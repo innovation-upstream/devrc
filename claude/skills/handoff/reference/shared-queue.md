@@ -62,6 +62,17 @@ never tell two sessions apart.
 the worktree you claimed from counts as the same owner, at any depth; a SIBLING
 worktree, a different clone, and the other host do not.
 
+⚠ **ONE EXCEPTION, on `--release`/`--steal` only: a claim whose worktree was
+`git worktree remove`d.** Its token is `<clone>/.git/worktrees/<name>`, so after
+the removal NOTHING recomputed it and the slug was stuck for the whole TTL — a
+shape this repo produces routinely, since a worktree per agent is mandated and an
+unchanged one is auto-removed. Since 2026-08-27 the claim also carries a
+`clone-id:`, and the destructive verbs grant when that id is yours AND the claim's
+`owner-id` matches no worktree this clone still has REGISTERED (it warns on stderr
+when it does). The claim/`--check` **verdict is unchanged** — a sibling still reads
+rc 10 STOP either way. Refs published before that date carry no `clone-id:` and
+still need `--force`.
+
 ⚠ **That describes NEW-format refs. LEGACY `cwd:` refs (pre-2026-08-26+1) carry a
 SECOND predicate that differs BY VERB**: strict per-worktree for the claim/check
 verdict (so a subdirectory of the claiming clone reads **rc 10**, not rc 12, even

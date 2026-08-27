@@ -169,6 +169,13 @@ b="$(failing)"; [ -z "$b" ] && echo "clean" || { echo "🔴 ALREADY RED: $b"; ex
 printf '\n== the OWNER TOKEN: both directions of the round-2 bug (must be KILLED) ==\n'
 # The too-strict half, reproduced exactly: key the worktree component off the
 # literal ident dir instead of the worktree's git-dir.
+# 🔴 ROUND 6 NEARLY LOST THIS ROW, AND THE SWEEP IS WHY IT DID NOT. The R3
+# recovery gave `--release` a SECOND route to rc 0, and under this mutant the
+# claim's owner-id becomes uncomputable from `sub/` — so the recovery granted and
+# the intended killer went green while the token was exactly as broken as round 2
+# left it. The row reported WRONG-KILLER (it still died, to three other tests).
+# The fix is in the test, not here: it now asserts the release did NOT print the
+# recovery's warning, i.e. that it was a token match.
 run 'worktree-half-is-the-literal-cwd' \
   test_release_from_a_SUBDIRECTORY_is_still_the_owners_own_claim \
   's@^owner_worktree_part="\$(git_ -C "\$IDENT_REPO" rev-parse.*@owner_worktree_part="$IDENT_REPO"@'
@@ -196,9 +203,12 @@ run 'host-half-is-uname-not-machine-id' \
   test_two_hosts_produce_different_owner_tokens \
   's@^  OWNER_HOST_PART="machine-id:\$machine_id"@  OWNER_HOST_PART="hostname:$MY_HOST"@'
 # Drop the worktree component entirely: every session on one host becomes one owner.
+# ⚠ The anchor moved in round 6: the formula lives in `owner_id_for()` now, because
+# the R3 recovery is a SECOND caller of it. The mutation is the same one — replace
+# the variable component of the hashed material with a constant.
 run 'worktree-half-dropped-from-the-token' \
   test_two_different_clones_on_one_host_are_different_owners \
-  's@^\$owner_worktree_part"$@CONSTANT-CLONE"@'
+  's@^\$1" | git_@CONSTANT-CLONE" | git_@'
 # The machine-id read must tolerate an absent file. Without `2>/dev/null || true`
 # the substitution fails and `set -e` aborts the whole run — a tool whose
 # contract is "never block a resume" dying because /etc/machine-id is missing.
@@ -206,14 +216,19 @@ run 'absent-machine-id-file-aborts-the-run' \
   test_a_missing_machine_id_file_degrades_instead_of_collapsing_every_token \
   's@^machine_id=.*$@machine_id="$(head -n1 -- "$MACHINE_ID_FILE")"@'
 # The token must reach the commit. A constant trailer means nobody owns anything.
+# 🔴 SAME ROUND-6 MASKING AS `worktree-half-is-the-literal-cwd` above: a constant
+# owner-id matches nobody, so the OWNER's own release fell through to the R3
+# recovery and returned rc 0. Its killer now also asserts the recovery's warning
+# is ABSENT on the owner's own release.
 run 'owner-id-trailer-is-a-constant' \
   test_release_refuses_another_sessions_live_claim_unless_forced \
   's@^owner-id: \$MY_OWNER_ID$@owner-id: CONSTANT@'
 
 printf '\n== the LEGACY tier, which is the one that is actually LIVE (must be KILLED) ==\n'
-# EVERY claim live on the real origin is `cwd:`-format (the COUNT moves hourly —
-# re-derive it, never quote it). Narrowing the legacy accept back to the literal
-# ident dir locks their holder out from a worktree.
+# The legacy tier is STILL live on the real origin — it was 100% of the refs when
+# round 5 measured it and is one ref of eleven on 2026-08-27. The MIX moves like
+# the count does; re-derive both, never quote either. Narrowing the legacy accept
+# back to the literal ident dir locks that holder out from a worktree.
 run 'legacy-clone-root-accept-removed' \
   test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone \
   's@^  \[ -n "\$MY_CLONE_ROOT" \] && \[ "\$legacy" = "\$MY_CLONE_ROOT" \]$@  false@'
@@ -260,6 +275,53 @@ run 'degraded-git-common-dir-probe-goes-quiet' \
 run 'legacy-host-check-removed' \
   test_a_legacy_cwd_claim_from_another_HOST_is_not_yours \
   's@^  \[ -n "\$h" \] && \[ "\$h" = "\$MY_HOST" \] || return 1$@  :@'
+
+printf '\n== ROUND 6 / F4: the REMOVED-WORKTREE recovery (must be KILLED) ==\n'
+# 🔴 THE RECOVERY MUST NOT REACH THE VERDICT. Dropping the scope guard hands
+# `report_existing` the widened answer, which is round 4's regression exactly:
+# after a removal a sibling worktree would be told rc 12 CARRY ON.
+run 'r3-recovery-reaches-the-verdict' \
+  test_a_live_sibling_worktree_is_not_widened_by_the_removed_worktree_recovery \
+  's@^    if \[ "\$legacy_scope" = clone \] && owner_worktree_is_gone "\$ref" "\$owner"; then$@    if owner_worktree_is_gone "$ref" "$owner"; then@'
+# …and the recovery wired to nothing: the F4 lockout comes straight back.
+run 'r3-recovery-never-fires' \
+  test_a_claim_from_a_REMOVED_worktree_is_releasable_by_its_own_clone \
+  's@ && owner_worktree_is_gone "\$ref" "\$owner"; then@ \&\& false; then@'
+# 🔴 THE STEP THAT MAKES IT CONDITIONAL RATHER THAN BLANKET: a claim whose owner
+# token IS computable by a worktree this clone still has registered must be
+# refused. Without it the recovery is "fall back to the clone", i.e. round 3.
+run 'r3-live-worktree-check-removed' \
+  test_a_live_sibling_worktree_is_not_widened_by_the_removed_worktree_recovery \
+  's@^    if \[ "\$(owner_id_for "\$admin")" = "\$owner" \]; then$@    if false; then@'
+# 🔴 PROVENANCE, HALF ONE: without the clone-id equality a removed worktree in
+# ANY clone (or on the other machine) qualifies.
+run 'r3-clone-id-equality-dropped' \
+  test_the_removed_worktree_recovery_does_not_reach_another_clone_or_host \
+  's@^  \[ "\$claim_clone" = "\$MY_CLONE_ID" \] || return 1$@  :@'
+# 🔴 PROVENANCE, HALF TWO — and this is the plausible WRONG fix, not a strawman:
+# "a claim with no clone-id is probably ours". It grants on every pre-round-6
+# `owner-id:` ref, which is the majority of the refs live on the real origin.
+run 'r3-absent-clone-id-treated-as-ours' \
+  test_a_pre_round6_claim_with_no_clone_id_is_still_refused_and_says_force \
+  's@^  \[ -n "\$claim_clone" \] || return 1$@  [ -n "$claim_clone" ] || claim_clone="$MY_CLONE_ID"@'
+# The clone id must reach the commit, and must be the REAL one. A constant that
+# still LOOKS like a hash (so the leak test cannot be the killer) breaks the
+# recovery for everyone.
+run 'clone-id-trailer-is-a-constant' \
+  test_a_claim_from_a_REMOVED_worktree_is_releasable_by_its_own_clone \
+  's@^clone-id: \$MY_CLONE_ID$@clone-id: deadbeefcafe@'
+# 🔴 AND IT MUST COME FROM `--git-common-dir`, NOT the worktree git dir — a
+# per-worktree clone id is uncomputable for exactly the worktree that is gone, so
+# the recovery would never fire while looking implemented.
+run 'clone-id-derived-from-the-worktree-git-dir' \
+  test_a_claim_from_a_REMOVED_worktree_is_releasable_by_its_own_clone \
+  's@^\$owner_common_part" | git_ hash-object@$owner_worktree_part" | git_ hash-object@'
+# 🔴 THE GRANT IS AN INFERENCE, NOT A TOKEN MATCH — same silent-fallback class as
+# the two probe rows above. A quiet rc 0 on somebody else's lock is the shape this
+# gate exists to stop.
+run 'r3-recovery-grant-goes-quiet' \
+  test_a_claim_from_a_REMOVED_worktree_is_releasable_by_its_own_clone \
+  's@^  warn "the worktree that made this claim@  : "@'
 
 printf '\n== the TRAILER READ must not inherit the callers git config (KILLED) ==\n'
 # 🔴 `interpret-trailers` obeys `trailer.*`; the awk line scan it replaced did

@@ -698,20 +698,31 @@ ident_mail="$(git_ -C "$IDENT_REPO" config --get user.email 2>/dev/null || true)
 #     "any subdirectory is the same owner" would lead you to expect. devrc has no
 #     submodules, so nothing here exercises it in anger.
 #
-#   R3 — A CLAIM MADE IN A WORKTREE THAT IS LATER `git worktree remove`d CANNOT
-#     BE RELEASED BY ANYONE WITHOUT `--force`, for the whole TTL. The token is
-#     `<clone>/.git/worktrees/<name>`, and removing the worktree deletes that
-#     admin directory, so no live directory computes it any more: measured rc 10
-#     from the clone root AND from a sibling worktree, and the refusal says the
-#     claim "is NOT yours" about the owner's own lock. 🔴 THIS SHAPE IS PRODUCED
-#     ROUTINELY, not hypothetically — this repo mandates a worktree per
-#     file-modifying agent and the harness AUTO-REMOVES one that ends unchanged.
-#     NOT FIXED, and deliberately so: making the token survive its own worktree's
-#     deletion means widening it back towards the clone, which is round 3's bug.
-#     The escape hatches are `--force`, the TTL, or recreating a worktree at the
-#     same path with the same admin name (measured: ownership is restored, since
-#     the token is the PATH of the admin dir and not its inode). `git worktree
-#     move` is safe — it rewrites the working tree's location, not the admin dir.
+#   R3 — A CLAIM MADE IN A WORKTREE THAT IS LATER `git worktree remove`d. The
+#     token is `<clone>/.git/worktrees/<name>`, and removing the worktree deletes
+#     that admin directory, so no live directory computes it any more: measured
+#     rc 10 from the clone root AND from a sibling worktree, for the whole TTL,
+#     with the refusal saying the claim "is NOT yours" about the owner's own lock.
+#     🔴 THIS SHAPE IS PRODUCED ROUTINELY, not hypothetically — this repo mandates
+#     a worktree per file-modifying agent and the harness AUTO-REMOVES one that
+#     ends unchanged.
+#     ✅ CLOSED IN ROUND 6, and NOT by widening the token — that is round 3's bug.
+#     The claim now also publishes a `clone-id:` (hash of machine-id ‖
+#     `--git-common-dir`), and `--release`/`--steal` grant only when that id is
+#     OURS *and* the claim's `owner-id` is not computable by any worktree this
+#     clone still has registered. A sibling that still exists is therefore still
+#     refused, and the claim/`--check` verdict is untouched (strict scope). See
+#     `owner_worktree_is_gone` for the two-step argument and its limits.
+#     ⚠ RESIDUAL OF THE FIX: a claim already on the remote with `owner-id:` and no
+#     `clone-id:` (everything written before round 6) is NOT recoverable — it
+#     still needs `--force`, the TTL, or recreating a worktree at the same path
+#     with the same admin name (measured: ownership is restored, since the token
+#     is the PATH of the admin dir and not its inode). Measured on the canonical
+#     remote 2026-08-27: refs in that shape exist today. `git worktree move` is
+#     safe — it rewrites the working tree's location, not the admin dir.
+#     ⚠ AND THE TEST IS "NO LONGER REGISTERED", NOT "THE DIRECTORY IS GONE": a
+#     worktree `rm -rf`'d without `git worktree prune` keeps its admin dir and is
+#     still refused. Conservative on purpose.
 #
 #   R4 — A `cp -a` COPY OF A WORKTREE IS THE SAME OWNER as the original, because
 #     the copy's `.git` is a FILE holding `gitdir: <original admin dir>`, so
@@ -781,10 +792,22 @@ fi
 # measured it, because other sessions claim and release while you read. Any count
 # written here is stale within hours; the FORMAT is what is durable, and the
 # command that re-derives both is on the line above.
-owner_material="claim-work-owner-v2
+#
+# 🔴 ONE FORMULA, ONE PLACE — and that became load-bearing in round 6. The R3
+# recovery below has to recompute the owner token of every worktree still
+# registered in this clone, i.e. there is now a SECOND caller. A second copy of
+# the three lines would drift from this one silently and the recovery would
+# then refuse (or grant) for a reason nobody could see; `claude/RULES.md` calls
+# an open-coded predicate wrong at N−1 of its N sites. So the derivation lives
+# in exactly one function and both callers go through it.
+owner_id_for() {
+  # <an absolute, realpath'd git DIR> ⇒ the 12-char owner token a session
+  # standing in that worktree computes. Prints nothing if `git` cannot hash.
+  printf '%s' "claim-work-owner-v2
 $OWNER_HOST_PART
-$owner_worktree_part"
-MY_OWNER_ID="$(printf '%s' "$owner_material" | git_ hash-object --stdin 2>/dev/null | cut -c1-12 || true)"
+$1" | git_ hash-object --stdin 2>/dev/null | cut -c1-12 || true
+}
+MY_OWNER_ID="$(owner_id_for "$owner_worktree_part")"
 [ -n "$MY_OWNER_ID" ] || MY_OWNER_ID="unknown"
 
 # 🔴 THE OLD TOKEN, KEPT ONLY TO READ OLD REFS. Refs OUTLIVE a format change, so
@@ -800,13 +823,15 @@ MY_OWNER_ID="$(printf '%s' "$owner_material" | git_ hash-object --stdin 2>/dev/n
 MY_CWD_ID="$(printf '%s' "$IDENT_REPO" | git_ hash-object --stdin 2>/dev/null | cut -c1-12 || true)"
 [ -n "$MY_CWD_ID" ] || MY_CWD_ID="unknown"
 
-# 🔴 AND THE OLDEST TIER GETS A CWD ACCOMMODATION TOO, because it is the one that
-# is ACTUALLY LIVE. Measured 2026-08-26: every claim on the real origin is in the
-# `cwd:` format, each recorded against `/home/zach/workspace/devrc` (the count
-# moves; re-derive it, see the note above). A legacy comparison against `$PWD`
-# alone would leave their holder unable to release them from a worktree or a
-# subdirectory — the same stuck lock, on the refs that exist today rather than on
-# hypothetical future ones.
+# 🔴 AND THE OLDEST TIER GETS A CWD ACCOMMODATION TOO, because it is STILL live.
+# Measured 2026-08-26: EVERY claim on the real origin was in the `cwd:` format,
+# each recorded against `/home/zach/workspace/devrc`. ⚠ RE-MEASURED 2026-08-27:
+# that is no longer true — the `owner-id:` format now holds the large majority and
+# one legacy `cwd:` ref remains. The MIX moves like the count does; re-derive both
+# (see the note above) and do not quote either. The accommodation stays because
+# the tier is not empty: a legacy comparison against `$PWD` alone would leave that
+# holder unable to release from a worktree or a subdirectory — the same stuck
+# lock, on a ref that exists today rather than on a hypothetical future one.
 #
 # So a legacy `cwd:` ALSO matches the CLONE ROOT: the parent of the realpath'd
 # git-common-dir, which is the main worktree's toplevel for any subdirectory and
@@ -874,6 +899,32 @@ esac
 # a second line saying the same thing trains the reader to skip both.
 if [ -z "$MY_CLONE_ROOT" ] && [ "$OWNER_TOKEN_DEGRADED" -eq 0 ]; then
   warn "could not resolve this clone's root (an unreadable --git-common-dir, or a git dir that is not named .git) — a pre-2026-08-26 'cwd:' claim taken at the clone root cannot be recognised as yours from a worktree or a subdirectory. --release/--steal will be refused as 'not yours'; use --force if that happens."
+fi
+
+# ── 🔴 THE CLONE ID — PROVENANCE, NOT OWNERSHIP (round 6, for R3) ─────────────
+# A SECOND published token, and it is deliberately NOT part of the ownership
+# comparison: widening `owner-id` towards the clone is round 3's bug and this
+# must never re-create it. It answers one narrow question that `owner-id` alone
+# cannot — "was this claim made in THIS clone, on THIS host?" — so the R3
+# recovery in `claim_is_mine` can be conditional on the owning worktree being
+# GONE rather than merely unmatched. See `owner_worktree_is_gone`.
+#
+# `--git-common-dir` on purpose (the one other place that reads it is the legacy
+# `cwd:` accept): every worktree of a clone shares it, which is exactly the
+# property that makes it useless as an owner token and correct as a clone id.
+# Hashed, not a path: this trailer is pushed to a PUBLIC remote, same rule as
+# `owner-id` — pinned by
+# `test_the_claim_commit_records_a_hashed_owner_id_not_an_absolute_path`.
+#
+# `unknown` when the probe degraded, and `unknown` never compares equal to
+# anything (see `owner_worktree_is_gone`): a clone that cannot identify itself
+# must get the OLD refusal, not a grant.
+MY_CLONE_ID="unknown"
+if [ -n "$owner_common_part" ] && [ "$OWNER_TOKEN_DEGRADED" -eq 0 ]; then
+  MY_CLONE_ID="$(printf '%s' "claim-work-clone-v1
+$OWNER_HOST_PART
+$owner_common_part" | git_ hash-object --stdin 2>/dev/null | cut -c1-12 || true)"
+  [ -n "$MY_CLONE_ID" ] || MY_CLONE_ID="unknown"
 fi
 
 remote_ref_sha() {
@@ -1057,12 +1108,83 @@ claim_field() {
 # Tiers 1 and 2 (`owner-id:`, `cwd-id:`) ignore the scope entirely — it exists
 # only for the oldest tier, which records a bare path and can be nothing better
 # than a guess about who is standing in it.
+#
+# ── 🔴 R3, AND WHY THE RECOVERY IS A DIFFERENT QUESTION FROM OWNERSHIP ────────
+# A claim made in a worktree that is later `git worktree remove`d used to be
+# unreleasable by ANYONE without `--force` for the whole TTL — the token is
+# `<clone>/.git/worktrees/<name>` and removing the worktree deletes that admin
+# directory, so no live directory computes it. Measured rc 10 from the clone root
+# AND from every sibling, with the refusal telling the owner their own lock "is
+# NOT yours". This repo MANDATES a worktree per file-modifying agent and the
+# harness AUTO-REMOVES one that ends unchanged, so the shape is routine.
+#
+# 🔴 THE FIX IS NOT "FALL BACK TO THE CLONE WHEN THE TOKEN DOES NOT MATCH." That
+# is round 3's bug with an extra step: a LIVE sibling worktree does not match
+# either, and would be handed its peer's lock. The grant is conditional on the
+# owning worktree being GONE, established positively:
+#
+#   1. the claim carries `clone-id:` and it equals OURS — same clone, same host.
+#      Without this, a different clone (or the other machine) would qualify, which
+#      is the blanket fallback above.
+#   2. the claim's `owner-id` is not computable by ANY worktree this clone still
+#      has — the main worktree's git dir plus every REGISTERED linked worktree's
+#      admin dir under `<common-dir>/worktrees/`. That set IS the complete owner
+#      space of this clone on this host (a subdirectory reports its worktree's git
+#      dir; a `cp -a` copy points at the original's admin dir), so absence from it
+#      means the producing worktree is no longer registered.
+#
+# So a sibling that STILL EXISTS is found in step 2 and still refused — the round-4
+# regression, pinned by
+# `test_a_live_sibling_worktree_is_not_widened_by_the_removed_worktree_recovery`.
+#
+# ⚠ THE LIMIT, STATED: `clone-id:` is written from round 6 onward. A claim already
+# on the remote carrying `owner-id:` and no `clone-id:` fails step 1 and still
+# needs `--force`. Measured on the canonical remote 2026-08-27: such refs exist,
+# so this is a live gap and not a hypothetical one.
+#
+# ⚠ AND IT IS "NO LONGER REGISTERED", NOT "THE DIRECTORY IS GONE". A worktree
+# whose checkout was `rm -rf`'d but never `git worktree prune`d still has its admin
+# dir, so it is still in the set and the claim is still refused. That is the
+# conservative direction on purpose.
+owner_worktree_is_gone() {
+  local ref="$1" owner="$2" claim_clone admin
+  claim_clone="$(claim_field "$ref" clone-id)"
+  [ -n "$claim_clone" ] || return 1
+  [ "$claim_clone" != unknown ] || return 1
+  [ "$MY_CLONE_ID" != unknown ] || return 1
+  [ "$claim_clone" = "$MY_CLONE_ID" ] || return 1
+  [ -n "$owner_common_part" ] || return 1
+  # `$owner_common_part` is the main worktree's OWN git dir as well as the common
+  # dir, so it covers a claim taken at the clone root. The glob may not match; the
+  # `-d` test is what handles that (nullglob is not set).
+  for admin in "$owner_common_part" "$owner_common_part"/worktrees/*; do
+    [ -d "$admin" ] || continue
+    admin="$(readlink -f -- "$admin" 2>/dev/null || printf '%s' "$admin")"
+    if [ "$(owner_id_for "$admin")" = "$owner" ]; then
+      return 1
+    fi
+  done
+  # LOUD, because this grant is an INFERENCE about a directory that is not there
+  # any more, not a token match. A silent rc 0 on somebody else's lock is exactly
+  # the shape this gate exists to stop.
+  warn "the worktree that made this claim (owner-id $owner) is no longer registered in this clone — treating it as YOURS to release/steal. If that is wrong, the claim can be re-made."
+  return 0
+}
+
 claim_is_mine() {
   local ref="$1" legacy_scope="${2:-strict}" owner h c legacy
   owner="$(claim_field "$ref" owner-id)"
   if [ -n "$owner" ]; then
-    [ "$owner" = "$MY_OWNER_ID" ] && [ "$MY_OWNER_ID" != "unknown" ]
-    return
+    if [ "$owner" = "$MY_OWNER_ID" ] && [ "$MY_OWNER_ID" != "unknown" ]; then
+      return 0
+    fi
+    # 🔴 R3 recovery, DESTRUCTIVE VERBS ONLY. `report_existing` calls with no
+    # scope, so the claim/`--check` verdict is untouched: a sibling worktree still
+    # reads rc 10 STOP whether or not any worktree was removed.
+    if [ "$legacy_scope" = clone ] && owner_worktree_is_gone "$ref" "$owner"; then
+      return 0
+    fi
+    return 1
   fi
   h="$(claim_field "$ref" host)"
   [ -n "$h" ] && [ "$h" = "$MY_HOST" ] || return 1
@@ -1278,6 +1400,7 @@ $msg
 claimed-by: $ident_name <$ident_mail>
 host: $MY_HOST
 owner-id: $MY_OWNER_ID
+clone-id: $MY_CLONE_ID
 nonce: $$-$(date +%s%N 2>/dev/null || date +%s)
 EOF
 }
