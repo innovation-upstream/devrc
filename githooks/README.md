@@ -15,7 +15,7 @@ Version-controlled, global git hooks. Two features, in order on every push:
 | `pre-push` | Global dispatcher. Chains to any repo-local pre-push first (never clobbers it), runs the **blocking test gate**, then fires the audit **backgrounded** so the push is never delayed. |
 | `tests-on-push.sh` | SYNCHRONOUS worker: self-detects devrc, filters on changed files, runs `scripts/run-tests.sh --set all` in the repo's **own devShell** (`nix develop`, so a venv owned by the caller's cwd cannot shadow the interpreter), and (mode `on`) **blocks on a test failure (exit 1) or a repo-content guard (exit 2)**. An ENVIRONMENT precondition (exit 3) → warn + allow. No-op for non-devrc repos. |
 | `audit-on-push.sh` | The backgrounded worker: fixture-tree + branch + synthetic-ref + diff-size + flag gates, then headless `claude -p "/audit-pr current"`, then routes 🔴/🟡 to clawgate. |
-| `install.sh` | Sets `git config --global core.hooksPath` to this dir. `--uninstall` reverts. |
+| `install.sh` | Points git's **global** `core.hooksPath` at this dir, picking a config file it can actually write. `--uninstall` reverts. |
 | `audit-on-push.env.example` | Config template → copy to `~/.claude/audit-on-push.env`. |
 
 ## Test gate (`tests-on-push.sh`)
@@ -96,6 +96,22 @@ Behaviour, all failing in the **safe direction**:
 ```
 
 This sets the **global** `core.hooksPath` and seeds `~/.claude/audit-on-push.env`.
+
+> **On a home-manager host** (#905) `~/.config/git/config` is a symlink into the
+> read-only nix store, so a `--global` write there is impossible — the installer
+> used to die `could not lock config file … Read-only file system` (rc=255) and
+> the hooks could not be installed at all. It now detects that and writes to
+> `~/.gitconfig` instead, printing a `NOTE:` when it does. git reads **both**
+> files and `~/.gitconfig` takes precedence, so every home-manager setting
+> (`rebase.autoStash = false` included) stays in force. The installer then
+> re-reads `core.hooksPath` and **fails loudly if the value did not actually take
+> effect** — writing a setting and installing one are separate claims.
+>
+> ⚠ One real side effect: once `~/.gitconfig` exists it is the only file
+> `git config --global` *reads*, so `git config --global --list` will show less
+> than you expect. Effective config is unchanged — `git config --list` still
+> shows everything. `--uninstall` deletes the `~/.gitconfig` it emptied, which
+> puts that back.
 Two independent knobs, seeded from the example:
 
 - **Audit** (`AUDIT_ON_PUSH=shadow`) — logs what it *would* send, sends nothing;
