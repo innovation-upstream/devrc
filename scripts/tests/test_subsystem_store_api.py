@@ -2322,6 +2322,67 @@ class TestPhaseOneScope:
                 assert headers["Allow"] == "GET, HEAD"
                 assert body == b"read-only\n"
 
+    def test_the_image_copies_every_module_it_needs(self):
+        """🔴 THE DOCKERFILE ENUMERATES ITS `COPY`s, AND THE LIST ROTTED SILENTLY.
+
+        `subsystem_touch` gained `from git_mainline import …` in #677
+        (2026-08-21). The Dockerfile's hand-written list was not updated, so
+        every image built after that commit contained code that could not
+        import — while the RUNNING pod stayed healthy, because its image
+        predates the change. The defect was therefore invisible from production
+        and invisible from CI, and surfaced only when somebody next rebuilt:
+        `ModuleNotFoundError: No module named 'git_mainline'`, caught by
+        `build-push.sh`'s own import control at deploy time.
+
+        This computes the TRANSITIVE closure of local `scripts/lib` imports from
+        the entrypoints and asserts the Dockerfile covers it, so the next added
+        import fails here — in CI, on the commit that adds it — rather than at
+        the next deploy, which may be months later and someone else's problem.
+        """
+        lib = ROOT / "scripts" / "lib"
+        dockerfile = (API_DIR / "Dockerfile").read_text()
+
+        def local_imports(path: Path) -> set[str]:
+            found = set()
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    found.add(node.module.split(".")[0])
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        found.add(alias.name.split(".")[0])
+            return {m for m in found if (lib / f"{m}.py").exists()}
+
+        # Entrypoints: what the server imports directly.
+        needed, queue = set(), ["subsystem_recall"]
+        while queue:
+            mod = queue.pop()
+            if mod in needed:
+                continue
+            needed.add(mod)
+            queue.extend(local_imports(lib / f"{mod}.py"))
+
+        # 🔴 TWO LISTS, AND CHECKING ONLY ONE IS A GUARD NARROWER THAN THE
+        # HAZARD. The first version of this test checked only the COPY lines —
+        # and would have passed while the build still failed, because
+        # `Dockerfile.dockerignore` is an ALLOWLIST (`**` then explicit `!`
+        # unignores) and an un-listed file never reaches the build context at
+        # all. Measured: with the COPY added but the ignore-file untouched,
+        # `docker build` fails with `"/scripts/lib/git_mainline.py": not found`.
+        # Both lists must cover the closure, so both are asserted.
+        ignorefile = (API_DIR / "Dockerfile.dockerignore").read_text()
+        copied = set(re.findall(r"COPY scripts/lib/(\w+)\.py", dockerfile))
+        unignored = set(re.findall(r"!scripts/lib/(\w+)\.py", ignorefile))
+
+        assert not (needed - copied), (
+            f"Dockerfile does not COPY {sorted(needed - copied)} — the image "
+            f"would build and then fail to import at runtime."
+        )
+        assert not (needed - unignored), (
+            f"Dockerfile.dockerignore does not un-ignore "
+            f"{sorted(needed - unignored)} — it is an allowlist, so the file "
+            f"never reaches the build context and COPY fails outright."
+        )
+
     def test_nothing_in_this_directory_writes_to_the_store(self):
         for path in sorted(API_DIR.iterdir()):
             if not path.is_file():
