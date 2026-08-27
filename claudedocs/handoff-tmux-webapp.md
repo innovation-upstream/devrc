@@ -8,9 +8,47 @@ with tmux sessions across workbench + laptop, with a composable view system agen
 and an **attention queue** that surfaces sessions needing a human so Zach can jump straight in.
 
 ## Status
-Design settled 2026-08-26 across two rounds: a greenfield session, then an audit that reopened
-four decisions, then a re-platform onto clawgate that resolved three of them outright. **No code
-yet.** The decisions below are RESOLVED unless marked otherwise.
+
+**Phase 1 (the attention queue) is SHIPPED, DEPLOYED and VERIFIED LIVE. Phases 2–6 are untouched.**
+
+*How the design got here (carried forward):* settled 2026-08-26 across two rounds — a greenfield
+session, then an audit that reopened four decisions — then a re-platform onto clawgate that resolved
+three of them outright. The sections below from `## Platform` down are that design, still current.
+
+- **clawgate 0.8.3 is live** — built, pushed (`sha256:c07436c3…`), pinned, Flux-reconciled,
+  pod `Running`/ready. Verified via `clawgatectl health` through the LAN NodePort, not from the
+  rollout's own success claim.
+- **`ZacxDev/homelab-infra#422`** — the attention queue — merged as **`5a008e4f`**.
+  **`#427`** (one-line `buildVersion` fix) merged as **`f2f8cb7e`**;
+  **`#432`** was closed after fast-forwarding onto the branch to keep one reviewable PR.
+- **`innovation-upstream/devrc#890`** — this doc's audited rewrite — merged as **`f53ef8a6`**.
+- **Both hosts are on clawgatectl 0.8.3** with the `attention` verb, converged via `scripts/ship.sh`
+  (both at `d3875d64`).
+- **Verified through the real path, not inferred:** a genuine `AskUserQuestion` produced a
+  `kind=question priority=high` entry sorted **above ten `idle` rows** — the priority-ordering fix
+  demonstrated in production. Repeated from the laptop after its hook was fixed: entry id 149,
+  `host=laptop`, hook `exit=0` with empty stdout (still defers). Test entry resolved afterwards.
+
+**What the feature is:** attention entries (migration `0026`), kinds `question` (high) / `idle`
+(low), raised by the `AskUserQuestion` path, the Stop hook, and `clawgatectl attention
+raise|ls|resolve`; surfaced in an htmx tab and pushed via the pre-existing `POST /api/notify`.
+🔴 An entry is **not** a decision object — no approve/deny, it carries a *destination*.
+
+**The laptop had a five-month-old hook.** Its `PermissionRequest` hook was registered at
+`~/.claude/clawgate-hook.sh` — a regular file (not a symlink; `readlink -f` resolves to itself),
+byte-identical to commit `03efe4ed`, **clawgate 0.3.1**, mtime 2026-06-06. Its Stop hook *was* on
+the repo path, so the idle path worked while the **question path was dead** — the exact use case
+this feature exists for, silently, on one host. Repointed at the repo path via `jq` against a
+timestamped backup (21 hooks / 7 keys preserved, one-line diff). The stale 0.3.1 copy is still on
+disk, now referenced by nothing.
+
+**Seven audit rounds ran; the ladder stopped when a round came back clean, never on a verdict.**
+Three compounding defects would have made the queue bury the questions it exists to surface
+(idle never reaped + priority absent from the sort + a 100-row limit taking the *oldest*).
+**Nine separate instruments were caught measuring nothing**, including three harnesses built to
+check earlier ones, one that scored an *unmutated* tree as SURVIVED, and a CI timer that had both
+fire-and-forget tests passing on literally nothing. Two of those predated this work and were found
+only because the **merged tree** was gated instead of the branch.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -157,17 +195,48 @@ From the analyze-service index (**recall — verify before relying on**):
   two different actions behind one button; design them explicitly.
 
 ## Next steps (ranked)
-1. **Ship the attention queue first — it is independently valuable and much smaller.** Push
-   (`/api/notify`) and the Stop hook already exist; the AskUserQuestion hook change and a
-   `clawgatectl` verb are small. It delivers the jump-to-session value without the host agent,
-   the terminal widget, or the layout schema.
-2. **Settle the vocabulary collision** — one decision, blocks route and verb naming.
-3. **Host-side tmux agent** — systemd user service on both hosts, outbound to clawgate, sourcing
-   from `session-manager` rather than a new collector.
-4. **Fail-closed terminal-write auth wrapper** — before any write endpoint exists, not after.
-5. **Layout schema + `clawgatectl view`/`panel` verbs** — server-side model first, UI second.
-6. **The grid UI** — panels, expand/collapse/archive, live `capture-pane` previews.
-7. **Terminal widget** — per the A4 decision.
+
+🔴 **Renumbered this session** — the previous 1–7 list is superseded and its ranks no longer point
+at the same items. Both prior claims (`tmux-webapp-1`, `clawgate-version-pin-0.8.2`) are released.
+
+1. **Watch the 4h idle reaper fire.** `homelab-talos`, `containers/clawgate/internal/api/server.go`
+   (`attentionIdleReapAfter`). It has **never run against production data** — the one behaviour in
+   this feature nobody has observed. 37+ idle entries accumulate within ~90 min. Tell:
+   `retention: resolved N idle attention entry(ies) not seen for 4h` in the server log. If the rate
+   outpaces it, that constant is the single knob.
+2. **Detach the synchronous suggest POST.** `homelab-talos`,
+   `containers/clawgate/hook/clawgate-stop-hook.sh`. Still costs ~8s per turn-end on a black-holed
+   route (`--max-time 8`) — the remaining half of the latency fix. The detach pattern now exists
+   next door in `raise_attention_idle`: rename the payload to a **sibling of `WORKDIR`** (escaping
+   the `EXIT` trap), fork, child deletes it. That rename is the load-bearing part.
+3. **Decide the terminal widget (audit finding A4 — still open).** clawgate vendors only two
+   hand-written JS files (~3.7 KB) and no third-party bundle, so xterm.js would be the first.
+   Recommendation on record: ship read-only `capture-pane` rendering first; if adopted, vendor and
+   `go:embed` it, never a CDN — clawgate must work on an offline LAN.
+4. **Host-side tmux agent** (phase 2). `devrc`, a new `systemd.user.services` unit on both hosts
+   holding an **outbound** connection to clawgate. Source from `scripts/session-manager --json`,
+   which already SSHes to the laptop and runs `list-panes -a` + `list-windows -a` on both hosts —
+   do not write a second collector.
+5. **Fail-closed terminal-write auth wrapper** — before any write endpoint exists, not after.
+   `internal/api/auth.go`. 🔴 Must NOT reuse `requireHookToken`: it is enforce-when-set
+   (`auth.go:51-54`), so an unset token would silently yield an open remote shell on both machines.
+6. **Layout schema + `clawgatectl view`/`panel` verbs** (phase 3) — views/panels/targets/state in
+   Postgres, so a human drag and an agent call are the same operation.
+7. **The grid UI** (phase 4), then organization ops behind item 5's auth.
+8. **Housekeeping, cheap:** eight more sleep-based timing bets in
+   `containers/clawgate/internal/api/{push_task,task_comment}_test.go` (pre-existing; mechanical now
+   the `awaitPushesSettled` barrier exists); and a scanner test for in-body `! grep` — closing
+   condition: a test in both bats suites that reds on a planted `! grep` assertion.
+
+**Parked with the operator (not work items until answered):**
+- Seam tests **skip in `clawgate-ci`** — the Go image has no `jq`. Closing it edits a pipeline every
+  PR in the repo runs. These are the tests that caught a constant-rename the bats tier stayed green
+  through.
+- `ZacxDev/homelab-infra` has **no branch protection at all** (the API 403s — needs GitHub Pro or a
+  public repo). Nothing there is mechanically required; every merge rests on the reader.
+- The **passive backstop was declined**: all three raisers need an agent to cooperate or a hook to
+  fire, so an agent that hangs, crashes or is killed raises nothing — and those strand longest.
+  `session-manager`'s waiting-detection is read-only and cheap to add if the queue misses cases.
 
 ## Gotchas
 - 🔴 **Committing to `trunk` deploys the MANIFEST, not the container CODE.** The image pin is an
@@ -190,14 +259,69 @@ From the analyze-service index (**recall — verify before relying on**):
   nebula-routed services**.
 - Laptop `main` is 2 commits behind `origin/main` (`drift-check.sh` rc 10) — `scripts/ship.sh`.
 
+- 🔴 **Merging is NOT deploying here, and the hooks invert that rule.** The image pin is an immutable
+  literal tag with no Flux image automation, so a `containers/clawgate/**` commit reconciles cleanly
+  and changes nothing running. **But the hook scripts are read from a working tree** —
+  `~/.claude/settings.json` points at
+  `/home/zach/workspace/homelab-talos/containers/clawgate/hook/*.sh` — so a plain `git pull` makes
+  them live instantly for every Claude Code session on that host, with no switch and nothing gating
+  it. **Deploy the server first.** The reverse degrades safely (404 → `exit 0`, no output; there is
+  a test) but the feature silently does nothing.
+- 🔴 **A host's hook registration is NOT uniform — check `readlink -f`, never assume.** The workbench
+  pointed at the repo; the laptop pointed at a stale private copy. Same feature, same pull, opposite
+  outcomes, and the broken one looked healthy.
+- 🔴 **The deploy runbook's step 3 is incomplete.** It bumps only `deployment.yaml`, but
+  `TestDeployPinMatchesClientBuildVersion` also requires `cmd/clawgatectl/client.go`'s
+  `buildVersion`. Bumping one reddens `trunk` for **every PR in the repo** — which is exactly how it
+  was found (#427). Independently documented upstream as devrc #923.
+- 🔴 **`! grep -q X f` is INERT under bats errexit** unless it is the last line of a test. A mutant
+  restoring an `Authorization: Bearer` header survived a fully green run. Use `refute_grep`, which
+  carries its own positive control as a test.
+- 🔴 **busybox `date +%s%N` silently DROPS `%N`** — no error, just bare epoch seconds. In the bats CI
+  image (`bats/bats:1.11.0`, BusyBox 1.36.1) the timer therefore read 0 ms for everything and **both
+  fire-and-forget tests passed vacuously on the tier that gates the merge**. Use bash's
+  `EPOCHREALTIME`. A positive control is what exposed it.
+- 🔴 **A squash merge NEVER makes the branch head an ancestor**, so `--is-ancestor` reads "not
+  merged" forever and blocks cleanup of merged worktrees. Verify by CONTENT (`gh pr view --json
+  mergedAt,mergeCommit` plus a file diff), never by ancestry.
+- **A smoke test can be structurally blind.** The first 0.8.3 smoke returned `404` on
+  `/api/attention` and looked like a missing feature; `registerAttentionRoutes` returns early with
+  no DB. Re-run against a real Postgres: 200, 200, and the image applied migration 26 itself.
+- **Build `app.css` from inside `containers/clawgate/`** or Tailwind's relative globs resolve against
+  the wrong tree and emit ~5 KB with no utility classes. `TestOpenRoutesNoAuth` and
+  `TestStaticAssetsServed` are **not** "known-red" — they fail only when that build was skipped.
+- **Rejected:** WebSocket-on-Python-stdlib, a homelab-cluster deploy, and a new cross-host collector
+  — see this doc's audit findings A1/A2/A7. The re-platform onto clawgate resolved A1 and A2
+  outright (clawgate already terminates WebSockets and already does SSE).
+
 ## How to verify
-- Attention queue: an agent calling `AskUserQuestion` produces a queue entry **and** a push;
-  today it produces neither. That before/after pair is the regression test.
-- Read model: the clawgate view agrees with `session-manager --json` for the same instant. A
-  divergence means the agent is re-deriving rather than delegating.
-- Auth: the write surface **refuses to serve with no token configured**. Assert the refusal —
-  a fail-open wrapper passes any test that only checks the happy path.
-- Laptop off-nebula returns a *timeout error*, not a hang.
-- After deploy: `clawgatectl health` shows the new version, the pod is `active` (not
-  `activating`), and the process holding the port is the one the unit started. A deploy
-  reporting success is a claim about the deploy, not the consumer.
+
+```bash
+clawgatectl health                 # expect version 0.8.3
+clawgatectl attention ls           # expect JSON; `unknown command "attention"` + exit 0 = stale binary
+```
+- 🔴 **`clawgatectl` is built from the LOCAL `homelab-talos` tree**, so a behind checkout ships a
+  binary missing verbs that prints help and **exits 0** under a plausible version label. Both hosts
+  need `homelab-talos` current *before* a `home-manager switch`.
+- **The feature's own proof** is end-to-end, not a unit test: trigger a real `AskUserQuestion`, then
+  confirm a `kind=question priority=high` row appears via
+  `curl -H "Authorization: Bearer $CLAWGATE_HOOK_TOKEN" http://192.168.50.250:30302/api/attention`
+  — and that it sorts **above** the `idle` rows. Entry fields are camelCase (`sessionId`), not
+  snake_case.
+- **Per host**, confirm the hook that will actually run:
+  `readlink -f "$(jq -r '.hooks.PermissionRequest[].hooks[].command' ~/.claude/settings.json | sed 's/^CLAUDE_HOST=[a-z]* //')"`
+  must terminate inside `homelab-talos`, and that file must contain `raise_attention_question`.
+- After any deploy: the pod is `Running` **and ready** — `kubectl -n clawgate get pods -l
+  app=clawgate` lists a `Succeeded` leftover too, so a `.items[0]` jsonpath reports the wrong image.
+## Run this first — the index, one read-only command
+```bash
+python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc
+```
+Terse pointers this doc does not carry, curated by past sessions and outliving it.
+🔴 RECALL, NOT LIVE OBSERVATION — every line is a pointer to VERIFY, never a current
+reading, and it may describe a gotcha already fixed. `scope-absent`/`scope-empty` means
+nothing is recorded yet: ordinary, not an error, and not a clean bill of health.
+Non-blocking: if it exits non-zero, print the stderr line and carry on.
+
+⚠ **This doc spans TWO repos.** The design lives in `devrc`; all the code lives in
+`homelab-talos` (remote `ZacxDev/homelab-infra`) under `containers/clawgate/`.
