@@ -1506,19 +1506,28 @@ def test_a_purely_foreign_header_says_not_enforced_here_precisely(tmp_path):
     assert "not enforced on every tree here" not in out, out
 
 
-def _states_out(tmp_path, *, gov=0, foreign=0, unknown=0):
-    """A run over exactly the requested governance states, all over budget."""
+def _states_out(tmp_path, *, gov=0, foreign=0, unknown=0, over=True):
+    """A run over exactly the requested governance states.
+
+    🔴 `over` IS A PARAMETER BECAUSE THE FIXTURE SILENTLY PINNED ONE HALF OF THE
+    OUTPUT. It hardcoded BUDGET+116, so every state it built was over budget and
+    the "within budget" verdict line was never printed — while the test using it
+    claimed to pin three sites and reached two. A divergence at the within-budget
+    verdict survived a green suite, in the state the default invocation actually
+    produces (~/.claude/skills is in no repo and is normally within budget).
+    Round-13 finding 1: a guard whose description is wider than its body.
+    """
     args = []
     for i in range(gov):
         args.append(str(_governed_repo(tmp_path / f"g{i}", governed=True,
-                                       skill_bytes=sa.BUDGET + 116)))
+                                       skill_bytes=(sa.BUDGET + 116) if over else 2_000)))
     for i in range(foreign):
         args.append(str(_governed_repo(tmp_path / f"f{i}", governed=False,
-                                       skill_bytes=sa.BUDGET + 116)))
+                                       skill_bytes=(sa.BUDGET + 116) if over else 2_000)))
     for i in range(unknown):
         d = tmp_path / f"u{i}" / ".claude" / "skills" / "s"
         d.mkdir(parents=True)
-        (d / "SKILL.md").write_bytes(b"# s\n" + b"y" * (sa.BUDGET + 116))
+        (d / "SKILL.md").write_bytes(b"# s\n" + b"y" * ((sa.BUDGET + 116) if over else 2_000))
         args.append(str(tmp_path / f"u{i}" / ".claude" / "skills"))
     r = subprocess.run([sys.executable, str(AUDIT_PY), *args, "--all"],
                        capture_output=True, text=True)
@@ -1570,11 +1579,57 @@ def test_the_scope_phrase_is_the_same_string_everywhere_it_appears(tmp_path):
     "who does this budget govern?" independently and drifted apart across three
     rounds, each round fixing a subset. They now come from one helper; this pins
     that they cannot diverge again."""
-    for kwargs in ({"foreign": 1}, {"unknown": 1}, {"gov": 1, "foreign": 1},
-                   {"foreign": 1, "unknown": 1}):
-        out = _states_out(tmp_path / "x".join(sorted(kwargs)), **kwargs)
-        phrase = out.split("devrc's DEFAULT (", 1)[1].split(")", 1)[0]
-        verdict = out[out.index("## verdict"):]
-        assert phrase in verdict, (
-            f"header says {phrase!r} but the verdict does not carry it, for "
-            f"{kwargs}:\n{out}")
+    for over in (True, False):
+        for kwargs in ({"foreign": 1}, {"unknown": 1}, {"gov": 1, "foreign": 1},
+                       {"foreign": 1, "unknown": 1}):
+            sub = tmp_path / ("over" if over else "under") / "x".join(sorted(kwargs))
+            out = _states_out(sub, over=over, **kwargs)
+            phrase = out.split("devrc's DEFAULT (", 1)[1].split(")", 1)[0]
+            verdict = out[out.index("## verdict"):]
+            # 🔴 Assert the verdict LINE was actually produced, or a fixture that
+            # silently stops emitting it makes the check below vacuous — which is
+            # precisely how the within-budget half went unpinned.
+            assert ("within budget" in verdict) == (not over), (
+                f"fixture did not produce the expected verdict kind for over={over}:\n{verdict}")
+            assert phrase in verdict, (
+                f"header says {phrase!r} but the verdict does not carry it, for "
+                f"{kwargs} over={over}:\n{out}")
+
+
+def test_the_cut_total_is_scoped_to_the_skills_it_tells_you_to_cut(tmp_path):
+    """🔴 The cut-total describes the OVER-BUDGET population, not the run. When the
+    two were consolidated onto the run-level phrase, a total that is 100% governed
+    got hedged with "(not enforced on every tree here)" one clause after the
+    n_tight clause said "the gate REJECTS these" — two claims in a row, in tension,
+    which is the contradiction the consolidation exists to remove. Round-13 finding
+    2, and its fix then shipped ungated (mutant: revert to run scope, 113 green).
+
+    Fixture: one GOVERNED skill over budget, one FOREIGN skill comfortably under.
+    Every byte the tool is asking you to cut is enforced, so the number must carry
+    no hedge at all.
+    """
+    g = _governed_repo(tmp_path / "govover", governed=True, skill_bytes=sa.BUDGET + 116)
+    f = _governed_repo(tmp_path / "forunder", governed=False, skill_bytes=2_000)
+    r = subprocess.run([sys.executable, str(AUDIT_PY), str(g), str(f), "--all"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    verdict = r.stdout[r.stdout.index("## verdict"):]
+    assert "cut ~116 B total" in verdict, verdict
+    assert "measured against devrc's budget" not in verdict, (
+        f"every over-budget byte here is governed, so the cut instruction must not "
+        f"be hedged:\n{verdict}")
+    # …and the run-level banner must STILL warn, because the foreign skill is real
+    assert "NOT governed by the" in r.stdout, r.stdout
+
+
+def test_the_cut_total_IS_hedged_when_the_over_budget_set_is_not_governed(tmp_path):
+    """The other half — without this, deleting the hedge entirely also passes."""
+    g = _governed_repo(tmp_path / "govunder", governed=True, skill_bytes=2_000)
+    f = _governed_repo(tmp_path / "forover", governed=False, skill_bytes=sa.BUDGET + 116)
+    r = subprocess.run([sys.executable, str(AUDIT_PY), str(g), str(f), "--all"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    verdict = r.stdout[r.stdout.index("## verdict"):]
+    assert "cut ~116 B total measured against devrc's budget (not enforced here)" in verdict, (
+        f"the over-budget set is entirely ungoverned, so the hedge must be present "
+        f"AND scoped to that set, not to the run:\n{verdict}")

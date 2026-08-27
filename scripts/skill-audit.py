@@ -700,6 +700,10 @@ def _governance_scope(audits, foreign, unknown):
     has_for = bool(foreign)
     n_states = sum((has_gov, has_for, unknown))
     quant = "SOME OF THESE" if n_states > 1 else "THESE"
+    # The three flags are RETURNED, not re-derived by callers: the banner's kinds
+    # list open-coded `any(... is True ...)` a fourth time, which is the very thing
+    # this helper exists to stop.
+    states = (has_gov, has_for, bool(unknown))
     if not (has_for or unknown):
         phrase = None                       # fully governed: the budget IS enforced
     elif has_gov:
@@ -714,15 +718,15 @@ def _governance_scope(audits, foreign, unknown):
         # avoid, and this is the DEFAULT invocation's state (~/.claude/skills is in
         # no repo, 34 of its 37 skills live in /nix/store). Round-11 finding 2.
         phrase = "governance not determined here"
-    return quant, phrase, n_states
+    return quant, phrase, n_states, states
 
 
-def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), mixed=False, unknown=False):
+def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), unknown=False):
     p = lambda *a: print(*a, file=out)
     audits = sorted(audits, key=lambda a: -a["size"])
     over = [a for a in audits if a["status"] != "OK"]
     p(f"# SKILL.md audit — {len(audits)} skill(s)")
-    quant, scope_phrase, n_states = _governance_scope(audits, foreign, unknown)
+    quant, scope_phrase, n_states, states = _governance_scope(audits, foreign, unknown)
     enforced = "ENFORCED" if scope_phrase is None else f"devrc's DEFAULT ({scope_phrase})"
     p(f"\nbudget {BUDGET:,} B {enforced}   = ceiling {TARGET:,} B − {MIN_HEADROOM:,} B "
       f"working margin   ·   hard cap {HARD:,} B")
@@ -755,12 +759,11 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
         p( "   a ratchet with a per-push allowance (talos-infra's gate 11) can pass a body")
         p( "   called RED here and block one called fine.")
         if n_states > 1:
-            ks = [k for k, on in (("governed", any(a.get("governed") is True for a in audits)),
-                                  ("ungoverned", bool(foreign)),
-                                  ("unknowable", unknown)) if on]
-            # proper English join — a bare " and ".join gave "governed and
-            # ungoverned and unknowable" on the three-state run.
-            kinds = ks[0] if len(ks) == 1 else " and ".join([", ".join(ks[:-1]), ks[-1]])
+            ks = [k for k, on in zip(("governed", "ungoverned", "unknowable"), states) if on]
+            # Guarded by `n_states > 1`, so len(ks) >= 2 always — the previous
+            # `ks[0] if len(ks) == 1` arm was unreachable (proven: replacing it
+            # with a sentinel changed no output across all 16 fixtures).
+            kinds = " and ".join([", ".join(ks[:-1]), ks[-1]])
             p(f"   ⚠️  This run MIXES {kinds} trees, so the mark is per-line and")
             p( "      the header cannot be read as a verdict about the whole run. Audit them")
             p( "      separately if you want an unambiguous answer.")
@@ -998,9 +1001,23 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
             # 🔴 Also the shared phrase. "does not govern every tree here" implies
             # some are governed — false on a purely-foreign or purely-unknown run,
             # which is where it was left after two rounds fixed the other sites.
+            # 🔴 SCOPED TO `over`, NOT THE RUN. This clause describes the bytes it
+            # is telling you to cut, and the `n_tight` clause immediately above is
+            # over-scoped too. Consolidating it onto the run-level phrase made a
+            # fully-governed total read "cut ~116 B … (not enforced on every tree
+            # here)" one clause after "the gate REJECTS these" — the same two-
+            # claims-in-a-row contradiction this consolidation exists to remove,
+            # moved from a paragraph apart to a clause apart. Round-13 finding 2.
+            # `_governance_scope` reads `foreign` only for truthiness and `unknown`
+            # as a bool, so the over-budget flags are derived from `over` itself —
+            # no need to map audits back to repo roots.
+            _, over_phrase, _, _ = _governance_scope(
+                over,
+                [1] if any(a.get("governed") is False for a in over) else [],
+                any(a.get("governed") is None for a in over))
             need.append(f"cut ~{excess:,} B total"
-                        + ("" if scope_phrase is None
-                           else f" measured against devrc's budget ({scope_phrase})"))
+                        + ("" if over_phrase is None
+                           else f" measured against devrc's budget ({over_phrase})"))
         if any_ref_issue:
             need.append("broken/orphaned reference routing")
         if broken_fence:
@@ -1041,9 +1058,14 @@ def main(argv=None):
     # `mixed` needs a GOVERNED target, not merely a non-foreign one: an unknowable
     # target (no enclosing repo) is neither, and counting it as governed would
     # print the mixed warning over a run that has nothing to disambiguate.
-    mixed = (bool(foreign) or unknown) and any(a.get("governed") is True for a in audits)
+    # 🔴 `mixed` is GONE, not merely unused. `_governance_scope`'s n_states
+    # superseded it, but main kept computing the OLD meaning ("some non-governed
+    # PLUS a governed") and passing it — a fifth site holding the predicate this
+    # consolidation exists to have one of, and exactly what invites the next
+    # drift. Proven dead first: `mixed = False` produced byte-identical output
+    # across all 16 state/budget fixtures. Round-13 finding 3.
     render(audits, args.all, args.sections, args.detail,
-           foreign=foreign, mixed=mixed, unknown=unknown)
+           foreign=foreign, unknown=unknown)
 
 
 if __name__ == "__main__":
