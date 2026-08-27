@@ -94,29 +94,49 @@ remotes on all 10 scopes. The artifacts verified were the ones the **TIMER** pro
 run. The commit count and the store's file count both advance hourly; the *byte-identity*
 and *zero-remotes* claims are the durable ones.
 
-### 🔴 OUTSTANDING — measured 2026-08-27, nothing blocked on an agent
+### ✅ THE DR GAPS ARE CLOSED — measured 2026-08-27
 
-**DR gaps (need a human):**
-1. 🟡 **The laptop's `bw` — HALF CLOSED 2026-08-27.** `serverUrl` was `null`; it is now set
-   (`bw config server` run on the laptop, verified: `{"serverUrl":"…","lastSync":null,
-   "status":"unauthenticated"}`). The remaining half is the part no agent can do: **`bw
-   login`** — email + master password + **2FA**.
-   **It is teed up and waiting:** a detached tmux session on the laptop is sitting at the
-   master-password prompt, email pre-filled.
-   ```sh
-   ssh -t zach@10.42.0.100 tmux attach -t bw-login     # -t is required, or no prompt renders
+Both gaps that stood open across several sessions are now **measured shut**, from the host
+that matters: if the workbench is the machine you lose, the laptop is the one you are
+standing at, and it has now been proven to recover the key unaided.
+
+1. ✅ **The laptop can reach AND authenticate to the vault.**
+
+   | | `serverUrl` | `lastSync` | `status` |
+   |---|---|---|---|
+   | before | `null` | `null` | `unauthenticated` |
+   | after | set | `2026-08-27T18:12:02Z` | `locked` |
+
+   🔴 **`lastSync` is the load-bearing field, not `status`.** It was `null`; a real timestamp
+   proves the CLI actually reached the server and pulled the vault, rather than merely
+   storing a credential. `locked` ≠ `unauthenticated` — authenticated, just needs unlocking.
+
+2. ✅ **The escrow is RETRIEVABLE AND CORRECT from the laptop** — the disaster rehearsal, run
+   for real 2026-08-27:
    ```
-   Driven by `~/bw-login-teeup.sh` **on the laptop** (not in this repo). The quoting lives in
-   a file on purpose — hand-typed one-liners for this cost three master-password entries on
-   2026-08-25/26, every failure a paste/quoting fault rather than a mistake about the task.
-   ⚠ If the session is gone, re-create it rather than hand-typing:
-   `tmux new-session -d -s bw-login "nix-shell -p bitwarden-cli jq --run '~/bw-login-teeup.sh'"`.
-   After login, the script prints the follow-on that **doubles as gap 2's real check**.
-   If the workbench is the machine you lose, the laptop is the machine you are standing at.
-2. **The web-vault paste path is still untested.** Everything verified went through `bw`
-   **on the machine that already holds the key**. The real disaster path — open the note in
-   the web vault on another device, paste into a file — can silently mangle whitespace and
-   nothing here exercises it.
+   ✅ ESCROW PROVEN FROM THIS HOST
+      pubkey sha 288c4d24cfdb5aa1 == expected
+   ```
+   Fetched the Secure Note over the network on the DR host, wrote it to a `mktemp` file
+   `shred`ed on every exit path, and compared the **public** half. This subsumes the old
+   "web-vault paste" item for everything except a browser's own copy-paste mangling — the
+   *retrieval and correctness* claim is proven; only the clipboard leg is unexercised, and it
+   is checked the same way (paste to a file, run the same `age-keygen -y | sha256sum`).
+
+   🔴 **The run printed `fetched: 189 bytes, 3 lines` AND said in the same breath that this is
+   NOT the check** — deliberately, because that number is what the old, vacuous instruction
+   told an operator to trust.
+
+   ⚠ **The rehearsal script lives at `~/bw-escrow-proof.sh` ON THE LAPTOP ONLY — it is in no
+   commit and no backup**, alongside `~/bw-login-teeup.sh`. Both put the quoting in a file on
+   purpose: hand-typed one-liners for this cost three master-password entries on 2026-08-25/26,
+   every failure a paste/quoting fault rather than a mistake about the task.
+   **Follow-up: upstream the proof script into `scripts/analyze-service-index/` so it is
+   managed, shipped to both hosts, and re-runnable** — see ranked follow-up 13.
+3. 🟢 **Residual: the BROWSER clipboard leg alone.** Item 2 proved retrieval and correctness
+   over the network from the DR host, so what is left is only a browser's own copy-paste
+   mangling. Check it identically when convenient: open the note in the web vault, paste
+   into `/tmp/paste.key`, run the hash below, `shred -u` it.
    🔴 **Do NOT check it with "189 bytes / 3 lines" — that check is VACUOUS, measured
    2026-08-27.** A freshly generated, completely unrelated age key is *also* exactly 189
    bytes / 3 lines (control run: pubkey sha `a3f415beca5861cf` vs the real key's
@@ -271,6 +291,17 @@ Kept because each cost a round, and none is a logic bug.
     its numbers — never quote these.
 12. Second A/B against a doc-poor repo (tests whether "selection, not knowledge"
     generalises past n=1).
+13. 🟡 **Upstream the DR rehearsal.** `~/bw-escrow-proof.sh` exists on the **laptop only**,
+    in no commit and no backup — the exact "stranded work" shape, and `drift-check.sh`
+    cannot see it because it lives in `$HOME`, not the repo. It proved a real property on
+    2026-08-27 and deserves to be an artifact: move it to
+    `scripts/analyze-service-index/escrow-retrieval-proof.sh`, reference it from
+    `SECRETS.md`, and it ships to both hosts like everything else.
+    Worth keeping when it moves: the four distinct verdicts (proven / did-not-parse /
+    empty-input / mismatch), the explicit `bw unlock --raw` emptiness check, the
+    `shred`-on-every-path handling, and the "189/3 is NOT the check" line.
+    *Closes when:* the script is in `scripts/`, deployed to both hosts, and the
+    `~/`-only copies are gone.
 
 ## `#896` filed, NOT fixed — each with its closing condition
 
@@ -501,10 +532,14 @@ guess on either exits 19 or 20 long before the decrypt, so reaching rc=0 proves 
 unset, so the run trusted whatever `bw config server` said. The session cross-check DID
 run and matched, which is a weaker but real check. Pin the server to close it.
 
-⚠ **Still untested, and unchanged:** the disaster path that actually matters — reading the
-note from the **web vault on another device** and pasting it into a file. That path can
-mangle whitespace and no run here exercises it. And the laptop's `bw` is still not logged
-in (`rc=13` when measured), so recovering from that host needs a fresh `bw login` first.
+✅ **BOTH of the caveats this paragraph used to carry are now CLOSED — measured 2026-08-27;
+see "THE DR GAPS ARE CLOSED" above.** The laptop is authenticated (`lastSync` non-null, so it
+genuinely reached the server), and the escrow was **retrieved and verified from that host** —
+`pubkey sha 288c4d24cfdb5aa1 == expected`. Only a browser's own clipboard mangling remains
+unexercised, and it is checked the same way.
+🔴 This paragraph read "still untested, and unchanged" for three revisions. Re-measure before
+quoting any "still open" line in this doc; that phrasing survives long after it stops
+being true.
 
 **How it was run — use this, not a hand-typed one-liner:**
 
@@ -619,10 +654,10 @@ prompt. `SECRETS.md` carries the full exit-code table with per-code "do not rota
 **Measured on BOTH hosts 2026-08-24, and they differ — correctly.** Workbench → `rc=12
 VAULT-LOCKED`; laptop → **`rc=13 VAULT-UNAUTH`**. Two points, two distinct codes, each
 accurate: this is the first *live* exercise of the unauthenticated branch, which had only
-ever been synthetic. 🔴 **The DR fact hiding in that second reading: the laptop's `bw` is
-not logged in at all.** If the workbench is the machine you lose, recovering the escrow from
-the laptop needs a fresh `bw login` there first — email plus master password plus 2FA, not
-just the master password. Worth doing before you need it.
+ever been synthetic. The DR fact hiding in that second reading was that the laptop's `bw` was
+not logged in at all — ✅ **since FIXED and PROVEN, 2026-08-27**: it is authenticated and the
+escrow was retrieved and verified from that host. The `rc=13` reading above is kept as the
+historical measurement that *found* the gap, not as current state.
 
 **And the retrieval path that actually matters in a disaster.** The escrow was verified
 through the `bw` CLI **on this machine**. If this machine is gone you would read that note

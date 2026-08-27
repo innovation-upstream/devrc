@@ -244,8 +244,14 @@ nix-shell -p bitwarden-cli jq 'python3.withPackages(p:[p.minio])' --run '
 
 Everything above runs `bw` **on a machine that already holds the key**. In the
 disaster you are on another device, reading the note out of the **web vault** and
-pasting it into a file — a path that can silently mangle whitespace, and one no
-automated check here exercises.
+pasting it into a file — a path that can silently mangle whitespace.
+
+✅ **Rehearsed for real on 2026-08-27 from the laptop** — the host you would
+actually be standing at if the workbench is the one you lost. The note was
+fetched over the network on that host and its **public** half matched:
+`pubkey sha 288c4d24cfdb5aa1 == expected`. So *retrieval and correctness* from a
+second machine are proven; what remains unexercised is only a **browser's own
+clipboard**, checked identically below.
 
 🔴 **Do NOT verify that paste by its size.** *Every* age identity file is exactly
 **189 bytes / 3 lines** — the `# created:` and `# public key:` lines are
