@@ -128,7 +128,7 @@ class _CloudflareShim(http.server.BaseHTTPRequestHandler):
                 # check were all silently inert in production while 358 tests
                 # passed. Found by the first live call after deploy, not here.
                 self.send_header(key.lower(), value)
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
@@ -391,7 +391,16 @@ class TestHostileOrBrokenArchives:
     def test_a_count_disagreeing_with_the_header_is_REFUSED(self, tmp_path: Path):
         """The server's comment claims a truncated transfer is 'visible as a
         disagreement'. It is only visible if somebody compares — this is the
-        test that the comparison exists."""
+        test that the comparison exists.
+
+        🔴 AND IT DID NOT, IN PRODUCTION, FOR THE WHOLE OF #863. The client read
+        the header with a case-SENSITIVE lookup, so behind Cloudflare (which
+        lowercases every name over HTTP/2) `declared` was always None and this
+        guard skipped the comparison entirely — while this very test passed
+        locally, because the fixture sent the case the broken code wanted. Both
+        test servers now lowercase, so this test finally exercises the shape
+        production actually delivers. Found by a live call, not by 358 tests.
+        """
         info = tarfile.TarInfo("widget-cfg/one.md")
         proc = self._run_against(
             self._tar_with(info),
@@ -1156,8 +1165,8 @@ class TestHeaderCaseInsensitivity:
         the COUNT CROSS-CHECK NEVER FIRED — the guard against a truncated
         transfer was inert in the only environment that matters
 
-    The shim now lowercases, so every header-dependent test exercises the
-    production shape. These pin the property directly, so a future refactor back
+    BOTH test servers (`_CloudflareShim` and the one-shot `_serve_once`) now
+    lowercase, so every header-dependent test exercises the production shape. These pin the property directly, so a future refactor back
     to `dict(...)` fails here rather than in six months on a live call.
     """
 
@@ -1172,31 +1181,19 @@ class TestHeaderCaseInsensitivity:
         assert "snapshot=UNSTAMPED" not in stamp, stamp
         assert "snapshot=seeded=" in stamp, stamp
         assert "entries=" in stamp, stamp
-        # ⚠ `revision=unknown` is CORRECT here and is pinned as such rather than
-        # left ambiguous: `/snapshot` deliberately sets no `X-Store-Revision`,
-        # because a full snapshot spans every scope and a revision is per-scope
-        # (`scope_revision(root, scope)`). My first version of this test asserted
-        # the opposite and failed — the assertion was wrong, not the code. A
-        # scoped snapshot could carry one; a whole-store snapshot cannot.
+        # ⚠ `revision=unknown` is CORRECT, and it is DEAD OUTPUT — pinned here
+        # so that is on the record rather than mistaken for information.
+        # `/snapshot` sets `X-Store-Revision` on no path, and cairn always
+        # fetches unscoped (deliberately — a scope-filtered cache is the
+        # silent-zero this client exists to prevent), so this field can never
+        # carry a value. My first version of this test asserted the opposite and
+        # failed: the assertion was wrong, not the code.
+        # CLOSING CONDITION for making it live: `_snapshot` sets
+        # `scope_revision(root, scope)` when `?scope=` is present — a revision
+        # IS well-defined there — AND some caller uses a scoped fetch. Neither
+        # is true today, so the honest move is to say the field is inert rather
+        # than leave a reader inferring freshness from "unknown".
         assert "revision=unknown" in stamp, stamp
-
-    def test_the_count_cross_check_actually_FIRES(self, live_store, tmp_path: Path):
-        """🔴 The guard that was inert in production. It can only fire if the
-        client READS `x-store-entries` — with the old lookup it saw None and
-        skipped the comparison entirely, so a truncated transfer sailed through.
-        """
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
-            info = tarfile.TarInfo("widget-cfg/one.md")
-            tar.addfile(info, io.BytesIO(b""))
-        proc = TestHostileOrBrokenArchives()._run_against(
-            buf.getvalue(),
-            "application/gzip",
-            tmp_path / "cache",
-            headers={"X-Store-Entries": "99"},
-        )
-        assert proc.returncode != 0, proc.stdout
-        assert "99" in proc.stderr and "REFUSED" in proc.stderr, proc.stderr
 
 
 class TestTheHarnessItself:

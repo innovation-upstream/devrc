@@ -178,26 +178,31 @@ def fetch_snapshot(
     req.add_header("User-Agent", "subsystem-store-client/1")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            # 🔴 LOWERCASED, because `dict(resp.headers)` THROWS AWAY the
-            # case-insensitivity that makes header lookup work. `resp.headers`
-            # is an `email.message.Message` whose `.get()` ignores case; a plain
-            # dict's does not. HTTP/2 sends header names lowercased, and this
-            # host is behind Cloudflare, so in PRODUCTION every key arrives as
-            # `x-store-entries` while the code asked for `X-Store-Entries`.
+            # 🔴 RETURN THE MESSAGE, NEVER A DICT BUILT FROM IT.
+            # `resp.headers` is an `email.message.Message` and its `.get()` is
+            # already case-insensitive; `dict(resp.headers)` throws that away.
+            # HTTP/2 lowercases every header name and this host is behind
+            # Cloudflare, so in PRODUCTION the keys arrive lowercased while the
+            # code asked for the mixed-case spelling. MEASURED against the live
+            # pod on the first real call after deploying 0.4.0:
+            #     dict(resp.headers).get("X-Store-Entries") -> None
+            #     dict(resp.headers).get("x-store-entries") -> 75
+            # Silent consequences: `snapshot=UNSTAMPED`, `revision=unknown`, and
+            # — worst — the count cross-check against `X-Store-Entries` NEVER
+            # FIRED, so the guard against a truncated transfer was inert in the
+            # only environment that matters. 358 tests and seven audit rounds
+            # missed it: the test shim reproduced production's TOPOLOGY but not
+            # its NORMALISATION.
             #
-            # MEASURED against the live pod, first real call after deploy:
-            #   dict(resp.headers).get("X-Store-Entries") -> None
-            #   dict(resp.headers).get("x-store-entries") -> 75
-            # Consequences, all silent: the freshness stamp recorded as
-            # `snapshot=UNSTAMPED`, `revision=unknown` on every cached banner,
-            # and — worst — the count cross-check against `X-Store-Entries`
-            # NEVER FIRED, so the guard against a truncated transfer was inert
-            # in the only environment that matters.
-            #
-            # 358 tests and seven audit rounds missed it: the test shim forwards
-            # headers in whatever case the in-process server sent, so it
-            # reproduced the production TOPOLOGY but not its NORMALISATION.
-            return resp.read(), {k.lower(): v for k, v in resp.headers.items()}
+            # ⚠ A `{k.lower(): v}` comprehension fixes the case and introduces a
+            # SECOND bug: on a duplicated header a dict keeps the LAST value
+            # where `Message.get` returns the FIRST (measured: 1 vs 99). This
+            # repo has `sole_header` (server.py:422) precisely because "a bare
+            # .get() silently takes the FIRST value" was a real smuggling bug,
+            # and its rule is REFUSE a duplicate, not quietly pick the other
+            # end. Handing back the Message keeps ONE semantics rather than
+            # inventing a second — caught in review, not shipped.
+            return resp.read(), resp.headers
     except urllib.error.HTTPError as exc:
         # 🔴 CARRY THE BODY. The server's 503 names WHICH scope it could not
         # read; reporting only "answered HTTP 503" throws that away and leaves
