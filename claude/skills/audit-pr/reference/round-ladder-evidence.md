@@ -100,17 +100,50 @@ counts*.
 
 ## 2026-08-26 · what a devrc PR actually ships — why the unit is PAYLOAD, not file type
 
-The measurement behind **"the unit is THIS PR's PAYLOAD, never a file extension"**. Same classifier
-as the table above, applied to each PR's file list from `gh pr view <n> --json files`:
+The measurement behind **"the unit is THIS PR's PAYLOAD, never a file extension"**. Classifier as
+above, applied to each PR's file list from `gh pr view <n> --json files`:
 
-> Of the **40 most recently merged** `innovation-upstream/devrc` PRs, **25 shipped no SOURCE file at
-> all** — 17 of those were docs-only, the rest docs plus tests.
+| selection | no SOURCE at all | docs-only | tests-only | both |
+|---|---|---|---|---|
+| `gh pr list --state merged --limit 40` (sorts by CREATED) | 24 | 16 | 7 | 1 |
+| the 40 most recently MERGED (`--json mergedAt`, sorted) | 24 | 16 | 6 | 2 |
 
-So a gate keyed to "docs are not production" reads zero payload for every round of well over half
-this repo's PRs and stops a ladder that is working. 🔴 **The list moves as PRs merge** — this figure
-is dated for that reason, and an earlier version of it (`24`) was carried over from a subagent's
-report without being re-derived, which is the same mistake the churn table above records three
-times. Re-derive before quoting; the script is six lines of `gh` plus the classifier.
+🔴 **This is a moving window, and it moved while this PR was open**: the same two commands read
+**25** two hours earlier, because PRs merged in between — including this one's siblings. That is why
+the skill body carries the qualitative claim (*most of this repo's merged PRs ship no source file at
+all*) and the number lives here with its date, its selection command and its classifier. An earlier
+version of the body pinned `24` taken from a subagent's report without re-derivation; the next
+pinned `25` measured correctly but decaying by the hour. **A number that changes with the clock does
+not belong in a rule** — only in a dated measurement beside it.
+
+Either selection supports the point: **well over half** of what this repo merges ships no source
+file, so a gate keyed to "docs are not production" reads zero payload for every round of those PRs
+and stops a ladder that is working.
+
+---
+
+## 2026-08-26 · which range form counts a ROUND's payload — measured across four shapes
+
+The measurement behind the gate's command. Each shape is a throwaway repo (git 2.55.0); the numbers
+are `additions + deletions` summed over the numstat output.
+
+| shape | truth | `git diff A..HEAD` | `--no-merges --first-parent` | `--remerge-diff … --not <base>` |
+|---|---|---|---|---|
+| A. clean `merge main` brings 200 upstream lines; the round's own fix is 1 test line | 0 payload | **201** | 1 | 1 |
+| B. payload hand-written into a merge-CONFLICT resolution | >0 | 30 | **1** | 37 |
+| C. the round's fix is 50 payload lines on a side branch, merged `--no-ff` | ~50 | 51 | **0** | 51 |
+| D. control: 12 payload lines, linear, no merges | 13 | 13 | 13 | 13 |
+
+Bold is wrong. Three lessons, and every one of them was shipped as a rule before it was measured:
+
+- **A** is why the range needs `--not <base>` — a two-dot diff attributes the whole upstream
+  bring-in to this round, the gate never fires, and the ladder runs forever.
+- **B and C** are why `--no-merges --first-parent` is NOT the fix, though it looks like one and
+  shipped as one for a round: it reads **0** for a fix committed on a side branch and merged
+  `--no-ff` — the shape agent worktrees produce — so the gate fires and stops a ladder whose payload
+  is still moving. `git show --numstat <merge>` is not the remedy either: it prints the first-parent
+  diff, so on shape A it reports every upstream line as this round's work.
+- **D** is the positive control. A form that gets D wrong is not measuring churn at all.
 
 ---
 

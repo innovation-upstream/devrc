@@ -59,30 +59,39 @@ them in the preceding 14 days**; mean deepest round 4.0; 34% ran >= 5 rounds.
 So the gate is: two consecutive rounds whose FIXES changed zero PAYLOAD lines
 => the ladder has left the PR, stop. Payload = what the PR exists to ship, never
 a file type: keyed to "docs are not production" the gate reads zero for every
-round of a docs or skill PR and stops a working ladder. Measured 2026-08-26: of
-the 40 most recently merged devrc PRs, **25 shipped no source file at all** (17
-of those docs-only) -- this PR among them. That figure is dated because the list
-moves; an earlier `24` here came from a subagent's report and was written in
-without being re-derived.
+round of a docs or skill PR and stops a working ladder -- and most of what this
+repo merges is exactly that. The measurement is in the reference file with its
+date, its selection command and its classifier, because it MOVES: it read 25 of
+40 and then 24 of 40 within two hours as PRs merged, and an earlier `24` in the
+body had come from a subagent's report without being re-derived. A number that
+changes with the clock does not belong in a rule.
 
-**Per-round, and the round's OWN commits** -- anchored at round 1 the count is
-non-zero forever once an early round touched payload (the first version of this
-rule shipped exactly that: on #498 it prints the same number for rounds 4-10 and
-never fires), while a plain two-dot `git diff` sweeps in whatever a `merge main`
-or a rebase brought with it and reads 200 upstream lines as this round's payload.
-Hence `git log --numstat --format= --no-merges --first-parent <sha>..HEAD`.
-Measured on a purpose-built scratch repo -- one round whose only fix was a single
-line of `app_test.go`, then `git merge main` bringing 200 upstream lines of
-`other.go`: the two-dot form reports `1 + 200`, this form reports `1`. The flag
-has a cost of its own, stated in the skill: payload written INTO a merge conflict
-resolution is invisible to `--no-merges` (measured 0 where the two-dot form read
-340), so a round whose fix landed that way must count that merge explicitly.
+**Per-round, and every commit the round actually made.** Anchored at round 1 the
+count is non-zero forever once an early round touched payload -- the first
+version of this rule shipped exactly that, and on #498 it prints the same number
+for rounds 4-10 and never fires. The second version shipped
+`--no-merges --first-parent`, which is WRONG in the other direction. Measured
+across four shapes (full table in the reference file; git 2.55.0):
+
+  shape                                    truth  two-dot  --no-merges   --remerge-diff
+                                                           --first-parent  --not <base>
+  A clean `merge main`, fix = 1 test line    0      201        1              1
+  B payload in a merge-CONFLICT resolution  >0       30        1 (!)         37
+  C fix on a side branch, merged --no-ff    ~50      51        0 (!)         51
+  D control: 12 payload lines, linear        13      13       13             13
+
+So: `--not <base>` is what excludes the upstream bring-in, `--remerge-diff` is
+what makes conflict-resolution payload visible, and `--no-merges --first-parent`
+reads ZERO for a fix committed on a side branch and merged `--no-ff` -- the shape
+agent worktrees produce -- which fires the gate on a ladder whose payload is
+still moving. `git show --numstat <merge>` is not a remedy either: it prints the
+first-parent diff, so on shape A it reports every upstream line as this round's.
 
 It is not a cap (it counts payload lines, never rounds; a round that touches
 payload never trips it however deep the ladder is) and it does not retract the
 retraction below -- #498 contains no round that ran and found nothing, which is
-the waste that retraction denies.
-Different axis: real findings about scaffolding the ladder itself had written.
+the waste that retraction denies. Different axis: real findings about scaffolding
+the ladder itself had written.
 
 🔴 WHY THIS MODULE ALSO GUARDS THE COUNTER-EVIDENCE
 ---------------------------------------------------
@@ -206,7 +215,8 @@ every whole-string pin stays GREEN and only
 what proves that assertion executes and is not a second spelling of the string
 pin it sits beside.
 
-THE ATTRIBUTION-GATE PINS -- their own matrix (2026-08-26, 5 tests added, 6 -> 11)
+THE ATTRIBUTION-GATE PINS -- their own matrix (2026-08-26, 5 tests added, 6 -> 11;
+22 mutants at the fourth round of review)
 ---------------------------------------------------------------------------------
 Same method: each run on its OWN scratch tree built from HEAD, never the
 worktree, under `PYTHONDONTWRITEBYTECODE=1` with the pytest cache disabled, and
@@ -249,12 +259,17 @@ recorded as SURVIVED off an 11-passed run.
   W3   "`--no-merges` has one cost" -> "has no
        cost" .................................. 1 failed  <- SURVIVED until the
                                                   blind spot was pinned
-  W4   evidence truncated to exactly the
-       1,500 B floor .......................... 1 failed  <- the FLOOR passes;
-                                                  the pin's message now names
-                                                  the file size, which is what
+  W4   evidence truncated to 1,520 B ......... 1 failed  <- the FLOOR passes;
+                                                  the pin's message names the
+                                                  file size, which is what
                                                   separates truncated from
                                                   reworded at any size
+  W5   truncation SPLITTING a multibyte
+       character (1,500 B) .................... 1 failed  <- and it still prints
+                                                  that message rather than a
+                                                  UnicodeDecodeError traceback,
+                                                  which is what `errors=
+                                                  "replace"` in `_read` buys
 
   the round-1 set, re-run against current strings:
   X3   gate command -> `echo 0` ............... 1 failed
@@ -406,17 +421,20 @@ SKILL_ATTRIBUTION_NOT_A_CAP = (
 # printed the same non-zero number for rounds 4 through 10 and never fired.
 # Caught in review; these three pins are what stop it coming back.
 SKILL_GATE_COMMAND = (
-    "git log --numstat --format= --no-merges --first-parent "
-    "<the sha you audited THAT round>..HEAD"
+    "git log --numstat --format= --remerge-diff "
+    "<the sha you audited THAT round>..HEAD --not <base>"
 )
 SKILL_GATE_PER_ROUND = (
-    "🔴 **Per-round and the round's OWN commits.** Anchored at round 1 the "
-    "count stays non-zero forever once an early round touched payload"
+    "🔴 **Per-round, and every commit the round actually made.** Anchored at "
+    "round 1 the count stays non-zero forever once an early round touched "
+    "payload"
 )
 
 # 🔴 THE CLASSIFIER, pinned as the INSTRUCTION it is -- not as the prohibition
 # beside it. Measured: with only the "do not use a pathspec" sentence pinned,
-# FIVE mutants passed a green 11-test suite, including one that deleted "read
+# FOUR mutants rewrote the method and passed a green 11-test suite (a fifth
+# survivor of that run, Z8, is the evidence family, caught by
+# EVIDENCE_BASELINE_ROW) -- including one that deleted "read
 # the list and name each one payload or scaffolding", one that flipped
 # "Ambiguous is not zero" to its opposite (reversing the fail-safe direction),
 # and one that reinstated the pathspec as the method while leaving the warning
@@ -424,8 +442,10 @@ SKILL_GATE_PER_ROUND = (
 #
 # The DEFINITION is the half that decides: keyed to file TYPE ("docs are not
 # production") the gate reads zero for every round of a docs or skill PR and
-# stops a working ladder -- measured at 24 of devrc's last 40 merged PRs, this
-# one included. Keyed to PAYLOAD it asks the question that matters: did this
+# stops a working ladder -- and most of what this repo merges is exactly that
+# (dated measurement, both selections, in the reference file; the figure moved
+# 25 -> 24 within two hours as PRs merged, which is why the body states it
+# qualitatively). Keyed to PAYLOAD it asks the question that matters: did this
 # round change what the PR ships, or only the guards the ladder wrote?
 SKILL_PAYLOAD_DEFINITION = (
     "🔴 **The unit is THIS PR's PAYLOAD, never a file extension.** Payload = "
@@ -444,15 +464,15 @@ SKILL_PAYLOAD_DEFINITION = (
 # resolution invisible (measured: 0, where the two-dot form read 340). That is
 # the UNSAFE direction: the gate reads zero on a round that did change payload.
 # Measured: rewriting "has one cost" to "has no cost" left the suite green.
-SKILL_NO_MERGES_COST = (
-    "**`--no-merges` has one cost**: payload hand-written into a merge "
-    "*conflict resolution* is invisible to it (measured: 0 where the old form "
-    "read 340), so if a round's fix landed that way, count that merge "
-    "explicitly with `git show --numstat <merge>`."
+SKILL_WRONG_FLAGS_TRAP = (
+    "Do **not** reach for `--no-merges --first-parent`: it looks equivalent and "
+    "hides payload in BOTH of those shapes — **0** for a fix committed on a "
+    "side branch and merged `--no-ff`, which is the shape agent worktrees "
+    "produce."
 )
 SKILL_PAYLOAD_MEASUREMENT = (
-    "on 2026-08-26 **25 of devrc's 40 most recently merged PRs shipped no "
-    "source at all**"
+    "**most of this repo's merged PRs ship no source file at all** (measured; "
+    "the reference file dates it)"
 )
 SKILL_CLASSIFIER_METHOD = (
     "A round's fix touches a handful of files — read the list and name each one "
@@ -534,18 +554,24 @@ def _norm(text: str) -> str:
 
 
 def _read(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    # errors="replace", not strict: a truncation landing mid-character (likely
+    # in a file full of em-dashes and 🔴) would otherwise raise
+    # UnicodeDecodeError before any assert runs, and the reader gets a traceback
+    # instead of the message saying the file was truncated. Measured: truncating
+    # the evidence file to exactly 1,500 B does this.
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def _assert_pinned_once(path: Path, claim: str, what: str) -> None:
     body = _norm(_read(path))
     count = body.count(_norm(claim))
     # 🔴 The size goes in the MESSAGE, not only in a floor. A byte floor can
-    # only ever sit below the LAST string it guards -- measured: a 1,500 B floor
-    # passed a truncation that had already eaten the first pinned row at byte
-    # 1,433, and any floor under 3,532 leaves a hole -- so the floor cannot be
-    # the thing that distinguishes "reworded" from "truncated". Reporting the
-    # file's actual size here does distinguish them, at every size, forever.
+    # only ever sit below the LAST string it guards, and every pin added later
+    # moves that boundary -- so no floor value distinguishes "reworded" from
+    # "truncated" for long. (The previous attempt quoted exact offsets; they
+    # were a commit out of date within one round, and the claim they carried was
+    # false at the tip.) Reporting the file's actual size here distinguishes
+    # them at any size, and needs no maintenance.
     size = len(path.read_bytes())
     assert count == 1, (
         f"\n\n{path.relative_to(REPO_ROOT)}: {what} is not present exactly once "
@@ -592,15 +618,15 @@ def test_the_guarded_files_exist_and_are_substantial():
         # exactly once as written (found 0)" and told the reader they had
         # REWORDED a sentence in a file that was empty.
         #
-        # 🔴 The floor is a SANITY check, not the truncation guard. Measured:
-        # this file's first pinned string spans bytes 1,433-1,501 and its last
-        # ends at 3,532, so a 1,500 B floor still passes a truncation that ate
-        # the first one, and every floor under 3,532 leaves some hole -- chasing
-        # the number is the wrong fix, because the floor can never sit above a
-        # string that has not been written yet. `_assert_pinned_once` now
-        # reports the file's size in its own failure message, which separates
-        # "reworded" from "truncated" at any size. This floor only has to
-        # separate "the document" from "a stub".
+        # 🔴 The floor is a SANITY check, not the truncation guard, and it sits
+        # far below the last string it guards ON PURPOSE. Chasing that offset is
+        # a losing game: every pin added later moves it, and an earlier attempt
+        # to quote exact byte positions here was a commit out of date within one
+        # round -- the numbers it named were the PREVIOUS tip's, and the claim
+        # they carried was false at HEAD. `_assert_pinned_once` reports the
+        # file's size in its own failure message instead, which separates
+        # "reworded" from "truncated" at any size and needs no maintenance. This
+        # floor only has to separate "the document" from "a stub".
         (EVIDENCE_MD, 1_500),
     ):
         assert path.is_file(), (
@@ -792,7 +818,7 @@ def test_the_gate_pins_its_MECHANISM_not_only_its_decision():
         SKILL_MD, SKILL_PAYLOAD_MEASUREMENT, "the dated payload measurement"
     )
     _assert_pinned_once(
-        SKILL_MD, SKILL_NO_MERGES_COST, "the --no-merges blind spot"
+        SKILL_MD, SKILL_WRONG_FLAGS_TRAP, "the --no-merges/--first-parent trap"
     )
     _assert_pinned_once(
         SKILL_MD, SKILL_GATE_NO_PATHSPEC, "the pathspec counter-evidence"

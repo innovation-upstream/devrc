@@ -7,7 +7,7 @@ allowed-tools: Bash, Read, Grep, Glob, Agent
 
 # /audit-pr — adversarial PR audit
 
-Every measurement below is dated and sourced in
+Case histories and the measurements behind the ladder rules:
 `~/.claude/skills/audit-pr/reference/round-ladder-evidence.md`.
 
 Target: `$ARGUMENTS`. Resolve it:
@@ -19,16 +19,16 @@ Target: `$ARGUMENTS`. Resolve it:
 
 Dispatch a subagent (read-only — it must NOT modify files or merge) to audit the change against this checklist. Have it read the diff and the code it touches, not just the PR description.
 
-**Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, and anything security/auth/path-gating. These reliably hide real, deploy-blocking bugs (shutdown data-loss, trash-path overwrite, scanner scope-creep, an unauthenticated arbitrary-path scan and a git `core.fsmonitor` RCE all surfaced this way). If the branch has a **private Go module dep**, the auditor may need `GOPRIVATE` — a sum-db `500` there is env, not a code defect.
+**Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, anything security/auth/path-gating. These reliably hide deploy-blocking bugs (shutdown data-loss, trash-path overwrite, scanner scope-creep, an unauthenticated arbitrary-path scan and a git `core.fsmonitor` RCE all surfaced this way). If the branch has a **private Go module dep**, the auditor may need `GOPRIVATE` — a sum-db `500` there is env, not a code defect.
 
 **Brief the auditor on the environment, or it will report false findings.** A fresh worktree is not
-a working checkout, and an auditor that hits this cold reports it as a defect in the PR. Tell it, up
-front, whichever apply: **git submodules are unpopulated** in a new worktree (one made 4 test files
+a working checkout, and an auditor hitting this cold reports it as a defect in the PR. Tell it,
+whichever apply: **git submodules are unpopulated** in a new worktree (one made 4 test files
 "fail to collect" — pure environment); **monorepo `node_modules`** may need linking per package, not
 just at the root; **whether the base branch is already red** on typecheck/lint/tests and *at which
 file*, so a baseline error is not attributed to the PR; and that **zsh does not word-split unquoted
-parameters**, so `eslint $FILES` silently checks **zero** files and prints a confident PASS. Also tell it to work in a `cp -a` copy if it wants to
-mutate code, leave your worktree untouched, and verify it clean at the end.
+parameters**, so `eslint $FILES` silently checks **zero** files and prints a confident PASS. Also tell it to mutate code only in a `cp -a` copy, and
+to verify your worktree clean at the end.
 
 **Audit for:**
 1. **Risks** — what could break in production from this change.
@@ -44,11 +44,9 @@ mutate code, leave your worktree untouched, and verify it clean at the end.
 ## After the fixes: RE-AUDIT THE DELTA (don't assume closure)
 
 **A fix round frequently introduces the next finding** — one feature took **five rounds**, each
-caused by the previous fix, none caught by the mechanical gate.
-
-So once an audit's findings are fixed, dispatch a **delta re-audit** — diff the fix commits against
-the **previously-audited tip** (`git diff <audited-sha>..HEAD`), not the whole PR again. Especially
-when the fix touched the same code path.
+caused by the previous fix, none caught by the mechanical gate. So once the findings are fixed,
+dispatch a **delta re-audit**: diff the fix commits against the **previously-audited tip**, not the
+whole PR again, especially when the fix touched the same code path.
 
 Ask the re-auditor to:
 - state **per prior finding**: actually fixed / partially / not / **made worse**;
@@ -57,12 +55,12 @@ Ask the re-auditor to:
   case);
 - **label every finding `behaviour` or `guard`, and separate shipped behaviour from scaffolding.**
   Tests an earlier round wrote are in its diff *by construction*; report on them only where the
-  defect would let a real regression through;
-- treat "the author says it's fixed" as a claim to verify against the diff.
+  defect lets a real regression through;
+- treat "the author says it's fixed" as a claim to check against the diff.
 
 **Carry the ledger in every round's summary**: `round N · payload lines changed THIS round: X (since
-round 1: Y) · elapsed: Z`. X is what the gate below reads; without it the flattening is visible only
-in hindsight — on #498 the session diagnosed its own plateau at round 9, six rounds late.
+round 1: Y) · elapsed: Z`. X is what the gate below reads; without it the flattening shows only in
+hindsight — on #498 the session diagnosed its own plateau at round 9, six rounds late.
 
 ### 🔴 A clean round ENDS the ladder. Never run another round to confirm a clean round.
 
@@ -88,22 +86,22 @@ detector exists to prevent, reintroduced by the fix for the previous one"*. A ca
 both. Keep going while rounds keep finding things — `claude/RULES.md` still says to budget for
 several — and stop the moment one does not.
 
-**When a round's fix is mostly renumbering your own prose, fix the FORM, not the number.** Number
+**When a round's fix is mostly renumbering your own prose, fix the FORM, not the number** — number
 the list and tell the reader to count it; a total kept in parallel with what it counts will drift.
 
 **Say the stop rule to the re-auditor explicitly** ("a clean round is the stop condition; do not
 invent findings to justify the round") — otherwise late rounds manufacture nits.
 
 🔴 **A FRAMED AUDIT VERIFIES THE FRAME. When a PR has already been audited, dispatch the next one
-BLIND** — give it the diff and the checklist, *not* your conclusions or the prior findings' answers.
-Three successive framed audits **confirmed** a claim; one blind audit refuted it in a single pass.
-For a delta re-audit you must name the prior findings (that is the point), so keep the framing to
-*what was claimed fixed* — never *why it is correct*.
+BLIND** — the diff and the checklist, *not* your conclusions or the prior findings' answers. Three
+successive framed audits **confirmed** a claim; one blind audit refuted it in a pass. A delta
+re-audit must name the prior findings, so frame it as *what was claimed fixed* — never *why it is
+correct*.
 
 ### 🔴 ATTRIBUTION: a round that changes no PAYLOAD is auditing the LADDER, not the PR
 
 A fix round writes new guards and the next delta round diffs them, so **the ladder manufactures its
-own next round's findings** and the stop rule above, keyed to findings, can never fire. Measured on
+own next round's findings** and the stop rule above, keyed to findings, cannot fire. Measured on
 `civitai/cli` #498: **ten rounds, 5 h 32 m, 77% of the session's output tokens; rounds 4–10 changed
 1,051 test lines and ZERO payload lines.** No round was ever clean.
 
@@ -111,31 +109,32 @@ So gate on what each round CHANGES, not on what it finds. After a round's fixes 
 payload lines **that round** changed:
 
 ```
-git log --numstat --format= --no-merges --first-parent <the sha you audited THAT round>..HEAD
+git log --numstat --format= --remerge-diff <the sha you audited THAT round>..HEAD --not <base>
 ```
 
 🔴 **The unit is THIS PR's PAYLOAD, never a file extension.** Payload = what the PR exists to ship;
 scaffolding = the tests, fixtures and notes a round wrote to guard it. For a code change the payload
-is source and a `.md` is not — but **for a docs or skill PR the payload IS the `.md`**, and on 2026-08-26 **25 of
-devrc's 40 most recently merged PRs shipped no source at all**, so a rule keyed to file type reads
-every round of those as zero and stops a ladder that is working. Nor will a pathspec do it: `':!*test*'` swallows
+is source and a `.md` is not — but **for a docs or skill PR the payload IS the `.md`**, and **most of this repo's
+merged PRs ship no source file at all** (measured; the reference file dates it), so a rule keyed to
+file type reads every round of those as zero and stops a ladder that is working. Nor will a pathspec do it: `':!*test*'` swallows
 `attestation/` and `latest/`, `':!*spec*'` swallows `inspector/`, and both keep `FooTest.java` and
 `*.cy.ts` (measured). A round's fix touches a handful of files — read the list and name each one
 payload or scaffolding. **Ambiguous is not zero**: the gate does not fire, and the ladder continues.
 
-🔴 **Per-round and the round's OWN commits.** Anchored at round 1 the count stays non-zero forever
-once an early round touched payload — on #498 that prints the same number for rounds 4 through 10
-and never fires. A plain two-dot `git diff` breaks the other way: after a `merge main` or a rebase
-it sweeps upstream lines in as payload, so a scaffolding-only round scores non-zero and the counter
-resets. Hence `--first-parent --no-merges` above; if the branch was rebased mid-round, re-anchor on the
-new sha. **`--no-merges` has one cost**: payload hand-written into a merge *conflict resolution* is
-invisible to it (measured: 0 where the old form read 340), so if a round's fix landed that way,
-count that merge explicitly with `git show --numstat <merge>`.
+🔴 **Per-round, and every commit the round actually made.** Anchored at round 1 the count stays
+non-zero forever once an early round touched payload — on #498 that prints the same number for
+rounds 4 through 10 and never fires. Each part of the command above earns its place, measured across
+four ladder shapes (table in the reference file): `--not <base>` is what keeps a `merge main` from
+being counted as this round's work — a plain two-dot `git diff` read **201** where the truth was one
+test line; `--remerge-diff` is what makes payload hand-written into a **merge-conflict resolution**
+visible. Do **not** reach for `--no-merges --first-parent`: it looks equivalent and hides payload in
+BOTH of those shapes — **0** for a fix committed on a side branch and merged `--no-ff`, which is the
+shape agent worktrees produce. If the branch was rebased mid-round, re-anchor on the new sha.
 
 **Two consecutive rounds whose fixes changed zero payload lines ⇒ the ladder has left the PR.
 Stop.** File the remaining scaffolding findings as one follow-up task naming the file, closed when
 its PR merges or a named reader dismisses it in writing. A round that touches payload never trips
-this, however deep the ladder is.
+this, however deep.
 
 ⚠ **This does not retract the two rules above, and is not a cap in disguise.** #498's rounds were
 not wasted in the sense those rules deny — every one found something real. The waste is on a
