@@ -188,6 +188,25 @@ When writing an item into `## Next steps (ranked)`, make "is this already taken?
 cheap to answer: name the repo and the files it will touch, and mark anything
 already in progress as `IN FLIGHT: <repo>#<pr>` or `BRANCH: <name>`.
 
+🔴 **NEVER write a status marker from an INFERRED human action.** A marker asserts
+somebody DID something, and a queue item is the one place where being wrong about
+that CANCELS the work rather than merely misleading a reader.
+
+MEASURED 2026-08-27: an operator said *"skip the reply, i handled it"*. That was
+read as "the reply was sent", and the item was rewritten as `IN FLIGHT: replied to
+by the operator` plus `DO NOT RAISE A THIRD TICKET`. Nothing had been sent. The
+next session would have read a live blocker as already handled and skipped it —
+the failure the `IN FLIGHT` marker exists to prevent, produced by the marker
+itself. It was caught only because the operator happened to re-read the kickoff
+block in the same session; nothing in the toolchain would have.
+
+The tell is that the evidence is a *human acknowledgement* rather than an
+artifact. `IN FLIGHT: <repo>#<pr>` is safe because a PR number is checkable;
+"handled", "done", "sorted" and "I've got it" are not, and they routinely mean
+"I have decided about it", not "I have performed it". **Either cite the artifact
+or ask which you were told** — and when neither is available, write what you
+actually know (`NOT SENT`), never the flattering reading.
+
 🔴 **NUMBER the items, and keep the numbering STABLE across updates.** The rank is
 half of `--slug-for`'s output, so re-ranking an existing list silently re-points
 every live claim: item 4's holder now holds what item 4 has *become*. Append new
