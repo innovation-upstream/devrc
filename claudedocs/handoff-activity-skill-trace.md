@@ -51,7 +51,14 @@ all 8 tool paths.
   `$CLICKHOUSE_URL` using the collector's own creds.
 - **Observed (with values):** `Code: 497. DB::Exception: activity_writer: Not enough privileges.
   To execute this query, it's necessary to have the grant SELECT(name) ON system.users.
-  (ACCESS_DENIED) (version 25.7.8.71 (official build))`
+  (ACCESS_DENIED) (version 25.7.x (official build))`
+  ⚠ The 4-part ClickHouse version is elided ON PURPOSE: pasted verbatim it parses as a
+  routable public IP literal and fails
+  `test_no_public_ips.py::test_no_unallowlisted_public_ip_literal_is_committed` on this
+  PUBLIC repo. A version string shaped like a dotted quad is a live trap for any "paste
+  the actual error" rule — this doc tripped it, and then the FIRST fix tripped it again by
+  naming the offending range numerically in its own explanation. Describe such a range in
+  words; never write the quad.
 - **Ruled out:** "the writer is an admin" — the ACCESS_DENIED is positive evidence it is NOT,
   which is half of what SKILL.md claims. Reachability and creds are fine (the same connection
   answered every other query in this session).
