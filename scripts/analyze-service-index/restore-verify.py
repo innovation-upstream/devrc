@@ -114,7 +114,7 @@ backups is worse than no verifier.
   * zero commits compared against the live scope       -> failure
   * a run that verified zero scopes                    -> failure
   * THIS host's artifacts, and NOT ONE of them cross-checked because the store
-    side gave nothing                                  -> failure
+    side gave nothing                          -> failure, exit 40
 
 The last one is the STORE-side twin of the first, and it was exit-0 until it
 was measured: `--host <this host> --store <an empty directory>` printed 13
@@ -124,6 +124,17 @@ downgraded the whole run to "it decrypts and is internally consistent" and
 called that success. Foreign artifacts and PARTIAL runs (one scope with no live
 repository beside scopes that have one) are outside it by construction — see
 `nothing_cross_checked_message`.
+
+🔴 IT HAS ITS OWN EXIT CODE, AND THE REASON IS THE SAME ONE `escrow-verify.py`
+GIVES: "every cause has its own exit code, so a timer can act on the number".
+`40 NOTHING-CROSS-CHECKED` means *your backups restored perfectly, and nothing
+here compared them to anything* — which is the EXPECTED outcome during a real
+recovery. `1` means a check FAILED. Collapsing the two would tell an operator
+mid-disaster that their backups are broken, and it is the reading that the
+absent-live-scope path was originally left at exit 0 to avoid. A real failure
+OUTRANKS it: 40 is raised only when it is the whole story. The message names
+BOTH mechanisms it cannot separate — a misconfigured `--store` and a store that
+is genuinely gone — and asserts neither.
 
 The single exception is the same one `backup.py` permits: a host that has never
 run the backup at all — no local store AND no objects under its own default
@@ -257,6 +268,48 @@ DECRYPT_CAUSES = frozenset(
     {DECRYPT_AGE_MISSING, DECRYPT_AGE_REFUSED, DECRYPT_EMPTY_PLAINTEXT})
 
 
+# --------------------------------------------------------------------------- #
+# the classified refusals
+# --------------------------------------------------------------------------- #
+# 🔴 ONE TOKEN AND ONE EXIT CODE PER DISTINGUISHABLE CAUSE — the convention
+# `escrow-verify.py` already runs on, in the same directory, for the same
+# reason it states: "Every cause has its own exit code, so a timer can act on
+# the number." SECRETS.md documents both tables side by side, and an operator
+# reading a number during a recovery must not find two answers, so these start
+# at 40 — clear of escrow's classified range.
+#
+# 🔴 WHY THIS TABLE EXISTS AT ALL: `NOTHING-CROSS-CHECKED` is NOT the same fact
+# as a failed verification, and collapsing them into one `1` conflates
+#
+#     "your backups restored perfectly, I just could not compare them"
+#
+# with
+#
+#     "your backups are broken".
+#
+# Those call for opposite reactions, and the first is the EXPECTED outcome
+# during a real recovery — the scenario this whole feature exists for. This
+# module already states the principle one screen down ("An UNKNOWN must not be
+# summarised as a decision"); the exit code is the only part of the output a
+# timer reads, so it is where the principle matters most.
+EXIT_OK = 0
+# 🔴 1 IS DELIBERATELY TWO THINGS: an unclassified verification failure AND an
+# unexpected exception. `escrow-verify.py` gives 1 the same "read the traceback"
+# meaning. Splitting it is a separate change with its own blast radius, and
+# leaving it alone keeps SECRETS.md's existing "exits 1" statements true.
+EXIT_FAILED = 1
+
+NOTHING_CROSS_CHECKED = "NOTHING-CROSS-CHECKED"
+
+EXIT_CODES: dict[str, int] = {
+    # This host's artifacts all verified, and NOT ONE of them was compared
+    # against a live store. The artifacts are NOT implicated — see
+    # `nothing_cross_checked_message`, which is careful to assert neither of the
+    # two mechanisms that share this observation.
+    NOTHING_CROSS_CHECKED: 40,
+}
+
+
 class RestoreVerifyError(B.BackupError):
     """A failure that must make the whole run non-zero.
 
@@ -270,16 +323,31 @@ class RestoreVerifyError(B.BackupError):
     else, so a caller that reads it gets an explicit "this failure carries no
     published cause" rather than a wrong one — never treat None as a default
     cause.
+
+    🔴 `token` IS OPTIONAL AND THE EXIT CODE IS DERIVED FROM IT, NEVER PASSED
+    IN. A constructor taking both could raise a token carrying the wrong code —
+    exactly the conflation the table exists to prevent (`EscrowError` makes the
+    same choice for the same reason). `token is None` means "this refusal is not
+    a distinguishable cause with its own remedy", and it maps to `EXIT_FAILED`.
     """
 
-    def __init__(self, message: str, *, cause: str | None = None):
+    def __init__(self, message: str, *, cause: str | None = None,
+                 token: str | None = None):
         super().__init__(message)
         if cause is not None and cause not in DECRYPT_CAUSES:
             raise KeyError(
                 f"{cause!r} is not a published cause. The set is closed on "
                 f"purpose: a consumer branches on these, so inventing one "
                 f"silently lands in whatever `else` that consumer has.")
+        if token is not None and token not in EXIT_CODES:
+            raise KeyError(
+                f"{token!r} is not in EXIT_CODES. A classified refusal is an "
+                f"ENUMERATED cause with its own exit code and its own remedy; "
+                f"adding one means adding it to the table in the same commit as "
+                f"the test that pins it.")
         self.cause = cause
+        self.token = token
+        self.exit_code = EXIT_FAILED if token is None else EXIT_CODES[token]
 
 
 # --------------------------------------------------------------------------- #
@@ -1272,7 +1340,8 @@ def diagnose_empty_prefix(*, bucket: str, prefix: str, siblings: list[str],
 
 def nothing_cross_checked_message(*, bucket: str, prefix: str, store: Path,
                                   artifacts: int, scopes: list[str]) -> str:
-    """The refusal for a run of THIS host's artifacts that compared NOTHING.
+    """The classified refusal for a run of THIS host's artifacts that compared
+    NOTHING. Raised as `NOTHING-CROSS-CHECKED` (exit 40), never as a bare 1.
 
     🔴 THE EXIT-0 VARIANT IS WORSE THAN THE REFUSAL — the same argument
     `diagnose_empty_prefix` already makes for the BUCKET side, made here for the
@@ -1284,6 +1353,24 @@ def nothing_cross_checked_message(*, bucket: str, prefix: str, store: Path,
     run to "the artifact decrypts and is internally consistent" — which proves
     nothing about whether the backup still matches the history it is a backup
     OF — and reports success while doing it.
+
+    🔴 BUT IT MUST NOT ASSERT *WHY*, AND THE FIRST VERSION DID. It ended
+    "Point --store at the live store, or fix it" — advice that is unfollowable
+    by the one operator who most needs this tool, because in a real disaster
+    THERE IS NO LIVE STORE TO POINT AT; that IS the disaster. "You pointed at
+    the wrong store" and "the store is genuinely gone" are the SAME OBSERVABLE,
+    which is the empty-result trap RULES.md names, and picking the one that
+    happened to be true in testing is a coin flip recorded as a diagnosis. So
+    the message names BOTH mechanisms, says plainly that this run cannot
+    separate them, and gives a remedy that works under either reading.
+
+    🔴 IT ALSO LEADS WITH THE GOOD NEWS, because that is what is actually
+    PROVEN: the artifacts decrypted, restored and passed `git fsck`. The
+    original design note on the absent-live-scope path — "failing here would
+    make the verifier useless at the exact moment it is needed" — is answered by
+    this shape, not overruled by it: the per-artifact evidence is unchanged, the
+    partial run still exits 0, and the disaster case gets its OWN code rather
+    than being folded into "your backups are broken".
 
     🔴 IT FIRES ON THE OBSERVED PROPERTY, NEVER ON "WAS A FLAG TYPED". The
     v1/v2/v3 note in `run()` and `cross_check_target`'s docstring are both about
@@ -1301,27 +1388,48 @@ def nothing_cross_checked_message(*, bucket: str, prefix: str, store: Path,
         zero-objects no-op returns first, with no verdicts).
     """
     state, names = store_state(store)
-    if state == STORE_ABSENT:
-        where = f"the store directory {store} DOES NOT EXIST"
-    elif state == STORE_EMPTY:
-        where = (f"the store directory {store} EXISTS but holds NO scope "
-                 f"repositories")
-    else:
+    # 🔴 TWO RIVAL MECHANISMS PER STATE, NEITHER ASSERTED. Which PAIR is
+    # plausible depends on what was observed; that one of the pair is true does
+    # not. The `--scope` case lands here too — narrowing the question does not
+    # make the answer decidable, and it gets the same code and the same shape.
+    if state == STORE_POPULATED:
         where = (f"the store {store} holds {len(names)} scope "
                  f"repositor{'y' if len(names) == 1 else 'ies'} "
                  f"({sorted(names)}), none of which is one of the artifact "
                  f"scope(s) verified here")
+        mechanisms = (
+            "(1) the scope repositor(y/ies) named below were removed or renamed "
+            "inside this store, or (2) --store names a DIFFERENT store that "
+            "happens to hold other scopes")
+    else:
+        where = (f"the store directory {store} DOES NOT EXIST"
+                 if state == STORE_ABSENT else
+                 f"the store directory {store} EXISTS but holds NO scope "
+                 f"repositories")
+        mechanisms = (
+            "(1) --store names a path that is not this host's store (a typo, a "
+            "different layout, a default that does not apply to this run), or "
+            "(2) the live store is GONE — the disaster these backups exist for")
     return (
-        f"NOTHING WAS CROSS-CHECKED AGAINST THE LIVE STORE. All {artifacts} "
-        f"artifact(s) under {bucket}/{prefix} are THIS machine's, and every one "
-        f"of them was verified for SELF-CONSISTENCY ONLY, because the store "
-        f"side contributed nothing: {where}. Scope(s) with no live repository: "
-        f"{scopes}. Self-consistency proves the object decrypts and restores; "
-        f"it proves NOTHING about whether it still matches the history it is a "
-        f"backup OF, and zero commits were compared on this run. Exiting "
-        f"non-zero because an exit code is all a timer reads. Point --store at "
-        f"the live store, or fix it. Verifying ANOTHER host's artifacts is the "
-        f"one case where zero cross-checks is correct, and this is not it.")
+        f"{NOTHING_CROSS_CHECKED}: {artifacts} artifact(s) under "
+        f"{bucket}/{prefix} DECRYPTED, RESTORED and passed `git fsck`. That "
+        f"much is PROVEN, and it is the good news — these objects are readable "
+        f"backups. What did NOT happen is any comparison against a live store: "
+        f"zero commits were compared, for every one of them. "
+        f"WHY IS NOT DECIDED HERE. The observation is that {where} — and that "
+        f"single observation is shared by two mechanisms: {mechanisms}. "
+        f"Nothing measured on this run separates them, so neither is asserted. "
+        f"Self-consistency proves an object decrypts and restores; it proves "
+        f"NOTHING about whether it still matches the history it is a backup OF, "
+        f"and that is the claim this run could not make. "
+        f"WHAT TO DO, UNDER EITHER READING: `restore-verify.py --print-plan` "
+        f"prints the store path this run used, touching neither the network nor "
+        f"the key. If that is not the store you meant, re-run pointing at the "
+        f"one you did. If it IS the store you meant, then the live side is gone "
+        f"— this code is the EXPECTED outcome during a recovery, not a verdict "
+        f"against the backups, and the per-artifact lines above are the "
+        f"evidence that they are intact. Scope(s) with no live repository: "
+        f"{scopes}.")
 
 
 def run(*, bucket: str, prefix: str, this_host: str,
@@ -1385,6 +1493,9 @@ def run(*, bucket: str, prefix: str, this_host: str,
 
         verdicts: list[ArtifactVerdict] = []
         failures: list[str] = []
+        # The classified NOTHING-CROSS-CHECKED finding, if the run produces one.
+        # Deliberately NOT an entry in `failures` — see where it is set.
+        nothing_cross_checked: str | None = None
 
         # 🔴 ONE NAME for "these artifacts are not this machine's", read by
         # both the coverage check below and `cross_check_target()` in the loop.
@@ -1509,18 +1620,31 @@ def run(*, bucket: str, prefix: str, this_host: str,
         if (verdicts
                 and scopes_with_a_live_target == 0
                 and store_blocked_scopes):
-            msg = nothing_cross_checked_message(
+            # 🔴 KEPT OUT OF `failures` ON PURPOSE. It is a DIFFERENT FACT from
+            # a verification failure — "your backups restored perfectly, I just
+            # could not compare them" versus "your backups are broken" — and it
+            # carries its own exit code so a timer can act on the number.
+            # Mixing it into `failures` would both mis-count the failures and
+            # make it impossible to tell which of the two the run found.
+            nothing_cross_checked = nothing_cross_checked_message(
                 bucket=bucket, prefix=prefix, store=store,
                 artifacts=len(verdicts), scopes=sorted(store_blocked_scopes))
-            failures.append(msg)
-            print(f"{PROG}: FAILED {msg}", file=sys.stderr)
+            print(f"{PROG}: FAILED {nothing_cross_checked}", file=sys.stderr)
     finally:
         ctx.__exit__(None, None, None)
 
+    # 🔴 A REAL FAILURE OUTRANKS "COULD NOT COMPARE". An artifact that did not
+    # restore is the louder finding, and a timer that saw 40 for a corrupt
+    # artifact would read "just a store problem" — the same conflation in the
+    # other direction. So the classified code is raised ONLY when it is the
+    # whole story.
     if failures:
         raise RestoreVerifyError(
             f"{len(failures)} artifact/scope check(s) FAILED; "
             f"{len(verdicts)} verified. First failure: {failures[0]}")
+    if nothing_cross_checked is not None:
+        raise RestoreVerifyError(nothing_cross_checked,
+                                 token=NOTHING_CROSS_CHECKED)
     if not verdicts:
         # 🔴 NOT REACHABLE TODAY, AND LABELLED AS SUCH — a mutation sweep scored
         # its removal SURVIVED, which is the honest answer: `keys` is non-empty
@@ -1598,6 +1722,18 @@ def print_plan(*, bucket: str, prefix: str, store: Path, identity: Path,
     print("           decrypts, never that it still matches the history it backs")
     print("           up. Another host's artifacts are exempt (their comparison")
     print("           is suppressed on purpose), and so is a PARTIAL run.")
+    # 🔴 EVERY CLASSIFIED CAUSE IS LISTED, so an operator can map a number by
+    # eye during a recovery — the same reason `escrow-verify.py --print-plan`
+    # prints its table. `--print-plan` touches neither the network nor the key,
+    # which is exactly why the refusal's remedy sends people here.
+    print(f"exit:      {EXIT_OK}=verified, {EXIT_FAILED}=a check FAILED or an "
+          f"unexpected error, plus one code per classified cause:")
+    for token, code in sorted(EXIT_CODES.items(), key=lambda kv: kv[1]):
+        print(f"           {code}={token}")
+    print(f"           {EXIT_CODES[NOTHING_CROSS_CHECKED]} is NOT a verdict "
+          f"against the backups: every artifact restored and")
+    print("           passed fsck, and NONE could be compared to a live store.")
+    print("           It is the EXPECTED code during a real recovery.")
     print("coverage:  every LOCAL scope must have at least one artifact. A scope")
     print("           that stopped being backed up is invisible to every other")
     print("           check here, because they all iterate the objects that ARE")
@@ -1700,7 +1836,7 @@ def main(argv: list[str] | None = None) -> int:
                        identity_source=identity_source,
                        identity=identity, scope_filter=args.scope,
                        verify_all=args.verify_all, max_lag_days=args.max_lag_days)
-            return 0
+            return EXIT_OK
 
         if args.keep_work_dir and args.work_dir is None:
             # An option that silently does nothing is a lie, and this one would
@@ -1739,12 +1875,20 @@ def main(argv: list[str] | None = None) -> int:
                 verdicts = _go(Path(td))
 
         if not verdicts:
-            return 0        # the documented never-ran-here no-op; reason on stderr
+            return EXIT_OK  # the documented never-ran-here no-op; reason on stderr
         print(summarise(verdicts))
-        return 0
+        return EXIT_OK
+    except RestoreVerifyError as exc:
+        # 🔴 THE CODE COMES OFF THE EXCEPTION, DERIVED FROM ITS TOKEN. A
+        # classified refusal keeps its own number; an unclassified one is
+        # EXIT_FAILED, which is what every raise here used to be. Ordered before
+        # the `BackupError` arm below because this subclasses it — reversed, the
+        # classified codes would be unreachable and 40 would never be seen.
+        print(f"{PROG}: {exc}", file=sys.stderr)
+        return exc.exit_code
     except B.BackupError as exc:
         print(f"{PROG}: {exc}", file=sys.stderr)
-        return 1
+        return EXIT_FAILED
     except Exception as exc:  # noqa: BLE001 — the failure signal, not a swallow
         # 🔴 NOT EVERY FAILURE IS A BackupError, and the ones that are not are the
         # ones nobody wrote a message for: `S3Error`, a urllib3 connection error,
@@ -1756,7 +1900,7 @@ def main(argv: list[str] | None = None) -> int:
               f"Nothing was verified on this run, or only part of it was — "
               f"treat this as NO verification and read the traceback above.",
               file=sys.stderr)
-        return 1
+        return EXIT_FAILED
     finally:
         # EVERY path out: success, BackupError, and an unexpected exception. A
         # failing run is the one most likely to have left a partly-restored

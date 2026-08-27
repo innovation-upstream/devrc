@@ -1116,16 +1116,63 @@ def test_a_PARTIAL_cross_check_EXITS_ZERO_through_the_real_CLI(tmp_path, identit
 #   * a PARTIAL run                        -> the two tests in section 5
 #   * a host that never ran the backup     -> the zero-objects no-op, which
 #                                             returns before any verdict exists
+#
+# 🔴 AND IT IS ITS OWN EXIT CODE, NOT A GENERIC 1. "Your backups restored
+# perfectly, I just could not compare them" and "your backups are broken" call
+# for opposite reactions, and the first is the EXPECTED outcome during a real
+# recovery. That is why the absent-live-scope path was originally left at exit
+# 0, in a docstring that said failing there "would make the verifier useless at
+# the exact moment it is needed" -- a concern this answers rather than overrules.
 # --------------------------------------------------------------------------- #
+
+# 🔴 THE INVARIANT HALF OF THE REFUSAL, PINNED ONCE, WHOLE. The clause that
+# matters most is the FIRST one: it asserts the artifacts themselves verified.
+# Pinned by substring it would still pass if flipped to its opposite -- exactly
+# what shipped in #851 and twice in #765 -- so the template is compared by
+# equality after whitespace normalisation, and each store state supplies its own
+# `where`/`mechanisms` literal below. A cosmetic reword costs a test edit; that
+# is the price of a claim a machine can check.
+_NCC = (
+    "NOTHING-CROSS-CHECKED: {n} artifact(s) under {src} DECRYPTED, RESTORED "
+    "and passed `git fsck`. That much is PROVEN, and it is the good news — "
+    "these objects are readable backups. What did NOT happen is any comparison "
+    "against a live store: zero commits were compared, for every one of them. "
+    "WHY IS NOT DECIDED HERE. The observation is that {where} — and that single "
+    "observation is shared by two mechanisms: {mechanisms}. Nothing measured on "
+    "this run separates them, so neither is asserted. Self-consistency proves "
+    "an object decrypts and restores; it proves NOTHING about whether it still "
+    "matches the history it is a backup OF, and that is the claim this run "
+    "could not make. WHAT TO DO, UNDER EITHER READING: `restore-verify.py "
+    "--print-plan` prints the store path this run used, touching neither the "
+    "network nor the key. If that is not the store you meant, re-run pointing "
+    "at the one you did. If it IS the store you meant, then the live side is "
+    "gone — this code is the EXPECTED outcome during a recovery, not a verdict "
+    "against the backups, and the per-artifact lines above are the evidence "
+    "that they are intact. Scope(s) with no live repository: {scopes}.")
+
+# The mechanism PAIR is chosen by what was observed, and neither member of
+# either pair is asserted. Written out here rather than imported so the test
+# does not derive its expectation from the implementation it tests.
+_MECH_STORE_LEVEL = (
+    "(1) --store names a path that is not this host's store (a typo, a "
+    "different layout, a default that does not apply to this run), or (2) the "
+    "live store is GONE — the disaster these backups exist for")
+_MECH_SCOPE_LEVEL = (
+    "(1) the scope repositor(y/ies) named below were removed or renamed inside "
+    "this store, or (2) --store names a DIFFERENT store that happens to hold "
+    "other scopes")
+
+
+def _norm(s: str) -> str:
+    return " ".join(s.split())
+
+
 def test_a_run_that_CROSS_CHECKS_NOTHING_because_of_the_store_REFUSES(
         tmp_path, identity):
     """🔴 THE F5 REGRESSION GUARD. Red before the fix: this run returned two
     verdicts and raised nothing.
 
-    🔴 THE WHOLE MESSAGE IS PINNED, NORMALISED — not a substring. A clause
-    pinned by substring has twice shipped in this repo asserting the OPPOSITE of
-    what the code does and passed the entire suite (#851, #765). A cosmetic
-    reword costs this literal; that price buys a machine-readable claim.
+    Pins the EMPTY-store wording whole, plus the token and the derived code.
     """
     store = tmp_path / "store"          # exists, holds NO scope repository
     store.mkdir()
@@ -1138,49 +1185,186 @@ def test_a_run_that_CROSS_CHECKS_NOTHING_because_of_the_store_REFUSES(
     with pytest.raises(RV.RestoreVerifyError) as ei:
         _verify(store, tmp_path / "work", FakeDownloader(objects), identity)
 
-    expected = (
-        f"1 artifact/scope check(s) FAILED; 2 verified. First failure: "
-        f"NOTHING WAS CROSS-CHECKED AGAINST THE LIVE STORE. All 2 artifact(s) "
-        f"under test-bucket/{PREFIX} are THIS machine's, and every one of them "
-        f"was verified for SELF-CONSISTENCY ONLY, because the store side "
-        f"contributed nothing: the store directory {store} EXISTS but holds NO "
-        f"scope repositories. Scope(s) with no live repository: "
-        f"['scope-alpha', 'scope-beta']. Self-consistency proves the object "
-        f"decrypts and restores; it proves NOTHING about whether it still "
-        f"matches the history it is a backup OF, and zero commits were compared "
-        f"on this run. Exiting non-zero because an exit code is all a timer "
-        f"reads. Point --store at the live store, or fix it. Verifying ANOTHER "
-        f"host's artifacts is the one case where zero cross-checks is correct, "
-        f"and this is not it.")
-    assert " ".join(str(ei.value).split()) == " ".join(expected.split())
+    assert ei.value.token == RV.NOTHING_CROSS_CHECKED, (
+        "the refusal is unclassified, so it exits 1 and is indistinguishable "
+        "from a backup that failed to verify")
+    assert ei.value.exit_code == 40
+    expected = _NCC.format(
+        n=2, src=f"test-bucket/{PREFIX}",
+        where=f"the store directory {store} EXISTS but holds NO scope "
+              f"repositories",
+        mechanisms=_MECH_STORE_LEVEL,
+        scopes="['scope-alpha', 'scope-beta']")
+    assert _norm(str(ei.value)) == _norm(expected)
 
 
-def test_the_STORE_refusal_reaches_the_PROCESS_EXIT_CODE(tmp_path, identity):
-    """The library raising is not the same claim as the PROCESS exiting non-zero,
-    and the exit code is the entire reason this defect matters: it is all a
-    systemd timer ever reads.
+def test_the_STORE_refusal_reaches_the_PROCESS_EXIT_CODE_as_FORTY(
+        tmp_path, identity):
+    """🔴 THE DISASTER CASE — restored from the test this fix originally deleted.
 
-    🔴 `subprocess.run` is read directly. `$?` after a pipe reports the PIPE's
-    status — that is exactly how a real rc=34 read as rc=0 on this host.
+    That test was `test_an_absent_live_scope_verifies_SELF_CONSISTENCY_and_says_
+    so`, and its 🔴 docstring was an explicit design decision:
+
+        "If the store is gone there is nothing to cross-check against — which is
+         the scenario these backups exist for. FAILING HERE WOULD MAKE THE
+         VERIFIER USELESS AT THE EXACT MOMENT IT IS NEEDED."
+
+    That concern is real and is NOT obsolete. What is obsolete is the conclusion
+    that exit 0 is how to honour it: exit 0 is what a timer reads as "the
+    backups are fine", which is a claim this run could not make. The concern is
+    answered instead by a DISTINCT code (40, never the generic 1), a message
+    that leads with what was proven, and per-artifact output that is unchanged.
+
+    🔴 The exit code is read from `subprocess.run` directly. `$?` after a pipe
+    reports the PIPE's status — that is exactly how a real rc=34 read as rc=0
+    on this host.
     """
     scope = _make_scope(tmp_path / "elsewhere", "scope-alpha", {"e.md": "x"},
                         commits=4)
     src = _dir_store(tmp_path / "objects",
                      {_key("scope-alpha"): _make_artifact(scope, identity,
                                                           tmp_path)})
+    gone = tmp_path / "gone"
 
     r = _cli("--from-dir", str(src), "--prefix", HOST,
-             "--store", str(tmp_path / "gone"), "--max-lag-days", "100000",
+             "--store", str(gone), "--max-lag-days", "100000",
              identity=identity)
-    assert r.returncode != 0, (
-        f"the process exited 0 having compared NOTHING against the live "
-        f"store:\n{r.stdout}\n{r.stderr}")
-    assert "NOTHING WAS CROSS-CHECKED AGAINST THE LIVE STORE" in r.stderr, (
-        f"non-zero for some OTHER reason — a control that goes red because a "
-        f"different guard fired is green for the wrong reason:\n{r.stderr}")
-    assert f"the store directory {tmp_path / 'gone'} DOES NOT EXIST" in r.stderr, (
-        f"the refusal does not name the store it looked at, so the operator "
-        f"cannot tell a typo from a disaster:\n{r.stderr}")
+    assert r.returncode == 40, (
+        f"expected the classified NOTHING-CROSS-CHECKED code; a bare 1 tells an "
+        f"operator mid-disaster their backups are broken, and a 0 tells a timer "
+        f"they were verified:\n{r.stdout}\n{r.stderr}")
+
+    expected = _NCC.format(
+        n=1, src=f"{src}/{PREFIX}",
+        where=f"the store directory {gone} DOES NOT EXIST",
+        mechanisms=_MECH_STORE_LEVEL, scopes="['scope-alpha']")
+    assert _norm(expected) in _norm(r.stderr), (
+        f"the refusal's wording changed. Re-read it before updating the "
+        f"literal: it must NAME BOTH mechanisms and assert neither, and it must "
+        f"say the artifacts themselves verified.\n{r.stderr}")
+
+    # The per-artifact evidence the original test protected is still printed —
+    # that is what makes the non-zero exit readable rather than alarming.
+    assert "RESTORED 4 commit(s)" in r.stdout and "fsck OK" in r.stdout, r.stdout
+
+
+def test_a_SCOPE_FILTER_that_compares_NOTHING_gets_the_SAME_code(
+        tmp_path, identity):
+    """🔴 NARROWING THE QUESTION DOES NOT MAKE THE ANSWER DECIDABLE.
+
+    `--scope` selects one scope of THIS host's artifacts; if that scope has no
+    live repository, zero commits were compared and the run must not report
+    success. The store here is POPULATED — it holds a different scope — so the
+    rival mechanisms are the scope-level pair, not the store-level one: a store
+    that is plainly there cannot be blamed on `--store` pointing at nothing.
+    """
+    store = tmp_path / "store"
+    _make_scope(store, "scope-beta", {"e.md": "b"}, commits=2)
+    alpha = _make_scope(tmp_path / "elsewhere", "scope-alpha", {"e.md": "a"},
+                        commits=3)
+    objects = {_key("scope-alpha"): _make_artifact(alpha, identity, tmp_path)}
+
+    with pytest.raises(RV.RestoreVerifyError) as ei:
+        _verify(store, tmp_path / "work", FakeDownloader(objects), identity,
+                scope_filter="scope-alpha")
+
+    assert ei.value.exit_code == 40, ei.value.token
+    expected = _NCC.format(
+        n=1, src=f"test-bucket/{PREFIX}",
+        where=f"the store {store} holds 1 scope repository (['scope-beta']), "
+              f"none of which is one of the artifact scope(s) verified here",
+        mechanisms=_MECH_SCOPE_LEVEL, scopes="['scope-alpha']")
+    assert _norm(str(ei.value)) == _norm(expected)
+
+
+def test_a_REAL_failure_OUTRANKS_the_NOTHING_CROSS_CHECKED_code(
+        tmp_path, identity, capsys):
+    """🔴 40 IS RAISED ONLY WHEN IT IS THE WHOLE STORY.
+
+    A corrupt artifact beside a store that offers nothing satisfies every
+    condition for 40 — and a timer that saw 40 there would read "just a store
+    problem" for a backup that did not restore. That is the same conflation this
+    round is fixing, pointed the other way, so the generic failure wins and 40
+    is withheld.
+
+    Reached with a case no earlier check rejects: `scope-beta` verifies fine, so
+    verdicts is non-empty and the guard's own conditions are all met.
+    """
+    store = tmp_path / "store"
+    store.mkdir()                       # exists, holds NO scope repository
+    elsewhere = tmp_path / "elsewhere"
+    alpha = _make_scope(elsewhere, "scope-alpha", {"e.md": "a"}, commits=3)
+    beta = _make_scope(elsewhere, "scope-beta", {"e.md": "b"}, commits=2)
+    objects = {
+        _key("scope-alpha"): _make_artifact(alpha, identity, tmp_path,
+                                            mangle=_flip_middle_byte),
+        _key("scope-beta"): _make_artifact(beta, identity, tmp_path),
+    }
+
+    with pytest.raises(RV.RestoreVerifyError) as ei:
+        _verify(store, tmp_path / "work", FakeDownloader(objects), identity)
+
+    assert ei.value.token is None, (
+        "a corrupt artifact was reported with the code that means 'the backups "
+        "are fine, I just could not compare them'")
+    assert ei.value.exit_code == 1
+    assert "1 artifact/scope check(s) FAILED" in str(ei.value), str(ei.value)
+    # It is still REPORTED — withholding the code must not withhold the finding.
+    assert "NOTHING-CROSS-CHECKED" in capsys.readouterr().err
+
+
+def test_the_exit_code_table_is_pinned_EXACTLY_both_ways():
+    """🔴 DISTINGUISHABLE CAUSES ARE THE DELIVERABLE, so the token->code map is
+    an EXACT dict of literals — the same pin `escrow-verify.py` carries, for the
+    same reason it gives: "every cause has its own exit code, so a timer can act
+    on the number". Silently reusing a code cannot happen unnoticed.
+    """
+    assert RV.EXIT_CODES == {"NOTHING-CROSS-CHECKED": 40}
+    assert RV.EXIT_OK == 0 and RV.EXIT_FAILED == 1
+    codes = list(RV.EXIT_CODES.values())
+    assert len(set(codes)) == len(codes), "two tokens share an exit code"
+    assert 0 not in codes and 1 not in codes, (
+        "a classified cause collides with success or with the generic failure, "
+        "which is the conflation the table exists to remove")
+
+
+def test_an_unknown_token_CANNOT_be_raised():
+    """The code is DERIVED from the token, so a refusal cannot carry the wrong
+    one — and a token with no table entry is a programming error, loudly.
+
+    🔴 THE MESSAGE IS PINNED, NOT JUST THE EXCEPTION TYPE, and a mutation sweep
+    is why. Deleting the explicit check leaves `EXIT_CODES[token]` on the next
+    line to raise `KeyError` by itself, so `pytest.raises(KeyError)` alone
+    stayed GREEN with the guard removed — green for a DIFFERENT guard's error,
+    which is the failure RULES.md names. The explicit check earns its place by
+    what it SAYS (a bare `KeyError('X')` explains nothing to whoever added the
+    token), so what it says is what gets asserted.
+    """
+    with pytest.raises(KeyError) as ei:
+        RV.RestoreVerifyError("x", token="NOT-A-REAL-TOKEN")
+    assert " ".join(ei.value.args[0].split()) == " ".join((
+        "'NOT-A-REAL-TOKEN' is not in EXIT_CODES. A classified refusal is an "
+        "ENUMERATED cause with its own exit code and its own remedy; adding one "
+        "means adding it to the table in the same commit as the test that pins "
+        "it.").split()), ei.value.args[0]
+    # POSITIVE CONTROL: the real token constructs, and brings its own code.
+    assert RV.RestoreVerifyError("x", token=RV.NOTHING_CROSS_CHECKED
+                                 ).exit_code == 40
+    # An UNCLASSIFIED refusal is the generic code, never a classified one.
+    assert RV.RestoreVerifyError("x").token is None
+    assert RV.RestoreVerifyError("x").exit_code == RV.EXIT_FAILED
+
+
+def test_print_plan_LISTS_every_classified_code(tmp_path, identity):
+    """The refusal's remedy sends the operator to `--print-plan`, so the code
+    they are holding has to be mappable there — escrow-verify's convention, and
+    the reason it prints its own table."""
+    r = _cli("--print-plan", "--store", str(tmp_path / "store"),
+             identity=identity)
+    assert r.returncode == 0, r.stderr
+    for token, code in RV.EXIT_CODES.items():
+        assert token in r.stdout, f"{token} is not listed in --print-plan"
+        assert str(code) in r.stdout, f"{code} is not listed in --print-plan"
 
 
 def test_a_BROKEN_artifact_beside_a_LIVE_target_is_not_blamed_on_the_store(
@@ -1215,7 +1399,11 @@ def test_a_BROKEN_artifact_beside_a_LIVE_target_is_not_blamed_on_the_store(
     assert "FAILED scope-alpha" in err, (
         f"the corrupt artifact was not the recorded failure, so this fixture "
         f"is not exercising what it claims:\n{err}")
-    assert "NOTHING WAS CROSS-CHECKED AGAINST THE LIVE STORE" not in err, (
+    # 🔴 The token, not the sentence. An absence assertion on prose that no
+    # longer exists anywhere passes vacuously; `NOTHING-CROSS-CHECKED` is the
+    # machine-readable name and `test_a_REAL_failure_OUTRANKS_...` is the
+    # positive control proving this string CAN appear on stderr.
+    assert RV.NOTHING_CROSS_CHECKED not in err, (
         f"a corrupt artifact was reported as a STORE problem — the store held "
         f"a live scope-alpha and offered a comparison:\n{err}")
 
@@ -1239,7 +1427,11 @@ def test_a_run_that_verified_ZERO_artifacts_is_not_called_a_store_problem(
 
     err = capsys.readouterr().err
     assert "FAILED scope-alpha" in err, err
-    assert "NOTHING WAS CROSS-CHECKED AGAINST THE LIVE STORE" not in err, (
+    # 🔴 The token, not the sentence. An absence assertion on prose that no
+    # longer exists anywhere passes vacuously; `NOTHING-CROSS-CHECKED` is the
+    # machine-readable name and `test_a_REAL_failure_OUTRANKS_...` is the
+    # positive control proving this string CAN appear on stderr.
+    assert RV.NOTHING_CROSS_CHECKED not in err, (
         f"a run that verified ZERO artifacts announced that all zero of them "
         f"were self-consistency only:\n{err}")
     assert "All 0 artifact(s)" not in err, err
@@ -3345,26 +3537,56 @@ def test_SECRETS_md_documents_the_ZERO_CROSS_CHECK_refusal_WORD_FOR_WORD():
     recipe = doc.split("**Restoring**", 1)[1].split("\n## ", 1)[0]
     expected = (
         "🔴 **A run of THIS host's artifacts in which NOT ONE scope could be "
-        "compared FAILS.** Measured 2026-08-26: `--host <this host> --store <an "
-        "empty directory>` printed every scope as `NOT CROSS-CHECKED … "
-        "self-consistency only` and exited **0** — an exit code is all a systemd "
-        "timer reads, so a wrong or absent `--store` silently downgraded the "
-        "whole run to \"the object decrypts and is internally consistent\", "
-        "which says nothing about whether it still matches the history it is a "
-        "backup of. It now exits non-zero and names the store it looked at, "
-        "distinguishing a store that **does not exist** from one that exists and "
-        "is **empty** from one that holds scopes but not this one. Two "
-        "zero-cross-check runs are deliberately still rc=0: **another host's** "
-        "artifacts (suppressing the comparison there is correct), and a "
-        "**partial** run where at least one scope did compare. So on a "
-        "disaster-recovery machine with no store yet, expect a non-zero exit — "
-        "read the per-artifact lines, which still say each artifact restored and "
-        "passed `fsck`.")
+        "compared exits `40`, and `40` IS NOT A VERDICT AGAINST YOUR BACKUPS.** "
+        "Every cause has its own exit code here for the same reason "
+        "`escrow-verify.py` gives below — so a timer can act on the number, and "
+        "so an operator mid-recovery is not told the wrong thing:\n"
+        "\n"
+        "| code | meaning | what to do |\n"
+        "|---|---|---|\n"
+        "| `0` | verified, and cross-checked against the live store | nothing |\n"
+        "| `40` `NOTHING-CROSS-CHECKED` | every artifact **decrypted, restored "
+        "and passed `git fsck`** — and **none** was compared to a live store | "
+        "**not an alarm about the backups.** `--print-plan` shows the store path "
+        "this run used: if it is not the one you meant, re-run pointing at the "
+        "right one; if it *is*, the live store is gone and this is the "
+        "**expected** code during a recovery — the per-artifact lines are your "
+        "evidence the backups are intact |\n"
+        "| `1` | a check **FAILED** — an artifact did not decrypt, did not "
+        "restore, failed `fsck`, is stale, or a scope has no artifact at all | "
+        "this one *is* about the backups; read the first failure |\n"
+        "\n"
+        "Measured 2026-08-26: `--host <this host> --store <an empty directory>` "
+        "printed every scope as `NOT CROSS-CHECKED … self-consistency only` and "
+        "exited **0** — an exit code is all a systemd timer reads, so a wrong or "
+        "absent `--store` silently downgraded the whole run to \"the object "
+        "decrypts and is internally consistent\", which says nothing about "
+        "whether it still matches the history it is a backup of.\n"
+        "\n"
+        "🔴 **`40`'s message names BOTH mechanisms and asserts NEITHER.** \"You "
+        "pointed at the wrong store\" and \"the store is genuinely gone\" are the "
+        "*same observation*, and nothing in the run separates them — so it says "
+        "so, and its remedy works under either reading. It does name which of "
+        "three store states it saw: the directory **does not exist**, it exists "
+        "and holds **no scope repositories**, or it holds scopes but **not this "
+        "one** (that third case gets a different mechanism pair — a store that "
+        "is plainly there cannot be blamed on `--store` naming nothing). A real "
+        "failure **outranks** `40`: a corrupt artifact beside an absent store "
+        "exits `1`, because the louder finding must not be filed as a store "
+        "problem.\n"
+        "\n"
+        "Two zero-cross-check runs are deliberately still `0`: **another "
+        "host's** artifacts (suppressing the comparison there is correct — see "
+        "the three `NOT CROSS-CHECKED` reasons above), and a **partial** run "
+        "where at least one scope did compare.")
     assert " ".join(expected.split()) in " ".join(recipe.split()), (
         "SECRETS.md's restore recipe no longer carries the zero-cross-check "
-        "paragraph verbatim. If you reworded it deliberately, update this "
-        "literal — but re-read it first: the claim it makes is that the run "
-        "FAILS, and the previous behaviour was exit 0.")
+        "section verbatim. If you reworded it deliberately, update this literal "
+        "— but re-read it first. Two claims in it are the ones a reword flips "
+        "silently: that `40` is NOT an alarm about the backups (it was exit 0 "
+        "until 2026-08-26, and a doc that says so again sends a recovering "
+        "operator to distrust a working tool), and that a real failure OUTRANKS "
+        "it.")
 
 
 def test_the_PRODUCER_points_at_the_verifier_for_the_downstream_half():

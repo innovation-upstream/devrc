@@ -2513,6 +2513,25 @@ def test_the_escrow_verifier_REUSES_the_restore_pipeline():
     assert "RV.verify_artifact(" in src
 
 
+def test_the_TWO_exit_code_TABLES_never_collide():
+    """🔴 A SEAM GUARD ON A RELATIONSHIP NEITHER FILE OWNS ALONE.
+
+    SECRETS.md documents both tables, a few paragraphs apart, as the thing an
+    operator maps a number through during a recovery. If `restore-verify.py`
+    ever claims a number this script already uses, that reader gets TWO answers
+    for one code and no way to know which — and each table is individually
+    correct, so neither file's own tests can see it. `restore-verify.py` starts
+    at 40 for exactly this reason; nothing but this assertion holds it there.
+    """
+    mine = set(EV.EXIT_CODES.values())
+    theirs = set(RV.EXIT_CODES.values())
+    assert mine and theirs, "one of the tables is empty — the pin is vacuous"
+    assert mine.isdisjoint(theirs), (
+        f"these exit codes are claimed by BOTH verifiers: "
+        f"{sorted(mine & theirs)}. SECRETS.md documents both tables; a shared "
+        f"number means an operator reading a code gets two answers.")
+
+
 def test_the_module_hardcodes_no_endpoint_and_no_host():
     """🔴 devrc is PUBLIC. The server is read from `bw config server` at run
     time; nothing that looks like an endpoint may be committed here."""
@@ -3282,18 +3301,30 @@ def test_SECRETS_md_exit_codes_agree_with_the_module():
     (code, token) pair the doc DOES list against the module, and requires the
     preflight code to appear. It cannot know which subset of codes the doc
     *ought* to list, so a future code omitted entirely is still invisible here.
+
+    🔴 THE DOC CARRIES TWO TABLES, SO THE EXPECTATION IS THE UNION. SECRETS.md
+    documents `restore-verify.py`'s codes a few paragraphs above this script's,
+    and the regex reads the whole file. Pinning against `EV.EXIT_CODES` alone
+    made a correctly-documented restore-verify code look like a doc error —
+    which would have been "fixed" by deleting the row. The two tables are held
+    disjoint by `test_the_TWO_exit_code_TABLES_never_collide`, so a token
+    resolves in exactly one of them and `owner` cannot be ambiguous.
     """
     import re
     doc = (ROOT / "SECRETS.md").read_text(encoding="utf-8")
     pairs = re.findall(r"\|\s*`(\d+)`\s*`([A-Z][A-Z-]+)`\s*\|", doc)
     assert pairs, "no exit-code rows found — the table moved or changed shape"
+    owner = {**EV.EXIT_CODES, **RV.EXIT_CODES}
     for code, token in pairs:
-        assert token in EV.EXIT_CODES, (
-            f"SECRETS.md documents {token!r}, which the module does not define")
-        assert EV.EXIT_CODES[token] == int(code), (
-            f"SECRETS.md says {token}={code}, module says "
-            f"{EV.EXIT_CODES[token]}")
+        assert token in owner, (
+            f"SECRETS.md documents {token!r}, which NEITHER verifier defines")
+        assert owner[token] == int(code), (
+            f"SECRETS.md says {token}={code}, module says {owner[token]}")
     documented = {t for _, t in pairs}
+    assert "NOTHING-CROSS-CHECKED" in documented, (
+        "restore-verify's zero-cross-check code is undocumented — it is the "
+        "one an operator DURING A RECOVERY will hit, and reading it as 'the "
+        "backups failed' is the whole reason it has its own number")
     assert "DECRYPT-DEPS-MISSING" in documented, (
         "the preflight's code is undocumented — it is the one an operator in "
         "the wrong shell will actually hit")

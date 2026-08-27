@@ -161,19 +161,38 @@ them would raise a false data-loss alarm), or this machine's id could not be
 read, which makes "another host's" an assumption rather than a measurement.
 
 🔴 **A run of THIS host's artifacts in which NOT ONE scope could be compared
-FAILS.** Measured 2026-08-26: `--host <this host> --store <an empty directory>`
-printed every scope as `NOT CROSS-CHECKED … self-consistency only` and exited
-**0** — an exit code is all a systemd timer reads, so a wrong or absent
-`--store` silently downgraded the whole run to "the object decrypts and is
-internally consistent", which says nothing about whether it still matches the
-history it is a backup of. It now exits non-zero and names the store it looked
-at, distinguishing a store that **does not exist** from one that exists and is
-**empty** from one that holds scopes but not this one. Two zero-cross-check
-runs are deliberately still rc=0: **another host's** artifacts (suppressing the
-comparison there is correct), and a **partial** run where at least one scope did
-compare. So on a disaster-recovery machine with no store yet, expect a non-zero
-exit — read the per-artifact lines, which still say each artifact restored and
-passed `fsck`.
+exits `40`, and `40` IS NOT A VERDICT AGAINST YOUR BACKUPS.** Every cause has
+its own exit code here for the same reason `escrow-verify.py` gives below — so a
+timer can act on the number, and so an operator mid-recovery is not told the
+wrong thing:
+
+| code | meaning | what to do |
+|---|---|---|
+| `0` | verified, and cross-checked against the live store | nothing |
+| `40` `NOTHING-CROSS-CHECKED` | every artifact **decrypted, restored and passed `git fsck`** — and **none** was compared to a live store | **not an alarm about the backups.** `--print-plan` shows the store path this run used: if it is not the one you meant, re-run pointing at the right one; if it *is*, the live store is gone and this is the **expected** code during a recovery — the per-artifact lines are your evidence the backups are intact |
+| `1` | a check **FAILED** — an artifact did not decrypt, did not restore, failed `fsck`, is stale, or a scope has no artifact at all | this one *is* about the backups; read the first failure |
+
+Measured 2026-08-26: `--host <this host> --store <an empty directory>` printed
+every scope as `NOT CROSS-CHECKED … self-consistency only` and exited **0** — an
+exit code is all a systemd timer reads, so a wrong or absent `--store` silently
+downgraded the whole run to "the object decrypts and is internally consistent",
+which says nothing about whether it still matches the history it is a backup of.
+
+🔴 **`40`'s message names BOTH mechanisms and asserts NEITHER.** "You pointed at
+the wrong store" and "the store is genuinely gone" are the *same observation*,
+and nothing in the run separates them — so it says so, and its remedy works
+under either reading. It does name which of three store states it saw: the
+directory **does not exist**, it exists and holds **no scope repositories**, or
+it holds scopes but **not this one** (that third case gets a different mechanism
+pair — a store that is plainly there cannot be blamed on `--store` naming
+nothing). A real failure **outranks** `40`: a corrupt artifact beside an absent
+store exits `1`, because the louder finding must not be filed as a store
+problem.
+
+Two zero-cross-check runs are deliberately still `0`: **another host's**
+artifacts (suppressing the comparison there is correct — see the three
+`NOT CROSS-CHECKED` reasons above), and a **partial** run where at least one
+scope did compare.
 
 🔴 **It never runs `git bundle verify`, and neither should you.** Measured: a
 bundle with one byte flipped mid-packfile passes it at **rc=0** printing *"The
