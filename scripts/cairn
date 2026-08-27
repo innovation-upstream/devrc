@@ -163,6 +163,17 @@ def fetch_snapshot(
     url: str, token: str, *, scope: str | None, timeout: int
 ) -> tuple[bytes, dict[str, str]]:
     """GET the tar. Every failure becomes a StoreUnreachable NAMING the host."""
+    # 🔴 `timeout=None` REACHES `urlopen` AS *NO* TIMEOUT, NOT AS A DEFAULT, so
+    # this refuses it rather than trusting the annotation above — `timeout: int`
+    # is a type hint, and a hint is not a code path. The sibling `who` side of
+    # this CLI has refused it since `cairn_who._run`; the store side did not,
+    # and mutating either `fetch_snapshot`'s or `urlopen`'s argument to `None`
+    # survived the whole suite. The asymmetry was the defect: one half of one
+    # program failing closed.
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        raise StoreUnreachable(
+            f"refusing to fetch {url} with timeout={timeout!r} — a missing or "
+            "non-positive bound is an UNBOUNDED wait, not a default")
     target = f"{url}/api/v1/snapshot" + (f"?scope={scope}" if scope else "")
     req = urllib.request.Request(target, method="GET")
     req.add_header("Authorization", f"Bearer {token}")
@@ -730,8 +741,12 @@ def _store_timeout(args: argparse.Namespace) -> int:
     all four to pass the raw `None` through kept the whole suite green — a
     `None` reaches `urllib` as NO timeout, the same unbounded wait `_run`
     already refuses on the other side of this file. One resolver, four callers,
-    and `test_every_store_call_site_resolves_the_timeout_sentinel` pins that no
-    fifth caller open-codes it.
+    and `test_no_call_site_passes_the_RAW_sentinel_attribute` pins that no
+    fifth caller open-codes it, while
+    `test_every_STORE_subcommand_reaches_the_network_with_a_POSITIVE_bound`
+    covers the spellings an AST scan cannot see. `fetch_snapshot` refuses a
+    non-positive bound outright, so a future caller that bypasses both
+    fails closed rather than waiting forever.
     """
     return int(args.timeout) if getattr(args, "timeout", None) is not None else DEFAULT_TIMEOUT
 

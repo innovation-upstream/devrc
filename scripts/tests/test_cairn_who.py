@@ -975,9 +975,10 @@ def test_no_call_site_passes_the_RAW_sentinel_attribute():
     the literal `args.timeout`. Measured survivors of that wider claim:
     `timeout=getattr(args, "timeout")`, `timeout=args.timeout or None`, and
     `timeout=None` — the last being the exact hazard the prose named. Those are
-    covered by the BEHAVIOURAL test below instead, which asserts what actually
-    reaches the network layer; this one catches the spelling a careless edit
-    produces, and says so rather than implying more.
+    covered by the BEHAVIOURAL test below, which asserts the value handed to
+    `resolve_state`, and beyond it by `fetch_snapshot`'s own refusal of a
+    non-positive bound. This one catches the spelling a careless edit produces,
+    and says so rather than implying more.
     """
     import ast
 
@@ -997,10 +998,18 @@ def test_every_STORE_subcommand_reaches_the_network_with_a_POSITIVE_bound(
     """🔴 THE BEHAVIOURAL HALF, and the one that covers spellings AST cannot.
 
     `timeout=None`, `getattr(args, "timeout")` and `args.timeout or None` all
-    slip past a syntactic guard while carrying the sentinel to `urllib`, where
-    a `None` means NO timeout — the unbounded wait `_run` refuses on the other
-    side of this file. Asserting on what the network layer actually receives is
-    indifferent to how the argument was spelled.
+    slip past a syntactic guard while carrying the sentinel onward. Asserting on
+    the value handed to `resolve_state` is indifferent to how the argument was
+    spelled, which an AST scan is not.
+
+    🔴 THE BOUNDARY THIS ASSERTS IS `resolve_state`, NOT `urllib`, AND THE
+    EARLIER WORDING CLAIMED THE LATTER. Two frames still sit between them
+    (`fetch_snapshot`, then `urlopen`), and mutating either one's `timeout=` to
+    `None` survived this test — a docstring promising coverage it did not have,
+    which is the defect the previous round existed to fix. Those frames are now
+    closed in SOURCE instead: `fetch_snapshot` refuses a non-positive bound the
+    way `cairn_who._run` always has, so the path fails closed rather than
+    depending on this test reaching far enough.
     """
     cli = _load_cairn_cli()
     seen = {}
@@ -1037,3 +1046,77 @@ def test_the_store_resolver_turns_the_sentinel_into_a_POSITIVE_bound():
     assert cli._store_timeout(args) == cli.DEFAULT_TIMEOUT > 0
     explicit = cli.build_parser().parse_args(["--timeout", "9", "recall"])
     assert cli._store_timeout(explicit) == 9
+
+
+@pytest.mark.parametrize("bad", [None, 0, -1, "60", True])
+def test_the_STORE_fetch_refuses_an_unbounded_bound_like_the_who_side_does(bad):
+    """🔴 CLOSES THE ASYMMETRY: half of one program was failing closed.
+
+    `cairn_who._run` has always refused a `None` timeout, because `urlopen` and
+    `subprocess` both read it as NO timeout rather than as a default. The store
+    half did not — `fetch_snapshot(timeout: int)` is an annotation, and an
+    annotation is not a code path. Mutating either `fetch_snapshot`'s or
+    `urlopen`'s `timeout=` to `None` survived the entire suite, inside a PR
+    whose own docstrings claimed that value was covered.
+
+    `True` is in the list deliberately: `bool` subclasses `int`, so a plain
+    `isinstance(x, int)` accepts it and would silently run with a 1-second bound.
+    """
+    cli = _load_cairn_cli()
+    with pytest.raises(cli.StoreUnreachable) as exc:
+        cli.fetch_snapshot("http://127.0.0.1:1", "tok", scope=None, timeout=bad)
+    assert "UNBOUNDED" in str(exc.value)
+
+
+def test_the_store_fetch_ACCEPTS_a_positive_bound():
+    """CONTROL. Without it the guard above passes on a function that refuses
+    every input, which is the other way to be useless."""
+    cli = _load_cairn_cli()
+    with pytest.raises(cli.StoreUnreachable) as exc:
+        # port 1 is closed: this must fail on the CONNECTION, not the bound.
+        cli.fetch_snapshot("http://127.0.0.1:1", "tok", scope=None, timeout=1)
+    assert "UNBOUNDED" not in str(exc.value), (
+        f"a valid bound was refused as unbounded: {exc.value}")
+
+
+def test_the_POSITIVE_bound_actually_reaches_urlopen(monkeypatch):
+    """🔴 THE NETWORK BOUNDARY ITSELF — the claim two docstrings kept making.
+
+    Validating `fetch_snapshot`'s PARAMETER does not pin what its body hands to
+    `urlopen`: mutating `urlopen(req, timeout=timeout)` to `timeout=None`
+    survived every guard above it, because the argument check had already
+    passed. That is the "mutate the narrowest expression" case — the guard and
+    the hazard were one line apart and never met.
+
+    Observing the kwarg `urlopen` receives is the only assertion that spans
+    them, and it is what finally makes "a positive bound reaches the network"
+    a measured statement rather than a hopeful one.
+    """
+    cli = _load_cairn_cli()
+    seen = {}
+
+    class _Resp:
+        headers = {}
+
+        def read(self):
+            return b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None, **kw):
+        seen["timeout"] = timeout
+        return _Resp()
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", fake_urlopen)
+    try:
+        cli.fetch_snapshot("http://127.0.0.1:1", "tok", scope=None, timeout=11)
+    except Exception:
+        pass  # the empty body may fail later; the kwarg is already recorded
+    assert "timeout" in seen, "urlopen was never reached — nothing was checked"
+    assert seen["timeout"] == 11, (
+        f"urlopen received timeout={seen['timeout']!r}, not the bound it was "
+        "given — the validated parameter is not what goes to the network")
