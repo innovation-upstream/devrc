@@ -194,35 +194,67 @@ the browser-bridge and fixed at the source each time.
 - **Next probe:** shoot sensei with the banner ABSENT and re-measure. If the control bar
   is gone, either drop it from the shot deliberately or give the form a bottom anchor.
 
+### 🔴 The devrc GATE is flaky, and item 3's five-session mystery may have been IT
+- **Symptom + exact repro:** three runs of `tekton/devrc-*` on ONE unchanged commit
+  (`4ea2ee71`, PR #937), retriggered by close/reopen:
+  1. both legs `ERROR` — *"COULD NOT RUN: the gate stopped before this leg reported"*,
+     no target URL;
+  2. nodetests pass, **pytests `FAILED`** — summary `collected=17680 passed=17678
+     skipped=2 failed=0`;
+  3. both **pass** — summary byte-identical to (2).
+- **Observed (with values):** attempt 2 reported **FAILED with `failed=0` in its own
+  summary**. Locally, in the repo's own dev shell, the same tree gives
+  `RESULT: PASS (exit=0)` with those same totals. `run-tests.sh` drives ~28 targets
+  including non-pytest ones, so "some target exited non-zero" is plausible — but the
+  status does not say which, so it cannot be told from a real test failure.
+- **Ruled out:** a line-length/lint trip from #937's own diff (the file already carries
+  109 lines >83 chars, max 127, and the flake defines no lint check); a genuine test
+  failure (`failed=0`, and 417/417 pass locally in that file, 17678 across the suite).
+- **Leading hypothesis:** 🔴 **item 3's original CI failure was this, not a stall in the
+  test.** Its recorded evidence — *"the failing CI run and a local build resolved to the
+  SAME nix derivation — built GREEN locally, failed in the gate"* — is the same
+  signature. NOT demonstrated; better supported than the stall hypothesis now is.
+- **Next probe:** filed as **devrc #943**, with a closing condition: a failing
+  `tekton/devrc-*` status must name the target that exited non-zero. That one fact would
+  have settled both this and the 429 question. ⚠ I could NOT read the pipeline — the
+  homelab cluster is not in this machine's kubeconfig — so all of the above is from
+  commit statuses plus local reproduction.
+
 ## Next steps (ranked)
 🔴 **Numbering is STABLE and is half a claim's identity — do not re-rank.** Items 1,
-2 and 7 are DONE and are kept in place rather than renumbered.
+2, 3 and 7 are DONE and are kept in place rather than renumbered.
 
 1. ✅ **DONE (#1316, squash `4379c27cf`, 2026-08-27)** — crops declared for `app-requests`
-   and `playable-collections`; #1297 closed.
+   and `playable-collections`; talos-infra #1297 closed.
 2. ✅ **DONE (#1306)** — `plan.py`/`capture.sh` no longer print the two retracted claims.
-3. **Fix the `test_browser_cli_backs_off_on_429` stall at its source** — `devrc`,
-   `scripts/browser-bridge/tests/test_server.py:5970`. UNCHANGED for four sessions; see
-   the investigation block already in this doc. #820 only stopped the test preempting
-   the CLI's own timeout — the stall itself is still UNFIXED and UNMEASURED. **This is
-   the next item.**
+3. ✅ **DONE (devrc #937, squash `7ffa4593a`, 2026-08-27)** — but NOT as this item was
+   framed, and the difference is the point. The item asked for the stall to be fixed at
+   its source. **Measured first, and the leading hypothesis did not survive**: the
+   fixture takes 0.027–0.036 s idle and stayed under 0.10 s at 2× core load, so the
+   "starved `ThreadingHTTPServer` thread" theory needs a ~10,000× change this load model
+   does not produce. (Weakened, NOT refuted — the load generators are `nice -n 19`
+   because this runs on the operator's desktop, so the model is deliberately gentle.)
+   `browser eval` makes exactly ONE `_curl POST /cmd` bounded at `-m 60`, so one hung
+   request cannot reach a 300 s net. And the test was green in CI throughout.
+   So nothing was patched. The test is now SELF-DIAGNOSING instead: three seam
+   timestamps reported on failure, separating "the request never reached the handler"
+   from "the CLI hung AFTER the reply". Watched firing in BOTH directions with two fake
+   CLIs, not merely reasoned about. **See the new investigation block below — the cause
+   may never have been this test at all.**
 4. **`open`'s fallthrough shares the suspected failure mode** — `devrc`,
    `scripts/browser-bridge/extension/service_worker.js`. UNCHANGED. `chrome.tabs.create`
    is another unbounded browser-process IPC, so a browser-wide stall leaks one tab per
-   `open` while returning success. 🔴 Worth more than its rank: the #797 audit PREDICTED
-   this shape would regenerate and #814 proved it right, so this is the third instance
-   of a class that is 2-for-2.
+   `open` while returning success. 🔴 **THIS IS THE NEXT ITEM, and it is worth more than
+   its rank**: the #797 audit PREDICTED this shape would regenerate and #814 proved it
+   right, so this is the third instance of a class that is 2-for-2.
 5. **Removing app-capture's raise** — `civitai/talos-infra`. 🔴 **PREMISE CHANGED**: the
    raise is not inert, only its i3 half is withheld. Re-scope before working it.
 6. **clawgate #358** — filed earlier, picked up by a different session. Not ours; live
    state NOT re-checked, so treat as unknown rather than still-in-flight.
-7. ✅ **DONE (#1333, squash `05e3110ca`, 2026-08-27)** — `sensei`'s shipped crop settled
-   and fixed. The answer was worse than the question: `y: 97` sat **44px ABOVE** the
-   iframe top (141), inside the rewards banner, so the live listing's crop had ~44 rows
-   of host page chrome and had for twelve days. Converted to the anchored form
-   (`y: 64, yFrom: appFrame, h: 982`). **Nothing was attached to any listing** — the live
-   asset is still the old crop; re-shooting it is a separate deliberate act, and is the
-   one thing this item did NOT do.
+7. ✅ **DONE (talos-infra #1333, squash `05e3110ca`, 2026-08-27)** — `sensei`'s shipped
+   crop settled and fixed. `y: 97` sat **44px ABOVE** the iframe top (141), inside the
+   rewards banner. Converted to the anchored form. **Nothing was attached to any
+   listing** — see the open investigation on the live asset.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`browser ping` → `buildMarker` is the ONLY field describing RUNNING code.** Both
@@ -405,6 +437,16 @@ the browser-bridge and fixed at the source each time.
 - **A store crop's framing changes when its height does, and it is worth stating.**
   `render` fits-inside then pads: 1694x1090 gave 1200x772 (3px letterbox); 1694x982 gives
   1200x696 — 41px top and bottom, 10.5% of the canvas.
+
+- 🔴 **A RANKED QUEUE UPDATED BEFORE THE WORK LANDS IS A STALE QUEUE.** This doc was
+  updated to mark item 7 done while item 3's PR was still in review, so for ~an hour it
+  told every `/resume` that item 3 was "the next item… UNFIXED and UNMEASURED" when it
+  was merged. The claim lock does not cover this: the claim had been released, and the
+  doc is what a session reads first. **Update the queue AFTER the merge, or in the same
+  breath as it — not when the work feels finished.**
+- 🔴 **A GATE CAN REPORT `FAILED` ON A LEG WHOSE OWN SUMMARY SAYS `failed=0`.** Read the
+  CONTENT of a red status, not the colour: the totals and the verdict disagreed, and the
+  verdict was the wrong one. Three runs of one commit gave three different answers.
 
 ## How to verify
 ```bash
