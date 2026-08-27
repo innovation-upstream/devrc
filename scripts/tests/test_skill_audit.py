@@ -24,6 +24,7 @@ bytes), the test cross-checks them rather than trusting one.
 """
 import importlib.machinery
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1206,24 +1207,132 @@ def test_foreign_repos_mixed_run_still_reports_the_ungoverned_one(tmp_path):
     assert sa._foreign_repos([str(g), str(u)]) == [tmp_path / "ungoverned"]
 
 
-def test_foreign_repos_path_outside_any_repo_is_not_flagged(tmp_path):
-    """No enclosing `.git` at all -> no claim either way. Flagging it would warn
-    about a tree whose governance is simply unknown."""
+def test_a_path_in_no_repo_at_all_is_unknowable_not_governed(tmp_path):
+    """🔴 THIS TEST PREVIOUSLY BLESSED A DEFECT. It asserted only that such a path
+    is "not flagged", which is true of the ARGUMENT and was then used to justify
+    computing governance from the CLI arguments — so a directory above the repo
+    roots made `foreign` empty and printed ENFORCED over entirely foreign skills
+    (round-3 delta audit, finding 3). The honest claim is three-valued: unknowable
+    is NOT governed, and callers must not collapse it to either bool. The
+    end-to-end guard is test_governance_comes_from_the_targets_not_the_cli_argument.
+    """
     loose = tmp_path / "loose"
     loose.mkdir()
     (loose / "SKILL.md").write_text("# x\n")
+    assert sa._is_governed(loose / "SKILL.md") is None
     assert sa._foreign_repos([str(loose / "SKILL.md")]) == []
 
 
-def test_mixed_run_marks_the_header_and_does_not_assert_the_gate(tmp_path):
-    """End-to-end: the four sites that used to assert devrc's gate on a foreign
-    tree (audit finding 5). The banner alone was not the fix -- 'the gate REJECTS
-    these' three lines below it is a verdict, not a label."""
-    u = _fake_repo(tmp_path / "ungoverned", governed=False)
-    big = u.parent.parent / "big"          # a second skill in the SAME ungoverned repo
-    big.mkdir(parents=True, exist_ok=True)
-    (big / "SKILL.md").write_bytes(b"x" * (sa.BUDGET + 200))
-    out = _run(tmp_path / "ungoverned" / ".claude" / "skills")
+# ── governance is PER-SKILL, and `mixed` is a real feature ───────────────────
+# 🔴 ROUND-3 DELTA AUDIT, findings 1/3/6. The round-2 fix for "a mixed run named
+# only the foreign repo" introduced the same harm one step further on: the mark
+# was keyed to the RUN, so the governed skill of a mixed run was stamped
+# [ungoverned] while the banner directly above promised "the mark is per-line".
+# Two mutants also survived a fully green suite (`if mixed:` -> `if False:`, and
+# `mixed=...` -> `mixed=False`) because the test named "mixed" audited a single
+# ungoverned directory, where `mixed` is False throughout.
+
+
+def _governed_repo(root, *, governed, skill_bytes):
+    """A repo fixture with one skill of a chosen size."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / ".git").write_text("gitdir: /elsewhere\n")
+    if governed:
+        m = root / sa._GATE_MARKER
+        m.parent.mkdir(parents=True, exist_ok=True)
+        m.write_text("MAX_BYTES = 12288\nMIN_HEADROOM_BYTES = 250\n")
+    d = root / ".claude" / "skills" / root.name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_bytes(b"# s\n" + b"y" * (skill_bytes - 4))
+    return root / ".claude" / "skills"
+
+
+def _size_rows(out):
+    """Just the rows of the `## sizes` section.
+
+    🔴 Scoped deliberately: `--all` also prints per-skill DETAIL blocks whose
+    section-weight lines have the identical `N B  ...` shape, so an unscoped
+    regex counted 6 rows for a 2-skill run and failed against correct behaviour.
+    """
+    lines, keep, rows = out.splitlines(), False, []
+    for l in lines:
+        if l.startswith("## sizes"):
+            keep = True
+            continue
+        if keep and l.startswith("##"):
+            break
+        if keep and re.match(r"\s+[\d,]+ B\s", l):
+            rows.append(l)
+    return rows
+
+
+def _mixed_out(tmp_path):
+    """A run over one governed and one ungoverned repo, both genuinely in breach."""
+    g = _governed_repo(tmp_path / "govrepo", governed=True, skill_bytes=sa.BUDGET + 116)
+    u = _governed_repo(tmp_path / "ungovrepo", governed=False, skill_bytes=sa.BUDGET + 116)
+    r = subprocess.run([sys.executable, str(AUDIT_PY), str(g), str(u), "--all"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def test_mixed_run_marks_ungoverned_per_line_not_per_run(tmp_path):
+    """🔴 The governed skill must NOT be stamped [ungoverned]."""
+    out = _mixed_out(tmp_path)
+    # 🔴 Count SKILL lines only. The banner itself contains the literal
+    # "[ungoverned]" because it explains the mark, so an unscoped grep counts the
+    # explanation as an instance — which is how the first version of this test
+    # failed against correct behaviour.
+    rows = _size_rows(out)
+    marked = [l for l in rows if "[ungoverned]" in l]
+    assert len(rows) == 2, f"expected two skill rows, got {len(rows)}:\n{out}"
+    assert len(marked) == 1, f"expected exactly one marked row, got {len(marked)}:\n{out}"
+    assert "devrc reference budget" in marked[0], out
+
+
+def test_mixed_run_still_calls_the_governed_skill_ENFORCED(tmp_path):
+    """The other half: a devrc file in real breach must keep being told so."""
+    out = _mixed_out(tmp_path)
+    assert "over the enforced budget" in out, out
+    assert "over the devrc reference budget" in out, out
+
+
+def test_mixed_banner_is_printed_when_the_run_mixes(tmp_path):
+    """Kills `if mixed:` -> `if False:` and `mixed=...` -> `mixed=False`, both of
+    which survived the round-2 suite because its 'mixed' test was not mixed."""
+    assert "This run MIXES governed and ungoverned trees" in _mixed_out(tmp_path)
+
+
+def test_a_purely_foreign_run_is_not_called_mixed(tmp_path):
+    """The negative control: without a governed target there is nothing to mix,
+    so the extra warning must stay off or it becomes noise on every foreign run."""
+    u = _governed_repo(tmp_path / "onlyforeign", governed=False, skill_bytes=sa.BUDGET + 50)
+    out = _run(u, "--all")
     assert "devrc's DEFAULT (not enforced here)" in out, out
-    assert "the gate REJECTS these" not in out, (
-        "an ungoverned tree must not be told devrc's gate rejects it")
+    assert "This run MIXES" not in out, out
+
+
+def test_detail_header_and_verdict_do_not_assert_the_gate_on_a_foreign_tree(tmp_path):
+    """🟡 Round-3 finding 2: the sizes-list note was de-asserted but `_overage`'s
+    detail header ("over enforced budget by N") and the verdict's "cut ~N B total"
+    were not — verdicts about a gate that does not bind the file."""
+    u = _governed_repo(tmp_path / "foreigndetail", governed=False, skill_bytes=sa.BUDGET + 166)
+    out = _run(u, "--all")
+    assert "over enforced budget by" not in out, out
+    assert "over devrc reference budget by" in out, out
+    assert "not enforced there" in out, out
+
+
+def test_governance_comes_from_the_targets_not_the_cli_argument(tmp_path):
+    """🟡 Round-3 finding 3, and the round-2 test that BLESSED it.
+
+    A directory argument ABOVE the repo roots resolves to no repo, so keying on
+    the ARGUMENT made `foreign` empty and printed ENFORCED over skills that were
+    entirely foreign. The argument's governance really is unknown; the targets'
+    is not, and the targets are what gets audited.
+    """
+    _governed_repo(tmp_path / "parent" / "repoA", governed=False, skill_bytes=sa.BUDGET + 20)
+    out = _run(tmp_path / "parent", "--all")
+    assert "devrc's DEFAULT (not enforced here)" in out, out
+    assert f"budget {sa.BUDGET:,} B ENFORCED" not in out, (
+        "an argument above the repo roots must not launder foreign skills as enforced")

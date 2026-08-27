@@ -115,7 +115,11 @@ BUDGET = TARGET - MIN_HEADROOM
 # The structural test is: does this tree contain the gate whose constants this
 # tool reads? If yes, those constants govern it, worktree or not. No subprocess,
 # no path equality, and it stays correct if devrc is cloned elsewhere.
-_GATE_MARKER = Path("scripts") / "browser-bridge" / "tests" / "test_skill_size.py"
+# 🔴 DERIVED, never re-spelled. A second copy of this relative path would go
+# stale the moment the gate moves, and the failure direction is the harmful
+# one: devrc would stop recognising ITSELF and print "not enforced here" on
+# every run. Same argument as _load_budget's ten lines above.
+_GATE_MARKER = _BUDGET_SOURCE.relative_to(Path(__file__).resolve().parent.parent)
 
 
 def _repo_root(path):
@@ -128,21 +132,34 @@ def _repo_root(path):
     return None
 
 
-def _foreign_repos(paths):
-    """Sorted roots of audited trees that this tool's budget does NOT govern.
+def _is_governed(path):
+    """Does this tool's budget bind <path>? True/False, or None when unknowable.
 
-    Returns a list, deliberately: the previous version collapsed to
-    `sorted(roots)[0]` in BOTH ternary branches -- the `len(roots) == 1` test was
-    inert -- so auditing a devrc skill and a foreign one together printed a
-    banner naming only the foreign repo, telling the reader that the devrc skill
-    (which IS enforced) is not. That is the inverse of the bug this banner fixes.
+    None means "no enclosing repo at all" — an answer about the ARGUMENT, not a
+    licence to assume governance. Callers must not collapse it to either bool.
     """
-    roots = set()
-    for raw in paths:
-        root = _repo_root(raw)
-        if root is not None and not (root / _GATE_MARKER).is_file():
-            roots.add(root)
-    return sorted(roots)
+    root = _repo_root(path)
+    if root is None:
+        return None
+    return (root / _GATE_MARKER).is_file()
+
+
+def _foreign_repos(paths):
+    """Sorted roots of trees this tool's budget does NOT govern.
+
+    🔴 CALL THIS WITH THE RESOLVED TARGETS, NEVER THE CLI ARGUMENTS. A directory
+    argument ABOVE the repo roots (`~/workspace`, a parent of several checkouts)
+    resolves to no repo at all, so every argument yields None, `foreign` comes
+    back empty, and the run prints ENFORCED over skills that are entirely foreign
+    — the exact defect this banner exists to prevent, surviving in the one shape
+    nobody types deliberately. Found by the round-3 delta audit, which also noted
+    that the round-2 test BLESSED it.
+
+    Returns a list, not a scalar: an earlier version collapsed to `sorted(roots)[0]`
+    in both ternary branches, so a mixed run named only the foreign repo and told
+    the reader that the devrc skill — which IS enforced — is not.
+    """
+    return sorted({_repo_root(p) for p in paths if _is_governed(p) is False})
 
 
 # HARD is where a skill stops being a skill. ~40 KB is ~10k tokens — already a
@@ -567,6 +584,8 @@ def audit_one(skill_md):
     fattest = max(h2, key=lambda s: s[3]) if h2 else None
     return {
         "path": skill_md,
+        # Per-skill, not per-run: the mark must follow the FILE (round-3 finding 1).
+        "governed": _is_governed(skill_md),
         # A skill is identified by its DIRECTORY (.claude/skills/<name>/SKILL.md).
         # Auditing a loose file — a scratch copy, a candidate rewrite — must not
         # inherit whatever directory it happens to be sitting in: that reported a
@@ -643,12 +662,19 @@ def _mark(status):
 
 
 def _overage(a):
-    """(what it is over, by how many bytes) for a non-OK skill."""
+    """(what it is over, by how many bytes) for a non-OK skill.
+
+    🔴 The budget label is per-skill. Round-3 finding 2: the sizes-list note was
+    de-asserted for ungoverned trees but this detail header was not, so a foreign
+    skill still read "over enforced budget by 166 B" — a verdict about a gate that
+    does not bind it, printed under a banner saying so.
+    """
     if a["status"] == "OVER HARD CAP":
         return "hard cap", a["size"] - HARD
     if a["status"] == "OVER TARGET":
         return "target", a["size"] - TARGET
-    return "enforced budget", a["size"] - BUDGET
+    label = "devrc reference budget" if a.get("governed") is False else "enforced budget"
+    return label, a["size"] - BUDGET
 
 
 def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), mixed=False):
@@ -685,10 +711,18 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
             # 🔴 "over the enforced budget" is a VERDICT, not a label. On an
             # ungoverned tree nothing enforces it, so the banner's disclaimer is
             # contradicted three lines later unless the mark travels with it.
-            note = (f"  {a['size'] - BUDGET:,} B over the {'devrc ' if foreign else ''}"
-                    f"{'reference' if foreign else 'enforced'} budget "
+            #
+            # 🔴 PER-AUDIT, NOT PER-RUN. Keyed on the run-level `foreign` this
+            # stamped [ungoverned] on the GOVERNED skill of a mixed run — a devrc
+            # file in real breach, told it was a reference number — while the
+            # banner directly above promised "the mark is per-line". That is the
+            # same reader-facing harm as the bug this banner fixes, asserted more
+            # specifically. Round-3 delta audit, finding 1.
+            ung = a.get("governed") is False
+            note = (f"  {a['size'] - BUDGET:,} B over the {'devrc ' if ung else ''}"
+                    f"{'reference' if ung else 'enforced'} budget "
                     f"(only {TARGET - a['size']:,} B of the {MIN_HEADROOM:,} B margin left)"
-                    f"{'  [ungoverned]' if foreign else ''}")
+                    f"{'  [ungoverned]' if ung else ''}")
         else:
             note = f"  {a['size'] / TARGET:.1f}x target"
         p(f"  {a['size']:>9,} B  {_mark(a['status'])} {a['status']:<13} {a['name']}{note}")
@@ -858,7 +892,11 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
         # silently cancelled out real overage elsewhere in the same run.
         excess = sum(a["size"] - BUDGET for a in over)
         if excess > 0:
-            need.append(f"cut ~{excess:,} B total")
+            # Same per-skill rule: on an ungoverned tree this is advice against
+            # devrc's number, not a requirement (round-3 finding 2).
+            any_ung = any(a.get("governed") is False for a in over)
+            need.append(f"cut ~{excess:,} B total"
+                        + (" against devrc's budget (not enforced there)" if any_ung else ""))
         if any_ref_issue:
             need.append("broken/orphaned reference routing")
         if broken_fence:
@@ -879,15 +917,22 @@ def main(argv=None):
     if not targets:
         sys.exit(f"no SKILL.md found under: {', '.join(paths)}\n"
                  "(pass a SKILL.md, a skills dir, or a repo root explicitly)")
-    # 🔴 `mixed` is computed from the PATHS, not from `foreign` being short: a run
-    # over one governed and one ungoverned tree must not print a header that reads
-    # as a verdict about either. Finding 3 of the #924 audit was exactly this
-    # shape reported the other way round.
-    foreign = _foreign_repos(paths)
-    governed = [x for x in paths
-                if (r := _repo_root(x)) is not None and (r / _GATE_MARKER).is_file()]
-    render([audit_one(t) for t in targets], args.all, args.sections, args.detail,
-           foreign=foreign, mixed=bool(foreign and governed))
+    # 🔴 GOVERNANCE COMES FROM THE RESOLVED TARGETS, NEVER THE CLI ARGUMENTS.
+    # Keyed on `paths`, a directory argument sitting ABOVE the repo roots resolves
+    # to no repo for every arg, so `foreign` came back empty and the run printed
+    # ENFORCED over skills that were entirely foreign — the very defect this
+    # banner exists to prevent, in the one shape nobody types on purpose
+    # (`~/workspace`, a parent of several checkouts). Round-3 delta audit,
+    # finding 3. `targets` are the SKILL.md files themselves, each of which sits
+    # inside exactly one repo or none.
+    audits = [audit_one(t) for t in targets]
+    foreign = _foreign_repos(targets)
+    # `mixed` needs a GOVERNED target, not merely a non-foreign one: an unknowable
+    # target (no enclosing repo) is neither, and counting it as governed would
+    # print the mixed warning over a run that has nothing to disambiguate.
+    mixed = bool(foreign) and any(a.get("governed") is True for a in audits)
+    render(audits, args.all, args.sections, args.detail,
+           foreign=foreign, mixed=mixed)
 
 
 if __name__ == "__main__":

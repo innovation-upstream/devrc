@@ -571,9 +571,32 @@ def test_this_modules_own_stated_figures_are_re_measured():
     # SPELLING of the claim; `MAX_BYTES <= target` IS the claim. The figure specs
     # can only ever pin the spelling, because every one of them re-derives from
     # MAX_BYTES itself and therefore moves WITH it.
-    if MAX_BYTES > target:
+    # 🔴 …AND THE SAME DOCTRINE APPLIED TWICE MORE, both found by the round-3
+    # delta audit on the fix that added the guard below.
+    #
+    # (a) `!=`, not `>`. The docstring says the ceiling IS the target ("now equal
+    # to the 12,288 B target"); `>` only forbids the exemption direction, so
+    # MAX_BYTES = 12_200 plus the four prose figures passed 40/40 with all three
+    # sentences false. The benign direction is also the one the docstring names as
+    # expected future action ("lower it as the file gets leaner"), i.e. the rot
+    # vector that will actually be walked.
+    #
+    # (b) The docstring also claims the body sits INSIDE the shared enforced
+    # budget. The figure spec for that number pins its SPELLING; the claim is a
+    # RELATIONSHIP. Between BUDGET (12,038) and this module's own effective floor
+    # (MAX_BYTES - MIN_HEADROOM_BYTES = 12,096) there was a live 58 B window in
+    # which this gate reported green while skill-audit.py called the same file
+    # NO HEADROOM — walked by padding SKILL.md to 12,050 B and updating the six
+    # size-derived figures: `136 passed`.
+    if size > shared_budget:
         problems.append(
-            f"the ceiling MAX_BYTES={MAX_BYTES:,} is ABOVE the {target:,} B target, "
+            f"SKILL.md is {size:,} B, OUTSIDE the shared {shared_budget:,} B enforced "
+            f"budget, but the docstring claims it sits inside it. skill-audit.py "
+            f"calls this NO HEADROOM; this gate must not disagree with the tool it cites."
+        )
+    if MAX_BYTES != target:
+        problems.append(
+            f"the ceiling MAX_BYTES={MAX_BYTES:,} is not EQUAL to the {target:,} B target, "
             "so the docstring's 'THE EXEMPTION IS RETIRED' / 'now equal to the "
             "target' is FALSE. Raising the ceiling back above the target is a "
             "deliberate re-exemption: restore the WHY-THE-CEILING-IS-ABOVE section "
