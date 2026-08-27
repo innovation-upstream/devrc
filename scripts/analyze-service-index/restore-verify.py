@@ -132,9 +132,15 @@ here compared them to anything* — which is the EXPECTED outcome during a real
 recovery. `1` means a check FAILED. Collapsing the two would tell an operator
 mid-disaster that their backups are broken, and it is the reading that the
 absent-live-scope path was originally left at exit 0 to avoid. A real failure
-OUTRANKS it: 40 is raised only when it is the whole story. The message names
-BOTH mechanisms it cannot separate — a misconfigured `--store` and a store that
-is genuinely gone — and asserts neither.
+OUTRANKS it: 40 is raised only when it is the whole story, and the finding is
+still printed as `ALSO:` when something louder wins. The message lists every
+mechanism CONSISTENT with what was observed, states that the list is NOT closed,
+and asserts none of them.
+
+(This docstring is `--help`, so it is operator-facing prose. The paragraph above
+is whole-string pinned by the test suite for the same reason the refusal itself
+is: it carries the claim that 40 is not a verdict against the backups, and that
+claim is worth nothing if a reword can silently invert it.)
 
 The single exception is the same one `backup.py` permits: a host that has never
 run the backup at all — no local store AND no objects under its own default
@@ -1003,24 +1009,52 @@ def store_state(store: Path) -> tuple[str, list[str]]:
     return (STORE_POPULATED, names) if names else (STORE_EMPTY, [])
 
 
-def why_no_live_scope(store: Path, scope: str) -> str:
-    """WHICH store state blocked `scope`'s cross-check. Never "no local store"."""
+# 🔴 THE FIVE WAYS A SCOPE CAN HAVE NO LIVE REPOSITORY, AS VALUES. The
+# sentences below are for the operator and may be reworded; these are what the
+# refusal BRANCHES on, so its explanation can never be a substring match on
+# prose — and, more importantly, so it cannot offer a two-way choice that
+# EXCLUDES what was actually observed. Measured: a scope that is a SYMLINK, and
+# a scope directory with no `.git`, both reached exit 40 being told the store
+# held "NO scope repositories" and offered only "--store is wrong" or "the store
+# is GONE". Both are false — the repository is right there and `--store` is
+# correct; `live_scope_path` refuses symlinks and `discover_scopes` skips them.
+WHY_STORE_ABSENT = "store-absent"
+WHY_STORE_EMPTY = "store-empty"
+WHY_SCOPE_SYMLINK = "scope-symlink"
+WHY_SCOPE_NOT_A_REPO = "scope-not-a-repo"
+WHY_SCOPE_NOT_PRESENT = "scope-not-present"
+
+WHY_KINDS = frozenset({WHY_STORE_ABSENT, WHY_STORE_EMPTY, WHY_SCOPE_SYMLINK,
+                       WHY_SCOPE_NOT_A_REPO, WHY_SCOPE_NOT_PRESENT})
+
+
+def why_no_live_scope(store: Path, scope: str) -> tuple[str, str]:
+    """`(kind, sentence)` for WHICH store state blocked `scope`'s cross-check.
+
+    Never "no local store": that spelling was three facts in one, and the two
+    scope-level ones below are a fourth and fifth that a store-level answer
+    cannot express at all.
+    """
     state, names = store_state(store)
     if state == STORE_ABSENT:
-        return f"the store directory {store} DOES NOT EXIST"
+        return WHY_STORE_ABSENT, f"the store directory {store} DOES NOT EXIST"
     p = store / scope
     if p.is_symlink():
-        return (f"{p} is a SYMLINK, and a symlink is never followed here — "
-                f"following one would compare against a repository from "
-                f"OUTSIDE the store")
+        return WHY_SCOPE_SYMLINK, (
+            f"{p} is a SYMLINK, and a symlink is never followed here — "
+            f"following one would compare against a repository from "
+            f"OUTSIDE the store")
     if p.is_dir() and not (p / ".git").exists():
-        return f"{p} exists but is not a git repository (it has no .git)"
+        return WHY_SCOPE_NOT_A_REPO, (
+            f"{p} exists but is not a git repository (it has no .git)")
     if state == STORE_EMPTY:
-        return (f"the store directory {store} EXISTS but holds NO scope "
-                f"repositories")
-    return (f"the store {store} holds {len(names)} scope "
-            f"repositor{'y' if len(names) == 1 else 'ies'} but none named "
-            f"{scope!r}")
+        return WHY_STORE_EMPTY, (
+            f"the store directory {store} EXISTS but holds NO scope "
+            f"repositories")
+    return WHY_SCOPE_NOT_PRESENT, (
+        f"the store {store} holds {len(names)} scope "
+        f"repositor{'y' if len(names) == 1 else 'ies'} but none named "
+        f"{scope!r}")
 
 
 # Where `%m` comes from. A module-level tuple so the test suite can point the
@@ -1167,7 +1201,7 @@ def cross_check_target(store: Path, scope: str, *, artifacts_are_foreign: bool,
     live = live_scope_path(store, scope)
     if live is None:
         return None, (f"no live scope repository at {store / scope}: "
-                      f"{why_no_live_scope(store, scope)}"
+                      f"{why_no_live_scope(store, scope)[1]}"
                       ), NO_CROSS_CHECK_NO_LIVE_SCOPE
     return live, None, None
 
@@ -1338,8 +1372,38 @@ def diagnose_empty_prefix(*, bucket: str, prefix: str, siblings: list[str],
                    f"nothing to verify{where}")
 
 
+# 🔴 ONE MECHANISM PER OBSERVED KIND, AND THE LIST IS OPEN. A CLOSED two-way
+# choice is a claim about what CANNOT be true, and it was wrong for two
+# reachable states (see `WHY_KINDS`). Each entry says what is CONSISTENT with
+# the observation; none says it is THE cause. Read by
+# `nothing_cross_checked_message` and pinned two-way against `WHY_KINDS`, so a
+# sixth state cannot be added without deciding what it means for the operator.
+_MECHANISMS: dict[str, tuple[str, ...]] = {
+    WHY_STORE_ABSENT: (
+        "--store names a path that is not this host's store (a typo, a "
+        "different layout, a default that does not apply to this run)",
+        "the live store is GONE — the disaster these backups exist for"),
+    WHY_STORE_EMPTY: (
+        "--store names a path that is not this host's store (a typo, a "
+        "different layout, a default that does not apply to this run)",
+        "the live store is GONE — the disaster these backups exist for"),
+    WHY_SCOPE_SYMLINK: (
+        "the scope path IS present but is a SYMLINK, which is never followed "
+        "here — the repository it points at may be perfectly intact, and "
+        "--store may be exactly right",),
+    WHY_SCOPE_NOT_A_REPO: (
+        "the scope path IS present but carries no .git — an interrupted move, "
+        "or a repository that lost it; --store may be exactly right",),
+    WHY_SCOPE_NOT_PRESENT: (
+        "the scope repositor(y/ies) named below were removed, RENAMED, or "
+        "never created in this store",
+        "--store names a DIFFERENT store that happens to hold other scopes"),
+}
+
+
 def nothing_cross_checked_message(*, bucket: str, prefix: str, store: Path,
-                                  artifacts: int, scopes: list[str]) -> str:
+                                  artifacts: int, scopes: list[str],
+                                  scope_filter: str | None = None) -> str:
     """The classified refusal for a run of THIS host's artifacts that compared
     NOTHING. Raised as `NOTHING-CROSS-CHECKED` (exit 40), never as a bare 1.
 
@@ -1387,49 +1451,53 @@ def nothing_cross_checked_message(*, bucket: str, prefix: str, store: Path,
       * a host that has never run the backup, which never reaches here (the
         zero-objects no-op returns first, with no verdicts).
     """
-    state, names = store_state(store)
-    # 🔴 TWO RIVAL MECHANISMS PER STATE, NEITHER ASSERTED. Which PAIR is
-    # plausible depends on what was observed; that one of the pair is true does
-    # not. The `--scope` case lands here too — narrowing the question does not
-    # make the answer decidable, and it gets the same code and the same shape.
-    if state == STORE_POPULATED:
-        where = (f"the store {store} holds {len(names)} scope "
-                 f"repositor{'y' if len(names) == 1 else 'ies'} "
-                 f"({sorted(names)}), none of which is one of the artifact "
-                 f"scope(s) verified here")
-        mechanisms = (
-            "(1) the scope repositor(y/ies) named below were removed or renamed "
-            "inside this store, or (2) --store names a DIFFERENT store that "
-            "happens to hold other scopes")
-    else:
-        where = (f"the store directory {store} DOES NOT EXIST"
-                 if state == STORE_ABSENT else
-                 f"the store directory {store} EXISTS but holds NO scope "
-                 f"repositories")
-        mechanisms = (
-            "(1) --store names a path that is not this host's store (a typo, a "
-            "different layout, a default that does not apply to this run), or "
-            "(2) the live store is GONE — the disaster these backups exist for")
+    # 🔴 THE OBSERVATIONS AND THE MECHANISMS BOTH COME FROM `why_no_live_scope`,
+    # which already knows the real reason per scope. Deriving them from
+    # `store_state` alone is what produced a two-way choice that EXCLUDED the
+    # truth for a symlinked or non-repository scope.
+    # 🔴 ONE ORDER FOR BOTH LISTS, KEYED ON THE KIND. Sorting the SENTENCES
+    # instead made the order depend on incidental string content — a path
+    # sorting before the word "the" — so the observations and the mechanisms
+    # they explain could appear in unrelated orders. Sorting the (kind,
+    # sentence) PAIRS groups observations by kind in exactly the order the
+    # mechanism list below walks, which is what lets a reader line them up.
+    seen = sorted({why_no_live_scope(store, s) for s in scopes})
+    observed = [sentence for _, sentence in seen]
+    mechanisms: list[str] = []
+    for kind in sorted({k for k, _ in seen}):
+        mechanisms.extend(_MECHANISMS[kind])
+    listed = "; ".join(f"({i}) {m}" for i, m in enumerate(mechanisms, 1))
+
+    # 🔴 THE COUNT IS ATTRIBUTED TO WHAT WAS ACTUALLY VERIFIED, NOT TO THE
+    # PREFIX. Under `--scope` only the selected scope ran, so "N artifact(s)
+    # under <prefix>" over-claimed — and a fixture holding one object cannot
+    # tell the two readings apart, which is why the test now holds several.
+    scanned = (f"scope {scope_filter!r} under {bucket}/{prefix}"
+               if scope_filter is not None
+               else f"every scope under {bucket}/{prefix}")
     return (
-        f"{NOTHING_CROSS_CHECKED}: {artifacts} artifact(s) under "
-        f"{bucket}/{prefix} DECRYPTED, RESTORED and passed `git fsck`. That "
+        f"{NOTHING_CROSS_CHECKED}: all {artifacts} artifact(s) this run "
+        f"verified ({scanned}) DECRYPTED, RESTORED and passed `git fsck`. That "
         f"much is PROVEN, and it is the good news — these objects are readable "
         f"backups. What did NOT happen is any comparison against a live store: "
         f"zero commits were compared, for every one of them. "
-        f"WHY IS NOT DECIDED HERE. The observation is that {where} — and that "
-        f"single observation is shared by two mechanisms: {mechanisms}. "
-        f"Nothing measured on this run separates them, so neither is asserted. "
+        f"WHY IS NOT DECIDED HERE. What was observed is: {'; '.join(observed)}. "
+        f"That is consistent with AT LEAST these mechanisms, and the list is "
+        f"NOT closed: {listed}. Nothing measured on this run separates them, so "
+        f"none of them is asserted. "
         f"Self-consistency proves an object decrypts and restores; it proves "
         f"NOTHING about whether it still matches the history it is a backup OF, "
         f"and that is the claim this run could not make. "
-        f"WHAT TO DO, UNDER EITHER READING: `restore-verify.py --print-plan` "
-        f"prints the store path this run used, touching neither the network nor "
-        f"the key. If that is not the store you meant, re-run pointing at the "
-        f"one you did. If it IS the store you meant, then the live side is gone "
-        f"— this code is the EXPECTED outcome during a recovery, not a verdict "
-        f"against the backups, and the per-artifact lines above are the "
-        f"evidence that they are intact. Scope(s) with no live repository: "
-        f"{scopes}.")
+        f"WHAT TO DO: the store this run looked at is {store} — it is named "
+        f"above, so no second command is needed to find it. If that is not the "
+        f"store you meant, re-run with --store pointing at the one you did. If "
+        f"it IS the store you meant, then something on the LIVE side is missing "
+        f"or unreachable, which is what these backups are for: this code is the "
+        f"EXPECTED outcome during a recovery, not a verdict against the "
+        f"backups, and the per-artifact lines above are the evidence that they "
+        f"are intact. `restore-verify.py --print-plan` WITH THE SAME FLAGS "
+        f"re-prints this run's settings and touches neither the network nor the "
+        f"key. Scope(s) with no live repository: {scopes}.")
 
 
 def run(*, bucket: str, prefix: str, this_host: str,
@@ -1626,10 +1694,15 @@ def run(*, bucket: str, prefix: str, this_host: str,
             # carries its own exit code so a timer can act on the number.
             # Mixing it into `failures` would both mis-count the failures and
             # make it impossible to tell which of the two the run found.
+            # 🔴 NOT PRINTED HERE, AND NOT PREFIXED `FAILED`. It was both, which
+            # cost twice: the 1.4 KB paragraph went to stderr once here and
+            # again from `main()`'s handler, and the first word an operator read
+            # was `FAILED` — the exact claim this message exists to retract. It
+            # is emitted ONCE below, by whichever path actually reports it.
             nothing_cross_checked = nothing_cross_checked_message(
                 bucket=bucket, prefix=prefix, store=store,
-                artifacts=len(verdicts), scopes=sorted(store_blocked_scopes))
-            print(f"{PROG}: FAILED {nothing_cross_checked}", file=sys.stderr)
+                artifacts=len(verdicts), scopes=sorted(store_blocked_scopes),
+                scope_filter=scope_filter)
     finally:
         ctx.__exit__(None, None, None)
 
@@ -1639,10 +1712,16 @@ def run(*, bucket: str, prefix: str, this_host: str,
     # other direction. So the classified code is raised ONLY when it is the
     # whole story.
     if failures:
+        # The outranked finding is still REPORTED — withholding the CODE must
+        # not withhold the fact. `ALSO:`, never `FAILED:`: it is a second
+        # finding beside the failure, not a second failure.
+        if nothing_cross_checked is not None:
+            print(f"{PROG}: ALSO: {nothing_cross_checked}", file=sys.stderr)
         raise RestoreVerifyError(
             f"{len(failures)} artifact/scope check(s) FAILED; "
             f"{len(verdicts)} verified. First failure: {failures[0]}")
     if nothing_cross_checked is not None:
+        # Printed by `main()`'s handler, exactly once. See where it is built.
         raise RestoreVerifyError(nothing_cross_checked,
                                  token=NOTHING_CROSS_CHECKED)
     if not verdicts:
@@ -1717,11 +1796,19 @@ def print_plan(*, bucket: str, prefix: str, store: Path, identity: Path,
     print("           restored tip must be an ANCESTOR of the live tip. Never an")
     print("           equality — the store advances hourly and an equality check")
     print("           would be a permanently-red gate.")
+    # 🔴 THIS PARAGRAPH SAID THE RUN "FAILS", TWELVE LINES ABOVE THE BLOCK
+    # SAYING 40 IS NOT A VERDICT AGAINST THE BACKUPS — and the refusal's own
+    # remedy routes a recovering operator to this screen, so the retracted claim
+    # was the first thing they read. Whole-string pinned by
+    # `test_print_plan_PROSE_never_contradicts_the_FORTY_framing`.
     print("           A run of THIS host's artifacts in which NOT ONE scope could")
-    print("           be compared FAILS: self-consistency alone says the object")
-    print("           decrypts, never that it still matches the history it backs")
-    print("           up. Another host's artifacts are exempt (their comparison")
-    print("           is suppressed on purpose), and so is a PARTIAL run.")
+    print("           be compared exits 40, NOT 0: self-consistency alone says")
+    print("           the object decrypts, never that it still matches the")
+    print("           history it backs up, so 0 would claim what was not")
+    print("           measured. 40 is NOT a verdict against the backups — see")
+    print("           `exit:` below. Another host's artifacts are exempt (their")
+    print("           comparison is suppressed on purpose), and so is a PARTIAL")
+    print("           run: both stay 0.")
     # 🔴 EVERY CLASSIFIED CAUSE IS LISTED, so an operator can map a number by
     # eye during a recovery — the same reason `escrow-verify.py --print-plan`
     # prints its table. `--print-plan` touches neither the network nor the key,

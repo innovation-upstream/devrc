@@ -169,7 +169,7 @@ wrong thing:
 | code | meaning | what to do |
 |---|---|---|
 | `0` | verified, and cross-checked against the live store | nothing |
-| `40` `NOTHING-CROSS-CHECKED` | every artifact **decrypted, restored and passed `git fsck`** — and **none** was compared to a live store | **not an alarm about the backups.** `--print-plan` shows the store path this run used: if it is not the one you meant, re-run pointing at the right one; if it *is*, the live store is gone and this is the **expected** code during a recovery — the per-artifact lines are your evidence the backups are intact |
+| `40` `NOTHING-CROSS-CHECKED` | every artifact **this run verified** (all scopes, or just the `--scope` one) **decrypted, restored and passed `git fsck`** — and **none** was compared to a live store | **not an alarm about the backups.** The message names the store path it looked at: if that is not the one you meant, re-run with `--store` pointing at the one you did; if it *is*, something on the live side is missing or unreachable and this is the **expected** code during a recovery — the per-artifact lines are your evidence the backups are intact |
 | `1` | a check **FAILED** — an artifact did not decrypt, did not restore, failed `fsck`, is stale, or a scope has no artifact at all | this one *is* about the backups; read the first failure |
 
 Measured 2026-08-26: `--host <this host> --store <an empty directory>` printed
@@ -178,16 +178,19 @@ exit code is all a systemd timer reads, so a wrong or absent `--store` silently
 downgraded the whole run to "the object decrypts and is internally consistent",
 which says nothing about whether it still matches the history it is a backup of.
 
-🔴 **`40`'s message names BOTH mechanisms and asserts NEITHER.** "You pointed at
-the wrong store" and "the store is genuinely gone" are the *same observation*,
-and nothing in the run separates them — so it says so, and its remedy works
-under either reading. It does name which of three store states it saw: the
-directory **does not exist**, it exists and holds **no scope repositories**, or
-it holds scopes but **not this one** (that third case gets a different mechanism
-pair — a store that is plainly there cannot be blamed on `--store` naming
-nothing). A real failure **outranks** `40`: a corrupt artifact beside an absent
-store exits `1`, because the louder finding must not be filed as a store
-problem.
+🔴 **`40`'s message lists every mechanism consistent with what it saw, says the
+list is NOT closed, and asserts none of them.** "You pointed at the wrong store"
+and "the store is genuinely gone" are the *same observation*, and nothing in the
+run separates them. It names which of **five** states it observed, per scope —
+the store directory **does not exist**; it exists and holds **no scope
+repositories**; it holds scopes but **not this one**; the scope path is a
+**symlink** (never followed, so the repository may be perfectly intact); the
+scope path has **no `.git`**. The last two matter because a closed
+"wrong `--store` *or* store GONE" pair is false for both: the repository is
+right there and `--store` is correct. A real failure **outranks** `40`: a
+corrupt artifact beside an absent store exits `1`, because the louder finding
+must not be filed as a store problem — the `40` finding is still printed, as
+`ALSO:`.
 
 Two zero-cross-check runs are deliberately still `0`: **another host's**
 artifacts (suppressing the comparison there is correct — see the three

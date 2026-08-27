@@ -2522,14 +2522,27 @@ def test_the_TWO_exit_code_TABLES_never_collide():
     for one code and no way to know which — and each table is individually
     correct, so neither file's own tests can see it. `restore-verify.py` starts
     at 40 for exactly this reason; nothing but this assertion holds it there.
+
+    🔴 KEYS AS WELL AS VALUES, BECAUSE THE DOC PIN MERGES THE TWO TABLES. Only
+    values were asserted at first, while `test_SECRETS_md_exit_codes_agree_with_
+    the_module` resolves a documented token through `{**EV, **RV}` — a dict
+    merge, which silently prefers RV for a SHARED KEY. Its docstring claimed a
+    token "resolves in exactly one of them and `owner` cannot be ambiguous", and
+    nothing checked that half. Unreachable today; asserted rather than argued,
+    because "unreachable" is exactly what the next token added makes wrong.
     """
-    mine = set(EV.EXIT_CODES.values())
-    theirs = set(RV.EXIT_CODES.values())
-    assert mine and theirs, "one of the tables is empty — the pin is vacuous"
-    assert mine.isdisjoint(theirs), (
-        f"these exit codes are claimed by BOTH verifiers: "
-        f"{sorted(mine & theirs)}. SECRETS.md documents both tables; a shared "
-        f"number means an operator reading a code gets two answers.")
+    mine_v, theirs_v = set(EV.EXIT_CODES.values()), set(RV.EXIT_CODES.values())
+    mine_k, theirs_k = set(EV.EXIT_CODES), set(RV.EXIT_CODES)
+    assert mine_v and theirs_v, "one of the tables is empty — the pin is vacuous"
+    assert mine_v.isdisjoint(theirs_v), (
+        f"these exit CODES are claimed by BOTH verifiers: "
+        f"{sorted(mine_v & theirs_v)}. SECRETS.md documents both tables; a "
+        f"shared number means an operator reading a code gets two answers.")
+    assert mine_k.isdisjoint(theirs_k), (
+        f"these TOKENS are defined by BOTH verifiers: "
+        f"{sorted(mine_k & theirs_k)}. The doc pin merges the two tables with "
+        f"`{{**EV, **RV}}`, so a shared token would be resolved by dict-merge "
+        f"order rather than by ownership.")
 
 
 def test_the_module_hardcodes_no_endpoint_and_no_host():
@@ -3307,8 +3320,11 @@ def test_SECRETS_md_exit_codes_agree_with_the_module():
     and the regex reads the whole file. Pinning against `EV.EXIT_CODES` alone
     made a correctly-documented restore-verify code look like a doc error —
     which would have been "fixed" by deleting the row. The two tables are held
-    disjoint by `test_the_TWO_exit_code_TABLES_never_collide`, so a token
-    resolves in exactly one of them and `owner` cannot be ambiguous.
+    disjoint IN BOTH DIRECTIONS by `test_the_TWO_exit_code_TABLES_never_collide`
+    — codes AND tokens — so a token resolves in exactly one of them and `owner`
+    cannot be ambiguous. That second half was asserted only after this docstring
+    already claimed it: the merge below silently prefers RV on a shared key, so
+    the sentence was true of the intent and not of the code.
     """
     import re
     doc = (ROOT / "SECRETS.md").read_text(encoding="utf-8")
