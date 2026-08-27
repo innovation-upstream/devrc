@@ -470,8 +470,10 @@ def worktree_submodules(path: Path) -> "tuple[bool | None, list[str]]":
     unanswered question here must not read as "safe to remove".
 
     🔴 THIS MIRRORS GIT'S OWN PREDICATE, WHICH IS NOT "does `.gitmodules`
-    exist". MEASURED against git 2.55.0, five hermetic fixtures, the refusal
-    outcome recorded next to every candidate signal:
+    exist". MEASURED against git 2.55.0, SIX hermetic fixtures (count them
+    below rather than trusting this word — a total kept beside the list it
+    counts drifts, and this docstring said "five" while citing a case F), the
+    refusal outcome recorded next to every candidate signal:
 
         A  .gitmodules tracked, submodule NOT initialised in the worktree
            -> modules/ absent, gitlink present but UNPOPULATED  -> rc=0 REMOVED
@@ -482,6 +484,8 @@ def worktree_submodules(path: Path) -> "tuple[bool | None, list[str]]":
            -> modules/ present, gitlink UNPOPULATED             -> rc=128 refused
         E  gitlink populated old-style (EMBEDDED .git directory)
            -> modules/ ABSENT, gitlink populated                -> rc=128 refused
+        F  EMPTY modules/ store, no .gitmodules, no gitlink
+           -> modules/ present but empty                        -> rc=128 refused
 
     So neither signal alone is the predicate and `.gitmodules` is neither:
     A has `.gitmodules` and removes fine, so keying on it OVER-blocks; D has no
@@ -539,15 +543,25 @@ def worktree_submodules(path: Path) -> "tuple[bool | None, list[str]]":
                       f"`git worktree remove` refuses outright"]
 
     # Only reached when `modules/` is absent, matching git's short-circuit.
-    ls = _git(path, "ls-files", "-s")
+    #
+    # 🔴 `-z` IS LOAD-BEARING, NOT STYLE. Without it `ls-files` applies
+    # `core.quotePath`, which is ON by default: a submodule at `vendôr` is
+    # emitted as the 15-character literal `"vend\303\264r"`. Statting that name
+    # finds nothing, so the arm returns False and `--execute` then dies
+    # rc=128 — the exact symptom #931 exists to remove, reintroduced in the one
+    # arm with no `modules/` store behind it. MEASURED on the PR head before
+    # this line changed: tool said `(False, [])`, git refused. `-z` emits the
+    # path RAW and NUL-terminates the record, so no unquoting is needed and a
+    # path containing a newline cannot split a record either.
+    ls = _git(path, "ls-files", "-s", "-z")
     if ls.returncode != 0:
         return None, [f"git ls-files failed rc={ls.returncode}: {ls.stderr.strip()[:200]}"]
     populated: list[str] = []
-    for line in ls.stdout.splitlines():
+    for entry in ls.stdout.split("\0"):
         # `<mode> <oid> <stage>\t<path>`; 160000 is the gitlink mode.
-        if not line.startswith("160000 "):
+        if not entry.startswith("160000 "):
             continue
-        _, _, rel = line.partition("\t")
+        _, _, rel = entry.partition("\t")
         if rel and (path / rel / ".git").exists():
             populated.append(rel)
     if populated:
@@ -1233,6 +1247,26 @@ def summarize(rows: "list[dict]", exclude_globs: "list[str] | None" = None,
         # `is not False` so the UNKNOWN rows are in it — they are held back too.
         "submodule_blocked_dead": sum(
             1 for r in rows if r["verdict"] == DEAD and r.get("submodules") is not False),
+        # 🔴 THE SUBSET OF THE ABOVE THAT IS NOT PERMANENT, carried separately
+        # because the report's sentence is different for it and used to be
+        # FALSE. `submodule_blocked_dead` counts `is not False`, so a row whose
+        # git call simply FAILED was described as carrying submodules, as
+        # `refuses outright`, as `permanent … re-running will never remove
+        # them`, and as named by `--verbose` — four claims, all false for an
+        # unanswered row, whose cause is the textbook TRANSIENT one and whose
+        # remedy really is to re-run. The count knew; the sentence did not.
+        "submodule_unknown_dead": sum(
+            1 for r in rows if r["verdict"] == DEAD and r.get("submodules") is None),
+        # 🔴 THE UNION, because the two "…and N further" lines OVERLAP and the
+        # word `further` reads additive. A single row that is BOTH excluded and
+        # submodule-bearing is counted by `excluded_dead` AND by
+        # `submodule_blocked_dead`, so the two lines print 1 + 1 against 1 dead
+        # row. This is the one figure that is always true, and the README
+        # already retires an earlier count trio for "never being
+        # self-consistent" — so the arithmetic is published rather than left
+        # for the operator to attempt.
+        "dead_not_removable": sum(
+            1 for r in rows if r["verdict"] == DEAD and not r.get("removable")),
         "exclude_globs": per_glob,
         # 🔴 THE HEADLINE SAFETY NUMBER. A glob that matches nothing produces
         # output BYTE-IDENTICAL to passing no filter at all, and `--confirm N`
@@ -1325,14 +1359,41 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
     # — 54 of 107 on the first real fleet run, a ~2x overcount in the operator's
     # primary safety number, and re-running never converged because the cause is
     # permanent rather than transient.
+    #
+    # 🔴 THE CARRIERS AND THE UNANSWERED ARE SEPARATE SENTENCES, because every
+    # claim in the first is FALSE for the second. An UNKNOWN row does not carry
+    # submodules, git does not refuse on it, its cause is transient, re-running
+    # IS the remedy, and `--verbose` names no submodule — the earlier single
+    # sentence asserted all five of those about it.
     if summary.get("submodule_blocked_dead"):
+        blocked = summary["submodule_blocked_dead"]
+        unknown = summary.get("submodule_unknown_dead", 0)
+        carrying = blocked - unknown
         lines.append(
-            f"🔴 …and {summary['submodule_blocked_dead']} further `dead` row(s) carry SUBMODULES "
-            f"— `git worktree remove` refuses on these outright, so they are NOT in the number "
-            f"above and NOT counted toward --confirm. This is permanent, not transient: "
-            f"re-running will never remove them, and forcing the removal is not the answer. "
-            f"Remove the submodule working copies by hand first, or leave them. --verbose "
-            f"gives their paths and names the submodule.")
+            f"🔴 …and {blocked} further `dead` row(s) are held back by the submodule check — "
+            f"NOT in the number above, and NOT counted toward --confirm.")
+        if carrying:
+            lines.append(
+                f"    · {carrying} carry SUBMODULES: `git worktree remove` refuses on these "
+                f"outright. PERMANENT, not transient — re-running will never remove them, and "
+                f"forcing the removal is not the answer. Remove the submodule working copies "
+                f"by hand first, or leave them. --verbose names the submodule.")
+        if unknown:
+            lines.append(
+                f"    · {unknown} could NOT be answered — a git call failed, so it is unknown "
+                f"whether they carry submodules and they are held back rather than removed on "
+                f"a guess. This one IS transient: re-running may settle it. --verbose gives "
+                f"the git error.")
+    # 🔴 THE ARITHMETIC, whenever more than one cause is in play. `excluded_dead`
+    # and `submodule_blocked_dead` are counted INDEPENDENTLY and a row can be in
+    # both, so the two "…and N further" lines above do NOT sum to anything —
+    # measured, one row that was both printed 1 + 1 against 1 dead row. Printing
+    # the union is the only way that stops reading as a third number to add.
+    if summary.get("excluded_dead") and summary.get("submodule_blocked_dead"):
+        lines.append(
+            f"🔴 The two lines above OVERLAP and do NOT sum: a row can be both excluded and "
+            f"submodule-bearing. {summary.get('dead_not_removable', 0)} `dead` row(s) are "
+            f"not removable in total.")
     # 🔴 The dangerous choice is the one you have to type — so say, loudly, when
     # it was typed. Printed before the filter list because it is the reason the
     # list is one line shorter than it usually is.
@@ -1538,7 +1599,18 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
     if verbose:
         lines.append("")
         for r in sorted(rows, key=lambda x: (x["verdict"], x["path"])):
-            lines.append(f"[{verdict_label(r)}] {r['path']}  branch={r['branch']}")
+            # 🔴 The submodule marker lives HERE, not in `verdict_label()`.
+            # That function's contract is "an excluded row keeps its verdict and
+            # gains a marker", pinned by
+            # `test_verdict_label_marks_only_excluded_rows` and rendered into a
+            # COLUMN elsewhere; widening it would make a second thing look like
+            # a verdict. The operator still needs the row findable by eye —
+            # the summary sends them to --verbose — so the marker is appended
+            # to the listing line only.
+            subs = r.get("submodules")
+            mark = ("  [SUBMODULES — git will refuse to remove this]" if subs
+                    else "  [submodules UNKNOWN — held back]" if subs is None else "")
+            lines.append(f"[{verdict_label(r)}] {r['path']}  branch={r['branch']}{mark}")
             lines.append(f"    {r['verdict_reason']}")
             for e in r["evidence"]:
                 lines.append(f"      · {e}")

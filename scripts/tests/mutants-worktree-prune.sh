@@ -546,6 +546,42 @@ run 'blocked-rows-vanish-from-the-report' \
   test_the_report_names_the_blocked_rows_instead_of_silently_dropping_them \
   's|^        "submodule_blocked_dead": sum($|        "submodule_blocked_dead": 0 * sum(|'
 
+printf '\n== #935 ROUND 2 — the blind audit'"'"'s findings ==\n'
+# 🔴 FINDING 1: `-z` is the whole fix. Without it `core.quotePath` renders a
+# non-ASCII submodule path as a quoted literal, the stat misses, and the arm
+# answers False over a worktree git REFUSES on — `failed=` back in the output.
+run 'quotepath-blinds-the-index-arm' \
+  test_a_submodule_path_git_QUOTES_is_still_seen \
+  's|^    ls = _git(path, "ls-files", "-s", "-z")$|    ls = _git(path, "ls-files", "-s")|'
+# 🔴 FINDING 4: this exact mutant SURVIVED the full suite when the auditor ran
+# it — the line had no test at all. It is here so that can never recur.
+run 'blocked-count-drops-the-unanswered-rows' \
+  test_summarize_counts_an_unanswered_row_as_blocked \
+  's|^            1 for r in rows if r\["verdict"\] == DEAD and r.get("submodules") is not False),$|            1 for r in rows if r["verdict"] == DEAD and r.get("submodules") is True),|'
+run 'unknown-subset-count-collapsed-to-zero' \
+  test_summarize_counts_an_unanswered_row_as_blocked \
+  's|^        "submodule_unknown_dead": sum($|        "submodule_unknown_dead": 0 * sum(|'
+run 'union-count-collapsed-to-zero' \
+  test_the_two_further_lines_do_not_read_as_additive \
+  's|^        "dead_not_removable": sum($|        "dead_not_removable": 0 * sum(|'
+# 🔴 FINDING 2: collapsing the split puts the PERMANENT sentence back over an
+# UNKNOWN row — four false claims about the very run printing them.
+run 'permanence-claimed-for-unanswered-rows' \
+  test_an_unanswered_row_is_not_described_as_carrying_submodules \
+  's|^        if carrying:$|        if True:|'
+run 'unanswered-rows-get-no-sentence-of-their-own' \
+  test_an_unanswered_row_is_not_described_as_carrying_submodules \
+  's|^        if unknown:$|        if False:|'
+# 🔴 FINDING 3: without the union line the two "further" counts read additive.
+run 'overlap-caveat-suppressed' \
+  test_the_two_further_lines_do_not_read_as_additive \
+  's|^    if summary.get("excluded_dead") and summary.get("submodule_blocked_dead"):$|    if False:|'
+# 🔴 FINDING 6: the summary sends the operator to --verbose; the marker is what
+# makes the row findable once they get there.
+run 'verbose-marker-dropped' \
+  test_verbose_marks_submodule_rows_without_widening_the_verdict_label \
+  's|^            mark = ("  \[SUBMODULES — git will refuse to remove this\]" if subs$|            mark = ("" if subs|'
+
 printf '\n== POSITIVE CONTROLS — mutants whose fate is KNOWN ==\n'
 # 🔴 A comment-only edit MUST survive. If it kills something, the harness is
 # keying on the file's text and every `ok` above is worthless.

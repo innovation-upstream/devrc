@@ -3760,3 +3760,131 @@ def test_an_EMPTY_modules_store_blocks_because_git_blocks_on_it_too(tmp_path):
     r = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(wt)],
                        capture_output=True, text=True, check=False)
     assert r.returncode != 0 and "submodule" in r.stderr, r
+
+
+# ── #935 round 2: findings from the blind audit ──────────────────────────────
+
+def test_a_submodule_path_git_QUOTES_is_still_seen(tmp_path):
+    """AUDIT FINDING 1 — the index arm was blind to `core.quotePath`.
+
+    `git ls-files -s` quotes non-ASCII paths by default: a submodule at
+    `vendôr` is emitted as the literal `"vend\\303\\264r"`. Statting that name
+    finds nothing, so the arm answered False and `--execute` then died rc=128 —
+    the exact symptom #931 exists to remove, surviving in the one arm with no
+    `modules/` store behind it.
+
+    MEASURED before the fix: tool `(False, [])`, git rc=128. The fixture uses
+    the OLD-STYLE embedded `.git` so the `modules/` arm is absent and the index
+    arm is what answers; without that this test would pass on the wrong arm.
+    """
+    subpath = "vendôr"
+    sub = new_repo(tmp_path, "quoted-subsrc")
+    repo = new_repo(tmp_path, "quoted")
+    git_allowing_file_submodules(repo, "submodule", "add", "-q", str(sub), subpath)
+    git(repo, "commit", "-qm", "add submodule")
+    publish(repo)
+    commit_on_branch(repo, "topic", "feature.txt", "feature\n", "feature")
+    wt = add_worktree(repo, tmp_path / "quoted-wt", "topic")
+    squash_merge(repo, "topic", "feature.txt", "squash: feature")
+
+    gitdir = Path(git(wt, "rev-parse", "--absolute-git-dir"))
+    subprocess.run(["git", "clone", "-q", str(sub), str(wt / subpath)],
+                   capture_output=True, text=True, check=True,
+                   env={**os.environ, "GIT_CONFIG_COUNT": "1",
+                        "GIT_CONFIG_KEY_0": "protocol.file.allow",
+                        "GIT_CONFIG_VALUE_0": "always"})
+    assert not (gitdir / "modules").exists(), "must reach the INDEX arm, not the store arm"
+    # The harness's own control: prove git really does quote this path, so the
+    # test cannot pass because the fixture failed to reproduce the condition.
+    raw = git(wt, "ls-files", "-s")
+    assert '"vend' in raw, f"fixture did not reproduce quoting: {raw!r}"
+
+    blocked, reasons = wp.worktree_submodules(wt)
+    assert blocked is True, f"quoted path went unseen: {reasons}"
+    assert subpath in reasons[0], reasons
+
+    r = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(wt)],
+                       capture_output=True, text=True, check=False)
+    assert r.returncode != 0 and "submodule" in r.stderr, r
+
+
+def test_an_unanswered_row_is_not_described_as_carrying_submodules(tmp_path, capsys,
+                                                                   monkeypatch):
+    """AUDIT FINDING 2 — every claim in the carriers sentence is FALSE for an
+    UNKNOWN row: it does not carry submodules, git does not refuse on it, its
+    cause is transient, re-running IS the remedy, and --verbose names no
+    submodule. The count deliberately includes it; the sentence must not."""
+    repo, wt, _sub, gh = submodule_universe(tmp_path, "unanswered")
+    monkeypatch.setattr(wp, "worktree_submodules",
+                        lambda p: (None, ["git rev-parse --git-path failed rc=128"]))
+
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1", "--verbose"])
+    out = capsys.readouterr().out
+    assert "held back by the submodule check" in out, out
+    assert "could NOT be answered" in out, out
+    assert "IS transient" in out, out
+    # 🔴 The permanence claims must NOT be attached to this row.
+    assert "PERMANENT" not in out, out
+    assert "carry SUBMODULES" not in out, out
+
+
+def test_the_two_further_lines_do_not_read_as_additive(tmp_path, capsys):
+    """AUDIT FINDING 3 — `excluded_dead` and `submodule_blocked_dead` are
+    counted independently, so one row that is BOTH printed `1 + 1` against a
+    single `dead` row while the word `further` read additive. The union is the
+    one figure that is always true, so it is printed."""
+    repo, wt, _sub, gh = submodule_universe(tmp_path, "overlap")
+    git_allowing_file_submodules(wt, "submodule", "update", "--init", "-q")
+
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+             "--exclude-path", f"{wt}"])
+    out = capsys.readouterr().out
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1,
+                        exclude_globs=[wp.normalize_glob(str(wt))])
+    s = wp.summarize(rows, exclude_globs=[wp.normalize_glob(str(wt))],
+                     agent_worktrees_included=False)
+    assert s["excluded_dead"] == 1 and s["submodule_blocked_dead"] == 1, s
+    # …and yet only ONE dead row is actually held back.
+    assert s["dead_not_removable"] == 1, s
+    assert "OVERLAP and do NOT sum" in out, out
+    assert "1 `dead` row(s) are not removable in total" in out, out
+
+
+def test_summarize_counts_an_unanswered_row_as_blocked(tmp_path):
+    """AUDIT FINDING 4 — `submodule_blocked_dead`'s `is not False` had no test
+    and no mutant: the auditor changed it to `is True` and it SURVIVED the full
+    suite. This pins the UNKNOWN row into the count, which is the branch that
+    made the report text false."""
+    dead_unknown = base_row(landed_signals=["ancestor"], submodules=None,
+                            submodule_reasons=["git ls-files failed rc=128"])
+    dead_unknown["path"] = "/x/unknown"
+    dead_carrying = base_row(landed_signals=["ancestor"], submodules=True,
+                             submodule_reasons=["populated submodule(s): vendor"])
+    dead_carrying["path"] = "/x/carrying"
+    dead_clean = base_row(landed_signals=["ancestor"])
+    dead_clean["path"] = "/x/clean"
+    rows = [wp.classify(r) for r in (dead_unknown, dead_carrying, dead_clean)]
+    for r in rows:
+        r.setdefault("repo", "/x")
+
+    s = wp.summarize(rows, agent_worktrees_included=False)
+    assert s["submodule_blocked_dead"] == 2, s   # UNKNOWN + carrying
+    assert s["submodule_unknown_dead"] == 1, s   # only the UNKNOWN one
+    assert s["dead_not_removable"] == 2, s
+    assert s["removable"] == 1, s
+
+
+def test_verbose_marks_submodule_rows_without_widening_the_verdict_label(tmp_path, capsys):
+    """AUDIT FINDING 6 — the summary sends the operator to --verbose, so the
+    rows must be findable by eye. The marker goes on the listing line, NOT into
+    `verdict_label()`, whose contract is pinned to excluded rows only and which
+    is rendered into a column elsewhere."""
+    repo, wt, _sub, gh = submodule_universe(tmp_path, "marker")
+    git_allowing_file_submodules(wt, "submodule", "update", "--init", "-q")
+
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1", "--verbose"])
+    out = capsys.readouterr().out
+    assert "[SUBMODULES — git will refuse to remove this]" in out, out
+    # …and the verdict label itself is untouched.
+    assert "[dead (submodules)]" not in out, out
+    assert wp.verdict_label({"verdict": "dead", "submodules": True}) == "dead"
