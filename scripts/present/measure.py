@@ -776,7 +776,7 @@ def m_gate_tiers(env: Env) -> dict:
 
 
 def m_gate_exit_codes(env: Env) -> dict:
-    """`gate.sh`'s exit-code legend, parsed out of its own header comment.
+    """`gate.sh`'s exit-code legend, parsed out of its `# Exit:` comment block.
 
     Split out of `m_gate_tiers` deliberately — see the note there. This is the
     HARVESTED half: whoever edits `scripts/gate.sh` writes these sentences, so
@@ -806,8 +806,8 @@ def m_gate_exit_codes(env: Env) -> dict:
     #: `{"0","1","2","90"}` allowlist as "dead code". It was dead as a
     #: REACHABILITY matter and load-bearing as a VALUE bound: it was the only
     #: thing confining the harvest to real exit codes. With it gone and the
-    #: pattern anchored on nothing but `^#`, any of `gate.sh`'s 99 comment lines
-    #: that happens to read `# N = …` became an exit code on the page. Measured:
+    #: pattern anchored on nothing but `^#`, ANY comment line in `gate.sh` that
+    #: happens to read `# N = …` became an exit code on the page. Measured:
     #: one ordinary body comment (`#   7 = the number of retries …`) rendered a
     #: fifth code, with the suite green.
     #:
@@ -838,7 +838,7 @@ def m_gate_exit_codes(env: Env) -> dict:
             "no `# Exit: N = …` legend block was found in scripts/gate.sh — an "
             "empty parse is a broken read, not a script without exit codes")
     return dict(
-        value=f"{len(rows)} exit codes documented in gate.sh's header",
+        value=f"{len(rows)} exit codes in gate.sh's `# Exit:` legend block",
         detail=(
             "🔴 90 is the one to understand: it means the runner's own verdict "
             "and its exit status DISAGREED, or a run was truncated. That is "

@@ -1024,11 +1024,18 @@ def test_the_gate_exit_code_legend_matches_gate_sh(tmp_path):
     # parser. Reading the whole file here instead would make the guard disagree
     # with a correct page the moment `gate.sh` gains an unrelated `# N = …`.
     #
-    # ⚠ WHAT NEITHER PARSER CAN SEE: a code documented with a different
-    # SEPARATOR (`#  3 : …`) is invisible to both, so the page under-reports and
-    # this guard confirms it. That is inherent to cross-checking one file with
-    # two readers; it is recorded rather than fixed because the alternative —
-    # a third grammar — has the same property one level up.
+    # ⚠ WHAT NEITHER PARSER CAN SEE, AND IT IS WORSE THAN "ONE CODE MISSING".
+    # An earlier version of this note said a code written with a different
+    # SEPARATOR (`#  3 : …`) is merely invisible. Measured, it is not: such a
+    # line is a NON-CONTINUATION, so it TERMINATES the block and every code
+    # after it is lost too — a legend of `0, 3(colon), 2` yields `['0']`. The
+    # same holds for a bare `#` used to group codes mid-legend: `0, #, 1` yields
+    # `['0']`. Both parsers agree, so this guard stays green while the page
+    # under-reports.
+    #
+    # Recorded rather than fixed: the fix is a third grammar, which has the same
+    # property one level up. The mitigation that does work is a maintainer of
+    # `gate.sh` knowing the legend must be an unbroken run of `# N = …` lines.
     block: list[str] = []
     started = False
     for line in gate.splitlines():
@@ -1061,7 +1068,7 @@ def test_the_exit_code_legend_stops_at_the_BLOCK_and_sorts_NUMERICALLY(tmp_path)
 
       * SCOPE. A previous round dropped a `{"0","1","2","90"}` allowlist as
         "dead code". It was dead as reachability and load-bearing as a VALUE
-        bound. Without it, any of `gate.sh`'s 99 comment lines reading
+        bound. Without it, ANY comment line in `gate.sh` reading
         `# N = …` became an exit code on the page — measured, one ordinary body
         comment rendered a fifth code with the suite green. The real file
         contains no such comment, so nothing failed.
@@ -1069,14 +1076,25 @@ def test_the_exit_code_legend_stops_at_the_BLOCK_and_sorts_NUMERICALLY(tmp_path)
         codes are `0,1,2,90`, where lexical and numeric order coincide, so
         reverting the numeric key changes nothing there.
 
-    The fixture therefore carries a decoy comment far below the legend AND a
-    two-digit code that sorts differently under the two orderings.
+    🔴 THE BLOCK HAS TWO BOUNDARIES AND A DECOY BELOW IT ONLY PINS ONE. The
+    first version of this fixture placed its decoy after the legend, so the
+    END boundary was pinned and the START was not — and two mutants survived a
+    green suite: dropping `started` from the continuation branch, and making
+    the `Exit:` anchor optional. The second is the worse one: with a `# N = …`
+    line anywhere ABOVE the legend it makes that line the anchor, so the real
+    legend is never reached and the page renders ONE FABRICATED CODE AND NO
+    REAL ONES, labelled "1 exit codes documented in …". So the fixture brackets
+    the legend — a decoy on each side.
     """
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
-    (repo / "flake.nix").write_text('runCommandLocal "devrc-pytests" {}\n')
+    # No `flake.nix` stub: `m_gate_exit_codes` reads ONLY `scripts/gate.sh`.
+    # The sibling `m_gate_tiers` is the one that reads the flake, and a stub
+    # here would imply a dependency this measurer does not have.
     (repo / "scripts" / "gate.sh").write_text(
         "#!/usr/bin/env bash\n"
+        "#   5 = a tunable, ABOVE the legend and not part of it\n"
+        "\n"
         "# Exit: 0 = everything passed.\n"
         "#      10 = a two-digit code, which must not sort before 2.\n"
         "#       2 = a usage problem.\n"
@@ -1090,7 +1108,10 @@ def test_the_exit_code_legend_stops_at_the_BLOCK_and_sorts_NUMERICALLY(tmp_path)
     got = [code for code, _ in measure.m_gate_exit_codes(env)["rows"]]
 
     assert "7" not in got, (
-        f"a comment outside the legend block was published as an exit code: {got}")
+        f"a comment BELOW the legend block was published as an exit code: {got}")
+    assert "5" not in got, (
+        f"a comment ABOVE the legend block was published as an exit code, or "
+        f"became the anchor and displaced the real legend: {got}")
     assert got == ["0", "2", "10"], (
         f"expected numeric order 0,2,10 — got {got}. Lexical sorting puts '10' "
         "before '2', which the real gate.sh cannot reveal.")
