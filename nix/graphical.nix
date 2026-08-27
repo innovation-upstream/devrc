@@ -337,17 +337,13 @@ let
       { button = "left"; cmd = "yad --calendar --width=200 --height=200 --undecorated --fixed --close-on-unfocus --no-buttons"; }
     ];
   };
-  # rigcontrol: workbench only. Reuses scripts/i3blocks-rigcontrol for the ⚙ render
-  # (plain-text stdout, json defaults false). The click opens the yad panel directly
-  # — i3status-rust custom blocks do NOT set $BLOCK_BUTTON, so the click must live
-  # here, not inside the render script.
+  # rigcontrol: workbench only. Instant toggle on left-click (sleep ↔ wake),
+  # no yad menu. The block script reads the state file and calls rig-control.sh
+  # sleep or wake directly; i3status-rust passes $BLOCK_BUTTON to the command.
   rigcontrolBlock = {
     block = "custom";
     command = "${scriptsDir}/i3blocks-rigcontrol";
     interval = "once";
-    click = [
-      { button = "left"; cmd = "setsid -f ${home}/workspace/devrc/scripts/rig-control.sh gui"; }
-    ];
   };
   # claude-runs: workbench only. LIVE count of Claude-Code-in-tmux runs — renders
   # `󰕮 N` (N>0) / bare `󰕮` (N==0) / `󰕮 ?` (could not measure), always neutral
@@ -665,6 +661,54 @@ lib.mkIf isNixOS {
     Timer = {
       OnStartupSec = "20s";
       OnUnitActiveSec = "45s";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # rig-control scheduled mode switches — workbench only.
+  # 3am → sleep (RGB off + monitor blackout), 10:15am → wake (RGB on + restore).
+  systemd.user.services.rig-control-sleep = lib.mkIf (!isLaptop) {
+    Unit = {
+      Description = "Auto sleep mode: chassis RGB off + monitor blackout";
+      After = [ "graphical-session.target" ];
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${home}/workspace/devrc/scripts/rig-control.sh sleep";
+    };
+  };
+  systemd.user.timers.rig-control-sleep = lib.mkIf (!isLaptop) {
+    Unit = {
+      Description = "Daily 3am sleep mode";
+    };
+    Timer = {
+      OnCalendar = "03:00:00";
+      Persistent = true;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  systemd.user.services.rig-control-wake = lib.mkIf (!isLaptop) {
+    Unit = {
+      Description = "Auto wake mode: chassis RGB on + monitor restore";
+      After = [ "graphical-session.target" ];
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${home}/workspace/devrc/scripts/rig-control.sh wake";
+    };
+  };
+  systemd.user.timers.rig-control-wake = lib.mkIf (!isLaptop) {
+    Unit = {
+      Description = "Daily 10:15am wake mode";
+    };
+    Timer = {
+      OnCalendar = "10:15:00";
+      Persistent = true;
     };
     Install = {
       WantedBy = [ "timers.target" ];
