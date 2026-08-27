@@ -178,7 +178,31 @@ def fetch_snapshot(
     req.add_header("User-Agent", "subsystem-store-client/1")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read(), dict(resp.headers)
+            # 🔴 RETURN THE MESSAGE, NEVER A DICT BUILT FROM IT.
+            # `resp.headers` is an `email.message.Message` and its `.get()` is
+            # already case-insensitive; `dict(resp.headers)` throws that away.
+            # HTTP/2 lowercases every header name and this host is behind
+            # Cloudflare, so in PRODUCTION the keys arrive lowercased while the
+            # code asked for the mixed-case spelling. MEASURED against the live
+            # pod on the first real call after deploying 0.4.0:
+            #     dict(resp.headers).get("X-Store-Entries") -> None
+            #     dict(resp.headers).get("x-store-entries") -> 75
+            # Silent consequences: `snapshot=UNSTAMPED`, `revision=unknown`, and
+            # — worst — the count cross-check against `X-Store-Entries` NEVER
+            # FIRED, so the guard against a truncated transfer was inert in the
+            # only environment that matters. 358 tests and seven audit rounds
+            # missed it: the test shim reproduced production's TOPOLOGY but not
+            # its NORMALISATION.
+            #
+            # ⚠ A `{k.lower(): v}` comprehension fixes the case and introduces a
+            # SECOND bug: on a duplicated header a dict keeps the LAST value
+            # where `Message.get` returns the FIRST (measured: 1 vs 99). This
+            # repo has `sole_header` (server.py:422) precisely because "a bare
+            # .get() silently takes the FIRST value" was a real smuggling bug,
+            # and its rule is REFUSE a duplicate, not quietly pick the other
+            # end. Handing back the Message keeps ONE semantics rather than
+            # inventing a second — caught in review, not shipped.
+            return resp.read(), resp.headers
     except urllib.error.HTTPError as exc:
         # 🔴 CARRY THE BODY. The server's 503 names WHICH scope it could not
         # read; reporting only "answered HTTP 503" throws that away and leaves
@@ -339,7 +363,7 @@ def install_snapshot(body: bytes, cache: Path, headers: dict[str, str]) -> int:
         # 🔴 The server's own count, checked. The header comment on the server
         # side claims a truncated transfer is "visible as a disagreement"; it is
         # only visible if somebody compares, so this is that comparison.
-        declared = headers.get("X-Store-Entries")
+        declared = headers.get("x-store-entries")
         if declared is not None and declared.isdigit() and int(declared) != count:
             raise StoreCorrupt(
                 f"server declared {declared} entries, archive held {count}"
@@ -349,8 +373,8 @@ def install_snapshot(body: bytes, cache: Path, headers: dict[str, str]) -> int:
             "\n".join(
                 [
                     f"synced={int(time.time())}",
-                    f"revision={headers.get('X-Store-Revision', 'unknown')}",
-                    f"snapshot={headers.get('X-Store-Snapshot', 'UNSTAMPED')}",
+                    f"revision={headers.get('x-store-revision', 'unknown')}",
+                    f"snapshot={headers.get('x-store-snapshot', 'UNSTAMPED')}",
                     f"entries={count}",
                     # Recorded so a filtered cache can never be mistaken for a
                     # complete one. Today the CLI only ever writes ALL.
@@ -473,7 +497,7 @@ def resolve_state(
         return (
             STATE_LIVE,
             f"fetched from {url} just now — {count} entries, "
-            f"snapshot {headers.get('X-Store-Snapshot', 'UNSTAMPED')}",
+            f"snapshot {headers.get('x-store-snapshot', 'UNSTAMPED')}",
             None,
         )
     except StoreUnreachable as exc:
