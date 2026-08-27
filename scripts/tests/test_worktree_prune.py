@@ -65,6 +65,7 @@ the tool FILE itself.
 """
 from __future__ import annotations
 
+import ast
 import fnmatch
 import importlib.machinery
 import importlib.util
@@ -2216,8 +2217,8 @@ def test_the_refusal_says_a_retyped_default_glob_is_free_to_drop(no_agent_worktr
                   "--exclude-path", AGENT_GLOB, "--execute", "--confirm", "1"])
     cap = capsys.readouterr()
     assert rc == wp.RC_EXECUTE_REFUSED, cap.err
-    assert "is applied by DEFAULT to every run" in cap.err, cap.err
-    assert "dropping your hand-typed copy of it changes nothing" in cap.err, cap.err
+    assert ("is applied by DEFAULT to every run, so dropping your hand-typed copy of it "
+            "leaves it in force: the tool puts it back.") in cap.err, cap.err
     # …and the SECOND spelling, on stdout, which had zero coverage.
     assert "is applied by DEFAULT, so if this is a hand-typed copy of it you can " \
            "simply drop it and lose nothing" in cap.out, cap.out
@@ -2272,6 +2273,21 @@ def test_the_free_to_drop_note_is_scoped_to_the_ONE_glob_it_is_true_of(
 
     Pinned on a MIXED list, which is the only shape that can tell a per-glob
     note from a boolean one.
+
+    🔴 AND THE CONTRAST HAS TO NAME THE REAL DISTINCTION. Round 5's scoping said
+    "dropping your hand-typed copy of it changes nothing about what is spared;
+    dropping '*/civitai/*' really would" — and `'*/civitai/*'` matched ZERO rows,
+    which is what put it in this refusal at all. It spares nothing, so dropping
+    it changes nothing about what is spared either, and the operator who believes
+    otherwise keeps an inert filter and reaches for --allow-unmatched-globs to get
+    past the refusal with a filter that filters nothing. The true distinction is
+    AUTO-RESTORED vs not: `resolve_exclude_globs` puts the constant back, and
+    puts nothing else back.
+
+    🔴 PINNED AS A WHOLE NORMALISED STRING, not on keywords. The artifact under
+    test is prose, and a guard on words is walkable by rewording — round 5's
+    wording would have passed a `"applied by DEFAULT" in err` check. A cosmetic
+    reword now fails this test; that is the price of a machine-readable claim.
     """
     repo, plain, gh = no_agent_worktrees
     rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
@@ -2279,8 +2295,14 @@ def test_the_free_to_drop_note_is_scoped_to_the_ONE_glob_it_is_true_of(
                   "--execute", "--confirm", "1"])
     err = capsys.readouterr().err
     assert rc == wp.RC_EXECUTE_REFUSED, err
-    assert f"{AGENT_GLOB!r} — and ONLY that one — is applied by DEFAULT" in err, err
-    assert "dropping '*/civitai/*' really would" in err, err
+    assert (f"{AGENT_GLOB!r} — and ONLY that one — is applied by DEFAULT to every run, so "
+            f"dropping your hand-typed copy of it leaves it in force: the tool puts it back. "
+            f"Dropping '*/civitai/*' really removes it, from every future run too — though "
+            f"none of the globs named in this refusal is sparing anything in THIS scan, "
+            f"because every one of them matched zero rows.") in err, err
+    # …and NOT the round-5 claim, which was false of BOTH globs named here.
+    assert "really would" not in err, err
+    assert "changes nothing about what is spared" not in err, err
     assert plain.is_dir(), "a refused run removed something"
 
 
@@ -2291,9 +2313,20 @@ def test_a_retyped_glob_with_the_flag_is_NOT_the_default_it_refuses(no_agent_wor
 
     Typing the glob converts the constant from an IMPLIED glob into a TYPED one,
     and only typed globs are `--execute` refusal candidates
-    (`exclude_globs_blocking_execute`). Same scan, same spared set, opposite exit
-    code — so the two command lines are NOT interchangeable, and the note may not
-    say they are.
+    (`exclude_globs_blocking_execute`). Opposite exit code on the same scan — so
+    the two command lines are NOT interchangeable, and the note may not say they
+    are.
+
+    🔴 WHAT THIS TEST DOES **NOT** COVER, said plainly, because the sentence used
+    to claim it did. An earlier docstring read "same scan, same SPARED SET,
+    opposite exit code" while the body checked only the exit codes — and on this
+    fixture the spared set is EMPTY on both sides, so that half was vacuous and
+    unassertable at once: the refusal exists precisely BECAUSE the glob matched
+    zero rows, so no fixture can make this contrast refuse and spare something.
+    The spared set is therefore asserted for what it is (empty, on both sides,
+    and that emptiness is the mechanism), and the NON-VACUOUS spared-set contrast
+    lives in `test_the_shout_is_gated_on_the_GLOB_not_on_the_flag`, where a real
+    agent worktree survives an `--execute` run.
 
     Ordered refuse-then-default: the refusal must remove nothing, which is also
     what leaves the fixture intact for the default run to consume.
@@ -2302,15 +2335,311 @@ def test_a_retyped_glob_with_the_flag_is_NOT_the_default_it_refuses(no_agent_wor
     flagged = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
                        "--include-agent-worktrees", "--exclude-path", AGENT_GLOB,
                        "--execute", "--confirm", "1"])
-    assert flagged == wp.RC_EXECUTE_REFUSED, capsys.readouterr().err
+    flagged_cap = capsys.readouterr()
+    assert flagged == wp.RC_EXECUTE_REFUSED, flagged_cap.err
     assert plain.is_dir(), "the refusal removed something"
+    # The spared set, ASSERTED rather than assumed: zero on this side, and that
+    # zero is what makes the typed glob a refusal candidate at all.
+    assert f"{AGENT_GLOB!r}  ->  matched 0 row(s), 0 of them dead" in flagged_cap.out, \
+        flagged_cap.out
 
     default = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
                        "--execute", "--confirm", "1"])
-    err = capsys.readouterr().err
-    assert default == wp.RC_OK, err
+    cap = capsys.readouterr()
+    assert default == wp.RC_OK, cap.err
+    # …and zero on the other side too, from the IMPLIED copy of the same glob —
+    # same scan, same (empty) spared set, opposite exit code.
+    assert f"{AGENT_GLOB!r}  ->  matched 0 row(s), 0 of them dead" in cap.out, cap.out
+    assert "(default; --include-agent-worktrees turns it off)" in cap.out, cap.out
     assert not plain.exists(), "the default run removed nothing, so the contrast is vacuous"
     assert flagged != default
+
+
+# ── 🔴 ROUND 6: ONE PREDICATE, ONE PLACE — AND THE CLAIMS THAT READ IT ───────
+#
+# Rounds 4 and 5 each exist because one copy of "is the agent constant applied by
+# this tool on its own?" diverged from another. It was open-coded at THREE sites
+# (`resolve_exclude_globs`, `render_text`, `main`). It is now computed once, by
+# `agent_glob_applied_by_default`, carried in the summary, and read — never
+# re-derived — by every message about it.
+
+def test_the_note_does_not_claim_a_run_REFUSES_when_that_run_REMOVES(
+        no_agent_worktrees, capsys):
+    """🔴 THE ROUND-4 DEFECT, REINTRODUCED IN THE SENTENCE WRITTEN TO REPLACE IT.
+
+    Round 5's note ended "…so on a scan holding no agent worktrees this run
+    REFUSES where the default would have proceeded" — unconditional on
+    `--allow-unmatched-globs`, which `main()` uses to downgrade exactly that
+    refusal to a warning. MEASURED before the fix, hermetic tmpdir, all three
+    flags plus `--execute --confirm 1`: rc 0 (not RC_EXECUTE_REFUSED), the
+    worktree GONE from disk, and "this run REFUSES" on the stdout of that very
+    run — three lines above the report's own "--allow-unmatched-globs IS IN
+    FORCE: … it does not refuse --execute".
+
+    The failure is not cosmetic: an operator who reads "REFUSES" treats the run
+    as inert, stops re-reading `--confirm N`, and the run removes.
+
+    ORDERED control-then-live: the control must remove nothing, which is also
+    what leaves the fixture intact for the live run to consume.
+    """
+    repo, plain, gh = no_agent_worktrees
+    base = ["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+            "--include-agent-worktrees", "--exclude-path", AGENT_GLOB]
+
+    # POSITIVE CONTROL: the same command line WITHOUT the override really does
+    # refuse — so "REFUSES" is a claim the tool can legitimately make, and its
+    # absence below is about the override and not about the sentence vanishing.
+    rc = wp.main([*base, "--execute", "--confirm", "1"])
+    cap = capsys.readouterr()
+    assert rc == wp.RC_EXECUTE_REFUSED, cap.err
+    assert plain.is_dir(), "the control removed something"
+    assert "REFUSES where the default would have proceeded" in cap.out, cap.out
+    assert "WARNS where the default would have said nothing" not in cap.out, cap.out
+
+    # …and with the override, on a run that REALLY REMOVES.
+    rc = wp.main([*base, "--allow-unmatched-globs", "--execute", "--confirm", "1"])
+    cap = capsys.readouterr()
+    assert rc == wp.RC_OK, cap.err
+    assert not plain.exists(), "nothing was removed, so the note is not on a removing run"
+    assert "REFUSES where the default would have proceeded" not in cap.out, cap.out
+    assert ("WARNS where the default would have said nothing — --allow-unmatched-globs is "
+            "in force, so it does NOT refuse and this run removes exactly what the default "
+            "would have removed.") in cap.out, cap.out
+    # …and the line it used to contradict is still there, saying the same thing.
+    assert "it does not refuse --execute" in cap.out, cap.out
+
+
+def test_the_zero_match_remedy_does_not_offer_a_flag_already_in_force(
+        no_agent_worktrees, capsys):
+    """🟢 SAME SHAPE, PRE-EXISTING, SAME PARAGRAPH. The per-glob zero-match line
+    ended "--execute REFUSES while a typed glob is in this state — pass
+    --allow-unmatched-globs if the glob is correct but out of this scan's scope"
+    even when `--allow-unmatched-globs` was ALREADY in force and `--execute`
+    therefore did not refuse. Advising the operator to pass a flag they already
+    passed, on the stdout of a run that proceeded.
+
+    Not in round 5's delta, but it is the same false-claim-about-this-very-run
+    defect as the note above and it is fixed in the same round rather than left
+    as the next round's finding.
+    """
+    repo, plain, gh = no_agent_worktrees
+    base = ["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+            "--exclude-path", "*/civitai/*"]
+
+    # POSITIVE CONTROL: without the override the remedy is the right one.
+    rc = wp.main([*base, "--execute", "--confirm", "1"])
+    cap = capsys.readouterr()
+    assert rc == wp.RC_EXECUTE_REFUSED, cap.err
+    assert plain.is_dir(), "the control removed something"
+    assert ("--execute REFUSES while a typed glob is in this state — pass "
+            "--allow-unmatched-globs if the glob is correct but out of this scan's "
+            "scope.") in cap.out, cap.out
+    assert "ALREADY IN FORCE" not in cap.out, cap.out
+
+    # …and with the override, on a run that REALLY REMOVES.
+    rc = wp.main([*base, "--allow-unmatched-globs", "--execute", "--confirm", "1"])
+    cap = capsys.readouterr()
+    assert rc == wp.RC_OK, cap.err
+    assert not plain.exists(), "nothing was removed, so the remedy is not on a removing run"
+    assert "--execute REFUSES while a typed glob is in this state" not in cap.out, cap.out
+    assert ("--allow-unmatched-globs IS ALREADY IN FORCE, so --execute does NOT refuse on "
+            "this — it proceeds with this glob filtering nothing.") in cap.out, cap.out
+
+
+def test_a_messy_hand_typed_copy_of_the_default_still_gets_the_free_note(
+        no_agent_worktrees, capsys):
+    """🟢 THE INVARIANT THAT LICENSES DROPPING A `normalize_glob` CALL.
+
+    Both copies of "is this glob the agent constant?" used to re-normalise `g`,
+    on a value `resolve_exclude_globs` -> `normalize_globs` had already
+    normalised. Harmless, but a mutant deleting the call would SURVIVE and no
+    test claimed otherwise. The call is gone and the invariant is asserted
+    BEHAVIOURALLY instead: a hand-typed copy with surrounding whitespace AND a
+    trailing slash — the shape shell tab-completion and a fat-fingered paste
+    actually produce — still reaches both messages as the bare constant.
+
+    This is what would redden if normalisation moved, weakened, or changed order.
+    """
+    repo, plain, gh = no_agent_worktrees
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--exclude-path", f"  {AGENT_GLOB}/  ", "--execute", "--confirm", "1"])
+    cap = capsys.readouterr()
+    assert rc == wp.RC_EXECUTE_REFUSED, cap.err
+    assert plain.is_dir(), "a refused run removed something"
+    # ONE glob in the table, spelled as the bare constant — not two, and not the
+    # messy spelling. Two would mean the typed copy failed to dedupe against the
+    # constant the resolver appends.
+    assert "exclusion filters in force (1):" in cap.out, cap.out
+    assert f"--exclude-path {AGENT_GLOB!r}  ->  matched 0 row(s)" in cap.out, cap.out
+    # …and BOTH reassurances fire, which is the thing the dropped call guarded.
+    assert ("is applied by DEFAULT to every run, so dropping your hand-typed copy of it "
+            "leaves it in force: the tool puts it back.") in cap.err, cap.err
+    assert "simply drop it and lose nothing" in cap.out, cap.out
+
+
+def test_summarize_separates_the_flag_from_the_two_facts_it_does_not_equal(two_dead):
+    """🔴 THREE KEYS, THREE DIFFERENT QUESTIONS, and the whole PR's bug history is
+    two of them being conflated:
+
+      `agent_worktrees_included`      — was the FLAG typed?
+      `agent_worktree_glob_in_force`  — is the constant in the effective list AT ALL?
+      `agent_glob_applied_by_default` — is the TOOL applying it, i.e. can the
+                                        operator drop their hand-typed copy for free?
+
+    The retyped-glob command line is the row that separates all three: flag True,
+    in force True, applied-by-default False. A summary that let any two of these
+    collapse is how a 🔴 warning ended up contradicting the filter table three
+    lines below it, and how "drop it, you lose nothing" ended up printed on the
+    one command line where dropping it exposes every live session's worktree.
+    """
+    repo, agent, plain, gh = two_dead
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1, exclude_globs=[AGENT_GLOB])
+
+    default_run = wp.summarize(rows, [AGENT_GLOB], [], agent_worktrees_included=False)
+    assert default_run["agent_worktrees_included"] is False
+    assert default_run["agent_worktree_glob_in_force"] is True
+    assert default_run["agent_glob_applied_by_default"] is True
+
+    # 🔴 THE SEPARATING ROW: every one of the three has a different value from at
+    # least one other, so no pair can be silently equal.
+    retyped = wp.summarize(rows, [AGENT_GLOB], [AGENT_GLOB], agent_worktrees_included=True)
+    assert retyped["agent_worktrees_included"] is True
+    assert retyped["agent_worktree_glob_in_force"] is True
+    assert retyped["agent_glob_applied_by_default"] is False
+
+    opted_out = wp.summarize(rows, [], [], agent_worktrees_included=True)
+    assert opted_out["agent_worktrees_included"] is True
+    assert opted_out["agent_worktree_glob_in_force"] is False
+    assert opted_out["agent_glob_applied_by_default"] is False
+
+    # …and the predicate itself, at the unit level, in both directions.
+    assert wp.agent_glob_applied_by_default(False) is True
+    assert wp.agent_glob_applied_by_default(True) is False
+
+
+# ── the structural guard that stops a SEVENTH round of this class ────────────
+
+_FLAG_SPELLINGS = ("include_agent_worktrees", "agent_worktrees_included")
+_PREDICATE = "agent_glob_applied_by_default"
+
+#: 🔴 EVERY reader of the consolidated fact, mapped to how many times it reads
+#: it, asserted BOTH WAYS. It fails when the set GROWS — a new surface started
+#: consuming the fact and nobody reviewed its wording — and when it SHRINKS — a
+#: consumer quietly went back to deriving its own copy, which is the exact
+#: regression rounds 4 and 5 were.
+#:
+#: Counted as `ast.Name` uses of the function plus `ast.Constant` strings equal
+#: to the key EXACTLY, so prose mentioning the name in a docstring or comment
+#: does not inflate it.
+_PREDICATE_READERS = {
+    # The site that MAKES it true: it appends the constant iff this is True.
+    "resolve_exclude_globs": 1,
+    # Computes the key (Name) and names it (dict key Constant).
+    "summarize": 2,
+    # The report's "you can simply drop it and lose nothing" parenthetical.
+    "render_text": 1,
+    # The stderr refusal's free-to-drop sentence.
+    "main": 1,
+}
+
+
+def _owner_map(tree: ast.AST) -> dict:
+    """id(node) -> the name of the innermost function enclosing it."""
+    owner = {id(tree): "<module>"}
+
+    def visit(node, fn):
+        for child in ast.iter_child_nodes(node):
+            f = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else fn
+            owner[id(child)] = f
+            visit(child, f)
+
+    visit(tree, "<module>")
+    return owner
+
+
+def _rederivations(tree: ast.AST, src: str, owner: dict) -> list:
+    """Every place that turns one of the flag spellings into a boolean FACT.
+
+    🔴 STRUCTURAL, NOT SPELLED. `grep 'not args.include_agent_worktrees'` misses
+    `is False`, `== False`, and `A if flag else B` — the last of which is exactly
+    how `main` spelled it in round 5. So this walks the AST for the three node
+    kinds that can convert the flag into the fact and reports the enclosing
+    function, whatever the wording.
+    """
+    hits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            probe = node.operand
+        elif isinstance(node, ast.Compare) and any(
+                isinstance(c, ast.Constant) and isinstance(c.value, bool)
+                for c in node.comparators):
+            probe = node.left
+        elif isinstance(node, ast.IfExp):
+            probe = node.test
+        else:
+            continue
+        if any(f in ast.dump(probe) for f in _FLAG_SPELLINGS):
+            hits.append((owner.get(id(node), "?"), ast.get_source_segment(src, node)))
+    return hits
+
+
+def test_the_agent_default_predicate_has_exactly_one_definition():
+    """🔴 THE POINT OF ROUND 6. "Is the agent constant applied by this tool on its
+    own?" was open-coded at THREE sites, and rounds 4 and 5 are each one copy
+    diverging from another: round 4 gated a message on the FLAG instead of the
+    FACT, round 5 fixed two spellings and introduced two fresh false claims in
+    the replacements.
+
+    `claude/RULES.md` → "One rule, one place": a predicate open-coded at N sites
+    is typically wrong at N−1 of them in the same direction, and the only thing
+    that keeps N at 1 is a test that fails when it becomes 2. Consolidating
+    without pinning it just resets the clock for round 7.
+
+    Two halves, and the second is the seam:
+      * NO function other than `agent_glob_applied_by_default` may derive the
+        fact from the flag — checked structurally, so a reworded derivation
+        cannot walk past it;
+      * the READER LEDGER is asserted in BOTH directions, so a new consumer or a
+        vanished one both fail.
+    """
+    src = TOOL.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    owner = _owner_map(tree)
+
+    # 🔴 POSITIVE CONTROL FIRST. A walker wired to nothing reports a reassuring
+    # empty list, indistinguishable from a clean tree. Round 5's own spelling,
+    # fed through this exact walker, MUST be seen.
+    control_src = (
+        "def render_text(summary):\n"
+        "    a = (1 if not summary.get('agent_worktrees_included') else 2)\n"
+        "    b = not args.include_agent_worktrees\n"
+        "    c = args.include_agent_worktrees is False\n")
+    control_tree = ast.parse(control_src)
+    control_hits = _rederivations(control_tree, control_src, _owner_map(control_tree))
+    assert len(control_hits) >= 3, (
+        f"the walker cannot see a re-derivation, so every zero it reports is "
+        f"meaningless: {control_hits}")
+
+    offenders = [(fn, seg) for fn, seg in _rederivations(tree, src, owner)
+                 if fn != _PREDICATE]
+    assert not offenders, (
+        "the agent-default predicate is being re-derived outside "
+        f"`{_PREDICATE}`: {offenders}. Read summary['{_PREDICATE}'] instead — a "
+        "second copy is how rounds 4 and 5 happened.")
+    # …and the one definition really is there. Without this the assertion above
+    # passes just as well on a tree where the predicate was deleted outright.
+    assert [fn for fn, _ in _rederivations(tree, src, owner)] == [_PREDICATE]
+
+    readers: dict = {}
+    for node in ast.walk(tree):
+        if ((isinstance(node, ast.Name) and node.id == _PREDICATE)
+                or (isinstance(node, ast.Constant) and node.value == _PREDICATE)):
+            fn = owner.get(id(node), "?")
+            readers[fn] = readers.get(fn, 0) + 1
+    assert readers == _PREDICATE_READERS, (
+        f"the reader ledger moved: {readers} != {_PREDICATE_READERS}. A new reader "
+        "means a new surface consuming the fact whose wording nobody reviewed; a "
+        "vanished one means a consumer went back to its own copy.")
 
 
 def test_the_override_does_not_change_which_rows_are_removable(no_agent_worktrees, capsys):
