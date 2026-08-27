@@ -144,8 +144,11 @@ rule rather than reformatting a paragraph.
    and it bites harder for this one: the gate is a `git log --numstat` an
    operator has to issue between rounds, so the only evidence it fired is a
    ladder that stopped. The behavioural claim needs transcript measurement over
-   future ladders -- re-run the sweep in the docstring above -- and is NOT made
-   here.
+   future ladders -- `scripts/ladder-depth-sweep.py` is that instrument, and it
+   prints both round counts with the date because the two differ -- and is NOT
+   made here. The mutation rows quoted in this module are re-derivable with
+   `bash scripts/tests/mutants-audit-ladder.sh`; before that harness was checked
+   in, every matrix here was a claim nobody else could re-run.
 6. **The CLASSIFIER is a human judgement, deliberately -- and only its WORDING
    is pinned.** The rule tells the reader to name each changed file payload or
    scaffolding rather than run a pathspec, because a pathspec is wrong in both
