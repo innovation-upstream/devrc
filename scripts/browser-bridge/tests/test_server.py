@@ -5966,13 +5966,29 @@ BROWSER_BIN = Path(__file__).resolve().parent.parent / "browser"
 from cli_budget import CLI_TIMEOUT_S  # noqa: E402  (see cli_budget for the rationale)
 
 
+def _mark(marks, key):
+    """A seam timestamp as an offset, or the fact that the seam was never reached.
+
+    🔴 'never reached' is the load-bearing answer here, not a missing value: it is
+    what tells a starved server thread apart from a CLI that hung after being
+    answered. Rendering it as a blank, a 0, or a KeyError would erase exactly the
+    distinction this exists to record.
+    """
+    if key not in marks:
+        return "NEVER REACHED"
+    return "%.3fs" % (marks[key] - marks["start"])
+
+
 @pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
 def test_browser_cli_backs_off_on_429(tmp_path):
+    marks = {}
+
     class _H(S.BaseHTTPRequestHandler):
         def log_message(self, *a):  # noqa: A003
             pass
 
         def do_POST(self):
+            marks.setdefault("post_in", time.monotonic())
             ln = int(self.headers.get("Content-Length") or 0)
             if ln:
                 self.rfile.read(ln)
@@ -5983,11 +5999,21 @@ def test_browser_cli_backs_off_on_429(tmp_path):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+            # setdefault, not assignment: if the CLI ever retried, the FIRST
+            # exchange is the one that dates the stall. Overwriting would report
+            # the last one and quietly hide a retry ladder.
+            marks.setdefault("post_out", time.monotonic())
 
     srv = S.ThreadingHTTPServer(("127.0.0.1", 0), _H)
     srv.daemon_threads = True
     port = srv.server_address[1]
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def _serve():
+        marks["serving"] = time.monotonic()
+        srv.serve_forever()
+
+    marks["start"] = time.monotonic()
+    threading.Thread(target=_serve, daemon=True).start()
     tokf = tmp_path / "token"
     tokf.write_text("smoke-token\n")
     env = dict(os.environ)
@@ -6001,6 +6027,28 @@ def test_browser_cli_backs_off_on_429(tmp_path):
         low = r.stderr.lower()
         assert "rate-limited" in low or "back off" in low, \
             f"expected a back-off message on stderr, got: {r.stderr!r}"
+    except subprocess.TimeoutExpired:
+        # 🔴 THE WHOLE POINT OF THE MARKS. A bare TimeoutExpired says only "300s
+        # elapsed" and names no mechanism, which is why this test's one CI failure
+        # has been UNDIAGNOSED across five sessions: nobody could tell a starved
+        # server thread from a hung CLI, and the failure is not reproducible on
+        # demand. These three numbers separate them, and they are only obtainable
+        # from inside the run that fails.
+        raise AssertionError(
+            "the CLI did not return within %ss. WHERE THE TIME WENT — this is the "
+            "measurement, do not re-derive it:\n"
+            "  serve_forever entered : %s\n"
+            "  do_POST entered       : %s\n"
+            "  do_POST returned      : %s\n"
+            "READ IT LIKE THIS: if do_POST was NEVER entered, the request never "
+            "reached the handler — a starved server thread, or a CLI that never "
+            "sent it (the two are still separated by whether serve_forever "
+            "entered). If do_POST entered EARLY and returned, the server did its "
+            "job and the CLI hung AFTER the reply — look at the CLI, not this "
+            "fixture. Baseline on an idle 24-core box: serving ~0.000, do_POST "
+            "~0.03, total ~0.04; under 48 niced spinners it stayed under 0.10."
+            % (CLI_TIMEOUT_S, _mark(marks, "serving"), _mark(marks, "post_in"),
+               _mark(marks, "post_out"))) from None
     finally:
         srv.shutdown(); srv.server_close()
 
