@@ -73,8 +73,8 @@ FAKE_NODE = "workbench-prod"
 
 #: Local identifiers for a `name` cell. Deliberately mixed:
 #:
-#:   * `quartzsight` and `pelagic-mail` are shaped like the leak that motivated
-#:     the class — a third party's name used as a local identifier;
+#:   * `quartzsight` and `pelagic-mailbox` are shaped like the leak that
+#:     motivated the class — a third party's name used as a local identifier;
 #:   * `bar` and `resume` are shaped like the CORRUPTION risk — ordinary English
 #:     words that are also real local identifiers. They are what proves the
 #:     substitution stays inside the cell it was declared on.
@@ -83,7 +83,16 @@ FAKE_NODE = "workbench-prod"
 #:     longest-first ordering in `_names` is untestable — and reversing it was
 #:     measured to keep the whole suite green while publishing a real client
 #:     name in cleartext.
-FAKE_NAMES = ("quartzsight", "pelagic-mailbox", "mailbox", "bar", "resume")
+#:
+#: 🔴 KEPT IN THE ORDER `build()` ACTUALLY PRODUCES — `tuple(sorted(set(...)))`,
+#: i.e. ALPHABETICAL, which puts `mailbox` BEFORE `pelagic-mailbox`. The first
+#: version of this tuple listed the longer name first, and that accident rescued
+#: a mutant: deleting the `sorted(..., key=len, reverse=True)` in `_names`
+#: entirely left the suite green, because iteration order happened to be
+#: longest-first anyway. Production never sees that order. A fixture whose
+#: incidental layout does the work of the code under test is not a fixture, it
+#: is a second bug.
+FAKE_NAMES = ("bar", "mailbox", "pelagic-mailbox", "quartzsight", "resume")
 #: A sentence of the kind a measurer HARVESTS rather than authors. It names a
 #: third party that appears in NO name list — which is the whole point: this is
 #: the value substitution structurally cannot reach.
@@ -653,17 +662,44 @@ def test_a_STATIC_LABEL_in_a_name_cell_is_not_corrupted():
     `costliest tier-A entry: <skill>`. The licence for dropping the ladder is
     CONFINEMENT plus `_word`'s boundaries, not purity, so the labels that
     actually ship are the thing to assert on.
+
+    🔴 EVERY LABEL BELOW CONTAINS A FIXTURE NAME AS A SUBSTRING, AND THAT IS
+    THE ENTIRE POINT. The first version asserted on four real labels from
+    `m_skill_listing` in which no fixture name appeared at all — so it compared
+    two constants and could not fail under ANY mutation of `_names`, `_word` or
+    the sort order, while its docstring claimed it proved corruption impossible.
+    A guard that reads as coverage and provides none is worse than none, because
+    it stops anyone looking. What actually defends these is `_word`'s
+    non-word-character boundaries, so the fixtures must exercise exactly that.
     """
-    labels = ("skills shipped (in-tree + mkOutOfStoreSymlink)",
-              "tier A — full description in the always-on listing",
-              "tier B — `name-only`, still /name-invocable",
-              "per-entry cap (upstream, not devrc's)")
+    #: name -> a label embedding it WITHOUT a word boundary, so only `_word`
+    #: (never a bare `str.replace`) leaves it intact.
+    labels = (
+        "the run resumed after the gate went green",     # `resume` inside `resumed`
+        "pinned to the toolbar, not the status area",    # `bar` inside `toolbar`
+        "mailboxes are counted, not read",               # `mailbox` inside `mailboxes`
+        "quartzsighted about the ceiling",               # `quartzsight` inside a longer word
+    )
+    for name in ("resume", "bar", "mailbox", "quartzsight"):
+        assert any(name in label for label in labels), \
+            f"fixture drifted: {name!r} is no longer exercised, so this guard is vacuous"
+
     ms = measure.MeasurementSet()
     ms.items.append(_row("k", columns=("what",), column_kinds=("name",),
                          rows=tuple((label,) for label in labels)))
     out = sanitize.apply(ms, _san()).by_key("k").rows
     for label, (got,) in zip(labels, out):
         assert got == label, f"a static label was corrupted: {label!r} -> {got!r}"
+
+    # CONTROL: the same cell kind DOES substitute a name that stands alone, so
+    # the assertions above cannot be passing because `_names` is inert.
+    ctl = measure.MeasurementSet()
+    ctl.items.append(_row("c", columns=("what",), column_kinds=("name",),
+                          rows=(("costliest tier-A entry: quartzsight",),)))
+    got = sanitize.apply(ctl, _san()).by_key("c").rows[0][0]
+    assert "quartzsight" not in got, f"the name class is inert: {got!r}"
+    assert got.startswith("costliest tier-A entry: "), \
+        f"the static half of the label was eaten too: {got!r}"
 
 
 def test_the_NAME_column_is_found_by_its_KIND_not_by_its_POSITION(tmp_path):
@@ -690,6 +726,27 @@ def test_the_NAME_column_is_found_by_its_KIND_not_by_its_POSITION(tmp_path):
     assert san.local_names == ("bar", "quartzsight"), (
         f"the name column was read positionally: {san.local_names!r}")
     assert not san.degraded, f"a well-formed build degraded: {san.degraded!r}"
+
+
+def test_a_SHORT_inventory_row_is_skipped_rather_than_raising(tmp_path):
+    """The `len(row) > idx` bound in `build()`, which nothing else reaches.
+
+    A row shorter than the declared name column is a measurer bug, but it must
+    not take the whole build down — and `>=` there turns the skip into an
+    IndexError. No live measurer emits one, so without this the branch is
+    unexercised and the off-by-one is invisible.
+    """
+    env = measure.Env(repo=tmp_path, home=tmp_path / "h", claude_dir=tmp_path / "c",
+                      index_store=tmp_path / "s", allow_systemd=False,
+                      allow_network=False)
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("index.store", columns=("scope",), rows=(("borealis",),)))
+    ms.items.append(_row("skills.inventory", columns=("tier", "skill"),
+                         column_kinds=("", "name"),
+                         rows=(("A",), ("B", "/quartzsight"))))
+    san = sanitize.build(True, env, ms)
+    assert san.local_names == ("quartzsight",), (
+        f"a short row was not skipped cleanly: {san.local_names!r}")
 
 
 def test_an_inventory_with_NO_name_column_degrades_LOUDLY(tmp_path):
@@ -811,7 +868,10 @@ def test_the_disabled_sanitizer_withholds_NOTHING():
 PROSE_LEDGER = {
     "skills.listing": ("name", ""),
     "skills.inventory": ("name", "", "prose", "name"),
-    "gate.tiers": ("", "prose"),
+    # 🔴 `gate.tiers` is deliberately ABSENT: every cell in it is a literal
+    # authored in `measure.py`. Its harvested half lives in `gate.exit_codes`,
+    # split out precisely so the safe half stops paying for the unsafe one.
+    "gate.exit_codes": ("", "prose"),
     "drift.ladder": ("", "prose"),
 }
 
@@ -876,6 +936,13 @@ def test_the_inventory_NAME_COLUMN_really_holds_the_skill_names(tmp_path):
     Read through `skill_tiers`, the measurer's OWN source, so this compares the
     rendered table against the thing it claims to render rather than against
     itself.
+
+    🔴 IT PINS EVERY DECLARED CELL, NOT JUST THE ONE `build()` READS. The first
+    version checked only the first `name` column it found. `skills.inventory`
+    declares TWO (`skill` and `path`), and swapping the description into the
+    OTHER one survived all 145 present tests and republished every harvested
+    description on a page stamped SANITIZED — the same leak class, one column
+    over. A guard scoped to one cell of a row cannot pin a claim about the row.
     """
     env = _ledger_env(tmp_path)
     inv = measure.take(env).by_key("skills.inventory")
@@ -883,24 +950,37 @@ def test_the_inventory_NAME_COLUMN_really_holds_the_skill_names(tmp_path):
         f"the inventory did not measure, so this guard checked NOTHING: "
         f"{inv.reason if inv else 'row absent'}")
 
-    idx = next((i for i in range(len(inv.columns)) if inv.kind_of(i) == "name"), None)
-    assert idx is not None, "skills.inventory declares no `name` column"
+    name_cols = [i for i in range(len(inv.columns)) if inv.kind_of(i) == "name"]
+    assert name_cols, "skills.inventory declares no `name` column"
 
     sys.path.insert(0, str(SCRIPTS / "lib"))
     try:
         import skill_tiers  # noqa: PLC0415
-        expected = {f"/{name}" for name in skill_tiers.shipped_skills()}
+        shipped = skill_tiers.shipped_skills()
     finally:
         if sys.path and sys.path[0] == str(SCRIPTS / "lib"):
             sys.path.pop(0)
+    assert shipped, "shipped_skills() returned nothing — this guard checked NOTHING"
 
-    got = {row[idx] for row in inv.rows}
+    # The WHOLE declared shape, read back against the measurer's own source:
+    # every `name` cell is the skill name (bare or inside its path), and the
+    # `prose` cell is the description — so no pair of cells can be swapped
+    # without this failing.
+    expected = set()
+    for name, (rel, desc) in shipped.items():
+        first = desc.split(". ")[0].strip()
+        if len(first) > 150:
+            first = first[:147].rstrip() + "..."
+        expected.add((f"/{name}", first, rel))
+    got = {(row[0], row[2], row[3]) for row in inv.rows}
     assert got == expected, (
-        "the cells in the declared `name` column are not the skill names.\n"
-        f"  column index {idx} holds: {sorted(got)[:5]}...\n"
-        f"  shipped skills are:      {sorted(expected)[:5]}...\n"
-        "If the row tuple was reordered, move `column_kinds` with it — otherwise "
-        "sanitize.build() harvests the wrong cell and every real name ships."
+        "the inventory's cells do not match what `skill_tiers` says they are.\n"
+        f"  declared `name` columns: {name_cols}\n"
+        f"  a row reads: {sorted(got)[:1]}\n"
+        f"  source says: {sorted(expected)[:1]}\n"
+        "If the row tuple was reordered, move `columns` and `column_kinds` with "
+        "it — otherwise sanitize.build() harvests the wrong cell, or a declared "
+        "`name` cell carries prose, and either way real values ship."
     )
 
 

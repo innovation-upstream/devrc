@@ -728,8 +728,6 @@ def m_gate_tiers(env: Env) -> dict:
     # The derivation NAME is the reliable token: `checks.${system} = { … }` is
     # an interpolated attrset, so the attribute path is not literally in the file.
     checks = sorted(set(re.findall(r'runCommandLocal\s+"devrc-([a-z0-9-]+)"', ftext)))
-    gtext = gate.read_text(encoding="utf-8", errors="replace")
-    exits = sorted(set(re.findall(r"^#\s+(\d+)\s*=\s*(.+)$", gtext, re.M)))
     #: 🔴 THE TIERS ARE A STRUCTURE, SO THE COUNT IS DERIVED FROM IT. This layer's
     #: charter is that no quantity is TYPED — a literal `2` here would be the
     #: first hand-maintained number on a page built to have none, and it would
@@ -742,7 +740,6 @@ def m_gate_tiers(env: Env) -> dict:
         ("sandbox source", "a `cp -r ${./.}` store copy with NO .git — repo-local git facts evaluate differently"),
         ("gate.sh could-not-vouch code", "90 — status/content disagreement or a truncated run; NOT 'the tests failed'"),
     ]
-    rows += [(f"gate.sh exit {code}", desc.strip()) for code, desc in exits if code in {"0", "1", "2", "90"}]
     return dict(
         value=(f"{len(tiers)} tiers, {len(checks)} flake checks" if checks
                else f"{len(tiers)} tiers"),
@@ -757,12 +754,49 @@ def m_gate_tiers(env: Env) -> dict:
         ),
         source="scripts/gate.sh header + flake.nix checks",
         columns=("tier / fact", "what it is"),
-        #: The tail of this column is `desc.strip()` lifted out of `gate.sh`'s
-        #: exit-code comments — a sentence a human edits freely, in a file this
-        #: module does not own. Same class as the skill descriptions, so it gets
-        #: the same treatment. It names no third party TODAY; that is a property
-        #: of the current contents, not of the column, and the contents change
-        #: without a commit here.
+        #: 🔴 NO DECLARATION, AND THE SPLIT BELOW IS WHY. Every cell here is a
+        #: literal written in THIS module and reviewed with it, so none of it is
+        #: harvested prose. The harvested half — `gate.sh`'s exit-code comments —
+        #: used to share this column, which forced the whole column to be
+        #: declared `prose`; that withheld the two tier COMMANDS as well, and
+        #: those commands are the entire argument of the section this table sits
+        #: in. Withholding was correct and the granularity was not: `column_kinds`
+        #: is per COLUMN, so mixing authored and harvested text in one column
+        #: makes the safe half pay for the unsafe half. Separated into
+        #: `m_gate_exit_codes` instead.
+        rows=tuple(rows),
+    )
+
+
+def m_gate_exit_codes(env: Env) -> dict:
+    """`gate.sh`'s exit-code legend, parsed out of its own header comment.
+
+    Split out of `m_gate_tiers` deliberately — see the note there. This is the
+    HARVESTED half: whoever edits `scripts/gate.sh` writes these sentences, so
+    the column is `prose` and a sanitized build withholds it. The CODES stay
+    visible, which is the part a reader needs to look one up.
+    """
+    gate = env.repo / "scripts" / "gate.sh"
+    if not gate.is_file():
+        raise Unmeasurable(f"{gate} does not exist")
+    gtext = gate.read_text(encoding="utf-8", errors="replace")
+    exits = sorted(set(re.findall(r"^#\s+(\d+)\s*=\s*(.+)$", gtext, re.M)))
+    rows = [(code, desc.strip()) for code, desc in exits if code in {"0", "1", "2", "90"}]
+    if not rows:
+        raise Unmeasurable(
+            "no `# N = …` exit-code lines were found in scripts/gate.sh — an "
+            "empty parse is a broken read, not a script without exit codes")
+    return dict(
+        value=f"{len(rows)} exit codes documented in gate.sh's header",
+        detail=(
+            "🔴 90 is the one to understand: it means the runner's own verdict "
+            "and its exit status DISAGREED, or a run was truncated. That is "
+            "'this gate cannot vouch for the run', which is not the same claim "
+            "as 'the tests failed' — read the log rather than debugging a diff "
+            "against it."
+        ),
+        source="scripts/gate.sh header comment",
+        columns=("exit", "meaning"),
         column_kinds=("", "prose"),
         rows=tuple(rows),
     )
@@ -1579,6 +1613,8 @@ REGISTRY: tuple[tuple[str, str, str, object, str], ...] = (
      "python -c \"import sys;sys.path.insert(0,'scripts');from present.measure import WORK_INTAKE;print(*WORK_INTAKE,sep=chr(10))\""),
     ("gate.tiers", "constraints", "The two gate tiers", m_gate_tiers,
      "nix develop --impure --command bash scripts/gate.sh --tier both"),
+    ("gate.exit_codes", "constraints", "gate.sh's exit-code legend", m_gate_exit_codes,
+     "grep -E '^#\\s+[0-9]+\\s*=' scripts/gate.sh"),
     ("gate.protection", "constraints", "What actually BLOCKS a merge", m_branch_protection,
      "gh api /repos/<owner>/<repo>/branches/main/protection --jq .required_status_checks"),
     ("tests.pytest", "constraints", "Per-target collected-test floors", m_pytest_floors,

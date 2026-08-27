@@ -664,6 +664,13 @@ SECTIONS: tuple[Section, ...] = (
                 "tier had simply never been run.")),
             ("measure", "gate.tiers"),
             ("p", (
+                "The gate reports its own inability to answer as a distinct code. "
+                "<b>90 is not &ldquo;the tests failed&rdquo;</b> &mdash; it means the runner's "
+                "verdict and its exit status disagreed, or the run was truncated, so the "
+                "gate cannot vouch for it. Debugging a diff against a 90 is debugging the "
+                "wrong thing.")),
+            ("measure", "gate.exit_codes"),
+            ("p", (
                 "Whether a check <i>runs</i> and whether it <i>blocks</i> are different "
                 "facts, and the repo's machine-checked marker sees only the first. One day "
                 "here exactly one of the two required contexts was listed, and it collected "
