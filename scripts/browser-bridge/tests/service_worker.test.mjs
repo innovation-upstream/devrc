@@ -98,7 +98,8 @@ globalThis.chrome = {
   alarms: { create() {}, onAlarm: { addListener() {} } },
 };
 
-const { OPS, loopTiming } = await import("../extension/service_worker.js");
+const { OPS, loopTiming, execute, emulationState, documentEmulation } =
+  await import("../extension/service_worker.js");
 const { FAST_CAPTURE_BUDGET_MS, EXEC_OP_BUDGET_MS, POLL_BUDGET_MS,
         RESULT_BUDGET_MS, LOOP_STALL_MS, STORAGE_BUDGET_MS, REUSE_TAB_BUDGET_MS }
   = await import("../extension/protocol.js");
@@ -602,6 +603,15 @@ test("open reuse probe: a TIMED-OUT probe reaps the tab it just orphaned",
   globalThis.BROWSER_BRIDGE_LOOP_TIMING = { ...(realTiming || {}), reuseTabMs: 20 };
   chrome.tabs.get = () => new Promise(() => {});   // never settles
 
+  // SEED both per-tab maps, or the `has(...) === false` assertions below are
+  // vacuous — they would hold just as well on a build that never forgets
+  // anything. t.after clears them so a leak here cannot colour a later test.
+  emulationState.set(TAB_ID, { preset: "iphone-15" });
+  documentEmulation.set(TAB_ID, { at: 1 });
+  t.after(() => { emulationState.delete(TAB_ID); documentEmulation.delete(TAB_ID); });
+  assert.equal(emulationState.has(TAB_ID), true, "control: the seed took");
+  assert.equal(documentEmulation.has(TAB_ID), true, "control: the seed took");
+
   const out = await openWithin(
     OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" }),
     "open did not settle within 1s");
@@ -612,6 +622,19 @@ test("open reuse probe: a TIMED-OUT probe reaps the tab it just orphaned",
                    "the orphaned tab must be reclaimed — server.py's "
                    + "\"Nothing reclaims it; only a human closes it\" is what this "
                    + "assertion deletes");
+  assert.equal(out.reapAttempted, TAB_ID,
+               "the envelope must carry the trace: this remove is issued WITHOUT "
+               + "the caller asking for it, so `open` is the only place it can be "
+               + "recorded (nothing awaits the result, hence ATTEMPTED)");
+
+  // 🔴 PARITY WITH `close`, WHICH DOES THIS FIRST AND SAYS WHY: onRemoved's
+  // timing is not ours to control and it does not fire at all on the
+  // already-gone path, so a stale entry is inheritable by a RECYCLED tabId.
+  // Without this the claim "the same thing `close` does" is not literally true.
+  assert.equal(emulationState.has(TAB_ID), false,
+               "the reap must forget the tab's emulation state, as `close` does");
+  assert.equal(documentEmulation.has(TAB_ID), false,
+               "…and its document record, for the same recycled-tabId reason");
 
   // 🔴 ORDERING, WHICH THE ASSERTION ABOVE CANNOT SEE: the reap must run only
   // AFTER the replacement exists. Reaping first would close the session's ONLY
@@ -651,6 +674,13 @@ test("open reuse probe: a REJECTING probe must NOT reap — the id is known abse
                    + "reclaim, and a recycled tabId would be someone else's tab");
 });
 
+// ⚠ ONE KNOWN EQUIVALENT MUTANT, recorded so nobody re-derives it as a coverage
+// gap: changing `orphanTabId != null` to a truthiness test SURVIVES this file.
+// It is equivalent, not uncovered — Chromium never issues tab id 0
+// (chrome.tabs.TAB_ID_NONE is -1 and real ids start at 1), so the two predicates
+// cannot disagree on any value this code can hold. `!= null` is kept anyway
+// because it says what is meant.
+//
 // The other two paths that reach `chrome.tabs.create`, both of which must stay
 // reap-free. Together with the two arms above these enumerate every route through
 // `open`, so "the reap fires on exactly one of them" is a closed claim rather than
@@ -667,6 +697,66 @@ test("open: neither a healthy reuse nor a first open ever reaps", async () => {
   assert.equal(state.calls.tabsCreate.length, 1);
   assert.deepEqual(state.calls.tabsRemove, [],
                    "a session's FIRST open has no predecessor to reclaim");
+});
+
+// 🔴 A REAP THAT ARRIVES AFTER execute() HAS GIVEN UP IS WORSE THAN NO REAP.
+//
+// execute() RACES the op against execMs; it does not CANCEL it. So a
+// `chrome.tabs.create` that is merely SLOW — not hung — resumes `open` long after
+// the op has already answered `op_timeout:open`. And on that path the old tab is
+// NOT an orphan: the server saw a non-tab-gone error, so it KEPT the session's
+// ownership pointing at a tab that is still live and still usable. Pre-change the
+// next `open` simply reused it. A late reap destroys it, leaving the session
+// owning a dead id → `owned_tab_gone` → the mapping is dropped → the op after
+// that falls back to the OPERATOR'S ACTIVE TAB, which is the blast radius the
+// ownership map exists to prevent.
+//
+// This test drives the whole op through execute(), not OPS.open, because the
+// race that defines "given up" lives in execute() and nowhere else. The reap is
+// asserted absent BOTH at return and after the slow create settles — checking
+// only the former would pass with the guard deleted, since the harm is
+// exclusively in the tail.
+test("open: a reap must NOT fire once execute() has already abandoned the op",
+     { timeout: 4000 }, async (t) => {
+  resetCalls();
+  const realGet = chrome.tabs.get;
+  const realCreate = chrome.tabs.create;
+  const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  t.after(() => {
+    chrome.tabs.get = realGet;
+    chrome.tabs.create = realCreate;
+    globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
+  });
+  // reuse probe 20ms (fall through), WHOLE OP 80ms, create settles at 300ms —
+  // so the create outlives the op by ~220ms. The three values are pairwise
+  // distinct and none is a multiple of another, so a mutant that swaps one
+  // budget for another cannot land on an equivalent schedule.
+  globalThis.BROWSER_BRIDGE_LOOP_TIMING = {
+    ...(realTiming || {}), reuseTabMs: 20, execMs: 80 };
+  chrome.tabs.get = () => new Promise(() => {});          // force the timeout arm
+  chrome.tabs.create = async (props) => {
+    state.calls.tabsCreate.push(props);
+    await new Promise((r) => setTimeout(r, 300));
+    return { id: FRESH_TAB_ID, url: (props && props.url) || "about:blank" };
+  };
+
+  const env = await execute({ op: "open", id: "late", reuseTabId: TAB_ID,
+                              url: "https://civitai.com/" });
+  assert.equal(env.ok, false, "the op must still time out (control: the slow "
+                              + "create really did outlive execute's budget)");
+  assert.equal(env.error, "op_timeout:open");
+  assert.deepEqual(state.calls.tabsRemove, [],
+                   "nothing may be reaped before the create settles");
+
+  // Let the abandoned create resume and run `open`'s tail.
+  await new Promise((r) => setTimeout(r, 600));
+  assert.equal(state.calls.tabsCreate.length, 1,
+               "control: the create really did run and settle");
+  assert.deepEqual(state.calls.tabsRemove, [],
+                   "a reap arriving after execute() gave up destroys a tab the "
+                   + "SERVER STILL OWNS and that is still live — the session is "
+                   + "left owning a dead id, and two ops later it falls back to "
+                   + "the operator's active tab");
 });
 
 // 🔴 THE REAP IS FIRE-AND-FORGET, AND THAT IS LOAD-BEARING RATHER THAN TIDY.
@@ -697,14 +787,21 @@ test("open reuse probe: a HANGING / REJECTING / THROWING reap cannot delay or fa
     openWithin(OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" }), why);
 
   // (a) HANG. The one that would catch an `await` being added to the reap.
+  // Recorded through `state.calls.tabsRemove`, not a local counter: a counter
+  // cannot see a reap issued against the WRONG id, and this arm would then be
+  // the one place in the file blind to it.
   resetCalls();
-  let removeCalls = 0;
-  chrome.tabs.remove = () => { removeCalls += 1; return new Promise(() => {}); };
+  chrome.tabs.remove = (id) => {
+    state.calls.tabsRemove.push(id);
+    return new Promise(() => {});                 // never settles
+  };
   let out = await openOrDie(
     "open did not settle within 1s: the reap is being AWAITED, so a hung "
     + "chrome.tabs.remove now wedges the op it was added to clean up after");
   assert.equal(out.tabId, FRESH_TAB_ID, "a hung reap must not change the result");
-  assert.equal(removeCalls, 1, "…and the reap must still have been ATTEMPTED");
+  assert.deepEqual(state.calls.tabsRemove, [TAB_ID],
+                   "…and the reap must still have been ATTEMPTED, against the "
+                   + "ORPHAN's id and not the replacement's");
 
   // (b) REJECT — the ordinary case when the orphan really had gone after all.
   resetCalls();
@@ -727,6 +824,13 @@ test("open reuse probe: a HANGING / REJECTING / THROWING reap cannot delay or fa
   out = await openOrDie("open did not settle within 1s on a SYNC-THROWING reap");
   assert.equal(out.tabId, FRESH_TAB_ID, "a synchronously throwing reap must not fail the op");
   assert.deepEqual(state.calls.tabsRemove, [TAB_ID]);
+  // 🔴 …and the trace must NOT claim an attempt that never left the building.
+  // `reapAttempted` is assigned AFTER the call precisely so a synchronous throw
+  // skips it; moving that line one statement earlier is invisible to every other
+  // assertion in this file.
+  assert.equal("reapAttempted" in out, false,
+               "a reap that threw before dispatching must leave no trace saying "
+               + "it was attempted — the field is the only record anyone gets");
 });
 
 // --------------------------------------------------------------------------- //

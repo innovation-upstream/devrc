@@ -1230,6 +1230,10 @@ const OPS = {
     // The tabId to reclaim after the fall-through succeeds, or null. Set ONLY on
     // the timeout arm — see the catch for why the rejection arm must not reap.
     let orphanTabId = null;
+    // Stamped BEFORE anything is awaited: the reap below must not fire once
+    // execute() has already given up on this op (it races us, it cannot cancel
+    // us). See the elapsed check for what a late reap actually destroys.
+    const startedAt = Date.now();
     if (cmd && cmd.reuseTabId != null) {
       try {
         const existing = await promiseWithTimeout(
@@ -1257,15 +1261,23 @@ const OPS = {
           String((e && e.message) || e).startsWith("reuse_tab_timeout");
         breadcrumb("open", (cmd && cmd.id) || null,
                    timedOut ? "open_reuse_timeout" : "open_reuse_gone");
-        // 🔴 REAP ONLY ON THE TIMEOUT ARM. The two arms carry OPPOSITE evidence
-        // about the tab, and that asymmetry is the whole safety argument:
-        //   * timeout  → we learned NOTHING. The tab is probably still live, and
-        //                the fall-through is about to orphan it. Reap.
-        //   * rejection → `chrome.tabs.get` answered, naming the id as absent.
-        //                Reaping would be a remove against an id we have positive
-        //                evidence is gone — pure exposure (Chromium can recycle a
-        //                tabId, which this file already reasons about in `close`)
-        //                for zero reclaimed tabs. Do not.
+        // 🔴 REAP ONLY ON THE TIMEOUT ARM — and the argument is EXPECTED VALUE,
+        // not a claim that the timeout arm is the safer one. It is not: a
+        // recycled tabId is a hazard on BOTH arms, and the timeout arm's remove
+        // is issued LATER (after an unbounded `chrome.tabs.create`), so its
+        // recycle window is strictly the WIDER of the two. What separates them is
+        // the numerator:
+        //   * rejection → `chrome.tabs.get` ANSWERED, naming the id as absent.
+        //                 Expected tabs reclaimed: ZERO. Any exposure at all,
+        //                 however small, buys nothing. Do not reap.
+        //   * timeout   → the probe answered NOTHING. A live tab is about to be
+        //                 orphaned with no owner, and reclaiming it is the whole
+        //                 point of this change. A non-zero exposure is justified
+        //                 by a non-zero return.
+        // (An earlier draft of this comment argued the rejection arm was refused
+        // because reaping there is "pure exposure" while implying the timeout arm
+        // was not exposed. That reasoning was one-sided and did not carry the
+        // conclusion, even though the conclusion is right.)
         orphanTabId = timedOut ? cmd.reuseTabId : null;
         /* owned tab gone (or hung) → open a fresh one below */
       }
@@ -1278,6 +1290,30 @@ const OPS = {
     // exists — reaping first would close the session's only tab and then, if the
     // create failed, leave it owning a dead id.
     //
+    // 🔴 AND ONLY WHILE THE OP IS STILL ALIVE. execute() RACES this function
+    // against execMs; it does not CANCEL it. So a `chrome.tabs.create` that is
+    // merely slow — settling at, say, 17s — resumes us LONG AFTER execute() has
+    // already answered `op_timeout:open` and moved on. Reaping then is actively
+    // HARMFUL rather than merely useless, and the harm is not the one the
+    // residual list below used to describe:
+    //
+    //   * the server saw `ok:false` with error `op_timeout:open`. That is not a
+    //     tab-gone error, so `_record_ownership_locked` KEEPS the session's
+    //     ownership pointing at the OLD tab (server.py) — which, on that path,
+    //     is still live and still perfectly usable. Pre-change, the next `open`
+    //     simply reused it.
+    //   * a late reap destroys exactly that tab. The session is now left owning
+    //     a dead id; its next op gets `owned_tab_gone`, the server self-heals by
+    //     dropping the mapping, and the op AFTER that falls back to the
+    //     operator's ACTIVE tab — the blast radius the ownership map exists to
+    //     prevent.
+    //
+    // MEASURED, not reasoned: with execMs 80, a hung `tabs.get` and a create
+    // resolving at 300ms, execute() returned `op_timeout:open` with tabsRemove
+    // [] — and 600ms later tabsRemove was [5]. The elapsed check below is what
+    // turns that into a no-op. `>=` deliberately: at exactly execMs the race has
+    // fired, and a tie must skip.
+    //
     // 🔴 FIRE-AND-FORGET, NEVER AWAITED, AND THAT IS LOAD-BEARING. `tabs.remove`
     // is one more unbounded browser-process IPC; awaiting it would put a NEW
     // unbounded await on `open`'s success path — re-creating, at the last line of
@@ -1287,23 +1323,42 @@ const OPS = {
     // ⚠ WHAT THIS DOES **NOT** FIX, stated rather than discovered later:
     //   (a) A browser-wide stall defeats the reap too — the same stall that hung
     //       `tabs.get` can hang `tabs.remove`, and nothing here waits to find
-    //       out. It is best-effort by construction, not a guarantee.
-    //   (b) The OTHER orphan is untouched: if `chrome.tabs.create` itself hangs,
-    //       execute() kills the op at EXEC_OP_BUDGET_MS while the abandoned
-    //       create still settles in the background, producing a tab this function
-    //       never sees and therefore cannot reap. Closing that one needs the
-    //       choke point to signal abandonment back into the op, which it has no
-    //       mechanism for today. Deliberately out of scope.
-    //   (c) No new exposure class: this is the SAME `chrome.tabs.remove(<the
-    //       session's owned tabId>)` that the `close` op already performs
-    //       unconditionally, on an id the server vouched for moments earlier.
-    if (orphanTabId != null) {
+    //       out. It is best-effort by construction, not a guarantee. And because
+    //       nothing waits, THE FAILURE IS UNOBSERVABLE: `reapAttempted` below
+    //       reports that the call was ISSUED, never that a tab was closed. There
+    //       is no production counter for how often either happens, deliberately
+    //       — the breadcrumb slot execute() clobbers could not carry one.
+    //   (b) The OTHER orphan is untouched: if `chrome.tabs.create` hangs and
+    //       NEVER settles, execute() kills the op at EXEC_OP_BUDGET_MS and the
+    //       abandoned create later produces a tab this function never sees and
+    //       therefore cannot reap. (The SLOW-but-settling variant is the case
+    //       the elapsed check above handles: there we do resume, and we
+    //       deliberately do nothing.) Closing (b) needs the choke point to
+    //       signal abandonment back into the op, which it cannot do today.
+    //   (c) No new CAPABILITY: `chrome.tabs.remove(<the session's owned tabId>)`
+    //       is what the `close` op already performs unconditionally, on an id
+    //       the server vouched for moments earlier. Two honest differences,
+    //       though — `close` calls `forgetTab` FIRST and for a stated reason
+    //       (onRemoved's timing is not ours to control, and a stale entry is
+    //       inheritable by a recycled tabId), so the reap does the same below;
+    //       and unlike `close` this remove is issued WITHOUT the caller asking
+    //       for it, so `reapAttempted` exists to leave a trace in the envelope.
+    let reapAttempted = null;
+    if (orphanTabId != null && (Date.now() - startedAt) < loopTiming().execMs) {
+      forgetTab(orphanTabId);
       try {
         const p = chrome.tabs.remove(orphanTabId);
         if (p && typeof p.catch === "function") p.catch(() => {});
+        reapAttempted = orphanTabId;
       } catch (e) { /* a reap must never break the op it is cleaning up after */ }
     }
-    return { tabId: tab.id, url: tab.url || (cmd && cmd.url) || "about:blank" };
+    const out = { tabId: tab.id,
+                  url: tab.url || (cmd && cmd.url) || "about:blank" };
+    // Additive, and ATTEMPTED is the honest word — the remove is not awaited, so
+    // this can never mean "closed". Present only on the path that reaps, so an
+    // ordinary `open` envelope is byte-identical to before.
+    if (reapAttempted != null) out.reapAttempted = reapAttempted;
+    return out;
   },
 
   // Close the session's owned tab (the server injects its tabId). The server

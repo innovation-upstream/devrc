@@ -222,7 +222,7 @@ the browser-bridge and fixed at the source each time.
 
 ## Next steps (ranked)
 🔴 **Numbering is STABLE and is half a claim's identity — do not re-rank.** Items 1,
-2, 3 and 7 are DONE and are kept in place rather than renumbered.
+2, 3, 4 and 7 are DONE and are kept in place rather than renumbered.
 
 1. ✅ **DONE (#1316, squash `4379c27cf`, 2026-08-27)** — crops declared for `app-requests`
    and `playable-collections`; talos-infra #1297 closed.
@@ -241,12 +241,34 @@ the browser-bridge and fixed at the source each time.
    from "the CLI hung AFTER the reply". Watched firing in BOTH directions with two fake
    CLIs, not merely reasoned about. **See the new investigation block below — the cause
    may never have been this test at all.**
-4. **`open`'s fallthrough shares the suspected failure mode** — `devrc`,
-   `scripts/browser-bridge/extension/service_worker.js`. UNCHANGED. `chrome.tabs.create`
-   is another unbounded browser-process IPC, so a browser-wide stall leaks one tab per
-   `open` while returning success. 🔴 **THIS IS THE NEXT ITEM, and it is worth more than
-   its rank**: the #797 audit PREDICTED this shape would regenerate and #814 proved it
-   right, so this is the third instance of a class that is 2-for-2.
+4. ✅ **DONE (devrc PR #950)** — and, like item 3, **NOT as this item was framed**. The
+   item said to bound `chrome.tabs.create` as the third instance of the #797/#814
+   unbounded-await class. **Two measurements refused that remedy**, and the refusal is
+   the deliverable:
+   - `execute()`'s own rule forbids it: a local bound is granted only to *"an await
+     inside a `try` whose `catch` implements a RECOVERY (a second, working path) … If a
+     hung step has no alternative to fall through to, the choke point below is already
+     the right and only answer — do NOT add a bound for it."* `chrome.tabs.create` has
+     no second path, so a bound could only relabel `op_timeout:open` and leak the same
+     tab 2 s earlier.
+   - the harm the item NAMES — "leaks one tab per `open` while returning success" — is
+     the **reuse-probe fall-through**, which needs no hang in `create` at all, and
+     `server.py` had already written it down verbatim: *"deterministically ORPHANING
+     the live first tab. Nothing reclaims it; only a human closes it."*
+
+   So: `open` now **reaps** that orphan — timeout arm only, after the replacement
+   exists, fire-and-forget, and **only while the op is still alive**. That last clause
+   was NOT in the first draft; a blind audit found the tail, and it was reproduced
+   before being fixed: `execute()` races the op but cannot cancel it, so a merely SLOW
+   `chrome.tabs.create` resumes `open` after `op_timeout:open` has already been
+   answered — and on that path the server KEEPS ownership of a tab that is still live,
+   so a late reap destroys it and strands the session on a dead id.
+   🔴 **What is still open and deliberately out of scope**: the OTHER orphan. A
+   `chrome.tabs.create` that hangs and never settles is killed at
+   `EXEC_OP_BUDGET_MS` while the abandoned create later produces a tab `open` never
+   sees. Closing it needs the choke point to signal abandonment back into the op, which
+   it has no mechanism for. **If you pick that up, it is a choke-point change, not
+   another budget constant** — re-read `execute()`'s narrow-exception rule first.
 5. **Removing app-capture's raise** — `civitai/talos-infra`. 🔴 **PREMISE CHANGED**: the
    raise is not inert, only its i3 half is withheld. Re-scope before working it.
 6. **clawgate #358** — filed earlier, picked up by a different session. Not ours; live

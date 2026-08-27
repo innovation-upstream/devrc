@@ -354,7 +354,10 @@ test("open's reuse-probe bound is ordered against the work it wraps (the op-ceil
   assert.ok(REUSE_TAB_BUDGET_MS >= 1000,
             `reuse probe (${REUSE_TAB_BUDGET_MS}ms) is below the 1000ms floor. Going `
             + `LOW orphans live tabs: a slow-but-healthy probe falls through to a `
-            + `fresh tab and nothing reclaims the old one. The floor is conservative `
+            + `fresh tab, and the reap that reclaims the old one is best-effort and `
+            + `fire-and-forget — least likely to land under exactly the stall that `
+            + `caused the slow probe, and it costs a real close+create either way. `
+            + `The floor is conservative `
             + `(2x activate's measured ~350-500ms round trip), not calibrated — if `
             + `you have measured chrome.tabs.get, replace it with the real band`);
 });
