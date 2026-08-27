@@ -27,26 +27,34 @@ the browser-bridge and fixed at the source each time.
   | #814 | `open`'s `chrome.tabs.get` — same shape, the audit's predicted regeneration | `REUSE_TAB_BUDGET_MS = 2000` | `b242fc2df` |
   | #820 | test safety-nets TIGHTER than the CLI's own `curl -m 60`, at 31 sites | `CLI_TIMEOUT_S = 300` | `366de0912` |
 
-- **talos-infra issues filed by the earlier session and still on record:** #1288
-  (`app-requests` list semantics), #1289 (the dropped `SHARED_LIST_RESULT`, see the
-  open investigation below), #1293, #1297 (the crop/render work — items 2 and 3 now
-  closed, item 1 open; see Next steps 1).
-- **NEW this session: talos-infra #1306 MERGED** as squash `0e4fc872a` (2026-08-26).
-  It removed two RETRACTED claims that were still being PRINTED at runtime by
-  `app-capture`, fixed the gate that was keeping one of them alive, and closed
-  items 2 and 3 of talos-infra **#1297**.
-  - Verified on `origin/trunk` **by content** (a squash merge never makes the branch
-    head an ancestor, so ancestry proves nothing): `5/5 deadlock` = **0** occurrences,
-    `STALE BRIDGE BUILD` present, `M112d` present, `TWO CAUSES` present.
-  - Gate `tekton / gitops-ci` = success on the exact head SHA, `total_count: 1`.
-  - Branch deleted; worktree removed.
-- **Four adversarial audit rounds ran on that PR, and every round found real defects —
-  each one introduced by the round before it.** The mutation battery caught none of
-  them. Details in Gotchas below; this is the most transferable output of the session.
+- **talos-infra issues filed by earlier sessions:** #1288 (`app-requests` list semantics),
+  #1289 (the dropped `SHARED_LIST_RESULT`, see the open investigation below), #1293.
+  **#1297 is now CLOSED** — all three of its items are done.
+- **#1306 MERGED** as squash `0e4fc872a` (2026-08-26): removed two RETRACTED claims that
+  were still being PRINTED at runtime by `app-capture`, and closed #1297 items 2 and 3.
+- 🔴 **NEW 2026-08-27: talos-infra #1316 MERGED** as squash `4379c27cf` — #1297 item 1,
+  the frame-relative declared crop. Verified on `origin/trunk` **by content** (a squash
+  merge never makes the branch head an ancestor, so ancestry proves nothing):
+  `RECT_Y_APP_FRAME` ×8 in `frame.py`, the iframe-bottom bound present, `yFrom` in
+  `app-requests.json`, `_measuredGeometry` in `playable-collections.json`, `F13d` in the
+  suite, `M181` in the battery. `tekton / gitops-ci` = SUCCESS on the head SHA,
+  `total_count: 1` (0 is NEVER settled in this repo). Branch left undeleted; worktree
+  removed.
+  - **What it added:** a THIRD crop form — `crop.rect` with `"yFrom": "appFrame"` used
+    *alongside* `fromAppFrame`, anchoring only `y` to the app iframe's top edge. Shipped
+    crops: `app-requests` `x=446 y=507 w=804 h=524`; `playable-collections`
+    `x=306 y=0 w=1084 h=573`. Both re-run end to end with `--render`, both states clean,
+    store-bounds green. **Nothing was attached to any listing.**
+  - Suite **142 PASS / 0 FAIL**; mutants M160–M181 (M176 retired with its reason
+    recorded), all killed by their own declared gate.
+- **NINE audit rounds ran on #1316; round 9 was clean and ended the ladder.** The
+  production code has been unchanged since round 4 — every finding after that was a
+  claim in prose or coverage bookkeeping wider than the code. Details in Gotchas.
 - **IN FLIGHT: nothing of ours.** No open PR, no half-written branch, no worktree.
-- 🔴 **`--repo devrc` primary clone is on `main`, clean** apart from two pre-existing
-  untracked files that are not ours (`nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`,
-  `scripts/dl-router/tests/load_test_store.sh`).
+- 🔴 **`--repo devrc` primary clone is on `main`** with two pre-existing untracked/deleted
+  files that are **not ours** (`nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`,
+  and a deletion of `claudedocs/handoff-discord-embed-ext-rescue.md`). Do not "rescue" or
+  restore either.
 
 ## Open investigations — live diagnosis state
 
@@ -129,41 +137,70 @@ the browser-bridge and fixed at the source each time.
   on Brave rests on this same residual. `plan.py` now says so instead of claiming the
   step "STEALS THE OPERATOR'S SCREEN". Behaviour deliberately unchanged.
 
-## Next steps (ranked)
-🔴 **Numbering is STABLE and is half a claim's identity — do not re-rank.** Items 2
-and 3 of the original list are DONE and are kept in place rather than renumbered.
+### `sensei`'s declared `y: 97` — which side of the iframe top is it on?
+- **Symptom + exact repro:** `sensei.json`'s `crop._notFromAppFrame` asserts `y: 97` is
+  BELOW the iframe's top edge, clipping the app's own buzz bar. Measured live 2026-08-26
+  on the same `apps/run/<slug>` shell (via `app-requests`): iframe top = **141** with the
+  banner present, banner rows **68…104** (height 37), breadcrumb ends 139. So 97 is
+  *inside the banner* — above the app.
+- **Observed (with values):** probe answer for two other apps on that shell,
+  `APPFRAME_RECT:141,64,-1,1709,1255`, from `capture.sh`'s own `$st.rect.json`. Row scan of
+  `top.png` at x=w/2: page bg to 67, banner 68–104 (`#29a3bc`-ish), breadcrumb 105–139,
+  page bg 140, iframe from 141. sensei's own rect is dated **2026-08-15** and was measured
+  on a 1709x1255 capture.
+- **Ruled out:** that the shell differs per app — all seven recipes' `url` is
+  `civitai.com/apps/run/<slug>`, enumerated not sampled. That the fixtures answer it —
+  they are 1709x1314 and pin 163/199, both superseded (the iframe top moved up ~58 px
+  between 2026-08-22 and 2026-08-26).
+- **Leading hypothesis:** the recipe's note is backwards and has been for a while; the
+  shipped crop's top rows are page chrome. NOT established — the layout the rect was
+  chosen on no longer exists to measure.
+- **Next probe:** load `civitai.com/apps/run/sensei`, wait for the app to actually render
+  (the ready gate, not a bare `--wake`), then run
+  `frame.py frame-rect-js --recipe <sensei.json>` in that tab and read the top. One
+  attempt on 2026-08-26 returned `APPFRAME_ABSENT` with **zero** iframes on the page after
+  a 12 s wake — an observation about one un-gated load, not a diagnosis.
 
-1. **Declare crops for `app-requests` + `playable-collections`** — `civitai/talos-infra`,
-   `.claude/skills/app-capture/scripts/{frame.py,recipes/*.json}`. **talos-infra #1297**,
-   still open with a stated closing condition. Design is SETTLED and smaller than it
-   looks: **the rewards-banner shift is purely VERTICAL** — measured on
-   `5-mb-combinations.png` vs the `bannershift.py` cut of the same capture, `x=252`,
-   `w=1200`, `h=312` are byte-identical in both layouts and only `y` moves, 194 → 230
-   (exactly +36). So a declared rect needs only its **y** anchored to the iframe top,
-   and the probe ALREADY reports that (`top`, in `(top, bottom, right, vw, vh)`) — no
-   probe or token change. Work: make `rect` frame-relative when `fromAppFrame` is true
-   (lift the exclusion for THAT FORM ONLY — an absolute rect + `fromAppFrame` must stay
-   refused), gate it by measuring the same declared rect in both banner layouts and
-   asserting the resolved crop is identical, then a LIVE `--render` run to pick crops
-   ending on a clean row boundary rather than mid-row.
-   ⚠ `playable-collections`' `mine` state was last measured populated **2026-08-16** and
-   has NOT been re-measured. If it is empty now, that state shoots an empty screen.
+## Next steps (ranked)
+🔴 **Numbering is STABLE and is half a claim's identity — do not re-rank.** Items 1 and 2
+are DONE and are kept in place rather than renumbered.
+
+1. ✅ **DONE (#1316, squash `4379c27cf`, 2026-08-27)** — crops declared for `app-requests`
+   and `playable-collections`; #1297 closed.
 2. ✅ **DONE (#1306)** — `plan.py`/`capture.sh` no longer print the two retracted claims.
 3. **Fix the `test_browser_cli_backs_off_on_429` stall at its source** — `devrc`,
-   `scripts/browser-bridge/tests/test_server.py`. UNCHANGED this session; see the
+   `scripts/browser-bridge/tests/test_server.py`. UNCHANGED for three sessions; see the
    investigation block already in this doc. #820 only stopped the test preempting the
    CLI's own timeout — the stall itself is still UNFIXED and UNMEASURED.
 4. **`open`'s fallthrough shares the suspected failure mode** — `devrc`,
-   `scripts/browser-bridge/extension/service_worker.js`. UNCHANGED this session.
-   `chrome.tabs.create` is another unbounded browser-process IPC, so a browser-wide
-   stall leaks one tab per `open` while returning success.
+   `scripts/browser-bridge/extension/service_worker.js`. UNCHANGED. `chrome.tabs.create`
+   is another unbounded browser-process IPC, so a browser-wide stall leaks one tab per
+   `open` while returning success.
 5. **Removing app-capture's raise** — `civitai/talos-infra`. 🔴 **THIS ITEM'S PREMISE
-   CHANGED: it is no longer "removing an INERT raise".** The raise is not inert (see
-   the open investigation above); only its i3 half is withheld. Removing it would
-   change which capture path is taken. Re-scope before working it.
-6. **clawgate #358** — filed earlier, picked up by a different session. Not ours; its
-   live state was NOT re-checked this session, so treat that as unknown rather than
-   as still-in-flight.
+   CHANGED: it is no longer "removing an INERT raise".** The raise is not inert (see the
+   open investigation); only its i3 half is withheld. Removing it would change which
+   capture path is taken. Re-scope before working it.
+6. **clawgate #358** — filed earlier, picked up by a different session. Not ours; its live
+   state was NOT re-checked, so treat that as unknown rather than as still-in-flight.
+7. 🔴 **NEW — settle whether `sensei`'s SHIPPED crop is currently wrong** —
+   `civitai/talos-infra`, `.claude/skills/app-capture/scripts/recipes/sensei.json`.
+   Surfaced by #1316 and deliberately not chased there (out of scope). `sensei.json` says
+   its `y: 97` is *below* the iframe's top edge, "because it also clips the app's OWN
+   partially-visible buzz bar". On today's shell that cannot be true — the iframe starts
+   at **141** and the banner occupies rows **68…104**, so 97 lands *inside the banner*,
+   above the app, where there is no app element to clip. If it is above the iframe top,
+   the shipped store crop's top rows are **page chrome, not app**, on a live listing.
+   ⚠ A plain re-shoot does NOT answer it: `capture.sh` only runs the app-frame probe when
+   `crop.fromAppFrame` is set and sensei deliberately does not set it. Run the probe by
+   hand against the loaded tab:
+   `.claude/skills/app-capture/scripts/frame.py frame-rect-js --recipe <sensei.json>`,
+   evaluate it there, then compare 97 against the reported top.
+   **Closing condition:** `97 >= top` (recipe's note right — delete the open block in
+   `.claude/skills/app-capture/reference/cropping-and-attaching.md`) or `97 < top` (fix
+   the crop AND the note together).
+   ⚠ Attempted 2026-08-26 and NOT obtained: the page rendered with **zero** iframes on a
+   12 s wake, so the probe returned `APPFRAME_ABSENT`. That is one un-gated load, not a
+   diagnosis — the app-ready gate exists for this and was not used.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`browser ping` → `buildMarker` is the ONLY field describing RUNNING code.** Both
@@ -254,24 +291,76 @@ and 3 of the original list are DONE and are kept in place rather than renumbered
   base-clone sync HOOK, not WIP.** Verified: the working copies hash-match PRIOR
   `origin/trunk` commits (`aa368b269`, `e3d62238a`). Do not "rescue" them.
 
+- 🔴 **NINE AUDIT ROUNDS ON #1316, AND THE PRODUCTION CODE WAS UNCHANGED AFTER ROUND 4.**
+  Every finding from round 5 on was *a claim in prose or coverage bookkeeping wider than
+  the code*. Two are worth carrying:
+  - **Round 5 — the harm was priced from the PRODUCING site.** An audit said a walked
+    recipe ships a crop with 17 rows of page furniture. Measured against the real capture
+    and the real probe answer, it does not: it `REFUSE`s on its next live run. The static
+    gate is a drift check; `declared_box`'s live bound is the safety property, because it
+    bounds by the edge THE PROBE REPORTED rather than any number a recipe wrote down.
+    Three rounds of hardening the static gate were three rounds on the wrong object.
+  - **Rounds 3–4 — adding witnesses to a SELF-WITNESSING gate closes nothing.** A record
+    the author writes, checked against another record the same author writes in the same
+    file, raises the price of a quiet edit from two numbers to three. No static gate can
+    check provenance. Stop adding witnesses; state the scope instead.
+- 🔴 **A COVERAGE LEDGER IS A CLAIM LIKE ANY OTHER, and "unreachable" is the dangerous
+  word.** #1316's own ledger comment (a) got which-mutant-pins-which-branch wrong once,
+  (b) then claimed completeness *inside the comment written to prevent completeness
+  claims*, and (c) excused a guard as needing "a fixture this suite does not have" one
+  paragraph from the counterexample — it took one `sed`. Each entry is now verified by
+  neutering ONLY that branch and confirming its mutant SURVIVES.
+- 🔴 **AN ATTRIBUTION PROBE MUST ISOLATE THE GUARD'S REPORT AND KEEP ITS `continue`.**
+  Deleting a whole `if …: … continue` block removes control flow the code below depends
+  on, so the mutant dies of a `KeyError` and the ledger line reads as broken when it is
+  correct. This is the repo's isolate-the-mutation rule, hit *inside* the comment that
+  tells you to run the check.
+- 🔴 **NEVER RUN TWO MUTATION BATTERIES AT ONCE IN talos-infra.** Measured this session:
+  64 gates exited **127** and the battery's self-test reported the inert-edit control as
+  MISATTRIBUTED rather than scoring it. `python3` here resolves through direnv to a shared
+  clone's `.venv`, which went away mid-run. Seen **three times** on this PR. Widespread
+  `127` is the instrument, not the code — re-run serially before believing anything.
+- 🔴 **The battery's backtick self-test fired THREE times on #1316, every time on a mutant
+  label I had just written, every time before any mutant ran.** An unescaped backtick in
+  an `apply_mutant` label is a command substitution. Three for three; never once the code.
+- **A mutant that drops a `%`-format specifier is a FAKE KILL that `py_compile` cannot
+  see.** M168's first form removed a `%r`, leaving the args tuple one long — `%` raises at
+  runtime and **every** gate in that family goes red (6 FAIL), measuring the crash, not
+  the message. Keep the specifier count when mutating a format string.
+- **A fixture must be RE-DERIVED when a bound moves.** Adding the iframe-bottom bound
+  immediately broke F13's "legal in one layout, refused in the other" case, whose numbers
+  were chosen against the *frame* height. It stopped discriminating rather than failing
+  loudly — the suite caught it, not me.
+- **The host page's top stack MOVED ~58 px between 2026-08-22 and 2026-08-26** (iframe top
+  199→141 with the banner). `frame.py`'s header windows (163/199) are a property of the
+  FIXTURES and are no longer current live. Do not "correct" a recipe to them. Note the
+  measured quantity is the iframe TOP — where in the stack the height went was never
+  measured, and the breadcrumb sits BELOW the banner, so it could be either side.
+- **`playable-collections`' `mine` state is a MECHANISM TEST, not a shippable asset.**
+  Re-measured populated 2026-08-26 (2 private collections, one with 0 items) — but it
+  photographs the operator's own account, which the shelf-life rules forbid.
+
 ## How to verify
 ```bash
-# 1. #1306 landed, by CONTENT (squash merge — ancestry proves nothing)
+# 1. #1316 landed, by CONTENT (squash merge — ancestry proves nothing)
 git -C $DATAPACKET fetch origin trunk -q
-git -C $DATAPACKET show origin/trunk:.claude/skills/app-capture/scripts/plan.py   | grep -c '5/5 deadlock)"'   # 0
-git -C $DATAPACKET show origin/trunk:.claude/skills/app-capture/scripts/capture.sh | grep -c 'STALE BRIDGE BUILD' # 1
-git -C $DATAPACKET show origin/trunk:tests/mutants-app-capture.sh                  | grep -c 'M112d'            # 2
+S=.claude/skills/app-capture/scripts
+git -C $DATAPACKET show origin/trunk:$S/frame.py | grep -c RECT_Y_APP_FRAME          # 8
+git -C $DATAPACKET show origin/trunk:$S/recipes/app-requests.json | grep -c yFrom     # 2
+git -C $DATAPACKET show origin/trunk:tests/mutants-app-capture.sh | grep -c M181      # 2
 
-# 2. the suite and the gate that was walked three times
+# 2. the suite and the battery, from a clean worktree at trunk
 WT=/tmp/wt-verify
 git -C $DATAPACKET worktree add --detach "$WT" origin/trunk
-(cd "$WT" && bash tests/run-tests-app-capture.sh | tail -3)                 # 138 PASS / 0 FAIL
-(cd "$WT" && MUTANTS_ONLY="M112c M112d" bash tests/mutants-app-capture.sh)  # both KILLED, by G14 alone
-# 🔴 at most 2 mutants per run — 3+ exceed a 570s command timeout
+(cd "$WT" && bash tests/run-tests-app-capture.sh | tail -3)          # 142 PASS / 0 FAIL
+(cd "$WT" && bash scripts/validate-skill-paths.sh --all | tail -2)   # 1498 refs, PASS
+(cd "$WT" && MUTANTS_ONLY="M179 M181" bash tests/mutants-app-capture.sh)  # both KILLED
 git -C $DATAPACKET worktree remove --force "$WT"
+# 🔴 at most ~4 mutants per run, and NEVER two batteries at once (see Gotchas)
 
-# 3. M112d is DISCRIMINATING, not merely passing — the check that matters
-#    revert norm_g14's range to /This is a STALE BRIDGE BUILD/,/FULL Brave restart is the reliable path/p
-#    then MUTANTS_ONLY="M112d" must report SURVIVED. Restore by DIFFING the file,
-#    not by a grep count (a pattern containing $ silently reports 0 on a correct file).
+# 3. the crop form actually resolves — the claim, on the fixtures
+#    (F13 does this and compares the two layouts' PIXELS; this is the eyeball version)
+(cd "$WT" && python3 $S/frame.py measure tests/fixtures/app-capture/5-mb-combinations.png \
+   --recipe $S/recipes/app-requests.json \
+   --app-frame-rect 'APPFRAME_RECT:141,64,-1,1709,1314')   # box.y = 141 + 507 = 648
 ```
