@@ -20,16 +20,27 @@ LADDER, not the PR**. Session `4719a2f0`, `feat/whoami-json-profile-fields`.
 | after the last production change | 171k output tokens, 4 h 10 m |
 | rounds that returned CLEAN | **zero** |
 
-Churn attribution, from the branch's own fix commits (`git show --numstat`, test files vs the rest):
+Churn attribution, from the branch's own fix commits. **Method, because the classifier decides the
+answer**: `git show --numstat <sha>`, summing `additions + deletions`, each path classed by an
+explicit rule — TEST if a path component is `test(s)`/`spec(s)`/`e2e`/`testdata`/`__tests__`/
+`cypress` or the filename matches `*_test.*` / `*.{test,spec,cy}.*` / `*Test.*`; DOC if `*.md`/
+`*.txt`/`*.rst` or under `doc(s)/`; PRODUCTION otherwise.
 
-| rounds | test/guard lines | production lines |
-|---|---|---|
-| feature + rounds 1–3 | 1,061 | 332 |
-| **rounds 4–10** | **1,002** | **0** |
+| rounds | test | doc | production |
+|---|---|---|---|
+| feature + rounds 1–3 | 961 | 110 | 222 |
+| **rounds 4–10** | **1,002** | **0** | **0** |
 
-The last production change was round 3's `d2ec92d` (32 lines — a fifth render path that was
-structurally unreachable from the golden table, a real find). Rounds 4–10 each found something real
-too; all of it concerned guards that an earlier round of the same ladder had written.
+🔴 An earlier version of this table read `1,061 / 332` and was wrong twice, both times in the
+direction that flatters the argument: the test column was mis-added, and the production column
+folded 110 lines of release-notes markdown into "production". Docs are not production — that is the
+same classifier question the gate itself turns on, which is why the rule in the body says to read
+the file list rather than trust a pathspec.
+
+The last production change was round 3's `d2ec92d` — **18 lines of `internal/appapi/appblocks.go`**
+(a fifth render path, structurally unreachable from the golden table: a real find). Rounds 4–10 each
+found something real too; all of it concerned guards that an earlier round of the same ladder had
+written.
 
 Two things this case establishes, and one it does not:
 
@@ -85,10 +96,31 @@ counts*.
 
 ---
 
+---
+
+## Mutation variants that delete NOTHING
+
+Behind **"deletion-mutants are the EASY half"**. Across one PR, four semantically broken variants
+that delete nothing all passed a suite its author had just "mutation-verified":
+
+- **swap the operands** of a merge/concat — inverts which side wins;
+- **invert the branches** of a CASE/ternary — here it turned a merge into an unconditional WIPE,
+  strictly worse than the bug being fixed;
+- **comment the guard out** — the clause is dead but the TEXT is still present, so every regex
+  looking for it still matches;
+- **re-bind a stale value** — literally the original defect, reintroduced.
+
+**Enumerate mutants from the expression's semantic failure modes** — operand order, branch order,
+comment-out, wrong bind, off-by-one — not from "delete the thing I was already thinking about". The
+`{}` fixture that hid one of these made "bind just the patch" and "rebind the whole stale snapshot"
+byte-identical.
+
+---
+
 ## Where the rest lives
 
 - The **rejected numeric cap** and devrc #505's ReDoS-introduced-by-the-fix evidence: stated inline
-  in `../SKILL.md` (it is load-bearing there) and in `claude/RULES-ARCHIVE.md` →
+  in the skill body (it is load-bearing there) and in `~/.claude/RULES-ARCHIVE.md` →
   `audit-fix-resets-gate`.
-- The retraction of the original "measured waste" justification: `claude/RULES-ARCHIVE.md` →
-  `audit-fix-resets-gate`, and pinned by `scripts/tests/test_audit_ladder_stop_rule.py`.
+- The retraction of the original "measured waste" justification: `~/.claude/RULES-ARCHIVE.md` →
+  `audit-fix-resets-gate`, and pinned by `devrc/scripts/tests/test_audit_ladder_stop_rule.py`.
