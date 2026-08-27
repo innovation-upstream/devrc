@@ -12,6 +12,7 @@
     "file degrades to no site_notes and never breaks a browser op."
   ],
   "sites": {
+    "civit.ai": "civit.ai.md",
     "civitai.com": "civitai.com.md"
   }
 }
