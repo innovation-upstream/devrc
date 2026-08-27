@@ -311,8 +311,8 @@ recorded as SURVIVED off an 11-passed run.
        into the sum so nothing escapes") ..... 1 failed
   S4   reworded-rule regression shape deleted   1 failed
 
-  added after the ninth audit -- two pins that certified PRESENCE without
-  certifying the instruction around them:
+  added after the ninth audit -- one pin that certified PRESENCE without
+  certifying the instruction around it, and one block with no pin at all:
   N1   delta-bullet HEAD inverted to "do NOT
        hunt", pinned phrase byte-identical ... 1 failed
   N2   the other regression shapes deleted,
@@ -560,14 +560,15 @@ SKILL_CLASSIFIER_METHOD = (
     "payload or scaffolding. **Ambiguous is not zero**: the gate does not fire, "
     "and the ladder continues."
 )
-# The pathspec facts, kept because they are the reason the method is a judgement
-# and not a pattern. `inspector` is dropped by `*spec*`, NOT by `*test*` -- an
-# earlier version of this sentence attributed all three to `*test*` and was
-# wrong on its own third example.
+# The pathspec prohibition. The MEASUREMENT behind it moved to the reference
+# file (pinned there as EVIDENCE_PATHSPEC_MEASUREMENT) when the body needed the
+# bytes for two worktree hazards; what stays here is the rule a reader acts on.
+# Keep both: an earlier version of the measurement attributed all three
+# directory names to `*test*` and was wrong on its own third example, which is
+# why the numbers are pinned rather than paraphrased.
 SKILL_GATE_NO_PATHSPEC = (
-    "Nor will a pathspec do it: `':!*test*'` swallows `attestation/` and "
-    "`latest/`, `':!*spec*'` swallows `inspector/`, and both keep "
-    "`FooTest.java` and `*.cy.ts` (measured)."
+    "Nor will a pathspec do it — measured wrong in both directions on ordinary "
+    "names (reference file)."
 )
 
 # The operator instructions this rule ships -- count them below rather than
@@ -612,7 +613,7 @@ SKILL_STDERR_CAPTURE = (
 # not that the instruction around it still tells the re-auditor to hunt.
 # Measured with only the phrase pinned -- inverting the bullet head to "do NOT
 # spend the round hunting regressions the fix round itself introduced", and
-# deleting the other two regression shapes, were both GREEN with the phrase
+# deleting the other three regression shapes, were both GREEN with the phrase
 # byte-identical. Same lesson as EVIDENCE_LESSON_BC, one file over.
 SKILL_REWORD_REGRESSION = (
     "- hunt for **regressions the fix round itself introduced** — the guard "
@@ -621,12 +622,25 @@ SKILL_REWORD_REGRESSION = (
     "narrower on another**;"
 )
 # 🔴 THE ENVIRONMENT BRIEF, pinned whole. It is payload -- what the operator is
-# told to put in front of the auditor -- and it was reworded in FOUR of this
-# PR's nine commits, every time under byte pressure. Measured unpinned: gutting
+# told to put in front of the auditor -- and it was reworded in SIX of #900's
+# eleven commits (four of the eight FIX commits), every one a shave until the
+# last, which restored what a shave had taken. Measured unpinned: gutting
 # its lead to "do not bother briefing the auditor", deleting the zsh word-split
 # warning, and re-applying the exact worktree-duty regression round 8 diagnosed
 # (shifting "verify your worktree clean YOURSELF" back to "leave your worktree
 # clean", i.e. from the operator to the auditee) were ALL green.
+# 🔴 The two worktree hazards, pinned because each is a rule whose DELETION is
+# silent and whose inversion reads plausible. `isolation: "worktree"` builds
+# from the CWD's repo, so dispatching it for a PR in another repo worktrees the
+# wrong one -- and the failure is quiet: the agent either reports a briefed file
+# missing, or silently audits the wrong tree. Measured: with the caveat
+# unpinned, replacing it with "use `isolation: \"worktree\"` for any repo" was
+# green.
+SKILL_CROSS_REPO_WORKTREE = (
+    "🔴 `isolation: \"worktree\"` worktrees the **cwd's** repo, not the PR's — "
+    "for a PR in another repo have the agent run `git -C <that-repo> worktree "
+    "add …` itself."
+)
 SKILL_ENVIRONMENT_BRIEF = (
     "**Brief the auditor on the environment, or it will report false findings** "
     "— a fresh worktree is not a working checkout, and an auditor hitting this "
@@ -636,7 +650,9 @@ SKILL_ENVIRONMENT_BRIEF = (
     "**whether the base branch is already red** and *at which file*; and that "
     "**zsh does not word-split unquoted parameters**, so `eslint $FILES` checks "
     "**zero** files and prints a confident PASS. Have it mutate only in a `cp "
-    "-a` copy, and verify your worktree clean yourself at the end."
+    "-a` copy — **`rm -f <copy>/.git` first**, since a worktree's is a FILE "
+    "pointing at the real git dir, so a commit in the copy lands on your branch "
+    "— and verify your worktree clean yourself at the end."
 )
 SKILL_LEDGER = (
     "**Carry the ledger in every round's summary**: `round N · payload lines "
@@ -680,6 +696,15 @@ EVIDENCE_SHAPE_C_ROW = (
 EVIDENCE_PR_POPULATION_ROW = (
     "| `gh pr list --state merged --limit 40` (sorts by CREATED) | 24 | 16 | 7 "
     "| 1 |"
+)
+# 🔴 The pathspec measurement, demoted from the body in the worktree-hazards
+# follow-up. The body now carries only the prohibition, so this file is where a
+# reader checks WHY -- and an unpinned measurement in this file has already
+# drifted twice (Z8, and shape A before U1).
+EVIDENCE_PATHSPEC_MEASUREMENT = (
+    "so `':!*test*'` swallows `pkg/attestation/verify.go` and "
+    "`api/latest/handler.go`, `':!*spec*'` swallows `internal/inspector/"
+    "scan.go`, and the two genuine tests survive as \"production\""
 )
 EVIDENCE_SHAPE_A_ROW = (
     "| A. clean `merge main` brings 200 upstream lines; the round's own fix is "
@@ -977,6 +1002,11 @@ def test_the_attribution_measurement_survives_where_the_skill_routes_to_it():
     _assert_pinned_once(
         EVIDENCE_MD, EVIDENCE_SHAPE_A_ROW, "the shape-A range measurement"
     )
+    _assert_pinned_once(
+        EVIDENCE_MD,
+        EVIDENCE_PATHSPEC_MEASUREMENT,
+        "the pathspec counter-measurement",
+    )
     _assert_pinned_once(EVIDENCE_MD, EVIDENCE_LESSON_A, "the shape-A lesson")
     _assert_pinned_once(EVIDENCE_MD, EVIDENCE_LESSON_BC, "the shape-B/C lesson")
     _assert_pinned_once(
@@ -1034,7 +1064,9 @@ def test_the_gate_pins_its_MECHANISM_not_only_its_decision():
 
 
 def test_the_operator_instructions_the_gate_depends_on_are_pinned():
-    """The instructions a reader ACTS on, each of which survived deletion.
+    """The instructions a reader ACTS on -- count the asserts, not this sentence.
+
+    Each was added after a mutant deleted or inverted it with the suite green.
 
     Neither is decorative. The ledger's X IS the number the gate reads -- it
     carries the per-round count into the summary a human actually sees, which is
@@ -1058,6 +1090,9 @@ def test_the_operator_instructions_the_gate_depends_on_are_pinned():
     )
     _assert_pinned_once(
         SKILL_MD, SKILL_ENVIRONMENT_BRIEF, "the environment brief"
+    )
+    _assert_pinned_once(
+        SKILL_MD, SKILL_CROSS_REPO_WORKTREE, "the cross-repo worktree hazard"
     )
 
 

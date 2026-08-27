@@ -123,6 +123,18 @@ plus the classifier above, and the answer changes with the window.
 
 ---
 
+## 2026-08-26 · why the classifier is a JUDGEMENT, not a pathspec
+
+Behind **"the unit is THIS PR's PAYLOAD, never a file extension"**. Measured on a scratch repo
+(git 2.55.0), `git ls-files -- ':!*_test.*' ':!*test*' ':!*spec*'` counts as PRODUCTION only
+`cypress/e2e/login.cy.ts`, `src/main/java/FooTest.java` and `main.go` — so `':!*test*'` swallows
+`pkg/attestation/verify.go` and `api/latest/handler.go`, `':!*spec*'` swallows
+`internal/inspector/scan.go`, and the two genuine tests survive as "production". Wrong in both
+directions, on directory names any repo might have. `':!*_test.*'` is entirely subsumed by
+`':!*test*'`, and docs are excluded by none of them.
+
+---
+
 ## 2026-08-26 · which range form counts a ROUND's payload — measured across four shapes
 
 The measurement behind the gate's command. Each shape is a throwaway repo (git 2.55.0); the numbers
@@ -166,6 +178,15 @@ that delete nothing all passed a suite its author had just "mutation-verified":
 - **comment the guard out** — the clause is dead but the TEXT is still present (`--`, `/* */`), so
   every regex looking for it still matches;
 - **re-bind a stale value** — literally the original defect, reintroduced.
+
+Two rules the skill body points here for, because they bind the AUTHOR of a guard more than the
+reader of a PR:
+
+- **A fixture of empty or default values collapses distinct implementations into identical output.**
+  One mutant survived *only* because the fixture was `{}`, which made "bind just the patch" and
+  "rebind the whole stale snapshot" byte-identical. Give fixtures non-default sibling values.
+- **A review fix RESETS the gate** (`claude/RULES.md`): re-run the FULL mutant battery after every
+  fix round *and* after any reformat — not just the mutant for the thing you changed.
 
 What would have caught all four: enumerating mutants from the expression's own semantic failure
 modes — operand order, branch order, comment-out, wrong bind, off-by-one — rather than from "delete

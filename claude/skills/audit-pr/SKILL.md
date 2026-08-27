@@ -13,7 +13,9 @@ Case histories and the measurements behind the ladder rules:
 Target: `$ARGUMENTS`:
 - A number → that GitHub PR (`gh pr diff <n>`, `gh pr view <n>`).
 - `current` / empty → the current branch's diff vs its base/trunk.
-- Several numbers → audit each, one subagent per PR **with `isolation: "worktree"`** so they don't collide.
+- Several numbers → audit each, one subagent per PR so they don't collide. 🔴 `isolation:
+  "worktree"` worktrees the **cwd's** repo, not the PR's — for a PR in another repo have the
+  agent run `git -C <that-repo> worktree add …` itself.
 
 ## What to do
 
@@ -27,7 +29,9 @@ not a working checkout, and an auditor hitting this cold blames the PR. Whicheve
 **monorepo `node_modules`** may need linking per package, not just at the root; **whether the base
 branch is already red** and *at which file*; and that **zsh does not word-split unquoted
 parameters**, so `eslint $FILES` checks **zero** files and prints a confident PASS. Have it mutate
-only in a `cp -a` copy, and verify your worktree clean yourself at the end.
+only in a `cp -a` copy — **`rm -f <copy>/.git` first**, since a worktree's is a FILE pointing at the
+real git dir, so a commit in the copy lands on your branch — and verify your worktree clean
+yourself at the end.
 
 **Audit for:**
 1. **Risks** — what breaks in production.
@@ -43,8 +47,8 @@ only in a `cp -a` copy, and verify your worktree clean yourself at the end.
 ## After the fixes: RE-AUDIT THE DELTA (don't assume closure)
 
 **A fix round frequently introduces the next finding** — one feature took **five rounds**, each
-caused by the previous fix, none caught by the mechanical gate. Once they are fixed, dispatch a
-**delta re-audit** against the **previously-audited tip**, not the whole PR again.
+caused by the previous fix, none caught by the mechanical gate. Then dispatch a **delta re-audit**
+against the **previously-audited tip**, not the whole PR again.
 
 Ask the re-auditor to:
 - state **per prior finding**: actually fixed / partially / not / **made worse**;
@@ -58,7 +62,7 @@ Ask the re-auditor to:
 
 **Carry the ledger in every round's summary**: `round N · payload lines changed THIS round: X (since
 round 1: Y) · elapsed: Z`. X is what the gate below reads; without it the flattening shows only in
-hindsight — on #498 the plateau was diagnosed at round 9, six rounds late.
+hindsight — on #498 the plateau was diagnosed six rounds late.
 
 ### 🔴 A clean round ENDS the ladder. Never run another round to confirm a clean round.
 
@@ -68,12 +72,12 @@ not on the author saying it's done.
 
 🔴 **A "safe to merge" VERDICT is not the stop signal — the FINDINGS are.** #804's rounds **5, 6 and
 7 each returned "safe to merge" and each still reported real defects** that were then fixed — the
-last a latch that read as pinned and was vacuous in both directions. A ladder keyed to the verdict
-stops at round 5 and ships it.
+last a latch that read as pinned and was vacuous both ways. A verdict-keyed ladder stops at round 5
+and ships it.
 
 ⚠ **#804 is NOT an example of a wasted round, and neither is any other PR cited here.** Every one of
-its eight rounds produced findings that needed fixing. This is a forward rule with a demonstrated
-near-miss — do not cite it as a fix for measured waste.
+its eight rounds produced findings that needed fixing. A forward rule with a demonstrated
+near-miss — not a fix for measured waste.
 
 🔴 **This is NOT a round cap, and a cap was rejected.** The count is set by
 FINDINGS, never by a number, and #505 is why: its round 2 opens *"Round 1 fixed six findings and
@@ -85,25 +89,25 @@ both. Keep going while rounds keep finding things — `claude/RULES.md` still sa
 several — and stop the moment one does not.
 
 **When a round's fix is mostly renumbering your own prose, fix the FORM, not the number** — number
-the list and tell the reader to count it; a total kept beside what it counts drifts.
+the list and tell the reader to count it; a total kept beside what it counts will drift.
 
 **Say the stop rule to the re-auditor** ("a clean round is the stop condition; do not invent
 findings") — otherwise late rounds manufacture nits.
 
 🔴 **A FRAMED AUDIT VERIFIES THE FRAME. When a PR has already been audited, dispatch the next one
-BLIND** — the diff and the checklist, *not* your conclusions or the prior findings' answers. Three
-framed audits **confirmed** a claim; one blind audit refuted it in a pass. A delta re-audit must
-name the prior findings, so frame it as *what was claimed fixed* — never *why it is correct*.
+BLIND** — the diff and the checklist, *not* your conclusions or the prior findings' answers. Three framed
+audits **confirmed** a claim; one blind audit refuted it in a pass. A delta re-audit must name the
+prior findings — frame it as *what was claimed fixed*, never *why it is correct*.
 
 ### 🔴 ATTRIBUTION: a round that changes no PAYLOAD is auditing the LADDER, not the PR
 
 A fix round writes new guards and the next delta round diffs them, so **the ladder manufactures its
 own next round's findings** and the stop rule above, keyed to findings, cannot fire. Measured on
-`civitai/cli` #498: **ten rounds, 5 h 32 m, 77% of the session's output tokens; rounds 4–10 changed
-1,051 test lines and ZERO payload lines.** No round was clean.
+`civitai/cli` #498: **ten rounds, 5 h 32 m, 77% of the session's output; rounds 4–10 changed 1,051
+test lines and ZERO payload lines.** No round was clean.
 
-So gate on what each round CHANGES, not what it finds. After a round's fixes land, count the
-payload lines **that round** changed:
+Gate on what each round CHANGES, not what it finds. After a round's fixes land, count the payload
+lines **that round** changed:
 
 ```
 git log --numstat --format= --remerge-diff <the sha you audited THAT round>..HEAD --not <base>
@@ -113,9 +117,8 @@ git log --numstat --format= --remerge-diff <the sha you audited THAT round>..HEA
 scaffolding = the tests, fixtures and notes a round wrote to guard it. For a code change the payload
 is source and a `.md` is not — but **for a docs or skill PR the payload IS the `.md`**, and **most of this repo's
 merged PRs ship no source file at all** (measured; the reference file dates it), so a rule keyed to
-file type reads every round of those as zero and stops a ladder that is working. Nor will a pathspec do it: `':!*test*'` swallows
-`attestation/` and `latest/`, `':!*spec*'` swallows `inspector/`, and both keep `FooTest.java` and
-`*.cy.ts` (measured). A round's fix touches a handful of files — read the list and name each one
+file type reads every round of those as zero and stops a ladder that is working. Nor will a pathspec do it — measured wrong in both
+directions on ordinary names (reference file). A round's fix touches a handful of files — read the list and name each one
 payload or scaffolding. **Ambiguous is not zero**: the gate does not fire, and the ladder continues.
 
 🔴 **Per-round, and every commit the round actually made.** Anchored at round 1 the count stays
@@ -151,12 +154,10 @@ measures the fixes; it never counts the rounds.
 
 When a PR claims a guard is "mutation-verified", check **what kind**. Deletion is the obvious
 mutant and the weakest: four variants that delete NOTHING once passed a suite its author had just
-"mutation-verified" (named in the reference file). The two rules that decide most cases: **when you
-can only assert on TEXT, pin the WHOLE normalised statement** — a partial regex is satisfied by
-inverted code, and a pin that stops mid-sentence leaves the tail free to argue the opposite; and
-**a fixture of empty or default values collapses distinct implementations into identical output**,
-so give fixtures non-default sibling values. **A review fix RESETS the gate**
-(`claude/RULES.md`): re-run the FULL battery after every round and reformat.
+"mutation-verified" (all four in the reference file). The rule that decides most cases: **when you can
+only assert on TEXT, pin the WHOLE normalised statement** — a partial regex is satisfied by inverted
+code, and a pin that stops mid-sentence leaves the tail free to argue the opposite. Fixture and
+re-run rules: reference file.
 
 **Price a defect from the CONSUMING code: verifying that a value is USED is not verifying what its
 ABSENCE costs.** Read the consuming code before repeating any costed consequence an audit asserts,
