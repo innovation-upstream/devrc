@@ -58,10 +58,25 @@ Two things this case establishes, and one it does not:
   nothing, so it is not an instance of the waste that retraction denies. Different axis.
 
 Ladder depth across all sessions, measured the same day over `~/.claude/projects/**/*.jsonl`
-(numbered delta re-audit dispatches, `subagents/` excluded): **110 sessions, 440 rounds, 84 of those
-sessions in the preceding 14 days**; mean deepest round 4.0; 34% ran ≥5 rounds; distribution
-3→38, 4→22, 5→21, 6→9, 7→4, 8→2, 10→1. The ladder is a dominant workflow, not an occasional one —
-which is what makes a per-round gate worth its bytes.
+(numbered delta re-audit dispatches, `subagents/` excluded): **110 sessions, 84 of them in the
+preceding 14 days**; mean deepest round 4.0; 34% ran ≥5 rounds; distribution 3→38, 4→22, 5→21, 6→9,
+7→4, 8→2, 10→1. The ladder is a dominant workflow, not an occasional one — which is what makes a
+per-round gate worth its bytes.
+
+🔴 **The "440 rounds" this paragraph used to quote was the SUM OF DEPTHS, and it did not say so.**
+Two different counts are available and they are far apart: rounds *observed* (the distinct numbered
+rounds a walk matches) and rounds *implied* (each session's deepest round summed, on the reasoning
+that a ladder reaching round 8 ran eight). Re-run 2026-08-27 with the checked-in instrument: 127
+sessions, **306 observed / 541 implied**, mean deepest 4.26, 39% ≥5 — and that reading includes the
+ten-round ladder this file documents, which is what "the window moves" means in practice. Quote one
+count, name which, and date it. 🔴 **That reading was stale within hours of being written** — an
+independent re-run the same day gave 319 observed / 556 implied / mean 4.38, because the corpus
+includes the very session dispatching the ladder this file describes. A figure from this instrument
+is a reading, not a fact about the world.
+
+**Re-derive rather than quote**: `scripts/ladder-depth-sweep.py` is the instrument, it prints both
+counts with the run date, and it REFUSES to report a zero it cannot distinguish from a broken
+filter — which is what its first version returned, having filtered on the wrong tool name.
 
 ---
 
