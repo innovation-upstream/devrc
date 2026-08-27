@@ -34,11 +34,13 @@ correction is marked `CORRECTED` inline with what the source actually says. The
 architecture was substantially right; the errors were in the details a reader acts on.
 
 The corrections are marked inline rather than counted here **on purpose**, and this
-paragraph is itself worked evidence for why. The first version said "six"; an audit
-then found a further wrong claim, so it became seven; the sentence recording *that*
-miscounted which ones were new. Three attempts, three wrong totals, in the paragraph
-whose subject is miscounting. **Count the `CORRECTED` markers in this document; do not
-trust any total written in prose, including one written by whoever edits this next.**
+paragraph is itself worked evidence for why. The first version said "six". An audit
+found a further wrong claim, and the sentence recording that said "a seventh and an
+eighth" — wrong, because one of the two had already been fixed in the first commit.
+Seven is the count as it stands. Two of the three totals written here were wrong, and
+the paragraph's own subject is miscounting. **So count the `CORRECTED` markers in this
+document rather than trusting any total in prose — including this one, and including
+whatever the next editor writes.**
 
 Every line number below is against `nix/home.nix` at `origin/main` as of 2026-08-27
 (3,873 lines). Line numbers rot — treat them as a starting offset for a grep, not an
@@ -234,7 +236,8 @@ Brave tab
   has not been `git add`ed is silently omitted from the deployed tree — a partially
   updated extension with no error anywhere. Documented for both extensions (553-557,
   764-768) and for `claude/skills/` in CLAUDE.md. `git add` before switching.
-- 🔴 **`rm -f` vs `rm -rf` at line 714 — and the original doc got the REASON wrong.**
+- 🔴 **CORRECTED — `rm -f` vs `rm -rf` at line 714: the original doc got the REASON
+  wrong, and the first two attempts to fix it were also wrong.**
   It said *"`rm -rf` on a symlink follows and deletes the target — must use `rm -f` for
   symlink removal."* **As stated that is false, but the true rule has a sharp edge —
   read both halves.** Tested 2026-08-27, GNU coreutils 9.11:
@@ -247,10 +250,15 @@ Brave tab
 
   So `rm` does not follow a symlink *operand*, but a trailing slash makes the operand a
   *directory reference* rather than the link, and then it does. 🔴 **Do not read the
-  first bullet as licence to drop a `[ ! -L ]` guard from around an `rm` in a new
+  first bullet as licence to drop a `[ ! -L ]` guard from around an `rm -rf` in a new
   deploy block** — a single trailing slash on a `$dst` that happens to be symlinked at
   a repo checkout empties the checkout, silently, with a success exit code. No site in
   `home.nix` uses a trailing slash today; that is not a property anyone is enforcing.
+
+  ⚠ **The silent-destruction half is specific to `-r`.** Measured the same day:
+  `rm -f <link>/` — trailing slash, no `-r` — fails LOUDLY (`Is a directory`, rc=1,
+  nothing removed). So line 714, which is `rm -f`, would catch this accident rather
+  than perform it. Do not generalise the silent case to every `rm`.
   Neither half of this appears anywhere in `home.nix` — the original claim was the
   `chmod -R` hazard below, misapplied to `rm`.
   The source's actual reason (705-713) is a **TOCTOU**: the `elif` at 700 tested the
