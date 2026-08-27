@@ -7,6 +7,9 @@ allowed-tools: Bash, Read, Grep, Glob, Agent
 
 # /audit-pr — adversarial PR audit
 
+Every case history and number below is sourced in
+`~/.claude/skills/audit-pr/reference/round-ladder-evidence.md`.
+
 Target: `$ARGUMENTS`. Resolve it:
 - A number → that GitHub PR (`gh pr diff <n>`, `gh pr view <n>`).
 - `current` / empty → the current branch's diff vs its base/trunk.
@@ -16,16 +19,15 @@ Target: `$ARGUMENTS`. Resolve it:
 
 Dispatch a subagent (read-only — it must NOT modify files or merge) to audit the change against this checklist. Have it read the diff and the code it touches, not just the PR description.
 
-**Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, and anything security/auth/path-gating. These reliably hide real, deploy-blocking bugs (shutdown data-loss, trash-path overwrite, scanner match-path scope-creep, an unauthenticated arbitrary-path scan and a git `core.fsmonitor` RCE all surfaced this way). If the branch has a **private Go module dep**, the auditor may need `GOPRIVATE` (e.g. `GOPRIVATE=github.com/civitai/*`) — a sum-db `500` there is env, not a code defect.
+**Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, and anything security/auth/path-gating. These reliably hide real, deploy-blocking bugs (shutdown data-loss, trash-path overwrite, scanner scope-creep, an unauthenticated arbitrary-path scan and a git `core.fsmonitor` RCE all surfaced this way). If the branch has a **private Go module dep**, the auditor may need `GOPRIVATE` — a sum-db `500` there is env, not a code defect.
 
-**Brief the auditor on the environment, or it will report false findings.** A fresh worktree is not a
-working checkout, and an auditor that hits this cold reports it as a defect in the PR. Tell it, up
+**Brief the auditor on the environment, or it will report false findings.** A fresh worktree is not
+a working checkout, and an auditor that hits this cold reports it as a defect in the PR. Tell it, up
 front, whichever apply: **git submodules are unpopulated** in a new worktree (one made 4 test files
-"fail to collect" — pure environment); **monorepo/workspace
-`node_modules`** may need linking per package, not just at the root; **whether the base branch is
-already red** on typecheck/lint/tests, and *at which file*, so a baseline error is not attributed to
-the PR; and that **zsh does not word-split unquoted parameters**, so `eslint $FILES` silently checks
-**zero** files and prints a confident PASS. Also tell it to work in a `cp -a` copy if it wants to
+"fail to collect" — pure environment); **monorepo `node_modules`** may need linking per package, not
+just at the root; **whether the base branch is already red** on typecheck/lint/tests and *at which
+file*, so a baseline error is not attributed to the PR; and that **zsh does not word-split unquoted
+parameters**, so `eslint $FILES` silently checks **zero** files and prints a confident PASS. Also tell it to work in a `cp -a` copy if it wants to
 mutate code, leave your worktree untouched, and verify it clean at the end.
 
 **Audit for:**
@@ -58,9 +60,9 @@ Ask the re-auditor to:
   only where the defect would let a real behaviour regression through;
 - treat "the author says it's fixed" as a claim to verify against the diff.
 
-**Carry the ledger in every round's summary**: `round N · production lines changed since round 1: X
-· elapsed: Y`. Without it the flattening is visible only in hindsight — on #498 the session
-diagnosed its own plateau at round 9, six rounds after X stopped moving.
+**Carry the ledger in every round's summary**: `round N · payload lines changed THIS round: X (since
+round 1: Y) · elapsed: Z`. X is what the gate below reads; without it the flattening is visible only
+in hindsight — on #498 the session diagnosed its own plateau at round 9, six rounds late.
 
 ### 🔴 A clean round ENDS the ladder. Never run another round to confirm a clean round.
 
@@ -101,31 +103,39 @@ For a delta re-audit you must name the prior findings (that is the point), so ke
 
 ### 🔴 ATTRIBUTION: a round that changes no PRODUCTION code is auditing the LADDER, not the PR
 
-A fix round writes new guards. The next delta round diffs `<audited-sha>..HEAD`, so **those guards
-are its audit surface** — the ladder manufactures its own next round's findings, and the stop rule
-above, keyed to findings, can never fire. Measured on `civitai/cli` #498 (2026-08-26): **ten rounds,
-5 h 32 m, 77% of the session's output tokens; the fix commits for rounds 4–10 changed 1,002 lines of
-test code and ZERO lines of production code.** No round was ever clean. Full numbers and method:
-`~/.claude/skills/audit-pr/reference/round-ladder-evidence.md`.
+A fix round writes new guards and the next delta round diffs them, so **the ladder manufactures its
+own next round's findings** and the stop rule above, keyed to findings, can never fire. Measured on
+`civitai/cli` #498 (2026-08-26): **ten rounds, 5 h 32 m, 77% of the session's output tokens; rounds
+4–10 changed 1,051 lines of test code and ZERO lines of the thing the PR shipped.** No round was
+ever clean.
 
 So gate on what each round CHANGES, not on what it finds. After a round's fixes land, count the
-production lines **that round** changed: `git diff --numstat <the sha you audited THAT round>..HEAD`.
+payload lines **that round** changed:
 
-🔴 **Per-round, never cumulative.** A range anchored at round 1 stays non-zero forever once any
-early round touched production — on #498 the cumulative form prints the same number for rounds 4
-through 10 and the gate never fires. Equivalently: the ledger's cumulative X **unchanged across two
-rounds** is the same condition, and that is what makes it visible in the summaries.
+```
+git log --numstat --format= --no-merges --first-parent <the sha you audited THAT round>..HEAD
+```
 
-🔴 **Do not classify with a pathspec.** `':!*test*'` swallows `attestation/`, `latest/` and
-`inspector/` as "tests" while missing `FooTest.java` and `*.cy.ts` — wrong in both directions on
-ordinary names (measured). A round's fix touches a handful of files: read the `--numstat` list and
-judge by this repo's convention. **Tests, fixtures and docs are not production.** Ambiguous is not
-zero — the gate does not fire, and the ladder continues.
+🔴 **The unit is THIS PR's PAYLOAD, never a file extension.** Payload = what the PR exists to ship;
+scaffolding = the tests, fixtures and notes a round wrote to guard it. For a code change the payload
+is source and a `.md` is not — but **for a docs or skill PR the payload IS the `.md`**, and 24 of
+devrc's last 40 merged PRs ship no source at all, so a rule keyed to file type reads every round of
+those as zero and stops a ladder that is working. Nor will a pathspec do it: `':!*test*'` swallows
+`attestation/` and `latest/`, `':!*spec*'` swallows `inspector/`, and both keep `FooTest.java` and
+`*.cy.ts` (measured). A round's fix touches a handful of files — read the list and name each one
+payload or scaffolding. **Ambiguous is not zero**: the gate does not fire, and the ladder continues.
 
-**Two consecutive rounds whose fixes changed zero production lines ⇒ the ladder has left the PR.
-Stop.** File the remaining guard findings as one follow-up task naming the test file, closed when
-its PR merges or a named reader dismisses it in writing; do not spend a round on them. A round that
-touches production code never trips this, however deep the ladder is.
+🔴 **Per-round and the round's OWN commits.** Anchored at round 1 the count stays non-zero forever
+once an early round touched payload — on #498 that prints the same number for rounds 4 through 10
+and never fires. A plain two-dot `git diff` breaks the other way: after a `merge main` or a rebase
+it sweeps upstream lines in as payload, so a scaffolding-only round scores non-zero and the counter
+resets. Hence `--first-parent --no-merges` above; if the branch was rebased mid-round, re-anchor on
+the new sha rather than trusting the old one.
+
+**Two consecutive rounds whose fixes changed zero payload lines ⇒ the ladder has left the PR.
+Stop.** File the remaining scaffolding findings as one follow-up task naming the file, closed when
+its PR merges or a named reader dismisses it in writing. A round that touches payload never trips
+this, however deep the ladder is.
 
 ⚠ **This does not retract the two rules above, and is not a cap in disguise.** #498's rounds were
 not wasted in the sense those rules deny — every one found something real. The waste is on a
@@ -137,26 +147,19 @@ measures the fixes; it never counts the rounds.
 When a PR claims a guard is "mutation-verified", check **what kind**. Deleting the guard is the
 obvious mutant and the weakest: four variants that delete NOTHING — swapped operands, inverted
 branches, the guard commented out, a stale value re-bound — once passed a suite its author had just
-"mutation-verified" (each one, and how to enumerate your own, in the reference file). The two that
-decide most cases:
-
-- **When you can only assert on TEXT** (raw SQL, a generated config, a serialised query), **pin the
-  WHOLE normalised statement**, not features of it — a partial regex is satisfied by semantically
-  inverted code, and `--` / `/* */` make "the token is present" and "the clause is live" different
-  facts. A cosmetic reformat then fails the test; that is the trade.
-- **A fixture of empty or default values collapses distinct implementations into identical output.**
-  One mutant survived *only* because the fixture was `{}`. Give fixtures non-default sibling values.
-
-**A review fix RESETS the gate** (`claude/RULES.md`): re-run the FULL battery after each fix round
-*and* after any reformat, not just the mutant for what you changed.
+"mutation-verified". The two rules that decide most cases: **when you can only assert on TEXT, pin
+the WHOLE normalised statement** (a partial regex is satisfied by inverted code, and `--` / `/* */`
+make "the token is present" and "the clause is live" different facts — a cosmetic reformat then
+fails the test, which is the trade); and **a fixture of empty or default values collapses distinct
+implementations into identical output**, so give fixtures non-default sibling values. **A review fix
+RESETS the gate** (`claude/RULES.md`): re-run the FULL battery after every round and reformat.
 
 ## Price a defect from the CONSUMING code, not the producing site
 
-Before repeating any consequence an audit asserts — especially one with a cost attached — read the
-code that **consumes** the value, not just the code that writes it. **Verifying that a value is USED
-is not verifying what its ABSENCE costs**: one audit priced a lost watermark at "re-judges the whole
-backlog at LLM cost" when a `NOT EXISTS` dedupe in the same `WHERE` clause made it zero LLM calls.
-Sanity-check the frequency side too — "routine" and "rare" are asserted far more often than measured.
+**Verifying that a value is USED is not verifying what its ABSENCE costs.** Read the code that
+consumes it before repeating any consequence an audit asserts, especially a costed one (worked
+example in the reference file). Sanity-check the frequency side too — "routine" and "rare" are
+asserted far more often than measured.
 
 **A finding about the PR *description* gets corrected PUBLICLY.** If the audit shows the PR body
 misstates what the change does, post a **PR comment** saying so rather than silently editing the

@@ -1,8 +1,8 @@
 # Round-ladder evidence
 
-Case histories behind the ladder rules in `../SKILL.md`. Facts only — the RULES live in the skill
-body, and nothing here decides whether one applies. Dated because each is a measurement, not a
-principle.
+Case histories behind the ladder rules in `~/.claude/skills/audit-pr/SKILL.md` (source:
+`devrc/claude/skills/audit-pr/`). Evidence and worked examples — the RULES live in the skill body,
+and nothing here decides whether one applies. Dated, because each is a measurement, not a principle.
 
 ---
 
@@ -26,16 +26,18 @@ explicit rule — TEST if a path component is `test(s)`/`spec(s)`/`e2e`/`testdat
 `cypress` or the filename matches `*_test.*` / `*.{test,spec,cy}.*` / `*Test.*`; DOC if `*.md`/
 `*.txt`/`*.rst` or under `doc(s)/`; PRODUCTION otherwise.
 
-| rounds | test | doc | production |
+| rounds | test | doc | source |
 |---|---|---|---|
-| feature + rounds 1–3 | 961 | 110 | 222 |
-| **rounds 4–10** | **1,002** | **0** | **0** |
+| feature + rounds 1–3 (`bce0c0c`…`d2ec92d`) | 961 | 110 | 222 |
+| **rounds 4–10** (`a82718b`…`7541bc1`) | **1,051** | **0** | **0** |
 
-🔴 An earlier version of this table read `1,061 / 332` and was wrong twice, both times in the
-direction that flatters the argument: the test column was mis-added, and the production column
-folded 110 lines of release-notes markdown into "production". Docs are not production — that is the
-same classifier question the gate itself turns on, which is why the rule in the body says to read
-the file list rather than trust a pathspec.
+🔴 This table has been wrong **three times**, each time in the direction that flatters the argument,
+which is why it now carries its shas and its classifier. `1,061 / 332`: the test column was
+mis-added, and the source column folded 110 lines of markdown (68 of a release-notes draft, 42 of
+`README.md`) into "production". Then `1,002`: that is rounds 4–**9**; round 10's fix `7541bc1` (49
+test lines) landed after the first snapshot and was never re-counted. **The lesson is the rule** —
+a number re-derived from a moving branch is a measurement with a timestamp, not a constant, and
+"which column does a `.md` belong in" is the same question the gate itself turns on.
 
 The last production change was round 3's `d2ec92d` — **18 lines of `internal/appapi/appblocks.go`**
 (a fifth render path, structurally unreachable from the golden table: a real find). Rounds 4–10 each
@@ -96,8 +98,6 @@ counts*.
 
 ---
 
----
-
 ## Mutation variants that delete NOTHING
 
 Behind **"deletion-mutants are the EASY half"**. Across one PR, four semantically broken variants
@@ -114,6 +114,18 @@ that delete nothing all passed a suite its author had just "mutation-verified":
 comment-out, wrong bind, off-by-one — not from "delete the thing I was already thinking about". The
 `{}` fixture that hid one of these made "bind just the patch" and "rebind the whole stale snapshot"
 byte-identical.
+
+---
+
+## Pricing a defect from the CONSUMING code — the worked example
+
+Behind **"verifying that a value is USED is not verifying what its ABSENCE costs"**. An audit
+correctly established that a watermark was written, that losing it reset the watermark, and that a
+query read it — then priced the loss as "re-judges the whole backlog at LLM cost". The same `WHERE`
+clause carried an independent `NOT EXISTS` dedupe that excluded every already-processed row
+regardless of the watermark, so the true cost was a wider index scan and **zero** LLM calls. The
+wrong figure reached a PR body, a public comment and two code notes before anyone read the full
+clause.
 
 ---
 

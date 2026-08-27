@@ -45,23 +45,32 @@ ladder manufactures its own next round's findings.
 
 Measured on `civitai/cli` #498 (session 4719a2f0, 2026-08-26): **10 rounds over
 5 h 32 m**, 75% of the session's transcript rows, **321k of 419k main-thread
-output tokens**. The fix commits for **rounds 4-10 changed 1,002 lines of test
-code and ZERO lines of production code** -- the last production change was round
-3's `d2ec92d`. **No round was ever clean**, so the stop rule was never once
-eligible to fire, and the session escalated to the operator at round 9 with its
+output tokens**. The fix commits for **rounds 4-10 changed 1,051 lines of test
+code and ZERO lines of what the PR SHIPPED** -- the last such change was round
+3's `d2ec92d` (18 lines of `internal/appapi/appblocks.go`). **No round was ever
+clean**, so the stop rule was never once eligible to fire, and the session escalated to the operator at round 9 with its
 own diagnosis ("rounds 3-10 have all been about the guards, not the feature").
 
 Scale, measured the same day over `~/.claude/projects/**/*.jsonl` (numbered delta
 re-audit dispatches, `subagents/` excluded): **110 sessions, 440 rounds, 84 of
 them in the preceding 14 days**; mean deepest round 4.0; 34% ran >= 5 rounds.
 
-So the gate is: two consecutive rounds whose FIXES changed zero production lines
-=> the ladder has left the PR, stop. **Per-round, never cumulative** -- a range
-anchored at round 1 is non-zero forever once any early round touched production,
-and the first version of this rule shipped exactly that, which on #498 prints
-the same number for rounds 4-10 and never fires. It is not a cap (it counts production lines,
-never rounds; a round that touches production code never trips it however deep
-the ladder is) and it does not retract the retraction below -- #498 contains no
+So the gate is: two consecutive rounds whose FIXES changed zero PAYLOAD lines
+=> the ladder has left the PR, stop. Payload = what the PR exists to ship, never
+a file type: keyed to "docs are not production" the gate reads zero for every
+round of a docs or skill PR and stops a working ladder (measured: 24 of devrc's
+last 40 merged PRs, this one included).
+
+**Per-round, and the round's OWN commits** -- anchored at round 1 the count is
+non-zero forever once an early round touched payload (the first version of this
+rule shipped exactly that: on #498 it prints the same number for rounds 4-10 and
+never fires), while a plain two-dot `git diff` sweeps in whatever a `merge main`
+or a rebase brought with it and reads 200 upstream lines as this round's payload.
+Hence `git log --numstat --format= --no-merges --first-parent <sha>..HEAD`:
+measured, 1 line where the two-dot form reported 201.
+
+It is not a cap (it counts payload lines, never rounds; a round that touches
+payload never trips it however deep the ladder is) and it does not retract the retraction below -- #498 contains no
 round that ran and found nothing, which is the waste that retraction denies.
 Different axis: real findings about scaffolding the ladder itself had written.
 
@@ -113,18 +122,23 @@ rule rather than reformatting a paragraph.
    it never caught the bug this module is about. It is labelled here rather than
    counted as a catch. It IS reachable: watched to fail by stubbing SKILL.md.
 5. **Nothing here proves the attribution gate is RUN.** Same blind spot as (2),
-   and it bites harder for this one: the gate is a `git diff --numstat` an
+   and it bites harder for this one: the gate is a `git log --numstat` an
    operator has to issue between rounds, so the only evidence it fired is a
    ladder that stopped. The behavioural claim needs transcript measurement over
    future ladders -- re-run the sweep in the docstring above -- and is NOT made
    here.
-6. **The CLASSIFIER is a human judgement, deliberately.** The rule tells the
-   reader to read the `--numstat` file list rather than run a pathspec, because
-   a pathspec is wrong in both directions on ordinary names (`':!*test*'`
-   excludes `pkg/attestation/`, `api/latest/`, `internal/inspector/`; misses
-   `FooTest.java`, `login.cy.ts` -- measured). Nothing here can check that a
-   given round's lines were classified correctly; the pins only ensure the
-   instruction still says to judge rather than to pattern-match.
+6. **The CLASSIFIER is a human judgement, deliberately -- and only its WORDING
+   is pinned.** The rule tells the reader to name each changed file payload or
+   scaffolding rather than run a pathspec, because a pathspec is wrong in both
+   directions on ordinary names (`':!*test*'` excludes `pkg/attestation/` and
+   `api/latest/`, `':!*spec*'` excludes `internal/inspector/`; both keep
+   `FooTest.java` and `login.cy.ts` -- measured). Three constants now pin the
+   definition, the method and that counter-evidence, after five mutants that
+   rewrote the method -- including one flipping "Ambiguous is not zero" to its
+   opposite -- passed a green 11-test suite with only the prohibition pinned.
+   What remains unenforceable: whether a given round's files were named
+   CORRECTLY. Nothing mechanical can answer that, which is why the residual
+   error is aimed at the safe side (ambiguous => the gate does not fire).
 7. **The THRESHOLD is pinned, not justified.** "Two consecutive rounds" comes
    from one measured ladder (#498, n=1), where the plateau began at round 4 and
    ran to 10. One round is knowingly too tight: a round may legitimately fix only
@@ -149,25 +163,29 @@ people's claims is the worst place for it to happen.
 
 Mutation controls, each run on a copy of the HEAD tree, under
 `PYTHONDONTWRITEBYTECODE=1` with the pytest cache disabled. The unmutated copy
-is the positive control (5 passed), so a red below is the mutant and not the
-harness:
+is the positive control, so a red below is the mutant and not the harness.
+**Re-measured 2026-08-26 against the current 11-test module** -- the counts
+first recorded here were taken against a 5-test module that never existed, and
+M2/M5 have since gained assertions that also fire:
 
-  POS  unmutated copy .......................... 5 passed
+  POS  unmutated copy ......................... 11 passed
   M1   cosmetic reword of the RULES clause
        ("FINDINGS, never by a number" -> "findings,
-       not by a number") ........................ 2 failed -- the string pin AND
-                                                  the relationship pin
-  M2   delete the SKILL heading .................. 1 failed -- heading pin
+       not by a number") ....................... 2 failed -- the string pin AND
+                                                 the relationship pin
+  M2   delete the SKILL heading ................ 2 failed -- heading pin, plus
+                                                 the order test's both-present
+                                                 precondition
   M3   replace the not-a-cap paragraph with an
        actual cap ("Cap the ladder at three
-       rounds") ................................. 1 failed -- not-a-cap pin
+       rounds") ................................ 1 failed -- not-a-cap pin
   M4   move the stop clause into its OWN bullet,
-       text byte-identical ...................... 1 failed -- relationship pin
-                                                  ONLY
-  M5   truncate SKILL.md to a stub .............. 3 failed -- the invariant guard
-                                                  fires with its own message
+       text byte-identical ..................... 1 failed -- relationship pin
+                                                 ONLY
+  M5   truncate SKILL.md to a stub ............. 9 failed -- the invariant guard
+                                                 fires with its own message
   M6   drop the rejected-cap evidence from the
-       archive .................................. 1 failed -- archive pin
+       archive ................................. 1 failed -- archive pin
 
 🔴 M4 is the one that matters for reachability. The clause survives verbatim, so
 every whole-string pin stays GREEN and only
@@ -179,39 +197,44 @@ THE ATTRIBUTION-GATE PINS -- their own matrix (2026-08-26, 5 tests added, 6 -> 1
 ---------------------------------------------------------------------------------
 Same method: each run on its OWN scratch tree built from HEAD, never the
 worktree, under `PYTHONDONTWRITEBYTECODE=1` with the pytest cache disabled, and
-every mutant asserts its target string is present before editing (so a missed
-mutant fails loudly instead of scoring SURVIVED).
+every mutant asserts its target string is present before editing. That assert is
+not ceremony -- two mutants below silently failed to apply on a first pass
+because their target had been re-wrapped, and without it both would have been
+recorded as SURVIVED off an 11-passed run.
 
   POS  unmutated copy ......................... 11 passed  <- harness control
   BASE origin/main's SKILL.md, reference file
-       absent (i.e. pre-change) ............... 6 failed, 5 passed  -- exactly
-                                                the five new tests plus the
-                                                widened floor guard: regression
-                                                coverage, not invariant guards
-  M7   attribution heading deleted ............. 2 failed -- heading pin, plus
-                                                the order test's both-present
-                                                precondition
-  M8   decision reworded TWO -> THREE .......... 1 failed -- the decision pin
-                                                ONLY, which separates a
-                                                whole-string pin from a keyword
-                                                guard
-  M9   evidence file deleted ................... 2 failed
-  M11  different-axis paragraph dropped ........ 1 failed
-  X3   gate COMMAND replaced with `echo 0` ..... 1 failed
-  X4   ledger instruction deleted .............. 1 failed
+       absent (i.e. pre-change) ............... 6 failed, 5 passed
+  PREV the round-1 tip `ed38490b` ............. 4 failed, 7 passed  <- the tree
+                                                the second audit read; these are
+                                                the pins added after it
+
+  the five that SURVIVED a green 11-test suite until the classifier was pinned:
+  Z1   classifier METHOD sentence deleted ..... 1 failed
+  Z3   "the payload IS the `.md`" -> "docs are
+       never payload" ......................... 1 failed
+  Z4   fail-safe inverted ("Ambiguous counts as
+       zero: the gate fires") ................. 1 failed
+  Y9   method replaced by the pathspec, the 🔴
+       warning left intact .................... 1 failed
+  Z8   corrected baseline row -> 9999s ........ 1 failed
+
+  the regressions earlier rounds shipped:
+  X8   command reverted to the cumulative
+       two-dot diff ........................... 1 failed
+  Y4   evidence truncated to 1,400 B (passed
+       under the old 1,000 B floor) ........... 2 failed
+  Z9   churn row reverted to the stale 1,002 .. 1 failed
+
+  the round-1 set, re-run against current strings:
+  X3   gate command -> `echo 0` ............... 1 failed
+  X4   ledger instruction deleted ............. 1 failed
   X5   behaviour/guard labelling bullet
        deleted ................................ 1 failed
-  X6   evidence file truncated to 0 B .......... 2 failed -- the floor guard
-                                                fires with its own message
-  X7   no-pathspec rule deleted ................ 1 failed
-  X8   range reverted to CUMULATIVE ............ 1 failed
-
-🔴 X3, X4 and X5 all SURVIVED a fully green 9-test run in review -- the gate's
-decision was pinned while the command producing its input, the ledger and the
-finding labels were not. X8 is the defect that shipped in the first version of
-this rule and was caught by review, not by this module: `<first-audited-sha>..`
-is cumulative, so it prints the same non-zero number for #498's rounds 4-10 and
-the gate never fires. Both are why the pins now cover the MECHANISM.
+  M8   decision reworded TWO -> THREE ......... 1 failed  (decision pin only)
+  X6   evidence file truncated to 0 B ......... 2 failed
+  M10  section moved ABOVE the stop rule,
+       text byte-identical .................... 1 failed  (order pin only)
 
 🔴 M10 is this half's reachability control, and the analogue of M4. The
 attribution section is MOVED above the stop rule with its text byte-identical:
@@ -329,7 +352,7 @@ SKILL_ATTRIBUTION_HEADING = (
 # ZERO production lines (not "few"), and the action is STOP rather than "consider
 # stopping".
 SKILL_ATTRIBUTION_GATE = (
-    "**Two consecutive rounds whose fixes changed zero production lines ⇒ the "
+    "**Two consecutive rounds whose fixes changed zero payload lines ⇒ the "
     "ladder has left the PR. Stop.**"
 )
 
@@ -353,28 +376,53 @@ SKILL_ATTRIBUTION_NOT_A_CAP = (
 # printed the same non-zero number for rounds 4 through 10 and never fired.
 # Caught in review; these three pins are what stop it coming back.
 SKILL_GATE_COMMAND = (
-    "After a round's fixes land, count the production lines **that round** "
-    "changed: `git diff --numstat <the sha you audited THAT round>..HEAD`."
+    "git log --numstat --format= --no-merges --first-parent "
+    "<the sha you audited THAT round>..HEAD"
 )
 SKILL_GATE_PER_ROUND = (
-    "🔴 **Per-round, never cumulative.** A range anchored at round 1 stays "
-    "non-zero forever once any early round touched production"
+    "🔴 **Per-round and the round's OWN commits.** Anchored at round 1 the "
+    "count stays non-zero forever once an early round touched payload"
 )
-# The classifier decides the gate's answer, so it is part of the mechanism. A
-# pathspec looks precise and is wrong in BOTH directions on ordinary names --
-# measured: `':!*test*'` excludes `pkg/attestation/`, `api/latest/` and
-# `internal/inspector/` while `FooTest.java` and `login.cy.ts` survive it.
+
+# 🔴 THE CLASSIFIER, pinned as the INSTRUCTION it is -- not as the prohibition
+# beside it. Measured: with only the "do not use a pathspec" sentence pinned,
+# FIVE mutants passed a green 11-test suite, including one that deleted "read
+# the list and name each one payload or scaffolding", one that flipped
+# "Ambiguous is not zero" to its opposite (reversing the fail-safe direction),
+# and one that reinstated the pathspec as the method while leaving the warning
+# in place. A prohibition is not a method.
+#
+# The DEFINITION is the half that decides: keyed to file TYPE ("docs are not
+# production") the gate reads zero for every round of a docs or skill PR and
+# stops a working ladder -- measured at 24 of devrc's last 40 merged PRs, this
+# one included. Keyed to PAYLOAD it asks the question that matters: did this
+# round change what the PR ships, or only the guards the ladder wrote?
+SKILL_PAYLOAD_DEFINITION = (
+    "🔴 **The unit is THIS PR's PAYLOAD, never a file extension.** Payload = "
+    "what the PR exists to ship; scaffolding = the tests, fixtures and notes a "
+    "round wrote to guard it. For a code change the payload is source and a "
+    "`.md` is not — but **for a docs or skill PR the payload IS the `.md`**"
+)
+SKILL_CLASSIFIER_METHOD = (
+    "A round's fix touches a handful of files — read the list and name each one "
+    "payload or scaffolding. **Ambiguous is not zero**: the gate does not fire, "
+    "and the ladder continues."
+)
+# The pathspec facts, kept because they are the reason the method is a judgement
+# and not a pattern. `inspector` is dropped by `*spec*`, NOT by `*test*` -- an
+# earlier version of this sentence attributed all three to `*test*` and was
+# wrong on its own third example.
 SKILL_GATE_NO_PATHSPEC = (
-    "🔴 **Do not classify with a pathspec.** `':!*test*'` swallows "
-    "`attestation/`, `latest/` and `inspector/` as \"tests\" while missing "
-    "`FooTest.java` and `*.cy.ts`"
+    "Nor will a pathspec do it: `':!*test*'` swallows `attestation/` and "
+    "`latest/`, `':!*spec*'` swallows `inspector/`, and both keep "
+    "`FooTest.java` and `*.cy.ts` (measured)."
 )
 
 # The other two operator instructions this rule ships. Both survived a mutant
 # that deleted them outright before these pins existed.
 SKILL_LEDGER = (
-    "**Carry the ledger in every round's summary**: `round N · production lines "
-    "changed since round 1: X · elapsed: Y`."
+    "**Carry the ledger in every round's summary**: `round N · payload lines "
+    "changed THIS round: X (since round 1: Y) · elapsed: Z`."
 )
 SKILL_FINDING_LABELS = (
     "**label every finding `behaviour` or `guard`, and separate shipped "
@@ -396,8 +444,16 @@ SKILL_ROUTES_TO_EVIDENCE = (
 
 # The measurement the gate rests on, pinned in the evidence file so an eviction
 # cannot leave the rule standing on an anecdote. The churn row IS the argument:
-# rounds 4-10 changed 1,002 test lines and 0 production lines.
-EVIDENCE_CHURN_ROW = "| **rounds 4–10** | **1,002** | **0** | **0** |"
+# rounds 4-10 changed 1,051 test lines and 0 payload lines.
+EVIDENCE_CHURN_ROW = (
+    "| **rounds 4–10** (`a82718b`…`7541bc1`) | **1,051** | **0** | **0** |"
+)
+# 🔴 The row the corrections were ABOUT, pinned too. Without it the numbers can
+# drift back while the correction sentence below still narrates having fixed
+# them -- measured: rewriting this row to 9999s left the suite green.
+EVIDENCE_BASELINE_ROW = (
+    "| feature + rounds 1–3 (`bce0c0c`…`d2ec92d`) | 961 | 110 | 222 |"
+)
 
 # 🔴 The classifier is stated in the evidence file because it DECIDES the numbers
 # above -- and because the first version of that table was wrong twice in the
@@ -405,8 +461,9 @@ EVIDENCE_CHURN_ROW = "| **rounds 4–10** | **1,002** | **0** | **0** |"
 # of release-notes markdown counted as production). Pinning the correction keeps
 # the honest version from being tidied away into a clean-looking table.
 EVIDENCE_TABLE_CORRECTION = (
-    "🔴 An earlier version of this table read `1,061 / 332` and was wrong twice, "
-    "both times in the direction that flatters the argument"
+    "🔴 This table has been wrong **three times**, each time in the direction "
+    "that flatters the argument, which is why it now carries its shas and its "
+    "classifier."
 )
 
 # 🔴 The half a reader will want to delete as "redundant with the retraction it
@@ -475,7 +532,13 @@ def test_the_guarded_files_exist_and_are_substantial():
         # evidence file to 0 B reported "the #498 churn row ... is not present
         # exactly once as written (found 0)" and told the reader they had
         # REWORDED a sentence in a file that was empty.
-        (EVIDENCE_MD, 1_000),
+        #
+        # 🔴 1,500, not 1,000: the first pinned string in this file starts at
+        # byte ~1,400, so a 1,000 B floor PASSES on a truncation that already
+        # ate it -- the misleading message the floor exists to prevent, from
+        # the guard meant to prevent it. A floor below the first thing it
+        # guards is not a floor.
+        (EVIDENCE_MD, 1_500),
     ):
         assert path.is_file(), (
             f"{path} not found -- every pin in this module would fail with a "
@@ -546,8 +609,8 @@ def test_the_attribution_gate_is_stated_with_its_not_a_cap_qualifier():
     INTO that range -- so the ladder manufactures its own next round's findings
     and a stop condition keyed to findings has no exit. Measured on `civitai/cli`
     #498 (2026-08-26): ten rounds, 5 h 32 m, 77% of the session's output tokens,
-    and the fix commits for rounds 4-10 changed 1,002 lines of test code and ZERO
-    lines of production code. No round was ever clean, so the rule above was
+    and the fix commits for rounds 4-10 changed 1,051 lines of test code and ZERO
+    lines of payload. No round was ever clean, so the rule above was
     never once eligible to fire.
 
     All three constants are pinned together on purpose. The gate without its
@@ -629,6 +692,9 @@ def test_the_attribution_measurement_survives_where_the_skill_routes_to_it():
     )
     _assert_pinned_once(EVIDENCE_MD, EVIDENCE_CHURN_ROW, "the #498 churn row")
     _assert_pinned_once(
+        EVIDENCE_MD, EVIDENCE_BASELINE_ROW, "the #498 baseline churn row"
+    )
+    _assert_pinned_once(
         EVIDENCE_MD, EVIDENCE_TABLE_CORRECTION, "the churn-table correction"
     )
     _assert_pinned_once(
@@ -654,7 +720,13 @@ def test_the_gate_pins_its_MECHANISM_not_only_its_decision():
     _assert_pinned_once(SKILL_MD, SKILL_GATE_COMMAND, "the gate's command")
     _assert_pinned_once(SKILL_MD, SKILL_GATE_PER_ROUND, "the per-round rule")
     _assert_pinned_once(
-        SKILL_MD, SKILL_GATE_NO_PATHSPEC, "the do-not-use-a-pathspec rule"
+        SKILL_MD, SKILL_PAYLOAD_DEFINITION, "the payload definition"
+    )
+    _assert_pinned_once(
+        SKILL_MD, SKILL_CLASSIFIER_METHOD, "the classifier METHOD"
+    )
+    _assert_pinned_once(
+        SKILL_MD, SKILL_GATE_NO_PATHSPEC, "the pathspec counter-evidence"
     )
 
 
