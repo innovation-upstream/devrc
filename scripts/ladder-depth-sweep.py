@@ -49,14 +49,16 @@ Blind spots, so the number is not read wider than it is:
 * IMPLIED is an UPPER BOUND. It assumes a ladder that reached round N ran N
   rounds; where numbering skips it over-counts — measured 2026-08-27: 3 sessions,
   8 round-numbers, 3.3% of the corpus-wide OBSERVED/IMPLIED gap.
-* 🔴 THE OTHER 97% OF THAT GAP IS NOT THE UNNUMBERED FIRST AUDIT, and an earlier
-  version of this comment said it was. Measured: 231 of 239 missing round-numbers
-  are LEADING absences — 1.79 per session across 129 sessions, and exactly ONE
-  session in the corpus ever dispatched a "round 1". A single unnumbered first
-  audit can account for at most one per session, so most of them are UNNUMBERED
-  DELTA ROUNDS: a real round that was dispatched without a number in its label.
-  That is blind spot #1 above, and it means the true ladder depth is HIGHER than
-  IMPLIED, not lower. Do not read "depth 3" as "exactly four audits ran".
+* 🔴 MUCH OF THE REST IS NOT THE UNNUMBERED FIRST AUDIT EITHER, though an
+  earlier version of this comment said all of it was. Measured 2026-08-27: 231 of
+  239 missing round-numbers are LEADING absences, 128 sessions have a minimum
+  round of 2 or more, and exactly ONE session in the corpus ever dispatched a
+  "round 1". One unnumbered first audit accounts for at most one missing number
+  per session, so **at least 103 of the 231 (45%)** must be UNNUMBERED DELTA
+  ROUNDS — real rounds dispatched without a number in the label. 45% is the floor
+  the measurement supports, not a share; an earlier "97% / most" over-stated it.
+  Either way it is blind spot #1 above, and it means true ladder depth is HIGHER
+  than IMPLIED, not lower. Do not read "depth 3" as "exactly four audits ran".
 * 🔴 COMPARING TWO WINDOWS OF DIFFERENT LENGTH IS BIASED. Depth is computed from
   in-window rounds only, so a narrower window truncates ladders that started
   before it and mechanically RAISES mean depth. Measured on one unchanged

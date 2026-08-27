@@ -185,18 +185,29 @@ run_move() { # run_move <name> <expect> <file> <python-expr>
     printf '  🔴 %-46s SURVIVED — no test failed\n' "$name"
     FAILURES=$((FAILURES+1)); return
   fi
-  # 🔴 EXCLUSIVE, not "among". These rows exist to show that ONE assertion --
-  # the relationship one -- executes; the docstring quotes them as "relationship
-  # pin ONLY". `grep -qx` would print ok for a mutant killed by the named test
-  # AND a neighbour, which is precisely the day the claim stops being true.
-  # Measured: with a co-failing test added to the module, the `among` form
-  # printed ok and the sweep still said "all as expected".
-  if [ "$killers" = "$want" ]; then
-    printf '  ok %-46s killed by %s ALONE\n' "$name" "$want"; return
+  # 🔴 EXCLUSIVE, not "among" -- but in TWO steps, because one comparison
+  # collapses two states that need opposite responses. These rows exist to show
+  # that ONE assertion (the relationship one) executes; the docstring quotes
+  # them as "relationship pin ONLY".
+  #   * named test ABSENT      -> WRONG-KILLER: your relationship pin is DEAD,
+  #                               something else killed the mutant.
+  #   * named test PLUS others -> NOT EXCLUSIVE: the pin fired, but the probe no
+  #                               longer isolates it; re-scope the mutant.
+  # A single equality test reports the first as the second, which routes the
+  # operator away from the exact failure these rows exist to catch. Measured:
+  # `grep -qx` alone printed ok for named-plus-neighbour (the round-2 bug);
+  # equality alone printed NOT EXCLUSIVE for named-absent (the round-3 bug).
+  if ! grep -qx "$want" <<<"$killers"; then
+    printf '  🔴 %-46s WRONG-KILLER: %s (wanted %s)\n' \
+      "$name" "$(tr '\n' ',' <<<"$killers" | sed 's/,$//')" "$want"
+    FAILURES=$((FAILURES+1)); return
   fi
-  printf '  🔴 %-46s NOT EXCLUSIVE: %s (wanted %s alone)\n' \
-    "$name" "$(tr '\n' ',' <<<"$killers")" "$want"
-  FAILURES=$((FAILURES+1))
+  if [ "$killers" != "$want" ]; then
+    printf '  🔴 %-46s NOT EXCLUSIVE: %s (wanted %s alone)\n' \
+      "$name" "$(tr '\n' ',' <<<"$killers" | sed 's/,$//')" "$want"
+    FAILURES=$((FAILURES+1)); return
+  fi
+  printf '  ok %-46s killed by %s ALONE\n' "$name" "$want"
 }
 
 run() { # run <name> <expect: test node name | SURVIVES> <file> <old> <new>
@@ -235,7 +246,7 @@ run() { # run <name> <expect: test node name | SURVIVES> <file> <old> <new>
     return
   fi
   printf '  🔴 %-46s WRONG-KILLER: %s (wanted %s)\n' \
-    "$name" "$(tr '\n' ',' <<<"$killers")" "$want"
+    "$name" "$(tr '\n' ',' <<<"$killers" | sed 's/,$//')" "$want"
   FAILURES=$((FAILURES+1))
 }
 
