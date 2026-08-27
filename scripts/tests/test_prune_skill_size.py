@@ -33,12 +33,12 @@ its own weight, so the target is achievable and is not in dispute.
 This file did not, and said so: it sat 524 B over that bar, pinned by a ceiling of
 13,056. A further pass demoted the budget rationale and §3's classification
 sub-rules into two more sidecars (`budgets-and-scope.md`,
-`classification-rules.md`); it sits at 11,953 B (11.67 KiB) now, inside the shared
+`classification-rules.md`); it sits at 11,841 B (11.56 KiB) now, inside the shared
 12,038 B enforced budget for the first time. MAX_BYTES is therefore lowered to the
-TARGET itself (11,953 against 12,288; the margin is 335 B), which is the direction
+TARGET itself (11,841 against 12,288; the margin is 447 B), which is the direction
 of travel this docstring already named as intended.
 
-The slack is genuinely thin (11,953 against a 12,096 B effective floor), and that
+The slack is genuinely thin (11,841 against an 11,846 B effective floor), and that
 is the honest position rather than a comfortable one: the next addition here has
 to evict something. That is the same contract this skill imposes on every file it
 prunes, and it no longer imposes it from above the line.
@@ -74,9 +74,9 @@ import pytest
 # The hard ceiling: SKILL.md must never exceed this many bytes.
 #
 # NOT a derivation -- a measured position, now equal to the 12,288 B target
-# rather than above it. SKILL.md is 11,953 B (`stat -c %s` and `git cat-file -s`
-# agree), so 12,288 leaves 335 B of headroom, of which MIN_HEADROOM_BYTES (192)
-# is the floor that must remain: 143 B of true working room before the headroom
+# rather than above it. SKILL.md is 11,841 B (`stat -c %s` and `git cat-file -s`
+# agree), so 12,288 leaves 447 B of headroom, of which MIN_HEADROOM_BYTES (192)
+# is the floor that must remain: 255 B of true working room before the headroom
 # test fires -- barely any; the next edit here will have to evict something. That
 # is deliberate and is the same contract the skill imposes on its subjects.
 # Re-measure before touching this number, and lower it as the file gets leaner --
@@ -89,13 +89,13 @@ MAX_BYTES = 12_288
 #
 # Sized in units of a REAL edit rather than a round number, and re-measured
 # against the current file rather than restated: the two structures that actually
-# grow here are the reference routing table (5 rows, 722 B -> mean 144 B/row) and
+# grow here are the reference routing table (5 rows, 716 B -> mean 143 B/row) and
 # §3's verdict bullets (9 lines, 1,739 B -> mean 193 B). 192 B is therefore
 # ~one mean §3 bullet, or one routing row with room to spare -- enough that the
 # headroom test fires BEFORE the ceiling rather than arriving alongside it.
 #
-# It is NOT two mean routing rows: that claim was here, and at the real 144 B/row
-# two rows are 288 B > 192. Kept at 192 on the measurement that does hold rather
+# It is NOT two mean routing rows: that claim was here, and at the real 143 B/row
+# two rows are 286 B > 192. Kept at 192 on the measurement that does hold rather
 # than raised to fit a sentence.
 MIN_HEADROOM_BYTES = 192
 
@@ -328,15 +328,45 @@ def test_skill_md_under_hard_ceiling():
     )
 
 
-def test_skill_md_keeps_working_headroom():
-    """Fire BEFORE the ceiling, so a breach is never a surprise."""
+def _shared_budget():
+    """devrc's ENFORCED budget, from skill-audit.py -- never a second literal."""
+    spec = importlib.util.spec_from_file_location(
+        "_sa_budget", REPO_ROOT / "scripts" / "skill-audit.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return int(m.BUDGET)
+
+
+def test_this_modules_floor_is_no_weaker_than_the_shared_one():
+    """🔴 THIS MODULE'S SEPARATE WORKING FLOOR IS SUPERSEDED, and pretending
+    otherwise is what round-5 finding 8 caught.
+
+    devrc's shared budget is ALREADY a warn-before-breach mechanism: BUDGET =
+    ceiling - MIN_HEADROOM (12,288 - 250 = 12,038), so breaching it is the
+    warning and the ceiling is the breach. Once MAX_BYTES was lowered to the
+    ceiling, a second margin BELOW the shared budget warns before the warning —
+    and every value for it is wrong. Keyed to MAX_BYTES the floor sat at 12,096,
+    ABOVE the 12,038 the relationship guard fires at, so it could never fire
+    first (the finding). Re-keyed to the binding limit it sat at 11,846, five
+    bytes under the body — a gate red on the next routine edit, which this repo's
+    RULES call worse than no gate.
+
+    So the second floor is retired rather than re-tuned, and what is asserted
+    instead is that this module can never become WEAKER than the shared one.
+    MIN_HEADROOM_BYTES survives as the sizing rationale in prose (and is still
+    gated by 'true working room'); it no longer defines a second threshold.
+    """
+    binding = min(MAX_BYTES, _shared_budget())
+    assert binding == _shared_budget(), (
+        f"this module's ceiling ({MAX_BYTES:,}) now binds before devrc's shared "
+        f"budget ({_shared_budget():,}), so a body could satisfy the shared gate "
+        "and fail here for a reason devrc does not enforce. Lower MAX_BYTES or "
+        "raise the shared budget deliberately; do not let them diverge silently."
+    )
     size = SKILL_MD.stat().st_size
-    headroom = MAX_BYTES - size
-    assert headroom >= MIN_HEADROOM_BYTES, (
-        f"SKILL.md is {size:,} B, leaving only {headroom:,} B under the "
-        f"{MAX_BYTES:,} B ceiling -- below the {MIN_HEADROOM_BYTES:,} B working "
-        "floor. The next routine edit will breach it. Evict now, while there is "
-        "still room to do it deliberately."
+    assert size <= binding, (
+        f"SKILL.md is {size:,} B, over the binding {binding:,} B limit. "
+        "Evict now, while there is still room to do it deliberately."
     )
 
 
@@ -481,7 +511,10 @@ def test_this_modules_own_stated_figures_are_re_measured():
     over = size - target
     headroom = MAX_BYTES - size
     slack = headroom - MIN_HEADROOM_BYTES
-    eff_floor = MAX_BYTES - MIN_HEADROOM_BYTES   # this module's own effective floor
+    # The floor the headroom test actually enforces: binding limit minus the
+    # working margin. Keyed to MAX_BYTES it was 12,096, ABOVE the 12,038 the
+    # relationship guard fires at, so it could never fire first (round-5 F8).
+    eff_floor = min(MAX_BYTES, shared_budget) - MIN_HEADROOM_BYTES
     rows = [ln for ln in SKILL_MD.read_text().splitlines()
             if ln.startswith("| ") and "reference/" in ln and "Load it when" not in ln]
     row_bytes = sum(len(ln.encode()) + 1 for ln in rows)
@@ -535,8 +568,8 @@ def test_this_modules_own_stated_figures_are_re_measured():
         # those two words, so a pattern spanning the break silently never matches
         # and reports itself as "reworded". The harness said so; it was not guessed.
         ("shared budget in the docstring", r"([\d,]+) B enforced budget", f"{shared_budget:,}"),
-        ("size, restated at the floor", r"\(([\d,]+) against a [\d,]+ B effective floor\)", f"{size:,}"),
-        ("effective floor",          r"against a ([\d,]+) B effective floor\)",   f"{eff_floor:,}"),
+        ("size, restated at the floor", r"\(([\d,]+) against an? [\d,]+ B effective floor\)", f"{size:,}"),
+        ("effective floor",          r"against an? ([\d,]+) B effective floor\)",   f"{eff_floor:,}"),
         ("target in the ceiling note", r"now equal to the ([\d,]+) B target",     f"{target:,}"),
         ("routing-table bytes",      r"routing table \(5 rows, ([\d,]+) B",       f"{row_bytes:,}"),
         ("routing-table mean",       r"routing table \(5 rows, [\d,]+ B -> mean ([\d,]+) B/row", f"{row_bytes // len(rows):,}"),

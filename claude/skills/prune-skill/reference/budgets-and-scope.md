@@ -26,17 +26,20 @@ skills the core names:
 | skill | core | `reference/**/*.md` | ratio |
 |---|---|---|---|
 | `browser-bridge` | 11,961 B | 162,076 B | **13.55x** |
-| `prune-skill` | 11,953 B | *self-referential — run the command* | **~2.5x** |
+| `prune-skill` | 11,953 B | *self-referential* | *run the command* |
 
-🔴 **The second row deliberately carries no reference byte-count.** THIS FILE lives
+🔴 **The second row deliberately carries neither a reference byte-count nor a ratio.** THIS FILE lives
 inside `prune-skill/reference/`, so any total stated here changes the moment the
 sentence stating it is edited — it was 51 B stale within one round, and stale again
 by the next. A self-referential measurement is not a number you can pin; it is a
-command you re-run. The `browser-bridge` row is exact because that skill is external
+command you re-run. 🔴 That includes anything DERIVED from it — the first attempt
+removed the byte count and kept the ratio, which was stale (2.51 → 2.61x) by the
+next round, because a ratio computed from an unstateable number is just as
+unstateable. Removing the input and keeping the output is the rot one step out. The `browser-bridge` row is exact because that skill is external
 to this file.
 
-🔴 **State the method or the number is not a measurement.** Both figures above are
-exact — but a pre-merge audit could not reproduce either and reported them as
+🔴 **State the method or the number is not a measurement.** The `browser-bridge`
+figures are exact — but a pre-merge audit could not reproduce them and reported them as
 unreproducible, because `browser-bridge/reference/` has a `sites/` subdirectory and
 the auditor globbed one level. It retracted that half after re-measuring. The
 lesson survives the retraction and is the reason this block exists: a ratio moves

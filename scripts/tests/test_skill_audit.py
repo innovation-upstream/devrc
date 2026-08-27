@@ -978,6 +978,18 @@ def _skill_of_size(tmp_path, name, size):
     finding, which would move the verdict for a reason that is not the size band
     — red for the wrong reason, and still red with the band check deleted.
     """
+    # 🔴 Make the fixture root a GOVERNED tree. These fixtures model a devrc
+    # skill, and governance is now three-valued: without a repo + gate marker they
+    # resolve to None and are correctly labelled "[governance unknown]", which is
+    # true of the fixture and false of what it represents. Planting the marker
+    # makes the fixture mean what its assertions have always assumed.
+    if not (tmp_path / ".git").exists():
+        # callers pass a not-yet-created subdir as the root, so create it first
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".git").write_text("gitdir: /fixture\n")
+        m = tmp_path / sa._GATE_MARKER
+        m.parent.mkdir(parents=True, exist_ok=True)
+        m.write_text("MAX_BYTES = 12288\nMIN_HEADROOM_BYTES = 250\n")
     d = tmp_path / name
     d.mkdir(parents=True)
     head = (f"---\nname: {name}\ndescription: a fixture sized to the byte.\n"
@@ -1287,7 +1299,16 @@ def test_mixed_run_marks_ungoverned_per_line_not_per_run(tmp_path):
     marked = [l for l in rows if "[ungoverned]" in l]
     assert len(rows) == 2, f"expected two skill rows, got {len(rows)}:\n{out}"
     assert len(marked) == 1, f"expected exactly one marked row, got {len(marked)}:\n{out}"
+    # 🔴 WHICH row, not just how many. The mark and the budget label come from one
+    # expression, so inverting it (`is False` -> `is True`) swaps them TOGETHER and
+    # leaves "exactly one marked" true — round-5 finding 1 reproduced that at 141
+    # green, i.e. round-3's headline defect could come back and pass.
+    assert "ungovrepo" in marked[0], f"the UNGOVERNED skill must be the marked one:\n{out}"
     assert "devrc reference budget" in marked[0], out
+    gov_row = [l for l in rows if "govrepo" in l and "ungovrepo" not in l]
+    assert len(gov_row) == 1 and "[ungoverned]" not in gov_row[0], (
+        f"the governed skill must be unmarked:\n{out}")
+    assert "over the enforced budget" in gov_row[0], out
 
 
 def test_mixed_run_still_calls_the_governed_skill_ENFORCED(tmp_path):
@@ -1336,3 +1357,41 @@ def test_governance_comes_from_the_targets_not_the_cli_argument(tmp_path):
     assert "devrc's DEFAULT (not enforced here)" in out, out
     assert f"budget {sa.BUDGET:,} B ENFORCED" not in out, (
         "an argument above the repo roots must not launder foreign skills as enforced")
+
+
+def test_the_gate_marker_names_a_file_that_actually_exists():
+    """🔴 Every other governed-side fixture builds the marker as `root /
+    sa._GATE_MARKER`, so it holds for ANY value of the constant — mutating it to a
+    wrong filename left the suite at 141 green while the real tool printed
+    "THESE SKILLS ARE IN <devrc> — NOT a tree governed by…" over devrc's own
+    skills, the exact self-contradiction the structural test exists to prevent.
+    This is the only assertion that pins the constant to reality."""
+    assert (SCRIPTS.parent / sa._GATE_MARKER).is_file(), (
+        f"_GATE_MARKER points at {sa._GATE_MARKER}, which does not exist — devrc "
+        "would classify ITSELF as ungoverned on every run")
+
+
+def test_a_skill_in_no_repo_is_labelled_unknown_not_enforced(tmp_path):
+    """🔴 F2, a REGRESSION round 4 introduced: `is False` sent the None arm down
+    the GOVERNED branch, so a skill in no repo at all was told "over the enforced
+    budget" under a banner saying nothing binds there. Round 2 had marked it.
+    Reachable, not synthetic: 34 of the 37 skills installed at ~/.claude/skills
+    resolve into /nix/store and are in no repo."""
+    loose = tmp_path / "norepo" / ".claude" / "skills" / "s"
+    loose.mkdir(parents=True)
+    (loose / "SKILL.md").write_bytes(b"# s\n" + b"y" * (sa.BUDGET + 112))
+    out = _run(tmp_path / "norepo" / ".claude" / "skills", "--all")
+    row = [l for l in _size_rows(out) if "B" in l][0]
+    assert "[governance unknown]" in row, f"None must get its OWN label:\n{out}"
+    assert "over the enforced budget" not in row, (
+        f"an unknowable tree must not be told devrc's gate enforces it:\n{out}")
+
+
+def test_mixed_verdict_tells_the_governed_skill_the_gate_rejects_it(tmp_path):
+    """🔴 F3: the verdict's REJECT clause was keyed to the RUN, so on a mixed run
+    the devrc file in real breach was told to "check this repo's own" gate —
+    circular, since it IS devrc — and never told the gate rejects it."""
+    out = _mixed_out(tmp_path)
+    verdict = out[out.index("## verdict"):]
+    assert "the gate REJECTS 1 of them" in verdict, verdict
+    assert "check that repo's own gate" in verdict, verdict

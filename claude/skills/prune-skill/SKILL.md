@@ -7,7 +7,7 @@ allowed-tools: Bash, Read, Write, Edit, Grep, Glob, Agent
 
 # prune-skill — audit & aggressively shrink a bloated `SKILL.md` body
 
-Stop a skill body from displacing the work it was loaded for: a `SKILL.md` costs **0 tokens until its trigger fires, then ALL of it at once**, so nothing applies per-session pressure and every session appends — one corpus hit **742 KB in a single skill**, which does not fit a 200k context. Audit a skill (or a whole `.claude/skills/` dir), then apply the `prune-memory` skill's cut methodology one level down.
+Stop a skill body from displacing the work it was loaded for: a `SKILL.md` costs **0 tokens until its trigger fires, then ALL of it at once**, so nothing applies per-session pressure and every session appends — one corpus hit **742 KB in a single skill**. Audit a skill (or a whole `.claude/skills/` dir), then apply `prune-memory`'s cut methodology one level down.
 
 **Reference topics** — `reference/<topic>.md` at `~/.claude/skills/prune-skill/reference/`, source `~/workspace/devrc/claude/skills/prune-skill/reference/`:
 
@@ -17,19 +17,19 @@ Stop a skill body from displacing the work it was loaded for: a `SKILL.md` costs
 | Before verifying (§7) — survival check, gap audit, control design | `~/.claude/skills/prune-skill/reference/verification-protocol.md` |
 | Pruning an ALWAYS-LOADED file; landing + re-sync; dispatching prune subagents | `~/.claude/skills/prune-skill/reference/always-loaded-and-landing.md` |
 | Before your first split (§3) — what cites in, frozen numbers, routing-line traps | `~/.claude/skills/prune-skill/reference/classification-rules.md` |
-| A budget number is load-bearing, or the file may not be a skill | `~/.claude/skills/prune-skill/reference/budgets-and-scope.md` |
+| A budget number is load-bearing, or it may not be a skill | `~/.claude/skills/prune-skill/reference/budgets-and-scope.md` |
 
 ## Budgets (the contract)
-- Core **target 12 KB (12,288 B)**, **hard cap 40 KB (40,960 B)**. Past the cap a body is ~10k tokens before any work starts. `scripts/browser-bridge/tests/test_skill_size.py` **owns** the ceiling and headroom floor — read the numbers there, never restate them.
-- 🔴 **Check what governs THIS file first — 12 KB is a SKILL budget.** Another repo's gate may be a ratchet with an allowance (talos-infra gate 11), passing bodies this tool calls RED and blocking ones it calls fine. `skill-audit.py` marks a tree it does not govern; believe that mark, not the number.
-- 🔴 **A low core-to-reference ratio points at CANDIDATES, not a target** — its floor is shape-dependent: a tool-shaped skill routes many times its weight, a method-shaped one may sit near 2x. Rationale, measurements and history are demotable in any shape.
-- 🔴 **Never prune an eviction SINK** (`claude/RULES-ARCHIVE.md`, a `claudedocs/` doc) — it is ungated and demand-loaded, so pruning it deletes what a prior prune put there. §3's evict-bias does not apply to one.
+- Core **target 12 KB**, **hard cap 40 KB**. Past the cap a body is ~10k tokens before any work starts. `scripts/browser-bridge/tests/test_skill_size.py` **owns** the ceiling and headroom floor — read the numbers there, never restate them.
+- 🔴 **Check what governs THIS file first — 12 KB is a SKILL budget.** Another repo's gate may be a ratchet with an allowance (talos-infra gate 11), passing bodies this tool calls RED and blocking ones it calls fine. `skill-audit.py` marks a tree it does not govern — believe the mark, not the number.
+- 🔴 **A low core-to-reference ratio points at CANDIDATES, not a target** — its floor is shape-dependent: a tool-shaped skill routes many times its weight, a method-shaped one far less. Rationale, measurements and history are demotable in any shape.
+- 🔴 **Never prune an eviction SINK** (`claude/RULES-ARCHIVE.md`, a `claudedocs/` doc) — ungated and demand-loaded, so pruning it deletes what a prior prune put there. §3's evict-bias does not apply.
 - 🔴 **ALWAYS-LOADED files (`CLAUDE.md`, `claude/RULES.md`) are a DIFFERENT problem — this playbook does not apply, and such a pass may legitimately end LARGER.** Read `~/.claude/skills/prune-skill/reference/always-loaded-and-landing.md` BEFORE touching one.
 - Ratchet, landing over target, the measured ratio table and the browser-bridge existence proof: `~/.claude/skills/prune-skill/reference/budgets-and-scope.md`.
 
 ## 0. 🔴 Staleness pass FIRST — a prune preserves rot BY CONSTRUCTION
 Verbatim slicing plus a survival check *guarantee* stale content survives intact, and no path gate proves a claim TRUE. ~6 tool calls. **Run it even when §1 says no prune is needed.**
-- 🔴 **Expect MORE false findings than real ones (measured ~6:1); confirm each before "fixing" it.** An empty result is not a rename — go to the DEFINING surface, carry a positive control, and suspect your own instrument first. **A documented filter beats a probe.**
+- 🔴 **Expect MORE false findings than real (~6:1); confirm each before "fixing" it.** An empty result is not a rename — go to the DEFINING surface, carry a positive control, and suspect your own instrument first. **A documented filter beats a probe.**
 - 🔴 **Fix EVERY copy.** A prune multiplies the copies of every claim — core, sidecar, always-loaded file. Grep the corrected token across the whole skill dir; a core saying "X is stale" beside a sidecar still asserting X is worse than either alone.
 - A finding needing a DECISION is FLAGGED, not silently fixed. Findings go in the commit message.
 
@@ -44,7 +44,7 @@ Prints: per-skill size vs budget, per-section byte weights, dated-history blocks
 
 If it says "no prune needed", **stop CUTTING** — it is a verdict about **BYTES only**: §0's staleness pass is still due.
 
-🔴 **A small over-budget number does not mean a small defect** — the auditor measures bytes, only a read finds rot (case: `~/.claude/skills/prune-skill/reference/staleness-pass.md`). 🔴 **Read the heading TREE before trusting the section weights** — they are a function of it.
+🔴 **A small over-budget number is not a small defect** — the auditor measures bytes, only a read finds rot (case: `~/.claude/skills/prune-skill/reference/staleness-pass.md`). 🔴 **Read the heading TREE before trusting the section weights** — they are a function of it.
 
 ## 2. Back up first (the cut deletes/rewrites)
 🔴 **Chain the success message with `&&` and count the files** — `cp …; echo "backed up"` prints success even when the copy failed, so a broken backup announces itself as a good one. This is the safety net for §5.

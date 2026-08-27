@@ -673,7 +673,8 @@ def _overage(a):
         return "hard cap", a["size"] - HARD
     if a["status"] == "OVER TARGET":
         return "target", a["size"] - TARGET
-    label = "devrc reference budget" if a.get("governed") is False else "enforced budget"
+    label = {True: "enforced budget", False: "devrc reference budget"}.get(
+        a.get("governed"), "devrc budget (governance unknown)")
     return label, a["size"] - BUDGET
 
 
@@ -718,11 +719,24 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
             # banner directly above promised "the mark is per-line". That is the
             # same reader-facing harm as the bug this banner fixes, asserted more
             # specifically. Round-3 delta audit, finding 1.
-            ung = a.get("governed") is False
-            note = (f"  {a['size'] - BUDGET:,} B over the {'devrc ' if ung else ''}"
-                    f"{'reference' if ung else 'enforced'} budget "
+            # 🔴 THREE-VALUED, because governance is. Round 4 wrote
+            # `_is_governed` -> True/False/None with a docstring saying callers
+            # must not collapse None to either bool, then collapsed it here: `is
+            # False` sent None down the GOVERNED branch, so a skill in no repo at
+            # all was told "over the enforced budget" three lines under a banner
+            # saying the number binds nothing. That was a REGRESSION — round 2 had
+            # marked it. Widening to `is not True` only moves the lie: 34 of the 37
+            # skills installed at ~/.claude/skills resolve into /nix/store and are
+            # in no repo, yet they ARE devrc's. Neither bool is true of both cases,
+            # so unknown gets its own label and asserts nothing.
+            gov = a.get("governed")
+            budget_label, mark = {
+                True:  ("enforced", ""),
+                False: ("devrc reference", "  [ungoverned]"),
+            }.get(gov, ("devrc", "  [governance unknown]"))
+            note = (f"  {a['size'] - BUDGET:,} B over the {budget_label} budget "
                     f"(only {TARGET - a['size']:,} B of the {MIN_HEADROOM:,} B margin left)"
-                    f"{'  [ungoverned]' if ung else ''}")
+                    f"{mark}")
         else:
             note = f"  {a['size'] / TARGET:.1f}x target"
         p(f"  {a['size']:>9,} B  {_mark(a['status'])} {a['status']:<13} {a['name']}{note}")
@@ -874,7 +888,14 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
     n_over = sum(1 for a in audits if a["status"] == "OVER TARGET")
     n_tight = sum(1 for a in audits if a["status"] == "NO HEADROOM")
     if not over and not any_ref_issue and not broken_fence:
-        p(f"  ✓ all {len(audits)} skill(s) within budget ({BUDGET:,} B enforced), "
+        # 🔴 THE FIFTH SITE, and the most-read line for the common "point it at
+        # another repo, it's fine" case: an all-foreign run printed "within budget
+        # (12,038 B enforced)" directly under the banner saying nothing is enforced
+        # there. Round-5 finding 5.
+        gov_states = {a.get("governed") for a in audits}
+        qual = ("enforced" if gov_states == {True}
+                else "devrc's, not enforced on every tree here")
+        p(f"  ✓ all {len(audits)} skill(s) within budget ({BUDGET:,} B — {qual}), "
           f"references intact — no prune needed (stop; do not churn the files)")
     else:
         need = []
@@ -883,10 +904,22 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
         if n_over:
             need.append(f"{n_over} over the {TARGET:,} B target")
         if n_tight:
-            need.append(f"{n_tight} inside the {TARGET:,} B ceiling but past the "
-                        f"{MIN_HEADROOM:,} B working margin — "
-                        + ("devrc's gate would REJECT these; check this repo's own"
-                           if foreign else "the gate REJECTS these"))
+            # 🔴 Per-skill, like the note above it. Keyed to the run, a devrc
+            # file in real breach on a MIXED run was told to "check this repo's
+            # own" gate — circular, since it IS devrc — and was never told the
+            # gate rejects it. Round-5 finding 3.
+            n_tight_gov = sum(1 for a in over
+                              if a["status"] == "NO HEADROOM" and a.get("governed") is True)
+            n_tight_other = n_tight - n_tight_gov
+            clause = f"{n_tight} inside the {TARGET:,} B ceiling but past the {MIN_HEADROOM:,} B working margin"
+            if n_tight_gov and n_tight_other:
+                clause += (f" — the gate REJECTS {n_tight_gov} of them; the other "
+                           f"{n_tight_other} sit outside it, check that repo's own gate")
+            elif n_tight_gov:
+                clause += " — the gate REJECTS these"
+            else:
+                clause += " — devrc's gate would REJECT these; check that repo's own"
+            need.append(clause)
         # Measured against the ENFORCED budget, not the ceiling: against the
         # ceiling a NO HEADROOM skill contributes a NEGATIVE number, which
         # silently cancelled out real overage elsewhere in the same run.
