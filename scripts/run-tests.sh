@@ -2904,6 +2904,37 @@ TOT_PASSED=0
 TOT_SKIPPED=0
 TOT_FAILED=0
 
+# --- PER-TARGET TIMING CENSUS --------------------------------------------------
+# 🔴 WHY THIS EXISTS. This runner reported COUNTS and a VERDICT and no durations
+# at all, so the only time signal anywhere was the gate's whole-run wall clock.
+# Measured 2026-08-27 over the twelve most recent completed `devrc-ci` runs:
+# 805s–1293s against the gate's 45m deadline. That is 30–48% of budget with a
+# 1.6x run-to-run spread, and NOTHING in the output could attribute either the
+# spread or a future overrun to a target. The first signal of a target that
+# doubles is a hard kill at 45m carrying no evidence about which one did it.
+#
+# The per-target shape IS known — the xdist header above records `scripts/tests`
+# at 677s of 1194 (57%), browser-bridge 234s, dl-router 126s — but it was
+# hand-measured once, on 2026-08-25, on the SERIAL runner that #841 then
+# replaced. A number in a comment ages; a number the run prints does not.
+#
+# 🔴 THE RECORD IS TAKEN BY A WRAPPER, NOT BY CALLS SPRINKLED THROUGH THE BODY.
+# `run_pytest` has FIVE terminal paths, three of which `return 1` before pytest
+# is ever invoked (missing target, non-file/dir target, unparseable summary).
+# Recording at each one is exactly the mistake GUARD 7/8/10 each had to grow a
+# "never accounted" check for. Wrapping makes the record structurally
+# unmissable instead: every path out of the body passes through one place.
+# `TIMING_CALLS` is kept anyway as a positive control on that claim — if it ever
+# exceeds the number of records, the census is a SUBSET, and a cost ranking
+# built from a subset reads exactly like a complete one.
+#
+# 🔴 FAIL-OPEN, DELIBERATELY. A census is an OBSERVER; an observer that can
+# abort the thing it observes is worse than no census. Every read here defaults
+# (`${VAR:-0}`) rather than tripping `set -u`, and nothing in this block can set
+# `fail`. The timing summary is DIAGNOSTIC — it never changes the verdict.
+TIMINGS=()        # "<elapsed_seconds>\t<rc>\t<target>"
+TIMING_CALLS=0    # dispatches; compared against ${#TIMINGS[@]} at the summary
+
 # Pull "<N> <word>" out of a pytest summary line; 0 when the word is absent.
 _count_of() { # $1 = alternation regex, $2 = summary line
   local n
@@ -2923,6 +2954,21 @@ _count_of() { # $1 = alternation regex, $2 = summary line
 # TARGET loop: running all 27 targets concurrently cannot finish sooner than its
 # longest single target, i.e. 677s — a 1.75x ceiling that -P2 already reaches and
 # -P8 does not improve on. The parallelism has to be INSIDE the big target.
+#
+# ⚠ THOSE FOUR NUMBERS ARE THE **SERIAL** SHAPE, and they are kept because they
+# are what justified the choice above — not because they still describe the run.
+# Do not quote them as current. The run now PRINTS its own per-target ranking
+# every time (see PER-TARGET TIMING CENSUS below), which exists precisely so a
+# figure in a comment stops being the only per-target number anyone has.
+#
+# First measurement off that census, the authoritative gate at this commit:
+# 527s accounted over 31 targets — `scripts/tests` 209s (40%), browser-bridge
+# 143s (27%), dl-router 99s (19%). 🔴 xdist did NOT scale the targets evenly:
+# scripts/tests fell 677→209 (3.2x), browser-bridge 234→143 (1.6x), dl-router
+# 126→99 (1.3x). So the concentration this comment describes has FLATTENED —
+# the biggest target is no longer 57% but 40%, and browser-bridge + dl-router
+# are now 46% between them. Anyone looking for the next devrc CI lever should
+# start there, not here.
 #
 # 🔴 `--dist loadfile`, not the `load` default: a file's tests stay on ONE
 # worker. Several suites here share module-level state (marker files, per-session
@@ -3093,7 +3139,25 @@ _markers_expected() {
   fi
 }
 
+# The timing wrapper. See the PER-TARGET TIMING CENSUS header above for why the
+# record is taken HERE rather than at each of the body's five terminal paths.
+#
+# 🔴 NOT a subshell. `_run_pytest_body` mutates globals the rest of the run
+# depends on — `fail`, `RESULTS`, `SKIP_LINES`, `NOLAUNCH_SEEN`, `TOT_*` — and
+# `fail` in particular is global by design (set at the top of the run, never
+# `local` in the body). Calling it in a subshell would discard every one of
+# those and turn a red target green, which is the whole verdict.
 run_pytest() {
+  local _t_target="$1" _t_t0 _t_rc
+  TIMING_CALLS=$(( ${TIMING_CALLS:-0} + 1 ))
+  _t_t0="$(date +%s)"
+  _run_pytest_body "$@"
+  _t_rc=$?
+  TIMINGS+=("$(( $(date +%s) - _t_t0 ))"$'\t'"$_t_rc"$'\t'"$_t_target")
+  return "$_t_rc"
+}
+
+_run_pytest_body() {
   local d="$1"
   echo "=== pytest $d ==="
 
@@ -3368,12 +3432,19 @@ SHELL_TESTS=(
   "scripts/tests/test_resume_state.sh"
   "scripts/tests/test_base_clone_staleness.sh"
 )
-for SHELL_TEST in "${SHELL_TESTS[@]}"; do
+# 🔴 THE SHELL TESTS ARE IN THE TIMING CENSUS TOO, and the reason is the census's
+# own honesty: it is presented as an accounting of the run, so a population it
+# silently omits would make every percentage in it wrong in the same direction.
+# Same wrapper shape as `run_pytest` above, for the same reason — the body has
+# two terminal paths (the missing-file `return` and falling off the end) and a
+# record at each is the pattern GUARD 7/8/10 each had to grow a check for.
+_run_shell_test_body() {
+  local SHELL_TEST="$1" nl_before
   if [ ! -f "$SHELL_TEST" ]; then
     echo "run-tests: ERROR — shell test '$SHELL_TEST' does not exist (typo, or moved?)." >&2
     RESULTS+=("FAIL  $SHELL_TEST (missing)")
     fail=1
-    continue
+    return 1
   fi
   echo "=== script $SHELL_TEST ==="
   nl_before="$(_nolaunch_lines)"
@@ -3389,12 +3460,75 @@ for SHELL_TEST in "${SHELL_TESTS[@]}"; do
   _spool_account "$SHELL_TEST"
   _nogit_account "$SHELL_TEST"
   echo
+}
+
+for SHELL_TEST in "${SHELL_TESTS[@]}"; do
+  _st_t0="$(date +%s)"
+  TIMING_CALLS=$(( ${TIMING_CALLS:-0} + 1 ))
+  _run_shell_test_body "$SHELL_TEST"
+  _st_rc=$?
+  TIMINGS+=("$(( $(date +%s) - _st_t0 ))"$'\t'"$_st_rc"$'\t'"$SHELL_TEST")
 done
 
 echo "======================== SUMMARY ($SET set) ========================"
 for r in "${RESULTS[@]}"; do echo "  $r"; done
 echo "  ----"
 echo "  TOTAL collected=$TOT_COLLECTED  passed=$TOT_PASSED  skipped=$TOT_SKIPPED  failed=$TOT_FAILED  (floor: $MIN_TESTS = sum of ${#TARGETS[@]} per-target floors)"
+
+# --- PER-TARGET TIMING (diagnostic; never changes the verdict) -----------------
+# Read the PER-TARGET TIMING CENSUS header for why this exists. Three properties
+# this block is written to hold, each of which a plainer version would violate:
+#
+#   1. It reports what it ACCOUNTED FOR and what the RUN COST, separately. Setup,
+#      the flake evaluation and the GUARD evaluation blocks below are outside
+#      both loops, so the target times do NOT sum to the run. Printing only the
+#      targets would imply they do, and every percentage would silently be a
+#      share of the wrong denominator. The `unaccounted` line is the difference,
+#      stated rather than left for the reader to derive.
+#   2. Percentages are of the ACCOUNTED total, and the line says so. This is the
+#      denominator a cost ranking actually wants ("which target should I attack")
+#      and it is not the same number as the run's wall clock.
+#   3. It is fail-open and cannot change `fail`. `${VAR:-0}` on every read, no
+#      `exit`, no assignment to the verdict.
+_t_accounted=0
+for _rec in ${TIMINGS[@]+"${TIMINGS[@]}"}; do
+  _t_accounted=$(( _t_accounted + ${_rec%%$'\t'*} ))
+done
+_t_run="${SECONDS:-0}"
+echo "  ----"
+echo "  TIMING accounted=${_t_accounted}s over ${#TIMINGS[@]} target(s)  run=${_t_run}s  unaccounted=$(( _t_run - _t_accounted ))s (setup + guard evaluation)"
+
+# 🔴 POSITIVE CONTROL ON THIS CENSUS'S OWN COMPLETENESS. The wrapper above is
+# meant to make a missed record structurally impossible; this is what turns that
+# from a claim into a checked one. If a dispatch ever fails to leave a record,
+# the ranking below is built from a SUBSET and reads exactly like a complete one.
+# Reported, never fatal — see property 3.
+if [ "${TIMING_CALLS:-0}" -ne "${#TIMINGS[@]}" ]; then
+  echo "  TIMING ⚠ INCOMPLETE — ${TIMING_CALLS:-0} dispatch(es) but ${#TIMINGS[@]} record(s)."
+  echo "          The ranking below is a SUBSET of what ran; do not read it as a total."
+fi
+
+# 🔴 THE ROW LOOP IS GUARDED ON HAVING RECORDS, NOT ON THE TOTAL BEING NON-ZERO.
+# An earlier revision required `_t_accounted > 0` so the percentage could divide
+# — which silently printed NO ranking at all for any run whose targets each
+# rounded to 0s. That is not a hypothetical: it is every fixture-sized run, i.e.
+# exactly the runs this block's own tests perform, so the tests would have been
+# asserting against a block that never executed. The division is what needs the
+# guard; the rows do not.
+if [ "${#TIMINGS[@]}" -gt 0 ]; then
+  printf '%s\n' ${TIMINGS[@]+"${TIMINGS[@]}"} \
+    | sort -t"$(printf '\t')" -k1,1nr \
+    | while IFS="$(printf '\t')" read -r _secs _rc _tgt; do
+        if [ "${_t_accounted:-0}" -gt 0 ]; then
+          _pct="$(( ( ${_secs:-0} * 1000 / _t_accounted + 5 ) / 10 ))"
+        else
+          _pct=0
+        fi
+        printf '    %6ss  %5s%%  %s%s\n' \
+          "$_secs" "$_pct" "$_tgt" \
+          "$([ "${_rc:-0}" -ne 0 ] && printf '  (rc=%s)' "$_rc" || true)"
+      done
+fi
 
 # --- GUARD 3 (global): collected-test floor ------------------------------------
 # The per-target floors above are the load-bearing check; this total is their
