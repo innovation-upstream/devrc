@@ -491,6 +491,61 @@ run 'force-passed-to-worktree-remove' \
   test_the_tool_never_passes_force_to_worktree_remove \
   's|"worktree", "remove", str(path)|"worktree", "remove", "--force", str(path)|'
 
+printf '\n== #931 — `removable` may not include a worktree git will REFUSE to remove ==\n'
+# 🔴 THE TWO ARMS ARE MUTATED SEPARATELY, and each names the ONE fixture where
+# it is the only arm that can fire. Mutating them together would prove nothing
+# about either: the initialised fixture trips BOTH, so a mutant that removed one
+# arm would still be caught by the other and be scored covered while its own
+# code was never the thing under test.
+#
+#   modules-store arm  -> only arm that fires on the DEINITIALISED fixture
+#                         (no populated gitlink left after `submodule deinit`)
+#   index arm          -> only arm that fires on the EMBEDDED fixture
+#                         (old-style `.git` directory creates no modules/ store)
+run 'submodule-not-a-blocker-in-classify' \
+  test_an_INITIALISED_submodule_makes_the_row_dead_but_not_removable \
+  's|^    elif subs:$|    elif False:|'
+run 'unknown-submodule-answer-treated-as-permission' \
+  test_an_unknowable_submodule_answer_blocks_rather_than_permits \
+  's|^    if subs is None:$|    if False:|'
+run 'modules-store-arm-blinded' \
+  test_a_DEINITIALISED_submodule_still_blocks_because_the_modules_store_remains \
+  's|^    if modules.is_dir():$|    if False:|'
+# 🔴 The "be cleverer than git" mutant. Requiring the store to be NON-EMPTY is
+# the reasonable-looking refinement, and it survives every fixture whose store
+# has contents — only the empty-store case can see it. git refuses on the
+# directory's existence alone, so this would hand back `failed=1`.
+run 'modules-store-required-to-be-non-empty' \
+  test_an_EMPTY_modules_store_blocks_because_git_blocks_on_it_too \
+  's|^    if modules.is_dir():$|    if modules.is_dir() and any(modules.iterdir()):|'
+run 'index-arm-blinded' \
+  test_an_EMBEDDED_submodule_git_dir_blocks_even_with_no_modules_store \
+  's|^        if rel and (path / rel / ".git").exists():$|        if False:|'
+run 'gitlink-mode-misspelled-so-no-gitlink-is-ever-seen' \
+  test_an_EMBEDDED_submodule_git_dir_blocks_even_with_no_modules_store \
+  's|^        if not line.startswith("160000 "):$|        if not line.startswith("160001 "):|'
+# 🔴 THE OVER-BLOCK MUTANT — the one that keeps the fix honest in the other
+# direction. Every mutant above makes the tool remove MORE; this makes it remove
+# NOTHING, which every "is it blocked?" assertion would happily score green.
+# Only the uninitialised CONTROL fixture can kill it, and that is the whole
+# reason that fixture exists: `.gitmodules` is tracked and a gitlink is in the
+# index, yet git removes the worktree fine.
+run 'submodules-reported-for-every-worktree' \
+  test_a_worktree_with_an_UNINITIALISED_submodule_is_still_removable \
+  's|^    if not is_dir(path):$|    if True:\n        return True, ["over-block"]\n    if not is_dir(path):|'
+run 'executor-skips-its-own-submodule-recheck' \
+  test_a_submodule_appearing_after_the_scan_skips_rather_than_fails \
+  's|^        if subs is not False:$|        if False:|'
+# 🔴 `is not False` vs `is True` — the mutant that only an UNKNOWN answer can
+# see. Both spellings behave identically on True and on False, so every fixture
+# above stays green; only the monkeypatched `None` re-check tells them apart.
+run 'executor-recheck-treats-unknown-as-permission' \
+  test_the_executor_skips_when_the_submodule_recheck_cannot_answer \
+  's|^        if subs is not False:$|        if subs is True:|'
+run 'blocked-rows-vanish-from-the-report' \
+  test_the_report_names_the_blocked_rows_instead_of_silently_dropping_them \
+  's|^        "submodule_blocked_dead": sum($|        "submodule_blocked_dead": 0 * sum(|'
+
 printf '\n== POSITIVE CONTROLS — mutants whose fate is KNOWN ==\n'
 # 🔴 A comment-only edit MUST survive. If it kills something, the harness is
 # keying on the file's text and every `ok` above is worthless.

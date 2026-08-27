@@ -463,6 +463,100 @@ def worktree_dirty(path: Path) -> "tuple[bool | None, int, list[str]]":
     return (len(lines) > 0), len(lines), lines[:10]
 
 
+def worktree_submodules(path: Path) -> "tuple[bool | None, list[str]]":
+    """Will `git worktree remove` REFUSE on this worktree because of submodules?
+
+    (blocked, reasons). `None` means UNKNOWABLE — never False, because an
+    unanswered question here must not read as "safe to remove".
+
+    🔴 THIS MIRRORS GIT'S OWN PREDICATE, WHICH IS NOT "does `.gitmodules`
+    exist". MEASURED against git 2.55.0, five hermetic fixtures, the refusal
+    outcome recorded next to every candidate signal:
+
+        A  .gitmodules tracked, submodule NOT initialised in the worktree
+           -> modules/ absent, gitlink present but UNPOPULATED  -> rc=0 REMOVED
+        B  submodule initialised in the worktree
+           -> modules/ present, gitlink populated               -> rc=128 refused
+        C  no submodule anywhere (negative control)             -> rc=0 REMOVED
+        D  submodule initialised then `submodule deinit`-ed
+           -> modules/ present, gitlink UNPOPULATED             -> rc=128 refused
+        E  gitlink populated old-style (EMBEDDED .git directory)
+           -> modules/ ABSENT, gitlink populated                -> rc=128 refused
+
+    So neither signal alone is the predicate and `.gitmodules` is neither:
+    A has `.gitmodules` and removes fine, so keying on it OVER-blocks; D has no
+    populated gitlink and is refused, so keying on that alone UNDER-blocks —
+    and under-blocking is the direction that puts `failed=` back in the output.
+    The predicate is the OR of the other two, checked in git's own order:
+
+        <this worktree's git dir>/modules exists   OR   any gitlink in the
+        index is populated (its path carries a `.git`)
+
+    🔴 The `modules/` check is per-WORKTREE, not per-repo: `rev-parse
+    --git-path` resolves against the linked worktree's own git dir
+    (`<repo>/.git/worktrees/<name>/modules`). It answers RELATIVELY for a main
+    checkout, hence the `path /` join rather than trusting it to be absolute.
+
+    🟡 Deliberately conservative on the second arm: git additionally requires
+    the gitlink to be a REAL git directory, while this only asks whether a
+    `.git` is there. A gitlink carrying a broken `.git` is therefore reported
+    blocked where git would have removed it — an over-block, which costs a row
+    of coverage and never a `failed=`.
+    """
+    if not is_dir(path):
+        return None, []
+
+    gp = _git(path, "rev-parse", "--git-path", "modules")
+    if gp.returncode != 0:
+        return None, [f"git rev-parse --git-path failed rc={gp.returncode}: "
+                      f"{gp.stderr.strip()[:200]}"]
+    modules = Path(gp.stdout.strip())
+    if not modules.is_absolute():
+        modules = path / modules
+    if modules.is_dir():
+        # 🔴 NAME them. The summary line promises `--verbose` "names the
+        # submodule", and a bare store path does not — a description wider than
+        # its body is a claim the code does not keep. The store holds one entry
+        # per submodule, which is also the thing the operator has to go and
+        # remove by hand.
+        # 🔴 The three cases are spelled apart rather than collapsed into one
+        # "none" — an EMPTY store is not an unreadable one, and git refuses on
+        # the directory's EXISTENCE either way. Its own source calls that a
+        # knowingly-accepted false positive; MEASURED (case F): an empty
+        # `modules/` with no `.gitmodules` and no gitlink in the index is
+        # refused rc=128, and this tool agrees. Telling an operator a store
+        # "holds" submodules it does not is the sort of small false sentence
+        # this file's history is made of.
+        try:
+            names = sorted(p.name for p in modules.iterdir())
+        except OSError as exc:
+            held = f"contents unreadable ({exc.__class__.__name__})"
+        else:
+            held = (f"holding: {', '.join(names[:10])}" if names
+                    else "EMPTY — git refuses on the store's existence alone")
+        return True, [f"submodule store in this worktree's git dir "
+                      f"({modules}), {held} — "
+                      f"`git worktree remove` refuses outright"]
+
+    # Only reached when `modules/` is absent, matching git's short-circuit.
+    ls = _git(path, "ls-files", "-s")
+    if ls.returncode != 0:
+        return None, [f"git ls-files failed rc={ls.returncode}: {ls.stderr.strip()[:200]}"]
+    populated: list[str] = []
+    for line in ls.stdout.splitlines():
+        # `<mode> <oid> <stage>\t<path>`; 160000 is the gitlink mode.
+        if not line.startswith("160000 "):
+            continue
+        _, _, rel = line.partition("\t")
+        if rel and (path / rel / ".git").exists():
+            populated.append(rel)
+    if populated:
+        return True, [f"populated submodule(s) in the working tree: "
+                      f"{', '.join(sorted(populated)[:10])} — "
+                      f"`git worktree remove` refuses outright"]
+    return False, []
+
+
 def _paths_differ(repo: Path, rev_a: str, rev_b: str, paths: "list[str]") -> "bool | None":
     """Do any of `paths` differ between the two revs? None on a git failure.
 
@@ -895,6 +989,25 @@ def classify(row: "dict") -> "dict":
     if excluded_by:
         blockers.append(f"excluded by path filter {excluded_by!r} — reported, never removed")
 
+    # 🔴 ALSO unconditional, and for the same reason: `git worktree remove`
+    # refuses outright on a submodule-bearing worktree, so `removable` was a
+    # claim the tool could not cash (#931 — 54 of 107 rows on the first real
+    # fleet `--execute` failed rc=128, and re-running never converged because
+    # the cause is permanent). A blocker rather than a new verdict: whether the
+    # branch LANDED is a different question from whether the directory can be
+    # removed, exactly as with `excluded_by`. The row stays `dead`, stays
+    # printed, and drops out of `removable` — and therefore out of `--confirm`.
+    #
+    # 🔴 `None` (unknowable) BLOCKS. It is not `False`; an unanswered question
+    # about a refusal must not be spent as permission.
+    subs = row.get("submodules")
+    if subs is None:
+        blockers.append("could not determine whether this worktree carries submodules — "
+                        + "; ".join(row.get("submodule_reasons") or ["no reason recorded"]))
+    elif subs:
+        blockers.extend(row.get("submodule_reasons")
+                        or ["carries submodules — `git worktree remove` refuses outright"])
+
     if row.get("is_main"):
         blockers.append("main checkout — never a removal candidate")
         return out(LIVE, "the repository's main worktree")
@@ -1005,6 +1118,20 @@ def scan_repo(repo: Path, gh_cmd: str, use_gh: bool, pr_limit: int, jobs: int,
         row["evidence"].append(
             "dirty=UNKNOWN" if dirty is None else f"dirty={dirty} ({count} path(s))")
 
+        # #931: gathered for EVERY row, not just dead ones, so the evidence line
+        # is present whatever the verdict turns out to be and a row that changes
+        # verdict between scans does not change what was asked about it.
+        subs, sub_reasons = worktree_submodules(path)
+        row["submodules"] = subs
+        row["submodule_reasons"] = sub_reasons
+        # 🔴 The REASONS go into `evidence`, not just the boolean — `blockers` is
+        # never rendered anywhere, so a bare `submodules=True` would have made
+        # the summary's own "--verbose … names the submodule" a false claim
+        # about the report printing it.
+        row["evidence"].append(
+            ("submodules=UNKNOWN" if subs is None else f"submodules={subs}")
+            + (": " + "; ".join(sub_reasons) if sub_reasons else ""))
+
         row["pr"] = index.lookup(wt["branch"])
         row["evidence"].append(
             f"pr: answered={row['pr']['answered']} state={row['pr']['state']} ({row['pr']['why']})")
@@ -1094,6 +1221,18 @@ def summarize(rows: "list[dict]", exclude_globs: "list[str] | None" = None,
         # removed without it. That is the number that says whether the filter did
         # anything, and it is not the same as `excluded`.
         "excluded_dead": sum(1 for r in excluded if r["verdict"] == DEAD),
+        # 🔴 #931. `dead` rows `git worktree remove` will REFUSE on, so they can
+        # never be removable and re-running never converges. Counted so the gap
+        # between `dead` and `removable` has a name in the report instead of
+        # being a silent truncation the operator has to notice was missing.
+        #
+        # Counted INDEPENDENTLY of `excluded_dead`, exactly like the per-glob
+        # counts above: a row can be both excluded and submodule-bearing, and
+        # the question this key answers is "how many dead rows does THIS cause
+        # hold back", not "how many rows are held back only by this".
+        # `is not False` so the UNKNOWN rows are in it — they are held back too.
+        "submodule_blocked_dead": sum(
+            1 for r in rows if r["verdict"] == DEAD and r.get("submodules") is not False),
         "exclude_globs": per_glob,
         # 🔴 THE HEADLINE SAFETY NUMBER. A glob that matches nothing produces
         # output BYTE-IDENTICAL to passing no filter at all, and `--confirm N`
@@ -1179,6 +1318,21 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
             f"exclusion filter — NOT in the number above, and NOT covered by this run. "
             f"They are listed under `exclusion filters in force` below; --verbose gives "
             f"their paths.")
+    # 🔴 #931, and immediately under the removable count for the same reason the
+    # spared-exclusion line is: this is the OTHER way `dead` exceeds `removable`,
+    # and it is the one that used to be invisible. Before this, `--confirm N`
+    # counted these rows and `--execute` then failed rc=128 on every one of them
+    # — 54 of 107 on the first real fleet run, a ~2x overcount in the operator's
+    # primary safety number, and re-running never converged because the cause is
+    # permanent rather than transient.
+    if summary.get("submodule_blocked_dead"):
+        lines.append(
+            f"🔴 …and {summary['submodule_blocked_dead']} further `dead` row(s) carry SUBMODULES "
+            f"— `git worktree remove` refuses on these outright, so they are NOT in the number "
+            f"above and NOT counted toward --confirm. This is permanent, not transient: "
+            f"re-running will never remove them, and forcing the removal is not the answer. "
+            f"Remove the submodule working copies by hand first, or leave them. --verbose "
+            f"gives their paths and names the submodule.")
     # 🔴 The dangerous choice is the one you have to type — so say, loudly, when
     # it was typed. Printed before the filter list because it is the reason the
     # list is one line shorter than it usually is.
@@ -1445,6 +1599,17 @@ def execute_removals(rows: "list[dict]", confirm: "int | None") -> int:
         if dirty is not False:
             _log(f"SKIP {path}: re-check says dirty={dirty} ({count} path(s)) — "
                  "it changed since the scan, or was never knowable")
+            skipped += 1
+            continue
+        # 🔴 #931, and LAST alongside the dirty re-check for the same reason:
+        # a concurrent session can run `git submodule update --init` in this
+        # worktree between the scan and now, and git would then refuse. `is not
+        # False` so UNKNOWN skips too — the scan's answer is a claim about the
+        # past, and this is the moment the destructive step actually runs.
+        subs, sub_reasons = worktree_submodules(path)
+        if subs is not False:
+            _log(f"SKIP {path}: re-check says submodules={subs} — "
+                 + ("; ".join(sub_reasons) if sub_reasons else "no reason recorded"))
             skipped += 1
             continue
         res = _git(repo, "worktree", "remove", str(path))

@@ -736,8 +736,12 @@ def test_porcelain_parser_marks_only_the_first_block_as_main():
 # ── classify() as a pure function ─────────────────────────────────────────────
 
 def base_row(**kw) -> dict:
+    # 🔴 `submodules` is spelled out rather than left to default. `classify`
+    # treats a MISSING key as UNKNOWN and blocks removal on it (#931) — an
+    # unanswered question about a refusal must not be spent as permission — so
+    # every caller has to answer it, and this fixture answers "no submodules".
     row = {"is_main": False, "bare": False, "prunable": False, "path_exists": True,
-           "locked": False, "dirty": False, "dirty_count": 0,
+           "locked": False, "dirty": False, "dirty_count": 0, "submodules": False,
            "default_ref": "refs/remotes/origin/main", "landed_signals": [],
            "signal_error": False, "evidence": [],
            "pr": {"answered": True, "state": None, "number": None, "merged_at": None,
@@ -3476,3 +3480,283 @@ def test_the_stub_interpreter_exists(tmp_path):
         "the stub shebang interpreter is missing — every gh stub in this file "
         "would fail to exec and the tests that depend on one must go red, not "
         "silently empty")
+
+
+# ── #931: submodule-bearing worktrees are never `removable` ───────────────────
+#
+# 🔴 THE FIXTURES ARE PAIRWISE DISTINCT ON PURPOSE, and that is the whole point
+# of this section. `git worktree remove` refuses on a predicate that is NOT
+# "does `.gitmodules` exist" — MEASURED against git 2.55.0:
+#
+#     uninitialised   .gitmodules yes, modules/ no,  gitlink unpopulated -> REMOVES
+#     initialised     .gitmodules yes, modules/ yes, gitlink populated   -> refuses
+#     deinitialised   .gitmodules yes, modules/ yes, gitlink unpopulated -> refuses
+#     embedded .git   .gitmodules yes, modules/ NO,  gitlink populated   -> refuses
+#
+# So a `.gitmodules` check passes the three refusal cases and OVER-blocks the
+# first; a populated-gitlink check misses the deinitialised case; a `modules/`
+# check misses the embedded case. Each fixture below kills a different one of
+# those wrong implementations, and the uninitialised case is the control that
+# stops "block everything that smells of a submodule" from scoring green.
+
+def git_allowing_file_submodules(repo: Path, *args: str) -> str:
+    """`git`, with the `file://` submodule transport enabled.
+
+    Git blocks that transport by default (CVE-2022-39253) and every local
+    fixture needs it. Set through `GIT_CONFIG_COUNT` rather than `git -c`
+    because `submodule add` clones in a CHILD process which `-c` does not
+    reach — MEASURED: the `-c` form dies `fatal: unable to checkout submodule
+    'vendor'`. `GIT_CONFIG_GLOBAL`/`_SYSTEM` isolation is untouched.
+    """
+    env = {**os.environ, "GIT_CONFIG_COUNT": "1",
+           "GIT_CONFIG_KEY_0": "protocol.file.allow", "GIT_CONFIG_VALUE_0": "always"}
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                       text=True, check=False, timeout=120, env=env)
+    if r.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)} in {repo} failed rc={r.returncode}\n"
+                             f"stdout={r.stdout}\nstderr={r.stderr}")
+    return r.stdout.strip()
+
+
+def submodule_universe(tmp_path: Path, name: str):
+    """A repo with a submodule and ONE worktree whose branch has squash-merged.
+
+    The worktree is `dead` on the landing evidence alone, so every assertion
+    below is about `removable` moving while the verdict stays put.
+    """
+    sub = new_repo(tmp_path, f"{name}-subsrc")
+    repo = new_repo(tmp_path, name)
+    git_allowing_file_submodules(repo, "submodule", "add", "-q", str(sub), "vendor")
+    git(repo, "commit", "-qm", "add submodule")
+    publish(repo)
+    commit_on_branch(repo, "topic", "feature.txt", "feature\n", "feature")
+    wt = add_worktree(repo, tmp_path / f"{name}-wt", "topic")
+    squash_merge(repo, "topic", "feature.txt", "squash: feature")
+    gh = gh_stub(tmp_path, [], name=f"gh-{name}")
+    return repo, wt, sub, gh
+
+
+def _row(repo, wt, gh):
+    return row_for(repo, wt, gh_cmd=gh)
+
+
+def test_a_worktree_with_an_UNINITIALISED_submodule_is_still_removable(tmp_path):
+    """THE CONTROL. `.gitmodules` is tracked and a gitlink is in the index, but
+    git removes this worktree happily — so a fix that keys on either of those
+    over-blocks, and this test is what says so.
+
+    It also proves the fixture can reach `removable=True` at all, without which
+    the three assertions below would be green against a tool that blocks
+    unconditionally.
+    """
+    repo, wt, _sub, gh = submodule_universe(tmp_path, "uninit")
+    assert (wt / ".gitmodules").is_file(), "fixture must carry a tracked .gitmodules"
+    assert not (wt / "vendor" / ".git").exists(), "fixture must leave the submodule uninitialised"
+
+    row = _row(repo, wt, gh)
+    assert row["verdict"] == "dead", row["verdict_reason"]
+    assert row["submodules"] is False, row["submodule_reasons"]
+    assert row["removable"] is True, row["blockers"]
+
+    # …and git agrees. This is the claim the tool is making, cashed.
+    assert wp.execute_removals([row], 1) == wp.RC_OK
+    assert not wt.exists()
+
+
+def test_an_INITIALISED_submodule_makes_the_row_dead_but_not_removable(tmp_path):
+    """The production shape: 54 of 107 rows on the first real fleet --execute."""
+    repo, wt, _sub, gh = submodule_universe(tmp_path, "init")
+    git_allowing_file_submodules(wt, "submodule", "update", "--init", "-q")
+    assert (wt / "vendor" / ".git").exists()
+
+    row = _row(repo, wt, gh)
+    # The verdict is about whether the branch LANDED, which is a different
+    # question and must not move.
+    assert row["verdict"] == "dead", row["verdict_reason"]
+    assert row["submodules"] is True
+    assert row["removable"] is False, row["blockers"]
+    assert any("submodule" in b for b in row["blockers"]), row["blockers"]
+
+
+def test_a_DEINITIALISED_submodule_still_blocks_because_the_modules_store_remains(tmp_path):
+    """Kills the populated-gitlink-only implementation.
+
+    After `submodule deinit` there is NO populated gitlink in the working tree,
+    yet git still refuses — the per-worktree `modules/` store is what it sees.
+    A fix that only walked the index would call this row removable and hand
+    back `failed=1`.
+    """
+    repo, wt, _sub, gh = submodule_universe(tmp_path, "deinit")
+    git_allowing_file_submodules(wt, "submodule", "update", "--init", "-q")
+    git(wt, "submodule", "deinit", "-f", "-q", "vendor")
+    assert not (wt / "vendor" / ".git").exists(), "deinit must leave the gitlink unpopulated"
+
+    row = _row(repo, wt, gh)
+    assert row["verdict"] == "dead"
+    assert row["submodules"] is True, row["submodule_reasons"]
+    assert row["removable"] is False, row["blockers"]
+
+    # The mechanism, not just the outcome: git itself must refuse this.
+    r = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(wt)],
+                       capture_output=True, text=True, check=False)
+    assert r.returncode != 0 and "submodule" in r.stderr, r
+
+
+def test_an_EMBEDDED_submodule_git_dir_blocks_even_with_no_modules_store(tmp_path):
+    """Kills the `modules/`-only implementation.
+
+    An old-style submodule carries a real `.git` DIRECTORY inside the worktree
+    and creates no per-worktree `modules/` store. git refuses on it via its
+    second arm; a fix that only stat'd `modules/` would miss it entirely.
+    """
+    repo, wt, sub, gh = submodule_universe(tmp_path, "embedded")
+    gitdir = Path(git(wt, "rev-parse", "--absolute-git-dir"))
+    subprocess.run(["git", "clone", "-q", str(sub), str(wt / "vendor")],
+                   capture_output=True, text=True, check=True,
+                   env={**os.environ, "GIT_CONFIG_COUNT": "1",
+                        "GIT_CONFIG_KEY_0": "protocol.file.allow",
+                        "GIT_CONFIG_VALUE_0": "always"})
+    assert (wt / "vendor" / ".git").is_dir(), "fixture must embed a real .git DIRECTORY"
+    assert not (gitdir / "modules").exists(), "fixture must create NO modules/ store"
+
+    row = _row(repo, wt, gh)
+    assert row["submodules"] is True, row["submodule_reasons"]
+    assert row["removable"] is False, row["blockers"]
+
+    r = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(wt)],
+                       capture_output=True, text=True, check=False)
+    assert r.returncode != 0 and "submodule" in r.stderr, r
+
+
+def test_confirm_counts_only_what_the_run_can_actually_remove(tmp_path, capsys):
+    """#931's headline: `--confirm N` was a claim the tool could not cash.
+
+    End to end through `main`, which is where the operator meets the number.
+    The old tool offered `--confirm 1` and then reported `failed=1`; the fixed
+    one offers 0, and 1 is refused.
+    """
+    repo, wt, _sub, gh = submodule_universe(tmp_path, "confirm")
+    git_allowing_file_submodules(wt, "submodule", "update", "--init", "-q")
+
+    assert wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                    "--execute", "--confirm", "1"]) == wp.RC_EXECUTE_REFUSED
+    assert wt.is_dir(), "nothing may be removed on a refused run"
+
+    # The achievable number runs clean — this is the issue's closing condition
+    # in miniature: `removed == N` and `failed=0`, with no rc=128 anywhere.
+    capsys.readouterr()
+    assert wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                    "--execute", "--confirm", "0"]) == wp.RC_OK
+    err = capsys.readouterr().err
+    assert "removed=0 skipped=0 failed=0" in err, err
+    assert "cannot be moved or removed" not in err, err
+    assert wt.is_dir()
+
+
+def test_the_report_names_the_blocked_rows_instead_of_silently_dropping_them(tmp_path, capsys):
+    """A row that is `dead` but not removable must not vanish into the gap
+    between the two counts — that is the silent truncation this tool exists not
+    to have. And `--verbose` must NAME the submodule, because the summary says
+    it does."""
+    repo, wt, _sub, gh = submodule_universe(tmp_path, "report")
+    git_allowing_file_submodules(wt, "submodule", "update", "--init", "-q")
+
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1", "--verbose"])
+    out = capsys.readouterr().out
+    assert "carry SUBMODULES" in out, out
+    assert "1 further `dead` row(s)" in out, out
+    # The summary's own promise, cashed: the submodule is named in --verbose.
+    assert "vendor" in out, out
+
+
+def test_a_submodule_appearing_after_the_scan_skips_rather_than_fails(tmp_path, capsys):
+    """The scan is a claim about the PAST. If a concurrent session initialises a
+    submodule between the scan and the removal, the executor must SKIP — the
+    whole point of #931 is that `failed=` stops appearing."""
+    repo, wt, _sub, gh = submodule_universe(tmp_path, "race")
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1)
+    targets = [r for r in rows if r["removable"]]
+    assert len(targets) == 1, [r["path"] for r in rows]
+
+    # …the world moves under the scan.
+    git_allowing_file_submodules(wt, "submodule", "update", "--init", "-q")
+
+    capsys.readouterr()
+    assert wp.execute_removals(rows, 1) == wp.RC_OK
+    err = capsys.readouterr().err
+    assert "removed=0 skipped=1 failed=0" in err, err
+    assert "SKIP" in err and "submodules=True" in err, err
+    assert wt.is_dir(), "the worktree must survive"
+
+
+def test_an_unknowable_submodule_answer_blocks_rather_than_permits(tmp_path):
+    """`None` is not `False`. An unanswered question about a refusal must not be
+    spent as permission — the same direction `dirty=None` already takes."""
+    row = wp.classify(base_row(landed_signals=["ancestor"], submodules=None,
+                               submodule_reasons=["git ls-files failed rc=128"]))
+    assert row["verdict"] == "dead"
+    assert row["removable"] is False, row["blockers"]
+    assert any("could not determine" in b for b in row["blockers"]), row["blockers"]
+
+
+def test_a_row_that_never_answered_the_submodule_question_is_not_removable(tmp_path):
+    """A missing key reads as UNKNOWN, not as False. A future scan path that
+    forgets to gather the evidence must lose coverage, never gain permission."""
+    row = dict(base_row(landed_signals=["ancestor"]))
+    del row["submodules"]
+    out = wp.classify(row)
+    assert out["verdict"] == "dead"
+    assert out["removable"] is False, out["blockers"]
+
+
+def test_the_executor_skips_when_the_submodule_recheck_cannot_answer(tmp_path, capsys,
+                                                                     monkeypatch):
+    """`is not False`, not `is True`. If the re-check at the destructive step
+    cannot answer, the executor must SKIP — an unknowable answer is not
+    permission, and a `git` that fails here is exactly when it matters."""
+    repo, wt, _sub, gh = submodule_universe(tmp_path, "recheck-unknown")
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1)
+    assert sum(1 for r in rows if r["removable"]) == 1
+
+    monkeypatch.setattr(wp, "worktree_submodules",
+                        lambda p: (None, ["git ls-files failed rc=128"]))
+    capsys.readouterr()
+    assert wp.execute_removals(rows, 1) == wp.RC_OK
+    err = capsys.readouterr().err
+    assert "removed=0 skipped=1 failed=0" in err, err
+    assert "submodules=None" in err, err
+    assert wt.is_dir(), "the worktree must survive an unanswerable re-check"
+
+
+def test_an_EMPTY_modules_store_blocks_because_git_blocks_on_it_too(tmp_path):
+    """The one place the mirror could plausibly diverge from git.
+
+    git refuses on the mere EXISTENCE of the per-worktree `modules/` directory
+    — its own source calls that a knowingly-accepted false positive. A worktree
+    with an empty store, no `.gitmodules` and no gitlink in the index is
+    therefore unremovable, and a tool that tried to be cleverer than git here
+    would hand back `failed=1`. The assertion is that the tool AGREES with git,
+    and git's behaviour is measured in the same test rather than assumed.
+    """
+    repo = new_repo(tmp_path, "emptystore")
+    commit_on_branch(repo, "topic", "feature.txt", "feature\n", "feature")
+    wt = add_worktree(repo, tmp_path / "emptystore-wt", "topic")
+    squash_merge(repo, "topic", "feature.txt", "squash: feature")
+    gitdir = Path(git(wt, "rev-parse", "--absolute-git-dir"))
+    (gitdir / "modules").mkdir()
+    assert not (wt / ".gitmodules").exists()
+    assert not [l for l in git(wt, "ls-files", "-s").splitlines() if l.startswith("160000 ")]
+
+    blocked, reasons = wp.worktree_submodules(wt)
+    assert blocked is True, reasons
+    assert "EMPTY" in reasons[0], reasons
+
+    gh = gh_stub(tmp_path, [], name="gh-emptystore")
+    row = row_for(repo, wt, gh_cmd=gh)
+    assert row["verdict"] == "dead"
+    assert row["removable"] is False, row["blockers"]
+
+    # …and git really does refuse, so the tool is agreeing rather than guessing.
+    r = subprocess.run(["git", "-C", str(repo), "worktree", "remove", str(wt)],
+                       capture_output=True, text=True, check=False)
+    assert r.returncode != 0 and "submodule" in r.stderr, r
