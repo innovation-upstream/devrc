@@ -801,14 +801,42 @@ def m_gate_exit_codes(env: Env) -> dict:
     #: `test_the_gate_exit_code_legend_matches_gate_sh`, because the count is a
     #: `value` string and NOTHING in this suite pinned any `value` string —
     #: hardcoding it to the right number was measured to pass.
-    exits = set(re.findall(r"^#\s*(?:Exit:)?\s*(\d+)\s*=\s*(.+)$", gtext, re.M))
+    #: 🔴 THE BLOCK IS THE UNIT, NOT THE LINE — AND WIDENING THE PATTERN WITHOUT
+    #: RE-BOUNDING IT PUBLISHED FICTION. The previous round dropped a
+    #: `{"0","1","2","90"}` allowlist as "dead code". It was dead as a
+    #: REACHABILITY matter and load-bearing as a VALUE bound: it was the only
+    #: thing confining the harvest to real exit codes. With it gone and the
+    #: pattern anchored on nothing but `^#`, any of `gate.sh`'s 99 comment lines
+    #: that happens to read `# N = …` became an exit code on the page. Measured:
+    #: one ordinary body comment (`#   7 = the number of retries …`) rendered a
+    #: fifth code, with the suite green.
+    #:
+    #: Restoring a literal allowlist would only re-freeze the answer this page
+    #: exists to MEASURE. So the bound is structural instead: the legend is the
+    #: CONTIGUOUS run of comment lines beginning at the `# Exit:` anchor, and it
+    #: ends at the first line that is not a continuation. A code documented
+    #: outside that block is not in the legend, which is exactly what `source`
+    #: and the row label claim.
+    exits: list[tuple[str, str]] = []
+    started = False
+    for line in gtext.splitlines():
+        head = re.match(r"^#\s*Exit:\s*(\d+)\s*=\s*(.+)$", line)
+        cont = re.match(r"^#\s*(\d+)\s*=\s*(.+)$", line)
+        if head:
+            started = True
+            exits.append((head.group(1), head.group(2)))
+        elif started and cont:
+            exits.append((cont.group(1), cont.group(2)))
+        elif started:
+            break
     #: Numeric, not lexical: a two-digit code must not sort before a one-digit
     #: one, and `sorted()` on the string puts `10` ahead of `2`.
-    rows = [(code, desc.strip()) for code, desc in sorted(exits, key=lambda kv: int(kv[0]))]
+    rows = [(code, desc.strip())
+            for code, desc in sorted(set(exits), key=lambda kv: int(kv[0]))]
     if not rows:
         raise Unmeasurable(
-            "no `# [Exit:] N = …` exit-code lines were found in scripts/gate.sh "
-            "— an empty parse is a broken read, not a script without exit codes")
+            "no `# Exit: N = …` legend block was found in scripts/gate.sh — an "
+            "empty parse is a broken read, not a script without exit codes")
     return dict(
         value=f"{len(rows)} exit codes documented in gate.sh's header",
         detail=(
@@ -818,7 +846,7 @@ def m_gate_exit_codes(env: Env) -> dict:
             "as 'the tests failed' — read the log rather than debugging a diff "
             "against it."
         ),
-        source="scripts/gate.sh header comment",
+        source="scripts/gate.sh — the contiguous `# Exit:` legend block only",
         columns=("exit", "meaning"),
         column_kinds=("", "prose"),
         rows=tuple(rows),

@@ -680,11 +680,14 @@ def test_a_STATIC_LABEL_in_a_name_cell_is_not_corrupted():
         "quartzsighted about the ceiling",               # `quartzsight` inside a longer word
         "pelagic-mailboxes archive nightly",             # the whole hyphenated name, extended
     )
-    # 🔴 CHECKED AGAINST `FAKE_NAMES` ITSELF, NOT A THIRD HARDCODED TUPLE. The
-    # first version listed the names again here, so it could not see the drift
-    # it names: deleting one from `FAKE_NAMES` left this test green, and only a
-    # sibling caught it. Every name the sanitizer is given must be exercised by
-    # some label, or this guard is partly vacuous again.
+    # 🔴 CHECKED AGAINST `FAKE_NAMES` ITSELF, NOT A THIRD HARDCODED TUPLE, so
+    # that ADDING a name to the sanitizer without giving it a label fails here
+    # rather than silently narrowing this guard. ⚠ It cannot see a DELETION —
+    # iterating `FAKE_NAMES` structurally cannot notice a shorter `FAKE_NAMES` —
+    # and that direction is covered by
+    # `test_a_local_name_that_PREFIXES_another_is_not_eaten` instead. Stated
+    # because an earlier version of this comment claimed the deletion direction,
+    # which is the "description wider than the implementation" shape.
     unexercised = [n for n in FAKE_NAMES if not any(n in label for label in labels)]
     assert not unexercised, (
         f"fixture drifted: {unexercised} are in FAKE_NAMES but appear in no label, "
@@ -1015,9 +1018,27 @@ def test_the_gate_exit_code_legend_matches_gate_sh(tmp_path):
         f"{row.reason if row else 'row absent'}")
 
     gate = (REPO_ROOT / "scripts" / "gate.sh").read_text(encoding="utf-8")
-    # Independent read: every commented `<digits> = <text>` in the header block,
-    # without assuming where on the line the digits sit.
-    expected = {m.group(1) for m in re.finditer(r"^#[^\n]*?\b(\d+)\s*=\s*\S", gate, re.M)}
+    # Independent read of the SAME block. Deliberately a different grammar —
+    # it does not care where on the line the digits sit — but the same SCOPE,
+    # because scope is a property of the claim ("the legend"), not of the
+    # parser. Reading the whole file here instead would make the guard disagree
+    # with a correct page the moment `gate.sh` gains an unrelated `# N = …`.
+    #
+    # ⚠ WHAT NEITHER PARSER CAN SEE: a code documented with a different
+    # SEPARATOR (`#  3 : …`) is invisible to both, so the page under-reports and
+    # this guard confirms it. That is inherent to cross-checking one file with
+    # two readers; it is recorded rather than fixed because the alternative —
+    # a third grammar — has the same property one level up.
+    block: list[str] = []
+    started = False
+    for line in gate.splitlines():
+        if re.match(r"^#[^\n]*?\bExit:\s*\d+\s*=", line):
+            started = True
+        elif started and not re.match(r"^#[^\n]*?\b\d+\s*=\s*\S", line):
+            break
+        if started:
+            block.append(line)
+    expected = {m.group(1) for m in re.finditer(r"\b(\d+)\s*=\s*\S", "\n".join(block))}
     assert expected, "no exit codes found in gate.sh at all — the control is broken"
 
     got = {code for code, _ in row.rows}
@@ -1030,6 +1051,49 @@ def test_the_gate_exit_code_legend_matches_gate_sh(tmp_path):
     )
     assert row.value.startswith(f"{len(expected)} "), (
         f"the count in the value label disagrees with the rows: {row.value!r}")
+
+
+def test_the_exit_code_legend_stops_at_the_BLOCK_and_sorts_NUMERICALLY(tmp_path):
+    """🔴 REGRESSION GUARD on two claims the REAL `gate.sh` cannot distinguish.
+
+    Both were unguarded because today's file makes the right and wrong answers
+    identical — the reason a synthetic fixture is the only instrument here:
+
+      * SCOPE. A previous round dropped a `{"0","1","2","90"}` allowlist as
+        "dead code". It was dead as reachability and load-bearing as a VALUE
+        bound. Without it, any of `gate.sh`'s 99 comment lines reading
+        `# N = …` became an exit code on the page — measured, one ordinary body
+        comment rendered a fifth code with the suite green. The real file
+        contains no such comment, so nothing failed.
+      * ORDER. `sorted()` on the code STRING puts `10` before `2`. The real
+        codes are `0,1,2,90`, where lexical and numeric order coincide, so
+        reverting the numeric key changes nothing there.
+
+    The fixture therefore carries a decoy comment far below the legend AND a
+    two-digit code that sorts differently under the two orderings.
+    """
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "flake.nix").write_text('runCommandLocal "devrc-pytests" {}\n')
+    (repo / "scripts" / "gate.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "# Exit: 0 = everything passed.\n"
+        "#      10 = a two-digit code, which must not sort before 2.\n"
+        "#       2 = a usage problem.\n"
+        "\n"
+        "echo hello\n"
+        "#   7 = a retry budget, NOT an exit code, far below the legend\n"
+    )
+    env = measure.Env(repo=repo, home=tmp_path / "h", claude_dir=tmp_path / "c",
+                      index_store=tmp_path / "s", allow_systemd=False,
+                      allow_network=False)
+    got = [code for code, _ in measure.m_gate_exit_codes(env)["rows"]]
+
+    assert "7" not in got, (
+        f"a comment outside the legend block was published as an exit code: {got}")
+    assert got == ["0", "2", "10"], (
+        f"expected numeric order 0,2,10 — got {got}. Lexical sorting puts '10' "
+        "before '2', which the real gate.sh cannot reveal.")
 
 
 def test_every_ledger_KEY_is_a_real_registry_key():
