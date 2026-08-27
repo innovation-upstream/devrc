@@ -115,23 +115,40 @@ def _write(root, project, session_id, lines, subagent=False):
     return p
 
 
-def _run_find_session(root, argv):
+def _run_find_session(root, argv, opencode_db=None):
     """Run scripts/find-session.py against `root`, return (stdout, parsed-json-or-None).
 
     Deliberately drives the CLI module, not the shared library: this is the harness the
     RED_AT_BASE tests were replayed through against a tree where the library did not
     exist yet, so it has to work on both.
+
+    🔴 `find-session.py` searches TWO corpora. `ROOT` scopes the Claude one; the
+    opencode one is scoped by the two env vars below, and it must be scoped
+    EXPLICITLY rather than left to chance. Unscoped, these tests read the live
+    opencode DBs and SSH to the other host, so a fixture asserting "exactly this
+    one session" collected whatever real sessions happened to match — and it
+    would still have passed in the nix sandbox tier, where no DB or SSH exists.
+    `opencode_db` defaults to a path that cannot exist, i.e. an empty corpus.
     """
     mod = _load(SCRIPTS / "find-session.py", "fs_under_test")
     mod.ROOT = str(root)
     buf = io.StringIO()
     old_argv = sys.argv
+    old_env = {k: os.environ.get(k)
+               for k in ("DEVRC_OPENCODE_PEERS", "DEVRC_OPENCODE_DB")}
+    os.environ["DEVRC_OPENCODE_PEERS"] = ""          # no host is contacted
+    os.environ["DEVRC_OPENCODE_DB"] = str(opencode_db or Path(root) / "_no_opencode.db")
     sys.argv = ["find-session.py"] + list(argv)
     try:
         with contextlib.redirect_stdout(buf):
             mod.main()
     finally:
         sys.argv = old_argv
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     out = buf.getvalue()
     parsed = None
     if "--json" in argv:
@@ -144,6 +161,69 @@ def _run_find_session(root, argv):
 
 def _ids(parsed):
     return sorted(x["session_id"] for x in (parsed or []))
+
+
+def _write_opencode_db(path, sessions):
+    """Build an opencode-shaped SQLite store. `sessions` is [(id, title, cwd, texts)]."""
+    import sqlite3
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, "
+                 "directory TEXT, time_created INTEGER, time_updated INTEGER)")
+    conn.execute("CREATE TABLE part (session_id TEXT, data TEXT)")
+    stamp = int(datetime(2026, 8, 25, 12, 0).timestamp() * 1000)
+    for sid, title, cwd, texts in sessions:
+        conn.execute("INSERT INTO session VALUES (?,?,?,?,?)",
+                     (sid, title, cwd, stamp, stamp))
+        for t in texts:
+            conn.execute("INSERT INTO part VALUES (?,?)",
+                         (sid, json.dumps({"type": "text", "text": t})))
+    conn.commit()
+    conn.close()
+    return path
+
+
+# --------------------------- the opencode corpus is actually wired in ---------------
+
+def test_the_opencode_corpus_is_merged_into_the_default_search():
+    """🔴 POSITIVE CONTROL for the muting in `_run_find_session`.
+
+    That helper points the opencode corpus at a path that cannot exist, so every
+    other test in this file sees an EMPTY opencode corpus. A harness wired to
+    nothing would satisfy all of them identically — a reassuring zero that is
+    indistinguishable from "the leg was deleted". This feeds a corpus that MUST
+    produce a non-zero count and watches the number move.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        _write(tmp, "-proj", "claudeone", [_user("zzmergetok")])
+        db = _write_opencode_db(Path(tmp) / "oc.db", [
+            ("ses_zz1", "a title", "/home/zach/workspace/devrc", ["zzmergetok here"]),
+        ])
+
+        _, empty = _run_find_session(tmp, ["--json", "zzmergetok"])
+        _, merged = _run_find_session(tmp, ["--json", "zzmergetok"], opencode_db=db)
+
+        assert _ids(empty) == ["claudeone"], "control: no opencode corpus, Claude row only"
+        assert _ids(merged) == ["claudeone", "ses_zz1"], merged
+        oc = [r for r in merged if r["session_id"] == "ses_zz1"][0]
+        assert oc["source"] == "opencode" and oc["path"] == "opencode:local", oc
+
+
+def test_opencode_only_and_claude_only_partition_the_corpus():
+    """The two flags must be complements, not two spellings of the same filter."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _write(tmp, "-proj", "claudeone", [_user("zzparttok")])
+        db = _write_opencode_db(Path(tmp) / "oc.db", [
+            ("ses_zz2", "t", "/home/zach/workspace/devrc", ["zzparttok here"]),
+        ])
+        _, both = _run_find_session(tmp, ["--json", "zzparttok"], opencode_db=db)
+        _, cc = _run_find_session(tmp, ["--json", "--claude-only", "zzparttok"],
+                                  opencode_db=db)
+        _, oc = _run_find_session(tmp, ["--json", "--opencode-only", "zzparttok"],
+                                  opencode_db=db)
+
+        assert _ids(cc) == ["claudeone"], cc
+        assert _ids(oc) == ["ses_zz2"], oc
+        assert _ids(both) == sorted(_ids(cc) + _ids(oc)), both
 
 
 # --------------------------------------------------------------- corpus enumeration

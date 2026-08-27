@@ -6,23 +6,90 @@ Each session's text lives in the `part` table as JSON blobs in the `data` column
 This module queries that database and returns results compatible with
 `transcript_search.py` so `find-session.py` can merge both sources.
 
-The database is per-host; both hosts are checked when the other is reachable via SSH.
+The database is per-host. Every peer in PEERS is searched: the one that IS this
+machine is queried directly on disk, the rest over SSH. Which peer is "local" is
+resolved from this host's own interface addresses, never hardcoded — pinning one
+host as "the remote" made the search asymmetric, because from that host the SSH
+leg was a self-connection that failed and was silently swallowed, leaving the
+OTHER host's sessions permanently invisible.
 """
 import json
 import os
 import re
+import socket
 import sqlite3
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 SNIPPET_PAD = 50
 GENESIS_CHARS = 200
 
-# Both hosts' DB paths, checked in order.
-LOCAL_DB = Path.home() / ".local" / "share" / "opencode" / "opencode-stable.db"
-REMOTE_HOST = "zach@10.42.0.30"
-REMOTE_DB = Path("/home/zach/.local/share/opencode/opencode-stable.db")
+DB_RELPATH = Path(".local") / "share" / "opencode" / "opencode-stable.db"
+LOCAL_DB = Path.home() / DB_RELPATH
+
+# Every host that holds an opencode DB, by Nebula address. Whichever of these IS
+# the machine we are running on is read from disk; the others go over SSH.
+PEERS = (
+    ("workbench", "10.42.0.30", "zach"),
+    ("laptop", "10.42.0.100", "zach"),
+)
+REMOTE_DB = Path("/home/zach") / DB_RELPATH
+
+
+def configured_peers():
+    """PEERS, unless `DEVRC_OPENCODE_PEERS` overrides it.
+
+    Format: comma-separated `label:addr:user`. An EMPTY value means "no peers".
+
+    🔴 This exists so the test suite can be hermetic BY CONSTRUCTION. Relying on
+    the real DB and SSH merely being absent is not hermeticity: they ARE absent in
+    the nix sandbox tier and present on the dev host, so the same test would pass
+    in one tier and fail in the other — which is exactly how it failed here.
+    """
+    raw = os.environ.get("DEVRC_OPENCODE_PEERS")
+    if raw is None:
+        return PEERS
+    peers = []
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        parts = chunk.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                "DEVRC_OPENCODE_PEERS entries are label:addr:user — got " + repr(chunk))
+        peers.append(tuple(parts))
+    return tuple(peers)
+
+
+def configured_local_db():
+    """LOCAL_DB, unless `DEVRC_OPENCODE_DB` overrides it (tests, or a moved store)."""
+    override = os.environ.get("DEVRC_OPENCODE_DB")
+    return Path(override) if override else LOCAL_DB
+
+
+def _own_addresses():
+    """This host's own IPv4 addresses, for deciding which peer is us.
+
+    Falls back to hostname resolution if `ip` is unavailable; an empty set is
+    safe — it just means no peer is treated as local, and the SSH leg reports
+    its own failure rather than silently returning nothing.
+    """
+    addrs = set()
+    try:
+        proc = subprocess.run(["ip", "-4", "-o", "addr", "show"],
+                              capture_output=True, text=True, timeout=5)
+        addrs.update(re.findall(r"inet (\d+\.\d+\.\d+\.\d+)", proc.stdout))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if not addrs:
+        try:
+            addrs.update(socket.gethostbyname_ex(socket.gethostname())[2])
+        except OSError:
+            pass
+    return addrs
 
 
 def _local_naive(dt):
@@ -71,10 +138,21 @@ def _extract_text(data_str):
     return "\n".join(parts)
 
 
+def _warn(msg):
+    """Report a degraded leg on stderr.
+
+    A peer that cannot be reached means the result set is INCOMPLETE. Returning
+    an empty list quietly is indistinguishable from "nothing matched", so every
+    failure gets a line here.
+    """
+    print(msg, file=sys.stderr)
+
+
 def _query_db(db_path, terms, patterns, *, match_any=False, since=None, project="",
-              limit=None):
+              limit=None, label="local"):
     """Search one opencode database. Returns list of result dicts."""
     if not db_path.exists():
+        _warn(f"opencode search: no database at {db_path} — skipping {label}")
         return []
 
     conn = sqlite3.connect(str(db_path))
@@ -158,7 +236,7 @@ def _query_db(db_path, terms, patterns, *, match_any=False, since=None, project=
 
             results.append({
                 "session_id": sess_id,
-                "path": f"opencode:{db_path}",
+                "path": f"opencode:{label}",
                 "cwd": directory,
                 "branch": "",
                 "title": title,
@@ -191,18 +269,30 @@ def search_opencode(terms, *, match_any=False, since=None, project="", limit=Non
     """
     patterns = [re.compile(re.escape(t), re.I) for t in terms]
     all_results = []
+    peers = configured_peers()
+    local_db = configured_local_db()
+    mine = _own_addresses() if peers else set()
 
-    # Local
-    all_results.extend(_query_db(LOCAL_DB, terms, patterns,
-                                 match_any=match_any, since=since, project=project))
+    for label, addr, user in peers:
+        if addr in mine:
+            # This peer is us — read the DB off local disk.
+            all_results.extend(_query_db(local_db, terms, patterns, match_any=match_any,
+                                         since=since, project=project, label=label))
+            continue
+        try:
+            all_results.extend(_query_remote(f"{user}@{addr}", label, terms, patterns,
+                                             match_any=match_any, since=since,
+                                             project=project))
+        except Exception as exc:  # noqa: BLE001 — reported, never swallowed
+            _warn(f"opencode search: peer {label} ({addr}) failed: {exc}")
 
-    # Remote (best-effort SSH query — no file transfer needed)
-    try:
-        remote_results = _query_remote(terms, patterns, match_any=match_any,
-                                       since=since, project=project)
-        all_results.extend(remote_results)
-    except Exception:
-        pass  # Remote unreachable; skip silently
+    if not any(addr in mine for _, addr, _ in peers):
+        # We are on a host that is not among the peers (or address detection
+        # failed): search the local DB anyway so we never silently skip our own
+        # sessions. With peers explicitly emptied this is the ONLY leg, which is
+        # what makes an injected fixture DB a complete corpus.
+        all_results.extend(_query_db(local_db, terms, patterns, match_any=match_any,
+                                     since=since, project=project, label="local"))
 
     # Sort by relevance + recency, same as transcript_search
     all_results.sort(
@@ -216,33 +306,51 @@ def search_opencode(terms, *, match_any=False, since=None, project="", limit=Non
     return all_results
 
 
-def _query_remote(terms, patterns, *, match_any=False, since=None, project=""):
-    """Query the workbench's opencode DB via SSH. Returns result dicts."""
+def _query_remote(ssh_target, label, terms, patterns, *, match_any=False, since=None,
+                  project=""):
+    """Query one peer's opencode DB via SSH. Returns result dicts.
+
+    Every failure path warns rather than returning a bare [] — an unreachable
+    peer and a peer with no matches are different facts and must not print the
+    same thing.
+    """
     search_payload = json.dumps({
         "terms": terms,
         "match_any": match_any,
         "since": since.isoformat() if since else None,
         "project": project,
+        "label": label,
     })
+    remote_script = f"/tmp/_oc_search_{label}.py"
     try:
         # Write the script to a temp file on the remote, then execute it.
         # This avoids shell-escaping the multi-line Python through SSH+zsh.
-        write_cmd = f"cat > /tmp/_oc_search.py << 'PYEOF'\n{_REMOTE_SEARCH_SCRIPT}\nPYEOF"
+        write_cmd = f"cat > {remote_script} << 'PYEOF'\n{_REMOTE_SEARCH_SCRIPT}\nPYEOF"
         proc = subprocess.run(
             ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
-             REMOTE_HOST, write_cmd],
+             ssh_target, write_cmd],
             capture_output=True, timeout=10
         )
         if proc.returncode != 0:
+            _warn(f"opencode search: peer {label} ({ssh_target}) unreachable — "
+                  f"its sessions are NOT in these results "
+                  f"({proc.stderr.decode(errors='replace').strip()[:200]})")
             return []
         # Now run the script with payload on stdin
         proc = subprocess.run(
             ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
-             REMOTE_HOST, "python3 /tmp/_oc_search.py"],
+             ssh_target, f"python3 {remote_script}"],
             input=search_payload.encode(),
-            capture_output=True, timeout=30
+            capture_output=True, timeout=120
         )
-        if proc.returncode != 0 or not proc.stdout.strip():
+        if proc.returncode != 0:
+            _warn(f"opencode search: peer {label} query failed (exit "
+                  f"{proc.returncode}) — its sessions are NOT in these results "
+                  f"({proc.stderr.decode(errors='replace').strip()[:200]})")
+            return []
+        if not proc.stdout.strip():
+            _warn(f"opencode search: peer {label} returned no output — "
+                  f"its sessions are NOT in these results")
             return []
         remote_data = json.loads(proc.stdout.decode())
         # Convert last_local strings back to datetime for sorting
@@ -252,7 +360,10 @@ def _query_remote(terms, patterns, *, match_any=False, since=None, project=""):
             except (ValueError, TypeError):
                 r["last_local"] = datetime.now()
         return remote_data
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError, OSError):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError,
+            OSError) as exc:
+        _warn(f"opencode search: peer {label} ({ssh_target}) failed: "
+              f"{type(exc).__name__}: {exc} — its sessions are NOT in these results")
         return []
 
 
@@ -268,6 +379,7 @@ terms = payload["terms"]
 match_any = payload["match_any"]
 since_str = payload["since"]
 project = payload["project"]
+label = payload.get("label", "remote")
 
 since = None
 if since_str:
@@ -349,7 +461,7 @@ for sess in sessions:
 
     results.append({
         "session_id": sid,
-        "path": "opencode:workbench",
+        "path": "opencode:" + label,
         "cwd": directory,
         "branch": "",
         "title": title,
