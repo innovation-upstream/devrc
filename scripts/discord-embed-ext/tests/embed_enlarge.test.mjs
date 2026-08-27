@@ -139,6 +139,9 @@ test("ENLARGE_CSS contains !important overrides", () => {
 test("ENLARGE_CSS targets embed container wrappers", () => {
   assert.match(DEE.ENLARGE_CSS, /\[class\*='imageWrapper'\]/);
   assert.match(DEE.ENLARGE_CSS, /\[class\*='mosaicItem'\]/);
+  assert.match(DEE.ENLARGE_CSS, /\[class\*='attachment'\]/);
+  assert.match(DEE.ENLARGE_CSS, /\[class\*='wrapper-'\]/);
+  assert.match(DEE.ENLARGE_CSS, /\[class\*='imageContainer'\]/);
 });
 
 test("ENLARGE_CSS does not target emojis", () => {
