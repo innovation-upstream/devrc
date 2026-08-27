@@ -26,7 +26,7 @@ Trace and document the browser-bridge extension's full architecture (three-actor
 - Complete architecture trace of browser-bridge: the three actors (CLI → server.py → MV3 extension), the HTTP long-poll transport, multi-instance routing, security model, op set (18 ops), deployment chain (home-manager atomic swap to `~/.local/share/browser-bridge-ext/`), and the build-marker freshness mechanism (#324)
 - Identification of the skill+flows pattern: the three-layer SKILL.md (always-on routing surface, ~1% context budget) → reference/ (durable FACTS, 0 cost until triggered) → flows/ (PROCEDURES, never auto-fire, named by hooks or SKILL.md table rows)
 - Concrete mapping of how `browser` implements this: `SKILL.md` + 13 reference files (including `sites/` sub-registry) + no flows/ (browser ops are direct, not procedural)
-- Contrast with `clawgate` which has both reference/ (11 files) and flows/ (2 files: `task-authoring.md`, `task-pickup.md`)
+- Contrast with `clawgate` which has both reference/ (12 files) and flows/ (2 files: `task-authoring.md`, `task-pickup.md`)
 
 ### Key files traced
 | File | Role |
@@ -56,6 +56,9 @@ Trace and document the browser-bridge extension's full architecture (three-actor
 - browser-bridge has no `flows/` directory because its ops are direct (command → result), not procedural multi-step workflows. clawgate has flows because task authoring and pickup are multi-phase procedures enforced by hooks.
 - The `sites/` sub-registry under `reference/` is a special case: `_index.json` maps host suffixes to filenames, matched on label boundaries (not substring), longest-wins. The server emits `site_notes` on matching result envelopes.
 - The BUILD_MARKER (`build_id.js`) is a generated literal, not a runtime computation — the only signal that describes running code rather than load directory. Two profiles on one directory can report identical version/id while running different code (#324).
+- 🔴 **"18 ops" is `ALLOWED_OPS` — the shared CLI↔server↔extension contract. There is a 19th op name the CLI can send that the extension never sees**: `SERVER_OPS = ("release",)` (`server.py:189`), handled entirely server-side. It carries a footgun the op table above does not show — ownership is keyed `(instance, session)`, so a `release` **without** `--instance` drops this session's owned tab on *every connected profile*, not just the one you meant.
+- 🔴 **Deployment of this subsystem is SPLIT, and `readlink -f` is the only arbiter.** `SKILL.md` and the `browser` CLI are `mkOutOfStoreSymlink`s into the repo — an edit is LIVE immediately, no switch. `server.py` is a `/nix/store` copy — editing the repo does NOTHING until `home-manager switch` (+ `systemctl --user restart browser-bridge`). `ls -la` shows only the first hop and misleads. The trace above describes SOURCE; it says nothing about what is running.
+- 🔴 **A green test suite is explicitly NOT verification here** — `scripts/browser-bridge/reference/security-ops.md` owns the gate and makes live-verify against real Brave the bar. An in-process fake cannot meet it, so an agent working only from tests CANNOT close a bridge change; the loop is merge → switch → live-verify.
 
 ## How to verify
-No verification needed — this was a read-only research session with no code changes.
+No verification needed for the session itself — it was read-only with no code changes. The doc's own claims WERE re-verified against the tree on 2026-08-27 (op parity in `server.py:179` vs `protocol.js:47`, `protocol.js` chrome-free in code, the `sites/` matcher at `server.py:1153-1193`, both `nix/home.nix` line ranges, and zero `child_process`/`exec`/`spawn` in `browser_tool_impl.mjs`); the clawgate reference-file count was wrong (11 → 12) and is corrected above.
