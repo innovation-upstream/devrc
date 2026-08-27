@@ -90,6 +90,78 @@ def _load_budget(path=_BUDGET_SOURCE):
 # BUDGET and TARGET is inside the ceiling and still fails the gate.
 TARGET, MIN_HEADROOM = _load_budget()
 BUDGET = TARGET - MIN_HEADROOM
+# 🔴 THE BUDGET ABOVE IS devrc's, AND devrc's GATE IS THE ONLY THING IT BINDS.
+# This tool is routinely pointed at ANOTHER repo's skills (talos-infra's
+# .claude/skills/, a client checkout), and it used to print devrc's number as
+# "ENFORCED" for those too. It is not enforced there: talos-infra's gate 11 is a
+# RATCHET at its own target with a per-push allowance, so a body this tool calls
+# RED can be perfectly legal there, and one it calls fine can be blocked. The
+# prune-skill skill's own first instruction is "check what governs THIS file
+# first" — and this tool contradicted it on every run.
+#
+# The fix is deliberately NOT a table of per-repo budgets (that is the duplicated
+# constant _load_budget exists to prevent, one directory further out). It is to
+# stop ASSERTING: when the audited file is outside devrc, the budget is labelled
+# as devrc's default and the reader is pointed at the file's own repo gate.
+# 🔴 devrc IS IDENTIFIED BY THE GATE IT CONTAINS, NOT BY A PATH. The first
+# version of this compared the audited repo root to `Path(__file__)/../..` and
+# was wrong on the repo's most common shape: a WORKTREE's `.git` is a FILE, so
+# the walk stops at the worktree root, which never equals the main checkout's
+# path — every one of the 60+ devrc worktrees open on this host was labelled
+# "THESE SKILLS ARE IN /home/zach/workspace/devrc, NOT devrc", a sentence that
+# contradicts itself. Worse, SKILL.md tells the reader to believe that line over
+# the number, so the false negative was actively harmful.
+#
+# The structural test is: does this tree contain the gate whose constants this
+# tool reads? If yes, those constants govern it, worktree or not. No subprocess,
+# no path equality, and it stays correct if devrc is cloned elsewhere.
+# 🔴 DERIVED, never re-spelled. A second copy of this relative path would go
+# stale the moment the gate moves, and the failure direction is the harmful
+# one: devrc would stop recognising ITSELF and print "not enforced here" on
+# every run. Same argument as _load_budget's ten lines above.
+_GATE_MARKER = _BUDGET_SOURCE.relative_to(Path(__file__).resolve().parent.parent)
+
+
+def _repo_root(path):
+    """The nearest enclosing repo root for <path>, or None."""
+    cur = Path(path).resolve()
+    cur = cur if cur.is_dir() else cur.parent
+    for cand in [cur, *cur.parents]:
+        if (cand / ".git").exists():          # a worktree's .git is a FILE
+            return cand
+    return None
+
+
+def _is_governed(path):
+    """Does this tool's budget bind <path>? True/False, or None when unknowable.
+
+    None means "no enclosing repo at all" — an answer about the ARGUMENT, not a
+    licence to assume governance. Callers must not collapse it to either bool.
+    """
+    root = _repo_root(path)
+    if root is None:
+        return None
+    return (root / _GATE_MARKER).is_file()
+
+
+def _foreign_repos(paths):
+    """Sorted roots of trees this tool's budget does NOT govern.
+
+    🔴 CALL THIS WITH THE RESOLVED TARGETS, NEVER THE CLI ARGUMENTS. A directory
+    argument ABOVE the repo roots (`~/workspace`, a parent of several checkouts)
+    resolves to no repo at all, so every argument yields None, `foreign` comes
+    back empty, and the run prints ENFORCED over skills that are entirely foreign
+    — the exact defect this banner exists to prevent, surviving in the one shape
+    nobody types deliberately. Found by the round-3 delta audit, which also noted
+    that the round-2 test BLESSED it.
+
+    Returns a list, not a scalar: an earlier version collapsed to `sorted(roots)[0]`
+    in both ternary branches, so a mixed run named only the foreign repo and told
+    the reader that the devrc skill — which IS enforced — is not.
+    """
+    return sorted({_repo_root(p) for p in paths if _is_governed(p) is False})
+
+
 # HARD is where a skill stops being a skill. ~40 KB is ~10k tokens — already a
 # 5% bite out of a 200k context before any work starts. Past this the body
 # routinely displaces the task it was loaded for.
@@ -512,6 +584,8 @@ def audit_one(skill_md):
     fattest = max(h2, key=lambda s: s[3]) if h2 else None
     return {
         "path": skill_md,
+        # Per-skill, not per-run: the mark must follow the FILE (round-3 finding 1).
+        "governed": _is_governed(skill_md),
         # A skill is identified by its DIRECTORY (.claude/skills/<name>/SKILL.md).
         # Auditing a loose file — a scratch copy, a candidate rewrite — must not
         # inherit whatever directory it happens to be sitting in: that reported a
@@ -588,25 +662,111 @@ def _mark(status):
 
 
 def _overage(a):
-    """(what it is over, by how many bytes) for a non-OK skill."""
+    """(what it is over, by how many bytes) for a non-OK skill.
+
+    🔴 The budget label is per-skill. Round-3 finding 2: the sizes-list note was
+    de-asserted for ungoverned trees but this detail header was not, so a foreign
+    skill still read "over enforced budget by 166 B" — a verdict about a gate that
+    does not bind it, printed under a banner saying so.
+    """
     if a["status"] == "OVER HARD CAP":
         return "hard cap", a["size"] - HARD
     if a["status"] == "OVER TARGET":
         return "target", a["size"] - TARGET
-    return "enforced budget", a["size"] - BUDGET
+    label = {True: "enforced budget", False: "devrc reference budget"}.get(
+        a.get("governed"), "devrc budget (governance unknown)")
+    return label, a["size"] - BUDGET
 
 
-def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
+def _governance_scope(audits, foreign, unknown):
+    """(quantifier, budget-phrase, n_states) for the run's governance mix.
+
+    🔴 CENTRALISED BECAUSE FOUR SITES DRIFTED APART. The header, the within-budget
+    verdict, the cut-total qualifier and the banner's quantifier each answered
+    "who does this budget govern?" independently, and each round fixed a subset:
+      - the foreign banner said "THESE SKILLS ARE IN <repo>" and the very next
+        paragraph said "SOME OF THESE ARE IN NO REPO" — two adjacent blocks making
+        opposite claims, because the quantifier keyed on `mixed`, which requires a
+        GOVERNED tree and so was False for foreign+unknown;
+      - "not enforced here" was applied to the unknowable state, which is the flat
+        non-governance assertion the banner two lines below says cannot be made;
+      - the cut-total kept "every tree here", implying some are governed when none
+        is.
+    Rounds 9 and 11 each fixed one or two of these and moved the rest. A predicate
+    open-coded at N sites is wrong at N-1 of them in the same direction; this is
+    the consolidation that makes them agree by construction.
+    """
+    has_gov = any(a.get("governed") is True for a in audits)
+    has_for = bool(foreign)
+    n_states = sum((has_gov, has_for, unknown))
+    quant = "SOME OF THESE" if n_states > 1 else "THESE"
+    # The three flags are RETURNED, not re-derived by callers: the banner's kinds
+    # list open-coded `any(... is True ...)` a fourth time, which is the very thing
+    # this helper exists to stop.
+    states = (has_gov, has_for, bool(unknown))
+    if not (has_for or unknown):
+        phrase = None                       # fully governed: the budget IS enforced
+    elif has_gov:
+        phrase = "not enforced on every tree here"
+    elif has_for and unknown:
+        phrase = "not enforced, or not determinable, for anything here"
+    elif has_for:
+        phrase = "not enforced here"
+    else:
+        # 🔴 A FOURTH VALUE, not "not enforced here". Nothing here is KNOWN to be
+        # ungoverned; saying so is the same over-claim the unknown banner exists to
+        # avoid, and this is the DEFAULT invocation's state (~/.claude/skills is in
+        # no repo, 34 of its 37 skills live in /nix/store). Round-11 finding 2.
+        phrase = "governance not determined here"
+    return quant, phrase, n_states, states
+
+
+def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), unknown=False):
     p = lambda *a: print(*a, file=out)
     audits = sorted(audits, key=lambda a: -a["size"])
     over = [a for a in audits if a["status"] != "OK"]
     p(f"# SKILL.md audit — {len(audits)} skill(s)")
-    p(f"\nbudget {BUDGET:,} B ENFORCED   = ceiling {TARGET:,} B − {MIN_HEADROOM:,} B "
+    quant, scope_phrase, n_states, states = _governance_scope(audits, foreign, unknown)
+    enforced = "ENFORCED" if scope_phrase is None else f"devrc's DEFAULT ({scope_phrase})"
+    p(f"\nbudget {BUDGET:,} B {enforced}   = ceiling {TARGET:,} B − {MIN_HEADROOM:,} B "
       f"working margin   ·   hard cap {HARD:,} B")
-    p(f"  ({BUDGET:,} is the number the gate rejects at — a body between it and the "
-      f"{TARGET:,} B\n   ceiling is 'under the ceiling' and still RED. Both constants are read "
-      f"from\n   {_BUDGET_SOURCE.relative_to(Path(__file__).resolve().parent.parent)}, "
-      f"which owns them.)")
+    if not (foreign or unknown):
+        p(f"  ({BUDGET:,} is the number the gate rejects at — a body between it and the "
+          f"{TARGET:,} B\n   ceiling is 'under the ceiling' and still RED. Both constants are read "
+          f"from\n   {_BUDGET_SOURCE.relative_to(Path(__file__).resolve().parent.parent)}, "
+          f"which owns them.)")
+    else:
+        # 🔴 COMPOSED FROM THE STATES PRESENT, not one banner reused for both. The
+        # foreign wording was printed verbatim over unknown trees, where all three
+        # of its claims break: "NOT a tree governed by the gate" and "binds nothing
+        # there" are flat assertions about the unknowable case (which this file's
+        # own comment says ARE devrc's); "marked [ungoverned]" named a string the
+        # run never emits, because those rows read [governance unknown]; and the
+        # MIXES sub-line said "ungoverned" on a governed+no-repo run containing no
+        # ungoverned tree. Round-9 finding 3 — the same header/row contradiction
+        # the previous round moved rather than removed.
+        if foreign:
+            names = ", ".join(r.name for r in foreign)
+            p(f"\n🔴 {quant} SKILLS ARE IN {names} — NOT governed by the")
+            p( "   gate this budget comes from, so the number above binds nothing for them.")
+            p( "   Those rows are marked [ungoverned].")
+        if unknown:
+            p(f"\n🔴 {quant} SKILLS ARE IN NO REPO, so whether this")
+            p( "   budget governs them cannot be determined — it is not a claim either way.")
+            p( "   Those rows are marked [governance unknown]. (Skills installed out of tree,")
+            p( "   e.g. under /nix/store, land here and may well BE devrc's.)")
+        p( "\n   Read the owning repo's own gate before treating any verdict below as one:")
+        p( "   a ratchet with a per-push allowance (talos-infra's gate 11) can pass a body")
+        p( "   called RED here and block one called fine.")
+        if n_states > 1:
+            ks = [k for k, on in zip(("governed", "ungoverned", "unknowable"), states) if on]
+            # Guarded by `n_states > 1`, so len(ks) >= 2 always — the previous
+            # `ks[0] if len(ks) == 1` arm was unreachable (proven: replacing it
+            # with a sentinel changed no output across all 16 fixtures).
+            kinds = " and ".join([", ".join(ks[:-1]), ks[-1]])
+            p(f"   ⚠️  This run MIXES {kinds} trees, so the mark is per-line and")
+            p( "      the header cannot be read as a verdict about the whole run. Audit them")
+            p( "      separately if you want an unambiguous answer.")
 
     p("\n## sizes (worst first)")
     listed = audits if show_all else over
@@ -614,8 +774,34 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
         if a["status"] == "OK":
             note = ""
         elif a["status"] == "NO HEADROOM":
-            note = (f"  {a['size'] - BUDGET:,} B over the enforced budget "
-                    f"(only {TARGET - a['size']:,} B of the {MIN_HEADROOM:,} B margin left)")
+            # 🔴 "over the enforced budget" is a VERDICT, not a label. On an
+            # ungoverned tree nothing enforces it, so the banner's disclaimer is
+            # contradicted three lines later unless the mark travels with it.
+            #
+            # 🔴 PER-AUDIT, NOT PER-RUN. Keyed on the run-level `foreign` this
+            # stamped [ungoverned] on the GOVERNED skill of a mixed run — a devrc
+            # file in real breach, told it was a reference number — while the
+            # banner directly above promised "the mark is per-line". That is the
+            # same reader-facing harm as the bug this banner fixes, asserted more
+            # specifically. Round-3 delta audit, finding 1.
+            # 🔴 THREE-VALUED, because governance is. Round 4 wrote
+            # `_is_governed` -> True/False/None with a docstring saying callers
+            # must not collapse None to either bool, then collapsed it here: `is
+            # False` sent None down the GOVERNED branch, so a skill in no repo at
+            # all was told "over the enforced budget" three lines under a banner
+            # saying the number binds nothing. That was a REGRESSION — round 2 had
+            # marked it. Widening to `is not True` only moves the lie: 34 of the 37
+            # skills installed at ~/.claude/skills resolve into /nix/store and are
+            # in no repo, yet they ARE devrc's. Neither bool is true of both cases,
+            # so unknown gets its own label and asserts nothing.
+            gov = a.get("governed")
+            budget_label, mark = {
+                True:  ("enforced", ""),
+                False: ("devrc reference", "  [ungoverned]"),
+            }.get(gov, ("devrc", "  [governance unknown]"))
+            note = (f"  {a['size'] - BUDGET:,} B over the {budget_label} budget "
+                    f"(only {TARGET - a['size']:,} B of the {MIN_HEADROOM:,} B margin left)"
+                    f"{mark}")
         else:
             note = f"  {a['size'] / TARGET:.1f}x target"
         p(f"  {a['size']:>9,} B  {_mark(a['status'])} {a['status']:<13} {a['name']}{note}")
@@ -767,7 +953,14 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
     n_over = sum(1 for a in audits if a["status"] == "OVER TARGET")
     n_tight = sum(1 for a in audits if a["status"] == "NO HEADROOM")
     if not over and not any_ref_issue and not broken_fence:
-        p(f"  ✓ all {len(audits)} skill(s) within budget ({BUDGET:,} B enforced), "
+        # 🔴 THE FIFTH SITE, and the most-read line for the common "point it at
+        # another repo, it's fine" case: an all-foreign run printed "within budget
+        # (12,038 B enforced)" directly under the banner saying nothing is enforced
+        # there. Round-5 finding 5.
+        # 🔴 The same phrase the header used, from the same helper — these two
+        # lines answered the question independently and drifted apart twice.
+        qual = "enforced" if scope_phrase is None else f"devrc's, {scope_phrase}"
+        p(f"  ✓ all {len(audits)} skill(s) within budget ({BUDGET:,} B — {qual}), "
           f"references intact — no prune needed (stop; do not churn the files)")
     else:
         need = []
@@ -776,14 +969,55 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
         if n_over:
             need.append(f"{n_over} over the {TARGET:,} B target")
         if n_tight:
-            need.append(f"{n_tight} inside the {TARGET:,} B ceiling but past the "
-                        f"{MIN_HEADROOM:,} B working margin — the gate REJECTS these")
+            # 🔴 Per-skill, like the note above it. Keyed to the run, a devrc
+            # file in real breach on a MIXED run was told to "check this repo's
+            # own" gate — circular, since it IS devrc — and was never told the
+            # gate rejects it. Round-5 finding 3.
+            n_tight_gov = sum(1 for a in over
+                              if a["status"] == "NO HEADROOM" and a.get("governed") is True)
+            n_tight_other = n_tight - n_tight_gov
+            clause = f"{n_tight} inside the {TARGET:,} B ceiling but past the {MIN_HEADROOM:,} B working margin"
+            if n_tight_gov and n_tight_other:
+                clause += (f" — the gate REJECTS {n_tight_gov} of them; the other "
+                           f"{n_tight_other} sit outside it, check that repo's own gate")
+            elif n_tight_gov:
+                clause += " — the gate REJECTS these"
+            else:
+                clause += " — devrc's gate would REJECT these; check that repo's own"
+            need.append(clause)
         # Measured against the ENFORCED budget, not the ceiling: against the
         # ceiling a NO HEADROOM skill contributes a NEGATIVE number, which
         # silently cancelled out real overage elsewhere in the same run.
         excess = sum(a["size"] - BUDGET for a in over)
         if excess > 0:
-            need.append(f"cut ~{excess:,} B total")
+            # Same per-skill rule: on an ungoverned tree this is advice against
+            # devrc's number, not a requirement (round-3 finding 2).
+            # 🔴 Neither bool. `is False` under-covered (unknown trees got a bare
+            # total); `is not True` over-claimed, attaching "not enforced there" to a
+            # sum that included genuinely governed devrc skills in real breach. The
+            # qualifier now says the total is measured against devrc's budget and
+            # that not every tree here is governed by it — true in both states, and
+            # asserting nothing about any individual tree. Round-9 finding 2.
+            # 🔴 Also the shared phrase. "does not govern every tree here" implies
+            # some are governed — false on a purely-foreign or purely-unknown run,
+            # which is where it was left after two rounds fixed the other sites.
+            # 🔴 SCOPED TO `over`, NOT THE RUN. This clause describes the bytes it
+            # is telling you to cut, and the `n_tight` clause immediately above is
+            # over-scoped too. Consolidating it onto the run-level phrase made a
+            # fully-governed total read "cut ~116 B … (not enforced on every tree
+            # here)" one clause after "the gate REJECTS these" — the same two-
+            # claims-in-a-row contradiction this consolidation exists to remove,
+            # moved from a paragraph apart to a clause apart. Round-13 finding 2.
+            # `_governance_scope` reads `foreign` only for truthiness and `unknown`
+            # as a bool, so the over-budget flags are derived from `over` itself —
+            # no need to map audits back to repo roots.
+            _, over_phrase, _, _ = _governance_scope(
+                over,
+                [1] if any(a.get("governed") is False for a in over) else [],
+                any(a.get("governed") is None for a in over))
+            need.append(f"cut ~{excess:,} B total"
+                        + ("" if over_phrase is None
+                           else f" measured against devrc's budget ({over_phrase})"))
         if any_ref_issue:
             need.append("broken/orphaned reference routing")
         if broken_fence:
@@ -804,7 +1038,34 @@ def main(argv=None):
     if not targets:
         sys.exit(f"no SKILL.md found under: {', '.join(paths)}\n"
                  "(pass a SKILL.md, a skills dir, or a repo root explicitly)")
-    render([audit_one(t) for t in targets], args.all, args.sections, args.detail)
+    # 🔴 GOVERNANCE COMES FROM THE RESOLVED TARGETS, NEVER THE CLI ARGUMENTS.
+    # Keyed on `paths`, a directory argument sitting ABOVE the repo roots resolves
+    # to no repo for every arg, so `foreign` came back empty and the run printed
+    # ENFORCED over skills that were entirely foreign — the very defect this
+    # banner exists to prevent, in the one shape nobody types on purpose
+    # (`~/workspace`, a parent of several checkouts). Round-3 delta audit,
+    # finding 3. `targets` are the SKILL.md files themselves, each of which sits
+    # inside exactly one repo or none.
+    audits = [audit_one(t) for t in targets]
+    foreign = _foreign_repos(targets)
+    # 🔴 UNKNOWN IS ITS OWN RUN STATE. `foreign` keeps only `is False`, so a run
+    # over trees in NO repo left every header keyed on it saying ENFORCED while
+    # the rows underneath said [governance unknown] — the two lines contradicting
+    # each other three apart. That is the dominant real shape, not a corner:
+    # ~/.claude/skills is in no repo and 34 of its 37 skills resolve into
+    # /nix/store. Round-7 finding 1.
+    unknown = any(a.get('governed') is None for a in audits)
+    # `mixed` needs a GOVERNED target, not merely a non-foreign one: an unknowable
+    # target (no enclosing repo) is neither, and counting it as governed would
+    # print the mixed warning over a run that has nothing to disambiguate.
+    # 🔴 `mixed` is GONE, not merely unused. `_governance_scope`'s n_states
+    # superseded it, but main kept computing the OLD meaning ("some non-governed
+    # PLUS a governed") and passing it — a fifth site holding the predicate this
+    # consolidation exists to have one of, and exactly what invites the next
+    # drift. Proven dead first: `mixed = False` produced byte-identical output
+    # across all 16 state/budget fixtures. Round-13 finding 3.
+    render(audits, args.all, args.sections, args.detail,
+           foreign=foreign, unknown=unknown)
 
 
 if __name__ == "__main__":

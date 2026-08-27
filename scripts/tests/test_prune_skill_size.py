@@ -26,40 +26,46 @@ mention (the skill body, a handoff doc, a PR description) must cross-reference
 this module rather than restate the literal, because a second hand-maintained copy
 is exactly how the drift regrows.
 
-WHY THE CEILING IS ABOVE THE 12,288 B TARGET, AND WHAT THAT COSTS
------------------------------------------------------------------
+THE CEILING IS NOW THE TARGET — THE EXEMPTION IS RETIRED (2026-08-27)
+---------------------------------------------------------------------
 The skill states a 12,288 B target and browser-bridge MEETS it while routing ~11x
 its own weight, so the target is achievable and is not in dispute.
-This file does not: it sits at 12,812 B (12.51 KiB) after being cut from 14,918 B
-by demoting §6 (landing), §4's deployment table, §7's verification rationale, §0's
-axes and the always-loaded model to three sidecars, plus stripping evidence from
-every remaining section.
+This file did not, and said so: it sat 524 B over that bar, pinned by a ceiling of
+13,056. A further pass demoted the budget rationale and §3's classification
+sub-rules into two more sidecars (`budgets-and-scope.md`,
+`classification-rules.md`); it sits at 11,841 B (11.56 KiB) now, inside the shared
+12,038 B enforced budget for the first time. MAX_BYTES is therefore lowered to the
+TARGET itself (11,841 against 12,288; the margin is 447 B), which is the direction
+of travel this docstring already named as intended.
+
+The binding limit is devrc's shared enforced budget, not this ceiling: 11,841
+against a 12,038 B effective floor, so there are 197 B of real room. This module
+keeps no second floor of its own — devrc's budget is already ceiling minus a 250 B
+margin, so a further margin beneath it would warn before the warning, and every
+value tried for one was wrong in one direction or the other. That is the same
+contract this skill imposes on every file it prunes, and it no longer imposes it
+from above the line.
 
 (The browser-bridge sentence states no byte count on purpose. That count belongs
 to ANOTHER skill's file: restating it here made this gate red for someone else's
 cosmetic churn, and -- worse -- walkable by a one-number edit. The claim it
 carries is a RELATIONSHIP, and is gated as one; see `BB_CLAIM` below.)
 
-The residual is the classification taxonomy (§3) and the rule NAMES in §0/§7.
-Demoting those was considered and rejected on the record: §3 is consulted at the
-moment of the decision, so putting it behind a load is the same defect as burying
-a rule in a table cell, and reducing §0/§7 further would make required checks
-invisible without a second load.
+The residual is the five VERDICT NAMES in §3 and the rule names in §0/§7. Their
+sub-rules are now behind `classification-rules.md`; the names themselves stay,
+because §3 is consulted at the moment of the decision and putting the taxonomy
+behind a load is the same defect as burying a rule in a table cell.
 
-So this ceiling is a RATCHET, not an endorsement: it pins the file where the
-demotion passes left it and forbids regrowth. It is deliberately NOT set to 12,288,
-because a permanently-red gate trains everyone to click through -- which
-`claude/RULES.md` names as worse than no gate. Lowering it as the file gets
-leaner is the intended direction of travel; raising it needs the same kind of
-justification recorded above.
+This ceiling stays a RATCHET and an INDEPENDENT constant -- it is numerically the
+target, not imported from it, because the BB_CLAIM assertion below exists
+precisely to watch the seam where browser-bridge's own ceiling could be raised.
+Lowering as the file gets leaner remains the direction of travel; raising it needs
+the same kind of justification recorded above.
 
-The honest accounting: the skill is 524 B -- 4.26% -- over the target it asks
-others to meet (12,812 against 12,288; `skill-audit.py` prints the same 524 B
-independently). That is disclosed in the body, in the PR that introduced it, and
-here. Every number in this docstring is re-measured, not carried forward: an
-earlier revision restated a size, a growth figure, a percentage and a per-pass
-byte ledger that were all wrong, in the module that declares itself the single
-source of truth for them.
+Every number in this docstring is re-measured, not carried forward: an earlier
+revision restated a size, a growth figure, a percentage and a per-pass byte ledger
+that were all wrong, in the module that declares itself the single source of truth
+for them.
 """
 import importlib.util
 import os
@@ -70,15 +76,16 @@ import pytest
 
 # The hard ceiling: SKILL.md must never exceed this many bytes.
 #
-# NOT a derivation -- a measured position. SKILL.md is 12,812 B (`stat -c %s` and
-# `git cat-file -s` agree), so 13,056 leaves 244 B of headroom, of which
-# MIN_HEADROOM_BYTES (192) is the floor that must remain: 52 B of true working
-# room before the headroom test fires -- i.e. barely any; the next edit
-# here will likely have to evict something. The comment here previously read
-# "12,864 B measured + 192 B headroom"; the file measured 12,834 at the time, so
-# the arithmetic was describing a size the file never had. Re-measure before
-# touching this number, and lower it as the file gets leaner -- never raise it.
-MAX_BYTES = 13_056
+# NOT a derivation -- a measured position, now equal to the 12,288 B target
+# rather than above it. SKILL.md is 11,841 B (`stat -c %s` and `git cat-file -s`
+# agree), so 12,288 leaves 447 B of headroom -- but the CEILING is not what binds.
+# devrc's shared budget (12,038) is smaller, so the room that matters is 197 B of
+# true working room. MIN_HEADROOM_BYTES (192) no longer defines a second floor
+# below that (see test_this_modules_floor_is_no_weaker_than_the_shared_one); it
+# survives only as the sizing rationale below.
+# Re-measure before touching this number, and lower it as the file gets leaner --
+# never raise it. (Was 13,056 while the body was 12,812 B and over target.)
+MAX_BYTES = 12_288
 
 # Required working margin below the ceiling. A file sitting one byte under
 # technically holds the line but leaves no room for a one-line correction, which
@@ -86,13 +93,13 @@ MAX_BYTES = 13_056
 #
 # Sized in units of a REAL edit rather than a round number, and re-measured
 # against the current file rather than restated: the two structures that actually
-# grow here are the reference routing table (3 rows, 435 B -> mean 145 B/row) and
+# grow here are the reference routing table (5 rows, 716 B -> mean 143 B/row) and
 # §3's verdict bullets (9 lines, 1,739 B -> mean 193 B). 192 B is therefore
 # ~one mean §3 bullet, or one routing row with room to spare -- enough that the
 # headroom test fires BEFORE the ceiling rather than arriving alongside it.
 #
-# It is NOT two mean routing rows: that claim was here, and at the real 145 B/row
-# two rows are 290 B > 192. Kept at 192 on the measurement that does hold rather
+# It is NOT two mean routing rows: that claim was here, and at the real 143 B/row
+# two rows are 286 B > 192. Kept at 192 on the measurement that does hold rather
 # than raised to fit a sentence.
 MIN_HEADROOM_BYTES = 192
 
@@ -325,15 +332,45 @@ def test_skill_md_under_hard_ceiling():
     )
 
 
-def test_skill_md_keeps_working_headroom():
-    """Fire BEFORE the ceiling, so a breach is never a surprise."""
+def _shared_budget():
+    """devrc's ENFORCED budget, from skill-audit.py -- never a second literal."""
+    spec = importlib.util.spec_from_file_location(
+        "_sa_budget", REPO_ROOT / "scripts" / "skill-audit.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return int(m.BUDGET)
+
+
+def test_this_modules_floor_is_no_weaker_than_the_shared_one():
+    """🔴 THIS MODULE'S SEPARATE WORKING FLOOR IS SUPERSEDED, and pretending
+    otherwise is what round-5 finding 8 caught.
+
+    devrc's shared budget is ALREADY a warn-before-breach mechanism: BUDGET =
+    ceiling - MIN_HEADROOM (12,288 - 250 = 12,038), so breaching it is the
+    warning and the ceiling is the breach. Once MAX_BYTES was lowered to the
+    ceiling, a second margin BELOW the shared budget warns before the warning —
+    and every value for it is wrong. Keyed to MAX_BYTES the floor sat at 12,096,
+    ABOVE the 12,038 the relationship guard fires at, so it could never fire
+    first (the finding). Re-keyed to the binding limit it sat at 11,846, five
+    bytes under the body — a gate red on the next routine edit, which this repo's
+    RULES call worse than no gate.
+
+    So the second floor is retired rather than re-tuned, and what is asserted
+    instead is that this module can never become WEAKER than the shared one.
+    MIN_HEADROOM_BYTES survives as the sizing rationale in prose (and is still
+    gated by 'true working room'); it no longer defines a second threshold.
+    """
+    binding = min(MAX_BYTES, _shared_budget())
+    assert binding == _shared_budget(), (
+        f"this module's ceiling ({MAX_BYTES:,}) now binds before devrc's shared "
+        f"budget ({_shared_budget():,}), so a body could satisfy the shared gate "
+        "and fail here for a reason devrc does not enforce. Lower MAX_BYTES or "
+        "raise the shared budget deliberately; do not let them diverge silently."
+    )
     size = SKILL_MD.stat().st_size
-    headroom = MAX_BYTES - size
-    assert headroom >= MIN_HEADROOM_BYTES, (
-        f"SKILL.md is {size:,} B, leaving only {headroom:,} B under the "
-        f"{MAX_BYTES:,} B ceiling -- below the {MIN_HEADROOM_BYTES:,} B working "
-        "floor. The next routine edit will breach it. Evict now, while there is "
-        "still room to do it deliberately."
+    assert size <= binding, (
+        f"SKILL.md is {size:,} B, over the binding {binding:,} B limit. "
+        "Evict now, while there is still room to do it deliberately."
     )
 
 
@@ -440,7 +477,8 @@ def test_this_modules_own_stated_figures_are_re_measured():
     🔴 Three refinements a round-4 audit forced, each closing a way this gate
     could have been decorative:
       - THE TARGET IS IMPORTED, NOT RESTATED. It used to hard-code 12,288 —
-        which made the check labelled "skill-audit cross-check" pin the sentence
+        which made the check then labelled "skill-audit cross-check" (retired
+        2026-08-27 with the exemption) pin the sentence
         against this test's OWN copy of the number rather than against the tool
         it names. Setting `TARGET` in skill-audit.py to 12,000 made the tool
         print 859 while the prose still claimed 571, and this gate said PASSED.
@@ -469,10 +507,28 @@ def test_this_modules_own_stated_figures_are_re_measured():
     _sa = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(_sa)
     target = _sa.TARGET
+    # The shared ENFORCED budget (ceiling - devrc's working margin). The
+    # docstring cites it, so it is gated like every other figure rather than
+    # left as a fourth hand-maintained copy.
+    shared_budget = _sa.BUDGET
 
     over = size - target
     headroom = MAX_BYTES - size
-    slack = headroom - MIN_HEADROOM_BYTES
+    # 🔴 The room that actually remains, measured to the BINDING limit. This was
+    # `headroom - MIN_HEADROOM_BYTES`, i.e. room below the retired second floor,
+    # and it read 255 against a true 197 — a 58 B gap, character-for-character the
+    # window this module says it closed. Worse, the 'true working room' spec PINNED
+    # that figure, so writing the correct number into the docstring was the edit
+    # that turned the suite red. A guard enforcing a false claim is the failure
+    # this module exists to prevent. Round-7 finding 5.
+    slack = min(MAX_BYTES, shared_budget) - size
+    # 🔴 The BINDING LIMIT — not "binding minus the working margin", which is what
+    # this comment said until round 9 while the statement below already computed
+    # the limit itself. There is no second floor: devrc's budget is already ceiling
+    # minus a 250 B margin, so subtracting another would warn before the warning
+    # (round-5 F8). Two comments on one statement disagreeing is a stale figure by
+    # another name.
+    eff_floor = min(MAX_BYTES, shared_budget)
     rows = [ln for ln in SKILL_MD.read_text().splitlines()
             if ln.startswith("| ") and "reference/" in ln and "Load it when" not in ln]
     row_bytes = sum(len(ln.encode()) + 1 for ln in rows)
@@ -491,7 +547,10 @@ def test_this_modules_own_stated_figures_are_re_measured():
             "own drift would be invisible; the figure only sizes MIN_HEADROOM_BYTES, "
             "which this gate pins directly via 'true working room'",
         "browser-bridge routes '~11x its own weight'":
-            "measured 11.05x today, but deriving it means summing that skill's whole "
+            "13.55x today counting reference/**/*.md, i.e. recursively including its "
+            "sites/ subdir; one level only gives 12.29x — the figure MOVES with the "
+            "method, which is why it is declared here rather than restated. Deriving it "
+            "means summing that skill's whole "
             "reference/ tree, which makes this gate depend on a SECOND skill's layout; "
             "the load-bearing half of that sentence (browser-bridge MEETS the target) "
             "is gated as a relationship by BB_CLAIM + the bb <= target assertion "
@@ -504,23 +563,50 @@ def test_this_modules_own_stated_figures_are_re_measured():
         ("size in the docstring",    r"it sits at ([\d,]+) B",                    f"{size:,}"),
         ("size in KiB",              r"it sits at [\d,]+ B \(([\d.]+) KiB\)",     f"{size / 1024:.2f}"),
         ("size in the ceiling note", r"SKILL\.md is ([\d,]+) B \(`stat -c %s`",   f"{size:,}"),
-        ("size in the accounting",   r"\(([\d,]+) against [\d,]+;",               f"{size:,}"),
-        ("the target it cites",      r"\([\d,]+ against ([\d,]+);",               f"{target:,}"),
-        ("over-target bytes",        r"the skill is ([\d,]+) B -- ",              f"{over:,}"),
-        ("over-target percent",      r"the skill is [\d,]+ B -- ([\d.]+)% -- ",   f"{100.0 * over / target:.2f}"),
-        ("skill-audit cross-check",  r"prints the same ([\d,]+) B",               f"{over:,}"),
+        # 5 specs retired 2026-08-27 with the over-target exemption: the sentences
+        # they pinned no longer exist. The two figures those sentences carried that
+        # ARE still printed are re-gated in the three below, so retiring a spec never
+        # means un-gating a number the docstring still states.
+        ("size in the accounting",   r"\(([\d,]+) against [\d,]+; the margin", f"{size:,}"),
+        ("the target it cites",      r"\([\d,]+ against ([\d,]+); the margin", f"{target:,}"),
+        ("margin in the accounting", r"the margin is ([\d,]+) B\)",             f"{headroom:,}"),
         ("headroom",                 r"leaves ([\d,]+) B of headroom",            f"{headroom:,}"),
-        ("true working room",        r"must remain: ([\d,]+) B of true working",  f"{slack:,}"),
-        ("routing-table bytes",      r"routing table \(3 rows, ([\d,]+) B",       f"{row_bytes:,}"),
-        ("routing-table mean",       r"routing table \(3 rows, [\d,]+ B -> mean ([\d,]+) B/row", f"{row_bytes // len(rows):,}"),
+        ("true working room",        r"matters is ([\d,]+) B of\s*#?\s*true working room", f"{slack:,}"),
+        # 🔴 FOUR FIGURES THE #924 PRE-MERGE AUDIT CORRUPTED WITH THE SUITE GREEN.
+        # Three were text this same PR introduced, so the round that added prose
+        # also added the gap — which is why UNGATED is a contract and not a note.
+        # The line-41 size is the "second literal restating a gated figure" shape
+        # the comment below already names: bump SKILL.md by a byte, fix the specs
+        # that go red, and an ungated copy stays stale and green.
+        # NB: anchored on the tail, not on "the shared " — the sentence WRAPS between
+        # those two words, so a pattern spanning the break silently never matches
+        # and reports itself as "reworded". The harness said so; it was not guessed.
+        ("shared budget in the docstring", r"([\d,]+) B enforced budget", f"{shared_budget:,}"),
+        # 🔴 \s+ not a literal space: the sentence WRAPS between the figure and
+        # "against", and a pattern spanning the break silently never matches and
+        # reports itself as "reworded" — the third time that has bitten this list.
+        ("size, restated at the floor", r"([\d,]+)\s+against an? [\d,]+ B effective floor,", f"{size:,}"),
+        ("effective floor",          r"against an? ([\d,]+) B effective floor,",    f"{eff_floor:,}"),
+        # the same room restated in prose two paragraphs up — a second copy of a
+        # gated figure is the shape this list already calls out, so it is gated too.
+        ("room restated in prose", r"so there are ([\d,]+) B of real room",       f"{slack:,}"),
+        # 🔴 Two more the round-9 audit caught, BOTH added by the prose of the round
+        # that wrote the spec above — "the round that added prose also added the gap",
+        # for the second time. Each derives from a value already in scope, so there
+        # was never a reason to declare them in UNGATED instead.
+        ("shared margin in prose",  r"ceiling\s*#?\s*minus a ([\d,]+) B margin",  f"{_sa.MIN_HEADROOM:,}"),
+        ("shared budget restated",  r"shared budget \(([\d,]+)\) is smaller",     f"{shared_budget:,}"),
+        ("target in the ceiling note", r"now equal to the ([\d,]+) B target",     f"{target:,}"),
+        ("routing-table bytes",      r"routing table \(5 rows, ([\d,]+) B",       f"{row_bytes:,}"),
+        ("routing-table mean",       r"routing table \(5 rows, [\d,]+ B -> mean ([\d,]+) B/row", f"{row_bytes // len(rows):,}"),
         # NOTE: browser-bridge is NOT gated by a restated byte count any more.
         # See BB_CLAIM below for the walk that made the literal indefensible.
-        # The three hand-maintained restatements of the target, in the module whose
+        # The hand-maintained restatements of the target, in the module whose
         # headline fix was "it pinned the cross-check against its own copy of the
-        # number". Each is a separate sentence, so each needs its own anchor.
-        ("target in the heading",    r"CEILING IS ABOVE THE ([\d,]+) B TARGET",   f"{target:,}"),
+        # number". Each is a separate sentence, so each needs its own anchor. Two
+        # of the three were retired with the exemption (2026-08-27); count the
+        # specs below rather than trusting a total written beside them.
         ("target in the preamble",   r"The skill states a ([\d,]+) B target",     f"{target:,}"),
-        ("target in the ratchet note", r"deliberately NOT set to ([\d,]+),",      f"{target:,}"),
         # A SECOND copy of the routing-table mean, and a figure derived from it.
         # This is the "second literal restating a gated figure" shape that rounds
         # 2 and 3 both found stale, so gating one copy and not the other is the
@@ -529,6 +615,52 @@ def test_this_modules_own_stated_figures_are_re_measured():
         ("two mean routing rows",    r"two rows are ([\d,]+) B > ",               f"{2 * (row_bytes // len(rows)):,}"),
     ]
     problems = figure_problems_in(src, checks)
+
+    # ── 🔴 THE CEILING vs THE TARGET: assert the CLAIM, not its spelling ─────
+    # This module's docstring now heads a section "THE CEILING IS NOW THE TARGET
+    # — THE EXEMPTION IS RETIRED" and states the ceiling is "now equal to the
+    # 12,288 B target". Until 2026-08-27 nothing asserted that, and it was WALKED
+    # in one edit during the pre-merge audit of the PR that wrote it: set
+    # MAX_BYTES = 13_000, make the four prose edits the surviving figure specs
+    # demand (headroom 973, true working 781, margin 973) and the suite returns
+    # `40 passed` while both sentences above still claim the exemption is gone.
+    #
+    # This is character-for-character the defect BB_CLAIM below was written to
+    # close, applied to a different claim in the same file: the byte count is a
+    # SPELLING of the claim; `MAX_BYTES <= target` IS the claim. The figure specs
+    # can only ever pin the spelling, because every one of them re-derives from
+    # MAX_BYTES itself and therefore moves WITH it.
+    # 🔴 …AND THE SAME DOCTRINE APPLIED TWICE MORE, both found by the round-3
+    # delta audit on the fix that added the guard below.
+    #
+    # (a) `!=`, not `>`. The docstring says the ceiling IS the target ("now equal
+    # to the 12,288 B target"); `>` only forbids the exemption direction, so
+    # MAX_BYTES = 12_200 plus the four prose figures passed 40/40 with all three
+    # sentences false. The benign direction is also the one the docstring names as
+    # expected future action ("lower it as the file gets leaner"), i.e. the rot
+    # vector that will actually be walked.
+    #
+    # (b) The docstring also claims the body sits INSIDE the shared enforced
+    # budget. The figure spec for that number pins its SPELLING; the claim is a
+    # RELATIONSHIP. Between BUDGET (12,038) and this module's own effective floor
+    # (MAX_BYTES - MIN_HEADROOM_BYTES = 12,096) there was a live 58 B window in
+    # which this gate reported green while skill-audit.py called the same file
+    # NO HEADROOM — walked by padding SKILL.md to 12,050 B and updating the six
+    # size-derived figures: `136 passed`.
+    if size > shared_budget:
+        problems.append(
+            f"SKILL.md is {size:,} B, OUTSIDE the shared {shared_budget:,} B enforced "
+            f"budget, but the docstring claims it sits inside it. skill-audit.py "
+            f"calls this NO HEADROOM; this gate must not disagree with the tool it cites."
+        )
+    if MAX_BYTES != target:
+        problems.append(
+            f"the ceiling MAX_BYTES={MAX_BYTES:,} is not EQUAL to the {target:,} B target, "
+            "so the docstring's 'THE EXEMPTION IS RETIRED' / 'now equal to the "
+            "target' is FALSE. Raising the ceiling back above the target is a "
+            "deliberate re-exemption: restore the WHY-THE-CEILING-IS-ABOVE section "
+            "and its accounting in the same edit, or lower the ceiling."
+        )
 
     # ── The one figure this module does NOT own ──────────────────────────────
     # Every other gated figure derives from something this module's own change
