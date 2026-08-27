@@ -1180,10 +1180,14 @@ def test_the_timeout_predicate_has_exactly_ONE_implementation():
     for path in (REPO_ROOT / "scripts" / "cairn",
                  REPO_ROOT / "scripts" / "lib" / "cairn_who.py"):
         src = path.read_text(encoding="utf-8")
-        # the predicate's own body is the one legitimate site
-        body = src.count("def unbounded_timeout_reason")
+        # 🔴 EXACTLY ZERO, not "at most one". The earlier bound allowed one
+        # copy on the theory that the predicate's own body is a legitimate
+        # site — but its parameter is `value`, not `timeout`, so this pattern
+        # never matched inside it, and the allowance was dead slack permitting
+        # one genuine re-open-coded copy. Measured: an agreeing duplicate in
+        # `_run` SURVIVED under the old bound.
         opencoded = len(re.findall(r"isinstance\(\s*timeout\s*,\s*int\s*\)", src))
-        assert opencoded <= body, (
-            f"{path.name} open-codes the timeout predicate "
-            f"({opencoded} site(s), {body} definition(s)) — import "
-            "`unbounded_timeout_reason` instead so the copies cannot drift")
+        assert opencoded == 0, (
+            f"{path.name} open-codes the timeout predicate at {opencoded} "
+            "site(s) — import `unbounded_timeout_reason` instead so the "
+            "copies cannot drift")

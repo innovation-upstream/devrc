@@ -737,10 +737,25 @@ def _cairn_who():
     🔴 SHARED SO THE TWO COPIES CANNOT DRIFT APART AGAIN. They already had:
     only one excluded `bool`, while a comment here claimed they mirrored each
     other. Importing the predicate rather than restating it means the next fix
-    lands in both halves of this CLI at once. Lazy because `cairn`'s store
-    commands must not pay for it, and because `sys.path` gains `lib/` at module
-    scope above.
+    lands in both halves of this CLI at once.
+
+    ⚠ THE IMPORT IS FUNCTION-SCOPED, BUT IT BUYS THE STORE PATH NOTHING, AND AN
+    EARLIER VERSION OF THIS SENTENCE CLAIMED IT DID. `build_parser` evaluates
+    `_who_default_timeout()` inside the `--timeout` help string, so `cairn_who`
+    is already in `sys.modules` before ANY subcommand dispatches — measured, on
+    every invocation. The first call here costs ~1 ms cold and ~0.1 us warm, and
+    in the real CLI it is always warm. It is function-scoped to keep the
+    module-scope import list honest about what this file needs to START, not as
+    an optimisation. Saying otherwise is the same false-comment class this whole
+    change exists to remove, and is how a maintainer reasons from a wrong cost
+    model — e.g. deleting the eager call above as an "obvious" cleanup.
     """
+    # The sibling importers below guard this the same way. Module scope already
+    # inserts `lib/`, so no failing path exists today; relying on that silently
+    # is what lets three importers disagree, which is the defect one commit ago.
+    lib = str(Path(__file__).resolve().parent / "lib")
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
     import cairn_who  # noqa: PLC0415
 
     return cairn_who
