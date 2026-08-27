@@ -146,13 +146,17 @@ a capability that does not exist).
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import hmac
+import io
 import ipaddress
 import math
 import os
 import re
+import stat
 import sys
+import tarfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -965,6 +969,213 @@ def scope_revision(store_root: str | Path, scope: str) -> str:
 
 SEED_STAMP_NAME = ".seed-stamp"
 
+
+# =============================================================================
+# 🔴 THE TOTAL CLASSIFIER — why this exists instead of a fourth `if` arm.
+#
+# Four consecutive audit rounds found the same shape of defect in `_snapshot`,
+# and every fix added one more predicate to a sequence:
+#
+#   r1  entry symlinks followed          -> refuse symlinked ENTRIES
+#   r2  symlinked SCOPE dirs filtered    -> silently omitted, read as scope-empty
+#   r3  `is_symlink()` before `is_dir()` -> a symlinked README 503'd everything
+#   r4  `is_dir()` first                 -> a DANGLING scope link vanished,
+#                                           read as scope-empty at exit 0
+#
+# Each round the stated predicate ("refuse a thing that IS a scope but cannot be
+# served safely; skip a thing that is not one") failed to DECIDE the next input
+# class, because a broken pointer is neither. Adding an arm fixes the instance;
+# it does not make the rule total, so the next class falls through the same gap.
+#
+# So: classify the path's TYPE exhaustively, in one place, and have each context
+# map EVERY kind to an action explicitly. `_ROOT_ACTIONS` and `_ENTRY_ACTIONS`
+# are asserted complete by `TestClassifierIsTotal`, and an unmapped kind raises
+# rather than defaulting — a fallthrough is a test failure, not a silent skip.
+# Name-based rules (dotfiles, the `.md` suffix) stay SEPARATE from type, because
+# conflating them is what made the dotfile and symlink rules interfere.
+# =============================================================================
+
+KIND_BROKEN_LINK = "broken-link"      # dangling target, or a symlink loop
+KIND_LINK_TO_DIR = "link-to-dir"
+KIND_LINK_TO_FILE = "link-to-file"
+KIND_LINK_TO_OTHER = "link-to-other"  # link to a fifo/socket/device
+KIND_DIRECTORY = "directory"
+KIND_REGULAR_FILE = "regular-file"
+KIND_OTHER = "other"                  # fifo, socket, device, door…
+# 🔴 THE LAST CELL OF THE LOOP: the first version of this classifier was total
+# over KIND STRINGS but not over KNOWLEDGE. "I could not determine what this is"
+# is its own answer and must never share a bucket with "I know exactly what this
+# is".
+#
+# ⚠ CORRECTED — AND THE CORRECTION IS THE INTERESTING PART. This comment used to
+# say "every pathlib predicate returns False when the stat itself fails, so an
+# EACCES fell into KIND_OTHER and was skipped", and cited a measurement of
+# `/snapshot` answering 200 / exit 0 / entries=0. BOTH WERE WRONG, and the
+# second was inherited from an audit report and written up here as first-hand.
+# ⚠ And the raise did NOT come from `classify_path` — that function is INTRODUCED
+# by this fix. In the failing version it came from `candidate.is_dir()` in
+# `_snapshot`, which this commit deletes. Corrected after an audit caught the
+# anachronism; the docstring below was already accurate.
+# Measured on the pinned interpreter:
+#     pathlib._IGNORED_ERRNOS == (ENOENT, ENOTDIR, EBADF, ELOOP)
+#     child of a 0o600 dir: is_symlink/is_dir/is_file/exists each RAISE
+#                           PermissionError — none returns False
+# So the old failure was not a silent empty store; it was an UNCAUGHT
+# PermissionError out of `classify_path`, crashing the handler with no response
+# and no audit line. Loud, not quiet.
+#
+# The fix stands — a crashed handler becoming a typed 503 is strictly better —
+# but the reasoning had to be corrected, because "pathlib returns False on stat
+# failure" is exactly the kind of false premise that gets a guard deleted
+# somewhere else in this file on the strength of a comment.
+KIND_INDETERMINATE = "indeterminate"
+# Vanished between `readdir` and the stat — a benign race, not a hazard, and
+# distinct from INDETERMINATE because the right action differs.
+KIND_ABSENT = "absent"
+
+ALL_KINDS: frozenset[str] = frozenset(
+    {
+        KIND_BROKEN_LINK,
+        KIND_LINK_TO_DIR,
+        KIND_LINK_TO_FILE,
+        KIND_LINK_TO_OTHER,
+        KIND_DIRECTORY,
+        KIND_REGULAR_FILE,
+        KIND_OTHER,
+        KIND_INDETERMINATE,
+        KIND_ABSENT,
+    }
+)
+
+# What a context does with each kind. `SKIP` = not the thing we are looking for,
+# so its absence is not a fact worth reporting. `TAKE` = use it. `REFUSE` = it
+# IS (or claims to be) the thing, and we cannot serve it — which must be
+# REPORTED, never skipped, because a skip renders as "nothing recorded".
+SKIP, TAKE, REFUSE = "skip", "take", "refuse"
+
+_ROOT_ACTIONS: dict[str, str] = {
+    # 🔴 A BROKEN POINTER IS A SCOPE THAT SHOULD BE THERE AND IS NOT. Skipping
+    # it is the r4 regression: `is_dir()` is False for a dangling link AND for a
+    # loop, so both vanished and the scope read as `scope-empty` at exit 0.
+    KIND_BROKEN_LINK: REFUSE,
+    KIND_LINK_TO_DIR: REFUSE,   # a real scope we will not follow off-store
+    KIND_DIRECTORY: TAKE,
+    KIND_LINK_TO_FILE: SKIP,    # a file is not a scope, link or no link (r3)
+    KIND_REGULAR_FILE: SKIP,    # …and neither is a plain README.md
+    KIND_LINK_TO_OTHER: SKIP,
+    KIND_OTHER: SKIP,
+    # 🔴 REFUSE, not SKIP. We do not know whether this is a scope, so we cannot
+    # claim its absence — that claim is the whole defect class.
+    KIND_INDETERMINATE: REFUSE,
+    KIND_ABSENT: SKIP,  # it is genuinely gone; nothing to report
+}
+
+_ENTRY_ACTIONS: dict[str, str] = {
+    # Inside a scope the name has ALREADY selected for `*.md`, so anything here
+    # claims to be an entry. A claim we cannot serve is refused, not skipped.
+    KIND_BROKEN_LINK: REFUSE,
+    KIND_LINK_TO_DIR: REFUSE,
+    KIND_LINK_TO_FILE: REFUSE,
+    KIND_LINK_TO_OTHER: REFUSE,
+    KIND_DIRECTORY: REFUSE,     # a directory named `*.md` (r3: it 503'd on open)
+    KIND_OTHER: REFUSE,         # a FIFO named `*.md` blocked `open()` forever
+    KIND_REGULAR_FILE: TAKE,
+    KIND_INDETERMINATE: REFUSE,
+    KIND_ABSENT: SKIP,
+}
+
+
+def classify_path(path: Path) -> str:
+    """The path's type, as exactly one of `ALL_KINDS`. Total by construction.
+
+    🔴 ONE `lstat`, THEN THE MODE BITS — not a sequence of pathlib predicates.
+    Those predicates fail in TWO different ways and neither is usable here:
+    they return False for the errnos in `pathlib._IGNORED_ERRNOS` (ENOENT,
+    ENOTDIR, EBADF, ELOOP), so "not a directory" and "no such path" are
+    indistinguishable; and they RAISE for every other errno (EACCES, ESTALE,
+    EIO), so a sequence built from them can abort mid-classification and take
+    the handler with it. The previous version did exactly that on an
+    unstat-able child.
+
+    Reading the mode bits from one explicit `lstat` makes both cases answerable:
+    a failure is an exception we must classify, not a False we might miss or a
+    raise we did not expect. It also halves the syscalls, which narrows the
+    TOCTOU window between them.
+    """
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return KIND_ABSENT
+    except OSError:
+        # EACCES on the parent, ESTALE, EIO… We do not know what this is, and
+        # saying so is the point — see KIND_INDETERMINATE.
+        return KIND_INDETERMINATE
+
+    if not stat.S_ISLNK(st.st_mode):
+        if stat.S_ISDIR(st.st_mode):
+            return KIND_DIRECTORY
+        if stat.S_ISREG(st.st_mode):
+            return KIND_REGULAR_FILE
+        return KIND_OTHER
+
+    try:
+        target = path.stat()  # follows the link
+    except OSError as exc:
+        # ENOENT = dangling, ELOOP = a cycle (measured: self-loop, mutual loop
+        # and a 45-link chain all give ELOOP). Both are broken POINTERS, which
+        # is a fact we know; anything else means the stat failed for a reason we
+        # cannot interpret, which is not.
+        #
+        # ⚠ NO ACTION DEPENDS ON THIS BRANCH, and saying so is honest rather
+        # than leaving it to read as coverage: BROKEN_LINK and INDETERMINATE map
+        # to the SAME action in BOTH tables, so the split only changes the word
+        # in the 503 body. A mutant collapsing it survives the suite, and that
+        # is correct — there is no behaviour to catch. It is kept because the
+        # two words mean different things to whoever reads the 503, and because
+        # the tables could diverge later. Errnos measured to land in
+        # `indeterminate` rather than `broken-link`: ENOTDIR (`/etc/hosts/x`),
+        # ENAMETOOLONG (300-char target), EACCES (link into an unsearchable dir).
+        if exc.errno in (errno.ENOENT, errno.ELOOP):
+            return KIND_BROKEN_LINK
+        return KIND_INDETERMINATE
+    if stat.S_ISDIR(target.st_mode):
+        return KIND_LINK_TO_DIR
+    if stat.S_ISREG(target.st_mode):
+        return KIND_LINK_TO_FILE
+    return KIND_LINK_TO_OTHER
+
+
+def action_for(kind: str, actions: dict[str, str]) -> str:
+    """Look up the action, refusing to guess. An unmapped kind is a BUG."""
+    try:
+        return actions[kind]
+    except KeyError:  # pragma: no cover - pinned by TestClassifierIsTotal
+        raise AssertionError(
+            f"unclassified path kind {kind!r}: every kind must be mapped "
+            f"explicitly, because a default is how the last four rounds of this "
+            f"defect happened"
+        ) from None
+
+# 🔴 THE ROUTE TABLE, AND THE DISPATCHER READS IT. `name -> (handler, arity)`,
+# where arity counts the path components including the route name itself, so
+# `recall/<scope>` is 2 and `snapshot` is 1.
+#
+# It is a module-level constant so a test can assert `set(API_ROUTES)` against
+# its ledger without reading this file as text. Two previous guards tried that —
+# a regex, then an AST walk — and each was defeated by an ordinary re-spelling
+# of the router while every test stayed green. One rule, one place: a route that
+# is not in this dict is not dispatched, so a route that is not in the ledger
+# cannot exist.
+#
+# 🔴 Adding a row here is ALSO adding a public, internet-reachable endpoint.
+# `TestPhaseOneScope` fails until its `ROUTES` ledger is updated to match, which
+# is the point: the update is where somebody has to think about it.
+API_ROUTES: dict[str, tuple[str, int]] = {
+    "recall": ("_recall", 2),
+    "search": ("_search", 2),
+    "snapshot": ("_snapshot", 1),
+}
+
 # How deep to walk when dating the served copy. Deliberately the SAME depth
 # `seed.sh` uses for its own `remote_entries` count (`find -maxdepth 2 -name
 # '*.md'`), so the two numbers are answers to the same question and a
@@ -1618,12 +1829,27 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            if len(parts) == 2 and parts[0] == "recall":
-                self._recall(parts[1], params)
-                return
-            if len(parts) == 2 and parts[0] == "search":
-                self._search(parts[1], params)
-                return
+            # 🔴 DISPATCH FROM THE DECLARED TABLE. Adding a route means adding a
+            # row to `API_ROUTES`, because that table IS the dispatcher — there
+            # is no second place to put one.
+            #
+            # This replaces a test that PARSED THIS SOURCE for route names, and
+            # it replaces it because that approach was defeated twice. v2 used a
+            # regex and missed `parts[0] == "raw_dump"` (underscore). v3 walked
+            # the AST and still missed `head = parts[0]; head == "x"` and
+            # `parts[0] in NAME` — one ordinary refactor away, with the literal
+            # sitting right there. Every iteration was a guard on the SPELLING
+            # of the router rather than on the router. A table the code actually
+            # dispatches from cannot be out of date with the code, so the test
+            # is now `set(API_ROUTES) == ledger` and spelling is not a variable.
+            route = API_ROUTES.get(parts[0]) if parts else None
+            if route is not None:
+                handler_name, arity = route
+                if len(parts) == arity:
+                    getattr(self, handler_name)(
+                        *(parts[1:arity]), params
+                    )
+                    return
         except ValueError as exc:
             # A caller error, and the caller is authenticated, so it may be told
             # what it did wrong.
@@ -1735,6 +1961,207 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             report.malformed,
             rc.render_search(report),
         )
+
+    def _snapshot(self, params: dict[str, list[str]]) -> None:
+        """Ship the store's entry files as a tar, so a client can hold a CACHE.
+
+        🔴 WHY A SECOND READ ROUTE EXISTS AT ALL, given `/recall` already
+        renders. `/recall` returns a RENDERED digest for one query. A client that
+        can only replay rendered answers is online-only in practice: the laptop
+        suspends and travels, and `/resume` must not turn into an error or — far
+        worse — an empty screen when the pod is unreachable (§2d, which states
+        outright that `subsystem_recall.py` keeps its no-network property and the
+        WRAPPER owns the network). Serving the files lets the client run the
+        unmodified local reader against its own copy, so an offline query it has
+        never asked before still answers.
+
+        🔴 THIS ROUTE IS READ-ONLY AND PHASE 2 STAYS READ-ONLY. It adds a GET; it
+        does not add a write verb, and `do_POST = do_PUT = do_PATCH = do_DELETE
+        = _reject_write` is untouched. `TestPhaseOneScope` has TWO guards and
+        only the route-ledger one moves — deliberately, so the write guard is
+        still the thing that has to be broken on purpose when phase 3 lands.
+
+        🔴 MTIMES ARE PRESERVED, AND THAT IS LOAD-BEARING, NOT TIDINESS. The
+        reader orders the index "NEWEST-FIRST by entry-file mtime". A tar built
+        with normalised mtimes — the usual move for reproducibility — would
+        reorder every digest rendered from the extracted copy, so the client's
+        output would differ from the pod's for content that is byte-identical.
+        That failure is invisible: no error, no missing entry, just a different
+        order that reads as a stale cache. uid/gid/uname/gname/mode ARE
+        normalised, since none of them reaches the reader.
+
+        What is shipped is exactly what the reader consumes — `<scope>/<x>.md`
+        at depth 2 — plus the seed stamp, so the client can date the copy for
+        itself instead of trusting a header. Nothing else: no `.git`, no dot
+        directories, no deeper paths.
+        """
+        root = Path(self.store_root)
+        wanted = params.get("scope")
+        scope_filter = wanted[-1] if wanted else None
+        if scope_filter is not None and not SAFE_PATH_COMPONENT.fullmatch(scope_filter):
+            # Same refusal as a bad path component: this value reaches the
+            # filesystem, and the caller is authenticated so it may be told.
+            self._respond(
+                400,
+                b"bad request: invalid scope\n",
+                headers={"X-Store-Status": "bad-request"},
+            )
+            self._audit(urlsplit(self.path).path, 400, "bad-request")
+            return
+
+        try:
+            candidates = sorted(
+                p
+                for p in root.iterdir()
+                if not p.name.startswith(".")
+                and (scope_filter is None or p.name == scope_filter)
+            )
+        except OSError as exc:
+            # 🔴 The store was NOT read. Same state, same code and the same
+            # reasoning as `_recall`'s: an empty tar and an unreadable store must
+            # never render alike, because one of them is a lie.
+            self._respond(
+                503,
+                f"store unreadable: {exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
+            )
+            self._audit(urlsplit(self.path).path, 503, "store-unreachable")
+            return
+
+        def _member(path: Path, arcname: str) -> tarfile.TarInfo:
+            st = path.stat()
+            info = tarfile.TarInfo(arcname)
+            info.size = st.st_size
+            # 🔴 SUB-SECOND PRECISION IS PART OF "PRESERVED", and `int()` here
+            # was a real bug caught by a test, not a hypothetical. Entries
+            # written in the same second tie on a whole-second mtime, so the
+            # reader falls back to its ref tie-break and the extracted copy
+            # orders its index DIFFERENTLY from the source — same bytes, same
+            # count, different order, no error. That is why the tar is opened
+            # PAX_FORMAT below: ustar stores mtime as integer octal seconds and
+            # structurally cannot carry the fraction.
+            info.mtime = st.st_mtime  # float — see PAX_FORMAT below
+            info.mode = 0o644
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.type = tarfile.REGTYPE
+            return info
+
+        # 🔴 AN UNREADABLE SCOPE IS NOT AN EMPTY ONE, AND `Path.glob` CANNOT TELL
+        # YOU WHICH IT SAW. `glob`/`iterdir` swallow `PermissionError` and yield
+        # nothing, so the first version of this handler answered 200 with
+        # `X-Store-Exit: 0` for a `chmod 000` scope, the tar silently omitted it,
+        # and the client rendered `scope-empty — reached the store; nothing
+        # recorded`. That is the exact lie this route's client exists to prevent,
+        # and `snapshot_freshness` above already carries a long comment about it
+        # (it uses `os.walk(onerror=...)` for this reason). Caught by an audit,
+        # reproduced end-to-end, not hypothetical.
+        #
+        # So every directory read is EXPLICIT and every failure is COLLECTED —
+        # never skipped — and any failure at all makes the whole response a 503
+        # carrying the same `store-unreachable` state `_recall` uses. A partial
+        # snapshot served as 200 is worse than no snapshot.
+        unreadable: list[str] = []
+        selected: list[tuple[Path, str]] = []
+        scopes: list[Path] = []
+        for candidate in candidates:
+            # One classification, one mapping, no ordering to get wrong.
+            kind = classify_path(candidate)
+            action = action_for(kind, _ROOT_ACTIONS)
+            if action == TAKE:
+                scopes.append(candidate)
+            elif action == REFUSE:
+                unreadable.append(f"{candidate.name}/: {kind} refused")
+
+        for scope in scopes:
+            try:
+                # 🔴 NAME RULES ARE SEPARATE FROM TYPE RULES, and keeping them
+                # separate is the point. `*.md` and the dotfile skip decide
+                # whether a path CLAIMS to be an entry; `classify_path` decides
+                # whether the claim can be served. Conflating them is what made
+                # an Emacs lock file — `.#entry.md`, a DANGLING SYMLINK whose
+                # name ends in `.md` — 503 the entire store for every caller
+                # because one buffer was open.
+                names = sorted(
+                    p
+                    for p in scope.iterdir()
+                    if p.name.endswith(".md") and not p.name.startswith(".")
+                )
+            except OSError as exc:
+                unreadable.append(f"{scope.name}/: {exc.strerror or exc}")
+                continue
+            for entry in names:
+                kind = classify_path(entry)
+                action = action_for(kind, _ENTRY_ACTIONS)
+                if action == REFUSE:
+                    unreadable.append(f"{scope.name}/{entry.name}: {kind} refused")
+                    continue
+                if action != TAKE:
+                    continue
+                selected.append((entry, f"{scope.name}/{entry.name}"))
+
+        if unreadable:
+            body = ("store unreadable:\n  " + "\n  ".join(unreadable) + "\n").encode()
+            self._respond(
+                503,
+                body,
+                headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
+            )
+            self._audit(urlsplit(self.path).path, 503, "store-unreachable")
+            return
+
+        buf = io.BytesIO()
+        count = 0
+        try:
+            # 🔴 GZIPPED, because PAX is expensive per member and these members
+            # are tiny. MEASURED: 305 entries totalling 62,821 bytes of markdown
+            # produced a 634,880-byte uncompressed tar — **10.1x the payload** —
+            # since PAX spends ~2 KB of headers on a ~200-byte entry. The whole
+            # tar is held in memory here and again on the client, and a timer
+            # re-transfers the entire store every tick, so the multiplier is the
+            # thing that matters, not the absolute size. The client opens with
+            # mode="r", which auto-detects, so this needs no client change.
+            with tarfile.open(
+                fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT
+            ) as tar:
+                stamp = root / SEED_STAMP_NAME
+                if stamp.is_file() and not stamp.is_symlink():
+                    with stamp.open("rb") as fh:
+                        tar.addfile(_member(stamp, SEED_STAMP_NAME), fh)
+                for entry, arcname in selected:
+                    with entry.open("rb") as fh:
+                        tar.addfile(_member(entry, arcname), fh)
+                    count += 1
+        except OSError as exc:
+            self._respond(
+                503,
+                f"store unreadable: {exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
+            )
+            self._audit(urlsplit(self.path).path, 503, "store-unreachable")
+            return
+
+        fresh_header, _prose = snapshot_freshness(self.store_root)
+        self._respond(
+            200,
+            buf.getvalue(),
+            content_type="application/gzip",
+            headers={
+                "X-Store-Status": "snapshot",
+                "X-Store-Exit": "0",
+                "X-Store-Snapshot": fresh_header,
+                # The SERVER's count of what it put in. The client compares its
+                # own extracted count against this and refuses a mismatch —
+                # `scripts/cairn::install_snapshot`. (An earlier version of this
+                # comment claimed the disagreement was "visible" while NOTHING
+                # compared them; the comparison now exists. A comment is a claim
+                # too.) ⚠ On a `?scope=` request the counts still describe the
+                # same filtered set, so the check holds there as well.
+                # number nobody can compare against.
+                "X-Store-Entries": str(count),
+            },
+        )
+        self._audit(urlsplit(self.path).path, 200, "snapshot")
 
 
 def build_server(

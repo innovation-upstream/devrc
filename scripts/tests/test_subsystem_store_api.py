@@ -49,8 +49,10 @@ import hashlib
 import http.client
 import importlib.util
 from testlib import hermetic_git  # noqa: E402
+import io
 import os
 import re
+import tarfile
 import secrets
 import subprocess
 import sys
@@ -952,6 +954,405 @@ class TestReadOnlyPhase1:
 # =============================================================================
 
 
+# 🔴 THE PINNED DECISION TABLE, as a named constant so the completeness guard
+# and the per-cell guard read the SAME list. Introspecting the parametrize mark
+# to get it was clever and wrong; two literals would drift.
+DECISION_TABLE = [
+    ("KIND_BROKEN_LINK", "REFUSE", "REFUSE"),
+    ("KIND_LINK_TO_DIR", "REFUSE", "REFUSE"),
+    ("KIND_LINK_TO_FILE", "SKIP", "REFUSE"),
+    ("KIND_LINK_TO_OTHER", "SKIP", "REFUSE"),
+    ("KIND_DIRECTORY", "TAKE", "REFUSE"),
+    ("KIND_REGULAR_FILE", "SKIP", "TAKE"),
+    ("KIND_OTHER", "SKIP", "REFUSE"),
+    # 🔴 "I could not look" must never share a cell with "nothing is there".
+    ("KIND_INDETERMINATE", "REFUSE", "REFUSE"),
+    ("KIND_ABSENT", "SKIP", "SKIP"),
+]
+
+
+class TestClassifierIsTotal:
+    """🔴 THE GUARD THAT IS SUPPOSED TO END THE ROUND-N LOOP.
+
+    Four audit rounds found the same defect shape in `_snapshot`, each time in a
+    NEW input class that the previous round's sequence of `if`s did not decide:
+    symlinked entries, symlinked scope dirs, symlinked non-scopes, then dangling
+    links and symlink loops. Every fix added an arm; none made the rule total,
+    so the next class fell through the same gap and rendered as `scope-empty —
+    nothing recorded` at exit 0.
+
+    These tests pin the classification itself rather than its instances:
+      1. every path lands in exactly one kind (totality of `classify_path`);
+      2. every kind is mapped explicitly in BOTH contexts (no default);
+      3. the fallthrough RAISES, so an unmapped kind is a failure, not a skip.
+
+    Adding a kind therefore breaks (2) until somebody decides, per context,
+    whether it is TAKE, SKIP or REFUSE — which is the decision the last four
+    rounds each made implicitly, by omission, and got wrong.
+    """
+
+    def test_every_kind_is_mapped_in_BOTH_contexts(self):
+        for name, actions in (
+            ("_ROOT_ACTIONS", api._ROOT_ACTIONS),
+            ("_ENTRY_ACTIONS", api._ENTRY_ACTIONS),
+        ):
+            missing = api.ALL_KINDS - set(actions)
+            extra = set(actions) - api.ALL_KINDS
+            assert not missing, f"{name} does not decide: {sorted(missing)}"
+            assert not extra, f"{name} maps unknown kinds: {sorted(extra)}"
+
+    def test_the_pinned_table_covers_EVERY_kind(self):
+        """🔴 Two-way pin on the parametrize list itself.
+
+        `test_the_decision_table_is_pinned`'s docstring says "a silent flip of
+        any single cell fails", but nothing asserted its parametrize list
+        covered `ALL_KINDS` — so a future kind, mapped correctly in both dicts,
+        would have an UNPINNED cell while the docstring claimed otherwise. Same
+        idiom as `test_waiting_windows.py`'s `set(KIND_BAND) == set(ALL_KINDS)`.
+        """
+        pinned = {getattr(api, name) for name, _r, _e in DECISION_TABLE}
+        assert pinned == api.ALL_KINDS, (
+            f"unpinned cells: {sorted(api.ALL_KINDS - pinned)}"
+        )
+
+    def test_an_unstatable_ROOT_child_is_REFUSED_by_the_CLASSIFIER(
+        self, store: Path, tmp_path: Path
+    ):
+        """🔴 The cell this whole commit exists for had only a CONSTANTS pin —
+        the shape `TestEntryTableCellsHaveBehaviour`'s own docstring calls
+        insufficient ("exactly the kind a future edit updates ALONGSIDE the code
+        it was meant to stop"). Three ENTRY cells got behavioural tests; the
+        ROOT cell did not.
+
+        🔴 IT ASSERTS THE MESSAGE, NOT THE STATUS, AND THAT IS THE WHOLE POINT.
+        With the store root at 0o600 the tar block ALSO fails (on `.seed-stamp`),
+        so a test asserting only `503` passes even with this cell flipped to
+        SKIP — green for the wrong reason. The classifier's refusal is emitted
+        BEFORE the tar block and names the kind, so pinning `indeterminate
+        refused` is what discriminates. Verified by mutation, not assumed.
+        """
+        if os.geteuid() == 0:
+            pytest.skip("root ignores directory permissions; unreachable as root")
+        store.chmod(0o600)  # readable, NOT searchable -> every child lstat EACCES
+        try:
+            with running(store) as (base, _):
+                code, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        finally:
+            store.chmod(0o755)
+        assert code == 503, body[:300]
+        assert b"indeterminate refused" in body, body[:300]
+
+    def test_every_mapped_action_is_a_known_action(self):
+        for actions in (api._ROOT_ACTIONS, api._ENTRY_ACTIONS):
+            for kind, action in actions.items():
+                assert action in (api.SKIP, api.TAKE, api.REFUSE), (kind, action)
+
+    def test_an_unmapped_kind_RAISES_rather_than_defaulting(self):
+        """🔴 The fallthrough is the whole mechanism. If `action_for` returned a
+        default, adding a kind would silently inherit SKIP — which is exactly
+        how a dangling scope link became `scope-empty` at exit 0."""
+        with pytest.raises(AssertionError, match="unclassified path kind"):
+            api.action_for("a-kind-nobody-mapped", api._ROOT_ACTIONS)
+
+    @pytest.mark.parametrize("kind,expected_root,expected_entry", DECISION_TABLE)
+    def test_the_decision_table_is_pinned(self, kind, expected_root, expected_entry):
+        """Pins the table itself, so a silent flip of any single cell fails.
+
+        Every previous round's bug was one cell of this table being wrong or
+        absent; asserting the table makes each cell a named, reviewable decision
+        instead of an emergent property of statement order.
+        """
+        k = getattr(api, kind)
+        assert api._ROOT_ACTIONS[k] == getattr(api, expected_root)
+        assert api._ENTRY_ACTIONS[k] == getattr(api, expected_entry)
+
+    def test_classify_returns_the_right_kind_for_each_REAL_path(self, tmp_path: Path):
+        """🔴 The table above is only meaningful if `classify_path` actually
+        produces these kinds from real filesystem objects. Built with `os.mkfifo`
+        and real symlinks — not mocks — because the whole bug class came from
+        `pathlib` predicates DEREFERENCING in ways a mock would not reproduce.
+        """
+        (tmp_path / "plain.md").write_text("x")
+        (tmp_path / "adir").mkdir()
+        (tmp_path / "to_file").symlink_to(tmp_path / "plain.md")
+        (tmp_path / "to_dir").symlink_to(tmp_path / "adir", target_is_directory=True)
+        (tmp_path / "dangling").symlink_to(tmp_path / "nope")
+        (tmp_path / "loop").symlink_to(tmp_path / "loop")
+        os.mkfifo(tmp_path / "afifo")
+        (tmp_path / "to_fifo").symlink_to(tmp_path / "afifo")
+
+        assert api.classify_path(tmp_path / "plain.md") == api.KIND_REGULAR_FILE
+        assert api.classify_path(tmp_path / "adir") == api.KIND_DIRECTORY
+        assert api.classify_path(tmp_path / "to_file") == api.KIND_LINK_TO_FILE
+        assert api.classify_path(tmp_path / "to_dir") == api.KIND_LINK_TO_DIR
+        # 🔴 The r4 regression lived here: `is_dir()` is False for BOTH of these,
+        # so the old code skipped them and the scope read as empty.
+        assert api.classify_path(tmp_path / "dangling") == api.KIND_BROKEN_LINK
+        assert api.classify_path(tmp_path / "loop") == api.KIND_BROKEN_LINK
+        assert api.classify_path(tmp_path / "afifo") == api.KIND_OTHER
+        assert api.classify_path(tmp_path / "to_fifo") == api.KIND_LINK_TO_OTHER
+        assert api.classify_path(tmp_path / "never-existed") == api.KIND_ABSENT
+
+    def test_an_UNSTATABLE_path_is_INDETERMINATE_not_OTHER(self, tmp_path: Path):
+        """🔴 The last cell of the four-round loop.
+
+        Every pathlib predicate returns False when the stat itself fails, so an
+        EACCES child fell into KIND_OTHER — the FIFO bucket — and was SKIPPED at
+        the root. MEASURED end-to-end before this fix, store root at 0o600
+        (readable, not searchable, so readdir works and every lstat gives
+        EACCES): snapshot answered 200 / X-Store-Exit: 0 / entries=0, and the
+        client printed "scope-empty — nothing recorded". An unreadable store
+        rendering as an empty one, which is the defect this client exists for.
+        """
+        if os.geteuid() == 0:
+            pytest.skip("root ignores directory permissions; unreachable as root")
+        parent = tmp_path / "locked"
+        parent.mkdir()
+        (parent / "child.md").write_text("x")
+        parent.chmod(0o600)  # readable, NOT searchable -> lstat(child) = EACCES
+        try:
+            assert api.classify_path(parent / "child.md") == api.KIND_INDETERMINATE
+        finally:
+            parent.chmod(0o755)
+
+    def test_classify_is_exhaustive_over_a_real_directory(self, tmp_path: Path):
+        """Totality, behaviourally: every child of a directory containing one of
+        each shape classifies into `ALL_KINDS`, and between them they cover it."""
+        (tmp_path / "plain.md").write_text("x")
+        (tmp_path / "adir").mkdir()
+        (tmp_path / "to_file").symlink_to(tmp_path / "plain.md")
+        (tmp_path / "to_dir").symlink_to(tmp_path / "adir", target_is_directory=True)
+        (tmp_path / "dangling").symlink_to(tmp_path / "nope")
+        os.mkfifo(tmp_path / "afifo")
+        (tmp_path / "to_fifo").symlink_to(tmp_path / "afifo")
+
+        seen = {api.classify_path(p) for p in tmp_path.iterdir()}
+        # ABSENT and INDETERMINATE cannot be produced by iterating a readable
+        # directory — they are the two "the stat failed" answers — so they are
+        # covered by their own tests above rather than here. Named, not omitted.
+        reachable_by_iteration = api.ALL_KINDS - {api.KIND_ABSENT, api.KIND_INDETERMINATE}
+        assert seen <= api.ALL_KINDS, f"produced an unknown kind: {seen - api.ALL_KINDS}"
+        assert seen == reachable_by_iteration, (
+            f"fixture misses kinds: {reachable_by_iteration - seen}"
+        )
+
+
+class TestSnapshotRoute:
+    """Phase 2's cache-fill route: `GET /api/v1/snapshot` ships the entry files.
+
+    🔴 The property under test is NOT "a tar came back". It is that a digest
+    rendered from the EXTRACTED copy is byte-identical to one rendered from the
+    source — because that is what makes a client's offline answer the same
+    answer, and it is the thing a plausible tar gets silently wrong.
+    """
+
+    @staticmethod
+    def _members(body: bytes) -> dict[str, tarfile.TarInfo]:
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
+            return {m.name: m for m in tar.getmembers()}
+
+    @staticmethod
+    def _extract(body: bytes, dest: Path) -> Path:
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
+            tar.extractall(dest)
+        return dest
+
+    def test_it_ships_every_entry_and_counts_them(self, store: Path):
+        with running(store) as (base, _):
+            code, headers, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        assert code == 200
+        assert headers["X-Store-Status"] == "snapshot"
+        assert headers["Content-Type"] == "application/gzip"
+        members = self._members(body)
+        on_disk = {
+            f"{p.parent.name}/{p.name}" for p in store.glob("*/*.md") if p.is_file()
+        }
+        assert on_disk, "fixture bug: the store has no entries to ship"
+        assert on_disk <= set(members), f"missing: {on_disk - set(members)}"
+        # The server's own count must agree with what it actually wrote.
+        assert int(headers["X-Store-Entries"]) == len(on_disk)
+
+    def test_the_archive_is_SMALLER_than_the_payload_it_carries(self, store: Path):
+        """The gzip change was made on a measured claim — PAX spends ~2 KB of
+        headers on a ~200-byte entry, so an uncompressed tar of 305 small
+        entries measured **10.1x** the markdown it carried. Assert the property
+        rather than trusting the commit message: with many small entries the
+        archive must not exceed the raw bytes.
+        """
+        for i in range(40):
+            (store / SCOPE / f"bulk-{i:03d}.md").write_text(
+                _entry(f"bulk-{i:03d}", SCOPE, nuance=f"- 2026-03-01: item {i}.")
+            )
+        raw = sum(p.stat().st_size for p in store.glob("*/*.md"))
+        with running(store) as (base, _):
+            _c, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        assert len(body) < raw, (
+            f"archive {len(body)}B vs {raw}B of markdown — compression is off "
+            f"or PAX overhead is dominating again"
+        )
+
+    def test_a_digest_from_the_EXTRACTED_copy_is_BYTE_IDENTICAL(
+        self, store: Path, tmp_path: Path
+    ):
+        """🔴 The criterion this route exists to satisfy.
+
+        Rendered from the source vs rendered from the extracted copy. The one
+        line that legitimately differs is `store: <root>`, for exactly the
+        reason `verify-byte-identity.sh` documents — so it is canonicalised on
+        BOTH sides and nothing else is.
+        """
+        with running(store) as (base, _):
+            _c, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        copy = self._extract(body, tmp_path / "cache")
+
+        def digest(root: Path) -> str:
+            report = api.rc.recall(str(root), SCOPE, mode=api.rc.DEFAULT_MODE)
+            text = api.rc.render_text(report)
+            return re.sub(r"^(\s*store:) .*$", r"\1 X", text, flags=re.M)
+
+        assert digest(copy) == digest(store)
+
+    def test_mtimes_are_PRESERVED_not_normalised(self, store: Path, tmp_path: Path):
+        """🔴 Load-bearing, and the reason a "reproducible" tar is WRONG here.
+
+        The reader orders the index newest-first by entry-file mtime. Normalising
+        mtimes — the usual reproducibility move — reorders every digest rendered
+        from the copy, with no error and nothing missing: it just reads as a
+        stale cache.
+
+        The fixture mtimes are pairwise distinct AND deliberately anti-aligned
+        with alphabetical order, so a tar that dropped mtimes cannot accidentally
+        reproduce the right ordering.
+        """
+        # This test owns its ordering requirement rather than depending on the
+        # shared fixture's shape — which holds ONE entry in this scope, so the
+        # ordering claim would have been vacuous against it.
+        for name in ("thing-beta", "thing-gamma"):
+            (store / SCOPE / f"{name}.md").write_text(
+                _entry(name, SCOPE, nuance=f"- 2026-02-01: {name} distinct nuance.")
+            )
+        entries = sorted(store.glob(f"{SCOPE}/*.md"))
+        assert len(entries) >= 3, "fixture bug: need several entries to order"
+        # 🔴 FRACTIONAL, AND SHARING ONE WHOLE SECOND. An earlier version of this
+        # test used whole-second mtimes a day apart and PASSED against a server
+        # that truncated with `int()` — the truncation was invisible because the
+        # fixture had no fraction to lose. Entries written in the same second is
+        # the NORMAL case (a `/handoff` writes several at once), and there the
+        # truncation makes every entry tie, so the reader's ref tie-break
+        # silently reorders the index. Fixture values must be able to see the
+        # mutation, or a green result is a claim about the fixture.
+        base_t = 1_700_000_000
+        for i, path in enumerate(reversed(entries)):
+            stamp = base_t + 0.1 * (i + 1)  # same second, distinct fractions
+            os.utime(path, (stamp, stamp))
+        want = {f"{p.parent.name}/{p.name}": p.stat().st_mtime for p in entries}
+        assert len({int(v) for v in want.values()}) == 1, (
+            "fixture bug: the mtimes must share a whole second, or truncation "
+            "is not exercised"
+        )
+
+        with running(store) as (base, _):
+            _c, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        members = self._members(body)
+        for name, mtime in want.items():
+            assert members[name].mtime == pytest.approx(mtime, abs=1e-4), (
+                f"{name}: snapshot lost sub-second mtime precision"
+            )
+
+        copy = self._extract(body, tmp_path / "cache")
+        for name, mtime in want.items():
+            assert (copy / name).stat().st_mtime == pytest.approx(mtime, abs=1e-4)
+
+    def test_the_index_ORDER_survives_a_round_trip(self, store: Path, tmp_path: Path):
+        """The behavioural consequence of the mtime test above.
+
+        Preserving mtimes is a means; this is the end. Asserted separately
+        because a structural mtime check passes for a tar whose ordering the
+        reader still disagrees with — e.g. if the reader's tie-break changed.
+        """
+        for name in ("thing-beta", "thing-gamma"):
+            (store / SCOPE / f"{name}.md").write_text(
+                _entry(name, SCOPE, nuance=f"- 2026-02-01: {name} distinct nuance.")
+            )
+        base_t = 1_700_000_000
+        for i, path in enumerate(sorted(store.glob(f"{SCOPE}/*.md"))):
+            stamp = base_t + 0.1 * (i + 1)
+            os.utime(path, (stamp, stamp))
+
+        with running(store) as (base, _):
+            _c, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        copy = self._extract(body, tmp_path / "cache")
+
+        def index_order(root: Path) -> list[str]:
+            report = api.rc.recall(str(root), SCOPE, mode=api.rc.DEFAULT_MODE)
+            return [
+                line.split()[0]
+                for line in api.rc.render_text(report).splitlines()
+                if line.startswith("  ") and line.strip() and "nuance" in line
+            ]
+
+        source_order = index_order(store)
+        assert len(source_order) >= 3, f"fixture bug: got {source_order}"
+        assert index_order(copy) == source_order
+
+    def test_the_mtime_assertion_can_SEE_a_normalised_tar(self, store: Path):
+        """Positive control for the test above: build the tar the WRONG way and
+        watch the same comparison fail. Without this, a snapshot that happened to
+        preserve mtimes and one whose mtimes were never checked look alike."""
+        entries = sorted(store.glob(f"{SCOPE}/*.md"))
+        os.utime(entries[0], (1_700_000_000, 1_700_000_000))
+        want = int(entries[0].stat().st_mtime)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(f"{SCOPE}/{entries[0].name}")
+            info.size = entries[0].stat().st_size
+            info.mtime = 0  # the mutation: normalised, as a "reproducible" tar would
+            with entries[0].open("rb") as fh:
+                tar.addfile(info, fh)
+        members = self._members(buf.getvalue())
+        got = members[f"{SCOPE}/{entries[0].name}"].mtime
+        assert got != want, "the control cannot distinguish a normalised tar"
+
+    def test_scope_filter_ships_only_that_scope(self, store: Path):
+        with running(store) as (base, _):
+            _c, _h, body = fetch(
+                f"{base}/api/v1/snapshot?scope={SCOPE}", token=GOOD_TOKEN
+            )
+        names = [n for n in self._members(body) if n.endswith(".md")]
+        assert names, "filtered snapshot shipped nothing"
+        assert all(n.startswith(f"{SCOPE}/") for n in names), names
+
+    def test_an_invalid_scope_is_a_400_not_a_traversal(self, store: Path):
+        with running(store) as (base, _):
+            code, headers, _b = fetch(
+                f"{base}/api/v1/snapshot?scope=../../etc", token=GOOD_TOKEN
+            )
+        assert code == 400
+        assert headers["X-Store-Status"] == "bad-request"
+
+    def test_it_requires_a_token(self, store: Path):
+        with running(store) as (base, _):
+            code, _h, _b = fetch(f"{base}/api/v1/snapshot")
+        assert code == 401
+
+    def test_it_ships_no_dot_dirs_and_no_non_markdown(self, store: Path):
+        (store / SCOPE / "notes.txt").write_text("not an entry")
+        (store / ".git").mkdir(exist_ok=True)
+        (store / ".git" / "HEAD").write_text("ref: refs/heads/main")
+        with running(store) as (base, _):
+            _c, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        names = set(self._members(body))
+        assert not any(n.startswith(".git") for n in names), names
+        assert not any(n.endswith(".txt") for n in names), names
+
+    def test_taking_a_snapshot_leaves_the_store_BYTE_IDENTICAL(self, store: Path):
+        before = tree_hash(store)
+        with running(store) as (base, _):
+            fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+            fetch(f"{base}/api/v1/snapshot?scope={SCOPE}", token=GOOD_TOKEN)
+        assert tree_hash(store) == before
+
+
 class TestSearchOverHTTP:
     def test_POSITIVE_a_query_that_must_hit_DOES(self, store: Path):
         with running(store) as (base, _):
@@ -1784,11 +2185,85 @@ class TestPhaseOneScope:
         for handler in ("def do_POST", "def do_PUT", "def do_PATCH", "def do_DELETE"):
             assert handler not in src
 
-    def test_the_only_routes_are_recall_and_search(self, store: Path):
-        """Behavioural, not a grep: an authenticated GET to anything else 404s.
+    # 🔴 THE LEDGER. Adding a route means adding it HERE, on purpose, in the
+    # same commit. That is the whole point of the guard below.
+    ROUTES: tuple[str, ...] = ("recall", "search", "snapshot")
 
-        A structural read of the router would be satisfied by a route added
-        through a different spelling; this walks the endpoint list.
+    def test_the_route_ledger_is_the_whole_route_set(self, store: Path):
+        """🔴 REWRITTEN TWICE, and the FIRST rewrite was still a spelled guard.
+
+        v1 was named `test_the_only_routes_are_recall_and_search` and claimed to
+        "walk the endpoint list". It probed four hardcoded non-routes, so adding
+        `/api/v1/snapshot` left every test in this class green.
+
+        v2 replaced that with `re.findall(r'parts\\[0\\]\\s*==\\s*"([a-z0-9-]+)"')`
+        and was described in its PR as "derives the accepted set from the
+        router". It does not — it derives the set from ONE SPELLING. An audit
+        MEASURED the hole: adding `parts[0] == "raw_dump"` (an underscore, which
+        the character class excludes) left all six tests in this class PASSING.
+        Single quotes, `parts[0] in (...)`, reversed operands, uppercase and
+        dict dispatch walk past it too. Its "positive control" fed it the one
+        spelling it catches, so the control could not reveal any of that.
+
+        v3 parses the ROUTER'S AST and collects every string compared against a
+        `parts[...]` subscript — `==` in either operand order, and `in` over a
+        tuple/list. Spelling is now irrelevant: quotes, case and underscores are
+        all the same node to `ast`.
+
+        🔴 WHAT THIS STILL CANNOT SEE, stated rather than implied: a route whose
+        name never appears as a literal in a comparison against `parts` — a dict
+        or table dispatch (`ROUTES[parts[0]]`), a computed name, or a
+        `startswith` prefix match. `test_no_table_dispatch_on_parts` below closes
+        the table case; a computed name remains uncovered, and the behavioural
+        test cannot cover it either because it cannot guess the name.
+        """
+        assert set(api.API_ROUTES) == set(self.ROUTES), (
+            f"router dispatches {sorted(api.API_ROUTES)} but the ledger says "
+            f"{sorted(self.ROUTES)} — add it to ROUTES on purpose, or remove it"
+        )
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            f"/api/v1/recall/{SCOPE}/extra",   # ledgered head, too many parts
+            "/api/v1/recall",                  # ledgered head, too few
+            "/api/v1/snapshot/anything/at/all",
+            "/api/v1/search",
+        ],
+    )
+    def test_a_ledgered_head_with_the_WRONG_arity_404s(self, store: Path, path: str):
+        """🔴 The dispatcher's one numeric field had NO test.
+
+        `if len(parts) == arity` mutated to `>=` SURVIVED all 318 tests, and
+        that mutant serves `200 recalled` for `/recall/<scope>/extra` and
+        `200 snapshot` for `/snapshot/anything/at/all`. The existing
+        `test_anything_outside_the_ledger_404s` only probes heads OUTSIDE the
+        table, so a ledgered head with the wrong component count was unreachable
+        by every guard in this file. Arity is the table's other half.
+        """
+        with running(store) as (base, _):
+            code, headers, _b = fetch(f"{base}{path}", token=GOOD_TOKEN)
+        assert code == 404, f"{path} answered {code}"
+        assert headers["X-Store-Status"] == "no-route"
+
+    def test_every_ledgered_route_actually_dispatches(self):
+        """Structural companion: the table's handlers must EXIST and be bound.
+
+        A table is only as good as its rows — a typo'd handler name would make a
+        ledgered route 500 rather than serve, and the equality check above
+        cannot see that.
+        """
+        for name, (handler, arity) in api.API_ROUTES.items():
+            assert hasattr(api.StoreRequestHandler, handler), f"{name} -> missing {handler}"
+            assert arity >= 1, f"{name} has arity {arity}"
+
+    def test_anything_outside_the_ledger_404s(self, store: Path):
+        """Behavioural companion to the structural ledger above.
+
+        The ledger reads the source; this proves the server actually refuses.
+        Both are needed: a structural check type-checks past a router that
+        accepts a name it never dispatches, and a behavioural sample cannot see
+        a route it did not think to name.
         """
         with running(store) as (base, _):
             for path in (
@@ -1800,6 +2275,52 @@ class TestPhaseOneScope:
                 code, headers, _b = fetch(f"{base}{path}", token=GOOD_TOKEN)
                 assert code == 404, f"{path} answered {code}"
                 assert headers["X-Store-Status"] == "no-route"
+
+    def test_the_router_reads_the_table_rather_than_its_own_spelling(self):
+        """🔴 WHY THE SOURCE-PARSING LEDGER IS GONE, recorded so nobody rebuilds it.
+
+        Three versions of this guard read the router as TEXT and each was
+        defeated by a re-spelling while the whole suite stayed green:
+
+          v1  four hardcoded non-route probes  -> missed `/snapshot` entirely
+          v2  regex `parts\\[0\\] == "([a-z0-9-]+)"` -> missed `"raw_dump"`
+              (underscore); its own positive control fed it the one spelling it
+              caught, so it could not reveal that
+          v3  AST walk over comparisons against `parts` -> missed
+              `head = parts[0]; head == "x"` and `parts[0] in NAME`, both one
+              ordinary refactor away, and it was file-scoped so a rewrite of an
+              unrelated `parts` local (server.py has two) would have produced a
+              FALSE failure naming a header value as a route
+
+        v3 and its companion `test_no_table_dispatch_on_parts` are BOTH GONE —
+        this docstring described them for a round after they were deleted, which
+        is the same "reads as coverage while providing none" failure the guard
+        itself exists to prevent. What runs now is the assertion below.
+
+        Each fix made the pattern-matching cleverer, which is the wrong axis.
+        The route set is now DATA the dispatcher reads (`API_ROUTES`), so
+        "what does the router accept" is answered by reading the router's own
+        table instead of guessing how it was written. There is no spelling left
+        to miss, and no source text to parse.
+        """
+        src = SERVER_PATH.read_text()
+        assert "API_ROUTES.get(parts[0])" in src, (
+            "the dispatcher no longer reads API_ROUTES — the ledger test above "
+            "would then be asserting against a table nothing uses"
+        )
+
+    def test_the_snapshot_route_added_NO_write_verb(self, store: Path):
+        """Phase 2 adds a READ route. The write guard above must be untouched by
+        it — stated as its own test so "phase 2 stayed read-only" is a checked
+        claim rather than a sentence in a commit message."""
+        with running(store) as (base, _):
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                code, headers, body = fetch(
+                    f"{base}/api/v1/snapshot", token=GOOD_TOKEN, method=method
+                )
+                assert code == 405, f"{method} answered {code}"
+                assert headers["Allow"] == "GET, HEAD"
+                assert body == b"read-only\n"
 
     def test_nothing_in_this_directory_writes_to_the_store(self):
         for path in sorted(API_DIR.iterdir()):
