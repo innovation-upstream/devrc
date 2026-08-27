@@ -46,6 +46,7 @@ wrong reason and stays green with the guard it claims to test deleted.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 from testlib import hermetic_git  # noqa: E402
@@ -1539,7 +1540,11 @@ def test_the_count_is_ARTIFACTS_not_SCOPES(tmp_path, identity):
     """
     store = tmp_path / "store"
     store.mkdir()                                  # exists, holds no repository
-    now = datetime.now(timezone.utc)
+    # The FROZEN clock every other fixture uses, not wall-clock: the run's `now`
+    # is threaded through `_verify`, so this was harmless — but a test whose
+    # inputs move with the wall clock is one whose failures are not reproducible
+    # from the recorded sha, and this file has one convention for that.
+    now = NOW
     alpha = _make_scope(tmp_path / "elsewhere", "scope-alpha", {"e.md": "a"},
                         commits=5)
     objects = {
@@ -1570,7 +1575,7 @@ def test_the_count_is_ARTIFACTS_not_SCOPES(tmp_path, identity):
         "above cannot see the difference")
 
 
-def test_a_kind_OUTSIDE_the_ledger_CANNOT_be_returned(tmp_path):
+def test_a_kind_OUTSIDE_the_ledger_CANNOT_be_returned():
     """🔴 THE LEDGER PIN SAYS NOTHING ABOUT WHAT THE FUNCTION RETURNS.
 
     `_MECHANISMS` is pinned key-for-key against `WHY_KINDS`, and that guard is
@@ -1598,15 +1603,36 @@ def test_a_kind_OUTSIDE_the_ledger_CANNOT_be_returned(tmp_path):
 
     # And the guard is REACHED by the real function on every branch — a check
     # that only the helper enforces would be bypassed by a branch that returns
-    # a bare tuple. Asserted structurally, since a sixth branch is the hazard.
-    body = SCRIPT.read_text(encoding="utf-8").split(
-        "def why_no_live_scope(", 1)[1].split("\ndef ", 1)[0]
-    returns = [ln.strip() for ln in body.splitlines()
-               if ln.strip().startswith("return ")]
-    assert returns, "why_no_live_scope has no returns — this pin is vacuous"
-    assert all(r.startswith("return _why(") for r in returns), (
-        f"a branch of why_no_live_scope returns without going through _why(), "
-        f"so its kind is unchecked: {[r for r in returns if not r.startswith('return _why(')]}")
+    # a bare tuple.
+    #
+    # 🔴 PARSED, NOT SPELLED. This was a line scan for text starting with
+    # `"return "`, and TWO valid, lint-clean bypassing spellings survived a
+    # fully green suite:
+    #
+    #     if scope == "sixth": return "scope-sixth", "x"   # same-line body
+    #     return("scope-sixth", "x")                        # no space
+    #
+    # There is no Python linter anywhere in the gate (zero hits for
+    # ruff/flake8/pylint/pycodestyle in gate.sh, run-tests.sh, flake.nix), so
+    # nothing else refused either spelling. A guard on WORDS is walkable by
+    # REWORDING; this asks the AST what the code IS. It also retires the
+    # `split("\ndef ")` body extraction, which a nested def or a docstring
+    # containing that text would have silently truncated.
+    fn = next((n for n in ast.walk(ast.parse(SCRIPT.read_text(encoding="utf-8")))
+               if isinstance(n, ast.FunctionDef) and n.name == "why_no_live_scope"),
+              None)
+    assert fn is not None, (
+        "why_no_live_scope was not found in the AST — this pin is vacuous")
+    returns = [n for n in ast.walk(fn) if isinstance(n, ast.Return)]
+    assert returns, "why_no_live_scope has no return statements — pin is vacuous"
+    bypassing = [ast.unparse(n) for n in returns
+                 if not (isinstance(n.value, ast.Call)
+                         and isinstance(n.value.func, ast.Name)
+                         and n.value.func.id == "_why")]
+    assert not bypassing, (
+        f"a branch of why_no_live_scope returns WITHOUT going through _why(), "
+        f"so its kind is unchecked and a sixth branch would KeyError inside "
+        f"the refusal an operator reads during a recovery: {bypassing}")
 
 
 def test_the_MECHANISM_ledger_is_pinned_two_way_to_WHY_KINDS():
@@ -1694,45 +1720,20 @@ def test_print_plan_LISTS_every_classified_code(tmp_path, identity):
             f"the number cannot map it:\n{r.stdout}")
 
 
-def test_print_plan_PROSE_never_contradicts_the_FORTY_framing(
-        tmp_path, identity):
-    """🔴 THE #851 TRAP, REPRODUCED INSIDE THE FIX FOR IT.
-
-    A previous round pinned `nothing_cross_checked_message` whole and left
-    `--print-plan`'s prose — added in the SAME commit, carrying the SAME
-    load-bearing claim — unpinned. An auditor rewrote the exit block to "40 IS a
-    verdict against the backups: NO artifact restored and FAILED fsck … It is
-    NEVER the expected code" and the suite stayed FULLY GREEN. The `compare:`
-    tail was worse than unpinned: it still said the run "FAILS", twelve lines
-    above the block saying 40 is not a verdict, and the refusal's own remedy
-    routes a recovering operator to this exact screen.
-
-    🔴 THE WHOLE RENDERED PLAN IS PINNED, NOT THE TWO BLOCKS THAT CARRY THE
-    CLAIM. Pinning the blocks left the obvious hole: a NEW paragraph elsewhere
-    on this screen asserting the opposite ("exit 40 DOES mean your backups are
-    broken") satisfied both `in` checks and survived. An operator reads the
-    screen, not the block, so the screen is the unit.
-
-    Every environment-dependent field is supplied BY THIS TEST (bucket, prefix,
-    store, identity, max-lag) so nothing here is derived from the implementation
-    — except the machine id, which is REDACTED by regex rather than pinned:
-    devrc is a public repo and the real id must never be committed.
-    """
-    store = tmp_path / "store"
-    ident = tmp_path / "ID.key"
-    r = _cli("--print-plan", "--bucket", "test-bucket", "--store", str(store),
-             "--identity", str(ident), "--max-lag-days", "3.0",
-             identity=identity)
-    assert r.returncode == 0, r.stderr
-    got = _norm(re.sub(r"machine-id (?:[0-9a-f]{32}|UNREADABLE)",
-                       "machine-id <redacted>", r.stdout))
-    expected = _norm(f"""
+# 🔴 THE PLAN AS RENDERED, PINNED WHOLE — the SHARED body, with the trailing
+# `local:` line supplied per case. `print_plan` RETURNS EARLY on an empty store
+# (restore-verify.py, `if not scopes: … return`), so a pin taken only against an
+# empty store leaves everything past that line unpinned: appending a
+# contradicting paragraph after the POPULATED `local:` loop survived a fully
+# green suite. Two cases, both by equality, is what closes the healthy-host
+# screen as well as the recovery one.
+_PLAN_BODY = """\
 source:    test-bucket
-prefix:    {PREFIX}
+prefix:    {prefix}
 store:     {store}
 identity:  {ident} (MISSING)
 chosen by: the --identity flag  <- NOT the default identity
-host:      {HOST} (machine-id <redacted>) -> these artifacts are THIS host's: they WILL be cross-checked
+host:      {host} (machine-id <redacted>) -> these artifacts are THIS host's: they WILL be cross-checked
 scope:     (every scope found under the prefix)
 artifacts: newest per scope
 max lag:   3.0 day(s) — older than this is a FAILURE
@@ -1765,16 +1766,96 @@ coverage:  every LOCAL scope must have at least one artifact. A scope
            red gate. Skipped under --scope or an explicit --host.
 writes:    NOTHING to the store, NOTHING to the bucket. The store is
            read through an allowlist of read-only subcommands.
-local:     (no scope repositories under {store})
-""")
+{tail}"""
+
+
+def _rendered_plan(store: Path, ident: Path, identity: Path) -> tuple[str, str]:
+    """`(normalised stdout, raw stdout)` for `--print-plan` over `store`.
+
+    🔴 The machine id is REDACTED, never pinned: devrc is public. It is redacted
+    in the RAW copy too, because that copy is what a failure message prints into
+    the run log — the committed file being clean is not the whole claim.
+    """
+    r = _cli("--print-plan", "--bucket", "test-bucket", "--store", str(store),
+             "--identity", str(ident), "--max-lag-days", "3.0",
+             identity=identity)
+    assert r.returncode == 0, r.stderr
+    safe = re.sub(r"machine-id (?:[0-9a-f]{32}|UNREADABLE)",
+                  "machine-id <redacted>", r.stdout)
+    return _norm(safe), safe
+
+
+_PLAN_WHY = (
+    "Re-read it before updating this literal — TWO claims on this screen invert "
+    "silently under a reword, and this is the screen the refusal sends a "
+    "recovering operator to: that a run comparing nothing exits 40 and NOT 0, "
+    "and that 40 is NOT a verdict against the backups. The WHOLE screen is "
+    "pinned, because pinning only the blocks carrying those claims let a "
+    "CONTRADICTING paragraph be added elsewhere on it.")
+
+
+def test_print_plan_PROSE_never_contradicts_the_FORTY_framing(
+        tmp_path, identity):
+    """🔴 THE #851 TRAP, REPRODUCED INSIDE THE FIX FOR IT — the RECOVERY screen.
+
+    A previous round pinned `nothing_cross_checked_message` whole and left
+    `--print-plan`'s prose — added in the SAME commit, carrying the SAME
+    load-bearing claim — unpinned. An auditor rewrote the exit block to "40 IS a
+    verdict against the backups: NO artifact restored and FAILED fsck … It is
+    NEVER the expected code" and the suite stayed FULLY GREEN. The `compare:`
+    tail was worse than unpinned: it still said the run "FAILS", twelve lines
+    above the block saying 40 is not a verdict.
+
+    Pinning the two BLOCKS was still not enough: a new paragraph ELSEWHERE on
+    the screen asserting the opposite satisfied both `in` checks and survived.
+    An operator reads the screen, not the block, so the screen is the unit.
+
+    This case renders the EMPTY-store screen — the one a recovering operator
+    sees. `test_print_plan_on_a_POPULATED_store_is_pinned_WHOLE_too` covers the
+    rest, which this case structurally cannot reach.
+    """
+    store = tmp_path / "store"
+    ident = tmp_path / "ID.key"
+    got, raw = _rendered_plan(store, ident, identity)
+    expected = _norm(_PLAN_BODY.format(
+        prefix=PREFIX, store=store, ident=ident, host=HOST,
+        tail=f"local:     (no scope repositories under {store})\n"))
     assert got == expected, (
-        f"the rendered --print-plan changed. Re-read it before updating this "
-        f"literal — TWO claims on this screen invert silently under a reword, "
-        f"and this is the screen the refusal sends a recovering operator to: "
-        f"that a run comparing nothing exits 40 and NOT 0, and that 40 is NOT a "
-        f"verdict against the backups. The whole screen is pinned because "
-        f"pinning only the blocks that carry those claims let a CONTRADICTING "
-        f"paragraph be added elsewhere.\n--- got ---\n{r.stdout}")
+        f"the rendered --print-plan (empty store) changed. {_PLAN_WHY}\n"
+        f"--- got ---\n{raw}")
+
+
+def test_print_plan_on_a_POPULATED_store_is_pinned_WHOLE_too(
+        tmp_path, identity):
+    """🔴 THE FIRST WHOLE-PLAN PIN COVERED ONE RENDERING OF TWO.
+
+    `print_plan` RETURNS EARLY when the store holds no scope repositories, and
+    the pin above uses a store that does not exist — so everything the function
+    prints AFTER that early return was unpinned. Measured: appending
+    `print("note: exit 40 DOES mean your backups are broken.")` after the
+    populated `local:` loop SURVIVED a fully green suite. The healthy-host
+    screen was reachable only through `in`-substring assertions, which is the
+    exact pattern this delta exists to retire.
+
+    One scope, one commit, so the `local:` line is deterministic.
+    """
+    store = tmp_path / "store"
+    _make_scope(store, "scope-alpha", {"e.md": "a"}, commits=1)
+    ident = tmp_path / "ID.key"
+    got, raw = _rendered_plan(store, ident, identity)
+    expected = _norm(_PLAN_BODY.format(
+        prefix=PREFIX, store=store, ident=ident, host=HOST,
+        tail=(f"local:     scope-alpha (1 commits) -> would compare against "
+              f"{PREFIX}scope-alpha/<newest>\n")))
+    assert got == expected, (
+        f"the rendered --print-plan (populated store) changed. {_PLAN_WHY}\n"
+        f"--- got ---\n{raw}")
+
+    # POSITIVE CONTROL on the fixture: this case really does render the branch
+    # the other one cannot reach, so it is not a second copy of the same screen.
+    assert "no scope repositories under" not in raw, (
+        "the store is empty, so this case took the early return and covers the "
+        "same rendering as the case above — the populated tail is still unpinned")
 
 
 # `argparse` is constructed with `description=__doc__`, so the module docstring
