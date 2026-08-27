@@ -170,10 +170,9 @@ def fetch_snapshot(
     # and mutating either `fetch_snapshot`'s or `urlopen`'s argument to `None`
     # survived the whole suite. The asymmetry was the defect: one half of one
     # program failing closed.
-    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
-        raise StoreUnreachable(
-            f"refusing to fetch {url} with timeout={timeout!r} — a missing or "
-            "non-positive bound is an UNBOUNDED wait, not a default")
+    bad = _cairn_who().unbounded_timeout_reason(timeout)
+    if bad:
+        raise StoreUnreachable(f"refusing to fetch {url}: {bad}")
     target = f"{url}/api/v1/snapshot" + (f"?scope={scope}" if scope else "")
     req = urllib.request.Request(target, method="GET")
     req.add_header("Authorization", f"Bearer {token}")
@@ -730,6 +729,21 @@ def cmd_validate(args: argparse.Namespace) -> int:
         )
         worst = max(worst, code)
     return worst
+
+
+def _cairn_who():
+    """The `who` module, imported lazily — it owns the timeout predicate.
+
+    🔴 SHARED SO THE TWO COPIES CANNOT DRIFT APART AGAIN. They already had:
+    only one excluded `bool`, while a comment here claimed they mirrored each
+    other. Importing the predicate rather than restating it means the next fix
+    lands in both halves of this CLI at once. Lazy because `cairn`'s store
+    commands must not pay for it, and because `sys.path` gains `lib/` at module
+    scope above.
+    """
+    import cairn_who  # noqa: PLC0415
+
+    return cairn_who
 
 
 def _store_timeout(args: argparse.Namespace) -> int:

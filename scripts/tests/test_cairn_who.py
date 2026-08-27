@@ -773,7 +773,7 @@ def test_EXIT_EMPTY_with_EMPTY_stdout_is_still_a_measured_zero():
         f"wrong — not be reported as a bad exit code: {exc.value}")
 
 
-@pytest.mark.parametrize("bad", [None, 0, -1, "60"])
+@pytest.mark.parametrize("bad", [None, 0, -1, "60", True])
 def test_a_MISSING_or_NONPOSITIVE_timeout_is_refused_not_treated_as_a_default(bad):
     """🔴 `timeout=None` means NO TIMEOUT — measured: an unbounded wait.
 
@@ -784,7 +784,13 @@ def test_a_MISSING_or_NONPOSITIVE_timeout_is_refused_not_treated_as_a_default(ba
     """
     with pytest.raises(W.WhoError) as exc:
         W._run(["true"], bad)
-    assert "UNBOUNDED" in str(exc.value)
+    # 🔴 Assert the REFUSAL, and that the reason names the actual problem —
+    # not one fixed word. `True` is not an UNBOUNDED wait, it is a silently
+    # WRONG one (1 second), and demanding that word made the guard's own
+    # message have to lie to satisfy the test.
+    assert "refusing to run" in str(exc.value)
+    assert repr(bad) in str(exc.value), (
+        f"the reason does not name the offending value: {exc.value}")
 
 
 def test_the_stderr_collapse_happens_at_the_REAL_boundary():
@@ -1065,7 +1071,8 @@ def test_the_STORE_fetch_refuses_an_unbounded_bound_like_the_who_side_does(bad):
     cli = _load_cairn_cli()
     with pytest.raises(cli.StoreUnreachable) as exc:
         cli.fetch_snapshot("http://127.0.0.1:1", "tok", scope=None, timeout=bad)
-    assert "UNBOUNDED" in str(exc.value)
+    assert "refusing to fetch" in str(exc.value)
+    assert repr(bad) in str(exc.value)
 
 
 def test_the_store_fetch_ACCEPTS_a_positive_bound():
@@ -1075,8 +1082,8 @@ def test_the_store_fetch_ACCEPTS_a_positive_bound():
     with pytest.raises(cli.StoreUnreachable) as exc:
         # port 1 is closed: this must fail on the CONNECTION, not the bound.
         cli.fetch_snapshot("http://127.0.0.1:1", "tok", scope=None, timeout=1)
-    assert "UNBOUNDED" not in str(exc.value), (
-        f"a valid bound was refused as unbounded: {exc.value}")
+    assert "refusing to fetch" not in str(exc.value), (
+        f"a valid bound was refused: {exc.value}")
 
 
 def test_the_POSITIVE_bound_actually_reaches_urlopen(monkeypatch):
@@ -1120,3 +1127,63 @@ def test_the_POSITIVE_bound_actually_reaches_urlopen(monkeypatch):
     assert seen["timeout"] == 11, (
         f"urlopen received timeout={seen['timeout']!r}, not the bound it was "
         "given — the validated parameter is not what goes to the network")
+
+
+#: Every value that must be refused as a timeout, by BOTH halves of this CLI.
+UNBOUNDED_TIMEOUTS = [None, 0, -1, "60", True, False, 1.5, [], object()]
+
+
+@pytest.mark.parametrize("bad", UNBOUNDED_TIMEOUTS)
+def test_BOTH_entry_points_refuse_the_SAME_unusable_timeouts(bad):
+    """🔴 TWO-WAY PIN. The rule was open-coded twice and the copies DISAGREED.
+
+    Only `fetch_snapshot` excluded `bool`, while a comment claimed it refused
+    "the way `cairn_who._run` always has". Measured before this fix:
+    `_run(["sleep","3"], True)` ran with a ONE-SECOND bound and reported
+    `did not answer within Trues` — verbatim the "nobody notices" failure
+    `_run`'s own docstring describes.
+
+    Asserting the two AGREE, rather than asserting each separately, is what
+    makes a future divergence fail here instead of shipping. Consolidation was
+    the bug-finding instrument: the disagreement was only audible once the two
+    predicates were put side by side.
+    """
+    cli = _load_cairn_cli()
+    with pytest.raises(W.WhoError) as who_exc:
+        W._run(["true"], bad)
+    with pytest.raises(cli.StoreUnreachable) as store_exc:
+        cli.fetch_snapshot("http://127.0.0.1:1", "tok", scope=None, timeout=bad)
+    assert "refusing to run" in str(who_exc.value)
+    assert "refusing to fetch" in str(store_exc.value)
+
+
+def test_both_entry_points_ACCEPT_the_same_positive_bound():
+    """CONTROL. Two guards that refuse EVERYTHING also agree perfectly."""
+    cli = _load_cairn_cli()
+    rc, _, _ = W._run(["true"], 5)
+    assert rc == 0
+    with pytest.raises(cli.StoreUnreachable) as exc:
+        cli.fetch_snapshot("http://127.0.0.1:1", "tok", scope=None, timeout=5)
+    assert "refusing to fetch" not in str(exc.value), (
+        f"a valid bound was refused: {exc.value}")
+
+
+def test_the_timeout_predicate_has_exactly_ONE_implementation():
+    """🔴 One rule, one place — asserted structurally, not by convention.
+
+    A second `isinstance(timeout, int)` anywhere in this CLI is the copy that
+    drifts. Searching the tree is how the disagreement was found; this is how
+    it stays found.
+    """
+    import re
+
+    for path in (REPO_ROOT / "scripts" / "cairn",
+                 REPO_ROOT / "scripts" / "lib" / "cairn_who.py"):
+        src = path.read_text(encoding="utf-8")
+        # the predicate's own body is the one legitimate site
+        body = src.count("def unbounded_timeout_reason")
+        opencoded = len(re.findall(r"isinstance\(\s*timeout\s*,\s*int\s*\)", src))
+        assert opencoded <= body, (
+            f"{path.name} open-codes the timeout predicate "
+            f"({opencoded} site(s), {body} definition(s)) — import "
+            "`unbounded_timeout_reason` instead so the copies cannot drift")

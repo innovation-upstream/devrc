@@ -230,6 +230,35 @@ class WhoReport:
 # --------------------------------------------------------------------------- #
 
 
+def unbounded_timeout_reason(value) -> str | None:
+    """Why `value` is not a usable timeout, or `None` if it is fine.
+
+    🔴 ONE PREDICATE, ONE PLACE — AND CONSOLIDATING IT IS WHAT FOUND THE BUG.
+    This rule was open-coded at two sites (`_run` here, `fetch_snapshot` in
+    `scripts/cairn`) and the copies DISAGREED: only one excluded `bool`. A
+    comment claiming the two mirrored each other was therefore false, and the
+    weaker copy was measured running `_run(cmd, True)` with a ONE-SECOND bound
+    and reporting `did not answer within Trues` — verbatim the "nobody notices"
+    failure `_run`'s own docstring describes.
+
+    `bool` is the trap: it subclasses `int`, so `isinstance(x, int)` accepts
+    `True` and silently yields a 1s timeout. `None` is the other: it means NO
+    timeout to both `subprocess` and `urlopen`, an unbounded wait rather than a
+    default. Both callers raise their OWN exception type from this reason, so
+    the rule is shared without coupling the store path to `who`'s error class.
+    """
+    if isinstance(value, bool):
+        return (f"timeout={value!r} is a bool — it subclasses int, so this "
+                "would silently run with a 1-second bound")
+    if not isinstance(value, int):
+        return (f"timeout={value!r} is not an int — a missing bound is an "
+                "UNBOUNDED wait, not a default")
+    if value <= 0:
+        return (f"timeout={value!r} is not positive — a non-positive bound is "
+                "an UNBOUNDED wait, not a default")
+    return None
+
+
 def _one_line(text: str) -> str:
     """Collapse a diagnostic to one line.
 
@@ -255,10 +284,9 @@ def _run(cmd: Sequence[str], timeout: int) -> tuple[int, str, str]:
     # waits forever on a host that will never answer. Measured: a None timeout
     # let a 2s sleep run to completion unbounded. The expiry message would also
     # have read "within Nones", which is how nobody notices. Refuse it.
-    if not isinstance(timeout, int) or timeout <= 0:
-        raise WhoError(
-            f"refusing to run {cmd[0]} with timeout={timeout!r} — a missing or "
-            "non-positive bound is an UNBOUNDED wait, not a default")
+    bad = unbounded_timeout_reason(timeout)
+    if bad:
+        raise WhoError(f"refusing to run {cmd[0]}: {bad}")
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
