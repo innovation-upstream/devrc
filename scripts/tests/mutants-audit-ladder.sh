@@ -6,7 +6,11 @@
 # Not run by CI. An author/reviewer instrument, kept IN THE TREE so
 # "mutation-verified" can be RE-DERIVED instead of believed.
 #
-#   bash scripts/tests/mutants-audit-ladder.sh          # exit 0 only if ALL ok
+#   nix develop ~/workspace/devrc -c bash scripts/tests/mutants-audit-ladder.sh
+#
+#   (a bare `bash …` works only where pytest is already on PATH; this host's
+#   `.envrc` is `use opencode`, which does not put it there.) Exit 0 only if
+#   every row is as expected.
 #
 # 🔴 IT EXISTS BECAUSE THE SWEEPS IT REPLACES WERE NOT COMMITTED. devrc #900 ran
 # ten audit rounds and recorded ~30 mutants in the module's docstring; every one
@@ -21,10 +25,14 @@
 # rewording that a reader would accept and that must nevertheless go red.
 #
 # 🔴 IT NEVER TOUCHES YOUR WORKING TREE. Everything is mutated inside a
-# `mktemp -d` copy, and the copy is asserted to carry no `.git` — a `cp -a` of a
-# worktree would carry its `.git` POINTER FILE and a git command inside the copy
-# would then act on the real repository. (That hazard is one of the things the
-# skill under test now warns about.)
+# `mktemp -d` copy built by naming FIVE INDIVIDUAL FILES — that selective copy,
+# not the assertion below it, is what keeps a `.git` out. The assertion is an
+# INVARIANT GUARD and is labelled as one rather than counted as coverage: it
+# cannot fire today and has never been watched to. It earns its two lines only
+# against the future refactor that replaces the file list with `cp -a "$SRC"`,
+# which would carry a worktree's `.git` POINTER FILE and let a git command
+# inside the copy act on the real repository — a hazard the skill under test
+# now warns about, and the reason to leave a tripwire on the road not taken.
 #
 # 🔴 EACH MUTANT NAMES THE TEST THAT MUST KILL IT. "A test failed" is not
 # enough: these pins overlap by design — the same sentence can be covered by a
@@ -81,9 +89,15 @@ find "$ROOT" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
 SUITE="$ROOT/scripts/tests/test_audit_ladder_stop_rule.py"
 SKILL="$ROOT/claude/skills/audit-pr/SKILL.md"
 EVID="$ROOT/claude/skills/audit-pr/reference/round-ladder-evidence.md"
+RULES="$ROOT/claude/RULES.md"
 cp -a "$SKILL" "$T/skill.orig"
 cp -a "$EVID"  "$T/evid.orig"
-restore() { cp -a "$T/skill.orig" "$SKILL"; cp -a "$T/evid.orig" "$EVID"; }
+cp -a "$RULES" "$T/rules.orig"
+restore() {
+  cp -a "$T/skill.orig" "$SKILL"
+  cp -a "$T/evid.orig"  "$EVID"
+  cp -a "$T/rules.orig" "$RULES"
+}
 
 FAILURES=0
 ROWS=0
@@ -91,11 +105,22 @@ ROWS=0
 # 🔴 Read the CONTENT, never an exit code. A suite that never ran yields zero
 # FAILED lines — i.e. "clean" — so a harness wired to nothing would score every
 # mutant SURVIVED and every control ok. The floor catches COLLAPSE, not growth.
-MIN_TESTS=8
+# `run-tests.sh`'s convention for a floor is `m - min(50, max(1, m/20))`; at
+# m=11 that is 10. Catches COLLAPSE, not growth.
+MIN_TESTS=10
 failing() {
   local out n f total
+  # stderr is CAPTURED, not discarded: the commonest way to get "0 tests ran" on
+  # this host is running outside `nix develop` (`.envrc` is `use opencode`, so a
+  # loaded direnv has no pytest), and discarding stderr turns that one-line
+  # diagnosis into a headline that blames the TREE. Checked before the count.
   out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$SUITE" \
-    -q --no-header --tb=no -p no:cacheprovider 2>/dev/null)"
+    -q --no-header --tb=no -p no:cacheprovider 2>&1)"
+  if grep -q "No module named pytest" <<<"$out"; then
+    echo "__HARNESS_BROKE__ pytest is not on PATH — run this under" \
+         "\`nix develop ~/workspace/devrc -c bash \$0\`, not a bare shell"
+    return
+  fi
   n="$(sed -n 's/^\([0-9]*\) passed.*/\1/p;s/^[0-9]* failed, \([0-9]*\) passed.*/\1/p' <<<"$out" | tail -1)"
   f="$(sed -n 's/^\([0-9]*\) failed.*/\1/p' <<<"$out" | tail -1)"
   total=$(( ${n:-0} + ${f:-0} ))
@@ -117,6 +142,46 @@ if old not in t:
     sys.exit(3)
 p.write_text(t.replace(old, new, 1))
 PY
+}
+
+# move <file> <python-expr-on-t> — for mutants that RELOCATE a block with its
+# text byte-identical. Those are the reachability controls: every whole-string
+# pin stays green, so only an assertion that actually EXECUTES can see them.
+move() {
+  python3 - "$1" "$2" <<'PYEOF'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]); t = p.read_text()
+ns = {"t": t}
+exec("out = " + sys.argv[2], ns)          # noqa: S102 — harness, not product
+if ns["out"] == t:
+    sys.exit(3)
+p.write_text(ns["out"])
+PYEOF
+}
+
+run_move() { # run_move <name> <expect> <file> <python-expr>
+  local name="$1" want="$2" file="$3" expr="$4"
+  ROWS=$((ROWS+1))
+  if ! move "$file" "$expr"; then
+    printf '  🔴 %-46s MUTATION DID NOT APPLY — result meaningless\n' "$name"
+    FAILURES=$((FAILURES+1)); restore; return
+  fi
+  local killers; killers="$(failing)"
+  restore
+  if grep -q __HARNESS_BROKE__ <<<"$killers"; then
+    printf '  🔴 %-46s HARNESS BROKE — %s\n' "$name" "$killers"
+    FAILURES=$((FAILURES+1)); return
+  fi
+  if [ -z "$killers" ]; then
+    printf '  🔴 %-46s SURVIVED — no test failed\n' "$name"
+    FAILURES=$((FAILURES+1)); return
+  fi
+  if grep -qx "$want" <<<"$killers"; then
+    printf '  ok %-46s killed by %s\n' "$name" "$want"; return
+  fi
+  printf '  🔴 %-46s WRONG-KILLER: %s (wanted %s)\n' \
+    "$name" "$(tr '\n' ',' <<<"$killers")" "$want"
+  FAILURES=$((FAILURES+1))
 }
 
 run() { # run <name> <expect: test node name | SURVIVES> <file> <old> <new>
@@ -153,6 +218,14 @@ run() { # run <name> <expect: test node name | SURVIVES> <file> <old> <new>
 
 echo "== baseline =="
 base="$(failing)"
+if grep -q __HARNESS_BROKE__ <<<"$base"; then
+  # Not the tree's fault — say which, because the previous version printed
+  # "the UNMUTATED tree is already failing" at somebody whose only mistake was
+  # the shell they ran in.
+  echo "  🔴 THE HARNESS could not run: ${base#__HARNESS_BROKE__ }"
+  echo "     Nothing was measured. This says nothing about the tree."
+  exit 2
+fi
 if [ -n "$base" ]; then
   echo "  🔴 the UNMUTATED tree is already failing: $(tr '\n' ',' <<<"$base")"
   echo "     every row below would be meaningless. Fix that first."
@@ -220,6 +293,19 @@ run "shape-B/C lesson tail inverted" \
 run "churn row reverted to the stale 1,002" \
     test_the_attribution_measurement_survives_where_the_skill_routes_to_it "$EVID" \
     '**1,051**' '**1,002**'
+
+echo
+echo "== REACHABILITY: relocations that leave every string pin byte-identical =="
+# 🔴 These two are the rows the module's docstring marks as the reachability
+# controls, and they were the gap this harness shipped with: without them the
+# two RELATIONSHIP assertions -- the ones that check WHERE a rule sits, not that
+# its words exist -- had no re-derivable evidence that they execute at all.
+run_move "stop clause moved to its OWN bullet in RULES.md" \
+    test_the_stop_rule_shares_a_bullet_with_the_rule_it_bounds "$RULES" \
+    't.replace("🔴 **A CLEAN round ENDS the ladder", "\n- 🔴 **A CLEAN round ENDS the ladder", 1)'
+run_move "ATTRIBUTION section moved ABOVE the stop rule" \
+    test_the_attribution_gate_comes_after_the_rule_it_bounds "$SKILL" \
+    't[:t.index("### 🔴 A clean round ENDS the ladder.")] + t[t.index("### 🔴 ATTRIBUTION: a round that changes no PAYLOAD"):t.index("## Mutation testing:")] + t[t.index("### 🔴 A clean round ENDS the ladder."):t.index("### 🔴 ATTRIBUTION: a round that changes no PAYLOAD")] + t[t.index("## Mutation testing:"):]'
 
 echo
 echo "== controls (must kill NOTHING) =="

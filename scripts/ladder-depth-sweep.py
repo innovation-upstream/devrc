@@ -42,9 +42,19 @@ audits ran. `subagents/` transcripts are excluded — by
 `scripts/lib/transcript_search.py`, which owns that rule; this script does not
 walk the corpus itself.
 
-Blind spots, so the number is not read wider than it is: a ladder whose rounds
-were never NUMBERED is invisible here, and so is one run by a different runtime.
-Both make this an UNDER-count of ladder work, never an over-count.
+Blind spots, so the number is not read wider than it is:
+
+* A ladder whose rounds were never NUMBERED is invisible, and so is one run by a
+  different runtime. Both make this an UNDER-count of ladder work.
+* IMPLIED is an UPPER BOUND. It assumes a ladder that reached round N ran N
+  rounds; where numbering skips (measured: 3 sessions, 8 round-numbers, ~2% of
+  the corpus-wide gap) it over-counts. The rest of that gap is the unnumbered
+  first audit, which is by design.
+* 🔴 COMPARING TWO WINDOWS OF DIFFERENT LENGTH IS BIASED. Depth is computed from
+  in-window rounds only, so a narrower window truncates ladders that started
+  before it and mechanically RAISES mean depth. Measured on one unchanged
+  corpus: 4.38 all-time, 4.42 since 08-01, 4.97 since 08-20, 6.47 since 08-27.
+  Compare equal-length windows, or the artifact reads as an effect.
 """
 from __future__ import annotations
 
@@ -106,10 +116,17 @@ def sweep(since: str | None) -> tuple[dict, int]:
         key = (path.parent.name, path.stem)
         for row in ts.load_records(path):
             stamp = (row.get("timestamp") or "")[:10]
+            texts = dispatch_texts(row)
+            # 🔴 The positive control counts dispatches BEFORE the window filter.
+            # Counting after it made an legitimately EMPTY window exit 2 with
+            # "indistinguishable from a wrong tool-name filter" -- naming a cause
+            # that was not the real one, and making the honest "this zero is a
+            # measurement" branch unreachable for the commonest way to get a
+            # zero.
+            dispatches += len(texts)
             if since and stamp and stamp < since:
                 continue
-            for text in dispatch_texts(row):
-                dispatches += 1
+            for text in texts:
                 hit = ROUND.search(text)
                 if not hit:
                     continue

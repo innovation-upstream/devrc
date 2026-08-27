@@ -69,7 +69,10 @@ rounds a walk matches) and rounds *implied* (each session's deepest round summed
 that a ladder reaching round 8 ran eight). Re-run 2026-08-27 with the checked-in instrument: 127
 sessions, **306 observed / 541 implied**, mean deepest 4.26, 39% ≥5 — and that reading includes the
 ten-round ladder this file documents, which is what "the window moves" means in practice. Quote one
-count, name which, and date it.
+count, name which, and date it. 🔴 **That reading was stale within hours of being written** — an
+independent re-run the same day gave 319 observed / 556 implied / mean 4.38, because the corpus
+includes the very session dispatching the ladder this file describes. A figure from this instrument
+is a reading, not a fact about the world.
 
 **Re-derive rather than quote**: `scripts/ladder-depth-sweep.py` is the instrument, it prints both
 counts with the run date, and it REFUSES to report a zero it cannot distinguish from a broken
