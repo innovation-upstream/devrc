@@ -80,9 +80,17 @@ the box:
     🔴 MEASURED DRIFT, so a re-run that disagrees is not a bug. Two runs the
     same day returned `236 dead / 137 agent-dead / 99 removable` IDENTICALLY,
     while `orphan`/`cannot-tell` moved 44/52 -> 43/53 — one row's PR state or
-    dirtiness changed between them. The numbers this design rests on are the
-    stable ones; the two soft ones are ±1 on a machine with live sessions
-    working in it.
+    dirtiness changed between them.
+
+    🔴 THAT IS n=2, AND IT IS NOT A STABILITY GUARANTEE — an earlier revision of
+    this comment read "the numbers this design rests on are the stable ones",
+    which the code cannot promise and which contradicts `--confirm` three
+    sections below. `dead` and `removable` consume EXACTLY the inputs that moved
+    in that pair: a worktree going clean flips `live -> dead -> removable`, and a
+    PR merging flips `orphan -> dead`. They held still across two runs minutes
+    apart; they are not pinned. `--confirm N` refusing because N moved is the
+    tool working — the scope changed under you — not a tool bug, and that is the
+    whole reason N is re-derived from a fresh scan instead of remembered.
 
 🔴 EARLIER NUMBERS IN THIS FILE'S HISTORY ARE RETIRED, NOT RESTATED. A previous
 revision cited "870 worktrees / 128 repos -> 250 dead … 106 removable" beside a
@@ -722,10 +730,25 @@ def _resolve_or_none(p: Path) -> "Path | None":
     `ValueError` is in the list for the embedded-NUL case, a different way for
     the same call to reject a path rather than fail on the filesystem.
 
-    A path we cannot resolve simply contributes no resolved form. That is the
-    conservative direction here: one fewer string for a glob to match means a
-    row is excluded LESS readily, never more — and the unresolved path is still
-    tested.
+    🔴 LOSING THE RESOLVED FORM IS THE **DELETING-MORE** DIRECTION, NOT THE SAFE
+    ONE. An earlier revision of this docstring called it "the conservative
+    direction … a row is excluded LESS readily"; for an EXCLUSION filter,
+    excluding less readily is exactly the direction the safe-direction rule at
+    the top of this file forbids ("excludes MORE from removal, never less").
+    Said plainly: a glob that would have matched only the resolved spelling stops
+    matching, and the row stops being spared by that glob.
+
+    🔴 WHAT ACTUALLY MAKES IT SAFE is a different mechanism entirely, and it is
+    worth naming because the wrong one was written down here for two rounds: the
+    only paths that reach the `None` branch are paths whose ancestry cannot be
+    walked, and NOTHING can stat such a path. `is_dir()` is False, so the row
+    carries `path_exists=False`; git cannot stat it either, so it is reported
+    `prunable`. Either lands `cannot-tell` in `classify()` — measured, BOTH are
+    set on a real fixture and `prunable` is the branch that fires first — and a
+    `cannot-tell` row is NEVER removable, for a reason that has nothing to do
+    with globs. The exclusion degrading is therefore moot on precisely the rows
+    that can trigger it. Pinned by
+    `test_a_row_whose_resolve_fails_is_cannot_tell_not_removable`.
     """
     try:
         return p.resolve()
@@ -1048,6 +1071,21 @@ def summarize(rows: "list[dict]", exclude_globs: "list[str] | None" = None,
         # hardcode wearing a costume.
         "agent_worktrees_included": bool(agent_worktrees_included),
         "allow_unmatched_globs": bool(allow_unmatched_globs),
+        # 🔴 Whether the agent glob is ACTUALLY OUT OF FORCE — which is not the
+        # same question as whether the flag was passed, and the report used to
+        # ask the wrong one. `--include-agent-worktrees --exclude-path
+        # '*/.claude/worktrees/*'` drops the default and re-adds the identical
+        # glob as a TYPED one, so agent worktrees are still spared; the report
+        # nonetheless shouted that they were "ordinary removal candidates" three
+        # lines above its own filter table saying they had been spared. A
+        # 🔴-marked warning that the next lines of the same report contradict is
+        # how a real one gets tuned out.
+        #
+        # Deliberately an EXACT membership test on the constant, not an attempt
+        # to decide whether some other typed glob happens to cover agent trees.
+        # A near-miss glob (`*/.claude/worktrees/agent-*` covers less) still gets
+        # the shout, which is the right way for this to be wrong.
+        "agent_worktree_glob_in_force": AGENT_WORKTREE_GLOB in globs,
     }
 
 
@@ -1091,13 +1129,23 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
     # 🔴 The dangerous choice is the one you have to type — so say, loudly, when
     # it was typed. Printed before the filter list because it is the reason the
     # list is one line shorter than it usually is.
-    if summary.get("agent_worktrees_included"):
+    #
+    # 🔴 GATED ON THE GLOB, NOT ON THE FLAG. It used to fire on the flag alone
+    # and could then be FALSE three lines above the filter table that
+    # contradicted it — see `agent_worktree_glob_in_force` in `summarize`.
+    if summary.get("agent_worktrees_included") and not summary.get("agent_worktree_glob_in_force"):
         lines.append(
             f"🔴 --include-agent-worktrees IS IN FORCE: the default exclusion "
             f"{AGENT_WORKTREE_GLOB!r} is OFF for this run, so worktrees belonging to OTHER "
             f"LIVE Claude sessions are ordinary removal candidates. Removing one destroys a "
             f"working directory that is in use RIGHT NOW. Drop the flag unless you have "
             f"checked every path by hand.")
+    elif summary.get("agent_worktrees_included"):
+        lines.append(
+            f"note: --include-agent-worktrees was passed, but {AGENT_WORKTREE_GLOB!r} is in "
+            f"force anyway as a --exclude-path you typed — so agent worktrees are STILL "
+            f"spared and this run behaves exactly like the default. The flag is doing "
+            f"nothing here.")
     # 🔴 Printed whenever a glob is in force — never gated on whether anything
     # matched. Gating it on the match count is precisely the bug: a mistyped glob
     # then produced output identical to an unfiltered run, and the operator read
@@ -1127,13 +1175,22 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
                 f"`*` crosses `/`, a trailing `/` is stripped, and a literal path containing "
                 f"`* ? [` needs glob.escape) before --execute. --execute REFUSES while a typed "
                 f"glob is in this state — pass --allow-unmatched-globs if the glob is correct "
-                f"but out of this scan's scope.")
-        if summary.get("allow_unmatched_globs"):
-            lines.append(
-                "🔴 --allow-unmatched-globs IS IN FORCE: a --exclude-path glob matching ZERO "
-                "rows only WARNS in this run, it does not refuse --execute. The zero still "
-                "cannot tell a typo from a glob that is simply out of this scan's scope — "
-                "you are asserting it is the latter.")
+                f"but out of this scan's scope."
+                + (f" (Note that {AGENT_WORKTREE_GLOB!r} is applied by DEFAULT, so if this is a "
+                   f"hand-typed copy of it you can simply drop it and lose nothing.)"
+                   if normalize_glob(g) == AGENT_WORKTREE_GLOB else ""))
+    # 🔴 OUTSIDE the `exclude_globs` block, because the flag can be in force with
+    # NO globs of its own to print under: `--include-agent-worktrees
+    # --allow-unmatched-globs` leaves the glob list empty, and the echo — which
+    # `--help` and the header both promise happens "whenever it is in force" —
+    # was silent. A description wider than its body is a claim the code does not
+    # keep, so the body is widened rather than the claim narrowed.
+    if summary.get("allow_unmatched_globs"):
+        lines.append(
+            "🔴 --allow-unmatched-globs IS IN FORCE: a --exclude-path glob matching ZERO "
+            "rows only WARNS in this run, it does not refuse --execute. The zero still "
+            "cannot tell a typo from a glob that is simply out of this scan's scope — "
+            "you are asserting it is the latter.")
     if c[CANNOT_TELL]:
         lines.append(f"🔴 {c[CANNOT_TELL]} row(s) are cannot-tell — they are NOT dead and are "
                      "NOT removable. Read their verdict_reason before believing any count above.")
@@ -1219,6 +1276,14 @@ def execute_removals(rows: "list[dict]", confirm: "int | None") -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="worktree-prune",
+        # 🔴 NO PREFIX ABBREVIATION. argparse's default (`allow_abbrev=True`)
+        # accepts any unambiguous prefix, which quietly voids this tool's whole
+        # design claim that "the dangerous action is the one the operator has to
+        # type": MEASURED on the default parser, `--i` alone set
+        # --include-agent-worktrees and `--all` set --allow-unmatched-globs. Both
+        # are safety opt-outs, and neither was typed. Pinned by
+        # `test_dangerous_flags_cannot_be_reached_by_abbreviation`.
+        allow_abbrev=False,
         description="Classify git worktrees as dead / orphan / live / cannot-tell. "
                     "DRY-RUN BY DEFAULT — nothing is removed without --execute.")
     p.add_argument("--repo", action="append", default=[], metavar="DIR",
@@ -1377,13 +1442,21 @@ def main(argv: "list[str] | None" = None) -> int:
              "count — you are asserting the glob is correct but out of this scan's scope. "
              "Proceeding.")
     elif dud:
+        # 🔴 "Drop it" is one of the three remedies, and for a hand-typed copy of
+        # the default agent glob it is a FREE one — the constant is applied to
+        # every run anyway. Saying so makes every remedy this message offers
+        # visibly safe; without it "drop it" reads as "drop your protection",
+        # which is the remedy phrasing that trained a click-through in round 2.
+        redundant = [g for g in dud if normalize_glob(g) == AGENT_WORKTREE_GLOB]
         _log("REFUSED: " + ", ".join(repr(g) for g in dud) +
              f" matched ZERO of the {len(rows)} scanned row(s). A filter that matches nothing "
              "is indistinguishable from no filter, and --confirm cannot catch that because it "
              "is derived from the same count. Fix the glob (`*` crosses `/`; a trailing `/` is "
              "stripped; a literal path containing `* ? [` needs glob.escape), drop it, or pass "
              "--allow-unmatched-globs if it is correct but out of this scan's scope. "
-             "Nothing removed.")
+             + (f"({AGENT_WORKTREE_GLOB!r} is applied by DEFAULT — dropping a hand-typed copy "
+                f"of it changes nothing about what is spared.) " if redundant else "")
+             + "Nothing removed.")
         return RC_EXECUTE_REFUSED
     return execute_removals(rows, args.confirm)
 
