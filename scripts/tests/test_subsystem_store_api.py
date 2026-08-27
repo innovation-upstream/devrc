@@ -87,6 +87,17 @@ def _load_server():
 
 api = _load_server()
 
+# 🔴 THE SAME MODULE OBJECT THE SERVER IMPORTED FROM, not a second load.
+# `server.py` puts `scripts/lib` on `sys.path` and imports `subsystem_resolver`,
+# so by the line above it is in `sys.modules`; re-loading it by path would give a
+# SECOND module whose `_LOADER_ENTRY_ACTIONS` is a different dict, and a mutation
+# aimed at the one the loader actually reads would survive against it.
+resolver = sys.modules["subsystem_resolver"]
+assert resolver.classify_path is api.classify_path, (
+    "the server no longer shares the resolver's classifier — two copies of "
+    "'what IS this path' is the defect the move was made to prevent"
+)
+
 
 # =============================================================================
 # Synthetic fixtures — realistic SHAPES, invented names, pairwise-distinct text.
@@ -498,6 +509,18 @@ def loaded(token_file, env, **kwargs) -> list[tuple]:
     return [(r.token, r.identity, r.scopes) for r in api.load_tokens(token_file, env, **kwargs)]
 
 
+def exc_of(call) -> ValueError:
+    """The `ValueError` `call()` raises, so a MESSAGE assertion is one line.
+
+    Only for tests whose subject is the wording; `pytest.raises` stays inline
+    wherever the fact under test is that it raised AT ALL, because that is a
+    different claim and reads better spelled out.
+    """
+    with pytest.raises(ValueError) as exc:
+        call()
+    return exc.value
+
+
 class TestTokenLoadingGuards:
     """`load_tokens` refuses to serve on a token that is absent, empty or weak.
 
@@ -539,7 +562,7 @@ class TestTokenLoadingGuards:
         assert "is too short" in str(exc.value)
         # The position is named even when there is only one — a message that
         # said "the token" would have to change shape the day a second appears.
-        assert "token 1 of 1" in str(exc.value)
+        assert "token on line 1 of 1" in str(exc.value)
         # 43 chars = 256 bits base64url, pinned LITERALLY (§2b).
         assert "43" in str(exc.value)
 
@@ -981,17 +1004,44 @@ class TestReadOnlyPhase1:
 # 🔴 THE PINNED DECISION TABLE, as a named constant so the completeness guard
 # and the per-cell guard read the SAME list. Introspecting the parametrize mark
 # to get it was clever and wrong; two literals would drift.
+#
+# THREE contexts now: the `/snapshot` scope-root scan, the `/snapshot` entry
+# scan, and — since the entry-kind guard landed — `subsystem_resolver`'s INDEX
+# LOADER, which is a different context and therefore a different column.
+#
+# 🔴 THE LOADER COLUMN IS THE NARROW RULING, CELL BY CELL. It refuses exactly
+# `broken-link` (the Emacs `.#entry.md` lock file, which used to 503 the whole
+# store) and `other` (the fifo, which used to HANG the request thread), and
+# TAKES everything else — most pointedly `link-to-file`, which the loader has
+# always read. Copying the `_ENTRY_ACTIONS` column wholesale is the over-broad
+# form that was explicitly rejected, and flipping any TAKE here to REFUSE is a
+# behaviour change for ordinary callers; every one of those flips is a mutant
+# this column kills.
 DECISION_TABLE = [
-    ("KIND_BROKEN_LINK", "REFUSE", "REFUSE"),
-    ("KIND_LINK_TO_DIR", "REFUSE", "REFUSE"),
-    ("KIND_LINK_TO_FILE", "SKIP", "REFUSE"),
-    ("KIND_LINK_TO_OTHER", "SKIP", "REFUSE"),
-    ("KIND_DIRECTORY", "TAKE", "REFUSE"),
-    ("KIND_REGULAR_FILE", "SKIP", "TAKE"),
-    ("KIND_OTHER", "SKIP", "REFUSE"),
+    ("KIND_BROKEN_LINK", "REFUSE", "REFUSE", "REFUSE"),
+    ("KIND_LINK_TO_DIR", "REFUSE", "REFUSE", "TAKE"),
+    ("KIND_LINK_TO_FILE", "SKIP", "REFUSE", "TAKE"),
+    # ⚠ A symlink POINTING AT a fifo is the same hang in a different shape, and
+    # is left TAKE by the narrow ruling. Pinned as the residual it is, so a
+    # future decision to close it is a deliberate edit here.
+    ("KIND_LINK_TO_OTHER", "SKIP", "REFUSE", "TAKE"),
+    ("KIND_DIRECTORY", "TAKE", "REFUSE", "TAKE"),
+    ("KIND_REGULAR_FILE", "SKIP", "TAKE", "TAKE"),
+    ("KIND_OTHER", "SKIP", "REFUSE", "REFUSE"),
     # 🔴 "I could not look" must never share a cell with "nothing is there".
-    ("KIND_INDETERMINATE", "REFUSE", "REFUSE"),
-    ("KIND_ABSENT", "SKIP", "SKIP"),
+    # In the LOADER it is TAKE, so `read_text` raises and the four-state rule's
+    # "the store was not fully READ" is preserved — a DIFFERENT fact from "this
+    # entry is malformed", which is what REFUSE would report it as.
+    ("KIND_INDETERMINATE", "REFUSE", "REFUSE", "TAKE"),
+    ("KIND_ABSENT", "SKIP", "SKIP", "TAKE"),
+]
+
+# The LEDGER of every action table that exists, so "all three contexts" is a
+# claim something checks rather than a number in a test name.
+ALL_ACTION_TABLES = [
+    ("subsystem_store_server._ROOT_ACTIONS", api._ROOT_ACTIONS),
+    ("subsystem_store_server._ENTRY_ACTIONS", api._ENTRY_ACTIONS),
+    ("subsystem_resolver._LOADER_ENTRY_ACTIONS", resolver._LOADER_ENTRY_ACTIONS),
 ]
 
 
@@ -1015,15 +1065,33 @@ class TestClassifierIsTotal:
     rounds each made implicitly, by omission, and got wrong.
     """
 
-    def test_every_kind_is_mapped_in_BOTH_contexts(self):
-        for name, actions in (
-            ("_ROOT_ACTIONS", api._ROOT_ACTIONS),
-            ("_ENTRY_ACTIONS", api._ENTRY_ACTIONS),
-        ):
+    def test_every_kind_is_mapped_in_ALL_THREE_contexts(self):
+        for name, actions in ALL_ACTION_TABLES:
             missing = api.ALL_KINDS - set(actions)
             extra = set(actions) - api.ALL_KINDS
             assert not missing, f"{name} does not decide: {sorted(missing)}"
             assert not extra, f"{name} maps unknown kinds: {sorted(extra)}"
+
+    def test_the_TABLE_LEDGER_names_every_action_table_that_exists(self):
+        """🔴 A SEAM GUARD, NOT A TOTALITY ONE — the test above is only as wide
+        as the list it iterates.
+
+        A fourth context that maps kinds would be structurally invisible to
+        every assertion in this class: nothing here reads the modules, so a new
+        table simply would not be checked, and "every kind is mapped in all
+        three contexts" would keep passing while the fourth defaulted. This
+        asserts the LEDGER against what the two modules actually define, so the
+        set GROWING or SHRINKING is a failure either way.
+        """
+        found = {
+            f"{mod.__name__}.{name}"
+            for mod in (api, resolver)
+            for name, value in vars(mod).items()
+            if name.endswith("_ACTIONS") and isinstance(value, dict)
+        }
+        assert found == {name for name, _t in ALL_ACTION_TABLES}, (
+            f"the action-table ledger is out of date: {sorted(found)}"
+        )
 
     def test_the_pinned_table_covers_EVERY_kind(self):
         """🔴 Two-way pin on the parametrize list itself.
@@ -1034,7 +1102,7 @@ class TestClassifierIsTotal:
         would have an UNPINNED cell while the docstring claimed otherwise. Same
         idiom as `test_waiting_windows.py`'s `set(KIND_BAND) == set(ALL_KINDS)`.
         """
-        pinned = {getattr(api, name) for name, _r, _e in DECISION_TABLE}
+        pinned = {getattr(api, name) for name, _r, _e, _l in DECISION_TABLE}
         assert pinned == api.ALL_KINDS, (
             f"unpinned cells: {sorted(api.ALL_KINDS - pinned)}"
         )
@@ -1067,9 +1135,9 @@ class TestClassifierIsTotal:
         assert b"indeterminate refused" in body, body[:300]
 
     def test_every_mapped_action_is_a_known_action(self):
-        for actions in (api._ROOT_ACTIONS, api._ENTRY_ACTIONS):
+        for name, actions in ALL_ACTION_TABLES:
             for kind, action in actions.items():
-                assert action in (api.SKIP, api.TAKE, api.REFUSE), (kind, action)
+                assert action in (api.SKIP, api.TAKE, api.REFUSE), (name, kind, action)
 
     def test_an_unmapped_kind_RAISES_rather_than_defaulting(self):
         """🔴 The fallthrough is the whole mechanism. If `action_for` returned a
@@ -1078,17 +1146,28 @@ class TestClassifierIsTotal:
         with pytest.raises(AssertionError, match="unclassified path kind"):
             api.action_for("a-kind-nobody-mapped", api._ROOT_ACTIONS)
 
-    @pytest.mark.parametrize("kind,expected_root,expected_entry", DECISION_TABLE)
-    def test_the_decision_table_is_pinned(self, kind, expected_root, expected_entry):
+    @pytest.mark.parametrize(
+        "kind,expected_root,expected_entry,expected_loader", DECISION_TABLE
+    )
+    def test_the_decision_table_is_pinned(
+        self, kind, expected_root, expected_entry, expected_loader
+    ):
         """Pins the table itself, so a silent flip of any single cell fails.
 
         Every previous round's bug was one cell of this table being wrong or
         absent; asserting the table makes each cell a named, reviewable decision
         instead of an emergent property of statement order.
+
+        ⚠ A CONSTANTS PIN IS NOT A BEHAVIOUR TEST, and this class's own history
+        says so — three ENTRY cells needed behavioural tests before they were
+        believed. The two loader cells that DO something have them below
+        (`TestTheLoaderRefusesHostileEntriesByKind`); this asserts the decision
+        is written down, not that it fires.
         """
         k = getattr(api, kind)
         assert api._ROOT_ACTIONS[k] == getattr(api, expected_root)
         assert api._ENTRY_ACTIONS[k] == getattr(api, expected_entry)
+        assert resolver._LOADER_ENTRY_ACTIONS[k] == getattr(api, expected_loader)
 
     def test_classify_returns_the_right_kind_for_each_REAL_path(self, tmp_path: Path):
         """🔴 The table above is only meaningful if `classify_path` actually
@@ -2491,6 +2570,44 @@ class TestTokenSetAndOverlapRotation:
         path = self._write(tmp_path, *four)
         assert [r[0] for r in loaded(path, {})] == four
 
+    def test_the_CAP_counts_CREDENTIALS_not_ROWS(self, tmp_path: Path):
+        """🔴 A REGRESSION THIS BRANCH INTRODUCED, MEASURED. Removing the
+        pre-parse dedup left guard 4 counting physical rows, so four distinct
+        tokens plus ONE verbatim duplicate line answered `too many tokens: 5,
+        max 4` — for a file holding four credentials that loaded fine before.
+
+        It also contradicted guard 11, whose own comment calls a duplicated row
+        "the rotation shape, and it is legitimate": the file guard 11 accepts is
+        the file guard 4 was refusing.
+
+        FIVE rows, FOUR credentials. It must load, and the collapse must leave
+        exactly the four.
+        """
+        four = [chr(ord("a") + i) * 48 for i in range(4)]
+        path = self._write(tmp_path, *four, four[0])
+        assert [r[0] for r in loaded(path, {})] == four
+
+    def test_FIVE_COPIES_of_ONE_token_is_ONE_credential(self, tmp_path: Path):
+        """The far end of the same claim, and the one that made the old wording
+        plainly wrong: five identical lines are one credential, and "too many
+        tokens: 5" was a sentence about a file with one token in it.
+        """
+        path = self._write(tmp_path, *([GOOD_TOKEN] * 5))
+        assert [r[0] for r in loaded(path, {})] == [GOOD_TOKEN]
+
+    def test_the_CAP_still_counts_the_DISTINCT_ones_and_says_so(
+        self, tmp_path: Path
+    ):
+        """🔴 THE UPPER BOUND: counting credentials must not become counting
+        nothing. Five DISTINCT tokens with one of them repeated is still five
+        credentials, and the number in the message is the credential count — not
+        the row count (6) it would have been, and not a constant.
+        """
+        five = [chr(ord("a") + i) * 48 for i in range(5)]
+        path = self._write(tmp_path, *five, five[2])
+        message = str(exc_of(lambda: api.load_tokens(path, {})))
+        assert "too many tokens: 5, max 4" in message, message
+
     def test_a_SHORT_SECOND_token_names_its_POSITION_and_never_the_token(
         self, tmp_path: Path
     ):
@@ -2501,7 +2618,7 @@ class TestTokenSetAndOverlapRotation:
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {})
         message = str(exc.value)
-        assert "token 2 of 2 is too short" in message
+        assert "token on line 2 of 2 is too short" in message
         assert "hunter2" not in message, "the secret was echoed into the error"
         assert "43" in message
 
@@ -5797,7 +5914,7 @@ class TestScopedTokenRowGuards:
         path = self._write(tmp_path, f"{ZACH_TOKEN} zach")
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {}, warn=lambda _l: None)
-        assert "malformed token row 1 of 1" in str(exc.value)
+        assert "malformed token row on line 1 of 1" in str(exc.value)
         assert "2 fields" in str(exc.value)
         # And never the credential itself, on the one file whose whole content
         # is credentials.
@@ -5809,7 +5926,7 @@ class TestScopedTokenRowGuards:
         path = self._write(tmp_path, f"{ZACH_TOKEN} zach {ALLOW_SCOPE} extra")
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {}, warn=lambda _l: None)
-        assert "malformed token row 1 of 1" in str(exc.value)
+        assert "malformed token row on line 1 of 1" in str(exc.value)
         assert "4 fields" in str(exc.value)
         # 🔴 THE NEGATIVE HALF OF THE TYPO HINT, and it is what stops the hint
         # becoming noise. There is no comma anywhere in this row, so a
@@ -5837,7 +5954,7 @@ class TestScopedTokenRowGuards:
             api.load_tokens(path, {}, warn=lambda _l: None)
         message = str(exc.value)
         # The guard is NOT weakened — it still refuses, still by field count.
-        assert "malformed token row 1 of 1" in message
+        assert "malformed token row on line 1 of 1" in message
         assert "4 fields" in message
         # …and now says what to do about it.
         assert "NO SPACES" in message
@@ -5849,7 +5966,7 @@ class TestScopedTokenRowGuards:
         path = self._write(tmp_path, f"{ZACH_TOKEN} Za_ch {ALLOW_SCOPE}")
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {}, warn=lambda _l: None)
-        assert "invalid identity in token row 1 of 1" in str(exc.value)
+        assert "invalid identity in token row on line 1 of 1" in str(exc.value)
         assert "Za_ch" in str(exc.value)
 
     def test_GUARD_7_a_TOKEN_can_never_be_read_as_an_identity(self, tmp_path: Path):
@@ -5871,7 +5988,7 @@ class TestScopedTokenRowGuards:
         )
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {}, warn=lambda _l: None)
-        assert "invalid identity in token row 1 of 1" in str(exc.value)
+        assert "invalid identity in token row on line 1 of 1" in str(exc.value)
         # 32 and 43, pinned LITERALLY — the cap must stay under the floor or
         # this whole property evaporates silently.
         assert api.MAX_IDENTITY_CHARS == 32
@@ -5887,7 +6004,7 @@ class TestScopedTokenRowGuards:
         path = self._write(tmp_path, f"{ZACH_TOKEN} legacy {ALLOW_SCOPE}")
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {}, warn=lambda _l: None)
-        assert "reserved identity in token row 1 of 1" in str(exc.value)
+        assert "reserved identity in token row on line 1 of 1" in str(exc.value)
         assert "'legacy'" in str(exc.value)
 
     def test_GUARD_9_an_explicitly_empty_allowlist_is_refused(self, tmp_path: Path):
@@ -5896,7 +6013,7 @@ class TestScopedTokenRowGuards:
         path = self._write(tmp_path, f"{ZACH_TOKEN} zach ,")
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {}, warn=lambda _l: None)
-        assert "empty scope allowlist in token row 1 of 1" in str(exc.value)
+        assert "empty scope allowlist in token row on line 1 of 1" in str(exc.value)
         assert "'zach'" in str(exc.value)
 
     def test_GUARD_10_a_scope_no_URL_could_name_is_refused(self, tmp_path: Path):
@@ -5906,7 +6023,7 @@ class TestScopedTokenRowGuards:
         path = self._write(tmp_path, f"{ZACH_TOKEN} zach kelp.forest")
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {}, warn=lambda _l: None)
-        assert "invalid scope in token row 1 of 1" in str(exc.value)
+        assert "invalid scope in token row on line 1 of 1" in str(exc.value)
         assert "kelp.forest" in str(exc.value)
 
     def test_GUARD_10_also_catches_an_EMPTY_entry_inside_a_real_list(
@@ -5920,7 +6037,7 @@ class TestScopedTokenRowGuards:
         )
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {}, warn=lambda _l: None)
-        assert "invalid scope in token row 1 of 1" in str(exc.value)
+        assert "invalid scope in token row on line 1 of 1" in str(exc.value)
 
     def test_GUARD_10_also_catches_an_entry_that_FOLDS_AWAY_to_nothing(
         self, tmp_path: Path
@@ -5939,7 +6056,7 @@ class TestScopedTokenRowGuards:
             path = self._write(tmp_path, f"{ZACH_TOKEN} zach {typo}")
             with pytest.raises(ValueError) as exc:
                 api.load_tokens(path, {}, warn=lambda _l: None)
-            assert "invalid scope in token row 1 of 1" in str(exc.value), typo
+            assert "invalid scope in token row on line 1 of 1" in str(exc.value), typo
             assert "folds away" in str(exc.value), typo
 
     def test_GUARD_11_the_MIGRATION_SHAPE_is_refused_not_silently_collapsed(
@@ -5965,7 +6082,7 @@ class TestScopedTokenRowGuards:
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {}, warn=lambda _l: None)
         message = str(exc.value)
-        assert "duplicate token in rows 1 and 2" in message
+        assert "duplicate token on lines 1 and 2" in message
         # Both authorities, spelled out — the unrestricted one by name, so an
         # operator reading the pod log can see WHICH reading they nearly got.
         assert "legacy (UNRESTRICTED)" in message
@@ -5995,7 +6112,7 @@ class TestScopedTokenRowGuards:
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {}, warn=lambda _l: None)
         message = str(exc.value)
-        assert "invalid identity in token row 2 of 2" in message
+        assert "invalid identity in token row on line 2 of 2" in message
         assert "Za_CH_BAD" in message
 
     def test_GUARD_11_collapses_ONE_GRANT_SPELLED_TWO_WAYS(self, tmp_path: Path):
@@ -6027,7 +6144,7 @@ class TestScopedTokenRowGuards:
         )
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {}, warn=lambda _l: None)
-        assert "duplicate token in rows 1 and 2" in str(exc.value)
+        assert "duplicate token on lines 1 and 2" in str(exc.value)
         assert "duplicate identity" not in str(exc.value)
 
     def test_GUARD_11_runs_BEFORE_12_so_an_IDENTICAL_MAPPED_ROW_still_loads(
@@ -6058,7 +6175,7 @@ class TestScopedTokenRowGuards:
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {}, warn=lambda _l: None)
         assert "duplicate identity 'zach'" in str(exc.value)
-        assert "rows 1 and 2" in str(exc.value)
+        assert "on lines 1 and 2" in str(exc.value)
 
     def test_GUARD_12_names_the_PHYSICAL_rows_across_a_collapse(
         self, tmp_path: Path
@@ -6076,7 +6193,149 @@ class TestScopedTokenRowGuards:
         )
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {}, warn=lambda _l: None)
-        assert "token rows 1 and 3 both claim it" in str(exc.value)
+        assert "token rows on lines 1 and 3 both claim it" in str(exc.value)
+
+    def test_GUARD_12_names_the_PHYSICAL_LINE_when_A_BLANK_LINE_SHIFTS_IT(
+        self, tmp_path: Path
+    ):
+        """🔴 THE FIXTURE ABOVE HAS NO BLANK LINE, SO IT PINS THE COLLAPSE
+        DIMENSION AND NOTHING ELSE — while its name and the comment beside the
+        code both claim PHYSICAL LINES. On a file with no blank line the ordinal
+        over non-blank rows and the line number are the same number, so it reads
+        as coverage for a claim it cannot see.
+
+        This is that claim, reproduced: rows on lines 2, 4 and 6. Lines 2 and 4
+        are identical and collapse; the identity clash is between lines 2 and 6.
+        Counting non-blank rows says "1 and 3" — a real message this code emitted
+        — and sends the operator to two lines that hold nothing.
+        """
+        path = self._write(
+            tmp_path,
+            "",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            "",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            "",
+            f"{DANA_TOKEN} zach {DENY_SCOPE}",
+        )
+        message = str(exc_of(lambda: api.load_tokens(path, {}, warn=lambda _l: None)))
+        assert "token rows on lines 2 and 6 both claim it" in message
+        assert "1 and 3" not in message, (
+            "the ordinal over non-blank rows leaked into the message"
+        )
+
+    def test_GUARD_11_names_the_PHYSICAL_LINE_when_A_BLANK_LINE_SHIFTS_IT(
+        self, tmp_path: Path
+    ):
+        """The same claim for guard 11 — "every guard's message must use them
+        consistently" is only true if every guard is measured. Rows on lines 2
+        and 4, disagreeing, so guard 11 fires rather than 12.
+        """
+        path = self._write(
+            tmp_path,
+            "",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            "",
+            f"{ZACH_TOKEN} zach {DENY_SCOPE}",
+        )
+        message = str(exc_of(lambda: api.load_tokens(path, {}, warn=lambda _l: None)))
+        assert "duplicate token on lines 2 and 4" in message
+        assert "1 and 2" not in message
+
+    @pytest.mark.parametrize(
+        "row,sentence",
+        [
+            ("hunter2", "token on line 4 of 4 is too short"),
+            # Two TOKEN-LENGTH fields, so guard 5 passes and guard 6 is what
+            # fires — `aaa bbb` would have been caught by the length floor first
+            # and this row would have measured guard 5 twice.
+            (f"{ZACH_TOKEN} {LOWER_TOKEN}", "malformed token row on line 4 of 4"),
+            (f"{ZACH_TOKEN} Za_ch {ALLOW_SCOPE}", "invalid identity in token row on line 4 of 4"),
+            (f"{ZACH_TOKEN} legacy {ALLOW_SCOPE}", "reserved identity in token row on line 4 of 4"),
+            (f"{ZACH_TOKEN} zach ,", "empty scope allowlist in token row on line 4 of 4"),
+            (f"{ZACH_TOKEN} zach ___", "invalid scope in token row on line 4 of 4"),
+        ],
+    )
+    def test_GUARDS_5_to_10_ALL_name_the_PHYSICAL_LINE(
+        self, tmp_path: Path, row: str, sentence: str
+    ):
+        """🔴 EVERY GUARD IN THE LADDER, NOT THE ONE THAT WAS CONVENIENT. The
+        index was wrong in ALL of them — it is one loop — so a fix measured at
+        one site is a fix that can be half-applied at the others and still look
+        green. The bad row sits on physical line 4 behind two blank lines and a
+        good row, so an ordinal over non-blank rows would say "2".
+        """
+        path = self._write(tmp_path, "", f"{DANA_TOKEN} dana {DENY_SCOPE}", "", row)
+        message = str(exc_of(lambda: api.load_tokens(path, {}, warn=lambda _l: None)))
+        assert sentence in message, message
+        assert "of 2" not in message, (
+            "`total` is still a count of non-blank rows, so 'line 4 of 2' or "
+            f"'line 2 of 2' can be printed for a 4-line file: {message}"
+        )
+
+    def test_GUARD_11_collapses_a_scope_list_written_in_A_DIFFERENT_ORDER(
+        self, tmp_path: Path
+    ):
+        """🔴 ORDER IS A SPELLING, NOT A DISAGREEMENT, and it was measured being
+        refused: `<tok> zach alpha,beta` and `<tok> zach beta,alpha` answered
+        "two different authorities — zach (alpha,beta) and zach (beta,alpha)".
+        Both grant the same SET, so there IS a defined answer and guard 11 may
+        not claim there is none. Guard 11's own comment already promised this
+        ("rows that merely SPELL one grant differently ... are recognised as the
+        same grant") while the code delivered it for case-folding only.
+
+        The FIRST row's spelling is what survives, which is the same rule the
+        rest of the collapse follows.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE},{DENY_SCOPE}",
+            f"{ZACH_TOKEN} zach {DENY_SCOPE},{ALLOW_SCOPE}",
+        )
+        assert loaded(path, {}) == [
+            (ZACH_TOKEN, "zach", (ALLOW_SCOPE, DENY_SCOPE))
+        ]
+
+    def test_GUARD_11_a_GENUINE_disagreement_is_STILL_refused(
+        self, tmp_path: Path
+    ):
+        """🔴 THE UPPER BOUND ON THE FIX ABOVE. Comparing SETS must not become
+        comparing nothing: `alpha,beta` and `alpha` are two different grants and
+        one is strictly wider, which is the fail-open direction. Same shape as
+        the collapse above — one token, one identity, two scope lists — so a
+        mutant that returned a constant key, or dropped `scopes` from the key
+        entirely, passes the test above and dies here.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE},{DENY_SCOPE}",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+        )
+        message = str(exc_of(lambda: api.load_tokens(path, {}, warn=lambda _l: None)))
+        assert "duplicate token on lines 1 and 2" in message
+        assert f"zach ({ALLOW_SCOPE},{DENY_SCOPE})" in message
+        assert f"zach ({ALLOW_SCOPE})" in message
+
+    def test_GUARD_11_a_BARE_row_never_collapses_into_a_MAPPED_one(
+        self, tmp_path: Path
+    ):
+        """A bare row and a mapped row on ONE token are two authorities, and the
+        refusal names the unrestricted one so the operator can see which reading
+        they nearly got.
+
+        ⚠ WHAT THIS DOES **NOT** PIN, said because the obvious reading of the
+        name is wrong: it is not a test of `_authority_key`'s `None`-vs-empty
+        asymmetry. The two rows differ in IDENTITY (`legacy` vs `zach`), so the
+        identity component alone decides, and a mutant folding `None` into the
+        empty frozenset SURVIVES this — measured. See `_authority_key`'s own
+        note for why that mutant is unreachable rather than uncaught.
+        """
+        path = self._write(
+            tmp_path, ZACH_TOKEN, f"{ZACH_TOKEN} zach {ALLOW_SCOPE}"
+        )
+        message = str(exc_of(lambda: api.load_tokens(path, {}, warn=lambda _l: None)))
+        assert "duplicate token on lines 1 and 2" in message
+        assert "legacy (UNRESTRICTED)" in message
 
     def test_a_WELL_FORMED_mapped_file_loads_with_its_allowlist(self, tmp_path: Path):
         """The positive control for all six guards above. Without it, a parser
@@ -6895,16 +7154,22 @@ class TestUnreadableEntriesInDeniedScopes:
       * broke `/recall` and `/search` for EVERY caller, including the ones whose
         own scopes were perfectly readable;
       * and for a FIFO named `*.md`, blocked the request thread on `open()`
-        indefinitely. `/snapshot` already refuses that by kind
+        indefinitely. `/snapshot` already refused that by kind
         (`_ENTRY_ACTIONS[KIND_OTHER] == REFUSE`); the index path did not.
 
-    Fixed by pushing `visible_scopes` DOWN into `load_index`, so a denied scope
-    dir is never descended into at all.
+    Fixed in TWO steps, and the split matters because they cover different
+    callers:
 
-    🔴 AND THE LIMIT IS TESTED TOO, not just stated: an UNRESTRICTED caller —
-    which is what a bare legacy token is, and what the pod is deployed with
-    today — is exactly as exposed as before. `test_the_UNRESTRICTED_reading_is_
-    UNCHANGED_and_that_is_the_residual` is the honest record of that.
+      1. `visible_scopes` pushed DOWN into `load_index`, so a denied scope dir
+         is never descended into at all. Protects a SCOPED caller only.
+      2. an entry-KIND check before `open()`
+         (`subsystem_resolver._LOADER_ENTRY_ACTIONS`), which protects EVERY
+         caller including the unrestricted bare legacy token the pod runs.
+
+    🔴 AND THE LIMIT OF (2) IS TESTED TOO, not just stated: it is NARROW. A
+    `chmod 000` regular file still raises for an unrestricted caller —
+    `test_an_UNREADABLE_REGULAR_FILE_still_RAISES_and_THAT_is_the_residual` is
+    the honest record of what did NOT close.
     """
 
     def _store(self, tmp_path: Path, kind: str) -> Path:
@@ -6939,33 +7204,85 @@ class TestUnreadableEntriesInDeniedScopes:
         assert index.scopes == (ALLOW_SCOPE,)
         assert index.malformed == ()
 
-    @pytest.mark.parametrize("kind", ["perm", "emacs"])
     def test_POSITIVE_CONTROL_the_same_file_in_the_CALLERS_OWN_scope_still_RAISES(
-        self, tmp_path: Path, kind: str
+        self, tmp_path: Path
     ):
         """🔴 WITHOUT THIS THE TEST ABOVE IS SATISFIED BY A FIXTURE THAT CREATED
         NOTHING UNREADABLE. It also pins the half that must NOT change: the
         four-state rule. "I could not read your store" and "you may see nothing"
         both produce an empty index, and only the first may raise.
+
+        ⚠ `perm` ONLY, and the parametrize over `emacs` that used to be here was
+        DELETED rather than left to fail: the entry-kind guard now refuses a
+        broken link before `open()`, so that shape no longer raises for ANY
+        caller. Its own-scope behaviour is asserted below, as a collected
+        malformed row.
         """
-        store = self._store(tmp_path, kind)
+        store = self._store(tmp_path, "perm")
         with pytest.raises(api.rc.EntryUnreadableError):
             api.rc.load_store(store, verb="recalled", visible_scopes=(DENY_SCOPE,))
 
-    @pytest.mark.parametrize("kind", ["perm", "emacs"])
-    def test_the_UNRESTRICTED_reading_is_UNCHANGED_and_that_is_the_residual(
-        self, tmp_path: Path, kind: str
+    def test_the_BROKEN_LINK_in_the_CALLERS_OWN_scope_is_REPORTED_not_fatal(
+        self, tmp_path: Path
     ):
-        """🔴 THE LIMIT OF THE FIX, ASSERTED RATHER THAN LEFT TO BE DISCOVERED.
-
-        `visible_scopes=None` skips nothing, so an unreadable entry anywhere
-        still takes the whole store down for a local CLI caller — and for a BARE
-        LEGACY TOKEN, which is unrestricted and is what the pod is deployed with
-        today. This test exists so nobody reads the class docstring above and
-        concludes the live API is protected by it. Closing it needs an entry-KIND
-        guard in `load_index`; see that function's own note.
+        """The other side of the guard: refusing an entry must not silently
+        empty the scope that holds it. The caller who OWNS the hostile file
+        still gets their good entry, and still gets told about the bad one.
         """
-        store = self._store(tmp_path, kind)
+        store = self._store(tmp_path, "emacs")
+        _s, index = api.rc.load_store(
+            store, verb="recalled", visible_scopes=(DENY_SCOPE,)
+        )
+        assert index.scopes == (DENY_SCOPE,)
+        assert len(index) == 1
+        assert [m.label for m in index.malformed] == [f"{DENY_SCOPE}/{EMACS_LOCK}"]
+
+    def test_the_UNRESTRICTED_reading_of_a_BROKEN_LINK_no_longer_DIES(
+        self, tmp_path: Path
+    ):
+        """🔴 THE INVERSION. This test used to be
+        `test_the_UNRESTRICTED_reading_is_UNCHANGED_and_that_is_the_residual`
+        and asserted `pytest.raises(EntryUnreadableError)` — the honest record
+        of a residual the allowlist pushdown could not reach. The residual was
+        CLOSED by the entry-kind guard, so the same input must now assert the
+        opposite, and the name has to say which.
+
+        `visible_scopes=None` still skips no SCOPE — that half is unchanged and
+        is why this matters: the pod runs a bare legacy token, which is
+        unrestricted. What changed is that the candidate's KIND is decided
+        before `open()`, so the Emacs lock file costs its own entry and nothing
+        else.
+        """
+        store = self._store(tmp_path, "emacs")
+        _s, index = api.rc.load_store(store, verb="recalled")
+        # The OTHER scope's content survived, which is the DoS half.
+        assert set(index.scopes) == {ALLOW_SCOPE, DENY_SCOPE}
+        assert len(index) == 2, "a good entry was dropped along with the bad one"
+        # …and the bad entry is REPORTED, not silently skipped: a dropped entry
+        # is indistinguishable from one nobody ever wrote, which is the exact
+        # conflation this store guards against everywhere else.
+        assert [m.label for m in index.malformed] == [f"{DENY_SCOPE}/{EMACS_LOCK}"]
+        assert "broken symlink" in index.malformed[0].reason
+
+    def test_an_UNREADABLE_REGULAR_FILE_still_RAISES_and_THAT_is_the_residual(
+        self, tmp_path: Path
+    ):
+        """🔴 THE HALF THAT IS **NOT** CLOSED, kept as its own named test rather
+        than left implied by the parametrize list this used to share.
+
+        A `chmod 000` regular file classifies as `regular-file`, which the
+        loader TAKES — deliberately. `read_text` then raises, and an OSError
+        fails closed in both policies: "the store was not fully READ" is a
+        different fact from "this entry is malformed", and only the second has
+        an honest degraded form. So for THIS shape an unrestricted caller is
+        exactly as exposed as before: 503, and the path in the body
+        (`test_POSITIVE_CONTROL_a_LEGACY_token_DOES_still_get_the_503`).
+
+        It is also the negative control for the test above: if the kind guard
+        were quietly widened to refuse everything it could not read, this would
+        go green-by-collapse and the four-state rule would be gone.
+        """
+        store = self._store(tmp_path, "perm")
         with pytest.raises(api.rc.EntryUnreadableError):
             api.rc.load_store(store, verb="recalled")
 
@@ -7038,9 +7355,17 @@ class TestUnreadableEntriesInDeniedScopes:
         On a `replicas: 1` Deployment an `open()` that never returns is worse
         than the 503: the worker is gone and the next request queues behind it.
 
-        The NEGATIVE CONTROL is in the same run and is what makes the timeout
-        meaningful — the unrestricted load of the SAME store must still hang, or
-        this test is measuring a FIFO that somehow opens.
+        🔴 THE UNRESTRICTED ARM IS AN INVERSION. It used to be the NEGATIVE
+        CONTROL — "the unrestricted load of the SAME store must still hang", the
+        residual the allowlist pushdown could not reach. The entry-kind guard
+        closed it, so the same probe must now COMPLETE, load both scopes, and
+        report the FIFO as a malformed entry. A control that asserts a hazard is
+        still live cannot survive the hazard being fixed; it has to be re-aimed
+        or it becomes a test pinning the bug.
+
+        What keeps the timeout meaningful instead is
+        `test_a_TAKEN_kind_still_HANGS_which_is_why_the_REFUSE_cells_exist`
+        below: the same machinery, aimed at a kind the loader still TAKES.
         """
         store = self._store(tmp_path, "fifo")
         probe = (
@@ -7049,7 +7374,8 @@ class TestUnreadableEntriesInDeniedScopes:
             "import subsystem_recall as rc;"
             f"vs = None if sys.argv[1] == 'unrestricted' else ({ALLOW_SCOPE!r},);"
             f"_s, i = rc.load_store({str(store)!r}, verb='recalled', visible_scopes=vs);"
-            "print('SCOPES=' + ','.join(i.scopes))"
+            "print('SCOPES=' + ','.join(i.scopes));"
+            "print('MALFORMED=' + ','.join(m.label for m in i.malformed))"
         )
 
         def run(arg: str, deadline: float):
@@ -7068,20 +7394,250 @@ class TestUnreadableEntriesInDeniedScopes:
             "allowlist is not reaching `load_index`"
         )
         assert scoped.returncode == 0, scoped.stderr[-600:]
-        assert scoped.stdout.strip() == f"SCOPES={ALLOW_SCOPE}"
+        assert f"SCOPES={ALLOW_SCOPE}\n" in scoped.stdout, scoped.stdout
+        # The denied scope was never descended into, so its FIFO is not even
+        # reported — step 1 still does its own job.
+        assert "MALFORMED=\n" in scoped.stdout, scoped.stdout
 
-        # 🔴 NEGATIVE CONTROL, SAME STORE, SAME PROBE, ONE ARGUMENT DIFFERENT. A
-        # FIFO that opened would make the assertion above pass for the wrong
-        # reason; this proves the hazard is real and still live for the
-        # unrestricted reading, which is the residual documented above. Its
-        # deadline is DELIBERATELY the shorter of the two: the scoped run has
-        # already shown a healthy load of this store finishes well inside it, so
-        # a timeout here is a block, not a slow interpreter.
-        assert run("unrestricted", 15.0) is None, (
-            "the UNRESTRICTED reader did NOT hang on the FIFO — either the "
-            "fixture is not a FIFO, or the residual this suite documents has "
-            "silently been fixed and these comments are now wrong"
+        unrestricted = run("unrestricted", 15.0)
+        assert unrestricted is not None, (
+            "the UNRESTRICTED reader HUNG on the FIFO — the entry-kind guard is "
+            "not reaching `load_index`, and on a `replicas: 1` Deployment that "
+            "is a worker that never comes back"
         )
+        assert unrestricted.returncode == 0, unrestricted.stderr[-600:]
+        assert f"SCOPES={ALLOW_SCOPE},{DENY_SCOPE}\n" in unrestricted.stdout
+        assert f"MALFORMED={DENY_SCOPE}/{LOCKED_ENTRY}\n" in unrestricted.stdout
+
+    def test_a_TAKEN_kind_still_HANGS_which_is_why_the_REFUSE_cells_exist(
+        self, tmp_path: Path
+    ):
+        """🔴 THE POSITIVE CONTROL FOR THE PROBE ITSELF, and the honest record of
+        the `link-to-other` residual in one test.
+
+        Every assertion in the test above is now "it did NOT hang", which is
+        exactly the reassuring zero `claude/RULES.md` calls indistinguishable
+        from a harness wired to nothing: a probe that crashed on import, or a
+        fixture that made no FIFO, would satisfy all of them. So this drives the
+        SAME probe at a store whose hostile entry is a SYMLINK POINTING AT a
+        fifo — `link-to-other`, which the narrow ruling leaves `TAKE` — and
+        watches it block.
+
+        It therefore asserts two things at once: the deadline machinery can
+        still observe a hang, and the one shape the narrow guard does not cover
+        is genuinely uncovered. Closing that residual means flipping ONE cell of
+        `_LOADER_ENTRY_ACTIONS`, and this test is what will go red and tell
+        whoever does it to update the table pin.
+        """
+        store = _build_store(
+            tmp_path / "store",
+            {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
+        )
+        real_fifo = tmp_path / "a-real-fifo"
+        os.mkfifo(real_fifo)
+        os.symlink(real_fifo, store / DENY_SCOPE / LOCKED_ENTRY)
+        assert api.classify_path(store / DENY_SCOPE / LOCKED_ENTRY) == (
+            api.KIND_LINK_TO_OTHER
+        ), "the fixture is not the kind this test is about"
+
+        probe = (
+            "import sys;"
+            f"sys.path.insert(0, {str(RECALL_PATH.parent)!r});"
+            "import subsystem_recall as rc;"
+            f"rc.load_store({str(store)!r}, verb='recalled');"
+            "print('LOADED')"
+        )
+        try:
+            done = subprocess.run(
+                [sys.executable, "-c", probe],
+                capture_output=True, text=True, timeout=15.0,
+            )
+        except subprocess.TimeoutExpired:
+            done = None
+        assert done is None, (
+            "a symlink-to-FIFO entry did NOT block the reader. Either the guard "
+            "was widened to cover `link-to-other` — in which case flip that cell "
+            "in DECISION_TABLE and re-aim this test — or this probe is no longer "
+            "measuring anything, which would make every 'it did not hang' "
+            f"assertion above vacuous. stdout={None if done is None else done.stdout!r}"
+        )
+
+
+class TestTheLoaderRefusesHostileEntriesByKind:
+    """🔴 THE NARROW ENTRY-KIND GUARD — what it closes, and what it must not.
+
+    The allowlist pushdown protects a SCOPED caller. `visible_scopes=None` skips
+    nothing, and the live pod runs a BARE LEGACY token, which is unrestricted —
+    so on the deployed configuration a single `.#entry.md` lock file 503'd every
+    recall and a single FIFO wedged the worker. That is the configuration these
+    tests drive.
+
+    🔴 AND THE GUARD IS NARROW BY DECISION, NOT BY ACCIDENT. Mirroring
+    `/snapshot`'s `_ENTRY_ACTIONS` wholesale also refuses a symlink to a regular
+    file, a directory and an unstat-able path — all of which this loader reads or
+    fails on TODAY, so the broad form is a behaviour change for every local CLI
+    caller. `test_a_SYMLINKED_entry_is_STILL_READ…` is the test that kills the
+    broad form; without it "refuse hostile kinds" has no upper bound.
+    """
+
+    def _hostile(self, tmp_path: Path) -> Path:
+        """One store, BOTH refused shapes, in a scope that is not the one asked
+        for — the arrangement the operator reproduced: unrestricted token, a
+        dangling `.#lock.md` in `bravo`, and a recall for `alpha`.
+        """
+        store = _build_store(
+            tmp_path / "store",
+            {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
+        )
+        _make_unreadable(store, DENY_SCOPE, "emacs")
+        _make_unreadable(store, DENY_SCOPE, "fifo")
+        return store
+
+    def test_an_UNRESTRICTED_recall_of_ANOTHER_scope_is_200_not_503(
+        self, tmp_path: Path
+    ):
+        """🔴 THE MEASURED SYMPTOM, DRIVEN THROUGH THE SERVER ON THE LIVE
+        CREDENTIAL SHAPE. Before the guard this exact request answered `503
+        index entry unreadable … '<store>/quartz-mine/.#sealed-adit.md'`.
+
+        `GOOD_TOKEN` is a BARE row, so the record is `legacy`/unrestricted —
+        the pod's own configuration, not a scoped token that would be protected
+        by the allowlist pushdown instead.
+        """
+        store = self._hostile(tmp_path)
+        with running(store, tokens=(GOOD_TOKEN,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=GOOD_TOKEN
+            )
+        text = body.decode()
+        assert code == 200, f"{code}: {text[:400]}"
+        assert headers["X-Store-Status"] == "recalled"
+        assert KELP_NUANCE in text, "the caller's own content vanished"
+
+    def test_the_REFUSED_entries_are_SURFACED_not_silently_dropped(
+        self, tmp_path: Path
+    ):
+        """🔴 A SKIP RENDERS AS "NOTHING RECORDED", which is the conflation this
+        whole store exists to avoid — so the 200 above is only correct if the
+        two refused files are still ACCOUNTED FOR.
+
+        Asserted on the index rather than on the rendered body, because the body
+        deliberately reports cross-scope defects as a COUNT with scopes named and
+        never a filename; the per-file facts live here.
+        """
+        store = self._hostile(tmp_path)
+        _s, index = api.rc.load_store(store, verb="recalled")
+        labels = sorted(m.label for m in index.malformed)
+        assert labels == sorted(
+            [f"{DENY_SCOPE}/{EMACS_LOCK}", f"{DENY_SCOPE}/{LOCKED_ENTRY}"]
+        )
+        reasons = " ".join(m.reason for m in index.malformed)
+        assert "broken symlink" in reasons
+        assert "not a regular file" in reasons
+        # …and the good entry in that same scope is still served.
+        assert len(index.entries(DENY_SCOPE)) == 1
+
+    def test_a_SYMLINKED_entry_is_STILL_READ_the_guard_is_NOT_the_broad_one(
+        self, tmp_path: Path
+    ):
+        """🔴 THE UPPER BOUND ON THE GUARD, AND THE MUTANT IT EXISTS TO KILL.
+
+        `_ENTRY_ACTIONS[KIND_LINK_TO_FILE]` is REFUSE, because `/snapshot` will
+        not follow a link out of the store. The LOADER has always read one, and
+        a `<scope>/<slug>.md -> ../shared/<slug>.md` symlink is an ordinary way
+        to keep one entry in two places. Copying `/snapshot`'s column here is the
+        over-broad form that was rejected on this PR; flipping that one cell to
+        REFUSE turns this entry into a malformed row and fails here.
+
+        The entry's CONTENT is asserted, not merely its presence: a guard that
+        refused it would still leave the scope registered.
+        """
+        store = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        real = tmp_path / "outside" / "linked-entry.md"
+        real.parent.mkdir()
+        real.write_text(
+            _entry("linked-entry", ALLOW_SCOPE, nuance="- 2026-03-06: via a link.")
+        )
+        link = store / ALLOW_SCOPE / "linked-entry.md"
+        os.symlink(real, link)
+        assert api.classify_path(link) == api.KIND_LINK_TO_FILE, (
+            "the fixture is not a symlink-to-regular-file, so this measures "
+            "nothing about the cell it names"
+        )
+
+        _s, index = api.rc.load_store(store, verb="recalled")
+        assert index.malformed == (), (
+            "a symlinked entry was refused — the guard has been widened to the "
+            "broad `_ENTRY_ACTIONS` form the narrow ruling rejected"
+        )
+        assert sorted(e.slug for e in index.entries(ALLOW_SCOPE)) == sorted(
+            ["linked-entry", f"{ALLOW_SCOPE}-entry"]
+        )
+
+    def test_under_RAISE_a_refused_entry_RAISES_the_same_class_as_any_other(
+        self, tmp_path: Path
+    ):
+        """🔴 THE POLICY IS `on_malformed`'s, NOT THE GUARD'S. The WRITER's probe
+        loads with `RAISE` precisely because it must not modify a store it read
+        only part of, and that is as true of a fifo as of a wrapped `aliases:`
+        line. A guard that collected unconditionally would silently hand the
+        writer a partial index.
+        """
+        store = self._hostile(tmp_path)
+        with pytest.raises(api.rc.MalformedEntryError) as exc:
+            api.rc.load_index(store)
+        assert "malformed index entry" in str(exc.value)
+        assert exc.value.source in (EMACS_LOCK, LOCKED_ENTRY)
+
+    def test_a_BOGUS_policy_is_still_a_ValueError_not_a_refusal(
+        self, tmp_path: Path
+    ):
+        """The guard branches on `on_malformed` BEFORE `build_index` validates
+        it, so the predicate is shared (`_check_on_malformed`) rather than
+        spelled twice. Spelled twice, a bogus policy on a hostile store would be
+        answered with a complaint about the first fifo instead of about the
+        policy — a message that sends the operator to the wrong file.
+        """
+        store = self._hostile(tmp_path)
+        with pytest.raises(ValueError, match="on_malformed must be one of"):
+            api.rc.load_index(store, on_malformed="collct")
+
+    def test_the_REFUSED_row_is_filed_under_the_FOLDED_scope(self, tmp_path: Path):
+        """🔴 THE SCOPE ON A `MalformedEntry` IS THE NORMALIZED ONE — that is
+        `MalformedEntry`'s own contract, and `malformed_in` compares against
+        `normalize_ref(scope)`. A refusal filed under the RAW directory name
+        matches no scope, so it vanishes from `malformed_in` and surfaces only
+        through the store-wide count: reported, but not against the scope that
+        holds it, which is where the operator will look.
+
+        The fixture directory really is spelled `Kelp_Forest`. Every other store
+        in this file is already its own folded form, so an unfolded mutant
+        survives them all.
+        """
+        raw_dir = "Kelp_Forest"
+        assert api.rc.normalize_ref(raw_dir) == ALLOW_SCOPE != raw_dir
+        store = _build_store(tmp_path / "store", {raw_dir: KELP_NUANCE})
+        _make_unreadable(store, raw_dir, "emacs")
+
+        _s, index = api.rc.load_store(store, verb="recalled")
+        assert [m.label for m in index.malformed_in(ALLOW_SCOPE)] == [
+            f"{ALLOW_SCOPE}/{EMACS_LOCK}"
+        ]
+        assert index.malformed_outside([ALLOW_SCOPE]) == ()
+
+    def test_a_CLEAN_store_is_UNCHANGED_by_the_guard(self, tmp_path: Path):
+        """The positive control. Every assertion above is about a hostile store;
+        without this, a loader that refused EVERY candidate would satisfy the
+        `.malformed` ones and only fail on content nobody asserted.
+        """
+        store = _build_store(
+            tmp_path / "store",
+            {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
+        )
+        _s, index = api.rc.load_store(store, verb="recalled")
+        assert index.malformed == ()
+        assert len(index) == 2
+        assert set(index.scopes) == {ALLOW_SCOPE, DENY_SCOPE}
 
 
 class TestScopeFilteringIsNotAWriteVerb:

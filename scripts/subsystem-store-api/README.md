@@ -86,6 +86,26 @@ all → `503` + `X-Store-Status: store-unreachable`, carrying the reader's own
 "this is NOT 'nothing recorded yet'" sentence. A `200` is a claim the store was
 read, and only the first of those can make it.
 
+🔴 **One hostile FILE no longer costs the whole store.** The index loader
+classifies each `*.md` candidate BEFORE opening it and refuses two kinds:
+
+| on disk | why it is refused |
+|---|---|
+| a dangling symlink — e.g. an Emacs lock file `.#entry.md`, which `glob("*.md")` really does match | opening it raised, and an `OSError` fails closed, so `/recall` and `/search` answered **503** for EVERY caller and named the file and its scope in the body |
+| a fifo / socket / device named `*.md` | `read_text` on a fifo blocks until somebody writes; on `replicas: 1` the request thread never returned |
+
+A refused entry becomes an ordinary **malformed** row — counted, named, and
+rendered like every other unusable entry — so the scope's good entries still
+serve. It is refused, never silently skipped: a dropped entry is
+indistinguishable from one nobody ever wrote.
+
+⚠ **What still 503s, deliberately:** an unreadable REGULAR file (`chmod 000`).
+"The store was not fully READ" is a different fact from "this entry is
+malformed", and only the second has an honest degraded form. A symlink pointing
+*at* a fifo is also still opened — the same hang in a different shape, left open
+by the narrow scope of this change and recorded at
+`subsystem_resolver._LOADER_ENTRY_ACTIONS`.
+
 ## Operating it
 
 ```bash
@@ -131,13 +151,21 @@ are the store-root line — `2` and `2` for pod-vs-workbench.
 ## The token is a SET, and rotation is by overlap
 
 The token file holds **one ROW per line, current first**. Blank lines are
-ignored. Up to `MAX_TOKENS` (4) — every line is a live credential, so an
-uncapped set is an accumulation nobody has retired, and the server refuses to
-start rather than serve one.
+ignored. Up to `MAX_TOKENS` (4) **distinct tokens** — every distinct token is a
+live credential, so an uncapped set is an accumulation nobody has retired, and
+the server refuses to start rather than serve one. The cap counts CREDENTIALS,
+not lines: a row written twice is one credential (see the collapse below), and
+counting it twice would have refused a four-credential file.
 
-🔴 **Two rows holding the same token collapse only if they are IDENTICAL** —
-same token, same identity, same folded scope list. If they disagree the server
-refuses to start with `duplicate token in rows N and M`, naming both
+Every guard that names a position names the **physical line number**, so it is
+countable in an editor — `token on line 6 of 6`, `duplicate token on lines 2
+and 6` — including across a collapse and across blank lines.
+
+🔴 **Two rows holding the same token collapse only if they grant the SAME
+THING** — same identity and the same folded scope SET. Case, `_` vs `-`, a
+repeated scope and the ORDER of the list are all spellings of one grant, so
+`zach alpha,beta` and `zach beta,alpha` collapse. If they genuinely disagree the
+server refuses to start with `duplicate token on lines N and M`, naming both
 authorities. This is not pedantry: dropping the second row before parsing it
 made `<tok>` followed by `<tok> zach kelp-forest` — "scope a credential its
 holder already has", the migration's own first step — load as ONE unrestricted
@@ -155,7 +183,7 @@ A row is one of two shapes:
 🔴 **Whitespace now separates the three FIELDS of one row, not two tokens.**
 Before phase 3 the file was split on any whitespace, so `<tokenA> <tokenB>` on
 one line was two credentials. It is now a row with a token in the identity
-field — refused at startup with `malformed token row N of M`, never
+field — refused at startup with `malformed token row on line N of M`, never
 reinterpreted. Put one row per line.
 
 Generate a token:

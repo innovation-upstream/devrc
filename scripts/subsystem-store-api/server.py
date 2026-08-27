@@ -189,7 +189,6 @@ criteria 4-10.
 from __future__ import annotations
 
 import argparse
-import errno
 import hashlib
 import hmac
 import io
@@ -197,7 +196,6 @@ import ipaddress
 import math
 import os
 import re
-import stat
 import sys
 import tarfile
 import threading
@@ -213,6 +211,35 @@ _LIB = Path(__file__).resolve().parents[1] / "lib"
 sys.path.insert(0, str(_LIB))
 
 import subsystem_recall as rc  # noqa: E402
+
+# 🔴 THE PATH CLASSIFIER IS IMPORTED, NOT DEFINED HERE — it moved into
+# `subsystem_resolver` when `load_index` grew an entry-kind guard of its own.
+# "What IS this path" spelled at two sites is wrong at one of them, and the two
+# sites are `/snapshot` and the index loader: disagreeing about a FIFO named
+# `*.md` is what costs a request thread. The three ACTION tables stay with their
+# contexts (`_ROOT_ACTIONS`/`_ENTRY_ACTIONS` below, `_LOADER_ENTRY_ACTIONS`
+# there), because an action is a property of the context and not of the path.
+#
+# Re-exported deliberately (hence the `F401`): `KIND_*`, `SKIP/TAKE/REFUSE`,
+# `ALL_KINDS`, `classify_path` and `action_for` are read off THIS module by
+# `TestClassifierIsTotal`, and the tables below are written in terms of them.
+from subsystem_resolver import (  # noqa: E402,F401
+    ALL_KINDS,
+    KIND_ABSENT,
+    KIND_BROKEN_LINK,
+    KIND_DIRECTORY,
+    KIND_INDETERMINATE,
+    KIND_LINK_TO_DIR,
+    KIND_LINK_TO_FILE,
+    KIND_LINK_TO_OTHER,
+    KIND_OTHER,
+    KIND_REGULAR_FILE,
+    REFUSE,
+    SKIP,
+    TAKE,
+    action_for,
+    classify_path,
+)
 
 # --- Constants that the tests pin LITERALLY -------------------------------------
 #
@@ -435,12 +462,53 @@ def _authority_of(record: TokenRecord) -> str:
     return f"{record.identity} ({','.join(record.scopes)})"
 
 
-def _parse_token_row(fields: list[str], index: int, total: int) -> TokenRecord:
+def _authority_key(record: TokenRecord) -> tuple[str, frozenset[str] | None]:
+    """What two rows must AGREE ON to be one grant rather than two authorities.
+
+    🔴 A **SET** OF SCOPES, NOT THE TUPLE, and that is a fix. `TokenRecord` is a
+    frozen dataclass, so `record == record` compares `scopes` positionally —
+    which made `<tok> zach alpha,beta` and `<tok> zach beta,alpha` a refusal
+    reading "two different authorities — zach (alpha,beta) and zach
+    (beta,alpha)". Both grant the same set; there is a defined answer, so guard
+    11 must not claim there is none. Guard 11's own comment already promised
+    this ("rows that merely SPELL one grant differently are recognised as the
+    same grant") and delivered it for case/`_`-folding only.
+
+    The TOKEN is not in the key: the collapse is already keyed on it, so every
+    pair this compares shares one by construction.
+
+    `None` (unrestricted) is kept as `None` rather than folded to an empty
+    frozenset, because an empty allowlist is its OPPOSITE everywhere else in
+    this file — the same asymmetry as `visible_scope_set`.
+
+    ⚠ EQUIVALENT MUTANT, MEASURED, RECORDED RATHER THAN LEFT TO READ AS PINNED.
+    `frozenset(record.scopes or ())` — which collapses `None` into the empty set
+    — SURVIVES the whole suite (56/56 in the token classes, 0 failures). It is
+    unreachable, and by construction rather than by luck: two rows only reach
+    this comparison sharing a token, `legacy` is the ONLY identity a bare row
+    gets and guard 8 refuses a mapped row that claims it, so a `None` is only
+    ever compared with another `None`; and guard 9 refuses a mapped row with an
+    empty allowlist, so no non-None empty set exists to confuse it. The spelling
+    stays because it is the same asymmetry as every other allowlist site and a
+    future guard-9 relaxation would make it load-bearing — but no test
+    distinguishes the two today, and saying so is the honest form.
+    """
+    return (
+        record.identity,
+        None if record.scopes is None else frozenset(record.scopes),
+    )
+
+
+def _parse_token_row(fields: list[str], line: int, total: int) -> TokenRecord:
     """One non-empty line of the token file -> one record, or raise naming why.
 
     Guards 6-10 of `load_tokens`' ladder live here; the numbering and the
     reachability argument are in that function's docstring. Guards 11 and 12 are
     cross-row and cannot live here — see `load_tokens`.
+
+    `line` is the PHYSICAL line number and `total` the file's physical line
+    count, so "line 6 of 6" is something the operator can count to in an editor.
+    Both are passed in rather than derived, because this function sees one row.
     """
     if len(fields) not in (1, 3):
         # 🔴 REFUSED, NOT REINTERPRETED, and this is where the format changed.
@@ -469,7 +537,7 @@ def _parse_token_row(fields: list[str], index: int, total: int) -> TokenRecord:
                 "three fields, so `alpha, beta` is two of them"
             )
         raise ValueError(
-            f"malformed token row {index} of {total}: {len(fields)} fields, "
+            f"malformed token row on line {line} of {total}: {len(fields)} fields, "
             f"expected 1 (a bare legacy token) or 3 (token, identity, "
             f"comma-separated scopes). Whitespace separates the three FIELDS, "
             f"so two tokens on one line is no longer two tokens{hint}"
@@ -484,7 +552,7 @@ def _parse_token_row(fields: list[str], index: int, total: int) -> TokenRecord:
         or not IDENTITY_COMPONENT.fullmatch(identity)
     ):
         raise ValueError(
-            f"invalid identity in token row {index} of {total}: {identity!r} — "
+            f"invalid identity in token row on line {line} of {total}: {identity!r} — "
             f"expected lowercase letters, digits and dashes, starting on an "
             f"alphanumeric, at most {MAX_IDENTITY_CHARS} characters. The "
             f"identity is quoted into the audit log, so it must be one spelling"
@@ -495,7 +563,7 @@ def _parse_token_row(fields: list[str], index: int, total: int) -> TokenRecord:
         # old shared credential, which can see everything" — or the one line the
         # operator greps to know the migration is finished is ambiguous.
         raise ValueError(
-            f"reserved identity in token row {index} of {total}: "
+            f"reserved identity in token row on line {line} of {total}: "
             f"{LEGACY_IDENTITY!r} is what a BARE token line is given, and it "
             f"means unrestricted scope. Name this row's holder instead"
         )
@@ -505,7 +573,7 @@ def _parse_token_row(fields: list[str], index: int, total: int) -> TokenRecord:
         # Reachable with a bare `,`: three fields, a valid identity, and no
         # scope name anywhere in the third.
         raise ValueError(
-            f"empty scope allowlist in token row {index} of {total} "
+            f"empty scope allowlist in token row on line {line} of {total} "
             f"({identity!r}): a credential that may see NO scope can never be "
             f"used. Remove the row, or name the scopes it may read"
         )
@@ -528,7 +596,7 @@ def _parse_token_row(fields: list[str], index: int, total: int) -> TokenRecord:
         folded = rc.normalize_ref(raw)
         if not SAFE_PATH_COMPONENT.fullmatch(raw) or not folded:
             raise ValueError(
-                f"invalid scope in token row {index} of {total} ({identity!r}): "
+                f"invalid scope in token row on line {line} of {total} ({identity!r}): "
                 f"{raw!r} — a scope must match {SAFE_PATH_COMPONENT.pattern} AND "
                 f"still name something once folded the way the reader folds a "
                 f"scope. An entry that no request could name, or that folds away "
@@ -571,25 +639,36 @@ def load_tokens(
     LOUD startup warning, because "unrestricted" is a state somebody has to be
     able to see from the pod log.
 
-    Guard order — each reachable by an input no earlier guard rejects:
+    Guard order — each reachable by an input no earlier guard rejects. `L` is a
+    PHYSICAL LINE NUMBER and `T` the file's physical line count:
       1.  some source at all      -> "no token source"
       2.  the file is readable    -> "token file unreadable"
       3.  at least one token      -> "token is empty"
       4.  not an accumulation     -> "too many tokens"
-      5.  every token long enough -> "token N of M is too short"
-      6.  every row parses        -> "malformed token row N of M"
-      7.  identity is well-formed -> "invalid identity in token row N of M"
-      8.  identity is not taken   -> "reserved identity in token row N of M"
-      9.  the allowlist is real   -> "empty scope allowlist in token row N of M"
-      10. every scope is namable  -> "invalid scope in token row N of M"
-      11. one authority per token -> "duplicate token in rows N and M"
+      5.  every token long enough -> "token on line L of T is too short"
+      6.  every row parses        -> "malformed token row on line L of T"
+      7.  identity is well-formed -> "invalid identity in token row on line L of T"
+      8.  identity is not taken   -> "reserved identity in token row on line L of T"
+      9.  the allowlist is real   -> "empty scope allowlist in token row on line L of T"
+      10. every scope is namable  -> "invalid scope in token row on line L of T"
+      11. one authority per token -> "duplicate token on lines L and M"
       12. one row per identity    -> "duplicate identity"
 
-    Guards 1-5 are UNCHANGED in wording and in order, deliberately: they are the
-    ones an operator has already met, and 5 in particular is reached by a file
-    whose second line an editor truncated. Guard 5 names the POSITION, never the
-    token — saying "one of them is short" would leave the operator grepping a
-    secret by hand — and 6-12 keep that property for the same reason.
+    Guards 1-4 are unchanged in ORDER, and 1-3 in wording too: they are the ones
+    an operator has already met, and 5 in particular is reached by a file whose
+    second line an editor truncated.
+
+    ⚠ 4 AND 5 DID CHANGE WORDING ON THIS BRANCH, and both were defects rather
+    than polish. 4 counted physical ROWS, so a legitimately duplicated line
+    counted twice against `MAX_TOKENS`; it counts DISTINCT tokens now. 5-12 said
+    "N of M" over NON-BLANK rows while the comment beside them claimed physical
+    lines — measurably false on any file with a blank line in it, and "the
+    operator can find the line" is the whole reason an index is carried at all.
+    Every one of them names a real line number now.
+
+    Guard 5 names the POSITION, never the token — saying "one of them is short"
+    would leave the operator grepping a secret by hand — and 6-12 keep that
+    property for the same reason.
 
     🔴 EVERY ROW REACHES THE LADDER, AND THAT IS A FIX, NOT A STYLE CHOICE.
     This loop used to drop a line whose FIRST FIELD had already been seen —
@@ -615,6 +694,11 @@ def load_tokens(
     holding one row twice, verbatim, must collapse to one record — otherwise
     guard 12 would see two rows claiming one identity and refuse the ordinary
     "I pasted the line twice" file. Collapse first, then count identities.
+
+    🔴 AND "TWICE" MEANS THE SAME GRANT, NOT THE SAME TEXT. Two rows collapse
+    when their identity and their scope SET agree; case, `_` vs `-`, a repeated
+    scope and the ORDER of the list are all spellings of one grant. See
+    `_authority_key`.
 
     🔴 GUARD 12 EXEMPTS `legacy`, AND THAT IS NOT AN OVERSIGHT. Two legacy rows
     are an overlap rotation of the old shared token, which is the exact thing
@@ -646,61 +730,91 @@ def load_tokens(
     # BETWEEN fields; a blank line is skipped rather than being an empty row.
     #
     # 🔴 NOTHING IS DROPPED HERE. See the docstring: a de-duplication that ran
-    # before the parse made two fail-open readings possible. Rows 4, 5 and every
-    # index in guards 6-12 therefore count PHYSICAL LINES, which is also what the
-    # operator is looking at when they read the message.
-    rows: list[list[str]] = []
-    for line in raw.splitlines():
-        fields = line.split()
+    # before the parse made two fail-open readings possible.
+    #
+    # 🔴 AND THE INDEX CARRIED FORWARD IS THE PHYSICAL LINE NUMBER, MEASURED, NOT
+    # THE ROW'S POSITION IN THIS LIST. The comment here used to CLAIM the two
+    # were the same thing; the loop skips blank lines, so they are not, and the
+    # claim was measurably false the moment a file had one. Reproduced on a
+    # six-line file whose rows sat on lines 2, 4 and 6: guard 12 said "token rows
+    # 1 and 3 both claim it" for a clash on lines 2 and 6 — and "the operator can
+    # find the line" is the ENTIRE justification for carrying a pre-collapse
+    # index through guard 12 at all. `total` is the physical line COUNT for the
+    # same reason, so "line 6 of 6" is countable in an editor.
+    lines = raw.splitlines()
+    total = len(lines)
+    rows: list[tuple[int, list[str]]] = []
+    for lineno, text in enumerate(lines, start=1):
+        fields = text.split()
         if not fields:
             continue
-        rows.append(fields)
+        rows.append((lineno, fields))
 
     if not rows:
         raise ValueError("token is empty: the source resolved to whitespace only")
-    if len(rows) > MAX_TOKENS:
+    # 🔴 GUARD 4 COUNTS CREDENTIALS, NOT ROWS. Removing the pre-parse dedup left
+    # this counting physical rows, and measured: 4 distinct tokens plus ONE
+    # verbatim duplicate line answered "too many tokens: 5, max 4" for a file
+    # holding 4 credentials that loaded fine before this branch — and five copies
+    # of one token said the same for ONE. That contradicts guard 11, whose own
+    # comment calls a duplicated row "the rotation shape, and it is legitimate".
+    #
+    # DISTINCT FIRST FIELDS is exactly the post-collapse count and needs no
+    # parse: guard 11 collapses on `record.token`, which IS `fields[0]`, and
+    # refuses outright any pair that shares one without agreeing. So for every
+    # file that loads at all, this number and `len(collapsed)` are the same
+    # number — computed here only because guard 4 must stay ahead of the parse.
+    credentials = {fields[0] for _lineno, fields in rows}
+    if len(credentials) > MAX_TOKENS:
         raise ValueError(
-            f"too many tokens: {len(rows)}, max {MAX_TOKENS}. Every line is a "
-            f"live credential; retire the old ones instead of accumulating them"
+            f"too many tokens: {len(credentials)}, max {MAX_TOKENS}. Every "
+            f"DISTINCT token is a live credential; retire the old ones instead "
+            f"of accumulating them"
         )
-    for index, fields in enumerate(rows, start=1):
+    for lineno, fields in rows:
         if len(fields[0]) < MIN_TOKEN_CHARS:
             raise ValueError(
-                f"token {index} of {len(rows)} is too short: {len(fields[0])} chars, "
-                f"need >= {MIN_TOKEN_CHARS} (256 bits base64url). A short token is "
-                f"a guessable one"
+                f"token on line {lineno} of {total} is too short: "
+                f"{len(fields[0])} chars, need >= {MIN_TOKEN_CHARS} (256 bits "
+                f"base64url). A short token is a guessable one"
             )
 
-    records = [
-        _parse_token_row(fields, index, len(rows))
-        for index, fields in enumerate(rows, start=1)
-    ]
+    records = [_parse_token_row(fields, lineno, total) for lineno, fields in rows]
 
     # GUARD 11 — one token, one authority. Runs on PARSED records, so a row that
     # would be collapsed has already been through guards 6-10, and two rows that
-    # merely SPELL one grant differently (`Kelp_Forest` vs `kelp-forest`) are
-    # recognised as the same grant rather than as a disagreement.
+    # merely SPELL one grant differently are recognised as the same grant rather
+    # than as a disagreement. Three spellings are folded, and each was a measured
+    # false refusal or would have been one:
+    #   * case and `_` vs `-`  (`Kelp_Forest` == `kelp-forest`) — by the parser
+    #   * a repeated scope     (`alpha,alpha` == `alpha`)       — by the parser
+    #   * scope-list ORDER     (`alpha,beta` == `beta,alpha`)   — by
+    #     `_authority_key`, which compares the SET. Measured before that: the two
+    #     rows were refused as "two different authorities — zach (alpha,beta) and
+    #     zach (beta,alpha)", which is one grant written twice.
     #
-    # 🔴 COLLAPSE ONLY WHAT IS IDENTICAL. `TokenRecord` is a frozen dataclass, so
-    # `==` compares the token, the identity AND the scope tuple — all three facts
-    # the rest of this file resolves off one match. Anything less than all three
-    # agreeing is two authorities for one credential, and picking one of them is
-    # what made the migration path fail open.
+    # 🔴 COLLAPSE ONLY WHAT GRANTS THE SAME THING. Anything less than the
+    # identity AND the scope SET agreeing is two authorities for one credential,
+    # and picking one of them is what made the migration path fail open.
     first_seen: dict[str, tuple[int, TokenRecord]] = {}
     collapsed: list[tuple[int, TokenRecord]] = []
-    for index, record in enumerate(records, start=1):
+    # `strict=True`: `records` is built one-for-one from `rows` directly above,
+    # and if a later edit ever makes it not, a SHORTER zip would silently drop
+    # the tail — the rows nobody then checks for a duplicate token.
+    for (lineno, _fields), record in zip(rows, records, strict=True):
         seen = first_seen.get(record.token)
         if seen is None:
-            first_seen[record.token] = (index, record)
-            collapsed.append((index, record))
+            first_seen[record.token] = (lineno, record)
+            collapsed.append((lineno, record))
             continue
-        first_index, first_record = seen
-        if record == first_record:
+        first_line, first_record = seen
+        if _authority_key(record) == _authority_key(first_record):
             # The rotation shape, and it is legitimate: one row written twice.
-            # Order is kept because the FIRST occurrence is the one retained.
+            # Order is kept because the FIRST occurrence is the one retained —
+            # which also decides which SPELLING of the scope list survives.
             continue
         raise ValueError(
-            f"duplicate token in rows {first_index} and {index}: one credential "
+            f"duplicate token on lines {first_line} and {lineno}: one credential "
             f"is given two different authorities — {_authority_of(first_record)} "
             f"and {_authority_of(record)} — and there is no defined precedence "
             f"between them. Scoping a token its holder already has means EDITING "
@@ -711,24 +825,26 @@ def load_tokens(
     # "N of M", and the returned SET — reads the collapsed list. A second name
     # kept alongside `records` is how a later edit ends up counting one list and
     # returning the other.
-    records = [record for _row, record in collapsed]
+    records = [record for _line, record in collapsed]
 
-    # GUARD 12 — one row per mapped identity. Indexed by PHYSICAL row, carried
-    # through the collapse above, so "rows 1 and 3" names the lines the operator
-    # can see rather than positions in a list they cannot.
+    # GUARD 12 — one row per mapped identity. Indexed by PHYSICAL LINE, carried
+    # through the collapse above, so "lines 2 and 6" names what the operator can
+    # see rather than positions in a list they cannot — and, since this branch,
+    # rather than an ordinal over non-blank rows that a single blank line makes
+    # wrong.
     by_identity: dict[str, int] = {}
-    for index, record in collapsed:
+    for lineno, record in collapsed:
         if record.is_legacy:
             continue
         first = by_identity.get(record.identity)
         if first is not None:
             raise ValueError(
-                f"duplicate identity {record.identity!r}: token rows {first} and "
-                f"{index} both claim it, and their scope allowlists have no "
-                f"defined precedence. Rotate a mapped credential under a second "
-                f"identity ({record.identity}-prev), not a second row"
+                f"duplicate identity {record.identity!r}: token rows on lines "
+                f"{first} and {lineno} both claim it, and their scope allowlists "
+                f"have no defined precedence. Rotate a mapped credential under a "
+                f"second identity ({record.identity}-prev), not a second row"
             )
-        by_identity[record.identity] = index
+        by_identity[record.identity] = lineno
 
     legacy = [r for r in records if r.is_legacy]
     if legacy:
@@ -1381,7 +1497,7 @@ SEED_STAMP_NAME = ".seed-stamp"
 
 
 # =============================================================================
-# 🔴 THE TOTAL CLASSIFIER — why this exists instead of a fourth `if` arm.
+# 🔴 THE ACTION TABLES. The CLASSIFIER they read moved to `subsystem_resolver`.
 #
 # Four consecutive audit rounds found the same shape of defect in `_snapshot`,
 # and every fix added one more predicate to a sequence:
@@ -1397,71 +1513,22 @@ SEED_STAMP_NAME = ".seed-stamp"
 # class, because a broken pointer is neither. Adding an arm fixes the instance;
 # it does not make the rule total, so the next class falls through the same gap.
 #
-# So: classify the path's TYPE exhaustively, in one place, and have each context
-# map EVERY kind to an action explicitly. `_ROOT_ACTIONS` and `_ENTRY_ACTIONS`
-# are asserted complete by `TestClassifierIsTotal`, and an unmapped kind raises
-# rather than defaulting — a fallthrough is a test failure, not a silent skip.
-# Name-based rules (dotfiles, the `.md` suffix) stay SEPARATE from type, because
-# conflating them is what made the dotfile and symlink rules interfere.
+# So: classify the path's TYPE exhaustively, in ONE place — now
+# `subsystem_resolver.classify_path`, because the index loader needs the same
+# answer and a second copy of it would be the predicate-at-two-sites shape — and
+# have each context map EVERY kind to an action explicitly.
+#
+# 🔴 THE TABLES DID **NOT** MOVE WITH IT, AND THAT IS THE DESIGN. A kind's
+# action is a property of the CONTEXT, not of the path: the loader's own table
+# (`subsystem_resolver._LOADER_ENTRY_ACTIONS`) is deliberately NARROWER than
+# `_ENTRY_ACTIONS` below — it TAKES a symlink-to-regular-file that `/snapshot`
+# refuses, because the loader has always read one and refusing it would be a
+# behaviour change for every local CLI caller. All three tables are asserted
+# complete by `TestClassifierIsTotal`, and an unmapped kind raises rather than
+# defaulting — a fallthrough is a test failure, not a silent skip. Name-based
+# rules (dotfiles, the `.md` suffix) stay SEPARATE from type, because conflating
+# them is what made the dotfile and symlink rules interfere.
 # =============================================================================
-
-KIND_BROKEN_LINK = "broken-link"      # dangling target, or a symlink loop
-KIND_LINK_TO_DIR = "link-to-dir"
-KIND_LINK_TO_FILE = "link-to-file"
-KIND_LINK_TO_OTHER = "link-to-other"  # link to a fifo/socket/device
-KIND_DIRECTORY = "directory"
-KIND_REGULAR_FILE = "regular-file"
-KIND_OTHER = "other"                  # fifo, socket, device, door…
-# 🔴 THE LAST CELL OF THE LOOP: the first version of this classifier was total
-# over KIND STRINGS but not over KNOWLEDGE. "I could not determine what this is"
-# is its own answer and must never share a bucket with "I know exactly what this
-# is".
-#
-# ⚠ CORRECTED — AND THE CORRECTION IS THE INTERESTING PART. This comment used to
-# say "every pathlib predicate returns False when the stat itself fails, so an
-# EACCES fell into KIND_OTHER and was skipped", and cited a measurement of
-# `/snapshot` answering 200 / exit 0 / entries=0. BOTH WERE WRONG, and the
-# second was inherited from an audit report and written up here as first-hand.
-# ⚠ And the raise did NOT come from `classify_path` — that function is INTRODUCED
-# by this fix. In the failing version it came from `candidate.is_dir()` in
-# `_snapshot`, which this commit deletes. Corrected after an audit caught the
-# anachronism; the docstring below was already accurate.
-# Measured on the pinned interpreter:
-#     pathlib._IGNORED_ERRNOS == (ENOENT, ENOTDIR, EBADF, ELOOP)
-#     child of a 0o600 dir: is_symlink/is_dir/is_file/exists each RAISE
-#                           PermissionError — none returns False
-# So the old failure was not a silent empty store; it was an UNCAUGHT
-# PermissionError out of `classify_path`, crashing the handler with no response
-# and no audit line. Loud, not quiet.
-#
-# The fix stands — a crashed handler becoming a typed 503 is strictly better —
-# but the reasoning had to be corrected, because "pathlib returns False on stat
-# failure" is exactly the kind of false premise that gets a guard deleted
-# somewhere else in this file on the strength of a comment.
-KIND_INDETERMINATE = "indeterminate"
-# Vanished between `readdir` and the stat — a benign race, not a hazard, and
-# distinct from INDETERMINATE because the right action differs.
-KIND_ABSENT = "absent"
-
-ALL_KINDS: frozenset[str] = frozenset(
-    {
-        KIND_BROKEN_LINK,
-        KIND_LINK_TO_DIR,
-        KIND_LINK_TO_FILE,
-        KIND_LINK_TO_OTHER,
-        KIND_DIRECTORY,
-        KIND_REGULAR_FILE,
-        KIND_OTHER,
-        KIND_INDETERMINATE,
-        KIND_ABSENT,
-    }
-)
-
-# What a context does with each kind. `SKIP` = not the thing we are looking for,
-# so its absence is not a fact worth reporting. `TAKE` = use it. `REFUSE` = it
-# IS (or claims to be) the thing, and we cannot serve it — which must be
-# REPORTED, never skipped, because a skip renders as "nothing recorded".
-SKIP, TAKE, REFUSE = "skip", "take", "refuse"
 
 _ROOT_ACTIONS: dict[str, str] = {
     # 🔴 A BROKEN POINTER IS A SCOPE THAT SHOULD BE THERE AND IS NOT. Skipping
@@ -1494,77 +1561,6 @@ _ENTRY_ACTIONS: dict[str, str] = {
     KIND_ABSENT: SKIP,
 }
 
-
-def classify_path(path: Path) -> str:
-    """The path's type, as exactly one of `ALL_KINDS`. Total by construction.
-
-    🔴 ONE `lstat`, THEN THE MODE BITS — not a sequence of pathlib predicates.
-    Those predicates fail in TWO different ways and neither is usable here:
-    they return False for the errnos in `pathlib._IGNORED_ERRNOS` (ENOENT,
-    ENOTDIR, EBADF, ELOOP), so "not a directory" and "no such path" are
-    indistinguishable; and they RAISE for every other errno (EACCES, ESTALE,
-    EIO), so a sequence built from them can abort mid-classification and take
-    the handler with it. The previous version did exactly that on an
-    unstat-able child.
-
-    Reading the mode bits from one explicit `lstat` makes both cases answerable:
-    a failure is an exception we must classify, not a False we might miss or a
-    raise we did not expect. It also halves the syscalls, which narrows the
-    TOCTOU window between them.
-    """
-    try:
-        st = path.lstat()
-    except FileNotFoundError:
-        return KIND_ABSENT
-    except OSError:
-        # EACCES on the parent, ESTALE, EIO… We do not know what this is, and
-        # saying so is the point — see KIND_INDETERMINATE.
-        return KIND_INDETERMINATE
-
-    if not stat.S_ISLNK(st.st_mode):
-        if stat.S_ISDIR(st.st_mode):
-            return KIND_DIRECTORY
-        if stat.S_ISREG(st.st_mode):
-            return KIND_REGULAR_FILE
-        return KIND_OTHER
-
-    try:
-        target = path.stat()  # follows the link
-    except OSError as exc:
-        # ENOENT = dangling, ELOOP = a cycle (measured: self-loop, mutual loop
-        # and a 45-link chain all give ELOOP). Both are broken POINTERS, which
-        # is a fact we know; anything else means the stat failed for a reason we
-        # cannot interpret, which is not.
-        #
-        # ⚠ NO ACTION DEPENDS ON THIS BRANCH, and saying so is honest rather
-        # than leaving it to read as coverage: BROKEN_LINK and INDETERMINATE map
-        # to the SAME action in BOTH tables, so the split only changes the word
-        # in the 503 body. A mutant collapsing it survives the suite, and that
-        # is correct — there is no behaviour to catch. It is kept because the
-        # two words mean different things to whoever reads the 503, and because
-        # the tables could diverge later. Errnos measured to land in
-        # `indeterminate` rather than `broken-link`: ENOTDIR (`/etc/hosts/x`),
-        # ENAMETOOLONG (300-char target), EACCES (link into an unsearchable dir).
-        if exc.errno in (errno.ENOENT, errno.ELOOP):
-            return KIND_BROKEN_LINK
-        return KIND_INDETERMINATE
-    if stat.S_ISDIR(target.st_mode):
-        return KIND_LINK_TO_DIR
-    if stat.S_ISREG(target.st_mode):
-        return KIND_LINK_TO_FILE
-    return KIND_LINK_TO_OTHER
-
-
-def action_for(kind: str, actions: dict[str, str]) -> str:
-    """Look up the action, refusing to guess. An unmapped kind is a BUG."""
-    try:
-        return actions[kind]
-    except KeyError:  # pragma: no cover - pinned by TestClassifierIsTotal
-        raise AssertionError(
-            f"unclassified path kind {kind!r}: every kind must be mapped "
-            f"explicitly, because a default is how the last four rounds of this "
-            f"defect happened"
-        ) from None
 
 # 🔴 THE ROUTE TABLE, AND THE DISPATCHER READS IT. `name -> (handler, arity)`,
 # where arity counts the path components including the route name itself, so
