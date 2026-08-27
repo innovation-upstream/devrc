@@ -678,14 +678,52 @@ def _overage(a):
     return label, a["size"] - BUDGET
 
 
+def _governance_scope(audits, foreign, unknown):
+    """(quantifier, budget-phrase, n_states) for the run's governance mix.
+
+    🔴 CENTRALISED BECAUSE FOUR SITES DRIFTED APART. The header, the within-budget
+    verdict, the cut-total qualifier and the banner's quantifier each answered
+    "who does this budget govern?" independently, and each round fixed a subset:
+      - the foreign banner said "THESE SKILLS ARE IN <repo>" and the very next
+        paragraph said "SOME OF THESE ARE IN NO REPO" — two adjacent blocks making
+        opposite claims, because the quantifier keyed on `mixed`, which requires a
+        GOVERNED tree and so was False for foreign+unknown;
+      - "not enforced here" was applied to the unknowable state, which is the flat
+        non-governance assertion the banner two lines below says cannot be made;
+      - the cut-total kept "every tree here", implying some are governed when none
+        is.
+    Rounds 9 and 11 each fixed one or two of these and moved the rest. A predicate
+    open-coded at N sites is wrong at N-1 of them in the same direction; this is
+    the consolidation that makes them agree by construction.
+    """
+    has_gov = any(a.get("governed") is True for a in audits)
+    has_for = bool(foreign)
+    n_states = sum((has_gov, has_for, unknown))
+    quant = "SOME OF THESE" if n_states > 1 else "THESE"
+    if not (has_for or unknown):
+        phrase = None                       # fully governed: the budget IS enforced
+    elif has_gov:
+        phrase = "not enforced on every tree here"
+    elif has_for and unknown:
+        phrase = "not enforced, or not determinable, for anything here"
+    elif has_for:
+        phrase = "not enforced here"
+    else:
+        # 🔴 A FOURTH VALUE, not "not enforced here". Nothing here is KNOWN to be
+        # ungoverned; saying so is the same over-claim the unknown banner exists to
+        # avoid, and this is the DEFAULT invocation's state (~/.claude/skills is in
+        # no repo, 34 of its 37 skills live in /nix/store). Round-11 finding 2.
+        phrase = "governance not determined here"
+    return quant, phrase, n_states
+
+
 def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), mixed=False, unknown=False):
     p = lambda *a: print(*a, file=out)
     audits = sorted(audits, key=lambda a: -a["size"])
     over = [a for a in audits if a["status"] != "OK"]
     p(f"# SKILL.md audit — {len(audits)} skill(s)")
-    enforced = ("ENFORCED" if not (foreign or unknown)
-                else "devrc's DEFAULT (not enforced on every tree here)" if mixed
-                else "devrc's DEFAULT (not enforced here)")
+    quant, scope_phrase, n_states = _governance_scope(audits, foreign, unknown)
+    enforced = "ENFORCED" if scope_phrase is None else f"devrc's DEFAULT ({scope_phrase})"
     p(f"\nbudget {BUDGET:,} B {enforced}   = ceiling {TARGET:,} B − {MIN_HEADROOM:,} B "
       f"working margin   ·   hard cap {HARD:,} B")
     if not (foreign or unknown):
@@ -705,21 +743,25 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
         # the previous round moved rather than removed.
         if foreign:
             names = ", ".join(r.name for r in foreign)
-            p(f"\n🔴 {'SOME OF THESE' if mixed else 'THESE'} SKILLS ARE IN {names} — NOT governed by the")
+            p(f"\n🔴 {quant} SKILLS ARE IN {names} — NOT governed by the")
             p( "   gate this budget comes from, so the number above binds nothing for them.")
             p( "   Those rows are marked [ungoverned].")
         if unknown:
-            p(f"\n🔴 {'SOME OF THESE' if (mixed or foreign) else 'THESE'} SKILLS ARE IN NO REPO, so whether this")
+            p(f"\n🔴 {quant} SKILLS ARE IN NO REPO, so whether this")
             p( "   budget governs them cannot be determined — it is not a claim either way.")
             p( "   Those rows are marked [governance unknown]. (Skills installed out of tree,")
             p( "   e.g. under /nix/store, land here and may well BE devrc's.)")
         p( "\n   Read the owning repo's own gate before treating any verdict below as one:")
         p( "   a ratchet with a per-push allowance (talos-infra's gate 11) can pass a body")
         p( "   called RED here and block one called fine.")
-        if mixed:
-            kinds = " and ".join(k for k, on in
-                                 (("ungoverned", bool(foreign)), ("unknowable", unknown)) if on)
-            p(f"   ⚠️  This run MIXES governed and {kinds} trees, so the mark is per-line and")
+        if n_states > 1:
+            ks = [k for k, on in (("governed", any(a.get("governed") is True for a in audits)),
+                                  ("ungoverned", bool(foreign)),
+                                  ("unknowable", unknown)) if on]
+            # proper English join — a bare " and ".join gave "governed and
+            # ungoverned and unknowable" on the three-state run.
+            kinds = ks[0] if len(ks) == 1 else " and ".join([", ".join(ks[:-1]), ks[-1]])
+            p(f"   ⚠️  This run MIXES {kinds} trees, so the mark is per-line and")
             p( "      the header cannot be read as a verdict about the whole run. Audit them")
             p( "      separately if you want an unambiguous answer.")
 
@@ -912,11 +954,9 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
         # another repo, it's fine" case: an all-foreign run printed "within budget
         # (12,038 B enforced)" directly under the banner saying nothing is enforced
         # there. Round-5 finding 5.
-        gov_states = {a.get("governed") for a in audits}
-        # Same three-way precision as the header: "on every tree" implies some are.
-        qual = ("enforced" if gov_states == {True}
-                else "devrc's, not enforced on every tree here" if True in gov_states
-                else "devrc's, not enforced here")
+        # 🔴 The same phrase the header used, from the same helper — these two
+        # lines answered the question independently and drifted apart twice.
+        qual = "enforced" if scope_phrase is None else f"devrc's, {scope_phrase}"
         p(f"  ✓ all {len(audits)} skill(s) within budget ({BUDGET:,} B — {qual}), "
           f"references intact — no prune needed (stop; do not churn the files)")
     else:
@@ -955,10 +995,12 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
             # qualifier now says the total is measured against devrc's budget and
             # that not every tree here is governed by it — true in both states, and
             # asserting nothing about any individual tree. Round-9 finding 2.
-            all_gov = all(a.get("governed") is True for a in over)
+            # 🔴 Also the shared phrase. "does not govern every tree here" implies
+            # some are governed — false on a purely-foreign or purely-unknown run,
+            # which is where it was left after two rounds fixed the other sites.
             need.append(f"cut ~{excess:,} B total"
-                        + ("" if all_gov else " measured against devrc's budget,"
-                                             " which does not govern every tree here"))
+                        + ("" if scope_phrase is None
+                           else f" measured against devrc's budget ({scope_phrase})"))
         if any_ref_issue:
             need.append("broken/orphaned reference routing")
         if broken_fence:

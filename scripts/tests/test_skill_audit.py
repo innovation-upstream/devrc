@@ -1353,7 +1353,7 @@ def test_detail_header_and_verdict_do_not_assert_the_gate_on_a_foreign_tree(tmp_
     out = _run(u, "--all")
     assert "over enforced budget by" not in out, out
     assert "over devrc reference budget by" in out, out
-    assert "does not govern every tree here" in out, out
+    assert "measured against devrc's budget (not enforced" in out, out
 
 
 def test_governance_comes_from_the_targets_not_the_cli_argument(tmp_path):
@@ -1429,10 +1429,20 @@ def test_the_within_budget_verdict_does_not_claim_enforcement_on_a_foreign_tree(
     test, so reverting it outright left the suite fully green."""
     u = _governed_repo(tmp_path / "smallforeign", governed=False, skill_bytes=2_000)
     out = _run(u, "--all")
-    assert "within budget" in out, out
-    assert f"({sa.BUDGET:,} B — enforced)" not in out, (
-        f"an ungoverned tree must not be told the budget is enforced:\n{out}")
-    assert "not enforced here" in out, out
+    # 🔴 SCOPED TO THE VERDICT. Both assertions here were whole-stdout and were
+    # satisfied by the HEADER line, which says the same thing one paragraph up — so
+    # rewriting `qual` to "devrc's, ENFORCED on every tree here" printed that false
+    # claim directly under "binds nothing for them" and this test, named for the
+    # within-budget verdict, passed along with all 109 others. And the negative
+    # assertion was a SPELLED guard (lowercase, in parens) that a different
+    # spelling of the same claim walks straight past. Round-11 finding 4.
+    verdict = out[out.index("## verdict"):]
+    assert "within budget" in verdict, verdict
+    assert "ENFORCED" not in verdict.upper().replace("NOT ENFORCED", ""), (
+        f"an ungoverned tree must not be told the budget is enforced, in ANY "
+        f"spelling:\n{verdict}")
+    assert f"({sa.BUDGET:,} B — devrc's, not enforced here)" in verdict, (
+        f"the verdict must carry the exact scoped phrase:\n{verdict}")
 
 
 def test_the_detail_header_says_unknown_for_a_skill_in_no_repo(tmp_path):
@@ -1484,7 +1494,7 @@ def test_the_cut_total_qualifier_asserts_nothing_about_an_individual_tree(tmp_pa
     assert "not enforced there" not in verdict, (
         f"the total includes governed skills, so it must not claim they are "
         f"unenforced:\n{verdict}")
-    assert "does not govern every tree here" in verdict, verdict
+    assert "measured against devrc's budget (not enforced on every tree here)" in verdict, verdict
 
 
 def test_a_purely_foreign_header_says_not_enforced_here_precisely(tmp_path):
@@ -1494,3 +1504,77 @@ def test_a_purely_foreign_header_says_not_enforced_here_precisely(tmp_path):
     out = _run(u, "--all")
     assert "devrc's DEFAULT (not enforced here)" in out, out
     assert "not enforced on every tree here" not in out, out
+
+
+def _states_out(tmp_path, *, gov=0, foreign=0, unknown=0):
+    """A run over exactly the requested governance states, all over budget."""
+    args = []
+    for i in range(gov):
+        args.append(str(_governed_repo(tmp_path / f"g{i}", governed=True,
+                                       skill_bytes=sa.BUDGET + 116)))
+    for i in range(foreign):
+        args.append(str(_governed_repo(tmp_path / f"f{i}", governed=False,
+                                       skill_bytes=sa.BUDGET + 116)))
+    for i in range(unknown):
+        d = tmp_path / f"u{i}" / ".claude" / "skills" / "s"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_bytes(b"# s\n" + b"y" * (sa.BUDGET + 116))
+        args.append(str(tmp_path / f"u{i}" / ".claude" / "skills"))
+    r = subprocess.run([sys.executable, str(AUDIT_PY), *args, "--all"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def test_the_banner_quantifier_matches_how_many_states_are_present(tmp_path):
+    """🔴 The quantifier said THESE (all of them) whenever no GOVERNED tree was
+    present — so a foreign+unknown run printed "THESE SKILLS ARE IN <repo>" and,
+    one paragraph later, "SOME OF THESE ARE IN NO REPO". Two adjacent blocks making
+    opposite claims. Round-11 finding 1; the fix for it then shipped ungated
+    (mutant: quantifier hardcoded to SOME OF THESE, survived 109 green)."""
+    one = _states_out(tmp_path / "a", foreign=1)
+    assert "THESE SKILLS ARE IN" in one and "SOME OF THESE" not in one, (
+        f"a single-state run must say THESE:\n{one}")
+    two = _states_out(tmp_path / "b", foreign=1, unknown=1)
+    assert "THESE SKILLS ARE IN" in two, two
+    assert two.count("SOME OF THESE") == 2, (
+        f"both blocks of a two-state run must be quantified SOME:\n{two}")
+
+
+def test_a_purely_unknown_run_does_not_assert_non_governance(tmp_path):
+    """🔴 "not enforced here" is a flat claim that the budget does NOT govern these
+    trees — the same over-claim the unknown banner two lines below exists to avoid,
+    and this is the DEFAULT invocation's state (~/.claude/skills is in no repo).
+    Round-11 finding 2; its fix also shipped ungated."""
+    out = _states_out(tmp_path, unknown=1)
+    assert "governance not determined here" in out, out
+    assert "not enforced here" not in out, (
+        f"nothing here is KNOWN to be ungoverned, so the header must not say so:\n{out}")
+
+
+def test_a_foreign_plus_unknown_run_over_claims_about_neither(tmp_path):
+    """🔴 The gap my own cross-site test could not see: it pins that the header and
+    verdict AGREE, and collapsing this state to the plain foreign phrase keeps them
+    agreeing — both wrong together. A run with one known-ungoverned tree and one
+    unknowable one must not flatly say "not enforced here", because that asserts
+    non-governance over the half that is undetermined."""
+    out = _states_out(tmp_path, foreign=1, unknown=1)
+    assert "not enforced, or not determinable, for anything here" in out, out
+    assert "devrc's DEFAULT (not enforced here)" not in out, (
+        f"this run contains an undetermined tree, so a flat non-governance claim "
+        f"over 'anything here' is an over-claim:\n{out}")
+
+
+def test_the_scope_phrase_is_the_same_string_everywhere_it_appears(tmp_path):
+    """🔴 The header, the within-budget verdict and the cut-total each answered
+    "who does this budget govern?" independently and drifted apart across three
+    rounds, each round fixing a subset. They now come from one helper; this pins
+    that they cannot diverge again."""
+    for kwargs in ({"foreign": 1}, {"unknown": 1}, {"gov": 1, "foreign": 1},
+                   {"foreign": 1, "unknown": 1}):
+        out = _states_out(tmp_path / "x".join(sorted(kwargs)), **kwargs)
+        phrase = out.split("devrc's DEFAULT (", 1)[1].split(")", 1)[0]
+        verdict = out[out.index("## verdict"):]
+        assert phrase in verdict, (
+            f"header says {phrase!r} but the verdict does not carry it, for "
+            f"{kwargs}:\n{out}")
