@@ -132,7 +132,8 @@ sites are added). Two ways, both cheap:
 # the registry itself — the authoritative list, one file
 cat ~/workspace/devrc/scripts/browser-bridge/reference/sites/_index.json
 
-# or drive ONE op yourself and read `.result.site_notes` off ITS OWN envelope
+# or drive it yourself and read `.result.site_notes` off the SECOND envelope.
+# 🔴 TWO commands, and the FIRST one's answer is a decoy — see below.
 browser --instance <key> open && browser --instance <key> nav <url>
 ```
 
@@ -145,6 +146,13 @@ browser --instance <key> open && browser --instance <key> nav <url>
   you will sometimes skip, and skipping this one navigates the operator's live tab
   out from under them. `open` is idempotent by reuse (it returns your existing
   tabId, `reused: true`, and navigates nothing), so running it always is free.
+* 🔴 **`open`'s OWN envelope may carry a `site_notes` — for the WRONG host.
+  Discard it.** `_annotate_site_notes` is not gated on the op, and `open`'s reuse
+  branch returns your existing tab's REAL url, so if that tab sits on a registered
+  host the first command annotates for THAT site. Grep the combined output of the
+  two commands and you can find exactly one `site_notes` pointing at a site that is
+  not your target — the false positive described below, manufactured by the check
+  itself. Read the SECOND envelope, or run the two commands separately.
 * **Read `site_notes` off the `nav` result, NOT a following `context`.** `nav`
   returns `url: cmd.url` — the url you ASKED for — and the server derives the
   annotated host from that (`_domain_from_result` → `_annotate_site_notes`), so the
