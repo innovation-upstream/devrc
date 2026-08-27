@@ -23,10 +23,14 @@
 # asserted before substituting and re-counted after: an unapplied `sed` produces
 # a fully green run that reads EXACTLY like a caught mutant.
 #
-# 🔴 TWO CONTROLS, CHECKED FIRST. CONTROL-CLEAN (no mutation) must be fully
-# green — if it is not, every SURVIVED below is meaningless. CONTROL-KILL is a
-# mutation known to be catchable — if it survives, the harness is not running
-# the tests it thinks it is.
+# 🔴 THREE CONTROLS, CHECKED FIRST, AND EACH ONE HAS CAUGHT A REAL FAULT HERE.
+#   CONTROL-CLEAN     — no mutation; must be fully green, or every SURVIVED
+#                       below is meaningless.
+#   CONTROL-KILL      — a mutation known to be catchable; if it survives, the
+#                       harness is not running the tests it thinks it is.
+#   CONTROL-DETECTOR  — feeds the WRONG-KILLER check a message the run did NOT
+#                       die with and requires it to say NO. A detector that only
+#                       ever says yes certifies everything; this one did, once.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -97,6 +101,24 @@ open(p, "w", encoding="utf-8").write(s)
 PY
 }
 
+# Did the run FAIL with this exact message?
+#
+# 🔴 ONLY `^E ` LINES. pytest's `--tb=long` ECHOES THE TEST SOURCE, and every
+# message this battery looks for is a string literal in that source — so a grep
+# over the whole output matched whenever the named test failed for ANY reason,
+# and the detector was INERT. MEASURED: with the fallback branch disabled,
+# `test_the_effectiveness_check_refuses_a_shadowed_write` died on its SECOND
+# assertion, yet the whole-output grep still "found" the FIRST assertion's
+# message — at line 29, in the echoed source. `^E ` is pytest's marker for the
+# assertion output itself, and it rejects that case while still matching the
+# message the test really died with (both directions measured).
+#
+# This is the SAME CLASS as the truncation bug this battery already fixed —
+# parsing a rendering whose format was never pinned — in a new shape.
+_died_with() {  # $1 = pytest output file, $2 = expected message
+  grep '^E ' "$1" | grep -qF -- "$2"
+}
+
 # case <label> <killer-test> <own-message> <count> <from> <to>
 case_mutant() {
   local label="$1" killer="$2" msg="$3" want="$4" from="$5" to="$6"
@@ -113,7 +135,7 @@ case_mutant() {
   fi
   # Phase 2 — re-run it ALONE, untruncated, and require ITS OWN message.
   local one="$WORK/one.$$"; run_one "$dir" "$killer" > "$one" 2>&1
-  if ! grep -qF -- "$msg" "$one"; then
+  if ! _died_with "$one" "$msg"; then
     echo "    🔴 WRONG-KILLER: '$killer' failed, but NOT with its own message"
     echo "       expected to see: $msg"
     tail -12 "$one" | sed 's/^/       /'
@@ -123,16 +145,33 @@ case_mutant() {
   pass=$((pass+1))
 }
 
+# 🔴 EVERY CHECK BELOW GREPS A FILE, NEVER `printf … | grep -q`.
+#
+# MEASURED, and it produced a confident FALSE VERDICT: `set -o pipefail` is on,
+# and `grep -q` EXITS AT THE FIRST MATCH. When the match appears early in a large
+# output, `printf` still has tens of kilobytes to write, takes SIGPIPE, and the
+# pipeline returns 141 — so a pipeline that FOUND its pattern reports failure.
+# CONTROL-KILL was scored SURVIVED against a run with 10 genuinely failing tests
+# (`### grep: NO MATCH rc=141`, output 23 751 bytes).
+#
+# 🔴 AND IT IS WORSE IN THE NEGATED FORM: CONTROL-CLEAN used
+# `! printf … | grep -q failed`, where the SIGPIPE turns into a report of "no
+# failures" — a FALSE GREEN on a suite that was actually red, which would have
+# certified every mutant below against a broken baseline.
+#
+# 🔴 MY FIRST CONTROL FOR THIS MISSED IT, and the reason is worth keeping: I put
+# the pattern at the END of the test string, which is precisely the position that
+# CANNOT produce SIGPIPE — grep must read everything to find it, so printf always
+# completes. A control has to place the match EARLY to exercise the hazard.
 echo "=== CONTROL-CLEAN (no mutation — must be fully green) ==="
 CLEAN="$(fresh_copy)"
-clean_out="$(run_tests "$CLEAN")"
-if printf '%s' "$clean_out" | grep -qE "^[0-9]+ passed" && \
-   ! printf '%s' "$clean_out" | grep -q "failed"; then
-  echo "    ok — $(printf '%s' "$clean_out" | grep -oE '[0-9]+ passed' | head -1) against an unmutated copy"
+clean_out="$WORK/clean.out"; run_tests "$CLEAN" > "$clean_out" 2>&1
+if grep -qE "^[0-9]+ passed" "$clean_out" && ! grep -q "failed" "$clean_out"; then
+  echo "    ok — $(grep -oE '[0-9]+ passed' "$clean_out" | head -1) against an unmutated copy"
   pass=$((pass+1))
 else
   echo "    🔴 CONTROL-CLEAN IS NOT GREEN — every result below is meaningless."
-  echo "$clean_out" | tail -15 | sed 's/^/       /'
+  tail -15 "$clean_out" | sed 's/^/       /'
   exit 1
 fi
 
@@ -140,17 +179,48 @@ echo "=== CONTROL-KILL (a mutation known to be catchable) ==="
 KDIR="$(fresh_copy)"
 if mutate "$KDIR" 1 'git config --file "$1" core.hooksPath "$DIR"' \
                     'git config --file "$1" core.hooksPath "/bogus/killable"'; then
-  kout="$(run_tests "$KDIR")"
-  if printf '%s' "$kout" | grep -q "failed"; then
+  kout="$WORK/kill.out"; run_tests "$KDIR" > "$kout" 2>&1
+  if grep -q "failed" "$kout"; then
     echo "    ok — the harness does observe a broken installer"
     pass=$((pass+1))
   else
     echo "    🔴 CONTROL-KILL SURVIVED — the harness is not running these tests."
-    echo "$kout" | tail -10 | sed 's/^/       /'
+    tail -10 "$kout" | sed 's/^/       /'
     exit 1
   fi
 else
   echo "    🔴 CONTROL-KILL could not be applied"; exit 1
+fi
+
+echo "=== CONTROL-DETECTOR (can the WRONG-KILLER check say NO?) ==="
+# 🔴 A DETECTOR THAT ONLY EVER SAYS YES IS NOT A DETECTOR. The previous version
+# of this battery said yes unconditionally (see `_died_with`), so every "killed
+# with its own message" verdict below was unearned. This builds a run that fails
+# for a KNOWN, DIFFERENT reason and requires the detector to reject the message
+# that does NOT belong to it, then accept the one that does. Both directions, or
+# the eleven mutant results below mean nothing.
+DDIR="$(fresh_copy)"
+if mutate "$DDIR" 1 \
+    'elif [ "$PICK" != "$FALLBACK" ] && err2="$(_set_hookspath "$FALLBACK" 2>&1)"; then' \
+    'elif false; then'; then
+  dprobe="$WORK/detector.out"
+  run_one "$DDIR" "test_the_effectiveness_check_refuses_a_shadowed_write" > "$dprobe" 2>&1
+  # It dies on its SECOND assertion. The FIRST assertion's message is a literal
+  # in the echoed source — the exact string that fooled the old detector.
+  foreign="reported success while core.hooksPath resolved"
+  actual="install failed, but not with the effectiveness check's own message"
+  if _died_with "$dprobe" "$foreign"; then
+    echo "    🔴 DETECTOR IS INERT — it matched a message the test did NOT die with."
+    echo "       Every mutant verdict below would be unearned."; exit 1
+  fi
+  if ! _died_with "$dprobe" "$actual"; then
+    echo "    🔴 DETECTOR IS DEAF — it rejected the message the test DID die with."
+    tail -12 "$dprobe" | sed 's/^/       /'; exit 1
+  fi
+  echo "    ok — rejects a foreign message, accepts the true one"
+  pass=$((pass+1))
+else
+  echo "    🔴 CONTROL-DETECTOR could not be applied"; exit 1
 fi
 
 echo "=== MUTANTS ==="
@@ -160,7 +230,7 @@ case_mutant "M1 fallback branch disabled" \
   "test_the_installer_succeeds_when_the_global_config_is_read_only" \
   "installer failed on a home-manager host" \
   1 \
-  'elif [ "$PICK" != "$HOME/.gitconfig" ] && err2="$(_set_hookspath "$HOME/.gitconfig" 2>&1)"; then' \
+  'elif [ "$PICK" != "$FALLBACK" ] && err2="$(_set_hookspath "$FALLBACK" 2>&1)"; then' \
   'elif false; then'
 
 # M2 — "wrote" is accepted as "installed". The narrowest expression that can be
@@ -207,6 +277,50 @@ case_mutant "M6 audit env seeding skipped" \
   "the flag file was not seeded" \
   1 \
   'if [ ! -f "$CONF" ]; then' \
+  'if false; then'
+
+# M7 — the stamp is never written, so a file we DID create looks foreign and
+# --uninstall can no longer clean it up.
+case_mutant "M7 creation stamp never written" \
+  "test_uninstall_removes_only_a_gitconfig_it_created_itself" \
+  "but --uninstall left it behind" \
+  1 \
+  'if [ -n "$CREATED_FILE" ]; then _stamp_marker "$CREATED_FILE"; fi' \
+  'if false; then _stamp_marker "$CREATED_FILE"; fi'
+
+# M8 — provenance replaced by SIZE, i.e. the audited defect re-injected verbatim.
+case_mutant "M8 provenance check reverted to a size test" \
+  "test_uninstall_keeps_an_operator_created_gitconfig" \
+  "DELETED a ~/.gitconfig the operator created" \
+  1 \
+  '&& _only_devrc_marker "$f"; then' \
+  '&& [ ! -s "$f" ]; then'
+
+# M9 — a failed install stops rolling back the file it created.
+case_mutant "M9 failed-install rollback removed" \
+  "test_a_failed_install_rolls_back_the_file_it_created" \
+  "left behind the ~/.gitconfig it created" \
+  1 \
+  '  if [ -n "$CREATED_FILE" ]; then
+    git config --file "$CREATED_FILE" --unset core.hooksPath 2>/dev/null || true' \
+  '  if false; then
+    git config --file "$CREATED_FILE" --unset core.hooksPath 2>/dev/null || true'
+
+# M10 — the repo-discovery ceiling is dropped, so a TMPDIR inside a checkout
+# poisons the effectiveness read with a repo-local value.
+case_mutant "M10 GIT_CEILING_DIRECTORIES dropped" \
+  "test_the_effective_read_is_not_poisoned_by_a_repo_around_TMPDIR" \
+  "the effectiveness read found a REPO-LOCAL" \
+  1 \
+  'GIT_CEILING_DIRECTORIES="$(dirname "$scratch")" \' \
+  'GIT_CEILING_DIRECTORIES="" \'
+
+# M11 — the HOME diagnostic is removed and `set -u` aborts instead.
+case_mutant "M11 unset-HOME diagnostic removed" \
+  "test_an_unset_HOME_gives_a_diagnostic_not_an_unbound_variable" \
+  "expected a diagnostic about HOME" \
+  1 \
+  'if [ -z "${HOME:-}" ]; then' \
   'if false; then'
 
 echo

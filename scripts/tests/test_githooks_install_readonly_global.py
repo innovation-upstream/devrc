@@ -27,6 +27,21 @@ it is the other half of git's own documented pair, and writing there leaves ever
 home-manager setting in force. `test_the_home_manager_settings_survive_the_fallback`
 is that claim as an executable assertion rather than a comment.
 
+🔴 TWO BASELINES, BECAUSE THERE ARE TWO DEFECTS. Quoting only the first would
+mislabel four tests. Measured, both restored byte-identical afterwards:
+
+  * vs `origin/main` (the #905 defect):        12 FAILED / 4 PASSED
+  * vs 426c4d52 (this branch's first commit,
+    the code the audit findings were against):  4 FAILED / 12 PASSED
+
+The 4 red at 426c4d52 are exactly the four audit findings — provenance-vs-size,
+the un-rolled-back failed install, the TMPDIR-inside-a-repo read, and the unset
+HOME diagnostic. Two of them (`…keeps_an_operator_created_gitconfig`,
+`…rolls_back_the_file_it_created`) are GREEN at `origin/main` and that is not
+coverage: at base the installer never gets far enough to create a file, so they
+pass for a reason unrelated to what they assert. Judge those two against
+426c4d52 only.
+
 WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the label):
 
   * `test_the_installer_succeeds_when_the_global_config_is_read_only` is THE
@@ -50,12 +65,33 @@ WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the label):
     coverage for the same "wrote != installed" hazard, exercised through a real
     input (`GIT_CONFIG_COUNT`, which outranks every config file) rather than
     through a mutant.
+  * `test_uninstall_keeps_an_operator_created_gitconfig` is regression coverage
+    for an audit finding, AGAINST 426c4d52 (red there, green at origin/main —
+    see the two-baseline note): removal used to be gated on the file being
+    0 bytes, which is SIZE, not PROVENANCE.
+  * `test_uninstall_removes_only_a_gitconfig_it_created_itself` is its pair, and
+    the pair is deliberate — the test above alone is satisfied by an
+    `--uninstall` that never removes anything. It is red at `origin/main` and
+    GREEN at 426c4d52, which is correct: the size-based version also removed the
+    file. It pins the capability the provenance fix must not lose.
+  * `test_a_failed_install_rolls_back_the_file_it_created` is regression
+    coverage for the other half of that finding: a FAILED install used to leave
+    its new `~/.gitconfig` behind, narrowing `git config --global` permanently
+    and for nothing.
+  * `test_the_effective_read_is_not_poisoned_by_a_repo_around_TMPDIR` is
+    regression coverage for an audit finding: `mktemp -d` honours $TMPDIR and is
+    NOT necessarily outside a repository, so the effectiveness read could return
+    a repo-local value and fail a good install.
 
   * `test_uninstall_leaves_a_hooks_path_it_did_not_write` is an INVARIANT GUARD.
     The pre-fix script already refused to unset a foreign value; no bug ever
     violated it. It is here because the fix widened `--uninstall` from one file
     to several, and widening a search is exactly how such a rule gets lost. It
     is NOT counted as regression coverage for #905.
+  * `test_an_unset_HOME_gives_a_diagnostic_not_an_unbound_variable` is RED at
+    BOTH baselines, so it is regression coverage by measurement — but for a
+    LEGIBILITY defect nobody ever hit in practice, not a behavioural one. Both
+    halves stated rather than picking the flattering one.
   * `test_an_explicit_GIT_CONFIG_GLOBAL_is_never_escaped` is an INVARIANT GUARD,
     and it guards the suite's own isolation: `scripts/tests/test_nogit_isolation.py`
     runs this very installer with `GIT_CONFIG_GLOBAL` pointed at a session file
@@ -136,9 +172,20 @@ def hm_home(tmp_path):
 
     hm_cfg = store / "hm_gitconfig"
     hm_cfg.write_text(
+        # 🔴 THE TWO autoStash KEYS AND core.sshCommand ARE HERE ON PURPOSE.
+        # README and the module docstring claim EVERY home-manager setting stays
+        # in force; a fixture carrying three keys could not observe that, and the
+        # two most safety-relevant ones were the ones missing. `merge.autoStash`
+        # is the sibling of `rebase.autoStash` (both must stay false — the
+        # fail-closed guard against the repo-global stash), and `core.sshCommand`
+        # is #782/#887's push keepalive, which a masked fallback would silently
+        # drop and turn long pre-push gates back into SIGPIPE failures.
         "[user]\n\tname = FromHomeManager\n"
         "[rebase]\n\tautoStash = false\n"
-        "[diff]\n\talgorithm = histogram\n",
+        "[merge]\n\tautoStash = false\n"
+        "[diff]\n\talgorithm = histogram\n"
+        "[core]\n\tsshCommand = ssh -o ServerAliveInterval=30 "
+        "-o ServerAliveCountMax=6\n",
         encoding="utf-8",
     )
     (home / ".config" / "git" / "config").symlink_to(hm_cfg)
@@ -270,6 +317,9 @@ def test_the_home_manager_settings_survive_the_fallback(hm_home):
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
     for key, expected in (("rebase.autoStash", "false"),
+                          ("merge.autoStash", "false"),
+                          ("core.sshCommand",
+                           "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6"),
                           ("diff.algorithm", "histogram"),
                           ("user.name", "FromHomeManager")):
         assert _git(hm_home, "config", "--get", key) == expected, (
@@ -320,6 +370,117 @@ def test_the_effectiveness_check_refuses_a_shadowed_write(hm_home):
 # --------------------------------------------------------------------------- #
 # Invariant guards (NOT regression coverage for #905 — see module docstring)
 # --------------------------------------------------------------------------- #
+def test_uninstall_keeps_an_operator_created_gitconfig(hm_home):
+    """🔴 `--uninstall` must not delete a `~/.gitconfig` it did not create.
+
+    REGRESSION coverage for an audit finding. An earlier revision removed the
+    file when it was 0 bytes after the unset, and called that "the file this
+    installer had to create". SIZE IS NOT PROVENANCE. Measured: an operator's
+    own empty `~/.gitconfig` — the exact manual workaround someone would apply
+    for #905 — was silently deleted, after which their next `git config --global`
+    write fails against the read-only store again.
+
+    The file here is empty and operator-owned, so it is indistinguishable from
+    the deleted case BY SIZE and distinguishable only by the absence of a stamp.
+    """
+    operator_file = hm_home / ".gitconfig"
+    operator_file.write_text("", encoding="utf-8")
+
+    assert _install(hm_home).returncode == 0
+    proc = _install(hm_home, "--uninstall")
+
+    assert operator_file.exists(), (
+        "--uninstall DELETED a ~/.gitconfig the operator created — size was "
+        "mistaken for provenance")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_uninstall_removes_only_a_gitconfig_it_created_itself(hm_home):
+    """The other half of the pair: a file we DID create is cleaned up.
+
+    Without this, the test above is satisfied by an `--uninstall` that never
+    removes anything, and the `--global` narrowing would be permanent.
+    """
+    assert not (hm_home / ".gitconfig").exists(), "fixture precondition"
+    assert _install(hm_home).returncode == 0
+    assert (hm_home / ".gitconfig").exists(), "the installer created no fallback file"
+
+    proc = _install(hm_home, "--uninstall")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (hm_home / ".gitconfig").exists(), (
+        "the installer created ~/.gitconfig but --uninstall left it behind, "
+        "permanently narrowing `git config --global` on this host")
+
+
+def test_a_failed_install_rolls_back_the_file_it_created(hm_home):
+    """A FAILED install must not leave a new `~/.gitconfig` behind.
+
+    REGRESSION coverage for an audit finding: when the effectiveness check
+    fails the script exits 1 — but it had already created the file, narrowing
+    `git config --global` on that host for nothing, with no hint and no cleanup.
+
+    Driven through the same real input as the effectiveness test itself, so the
+    failure is genuine rather than simulated.
+    """
+    assert not (hm_home / ".gitconfig").exists(), "fixture precondition"
+    env = _env(hm_home, GIT_CONFIG_COUNT="1",
+               GIT_CONFIG_KEY_0="core.hooksPath",
+               GIT_CONFIG_VALUE_0="/somewhere/else")
+    proc = _install(hm_home, env=env)
+
+    assert proc.returncode != 0, "expected the effectiveness check to fail"
+    assert not (hm_home / ".gitconfig").exists(), (
+        "the install FAILED but left behind the ~/.gitconfig it created — "
+        "`git config --global` is now permanently narrowed for nothing")
+
+
+def test_the_effective_read_is_not_poisoned_by_a_repo_around_TMPDIR(
+        hm_home, tmp_path):
+    """🔴 `mktemp -d` is not necessarily outside a git repository.
+
+    REGRESSION coverage for an audit finding. The installer verifies its write by
+    reading `core.hooksPath` back from a scratch dir — but `mktemp -d` honours
+    $TMPDIR, and if TMPDIR sits inside a checkout, git walks UP, finds that repo
+    and answers with its REPO-LOCAL value. Measured: `/REPO/LOCAL/POISON` came
+    back, which fails the effectiveness check on a perfectly good install.
+
+    This is a realistic configuration, not a contrivance — a per-session TMPDIR
+    under a working tree is exactly how agent scratch dirs are laid out here.
+    """
+    repo = tmp_path / "enclosing-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, timeout=60,
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config",
+                    "core.hooksPath", "/REPO/LOCAL/POISON"],
+                   check=True, timeout=60, capture_output=True)
+    tmpdir = repo / "scratch"
+    tmpdir.mkdir()
+
+    proc = _install(hm_home, env=_env(hm_home, TMPDIR=tmpdir))
+    assert proc.returncode == 0, (
+        "the install failed because the effectiveness read found a REPO-LOCAL "
+        f"core.hooksPath instead of the global one:\n{proc.stdout}{proc.stderr}")
+    assert "/REPO/LOCAL/POISON" not in proc.stderr
+
+
+def test_an_unset_HOME_gives_a_diagnostic_not_an_unbound_variable(hm_home):
+    """INVARIANT GUARD: fail with an explanation, not `HOME: unbound variable`.
+
+    Every path in the script is anchored on $HOME, and under `set -u` an unset
+    HOME aborts from whichever line touches it first. Not a bug anyone hit — a
+    legibility floor, labelled as a guard and not counted as regression coverage.
+    """
+    env = _env(hm_home, HOME=None)
+    proc = subprocess.run(["bash", str(INSTALLER)], capture_output=True,
+                          text=True, timeout=120, cwd=str(REPO_ROOT), env=env)
+    assert proc.returncode != 0
+    combined = proc.stdout + proc.stderr
+    assert "HOME is not set" in combined, (
+        f"expected a diagnostic about HOME; got:\n{combined}")
+    assert "unbound variable" not in combined
+
+
 def test_uninstall_leaves_a_hooks_path_it_did_not_write(hm_home):
     """INVARIANT GUARD: never remove a setting this installer did not write."""
     foreign = "/somebody/elses/hooks"
@@ -346,6 +507,17 @@ def test_an_explicit_GIT_CONFIG_GLOBAL_is_never_escaped(hm_home, tmp_path):
     config. If that file were unwritable and the installer fell back to
     `$HOME/.gitconfig`, it would write outside the nominated file — the exact
     escape that guard exists to prevent. Refusing is the only correct answer.
+
+    🔴 THE WITNESS IS THE FILE'S CONTENT, NOT ITS EXISTENCE, AND THE DIFFERENCE
+    WAS MEASURED. This test used to assert `~/.gitconfig` does not exist. Once the
+    failed-install ROLLBACK landed, an escaping installer wrote the file, failed
+    its effectiveness check, and then DELETED the file on the way out — so the
+    escape happened and the assertion still passed. The mutant that removes the
+    refusal went from killed to SURVIVED without the guard changing at all.
+
+    So `~/.gitconfig` is pre-created, empty and operator-owned. That makes the
+    rollback structurally unable to erase the evidence (it only removes files the
+    run itself created), and turns "did it escape" into a question about CONTENT.
     """
     ro_dir = tmp_path / "ro"
     ro_dir.mkdir()
@@ -353,22 +525,36 @@ def test_an_explicit_GIT_CONFIG_GLOBAL_is_never_escaped(hm_home, tmp_path):
     nominated.write_text("", encoding="utf-8")
     nominated.chmod(0o444)
     ro_dir.chmod(0o555)
+    operator_file = hm_home / ".gitconfig"
+    operator_file.write_text("", encoding="utf-8")
     try:
         proc = _install(hm_home, env=_env(hm_home, GIT_CONFIG_GLOBAL=nominated))
         assert proc.returncode != 0, (
             "installer reported success against an unwritable nominated file")
-        assert not (hm_home / ".gitconfig").exists(), (
+        assert "hooksPath" not in operator_file.read_text(encoding="utf-8"), (
             "the installer ESCAPED the nominated GIT_CONFIG_GLOBAL and wrote to "
             "$HOME/.gitconfig — this defeats the suite's isolation guard")
+        assert FALLBACK_NOTE not in proc.stdout, (
+            "the installer ESCAPED the nominated GIT_CONFIG_GLOBAL by taking the "
+            "fallback branch, which must never run when an override is set")
     finally:
         ro_dir.chmod(0o755)
         nominated.chmod(0o644)
 
 
+# --------------------------------------------------------------------------- #
+# Back to REGRESSION coverage — this one is red at base (see its docstring); it
+# lives down here only because it also measures a fixture dimension at 2 points.
+# --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("xdg_set", [True, False])
 def test_the_xdg_location_is_honoured_whether_or_not_XDG_CONFIG_HOME_is_set(
         hm_home, xdg_set):
-    """INVARIANT GUARD, measured at BOTH points on a dimension the fixture pins.
+    """REGRESSION coverage, measured at BOTH points on a dimension the fixture pins.
+
+    🔴 NOT an invariant guard, though it was drafted as one and an earlier
+    revision of this file still said so in three places. The measured base run
+    settles it: BOTH parametrisations are red at `origin/main`, because at base
+    the installer cannot install at all. The label follows the measurement.
 
     The installer resolves the XDG config as `${XDG_CONFIG_HOME:-$HOME/.config}`.
     A suite that always exports the variable is structurally blind to a defect in

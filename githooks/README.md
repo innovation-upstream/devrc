@@ -102,16 +102,28 @@ This sets the **global** `core.hooksPath` and seeds `~/.claude/audit-on-push.env
 > used to die `could not lock config file … Read-only file system` (rc=255) and
 > the hooks could not be installed at all. It now detects that and writes to
 > `~/.gitconfig` instead, printing a `NOTE:` when it does. git reads **both**
-> files and `~/.gitconfig` takes precedence, so every home-manager setting
-> (`rebase.autoStash = false` included) stays in force. The installer then
+> files and `~/.gitconfig` takes precedence, so home-manager's settings stay in
+> force — asserted per key for `rebase.autoStash`, `merge.autoStash`,
+> `core.sshCommand`, `diff.algorithm` and `user.name`, the safety-relevant ones.
+> (`git config --list --show-origin` shows the XDG file still answering; the test
+> pins the five named keys, not literally every key.) The installer then
 > re-reads `core.hooksPath` and **fails loudly if the value did not actually take
 > effect** — writing a setting and installing one are separate claims.
 >
 > ⚠ One real side effect: once `~/.gitconfig` exists it is the only file
 > `git config --global` *reads*, so `git config --global --list` will show less
 > than you expect. Effective config is unchanged — `git config --list` still
-> shows everything. `--uninstall` deletes the `~/.gitconfig` it emptied, which
+> shows everything. `--uninstall` deletes a `~/.gitconfig` **that the installer
+> itself created** (it stamps one on creation) and leaves any other alone, which
 > puts that back.
+>
+> Three things in this repo do read `git config --global`: `scripts/run-tests.sh`,
+> `scripts/testlib/nogit_plugin.py` and `scripts/present/measure.py`. None breaks
+> today. ⚠ Latent: if `core.hooksPath` ever lands in the XDG file *and* a
+> `~/.gitconfig` later appears, `measure.py` would report "no blocking pre-push
+> gate installed" while one is armed.
+
+
 Two independent knobs, seeded from the example:
 
 - **Audit** (`AUDIT_ON_PUSH=shadow`) — logs what it *would* send, sends nothing;

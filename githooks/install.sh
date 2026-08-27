@@ -18,6 +18,49 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Every path below is anchored on $HOME. Under `set -u` an unset HOME aborts with
+# a bare `HOME: unbound variable` from whichever line happens to touch it first,
+# which tells the operator nothing about what to do.
+if [ -z "${HOME:-}" ]; then
+  echo "ERROR: HOME is not set, so there is no global git config to install into." >&2
+  echo "       Re-run with HOME pointing at your home directory." >&2
+  exit 1
+fi
+
+# 🔴 PROVENANCE, NOT SIZE. `--uninstall` may delete a `~/.gitconfig` only if THIS
+# script created it. An earlier revision tested `size == 0` and called that
+# "the file this installer had to create" — it is not. MEASURED: an operator's
+# own empty `~/.gitconfig` (the exact manual workaround someone would apply for
+# for #905) was silently deleted by `--uninstall`, after which their next
+# `git config --global …` write fails against the read-only store all over again.
+# So the file is STAMPED on creation and the stamp is what authorises removal.
+MARKER_TOKEN="devrc-githooks-install-created-this-file"
+
+# 🔴 ONE LINE, AND THAT IS A CORRECTNESS CONSTRAINT, NOT A STYLE CHOICE. The
+# predicate below accepts a line only if it CONTAINS the token, so a multi-line
+# stamp makes its own continuation lines look like foreign content and the file
+# is then never removable. Measured: a 3-line stamp broke both the uninstall
+# cleanup and the failed-install rollback. Keep the whole stamp on this line.
+_stamp_marker() {  # $1 = a file this run created
+  printf '# %s — created by devrc githooks/install.sh (#905); remove with: %s/install.sh --uninstall\n' \
+    "$MARKER_TOKEN" "$DIR" >> "$1"
+}
+
+# True only when the file carries OUR stamp and holds nothing else of substance.
+# git leaves an empty `[section]` header behind after unsetting a section's last
+# key (measured), so a bare header is not content; ANY other comment or line is,
+# and blocks removal. Deliberately conservative: a file we are not certain about
+# is left alone.
+_only_devrc_marker() {  # $1 = file
+  awk -v tok="$MARKER_TOKEN" '
+    /^[[:space:]]*$/                      { next }
+    index($0, tok)                        { seen = 1; next }
+    /^[[:space:]]*\[[^]]*\][[:space:]]*$/ { next }
+                                          { other = 1 }
+    END { exit !(seen && !other) }
+  ' "$1"
+}
+
 # --------------------------------------------------------------------------- #
 # 🔴 WHERE A "GLOBAL" SETTING CAN ACTUALLY BE WRITTEN
 # --------------------------------------------------------------------------- #
@@ -64,10 +107,29 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # user.name` then returns nothing on this host, because the home-manager values
 # live in the XDG file and `--global` no longer looks there. Effective config is
 # unchanged (`git config --get user.name` still answers); only the `--global`
-# SCOPE view narrows. No script in devrc reads `git config --global` — checked
-# across the tree — but a human debugging with `--global --list` will see less
-# than they expect. `--uninstall` removes a `~/.gitconfig` it emptied, which
-# restores the original resolution.
+# SCOPE view narrows, and a human debugging with `--global --list` sees less than
+# they expect. `--uninstall` removes a `~/.gitconfig` THIS SCRIPT created (see the
+# stamp above), which restores the original resolution.
+#
+# 🔴 AN EARLIER REVISION OF THIS COMMENT CLAIMED "no script in devrc reads
+# `git config --global` — checked across the tree". THAT WAS FALSE, and it was
+# asserted rather than measured: the enumeration behind it was a broken shell
+# pipeline that inspected nothing and returned a confident empty result. Readers
+# that DO exist:
+#   * `scripts/run-tests.sh` — `--list --show-origin` to build the protected set,
+#     and a `--global` write probe that verifies the isolation lever governs;
+#   * `scripts/testlib/nogit_plugin.py` — the same write/read control;
+#   * `scripts/present/measure.py` (`m_hook_gate_install`) — reads
+#     `core.hooksPath` at `--local` then `--global`.
+# None of them breaks today: run-tests.sh UNIONS the discovered origins with the
+# two hardcoded paths, so its protected set can only grow.
+#
+# ⚠ ONE LATENT CASE, NOT FIXED HERE AND NOT REACHABLE TODAY. If `core.hooksPath`
+# ever lands in the XDG file (e.g. someone declares it in nix) AND a
+# `~/.gitconfig` later appears, `measure.py`'s `--global` read looks only at
+# `~/.gitconfig` and would report "no blocking pre-push gate installed" while one
+# is in fact armed. That is a defect in the READER, not here; it is recorded so
+# whoever hits it does not have to rediscover the mechanism.
 
 _xdg_config() { printf '%s/git/config\n' "${XDG_CONFIG_HOME:-$HOME/.config}"; }
 
@@ -97,12 +159,31 @@ _set_hookspath() {  # $1 = config file. stdout/stderr = git's own diagnostic.
 }
 
 # The EFFECTIVE value, as any later `git push` will see it — not the value we
-# think we wrote. Repo pointers are cleared and cwd is moved out of any working
-# tree so a repo-local core.hooksPath cannot answer for the global one.
+# think we wrote.
+#
+# 🔴 `mktemp -d` IS NOT NECESSARILY OUTSIDE A REPOSITORY. An earlier comment here
+# claimed cwd was "moved out of any working tree"; it is not — `mktemp -d` honours
+# $TMPDIR, and if TMPDIR sits inside a git checkout then git discovers that repo
+# by walking UP from the scratch dir and answers with its REPO-LOCAL
+# core.hooksPath. MEASURED: with TMPDIR inside a repo whose local core.hooksPath
+# was `/REPO/LOCAL/POISON`, this function returned `/REPO/LOCAL/POISON` — which
+# would fail the effectiveness check on a perfectly good install (a false RED)
+# or, in the mirror case, hide a real failure.
+#
+# GIT_CEILING_DIRECTORIES stops the upward search, so no repository is found and
+# only system+global config answers — which is exactly the scope being verified.
+#
+# 🔴 IT MUST NAME THE PARENT, NOT THE SCRATCH DIR ITSELF. MEASURED both ways:
+# with the ceiling set to the scratch directory git STILL found the enclosing
+# repo and returned `/REPO/LOCAL/POISON`; with the parent it returned empty.
+# A ceiling bounds where git may CHDIR TO, so the directory that must be
+# out of bounds is the one above the search start.
 _effective_hookspath() {
   local scratch; scratch="$(mktemp -d)"
   local out=""
-  out="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$scratch" config --get core.hooksPath 2>/dev/null || true)"
+  out="$(env -u GIT_DIR -u GIT_WORK_TREE \
+         GIT_CEILING_DIRECTORIES="$(dirname "$scratch")" \
+         git -C "$scratch" config --get core.hooksPath 2>/dev/null || true)"
   rmdir "$scratch" 2>/dev/null || true
   printf '%s\n' "$out"
 }
@@ -126,12 +207,18 @@ if [ "${1:-}" = "--uninstall" ]; then
     if git config --file "$f" --unset core.hooksPath 2>/dev/null; then
       echo "uninstalled: core.hooksPath cleared from $f (was $DIR)"
       cleared=$((cleared + 1))
-      # git leaves a 0-BYTE file behind when the last key goes (measured). If
-      # that file is the ~/.gitconfig this installer had to create, removing it
-      # restores git's original --global resolution. Guarded on size 0, so it
-      # can never delete content — there is none left to delete.
-      if [ "$f" = "$HOME/.gitconfig" ] && [ ! -s "$f" ]; then
-        rm -f "$f" && echo "  removed now-empty $f"
+      # Remove the file only if THIS SCRIPT created it — proven by the stamp,
+      # not inferred from its size. See the MARKER_TOKEN header: an operator's
+      # own empty ~/.gitconfig is a legitimate manual workaround for #905 and
+      # deleting it re-breaks their `git config --global` writes.
+      if [ "$f" = "$HOME/.gitconfig" ] \
+         && [ -z "$(git config --file "$f" --list 2>/dev/null)" ] \
+         && _only_devrc_marker "$f"; then
+        rm -f "$f" && echo "  removed $f (this installer created it; nothing else was in it)"
+      elif [ "$f" = "$HOME/.gitconfig" ] && [ ! -s "$f" ]; then
+        echo "  left $f in place — it is empty but carries no devrc stamp, so it"
+        echo "  is not ours to delete. Remove it yourself if you want git's"
+        echo "  --global reads to go back to the XDG config."
       fi
     else
       echo "WARNING: core.hooksPath in $f is ours but could NOT be unset" >&2
@@ -165,8 +252,18 @@ if [ -n "$prev" ] && [ "$prev" != "$DIR" ]; then
 fi
 
 TARGET=""
+CREATED_FILE=""
+FALLBACK="$HOME/.gitconfig"
+# 🔴 RECORDED OUT HERE, BEFORE THE CALL. `_set_hookspath` is invoked inside a
+# command substitution — a SUBSHELL — so any variable it sets is discarded on
+# return. The rollback below has to know which file THIS RUN brought into
+# existence, so the existence test cannot live inside the function.
+PICK_EXISTED=0; if [ -e "$PICK" ]; then PICK_EXISTED=1; fi
+FB_EXISTED=0;   if [ -e "$FALLBACK" ]; then FB_EXISTED=1; fi
+
 if err="$(_set_hookspath "$PICK" 2>&1)"; then
   TARGET="$PICK"
+  if [ "$PICK_EXISTED" -eq 0 ]; then CREATED_FILE="$PICK"; fi
 elif [ -n "${GIT_CONFIG_GLOBAL:-}" ]; then
   # 🔴 NO FALLBACK WHEN GIT_CONFIG_GLOBAL IS SET. That variable is an explicit
   # override — the test suite's isolation guard uses it to keep a real installer
@@ -177,8 +274,9 @@ elif [ -n "${GIT_CONFIG_GLOBAL:-}" ]; then
   echo "       Refusing to fall back — an explicit override is honoured or nothing is." >&2
   echo "       git said: $err" >&2
   exit 1
-elif [ "$PICK" != "$HOME/.gitconfig" ] && err2="$(_set_hookspath "$HOME/.gitconfig" 2>&1)"; then
-  TARGET="$HOME/.gitconfig"
+elif [ "$PICK" != "$FALLBACK" ] && err2="$(_set_hookspath "$FALLBACK" 2>&1)"; then
+  TARGET="$FALLBACK"
+  if [ "$FB_EXISTED" -eq 0 ]; then CREATED_FILE="$FALLBACK"; fi
   echo "NOTE: $PICK is not writable (home-manager owns it — it is a symlink into"
   echo "      the read-only nix store), so core.hooksPath went to $TARGET instead."
   echo "      git reads both; ~/.gitconfig takes precedence. Nothing else moved."
@@ -196,11 +294,28 @@ fi
 # 🔴 WROTE IS NOT INSTALLED. A write to the XDG file loses to a `core.hooksPath`
 # already present in ~/.gitconfig, and the write would still report success — so
 # the claim is checked against what git actually resolves, from outside any repo.
+if [ -n "$CREATED_FILE" ]; then _stamp_marker "$CREATED_FILE"; fi
+
 effective="$(_effective_hookspath)"
 if [ "$effective" != "$DIR" ]; then
   echo "ERROR: wrote core.hooksPath to $TARGET, but git resolves it to" >&2
   echo "       '${effective:-<unset>}' — the install did NOT take effect." >&2
   echo "       Something with higher precedence is overriding it." >&2
+  # 🔴 ROLL BACK A FILE THIS RUN CREATED. Leaving a new ~/.gitconfig behind after
+  # a FAILED install permanently narrows `git config --global` on the host — for
+  # nothing, since the install did not take. Only a file we created, still
+  # carrying nothing but our own stamp and our own key, is removed.
+  if [ -n "$CREATED_FILE" ]; then
+    git config --file "$CREATED_FILE" --unset core.hooksPath 2>/dev/null || true
+    if [ -z "$(git config --file "$CREATED_FILE" --list 2>/dev/null)" ] \
+       && _only_devrc_marker "$CREATED_FILE"; then
+      rm -f "$CREATED_FILE"
+      echo "       (rolled back $CREATED_FILE, which this run had created)" >&2
+    else
+      echo "       NOTE: $CREATED_FILE was created by this run and could not be" >&2
+      echo "       rolled back cleanly. Remove it with: $DIR/install.sh --uninstall" >&2
+    fi
+  fi
   exit 1
 fi
 
