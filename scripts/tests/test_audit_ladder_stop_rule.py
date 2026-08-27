@@ -162,9 +162,9 @@ rule rather than reformatting a paragraph.
    CORRECTLY. Nothing mechanical can answer that, which is why the residual
    error is aimed at the safe side (ambiguous => the gate does not fire).
 7. **The evidence file is pinned ROW BY ROW, so a row nobody pinned is
-   unguarded.** Six of its numbers and both of its lessons are pinned; shape D
-   (the positive control) and shape B's row are not, and neither is any prose
-   outside those sentences. A row added later is unguarded until someone pins
+   unguarded.** The `EVIDENCE_*` constants below are the whole of it -- count
+   them; shape D (the positive control) and shape B's row are NOT among them,
+   and neither is any prose outside those sentences. A row added later is unguarded until someone pins
    it, and nothing here notices. The pattern to follow: if the body delegates a
    number to that file, the row carrying it gets a constant in the same commit.
 8. **The THRESHOLD is pinned, not justified.** "Two consecutive rounds" comes
@@ -294,6 +294,12 @@ recorded as SURVIVED off an 11-passed run.
        prohibits .............................. 1 failed  <- the sharp one
   U6   shape-A lesson negated ................ 1 failed
   U7   shape-B/C lesson negated ............... 1 failed
+
+  added after the seventh audit:
+  T1   the empty-range clause deleted ......... 1 failed  <- the check the
+                                                previous rewrite dropped
+  T2   the B/C lesson's TAIL inverted ......... 1 failed  <- green until the
+                                                lesson was pinned WHOLE
 
   the round-1 set, re-run against current strings:
   X3   gate command -> `echo 0` ............... 1 failed
@@ -511,17 +517,18 @@ SKILL_WRONG_FLAGS_TRAP = (
 #     silent stderr.
 SKILL_BASE_DEFINITION = (
     "🔴 **`<base>` is the CURRENT tip you would merge into — `git fetch` it "
-    "first.** A local `origin/main` is exactly as current as your last fetch, "
-    "and a stale one re-reports upstream work as this round's payload: at the "
-    "fork point the entire bring-in (201 where the truth was 1), one commit "
-    "behind, its tail."
+    "first.** A local `origin/main` is only as current as your last fetch, and "
+    "a stale one re-reports upstream work as this round's payload: the whole "
+    "bring-in from the fork point (201 where the truth was 1), its tail from "
+    "one commit behind."
 )
 SKILL_FAILED_IS_NOT_ZERO = (
-    "And **a failed command is not zero — require rc 0 AND silent stderr.** A "
-    "missing ref or a git without `--remerge-diff` exits 128 with empty output; "
-    "an unwritable object store is worse, because `--remerge-diff` then "
-    "under-counts, **exits 0 and prints a plausible number**, saying so only on "
-    "stderr."
+    "And **a zero you did not watch the command EARN is not a zero — require rc "
+    "0, silent stderr, and a non-empty range.** A missing ref or a git without "
+    "`--remerge-diff` exits 128 with empty output; an unwritable object store is "
+    "worse, because `--remerge-diff` then under-counts, **exits 0 and prints a "
+    "plausible number**, saying so only on stderr; and a range whose commits are "
+    "simply not in this checkout yet prints nothing, silently, with rc 0."
 )
 SKILL_PAYLOAD_MEASUREMENT = (
     "**most of this repo's merged PRs ship no source file at all** (measured; "
@@ -572,9 +579,6 @@ SKILL_ROUTES_TO_EVIDENCE = (
 EVIDENCE_CHURN_ROW = (
     "| **rounds 4–10** (`a82718b`…`7541bc1`) | **1,051** | **0** | **0** |"
 )
-# 🔴 The row the corrections were ABOUT, pinned too. Without it the numbers can
-# drift back while the correction sentence below still narrates having fixed
-# them -- measured: rewriting this row to 9999s left the suite green.
 # 🔴 The rows that ARE the argument for the current command, and the sentences
 # that read them. The body delegates these numbers to this file, so the file has
 # to be pinned too -- measured: with only the #498 pins in place, rewriting shape
@@ -602,10 +606,18 @@ EVIDENCE_LESSON_A = (
     "whole upstream bring-in to this round, the gate never fires, and the ladder "
     "runs forever."
 )
+# 🔴 Pinned WHOLE, tail included. The first version stopped at "merged
+# `--no-ff`" -- and the tail could then be rewritten to "a shape that
+# essentially never occurs, so prefer it" with the suite green, which is the
+# same inversion U1b exists to prevent, one clause later in the same bullet.
 EVIDENCE_LESSON_BC = (
     "**B and C** are why `--no-merges --first-parent` is NOT the fix, though it "
     "looks like one and shipped as one for a round: it reads **0** for a fix "
-    "committed on a side branch and merged `--no-ff`"
+    "committed on a side branch and merged `--no-ff` — the shape agent "
+    "worktrees produce — so the gate fires and stops a ladder whose payload is "
+    "still moving. `git show --numstat <merge>` is not the remedy either: it "
+    "prints the first-parent diff, so on shape A it reports every upstream line "
+    "as this round's work."
 )
 # 🔴 Z8's own constant: the corrected #498 baseline row. Pinned because rewriting
 # it to 9999s was green while the correction sentence below still narrated having

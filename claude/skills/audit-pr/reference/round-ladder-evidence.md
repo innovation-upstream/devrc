@@ -167,6 +167,10 @@ that delete nothing all passed a suite its author had just "mutation-verified":
   looking for it still matches;
 - **re-bind a stale value** — literally the original defect, reintroduced.
 
+Why a text assertion needs the WHOLE statement: `--` and `/* */` make "the token is present" and
+"the clause is live" different facts, so a guard commented out still satisfies every regex looking
+for it.
+
 What would have caught all four: enumerating mutants from the expression's own semantic failure
 modes — operand order, branch order, comment-out, wrong bind, off-by-one — rather than from "delete
 the thing I was already thinking about". The `{}` fixture that hid one of them made "bind just the
