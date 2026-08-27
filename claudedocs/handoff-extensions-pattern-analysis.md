@@ -38,9 +38,16 @@ paragraph is itself worked evidence for why. The first version said "six". An au
 found a further wrong claim, and the sentence recording that said "a seventh and an
 eighth" — wrong, because one of the two had already been fixed in the first commit.
 Seven is the count as it stands. Two of the three totals written here were wrong, and
-the paragraph's own subject is miscounting. **So count the `CORRECTED` markers in this
+the paragraph's own subject is miscounting. **So count the correction markers in this
 document rather than trusting any total in prose — including this one, and including
 whatever the next editor writes.**
+
+⚠ Count them by eye — the bold red label opening each correction. A text search for
+the label word over-counts, because this paragraph necessarily names the convention it
+is describing, and each mention matches. That is not a defect to fix: a document cannot
+contain a search pattern for its own marker without matching itself. It is also the
+third-order version of the same lesson, and the reason the instruction is "count", not
+"grep".
 
 Every line number below is against `nix/home.nix` at `origin/main` as of 2026-08-27
 (3,873 lines). Line numbers rot — treat them as a starting offset for a grep, not an
@@ -255,12 +262,17 @@ Brave tab
   a repo checkout empties the checkout, silently, with a success exit code. No site in
   `home.nix` uses a trailing slash today; that is not a property anyone is enforcing.
 
+  Neither `rm -rf` case above appears anywhere in `home.nix` — the original claim was
+  the `chmod -R` hazard below, misapplied to `rm`.
+
   ⚠ **The silent-destruction half is specific to `-r`.** Measured the same day:
   `rm -f <link>/` — trailing slash, no `-r` — fails LOUDLY (`Is a directory`, rc=1,
-  nothing removed). So line 714, which is `rm -f`, would catch this accident rather
-  than perform it. Do not generalise the silent case to every `rm`.
-  Neither half of this appears anywhere in `home.nix` — the original claim was the
-  `chmod -R` hazard below, misapplied to `rm`.
+  nothing removed). Do not generalise the silent case to every `rm`. But note what
+  that does *not* buy you at line 714: that call site ends `|| true`, so the rc=1 is
+  swallowed and the switch proceeds. Nothing is destroyed — and nothing is **caught**
+  either, only a stderr line. Do not rely on an `rm -f` call site to surface a
+  trailing-slash mistake as a failure.
+
   The source's actual reason (705-713) is a **TOCTOU**: the `elif` at 700 tested the
   path, so by the time line 714 runs a concurrent activation may have installed a
   **directory** there. `rm -rf` would delete it silently with rc=0 — *"measured, 5/5"*
@@ -313,7 +325,11 @@ T=$(mktemp -d); mkdir -p "$T/a/real" "$T/b/real"; : > "$T/a/real/f"; : > "$T/b/r
 ln -s "$T/a/real" "$T/a/link"; ln -s "$T/b/real" "$T/b/link"
 rm -rf "$T/a/link"    # no slash  → link gone, target + f INTACT
 rm -rf "$T/b/link/"   # slash     → link SURVIVES, target EMPTIED (f destroyed, rc=0)
-find "$T" | sort; rm -rf "$T"
+find "$T" | sort
+mkdir -p "$T/c/real"; : > "$T/c/real/f"; ln -s "$T/c/real" "$T/c/link"
+rm -f "$T/c/link/"; echo "rm -f with slash: rc=$?"   # → rc=1 'Is a directory', LOUD,
+find "$T/c" | sort                                   #   nothing removed
+rm -rf "$T"
 ```
 
 🔴 Nothing here was verified by running a `home-manager switch`. Every claim above is
