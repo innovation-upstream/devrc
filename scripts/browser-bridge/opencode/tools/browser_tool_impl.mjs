@@ -897,6 +897,26 @@ function _withHiddenNotice(data, body, autoWake) {
 // `autoWake` (4th arg, default null) carries what runBrowserOp did about a hidden
 // tab — see hiddenNotice. It only affects text/html/eval; every other op and every
 // existing caller/test is unaffected.
+//
+// 🔴 `site_notes` IS NOT FORWARDED, AND THAT IS DELIBERATE — but it is a REAL
+// capability gap, not a nil-cost omission, so it is written down rather than left
+// to be rediscovered. server.py sets `site_notes` on the ENVELOPE ROOT
+// (_annotate_site_notes: `result["site_notes"] = path`), while every branch below
+// reads `envelope.data` — so the field is structurally invisible to the model on
+// ALL 13 agent-reachable ops, not merely unmentioned in one of them.
+//
+// WHY IT STAYS DROPPED: the value is a repo-relative PATH to a reference doc, and
+// the agent def denies every built-in tool including `read`. Forwarding it would
+// hand the model a filename it has no capability to open — an instruction it can
+// only fail to follow, on every single op of every run, for a site whose notes
+// exist precisely because that site misleads a naive driver.
+//
+// 🔴 THE CONSEQUENCE, which belongs to the CALLER and not to this file: on a
+// registered host the agent runs WITHOUT the site's flow notes — the sign-in,
+// account-switch, picker and wizard sequences, and the reads that lie there. So
+// "agent-first when ambiguous" is wrong for exactly those hosts. SKILL.md's FIRST
+// DECISION section names this (`· **site-noted**`) and tests/browser_tool.test.mjs
+// pins both halves: that no op forwards the field, and that SKILL.md still says so.
 export function summarizeResult(op, envelope, env = {}, autoWake = null) {
   const data = (envelope && envelope.data) || {};
   if (op === "text") {

@@ -25,18 +25,19 @@ host and pick the right `--instance` first. Architecture / security model:
 
 **Open-ended READ — "go find X and tell me Y" → reach for `browser agent` FIRST.**
 A cheap autonomous model works in its OWN isolated tab and returns a compact
-`{answer,evidence,steps_used,status}` — the page HTML (10K–100K tokens on a heavy
-page) never enters YOUR context.
+`{answer,evidence,steps_used,status}` — the page HTML (10K–100K tokens) never
+enters YOUR context.
 
 **Drive ops directly when** the task is **precise** (URL + selector/JS known, 1–3
 ops) · **interactive** (click/type/submit/upload) · **diagnostic** (the agent is
 BLIND — its tool returns no pixels; you must SEE a screenshot, or hit-test paint
-order) · **secret** — agent-read pages go to
+order) · **site-noted** (the agent never sees `site_notes` — read it yourself,
+then drive or brief it) · **secret** — agent-read pages go to
 **OpenRouter/DeepSeek**: never banking, private mail, credential managers, or
 anything you wouldn't hand a third party. Nor **virtualised/lazy-loaded lists**.
 
-KNOW something from it → agent. Ambiguous → agent first: taking over is cheap, so
-agent-first wins even at a low success rate.
+Ambiguous → agent first: taking over is cheap, so it wins even at a low
+success rate.
 
 🔴 The AGENT's auto-`wake` covers a hidden `text`/`html` read but **never `eval`/`js`** — so
 ASSERT a non-zero content count in any `js` measurement. Result handling

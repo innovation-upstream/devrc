@@ -1492,3 +1492,79 @@ test("AGENT SURFACE PARTITION: every wire op is REACHABLE or a DECLARED exclusio
     `REVIEWED_AGENT_EXCLUSIONS citing it. Do NOT invent a rationale to make this ` +
     `green. [ops: ${undeclared.join(", ")}]`);
 });
+
+// --------------------------------------------------------------------------- //
+// `site_notes` — the agent's ONE structural blind spot, pinned in both halves.
+//
+// server.py's _annotate_site_notes sets `site_notes` on the ENVELOPE ROOT, while
+// summarizeResult reads `envelope.data`. So a registered host's flow notes never
+// reach the model. That is deliberate (the agent has no `read` tool, so a path is
+// an instruction it cannot follow) but it is a CAPABILITY GAP the caller has to
+// route around, which is why both the behaviour and its documentation are pinned.
+// Rationale: browser_tool_impl.mjs, above summarizeResult.
+// --------------------------------------------------------------------------- //
+
+// Every op the model can actually reach — derived, never hand-listed, so a newly
+// exposed op is covered the day it is added rather than the day someone
+// remembers this test.
+const AGENT_REACHABLE_OPS = [...ALLOWED_OPS_DEFAULT].sort();
+
+const SITE_NOTES_PATH = "reference/sites/example.test.md";
+const siteNotesEnvelope = () => ({
+  id: "cid", ok: true,
+  site_notes: SITE_NOTES_PATH,
+  data: {
+    url: "https://example.test/page", title: "T", domain: "example.test",
+    path: "/page", searchParams: {}, tabId: 4242,
+    text: "visible text", html: "<p>hi</p>", value: "v",
+    frames: [], clicked: "#a", typed: 3, key: "Enter",
+    woke: true, visibilityState: "visible", readyState: "complete",
+  },
+});
+
+test("SITE NOTES: no agent-reachable op forwards `site_notes` to the model", () => {
+  assert.ok(AGENT_REACHABLE_OPS.length >= 10,
+    `op inventory looks broken (${AGENT_REACHABLE_OPS.length}) — this test would ` +
+    `pass vacuously`);
+  const leaked = [];
+  for (const op of AGENT_REACHABLE_OPS) {
+    const out = String(summarizeResult(op, siteNotesEnvelope(), {}, null));
+    if (out.includes("site_notes") || out.includes(SITE_NOTES_PATH)) leaked.push(op);
+  }
+  assert.deepEqual(leaked, [],
+    `op(s) now forward \`site_notes\`: ${leaked.join(", ")}. If that is INTENDED ` +
+    `(the agent gained a way to read the file), delete this test AND the ` +
+    `\`· **site-noted**\` clause in SKILL.md's FIRST DECISION — leaving the clause ` +
+    `standing would tell every caller to route around a gap that no longer exists.`);
+});
+
+// 🔴 POSITIVE CONTROL for the test above. Without it, a `summarizeResult` that
+// returned "" for everything — or an assertion wired to the wrong variable —
+// would report a clean sweep of 13 "drops" and prove nothing at all. This feeds
+// the SAME harness a field that IS forwarded and watches the number move.
+test("SITE NOTES positive control: the same harness DOES observe a forwarded field", () => {
+  const out = String(summarizeResult("context", siteNotesEnvelope(), {}, null));
+  assert.ok(out.includes("example.test"),
+    `the harness cannot see a field summarizeResult really does forward ` +
+    `(context.domain), so its \`site_notes\` zero is meaningless: ${out}`);
+  assert.ok(!out.includes(SITE_NOTES_PATH),
+    "and it still must not carry the site_notes PATH");
+});
+
+// 🔴 A guard on WORDS is walkable by REWORDING, so this pins the WHOLE normalised
+// clause rather than a keyword. A cosmetic reword fails here — pay it; the point
+// is that the caller-facing warning cannot silently decay into something weaker.
+const SKILL_SITE_NOTED_CLAUSE =
+  "· **site-noted** (the agent never sees `site_notes` — read it yourself, " +
+  "then drive or brief it) ·";
+
+test("SITE NOTES: SKILL.md's FIRST DECISION still warns the caller", () => {
+  const skill = readBB("SKILL.md");
+  const normalised = skill.replace(/\s+/g, " ");
+  assert.ok(normalised.includes(SKILL_SITE_NOTED_CLAUSE),
+    `SKILL.md no longer carries the site-noted clause verbatim. The agent is ` +
+    `STILL blind to \`site_notes\` (the test above proves it), so a caller reading ` +
+    `only SKILL.md would now dispatch the agent at a registered host and lose that ` +
+    `site's flows. Restore the clause, or — if the gap was actually closed — change ` +
+    `both tests together. Expected: ${JSON.stringify(SKILL_SITE_NOTED_CLAUSE)}`);
+});
