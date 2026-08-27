@@ -139,15 +139,47 @@ through in place and the number is retired with it.
    Watch that first push; verify with `git ls-remote`, never the wrapper's rc.
    ⚠ **PRICE IT BEFORE ARMING — this reaches other people's sessions, not just yours.**
    `core.hooksPath` is set **GLOBALLY**, for every repo and every concurrent session on the box.
-   Measured 2026-08-27: the devrc suite takes **10m37s** (8798 tests), **~20 devrc worktrees** on
-   this host satisfy `tests-on-push.sh`'s applicability gate, and ~15 agent sessions run
-   concurrently. Repos carrying a **repo-local** `core.hooksPath` are unaffected (measured:
+   🔴 **CORRECTION — an earlier revision of this line said "10m37s", and that number was WRONG AND
+   WRONGLY DERIVED.** It came from a **serial** `pytest scripts/tests/` run (637s) quoted as if it
+   were the gate's cost; the gate does not run serially, it runs `-n 4 --dist loadfile`. Right
+   ballpark, invalid derivation — the kind of asserted measurement that stops the next reader
+   checking. The authoritative figure is the census `scripts/run-tests.sh` prints every run:
+   **527s (~8.8 min) over 31 targets**, and it is concentrated — `scripts/tests` 209s (40%),
+   `browser-bridge` 143s (27%), `dl-router` 99s (19%), the other 28 targets ~76s **combined**.
+   **~20 devrc worktrees** on this host satisfy `tests-on-push.sh`'s applicability gate, and ~15
+   agent sessions run concurrently.
+   🔴 **The gate is FLOOR-BOUND, not core-bound — do not try to fix it with more workers.**
+   Measured 2026-08-27: `--dist loadfile` pins a file to ONE worker (deliberately; several suites
+   share module state), so a target cannot finish faster than its slowest FILE.
+   `test_subsystem_store_api.py` alone is **~178s** and `test_run_tests_floors.py` alone is
+   **98.7s for 20 tests**, against a whole-target time of **237s at `-n 4`** — i.e. `scripts/tests`
+   is already within ~1.3x of its own floor. The host has 24 cores but sits at load ~15.9.
+   Two distinct causes, needing different fixes: `test_run_tests_floors.py` **spawns the real
+   `run-tests.sh` 20 times** (~5s each), while the `store_api` slowloris / half-open / dripped-body
+   tests **wait on hardcoded wall-clock deadlines** — the `25.01s / 15.02s / 10.01s / 5.51s / 4.00s`
+   quantisation in `--durations` is the fingerprint, and none of those deadlines is env-tunable
+   today. Repos carrying a **repo-local** `core.hooksPath` are unaffected (measured:
    `homelab-talos` + 17 of its worktrees, `kubeclaw{,-cloud,-embed}`, `promptver`) — a local value
    overrides the global one entirely. **Zach deferred this deliberately on 2026-08-27 with those
    numbers in view; it is a decision awaiting him, not an oversight.**
    🔴 Invoke by **absolute** path (`$HOME/workspace/devrc/githooks/install.sh`).
 3. **Fix or close the `measure.py` latent misreport** (see Open investigations). Repo `devrc`,
    file `scripts/present/measure.py`.
+5. **Make the pre-push gate change-scoped, so a typical push costs seconds instead of ~9 min.**
+   `innovation-upstream/devrc#952`. 🔴 **This is the lever that makes step 2 cheap, and it is ~90%
+   already built** — `should_run_by_files` (`githooks/tests-on-push.sh:~152`) already walks the
+   pushed refs and computes `git diff --name-only` per range, then **throws the file list away** to
+   answer a boolean against `CODE_RE='^(scripts/|flake\.nix$|flake\.lock$)'`. So touching one file
+   under `scripts/` runs all 31 targets: #908's own push was a shell installer and paid full freight
+   to learn nothing about `browser-bridge` or `dl-router`. Replace the boolean with a path→target
+   map; keep the existing **fail-toward-running** discipline for anything ambiguous; let shared
+   infra (`testlib/`, `conftest.py`, `flake.*`) still run everything; leave CI running the full set
+   so the pre-push gate is fast feedback rather than the sole authority.
+   ⚠ **Ranked 5, not 4, deliberately — ranks are never renumbered here** (a claim slug is
+   `<doc>-<rank>`, so inserting at 4 would silently re-point a live claim on the laptop item).
+   ⚠ **This does NOT get the FULL suite to 60s and nothing credibly will** — that is 9x on work
+   which is mostly waiting and process-spawning. Injectable deadlines plus splitting the two hot
+   files might reach 3–4 min; past that you are deleting real integration coverage.
 4. **Deploy to the laptop** — `home-manager switch` there picks up the keepalive. Unverified;
    `zach@192.168.50.155`.
 
