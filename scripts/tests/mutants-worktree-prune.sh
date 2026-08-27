@@ -530,9 +530,17 @@ run 'gitlink-mode-misspelled-so-no-gitlink-is-ever-seen' \
 # Only the uninitialised CONTROL fixture can kill it, and that is the whole
 # reason that fixture exists: `.gitmodules` is tracked and a gitlink is in the
 # index, yet git removes the worktree fine.
+#
+# 🔴 ANCHORED ON THE TWO-LINE PAIR, because `^    if not is_dir(path):$` alone
+# matches TWICE — `worktree_dirty` has the identical line. Anchoring on the bare
+# line injected the over-block return into `worktree_dirty` as well, whose
+# caller unpacks a 3-tuple, so ~40 unrelated tests died on a `ValueError`. The
+# named killer still died, so it was never a false green — but a mutant that
+# detonates half the suite is not isolated, and "isolate the mutation" is this
+# harness's own premise. `return None, []` is unique to `worktree_submodules`.
 run 'submodules-reported-for-every-worktree' \
   test_a_worktree_with_an_UNINITIALISED_submodule_is_still_removable \
-  's|^    if not is_dir(path):$|    if True:\n        return True, ["over-block"]\n    if not is_dir(path):|'
+  '/^def worktree_submodules/,/^def _paths_differ/ s|^    if not is_dir(path):$|    if True:\n        return True, ["over-block"]\n    if not is_dir(path):|'
 run 'executor-skips-its-own-submodule-recheck' \
   test_a_submodule_appearing_after_the_scan_skips_rather_than_fails \
   's|^        if subs is not False:$|        if False:|'
@@ -628,6 +636,13 @@ run 'exclusion-credited-for-rows-it-did-not-free' \
 run 'vanished-worktree-marked-submodule-unknown' \
   test_a_vanished_worktree_is_not_marked_as_a_submodule_unknown \
   's|^                    if subs is None and r.get("path_exists") else "")$|                    if subs is None else "")|'
+# 🔴 THE OTHER DIRECTION. The mutant above pins only that the marker STAYS OFF
+# for a vanished row; with it alone, deleting the marker entirely SURVIVED all
+# 207 tests — the positive side was unguarded, so `[submodules UNKNOWN]` could
+# never print and the suite stayed green. A gate needs a mutant per direction.
+run 'unknown-marker-never-prints' \
+  test_an_unanswered_row_is_not_described_as_carrying_submodules \
+  's|^                    else "  \[submodules UNKNOWN — held back\]"$|                    else ""|'
 
 printf '\n== POSITIVE CONTROLS — mutants whose fate is KNOWN ==\n'
 # 🔴 A comment-only edit MUST survive. If it kills something, the harness is

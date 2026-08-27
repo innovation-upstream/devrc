@@ -3827,6 +3827,14 @@ def test_an_unanswered_row_is_not_described_as_carrying_submodules(tmp_path, cap
     # 🔴 The permanence claims must NOT be attached to this row.
     assert "PERMANENT" not in out, out
     assert "carry SUBMODULES" not in out, out
+    # 🔴 …AND THE MARKER MUST ACTUALLY PRINT. Without this the marker's POSITIVE
+    # direction is unguarded: two mutants — reverting the gate to round 3's
+    # `submodule_reasons` form, and deleting the marker outright with
+    # `if False` — both SURVIVED all 207 tests. The summary sentence this test
+    # already checks sends the operator to --verbose for the git error, so a
+    # --verbose that shows neither marker nor error is the exact
+    # summary/verbose mismatch this gate was changed to close.
+    assert "[submodules UNKNOWN — held back]" in out, out
 
 
 def test_the_two_further_lines_do_not_read_as_additive(tmp_path, capsys):

@@ -314,9 +314,10 @@ def _git_raw(cwd: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.Co
     regardless, so a worktree whose DIRECTORY NAME holds an undecodable byte
     still takes the whole scan down through `list_worktrees` — identically on
     `origin/main`, so it is pre-existing here and not this change's doing.
-    Tracked separately rather than widened into this PR; converting the
-    porcelain parser to bytes touches the core scan path and wants its own
-    tests. Do not read this helper as evidence the abort class is closed.
+    Tracked as issue #944 rather than widened into the PR that added this
+    helper; converting the porcelain parser to bytes touches the core scan path
+    and wants its own tests. Do not read this helper as evidence the abort
+    class is closed.
     """
     return subprocess.run(
         ["git", "--no-optional-locks", "-C", str(cwd), *args],
@@ -1695,6 +1696,26 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
             # answered … --verbose gives the git error" over a --verbose
             # showing neither. `path_exists` separates "not asked" from
             # "asked and unanswered", which is the distinction both sites need.
+            #
+            # 🟡 Scope, stated honestly: OUTSIDE A TOCTOU RACE the two gates are
+            # exactly equivalent. `worktree_submodules` returns `(None, [])`
+            # only from its `is_dir` guard and every other `None` carries a
+            # reason, so "unanswered, no reason, path live" needs the directory
+            # to vanish between this `build()`'s two `is_dir` calls.
+            # `path_exists` is still the right gate — it STATES the distinction
+            # instead of standing in for it — but this is a correctness tidy,
+            # not a defect anyone has hit.
+            #
+            # 🔴 AND THEREFORE NO TEST CAN TELL THIS GATE FROM THE OLD ONE.
+            # MEASURED: swapping `path_exists` back to `submodule_reasons`
+            # SURVIVES all 207 tests. There is deliberately NO mutant for it —
+            # a `run` line asserting coverage it does not have is worse than
+            # none, which is the defect round 4 of this PR existed to fix. What
+            # IS pinned is both directions of the marker itself: it must not
+            # print for a vanished row (`vanished-worktree-marked-submodule-
+            # unknown`) and it must print for an unanswered live one
+            # (`unknown-marker-never-prints`) — the second closed a real hole,
+            # where deleting the marker outright also survived all 207.
             mark = ("  [SUBMODULES — git will refuse to remove this]" if subs
                     else "  [submodules UNKNOWN — held back]"
                     if subs is None and r.get("path_exists") else "")
