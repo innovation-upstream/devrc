@@ -1,0 +1,203 @@
+# Handoff: devrc push keepalive (#782) — 2026-08-27
+
+_No `clawgate-task:` front matter, deliberately._ The resolver returned **exit 6** with one link —
+**#306, role=`read`** — which is the *previous* session's clawgate task-threads card, fetched by
+`/resume`'s reconciler, not worked here. This session's work was **devrc issue #782**, a GitHub
+issue with no clawgate card. Reading a task is not doing its work, so nothing is recorded.
+
+## Run this first — the index, one read-only command
+```bash
+python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo devrc
+```
+Terse pointers this doc does not carry, curated by past sessions and outliving it.
+🔴 RECALL, NOT LIVE OBSERVATION — every line is a pointer to VERIFY, never a current
+reading, and it may describe a gotcha already fixed. `scope-absent`/`scope-empty` means
+nothing is recorded yet: ordinary, not an error, and not a clean bill of health.
+Non-blocking: if it exits non-zero, print the stderr line and carry on.
+
+## Goal
+Close devrc **#782** — `git push` returning **141 (SIGPIPE)** with the branch never created, after
+the `pre-push` test gate runs. Reproduce it, fix it, ship it, and make it live.
+
+## State now
+
+- **#782 is CLOSED — reproduced, fixed, merged, deployed, and verified against the real failing
+  path.** Not "deployed"; verified.
+- **Mechanism, measured 2026-08-26 against real github.com, twice independently:**
+  github.com closes an **idle `git-receive-pack` session after ~360 s** (361 s in both runs; the
+  clean one returned `rc=255` + `Connection to github.com closed by remote host.`). git opens **and
+  negotiates** the connection **before** running `pre-push` — measured with a `GIT_SSH_COMMAND`
+  stamp, not inferred from interleaved output: `ssh-launch 04:12:04Z` then `hook START 04:12:05Z`.
+  So the connection idles for the hook's whole runtime.
+- **It is NOT flaky. It is a hard threshold**, and it fires more often the longer the suite grows.
+  It reads as a network error because the hook prints `✅ devrc test suite passed.` *after* the
+  connection has already died.
+- **Fix: PR #887, MERGED `1d543186`** — `core.sshCommand = "ssh -o ServerAliveInterval=30 -o
+  ServerAliveCountMax=6"` in `nix/programs/git/default.nix`, plus the two `GIT_SSH_COMMAND` exports
+  that would otherwise bypass it (`scripts/claim-work.sh`, `scripts/resume-state.sh`), plus a
+  ledger test over every such export.
+- **DEPLOYED AND LIVE** — `home-manager switch` run 2026-08-27, generation **573**.
+  `git config --global --get core.sshCommand` returns the value. Rollback: generation **572**.
+- **Follow-on defect found and filed: issue #905** — `githooks/install.sh` cannot install the hooks
+  **at all** on a home-manager host. **Fix in review: PR #908, CI green, MERGEABLE, awaiting the
+  required approving review.** Not merged.
+- ⚠ **#908 merged ≠ the gate armed.** It fixes the installer; it does not run it. `core.hooksPath`
+  is still **empty** on this host and the blocking pre-push gate has never actually run here.
+
+### Verified vs merely deployed
+| claim | evidence |
+|---|---|
+| **#782 fixed on this host** | 🔴 the row that closes it. Same harness that produced the failure: 420 s hook, **`GIT_SSH_COMMAND` unset** so the keepalive can only come from the deployed config → `push_rc=0`, `remote_sha == local_sha`, `BRANCH_CREATED`. Previously `rc=141` / `BRANCH_ABSENT` |
+| the deploy is real | `nix eval` predicted gitconfig derivation `1yxm38gq…`; after the switch `readlink -f ~/.config/git/config` **is** `1yxm38gq…` (was `nxa6x4jl…`) |
+| no version skew introduced | `clawgatectl` still `0.8.1` after the switch, matching the live server |
+| #887 merged by CONTENT | `git show origin/main:nix/programs/git/default.nix` carries `core.sshCommand`; both exports carry the option. **A squash merge is never an ancestor — never verify by ancestry** |
+| #908 does not mask home-manager settings | measured outside any repo with both global files present: `rebase.autoStash=false`, `merge.autoStash=false`, `diff.algorithm` all survive. **git reads BOTH global files**; only `--global --list` narrows its view |
+| #908's `--uninstall` respects provenance | operator-created empty `~/.gitconfig` **survives**; installer-created one is still **removed** (both arms — the second is what stops "survives" being satisfied by an uninstall that deletes nothing) |
+
+### NOT verified — stated plainly
+- **The laptop was never touched.** Everything above is the workbench only. `nix/programs/git` is
+  shared, so the laptop gets the keepalive on its next `home-manager switch` — unverified.
+- **Never measured that the real devrc suite exceeds 361 s.** The reproduction used a `sleep` hook
+  deliberately (isolates duration, finds the threshold, avoids running the suite that travelled the
+  GIT_DIR-incident path against a clone that must keep `origin`). That is the gap between
+  "mechanism reproduced" and "this is precisely what happened on those two pushes".
+- **361 s is a GitHub-side value measured twice on one day**, not a documented constant. The fix is
+  pinned against it *with margin*, not tuned to it. Keepalive validated to 1367 s, not indefinitely.
+
+## Open investigations — live diagnosis state
+
+### `scripts/present/measure.py` can report "no pre-push gate installed" while one IS armed
+- **Symptom:** a latent misreport, not yet observed in the wild. Found during #908's audit.
+- **Observed (values):** `m_hook_gate_install` (~`scripts/present/measure.py:1089`) reads
+  `git config --local --get core.hooksPath; git config --global --get core.hooksPath`. Measured on
+  git 2.55.0: when **both** `~/.gitconfig` and `~/.config/git/config` exist, `git config --global
+  --get <key>` reads **`~/.gitconfig` only** — the XDG file's keys stay *in effect* but vanish from
+  `--global` scope reads. Confirmed live: with both present, `--global --list` printed only
+  `core.hookspath=/some/hooks`.
+- **Ruled out:** that it breaks today — `core.hooksPath` is exactly the key #908's installer writes
+  into `~/.gitconfig`, so the reader finds it. Also ruled out for `scripts/run-tests.sh:2183`, which
+  **unions** the `--show-origin` result with hardcoded `~/.gitconfig` + XDG paths, so its protected
+  set can only grow.
+- **Leading hypothesis:** the break needs `core.hooksPath` to land in the **XDG** file *and*
+  `~/.gitconfig` to appear later. Reachable if home-manager ever declares `core.hooksPath`.
+- **Next probe:** decide whether `measure.py` should read effective config
+  (`git config --get core.hooksPath`, no `--global`) instead of scope-qualified. One-line change;
+  the question is whether the measure *wants* scope or effect.
+
+## Next steps (ranked)
+🔴 Numbering is stable — `claim-work --slug-for <this doc> <rank>` is the lock; re-ranking
+re-points every live claim.
+
+1. **Review and merge devrc #908.** `IN FLIGHT: innovation-upstream/devrc#908` — CI green,
+   MERGEABLE, blocked only on the required approving review. Touches `githooks/install.sh`,
+   `githooks/README.md`, `scripts/tests/test_githooks_install_readonly_global.py`,
+   `scripts/tests/mutants-install-sh.sh`.
+2. **Run `githooks/install.sh` for the first time on this host** — *after* #908 merges. 🔴 This is
+   the real threshold, not the merge: success arms a **blocking** pre-push gate
+   (`TESTS_ON_PUSH=on` inside devrc) that has never run here. #782's keepalive is deployed, so the
+   pairing is right. Watch that first push; verify with `git ls-remote`, never the wrapper's rc.
+3. **Fix or close the `measure.py` latent misreport** (see Open investigations). Repo `devrc`,
+   file `scripts/present/measure.py`.
+4. **Deploy to the laptop** — `home-manager switch` there picks up the keepalive. Unverified;
+   `zach@192.168.50.155`.
+
+## Gotchas / decisions / dead-ends
+
+- 🔴 **`githooks/install.sh` cannot write global git config on a home-manager host.** `git config
+  --global` resolves to `~/.config/git/config`, a **symlink into the read-only nix store**;
+  `~/.gitconfig` does not exist. The installer dies `could not lock config file … Read-only file
+  system`, rc=255, on its **pre-existing** `core.hooksPath` line. **This is why `core.hooksPath`
+  reads empty on this host** — #782 and I both attributed that to another session toggling it. It
+  had simply never been installable. (Issue #905; fix in #908.)
+- 🔴 **The first version of #887 put the fix in `install.sh` and was therefore INERT**, on the
+  reasoning "the installer already writes global git config". That reasoning was false on the
+  machines devrc targets. An audit caught it. **`nix/programs/git/default.nix` is the repo's
+  declarative home for git config** — it GENERATES the read-only file.
+- 🔴 **`ssh -G git@github.com` is the WRONG INSTRUMENT for this fix and answers anyway.** It reports
+  `serveraliveinterval 0` even with the fix fully live, because it reads `~/.ssh/config` — which was
+  deliberately not modified — while git passes the options on the **command line**, where `ssh -G`
+  cannot see them. Reading that zero as a result would report a working fix as broken.
+- 🔴 **`~/.ssh/config` is a plain unmanaged file here** (`readlink -f` resolves to itself, not into
+  devrc or /nix/store). A fix placed there protects one machine and never ships. That is what ruled
+  out the issue's own option 2 as written.
+- 🔴 **`GIT_SSH_COMMAND` (env) BEATS `core.sshCommand` (config)**, so any script exporting it
+  bypasses the fix. Two do; both now carry the keepalive, with a ledger test that fails when the
+  set GROWS. ⚠ `claim-work.sh` uses `${GIT_SSH_COMMAND:-…}` — an **inherited** outer value wins and
+  the ledger cannot see it (it reads the literal default). Known blind spot, documented in-file.
+- 🔴 **`ServerAliveCountMax` defaults to 3.** Setting only the interval silently creates a
+  `30×3 = 90 s` disconnect trigger on **every** git-over-ssh operation, where previously only
+  `TCPKeepAlive` applied and a stall of any length survived. Set to **6** (180 s) explicitly. This
+  is the fix's own failure mode — a trade, not a free win.
+- 🔴 **A wrapper's trailing command swallows the push status.** `git push … ; echo; tail` reported
+  **exit 0** twice while the real rc was **141** and no branch existed. **Verify a push with
+  `git ls-remote`, never the wrapper's exit code.**
+- 🔴 **`printf … | grep -q` returns 141 under `set -o pipefail`** when the match is early and the
+  output large — `grep -q` exits first, `printf` takes SIGPIPE. Found in #908's mutation harness:
+  `CONTROL-KILL` scored **SURVIVED against a run with 10 genuinely failing tests**, and in the
+  negated form (`! … | grep -q failed`) it reads as *"no failures"* — **a false green that would
+  certify every mutant against a broken baseline.** Grep a **file**, not a pipe. Same SIGPIPE
+  family as #782 itself, in a completely different place.
+- 🔴 **Editing a file that a background job is currently reading invalidates that run — and bash
+  re-reads scripts by BYTE OFFSET, so editing a running script corrupts it mid-execution.** Hit
+  **five times** this session: a probe reported `rc=127` from a corrupted fragment; three full-suite
+  runs graded a moving tree; an audit agent found the file changing under it. **Fix:** `sha256sum`
+  the touched files before a long run and `sha256sum -c` after — that check is now part of the
+  procedure, and it is what makes a green run evidence about the tree you committed.
+- 🔴 **Never run `handoff_doc.py`/commit from the devrc base clone.** It is shared and other
+  sessions move its branch constantly — observed on `main`, then `docs/handoff-783-decision`, then
+  `feat/rig-control-toggle-and-timers` **within one session**. Work from a worktree off
+  `origin/main`.
+- 🔴 **`home-manager switch` deploys whatever branch the shared clone happens to be on.** Mine
+  landed in a **five-minute window**: `merge origin/main` at 20:27, generation built 20:29, another
+  session checked out a different branch at 20:34. Three minutes later and it would have deployed
+  their branch **with a clean success**. Sync, then switch, then verify by live state — and check
+  `branch --show-current` first.
+- 🔴 **`clawgatectl.nix` builds from the host's homelab-talos WORKING TREE**, so a stale checkout
+  silently rebuilds an OLD version and reports success. Checked before switching: tree carried
+  `buildVersion = "0.8.1"`, matching the live server. It stayed 0.8.1 after.
+- 🔴 **A FALLBACK THAT DISABLED `rebase.autoStash = false` WOULD BE WORSE THAN THE BUG.** #908 adds
+  `~/.gitconfig`; that guard is devrc's fail-closed protection against the repo-global stash that
+  has already stolen work between sessions. Measured outside any repo: it survives. Verify this
+  again if the fallback logic ever changes.
+- ⚠ **`git config --global --list` narrows after #908** — once `~/.gitconfig` exists it is the only
+  file `--global` *reads*. Effective config is unchanged. Second-order: global writes now **succeed**
+  where they previously failed closed, landing in the file that **outranks** the home-manager one —
+  a new drift vector for a repo that deliberately pinned settings in nix.
+- ⚠ **"No script in devrc reads `git config --global`" is FALSE** and was asserted in three places.
+  `scripts/run-tests.sh:2183` and `:2490` and `scripts/present/measure.py` all do. Corrected in
+  #908 and in a public comment on #905.
+- 🔴 **THE PATTERN OF THIS SESSION, worth more than any single fix: almost every defect after the
+  first was a CLAIM RECORDED AS SETTLED FACT, not a logic error.** Seven audit rounds on #887; the
+  code was mostly right and the *sentences about the code* were the unreliable part. Twice the false
+  claim was mine — including clearing a surviving mutant as "fails safe" from a fixture that
+  structurally could not show the failure, then writing that conclusion into the tree. **An
+  assertion of safety is what stops the next reader looking.** Corollary that keeps paying: when a
+  guard's docstring names a relationship, check the body is as wide as the sentence.
+- **Dead end, do not repeat:** `nix-store --realise` on the generated gitconfig path to inspect it
+  pre-switch — it is not built yet. `nix eval` of the option, plus the derivation **hash changing**,
+  is the cheap pre-deploy evidence that the artifact will differ.
+
+## How to verify
+```bash
+# the keepalive is LIVE on this host
+git config --global --get core.sshCommand      # -> ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6
+readlink -f ~/.config/git/config               # -> /nix/store/1yxm38gq…-hm_gitconfig
+# 🔴 NOT `ssh -G git@github.com` — it reads ~/.ssh/config, which is deliberately untouched, and
+# will report `serveraliveinterval 0` while the fix works perfectly.
+
+# the fix is on main (CONTENT, never ancestry — #887 was squash-merged)
+git -C ~/workspace/devrc show origin/main:nix/programs/git/default.nix | grep -n sshCommand
+
+# 🔴 THE probe that actually closes #782 — reproduce the original symptom.
+#   A pre-push hook that sleeps > ~360s, pushing a REAL content change, with GIT_SSH_COMMAND UNSET
+#   so the keepalive can only come from config. Expect rc=0 and the branch present.
+#   Verify by `git ls-remote`, NEVER by the wrapper's exit code. Delete the scratch branch after.
+#   Arm the hook with a REPO-LOCAL core.hooksPath in a throwaway clone — never `githooks/install.sh`,
+#   which sets it GLOBALLY for every session on the box.
+
+# #908's state
+gh pr view 908 --repo innovation-upstream/devrc --json state,mergeable,statusCheckRollup
+
+# the gate is NOT armed until someone runs the installer
+git config --global --get core.hooksPath       # -> empty, expected, until step 2 above
+```
