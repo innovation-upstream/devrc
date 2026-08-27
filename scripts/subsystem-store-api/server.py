@@ -214,11 +214,18 @@ import subsystem_recall as rc  # noqa: E402
 
 # 🔴 THE PATH CLASSIFIER IS IMPORTED, NOT DEFINED HERE — it moved into
 # `subsystem_resolver` when `load_index` grew an entry-kind guard of its own.
-# "What IS this path" spelled at two sites is wrong at one of them, and the two
-# sites are `/snapshot` and the index loader: disagreeing about a FIFO named
-# `*.md` is what costs a request thread. The three ACTION tables stay with their
-# contexts (`_ROOT_ACTIONS`/`_ENTRY_ACTIONS` below, `_LOADER_ENTRY_ACTIONS`
-# there), because an action is a property of the context and not of the path.
+# "What IS this path" spelled at N sites is wrong at N-1 of them, and the two
+# sites GUARDED BY THIS CLASSIFIER are `/snapshot` and the index loader:
+# disagreeing about a FIFO named `*.md` is what costs a request thread. The
+# three ACTION tables stay with their contexts (`_ROOT_ACTIONS`/`_ENTRY_ACTIONS`
+# below, `_LOADER_ENTRY_ACTIONS` there), because an action is a property of the
+# context and not of the path.
+#
+# ⚠ TWO GUARDED SITES IS NOT TWO SITES — this comment used to say it was, and
+# was wrong. `subsystem_touch.census()` globs `*.md` and `read_text`s the result
+# with no kind check, so it still hangs on a fifo. It is unguarded BY RULING,
+# not by oversight: it is CLI-only and NOTHING in this server imports
+# `subsystem_touch`, so no request thread can reach it.
 #
 # Re-exported deliberately (hence the `F401`): `KIND_*`, `SKIP/TAKE/REFUSE`,
 # `ALL_KINDS`, `classify_path` and `action_for` are read off THIS module by

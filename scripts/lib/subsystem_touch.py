@@ -4745,6 +4745,16 @@ def census(store_root: str | Path, now: float | None = None) -> Census:
         scope = scope_dir.name
         by_scope.setdefault(scope, 0)
         nested.setdefault(scope, {})
+        # ⚠ THE THIRD `glob("*.md")` + `read_text` SITE, AND THE ONE WITH NO
+        # ENTRY-KIND GUARD. `subsystem_resolver.load_index` and the API's
+        # `/snapshot` both classify a candidate before opening it; this one does
+        # not, so a fifo named `*.md` still blocks `read_text` here forever and a
+        # directory named `*.md` still raises `IsADirectoryError` out of
+        # `census()`. Left that way by ruling, not oversight: `census` is CLI
+        # only — nothing in `subsystem-store-api/server.py` imports
+        # `subsystem_touch` — so no request thread can reach it, and widening the
+        # guard here was considered and declined. If that import ever appears,
+        # this line becomes a hung worker.
         for md in sorted(scope_dir.glob("*.md")):
             if md.name == "README.md":
                 continue

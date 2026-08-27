@@ -68,6 +68,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -2712,11 +2713,29 @@ class TestCollectDegrades:
         """🔴 THE LINE THE DEGRADATION STOPS AT, stated as a test. A malformed
         entry is a file we READ and could not interpret; an unreadable one means
         the store was not fully read, so the entry SET is unknown and there is
-        nothing honest to degrade to. Reached with a directory where a `.md`
-        belongs — an OSError any user hits, not a mode change a root-run sandbox
-        would silently bypass."""
+        nothing honest to degrade to.
+
+        🔴 IT USED TO BE A DIRECTORY, AND THAT SHAPE NO LONGER REACHES THIS
+        LINE. `_LOADER_ENTRY_ACTIONS` now REFUSES `directory` and `link-to-dir`
+        before `open()` — one stray `mkdir <scope>/<slug>.md` was measured 503ing
+        the whole store for every caller — so a directory DEGRADES into a named
+        malformed row and this control had gone vacuous, asserting a raise that
+        no longer happens.
+
+        The replacement is still not a mode change a root-run sandbox would
+        bypass: a symlink whose target resolution fails with ENOTDIR (a path
+        under a regular file). `classify_path` calls that `indeterminate` — "I
+        could not look" — which the loader deliberately still TAKEs, so
+        `read_text` runs and raises `NotADirectoryError`."""
         store = _synth_store(tmp_path, {"alpha-unit.md": GOOD_A})
-        (store / "synth-scope" / "broken.md").mkdir()
+        scope_dir = store / "synth-scope"
+        blocker = scope_dir / ".not-a-directory"
+        blocker.write_text("a regular file, so paths UNDER it are ENOTDIR\n")
+        os.symlink(blocker / "child", scope_dir / "broken.md")
+        assert sr.classify_path(scope_dir / "broken.md") == sr.KIND_INDETERMINATE, (
+            "the fixture is not a kind the loader still TAKEs, so it would be "
+            "refused rather than read and this control would prove nothing"
+        )
         with pytest.raises(OSError):
             sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
 

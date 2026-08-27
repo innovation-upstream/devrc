@@ -1009,18 +1009,28 @@ class TestReadOnlyPhase1:
 # scan, and — since the entry-kind guard landed — `subsystem_resolver`'s INDEX
 # LOADER, which is a different context and therefore a different column.
 #
-# 🔴 THE LOADER COLUMN IS THE NARROW RULING, CELL BY CELL. It refuses exactly
-# `broken-link` (the Emacs `.#entry.md` lock file, which used to 503 the whole
-# store) and the two shapes of "an `open()` on this never returns" — `other`
-# (the fifo itself) and `link-to-other` (a symlink pointing at one), each of
-# which was measured HANGING the request thread. It TAKES everything else —
-# most pointedly `link-to-file`, which the loader has always read. Copying the
-# `_ENTRY_ACTIONS` column wholesale is the over-broad form that was explicitly
-# rejected, and flipping any remaining TAKE here to REFUSE is a behaviour change
-# for ordinary callers; every one of those flips is a mutant this column kills.
+# 🔴 THE LOADER COLUMN IS THE NARROW RULING, CELL BY CELL. Every REFUSE in it
+# rests on ONE criterion, applied over three rulings and never widened: this
+# loader has never successfully READ that kind — it has only ever raised or
+# blocked on one — so refusing it changes no legitimate caller. That covers
+# `broken-link` (the Emacs `.#entry.md` lock file, which 503'd the whole store),
+# the two shapes of "an `open()` on this never returns" — `other` (the fifo) and
+# `link-to-other` (a symlink pointing at one), each measured HANGING the request
+# thread — and the two shapes of `IsADirectoryError`, `directory` and
+# `link-to-dir`, measured 503ing the whole store off one stray `mkdir`.
+#
+# It TAKES everything else — most pointedly `link-to-file`, which the loader has
+# always read. Copying the `_ENTRY_ACTIONS` column wholesale is the over-broad
+# form that was explicitly rejected, and flipping any remaining TAKE here to
+# REFUSE is a behaviour change for ordinary callers; every one of those flips is
+# a mutant this column kills.
 DECISION_TABLE = [
     ("KIND_BROKEN_LINK", "REFUSE", "REFUSE", "REFUSE"),
-    ("KIND_LINK_TO_DIR", "REFUSE", "REFUSE", "TAKE"),
+    # 🔴 CLOSED IN THE SAME ROUND AS `KIND_DIRECTORY`, AND FOR ITS REASON —
+    # `read_text` raises `IsADirectoryError` whether the directory is named
+    # directly or reached through a link, and that OSError fails closed into a
+    # store-wide 503 for every caller.
+    ("KIND_LINK_TO_DIR", "REFUSE", "REFUSE", "REFUSE"),
     ("KIND_LINK_TO_FILE", "SKIP", "REFUSE", "TAKE"),
     # 🔴 CLOSED, AND IT WAS THE SAME DEFECT — NOT A LESSER ONE. This cell was
     # `TAKE` for one round, pinned as a named residual because the ruling that
@@ -1033,16 +1043,47 @@ DECISION_TABLE = [
     # column now refuses BOTH shapes of it. `link-to-file` stays `TAKE` — that
     # is still the upper bound, and still the point of the narrow form.
     ("KIND_LINK_TO_OTHER", "SKIP", "REFUSE", "REFUSE"),
-    ("KIND_DIRECTORY", "TAKE", "REFUSE", "TAKE"),
+    # 🔴 CLOSED, AND IT WAS NEVER A LESSER DEFECT EITHER. The loader TOOK this
+    # cell for three rounds while its own ledger called `chmod 000` "the only
+    # residual left" — which was measured false: `store/beta/notes.md` created
+    # as a DIRECTORY answered `GET /api/v1/recall/alpha` (a scope the caller
+    # never asked about, unrestricted legacy token) with `503 index entry
+    # unreadable … IsADirectoryError`, while the same store carrying a dangling
+    # `.#lock.md` instead answered 200. One accidental `mkdir <scope>/notes.md`
+    # or one rsync/restore artefact took `/recall` and `/search` down for EVERY
+    # caller. `read_text` has never once succeeded on a directory, so refusing
+    # it changes no legitimate caller — the criterion the narrow ruling itself
+    # used — and it makes the loader agree with `/snapshot`, which already
+    # refused it.
+    ("KIND_DIRECTORY", "TAKE", "REFUSE", "REFUSE"),
     ("KIND_REGULAR_FILE", "SKIP", "TAKE", "TAKE"),
     ("KIND_OTHER", "SKIP", "REFUSE", "REFUSE"),
     # 🔴 "I could not look" must never share a cell with "nothing is there".
     # In the LOADER it is TAKE, so `read_text` raises and the four-state rule's
     # "the store was not fully READ" is preserved — a DIFFERENT fact from "this
-    # entry is malformed", which is what REFUSE would report it as.
+    # entry is malformed", which is what REFUSE would report it as. ⚠ This is
+    # the cell the `directory` ruling deliberately did NOT sweep up with it:
+    # "the lstat failed" is a different premise from "this kind can never be an
+    # entry", and only the second justifies a REFUSE.
     ("KIND_INDETERMINATE", "REFUSE", "REFUSE", "TAKE"),
     ("KIND_ABSENT", "SKIP", "SKIP", "TAKE"),
 ]
+
+# 🔴 THE LOADER'S RESIDUAL SET, PINNED AS A LITERAL — the set of kinds
+# `_LOADER_ENTRY_ACTIONS` still maps to TAKE, which is exactly the set of shapes
+# whose `read_text` can still fail closed into a store-wide 503.
+#
+# It is spelled here, by hand, and NOT derived from the table, because the whole
+# defect this pins is a LEDGER that drifted: two documents claimed `chmod 000`
+# was "the only residual" while the table had four TAKE cells that could raise,
+# one of which (`directory`) took the store down for every caller. A derived set
+# would have agreed with the table forever and said nothing.
+LOADER_RESIDUAL_KINDS = {
+    "regular-file",   # chmod 000 -> PermissionError
+    "link-to-file",   # a link whose TARGET is chmod 000 -> PermissionError
+    "indeterminate",  # the lstat itself failed -> OSError on read
+    "absent",         # vanished between glob() and classify -> FileNotFoundError
+}
 
 # The LEDGER of every action table that exists, so "all three contexts" is a
 # claim something checks rather than a number in a test name.
@@ -1090,16 +1131,164 @@ class TestClassifierIsTotal:
         three contexts" would keep passing while the fourth defaulted. This
         asserts the LEDGER against what the two modules actually define, so the
         set GROWING or SHRINKING is a failure either way.
+
+        🔴 SELECTED BY WHAT THE DICT CONTAINS, NEVER BY WHAT IT IS CALLED. This
+        guard used to match `name.endswith("_ACTIONS")`, which made it a SPELLED
+        guard while its docstring claimed a structural one — and the difference
+        was measured with paired controls: a fourth table named
+        `_FOURTH_TABLE_ACTIONS` was KILLED, the byte-identical table renamed
+        `_SNAPSHOT_KIND_POLICY` SURVIVED (19 passed, 0 failed). A new context
+        does not have to adopt the old suffix, and the one that does not is
+        exactly the one nobody notices.
+
+        So the question asked is what the dict IS, not what it is called: KEYS
+        that are kinds, VALUES that are actions. Both halves are load-bearing —
+        keys alone also matches `_LOADER_REFUSAL_REASON`, which is kind-keyed
+        but maps to English sentences and decides nothing. Naming is then free.
         """
         found = {
             f"{mod.__name__}.{name}"
             for mod in (api, resolver)
             for name, value in vars(mod).items()
-            if name.endswith("_ACTIONS") and isinstance(value, dict)
+            if isinstance(value, dict)
+            and set(value) & api.ALL_KINDS
+            and set(value.values()) <= {api.SKIP, api.TAKE, api.REFUSE}
         }
         assert found == {name for name, _t in ALL_ACTION_TABLES}, (
             f"the action-table ledger is out of date: {sorted(found)}"
         )
+
+    def test_the_LOADER_RESIDUAL_SET_is_pinned(self):
+        """🔴 THE LEDGER THAT KEPT GOING STALE, MADE MACHINE-READABLE.
+
+        `load_index`'s docstring and the API README each asserted, for three
+        rounds, that a `chmod 000` regular file was "the only residual left" —
+        while the table held FOUR `TAKE` cells whose `read_text` fails closed
+        into a store-wide 503, one of them (`directory`) reachable from a single
+        accidental `mkdir <scope>/notes.md` and measured taking `/recall` down
+        for every caller.
+
+        ⚠ AN INVARIANT GUARD, NOT A REGRESSION TEST — nothing was ever
+        structurally wrong with the TABLE this asserts; the defect was in the
+        two documents describing it, and the two guards below are the ones that
+        pin those. This exists so that whatever is ruled next about a cell has
+        to move a literal a reviewer can see, in the same diff.
+        """
+        taken = {
+            k for k, a in resolver._LOADER_ENTRY_ACTIONS.items() if a == api.TAKE
+        }
+        assert taken == LOADER_RESIDUAL_KINDS, (
+            "the loader's TAKE set moved. Every kind here is a shape whose "
+            "`read_text` can still 503 the whole store, so this set IS the "
+            "residual ledger — update `load_index`'s docstring and "
+            f"subsystem-store-api/README.md in the same diff. now={sorted(taken)}"
+        )
+
+    @staticmethod
+    def _residual_ledger(label: str) -> str:
+        """The document's RESIDUAL LEDGER region, by its literal markers.
+
+        An absent or unterminated marker ASSERTS rather than returning an empty
+        slice — an empty region would satisfy every "is not in" below and turn
+        this guard into the reassuring zero it exists to prevent.
+        """
+        text = (
+            resolver.load_index.__doc__
+            if "load_index" in label
+            else (API_DIR / label).read_text(encoding="utf-8")
+        )
+        start = text.find("RESIDUAL LEDGER")
+        assert start > 0, f"{label}: no RESIDUAL LEDGER section at all"
+        end = text.find("END OF RESIDUAL LEDGER", start + 1)
+        assert end > start, f"{label}: the RESIDUAL LEDGER is not terminated"
+        region = text[start:end]
+        assert len(region) > 200, f"{label}: the ledger region is suspiciously short"
+        return region
+
+    @pytest.mark.parametrize(
+        "label", ["subsystem_resolver.load_index", "README.md"]
+    )
+    def test_the_RESIDUAL_LEDGER_names_every_TAKE_kind_and_no_REFUSE_one(
+        self, label
+    ):
+        """🔴 THE GUARD THAT WOULD HAVE CAUGHT THE STALE LEDGER, IN BOTH
+        DIRECTIONS AND IN BOTH DOCUMENTS.
+
+        The previous round flipped `link-to-other` to REFUSE and its commit
+        message claimed "comments and docstrings updated wherever they still
+        recorded the hang as open". The docstring and two test docstrings were;
+        the README was NOT, and went on telling operators the hang was "left
+        open" for a whole round after it was closed. Nothing could see that,
+        because no test read the README.
+
+        So both directions are asserted, and a document that fails either is
+        wrong in a way a reader would act on:
+          * a kind the table still `TAKE`s and the ledger omits -> the ledger
+            reads SHORTER than the hazard actually is;
+          * a kind the table now REFUSEs and the ledger still lists -> a closed
+            hazard recorded as open, which is what happened.
+        And symmetrically for the REFUSED table above the ledger.
+
+        ⚠ THIS PINS TOKENS, NOT PROSE. A backticked kind name is a
+        machine-readable claim; the sentences around it are free to be
+        rewritten. That is the deliberate trade — pinning the whole normalised
+        string would fail on every cosmetic edit and get deleted.
+        """
+        ledger = self._residual_ledger(label)
+        taken = {
+            k for k, a in resolver._LOADER_ENTRY_ACTIONS.items() if a == api.TAKE
+        }
+        refused = {
+            k for k, a in resolver._LOADER_ENTRY_ACTIONS.items() if a == api.REFUSE
+        }
+        assert taken and refused, "the loader table is degenerate"
+
+        for kind in sorted(taken):
+            assert f"`{kind}`" in ledger, (
+                f"{label}: the residual ledger does not name `{kind}`, which "
+                f"the loader still TAKEs — the ledger reads SHORTER than the "
+                f"hazard is"
+            )
+        for kind in sorted(refused):
+            assert f"`{kind}`" not in ledger, (
+                f"{label}: `{kind}` is still described as a residual, but the "
+                f"loader now REFUSEs it — a closed hazard recorded as open is "
+                f"the exact drift this guard exists for"
+            )
+
+    def test_the_README_REFUSED_TABLE_names_every_REFUSE_kind_and_no_other(self):
+        """The other half of the same seam, and the half an operator reads
+        first: the README's refusal table is what tells them which shapes are
+        already handled. A kind missing from it reads as an open hazard that is
+        closed; a kind listed in it that the loader actually TAKEs reads as a
+        guard that does not exist.
+
+        Scoped to the README because it is the document with an explicit table.
+        `load_index`'s docstring prose is covered by the ledger half above.
+        """
+        text = (API_DIR / "README.md").read_text(encoding="utf-8")
+        cut = text.find("RESIDUAL LEDGER")
+        # 🔴 NOT `text[:cut]` UNGUARDED: `find` returns -1 when the marker is
+        # gone, and `text[:-1]` is the WHOLE file — which would silently fold
+        # the residual ledger's own rows into the refusal table and fail with a
+        # message about the wrong thing. Measured: deleting the marker produced
+        # "README refusal table lists `absent`", which sends the reader nowhere
+        # near the actual edit.
+        assert cut > 0, "the README has no RESIDUAL LEDGER marker to split on"
+        head = text[:cut]
+        assert "| kind |" in head, "the README's refusal table has moved"
+        for kind, action in sorted(resolver._LOADER_ENTRY_ACTIONS.items()):
+            present = f"| `{kind}` |" in head
+            if action == api.REFUSE:
+                assert present, (
+                    f"README refusal table does not list `{kind}`, which the "
+                    f"loader refuses"
+                )
+            else:
+                assert not present, (
+                    f"README refusal table lists `{kind}`, which the loader "
+                    f"TAKEs — it claims a guard that is not there"
+                )
 
     def test_the_pinned_table_covers_EVERY_kind(self):
         """🔴 Two-way pin on the parametrize list itself.
@@ -1199,7 +1388,13 @@ class TestClassifierIsTotal:
         assert refused == set(resolver._LOADER_REFUSAL_REASON), (
             "the loader's REFUSE cells and its refusal sentences have drifted"
         )
-        assert refused == {api.KIND_BROKEN_LINK, api.KIND_OTHER, api.KIND_LINK_TO_OTHER}
+        assert refused == {
+            api.KIND_BROKEN_LINK,
+            api.KIND_OTHER,
+            api.KIND_LINK_TO_OTHER,
+            api.KIND_DIRECTORY,
+            api.KIND_LINK_TO_DIR,
+        }
 
     def test_classify_returns_the_right_kind_for_each_REAL_path(self, tmp_path: Path):
         """🔴 The table above is only meaningful if `classify_path` actually
@@ -2631,14 +2826,27 @@ class TestTokenSetAndOverlapRotation:
         self, tmp_path: Path
     ):
         """🔴 THE UPPER BOUND: counting credentials must not become counting
-        nothing. Five DISTINCT tokens with one of them repeated is still five
+        nothing. SEVEN distinct tokens with one of them repeated is still seven
         credentials, and the number in the message is the credential count — not
-        the row count (6) it would have been, and not a constant.
+        the row count (8) it would have been, and not a constant.
+
+        🔴 SEVEN, NOT FIVE, AND THAT IS THE WHOLE POINT OF THE FIXTURE. This
+        test used to build five tokens and assert `too many tokens: 5, max 4` —
+        five being one past a cap of four, so the printed number could only ever
+        BE five, and the other test that reaches this message uses five too. It
+        was a fixture that can only produce the constant's own value:
+        `claude/RULES.md` calls that shape out by name, and it was measured — a
+        mutant hardcoding `5` in place of the credential count SURVIVED the full
+        93-test subset with 0 failures.
+
+        Seven separates every number in the sentence: 7 credentials, 8 rows,
+        cap 4. A hardcoded 5, a row count, or the cap itself each print
+        something this assertion rejects.
         """
-        five = [chr(ord("a") + i) * 48 for i in range(5)]
-        path = self._write(tmp_path, *five, five[2])
+        seven = [chr(ord("a") + i) * 48 for i in range(7)]
+        path = self._write(tmp_path, *seven, seven[2])
         message = str(exc_of(lambda: api.load_tokens(path, {})))
-        assert "too many tokens: 5, max 4" in message, message
+        assert "too many tokens: 7, max 4" in message, message
 
     def test_a_SHORT_SECOND_token_names_its_POSITION_and_never_the_token(
         self, tmp_path: Path
@@ -7057,12 +7265,17 @@ LOCKED_ENTRY = "sealed-adit.md"
 EMACS_LOCK = ".#sealed-adit.md"
 
 
-def _make_unreadable(store: Path, scope: str, kind: str) -> Path:
+def _make_unreadable(
+    store: Path, scope: str, kind: str, *, outside: Path | None = None
+) -> Path:
     """Put ONE hostile candidate entry into `<store>/<scope>/`.
 
     `kind` is `perm` (a mode-000 regular file), `emacs` (the dangling lock-file
-    symlink) or `fifo` (a named pipe, which blocks `open()` until somebody
-    writes). All three are real shapes seen on a real store, not contrivances.
+    symlink), `fifo` (a named pipe, which blocks `open()` until somebody
+    writes), `dir` (a DIRECTORY named `*.md` — one stray `mkdir`, or an
+    rsync/restore artefact) or `linkdir` (a symlink pointing at one, which needs
+    `outside` to hold the real directory). All five are real shapes seen on a
+    real store, not contrivances.
     """
     target = store / scope / (EMACS_LOCK if kind == "emacs" else LOCKED_ENTRY)
     if kind == "perm":
@@ -7072,9 +7285,101 @@ def _make_unreadable(store: Path, scope: str, kind: str) -> Path:
         os.symlink("zach@host.4242:1767225600", target)
     elif kind == "fifo":
         os.mkfifo(target)
+    elif kind == "dir":
+        target.mkdir()
+    elif kind == "linkdir":
+        assert outside is not None, "`linkdir` needs somewhere to put the target"
+        real = outside / "a-real-directory"
+        real.mkdir(parents=True, exist_ok=True)
+        os.symlink(real, target)
     else:  # pragma: no cover - a typo in a test argument is a test bug
         raise AssertionError(kind)
     return target
+
+
+def under_deadline(source: str, seconds: float, *args: str):
+    """Run `source` in a CHILD process. The completed process, or `None` meaning
+    it blew the wall-clock deadline.
+
+    🔴 EVERY TEST THAT READS A STORE HOLDING A FIFO MUST GO THROUGH HERE, AND
+    THE REASON IS THAT THE ALTERNATIVE HAS NO FAILURE MODE. `read_text` on a
+    fifo blocks forever: in-process there is no exception and no value to assert
+    on, so the test does not fail — the RUNNER wedges. Measured on this file
+    with `_LOADER_ENTRY_ACTIONS[KIND_OTHER]` reverted to `TAKE`:
+    `test_the_REFUSED_entries_are_SURFACED_not_silently_dropped` ran **>600s**
+    with no error and no failure (isolated, `rc=124` at 60s). No
+    `pytest-timeout` plugin is installed — only `xdist` — so nothing above the
+    test would have cut it off either.
+
+    A test that hangs instead of failing is worse than no test: CI stops, and
+    nobody gets a red to act on. `claude/RULES.md`: "a permanently-red gate is
+    worse than no gate" — a permanently-HUNG one is worse still, because it does
+    not even report.
+
+    ⚠ ONE SPELLING, DELIBERATELY. This was a nested closure in two separate
+    tests before, and a third test simply did without; the predicate-at-N-sites
+    shape is how the third one came to be missing.
+    """
+    try:
+        return subprocess.run(
+            [sys.executable, "-c", source, *args],
+            capture_output=True,
+            text=True,
+            timeout=seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _load_store_probe(store: Path, *, expr: str = "None") -> str:
+    """A child-process program that loads `store` and prints what it found.
+
+    `expr` is evaluated in the child to produce `visible_scopes`, so the scoped
+    and unrestricted arms share one program instead of two that could drift.
+    """
+    return (
+        "import sys;"
+        f"sys.path.insert(0, {str(RECALL_PATH.parent)!r});"
+        "import subsystem_recall as rc;"
+        f"vs = {expr};"
+        f"_s, i = rc.load_store({str(store)!r}, verb='recalled', visible_scopes=vs);"
+        "print('SCOPES=' + ','.join(i.scopes));"
+        "print('MALFORMED=' + ','.join(m.label for m in i.malformed));"
+        "print('REASONS=' + '|'.join(m.reason for m in i.malformed));"
+        "print('PERSCOPE=' + ','.join("
+        "    '%s:%d' % (s, len(i.entries(s))) for s in i.scopes))"
+    )
+
+
+def _load_index_raise_probe(store: Path) -> str:
+    """A child-process program that loads `store` under `RAISE` and prints the
+    exception class, its `source` and its message — the facts the in-process
+    `pytest.raises` used to assert, in a form a wall-clock deadline can bound.
+    """
+    return (
+        "import sys;"
+        f"sys.path.insert(0, {str(RECALL_PATH.parent)!r});"
+        "import subsystem_recall as rc;"
+        "\ntry:\n"
+        f"    rc.load_index({str(store)!r})\n"
+        "except BaseException as exc:\n"
+        "    print('CLASS=' + type(exc).__name__)\n"
+        "    print('SOURCE=' + str(getattr(exc, 'source', None)))\n"
+        "    print('MESSAGE=' + str(exc).replace(chr(10), ' '))\n"
+        "else:\n"
+        "    print('CLASS=NOTHING-RAISED')\n"
+    )
+
+
+def _probe_field(stdout: str, key: str) -> str:
+    """The one `KEY=value` line a probe printed, or an assertion naming what it
+    printed instead — never a silent empty string, which would satisfy most of
+    the comparisons it feeds.
+    """
+    for line in stdout.splitlines():
+        if line.startswith(f"{key}="):
+            return line[len(key) + 1 :]
+    raise AssertionError(f"the probe printed no {key}= line: {stdout[:600]!r}")
 
 
 class TestTheLoaderItselfTakesTheAllowlist:
@@ -7201,7 +7506,11 @@ class TestUnreadableEntriesInDeniedScopes:
     🔴 AND THE LIMIT OF (2) IS TESTED TOO, not just stated: it is NARROW. A
     `chmod 000` regular file still raises for an unrestricted caller —
     `test_an_UNREADABLE_REGULAR_FILE_still_RAISES_and_THAT_is_the_residual` is
-    the honest record of what did NOT close.
+    the honest record of ONE thing that did not close. ⚠ It is not the only one
+    and must not be read as such: the full list is the module-level
+    `LOADER_RESIDUAL_KINDS`, pinned against the table by
+    `test_the_LOADER_RESIDUAL_SET_is_pinned` and against both documents that
+    describe it by the two `RESIDUAL LEDGER` guards beside it.
     """
 
     def _store(self, tmp_path: Path, kind: str) -> Path:
@@ -7405,25 +7714,12 @@ class TestUnreadableEntriesInDeniedScopes:
         than a proxy for it.
         """
         store = self._store(tmp_path, "fifo")
-        probe = (
-            "import sys;"
-            f"sys.path.insert(0, {str(RECALL_PATH.parent)!r});"
-            "import subsystem_recall as rc;"
-            f"vs = None if sys.argv[1] == 'unrestricted' else ({ALLOW_SCOPE!r},);"
-            f"_s, i = rc.load_store({str(store)!r}, verb='recalled', visible_scopes=vs);"
-            "print('SCOPES=' + ','.join(i.scopes));"
-            "print('MALFORMED=' + ','.join(m.label for m in i.malformed))"
+        probe = _load_store_probe(
+            store, expr=f"None if sys.argv[1] == 'unrestricted' else ({ALLOW_SCOPE!r},)"
         )
 
         def run(arg: str, deadline: float):
-            """The completed process, or `None` meaning it blew the deadline."""
-            try:
-                return subprocess.run(
-                    [sys.executable, "-c", probe, arg],
-                    capture_output=True, text=True, timeout=deadline,
-                )
-            except subprocess.TimeoutExpired:
-                return None
+            return under_deadline(probe, deadline, arg)
 
         scoped = run("scoped", 30.0)
         assert scoped is not None, (
@@ -7491,16 +7787,6 @@ class TestUnreadableEntriesInDeniedScopes:
             "the fixture is not the kind this test is about"
         )
 
-        def under_deadline(source: str, seconds: float):
-            """The completed process, or `None` meaning it blew the deadline."""
-            try:
-                return subprocess.run(
-                    [sys.executable, "-c", source],
-                    capture_output=True, text=True, timeout=seconds,
-                )
-            except subprocess.TimeoutExpired:
-                return None
-
         # 🔴 THE POSITIVE CONTROL FIRST, so a runner that cannot observe a block
         # fails before the assertion that depends on it means anything. A bare
         # `open()` of the fifo — no store, no loader — is the syscall the guard
@@ -7548,23 +7834,44 @@ class TestTheLoaderRefusesHostileEntriesByKind:
 
     🔴 AND THE GUARD IS NARROW BY DECISION, NOT BY ACCIDENT. Mirroring
     `/snapshot`'s `_ENTRY_ACTIONS` wholesale also refuses a symlink to a regular
-    file, a directory and an unstat-able path — all of which this loader reads or
-    fails on TODAY, so the broad form is a behaviour change for every local CLI
-    caller. `test_a_SYMLINKED_entry_is_STILL_READ…` is the test that kills the
-    broad form; without it "refuse hostile kinds" has no upper bound.
+    file and an unstat-able path — which this loader READS and honestly fails on
+    respectively, so the broad form is still a behaviour change for every local
+    CLI caller. `test_a_SYMLINKED_entry_is_STILL_READ…` is the test that kills
+    the broad form; without it "refuse hostile kinds" has no upper bound.
 
-    ⚠ NARROW IS NOT FROZEN. The guard has THREE cells, not the two it shipped
-    with: `link-to-other` (a symlink pointing at a fifo/socket/device) was left
-    TAKE for one round as a named residual, then measured wedging an
-    unrestricted `/recall` for 25s and closed. That widening is still inside the
-    upper bound — it refuses a shape no legitimate entry has, and
-    `link-to-file`, the cell the narrow ruling was actually about, is untouched.
+    ⚠ NARROW IS NOT FROZEN. The guard has FIVE cells, not the two it shipped
+    with, added over three rulings and each on the SAME criterion — this loader
+    has never successfully read that kind, so refusing it changes no legitimate
+    caller. `link-to-other` (a symlink pointing at a fifo/socket/device) was
+    left TAKE for one round as a named residual, then measured wedging an
+    unrestricted `/recall` for 25s. `directory` and `link-to-dir` were TAKE for
+    three, while the ledger called `chmod 000` "the only residual left" — then
+    measured 503ing the whole store on an `IsADirectoryError`, off one stray
+    `mkdir <scope>/notes.md`. Every one of those widenings is still inside the
+    upper bound, and `link-to-file`, the cell the narrow ruling was actually
+    about, is untouched.
+
+    🔴 THE UPPER BOUND IS NOW ALSO A LEDGER SOMETHING READS.
+    `TestClassifierIsTotal.test_the_LOADER_RESIDUAL_SET_is_pinned` and the two
+    `RESIDUAL LEDGER` guards beside it assert the surviving TAKE set against
+    both documents that describe it, in both directions — because the drift that
+    let `directory` sit open for three rounds was a DOCUMENT going stale, not a
+    table being wrong, and no test read the documents.
     """
 
     def _hostile(self, tmp_path: Path) -> Path:
         """One store, BOTH refused shapes, in a scope that is not the one asked
         for — the arrangement the operator reproduced: unrestricted token, a
         dangling `.#lock.md` in `bravo`, and a recall for `alpha`.
+
+        🔴 THIS FIXTURE PLANTS A REAL FIFO, SO NOTHING MAY READ IT IN-PROCESS.
+        Three tests in this class used to: `load_store` / `load_index` directly,
+        and an in-process server. With `_LOADER_ENTRY_ACTIONS[KIND_OTHER]`
+        reverted to `TAKE` the first of them ran >600s with no error and no
+        failure — the guard's own regression test WEDGED the suite instead of
+        failing it, and with no `pytest-timeout` plugin loaded nothing would have
+        cut it off. Every read of this store now goes through `under_deadline`,
+        which turns that hang back into a red.
         """
         store = _build_store(
             tmp_path / "store",
@@ -7584,12 +7891,30 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         `GOOD_TOKEN` is a BARE row, so the record is `legacy`/unrestricted —
         the pod's own configuration, not a scoped token that would be protected
         by the allowlist pushdown instead.
+
+        🔴 THE SERVER IS A REAL SPAWNED PROCESS, NOT AN IN-PROCESS ONE, AND
+        THAT IS A TEST-SAFETY REQUIREMENT RATHER THAN A FIDELITY PREFERENCE.
+        This fixture plants a FIFO; a wedged handler thread inside the pytest
+        process cannot be reclaimed, and `running()`'s teardown would leave it
+        parked for the rest of the run. `running_subprocess` puts the load in a
+        child that is `terminate()`d in its own `finally`, and turns a wedge into
+        a socket timeout — which this test converts into a NAMED failure below,
+        because "the worker never came back" is the whole claim.
         """
         store = self._hostile(tmp_path)
-        with running(store, tokens=(GOOD_TOKEN,)) as (base, _):
-            code, headers, body = fetch(
-                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=GOOD_TOKEN
-            )
+        token_file = tmp_path / "token"
+        token_file.write_text(GOOD_TOKEN + "\n")
+        with running_subprocess(store, token_file) as (base, _proc):
+            try:
+                code, headers, body = fetch(
+                    f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=GOOD_TOKEN
+                )
+            except (urllib.error.URLError, TimeoutError) as exc:  # no response
+                raise AssertionError(
+                    "the request thread WEDGED on the hostile store — a REFUSE "
+                    "cell is not reaching `load_index`. On a `replicas: 1` "
+                    f"Deployment that is a worker that never comes back ({exc})"
+                ) from None
         text = body.decode()
         assert code == 200, f"{code}: {text[:400]}"
         assert headers["X-Store-Status"] == "recalled"
@@ -7605,16 +7930,124 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         Asserted on the index rather than on the rendered body, because the body
         deliberately reports cross-scope defects as a COUNT with scopes named and
         never a filename; the per-file facts live here.
+
+        🔴 IN A CHILD PROCESS, BECAUSE THIS IS THE TEST THAT WEDGED. Measured:
+        reverting `_LOADER_ENTRY_ACTIONS[KIND_OTHER]` to `TAKE` made this exact
+        test run >600s with no error and no failure — it called `load_store` on a
+        store holding a real fifo, in-process, and `read_text` never returned.
+        The deadline is what converts that back into a `None`, i.e. a red.
         """
         store = self._hostile(tmp_path)
-        _s, index = api.rc.load_store(store, verb="recalled")
-        labels = sorted(m.label for m in index.malformed)
+        done = under_deadline(_load_store_probe(store), 30.0)
+        assert done is not None, (
+            "an UNRESTRICTED `load_store` of the hostile store HUNG — a "
+            "REFUSE cell is not reaching `load_index`"
+        )
+        assert done.returncode == 0, done.stderr[-800:]
+        labels = sorted(
+            _probe_field(done.stdout, "MALFORMED").split(",")
+        )
         assert labels == sorted(
             [f"{DENY_SCOPE}/{EMACS_LOCK}", f"{DENY_SCOPE}/{LOCKED_ENTRY}"]
+        ), done.stdout
+        reasons = _probe_field(done.stdout, "REASONS")
+        assert "broken symlink" in reasons, reasons
+        assert "not a regular file" in reasons, reasons
+        # …and the good entry in that same scope is still served.
+        assert f"{DENY_SCOPE}:1" in _probe_field(done.stdout, "PERSCOPE"), done.stdout
+
+    def _recall_over_http(self, tmp_path: Path, name: str, kind: str):
+        """Build a store carrying ONE hostile `kind`, then recall a DIFFERENT
+        scope over the wire on the pod's own credential shape (a bare legacy
+        row, i.e. unrestricted). Returns `(code, headers, text)`.
+        """
+        root = tmp_path / name
+        store = _build_store(
+            root / "store",
+            {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
         )
-        reasons = " ".join(m.reason for m in index.malformed)
-        assert "broken symlink" in reasons
-        assert "not a regular file" in reasons
+        _make_unreadable(store, DENY_SCOPE, kind, outside=root / "outside")
+        with running(store, tokens=(GOOD_TOKEN,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=GOOD_TOKEN
+            )
+        return code, headers, body.decode()
+
+    @pytest.mark.parametrize("kind", ["dir", "linkdir"])
+    def test_a_DIRECTORY_named_md_no_longer_503s_the_WHOLE_store(
+        self, tmp_path: Path, kind: str
+    ):
+        """🔴 THE MEASURED SYMPTOM, AND THE ONE THE LEDGER DENIED EXISTED.
+
+        For three rounds `load_index`'s docstring and the API README both said a
+        `chmod 000` regular file was "the only residual left". Measured on that
+        tip, with a paired control:
+
+            store/beta/notes.md created as a DIRECTORY
+              GET /api/v1/recall/alpha, unrestricted legacy token
+              -> 503 "index entry unreadable: … (IsADirectoryError: …)"
+            CONTROL, same shape but a dangling `.#lock.md`
+              -> 200
+
+        So one accidental `mkdir <scope>/notes.md`, or one rsync or restore
+        artefact, took `/recall` AND `/search` down for EVERY caller — including
+        callers whose own scopes were untouched, and for a scope this request
+        never even asked about. A symlink to a directory behaved identically,
+        which is why both are parametrized here rather than one standing in for
+        the other.
+
+        🔴 THE POSITIVE CONTROL IS IN THIS TEST, NOT NEXT TO IT. Every assertion
+        here is "it did NOT 503", which is the reassuring zero that a harness
+        wired to nothing also produces. The `chmod 000` arm at the end drives the
+        SAME helper at the one shape that is still, deliberately, a residual —
+        so a fixture that plants nothing, or a `running()` that never reaches the
+        loader, fails there before the 200 above means anything.
+        """
+        code, headers, text = self._recall_over_http(tmp_path, f"probe-{kind}", kind)
+        assert code == 200, f"{code}: {text[:400]}"
+        assert headers["X-Store-Status"] == "recalled"
+        assert KELP_NUANCE in text, "the caller's own content vanished"
+
+        code, headers, text = self._recall_over_http(
+            tmp_path, f"control-{kind}", "perm"
+        )
+        assert code == 503, (
+            "an unreadable REGULAR file did NOT 503 — this harness cannot "
+            f"observe the failure the assertions above deny, so they are "
+            f"vacuous. got {code}: {text[:300]}"
+        )
+        assert headers["X-Store-Status"] == "store-unreachable"
+
+    @pytest.mark.parametrize("kind", ["dir", "linkdir"])
+    def test_the_REFUSED_DIRECTORY_is_a_NAMED_row_not_a_silent_skip(
+        self, tmp_path: Path, kind: str
+    ):
+        """A 200 is only correct if the refused path is still ACCOUNTED FOR — a
+        dropped entry is indistinguishable from one nobody ever wrote, which is
+        the conflation this whole store exists to avoid.
+
+        The REASON is asserted too, and the two kinds carry DIFFERENT sentences,
+        so a refusal filed under the wrong cell's reason fails here rather than
+        passing on the word "directory" appearing anywhere at all.
+        """
+        root = tmp_path / kind
+        store = _build_store(
+            root / "store",
+            {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
+        )
+        planted = _make_unreadable(
+            store, DENY_SCOPE, kind, outside=root / "outside"
+        )
+        expected_kind = api.KIND_DIRECTORY if kind == "dir" else api.KIND_LINK_TO_DIR
+        assert api.classify_path(planted) == expected_kind, (
+            "the fixture is not the kind this test is about"
+        )
+
+        _s, index = api.rc.load_store(store, verb="recalled")
+        assert [m.label for m in index.malformed] == [f"{DENY_SCOPE}/{LOCKED_ENTRY}"]
+        assert index.malformed[0].reason == resolver._LOADER_REFUSAL_REASON[
+            expected_kind
+        ], "the refusal was filed under another cell's sentence"
         # …and the good entry in that same scope is still served.
         assert len(index.entries(DENY_SCOPE)) == 1
 
@@ -7663,12 +8096,22 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         only part of, and that is as true of a fifo as of a wrapped `aliases:`
         line. A guard that collected unconditionally would silently hand the
         writer a partial index.
+
+        🔴 UNDER THE DEADLINE TOO. Whether the fifo is even REACHED here depends
+        on `sorted()` order inside the scope directory — so "it raised before the
+        fifo, therefore it cannot hang" is a property of two filenames, not of
+        the code. That is not a guarantee worth resting the suite's liveness on.
         """
         store = self._hostile(tmp_path)
-        with pytest.raises(api.rc.MalformedEntryError) as exc:
-            api.rc.load_index(store)
-        assert "malformed index entry" in str(exc.value)
-        assert exc.value.source in (EMACS_LOCK, LOCKED_ENTRY)
+        done = under_deadline(_load_index_raise_probe(store), 30.0)
+        assert done is not None, (
+            "`load_index` under RAISE HUNG on the hostile store — a REFUSE cell "
+            "is not reaching the loader"
+        )
+        assert done.returncode == 0, done.stderr[-800:]
+        assert _probe_field(done.stdout, "CLASS") == "MalformedEntryError", done.stdout
+        assert "malformed index entry" in _probe_field(done.stdout, "MESSAGE")
+        assert _probe_field(done.stdout, "SOURCE") in (EMACS_LOCK, LOCKED_ENTRY)
 
     def test_a_BOGUS_policy_is_still_a_ValueError_not_a_refusal(
         self, tmp_path: Path
@@ -7678,6 +8121,13 @@ class TestTheLoaderRefusesHostileEntriesByKind:
         spelled twice. Spelled twice, a bogus policy on a hostile store would be
         answered with a complaint about the first fifo instead of about the
         policy — a message that sends the operator to the wrong file.
+
+        ⚠ THE ONE TEST IN THIS CLASS THAT STAYS IN-PROCESS ON THE HOSTILE STORE,
+        and it is safe for a STRUCTURAL reason, not a lucky one:
+        `_check_on_malformed` is the FIRST statement of `load_index`, so this
+        call raises before `iterdir()` — no candidate is ever classified, let
+        alone opened. If that ordering ever changes, this test becomes a hang and
+        must move to `under_deadline` with the others.
         """
         store = self._hostile(tmp_path)
         with pytest.raises(ValueError, match="on_malformed must be one of"):

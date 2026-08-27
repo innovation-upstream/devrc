@@ -1741,13 +1741,23 @@ def entry_mapping(text: str, *, filename: str, scope: str) -> dict[str, object]:
 # 🔴 THE TOTAL CLASSIFIER — why this exists instead of a fourth `if` arm.
 #
 # ⚠ IT LIVED IN `subsystem-store-api/server.py` UNTIL `load_index` NEEDED IT.
-# It moved here rather than being copied: "what IS this path" open-coded at two
-# sites is the predicate-at-N-sites shape that is wrong at N-1 of them, and the
-# two sites in question are `/snapshot` and the index loader — disagreeing about
-# a FIFO named `*.md` is exactly what costs a request thread. What did NOT move
-# is the ACTION TABLES: each context maps every kind explicitly, and the loader's
-# table (`_LOADER_ENTRY_ACTIONS`, below) is deliberately NARROWER than the
-# server's `_ENTRY_ACTIONS`. `server.py` imports these names.
+# It moved here rather than being copied: "what IS this path" open-coded at N
+# sites is wrong at N-1 of them, and disagreeing about a FIFO named `*.md` is
+# exactly what costs a request thread. What did NOT move is the ACTION TABLES:
+# each context maps every kind explicitly, and the loader's table
+# (`_LOADER_ENTRY_ACTIONS`, below) is deliberately NARROWER than the server's
+# `_ENTRY_ACTIONS`. `server.py` imports these names.
+#
+# 🔴 THE TWO GUARDED SITES ARE `/snapshot` AND THIS INDEX LOADER — AND THEY ARE
+# NOT ALL THE SITES. An earlier wording here said they were, and that claim was
+# false: `subsystem_touch.census()` (`glob("*.md")` then `read_text`) is a THIRD
+# glob-and-read site with NO kind check at all, so it still hangs on a fifo and
+# still 503-equivalents on a directory. It is left that way ON PURPOSE, by
+# ruling: `census()` is CLI-only, no server path imports `subsystem_touch`, and
+# the operator declined to widen the guard to it. `validate_scope` also globs,
+# but only for NAMES — it reads nothing itself and defers to `load_index`, so it
+# inherits this guard rather than needing one. Said here so the next reader does
+# not have to rediscover it, and so "two sites" stops reading as "all of them".
 #
 # Four consecutive audit rounds found the same shape of defect in `_snapshot`,
 # and every fix added one more predicate to a sequence:
@@ -1927,10 +1937,13 @@ def visible_scope_set(visible_scopes: Sequence[str] | None) -> set[str] | None:
 # 🔴 THE LOADER'S OWN TABLE, AND IT IS DELIBERATELY NARROWER THAN THE SERVER'S.
 #
 # The broad form — mirroring `server.py`'s `_ENTRY_ACTIONS` wholesale — was
-# written, reviewed and REJECTED: it also refuses `link-to-file`, `directory`,
-# `link-to-dir` and `indeterminate`, every one of which this loader reads (or
-# fails on) today, so it is a behaviour change for every local CLI caller and
-# for the writer's probe. What was decided instead is exactly two cells:
+# written, reviewed and REJECTED, because it also refuses `link-to-file` and
+# `indeterminate`, which this loader READS (or honestly fails on) today: that is
+# a behaviour change for every local CLI caller and for the writer's probe, and
+# those two cells are still `TAKE` for exactly that reason. The cells that HAVE
+# been decided, one ruling at a time, each on the same criterion — "this loader
+# has never successfully read one, so refusing it changes no legitimate caller"
+# — are the five below. The first ruling decided two:
 #
 #   `broken-link`  a dangling symlink. `Path.glob("*.md")` MATCHES A LEADING
 #                  DOT — measured, not assumed — so an Emacs lock file
@@ -1962,30 +1975,63 @@ def visible_scope_set(visible_scopes: Sequence[str] | None) -> set[str] | None:
 #                  one, and on a `replicas: 1` / `strategy: Recreate` service a
 #                  wedged thread is the worst outcome in this file. Refused.
 #
-# None of the three is ever a legitimate entry, so no legitimate caller changes
+# 🔴 AND NOW A FOURTH AND FIFTH, ON THE SAME CRITERION THE NARROW RULING USED:
+#
+#   `directory`    a DIRECTORY named `*.md`. `read_text` on one raises
+#   `link-to-dir`  `IsADirectoryError`, and because an OSError fails closed in
+#                  BOTH policies that was a store-wide `503 index entry
+#                  unreadable` for EVERY caller — `/recall` AND `/search` — off
+#                  one stray `mkdir <scope>/<slug>.md` or an rsync/restore
+#                  artefact. Measured on the tip that carried them, with a
+#                  paired control:
+#
+#                      store/beta/notes.md created as a DIRECTORY
+#                      GET /api/v1/recall/alpha, UNRESTRICTED legacy token
+#                      -> 503 "index entry unreadable: … (IsADirectoryError:
+#                         … /beta/notes.md)"
+#                      CONTROL, same shape but a dangling `.#lock.md` -> 200
+#
+#                  A symlink to a directory measured identically. 🔴 THE
+#                  CRITERION IS UNCHANGED, WHICH IS WHY THIS IS NOT A WIDENING
+#                  OF THE RULING: this loader has NEVER successfully read a
+#                  directory — it has only ever raised on one — so refusing it
+#                  changes no legitimate caller's behaviour, exactly as with
+#                  `broken-link`, `other` and `link-to-other`. It also makes the
+#                  loader AGREE with `/snapshot`'s `_ENTRY_ACTIONS`, which
+#                  already refused both kinds; two readers of one store
+#                  disagreeing about what a directory named `*.md` is was the
+#                  divergence, not the fix.
+#
+# None of the five is ever a legitimate entry, so no legitimate caller changes
 # behaviour.
 #
 # 🔴 `link-to-file` IS `TAKE`, AND THAT IS THE POINT OF THE NARROW FORM — it is
 # the cell the narrow-vs-broad ruling was actually about, and closing
-# `link-to-other` did not touch it. A symlink to a regular `*.md` is read today
-# and keeps being read. A mutant that flips this cell to REFUSE is the exact
-# over-broad regression the narrow ruling exists to prevent, and
-# `test_a_SYMLINKED_entry_is_STILL_READ_the_guard_is_NOT_the_broad_one` kills
-# it.
+# `link-to-other`, `directory` and `link-to-dir` did not touch it. A symlink to
+# a regular `*.md` is read today and keeps being read. A mutant that flips this
+# cell to REFUSE is the exact over-broad regression the narrow ruling exists to
+# prevent, and `test_a_SYMLINKED_entry_is_STILL_READ_the_guard_is_NOT_the_broad_one`
+# kills it.
 #
-# ⚠ `indeterminate`, `directory`, `link-to-dir` and `absent` are `TAKE` for the
-# same conservatism: `read_text` raises on each (EACCES, IsADirectoryError,
-# FileNotFoundError) and that raise is the four-state rule's "the store was not
-# fully READ", which is a DIFFERENT fact from "this entry is malformed" and must
-# not be quietly folded into it.
+# ⚠ `indeterminate` and `absent` are `TAKE`, and for a DIFFERENT reason from the
+# two cells that just left this list — one this round was told explicitly not to
+# fold in. `indeterminate` means "the `lstat` failed and I could not look",
+# which is not "this kind can never be an entry"; `absent` is a file that
+# vanished between `glob()` and `classify_path`. `read_text` raises on each
+# (EACCES, FileNotFoundError) and that raise is the four-state rule's "the store
+# was not fully READ" — a DIFFERENT fact from "this entry is malformed", which
+# must not be quietly folded into it. `regular-file` and `link-to-file` are
+# `TAKE` because they are what an entry IS; the residuals they carry are
+# enumerated in `load_index`'s RESIDUAL LEDGER and pinned by
+# `test_the_LOADER_RESIDUAL_SET_is_pinned`.
 _LOADER_ENTRY_ACTIONS: dict[str, str] = {
     KIND_BROKEN_LINK: REFUSE,
     KIND_OTHER: REFUSE,
     KIND_LINK_TO_OTHER: REFUSE,
+    KIND_DIRECTORY: REFUSE,
+    KIND_LINK_TO_DIR: REFUSE,
     KIND_REGULAR_FILE: TAKE,
     KIND_LINK_TO_FILE: TAKE,
-    KIND_DIRECTORY: TAKE,
-    KIND_LINK_TO_DIR: TAKE,
     KIND_INDETERMINATE: TAKE,
     KIND_ABSENT: TAKE,
 }
@@ -2012,6 +2058,19 @@ _LOADER_REFUSAL_REASON: dict[str, str] = {
         "device) — refused before `open()`, which blocks on a fifo whether it "
         "is named directly or reached through a link. Measured wedging a "
         "`/recall` request thread for 25s while the process stayed healthy"
+    ),
+    KIND_DIRECTORY: (
+        "a directory named `*.md` — refused before `open()`, which on a "
+        "directory raises `IsADirectoryError`; that OSError fails closed, so "
+        "one stray `mkdir <scope>/<slug>.md` (or an rsync/restore artefact) "
+        "answered `/recall` and `/search` with a store-wide 503 for every "
+        "caller. Delete the directory, or move its contents into a `*.md` file"
+    ),
+    KIND_LINK_TO_DIR: (
+        "a symlink to a directory — refused before `open()`, which raises "
+        "`IsADirectoryError` whether the directory is named directly or "
+        "reached through a link, and that OSError fails closed into the same "
+        "store-wide 503"
     ),
 }
 
@@ -2093,27 +2152,48 @@ def load_index(
     🔴 SO THE CANDIDATE'S KIND IS NOW CHECKED BEFORE `open()`, FOR EVERY CALLER
     — `_LOADER_ENTRY_ACTIONS`, above, which reuses `classify_path` rather than
     asking the question a second way. It is NARROW on purpose: a dangling
-    symlink, a fifo/socket/device, and a symlink POINTING AT one are refused,
-    and everything this loader reads today — regular files AND symlinks to
+    symlink, a fifo/socket/device, a symlink POINTING AT one, a directory named
+    `*.md` and a symlink pointing at a directory are refused, and everything
+    this loader has ever successfully READ — regular files AND symlinks to
     regular files — is still read, so no legitimate caller changes behaviour.
-    (The `link-to-other` cell shipped one round later than the other two, after
-    the shape was measured wedging an unrestricted `/recall` thread for 25s;
-    `open()` blocks the same through a link as directly.) A refusal is reported the way
+    (Cells 3-5 shipped in later rounds than the first two, each after the shape
+    was measured: `link-to-other` wedging an unrestricted `/recall` thread for
+    25s, and `directory`/`link-to-dir` 503ing the whole store on an
+    `IsADirectoryError` off one stray `mkdir`.) A refusal is reported the way
     every other unusable entry is, through `on_malformed`: a `MalformedEntry` on
     the index under `COLLECT`, a `MalformedEntryError` under `RAISE`. One
     hostile file therefore costs that ONE entry, and is NAMED, instead of
     costing the whole store.
 
-    ⚠ WHAT IT DOES **NOT** COVER, said rather than left to be found: a
-    `chmod 000` REGULAR file still raises `EntryUnreadableError` for an
-    unrestricted caller, and still names its path in the message. That is
-    deliberate — it is the four-state rule below ("the store was not fully
-    READ", which is not "this entry is malformed") — so on a HOSTILE store the
-    unrestricted reading is unchanged for that shape and changed for the other
-    three. ⚠ THAT LIST USED TO NAME A SECOND UNCOVERED SHAPE — a symlink
-    pointing AT a fifo — and it no longer does, because that cell is now
-    REFUSE. `chmod 000` is the only residual left here, and it is a 503, not a
-    hang.
+    ⚠ THE RESIDUAL LEDGER — what this guard does **NOT** cover, enumerated
+    rather than left to be found, and machine-checked so it cannot silently go
+    stale the way it twice did. It is exactly the kinds `_LOADER_ENTRY_ACTIONS`
+    still maps to `TAKE`, because `TAKE` means `read_text` runs and any `OSError`
+    it raises fails closed into a store-wide `EntryUnreadableError` — a 503, and
+    for an unrestricted caller one that names the path:
+
+      * `regular-file` — a `chmod 000` entry. `PermissionError`. This is the
+        four-state rule working as designed: "the store was not fully READ" is
+        a different fact from "this entry is malformed", and only the second has
+        an honest degraded form.
+      * `link-to-file` — the SAME shape reached through a symlink, when the
+        TARGET is unreadable. Measured, not assumed: a link to a `chmod 000`
+        regular file 503s identically. Listed separately because the kind is
+        separate and the ledger must not read shorter than it is.
+      * `indeterminate` — the `lstat` itself failed (EACCES on the parent,
+        ESTALE, EIO…). Deliberately NOT refused: "I could not look" is a
+        different premise from "this kind can never be an entry", which is the
+        criterion every REFUSE cell above rests on.
+      * `absent` — the candidate vanished between `glob()` and `classify_path`.
+        A TOCTOU race, `FileNotFoundError`, unreproduced here rather than
+        measured.
+
+    `test_the_LOADER_RESIDUAL_SET_is_pinned` pins that set, and
+    `test_the_RESIDUAL_LEDGER_names_every_TAKE_kind_and_no_REFUSE_one` pins THIS
+    PARAGRAPH against the table in both directions — so a cell that becomes
+    REFUSE cannot stay listed here (the drift that left a closed hang recorded
+    as open for a whole round), and a new `TAKE` cell cannot go unlisted.
+    (END OF RESIDUAL LEDGER)
 
     ⚠ `Path.glob("*.md")` DOES match a leading dot — measured, not assumed — so
     an Emacs lock file (`.#entry.md`, a dangling symlink) is a candidate and had

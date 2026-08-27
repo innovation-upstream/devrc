@@ -43,6 +43,7 @@ import collections
 import hashlib
 import importlib.util
 import json
+import os
 from testlib import hermetic_git  # noqa: E402
 import subprocess
 import sys
@@ -159,6 +160,49 @@ def _make_store(root: Path) -> Path:
 @pytest.fixture()
 def store(tmp_path: Path) -> Path:
     return _make_store(tmp_path)
+
+
+BLOCKER_NAME = ".not-a-directory"
+
+
+def _plant_unreadable(store: Path, scope: str, name: str = "broken.md") -> Path:
+    """Plant a candidate entry the loader still TAKEs and then CANNOT read.
+
+    🔴 IT USED TO BE `(scope / "broken.md").mkdir()`, AND THAT STOPPED BEING AN
+    UNREADABLE ENTRY FOR A GOOD REASON. `subsystem_resolver._LOADER_ENTRY_ACTIONS`
+    now REFUSES `directory` and `link-to-dir` before `open()` — measured: one
+    stray `mkdir <scope>/<slug>.md` (or an rsync/restore artefact) answered
+    `/recall` and `/search` with a store-wide 503 for EVERY caller. A directory
+    is therefore a NAMED MALFORMED ROW now, not an `EntryUnreadableError`, and
+    every control that used one to provoke an OSError had silently gone vacuous:
+    it was asserting a raise that no longer happens.
+
+    🔴 THE REPLACEMENT IS PERMISSION-FREE ON PURPOSE. Every OTHER surviving
+    residual (`regular-file`, `link-to-file`) is a `chmod 000`, which a root-run
+    sandbox ignores — that is exactly the vacuum the original fixture comment
+    said it was avoiding, so swapping to one would have traded a dead control
+    for a conditionally dead one. This is a symlink whose target resolution
+    fails with ENOTDIR (a path "under" a regular file): `classify_path` calls it
+    `indeterminate` — "I could not look" — which the loader deliberately still
+    TAKEs, so `read_text` runs and raises `NotADirectoryError`. Measured on this
+    tree as euid 1000, and it does not depend on being non-root.
+
+    Returns the planted path; `_unplant_unreadable` removes both files it made.
+    """
+    scope_dir = store / scope
+    blocker = scope_dir / BLOCKER_NAME
+    if not blocker.exists():
+        blocker.write_text("a regular file, so paths UNDER it are ENOTDIR\n",
+                           encoding="utf-8")
+    target = scope_dir / name
+    os.symlink(blocker / "child", target)
+    return target
+
+
+def _unplant_unreadable(store: Path, scope: str, name: str = "broken.md") -> None:
+    """Undo `_plant_unreadable`, both files, so a tree hash can be compared."""
+    (store / scope / name).unlink()
+    (store / scope / BLOCKER_NAME).unlink()
 
 
 def _tree_hash(root: Path) -> str:
@@ -359,10 +403,12 @@ class TestNegativeControls:
         assert "none omitted" not in text, "a completeness claim over an incomplete index"
 
     def test_an_unreadable_entry_RAISES_its_own_sentinel(self, store: Path) -> None:
-        """Reached with a DIRECTORY sitting where a `.md` is expected — an
-        OSError any user hits, rather than a mode change that a root-run sandbox
-        would silently bypass and make this control vacuous."""
-        (store / SCOPE / "broken.md").mkdir()
+        """Reached with a candidate the loader TAKEs and cannot read — an
+        OSError any user hits, and still not a mode change a root-run sandbox
+        would silently bypass. See `_plant_unreadable` for why it is no longer
+        a directory: that shape is REFUSED before `open()` now, so it degrades
+        into a named malformed row and this control had gone vacuous."""
+        _plant_unreadable(store, SCOPE)
         with pytest.raises(rc.EntryUnreadableError) as exc:
             rc.recall(store, SCOPE)
         assert "index entry unreadable" in str(exc.value)
@@ -393,7 +439,7 @@ class TestNegativeControls:
         with pytest.raises(rc.StoreMissingError) as e1:
             rc.recall(tmp_path / "absent", SCOPE)
         msgs.append(str(e1.value))
-        (store / SCOPE / "broken.md").mkdir()
+        _plant_unreadable(store, SCOPE)
         with pytest.raises(rc.EntryUnreadableError) as e2:
             rc.recall(store, SCOPE)
         msgs.append(str(e2.value))
@@ -2907,10 +2953,11 @@ class TestRecallNeverWrites:
         rc.render_text(rep)
         json.dumps(rc.report_json(rep))
         with pytest.raises(rc.EntryUnreadableError):
-            # …and the raising arm is kept, on the condition that still raises.
-            (store / SCOPE / "broken.md").mkdir()
+            # …and the raising arm is kept, on a condition that still raises —
+            # a directory no longer does, it is REFUSED before `open()` now.
+            _plant_unreadable(store, SCOPE)
             rc.recall(store, SCOPE)
-        (store / SCOPE / "broken.md").rmdir()
+        _unplant_unreadable(store, SCOPE)
         assert _tree_hash(store) == after_fixture
         assert after_fixture != before  # the fixture moved it; the module did not
 
@@ -4054,7 +4101,7 @@ class TestMutationKillMatrix:
             ],
         )
         store = _make_store(tmp_path / "s")
-        (store / SCOPE / "broken.md").mkdir()
+        _plant_unreadable(store, SCOPE)
         with pytest.raises(Exception) as exc:
             mod.recall(store, SCOPE)
         assert not isinstance(exc.value, mod.EntryUnreadableError)

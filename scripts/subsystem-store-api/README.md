@@ -87,24 +87,41 @@ all → `503` + `X-Store-Status: store-unreachable`, carrying the reader's own
 read, and only the first of those can make it.
 
 🔴 **One hostile FILE no longer costs the whole store.** The index loader
-classifies each `*.md` candidate BEFORE opening it and refuses two kinds:
+classifies each `*.md` candidate BEFORE opening it, and REFUSES these kinds —
+the list is `subsystem_resolver._LOADER_ENTRY_ACTIONS`, and a test asserts this
+table against it in both directions, so neither can drift ahead of the other:
 
-| on disk | why it is refused |
-|---|---|
-| a dangling symlink — e.g. an Emacs lock file `.#entry.md`, which `glob("*.md")` really does match | opening it raised, and an `OSError` fails closed, so `/recall` and `/search` answered **503** for EVERY caller and named the file and its scope in the body |
-| a fifo / socket / device named `*.md` | `read_text` on a fifo blocks until somebody writes; on `replicas: 1` the request thread never returned |
+| kind | on disk | why it is refused |
+|---|---|---|
+| `broken-link` | a dangling symlink — e.g. an Emacs lock file `.#entry.md`, which `glob("*.md")` really does match | opening it raised, and an `OSError` fails closed, so `/recall` and `/search` answered **503** for EVERY caller and named the file and its scope in the body |
+| `other` | a fifo / socket / device named `*.md` | `read_text` on a fifo blocks until somebody writes; on `replicas: 1` the request thread never returned |
+| `link-to-other` | a symlink pointing *at* a fifo / socket / device | the same hang in a different shape — `open()` does not care which path shape reached the fifo. Measured wedging an unrestricted `/recall` for **25s** while `/healthz` stayed 200 |
+| `directory` | a directory named `*.md` — one stray `mkdir <scope>/<slug>.md`, an rsync or a restore artefact | `read_text` raises `IsADirectoryError`, and that `OSError` fails closed: **503** on `/recall` and `/search` for every caller. Measured, with a dangling-lock-file control returning 200 on the same shape |
+| `link-to-dir` | a symlink pointing at a directory | identical, through a link |
 
 A refused entry becomes an ordinary **malformed** row — counted, named, and
 rendered like every other unusable entry — so the scope's good entries still
 serve. It is refused, never silently skipped: a dropped entry is
 indistinguishable from one nobody ever wrote.
 
-⚠ **What still 503s, deliberately:** an unreadable REGULAR file (`chmod 000`).
-"The store was not fully READ" is a different fact from "this entry is
-malformed", and only the second has an honest degraded form. A symlink pointing
-*at* a fifo is also still opened — the same hang in a different shape, left open
-by the narrow scope of this change and recorded at
-`subsystem_resolver._LOADER_ENTRY_ACTIONS`.
+⚠ **THE RESIDUAL LEDGER — what still 503s, deliberately.** This is exactly the
+set of kinds the loader still `TAKE`s, and the same test pins it, because this
+paragraph has twice gone stale while the table moved underneath it:
+
+| kind | the shape | why it is still read |
+|---|---|---|
+| `regular-file` | an unreadable entry (`chmod 000`) | "the store was not fully READ" is a different fact from "this entry is malformed", and only the second has an honest degraded form |
+| `link-to-file` | a symlink whose TARGET is unreadable | the same shape through a link — measured, and listed on its own so the ledger does not read shorter than it is |
+| `indeterminate` | the `lstat` itself failed (EACCES on the parent, ESTALE, EIO) | "I could not look" is a different premise from "this kind can never be an entry", which is the criterion every REFUSE row above rests on |
+| `absent` | the candidate vanished between `glob()` and the classify | a TOCTOU race. Reasoned from the table, not reproduced |
+
+Everything else this loader has ever successfully read — regular files and
+symlinks to regular files — is still read, so no legitimate caller changed
+behaviour. **END OF RESIDUAL LEDGER.**
+
+⚠ `subsystem_touch.census()` is a THIRD `glob("*.md")` + `read_text` site and has
+**no** kind check, so it still hangs on a fifo. Unguarded by ruling, not by
+oversight: it is CLI-only and nothing in `server.py` imports `subsystem_touch`.
 
 ## Operating it
 

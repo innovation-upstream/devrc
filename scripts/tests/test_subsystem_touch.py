@@ -7559,10 +7559,23 @@ class TestJournalNegativeControls:
         self, tmp_path
     ) -> None:
         """Reachable through the whole flow: the loader reads every `*.md`, so a
-        directory sitting where one is expected fails there — with a NAME, not as
-        a bare `IsADirectoryError`."""
+        candidate it TAKEs and then cannot read fails there — with a NAME, not
+        as a bare `OSError`.
+
+        ⚠ IT USED TO BE A DIRECTORY. That shape is now REFUSED before `open()`
+        (`_LOADER_ENTRY_ACTIONS`, after one stray `mkdir <scope>/<slug>.md` was
+        measured 503ing the whole store), so it takes the MALFORMED path and
+        this control had gone vacuous. The replacement is a symlink whose target
+        resolution fails with ENOTDIR — `indeterminate`, which the loader still
+        TAKEs deliberately — and it is still not a permission change a root-run
+        sandbox would bypass."""
         store = _journal_store(tmp_path)
-        (store / SCOPE / "half-written.md").mkdir()
+        blocker = store / SCOPE / ".not-a-directory"
+        blocker.write_text("a regular file, so paths UNDER it are ENOTDIR\n")
+        os.symlink(blocker / "child", store / SCOPE / "half-written.md")
+        assert sr.classify_path(store / SCOPE / "half-written.md") == (
+            sr.KIND_INDETERMINATE
+        ), "the fixture is a kind the loader REFUSES, so it never reaches a read"
         with pytest.raises(st.EntryUnreadableError) as exc:
             _journal_render(store, "batcher")
         assert "index entry unreadable" in str(exc.value)
