@@ -660,8 +660,7 @@ def test_a_STATIC_LABEL_in_a_name_cell_is_not_corrupted():
     🔴 A `name` cell is NOT a pure identifier slot — `skills.listing`'s `what`
     column is declared `name` and holds static English labels beside
     `costliest tier-A entry: <skill>`. The licence for dropping the ladder is
-    CONFINEMENT plus `_word`'s boundaries, not purity, so the labels that
-    actually ship are the thing to assert on.
+    CONFINEMENT plus `_word`'s boundaries, not purity.
 
     🔴 EVERY LABEL BELOW CONTAINS A FIXTURE NAME AS A SUBSTRING, AND THAT IS
     THE ENTIRE POINT. The first version asserted on four real labels from
@@ -679,10 +678,17 @@ def test_a_STATIC_LABEL_in_a_name_cell_is_not_corrupted():
         "pinned to the toolbar, not the status area",    # `bar` inside `toolbar`
         "mailboxes are counted, not read",               # `mailbox` inside `mailboxes`
         "quartzsighted about the ceiling",               # `quartzsight` inside a longer word
+        "pelagic-mailboxes archive nightly",             # the whole hyphenated name, extended
     )
-    for name in ("resume", "bar", "mailbox", "quartzsight"):
-        assert any(name in label for label in labels), \
-            f"fixture drifted: {name!r} is no longer exercised, so this guard is vacuous"
+    # 🔴 CHECKED AGAINST `FAKE_NAMES` ITSELF, NOT A THIRD HARDCODED TUPLE. The
+    # first version listed the names again here, so it could not see the drift
+    # it names: deleting one from `FAKE_NAMES` left this test green, and only a
+    # sibling caught it. Every name the sanitizer is given must be exercised by
+    # some label, or this guard is partly vacuous again.
+    unexercised = [n for n in FAKE_NAMES if not any(n in label for label in labels)]
+    assert not unexercised, (
+        f"fixture drifted: {unexercised} are in FAKE_NAMES but appear in no label, "
+        "so this guard does not cover them")
 
     ms = measure.MeasurementSet()
     ms.items.append(_row("k", columns=("what",), column_kinds=("name",),
@@ -978,10 +984,52 @@ def test_the_inventory_NAME_COLUMN_really_holds_the_skill_names(tmp_path):
         f"  declared `name` columns: {name_cols}\n"
         f"  a row reads: {sorted(got)[:1]}\n"
         f"  source says: {sorted(expected)[:1]}\n"
-        "If the row tuple was reordered, move `columns` and `column_kinds` with "
-        "it — otherwise sanitize.build() harvests the wrong cell, or a declared "
-        "`name` cell carries prose, and either way real values ship."
+        "This pins POSITIONS 0/2/3 against the source, so moving `columns` and "
+        "`column_kinds` alongside a row reorder will NOT satisfy it — update the "
+        "indices here in the same commit, deliberately. Until they agree, "
+        "sanitize.build() harvests the wrong cell or a declared `name` cell "
+        "carries prose, and either way real values ship."
     )
+
+
+def test_the_gate_exit_code_legend_matches_gate_sh(tmp_path):
+    """🔴 REGRESSION GUARD. The parser silently dropped `gate.sh`'s SUCCESS code.
+
+    `gate.sh` writes its legend as a hanging indent — `# Exit: 0 = …` first,
+    `#       1 = …` after — so a pattern anchored on `^#\\s+(\\d+)` matches every
+    code EXCEPT 0. The row then rendered "3 exit codes documented in gate.sh's
+    header" for a header documenting four, and the filter's own `"0"` entry was
+    dead code that made the intent look satisfied.
+
+    It shipped green because NOTHING in this suite pinned any `value` string:
+    hardcoding the count to the right number was measured to pass. So this reads
+    the codes out of `gate.sh` INDEPENDENTLY — a different pattern, deliberately
+    — and compares. It is the same defect `m_drift_ladder` already carries a 🔴
+    note about, reintroduced by a new parser 370 lines away, which is why it is
+    pinned rather than merely commented.
+    """
+    env = _ledger_env(tmp_path)
+    row = measure.take(env).by_key("gate.exit_codes")
+    assert row is not None and row.measured, (
+        f"gate.exit_codes did not measure, so this guard checked NOTHING: "
+        f"{row.reason if row else 'row absent'}")
+
+    gate = (REPO_ROOT / "scripts" / "gate.sh").read_text(encoding="utf-8")
+    # Independent read: every commented `<digits> = <text>` in the header block,
+    # without assuming where on the line the digits sit.
+    expected = {m.group(1) for m in re.finditer(r"^#[^\n]*?\b(\d+)\s*=\s*\S", gate, re.M)}
+    assert expected, "no exit codes found in gate.sh at all — the control is broken"
+
+    got = {code for code, _ in row.rows}
+    assert got == expected, (
+        f"the rendered legend does not match gate.sh's header.\n"
+        f"  rendered: {sorted(got, key=int)}\n"
+        f"  gate.sh:  {sorted(expected, key=int)}\n"
+        "A code documented in the script and missing from the page sends a "
+        "reader looking for their exit status in a set that does not contain it."
+    )
+    assert row.value.startswith(f"{len(expected)} "), (
+        f"the count in the value label disagrees with the rows: {row.value!r}")
 
 
 def test_every_ledger_KEY_is_a_real_registry_key():

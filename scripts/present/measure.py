@@ -752,7 +752,14 @@ def m_gate_tiers(env: Env) -> dict:
             "#773. Name the tier AND the base sha in any claim that a merge is safe."
             + (f" flake checks discovered: {', '.join(checks)}." if checks else "")
         ),
-        source="scripts/gate.sh header + flake.nix checks",
+        #: 🔴 THIS USED TO SAY "scripts/gate.sh header + flake.nix checks" AND
+        #: WAS STALE THE MOMENT THE HARVEST MOVED OUT. This measurer no longer
+        #: reads a byte of `gate.sh`'s text — it only checks the file EXISTS —
+        #: so the old provenance contradicted the note below it inside one
+        #: function. Provenance is this page's core promise; a `source` that
+        #: names a file the code stopped reading is the page lying about itself.
+        source="flake.nix `checks` + literals in scripts/present/measure.py "
+               "(scripts/gate.sh is checked for existence only)",
         columns=("tier / fact", "what it is"),
         #: 🔴 NO DECLARATION, AND THE SPLIT BELOW IS WHY. Every cell here is a
         #: literal written in THIS module and reviewed with it, so none of it is
@@ -780,12 +787,28 @@ def m_gate_exit_codes(env: Env) -> dict:
     if not gate.is_file():
         raise Unmeasurable(f"{gate} does not exist")
     gtext = gate.read_text(encoding="utf-8", errors="replace")
-    exits = sorted(set(re.findall(r"^#\s+(\d+)\s*=\s*(.+)$", gtext, re.M)))
-    rows = [(code, desc.strip()) for code, desc in exits if code in {"0", "1", "2", "90"}]
+    #: 🔴 THE `Exit:` PREFIX IS PART OF THE GRAMMAR, AND MISSING IT DROPPED THE
+    #: SUCCESS CODE. `gate.sh` writes its legend as a hanging indent —
+    #: `# Exit: 0 = …` on the first line, `#       1 = …` after it — so a
+    #: pattern anchored on `^#\s+(\d+)` matches every code EXCEPT 0, and the row
+    #: rendered "3 exit codes documented in gate.sh's header" while the header
+    #: documents four. A reader looking up a code would have found the legend
+    #: missing the one that means everything passed.
+    #:
+    #: This is the SAME defect `m_drift_ladder` already carries a 🔴 note about
+    #: ("a count of one thing wearing the name of another"), reintroduced 370
+    #: lines away by a new parser. Pinned now by
+    #: `test_the_gate_exit_code_legend_matches_gate_sh`, because the count is a
+    #: `value` string and NOTHING in this suite pinned any `value` string —
+    #: hardcoding it to the right number was measured to pass.
+    exits = set(re.findall(r"^#\s*(?:Exit:)?\s*(\d+)\s*=\s*(.+)$", gtext, re.M))
+    #: Numeric, not lexical: a two-digit code must not sort before a one-digit
+    #: one, and `sorted()` on the string puts `10` ahead of `2`.
+    rows = [(code, desc.strip()) for code, desc in sorted(exits, key=lambda kv: int(kv[0]))]
     if not rows:
         raise Unmeasurable(
-            "no `# N = …` exit-code lines were found in scripts/gate.sh — an "
-            "empty parse is a broken read, not a script without exit codes")
+            "no `# [Exit:] N = …` exit-code lines were found in scripts/gate.sh "
+            "— an empty parse is a broken read, not a script without exit codes")
     return dict(
         value=f"{len(rows)} exit codes documented in gate.sh's header",
         detail=(

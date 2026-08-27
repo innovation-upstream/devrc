@@ -29,12 +29,17 @@ REASSURING ONE. It read: a 2026-08-26 build left two client-ish names in the
 sanitized copy, one hostname "indistinguishable from a word" and one scope
 "matched in its exact form only" — i.e. the two DEGRADED lines were the leak.
 They were not, and never had been. Both are deliberate declines, counted in the
-legend. ⚠ Careful with the stronger phrasing this line used to carry: "they
-leaked nothing" is wrong as stated, because both declined values DO appear in
-the page — measured, one of them 28 times. The accurate claim is narrower and
-host-dependent: neither declined value is a THIRD-PARTY name on this host
-TODAY, which is a fact about today's contents, not about the rule. The actual
-leak was human prose harvested out of another file,
+legend. ⚠ Two phrasings of this line have now been wrong in OPPOSITE
+directions, which is worth more than either correction. It first said the
+declined values "leaked nothing" — too strong, since a declined value is by
+definition left in the page. The fix then said one of them appears "28 times",
+which was a SUBSTRING count read as an appearance count: word-bounded, it
+appears once, and the 28 were other words that merely contain those letters.
+Counting the wrong thing is the failure this whole page argues against, so:
+state the property, not a number. Both declined values are present, both are
+counted in the legend, and neither is a third-party name on this host TODAY —
+a fact about today's contents, not about the rule. The actual leak was human
+prose harvested out of another file,
 which no identifier rule can enumerate and which printed no warning at all.
 Fixed by withholding declared prose rather than substituting it — see
 `sanitize.py`'s header. Kept here because "the page warned me" was exactly the
