@@ -38,7 +38,7 @@ your worktree clean at the end.
 5. **Bugs** — logic/correctness defects, with file:line.
 6. **Issues** — code quality, maintainability, conventions.
 7. **Behaviour changes** — observable changes in output/API/UX, intended or not. If the PR claims to revert prior behaviour, confirm it restores the pre-change state.
-8. **Leaks** — secrets, PII, resource/handle/memory leaks, over-broad permissions.
+8. **Leaks** — secrets, PII, resource/handle/memory, over-broad permissions.
 9. **Second-order consequences** — ripple effects on other services, callers, data, cost.
 
 ## After the fixes: RE-AUDIT THE DELTA (don't assume closure)
