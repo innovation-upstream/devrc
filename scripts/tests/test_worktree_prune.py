@@ -2422,6 +2422,28 @@ def test_the_note_does_not_claim_a_run_REFUSES_when_that_run_REMOVES(
     # be true — see `test_dropping_the_flag_cannot_change_whether_the_run_refuses`.
     assert "depends on the other globs you typed" not in cap.out, cap.out
     assert "WARNS where the default would have said nothing" not in cap.out, cap.out
+    # 🔴 AND THE PREFIX THOSE ARMS HANG OFF, pinned as a WHOLE normalised string.
+    # Every `differs` arm above is pinned in full; the shared prefix was not, and
+    # `scripts/README.md` newly blesses the bounded claim it makes ("no more than")
+    # while banning the EQUALITY shape. A guard on the arms alone is walkable by
+    # rewording the head — which is the same defect, one clause to the left, that
+    # rounds 6 and 7 each shipped. MEASURED (2026-08-27, hermetic copy, 3.12.14,
+    # PYTHONDONTWRITEBYTECODE=1): rewriting this prefix to the banned equality
+    # shape *with the word "bare" kept* — "…this run removes exactly what the bare
+    # default would have removed." — SURVIVED the whole suite at 186 passed,
+    # because the only guard was a word-level `not in` naming the wordING without
+    # "bare". One word walked past it. The control: the same mutation WITHOUT
+    # "bare" went red here, so the measurement can go red.
+    assert ("note: --include-agent-worktrees was passed, but "
+            f"{AGENT_GLOB!r} is in force anyway as a --exclude-path you typed — so "
+            "agent worktrees are STILL spared and this run can remove no more than "
+            "the bare default would. It is NOT identical to the default, though: a "
+            "glob YOU typed is an --execute refusal candidate, so on a scan holding "
+            "no agent worktrees this run ") in cap.out, cap.out
+    # The banned shape is EQUALITY (README), in either spelling. "bare" is named
+    # explicitly because it is the word the earlier guard did not see.
+    assert "removes exactly what the bare default" not in cap.out, cap.out
+    assert "removes exactly what the default" not in cap.out, cap.out
 
     # 🟡 THE PARITY-BREAKING RUN, FIRST, because it is the one whose sentence was
     # false: one MORE typed glob, matching the live row, so this command line

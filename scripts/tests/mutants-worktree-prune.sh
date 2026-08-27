@@ -473,6 +473,19 @@ run 'filter-table-gated-on-the-match-count' \
   test_the_default_exclusion_matching_zero_is_still_reported \
   's|^    if summary.get("exclude_globs"):|    if summary.get("excluded"):|'
 
+printf '\n== ROUND 9 — the note PREFIX, not just the arms that hang off it ==\n'
+# 🔴 THE ONE WORD THAT WALKED PAST THE GUARD. Every `differs` arm was pinned as a
+# whole normalised string; the shared PREFIX was not, and README bans the EQUALITY
+# shape while blessing the bounded "no more than". MEASURED 2026-08-27 against
+# `0e525e6d`: this exact substitution — the banned shape, keeping the word "bare" —
+# SURVIVED at 186 passed, because the only guard was a word-level `not in` naming
+# the wording WITHOUT "bare". Dropping "bare" from the mutant went red; keeping it
+# did not. A guard on the arms is walkable by rewording the head — the same defect
+# rounds 6 and 7 each shipped, one clause to the left.
+run 'note-prefix-claims-removal-parity-keeping-the-word-bare' \
+  test_the_note_does_not_claim_a_run_REFUSES_when_that_run_REMOVES \
+  's|^            f"spared and this run can remove no more than the bare default would. It is NOT "$|            f"spared and this run removes exactly what the bare default would have removed. It is NOT "|'
+
 printf '\n== --force must never reach `git worktree remove` ==\n'
 run 'force-passed-to-worktree-remove' \
   test_the_tool_never_passes_force_to_worktree_remove \
