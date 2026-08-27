@@ -531,13 +531,16 @@ run 'gitlink-mode-misspelled-so-no-gitlink-is-ever-seen' \
 # reason that fixture exists: `.gitmodules` is tracked and a gitlink is in the
 # index, yet git removes the worktree fine.
 #
-# 🔴 ANCHORED ON THE TWO-LINE PAIR, because `^    if not is_dir(path):$` alone
+# 🔴 SCOPED BY AN ADDRESS RANGE, because `^    if not is_dir(path):$` alone
 # matches TWICE — `worktree_dirty` has the identical line. Anchoring on the bare
 # line injected the over-block return into `worktree_dirty` as well, whose
-# caller unpacks a 3-tuple, so ~40 unrelated tests died on a `ValueError`. The
-# named killer still died, so it was never a false green — but a mutant that
-# detonates half the suite is not isolated, and "isolate the mutation" is this
-# harness's own premise. `return None, []` is unique to `worktree_submodules`.
+# caller unpacks a 3-tuple, so the mutant died on a `ValueError` far from the
+# thing under test. MEASURED: the unscoped sed fails 112 tests, this scoped one
+# fails 41, so the collateral was ~71 — an earlier version of this comment said
+# ~40, which was a guess, not a measurement. The named killer died either way,
+# so it was never a false green — but a mutant that detonates most of the suite
+# is not isolated, and "isolate the mutation" is this harness's own premise.
+# The 41 that remain are genuine consequences of over-blocking every worktree.
 run 'submodules-reported-for-every-worktree' \
   test_a_worktree_with_an_UNINITIALISED_submodule_is_still_removable \
   '/^def worktree_submodules/,/^def _paths_differ/ s|^    if not is_dir(path):$|    if True:\n        return True, ["over-block"]\n    if not is_dir(path):|'
@@ -643,6 +646,16 @@ run 'vanished-worktree-marked-submodule-unknown' \
 run 'unknown-marker-never-prints' \
   test_an_unanswered_row_is_not_described_as_carrying_submodules \
   's|^                    else "  \[submodules UNKNOWN — held back\]"$|                    else ""|'
+# 🔴 THE GATE ITSELF — the round-3 -> round-4 change. Round 5 shipped this with
+# NO mutant, on the reasoning that the two gates are equivalent outside a TOCTOU
+# race and were therefore untestable. The reachability half was right and the
+# conclusion was wrong: `render_text` is a pure function of the row dict, so a
+# monkeypatched producer forces the state in one line. PRODUCTION-UNREACHABLE
+# IS NOT UNTESTABLE — and the omission was justified in a code comment that
+# asserted the stronger claim, which is how a gap gets sealed shut.
+run 'unknown-marker-gate-reverted-to-reasons' \
+  test_the_marker_gate_is_path_exists_not_reasons \
+  's|^                    if subs is None and r.get("path_exists") else "")$|                    if subs is None and r.get("submodule_reasons") else "")|'
 
 printf '\n== POSITIVE CONTROLS — mutants whose fate is KNOWN ==\n'
 # 🔴 A comment-only edit MUST survive. If it kills something, the harness is

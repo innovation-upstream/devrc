@@ -1706,16 +1706,22 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
             # instead of standing in for it — but this is a correctness tidy,
             # not a defect anyone has hit.
             #
-            # 🔴 AND THEREFORE NO TEST CAN TELL THIS GATE FROM THE OLD ONE.
-            # MEASURED: swapping `path_exists` back to `submodule_reasons`
-            # SURVIVES all 207 tests. There is deliberately NO mutant for it —
-            # a `run` line asserting coverage it does not have is worse than
-            # none, which is the defect round 4 of this PR existed to fix. What
-            # IS pinned is both directions of the marker itself: it must not
+            # 🔴 NO test over the REAL PRODUCER can tell this gate from the old
+            # one — but a monkeypatched producer can, and that distinction is
+            # the whole point. An earlier version of this comment said "no test
+            # can", concluded the gate was untestable and shipped it with no
+            # mutant. That was wrong: `render_text` is a pure function of the
+            # row dict, so `(None, [], path_exists=True)` is trivially
+            # forceable, and `test_the_marker_gate_is_path_exists_not_reasons`
+            # + `unknown-marker-gate-reverted-to-reasons` now pin it.
+            # PRODUCTION-UNREACHABLE IS NOT UNTESTABLE, and a comment asserting
+            # the stronger claim discourages anyone from ever closing the gap.
+            #
+            # Both directions of the marker itself are pinned too: it must not
             # print for a vanished row (`vanished-worktree-marked-submodule-
             # unknown`) and it must print for an unanswered live one
             # (`unknown-marker-never-prints`) — the second closed a real hole,
-            # where deleting the marker outright also survived all 207.
+            # where deleting the marker outright survived all 207 tests.
             mark = ("  [SUBMODULES — git will refuse to remove this]" if subs
                     else "  [submodules UNKNOWN — held back]"
                     if subs is None and r.get("path_exists") else "")

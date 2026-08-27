@@ -3829,8 +3829,8 @@ def test_an_unanswered_row_is_not_described_as_carrying_submodules(tmp_path, cap
     assert "carry SUBMODULES" not in out, out
     # 🔴 …AND THE MARKER MUST ACTUALLY PRINT. Without this the marker's POSITIVE
     # direction is unguarded: two mutants — reverting the gate to round 3's
-    # `submodule_reasons` form, and deleting the marker outright with
-    # `if False` — both SURVIVED all 207 tests. The summary sentence this test
+    # `submodule_reasons` form, and deleting the marker outright
+    # (`else ""`) — both SURVIVED all 207 tests. The summary sentence this test
     # already checks sends the operator to --verbose for the git error, so a
     # --verbose that shows neither marker nor error is the exact
     # summary/verbose mismatch this gate was changed to close.
@@ -4041,3 +4041,28 @@ def test_a_vanished_worktree_is_not_marked_as_a_submodule_unknown(tmp_path, caps
     out = capsys.readouterr().out
     assert "cannot-tell" in out
     assert "submodules UNKNOWN — held back" not in out, out
+
+
+def test_the_marker_gate_is_path_exists_not_reasons(tmp_path, capsys, monkeypatch):
+    """The round-3 -> round-4 gate change, pinned.
+
+    🔴 THIS EXISTS BECAUSE "PRODUCTION-UNREACHABLE" WAS MISTAKEN FOR
+    "UNTESTABLE". Outside a TOCTOU race the two gates really are equivalent —
+    `worktree_submodules` returns `(None, [])` only from its `is_dir` guard and
+    every other `None` carries a reason — so round 5 shipped the gate with no
+    mutant and a comment claiming no test could distinguish them. But
+    `render_text` is a PURE function of the row dict: the state is forceable in
+    one line, and this test is the sole killer of the revert mutant.
+
+    Gating on `submodule_reasons` would suppress the marker for a row that
+    `submodule_unknown_dead` still COUNTS, so the summary would say "N could
+    NOT be answered ... --verbose gives the git error" over a --verbose showing
+    neither — the mismatch the gate was changed to close.
+    """
+    repo, wt, _sub, gh = submodule_universe(tmp_path, "gate-no-reason")
+    # unanswered AND reason-less, with the directory still present
+    monkeypatch.setattr(wp, "worktree_submodules", lambda p: (None, []))
+
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1", "--verbose"])
+    out = capsys.readouterr().out
+    assert "[submodules UNKNOWN — held back]" in out, out
