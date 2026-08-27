@@ -43,11 +43,10 @@ document rather than trusting any total in prose — including this one, and inc
 whatever the next editor writes.**
 
 ⚠ Count them by eye — the bold red label opening each correction. A text search for
-the label word over-counts, because this paragraph necessarily names the convention it
-is describing, and each mention matches. That is not a defect to fix: a document cannot
-contain a search pattern for its own marker without matching itself. It is also the
-third-order version of the same lesson, and the reason the instruction is "count", not
-"grep".
+the label word over-counts by one, because the paragraph above describes the convention
+and names it. That is not a defect to fix: a document cannot describe its own marker
+without matching a search for it. It is the third-order version of the same lesson, and
+the reason the instruction is "count", not "grep".
 
 Every line number below is against `nix/home.nix` at `origin/main` as of 2026-08-27
 (3,873 lines). Line numbers rot — treat them as a starting offset for a grep, not an
@@ -249,8 +248,12 @@ Brave tab
   symlink removal."* **As stated that is false, but the true rule has a sharp edge —
   read both halves.** Tested 2026-08-27, GNU coreutils 9.11:
   - `rm -rf <symlink-to-dir>` — **no trailing slash** — removes the **link**. Target
-    directory and contents intact. This is the case the source's call sites are in, and
-    it is what makes the original claim wrong.
+    directory and contents intact. This is the form every `rm -rf` in the source takes,
+    and it is what makes the original claim wrong. ⚠ Read that as a statement about the
+    *form*, not about the operands: none of the six `rm -rf` sites (624, 628, 677, 686,
+    745, 791) can actually receive a symlink. 791 is reached only after `deeScrub`
+    diverts symlinks to `rm -f` at 789; 624/628/745 take block-created temp dirs; 677
+    and 686 take `$bbBak`, which `mv` just produced from a directory.
   - 🔴 `rm -rf <symlink-to-dir>/` — **with a trailing slash** — DOES follow the link.
     Measured: rc=0, the link survives, and the target directory is **emptied**
     (a 2-file tree went to 0). Silent.
