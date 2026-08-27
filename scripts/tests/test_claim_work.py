@@ -1138,9 +1138,20 @@ def test_release_refuses_another_sessions_live_claim_unless_forced(tmp_path):
         "the ref moved despite the refusal")
 
     # …and the owner is still allowed, so the gate is not simply "always refuse".
-    assert _run("--release", "held", repo=a).returncode == RC_OK, (
+    own = _run("--release", "held", repo=a)
+    assert own.returncode == RC_OK, (
         "the OWNER was refused too — the gate is refusing on something other "
         "than ownership")
+    # 🔴 …AND IT WAS A TOKEN MATCH, NOT THE R3 REMOVED-WORKTREE RECOVERY. Round 6
+    # added a second way for `--release` to return 0, and it silently took over
+    # this leg: with a constant `owner-id:` trailer the token matches nobody, the
+    # recovery then finds it uncomputable in this clone and grants — so the
+    # `owner-id-trailer-is-a-constant` mutant passed a green rc 0 for a reason
+    # with nothing to do with ownership. The recovery announces itself; assert it
+    # did not fire, or this leg stops measuring the token at all.
+    assert "no longer registered in this clone" not in own.stderr, (
+        f"the owner's own release went through the R3 removed-worktree recovery "
+        f"instead of matching its token:\n{own.stderr}")
 
 
 def test_release_with_force_overrides_the_ownership_gate(tmp_path):
@@ -1822,6 +1833,12 @@ def test_the_claim_commit_records_a_hashed_owner_id_not_an_absolute_path(tmp_pat
         f"the claim commit published an ABSOLUTE PATH to the remote:\n{body}")
     assert re.search(r"^host: \S+$", body, re.M), body
     assert re.search(r"^nonce: \S+$", body, re.M), body
+    # 🔴 ROUND 6 added a SECOND published token. It goes to the same public
+    # remote under the same rule, so it is pinned here rather than in a test of
+    # its own: a hash, never the clone's path.
+    assert re.search(r"^clone-id: [0-9a-f]{6,}$", body, re.M), (
+        f"the claim commit does not carry a hashed clone-id — the R3 recovery "
+        f"reads it, and an absent one silently disables the recovery:\n{body}")
 
 
 # ── 🔴 refs OUTLIVE a format change ──────────────────────────────────────────
@@ -1930,6 +1947,17 @@ def test_release_from_a_SUBDIRECTORY_is_still_the_owners_own_claim(tmp_path):
             f"literal cwd, so a claim taken at the root is unreleasable from any "
             f"subdirectory and the item is blocked for the whole TTL.\n"
             f"{rel.stdout}\n{rel.stderr}")
+        # 🔴 BY MATCHING THE TOKEN, NOT VIA THE R3 RECOVERY. Round 6 gave
+        # `--release` a second route to rc 0, and it masked this very mutant: a
+        # cwd-keyed token makes the claim's owner-id uncomputable from `sub/`,
+        # the recovery then grants, and "the owner can release from a
+        # subdirectory" reads green while the token is exactly as broken as it
+        # was in round 2. The recovery announces itself on stderr.
+        assert "no longer registered in this clone" not in rel.stderr, (
+            f"the release from {depth} succeeded through the removed-worktree "
+            f"recovery rather than by owning the claim — the owner token is not "
+            f"cwd-invariant and this assertion is the only thing that can see "
+            f"it:\n{rel.stderr}")
         assert f"{CLAIM_NS}subdir-probe" not in _remote_refs(origin)
 
 
@@ -2961,3 +2989,240 @@ def test_a_hostile_init_template_cannot_lock_the_owner_out(tmp_path):
     assert _run("tpltrailer2", cwd=a, env=env).returncode == RC_OK
     assert _run("--release", "tpltrailer2", cwd=b,
                 env=env).returncode == RC_TAKEN
+
+
+# ── 🔴 ROUND 6 / F4: a claim whose WORKTREE was removed was stuck for the TTL ──
+#
+# The owner token is `hash(machine-id ‖ realpath(--git-dir))`, i.e.
+# `<clone>/.git/worktrees/<name>` for a linked worktree. `git worktree remove`
+# deletes that admin directory, so after it NOTHING on the machine recomputes the
+# token: measured rc 10 "is NOT yours" from the clone root and from every sibling,
+# for the whole 7-day TTL, with the refusal telling the owner their own lock
+# belongs to somebody else.
+#
+# 🔴 IT RECURS BY DESIGN. `claude/RULES.md` mandates a worktree per file-modifying
+# agent, and the harness AUTO-REMOVES a worktree that ends unchanged — so
+# "claim in a worktree that then disappears" is a shape this repo produces
+# routinely, not an edge case.
+#
+# The fix is deliberately NOT a clone-level fallback (that is round 3's bug, and
+# round 4's regression, with an extra step). The claim now publishes a `clone-id:`
+# and the grant needs BOTH: same clone + same host, AND the claim's owner-id not
+# computable by any worktree this clone still has registered.
+
+def _remove_worktree(session: Path, path: Path) -> None:
+    _git("-C", str(session), "worktree", "remove", str(path))
+    assert not path.exists(), f"{path} survived `git worktree remove`"
+
+
+def test_a_claim_from_a_REMOVED_worktree_is_releasable_by_its_own_clone(tmp_path):
+    """🔴 F4, THE STUCK LOCK, END TO END. Claim from a linked worktree, remove the
+    worktree, then release — from the clone root AND from a sibling worktree,
+    because the measured symptom was rc 10 from BOTH and one of them is not a
+    general claim.
+
+    Red at the base commit with this message; green at HEAD.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    doomed = _worktree(a, tmp_path / "a-doomed", branch="doomed")
+    sibling = _worktree(a, tmp_path / "a-sibling", branch="sibling")
+    env = _cwd_env(origin)
+
+    assert _run("gone-probe", "--subject", "generic item", cwd=doomed,
+                env=env).returncode == RC_OK
+    assert _run("gone-probe-2", "--subject", "generic item", cwd=doomed,
+                env=env).returncode == RC_OK
+    _remove_worktree(a, doomed)
+
+    # (1) from the CLONE ROOT
+    rel = _run("--release", "gone-probe", cwd=a, env=env)
+    assert rel.returncode == RC_OK, (
+        f"a claim made in a worktree that was later `git worktree remove`d is "
+        f"unreleasable from the clone root (rc={rel.returncode}) — nothing on "
+        f"this machine can recompute `<clone>/.git/worktrees/<name>` any more, so "
+        f"the slug is stuck for the whole TTL and the refusal tells the owner "
+        f"their own lock is somebody else's.\n{rel.stdout}\n{rel.stderr}")
+    assert f"{CLAIM_NS}gone-probe" not in _remote_refs(origin)
+    assert "no longer registered in this clone" in rel.stderr, (
+        f"the grant is an INFERENCE about a directory that is not there any "
+        f"more, not a token match, and it went out silently:\n{rel.stderr}")
+
+    # (2) …and from a SIBLING worktree of the same clone, which measured rc 10 too.
+    rel2 = _run("--release", "gone-probe-2", cwd=sibling, env=env)
+    assert rel2.returncode == RC_OK, (
+        f"a sibling worktree of the same clone still cannot release the claim of "
+        f"a REMOVED worktree (rc={rel2.returncode}) — the measured symptom was "
+        f"rc 10 from the clone root and from every sibling, and only one of the "
+        f"two has been fixed.\n{rel2.stdout}\n{rel2.stderr}")
+    assert f"{CLAIM_NS}gone-probe-2" not in _remote_refs(origin)
+
+
+def test_a_live_sibling_worktree_is_not_widened_by_the_removed_worktree_recovery(
+        tmp_path):
+    """🔴 THE REGRESSION GUARD FOR ROUND 4'S BUG, SAID PLAINLY: round 4 widened the
+    ownership predicate and the widening leaked into the VERDICT, so a sibling
+    worktree claiming a peer's live slug was told rc 12 "✅ THIS IS YOURS — carry
+    on with it". The F4 recovery must not re-create that, in either of its two
+    ways: it must not fire while the owning worktree still EXISTS, and it must not
+    reach `report_existing` at all (which calls `claim_is_mine` with the strict
+    scope and no second argument).
+
+    So, with the owning worktree LIVE, a sibling and the clone root must both get
+    rc 10 on `--check` and on a bare claim, and rc 10 on the destructive verb too.
+
+    🔴 AND THE PAIRING IS THE POINT. Every rc 10 below is followed by the same
+    command after the worktree is removed, which must then behave differently on
+    the release path and IDENTICALLY on the verdict path. Without that, "rc 10"
+    would be satisfied by a recovery wired to nothing.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    holder = _worktree(a, tmp_path / "a-holder", branch="holder")
+    sibling = _worktree(a, tmp_path / "a-sibling2", branch="sibling2")
+    env = _cwd_env(origin)
+
+    assert _run("live-sibling", "--subject", "generic item", cwd=holder,
+                env=env).returncode == RC_OK
+    ref_sha = _remote_refs(origin)[f"{CLAIM_NS}live-sibling"]
+
+    for label, where in (("sibling worktree", sibling), ("clone root", a)):
+        chk = _run("--check", "live-sibling", cwd=where, env=env)
+        assert chk.returncode == RC_TAKEN, (
+            f"--check from the {label} got rc={chk.returncode} about a LIVE "
+            f"peer's claim. rc {RC_MINE} is CARRY ON — round 4's bug "
+            f"verbatim.\n{chk.stdout}")
+        assert "THIS IS YOURS" not in chk.stdout, chk.stdout
+        assert "DO NOT start this item" in chk.stdout, chk.stdout
+
+        dup = _run("live-sibling", "--subject", "the same item", cwd=where, env=env)
+        assert dup.returncode == RC_TAKEN, (
+            f"a bare claim from the {label} got rc={dup.returncode} about a LIVE "
+            f"peer's claim\n{dup.stdout}")
+        assert "THIS IS YOURS" not in dup.stdout, dup.stdout
+
+        rel = _run("--release", "live-sibling", cwd=where, env=env)
+        assert rel.returncode == RC_TAKEN, (
+            f"--release from the {label} deleted a claim whose worktree is still "
+            f"REGISTERED (rc={rel.returncode}) — the F4 recovery is a blanket "
+            f"clone-level fallback, which is round 3's bug.\n{rel.stdout}")
+        assert _remote_refs(origin)[f"{CLAIM_NS}live-sibling"] == ref_sha
+
+    # 🔴 POSITIVE CONTROL — the refusals above are about the worktree being LIVE,
+    # not about a recovery that never runs. Same commands, worktree removed.
+    _remove_worktree(a, holder)
+
+    # the VERDICT is unchanged: strict scope, so still STOP. That is deliberate —
+    # "may I delete this ref?" and "should I start this work?" are not the same
+    # question, and only the first one was widened.
+    chk = _run("--check", "live-sibling", cwd=sibling, env=env)
+    assert chk.returncode == RC_TAKEN, (
+        f"the F4 recovery leaked into the CLAIM/--check verdict (rc="
+        f"{chk.returncode}) — that is exactly round 4's regression\n{chk.stdout}")
+    assert "THIS IS YOURS" not in chk.stdout, chk.stdout
+
+    # the DESTRUCTIVE verb is the one that moves.
+    rel = _run("--release", "live-sibling", cwd=sibling, env=env)
+    assert rel.returncode == RC_OK, (
+        f"removing the owning worktree changed nothing on the release path "
+        f"(rc={rel.returncode}) — every rc 10 asserted above is then vacuous\n"
+        f"{rel.stdout}\n{rel.stderr}")
+    assert f"{CLAIM_NS}live-sibling" not in _remote_refs(origin)
+
+
+def test_the_removed_worktree_recovery_does_not_reach_another_clone_or_host(
+        tmp_path):
+    """🔴 THE RECOVERY IS CONDITIONAL ON PROVENANCE, NOT ON "I COULD NOT MATCH THE
+    TOKEN". A removed worktree's owner-id is uncomputable — but so is a claim from
+    a DIFFERENT clone and so is one from the OTHER MACHINE, and granting those is
+    the blanket fallback this fix exists to avoid.
+
+    Two legs, because the `clone-id` is a hash of BOTH halves and one measurement
+    would not say which half is load-bearing:
+      (1) a different clone on the SAME host, and
+      (2) the SAME clone with a different `/etc/machine-id`.
+    Each is paired with the matching grant, so a `clone-id` comparison wired to
+    nothing cannot pass.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    b = _session(tmp_path, origin, "Same Identity", "b")
+    mid1 = _machine_id(tmp_path, "mid-1", "1111111111111111aaaaaaaaaaaaaaaa")
+    mid2 = _machine_id(tmp_path, "mid-2", "2222222222222222bbbbbbbbbbbbbbbb")
+    env_a = _cwd_env(origin, DEVRC_CLAIM_MACHINE_ID_FILE=str(mid1))
+    env_b = _cwd_env(origin, DEVRC_CLAIM_MACHINE_ID_FILE=str(mid1))
+    env_other_host = _cwd_env(origin, DEVRC_CLAIM_MACHINE_ID_FILE=str(mid2))
+
+    # (1) another CLONE on the same host
+    wt = _worktree(a, tmp_path / "a-cross", branch="cross")
+    assert _run("cross-clone", "--subject", "generic item", cwd=wt,
+                env=env_a).returncode == RC_OK
+    _remove_worktree(a, wt)
+    other = _run("--release", "cross-clone", cwd=b, env=env_b)
+    assert other.returncode == RC_TAKEN, (
+        f"a DIFFERENT clone released a claim made in a removed worktree of "
+        f"another clone (rc={other.returncode}) — the recovery is a blanket "
+        f"'the token did not match' fallback, not a provenance check.\n"
+        f"{other.stdout}\n{other.stderr}")
+    assert f"{CLAIM_NS}cross-clone" in _remote_refs(origin)
+    # …and the clone it WAS made in still gets it, so the refusal above is about
+    # provenance rather than about a recovery that never fires.
+    assert _run("--release", "cross-clone", cwd=a, env=env_a).returncode == RC_OK
+
+    # (2) the same clone, a different machine-id
+    wt2 = _worktree(a, tmp_path / "a-cross2", branch="cross2")
+    assert _run("cross-host", "--subject", "generic item", cwd=wt2,
+                env=env_a).returncode == RC_OK
+    _remove_worktree(a, wt2)
+    xhost = _run("--release", "cross-host", cwd=a, env=env_other_host)
+    assert xhost.returncode == RC_TAKEN, (
+        f"the OTHER machine released a claim made in a removed worktree at the "
+        f"same path (rc={xhost.returncode}) — `/home/zach/workspace/devrc` "
+        f"exists on both hosts, which is the too-loose half of the round-2 bug "
+        f"reappearing in the recovery.\n{xhost.stdout}\n{xhost.stderr}")
+    assert f"{CLAIM_NS}cross-host" in _remote_refs(origin)
+    assert _run("--release", "cross-host", cwd=a, env=env_a).returncode == RC_OK
+
+
+def test_a_pre_round6_claim_with_no_clone_id_is_still_refused_and_says_force(
+        tmp_path):
+    """⚠ THE STATED LIMIT OF THE F4 FIX, PINNED SO IT CANNOT BE MISREAD AS CLOSED.
+
+    `clone-id:` is written from round 6 onward. A claim ALREADY on the remote
+    carrying `owner-id:` and no `clone-id:` fails step 1 of the recovery and still
+    needs `--force` — measured on the canonical remote 2026-08-27, refs in exactly
+    that shape exist today.
+
+    ⚠ LABEL: an INVARIANT GUARD, not regression cover. It passes at the base
+    commit too (nothing there could grant), and its job is to make the
+    `clone-id-requirement-dropped` mutant killable and to stop a later round
+    quietly deleting the requirement.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    env = _cwd_env(origin)
+
+    # A round-5-format claim: owner-id, no clone-id. Built with raw git so it is
+    # genuinely the old shape rather than whatever the current script emits.
+    tree = _git("-C", str(a), "mktree", input="").stdout.strip()
+    body = ("claim(old-format): generic item\n\n"
+            "claimed-by: t <t@localhost>\n"
+            f"host: {os.uname().nodename}\n"
+            "owner-id: deadbeefcafe\n"
+            "nonce: 1-2\n")
+    sha = _git("-C", str(a), "commit-tree", tree, input=body).stdout.strip()
+    _git("-C", str(a), "push", "origin", f"{sha}:{CLAIM_NS}old-format")
+
+    rel = _run("--release", "old-format", cwd=a, env=env)
+    assert rel.returncode == RC_TAKEN, (
+        f"a pre-round-6 `owner-id:` claim with no `clone-id:` was released "
+        f"without --force (rc={rel.returncode}) — the recovery then grants on "
+        f"'the token did not match' alone, which is the blanket fallback\n"
+        f"{rel.stdout}")
+    assert "--force" in rel.stdout, rel.stdout
+    assert _remote_refs(origin)[f"{CLAIM_NS}old-format"] == sha
+
+    # POSITIVE CONTROL: the documented escape hatch works on it.
+    assert _run("--release", "old-format", "--force", cwd=a,
+                env=env).returncode == RC_OK
+    assert f"{CLAIM_NS}old-format" not in _remote_refs(origin)

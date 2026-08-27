@@ -254,18 +254,55 @@ no submodules, so nothing exercises it in anger; it is pinned by
 invariant guard, labelled as one **in the docstring as well as here** — round 5
 found the doc claiming the label and the docstring never using the words.
 
-🔴 **A third residual, found in round 5 and NOT fixed: a claim made in a worktree
-that is later `git worktree remove`d can never be released by anyone without
-`--force`.** The token is `<clone>/.git/worktrees/<name>`; removing the worktree
-deletes that admin directory, so no live directory computes it. Measured: rc 10
-from the clone root *and* from a sibling worktree, for the full TTL, with the
+🔴 **A third residual, found in round 5, FIXED in round 6: a claim made in a
+worktree that is later `git worktree remove`d could not be released by anyone
+without `--force`.** The token is `<clone>/.git/worktrees/<name>`; removing the
+worktree deletes that admin directory, so no live directory computes it. Measured:
+rc 10 from the clone root *and* from a sibling worktree, for the full TTL, with the
 refusal saying the claim "is NOT yours" about the owner's own lock. **This shape
 is produced routinely** — this repo mandates a worktree per file-modifying agent
-and auto-removes one that ends unchanged. It is not fixed because every fix
-widens the token back towards the clone, which is round 3's bug; the escape
-hatches are `--force`, the TTL, or recreating a worktree at the same path with
-the same admin name (measured to restore ownership — the token is the admin
-dir's PATH, not its inode). `git worktree move` is safe.
+and auto-removes one that ends unchanged.
+
+**Round 6's fix, and why it is not round 3 again.** The obvious repair — "if the
+token does not match, fall back to the clone" — is round 3's bug with an extra
+step, and round 4's regression on top of it: a LIVE sibling worktree does not
+match either, and would be handed its peer's lock. So the grant is conditional on
+the owning worktree being **gone**, established positively in two steps:
+
+1. the claim commit now also carries **`clone-id:`** — `hash(machine-id ‖
+   realpath(--git-common-dir))`, hashed for the same public-remote reason
+   `owner-id` is — and it must equal ours. Same clone, same host. Without this
+   step a different clone, or the other machine, would qualify.
+2. the claim's `owner-id` must not be computable by **any worktree this clone
+   still has registered** — the main worktree's git dir plus every admin dir under
+   `<common-dir>/worktrees/`. That set is the complete owner space of this clone on
+   this host (a subdirectory reports its worktree's git dir; a `cp -a` copy points
+   at the original's admin dir), so absence from it means the producing worktree is
+   no longer registered.
+
+`clone-id` is **provenance, not ownership**: it is never compared as a token, and
+the recovery is reached only through `claim_is_mine`'s `clone` scope, i.e. only
+from `require_ownership_or_force`. **The claim/`--check` verdict is untouched** —
+a sibling worktree still reads rc 10 STOP, before and after a removal. The grant
+also warns on stderr, because it is an inference about a directory that is not
+there any more rather than a token match.
+
+⚠ **Two limits, stated.** (a) `clone-id:` is written from round 6 onward, so a
+claim already on the remote with `owner-id:` and no `clone-id:` still needs
+`--force`, the TTL, or recreating a worktree at the same path with the same admin
+name (measured to restore ownership — the token is the admin dir's PATH, not its
+inode). Measured on the canonical remote 2026-08-27: refs in that shape exist
+today, so this is a live gap. (b) The test is "no longer **registered**", not "the
+directory is gone": a worktree `rm -rf`'d without `git worktree prune` keeps its
+admin dir and is still refused — the conservative direction, on purpose.
+`git worktree move` is safe.
+
+Pinned by `test_a_claim_from_a_REMOVED_worktree_is_releasable_by_its_own_clone`
+(red at `648f08c2`), `test_a_live_sibling_worktree_is_not_widened_by_the_removed_
+worktree_recovery` (the round-4 regression guard — every rc 10 paired with the
+same command after the removal, so a recovery wired to nothing cannot pass it),
+`test_the_removed_worktree_recovery_does_not_reach_another_clone_or_host` and
+`test_a_pre_round6_claim_with_no_clone_id_is_still_refused_and_says_force`.
 
 ⚠ **A fourth: a `cp -a` copy of a worktree is the SAME owner as the original**,
 because the copy's `.git` is a file holding `gitdir: <original admin dir>`.
@@ -305,6 +342,14 @@ and a transitional claim's `where:` line says which format it is in rather than
 the matching cwd releases without `--force`, a different cwd is still refused.
 ⚠ Those published claims carry `cwd: /home/zach/workspace/devrc`, a path already
 all over this public repo, so nothing needed redacting.
+
+⚠ **RE-MEASURED 2026-08-27 (round 6): the mix has flipped and the "all legacy"
+sentences above are HISTORY, not the current state.** `owner-id:` now holds the
+large majority of the live refs and a single `cwd:` ref remains. Nothing changes —
+the legacy tier stays because it is not empty — but the **mix moves like the count
+does**, so re-derive both rather than quoting either. This matters for round 6's
+F4 fix in particular: the refs that fall in its `owner-id:`-with-no-`clone-id:` gap
+are the majority today, not a rounding error.
 
 #### 🔴 Round 5: the legacy tier's widening is scoped to the DESTRUCTIVE verbs
 
