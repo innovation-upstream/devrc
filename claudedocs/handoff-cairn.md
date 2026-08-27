@@ -138,9 +138,25 @@ empty. An unknown kind is withheld too — the fail-closed direction.
 1. ~~**Fix the sanitizer leak**~~ — **DONE**, see the diagnosis above. The proposed fix was
    measured not to work and was replaced: declaration-driven **withholding** of harvested
    prose, plus name substitution confined to declared identifier cells.
-2. **Build `cairn who <task>`** — the task→session→window→transcript resolver. Every hop exists;
-   only the join is missing (see the Gotchas block below for the exact chain). Repo: `devrc`.
-   This is the first capability that is *about* Cairn rather than inherited from devrc.
+2. ~~**Build `cairn who <task>`**~~ — **DONE**, PR #917 (squash `c39abe31`), shipped to both
+   hosts. Three things the chain description below did NOT carry, each measured and each
+   changing the design:
+   - 🔴 **A tmux window is TRANSIENT; a transcript is DURABLE, and collapsing them is the trap.**
+     The worked example below *no longer resolves* — #360's window is gone while its 6 MB
+     transcript sits where it was written. A window-keyed resolver answers "nobody" for almost
+     every task older than current uptime. So each session yields TWO independent findings.
+   - **The join key is not always a uuid** — 39 of 41 live windows carried uuids, 2 carried
+     `ses_…` tokens. A shape-validating join silently matches nothing and reports a clean
+     "no live window".
+   - **`session-manager --lean` omits `pane_id`/`window_id`/`codename`** — three of the four
+     things the command prints. Pinned by a test, since `--lean` is the obvious "optimisation".
+
+   Five states are kept distinct because they all print near-nothing: `resolved` ·
+   `no-sessions-recorded` (a UI-filed task genuinely has none — exit 0) ·
+   `sessions-recorded-but-none-located` · `task-not-found` (7) · `bad-task-id` (2) ·
+   `clawgate-unreachable` (8). The pair that matters is *"the answer is no"* vs *"there was no
+   answer"*. 🔴 **An unmeasured live half is never rendered as "no window"** — if any host goes
+   unmeasured the absence is UNMEASURED, and transcripts are still reported.
 3. **Convert the six remaining positional audit reads** —
    `scripts/tests/test_subsystem_store_api.py`. One PR covering all 11 sites, each shown red
    under a forced `_audit` delay. Repo: `devrc`. 🔴 **Do this AFTER #360 lands** — that card may
@@ -245,6 +261,14 @@ grep -o -i civitai /tmp/san.html | wc -l   # expect 0  — control: substitution
 grep -o WITHHELD /tmp/san.html   | wc -l   # >0 — positive control: the page is NOT empty
 grep -o 'name-[0-9][0-9]' /tmp/san.html | wc -l   # >0 — identifiers renamed, not dropped
 grep -o -i ' test ' /tmp/san.html | wc -l  # equal in BOTH builds — prose NOT corrupted
+
+# cairn who — the task -> session -> window -> transcript join
+cairn who 360            # expect rc 0; each session shows BOTH a window line and a transcript line
+cairn who 99999999       # expect rc 7  — task-not-found
+cairn who not-a-number   # expect rc 2  — bad-task-id (clawgate ANSWERED with a 400)
+#   🔴 rc 7 and rc 8 are the pair that matters: "the answer is no" vs "there was no answer".
+#   A session whose window is gone still resolves via its transcript — that is the design,
+#   not a degraded result.
 ```
 🔴 **Do not pin the last four to a literal count here.** They move whenever a skill or an rc
 code is added, and a stale number in a doc reads as a failed fix. Compare the sanitized build
