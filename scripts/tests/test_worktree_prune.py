@@ -1678,6 +1678,26 @@ def test_a_looped_worktree_does_not_abort_the_whole_scan(tmp_path, capsys):
     assert wp.summarize(rows, ["*/nope/*"])["worktrees"] == len(rows)
 
 
+def test_a_looped_repo_path_on_the_command_line_does_not_crash_the_run(symlink_loop,
+                                                                       tmp_path, capsys):
+    """🔴 The OTHER reachable `.resolve()` — `collect_repos` de-duplicates
+    `--repo` values by their resolved path, with NO `is_dir` gate in front of
+    it, so a looped path typed on the command line reached `resolve()` directly
+    and took `main()` down before one row was scanned.
+
+    (`discover_repos`' resolve is guarded by `is_dir(p / ".git")`, which is
+    already False under a loop, so its fallback is defensive rather than
+    reachable — said here rather than implied by an absent test.)
+    """
+    assert wp.collect_repos(type("A", (), {
+        "repo": [symlink_loop], "repos_from": None,
+        "scan_root": [], "scan_depth": 2})()) == [Path(symlink_loop)]
+
+    gh = gh_stub(tmp_path, [], name="gh-looped-repo")
+    rc = wp.main(["--repo", symlink_loop, "--gh-cmd", gh, "--jobs", "1"])
+    assert rc == wp.RC_OK, capsys.readouterr().err
+
+
 def test_resolve_or_none_swallows_the_loop_and_still_resolves_normal_paths(symlink_loop,
                                                                           tmp_path):
     """Both halves of the helper. Swallowing everything would be indistinguishable
