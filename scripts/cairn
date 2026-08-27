@@ -851,7 +851,10 @@ def build_parser() -> argparse.ArgumentParser:
     # was rejected outright because the flag only existed BEFORE the subcommand.
     # 🔴 A DISTINCT `dest` IS WHAT MAKES THE PRECEDENCE POSSIBLE. Sharing
     # `timeout` let the subparser default clobber an explicit parent value.
+    # `metavar` because the internal dest would otherwise surface in --help
+    # as `--timeout WHO_TIMEOUT` — an implementation detail on a user surface.
     w.add_argument("--timeout", type=int, default=None, dest="who_timeout",
+                   metavar="SECONDS",
                    help=f"seconds per external tool (default {_who_default_timeout()}; "
                         "a top-level --timeout is honoured too)")
     w.set_defaults(func=cmd_who)

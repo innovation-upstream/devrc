@@ -926,51 +926,108 @@ def test_the_store_commands_still_get_the_STORE_default_when_no_flag_is_given():
     assert cli._who_timeout(who, W.DEFAULT_TIMEOUT) == W.DEFAULT_TIMEOUT
 
 
-def test_every_store_call_site_resolves_the_timeout_sentinel():
-    """🔴 SEAM GUARD: no call site may pass the raw sentinel to the network.
+def _passes_args_timeout_raw(kw) -> bool:
+    """The detector, as ONE function used by both the scan and its control.
 
-    Making the top-level `--timeout` default `None` — so `who` can tell "not
-    given" from an explicit value — gave every store command a chance to forget.
-    Mutating all four sites to pass `args.timeout` through kept the suite green,
-    and a `None` reaches `urllib` as NO timeout: the unbounded wait `_run`
-    already refuses on the other side of this same file.
-
-    Asserts the RELATIONSHIP (every `timeout=` argument in the store paths goes
-    through the resolver) rather than a count, so a fifth caller fails here.
+    🔴 THE FIRST CONTROL WAS A TAUTOLOGY AND A DEMONSTRATED BYPASS PROVED IT.
+    It re-implemented this predicate as separate literal code, so it verified a
+    COPY of the detector rather than the detector. Measured: blinding the real
+    predicate (`v.value.id != "args"`) AND restoring a genuine bypass in
+    `cmd_sync` at the same time left all 63 tests green — the control could not
+    fail in exactly the scenario its own comment named. A control built out of
+    the thing it is controlling is a second sample of the same unknown.
     """
     import ast
 
-    src = (REPO_ROOT / "scripts" / "cairn").read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    # The hazard is precisely `args.timeout` — the namespace attribute that may
-    # hold the sentinel. A local `timeout=timeout` inside a helper is forwarding
-    # an ALREADY-resolved value and is not a bypass; flagging it too made this
-    # guard fire on two innocent sites, which is how a guard gets loosened until
-    # it means nothing.
-    offenders = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        for kw in node.keywords:
-            if kw.arg != "timeout":
-                continue
-            v = kw.value
-            if (isinstance(v, ast.Attribute) and v.attr == "timeout"
-                    and isinstance(v.value, ast.Name) and v.value.id == "args"):
-                offenders.append(ast.unparse(kw))
+    if kw.arg != "timeout":
+        return False
+    v = kw.value
+    return (isinstance(v, ast.Attribute) and v.attr == "timeout"
+            and isinstance(v.value, ast.Name) and v.value.id == "args")
+
+
+def test_the_raw_sentinel_detector_can_actually_FIRE():
+    """CONTROL, exercising the SAME function the scan below uses.
+
+    Narrowing a guard can narrow it to nothing, so the detector must be shown
+    to see a real bypass before its silence means anything.
+    """
+    import ast
+
+    bad = ast.parse("cmd(timeout=args.timeout)")
+    hits = [kw for n in ast.walk(bad) if isinstance(n, ast.Call)
+            for kw in n.keywords if _passes_args_timeout_raw(kw)]
+    assert len(hits) == 1, "the detector cannot see a real bypass"
+
+    for safe in ("cmd(timeout=_store_timeout(args))", "cmd(timeout=timeout)",
+                 "cmd(cache=args.timeout)", "cmd(timeout=other.timeout)"):
+        tree = ast.parse(safe)
+        assert not [kw for n in ast.walk(tree) if isinstance(n, ast.Call)
+                    for kw in n.keywords if _passes_args_timeout_raw(kw)], (
+            f"the detector fires on a safe form: {safe}")
+
+
+def test_no_call_site_passes_the_RAW_sentinel_attribute():
+    """SEAM GUARD, scoped to exactly what it can see.
+
+    🔴 ITS EARLIER DOCSTRING CLAIMED A RELATIONSHIP IT DOES NOT ENFORCE — "every
+    `timeout=` argument goes through the resolver". It rejects one AST shape:
+    the literal `args.timeout`. Measured survivors of that wider claim:
+    `timeout=getattr(args, "timeout")`, `timeout=args.timeout or None`, and
+    `timeout=None` — the last being the exact hazard the prose named. Those are
+    covered by the BEHAVIOURAL test below instead, which asserts what actually
+    reaches the network layer; this one catches the spelling a careless edit
+    produces, and says so rather than implying more.
+    """
+    import ast
+
+    tree = ast.parse((REPO_ROOT / "scripts" / "cairn").read_text(encoding="utf-8"))
+    offenders = [ast.unparse(kw) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 for kw in n.keywords if _passes_args_timeout_raw(kw)]
     assert not offenders, (
         "a `timeout=` argument passes `args.timeout` raw, so it may carry the "
         f"None sentinel to the network — resolve it first: {offenders}")
 
-    # CONTROL: the guard must be able to FIRE. Without this, narrowing it to
-    # `args.timeout` could have narrowed it to nothing.
-    bad = ast.parse("f(timeout=args.timeout)")
-    hits = [ast.unparse(kw) for n in ast.walk(bad) if isinstance(n, ast.Call)
-            for kw in n.keywords
-            if kw.arg == "timeout" and isinstance(kw.value, ast.Attribute)
-            and kw.value.attr == "timeout"
-            and isinstance(kw.value.value, ast.Name) and kw.value.value.id == "args"]
-    assert hits == ["timeout=args.timeout"], "the detector cannot see a real bypass"
+
+@pytest.mark.parametrize("argv", [
+    ["sync"], ["recall"], ["search", "q"], ["validate"], ["ls-entries"],
+])
+def test_every_STORE_subcommand_reaches_the_network_with_a_POSITIVE_bound(
+        argv, monkeypatch, tmp_path):
+    """🔴 THE BEHAVIOURAL HALF, and the one that covers spellings AST cannot.
+
+    `timeout=None`, `getattr(args, "timeout")` and `args.timeout or None` all
+    slip past a syntactic guard while carrying the sentinel to `urllib`, where
+    a `None` means NO timeout — the unbounded wait `_run` refuses on the other
+    side of this file. Asserting on what the network layer actually receives is
+    indifferent to how the argument was spelled.
+    """
+    cli = _load_cairn_cli()
+    seen = {}
+
+    def fake_resolve_state(cache, *, no_sync, scope, timeout, **kw):
+        seen["timeout"] = timeout
+        raise SystemExit(0)
+
+    monkeypatch.setattr(cli, "resolve_state", fake_resolve_state, raising=False)
+    monkeypatch.setattr(cli, "DEFAULT_CACHE", tmp_path / "cache", raising=False)
+    # `--cache` is a TOP-LEVEL flag, so it goes BEFORE the subcommand — the
+    # same namespace-position distinction this round's precedence fix is about.
+    args = cli.build_parser().parse_args(["--cache", str(tmp_path / "c")] + argv)
+    try:
+        args.func(args)
+    except SystemExit:
+        pass
+    except Exception:
+        pass
+    # 🔴 NOT a skip. A subcommand that stops reaching `resolve_state` has lost
+    # this coverage, and a skip would report that as a pass — the vacuous green
+    # this whole file is written against. Measured: all five reach it today.
+    assert "timeout" in seen, (
+        f"{argv[0]} never reached resolve_state, so nothing was checked")
+    assert isinstance(seen["timeout"], int) and seen["timeout"] > 0, (
+        f"{argv[0]} reached the network with timeout={seen['timeout']!r} — a "
+        "non-positive or None bound is an UNBOUNDED wait")
 
 
 def test_the_store_resolver_turns_the_sentinel_into_a_POSITIVE_bound():
