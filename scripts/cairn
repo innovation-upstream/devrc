@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import io
+import json
 import os
 import shutil
 import sys
@@ -720,6 +721,24 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return worst
 
 
+def cmd_who(args: argparse.Namespace) -> int:
+    """Task -> sessions -> windows + transcripts. See `lib/cairn_who.py`."""
+    lib = str(Path(__file__).resolve().parent / "lib")
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
+    import cairn_who  # noqa: PLC0415
+
+    report = cairn_who.resolve(
+        args.task, timeout=args.timeout, host=args.host,
+        skip_windows=args.no_windows,
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(cairn_who.render(report))
+    return report.exit_code
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="cairn",
@@ -762,6 +781,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     e = common(sub.add_parser("ls-entries", help="one `<scope>/<entry>.md` per line"))
     e.set_defaults(func=cmd_ls_entries)
+
+    # 🔴 `who` TOUCHES NO STORE AND NO CACHE. It is the first cairn subcommand
+    # about a different noun — a TASK, not a subsystem entry — so it takes none
+    # of the `common()` flags and never syncs. It is here rather than in its own
+    # binary because `cairn` is the name for the whole three-noun layer, and a
+    # second CLI would be the second place to look.
+    w = sub.add_parser("who", help="which sessions/windows/transcripts worked a task")
+    w.add_argument("task")
+    w.add_argument("--json", action="store_true")
+    w.add_argument("--host", default=None, choices=["workbench", "laptop"])
+    w.add_argument("--no-windows", action="store_true",
+                   help="skip the tmux scan; report only the durable transcripts")
+    w.set_defaults(func=cmd_who)
     return p
 
 
