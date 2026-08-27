@@ -7833,8 +7833,34 @@ class TestJournalMutationKillMatrix:
         assert "top 3 of 5" in text, "the cap stopped applying, so this is not the notice's kill"
 
     def test_kills_the_UNREADABLE_wrap_in_build_report(self, tmp_path) -> None:
-        """Without it an `IsADirectoryError` escapes with nothing saying the
-        SUBSYSTEM STORE was what failed."""
+        """Without it a raw `OSError` escapes with nothing saying the SUBSYSTEM
+        STORE was what failed.
+
+        🔴 THE SEVENTH `mkdir` SITE, AND THE ONE THE SWEEP MISSED. This fixture
+        was `(store / SCOPE / "half-written.md").mkdir()` for a round after the
+        six others were migrated — same file, same filename, 276 lines below the
+        sibling at `test_an_UNREADABLE_entry_raises_the_named_error_from_
+        build_report` that WAS migrated. `_LOADER_ENTRY_ACTIONS` now REFUSES
+        `directory` before `open()`, so `load_index` raised `MalformedEntryError`
+        and the `except OSError -> EntryUnreadableError` clause THIS TEST MUTATES
+        was never reached: mutant and pristine module raised the same
+        `MalformedEntryError` and both assertions below passed either way.
+        Measured, not inferred — an IDENTITY replacement (mutant == original) on
+        the old fixture gave `1 passed`, where a sensitive kill must give a
+        FAILURE.
+
+        The replacement is the same ENOTDIR symlink the six siblings use — a
+        path "under" a regular file, which `classify_path` calls `indeterminate`
+        ("I could not look") and the loader deliberately still TAKEs, so
+        `read_text` runs and raises `NotADirectoryError`. Privilege-independent
+        on purpose: a `chmod 000` would be bypassed by a root-run sandbox, which
+        is a conditionally dead control rather than a live one.
+
+        The premise is ASSERTED, not assumed — that is what the old fixture
+        silently lost — and the mutant's OWN symptom is pinned, so a future
+        refusal that moves this shape back onto the malformed path fails here
+        instead of going quietly vacuous again.
+        """
         mod = _load_mutant(
             tmp_path,
             "mj_unreadable",
@@ -7843,13 +7869,30 @@ class TestJournalMutationKillMatrix:
               '        raise RuntimeError(\n            f"neutered: under {store} ')],
         )
         store = _journal_store(tmp_path)
-        (store / SCOPE / "half-written.md").mkdir()
+        blocker = store / SCOPE / ".not-a-directory"
+        blocker.write_text("a regular file, so paths UNDER it are ENOTDIR\n")
+        os.symlink(blocker / "child", store / SCOPE / "half-written.md")
+        assert sr.classify_path(store / SCOPE / "half-written.md") == (
+            sr.KIND_INDETERMINATE
+        ), "the fixture is a kind the loader REFUSES, so it never reaches a read"
         with pytest.raises(Exception) as exc:
             mod.build_report(
                 mod.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
             )
         assert not isinstance(exc.value, st.EntryUnreadableError)
         assert "index entry unreadable" not in str(exc.value)
+        # 🔴 THE ANTI-VACUUM HALF. Without this the two assertions above are
+        # satisfied by ANY other exception — including the `MalformedEntryError`
+        # a refused entry raises, which is exactly how this test died the first
+        # time. `MalformedEntryError` is a `ResolverError`, never a
+        # `RuntimeError`, so this names the neutered raise and nothing else.
+        assert isinstance(exc.value, RuntimeError), (
+            f"the mutated clause was never reached — got {type(exc.value).__name__}: "
+            f"{exc.value}"
+        )
+        assert str(exc.value).startswith("neutered: under "), (
+            "the raise that escaped is not the one this mutation planted"
+        )
 
     def test_kills_the_MALFORMED_refusal_wording(self, tmp_path) -> None:
         """🔴 SUPERSEDES `test_the_MALFORMED_reraise_is_UNKILLABLE_and_that_is_the

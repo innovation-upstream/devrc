@@ -2151,11 +2151,18 @@ def load_index(
 
     🔴 SO THE CANDIDATE'S KIND IS NOW CHECKED BEFORE `open()`, FOR EVERY CALLER
     — `_LOADER_ENTRY_ACTIONS`, above, which reuses `classify_path` rather than
-    asking the question a second way. It is NARROW on purpose: a dangling
-    symlink, a fifo/socket/device, a symlink POINTING AT one, a directory named
-    `*.md` and a symlink pointing at a directory are refused, and everything
-    this loader has ever successfully READ — regular files AND symlinks to
-    regular files — is still read, so no legitimate caller changes behaviour.
+    asking the question a second way. It is NARROW on purpose. THE REFUSED SET,
+    named by KIND so this sentence is machine-readable and cannot drift the way
+    the ledger below twice did: a dangling symlink (`broken-link`), a
+    fifo/socket/device (`other`), a symlink POINTING AT one (`link-to-other`), a
+    directory named `*.md` (`directory`) and a symlink pointing at a directory
+    (`link-to-dir`) are refused. (END OF REFUSED SET.) Everything this loader has
+    ever successfully READ — regular files AND symlinks to regular files — is
+    still read, so no legitimate caller changes behaviour.
+    `test_the_DOCSTRING_REFUSED_SET_names_every_REFUSE_kind_and_no_other` pins
+    the marked span above against the table in both directions — it was PROSE
+    for a round, naming none of the kinds, and nothing read it: dropping three
+    of the five refusals from it left the whole suite green.
     (Cells 3-5 shipped in later rounds than the first two, each after the shape
     was measured: `link-to-other` wedging an unrestricted `/recall` thread for
     25s, and `directory`/`link-to-dir` 503ing the whole store on an

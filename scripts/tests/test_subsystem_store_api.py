@@ -1185,25 +1185,37 @@ class TestClassifierIsTotal:
         )
 
     @staticmethod
-    def _residual_ledger(label: str) -> str:
-        """The document's RESIDUAL LEDGER region, by its literal markers.
+    def _marked_region(
+        text: str, label: str, start: str, end: str, min_len: int
+    ) -> str:
+        """A document region delimited by two literal markers.
 
         An absent or unterminated marker ASSERTS rather than returning an empty
         slice — an empty region would satisfy every "is not in" below and turn
-        this guard into the reassuring zero it exists to prevent.
+        the guard using it into the reassuring zero it exists to prevent. So
+        does a region that came back implausibly short.
         """
+        lo = text.find(start)
+        assert lo > 0, f"{label}: no {start} section at all"
+        hi = text.find(end, lo + len(start))
+        assert hi > lo, f"{label}: the {start} region is not terminated by {end!r}"
+        region = text[lo:hi]
+        assert len(region) > min_len, (
+            f"{label}: the {start} region is suspiciously short ({len(region)}b)"
+        )
+        return region
+
+    @classmethod
+    def _residual_ledger(cls, label: str) -> str:
+        """The document's RESIDUAL LEDGER region, by its literal markers."""
         text = (
             resolver.load_index.__doc__
             if "load_index" in label
             else (API_DIR / label).read_text(encoding="utf-8")
         )
-        start = text.find("RESIDUAL LEDGER")
-        assert start > 0, f"{label}: no RESIDUAL LEDGER section at all"
-        end = text.find("END OF RESIDUAL LEDGER", start + 1)
-        assert end > start, f"{label}: the RESIDUAL LEDGER is not terminated"
-        region = text[start:end]
-        assert len(region) > 200, f"{label}: the ledger region is suspiciously short"
-        return region
+        return cls._marked_region(
+            text, label, "RESIDUAL LEDGER", "END OF RESIDUAL LEDGER", min_len=200
+        )
 
     @pytest.mark.parametrize(
         "label", ["subsystem_resolver.load_index", "README.md"]
@@ -1256,6 +1268,66 @@ class TestClassifierIsTotal:
                 f"the exact drift this guard exists for"
             )
 
+    def test_the_DOCSTRING_REFUSED_SET_names_every_REFUSE_kind_and_no_other(self):
+        """🔴 THE HALF THE GUARD BELOW CLAIMED AND DID NOT COVER — a docstring
+        whose SENTENCE promised more coverage than its BODY delivered.
+
+        `test_the_README_REFUSED_TABLE_…` used to say "`load_index`'s docstring
+        prose is covered by the ledger half above". It was not. The ledger guard
+        reads only the span between `RESIDUAL LEDGER` and its END marker, and
+        the docstring's REFUSAL sentence lives well above that span — so nothing
+        in the tree read it. `resolver.load_index.__doc__` appeared exactly once
+        in the whole test suite, inside `_residual_ledger`.
+
+        Measured, on the state this fix replaced: dropping `link-to-other`,
+        `directory` and `link-to-dir` from that sentence — leaving the docstring
+        asserting a TWO-cell guard against a FIVE-cell table, verbatim the shape
+        of the README drift the ledger guard exists for — left the suite at
+        **407 passed**.
+
+        So the sentence now names its kinds as backticked TOKENS inside literal
+        markers, and this pins the marked span against the table in both
+        directions, exactly as the two guards around it do:
+          * a kind the loader REFUSEs and the sentence omits -> the docstring
+            claims a NARROWER guard than the code has, which is what a reader
+            deletes a "redundant" cell on the strength of;
+          * a kind the sentence names that the loader TAKEs -> a guard claimed
+            where none exists, which is the README failure one document over.
+
+        ⚠ TOKENS, NOT PROSE — same trade as the ledger guard. The explanatory
+        clause beside each kind is free to be rewritten; the backticked name is
+        the machine-readable claim. And the span is delimited tightly on
+        purpose: the paragraph BELOW it names `link-to-other`, `directory` and
+        `link-to-dir` while recounting which round each shipped in, so a guard
+        scoped to the whole docstring would have passed on all three while the
+        refusal sentence itself said nothing about them.
+        """
+        refused = {
+            k for k, a in resolver._LOADER_ENTRY_ACTIONS.items() if a == api.REFUSE
+        }
+        assert refused, "the loader refuses nothing — the table is degenerate"
+        region = self._marked_region(
+            resolver.load_index.__doc__ or "",
+            "subsystem_resolver.load_index",
+            "REFUSED SET",
+            "END OF REFUSED SET",
+            min_len=120,
+        )
+        for kind, action in sorted(resolver._LOADER_ENTRY_ACTIONS.items()):
+            present = f"`{kind}`" in region
+            if action == api.REFUSE:
+                assert present, (
+                    f"`load_index`'s REFUSED SET does not name `{kind}`, which "
+                    f"the loader refuses — the docstring claims a narrower "
+                    f"guard than the code has"
+                )
+            else:
+                assert not present, (
+                    f"`load_index`'s REFUSED SET names `{kind}`, which the "
+                    f"loader does not REFUSE (it is {action!r}) — it claims a "
+                    f"guard that is not there"
+                )
+
     def test_the_README_REFUSED_TABLE_names_every_REFUSE_kind_and_no_other(self):
         """The other half of the same seam, and the half an operator reads
         first: the README's refusal table is what tells them which shapes are
@@ -1263,20 +1335,22 @@ class TestClassifierIsTotal:
         closed; a kind listed in it that the loader actually TAKEs reads as a
         guard that does not exist.
 
-        Scoped to the README because it is the document with an explicit table.
-        `load_index`'s docstring prose is covered by the ledger half above.
+        Scoped to the README's refusal TABLE — not to everything above the
+        ledger marker, which is what it used to be. `text[:cut]` swept in every
+        line of the document before the ledger, so an unrelated future table
+        with a `regular-file` row would have failed here with a message
+        pointing at the refusal table, which is not where the edit is. The
+        docstring's own refusal sentence is pinned by the guard ABOVE, not by
+        this one — it is a different document and it says it differently.
         """
         text = (API_DIR / "README.md").read_text(encoding="utf-8")
-        cut = text.find("RESIDUAL LEDGER")
-        # 🔴 NOT `text[:cut]` UNGUARDED: `find` returns -1 when the marker is
-        # gone, and `text[:-1]` is the WHOLE file — which would silently fold
-        # the residual ledger's own rows into the refusal table and fail with a
-        # message about the wrong thing. Measured: deleting the marker produced
-        # "README refusal table lists `absent`", which sends the reader nowhere
-        # near the actual edit.
-        assert cut > 0, "the README has no RESIDUAL LEDGER marker to split on"
-        head = text[:cut]
-        assert "| kind |" in head, "the README's refusal table has moved"
+        # The table's own header line is the anchor, and a blank line ends it —
+        # the narrowest span that can be wrong. An absent header ASSERTS rather
+        # than yielding a slice: `find` returns -1 on a miss, and `text[-1:]`
+        # is a one-character region that satisfies every "is not in" below.
+        head = self._marked_region(
+            text, "README.md", "| kind | on disk | why it is refused |", "\n\n", min_len=200
+        )
         for kind, action in sorted(resolver._LOADER_ENTRY_ACTIONS.items()):
             present = f"| `{kind}` |" in head
             if action == api.REFUSE:
