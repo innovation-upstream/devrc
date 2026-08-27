@@ -26,9 +26,12 @@ diff is exactly one line, so a second divergence cannot hide inside the excuse.
 
 PHASE 1 SCOPE — read-only, cluster-internal, no ingress
 -------------------------------------------------------
-GET is the only method that reaches a handler. There is no append endpoint, no
-`PUT`, no `If-Match`; those are phase 3 (§2c) and writing them now would put an
-unreviewed write path on a store whose only copy is on the workbench.
+⚠ THIS SECTION DESCRIBES A STATE THAT NO LONGER HOLDS, and it is kept because
+every guard below was shaped by it. It read: "GET is the only method that
+reaches a handler. There is no append endpoint, no `PUT`, no `If-Match`; those
+are phase 3 (§2c)". Phase 3's criteria 4-7 landed; see the write-path section at
+the bottom of this docstring for exactly what changed and what deliberately did
+not. `/recall`, `/search` and `/snapshot` are still GET-only.
 
 THE FOUR-STATE RULE, WHICH IS THE WHOLE POINT (§3)
 --------------------------------------------------
@@ -138,13 +141,11 @@ it is the second layer, not this one.
     all three are tunable by env. Cloudflare's WAF and the Traefik middleware
     are the outer two layers, not the only ones.
 
-PHASE 3, CRITERIA 1-3 — TWO-TOKEN AUTHORIZATION ON THE **READ** PATH
----------------------------------------------------------------------
-🔴 THE READ PATH ONLY. There is still NO write verb, no append endpoint and no
-`PUT`; `do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write` is untouched
-and `TestPhaseOneScope`'s write guard is still the thing that has to be broken
-on purpose when the write path lands. What changed is WHO a token is and WHAT
-it may see.
+PHASE 3, CRITERIA 1-3 — TWO-TOKEN AUTHORIZATION, FIRST ON THE **READ** PATH
+----------------------------------------------------------------------------
+This landed first, on reads only. What changed is WHO a token is and WHAT it may
+see; the write path (criteria 4-7) then reused every line of it rather than
+growing a second answer.
 
   * **A token file row maps token -> identity -> scope allowlist**
     (`load_tokens`, `TokenRecord`). A BARE token line is still valid and means
@@ -182,22 +183,67 @@ its own allowlist — but it IS a residual count leak, and it is the reason the
 byte-identity claim below is about a REFUSED scope versus an ABSENT one, never
 about two different stores.
 
-Still NOT here, and still tracked forward: the write path itself (§2c) —
-criteria 4-10.
+PHASE 3, CRITERIA 4-7 — THE WRITE PATH (§2c)
+---------------------------------------------
+🔴 THE READ-ONLY GUARD WAS BROKEN ON PURPOSE, ONCE, AND CONVERTED RATHER THAN
+DELETED. `do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write` is now
+`= _write`, which is the SAME function with a route lookup in front of its 405
+tail: a verb with no row in `WRITE_ROUTES` and a path with no row both take the
+identical answer they took before. `TestPhaseOneScope` still fails when a route
+OR a verb appears outside its ledger — the ledgers simply now name the write
+rows too.
+
+  * **`POST /api/v1/entry/<scope>/<ref>/bullets`** appends ONE attributed bullet
+    to `## Nuance / work-history`. 🔴 THE ACTOR IS THE AUTHENTICATED IDENTITY
+    AND THE BODY CANNOT SUPPLY IT — an `actor` key is accepted and discarded,
+    because a client-supplied actor lets any token-holder attribute a bullet to
+    somebody else. The SESSION is caller-supplied, because it is correlation
+    data rather than an identity claim, and it is validated as hostile input.
+  * 🔴 **A LEGACY (BARE, UNMAPPED) TOKEN MAY NOT WRITE.** It has no identity, so
+    there is no actor to derive and "every appended bullet records actor and
+    session" cannot be satisfied. It is refused with its OWN error, which makes
+    the token-file migration a prerequisite for writes rather than an
+    afterthought. READS from a legacy token are unchanged.
+  * **Commutative and idempotent** (`append_bullet`), and this is the ship gate:
+    the store is not re-derivable, so a lost append is lost forever. Two writers
+    appending different bullets both survive — the read-modify-write is under
+    `_EntryLock`, a side-file `flock` that survives the temp-file-and-rename the
+    write itself uses. Re-POSTing the same CONTENT is a no-op that writes not one
+    byte.
+  * **`PUT /api/v1/entry/<scope>/<ref>`** replaces the whole file behind a
+    REQUIRED `If-Match`; a stale revision is a 412 and the file is untouched.
+    ⚠ THE REVISION IS THE ENTRY'S CONTENT HASH, NOT `scope_revision`, AND THAT IS
+    A DELIBERATE DEVIATION FROM THE CARD'S WORDING — no scope in the served copy
+    is a git repo, so `scope_revision` answers "unknown" for all of them and a
+    precondition keyed on it could never refuse anything. See `entry_revision`.
+  * **Writes go through the SAME auth path as reads.** Same
+    `_identify_and_meter`, same `authorize`, same uniform 401, same lockout. A
+    write to a scope outside the caller's allowlist is refused, and 🔴 THAT
+    REFUSAL IS BYTE-IDENTICAL TO A WRITE TO A SCOPE THAT DOES NOT EXIST — closed
+    at the index (`rc.load_store`), exactly as criteria 1-3 closed it for reads,
+    rather than by a per-route "is this scope yours" check with its own answer.
+
+Still NOT here, and still tracked forward: criteria 8-10 — the re-seed, the
+cache cutover and the retirement of the legacy credential. Those are OPERATIONS,
+not code, and criterion 10 in particular is now load-bearing: until the shared
+bare token is replaced by mapped rows, NOTHING can write.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import hmac
 import io
 import ipaddress
+import json
 import math
 import os
 import re
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -230,6 +276,16 @@ import subsystem_recall as rc  # noqa: E402
 # Re-exported deliberately (hence the `F401`): `KIND_*`, `SKIP/TAKE/REFUSE`,
 # `ALL_KINDS`, `classify_path` and `action_for` are read off THIS module by
 # `TestClassifierIsTotal`, and the tables below are written in terms of them.
+#
+# 🔴 `_is_fence` AND `entry_mapping` ARE IMPORTED, PRIVACY AND ALL, RATHER THAN
+# RE-SPELLED. The write path has to answer two questions the reader already
+# answers: "is this line inside a fenced block" (so a `## Nuance / work-history`
+# written INSIDE a fence is not mistaken for the real heading, exactly as
+# `extract_sections` treats it) and "would the loader accept these bytes as an
+# entry" (the PUT validity gate). A second copy of either is the duplicated
+# predicate this file keeps finding: the day one learns a new fence spelling or
+# a new identity field, the writer starts accepting what the reader rejects.
+from subsystem_resolver import _is_fence  # noqa: E402
 from subsystem_resolver import (  # noqa: E402,F401
     ALL_KINDS,
     KIND_ABSENT,
@@ -246,6 +302,7 @@ from subsystem_resolver import (  # noqa: E402,F401
     TAKE,
     action_for,
     classify_path,
+    entry_mapping,
 )
 
 # --- Constants that the tests pin LITERALLY -------------------------------------
@@ -390,6 +447,66 @@ DRAIN_DEADLINE_S = 10.0
 # in the live store match `[A-Za-z0-9_-]+`, and 0 contain a dot. (Counts only —
 # the names are client-confidential and this repo is PUBLIC.)
 SAFE_PATH_COMPONENT = re.compile(r"[A-Za-z0-9_-]+")
+
+# --- The write path (phase 3, criteria 4-7) -------------------------------------
+
+# 🔴 A SESSION ID IS CORRELATION DATA, NOT AN IDENTITY CLAIM, so unlike the actor
+# it IS caller-supplied — and it is therefore validated as hostile input before
+# it is written into a curated file. The class is narrower than a token and
+# wider than an identity: agent session ids are uuids and short hex handles.
+# `fullmatch` on this class is what stops a newline, a markdown control
+# character or a `]` from breaking the attribution trailer it is written into.
+SESSION_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+# One bullet, one line. A multi-line append is refused rather than accepted and
+# reflowed: `parse_journal_bullets` attaches every non-bullet line to the bullet
+# above it, so a caller that sent an embedded newline would silently get ONE
+# bullet whose second line is prose it thought was separate — and a caller that
+# sent a leading `- ` would get TWO bullets from one POST, only one of which
+# carries an attribution trailer. Both are content the store cannot account for.
+BULLET_TEXT_MAX = 2000
+
+# 🔴 THE ATTRIBUTION IS A SUFFIX, AND THE POSITION IS LOAD-BEARING RATHER THAN
+# COSMETIC. The store's bullet grammar is a PREFIX grammar:
+# `_JOURNAL_DATE` reads `- YYYY-MM-DD` and `_JOURNAL_OPENNESS` reads
+# `- [YYYY-MM-DD: ]OPEN:` / `RESOLVED <sha>:` — both anchored at position 0 with
+# an EXACT terminator. Writing the actor between the date and the text
+# (`- 2026-08-27 (zach): OPEN: …`) parses as NO MARKER, which is precisely the
+# near-miss class `_NEAR_MISS_MARKER` exists to report: the badge silently stops
+# rendering and a vanished badge looks like success. A suffix leaves every
+# prefix rule untouched, so an appended `OPEN:` bullet still declares itself.
+ATTRIBUTION = " [cairn: {actor}/{session}]"
+
+# The parser for the suffix above, and it is deliberately the SAME shape written
+# by `render_bullet` rather than a looser one: a trailer this cannot read is not
+# an attribution, so its bullet's content hash is computed over the whole line
+# and simply will not collide with a fresh append. Anchored at end-of-line.
+_ATTRIBUTION_RE = re.compile(
+    r"[ \t]*\[cairn: (?P<actor>[a-z0-9][a-z0-9-]{0,31})"
+    r"/(?P<session>[A-Za-z0-9][A-Za-z0-9_.-]{0,63})\]\Z"
+)
+
+# `- YYYY-MM-DD: ` — the dated bullet opener this writer emits and the one the
+# corpus already uses. Stripped before hashing so a bullet re-POSTed on a later
+# day is still recognised as the same CONTENT.
+_BULLET_OPENER_RE = re.compile(r"\A[-*][ \t]+(?:\d{4}-\d{2}-\d{2}:[ \t]+)?")
+
+# How much of a bullet's content hash is carried. 16 hex characters is 64 bits —
+# far past any collision an append stream could reach, and short enough to read
+# in an audit line.
+CONTENT_HASH_CHARS = 16
+
+# 🔴 A DETERMINISTIC INTERLEAVE POINT, CALLED INSIDE THE CRITICAL SECTION, and it
+# is a no-op in every deployment. `claude/RULES.md`: a concurrent-append test
+# driven by two threads racing on wall-clock timing proves nothing on the run
+# where they happen not to overlap, and the defect it guards against DESTROYS
+# CONTENT rather than availability — so the overlap has to be forced, not hoped
+# for. This is the seam that forces it, and it is the same shape as `audit=` and
+# `warn=`: injected behaviour with an inert default.
+#
+# It sits AFTER the read and BEFORE the write, which is exactly the window a
+# missing lock leaves open.
+_WRITE_INTERLEAVE: "Callable[[], None]" = lambda: None  # noqa: E731
 
 DEFAULT_STORE = "/data"
 DEFAULT_TOKEN_FILE = "/run/secrets/subsystem-store/token"
@@ -1504,6 +1621,271 @@ SEED_STAMP_NAME = ".seed-stamp"
 
 
 # =============================================================================
+# 🔴 THE WRITE PRIMITIVES (phase 3, criteria 4-6). The store is NOT RE-DERIVABLE
+# — it records gotchas, retracted theories and measurements that were true at a
+# moment — so a LOST APPEND IS LOST FOREVER. Everything below is shaped by that
+# one fact: the failure that matters here is silent content destruction, not
+# unavailability, and unavailability is the direction every ambiguity resolves
+# towards.
+# =============================================================================
+
+
+class EntryShapeError(Exception):
+    """The target file cannot carry an appended bullet.
+
+    Its own exception rather than a generic refusal because the two shapes it
+    covers are both a request to write into a file whose structure this writer
+    does not understand — no `## Nuance / work-history` heading, or bytes the
+    index loader would not accept as an entry — and both must fail the write
+    rather than reshape somebody's curated markdown.
+    """
+
+
+class PreconditionFailed(Exception):
+    """`If-Match` named a revision the file no longer has. Carries the CURRENT
+    one, because a client that cannot learn the new revision cannot retry."""
+
+    def __init__(self, current: str) -> None:
+        super().__init__(f"entry revision is {current}")
+        self.current = current
+
+
+def entry_revision(data: bytes) -> str:
+    """The revision an `If-Match` is compared against: the entry file's content.
+
+    🔴 THIS IS DELIBERATELY **NOT** `scope_revision`, AND THE DEVIATION IS THE
+    ONLY THING THAT MAKES THE PRECONDITION A GUARD AT ALL. `scope_revision`
+    reads `<store>/<scope>/.git/HEAD`; no scope in the served copy is a git repo,
+    so it answers `"unknown"` for every scope in the store — a precondition
+    keyed on it would be satisfied by every caller sending the literal string
+    `unknown`, forever, and could never refuse a stale write. A guard that
+    cannot fail is not a guard.
+
+    The entry's own content hash is the value a lost-update check actually needs:
+    it changes exactly when the bytes a caller based its edit on change. It is
+    also derivable by any client OFFLINE — `/snapshot` ships the entry files, so
+    a `cairn` cache can compute the revision of what it holds without a round
+    trip and without a second endpoint existing to hand it out.
+    """
+    return hashlib.sha256(data).hexdigest()[:CONTENT_HASH_CHARS]
+
+
+def content_hash(text: str) -> str:
+    """The idempotency key for one bullet: its CONTENT, and nothing else.
+
+    Whitespace is collapsed before hashing so a re-POST that differs only in
+    wrapping is the same bullet; the DATE, the ACTOR and the SESSION are not in
+    it, so the same observation re-sent by the same agent after a timeout — or
+    on the next day — is recognised rather than duplicated.
+
+    ⚠ AND THE CONSEQUENCE, STATED RATHER THAN LEFT TO BE MET: a genuinely NEW
+    bullet whose text is byte-identical to one already in the entry is treated
+    as already recorded and is NOT appended. That is the idempotency criterion
+    working, not a bug — but it means "the drill head overheats" written twice
+    six months apart records once. A caller that means both must say something
+    different in the second, which the store's own convention (a leading date in
+    the prose, a sha, a run id) already produces.
+    """
+    return hashlib.sha256(
+        " ".join(text.split()).encode("utf-8")
+    ).hexdigest()[:CONTENT_HASH_CHARS]
+
+
+def bullet_content(lines: "Sequence[str]") -> str:
+    """One stored bullet -> the CONTENT its hash is taken over.
+
+    Strips the two things this writer adds and the corpus already uses: the
+    `- YYYY-MM-DD: ` opener and the ` [cairn: actor/session]` trailer. A bullet
+    carrying neither (most of the existing corpus) comes back as its own prose,
+    which is what makes a fresh append idempotent against a hand-written bullet
+    that says the same thing.
+    """
+    joined = " ".join(" ".join(line.split()) for line in lines).strip()
+    joined = _BULLET_OPENER_RE.sub("", joined, count=1)
+    joined = _ATTRIBUTION_RE.sub("", joined)
+    return " ".join(joined.split())
+
+
+def render_bullet(text: str, *, actor: str, session: str, today: str) -> str:
+    """The line that goes on disk. ONE line, always attributed.
+
+    🔴 `actor` IS THE AUTHENTICATED IDENTITY AND NOTHING ELSE. This function has
+    no parameter a request body can reach; the caller passes `record.identity`,
+    which came off the credential `authorize` matched. That is the whole of
+    criterion 4's attribution guarantee, and it is structural: there is no field
+    here for a client-supplied name to land in.
+    """
+    return f"- {today}: {text.strip()}" + ATTRIBUTION.format(
+        actor=actor, session=session
+    )
+
+
+def nuance_insert_index(lines: "Sequence[str]") -> int | None:
+    """The line index a new bullet is inserted AT, or `None` if there is no place.
+
+    NEWEST-FIRST, immediately under the heading, because that is the store's own
+    convention (`parse_journal_bullets`: "The store's convention is newest-first")
+    and because appending at the END of the section would put a new bullet after
+    whatever trailing prose or nested list the last bullet carries — attaching
+    it, by `parse_journal_bullets`' own rule, to that bullet instead of starting
+    a new one.
+
+    A heading is what `_heading_blocks` says it is — `#` at column 0, outside a
+    fence, compared `rstrip()`ed — because that is the parser every reader uses,
+    and a writer that disagreed about where the section starts would insert into
+    prose. The FIRST occurrence wins, matching `extract_sections`' merge order.
+    """
+    in_fence = False
+    for index, line in enumerate(lines):
+        if _is_fence(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence and line.startswith("#") and line.rstrip() == rc.NUANCE_HEADING:
+            return index + 1
+    return None
+
+
+class _EntryLock:
+    """Mutual exclusion for one entry file, held across a read-modify-write.
+
+    🔴 THE LOCK IS ON A SEPARATE FILE, AND THAT IS NOT AN OVERSIGHT. The write
+    itself is a temp-file-plus-`os.replace`, so the entry file's INODE changes on
+    every append: a second writer that had `flock`ed the entry file directly
+    would be holding a lock on an inode nobody is looking at any more, and both
+    writers would proceed. A stable side file is the only thing both writers can
+    agree on across a rename.
+
+    The lock file is named `.<entry>.lock` — a leading dot AND no `.md` suffix,
+    so it is invisible to all three of the store's walkers twice over
+    (`load_index` globs `*.md`, `/snapshot` skips dotfiles and requires `.md`,
+    `snapshot_freshness` counts `.md` only).
+    """
+
+    def __init__(self, entry_path: Path) -> None:
+        self.path = entry_path.parent / f".{entry_path.name}.lock"
+        self._fh: Any = None
+
+    def __enter__(self) -> "_EntryLock":
+        self._fh = open(self.path, "a+")  # noqa: SIM115 — released in __exit__
+        fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        try:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._fh.close()
+            self._fh = None
+
+
+def _replace_bytes(path: Path, data: bytes) -> None:
+    """Write `data` to `path` so a reader sees the OLD file or the NEW one.
+
+    🔴 NEVER `open(path, "w")`. A truncate-then-write leaves a window in which
+    the entry is EMPTY or half-written, and a concurrent `/recall` reading it
+    then serves a truncated entry as a complete one — the silent under-report
+    this module is built against, produced by the writer instead of the reader.
+    `os.replace` is atomic within a filesystem, and the temp file is created in
+    the SAME directory precisely so it is on that filesystem.
+    """
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".cairn-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        # A failed write must not leave a `.cairn-*.tmp` behind: it is invisible
+        # to every reader, so nothing would ever report it and nothing would
+        # ever clean it up.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def append_bullet(
+    path: Path, *, text: str, actor: str, session: str, today: str
+) -> "tuple[str, str, str]":
+    """Append one attributed bullet. Returns `(status, line, revision)`.
+
+    `status` is `"appended"` or `"duplicate"`; on `"duplicate"` NOT ONE BYTE of
+    the file is written, and `line` is the bullet already on disk.
+
+    🔴 COMMUTATIVE AND IDEMPOTENT, WHICH IS THE SHIP GATE (criterion 5). Two
+    writers appending DIFFERENT bullets to one entry must both survive, and the
+    whole read-modify-write therefore happens under `_EntryLock` — an
+    unsynchronised version reads the same original bytes twice and the second
+    `os.replace` silently discards the first append. Re-appending the SAME
+    content is a no-op decided by `content_hash` over the bullets already there,
+    so a retried request cannot double-record.
+    """
+    with _EntryLock(path):
+        original = path.read_bytes()
+        text_in = original.decode("utf-8", errors="replace")
+        lines = text_in.splitlines()
+        insert_at = nuance_insert_index(lines)
+        if insert_at is None:
+            raise EntryShapeError(
+                f"entry has no `{rc.NUANCE_HEADING}` heading, so an appended "
+                f"bullet would have nowhere to go"
+            )
+        wanted = content_hash(text)
+        body = rc.extract_sections(text_in, (rc.NUANCE_HEADING,)).get(
+            rc.NUANCE_HEADING, ""
+        )
+        for existing in rc.parse_journal_bullets(body):
+            if content_hash(bullet_content(existing.lines)) == wanted:
+                return "duplicate", existing.lines[0], entry_revision(original)
+        line = render_bullet(text, actor=actor, session=session, today=today)
+        # 🔴 THE INTERLEAVE POINT: after the read, before the write. See
+        # `_WRITE_INTERLEAVE`.
+        _WRITE_INTERLEAVE()
+        merged = lines[:insert_at] + [line] + lines[insert_at:]
+        data = ("\n".join(merged) + "\n").encode("utf-8")
+        _replace_bytes(path, data)
+        return "appended", line, entry_revision(data)
+
+
+def replace_entry(
+    path: Path, *, data: bytes, if_match: str, scope: str, filename: str
+) -> str:
+    """Whole-file replace behind an `If-Match` precondition. Returns the new rev.
+
+    🔴 THE PRECONDITION IS CHECKED UNDER THE SAME LOCK THE WRITE HAPPENS UNDER,
+    and checking it outside would make it decorative: two callers could both read
+    revision R, both pass, and the second would overwrite the first — which is
+    the exact lost update the precondition exists to refuse.
+
+    🔴 THE NEW BYTES ARE VALIDATED BEFORE THEY LAND, through the index loader's
+    OWN mapping (`entry_mapping` + `SubsystemEntry.from_mapping`). A PUT is the
+    only primitive here that can destroy content rather than add to it, so a
+    body the reader would classify as MALFORMED is refused instead of written:
+    otherwise one bad PUT turns a served entry into a `MALFORMED` block and the
+    content it replaced is gone.
+    """
+    with _EntryLock(path):
+        original = path.read_bytes()
+        current = entry_revision(original)
+        if if_match != current:
+            raise PreconditionFailed(current)
+        text = data.decode("utf-8", errors="strict")
+        try:
+            rc.SubsystemEntry.from_mapping(
+                entry_mapping(text, filename=filename, scope=scope),
+                source=filename,
+            )
+        except rc.MalformedEntryError as exc:
+            raise EntryShapeError(f"the index loader would reject these bytes: {exc}")
+        _WRITE_INTERLEAVE()
+        _replace_bytes(path, data)
+        return entry_revision(data)
+
+
+# =============================================================================
 # 🔴 THE ACTION TABLES. The CLASSIFIER they read moved to `subsystem_resolver`.
 #
 # Four consecutive audit rounds found the same shape of defect in `_snapshot`,
@@ -1587,6 +1969,28 @@ API_ROUTES: dict[str, tuple[str, int]] = {
     "recall": ("_recall", 2),
     "search": ("_search", 2),
     "snapshot": ("_snapshot", 1),
+}
+
+# 🔴 THE WRITE TABLE, AND IT IS KEYED ON `(METHOD, HEAD)` RATHER THAN ON HEAD
+# ALONE. `POST .../bullets` and `PUT .../<ref>` are different operations on the
+# same noun, so the METHOD is part of the route identity: keying on the head and
+# branching on the verb inside the handler is the shape that lets a PUT reach an
+# append. `PATCH` and `DELETE` appear in no row, which is how they stay refused
+# — not by a separate rejecter they could be re-bound away from.
+#
+# `(handler, arity, tail)`: `arity` counts path components including the head,
+# `tail` is the fixed trailing components. The handler receives the components
+# BETWEEN them, so `entry/<scope>/<ref>/bullets` hands over `(scope, ref)` and a
+# request that spells the tail differently does not dispatch at all.
+#
+# 🔴 THE READ LEDGER'S RULE APPLIES HERE UNCHANGED: adding a row is adding a
+# public, internet-reachable WRITE endpoint, and `TestPhaseOneScope` fails until
+# its ledger names it. That guard was NOT deleted when the write path landed —
+# it was converted, and the write-verb half of it still fails when a verb is
+# bound outside the ledger below.
+WRITE_ROUTES: dict[tuple[str, str], tuple[str, int, tuple[str, ...]]] = {
+    ("POST", "entry"): ("_append_bullet", 4, ("bullets",)),
+    ("PUT", "entry"): ("_replace_entry", 3, ()),
 }
 
 # How deep to walk when dating the served copy. Deliberately the SAME depth
@@ -1791,12 +2195,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
     # unexplained survivor reads either as a missing test or as a guard somebody
     # may delete. MEASURED, one site at a time, each against the FULL
     # `test_subsystem_store_api.py` suite: substituting `= None` at this
-    # declaration or at any of the four resets (`_reject_write`, `send_error`,
+    # declaration or at any of the four resets (`_write`, `send_error`,
     # `_request_path`'s `ValueError` branch, `_handle`) leaves 375/375 passing.
     #
     # WHY, precisely — and it is a REACHABILITY fact, not a coverage gap: every
     # entry point into this handler assigns this field before any route can read
-    # it. `_handle` and `_reject_write` reset then either `authorize` (which
+    # it. `_handle` and `_write` reset then either `authorize` (which
     # overwrites it from the matched record) or refuse and return; `send_error`
     # and the `_request_path` branch answer 401 and never reach a read route.
     # There is no path on which the RESET VALUE is what a route observes, so no
@@ -1921,7 +2325,11 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         self._handle()
 
     def _drain_body(self) -> None:
-        """🔴 READ AND DISCARD THE ENTITY BODY. THIS IS A SMUGGLING FIX.
+        """Read and discard the entity body. See `_consume_body`."""
+        self._consume_body(keep=False)
+
+    def _consume_body(self, *, keep: bool) -> "tuple[bool, bytes]":
+        """🔴 READ THE ENTITY BODY. THIS IS A SMUGGLING FIX.
 
         `BaseHTTPRequestHandler` never reads a request body, and this server
         keeps connections alive (HTTP/1.1). So an unread body stayed in the
@@ -1940,10 +2348,26 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         Belt and braces, because either alone is one mistake from failing:
         drain the declared body here, and `_respond` sets `close_connection` on
         every non-200 so a desynchronised connection cannot be reused at all.
+
+        🔴 THE WRITE PATH READS ITS BODY THROUGH THIS FUNCTION AND NO OTHER, and
+        that is why it returns bytes instead of a second reader existing beside
+        it. Every guard above — the `Transfer-Encoding` refusal, the exactly-one
+        `Content-Length`, the negative length, the byte cap, the wall-clock
+        deadline, `read1` — was written against a measured smuggling or
+        thread-pinning attack, and a write handler that read `rfile` itself would
+        be a second framing parser with none of them. `keep=False` (the drain)
+        and `keep=True` (a write) differ in whether the chunks are retained and
+        in nothing else.
+
+        Returns `(framing_understood, body)`. `framing_understood` is False for
+        every refusal above, so a caller that NEEDS the body can tell "there was
+        no body" (`(True, b"")`) from "this framing was refused" — a distinction
+        the drain never had to make and a write cannot do without.
         """
+        chunks: list[bytes] = []
         headers = getattr(self, "headers", None)
         if headers is None:
-            return
+            return False, b""
         # 🔴 ANY FRAMING THIS FUNCTION DOES NOT FULLY UNDERSTAND ENDS THE
         # CONNECTION. A delta audit measured the first version being walked by
         # two framings it silently ignored — `Transfer-Encoding: chunked` (no
@@ -1956,9 +2380,9 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         # framing nobody has thought of yet.
         if headers.get("Transfer-Encoding"):
             self.close_connection = True
-            return
+            return False, b""
         if headers.get_all("Content-Length") is None:
-            return
+            return True, b""
         # 🔴 EXACTLY ONE Content-Length, via the SAME predicate `client_ip` uses.
         # A bare `.get()` takes the first value, so `Content-Length: 0` followed
         # by `Content-Length: 154` drained nothing and smuggled the body — on a
@@ -1966,26 +2390,26 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         raw_length = sole_header(headers, "Content-Length")
         if raw_length is None:
             self.close_connection = True
-            return
+            return False, b""
         try:
             length = int(raw_length)
         except ValueError:
             # A malformed length means the framing is already unknowable. Do not
             # guess; `_respond` will close the connection.
             self.close_connection = True
-            return
+            return False, b""
         if length < 0:
             # Negative lengths are not "no body" — they are a caller telling two
             # different stories to two different parsers.
             self.close_connection = True
-            return
+            return False, b""
         if length == 0:
-            return
+            return True, b""
         if length > MAX_DRAIN_BYTES:
             # Too big to swallow politely. Closing is the only safe answer —
             # leaving it queued is exactly the desync above.
             self.close_connection = True
-            return
+            return False, b""
         # 🔴 BOUNDED IN TIME, NOT JUST IN BYTES. `timeout` is per-recv, so a
         # caller dripping one byte every 10s held a thread for as long as it
         # liked — measured at 60s for a 6-byte body, i.e. months for a 1 MiB
@@ -1995,7 +2419,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         while remaining > 0:
             if time.monotonic() > deadline:
                 self.close_connection = True
-                return
+                return False, b""
             # 🔴 `read1`, NOT `read`. `rfile` is a BufferedReader and `read(n)`
             # blocks until it has ALL n bytes (or EOF) — so the deadline check
             # above never got control back and was decorative: a caller dripping
@@ -2006,25 +2430,39 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             chunk = self.rfile.read1(min(remaining, 65536))
             if not chunk:
                 self.close_connection = True
-                return
+                return False, b""
             remaining -= len(chunk)
+            if keep:
+                chunks.append(chunk)
+        return True, b"".join(chunks)
 
-    def _reject_write(self) -> None:
-        """🔴 PHASE 1 IS READ-ONLY, and that is enforced here, not documented.
+    def _write(self) -> None:
+        """🔴 THE ONE DOOR EVERY MUTATING VERB GOES THROUGH — including the ones
+        that have no write route and are therefore still refused.
 
-        A write endpoint lands in phase 3 with its own append semantics (§2c).
-        Until then a POST/PUT/PATCH/DELETE must not fall through to the GET
-        router and be served as a read — a mutation that silently succeeded as a
-        no-op read is indistinguishable from one that worked.
+        THIS FUNCTION IS THE READ-ONLY GUARD BEING BROKEN ON PURPOSE (criterion
+        7). It was `_reject_write`, whose whole body was "authenticate, then 405
+        everything". What changed is that a request matching a row of
+        `WRITE_ROUTES` now dispatches instead; EVERYTHING ELSE — every verb with
+        no row, every path with no row — takes the identical 405 tail below, so
+        `PATCH`, `DELETE` and a `POST` at a read route behave exactly as they did
+        before this branch. That is deliberate: converting the guard must not
+        quietly widen it.
 
-        🔴 IT NO LONGER SHORT-CIRCUITS THE CLIENT-IP AND LOCKOUT CHECKS. It used
-        to answer 405 before either, which made it a free, unauthenticated,
-        UNMETERED channel: 31 anonymous POSTs with no token and no
-        `CF-Connecting-IP` produced 31 audit lines and counted for nothing —
-        enough to drown the Loki auth-fail alert this design relies on. A write
-        attempt from an unidentifiable or locked-out client is now the same
-        uniform 401 as everything else, and the 405 is reserved for a caller who
-        got that far.
+        🔴 THE PROLOGUE IS UNCHANGED AND IS NOT NEGOTIABLE. It used to answer 405
+        before the client-IP and lockout checks, which made it a free,
+        unauthenticated, UNMETERED channel: 31 anonymous POSTs with no token and
+        no `CF-Connecting-IP` produced 31 audit lines and counted for nothing —
+        enough to drown the Loki auth-fail alert this design relies on. Writes go
+        through the SAME `_identify_and_meter` and the SAME `authorize` as reads,
+        so nothing about the write path is a second, weaker door.
+
+        🔴 ORDER: ROUTE FIRST, THEN THE LEGACY REFUSAL. A bare (unmapped) token
+        may not write — it has no identity, so there is no actor to attribute a
+        bullet to — but that refusal is about the OPERATION, not about the verb.
+        Refusing it before the route lookup would answer 403 to a legacy caller's
+        `POST /api/v1/snapshot`, which is a wrong-method, and would change an
+        answer this branch is supposed to leave alone.
         """
         self._client_ip = None
         self._token_fp = None
@@ -2040,11 +2478,16 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         path = self._request_path()
         if path is None:
             return
-        self._drain_body()
+        # 🔴 READ BEFORE AUTH, exactly as the drain did. The body has to leave the
+        # socket whether or not the request is going to be served, or an
+        # unauthenticated POST desynchronises the connection — see
+        # `_consume_body`. Holding the bytes costs at most `MAX_DRAIN_BYTES`,
+        # which is the bound the drain already enforced.
+        framed, body = self._consume_body(keep=True)
         if not self._identify_and_meter(path):
             return
         try:
-            # 🔴 AUTHENTICATE BEFORE ANSWERING 405. Otherwise an anonymous
+            # 🔴 AUTHENTICATE BEFORE ANSWERING ANYTHING. Otherwise an anonymous
             # POST flood is still free: identified, not locked out, and never
             # counted — 405 after 405 with nothing charged. A write attempt
             # with no valid credential is not a "wrong method", it is an
@@ -2062,10 +2505,88 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         except _Rejected:
             self._refuse(path, self._count_failure(self.limiter, self._client_ip))
             return
+
+        route = self._write_route(path)
+        if route is not None:
+            handler_name, parts, tail_len = route
+            if record.is_legacy:
+                # 🔴 A LEGACY (BARE, UNMAPPED) TOKEN MAY NOT WRITE, AND THIS IS
+                # THE DELIBERATE COST OF THE MIGRATION RATHER THAN AN OVERSIGHT.
+                # Criterion 4 says every appended bullet records an ACTOR and a
+                # SESSION; a bare row's identity is the constant `legacy`, which
+                # names no holder, so there is no actor to derive and the
+                # guarantee cannot be met. Attributing to `legacy` would put a
+                # word in the store that reads like a person and is not one.
+                # READS from a legacy token are unchanged — this refusal is on
+                # the write routes only.
+                #
+                # It is answered to an AUTHENTICATED caller, so it may say what
+                # it did wrong; it discriminates nothing about the store, because
+                # a legacy row is UNRESTRICTED and this answer is the same for
+                # every scope, existing or not.
+                self._respond(
+                    403,
+                    b"forbidden: this credential has no identity, so a bullet "
+                    b"written with it could not record an actor. Give the holder "
+                    b"a `<token> <identity> <scopes>` row\n",
+                    headers={"X-Store-Status": "legacy-cannot-write"},
+                )
+                self._audit(path, 403, "legacy-cannot-write")
+                return
+            if any(not SAFE_PATH_COMPONENT.fullmatch(p) for p in parts):
+                # The same refusal the read router makes, for the same reason:
+                # these components reach the filesystem. See `_handle`.
+                self._respond(
+                    400, b"bad request: invalid path component\n",
+                    headers={"X-Store-Status": "bad-request"},
+                )
+                self._audit(path, 400, "bad-request")
+                return
+            if not framed:
+                # `_consume_body` refused the framing (chunked, a duplicated or
+                # negative `Content-Length`, an over-long or slow body). The
+                # connection is already marked for close; the caller is told, and
+                # NOTHING is written from bytes this server could not frame.
+                self._respond(
+                    400, b"bad request: unreadable request body\n",
+                    headers={"X-Store-Status": "bad-request"},
+                )
+                self._audit(path, 400, "bad-request")
+                return
+            middle = parts[1 : len(parts) - tail_len]
+            getattr(self, handler_name)(*middle, body, path)
+            return
+
+        # 🔴 THE UNCHANGED TAIL. `read-only` is a claim about THIS ROUTE, not
+        # about the server: `/api/v1/recall/<scope>` and `/api/v1/snapshot` have
+        # no write verb and never will, and that is what this answers.
         self._respond(405, b"read-only\n", headers={"Allow": "GET, HEAD"})
         self._audit(path, 405, "method-not-allowed")
 
-    do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write  # noqa: N815
+    def _write_route(self, path: str) -> "tuple[str, list[str], int] | None":
+        """Match one request against `WRITE_ROUTES`, or `None`.
+
+        Split out so the dispatcher is one table lookup rather than a nest of
+        conditions inside `_write`, and so the arity and the fixed TAIL are
+        checked in the same place the row declares them — `if len(parts) == arity`
+        mutated to `>=` once survived 318 tests on the read side.
+        """
+        if not path.startswith(API_PREFIX):
+            return None
+        parts = [p for p in path[len(API_PREFIX) :].split("/") if p]
+        if not parts:
+            return None
+        row = WRITE_ROUTES.get((self.command, parts[0]))
+        if row is None:
+            return None
+        handler_name, arity, tail = row
+        if len(parts) != arity:
+            return None
+        if tail and tuple(parts[arity - len(tail) :]) != tail:
+            return None
+        return handler_name, parts, len(tail)
+
+    do_POST = do_PUT = do_PATCH = do_DELETE = _write  # noqa: N815
 
     def send_error(self, code: int, message=None, explain=None) -> None:  # noqa: D102
         """🔴 EVERY unhandled method answers the ONE uniform 401, not a 501 page.
@@ -2086,8 +2607,9 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             per request. That is verbatim what `_request_path` exists to prevent,
             reintroduced one screen below it, and made cheaper.
           * it never metered, so 30 `FROBNICATE` requests wrote 30 audit lines
-            and counted for nothing — the same free channel `_reject_write` had
-            just been reordered to close, widened to every other verb.
+            and counted for nothing — the same free channel `_write` (then
+            named `_reject_write`) had just been reordered to close, widened
+            to every other verb.
 
         So: `getattr` for everything, because on this path NOTHING is guaranteed
         to exist; meter when there are headers to identify a client from; and
@@ -2492,11 +3014,13 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         unmodified local reader against its own copy, so an offline query it has
         never asked before still answers.
 
-        🔴 THIS ROUTE IS READ-ONLY AND PHASE 2 STAYS READ-ONLY. It adds a GET; it
-        does not add a write verb, and `do_POST = do_PUT = do_PATCH = do_DELETE
-        = _reject_write` is untouched. `TestPhaseOneScope` has TWO guards and
-        only the route-ledger one moves — deliberately, so the write guard is
-        still the thing that has to be broken on purpose when phase 3 lands.
+        🔴 THIS ROUTE IS READ-ONLY AND STAYS READ-ONLY. It adds a GET; it adds
+        no write verb, and `WRITE_ROUTES` holds no row for `snapshot` — so
+        every mutating verb here is still the 405 it always was, which
+        `test_the_snapshot_route_added_NO_write_verb` pins behaviourally.
+        (This paragraph used to say the write ALIASES were untouched. Phase 3
+        criteria 4-7 rebound them to `_write`; what is untouched is this
+        route's answer, which is the claim that was actually load-bearing.)
 
         🔴 MTIMES ARE PRESERVED, AND THAT IS LOAD-BEARING, NOT TIDINESS. The
         reader orders the index "NEWEST-FIRST by entry-file mtime". A tar built
@@ -2697,6 +3221,292 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             },
         )
         self._audit(urlsplit(self.path).path, 200, "snapshot")
+
+    # --- write handlers (criteria 4-6) ------------------------------------------
+
+    def _not_found(self, path: str, status: str) -> None:
+        """🔴 ONE 404 FOR EVERY WAY A WRITE TARGET CAN FAIL TO RESOLVE, and the
+        uniformity is criterion 3's enumeration property applied to writes.
+
+        A scope OUTSIDE the caller's allowlist, a scope that has never existed, a
+        ref that resolves to nothing and an entry the loader could not parse all
+        answer these exact bytes with these exact headers. The read path closed
+        this at the INDEX — `load_store(visible_scopes=…)` simply does not
+        contain a refused scope, so `index.entries()` raises the same
+        `UnknownScopeError` it raises for one that was never there — and the
+        write path reuses that narrowing rather than adding a second "is this
+        scope yours" check with its own answer. A refusal that is distinguishable
+        from an absence is an enumeration API, on a write verb just as on a read.
+
+        The WIRE does not discriminate; the audit LOG does, via `status`, in a
+        place the caller cannot read.
+        """
+        self._respond(
+            404, b"not found\n", headers={"X-Store-Status": "not-found"}
+        )
+        self._audit(path, 404, status)
+
+    def _resolve_writable(self, scope: str, ref: str, path: str) -> Any:
+        """The entry a write targets, or `None` having already answered.
+
+        Loads through `rc.load_store` — the SAME function both read routes use,
+        with the SAME allowlist — so there is exactly one place that decides what
+        a caller may see and it cannot come to disagree with itself.
+        """
+        try:
+            _store, index = rc.load_store(
+                self.store_root,
+                verb="written",
+                visible_scopes=self._visible_scopes,
+            )
+            entry, _tier = rc.resolve_ref_tiered(ref, index, scope)
+        except rc.UnknownScopeError:
+            # Refused OR absent — indistinguishable by construction, see above.
+            self._not_found(path, "scope-unknown")
+            return None
+        except rc.AmbiguousRefError as exc:
+            # The caller is authenticated AND may see this scope, so it may be
+            # told: an ambiguous ref is a caller error with a defined remedy, and
+            # it names only entries this caller can already read.
+            self._respond(
+                400,
+                f"bad request: {exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "bad-request"},
+            )
+            self._audit(path, 400, "bad-request")
+            return None
+        except (rc.StoreMissingError, rc.EntryUnreadableError) as exc:
+            # 🔴 THE STORE WAS NOT READ. Never a 404 — "I could not look" and
+            # "it is not there" are the four-state rule's two states and a write
+            # must not conflate them any more than a read may.
+            self._respond(
+                503,
+                f"{exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
+            )
+            self._audit(path, 503, "store-unreachable")
+            return None
+        if entry is None:
+            # No such ref — and a MALFORMED entry lands here too, because
+            # `load_store` collects it onto `index.malformed` rather than into
+            # `entries`. That is the fail-closed direction: this writer will not
+            # edit a file the reader cannot parse.
+            self._not_found(path, "ref-unknown")
+            return None
+        return entry
+
+    def _entry_path(self, entry: Any) -> Path:
+        """Located from the LOADER's own scope + filename, never rebuilt from the
+        ref — `<slug>.<kind>.md` and `<slug>.md` are different files and only the
+        loader knows which one this entry came from (`rc.read_entry` says the
+        same thing for the read side)."""
+        return Path(self.store_root) / entry.scope / entry.filename
+
+    def _append_bullet(
+        self, scope: str, ref: str, body: bytes, path: str
+    ) -> None:
+        """`POST /api/v1/entry/<scope>/<ref>/bullets` — criteria 4 and 5.
+
+        🔴 THE ACTOR IS `record.identity`, DERIVED FROM THE TOKEN THAT
+        AUTHENTICATED, AND THE REQUEST BODY HAS NO WAY TO REACH IT. An `actor`
+        key in the JSON is accepted and DISCARDED — accepted because a client
+        library may send one and a 400 there would be a compatibility trap,
+        discarded because a client-supplied actor lets any token-holder attribute
+        a bullet to somebody else, and an attribution nobody can trust is worse
+        than none. `render_bullet` takes `actor` as a keyword the request cannot
+        populate, so this is structural rather than a rule someone remembers.
+
+        The SESSION is different and IS caller-supplied: it is correlation data,
+        not an identity claim — it says which run of which agent wrote this, and
+        the agent is the only thing that knows. It is validated against
+        `SESSION_COMPONENT` before it goes anywhere near a file.
+        """
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            self._respond(
+                400,
+                f"bad request: body must be JSON ({exc})\n".encode("utf-8"),
+                headers={"X-Store-Status": "bad-request"},
+            )
+            self._audit(path, 400, "bad-request")
+            return
+        problem = _bullet_request_problem(payload)
+        if problem is not None:
+            self._respond(
+                400,
+                f"bad request: {problem}\n".encode("utf-8"),
+                headers={"X-Store-Status": "bad-request"},
+            )
+            self._audit(path, 400, "bad-request")
+            return
+        entry = self._resolve_writable(scope, ref, path)
+        if entry is None:
+            return
+        assert self._identity is not None  # set by `authorize` in `_write`
+        try:
+            status, line, revision = append_bullet(
+                self._entry_path(entry),
+                text=payload["text"],
+                actor=self._identity,
+                session=payload["session"],
+                today=_today(),
+            )
+        except EntryShapeError as exc:
+            self._respond(
+                422,
+                f"unprocessable: {exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "entry-shape"},
+            )
+            self._audit(path, 422, "entry-shape")
+            return
+        except OSError as exc:
+            self._respond(
+                503,
+                f"store unreadable: {exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
+            )
+            self._audit(path, 503, "store-unreachable")
+            return
+        self._respond(
+            200,
+            (line + "\n").encode("utf-8"),
+            headers={
+                "X-Store-Status": status,
+                "X-Cairn-Bullet": content_hash(payload["text"]),
+                "ETag": f'"{revision}"',
+            },
+        )
+        self._audit(path, 200, status)
+
+    def _replace_entry(
+        self, scope: str, ref: str, body: bytes, path: str
+    ) -> None:
+        """`PUT /api/v1/entry/<scope>/<ref>` — criterion 6, whole-file replace.
+
+        🔴 `If-Match` IS REQUIRED, NOT OPTIONAL, and a request without one is
+        refused 428 rather than served. An optional precondition is no
+        precondition: the caller that most needs it — a retry after a timeout, on
+        a store two agents share — is exactly the one that would omit it.
+
+        🔴 `If-Match: *` IS REFUSED. It means "any current representation", which
+        is the one value that turns the guard off while looking like it is on.
+        """
+        raw = sole_header(self.headers, "If-Match")
+        if raw is None:
+            self._respond(
+                428,
+                b"precondition required: send If-Match with the entry revision "
+                b"(sha256 of the entry file, first 16 hex characters)\n",
+                headers={"X-Store-Status": "precondition-required"},
+            )
+            self._audit(path, 428, "precondition-required")
+            return
+        if_match = raw.strip()
+        if if_match.startswith("W/"):
+            if_match = if_match[2:].strip()
+        if_match = if_match.strip('"')
+        if if_match == "*":
+            self._respond(
+                400,
+                b"bad request: If-Match: * is refused - it matches any revision, "
+                b"which is the same as sending no precondition at all\n",
+                headers={"X-Store-Status": "bad-request"},
+            )
+            self._audit(path, 400, "bad-request")
+            return
+        entry = self._resolve_writable(scope, ref, path)
+        if entry is None:
+            return
+        try:
+            revision = replace_entry(
+                self._entry_path(entry),
+                data=body,
+                if_match=if_match,
+                scope=entry.scope,
+                filename=entry.filename,
+            )
+        except PreconditionFailed as exc:
+            # 🔴 THE FILE IS UNCHANGED, and the CURRENT revision rides the
+            # response: a client told only "no" cannot retry, and a client that
+            # cannot retry re-sends without the precondition.
+            self._respond(
+                412,
+                b"precondition failed: the entry has changed since that revision\n",
+                headers={
+                    "X-Store-Status": "precondition-failed",
+                    "ETag": f'"{exc.current}"',
+                },
+            )
+            self._audit(path, 412, "precondition-failed")
+            return
+        except (EntryShapeError, UnicodeDecodeError) as exc:
+            self._respond(
+                422,
+                f"unprocessable: {exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "entry-shape"},
+            )
+            self._audit(path, 422, "entry-shape")
+            return
+        except OSError as exc:
+            self._respond(
+                503,
+                f"store unreadable: {exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
+            )
+            self._audit(path, 503, "store-unreachable")
+            return
+        self._respond(
+            200,
+            b"replaced\n",
+            headers={"X-Store-Status": "replaced", "ETag": f'"{revision}"'},
+        )
+        self._audit(path, 200, "replaced")
+
+
+def _today() -> str:
+    """The date an appended bullet is stamped with. UTC, because the pod's local
+    time is UTC and a bullet's date is compared against other bullets' dates by
+    `subsystem_touch.EntryJournal.newest_date`, never against a wall clock."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _bullet_request_problem(payload: Any) -> str | None:
+    """Validate an append request. Returns the sentence to refuse with, or None.
+
+    🔴 A SEPARATE FUNCTION SO EVERY REFUSAL IS IN ONE PLACE AND NAMES ITSELF.
+    Each clause is reachable by an input every earlier clause accepts, which is
+    the same ladder discipline `load_tokens`' guards are built to.
+
+    ⚠ `actor` IS NOT VALIDATED AND NOT REJECTED — it is simply never read. See
+    `_append_bullet`.
+    """
+    if not isinstance(payload, dict):
+        return "the body must be a JSON object"
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return "`text` is required and must be a non-empty string"
+    if len(text) > BULLET_TEXT_MAX:
+        return f"`text` is {len(text)} characters, max {BULLET_TEXT_MAX}"
+    if "\n" in text or "\r" in text:
+        return (
+            "`text` must be ONE line — an embedded newline would be attached to "
+            "this bullet as a continuation, or would start a second, unattributed "
+            "bullet"
+        )
+    if text.lstrip().startswith(("- ", "* ")):
+        return (
+            "`text` must not open a markdown bullet — the `- ` is added here, and "
+            "a second one would start a bullet with no attribution trailer"
+        )
+    session = payload.get("session")
+    if not isinstance(session, str) or not SESSION_COMPONENT.fullmatch(session):
+        return (
+            "`session` is required and must match "
+            f"{SESSION_COMPONENT.pattern} — every appended bullet records the "
+            "actor AND the session that wrote it"
+        )
+    return None
 
 
 def build_server(

@@ -10,7 +10,11 @@ landed, the same deployed-state category as the port corrected in §2b.
 🔴 **Phase 2 is the gap, and it is why this nearly got deleted.** The server was built and the
 **client never was**: `_reject_write()` refuses every write verb, the route table is exactly
 `/healthz` + `/api/v1/recall/{scope}` + `/api/v1/search/{scope}`, there is no CLI wrapper, and
-**no client-side token exists on either host** — it lives only as the in-cluster secret. The pod
+**no client-side token exists on either host** — it lives only as the in-cluster secret. (⚠ THE
+`_reject_write()` HALF OF THIS PARAGRAPH IS NOW HISTORY: phase 3 criteria 4-7 landed the write
+path — `POST /api/v1/entry/{scope}/{ref}/bullets` and `PUT /api/v1/entry/{scope}/{ref}` — so
+the aliases point at `_write`, which dispatches those two rows and 405s everything else. The
+rest of the paragraph still holds.) The pod
 logged 309 requests, all on 2026-08-20, all from the session that built it. Retirement was
 proposed on that evidence (devrc #849, homelab-infra #404) and **both were closed unmerged on
 2026-08-25**: the store is being finished, not retired. Clawgate task **360** owns phases 2–3.

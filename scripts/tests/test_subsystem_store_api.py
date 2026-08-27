@@ -48,6 +48,7 @@ import ast
 import hashlib
 import http.client
 import importlib.util
+import json
 from testlib import hermetic_git  # noqa: E402
 import io
 import os
@@ -228,14 +229,21 @@ def fetch(
     auth_header=None,
     client_ip: str | None = CLIENT_IP,
     extra_headers: dict[str, str] | None = None,
+    data: bytes | None = None,
 ):
     """Return (code, headers, body-bytes) without raising on 4xx/5xx.
 
     🔴 `CF-Connecting-IP` is sent BY DEFAULT because the server requires it —
     it is the rate limiter's key, and an absent one fails closed. Pass
     `client_ip=None` to exercise exactly that.
+
+    `data` is the REQUEST body, added for the write path. `urllib` frames it
+    with a single `Content-Length`, which is the one framing `_consume_body`
+    accepts — the hostile framings (chunked, duplicated, negative) have their own
+    tests and are put on the wire by `http.client` directly, since `urllib`
+    cannot express them.
     """
-    req = urllib.request.Request(url, method=method)
+    req = urllib.request.Request(url, method=method, data=data)
     if auth_header is not None:
         req.add_header("Authorization", auth_header)
     elif token is not None:
@@ -2582,16 +2590,89 @@ class TestPhaseOneScope:
     exposure added here fails a test rather than a review.
     """
 
-    def test_the_server_declares_no_write_handler(self):
+    # 🔴 THE VERB LEDGER — the CONVERTED write guard (phase 3, criterion 7).
+    #
+    # It used to be a `str in SERVER_PATH.read_text()` for the exact line
+    # `do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write`, plus four
+    # `"def do_POST" not in src` probes. That guard was WALKED IN THE COMMIT THAT
+    # CONVERTED IT, and the walk is worth recording because nobody aimed at it:
+    # the write path rebound the aliases to `_write` and, in the same edit,
+    # QUOTED THE OLD LINE IN THE MODULE DOCSTRING while explaining the change.
+    # The substring was still in the file, so all 408 tests stayed green over a
+    # server that had just grown two write endpoints. `claude/RULES.md`: a guard
+    # on a SPELLING is walkable by re-spelling — here, by writing the spelling
+    # somewhere it does not execute.
+    #
+    # So it is structural now, over the CLASS rather than the source text. It
+    # pins the whole `do_*` surface AND what each verb is bound to, in both
+    # directions: a new verb (`do_OPTIONS`), a removed one, or an existing one
+    # rebound to a different function all fail. Prose cannot satisfy it, because
+    # nothing here reads prose.
+    # The value is the name of the FUNCTION the verb resolves to. `do_GET` and
+    # `do_HEAD` are their own one-line methods (so they name themselves); the
+    # four mutating verbs are ALIASES of one function, and `__name__` is what
+    # sees through an alias — a `def do_POST(self): …` would name itself and
+    # fail, and `do_DELETE = _handle` would name `_handle` and fail.
+    VERBS: "dict[str, str]" = {
+        "do_GET": "do_GET",
+        "do_HEAD": "do_HEAD",
+        # Every mutating verb goes through ONE door. The ones with no row in
+        # `WRITE_ROUTES` — PATCH and DELETE — reach it and take its 405 tail.
+        "do_POST": "_write",
+        "do_PUT": "_write",
+        "do_PATCH": "_write",
+        "do_DELETE": "_write",
+    }
+
+    def test_the_verb_ledger_is_the_whole_bound_verb_surface(self):
+        bound = {
+            name for name in dir(api.StoreRequestHandler) if name.startswith("do_")
+        }
+        assert bound == set(self.VERBS), (
+            f"the handler binds {sorted(bound)} but the ledger says "
+            f"{sorted(self.VERBS)} — add the verb to VERBS on purpose, or unbind it"
+        )
+        for verb, target in sorted(self.VERBS.items()):
+            assert getattr(api.StoreRequestHandler, verb).__name__ == target, (
+                f"{verb} resolves to "
+                f"{getattr(api.StoreRequestHandler, verb).__name__}, not {target}"
+            )
+
+    def test_no_verb_is_declared_as_its_own_method(self):
+        """The aliasing above is what makes the ledger readable in one place. A
+        `def do_POST(self)` would satisfy the identity check only by being the
+        thing it names, so the shape is pinned separately."""
         src = SERVER_PATH.read_text()
-        # `do_POST` etc. exist ONLY as aliases of the 405 rejecter.
-        assert "do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write" in src
         for handler in ("def do_POST", "def do_PUT", "def do_PATCH", "def do_DELETE"):
             assert handler not in src
 
     # 🔴 THE LEDGER. Adding a route means adding it HERE, on purpose, in the
     # same commit. That is the whole point of the guard below.
     ROUTES: tuple[str, ...] = ("recall", "search", "snapshot")
+
+    # …and the same rule for the WRITE table, which is keyed on `(verb, head)`
+    # because `POST .../bullets` and `PUT .../<ref>` are different operations on
+    # one noun. Adding a row here is adding a public, internet-reachable write
+    # endpoint; the arity and the fixed tail are part of the row because
+    # `len(parts) == arity` mutated to `>=` once survived 318 tests on the read
+    # side, and the tail is the only thing that stops `POST entry/a/b/anything`
+    # from dispatching as an append.
+    WRITE_ROUTES: "dict[tuple[str, str], tuple[str, int, tuple[str, ...]]]" = {
+        ("POST", "entry"): ("_append_bullet", 4, ("bullets",)),
+        ("PUT", "entry"): ("_replace_entry", 3, ()),
+    }
+
+    def test_the_write_route_ledger_is_the_whole_write_route_set(self):
+        assert api.WRITE_ROUTES == self.WRITE_ROUTES, (
+            f"the write router dispatches {sorted(api.WRITE_ROUTES)} but the "
+            f"ledger says {sorted(self.WRITE_ROUTES)}"
+        )
+
+    def test_every_ledgered_write_route_actually_dispatches(self):
+        for key, (handler, arity, tail) in api.WRITE_ROUTES.items():
+            assert hasattr(api.StoreRequestHandler, handler), f"{key} -> {handler}"
+            assert arity >= 1, f"{key} has arity {arity}"
+            assert len(tail) < arity, f"{key} tail {tail} is longer than its path"
 
     def test_the_route_ledger_is_the_whole_route_set(self, store: Path):
         """🔴 REWRITTEN TWICE, and the FIRST rewrite was still a spelled guard.
@@ -5863,7 +5944,7 @@ class TestTrustedProxyOverHTTP:
     def test_a_WRITE_verb_from_an_untrusted_peer_is_METERED_under_the_peer(
         self, store: Path
     ):
-        """🔴 ONE RULE, BOTH DOORS. `_reject_write` and `_handle` share
+        """🔴 ONE RULE, BOTH DOORS. `_write` and `_handle` share
         `_identify_and_meter` precisely because a check enforced at one call site
         and not the other is the failure this file keeps finding — writes used to
         skip the client-IP and lockout checks entirely. A write from an untrusted
@@ -8306,3 +8387,1254 @@ class TestScopeFilteringIsNotAWriteVerb:
                 ):
                     fetch(f"{base}{path}", token=token)
         assert tree_hash(scoped_store) == before
+
+
+# =============================================================================
+# 19. PHASE 3, CRITERIA 4-7 — THE WRITE PATH.
+#
+# 🔴 WHAT IS RED AT THE BASE REF AND WHAT IS NOT, STATED HERE RATHER THAN LEFT
+# TO BE ASSUMED, because "a test never seen fail proves nothing".
+#
+#   * Every BEHAVIOURAL test below is red at `origin/main`: the routes do not
+#     exist there, so `POST /api/v1/entry/…` answers `405 read-only` and each
+#     assertion fails on a real behaviour difference rather than on an import
+#     error. That is genuine regression coverage.
+#   * The UNIT tests (`content_hash`, `bullet_content`, `nuance_insert_index`,
+#     `entry_revision`, `append_bullet`, `replace_entry`) reference names that do
+#     not exist at base, so their red is an `AttributeError` and proves nothing
+#     about behaviour. They are pinned by MUTATION instead, and the PR body
+#     reports which mutant each one kills.
+#   * `TestPhaseOneScope.test_the_verb_ledger_…` is likewise an ATTRIBUTE error
+#     at base (`_write` does not exist), so it is an invariant guard plus its
+#     mutants, not regression coverage.
+# =============================================================================
+
+
+# Pairwise-distinct, sharing no substring with each other or with the three
+# scope nuance lines above — so an assertion that a bullet landed cannot be
+# satisfied by a renderer that surfaced a different one, and a mutant that
+# hardcodes any single literal is visible.
+BULLET_A = "the salinity probe reads high after a squall"
+BULLET_B = "the winch motor stalls on a neap tide"
+BULLET_C = "the buoy transmitter drops every third packet"
+BULLET_OPEN = "OPEN: the mooring shackle wants replacing before winter"
+
+# Distinct from each other and from every identity, so "the session was
+# recorded" and "the actor was recorded" cannot pass by reading one field twice.
+SESSION_A = "sess-7f3a2b"
+SESSION_B = "sess-91cd40"
+
+# 🔴 THE NAME A HOSTILE CLIENT PUTS IN THE BODY. It is not any identity in this
+# file, so a server that wrote the body's `actor` through would spell something
+# no token could ever produce.
+FORGED_ACTOR = "mallory"
+
+
+def entry_ref(scope: str) -> str:
+    """`_build_store` names each scope's single entry `<scope>-entry`."""
+    return f"{scope}-entry"
+
+
+def entry_file(root: Path, scope: str) -> Path:
+    return root / scope / f"{entry_ref(scope)}.md"
+
+
+def bullets_url(base: str, scope: str, ref: str | None = None) -> str:
+    return f"{base}/api/v1/entry/{scope}/{ref or entry_ref(scope)}/bullets"
+
+
+def entry_url(base: str, scope: str, ref: str | None = None) -> str:
+    return f"{base}/api/v1/entry/{scope}/{ref or entry_ref(scope)}"
+
+
+def post_bullet(base: str, token: str, scope: str, *, ref: str | None = None, **payload):
+    """POST one append. The payload is passed through VERBATIM so a test can send
+    a field the server must ignore, or omit one it must require."""
+    return fetch(
+        bullets_url(base, scope, ref),
+        token=token,
+        method="POST",
+        data=json.dumps(payload).encode("utf-8"),
+    )
+
+
+def nuance_of(path: Path) -> str:
+    """The `## Nuance / work-history` body of an entry file, via the resolver's
+    own parser — so "the bullet landed in the right SECTION" is answered the way
+    every reader answers it, not by an `in` over the whole file."""
+    return resolver.extract_sections(
+        path.read_text(encoding="utf-8"), (resolver.NUANCE_HEADING,)
+    ).get(resolver.NUANCE_HEADING, "")
+
+
+def store_headers(headers: dict) -> tuple:
+    return tuple(
+        sorted((k, v) for k, v in headers.items() if k.lower().startswith("x-store"))
+    )
+
+
+@contextmanager
+def forced_interleave(gate_s: float = 2.0):
+    """Force TWO writers to overlap inside the critical section, deterministically.
+
+    🔴 WHY A HOOK AND NOT TWO THREADS AND HOPE. The defect this guards against —
+    a read-modify-write with no mutual exclusion — only shows up when the two
+    writers' windows actually overlap, and on a fast machine they usually do not.
+    A test that passes because the race did not happen is worse than no test: it
+    reads as coverage of the ONE criterion that protects against content loss.
+
+    The hook runs inside `append_bullet`/`replace_entry`, after the read and
+    before the write, which is exactly the window a missing lock leaves open.
+    The FIRST caller to reach it parks until `release` is set or `gate_s`
+    elapses; every later caller passes straight through. So:
+
+      * with the lock, the second writer cannot even reach the hook — it is
+        blocked on `flock` — so the first parks for `gate_s`, writes, releases,
+        and the second then does its own complete read-modify-write. Both
+        bullets survive, and the test costs `gate_s`.
+      * without the lock, the second writer reads the SAME original bytes the
+        first is holding, writes, and finishes; the first then writes its own
+        version over the top and the second bullet is gone. Every time.
+
+    `test_the_interleave_harness_CAN_LOSE_an_append` is the negative control for
+    exactly that second bullet, run against a no-op lock.
+    """
+    state = {"n": 0}
+    counter_lock = threading.Lock()
+    first_in = threading.Event()
+    release = threading.Event()
+
+    def hook() -> None:
+        with counter_lock:
+            index = state["n"]
+            state["n"] += 1
+        if index == 0:
+            first_in.set()
+            release.wait(timeout=gate_s)
+
+    original = api._WRITE_INTERLEAVE
+    api._WRITE_INTERLEAVE = hook
+    try:
+        yield first_in, release
+    finally:
+        api._WRITE_INTERLEAVE = original
+
+
+@contextmanager
+def no_entry_lock():
+    """Replace `_EntryLock` with a lock that locks nothing. The MUTATION, run as
+    a control: every concurrency assertion in this file must fail under it."""
+
+    class _NoLock:
+        def __init__(self, _path):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+    original = api._EntryLock
+    api._EntryLock = _NoLock
+    try:
+        yield
+    finally:
+        api._EntryLock = original
+
+
+class TestTheActorComesFromTheTOKEN:
+    """🔴 CRITERION 4. The single most important property on the write path: a
+    client-supplied actor lets any token-holder attribute a bullet to somebody
+    else, and an attribution nobody can trust is worse than none.
+    """
+
+    @pytest.mark.parametrize(
+        "record,token,scope,identity",
+        [
+            (ZACH, ZACH_TOKEN, ALLOW_SCOPE, "zach"),
+            (DANA, DANA_TOKEN, DENY_SCOPE, "dana"),
+        ],
+    )
+    def test_a_FORGED_actor_in_the_body_is_DISCARDED(
+        self, scoped_store: Path, record, token: str, scope: str, identity: str
+    ):
+        """🔴 TWO IDENTITIES, NOT ONE, AND THAT IS THE POINT. A single-identity
+        version of this test is passed by `actor = "zach"` hardcoded in the
+        renderer. Two callers writing to two scopes cannot be.
+        """
+        path = entry_file(scoped_store, scope)
+        with running(scoped_store, tokens=(record,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, token, scope, text=BULLET_A, session=SESSION_A,
+                actor=FORGED_ACTOR,
+            )
+        assert code == 200, (code, headers)
+        assert headers["X-Store-Status"] == "appended"
+        text = path.read_text()
+        assert f"[cairn: {identity}/{SESSION_A}]" in text, text
+        assert FORGED_ACTOR not in text, (
+            "the body's `actor` reached the file — any token-holder could then "
+            "attribute a bullet to anybody"
+        )
+
+    def test_the_FORGED_name_is_one_the_server_COULD_have_written(self):
+        """Positive control for the assertion above: `mallory` passes the
+        identity charset, so its absence from the file is evidence that it was
+        DISCARDED rather than evidence that it could never have been rendered."""
+        assert IDENTITY_CHARSET.fullmatch(FORGED_ACTOR)
+        assert len(FORGED_ACTOR) <= api.MAX_IDENTITY_CHARS
+
+    def test_the_SESSION_is_recorded_and_it_is_the_one_that_was_SENT(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_B, session=SESSION_B)
+        text = path.read_text()
+        # Both sessions, each on its OWN bullet — a server that stamped the last
+        # session onto every bullet would satisfy a one-append test.
+        assert f"{BULLET_A} [cairn: zach/{SESSION_A}]" in text, text
+        assert f"{BULLET_B} [cairn: zach/{SESSION_B}]" in text, text
+
+    def test_the_bullet_lands_in_the_NUANCE_section_and_nowhere_else(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_text()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+        after = path.read_text()
+        assert BULLET_A in nuance_of(path)
+        # …and the other two sections are untouched, byte for byte.
+        for heading in (resolver.WHAT_HEADING, resolver.POINTERS_HEADING):
+            was = resolver.extract_sections(before, (heading,))
+            now = resolver.extract_sections(after, (heading,))
+            assert was == now, f"{heading} changed"
+
+    def test_the_new_bullet_is_FIRST_which_is_the_store_convention(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+        bullets = resolver.parse_journal_bullets(nuance_of(path))
+        assert len(bullets) == 2
+        assert BULLET_A in bullets[0].lines[0]
+        assert KELP_NUANCE.lstrip("- ") in bullets[1].lines[0]
+
+    def test_an_appended_OPEN_MARKER_STILL_PARSES(self, scoped_store: Path):
+        """🔴 THIS IS WHY THE ATTRIBUTION IS A SUFFIX.
+
+        The store's bullet grammar is a PREFIX grammar anchored at position 0:
+        `- [YYYY-MM-DD: ]OPEN:` with an exact terminator. Writing the actor
+        between the date and the text — `- 2026-08-27 (zach): OPEN: …`, the
+        obvious rendering — parses as NO MARKER at all, which is precisely the
+        near-miss class the reader exists to report: the `🔴 1 OPEN` badge
+        silently stops rendering and a vanished badge looks like success.
+
+        So the marker is asserted through the READER'S OWN parser, not by an `in`
+        over the line.
+        """
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_OPEN, session=SESSION_A
+            )
+        assert code == 200
+        first = resolver.parse_journal_bullets(nuance_of(path))[0]
+        assert first.openness == resolver.OPENNESS_OPEN, first.lines
+        assert first.date is not None, "the date prefix stopped parsing too"
+
+    def test_the_audit_line_names_the_identity_and_the_append(
+        self, scoped_store: Path
+    ):
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+            line = await_audit(audit, 1)[0]
+        assert "identity=zach" in line, line
+        assert "method=POST" in line, line
+        assert "status=appended" in line, line
+        assert "result=200" in line, line
+        assert ZACH_TOKEN not in line
+
+
+class TestALegacyTokenCannotWrite:
+    """🔴 A BARE (UNMAPPED) TOKEN HAS NO IDENTITY, SO IT HAS NO ACTOR.
+
+    Criterion 4 says every appended bullet records an actor and a session. A
+    legacy row's identity is the constant `legacy`, which names no holder — so
+    the guarantee cannot be met and the write is refused with its OWN error.
+    That makes criterion 10's credential retirement a PREREQUISITE for writes
+    rather than an afterthought.
+    """
+
+    def test_a_legacy_token_is_REFUSED_and_the_entry_is_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, token=GOOD_TOKEN) as (base, _):
+            code, headers, body = post_bullet(
+                base, GOOD_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert code == 403, (code, body)
+        assert headers["X-Store-Status"] == "legacy-cannot-write"
+        assert path.read_bytes() == before
+
+    def test_the_refusal_is_its_OWN_error_not_the_uniform_401_or_the_404(
+        self, scoped_store: Path
+    ):
+        """It must be distinguishable BY THE HOLDER, or the migration is
+        undiagnosable: an operator seeing `unauthorized` would rotate a token
+        that is working exactly as configured."""
+        with running(scoped_store, token=GOOD_TOKEN) as (base, _):
+            code, _h, body = post_bullet(
+                base, GOOD_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert code == 403
+        assert body != UNAUTHORIZED_BODY_LITERAL
+        assert b"no identity" in body, body
+
+    def test_a_legacy_token_can_still_READ(self, scoped_store: Path):
+        """The control. The refusal is on WRITES; a legacy row is still
+        unrestricted for reads and rolling back to one must stay possible."""
+        with running(scoped_store, token=GOOD_TOKEN) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{DENY_SCOPE}", token=GOOD_TOKEN
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "recalled"
+        assert QUARTZ_NUANCE.encode() in body
+
+    def test_the_403_names_no_scope_so_it_is_not_an_ORACLE(self, scoped_store: Path):
+        """A legacy row is UNRESTRICTED, so this answer must not vary with
+        whether the scope or the ref exists — otherwise the one credential that
+        cannot write would be the one that can enumerate."""
+        with running(scoped_store, token=GOOD_TOKEN) as (base, _):
+            real = post_bullet(
+                base, GOOD_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+            phantom = post_bullet(
+                base, GOOD_TOKEN, PHANTOM_SCOPE, ref="never-carved",
+                text=BULLET_A, session=SESSION_A,
+            )
+        assert real[0] == phantom[0] == 403
+        assert store_headers(real[1]) == store_headers(phantom[1])
+        assert real[2] == phantom[2]
+        assert real[2], "both bodies are empty — the comparison would be vacuous"
+
+
+UNAUTHORIZED_BODY_LITERAL = b"unauthorized\n"
+
+
+class TestWritesGoThroughTheSAMEDoorAsReads:
+    """🔴 NO SECOND, WEAKER AUTH PATH. Same `_identify_and_meter`, same
+    `authorize`, same uniform 401, same lockout — because a rule enforced at one
+    call site and not the other is the failure this file keeps finding.
+    """
+
+    def test_a_write_with_NO_client_ip_is_the_uniform_401(self, scoped_store: Path):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, _h, body = fetch(
+                bullets_url(base, ALLOW_SCOPE),
+                token=ZACH_TOKEN,
+                method="POST",
+                client_ip=None,
+                data=json.dumps({"text": BULLET_A, "session": SESSION_A}).encode(),
+            )
+            line = await_audit(audit, 1)[0]
+        assert (code, body) == (401, UNAUTHORIZED_BODY_LITERAL)
+        assert "status=no-client-ip" in line
+        assert path.read_bytes() == before
+
+    def test_a_write_with_a_WRONG_token_is_the_uniform_401_and_is_CHARGED(
+        self, scoped_store: Path
+    ):
+        limiter = api.RateLimiter(max_failures=5, window_s=600.0, lockout_s=600.0)
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,), limiter=limiter) as (base, _):
+            code, _h, body = post_bullet(
+                base, "w" * 48, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert (code, body) == (401, UNAUTHORIZED_BODY_LITERAL)
+        assert limiter._failures, "a failed write auth was not charged"
+        assert path.read_bytes() == before
+
+    def test_a_LOCKED_OUT_client_cannot_write(self, scoped_store: Path):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            for _ in range(5):
+                post_bullet(
+                    base, "w" * 48, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+                )
+            code, _h, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert (code, body) == (401, UNAUTHORIZED_BODY_LITERAL)
+        assert path.read_bytes() == before
+
+    def test_a_write_to_a_route_with_no_write_row_is_STILL_405(
+        self, scoped_store: Path
+    ):
+        """The converted guard, behaviourally: adding two write routes must not
+        have widened any OTHER path."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            for path in (
+                f"/api/v1/recall/{ALLOW_SCOPE}",
+                f"/api/v1/search/{ALLOW_SCOPE}?q=tide",
+                "/api/v1/snapshot",
+            ):
+                for method in ("POST", "PUT", "PATCH", "DELETE"):
+                    code, headers, body = fetch(
+                        f"{base}{path}", token=ZACH_TOKEN, method=method, data=b"{}"
+                    )
+                    assert code == 405, f"{method} {path} answered {code}"
+                    assert body == b"read-only\n"
+                    assert headers["Allow"] == "GET, HEAD"
+
+    @pytest.mark.parametrize("method", ["PATCH", "DELETE"])
+    def test_PATCH_and_DELETE_have_no_write_row_even_on_the_ENTRY_path(
+        self, scoped_store: Path, method: str
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, body = fetch(
+                bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method=method,
+                data=json.dumps({"text": BULLET_A, "session": SESSION_A}).encode(),
+            )
+        assert (code, body) == (405, b"read-only\n")
+        assert path.read_bytes() == before
+
+    def test_a_PUT_at_the_BULLETS_path_does_not_dispatch(self, scoped_store: Path):
+        """The tail (`bullets`) and the arity are part of the row. A PUT there is
+        four components against a row that declares three, so it matches nothing."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, _b = fetch(
+                bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="PUT",
+                data=before, extra_headers={"If-Match": api.entry_revision(before)},
+            )
+        assert code == 405
+        assert path.read_bytes() == before
+
+    def test_a_POST_with_the_WRONG_TAIL_does_not_dispatch(self, scoped_store: Path):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, _b = fetch(
+                f"{base}/api/v1/entry/{ALLOW_SCOPE}/{entry_ref(ALLOW_SCOPE)}/pointers",
+                token=ZACH_TOKEN, method="POST",
+                data=json.dumps({"text": BULLET_A, "session": SESSION_A}).encode(),
+            )
+        assert code == 405
+        assert path.read_bytes() == before
+
+    def test_a_TRAVERSING_path_component_is_refused_before_it_reaches_the_disk(
+        self, scoped_store: Path
+    ):
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = fetch(
+                f"{base}/api/v1/entry/%2e%2e/{entry_ref(ALLOW_SCOPE)}/bullets",
+                token=ZACH_TOKEN, method="POST",
+                data=json.dumps({"text": BULLET_A, "session": SESSION_A}).encode(),
+            )
+        assert code == 400
+        assert headers["X-Store-Status"] == "bad-request"
+
+
+class TestARefusedWriteIsIndistinguishableFromAnAbsentOne:
+    """🔴 CRITERION 3's ENUMERATION PROPERTY, APPLIED TO WRITES.
+
+    The read path closed this at the INDEX rather than with a per-route "is this
+    scope yours" check, and the write path reuses that same narrowing — so a
+    scope outside the caller's allowlist is not merely refused, it is not IN the
+    index the writer resolves against, and `UnknownScopeError` is raised for the
+    identical reason it is raised for a scope that never existed.
+
+    An error that discriminates is an enumeration API on a write verb exactly as
+    on a read one, and building a NEW oracle on the write side would undo what
+    criteria 1-3 closed.
+    """
+
+    def _phases(self, tmp_path: Path):
+        root = tmp_path / "store"
+
+        def present():
+            if root.exists():
+                shutil.rmtree(root)
+            return _build_store(
+                root, {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE}
+            )
+
+        def absent():
+            shutil.rmtree(root)
+            return _build_store(
+                root, {ALLOW_SCOPE: KELP_NUANCE, THIRD_SCOPE: LANTERN_NUANCE}
+            )
+
+        return root, present, absent
+
+    def _post(self, root: Path, record, scope: str):
+        with running(root, tokens=(record,)) as (base, _):
+            code, headers, body = post_bullet(
+                base, record.token, scope, text=BULLET_C, session=SESSION_B
+            )
+        return code, store_headers(headers), body
+
+    def test_APPEND_to_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
+        self, tmp_path: Path
+    ):
+        root, present, absent = self._phases(tmp_path)
+        present()
+        refused = self._post(root, ZACH, DENY_SCOPE)
+        absent()
+        never = self._post(root, ZACH, DENY_SCOPE)
+
+        assert refused[0] == never[0] == 404
+        assert refused[1] == never[1], (
+            f"X-Store-* headers differ:\n refused={refused[1]}\n absent ={never[1]}"
+        )
+        assert refused[2] == never[2], (
+            "response bodies differ — a refused write target is distinguishable "
+            f"from an absent one:\nrefused: {refused[2]!r}\nabsent : {never[2]!r}"
+        )
+        assert refused[2], "both bodies are empty — the equality would be vacuous"
+
+    def test_POSITIVE_CONTROL_the_APPEND_comparison_CAN_see_the_difference(
+        self, tmp_path: Path
+    ):
+        """🔴 WITHOUT THIS, THE EQUALITY ABOVE IS SATISFIED BY A SERVER THAT
+        ANSWERS 404 TO EVERYTHING — and by a fail-closed one that answers two
+        empty bodies. Same two phases, same path, a token that MAY write that
+        scope: present -> `appended`, absent -> `not-found`. Both non-empty, and
+        different.
+        """
+        root, present, absent = self._phases(tmp_path)
+        present()
+        wrote = self._post(root, DANA, DENY_SCOPE)
+        absent()
+        gone = self._post(root, DANA, DENY_SCOPE)
+
+        assert wrote[0] == 200 and gone[0] == 404
+        assert dict(wrote[1])["X-Store-Status"] == "appended"
+        assert dict(gone[1])["X-Store-Status"] == "not-found"
+        assert wrote[2] != gone[2]
+        assert wrote[2] and gone[2]
+        assert BULLET_C.encode() in wrote[2]
+
+    def test_a_refused_write_leaves_the_DENIED_scope_BYTE_IDENTICAL(
+        self, scoped_store: Path
+    ):
+        """The refusal is not merely a status: nothing on disk moved. Hashed over
+        the WHOLE tree, so a lock file, a temp file or a stray write anywhere
+        would be caught, not just a change to the entry this test names."""
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            for scope, ref in (
+                (DENY_SCOPE, entry_ref(DENY_SCOPE)),
+                (PHANTOM_SCOPE, "never-carved"),
+                (THIRD_SCOPE, entry_ref(THIRD_SCOPE)),
+                (ALLOW_SCOPE, "no-such-entry"),
+            ):
+                code, _h, _b = post_bullet(
+                    base, ZACH_TOKEN, scope, ref=ref, text=BULLET_A, session=SESSION_A
+                )
+                assert code == 404, (scope, ref, code)
+        assert tree_hash(scoped_store) == before
+
+    def test_an_UNKNOWN_REF_in_an_ALLOWED_scope_is_the_SAME_404(
+        self, scoped_store: Path
+    ):
+        """A ref that resolves to nothing answers the identical bytes a refused
+        scope does. Four ways to fail to resolve, ONE answer — so there is no
+        residual channel to probe on either axis."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            missing_ref = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, ref="no-such-entry",
+                text=BULLET_A, session=SESSION_A,
+            )
+            refused_scope = post_bullet(
+                base, ZACH_TOKEN, DENY_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert missing_ref[0] == refused_scope[0] == 404
+        assert store_headers(missing_ref[1]) == store_headers(refused_scope[1])
+        assert missing_ref[2] == refused_scope[2]
+
+    def test_PUT_to_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
+        self, tmp_path: Path
+    ):
+        root, present, absent = self._phases(tmp_path)
+
+        def put(record):
+            with running(root, tokens=(record,)) as (base, _):
+                code, headers, body = fetch(
+                    entry_url(base, DENY_SCOPE), token=record.token, method="PUT",
+                    data=b"---\nservice: x\n---\n",
+                    extra_headers={"If-Match": "0" * 16},
+                )
+            return code, store_headers(headers), body
+
+        present()
+        refused = put(ZACH)
+        absent()
+        never = put(ZACH)
+        assert refused[0] == never[0] == 404
+        assert refused[1] == never[1]
+        assert refused[2] == never[2]
+        assert refused[2]
+
+        # 🔴 THE POSITIVE CONTROL, IN THE SAME TEST because the pair is the
+        # evidence: a holder who MAY see that scope gets a 412 (a real
+        # precondition answer about a real file), not the 404 above.
+        present()
+        allowed = put(DANA)
+        assert allowed[0] == 412, allowed
+        assert allowed[:2] != refused[:2]
+
+
+class TestAppendIsCommutativeAndIdempotent:
+    """🔴 CRITERION 5, AND THE SHIP GATE. The store is not re-derivable — it
+    records gotchas, retracted theories and measurements that were true at a
+    moment — so a lost append is lost forever. This is the one defect class here
+    that destroys CONTENT rather than availability.
+    """
+
+    def test_two_CONCURRENT_appends_of_DIFFERENT_bullets_BOTH_survive(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        results: "dict[str, tuple]" = {}
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            with forced_interleave() as (first_in, release):
+
+                def writer(name: str, text: str, session: str) -> None:
+                    results[name] = post_bullet(
+                        base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=session
+                    )
+
+                first = threading.Thread(
+                    target=writer, args=("a", BULLET_A, SESSION_A), daemon=True
+                )
+                first.start()
+                assert first_in.wait(timeout=20), (
+                    "the first writer never reached the interleave point — the "
+                    "harness is not observing the critical section at all"
+                )
+                second = threading.Thread(
+                    target=writer, args=("b", BULLET_B, SESSION_B), daemon=True
+                )
+                second.start()
+                second.join(timeout=60)
+                release.set()
+                first.join(timeout=60)
+                assert not first.is_alive() and not second.is_alive()
+
+        assert results["a"][0] == results["b"][0] == 200, results
+        text = path.read_text()
+        assert BULLET_A in text, "the FIRST writer's bullet was lost"
+        assert BULLET_B in text, "the SECOND writer's bullet was lost"
+        bullets = resolver.parse_journal_bullets(nuance_of(path))
+        assert len(bullets) == 3, [b.lines[0] for b in bullets]
+
+    def test_the_interleave_harness_CAN_LOSE_an_append(self, scoped_store: Path):
+        """🔴 THE NEGATIVE CONTROL FOR THE TEST ABOVE, and it is the mutation run
+        as a test: with `_EntryLock` replaced by a lock that locks nothing, the
+        identical scenario MUST lose a bullet. Without this, "both survived"
+        cannot be told apart from a harness whose two writers never overlapped.
+        """
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            with no_entry_lock():
+                with forced_interleave() as (first_in, release):
+
+                    def writer(text: str, session: str) -> None:
+                        post_bullet(
+                            base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=session
+                        )
+
+                    first = threading.Thread(
+                        target=writer, args=(BULLET_A, SESSION_A), daemon=True
+                    )
+                    first.start()
+                    assert first_in.wait(timeout=20)
+                    second = threading.Thread(
+                        target=writer, args=(BULLET_B, SESSION_B), daemon=True
+                    )
+                    second.start()
+                    second.join(timeout=60)
+                    release.set()
+                    first.join(timeout=60)
+
+        text = path.read_text()
+        assert BULLET_A in text, "the surviving writer is the wrong one"
+        assert BULLET_B not in text, (
+            "the unlocked read-modify-write did NOT lose the second append — the "
+            "harness cannot see the defect it claims to guard against, so the "
+            "green test above is evidence of nothing"
+        )
+
+    def test_EIGHT_concurrent_appends_all_survive(self, scoped_store: Path):
+        """No hook, real overlap, eight racers. A supplement to the forced
+        interleave rather than a replacement: it cannot be relied on to catch a
+        missing lock (some runs will serialise anyway) but it exercises the lock
+        under genuine contention, which the two-writer version does not."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        texts = [f"{BULLET_C} on run {n}" for n in range(8)]
+        barrier = threading.Barrier(len(texts))
+        codes: "list[int]" = []
+        lock = threading.Lock()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+
+            def writer(text: str) -> None:
+                barrier.wait(timeout=30)
+                code, _h, _b = post_bullet(
+                    base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
+                )
+                with lock:
+                    codes.append(code)
+
+            threads = [
+                threading.Thread(target=writer, args=(t,), daemon=True) for t in texts
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=60)
+                assert not t.is_alive()
+        assert codes == [200] * len(texts), codes
+        stored = path.read_text()
+        for text in texts:
+            assert text in stored, f"{text!r} was lost"
+        assert len(resolver.parse_journal_bullets(nuance_of(path))) == len(texts) + 1
+
+    def test_re_POSTing_the_SAME_bullet_leaves_the_entry_BYTE_IDENTICAL(
+        self, scoped_store: Path
+    ):
+        """🔴 ASSERTED ON BYTES, NOT ON A STATUS CODE. A server that appended a
+        second identical bullet and answered 200 satisfies every status-based
+        check, and the duplicate is then in the store forever."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            first = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+            after_first = path.read_bytes()
+            second = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert first[1]["X-Store-Status"] == "appended"
+        assert second[1]["X-Store-Status"] == "duplicate"
+        assert path.read_bytes() == after_first, "the re-POST changed the file"
+
+    def test_the_duplicate_check_is_on_CONTENT_not_on_the_WHOLE_LINE(
+        self, scoped_store: Path
+    ):
+        """Same text, DIFFERENT session — still a duplicate. A retry from a new
+        agent run is the same observation, and hashing the rendered line would
+        make every retry a new bullet."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+            after_first = path.read_bytes()
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_B
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "duplicate"
+        assert path.read_bytes() == after_first
+
+    def test_a_DIFFERENT_bullet_from_the_SAME_session_IS_appended(
+        self, scoped_store: Path
+    ):
+        """Positive control for both duplicate tests: the no-op is decided by the
+        CONTENT, so a different observation from the same session must land."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+            after_first = path.read_bytes()
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_B, session=SESSION_A
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "appended"
+        assert path.read_bytes() != after_first
+        assert BULLET_B in path.read_text()
+
+    def test_a_bullet_ALREADY_in_the_entry_by_hand_is_a_duplicate_too(
+        self, scoped_store: Path
+    ):
+        """The hash is taken over the CONTENT of the bullets already there, with
+        the date opener and any attribution trailer stripped — so an append that
+        repeats a hand-written line is recognised, not duplicated."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        # KELP_NUANCE is `- 2026-03-04: <prose>` — send exactly its prose.
+        prose = KELP_NUANCE.split(": ", 1)[1]
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=prose, session=SESSION_A
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "duplicate"
+        assert path.read_bytes() == before
+
+    def test_a_CONCURRENT_duplicate_still_writes_NOTHING(self, scoped_store: Path):
+        """The idempotency check runs INSIDE the lock. Outside it, two identical
+        POSTs racing would both read "not present" and both append."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        statuses: "list[str]" = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(4)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+
+            def writer() -> None:
+                barrier.wait(timeout=30)
+                _c, headers, _b = post_bullet(
+                    base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+                )
+                with lock:
+                    statuses.append(headers["X-Store-Status"])
+
+            threads = [threading.Thread(target=writer, daemon=True) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=60)
+                assert not t.is_alive()
+        assert sorted(statuses) == ["appended", "duplicate", "duplicate", "duplicate"], (
+            statuses
+        )
+        assert len(resolver.parse_journal_bullets(nuance_of(path))) == 2
+
+
+class TestIfMatchIsRequiredAndChecked:
+    """🔴 CRITERION 6. A whole-file PUT is the only primitive here that DESTROYS
+    content rather than adding to it, so the precondition is the thing standing
+    between a stale client and a lost update — and every refusal is asserted on
+    the BYTES on disk, not on a status code.
+    """
+
+    def _replacement(self, scope: str) -> bytes:
+        return _entry(entry_ref(scope), scope, nuance=f"- 2026-04-09: {BULLET_C}").encode()
+
+    def _put(self, base: str, scope: str, data: bytes, if_match: str | None):
+        headers = {} if if_match is None else {"If-Match": if_match}
+        return fetch(
+            entry_url(base, scope), token=ZACH_TOKEN, method="PUT", data=data,
+            extra_headers=headers,
+        )
+
+    def test_the_CURRENT_revision_REPLACES_the_file(self, scoped_store: Path):
+        """The positive control, and it comes first: every refusal below is only
+        evidence if the same request WITH the right revision succeeds."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = self._replacement(ALLOW_SCOPE)
+        revision = api.entry_revision(path.read_bytes())
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(base, ALLOW_SCOPE, data, revision)
+        assert code == 200, (code, headers)
+        assert headers["X-Store-Status"] == "replaced"
+        assert path.read_bytes() == data
+        assert headers["ETag"] == f'"{api.entry_revision(data)}"'
+        assert KELP_NUANCE not in path.read_text()
+
+    def test_a_STALE_revision_is_412_and_the_file_is_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        stale = api.entry_revision(b"whatever this store used to hold")
+        assert stale != api.entry_revision(before)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(
+                base, ALLOW_SCOPE, self._replacement(ALLOW_SCOPE), stale
+            )
+        assert code == 412, (code, body)
+        assert headers["X-Store-Status"] == "precondition-failed"
+        assert path.read_bytes() == before, "a stale PUT overwrote the entry"
+
+    def test_the_412_carries_the_CURRENT_revision_so_a_retry_can_SUCCEED(
+        self, scoped_store: Path
+    ):
+        """A client told only "no" cannot retry, and a client that cannot retry
+        re-sends without the precondition. So the refusal names the revision, and
+        the retry is exercised rather than assumed."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = self._replacement(ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            _c, refused, _b = self._put(base, ALLOW_SCOPE, data, "f" * 16)
+            current = refused["ETag"].strip('"')
+            code, _h, _b2 = self._put(base, ALLOW_SCOPE, data, current)
+        assert current == api.entry_revision(
+            _entry(entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=KELP_NUANCE).encode()
+        )
+        assert code == 200
+        assert path.read_bytes() == data
+
+    def test_a_MISSING_If_Match_is_428_and_the_file_is_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        """🔴 REQUIRED, NOT OPTIONAL. An optional precondition is no precondition:
+        the caller that most needs it — a retry after a timeout, on a store two
+        agents share — is exactly the one that would omit it."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(
+                base, ALLOW_SCOPE, self._replacement(ALLOW_SCOPE), None
+            )
+        assert code == 428, code
+        assert headers["X-Store-Status"] == "precondition-required"
+        assert path.read_bytes() == before
+
+    def test_If_Match_STAR_is_REFUSED_and_the_file_is_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        """`*` means "any current representation" — the one value that turns the
+        guard off while looking like it is on."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(
+                base, ALLOW_SCOPE, self._replacement(ALLOW_SCOPE), "*"
+            )
+        assert code == 400, code
+        assert headers["X-Store-Status"] == "bad-request"
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("wrap", ['{rev}', '"{rev}"', 'W/"{rev}"'])
+    def test_a_QUOTED_and_a_BARE_revision_name_the_SAME_revision(
+        self, scoped_store: Path, wrap: str
+    ):
+        """HTTP spells an entity-tag quoted; a shell client will send it bare.
+        Refusing one of the two would be a precondition that fails for a reason
+        the caller cannot see."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = self._replacement(ALLOW_SCOPE)
+        revision = api.entry_revision(path.read_bytes())
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, _b = self._put(
+                base, ALLOW_SCOPE, data, wrap.format(rev=revision)
+            )
+        assert code == 200, (wrap, code)
+        assert path.read_bytes() == data
+
+    def test_a_PUT_that_would_MALFORM_the_entry_is_refused_and_the_file_is_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        """🔴 THE WRITE PATH MAY NOT CREATE THE `MALFORMED` STATE THE READ PATH
+        HAS SO MUCH MACHINERY FOR. The check is the index loader's OWN mapping,
+        not a second opinion about what an entry is."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        revision = api.entry_revision(before)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(
+                base, ALLOW_SCOPE, b"no front matter here\n", revision
+            )
+        assert code == 422, code
+        assert headers["X-Store-Status"] == "entry-shape"
+        assert path.read_bytes() == before
+
+    def test_the_MALFORM_guard_is_the_LOADER_and_a_VALID_entry_still_lands(
+        self, scoped_store: Path
+    ):
+        """Positive control: the refusal above is about the CONTENT, not about
+        PUT refusing everything."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = self._replacement(ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, _b = self._put(
+                base, ALLOW_SCOPE, data, api.entry_revision(path.read_bytes())
+            )
+        assert code == 200
+        # …and the reader agrees it is an entry, which is the claim the guard
+        # actually makes.
+        index = resolver.load_index(
+            scoped_store, on_malformed=resolver.ON_MALFORMED_COLLECT
+        )
+        assert not index.malformed_in(ALLOW_SCOPE)
+
+    def test_two_CONCURRENT_PUTs_on_ONE_revision_land_exactly_ONE(
+        self, scoped_store: Path
+    ):
+        """🔴 THE LOST-UPDATE CASE, AND THE PRECONDITION IS CHECKED UNDER THE SAME
+        LOCK THE WRITE HAPPENS UNDER. Outside it, both callers read revision R,
+        both pass, and the second silently overwrites the first — which is the
+        exact update the precondition exists to refuse.
+        """
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        revision = api.entry_revision(path.read_bytes())
+        first_data = self._replacement(ALLOW_SCOPE)
+        second_data = _entry(
+            entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=f"- 2026-04-10: {BULLET_B}"
+        ).encode()
+        codes: "dict[str, int]" = {}
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            with forced_interleave() as (first_in, release):
+
+                def writer(name: str, data: bytes) -> None:
+                    codes[name] = self._put(base, ALLOW_SCOPE, data, revision)[0]
+
+                first = threading.Thread(
+                    target=writer, args=("a", first_data), daemon=True
+                )
+                first.start()
+                assert first_in.wait(timeout=20)
+                second = threading.Thread(
+                    target=writer, args=("b", second_data), daemon=True
+                )
+                second.start()
+                second.join(timeout=60)
+                release.set()
+                first.join(timeout=60)
+                assert not first.is_alive() and not second.is_alive()
+        assert sorted(codes.values()) == [200, 412], codes
+        assert path.read_bytes() == first_data
+        assert BULLET_B.encode() not in path.read_bytes()
+
+    def test_the_CONCURRENT_PUT_harness_CAN_see_a_lost_update(
+        self, scoped_store: Path
+    ):
+        """The negative control for the test above: with the lock removed, BOTH
+        PUTs pass the precondition and the first writer's content is gone."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        revision = api.entry_revision(path.read_bytes())
+        first_data = self._replacement(ALLOW_SCOPE)
+        second_data = _entry(
+            entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=f"- 2026-04-10: {BULLET_B}"
+        ).encode()
+        codes: "dict[str, int]" = {}
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            with no_entry_lock():
+                with forced_interleave() as (first_in, release):
+
+                    def writer(name: str, data: bytes) -> None:
+                        codes[name] = self._put(base, ALLOW_SCOPE, data, revision)[0]
+
+                    first = threading.Thread(
+                        target=writer, args=("a", first_data), daemon=True
+                    )
+                    first.start()
+                    assert first_in.wait(timeout=20)
+                    second = threading.Thread(
+                        target=writer, args=("b", second_data), daemon=True
+                    )
+                    second.start()
+                    second.join(timeout=60)
+                    release.set()
+                    first.join(timeout=60)
+        assert sorted(codes.values()) == [200, 200], (
+            "the unlocked PUT pair did NOT both pass the precondition — the "
+            f"harness cannot see a lost update: {codes}"
+        )
+        assert path.read_bytes() == first_data
+
+
+class TestTheAppendRequestIsValidated:
+    """Every clause of `_bullet_request_problem` is reachable by an input every
+    earlier clause accepts, and each is asserted on its OWN sentence — a test
+    that went red because a DIFFERENT clause fired would be green with the clause
+    it names deleted."""
+
+    def _post_raw(self, base: str, body: bytes):
+        return fetch(
+            bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="POST", data=body
+        )
+
+    @pytest.mark.parametrize(
+        "body,fragment",
+        [
+            (b"not json at all", b"must be JSON"),
+            (b'"a string"', b"must be a JSON object"),
+            (b'{"session": "sess-7f3a2b"}', b"`text` is required"),
+            (b'{"text": "   ", "session": "sess-7f3a2b"}', b"`text` is required"),
+            (b'{"text": "a\\nb", "session": "sess-7f3a2b"}', b"must be ONE line"),
+            (b'{"text": "- a", "session": "sess-7f3a2b"}', b"must not open a markdown"),
+            (b'{"text": "a real observation"}', b"`session` is required"),
+            (b'{"text": "a real observation", "session": "has spaces"}',
+             b"`session` is required"),
+        ],
+    )
+    def test_a_MALFORMED_append_is_400_and_writes_NOTHING(
+        self, scoped_store: Path, body: bytes, fragment: bytes
+    ):
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, resp = self._post_raw(base, body)
+        assert code == 400, (body, code, resp)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert fragment in resp, resp
+        assert tree_hash(scoped_store) == before
+
+    def test_an_OVERLONG_text_is_refused(self, scoped_store: Path):
+        before = tree_hash(scoped_store)
+        payload = {"text": "x" * (api.BULLET_TEXT_MAX + 1), "session": SESSION_A}
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, resp = self._post_raw(base, json.dumps(payload).encode())
+        assert code == 400
+        assert b"characters, max" in resp
+        assert tree_hash(scoped_store) == before
+
+    def test_a_text_at_the_LIMIT_is_accepted(self, scoped_store: Path):
+        """The other side of the boundary. A cap tested only from above is a cap
+        tested on one side of its condition."""
+        payload = {"text": "x" * api.BULLET_TEXT_MAX, "session": SESSION_A}
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._post_raw(base, json.dumps(payload).encode())
+        assert code == 200, code
+        assert headers["X-Store-Status"] == "appended"
+
+    def test_a_body_with_NO_Content_Length_writes_nothing(self, scoped_store: Path):
+        """A write needs a body, and `_consume_body` reports "no body declared"
+        distinctly from "framing refused" precisely so this can be answered."""
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, resp = fetch(
+                bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="POST"
+            )
+        assert code == 400, (code, resp)
+        assert tree_hash(scoped_store) == before
+
+
+class TestTheWritePrimitives:
+    """Unit-level, and pinned by MUTATION rather than by a red-at-base run: these
+    names do not exist at the base ref, so their red there is an `AttributeError`
+    and proves nothing about behaviour."""
+
+    def test_a_revision_is_a_function_of_the_BYTES(self):
+        assert api.entry_revision(b"alpha") == api.entry_revision(b"alpha")
+        assert api.entry_revision(b"alpha") != api.entry_revision(b"alphb")
+        assert len(api.entry_revision(b"alpha")) == api.CONTENT_HASH_CHARS
+
+    def test_a_content_hash_ignores_WRAPPING_and_nothing_else(self):
+        assert api.content_hash(BULLET_A) == api.content_hash(
+            "  " + BULLET_A.replace(" ", "\t ") + "  "
+        )
+        assert api.content_hash(BULLET_A) != api.content_hash(BULLET_B)
+        # …and it is not a constant: three distinct texts, three distinct hashes.
+        assert len({api.content_hash(t) for t in (BULLET_A, BULLET_B, BULLET_C)}) == 3
+
+    def test_a_rendered_bullet_round_trips_through_bullet_content(self):
+        line = api.render_bullet(
+            BULLET_B, actor="dana", session=SESSION_B, today="2026-04-11"
+        )
+        assert api.bullet_content([line]) == BULLET_B
+        assert api.content_hash(api.bullet_content([line])) == api.content_hash(BULLET_B)
+
+    def test_bullet_content_strips_an_opener_WITHOUT_a_trailer(self):
+        assert api.bullet_content(["- 2026-04-11: " + BULLET_C]) == BULLET_C
+        assert api.bullet_content(["- " + BULLET_C]) == BULLET_C
+        # A trailer that is not THIS writer's trailer is content, not attribution.
+        assert api.bullet_content([f"- {BULLET_C} [seen: dana]"]) == (
+            f"{BULLET_C} [seen: dana]"
+        )
+
+    def test_bullet_content_joins_a_MULTI_LINE_bullet(self):
+        assert api.bullet_content(["- 2026-04-11: " + BULLET_A, "  " + BULLET_B]) == (
+            f"{BULLET_A} {BULLET_B}"
+        )
+
+    def test_the_insert_point_is_UNDER_the_nuance_heading(self):
+        lines = _entry("x", "y").splitlines()
+        index = api.nuance_insert_index(lines)
+        assert index is not None
+        assert lines[index - 1] == resolver.NUANCE_HEADING
+
+    def test_there_is_NO_insert_point_without_the_heading(self):
+        lines = _entry("x", "y").splitlines()
+        lines = [ln for ln in lines if ln != resolver.NUANCE_HEADING]
+        assert api.nuance_insert_index(lines) is None
+
+    def test_a_heading_INSIDE_a_fence_is_not_the_heading(self):
+        """The same rule `_heading_blocks` applies — imported rather than
+        re-spelled, so the writer cannot come to disagree with the reader about
+        where a section starts."""
+        lines = [
+            "```",
+            resolver.NUANCE_HEADING,
+            "```",
+            resolver.NUANCE_HEADING,
+            "- real",
+        ]
+        assert api.nuance_insert_index(lines) == 4
+
+    def test_an_entry_with_no_NUANCE_heading_is_422_not_a_reshaped_file(
+        self, tmp_path: Path
+    ):
+        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        path = entry_file(root, ALLOW_SCOPE)
+        text = path.read_text().replace(resolver.NUANCE_HEADING, "## Notes")
+        path.write_text(text)
+        before = path.read_bytes()
+        with running(root, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert code == 422, code
+        assert headers["X-Store-Status"] == "entry-shape"
+        assert path.read_bytes() == before
+
+    def test_a_FAILED_write_leaves_the_entry_and_no_temp_file(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """🔴 `os.replace`, NOT `open(path, "w")`. A truncate-then-write leaves a
+        window in which a concurrent reader sees an EMPTY or half-written entry
+        and serves it as a complete one — the silent under-report this whole
+        module is built against, produced by the WRITER.
+
+        Driven by making the final `os.replace` fail: a truncating writer has
+        already destroyed the entry by this point, `os.replace` has not, and the
+        temp file must not be left behind either (it is invisible to every
+        walker, so nothing would ever report or clean it up).
+        """
+        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        path = entry_file(root, ALLOW_SCOPE)
+        before = path.read_bytes()
+
+        def boom(_src, _dst):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(os, "replace", boom)
+        with pytest.raises(OSError):
+            api.append_bullet(
+                path, text=BULLET_A, actor="zach", session=SESSION_A,
+                today="2026-04-11",
+            )
+        monkeypatch.undo()
+        assert path.read_bytes() == before
+        assert not list(path.parent.glob(".cairn-*.tmp")), "a temp file was orphaned"
+
+    def test_the_LOCK_FILE_is_invisible_to_every_walker(self, scoped_store: Path):
+        """It has a leading dot AND no `.md` suffix, so all three of the store's
+        walkers skip it twice over. Asserted through the walkers themselves."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+            lock = scoped_store / ALLOW_SCOPE / f".{entry_ref(ALLOW_SCOPE)}.md.lock"
+            assert lock.exists(), "the lock file was never created"
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )
+            _c, snap_headers, tar_bytes = fetch(
+                f"{base}/api/v1/snapshot", token=ZACH_TOKEN
+            )
+        assert code == 200 and headers["X-Store-Status"] == "recalled"
+        assert lock.name.encode() not in body
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r") as tar:
+            names = tar.getnames()
+        assert not any(n.endswith(".lock") for n in names), names
+        # `entry-files=` counts `.md` only, so the lock must not move it. The
+        # expected number is counted off DISK, not copied from the fixture.
+        md_on_disk = len(list(scoped_store.rglob("*.md")))
+        assert f"entry-files={md_on_disk}" in snap_headers["X-Store-Snapshot"], (
+            snap_headers,
+            md_on_disk,
+        )
