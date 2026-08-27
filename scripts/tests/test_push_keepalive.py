@@ -57,8 +57,18 @@ WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the label):
     misplacement: a setting in a file nothing imports ships nothing. It is
     labelled as a guard and NOT counted as regression coverage for #782.
 
-(Five tests, and the list above has one entry each — count it rather than
-trusting a total maintained in parallel with the thing it counts.)
+  * `test_the_two_parser_passes_stay_offset_aligned` is an INVARIANT GUARD on
+    the assumption the depth-counting rests on: `_top_level_of_settings` counts
+    braces in the string-BLANKED text and takes characters from the
+    string-KEEPING one at the SAME offsets, which is sound only while both
+    passes are the same length. No bug ever violated it; it is here because a
+    future edit to `_nix_code` could shift every slice downstream WITHOUT
+    failing, and the tests above would then describe the wrong region of the
+    file while still passing.
+
+(The list above has one entry per test. Count it rather than trusting a total
+maintained in parallel with the thing it counts — this parenthetical said FIVE
+and went stale within one commit of being written, which is the whole point.)
 
 🔴 WHAT THIS FILE STILL CANNOT SEE, STATED SO NOBODY READS IT AS WIDER:
   * `scripts/claim-work.sh` uses `${GIT_SSH_COMMAND:-…}`. An INHERITED outer
@@ -266,20 +276,29 @@ def _top_level_of_settings() -> str:
     m = re.search(r"(?<![.\w])settings\s*=\s*\{", located)
     if not m:
         return ""
-    depth, i, body = 1, m.end(), []
-    while i < len(code) and depth:
-        ch = code[i]
+    # 🔴 COUNT BRACES ON THE BLANKED TEXT, TAKE CHARACTERS FROM THE KEEPING ONE.
+    # A `{` or `}` inside a string VALUE would otherwise corrupt the depth and
+    # silently move what counts as "top level". Not hypothetical at the scale
+    # this parser runs at: `nix/home.nix` carries 314 brace-bearing offsets that
+    # exist only inside strings. The git module has none TODAY, so this is a
+    # latent hole rather than a live bug — closed now because the next value
+    # someone adds is exactly where it would bite, and it would fail SILENTLY by
+    # relocating the boundary rather than by erroring.
+    depth, i, span = 1, m.end(), []
+    while i < len(located) and depth:
+        ch = located[i]
         if ch == "{":
             depth += 1
         elif ch == "}":
             depth -= 1
             if depth == 0:
                 break
-        body.append(ch)
+        span.append(i)
         i += 1
     depth = 0
     out: list[str] = []
-    for ch in body:
+    for idx in span:
+        ch = located[idx]
         if ch == "{":
             depth += 1
             out.append(" ")
@@ -287,7 +306,11 @@ def _top_level_of_settings() -> str:
             depth -= 1
             out.append(" ")
         else:
-            out.append(ch if depth == 0 else (" " if ch != "\n" else "\n"))
+            # depth from `located`, CHARACTER from `code` — offsets agree
+            # because both passes strip comments identically and blank strings
+            # in place, which is asserted by
+            # `test_the_two_parser_passes_stay_offset_aligned`.
+            out.append(code[idx] if depth == 0 else (" " if ch != "\n" else "\n"))
     return "".join(out)
 
 
@@ -461,6 +484,60 @@ def test_the_setting_is_reachable_from_the_home_manager_entry_point():
         f"{HOME_NIX} no longer assigns `programs = programs;`, so "
         f"{PROGRAMS_INDEX} is built but never handed to home-manager — every "
         "setting in nix/programs/git ships nothing")
+
+
+# --------------------------------------------------------------------------- #
+# INVARIANT GUARD — the assumption the depth-counting rests on
+# --------------------------------------------------------------------------- #
+def test_the_two_parser_passes_stay_offset_aligned():
+    """🔴 `_top_level_of_settings` counts braces in the string-BLANKED text and
+    takes characters from the string-KEEPING one at the SAME offsets. That is
+    only sound while the two passes are the same length.
+
+    It holds by construction — a blanked `"…"` emits `"` + N spaces + `"`, and a
+    blanked `''…''` preserves newlines and spaces the rest, both exactly as long
+    as the original — but "by construction" is what every silently-broken
+    invariant was, so it is measured here instead. If a future edit to
+    `_nix_code` blanks a string to a different LENGTH, every slice downstream
+    shifts and the tests above start describing the wrong region of the file
+    without failing.
+
+    INVARIANT GUARD, not regression coverage: no bug ever violated it.
+    """
+    for path in (GIT_MODULE, PROGRAMS_INDEX, HOME_NIX):
+        keep = _nix_code(path, keep_strings=True)
+        blank = _nix_code(path, keep_strings=False)
+        assert len(keep) == len(blank), (
+            f"{path.name}: the two parser passes disagree on length "
+            f"({len(keep)} vs {len(blank)}), so every offset-based slice in "
+            "this file now reads the wrong region")
+
+    # A constructed case, because the three real files may not contain the
+    # shapes that break alignment. Braces and a newline INSIDE strings are
+    # exactly what the blanking must neutralise without changing length.
+    probe = REPO_ROOT / "nix" / "programs" / "git" / "default.nix"
+    synthetic = (
+        'x = { a = "brace { inside} a string";\n'
+        "     b = ''line1 { \n line2 }'';\n"
+        '     c = "esc \\" still in string { ";  # trailing comment\n'
+        "   };\n")
+    tmp = probe.parent / ".__alignment_probe.nix"
+    try:
+        tmp.write_text(synthetic, encoding="utf-8")
+        keep = _nix_code(tmp, keep_strings=True)
+        blank = _nix_code(tmp, keep_strings=False)
+        assert len(keep) == len(blank), (
+            f"alignment breaks on braces/newlines inside strings: "
+            f"{len(keep)} vs {len(blank)}")
+        # And the point of blanking: the braces inside strings are GONE from the
+        # text depth is counted on, while still present in the text values come
+        # from. Without this the two passes could be equal-length and still
+        # useless.
+        assert blank.count("{") < keep.count("{"), (
+            "keep_strings=False did not remove any brace, so blanking is not "
+            "protecting the depth count from braces inside string values")
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- #
