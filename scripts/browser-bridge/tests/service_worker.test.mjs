@@ -31,14 +31,15 @@ const state = {
   tab: { id: TAB_ID, url: "https://civitai.com/apps/run/model-benchmarking",
          title: "Model Benchmarking", active: false, status: "complete", windowId: 1 },
   calls: { getAllFrames: [], executeScript: [], debugger: [], tabsGet: [],
-           tabsUpdate: [], windowsUpdate: [], tabsCreate: [] },
+           tabsUpdate: [], windowsUpdate: [], tabsCreate: [], tabsRemove: [] },
   crumbs: [],
 };
 function resetCalls() {
   state.calls = { getAllFrames: [], executeScript: [], debugger: [], tabsGet: [],
-                  tabsUpdate: [], windowsUpdate: [], tabsCreate: [] };
+                  tabsUpdate: [], windowsUpdate: [], tabsCreate: [], tabsRemove: [] };
   state.crumbs = [];
   state.execResult = { ok: true };
+  state.tabsRemoveThrows = false;
 }
 // Keep the `activate` wait fast + deterministic in these wiring tests (the wait
 // LOGIC itself is unit-tested in protocol.test.mjs): no paint settle, 1ms polls.
@@ -62,6 +63,10 @@ globalThis.chrome = {
     async create(props) {
       state.calls.tabsCreate.push(props);
       return { id: FRESH_TAB_ID, url: (props && props.url) || "about:blank" };
+    },
+    async remove(id) {
+      state.calls.tabsRemove.push(id);
+      if (state.tabsRemoveThrows) throw new Error(`No tab with id: ${id}.`);
     },
     async update(id, props) {
       state.calls.tabsUpdate.push({ id, props });
@@ -468,7 +473,10 @@ test("open reuse probe: a HUNG chrome.tabs.get falls through to a fresh tab",
 // reuse into a fresh tab. A healthy `tabs.get` must still reuse — otherwise the
 // test above would pass just as well with the reuse path deleted outright, and
 // would be recording coverage it does not have. (Tab reuse is not cosmetic: a
-// missed reuse orphans the previous tab, which nothing owns and nothing closes.)
+// missed reuse orphans the previous tab, which nothing OWNS — the reap added
+// later in this file closes it best-effort, but reuse is still strictly cheaper
+// than close-plus-create, and the reap is the least likely thing to land under
+// the stall that caused the missed reuse.)
 test("open reuse probe: a HEALTHY chrome.tabs.get still reuses the owned tab", async () => {
   resetCalls();
   const out = await OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" });
@@ -546,6 +554,179 @@ test("open reuse probe: the breadcrumb distinguishes a HANG from a genuinely-gon
   // distinct literals above, so such an assertion is strictly IMPLIED and cannot fail
   // for any mutant — coverage-shaped and empty, the same defect this PR removed once
   // already. The distinctness that matters is enforced by the two equals.)
+});
+
+// --------------------------------------------------------------------------- //
+// 🔴 THE BOUND'S ORPHAN IS REAPED, NOT ONLY DISCLOSED.
+//
+// #814 bounded the reuse probe and DISCLOSED its cost in two places — the
+// REUSE_TAB_BUDGET_MS comment, and server.py's `reuse_tab_id` block, which spells
+// it out: a probe that exceeds the budget falls through to a FRESH tab, the server
+// overwrites the ownership record, and the live first tab is "deterministically
+// ORPHAN[ed] … Nothing reclaims it; only a human closes it." `open` returns
+// SUCCESS on that path, so nothing ever revisits it — one leaked tab per
+// timed-out re-open. These tests pin the reclaim.
+//
+// WHY THE ASYMMETRY IS THE SUBJECT AND NOT AN IMPLEMENTATION DETAIL: the two arms
+// of the catch carry OPPOSITE evidence. A timeout learned nothing (reap); a
+// rejection is `chrome.tabs.get` naming the id as absent (do not reap — a remove
+// against an id we have positive evidence is gone is pure exposure, since a tabId
+// can be recycled). A test that only asserted "the timeout arm reaps" would pass
+// just as well with an UNCONDITIONAL reap, which is a strictly worse program. So
+// both arms are asserted, side by side, and the negative is the discriminating one.
+// --------------------------------------------------------------------------- //
+
+// Race an `open` against a 1s deadline so a REGRESSION IS AN ASSERTION FAILURE,
+// not a hang: node scores a timed-out test `cancelled` and leaves `fail` at 0, so
+// a gate that greps the fail count would read a live regression as clean. The
+// per-test `{ timeout }` stays only as a backstop for anything outside the race.
+function openWithin(promise, why) {
+  let hangTimer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      hangTimer = setTimeout(() => reject(new Error(why)), 1000);
+    }),
+  ]).finally(() => clearTimeout(hangTimer));
+}
+
+test("open reuse probe: a TIMED-OUT probe reaps the tab it just orphaned",
+     { timeout: 2000 }, async (t) => {
+  resetCalls();
+  const realGet = chrome.tabs.get;
+  const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  t.after(() => {
+    chrome.tabs.get = realGet;
+    globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
+  });
+  globalThis.BROWSER_BRIDGE_LOOP_TIMING = { ...(realTiming || {}), reuseTabMs: 20 };
+  chrome.tabs.get = () => new Promise(() => {});   // never settles
+
+  const out = await openWithin(
+    OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" }),
+    "open did not settle within 1s");
+
+  assert.equal(out.tabId, FRESH_TAB_ID, "the fall-through still yields the fresh tab");
+  assert.equal(state.calls.tabsCreate.length, 1, "exactly one replacement tab");
+  assert.deepEqual(state.calls.tabsRemove, [TAB_ID],
+                   "the orphaned tab must be reclaimed — server.py's "
+                   + "\"Nothing reclaims it; only a human closes it\" is what this "
+                   + "assertion deletes");
+
+  // 🔴 ORDERING, WHICH THE ASSERTION ABOVE CANNOT SEE: the reap must run only
+  // AFTER the replacement exists. Reaping first would close the session's ONLY
+  // tab and then, when the create fails, leave it owning a dead id — strictly
+  // worse than the leak. A failing create is the one probe that separates the two
+  // orderings, because both produce an identical `tabsRemove` when create works.
+  resetCalls();
+  const realCreate = chrome.tabs.create;
+  t.after(() => { chrome.tabs.create = realCreate; });
+  chrome.tabs.create = async () => { throw new Error("Tab creation failed."); };
+  await assert.rejects(
+    () => openWithin(OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" }),
+                     "open did not settle within 1s on a failing create"),
+    /Tab creation failed\./,
+    "a failed create must still surface as the op's error");
+  assert.deepEqual(state.calls.tabsRemove, [],
+                   "nothing may be reaped when there is no replacement tab — the "
+                   + "reap belongs AFTER chrome.tabs.create, not before it");
+});
+
+// 🔴 THE DISCRIMINATING NEGATIVE. Without this, an unconditional reap passes the
+// test above — and an unconditional reap fires a `tabs.remove` at an id
+// `chrome.tabs.get` has just reported absent, which buys nothing and can land on a
+// recycled tabId.
+test("open reuse probe: a REJECTING probe must NOT reap — the id is known absent",
+     async (t) => {
+  resetCalls();
+  const realGet = chrome.tabs.get;
+  t.after(() => { chrome.tabs.get = realGet; });
+  chrome.tabs.get = async () => { throw new Error("No tab with id: 5."); };
+
+  const out = await OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" });
+  assert.equal(out.tabId, FRESH_TAB_ID, "the gone path still yields a fresh tab");
+  assert.equal(state.calls.tabsCreate.length, 1);
+  assert.deepEqual(state.calls.tabsRemove, [],
+                   "a tab the probe REPORTED gone must not be removed: nothing to "
+                   + "reclaim, and a recycled tabId would be someone else's tab");
+});
+
+// The other two paths that reach `chrome.tabs.create`, both of which must stay
+// reap-free. Together with the two arms above these enumerate every route through
+// `open`, so "the reap fires on exactly one of them" is a closed claim rather than
+// a sampled one.
+test("open: neither a healthy reuse nor a first open ever reaps", async () => {
+  resetCalls();
+  const reused = await OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" });
+  assert.equal(reused.reused, true, "healthy probe reuses (attribution control)");
+  assert.deepEqual(state.calls.tabsRemove, [], "a reused tab is not an orphan");
+
+  resetCalls();
+  const fresh = await OPS.open({ url: "https://civitai.com/" });   // no reuseTabId
+  assert.equal(fresh.tabId, FRESH_TAB_ID);
+  assert.equal(state.calls.tabsCreate.length, 1);
+  assert.deepEqual(state.calls.tabsRemove, [],
+                   "a session's FIRST open has no predecessor to reclaim");
+});
+
+// 🔴 THE REAP IS FIRE-AND-FORGET, AND THAT IS LOAD-BEARING RATHER THAN TIDY.
+// `chrome.tabs.remove` is one more unbounded browser-process IPC. Awaiting it
+// would put a NEW unbounded await on `open`'s SUCCESS path — regenerating, at the
+// last line of the op, the exact defect class #797/#814 exist to remove. So the
+// property under test is not "the reap works" but "the reap cannot hurt": a
+// remove that HANGS FOREVER, one that REJECTS, and one that throws SYNCHRONOUSLY
+// must each leave `open`'s result and latency untouched.
+//
+// The hang arm needs the race + `{ timeout }` for the reason stated above the
+// probe tests: node scores a timed-out test `cancelled`, leaving `fail` at 0, so a
+// regression here would read as clean to a gate that greps the fail count.
+test("open reuse probe: a HANGING / REJECTING / THROWING reap cannot delay or fail open",
+     { timeout: 2000 }, async (t) => {
+  const realGet = chrome.tabs.get;
+  const realRemove = chrome.tabs.remove;
+  const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  t.after(() => {
+    chrome.tabs.get = realGet;
+    chrome.tabs.remove = realRemove;
+    globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
+  });
+  globalThis.BROWSER_BRIDGE_LOOP_TIMING = { ...(realTiming || {}), reuseTabMs: 20 };
+  chrome.tabs.get = () => new Promise(() => {});   // force the timeout arm
+
+  const openOrDie = (why) =>
+    openWithin(OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" }), why);
+
+  // (a) HANG. The one that would catch an `await` being added to the reap.
+  resetCalls();
+  let removeCalls = 0;
+  chrome.tabs.remove = () => { removeCalls += 1; return new Promise(() => {}); };
+  let out = await openOrDie(
+    "open did not settle within 1s: the reap is being AWAITED, so a hung "
+    + "chrome.tabs.remove now wedges the op it was added to clean up after");
+  assert.equal(out.tabId, FRESH_TAB_ID, "a hung reap must not change the result");
+  assert.equal(removeCalls, 1, "…and the reap must still have been ATTEMPTED");
+
+  // (b) REJECT — the ordinary case when the orphan really had gone after all.
+  resetCalls();
+  chrome.tabs.remove = async (id) => {
+    state.calls.tabsRemove.push(id);
+    throw new Error("No tab with id: 5.");
+  };
+  out = await openOrDie("open did not settle within 1s on a REJECTING reap");
+  assert.equal(out.tabId, FRESH_TAB_ID, "a rejected reap must not fail the op");
+  assert.deepEqual(state.calls.tabsRemove, [TAB_ID]);
+
+  // (c) SYNCHRONOUS throw — an older/stubbed chrome.* surface. This is the arm
+  // that makes the `try` around the reap non-vacuous; without it, deleting that
+  // try/catch passes the whole suite.
+  resetCalls();
+  chrome.tabs.remove = (id) => {
+    state.calls.tabsRemove.push(id);
+    throw new Error("chrome.tabs.remove is not a function");
+  };
+  out = await openOrDie("open did not settle within 1s on a SYNC-THROWING reap");
+  assert.equal(out.tabId, FRESH_TAB_ID, "a synchronously throwing reap must not fail the op");
+  assert.deepEqual(state.calls.tabsRemove, [TAB_ID]);
 });
 
 // --------------------------------------------------------------------------- //

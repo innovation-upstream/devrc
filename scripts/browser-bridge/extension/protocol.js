@@ -1803,6 +1803,18 @@ export const FAST_CAPTURE_BUDGET_MS = 1500;
 // is no abort primitive for `chrome.tabs.get`, so the abandoned call still settles
 // in the background — harmlessly, since its result is no longer read.
 //
+// ⚠ THAT COST IS NOW REAPED, AND THE PARAGRAPH ABOVE IS KEPT VERBATIM ON PURPOSE
+// — it is the derivation of the constant, and rewriting it would erase why 2000
+// was chosen. What changed is only the LAST step: `open` now closes the orphaned
+// tab itself, on the timeout arm only, after the replacement exists,
+// fire-and-forget (never awaited — awaiting `chrome.tabs.remove` would put a NEW
+// unbounded chrome.* await on the success path, regenerating this very class).
+// So read the trade as "a rare orphaned tab, best-effort reclaimed" rather than
+// "a rare orphaned tab, permanent". It does NOT become free: a browser-wide stall
+// defeats the reap too, and the OTHER orphan — a hung `chrome.tabs.create`, whose
+// op is killed at EXEC_OP_BUDGET_MS while the abandoned create still settles — is
+// still unreclaimed and deliberately out of scope.
+//
 // ⚠ LOOP_STALL_MS's worst-legitimate-iteration sum was CHECKED and does NOT move.
 // That comment warns "ADDING A NEW BOUNDED AWAIT TO THE LOOP BODY EATS INTO IT",
 // which is about the LOOP BODY's own awaits. This bound sits INSIDE execute(),

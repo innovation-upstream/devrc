@@ -1328,7 +1328,14 @@ Two changes close it:
       ⚠ **Cost:** falling through on a merely *slow* `tabs.get` opens a second tab
       while the first is still live and unowned, i.e. the exact tab leak the reuse
       path exists to prevent. A rare orphaned tab is traded for a
-      guaranteed-terminating op.
+      guaranteed-terminating op — **and that orphan is now reaped**: `open` closes
+      it itself, on the timeout arm only, *after* the replacement exists, and
+      fire-and-forget (awaiting `chrome.tabs.remove` would add a new unbounded
+      `chrome.*` await to the success path — the very class this bound exists to
+      remove). Best-effort, not a guarantee: the browser-wide stall that hung
+      `tabs.get` can hang `tabs.remove` too, and a *different* orphan — one from a
+      hung `chrome.tabs.create`, whose op is killed at `EXEC_OP_BUDGET_MS` while
+      the abandoned create still settles — is still unreclaimed by design.
       ⚠ **Evidence, honestly:** unlike (1), there is **no live measurement of a
       hung `chrome.tabs.get`** — this is the same mechanism reasoned about from
       the code (the await is unbounded; the catch is structurally blind to a
@@ -1933,7 +1940,10 @@ per-session (multi-step **workflow**) isolation did not.
   tabId as `reuseTabId`; the extension reuses it) instead of creating a second
   real tab — so a double `open` does not orphan the first tab **unless the reuse
   probe exceeds `REUSE_TAB_BUDGET_MS`**, in which case it falls through to a fresh
-  tab and the first one IS orphaned with nothing to reclaim it. If the owned
+  tab and the first one is orphaned — and then **reaped**: the extension closes
+  it, best-effort and fire-and-forget, once the replacement exists. Reaping is
+  deliberately restricted to the *timeout* arm; when the probe REJECTS, the tab is
+  known absent and a `remove` would only risk a recycled tabId. If the owned
   tab is **gone**, `open` transparently creates a fresh one.
 - **Self-heal on a vanished owned tab.** If the user manually closes an owned
   background tab, the next tab-scoped op dispatches the stale tabId and the

@@ -2163,8 +2163,23 @@ class Registry:
             # is gone (owned_tab_gone). 🔴 NO LONGER UNCONDITIONAL: since the
             # extension bounds that probe (REUSE_TAB_BUDGET_MS), a probe that
             # exceeds the budget falls through to a FRESH tab and the ownership
-            # record below is overwritten, deterministically ORPHANING the live
-            # first tab. Nothing reclaims it; only a human closes it.
+            # record below is overwritten, orphaning the live first tab.
+            #
+            # ⚠ THIS COMMENT USED TO END "Nothing reclaims it; only a human
+            # closes it." THAT IS NO LONGER TRUE and the correction is the point:
+            # the extension now REAPS that tab — on the timeout arm only, after
+            # the replacement exists, fire-and-forget (see `open` in
+            # service_worker.js). What survives is a WEAKER residual, stated so
+            # nobody re-derives the stronger claim from this block:
+            #   * the reap is best-effort. A browser-wide stall that hung
+            #     `tabs.get` can hang `tabs.remove` too, and nothing waits.
+            #   * a DIFFERENT orphan is still unreclaimed: if `chrome.tabs.create`
+            #     itself hangs, the op is killed at EXEC_OP_BUDGET_MS while the
+            #     abandoned create still settles, producing a tab the extension
+            #     never sees. Nothing here or there can close that one.
+            # Either way the SERVER's behaviour is unchanged — it overwrites the
+            # ownership record exactly as before; the reclaim is entirely the
+            # extension's, so nothing below depends on it.
             reuse_tab_id = None
             if op == "open" and session_id is not None and tab is None:
                 reuse_tab_id = self._owned_tab_locked(inst.key, session_id,

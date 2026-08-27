@@ -331,7 +331,17 @@ test("open's reuse-probe bound is ordered against the work it wraps (the op-ceil
   // measured, `REUSE_TAB_BUDGET_MS = 100` passed the entire 507-test suite. That is
   // the wrong direction to be unguarded, because the bound's whole disclosed cost is
   // a LOW-side failure — a merely slow probe falls through to a fresh tab and
-  // ORPHANS the live one, with nothing to reclaim it.
+  // ORPHANS the live one.
+  //
+  // ⚠ `open` now REAPS that orphan (service_worker.js), so an earlier wording here
+  // — "with nothing to reclaim it" — no longer holds. THE FLOOR IS NOT WEAKENED BY
+  // THAT, and the reason is worth stating so nobody lowers it on the strength of
+  // the reap: the reap is best-effort and fire-and-forget, so it converts a
+  // guaranteed leak into a probable reclaim, not into a no-op. Every low-side
+  // fall-through still costs a real tab close plus a real tab create — visible
+  // churn in the operator's window — and under the browser-wide stall that would
+  // cause a slow probe in the first place, the reap is exactly the thing least
+  // likely to land.
   //
   // ⚠️ BE HONEST ABOUT WHAT THIS FLOOR IS: there is NO measurement of a healthy
   // `chrome.tabs.get` anywhere in this repo, so unlike #797's `> 1365` (anchored to
