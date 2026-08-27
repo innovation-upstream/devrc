@@ -10,32 +10,32 @@ allowed-tools: Bash, Read, Grep, Glob, Agent
 Case histories and the measurements behind the ladder rules:
 `~/.claude/skills/audit-pr/reference/round-ladder-evidence.md`.
 
-Target: `$ARGUMENTS`. Resolve it:
+Target: `$ARGUMENTS`:
 - A number → that GitHub PR (`gh pr diff <n>`, `gh pr view <n>`).
 - `current` / empty → the current branch's diff vs its base/trunk.
-- Multiple numbers → audit each; if several, dispatch one subagent per PR **with `isolation: "worktree"`** so they don't collide.
+- Several numbers → audit each, one subagent per PR **with `isolation: "worktree"`** so they don't collide.
 
 ## What to do
 
 Dispatch a subagent (read-only — it must NOT modify files or merge) to audit the change against this checklist. Have it read the diff and the code it touches, not just the PR description.
 
-**Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, anything security/auth/path-gating. These reliably hide deploy-blocking bugs (shutdown data-loss, trash-path overwrite, an unauthenticated arbitrary-path scan and a git `core.fsmonitor` RCE all surfaced this way). A branch with a **private Go module dep** may need `GOPRIVATE` — a sum-db `500` there is env, not a defect.
+**Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, anything security/auth/path-gating. These hide deploy-blocking bugs (shutdown data-loss, trash-path overwrite, an unauthenticated arbitrary-path scan and a git `core.fsmonitor` RCE all surfaced this way). A branch with a **private Go module dep** may need `GOPRIVATE` — a sum-db `500` there is env, not a defect.
 
 **Brief the auditor on the environment, or it will report false findings.** A fresh worktree is not
 a working checkout, and an auditor hitting this cold reports it as a defect in the PR. Tell it,
-whichever apply: **git submodules are unpopulated** in a new worktree (one made 4 test files
-"fail to collect" — pure environment); **monorepo `node_modules`** may need linking per package, not
-just at the root; **whether the base branch is already red** on typecheck/lint/tests and *at which
-file*, so a baseline error is not attributed to the PR; and that **zsh does not word-split unquoted
-parameters**, so `eslint $FILES` silently checks **zero** files and prints a confident PASS. Also tell it to mutate code only in a `cp -a` copy, and
-to verify your worktree clean at the end.
+whichever apply: **submodules are unpopulated** in a new worktree (one made 4 test files "fail to
+collect" — pure environment); **monorepo `node_modules`** may need linking per package, not just at
+the root; **whether the base branch is already red** and *at which file*, so a baseline error is not
+blamed on the PR; and that **zsh does not word-split unquoted parameters**, so `eslint $FILES`
+checks **zero** files and prints a confident PASS. Have it mutate only in a `cp -a` copy and verify
+your worktree clean at the end.
 
 **Audit for:**
 1. **Risks** — what could break in production.
 2. **Regressions** — existing behaviour this silently alters or removes.
 3. **Assumptions** — unstated preconditions the code relies on that may not hold.
 4. **Gaps** — error handling, edge cases, tests, migrations, rollback.
-5. **Bugs** — concrete logic/correctness defects, with file:line.
+5. **Bugs** — logic/correctness defects, with file:line.
 6. **Issues** — code quality, maintainability, conventions.
 7. **Behaviour changes** — observable changes in output/API/UX, intended or not. If the PR claims to revert prior behaviour, confirm it restores the pre-change state.
 8. **Leaks** — secrets, PII, resource/handle/memory leaks, over-broad permissions.
@@ -45,8 +45,7 @@ to verify your worktree clean at the end.
 
 **A fix round frequently introduces the next finding** — one feature took **five rounds**, each
 caused by the previous fix, none caught by the mechanical gate. So once the findings are fixed,
-dispatch a **delta re-audit**: diff the fix commits against the **previously-audited tip**, not the
-whole PR again.
+dispatch a **delta re-audit** against the **previously-audited tip**, not the whole PR again.
 
 Ask the re-auditor to:
 - state **per prior finding**: actually fixed / partially / not / **made worse**;
@@ -54,8 +53,8 @@ Ask the re-auditor to:
   strict, the new branch that's unreachable, the narrowed type check that now rejects a legitimate
   case);
 - **label every finding `behaviour` or `guard`, and separate shipped behaviour from scaffolding.**
-  Tests an earlier round wrote are in its diff *by construction*; report on them only where the
-  defect lets a real regression through;
+  Tests an earlier round wrote are in its diff *by construction*; report them only where the defect
+  lets a real regression through;
 - treat "the author says it's fixed" as a claim to check against the diff.
 
 **Carry the ledger in every round's summary**: `round N · payload lines changed THIS round: X (since
@@ -87,7 +86,7 @@ both. Keep going while rounds keep finding things — `claude/RULES.md` still sa
 several — and stop the moment one does not.
 
 **When a round's fix is mostly renumbering your own prose, fix the FORM, not the number** — number
-the list and tell the reader to count it; a total kept in parallel with what it counts will drift.
+the list and tell the reader to count it; a total kept beside what it counts drifts.
 
 **Say the stop rule to the re-auditor explicitly** ("a clean round is the stop condition; do not
 invent findings") — otherwise late rounds manufacture nits.
@@ -102,8 +101,8 @@ correct*.
 
 A fix round writes new guards and the next delta round diffs them, so **the ladder manufactures its
 own next round's findings** and the stop rule above, keyed to findings, cannot fire. Measured on
-`civitai/cli` #498: **ten rounds, 5 h 32 m, 77% of the session's output tokens; rounds 4–10 changed
-1,051 test lines and ZERO payload lines.** No round was ever clean.
+`civitai/cli` #498: **ten rounds, 5 h 32 m, 77% of the session's output; rounds 4–10 changed 1,051
+test lines and ZERO payload lines.** No round was ever clean.
 
 So gate on what each round CHANGES, not on what it finds. After a round's fixes land, count the
 payload lines **that round** changed:
@@ -129,11 +128,13 @@ along; `--remerge-diff` makes payload hand-written into a **merge-conflict resol
 **not** reach for `--no-merges --first-parent`: it looks equivalent and reads **0** for a fix
 committed on a side branch and merged `--no-ff` — the shape agent worktrees produce.
 
-🔴 **`<base>` is the CURRENT tip you would merge into** (`origin/main`), never the fork point: one
-commit stale and the whole bring-in is re-reported as this round's payload (201 where the truth was
-1, measured). Re-anchor on the new sha after a mid-round rebase. And **a failed command is not
-zero** — a missing ref exits 128 with empty output, and `--remerge-diff` under-counts and still
-exits 0 when the object store is unwritable. Confirm it printed something before believing a zero.
+🔴 **`<base>` is the CURRENT tip you would merge into — `git fetch` it first.** A local
+`origin/main` is exactly as current as your last fetch, and a stale one re-reports upstream work as
+this round's payload: at the fork point the entire bring-in (201 where the truth was 1), one commit
+behind, its tail. Re-anchor on the new sha after a mid-round rebase. And **a failed command is not
+zero — require rc 0 AND silent stderr.** A missing ref or a git without `--remerge-diff` exits 128
+with empty output; an unwritable object store is worse, because `--remerge-diff` then under-counts,
+**exits 0 and prints a plausible number**, saying so only on stderr.
 
 **Two consecutive rounds whose fixes changed zero payload lines ⇒ the ladder has left the PR.
 Stop.** File the remaining scaffolding findings as one follow-up task naming the file, closed when
@@ -169,6 +170,6 @@ body — a reviewer may already have read (and believed) the wrong version.
 ## Output
 
 Findings by severity (🔴 deploy-blocking / 🟡 should-fix / 🟢 nit), each with file:line, a
-`behaviour`/`guard` label and a one-line "why it matters". Then the round ledger, then a clear
-**verdict**: safe to merge / merge after fixing 🔴 / needs rework — advisory for the human, never
-the ladder's stop signal. Flag uncertainty. Do not merge — report only.
+`behaviour`/`guard` label and one line on why it matters. Then the round ledger, then a **verdict**:
+safe to merge / merge after fixing 🔴 / needs rework — advisory for the human, never the ladder's
+stop signal. Flag uncertainty. Do not merge — report only.

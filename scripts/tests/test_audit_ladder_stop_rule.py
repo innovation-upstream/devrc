@@ -161,7 +161,13 @@ rule rather than reformatting a paragraph.
    What remains unenforceable: whether a given round's files were named
    CORRECTLY. Nothing mechanical can answer that, which is why the residual
    error is aimed at the safe side (ambiguous => the gate does not fire).
-7. **The THRESHOLD is pinned, not justified.** "Two consecutive rounds" comes
+7. **The evidence file is pinned ROW BY ROW, so a row nobody pinned is
+   unguarded.** Six of its numbers and both of its lessons are pinned; shape D
+   (the positive control) and shape B's row are not, and neither is any prose
+   outside those sentences. A row added later is unguarded until someone pins
+   it, and nothing here notices. The pattern to follow: if the body delegates a
+   number to that file, the row carrying it gets a constant in the same commit.
+8. **The THRESHOLD is pinned, not justified.** "Two consecutive rounds" comes
    from one measured ladder (#498, n=1), where the plateau began at round 4 and
    ran to 10. One round is knowingly too tight: a round may legitimately fix only
    a guard. Whether two is right is a judgement, and this module cannot tell a
@@ -279,6 +285,15 @@ recorded as SURVIVED off an 11-passed run.
   V3   shape-C row rewritten to erase the
        argument for the current command ....... 1 failed
   V4   PR-population row rewritten to 2 of 40 . 1 failed
+
+  added after the sixth audit -- the evidence file was pinned ROW BY ROW, so the
+  rows and lessons nobody had pinned were still rewritable:
+  U1   shape-A row blanked ................... 1 failed
+  U1b  shape-A row INVERTED so the table
+       argues FOR the flag the body
+       prohibits .............................. 1 failed  <- the sharp one
+  U6   shape-A lesson negated ................ 1 failed
+  U7   shape-B/C lesson negated ............... 1 failed
 
   the round-1 set, re-run against current strings:
   X3   gate command -> `echo 0` ............... 1 failed
@@ -482,21 +497,31 @@ SKILL_WRONG_FLAGS_TRAP = (
 # hours later because PRs kept merging. The dated measurement, both selection
 # commands and the classifier live in the reference file; what is pinned here is
 # the part that does not decay.
-# 🔴 `<base>` and the failed-command rule. Both are new because both were found
-# by measurement, not reasoning: a base ref ONE COMMIT stale re-reports the whole
-# upstream bring-in (201 where the truth was 1), and every way the command can
-# fail -- a missing ref (rc 128, empty stdout), an unwritable object store
-# (`--remerge-diff` under-counts and still exits 0) -- produces a number that
-# sums to ZERO, which is indistinguishable from the gate's own stop verdict.
+# 🔴 `<base>` and the failed-command rule. Both were found by measurement, not
+# reasoning, and both were WIDENED by the next round's measurement:
+#   - `origin/main` is only as current as the last fetch, so defining <base> as
+#     that ref without saying to fetch it leaves the same defect one level down.
+#     A base at the FORK POINT re-reports the whole bring-in (201 vs a truth of
+#     1); one commit stale re-reports its tail -- "the whole bring-in" was a
+#     property of the first fixture, not of staleness.
+#   - "confirm it printed something" is NOT sufficient: a missing ref and a git
+#     without `--remerge-diff` do give rc 128 and empty stdout, but an unwritable
+#     object store makes `--remerge-diff` under-count, exit 0 and print a
+#     PLAUSIBLE number, announcing the failure only on stderr. Hence rc 0 AND
+#     silent stderr.
 SKILL_BASE_DEFINITION = (
-    "🔴 **`<base>` is the CURRENT tip you would merge into** (`origin/main`), "
-    "never the fork point: one commit stale and the whole bring-in is "
-    "re-reported as this round's payload (201 where the truth was 1, measured)."
+    "🔴 **`<base>` is the CURRENT tip you would merge into — `git fetch` it "
+    "first.** A local `origin/main` is exactly as current as your last fetch, "
+    "and a stale one re-reports upstream work as this round's payload: at the "
+    "fork point the entire bring-in (201 where the truth was 1), one commit "
+    "behind, its tail."
 )
 SKILL_FAILED_IS_NOT_ZERO = (
-    "And **a failed command is not zero** — a missing ref exits 128 with empty "
-    "output, and `--remerge-diff` under-counts and still exits 0 when the object "
-    "store is unwritable. Confirm it printed something before believing a zero."
+    "And **a failed command is not zero — require rc 0 AND silent stderr.** A "
+    "missing ref or a git without `--remerge-diff` exits 128 with empty output; "
+    "an unwritable object store is worse, because `--remerge-diff` then "
+    "under-counts, **exits 0 and prints a plausible number**, saying so only on "
+    "stderr."
 )
 SKILL_PAYLOAD_MEASUREMENT = (
     "**most of this repo's merged PRs ship no source file at all** (measured; "
@@ -550,11 +575,13 @@ EVIDENCE_CHURN_ROW = (
 # 🔴 The row the corrections were ABOUT, pinned too. Without it the numbers can
 # drift back while the correction sentence below still narrates having fixed
 # them -- measured: rewriting this row to 9999s left the suite green.
-# 🔴 The two rows that ARE the argument for the current command. Measured: with
-# only the #498 pins in place, rewriting shape C's `0` to `51` -- which deletes
-# the entire reason the command changed -- left the suite green, as did blanking
-# the four-shape table's first row and rewriting the PR-population count. The
-# body delegates both numbers to this file, so the file has to be pinned too.
+# 🔴 The rows that ARE the argument for the current command, and the sentences
+# that read them. The body delegates these numbers to this file, so the file has
+# to be pinned too -- measured: with only the #498 pins in place, rewriting shape
+# C's `0` to `51` (which deletes the entire reason the command changed), blanking
+# shape A's row, INVERTING shape A's row so the table argues FOR the flag the
+# body prohibits, rewriting the PR-population count, and negating either lesson
+# bullet were ALL green. The first fix pinned two of those; the rest are here.
 EVIDENCE_SHAPE_C_ROW = (
     "| C. the round's fix is 50 payload lines on a side branch, merged "
     "`--no-ff` | ~50 | 51 | **0** | 51 |"
@@ -563,6 +590,27 @@ EVIDENCE_PR_POPULATION_ROW = (
     "| `gh pr list --state merged --limit 40` (sorts by CREATED) | 24 | 16 | 7 "
     "| 1 |"
 )
+EVIDENCE_SHAPE_A_ROW = (
+    "| A. clean `merge main` brings 200 upstream lines; the round's own fix is "
+    "1 test line | 1 line, and it is a TEST ⇒ 0 payload | **201** | 1 | 1 |"
+)
+# The two sentences that tell a reader what the table MEANS. A table can be
+# correct and useless if the lesson beside it is negated -- both of these were
+# rewritable to the opposite claim with every row pin still green.
+EVIDENCE_LESSON_A = (
+    "**A** is why the range needs `--not <base>` — a two-dot diff attributes the "
+    "whole upstream bring-in to this round, the gate never fires, and the ladder "
+    "runs forever."
+)
+EVIDENCE_LESSON_BC = (
+    "**B and C** are why `--no-merges --first-parent` is NOT the fix, though it "
+    "looks like one and shipped as one for a round: it reads **0** for a fix "
+    "committed on a side branch and merged `--no-ff`"
+)
+# 🔴 Z8's own constant: the corrected #498 baseline row. Pinned because rewriting
+# it to 9999s was green while the correction sentence below still narrated having
+# fixed it. (This comment sat orphaned from its constant for one round, which is
+# the defect it exists to record -- do not insert new constants between them.)
 EVIDENCE_BASELINE_ROW = (
     "| feature + rounds 1–3 (`bce0c0c`…`d2ec92d`) | 961 | 110 | 222 |"
 )
@@ -828,6 +876,11 @@ def test_the_attribution_measurement_survives_where_the_skill_routes_to_it():
         EVIDENCE_MD, EVIDENCE_SHAPE_C_ROW, "the shape-C range measurement"
     )
     _assert_pinned_once(
+        EVIDENCE_MD, EVIDENCE_SHAPE_A_ROW, "the shape-A range measurement"
+    )
+    _assert_pinned_once(EVIDENCE_MD, EVIDENCE_LESSON_A, "the shape-A lesson")
+    _assert_pinned_once(EVIDENCE_MD, EVIDENCE_LESSON_BC, "the shape-B/C lesson")
+    _assert_pinned_once(
         EVIDENCE_MD, EVIDENCE_PR_POPULATION_ROW, "the PR-population measurement"
     )
     _assert_pinned_once(
@@ -851,10 +904,12 @@ def test_the_gate_pins_its_MECHANISM_not_only_its_decision():
     CUMULATIVE range, which a per-round condition cannot consume -- on #498 it
     prints the same non-zero number for rounds 4 through 10, and the second
     shipped `--no-merges --first-parent`, which reads ZERO for a fix merged from
-    a side branch. SEVEN pins, because that many parts of the mechanism have
-    each been found wrong on their own: WHICH RANGE, WHAT `<base>` IS, WHAT
-    COUNTS AS PAYLOAD, HOW THE LINES ARE CLASSIFIED, WHICH FLAGS ARE THE TRAP,
-    the measurement under it, and the DECISION over the result.
+    a side branch. One pin per constant below -- count them rather than trusting
+    a total here, which is this PR's own rule and was violated twice: the number
+    said THREE when the test made seven, was corrected to SEVEN in the same
+    commit that made it nine, and each part it names -- the range, what `<base>`
+    is, what counts as payload, how lines are classified, which flags are the
+    trap, the measurement under it -- has been found wrong on its own.
     """
     _assert_pinned_once(SKILL_MD, SKILL_GATE_COMMAND, "the gate's command")
     _assert_pinned_once(SKILL_MD, SKILL_GATE_PER_ROUND, "the per-round rule")
