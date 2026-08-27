@@ -43,12 +43,14 @@ opposite verdicts.
 
 🔴 AND THE PATH-EXCLUSION SECTION, WHICH EXISTS BECAUSE OF A MEASUREMENT
 ------------------------------------------------------------------------
-A full scan of this machine reported 870 worktrees / 128 repos -> 250 dead. 131
-of those 250 were `.claude/worktrees/agent-*` trees belonging to OTHER LIVE
-Claude sessions: `dead` is a correct verdict about the BRANCH and a catastrophic
-instruction about the DIRECTORY. `--exclude-path` / `--skip-agent-worktrees`
-spare a row without hiding it, and the tests for them carry the same shape as the
-ones above — a positive control that BOTH fixtures are removable unfiltered, a
+One scan of this machine, dated, with the exact scope stated — see the section
+comment above `two_dead` for the numbers and the command. Most of the `dead`
+rows it found were trees under a `.claude/worktrees/` directory belonging to
+OTHER LIVE Claude sessions: `dead` is a correct verdict about the BRANCH and a
+catastrophic instruction about the DIRECTORY. Those rows are therefore spared BY
+DEFAULT (`--include-agent-worktrees` opts back in), and `--exclude-path` spares
+further rows without hiding them. The tests carry the same shape as the ones
+above — a positive control that BOTH fixtures are removable unfiltered, a
 both-halves test (the excluded one survives on disk AND the other is really
 gone), and a mutation control that neuters `path_excluded` and watches the
 excluded row become removable again.
@@ -1070,18 +1072,32 @@ def test_default_branch_resolution_records_how_it_was_resolved(tmp_path):
 
 # ── the instrument's own controls ─────────────────────────────────────────────
 
-# ── 🔴 --exclude-path / --skip-agent-worktrees ────────────────────────────────
+# ── 🔴 --exclude-path / the DEFAULT agent-worktree exclusion ──────────────────
 #
-# WHY THIS SECTION EXISTS, measured rather than imagined. A full scan of this
-# machine reported 870 worktrees / 128 repos -> 250 dead, 40 orphan, 528 live,
-# 52 cannot-tell. 131 of the 250 `dead` rows were `.claude/worktrees/agent-*`
-# trees belonging to OTHER LIVE Claude sessions: `dead` is a correct verdict
+# WHY THIS SECTION EXISTS, measured rather than imagined. ONE scan, dated, with
+# its scope named — these are numbers from that run, not a standing fact about
+# the box, and the command is here so anyone can re-derive them:
+#
+#     2026-08-27  worktree-prune --scan-root /home/zach/workspace --scan-depth 2
+#     860 worktrees / 129 repos -> 236 dead, 44 orphan, 528 live, 52 cannot-tell
+#     137 of the 236 dead rows are under a `.claude/worktrees/` directory, so the
+#     default leaves 99 removable and --include-agent-worktrees leaves 236.
+#
+# 🔴 The numbers this comment used to carry — "870 worktrees / 128 repos -> 250
+# dead … 131 agent … safe set of 106" — are RETIRED, not restated: 250 - 131 is
+# 119, not 106, so at most two of the three could ever have been right, and the
+# run that produced them cannot be re-derived. Do not resurrect them.
+#
+# Those 137 belong to OTHER LIVE Claude sessions: `dead` is a correct verdict
 # about the BRANCH and a catastrophic instruction about the DIRECTORY. Excluding
-# whole repos to dodge them collapsed the safe set from 106 rows to 24, because
-# a repo like civit/civitai holds 59 ordinary dead rows AND agent worktrees.
+# whole repos to dodge them also drops the ordinary dead rows those repos hold,
+# because a repo like civit/civitai carries dozens of each.
 #
-# So the filter has to be per-ROW, and it has to be visible: an excluded row that
-# vanished from the report would read as "we covered everything".
+# So the filter has to be per-ROW; it has to be visible (an excluded row that
+# vanished from the report would read as "we covered everything"); and — because
+# it is the majority case, not the exception — it has to be the DEFAULT. The
+# dangerous run is the one an operator has to type `--include-agent-worktrees`
+# for.
 
 AGENT_GLOB = "*/.claude/worktrees/*"
 
@@ -1121,6 +1137,33 @@ def two_dead(tmp_path: Path):
     return repo, agent, plain, gh_stub(tmp_path, [], name="gh-excl")
 
 
+@pytest.fixture()
+def no_agent_worktrees(tmp_path: Path):
+    """One repo, ONE ordinary dead worktree, and NO `.claude/worktrees` anywhere.
+
+    🔴 The shape that broke round 2: the default agent glob matches zero rows
+    here, which is the ordinary state of most repos on this box. Returns
+    (repo, plain_worktree, gh_cmd).
+    """
+    repo = new_repo(tmp_path)
+    commit_on_branch(repo, "feat/plain", "plain.txt", "plain\n", "plain work")
+    git(repo, "merge", "-q", "--no-ff", "-m", "merge feat/plain", "feat/plain")
+    publish(repo)
+    plain = add_worktree(repo, tmp_path / "wts" / "plain", "feat/plain")
+    return repo, plain, gh_stub(tmp_path, [], name="gh-noagent")
+
+
+def test_the_no_agent_fixture_really_holds_no_claude_worktrees(no_agent_worktrees):
+    """Positive control on the fixture the four tests below rest on: if it DID
+    hold an agent worktree, "the default glob matched zero" would be false and
+    each of them would be passing for the wrong reason."""
+    repo, plain, gh = no_agent_worktrees
+    rows = _rows_by_path(repo, gh, [AGENT_GLOB])
+    assert [r["excluded_by"] for r in rows.values()] == [None] * len(rows)
+    assert rows[str(plain)]["verdict"] == "dead"
+    assert rows[str(plain)]["removable"] is True
+
+
 def _rows_by_path(repo: Path, gh: str, globs: "list[str] | None" = None) -> dict:
     return {r["path"]: r
             for r in wp.scan_repo(repo, gh, True, 2000, jobs=1, exclude_globs=globs)}
@@ -1143,13 +1186,16 @@ def test_without_any_filter_both_dead_worktrees_are_removable(two_dead):
 # ── the headline: one survives, the other is really gone ──────────────────────
 
 @pytest.mark.parametrize("flag", [
-    ["--skip-agent-worktrees"],
-    ["--exclude-path", AGENT_GLOB],
+    [],                                  # 🔴 the DEFAULT spares it — no flag at all
+    ["--exclude-path", AGENT_GLOB],      # …and typing the same glob agrees
 ])
 def test_execute_removes_the_plain_dead_tree_and_spares_the_excluded_one(two_dead, flag, capsys):
     """BOTH halves, in ONE run. The excluded worktree must still be on disk and
     the other must be GONE — a filter that spared everything would pass the first
-    assertion on its own."""
+    assertion on its own.
+
+    The empty parametrisation is the one that matters most: it says the sparing
+    happens with NO flag typed."""
     repo, agent, plain, gh = two_dead
     rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
                   *flag, "--execute", "--confirm", "1"])
@@ -1181,12 +1227,13 @@ def test_the_excluded_row_is_still_classified_dead_and_marked(two_dead):
 # ── --confirm N counts REMOVABLE rows, not dead rows ──────────────────────────
 
 def test_confirm_counts_only_the_rows_that_will_actually_be_removed(two_dead, capsys):
-    """N = non-excluded dead count SUCCEEDS."""
+    """N = non-excluded dead count SUCCEEDS — under the DEFAULT, no flag."""
     repo, agent, plain, gh = two_dead
     rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
-                  "--skip-agent-worktrees", "--execute", "--confirm", "1"])
+                  "--execute", "--confirm", "1"])
     assert rc == wp.RC_OK, capsys.readouterr().err
     assert not plain.exists()
+    assert agent.is_dir()
 
 
 def test_confirm_with_the_total_dead_count_is_refused_when_one_is_excluded(two_dead, capsys):
@@ -1194,23 +1241,31 @@ def test_confirm_with_the_total_dead_count_is_refused_when_one_is_excluded(two_d
 
     This is the half that pins the meaning of --confirm: if excluded rows still
     counted, `--confirm 2` would be the accepted value and the operator's number
-    would silently describe rows the run was never going to touch."""
+    would silently describe rows the run was never going to touch.
+
+    🔴 This is also the `--confirm N` half of the DEFAULT INVERSION: the number
+    an operator reads off an unfiltered mental model (2, the dead count) is now
+    the REFUSED one, with no flag typed."""
     repo, agent, plain, gh = two_dead
     rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
-                  "--skip-agent-worktrees", "--execute", "--confirm", "2"])
+                  "--execute", "--confirm", "2"])
     err = capsys.readouterr().err
     assert rc == wp.RC_EXECUTE_REFUSED, err
     assert "does not match the 1 row(s)" in err, err
     assert agent.is_dir() and plain.is_dir(), "a refused run removed something"
 
 
-def test_without_the_filter_the_same_scope_needs_confirm_two(two_dead, capsys):
-    """The control on the test above: 2 is the RIGHT number when nothing is
-    excluded, so the refusal there is caused by the exclusion and not by the
-    fixture happening to hold one dead row."""
+def test_opting_back_in_to_agent_worktrees_needs_confirm_two(two_dead, capsys):
+    """The control on the test above: 2 is the RIGHT number once the operator
+    TYPES --include-agent-worktrees, so the refusal there is caused by the
+    default exclusion and not by the fixture happening to hold one dead row.
+
+    🔴 And it is the only test that proves the opt-in flag does anything at all:
+    without it, a `--include-agent-worktrees` wired to nothing would leave every
+    other test in this file green."""
     repo, agent, plain, gh = two_dead
     rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
-                  "--execute", "--confirm", "2"])
+                  "--include-agent-worktrees", "--execute", "--confirm", "2"])
     assert rc == wp.RC_OK, capsys.readouterr().err
     assert not agent.exists() and not plain.exists()
 
@@ -1219,18 +1274,57 @@ def test_without_the_filter_the_same_scope_needs_confirm_two(two_dead, capsys):
 
 def test_excluded_rows_still_appear_in_the_text_report(two_dead, capsys):
     repo, agent, plain, gh = two_dead
-    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
-             "--skip-agent-worktrees", "--verbose"])
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1", "--verbose"])
     out = capsys.readouterr().out
     assert "excluded" in out
     assert "1 row(s) matched at least one glob" in out, out
     assert "1 of them are `dead`" in out, out
-    assert f"--exclude-path {AGENT_GLOB!r}  ->  matched 1 row(s), 1 of them dead" in out, out
+    assert (f"(default; --include-agent-worktrees turns it off) {AGENT_GLOB!r}  ->  "
+            f"matched 1 row(s), 1 of them dead") in out, out
     assert str(agent) in out, "the excluded worktree vanished from the report"
     assert "[dead (excluded)]" in out, out
     # …and the summary still counts it as dead, so the operator's totals do not
     # silently shrink when they add a filter.
     assert "2 dead" in out, out
+
+
+def test_the_default_report_says_dead_rows_were_spared(two_dead, capsys):
+    """🔴 THE DEFAULT-INVERSION READING HAZARD, pinned.
+
+    With the exclusion on by default the removable count is routinely far below
+    the dead count, and an operator who reads "1 row(s) would be removed" as
+    "this run covered everything" is exactly the silent-truncation failure this
+    tool exists not to have. The spared count must sit next to the removable one
+    and say so, WITHOUT --verbose and WITHOUT any flag typed.
+    """
+    repo, agent, plain, gh = two_dead
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1"])
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    i = next(i for i, ln in enumerate(lines) if "would be removed by --execute" in ln)
+    spared = lines[i + 1]
+    assert "1 further `dead` row(s) were SPARED" in spared, out
+    assert "NOT covered by this run" in spared, out
+
+    # NEGATIVE CONTROL: with nothing spared the line must be absent, or it is
+    # printed unconditionally and says nothing.
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+             "--include-agent-worktrees"])
+    assert "were SPARED" not in capsys.readouterr().out
+
+
+def test_the_report_shouts_when_agent_worktrees_are_opted_back_in(two_dead, capsys):
+    """An override invisible in the output is a hardcode wearing a costume."""
+    repo, agent, plain, gh = two_dead
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+             "--include-agent-worktrees"])
+    out = capsys.readouterr().out
+    assert "--include-agent-worktrees IS IN FORCE" in out, out
+    assert "in use RIGHT NOW" in out, out
+
+    # NEGATIVE CONTROL: the default run must NOT shout it.
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1"])
+    assert "IS IN FORCE" not in capsys.readouterr().out
 
 
 def _repo_table_row(out: str, repo) -> "list[str]":
@@ -1251,11 +1345,12 @@ def test_the_per_repo_table_reports_the_excluded_count_in_its_column(two_dead, c
     nothing and widens or drops it.
     """
     repo, agent, plain, gh = two_dead
-    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1", "--skip-agent-worktrees"])
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1"])
     filtered = _repo_table_row(capsys.readouterr().out, repo)
     assert filtered[-1] == "1", filtered
 
-    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1"])
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+             "--include-agent-worktrees"])
     unfiltered = _repo_table_row(capsys.readouterr().out, repo)
     assert unfiltered[-1] == "0", (
         "the column reads the same with and without a filter, so it is not "
@@ -1276,7 +1371,7 @@ def test_excluded_rows_still_appear_in_the_json_report(two_dead, tmp_path, capsy
     repo, agent, plain, gh = two_dead
     out = tmp_path / "excl.json"
     wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
-             "--skip-agent-worktrees", "--format", "json", "--out", str(out)])
+             "--format", "json", "--out", str(out)])
     capsys.readouterr()
     payload = json.loads(out.read_text(encoding="utf-8"))
     by_path = {r["path"]: r for r in payload["rows"]}
@@ -1288,15 +1383,34 @@ def test_excluded_rows_still_appear_in_the_json_report(two_dead, tmp_path, capsy
     assert payload["summary"]["excluded"] == 1
     assert payload["summary"]["excluded_dead"] == 1
     assert payload["summary"]["exclude_globs"] == [
-        {"glob": AGENT_GLOB, "matched": 1, "matched_dead": 1}]
+        {"glob": AGENT_GLOB, "typed": False, "matched": 1, "matched_dead": 1}]
     assert payload["summary"]["exclude_globs_matching_nothing"] == []
+    assert payload["summary"]["exclude_globs_blocking_execute"] == []
+    assert payload["summary"]["agent_worktrees_included"] is False
+    assert payload["summary"]["allow_unmatched_globs"] is False
 
 
-def test_an_unfiltered_run_does_not_shout_about_exclusions(two_dead, capsys):
-    """Negative control on the report line above — it must be caused by an actual
-    exclusion, not printed unconditionally."""
+def test_the_json_marks_a_typed_glob_as_typed_and_the_default_as_not(two_dead, tmp_path, capsys):
+    """🔴 `typed` is what decides refusal eligibility, so a consumer — and the
+    report — must be able to tell an operator filter from the tool's own
+    default. Both values, in one run, so a field hardwired either way fails."""
     repo, agent, plain, gh = two_dead
-    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1"])
+    out = tmp_path / "typed.json"
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+             "--exclude-path", "*/wts/*", "--format", "json", "--out", str(out)])
+    capsys.readouterr()
+    per_glob = json.loads(out.read_text(encoding="utf-8"))["summary"]["exclude_globs"]
+    assert {d["glob"]: d["typed"] for d in per_glob} == {
+        "*/wts/*": True, AGENT_GLOB: False}
+
+
+def test_an_opted_in_run_does_not_shout_about_exclusions(two_dead, capsys):
+    """Negative control on the report lines above — they must be caused by an
+    actual exclusion, not printed unconditionally. `--include-agent-worktrees`
+    is now the only way to get a run with no glob in force at all."""
+    repo, agent, plain, gh = two_dead
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+             "--include-agent-worktrees"])
     out = capsys.readouterr().out
     assert "exclusion filters in force" not in out
     assert "matched at least one glob" not in out
@@ -1350,13 +1464,16 @@ def test_the_glob_star_crosses_slashes():
 def test_a_non_agent_entry_under_claude_worktrees_is_still_matched():
     """🔴 The glob is `worktrees/*`, NOT `worktrees/agent-*`.
 
-    Measured on this box: of 246 `.claude/worktrees/` entries across 14 repos,
-    exactly one had no `agent-` prefix — `…/fast/comfyui/.claude/worktrees/card-ux`,
-    a real registered worktree on `refs/heads/feat/prefopt-card-ux`. Under the
-    narrower glob it was spared only by the dirty check (three untracked
+    Measured on this box 2026-08-27: of the 246 `.claude/worktrees/` entries the
+    scan returned, TWO had no `agent-` prefix —
+    `…/fast/comfyui/.claude/worktrees/card-ux` (a real registered worktree on
+    `refs/heads/feat/prefopt-card-ux`) and
+    `…/promptver/.claude/worktrees/fix-0421-image-edit-auth`. Under the narrower
+    glob the first was spared only by the dirty check (three untracked
     `__pycache__` dirs); one `git clean` plus a squash merge and it would have
-    become a removable row that `--skip-agent-worktrees`' own help text claimed
-    to cover. The DIRECTORY identifies these trees, not the entry's prefix.
+    become a removable row the exclusion's own help text claimed to cover. The
+    count MOVED (1 of 246 a day earlier), which is the argument: the prefix is a
+    convention nobody enforces, the DIRECTORY identifies these trees.
     """
     assert wp.path_excluded("/home/z/fast/comfyui/.claude/worktrees/card-ux",
                             [AGENT_GLOB]) == AGENT_GLOB
@@ -1408,11 +1525,42 @@ def test_a_trailing_slash_does_not_defeat_the_filter():
     """Rows carry `str(Path(...))`, which never ends in `/`, and tab-completion
     appends one to every directory. Unstripped, the glob matched nothing and the
     run was byte-identical to no filter."""
-    assert wp.resolve_exclude_globs(["/home/z/repo/"], False) == ["/home/z/repo"]
-    assert wp.resolve_exclude_globs(["/home/z/repo///"], False) == ["/home/z/repo"]
+    assert wp.normalize_globs(["/home/z/repo/"]) == ["/home/z/repo"]
+    assert wp.normalize_globs(["/home/z/repo///"]) == ["/home/z/repo"]
     # …and the stripped glob really does match, end to end.
-    globs = wp.resolve_exclude_globs(["/home/z/repo/"], False)
+    globs = wp.normalize_globs(["/home/z/repo/"])
     assert wp.path_excluded("/home/z/repo/wt", globs) == "/home/z/repo"
+
+
+@pytest.mark.parametrize("padded", [
+    "/home/z/repo/ ", " /home/z/repo/", "\t/home/z/repo/ \n", "/home/z/repo/  ",
+])
+def test_whitespace_around_a_glob_is_stripped_before_the_slash(padded):
+    """🔴 The two spellings that disagreed. The resolver did `raw.rstrip('/')`
+    then tested `.strip()`; the CLI's empty check did `.strip().rstrip('/')`. So
+    `--exclude-path '/home/z/repo/ '` passed the CLI check (which saw
+    `/home/z/repo`) and reached the matcher still carrying BOTH its trailing
+    slash and its space — a glob that matches nothing, delivered through the two
+    guards written to stop exactly that.
+
+    Whitespace FIRST, then the slash, in ONE function used by both sites.
+    """
+    assert wp.normalize_glob(padded) == "/home/z/repo"
+    assert wp.normalize_globs([padded]) == ["/home/z/repo"]
+    assert wp.path_excluded("/home/z/repo/wt", wp.normalize_globs([padded])) == "/home/z/repo"
+
+
+def test_a_whitespace_padded_glob_is_not_a_usage_error_and_does_not_refuse(two_dead, capsys):
+    """The end-to-end half: the padded glob must behave EXACTLY like the clean
+    one — accepted at the CLI, matching, and not tripping the zero-match
+    refusal. Before the fix it was accepted and then matched nothing."""
+    repo, agent, plain, gh = two_dead
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--exclude-path", f" {plain}/ ", "--execute", "--confirm", "0"])
+    err = capsys.readouterr().err
+    assert rc == wp.RC_OK, err
+    assert "REFUSED" not in err, err
+    assert plain.is_dir() and agent.is_dir()
 
 
 def test_a_glob_on_the_resolved_path_matches_a_symlinked_repo(tmp_path):
@@ -1426,6 +1574,114 @@ def test_a_glob_on_the_resolved_path_matches_a_symlinked_repo(tmp_path):
     via_link = str(link / "wt")
     assert wp.path_excluded(via_link, [str(real)]) == str(real)
     assert wp.path_excluded(via_link, [str(link)]) == str(link)
+
+
+# ── 🔴 A PATH'S SHAPE MUST NOT BE ABLE TO KILL THE SCAN ──────────────────────
+
+@pytest.fixture()
+def symlink_loop(tmp_path: Path) -> str:
+    """A REAL symlink loop: `a -> b -> a`. Returns a path UNDER it."""
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    return str(tmp_path / "a" / "wt")
+
+
+def test_the_symlink_loop_fixture_really_loops(symlink_loop):
+    """🔴 POSITIVE CONTROL on the fixture, and the reason the `except` is wide.
+
+    Measured 2026-08-27 at two interpreter versions on this exact construct:
+    CPython 3.12.14 (this dev shell) raises RuntimeError('Symlink loop from …')
+    from a NON-strict `Path.resolve()`; CPython 3.13.15 does not raise and
+    returns the path unresolved. So on 3.13 this assertion would be vacuous —
+    it says so rather than pretending to pin behaviour it cannot see there.
+
+    Either way `os.path.realpath` reports the loop, which is the platform-level
+    fact the fixture actually rests on.
+    """
+    assert os.path.islink(symlink_loop.rsplit("/", 1)[0])
+    if sys.version_info < (3, 13):
+        with pytest.raises(RuntimeError, match="Symlink loop"):
+            Path(symlink_loop).resolve()
+    else:
+        pytest.skip("CPython >= 3.13 does not raise here; the guard is still required "
+                    "because this tool runs under whatever interpreter it is given")
+
+
+def test_a_symlink_loop_does_not_kill_path_excluded(symlink_loop):
+    """🔴 A CRASH CLASS the exclusion feature INTRODUCED. Before it,
+    `path_excluded` never touched the filesystem, so no path's SHAPE could take
+    a scan down. It resolves paths now, and on 3.12 one looped symlink anywhere
+    in one worktree's ancestry raised straight out of the classifier.
+    """
+    assert wp.path_excluded(symlink_loop, ["*/nope/*"]) is None
+    # …and it still MATCHES on the recorded path, so the fallback degrades the
+    # resolved candidate only — it does not turn the filter off.
+    assert wp.path_excluded(symlink_loop, ["*/a/*"]) == "*/a/*"
+
+
+def test_a_symlink_loop_does_not_kill_summarize(symlink_loop):
+    """The SECOND call site, which crashed independently: `summarize` re-runs
+    `path_excluded` per glob for the match counts, so fixing only `scan_repo`
+    would have moved the traceback rather than removed it."""
+    rows = [{"path": symlink_loop, "verdict": wp.DEAD, "repo": "/r", "excluded_by": None}]
+    s = wp.summarize(rows, ["*/nope/*"])
+    assert s["exclude_globs"] == [
+        {"glob": "*/nope/*", "typed": True, "matched": 0, "matched_dead": 0}]
+
+
+def test_a_looped_worktree_does_not_abort_the_whole_scan(tmp_path, capsys):
+    """🔴 THE COST OF THE CRASH, end to end: the traceback did not lose ONE row,
+    it lost the RUN — every other repo's verdict with it.
+
+    Built the only way it can happen for real. git RESOLVES symlinks when it
+    records a worktree path, so registering one *through* a link does not do it;
+    instead an ordinary ancestor directory is REPLACED by a symlink loop after
+    registration. That is what a rotated or re-pointed scratch directory looks
+    like from the tool's side — the recorded path string is unchanged and only
+    resolving it breaks.
+    """
+    repo = new_repo(tmp_path)
+    for name, rel in (("feat/looped", "looped.txt"), ("feat/plain", "plain.txt")):
+        commit_on_branch(repo, name, rel, f"{name}\n", f"{name} work")
+        git(repo, "merge", "-q", "--no-ff", "-m", f"merge {name}", name)
+    publish(repo)
+
+    holder = tmp_path / "holder"
+    holder.mkdir()
+    looped = add_worktree(repo, holder / "wt", "feat/looped")
+    plain = add_worktree(repo, tmp_path / "wts" / "plain", "feat/plain")
+    gh = gh_stub(tmp_path, [], name="gh-loop")
+
+    # POSITIVE CONTROL: before the loop, both rows classify and both are dead.
+    before = _rows_by_path(repo, gh, ["*/nope/*"])
+    assert before[str(looped)]["verdict"] == "dead", before[str(looped)]["verdict_reason"]
+    assert before[str(plain)]["verdict"] == "dead"
+
+    # Turn `holder` into a loop. `git worktree list` still reports the same path.
+    holder.rename(tmp_path / "holder-was-here")
+    (tmp_path / "holder").symlink_to(tmp_path / "hop")
+    (tmp_path / "hop").symlink_to(tmp_path / "holder")
+    assert str(looped) in git(repo, "worktree", "list", "--porcelain"), (
+        "git stopped reporting the looped path, so this fixture no longer "
+        "exercises the crash")
+
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1, exclude_globs=["*/nope/*"])
+    by_path = {r["path"]: r for r in rows}
+    assert str(looped) in by_path, "the looped row disappeared instead of being classified"
+    assert by_path[str(plain)]["verdict"] == "dead", (
+        "the ORDINARY row was lost too — which is the actual cost of the crash")
+    assert wp.summarize(rows, ["*/nope/*"])["worktrees"] == len(rows)
+
+
+def test_resolve_or_none_swallows_the_loop_and_still_resolves_normal_paths(symlink_loop,
+                                                                          tmp_path):
+    """Both halves of the helper. Swallowing everything would be indistinguishable
+    from a helper that always returns None — which would silently disable the
+    symlink-resolved candidate for EVERY path."""
+    assert wp._resolve_or_none(Path(symlink_loop)) is None
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+    assert wp._resolve_or_none(ordinary) == ordinary.resolve()
 
 
 def test_a_literal_path_with_fnmatch_metacharacters_needs_escaping():
@@ -1463,15 +1719,17 @@ def test_an_empty_glob_list_excludes_nothing():
 
 def test_an_empty_glob_is_dropped_by_the_resolver():
     """The quiet half of the empty-glob guard (the CLI refuses one outright)."""
-    assert wp.resolve_exclude_globs([""], False) == []
-    assert wp.resolve_exclude_globs(["   "], False) == []
-    assert wp.resolve_exclude_globs(["/"], False) == []
-    assert wp.resolve_exclude_globs(["", "*/x/*", ""], False) == ["*/x/*"]
+    assert wp.normalize_globs([""]) == []
+    assert wp.normalize_globs(["   "]) == []
+    assert wp.normalize_globs(["/"]) == []
+    assert wp.normalize_globs([" / "]) == []
+    assert wp.normalize_globs(["", "*/x/*", ""]) == ["*/x/*"]
 
 
 def test_a_repeated_glob_is_not_double_counted():
-    assert wp.resolve_exclude_globs(["*/x/*", "*/x/*"], False) == ["*/x/*"]
-    assert wp.resolve_exclude_globs(["*/x/*/", "*/x/*"], False) == ["*/x/*"]
+    assert wp.normalize_globs(["*/x/*", "*/x/*"]) == ["*/x/*"]
+    assert wp.normalize_globs(["*/x/*/", "*/x/*"]) == ["*/x/*"]
+    assert wp.normalize_globs([" */x/* ", "*/x/*"]) == ["*/x/*"]
 
 
 def test_an_empty_exclude_path_is_a_usage_error(two_dead, capsys):
@@ -1496,7 +1754,8 @@ def test_a_mistyped_glob_is_named_and_counted_not_silently_ignored(two_dead, cap
     rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1", "--exclude-path", typo])
     assert rc == wp.RC_OK
     out = capsys.readouterr().out
-    assert "exclusion filters in force (1):" in out, out
+    # Two filters: the typo, and the default agent exclusion.
+    assert "exclusion filters in force (2):" in out, out
     assert f"--exclude-path {typo!r}  ->  matched 0 row(s)" in out, out
     assert "matched ZERO rows" in out, out
     assert "BYTE-IDENTICAL" in out, out
@@ -1522,7 +1781,7 @@ def test_execute_refuses_while_any_glob_matches_zero_rows(two_dead, capsys):
     repo, agent, plain, gh = two_dead
     rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
                   "--exclude-path", "*/.claude/wortrees/agent-*",
-                  "--execute", "--confirm", "2"])
+                  "--execute", "--confirm", "1"])
     err = capsys.readouterr().err
     assert rc == wp.RC_EXECUTE_REFUSED, err
     assert "matched ZERO" in err, err
@@ -1548,9 +1807,151 @@ def test_a_glob_that_matches_does_not_trip_the_refusal(two_dead, capsys):
     presence of a glob. Without this, --execute could be refusing always."""
     repo, agent, plain, gh = two_dead
     rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
-                  "--skip-agent-worktrees", "--execute", "--confirm", "1"])
+                  "--exclude-path", AGENT_GLOB, "--execute", "--confirm", "1"])
     assert rc == wp.RC_OK, capsys.readouterr().err
     assert agent.is_dir() and not plain.exists()
+
+
+# ── 🔴 …BUT THE REFUSAL MUST NOT BLOCK THE SAFETY DEFAULT ITSELF ─────────────
+#
+# Round 2 scoped the zero-match refusal to EVERY glob. The default agent
+# exclusion is a glob, so on any repo with no `.claude/worktrees` directory the
+# safety filter refused ITSELF — and the message's remedy ("fix the glob … or
+# drop it") could only be satisfied by dropping the safety. That is a
+# permanently-red gate whose click-through is the catastrophic action.
+
+def test_the_default_exclusion_matching_zero_rows_does_not_refuse(no_agent_worktrees, capsys):
+    """🔴 THE HEADLINE. One ordinary dead worktree, no `.claude/worktrees`
+    anywhere: the default glob matches zero rows and the run must still fire."""
+    repo, plain, gh = no_agent_worktrees
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--execute", "--confirm", "1"])
+    err = capsys.readouterr().err
+    assert rc == wp.RC_OK, err
+    assert "REFUSED" not in err, err
+    assert not plain.exists(), "the run refused, or removed nothing at all"
+
+
+def test_the_default_exclusion_matching_zero_is_still_reported(no_agent_worktrees, capsys):
+    """Not refusing is not the same as going quiet. The glob is still echoed
+    with its zero — it just does not get the 🔴 typo shout, because a constant
+    cannot be mistyped."""
+    repo, plain, gh = no_agent_worktrees
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1"])
+    out = capsys.readouterr().out
+    assert f"{AGENT_GLOB!r}  ->  matched 0 row(s)" in out, out
+    assert "matched ZERO rows" not in out, out
+
+
+def test_a_typed_glob_matching_zero_still_refuses_in_the_same_scope(no_agent_worktrees, capsys):
+    """🔴 THE CONTROL that makes the two tests above mean something. In the SAME
+    zero-matching scope, a glob the OPERATOR typed still refuses — so the pass
+    above is caused by the glob being a constant, not by the refusal having been
+    deleted.
+
+    Typing the agent glob by hand is the sharpest form: byte-identical pattern,
+    byte-identical zero, opposite outcome. The only difference is who spelled it.
+    """
+    repo, plain, gh = no_agent_worktrees
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--exclude-path", AGENT_GLOB, "--execute", "--confirm", "1"])
+    err = capsys.readouterr().err
+    assert rc == wp.RC_EXECUTE_REFUSED, err
+    assert "matched ZERO" in err, err
+    assert plain.is_dir(), "a refused run removed something"
+
+
+# ── 🔴 --allow-unmatched-globs: the OTHER half of the empty result ───────────
+#
+# A zero match cannot distinguish "mistyped" from "correct but out of THIS
+# scan's scope". A fleet-wide exclude list aimed at a one-repo scan matches
+# nothing and is entirely right; round 2 picked the dangerous reading and hard
+# stopped, with no escape hatch.
+
+def test_a_correct_fleet_wide_glob_on_a_narrow_scan_is_refused_without_the_flag(
+        no_agent_worktrees, capsys):
+    """The POSITIVE CONTROL on the pair below: without the flag this exact
+    invocation refuses, so the pass below is caused by the flag."""
+    repo, plain, gh = no_agent_worktrees
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--exclude-path", AGENT_GLOB, "--exclude-path", "*/civitai/*",
+                  "--execute", "--confirm", "1"])
+    err = capsys.readouterr().err
+    assert rc == wp.RC_EXECUTE_REFUSED, err
+    assert plain.is_dir()
+
+
+def test_allow_unmatched_globs_warns_and_proceeds(no_agent_worktrees, capsys):
+    repo, plain, gh = no_agent_worktrees
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--exclude-path", AGENT_GLOB, "--exclude-path", "*/civitai/*",
+                  "--allow-unmatched-globs", "--execute", "--confirm", "1"])
+    err = capsys.readouterr().err
+    assert rc == wp.RC_OK, err
+    assert "WARNING (--allow-unmatched-globs)" in err, err
+    # Still NAMED, still PER-GLOB — the override downgrades the stop, it does
+    # not make the zero-matchers invisible.
+    assert repr(AGENT_GLOB) in err and "'*/civitai/*'" in err, err
+    assert not plain.exists(), "the run did not actually proceed"
+
+
+def test_the_override_is_echoed_prominently_in_the_report(no_agent_worktrees, capsys):
+    """🔴 An override that is not visible in the output is a hardcode wearing a
+    costume. Both halves: present when in force, absent when not."""
+    repo, plain, gh = no_agent_worktrees
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+             "--exclude-path", "*/civitai/*", "--allow-unmatched-globs"])
+    out = capsys.readouterr().out
+    assert "--allow-unmatched-globs IS IN FORCE" in out, out
+
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+             "--exclude-path", "*/civitai/*"])
+    assert "--allow-unmatched-globs IS IN FORCE" not in capsys.readouterr().out
+
+
+def test_the_override_does_not_change_which_rows_are_removable(no_agent_worktrees, capsys):
+    """🔴 The flag relaxes ONE refusal and nothing else. If it also widened the
+    removable set it would be a second, silent behaviour change riding on a
+    diagnostics flag."""
+    repo, plain, gh = no_agent_worktrees
+    base = ["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+            "--exclude-path", "*/civitai/*", "--format", "json"]
+    wp.main(base)
+    without = json.loads(capsys.readouterr().out)
+    wp.main([*base, "--allow-unmatched-globs"])
+    with_flag = json.loads(capsys.readouterr().out)
+    assert without["summary"]["removable"] == with_flag["summary"]["removable"]
+    assert ([r["removable"] for r in without["rows"]]
+            == [r["removable"] for r in with_flag["rows"]])
+    assert without["summary"]["allow_unmatched_globs"] is False
+    assert with_flag["summary"]["allow_unmatched_globs"] is True
+
+
+# ── 🔴 A SCAN THAT FOUND NOTHING SAYS NOTHING ABOUT THE GLOB ─────────────────
+
+def test_an_empty_scan_with_confirm_zero_is_a_no_op_not_a_refusal(tmp_path, capsys):
+    """🔴 The regression round 2 introduced. With ZERO rows scanned, no glob
+    could have matched anything — the zero is evidence about the SCAN, not about
+    the glob — and `--execute --confirm 0` used to succeed as a no-op. It began
+    refusing instead.
+    """
+    gh = gh_stub(tmp_path, [], name="gh-empty")
+    rc = wp.main(["--repo", str(tmp_path / "no-such-repo"), "--gh-cmd", gh, "--jobs", "1",
+                  "--exclude-path", "*/civitai/*", "--execute", "--confirm", "0"])
+    err = capsys.readouterr().err
+    assert rc == wp.RC_OK, err
+    assert "REFUSED" not in err, err
+    assert "NO rows at all" in err, err
+
+
+def test_an_empty_scan_without_any_glob_was_and_stays_a_no_op(tmp_path, capsys):
+    """The control: the same empty scope with no typed glob succeeded before and
+    must still, so the test above is about the glob and not about empty scopes
+    being broken in general."""
+    gh = gh_stub(tmp_path, [], name="gh-empty2")
+    rc = wp.main(["--repo", str(tmp_path / "no-such-repo"), "--gh-cmd", gh, "--jobs", "1",
+                  "--execute", "--confirm", "0"])
+    assert rc == wp.RC_OK, capsys.readouterr().err
 
 
 def test_per_glob_counts_are_independent_of_shadowing(two_dead):
@@ -1586,6 +1987,39 @@ def test_the_first_matching_glob_is_the_one_reported():
     assert wp.path_excluded("/a/b/c", ["/nope/*", "/a/*", "/a/b/*"]) == "/a/*"
 
 
+def test_the_credited_glob_is_glob_major_not_candidate_major():
+    """🔴 The mutant this pins SURVIVED all 132 tests: swapping the loop nesting
+    in `path_excluded` from glob-major to candidate-major.
+
+    The test above cannot see it. Every glob there matches the path DIRECTLY, so
+    the candidate loop's first iteration settles it either way and the two
+    nestings agree. The disagreement only appears when an EARLIER glob matches
+    an ANCESTOR while a LATER one matches the path itself:
+
+        glob-major      -> '/a/b'   (first glob in `globs` that matches anything)
+        candidate-major -> '*/c'    (first candidate's match, i.e. the path's)
+
+    `excluded_by` is what the report shows the operator as the reason a row was
+    spared, so the credited glob is a claim about WHICH filter did it. Per-glob
+    match counts are computed one glob at a time and are unaffected — verified,
+    and asserted below so this test does not overstate its own scope.
+    """
+    assert wp.path_excluded("/a/b/c", ["/a/b", "*/c"]) == "/a/b"
+    # The mirror: reversing the globs reverses the answer, so this is about
+    # ORDER and not about one of the two patterns being preferred.
+    assert wp.path_excluded("/a/b/c", ["*/c", "/a/b"]) == "*/c"
+    # Ancestor-vs-self at a deeper level, so it is not a two-component special
+    # case either.
+    assert wp.path_excluded("/x/y/z/w", ["/x/y", "*/w"]) == "/x/y"
+
+    # …and the scope disclaimer above, made mechanical: per-glob counts do not
+    # move with the ordering.
+    rows = [{"path": "/a/b/c", "verdict": wp.DEAD, "repo": "/a", "excluded_by": "/a/b"}]
+    for order in (["/a/b", "*/c"], ["*/c", "/a/b"]):
+        counts = {d["glob"]: d["matched"] for d in wp.summarize(rows, order)["exclude_globs"]}
+        assert counts == {"/a/b": 1, "*/c": 1}, order
+
+
 def test_multiple_exclude_paths_all_apply(two_dead):
     repo, agent, plain, gh = two_dead
     rows = _rows_by_path(repo, gh, ["*/nothing-matches-this/*", AGENT_GLOB])
@@ -1593,23 +2027,32 @@ def test_multiple_exclude_paths_all_apply(two_dead):
     assert rows[str(agent)]["removable"] is False
 
 
-# ── ONE RULE, ONE PLACE: the convenience flag IS the glob ─────────────────────
+# ── ONE RULE, ONE PLACE: the default IS the glob ──────────────────────────────
 
-def test_skip_agent_worktrees_resolves_to_exactly_the_documented_glob():
-    assert wp.resolve_exclude_globs([], True) == [wp.AGENT_WORKTREE_GLOB]
+def test_the_default_resolves_to_exactly_the_documented_glob():
+    """🔴 The default is ON. `include_agent_worktrees=True` is the ONLY thing
+    that takes the constant out of the list — there is no flag that puts it in,
+    because it is not absent."""
     assert wp.AGENT_WORKTREE_GLOB == AGENT_GLOB
-    assert wp.resolve_exclude_globs(["*/x/*"], True) == ["*/x/*", wp.AGENT_WORKTREE_GLOB]
-    assert wp.resolve_exclude_globs([], False) == []
-    # Spelling it both ways must not double it up.
+    assert wp.resolve_exclude_globs([], False) == [wp.AGENT_WORKTREE_GLOB]
+    assert wp.resolve_exclude_globs(["*/x/*"], False) == ["*/x/*", wp.AGENT_WORKTREE_GLOB]
+    # Opted back in: the constant is gone and only typed globs remain.
+    assert wp.resolve_exclude_globs([], True) == []
+    assert wp.resolve_exclude_globs(["*/x/*"], True) == ["*/x/*"]
+    # Spelling it by hand must not double it up.
+    assert wp.resolve_exclude_globs([AGENT_GLOB], False) == [AGENT_GLOB]
+    # …and typing it explicitly OVERRIDES the opt-in, because a typed glob is a
+    # typed glob. The operator asked for both; the filter wins, as everywhere
+    # else in this tool.
     assert wp.resolve_exclude_globs([AGENT_GLOB], True) == [AGENT_GLOB]
 
 
-def test_the_convenience_flag_and_the_explicit_glob_produce_identical_rows(two_dead, capsys):
+def test_the_default_and_the_explicit_glob_produce_identical_rows(two_dead, capsys):
     """Behavioural, not structural: the two routes must agree row for row. A
     second open-coded matcher would pass a `==` on the constant and still drift
     here."""
     repo, agent, plain, gh = two_dead
-    a = _rows_by_path(repo, gh, wp.resolve_exclude_globs([], True))
+    a = _rows_by_path(repo, gh, wp.resolve_exclude_globs([], False))
     b = _rows_by_path(repo, gh, [AGENT_GLOB])
     key = lambda rs: {p: (r["verdict"], r["excluded_by"], r["removable"])
                       for p, r in rs.items()}
@@ -1618,9 +2061,10 @@ def test_the_convenience_flag_and_the_explicit_glob_produce_identical_rows(two_d
 
 
 def test_the_agent_glob_literal_is_spelled_exactly_once_in_executable_code():
-    """Structural backstop for the one-rule-one-place claim. `--skip-agent-worktrees`
-    interpolates the CONSTANT into its help text, so a second occurrence of the
-    literal means somebody re-typed the pattern."""
+    """Structural backstop for the one-rule-one-place claim. Both
+    `--include-agent-worktrees`' help and the report's shout interpolate the
+    CONSTANT, so a second occurrence of the literal means somebody re-typed the
+    pattern."""
     literals = _executable_string_literals(TOOL)
     assert literals.count(AGENT_GLOB) == 1, (
         f"the agent glob is spelled {literals.count(AGENT_GLOB)} times in executable "
@@ -1664,14 +2108,14 @@ def test_a_full_execute_pass_over_the_scanned_rows_never_touches_an_excluded_pat
         "so the survival above says nothing about the exclusion")
 
 
-def test_skip_agent_worktrees_spares_a_non_agent_entry_end_to_end(tmp_path, capsys):
-    """🔴 The 246-vs-1 case, driven all the way through --execute.
+def test_the_default_spares_a_non_agent_entry_end_to_end(tmp_path, capsys):
+    """🔴 The no-`agent-`-prefix case, driven all the way through --execute.
 
     A real registered worktree at `.claude/worktrees/card-ux` — no `agent-`
     prefix, squash-merged so genuinely `dead`, and CLEAN, so the dirty check that
     happened to be sparing the real one on this box cannot be what spares it
-    here. It must survive `--skip-agent-worktrees --execute` while an ordinary
-    dead worktree in the same run is really removed.
+    here. It must survive `--execute` WITH NO FLAG TYPED while an ordinary dead
+    worktree in the same run is really removed.
     """
     repo = new_repo(tmp_path)
     for name, rel in (("feat/card-ux", "cardux.txt"), ("feat/agenty", "agenty.txt")):
@@ -1702,7 +2146,7 @@ def test_skip_agent_worktrees_spares_a_non_agent_entry_end_to_end(tmp_path, caps
         assert rows[str(p)]["dirty"] is False, (p, "the fixture is spared by dirt, not by the flag")
 
     rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
-                  "--skip-agent-worktrees", "--execute", "--confirm", "1"])
+                  "--execute", "--confirm", "1"])
     err = capsys.readouterr().err
     assert rc == wp.RC_OK, err
     assert card.is_dir(), "the non-agent .claude/worktrees entry was REMOVED"
@@ -1738,13 +2182,38 @@ def test_the_help_text_documents_the_new_flags_and_the_glob_semantics():
     slash-crossing choice is exactly the thing they will get wrong."""
     text = wp.build_parser().format_help()
     assert "--exclude-path" in text
-    assert "--skip-agent-worktrees" in text
+    assert "--include-agent-worktrees" in text
+    assert "--allow-unmatched-globs" in text
     assert AGENT_GLOB in text, text
     # Every semantic an operator can get wrong has to be stated where they will
     # actually read it. Each of these was a measured failure, not a hypothetical.
     for claim in ("CROSSES", "SUBTREE", "trailing", "symlink", "glob.escape",
                   "REFUSES", "ZERO"):
         assert claim in text, (claim, text)
+
+
+def test_the_removed_opt_in_flag_is_gone_rather_than_a_no_op_alias():
+    """🔴 `--skip-agent-worktrees` was the opt-IN spelling of a behaviour that is
+    now the default. The PR is unmerged, so there is no compatibility to keep —
+    and a flag that does nothing is worse than one that does not exist, because
+    it reads as protection while providing none.
+
+    Structural AND behavioural: absent from --help, and rejected by the parser.
+    """
+    assert "--skip-agent-worktrees" not in wp.build_parser().format_help()
+    with pytest.raises(SystemExit):
+        wp.build_parser().parse_args(["--repo", "/x", "--skip-agent-worktrees"])
+
+
+def test_the_dangerous_flag_says_so_in_help():
+    """🔴 The whole point of the inversion is that the dangerous action is the
+    one you type. Its help must say what it costs, not merely what it does."""
+    action = [a for a in wp.build_parser()._actions
+              if "--include-agent-worktrees" in a.option_strings]
+    assert len(action) == 1
+    h = action[0].help
+    assert "DANGEROUS" in h, h
+    assert "in use RIGHT NOW" in h, h
 
 
 def test_the_gh_stub_can_be_observed_to_answer(tmp_path):
