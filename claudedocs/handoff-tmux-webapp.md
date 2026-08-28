@@ -331,8 +331,26 @@ do not renumber again without releasing the live claims first.
    volume is a PVC — so the pod has no path to a host tmux socket, and `capture-pane` output has to
    be *delivered* from the host. (The image is distroless with no shell, so probe it via the spec,
    not `kubectl exec`.) Item 4 is the next buildable thing; item 3 needs no further decisions.
-4. **Host-side tmux agent** (phase 2). **SERVER HALF DONE — `ZacxDev/homelab-infra#468`, merged as
-   `32f49804`. The host-side pusher is the remaining half.**
+4. ✅ **DONE 2026-08-28 — BOTH HALVES SHIPPED, DEPLOYED AND OBSERVED RUNNING UNATTENDED.**
+   Server: `ZacxDev/homelab-infra#468` (`32f49804`), deployed as clawgate **0.8.8**
+   (`628a963a`). Pusher: `innovation-upstream/devrc#974`, squash-merged **`f0308e46`**,
+   shipped to both hosts (`ship.sh` — cross-host agreement verified at one sha).
+   Claim `tmux-webapp-4` released.
+
+   🔴 **THE PROOF IS AN UNATTENDED TICK, NOT A HAND-RUN PUSH.** Every earlier success in
+   this item's history was me invoking the script. Measured after the switch, with no human
+   action: journal shows successive `pushed …B … HTTP 200` at 14:58:47 / 15:00:49 / 15:02:5x
+   / 15:04:5x (2m0s apart, `Result=success`, `ExecMainStatus=0`), and `receivedAt` advanced
+   `20:02:52 → 20:04:52` across a tick while the push count went 3 → 4. Read model:
+   workbench 45 windows / 34 with `runtime`, laptop 27 / 10.
+
+   ⚠ **Live clawgate is now 0.8.9** — another session shipped it mid-work. My 0.8.8 deploy is
+   superseded, not undone; the snapshot routes were re-verified on 0.8.9 (200 with token, 401
+   without). **Read the live pin, never this line.**
+
+   ⚠ The timer is `serverMode`-gated to the workbench and the laptop correctly shows
+   `linked`-not-enabled. That is CORRECTNESS, not scoping: `session-manager --json` collects
+   BOTH hosts from the workbench, so two reporters would fight over every row.
 
    🔴 **Two decisions here were made AGAINST this doc, on measurement.** (a) It specified a unit on
    EACH host; `session-manager --json` already collects BOTH from the workbench (it SSHes to the
@@ -347,11 +365,40 @@ do not renumber again without releasing the live claims first.
    which exists to own the VOCABULARY BOUNDARY: session-manager spells its tmux session `session`,
    so the collision arrives WITH THE PAYLOAD and is renamed to `tmuxSessionName` at ingest.
 
-   **Still to do — the pusher.** A timer + `curl` on the workbench posting `session-manager --json`
-   VERBATIM; the server normalises, so the host stays a dumb pipe. 🔴 **Deploy order is
-   server-first** — it already is, so a pusher shipped now degrades to a 404 it treats as an
-   unreachable server. **The server is MERGED but NOT DEPLOYED** (immutable image pin, no Flux
-   automation): build + push + bump both `deployment.yaml` and `client.go`'s `buildVersion`.
+   **The pusher, as shipped.** `scripts/tmux-snapshot-push.sh` + a `serverMode`-gated systemd
+   user timer (`OnUnitActiveSec=2min`), posting `session-manager --json` VERBATIM; the server
+   normalises, so the host stays a dumb pipe and the vocabulary rename lives where it is
+   tested. Cadence measured, not guessed: 1298 / 1196 / 1193 ms per collection, ~1% duty
+   cycle. ⚠ Its real per-run cost is up to FOUR ssh invocations (no `ControlMaster`) plus one
+   ClickHouse query — ~2,880 handshakes/day, not the 720 an earlier estimate implied.
+
+   🔴 **Distinct exit codes are the ONLY alarm it has** — 2 no creds, 3 collector failed,
+   4 transport, 5 non-2xx, 6 torn collection. It deliberately wires **no** `OnFailure` toast:
+   that toast defeats do-not-disturb and is justified by ~1 firing in 9 days, so at this
+   cadence a sustained outage would fire it 720×/day and burn down the channel. ⚠ **The
+   compensating control is `/standup` reading the failed-unit list, NOT read-model staleness**
+   — nothing reads `GET /api/tmux/snapshot` outside clawgate's own tests, so `receivedAt`
+   staleness is recorded and unread. That covers the exit codes and NOT an exit-0-achieving-
+   nothing, which is why the redirect and unmeasured-zero cases are handled in the script.
+
+   🔴 **Four audit rounds; every one found a defect the previous round's fix introduced.**
+   Round 2: `rc=$?` after `if ! cmd` is always 0 (so every failure logged `rc=0`, worst on a
+   timeout, which has empty stderr too); success tested `HTTP < 400`, so a 3xx meant curl
+   returned the redirect, nothing was stored, and it logged "pushed" and exited 0; and
+   `windows_measured` — the discriminant `session-manager` computes precisely to separate an
+   unmeasured zero from a real one — was being discarded at the last place that still had it,
+   so a reachable-but-unenumerated host would overwrite a good 44-window snapshot with a
+   false zero. Round 3's fix then **dropped `gawk`** as "unused": `agent_ledger` runs `awk 1`,
+   `awk` exists only in gawk, and the `2>/dev/null; exit 0` hides the error while the `echo`
+   sentinel still prints — 34 of 45 windows silently lost `runtime`. Round 3 also broke BOTH
+   required checks with a **pure prose change**, because `launcher_scan.py` reads raw text and
+   the comment named a hazardous binary. Round 4 caught `30[0-9]` failing to exclude 304.
+
+   🔴 **A mutation sweep certified two of these as covered when they were not.** The `rc=0`
+   mutant SURVIVED a green file (nothing asserted the number), and the 304 mutant reported
+   *killed* against a test that was **already red** — a mutant dies for free when the baseline
+   is red, and I had never run that test unmutated. Final: 24 mutants, 24 killed, with the
+   controls fixed. **The sweeps found less than the auditor did.**
 
    **Five audit rounds ran. Every round found a defect the PREVIOUS round's fix introduced** —
    round 1 an atomicity bug; fixing it caused a 30%-reproducible deadlock (randomised map order vs
