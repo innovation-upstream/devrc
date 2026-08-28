@@ -50,7 +50,7 @@ is_asleep() { [[ -f "$STATE_FILE" ]] && read -r _state < "$STATE_FILE" && [[ "$_
 # Sleep mode always uses black (000000) regardless of time.
 time_color() {
   local h
-  h=$(date +%H)
+  h=$(date +%-H)
   case "$h" in
     10)        echo "FFA500" ;;  # 10am  — amber (just woke)
     11)        echo "FFBF00" ;;  # 11am  — golden
