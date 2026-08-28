@@ -234,6 +234,29 @@ do not renumber again without releasing the live claims first.
    started and a pod sweeping a healthy empty queue emit byte-identical logs. That
    indistinguishability is exactly what hid this bug, and "0 log lines" was the evidence for it.
 
+   **SHIPPED — clawgate 0.8.7 is live** (`3a66e3e0` merged; pin `cc51b9b4`; Flux reconciled; pod
+   `clawgate-7c78695584-zqdjf` Running/ready). ⚠ The pin had moved to **0.8.6 under me** mid-session
+   (a concurrent ship), so 0.8.7 was derived from the LIVE pin re-read at the moment of acting —
+   and 0.8.6 was confirmed **by content** to predate the merge and not contain the fix.
+   First evidence in this feature's history that the reaper exists at runtime:
+   `02:04:10 attention reaper: sweeping every 30m0s …` followed by
+   `02:04:40 leader(background-loops): acquired lease`.
+
+   **Forced end-to-end validation (2026-08-28), because waiting 30m is not the only option — but
+   restarting the pod is NOT a way to force it: that RESETS the ticker and makes it strictly
+   worse.** There is no on-demand route. So the deployed tree was run against a throwaway Postgres
+   with **one line changed** (the interval to 5s) and **synthetic** rows — never copied production
+   entries, which carry captured session text. Result:
+   `attention-reap: resolved 3 idle attention entry(ies) not seen for 4h0m0s`, taking exactly the
+   3 stale `idle` rows while 2 fresh `idle`, a stale `question` and a stale `manual` all survived,
+   with `created_at` backdated 30 days on **every** row so the reap provably keys on `updated_at`.
+   A negative control ran first: two sweeps with nothing stale resolved nothing and logged nothing.
+   🔴 **This closes a real gap — every unit test runs against a FAKE store, so the `pgstore` SQL had
+   never been exercised by the loop against a real Postgres.** 🔴 **But it changed the very variable
+   the bug was about (the interval), so it is NOT a substitute for observing the 30m production
+   tick** — that is what the boot line's `every 30m0s`, the AST cadence guard and the `main()`
+   ledger are for.
+
    Claim `tmux-webapp-1` released.
 2. ✅ **DONE 2026-08-27 — `ZacxDev/homelab-infra#451`, merged as `a38360a5`. Deployed and verified
    on BOTH hosts.** The suggest POST is detached (payload renamed to a **sibling of `WORKDIR`**,
@@ -319,6 +342,12 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
   ALL survive; a bound tight enough to catch ×10 is tight enough to flake. There is no good value.
   Pin it **structurally** instead (AST-assert the ticker is driven by the bare `interval`
   parameter): deterministic, zero wall time, and it killed the whole class.
+- ⚠ **The deploy runbook's `DOCKER_HOST=ssh://zach@192.168.50.250` is HOST-DEPENDENT and fails on
+  the workbench.** `192.168.50.250` **is** the workbench, so running it there SSHes to itself and
+  dies with `ssh_askpass: exec(): No such file or directory` → `Too many authentication failures`,
+  which reads like a broken credential rather than a wrong host. From the workbench just use the
+  local daemon — it is the same daemon the ssh transport was reaching for. The runbook line is
+  correct *from the laptop*. Check `ip -4 addr | grep 192.168.50.250` before believing the error.
 - ⚠ **A stress test that spawns busy-loops must reap them by RESOLVED PID.** An audit round's
   `kill %1 %2 …` job-control cleanup failed; 74 `while :; do :; done` shells reparented to init and
   saturated ~11 cores for 45 minutes — corrupting the very timing measurements the next round then
