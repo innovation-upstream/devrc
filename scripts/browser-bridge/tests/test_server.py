@@ -10104,8 +10104,14 @@ def test_a_prune_must_not_starve_a_reap_STILL_IN_THE_OUTBOX():
     `waiters` (deliberately), so the prune's second condition never shields it.
 
     An inflight-only sweep therefore deleted the metadata of a reap STILL SITTING
-    IN THE OUTBOX, removing BOTH bounds at once. This test pins both, because
-    they fail together and each alone reads as a smaller bug than it is.
+    IN THE OUTBOX, removing BOTH bounds at once. ⚠ THIS TEST PINS THE **EXPIRY**
+    HALF ONLY — the cancellation half is
+    `test_a_prune_must_not_make_a_queued_reap_UNCANCELLABLE`, deliberately a
+    separate test because the two have different consequences. (An earlier
+    docstring here said "this test pins both", which is the
+    description-claims-coverage-the-body-lacks shape this very round exists to
+    remove; corrected rather than quietly reworded.) They fail together, and each
+    alone reads as a smaller bug than it is, which is why the pair matters.
 
     Not exotic: `_prune_inflight_locked` runs on every submit and every ping, and
     two ordinary ops ahead of the reap in the serial FIFO can exceed

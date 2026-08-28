@@ -1817,11 +1817,20 @@ export const FAST_CAPTURE_BUDGET_MS = 1500;
 // in the extension and both were wrong the same way.
 //
 // So read the trade as "a rare orphaned tab, reclaimed when the op landed" rather
-// than "a rare orphaned tab, permanent". It does NOT become free: the reclaim is
-// a real op that can fail, nothing counts how often, and the OTHER orphan — a
-// `chrome.tabs.create` that hangs and NEVER settles, whose op dies at
-// EXEC_OP_BUDGET_MS while the abandoned create still produces a tab nobody ever
-// sees — cannot even be reported, and is deliberately out of scope.
+// than "a rare orphaned tab, permanent". It does NOT become free — THREE ways the
+// orphan still survives, and this list is the one `server.py`'s sibling block
+// tells you to extend whenever a bound is added (it was already incomplete once,
+// and this copy was the one missed):
+//   1. the reclaim is a real `close` op that can fail or be lost, and nothing
+//      counts how often;
+//   2. a reclaim not picked up within INFLIGHT_STALE_S is DROPPED rather than
+//      dispatched — deliberately, since after a browser restart that tabId names
+//      a different tab — so that orphan is never reclaimed at all. Note this one
+//      happens AFTER the op landed, which is why (1) alone does not cover it;
+//   3. the OTHER orphan — a `chrome.tabs.create` that hangs and NEVER settles,
+//      whose op dies at EXEC_OP_BUDGET_MS while the abandoned create still
+//      produces a tab nobody ever sees — cannot even be reported, and is
+//      deliberately out of scope.
 //
 // ⚠ LOOP_STALL_MS's worst-legitimate-iteration sum was CHECKED and does NOT move.
 // That comment warns "ADDING A NEW BOUNDED AWAIT TO THE LOOP BODY EATS INTO IT",
