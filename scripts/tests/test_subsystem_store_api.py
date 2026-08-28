@@ -13578,8 +13578,15 @@ class TestNoRequestEverAuditsTwiceAndNoneVanishes:
         A duplicate beats a hole: the operator can see that the request was
         served AND that answering it failed. `settle` pins the ceiling at two, so
         "audit first" cannot quietly become "audit twice on every request".
+
+        🔴 THE OWN-COPY (`_tee`) IS WHY THIS DIES ON ITS OWN MESSAGE. Waiting for
+        two records first would make the KILLING assertion `await_audit`'s
+        ("expected at least 2, got 1") — a true statement that names a count
+        instead of naming the missing outcome. The copy is read before any
+        waiter, so the failure says which record was lost.
         """
         calls = {"n": 0}
+        records: "list[str]" = []
         real_respond = api.StoreRequestHandler._respond
 
         def flaky(self, code, body, **kwargs):
@@ -13589,25 +13596,27 @@ class TestNoRequestEverAuditsTwiceAndNoneVanishes:
             return real_respond(self, code, body, **kwargs)
 
         monkeypatch.setattr(api.StoreRequestHandler, "_respond", flaky)
-        with running(store) as (base, audit):
+        with running(store, wrap_sink=_tee(records)) as (base, audit):
             code, headers, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN
             )
-            await_audit(audit, 2)
+            await_audit(audit, 1)
         monkeypatch.undo()
 
         assert code == 500, (code, body)
         assert headers["X-Store-Status"] == "internal-error"
-        lines = settle(audit, 2)
-        assert "result=200 status=recalled" in lines[0], (
-            "the outcome the handler had already decided was never written — "
-            f"the record was lost in the crash: {lines}"
+        assert any("result=200 status=recalled" in ln for ln in records), (
+            "the outcome the handler had already decided was NEVER WRITTEN — the "
+            "record died with the response it was waiting for. The trail holds "
+            f"only: {records}"
         )
-        assert "result=500 status=internal-error" in lines[1], lines
         # And it really was the injected failure, not a store that answered 500
         # on its own: `_respond` was reached twice, the handler's and the
         # backstop's.
         assert calls["n"] == 2, calls
+        lines = settle(audit, 2)
+        assert "result=200 status=recalled" in lines[0], lines
+        assert "result=500 status=internal-error" in lines[1], lines
 
     def test_an_exception_AFTER_a_completed_response_audits_EXACTLY_TWICE(
         self, store: Path, monkeypatch
