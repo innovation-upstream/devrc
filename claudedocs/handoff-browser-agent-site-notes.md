@@ -16,21 +16,21 @@ gap that trace found — the autonomous `browser agent` is BLIND to `site_notes`
 registered host it runs without that site's flow notes.
 
 ## State now
-- **devrc PR #940 MERGED** — squash `880786cf`, `mergedAt 2026-08-28T00:29:26Z`.
-  Verified **by content** on `origin/main` (a squash never makes the head an ancestor,
-  so ancestry lies): SKILL.md sentence present, `reference/agent.md` section present,
-  3 new tests present.
-- Base clone `~/workspace/devrc` re-synced `--ff-only` to `880786cf`. Worktree
-  `devrc-site-notes-agent` and the `/tmp/devrc-main-control-*` control worktree removed.
-- **Merged with `tekton/devrc-pytests` RED.** Operator instruction ("skip tests, get it
-  merged"). Mechanism: `enforce_admins` lifted → `gh pr merge --squash --admin` →
-  `enforce_admins` restored **and verified** (`enforce_admins: true`, contexts
-  `["tekton/devrc-pytests","tekton/devrc-nodetests"]`). Required checks stayed in force
-  for non-admins throughout. Pre-change snapshot:
+- **devrc PR #940 MERGED** — squash `880786cf`. Verified **by content** on `origin/main`
+  (a squash never makes the head an ancestor, so ancestry lies): SKILL.md sentence,
+  `reference/agent.md` section, 3 new tests all present.
+- **devrc PR #956 MERGED** — squash `c6b9b77e`, this handoff doc (182 lines).
+  🔴 **Merged CLEANLY through the gate** — `tekton/devrc-pytests: success`,
+  `tekton/devrc-nodetests: success`. No bypass.
+- **The `devrc-pytests` red on #940 is RESOLVED as noise** — see the Open-investigations
+  block below. Nothing broken from #940 is sitting on `main`.
+- Base clone `~/workspace/devrc` re-synced `--ff-only` to `c6b9b77e`. All three worktrees
+  (`devrc-site-notes-agent`, `devrc-handoff-bb`, `/tmp/devrc-main-control-*`) removed.
+- #940 was merged with `devrc-pytests` RED by operator instruction. Mechanism:
+  `enforce_admins` lifted → `--admin` squash → `enforce_admins` restored **and verified**.
+  Required checks stayed in force for non-admins throughout. Snapshot:
   `<scratchpad>/main-protection-backup.json`.
-- Shipped in #940: `SKILL.md` +1 sentence (12,028 B), `reference/agent.md` new section,
-  `browser_tool_impl.mjs` rationale comment, `tests/browser_tool.test.mjs` +3 tests.
-- **4 audit rounds ran, each found real findings; round 5 was never run** (operator
+- **4 audit rounds ran on #940, each found real findings; round 5 never run** (operator
   chose to merge). Rounds 1–4: 6🟡, 3, 3, 1 — three of the four rounds' findings were
   introduced *by the previous round's fix*.
 
@@ -81,32 +81,56 @@ registered host it runs without that site's flow notes.
   Cheaper alternative from any host: the **next** devrc PR. Red on an unrelated diff ⇒
   kill signature (noise). Green ⇒ #940's failure was real and is now on `main`.
 
+### RESOLVED 2026-08-27 — `tekton/devrc-pytests` red on #940 was NOISE, not a real failure
+🔴 **This supersedes the UNRESOLVED block above. That block's evidence stands; only its
+verdict is now settled.** Recorded rather than deleted so the next reader sees the prior
+reading was *corrected*, not that it never existed.
+- **The discriminator that settled it, and it cost nothing:** PR **#956** branches off
+  `main` **including #940's squash** and adds exactly **one markdown file**. A docs-only
+  diff cannot break pytest, so its check result is a statement about the TREE, not the
+  diff. It came back **`tekton/devrc-pytests: success` + `devrc-nodetests: success`** and
+  merged cleanly with no bypass.
+- **Therefore:** the tree containing #940 passes `devrc-pytests`. There is **no persistent
+  test failure from #940 on `main`** — which was the consequential half of the question.
+- 🔴 **Scope this claim honestly.** It proves the tree is green NOW. It does **not** prove
+  #940's specific run died of preemption — a genuinely flaky test would produce the same
+  pair of readings. What is ruled out is the outcome that mattered: a real regression
+  landed and left on `main`.
+- **Never needed:** the workbench `kubectl` probe into the TaskRun log. Left in the block
+  above because it remains the right move for the NEXT unexplained red — and note the
+  cheaper move that worked here: **let the next PR's check answer it.**
+- **Cost of the wrong instinct, for the record:** the local repo-wide suite was run three
+  times chasing this. Every target was green every time (browser-bridge 792, dl-router
+  1005, signal 716, initiatives 784, …); all three runs ended in `RESULT: FAIL (exit=143)`
+  — SIGTERM — **twice from my own `timeout`, once from my own cleanup `kill`**. Not one
+  test was ever observed red locally.
+
 ## Next steps (ranked)
 
-1. **Settle the `devrc-pytests` red** (repo: devrc; no files — a read). Run the Next
-   probe above from the workbench, or read the next devrc PR's check. Closes when the
-   discriminator says `killed` (noise, nothing to do) or names a failing test (fix it —
-   it is on `main` now).
+1. ✅ **RESOLVED 2026-08-27 — settle the `devrc-pytests` red.** Answered for free by
+   #956's own check (docs-only diff on a tree containing #940 → green). Nothing broken on
+   `main`. Kept at rank 1 with its number intact so any live `claim-work` slug still
+   resolves; nothing to do here.
 2. **Reload the browser-bridge extension in BOTH Brave profiles** (repo: none — operator
-   action, cannot be done by an agent). Both `work` and `personal` report
+   action, an agent cannot do it). Both `work` and `personal` report
    `extension_stale: true`: loaded build `04bbd6f9c695141d`, deployed
    `e1ee86a50a811d40`, versions identical at `0.8.1` — the case a version compare cannot
    see. Loaded code predates **2026-08-24**, missing `b20b7835` (#797, bound the
    screenshot fast path) and `b242fc2d` (#814, bound `open`'s reuse probe) — both
-   bounded-hang fixes, so the symptom is a wedged op, not an error. Fix: `brave://extensions`
-   → **Remove** → **Load unpacked** `~/.local/share/browser-bridge-ext/` (a ↻ reload is
-   unreliable — the long-poll keeps the old worker alive). Verify: `browser whoami` →
-   require `extension_stale: false`; `null` = undecidable, NOT ok.
+   bounded-hang fixes, so the symptom is a wedged op, not an error. Fix:
+   `brave://extensions` → **Remove** → **Load unpacked** `~/.local/share/browser-bridge-ext/`
+   (a ↻ reload is unreliable — the long-poll keeps the old worker alive). Verify:
+   `browser whoami` → require `extension_stale: false`; `null` = undecidable, NOT ok.
 3. **Decide the SKILL.md byte budget** (repo: devrc; file
-   `scripts/browser-bridge/SKILL.md`). Now **12,028 B** against the **12,038 B** enforced
+   `scripts/browser-bridge/SKILL.md`). **12,028 B** against the **12,038 B** enforced
    ceiling = **10 bytes of slack** (was 77 before #940). The next edit larger than that
    fails `test_skill_md_keeps_working_headroom`. `skill-audit.py` says "no prune needed"
    (a BYTES verdict) and the staleness pass came back clean, so nothing was churned.
    Demotion candidates, each with an existing sidecar home: `text` row 383 B →
    `read-envelopes.md`; `wake` row 361 B → `spa-wake.md`; `screenshot` row 343 B → a new
-   topic. Any one buys 200–300 B. Closes when either a demotion PR merges or the operator
-   says explicitly that 10 bytes is acceptable.
-4. **Optional: round 5 delta audit of the merged #940** (repo: devrc; files
+   topic. Any one buys 200–300 B. Closes when a demotion PR merges, or the operator says
+   in writing that 10 bytes is acceptable.
+4. **Optional: round 5 delta audit of the merged #940** (repo: devrc; file
    `scripts/browser-bridge/reference/agent.md`). Rounds 1–4 each found something real and
    round 5 was skipped by operator choice. Scope is prose in one file; no code path ships
    behaviour change. Closes when a round returns no findings, or the operator declines.
@@ -158,25 +182,25 @@ registered host it runs without that site's flow notes.
 
 ## How to verify
 ```bash
-# 1. #940 landed, by CONTENT (a squash is never an ancestor — ancestry would lie)
+# 1. both PRs landed, by CONTENT (a squash is never an ancestor — ancestry would lie)
 git -C ~/workspace/devrc fetch origin
-git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/SKILL.md | grep -c 'never sees'          # 1
-git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/reference/agent.md | grep -c 'never sees .site_notes'  # 1
-git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/browser_tool.test.mjs | grep -c 'SITE NOTES'     # 3
+git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/SKILL.md | grep -c 'never sees'   # 1
+git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/browser_tool.test.mjs | grep -c 'SITE NOTES'  # 3
+git -C ~/workspace/devrc show origin/main:claudedocs/handoff-browser-agent-site-notes.md | wc -l   # ~182+
 gh pr view 940 --repo innovation-upstream/devrc --json state,mergeCommit   # MERGED / 880786cf
+gh pr view 956 --repo innovation-upstream/devrc --json state,mergeCommit   # MERGED / c6b9b77e
 
-# 2. branch protection really was restored
+# 2. branch protection really was restored after #940's bypass
 gh api repos/innovation-upstream/devrc/branches/main/protection \
   --jq '{enforce_admins:.enforce_admins.enabled, contexts:.required_status_checks.contexts}'
 # expect: enforce_admins true, both tekton contexts
 
-# 3. the guards actually guard (all three must go RED)
-cd ~/workspace/devrc && nix-shell -p nodejs --run \
-  "node --test scripts/browser-bridge/tests/browser_tool.test.mjs"        # 91 pass
-#   mutants that MUST kill: forward site_notes in the `upload` branch; make
-#   summarizeResult return "" for every op but context; reword or MOVE the SKILL.md
-#   sentence out of ## FIRST DECISION.
+# 3. the guards actually guard (each mutant must go RED with its OWN assertion)
+nix-shell -p nodejs --run \
+  "node --test ~/workspace/devrc/scripts/browser-bridge/tests/browser_tool.test.mjs"   # 91 pass
+#   mutants: forward site_notes in the `upload` branch; make summarizeResult return ""
+#   for every op but context; reword OR MOVE the SKILL.md sentence out of ## FIRST DECISION.
 
 # 4. the byte ceiling
-python3 ~/workspace/devrc/scripts/skill-audit.py scripts/browser-bridge/SKILL.md
+python3 ~/workspace/devrc/scripts/skill-audit.py ~/workspace/devrc/scripts/browser-bridge/SKILL.md
 ```
