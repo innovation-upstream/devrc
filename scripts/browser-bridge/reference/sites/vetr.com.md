@@ -102,14 +102,13 @@ $BB --instance <key> --tab $TAB nav http://127.0.0.1:5174/user --wake
 because the boot that mattered already happened. That failure looks exactly like
 a bad token.
 
-**Measured 2026-08-27 against the hermetic stack, laptop, Brave profile `work`:**
-the seed half of this works. Before the seed, `/user` issues only `/api/config`;
-after the seed + second `nav` the app issues `/api/auth/me` and renders the
-**authed dashboard skeleton** rather than redirecting to auth. The token was
-independently confirmed valid (`/api/auth/me` → `E2E Owner`, id 1, tz `UTC`).
-
-🔴 **But see "the render problem" below — the seed authenticating is NOT the same
-as the page becoming drivable, and in that run it did not.**
+**Verified end-to-end 2026-08-27, hermetic stack, laptop, Brave profile `work`:**
+on a fresh tab the recipe lands the **fully-rendered authed dashboard** (1232
+chars of `innerText` — "Quick Actions / My Vet Appointments / … / Switch/Add
+profile") with the **complete data fan-out** (`/api/user/pets`, `/api/indicators`,
+`/api/vets/popular`, `/api/user/subscriptions`, …). Negative control: seeding
+without the second `nav` leaves the page logged-out. Token confirmed
+independently (`/api/auth/me` → `E2E Owner`, id 1, tz `UTC`).
 
 - **Role** is `vetr-profile` — a plain zustand-persist key, **NOT** under the
   Capacitor prefix: `{state:{profile:"user"|"vet"|"servicer"},version:0}`. A vet
@@ -124,6 +123,13 @@ as the page becoming drivable, and in that run it did not.**
 can open a **`fixed inset-0 z-[9999]` overlay** (`FeedbackModalRenderer.tsx:35`).
 It intercepts every click, so the page reads fine and every input op silently
 does nothing.
+
+**Measured, both controls.** WITHOUT the opt-out: the modal fires — "Timezone
+Mismatch Detected / Your device timezone (America/Winnipeg) doesn't match…" — its
+rect is `1124×1361`, **exactly the viewport**, `pointer-events: auto`,
+`z-index: 9999`, and a hit-test of **all 35 in-viewport controls** returns the
+modal as the topmost element for **every one of them**. WITH
+`timezone_mismatch_dismissed` seeded: no modal, dashboard renders normally.
 
 Playwright dodges it by pinning `timezoneId: "UTC"` to match the seeded fixtures
 (they are all UTC). **The bridge is the operator's real browser and cannot pin a
@@ -145,44 +151,55 @@ availability slot you were about to measure.
 It only fires for an **authed** user with a differing saved profile tz, so a
 logged-out walk never sees it.
 
-## 🔴 THE RENDER PROBLEM — unresolved, and it gates the whole drive lane
+## 🔴 A TIRED TAB GOES BLANK — and it reads exactly like "vetr is broken"
 
-Measured 2026-08-27 against the hermetic stack (the same origin that had just
-served **53 passed / 7 skipped / 0 failed** to Playwright minutes earlier):
+The single most expensive thing that happened while writing this file. **A tab
+reused across many `nav`s stopped rendering any route** — app shell mounted,
+`textContent` was only the react-router bootstrap script. It reproduced on
+`/choose-experience` (logged-OUT, 4 green Playwright tests against that same
+origin), on `/user`, and on `/user/appointments`, across 6+ attempts with
+`--wake` up to 10s and `localStorage.clear()`.
 
-| route | in a bridge-driven tab |
-|---|---|
-| `/` (welcome) | rendered content **once** ("Vetr — One App for Every Pet Need"), and on a later `nav` showed only the empty splash `<section>` |
-| `/choose-experience` (logged-OUT, 4 green Playwright tests) | **blank** — app shell mounts, zero interactive elements, `textContent` is just the react-router bootstrap script. 6+ attempts, `--wake` up to 10s, storage cleared |
-| `/user` (authed) | authenticated, but a **permanent skeleton**: `/api/auth/me` + `/api/config` fire and then **no dashboard queries at all**, versus the full `/api/user/pets`+`/api/indicators`+… fan-out the same origin served Playwright |
-| `/user/appointments` | blank |
+**It was written up as a vetr defect. It was not one.** A `close` + fresh `open`
+of the *same URL* rendered everything immediately — the chooser's three role
+cards, the authed dashboard with its full data fan-out.
 
-**What was ruled OUT:**
-- Not the server — all three paths return an **identical** 5176-byte SPA-fallback
-  `index.html`, HTTP 200 (`cmp` clean).
-- Not throttling. The tab was `activate`d: `visibilityState` went `visible`, the
-  skeleton shimmer advanced (so animations run) — and it was **still blank, with
-  still no new API calls**.
-- Not the seeded keys — `localStorage.clear()` then re-`nav` reproduced it.
-- Not a bad token — verified server-side.
+Ruled out along the way, so nobody re-runs them: **not the server** (all paths
+return an identical 5176-byte SPA-fallback `index.html`, 200, `cmp` clean);
+**not throttling** (`activate`d — `visibilityState: visible`, animations
+advancing, still blank); **not the seeded keys**; **not the token**; **not the
+splash** (it renders the literal text "Vetr", and these reads had *zero*
+`innerText`); **not GTM/Brave Shields** (`TagManager.initialize` is try/caught
+non-fatal, `root.tsx:288`); **not the error boundary** (it renders a visible
+"Oops!", `root.tsx:400`).
 
-**Mechanism is UNKNOWN.** Do not guess one from this file. Two candidates were
-never separated: a hydration race on non-root paths (the shell's baked
-`__reactRouterContext` is for `/`), or something about a bridge-driven tab that a
-Playwright context does not reproduce. The `/` result moving between two reads
-says it is at least partly **racy**, not a hard failure.
+🔴 **So: if a vetr route reads blank, `close` the tab and `open` a fresh one
+BEFORE forming any theory.** The root cause of the tired-tab state is unknown and
+is a bridge-level question, not a vetr one.
 
-**So, until this is root-caused:**
-- 🔴 **Do not treat a blank vetr route as a bug in vetr.** Playwright renders these
-  same routes green. Reproduce it in the suite before reporting anything.
-- **Enter at `/` and navigate in-app** rather than deep-linking a route.
-- **For anything that must actually work, use the Playwright/ux-audit harness, not
-  the bridge.** The bridge's proven vetr capability today is *reading the welcome
-  screen and proving an auth seed took*, not walking the funnel.
-- `js` runs in an **ISOLATED world**: `window` state does **not** survive between
-  calls (`window.__x = …` then reading it back returns nothing), and a returned
-  **Promise is not awaited** (`async` expressions come back empty). Use one
-  self-contained synchronous expression, or `curl` the API directly.
+### 🔴 And your blankness detector is probably lying
+
+Three separate instruments gave a confident wrong answer here. All three are
+generic — they are not about vetr:
+
+- **`innerText` needs layout**; a backgrounded/occluded tab can return `""` for a
+  page that is rendering fine. Use `textContent` to decide "is anything in the
+  DOM", and a **`screenshot` to decide what state it is in** — the screenshot is
+  what finally separated "skeleton loading" from "nothing mounted".
+- **A button/link count of 0 means nothing.** The chooser renders three role
+  cards and still counted 0 `button,a`. A skeleton legitimately has no text and
+  no controls.
+- **`elementFromPoint` returns `null` for an off-viewport point**, which reads
+  identically to "covered by an overlay". vetr renders an off-canvas menu at
+  negative x, so its controls sit at e.g. `x = -249`. **Filter to in-viewport
+  centres first**, then hit-test.
+
+### `js` runs in an ISOLATED world
+
+`window` state does **not** survive between calls (`window.__x = …` then reading
+it back returns nothing), page globals set by the app may not be visible, and a
+returned **Promise is not awaited** (`async` expressions come back empty). Use
+one self-contained synchronous expression, or `curl` the API directly.
 
 ## Other traps
 
@@ -231,3 +248,7 @@ cancellation-with-fee, Rx gating, subscription purchase, admin), and eyeballing 
 fix before someone writes the spec. **It is not a substitute for a spec** — when a
 bridge walk finds something, the deliverable is a spec in `vetr-app/e2e/`, not a
 note.
+
+🔴 **And nothing a bridge walk finds is a vetr defect until the suite reproduces
+it.** The suite renders these routes green; this file's own worst mistake was
+skipping that step.
