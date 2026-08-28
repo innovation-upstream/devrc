@@ -201,8 +201,10 @@ def version_base(version: str) -> str:
     if len(parts) < VERSION_BASE_COMPONENTS:
         raise AssertionError(
             f"manifest version {version!r} has {len(parts)} component(s); the "
-            f"release base must be exactly {VERSION_BASE_COMPONENTS} "
-            f"(e.g. '0.9.0', not '0.9'). A shorter base has no fixpoint: the "
+            f"release base needs at least {VERSION_BASE_COMPONENTS} "
+            f"(e.g. '0.9.0', not '0.9'). More is fine — a 4th component is the "
+            f"generated build id and is truncated away here. A SHORTER base has "
+            f"no fixpoint: the "
             f"generated build id would be re-read as part of the base on the "
             f"next run and frozen there permanently.")
     base_parts = parts[:VERSION_BASE_COMPONENTS]
@@ -216,8 +218,14 @@ def _require_legal_component(part: str, version: str) -> None:
 
     Chrome's rule: 1-4 dot-separated integers, each 0..65535, no leading zeros.
     A manifest breaking it does not warn — the extension simply fails to LOAD,
-    which presents as a bridge that is down rather than as a bad version."""
-    if not part.isdigit() or part != str(int(part)) or \
+    which presents as a bridge that is down rather than as a bad version.
+
+    `isascii()` guards `isdigit()`, and the order matters: `'²'.isdigit()` is
+    True while `int('²')` RAISES, so testing digit-ness alone let a ValueError
+    escape from the next clause — losing the message that names Chrome's rule
+    and the file to edit, in favour of a bare
+    `invalid literal for int() with base 10`."""
+    if not (part.isascii() and part.isdigit()) or part != str(int(part)) or \
             int(part) > VERSION_COMPONENT_MAX:
         raise AssertionError(
             f"manifest version {version!r} contains component {part!r}, which "
@@ -262,19 +270,16 @@ def derive_version(ext_dir=None, marker: str | None = None) -> str:
             f"derive a base from.")
     if marker is None:
         marker = compute_marker(ext_dir)
-    derived = f"{version_base(current)}.{build_component(marker)}"
-    # Validate the CONCATENATION, not just the halves. Each half is checked by
-    # the function that produces it, but "both halves are legal" is not the
-    # claim that matters — Chrome parses the whole string, and this is the last
-    # point before it is written to a manifest and deployed.
-    parts = derived.split(".")
-    if not 1 <= len(parts) <= 4:
-        raise AssertionError(
-            f"derived version {derived!r} has {len(parts)} components; Chrome "
-            f"accepts 1-4.")
-    for p in parts:
-        _require_legal_component(p, derived)
-    return derived
+    # No re-validation of the concatenation here. `version_base` returns exactly
+    # VERSION_BASE_COMPONENTS already-validated components and `build_component`
+    # returns an int in 0..VERSION_COMPONENT_MAX, so the result is always 4 legal
+    # components — a check here CANNOT FIRE. An earlier revision had one, with a
+    # comment calling it "the last point before it is written to a manifest",
+    # which was worse than nothing: it read as defence-in-depth while being
+    # unreachable, and it pointed away from the entry point that IS unguarded.
+    # That check now lives in `write_manifest_version`, where an externally
+    # supplied `version=` can genuinely be illegal.
+    return f"{version_base(current)}.{build_component(marker)}"
 
 
 def write_manifest_version(ext_dir=None, version: str | None = None) -> str:
@@ -282,10 +287,25 @@ def write_manifest_version(ext_dir=None, version: str | None = None) -> str:
 
     A targeted substitution rather than a JSON round-trip on purpose: reparsing
     and re-dumping would reformat the whole file, so every build would produce a
-    diff far larger than the one byte-range that actually changed."""
+    diff far larger than the one byte-range that actually changed.
+
+    🔴 THIS is where the written string is validated, and it is the only place
+    that can be. A caller-supplied `version=` is the one entry point that
+    reaches the manifest without passing through `derive_version` — so
+    `write_manifest_version(d, "0.8.1-beta")` used to write a manifest Chrome
+    refuses to load, with no error. `derive_version`'s own output is legal by
+    construction, so validating it there could never fire."""
     ext_dir = Path(ext_dir) if ext_dir is not None else EXT_DIR
     path = ext_dir / "manifest.json"
     version = version or derive_version(ext_dir)
+    parts = version.split(".")
+    if not 1 <= len(parts) <= 4:
+        raise AssertionError(
+            f"refusing to write version {version!r}: it has {len(parts)} "
+            f"components and Chrome accepts 1-4. An extension whose manifest "
+            f"breaks this fails to LOAD, which presents as a dead bridge.")
+    for p in parts:
+        _require_legal_component(p, version)
     text = path.read_text(encoding="utf-8")
     new, n = MANIFEST_VERSION_RE.subn(f'"version": "{version}"', text)
     if n != 1:

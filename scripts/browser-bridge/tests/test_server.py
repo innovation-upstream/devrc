@@ -6621,11 +6621,17 @@ COMMITTED_BUILD_MARKER = GEN.read_marker(EXT_DIR / "build_id.js")
 # them, rather than reading the manifest and comparing it to itself.
 # Calls GEN.build_component rather than re-slicing the marker here: a second
 # copy of the derivation is how a gate drifts into agreeing with itself (the
-# generator's own docstring says so), and it also localises the failure. A
-# hand-rolled `int(COMMITTED_BUILD_MARKER[:4], 16)` raises TypeError at IMPORT
-# when build_id.js is unreadable — read_marker returns None by contract — which
-# turns one specific gate failure into a collection error that takes every test
-# in this file down with it.
+# generator's own docstring says so).
+#
+# ⚠ What this does NOT fix, stated because an earlier version of this comment
+# claimed it did: the call is still at MODULE scope, so an unreadable
+# build_id.js still kills COLLECTION and hides every test in this file. Measured
+# — delete extension/build_id.js and pytest reports `Interrupted: 1 error during
+# collection`, not one failed gate. The change buys a message that names the
+# file and the regen command instead of a bare TypeError; the blast radius is
+# identical. Moving this into a fixture would fix that, and is deliberately not
+# done here — it would rewrite both call sites for a failure mode that only
+# occurs when a generated file has been deleted.
 PINNED_EXT_VERSION = (
     f"{declared_ext_versions()[0]}.{GEN.build_component(COMMITTED_BUILD_MARKER)}")
 
@@ -6714,8 +6720,12 @@ def test_build_marker_check_mode_agrees_with_the_gate():
 # separate them. It is now DERIVED from the marker, so it moves whenever the
 # code moves and a stale profile is legible at a glance.
 #
-# `extension_stale` still compares the MARKER and nothing else. The version is a
-# human signal; do not make it load-bearing.
+# An ALL-CLEAR (`extension_stale: false`) comes from the MARKER alone — that is
+# the half that matters, and no version-shaped signal can produce it. A `true`
+# can ALSO come from a version disagreement (`server.py:883-884`, `:887-891`),
+# so "the marker and nothing else" is wrong in that direction and this comment
+# said exactly that until round 2 caught the third copy of it.
+# The version is a human signal; do not make it load-bearing.
 # --------------------------------------------------------------------------- #
 def _ext_copy(tmp_path, name="ext"):
     """A throwaway copy of the real extension source."""
@@ -6884,6 +6894,34 @@ def test_derivation_reaches_a_fixpoint_in_ONE_regeneration(tmp_path):
     written = GEN.write_manifest_version(src)
     assert GEN.derive_version(src) == written
     assert GEN.read_manifest_version(src / "manifest.json") == written
+
+
+@pytest.mark.parametrize("bad", [
+    "0.8.1-beta", "v0.8.1", "0.08.1", "1.2.3.4.5", "0.8.65536", "0.8.²",
+])
+def test_write_manifest_version_refuses_an_illegal_CALLER_SUPPLIED_version(
+        tmp_path, bad):
+    """The `version=` argument is the ONE path to the manifest that does not go
+    through `derive_version`, so it is the only place this check can fire.
+
+    Round 2 found the previous guard sitting in `derive_version`, where it was
+    UNREACHABLE — `version_base` and `build_component` each validate their own
+    half, so the concatenation is legal by construction — while carrying a
+    comment calling it "the last point before it is written to a manifest".
+    Meanwhile `write_manifest_version(d, "0.8.1-beta")` wrote a manifest Chrome
+    refuses to load, unchecked. A guard that reads as defence-in-depth while
+    being dead is worse than none: it stops anyone looking at the entry point
+    that is actually open.
+
+    `0.8.²` is here because `'²'.isdigit()` is True while `int('²')` raises —
+    without the `isascii()` guard this leaks a bare ValueError instead of the
+    message naming Chrome's rule and the file to fix."""
+    src = _ext_copy(tmp_path)
+    before = GEN.read_manifest_version(src / "manifest.json")
+    with pytest.raises(AssertionError):
+        GEN.write_manifest_version(src, bad)
+    assert GEN.read_manifest_version(src / "manifest.json") == before, \
+        "the manifest was written on the way to raising"
 
 
 def test_build_component_refuses_a_missing_marker():
