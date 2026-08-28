@@ -282,50 +282,69 @@ different depending only on which URL you entered at.
 
 ### 🔴 `z-index: 9999` does NOT identify the timezone modal
 
-An earlier revision of this file said a `z-9999` blocker "is **always** the timezone
-modal". **False, and it sends you to a remedy that cannot work.** There are (at
-least) **two distinct z-9999 `pointer-events: auto` surfaces** in a browser tab.
+An earlier revision said a `z-9999` blocker "is **always** the timezone modal".
+False — z-9999 is shared. **Identify the blocker, don't infer it:**
 
-**(a) The shared `FeedbackModalRenderer` backdrop** (`FeedbackModalRenderer.tsx:35`).
-The timezone modal (`root.tsx:334`) is *one* of **eleven** `<FeedbackModal>` callers
-— the other ten include the exact surfaces this file routes you to:
+```js
+// one expression. NB the modal has no data-testid — find it by computed style.
+(function(){
+  var z = [].slice.call(document.querySelectorAll("div")).filter(function(e){
+    var s = getComputedStyle(e);
+    return s.position === "fixed" && s.zIndex === "9999";
+  });
+  return JSON.stringify({
+    boot:  !!document.querySelector("[data-testid=app-boot-skeleton]"),
+    toast: !!document.querySelector(".Toastify__toast-container"),
+    z9999: z.map(function(e){ return (e.innerText || "").trim().slice(0, 80); })
+  });
+})()
+```
 
-- `routes/user/vets/vet-view.tsx:1764` — `/user/vets/:id`, the landing route above
-- `routes/user/bookings/booking-checkout.tsx:88` and
-  `routes/user/appointments/appointment-checkout.tsx:143` — the checkout screens the
-  gateway trap below sends you into
-- plus `bookings/index.tsx`, `appointments/index.tsx`, `servicer-service-view.tsx`,
-  `my-pets-create.tsx`, `pages/contact.tsx`, `professional-report.tsx`,
-  `PetOwnerHomeBookingCard.tsx`
+1. **`.Toastify__toast-container` present** ⇒ a toast is live. That div is only
+   rendered while at least one toast exists, so its presence is a binary answer.
+2. **A `z9999` entry reading "Timezone Mismatch Detected"** ⇒ the modal above; that
+   is the *only* one `timezone_mismatch_dismissed` clears.
+3. **Any other title** ⇒ a different `<FeedbackModal>`; dismiss it on its own terms.
 
-**(b) The react-toastify container — and in a bridge walk this is the LIKELIER
-one.** `<ToastContainer>` is mounted unconditionally on every route
-(`root.tsx:161`), and `ReactToastify.css` sets `--toastify-z-index: 9999` (`:29`,
-applied `:52`) with **no `pointer-events` rule anywhere in the stylesheet** ⇒
-default `auto`. The axios interceptor fires `toast.error` on **any** API error
-(`app/lib/api/axios.tsx:151,192,197`), and vetr passes `closeOnClick={false}` +
-`autoClose={5000}` (`root.tsx:161-167`). So an API error parks a clickable
-`position: fixed`, top-right, z-9999 box over the page for 5s. Bounded, at least:
-`--toastify-container-width: fit-content` (`:15`, applied `:55`), so with no toast up
-the container is zero-size and intercepts nothing.
+(That filter is the one measured against this app: it returned the timezone modal
+plus its inner panel, and the modal as topmost for all 35 in-viewport controls.)
 
-⚠ **`UpdateApp.tsx:9` is `fixed inset-0 z-[9999]` with no `pointer-events-none`, but
-you will NEVER meet it in a browser** — `setUpdateStoreUrl` has exactly one call site
-(`root.tsx:245`) behind `if (!Capacitor.isNativePlatform()) return;` (`root.tsx:236`),
-plus `isProduction` and an outdated native build. And where it *does* fire it is an
-early `return` replacing the whole tree (`root.tsx:320-322`), not an overlay — so it
-cannot produce the "page reads fine, clicks do nothing" symptom at all. Listed only
-because an earlier revision of this file offered it as the non-`FeedbackModal`
-example; it is a phantom.
+**Why a title and not a z-index.** `z-[9999]` + `pointer-events: auto` is the
+**shared** `FeedbackModalRenderer` backdrop (`FeedbackModalRenderer.tsx:35`), and the
+timezone modal (`root.tsx:334`) is *one* of **eleven** `<FeedbackModal>` callers. The
+other ten include surfaces this file routes you to —
+`routes/user/vets/vet-view.tsx:1764` (`/user/vets/:id`, the landing route above),
+`routes/user/bookings/booking-checkout.tsx:88` and
+`routes/user/appointments/appointment-checkout.tsx:143` (the checkout screens in the
+gateway trap below), plus `bookings/index.tsx`, `appointments/index.tsx`,
+`servicer-service-view.tsx`, `my-pets-create.tsx`, `pages/contact.tsx`,
+`professional-report.tsx`, `PetOwnerHomeBookingCard.tsx`. `title` is a required prop
+rendered as plain text (`FeedbackModal.tsx:8`, `FeedbackModalRenderer.tsx:60`), so
+`innerText` reads it.
 
-🔴 **So read the modal's TITLE, never its z-index.** Only
-"Timezone Mismatch Detected" is cleared by `timezone_mismatch_dismissed`; a
-success/error `FeedbackModal` needs its own dismiss (`title` is a required prop and
-renders as plain text, `FeedbackModal.tsx:8` / `FeedbackModalRenderer.tsx:60`, so
-`innerText` reads it); a toast has no title row at all — check for
-`.Toastify__toast-container`. What the splash row above *does* license is the one-way
-inference: the splash is `pointer-events-none`, so whatever a hit-test returns, it
-is not the splash.
+**The toast container is the other z-9999 surface** (`<ToastContainer>` at
+`root.tsx:161`, `--toastify-z-index: 9999` at `ReactToastify.css:29`, applied `:52`;
+stylesheet imported `root.tsx:30`). Two things about it that are easy to get wrong:
+
+- ⚠ **A toast implies a prior click.** vetr's toasts come from **component action
+  handlers** (~68 `toast.*` calls across 14 non-test files). The axios interceptor's
+  two toasts are gated on `config?.toastr` (`axios.tsx:151,197`) — and **vetr-api's
+  `GET /config` never sends a `toastr` key**, so they do not fire; the third
+  (`:192`) is a client-side HEIC-conversion failure only. So a toast does not appear
+  from a passive read.
+- ⚠ **At mobile widths it is a full-width top strip, not a corner box** —
+  `ReactToastify.css:115-117` sets `width: 100vw` at `≤480px`, and this file tells you
+  to `emulate` 390×844. Don't rule it out because your control is on the left.
+  `autoClose` is 5000ms but `pauseOnFocusLoss` is set (`root.tsx:168`), and a
+  bridge tab is often unfocused — so treat it as *until dismissed*, not 5s.
+
+⚠ `UpdateApp.tsx:9` is also `fixed inset-0 z-[9999]`, but **you cannot meet it in a
+browser**: its only trigger (`root.tsx:245`) sits behind
+`if (!Capacitor.isNativePlatform()) return;` (`:236`). Noted only so nobody re-adds
+it as a candidate.
+
+The splash licenses one inference and only one: it is `pointer-events-none`, so
+whatever a hit-test returns, it is **not** the splash.
 
 So, precisely: a read with **zero `innerText`** does rule the brand splash out —
 splash renders text. What it does **not** rule out is stalled hydration, because
