@@ -4179,7 +4179,19 @@ class TestTheDeployedEntrypoint:
         # non-audit line must still fail this. `wait_closed()` first, so a line
         # printed during SHUTDOWN is inside the stream being asserted on rather
         # than still in flight.
-        out.wait_closed()
+        #
+        # 🔴 AND ITS ANSWER IS ASSERTED, exactly as in `settle`. Discarded, a
+        # timeout here degrades in silence: the stream has NOT reached EOF, the
+        # ceiling below is a snapshot again, and it reports "the closed stream
+        # holds ..." about a stream that is not closed. This site kept the
+        # discarded form after `settle` was fixed because `_eof_barriers`
+        # accepted only `ast.Expr`/`ast.Assign` and FLAGGED the assert — the
+        # guard structurally required the defect. That arm now exists.
+        assert out.wait_closed(), (
+            f"the stream never reached EOF within 15s, so the ceiling below is "
+            f"a snapshot again and the leak check is racing lines still in "
+            f"flight — it holds {len(out.audit)} audit record(s) so far for 3 "
+            f"requests.\nfull stream:\n{out.text}")
         assert GOOD_TOKEN not in out.text and SECOND_TOKEN not in out.text
         assert "w" * 48 not in out.text
         # 🔴 AND THE CEILING, AFTER THE STREAM IS CLOSED. `lines` above is a
@@ -4207,6 +4219,17 @@ class TestTheDeployedEntrypoint:
         #       mutation sweep. It belongs in a change that carries its own
         #       matrix, not in one that inherits this one's.
         # If (1) is ever solved with a synthetic fixture, convert this.
+        #
+        # 🔴 "NOT CONVERTED" IS NOT "FINE AS-IS", AND THIS PARAGRAPH USED TO
+        # READ AS THOUGH IT WERE. Both reasons above are about the CONVERSION to
+        # `settle`, and neither has anything to say about whether the copy is
+        # CORRECT. It was not: it carried the discarded `out.wait_closed()` and
+        # the "the closed stream holds ..." message verbatim — line for line the
+        # pre-fix shape that the `settle` commit repaired everywhere else, in
+        # the one place a reader is most likely to copy from. The one-word
+        # repair is above; it is independent of the conversion, which stays
+        # deferred. A duplicated branch has to be kept in step with its
+        # original, not merely justified.
         assert len(out.audit) == 3, (
             f"the closed stream holds {len(out.audit)} audit records for 3 "
             f"requests — an extra one was emitted after the snapshot:\n{out.text}")
@@ -5993,6 +6016,46 @@ def test_every_exact_count_site_goes_through_settle():
     `len(...) == n` on the snapshot — is invisible to every other guard here.
     Pinning the number is what makes that revert a red run instead of a silent
     narrowing back to the synchronous-only ceiling.
+
+    🔴 WHAT IT CANNOT SEE, AND THE NAME OVERCLAIMS. This is a COUNT of
+    `settle(...)` call expressions. "Every exact-count site goes through
+    `settle`" is a claim about a SET, and a count cannot deliver it — the census
+    never enumerates the exact-count sites, so it cannot know whether one of
+    them is missing. Two shapes were APPLIED and SURVIVED — measured against
+    all five census/placement guards, not reasoned about — and they are named
+    here rather than left for the next reader to rediscover:
+
+      (1) HELPER INDIRECTION. Route one site through a one-line wrapper
+          (`def _w(o): return settle(o, 4)`, called where the direct call was).
+          The `settle(...)` expression still exists, so the count stays 15 and
+          this stays green; and because the call AT THE SITE is now spelled
+          `_w(...)`, `test_settle_is_called_AFTER_the_running_block_never_inside`
+          cannot see it either. MEASURED: indirection alone, 0/5 guards red —
+          and the state that actually LOSES the ceiling, indirection plus the
+          call moved INSIDE the `with` body where teardown has not run, also
+          0/5. The stake is not hypothetical.
+      (2) A NEW SITE WRITTEN THE OLD WAY. Add a test whose exact-count assertion
+          is spelled `lines = await_audit(audit, n)` + `assert len(lines) == n`.
+          It is a snapshot ceiling, it is exactly the defect `settle` exists to
+          repair, and the count is unchanged at 15. MEASURED: 0/5 red. What the
+          census catches is the REVERSION of an EXISTING site — the failure it
+          was built against — never the ARRIVAL of a new one in the old shape,
+          despite what the name says.
+          🔴 And it is invisible only in the IN-PROCESS shape. A new site that
+          also calls `drain_output(...)` IS caught — but by the sibling census
+          `test_every_audit_reading_test_goes_through_the_shared_helper` moving
+          3 -> 4, i.e. for a reason that has nothing to do with ceilings. Do not
+          read that red as coverage: it is a guard dying for the wrong reason,
+          and it disappears the moment the new site uses `running(...)`.
+
+    Both gaps are PRECEDENT, not new: `_drain_output_call_sites` and
+    `test_every_audit_reading_test_goes_through_the_shared_helper` have the
+    identical name-versus-count shape and shipped that way. Closing (1) needs
+    the census routed through `_transitive` (which propagates a BOOLEAN through
+    the call graph and so can serve the placement guard, but cannot produce a
+    count); closing (2) needs a detector for the old spelling. Both are new
+    guards with their own mutation matrices, and neither belongs in a change
+    that inherits this PR's.
     """
     assert _settle_call_sites() == 15, (
         f"expected exactly 15 `settle(...)` call sites, found "
@@ -6132,16 +6195,48 @@ def _eof_barriers(fn: ast.AST) -> "list[tuple[int, str]]":
     the site is asked to hoist it, which for the one permitted site in this file
     is where the barrier already is.
 
-    Only a bare `x.wait_closed()` statement or `y = x.wait_closed()` qualifies,
-    and `x` must be a plain name so it can be matched against the read's owner:
-    a call buried in a lambda, a comprehension or an argument list is a mention
-    again, one layer down.
+    Only a bare `x.wait_closed()` statement, `y = x.wait_closed()`, or
+    `assert x.wait_closed()` qualifies, and `x` must be a plain name so it can
+    be matched against the read's owner: a call buried in a lambda, a
+    comprehension or an argument list is a mention again, one layer down.
+
+    🔴 `assert x.wait_closed()` IS ACCEPTED, AND LEAVING IT OUT WAS A REAL
+    DEFECT, NOT A GAP. `wait_closed` RETURNS whether EOF was reached, and
+    discarding that answer is the exact bug `settle` was fixed for: on a timeout
+    the discarded form degrades silently into a bare snapshot with no ceiling at
+    all, and then reports "the closed stream holds ..." about a stream that was
+    not closed. Accepting only `ast.Expr`/`ast.Assign` made the repaired form
+    STRUCTURALLY FORBIDDEN at every test site — this helper taught "assert the
+    answer" while its own predicate required the discarded spelling — so the
+    file's one hand-rolled copy of that branch was pinned at the pre-fix shape
+    by the guard that was supposed to be protecting it. MEASURED against the
+    shipped predicate before this arm existed: rewriting the permitted site's
+    barrier to `assert out.wait_closed()` emptied `_eof_barriers` and FLAGGED
+    both of its reads, under the message "these tests index the LIVE audit
+    list" — which is not what had happened.
+
+    🔴 AND ONLY WHEN THE CALL IS THE ASSERT'S ENTIRE `test` EXPRESSION.
+    `assert not x.wait_closed()` asserts the NEGATION — a stream that did NOT
+    reach EOF — and `assert x.wait_closed() is False` says the same thing one
+    node further out; accepting either would exempt a raw read behind an
+    assertion that the ceiling does not exist. So a `UnaryOp` or a `Compare`
+    wrapper is not counted, deliberately: the truthy comparison spellings are
+    unused in this file and cannot be separated from their negations without a
+    whitelist of operators and literals, and the cost of refusing them is that a
+    site writes the plain form. Both spellings are controls below. (`assert`
+    also implies `-O` strips the barrier; nothing here runs under `-O`, and a
+    stripped `assert` removes the wait rather than the read, which fails loudly.)
     """
     found: "list[tuple[int, str]]" = []
     for stmt in fn.body:
         if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
             break                       # nothing after this statement runs
-        value = stmt.value if isinstance(stmt, (ast.Expr, ast.Assign)) else None
+        if isinstance(stmt, (ast.Expr, ast.Assign)):
+            value = stmt.value
+        elif isinstance(stmt, ast.Assert):
+            value = stmt.test           # `assert x.wait_closed()` — see above
+        else:
+            value = None
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) \
                 and value.func.attr == "wait_closed" \
                 and isinstance(value.func.value, ast.Name):
@@ -6212,18 +6307,39 @@ def test_no_test_INDEXES_a_live_audit_list():
     binds its stream to `out` the way `Drained` sites do. The control below is
     written both ways for that reason.
 
-    The condition is now `_eof_barriers`: an UNCONDITIONAL `x.wait_closed()`
-    statement in the function's OWN top-level statement sequence, before any
-    terminator, LEXICALLY BEFORE the read, and on the SAME object the read names.
-    Every clause of that sentence has a control below that separates it from its
-    negation, so the sentence is machine-checked for the shapes enumerated there
-    and is not a claim about code nobody re-read.
+    🔴 AND THE FOURTH ROUND WAS THE OPPOSITE ERROR — THE EXEMPTION WAS TOO
+    NARROW, AND THAT IS ALSO A DEFECT. `_eof_barriers` accepted only `ast.Expr`
+    and `ast.Assign`, so `assert x.wait_closed()` — the form the `settle` fix
+    adopted precisely BECAUSE the discarded answer degrades in silence on a
+    timeout — was invisible to it. MEASURED against the shipped predicate:
+    rewriting the permitted site's barrier to `assert out.wait_closed()` emptied
+    its barrier list and FLAGGED both of its reads as though they were racy,
+    under this test's own "these tests index the LIVE audit list" message. So
+    the guard did not merely fail to recognise the repaired form, it FORBADE it,
+    and the one hand-rolled copy of `settle`'s branch in this file stayed pinned
+    at the pre-fix shape for exactly that reason. A guard that requires the
+    defect is worse than one that misses it.
+
+    The condition is now `_eof_barriers`: an UNCONDITIONAL `x.wait_closed()` —
+    discarded, assigned, or ASSERTED — in the function's OWN top-level statement
+    sequence, before any terminator, LEXICALLY BEFORE the read, and on the SAME
+    object the read names. Every clause of that sentence has a control below
+    that separates it from its negation, so the sentence is machine-checked for
+    the shapes enumerated there and is not a claim about code nobody re-read.
 
     🔴 WHAT IT CANNOT SEE: a read through an alias (`a = audit; a[0]`), a list
     passed into a helper, a differently-named binding, or a barrier whose
     receiver is a plain name that has been REBOUND between the barrier and the
     read. It is a ledger of the shapes that actually bit plus their nearest
     siblings, not a proof that no racy read exists.
+
+    🔴 AND WHAT IT DELIBERATELY REFUSES, which is the other direction and is
+    stated separately because it costs a site a rewrite rather than hiding a
+    race: `assert not x.wait_closed()` and `assert x.wait_closed() is False`
+    assert that EOF was NOT reached, and the truthy comparison spellings cannot
+    be told from their negations without a whitelist of operators and literals.
+    Only an `assert` whose test IS the call counts. Both refusals are controls
+    below, so this is pinned rather than merely intended.
     """
     tree = ast.parse(Path(__file__).read_text())
     offenders = []
@@ -6333,6 +6449,92 @@ def test_no_test_INDEXES_a_live_audit_list():
             out.wait_closed()
             assert "x" in out.audit[0]
     """), "a real, unconditional `wait_closed()` before the read was rejected"
+
+    # 🔴 CONTROLS FOR THE `assert` ARM — the round where the exemption was too
+    # NARROW rather than too wide. Both directions, because widening the barrier
+    # FORM must not widen the EXEMPTION: the accepted pair below is the whole
+    # point of the arm, and everything after it is a shape that must still be
+    # flagged with the arm in place.
+    assert not unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            assert out.wait_closed()
+            assert "x" in out.audit[0]
+    """), ("`assert x.wait_closed()` — the form `settle` uses, and the only one "
+           "that does not discard the answer — was rejected as a barrier")
+
+    # The real site's spelling: an explicit timeout and a failure message.
+    assert not unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            assert out.wait_closed(15.0), f"no EOF: {out.text}"
+            assert "x" in out.audit[0]
+    """), "an asserted barrier with a timeout and a message was rejected"
+
+    # Refused on purpose: these assert the NEGATION of the barrier.
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            assert not out.wait_closed()
+            assert "x" in out.audit[0]
+    """), ("`assert not x.wait_closed()` asserts the stream did NOT reach EOF "
+           "and was accepted as a barrier for it")
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            assert out.wait_closed() is False
+            assert "x" in out.audit[0]
+    """), ("a `Compare` wrapper was counted, so `is False` — the negation one "
+           "node further out — buys the read a pass")
+
+    # And the four shapes from the previous round, respelled with the new arm.
+    # The nesting/ordering clauses live in the statement walk, which the arm
+    # shares; these pin that it did not become a way around them.
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            if False:
+                assert out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "an ASSERTED barrier inside `if False:` was counted as unconditional"
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            with contextlib.suppress(AttributeError):
+                assert out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "an ASSERTED barrier inside a SUPPRESSING `with` was counted"
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            with pytest.raises(AttributeError):
+                assert out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "an ASSERTED barrier inside `pytest.raises(...)` was counted"
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            return
+            assert out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "an ASSERTED barrier after a `return` is unreachable and was counted"
+
+    assert unguarded("""
+        def test_x(out, proc_out):
+            await_audit(out, 1)
+            assert proc_out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "an ASSERTED barrier on a DIFFERENT stream exempted a read of `out.audit`"
+
+    assert unguarded("""
+        def test_x(out):
+            assert "x" in out.audit[0]
+            assert out.wait_closed()
+    """), "an ASSERTED barrier AFTER the read was accepted as if it preceded it"
 
 
 class TestTrustedProxyAllowlistParsing:
