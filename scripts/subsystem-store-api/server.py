@@ -212,6 +212,14 @@ rows too.
     byte.
   * **`PUT /api/v1/entry/<scope>/<ref>`** replaces the whole file behind a
     REQUIRED `If-Match`; a stale revision is a 412 and the file is untouched.
+    ⚠ **THE ATTRIBUTION GUARANTEE ABOVE IS A CLAIM ABOUT `POST /bullets`
+    ONLY.** A PUT writes the caller's bytes verbatim — a body containing
+    `- <date>: OPEN: … [cairn: someone-else/…]` lands exactly as sent — and this
+    server does not check it. Decided, not overlooked: PUT exists for the
+    whole-file rewrites the store needs (`## Pointers`, `OPEN:` ->
+    `RESOLVED <sha>:`), and enforcing per-bullet attribution would mean diffing
+    the old bullet set against the new one and refusing legitimate rewrites
+    whenever that diff was wrong. See `replace_entry`.
     ⚠ THE REVISION IS THE ENTRY'S CONTENT HASH, NOT `scope_revision`, AND THAT IS
     A DELIBERATE DEVIATION FROM THE CARD'S WORDING — no scope in the served copy
     is a git repo, so `scope_revision` answers "unknown" for all of them and a
@@ -246,6 +254,8 @@ import tarfile
 import tempfile
 import threading
 import time
+import traceback
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -465,6 +475,49 @@ SESSION_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 # sent a leading `- ` would get TWO bullets from one POST, only one of which
 # carries an attribution trailer. Both are content the store cannot account for.
 BULLET_TEXT_MAX = 2000
+
+# 🔴 EVERY CHARACTER `str.splitlines()` TREATS AS A LINE BREAK — TEN OF THEM,
+# NOT TWO. The validator used to read `if "\n" in text or "\r" in text`, which is
+# a membership test on two characters standing in for a predicate about ten.
+# MEASURED, with a paired control on the same payload: a literal `U+2028` in
+# `text` was accepted `200 appended`, and the ONE line the server rendered became
+# TWO on the next read — the first carrying the caller's prose with **no
+# attribution trailer at all** (criterion 4 says every appended bullet records
+# actor and session), the second an `OPEN:`-marked bullet whose leading
+# `[cairn: …]` an operator reads as somebody ELSE's attribution. One `200` by
+# `zach`, two bullets, one of them forged-looking. The same payload with a plain
+# `" - "` separator stayed one line, which is what makes it the character and not
+# the shape.
+#
+# `U+2028`/`U+2029` are `Zl`/`Zp`; the other eight are `Cc` and would also be
+# caught by `_FORBIDDEN_CATEGORIES` below — but the line-break clause runs FIRST
+# so a caller who embedded a newline is told about the newline rather than about
+# a category name.
+LINE_BREAK_CHARS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
+# 🔴 CONTROL AND FORMATTING CHARACTERS ARE REFUSED, AND EACH OF THESE WAS
+# MEASURED LANDING IN THE CURATED FILE AT `200 appended`:
+#
+#   * `\x00`   makes `git` and `grep` treat the entry as BINARY, so the file
+#              silently drops out of every text tool the store is read with.
+#   * `\x1b[…` rewrites the terminal of whoever renders a recall digest.
+#   * `U+202E` (and the isolates) reorder the rendered line, so what an operator
+#              reads is not what is stored — visual spoofing of a curated record.
+#   * `U+200B` is invisible AND defeats idempotency: two bullets that read
+#              identically hash differently, so a retry double-records.
+#
+# One category test rather than a list of characters, because a list is walkable
+# by the next character nobody thought of — the exact failure the two-character
+# newline check above already demonstrated. `Cs` (lone surrogates, reachable
+# through a JSON `\ud800` escape) and `Co` (private use) are included for the
+# same reason. `Cn` (unassigned) is NOT: it would refuse whatever the running
+# Python's Unicode tables have not caught up with, which is a refusal that
+# changes with the base image.
+#
+# ⚠ `\t` IS `Cc` AND IS THEREFORE REFUSED. Decided, not incidental: a bullet is
+# ONE line of prose, `content_hash` collapses runs of whitespace anyway, and a
+# named 400 is better than a tab that renders differently everywhere.
+_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co"})
 
 # 🔴 THE ATTRIBUTION IS A SUFFIX, AND THE POSITION IS LOAD-BEARING RATHER THAN
 # COSMETIC. The store's bullet grammar is a PREFIX grammar:
@@ -1714,10 +1767,63 @@ def render_bullet(text: str, *, actor: str, session: str, today: str) -> str:
     which came off the credential `authorize` matched. That is the whole of
     criterion 4's attribution guarantee, and it is structural: there is no field
     here for a client-supplied name to land in.
+
+    ⚠ AND THE GUARANTEE IS EXACTLY AS WIDE AS THIS FUNCTION'S CALLERS. Only
+    `append_bullet` (`POST /bullets`) renders through here; `replace_entry`
+    (`PUT`) writes the caller's bytes verbatim and enforces nothing. Stated
+    because "the actor comes from the token" reads like a property of the
+    SERVER, and it is a property of one ROUTE.
     """
     return f"- {today}: {text.strip()}" + ATTRIBUTION.format(
         actor=actor, session=session
     )
+
+
+def nuance_block(lines: "Sequence[str]") -> "tuple[int, str] | None":
+    """`(insert index, that section's body)` for the FIRST nuance heading.
+
+    🔴 ONE WALK, BECAUSE THE INSERTION SCOPE AND THE DEDUPE SCOPE MUST BE THE
+    SAME SECTION. They were not: insertion took the FIRST
+    `## Nuance / work-history` heading while the duplicate check read
+    `rc.extract_sections`, which CONCATENATES every block sharing a heading. An
+    entry carrying the heading twice therefore answered `200 duplicate` — writing
+    nothing — for a genuinely new bullet that merely matched one already sitting
+    in the SECOND section, a section this writer would never have inserted into.
+    That is content loss in the direction the design says matters most, and it is
+    silent: the response says the observation is already recorded.
+
+    So the body returned here is the body of the block the index points INTO,
+    and nothing else. A repeated heading is reported by `subsystem_touch
+    --validate`; this writer simply refuses to reason about a section it is not
+    writing to.
+
+    A heading is what `_heading_blocks` says it is — `#` at column 0, outside a
+    fence, compared `rstrip()`ed — because that is the parser every reader uses,
+    and a writer that disagreed about where the section starts would insert into
+    prose. The FIRST occurrence wins.
+    """
+    in_fence = False
+    start: int | None = None
+    body: list[str] = []
+    for index, line in enumerate(lines):
+        if _is_fence(line):
+            in_fence = not in_fence
+            if start is not None:
+                body.append(line)
+            continue
+        if not in_fence and line.startswith("#"):
+            if start is not None:
+                # The next heading of any level ENDS the section — the same rule
+                # `extract_sections` applies.
+                break
+            if line.rstrip() == rc.NUANCE_HEADING:
+                start = index + 1
+            continue
+        if start is not None:
+            body.append(line)
+    if start is None:
+        return None
+    return start, "\n".join(body).strip("\n")
 
 
 def nuance_insert_index(lines: "Sequence[str]") -> int | None:
@@ -1733,16 +1839,14 @@ def nuance_insert_index(lines: "Sequence[str]") -> int | None:
     A heading is what `_heading_blocks` says it is — `#` at column 0, outside a
     fence, compared `rstrip()`ed — because that is the parser every reader uses,
     and a writer that disagreed about where the section starts would insert into
-    prose. The FIRST occurrence wins, matching `extract_sections`' merge order.
+    prose. The FIRST occurrence wins.
+
+    A VIEW over `nuance_block`, never a second walker: two functions answering
+    "where does the nuance section start" is exactly how the insertion point and
+    the dedupe scope came to disagree.
     """
-    in_fence = False
-    for index, line in enumerate(lines):
-        if _is_fence(line):
-            in_fence = not in_fence
-            continue
-        if not in_fence and line.startswith("#") and line.rstrip() == rc.NUANCE_HEADING:
-            return index + 1
-    return None
+    block = nuance_block(lines)
+    return None if block is None else block[0]
 
 
 class _EntryLock:
@@ -1778,6 +1882,28 @@ class _EntryLock:
             self._fh = None
 
 
+def _fsync_dir(directory: Path) -> None:
+    """`fsync` a DIRECTORY, so a rename inside it survives a crash.
+
+    Best-effort: a filesystem that refuses a directory fd (or a store on one
+    that has no such concept) must not turn a completed write into a 503. The
+    bytes are already persisted by the file `fsync` in `_replace_bytes`; what is
+    at risk here is only the rename's own metadata, and refusing to serve
+    because we could not flush it would trade a rare durability gap for a
+    certain availability one.
+    """
+    try:
+        fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _replace_bytes(path: Path, data: bytes) -> None:
     """Write `data` to `path` so a reader sees the OLD file or the NEW one.
 
@@ -1787,6 +1913,20 @@ def _replace_bytes(path: Path, data: bytes) -> None:
     this module is built against, produced by the writer instead of the reader.
     `os.replace` is atomic within a filesystem, and the temp file is created in
     the SAME directory precisely so it is on that filesystem.
+
+    🔴 TWO FSYNCS, AND THE SECOND ONE IS NOT REDUNDANT. `fsync` on the FILE
+    persists the bytes; the RENAME lives in the parent DIRECTORY and is a
+    separate piece of metadata with its own writeback. Without the directory
+    fsync a node that loses power after `os.replace` returns can come back with
+    the old name still pointing at the old inode — the append is gone, and the
+    client was told `200 appended`. Atomicity is a claim about what a concurrent
+    READER can see; durability is a claim about what survives a crash, and only
+    the first of those `os.replace` gives you for free.
+
+    Both are best-effort against a directory that cannot be opened (some
+    filesystems refuse `O_RDONLY` on a directory fd, and a store on one of them
+    must still be writable) — but the failure is NOT swallowed silently for the
+    file fsync, which is the one that decides whether the bytes exist at all.
     """
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".cairn-", suffix=".tmp")
     try:
@@ -1796,6 +1936,7 @@ def _replace_bytes(path: Path, data: bytes) -> None:
             os.fsync(fh.fileno())
         os.chmod(tmp, 0o644)
         os.replace(tmp, path)
+        _fsync_dir(path.parent)
     except BaseException:
         # A failed write must not leave a `.cairn-*.tmp` behind: it is invisible
         # to every reader, so nothing would ever report it and nothing would
@@ -1822,21 +1963,50 @@ def append_bullet(
     `os.replace` silently discards the first append. Re-appending the SAME
     content is a no-op decided by `content_hash` over the bullets already there,
     so a retried request cannot double-record.
+
+    🔴 A SPLICE INTO THE ORIGINAL BYTES, NEVER A DECODE-AND-REJOIN. This used to
+    read `original.decode("utf-8", errors="replace")`, `splitlines()`, and write
+    back `"\\n".join(...) + "\\n"` — which silently REWROTE THE WHOLE FILE, and
+    lossily. Three measured effects of one ordinary append to an unrelated line:
+
+      * a byte that is not valid UTF-8 anywhere in the file became `U+FFFD`,
+        permanently, at `200 appended` with no error — while `replace_entry`
+        decodes the SAME bytes with `errors="strict"` and answers 422. The two
+        write primitives disagreed about what a valid entry is, and the LOSSY
+        one was the primitive advertised as purely additive.
+      * every `\\r\\n` became `\\n`.
+      * a file with no trailing newline gained one.
+
+    Each of those also changes the entry's revision, invalidating every other
+    client's `If-Match` for a change nobody asked for.
+
+    So the output is `original[:offset] + inserted + original[offset:]` and the
+    untouched region is byte-identical BY CONSTRUCTION rather than by a
+    round-trip anyone has to trust. `offset` is the end of the heading line
+    INCLUDING its terminator, and `inserted` carries that same terminator — so
+    CRLF stays CRLF, and a heading that is the final line with no terminator at
+    all gets `\\n<bullet>` appended, preserving "this file does not end in a
+    newline" rather than quietly fixing it.
+
+    The decode for ANALYSIS uses `surrogateescape`, which round-trips every byte
+    sequence exactly; it decides WHERE to splice and whether the content is
+    already there, and it is never the thing written back.
     """
     with _EntryLock(path):
         original = path.read_bytes()
-        text_in = original.decode("utf-8", errors="replace")
+        # 🔴 `surrogateescape`, not `replace`. `replace` is destructive on the
+        # way IN, so any offset computed from it would describe a string that is
+        # not this file. `surrogateescape` is a bijection with the bytes.
+        text_in = original.decode("utf-8", errors="surrogateescape")
         lines = text_in.splitlines()
-        insert_at = nuance_insert_index(lines)
-        if insert_at is None:
+        block = nuance_block(lines)
+        if block is None:
             raise EntryShapeError(
                 f"entry has no `{rc.NUANCE_HEADING}` heading, so an appended "
                 f"bullet would have nowhere to go"
             )
+        insert_at, body = block
         wanted = content_hash(text)
-        body = rc.extract_sections(text_in, (rc.NUANCE_HEADING,)).get(
-            rc.NUANCE_HEADING, ""
-        )
         for existing in rc.parse_journal_bullets(body):
             if content_hash(bullet_content(existing.lines)) == wanted:
                 return "duplicate", existing.lines[0], entry_revision(original)
@@ -1844,16 +2014,71 @@ def append_bullet(
         # 🔴 THE INTERLEAVE POINT: after the read, before the write. See
         # `_WRITE_INTERLEAVE`.
         _WRITE_INTERLEAVE()
-        merged = lines[:insert_at] + [line] + lines[insert_at:]
-        data = ("\n".join(merged) + "\n").encode("utf-8")
+        # `keepends=True` splits on EXACTLY the same set `splitlines()` above
+        # does, so the two lists index alike and `insert_at` means the same line
+        # in both. Anything else here is an off-by-one on a file the caller
+        # cannot see.
+        raw_lines = text_in.splitlines(keepends=True)
+        heading = raw_lines[insert_at - 1]
+        # Whatever `splitlines` treated as this line's break, VERBATIM — derived
+        # by asking the same function, never by guessing a newline and never by
+        # stripping a hand-written character class (which would also eat trailing
+        # spaces the heading line is entitled to keep).
+        without_break = heading.splitlines()[0] if heading else ""
+        terminator = heading[len(without_break) :]
+        offset = len(
+            "".join(raw_lines[:insert_at]).encode("utf-8", errors="surrogateescape")
+        )
+        if terminator:
+            inserted = (line + terminator).encode("utf-8")
+        else:
+            # The heading is the last line and the file does not end in a
+            # newline. Appending `\n<bullet>` keeps it that way.
+            inserted = ("\n" + line).encode("utf-8")
+        data = original[:offset] + inserted + original[offset:]
         _replace_bytes(path, data)
         return "appended", line, entry_revision(data)
 
 
+def parse_if_match(raw: str) -> "list[str]":
+    """Every entity-tag in an `If-Match` header value, unquoted and lower-cased.
+
+    🔴 RFC 9110 §13.1.1 SAYS `If-Match` IS A **LIST**, and this used to read it
+    as one opaque string. So `If-Match: "stale", "<correct>"` — the exact header
+    a client sends when it holds two candidate revisions, and the exact header a
+    conformant HTTP library will build from a list — compared the WHOLE string
+    against a 16-character hash and answered **412 forever**. Fail-closed, and
+    still a bug: a conformant client could never succeed, and a client that
+    cannot succeed re-sends without the precondition.
+
+    Splitting on commas is safe HERE and would not be in general: an entity-tag
+    may in principle contain a comma inside its quotes, but this server's tags
+    are `sha256(...)[:16]` and cannot. The one place that matters is stated
+    rather than left as a silent assumption.
+
+    Case is folded because `hexdigest()` is lower-case and hex is not:
+    `If-Match: "3F2A…"` names the same revision as `"3f2a…"`, and refusing it was
+    a precondition failing for a reason the caller cannot see.
+    """
+    tags: "list[str]" = []
+    for item in re.split(r"\s*,\s*", raw.strip()):
+        item = item.strip()
+        if not item:
+            continue
+        if item[:2].upper() == "W/":
+            item = item[2:].strip()
+        tags.append(item.strip('"').lower())
+    return tags
+
+
 def replace_entry(
-    path: Path, *, data: bytes, if_match: str, scope: str, filename: str
+    path: Path, *, data: bytes, if_match: "Sequence[str]", scope: str, filename: str
 ) -> str:
     """Whole-file replace behind an `If-Match` precondition. Returns the new rev.
+
+    `if_match` is the LIST of candidate revisions the caller named (see
+    `parse_if_match`); the write proceeds if ANY of them is the current one,
+    which is what RFC 9110 §13.1.1 specifies.
 
     🔴 THE PRECONDITION IS CHECKED UNDER THE SAME LOCK THE WRITE HAPPENS UNDER,
     and checking it outside would make it decorative: two callers could both read
@@ -1866,11 +2091,30 @@ def replace_entry(
     body the reader would classify as MALFORMED is refused instead of written:
     otherwise one bad PUT turns a served entry into a `MALFORMED` block and the
     content it replaced is gone.
+
+    ⚠ **ATTRIBUTION IS NOT ENFORCED HERE, AND THAT IS A DECIDED LIMIT RATHER THAN
+    AN OVERSIGHT.** Criterion 4's "every appended bullet records actor and
+    session" is a claim about **`POST /bullets`** (`append_bullet` +
+    `render_bullet`, where the actor is a keyword no request body can populate).
+    A PUT writes the caller's bytes VERBATIM: a body containing
+    `- 2026-08-27: OPEN: … [cairn: someone-else/sess-…]` lands exactly as sent,
+    trailer included, and this server does not check it.
+
+    Enforcing it was considered and DECLINED. PUT exists for the whole-file
+    rewrites the store needs — editing `## Pointers`, turning an `OPEN:` bullet
+    into `RESOLVED <sha>:` — and per-bullet attribution enforcement would have to
+    diff the old bullet set against the new one to tell a legitimate rewrite from
+    a forged trailer, refusing real edits whenever that diff was wrong. The
+    holder of a PUT-capable token is trusted with the whole file's contents
+    already; what is NOT acceptable is CLAIMING otherwise, which is why the claim
+    is scoped to POST in the README, the module docstring and here.
+    `TestPUTDoesNotEnforceAttribution` pins this limit so it cannot drift into
+    being assumed.
     """
     with _EntryLock(path):
         original = path.read_bytes()
         current = entry_revision(original)
-        if if_match != current:
+        if current not in if_match:
             raise PreconditionFailed(current)
         text = data.decode("utf-8", errors="strict")
         try:
@@ -2508,7 +2752,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
 
         route = self._write_route(path)
         if route is not None:
-            handler_name, parts, tail_len = route
+            handler_name, parts, arity, tail_len = route
             if record.is_legacy:
                 # 🔴 A LEGACY (BARE, UNMAPPED) TOKEN MAY NOT WRITE, AND THIS IS
                 # THE DELIBERATE COST OF THE MIGRATION RATHER THAN AN OVERSIGHT.
@@ -2553,8 +2797,51 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 )
                 self._audit(path, 400, "bad-request")
                 return
-            middle = parts[1 : len(parts) - tail_len]
-            getattr(self, handler_name)(*middle, body, path)
+            # 🔴 THE SLICE COMES FROM THE TABLE, NOT FROM THE REQUEST. It read
+            # `parts[1 : len(parts) - tail_len]`, and `len(parts)` is
+            # attacker-controlled: the handler's ARGUMENT COUNT was therefore a
+            # function of the URL, correct only because `_write_route`'s
+            # `len(parts) != arity` check happened to reject the mismatch first.
+            # Proven load-bearing by relaxing that check — `PUT
+            # /api/v1/entry/<scope>/<ref>/bullets` (4 parts) then matched the PUT
+            # row (arity 3) and passed FIVE arguments to a four-parameter method:
+            # unhandled `TypeError`, connection dropped, no response, no
+            # `X-Store-Status`, no audit line. `arity` is a constant from
+            # `WRITE_ROUTES`, so a wrong argument count is now structurally
+            # impossible regardless of what any other check does.
+            middle = parts[1 : arity - tail_len]
+            try:
+                getattr(self, handler_name)(*middle, body, path)
+            except Exception:  # noqa: BLE001 — deliberate backstop, see below
+                # 🔴 A METERED REQUEST MUST NEVER VANISH FROM THE AUDIT TRAIL.
+                # An unhandled exception here drops the connection with no
+                # response, no status header and NO AUDIT LINE — the mirror image
+                # of the unmetered-405 channel this function's docstring says it
+                # closed, and reachable by any token holder. Two separate
+                # defects landed in exactly this shape (a `RecursionError` out of
+                # `json.loads`, and the `TypeError` above), which is what makes a
+                # backstop worth its cost.
+                #
+                # 🔴 THIS IS NOT A SUBSTITUTE FOR FIXING EITHER OF THEM AT ITS
+                # OWN SITE, and both are fixed at their own site — the
+                # `RecursionError` in `_append_bullet`'s JSON catch, the argument
+                # count on the line above. A backstop that made the real fixes
+                # look unnecessary would be masking, not surfacing.
+                #
+                # `Exception`, NOT `BaseException`: `KeyboardInterrupt` and
+                # `SystemExit` must still terminate the process.
+                #
+                # The BODY IS A CONSTANT and carries no exception text. This is
+                # internet-reachable; an exception string names paths, values and
+                # types, and would be a new leak channel opened by the very guard
+                # meant to close one. The traceback goes to the pod log only.
+                traceback.print_exc(file=sys.stderr)
+                self._respond(
+                    500,
+                    b"internal error\n",
+                    headers={"X-Store-Status": "internal-error"},
+                )
+                self._audit(path, 500, "internal-error")
             return
 
         # 🔴 THE UNCHANGED TAIL. `read-only` is a claim about THIS ROUTE, not
@@ -2563,8 +2850,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         self._respond(405, b"read-only\n", headers={"Allow": "GET, HEAD"})
         self._audit(path, 405, "method-not-allowed")
 
-    def _write_route(self, path: str) -> "tuple[str, list[str], int] | None":
+    def _write_route(self, path: str) -> "tuple[str, list[str], int, int] | None":
         """Match one request against `WRITE_ROUTES`, or `None`.
+
+        Returns `(handler, parts, arity, tail_len)`. The ARITY is returned — not
+        left implicit in `len(parts)` — so the dispatcher can size the handler's
+        argument list from the TABLE. See the slice in `_write`.
 
         Split out so the dispatcher is one table lookup rather than a nest of
         conditions inside `_write`, and so the arity and the fixed TAIL are
@@ -2584,7 +2875,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             return None
         if tail and tuple(parts[arity - len(tail) :]) != tail:
             return None
-        return handler_name, parts, len(tail)
+        return handler_name, parts, arity, len(tail)
 
     do_POST = do_PUT = do_PATCH = do_DELETE = _write  # noqa: N815
 
@@ -3323,7 +3614,13 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         """
         try:
             payload = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as exc:
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+            # 🔴 `RecursionError` IS NOT A `ValueError`, AND JSON RAISES IT. A
+            # 400 KB body of `[[[[…]]]]` blows the interpreter's recursion limit
+            # inside `json.loads`, so the caller got a dropped connection with no
+            # response, no `X-Store-Status` and — the part that matters — NO
+            # AUDIT LINE, on a request that had already been metered. It is a
+            # caller error like any other malformed body and is answered as one.
             self._respond(
                 400,
                 f"bad request: body must be JSON ({exc})\n".encode("utf-8"),
@@ -3391,6 +3688,15 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
 
         🔴 `If-Match: *` IS REFUSED. It means "any current representation", which
         is the one value that turns the guard off while looking like it is on.
+
+        The header is a LIST (RFC 9110 §13.1.1) and is read as one — see
+        `parse_if_match`. Reading it as a single opaque string made
+        `If-Match: "stale", "<correct>"` a permanent 412.
+
+        ⚠ THIS ROUTE DOES NOT ENFORCE ATTRIBUTION. The bytes are written
+        verbatim, forged `[cairn: …]` trailers included; criterion 4's guarantee
+        is a claim about `POST /bullets` only. Decided, not overlooked — see
+        `replace_entry`'s docstring for why enforcement was declined.
         """
         raw = sole_header(self.headers, "If-Match")
         if raw is None:
@@ -3402,15 +3708,23 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             )
             self._audit(path, 428, "precondition-required")
             return
-        if_match = raw.strip()
-        if if_match.startswith("W/"):
-            if_match = if_match[2:].strip()
-        if_match = if_match.strip('"')
-        if if_match == "*":
+        if_match = parse_if_match(raw)
+        if "*" in if_match:
             self._respond(
                 400,
                 b"bad request: If-Match: * is refused - it matches any revision, "
                 b"which is the same as sending no precondition at all\n",
+                headers={"X-Store-Status": "bad-request"},
+            )
+            self._audit(path, 400, "bad-request")
+            return
+        if not if_match:
+            # A header that is present but names NO entity-tag (`If-Match:` or
+            # `If-Match: ,`) is not a precondition. Refusing it is the same
+            # answer `*` gets, for the same reason: it would gate nothing.
+            self._respond(
+                400,
+                b"bad request: If-Match names no entity-tag\n",
                 headers={"X-Store-Status": "bad-request"},
             )
             self._audit(path, 400, "bad-request")
@@ -3480,6 +3794,15 @@ def _bullet_request_problem(payload: Any) -> str | None:
 
     ⚠ `actor` IS NOT VALIDATED AND NOT REJECTED — it is simply never read. See
     `_append_bullet`.
+
+    🔴 THE CHARACTER CLAUSES ARE A PREDICATE, NOT A DENYLIST. The line-break
+    clause asks `str.splitlines()` itself how many lines the text becomes, and
+    the control/format clause asks `unicodedata` for a CATEGORY — because the
+    two-character `"\n" in text or "\r" in text` this replaced was walked by
+    eight other characters `splitlines()` splits on, one of which (`U+2028`)
+    produced a stored bullet with NO attribution trailer and a second one whose
+    `[cairn: …]` reads as somebody else's. See `LINE_BREAK_CHARS` and
+    `_FORBIDDEN_CATEGORIES`.
     """
     if not isinstance(payload, dict):
         return "the body must be a JSON object"
@@ -3488,12 +3811,27 @@ def _bullet_request_problem(payload: Any) -> str | None:
         return "`text` is required and must be a non-empty string"
     if len(text) > BULLET_TEXT_MAX:
         return f"`text` is {len(text)} characters, max {BULLET_TEXT_MAX}"
-    if "\n" in text or "\r" in text:
+    if len(text.splitlines()) > 1 or text.strip(LINE_BREAK_CHARS) != text:
+        # 🔴 `len(splitlines()) > 1` IS THE HONEST PREDICATE — it asks the very
+        # function that decides how many lines these bytes become, so it cannot
+        # fall behind the ten characters that function splits on. The second
+        # clause covers a LEADING or TRAILING break, which `splitlines` folds
+        # away (`"a\n".splitlines()` is one element) and which would otherwise
+        # open or close the bullet with an empty line.
         return (
             "`text` must be ONE line — an embedded newline would be attached to "
             "this bullet as a continuation, or would start a second, unattributed "
             "bullet"
         )
+    for char in text:
+        if unicodedata.category(char) in _FORBIDDEN_CATEGORIES:
+            # Named by CODE POINT, because the offending character is by
+            # definition one the caller cannot see in their own error message.
+            return (
+                f"`text` contains U+{ord(char):04X} "
+                f"({unicodedata.category(char)}), a control or formatting "
+                "character that must not be written into a curated entry"
+            )
     if text.lstrip().startswith(("- ", "* ")):
         return (
             "`text` must not open a markdown bullet — the `- ` is added here, and "

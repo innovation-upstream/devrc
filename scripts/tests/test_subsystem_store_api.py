@@ -54,6 +54,7 @@ import io
 import os
 import re
 import shutil
+import stat
 import tarfile
 import secrets
 import subprocess
@@ -7016,17 +7017,16 @@ class TestEnumerationChannelsAreClosed:
                 f"{base}/api/v1/snapshot?scope={PHANTOM_SCOPE}", token=ZACH_TOKEN
             )
 
-        def store_headers(headers: dict) -> tuple:
-            return tuple(
-                sorted(
-                    (k, v) for k, v in headers.items() if k.lower().startswith("x-store")
-                )
-            )
-
+        # 🔴 THE WHOLE RESPONSE, VIA `_comparable` — every header but `Date`,
+        # not just the `X-Store-*` subset. A local helper here narrowed the
+        # comparison to the family somebody expected the leak to be in, which is
+        # a guard narrower than its own docstring: `ETag`, `Content-Length` and
+        # anything a future header carries would discriminate a refused scope
+        # from an absent one with every named assertion still green.
         assert denied[0] == phantom[0] == 200
-        assert store_headers(denied[1]) == store_headers(phantom[1]), (
-            f"X-Store-* headers differ:\n denied ={store_headers(denied[1])}\n"
-            f" phantom={store_headers(phantom[1])}"
+        assert _comparable(denied[1]) == _comparable(phantom[1]), (
+            f"headers differ:\n denied ={_comparable(denied[1])}\n"
+            f" phantom={_comparable(phantom[1])}"
         )
         assert denied[2] == phantom[2], (
             "the tar BYTES differ — a refused scope is distinguishable from an "
@@ -7130,10 +7130,11 @@ class TestRefusedIsIndistinguishableFromAbsent:
                 f"{base}{path}",
                 token=token.token if hasattr(token, "token") else token,
             )
-        store_headers = tuple(
-            sorted((k, v) for k, v in headers.items() if k.lower().startswith("x-store"))
-        )
-        return code, store_headers, body
+        # 🔴 THE WHOLE RESPONSE, VIA `_comparable`. This narrowed to the
+        # `X-Store-*` family, which is a guard narrower than its own docstring:
+        # `ETag`, `Content-Length` or any header added later would discriminate a
+        # refused scope from an absent one with every assertion still green.
+        return code, _comparable(headers), body
 
     def test_RECALL_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
         self, tmp_path: Path
@@ -7156,7 +7157,7 @@ class TestRefusedIsIndistinguishableFromAbsent:
         # 🔴 And the shared answer is the ABSENT report, not two identical
         # errors: byte-identity between two 401s or two 503s would satisfy
         # everything above while serving nothing.
-        assert dict(refused[1])["X-Store-Status"] == "scope-absent"
+        assert dict(refused[1])["x-store-status"] == "scope-absent"
         assert b"NOTHING RECORDED YET" in refused[2].upper()
         assert QUARTZ_NUANCE.encode() not in refused[2]
 
@@ -7174,7 +7175,7 @@ class TestRefusedIsIndistinguishableFromAbsent:
         assert refused[0] == never[0] == 200
         assert refused[1] == never[1], f"{refused[1]} != {never[1]}"
         assert refused[2] == never[2]
-        assert dict(refused[1])["X-Store-Status"] == "scope-absent"
+        assert dict(refused[1])["x-store-status"] == "scope-absent"
 
     def test_POSITIVE_CONTROL_the_RECALL_comparison_CAN_see_the_difference(
         self, tmp_path: Path
@@ -7193,8 +7194,8 @@ class TestRefusedIsIndistinguishableFromAbsent:
         absent()
         gone = self._ask(root, GOOD_TOKEN, f"/api/v1/recall/{DENY_SCOPE}")
 
-        assert dict(seen[1])["X-Store-Status"] == "recalled"
-        assert dict(gone[1])["X-Store-Status"] == "scope-absent"
+        assert dict(seen[1])["x-store-status"] == "recalled"
+        assert dict(gone[1])["x-store-status"] == "scope-absent"
         assert seen[2] != gone[2]
         assert QUARTZ_NUANCE.encode() in seen[2]
 
@@ -7220,8 +7221,8 @@ class TestRefusedIsIndistinguishableFromAbsent:
         gone = self._ask(root, GOOD_TOKEN, self.SEARCH_QUERY)
 
         assert found[0] == gone[0] == 200
-        assert dict(found[1])["X-Store-Status"] == "search-hit"
-        assert dict(gone[1])["X-Store-Status"] == "scope-absent"
+        assert dict(found[1])["x-store-status"] == "search-hit"
+        assert dict(gone[1])["x-store-status"] == "scope-absent"
         assert found[2] != gone[2]
         assert QUARTZ_NUANCE.encode() in found[2]
         # …and neither body is the empty string, which is what a fail-closed
@@ -8468,6 +8469,16 @@ def nuance_of(path: Path) -> str:
 
 
 def store_headers(headers: dict) -> tuple:
+    """The `X-Store-*` family only.
+
+    🔴 NOT FOR A LEAK-PROPERTY COMPARISON — use `_comparable`, which keeps
+    every header but `Date`. Every "these two answers are byte-identical" test in
+    this file used to narrow to this family, which is a guard narrower than its
+    own name: `ETag`, `Content-Length` or any header added later would
+    discriminate a refused target from an absent one while the assertion stayed
+    green. Kept for the places that genuinely mean "the store's own status
+    fields", not for indistinguishability.
+    """
     return tuple(
         sorted((k, v) for k, v in headers.items() if k.lower().startswith("x-store"))
     )
@@ -8721,7 +8732,7 @@ class TestALegacyTokenCannotWrite:
                 text=BULLET_A, session=SESSION_A,
             )
         assert real[0] == phantom[0] == 403
-        assert store_headers(real[1]) == store_headers(phantom[1])
+        assert _comparable(real[1]) == _comparable(phantom[1])
         assert real[2] == phantom[2]
         assert real[2], "both bodies are empty — the comparison would be vacuous"
 
@@ -8887,7 +8898,7 @@ class TestARefusedWriteIsIndistinguishableFromAnAbsentOne:
             code, headers, body = post_bullet(
                 base, record.token, scope, text=BULLET_C, session=SESSION_B
             )
-        return code, store_headers(headers), body
+        return code, _comparable(headers), body
 
     def test_APPEND_to_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
         self, tmp_path: Path
@@ -8924,8 +8935,9 @@ class TestARefusedWriteIsIndistinguishableFromAnAbsentOne:
         gone = self._post(root, DANA, DENY_SCOPE)
 
         assert wrote[0] == 200 and gone[0] == 404
-        assert dict(wrote[1])["X-Store-Status"] == "appended"
-        assert dict(gone[1])["X-Store-Status"] == "not-found"
+        # `_comparable` lower-cases the header names it sorts on.
+        assert dict(wrote[1])["x-store-status"] == "appended"
+        assert dict(gone[1])["x-store-status"] == "not-found"
         assert wrote[2] != gone[2]
         assert wrote[2] and gone[2]
         assert BULLET_C.encode() in wrote[2]
@@ -8965,7 +8977,7 @@ class TestARefusedWriteIsIndistinguishableFromAnAbsentOne:
                 base, ZACH_TOKEN, DENY_SCOPE, text=BULLET_A, session=SESSION_A
             )
         assert missing_ref[0] == refused_scope[0] == 404
-        assert store_headers(missing_ref[1]) == store_headers(refused_scope[1])
+        assert _comparable(missing_ref[1]) == _comparable(refused_scope[1])
         assert missing_ref[2] == refused_scope[2]
 
     def test_PUT_to_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
@@ -8980,7 +8992,7 @@ class TestARefusedWriteIsIndistinguishableFromAnAbsentOne:
                     data=b"---\nservice: x\n---\n",
                     extra_headers={"If-Match": "0" * 16},
                 )
-            return code, store_headers(headers), body
+            return code, _comparable(headers), body
 
         present()
         refused = put(ZACH)
@@ -9638,3 +9650,1058 @@ class TestTheWritePrimitives:
             snap_headers,
             md_on_disk,
         )
+
+
+# =============================================================================
+# AUDIT ROUND 2 — the write path's own defects. Every class below names a
+# MEASURED behaviour, not a hypothetical: the fixtures are the ones the auditor
+# reproduced with, and each test's red-at-`b32db213` state is recorded in the PR.
+# =============================================================================
+
+
+# 🔴 A FIXTURE BUILT OUT OF THE THREE THINGS THE OLD WRITER DESTROYED, in one
+# file, because they were destroyed by ONE operation and a test that separated
+# them would let two of the three regress unseen:
+#
+#   * `\xe9` — a latin-1 byte. Not valid UTF-8 anywhere, on a line the append
+#     does not touch.
+#   * a `\r\n` line ending, twice.
+#   * NO trailing newline.
+#
+# The bytes are spelled out rather than built from `_entry()` because every one
+# of them is load-bearing here, and `_entry()` can only emit LF and always ends
+# with a newline.
+_HEADING_BYTES = b"## Nuance / work-history\n"
+LOSSY_ENTRY = (
+    b"---\n"
+    b"service: reef-buoy\n"
+    b"scope: kelp-forest\n"
+    b"sensitivity: internal\n"
+    b"---\n"
+    b"\n"
+    b"## What it is\r\n"
+    b"the tender's caf\xe9 log was written latin-1 and nobody re-encoded it\r\n"
+    b"\n"
+    + _HEADING_BYTES
+    + b"- 2026-05-01: the anchor winch was re-greased and left untested"
+)
+
+# Distinct from BULLET_A/B/C, from every nuance line, and from every literal any
+# assertion in this section names.
+BULLET_D = "the fog horn compressor cycles twice on a cold start"
+BULLET_E = "the deck light dims whenever the davit is powered"
+BULLET_F = "the tide predictor disagrees with the gauge on a neap"
+
+
+class TestAnAppendDoesNotREWRITETheFile:
+    """🔴 AN ORDINARY APPEND SILENTLY REWROTE THE WHOLE FILE, LOSSILY.
+
+    `append_bullet` decoded with `errors="replace"`, `splitlines()`, and wrote
+    back `"\\n".join(...) + "\\n"` — so one append to ONE line re-emitted every
+    other line through a lossy round trip. Measured, all three at `200 appended`
+    with no error:
+
+      * a latin-1 `0xe9` on an untouched line became `U+FFFD`, permanently —
+        while `replace_entry` decodes the same bytes `errors="strict"` and
+        answers **422**. The two write primitives disagreed about what a valid
+        entry is, and the LOSSY one was the primitive advertised as additive.
+      * `\\r\\n` became `\\n`.
+      * a file with no trailing newline gained one.
+
+    Each also changes the entry revision, so every other client's cached
+    `If-Match` is invalidated for a change nobody asked for.
+    """
+
+    def _entry_path(self, tmp_path: Path) -> Path:
+        root = tmp_path / "store" / ALLOW_SCOPE
+        root.mkdir(parents=True)
+        path = root / f"{entry_ref(ALLOW_SCOPE)}.md"
+        path.write_bytes(LOSSY_ENTRY)
+        return path
+
+    def test_every_byte_OUTSIDE_the_inserted_line_is_IDENTICAL(self, tmp_path: Path):
+        """🔴 THE WHOLE CLAIM, PINNED ON BYTES. The expected file is spelled here
+        as `prefix + <the one new line> + suffix` over the ORIGINAL bytes, so a
+        writer that changed anything at all — an encoding, a line ending, a
+        trailing newline — fails on the equality rather than on a property
+        somebody remembered to check."""
+        path = self._entry_path(tmp_path)
+        head_end = LOSSY_ENTRY.index(_HEADING_BYTES) + len(_HEADING_BYTES)
+
+        status, line, _rev = api.append_bullet(
+            path, text=BULLET_D, actor="zach", session=SESSION_A, today="2026-05-02"
+        )
+        after = path.read_bytes()
+
+        assert status == "appended"
+        assert after == (
+            LOSSY_ENTRY[:head_end]
+            + (line + "\n").encode("utf-8")
+            + LOSSY_ENTRY[head_end:]
+        ), after
+
+    def test_a_NON_UTF8_byte_on_an_untouched_line_SURVIVES(self, tmp_path: Path):
+        """Named separately from the equality above because this is the one that
+        DESTROYS content the store cannot re-derive, and because `U+FFFD` is the
+        specific corpse to look for."""
+        path = self._entry_path(tmp_path)
+        assert b"\xe9" in LOSSY_ENTRY and b"\xef\xbf\xbd" not in LOSSY_ENTRY
+
+        api.append_bullet(
+            path, text=BULLET_E, actor="zach", session=SESSION_A, today="2026-05-02"
+        )
+        after = path.read_bytes()
+
+        assert b"\xe9" in after, "the latin-1 byte was destroyed by an append"
+        assert b"\xef\xbf\xbd" not in after, (
+            "the append replaced an undecodable byte with U+FFFD"
+        )
+
+    def test_CRLF_line_endings_are_NOT_normalised(self, tmp_path: Path):
+        path = self._entry_path(tmp_path)
+        before_crlf = LOSSY_ENTRY.count(b"\r\n")
+        assert before_crlf == 2, "the fixture stopped exercising CRLF"
+
+        api.append_bullet(
+            path, text=BULLET_F, actor="zach", session=SESSION_A, today="2026-05-02"
+        )
+
+        assert path.read_bytes().count(b"\r\n") == before_crlf
+
+    def test_a_file_with_NO_trailing_newline_does_not_gain_one(self, tmp_path: Path):
+        path = self._entry_path(tmp_path)
+        assert not LOSSY_ENTRY.endswith(b"\n")
+
+        api.append_bullet(
+            path, text=BULLET_D, actor="zach", session=SESSION_A, today="2026-05-02"
+        )
+
+        assert not path.read_bytes().endswith(b"\n"), (
+            "the append added a trailing newline to a file that had none"
+        )
+
+    def test_the_bullet_INHERITS_the_headings_own_line_ending(self, tmp_path: Path):
+        """A CRLF entry must not gain an LF-terminated line in the middle of it.
+        The terminator is taken from the heading the bullet is inserted under,
+        never assumed."""
+        root = tmp_path / "store" / ALLOW_SCOPE
+        root.mkdir(parents=True)
+        path = root / f"{entry_ref(ALLOW_SCOPE)}.md"
+        original = (
+            b"---\r\nservice: crlf-only\r\nscope: kelp-forest\r\n---\r\n\r\n"
+            b"## Nuance / work-history\r\n"
+            b"- 2026-05-01: the bilge alarm chirps once at power-up\r\n"
+        )
+        path.write_bytes(original)
+
+        _s, line, _r = api.append_bullet(
+            path, text=BULLET_F, actor="zach", session=SESSION_A, today="2026-05-02"
+        )
+        after = path.read_bytes()
+
+        assert (line + "\r\n").encode("utf-8") in after
+        assert b"\n" not in after.replace(b"\r\n", b""), (
+            "a bare LF was introduced into a CRLF-only file"
+        )
+
+    def test_a_NO_trailing_newline_entry_whose_HEADING_is_the_LAST_line(
+        self, tmp_path: Path
+    ):
+        """The boundary the terminator rule turns on: there is no line ending to
+        inherit, so one is introduced BEFORE the bullet and the file still does
+        not end in a newline."""
+        root = tmp_path / "store" / ALLOW_SCOPE
+        root.mkdir(parents=True)
+        path = root / f"{entry_ref(ALLOW_SCOPE)}.md"
+        original = (
+            b"---\nservice: bare-tail\nscope: kelp-forest\n---\n\n"
+            b"## Nuance / work-history"
+        )
+        path.write_bytes(original)
+
+        _s, line, _r = api.append_bullet(
+            path, text=BULLET_E, actor="zach", session=SESSION_A, today="2026-05-02"
+        )
+        after = path.read_bytes()
+
+        assert after == original + b"\n" + line.encode("utf-8")
+        assert not after.endswith(b"\n")
+
+
+class TestTextIsValidatedAgainstEVERYLineBreak:
+    """🔴 `str.splitlines()` SPLITS ON TEN CHARACTERS AND THE VALIDATOR CHECKED
+    TWO. `if "\\n" in text or "\\r" in text` is a membership test on two
+    characters standing in for a predicate about ten.
+
+    MEASURED with a paired control — the same payload twice, once with a plain
+    `" - "` separator and once with a literal `U+2028`. The control stayed ONE
+    line; the probe became TWO stored bullets, the first carrying the caller's
+    prose with **no attribution trailer at all** and the second an `OPEN:`-marked
+    bullet whose leading `[cairn: …]` an operator reads as a DIFFERENT person's
+    attribution. One `200 appended` by `zach`; one forged-looking record.
+
+    Every one of the ten is exercised, not a sample: the defect was precisely
+    that a hand-picked subset stood in for the class.
+    """
+
+    # Spelled out here by hand rather than imported from `api.LINE_BREAK_CHARS`,
+    # which would assert `x == x` and stay green if the module's own set shrank.
+    ALL_BREAKS = [
+        "\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", " ", " ",
+    ]
+
+    def test_the_set_this_class_exercises_is_the_set_splitlines_ACTUALLY_splits_on(
+        self,
+    ):
+        """The list above is only evidence if it is complete. Asked of
+        `str.splitlines()` itself, over the whole BMP-and-then-some, so a
+        character nobody thought of fails this rather than slipping through every
+        parametrized case below."""
+        found = [
+            chr(cp)
+            for cp in range(0x11000)
+            if len(f"a{chr(cp)}b".splitlines()) > 1
+        ]
+        assert sorted(found) == sorted(self.ALL_BREAKS), found
+
+    @pytest.mark.parametrize("break_char", ALL_BREAKS)
+    def test_a_LINE_BREAK_in_text_is_400_and_writes_NOTHING(
+        self, scoped_store: Path, break_char: str
+    ):
+        before = tree_hash(scoped_store)
+        text = f"{BULLET_D}{break_char}OPEN: {BULLET_E}"
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
+            )
+        assert code == 400, (hex(ord(break_char)), code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        # 🔴 THE VALIDATOR'S OWN SENTENCE. A test satisfied by any 400 would be
+        # green with this clause deleted and a different clause firing.
+        assert b"must be ONE line" in body, body
+        assert tree_hash(scoped_store) == before
+
+    def test_PAIRED_CONTROL_the_SAME_payload_with_a_plain_separator_is_ONE_line(
+        self, scoped_store: Path
+    ):
+        """🔴 WITHOUT THIS THE PARAMETRIZED REFUSAL ABOVE IS SATISFIED BY A SERVER
+        THAT 400s EVERY APPEND. Same prose, same shape, an ordinary `" - "` where
+        the break was: accepted, and exactly ONE bullet appears."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before_lines = len(path.read_text().splitlines())
+        text = f"{BULLET_D} - OPEN: {BULLET_E}"
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
+            )
+        assert code == 200, code
+        assert headers["X-Store-Status"] == "appended"
+        stored = path.read_text()
+        assert len(stored.splitlines()) == before_lines + 1, stored
+        assert f"[cairn: zach/{SESSION_A}]" in stored
+
+    @pytest.mark.parametrize("break_char", ALL_BREAKS)
+    def test_a_LEADING_or_TRAILING_line_break_is_refused_too(
+        self, scoped_store: Path, break_char: str
+    ):
+        """`"a\\n".splitlines()` is ONE element, so the count predicate alone
+        cannot see a break at either end — and a bullet that opens or closes with
+        an empty line is the same content-attached-to-the-wrong-bullet defect one
+        line over."""
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            for text in (f"{break_char}{BULLET_F}", f"{BULLET_F}{break_char}"):
+                code, _h, body = post_bullet(
+                    base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
+                )
+                assert code == 400, (hex(ord(break_char)), repr(text), code)
+                assert b"must be ONE line" in body, body
+        assert tree_hash(scoped_store) == before
+
+
+class TestTextRejectsControlAndFormattingCharacters:
+    """🔴 EACH OF THESE WAS MEASURED LANDING IN THE CURATED FILE AT `200
+    appended`. None of them is a line break, so the widened line-break predicate
+    does not cover them and a second clause is required — in the SAME validator,
+    because a character rule at two sites is a character rule that disagrees with
+    itself.
+    """
+
+    HOSTILE = [
+        ("\x00", "makes git and grep read the entry as BINARY"),
+        ("\x1b", "an ANSI escape rewrites the reader's terminal"),
+        ("\t", "a tab is a control character and a bullet is one line of prose"),
+        ("‮", "a bidi override reorders what an operator reads"),
+        ("⁦", "a bidi isolate does the same, in a newer shape"),
+        ("​", "zero width: invisible AND it defeats idempotency"),
+        ("‍", "a joiner is invisible between two visible characters"),
+        ("­", "a soft hyphen renders as nothing, or as a hyphen"),
+        ("﻿", "a BOM in mid-line is invisible everywhere"),
+    ]
+
+    @pytest.mark.parametrize("char,why", HOSTILE)
+    def test_a_HOSTILE_character_is_400_and_writes_NOTHING(
+        self, scoped_store: Path, char: str, why: str
+    ):
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE,
+                text=f"{BULLET_E}{char}{BULLET_F}", session=SESSION_A,
+            )
+        assert code == 400, (why, code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        # 🔴 The clause's OWN sentence, naming the CODE POINT it refused — so a
+        # green here cannot be a different clause firing, and the message is
+        # actionable for a character the caller cannot see.
+        assert f"U+{ord(char):04X}".encode() in body, (why, body)
+        assert tree_hash(scoped_store) == before
+
+    def test_ORDINARY_non_ASCII_prose_is_still_ACCEPTED(self, scoped_store: Path):
+        """🔴 THE POSITIVE CONTROL. A rule that refused all non-ASCII would pass
+        every case above and quietly make the store English-only."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        text = "the café gauge reads 3 °C low — naïve calibration, 5 µs skew"
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
+            )
+        assert code == 200, code
+        assert headers["X-Store-Status"] == "appended"
+        assert text in path.read_text(encoding="utf-8")
+
+    def test_two_VISUALLY_IDENTICAL_bullets_cannot_both_land(
+        self, scoped_store: Path
+    ):
+        """The idempotency half of the zero-width finding: `A\\u200bB` and `AB`
+        render identically, so accepting the first would let a retry
+        double-record something an operator cannot tell apart on screen."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            first = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_A
+            )
+            after_first = path.read_bytes()
+            second = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE,
+                text=BULLET_D.replace(" ", "​ ", 1), session=SESSION_A,
+            )
+        assert first[0] == 200 and first[1]["X-Store-Status"] == "appended"
+        assert second[0] == 400, second
+        assert path.read_bytes() == after_first
+
+
+class TestADeepJSONBodyIsAnswered:
+    """🔴 `RecursionError` IS NOT A `ValueError`, AND `json.loads` RAISES IT.
+
+    The handler caught `(UnicodeDecodeError, ValueError)`, so a 400 KB body of
+    `[[[[…]]]]` escaped the handler entirely: the connection was dropped with no
+    response, no `X-Store-Status` and — the part that matters — **no audit line**,
+    on a request that had already been metered and authenticated.
+    """
+
+    BODY = b"[" * 200_000 + b"]" * 200_000
+
+    def test_the_deep_body_is_a_400_and_the_AUDIT_LINE_IS_WRITTEN(
+        self, scoped_store: Path
+    ):
+        before = tree_hash(scoped_store)
+        assert len(self.BODY) < api.MAX_DRAIN_BYTES, "the body must reach the parser"
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, headers, body = fetch(
+                bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="POST",
+                data=self.BODY,
+            )
+            lines = await_audit(audit, 1)
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert b"must be JSON" in body, body
+        assert any("result=400" in ln and "status=bad-request" in ln for ln in lines), lines
+        assert tree_hash(scoped_store) == before
+
+    def test_POSITIVE_CONTROL_a_SHALLOW_body_of_the_same_shape_still_parses(
+        self, scoped_store: Path
+    ):
+        """The refusal above must be about the DEPTH, not about brackets or about
+        a large body. A nested list the parser can handle is still refused — as
+        `the body must be a JSON object` — which is a DIFFERENT clause, and that
+        difference is the evidence."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, body = fetch(
+                bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="POST",
+                data=b"[" * 50 + b"]" * 50,
+            )
+        assert code == 400
+        assert b"must be a JSON object" in body, body
+        assert b"must be JSON (" not in body, body
+
+
+class TestTheDedupeScopeIsTheINSERTIONScope:
+    """🔴 A `duplicate` VERDICT DECIDED BY A SECTION THE WRITER WOULD NEVER TOUCH.
+
+    `nuance_insert_index` takes the FIRST `## Nuance / work-history` heading; the
+    duplicate check read `rc.extract_sections`, which CONCATENATES every block
+    sharing a heading. So a genuinely new bullet that happened to match one in
+    the SECOND section answered `200 duplicate` and wrote nothing — content loss
+    in the direction this module's own docstring calls the one that matters, and
+    silent, because the response says the observation is already recorded.
+    """
+
+    FIRST_PROSE = "the mooring pennant chafes against the fairlead"
+    SECOND_PROSE = "the stern gland weeps a drop a minute under way"
+
+    def _twin_heading_entry(self, tmp_path: Path) -> Path:
+        root = tmp_path / "store" / ALLOW_SCOPE
+        root.mkdir(parents=True)
+        path = root / f"{entry_ref(ALLOW_SCOPE)}.md"
+        path.write_text(
+            "\n".join(
+                [
+                    "---",
+                    f"service: {entry_ref(ALLOW_SCOPE)}",
+                    f"scope: {ALLOW_SCOPE}",
+                    "sensitivity: internal",
+                    "---",
+                    "",
+                    "## Nuance / work-history",
+                    f"- 2026-05-03: {self.FIRST_PROSE}",
+                    "",
+                    "## Pointers",
+                    POINTER_LINE,
+                    "",
+                    "## Nuance / work-history",
+                    f"- 2026-05-04: {self.SECOND_PROSE}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_a_bullet_matching_the_SECOND_section_is_APPENDED_not_swallowed(
+        self, tmp_path: Path
+    ):
+        path = self._twin_heading_entry(tmp_path)
+        before = path.read_bytes()
+
+        status, line, _rev = api.append_bullet(
+            path, text=self.SECOND_PROSE, actor="zach", session=SESSION_A,
+            today="2026-05-05",
+        )
+
+        assert status == "appended", (
+            "a bullet matching only the SECOND nuance section was answered "
+            "`duplicate` — the writer refused to record an observation on the "
+            "authority of a section it would never have inserted into"
+        )
+        assert path.read_bytes() != before
+        after = path.read_text(encoding="utf-8")
+        heading = resolver.NUANCE_HEADING
+        # It landed under the FIRST heading — asserted by position in the raw
+        # text, not by re-asking the function under test where that is.
+        first_body = after.split(heading, 2)[1]
+        assert first_body.splitlines()[1] == line, after
+
+    def test_a_bullet_matching_the_FIRST_section_is_STILL_a_duplicate(
+        self, tmp_path: Path
+    ):
+        """🔴 THE POSITIVE CONTROL, and the reason the fix is a NARROWING rather
+        than a removal: within the section the writer actually inserts into,
+        idempotency is unchanged and not one byte is written."""
+        path = self._twin_heading_entry(tmp_path)
+        before = path.read_bytes()
+
+        status, _line, _rev = api.append_bullet(
+            path, text=self.FIRST_PROSE, actor="zach", session=SESSION_A,
+            today="2026-05-05",
+        )
+
+        assert status == "duplicate"
+        assert path.read_bytes() == before
+
+    def test_the_section_body_STOPS_at_the_next_heading(self, tmp_path: Path):
+        """The narrowing is the section boundary itself, so it is asserted
+        directly: `## Pointers` sits between the two nuance blocks and its
+        content belongs to neither."""
+        path = self._twin_heading_entry(tmp_path)
+        lines = path.read_text(encoding="utf-8").splitlines()
+
+        block = api.nuance_block(lines)
+
+        assert block is not None
+        index, body = block
+        assert lines[index - 1] == resolver.NUANCE_HEADING
+        assert self.FIRST_PROSE in body
+        assert self.SECOND_PROSE not in body, body
+        assert POINTER_LINE not in body, body
+
+
+class TestTheRENAMEIsFSYNCedToo:
+    """🔴 DURABILITY WAS ENTIRELY UNPINNED: a mutant deleting `os.fsync(fh)`
+    survived all 479 tests, and there was no directory fsync at all.
+
+    `fsync` on the FILE persists the bytes; the RENAME lives in the parent
+    DIRECTORY and has its own writeback, so a node that lost power after
+    `os.replace` returned could come back with the old name still pointing at the
+    old inode — the append gone, the client told `200 appended`. Atomicity is
+    what a concurrent READER sees; durability is what survives a crash, and
+    `os.replace` gives only the first for free.
+    """
+
+    def _fsynced_kinds(self, monkeypatch, work) -> "list[bool]":
+        """`[is_a_directory, …]` for every fd `os.fsync` was called on."""
+        kinds: "list[bool]" = []
+        real = os.fsync
+
+        def spy(fd):
+            kinds.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+            return real(fd)
+
+        monkeypatch.setattr(os, "fsync", spy)
+        try:
+            work()
+        finally:
+            monkeypatch.undo()
+        return kinds
+
+    def test_an_append_fsyncs_BOTH_the_file_and_its_DIRECTORY(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """🔴 ONE ASSERTION PER FSYNC, so deleting EITHER one goes red — a single
+        "fsync was called" check is green with the directory one removed, which
+        is exactly the mutant that survived."""
+        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        path = entry_file(root, ALLOW_SCOPE)
+
+        kinds = self._fsynced_kinds(
+            monkeypatch,
+            lambda: api.append_bullet(
+                path, text=BULLET_D, actor="zach", session=SESSION_A,
+                today="2026-05-06",
+            ),
+        )
+
+        assert False in kinds, "the entry file itself was never fsynced"
+        assert True in kinds, (
+            "the parent DIRECTORY was never fsynced, so the rename that made the "
+            "append visible is not durable across a crash"
+        )
+
+    def test_a_PUT_fsyncs_BOTH_as_well(self, tmp_path: Path, monkeypatch):
+        """Both write primitives go through `_replace_bytes`, and the test says so
+        rather than assuming it: a second copy of the write would be the
+        predicate-at-two-sites shape this module keeps finding."""
+        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        path = entry_file(root, ALLOW_SCOPE)
+        data = _entry(entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=f"- 2026-05-06: {BULLET_E}").encode()
+        revision = api.entry_revision(path.read_bytes())
+
+        kinds = self._fsynced_kinds(
+            monkeypatch,
+            lambda: api.replace_entry(
+                path, data=data, if_match=[revision], scope=ALLOW_SCOPE,
+                filename=path.name,
+            ),
+        )
+
+        assert False in kinds and True in kinds, kinds
+
+    def test_an_UNFSYNCABLE_directory_does_not_fail_the_write(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Best-effort is a decision, so it is pinned: a filesystem that refuses a
+        directory fd must not turn a completed append into a 503. Trading a rare
+        durability gap for a certain availability one is the wrong trade, and an
+        unasserted `try/except` is the shape that silently becomes the right one
+        for the wrong reason."""
+        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        path = entry_file(root, ALLOW_SCOPE)
+        real_open = os.open
+
+        def refuse_dirs(target, flags, *args, **kwargs):
+            if Path(target).is_dir():
+                raise OSError(13, "permission denied")
+            return real_open(target, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", refuse_dirs)
+        status, line, _rev = api.append_bullet(
+            path, text=BULLET_F, actor="zach", session=SESSION_A, today="2026-05-06",
+        )
+        monkeypatch.undo()
+
+        assert status == "appended"
+        assert line in path.read_text(encoding="utf-8")
+
+
+class TestIfMatchIsRead_AS_A_LIST:
+    """🔴 RFC 9110 §13.1.1 SAYS `If-Match` IS A LIST, AND THIS READ IT AS ONE
+    STRING. `If-Match: "stale", "<correct>"` — the header any conformant client
+    builds from more than one candidate revision — compared the WHOLE value
+    against a 16-character hash and answered **412 forever**. Uppercase hex did
+    the same. Fail-closed, and still a precondition no conformant client could
+    ever satisfy; a client that cannot succeed re-sends without one.
+    """
+
+    def _replacement(self) -> bytes:
+        return _entry(
+            entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=f"- 2026-05-07: {BULLET_D}"
+        ).encode()
+
+    def _put(self, base: str, if_match: str):
+        return fetch(
+            entry_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="PUT",
+            data=self._replacement(), extra_headers={"If-Match": if_match},
+        )
+
+    def test_a_LIST_containing_the_CURRENT_revision_SUCCEEDS(self, scoped_store: Path):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        current = api.entry_revision(path.read_bytes())
+        stale = api.entry_revision(b"a revision this store never held")
+        assert stale != current
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(base, f'"{stale}", "{current}"')
+        assert code == 200, (code, body)
+        assert headers["X-Store-Status"] == "replaced"
+        assert path.read_bytes() == self._replacement()
+
+    def test_a_LIST_of_ONLY_stale_revisions_is_still_412_and_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        """🔴 THE NEGATIVE HALF, AND IT IS THE ONE THAT MATTERS: widening the
+        parser must not widen what SATISFIES the precondition. Two wrong tags are
+        still wrong."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        one = api.entry_revision(b"neither of these")
+        two = api.entry_revision(b"is the current revision")
+        assert one != two
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(base, f'"{one}", "{two}"')
+        assert code == 412, code
+        assert headers["X-Store-Status"] == "precondition-failed"
+        assert path.read_bytes() == before
+
+    def test_UPPERCASE_hex_names_the_SAME_revision(self, scoped_store: Path):
+        """`hexdigest()` is lower-case; hex is not. A client that upper-cased its
+        ETag got a 412 it could not diagnose."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        current = api.entry_revision(path.read_bytes())
+        assert current != current.upper(), "the fixture revision has no hex letters"
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, _b = self._put(base, f'"{current.upper()}"')
+        assert code == 200, code
+        assert path.read_bytes() == self._replacement()
+
+    def test_a_LIST_containing_STAR_is_still_REFUSED(self, scoped_store: Path):
+        """`*` turns the guard off while looking like it is on, and hiding it in
+        a list must not smuggle it past the refusal."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        current = api.entry_revision(before)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(base, f'"{current}", *')
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("shape", ["prefix", "superstring"])
+    def test_the_precondition_is_EQUALITY_not_CONTAINMENT(
+        self, scoped_store: Path, shape: str
+    ):
+        """🔴 THE MUTANT A 16-HEX FIXTURE STRUCTURALLY CANNOT SEE. Weakening
+        `current not in tags` to a substring test (`tag in current or current in
+        tag`) survives every other case in this file, because two DISTINCT full
+        revisions are never substrings of one another — so nothing reached the
+        weakened branch. A truncated ETag would then satisfy the precondition and
+        a lost update would go straight through.
+
+        Both directions, because the two containment mutants are different
+        mutants: a PREFIX of the revision, and a string CONTAINING it.
+        """
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        current = api.entry_revision(before)
+        tag = current[:8] if shape == "prefix" else f"00{current}00"
+        assert tag != current
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(base, f'"{tag}"')
+        assert code == 412, (shape, code)
+        assert headers["X-Store-Status"] == "precondition-failed"
+        assert path.read_bytes() == before
+
+    def test_an_If_Match_naming_NO_entity_tag_is_refused(self, scoped_store: Path):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(base, " , ")
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert b"names no entity-tag" in body, body
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ('"abc"', ["abc"]),
+            ('W/"abc"', ["abc"]),
+            ('"abc", "def"', ["abc", "def"]),
+            ('"ABC" ,  W/"DeF"', ["abc", "def"]),
+            ("bare", ["bare"]),
+            ("", []),
+            (" , ", []),
+            ("*", ["*"]),
+        ],
+    )
+    def test_the_parser_itself(self, raw: str, expected: "list[str]"):
+        assert api.parse_if_match(raw) == expected
+
+
+class TestPUTDoesNotEnforceAttribution:
+    """⚠ AN ACCEPTED LIMIT, PINNED SO IT CANNOT DRIFT INTO BEING ASSUMED. THIS IS
+    NOT A SECURITY GUARANTEE AND NOTHING HERE SHOULD BE READ AS ONE.
+
+    Criterion 4's "every appended bullet records actor and session" is a claim
+    about `POST /bullets`, where the actor is a keyword no request body can
+    populate. A PUT writes the caller's bytes VERBATIM — a forged
+    `[cairn: <somebody else>/…]` trailer included — and this server does not
+    check it.
+
+    Enforcement was considered and DECLINED: PUT exists for the whole-file
+    rewrites the store needs (editing `## Pointers`, turning `OPEN:` into
+    `RESOLVED <sha>:`), and per-bullet enforcement would have to diff the old
+    bullet set against the new one to tell a legitimate rewrite from a forgery,
+    refusing real edits whenever that diff was wrong. The holder of a
+    PUT-capable token is already trusted with the whole file's contents. What is
+    NOT acceptable is claiming otherwise, which is why the claim is scoped to
+    POST in the README, the module docstring and `render_bullet`.
+    """
+
+    FORGED_BULLET = (
+        f"- 2026-05-08: OPEN: {BULLET_F} [cairn: {DANA.identity}/{SESSION_B}]"
+    )
+
+    def test_a_PUT_writes_a_FORGED_attribution_trailer_VERBATIM(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = _entry(
+            entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=self.FORGED_BULLET
+        ).encode()
+        revision = api.entry_revision(path.read_bytes())
+        assert ZACH.identity != DANA.identity, "the forgery must name another holder"
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = fetch(
+                entry_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="PUT",
+                data=data, extra_headers={"If-Match": revision},
+            )
+
+        assert code == 200, code
+        assert headers["X-Store-Status"] == "replaced"
+        # 🔴 The bytes are on disk exactly as `zach` sent them, naming `dana`.
+        assert path.read_bytes() == data
+        assert self.FORGED_BULLET in path.read_text(encoding="utf-8")
+
+    def test_the_SAME_forgery_through_POST_is_ATTRIBUTED_TO_THE_TOKEN(
+        self, scoped_store: Path
+    ):
+        """🔴 THE BOUNDARY, IN ONE PAIR. The identical trailer sent through the
+        POST route does NOT become an attribution: `render_bullet` appends the
+        token's own, so the forged text is demoted to content and the bullet
+        still records who wrote it. That contrast is the whole reason the claim
+        can be scoped to POST rather than dropped."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        text = f"OPEN: {BULLET_F} [cairn: {DANA.identity}/{SESSION_B}]"
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
+            )
+
+        assert code == 200 and headers["X-Store-Status"] == "appended"
+        stored = path.read_text(encoding="utf-8")
+        written = [ln for ln in stored.splitlines() if BULLET_F in ln]
+        assert len(written) == 1, stored
+        assert written[0].endswith(f"[cairn: {ZACH.identity}/{SESSION_A}]"), written
+
+
+class TestTheFramingRefusalIsREACHED:
+    """The `if not framed:` branch was dead code as far as the suite could see —
+    a mutant making it inert survived 479 tests. It is EQUIVALENT today
+    (`framed=False` implies `body=b""` by construction, and both write handlers
+    then refuse an empty body downstream), and that is accepted. These guards
+    stop the redundancy from being incidental: one pins the ANSWER a refused
+    framing gets, the other pins the INVARIANT the equivalence rests on.
+    """
+
+    def test_a_CHUNKED_PUT_with_a_CORRECT_If_Match_is_400_and_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        """🔴 EVERY OTHER GUARD IS SATISFIED — a valid token, a resolvable target
+        and the CURRENT revision — so the only thing that can refuse this request
+        is the framing check. A test that sent a stale revision would be green
+        with the branch deleted."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        revision = api.entry_revision(before)
+        body = _entry(
+            entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=f"- 2026-05-09: {BULLET_E}"
+        ).encode()
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            host = base.split("//", 1)[1]
+            payload = (
+                f"PUT /api/v1/entry/{ALLOW_SCOPE}/{entry_ref(ALLOW_SCOPE)} HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                f"Authorization: Bearer {ZACH_TOKEN}\r\n"
+                f"CF-Connecting-IP: {CLIENT_IP}\r\n"
+                f"If-Match: \"{revision}\"\r\n"
+                f"Transfer-Encoding: chunked\r\n\r\n"
+                f"{len(body):x}\r\n"
+            ).encode() + body + b"\r\n0\r\n\r\n"
+            data = _speak(host, payload)
+            await_audit(audit, 1)
+        assert b"HTTP/1.1 400" in data, data[:200]
+        assert b"X-Store-Status: bad-request" in data, data[:400]
+        assert b"unreadable request body" in data, data[:400]
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        "raw_headers",
+        [
+            b"Transfer-Encoding: chunked\r\n",
+            b"Content-Length: 5\r\nContent-Length: 9\r\n",
+            b"Content-Length: -5\r\n",
+            b"Content-Length: not-a-number\r\n",
+            b"Content-Length: 99999999\r\n",
+        ],
+    )
+    def test_INVARIANT_a_refused_framing_ALWAYS_yields_an_EMPTY_body(
+        self, raw_headers: bytes
+    ):
+        """🔴 THE INVARIANT THE EQUIVALENCE RESTS ON, ASSERTED DIRECTLY. If a
+        refusal could ever return bytes, the `if not framed:` branch would stop
+        being redundant and its absence would be a real defect — so the thing to
+        pin is not the branch but the property that makes it safe."""
+        message = http.client.parse_headers(io.BytesIO(raw_headers + b"\r\n"))
+
+        class _Stub:
+            close_connection = False
+            headers = message
+            rfile = io.BytesIO(b"hello there, this should never be read")
+
+        framed, body = api.StoreRequestHandler._consume_body(_Stub(), keep=True)
+
+        assert framed is False, raw_headers
+        assert body == b"", (raw_headers, body)
+
+    def test_POSITIVE_CONTROL_an_ACCEPTED_framing_DOES_return_the_body(self):
+        """Without this, the invariant above is satisfied by a `_consume_body`
+        that returns an empty body for everything."""
+        message = http.client.parse_headers(io.BytesIO(b"Content-Length: 5\r\n\r\n"))
+
+        class _Stub:
+            close_connection = False
+            headers = message
+            rfile = io.BytesIO(b"hello there")
+
+        framed, body = api.StoreRequestHandler._consume_body(_Stub(), keep=True)
+
+        assert framed is True
+        assert body == b"hello"
+
+
+class TestTheHandlerArgumentCountComesFromTheTABLE:
+    """🔴 `middle = parts[1 : len(parts) - tail_len]` SIZED A HANDLER CALL FROM
+    THE REQUEST. `len(parts)` is attacker-controlled, and the expression was
+    correct only because `_write_route`'s `len(parts) != arity` check rejected
+    the mismatch three lines earlier. Relaxing that check proved the coupling:
+    `PUT /api/v1/entry/<scope>/<ref>/bullets` (4 parts) matched the PUT row
+    (arity 3) and passed FIVE arguments into a four-parameter method — unhandled
+    `TypeError`, connection dropped, no response, no `X-Store-Status`, no audit
+    line.
+
+    The slice now comes from `WRITE_ROUTES`' own `arity`, so a wrong argument
+    count is structurally impossible however the arity check behaves.
+    """
+
+    def test_a_PUT_at_the_BULLETS_path_is_a_405_and_writes_NOTHING(
+        self, scoped_store: Path
+    ):
+        """🔴 ASSERTED ON THE STATUS CODE, NOT ON "something went wrong". The
+        mutant that motivated this fix was previously "killed" only because
+        `fetch` itself raised `RemoteDisconnected` — a transport error that would
+        be equally red for any downstream crash and proves nothing about the
+        arity guard. A real 405 read off the wire is the guard's own answer."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        revision = api.entry_revision(before)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, headers, body = fetch(
+                bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="PUT",
+                data=b"---\nservice: x\nscope: y\n---\n",
+                extra_headers={"If-Match": revision},
+            )
+            lines = await_audit(audit, 1)
+        assert code == 405, (code, body)
+        assert headers["Allow"] == "GET, HEAD"
+        assert body == b"read-only\n", body
+        assert any("result=405" in ln and "status=method-not-allowed" in ln for ln in lines), lines
+        assert path.read_bytes() == before
+
+    def test_the_route_table_and_every_handler_signature_AGREE(self):
+        """🔴 A LEDGER OVER THE SEAM, not over one side of it. The dispatcher
+        passes `arity - tail_len - 1` path components plus `body` and `path`; a
+        row whose arity disagrees with its handler's signature is a `TypeError`
+        at request time on an internet-reachable route, and nothing else in this
+        file would see it. Fails when a row is added, when a handler grows a
+        parameter, and when either is removed."""
+        import inspect
+
+        for (verb, name), (handler_name, arity, tail) in api.WRITE_ROUTES.items():
+            handler = getattr(api.StoreRequestHandler, handler_name)
+            params = [
+                p
+                for p in inspect.signature(handler).parameters
+                if p != "self"
+            ]
+            expected = (arity - len(tail) - 1) + 2  # path components + body + path
+            assert len(params) == expected, (
+                f"{verb} {name} -> {handler_name}: the table would pass "
+                f"{expected} arguments to a {len(params)}-parameter handler"
+            )
+            assert params[-2:] == ["body", "path"], (verb, name, params)
+
+
+class TestAnUnhandledHandlerErrorIsSTILLAudited:
+    """🔴 A METERED REQUEST MUST NEVER VANISH FROM THE AUDIT TRAIL.
+
+    Two defects in this round reached an unhandled-exception path (a
+    `RecursionError` out of `json.loads`, a `TypeError` from the argument slice),
+    and each dropped the connection with no response, no `X-Store-Status` and no
+    audit line — the mirror image of the unmetered-405 channel `_write`'s
+    docstring says it closed, and reachable by any token holder.
+
+    🔴 THIS IS A BACKSTOP FOR THE UNKNOWN NEXT CASE, NOT A SUBSTITUTE FOR EITHER
+    FIX. Both are fixed at their own site and have their own tests above.
+    """
+
+    def test_an_exception_in_a_handler_is_a_500_with_an_AUDIT_LINE(
+        self, scoped_store: Path, monkeypatch
+    ):
+        def boom(*_a, **_k):
+            raise ZeroDivisionError(
+                f"/data/{DENY_SCOPE}/secret-path-{SESSION_B} blew up"
+            )
+
+        monkeypatch.setattr(api, "append_bullet", boom)
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_A
+            )
+            lines = await_audit(audit, 1)
+        monkeypatch.undo()
+
+        assert code == 500, (code, body)
+        assert headers["X-Store-Status"] == "internal-error"
+        assert body == b"internal error\n", body
+        assert any("result=500" in ln and "status=internal-error" in ln for ln in lines), lines
+        assert tree_hash(scoped_store) == before
+
+    def test_the_500_body_carries_NO_exception_detail(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """🔴 A BACKSTOP THAT ECHOED THE EXCEPTION WOULD OPEN A LEAK CHANNEL WHILE
+        CLOSING AN AUDIT ONE. The raised message names a scope the caller may not
+        see, a path and a session id; none of them may reach the wire."""
+        secret = f"/data/{DENY_SCOPE}/{THIRD_SCOPE}-{SESSION_B}"
+
+        def boom(*_a, **_k):
+            raise ZeroDivisionError(secret)
+
+        monkeypatch.setattr(api, "append_bullet", boom)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            _c, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_E, session=SESSION_A
+            )
+            await_audit(audit, 1)
+        monkeypatch.undo()
+
+        for leaked in (secret, DENY_SCOPE, THIRD_SCOPE, "ZeroDivisionError", "Traceback"):
+            assert leaked.encode() not in body, (leaked, body)
+        assert tuple(sorted(k.lower() for k in headers)) == tuple(
+            sorted(
+                ("cache-control", "connection", "content-length", "content-type",
+                 "date", "server", "x-store-status")
+            )
+        ), sorted(headers)
+
+
+class TestTheWriteRoutesDoNotCarryTheREADHeaders:
+    """🔴 A README SENTENCE IS A CLAIM LIKE ANY OTHER, and this one was false from
+    the moment the write path landed: "Every `/api/*` response carries
+    `X-Store-Status`, `X-Store-Exit` …, `X-Store-Revision` … and
+    `X-Store-Snapshot`". The write routes carry neither `X-Store-Revision` nor
+    `X-Store-Snapshot`, and `X-Store-Exit` only on a 503.
+
+    Pinned on BEHAVIOUR — the header set a write answer actually carries — and
+    then on the corrected sentence, so the doc cannot drift back.
+    """
+
+    def test_a_successful_APPEND_carries_no_read_headers(self, scoped_store: Path):
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_F, session=SESSION_A
+            )
+        assert code == 200
+        lowered = {k.lower() for k in headers}
+        assert "x-store-status" in lowered and "etag" in lowered
+        assert "x-store-revision" not in lowered, sorted(headers)
+        assert "x-store-snapshot" not in lowered, sorted(headers)
+        assert "x-store-exit" not in lowered, sorted(headers)
+
+    def test_a_successful_RECALL_DOES_carry_them(self, scoped_store: Path):
+        """The positive control: the claim is true of the READ routes, which is
+        why the fix is a qualification rather than a deletion."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )
+        assert code == 200
+        lowered = {k.lower() for k in headers}
+        for name in ("x-store-status", "x-store-exit", "x-store-revision",
+                     "x-store-snapshot"):
+            assert name in lowered, (name, sorted(headers))
+
+    def test_the_README_no_longer_makes_the_UNQUALIFIED_claim(self):
+        """🔴 PINNED ON THE WHOLE NORMALISED SENTENCE, not on a keyword. A guard
+        that grepped for `X-Store-Revision` would be walked by any reword; a
+        cosmetic edit failing this test is the price of a machine-readable claim.
+        """
+        text = " ".join((API_DIR / "README.md").read_text().split())
+        assert (
+            "Every `/api/*` response carries `X-Store-Status`, `X-Store-Exit` "
+            "(the CLI's own exit code, from the CLI's own `_exit_for`), "
+            "`X-Store-Revision` (the scope's git HEAD, or `unknown` — never a "
+            "fabricated sha) and `X-Store-Snapshot`."
+        ) not in text, "the README still claims all four headers on EVERY /api/* route"
+        assert (
+            "⚠ **The WRITE routes carry NEITHER `X-Store-Revision` NOR "
+            "`X-Store-Snapshot`, and `X-Store-Exit` only on a `503`.**"
+        ) in text
+
+    def test_the_README_scopes_the_attribution_claim_to_POST(self):
+        """The other false-by-scope claim from this round. Same whole-sentence
+        rule, for the same reason."""
+        text = " ".join((API_DIR / "README.md").read_text().split())
+        assert (
+            "🔴 **The ACTOR is derived from the token, never from the body.**"
+        ) not in text, "the README still makes the attribution claim server-wide"
+        assert (
+            "🔴 **On this POST route the ACTOR is derived from the token, never "
+            "from the body.**"
+        ) in text
+        assert (
+            "⚠ **PUT DOES NOT ENFORCE ATTRIBUTION, AND THE POST GUARANTEE ABOVE "
+            "DOES NOT EXTEND TO IT.**"
+        ) in text

@@ -62,11 +62,25 @@ Content-Type: application/json
 {"text": "one line, no leading `- `", "session": "<agent session id>"}
 ```
 
-🔴 **The ACTOR is derived from the token, never from the body.** An `actor` key
-is accepted and DISCARDED — a client-supplied actor would let any token-holder
-attribute a bullet to somebody else. The `session` IS caller-supplied, because
-it is correlation data rather than an identity claim, and it is validated
-against `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`.
+🔴 **On this POST route the ACTOR is derived from the token, never from the
+body.** An `actor` key is accepted and DISCARDED — a client-supplied actor would
+let any token-holder attribute a bullet to somebody else. The `session` IS
+caller-supplied, because it is correlation data rather than an identity claim,
+and it is validated against `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`. **The claim is
+scoped to POST on purpose — PUT does not enforce it; see below.**
+
+`text` must be ONE line and must carry no control or formatting characters. The
+line check is `len(text.splitlines()) > 1` (plus a leading/trailing break test)
+rather than a search for `\n`/`\r`, because `str.splitlines()` splits on TEN
+characters: a literal `U+2028` was measured landing at `200 appended` and
+becoming TWO stored bullets — the first with **no attribution trailer at all**,
+the second an `OPEN:` bullet whose leading `[cairn: …]` reads as a different
+person's. Characters in Unicode categories `Cc`, `Cf`, `Cs` and `Co` are refused
+for the same reason a denylist is not: `\x00` makes the entry read as binary to
+`git`/`grep`, `\x1b[…` rewrites the terminal of whoever renders a digest,
+`U+202E` reorders the rendered line, and `U+200B` is invisible while still
+defeating idempotency. (`\t` is `Cc` and is therefore refused too — a bullet is
+one line of prose.)
 
 The bullet lands at the TOP of `## Nuance / work-history` (the store's
 newest-first convention) as:
@@ -88,6 +102,7 @@ parse as no marker at all — a silently vanishing badge.
 | `403` + `X-Store-Status: legacy-cannot-write` | a BARE (unmapped) token — it has no identity, so no actor can be derived. Give the holder a `<token> <identity> <scopes>` row |
 | `404` + `X-Store-Status: not-found` | the scope is outside your allowlist, OR it does not exist, OR the ref resolves to nothing, OR the entry is malformed — **one answer for all four**, because a refusal distinguishable from an absence is an enumeration API |
 | `422` | the entry has no `## Nuance / work-history` heading |
+| `500` + `X-Store-Status: internal-error` | a handler raised something nobody anticipated. The body is a **constant** — no exception text reaches the wire — the traceback goes to the pod log, and **the audit line is still written**. A metered request must never vanish from the audit trail; two defects in one audit round dropped the connection with no response and no record at all |
 
 Appends are **commutative and idempotent**: two writers appending different
 bullets to one entry both survive (the read-modify-write is under an exclusive
@@ -106,6 +121,24 @@ the current revision as an `ETag` so a client can retry. Bytes the index loader
 would reject are refused `422` rather than written — a PUT is the only
 primitive here that destroys content rather than adding to it.
 
+`If-Match` is read as the **list** RFC 9110 §13.1.1 says it is: `If-Match:
+"stale", "<correct>"` succeeds on the second tag, and hex case is folded, so
+`"3F2A…"` and `"3f2a…"` name the same revision. Reading it as one opaque string
+made both a permanent `412` — fail-closed, and still a precondition a
+conformant client could never satisfy.
+
+⚠ **PUT DOES NOT ENFORCE ATTRIBUTION, AND THE POST GUARANTEE ABOVE DOES NOT
+EXTEND TO IT.** The body is written verbatim: a PUT whose content includes
+`- 2026-08-27: OPEN: … [cairn: someone-else/sess-…]` is stored exactly as sent,
+forged trailer included. This is a **decided limit**, not an oversight — PUT
+exists for the whole-file rewrites the store needs (editing `## Pointers`,
+turning an `OPEN:` bullet into `RESOLVED <sha>:`), and enforcing per-bullet
+attribution would mean diffing the old bullet set against the new one to tell a
+legitimate rewrite from a forged trailer, refusing real edits whenever that diff
+was wrong. A holder of a PUT-capable token is already trusted with the whole
+file. `TestPUTDoesNotEnforceAttribution` pins the limit so it cannot drift into
+being assumed.
+
 ⚠ **THE REVISION IS THE ENTRY'S CONTENT HASH — `sha256(entry file)[:16]` — NOT
 the scope's git head.** No scope in the served copy is a git repository, so
 `X-Store-Revision` answers `unknown` for all of them; a precondition keyed on
@@ -113,9 +146,17 @@ it would be satisfied by every caller sending the literal string `unknown`,
 forever. A client can compute the revision itself from the copy `/snapshot`
 gave it.
 
-Every `/api/*` response carries `X-Store-Status`, `X-Store-Exit` (the CLI's own
-exit code, from the CLI's own `_exit_for`), `X-Store-Revision` (the scope's
+Every `/api/*` response carries `X-Store-Status`. The **READ** routes
+(`/recall`, `/search`, `/snapshot`) additionally carry `X-Store-Exit` (the CLI's
+own exit code, from the CLI's own `_exit_for`), `X-Store-Revision` (the scope's
 git HEAD, or `unknown` — never a fabricated sha) and `X-Store-Snapshot`.
+
+⚠ **The WRITE routes carry NEITHER `X-Store-Revision` NOR `X-Store-Snapshot`,
+and `X-Store-Exit` only on a `503`.** They carry an `ETag` (the entry revision)
+instead, which is the fact a writer needs and the read headers do not give. This
+paragraph used to claim all four on every `/api/*` response; that was false for
+the write path from the moment it landed. A README sentence is a claim like any
+other.
 
 🔴 **This server does NOT serve the authoritative store — it serves a COPY, and
 nothing syncs that copy.** `seed.sh` pushes it by hand; there is no CronJob and
