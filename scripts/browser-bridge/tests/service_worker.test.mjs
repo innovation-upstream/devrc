@@ -31,12 +31,12 @@ const state = {
   tab: { id: TAB_ID, url: "https://civitai.com/apps/run/model-benchmarking",
          title: "Model Benchmarking", active: false, status: "complete", windowId: 1 },
   calls: { getAllFrames: [], executeScript: [], debugger: [], tabsGet: [],
-           tabsUpdate: [], windowsUpdate: [], tabsCreate: [] },
+           tabsUpdate: [], windowsUpdate: [], tabsCreate: [], tabsRemove: [] },
   crumbs: [],
 };
 function resetCalls() {
   state.calls = { getAllFrames: [], executeScript: [], debugger: [], tabsGet: [],
-                  tabsUpdate: [], windowsUpdate: [], tabsCreate: [] };
+                  tabsUpdate: [], windowsUpdate: [], tabsCreate: [], tabsRemove: [] };
   state.crumbs = [];
   state.execResult = { ok: true };
 }
@@ -63,6 +63,10 @@ globalThis.chrome = {
       state.calls.tabsCreate.push(props);
       return { id: FRESH_TAB_ID, url: (props && props.url) || "about:blank" };
     },
+    // Present ONLY so that a regression which puts a tab close back into `open`
+    // is RECORDED rather than crashing on an undefined stub — every `open`
+    // assertion below requires this list to stay EMPTY.
+    async remove(id) { state.calls.tabsRemove.push(id); },
     async update(id, props) {
       state.calls.tabsUpdate.push({ id, props });
       if (props) Object.assign(state.tab, props);   // e.g. {active:true}
@@ -93,7 +97,8 @@ globalThis.chrome = {
   alarms: { create() {}, onAlarm: { addListener() {} } },
 };
 
-const { OPS, loopTiming } = await import("../extension/service_worker.js");
+const { OPS, loopTiming, execute } =
+  await import("../extension/service_worker.js");
 const { FAST_CAPTURE_BUDGET_MS, EXEC_OP_BUDGET_MS, POLL_BUDGET_MS,
         RESULT_BUDGET_MS, LOOP_STALL_MS, STORAGE_BUDGET_MS, REUSE_TAB_BUDGET_MS }
   = await import("../extension/protocol.js");
@@ -468,7 +473,10 @@ test("open reuse probe: a HUNG chrome.tabs.get falls through to a fresh tab",
 // reuse into a fresh tab. A healthy `tabs.get` must still reuse — otherwise the
 // test above would pass just as well with the reuse path deleted outright, and
 // would be recording coverage it does not have. (Tab reuse is not cosmetic: a
-// missed reuse orphans the previous tab, which nothing owns and nothing closes.)
+// missed reuse orphans the previous tab, which nothing OWNS — the reap added
+// later in this file closes it best-effort, but reuse is still strictly cheaper
+// than close-plus-create, and the reap is the least likely thing to land under
+// the stall that caused the missed reuse.)
 test("open reuse probe: a HEALTHY chrome.tabs.get still reuses the owned tab", async () => {
   resetCalls();
   const out = await OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" });
@@ -547,8 +555,245 @@ test("open reuse probe: the breadcrumb distinguishes a HANG from a genuinely-gon
   // for any mutant — coverage-shaped and empty, the same defect this PR removed once
   // already. The distinctness that matters is enforced by the two equals.)
 });
-
 // --------------------------------------------------------------------------- //
+// 🔴 THE BOUND'S ORPHAN IS REPORTED SO THE SERVER CAN RECLAIM IT — AND THE
+// EXTENSION CLOSES NOTHING.
+//
+// #814 bounded the reuse probe and DISCLOSED its cost in two places — the
+// REUSE_TAB_BUDGET_MS comment, and server.py's `reuse_tab_id` block, which spells
+// it out: a probe that exceeds the budget falls through to a FRESH tab, the server
+// overwrites the ownership record, and the live first tab is orphaned with nothing
+// to reclaim it. `open` returns SUCCESS on that path, so nothing ever revisits it
+// — one leaked tab per timed-out re-open.
+//
+// 🔴 WHY THE DIVISION OF LABOUR IS THE SUBJECT OF THESE TESTS. Two earlier drafts
+// had the extension close the tab itself. Both were wrong the same way:
+// reclaiming is correct ONLY IF THE RESULT IS DELIVERED — otherwise the old tab is
+// not an orphan at all (the ownership record still names it, it is still live) and
+// closing it strands the session on a dead id, then on the operator's ACTIVE tab.
+// TWO parties abandon an op on TWO clocks and neither is visible from inside the
+// op: execute()'s execMs race (which cannot cancel, so a merely SLOW create
+// resumes afterwards) and the submitter's cmd_timeout (which starts at SUBMIT, so
+// queue time is invisible). An extension-side elapsed guard closed the first and
+// structurally could not close the second. So the assertion that matters most
+// below is the NEGATIVE one, repeated on every path: `tabsRemove` stays empty.
+//
+// The server half — that a DELIVERED `open` result carrying `orphanTabId` enqueues
+// a `close`, and an abandoned one does not — is pinned in test_server.py, because
+// the fact "we got here" lives only there.
+// --------------------------------------------------------------------------- //
+
+// Race an `open` against a 1s deadline so a REGRESSION IS AN ASSERTION FAILURE,
+// not a hang: node scores a timed-out test `cancelled` and leaves `fail` at 0, so
+// a gate that greps the fail count would read a live regression as clean. The
+// per-test `{ timeout }` stays only as a backstop for anything outside the race.
+function openWithin(promise, why) {
+  let hangTimer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      hangTimer = setTimeout(() => reject(new Error(why)), 1000);
+    }),
+  ]).finally(() => clearTimeout(hangTimer));
+}
+
+test("open reuse probe: a TIMED-OUT probe REPORTS the orphan and closes nothing",
+     { timeout: 2000 }, async (t) => {
+  resetCalls();
+  const realGet = chrome.tabs.get;
+  const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  t.after(() => {
+    chrome.tabs.get = realGet;
+    globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
+  });
+  globalThis.BROWSER_BRIDGE_LOOP_TIMING = { ...(realTiming || {}), reuseTabMs: 20 };
+  chrome.tabs.get = () => new Promise(() => {});   // never settles
+
+  const out = await openWithin(
+    OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" }),
+    "open did not settle within 1s");
+
+  assert.equal(out.tabId, FRESH_TAB_ID, "the fall-through still yields the fresh tab");
+  assert.equal(state.calls.tabsCreate.length, 1, "exactly one replacement tab");
+  assert.equal(out.orphanTabId, TAB_ID,
+               "the tab the fall-through orphaned must be REPORTED — it is the "
+               + "only way the server can ever learn of it, and server.py's "
+               + "\"Nothing reclaims it; only a human closes it\" is what this "
+               + "report exists to delete");
+  assert.deepEqual(state.calls.tabsRemove, [],
+                   "🔴 the EXTENSION must not close it. It cannot know whether "
+                   + "this result will be delivered, and on the paths where it is "
+                   + "not, the old tab is still OWNED and still live");
+});
+
+// 🔴 THE DISCRIMINATING NEGATIVE for the report. Without it, an unconditional
+// `orphanTabId` passes the test above — and an unconditional report makes the
+// server close a tab `chrome.tabs.get` has just named as absent: nothing to
+// reclaim, and a recycled tabId would be someone else's tab.
+test("open reuse probe: a REJECTING probe reports NO orphan — the id is known absent",
+     async (t) => {
+  resetCalls();
+  const realGet = chrome.tabs.get;
+  t.after(() => { chrome.tabs.get = realGet; });
+  chrome.tabs.get = async () => { throw new Error("No tab with id: 5."); };
+
+  const out = await OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" });
+  assert.equal(out.tabId, FRESH_TAB_ID, "the gone path still yields a fresh tab");
+  assert.equal(state.calls.tabsCreate.length, 1);
+  assert.equal("orphanTabId" in out, false,
+               "a tab the probe REPORTED gone must not be reported as an orphan: "
+               + "nothing to reclaim, and a recycled tabId would be someone "
+               + "else's tab");
+  assert.deepEqual(state.calls.tabsRemove, []);
+});
+
+// The other two routes through `open`. Together with the two arms above, these
+// four enumerate every route — reuse-hit, reuse-reject, reuse-timeout, and no
+// `reuseTabId` at all — so "exactly one of them reports an orphan" is a CLOSED
+// claim rather than a sampled one.
+//
+// ⚠ An earlier wording called these "the other two paths that reach
+// `chrome.tabs.create`". Only ONE of them does: a healthy reuse RETURNS before
+// the create (which is what `reused.reused === true` below asserts). The
+// load-bearing claim — that the four cases are exhaustive — was right; the
+// description of them was not.
+test("open: neither a healthy reuse nor a first open reports an orphan", async () => {
+  resetCalls();
+  const reused = await OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" });
+  assert.equal(reused.reused, true, "healthy probe reuses (attribution control)");
+  assert.equal("orphanTabId" in reused, false, "a reused tab is not an orphan");
+  assert.deepEqual(state.calls.tabsRemove, []);
+
+  resetCalls();
+  const fresh = await OPS.open({ url: "https://civitai.com/" });   // no reuseTabId
+  assert.equal(fresh.tabId, FRESH_TAB_ID);
+  assert.equal(state.calls.tabsCreate.length, 1);
+  assert.equal("orphanTabId" in fresh, false,
+               "a session's FIRST open has no predecessor to reclaim");
+  assert.deepEqual(state.calls.tabsRemove, []);
+});
+
+// 🔴 THE REGRESSION GUARD FOR THE WHOLE DESIGN DECISION, and the one case that
+// makes it concrete: an op execute() has ALREADY ABANDONED.
+//
+// execute() RACES the op against execMs; it does not CANCEL it. So a
+// `chrome.tabs.create` that is merely SLOW resumes `open` long after the op
+// answered `op_timeout:open`. On that path the old tab is NOT an orphan — the
+// server saw a non-tab-gone error and KEPT ownership of a tab that is still live
+// and still usable; pre-change the next `open` simply reused it. Anything closing
+// it here would strand the session on a dead id → `owned_tab_gone` → the mapping
+// is dropped → the op AFTER that falls back to the OPERATOR'S ACTIVE TAB.
+//
+// This is now impossible BY CONSTRUCTION rather than by a guard: the extension
+// never closes, and the server acts only on a delivered result. This test pins
+// that construction — put a `chrome.tabs.remove` back into `open` and it goes red.
+// It is driven through execute(), not OPS.open, because the race that defines
+// "given up" lives there and nowhere else.
+test("open: the extension closes NO tab even when execute() has abandoned the op",
+     { timeout: 4000 }, async (t) => {
+  resetCalls();
+  const realGet = chrome.tabs.get;
+  const realCreate = chrome.tabs.create;
+  const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  t.after(() => {
+    chrome.tabs.get = realGet;
+    chrome.tabs.create = realCreate;
+    globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
+  });
+  // reuse probe 90ms (falls through), WHOLE OP 310ms, create settling at 260ms.
+  // 🔴 THESE NUMBERS ARE CHOSEN SO THE CREATE ALONE FITS INSIDE execMs (260 <
+  // 310) WHILE THE WHOLE OP DOES NOT (~350 > 310). A fixture where the create by
+  // itself already exceeds execMs cannot tell "elapsed since op start" from
+  // "elapsed since create start", so it would pass against an implementation
+  // that re-anchored its clock — measured: that mutant survived the earlier
+  // 20/80/300 fixture. Keep the create INSIDE the budget and the op OUTSIDE it.
+  globalThis.BROWSER_BRIDGE_LOOP_TIMING = {
+    ...(realTiming || {}), reuseTabMs: 90, execMs: 310 };
+  chrome.tabs.get = () => new Promise(() => {});          // force the timeout arm
+  let createSettled = false;
+  chrome.tabs.create = async (props) => {
+    state.calls.tabsCreate.push(props);
+    await new Promise((r) => setTimeout(r, 260));
+    createSettled = true;
+    return { id: FRESH_TAB_ID, url: (props && props.url) || "about:blank" };
+  };
+
+  const env = await execute({ op: "open", id: "late", reuseTabId: TAB_ID,
+                              url: "https://civitai.com/" });
+  assert.equal(env.ok, false, "control: the slow create really did outlive "
+                              + "execute's budget, so this IS the abandoned case");
+  assert.equal(env.error, "op_timeout:open");
+  assert.deepEqual(state.calls.tabsRemove, []);
+
+  // Let the abandoned create resume and run `open`'s tail.
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(createSettled, true,
+               "control: the create really did SETTLE (not merely start — the "
+               + "push above happens before its await, so tabsCreate.length "
+               + "cannot witness settlement)");
+  assert.deepEqual(state.calls.tabsRemove, [],
+                   "🔴 nothing may close a tab from inside `open`. On this path "
+                   + "the SERVER STILL OWNS the old tab and it is still live; a "
+                   + "close here leaves the session on a dead id and, two ops "
+                   + "later, on the operator's active tab");
+});
+
+// The op DOES still report the orphan on a GENUINELY ABANDONED op — harmlessly,
+// since the envelope is dropped. Asserted so nobody "tidies" the report behind
+// the same abandonment check the close used to need: the report is inert without
+// a delivered result, which is exactly why it is safe to emit unconditionally.
+//
+// 🔴 THIS TEST WAS VACUOUS IN ITS FIRST FORM AND AN AUDIT MEASURED IT. It called
+// `OPS.open()` directly, with the default `execMs` and no `execute()` wrapper, so
+// the op finished in ~20ms and NOTHING was abandoned — a duplicate of the
+// timeout-arm test above, under a name claiming coverage it did not have. The
+// mutant its own comment names (re-guard the emit with
+// `(Date.now() - startedAt) < loopTiming().execMs`) SURVIVED the whole file. It
+// must therefore observe the report on the far side of a real abandonment, which
+// means reading `open`'s return value AFTER execute() has already given up on it.
+test("open: the orphan is still REPORTED on a genuinely ABANDONED op (inert, not guarded)",
+     { timeout: 4000 }, async (t) => {
+  resetCalls();
+  const realGet = chrome.tabs.get;
+  const realCreate = chrome.tabs.create;
+  const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  t.after(() => {
+    chrome.tabs.get = realGet;
+    chrome.tabs.create = realCreate;
+    globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
+  });
+  // Same 90/310/260 shape as the test above — create INSIDE execMs, whole op
+  // OUTSIDE it — so a re-anchored clock cannot pass by accident.
+  globalThis.BROWSER_BRIDGE_LOOP_TIMING = {
+    ...(realTiming || {}), reuseTabMs: 90, execMs: 310 };
+  chrome.tabs.get = () => new Promise(() => {});
+  // Hold onto the op's OWN promise so its resolved value is readable after
+  // execute() has abandoned it. execute() races the op; it does not cancel it, so
+  // this promise still settles — with whatever `open` decided to report.
+  let opPromise = null;
+  chrome.tabs.create = async (props) => {
+    state.calls.tabsCreate.push(props);
+    await new Promise((r) => setTimeout(r, 260));
+    return { id: FRESH_TAB_ID, url: (props && props.url) || "about:blank" };
+  };
+  const realOpen = OPS.open;
+  t.after(() => { OPS.open = realOpen; });
+  OPS.open = (cmd) => { opPromise = realOpen.call(OPS, cmd); return opPromise; };
+
+  const env = await execute({ op: "open", id: "inert", reuseTabId: TAB_ID,
+                             url: "https://civitai.com/" });
+  assert.equal(env.error, "op_timeout:open",
+               "control: this really IS the abandoned case");
+
+  const out = await opPromise;   // resolves ~260ms after execute() gave up
+  assert.equal(out.orphanTabId, TAB_ID,
+               "the report must be emitted UNCONDITIONALLY — putting it behind an "
+               + "abandonment check buys nothing (a dropped envelope is already "
+               + "inert) and would re-introduce a clock this file no longer needs");
+  assert.equal(out.tabId, FRESH_TAB_ID);
+  assert.deepEqual(state.calls.tabsRemove, [],
+                   "and still nothing is closed from inside `open`");
+});
 // `activate` op: foreground the tab (tabs.update{active} + windows.update{focused})
 // then bounded wait-for-load. Wiring only — the wait LOGIC is unit-tested in
 // protocol.test.mjs. No CDP/debugger, no executeScript, no new permission.

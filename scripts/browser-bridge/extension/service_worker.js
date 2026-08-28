@@ -1210,7 +1210,45 @@ const OPS = {
   // ONLY shape this catch can act on. See REUSE_TAB_BUDGET_MS for the 2000ms
   // choice — and, importantly, for why `screenshot`'s CDP attach-hang arithmetic
   // does NOT apply here (`open` never attaches the debugger).
+  //
+  // 🔴 AND THE BOUND'S DISCLOSED COST IS REPORTED SO THE SERVER CAN RECLAIM IT.
+  // REUSE_TAB_BUDGET_MS states the cost, and server.py's `reuse_tab_id` block
+  // states it harder — a probe that exceeds the budget falls through to a FRESH
+  // tab, the server overwrites the ownership record, and the live first tab is
+  // orphaned. `open` returns SUCCESS on that path, so no error surfaces: one
+  // leaked tab per timed-out re-open, accumulating until a human notices.
+  //
+  // 🔴 THIS FUNCTION REPORTS THE ORPHAN. IT DOES NOT CLOSE IT — and that
+  // division is the whole design, arrived at by getting it wrong twice.
+  // Reclaiming is only correct when the op's RESULT IS DELIVERED: if nobody
+  // records the fresh tab as owned, the OLD tab is not an orphan at all — the
+  // server still owns it, it is still live, and closing it strands the session
+  // on a dead id (then, one op later, on the operator's ACTIVE tab). This
+  // function cannot know whether delivery happened. TWO independent parties
+  // abandon an op and NEITHER is visible from here:
+  //   * execute() races this op against execMs and cannot cancel it, so a merely
+  //     SLOW `chrome.tabs.create` resumes us after `op_timeout:open` was already
+  //     answered;
+  //   * the SUBMITTER gives up at its own `cmd_timeout`, on a different clock
+  //     that starts at SUBMIT rather than at dequeue — so queue time is
+  //     structurally invisible here (server.py: "The SUBMITTER giving up … does
+  //     NOT free the extension"). An elapsed-time guard in this file closed the
+  //     first and could not close the second.
+  // The server knows both, because `_record_ownership_locked` runs ONLY on a
+  // delivered result. So it decides, and it enqueues the `close`. One rule, one
+  // place — and the place is the one holding the ownership map.
+  //
+  // NOT a bound on `chrome.tabs.create` — that was considered and rejected. This
+  // choke-point file's own rule (see execute()) grants a local bound only to "an
+  // await inside a `try` whose `catch` implements a RECOVERY (a second, working
+  // path)". `chrome.tabs.create` has no second path, so a bound there could only
+  // relabel `op_timeout:open` as a create-specific timeout while leaking exactly
+  // the same tab. The leak, not the label, is the defect.
   async open(cmd) {
+    // The tabId the fall-through is about to orphan, or null. Set ONLY on the
+    // timeout arm — see the catch for why the rejection arm reports nothing.
+    // REPORTED in the envelope; never acted on here.
+    let orphanTabId = null;
     if (cmd && cmd.reuseTabId != null) {
       try {
         const existing = await promiseWithTimeout(
@@ -1234,9 +1272,28 @@ const OPS = {
         // mid-open. It is NOT a counter and NOT an answer to "how often does the
         // probe time out in production" — that needs a key execute() does not
         // clobber, deliberately not added here.
+        const timedOut =
+          String((e && e.message) || e).startsWith("reuse_tab_timeout");
         breadcrumb("open", (cmd && cmd.id) || null,
-                   String((e && e.message) || e).startsWith("reuse_tab_timeout")
-                     ? "open_reuse_timeout" : "open_reuse_gone");
+                   timedOut ? "open_reuse_timeout" : "open_reuse_gone");
+        // 🔴 REPORT AN ORPHAN ONLY ON THE TIMEOUT ARM — and the argument is
+        // EXPECTED VALUE, not a claim that the timeout arm is the safer one. It
+        // is not: a recycled tabId is a hazard on BOTH arms, and the timeout
+        // arm's close is issued LATER (after an unbounded `chrome.tabs.create`,
+        // plus a server round-trip), so its recycle window is strictly the WIDER
+        // of the two. What separates them is the numerator:
+        //   * rejection → `chrome.tabs.get` ANSWERED, naming the id as absent.
+        //                 Expected tabs reclaimed: ZERO. Any exposure at all,
+        //                 however small, buys nothing. Report nothing.
+        //   * timeout   → the probe answered NOTHING. A live tab is about to be
+        //                 orphaned with no owner, and reclaiming it is the whole
+        //                 point of this change. A non-zero exposure is justified
+        //                 by a non-zero return.
+        // (An earlier draft of this comment argued the rejection arm was refused
+        // because acting there is "pure exposure" while implying the timeout arm
+        // was not exposed. That reasoning was one-sided and did not carry the
+        // conclusion, even though the conclusion is right.)
+        orphanTabId = timedOut ? cmd.reuseTabId : null;
         /* owned tab gone (or hung) → open a fresh one below */
       }
     }
@@ -1244,7 +1301,40 @@ const OPS = {
       url: (cmd && cmd.url) ? cmd.url : "about:blank",
       active: false,
     });
-    return { tabId: tab.id, url: tab.url || (cmd && cmd.url) || "about:blank" };
+    // 🔴 REPORT the orphan; the SERVER closes it. Two earlier drafts closed it
+    // here and both were wrong in the same direction, so state the rule rather
+    // than the fix: RECLAIMING IS CORRECT ONLY IF THIS RESULT IS DELIVERED. If
+    // nobody records the fresh tab as owned, the old tab is not an orphan — it
+    // is still owned, still live, and closing it strands the session on a dead
+    // id. Two independent parties abandon an op, and NEITHER is observable from
+    // inside this function: execute()'s execMs race (which cannot cancel us, so
+    // a merely SLOW create resumes here after `op_timeout:open` was answered),
+    // and the SUBMITTER's own cmd_timeout — a different clock, started at
+    // SUBMIT, so queue time is structurally invisible here. An elapsed-time
+    // guard in this file closed the first and could not close the second.
+    //
+    // `_record_ownership_locked` runs ONLY on a delivered result, so the server
+    // has exactly the fact this function lacks. It enqueues the `close`.
+    //
+    // ⚠ WHAT THIS DOES **NOT** FIX, stated rather than discovered later:
+    //   (a) It is still best-effort. The server-issued `close` is a real op that
+    //       can itself fail or be lost, and no counter tracks how often. What is
+    //       gone is the case where the reclaim was WRONG, not the case where it
+    //       silently does not happen.
+    //   (b) The OTHER orphan is untouched: if `chrome.tabs.create` hangs and
+    //       NEVER settles, execute() kills the op at EXEC_OP_BUDGET_MS and the
+    //       abandoned create later produces a tab this function never sees, so
+    //       there is nothing to report. Closing (b) needs the choke point to
+    //       signal abandonment back into the op, which it cannot do today.
+    //   (c) `orphanTabId` is a REPORT, not an instruction, and the server treats
+    //       it as one — it closes the tab only when it also just recorded the
+    //       session's NEW tab, and never when the two ids are equal.
+    const out = { tabId: tab.id,
+                  url: tab.url || (cmd && cmd.url) || "about:blank" };
+    // Additive, and present only on the path that orphans, so an ordinary `open`
+    // envelope is byte-identical to before.
+    if (orphanTabId != null) out.orphanTabId = orphanTabId;
+    return out;
   },
 
   // Close the session's owned tab (the server injects its tabId). The server

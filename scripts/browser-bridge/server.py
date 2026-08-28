@@ -1659,7 +1659,7 @@ class Instance:
                  "pending", "rl_tokens", "rl_last", "extension_version",
                  "extension_id", "extension_build", "last_poll_wall",
                  "lost_logged",
-                 "last_dispatch", "inflight")
+                 "last_dispatch", "inflight", "reaps")
 
     def __init__(self, key, instance_id, label, now, burst=0.0,
                  extension_version=None, extension_id=None,
@@ -1716,6 +1716,11 @@ class Instance:
         # one — which is what tells a legitimately BUSY extension apart from a
         # WEDGED one (see Registry.submit's `fast_timeout`).
         self.inflight: dict[str, float] = {}
+        # cid -> {"tab_id", "expires_at"} for FIRE-AND-FORGET orphan reaps only
+        # (see _enqueue_reap_close_locked). Every OTHER outbox entry belongs to a
+        # submitter that removes it on abandonment; a reap has no submitter, so
+        # this is what gives it a lifetime and lets it be cancelled.
+        self.reaps: dict[str, dict] = {}
 
 
 class Registry:
@@ -1928,7 +1933,23 @@ class Registry:
                     if inst.superseded:
                         return SUPERSEDED
                     if inst.outbox:
-                        return inst.outbox.popleft()
+                        cmd = inst.outbox.popleft()
+                        # A fire-and-forget orphan reap is the ONE outbox entry
+                        # with no submitter to withdraw it, so it carries its own
+                        # expiry — see _enqueue_reap_close_locked. Past it, the
+                        # tabId can no longer be trusted to name the same tab
+                        # (a Brave restart reuses this Instance and restarts tab
+                        # ids at 1), so DROP it rather than dispatch it.
+                        r = inst.reaps.get(cmd.get("id"))
+                        if r is not None:
+                            if self._clock() >= r["expires_at"]:
+                                inst.reaps.pop(cmd["id"], None)
+                                inst.inflight.pop(cmd["id"], None)
+                                log("owner_orphan_reap_expired",
+                                    key=inst.key, tab=r.get("tab_id"),
+                                    id=cmd["id"])
+                                continue      # look for the next command
+                        return cmd
                     remaining = deadline - self._clock()
                     if remaining <= 0:
                         return None
@@ -1956,7 +1977,26 @@ class Registry:
                     inst.results[cid] = payload
                     self._cond.notify_all()
                     return True
-            # No live submitter — but this may be the ABANDONED command whose
+            # A fire-and-forget orphan reap: no waiter by design, but very much a
+            # command WE issued and are expecting. Recognised here so a perfectly
+            # normal reap does not fall through to the abandoned-command branch
+            # below and get logged as `result_unknown_id` — a line whose whole
+            # meaning is "a reply for a command nobody knows about", i.e. a
+            # lost-reply tell. Emitting it on every successful reap would retire
+            # that signal.
+            for inst in candidates:
+                r = inst.reaps.pop(cid, None)
+                if r is not None:
+                    inst.inflight.pop(cid, None)
+                    if (inst.last_dispatch or {}).get("id") == cid:
+                        inst.last_dispatch = None
+                    log("owner_orphan_reap_done", key=inst.key,
+                        tab=r.get("tab_id"), id=cid,
+                        ok=bool(isinstance(payload, dict)
+                                and payload.get("ok")))
+                    return True
+            # No live submitter, and not a reap either — so this may be the
+            # ABANDONED command whose
             # inflight entry we deliberately kept (see INFLIGHT_STALE_S). The reply
             # proves the extension is free again, so release it NOW instead of
             # waiting out the staleness window: that is the difference between the
@@ -2037,9 +2077,19 @@ class Registry:
 
     @staticmethod
     def _prune_inflight_locked(inst, now):
-        """Drop `inflight` entries that can no longer describe current business.
+        """Drop `inflight` entries that can no longer describe current business,
+        AND sweep the `reaps` index of entries nothing can reach any more.
 
-        TWO conditions, and the second is not optional:
+        🔴 THE SECOND JOB IS IN THE NAME'S BLIND SPOT, WHICH IS HOW A REGRESSION
+        GOT IN. This used to say "Drop `inflight` entries" and nothing else, so a
+        function whose contract read "inflight only" was quietly given authority
+        over the reap-expiry index — and the first draft of that sweep used an
+        inflight-only predicate, deleting the metadata of reaps still queued in
+        the outbox and thereby removing BOTH of a reap's bounds. The sweep's own
+        comment below carries the measurement; this line exists so the contract
+        at the top is as wide as the body.
+
+        TWO conditions for the inflight half, and the second is not optional:
 
         (a) older than INFLIGHT_STALE_S, AND
         (b) NO live submitter is still blocked on it (`cid not in inst.waiters`).
@@ -2069,6 +2119,34 @@ class Registry:
                  if now - t > INFLIGHT_STALE_S and c not in inst.waiters]
         for c in stale:
             del inst.inflight[c]
+        # Sweep the `reaps` index for entries nothing can reach any more. The one
+        # path that strands one is a reap whose reply is LOST — the residual this
+        # feature discloses — after which it would outlive the Instance's
+        # usefulness, since `instance_id` is stable across a browser restart.
+        #
+        # 🔴 A REAP IS REACHABLE FROM TWO PLACES, AND AN EARLIER DRAFT SWEPT ON
+        # ONLY ONE OF THEM. `inst.reaps[cid]` is the ONLY index from an outbox
+        # entry to its `expires_at`, and it is also what `_cancel_queued_reaps_
+        # locked` matches on. A reap's inflight stamp and its expiry are both set
+        # from the same instant, so the age-prune above fires at EXACTLY the
+        # moment the reap expires — and a reap is never in `waiters`
+        # (deliberately: "NO WAITER"), so condition (b) never shields it. An
+        # inflight-only predicate therefore deleted the metadata of a reap STILL
+        # SITTING IN THE OUTBOX. Measured, red at that draft and green before it:
+        #   * `poll()` found no entry, skipped the expiry branch, and DISPATCHED
+        #     the stale close — removing the exact bound `expires_at` exists to
+        #     provide, in the wedged-extension case it was written for;
+        #   * `_cancel_queued_reaps_locked` could no longer see it, so re-owning
+        #     the tab stopped withdrawing the close — the other bound, gone too.
+        # Neither needs a rare event: `_prune_inflight_locked` runs on EVERY
+        # submit and every ping, and two ordinary ops ahead of the reap in the
+        # serial FIFO can exceed INFLIGHT_STALE_S without any wedge at all.
+        #
+        # So sweep only what BOTH bounded lifetimes have finished with.
+        queued = {c.get("id") for c in inst.outbox}
+        for c in [c for c in inst.reaps
+                  if c not in inst.inflight and c not in queued]:
+            del inst.reaps[c]
 
     # --- concurrency backstop (per-instance rate limit + queue-depth cap) --- #
     def _admit_locked(self, inst: Instance):
@@ -2163,8 +2241,48 @@ class Registry:
             # is gone (owned_tab_gone). 🔴 NO LONGER UNCONDITIONAL: since the
             # extension bounds that probe (REUSE_TAB_BUDGET_MS), a probe that
             # exceeds the budget falls through to a FRESH tab and the ownership
-            # record below is overwritten, deterministically ORPHANING the live
-            # first tab. Nothing reclaims it; only a human closes it.
+            # record below is overwritten, orphaning the live first tab.
+            #
+            # ⚠ THIS COMMENT USED TO END "Nothing reclaims it; only a human
+            # closes it." THAT IS NO LONGER TRUE: the extension REPORTS the
+            # orphaned tabId in its `open` result and THIS SERVER closes it, in
+            # `_record_ownership_locked` → `_enqueue_reap_close_locked`. Read
+            # those two for the full argument; the short version is that
+            # reclaiming is only correct when the `open` result was DELIVERED, and
+            # this side is the only side that knows.
+            #
+            # 🔴 AN EARLIER REVISION OF THIS PARAGRAPH SAID THE OPPOSITE — "the
+            # reclaim is entirely the extension's, so nothing below depends on
+            # it" — and it survived one whole audit round. It was written when the
+            # extension did the closing, and it is exactly the sentence that would
+            # tell a maintainer reading submit() that the server does nothing
+            # here. It does. Left recorded rather than silently replaced, because
+            # the same inversion is easy to reintroduce from either direction.
+            #
+            # What survives is a WEAKER residual, stated so nobody re-derives the
+            # stronger claim from this block. ⚠ THIS LIST IS LOAD-BEARING AND HAS
+            # BEEN INCOMPLETE ONCE — it is where the "what is still broken"
+            # answer is supposed to live, so add to it when you add a bound.
+            # 🔴 AND THERE IS A SECOND COPY: `REUSE_TAB_BUDGET_MS` in
+            # extension/protocol.js carries a narrower list (ways the ORPHAN
+            # survives; this one also covers over-closes). It was the copy missed
+            # last time precisely because nothing here said it existed — update
+            # both, or say why only one applies.
+            #   * the reclaim is best-effort — a real `close` op that can fail or
+            #     be lost, with no counter for how often;
+            #   * a DIFFERENT orphan is still unreclaimed: if `chrome.tabs.create`
+            #     hangs and NEVER settles, the op is killed at EXEC_OP_BUDGET_MS
+            #     and the abandoned create later produces a tab the extension
+            #     never sees, so there is nothing to report. Neither side can
+            #     close that one;
+            #   * CANCELLATION IS PRE-DISPATCH ONLY. Re-owning a tab withdraws a
+            #     reclaim still in the outbox, but once the extension has taken
+            #     it there is nothing to withdraw — one poll round trip in which
+            #     a re-owned tab can still be closed (was unbounded before);
+            #   * AN EXPIRED RECLAIM IS DROPPED, so that orphan is never
+            #     reclaimed at all. A leaked tab, taken deliberately over
+            #     dispatching a stale tabId that a browser restart has reassigned
+            #     to somebody else's tab.
             reuse_tab_id = None
             if op == "open" and session_id is not None and tab is None:
                 reuse_tab_id = self._owned_tab_locked(inst.key, session_id,
@@ -2332,6 +2450,50 @@ class Registry:
                 self._owners[okey] = {
                     "tab_id": tid, "last_seen": self._clock()}
                 log("owner_open", key=inst.key, session=session_id, tab=tid)
+                # 🔴 RE-OWNING A TAB WITHDRAWS ANY REAP AIMED AT IT. `open` is
+                # not in TAB_SCOPED_OPS, so two concurrent opens from one session
+                # take no turnstile and a later one can healthily REUSE the tab an
+                # earlier one queued for reaping. Without this the server closes a
+                # tab it currently owns. Reproduced before it was fixed.
+                self._cancel_queued_reaps_locked(inst, tid)
+                # 🔴 RECLAIM THE ORPHAN — HERE, AND NOWHERE ELSE.
+                #
+                # When the extension's reuse probe exceeds REUSE_TAB_BUDGET_MS it
+                # falls through to a FRESH tab and reports the tabId it thereby
+                # orphaned. The line above has just overwritten the ownership
+                # record, so that old tab now has NO owner and nothing else in the
+                # system will ever revisit it — the leak this block's sibling
+                # comment (see `reuse_tab_id` in submit) used to describe as
+                # "Nothing reclaims it; only a human closes it."
+                #
+                # 🔴 WHY THE CLOSE LIVES ON THIS SIDE. Two earlier attempts had
+                # the EXTENSION close it directly, and both were wrong the same
+                # way: reclaiming is correct only if this result is DELIVERED.
+                # If it is not, the old tab is not an orphan at all — the ownership
+                # record still names it, it is still live, and closing it strands
+                # the session on a dead id (then, one op later, on the operator's
+                # ACTIVE tab). The extension cannot know: TWO parties abandon an
+                # op on TWO clocks, and neither is visible from inside the op —
+                # execute()'s EXEC_OP_BUDGET_MS race, which does not cancel the op
+                # so a merely SLOW `chrome.tabs.create` resumes it afterwards; and
+                # the submitter's own cmd_timeout, which starts at SUBMIT, so
+                # queue time is invisible to any extension-side elapsed check.
+                #
+                # This method is reached ONLY from the delivered-result path in
+                # submit() (after `inst.results.pop(cid)`). A submitter that gave
+                # up raised BridgeTimeout long before here, and a result arriving
+                # after that goes down deliver_result's `result_after_abandon`
+                # branch instead. So "we got here" IS the fact the extension
+                # lacked, and it is structural rather than a check that could
+                # drift.
+                orphan = data.get("orphanTabId") if isinstance(data, dict) else None
+                # `!= tid` is not paranoia: closing the tab we just recorded as
+                # owned would destroy the session's only tab. A report is data,
+                # never an instruction. (`isinstance(orphan, int)` also rejects
+                # the bool a hand-crafted envelope could carry — `True == 1`.)
+                if (isinstance(orphan, int) and not isinstance(orphan, bool)
+                        and orphan != tid):
+                    self._enqueue_reap_close_locked(inst, orphan, session_id)
         elif op == "tabs":
             # Annotate the listing with which tab (if any) THIS session owns, so
             # `browser tabs` can flag it. Metadata only (a tabId, never content).
@@ -2339,6 +2501,119 @@ class Registry:
             if isinstance(data, dict):
                 data["ownedTabId"] = self._owned_tab_locked(
                     inst.key, session_id, touch=False)
+
+    def _enqueue_reap_close_locked(self, inst, tab_id: int, session_id) -> None:
+        """Queue a fire-and-forget `close` for a tab the extension just orphaned.
+
+        🔴 NO WAITER, DELIBERATELY. Every other command in this file is enqueued
+        by a submitter that then blocks on `inst.results[cid]`; this one has no
+        submitter, because the caller it would belong to has already been handed
+        its `open` result. So `cid` is NOT added to `inst.waiters`, and it cannot
+        strand a waiter or a `pending` slot: it takes neither. Its reply is
+        recognised by `deliver_result` via `inst.reaps` and answered normally.
+
+        🔴 BUT IT DOES TAKE AN `inflight` ENTRY, and that is the point of the
+        line. `inflight` is what `_effective_timeout_locked` reads to tell a BUSY
+        extension from an idle one; without an entry, a `ping` landing while this
+        close executes would fast-fail against a perfectly healthy extension.
+
+        🔴 AND IT IS THE ONLY OUTBOX ENTRY THAT NEEDS ITS OWN LIFETIME, because
+        it is the only one with no submitter to withdraw it. Every other command
+        is dropped from the outbox by its abandoning submitter at `cmd_timeout`
+        (see the filter in submit's finally). Left unbounded this one survives a
+        wedged extension indefinitely — and `instance_id` is stable per profile,
+        so a Brave RESTART returns the SAME `Instance` while Chromium's tab ids
+        restart at 1. The queued `close` would then name a different, real tab.
+        That correlation is adverse: a browser-wide stall is what PRODUCES a
+        reap, and a full restart is the documented remedy for a stall. Hence
+        `expires_at`, checked at pickup in `poll()`, matched to the same
+        INFLIGHT_STALE_S window the inflight entry already ages out on.
+
+        🔴 AND IT MUST BE CANCELLABLE, because the guard that made it safe is
+        POINT-IN-TIME. `orphan != tid` was true when the reap was enqueued; the
+        close executes later, and `open` is NOT in TAB_SCOPED_OPS, so two
+        concurrent `open`s from one session (which parallel agents sharing a
+        session id really do produce) take no turnstile: a later `open` can
+        healthily REUSE the very tab this reap is queued to close. Then the
+        server would close a tab it CURRENTLY OWNS — the session is left on a
+        dead id and, one op later, on the operator's ACTIVE tab. That is why
+        `_record_ownership_locked` calls `_cancel_queued_reaps_locked` for every
+        tab it records: re-owning a tab withdraws any reap aimed at it.
+
+        Ordering: appended to the same FIFO outbox as everything else, so it is
+        dispatched before any command appended after it. ⚠ NOT "before any
+        command SUBMITTED after it" — a submit blocked in `_tab_queues` has not
+        appended yet, so it can still land ahead. Harmless (the reap targets a
+        different tab), but the stronger sentence was wrong.
+
+        Idempotent WHILE THE ID STILL NAMES THE SAME TAB: the extension's `close`
+        treats an already-gone tab as success, so a tab that really had died
+        during the probe costs one no-op round trip. The expiry above is what
+        keeps that qualifier true.
+        """
+        cid = secrets.token_hex(8)
+        inst.outbox.append({"id": cid, "op": "close", "tabId": tab_id})
+        _now = self._clock()
+        self._prune_inflight_locked(inst, _now)
+        inst.inflight[cid] = _now
+        inst.reaps[cid] = {"tab_id": tab_id,
+                           "expires_at": _now + INFLIGHT_STALE_S}
+        log("owner_orphan_reap", key=inst.key, session=session_id, tab=tab_id,
+            id=cid)
+        self._cond.notify_all()   # wake this instance's waiting poller
+
+    @staticmethod
+    def _cancel_queued_reaps_locked(inst, tab_id: int) -> int:
+        """Withdraw any not-yet-dispatched reap aimed at `tab_id`.
+
+        Called whenever a session RE-OWNS a tab. See the cancellation paragraph
+        in `_enqueue_reap_close_locked`: the `orphan != tid` guard is true only
+        at enqueue time, and a concurrent `open` can hand the same tab back to a
+        session before the close is dispatched.
+
+        Only removes entries still sitting in the OUTBOX — once dispatched there
+        is nothing to withdraw, which is a real (much narrower) residual: the
+        window is one poll round trip rather than unbounded.
+
+        🔴 AND THAT SCOPE MUST GOVERN THE BOOKKEEPING TOO, WHICH AN EARLIER DRAFT
+        GOT WRONG IN EXACTLY THE WAY THIS DOCSTRING HID. `inst.reaps` holds reaps
+        the extension has ALREADY PICKED UP as well as queued ones. The first
+        version selected from `reaps` and then popped `reaps` + `inflight` for
+        every match, while removing only the queued ones from the outbox — so a
+        cancel landing one poll round trip later erased the bookkeeping of a reap
+        that was still genuinely executing. Two measured harms, both re-opening
+        something this feature had just closed:
+          * the `inflight` entry is what `_effective_timeout_locked` reads to
+            tell a BUSY extension from a wedged one. Dropping it collapsed a
+            `ping`'s deadline from 20.0s to 2.0s while the close was really
+            running — the false wedge `_enqueue_reap_close_locked` adds that line
+            to prevent, and whose documented remedy is restarting the operator's
+            live browser.
+          * the reap's own reply then matched nothing, so `deliver_result`
+            returned False and the reply was logged `result_unknown_id` — the
+            lost-reply tell that branch exists to stop emitting.
+        It also contradicted the sibling path: the EXPIRY drop pops only the one
+        entry it removed, and its test asserts exactly that ("the reap already in
+        flight is still outstanding"). Same invariant, two call sites.
+
+        So the pops below are keyed on what was ACTUALLY REMOVED from the outbox,
+        never on what merely matched the tab.
+        """
+        match = {c for c in inst.reaps
+                 if inst.reaps[c].get("tab_id") == tab_id}
+        if not match:
+            return 0
+        withdrawn = {c.get("id") for c in inst.outbox if c.get("id") in match}
+        if not withdrawn:
+            return 0          # all matches are already in flight — leave them be
+        inst.outbox = deque(c for c in inst.outbox
+                            if c.get("id") not in withdrawn)
+        for c in withdrawn:
+            inst.reaps.pop(c, None)
+            inst.inflight.pop(c, None)
+        log("owner_orphan_reap_cancel", key=inst.key, tab=tab_id,
+            n=len(withdrawn))
+        return len(withdrawn)
 
     # --- resolution / introspection --------------------------------------- #
     def _live_instances_locked(self):
