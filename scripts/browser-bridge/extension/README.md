@@ -9,13 +9,52 @@ or merge them.
 
 | file | role |
 |------|------|
-| `manifest.json`     | MV3 manifest (permissions, icons, background SW, options page) |
+| `manifest.json`     | MV3 manifest (permissions, icons, background SW, options page). Its `version` is **partly generated** — see *Versioning* below |
 | `service_worker.js` | long-poll loop + chrome.* op executors (needs real Brave) |
 | `protocol.js`       | pure op-set / validation / envelope / backoff + registration payload (unit-tested) |
 | `build_id.js`       | **GENERATED** — the `BUILD_MARKER` literal that travels with the CODE (#324). Regenerate with `python3 scripts/browser-bridge/gen-build-marker.py`; CI fails if it is stale |
 | `options.html/js`   | one-time setup: bearer token + port + optional **label** → `chrome.storage.local` |
 | `icons/icon.svg`    | gruvbox bridge/link glyph — the SVG source |
 | `icons/icon-{16,32,48,128}.png` | rasterised icons wired into the manifest (regenerate with `rsvg-convert`, see `../README.md`) |
+
+## Versioning — `<release>.<build>`
+
+`manifest.json`'s version has two halves, owned by different parties:
+
+    0.8.1.43738
+    └─┬─┘ └─┬─┘
+      │     └── BUILD component — GENERATED, = first 4 hex chars of BUILD_MARKER
+      └──────── RELEASE base — yours, bump by hand, needs a changelog block below
+
+**Why the build half exists.** The build marker is the fail-closed staleness
+authority, but it is invisible in `brave://extensions`, where a human only ever
+sees a version. Two profiles once both read `0.8.1` while running different
+code: the version was hand-bumped, so it did not move between builds and could
+not separate them. The build component is derived from the marker, so it moves
+whenever the code moves — a stale profile is now legible **at a glance, without
+running anything**.
+
+    $ python3 scripts/browser-bridge/gen-build-marker.py         # regenerate both
+    $ python3 scripts/browser-bridge/gen-build-marker.py --check  # verify both
+
+Four hex chars, not five: Chrome caps each dotted component at 65535 and
+`0xFFFF` is exactly 65535. A wider component yields a manifest Chrome **refuses
+to load**, which presents exactly like a dead bridge.
+
+🔴 **`extension_stale` still compares the MARKER and nothing else.** The version
+is a human convenience and is not fail-closed — a version that merely *looks*
+current does not mean the code is. When the two disagree, believe the marker.
+
+🔴 **The marker deliberately does NOT hash the version value.** It hashes every
+other byte of the manifest, but the version is derived FROM the marker, so
+hashing it would make the derivation a recurrence with no fixpoint. Consequence
+worth knowing: a version-only edit does not move the marker, so hand-editing the
+version does not fake a new build — it just fails `--check`.
+
+Bumping the **release** base (`0.8.1` → `0.9.0`) still requires a
+`> **0.9.0 — …**` changelog block below, gated by
+`test_manifest_version_matches_the_declared_build`. The build component needs no
+block — that gate compares the base only.
 
 ## Per-session tab targeting (open/close + injected tabId)
 

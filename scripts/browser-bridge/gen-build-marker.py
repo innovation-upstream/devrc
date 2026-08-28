@@ -31,6 +31,24 @@ how a gate like this drifts into vacuousness.
 `build_id.js` is excluded to avoid the self-reference; that is safe because the
 file contains nothing but the marker, so it has no behaviour of its own to go
 untracked.
+
+🔴 SECOND EXCLUSION, AND WHY IT IS NOT OPTIONAL: `manifest.json`'s `version`
+VALUE is normalised away before hashing (`normalised_manifest_bytes`). The
+manifest is still hashed — every other field of it — but the version string
+is not, and removing that exclusion makes this module non-terminating.
+
+The reason is a cycle. The version's 4th component is DERIVED from the marker
+(`derive_version`, below), so version = f(marker). If the marker also hashed the
+version, then marker = g(version) = g(f(marker)) — writing the derived version
+back into the manifest would change the marker, which would derive a different
+version, forever. There is no fixpoint to iterate to; the normalisation is what
+makes `version = f(marker)` a definition rather than a recurrence.
+
+What this costs, stated honestly: a change to ONLY the version string no longer
+moves the marker. That is intended — such a change is not a code change, and
+the version is now a function of the code rather than an input to it. Every
+change that alters BEHAVIOUR still moves the marker, which is the property
+`extension_stale` depends on.
 """
 from __future__ import annotations
 
@@ -42,7 +60,29 @@ from pathlib import Path
 
 EXT_DIR = Path(__file__).resolve().parent / "extension"
 BUILD_ID_FILE = EXT_DIR / "build_id.js"
+MANIFEST_FILE = EXT_DIR / "manifest.json"
 MARKER_HEX_CHARS = 16
+
+# How many hex chars of the marker become the version's build component.
+# FOUR, and that is a hard constraint, not a taste: Chrome caps each dotted
+# component at 65535, and 0xFFFF == 65535 exactly. Five would silently produce
+# manifests Chrome REFUSES TO LOAD for ~94% of markers — an extension that
+# fails to load looks identical to a bridge that is down.
+VERSION_HEX_CHARS = 4
+VERSION_COMPONENT_MAX = 65535
+
+# The human-owned part of the version: everything before the build component.
+# Bump it by hand for a real release; the generator preserves it.
+VERSION_BASE_COMPONENTS = 3
+
+# Matches the manifest's `version` KEY only. `"manifest_version"` cannot match:
+# the pattern requires a literal opening quote immediately before `version`,
+# and there the preceding character is `_`. Its value is unquoted anyway.
+MANIFEST_VERSION_RE = re.compile(r'"version"\s*:\s*"([^"]*)"')
+
+# What the version value is replaced BY when hashing. Any fixed string works;
+# this one is self-describing if it ever surfaces in a debug dump.
+VERSION_PLACEHOLDER = '"version": "<NORMALISED-FOR-MARKER>"'
 
 # The regeneration command, quoted verbatim in every failure message so a red
 # gate tells you what to run instead of tempting you to delete it.
@@ -81,13 +121,107 @@ def compute_marker(ext_dir=None) -> str:
             f"empty result as 'nothing to check'.")
     h = hashlib.sha256()
     for p in files:
-        body = p.read_bytes()
+        # The manifest contributes its NORMALISED bytes — see the module
+        # docstring for why hashing its version would make this non-terminating.
+        # The length is taken from the normalised body too: taking it from the
+        # raw one would leak the version's LENGTH back into the digest, so
+        # `0.8.1.7` and `0.8.1.4242` would still disagree and the cycle would
+        # come back in a form that only bites on some builds.
+        body = (normalised_manifest_bytes(p) if p.name == "manifest.json"
+                else p.read_bytes())
         h.update(p.name.encode("utf-8"))
         h.update(b"\0")
         h.update(str(len(body)).encode("ascii"))
         h.update(b"\0")
         h.update(body)
     return h.hexdigest()[:MARKER_HEX_CHARS]
+
+
+def normalised_manifest_bytes(path=None) -> bytes:
+    """`manifest.json`'s bytes with the `version` VALUE replaced by a constant.
+
+    Every other byte of the manifest is preserved, so a permissions change, a
+    renamed service worker or an edited description all still move the marker.
+    Only the version — which is derived FROM the marker — is neutralised.
+
+    Raises if the manifest carries no version key: silently hashing the raw
+    bytes there would reintroduce the cycle on exactly the manifest that is
+    malformed, and a marker that is right except in the broken case is worse
+    than a loud failure."""
+    path = Path(path) if path is not None else MANIFEST_FILE
+    text = path.read_text(encoding="utf-8")
+    normalised, n = MANIFEST_VERSION_RE.subn(VERSION_PLACEHOLDER, text)
+    if n != 1:
+        raise AssertionError(
+            f"HARNESS: expected exactly ONE `\"version\": \"...\"` in {path}, "
+            f"found {n}. The marker derivation cannot neutralise a version it "
+            f"cannot locate. Fix this function or the manifest; do NOT fall "
+            f"back to hashing the raw bytes — that reintroduces the "
+            f"version<->marker cycle described in this module's docstring.")
+    return normalised.encode("utf-8")
+
+
+def read_manifest_version(path=None):
+    """The `version` string declared in a manifest, or None if absent."""
+    path = Path(path) if path is not None else MANIFEST_FILE
+    try:
+        m = MANIFEST_VERSION_RE.search(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — best-effort, mirrors read_marker.
+        return None
+    return m.group(1) if m else None
+
+
+def version_base(version: str) -> str:
+    """The human-owned prefix of a version: its first VERSION_BASE_COMPONENTS
+    components, or the whole thing if it is shorter.
+
+    So `0.8.1` -> `0.8.1` and `0.8.1.47127` -> `0.8.1`. This is what makes the
+    scheme idempotent: re-deriving from an already-derived version must not
+    keep appending components."""
+    return ".".join(version.split(".")[:VERSION_BASE_COMPONENTS])
+
+
+def build_component(marker: str) -> int:
+    """The version's build component: the marker's first VERSION_HEX_CHARS hex
+    chars as an integer, so it moves whenever the CODE moves."""
+    value = int(marker[:VERSION_HEX_CHARS], 16)
+    if not 0 <= value <= VERSION_COMPONENT_MAX:
+        raise AssertionError(  # unreachable while VERSION_HEX_CHARS == 4
+            f"HARNESS: build component {value} outside Chrome's 0.."
+            f"{VERSION_COMPONENT_MAX} — a manifest carrying it would not load.")
+    return value
+
+
+def derive_version(ext_dir=None, marker: str | None = None) -> str:
+    """The version `ext_dir`'s manifest SHOULD declare: its human-owned base
+    with the marker-derived build component appended."""
+    ext_dir = Path(ext_dir) if ext_dir is not None else EXT_DIR
+    current = read_manifest_version(ext_dir / "manifest.json")
+    if current is None:
+        raise AssertionError(
+            f"HARNESS: no version in {ext_dir / 'manifest.json'} — nothing to "
+            f"derive a base from.")
+    if marker is None:
+        marker = compute_marker(ext_dir)
+    return f"{version_base(current)}.{build_component(marker)}"
+
+
+def write_manifest_version(ext_dir=None, version: str | None = None) -> str:
+    """Rewrite the manifest's version in place, touching nothing else.
+
+    A targeted substitution rather than a JSON round-trip on purpose: reparsing
+    and re-dumping would reformat the whole file, so every build would produce a
+    diff far larger than the one byte-range that actually changed."""
+    ext_dir = Path(ext_dir) if ext_dir is not None else EXT_DIR
+    path = ext_dir / "manifest.json"
+    version = version or derive_version(ext_dir)
+    text = path.read_text(encoding="utf-8")
+    new, n = MANIFEST_VERSION_RE.subn(f'"version": "{version}"', text)
+    if n != 1:
+        raise AssertionError(
+            f"HARNESS: expected exactly ONE version key in {path}, found {n}.")
+    path.write_text(new, encoding="utf-8")
+    return version
 
 
 def read_marker(path=None):
@@ -140,15 +274,35 @@ def main(argv=None) -> int:
 
     want = compute_marker()
     have = read_marker()
+    want_version = derive_version(marker=want)
+    have_version = read_manifest_version()
+
     if args.check:
+        rc = 0
         if have == want:
             print(f"build marker OK: {want}")
-            return 0
-        print(f"build marker STALE: build_id.js has {have!r}, extension source "
-              f"hashes to {want!r}. Run: {REGEN_CMD}", file=sys.stderr)
-        return 1
+        else:
+            print(f"build marker STALE: build_id.js has {have!r}, extension "
+                  f"source hashes to {want!r}. Run: {REGEN_CMD}",
+                  file=sys.stderr)
+            rc = 1
+        # Reported independently of the marker, and both verdicts always print:
+        # collapsing them would let a correct marker mask a stale version, and
+        # the version is the half a HUMAN reads in brave://extensions.
+        if have_version == want_version:
+            print(f"manifest version OK: {want_version}")
+        else:
+            print(f"manifest version STALE: manifest.json declares "
+                  f"{have_version!r}, the marker derives {want_version!r}. "
+                  f"Run: {REGEN_CMD}", file=sys.stderr)
+            rc = 1
+        return rc
+
+    written_version = write_manifest_version(version=want_version)
     BUILD_ID_FILE.write_text(render(want), encoding="utf-8")
     print(f"wrote {BUILD_ID_FILE} ({have!r} -> {want!r})")
+    print(f"wrote {MANIFEST_FILE} version ({have_version!r} -> "
+          f"{written_version!r})")
     return 0
 
 

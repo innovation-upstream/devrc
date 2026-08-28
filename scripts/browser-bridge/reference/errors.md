@@ -161,6 +161,22 @@ version MATCH can never produce `false`.
 service worker **imports**, so it is frozen into the loaded module graph and
 travels with the code — a stale worker reports the stale marker by construction.
 
+⚠ **The version now MOVES per build, and that changes what a match is worth —
+but not the rule above.** `manifest.json` is `<release>.<build>`, e.g.
+`0.8.1.43738`, where the 4th component is derived from the marker
+(`extension/README.md` § *Versioning*). Two consequences, and only one of them
+is a detection improvement:
+- the `true`-from-version-mismatch branch now fires on **every** build, where
+  before it only fired across hand-bumped releases — this is the case #324
+  measured and could not catch;
+- a human can spot a stale profile **in `brave://extensions`**, with no bridge
+  call at all: the two profiles show different numbers.
+
+🔴 What it does NOT change: a version MATCH still cannot produce `false`. The
+version describes the manifest that was LOADED, so a worker running old code
+against a re-pointed directory can still report a current-looking version. Only
+the marker travels with the code. **Believe the marker.**
+
 The verdict is **ASYMMETRIC**, because the two directions are not equally
 knowable. `false` requires two markers that are present and identical — that is
 the whole of it, and nothing else can produce it. `true` additionally comes from
