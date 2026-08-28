@@ -264,9 +264,16 @@ INVARIANTS_HEADING = "## 🔴 NON-NEGOTIABLE — every audit, every round"
 # edit.
 #
 # 🔴 THE MEASURED INVERSIONS, which is a different and checkable claim. Each
-# was applied ALONE against the whole audit-related suite and the result
-# recorded. This list is closed only over what has been MEASURED; it is not a
-# claim that nothing else is invertible.
+# was applied ALONE and the result recorded. This list is closed only over what
+# has been MEASURED; it is not a claim that nothing else is invertible.
+#
+# 🔴 TWO SCOPES, NAMED, because they are not the same measurement. Y1 and Y2
+# were re-measured HERE rather than restated from the audit that found them:
+# each inversion applied alone to `e06461f7`'s script, with `e06461f7`'s test
+# module, leaves that module's own **72 passed** fully green — a claim about
+# THIS module, not about the ~199 audit-related tests the round-4 audit ran,
+# which were not re-run for this line. Y3-Y5 are measured continuously instead,
+# by their `HOLE` rows in the mutation harness, against the CURRENT tree.
 #
 #   Y1  the delta-scope sentence "Do not re-audit the whole PR"   -> green
 #       inverted to "Re-audit the whole PR as well". It defines the round's
