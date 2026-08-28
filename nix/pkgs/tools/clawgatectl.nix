@@ -133,7 +133,7 @@ let
     # MEASURED by building with a deliberately wrong hash and taking the "got:"
     # value from the failure. Do not hand-edit: change go.mod/go.sum and this
     # must be re-derived the same way.
-    vendorHash = "sha256-vJk2z5piIye+YwhsiyHqhUgXzHd6bHsr1kWH7PqUX7k=";
+    vendorHash = "sha256-T2rgqEv5MEWXkOaAHNWpxEUY/Z60x7lGS/lyWWxNhPg=";
 
     # Only the CLI. The module also contains the clawgate SERVER, which pulls in
     # helm and client-go and has no business being built on a laptop.
