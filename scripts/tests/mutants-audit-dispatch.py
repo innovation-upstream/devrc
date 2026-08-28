@@ -1176,6 +1176,30 @@ def the_stale_base_caveat_says_it_is_fine(t):
     )
 
 
+def a_third_prescription_site_nothing_drives(t):
+    """🔴 ROUND 12 — THE COVERAGE ARM of the refusal-remedy guard.
+
+    An ADDITION rather than an inversion, and that is the point: the guard
+    calls itself a class guard over "a third refusal that prescribes a command
+    it refuses", so the mutation is a third prescription — planted in the
+    `--audited`-without-`--emit-claims` branch, which neither driven case
+    reaches. Every other assertion in that guard stays green (the two real
+    refusals still prescribe commands that still run); only the site-coverage
+    assertion can see it.
+    """
+    return _swap(
+        t,
+        "    if args.audited and not args.emit_claims:\n        print(\n",
+        "    if args.audited and not args.emit_claims:\n"
+        "        print(\n"
+        '            f"  Fix: run `audit-dispatch.py {args.pr} --round 1 "\n'
+        '            "--emit-claims --audited <sha>`.",\n'
+        "            file=err_stream,\n"
+        "        )\n"
+        "        print(\n",
+    )
+
+
 def the_toolchain_names_the_shared_checkout_cross_repo_only(t):
     """🔴 THE ISOLATING ROW for round 6's 🟢 F4.
 
@@ -2080,6 +2104,9 @@ ROWS = [
      {"test_the_clone_grant_covers_only_the_write_the_recipe_makes",
       "test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
      the_clone_grant_reverts_to_the_enumeration),
+    ("V29 a THIRD prescription site nothing drives",
+     {"test_every_command_a_refusal_prescribes_actually_runs"},
+     a_third_prescription_site_nothing_drives),
 ]
 
 

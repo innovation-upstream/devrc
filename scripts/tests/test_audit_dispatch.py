@@ -2909,6 +2909,71 @@ _PRESCRIBED_COMMAND = re.compile(r"`audit-dispatch\.py ([^`]+)`")
 _FILL_IN = re.compile(r"<[^>]*>")
 PRESCRIPTION_SHA = "beefcafe"
 
+# The literal every prescription is spelled with. The usage block at the top of
+# the script writes the same name WITHOUT a backtick, so this does not match it
+# — which is correct: a usage line is not a remedy handed to an operator who
+# just hit a refusal.
+_PRESCRIPTION_LITERAL = "`audit-dispatch.py "
+
+
+def prescription_sites():
+    """-> {(first line, last line)} of every `print()` that prescribes a re-run.
+
+    🔴 ROUND 12 — READ OUT OF THE SCRIPT, NOT LISTED HERE. The guard below
+    calls itself a CLASS guard ("a third refusal that prescribes a command it
+    refuses fails here without anyone remembering to add a row") over two
+    HARDCODED inputs. That sentence is a coverage claim, and it was true only
+    by accident of there being exactly two sites today: an eighth refusal
+    reached by a different input would be prescribed, unrun, and unreported,
+    while the docstring went on promising otherwise. `claude/RULES.md` ->
+    guards-narrower: make the implementation as wide as the sentence.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    out = set()
+    for node in ast.walk(ast.parse(src)):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "print"):
+            continue
+        if _PRESCRIPTION_LITERAL in (ast.get_source_segment(src, node) or ""):
+            out.add((node.lineno, node.end_lineno))
+    return out
+
+
+def run_main_traced(argv, **kw):
+    """`run_main`, plus the set of `audit-dispatch.py` LINES the run executed.
+
+    🔴 ATTRIBUTION, not textual matching. The two refusals render prescriptions
+    that are BYTE-IDENTICAL under this module's fixtures (`--round 3` over a
+    `round=2` block makes both say `--round 2 --emit-claims …`), so a scan of
+    stderr cannot tell which site produced one — and a coverage claim built on
+    that would report both sites reached when only one ever ran. A line trace
+    can, because the two `print()` calls occupy disjoint line spans.
+
+    The previous trace function is saved and restored: a coverage runner or a
+    debugger installs its own, and clobbering it would break the tool rather
+    than this test.
+    """
+    out, err = io.StringIO(), io.StringIO()
+    runner = kw.pop("runner", None) or make_runner(**kw)
+    executed = set()
+
+    def trace_lines(frame, event, _arg):
+        if event == "line":
+            executed.add(frame.f_lineno)
+        return trace_lines
+
+    def trace_calls(frame, event, _arg):
+        return trace_lines if frame.f_code.co_filename == str(SCRIPT) else None
+
+    previous = sys.gettrace()
+    sys.settrace(trace_calls)
+    try:
+        rc = ad.main(argv, runner=runner, stdout=out, stderr=err,
+                     checklist_reader=fake_checklist)
+    finally:
+        sys.settrace(previous)
+    return rc, out.getvalue(), err.getvalue(), executed
+
 
 def prescribed_commands(err):
     """Every `audit-dispatch.py …` command a refusal PRINTED, as argv lists."""
@@ -2944,6 +3009,17 @@ def test_every_command_a_refusal_prescribes_actually_runs():
     🔴 THE GUARD IS THE CLASS, NOT THE TWO SITES. It reads the commands out of
     whatever the refusal printed and RUNS them; a third refusal that prescribes
     a command it refuses fails here without anyone remembering to add a row.
+
+    🔴 ROUND 12 MADE THAT SENTENCE TRUE. It was a claim about PRESCRIPTIONS
+    made by a loop over two HARDCODED inputs, so it covered a third refusal
+    only if that refusal happened to be reached by one of those two — and an
+    eighth refusal reached by a different input would have been prescribed,
+    never run, and never reported, under a docstring promising otherwise. The
+    prescription SITES are now read out of the script (`prescription_sites`)
+    and the cases must reach every one of them, attributed by LINE TRACE
+    because the two sites' rendered text is byte-identical under these
+    fixtures. Coverage is complete today; what changed is that it stays
+    complete or this goes red.
     """
     bad_block = (
         "```audit-claims round=2 audited=..\n"
@@ -2954,8 +3030,20 @@ def test_every_command_a_refusal_prescribes_actually_runs():
         "REFUSAL 1b (anchorless block)": {"comments": [bad_block]},
         "REFUSAL 1 (no block at all)": {"comments": []},
     }
+    sites = prescription_sites()
+    # POSITIVE CONTROL for the scanner: an empty site set makes the coverage
+    # assertion at the foot vacuously true, which is the reassuring zero
+    # `claude/RULES.md` says to feed a case that must move.
+    assert sites, (
+        "no `print()` in the script prescribes an `audit-dispatch.py` re-run "
+        f"at all — {_PRESCRIPTION_LITERAL!r} matched nothing, so the coverage "
+        "assertion below would pass over an empty set. Either the remedies "
+        "moved out of `print()` or the literal changed."
+    )
+    reached = set()
     for name, kw in cases.items():
-        rc, _out, err = run_main(["900", "--round", "3"], **kw)
+        rc, _out, err, executed = run_main_traced(["900", "--round", "3"], **kw)
+        reached |= {s for s in sites if any(s[0] <= n <= s[1] for n in executed)}
         assert rc == 2, f"{name}: expected the refusal, got rc {rc}"
         commands = prescribed_commands(err)
         # POSITIVE CONTROL for the extractor: a refusal that prescribes nothing
@@ -2974,6 +3062,18 @@ def test_every_command_a_refusal_prescribes_actually_runs():
                 "A refusal that prescribes a command it refuses reads to the "
                 "operator as their own error."
             )
+    unreached = sites - reached
+    assert not unreached, (
+        f"\n\n{len(unreached)} of the script's {len(sites)} prescription "
+        f"site(s) were never executed by any case here — lines {sorted(unreached)}.\n"
+        "  Each prints an `audit-dispatch.py …` remedy to an operator who has "
+        "just been refused, and nothing in this module has ever RUN what they "
+        "print. Add a case whose input reaches that refusal; the two here are "
+        "an anchorless `audited=` header and no block at all.\n"
+        "  This assertion is what makes this guard's docstring true: without "
+        "it the loop above covers whichever refusals these two inputs happen "
+        "to reach, and reads as covering all of them."
+    )
 
 
 def test_control_the_prescription_extractor_can_see_a_broken_remedy():
