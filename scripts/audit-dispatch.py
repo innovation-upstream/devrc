@@ -888,7 +888,8 @@ Facts = namedtuple(
     "Facts",
     "pr repo title base_ref url round_no cwd_repo_dir cwd_repo_slug repo_relation "
     "worktree branch dirty prev_sha emit_from claims claims_round checklist "
-    "ledger assembled_at claims_source head_check base_assumed",
+    "ledger assembled_at claims_source head_check base_assumed "
+    "base_assumed_reason",
 )
 # 🔴 `base_assumed` — ROUND 10's SEVENTH INSTANCE, found by the sweep round 9's
 # auditor asked for and not by a finding. `base_ref` is
@@ -897,10 +898,17 @@ Facts = namedtuple(
 # absent, rc 0 and silent stderr, THE LEDGER's cross-repo hand-over read
 # "…where `origin/main` names THAT repository's base branch and not this
 # checkout's" — an assertion about a repository nothing was asked about.
-# `--claims-file` mode reaches it on EVERY run: it consults no `gh` and
-# hardcodes `baseRefName: "main"`, exactly as it hardcodes no `headRefOid`,
-# and that second omission already carries a reason string while this one did
-# not. Same shape as finding A one field over.
+# `--claims-file` mode reaches it on EVERY run: it consults no `gh`, so it
+# learns no `baseRefName`, exactly as it learns no `headRefOid`.
+# 🔴 ROUND 12 — AND FOR TWO ROUNDS IT DID NOT REACH IT. Round 10 stated the
+# sentence above and left the mode HARDCODING `baseRefName: "main"`, so
+# `base_assumed` answered False in the one mode this comment, the test
+# module's `delta-assumed-base` comment and the guard's own docstring all
+# call permanently assumed — the banner was suppressed exactly where it is
+# always warranted, at rc 0. The hardcode is gone and the mode now carries a
+# per-cause `base_assumed_reason`, because "gh reported no baseRefName" is
+# itself false in a run that never asked `gh`. Same shape as finding A one
+# field over, and the same remedy.
 # 🔴 `prev_sha` and `emit_from` are TWO ANCHORS out of ONE `audited=` field, and
 # they are deliberately separate fields rather than one: `prev_sha` is
 # `range_anchor` (what this round DIFFS FROM) and `emit_from` is `emit_anchor`
@@ -1530,13 +1538,24 @@ def assumed_base_note(facts):
     it unconditionally — the same shape as `unresolved_tip_note`, and for the
     same reason: a conditional a caller has to remember is one a caller forgets
     at the second site.
+
+    🔴 ROUND 12 — THE CAUSE IS THE CALLER'S TO NAME, exactly as `no_sha_reason`
+    is one field over. This block used to state "`gh` reported no
+    `baseRefName`" unconditionally, which is false in `--claims-file` mode:
+    `gh` is never consulted there, so it reported nothing. The fallback below
+    is for a caller that genuinely cannot say, and it says so rather than
+    picking one of the two causes.
     """
     if not facts.base_assumed:
         return ""
+    why = facts.base_assumed_reason or (
+        "`gh` was not consulted, or reported no `baseRefName` — this caller "
+        "did not say which"
+    )
     return (
-        "🔴 **THAT BASE BRANCH WAS ASSUMED, NOT READ.** `gh` reported no "
-        f"`baseRefName` for this PR, so `{facts.base_ref}` is this script's "
-        "DEFAULT and not a fact about the PR. The base is what the PR is "
+        f"🔴 **THAT BASE BRANCH WAS ASSUMED, NOT READ** ({why}), so "
+        f"`{facts.base_ref}` is this script's DEFAULT and not a fact about "
+        "the PR. The base is what the PR is "
         "diffed against and — from round 2 — what `--not <base>` subtracts "
         "when the payload figure is measured, so a wrong one silently changes "
         "what you read, at rc 0. Check the PR's real base branch before "
@@ -2559,7 +2578,20 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             print(f"cannot read --claims-file: {e}", file=err_stream)
             return 2
         claims_source = f"`{args.claims_file}`"
-        data = {"title": f"PR #{args.pr}", "url": "", "baseRefName": "main"}
+        # 🔴 ROUND 12 — `baseRefName` WAS HARDCODED `"main"` HERE, AND THAT
+        # SWITCHED THE ASSUMED-BASE BANNER OFF IN THE ONE MODE THAT ALWAYS
+        # ASSUMES. `base_assumed` is `not data.get("baseRefName")`, so the
+        # hardcode answered "the base was READ" for a run that consulted no
+        # `gh` at all — the exact state three comments in this module and its
+        # test module describe as permanent for this mode. Measured at
+        # `88b4105c`: `--round 3 --claims-file <f>` printed "Base branch:
+        # `origin/main`." with no banner, at rc 0 and silent stderr, while the
+        # same run over a `gh` payload with the field deleted printed it.
+        #
+        # This mode does not learn `baseRefName` for the same reason it does
+        # not learn `headRefOid`, so it now omits BOTH and lets `or "main"`
+        # below be the visible default it always was.
+        data = {"title": f"PR #{args.pr}", "url": ""}
         # 🔴 THE CALLER KNOWS WHICH CAUSE IT IS. See `verify_head_is_the_pr`:
         # naming both leaves the reader with a list instead of an answer, and
         # this branch is the one that decided not to consult `gh`.
@@ -2567,12 +2599,24 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             "this run is `--claims-file` mode, which consults no `gh` and so "
             "never learns the PR's `headRefOid`"
         )
+        # 🔴 THE SAME PER-CAUSE RULE, ONE FIELD OVER. `assumed_base_note` used
+        # to state "`gh` reported no `baseRefName`" unconditionally, which is
+        # itself false here — `gh` was never asked. Following `no_sha_reason`
+        # rather than inventing a second mechanism.
+        base_assumed_reason = (
+            "this run is `--claims-file` mode, which consults no `gh` and so "
+            "never learns the PR's `baseRefName`"
+        )
     else:
         data, comment_texts = gh_pr_facts(runner, args.pr, args.repo)
         claims_source = f"PR #{args.pr}'s comments"
         no_sha_reason = (
             "`gh pr view` was consulted and reported no `headRefOid` for this "
             "PR"
+        )
+        base_assumed_reason = (
+            "`gh pr view` was consulted and reported no `baseRefName` for "
+            "this PR"
         )
         if data.get("_error"):
             print(f"🔴 `gh pr view {args.pr}` failed: {data['_error']}",
@@ -2847,6 +2891,7 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         claims_source=claims_source,
         head_check=head_check,
         base_assumed=base_assumed,
+        base_assumed_reason=base_assumed_reason,
     )
 
     # 🔴 THE REFUSAL'S SCOPE IS THE BRIEF, AND ONLY THE BRIEF. A refused run

@@ -496,6 +496,8 @@ import importlib.util
 import io
 import json
 import re
+import sys
+import tempfile
 import tokenize
 from pathlib import Path
 
@@ -1009,6 +1011,17 @@ def comment_with_prose():
     return SURROUNDING_PROSE.format(block=CLAIMS_BLOCK_R2)
 
 
+# 🔴 A REAL FILE ON DISK, because `--claims-file` is the one input this script
+# reads without going through the injected runner: `Path(...).read_text` is a
+# real open. A `tmp_path` fixture cannot serve it — `SCENARIO_RUNS` entries are
+# built by plain callables that every scenario-driven guard invokes, and a
+# pytest fixture is not available there. The `TemporaryDirectory` is bound to a
+# module global so it outlives collection and is removed at interpreter exit.
+_CLAIMS_FILE_DIR = tempfile.TemporaryDirectory(prefix="audit-dispatch-claims-")
+CLAIMS_FILE = Path(_CLAIMS_FILE_DIR.name) / "round-2-claims.md"
+CLAIMS_FILE.write_text(CLAIMS_BLOCK_R2, encoding="utf-8")
+
+
 # --------------------------------------------------------------------------- #
 # THE TWO-WAY PIN
 # --------------------------------------------------------------------------- #
@@ -1466,6 +1479,23 @@ SCENARIO_RUNS = {
         ["900", "--round", "3"],
         {"pr": {k: v for k, v in DEFAULT_PR.items() if k != "baseRefName"},
          "comments": [CLAIMS_BLOCK_R2]},
+    ),
+    # 🔴 ROUND 12 — THE MODE THE COMMENT ABOVE NAMES AS ALWAYS ASSUMED, AND NO
+    # SCENARIO RAN IT. Round 10 modelled the assumed-base state by DELETING
+    # `baseRefName` from a `gh` payload, which is the rarer of the two ways to
+    # reach it; `--claims-file` reaches it on every single run. The script
+    # meanwhile HARDCODED `baseRefName: "main"` in that branch, so the state
+    # the guard exists for was unreachable through the door it is always open
+    # on. Measured at `88b4105c`: `--round 3 --claims-file <f>` -> rc 0,
+    # silent stderr, banner ABSENT.
+    #
+    # 🔴 Its `pr` payload is DELIBERATELY ABSENT. In this mode `gh_pr_facts`
+    # is never called, so a payload here would be a fixture nothing reads —
+    # and reading one to decide what to expect is exactly the fixture defect
+    # `scenario_base_is_assumed` was written to avoid.
+    "claims-file-assumed-base": lambda: (
+        ["900", "--round", "3", "--claims-file", str(CLAIMS_FILE)],
+        {},
     ),
 }
 SCENARIOS = tuple(SCENARIO_RUNS)
@@ -2690,6 +2720,28 @@ def test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha():
 ASSUMED_BASE_BANNER = "THAT BASE BRANCH WAS ASSUMED, NOT READ"
 
 
+def scenario_base_is_assumed(name):
+    """Does this scenario's fixture leave the base branch to the DEFAULT?
+
+    🔴 ROUND 12 — TWO WAYS TO REACH THAT STATE, AND READING THE PR PAYLOAD SEES
+    ONLY ONE. `gh` can report no `baseRefName`, or the run can consult no `gh`
+    at all — and in the second case there IS no payload, so
+    `kw.get("pr") or DEFAULT_PR` falls to a fixture that HAS the field and the
+    guard would assert the banner's ABSENCE in the one mode that always
+    assumes. That is the fixture half of the same defect: the script hardcoded
+    the field, this module would have hardcoded the expectation, and the two
+    wrongs agree.
+
+    So the ARGV is consulted first: `--claims-file` decides it before any
+    payload is read.
+    """
+    argv, kw = SCENARIO_RUNS[name]()
+    if "--claims-file" in argv:
+        return True
+    payload = kw.get("pr") or DEFAULT_PR
+    return not payload.get("baseRefName")
+
+
 def test_no_brief_states_an_assumed_base_branch_as_a_fact():
     """🔴 REGRESSION. Red at `706a6b38`, scenario `delta-assumed-base`.
 
@@ -2718,29 +2770,43 @@ def test_no_brief_states_an_assumed_base_branch_as_a_fact():
     """
     seen_assumed = seen_read = 0
     for scenario in SCENARIOS:
-        kw = SCENARIO_RUNS[scenario]()[1]
-        payload = kw.get("pr") or DEFAULT_PR
         brief = brief_for_scenario(scenario)
-        if payload.get("baseRefName"):
+        if not scenario_base_is_assumed(scenario):
             seen_read += 1
             assert ASSUMED_BASE_BANNER not in brief, (
                 f"\n\nscenario {scenario!r}: the brief calls the base branch "
-                "assumed, in a run whose fixture reports "
-                f"{payload['baseRefName']!r}. A banner that fires when the "
-                "field WAS read is a banner every reader learns to skip."
+                "assumed, in a run whose fixture reports a real "
+                "`baseRefName`. A banner that fires when the field WAS read "
+                "is a banner every reader learns to skip."
             )
             continue
         seen_assumed += 1
         assert ASSUMED_BASE_BANNER in brief, (
-            f"\n\nscenario {scenario!r}: `gh` reported no `baseRefName`, so "
-            f"`{payload.get('baseRefName')!r}` fell back to this script's "
-            "default — and the brief states the result as a fact about the "
-            "PR's repository. `--not <base>` decides which commits count as "
-            "this round's payload."
+            f"\n\nscenario {scenario!r}: nothing in this run learned the PR's "
+            "`baseRefName` — `gh` reported none, or was never consulted — so "
+            "`main` is this script's DEFAULT, and the brief states the result "
+            "as a fact about the PR's repository. `--not <base>` decides "
+            "which commits count as this round's payload."
         )
+    # 🔴 ROUND 12 — THE ASSUMED SIDE IS COUNTED BY MECHANISM, NOT IN TOTAL. A
+    # single `seen_assumed` counter is satisfied by either door, and the
+    # `--claims-file` door is the one that was covered by nothing while a
+    # comment in the script asserted it was reached on EVERY run.
+    by_gh = [s for s in SCENARIOS
+             if scenario_base_is_assumed(s) and "--claims-file"
+             not in SCENARIO_RUNS[s]()[0]]
+    by_claims_file = [s for s in SCENARIOS
+                      if "--claims-file" in SCENARIO_RUNS[s]()[0]]
     assert seen_assumed and seen_read, (
         f"only one side was driven ({seen_assumed} assumed, {seen_read} read), "
         "so this guard pins a constant rather than a relationship"
+    )
+    assert by_gh and by_claims_file, (
+        f"the assumed side is reached by {len(by_gh)} `gh`-payload "
+        f"scenario(s) and {len(by_claims_file)} `--claims-file` scenario(s). "
+        "Both doors must be driven: the script hardcoded `baseRefName` in the "
+        "claims-file branch for two rounds, and a suite that only deletes the "
+        "field from a `gh` payload cannot see that."
     )
 
 
@@ -2766,7 +2832,7 @@ def test_the_tip_placeholder_ledger_matches_the_script():
             branch="b", dirty=0, prev_sha="aaaa1111", emit_from=None,
             claims=[], claims_round=None, checklist="", ledger=None,
             assembled_at="", claims_source="", head_check=None,
-            base_assumed=False,
+            base_assumed=False, base_assumed_reason=None,
         )
     ), (
         "the banner every keyed guard looks for is not what the note emits, so "
