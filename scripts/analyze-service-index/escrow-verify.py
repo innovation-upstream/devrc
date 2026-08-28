@@ -101,11 +101,21 @@ send the operator hunting for corruption that is not there.
     is unchanged in force for the SECRET half: it is never printed, never
     hashed into a message, and never passed in argv.
     🔴 AND age-keygen's STDERR IS NOT SAFE, on exactly the failure this mode
-    exists to catch. Measured: a file it cannot parse comes back as `unknown
-    identity type: "<the offending line>"` — it ECHOES ITS INPUT, and on a
-    subtly-mangled identity that line is the SECRET KEY. So the
-    `NOT-AN-AGE-IDENTITY` refusal reports the exit code and the stdout byte
+    exists to catch. Measured: a file whose identity TYPE it cannot recognise
+    comes back as `unknown identity type: "<the offending line>"` — it ECHOES
+    ITS INPUT, and on a subtly-mangled identity that line is the SECRET KEY. So
+    the `NOT-AN-AGE-IDENTITY` refusal reports the exit code and the stdout byte
     count and quotes no stream at all.
+    ⚠ WHICH manglings echo is NOT obvious, and a guard built on the wrong ones
+    is vacuous. MEASURED 2026-08-27, age v1.3.1, ten inputs, compared
+    case-INSENSITIVELY against the fixture's own secret: collapsed newlines, an
+    emptied note and a TRUNCATED secret line leak NOTHING (age rejects them
+    without repeating them), while a LEADING SPACE on the secret line — the
+    likeliest web-vault clipboard artifact — and a LOWERCASED `age-secret-key-`
+    prefix leak the WHOLE line. The realistic manglings are the leaking ones.
+    ⚠ `age --decrypt` does NOT echo, which is why `restore-verify.py` may quote
+    its stderr and this module may not. Two different tools, two different
+    rules; do not unify them without re-measuring.
   * `bw`'s stdout is NEVER quoted in an error message. Every subprocess result
     here is handled as redacted by construction — `_run()` has no path that
     interpolates output into an exception.
@@ -381,9 +391,22 @@ EXIT_CODES: dict[str, int] = {
     # --expect-pubkey
     #
     # 🔴 FIVE OUTCOMES, SPLIT BY REMEDY LIKE EVERY BLOCK ABOVE, AND THE SPLIT IS
-    # what keeps a wrong PIPELINE from being read as a wrong KEY. All five are
-    # reachable on a machine holding no age identity and no route to the bucket,
+    # what keeps a wrong PIPELINE from being read as a wrong KEY. All of them are
+    # reached on a machine holding no age identity and no route to the bucket,
     # which is the point of the mode.
+    #
+    # ⚠ WITH ONE EXCEPTION, STATED BECAUSE THE SENTENCE ABOVE USED TO OVERCLAIM
+    # IT: `PUBKEY-DERIVATION-EMPTY` is a DEFENSIVE refusal, not a measured path.
+    # MEASURED 2026-08-27, age v1.3.1, over TEN inputs (nine manglings — empty,
+    # collapsed newlines, truncated, leading space, lowercased prefix, prose,
+    # comments only, blank lines, bare prefix — plus a valid control): every
+    # failure is a NON-ZERO exit with empty stdout, and the only rc=0 is the
+    # valid key at 63 bytes. `age-keygen -y` never exits 0 printing nothing. So
+    # that branch is reachable today only through its test's monkeypatch. It is
+    # kept because the alternative is hashing the empty stream, which is exactly
+    # what the hand-run shell pipeline does, and because "age never does this"
+    # is a claim about a version, not about the format. Do not delete it as dead
+    # code; do not describe it as observed behaviour either.
     #
     #   * EXPECT-PUBKEY-MALFORMED — the fault is in YOUR ARGV. Raised before any
     #     `bw` call, because an expectation that could only ever mismatch must
@@ -968,7 +991,8 @@ class PubkeyVerdict:
         return (
             f"{PROG}: ESCROW PROVEN FROM THIS HOST — the Secure Note "
             f"{self.item_name!r} derives public-key sha {self.pubkey_sha}, "
-            f"which is the {PUBKEY_SHA_CHARS}-hex pin you gave. NO on-disk "
+            f"which is what your pin's first {PUBKEY_SHA_CHARS} hex characters "
+            f"were compared against. NO on-disk "
             f"identity was read and NO artifact store was contacted: this mode "
             f"needs only `bw` and `age-keygen`, which is what lets it run on a "
             f"recovery machine that has neither the key nor a route to the "
@@ -1590,9 +1614,13 @@ def derive_pubkey_sha(identity_file: Path) -> str:
                                        not run, and a shell pipeline would
                                        silently digest the empty stream instead.
 
-    🔴 NEITHER STREAM IS QUOTED. age-keygen's stderr ECHOES the input line it
-    could not parse — measured — and on a mangled identity that line is the
-    secret key. The refusals report the exit code and the stdout byte count.
+    🔴 NEITHER STREAM IS QUOTED. age-keygen's stderr ECHOES the input line whose
+    identity TYPE it could not recognise — measured — and on a mangled identity
+    that line is the secret key. The refusals report the exit code and the
+    stdout byte count. ⚠ The manglings that actually echo are a LEADING SPACE
+    and a LOWERCASED key prefix, NOT the "obviously broken" ones; see the module
+    docstring, and `_MANGLERS` in the test suite, which carries the measured
+    ledger plus a positive control that the leaking fixtures really do leak.
     """
     p = B.age_public_key_bytes(identity_file)
     if p.returncode != 0:

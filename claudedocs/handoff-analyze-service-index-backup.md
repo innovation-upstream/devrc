@@ -131,9 +131,12 @@ standing at, and it has now been proven to recover the key unaided.
    commit and no backup**, alongside `~/bw-login-teeup.sh`. Both put the quoting in a file on
    purpose: hand-typed one-liners for this cost three master-password entries on 2026-08-25/26,
    every failure a paste/quoting fault rather than a mistake about the task.
-   ✅ **SUPERSEDED**: this is now `escrow-verify.py --expect-pubkey <sha16>`, managed and
-   shipped to both hosts — see ranked follow-up 13, which this closes. The `~/` copy was
-   deliberately left in place (live host, not the implementing session's to touch).
+   ✅ **SUPERSEDED IN THE REPO**: this is now `escrow-verify.py --expect-pubkey <sha16>`,
+   tracked and reviewable — see ranked follow-up 13, which this closes. 🔴 **It is NOT yet on
+   either host**: the flag lives on PR #955 and reaches a machine only after that merges AND
+   `ship.sh` converges it, and at the time of writing the workbench checkout is parked on
+   another session's branch, so `ship.sh` would SKIP it. The `~/` copy was deliberately left
+   in place (live host, not the implementing session's to touch).
 3. 🟢 **Residual: the BROWSER clipboard leg alone.** Item 2 proved retrieval and correctness
    over the network from the DR host, so what is left is only a browser's own copy-paste
    mangling. Check it identically when convenient: open the note in the web vault, paste
@@ -319,6 +322,17 @@ Kept because each cost a round, and none is a logic bug.
     reduced to its secret line alone also derives correctly, because the `#` lines are
     comments; and age-keygen's stderr **echoes the input line it could not parse**, which
     on a mangled identity is the secret key — so no stream is quoted on that path.
+
+    🔴 **The echo needs an unrecognised identity TYPE prefix, and the first version of the
+    leak guard missed that entirely.** Re-measured 2026-08-27 over ten inputs,
+    case-INSENSITIVELY against the fixture's own secret: collapsed newlines, an emptied
+    note and a truncated secret line leak **nothing** — while a **leading space** (the
+    likeliest web-vault clipboard artifact) and a **lowercased `age-secret-key-` prefix**
+    leak the **whole** secret line. So the original three-mangler guard was VACUOUS:
+    re-quoting `p.stderr` survived the full suite and printed the entire key. Both leaking
+    manglers are now fixtures, with a positive control asserting they really do echo, and
+    `backup.py`'s half of the same fix — which had **no** test at all — is covered too.
+    `age --decrypt` does **not** echo, so `restore-verify.py`'s stderr quoting is safe.
 
     ⚠ **`~/bw-escrow-proof.sh` on the laptop is now SUPERSEDED but was NOT touched** — it is
     a live host and not this session's to modify. Remove it (and `~/bw-login-teeup.sh` if it

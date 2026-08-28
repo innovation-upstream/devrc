@@ -3611,6 +3611,13 @@ def test_expect_pubkey_ACCEPTS_the_full_64_char_digest_too(tmp_path):
     assert len(full) == 64
     v = _pubkey_run(tmp_path, FakeBw(), note=note, expect=full.upper())
     assert v.pubkey_sha == full[:16]
+    # 🔴 THE VERDICT MUST NOT CALL A 64-CHAR PIN "the 16-hex pin you gave" — it
+    # would be describing something the operator did not type, in a module whose
+    # own rule is that unmeasured scope must not borrow a measured word. It says
+    # what was COMPARED instead.
+    assert "what your pin's first 16 hex characters were compared against" \
+        in v.line()
+    assert "pin you gave" not in v.line()
 
 
 def test_the_verdict_line_is_pinned_WHOLE_for_BOTH_server_states(tmp_path):
@@ -3626,7 +3633,8 @@ def test_the_verdict_line_is_pinned_WHOLE_for_BOTH_server_states(tmp_path):
     head = (
         f"analyze-service-index-escrow-verify: ESCROW PROVEN FROM THIS HOST — "
         f"the Secure Note {ITEM!r} derives public-key sha {expect}, which is "
-        f"the 16-hex pin you gave. NO on-disk identity was read and NO artifact "
+        f"what your pin's first 16 hex characters were compared against. NO "
+        f"on-disk identity was read and NO artifact "
         f"store was contacted: this mode needs only `bw` and `age-keygen`, "
         f"which is what lets it run on a recovery machine that has neither the "
         f"key nor a route to the bucket. ")
@@ -3785,6 +3793,35 @@ def test_a_DIFFERENT_key_is_PUBKEY_MISMATCH_and_REFUSES_to_advise_re_escrowing(
             "either.") in msg
 
 
+def test_a_pin_differing_only_in_its_LAST_character_is_a_MISMATCH(tmp_path):
+    """🔴 ALL {PUBKEY_SHA_CHARS} CHARACTERS ARE COMPARED, not a prefix.
+
+    FOUND BY AUDIT: `got == expected_sha` -> `got.startswith(expected_sha[:4])`
+    SURVIVED the whole sweep, because every other mismatch fixture is a
+    different key whose sha differs in the first few hex characters. Nothing
+    asserted the tail mattered. This pin differs from the real one ONLY in its
+    final character, so a prefix comparison of any length below 16 accepts it.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    real = _sha_via_documented_shell(k)
+    # Flip only the LAST character, staying in the hex alphabet so the pin is
+    # well-formed and reaches the comparison rather than the malformed refusal.
+    near_miss = real[:-1] + ("0" if real[-1] != "0" else "1")
+    assert len(near_miss) == len(real) and near_miss != real
+    assert near_miss[:15] == real[:15], "the fixture must differ ONLY at the end"
+
+    with pytest.raises(EV.EscrowError) as ei:
+        _pubkey_run(tmp_path, FakeBw(), note=k.read_text(encoding="utf-8"),
+                    expect=near_miss)
+    assert ei.value.token == "PUBKEY-MISMATCH"
+    assert ei.value.exit_code == 36
+    # POSITIVE CONTROL: the very same fixture with the true pin PROVES, so this
+    # refusal is discriminating rather than universal.
+    v = _pubkey_run(tmp_path / "ok", FakeBw(),
+                    note=k.read_text(encoding="utf-8"), expect=real)
+    assert v.pubkey_sha == real
+
+
 def test_age_keygen_exiting_ZERO_with_NO_OUTPUT_is_the_CHECK_NOT_RUNNING(
         tmp_path, monkeypatch):
     """🔴 `e3b0c442…` IS NOT A VERDICT. A naive pipeline hashes the empty stream
@@ -3807,49 +3844,226 @@ def test_age_keygen_exiting_ZERO_with_NO_OUTPUT_is_the_CHECK_NOT_RUNNING(
     assert f"derived {EV.EMPTY_SHA256_PREFIX}" not in exc.verdict
 
 
+@pytest.mark.parametrize("shape", ["no-recipient-at-all", "recipient-PLUS-junk"])
 def test_age_keygen_exiting_ZERO_with_NON_RECIPIENT_output_is_refused(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, shape):
     """A future age-keygen that exits 0 while printing something else must not
-    have that something hashed and published as a public key."""
+    have that something hashed and published as a public key.
+
+    🔴 THE SECOND SHAPE IS WHAT MAKES THE `fullmatch` LOAD-BEARING. With only
+    the first, `AGE_PUBKEY_RE.fullmatch` -> `.search` SURVIVED a full sweep:
+    output with no recipient anywhere fails both spellings identically, so the
+    widening was invisible. A valid recipient FOLLOWED BY JUNK is the case that
+    tells them apart — `search` accepts it and would hash the whole polluted
+    stream as though it were a public key.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    real_pub = subprocess.run([AGE_KEYGEN, "-y", str(k)],
+                              capture_output=True).stdout.decode().strip()
+    stdout = {
+        "no-recipient-at-all": b"Warning: whatever\n",
+        "recipient-PLUS-junk": (real_pub + " trailing junk\n").encode(),
+    }[shape]
+    stderr = b"a captured stderr stream\n"
     monkeypatch.setattr(
         B, "age_public_key_bytes",
-        lambda _p: subprocess.CompletedProcess([], 0, b"Warning: whatever\n", b""))
+        lambda _p: subprocess.CompletedProcess([], 0, stdout, stderr))
+    with pytest.raises(EV.EscrowError) as ei:
+        _pubkey_run(tmp_path, FakeBw(), note=k.read_text(encoding="utf-8"),
+                    expect="0" * 16)
+    assert ei.value.token == "NOT-AN-AGE-IDENTITY", shape
+    # 🔴 NOT `"Warning" not in msg` — that was a SPELLED guard, satisfied by any
+    # rewording of the stub's output and blind to a message quoting a DIFFERENT
+    # part of the stream. Assert the STATE: no captured stream reaches the
+    # message at all.
+    rendered = str(ei.value)
+    assert stdout.decode().strip() not in rendered, "captured stdout was quoted"
+    assert stderr.decode().strip() not in rendered, "captured stderr was quoted"
+    assert ei.value.detail is None, "an unvetted stream reached the detail field"
+
+
+def test_the_NOT_AN_AGE_IDENTITY_advisory_is_pinned_as_WHOLE_SENTENCES(tmp_path):
+    """🔴 A GUARD ON WORDS IS WALKABLE BY REWORDING — and this is the subsystem
+    where a re-escrow instruction on 2026-08-25 would have overwritten a good
+    escrow with a client's key.
+
+    FOUND BY AUDIT: flipping this message's "🔴 DO NOT RE-ESCROW ON THIS." to
+    "Re-escrow the note from this host." SURVIVED the whole suite. Only code
+    36's advisory was pinned. So the refusal and the reason are pinned WHOLE
+    here, and in ORDER — the refusal must be READ FIRST, before the sentence
+    explaining what is at stake.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    mangled = k.read_text(encoding="utf-8").replace("\n", " ")
+    with pytest.raises(EV.EscrowError) as ei:
+        _pubkey_run(tmp_path, FakeBw(), note=mangled,
+                    expect=_sha_via_documented_shell(k))
+    msg = ei.value.verdict
+    assert ei.value.token == "NOT-AN-AGE-IDENTITY"
+
+    refusal = "🔴 DO NOT RE-ESCROW ON THIS."
+    stake = (
+        "What re-escrowing overwrites is the ONLY off-machine copy of the "
+        "identity every artifact in the bucket is encrypted to; if the mangling "
+        "happened on the way OUT of the vault, the stored note is fine and you "
+        "would be replacing a good copy with whatever this machine holds.")
+    remedy = "Open the item in the web vault and look at it first."
+    for piece in (refusal, stake, remedy):
+        assert piece in msg, piece
+    assert msg.index(refusal) < msg.index(stake) < msg.index(remedy), (
+        "the refusal must come BEFORE the reason and the remedy — the "
+        "BYTES-DIFFER-MATERIALLY arm carries the same ordering rule because a "
+        "reader who meets the instruction first acts on it first")
+    # The opposite instruction must never appear on this path.
+    assert "Re-escrow the note" not in msg
+    assert "re-escrow from" not in msg.lower()
+
+
+def test_the_PUBKEY_DERIVATION_EMPTY_advisory_is_pinned_as_WHOLE_SENTENCES(
+        tmp_path, monkeypatch):
+    """The same audit finding as the test above, on code 37. Flipping its
+    "Do NOT re-escrow and do NOT rotate on this." to the opposite SURVIVED.
+
+    This message's whole job is to say the check DID NOT RUN — an operator who
+    reads it as a failed check has been handed a reason to act destructively on
+    a key nothing was ever measured about."""
+    monkeypatch.setattr(
+        B, "age_public_key_bytes",
+        lambda _p: subprocess.CompletedProcess([], 0, b"", b""))
     k = _new_identity(tmp_path, "escrowed.key")
     with pytest.raises(EV.EscrowError) as ei:
         _pubkey_run(tmp_path, FakeBw(), note=k.read_text(encoding="utf-8"),
                     expect="0" * 16)
-    assert ei.value.token == "NOT-AN-AGE-IDENTITY"
-    assert "Warning" not in str(ei.value), "the unknown output was quoted"
+    msg = ei.value.verdict
+    assert ei.value.token == "PUBKEY-DERIVATION-EMPTY"
+
+    not_running = ("🔴 THIS IS THE CHECK NOT RUNNING, NOT A CHECK THAT FAILED, "
+                   "and nothing about the escrow was determined.")
+    tell = "If you see that value anywhere, the command did not run."
+    refusal = "Do NOT re-escrow and do NOT rotate on this."
+    for piece in (not_running, tell, refusal):
+        assert piece in msg, piece
+    assert msg.index(not_running) < msg.index(tell) < msg.index(refusal)
+    assert "Re-escrow" not in msg and "rotate the key" not in msg
 
 
-@pytest.mark.parametrize("mangler,label", [
-    (lambda t: t.replace("\n", " "), "newlines collapsed to spaces"),
-    (lambda t: "", "emptied"),
-    (lambda t: t.replace(t.split("\n")[-2], t.split("\n")[-2][:-5]),
-     "the secret line truncated"),
-])
+def _secret_line(text: str) -> str:
+    """The `AGE-SECRET-KEY-1…` line of a throwaway identity."""
+    return [ln for ln in text.splitlines()
+            if ln.startswith("AGE-SECRET-KEY-")][0]
+
+
+# 🔴 THE MANGLINGS THAT ACTUALLY MAKE age-keygen ECHO, MEASURED — NOT GUESSED.
+#
+# The first version of this guard was VACUOUS, and an audit proved it: its three
+# manglers (`\n`->space, emptied, secret line truncated) produce stderr that
+# contains ZERO characters of the secret, so re-quoting `p.stderr` into the
+# NOT-AN-AGE-IDENTITY verdict SURVIVED the entire suite — and that mutated build
+# printed the whole 74-character secret key. The docstring said "a message that
+# echoed it would be caught here". It would not have been.
+#
+# MEASURED 2026-08-27, age v1.3.1, over six inputs, checking stderr
+# case-INSENSITIVELY against the fixture's own secret:
+#
+#   newlines -> spaces            rc=1  145 B  no leak   ("no identities found")
+#   emptied                       rc=1  145 B  no leak   ("no identities found")
+#   secret line truncated by 5    rc=1  181 B  no leak   (bech32 checksum)
+#   non-key text                  rc=1  189 B  no leak
+#   LEADING SPACE on the line     rc=1  243 B  🔴 LEAKS the full secret line
+#   LOWERCASED `age-secret-key-`  rc=1  242 B  🔴 LEAKS the full secret line
+#
+# The echo needs an UNRECOGNISED IDENTITY *TYPE* PREFIX — age-keygen quotes what
+# it could not classify. A line it recognises but cannot parse is rejected
+# without being repeated. So a guard built only from "obviously broken" inputs
+# tests the one shape that CANNOT leak.
+#
+# 🔴 A LEADING SPACE IS THE LIKELIEST WEB-VAULT CLIPBOARD ARTIFACT — i.e. the
+# exact mangling this whole mode exists to catch. The leaking cases are the
+# realistic ones; that is what made the vacuous version so quiet.
+_LEAKING = "leaking"
+_NON_LEAKING = "non-leaking"
+
+_MANGLERS = [
+    (lambda t: t.replace("\n", " "), "newlines collapsed to spaces", _NON_LEAKING),
+    (lambda t: "", "emptied", _NON_LEAKING),
+    (lambda t: t.replace(_secret_line(t), _secret_line(t)[:-5]),
+     "the secret line truncated", _NON_LEAKING),
+    (lambda t: t.replace(_secret_line(t), " " + _secret_line(t)),
+     "a LEADING SPACE on the secret line", _LEAKING),
+    (lambda t: t.replace("AGE-SECRET-KEY-", "age-secret-key-"),
+     "a LOWERCASED key prefix", _LEAKING),
+]
+
+
+def test_the_LEAKING_manglers_really_DO_make_age_keygen_echo_the_secret(tmp_path):
+    """🔴 THE POSITIVE CONTROL THE FIRST VERSION OF THIS GUARD LACKED.
+
+    A "no key material in the message" assertion is worth exactly as much as the
+    input's ability to PUT key material there. This runs `age-keygen -y` directly
+    on each fixture and asserts the stderr of the two `_LEAKING` manglers really
+    does contain the secret — and that the three `_NON_LEAKING` ones really do
+    not. If age ever stops echoing, this goes red and tells you the guard below
+    has become vacuous, instead of leaving it silently green forever.
+
+    ⚠ THE COMPARISON IS CASE-INSENSITIVE, and that is not fussiness: a
+    case-SENSITIVE check returns a FALSE NEGATIVE on the lowercased-prefix case
+    while the full key body is sitting in the stream. (The auditor's own first
+    check made exactly that error.)
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    text = k.read_text(encoding="utf-8")
+    secret = _secret_line(text)
+    seen = {_LEAKING: 0, _NON_LEAKING: 0}
+    for mangler, label, kind in _MANGLERS:
+        f = tmp_path / f"probe-{abs(hash(label))}.key"
+        f.write_text(mangler(text), encoding="utf-8")
+        p = subprocess.run([AGE_KEYGEN, "-y", str(f)], capture_output=True)
+        assert p.returncode != 0, f"{label} was ACCEPTED by age-keygen"
+        err = p.stderr.decode("utf-8", "replace").lower()
+        leaked = secret.lower() in err
+        assert leaked == (kind is _LEAKING), (
+            f"{label}: expected {kind}, stderr {'HAS' if leaked else 'lacks'} "
+            f"the secret. The ledger above is now wrong about this age version; "
+            f"re-measure before trusting the guard that reads it.")
+        seen[kind] += 1
+    assert seen[_LEAKING] >= 2 and seen[_NON_LEAKING] >= 3, seen
+
+
+@pytest.mark.parametrize("mangler,label,kind", _MANGLERS)
 def test_NO_pubkey_failure_message_EVER_carries_key_material(tmp_path, mangler,
-                                                             label):
-    """🔴 age-keygen's STDERR ECHOES ITS INPUT — measured: a file it cannot
-    parse comes back as `unknown identity type: "<the line>"`, and on a mangled
-    identity that line is the SECRET KEY. Quoting it would leak the very thing
-    this module refuses to print, on exactly the failure it exists to report.
+                                                             label, kind):
+    """🔴 age-keygen's STDERR ECHOES ITS INPUT on the realistic manglings —
+    measured: an unrecognised identity TYPE comes back as `unknown identity
+    type: "<the line>"`, and on a leading-space or lowercased-prefix paste that
+    line is the SECRET KEY. Quoting it would leak the very thing this module
+    refuses to print, on exactly the failure it exists to report.
 
-    The fixtures are real throwaway keys, so `AGE-SECRET-KEY-1…` really is
-    present in the input; a message that echoed it would be caught here.
+    🔴 THE GUARD IS ONLY AS GOOD AS ITS LEAKING FIXTURES. Two of the five
+    manglers put the real secret into age-keygen's stderr — proven by
+    `test_the_LEAKING_manglers_really_DO_make_age_keygen_echo_the_secret` above,
+    which is this test's positive control. Interpolating `p.stderr` into the
+    NOT-AN-AGE-IDENTITY verdict is killed here by those two.
+
+    ⚠ CASE-INSENSITIVE, against the FIXTURE'S OWN secret — a case-sensitive
+    check reads clean on the lowercased-prefix case while the whole key body is
+    in the message.
     """
     k = _new_identity(tmp_path, "escrowed.key")
     text = k.read_text(encoding="utf-8")
     note = mangler(text)
-    secret_line = [ln for ln in text.splitlines()
-                   if ln.startswith("AGE-SECRET-KEY-")][0]
+    secret = _secret_line(text)
+    body = secret.split("AGE-SECRET-KEY-", 1)[-1]
     try:
         _pubkey_run(tmp_path, FakeBw(), note=note,
                     expect=_sha_via_documented_shell(k))
     except EV.EscrowError as exc:
-        rendered = str(exc)
-        assert secret_line not in rendered, label
-        assert "AGE-SECRET-KEY-" not in rendered, label
+        rendered = str(exc).lower()
+        assert secret.lower() not in rendered, label
+        # The BODY alone, so a message that dropped the prefix while keeping the
+        # key still fails. This is the half a `"AGE-SECRET-KEY-" not in msg`
+        # spelling check cannot see.
+        assert body.lower() not in rendered, label
+        assert "age-secret-key-" not in rendered, label
         assert exc.detail is None, (
             "a detail field was populated on a path where the only upstream "
             "stream available is age-keygen's input-echoing stderr")
