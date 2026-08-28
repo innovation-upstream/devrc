@@ -270,10 +270,11 @@ invariant guards rather than coverage of these defects.
   times across both corpora (devrc 126 docs, homelab-talos 139), and all ten are
   bounded by the same closed-vocabulary argument as the markup class, so none is
   being fixed — they are recorded. Pinned cell-by-cell by
-  `test_the_widened_anchors_admit_these_and_the_comment_says_so`; the module
-  comment is **not** allowed to re-state a count (`test_the_comment_still_states
-  _the_ASCII_scope` now refuses the retired "FOUR ADMISSIONS, NOT ONE" literal,
-  because a number in prose is what went stale both times).
+  `test_the_widened_anchors_admit_these_and_the_comment_says_so`. The module
+  comment is **not** allowed to re-state a count:
+  `test_the_comment_still_states_the_ASCII_scope` now REFUSES the retired
+  "FOUR ADMISSIONS, NOT ONE" literal, because a number in prose is the thing
+  that went stale both times.
 
 **Two limits the skill body states in one clause and this section owns in full.**
 A tag written **flush-left on its own line under a blank one**, directly beneath
