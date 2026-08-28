@@ -208,17 +208,16 @@ do not renumber again without releasing the live claims first.
    this feature nobody has observed. Idle entries accumulate fast (53 open seen within ~2h). Tell:
    `retention: resolved N idle attention entry(ies) not seen for 4h` in the server log. If the rate
    outpaces it, that constant is the single knob.
-2. ✅ **DONE 2026-08-27 — `ZacxDev/homelab-infra#451`, merged as `a38360a5`.** The suggest POST is
-   detached (payload renamed to a **sibling of `WORKDIR`**, fork, child `rm`s before it logs).
-   Claim `tmux-webapp-2` released.
-   **Measured independently on the workbench, old hook vs new, against a server that accepts and
-   never replies: 8030/8031/8037 ms → 22/21/21 ms.** Verified live after deploy: `exit 0`, empty
-   stdout, **28 ms**, and the detached child still logged `suggest sent ok`. No scratch leaked.
-   🔴 **DEPLOYED TO THE WORKBENCH ONLY.** The hooks are read from `~/workspace/homelab-talos`'s
-   working tree, so the laptop keeps the OLD synchronous hook until that checkout is pulled —
-   `git -C ~/workspace/homelab-talos merge --ff-only origin/trunk` there. Pre-flight it exactly as
-   the workbench was: confirm **0 local-only commits** and that no incoming commit collides with a
-   dirty path.
+2. ✅ **DONE 2026-08-27 — `ZacxDev/homelab-infra#451`, merged as `a38360a5`. Deployed and verified
+   on BOTH hosts.** The suggest POST is detached (payload renamed to a **sibling of `WORKDIR`**,
+   fork, child `rm`s before it logs). Claim `tmux-webapp-2` released.
+   **Measured independently, old hook vs new, against a server that accepts and never replies:
+   8030/8031/8037 ms → 22/21/21 ms.** Verified live through the real path after each pull:
+   workbench `exit 0`, empty stdout, **28 ms**; laptop `exit 0`, empty stdout, **199 ms** (its
+   endpoint is the homelab gateway over nebula, not a LAN NodePort — the extra ~170 ms is the
+   route, not the fork). Both logged `suggest sent ok` from the detached child; no scratch leaked.
+   ⚠ The two hosts pulled at different moments, so they carry the detach at different commits
+   (`a38360a5` / `6cda752c`) — `drift-check.sh` will report that correctly and it is not a defect.
 3. **Decide the terminal widget (audit finding A4 — still open).** clawgate vendors only two
    hand-written JS files (~3.7 KB) and no third-party bundle, so xterm.js would be the first.
    Recommendation on record: ship read-only `capture-pane` rendering first; if adopted, vendor and
@@ -237,11 +236,14 @@ do not renumber again without releasing the live claims first.
    `containers/clawgate/internal/api/{push_task,task_comment}_test.go` (pre-existing; mechanical now
    the `awaitPushesSettled` barrier exists); and a scanner test for in-body `! grep` — closing
    condition: a test in both bats suites that reds on a planted `! grep` assertion.
-9. **Three portable lessons are NOT in `MEMORY.md`** — offered repeatedly, never answered, so
-   recorded here rather than lost: `! grep -q X f` is inert under bats errexit unless it is the last
-   line of a test; busybox `date +%s%N` silently DROPS `%N`; and the Bash tool's shell is **zsh**,
-   which has no `EPOCHREALTIME` (see Gotchas). All three are cross-cutting shell/testing tripwires
-   that map to no skill, which is what that index is for.
+
+🔴 **There is no rank 9. A previous revision listed one — "get three portable lessons into
+`MEMORY.md`" — and it was NOT a work item: the operator confirmed 2026-08-27 that MEMORY.md is not
+used here, so nothing could ever have closed it.** Removed deliberately rather than left to be
+re-read by every resume. The lessons themselves are kept where they belong: the clawgate-specific
+ones in the subsystem index (`homelab-talos/clawgate.md`), and the two generic ones — bats `! grep`
+inertness and the zsh `EPOCHREALTIME` trap — in this doc's own **Gotchas**, which appends and
+survives. Nothing was lost by dropping the item; only the false claim that work was outstanding.
 
 **Parked with the operator (not work items until answered):**
 - Seam tests **skip in `clawgate-ci`** — the Go image has no `jq`. Closing it edits a pipeline every
