@@ -257,6 +257,15 @@ do not renumber again without releasing the live claims first.
    tick** — that is what the boot line's `every 30m0s`, the AST cadence guard and the `main()`
    ledger are for.
 
+   ✅ **VERIFIED IN PRODUCTION 2026-08-28 — the behaviour nobody had ever observed.** Six sweeps
+   over 4.5h, every one landing on exactly `:04:10` / `:34:10` (boot 02:04:10 + n×30m0s), so the
+   cadence is measured over many ticks rather than inferred from one:
+   `02:34:10` resolved **23**, then 8 / 1 / 2 / 5 / 11 at 04:04, 05:04, 05:34, 06:04, 06:34.
+   The bound is holding, checked against the DB and not just the log: open **64 → 11**, resolved
+   45 → 107, **idle entries still past the 4h window = 0**, and both `question` rows preserved.
+   Steady state ~11 against `attentionPanelLimit` 100 — the runaway this feature was losing to is
+   closed.
+
    Claim `tmux-webapp-1` released.
 2. ✅ **DONE 2026-08-27 — `ZacxDev/homelab-infra#451`, merged as `a38360a5`. Deployed and verified
    on BOTH hosts.** The suggest POST is detached (payload renamed to a **sibling of `WORKDIR`**,
