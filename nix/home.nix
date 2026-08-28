@@ -235,7 +235,18 @@ in
           # interface — and the old search_terms (ask/clarify/questions/elicit/…)
           # contained none of the words he actually types: feedback, dispatch,
           # process. Lead the label with "feedback" and add those three terms.
-          { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + ask clarifying questions"; search_terms = ["feedback" "dispatch" "process" "ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
+          # 2026-08-28 SPLIT into :dacq (dispatch) + :acq (the bare ask). The
+          # split made 'ask' AMBIGUOUS over the two — and 'ask' is the
+          # highest-traffic term in the whole config (58 fires, 2026-08-06..19),
+          # so an ambiguous 'ask' is recorded UNATTRIBUTED by the keylog
+          # detector. `_token_matches` reads the trigger, every WORD OF THE
+          # LABEL, and search_terms, so dropping the search_terms alone would
+          # NOT have fixed it: the old label spelled "ask clarifying questions"
+          # outright. Both had to move. The label must also avoid "task" —
+          # 'ask' ⊂ 'task' is the documented way a neighbour silently steals it.
+          # :dacq keeps the words he actually types for THIS snippet (feedback,
+          # dispatch, process); :acq owns ask/clarify/questions alone.
+          { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["feedback" "dispatch" "process" "elicit" "scope" "include"]; }
           { trigger = ":acq"; replace = "ask clarifying questions"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
           { trigger = ":alo"; replace = "anything left outstanding from this thread? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
