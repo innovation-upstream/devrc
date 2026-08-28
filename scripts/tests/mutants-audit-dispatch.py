@@ -567,16 +567,22 @@ def the_git_dirs_are_compared_as_strings(t):
     )
 
 
+# 🔴 Y6 AND Y14 WERE RE-TARGETED IN ROUND 7 and the reason is a FIX, not a
+# refactor: `render_checkout`'s inline state->directive dict became the
+# module-level `CHECKOUT_STATE_DIRECTIVE`, so the relationship it encodes can
+# be READ by a guard instead of being spelled as an id prefix. Both mutations
+# still express exactly what they expressed before — the unknown state
+# collapsing into SHARED, and a private worktree being described as shared.
 def the_unknown_worktree_state_collapses_to_shared(t):
     return _swap(t,
-                 '        }.get(wt.kind, "checkout-unknown")),',
-                 '        }.get(wt.kind, "checkout-moves")),')
+                 '    "unknown": "checkout-unknown",\n}',
+                 '    "unknown": "checkout-moves",\n}')
 
 
 def a_private_worktree_is_called_shared(t):
     return _swap(t,
-                 '            "private": "checkout-private",',
-                 '            "private": "checkout-moves",')
+                 '    "private": "checkout-private",',
+                 '    "private": "checkout-moves",')
 
 
 def where_to_work_drops_the_private_note(t):
@@ -655,11 +661,133 @@ def the_shared_state_drops_the_no_write_rule(t):
 
 
 def a_fourth_checkout_state_arrives_with_no_rule(t):
-    """A new `checkout-*` state nobody checked carries the no-write rule."""
+    """A new checkout state nobody checked carries the no-write rule.
+
+    🔴 ROUND 7 EXTENDED IT TO REGISTER THE STATE IN THE RENDERER'S MAP. Round 5
+    added only the `Directive`, which was enough while the guard derived its set
+    from the id PREFIX `checkout-`. The guard now derives it from
+    `CHECKOUT_STATE_DIRECTIVE` — what `render_checkout` can actually SELECT —
+    so a directive nobody selects reaches no brief and, correctly, is no longer
+    that guard's business. Adding the map entry is what keeps this row meaning
+    "a fourth STATE with no rule" rather than "an unledgered directive".
+    """
     marker = ")\n\nDIRECTIVE = {d.id: d.text for d in SECTION_DIRECTIVES}"
-    return _swap(t, marker,
-                 '    Directive("checkout-detached", "🔴 **This checkout is on '
-                 'a DETACHED HEAD.** Nobody wrote a rule for it."),\n' + marker)
+    t = _swap(t, marker,
+              '    Directive("checkout-detached", "🔴 **This checkout is on '
+              'a DETACHED HEAD.** Nobody wrote a rule for it."),\n' + marker)
+    return _swap(t,
+                 '    "unknown": "checkout-unknown",\n}',
+                 '    "unknown": "checkout-unknown",\n'
+                 '    "detached": "checkout-detached",\n}')
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 V1-V7 — round 7 (base `3619fe68`).
+# --------------------------------------------------------------------------- #
+# V1/V2 restore the two halves of the `checkout-*` PREFIX derivation round 6
+# walked; V3 the false blind-spot rationale; V4 the forward reference that
+# narrowed the no-write rule; V5 the whitespace input check; V6 the verified
+# branch's hardcoded `HEAD`; V7 the cross-repo-only toolchain reword that a
+# two-scenario equality could not see.
+
+
+def the_private_state_is_renamed_and_stripped_of_its_rule(t):
+    """Round 6's demonstrated disarm, as far as a SCRIPT-ONLY mutation reaches.
+
+    🔴 AND THE HALF IT CANNOT REACH IS RECORDED RATHER THAN IMPLIED. Round 6's
+    measurement also updated the THREE LEDGERS in the test module — which is
+    what made the suite stay at 89 green — and this battery mutates the script
+    and nothing else. So the ledger pins fire here where they did not fire
+    there, and this row is WIDE for that reason. `V2` is the isolating row for
+    the derivation change; this one exists so the demonstrated disarm has a
+    line in the battery at all.
+    """
+    t = _swap(t, '        "checkout-private",\n', '        "assembly-private",\n')
+    t = _swap(t, '    "private": "checkout-private",',
+              '    "private": "assembly-private",')
+    return reword_entry(
+        "Directive", "assembly-private",
+        "🔴 **This is the checkout this brief was ASSEMBLED in — not "
+        "necessarily the one you are standing in.** Git reports it as a "
+        "PRIVATE linked worktree: its `.git` is a link into a shared "
+        "repository, and the working tree belongs to the session that BUILT "
+        "this brief, which is not you. That session is live in it, so files "
+        "here can appear, vanish and change. If you do see something move "
+        "here, report it with what moved and when.")(t)
+
+
+def a_fourth_state_selects_an_existing_rule_less_directive(t):
+    """🔴 THE ISOLATING ROW for round 6's 🟢 F5.
+
+    Adds a fourth SELECTABLE state pointing at a directive that already exists
+    and is already ledgered — so `SECTION_DIRECTIVES` is untouched, both
+    two-way ledger pins stay green, and the ONLY thing that can see it is a
+    guard that reads the renderer's own selection. Under the round-5 spelling
+    (`ids beginning "checkout-"`) this mutation was invisible.
+    """
+    return _swap(t,
+                 '    "unknown": "checkout-unknown",\n}',
+                 '    "unknown": "checkout-unknown",\n'
+                 '    "detached": "own-worktree-is-writable",\n}')
+
+
+def the_blind_spot_blames_sha_resolution_again(t):
+    """The rationale that was false for three rounds, restored."""
+    return _swap(
+        t,
+        "# 🔴 AND THE REASON GIVEN HERE FOR THREE ROUNDS WAS FALSE. It asserted that",
+        "# This script never resolves a sha, so whether the token is a real\n"
+        "# commit is a question it cannot answer.\n"
+        "# 🔴 AND THE REASON GIVEN HERE FOR THREE ROUNDS WAS FALSE. It asserted that",
+    )
+
+
+def the_own_worktree_grant_scopes_the_rule_to_sharedness_again(t):
+    """Round 5's second sentence, verbatim."""
+    return reword_entry(
+        "Directive", "own-worktree-is-writable",
+        "That worktree is YOURS: fetching and checking out inside it is fine. "
+        "The no-write rule below is about the SHARED checkout.")(t)
+
+
+def the_whitespace_input_check_is_removed(t):
+    return _swap(
+        t,
+        "    if args.audited is not None and args.audited.split() != [args.audited]:",
+        "    if False:",
+    )
+
+
+def the_verified_range_hands_out_head_again(t):
+    return _swap(
+        t,
+        "    elif hc is not None and hc.ok:\n        tip = hc.local_sha\n",
+        '    elif hc is not None and hc.ok:\n        tip = "HEAD"\n',
+    )
+
+
+def the_toolchain_names_the_shared_checkout_cross_repo_only(t):
+    """🔴 THE ISOLATING ROW for round 6's 🟢 F4.
+
+    The forbidden phrase comes back, but ONLY in the cross-repo branch. Round
+    5's guard drove two scenarios, both SAME-REPO, so this reword left the
+    suite at 89 green with no row naming it. Only a guard that drives every
+    scenario — and requires the section byte-identical across them — can see it.
+    """
+    return _swap(
+        t,
+        "    r = facts.cwd_repo_dir\n    return \"\\n\".join([\n"
+        '        "## TOOLCHAIN — the exact commands, and the two ways they lie",',
+        "    r = facts.cwd_repo_dir\n"
+        '    _why = ("so running that copy runs the suite in the SHARED CHECKOUT on "\n'
+        '            "whatever branch it is standing on"\n'
+        '            if facts.repo_relation == "cross" else\n'
+        '            "so running that copy runs the suite in a checkout that is NOT '
+        'yours")\n'
+        "    return \"\\n\".join([\n"
+        '        "## TOOLCHAIN — the exact commands, and the two ways they lie",\n'
+        '        _why,',
+    )
 
 
 def the_no_fetch_clause_is_conditional_again(t):
@@ -891,9 +1019,17 @@ ROWS = [
     # `..._unknown_head_sha_reason_names_one_cause_not_two` reads. Recorded in
     # the same spirit as D2 and D7 — the alternative would be to weaken that
     # test into asserting nothing about the brief.
+    # 🔴 H2 GAINED A THIRD KILLER IN ROUND 7, and it is the tightest coupling
+    # in the file rather than a row gone vague: this mutation makes THE RANGE
+    # hand out the token `HEAD` unconditionally, and round 7's rule is that a
+    # VERIFIED head renders as its SHA. The two claims are about the same
+    # rendered token from opposite sides — "not `..HEAD` when the head is
+    # unverified" and "not `..HEAD` when it IS verified" — so a mutation that
+    # hardcodes the token necessarily trips both. Recorded, not narrowed.
     ("H2  the range hands out ..HEAD regardless",
      {"test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head",
-      "test_the_unknown_head_sha_reason_names_one_cause_not_two"},
+      "test_the_unknown_head_sha_reason_names_one_cause_not_two",
+      "test_the_range_names_a_sha_and_not_head_when_the_head_is_verified"},
      range_ignores_the_head_check),
     ("H3  --emit-claims stamps the LOCAL head",
      {"test_emit_claims_stamps_the_prs_head_not_the_local_checkouts",
@@ -1213,7 +1349,7 @@ ROWS = [
      {"test_each_clause_carries_the_instruction_its_ledger_entry_names"},
      the_no_fetch_clause_is_conditional_again),
     ("Z4  TOOLCHAIN's reason names the SHARED CHECKOUT again",
-     {"test_the_toolchain_reason_is_true_in_both_checkout_states"},
+     {"test_the_toolchain_reason_is_true_in_every_scenario"},
      the_toolchain_reason_names_the_shared_checkout_again),
     ("Z5  the emitted block loses its legend",
      {"test_the_emitted_skeleton_carries_a_legend_for_its_two_fields"},
@@ -1229,6 +1365,53 @@ ROWS = [
       "test_the_degenerate_cause_list_scopes_the_omitted_flag_to_round_one",
       "test_a_degenerate_range_does_not_blame_a_checkout_it_verified"},
      the_degenerate_causes_stop_scoping_the_omission),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 V1-V7 — round 7. Base `3619fe68`.
+    # --------------------------------------------------------------------- #
+    # 🔴 V1 IS WIDE ON PURPOSE and the width is the finding's own shape: round
+    # 6 demonstrated this disarm with the three test-module ledgers UPDATED,
+    # which this battery cannot do. Script-only, the ledger pins catch the
+    # rename — so the row proves the rename is not free, while V2 is what
+    # proves the derivation change bought something.
+    ("V1  checkout-private renamed and stripped of its rule",
+     {"test_the_section_directive_ledger_is_pinned_two_way",
+      "test_the_directive_render_scenario_ledger_is_pinned_two_way",
+      "test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
+      "test_every_section_directive_is_emitted_verbatim_in_the_brief_that_owns_it",
+      "test_every_checkout_state_carries_the_no_write_rule"},
+     the_private_state_is_renamed_and_stripped_of_its_rule),
+    # 🔴 V2 IS THE ISOLATING ROW. Nothing but the renderer's own selection can
+    # see it: `SECTION_DIRECTIVES` is untouched and both ledgers stay green.
+    ("V2  a fourth STATE selects a rule-less directive",
+     {"test_every_checkout_state_carries_the_no_write_rule"},
+     a_fourth_state_selects_an_existing_rule_less_directive),
+    ("V3  the blind-spot note blames sha resolution again",
+     {"test_the_blind_spot_rationale_matches_what_the_script_actually_does"},
+     the_blind_spot_blames_sha_resolution_again),
+    ("V4  own-worktree scopes the no-write rule to SHARED again",
+     {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
+      "test_no_forward_reference_scopes_the_no_write_rule_to_a_denied_state"},
+     the_own_worktree_grant_scopes_the_rule_to_sharedness_again),
+    ("V5  the --audited whitespace input check is removed",
+     {"test_emit_claims_refuses_an_audited_value_whose_whitespace_leaves_the_line"},
+     the_whitespace_input_check_is_removed),
+    # 🔴 V6's killer set is WIDE and every member is a real consumer of the
+    # rendered tip: six tests assert a `<anchor>..<sha>` spec, and reverting
+    # the tip to `HEAD` moves all of them. Listed in full rather than trimmed
+    # to the "main" one — the same treatment N1 gets, for the same reason.
+    ("V6  the VERIFIED range hands out `..HEAD` again",
+     {"test_the_range_names_a_sha_and_not_head_when_the_head_is_verified",
+      "test_the_range_is_generated_from_the_previous_rounds_audited_sha",
+      "test_the_range_says_head_was_verified_when_it_was",
+      "test_the_newest_claims_block_wins",
+      "test_a_bare_round_one_audited_sha_still_anchors_the_next_round",
+      "test_audited_supplies_the_tip_a_round_one_emit_cannot_derive",
+      "test_audited_without_emit_claims_says_it_changed_nothing"},
+     the_verified_range_hands_out_head_again),
+    ("V7  TOOLCHAIN names the SHARED CHECKOUT, cross-repo only",
+     {"test_the_toolchain_reason_is_true_in_every_scenario"},
+     the_toolchain_names_the_shared_checkout_cross_repo_only),
 ]
 
 

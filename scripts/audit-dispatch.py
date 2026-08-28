@@ -110,10 +110,19 @@ converts that into "the ladder ENDS".
    the next round diffed `abc..HEAD`; `e06461f7..dd601793` corrupted `<to>`
    instead and cascaded into the round after that. A refusal and NOT a warning,
    because the failure is silent at every downstream station — nothing reports
-   the block malformed, and the self-range guard cannot fire on it. 🔴 A
-   well-formed token that is not a commit round-trips and is NOT caught: this
-   script never resolves a sha, and saying otherwise would be a guard whose
-   description is wider than its implementation.
+   the block malformed, and the self-range guard cannot fire on it. Whitespace
+   is refused on the INPUT rather than by that round trip, which is
+   line-oriented on both sides and therefore blind to a NEWLINE — see the check
+   in `main`. 🔴 A well-formed token that is not a commit round-trips and is
+   NOT caught. THE REASON IS NOT THAT THIS SCRIPT CANNOT RESOLVE A SHA — it
+   runs seven read-only `git -C <that checkout>` commands, two of which
+   (`rev-list --count <anchor>..HEAD`, `log --numstat … <anchor>..HEAD`)
+   resolve exactly that token in exactly that checkout. The reason is that this
+   script deliberately never FETCHES, so the assembly checkout may legitimately
+   lack an object that is perfectly fine on the PR, and a `cat-file` refusal
+   there would be a FALSE POSITIVE on a correct value. The downstream cost is
+   bounded and correctly attributed: `rev-list` exits 128 and the ledger prints
+   COULD NOT MEASURE naming the command, one round later.
 
 🔴 EVERY NUMBER HERE IS ABOUT THE PR, NOT ABOUT YOUR CHECKOUT
 -------------------------------------------------------------
@@ -464,14 +473,48 @@ SECTION_DIRECTIVES = (
     # fetch or check out inside it" passed all 199 audit-related tests and
     # leaves a cross-repo auditor with nowhere to work: the brief has just told
     # them to build that worktree themselves precisely so they CAN.
+    #
+    # 🔴 ROUND 6 — THE SECOND SENTENCE FORWARD-REFERENCES A CLAUSE THAT NO
+    # LONGER SAYS WHAT IT NAMES. It used to read "the no-write rule below is
+    # about the SHARED checkout", which was true while `no-fetch` was scoped to
+    # sharedness. Round 5 rewrote that clause off sharedness and onto OWNERSHIP,
+    # and this sentence was left behind — so in the configuration production
+    # actually produces (a cross-repo PR assembled in a PRIVATE agent worktree)
+    # the brief reads, in order: "the no-write rule below is about the SHARED
+    # checkout" -> "kind : PRIVATE linked worktree" -> "write to no checkout
+    # that is not the copy YOU made, including the one THE CHECKOUT names".
+    # That is the same syllogism round 4 wrote into `checkout-private` and round
+    # 5 deleted, surviving one directive over: the reader can discharge the
+    # no-write rule on the grounds that this checkout is not shared.
+    #
+    # So the scope is stated the way the clause states it — by OWNERSHIP, which
+    # is true in every checkout state and cannot be discharged by one.
     Directive(
         "own-worktree-is-writable",
         "That worktree is YOURS: fetching and checking out inside it is fine. "
-        "The no-write rule below is about the SHARED checkout.",
+        "The no-write rule below is about every checkout you did not make.",
     ),
 )
 
 DIRECTIVE = {d.id: d.text for d in SECTION_DIRECTIVES}
+
+# 🔴 WHICH DIRECTIVE EACH `gather_worktree_kind` STATE RENDERS — ONE PLACE.
+# `render_checkout` used to carry this map inline, which left the RELATIONSHIP
+# ("every state the renderer can select carries the no-write rule") with no
+# machine-readable statement anywhere: round 5's guard over it had to spell the
+# set as ids beginning `checkout-`, and round 6 measured the consequence —
+# RENAMING `checkout-private` to `assembly-private`, DROPPING its no-write
+# sentence and updating the three ledgers left the whole suite green. The rule
+# is the renderer's selection, never a naming convention, so the selection is
+# what a guard now reads. `unknown` is both a state and the fallback for a
+# state this map does not know: not knowing which state you are in is itself
+# the unknown state, and collapsing it into either answer picks the branch
+# whose failure is silent.
+CHECKOUT_STATE_DIRECTIVE = {
+    "shared": "checkout-moves",
+    "private": "checkout-private",
+    "unknown": "checkout-unknown",
+}
 
 
 def directive(did):
@@ -1350,12 +1393,41 @@ def render_range(facts):
             "into \"the ladder ENDS\".\n\n"
             + directive("degenerate-range-causes")
         )
+    # 🔴 ROUND 7 — THE THIRD INSTANCE OF THIS LADDER'S RECURRING CONFUSION, and
+    # it is a TIME axis rather than a place one. Round 3 conflated the
+    # OPERATOR'S CHECKOUT with the tree under audit; round 5 conflated the
+    # ASSEMBLING PROCESS'S CWD with where the auditor stands. This pair: the
+    # HEAD VERIFIED AT ASSEMBLY TIME versus the HEAD THE AUDITOR'S COMMAND WILL
+    # RESOLVE.
+    #
+    # `hc.ok` means `git rev-parse HEAD` in THIS tree, at THIS moment, equalled
+    # the PR's head. It says nothing about the tree the auditor types `..HEAD`
+    # in: this same brief says `Dispatch with isolation: "worktree"` and that
+    # the checkout it names is "not necessarily the one you are standing in",
+    # and the cross-repo recipe hands them a BRANCH, not this sha. That tree is
+    # cut AFTER assembly from a repo the brief itself describes as live under
+    # another session — so a commit landing in between makes
+    # `git diff <from>..HEAD` cover commits no claims block describes, while
+    # the brief's own justification asserts the range was verified.
+    #
+    # Two tells that this is the same inversion and not a new one: the
+    # UNVERIFIED branch three lines down already does the safe thing
+    # (`tip = hc.pr_sha`), and `emit_claims_skeleton` already prefers the
+    # resolved PR head. Only the VERIFIED branch hardcoded `HEAD` — the branch
+    # where being sure was mistaken for the range being stable.
+    #
+    # The ledger below still MEASURES `<anchor>..HEAD`, and correctly: that
+    # command runs HERE, now, in the tree just verified. What is handed to
+    # ANOTHER process, later, is a sha.
     elif hc is not None and hc.ok:
-        tip = "HEAD"
+        tip = hc.local_sha
         note = (
             f"This checkout's HEAD is `{hc.local_sha}`, verified at assembly "
-            f"time to be PR #{facts.pr}'s head commit — which is what makes "
-            "`..HEAD` mean the PR here."
+            f"time to be PR #{facts.pr}'s head commit — so the range above "
+            "names that SHA and not `HEAD`. `HEAD` would resolve in YOUR "
+            "worktree, which is cut after this brief was assembled from a "
+            "repository other sessions are pushing to; the sha cannot move "
+            "under you."
         )
     else:
         tip = hc.pr_sha if (hc is not None and hc.pr_sha) else "<the PR's head sha>"
@@ -1429,10 +1501,8 @@ def render_checkout(facts):
         lines += ["", f"    {wt.reason}"]
     lines += [
         "",
-        directive({
-            "shared": "checkout-moves",
-            "private": "checkout-private",
-        }.get(wt.kind, "checkout-unknown")),
+        directive(CHECKOUT_STATE_DIRECTIVE.get(
+            wt.kind, CHECKOUT_STATE_DIRECTIVE["unknown"])),
     ]
     return "\n".join(lines)
 
@@ -1463,7 +1533,10 @@ def render_toolchain(facts):
     name a tree that does not contain what was tested. This section knows
     nothing about where the auditor stands, so it says only what is true in
     every state — that copy is not yours and holds none of your mutations.
-    `test_the_toolchain_reason_is_true_in_both_checkout_states` drives both.
+    `test_the_toolchain_reason_is_true_in_every_scenario` drives EVERY scenario
+    that module knows and requires this section byte-identical across all of
+    them — round 5 drove two, both same-repo, and round 6 measured that a
+    cross-repo-only reword walked it.
     """
     r = facts.cwd_repo_dir
     return "\n".join([
@@ -1779,11 +1852,34 @@ def emit_claims_skeleton(facts, head_sha):
 # "it does not parse" refusal. Measured by the battery, which reported both as
 # EXTRA-KILLER. This asks only whether the printed field survives the FORMAT.
 #
-# 🔴 NAMED BLIND SPOT: a well-formed token that is not a commit (`zzzzzzzz`)
-# round-trips perfectly and is NOT caught. This script never resolves the sha —
-# it does not `git cat-file` anything in a checkout it refuses to write to — so
-# "is it a real commit" is a question it cannot answer, and pretending otherwise
-# would be a guard whose description is wider than its implementation.
+# 🔴 NAMED BLIND SPOT ONE: a well-formed token that is not a commit
+# (`zzzzzzzz`) round-trips perfectly and is NOT caught.
+#
+# 🔴 AND THE REASON GIVEN HERE FOR THREE ROUNDS WAS FALSE. It asserted that
+# this script performs no sha resolution at all in that checkout, on the
+# grounds that it will not write to one. It does resolve it: `gather_ledger`
+# runs
+# `git -C <that checkout> rev-list --count <anchor>..HEAD` and
+# `git -C <that checkout> log --numstat … <anchor>..HEAD`, both of which resolve
+# exactly this token in exactly that checkout, and READING is not writing. The
+# gap is real; the stated cause was not, and a false cause is what makes the
+# next round close a hole that was never there.
+#
+# THE TRUE REASON, which the code never stated: this script deliberately never
+# FETCHES. So the assembly checkout can legitimately be missing an object that
+# is perfectly present on the PR — a routine state, since it may be an
+# unfetched worktree of a branch someone else pushed — and a `cat-file` refusal
+# there would reject a CORRECT value. The downstream cost of leaving it open is
+# bounded and loud: `rev-list` exits 128 one round later and the ledger prints
+# COULD NOT MEASURE naming the command that failed.
+#
+# 🔴 NAMED BLIND SPOT TWO, and it is why `main` checks the INPUT separately:
+# this function compares the printed header LINE against a parse of that same
+# printed header LINE. `_EMITTED_AUDITED` is `re.M` + `$`; `parse_claims_blocks`
+# reads line by line. Both sides are line-oriented, so a NEWLINE inside the
+# value pushes content onto the next line where NEITHER side can see it and
+# they agree — a control built out of the step it doubts. Do not widen this
+# function to cover it; the input check does, before this runs.
 EMIT_REFUSAL_HEADER = "🔴 REFUSING TO EMIT an `audit-claims` block"
 
 # The RAW text after `audited=`, to end of line — deliberately NOT `\S+`, which
@@ -1935,10 +2031,14 @@ def build_parser():
                     help="the tip THIS round's audit read — written as the "
                          "`<from>` of the `--emit-claims` block. Round 1 has "
                          "no previous block to derive it from; without this, "
-                         "HEAD is ASSUMED and said so on stderr. ONE sha: no "
-                         "whitespace, no `..`, no placeholder — the emitted "
-                         "block is fed back through this script's own parser "
-                         "and a value that does not survive is REFUSED.")
+                         "HEAD is ASSUMED and said so on stderr. ONE sha, and "
+                         "exactly one token: any whitespace at all — a "
+                         "TRAILING NEWLINE included — is refused on the INPUT, "
+                         "because a newline moves content off the header line "
+                         "where the round trip below cannot see it. A value "
+                         "with `..` or a placeholder is refused too: the "
+                         "emitted block is fed back through this script's own "
+                         "parser and one that does not survive is REFUSED.")
     ap.add_argument("--claims-file",
                     help="read claims-block text from this file instead of the "
                          "PR's comments (offline/testing seam)")
@@ -2010,6 +2110,51 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             "BY CONSTRUCTION.",
             "",
             "  Pass the sha this round's audit actually read, or omit the flag.",
+        ]), file=err_stream)
+        return 4
+
+    # 🔴 ROUND 6 — THE ROUND TRIP IS STRUCTURALLY BLIND TO A NEWLINE, so the
+    # ONE character that moves content off the header LINE gets its own check
+    # on the INPUT, before any of that machinery runs.
+    #
+    # `emitted_block_reads_back_as_written` compares the printed header LINE
+    # against a parse of that same printed header LINE. Both sides are
+    # line-oriented (`_EMITTED_AUDITED` is `re.M` + `$`; `parse_claims_blocks`
+    # reads line by line), so anything pushed onto the NEXT line is invisible
+    # to both and they agree — a control built out of the step it doubts. The
+    # empty check above misses it too: `.strip()` is truthy for `aaaa1111\n`.
+    #
+    # Measured through `main()` at `3619fe68`: `--audited $'aaaa1111\n'` exited
+    # 0 and emitted ``audited=aaaa1111`` — the BARE round-1 spelling, `<to>`
+    # dropped on the floor and a stray `..<head>` line left in the body, with
+    # `parse_claims_blocks` reporting `malformed=[]`. Round 3 then reads
+    # `emit_anchor` = `aaaa1111`, and round 4 re-audits round 2's fixes on top
+    # of round 3's, one round downstream and in silence.
+    #
+    # 🔴 THE PREDICATE IS `split() != [value]`, NOT `len(split()) != 1`. The
+    # obvious spelling does NOT catch this: `'aaaa1111\n'.split()` is
+    # `['aaaa1111']` — length ONE — because `str.split()` with no argument
+    # discards empty fields. It misses a trailing newline, a trailing space and
+    # a trailing `\r` alike. Only comparing against the value ITSELF asks the
+    # question that matters: is this exactly one token with nothing around it?
+    #
+    # Deliberately independent of the round trip: it asks about the INPUT, the
+    # round trip asks about the printed BLOCK, and coupling them is the N3/Y7
+    # cascade round 5 measured and refused.
+    if args.audited is not None and args.audited.split() != [args.audited]:
+        print("\n".join([
+            f"{EMIT_REFUSAL_HEADER}: `--audited` was given a value carrying "
+            f"WHITESPACE ({args.audited!r}).",
+            "",
+            "  It must be exactly ONE whitespace-free token. A NEWLINE is the "
+            "dangerous one: it moves everything after it off the header LINE, "
+            "where neither this script's parser nor the emitted block's own "
+            "round-trip check can see it — the block degrades to the bare "
+            "`audited=<sha>` spelling, `<to>` is lost, and nothing downstream "
+            "reports it malformed.",
+            "",
+            "  Pass a single sha — `--audited abc1234`, not `--audited "
+            "\"$(some command)\"`, whose output ends in a newline.",
         ]), file=err_stream)
         return 4
 
