@@ -110,7 +110,7 @@ def host_label() -> str:
 # How much of the machine id `this_host()` prints. 🔴 A PREFIX, NEVER THE WHOLE
 # ID. `/etc/machine-id` is a stable, unique installation identifier, and
 # `this_host()` is a DISPLAY value: it lands on every `/analyze-service`,
-# `/handoff` and `/resume` run, in four rendered headers and four JSON payloads,
+# `/handoff` and `/resume` run, in four rendered headers and three JSON payloads,
 # and `/handoff` writes into `claudedocs/` — which is COMMITTED, in a PUBLIC
 # repo. Tool output also gets pasted into PR bodies routinely. None of the four
 # content gates screens for a machine id, so nothing downstream would catch it.

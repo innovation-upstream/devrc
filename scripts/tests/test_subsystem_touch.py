@@ -11963,6 +11963,27 @@ class TestTheStoreIsPerHost:
         hi = injected_machine_id
         monkeypatch.setenv("ASIB_HOST", "a-label-with-no-id")
         assert hi.host_label() == "a-label-with-no-id"
+        # 🔴 LITERAL BOUNDS, NOT THE CONSTANT UNDER TEST. An earlier revision of
+        # this test wrote `SYNTH_MACHINE_ID[: hi.MACHINE_ID_DISPLAY_CHARS]` and
+        # asserted only "not the WHOLE id", deriving its expectation from the
+        # very value it was supposed to bound — and nothing else in the repo
+        # references that constant. MEASURED: at 31 the identity carried 31 of
+        # 32 hex chars and the suite stayed GREEN; at 0 it returned a bare
+        # `nixos-`, identical on both machines, which is the exact defect this
+        # change exists to fix — and the suite stayed GREEN. So the numbers here
+        # are this test's own, and moving the constant outside them fails.
+        assert 8 <= hi.MACHINE_ID_DISPLAY_CHARS <= 16, (
+            f"MACHINE_ID_DISPLAY_CHARS is {hi.MACHINE_ID_DISPLAY_CHARS}. Below 8 "
+            "the two machines stop being distinguishable; above 16 this stops "
+            "being a prefix and starts being the identifier itself, in output "
+            "that reaches a PUBLIC repo."
+        )
+        suffix = hi.this_host().rsplit("-", 1)[-1]
+        assert len(suffix) == hi.MACHINE_ID_DISPLAY_CHARS, (
+            f"`this_host()` emitted a {len(suffix)}-char id segment but "
+            f"MACHINE_ID_DISPLAY_CHARS is {hi.MACHINE_ID_DISPLAY_CHARS} — the "
+            "constant and the output have come apart."
+        )
         expected_prefix = self.SYNTH_MACHINE_ID[: hi.MACHINE_ID_DISPLAY_CHARS]
         assert hi.this_host() == f"a-label-with-no-id-{expected_prefix}", (
             "`this_host()` did not join the machine-id PREFIX to the label. On a "
