@@ -308,7 +308,8 @@ deliberately — the shas and constants are the arc's only compact index):
    **Zero behaviour change, measured both ways.** `spend` is EXEMPT on purpose — see the
    open investigation below; G11 pins the exemption so a sweep cannot settle it.
    🔴 **The seam was one-sided: devrc documents its TTY default correctly in FIVE places
-   and even has a pty test for it (`tests/test_browser_cli_args.py:1150`), and carries
+   and even has a pty test for it
+   (`scripts/browser-bridge/tests/test_browser_cli_args.py:1150`), and carries
    ZERO instances of the wrong derivation (grepped, with a positive control).** The
    producer stated the condition; the consumer's summary dropped it. That is the shape
    to look for elsewhere — not a wrong fact, a **correct fact re-summarised without its
