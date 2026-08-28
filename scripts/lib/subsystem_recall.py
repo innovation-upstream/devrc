@@ -2914,7 +2914,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "READ-ONLY: it never writes to the store, and it never touches the network."
         ),
     )
-    p.add_argument("--repo", default=".", help="repo whose scope to read (default: cwd)")
+    # 🔴 "PATH" IS LOAD-BEARING IN THE HELP TOO. The old text said "repo", which
+    # is what invited `--repo datapacket-talos` — a bare name that silently
+    # becomes `$PWD/<name>`. The refusal explains it, but the flag's own
+    # self-description should not have set the trap.
+    p.add_argument(
+        "--repo",
+        default=".",
+        help="PATH to the repo whose scope to read — not a repo name (default: cwd)",
+    )
     p.add_argument("--scope", default=None, help="override the derived store scope")
     p.add_argument("--store", default=str(DEFAULT_STORE_ROOT), help="store root")
     p.add_argument(
@@ -3140,7 +3148,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         repo = Path(args.repo).resolve()
-        scope = args.scope if args.scope is not None else scope_for_repo(repo)
+        # `given=args.repo` is the RAW string, before `.resolve()` ate the
+        # cwd-join: a bare repo name is the mistake this guard exists for, and a
+        # message that shows only the resolved path cannot say where the prefix
+        # came from. `store_root` lets the refusal name the scope that IS there.
+        scope = (
+            args.scope
+            if args.scope is not None
+            else scope_for_repo(repo, store_root=args.store, given=args.repo)
+        )
         if args.search is not None:
             found = search(
                 args.store,
