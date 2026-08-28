@@ -154,9 +154,9 @@ independently (`/api/auth/me` → `E2E Owner`, id 1, tz `UTC`).
 `root.tsx` compares the profile timezone against the device timezone on boot and
 can open a **`fixed inset-0 z-[9999]` overlay** (`FeedbackModalRenderer.tsx:35`).
 It intercepts every click, so the page reads fine and every input op silently
-does nothing. ⚠ That renderer is **shared by ten `<FeedbackModal>` callers** — this
-modal is identified by its **title**, never by its z-index (see "`z-index: 9999`
-does NOT identify the timezone modal" below).
+does nothing. ⚠ That renderer is **shared by eleven `<FeedbackModal>` callers** —
+this modal is identified by its **title**, never by its z-index (see "`z-index:
+9999` does NOT identify the timezone modal" below).
 
 **Measured, both controls.** WITHOUT the opt-out: the modal fires — "Timezone
 Mismatch Detected / Your device timezone (America/Winnipeg) doesn't match…" — its
@@ -283,11 +283,12 @@ different depending only on which URL you entered at.
 ### 🔴 `z-index: 9999` does NOT identify the timezone modal
 
 An earlier revision of this file said a `z-9999` blocker "is **always** the timezone
-modal". **False, and it sends you to a remedy that cannot work.** `z-[9999]` +
-`pointer-events: auto` is the **shared** `FeedbackModalRenderer` backdrop
-(`FeedbackModalRenderer.tsx:35`) — the timezone modal (`root.tsx:334`) is just *one*
-of **ten** `<FeedbackModal>` callers. The others include the exact surfaces this file
-routes you to:
+modal". **False, and it sends you to a remedy that cannot work.** There are (at
+least) **two distinct z-9999 `pointer-events: auto` surfaces** in a browser tab.
+
+**(a) The shared `FeedbackModalRenderer` backdrop** (`FeedbackModalRenderer.tsx:35`).
+The timezone modal (`root.tsx:334`) is *one* of **eleven** `<FeedbackModal>` callers
+— the other ten include the exact surfaces this file routes you to:
 
 - `routes/user/vets/vet-view.tsx:1764` — `/user/vets/:id`, the landing route above
 - `routes/user/bookings/booking-checkout.tsx:88` and
@@ -297,14 +298,32 @@ routes you to:
   `my-pets-create.tsx`, `pages/contact.tsx`, `professional-report.tsx`,
   `PetOwnerHomeBookingCard.tsx`
 
-And a **separate** z-9999 blocker that is not a `FeedbackModal` at all:
-`components/UpdateApp.tsx:9` (`fixed inset-0 z-[9999]`, no `pointer-events-none`),
-rendered from `root.tsx:321`.
+**(b) The react-toastify container — and in a bridge walk this is the LIKELIER
+one.** `<ToastContainer>` is mounted unconditionally on every route
+(`root.tsx:161`), and `ReactToastify.css` sets `--toastify-z-index: 9999` (`:29`,
+applied `:52`) with **no `pointer-events` rule anywhere in the stylesheet** ⇒
+default `auto`. The axios interceptor fires `toast.error` on **any** API error
+(`app/lib/api/axios.tsx:151,192,197`), and vetr passes `closeOnClick={false}` +
+`autoClose={5000}` (`root.tsx:161-167`). So an API error parks a clickable
+`position: fixed`, top-right, z-9999 box over the page for 5s. Bounded, at least:
+`--toastify-container-width: fit-content` (`:15`, applied `:55`), so with no toast up
+the container is zero-size and intercepts nothing.
+
+⚠ **`UpdateApp.tsx:9` is `fixed inset-0 z-[9999]` with no `pointer-events-none`, but
+you will NEVER meet it in a browser** — `setUpdateStoreUrl` has exactly one call site
+(`root.tsx:245`) behind `if (!Capacitor.isNativePlatform()) return;` (`root.tsx:236`),
+plus `isProduction` and an outdated native build. And where it *does* fire it is an
+early `return` replacing the whole tree (`root.tsx:320-322`), not an overlay — so it
+cannot produce the "page reads fine, clicks do nothing" symptom at all. Listed only
+because an earlier revision of this file offered it as the non-`FeedbackModal`
+example; it is a phantom.
 
 🔴 **So read the modal's TITLE, never its z-index.** Only
 "Timezone Mismatch Detected" is cleared by `timezone_mismatch_dismissed`; a
-success/error `FeedbackModal` needs its own dismiss, and `UpdateApp` is a
-force-upgrade screen. What the splash row above *does* license is the one-way
+success/error `FeedbackModal` needs its own dismiss (`title` is a required prop and
+renders as plain text, `FeedbackModal.tsx:8` / `FeedbackModalRenderer.tsx:60`, so
+`innerText` reads it); a toast has no title row at all — check for
+`.Toastify__toast-container`. What the splash row above *does* license is the one-way
 inference: the splash is `pointer-events-none`, so whatever a hit-test returns, it
 is not the splash.
 
