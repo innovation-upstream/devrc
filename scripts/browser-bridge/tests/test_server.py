@@ -9568,6 +9568,26 @@ def _wait_closed(ext, tab_id, timeout=3.0):
     return False
 
 
+def _drain(srv, session="A"):
+    """🔴 PROVE THE OUTBOX WAS DRAINED PAST WHERE A REAP WOULD SIT.
+
+    Every "no reap happened" assertion below is a ZERO, and a zero is
+    indistinguishable from "the test looked too early" — the exact class this PR
+    has already tripped over four times. A wall-clock window does not fix it; it
+    just makes the vacuous pass load-dependent.
+
+    The outbox is FIFO. So dispatch a sentinel op through the same instance and
+    wait for its RESULT: if the sentinel came back, everything queued before it
+    has already been handed to the extension. A subsequent "no `close` was
+    dispatched" then means the reap was never enqueued, rather than not yet
+    picked up.
+    """
+    st, body = _cmd(srv, {"op": "text"}, session=session)
+    assert st == 200 and body["result"]["ok"] is True, (
+        f"drain sentinel failed ({st} {body}) — the negative assertions after it "
+        f"would be vacuous")
+
+
 def test_reported_orphan_is_reaped_by_the_server():
     """A DELIVERED `open` result carrying `orphanTabId` makes the server enqueue a
     `close` for that tab — the leak `reuse_tab_id`'s comment used to describe as
@@ -9618,7 +9638,9 @@ def test_an_abandoned_open_never_reaps_the_orphan():
         while time.monotonic() < end and 202 not in live:
             time.sleep(0.01)
         assert 202 in live, "control: the extension never actually ran the open"
-        # Now the real assertion: no reap, ever.
+        # Now the real assertion: no reap, ever. Drained first, so the zero is
+        # a fact about the server rather than about our timing.
+        _drain(srv)
         assert not _wait_closed(ext, 101, timeout=0.6), (
             "an abandoned open must NOT reap: nothing recorded the fresh tab as "
             "owned, so 101 is still this session's OWNED, LIVE tab")
@@ -9658,6 +9680,7 @@ def test_a_failed_open_never_reaps_the_orphan():
         assert body["result"]["data"]["orphanTabId"] == 101, (
             "control: the failure envelope really did carry the report the server "
             "must ignore")
+        _drain(srv)
         assert not _wait_closed(ext, 101, timeout=0.4)
         assert [c for c in ext.dispatched if c["op"] == "close"] == []
         assert live == {101}
@@ -9699,6 +9722,7 @@ def test_a_malformed_or_self_referential_orphan_report_is_refused(reported):
         # even polled, so it was empty either way. Two independent reasons the
         # test could not fail. Wait for a plausible round trip, then look at the
         # WHOLE list.
+        _drain(srv)
         assert not _wait_closed(ext, 202, timeout=0.4)
         closes = [c for c in ext.dispatched if c["op"] == "close"]
         assert closes == [], f"a refused report still enqueued {closes}"
@@ -9775,3 +9799,139 @@ def test_the_reap_close_is_inflight_while_it_runs_then_fully_released():
         assert st == 200 and body["result"]["ok"] is True
     finally:
         gate.set(); ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE REAP'S OWN LIFETIME AND CANCELLATION.
+#
+# A reap is the ONLY outbox entry with no submitter. Every other command is
+# withdrawn from the outbox by its abandoning submitter at `cmd_timeout`; this one
+# has nobody to do that. Two consequences, both reproduced before being fixed:
+#
+#   * it must EXPIRE. `instance_id` is stable per profile, so a Brave restart
+#     returns the SAME `Instance` while Chromium's tab ids restart at 1 — a
+#     long-queued `close` would then name a different, REAL tab. The correlation
+#     is adverse: a browser-wide stall is what produces a reap, and a full restart
+#     is the documented remedy for a stall.
+#   * it must be CANCELLABLE. `orphan != tid` is true only at ENQUEUE time, and
+#     `open` is not in TAB_SCOPED_OPS, so two concurrent opens from one session
+#     (which parallel agents sharing a session id really do produce) take no
+#     turnstile: a later `open` can healthily REUSE the tab an earlier one queued
+#     for reaping. The server would then close a tab it CURRENTLY OWNS.
+# --------------------------------------------------------------------------- #
+def test_re_owning_a_tab_cancels_the_reap_queued_for_it():
+    """🔴 The guard that made the reap safe is POINT-IN-TIME; the close runs later.
+
+    Driven at the registry, because the race needs the reap to sit in the outbox
+    across a second ownership record — which an HTTP-level test cannot pin
+    deterministically. The instance never polls, so nothing is dispatched and the
+    outbox itself is the observable.
+    """
+    reg = S.Registry()
+    # Register through the public path (one poll that times out immediately).
+    reg.poll("solo", "only", 0)
+    inst = list(reg._instances.values())[0]
+    okey = (inst.key, "A")
+
+    # open #1 owns 101; open #2 falls through to 202 and orphans 101.
+    with reg._cond:                       # `_locked` in the name is literal
+        reg._record_ownership_locked(
+            inst, "open", "A", None, {"ok": True, "data": {"tabId": 101}})
+        reg._record_ownership_locked(
+            inst, "open", "A", None,
+            {"ok": True, "data": {"tabId": 202, "orphanTabId": 101}})
+    queued = [c for c in inst.outbox if c["op"] == "close"]
+    assert [c["tabId"] for c in queued] == [101], (
+        "control: the reap really was queued")
+    assert reg.owners_snapshot()[okey] == 202
+
+    # …and now a CONCURRENT open healthily reuses 101 before the reap is picked up.
+    with reg._cond:
+        reg._record_ownership_locked(
+            inst, "open", "A", None, {"ok": True, "data": {"tabId": 101,
+                                                           "reused": True}})
+    assert reg.owners_snapshot()[okey] == 101
+    assert [c for c in inst.outbox if c["op"] == "close"] == [], (
+        "the queued reap must be WITHDRAWN — the session owns 101 again, and "
+        "closing it would strand the session on a dead id and, one op later, on "
+        "the operator's ACTIVE tab")
+    assert inst.reaps == {}, "the reap bookkeeping must be dropped with it"
+    assert inst.inflight == {}, "…including its inflight entry"
+
+
+def test_a_reap_that_outlives_its_window_is_dropped_not_dispatched():
+    """🔴 An EXPIRED reap must never reach the extension.
+
+    Past the window the tabId can no longer be trusted to name the same tab. The
+    injected clock jumps far past INFLIGHT_STALE_S between enqueue and pickup —
+    exactly the wedged-extension-then-Brave-restart shape.
+    """
+    t = {"now": 1000.0}
+    reg = S.Registry(clock=lambda: t["now"])
+    reg.poll("solo", "only", 0)
+    inst = list(reg._instances.values())[0]
+
+    with reg._cond:                       # `_locked` in the name is literal
+        reg._record_ownership_locked(
+            inst, "open", "A", None, {"ok": True, "data": {"tabId": 101}})
+        reg._record_ownership_locked(
+            inst, "open", "A", None,
+            {"ok": True, "data": {"tabId": 202, "orphanTabId": 101}})
+    assert [c["tabId"] for c in inst.outbox if c["op"] == "close"] == [101]
+
+    # A poll BEFORE the window closes still gets it — the control that makes the
+    # assertion below about EXPIRY rather than about the reap never existing.
+    t["now"] += S.INFLIGHT_STALE_S / 2
+    got = reg.poll("solo", "only", 0)
+    assert got is not None and got["op"] == "close" and got["tabId"] == 101
+
+    # Now the same again, but the extension is gone past the window.
+    with reg._cond:
+        reg._record_ownership_locked(
+            inst, "open", "A", None,
+            {"ok": True, "data": {"tabId": 303, "orphanTabId": 202}})
+    assert [c["tabId"] for c in inst.outbox if c["op"] == "close"] == [202]
+    t["now"] += S.INFLIGHT_STALE_S + 1
+    got = reg.poll("solo", "only", 0)
+    assert got is None, f"an expired reap was dispatched anyway: {got}"
+    assert list(inst.outbox) == [], "…and it must be removed, not left to retry"
+    # 🔴 THE DISPATCHED REAP IS STILL OUTSTANDING, AND THAT ASYMMETRY IS THE
+    # ASSERTION. An earlier draft here demanded `reaps == {}` and failed — which
+    # was the TEST being wrong, not the code: the 101 reap was handed to the
+    # extension and is legitimately awaiting its reply, so dropping its
+    # bookkeeping would lose the very entry that keeps the instance reading BUSY.
+    # Only the never-dispatched 202 entry may disappear.
+    assert [r["tab_id"] for r in inst.reaps.values()] == [101], (
+        "expiry must drop ONLY the entry it dropped from the outbox — the reap "
+        "already in flight is still outstanding")
+    assert len(inst.inflight) == 1, "…and keeps its inflight entry until it replies"
+
+
+def test_a_reap_reply_is_recognised_not_logged_as_an_unknown_id():
+    """`result_unknown_id` means "a reply for a command nobody knows about" — a
+    LOST-REPLY tell. A reap has no waiter by design, so before this it fell to
+    that branch and fired on every SUCCESSFUL reap, retiring the signal.
+
+    Asserted on the RETURN VALUE of deliver_result (True = we know this command),
+    which is what `_handle_result` branches on to choose between an ok response
+    and the `unknown_id` error.
+    """
+    reg = S.Registry()
+    reg.poll("solo", "only", 0)
+    inst = list(reg._instances.values())[0]
+    with reg._cond:                       # `_locked` in the name is literal
+        reg._record_ownership_locked(
+            inst, "open", "A", None, {"ok": True, "data": {"tabId": 101}})
+        reg._record_ownership_locked(
+            inst, "open", "A", None,
+            {"ok": True, "data": {"tabId": 202, "orphanTabId": 101}})
+    cid = next(iter(inst.reaps))
+
+    assert reg.deliver_result(cid, {"id": cid, "ok": True,
+                                    "data": {"closed": 101}}) is True, (
+        "a reap's own reply must be RECOGNISED — falling through to the "
+        "abandoned-command branch logs result_unknown_id on correct operation")
+    assert inst.reaps == {} and inst.inflight == {}
+    # A genuinely unknown id still reads as unknown — the control that proves the
+    # branch above did not simply make deliver_result answer True to everything.
+    assert reg.deliver_result("deadbeefdeadbeef", {"ok": True}) is False

@@ -731,26 +731,61 @@ test("open: the extension closes NO tab even when execute() has abandoned the op
                    + "later, on the operator's active tab");
 });
 
-// The op DOES still report the orphan on that abandoned path — harmlessly, since
-// the envelope is dropped. Asserted so nobody "tidies" the report into the same
-// abandonment check the close used to need: the report is inert without a
-// delivered result, which is exactly why it is safe to make unconditionally.
-test("open: the orphan is still REPORTED on the abandoned path (inert, not guarded)",
+// The op DOES still report the orphan on a GENUINELY ABANDONED op — harmlessly,
+// since the envelope is dropped. Asserted so nobody "tidies" the report behind
+// the same abandonment check the close used to need: the report is inert without
+// a delivered result, which is exactly why it is safe to emit unconditionally.
+//
+// 🔴 THIS TEST WAS VACUOUS IN ITS FIRST FORM AND AN AUDIT MEASURED IT. It called
+// `OPS.open()` directly, with the default `execMs` and no `execute()` wrapper, so
+// the op finished in ~20ms and NOTHING was abandoned — a duplicate of the
+// timeout-arm test above, under a name claiming coverage it did not have. The
+// mutant its own comment names (re-guard the emit with
+// `(Date.now() - startedAt) < loopTiming().execMs`) SURVIVED the whole file. It
+// must therefore observe the report on the far side of a real abandonment, which
+// means reading `open`'s return value AFTER execute() has already given up on it.
+test("open: the orphan is still REPORTED on a genuinely ABANDONED op (inert, not guarded)",
      { timeout: 4000 }, async (t) => {
   resetCalls();
   const realGet = chrome.tabs.get;
+  const realCreate = chrome.tabs.create;
   const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
   t.after(() => {
     chrome.tabs.get = realGet;
+    chrome.tabs.create = realCreate;
     globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
   });
-  globalThis.BROWSER_BRIDGE_LOOP_TIMING = { ...(realTiming || {}), reuseTabMs: 20 };
+  // Same 90/310/260 shape as the test above — create INSIDE execMs, whole op
+  // OUTSIDE it — so a re-anchored clock cannot pass by accident.
+  globalThis.BROWSER_BRIDGE_LOOP_TIMING = {
+    ...(realTiming || {}), reuseTabMs: 90, execMs: 310 };
   chrome.tabs.get = () => new Promise(() => {});
-  const out = await openWithin(
-    OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" }),
-    "open did not settle within 1s");
-  assert.equal(out.orphanTabId, TAB_ID);
-  assert.deepEqual(state.calls.tabsRemove, []);
+  // Hold onto the op's OWN promise so its resolved value is readable after
+  // execute() has abandoned it. execute() races the op; it does not cancel it, so
+  // this promise still settles — with whatever `open` decided to report.
+  let opPromise = null;
+  chrome.tabs.create = async (props) => {
+    state.calls.tabsCreate.push(props);
+    await new Promise((r) => setTimeout(r, 260));
+    return { id: FRESH_TAB_ID, url: (props && props.url) || "about:blank" };
+  };
+  const realOpen = OPS.open;
+  t.after(() => { OPS.open = realOpen; });
+  OPS.open = (cmd) => { opPromise = realOpen.call(OPS, cmd); return opPromise; };
+
+  const env = await execute({ op: "open", id: "inert", reuseTabId: TAB_ID,
+                             url: "https://civitai.com/" });
+  assert.equal(env.error, "op_timeout:open",
+               "control: this really IS the abandoned case");
+
+  const out = await opPromise;   // resolves ~260ms after execute() gave up
+  assert.equal(out.orphanTabId, TAB_ID,
+               "the report must be emitted UNCONDITIONALLY — putting it behind an "
+               + "abandonment check buys nothing (a dropped envelope is already "
+               + "inert) and would re-introduce a clock this file no longer needs");
+  assert.equal(out.tabId, FRESH_TAB_ID);
+  assert.deepEqual(state.calls.tabsRemove, [],
+                   "and still nothing is closed from inside `open`");
 });
 // `activate` op: foreground the tab (tabs.update{active} + windows.update{focused})
 // then bounded wait-for-load. Wiring only — the wait LOGIC is unit-tested in

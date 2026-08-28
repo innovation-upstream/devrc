@@ -1959,10 +1959,15 @@ per-session (multi-step **workflow**) isolation did not.
   sibling's tab being handed over was observed 2026-07-31). A re-`open` by one
   sibling whose probe times out therefore closes the tab the OTHER is mid-workflow
   on. That collision was previously benign; it is not any more.
-  ⚠ **The reclaim is not guaranteed.** It is a real `close` op that can fail or
-  be lost, and nothing counts how often. What IS structural is that it never fires
-  when the `open` result was not delivered — on those paths the old tab is still
-  owned and still usable, so closing it would be the worse error.
+  ⚠ **The reclaim is not guaranteed, and it is bounded on both sides.** It is a
+  real `close` op that can fail or be lost, and nothing counts how often. Three
+  things ARE structural: it never fires when the `open` result was not delivered
+  (on those paths the old tab is still owned and still usable, so closing it would
+  be the worse error); **re-owning a tab withdraws any reclaim queued for it**, so
+  a second `open` that healthily reuses the tab cancels the close; and a reclaim
+  that has not been picked up within `INFLIGHT_STALE_S` is **dropped rather than
+  dispatched**, because after a Brave restart the same tab id names a different
+  tab.
 - **Self-heal on a vanished owned tab.** If the user manually closes an owned
   background tab, the next tab-scoped op dispatches the stale tabId and the
   extension returns `owned_tab_gone` (ok:false). The server then **drops** that
