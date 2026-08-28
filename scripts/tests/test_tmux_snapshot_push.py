@@ -799,11 +799,12 @@ def test_the_unit_PATH_carries_every_binary_the_collector_needs():
     was the audit finding that got iproute2 removed, and removing gawk in the
     same sweep is what broke the ledger, because nothing here listed it.
 
-    ⚠ AND IT OVERSTATES ITSELF: it says RELATIONSHIP (unit PATH ⊇ what the child
-    needs), but the body checks a HAND-TYPED list of names. It pins what someone
-    remembered, not what the child calls — which is exactly how gawk went
-    missing while this test stayed green. Treat the list below as a ledger to
-    maintain, and re-measure by RUNNING the collector before removing an entry.
+    ⚠ AND THE NAME OVERSTATES THE BODY. "carries every binary the collector
+    needs" sounds like a RELATIONSHIP (unit PATH ⊇ what the child calls); the
+    body checks a HAND-TYPED list of names. It pins what someone remembered, not
+    what the child actually calls — which is exactly how gawk went missing while
+    this test stayed green. Treat the list below as a ledger to maintain, and
+    re-measure by RUNNING the collector before removing an entry.
     """
     src = HOME_NIX.read_text()
     marker = "systemd.user.services.tmux-snapshot-push"
