@@ -4187,7 +4187,13 @@ class TestTheDeployedEntrypoint:
         # discarded form after `settle` was fixed because `_eof_barriers`
         # accepted only `ast.Expr`/`ast.Assign` and FLAGGED the assert — the
         # guard structurally required the defect. That arm now exists.
-        assert out.wait_closed(), (
+        # 🔴 THE TIMEOUT IS PASSED EXPLICITLY, and the message below hardcodes
+        # it. Taking `Drained.wait_closed`'s default instead would couple this
+        # sentence to a constant declared 3800 lines away: retune that default
+        # and the message silently starts lying about how long it waited. The
+        # duplicated branch has to be kept in step with `settle` on every axis,
+        # and this was the one axis where it was not.
+        assert out.wait_closed(15.0), (
             f"the stream never reached EOF within 15s, so the ceiling below is "
             f"a snapshot again and the leak check is racing lines still in "
             f"flight — it holds {len(out.audit)} audit record(s) so far for 3 "
