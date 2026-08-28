@@ -2262,7 +2262,12 @@ class Registry:
             # What survives is a WEAKER residual, stated so nobody re-derives the
             # stronger claim from this block. ⚠ THIS LIST IS LOAD-BEARING AND HAS
             # BEEN INCOMPLETE ONCE — it is where the "what is still broken"
-            # answer is supposed to live, so add to it when you add a bound:
+            # answer is supposed to live, so add to it when you add a bound.
+            # 🔴 AND THERE IS A SECOND COPY: `REUSE_TAB_BUDGET_MS` in
+            # extension/protocol.js carries a narrower list (ways the ORPHAN
+            # survives; this one also covers over-closes). It was the copy missed
+            # last time precisely because nothing here said it existed — update
+            # both, or say why only one applies.
             #   * the reclaim is best-effort — a real `close` op that can fail or
             #     be lost, with no counter for how often;
             #   * a DIFFERENT orphan is still unreclaimed: if `chrome.tabs.create`

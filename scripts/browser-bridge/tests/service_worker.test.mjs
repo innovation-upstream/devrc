@@ -647,9 +647,16 @@ test("open reuse probe: a REJECTING probe reports NO orphan — the id is known 
   assert.deepEqual(state.calls.tabsRemove, []);
 });
 
-// The other two paths that reach `chrome.tabs.create`. Together with the two arms
-// above these enumerate every route through `open`, so "exactly one of them
-// reports an orphan" is a closed claim rather than a sampled one.
+// The other two routes through `open`. Together with the two arms above, these
+// four enumerate every route — reuse-hit, reuse-reject, reuse-timeout, and no
+// `reuseTabId` at all — so "exactly one of them reports an orphan" is a CLOSED
+// claim rather than a sampled one.
+//
+// ⚠ An earlier wording called these "the other two paths that reach
+// `chrome.tabs.create`". Only ONE of them does: a healthy reuse RETURNS before
+// the create (which is what `reused.reused === true` below asserts). The
+// load-bearing claim — that the four cases are exhaustive — was right; the
+// description of them was not.
 test("open: neither a healthy reuse nor a first open reports an orphan", async () => {
   resetCalls();
   const reused = await OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" });
