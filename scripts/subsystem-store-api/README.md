@@ -105,15 +105,38 @@ parse as no marker at all — a silently vanishing badge.
 | `500` + `X-Store-Status: internal-error` | a handler raised something nobody anticipated. The body is a **constant** — no exception text reaches the wire — the traceback goes to the pod log, and **the audit line is still written**. A metered request must never vanish from the audit trail; two defects in one audit round dropped the connection with no response and no record at all |
 
 🔴 **THE `500` BACKSTOP NEVER SENDS A *SECOND* RESPONSE.** A handler that raises
-*after* it has already answered — `_append_bullet` responds `200` and *then*
-audits — used to produce a complete `200` followed by a complete `500` on one
-connection. The `200` had advertised the socket as reusable, so a pooling proxy
-(Traefik does this by default) hands the trailing `500` to the **next** client on
-it: the response desync the request-body drain exists to prevent, arriving from
-the other direction. `_respond` now records that it has answered, and the
-backstop logs, audits and **closes** instead of answering twice. That case is
-audited as `status=internal-error-after-response`, distinct from the ordinary
-`internal-error` so the two are not conflated in Loki.
+*after* it has already answered — `_append_bullet` used to respond `200` and
+*then* audit — used to produce a complete `200` followed by a complete `500` on
+one connection. The `200` had advertised the socket as reusable, so a pooling
+proxy (Traefik does this by default) hands the trailing `500` to the **next**
+client on it: the response desync the request-body drain exists to prevent,
+arriving from the other direction. `_respond` now records that it has answered,
+and the backstop logs, audits and **closes** instead of answering twice. That
+case is audited as `status=internal-error-after-response`, distinct from the
+ordinary `internal-error` so the two are not conflated in Loki.
+
+🔴 **THE AUDIT LINE IS WRITTEN *BEFORE* THE RESPONSE, AND THE SINK IS LOCKED.**
+Log the decision, then act on it. Two things follow, and both are properties an
+operator reads the stream for:
+
+* **A sequential client's records are in request order.** They were not: the
+  response used to be written first, so request `N+1` could be accepted on a new
+  handler thread and reach the sink before request `N` did. Observed once in CI
+  as two audit lines emitted in the wrong order, then green on re-run — rare,
+  and real. Ordering is now structural: holding response `N` means line `N` is
+  already in the stream.
+* **Two concurrent requests cannot interleave their writes.** The default sink is
+  `print(line, flush=True)` — the record and the terminator are two writes on one
+  stream — so overlapping handlers could emit one line carrying two requests'
+  fields and one carrying none. A single process-wide lock is held across the
+  whole sink call.
+
+⚠ The price, because it is a real behaviour change: an audit sink that **raises**
+now does so before any byte is on the wire, so the request is answered `500`
+rather than served with no record. On a write that means a landed mutation can
+be reported as a `500`. Fail-closed is the right direction for a service whose
+reason to exist is a complete audit trail, but it is a direction, not a free
+win.
 
 The same backstop covers the **READ** dispatch. It used to cover writes only —
 an exception in `/recall`, `/search` or `/snapshot` dropped the connection with
