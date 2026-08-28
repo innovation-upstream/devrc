@@ -1492,3 +1492,123 @@ test("AGENT SURFACE PARTITION: every wire op is REACHABLE or a DECLARED exclusio
     `REVIEWED_AGENT_EXCLUSIONS citing it. Do NOT invent a rationale to make this ` +
     `green. [ops: ${undeclared.join(", ")}]`);
 });
+
+// --------------------------------------------------------------------------- //
+// `site_notes` — the agent's ONE structural blind spot, pinned in both halves.
+//
+// server.py's _annotate_site_notes sets `site_notes` on the ENVELOPE ROOT, while
+// summarizeResult reads `envelope.data`. So a registered host's flow notes never
+// reach the model. That is deliberate (the agent has no `read` tool, so a path is
+// an instruction it cannot follow) but it is a CAPABILITY GAP the caller has to
+// route around, which is why both the behaviour and its documentation are pinned.
+// Rationale: browser_tool_impl.mjs, above summarizeResult.
+// --------------------------------------------------------------------------- //
+
+// 🔴 REACHABLE, not DEFAULT — and the difference is a hole a mutant walked through.
+// `ALLOWED_OPS_DEFAULT` (13) is what the agent gets with no env override.
+// `OP_TO_SERVER` (14) is what it can be GIVEN: browser_tool_impl.mjs:159 keeps
+// `upload` in that map precisely so it "remains REACHABLE, but only via an explicit
+// BROWSER_AGENT_ALLOWED_OPS opt-in". Keyed on the default set, this guard did not
+// cover `upload` at all — a `site_notes` forward added to that branch passed the
+// FULL suite. This file already uses OP_TO_SERVER as its definition of reachable
+// (see the AGENT SURFACE PARTITION test), so use the same vocabulary here.
+//
+// 🔴 KEYS, NOT VALUES. OP_TO_SERVER maps the TOOL-facing name to the WIRE name
+// (`html` -> `getHtml`), and `summarizeResult` is called with the TOOL-facing one
+// (browser_tool_impl.mjs:1268 passes the caller's `op`). Iterating values feeds it
+// `getHtml`, which matches no branch and falls through to the terminal
+// `JSON.stringify(data)` — exercising a path the agent never takes while skipping
+// the `html` branch entirely. The spot-pin below caught exactly that.
+const AGENT_REACHABLE_OPS = [...Object.keys(OP_TO_SERVER)].sort();
+
+const SITE_NOTES_PATH = "reference/sites/example.test.md";
+const siteNotesEnvelope = () => ({
+  id: "cid", ok: true,
+  site_notes: SITE_NOTES_PATH,
+  data: {
+    url: "https://example.test/page", title: "T", domain: "example.test",
+    path: "/page", searchParams: {}, tabId: 4242,
+    text: "visible text", html: "<p>hi</p>", value: "v",
+    frames: [], clicked: "#a", typed: 3, key: "Enter",
+    woke: true, visibilityState: "visible", readyState: "complete",
+    selector: "#f", files: ["a.txt"],
+  },
+});
+
+test("SITE NOTES: no agent-reachable op forwards `site_notes` to the model", () => {
+  // Spot-pin, not just a count: a length floor alone cannot see an inventory that
+  // silently SHRANK past ops this guard is specifically about. `upload` is the
+  // opt-in one the previous revision of this test missed entirely.
+  for (const op of ["text", "html", "eval", "context", "whoami", "upload"]) {
+    assert.ok(AGENT_REACHABLE_OPS.includes(op),
+      `op inventory lost \`${op}\` — this guard would silently stop covering it. ` +
+      `[inventory: ${AGENT_REACHABLE_OPS.join(",")}]`);
+  }
+  const leaked = [];
+  for (const op of AGENT_REACHABLE_OPS) {
+    const out = String(summarizeResult(op, siteNotesEnvelope(), {}, null));
+    // 🔴 PER-OP LIVENESS, inside the loop. Without it a mutant that returns "" for
+    // every op BUT the one the positive control probes leaves 13 of 14 assertions
+    // vacuous while all three of these tests stay green — measured, round 1 audit.
+    // A control at the END of the list cannot cover the items before it; this can.
+    assert.ok(out.length > 0,
+      `summarizeResult("${op}") returned EMPTY — its \`site_notes\` check below is ` +
+      `vacuous, so a leak on this op would go unseen. Fix the summarizer, not this ` +
+      `assertion.`);
+    if (out.includes("site_notes") || out.includes(SITE_NOTES_PATH)) leaked.push(op);
+  }
+  assert.deepEqual(leaked, [],
+    `op(s) now forward \`site_notes\`: ${leaked.join(", ")}. If that is INTENDED ` +
+    `(the agent gained a way to read the file), delete this test AND the ` +
+    `\`· **site-noted**\` clause in SKILL.md's FIRST DECISION — leaving the clause ` +
+    `standing would tell every caller to route around a gap that no longer exists.`);
+});
+
+// 🔴 POSITIVE CONTROL for the test above: it proves the harness can OBSERVE a
+// forwarded field at all, so a sweep of "drops" is a measurement and not a
+// tautology. Scope it honestly — this control is ONE op. It cannot speak for the
+// others, which is why per-op liveness is asserted inside the loop above rather
+// than inferred from here (a `summarizeResult` empty for every op but `context`
+// passes this control while leaving the rest of the sweep vacuous — measured).
+test("SITE NOTES positive control: the same harness DOES observe a forwarded field", () => {
+  const out = String(summarizeResult("context", siteNotesEnvelope(), {}, null));
+  assert.ok(out.includes("example.test"),
+    `the harness cannot see a field summarizeResult really does forward ` +
+    `(context.domain), so its \`site_notes\` zero is meaningless: ${out}`);
+  assert.ok(!out.includes(SITE_NOTES_PATH),
+    "and it still must not carry the site_notes PATH");
+});
+
+// 🔴 A guard on WORDS is walkable by REWORDING, so this pins the WHOLE normalised
+// sentence rather than a keyword. A cosmetic reword fails here — pay it; the point
+// is that the caller-facing warning cannot silently decay into something weaker.
+// No trailing list separator: pinning one would pin the sentence's POSITION too,
+// so an innocuous reordering elsewhere in the paragraph would read as a removal.
+const SKILL_SITE_NOTED_CLAUSE =
+  "It also never sees `site_notes` — brief those flows in yourself.";
+
+// 🔴 SCOPED TO THE SECTION THE TEST NAMES, not the whole file. A whole-file
+// substring stays green when the sentence is MOVED — right words, wrong place,
+// which is a near neighbour of the placement defect this PR's round 1 already
+// hit once. The warning only does its job where the agent/direct call is made.
+function skillFirstDecisionSection() {
+  const skill = readBB("SKILL.md");
+  const start = skill.indexOf("## FIRST DECISION");
+  assert.ok(start !== -1,
+    "SKILL.md has no `## FIRST DECISION` heading — this guard cannot locate the " +
+    "section it exists to check, so it must fail rather than pass vacuously.");
+  const after = skill.indexOf("\n## ", start + 1);
+  return skill.slice(start, after === -1 ? undefined : after);
+}
+
+test("SITE NOTES: SKILL.md's FIRST DECISION still warns the caller", () => {
+  const normalised = skillFirstDecisionSection().replace(/\s+/g, " ");
+  assert.ok(normalised.includes(SKILL_SITE_NOTED_CLAUSE),
+    `SKILL.md no longer carries the site-noted clause verbatim. The agent is ` +
+    `STILL blind to \`site_notes\` (the test above proves it), so a caller reading ` +
+    `only SKILL.md would now dispatch the agent at a registered host and lose that ` +
+    `site's flows. NOTE this is scoped to the \`## FIRST DECISION\` section — if the ` +
+    `sentence still exists but MOVED, that is this failure, and moving it back is ` +
+    `the fix. Restore the clause, or — if the gap was actually closed — change ` +
+    `both tests together. Expected: ${JSON.stringify(SKILL_SITE_NOTED_CLAUSE)}`);
+});

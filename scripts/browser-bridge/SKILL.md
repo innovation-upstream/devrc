@@ -39,7 +39,8 @@ KNOW something from it → agent. Ambiguous → agent first: taking over is chea
 agent-first wins even at a low success rate.
 
 🔴 The AGENT's auto-`wake` covers a hidden `text`/`html` read but **never `eval`/`js`** — so
-ASSERT a non-zero content count in any `js` measurement. Result handling
+ASSERT a non-zero content count in any `js` measurement. It also never sees
+`site_notes` — brief those flows in yourself. Result handling
 (`blocked`/`partial`), why thin `evidence` is NOT protection, and the
 `--allow-domains` guardrail → `reference/agent.md`.
 
