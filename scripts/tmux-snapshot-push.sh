@@ -268,7 +268,7 @@ case "$HTTP" in
     log "server at $API_URL has no /api/tmux/snapshot route (HTTP 404) — it predates the read model; deploy the server first"
     exit 5
     ;;
-  30[0-9]|3[1-9][0-9])
+  30[0-35-9]|3[1-9][0-9])
     # 🔴 304 is EXCLUDED from this arm on purpose — it is "not modified", not a
     # redirect, and telling an operator to re-point CLAWGATE_API_URL would send
     # them the wrong way entirely. It falls to the generic arm below, which
