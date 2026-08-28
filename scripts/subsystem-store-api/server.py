@@ -510,7 +510,17 @@ LINE_BREAK_CHARS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 # by the next character nobody thought of — the exact failure the two-character
 # newline check above already demonstrated. `Cs` (lone surrogates, reachable
 # through a JSON `\ud800` escape) and `Co` (private use) are included for the
-# same reason. `Cn` (unassigned) is NOT: it would refuse whatever the running
+# same reason.
+#
+# 🔴 `Cs` IS LOAD-BEARING BEYOND THIS FUNCTION AND MUST NOT BE DROPPED AS
+# "defensive". It is the ONLY thing keeping a lone surrogate out of a stored
+# bullet, and `_append_bullet`'s duplicate branch echoes a STORED bullet back on
+# the wire — see the `encode_entry_text` note there, whose earlier reasoning
+# ("the body is decoded `strict`, so it holds no surrogates") was measured FALSE:
+# `json.loads('"\ud800"')` yields one regardless of the decode. This clause is
+# what makes that note's conclusion true.
+#
+# `Cn` (unassigned) is NOT included: it would refuse whatever the running
 # Python's Unicode tables have not caught up with, which is a refusal that
 # changes with the base image.
 #
@@ -2529,6 +2539,9 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
     _visible_scopes: "tuple[str, ...] | None" = ()
     # The matched credential's name, for the audit line. `-` until one matches.
     _identity: str | None = None
+    # 🔴 HAS THIS REQUEST ALREADY PUT A RESPONSE ON THE WIRE? Set by `_respond`
+    # and read by `_backstop`, which must never send a second one. See both.
+    _responded: bool = False
 
     # --- plumbing ---------------------------------------------------------------
 
@@ -2543,6 +2556,73 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         # second, differently-shaped one that nobody reads.
         return
 
+    def handle_one_request(self) -> None:
+        """🔴 THE ONE PLACE `_responded` IS CLEARED, AND THAT IS WHY IT IS HERE.
+
+        This handler object is REUSED for every request on a keep-alive
+        connection, so a per-request flag left set would make the backstop
+        believe request N+1 had already answered and swallow its 500. Clearing it
+        in each entry point instead (`_handle`, `_write`, `send_error`) would be
+        four copies of one rule, and the fourth — whichever entry point is added
+        next — is the one that would be forgotten. `handle_one_request` is
+        upstream of ALL of them, including the `send_error` calls `parse_request`
+        makes before `self.path` even exists.
+        """
+        self._responded = False
+        super().handle_one_request()
+
+    def _backstop(self, path: str) -> None:
+        """Turn an unhandled handler exception into an answer — or, if one has
+        already gone out, into a LOG ENTRY AND NOTHING ELSE.
+
+        🔴 A SECOND RESPONSE ON ONE CONNECTION IS A DESYNC, NOT A COURTESY. The
+        first version of this backstop called `_respond(500, …)` unconditionally,
+        and `_append_bullet` answers `200` and THEN audits — so anything raising
+        after that `_respond` (a broken audit sink, a full disk on stderr, or
+        simply the next statement somebody adds below it) put a complete `200`
+        and a complete `500` on the same socket. Worse than the usual case: the
+        `200` has already advertised the connection as reusable, so a pooling
+        proxy hands the trailing `500` to the NEXT client on it. That is exactly
+        the response-desync `_drain_body`'s docstring exists to prevent,
+        reintroduced by the guard added to close a different hole.
+
+        So the rule is structural rather than a promise that no statement will
+        ever follow a `_respond`: ask whether bytes have gone out, and if they
+        have, close the connection and say so in the log only.
+
+        🔴 THE AUDIT IS THE LAST THING AND IS ITSELF GUARDED. "A metered request
+        must never vanish from the audit trail" is the point of this function,
+        but if the sink is what raised — the one production-reachable route to
+        the already-responded arm — calling it again re-raises out of
+        `do_POST`, past `handle_one_request`, and the traceback the operator
+        needs is replaced by socketserver's. Print, then try; a sink that cannot
+        record cannot be made to.
+        """
+        traceback.print_exc(file=sys.stderr)
+        already = self._responded
+        if already:
+            # Nothing more may be written. Do not reuse this connection either:
+            # the request ended in an unknown state, which is the same reason
+            # `_respond` closes on every non-200.
+            self.close_connection = True
+        else:
+            # The BODY IS A CONSTANT and carries no exception text. This is
+            # internet-reachable; an exception string names paths, values and
+            # types, and would be a new leak channel opened by the very guard
+            # meant to close one. The traceback goes to the pod log only.
+            self._respond(
+                500,
+                b"internal error\n",
+                headers={"X-Store-Status": "internal-error"},
+            )
+        try:
+            self._audit(
+                path, 500,
+                "internal-error-after-response" if already else "internal-error",
+            )
+        except Exception:  # noqa: BLE001 — see the docstring
+            traceback.print_exc(file=sys.stderr)
+
     def _respond(
         self,
         code: int,
@@ -2551,6 +2631,13 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         content_type: str = "text/plain; charset=utf-8",
         headers: dict[str, str] | None = None,
     ) -> None:
+        # 🔴 SET FIRST, BEFORE A SINGLE BYTE GOES OUT, AND SET HERE SO EVERY
+        # CALLER GETS IT. Once `send_response` has run, bytes are on the wire and
+        # a SECOND complete response on the same connection is a desync — the
+        # very class `_drain_body` exists to prevent, arriving from the other
+        # direction. A partial write counts too: whatever the peer has already
+        # read cannot be unsaid, so the flag is set before the write, not after.
+        self._responded = True
         if code != 200:
             # 🔴 A REJECTED REQUEST NEVER KEEPS ITS CONNECTION. Belt to
             # `_drain_body`'s braces: if framing was ever mis-read, the socket
@@ -2790,12 +2877,26 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         path = self._request_path()
         if path is None:
             return
+        # 🔴 THE ROUTE IS LOOKED UP BEFORE THE BODY IS READ, AND THAT ORDER IS
+        # THE POINT. `_write_route` is a pure function of `self.command` and
+        # `path` — both known here — so nothing is lost by asking early, and what
+        # is gained is that only a request with somewhere to PUT a body retains
+        # one. See `keep=` below.
+        route = self._write_route(path)
         # 🔴 READ BEFORE AUTH, exactly as the drain did. The body has to leave the
         # socket whether or not the request is going to be served, or an
         # unauthenticated POST desynchronises the connection — see
-        # `_consume_body`. Holding the bytes costs at most `MAX_DRAIN_BYTES`,
-        # which is the bound the drain already enforced.
-        framed, body = self._consume_body(keep=True)
+        # `_consume_body`.
+        #
+        # 🔴 BUT `keep=` IS THE ROUTE, NOT `True`. Retaining is what costs
+        # memory; draining is what closes the desync, and every request is
+        # drained either way. `keep=True` unconditionally held up to
+        # `MAX_DRAIN_BYTES` per in-flight request for callers that could never
+        # reach a handler — an UNAUTHENTICATED `POST /api/v1/recall/<scope>`,
+        # whose only possible answer is the 405 tail below, buffered a megabyte
+        # first. Now a request with no write row keeps nothing, and only the
+        # bytes a handler is actually going to read are held.
+        framed, body = self._consume_body(keep=route is not None)
         if not self._identify_and_meter(path):
             return
         try:
@@ -2818,7 +2919,6 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             self._refuse(path, self._count_failure(self.limiter, self._client_ip))
             return
 
-        route = self._write_route(path)
         if route is not None:
             handler_name, parts, arity, tail_len = route
             if record.is_legacy:
@@ -2880,7 +2980,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             middle = parts[1 : arity - tail_len]
             try:
                 getattr(self, handler_name)(*middle, body, path)
-            except Exception:  # noqa: BLE001 — deliberate backstop, see below
+            except Exception:  # noqa: BLE001 — deliberate backstop, see `_backstop`
                 # 🔴 A METERED REQUEST MUST NEVER VANISH FROM THE AUDIT TRAIL.
                 # An unhandled exception here drops the connection with no
                 # response, no status header and NO AUDIT LINE — the mirror image
@@ -2899,17 +2999,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 # `Exception`, NOT `BaseException`: `KeyboardInterrupt` and
                 # `SystemExit` must still terminate the process.
                 #
-                # The BODY IS A CONSTANT and carries no exception text. This is
-                # internet-reachable; an exception string names paths, values and
-                # types, and would be a new leak channel opened by the very guard
-                # meant to close one. The traceback goes to the pod log only.
-                traceback.print_exc(file=sys.stderr)
-                self._respond(
-                    500,
-                    b"internal error\n",
-                    headers={"X-Store-Status": "internal-error"},
-                )
-                self._audit(path, 500, "internal-error")
+                # 🔴 AND IT GOES THROUGH `_backstop`, WHICH IS SHARED WITH THE
+                # READ DISPATCH. The answer must not be a SECOND response — the
+                # handler above may already have sent one — and "a metered
+                # request must never vanish" says nothing about reads versus
+                # writes, so the read router uses the identical helper.
+                self._backstop(path)
             return
 
         # 🔴 THE UNCHANGED TAIL. `read-only` is a claim about THIS ROUTE, not
@@ -3235,6 +3330,34 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                         *(parts[1:arity]), params
                     )
                     return
+        except UnicodeError:
+            # 🔴 A BADLY-NAMED FILE IS A STORE-SIDE PROBLEM, NOT A CALLER ERROR,
+            # AND USED TO BE BLAMED ON THE CALLER. `UnicodeEncodeError` is a
+            # `ValueError`, so a single legacy byte in a filename — `café.md`
+            # written by a non-UTF-8 locale — reached the clause below and
+            # answered `400 bad request: 'utf-8' codec can't encode character
+            # '\udce9' …`: the caller told it had sent something wrong when it
+            # had sent nothing wrong, and the internal codec message echoed onto
+            # the wire. Measured on `/recall/<scope>`, where the surrogate rides
+            # the rendered report into `_serve_report`'s encode.
+            #
+            # The four-state doctrine's answer for "I could not look" is a 503,
+            # and this is one: the store was NOT read, and the caller cannot fix
+            # it by asking differently. `UnicodeError`, not `UnicodeEncodeError`
+            # — a decode that fails over store bytes is the same statement about
+            # the same store.
+            #
+            # The SENTENCE IS A CONSTANT. The codec's own message names the
+            # offending code point and its position, which is a fact about a
+            # file the caller may not be allowed to know exists.
+            traceback.print_exc(file=sys.stderr)
+            self._respond(
+                503,
+                b"store unreadable: an entry name or body is not valid UTF-8\n",
+                headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
+            )
+            self._audit(path, 503, "store-unreachable")
+            return
         except ValueError as exc:
             # A caller error, and the caller is authenticated, so it may be told
             # what it did wrong.
@@ -3253,6 +3376,18 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
             )
             self._audit(path, 503, "store-unreachable")
+            return
+        except Exception:  # noqa: BLE001 — deliberate backstop, see `_backstop`
+            # 🔴 THE READ DISPATCH VANISHED THE SAME WAY THE WRITE ONE DID, AND
+            # READS ARE THE BUSIER PATH. The write dispatch got a backstop first;
+            # this one did not, so an unhandled exception in `_recall`,
+            # `_search` or `_snapshot` dropped the connection with no response
+            # and — measured — ZERO audit lines, on a request that had already
+            # been metered and authenticated. The justification the write
+            # backstop carries ("a metered request must never vanish from the
+            # audit trail") does not distinguish reads from writes, so neither
+            # does the guard: same helper, same already-responded rule.
+            self._backstop(path)
             return
 
         self._respond(404, b"no such endpoint\n", headers={"X-Store-Status": "no-route"})
@@ -3743,8 +3878,22 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             #
             # ⚠ HONESTLY LABELLED: no input is known to reach it. A stored
             # bullet holding an undecodable byte cannot hash-equal any body a
-            # client can send (the body is decoded `strict`, so it holds no
-            # surrogates, and the byte survives `bullet_content` into the hash).
+            # client can send, and the reason is 🔴 `Cs` IN
+            # `_FORBIDDEN_CATEGORIES` — WHICH IS THEREFORE LOAD-BEARING HERE,
+            # NOT MERELY DEFENSIVE, AND MUST NOT BE REMOVED ON THE STRENGTH OF
+            # THIS COMMENT.
+            #
+            # 🔴 CORRECTION — the reason this note used to give was FALSE. It
+            # said the body "is decoded `strict`, so it holds no surrogates".
+            # Measured false: `json.loads('"\\ud800"')` yields a LONE SURROGATE
+            # whatever handler the raw bytes were decoded with, because the
+            # escape is plain ASCII on the wire and JSON expands it afterwards.
+            # The conclusion survives only because `_bullet_request_problem`
+            # refuses category `Cs` before any such text reaches a hash — so the
+            # guard doing the work is the category set, and a future reader
+            # reasoning from the old premise would delete it thinking the decode
+            # covered them.
+            #
             # This is the codec rule applied uniformly, NOT regression coverage,
             # and it is not counted as any.
             encode_entry_text(line + "\n"),

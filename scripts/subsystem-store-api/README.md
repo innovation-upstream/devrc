@@ -104,6 +104,23 @@ parse as no marker at all — a silently vanishing badge.
 | `422` | the entry has no `## Nuance / work-history` heading |
 | `500` + `X-Store-Status: internal-error` | a handler raised something nobody anticipated. The body is a **constant** — no exception text reaches the wire — the traceback goes to the pod log, and **the audit line is still written**. A metered request must never vanish from the audit trail; two defects in one audit round dropped the connection with no response and no record at all |
 
+🔴 **THE `500` BACKSTOP NEVER SENDS A *SECOND* RESPONSE.** A handler that raises
+*after* it has already answered — `_append_bullet` responds `200` and *then*
+audits — used to produce a complete `200` followed by a complete `500` on one
+connection. The `200` had advertised the socket as reusable, so a pooling proxy
+(Traefik does this by default) hands the trailing `500` to the **next** client on
+it: the response desync the request-body drain exists to prevent, arriving from
+the other direction. `_respond` now records that it has answered, and the
+backstop logs, audits and **closes** instead of answering twice. That case is
+audited as `status=internal-error-after-response`, distinct from the ordinary
+`internal-error` so the two are not conflated in Loki.
+
+The same backstop covers the **READ** dispatch. It used to cover writes only —
+an exception in `/recall`, `/search` or `/snapshot` dropped the connection with
+no response and **zero** audit lines, on a request that had already been metered
+and authorised. "A metered request must never vanish from the audit trail" does
+not distinguish reads from writes, and reads are the busier path.
+
 Appends are **commutative and idempotent**: two writers appending different
 bullets to one entry both survive (the read-modify-write is under an exclusive
 lock on a side file, `.<entry>.md.lock`, invisible to every walker), and
@@ -207,6 +224,18 @@ store and found nothing → `200` + `X-Store-Status: scope-empty`. Read nothing 
 all → `503` + `X-Store-Status: store-unreachable`, carrying the reader's own
 "this is NOT 'nothing recorded yet'" sentence. A `200` is a claim the store was
 read, and only the first of those can make it.
+
+🔴 **An entry whose NAME is not valid UTF-8 is a `503`, not a `400`.** One legacy
+byte in a filename — `café.md` written under a non-UTF-8 locale — rides a
+surrogate into the rendered digest, and the encode raises `UnicodeEncodeError`,
+which is a `ValueError`. It therefore used to fall through the caller-error
+clause and answer `400 bad request: 'utf-8' codec can't encode character
+'\udce9' in position …`: the caller blamed for a store-side problem it cannot
+fix, and the codec's own message — which names the offending code point and its
+position in a file the caller may not be allowed to know exists — echoed onto the
+wire. It is now `503` + `X-Store-Status: store-unreachable` with a **constant**
+sentence. Measured on `/recall`; `/snapshot` was **not** affected, because
+`tarfile` encodes member names with `surrogateescape`.
 
 🔴 **One hostile FILE no longer costs the whole store.** The index loader
 classifies each `*.md` candidate BEFORE opening it, and REFUSES these kinds —
