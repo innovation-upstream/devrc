@@ -13868,13 +13868,22 @@ def test_the_SINK_call_is_inside_the_lock_not_beside_it():
     # keeps the mutant syntactically valid whatever the body holds.
     src = SERVER_PATH.read_text()
     lines = src.splitlines(keepends=True)
-    audit = next(
+    # 🔴 `audit_fn`, NOT `audit`. This binds an AST FunctionDef, but
+    # `_raw_audit_reads` flags the NAME — deliberately, since it cannot tell an
+    # audit-record read from anything else spelled that way — so a local called
+    # `audit` here makes this a FALSE OFFENDER in
+    # `test_no_test_INDEXES_a_live_audit_list`. MEASURED: it did, in BOTH gate
+    # tiers, on that test. What missed it was checking the edit with a `-k`
+    # filter that excluded the seam guard — a subset run is a claim about the
+    # subset. Renamed rather than widening the guard: the guard is right that a
+    # `test*` function should not carry a bare `audit` Load.
+    audit_fn = next(
         node for node in ast.walk(ast.parse(src))
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name == "_audit"
     )
     blocks = [
-        node for node in ast.walk(audit)
+        node for node in ast.walk(audit_fn)
         if isinstance(node, (ast.With, ast.AsyncWith))
         and any(
             isinstance(item.context_expr, ast.Attribute)
