@@ -308,16 +308,30 @@ def _git_raw(cwd: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.Co
     legislates against — one unreadable row is not a reason to abandon the
     other 750.
 
-    🔴 THIS FIXES ONE CALL, NOT THE CLASS — and the class is NOT confined to
-    `-z` callers, which an earlier wording of this docstring implied. MEASURED:
-    `git worktree list --porcelain` emits the worktree PATH raw and unquoted
-    regardless, so a worktree whose DIRECTORY NAME holds an undecodable byte
-    still takes the whole scan down through `list_worktrees` — identically on
-    `origin/main`, so it is pre-existing here and not this change's doing.
-    Tracked as issue #944 rather than widened into the PR that added this
-    helper; converting the porcelain parser to bytes touches the core scan path
-    and wants its own tests. Do not read this helper as evidence the abort
-    class is closed.
+    🔴 THE CLASS IS NOT CONFINED TO `-z` CALLERS, which an earlier wording of
+    this docstring implied. #944 closed three more sites, and only ONE of them
+    was the one that issue named:
+
+        `worktree list --porcelain`   the path, raw and unquoted — `core.
+                                      quotePath` does not apply to it
+        `rev-parse --git-path`        ANSWERS with a path we never supplied:
+                                      `…/worktrees/<DIRECTORY NAME>/modules`
+        `worktree remove` (stderr)    git names the path back at us when it
+                                      refuses — the reporting arm was the abort
+
+    The second is the one worth remembering: fixing only the porcelain arm MOVED
+    the abort to it rather than removing it, under default git config, on a
+    line `execute_removals` re-checks MID-REMOVAL. Ask what a call ANSWERS with,
+    not only what you passed it.
+
+    🔴 STILL OPEN, MEASURED, NOT FIXED HERE: with `core.quotePath=false` set on
+    a host, `git status --porcelain=v1` (`worktree_dirty`) and `git diff
+    --name-only` (`landing_signals` / `_paths_differ`) both emit raw path bytes
+    and both abort. #944 deliberately stopped short of them: the diff arm is the
+    one that decides DEAD, wants its own fixture and its own audit, and a fix to
+    `status` ALONE buys nothing observable — the scan would still die in the
+    diff arm — while reading as coverage. Do not read this helper, or the sites
+    that use it, as evidence the abort class is closed.
     """
     return subprocess.run(
         ["git", "--no-optional-locks", "-C", str(cwd), *args],
@@ -337,6 +351,20 @@ def _printable(raw: bytes) -> str:
     uses `os.fsdecode` on the same bytes.
     """
     return raw.decode("utf-8", "replace")
+
+
+def _printable_path(p) -> str:
+    """`_printable` for something ALREADY decoded with surrogateescape.
+
+    A `Path` built from `os.fsdecode` holds lone surrogates, and every one of
+    them is a `UnicodeEncodeError` waiting at the next `print()`. Round-tripping
+    through `os.fsencode` recovers the original bytes so `_printable` can render
+    them, which is the only way to name such a path in a message. One helper
+    rather than the expression open-coded at each site: the rule is "display and
+    filesystem access are different decodings", and a rule spelled at N sites is
+    wrong at N-1 of them.
+    """
+    return _printable(os.fsencode(p))
 
 
 def _git_ok(cwd: Path, *args: str) -> "str | None":
@@ -400,26 +428,59 @@ def discover_repos(roots: "list[Path]", depth: int) -> "list[Path]":
     return sorted(found.values(), key=str)
 
 
-def parse_worktree_porcelain(text: str) -> "list[dict]":
+def parse_worktree_porcelain(data: bytes) -> "list[dict]":
     """Parse `git worktree list --porcelain` into one dict per worktree.
 
     Blocks are blank-line separated; the FIRST block is the main worktree.
     Attribute lines are `key` or `key value`.
+
+    🔴 BYTES IN — see `_git_raw`, and #944. Git emits the worktree PATH on this
+    call RAW and UNQUOTED: `core.quotePath` does not apply to it, MEASURED by
+    running the command with the setting on and off and comparing the output
+    BYTE FOR BYTE (identical). So the strict-utf-8 `_git` this used to be read
+    through took the ENTIRE scan down — `UnicodeDecodeError` raised inside
+    `subprocess.run`, before `list_worktrees` could see a thing, with no `try:`
+    between there and `sys.exit(main())` — on one worktree whose DIRECTORY NAME
+    held an undecodable byte. 800 classifiable rows, zero printed. That is the
+    failure `is_dir`'s docstring legislates against.
+
+    🔴 EVERY ROW CARRIES THE PATH TWICE, ON PURPOSE. Display and filesystem
+    access need DIFFERENT decodings and using one for both is how the abort
+    comes back — #935 round 3 measured both directions:
+
+        `path`     `_printable`, U+FFFD. What the report prints and what JSON
+                   serialises. NEVER used for I/O: U+FFFD sent to the
+                   filesystem names nothing and the worktree is never found.
+        `path_fs`  `os.fsdecode`, surrogateescape. What reaches the filesystem
+                   and git's argv. NEVER printed: a lone surrogate raises
+                   `UnicodeEncodeError` at `print()`, which MOVES the abort
+                   from git's output to the report instead of removing it.
+
+    `path` is the reported field and `path_fs` the derived one round THIS way
+    because the failure modes are not symmetric: a display site that forgets to
+    convert CRASHES, while a filesystem site that forgets degrades to
+    `cannot-tell` — the tool's own designed degradation, and never a removal.
     """
     rows: list[dict] = []
     cur: "dict | None" = None
-    for raw in text.splitlines():
-        line = raw.rstrip("\n")
+    for raw in data.splitlines():
+        line = raw.rstrip(b"\n")
         if not line.strip():
             if cur is not None:
                 rows.append(cur)
                 cur = None
             continue
-        key, _, value = line.partition(" ")
+        key_raw, _, value_raw = line.partition(b" ")
+        # Keys are git's own ASCII vocabulary; values other than the path are
+        # display-only (a ref name, a hex sha, a lock reason), so they take the
+        # lossy decoding and can never carry a surrogate into `print()`.
+        key = _printable(key_raw)
+        value = _printable(value_raw)
         if key == "worktree":
             if cur is not None:
                 rows.append(cur)
-            cur = {"path": value, "head": None, "branch": None, "detached": False,
+            cur = {"path": value, "path_fs": os.fsdecode(value_raw),
+                   "head": None, "branch": None, "detached": False,
                    "bare": False, "locked": False, "lock_reason": None,
                    "prunable": False, "prune_reason": None}
         elif cur is None:
@@ -446,7 +507,10 @@ def parse_worktree_porcelain(text: str) -> "list[dict]":
 
 
 def list_worktrees(repo: Path) -> "list[dict]":
-    r = _git(repo, "worktree", "list", "--porcelain")
+    # 🔴 `_git_raw`, NOT `_git` — #944. The porcelain path is raw bytes and
+    # `core.quotePath` does not apply to it, so strict decoding here aborted the
+    # whole scan. `parse_worktree_porcelain` owns the two decodings.
+    r = _git_raw(repo, "worktree", "list", "--porcelain")
     if r.returncode != 0:
         return []
     return parse_worktree_porcelain(r.stdout)
@@ -556,11 +620,22 @@ def worktree_submodules(path: Path) -> "tuple[bool | None, list[str]]":
     if not is_dir(path):
         return None, []
 
-    gp = _git(path, "rev-parse", "--git-path", "modules")
+    # 🔴 BYTES, and NOT because of a `-z` — #944, and the reason that issue's
+    # own suggested fix would not have been enough. `--git-path` ANSWERS WITH A
+    # PATH THIS TOOL DID NOT SUPPLY: for a linked worktree it resolves to
+    # `<repo>/.git/worktrees/<DIRECTORY NAME>/modules`, so a worktree whose
+    # directory name holds an undecodable byte aborted the scan HERE too, under
+    # DEFAULT git config, independently of `list_worktrees`. MEASURED on
+    # `origin/main`: fixing only the porcelain arm moves the abort to this line
+    # rather than removing it — and this line is reachable from
+    # `execute_removals`' submodule re-check, i.e. MID-REMOVAL.
+    gp = _git_raw(path, "rev-parse", "--git-path", "modules")
     if gp.returncode != 0:
         return None, [f"git rev-parse --git-path failed rc={gp.returncode}: "
-                      f"{gp.stderr.strip()[:200]}"]
-    modules = Path(gp.stdout.strip())
+                      f"{_printable(gp.stderr).strip()[:200]}"]
+    # `os.fsdecode` to REACH the store, `_printable` to SHOW it below — the same
+    # deliberate split as the index arm, for the same reason.
+    modules = Path(os.fsdecode(gp.stdout.strip()))
     if not modules.is_absolute():
         modules = path / modules
     if modules.is_dir():
@@ -578,14 +653,18 @@ def worktree_submodules(path: Path) -> "tuple[bool | None, list[str]]":
         # "holds" submodules it does not is the sort of small false sentence
         # this file's history is made of.
         try:
-            names = sorted(p.name for p in modules.iterdir())
+            # 🔴 `_printable_path` on the ENTRY NAMES as well as on the store —
+            # `iterdir()` yields surrogateescape-decoded names, and one of them
+            # in this message is a `UnicodeEncodeError` at the `print()` that
+            # renders the report (#944).
+            names = sorted(_printable_path(p.name) for p in modules.iterdir())
         except OSError as exc:
             held = f"contents unreadable ({exc.__class__.__name__})"
         else:
             held = (f"holding: {', '.join(names[:10])}" if names
                     else "EMPTY — git refuses on the store's existence alone")
         return True, [f"submodule store in this worktree's git dir "
-                      f"({modules}), {held} — "
+                      f"({_printable_path(modules)}), {held} — "
                       f"`git worktree remove` refuses outright"]
 
     # Only reached when `modules/` is absent, matching git's short-circuit.
@@ -1152,11 +1231,17 @@ def scan_repo(repo: Path, gh_cmd: str, use_gh: bool, pr_limit: int, jobs: int,
     index.fetch()
 
     def build(wt: dict) -> dict:
-        path = Path(wt["path"])
+        # 🔴 TWO PATHS, and which one you reach for is the whole of #944.
+        # `path` is the `os.fsdecode` form and is the ONLY thing that touches
+        # the filesystem or git's argv; `wt["path"]` is the `_printable` form
+        # and is the ONLY thing that is reported. See
+        # `parse_worktree_porcelain` for why they are not interchangeable.
+        path = Path(wt["path_fs"])
         row: dict = {
             "repo": str(repo),
             "repo_slug": slug,
-            "path": str(path),
+            "path": wt["path"],
+            "path_fs": wt["path_fs"],
             "path_exists": is_dir(path),
             "is_main": wt["is_main"],
             "bare": wt["bare"],
@@ -1169,7 +1254,13 @@ def scan_repo(repo: Path, gh_cmd: str, use_gh: bool, pr_limit: int, jobs: int,
             "prune_reason": wt["prune_reason"],
             "default_ref": default_ref,
             "default_how": default_how,
-            "excluded_by": path_excluded(str(path), exclude_globs),
+            # 🔴 Matched against the PRINTABLE path, deliberately, and the same
+            # choice as `summarize`'s per-glob accounting — the two must agree
+            # or the count printed beside a glob is not the exclusion that ran.
+            # It is also the only form an operator can target: the printable
+            # path is what the report showed them, and nobody types a byte that
+            # is not valid utf-8 into `--exclude-path`.
+            "excluded_by": path_excluded(wt["path"], exclude_globs),
             "evidence": [f"default branch {default_ref} resolved by {default_how}"],
         }
         if row["excluded_by"]:
@@ -1758,33 +1849,45 @@ def execute_removals(rows: "list[dict]", confirm: "int | None") -> int:
 
     removed = skipped = failed = 0
     for r in targets:
-        path = Path(r["path"])
+        # 🔴 #944, AND THIS IS THE WORST PLACE IN THE TOOL FOR IT. Three decode
+        # hazards meet in this loop — the `list_worktrees` re-check, the
+        # submodule re-check's `--git-path`, and this call's own stderr — and an
+        # abort here fires AFTER some removals have already happened and BEFORE
+        # the `execute: removed= skipped= failed=` line that is the only record
+        # of what was done. `path_fs` REACHES the worktree; `disp` SHOWS it, and
+        # every `_log` below uses `disp` because a lone surrogate raises
+        # `UnicodeEncodeError` at `print()` and would abort the loop just the
+        # same. `.get` with a fallback so a hand-built row keeps working.
+        path = Path(r.get("path_fs") or r["path"])
+        disp = r["path"]
         repo = Path(r["repo"])
         if r.get("verdict") != DEAD:
-            _log(f"SKIP {path}: verdict is {r.get('verdict')}, not {DEAD}")
+            _log(f"SKIP {disp}: verdict is {r.get('verdict')}, not {DEAD}")
             skipped += 1
             continue
         # Second, independent floor under the exclusion — same reasoning as the
         # verdict re-assert above: the executor does not trust the `removable`
         # flag it was handed.
         if r.get("excluded_by"):
-            _log(f"SKIP {path}: excluded by path filter {r['excluded_by']!r}")
+            _log(f"SKIP {disp}: excluded by path filter {r['excluded_by']!r}")
             skipped += 1
             continue
-        live = [w for w in list_worktrees(repo) if Path(w["path"]) == path]
+        # 🔴 Compared on `path_fs`. The printable form is LOSSY, so two distinct
+        # worktrees can share it; identity has to be settled on the bytes.
+        live = [w for w in list_worktrees(repo) if Path(w["path_fs"]) == path]
         if not live:
-            _log(f"SKIP {path}: git no longer lists this worktree")
+            _log(f"SKIP {disp}: git no longer lists this worktree")
             skipped += 1
             continue
         if live[0]["locked"]:
-            _log(f"SKIP {path}: locked since the scan")
+            _log(f"SKIP {disp}: locked since the scan")
             skipped += 1
             continue
         # 🔴 LAST, so it is the check immediately before the destructive step
         # rather than one buried in the survey that motivated it.
         dirty, count, _ = worktree_dirty(path)
         if dirty is not False:
-            _log(f"SKIP {path}: re-check says dirty={dirty} ({count} path(s)) — "
+            _log(f"SKIP {disp}: re-check says dirty={dirty} ({count} path(s)) — "
                  "it changed since the scan, or was never knowable")
             skipped += 1
             continue
@@ -1795,16 +1898,26 @@ def execute_removals(rows: "list[dict]", confirm: "int | None") -> int:
         # past, and this is the moment the destructive step actually runs.
         subs, sub_reasons = worktree_submodules(path)
         if subs is not False:
-            _log(f"SKIP {path}: re-check says submodules={subs} — "
+            _log(f"SKIP {disp}: re-check says submodules={subs} — "
                  + ("; ".join(sub_reasons) if sub_reasons else "no reason recorded"))
             skipped += 1
             continue
-        res = _git(repo, "worktree", "remove", str(path))
+        # 🔴 `_git_raw`: git NAMES THE PATH BACK AT US in the refusal message
+        # ("fatal: '<path>' contains modified or untracked files…"), so the
+        # failure arm — the one that exists to report a removal that did not
+        # happen — was itself the abort. MEASURED on `origin/main`: the
+        # `UnicodeDecodeError` fires inside `subprocess.run` on the refusal,
+        # taking down the loop and the accounting line with it. Passing
+        # `str(path)` is safe in the other direction: `subprocess` encodes argv
+        # with `os.fsencode`, so the surrogates round-trip back to the original
+        # bytes and git receives the real name.
+        res = _git_raw(repo, "worktree", "remove", str(path))
         if res.returncode == 0:
-            _log(f"REMOVED {path}")
+            _log(f"REMOVED {disp}")
             removed += 1
         else:
-            _log(f"FAILED  {path}: rc={res.returncode} {res.stderr.strip()[:300]}")
+            _log(f"FAILED  {disp}: rc={res.returncode} "
+                 f"{_printable(res.stderr).strip()[:300]}")
             failed += 1
     _log(f"execute: removed={removed} skipped={skipped} failed={failed}")
     return RC_OK if failed == 0 else 1

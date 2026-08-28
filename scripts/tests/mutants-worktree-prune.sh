@@ -657,6 +657,82 @@ run 'unknown-marker-gate-reverted-to-reasons' \
   test_the_marker_gate_is_path_exists_not_reasons \
   's|^                    if subs is None and r.get("path_exists") else "")$|                    if subs is None and r.get("submodule_reasons") else "")|'
 
+printf '\n== #944 — an undecodable worktree DIRECTORY NAME ==\n'
+# 🔴 THE HEADLINE ARM. `worktree list --porcelain` emits the path raw and
+# unquoted — `core.quotePath` does not apply to it, so unlike the `-z` case
+# there was never any quoting keeping this ASCII. Strict decoding took the whole
+# scan down: zero rows out of 800, from ONE bad directory name.
+run 'porcelain-read-with-strict-decoding' \
+  test_an_undecodable_worktree_DIRECTORY_NAME_does_not_abort_the_scan \
+  's|^    r = _git_raw(repo, "worktree", "list", "--porcelain")$|    r = _git(repo, "worktree", "list", "--porcelain")|'
+# 🔴 THE ARM THE ISSUE DID NOT NAME, and the reason this mutant is not a
+# duplicate of the one above: `rev-parse --git-path` ANSWERS with a path we
+# never passed it (`…/worktrees/<DIRECTORY NAME>/modules`), so fixing only the
+# porcelain read MOVED the abort here instead of removing it — under default git
+# config, with no submodule in the fixture, on a line `execute_removals` re-runs
+# BETWEEN REMOVALS. Its killer touches no porcelain at all.
+run 'git-path-answer-read-with-strict-decoding' \
+  test_the_submodule_check_survives_an_undecodable_worktree_NAME \
+  's|^    gp = _git_raw(path, "rev-parse", "--git-path", "modules")$|    gp = _git(path, "rev-parse", "--git-path", "modules")|'
+# 🔴 THE TWO DECODINGS, ONE MUTANT EACH — the same pairing #935 round 3
+# established, now on the worktree path rather than the submodule path. Neither
+# direction is covered by the other: swapping them produces a SILENT wrong
+# answer and a CRASH respectively, and a battery with only one of these would
+# certify a fix that still fails half the time.
+#
+# DIRECTION 1 — `_printable` reaching the filesystem. U+FFFD names nothing, so
+# the directory reads as absent and the row degrades to `cannot-tell`: no
+# traceback, no exception, just a tool that quietly stopped being able to answer.
+run 'display-decoding-used-to-reach-the-worktree' \
+  test_an_undecodable_worktree_NAME_is_classified_from_the_real_filesystem_path \
+  's|^        path = Path(wt\["path_fs"\])$|        path = Path(wt["path"])|'
+# …and the same direction at its SOURCE, in the parser rather than at the use.
+run 'parser-derives-path-fs-from-the-lossy-string' \
+  test_an_undecodable_worktree_NAME_is_classified_from_the_real_filesystem_path \
+  's|^            cur = {"path": value, "path_fs": os.fsdecode(value_raw),$|            cur = {"path": value, "path_fs": value,|'
+# DIRECTION 2 — `os.fsdecode` reaching the report. A lone surrogate raises
+# `UnicodeEncodeError` at `print()`, which MOVES the abort rather than removing
+# it. This is the failure the issue warned about by name.
+run 'filesystem-decoding-used-for-the-reported-path' \
+  test_an_undecodable_worktree_NAME_survives_being_rendered_and_printed \
+  's|^            "path": wt\["path"\],$|            "path": wt["path_fs"],|'
+
+printf '\n== #944 — the mid-EXECUTE abort, which is the worst of them ==\n'
+# 🔴 An abort inside this loop fires AFTER some removals and BEFORE the
+# `execute: removed= skipped= failed=` line — the operator is left deleting
+# things with no record of what was deleted. Four lines, four mutants.
+run 'executor-reaches-the-worktree-by-its-lossy-name' \
+  test_execute_removes_an_undecodable_worktree_and_prints_its_accounting \
+  's|^        path = Path(r.get("path_fs") or r\["path"\])$|        path = Path(r["path"])|'
+# 🔴 Identity settled on the LOSSY form: U+FFFD collapses distinct byte
+# sequences, so this comparison has to be made on the bytes.
+run 'executor-matches-the-live-row-on-the-lossy-path' \
+  test_execute_removes_an_undecodable_worktree_and_prints_its_accounting \
+  's|^        live = \[w for w in list_worktrees(repo) if Path(w\["path_fs"\]) == path\]$|        live = [w for w in list_worktrees(repo) if Path(w["path"]) == path]|'
+# 🔴 The success LOG, not the removal: printing the filesystem form aborts the
+# loop just as surely as decoding did, one line after the deletion happened.
+run 'executor-logs-the-filesystem-form-of-the-path' \
+  test_execute_removes_an_undecodable_worktree_and_prints_its_accounting \
+  's|^            _log(f"REMOVED {disp}")$|            _log(f"REMOVED {path}")|'
+# 🔴 The REFUSAL arm — git names the path back at us in the error, so the one
+# call whose whole job is to report a removal that did not happen was itself the
+# abort.
+run 'refusal-stderr-read-with-strict-decoding' \
+  test_a_refused_removal_of_an_undecodable_worktree_still_accounts_for_it \
+  's|^        res = _git_raw(repo, "worktree", "remove", str(path))$|        res = _git(repo, "worktree", "remove", str(path))|'
+
+printf '\n== #944 — _printable_path, for a path we only hold as surrogates ==\n'
+run 'submodule-store-path-printed-raw' \
+  test_a_submodule_store_under_an_undecodable_worktree_NAME_is_named_printably \
+  's|^                      f"({_printable_path(modules)}), {held} — "$|                      f"({modules}), {held} — "|'
+# 🔴 A SECOND mutant because the store path and the ENTRY NAMES inside it are
+# two different surrogate sources, and the fixture makes both undecodable on
+# purpose — an ASCII entry name would make this mutant behaviour-free and it
+# would be scored SURVIVED on a line whose whole point is that it is covered.
+run 'submodule-store-entry-names-printed-raw' \
+  test_a_submodule_store_under_an_undecodable_worktree_NAME_is_named_printably \
+  's|^            names = sorted(_printable_path(p.name) for p in modules.iterdir())$|            names = sorted(p.name for p in modules.iterdir())|'
+
 printf '\n== POSITIVE CONTROLS — mutants whose fate is KNOWN ==\n'
 # 🔴 A comment-only edit MUST survive. If it kills something, the harness is
 # keying on the file's text and every `ok` above is worthless.
