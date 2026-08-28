@@ -8468,6 +8468,24 @@ def nuance_of(path: Path) -> str:
     ).get(resolver.NUANCE_HEADING, "")
 
 
+def nuance_bytes_of(data: bytes) -> str:
+    """`nuance_of`, for an entry whose bytes are NOT valid UTF-8.
+
+    `Path.read_text` decodes `strict` and raises on exactly the files the
+    non-UTF-8 section is about, so a test there cannot use `nuance_of` at all.
+
+    `surrogateescape` is spelled HERE BY HAND rather than imported from the
+    module under test: reading the file with whatever handler the server happens
+    to use would assert `x == x`, and this helper is used to state what is on
+    disk, which is a claim about BYTES and not about the server's opinion of
+    them. `TestTheEntryTextCodecIsONERuleInONEPlace` pins the server's side
+    separately.
+    """
+    return resolver.extract_sections(
+        data.decode("utf-8", errors="surrogateescape"), (resolver.NUANCE_HEADING,)
+    ).get(resolver.NUANCE_HEADING, "")
+
+
 def store_headers(headers: dict) -> tuple:
     """The `X-Store-*` family only.
 
@@ -9154,7 +9172,13 @@ class TestAppendIsCommutativeAndIdempotent:
         make every retry a new bullet."""
         path = entry_file(scoped_store, ALLOW_SCOPE)
         with running(scoped_store, tokens=(ZACH,)) as (base, _):
-            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+            # The seeding append's verdict is ASSERTED, not discarded: if it
+            # failed, `after_first` would be the untouched fixture and the
+            # "unchanged" assertion below would hold for the wrong reason.
+            seed, seed_h, seed_b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+            assert (seed, seed_h["X-Store-Status"]) == (200, "appended"), seed_b
             after_first = path.read_bytes()
             code, headers, _b = post_bullet(
                 base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_B
@@ -9170,7 +9194,12 @@ class TestAppendIsCommutativeAndIdempotent:
         CONTENT, so a different observation from the same session must land."""
         path = entry_file(scoped_store, ALLOW_SCOPE)
         with running(scoped_store, tokens=(ZACH,)) as (base, _):
-            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+            # Same reason as above: a seeding append whose verdict is not read
+            # turns "two appends" into "one append" without any assertion moving.
+            seed, seed_h, seed_b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+            assert (seed, seed_h["X-Store-Status"]) == (200, "appended"), seed_b
             after_first = path.read_bytes()
             code, headers, _b = post_bullet(
                 base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_B, session=SESSION_A
@@ -9663,10 +9692,19 @@ class TestTheWritePrimitives:
 # file, because they were destroyed by ONE operation and a test that separated
 # them would let two of the three regress unseen:
 #
-#   * `\xe9` — a latin-1 byte. Not valid UTF-8 anywhere, on a line the append
-#     does not touch.
+#   * `\xe9` — a latin-1 byte. Not valid UTF-8 anywhere. It appears TWICE, see
+#     below.
 #   * a `\r\n` line ending, twice.
 #   * NO trailing newline.
+#
+# 🔴 THE BYTE IS IN **BOTH** SECTIONS, AND THAT PLACEMENT IS THE WHOLE POINT.
+# It used to sit only in `## What it is`, and that made every assertion in this
+# section STRUCTURALLY UNABLE to reach the branch that later broke: the append's
+# dedupe hashes `bullet_content(...)` over the NUANCE BULLETS ONLY, so a hostile
+# byte parked in another section is never fed to `content_hash` and a writer that
+# crashes on one stayed green here. With it in both places neither location is
+# load-bearing — the byte survives an append wherever it is, and the hashing path
+# is exercised whether or not anyone remembers that it is the interesting one.
 #
 # The bytes are spelled out rather than built from `_entry()` because every one
 # of them is load-bearing here, and `_entry()` can only emit LF and always ends
@@ -9683,7 +9721,7 @@ LOSSY_ENTRY = (
     b"the tender's caf\xe9 log was written latin-1 and nobody re-encoded it\r\n"
     b"\n"
     + _HEADING_BYTES
-    + b"- 2026-05-01: the anchor winch was re-greased and left untested"
+    + b"- 2026-05-01: the anchor winch was re-greased at the caf\xe9 and left untested"
 )
 
 # Distinct from BULLET_A/B/C, from every nuance line, and from every literal any
@@ -9740,6 +9778,30 @@ class TestAnAppendDoesNotREWRITETheFile:
             + LOSSY_ENTRY[head_end:]
         ), after
 
+    def test_the_hostile_byte_is_INSIDE_A_NUANCE_BULLET_which_is_what_is_hashed(self):
+        """🔴 THE ANTI-VACUITY CONTROL FOR EVERY ASSERTION BELOW, and the exact
+        hole that let a 500 pass here for a whole audit round.
+
+        `append_bullet` feeds `bullet_content(existing.lines)` — the NUANCE
+        BULLETS and nothing else — to `content_hash`. A fixture whose only
+        undecodable byte sat in `## What it is` therefore never put one through
+        the hashing path, so "a non-UTF-8 byte survives an append" was answered
+        by a writer that cannot append to such an entry at all.
+
+        Asked of the reader's OWN section parser rather than by an `in` over the
+        whole file, so a byte that drifts back out of the nuance block fails
+        here instead of quietly re-vacuating the section.
+        """
+        assert b"\xe9" in LOSSY_ENTRY and b"\xef\xbf\xbd" not in LOSSY_ENTRY
+        assert LOSSY_ENTRY.count(b"\xe9") == 2, "the fixture stopped covering BOTH"
+        nuance = nuance_bytes_of(LOSSY_ENTRY)
+        assert "\udce9" in nuance, nuance
+        what = resolver.extract_sections(
+            LOSSY_ENTRY.decode("utf-8", errors="surrogateescape"),
+            (resolver.WHAT_HEADING,),
+        )[resolver.WHAT_HEADING]
+        assert "\udce9" in what, what
+
     def test_a_NON_UTF8_byte_on_an_untouched_line_SURVIVES(self, tmp_path: Path):
         """Named separately from the equality above because this is the one that
         DESTROYS content the store cannot re-derive, and because `U+FFFD` is the
@@ -9747,10 +9809,18 @@ class TestAnAppendDoesNotREWRITETheFile:
         path = self._entry_path(tmp_path)
         assert b"\xe9" in LOSSY_ENTRY and b"\xef\xbf\xbd" not in LOSSY_ENTRY
 
-        api.append_bullet(
+        status, line, _rev = api.append_bullet(
             path, text=BULLET_E, actor="zach", session=SESSION_A, today="2026-05-02"
         )
         after = path.read_bytes()
+
+        # 🔴 THE POSITIVE CONTROL, AND IT COMES FIRST. "the bytes are unchanged"
+        # is trivially true of a file NOTHING WROTE TO — a writer that raised, or
+        # refused, or returned `duplicate`, satisfies the preservation assertions
+        # below completely. So the append is proved to have LANDED before its
+        # non-destructiveness is claimed.
+        assert status == "appended", status
+        assert line.encode("utf-8") in after, "the new bullet never reached the file"
 
         assert b"\xe9" in after, "the latin-1 byte was destroyed by an append"
         assert b"\xef\xbf\xbd" not in after, (
@@ -9762,21 +9832,33 @@ class TestAnAppendDoesNotREWRITETheFile:
         before_crlf = LOSSY_ENTRY.count(b"\r\n")
         assert before_crlf == 2, "the fixture stopped exercising CRLF"
 
-        api.append_bullet(
+        status, line, _rev = api.append_bullet(
             path, text=BULLET_F, actor="zach", session=SESSION_A, today="2026-05-02"
         )
+        after = path.read_bytes()
 
-        assert path.read_bytes().count(b"\r\n") == before_crlf
+        # Positive control, same reason as above: an unwritten file has exactly
+        # the CRLF count it started with.
+        assert status == "appended", status
+        assert line.encode("utf-8") in after, "the new bullet never reached the file"
+
+        assert after.count(b"\r\n") == before_crlf
 
     def test_a_file_with_NO_trailing_newline_does_not_gain_one(self, tmp_path: Path):
         path = self._entry_path(tmp_path)
         assert not LOSSY_ENTRY.endswith(b"\n")
 
-        api.append_bullet(
+        status, line, _rev = api.append_bullet(
             path, text=BULLET_D, actor="zach", session=SESSION_A, today="2026-05-02"
         )
+        after = path.read_bytes()
 
-        assert not path.read_bytes().endswith(b"\n"), (
+        # Positive control, same reason as above: a file nobody wrote to has
+        # exactly the trailing newline it started without.
+        assert status == "appended", status
+        assert line.encode("utf-8") in after, "the new bullet never reached the file"
+
+        assert not after.endswith(b"\n"), (
             "the append added a trailing newline to a file that had none"
         )
 
@@ -9826,6 +9908,332 @@ class TestAnAppendDoesNotREWRITETheFile:
 
         assert after == original + b"\n" + line.encode("utf-8")
         assert not after.endswith(b"\n")
+
+
+# The one substring of `KELP_NUANCE` the hostile byte is spliced next to. Named
+# so the fixture builder can assert it occurs EXACTLY ONCE store-wide — a
+# `bytes.replace` that hit a second site would put the byte somewhere no
+# assertion below describes.
+_NUANCE_ANCHOR = b"spring flood"
+
+
+def lossy_scoped_entry(root: Path) -> Path:
+    """The ALLOW_SCOPE entry of a `scoped_store`, with ONE latin-1 `0xe9` spliced
+    into its NUANCE BULLET — and nowhere else.
+
+    🔴 BUILT BY MUTATING `_build_store`'s OWN OUTPUT rather than spelled by hand.
+    The entry has to survive `rc.load_store` for the route to reach the writer at
+    all: a hand-written file that the index loader classified as MALFORMED would
+    answer `404 ref-unknown`, and every assertion about the write path below
+    would then be measuring a 404 while reading as coverage of an append.
+    """
+    path = entry_file(root, ALLOW_SCOPE)
+    original = path.read_bytes()
+    assert original.count(_NUANCE_ANCHOR) == 1, original
+    assert nuance_bytes_of(original).count(_NUANCE_ANCHOR.decode()) == 1
+    hostile = original.replace(_NUANCE_ANCHOR, b"caf\xe9 spring flood")
+    assert hostile != original and hostile.count(b"\xe9") == 1
+    path.write_bytes(hostile)
+    os.utime(path, (FIXED_MTIME, FIXED_MTIME))
+    return path
+
+
+class TestAnEntryWithANonUTF8ByteInABulletIsSTILLAPPENDABLE:
+    """🔴 THE FIX FOR THE LOSSY REWRITE MADE ONE LEGACY BYTE PERMANENTLY
+    UNAPPENDABLE — over HTTP, on the real route, `500 internal-error`.
+
+    The append decodes the whole file `errors="surrogateescape"`, which is what
+    makes the round trip a bijection; that decode yields LONE SURROGATES for
+    every byte that is not valid UTF-8. `content_hash` then re-encoded the
+    dedupe text with PLAIN `"utf-8"`, which refuses to encode a surrogate:
+
+        server.py:2011  if content_hash(bullet_content(existing.lines)) == wanted
+        server.py:1743  " ".join(text.split()).encode("utf-8")
+        UnicodeEncodeError: 'utf-8' codec can't encode character '\\udce9'
+
+    Measured end to end over HTTP and isolated by property, at the ref that
+    introduced it:
+
+        plain             -> 200 appended
+        latin-1 in bullet -> 500 internal-error      <- the regression
+        crlf-only         -> 200 appended
+        no trailing \\n    -> 200 appended
+
+    🔴 AND WHY IT IS NOT MERELY COSMETIC. The old writer corrupted the byte
+    silently; this refused the append entirely, so ONE legacy byte in ONE bullet
+    made that entry unappendable FOREVER — an availability regression on a store
+    whose entire purpose is accumulating notes, and on exactly the entry shape
+    the fix was written to protect.
+
+    🔴 THE CLASS ABOVE COULD NOT SEE IT, TWICE OVER, and both holes are closed
+    rather than worked around:
+
+      1. Its fixture put the byte in `## What it is`, a section
+         `bullet_content` never reads — so the crashing branch was unreachable.
+         `LOSSY_ENTRY` now carries the byte in BOTH sections.
+      2. It called `api.append_bullet` DIRECTLY. That proves the library
+         function preserves bytes while the ROUTE still 500s: the isolation
+         seam, two surfaces each verified alone and broken together. Every test
+         here goes over a real socket.
+
+    🔴 AND EVERY ONE OF THEM PROVES THE WRITE LANDED BEFORE CLAIMING THE OLD
+    BYTES SURVIVED. "the pre-existing bytes are unchanged" is trivially true of
+    a file NOTHING WROTE TO, which is precisely how the earlier assertion passed
+    over a 500.
+    """
+
+    def test_PAIRED_CONTROL_the_same_POST_against_an_ASCII_entry_is_200(
+        self, scoped_store: Path
+    ):
+        """🔴 Without this, every 200 below is satisfied by a store that would
+        answer 200 for any reason at all, and every 500 by a broken harness. Same
+        store, same token, same call shape, same text — the ONLY difference in
+        the test that follows is one byte inside one bullet."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_A
+            )
+        assert code == 200, (code, body)
+        assert headers["X-Store-Status"] == "appended"
+        assert BULLET_D.encode("utf-8") in path.read_bytes()
+
+    def test_the_append_SUCCEEDS_over_the_REAL_ROUTE(self, scoped_store: Path):
+        """🔴 THE REGRESSION, ON THE WIRE. `500` at the ref this fix lands on."""
+        path = lossy_scoped_entry(scoped_store)
+        before = path.read_bytes()
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_A
+            )
+        after = path.read_bytes()
+
+        assert code == 200, (code, headers, body)
+        assert headers["X-Store-Status"] == "appended"
+        # 🔴 THE POSITIVE CONTROL: the write actually LANDED. Asked of the
+        # reader's own section parser, so "the bullet is on disk" cannot be
+        # satisfied by prose that landed outside the nuance block.
+        assert after != before, "the route answered 200 and wrote nothing"
+        assert BULLET_D in nuance_bytes_of(after), nuance_bytes_of(after)
+        assert f"[cairn: zach/{SESSION_A}]" in nuance_bytes_of(after)
+
+    def test_the_PRE_EXISTING_undecodable_byte_survives_the_append(
+        self, scoped_store: Path
+    ):
+        path = lossy_scoped_entry(scoped_store)
+        assert b"\xe9" in path.read_bytes()
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_E, session=SESSION_A
+            )
+        after = path.read_bytes()
+
+        # Positive control first — see the class docstring.
+        assert code == 200, (code, headers, body)
+        assert BULLET_E in nuance_bytes_of(after)
+
+        assert b"\xe9" in after, "the latin-1 byte was destroyed by an append"
+        assert b"\xef\xbf\xbd" not in after, (
+            "the append replaced an undecodable byte with U+FFFD"
+        )
+
+    def test_the_RESPONSE_BODY_carries_the_rendered_bullet(self, scoped_store: Path):
+        """The append's response body is `(line + "\\n").encode(...)`, so a
+        surrogate reaching `line` would 500 AFTER the file was already written —
+        the worst shape of all, a durable write reported as a server error."""
+        path = lossy_scoped_entry(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, _h, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_F, session=SESSION_A
+            )
+        assert code == 200, (code, body)
+        assert BULLET_F.encode("utf-8") in body, body
+        assert body.decode("utf-8").strip() in nuance_bytes_of(path.read_bytes())
+
+    def test_the_audit_line_says_APPENDED_not_internal_error(
+        self, scoped_store: Path
+    ):
+        """🔴 The dispatch backstop is what turned this from a dropped connection
+        into an answered `500 internal-error` WITH an audit line — which is how
+        the regression was found at all. The line is asserted to say `appended`
+        so that a future crash caught by that same backstop cannot pass here."""
+        lossy_scoped_entry(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_A)
+            line = await_audit(audit, 1)[0]
+        assert "status=appended" in line, line
+        assert "result=200" in line, line
+        assert "internal-error" not in line, line
+
+    def test_a_RE_POST_of_the_SAME_text_is_a_DUPLICATE_and_writes_NOTHING(
+        self, scoped_store: Path
+    ):
+        """🔴 THE OTHER DIRECTION OF THE SAME HASH. Idempotency is decided by
+        `content_hash` over the stored bullets — the very call that raised — so
+        an entry carrying an undecodable byte must still be able to RECOGNISE a
+        repeat, not merely to accept a new one. A fix that made `content_hash`
+        return a constant would pass the append tests above and fail here.
+        """
+        path = lossy_scoped_entry(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            first, h1, b1 = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_A
+            )
+            after_first = path.read_bytes()
+            second, h2, b2 = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_B
+            )
+        assert (first, h1["X-Store-Status"]) == (200, "appended"), (first, b1)
+        assert (second, h2["X-Store-Status"]) == (200, "duplicate"), (second, b2)
+        assert path.read_bytes() == after_first, "the duplicate wrote to the file"
+        # …and the PRE-EXISTING hostile bullet is still not confused with it: a
+        # `content_hash` that collapsed every surrogate-bearing bullet to one
+        # value would have answered `duplicate` on the FIRST post.
+        assert b"\xe9" in after_first
+
+    def test_the_hostile_bullet_is_NOT_hash_equal_to_its_REPAIRED_spelling(
+        self, scoped_store: Path
+    ):
+        """🔴 THE BIJECTION, STATED AS BEHAVIOUR. `surrogateescape` must map the
+        raw `0xe9` back to `0xe9` — not to `é` (U+00E9, `0xc3 0xa9`) and not to
+        `U+FFFD`. If it did, a client POSTing the correctly-encoded spelling of a
+        legacy bullet would be told `duplicate` and its correction silently
+        dropped; here it is a genuinely new bullet and it lands.
+        """
+        path = lossy_scoped_entry(scoped_store)
+        bullets = resolver.parse_journal_bullets(nuance_bytes_of(path.read_bytes()))
+        stored = api.bullet_content(bullets[0].lines)
+        assert "\udce9" in stored, stored
+        repaired = stored.replace("\udce9", "é")
+        assert "\udce9" not in repaired and "é" in repaired
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=repaired, session=SESSION_A
+            )
+        assert code == 200, (code, body)
+        assert headers["X-Store-Status"] == "appended", body
+        after = path.read_bytes()
+        assert b"caf\xc3\xa9" in after, "the correctly-encoded spelling did not land"
+        assert b"caf\xe9" in after, "the legacy byte was overwritten by the repair"
+
+
+class TestTheEntryTextCodecIsONERuleInONEPlace:
+    """🔴 THE DECODE AND THE ENCODE MUST AGREE, EVERYWHERE, and the regression
+    above was exactly one site where they did not.
+
+    `append_bullet` decodes the entry `surrogateescape` and then re-encoded at
+    three separate sites — the splice offset (`surrogateescape`), the inserted
+    line (plain), and the idempotency hash (plain). Three call sites deciding one
+    thing is the predicate-at-N-sites shape: it was wrong at one of them, and the
+    disagreement was inaudible until a byte reached it. There is now ONE encoder
+    and ONE decoder and every site calls them.
+    """
+
+    # Pairwise distinct, and each a DIFFERENT reason to be undecodable: a lone
+    # continuation byte, a truncated 2-byte lead, a UTF-16 BOM, a valid
+    # multi-byte character (which must survive unchanged), and a mix with a CRLF.
+    HOSTILE = [
+        b"",
+        b"caf\xe9 log",
+        b"\x80",
+        b"\xc3",
+        b"\xff\xfe",
+        "café log".encode("utf-8"),
+        b"a\xe9b\r\nc\xf0d",
+    ]
+
+    @pytest.mark.parametrize("raw", HOSTILE)
+    def test_the_round_trip_is_a_BIJECTION_on_BYTES(self, raw: bytes):
+        assert api.encode_entry_text(api.decode_entry_text(raw)) == raw
+
+    def test_content_hash_hashes_the_ORIGINAL_BYTES(self):
+        """🔴 PINNED TO A DIGEST COMPUTED HERE FROM THE RAW BYTES, never from the
+        function under test. A `content_hash` that encoded `"utf-8"` raises on
+        this input; one that encoded `errors="replace"` returns the digest of
+        `U+FFFD` and fails on the value.
+        """
+        raw = b"the tender's caf\xe9 log"
+        expected = hashlib.sha256(raw).hexdigest()[:16]
+        assert api.content_hash(raw.decode("utf-8", "surrogateescape")) == expected
+        assert len(expected) == len(api.content_hash("anything at all"))
+
+    def test_a_CLEAN_string_hashes_IDENTICALLY_to_before(self):
+        """The fix must not move the hash of any bullet already in the corpus —
+        that would re-open every entry's idempotency and re-write the world. The
+        digest is spelled from plain UTF-8 bytes, which is what the old code
+        computed."""
+        text = "the tide gauge drifts 3cm after a spring flood."
+        assert api.content_hash(text) == (
+            hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        )
+
+    def test_NEGATIVE_CONTROL_a_surrogate_is_UNENCODABLE_by_plain_utf8(self):
+        """Proof that the parametrized bijection above is testing something: the
+        SAME string, through the encoder the code used to use, raises."""
+        text = b"caf\xe9".decode("utf-8", "surrogateescape")
+        with pytest.raises(UnicodeEncodeError):
+            text.encode("utf-8")
+
+
+class TestAPUTOfUndecodableBytesIs422NotA500:
+    """🔴 THE SIBLING WRITE PRIMITIVE, CHECKED FOR THE SAME MISMATCH.
+
+    `replace_entry` decodes the PUT body `errors="strict"` — deliberately, and
+    that is NOT the append's handler. A PUT is the one primitive that can
+    DESTROY content, so bytes the reader could not parse are refused rather than
+    written, and the refusal is the documented `422 unprocessable`.
+
+    The two handlers disagreeing is the whole defect class above, so the
+    difference is pinned as INTENDED behaviour rather than left to be rediscovered
+    as a bug: append round-trips any bytes, PUT refuses the ones it cannot read.
+    """
+
+    def _if_match(self, path: Path) -> dict[str, str]:
+        return {"If-Match": f'"{api.entry_revision(path.read_bytes())}"'}
+
+    def test_a_PUT_of_a_body_with_a_non_UTF8_byte_is_422(self, scoped_store: Path):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        body = before.replace(_NUANCE_ANCHOR, b"caf\xe9 spring flood")
+        assert body != before
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, resp = fetch(
+                entry_url(base, ALLOW_SCOPE),
+                token=ZACH_TOKEN,
+                method="PUT",
+                data=body,
+                extra_headers=self._if_match(path),
+            )
+        assert code == 422, (code, resp)
+        assert headers["X-Store-Status"] == "entry-shape"
+        assert path.read_bytes() == before, "a refused PUT wrote to the file"
+
+    def test_POSITIVE_CONTROL_the_SAME_edit_correctly_encoded_is_200(
+        self, scoped_store: Path
+    ):
+        """🔴 Without this the 422 above is satisfied by a PUT route that refuses
+        EVERYTHING. Same target, same precondition, same edit — spelled in
+        well-formed UTF-8."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        body = before.replace(_NUANCE_ANCHOR, "café spring flood".encode("utf-8"))
+        assert body != before
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, resp = fetch(
+                entry_url(base, ALLOW_SCOPE),
+                token=ZACH_TOKEN,
+                method="PUT",
+                data=body,
+                extra_headers=self._if_match(path),
+            )
+        assert code == 200, (code, resp)
+        assert headers["X-Store-Status"] == "replaced"
+        assert path.read_bytes() == body
 
 
 class TestTextIsValidatedAgainstEVERYLineBreak:

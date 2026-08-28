@@ -1723,6 +1723,61 @@ def entry_revision(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:CONTENT_HASH_CHARS]
 
 
+# =============================================================================
+# 🔴 ONE ENTRY-TEXT CODEC, IN ONE PLACE — because three sites deciding it was
+# wrong at one of them, and the disagreement was inaudible until a byte reached
+# it.
+#
+# The append reads an entry as BYTES and must write back BYTES THAT ROUND-TRIP.
+# `surrogateescape` is the only handler that does: it maps every byte that is
+# not valid UTF-8 to a lone surrogate in `U+DC80..U+DCFF` and maps that surrogate
+# back to the same byte. `strict` refuses the file; `replace` DESTROYS the byte
+# (that was the original defect); `ignore` deletes it.
+#
+# 🔴 AND THE ENCODE IS THE HALF THAT GETS FORGOTTEN. Decoding `surrogateescape`
+# and re-encoding plain `"utf-8"` is not a round trip — it RAISES, because a lone
+# surrogate is not encodable UTF-8. That mismatch shipped: `append_bullet`
+# decoded here, `content_hash` re-encoded there, and one legacy latin-1 byte
+# inside one NUANCE BULLET made that entry answer `500 internal-error` to every
+# append, FOREVER. Fail-closed rather than destructive, and still an availability
+# regression on a store whose whole purpose is accumulating notes — on precisely
+# the entry shape the `surrogateescape` decode was introduced to protect.
+#
+# So both halves are named, and every site on the entry round trip calls THESE
+# rather than spelling a handler of its own:
+#
+#   * `append_bullet` — the read, the splice offset, the inserted line.
+#   * `content_hash`  — the idempotency key, which is taken over text that came
+#                       off disk and therefore may hold surrogates.
+#   * `_append_bullet`'s response body, which echoes a line that may have come
+#                       off disk (the `duplicate` verdict returns a STORED line).
+#
+# ⚠ `replace_entry` DELIBERATELY DOES NOT. A PUT decodes the CALLER'S body
+# `errors="strict"` and answers 422 on bytes it cannot read: that is a validation
+# decision about untrusted input, not a round trip of the store's own bytes, and
+# conflating the two would let a PUT write a file the reader cannot parse. The
+# difference is the one place the two write primitives are MEANT to disagree, so
+# it is stated here rather than left to look like the bug above.
+#
+# ⚠ THE BIJECTION IS ALSO WHAT KEEPS A LEGACY BULLET DISTINCT FROM ITS REPAIR.
+# `content_hash` of a surrogate-bearing bullet hashes the ORIGINAL BYTES, so the
+# correctly-encoded spelling of the same words hashes differently and lands as a
+# genuinely new bullet instead of being swallowed as a duplicate.
+# =============================================================================
+
+ENTRY_TEXT_ERRORS = "surrogateescape"
+
+
+def decode_entry_text(data: bytes) -> str:
+    """An entry file's bytes -> text that encodes back to exactly those bytes."""
+    return data.decode("utf-8", errors=ENTRY_TEXT_ERRORS)
+
+
+def encode_entry_text(text: str) -> bytes:
+    """The inverse of `decode_entry_text`. Never plain `"utf-8"`: see above."""
+    return text.encode("utf-8", errors=ENTRY_TEXT_ERRORS)
+
+
 def content_hash(text: str) -> str:
     """The idempotency key for one bullet: its CONTENT, and nothing else.
 
@@ -1738,9 +1793,15 @@ def content_hash(text: str) -> str:
     six months apart records once. A caller that means both must say something
     different in the second, which the store's own convention (a leading date in
     the prose, a sha, a run id) already produces.
+
+    🔴 `encode_entry_text`, NOT `.encode("utf-8")`. Half this function's callers
+    hand it text that came OFF DISK — `bullet_content(existing.lines)`, from a
+    `surrogateescape` decode of the entry file — so a plain UTF-8 encode raises
+    `UnicodeEncodeError` on any bullet holding a byte that is not valid UTF-8,
+    and the append answers `500`. See the codec block above.
     """
     return hashlib.sha256(
-        " ".join(text.split()).encode("utf-8")
+        encode_entry_text(" ".join(text.split()))
     ).hexdigest()[:CONTENT_HASH_CHARS]
 
 
@@ -1994,10 +2055,12 @@ def append_bullet(
     """
     with _EntryLock(path):
         original = path.read_bytes()
-        # 🔴 `surrogateescape`, not `replace`. `replace` is destructive on the
+        # 🔴 `decode_entry_text`, not `replace`. `replace` is destructive on the
         # way IN, so any offset computed from it would describe a string that is
-        # not this file. `surrogateescape` is a bijection with the bytes.
-        text_in = original.decode("utf-8", errors="surrogateescape")
+        # not this file. The codec is a bijection with the bytes — and it is
+        # named ONCE, up by `encode_entry_text`, because every re-encode below
+        # has to be the same handler or the round trip raises. It did.
+        text_in = decode_entry_text(original)
         lines = text_in.splitlines()
         block = nuance_block(lines)
         if block is None:
@@ -2026,15 +2089,13 @@ def append_bullet(
         # spaces the heading line is entitled to keep).
         without_break = heading.splitlines()[0] if heading else ""
         terminator = heading[len(without_break) :]
-        offset = len(
-            "".join(raw_lines[:insert_at]).encode("utf-8", errors="surrogateescape")
-        )
+        offset = len(encode_entry_text("".join(raw_lines[:insert_at])))
         if terminator:
-            inserted = (line + terminator).encode("utf-8")
+            inserted = encode_entry_text(line + terminator)
         else:
             # The heading is the last line and the file does not end in a
             # newline. Appending `\n<bullet>` keeps it that way.
-            inserted = ("\n" + line).encode("utf-8")
+            inserted = encode_entry_text("\n" + line)
         data = original[:offset] + inserted + original[offset:]
         _replace_bytes(path, data)
         return "appended", line, entry_revision(data)
@@ -2116,6 +2177,13 @@ def replace_entry(
         current = entry_revision(original)
         if current not in if_match:
             raise PreconditionFailed(current)
+        # 🔴 `strict`, AND DELIBERATELY **NOT** `decode_entry_text`. This is the
+        # CALLER'S body, not the store's own bytes: a PUT is the one primitive
+        # that can destroy content, so bytes the reader could not parse are
+        # refused (422, via the `UnicodeDecodeError` the route catches) rather
+        # than written. Round-tripping them here would let one PUT leave an entry
+        # the index loader classifies as MALFORMED. See the codec block above for
+        # why the two write primitives are meant to disagree exactly here.
         text = data.decode("utf-8", errors="strict")
         try:
             rc.SubsystemEntry.from_mapping(
@@ -3667,7 +3735,19 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             return
         self._respond(
             200,
-            (line + "\n").encode("utf-8"),
+            # 🔴 `encode_entry_text`, because `line` is NOT always the line this
+            # request rendered: on `duplicate` it is the bullet ALREADY ON DISK,
+            # decoded with the entry codec, so it can hold a lone surrogate that
+            # plain UTF-8 refuses. A raise here would be the worst shape
+            # available — the file already written, the client told `500`.
+            #
+            # ⚠ HONESTLY LABELLED: no input is known to reach it. A stored
+            # bullet holding an undecodable byte cannot hash-equal any body a
+            # client can send (the body is decoded `strict`, so it holds no
+            # surrogates, and the byte survives `bullet_content` into the hash).
+            # This is the codec rule applied uniformly, NOT regression coverage,
+            # and it is not counted as any.
+            encode_entry_text(line + "\n"),
             headers={
                 "X-Store-Status": status,
                 "X-Cairn-Bullet": content_hash(payload["text"]),

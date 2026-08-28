@@ -109,6 +109,24 @@ bullets to one entry both survive (the read-modify-write is under an exclusive
 lock on a side file, `.<entry>.md.lock`, invisible to every walker), and
 re-POSTing the same content writes nothing.
 
+🔴 **An append is byte-preserving over ANY existing entry, including one that is
+not valid UTF-8.** The corpus holds files nobody re-encoded — a latin-1 `0xe9`
+in a bullet is a real shape — and the append reads and writes them through a
+single `surrogateescape` codec, so every byte outside the inserted line comes
+back identical and the entry stays appendable. Two earlier answers to those
+bytes were both wrong and are both pinned against: a `replace` decode DESTROYED
+the byte at `200 appended`, and re-encoding plain UTF-8 after a
+`surrogateescape` decode raised, so one legacy byte in one bullet made that
+entry answer `500` to every append forever. The idempotency hash is taken over
+the ORIGINAL bytes, so the correctly-encoded spelling of a legacy bullet is a
+genuinely new bullet rather than a swallowed duplicate.
+
+⚠ **PUT is the deliberate exception: it decodes the body `strict` and answers
+`422` on bytes that are not valid UTF-8.** That is a validation decision about
+untrusted input, not a round trip of the store's own bytes — a PUT can destroy
+content, so it will not write a file the reader cannot parse. The two write
+primitives are meant to disagree exactly here.
+
 ```
 PUT /api/v1/entry/{scope}/{ref}
 If-Match: <entry revision>
