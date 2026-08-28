@@ -60,6 +60,7 @@ import tarfile
 import secrets
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import urllib.error
@@ -465,9 +466,28 @@ def await_audit(out: "Drained | AuditLog", n: int, timeout: float = 15.0) -> "li
     Measured: with the server patched to emit one extra audit line at SIGTERM,
     the racy pre-helper code FAILED and the snapshot check PASSES.
 
-    A caller that means "exactly N, ever" must re-read `out.audit` after
-    `out.wait_closed()`. `test_the_STDOUT_audit_stream_names_the_matched_
-    fingerprint` does both and is the worked example.
+    🔴 SO A CALLER THAT MEANS "EXACTLY N, EVER" CALLS `settle()` — NOT THIS.
+    This paragraph used to prescribe "re-read `out.audit` after
+    `out.wait_closed()`", which is a real recipe for a `Drained` and an
+    IMPOSSIBLE one for an `AuditLog`: that class has no `wait_closed` at all and
+    its `closed` is `None` on purpose (see `AuditLog`). Nine in-process sites
+    were converted to this helper on the strength of that sentence and silently
+    lost their ceiling — a SECOND line emitted from a later callback, another
+    thread, or after any delay became invisible to them.
+
+    🔴 AND THE TWO HALVES DISAGREE, WHICH IS THE WHOLE POINT — "the ceiling is
+    gone" would be an overstatement. Measured over the 19 exact-count items:
+    with every `_audit` scheduling one extra line 50 ms or 300 ms later, the
+    snapshot assertions were green 0/19 and these `settle` assertions are red
+    18/19; with a SYNCHRONOUS second `self.audit(...)` emitted inline, the
+    SNAPSHOT assertions were already red 19/19. So the ceiling was never
+    destroyed — it was NARROWED to the synchronous case, and `settle` widens it
+    back. (The one deferred survivor is the SUBPROCESS site: `running_
+    subprocess` SIGTERMs the child on block exit, so the mutant's own timer dies
+    with it. That is a property of the mutant, not of the assertion — the
+    synchronous mutant kills that site.)
+    `test_the_STDOUT_audit_stream_names_the_matched_fingerprint` keeps the
+    `wait_closed()` form because a subprocess pipe really does have an EOF.
 
     🔴 AND IT GUARANTEES A COUNT, NEVER AN ORDER — the half that cost a red run
     after the count race was closed everywhere. `_audit` runs AFTER `_respond`,
@@ -481,7 +501,21 @@ def await_audit(out: "Drained | AuditLog", n: int, timeout: float = 15.0) -> "li
     So a POSITIONAL read has a second obligation: wait for line N BEFORE issuing
     request N+1, which makes the position a fact rather than an assumption. A
     caller that only aggregates (`len`, `any`, `all`, `sum`, `join`) has no such
-    obligation. Every positional site in this file interleaves its waits.
+    obligation.
+
+    🔴 THE OBLIGATION IS "AT MOST ONE AUDITED REQUEST IS IN FLIGHT PER WAIT",
+    NOT "one request per wait" — an earlier draft of this paragraph claimed
+    "every positional site in this file interleaves its waits", and that was
+    simply false for the three healthz sites (`test_health_is_NOT_audited`,
+    `test_health_needs_NO_client_ip_because_the_kubelet_sends_none`,
+    `test_healthz_answers_an_untrusted_peer`). Each issues TWO requests, waits
+    ONCE and reads `lines[0]`. They are sound anyway, and for a reason worth
+    spelling out rather than papering over: `/healthz` is the thing they are
+    proving is NOT audited, so only one of the two requests can produce a line
+    and `lines[0]` cannot be the wrong one. That argument is STRUCTURAL, not a
+    measurement — no mutant can demonstrate the absence of an ordering hazard
+    that the request count already rules out. A site that issues two AUDITED
+    requests and waits once has no such argument available and must interleave.
     """
     # `closed` is None for an `AuditLog`: that stream has no EOF to short-circuit
     # on, so the loop simply runs to its deadline. See `AuditLog`.
@@ -497,6 +531,73 @@ def await_audit(out: "Drained | AuditLog", n: int, timeout: float = 15.0) -> "li
         f"expected at least {n} `{AUDIT_PREFIX}` line(s) within {timeout:g}s, got "
         f"{len(lines)}{' (stdout closed early)' if ended else ''}.\n"
         f"full stdout:\n{out.text}")
+    return lines
+
+
+# How long `settle` keeps watching AFTER the server is torn down. It is the
+# width of the ceiling, and it is a real cost — 0.75s at each in-process site
+# that calls it, MEASURED at +8.3s on the whole file (279.2s -> 287.5s). Chosen
+# so a second line deferred by 300ms is caught with margin, on top of whatever
+# `shutdown()`'s 0.5s poll interval happens to contribute — which is 0 to 0.5s
+# and NOT a guarantee, which is exactly why the wait is written down here
+# instead of being leaned on.
+SETTLE_GRACE_S = 0.75
+
+
+def settle(out: "Drained | AuditLog", n: int, grace: float = SETTLE_GRACE_S) -> "list[str]":
+    """EXACTLY `n` audit lines, ever — the CEILING, which `await_audit` cannot give.
+
+    🔴 CALL IT AFTER THE `with running(...)` BLOCK, NEVER INSIDE. Inside, the
+    only thing it could observe is the same snapshot `await_audit` already
+    returned. Outside, `shutdown()`/`server_close()`/`join()` have run and the
+    grace window below runs on top of them, so a line emitted from a later
+    callback, another thread, or after a delay has somewhere to land where this
+    can see it.
+
+    🔴 WHY IT IS A WALL-CLOCK WAIT AND NOT AN EVENT. An `AuditLog` has no EOF to
+    wait for: `ThreadingHTTPServer` runs handlers as DAEMON threads, which
+    `socketserver._Threads.append` drops on the floor, so `server_close()` joins
+    nothing and `AuditLog.closed` is honestly `None`. There is no signal here to
+    convert into an `Event` — only elapsed time. That makes this ceiling a
+    BOUNDED one and the bound is `grace`: a line emitted a full second late is
+    still unobserved, and no assertion in this file claims otherwise.
+
+    🔴 A `Drained` DOES HAVE AN EOF, AND THIS TAKES IT. When `out.closed` is a
+    real `Event` the grace window is not used at all: the pipe reaching EOF is a
+    genuine "no more lines are coming", which is strictly stronger than any
+    amount of elapsed time and costs nothing. The wall-clock path below exists
+    only for the sink that has no such signal.
+
+    🔴 IT FAILS FAST AND IT FAILS SPECIFIC. The `<= n` check runs on every poll,
+    so an extra line is reported the moment it lands rather than at the end of
+    the window, and the message names the surplus records — a bare `== n` at the
+    end reports a number and leaves the reader to go find which line was extra.
+    """
+    if out.closed is not None:
+        # 🔴 `wait_closed()`, NOT `out.closed.wait()`. Identical behaviour and a
+        # DIFFERENT static shape: `test_no_test_reads_an_AUDIT_LINE_from_a_
+        # process_it_just_terminated` counts a bare `.wait` attribute as a killer
+        # verb, so the raw `Event` form makes this helper — and transitively
+        # every test that calls it — a false offender in that seam guard.
+        out.wait_closed(15.0)
+        lines = out.audit
+        assert len(lines) == n, (
+            f"the closed stream holds {len(lines)} `{AUDIT_PREFIX}` line(s) for "
+            f"an expected {n}.\nfull stream:\n{out.text}")
+        return lines
+    deadline = time.time() + grace
+    while True:
+        lines = out.audit
+        assert len(lines) <= n, (
+            f"{len(lines)} `{AUDIT_PREFIX}` line(s) for an expected {n} — a "
+            f"record was emitted after the response. Surplus:\n  "
+            + "\n  ".join(lines[n:]))
+        if time.time() >= deadline:
+            break
+        time.sleep(0.02)
+    assert len(lines) == n, (
+        f"expected exactly {n} `{AUDIT_PREFIX}` line(s), got {len(lines)}.\n"
+        f"full stream:\n{out.text}")
     return lines
 
 
@@ -2115,8 +2216,11 @@ class TestAuditLog:
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
             fetch(f"{base}/api/v1/recall/{SCOPE}")  # rejected
-            lines = await_audit(audit, 2)
-        assert len(lines) == 2
+            await_audit(audit, 2)
+        # 🔴 `settle`, NOT `assert len(lines) == 2` ON THE SNAPSHOT. The snapshot
+        # is taken microseconds after the response, so a THIRD line emitted from
+        # a later callback or another thread is invisible to it. See `settle`.
+        settle(audit, 2)
 
     def test_health_is_NOT_audited(self, store: Path):
         # It is unauthenticated and says nothing; logging it would bury the
@@ -2124,16 +2228,19 @@ class TestAuditLog:
         with running(store) as (base, audit):
             fetch(f"{base}/healthz")
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
-            lines = await_audit(audit, 1)
+            await_audit(audit, 1)
         # 🔴 A REASSURING ZERO NEEDS A POSITIVE CONTROL. `assert audit == []`
         # read the live list with nothing to wait for, so it was equally happy
         # with "the probe is not audited" and with "the sink had not appended
         # yet" — and it would have stayed green with `_audit` wired to nothing
         # at all. An audited request is issued after the probe; waiting for ITS
         # line proves the sink works, and the count then says the probe added
-        # none. (Residual: a probe line arriving after this snapshot is still
-        # unobserved — there is no EOF on an in-process sink to wait for.)
-        assert len(lines) == 1, lines
+        # none. 🔴 THE COUNT IS `settle`'s, NOT THE SNAPSHOT'S — this comment
+        # used to close with "(Residual: a probe line arriving after this
+        # snapshot is still unobserved)", and that residual is now closed for
+        # anything landing inside `SETTLE_GRACE_S` of teardown. Still bounded by
+        # that window: a sink with no EOF admits no stronger claim.
+        lines = settle(audit, 1)
         assert "/healthz" not in lines[0], lines[0]
 
     def test_the_line_carries_timestamp_path_result_and_a_token_ID(self, store: Path):
@@ -3089,8 +3196,8 @@ class TestTokenSetAndOverlapRotation:
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
             await_audit(audit, 1)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
-            lines = await_audit(audit, 2)
-        assert len(lines) == 2
+            await_audit(audit, 2)
+        lines = settle(audit, 2)
         first, second = api.token_id(GOOD_TOKEN), api.token_id(SECOND_TOKEN)
         assert first != second
         assert f"token={first}" in lines[0]
@@ -3324,10 +3431,10 @@ class TestClientIpIsCloudflareOnly:
             # RESPONSE was written; `_audit()` runs after it, on a handler
             # thread. See `drain_output` — the hazard is the server's, not the
             # subprocess pipe's, and this site is in-process.
-            lines = await_audit(audit, 21)
+            await_audit(audit, 21)
         assert code == 200, "an unidentifiable caller locked out an identified one"
         assert POINTER_LINE.encode() in body
-        assert len(lines) == 21, lines
+        lines = settle(audit, 21)
         # 🔴 THE ASSERTION THAT MAKES THIS TEST MEAN ANYTHING, and it was missing.
         # An audit found this test VACUOUS against the very hazard it names:
         # under the mutant `ip = "unknown"` (bucket every unidentified caller
@@ -3368,7 +3475,7 @@ class TestClientIpIsCloudflareOnly:
         with running(store) as (base, audit):
             code, _h, body = fetch(f"{base}/healthz", client_ip=None)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
-            lines = await_audit(audit, 1)
+            await_audit(audit, 1)
         assert (code, body) == (200, b"ok\n")
         # 🔴 A REASSURING ZERO NEEDS A POSITIVE CONTROL. `assert audit == []`
         # read the live list with nothing to wait for, so it was equally happy
@@ -3376,9 +3483,12 @@ class TestClientIpIsCloudflareOnly:
         # yet" — and it would have stayed green with `_audit` wired to nothing
         # at all. An audited request is issued after the probe; waiting for ITS
         # line proves the sink works, and the count then says the probe added
-        # none. (Residual: a probe line arriving after this snapshot is still
-        # unobserved — there is no EOF on an in-process sink to wait for.)
-        assert len(lines) == 1, lines
+        # none. 🔴 THE COUNT IS `settle`'s, NOT THE SNAPSHOT'S — this comment
+        # used to close with "(Residual: a probe line arriving after this
+        # snapshot is still unobserved)", and that residual is now closed for
+        # anything landing inside `SETTLE_GRACE_S` of teardown. Still bounded by
+        # that window: a sink with no EOF admits no stronger claim.
+        lines = settle(audit, 1)
         assert "/healthz" not in lines[0], lines[0]
 
     def test_the_source_never_reads_X_Forwarded_For(self):
@@ -3743,8 +3853,8 @@ class TestLockoutOverHTTP:
                 assert headers["Allow"] == "GET, HEAD"
             # `all(...)` over a partially-filled list is vacuously true, so the
             # count is waited for before it is read.
-            lines = await_audit(audit, 4)
-        assert len(lines) == 4, lines
+            await_audit(audit, 4)
+        lines = settle(audit, 4)
         assert all("status=method-not-allowed" in line for line in lines)
 
 
@@ -4049,10 +4159,10 @@ class TestAuditLogCannotBeForged:
     def test_a_NEWLINE_in_the_path_cannot_open_a_second_record(self, store: Path):
         with running(store) as (base, audit):
             code, _h, _b = fetch(f"{base}/api/v1/x%0a{self.FORGED}")
-            lines = await_audit(audit, 1)
+            await_audit(audit, 1)
         assert code == 401
         # ONE request, ONE record — the property nothing asserted before.
-        assert len(lines) == 1, f"the request produced {len(lines)} audit entries"
+        lines = settle(audit, 1)
         assert "\n" not in lines[0], "a newline survived into the audit record"
         assert "\r" not in lines[0]
         # 🔴 ASSERT THE PARSED FIELDS, NOT THE SPELLING. The escaped text still
@@ -4609,12 +4719,12 @@ class TestMalformedRequestLinesDoNotCrash:
     def test_it_answers_instead_of_crashing(self, store: Path, shape: bytes):
         with running(store) as (base, audit):
             data = _speak(base.split("//", 1)[1], shape)
-            lines = await_audit(audit, 1)
+            await_audit(audit, 1)
         assert data, "the request got no response at all"
         assert b"unauthorized\n" in data
         # And it was RECORDED — a crash produces no audit line, which is what
         # made this invisible to every wire-level assertion.
-        assert len(lines) == 1, f"{len(lines)} audit lines for one request"
+        lines = settle(audit, 1)
         assert "auth=fail" in lines[0]
 
     def test_the_audit_line_survives_a_missing_request_path(self, store: Path):
@@ -4648,9 +4758,9 @@ class TestMalformedRequestLinesDoNotCrash:
                 f"FROBNICATE /api/v1/recall/{SCOPE} HTTP/1.1\r\n"
                 f"Host: h\r\nCF-Connecting-IP: {CLIENT_IP}\r\n\r\n".encode(),
             )
-            lines = await_audit(audit, 1)
+            await_audit(audit, 1)
         assert b"401" in data.split(b"\r\n")[0]
-        assert len(lines) == 1
+        settle(audit, 1)
 
 
 class TestUnknownVerbsAreMeteredToo:
@@ -5227,8 +5337,8 @@ class TestTrustedProxyOverTheRealProcess:
                     token="w" * 48,
                     client_ip=SPOOF_IP,
                 )
-            lines = await_audit(out, 5)
-        assert len(lines) == 5, lines
+            await_audit(out, 5)
+        lines = settle(out, 5)
         # 🔴 THE ASSERTION THAT IS THE WHOLE DEFECT: the forged address never
         # becomes an identity. A fix that recorded the spoofed value but declined
         # to COUNT it would pass every status check and fail this one.
@@ -5753,8 +5863,8 @@ def _raw_audit_reads(fn: ast.AST) -> "list[int]":
     """Lines where `fn` reads the audit records WITHOUT going through the helper.
 
     A read is `audit` in a Load context or any `.audit` attribute; the argument
-    positions of `await_audit(...)` are subtracted, since naming the list to hand
-    it to the waiter is not reading it.
+    positions of `await_audit(...)` and `settle(...)` are subtracted, since
+    naming the record to hand it to a waiter is not reading it.
     """
     raw, in_arg = set(), set()
     for node in ast.walk(fn):
@@ -5764,12 +5874,60 @@ def _raw_audit_reads(fn: ast.AST) -> "list[int]":
         elif isinstance(node, ast.Attribute) and node.attr == "audit":
             raw.add(node.lineno)
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
-                and node.func.id == "await_audit":
+                and node.func.id in ("await_audit", "settle"):
             for arg in node.args:
                 for sub in ast.walk(arg):
                     if isinstance(sub, (ast.Name, ast.Attribute)):
                         in_arg.add(sub.lineno)
     return sorted(raw - in_arg)
+
+
+def _eof_barriers(fn: ast.AST) -> "list[int]":
+    """Lines where `fn` UNCONDITIONALLY waits for the stream's EOF.
+
+    🔴 THE POINT IS "UNCONDITIONALLY", AND IT IS WHY THIS IS NOT AN
+    `ast.walk(fn)`. The guard below used to accept a `wait_closed` MENTION
+    anywhere in the function — unordered, and inside whatever branch. MEASURED:
+    a reintroduced raw `audit[0]` was caught, and the SAME raw read alongside a
+    dead `if False: audit.wait_closed()` SURVIVED. One unreachable line bought a
+    blanket pass, which is precisely the rot the guard's own docstring claimed
+    it was immune to.
+
+    So only the function's straight-line statement sequence counts. `with`
+    bodies are descended into because `with running(...)` is how every test in
+    this file is shaped and its body always runs; `if`/`try`/`for`/`while`/
+    `match` are NOT, because whether their bodies run is exactly the question a
+    static walk cannot answer. A barrier nested in one is not rejected as
+    hostile — it is simply not counted, and the site is asked to hoist it.
+
+    Only a bare `x.wait_closed()` statement or `y = x.wait_closed()` qualifies:
+    a call buried in a lambda, a comprehension or an argument list is a mention
+    again, one layer down.
+    """
+    found: "list[int]" = []
+
+    def scan(body) -> None:
+        for stmt in body:
+            if isinstance(stmt, (ast.With, ast.AsyncWith)):
+                scan(stmt.body)
+                continue
+            value = stmt.value if isinstance(stmt, (ast.Expr, ast.Assign)) else None
+            if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) \
+                    and value.func.attr == "wait_closed":
+                found.append(value.lineno)
+
+    scan(fn.body)
+    return sorted(found)
+
+
+def _unguarded_audit_reads(fn: ast.AST) -> "list[int]":
+    """Raw audit reads in `fn` that no EOF barrier precedes. ONE predicate.
+
+    The guard below and its own controls both need this answer, and an open-coded
+    second copy is how the two drift into disagreeing about what the guard means.
+    """
+    barriers = _eof_barriers(fn)
+    return [r for r in _raw_audit_reads(fn) if not any(b < r for b in barriers)]
 
 
 def test_no_test_INDEXES_a_live_audit_list():
@@ -5791,9 +5949,23 @@ def test_no_test_INDEXES_a_live_audit_list():
     `test_the_STDOUT_audit_stream_names_the_matched_fingerprint` re-reads
     `out.audit` deliberately, to assert a CEILING ("exactly 3, ever") that a
     snapshot cannot see — and it is sound only because it calls
-    `out.wait_closed()` first, so the stream has a real EOF behind it. That is
-    the condition checked here. Delete the `wait_closed()` and this fails; it
-    cannot rot into a free pass the way a name exclusion would.
+    `out.wait_closed()` first, so the stream has a real EOF behind it.
+
+    🔴 AND "STRUCTURALLY" NOW MEANS WHAT IT SAYS — IT DID NOT. This paragraph
+    used to end "Delete the `wait_closed()` and this fails; it cannot rot into a
+    free pass the way a name exclusion would", and that second clause was FALSE.
+    The condition was `any(n.attr == "wait_closed" for n in ast.walk(fn))`: a
+    MENTION, anywhere in the function, in any branch, in any order relative to
+    the read. MEASURED: a reintroduced raw `audit[0]` was KILLED, and the same
+    read plus a dead `if False: audit.wait_closed()` SURVIVED — one unreachable
+    line, blanket pass, and the detector was demonstrably sensitive otherwise.
+    The escape hatch was pure rot channel: `wait_closed` is not even a method on
+    `AuditLog`, so no in-process test could ever have called it honestly.
+
+    The condition is now `_eof_barriers`: an UNCONDITIONAL `x.wait_closed()`
+    statement, LEXICALLY BEFORE the read. Both halves are controlled below
+    against synthetic sources, so this paragraph is machine-checked and not a
+    claim about code nobody re-read.
 
     🔴 WHAT IT CANNOT SEE: a read through an alias (`a = audit; a[0]`), a list
     passed into a helper, or a differently-named binding. It is a ledger of the
@@ -5806,19 +5978,14 @@ def test_no_test_INDEXES_a_live_audit_list():
             continue
         if not fn.name.startswith("test"):
             continue
-        reads = _raw_audit_reads(fn)
-        if not reads:
-            continue
-        waits = any(
-            isinstance(n, ast.Attribute) and n.attr == "wait_closed"
-            for n in ast.walk(fn)
-        )
-        if not waits:
-            offenders.append(f"{fn.name} (line {fn.lineno}) reads at {reads}")
+        unguarded = _unguarded_audit_reads(fn)
+        if unguarded:
+            offenders.append(f"{fn.name} (line {fn.lineno}) reads at {unguarded}")
     assert not offenders, (
         "these tests index the LIVE audit list: `_respond` runs before `_audit` "
         "and the handler threads are never joined, so the record may not be "
-        "there yet. Use `lines = await_audit(audit, n)` and index `lines`:\n  "
+        "there yet. Use `lines = await_audit(audit, n)` and index `lines`, and "
+        "`settle(audit, n)` after the `with` block for an exact count:\n  "
         + "\n  ".join(offenders)
     )
 
@@ -5833,6 +6000,40 @@ def test_no_test_INDEXES_a_live_audit_list():
         "the raw-read detector sees nothing — it is broken, and every zero it "
         "reported above is meaningless"
     )
+    assert _eof_barriers(permitted), (
+        "the permitted site's `out.wait_closed()` is not being recognised as a "
+        "barrier — the guard is passing it for some other reason"
+    )
+
+    # 🔴 CONTROLS FOR THE ESCAPE HATCH ITSELF, not just for the read detector.
+    # A guard whose exemption can be spelled by a dead line is a free pass; the
+    # three shapes below are the ones that separate "unconditional, before" from
+    # "mentioned somewhere", and the first is the mutant that SURVIVED the
+    # previous version.
+    def unguarded(src: str) -> "list[int]":
+        return _unguarded_audit_reads(ast.parse(textwrap.dedent(src)).body[0])
+
+    assert unguarded("""
+        def test_x(store):
+            with running(store) as (base, audit):
+                await_audit(audit, 1)
+            if False:
+                audit.wait_closed()
+            assert "x" in audit[0]
+    """), "a DEAD `wait_closed()` still buys a raw read a free pass"
+
+    assert unguarded("""
+        def test_x(out):
+            assert "x" in out.audit[0]
+            out.wait_closed()
+    """), "a `wait_closed()` AFTER the read was accepted as if it preceded it"
+
+    assert not unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "a real, unconditional `wait_closed()` before the read was rejected"
 
 
 class TestTrustedProxyAllowlistParsing:
@@ -6118,9 +6319,9 @@ class TestTrustedProxyOverHTTP:
         """
         with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
             code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
-            lines = await_audit(audit, 1)
+            await_audit(audit, 1)
         assert code == 200, code
-        assert len(lines) == 1
+        lines = settle(audit, 1)
         assert "peer=untrusted" in lines[0], lines[0]
         assert "auth=ok" in lines[0], lines[0]
         assert "result=200" in lines[0], lines[0]
@@ -6155,17 +6356,18 @@ class TestTrustedProxyOverHTTP:
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method="POST"
             )
-            lines = await_audit(audit, 1)
-        assert code == 405, (code, body)
-        assert body == b"read-only\n"
-        assert "peer=untrusted" in lines[0], lines[0]
-        assert f"ip={TRUSTED_PEER}" in lines[0], lines[0]
+            await_audit(audit, 1)
         # 🔴 EXACTLY ONE LINE, AND NOTHING CHARGED for a request that AUTHENTICATED
         # — a round-2 correction, not belt and braces. A mutant that mis-handles
         # the identify step's return value answers a SECOND response here and
         # charges the limiter under a `None` key; the GET path hides that on an
-        # internal assert.
-        assert len(lines) == 1, lines
+        # internal assert. `settle`, not the snapshot: the second line that
+        # mutant emits need not be synchronous with the first.
+        lines = settle(audit, 1)
+        assert code == 405, (code, body)
+        assert body == b"read-only\n"
+        assert "peer=untrusted" in lines[0], lines[0]
+        assert f"ip={TRUSTED_PEER}" in lines[0], lines[0]
         assert limiter._failures == {} and limiter._locked_until == {}
 
     def test_an_UNKNOWN_VERB_from_an_untrusted_peer_is_METERED_under_the_peer(
@@ -6182,11 +6384,11 @@ class TestTrustedProxyOverHTTP:
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method="FROBNICATE"
             )
-            lines = await_audit(audit, 1)
+            await_audit(audit, 1)
+        lines = settle(audit, 1)
         assert code == 401, (code, body)
         assert body == b"unauthorized\n"
         assert "peer=untrusted" in lines[0], lines[0]
-        assert len(lines) == 1, lines
         assert list(limiter._failures) == [TRUSTED_PEER], limiter._failures
 
     def test_the_header_is_NOT_READ_AT_ALL_from_an_untrusted_peer(self, store: Path):
@@ -6200,8 +6402,8 @@ class TestTrustedProxyOverHTTP:
         with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=SPOOF_IP)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=None)
-            lines = await_audit(audit, 2)
-        assert len(lines) == 2, lines
+            await_audit(audit, 2)
+        lines = settle(audit, 2)
         assert all(f"ip={TRUSTED_PEER}" in ln for ln in lines), lines
         assert all(f"ip={SPOOF_IP}" not in ln for ln in lines), lines
         # …and the absent header is NOT the `no-client-ip` refusal either: that
@@ -6239,7 +6441,7 @@ class TestTrustedProxyOverHTTP:
         with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
             code, _h, body = fetch(f"{base}/healthz", client_ip=None)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
-            lines = await_audit(audit, 1)
+            await_audit(audit, 1)
         assert (code, body) == (200, b"ok\n")
         # 🔴 A REASSURING ZERO NEEDS A POSITIVE CONTROL. `assert audit == []`
         # read the live list with nothing to wait for, so it was equally happy
@@ -6247,10 +6449,12 @@ class TestTrustedProxyOverHTTP:
         # yet" — and it would have stayed green with `_audit` wired to nothing
         # at all. An audited request is issued after the probe; waiting for ITS
         # line proves the sink works, and the count then says the probe added
-        # none. (Residual: a probe line arriving after this snapshot is still
-        # unobserved — there is no EOF on an in-process sink to wait for.)
-        assert len(lines) == 1, (
-            "the probe path must not audit, or Loki fills with noise", lines)
+        # none. 🔴 THE COUNT IS `settle`'s, NOT THE SNAPSHOT'S — this comment
+        # used to close with "(Residual: a probe line arriving after this
+        # snapshot is still unobserved)", and that residual is now closed for
+        # anything landing inside `SETTLE_GRACE_S` of teardown. Still bounded by
+        # that window: a sink with no EOF admits no stronger claim.
+        lines = settle(audit, 1)
         assert "/healthz" not in lines[0], lines[0]
 
     def test_a_CIDR_entry_admits_a_peer_INSIDE_it(self, store: Path):
@@ -11999,15 +12203,19 @@ class TestTheBackstopSurvivesITSOWNLogSink:
         )
         # Positive control: the detector must be able to SEE the shape it bans,
         # or the zero above is a fact about the walker and not about the handler.
+        #
+        # 🔴 NON-EMPTY, NOT `== 1`. The upper bound this used to carry BANNED
+        # what the docstring above explicitly blesses: a `traceback.print_exc`
+        # inside `main()` is a startup failure, loud and correct, and adding one
+        # failed this control with "`traceback.print_exc` is spelled at 2 sites"
+        # — a message naming a problem that is not the problem, in a test whose
+        # subject is the handler class. The control's job is only to prove the
+        # walker can see the shape; the file-wide count is not its business.
         seen = [
             n.lineno for n in ast.walk(tree)
             if isinstance(n, ast.Attribute) and n.attr == "print_exc"
         ]
         assert seen, "the print_exc detector sees nothing — it is broken"
-        assert len(seen) == 1, (
-            f"`traceback.print_exc` is spelled at {len(seen)} sites ({seen}); the "
-            "helper is supposed to be the only one"
-        )
 
 
 class TestAnUndecodableEntryNameIsNotTheCallersFault:
