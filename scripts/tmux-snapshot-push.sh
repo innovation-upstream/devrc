@@ -132,8 +132,29 @@ fi
 # log line carrying no information at all, from the one path most likely to
 # happen (a wedged ssh to a sleeping laptop). That defeats this script's own
 # distinct-exit-code doctrine at the header.
+#
+# 🔴 `--pane-preview` IS PART OF THE PAYLOAD CONTRACT, NOT A TUNING KNOB.
+# The read model exists so an operator can see what panes are showing; without
+# this flag every row arrives `pane_preview_status: disabled` and the server
+# stores a document that structurally cannot render one. It is off by DEFAULT in
+# the collector because every other consumer reads scalar fields and would pay
+# for the text — this is the one caller that wants it, so this is where it is
+# turned on.
+#
+# MEASURED 2026-08-28 on the live fleet, both forms back to back: 122,731 bytes
+# without, 322,204 with — 2.63x, of which 46 Claude panes contribute 109,256
+# characters of screen and the 26 shells contribute none (they report
+# `not_claude`, never an empty screen). That lands at ~7.7% of the server's
+# 4 MB `maxTmuxPushBytes`, so the cap is ~13x away at today's pane count.
+#
+# 🔴 IT IS THE VISIBLE SCREEN AND MUST STAY SO. Scrollback costs ~4,014 bytes
+# per line fleet-wide, which breaches that same cap at roughly 650 lines per
+# pane — `-S -1000` computes to 6.13 MB. A push over the cap is rejected 413 and
+# the read model silently keeps its LAST GOOD snapshot, so the damage would
+# present as a read model that quietly stops advancing, not as an error anyone
+# sees. History belongs to `session-manager tail`, one window at a time.
 set +e
-timeout "$COLLECT_TIMEOUT" "$SM" --json >"$PAYLOAD" 2>"$COLLECT_ERR"
+timeout "$COLLECT_TIMEOUT" "$SM" --json --pane-preview >"$PAYLOAD" 2>"$COLLECT_ERR"
 COLLECT_RC=$?
 set -e
 if [ "$COLLECT_RC" -ne 0 ]; then
