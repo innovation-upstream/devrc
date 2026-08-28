@@ -1093,6 +1093,89 @@ def the_clone_grant_permits_fetching_again(t):
         "below is about every checkout you did not make.")(t)
 
 
+def the_clone_grant_reverts_to_the_enumeration(t):
+    """Round 12's finding: round 10's wording, verbatim.
+
+    The grant is still present, still ledgered, still emitted, and still
+    refuses three verbs BY NAME — so every presence pin stays green and only
+    the enumeration probe plus the whole-string ledger can see it. That is the
+    hole: `remote update`, `switch`, `restore`, `reset`, `branch -f` and `gc`
+    are permitted by omission in the one tree whose blast radius is outside
+    the brief.
+    """
+    return reword_entry(
+        "Directive", "own-worktree-is-writable",
+        "That worktree is YOURS: fetching and checking out inside it is fine. "
+        "In the clone you made it from, `git worktree add` is the ONLY write "
+        "this brief asks for — do not `fetch`, `pull` or `checkout` there, "
+        "whoever made it, because other sessions may be standing in it. The "
+        "no-write rule below is about every checkout you did not make.")(t)
+
+
+def the_claims_file_hardcodes_the_base_ref(t):
+    """Round 12's finding: `--claims-file` mode asserting a base it never read.
+
+    The base's behaviour exactly. `base_assumed` is
+    `not data.get("baseRefName")`, so hardcoding the field switches the
+    assumed-base banner OFF in the one mode that consults no `gh` at all —
+    which is the mode three comments in the script call permanently assumed.
+    """
+    return _swap(
+        t,
+        '        data = {"title": f"PR #{args.pr}", "url": ""}',
+        '        data = {"title": f"PR #{args.pr}", "url": "", '
+        '"baseRefName": "main"}',
+    )
+
+
+# 🔴 THE CAVEAT THE LEDGER PIN HAD NO ROW FOR. Round 10 shrank C3's killer set
+# and `test_the_ledger_says_the_base_was_not_fetched` fell out of the battery
+# entirely — zero occurrences across every row — while sitting in
+# `INVARIANT_GUARDS_AND_LEDGERS`, whose declared evidence IS the battery.
+# TWO rows, because they answer different questions: V26 asks whether anything
+# detects the caveat's ABSENCE, V27 whether anything detects a REWORD that
+# leaves the old fragment pins intact.
+def the_stale_base_caveat_is_deleted(t):
+    """The caveat removed outright; every other ledger sentence untouched."""
+    return _swap(
+        t,
+        '        "⚠ `<base>` here is `" + facts.base_ref + "` **as it stands '
+        'in this "\n'
+        '        "checkout**, and it is the ONLY end of that command that can '
+        'mean "\n'
+        '        "something different where you are standing — both ends of '
+        'the range "\n'
+        '        "itself are shas. This script does not fetch (that would be '
+        'a write to "\n'
+        '        "a checkout it does not own), so a stale base re-reports '
+        'upstream work "\n'
+        '        "as this round\'s payload. If the number looks large, that is '
+        'the first "\n'
+        '        "thing to check.",\n',
+        "",
+    )
+
+
+def the_stale_base_caveat_says_it_is_fine(t):
+    """🔴 THE REACHABILITY CONTROL for the whole-string pin.
+
+    The qualifier the caveat exists for — "as it stands in THIS CHECKOUT" — is
+    replaced by an assurance that it is fine, which is the opposite
+    instruction. Both fragments the guard used to pin ("does not fetch",
+    "stale base") survive downstream untouched, so a fragment pin CANNOT see
+    this. Measured at `88b4105c`: this exact reword left the suite at 109
+    passed.
+    """
+    return _swap(
+        t,
+        '"` **as it stands in this "\n'
+        '        "checkout**, and it is the ONLY end of that command that can '
+        'mean "\n',
+        '"` and it is fine. It is the ONLY end of that command that can '
+        'mean "\n',
+    )
+
+
 def the_toolchain_names_the_shared_checkout_cross_repo_only(t):
     """🔴 THE ISOLATING ROW for round 6's 🟢 F4.
 
@@ -1307,19 +1390,33 @@ ROWS = [
       "test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout",
       "test_the_ledger_refuses_to_measure_a_checkout_that_is_not_the_pr",
       "test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head",
-      # 🔴 ROUND 10 — SEVEN OF ROUND 8's THIRTEEN LEFT THIS SET, and their
+      # 🔴 ROUND 10 — NINE OF THE NINETEEN NAMES HERE LEFT THIS SET, and their
       # departure is the FIX, measured. Round 8 made THE LEDGER's branch turn
       # on `repo_relation` ALONE, so inverting that decision sent the
       # same-repo `delta` scenario down the hand-over branch and took every
       # ledger assertion with it. The branch now asks
       # `cross_repo_holds_neither_end`, which consults the HEAD CHECK first —
       # and in `delta` that check passes, so the ledger measures whatever the
-      # repo decision says. `..._degenerate_...`, `..._cumulative_...`,
-      # `..._empty_range_...`, `..._refuses_a_failed_command_...`,
-      # `..._says_the_base_was_not_fetched`, `..._shows_the_files_...` and the
-      # fixture seam guard all stopped depending on the repo decision, which
-      # is exactly what round 10's finding B says they should never have.
-      # Re-measured, not reasoned: this set is what the battery reported.
+      # repo decision says. The nine, in full: the two `..._degenerate_...`
+      # guards, the two cumulative ones (`..._a_failed_cumulative_...` and
+      # `..._the_cumulative_figure_...`), `..._an_empty_range_...`,
+      # `..._refuses_a_failed_command_...`,
+      # `..._says_the_base_was_not_fetched`, `..._shows_the_files_...` and
+      # `test_no_cross_repo_brief_claims_its_checkout_was_verified` — all of
+      # which stopped depending on the repo decision, which is exactly what
+      # round 10's finding B says they should never have. Three arrived, so
+      # THIRTEEN distinct names remain (fifteen occurrences: the two directive
+      # guards are listed twice, once for round 4's reason and once for round
+      # 10's).
+      #
+      # 🔴 ROUND 12 CORRECTED THIS PARAGRAPH; IT WAS WRONG IN BOTH NUMBERS. It
+      # read "SEVEN OF ROUND 8's THIRTEEN", and thirteen is what REMAINS at
+      # this head, not what round 8 left. Re-derive by AST-diffing this row's
+      # name set between the two trees — `ast.walk` over the second tuple
+      # element, `set()` the string constants — never by counting the glob
+      # tokens in the sentence above, which was how seven was arrived at while
+      # two of them cover two guards each. Measured 706a6b38 -> 88b4105c: 19
+      # distinct -> 13 distinct, 9 departed, 3 arrived.
       "test_a_cross_repo_ledger_prints_a_measurement_the_head_check_vouched_for",
       "test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha",
       "test_the_clone_grant_covers_only_the_write_the_recipe_makes",
@@ -1960,6 +2057,29 @@ ROWS = [
     ("V24 an ASSUMED base branch is recorded as read",
      {"test_no_brief_states_an_assumed_base_branch_as_a_fact"},
      the_assumed_base_is_recorded_as_read),
+    # 🔴 ROUND 12. V24 mutates the PREDICATE; V25 mutates the INPUT it reads,
+    # and only the second reaches `--claims-file` mode. At `88b4105c` the mode
+    # hardcoded `baseRefName: "main"`, so V24's predicate answered correctly
+    # over a fixture that lied — the whole point of finding 1.
+    ("V25 `--claims-file` hardcodes the base ref again",
+     {"test_no_brief_states_an_assumed_base_branch_as_a_fact"},
+     the_claims_file_hardcodes_the_base_ref),
+    ("V26 THE LEDGER's stale-base caveat deleted",
+     {"test_the_ledger_says_the_base_was_not_fetched"},
+     the_stale_base_caveat_is_deleted),
+    # 🔴 THE REACHABILITY CONTROL for V26's guard, and the row that proves the
+    # whole-string pin is worth its cosmetic cost: the caveat is still present
+    # and still spells both fragments the guard used to look for.
+    ("V27 the stale-base caveat reworded into an assurance",
+     {"test_the_ledger_says_the_base_was_not_fetched"},
+     the_stale_base_caveat_says_it_is_fine),
+    # Same shape as V22: restoring a REWORDED directive necessarily moves the
+    # whole-string directive ledger too. The enumeration probe is the one that
+    # fires for THIS row's reason.
+    ("V28 the clone grant reverts to a closed verb list",
+     {"test_the_clone_grant_covers_only_the_write_the_recipe_makes",
+      "test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
+     the_clone_grant_reverts_to_the_enumeration),
 ]
 
 

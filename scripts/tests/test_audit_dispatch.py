@@ -4861,15 +4861,53 @@ def test_a_failed_cumulative_measurement_does_not_print_a_false_cause():
     assert "not a missing anchor" in out
 
 
+# 🔴 ROUND 12 — THE WHOLE CAVEAT, NORMALISED, not two fragments out of it.
+# Measured at `88b4105c`: replacing "**as it stands in this checkout**, and"
+# with "and it is fine. It" — which guts the qualifier the whole caveat exists
+# for, and inverts what it tells the reader to do — left the suite at 109
+# passed, because both pinned fragments ("does not fetch", "stale base")
+# survive the reword untouched. `claude/RULES.md` -> spelled-guards: when the
+# artifact under test IS prose, a guard on words is walkable by rewording, so
+# pin the whole normalised string and pay the cosmetic-reflow cost.
+#
+# `origin/main` is interpolated from `facts.base_ref`; this run is round 3, so
+# that is the spelling the delta half renders.
+STALE_BASE_CAVEAT = norm(
+    "⚠ `<base>` here is `origin/main` **as it stands in this checkout**, and "
+    "it is the ONLY end of that command that can mean something different "
+    "where you are standing — both ends of the range itself are shas. This "
+    "script does not fetch (that would be a write to a checkout it does not "
+    "own), so a stale base re-reports upstream work as this round's payload. "
+    "If the number looks large, that is the first thing to check."
+)
+
+
 def test_the_ledger_says_the_base_was_not_fetched():
     """The script cannot fetch (that would be a write), so it says so.
 
     A stale `<base>` re-reports upstream work as this round's payload — measured
     at 201 lines where the truth was 1.
+
+    🔴 ROUND 12 — PINNED WHOLE. This test used to assert two fragments and was
+    killed by NO row in the mutation battery: zero occurrences of its name
+    across the full 100-row log, while it sits in `INVARIANT_GUARDS_AND_LEDGERS`
+    whose declared evidence IS the battery. Round 10 removed the evidence for
+    it when the C3 killer set shrank. Rows V26 and V27 restore it — one deletes
+    the caveat (this test is the sole detector, measured), one rewords it while
+    leaving both old fragments intact (the reachability control for the whole
+    string).
     """
     rc, out, err = run_main(["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2])
     assert rc == 0, err
-    assert "does not fetch" in out and "stale base" in out
+    assert STALE_BASE_CAVEAT in norm(out), (
+        "\n\nTHE LEDGER's stale-base caveat is gone or reworded. It is the "
+        "only thing telling the reader that `--not <base>` resolves LOCALLY "
+        "in a checkout this script deliberately never fetched, and a reword "
+        "that keeps the words `does not fetch` and `stale base` while "
+        "dropping `as it stands in this checkout` inverts what it asks for "
+        "and passed a fragment pin.\n\n"
+        f"expected: {STALE_BASE_CAVEAT}\n\ngot section: {norm(out)[-1200:]}"
+    )
 
 
 # --------------------------------------------------------------------------- #
