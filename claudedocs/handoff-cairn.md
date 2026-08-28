@@ -157,33 +157,62 @@ was being grown by a branch nobody reconciled against.
    - **The named blocker merged.** `feat/cairn-p3-two-token-auth` is PR **#915**, merged
      `2026-08-27T21:15:04Z` (squash `d60c968c`). Verified by CONTENT, not ancestry: that file on
      `origin/main` and on the branch tip are the **same blob** `26688d49`.
-   - 🔴 **THE ESTIMATE IN THIS LINE WAS UNDERSTATED ~5×, AND THAT IS THE REUSABLE PART.** "Six
+   - 🔴 **THE ESTIMATE IN THIS LINE WAS UNDERSTATED 5–7×, AND THAT IS THE REUSABLE PART.** "Six
      remaining … all 11 sites" was measured before #915. On `origin/main` the file carries **59**
-     `audit[...]` subscript lines, and the converting branch's own guard docstring puts the real
-     population at **FORTY test functions**. A site count in prose is a measurement with an
-     expiry date on a file another branch is actively growing; re-measure, never carry it.
-   - **PR #948** (`feat/cairn-p3-write-path`, head `92f6650e`, +4066/−112 in that exact file)
-     removes **58** positional reads and adds **2** — and both additions are inside comments. On
-     its head, 3 `audit[...]` occurrences remain in 12,264 lines, **all three in docstrings**:
-     zero live positional reads.
-   - **It ships the durable half this card only implied.** Two AST guards —
-     `test_no_test_INDEXES_a_live_audit_list` (ledgers every raw read; permits exactly one site
-     **structurally**, via `wait_closed()`, never by name) and
-     `test_every_audit_reading_test_goes_through_the_shared_helper` (anti-vacuity: fails when
-     coverage SHRINKS) — plus a threshold test proving `== 3` can tell three readers from two.
+     `audit[...]` subscript lines across **40** offending test functions (independently
+     re-measured; the guard docstring's "forty" is exactly right), and **82** raw read lines by
+     AST. So the ratio is 5.4× on sites→lines, 6.7× on remaining→functions, 7.5× on sites→reads —
+     quote the range, not the friendliest end, because a correction stated at its low end is
+     itself an understatement. A site count in prose is a measurement with an expiry date on a
+     file another branch is actively growing; re-measure, never carry it.
+   - **PR #948** (`feat/cairn-p3-write-path`), measured at head `92f6650e`, +4066/−112 in that
+     exact file: removes **58** positional reads and adds **2**. Three `audit[...]` occurrences
+     remain in **12,262** lines — two `#` comments (one pre-existing at 3341, one added at 3648)
+     and one docstring line (5781, added). **Zero live positional reads**, re-derived by running
+     the guard's own AST algorithm: 0 offenders.
+     🔴 **An earlier draft of this bullet said "both additions are inside comments" AND "all three
+     in docstrings" — mutually exclusive, since the 2 are a subset of the 3.** It also said
+     12,264, which was a fact about `str.splitlines()`, not the file: it contains one **U+2028**
+     and one **U+2029**, which Python splits on and `wc -l` does not. Both wrong; the
+     load-bearing conclusion (zero live reads) was right, which is exactly how a wrong number
+     survives review.
+   - **It ships ONE durable guard, not three.** `test_no_test_INDEXES_a_live_audit_list` is the
+     only one #948 adds. `test_every_audit_reading_test_goes_through_the_shared_helper` and
+     `test_the_call_site_THRESHOLD_is_load_bearing_not_decorative` **already exist on `origin/main`
+     and are byte-identical at `92f6650e`** — an earlier draft credited all three to #948.
+     🔴 **And the pairing was misleading beyond the miscount:** that pre-existing anti-vacuity test
+     pins `_drain_output_call_sites() == 3`, a population of `drain_output(...)` calls **unrelated
+     to the ~40 `await_audit` conversions**. So nothing pins the converted call-site count, and
+     the conversion is *not* protected against silent shrinkage the way "anti-vacuity" implies.
+   - 🔴 **THE GUARD'S EXEMPTION IS WALKABLE, and this doc repeated its docstring's claim
+     unchecked.** The waiver is `any(isinstance(n, ast.Attribute) and n.attr == "wait_closed" for n
+     in ast.walk(fn))` — a token anywhere in the function body, **reachability-blind**. Adding
+     `if False: _unused.wait_closed()` after a raw read exempts the test, on an undefined name in
+     dead code. So "permits exactly one site structurally, it cannot rot into a free pass the way
+     a name exclusion would" is **false**; only "never by name" survives. The guard is real and it
+     caught the mutation below — it is just weaker than it says.
    - **Mutation-tested rather than trusted** (detached worktree at `92f6650e`, pristine restored):
      reinserting one `assert audit[0]` into a converted test drove
      `test_no_test_INDEXES_a_live_audit_list` **red with its own message**, naming the offending
      function and line. Killed by the guard's own assertion — not by a crash, not by a neighbour.
-   - 🔴 **THE CLAIM LOCK COULD NOT SEE THIS AND THE PR SWEEP COULD.** #948 had been public ~16 h.
-     The other session claimed `cairn-write-path` (clawgate #371, criteria 4–7, the *write path*),
-     so the slug never collided with `cairn-3` — the duplicate was real and the hard lock was
-     blind to it by construction. `gh pr list --state open` is what caught it. This is the exact
-     "not covered" class in `claudedocs/design-claim-by-push.md`; the sweep is not a fallback.
-   - **Left to do:** nothing to write. #948 is `MERGEABLE`/`CLEAN` with both required checks
-     green, and is 26 behind `main` under `strict: false` — so its green is a claim about its
-     BRANCH. The merged-tree gate belongs to the #371 session (a `devrc-integ-948` worktree on
-     `integ/948-merged` already exists). Do not run it a second time without coordinating.
+     Independently reproduced by an auditor at a different call site.
+   - 🔴 **THE HARD LOCK COULD NOT SEE THIS AND THE PR SWEEP COULD.** #948 had been public ~16 h.
+     The other session claimed `cairn-write-path` (clawgate #371, criteria 4–7, the *write path*);
+     this reader derived `cairn-3` for the test conversion. **Both sides claimed correctly and the
+     slugs simply never collided** — the overlap was in the DIFF, not the description.
+     ⚠ **That is `design-claim-by-push.md`'s "Reworded duplicates" class (line 665), NOT its "a
+     collision on work that was never claimed at all" (line 661)** — an earlier draft cited the
+     wrong one, and they are listed separately for a reason. Either way `gh pr list --state open`
+     is what caught it, and the sweep is not a fallback.
+   - **Left to do: the merged-tree gate, and NOBODY OWNS IT.** #948 was `MERGEABLE`/`CLEAN` with
+     both checks green and 28 behind `main` when measured at `92f6650e`; at
+     **2026-08-28T17:52Z** its head is `47c9849b`, state `BLOCKED`, both checks `PENDING`.
+     🔴 **An earlier draft said a `devrc-integ-948` worktree on `integ/948-merged` "already
+     exists" and told the reader not to duplicate that work. It does not exist** — no such
+     worktree on either host, no such local or remote branch. It was observed earlier in one
+     session and was gone by the end of it. Under `strict: false` a green check is a claim about
+     the BRANCH, so the merged-tree gate is genuinely still owed and the sentence that disarmed it
+     was built on a stale observation of my own — the failure this file's own rule names.
 4. ~~**Instrument the Tekton non-fire rather than chase it**~~ — **DONE**, homelab-infra #438
    (squash `bbc373ed`), `scripts/check-ci-nonfire.py` + 88 tests. 🔴 **THE CARD'S OWN SPEC WAS
    THE FIRST THING THAT HAD TO GO.** "Flag required checks pending with no PipelineRun for that
@@ -227,19 +256,33 @@ was being grown by a branch nobody reconciled against.
    of the record is the reasoning a card would cite.
 
 ## Gotchas / decisions / dead-ends
-- 🔴 **A HARD CLAIM LOCK CANNOT SEE A DUPLICATE NOBODY CLAIMED — and this handoff produced one.**
-  Rank 3 was fully implemented in open PR #948 for ~16 h before anyone here looked. The other
-  session had claimed `cairn-write-path` for the *write path*; this reader derived `cairn-3` for
-  the *test conversion*; the slugs never collided and both sessions were correct to claim what
-  they claimed. **The overlap was in the DIFF, not in the description**, which is the one place a
-  slug lock structurally cannot look. `gh pr list --state open` found it in one command.
-  Corollary for this doc's own ranked list: **a ranked item can be completed by a PR that never
-  names it**, so re-scoping means diffing the file, not reading titles.
+- 🔴 **TWO SESSIONS CAN BOTH CLAIM CORRECTLY AND STILL COLLIDE — the lock matches SLUGS, and the
+  overlap was in the DIFF.** Rank 3 was fully implemented in open PR #948 for ~16 h before anyone
+  here looked. The other session claimed `cairn-write-path` for the *write path*; this reader
+  derived `cairn-3` for the *test conversion*; neither was wrong and the slugs never met. A slug
+  lock structurally cannot look at what a branch actually changes, so `gh pr list --state open`
+  found in one command what the lock could not. ⚠ **This is `design-claim-by-push.md`'s "Reworded
+  duplicates" (line 665), not its "never claimed at all" (line 661)** — a first draft of this
+  bullet named the wrong class, and a heading saying "a duplicate nobody claimed" flatly
+  contradicted its own body. Corollary for this doc's ranked list: **a ranked item can be
+  completed by a PR that never names it**, so re-scoping means diffing the file, not reading
+  titles.
 - 🔴 **A SITE COUNT IN PROSE IS A MEASUREMENT WITH AN EXPIRY DATE.** Rank 3's "six remaining …
-  all 11 sites" was ~5× low within a day because a concurrent branch was growing the same file.
+  all 11 sites" was 5–7× low within a day because a concurrent branch was growing the same file.
   Same family as the suite-size literals below, but worse: a suite total reads as trivia, whereas
   a site count reads as *scope* and is what a session budgets against. Re-measure at the moment
   you act; never carry the number forward.
+- 🔴 **A COUNT IS A CLAIM ABOUT THE TOOL THAT PRODUCED IT.** The rank-3 rewrite said this file was
+  12,264 lines; `wc -l` says **12,262**. Both are honest: it holds one **U+2028** and one
+  **U+2029**, and Python's `str.splitlines()` treats them as line breaks while `bytes.splitlines()`
+  and `wc -l` do not. Same family as grep rendering a character invisible — **when a count matters,
+  produce it two ways that fail differently**, and prefer the byte-level one.
+- 🔴 **AN OBSERVATION FROM EARLIER IN YOUR OWN SESSION IS STILL A HYPOTHESIS ABOUT NOW.** This
+  doc's first draft told the next reader not to run the merged-tree gate because a
+  `devrc-integ-948` worktree "already exists". It had existed — it was in a `worktree list` earlier
+  the same session — and it was gone hours later. The sentence would have disarmed a gate the same
+  paragraph argues is still owed, on a stale first-hand memory that reads exactly like knowledge.
+  **Re-check immediately before the step that depends on it, not in the survey that motivated it.**
 - 🔴 **#438 took THIRTEEN adversarial rounds, and the shape of what they found is the lesson.**
   Rounds 1-5 found behaviour defects. Rounds 6-13 found almost none — what they found instead
   was **prose claiming coverage it did not provide**, which is the same defect class the tool
