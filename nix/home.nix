@@ -2956,6 +2956,36 @@ in
         # Pinned by `test_the_unit_PATH_carries_every_binary_the_collector_needs`.
         "PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.curl pkgs.gawk pkgs.gnugrep pkgs.gnused pkgs.iproute2 pkgs.openssh pkgs.python3 pkgs.tmux ]}"
         "HOME=%h"
+        # DEFENSIVE, not a fix for a live defect — and the distinction is
+        # recorded because getting it wrong nearly shipped a false claim.
+        #
+        # This host's tmux socket is at $XDG_RUNTIME_DIR/tmux-UID/default, NOT
+        # tmux's compiled-in /tmp/tmux-UID/default. If a unit cannot see
+        # TMUX_TMPDIR, `tmux list-windows -a` fails to connect and — this is the
+        # dangerous part — session-manager reports the host as `reachable: true`
+        # with an EMPTY windows array. That is a perfectly valid document, so
+        # the server accepts it and the latest-per-host upsert REPLACES a good
+        # 44-window snapshot with zero. The server's "a rejected push leaves the
+        # previous snapshot in place" protection cannot help; nothing is
+        # rejected. Silent, and destructive.
+        #
+        # 🔴 BUT IT DOES NOT HAPPEN TODAY, MEASURED BOTH WAYS. `Environment=`
+        # ADDS to the systemd user-manager environment rather than replacing it,
+        # and that environment already carries TMUX_TMPDIR=/run/user/1000
+        # (`systemctl --user show-environment`). A real transient user unit
+        # reports TMUX_TMPDIR set and sees all 44 windows, and drift-check.service
+        # — which execs the same collector with only PATH and HOME set — has been
+        # reporting 42-44 rows in its journal for weeks. An earlier revision of
+        # this comment asserted a live bug on the strength of an `env -i` probe,
+        # which is STRICTER than systemd: that probe blanks the manager
+        # environment, so it measured a condition the unit never runs in.
+        #
+        # It is kept because the inherited value comes from whatever populated
+        # the manager environment at login, this unit destroys data rather than
+        # merely failing if it is ever absent, and the cost is one line.
+        # `%t` is the user runtime dir (/run/user/UID).
+        # Pinned by `test_the_unit_gives_tmux_its_SOCKET_directory`.
+        "TMUX_TMPDIR=%t"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/tmux-snapshot-push.sh";
       X-Restart-Triggers = [

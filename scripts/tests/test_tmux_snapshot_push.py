@@ -560,6 +560,54 @@ def test_the_unit_PATH_carries_every_binary_the_collector_needs():
         assert needed in path_line, f"{needed} missing from the unit PATH: {path_line}"
 
 
+def test_the_unit_gives_tmux_its_SOCKET_directory():
+    """A DEFENSIVE invariant, and this docstring is careful about that because
+    an earlier version of it claimed a live bug that does not exist.
+
+    THE HAZARD IT GUARDS. This host's tmux socket is at
+    $XDG_RUNTIME_DIR/tmux-UID/default, not tmux's compiled-in
+    /tmp/tmux-UID/default. A unit that cannot see TMUX_TMPDIR gets a failed
+    connect, and session-manager renders that as `reachable: true` with an
+    EMPTY windows array — a perfectly valid document. The server accepts it and
+    the latest-per-host upsert REPLACES a good 44-window snapshot with zero.
+    "A rejected push leaves the previous snapshot in place" cannot help; nothing
+    is rejected. The failure is silent and it destroys data.
+
+    🔴 IT DOES NOT HAPPEN TODAY, and the correction matters more than the guard.
+    `Environment=` ADDS to the systemd user-manager environment rather than
+    replacing it, and that environment already carries
+    TMUX_TMPDIR=/run/user/1000. A real transient user unit sees all 44 windows,
+    and drift-check.service — same collector, only PATH and HOME set
+    explicitly — has reported 42-44 rows in its journal for weeks. The claim of
+    a live bug came from an `env -i` probe, which is STRICTER than systemd: it
+    blanks the manager environment and so measured a condition the unit never
+    runs in. A simulation that is harsher than production does not prove a
+    production defect.
+
+    So this pins a cheap belt-and-braces property: the unit should not depend on
+    an inherited value for something whose absence destroys data. Asserted as a
+    PROPERTY (tmux is given a runtime socket dir), not the literal `%t`, so
+    /run/user/%U also passes.
+    """
+    src = HOME_NIX.read_text()
+    marker = "systemd.user.services.tmux-snapshot-push"
+    assert marker in src
+    block = src.split(marker, 1)[1].split("systemd.user.timers.tmux-snapshot-push", 1)[0]
+    config = "\n".join(
+        ln for ln in block.splitlines() if not ln.strip().startswith("#")
+    )
+    tmux_env = [ln for ln in config.splitlines() if "TMUX_TMPDIR=" in ln]
+    assert tmux_env, (
+        "the unit does not set TMUX_TMPDIR — the collector will report the local "
+        "host as reachable with ZERO windows and overwrite a good snapshot"
+    )
+    # It must point at the runtime dir, not /tmp: %t and /run/user/%U are the
+    # two correct spellings; /tmp is exactly the wrong default we are overriding.
+    line = tmux_env[0]
+    assert ("%t" in line) or ("/run/user" in line), f"suspicious TMUX_TMPDIR: {line}"
+    assert "/tmp" not in line, f"TMUX_TMPDIR points at /tmp, which is the broken default: {line}"
+
+
 def test_the_unit_does_not_wire_the_DND_defeating_failure_toast():
     """🔴 DELIBERATE ABSENCE, pinned so nobody 'fixes' it.
 
