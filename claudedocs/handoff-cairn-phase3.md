@@ -38,7 +38,44 @@ deferred-ceiling fix      killed nothing at 92f6650e; 4 red at HEAD
 deploy is a no-op         origin/main vs branch, bare legacy token: byte-identical, 12051 bytes
 ```
 
-🔴 **Nothing has ever been run against the deployed pod.** It still serves image **`0.4.0`**; neither merge changes anything running until an image is built and pinned. **On the live pod every write answers 403** — a bare legacy token has no identity to derive an actor from. That is by design and it makes criterion 10 a hard prerequisite, not an afterthought.
+🔴 **RETRACTED 2026-08-28, and the retraction is the point.** This block used to
+read: *"Nothing has ever been run against the deployed pod. It still serves image
+`0.4.0` … **On the live pod every write answers 403** — a bare legacy token has no
+identity to derive an actor from … it makes criterion 10 a hard prerequisite."*
+The first sentence was true and **contradicted the third**: the 403 was a property
+of the code on `main`, asserted about a pod nothing had ever been run against.
+
+**Measured on the running `0.4.0` pod before it was replaced:** `POST` and `PUT`
+both answered **`405 read-only`**, not 403, against 401-unauth/200-authed controls.
+Its `server.py` was **113,082 B with 0 write-path markers** where `main` has
+**222,147 B with 16**, and it defined `do_GET`/`do_HEAD` only. There was **no write
+path deployed at all** — nothing for a credential to be refused *by*.
+
+🔴 **So criterion 10 was not "a hard prerequisite" — it was actively destructive.**
+The live secret is a single bare line and `0.4.0`'s `load_tokens` returns a plain
+`list[str]` with no per-token identity whatsoever. Deleting that line would have
+removed the only credential the running pod understood, killing every read from
+both hosts, and unblocked nothing, because nothing writeable was deployed. A
+session that trusted this paragraph would have started there.
+
+**RESOLVED by deploying `0.5.0`** (homelab-infra `734095ea`): the pod now runs
+`sha256:7bd5c648…` — read from the pod's own `imageID`, not the spec — and the
+sentence above is finally true *of the pod*:
+
+```
+POST /api/v1/entry/devrc/present/bullets  ->  403   "this credential has no
+                                                     identity … Give the holder a
+                                                     `<token> <identity> <scopes>` row"
+PUT  /api/v1/entry/devrc/present          ->  403
+unauth 401 · authed GET 200 · ALL 9 entries in `devrc/` · probe wrote 0 bullets
+```
+
+🔴 **The route is `/api/v1/entry/<scope>/<ref>/bullets` and the body field is
+`text`, not `bullet`.** `WRITE_ROUTES` declares a fixed TAIL, so `/nuance` takes
+the unchanged `405 read-only` tail — which reads exactly like "the write path is
+not deployed". Two hours were nearly spent on that; `do_POST = do_PUT = do_PATCH =
+do_DELETE = _write` is a **class attribute**, so `grep 'def do_'` shows only
+`do_GET`/`do_HEAD` on `main` too and is not evidence of a missing verb.
 
 ## Open investigations — live diagnosis state
 
@@ -61,9 +98,26 @@ deploy is a no-op         origin/main vs branch, bare legacy token: byte-identic
 
 ## Next steps (ranked)
 
-1. **Merge PR #907** (`docs/handoff-cairn-phase2`) — the phase-2 handoff doc is unmerged and lives only on its branch. Cheapest item here; `claude/RULES.md` names an uncommitted doc as unsaved work.
-2. **Criterion 10 — retire the shared token** (`devrc`: `scripts/subsystem-store-api/server.py` token file, `~/.config/subsystem-store/env` on both hosts). 🔴 **This now BLOCKS the write path**: a bare legacy token cannot write, so nothing can append until a mapped row exists. The card requires the rollback be exercised *before* the old line is deleted, and the audit log to show no request on the old fingerprint for 24h.
-3. **Build and deploy an image carrying #915 + #948.** The pod runs `0.4.0`; both merges are inert until it is pinned. `build-push.sh` needs a version argument and has **no default** — derive the next version from the LIVE pin, not from docs.
+0. ~~**Build and deploy an image carrying #915 + #948.**~~ **DONE 2026-08-28** —
+   `0.5.0` pushed (`sha256:7bd5c648…`) and pinned in homelab-infra `734095ea`;
+   rollout verified by the pod's own `imageID` and the 405→403 symptom flip above.
+   Gate: `test_subsystem_store_api.py` **602 passed**. The secret was deployed
+   **unchanged** — a bare row still reads everything, so no credential moved and no
+   read broke. Rollback is one line back to `0.4.0`.
+
+1. 🔴 **Criterion 10 is a TWO-STEP, and only the second step is the retirement.**
+   Nothing can write today: the *only* row is the bare legacy one, and it is now
+   refused (403, verified live). So **first add a mapped `<token> <identity>
+   <scopes>` row** to the `subsystem-store-token` secret (ns `subsystem-store`,
+   homelab) and prove a write lands end-to-end; **only then** delete the bare line.
+   Both shapes may coexist in one file — that coexistence *is* the migration and
+   the rollback, and putting the bare line back undoes it **without a deploy**.
+   The card still requires the rollback be exercised *before* the old line goes,
+   and the audit log to show no request on the old fingerprint for 24h.
+   ⚠ The verification must read the appended bullet **back off disk** — a 200 is
+   not proof, and the body field is `text` (omitting `session` gives 400).
+
+2. **Merge PR #907** (`docs/handoff-cairn-phase2`) — the phase-2 handoff doc is unmerged and lives only on its branch. Cheapest item here; `claude/RULES.md` names an uncommitted doc as unsaved work.
 4. **Criterion 8 — re-seed.** Store serves **75 entries / 9 scopes** against a union of **19 scopes / 139 entries** (workbench 114, laptop 26, overlap 1). Verify with `comm -23 <host entry list> <cairn ls-entries>` per host — must print zero lines.
 5. **Criterion 9 — the cutover.** `subsystem-index` skill writes through `cairn`; local store becomes a read-only cache (`stat -c %a` = 444, an attempted write returns EACCES, *watched* not assumed). 🔴 **A backup must land BEFORE this** — see the read/write allowlist residual below.
 6. **Add the `internal-error` alert** in the monitoring config. Without it the dispatch backstop converts a dropped connection into a quiet 500 that only the audit log sees.
