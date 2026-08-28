@@ -157,13 +157,15 @@ was being grown by a branch nobody reconciled against.
    - **The named blocker merged.** `feat/cairn-p3-two-token-auth` is PR **#915**, merged
      `2026-08-27T21:15:04Z` (squash `d60c968c`). Verified by CONTENT, not ancestry: that file on
      `origin/main` and on the branch tip are the **same blob** `26688d49`.
-   - 🔴 **THE ESTIMATE IN THIS LINE WAS UNDERSTATED 5–7×, AND THAT IS THE REUSABLE PART.** "Six
+   - 🔴 **THE ESTIMATE IN THIS LINE WAS UNDERSTATED 5.4×–7.3×, AND THAT IS THE REUSABLE PART.** "Six
      remaining … all 11 sites" was measured before #915. On `origin/main` the file carries **59**
      `audit[...]` subscript lines across **40** offending test functions (independently
-     re-measured; the guard docstring's "forty" is exactly right), and **82** raw read lines by
-     AST. So the ratio is 5.4× on sites→lines, 6.7× on remaining→functions, 7.5× on sites→reads —
-     quote the range, not the friendliest end, because a correction stated at its low end is
-     itself an understatement. A site count in prose is a measurement with an expiry date on a
+     re-measured; the guard docstring's "forty" is exactly right), carrying **80** raw read lines
+     by AST. So the ratio is 5.4× on sites→lines, 6.7× on remaining→functions, 7.3× on
+     sites→reads — quote the range, not the friendliest end, because a correction stated at its
+     low end is itself an understatement. ⚠ An earlier draft said 7.5×, which used **82** lines
+     across **41** functions — that population includes the one PERMITTED site, which is not an
+     offender. The offenders carry 80. A site count in prose is a measurement with an expiry date on a
      file another branch is actively growing; re-measure, never carry it.
    - **PR #948** (`feat/cairn-p3-write-path`), measured at head `92f6650e`, +4066/−112 in that
      exact file: removes **58** positional reads and adds **2**. Three `audit[...]` occurrences
@@ -176,10 +178,21 @@ was being grown by a branch nobody reconciled against.
      and one **U+2029**, which Python splits on and `wc -l` does not. Both wrong; the
      load-bearing conclusion (zero live reads) was right, which is exactly how a wrong number
      survives review.
-   - **It ships ONE durable guard, not three.** `test_no_test_INDEXES_a_live_audit_list` is the
-     only one #948 adds. `test_every_audit_reading_test_goes_through_the_shared_helper` and
+   - **Of the three guards named here, #948 adds ONE** — `test_no_test_INDEXES_a_live_audit_list`.
+     `test_every_audit_reading_test_goes_through_the_shared_helper` and
      `test_the_call_site_THRESHOLD_is_load_bearing_not_decorative` **already exist on `origin/main`
      and are byte-identical at `92f6650e`** — an earlier draft credited all three to #948.
+     ⚠ **That is a statement about THESE THREE, not about #948.** A previous wording said "it ships
+     ONE durable guard, not three", which is false at its widest reading and understates the PR in
+     the same breath as saying its merged-tree gate is still owed — the disarming shape again, in
+     the correction this time. Measured: #948 takes the file from **360 to 496 test functions**
+     (+137, −1), and several additions are durable structural guards unrelated to audit reads
+     (`test_every_ledgered_write_route_actually_dispatches`,
+     `test_the_write_route_ledger_is_the_whole_write_route_set`,
+     `test_the_verb_ledger_is_the_whole_bound_verb_surface`,
+     `test_the_route_table_and_every_handler_signature_AGREE`, and —
+     with some irony given the count error above —
+     `test_the_set_this_class_exercises_is_the_set_splitlines_ACTUALLY_splits_on`).
      🔴 **And the pairing was misleading beyond the miscount:** that pre-existing anti-vacuity test
      pins `_drain_output_call_sites() == 3`, a population of `drain_output(...)` calls **unrelated
      to the ~40 `await_audit` conversions**. So nothing pins the converted call-site count, and
@@ -200,12 +213,18 @@ was being grown by a branch nobody reconciled against.
      The other session claimed `cairn-write-path` (clawgate #371, criteria 4–7, the *write path*);
      this reader derived `cairn-3` for the test conversion. **Both sides claimed correctly and the
      slugs simply never collided** — the overlap was in the DIFF, not the description.
-     ⚠ **That is `design-claim-by-push.md`'s "Reworded duplicates" class (line 665), NOT its "a
-     collision on work that was never claimed at all" (line 661)** — an earlier draft cited the
-     wrong one, and they are listed separately for a reason. Either way `gh pr list --state open`
-     is what caught it, and the sweep is not a fallback.
-   - **Left to do: the merged-tree gate, and NOBODY OWNS IT.** #948 was `MERGEABLE`/`CLEAN` with
-     both checks green and 28 behind `main` when measured at `92f6650e`; at
+     ⚠ **`design-claim-by-push.md`'s "What is NOT covered" list has no bullet that fits this
+     exactly, and pretending otherwise has now been wrong twice.** A first draft cited "a
+     collision on work that was never claimed at all" (`:661`) — plainly wrong, both sides
+     claimed. The correction cited "Reworded duplicates" (`:665` → `:542`, *"a semantically
+     identical item that two sessions word differently"*), which is a loose fit at best: these
+     were two genuinely DIFFERENT items — a clawgate task and a handoff rank — that happened to
+     be completed by one diff. The honest statement is that the list is **missing this case**:
+     *a correctly-claimed item whose PR incidentally completes a separately-claimed one.* Worth
+     adding there. Either way `gh pr list --state open` is what caught it, and the sweep is not
+     a fallback.
+   - **Left to do: the merged-tree gate, and no evidence anyone has run it.** #948 was `MERGEABLE`/`CLEAN` with
+     both checks green when measured at `92f6650e`; at
      **2026-08-28T17:52Z** its head is `47c9849b`, state `BLOCKED`, both checks `PENDING`.
      🔴 **An earlier draft said a `devrc-integ-948` worktree on `integ/948-merged` "already
      exists" and told the reader not to duplicate that work. It does not exist** — no such
@@ -261,19 +280,21 @@ was being grown by a branch nobody reconciled against.
   here looked. The other session claimed `cairn-write-path` for the *write path*; this reader
   derived `cairn-3` for the *test conversion*; neither was wrong and the slugs never met. A slug
   lock structurally cannot look at what a branch actually changes, so `gh pr list --state open`
-  found in one command what the lock could not. ⚠ **This is `design-claim-by-push.md`'s "Reworded
-  duplicates" (line 665), not its "never claimed at all" (line 661)** — a first draft of this
-  bullet named the wrong class, and a heading saying "a duplicate nobody claimed" flatly
-  contradicted its own body. Corollary for this doc's ranked list: **a ranked item can be
+  found in one command what the lock could not. ⚠ **`design-claim-by-push.md`'s "What is NOT
+  covered" list (`:659-670`) has no bullet that fits this exactly** — not "never claimed at all"
+  (`:661`, plainly wrong here) and not really "Reworded duplicates" (`:665`, which is about one
+  item worded two ways; these were two different items completed by one diff). The gap is worth
+  filing there rather than papered over with the nearest label. Corollary for this doc's ranked
+  list: **a ranked item can be
   completed by a PR that never names it**, so re-scoping means diffing the file, not reading
   titles.
 - 🔴 **A SITE COUNT IN PROSE IS A MEASUREMENT WITH AN EXPIRY DATE.** Rank 3's "six remaining …
-  all 11 sites" was 5–7× low within a day because a concurrent branch was growing the same file.
+  all 11 sites" was 5.4×–7.3× low within a day because a concurrent branch was growing the same file.
   Same family as the suite-size literals below, but worse: a suite total reads as trivia, whereas
   a site count reads as *scope* and is what a session budgets against. Re-measure at the moment
   you act; never carry the number forward.
-- 🔴 **A COUNT IS A CLAIM ABOUT THE TOOL THAT PRODUCED IT.** The rank-3 rewrite said this file was
-  12,264 lines; `wc -l` says **12,262**. Both are honest: it holds one **U+2028** and one
+- 🔴 **A COUNT IS A CLAIM ABOUT THE TOOL THAT PRODUCED IT.** The rank-3 rewrite said
+  `scripts/tests/test_subsystem_store_api.py` was 12,264 lines; `wc -l` says **12,262**. Both are honest: it holds one **U+2028** and one
   **U+2029**, and Python's `str.splitlines()` treats them as line breaks while `bytes.splitlines()`
   and `wc -l` do not. Same family as grep rendering a character invisible — **when a count matters,
   produce it two ways that fail differently**, and prefer the byte-level one.
