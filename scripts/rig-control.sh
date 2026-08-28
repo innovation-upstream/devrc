@@ -91,7 +91,7 @@ do_sleep() {
 do_wake() {
   echo "awake" > "$STATE_FILE"
   rgb_on
-  restore
+  restore || notify "RGB on but monitor restore failed (DDC/CI)" || true
   notify "Wake mode activated"
 }
 
