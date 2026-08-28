@@ -4031,112 +4031,459 @@ def test_the_PUBKEY_DERIVATION_EMPTY_advisory_is_pinned_WHOLE(
     # `test_the_EMPTY_SHA_CONSTANT_really_is_sha256_of_NOTHING`.
 
 
-def _raise_sites_by_token(src: str) -> tuple[dict[str, int], list[int]]:
-    """`({token: raise-site count}, [unresolvable line numbers])`, by AST WALK.
+# --------------------------------------------------------------------------- #
+# 🔴 THE DESTRUCTIVE-ADVICE LEDGER — MEMBERSHIP DERIVED, NEVER HAND-LISTED
+# --------------------------------------------------------------------------- #
+# Round 4 found the class still open: SIX more messages took an append with all
+# 241 tests green, including `BYTES-DIFFER-MATERIALLY` — the tool's PRIMARY
+# comparison verdict — gaining "Then re-escrow the note from this host…" as the
+# last thing an operator reads.
+#
+# 🔴 THE CAUSE WAS NOT THE STRUCTURAL APPROACH; IT WAS ITS SCOPE. The previous
+# ledger hand-enumerated THREE tokens while the class is EVERY message carrying
+# destroy-or-not advice — thirteen of them. That is the same hand-typed hazard
+# the previous round removed one level down, reintroduced one level up: a
+# derived count, policed against a hand-written membership list.
+#
+# So membership is now DERIVED FROM THE MODULE: every `raise EscrowError` whose
+# static message text contains a destructive imperative MUST have its whole text
+# pinned below. Two-way — an unpinned destructive message fails, and a pin that
+# matches no site fails as stale.
+#
+# 🔴 IT ALSO CATCHES APPENDS TO MESSAGES THAT ARE NOT DESTRUCTIVE TODAY. Adding
+# "…re-escrow from this host" to any other refusal makes that site newly MATCH
+# the pattern, and it is then not in the pinned set — so it fails. That is the
+# property the hand-listed version could not have: it covers messages nobody
+# thought to list, which is exactly how all six were missed.
+_DESTRUCTIVE_ADVICE = re.compile(r"re-escrow|rotate|delete|overwrite|destroy",
+                                 re.IGNORECASE)
 
-    🔴 AN AST WALK, NOT A `str.count`. The predecessor counted the literal
-    `"<TOKEN>",` in the source, and an audit measured it wrong in BOTH
-    directions:
+# 🔴 MEASURED, NOT GUESSED — the module raises exactly these four callees today
+# (EscrowError x40, ValueError x3, SystemExit x2, KeyError x1, plus two bare
+# re-raises). Anything else is UNRESOLVABLE rather than skipped: see
+# `_escrow_raise_sites`.
+_KNOWN_NON_ESCROW_RAISES = frozenset({"ValueError", "SystemExit", "KeyError"})
 
-      * BLIND to 8 of 10 real spellings — a third raise site written with
-        SINGLE quotes survived, and so did one holding the token in a module
-        CONSTANT. Also invisible: a space before the comma, the comma on the
-        next line, a table lookup, concatenation, an f-string, the `token=`
-        kwarg, an `*args` splat. A predicate that misses most spellings cannot
-        do the one job this ledger exists for — catching a raise site nobody
-        counted.
-      * FALSE-ACCUSING the other way — a pure PROSE COMMENT containing the
-        token made it report "raised from 3 place(s)". A docs-only edit broke a
-        raise-site test, and the ledger's own comment claimed prose was not
-        counted.
 
-    So the token is resolved from the AST: a string literal, or a `Name` bound
-    to a module-level string constant. 🔴 A token this CANNOT resolve is
-    returned as unresolvable and the caller FAILS on it — "cannot say" must
-    never render as compliant, the same stance `backup.py`'s git-subprocess
-    walker takes.
+def _render_message(node: ast.AST) -> str:
+    """An expression's STATIC text: literals verbatim, anything else as `{expr}`.
+
+    Total by construction, so a message built by concatenating a constant onto a
+    module-level name (`"…" + NIX_SHELL_HINT`) is still readable — it renders as
+    the literal prose plus `{NIX_SHELL_HINT}`. A renderer that gave up there
+    would have excused the one site whose text it could not read, which is how a
+    fail-closed check quietly becomes a fail-open one.
+
+    🔴 CONVERSIONS AND FORMAT SPECS ARE PART OF THE TEXT. `{x}` and `{x!r}` are
+    different operator-facing output, so they must be different pins.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(_render_message(p) for p in node.values)
+    if isinstance(node, ast.FormattedValue):
+        conv = {-1: "", 114: "!r", 115: "!s", 97: "!a"}[node.conversion]
+        spec = ("" if node.format_spec is None
+                else ":" + _render_message(node.format_spec))
+        return "{" + ast.unparse(node.value) + conv + spec + "}"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _render_message(node.left) + _render_message(node.right)
+    return "{" + ast.unparse(node) + "}"
+
+
+def _escrow_raise_sites(src: str):
+    """`([(lineno, token, message text)], [reasons it could not be read])`.
+
+    🔴 AN AST WALK THAT FAILS CLOSED ON ALL THREE AXES — callee, token, message.
+
+    Round 2 found a second raise site nobody had counted. Round 3 replaced a
+    `str.count` that was blind to 8 of 10 spellings and false-accused prose.
+    Round 4 found the remaining hole: the CALLEE test failed OPEN. `if fname !=
+    "EscrowError": continue` silently dropped an ALIASED binding
+    (`_A = EscrowError`), a SUBCLASS, and an attribute callee (`self.Err(...)`)
+    — and a genuine second `PUBKEY-MISMATCH` raise carrying destructive advice,
+    spelled through an alias, survived the whole suite.
+
+    So a callee is either `EscrowError` (counted), or one of the exception types
+    this module is MEASURED to raise (skipped), or UNRESOLVABLE. The module is
+    40/40 literal `EscrowError` today, so this is prospective — which is what a
+    ledger is for.
     """
     tree = ast.parse(src)
+
     consts: dict[str, str] = {}
     for node in tree.body:
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
-                and isinstance(node.value.value, str):
-            for tgt in node.targets:
+        # 🔴 `AnnAssign` TOO. Reading only `Assign` made an annotated constant
+        # (`_TOK: str = "PUBKEY-MISMATCH"`) unresolvable, so a refactor that
+        # PRESERVED coverage was false-accused. It failed closed, which is the
+        # safe direction, but a guard that punishes a harmless refactor is a
+        # guard people route around.
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        elif isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        else:
+            continue
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            for tgt in targets:
                 if isinstance(tgt, ast.Name):
-                    consts[tgt.id] = node.value.value
+                    consts[tgt.id] = value.value
 
-    counts: dict[str, int] = {}
-    unresolved: list[int] = []
+    sites = []
+    unresolved: list[str] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
+        if not isinstance(node, ast.Raise) or node.exc is None:
+            continue                      # a bare `raise` re-raises; not a site
+        exc = node.exc
+        if isinstance(exc, ast.Name):     # `raise ValueError` with no call
+            if exc.id not in _KNOWN_NON_ESCROW_RAISES:
+                unresolved.append(f"line {node.lineno}: raises bare {exc.id!r}")
             continue
-        fn = node.exc.func
-        fname = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
+        if not isinstance(exc, ast.Call):
+            unresolved.append(
+                f"line {node.lineno}: raises a {type(exc).__name__} this walker "
+                f"cannot classify")
+            continue
+        fn = exc.func
+        if isinstance(fn, ast.Name):
+            fname = fn.id
+        else:
+            unresolved.append(
+                f"line {node.lineno}: callee {ast.unparse(fn)!r} is not a plain "
+                f"name, so whether it is EscrowError cannot be read statically")
+            continue
+        if fname in _KNOWN_NON_ESCROW_RAISES:
+            continue
         if fname != "EscrowError":
+            unresolved.append(
+                f"line {node.lineno}: raises {fname!r}, which is neither "
+                f"EscrowError nor one of the measured non-escrow types "
+                f"{sorted(_KNOWN_NON_ESCROW_RAISES)} — an alias or subclass "
+                f"would hide a raise site from this ledger")
             continue
-        tok = node.exc.args[0] if node.exc.args else None
-        for kw in node.exc.keywords:
+
+        tok = exc.args[0] if exc.args else None
+        msg = exc.args[1] if len(exc.args) > 1 else None
+        for kw in exc.keywords:
             if kw.arg == "token":
                 tok = kw.value
+            elif kw.arg == "verdict":
+                msg = kw.value
         if isinstance(tok, ast.Constant) and isinstance(tok.value, str):
-            counts[tok.value] = counts.get(tok.value, 0) + 1
+            token = tok.value
         elif isinstance(tok, ast.Name) and tok.id in consts:
-            counts[consts[tok.id]] = counts.get(consts[tok.id], 0) + 1
+            token = consts[tok.id]
         else:
-            unresolved.append(node.lineno)
+            unresolved.append(
+                f"line {node.lineno}: token is not a literal or a module-level "
+                f"string constant")
+            continue
+        if msg is None:
+            unresolved.append(f"line {node.lineno}: no message argument found")
+            continue
+        sites.append((node.lineno, token, _render_message(msg)))
+    return sites, unresolved
+
+
+def _raise_sites_by_token(src: str) -> tuple[dict[str, int], list]:
+    """The counting view of `_escrow_raise_sites`, kept for the token ledger."""
+    sites, unresolved = _escrow_raise_sites(src)
+    counts: dict[str, int] = {}
+    for _line, token, _msg in sites:
+        counts[token] = counts.get(token, 0) + 1
     return counts, unresolved
 
 
-def test_the_raise_site_WALKER_sees_the_spellings_a_substring_count_MISSED():
+# generated from 13 destructive-advice raise sites
+_PINNED_DESTRUCTIVE_TEXTS: frozenset[str] = frozenset({
+    # ITEM-NOT-FOUND  (escrow-verify.py:1174)
+    (
+        'no vault item is named exactly {item_name!r}. This is the whole '
+        'off-machine copy of the decryption key being absent: every artifact '
+        'in the bucket is still there and none of them can be opened without '
+        'the identity on this one disk. `bw list items --search` was used and'
+        ' it is FUZZY, so a near-miss would have been returned and rejected '
+        'here — check for a renamed item before concluding it was deleted.'
+    ),
+    # ITEM-AMBIGUOUS  (escrow-verify.py:1184)
+    (
+        '{len(matches)} vault items are named exactly {item_name!r}. This '
+        'script cannot tell which one is the escrow, and choosing one would '
+        'turn a coin flip into a verdict — a stale duplicate holding a '
+        'rotated-out key verifies green forever. Delete or rename the '
+        'duplicates so exactly one remains.'
+    ),
+    # NOTE-MISSING  (escrow-verify.py:1224)
+    (
+        'the vault item {item_name!r} exists but its payload carries NO '
+        '`notes` VALUE — the field is absent or null, not empty. That is a '
+        '`bw` output-schema answer, not evidence the escrow was emptied, and '
+        'the note may be perfectly intact. Do NOT re-escrow on this: read the'
+        ' item in the web vault first.'
+    ),
+    # ARTIFACT-EMPTY  (escrow-verify.py:1430)
+    (
+        'the ESCROWED key OPENED {key} and the artifact contains NOTHING. 🔴 '
+        'THE ESCROW IS FINE — age exited ZERO, which a wrong key cannot make '
+        'it do; the payload is a valid encryption of an empty file. Do NOT '
+        're-escrow or rotate on the strength of this. Run `restore-verify.py`'
+        ' to diagnose the artifact.'
+    ),
+    # ARTIFACT-CORRUPT  (escrow-verify.py:1470)
+    (
+        '🔴 {key} is TAMPERED, CORRUPT or TRUNCATED. age authenticated the '
+        'header with the ESCROWED key — which a non-matching identity cannot '
+        'do — began writing plaintext, and then FAILED on the payload. THE '
+        'ESCROW IS FINE; THE BACKUP IS NOT. This is the finding a backup '
+        'verifier exists to make: treat the artifact as unusable, check the '
+        'other retained objects for this scope, and do NOT rotate the key.'
+    ),
+    # DECRYPT-FAILED  (escrow-verify.py:1482)
+    (
+        'age REFUSED {key} without writing any plaintext at all. TWO CAUSES '
+        'PRODUCE THIS AND THEY ARE NOT SEPARABLE FROM HERE: the escrowed '
+        "identity does not match this artifact's recipients, or the "
+        "artifact's HEADER is damaged. Neither is asserted. To tell them "
+        'apart, try a DIFFERENT artifact with this same escrowed copy — '
+        '`--scope <another scope>`, or `restore-verify.py --all` for an older'
+        ' stamp: if another artifact OPENS, the escrowed key is fine and THIS'
+        " object's header is damaged; if none open, the key is the likely "
+        'cause. Do NOT rotate the key before running that.'
+    ),
+    # EXPECT-PUBKEY-MALFORMED  (escrow-verify.py:1548)
+    (
+        '--expect-pubkey is not a sha256 digest: {why}. (The value itself is '
+        'NOT echoed.) Produce it with `age-keygen -y <identity> | sha256sum |'
+        ' cut -c1-{PUBKEY_SHA_CHARS}` on a machine that holds the key. '
+        'NOTHING HAS BEEN CHECKED and the vault was NOT contacted — this '
+        'refusal is raised before any `bw` call, so no master password is '
+        'spent on a pin that could only ever mismatch. 🔴 ITS OWN CODE, NOT '
+        'PUBKEY-MISMATCH: a typo is a fact about what you typed, and '
+        'reporting it as a mismatch would accuse an intact escrow of being '
+        'the wrong key — whose remedy is to overwrite it.'
+    ),
+    # NOT-AN-AGE-IDENTITY  (escrow-verify.py:1628)
+    (
+        'the escrowed note did NOT PARSE as an age identity: `age-keygen -y` '
+        'exited {p.returncode} and produced {len(p.stdout)} bytes of output. '
+        'This is the mangling this mode exists to catch — a note '
+        'round-tripped through a web vault or a clipboard can have its line '
+        'breaks collapsed, and MEASURED 2026-08-27 (age v1.3.1) that gives '
+        "exactly this. age-keygen's stderr is NOT quoted here: it echoes the "
+        'line it could not parse, which for an identity file is KEY MATERIAL.'
+        ' 🔴 DO NOT RE-ESCROW ON THIS. What re-escrowing overwrites is the '
+        'ONLY off-machine copy of the identity every artifact in the bucket '
+        'is encrypted to; if the mangling happened on the way OUT of the '
+        'vault, the stored note is fine and you would be replacing a good '
+        'copy with whatever this machine holds. Open the item in the web '
+        'vault and look at it first.'
+    ),
+    # PUBKEY-DERIVATION-EMPTY  (escrow-verify.py:1644)
+    (
+        '`age-keygen -y` exited ZERO and printed NOTHING, so there was no '
+        'public key to hash. 🔴 THIS IS THE CHECK NOT RUNNING, NOT A CHECK '
+        'THAT FAILED, and nothing about the escrow was determined. The '
+        'hand-run pipeline cannot tell the two apart: `sha256sum` digests the'
+        ' empty stream and prints {EMPTY_SHA256_PREFIX}…, which reads as a '
+        'confident MISMATCH against a key that may be perfectly good. If you '
+        'see that value anywhere, the command did not run. Do NOT re-escrow '
+        'and do NOT rotate on this.'
+    ),
+    # NOT-AN-AGE-IDENTITY  (escrow-verify.py:1656)
+    (
+        '`age-keygen -y` exited ZERO but its {len(p.stdout)} bytes of output '
+        'are not an age recipient (`age1` + 58 base32 characters). The output'
+        ' is NOT quoted — this module cannot know what a future age-keygen '
+        'might print there, so it treats it as untrusted. Hashing it anyway '
+        'would publish a digest of an unknown string as though it were a '
+        'public key. Nothing about the escrow was determined. 🔴 DO NOT '
+        'RE-ESCROW ON THIS. What re-escrowing overwrites is the ONLY '
+        'off-machine copy of the identity every artifact in the bucket is '
+        'encrypted to, and this run learned NOTHING about whether that copy '
+        'is good. Re-run under a shell whose `age-keygen` you trust before '
+        'concluding anything.'
+    ),
+    # PUBKEY-MISMATCH  (escrow-verify.py:1708)
+    (
+        'the escrowed note IS a valid age identity, and its public half is '
+        'NOT the one you pinned: derived {got}, expected {expected_sha} (the '
+        'first {PUBKEY_SHA_CHARS} hex characters of sha256 over `age-keygen '
+        "-y`'s stdout). Both values are PUBLIC halves; no key material is "
+        'disclosed by either. 🔴 DO NOT RE-ESCROW OR ROTATE ON THIS ALONE — '
+        'CHECK THE PIPELINE FIRST. A wrong pipeline produces a FALSE MISMATCH'
+        ' ON A GOOD KEY: MEASURED 2026-08-27, `printf \'%s\' "$out" | '
+        'sha256sum` drops the trailing newline age-keygen emits and yields a '
+        'different digest, and {EMPTY_SHA256_PREFIX}… is sha256 of EMPTY '
+        'INPUT, i.e. the command never ran. Re-derive the expectation from a '
+        'key you KNOW is right and watch it reproduce before believing this. '
+        'WHAT RE-ESCROWING WOULD OVERWRITE: the Secure Note is the ONLY '
+        'off-machine copy of the identity every artifact in the bucket is '
+        'encrypted to. Overwriting it from a machine holding a DIFFERENT key '
+        'destroys the escrow and every backup with it — and that is not '
+        'hypothetical here: on 2026-08-25 an exported SOPS_AGE_KEY_FILE '
+        "pointed this subsystem's comparison at an unrelated key and the "
+        "advice given was to re-escrow. Confirm which identity the bucket's "
+        "artifacts actually open with — `restore-verify.py`, or this script's"
+        ' --decrypt-check — before touching the note.'
+    ),
+    # BYTES-DIFFER-TRAILING-NEWLINE  (escrow-verify.py:2026)
+    (
+        'the escrowed note and {identity} differ ONLY in trailing newlines: '
+        '{len(escrow)} escrowed bytes vs {len(disk)} on disk. (The differing '
+        'content is NOT printed — it is key material.) This is what a copy '
+        'through a web vault that trims looks like. An age identity still '
+        'decrypts without its final newline, so the escrow is very likely '
+        "USABLE — but it is no longer a byte-for-byte copy, and 'very likely'"
+        ' is not what a disaster-recovery artifact gets to be.{chose} '
+        'Re-escrow the file. 🔴 --decrypt-check CANNOT confirm this: this '
+        'refusal is raised BEFORE the decrypt step runs, so the flag produces'
+        ' the identical message and tests nothing. To check the trimmed bytes'
+        ' by hand, write them to a 0600 file yourself and pass it as '
+        '--identity to `restore-verify.py`.'
+    ),
+    # BYTES-DIFFER-MATERIALLY  (escrow-verify.py:2041)
+    (
+        'the escrowed note and {identity} DIFFER: {len(escrow)} escrowed '
+        'bytes vs {len(disk)} on disk, and they are not equal after trailing '
+        'newlines are removed. (The differing content is NOT printed — it is '
+        'key material; compare them by hand if you must.) One of the two '
+        'copies is not the key this subsystem encrypts to.{chose}{redirect} '
+        'Re-escrow from the on-disk identity only after confirming the '
+        "on-disk one is the one the bucket's artifacts open with — "
+        '`restore-verify.py` answers that (pass it the SAME --identity you '
+        'used here, or it will resolve its own).'
+    ),
+})
+
+
+def test_the_raise_site_WALKER_fails_CLOSED_on_every_axis():
     """POSITIVE + NEGATIVE CONTROL FOR THE LEDGER'S OWN INSTRUMENT.
 
-    A walker wired to nothing returns `{}` and the ledger below passes over an
-    empty world. So: it finds the real module's sites; it resolves the two
-    spellings that defeated the substring count; it does NOT count prose; and it
-    REFUSES a shape it cannot read.
+    A walker wired to nothing returns `{}` and every ledger below passes over an
+    empty world. So: it finds the real module's sites, it resolves the spellings
+    that defeated the substring count, it does NOT count prose or table entries,
+    and it REFUSES every shape it cannot read — including the three callee
+    spellings that used to be dropped silently.
     """
     real, unresolved = _raise_sites_by_token(SCRIPT.read_text(encoding="utf-8"))
-    assert not unresolved
-    assert sum(real.values()) >= 10, real
+    assert not unresolved, unresolved
+    # 🔴 A REAL FLOOR. This used to read `>= 10` while the true count is 40, so a
+    # walker regression losing 75% of the sites still passed its own control.
+    assert sum(real.values()) >= 35, real
+    assert len(real) >= 25, real
 
-    single = 'raise EscrowError(\n    \'NOT-AN-AGE-IDENTITY\',\n    "x")\n'
-    assert _raise_sites_by_token(single)[0] == {"NOT-AN-AGE-IDENTITY": 1}
+    def counts(src):
+        return _raise_sites_by_token(src)[0]
 
-    held = ('TOK = "NOT-AN-AGE-IDENTITY"\n'
-            'raise EscrowError(TOK, "x")\n')
-    assert _raise_sites_by_token(held)[0] == {"NOT-AN-AGE-IDENTITY": 1}
+    def refused(src):
+        return _raise_sites_by_token(src)[1]
 
-    kwarg = 'raise EscrowError(token="PUBKEY-MISMATCH", verdict="x")\n'
-    assert _raise_sites_by_token(kwarg)[0] == {"PUBKEY-MISMATCH": 1}
+    assert counts('raise EscrowError(\n    \'NOT-AN-AGE-IDENTITY\',\n    "x")\n') \
+        == {"NOT-AN-AGE-IDENTITY": 1}
+    assert counts('TOK = "NOT-AN-AGE-IDENTITY"\nraise EscrowError(TOK, "x")\n') \
+        == {"NOT-AN-AGE-IDENTITY": 1}
+    assert counts('TOK: str = "PUBKEY-MISMATCH"\nraise EscrowError(TOK, "x")\n') \
+        == {"PUBKEY-MISMATCH": 1}, "an ANNOTATED constant was false-accused"
+    assert counts('raise EscrowError(token="PUBKEY-MISMATCH", verdict="x")\n') \
+        == {"PUBKEY-MISMATCH": 1}
+    assert counts('# a comment mentioning "NOT-AN-AGE-IDENTITY", at length\nx=1\n') \
+        == {}, "prose was counted as a raise"
+    assert counts('EXIT_CODES = {"NOT-AN-AGE-IDENTITY": 35}\n') == {}, \
+        "a table entry was counted"
+    assert counts('try:\n    pass\nexcept Exception:\n    raise\n') == {}, \
+        "a bare re-raise was counted"
+    for ok in ("raise ValueError('x')\n", "raise KeyError('x')\n",
+               "raise SystemExit(3)\n", "raise ValueError\n"):
+        assert counts(ok) == {} and not refused(ok), ok
 
-    prose = '# a comment mentioning "NOT-AN-AGE-IDENTITY", at length\nx = 1\n'
-    assert _raise_sites_by_token(prose)[0] == {}, "prose was counted as a raise"
+    # 🔴 THE THREE CALLEE SPELLINGS ROUND 4 PROVED WERE DROPPED SILENTLY.
+    assert refused('_A = EscrowError\nraise _A("PUBKEY-MISMATCH", "x")\n'), \
+        "an ALIASED EscrowError binding was let through"
+    assert refused('class Sub(EscrowError):\n    pass\nraise Sub("T", "x")\n'), \
+        "a SUBCLASS callee was let through"
+    assert refused('raise self.Err("PUBKEY-MISMATCH", "x")\n'), \
+        "an ATTRIBUTE callee was let through"
+    assert refused('args = ()\nraise EscrowError(*args)\n'), \
+        "an unreadable token shape was let through"
+    assert refused('raise EscrowError("PUBKEY-MISMATCH")\n'), \
+        "a raise with no message was let through"
 
-    table = 'EXIT_CODES = {"NOT-AN-AGE-IDENTITY": 35}\n'
-    assert _raise_sites_by_token(table)[0] == {}, "a table entry was counted"
 
-    splat = 'args = ()\nraise EscrowError(*args)\n'
-    assert _raise_sites_by_token(splat)[1], "an unreadable shape was let through"
+def test_the_MESSAGE_RENDERER_reads_the_shapes_this_module_uses():
+    """The renderer is what decides whether a message is destructive, so a shape
+    it silently mis-renders is a message that escapes the ledger."""
+    assert _render_message(ast.parse('"a" "b"').body[0].value) == "ab"
+    assert _render_message(ast.parse('f"x{y}z"').body[0].value) == "x{y}z"
+    assert _render_message(ast.parse('f"{y!r}"').body[0].value) == "{y!r}"
+    assert _render_message(ast.parse('f"{y}"').body[0].value) != "{y!r}", (
+        "a conversion change must be visible to the pin, or `{x}` -> `{x!r}` "
+        "silently rewrites operator-facing output")
+    assert _render_message(ast.parse('"a" + HINT').body[0].value) == "a{HINT}"
+    assert _render_message(ast.parse('f"a{b}" "c"').body[0].value) == "a{b}c"
 
 
-def test_EVERY_raise_site_of_the_pubkey_codes_is_COVERED_by_a_whole_pin():
-    """🔴 A LEDGER OVER THE RAISE SITES, failing when the set GROWS or SHRINKS.
+def test_EVERY_destructive_advice_message_is_pinned_WHOLE():
+    """🔴 THE LEDGER OVER THE DESTROY-OR-NOT CLASS, MEMBERSHIP DERIVED.
 
-    The round-2 finding was not that a message was wrong — it was that a SECOND
-    raise site existed and nobody had counted them, and a test pinning the arms
-    it knows about cannot see a third being added.
+    Every `raise EscrowError` whose static text carries a destructive imperative
+    must have that whole text pinned. Two-way, so a pin matching no site is a
+    stale pin and fails too.
 
-    🔴 THE EXPECTED COUNT IS DERIVED FROM THE PINS THAT EXIST, never typed
-    beside them. Round 3 found the hand-typed version certifying a whole-pin for
-    `PUBKEY-MISMATCH` that did not exist — so the ledger read as coverage while
-    that message was the one message an append could walk.
+    🔴 WHY THIS SHAPE. An append is invisible to a substring assertion and to an
+    `.index()` ordering assertion — round 2 established that, and round 4 found
+    six messages still exposed because the previous ledger policed a hand-listed
+    set of three tokens. Deriving membership from the module is what makes the
+    seventh instance fail without anyone remembering to add it.
+
+    ⚠ THE TRADE, STATED: a cosmetic reword of any of these messages now costs a
+    test edit. That is the right price for a message whose subject is whether to
+    overwrite the only off-machine copy of the key every artifact is encrypted
+    to — and it is the trade the previous rounds accepted for three messages,
+    applied consistently to all of them.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    sites, unresolved = _escrow_raise_sites(src)
+    assert not unresolved, (
+        f"the walker refused to classify: {unresolved}. It will not read "
+        f"'cannot say' as compliant — fix the spelling or widen the walker in "
+        f"the same commit.")
+
+    must_pin = {text for _l, _t, text in sites
+                if _DESTRUCTIVE_ADVICE.search(text)}
+    # POSITIVE CONTROL: if this ever collapses to nothing, the pattern or the
+    # renderer has broken and the whole ledger would pass vacuously.
+    assert len(must_pin) >= 12, (
+        f"only {len(must_pin)} destructive-advice message(s) found — the "
+        f"renderer or the pattern has regressed; the measured count is 13")
+
+    unpinned = must_pin - _PINNED_DESTRUCTIVE_TEXTS
+    assert not unpinned, (
+        "these messages carry destroy-or-not advice and are NOT pinned whole. "
+        "An append to any of them reaches the operator with all tests green — "
+        "that is exactly how six were missed. Add each WHOLE text to "
+        "`_PINNED_DESTRUCTIVE_TEXTS`:\n\n"
+        + "\n\n".join(sorted(f"  {t!r}" for t in unpinned)))
+
+    stale = _PINNED_DESTRUCTIVE_TEXTS - must_pin
+    assert not stale, (
+        "these pins match no raise site in the module — the message was "
+        "reworded or removed, so the pin is now guarding nothing:\n\n"
+        + "\n\n".join(sorted(f"  {t!r}" for t in stale)))
+
+
+def test_the_pubkey_TOKENS_each_have_the_whole_pins_they_CLAIM():
+    """🔴 A LEDGER OVER THE RAISE SITES OF THE THREE TOKENS NAMED BELOW.
+
+    Scope stated exactly, because the previous docstring said "failing when the
+    set GROWS or SHRINKS" — wider than the code, which polices only the tokens
+    in `_WHOLE_PINNED_ADVISORIES`. The class-wide guarantee is the test above;
+    this one pins the RENDERED messages, including runtime values a static text
+    cannot show.
     """
     counts, unresolved = _raise_sites_by_token(SCRIPT.read_text(encoding="utf-8"))
-    assert not unresolved, (
-        f"EscrowError raised at line(s) {unresolved} with a token this walker "
-        f"cannot resolve. It refuses to read that as compliant — spell the "
-        f"token as a literal or a module-level constant, or widen "
-        f"`_raise_sites_by_token` in the same commit.")
+    assert not unresolved, unresolved
 
     for token, pins in _WHOLE_PINNED_ADVISORIES.items():
         assert counts.get(token, 0) == len(pins), (
@@ -4144,8 +4491,6 @@ def test_EVERY_raise_site_of_the_pubkey_codes_is_COVERED_by_a_whole_pin():
             f"file declares {len(pins)} whole-message pin(s) for it. A new "
             f"raise site needs its own WHOLE pin in the SAME commit.")
 
-    # Each declared pin is non-empty, pairwise distinct, and actually READ by a
-    # test in this file — a constant nothing loads is a pin in name only.
     all_pins = [p for pins in _WHOLE_PINNED_ADVISORIES.values() for p in pins]
     assert all(p.strip() for p in all_pins)
     assert len(set(all_pins)) == len(all_pins), "two pins are the same string"
@@ -4154,12 +4499,28 @@ def test_EVERY_raise_site_of_the_pubkey_codes_is_COVERED_by_a_whole_pin():
              "_ADVISORY_37", "_ADVISORY_36"}
     assert len(names) == len(all_pins), (
         "this name list and _WHOLE_PINNED_ADVISORIES have drifted apart")
-    loaded = {n.id
-              for n in ast.walk(ast.parse(
-                  Path(__file__).read_text(encoding="utf-8")))
-              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+
+    # 🔴 THE COLLECTION ITSELF IS NOT A READER. `_WHOLE_PINNED_ADVISORIES` loads
+    # all four names, so counting every `Name` Load made `missing` empty BY
+    # CONSTRUCTION for exactly the set it polices: round 4 deleted the sole
+    # assertion reading `_ADVISORY_36` AND re-applied round 3's append, and all
+    # 241 tests passed. So the collection's own node is excluded, and a pin must
+    # be loaded somewhere ELSE.
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    collection_nodes = set()
+    for node in tree.body:
+        tgts = ([node.target] if isinstance(node, ast.AnnAssign)
+                else node.targets if isinstance(node, ast.Assign) else [])
+        if any(isinstance(t, ast.Name) and t.id == "_WHOLE_PINNED_ADVISORIES"
+               for t in tgts):
+            collection_nodes.update(id(n) for n in ast.walk(node))
+    loaded = {n.id for n in ast.walk(tree)
+              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+              and id(n) not in collection_nodes}
     missing = names - loaded
-    assert not missing, f"declared but never asserted anywhere: {sorted(missing)}"
+    assert not missing, (
+        f"declared but asserted nowhere outside the collection itself: "
+        f"{sorted(missing)} — a pin no test reads is a pin in name only")
 
 
 def _secret_line(text: str) -> str:
