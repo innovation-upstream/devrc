@@ -61,8 +61,19 @@ Topic argument (optional): `$ARGUMENTS`.
 4. **Surface what the subsystem index already records for this repo** (read-only, ~1 command, no network):
 
    ```bash
-   python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo <repo>
+   python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo <path>
    ```
+
+   🔴 **`--repo` takes a PATH, not a repo name.** A bare name is resolved against your
+   **cwd**, so `--repo datapacket-talos` becomes `$PWD/datapacket-talos` and the run
+   **exits 3** with a raw `git ... cannot change to` error. Pass an absolute path or one
+   of the pre-exported handles (`$DEVRC`, `$HOMELAB`, `$DATAPACKET`, `$CIVITAI`), or use
+   **`--scope <name>`**, which names the store directory directly and skips git
+   derivation entirely. MEASURED 2026-08-28: a session following this block verbatim with
+   a bare name got the exit-3 and had to recover to `--scope`. That matters more here than
+   it looks — this command is the store's ONLY read surface, and the store spent its early
+   life with two writers and no reader; a prescribed command that errors sends it straight
+   back to unread.
 
    This is the **read half** of the store `/analyze-service` and `/handoff` write to — the terse pointer sheet that *outlives the handoff doc you just read*. It had two writers and no reader, so nothing ever opened it at resume time.
 
