@@ -45,18 +45,22 @@ status strings are all spelled again here by hand. Importing them would assert
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import http.client
 import importlib.util
+import json
 from testlib import hermetic_git  # noqa: E402
 import io
 import os
 import re
 import shutil
+import stat
 import tarfile
 import secrets
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import urllib.error
@@ -228,14 +232,21 @@ def fetch(
     auth_header=None,
     client_ip: str | None = CLIENT_IP,
     extra_headers: dict[str, str] | None = None,
+    data: bytes | None = None,
 ):
     """Return (code, headers, body-bytes) without raising on 4xx/5xx.
 
     🔴 `CF-Connecting-IP` is sent BY DEFAULT because the server requires it —
     it is the rate limiter's key, and an absent one fails closed. Pass
     `client_ip=None` to exercise exactly that.
+
+    `data` is the REQUEST body, added for the write path. `urllib` frames it
+    with a single `Content-Length`, which is the one framing `_consume_body`
+    accepts — the hostile framings (chunked, duplicated, negative) have their own
+    tests and are put on the wire by `http.client` directly, since `urllib`
+    cannot express them.
     """
-    req = urllib.request.Request(url, method=method)
+    req = urllib.request.Request(url, method=method, data=data)
     if auth_header is not None:
         req.add_header("Authorization", auth_header)
     elif token is not None:
@@ -455,9 +466,63 @@ def await_audit(out: "Drained | AuditLog", n: int, timeout: float = 15.0) -> "li
     Measured: with the server patched to emit one extra audit line at SIGTERM,
     the racy pre-helper code FAILED and the snapshot check PASSES.
 
-    A caller that means "exactly N, ever" must re-read `out.audit` after
-    `out.wait_closed()`. `test_the_STDOUT_audit_stream_names_the_matched_
-    fingerprint` does both and is the worked example.
+    🔴 SO A CALLER THAT MEANS "EXACTLY N, EVER" CALLS `settle()` — NOT THIS.
+    This paragraph used to prescribe "re-read `out.audit` after
+    `out.wait_closed()`", which is a real recipe for a `Drained` and an
+    IMPOSSIBLE one for an `AuditLog`: that class has no `wait_closed` at all and
+    its `closed` is `None` on purpose (see `AuditLog`). Nine in-process sites
+    were converted to this helper on the strength of that sentence and silently
+    lost their ceiling — a SECOND line emitted from a later callback, another
+    thread, or after any delay became invisible to them.
+
+    🔴 AND THE TWO HALVES DISAGREE, WHICH IS THE WHOLE POINT — "the ceiling is
+    gone" would be an overstatement. Measured over the 19 exact-count items:
+    with every `_audit` scheduling one extra line 50 ms or 300 ms later, the
+    snapshot assertions were green 0/19 and these `settle` assertions are red
+    18/19; with a SYNCHRONOUS second `self.audit(...)` emitted inline, the
+    SNAPSHOT assertions were already red 19/19. So the ceiling was never
+    destroyed — it was NARROWED to the synchronous case, and `settle` widens it
+    back.
+
+    🔴 AND THE ONE DEFERRED SURVIVOR IS A PROPERTY OF THAT SITE'S TEARDOWN, NOT
+    OF THE MUTANT. The survivor is the SUBPROCESS site, and the earlier reading
+    of it — "the mutant's own timer dies with the SIGTERM'd child, so that is a
+    property of the mutant" — was wrong in a way worth correcting rather than
+    quietly rewriting: `running_subprocess` `terminate()`s AND `wait()`s on
+    block exit, so that site structurally cannot observe ANY record deferred
+    past its own teardown — from a mutant, or from a real defect. The blind spot
+    belongs to the fixture. What the synchronous mutant shows is only that the
+    site's assertion works when the extra record arrives BEFORE teardown.
+    `test_the_STDOUT_audit_stream_names_the_matched_fingerprint` keeps the
+    `wait_closed()` form because a subprocess pipe really does have an EOF.
+
+    🔴 AND IT GUARANTEES A COUNT, NEVER AN ORDER — the half that cost a red run
+    after the count race was closed everywhere. `_audit` runs AFTER `_respond`,
+    so a client can send request N+1 while handler N has still not appended:
+    request N's line can land SECOND. `await_audit(audit, 2)` is then perfectly
+    satisfied by two lines in the WRONG order, and a caller reading `lines[0]`
+    attributes one request's fields to another. MEASURED: with every positional
+    site waiting only at the end, `test_a_ROTATION_end_to_end_old_still_works_
+    then_stops` failed on `lines[0]` inside a full-file run.
+
+    So a POSITIONAL read has a second obligation: wait for line N BEFORE issuing
+    request N+1, which makes the position a fact rather than an assumption. A
+    caller that only aggregates (`len`, `any`, `all`, `sum`, `join`) has no such
+    obligation.
+
+    🔴 THE OBLIGATION IS "AT MOST ONE AUDITED REQUEST IS IN FLIGHT PER WAIT",
+    NOT "one request per wait" — an earlier draft of this paragraph claimed
+    "every positional site in this file interleaves its waits", and that was
+    simply false for the three healthz sites (`test_health_is_NOT_audited`,
+    `test_health_needs_NO_client_ip_because_the_kubelet_sends_none`,
+    `test_healthz_answers_an_untrusted_peer`). Each issues TWO requests, waits
+    ONCE and reads `lines[0]`. They are sound anyway, and for a reason worth
+    spelling out rather than papering over: `/healthz` is the thing they are
+    proving is NOT audited, so only one of the two requests can produce a line
+    and `lines[0]` cannot be the wrong one. That argument is STRUCTURAL, not a
+    measurement — no mutant can demonstrate the absence of an ordering hazard
+    that the request count already rules out. A site that issues two AUDITED
+    requests and waits once has no such argument available and must interleave.
     """
     # `closed` is None for an `AuditLog`: that stream has no EOF to short-circuit
     # on, so the loop simply runs to its deadline. See `AuditLog`.
@@ -473,6 +538,132 @@ def await_audit(out: "Drained | AuditLog", n: int, timeout: float = 15.0) -> "li
         f"expected at least {n} `{AUDIT_PREFIX}` line(s) within {timeout:g}s, got "
         f"{len(lines)}{' (stdout closed early)' if ended else ''}.\n"
         f"full stdout:\n{out.text}")
+    return lines
+
+
+# How long `settle` keeps watching AFTER the server is torn down. It is the
+# width of the ceiling, and it is a real cost. Chosen so a second line deferred
+# by 300ms is caught with margin, on top of whatever `shutdown()`'s 0.5s poll
+# interval happens to contribute — which is 0 to 0.5s and NOT a guarantee, which
+# is exactly why the wait is written down here instead of being leaned on.
+#
+# 🔴 THE COST IS 13.76s, AND IT IS MEASURED INSIDE THE HELPER, NOT BY DIFFING
+# TWO SUITE RUNS. An earlier version of this comment claimed "+8.3s (279.2s ->
+# 287.5s)", which was the difference of two single whole-file runs — an
+# instrument that cannot see this effect: four whole-file runs of the SAME tree
+# in one sitting came in at 273.6s, 288.9s, 290.4s and 302.4s, a 28.8s spread
+# over a ~14s quantity. That number was also reasoned from a site count that
+# missed the x5 parametrization on
+# `TestMalformedRequestLinesDoNotCrash.test_it_answers_instead_of_crashing`:
+# 15 call SITES, but 19 call EXECUTIONS.
+#
+# METHOD: a pytest plugin wraps `settle` and sums the helper's OWN wall time
+# over a whole-file run. 19 calls — 1 on the free EOF path (a `Drained`) and 18
+# on the wall-clock path — totalling 13.76s, against 0.00s for the identical
+# run with the grace forced to 0. So 13.76s is attributable to the window, and
+# the arithmetic floor agrees: 18 x 0.75 = 13.5s.
+SETTLE_GRACE_S = 0.75
+
+
+def settle(out: "Drained | AuditLog", n: int, grace: float = SETTLE_GRACE_S) -> "list[str]":
+    """EXACTLY `n` audit lines, ever — the CEILING, which `await_audit` cannot give.
+
+    🔴 CALL IT AFTER THE `with running(...)` BLOCK, NEVER INSIDE, and
+    `test_settle_is_called_AFTER_the_running_block_never_inside` enforces that
+    structurally rather than leaving it to this sentence.
+
+    🔴 AND THE REASON IS TEARDOWN, NOT THE POLL. An earlier version of this
+    paragraph said that inside the block "the only thing it could observe is the
+    same snapshot `await_audit` already returned", and that is not what the code
+    does: the grace loop below would still run its 0.75s inside the block and
+    would still catch a line deferred by 300ms. What it could NOT catch there is
+    the case the ceiling exists for — a line emitted BY teardown, from
+    `shutdown()`/`server_close()`/`thread.join()` or from a handler thread that
+    only finishes as the block exits. None of that has happened yet on the
+    inside, so the window would be spent watching a server that is still up.
+
+    🔴 WHY IT IS A WALL-CLOCK WAIT AND NOT AN EVENT. An `AuditLog` has no EOF to
+    wait for: `ThreadingHTTPServer` runs handlers as DAEMON threads, which
+    `socketserver._Threads.append` drops on the floor, so `server_close()` joins
+    nothing and `AuditLog.closed` is honestly `None`. There is no signal here to
+    convert into an `Event` — only elapsed time. That makes this ceiling a
+    BOUNDED one, and the bound is `grace` PLUS whatever teardown itself costs
+    before the loop starts. MEASURED against a server patched to emit one extra
+    audit line per request after a delay, over the 19 exact-count items:
+    18/19 red at 300ms, 18/19 red at 1.0s, 0/19 at 1.5s. So the sentence this
+    replaces — "a line emitted a full second late is still unobserved" — was
+    FALSE, and contradicted `SETTLE_GRACE_S`'s own comment just above it: the
+    effective window is roughly 0.75-1.25s, not a flat 0.75s. What is true is
+    that the window is finite and this docstring is where its width is written
+    down; no assertion in this file claims a line arriving after it is caught.
+
+    🔴 A 0.75s WALL-CLOCK BOUND INSIDE AN ASSERTION IS THE SHAPE THAT PRODUCES
+    FLAKES, SO HERE IS WHY THIS ONE CANNOT FAIL FALSELY. The bound is on how
+    long a surplus has to ARRIVE, never on how long anything has to FINISH.
+    (a) Every call site runs `await_audit(out, n)` first, so `len >= n` already
+    holds on entry and the `<= n` assertion can only fire on a genuine surplus —
+    it is not racing the arrival of the n records it expects. (b) The sink
+    handed to `build_server` is `audit.append` and nothing in this file removes
+    an element, so a count that reached n cannot drop back below it. (c) The
+    grace deadline and any deferred emitter are on the SAME wall clock, so a
+    saturated host stretches both and cannot shrink the window relative to what
+    it is watching for. The failure mode this leaves is the honest one — a
+    surplus arriving after the window is MISSED, never a green run turned red.
+
+    🔴 A `Drained` DOES HAVE AN EOF, AND THIS TAKES IT. When `out.closed` is a
+    real `Event` the grace window is not used at all: the pipe reaching EOF is a
+    genuine "no more lines are coming", which is strictly stronger than any
+    amount of elapsed time and costs nothing. The wall-clock path below exists
+    only for the sink that has no such signal.
+
+    🔴 IT FAILS FAST, AND IT PRINTS THE WHOLE LEDGER RATHER THAN GUESSING WHICH
+    LINE IS THE EXTRA. The `<= n` check runs on every poll, so an extra line is
+    reported the moment it lands rather than at the end of the window. It used
+    to print `lines[n:]` under the heading "Surplus", which quietly assumed the
+    records arrive in the order they were requested — the exact assumption
+    `await_audit`'s docstring exists to deny ("IT GUARANTEES A COUNT, NEVER AN
+    ORDER"). At an interleaved site a deferred record can land BETWEEN two
+    genuine ones, and the slice then names a genuine record as the intruder.
+    Never a pass/fail difference; purely a message that sends the reader to the
+    wrong line, which is the failure mode the fail-specific claim was about.
+    """
+    if out.closed is not None:
+        # 🔴 `wait_closed()`, NOT `out.closed.wait()`. Identical behaviour and a
+        # DIFFERENT static shape: `test_no_test_reads_an_AUDIT_LINE_from_a_
+        # process_it_just_terminated` counts a bare `.wait` attribute as a killer
+        # verb, so the raw `Event` form makes this helper — and transitively
+        # every test that calls it — a false offender in that seam guard.
+        #
+        # 🔴 AND ITS ANSWER IS ASSERTED, NOT DISCARDED. `wait_closed` returns
+        # whether EOF was actually reached; on a timeout the discarded form
+        # degraded silently into a bare snapshot with no ceiling at all, and
+        # then reported "the closed stream holds ..." about a stream that was
+        # not closed. That is the docstring's "A `Drained` DOES HAVE AN EOF, AND
+        # THIS TAKES IT" claiming a state which did not hold.
+        assert out.wait_closed(15.0), (
+            f"the stream never reached EOF within 15s, so there is no ceiling to "
+            f"check — it holds {len(out.audit)} `{AUDIT_PREFIX}` line(s) so far "
+            f"for an expected {n}.\nfull stream:\n{out.text}")
+        lines = out.audit
+        assert len(lines) == n, (
+            f"the closed stream holds {len(lines)} `{AUDIT_PREFIX}` line(s) for "
+            f"an expected {n}.\nfull stream:\n{out.text}")
+        return lines
+    deadline = time.time() + grace
+    while True:
+        lines = out.audit
+        assert len(lines) <= n, (
+            f"{len(lines)} `{AUDIT_PREFIX}` line(s) for an expected {n} — a "
+            f"record was emitted after the response. The records are NOT "
+            f"ordered by request (see `await_audit`), so which of these is the "
+            f"extra cannot be read off its position; all of them:\n  "
+            + "\n  ".join(lines))
+        if time.time() >= deadline:
+            break
+        time.sleep(0.02)
+    assert len(lines) == n, (
+        f"expected exactly {n} `{AUDIT_PREFIX}` line(s), got {len(lines)}.\n"
+        f"full stream:\n{out.text}")
     return lines
 
 
@@ -1589,7 +1780,11 @@ class TestSnapshotRoute:
             )
         raw = sum(p.stat().st_size for p in store.glob("*/*.md"))
         with running(store) as (base, _):
-            _c, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+            code, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        # 🔴 THE STATUS, FIRST. This used to be `_c, _h, body` — the code
+        # discarded — so a 9-byte error body satisfied `len(body) < raw` and the
+        # test passed having measured no archive at all.
+        assert code == 200, (code, body)
         assert len(body) < raw, (
             f"archive {len(body)}B vs {raw}B of markdown — compression is off "
             f"or PAX overhead is dominating again"
@@ -1750,10 +1945,22 @@ class TestSnapshotRoute:
         assert not any(n.endswith(".txt") for n in names), names
 
     def test_taking_a_snapshot_leaves_the_store_BYTE_IDENTICAL(self, store: Path):
+        """🔴 THE SNAPSHOTS MUST HAVE HAPPENED. Both `fetch` results used to be
+        discarded, so the only assertion was `tree_hash == before` — which a
+        server that answered 401 to everything satisfies perfectly, having
+        touched nothing because it did nothing. "Unchanged" is only a claim
+        about the archiver if the archiver ran.
+        """
         before = tree_hash(store)
         with running(store) as (base, _):
-            fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
-            fetch(f"{base}/api/v1/snapshot?scope={SCOPE}", token=GOOD_TOKEN)
+            whole, _h, whole_body = fetch(
+                f"{base}/api/v1/snapshot", token=GOOD_TOKEN
+            )
+            scoped, _h2, scoped_body = fetch(
+                f"{base}/api/v1/snapshot?scope={SCOPE}", token=GOOD_TOKEN
+            )
+        assert whole == 200, (whole, whole_body)
+        assert scoped == 200, (scoped, scoped_body)
         assert tree_hash(store) == before
 
 
@@ -2075,19 +2282,37 @@ class TestAuditLog:
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
             fetch(f"{base}/api/v1/recall/{SCOPE}")  # rejected
-        assert len(audit) == 2
+            await_audit(audit, 2)
+        # 🔴 `settle`, NOT `assert len(lines) == 2` ON THE SNAPSHOT. The snapshot
+        # is taken microseconds after the response, so a THIRD line emitted from
+        # a later callback or another thread is invisible to it. See `settle`.
+        settle(audit, 2)
 
     def test_health_is_NOT_audited(self, store: Path):
         # It is unauthenticated and says nothing; logging it would bury the
         # /api/* lines the log exists for under kubelet probe traffic.
         with running(store) as (base, audit):
             fetch(f"{base}/healthz")
-        assert audit == []
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            await_audit(audit, 1)
+        # 🔴 A REASSURING ZERO NEEDS A POSITIVE CONTROL. `assert audit == []`
+        # read the live list with nothing to wait for, so it was equally happy
+        # with "the probe is not audited" and with "the sink had not appended
+        # yet" — and it would have stayed green with `_audit` wired to nothing
+        # at all. An audited request is issued after the probe; waiting for ITS
+        # line proves the sink works, and the count then says the probe added
+        # none. 🔴 THE COUNT IS `settle`'s, NOT THE SNAPSHOT'S — this comment
+        # used to close with "(Residual: a probe line arriving after this
+        # snapshot is still unobserved)", and that residual is now closed for
+        # anything landing inside `SETTLE_GRACE_S` of teardown. Still bounded by
+        # that window: a sink with no EOF admits no stronger claim.
+        lines = settle(audit, 1)
+        assert "/healthz" not in lines[0], lines[0]
 
     def test_the_line_carries_timestamp_path_result_and_a_token_ID(self, store: Path):
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
-        line = audit[0]
+            line = await_audit(audit, 1)[0]
         assert "ts=2" in line
         assert f"path=/api/v1/recall/{SCOPE}" in line
         assert "result=200" in line
@@ -2098,7 +2323,7 @@ class TestAuditLog:
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
-        joined = "\n".join(audit)
+            joined = "\n".join(await_audit(audit, 2))
         assert GOOD_TOKEN not in joined
         assert "w" * 48 not in joined, "a rejected token was echoed into the log"
 
@@ -2107,9 +2332,10 @@ class TestAuditLog:
     ):
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
-        assert "auth=fail" in audit[0]
-        assert "token=-" in audit[0]
-        assert "result=401" in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert "auth=fail" in line
+        assert "token=-" in line
+        assert "result=401" in line
 
     def test_the_token_id_is_a_DIGEST_not_a_prefix_of_the_token(self):
         tid = api.token_id(GOOD_TOKEN)
@@ -2582,16 +2808,89 @@ class TestPhaseOneScope:
     exposure added here fails a test rather than a review.
     """
 
-    def test_the_server_declares_no_write_handler(self):
+    # 🔴 THE VERB LEDGER — the CONVERTED write guard (phase 3, criterion 7).
+    #
+    # It used to be a `str in SERVER_PATH.read_text()` for the exact line
+    # `do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write`, plus four
+    # `"def do_POST" not in src` probes. That guard was WALKED IN THE COMMIT THAT
+    # CONVERTED IT, and the walk is worth recording because nobody aimed at it:
+    # the write path rebound the aliases to `_write` and, in the same edit,
+    # QUOTED THE OLD LINE IN THE MODULE DOCSTRING while explaining the change.
+    # The substring was still in the file, so all 408 tests stayed green over a
+    # server that had just grown two write endpoints. `claude/RULES.md`: a guard
+    # on a SPELLING is walkable by re-spelling — here, by writing the spelling
+    # somewhere it does not execute.
+    #
+    # So it is structural now, over the CLASS rather than the source text. It
+    # pins the whole `do_*` surface AND what each verb is bound to, in both
+    # directions: a new verb (`do_OPTIONS`), a removed one, or an existing one
+    # rebound to a different function all fail. Prose cannot satisfy it, because
+    # nothing here reads prose.
+    # The value is the name of the FUNCTION the verb resolves to. `do_GET` and
+    # `do_HEAD` are their own one-line methods (so they name themselves); the
+    # four mutating verbs are ALIASES of one function, and `__name__` is what
+    # sees through an alias — a `def do_POST(self): …` would name itself and
+    # fail, and `do_DELETE = _handle` would name `_handle` and fail.
+    VERBS: "dict[str, str]" = {
+        "do_GET": "do_GET",
+        "do_HEAD": "do_HEAD",
+        # Every mutating verb goes through ONE door. The ones with no row in
+        # `WRITE_ROUTES` — PATCH and DELETE — reach it and take its 405 tail.
+        "do_POST": "_write",
+        "do_PUT": "_write",
+        "do_PATCH": "_write",
+        "do_DELETE": "_write",
+    }
+
+    def test_the_verb_ledger_is_the_whole_bound_verb_surface(self):
+        bound = {
+            name for name in dir(api.StoreRequestHandler) if name.startswith("do_")
+        }
+        assert bound == set(self.VERBS), (
+            f"the handler binds {sorted(bound)} but the ledger says "
+            f"{sorted(self.VERBS)} — add the verb to VERBS on purpose, or unbind it"
+        )
+        for verb, target in sorted(self.VERBS.items()):
+            assert getattr(api.StoreRequestHandler, verb).__name__ == target, (
+                f"{verb} resolves to "
+                f"{getattr(api.StoreRequestHandler, verb).__name__}, not {target}"
+            )
+
+    def test_no_verb_is_declared_as_its_own_method(self):
+        """The aliasing above is what makes the ledger readable in one place. A
+        `def do_POST(self)` would satisfy the identity check only by being the
+        thing it names, so the shape is pinned separately."""
         src = SERVER_PATH.read_text()
-        # `do_POST` etc. exist ONLY as aliases of the 405 rejecter.
-        assert "do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write" in src
         for handler in ("def do_POST", "def do_PUT", "def do_PATCH", "def do_DELETE"):
             assert handler not in src
 
     # 🔴 THE LEDGER. Adding a route means adding it HERE, on purpose, in the
     # same commit. That is the whole point of the guard below.
     ROUTES: tuple[str, ...] = ("recall", "search", "snapshot")
+
+    # …and the same rule for the WRITE table, which is keyed on `(verb, head)`
+    # because `POST .../bullets` and `PUT .../<ref>` are different operations on
+    # one noun. Adding a row here is adding a public, internet-reachable write
+    # endpoint; the arity and the fixed tail are part of the row because
+    # `len(parts) == arity` mutated to `>=` once survived 318 tests on the read
+    # side, and the tail is the only thing that stops `POST entry/a/b/anything`
+    # from dispatching as an append.
+    WRITE_ROUTES: "dict[tuple[str, str], tuple[str, int, tuple[str, ...]]]" = {
+        ("POST", "entry"): ("_append_bullet", 4, ("bullets",)),
+        ("PUT", "entry"): ("_replace_entry", 3, ()),
+    }
+
+    def test_the_write_route_ledger_is_the_whole_write_route_set(self):
+        assert api.WRITE_ROUTES == self.WRITE_ROUTES, (
+            f"the write router dispatches {sorted(api.WRITE_ROUTES)} but the "
+            f"ledger says {sorted(self.WRITE_ROUTES)}"
+        )
+
+    def test_every_ledgered_write_route_actually_dispatches(self):
+        for key, (handler, arity, tail) in api.WRITE_ROUTES.items():
+            assert hasattr(api.StoreRequestHandler, handler), f"{key} -> {handler}"
+            assert arity >= 1, f"{key} has arity {arity}"
+            assert len(tail) < arity, f"{key} tail {tail} is longer than its path"
 
     def test_the_route_ledger_is_the_whole_route_set(self, store: Path):
         """🔴 REWRITTEN TWICE, and the FIRST rewrite was still a spelled guard.
@@ -2958,16 +3257,20 @@ class TestTokenSetAndOverlapRotation:
         useless on the only deployment shape that needs it.
         """
         with running(store, tokens=(GOOD_TOKEN, SECOND_TOKEN)) as (base, audit):
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            await_audit(audit, 1)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
-        assert len(audit) == 2
+            await_audit(audit, 2)
+        lines = settle(audit, 2)
         first, second = api.token_id(GOOD_TOKEN), api.token_id(SECOND_TOKEN)
         assert first != second
-        assert f"token={first}" in audit[0]
-        assert f"token={second}" in audit[1]
-        assert "auth=ok" in audit[0] and "auth=ok" in audit[1]
+        assert f"token={first}" in lines[0]
+        assert f"token={second}" in lines[1]
+        assert "auth=ok" in lines[0] and "auth=ok" in lines[1]
         # And never the credential itself, on either line.
-        joined = "\n".join(audit)
+        joined = "\n".join(lines)
         assert GOOD_TOKEN not in joined and SECOND_TOKEN not in joined
 
     def test_authorize_compares_against_EVERY_token_with_no_early_exit(
@@ -3037,10 +3340,14 @@ class TestTokenSetAndOverlapRotation:
             assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)[0] == 401
         # Step 2: OVERLAP — both accepted, and the log tells them apart.
         with running(store, tokens=(SECOND_TOKEN, GOOD_TOKEN)) as (base, audit):
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
             assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)[0] == 200
+            await_audit(audit, 1)
             assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)[0] == 200
-        assert f"token={api.token_id(GOOD_TOKEN)}" in audit[0]
-        assert f"token={api.token_id(SECOND_TOKEN)}" in audit[1]
+            lines = await_audit(audit, 2)
+        assert f"token={api.token_id(GOOD_TOKEN)}" in lines[0]
+        assert f"token={api.token_id(SECOND_TOKEN)}" in lines[1]
         # Step 3: the old token is REMOVED. 🔴 This is the assertion that makes
         # the whole exercise mean something.
         with running(store, tokens=(SECOND_TOKEN,)) as (base, _):
@@ -3085,7 +3392,8 @@ class TestClientIpIsCloudflareOnly:
     def test_the_audit_line_carries_the_CF_Connecting_IP(self, store: Path):
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=CLIENT_IP)
-        assert f"ip={CLIENT_IP}" in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert f"ip={CLIENT_IP}" in line
 
     def test_a_spoofed_X_Forwarded_For_does_NOT_win(self, store: Path):
         """🔴 Both headers present, DIFFERENT values. The CF one must be the one
@@ -3098,9 +3406,10 @@ class TestClientIpIsCloudflareOnly:
                 client_ip=CLIENT_IP,
                 extra_headers={"X-Forwarded-For": SPOOF_IP},
             )
+            line = await_audit(audit, 1)[0]
         assert code == 200
-        assert f"ip={CLIENT_IP}" in audit[0]
-        assert SPOOF_IP not in audit[0], "a caller-supplied address was trusted"
+        assert f"ip={CLIENT_IP}" in line
+        assert SPOOF_IP not in line, "a caller-supplied address was trusted"
 
     def test_X_Forwarded_For_ALONE_fails_CLOSED(self, store: Path):
         """The header an attacker controls cannot substitute for the one
@@ -3113,10 +3422,11 @@ class TestClientIpIsCloudflareOnly:
                 client_ip=None,
                 extra_headers={"X-Forwarded-For": SPOOF_IP},
             )
+            line = await_audit(audit, 1)[0]
         assert code == 401
         assert body == b"unauthorized\n"
-        assert "status=no-client-ip" in audit[0]
-        assert SPOOF_IP not in audit[0]
+        assert "status=no-client-ip" in line
+        assert SPOOF_IP not in line
 
     def test_a_MISSING_CF_Connecting_IP_fails_closed_even_with_a_VALID_token(
         self, store: Path
@@ -3125,9 +3435,10 @@ class TestClientIpIsCloudflareOnly:
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=None
             )
+            line = await_audit(audit, 1)[0]
         assert code == 401
         assert body == b"unauthorized\n"
-        assert "auth=fail" in audit[0] and "ip=-" in audit[0]
+        assert "auth=fail" in line and "ip=-" in line
 
     def test_a_MANGLED_CF_Connecting_IP_fails_closed(self, store: Path):
         for value in ("not-an-ip", "", "203.0.113.7, 198.51.100.4", "999.1.1.1"):
@@ -3186,10 +3497,10 @@ class TestClientIpIsCloudflareOnly:
             # RESPONSE was written; `_audit()` runs after it, on a handler
             # thread. See `drain_output` — the hazard is the server's, not the
             # subprocess pipe's, and this site is in-process.
-            lines = await_audit(audit, 21)
+            await_audit(audit, 21)
         assert code == 200, "an unidentifiable caller locked out an identified one"
         assert POINTER_LINE.encode() in body
-        assert len(lines) == 21, lines
+        lines = settle(audit, 21)
         # 🔴 THE ASSERTION THAT MAKES THIS TEST MEAN ANYTHING, and it was missing.
         # An audit found this test VACUOUS against the very hazard it names:
         # under the mutant `ip = "unknown"` (bucket every unidentified caller
@@ -3229,8 +3540,22 @@ class TestClientIpIsCloudflareOnly:
     ):
         with running(store) as (base, audit):
             code, _h, body = fetch(f"{base}/healthz", client_ip=None)
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            await_audit(audit, 1)
         assert (code, body) == (200, b"ok\n")
-        assert audit == []
+        # 🔴 A REASSURING ZERO NEEDS A POSITIVE CONTROL. `assert audit == []`
+        # read the live list with nothing to wait for, so it was equally happy
+        # with "the probe is not audited" and with "the sink had not appended
+        # yet" — and it would have stayed green with `_audit` wired to nothing
+        # at all. An audited request is issued after the probe; waiting for ITS
+        # line proves the sink works, and the count then says the probe added
+        # none. 🔴 THE COUNT IS `settle`'s, NOT THE SNAPSHOT'S — this comment
+        # used to close with "(Residual: a probe line arriving after this
+        # snapshot is still unobserved)", and that residual is now closed for
+        # anything landing inside `SETTLE_GRACE_S` of teardown. Still bounded by
+        # that window: a sink with no EOF admits no stronger claim.
+        lines = settle(audit, 1)
+        assert "/healthz" not in lines[0], lines[0]
 
     def test_the_source_never_reads_X_Forwarded_For(self):
         """Secondary, not the guard — `test_a_spoofed_X_Forwarded_For_does_NOT_win`
@@ -3441,13 +3766,17 @@ class TestLockoutOverHTTP:
         self, store: Path
     ):
         with running(store) as (base, audit):
-            for _ in range(5):
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
+            for k in range(5):
                 assert fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)[0] == 401
+                await_audit(audit, k + 1)
             code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            lines = await_audit(audit, 6)
         assert code == 401, "a locked-out client was served with a valid token"
         assert body == b"unauthorized\n"
-        assert "status=lockout-triggered" in audit[4]
-        assert "status=locked-out" in audit[5]
+        assert "status=lockout-triggered" in lines[4]
+        assert "status=locked-out" in lines[5]
 
     def test_FOUR_failures_do_not_lock_out_the_boundary_is_not_off_by_one(
         self, store: Path
@@ -3483,15 +3812,25 @@ class TestLockoutOverHTTP:
         """
         with running(store) as (base, audit):
             ordinary = fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
-            for _ in range(5):
+            await_audit(audit, 1)
+            for k in range(5):
                 fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+                await_audit(audit, k + 2)
             locked = fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+            # 🔴 SEVEN REQUESTS, SEVEN LINES, WAITED FOR. `_respond` runs before
+            # `_audit` and `ThreadingHTTPServer` uses DAEMON threads, so `fetch`
+            # returning — and the `with` block exiting — prove nothing about the
+            # last handler having appended yet. Observed failing exactly that
+            # way: `audit[-1]` held the PREVIOUS request's `status=unauthorized`.
+            # This is the hazard `await_audit`'s own docstring names, and this
+            # was one of the few call sites not using it.
+            lines = await_audit(audit, 7)
         assert ordinary[0] == locked[0] == 401
         assert ordinary[2] == locked[2]
         assert _comparable(ordinary[1]) == _comparable(locked[1])
         # …and the audit log DOES tell them apart, or the property is vacuous.
-        assert "status=unauthorized" in audit[0]
-        assert "status=locked-out" in audit[-1]
+        assert "status=unauthorized" in lines[0]
+        assert "status=locked-out" in lines[-1]
 
     def test_a_SUCCESS_does_NOT_buy_more_GUESSES(self, store: Path):
         """🔴 THE INTERLEAVE ATTACK, over HTTP. An attacker holding one accepted
@@ -3501,13 +3840,19 @@ class TestLockoutOverHTTP:
         inside the window, so it locks out.
         """
         with running(store, tokens=(GOOD_TOKEN, SECOND_TOKEN)) as (base, audit):
-            for _ in range(4):
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
+            for k in range(4):
                 fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+                await_audit(audit, k + 1)
             assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)[0] == 200
+            await_audit(audit, 5)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token="x" * 48)
+            await_audit(audit, 6)
             code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
+            lines = await_audit(audit, 7)
         assert code == 401, "a valid token reset the guessing budget"
-        assert "status=lockout-triggered" in audit[5]
+        assert "status=lockout-triggered" in lines[5]
 
     def test_a_WRONG_PATH_does_NOT_lock_out_a_client_holding_the_RIGHT_token(
         self, store: Path
@@ -3527,11 +3872,15 @@ class TestLockoutOverHTTP:
             for path in ("/favicon.ico", "/", "/robots.txt", "/metrics", "/api/v1"):
                 assert fetch(f"{base}{path}", token=GOOD_TOKEN)[0] == 401
             code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            lines = await_audit(audit, 6)
         assert code == 200, "a valid client locked itself out on wrong paths"
         assert POINTER_LINE.encode() in body
-        assert not any("locked-out" in line for line in audit)
+        # 🔴 WAITED FOR, because `not any(...)` over a list that is still filling
+        # is satisfied by an EMPTY one — the racy read makes the negative half of
+        # this test pass for the wrong reason.
+        assert not any("locked-out" in line for line in lines)
         # …and they are still REFUSED and logged, or this would be a hole.
-        assert sum("status=unauthorized" in line for line in audit) == 5
+        assert sum("status=unauthorized" in line for line in lines) == 5
 
     def test_a_WRONG_TOKEN_still_counts_even_on_a_path_that_does_not_exist(
         self, store: Path
@@ -3568,7 +3917,11 @@ class TestLockoutOverHTTP:
                 assert code == 405, f"{method} answered {code}"
                 assert body == b"read-only\n"
                 assert headers["Allow"] == "GET, HEAD"
-        assert all("status=method-not-allowed" in line for line in audit)
+            # `all(...)` over a partially-filled list is vacuously true, so the
+            # count is waited for before it is read.
+            await_audit(audit, 4)
+        lines = settle(audit, 4)
+        assert all("status=method-not-allowed" in line for line in lines)
 
 
 # =============================================================================
@@ -3803,8 +4156,12 @@ class TestTheDeployedEntrypoint:
         # See `drain_output`.
         with running_subprocess(store, rotating_token_file) as (base, proc):
             out = drain_output(proc)
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            await_audit(out, 1)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
+            await_audit(out, 2)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
             lines = await_audit(out, 3)
 
@@ -3822,7 +4179,25 @@ class TestTheDeployedEntrypoint:
         # non-audit line must still fail this. `wait_closed()` first, so a line
         # printed during SHUTDOWN is inside the stream being asserted on rather
         # than still in flight.
-        out.wait_closed()
+        #
+        # 🔴 AND ITS ANSWER IS ASSERTED, exactly as in `settle`. Discarded, a
+        # timeout here degrades in silence: the stream has NOT reached EOF, the
+        # ceiling below is a snapshot again, and it reports "the closed stream
+        # holds ..." about a stream that is not closed. This site kept the
+        # discarded form after `settle` was fixed because `_eof_barriers`
+        # accepted only `ast.Expr`/`ast.Assign` and FLAGGED the assert — the
+        # guard structurally required the defect. That arm now exists.
+        # 🔴 THE TIMEOUT IS PASSED EXPLICITLY, and the message below hardcodes
+        # it. Taking `Drained.wait_closed`'s default instead would couple this
+        # sentence to a constant declared 3800 lines away: retune that default
+        # and the message silently starts lying about how long it waited. The
+        # duplicated branch has to be kept in step with `settle` on every axis,
+        # and this was the one axis where it was not.
+        assert out.wait_closed(15.0), (
+            f"the stream never reached EOF within 15s, so the ceiling below is "
+            f"a snapshot again and the leak check is racing lines still in "
+            f"flight — it holds {len(out.audit)} audit record(s) so far for 3 "
+            f"requests.\nfull stream:\n{out.text}")
         assert GOOD_TOKEN not in out.text and SECOND_TOKEN not in out.text
         assert "w" * 48 not in out.text
         # 🔴 AND THE CEILING, AFTER THE STREAM IS CLOSED. `lines` above is a
@@ -3831,6 +4206,36 @@ class TestTheDeployedEntrypoint:
         # gap is real: with the server patched to emit one extra audit line at
         # SIGTERM, the pre-helper code failed and the snapshot check passes.
         # Three requests must produce three records, not "at least three".
+        #
+        # 🔴 AND YES, THESE TWO LINES HAND-ROLL `settle`'s `Drained` BRANCH —
+        # THE ONLY `len(...audit...) ==` LEFT OUTSIDE THE HELPER, AND THE ONLY
+        # REASON `_eof_barriers` NEEDS AN EXEMPTION AT ALL. "One rule, one
+        # place" says convert it, and it is DELIBERATELY not converted, for two
+        # reasons that are worth stating rather than leaving as a smell:
+        #   (1) `settle(out, 3)` would leave this function with no raw audit
+        #       read, which is what the raw-read guard's positive control
+        #       (`assert _raw_audit_reads(permitted)`) and its barrier control
+        #       are built on — the file's only LIVE specimen of the shape that
+        #       guard classifies. Both would have to fall back to synthetic
+        #       sources, i.e. the guard would no longer be exercised against any
+        #       real code in the tree it polices.
+        #   (2) It would move the denominator every ceiling matrix in this PR is
+        #       stated against — 19 exact-count items, 18 of them on `settle`'s
+        #       wall-clock path — so the conversion is not a rename, it is a new
+        #       mutation sweep. It belongs in a change that carries its own
+        #       matrix, not in one that inherits this one's.
+        # If (1) is ever solved with a synthetic fixture, convert this.
+        #
+        # 🔴 "NOT CONVERTED" IS NOT "FINE AS-IS", AND THIS PARAGRAPH USED TO
+        # READ AS THOUGH IT WERE. Both reasons above are about the CONVERSION to
+        # `settle`, and neither has anything to say about whether the copy is
+        # CORRECT. It was not: it carried the discarded `out.wait_closed()` and
+        # the "the closed stream holds ..." message verbatim — line for line the
+        # pre-fix shape that the `settle` commit repaired everywhere else, in
+        # the one place a reader is most likely to copy from. The one-word
+        # repair is above; it is independent of the conversion, which stays
+        # deferred. A duplicated branch has to be kept in step with its
+        # original, not merely justified.
         assert len(out.audit) == 3, (
             f"the closed stream holds {len(out.audit)} audit records for 3 "
             f"requests — an extra one was emitted after the snapshot:\n{out.text}")
@@ -3868,19 +4273,20 @@ class TestAuditLogCannotBeForged:
     def test_a_NEWLINE_in_the_path_cannot_open_a_second_record(self, store: Path):
         with running(store) as (base, audit):
             code, _h, _b = fetch(f"{base}/api/v1/x%0a{self.FORGED}")
+            await_audit(audit, 1)
         assert code == 401
         # ONE request, ONE record — the property nothing asserted before.
-        assert len(audit) == 1, f"the request produced {len(audit)} audit entries"
-        assert "\n" not in audit[0], "a newline survived into the audit record"
-        assert "\r" not in audit[0]
+        lines = settle(audit, 1)
+        assert "\n" not in lines[0], "a newline survived into the audit record"
+        assert "\r" not in lines[0]
         # 🔴 ASSERT THE PARSED FIELDS, NOT THE SPELLING. The escaped text still
         # CONTAINS the characters `auth=ok` inside the path value — a substring
         # check would be red for a record that is perfectly safe, and would then
         # be "fixed" by scrubbing the path into uselessness. What matters is
         # that a splitter sees one `auth` field and it says `fail`.
-        fields = [part for part in audit[0].split() if "=" in part]
+        fields = [part for part in lines[0].split() if "=" in part]
         keys = [part.split("=", 1)[0] for part in fields]
-        assert keys.count("auth") == 1, f"more than one auth field: {audit[0]}"
+        assert keys.count("auth") == 1, f"more than one auth field: {lines[0]}"
         assert keys.count("token") == 1
         parsed = dict(part.split("=", 1) for part in fields)
         assert parsed["auth"] == "fail"
@@ -3894,7 +4300,7 @@ class TestAuditLogCannotBeForged:
         """
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/x%20auth=ok%20token=deadbeef1234")
-        line = audit[0]
+            line = await_audit(audit, 1)[0]
         # 🔴 COUNT THE FIELDS; DO NOT `dict()` THEM. A round-2 mutation sweep
         # caught this test being vacuous: `dict()` lets the LAST occurrence win,
         # and the genuine `auth=fail` the server appends is always last — so
@@ -3913,7 +4319,7 @@ class TestAuditLogCannotBeForged:
     ):
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}%00%09%1b[31m", token=GOOD_TOKEN)
-        line = audit[0]
+            line = await_audit(audit, 1)[0]
         assert "\x00" not in line and "\x1b" not in line and "\t" not in line
         # A log that scrubbed everything would be safe and useless.
         assert SCOPE in line
@@ -3921,8 +4327,9 @@ class TestAuditLogCannotBeForged:
     def test_an_ABSURDLY_long_path_cannot_flood_one_record(self, store: Path):
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/{'z' * 4000}")
-        assert len(audit[0]) < 1000, "one request wrote an unbounded log record"
-        assert "truncated" in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert len(line) < 1000, "one request wrote an unbounded log record"
+        assert "truncated" in line
 
     def test_POSITIVE_CONTROL_an_ordinary_path_is_logged_verbatim(self, store: Path):
         """Without this, every assertion above is satisfied by a `_audit` that
@@ -3930,8 +4337,9 @@ class TestAuditLogCannotBeForged:
         """
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
-        assert f"path=/api/v1/recall/{SCOPE}" in audit[0]
-        assert f"token={api.token_id(GOOD_TOKEN)}" in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert f"path=/api/v1/recall/{SCOPE}" in line
+        assert f"token={api.token_id(GOOD_TOKEN)}" in line
 
 
 class TestNoRequestSmuggling:
@@ -4054,9 +4462,10 @@ class TestWritesAreMeteredLikeEverythingElse:
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", method="POST", client_ip=None
             )
+            line = await_audit(audit, 1)[0]
         assert code == 401
         assert body == b"unauthorized\n"
-        assert "status=no-client-ip" in audit[0]
+        assert "status=no-client-ip" in line
 
     def test_POST_probing_COUNTS_toward_the_lockout(self, store: Path):
         with running(store) as (base, _):
@@ -4117,10 +4526,11 @@ class TestMalformedTargetsAndUnknownMethods:
                         data += chunk
                 except (TimeoutError, OSError):
                     pass
+            lines = await_audit(audit, 1)
         assert data, "the request got no response at all"
         assert b"401" in data.split(b"\r\n")[0], data.split(b"\r\n")[0]
         assert b"unauthorized" in data
-        assert any("status=malformed-target" in line for line in audit)
+        assert any("status=malformed-target" in line for line in lines)
 
     def test_an_UNKNOWN_method_is_the_same_uniform_401_not_a_501_page(
         self, store: Path
@@ -4423,18 +4833,20 @@ class TestMalformedRequestLinesDoNotCrash:
     def test_it_answers_instead_of_crashing(self, store: Path, shape: bytes):
         with running(store) as (base, audit):
             data = _speak(base.split("//", 1)[1], shape)
+            await_audit(audit, 1)
         assert data, "the request got no response at all"
         assert b"unauthorized\n" in data
         # And it was RECORDED — a crash produces no audit line, which is what
         # made this invisible to every wire-level assertion.
-        assert len(audit) == 1, f"{len(audit)} audit lines for one request"
-        assert "auth=fail" in audit[0]
+        lines = settle(audit, 1)
+        assert "auth=fail" in lines[0]
 
     def test_the_audit_line_survives_a_missing_request_path(self, store: Path):
         with running(store) as (base, audit):
             _speak(base.split("//", 1)[1], b"GET\r\n\r\n")
-        assert "path=-" in audit[0], audit[0]
-        assert "status=malformed-request" in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert "path=-" in line, line
+        assert "status=malformed-request" in line
         # 🔴 `peer=-`, THE THIRD VALUE OF THAT FIELD, AND THE ONLY ONE NOTHING
         # ASSERTED. Six bytes is too little to have headers, so `send_error`
         # answers before `_identify_and_meter` ever runs and `_peer_trusted` is
@@ -4445,8 +4857,8 @@ class TestMalformedRequestLinesDoNotCrash:
         # The untested direction is the dangerous one. It makes the audit log
         # assert TRUST about a request whose peer was never evaluated, which is
         # the one claim this field exists to let an operator rely on.
-        assert "peer=-" in audit[0], audit[0]
-        assert "peer=trusted" not in audit[0], audit[0]
+        assert "peer=-" in line, line
+        assert "peer=trusted" not in line, line
 
     def test_POSITIVE_CONTROL_a_WELL_FORMED_unknown_verb_still_works(
         self, store: Path
@@ -4460,8 +4872,9 @@ class TestMalformedRequestLinesDoNotCrash:
                 f"FROBNICATE /api/v1/recall/{SCOPE} HTTP/1.1\r\n"
                 f"Host: h\r\nCF-Connecting-IP: {CLIENT_IP}\r\n\r\n".encode(),
             )
+            await_audit(audit, 1)
         assert b"401" in data.split(b"\r\n")[0]
-        assert len(audit) == 1
+        settle(audit, 1)
 
 
 class TestUnknownVerbsAreMeteredToo:
@@ -4488,8 +4901,9 @@ class TestUnknownVerbsAreMeteredToo:
     def test_an_unknown_verb_with_NO_client_ip_fails_closed(self, store: Path):
         with running(store) as (base, audit):
             data = self._verb(base, "OPTIONS", ip=None)
+            line = await_audit(audit, 1)[0]
         assert b"unauthorized" in data
-        assert "status=no-client-ip" in audit[0]
+        assert "status=no-client-ip" in line
 
     def test_a_MALFORMED_request_line_cannot_be_a_keep_alive_channel(
         self, store: Path
@@ -4685,9 +5099,10 @@ class TestEveryAuditFieldIsEscaped:
                 f"FROB\x1b[31mNICATE /api/v1/recall/{SCOPE} HTTP/1.1\r\n"
                 f"Host: h\r\nCF-Connecting-IP: {CLIENT_IP}\r\n\r\n".encode(),
             )
-        assert audit, "no audit line was written"
-        assert "\x1b" not in audit[0], "an escape sequence reached the log"
-        assert "\n" not in audit[0]
+            lines = await_audit(audit, 1)
+        assert lines, "no audit line was written"
+        assert "\x1b" not in lines[0], "an escape sequence reached the log"
+        assert "\n" not in lines[0]
 
 
 # =============================================================================
@@ -5036,8 +5451,8 @@ class TestTrustedProxyOverTheRealProcess:
                     token="w" * 48,
                     client_ip=SPOOF_IP,
                 )
-            lines = await_audit(out, 5)
-        assert len(lines) == 5, lines
+            await_audit(out, 5)
+        lines = settle(out, 5)
         # 🔴 THE ASSERTION THAT IS THE WHOLE DEFECT: the forged address never
         # becomes an identity. A fix that recorded the spoofed value but declined
         # to COUNT it would pass every status check and fail this one.
@@ -5558,6 +5973,576 @@ def test_the_call_site_THRESHOLD_is_load_bearing_not_decorative():
     )
 
 
+# 🔴 THE SAME TWO-PART TREATMENT FOR `settle`, BECAUSE ITS RULE WAS PROSE ONLY.
+# `settle`'s docstring says CALL IT AFTER THE `with running(...)` BLOCK, NEVER
+# INSIDE, and 15 sites were converted to it in one commit — with nothing pinning
+# either fact. This file's own history says what a prose rule is worth here:
+# `await_audit` was documented and FORTY sites ignored it, and the commit that
+# fixed that prescribed a recipe (`out.wait_closed()` on an `AuditLog`) that
+# cannot exist, so nine more sites followed a rule that could not work.
+#
+# The failure this closes is silent and is a REVERSION, not a new mistake:
+# rewrite any `lines = settle(audit, 1)` back to
+# `lines = await_audit(audit, 1); assert len(lines) == 1` and that site's
+# ceiling re-narrows to the synchronous case — which is bit-for-bit the defect
+# the `settle` commit repaired — while every other guard in this file stays
+# green, because that form performs no raw read and so the raw-read ban never
+# fires. A count is the cheapest thing that notices.
+def _settle_call_sites(source: "str | None" = None) -> int:
+    """`settle(...)` CALL expressions — not the functions containing them."""
+    tree = ast.parse(source if source is not None else Path(__file__).read_text())
+    return sum(
+        1 for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "settle"
+    )
+
+
+def _settle_calls_inside_a_with_block(source: "str | None" = None) -> "list[int]":
+    """Lines where a `settle(...)` call sits INSIDE a `with` body. The placement
+    half of the rule, which no count can see.
+    """
+    tree = ast.parse(source if source is not None else Path(__file__).read_text())
+    found = set()
+    for block in ast.walk(tree):
+        if not isinstance(block, (ast.With, ast.AsyncWith)):
+            continue
+        for stmt in block.body:
+            for n in ast.walk(stmt):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                        and n.func.id == "settle":
+                    found.add(n.lineno)
+    return sorted(found)
+
+
+def test_every_exact_count_site_goes_through_settle():
+    """The anti-shrink half: this fails when the ceiling coverage SHRINKS.
+
+    A site that gives up its ceiling — reverting to `await_audit` plus a
+    `len(...) == n` on the snapshot — is invisible to every other guard here.
+    Pinning the number is what makes that revert a red run instead of a silent
+    narrowing back to the synchronous-only ceiling.
+
+    🔴 WHAT IT CANNOT SEE, AND THE NAME OVERCLAIMS. This is a COUNT of
+    `settle(...)` call expressions. "Every exact-count site goes through
+    `settle`" is a claim about a SET, and a count cannot deliver it — the census
+    never enumerates the exact-count sites, so it cannot know whether one of
+    them is missing. Two shapes were APPLIED and SURVIVED — measured against
+    all five census/placement guards, not reasoned about — and they are named
+    here rather than left for the next reader to rediscover:
+
+      (1) HELPER INDIRECTION. Route one site through a one-line wrapper
+          (`def _w(o): return settle(o, 4)`, called where the direct call was).
+          The `settle(...)` expression still exists, so the count stays 15 and
+          this stays green; and because the call AT THE SITE is now spelled
+          `_w(...)`, `test_settle_is_called_AFTER_the_running_block_never_inside`
+          cannot see it either. MEASURED: indirection alone, 0/5 guards red —
+          and the state that actually LOSES the ceiling, indirection plus the
+          call moved INSIDE the `with` body where teardown has not run, also
+          0/5. The stake is not hypothetical.
+      (2) A NEW SITE WRITTEN THE OLD WAY. Add a test whose exact-count assertion
+          is spelled `lines = await_audit(audit, n)` + `assert len(lines) == n`.
+          It is a snapshot ceiling, it is exactly the defect `settle` exists to
+          repair, and the count is unchanged at 15. MEASURED: 0/5 red. What the
+          census catches is the REVERSION of an EXISTING site — the failure it
+          was built against — never the ARRIVAL of a new one in the old shape,
+          despite what the name says.
+          🔴 And it is invisible only in the IN-PROCESS shape. A new site that
+          also calls `drain_output(...)` IS caught — but by the sibling census
+          `test_every_audit_reading_test_goes_through_the_shared_helper` moving
+          3 -> 4, i.e. for a reason that has nothing to do with ceilings. Do not
+          read that red as coverage: it is a guard dying for the wrong reason,
+          and it disappears the moment the new site uses `running(...)`.
+
+    Both gaps are PRECEDENT, not new: `_drain_output_call_sites` and
+    `test_every_audit_reading_test_goes_through_the_shared_helper` have the
+    identical name-versus-count shape and shipped that way. Closing (1) needs
+    the census routed through `_transitive` (which propagates a BOOLEAN through
+    the call graph and so can serve the placement guard, but cannot produce a
+    count); closing (2) needs a detector for the old spelling. Both are new
+    guards with their own mutation matrices, and neither belongs in a change
+    that inherits this PR's.
+    """
+    assert _settle_call_sites() == 15, (
+        f"expected exactly 15 `settle(...)` call sites, found "
+        f"{_settle_call_sites()}. A ceiling was added or given up; if that is "
+        "intended, update this count AND say in the commit which property the "
+        "file no longer asserts."
+    )
+
+
+def test_the_settle_call_site_THRESHOLD_is_load_bearing_not_decorative():
+    """🔴 The mutant the threshold's own sweep cannot supply, for `settle`.
+
+    Deleting the helper everywhere drives the count to 0 and kills `>= 1`,
+    `>= 14` and `== 15` identically. This removes ONE site from a COPY of the
+    source and requires the count to actually move to 14 — the case that
+    separates a real ceiling census from a floor that fifteen sites could
+    satisfy with one.
+    """
+    src = Path(__file__).read_text()
+    assert _settle_call_sites(src) == 15, "fixture drift: the real count moved"
+
+    # A literal that appears exactly once as real code. (It also appears in this
+    # line, later in the file; `count=1` takes the earlier, real occurrence, and
+    # the assertions below fail loudly if it ever stops doing so.)
+    one_removed = src.replace("lines = settle(audit, 21)",
+                              "lines = []  # mutant", 1)
+    assert one_removed != src, "the mutation did not apply — this test is vacuous"
+    assert _settle_call_sites(one_removed) == 14, (
+        "removing one call site did not move the count, so the threshold cannot "
+        "distinguish fifteen ceilings from fourteen"
+    )
+
+
+def test_settle_is_called_AFTER_the_running_block_never_inside():
+    """The placement half of `settle`'s rule, which the count cannot see.
+
+    Inside the block the grace window watches a server that is still up, so the
+    one thing the ceiling exists for — a record emitted BY teardown — cannot
+    land where it can be seen. A site moved inside keeps the call, keeps the
+    count, and quietly stops asserting the property.
+    """
+    inside = _settle_calls_inside_a_with_block()
+    assert inside == [], (
+        "these `settle(...)` calls are INSIDE a `with` body, where teardown has "
+        f"not run yet and the ceiling is not being tested: lines {inside}"
+    )
+
+    # Positive control: the detector must be able to SEE a misplaced call, or
+    # the empty list above is a fact about the walker and nothing else.
+    misplaced = textwrap.dedent("""
+        def test_x(store):
+            with running(store) as (base, audit):
+                await_audit(audit, 1)
+                lines = settle(audit, 1)
+            assert lines
+    """)
+    flagged = _settle_calls_inside_a_with_block(misplaced)
+    assert len(flagged) == 1, (
+        "the placement detector cannot see a `settle(...)` inside a `with` body: "
+        f"{flagged}"
+    )
+    assert misplaced.splitlines()[flagged[0] - 1].strip() == "lines = settle(audit, 1)", (
+        "the placement detector flagged a line other than the misplaced call, so "
+        "its line numbers cannot be trusted to point anywhere"
+    )
+    correct = textwrap.dedent("""
+        def test_x(store):
+            with running(store) as (base, audit):
+                await_audit(audit, 1)
+            lines = settle(audit, 1)
+            assert lines
+    """)
+    assert _settle_calls_inside_a_with_block(correct) == [], (
+        "the placement detector flags a correctly-placed call, so its zero above "
+        "means nothing"
+    )
+
+
+def _raw_audit_reads(fn: ast.AST) -> "list[tuple[int, str]]":
+    """`(line, owner)` per read of the audit records that skips the helper.
+
+    A read is `audit` in a Load context or any `.audit` attribute; the argument
+    positions of `await_audit(...)` and `settle(...)` are subtracted, since
+    naming the record to hand it to a waiter is not reading it.
+
+    🔴 `owner` IS WHAT MAKES THE BARRIER BELOW CHECKABLE AGAINST THE SAME
+    STREAM. `out.audit` is owned by `out`, a bare `audit[0]` by `audit`, and
+    anything whose base is not a plain name (`f().audit`) owns `""`, which no
+    barrier can match. Without it, `proc_out.wait_closed()` — a barrier on a
+    DIFFERENT stream, standing next to a raw read of `out.audit` — bought that
+    read a pass. An exemption spelled by waiting on the wrong object is a free
+    pass wearing the costume of diligence.
+    """
+    raw, in_arg = set(), set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and node.id == "audit" \
+                and isinstance(node.ctx, ast.Load):
+            raw.add((node.lineno, "audit"))
+        elif isinstance(node, ast.Attribute) and node.attr == "audit":
+            raw.add((node.lineno,
+                     node.value.id if isinstance(node.value, ast.Name) else ""))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in ("await_audit", "settle"):
+            for arg in node.args:
+                for sub in ast.walk(arg):
+                    if isinstance(sub, (ast.Name, ast.Attribute)):
+                        in_arg.add(sub.lineno)
+    return sorted((ln, owner) for ln, owner in raw if ln not in in_arg)
+
+
+def _eof_barriers(fn: ast.AST) -> "list[tuple[int, str]]":
+    """`(line, receiver)` per UNCONDITIONAL wait for that stream's EOF in `fn`.
+
+    🔴 THE POINT IS "UNCONDITIONALLY", AND IT IS WHY THIS IS NOT AN
+    `ast.walk(fn)`. The guard below used to accept a `wait_closed` MENTION
+    anywhere in the function — unordered, and inside whatever branch. MEASURED:
+    a reintroduced raw `audit[0]` was caught, and the SAME raw read alongside a
+    dead `if False: audit.wait_closed()` SURVIVED. One unreachable line bought a
+    blanket pass, which is precisely the rot the guard's own docstring claimed
+    it was immune to.
+
+    🔴 AND CLOSING THAT HOLE FOR `if` LEFT IT OPEN SPELLED AS A `with`. This
+    used to descend into `with` bodies, justified by "`with running(...)` is how
+    every test in this file is shaped and its body always runs". That sentence
+    is false for any context manager that suppresses or diverts, and both
+    spellings are one import away: MEASURED against the shipped predicate, a raw
+    `out.audit[0]` was EXEMPTED by a barrier sitting inside
+    `with contextlib.suppress(AttributeError):` and again by one inside
+    `with pytest.raises(AttributeError):` — the same free pass as `if False:`,
+    two characters of diff away from it. `return` had the same hole in the time
+    axis: a barrier after one is unreachable and was counted anyway.
+
+    So NOTHING nested counts, and nothing after a terminator counts: only the
+    function's own top-level statement sequence, up to the first
+    `return`/`raise`/`break`/`continue`. A barrier nested in a `with`, an `if`,
+    a `try` or a loop is not rejected as hostile — it is simply not counted, and
+    the site is asked to hoist it, which for the one permitted site in this file
+    is where the barrier already is.
+
+    Only a bare `x.wait_closed()` statement, `y = x.wait_closed()`, or
+    `assert x.wait_closed()` qualifies, and `x` must be a plain name so it can
+    be matched against the read's owner: a call buried in a lambda, a
+    comprehension or an argument list is a mention again, one layer down.
+
+    🔴 `assert x.wait_closed()` IS ACCEPTED, AND LEAVING IT OUT WAS A REAL
+    DEFECT, NOT A GAP. `wait_closed` RETURNS whether EOF was reached, and
+    discarding that answer is the exact bug `settle` was fixed for: on a timeout
+    the discarded form degrades silently into a bare snapshot with no ceiling at
+    all, and then reports "the closed stream holds ..." about a stream that was
+    not closed. Accepting only `ast.Expr`/`ast.Assign` made the repaired form
+    STRUCTURALLY FORBIDDEN at every test site — this helper taught "assert the
+    answer" while its own predicate required the discarded spelling — so the
+    file's one hand-rolled copy of that branch was pinned at the pre-fix shape
+    by the guard that was supposed to be protecting it. MEASURED against the
+    shipped predicate before this arm existed: rewriting the permitted site's
+    barrier to `assert out.wait_closed()` emptied `_eof_barriers` and FLAGGED
+    both of its reads, under the message "these tests index the LIVE audit
+    list" — which is not what had happened.
+
+    🔴 AND ONLY WHEN THE CALL IS THE ASSERT'S ENTIRE `test` EXPRESSION.
+    `assert not x.wait_closed()` asserts the NEGATION — a stream that did NOT
+    reach EOF — and `assert x.wait_closed() is False` says the same thing one
+    node further out; accepting either would exempt a raw read behind an
+    assertion that the ceiling does not exist. So a `UnaryOp` or a `Compare`
+    wrapper is not counted, deliberately: the truthy comparison spellings are
+    unused in this file and cannot be separated from their negations without a
+    whitelist of operators and literals, and the cost of refusing them is that a
+    site writes the plain form. Both spellings are controls below. (`assert`
+    also implies `-O` strips the barrier; nothing here runs under `-O`, and a
+    stripped `assert` removes the wait rather than the read, which fails loudly.)
+    """
+    found: "list[tuple[int, str]]" = []
+    for stmt in fn.body:
+        if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+            break                       # nothing after this statement runs
+        if isinstance(stmt, (ast.Expr, ast.Assign)):
+            value = stmt.value
+        elif isinstance(stmt, ast.Assert):
+            value = stmt.test           # `assert x.wait_closed()` — see above
+        else:
+            value = None
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) \
+                and value.func.attr == "wait_closed" \
+                and isinstance(value.func.value, ast.Name):
+            found.append((value.lineno, value.func.value.id))
+    return sorted(found)
+
+
+def _unguarded_audit_reads(fn: ast.AST) -> "list[int]":
+    """Raw audit reads in `fn` that no EOF barrier ON THAT STREAM precedes.
+
+    ONE predicate: the guard below and its own controls both need this answer,
+    and an open-coded second copy is how the two drift into disagreeing about
+    what the guard means.
+    """
+    barriers = _eof_barriers(fn)
+    return sorted({
+        line for line, owner in _raw_audit_reads(fn)
+        if not any(b < line and receiver == owner for b, receiver in barriers)
+    })
+
+
+def test_no_test_INDEXES_a_live_audit_list():
+    """🔴 THE SWEEP, MADE DURABLE. `await_audit` existed and was documented, and
+    FORTY test functions still read the live list directly — the helper's own
+    docstring names the hazard and those sites were simply never converted.
+
+    One of them was observed failing: `test_a_LOCKED_OUT_response_is_BYTE_
+    IDENTICAL_to_an_ordinary_401` asserted on `audit[-1]` and got the PREVIOUS
+    request's `status=unauthorized`. `_respond` runs before `_audit`, and
+    `ThreadingHTTPServer` uses DAEMON threads — which `socketserver._Threads`
+    refuses to track — so `server_close()` joins nothing: neither `fetch`
+    returning NOR the `with` block exiting proves the last handler has appended.
+
+    An unknown number of tests carrying a known race is worse than the one that
+    was caught, so the count is pinned here rather than left to the next reader.
+
+    🔴 THE ONE PERMITTED SITE IS PERMITTED STRUCTURALLY, NOT BY NAME.
+    `test_the_STDOUT_audit_stream_names_the_matched_fingerprint` re-reads
+    `out.audit` deliberately, to assert a CEILING ("exactly 3, ever") that a
+    snapshot cannot see — and it is sound only because it calls
+    `out.wait_closed()` first, so the stream has a real EOF behind it.
+
+    🔴 AND "STRUCTURALLY" NOW MEANS WHAT IT SAYS — IT DID NOT. This paragraph
+    used to end "Delete the `wait_closed()` and this fails; it cannot rot into a
+    free pass the way a name exclusion would", and that second clause was FALSE.
+    The condition was `any(n.attr == "wait_closed" for n in ast.walk(fn))`: a
+    MENTION, anywhere in the function, in any branch, in any order relative to
+    the read. MEASURED: a reintroduced raw `audit[0]` was KILLED, and the same
+    read plus a dead `if False: audit.wait_closed()` SURVIVED — one unreachable
+    line, blanket pass, and the detector was demonstrably sensitive otherwise.
+    The escape hatch was pure rot channel: `wait_closed` is not even a method on
+    `AuditLog`, so no in-process test could ever have called it honestly.
+
+    🔴 AND THE FIRST REPAIR CLOSED THE HOLE FOR `if` AND LEFT IT OPEN FOR
+    `with`. `_eof_barriers` descended into `with` bodies on the claim that such
+    a body "always runs"; `contextlib` and `pytest` are both one line away, and
+    MEASURED against that shipped predicate a barrier inside
+    `with contextlib.suppress(AttributeError):` or `with pytest.raises(...):`
+    exempted a raw read exactly as `if False:` had. Two more of the same family
+    went with it: a barrier after a `return` (unreachable, counted anyway) and a
+    barrier on a DIFFERENT object (`proc_out.wait_closed()` guarding a read of
+    `out.audit`). All four are controls below.
+
+    🔴 A NOTE ON WHY THE `if False:` CONTROL IS NOW BOUND TO `out`. Spelled
+    against `audit`, the barrier line `audit.wait_closed()` is itself a raw
+    `audit` Name-Load read, so the control passed partly because the dead line
+    self-flagged — protection by accident, which evaporates the moment a site
+    binds its stream to `out` the way `Drained` sites do. The control below is
+    written both ways for that reason.
+
+    🔴 AND THE FOURTH ROUND WAS THE OPPOSITE ERROR — THE EXEMPTION WAS TOO
+    NARROW, AND THAT IS ALSO A DEFECT. `_eof_barriers` accepted only `ast.Expr`
+    and `ast.Assign`, so `assert x.wait_closed()` — the form the `settle` fix
+    adopted precisely BECAUSE the discarded answer degrades in silence on a
+    timeout — was invisible to it. MEASURED against the shipped predicate:
+    rewriting the permitted site's barrier to `assert out.wait_closed()` emptied
+    its barrier list and FLAGGED both of its reads as though they were racy,
+    under this test's own "these tests index the LIVE audit list" message. So
+    the guard did not merely fail to recognise the repaired form, it FORBADE it,
+    and the one hand-rolled copy of `settle`'s branch in this file stayed pinned
+    at the pre-fix shape for exactly that reason. A guard that requires the
+    defect is worse than one that misses it.
+
+    The condition is now `_eof_barriers`: an UNCONDITIONAL `x.wait_closed()` —
+    discarded, assigned, or ASSERTED — in the function's OWN top-level statement
+    sequence, before any terminator, LEXICALLY BEFORE the read, and on the SAME
+    object the read names. Every clause of that sentence has a control below
+    that separates it from its negation, so the sentence is machine-checked for
+    the shapes enumerated there and is not a claim about code nobody re-read.
+
+    🔴 WHAT IT CANNOT SEE: a read through an alias (`a = audit; a[0]`), a list
+    passed into a helper, a differently-named binding, or a barrier whose
+    receiver is a plain name that has been REBOUND between the barrier and the
+    read. It is a ledger of the shapes that actually bit plus their nearest
+    siblings, not a proof that no racy read exists.
+
+    🔴 AND WHAT IT DELIBERATELY REFUSES, which is the other direction and is
+    stated separately because it costs a site a rewrite rather than hiding a
+    race: `assert not x.wait_closed()` and `assert x.wait_closed() is False`
+    assert that EOF was NOT reached, and the truthy comparison spellings cannot
+    be told from their negations without a whitelist of operators and literals.
+    Only an `assert` whose test IS the call counts. Both refusals are controls
+    below, so this is pinned rather than merely intended.
+    """
+    tree = ast.parse(Path(__file__).read_text())
+    offenders = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not fn.name.startswith("test"):
+            continue
+        unguarded = _unguarded_audit_reads(fn)
+        if unguarded:
+            offenders.append(f"{fn.name} (line {fn.lineno}) reads at {unguarded}")
+    assert not offenders, (
+        "these tests index the LIVE audit list: `_respond` runs before `_audit` "
+        "and the handler threads are never joined, so the record may not be "
+        "there yet. Use `lines = await_audit(audit, n)` and index `lines`, and "
+        "`settle(audit, n)` after the `with` block for an exact count:\n  "
+        + "\n  ".join(offenders)
+    )
+
+    # Positive control: the detector must be able to SEE a raw read, or the
+    # empty offender list above is a fact about the walker and nothing else.
+    permitted = next(
+        fn for fn in ast.walk(tree)
+        if isinstance(fn, ast.FunctionDef)
+        and fn.name == "test_the_STDOUT_audit_stream_names_the_matched_fingerprint"
+    )
+    assert _raw_audit_reads(permitted), (
+        "the raw-read detector sees nothing — it is broken, and every zero it "
+        "reported above is meaningless"
+    )
+    assert _eof_barriers(permitted), (
+        "the permitted site's `out.wait_closed()` is not being recognised as a "
+        "barrier — the guard is passing it for some other reason"
+    )
+
+    # 🔴 CONTROLS FOR THE ESCAPE HATCH ITSELF, not just for the read detector.
+    # A guard whose exemption can be spelled by a dead line is a free pass. Each
+    # shape below separates one clause of "unconditional, before, same object"
+    # from its negation; the `if False:` pair is the mutant that SURVIVED the
+    # first version of the guard, and the `with` pair is the mutant that
+    # survived the SECOND — the same hole respelled, which is why they are
+    # enumerated rather than summarised.
+    def unguarded(src: str) -> "list[int]":
+        return _unguarded_audit_reads(ast.parse(textwrap.dedent(src)).body[0])
+
+    assert unguarded("""
+        def test_x(store):
+            with running(store) as (base, audit):
+                await_audit(audit, 1)
+            if False:
+                audit.wait_closed()
+            assert "x" in audit[0]
+    """), "a DEAD `wait_closed()` still buys a raw read a free pass"
+
+    # The same shape bound to `out`. Against `audit` the dead barrier line is
+    # ITSELF a raw `audit` read and self-flags, so the control above passes
+    # partly by accident; this one has no such help.
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            if False:
+                out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "a DEAD `wait_closed()` on an `out`-bound stream buys a free pass"
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            with contextlib.suppress(AttributeError):
+                out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "a barrier inside a SUPPRESSING `with` was counted as unconditional"
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            with pytest.raises(AttributeError):
+                out.wait_closed()
+            assert "x" in out.audit[0]
+    """), ("a barrier inside `pytest.raises(...)` — which REQUIRES the body to "
+           "raise, i.e. NOT to complete — was counted as unconditional")
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            return
+            out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "a barrier after a `return` is unreachable and was counted anyway"
+
+    assert unguarded("""
+        def test_x(out, proc_out):
+            await_audit(out, 1)
+            proc_out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "a barrier on a DIFFERENT stream exempted a read of `out.audit`"
+
+    assert unguarded("""
+        def test_x(out):
+            assert "x" in out.audit[0]
+            out.wait_closed()
+    """), "a `wait_closed()` AFTER the read was accepted as if it preceded it"
+
+    assert not unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "a real, unconditional `wait_closed()` before the read was rejected"
+
+    # 🔴 CONTROLS FOR THE `assert` ARM — the round where the exemption was too
+    # NARROW rather than too wide. Both directions, because widening the barrier
+    # FORM must not widen the EXEMPTION: the accepted pair below is the whole
+    # point of the arm, and everything after it is a shape that must still be
+    # flagged with the arm in place.
+    assert not unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            assert out.wait_closed()
+            assert "x" in out.audit[0]
+    """), ("`assert x.wait_closed()` — the form `settle` uses, and the only one "
+           "that does not discard the answer — was rejected as a barrier")
+
+    # The real site's spelling: an explicit timeout and a failure message.
+    assert not unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            assert out.wait_closed(15.0), f"no EOF: {out.text}"
+            assert "x" in out.audit[0]
+    """), "an asserted barrier with a timeout and a message was rejected"
+
+    # Refused on purpose: these assert the NEGATION of the barrier.
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            assert not out.wait_closed()
+            assert "x" in out.audit[0]
+    """), ("`assert not x.wait_closed()` asserts the stream did NOT reach EOF "
+           "and was accepted as a barrier for it")
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            assert out.wait_closed() is False
+            assert "x" in out.audit[0]
+    """), ("a `Compare` wrapper was counted, so `is False` — the negation one "
+           "node further out — buys the read a pass")
+
+    # And the four shapes from the previous round, respelled with the new arm.
+    # The nesting/ordering clauses live in the statement walk, which the arm
+    # shares; these pin that it did not become a way around them.
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            if False:
+                assert out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "an ASSERTED barrier inside `if False:` was counted as unconditional"
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            with contextlib.suppress(AttributeError):
+                assert out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "an ASSERTED barrier inside a SUPPRESSING `with` was counted"
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            with pytest.raises(AttributeError):
+                assert out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "an ASSERTED barrier inside `pytest.raises(...)` was counted"
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            return
+            assert out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "an ASSERTED barrier after a `return` is unreachable and was counted"
+
+    assert unguarded("""
+        def test_x(out, proc_out):
+            await_audit(out, 1)
+            assert proc_out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "an ASSERTED barrier on a DIFFERENT stream exempted a read of `out.audit`"
+
+    assert unguarded("""
+        def test_x(out):
+            assert "x" in out.audit[0]
+            assert out.wait_closed()
+    """), "an ASSERTED barrier AFTER the read was accepted as if it preceded it"
+
+
 class TestTrustedProxyAllowlistParsing:
     """Invariant guards on `trusted_network` / `load_trusted_proxies`.
 
@@ -5841,12 +6826,13 @@ class TestTrustedProxyOverHTTP:
         """
         with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
             code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            await_audit(audit, 1)
         assert code == 200, code
-        assert len(audit) == 1
-        assert "peer=untrusted" in audit[0], audit[0]
-        assert "auth=ok" in audit[0], audit[0]
-        assert "result=200" in audit[0], audit[0]
-        assert "status=untrusted-peer" not in audit[0], audit[0]
+        lines = settle(audit, 1)
+        assert "peer=untrusted" in lines[0], lines[0]
+        assert "auth=ok" in lines[0], lines[0]
+        assert "result=200" in lines[0], lines[0]
+        assert "status=untrusted-peer" not in lines[0], lines[0]
 
     def test_a_TRUSTED_peer_is_annotated_too_so_the_field_is_not_write_only(
         self, store: Path
@@ -5857,13 +6843,14 @@ class TestTrustedProxyOverHTTP:
         """
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
-        assert "peer=trusted" in audit[0], audit[0]
-        assert "peer=untrusted" not in audit[0], audit[0]
+            line = await_audit(audit, 1)[0]
+        assert "peer=trusted" in line, line
+        assert "peer=untrusted" not in line, line
 
     def test_a_WRITE_verb_from_an_untrusted_peer_is_METERED_under_the_peer(
         self, store: Path
     ):
-        """🔴 ONE RULE, BOTH DOORS. `_reject_write` and `_handle` share
+        """🔴 ONE RULE, BOTH DOORS. `_write` and `_handle` share
         `_identify_and_meter` precisely because a check enforced at one call site
         and not the other is the failure this file keeps finding — writes used to
         skip the client-IP and lockout checks entirely. A write from an untrusted
@@ -5876,16 +6863,18 @@ class TestTrustedProxyOverHTTP:
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method="POST"
             )
-        assert code == 405, (code, body)
-        assert body == b"read-only\n"
-        assert "peer=untrusted" in audit[0], audit[0]
-        assert f"ip={TRUSTED_PEER}" in audit[0], audit[0]
+            await_audit(audit, 1)
         # 🔴 EXACTLY ONE LINE, AND NOTHING CHARGED for a request that AUTHENTICATED
         # — a round-2 correction, not belt and braces. A mutant that mis-handles
         # the identify step's return value answers a SECOND response here and
         # charges the limiter under a `None` key; the GET path hides that on an
-        # internal assert.
-        assert len(audit) == 1, audit
+        # internal assert. `settle`, not the snapshot: the second line that
+        # mutant emits need not be synchronous with the first.
+        lines = settle(audit, 1)
+        assert code == 405, (code, body)
+        assert body == b"read-only\n"
+        assert "peer=untrusted" in lines[0], lines[0]
+        assert f"ip={TRUSTED_PEER}" in lines[0], lines[0]
         assert limiter._failures == {} and limiter._locked_until == {}
 
     def test_an_UNKNOWN_VERB_from_an_untrusted_peer_is_METERED_under_the_peer(
@@ -5902,10 +6891,11 @@ class TestTrustedProxyOverHTTP:
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method="FROBNICATE"
             )
+            await_audit(audit, 1)
+        lines = settle(audit, 1)
         assert code == 401, (code, body)
         assert body == b"unauthorized\n"
-        assert "peer=untrusted" in audit[0], audit[0]
-        assert len(audit) == 1, audit
+        assert "peer=untrusted" in lines[0], lines[0]
         assert list(limiter._failures) == [TRUSTED_PEER], limiter._failures
 
     def test_the_header_is_NOT_READ_AT_ALL_from_an_untrusted_peer(self, store: Path):
@@ -5919,12 +6909,13 @@ class TestTrustedProxyOverHTTP:
         with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=SPOOF_IP)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=None)
-        assert len(audit) == 2, audit
-        assert all(f"ip={TRUSTED_PEER}" in ln for ln in audit), audit
-        assert all(f"ip={SPOOF_IP}" not in ln for ln in audit), audit
+            await_audit(audit, 2)
+        lines = settle(audit, 2)
+        assert all(f"ip={TRUSTED_PEER}" in ln for ln in lines), lines
+        assert all(f"ip={SPOOF_IP}" not in ln for ln in lines), lines
         # …and the absent header is NOT the `no-client-ip` refusal either: that
         # rule applies only where the header IS the identity.
-        assert all("status=no-client-ip" not in ln for ln in audit), audit
+        assert all("status=no-client-ip" not in ln for ln in lines), lines
 
     def test_an_untrusted_peer_IS_charged_to_ITS_OWN_bucket(self, store: Path):
         """🔴 THIS REPLACES A TEST THAT ASSERTED NOTHING WAS CHARGED. Under the
@@ -5937,23 +6928,41 @@ class TestTrustedProxyOverHTTP:
         with running(
             store, limiter=limiter, trusted_proxies=(NOT_LOOPBACK_PROXY,)
         ) as (base, audit):
-            for _ in range(5):
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
+            for k in range(5):
                 fetch(
                     f"{base}/api/v1/recall/{SCOPE}", token="w" * 48, client_ip=SPOOF_IP
                 )
+                await_audit(audit, k + 1)
             after = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=SPOOF_IP
             )
+            lines = await_audit(audit, 6)
         assert after[0] == 401, "an untrusted peer had an unlimited budget"
         assert list(limiter._locked_until) == [TRUSTED_PEER], limiter._locked_until
         assert SPOOF_IP not in limiter._locked_until, limiter._locked_until
-        assert "status=lockout-triggered" in audit[4], audit[4]
+        assert "status=lockout-triggered" in lines[4], lines[4]
 
     def test_healthz_answers_an_untrusted_peer(self, store: Path):
         with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
             code, _h, body = fetch(f"{base}/healthz", client_ip=None)
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            await_audit(audit, 1)
         assert (code, body) == (200, b"ok\n")
-        assert audit == [], "the probe path must not audit, or Loki fills with noise"
+        # 🔴 A REASSURING ZERO NEEDS A POSITIVE CONTROL. `assert audit == []`
+        # read the live list with nothing to wait for, so it was equally happy
+        # with "the probe is not audited" and with "the sink had not appended
+        # yet" — and it would have stayed green with `_audit` wired to nothing
+        # at all. An audited request is issued after the probe; waiting for ITS
+        # line proves the sink works, and the count then says the probe added
+        # none. 🔴 THE COUNT IS `settle`'s, NOT THE SNAPSHOT'S — this comment
+        # used to close with "(Residual: a probe line arriving after this
+        # snapshot is still unobserved)", and that residual is now closed for
+        # anything landing inside `SETTLE_GRACE_S` of teardown. Still bounded by
+        # that window: a sink with no EOF admits no stronger claim.
+        lines = settle(audit, 1)
+        assert "/healthz" not in lines[0], lines[0]
 
     def test_a_CIDR_entry_admits_a_peer_INSIDE_it(self, store: Path):
         """POSITIVE CONTROL for the CIDR arm. Every other test in this class
@@ -5965,8 +6974,9 @@ class TestTrustedProxyOverHTTP:
         # into a fact about the floor rather than about the CIDR arm.
         with running(store, trusted_proxies=("127.0.0.0/24",)) as (base, audit):
             code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            line = await_audit(audit, 1)[0]
         assert code == 200, (code, body)
-        assert "peer=trusted" in audit[0], audit[0]
+        assert "peer=trusted" in line, line
 
     def test_build_server_REFUSES_an_empty_allowlist(self, store: Path):
         with pytest.raises(ValueError) as exc:
@@ -6935,17 +7945,16 @@ class TestEnumerationChannelsAreClosed:
                 f"{base}/api/v1/snapshot?scope={PHANTOM_SCOPE}", token=ZACH_TOKEN
             )
 
-        def store_headers(headers: dict) -> tuple:
-            return tuple(
-                sorted(
-                    (k, v) for k, v in headers.items() if k.lower().startswith("x-store")
-                )
-            )
-
+        # 🔴 THE WHOLE RESPONSE, VIA `_comparable` — every header but `Date`,
+        # not just the `X-Store-*` subset. A local helper here narrowed the
+        # comparison to the family somebody expected the leak to be in, which is
+        # a guard narrower than its own docstring: `ETag`, `Content-Length` and
+        # anything a future header carries would discriminate a refused scope
+        # from an absent one with every named assertion still green.
         assert denied[0] == phantom[0] == 200
-        assert store_headers(denied[1]) == store_headers(phantom[1]), (
-            f"X-Store-* headers differ:\n denied ={store_headers(denied[1])}\n"
-            f" phantom={store_headers(phantom[1])}"
+        assert _comparable(denied[1]) == _comparable(phantom[1]), (
+            f"headers differ:\n denied ={_comparable(denied[1])}\n"
+            f" phantom={_comparable(phantom[1])}"
         )
         assert denied[2] == phantom[2], (
             "the tar BYTES differ — a refused scope is distinguishable from an "
@@ -6969,10 +7978,16 @@ class TestEnumerationChannelsAreClosed:
         request on a keep-alive connection.
         """
         with running(scoped_store, tokens=(ZACH, DANA)) as (base, audit):
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
             zach_own = fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN)
+            await_audit(audit, 1)
             zach_other = fetch(f"{base}/api/v1/recall/{DENY_SCOPE}", token=ZACH_TOKEN)
+            await_audit(audit, 2)
             dana_own = fetch(f"{base}/api/v1/recall/{DENY_SCOPE}", token=DANA_TOKEN)
+            await_audit(audit, 3)
             dana_other = fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=DANA_TOKEN)
+            lines = await_audit(audit, 4)
 
         assert zach_own[1]["X-Store-Status"] == "recalled"
         assert KELP_NUANCE.encode() in zach_own[2]
@@ -6985,8 +8000,8 @@ class TestEnumerationChannelsAreClosed:
         assert KELP_NUANCE.encode() not in dana_other[2]
         # The audit line says WHOSE request each was, which is the only record
         # that can answer "who read what" after the fact.
-        assert "identity=zach" in audit[0] and "identity=zach" in audit[1]
-        assert "identity=dana" in audit[2] and "identity=dana" in audit[3]
+        assert "identity=zach" in lines[0] and "identity=zach" in lines[1]
+        assert "identity=dana" in lines[2] and "identity=dana" in lines[3]
 
     def test_the_audit_line_still_carries_the_FINGERPRINT_not_only_the_identity(
         self, scoped_store: Path
@@ -6997,16 +8012,18 @@ class TestEnumerationChannelsAreClosed:
         """
         with running(scoped_store, tokens=(ZACH,)) as (base, audit):
             fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN)
-        assert f"token={api.token_id(ZACH_TOKEN)}" in audit[0]
-        assert "identity=zach" in audit[0]
-        assert "auth=ok" in audit[0]
-        assert ZACH_TOKEN not in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert f"token={api.token_id(ZACH_TOKEN)}" in line
+        assert "identity=zach" in line
+        assert "auth=ok" in line
+        assert ZACH_TOKEN not in line
 
     def test_a_REJECTED_request_names_no_identity(self, scoped_store: Path):
         with running(scoped_store, tokens=(ZACH,)) as (base, audit):
             fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token="w" * 48)
-        assert "identity=-" in audit[0]
-        assert "auth=fail" in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert "identity=-" in line
+        assert "auth=fail" in line
 
 
 class TestRefusedIsIndistinguishableFromAbsent:
@@ -7049,10 +8066,11 @@ class TestRefusedIsIndistinguishableFromAbsent:
                 f"{base}{path}",
                 token=token.token if hasattr(token, "token") else token,
             )
-        store_headers = tuple(
-            sorted((k, v) for k, v in headers.items() if k.lower().startswith("x-store"))
-        )
-        return code, store_headers, body
+        # 🔴 THE WHOLE RESPONSE, VIA `_comparable`. This narrowed to the
+        # `X-Store-*` family, which is a guard narrower than its own docstring:
+        # `ETag`, `Content-Length` or any header added later would discriminate a
+        # refused scope from an absent one with every assertion still green.
+        return code, _comparable(headers), body
 
     def test_RECALL_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
         self, tmp_path: Path
@@ -7075,7 +8093,7 @@ class TestRefusedIsIndistinguishableFromAbsent:
         # 🔴 And the shared answer is the ABSENT report, not two identical
         # errors: byte-identity between two 401s or two 503s would satisfy
         # everything above while serving nothing.
-        assert dict(refused[1])["X-Store-Status"] == "scope-absent"
+        assert dict(refused[1])["x-store-status"] == "scope-absent"
         assert b"NOTHING RECORDED YET" in refused[2].upper()
         assert QUARTZ_NUANCE.encode() not in refused[2]
 
@@ -7093,7 +8111,7 @@ class TestRefusedIsIndistinguishableFromAbsent:
         assert refused[0] == never[0] == 200
         assert refused[1] == never[1], f"{refused[1]} != {never[1]}"
         assert refused[2] == never[2]
-        assert dict(refused[1])["X-Store-Status"] == "scope-absent"
+        assert dict(refused[1])["x-store-status"] == "scope-absent"
 
     def test_POSITIVE_CONTROL_the_RECALL_comparison_CAN_see_the_difference(
         self, tmp_path: Path
@@ -7112,8 +8130,8 @@ class TestRefusedIsIndistinguishableFromAbsent:
         absent()
         gone = self._ask(root, GOOD_TOKEN, f"/api/v1/recall/{DENY_SCOPE}")
 
-        assert dict(seen[1])["X-Store-Status"] == "recalled"
-        assert dict(gone[1])["X-Store-Status"] == "scope-absent"
+        assert dict(seen[1])["x-store-status"] == "recalled"
+        assert dict(gone[1])["x-store-status"] == "scope-absent"
         assert seen[2] != gone[2]
         assert QUARTZ_NUANCE.encode() in seen[2]
 
@@ -7139,8 +8157,8 @@ class TestRefusedIsIndistinguishableFromAbsent:
         gone = self._ask(root, GOOD_TOKEN, self.SEARCH_QUERY)
 
         assert found[0] == gone[0] == 200
-        assert dict(found[1])["X-Store-Status"] == "search-hit"
-        assert dict(gone[1])["X-Store-Status"] == "scope-absent"
+        assert dict(found[1])["x-store-status"] == "search-hit"
+        assert dict(gone[1])["x-store-status"] == "scope-absent"
         assert found[2] != gone[2]
         assert QUARTZ_NUANCE.encode() in found[2]
         # …and neither body is the empty string, which is what a fail-closed
@@ -8306,3 +9324,3654 @@ class TestScopeFilteringIsNotAWriteVerb:
                 ):
                     fetch(f"{base}{path}", token=token)
         assert tree_hash(scoped_store) == before
+
+
+# =============================================================================
+# 19. PHASE 3, CRITERIA 4-7 — THE WRITE PATH.
+#
+# 🔴 WHAT IS RED AT THE BASE REF AND WHAT IS NOT, STATED HERE RATHER THAN LEFT
+# TO BE ASSUMED, because "a test never seen fail proves nothing".
+#
+#   * Every BEHAVIOURAL test below is red at `origin/main`: the routes do not
+#     exist there, so `POST /api/v1/entry/…` answers `405 read-only` and each
+#     assertion fails on a real behaviour difference rather than on an import
+#     error. That is genuine regression coverage.
+#   * The UNIT tests (`content_hash`, `bullet_content`, `nuance_insert_index`,
+#     `entry_revision`, `append_bullet`, `replace_entry`) reference names that do
+#     not exist at base, so their red is an `AttributeError` and proves nothing
+#     about behaviour. They are pinned by MUTATION instead, and the PR body
+#     reports which mutant each one kills.
+#   * `TestPhaseOneScope.test_the_verb_ledger_…` is likewise an ATTRIBUTE error
+#     at base (`_write` does not exist), so it is an invariant guard plus its
+#     mutants, not regression coverage.
+# =============================================================================
+
+
+# Pairwise-distinct, sharing no substring with each other or with the three
+# scope nuance lines above — so an assertion that a bullet landed cannot be
+# satisfied by a renderer that surfaced a different one, and a mutant that
+# hardcodes any single literal is visible.
+BULLET_A = "the salinity probe reads high after a squall"
+BULLET_B = "the winch motor stalls on a neap tide"
+BULLET_C = "the buoy transmitter drops every third packet"
+BULLET_OPEN = "OPEN: the mooring shackle wants replacing before winter"
+
+# Distinct from each other and from every identity, so "the session was
+# recorded" and "the actor was recorded" cannot pass by reading one field twice.
+SESSION_A = "sess-7f3a2b"
+SESSION_B = "sess-91cd40"
+
+# 🔴 THE NAME A HOSTILE CLIENT PUTS IN THE BODY. It is not any identity in this
+# file, so a server that wrote the body's `actor` through would spell something
+# no token could ever produce.
+FORGED_ACTOR = "mallory"
+
+
+def entry_ref(scope: str) -> str:
+    """`_build_store` names each scope's single entry `<scope>-entry`."""
+    return f"{scope}-entry"
+
+
+def entry_file(root: Path, scope: str) -> Path:
+    return root / scope / f"{entry_ref(scope)}.md"
+
+
+def bullets_url(base: str, scope: str, ref: str | None = None) -> str:
+    return f"{base}/api/v1/entry/{scope}/{ref or entry_ref(scope)}/bullets"
+
+
+def entry_url(base: str, scope: str, ref: str | None = None) -> str:
+    return f"{base}/api/v1/entry/{scope}/{ref or entry_ref(scope)}"
+
+
+def post_bullet(base: str, token: str, scope: str, *, ref: str | None = None, **payload):
+    """POST one append. The payload is passed through VERBATIM so a test can send
+    a field the server must ignore, or omit one it must require."""
+    return fetch(
+        bullets_url(base, scope, ref),
+        token=token,
+        method="POST",
+        data=json.dumps(payload).encode("utf-8"),
+    )
+
+
+def nuance_of(path: Path) -> str:
+    """The `## Nuance / work-history` body of an entry file, via the resolver's
+    own parser — so "the bullet landed in the right SECTION" is answered the way
+    every reader answers it, not by an `in` over the whole file."""
+    return resolver.extract_sections(
+        path.read_text(encoding="utf-8"), (resolver.NUANCE_HEADING,)
+    ).get(resolver.NUANCE_HEADING, "")
+
+
+def nuance_bytes_of(data: bytes) -> str:
+    """`nuance_of`, for an entry whose bytes are NOT valid UTF-8.
+
+    `Path.read_text` decodes `strict` and raises on exactly the files the
+    non-UTF-8 section is about, so a test there cannot use `nuance_of` at all.
+
+    `surrogateescape` is spelled HERE BY HAND rather than imported from the
+    module under test: reading the file with whatever handler the server happens
+    to use would assert `x == x`, and this helper is used to state what is on
+    disk, which is a claim about BYTES and not about the server's opinion of
+    them. `TestTheEntryTextCodecIsONERuleInONEPlace` pins the server's side
+    separately.
+    """
+    return resolver.extract_sections(
+        data.decode("utf-8", errors="surrogateescape"), (resolver.NUANCE_HEADING,)
+    ).get(resolver.NUANCE_HEADING, "")
+
+
+def store_headers(headers: dict) -> tuple:
+    """The `X-Store-*` family only.
+
+    🔴 NOT FOR A LEAK-PROPERTY COMPARISON — use `_comparable`, which keeps
+    every header but `Date`. Every "these two answers are byte-identical" test in
+    this file used to narrow to this family, which is a guard narrower than its
+    own name: `ETag`, `Content-Length` or any header added later would
+    discriminate a refused target from an absent one while the assertion stayed
+    green. Kept for the places that genuinely mean "the store's own status
+    fields", not for indistinguishability.
+    """
+    return tuple(
+        sorted((k, v) for k, v in headers.items() if k.lower().startswith("x-store"))
+    )
+
+
+@contextmanager
+def forced_interleave(gate_s: float = 2.0):
+    """Force TWO writers to overlap inside the critical section, deterministically.
+
+    🔴 WHY A HOOK AND NOT TWO THREADS AND HOPE. The defect this guards against —
+    a read-modify-write with no mutual exclusion — only shows up when the two
+    writers' windows actually overlap, and on a fast machine they usually do not.
+    A test that passes because the race did not happen is worse than no test: it
+    reads as coverage of the ONE criterion that protects against content loss.
+
+    The hook runs inside `append_bullet`/`replace_entry`, after the read and
+    before the write, which is exactly the window a missing lock leaves open.
+    The FIRST caller to reach it parks until `release` is set or `gate_s`
+    elapses; every later caller passes straight through. So:
+
+      * with the lock, the second writer cannot even reach the hook — it is
+        blocked on `flock` — so the first parks for `gate_s`, writes, releases,
+        and the second then does its own complete read-modify-write. Both
+        bullets survive, and the test costs `gate_s`.
+      * without the lock, the second writer reads the SAME original bytes the
+        first is holding, writes, and finishes; the first then writes its own
+        version over the top and the second bullet is gone. Every time.
+
+    `test_the_interleave_harness_CAN_LOSE_an_append` is the negative control for
+    exactly that second bullet, run against a no-op lock.
+    """
+    state = {"n": 0}
+    counter_lock = threading.Lock()
+    first_in = threading.Event()
+    release = threading.Event()
+
+    def hook() -> None:
+        with counter_lock:
+            index = state["n"]
+            state["n"] += 1
+        if index == 0:
+            first_in.set()
+            release.wait(timeout=gate_s)
+
+    original = api._WRITE_INTERLEAVE
+    api._WRITE_INTERLEAVE = hook
+    try:
+        yield first_in, release
+    finally:
+        api._WRITE_INTERLEAVE = original
+
+
+@contextmanager
+def no_entry_lock():
+    """Replace `_EntryLock` with a lock that locks nothing. The MUTATION, run as
+    a control: every concurrency assertion in this file must fail under it."""
+
+    class _NoLock:
+        def __init__(self, _path):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+    original = api._EntryLock
+    api._EntryLock = _NoLock
+    try:
+        yield
+    finally:
+        api._EntryLock = original
+
+
+class TestTheActorComesFromTheTOKEN:
+    """🔴 CRITERION 4. The single most important property on the write path: a
+    client-supplied actor lets any token-holder attribute a bullet to somebody
+    else, and an attribution nobody can trust is worse than none.
+    """
+
+    @pytest.mark.parametrize(
+        "record,token,scope,identity",
+        [
+            (ZACH, ZACH_TOKEN, ALLOW_SCOPE, "zach"),
+            (DANA, DANA_TOKEN, DENY_SCOPE, "dana"),
+        ],
+    )
+    def test_a_FORGED_actor_in_the_body_is_DISCARDED(
+        self, scoped_store: Path, record, token: str, scope: str, identity: str
+    ):
+        """🔴 TWO IDENTITIES, NOT ONE, AND THAT IS THE POINT. A single-identity
+        version of this test is passed by `actor = "zach"` hardcoded in the
+        renderer. Two callers writing to two scopes cannot be.
+        """
+        path = entry_file(scoped_store, scope)
+        with running(scoped_store, tokens=(record,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, token, scope, text=BULLET_A, session=SESSION_A,
+                actor=FORGED_ACTOR,
+            )
+        assert code == 200, (code, headers)
+        assert headers["X-Store-Status"] == "appended"
+        text = path.read_text()
+        assert f"[cairn: {identity}/{SESSION_A}]" in text, text
+        assert FORGED_ACTOR not in text, (
+            "the body's `actor` reached the file — any token-holder could then "
+            "attribute a bullet to anybody"
+        )
+
+    def test_the_FORGED_name_is_one_the_server_COULD_have_written(self):
+        """Positive control for the assertion above: `mallory` passes the
+        identity charset, so its absence from the file is evidence that it was
+        DISCARDED rather than evidence that it could never have been rendered."""
+        assert IDENTITY_CHARSET.fullmatch(FORGED_ACTOR)
+        assert len(FORGED_ACTOR) <= api.MAX_IDENTITY_CHARS
+
+    def test_the_SESSION_is_recorded_and_it_is_the_one_that_was_SENT(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_B, session=SESSION_B)
+        text = path.read_text()
+        # Both sessions, each on its OWN bullet — a server that stamped the last
+        # session onto every bullet would satisfy a one-append test.
+        assert f"{BULLET_A} [cairn: zach/{SESSION_A}]" in text, text
+        assert f"{BULLET_B} [cairn: zach/{SESSION_B}]" in text, text
+
+    def test_the_bullet_lands_in_the_NUANCE_section_and_nowhere_else(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_text()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+        after = path.read_text()
+        assert BULLET_A in nuance_of(path)
+        # …and the other two sections are untouched, byte for byte.
+        for heading in (resolver.WHAT_HEADING, resolver.POINTERS_HEADING):
+            was = resolver.extract_sections(before, (heading,))
+            now = resolver.extract_sections(after, (heading,))
+            assert was == now, f"{heading} changed"
+
+    def test_the_new_bullet_is_FIRST_which_is_the_store_convention(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+        bullets = resolver.parse_journal_bullets(nuance_of(path))
+        assert len(bullets) == 2
+        assert BULLET_A in bullets[0].lines[0]
+        assert KELP_NUANCE.lstrip("- ") in bullets[1].lines[0]
+
+    def test_an_appended_OPEN_MARKER_STILL_PARSES(self, scoped_store: Path):
+        """🔴 THIS IS WHY THE ATTRIBUTION IS A SUFFIX.
+
+        The store's bullet grammar is a PREFIX grammar anchored at position 0:
+        `- [YYYY-MM-DD: ]OPEN:` with an exact terminator. Writing the actor
+        between the date and the text — `- 2026-08-27 (zach): OPEN: …`, the
+        obvious rendering — parses as NO MARKER at all, which is precisely the
+        near-miss class the reader exists to report: the `🔴 1 OPEN` badge
+        silently stops rendering and a vanished badge looks like success.
+
+        So the marker is asserted through the READER'S OWN parser, not by an `in`
+        over the line.
+        """
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_OPEN, session=SESSION_A
+            )
+        assert code == 200
+        first = resolver.parse_journal_bullets(nuance_of(path))[0]
+        assert first.openness == resolver.OPENNESS_OPEN, first.lines
+        assert first.date is not None, "the date prefix stopped parsing too"
+
+    def test_the_audit_line_names_the_identity_and_the_append(
+        self, scoped_store: Path
+    ):
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+            line = await_audit(audit, 1)[0]
+        assert "identity=zach" in line, line
+        assert "method=POST" in line, line
+        assert "status=appended" in line, line
+        assert "result=200" in line, line
+        assert ZACH_TOKEN not in line
+
+
+class TestALegacyTokenCannotWrite:
+    """🔴 A BARE (UNMAPPED) TOKEN HAS NO IDENTITY, SO IT HAS NO ACTOR.
+
+    Criterion 4 says every appended bullet records an actor and a session. A
+    legacy row's identity is the constant `legacy`, which names no holder — so
+    the guarantee cannot be met and the write is refused with its OWN error.
+    That makes criterion 10's credential retirement a PREREQUISITE for writes
+    rather than an afterthought.
+    """
+
+    def test_a_legacy_token_is_REFUSED_and_the_entry_is_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, token=GOOD_TOKEN) as (base, _):
+            code, headers, body = post_bullet(
+                base, GOOD_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert code == 403, (code, body)
+        assert headers["X-Store-Status"] == "legacy-cannot-write"
+        assert path.read_bytes() == before
+
+    def test_the_refusal_is_its_OWN_error_not_the_uniform_401_or_the_404(
+        self, scoped_store: Path
+    ):
+        """It must be distinguishable BY THE HOLDER, or the migration is
+        undiagnosable: an operator seeing `unauthorized` would rotate a token
+        that is working exactly as configured."""
+        with running(scoped_store, token=GOOD_TOKEN) as (base, _):
+            code, _h, body = post_bullet(
+                base, GOOD_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert code == 403
+        assert body != UNAUTHORIZED_BODY_LITERAL
+        assert b"no identity" in body, body
+
+    def test_a_legacy_token_can_still_READ(self, scoped_store: Path):
+        """The control. The refusal is on WRITES; a legacy row is still
+        unrestricted for reads and rolling back to one must stay possible."""
+        with running(scoped_store, token=GOOD_TOKEN) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{DENY_SCOPE}", token=GOOD_TOKEN
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "recalled"
+        assert QUARTZ_NUANCE.encode() in body
+
+    def test_the_403_names_no_scope_so_it_is_not_an_ORACLE(self, scoped_store: Path):
+        """A legacy row is UNRESTRICTED, so this answer must not vary with
+        whether the scope or the ref exists — otherwise the one credential that
+        cannot write would be the one that can enumerate."""
+        with running(scoped_store, token=GOOD_TOKEN) as (base, _):
+            real = post_bullet(
+                base, GOOD_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+            phantom = post_bullet(
+                base, GOOD_TOKEN, PHANTOM_SCOPE, ref="never-carved",
+                text=BULLET_A, session=SESSION_A,
+            )
+        assert real[0] == phantom[0] == 403
+        assert _comparable(real[1]) == _comparable(phantom[1])
+        assert real[2] == phantom[2]
+        assert real[2], "both bodies are empty — the comparison would be vacuous"
+
+
+UNAUTHORIZED_BODY_LITERAL = b"unauthorized\n"
+
+
+class TestWritesGoThroughTheSAMEDoorAsReads:
+    """🔴 NO SECOND, WEAKER AUTH PATH. Same `_identify_and_meter`, same
+    `authorize`, same uniform 401, same lockout — because a rule enforced at one
+    call site and not the other is the failure this file keeps finding.
+    """
+
+    def test_a_write_with_NO_client_ip_is_the_uniform_401(self, scoped_store: Path):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, _h, body = fetch(
+                bullets_url(base, ALLOW_SCOPE),
+                token=ZACH_TOKEN,
+                method="POST",
+                client_ip=None,
+                data=json.dumps({"text": BULLET_A, "session": SESSION_A}).encode(),
+            )
+            line = await_audit(audit, 1)[0]
+        assert (code, body) == (401, UNAUTHORIZED_BODY_LITERAL)
+        assert "status=no-client-ip" in line
+        assert path.read_bytes() == before
+
+    def test_a_write_with_a_WRONG_token_is_the_uniform_401_and_is_CHARGED(
+        self, scoped_store: Path
+    ):
+        limiter = api.RateLimiter(max_failures=5, window_s=600.0, lockout_s=600.0)
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,), limiter=limiter) as (base, _):
+            code, _h, body = post_bullet(
+                base, "w" * 48, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert (code, body) == (401, UNAUTHORIZED_BODY_LITERAL)
+        assert limiter._failures, "a failed write auth was not charged"
+        assert path.read_bytes() == before
+
+    def test_a_LOCKED_OUT_client_cannot_write(self, scoped_store: Path):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            for _ in range(5):
+                post_bullet(
+                    base, "w" * 48, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+                )
+            code, _h, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert (code, body) == (401, UNAUTHORIZED_BODY_LITERAL)
+        assert path.read_bytes() == before
+
+    def test_a_write_to_a_route_with_no_write_row_is_STILL_405(
+        self, scoped_store: Path
+    ):
+        """The converted guard, behaviourally: adding two write routes must not
+        have widened any OTHER path."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            for path in (
+                f"/api/v1/recall/{ALLOW_SCOPE}",
+                f"/api/v1/search/{ALLOW_SCOPE}?q=tide",
+                "/api/v1/snapshot",
+            ):
+                for method in ("POST", "PUT", "PATCH", "DELETE"):
+                    code, headers, body = fetch(
+                        f"{base}{path}", token=ZACH_TOKEN, method=method, data=b"{}"
+                    )
+                    assert code == 405, f"{method} {path} answered {code}"
+                    assert body == b"read-only\n"
+                    assert headers["Allow"] == "GET, HEAD"
+
+    @pytest.mark.parametrize("method", ["PATCH", "DELETE"])
+    def test_PATCH_and_DELETE_have_no_write_row_even_on_the_ENTRY_path(
+        self, scoped_store: Path, method: str
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, body = fetch(
+                bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method=method,
+                data=json.dumps({"text": BULLET_A, "session": SESSION_A}).encode(),
+            )
+        assert (code, body) == (405, b"read-only\n")
+        assert path.read_bytes() == before
+
+    def test_a_PUT_at_the_BULLETS_path_does_not_dispatch(self, scoped_store: Path):
+        """The tail (`bullets`) and the arity are part of the row. A PUT there is
+        four components against a row that declares three, so it matches nothing."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, _b = fetch(
+                bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="PUT",
+                data=before, extra_headers={"If-Match": api.entry_revision(before)},
+            )
+        assert code == 405
+        assert path.read_bytes() == before
+
+    def test_a_POST_with_the_WRONG_TAIL_does_not_dispatch(self, scoped_store: Path):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, _b = fetch(
+                f"{base}/api/v1/entry/{ALLOW_SCOPE}/{entry_ref(ALLOW_SCOPE)}/pointers",
+                token=ZACH_TOKEN, method="POST",
+                data=json.dumps({"text": BULLET_A, "session": SESSION_A}).encode(),
+            )
+        assert code == 405
+        assert path.read_bytes() == before
+
+    def test_a_TRAVERSING_path_component_is_refused_before_it_reaches_the_disk(
+        self, scoped_store: Path
+    ):
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = fetch(
+                f"{base}/api/v1/entry/%2e%2e/{entry_ref(ALLOW_SCOPE)}/bullets",
+                token=ZACH_TOKEN, method="POST",
+                data=json.dumps({"text": BULLET_A, "session": SESSION_A}).encode(),
+            )
+        assert code == 400
+        assert headers["X-Store-Status"] == "bad-request"
+
+
+class TestARefusedWriteIsIndistinguishableFromAnAbsentOne:
+    """🔴 CRITERION 3's ENUMERATION PROPERTY, APPLIED TO WRITES.
+
+    The read path closed this at the INDEX rather than with a per-route "is this
+    scope yours" check, and the write path reuses that same narrowing — so a
+    scope outside the caller's allowlist is not merely refused, it is not IN the
+    index the writer resolves against, and `UnknownScopeError` is raised for the
+    identical reason it is raised for a scope that never existed.
+
+    An error that discriminates is an enumeration API on a write verb exactly as
+    on a read one, and building a NEW oracle on the write side would undo what
+    criteria 1-3 closed.
+    """
+
+    def _phases(self, tmp_path: Path):
+        root = tmp_path / "store"
+
+        def present():
+            if root.exists():
+                shutil.rmtree(root)
+            return _build_store(
+                root, {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE}
+            )
+
+        def absent():
+            shutil.rmtree(root)
+            return _build_store(
+                root, {ALLOW_SCOPE: KELP_NUANCE, THIRD_SCOPE: LANTERN_NUANCE}
+            )
+
+        return root, present, absent
+
+    def _post(self, root: Path, record, scope: str):
+        with running(root, tokens=(record,)) as (base, _):
+            code, headers, body = post_bullet(
+                base, record.token, scope, text=BULLET_C, session=SESSION_B
+            )
+        return code, _comparable(headers), body
+
+    def test_APPEND_to_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
+        self, tmp_path: Path
+    ):
+        root, present, absent = self._phases(tmp_path)
+        present()
+        refused = self._post(root, ZACH, DENY_SCOPE)
+        absent()
+        never = self._post(root, ZACH, DENY_SCOPE)
+
+        assert refused[0] == never[0] == 404
+        assert refused[1] == never[1], (
+            f"X-Store-* headers differ:\n refused={refused[1]}\n absent ={never[1]}"
+        )
+        assert refused[2] == never[2], (
+            "response bodies differ — a refused write target is distinguishable "
+            f"from an absent one:\nrefused: {refused[2]!r}\nabsent : {never[2]!r}"
+        )
+        assert refused[2], "both bodies are empty — the equality would be vacuous"
+
+    def test_POSITIVE_CONTROL_the_APPEND_comparison_CAN_see_the_difference(
+        self, tmp_path: Path
+    ):
+        """🔴 WITHOUT THIS, THE EQUALITY ABOVE IS SATISFIED BY A SERVER THAT
+        ANSWERS 404 TO EVERYTHING — and by a fail-closed one that answers two
+        empty bodies. Same two phases, same path, a token that MAY write that
+        scope: present -> `appended`, absent -> `not-found`. Both non-empty, and
+        different.
+        """
+        root, present, absent = self._phases(tmp_path)
+        present()
+        wrote = self._post(root, DANA, DENY_SCOPE)
+        absent()
+        gone = self._post(root, DANA, DENY_SCOPE)
+
+        assert wrote[0] == 200 and gone[0] == 404
+        # `_comparable` lower-cases the header names it sorts on.
+        assert dict(wrote[1])["x-store-status"] == "appended"
+        assert dict(gone[1])["x-store-status"] == "not-found"
+        assert wrote[2] != gone[2]
+        assert wrote[2] and gone[2]
+        assert BULLET_C.encode() in wrote[2]
+
+    def test_a_refused_write_leaves_the_DENIED_scope_BYTE_IDENTICAL(
+        self, scoped_store: Path
+    ):
+        """The refusal is not merely a status: nothing on disk moved. Hashed over
+        the WHOLE tree, so a lock file, a temp file or a stray write anywhere
+        would be caught, not just a change to the entry this test names."""
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            for scope, ref in (
+                (DENY_SCOPE, entry_ref(DENY_SCOPE)),
+                (PHANTOM_SCOPE, "never-carved"),
+                (THIRD_SCOPE, entry_ref(THIRD_SCOPE)),
+                (ALLOW_SCOPE, "no-such-entry"),
+            ):
+                code, _h, _b = post_bullet(
+                    base, ZACH_TOKEN, scope, ref=ref, text=BULLET_A, session=SESSION_A
+                )
+                assert code == 404, (scope, ref, code)
+        assert tree_hash(scoped_store) == before
+
+    def test_an_UNKNOWN_REF_in_an_ALLOWED_scope_is_the_SAME_404(
+        self, scoped_store: Path
+    ):
+        """A ref that resolves to nothing answers the identical bytes a refused
+        scope does. Four ways to fail to resolve, ONE answer — so there is no
+        residual channel to probe on either axis."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            missing_ref = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, ref="no-such-entry",
+                text=BULLET_A, session=SESSION_A,
+            )
+            refused_scope = post_bullet(
+                base, ZACH_TOKEN, DENY_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert missing_ref[0] == refused_scope[0] == 404
+        assert _comparable(missing_ref[1]) == _comparable(refused_scope[1])
+        assert missing_ref[2] == refused_scope[2]
+        # 🔴 THE NON-EMPTY GUARD ITS THREE SIBLINGS CARRY AND THIS ONE DID NOT.
+        # `b"" == b""` satisfies the equality above, so a server that answered
+        # two empty bodies would pass an indistinguishability test while telling
+        # the caller nothing at all.
+        assert missing_ref[2]
+
+    def test_PUT_to_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
+        self, tmp_path: Path
+    ):
+        root, present, absent = self._phases(tmp_path)
+
+        def put(record):
+            with running(root, tokens=(record,)) as (base, _):
+                code, headers, body = fetch(
+                    entry_url(base, DENY_SCOPE), token=record.token, method="PUT",
+                    data=b"---\nservice: x\n---\n",
+                    extra_headers={"If-Match": "0" * 16},
+                )
+            return code, _comparable(headers), body
+
+        present()
+        refused = put(ZACH)
+        absent()
+        never = put(ZACH)
+        assert refused[0] == never[0] == 404
+        assert refused[1] == never[1]
+        assert refused[2] == never[2]
+        assert refused[2]
+
+        # 🔴 THE POSITIVE CONTROL, IN THE SAME TEST because the pair is the
+        # evidence: a holder who MAY see that scope gets a 412 (a real
+        # precondition answer about a real file), not the 404 above.
+        present()
+        allowed = put(DANA)
+        assert allowed[0] == 412, allowed
+        assert allowed[:2] != refused[:2]
+
+
+class TestAppendIsCommutativeAndIdempotent:
+    """🔴 CRITERION 5, AND THE SHIP GATE. The store is not re-derivable — it
+    records gotchas, retracted theories and measurements that were true at a
+    moment — so a lost append is lost forever. This is the one defect class here
+    that destroys CONTENT rather than availability.
+    """
+
+    def test_two_CONCURRENT_appends_of_DIFFERENT_bullets_BOTH_survive(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        results: "dict[str, tuple]" = {}
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            with forced_interleave() as (first_in, release):
+
+                def writer(name: str, text: str, session: str) -> None:
+                    results[name] = post_bullet(
+                        base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=session
+                    )
+
+                first = threading.Thread(
+                    target=writer, args=("a", BULLET_A, SESSION_A), daemon=True
+                )
+                first.start()
+                assert first_in.wait(timeout=20), (
+                    "the first writer never reached the interleave point — the "
+                    "harness is not observing the critical section at all"
+                )
+                second = threading.Thread(
+                    target=writer, args=("b", BULLET_B, SESSION_B), daemon=True
+                )
+                second.start()
+                second.join(timeout=60)
+                release.set()
+                first.join(timeout=60)
+                assert not first.is_alive() and not second.is_alive()
+
+        assert results["a"][0] == results["b"][0] == 200, results
+        text = path.read_text()
+        assert BULLET_A in text, "the FIRST writer's bullet was lost"
+        assert BULLET_B in text, "the SECOND writer's bullet was lost"
+        bullets = resolver.parse_journal_bullets(nuance_of(path))
+        assert len(bullets) == 3, [b.lines[0] for b in bullets]
+
+    def test_the_interleave_harness_CAN_LOSE_an_append(self, scoped_store: Path):
+        """🔴 THE NEGATIVE CONTROL FOR THE TEST ABOVE, and it is the mutation run
+        as a test: with `_EntryLock` replaced by a lock that locks nothing, the
+        identical scenario MUST lose a bullet. Without this, "both survived"
+        cannot be told apart from a harness whose two writers never overlapped.
+
+        🔴 THE TWO CODES ARE ASSERTED FIRST, AND THAT IS THE WHOLE POINT OF THE
+        CONTROL. Without them "BULLET_B is not in the file" is satisfied by a
+        second writer that was REFUSED and never wrote at all — a file nothing
+        wrote to is trivially missing the bullet. Proven vacuous: injecting a
+        server-side refusal into the write dispatch made this test pass while
+        the well-shaped `test_an_exception_in_a_handler_is_a_500_with_an_AUDIT_LINE`
+        failed under the identical injection. Its PUT twin
+        (`test_the_CONCURRENT_PUT_harness_CAN_see_a_lost_update`) had the
+        `[200, 200]` assertion from the start; this one did not.
+
+        ⚠ THE CONCURRENCY PROPERTY ITSELF WAS NEVER UNSUPPORTED — `LOCK_EX` ->
+        `LOCK_SH` has been watched to red the test above on "the SECOND writer's
+        bullet was lost". What was unsupported was the IN-BAND control.
+        """
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        results: "dict[str, tuple]" = {}
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            with no_entry_lock():
+                with forced_interleave() as (first_in, release):
+
+                    def writer(name: str, text: str, session: str) -> None:
+                        results[name] = post_bullet(
+                            base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=session
+                        )
+
+                    first = threading.Thread(
+                        target=writer, args=("a", BULLET_A, SESSION_A), daemon=True
+                    )
+                    first.start()
+                    assert first_in.wait(timeout=20)
+                    second = threading.Thread(
+                        target=writer, args=("b", BULLET_B, SESSION_B), daemon=True
+                    )
+                    second.start()
+                    second.join(timeout=60)
+                    release.set()
+                    first.join(timeout=60)
+
+        assert sorted(r[0] for r in results.values()) == [200, 200], (
+            "a writer was REFUSED, so 'the second bullet is missing' is a fact "
+            "about the refusal and not about the lock — this control proves "
+            f"nothing in that state: {results}"
+        )
+        text = path.read_text()
+        assert BULLET_A in text, "the surviving writer is the wrong one"
+        assert BULLET_B not in text, (
+            "the unlocked read-modify-write did NOT lose the second append — the "
+            "harness cannot see the defect it claims to guard against, so the "
+            "green test above is evidence of nothing"
+        )
+
+    def test_EIGHT_concurrent_appends_all_survive(self, scoped_store: Path):
+        """No hook, real overlap, eight racers. A supplement to the forced
+        interleave rather than a replacement: it cannot be relied on to catch a
+        missing lock (some runs will serialise anyway) but it exercises the lock
+        under genuine contention, which the two-writer version does not.
+
+        🔴 THE FAILURE NAMES ITS OWN MECHANISM, BECAUSE ONE OCCURRENCE IS ALL
+        YOU GET. This failed once in a saturated baseline run and then passed
+        15/15 (3 immediate re-runs, then 12 on a quiet host) — so the
+        discriminator that mattered was never captured, and the two candidate
+        mechanisms call for OPPOSITE actions:
+
+            `'…was lost'` with every code 200  -> an append was lost WITH THE
+              LOCK IN PLACE. A DEFECT. Do not re-run; the serialisation is wrong.
+            a short `codes` list, a `BrokenBarrierError`, or a live thread after
+              `join` -> the WALL-CLOCK BOUND (`barrier.wait(timeout=30)`,
+              `t.join(timeout=60)`) under host saturation. Not about the lock.
+
+        The old assertions could not tell them apart: `codes == [200]*8` reds
+        identically for "a writer was refused" and "a writer never got past the
+        barrier", and `f"{text!r} was lost"` fires without ever saying whether
+        the writer that owned that text actually completed. So every arm below
+        is now labelled with its MECHANISM and carries the per-writer phase and
+        elapsed time — `claude/RULES.md` separates load from a real assertion by
+        WHOSE time moved, and that evidence has to be IN the failure output or
+        the next single occurrence is as unresolvable as this one was.
+
+        🔴 THE TIMEOUTS ARE DELIBERATELY NOT WIDENED. Widening them converts the
+        load case into a pass and leaves the defect case looking identical —
+        which hides exactly the mechanism this instrumentation exists to name.
+        """
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        texts = [f"{BULLET_C} on run {n}" for n in range(8)]
+        barrier = threading.Barrier(len(texts))
+        outcomes: "dict[int, dict]" = {}
+        lock = threading.Lock()
+        started = time.time()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+
+            def writer(n: int, text: str) -> None:
+                record = {
+                    "n": n, "phase": "never-started", "code": None,
+                    "error": None, "elapsed": None,
+                }
+                with lock:
+                    outcomes[n] = record
+                mark = time.time()
+                try:
+                    barrier.wait(timeout=30)
+                except threading.BrokenBarrierError as exc:
+                    record["phase"] = "barrier-broken"
+                    record["error"] = f"{type(exc).__name__}: {exc}"
+                    record["elapsed"] = round(time.time() - mark, 2)
+                    return
+                record["phase"] = "posting"
+                mark = time.time()
+                try:
+                    code, _h, _b = post_bullet(
+                        base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
+                    )
+                except Exception as exc:  # noqa: BLE001 — recorded, then reported
+                    record["phase"] = "post-raised"
+                    record["error"] = f"{type(exc).__name__}: {exc}"
+                    record["elapsed"] = round(time.time() - mark, 2)
+                    return
+                record["phase"] = "posted"
+                record["code"] = code
+                record["elapsed"] = round(time.time() - mark, 2)
+
+            threads = [
+                threading.Thread(target=writer, args=(n, t), daemon=True)
+                for n, t in enumerate(texts)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=60)
+            alive = sorted(n for n, t in enumerate(threads) if t.is_alive())
+            wall = round(time.time() - started, 2)
+
+        rows = sorted(outcomes.values(), key=lambda r: r["n"])
+        report = (
+            f"\n  wall={wall}s for {len(texts)} racers"
+            f" (barrier timeout 30s, join timeout 60s)\n  "
+            + "\n  ".join(
+                f"#{r['n']} phase={r['phase']} code={r['code']} "
+                f"elapsed={r['elapsed']}s err={r['error']}" for r in rows
+            )
+        )
+
+        assert len(outcomes) == len(texts), (
+            "MECHANISM = HARNESS. A writer thread never recorded an outcome at "
+            "all, so the classification below cannot be trusted." + report
+        )
+        assert not alive, (
+            f"MECHANISM = WALL-CLOCK BOUND (join). Writers {alive} were still "
+            "running after join(timeout=60). The host was saturated; this says "
+            "nothing about the entry lock. Re-run on a quiet host — do NOT widen "
+            "the timeout." + report
+        )
+        broken = [r["n"] for r in rows if r["phase"] == "barrier-broken"]
+        assert not broken, (
+            f"MECHANISM = WALL-CLOCK BOUND (barrier). Writers {broken} never got "
+            "past barrier.wait(timeout=30), so they never POSTed and no append "
+            "was lost. Saturation, not the lock." + report
+        )
+        raised = [r["n"] for r in rows if r["phase"] == "post-raised"]
+        assert not raised, (
+            f"MECHANISM = TRANSPORT. The POST from writers {raised} raised "
+            "instead of answering. Read the per-writer error: a connection error "
+            "is not a lost append." + report
+        )
+        assert [r["code"] for r in rows] == [200] * len(texts), (
+            "MECHANISM = REFUSED. Every writer answered, but not all with 200 — "
+            "so a 'was lost' claim would be a fact about the refusal and not "
+            "about the lock." + report
+        )
+        stored = path.read_text()
+        lost = [t for t in texts if t not in stored]
+        assert not lost, (
+            "🔴 MECHANISM = LOST APPEND, WITH THE LOCK IN PLACE. All "
+            f"{len(texts)} writers answered 200 and {len(lost)} bullet(s) are "
+            f"absent from the entry: {lost!r}. This is the DEFECT case — the "
+            "read-modify-write is not serialised. Do NOT re-run and move on."
+            + report
+        )
+        bullets = resolver.parse_journal_bullets(nuance_of(path))
+        assert len(bullets) == len(texts) + 1, (
+            "🔴 MECHANISM = LOST OR DUPLICATED BULLET. Every text is present but "
+            f"the journal holds {len(bullets)} bullets for {len(texts)} appends "
+            "plus the fixture's one — a splice landed in the wrong place."
+            + report
+        )
+
+    def test_re_POSTing_the_SAME_bullet_leaves_the_entry_BYTE_IDENTICAL(
+        self, scoped_store: Path
+    ):
+        """🔴 ASSERTED ON BYTES, NOT ON A STATUS CODE. A server that appended a
+        second identical bullet and answered 200 satisfies every status-based
+        check, and the duplicate is then in the store forever."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            first = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+            after_first = path.read_bytes()
+            second = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert first[1]["X-Store-Status"] == "appended"
+        assert second[1]["X-Store-Status"] == "duplicate"
+        assert path.read_bytes() == after_first, "the re-POST changed the file"
+
+    def test_the_duplicate_check_is_on_CONTENT_not_on_the_WHOLE_LINE(
+        self, scoped_store: Path
+    ):
+        """Same text, DIFFERENT session — still a duplicate. A retry from a new
+        agent run is the same observation, and hashing the rendered line would
+        make every retry a new bullet."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            # The seeding append's verdict is ASSERTED, not discarded: if it
+            # failed, `after_first` would be the untouched fixture and the
+            # "unchanged" assertion below would hold for the wrong reason.
+            seed, seed_h, seed_b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+            assert (seed, seed_h["X-Store-Status"]) == (200, "appended"), seed_b
+            after_first = path.read_bytes()
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_B
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "duplicate"
+        assert path.read_bytes() == after_first
+
+    def test_a_DIFFERENT_bullet_from_the_SAME_session_IS_appended(
+        self, scoped_store: Path
+    ):
+        """Positive control for both duplicate tests: the no-op is decided by the
+        CONTENT, so a different observation from the same session must land."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            # Same reason as above: a seeding append whose verdict is not read
+            # turns "two appends" into "one append" without any assertion moving.
+            seed, seed_h, seed_b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+            assert (seed, seed_h["X-Store-Status"]) == (200, "appended"), seed_b
+            after_first = path.read_bytes()
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_B, session=SESSION_A
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "appended"
+        assert path.read_bytes() != after_first
+        assert BULLET_B in path.read_text()
+
+    def test_a_bullet_ALREADY_in_the_entry_by_hand_is_a_duplicate_too(
+        self, scoped_store: Path
+    ):
+        """The hash is taken over the CONTENT of the bullets already there, with
+        the date opener and any attribution trailer stripped — so an append that
+        repeats a hand-written line is recognised, not duplicated."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        # KELP_NUANCE is `- 2026-03-04: <prose>` — send exactly its prose.
+        prose = KELP_NUANCE.split(": ", 1)[1]
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=prose, session=SESSION_A
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "duplicate"
+        assert path.read_bytes() == before
+
+    def test_a_CONCURRENT_duplicate_still_writes_NOTHING(self, scoped_store: Path):
+        """The idempotency check runs INSIDE the lock. Outside it, two identical
+        POSTs racing would both read "not present" and both append."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        statuses: "list[str]" = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(4)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+
+            def writer() -> None:
+                barrier.wait(timeout=30)
+                _c, headers, _b = post_bullet(
+                    base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+                )
+                with lock:
+                    statuses.append(headers["X-Store-Status"])
+
+            threads = [threading.Thread(target=writer, daemon=True) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=60)
+                assert not t.is_alive()
+        assert sorted(statuses) == ["appended", "duplicate", "duplicate", "duplicate"], (
+            statuses
+        )
+        assert len(resolver.parse_journal_bullets(nuance_of(path))) == 2
+
+
+class TestIfMatchIsRequiredAndChecked:
+    """🔴 CRITERION 6. A whole-file PUT is the only primitive here that DESTROYS
+    content rather than adding to it, so the precondition is the thing standing
+    between a stale client and a lost update — and every refusal is asserted on
+    the BYTES on disk, not on a status code.
+    """
+
+    def _replacement(self, scope: str) -> bytes:
+        return _entry(entry_ref(scope), scope, nuance=f"- 2026-04-09: {BULLET_C}").encode()
+
+    def _put(self, base: str, scope: str, data: bytes, if_match: str | None):
+        headers = {} if if_match is None else {"If-Match": if_match}
+        return fetch(
+            entry_url(base, scope), token=ZACH_TOKEN, method="PUT", data=data,
+            extra_headers=headers,
+        )
+
+    def test_the_CURRENT_revision_REPLACES_the_file(self, scoped_store: Path):
+        """The positive control, and it comes first: every refusal below is only
+        evidence if the same request WITH the right revision succeeds."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = self._replacement(ALLOW_SCOPE)
+        revision = api.entry_revision(path.read_bytes())
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(base, ALLOW_SCOPE, data, revision)
+        assert code == 200, (code, headers)
+        assert headers["X-Store-Status"] == "replaced"
+        assert path.read_bytes() == data
+        assert headers["ETag"] == f'"{api.entry_revision(data)}"'
+        assert KELP_NUANCE not in path.read_text()
+
+    def test_a_STALE_revision_is_412_and_the_file_is_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        stale = api.entry_revision(b"whatever this store used to hold")
+        assert stale != api.entry_revision(before)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(
+                base, ALLOW_SCOPE, self._replacement(ALLOW_SCOPE), stale
+            )
+        assert code == 412, (code, body)
+        assert headers["X-Store-Status"] == "precondition-failed"
+        assert path.read_bytes() == before, "a stale PUT overwrote the entry"
+
+    def test_the_412_carries_the_CURRENT_revision_so_a_retry_can_SUCCEED(
+        self, scoped_store: Path
+    ):
+        """A client told only "no" cannot retry, and a client that cannot retry
+        re-sends without the precondition. So the refusal names the revision, and
+        the retry is exercised rather than assumed."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = self._replacement(ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            _c, refused, _b = self._put(base, ALLOW_SCOPE, data, "f" * 16)
+            current = refused["ETag"].strip('"')
+            code, _h, _b2 = self._put(base, ALLOW_SCOPE, data, current)
+        assert current == api.entry_revision(
+            _entry(entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=KELP_NUANCE).encode()
+        )
+        assert code == 200
+        assert path.read_bytes() == data
+
+    def test_a_MISSING_If_Match_is_428_and_the_file_is_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        """🔴 REQUIRED, NOT OPTIONAL. An optional precondition is no precondition:
+        the caller that most needs it — a retry after a timeout, on a store two
+        agents share — is exactly the one that would omit it."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(
+                base, ALLOW_SCOPE, self._replacement(ALLOW_SCOPE), None
+            )
+        assert code == 428, code
+        assert headers["X-Store-Status"] == "precondition-required"
+        assert path.read_bytes() == before
+
+    def test_If_Match_STAR_is_REFUSED_and_the_file_is_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        """`*` means "any current representation" — the one value that turns the
+        guard off while looking like it is on."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(
+                base, ALLOW_SCOPE, self._replacement(ALLOW_SCOPE), "*"
+            )
+        assert code == 400, code
+        assert headers["X-Store-Status"] == "bad-request"
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("wrap", ['{rev}', '"{rev}"', 'W/"{rev}"'])
+    def test_a_QUOTED_and_a_BARE_revision_name_the_SAME_revision(
+        self, scoped_store: Path, wrap: str
+    ):
+        """HTTP spells an entity-tag quoted; a shell client will send it bare.
+        Refusing one of the two would be a precondition that fails for a reason
+        the caller cannot see."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = self._replacement(ALLOW_SCOPE)
+        revision = api.entry_revision(path.read_bytes())
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, _b = self._put(
+                base, ALLOW_SCOPE, data, wrap.format(rev=revision)
+            )
+        assert code == 200, (wrap, code)
+        assert path.read_bytes() == data
+
+    def test_a_PUT_that_would_MALFORM_the_entry_is_refused_and_the_file_is_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        """🔴 THE WRITE PATH MAY NOT CREATE THE `MALFORMED` STATE THE READ PATH
+        HAS SO MUCH MACHINERY FOR. The check is the index loader's OWN mapping,
+        not a second opinion about what an entry is."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        revision = api.entry_revision(before)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(
+                base, ALLOW_SCOPE, b"no front matter here\n", revision
+            )
+        assert code == 422, code
+        assert headers["X-Store-Status"] == "entry-shape"
+        assert path.read_bytes() == before
+
+    def test_the_MALFORM_guard_is_the_LOADER_and_a_VALID_entry_still_lands(
+        self, scoped_store: Path
+    ):
+        """Positive control: the refusal above is about the CONTENT, not about
+        PUT refusing everything."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = self._replacement(ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, _b = self._put(
+                base, ALLOW_SCOPE, data, api.entry_revision(path.read_bytes())
+            )
+        assert code == 200
+        # …and the reader agrees it is an entry, which is the claim the guard
+        # actually makes.
+        index = resolver.load_index(
+            scoped_store, on_malformed=resolver.ON_MALFORMED_COLLECT
+        )
+        assert not index.malformed_in(ALLOW_SCOPE)
+
+    def test_two_CONCURRENT_PUTs_on_ONE_revision_land_exactly_ONE(
+        self, scoped_store: Path
+    ):
+        """🔴 THE LOST-UPDATE CASE, AND THE PRECONDITION IS CHECKED UNDER THE SAME
+        LOCK THE WRITE HAPPENS UNDER. Outside it, both callers read revision R,
+        both pass, and the second silently overwrites the first — which is the
+        exact update the precondition exists to refuse.
+        """
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        revision = api.entry_revision(path.read_bytes())
+        first_data = self._replacement(ALLOW_SCOPE)
+        second_data = _entry(
+            entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=f"- 2026-04-10: {BULLET_B}"
+        ).encode()
+        codes: "dict[str, int]" = {}
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            with forced_interleave() as (first_in, release):
+
+                def writer(name: str, data: bytes) -> None:
+                    codes[name] = self._put(base, ALLOW_SCOPE, data, revision)[0]
+
+                first = threading.Thread(
+                    target=writer, args=("a", first_data), daemon=True
+                )
+                first.start()
+                assert first_in.wait(timeout=20)
+                second = threading.Thread(
+                    target=writer, args=("b", second_data), daemon=True
+                )
+                second.start()
+                second.join(timeout=60)
+                release.set()
+                first.join(timeout=60)
+                assert not first.is_alive() and not second.is_alive()
+        assert sorted(codes.values()) == [200, 412], codes
+        assert path.read_bytes() == first_data
+        assert BULLET_B.encode() not in path.read_bytes()
+
+    def test_the_CONCURRENT_PUT_harness_CAN_see_a_lost_update(
+        self, scoped_store: Path
+    ):
+        """The negative control for the test above: with the lock removed, BOTH
+        PUTs pass the precondition and the first writer's content is gone."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        revision = api.entry_revision(path.read_bytes())
+        first_data = self._replacement(ALLOW_SCOPE)
+        second_data = _entry(
+            entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=f"- 2026-04-10: {BULLET_B}"
+        ).encode()
+        codes: "dict[str, int]" = {}
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            with no_entry_lock():
+                with forced_interleave() as (first_in, release):
+
+                    def writer(name: str, data: bytes) -> None:
+                        codes[name] = self._put(base, ALLOW_SCOPE, data, revision)[0]
+
+                    first = threading.Thread(
+                        target=writer, args=("a", first_data), daemon=True
+                    )
+                    first.start()
+                    assert first_in.wait(timeout=20)
+                    second = threading.Thread(
+                        target=writer, args=("b", second_data), daemon=True
+                    )
+                    second.start()
+                    second.join(timeout=60)
+                    release.set()
+                    first.join(timeout=60)
+        assert sorted(codes.values()) == [200, 200], (
+            "the unlocked PUT pair did NOT both pass the precondition — the "
+            f"harness cannot see a lost update: {codes}"
+        )
+        assert path.read_bytes() == first_data
+
+
+class TestTheAppendRequestIsValidated:
+    """Every clause of `_bullet_request_problem` is reachable by an input every
+    earlier clause accepts, and each is asserted on its OWN sentence — a test
+    that went red because a DIFFERENT clause fired would be green with the clause
+    it names deleted."""
+
+    def _post_raw(self, base: str, body: bytes):
+        return fetch(
+            bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="POST", data=body
+        )
+
+    @pytest.mark.parametrize(
+        "body,fragment",
+        [
+            (b"not json at all", b"must be JSON"),
+            (b'"a string"', b"must be a JSON object"),
+            (b'{"session": "sess-7f3a2b"}', b"`text` is required"),
+            (b'{"text": "   ", "session": "sess-7f3a2b"}', b"`text` is required"),
+            (b'{"text": "a\\nb", "session": "sess-7f3a2b"}', b"must be ONE line"),
+            (b'{"text": "- a", "session": "sess-7f3a2b"}', b"must not open a markdown"),
+            (b'{"text": "a real observation"}', b"`session` is required"),
+            (b'{"text": "a real observation", "session": "has spaces"}',
+             b"`session` is required"),
+        ],
+    )
+    def test_a_MALFORMED_append_is_400_and_writes_NOTHING(
+        self, scoped_store: Path, body: bytes, fragment: bytes
+    ):
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, resp = self._post_raw(base, body)
+        assert code == 400, (body, code, resp)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert fragment in resp, resp
+        assert tree_hash(scoped_store) == before
+
+    def test_an_OVERLONG_text_is_refused(self, scoped_store: Path):
+        before = tree_hash(scoped_store)
+        payload = {"text": "x" * (api.BULLET_TEXT_MAX + 1), "session": SESSION_A}
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, resp = self._post_raw(base, json.dumps(payload).encode())
+        assert code == 400
+        assert b"characters, max" in resp
+        assert tree_hash(scoped_store) == before
+
+    def test_a_text_at_the_LIMIT_is_accepted(self, scoped_store: Path):
+        """The other side of the boundary. A cap tested only from above is a cap
+        tested on one side of its condition."""
+        payload = {"text": "x" * api.BULLET_TEXT_MAX, "session": SESSION_A}
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._post_raw(base, json.dumps(payload).encode())
+        assert code == 200, code
+        assert headers["X-Store-Status"] == "appended"
+
+    def test_a_body_with_NO_Content_Length_writes_nothing(self, scoped_store: Path):
+        """A write needs a body, and `_consume_body` reports "no body declared"
+        distinctly from "framing refused" precisely so this can be answered."""
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, resp = fetch(
+                bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="POST"
+            )
+        assert code == 400, (code, resp)
+        assert tree_hash(scoped_store) == before
+
+
+class TestTheWritePrimitives:
+    """Unit-level, and pinned by MUTATION rather than by a red-at-base run: these
+    names do not exist at the base ref, so their red there is an `AttributeError`
+    and proves nothing about behaviour."""
+
+    def test_a_revision_is_a_function_of_the_BYTES(self):
+        assert api.entry_revision(b"alpha") == api.entry_revision(b"alpha")
+        assert api.entry_revision(b"alpha") != api.entry_revision(b"alphb")
+        assert len(api.entry_revision(b"alpha")) == api.CONTENT_HASH_CHARS
+
+    def test_a_content_hash_ignores_WRAPPING_and_nothing_else(self):
+        assert api.content_hash(BULLET_A) == api.content_hash(
+            "  " + BULLET_A.replace(" ", "\t ") + "  "
+        )
+        assert api.content_hash(BULLET_A) != api.content_hash(BULLET_B)
+        # …and it is not a constant: three distinct texts, three distinct hashes.
+        assert len({api.content_hash(t) for t in (BULLET_A, BULLET_B, BULLET_C)}) == 3
+
+    def test_a_rendered_bullet_round_trips_through_bullet_content(self):
+        line = api.render_bullet(
+            BULLET_B, actor="dana", session=SESSION_B, today="2026-04-11"
+        )
+        assert api.bullet_content([line]) == BULLET_B
+        assert api.content_hash(api.bullet_content([line])) == api.content_hash(BULLET_B)
+
+    def test_bullet_content_strips_an_opener_WITHOUT_a_trailer(self):
+        assert api.bullet_content(["- 2026-04-11: " + BULLET_C]) == BULLET_C
+        assert api.bullet_content(["- " + BULLET_C]) == BULLET_C
+        # A trailer that is not THIS writer's trailer is content, not attribution.
+        assert api.bullet_content([f"- {BULLET_C} [seen: dana]"]) == (
+            f"{BULLET_C} [seen: dana]"
+        )
+
+    def test_bullet_content_joins_a_MULTI_LINE_bullet(self):
+        assert api.bullet_content(["- 2026-04-11: " + BULLET_A, "  " + BULLET_B]) == (
+            f"{BULLET_A} {BULLET_B}"
+        )
+
+    def test_the_insert_point_is_UNDER_the_nuance_heading(self):
+        lines = _entry("x", "y").splitlines()
+        index = api.nuance_insert_index(lines)
+        assert index is not None
+        assert lines[index - 1] == resolver.NUANCE_HEADING
+
+    def test_there_is_NO_insert_point_without_the_heading(self):
+        lines = _entry("x", "y").splitlines()
+        lines = [ln for ln in lines if ln != resolver.NUANCE_HEADING]
+        assert api.nuance_insert_index(lines) is None
+
+    def test_a_heading_INSIDE_a_fence_is_not_the_heading(self):
+        """The same rule `_heading_blocks` applies — imported rather than
+        re-spelled, so the writer cannot come to disagree with the reader about
+        where a section starts."""
+        lines = [
+            "```",
+            resolver.NUANCE_HEADING,
+            "```",
+            resolver.NUANCE_HEADING,
+            "- real",
+        ]
+        assert api.nuance_insert_index(lines) == 4
+
+    def test_an_entry_with_no_NUANCE_heading_is_422_not_a_reshaped_file(
+        self, tmp_path: Path
+    ):
+        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        path = entry_file(root, ALLOW_SCOPE)
+        text = path.read_text().replace(resolver.NUANCE_HEADING, "## Notes")
+        path.write_text(text)
+        before = path.read_bytes()
+        with running(root, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A
+            )
+        assert code == 422, code
+        assert headers["X-Store-Status"] == "entry-shape"
+        assert path.read_bytes() == before
+
+    def test_a_FAILED_write_leaves_the_entry_and_no_temp_file(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """🔴 `os.replace`, NOT `open(path, "w")`. A truncate-then-write leaves a
+        window in which a concurrent reader sees an EMPTY or half-written entry
+        and serves it as a complete one — the silent under-report this whole
+        module is built against, produced by the WRITER.
+
+        Driven by making the final `os.replace` fail: a truncating writer has
+        already destroyed the entry by this point, `os.replace` has not, and the
+        temp file must not be left behind either (it is invisible to every
+        walker, so nothing would ever report or clean it up).
+        """
+        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        path = entry_file(root, ALLOW_SCOPE)
+        before = path.read_bytes()
+
+        def boom(_src, _dst):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(os, "replace", boom)
+        # 🔴 `match=`, NOT A BARE `OSError`. `append_bullet` opens, writes and
+        # fsyncs before it replaces, and any of those raising is also an
+        # `OSError` — so a bare `raises` would be green for a failure that
+        # happened BEFORE the window this test is about, which is the one state
+        # where "the entry is unchanged" proves nothing.
+        with pytest.raises(OSError, match="no space left"):
+            api.append_bullet(
+                path, text=BULLET_A, actor="zach", session=SESSION_A,
+                today="2026-04-11",
+            )
+        monkeypatch.undo()
+        assert path.read_bytes() == before
+        assert not list(path.parent.glob(".cairn-*.tmp")), "a temp file was orphaned"
+
+    def test_the_LOCK_FILE_is_invisible_to_every_walker(self, scoped_store: Path):
+        """It has a leading dot AND no `.md` suffix, so all three of the store's
+        walkers skip it twice over. Asserted through the walkers themselves."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_A, session=SESSION_A)
+            lock = scoped_store / ALLOW_SCOPE / f".{entry_ref(ALLOW_SCOPE)}.md.lock"
+            assert lock.exists(), "the lock file was never created"
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )
+            _c, snap_headers, tar_bytes = fetch(
+                f"{base}/api/v1/snapshot", token=ZACH_TOKEN
+            )
+        assert code == 200 and headers["X-Store-Status"] == "recalled"
+        assert lock.name.encode() not in body
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r") as tar:
+            names = tar.getnames()
+        assert not any(n.endswith(".lock") for n in names), names
+        # `entry-files=` counts `.md` only, so the lock must not move it. The
+        # expected number is counted off DISK, not copied from the fixture.
+        md_on_disk = len(list(scoped_store.rglob("*.md")))
+        assert f"entry-files={md_on_disk}" in snap_headers["X-Store-Snapshot"], (
+            snap_headers,
+            md_on_disk,
+        )
+
+
+# =============================================================================
+# AUDIT ROUND 2 — the write path's own defects. Every class below names a
+# MEASURED behaviour, not a hypothetical: the fixtures are the ones the auditor
+# reproduced with, and each test's red-at-`b32db213` state is recorded in the PR.
+# =============================================================================
+
+
+# 🔴 A FIXTURE BUILT OUT OF THE THREE THINGS THE OLD WRITER DESTROYED, in one
+# file, because they were destroyed by ONE operation and a test that separated
+# them would let two of the three regress unseen:
+#
+#   * `\xe9` — a latin-1 byte. Not valid UTF-8 anywhere. It appears TWICE, see
+#     below.
+#   * a `\r\n` line ending, twice.
+#   * NO trailing newline.
+#
+# 🔴 THE BYTE IS IN **BOTH** SECTIONS, AND THAT PLACEMENT IS THE WHOLE POINT.
+# It used to sit only in `## What it is`, and that made every assertion in this
+# section STRUCTURALLY UNABLE to reach the branch that later broke: the append's
+# dedupe hashes `bullet_content(...)` over the NUANCE BULLETS ONLY, so a hostile
+# byte parked in another section is never fed to `content_hash` and a writer that
+# crashes on one stayed green here. With it in both places neither location is
+# load-bearing — the byte survives an append wherever it is, and the hashing path
+# is exercised whether or not anyone remembers that it is the interesting one.
+#
+# The bytes are spelled out rather than built from `_entry()` because every one
+# of them is load-bearing here, and `_entry()` can only emit LF and always ends
+# with a newline.
+_HEADING_BYTES = b"## Nuance / work-history\n"
+LOSSY_ENTRY = (
+    b"---\n"
+    b"service: reef-buoy\n"
+    b"scope: kelp-forest\n"
+    b"sensitivity: internal\n"
+    b"---\n"
+    b"\n"
+    b"## What it is\r\n"
+    b"the tender's caf\xe9 log was written latin-1 and nobody re-encoded it\r\n"
+    b"\n"
+    + _HEADING_BYTES
+    + b"- 2026-05-01: the anchor winch was re-greased at the caf\xe9 and left untested"
+)
+
+# Distinct from BULLET_A/B/C, from every nuance line, and from every literal any
+# assertion in this section names.
+BULLET_D = "the fog horn compressor cycles twice on a cold start"
+BULLET_E = "the deck light dims whenever the davit is powered"
+BULLET_F = "the tide predictor disagrees with the gauge on a neap"
+
+
+class TestAnAppendDoesNotREWRITETheFile:
+    """🔴 AN ORDINARY APPEND SILENTLY REWROTE THE WHOLE FILE, LOSSILY.
+
+    `append_bullet` decoded with `errors="replace"`, `splitlines()`, and wrote
+    back `"\\n".join(...) + "\\n"` — so one append to ONE line re-emitted every
+    other line through a lossy round trip. Measured, all three at `200 appended`
+    with no error:
+
+      * a latin-1 `0xe9` on an untouched line became `U+FFFD`, permanently —
+        while `replace_entry` decodes the same bytes `errors="strict"` and
+        answers **422**. The two write primitives disagreed about what a valid
+        entry is, and the LOSSY one was the primitive advertised as additive.
+      * `\\r\\n` became `\\n`.
+      * a file with no trailing newline gained one.
+
+    Each also changes the entry revision, so every other client's cached
+    `If-Match` is invalidated for a change nobody asked for.
+    """
+
+    def _entry_path(self, tmp_path: Path) -> Path:
+        root = tmp_path / "store" / ALLOW_SCOPE
+        root.mkdir(parents=True)
+        path = root / f"{entry_ref(ALLOW_SCOPE)}.md"
+        path.write_bytes(LOSSY_ENTRY)
+        return path
+
+    def test_every_byte_OUTSIDE_the_inserted_line_is_IDENTICAL(self, tmp_path: Path):
+        """🔴 THE WHOLE CLAIM, PINNED ON BYTES. The expected file is spelled here
+        as `prefix + <the one new line> + suffix` over the ORIGINAL bytes, so a
+        writer that changed anything at all — an encoding, a line ending, a
+        trailing newline — fails on the equality rather than on a property
+        somebody remembered to check."""
+        path = self._entry_path(tmp_path)
+        head_end = LOSSY_ENTRY.index(_HEADING_BYTES) + len(_HEADING_BYTES)
+
+        status, line, _rev = api.append_bullet(
+            path, text=BULLET_D, actor="zach", session=SESSION_A, today="2026-05-02"
+        )
+        after = path.read_bytes()
+
+        assert status == "appended"
+        assert after == (
+            LOSSY_ENTRY[:head_end]
+            + (line + "\n").encode("utf-8")
+            + LOSSY_ENTRY[head_end:]
+        ), after
+
+    def test_the_hostile_byte_is_INSIDE_A_NUANCE_BULLET_which_is_what_is_hashed(self):
+        """🔴 THE ANTI-VACUITY CONTROL FOR EVERY ASSERTION BELOW, and the exact
+        hole that let a 500 pass here for a whole audit round.
+
+        `append_bullet` feeds `bullet_content(existing.lines)` — the NUANCE
+        BULLETS and nothing else — to `content_hash`. A fixture whose only
+        undecodable byte sat in `## What it is` therefore never put one through
+        the hashing path, so "a non-UTF-8 byte survives an append" was answered
+        by a writer that cannot append to such an entry at all.
+
+        Asked of the reader's OWN section parser rather than by an `in` over the
+        whole file, so a byte that drifts back out of the nuance block fails
+        here instead of quietly re-vacuating the section.
+        """
+        assert b"\xe9" in LOSSY_ENTRY and b"\xef\xbf\xbd" not in LOSSY_ENTRY
+        assert LOSSY_ENTRY.count(b"\xe9") == 2, "the fixture stopped covering BOTH"
+        nuance = nuance_bytes_of(LOSSY_ENTRY)
+        assert "\udce9" in nuance, nuance
+        what = resolver.extract_sections(
+            LOSSY_ENTRY.decode("utf-8", errors="surrogateescape"),
+            (resolver.WHAT_HEADING,),
+        )[resolver.WHAT_HEADING]
+        assert "\udce9" in what, what
+
+    def test_a_NON_UTF8_byte_on_an_untouched_line_SURVIVES(self, tmp_path: Path):
+        """Named separately from the equality above because this is the one that
+        DESTROYS content the store cannot re-derive, and because `U+FFFD` is the
+        specific corpse to look for."""
+        path = self._entry_path(tmp_path)
+        assert b"\xe9" in LOSSY_ENTRY and b"\xef\xbf\xbd" not in LOSSY_ENTRY
+
+        status, line, _rev = api.append_bullet(
+            path, text=BULLET_E, actor="zach", session=SESSION_A, today="2026-05-02"
+        )
+        after = path.read_bytes()
+
+        # 🔴 THE POSITIVE CONTROL, AND IT COMES FIRST. "the bytes are unchanged"
+        # is trivially true of a file NOTHING WROTE TO — a writer that raised, or
+        # refused, or returned `duplicate`, satisfies the preservation assertions
+        # below completely. So the append is proved to have LANDED before its
+        # non-destructiveness is claimed.
+        assert status == "appended", status
+        assert line.encode("utf-8") in after, "the new bullet never reached the file"
+
+        assert b"\xe9" in after, "the latin-1 byte was destroyed by an append"
+        assert b"\xef\xbf\xbd" not in after, (
+            "the append replaced an undecodable byte with U+FFFD"
+        )
+
+    def test_CRLF_line_endings_are_NOT_normalised(self, tmp_path: Path):
+        path = self._entry_path(tmp_path)
+        before_crlf = LOSSY_ENTRY.count(b"\r\n")
+        assert before_crlf == 2, "the fixture stopped exercising CRLF"
+
+        status, line, _rev = api.append_bullet(
+            path, text=BULLET_F, actor="zach", session=SESSION_A, today="2026-05-02"
+        )
+        after = path.read_bytes()
+
+        # Positive control, same reason as above: an unwritten file has exactly
+        # the CRLF count it started with.
+        assert status == "appended", status
+        assert line.encode("utf-8") in after, "the new bullet never reached the file"
+
+        assert after.count(b"\r\n") == before_crlf
+
+    def test_a_file_with_NO_trailing_newline_does_not_gain_one(self, tmp_path: Path):
+        path = self._entry_path(tmp_path)
+        assert not LOSSY_ENTRY.endswith(b"\n")
+
+        status, line, _rev = api.append_bullet(
+            path, text=BULLET_D, actor="zach", session=SESSION_A, today="2026-05-02"
+        )
+        after = path.read_bytes()
+
+        # Positive control, same reason as above: a file nobody wrote to has
+        # exactly the trailing newline it started without.
+        assert status == "appended", status
+        assert line.encode("utf-8") in after, "the new bullet never reached the file"
+
+        assert not after.endswith(b"\n"), (
+            "the append added a trailing newline to a file that had none"
+        )
+
+    def test_the_bullet_INHERITS_the_headings_own_line_ending(self, tmp_path: Path):
+        """A CRLF entry must not gain an LF-terminated line in the middle of it.
+        The terminator is taken from the heading the bullet is inserted under,
+        never assumed."""
+        root = tmp_path / "store" / ALLOW_SCOPE
+        root.mkdir(parents=True)
+        path = root / f"{entry_ref(ALLOW_SCOPE)}.md"
+        original = (
+            b"---\r\nservice: crlf-only\r\nscope: kelp-forest\r\n---\r\n\r\n"
+            b"## Nuance / work-history\r\n"
+            b"- 2026-05-01: the bilge alarm chirps once at power-up\r\n"
+        )
+        path.write_bytes(original)
+
+        _s, line, _r = api.append_bullet(
+            path, text=BULLET_F, actor="zach", session=SESSION_A, today="2026-05-02"
+        )
+        after = path.read_bytes()
+
+        assert (line + "\r\n").encode("utf-8") in after
+        assert b"\n" not in after.replace(b"\r\n", b""), (
+            "a bare LF was introduced into a CRLF-only file"
+        )
+
+    def test_a_NO_trailing_newline_entry_whose_HEADING_is_the_LAST_line(
+        self, tmp_path: Path
+    ):
+        """The boundary the terminator rule turns on: there is no line ending to
+        inherit, so one is introduced BEFORE the bullet and the file still does
+        not end in a newline."""
+        root = tmp_path / "store" / ALLOW_SCOPE
+        root.mkdir(parents=True)
+        path = root / f"{entry_ref(ALLOW_SCOPE)}.md"
+        original = (
+            b"---\nservice: bare-tail\nscope: kelp-forest\n---\n\n"
+            b"## Nuance / work-history"
+        )
+        path.write_bytes(original)
+
+        _s, line, _r = api.append_bullet(
+            path, text=BULLET_E, actor="zach", session=SESSION_A, today="2026-05-02"
+        )
+        after = path.read_bytes()
+
+        assert after == original + b"\n" + line.encode("utf-8")
+        assert not after.endswith(b"\n")
+
+
+# The one substring of `KELP_NUANCE` the hostile byte is spliced next to. Named
+# so the fixture builder can assert it occurs EXACTLY ONCE store-wide — a
+# `bytes.replace` that hit a second site would put the byte somewhere no
+# assertion below describes.
+_NUANCE_ANCHOR = b"spring flood"
+
+
+def lossy_scoped_entry(root: Path) -> Path:
+    """The ALLOW_SCOPE entry of a `scoped_store`, with ONE latin-1 `0xe9` spliced
+    into its NUANCE BULLET — and nowhere else.
+
+    🔴 BUILT BY MUTATING `_build_store`'s OWN OUTPUT rather than spelled by hand.
+    The entry has to survive `rc.load_store` for the route to reach the writer at
+    all: a hand-written file that the index loader classified as MALFORMED would
+    answer `404 ref-unknown`, and every assertion about the write path below
+    would then be measuring a 404 while reading as coverage of an append.
+    """
+    path = entry_file(root, ALLOW_SCOPE)
+    original = path.read_bytes()
+    assert original.count(_NUANCE_ANCHOR) == 1, original
+    assert nuance_bytes_of(original).count(_NUANCE_ANCHOR.decode()) == 1
+    hostile = original.replace(_NUANCE_ANCHOR, b"caf\xe9 spring flood")
+    assert hostile != original and hostile.count(b"\xe9") == 1
+    path.write_bytes(hostile)
+    os.utime(path, (FIXED_MTIME, FIXED_MTIME))
+    return path
+
+
+class TestAnEntryWithANonUTF8ByteInABulletIsSTILLAPPENDABLE:
+    """🔴 THE FIX FOR THE LOSSY REWRITE MADE ONE LEGACY BYTE PERMANENTLY
+    UNAPPENDABLE — over HTTP, on the real route, `500 internal-error`.
+
+    The append decodes the whole file `errors="surrogateescape"`, which is what
+    makes the round trip a bijection; that decode yields LONE SURROGATES for
+    every byte that is not valid UTF-8. `content_hash` then re-encoded the
+    dedupe text with PLAIN `"utf-8"`, which refuses to encode a surrogate:
+
+        server.py:2011  if content_hash(bullet_content(existing.lines)) == wanted
+        server.py:1743  " ".join(text.split()).encode("utf-8")
+        UnicodeEncodeError: 'utf-8' codec can't encode character '\\udce9'
+
+    Measured end to end over HTTP and isolated by property, at the ref that
+    introduced it:
+
+        plain             -> 200 appended
+        latin-1 in bullet -> 500 internal-error      <- the regression
+        crlf-only         -> 200 appended
+        no trailing \\n    -> 200 appended
+
+    🔴 AND WHY IT IS NOT MERELY COSMETIC. The old writer corrupted the byte
+    silently; this refused the append entirely, so ONE legacy byte in ONE bullet
+    made that entry unappendable FOREVER — an availability regression on a store
+    whose entire purpose is accumulating notes, and on exactly the entry shape
+    the fix was written to protect.
+
+    🔴 THE CLASS ABOVE COULD NOT SEE IT, TWICE OVER, and both holes are closed
+    rather than worked around:
+
+      1. Its fixture put the byte in `## What it is`, a section
+         `bullet_content` never reads — so the crashing branch was unreachable.
+         `LOSSY_ENTRY` now carries the byte in BOTH sections.
+      2. It called `api.append_bullet` DIRECTLY. That proves the library
+         function preserves bytes while the ROUTE still 500s: the isolation
+         seam, two surfaces each verified alone and broken together. Every test
+         here goes over a real socket.
+
+    🔴 AND EVERY ONE OF THEM PROVES THE WRITE LANDED BEFORE CLAIMING THE OLD
+    BYTES SURVIVED. "the pre-existing bytes are unchanged" is trivially true of
+    a file NOTHING WROTE TO, which is precisely how the earlier assertion passed
+    over a 500.
+    """
+
+    def test_PAIRED_CONTROL_the_same_POST_against_an_ASCII_entry_is_200(
+        self, scoped_store: Path
+    ):
+        """🔴 Without this, every 200 below is satisfied by a store that would
+        answer 200 for any reason at all, and every 500 by a broken harness. Same
+        store, same token, same call shape, same text — the ONLY difference in
+        the test that follows is one byte inside one bullet."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_A
+            )
+        assert code == 200, (code, body)
+        assert headers["X-Store-Status"] == "appended"
+        assert BULLET_D.encode("utf-8") in path.read_bytes()
+
+    def test_the_append_SUCCEEDS_over_the_REAL_ROUTE(self, scoped_store: Path):
+        """🔴 THE REGRESSION, ON THE WIRE. `500` at the ref this fix lands on."""
+        path = lossy_scoped_entry(scoped_store)
+        before = path.read_bytes()
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_A
+            )
+        after = path.read_bytes()
+
+        assert code == 200, (code, headers, body)
+        assert headers["X-Store-Status"] == "appended"
+        # 🔴 THE POSITIVE CONTROL: the write actually LANDED. Asked of the
+        # reader's own section parser, so "the bullet is on disk" cannot be
+        # satisfied by prose that landed outside the nuance block.
+        assert after != before, "the route answered 200 and wrote nothing"
+        assert BULLET_D in nuance_bytes_of(after), nuance_bytes_of(after)
+        assert f"[cairn: zach/{SESSION_A}]" in nuance_bytes_of(after)
+
+    def test_the_PRE_EXISTING_undecodable_byte_survives_the_append(
+        self, scoped_store: Path
+    ):
+        path = lossy_scoped_entry(scoped_store)
+        assert b"\xe9" in path.read_bytes()
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_E, session=SESSION_A
+            )
+        after = path.read_bytes()
+
+        # Positive control first — see the class docstring.
+        assert code == 200, (code, headers, body)
+        assert BULLET_E in nuance_bytes_of(after)
+
+        assert b"\xe9" in after, "the latin-1 byte was destroyed by an append"
+        assert b"\xef\xbf\xbd" not in after, (
+            "the append replaced an undecodable byte with U+FFFD"
+        )
+
+    def test_the_RESPONSE_BODY_carries_the_rendered_bullet(self, scoped_store: Path):
+        """The append's response body is `(line + "\\n").encode(...)`, so a
+        surrogate reaching `line` would 500 AFTER the file was already written —
+        the worst shape of all, a durable write reported as a server error."""
+        path = lossy_scoped_entry(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, _h, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_F, session=SESSION_A
+            )
+        assert code == 200, (code, body)
+        assert BULLET_F.encode("utf-8") in body, body
+        assert body.decode("utf-8").strip() in nuance_bytes_of(path.read_bytes())
+
+    def test_the_audit_line_says_APPENDED_not_internal_error(
+        self, scoped_store: Path
+    ):
+        """🔴 The dispatch backstop is what turned this from a dropped connection
+        into an answered `500 internal-error` WITH an audit line — which is how
+        the regression was found at all. The line is asserted to say `appended`
+        so that a future crash caught by that same backstop cannot pass here."""
+        lossy_scoped_entry(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            post_bullet(base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_A)
+            line = await_audit(audit, 1)[0]
+        assert "status=appended" in line, line
+        assert "result=200" in line, line
+        assert "internal-error" not in line, line
+
+    def test_a_RE_POST_of_the_SAME_text_is_a_DUPLICATE_and_writes_NOTHING(
+        self, scoped_store: Path
+    ):
+        """🔴 THE OTHER DIRECTION OF THE SAME HASH. Idempotency is decided by
+        `content_hash` over the stored bullets — the very call that raised — so
+        an entry carrying an undecodable byte must still be able to RECOGNISE a
+        repeat, not merely to accept a new one. A fix that made `content_hash`
+        return a constant would pass the append tests above and fail here.
+        """
+        path = lossy_scoped_entry(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            first, h1, b1 = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_A
+            )
+            after_first = path.read_bytes()
+            second, h2, b2 = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_B
+            )
+        assert (first, h1["X-Store-Status"]) == (200, "appended"), (first, b1)
+        assert (second, h2["X-Store-Status"]) == (200, "duplicate"), (second, b2)
+        assert path.read_bytes() == after_first, "the duplicate wrote to the file"
+        # …and the PRE-EXISTING hostile bullet is still not confused with it: a
+        # `content_hash` that collapsed every surrogate-bearing bullet to one
+        # value would have answered `duplicate` on the FIRST post.
+        assert b"\xe9" in after_first
+
+    def test_the_hostile_bullet_is_NOT_hash_equal_to_its_REPAIRED_spelling(
+        self, scoped_store: Path
+    ):
+        """🔴 THE BIJECTION, STATED AS BEHAVIOUR. `surrogateescape` must map the
+        raw `0xe9` back to `0xe9` — not to `é` (U+00E9, `0xc3 0xa9`) and not to
+        `U+FFFD`. If it did, a client POSTing the correctly-encoded spelling of a
+        legacy bullet would be told `duplicate` and its correction silently
+        dropped; here it is a genuinely new bullet and it lands.
+        """
+        path = lossy_scoped_entry(scoped_store)
+        bullets = resolver.parse_journal_bullets(nuance_bytes_of(path.read_bytes()))
+        stored = api.bullet_content(bullets[0].lines)
+        assert "\udce9" in stored, stored
+        repaired = stored.replace("\udce9", "é")
+        assert "\udce9" not in repaired and "é" in repaired
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=repaired, session=SESSION_A
+            )
+        assert code == 200, (code, body)
+        assert headers["X-Store-Status"] == "appended", body
+        after = path.read_bytes()
+        assert b"caf\xc3\xa9" in after, "the correctly-encoded spelling did not land"
+        assert b"caf\xe9" in after, "the legacy byte was overwritten by the repair"
+
+
+class TestTheEntryTextCodecIsONERuleInONEPlace:
+    """🔴 THE DECODE AND THE ENCODE MUST AGREE, EVERYWHERE, and the regression
+    above was exactly one site where they did not.
+
+    `append_bullet` decodes the entry `surrogateescape` and then re-encoded at
+    three separate sites — the splice offset (`surrogateescape`), the inserted
+    line (plain), and the idempotency hash (plain). Three call sites deciding one
+    thing is the predicate-at-N-sites shape: it was wrong at one of them, and the
+    disagreement was inaudible until a byte reached it. There is now ONE encoder
+    and ONE decoder and every site calls them.
+    """
+
+    # Pairwise distinct, and each a DIFFERENT reason to be undecodable: a lone
+    # continuation byte, a truncated 2-byte lead, a UTF-16 BOM, a valid
+    # multi-byte character (which must survive unchanged), and a mix with a CRLF.
+    HOSTILE = [
+        b"",
+        b"caf\xe9 log",
+        b"\x80",
+        b"\xc3",
+        b"\xff\xfe",
+        "café log".encode("utf-8"),
+        b"a\xe9b\r\nc\xf0d",
+    ]
+
+    @pytest.mark.parametrize("raw", HOSTILE)
+    def test_the_round_trip_is_a_BIJECTION_on_BYTES(self, raw: bytes):
+        assert api.encode_entry_text(api.decode_entry_text(raw)) == raw
+
+    def test_content_hash_hashes_the_ORIGINAL_BYTES(self):
+        """🔴 PINNED TO A DIGEST COMPUTED HERE FROM THE RAW BYTES, never from the
+        function under test. A `content_hash` that encoded `"utf-8"` raises on
+        this input; one that encoded `errors="replace"` returns the digest of
+        `U+FFFD` and fails on the value.
+        """
+        raw = b"the tender's caf\xe9 log"
+        expected = hashlib.sha256(raw).hexdigest()[:16]
+        assert api.content_hash(raw.decode("utf-8", "surrogateescape")) == expected
+        assert len(expected) == len(api.content_hash("anything at all"))
+
+    def test_a_CLEAN_string_hashes_IDENTICALLY_to_before(self):
+        """The fix must not move the hash of any bullet already in the corpus —
+        that would re-open every entry's idempotency and re-write the world. The
+        digest is spelled from plain UTF-8 bytes, which is what the old code
+        computed."""
+        text = "the tide gauge drifts 3cm after a spring flood."
+        assert api.content_hash(text) == (
+            hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        )
+
+    def test_NEGATIVE_CONTROL_a_surrogate_is_UNENCODABLE_by_plain_utf8(self):
+        """Proof that the parametrized bijection above is testing something: the
+        SAME string, through the encoder the code used to use, raises."""
+        text = b"caf\xe9".decode("utf-8", "surrogateescape")
+        with pytest.raises(UnicodeEncodeError):
+            text.encode("utf-8")
+
+
+class TestAPUTOfUndecodableBytesIs422NotA500:
+    """🔴 THE SIBLING WRITE PRIMITIVE, CHECKED FOR THE SAME MISMATCH.
+
+    `replace_entry` decodes the PUT body `errors="strict"` — deliberately, and
+    that is NOT the append's handler. A PUT is the one primitive that can
+    DESTROY content, so bytes the reader could not parse are refused rather than
+    written, and the refusal is the documented `422 unprocessable`.
+
+    The two handlers disagreeing is the whole defect class above, so the
+    difference is pinned as INTENDED behaviour rather than left to be rediscovered
+    as a bug: append round-trips any bytes, PUT refuses the ones it cannot read.
+    """
+
+    def _if_match(self, path: Path) -> dict[str, str]:
+        return {"If-Match": f'"{api.entry_revision(path.read_bytes())}"'}
+
+    def test_a_PUT_of_a_body_with_a_non_UTF8_byte_is_422(self, scoped_store: Path):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        body = before.replace(_NUANCE_ANCHOR, b"caf\xe9 spring flood")
+        assert body != before
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, resp = fetch(
+                entry_url(base, ALLOW_SCOPE),
+                token=ZACH_TOKEN,
+                method="PUT",
+                data=body,
+                extra_headers=self._if_match(path),
+            )
+        assert code == 422, (code, resp)
+        assert headers["X-Store-Status"] == "entry-shape"
+        assert path.read_bytes() == before, "a refused PUT wrote to the file"
+
+    def test_POSITIVE_CONTROL_the_SAME_edit_correctly_encoded_is_200(
+        self, scoped_store: Path
+    ):
+        """🔴 Without this the 422 above is satisfied by a PUT route that refuses
+        EVERYTHING. Same target, same precondition, same edit — spelled in
+        well-formed UTF-8."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        body = before.replace(_NUANCE_ANCHOR, "café spring flood".encode("utf-8"))
+        assert body != before
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, resp = fetch(
+                entry_url(base, ALLOW_SCOPE),
+                token=ZACH_TOKEN,
+                method="PUT",
+                data=body,
+                extra_headers=self._if_match(path),
+            )
+        assert code == 200, (code, resp)
+        assert headers["X-Store-Status"] == "replaced"
+        assert path.read_bytes() == body
+
+
+class TestTextIsValidatedAgainstEVERYLineBreak:
+    """🔴 `str.splitlines()` SPLITS ON TEN CHARACTERS AND THE VALIDATOR CHECKED
+    TWO. `if "\\n" in text or "\\r" in text` is a membership test on two
+    characters standing in for a predicate about ten.
+
+    MEASURED with a paired control — the same payload twice, once with a plain
+    `" - "` separator and once with a literal `U+2028`. The control stayed ONE
+    line; the probe became TWO stored bullets, the first carrying the caller's
+    prose with **no attribution trailer at all** and the second an `OPEN:`-marked
+    bullet whose leading `[cairn: …]` an operator reads as a DIFFERENT person's
+    attribution. One `200 appended` by `zach`; one forged-looking record.
+
+    Every one of the ten is exercised, not a sample: the defect was precisely
+    that a hand-picked subset stood in for the class.
+    """
+
+    # Spelled out here by hand rather than imported from `api.LINE_BREAK_CHARS`,
+    # which would assert `x == x` and stay green if the module's own set shrank.
+    ALL_BREAKS = [
+        "\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", " ", " ",
+    ]
+
+    def test_the_set_this_class_exercises_is_the_set_splitlines_ACTUALLY_splits_on(
+        self,
+    ):
+        """The list above is only evidence if it is complete. Asked of
+        `str.splitlines()` itself, over the whole BMP-and-then-some, so a
+        character nobody thought of fails this rather than slipping through every
+        parametrized case below."""
+        found = [
+            chr(cp)
+            for cp in range(0x11000)
+            if len(f"a{chr(cp)}b".splitlines()) > 1
+        ]
+        assert sorted(found) == sorted(self.ALL_BREAKS), found
+
+    @pytest.mark.parametrize("break_char", ALL_BREAKS)
+    def test_a_LINE_BREAK_in_text_is_400_and_writes_NOTHING(
+        self, scoped_store: Path, break_char: str
+    ):
+        """⚠ 8 of these 10 are pinned on the MESSAGE, not on this clause: the
+        eight `Cc` characters are ALSO refused by `_FORBIDDEN_CATEGORIES`, so
+        deleting the line-break predicate leaves them 400 with a different
+        sentence. `must be ONE line` is what keeps them honest — it pins WHICH
+        clause wins, a deliberate UX ordering — but the coverage that only this
+        clause can provide is `U+2028`/`U+2029` (`Zl`/`Zp`, not in
+        `_FORBIDDEN_CATEGORIES`), and it is in this same parametrization.
+        Redundancy, accepted and now stated rather than left invisible.
+        """
+        before = tree_hash(scoped_store)
+        text = f"{BULLET_D}{break_char}OPEN: {BULLET_E}"
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
+            )
+        assert code == 400, (hex(ord(break_char)), code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        # 🔴 THE VALIDATOR'S OWN SENTENCE. A test satisfied by any 400 would be
+        # green with this clause deleted and a different clause firing.
+        assert b"must be ONE line" in body, body
+        assert tree_hash(scoped_store) == before
+
+    def test_PAIRED_CONTROL_the_SAME_payload_with_a_plain_separator_is_ONE_line(
+        self, scoped_store: Path
+    ):
+        """🔴 WITHOUT THIS THE PARAMETRIZED REFUSAL ABOVE IS SATISFIED BY A SERVER
+        THAT 400s EVERY APPEND. Same prose, same shape, an ordinary `" - "` where
+        the break was: accepted, and exactly ONE bullet appears."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before_lines = len(path.read_text().splitlines())
+        text = f"{BULLET_D} - OPEN: {BULLET_E}"
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
+            )
+        assert code == 200, code
+        assert headers["X-Store-Status"] == "appended"
+        stored = path.read_text()
+        assert len(stored.splitlines()) == before_lines + 1, stored
+        assert f"[cairn: zach/{SESSION_A}]" in stored
+
+    @pytest.mark.parametrize("break_char", ALL_BREAKS)
+    def test_a_LEADING_or_TRAILING_line_break_is_refused_too(
+        self, scoped_store: Path, break_char: str
+    ):
+        """`"a\\n".splitlines()` is ONE element, so the count predicate alone
+        cannot see a break at either end — and a bullet that opens or closes with
+        an empty line is the same content-attached-to-the-wrong-bullet defect one
+        line over."""
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            for text in (f"{break_char}{BULLET_F}", f"{BULLET_F}{break_char}"):
+                code, _h, body = post_bullet(
+                    base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
+                )
+                assert code == 400, (hex(ord(break_char)), repr(text), code)
+                assert b"must be ONE line" in body, body
+        assert tree_hash(scoped_store) == before
+
+
+class TestTextRejectsControlAndFormattingCharacters:
+    """🔴 EACH OF THESE WAS MEASURED LANDING IN THE CURATED FILE AT `200
+    appended`. None of them is a line break, so the widened line-break predicate
+    does not cover them and a second clause is required — in the SAME validator,
+    because a character rule at two sites is a character rule that disagrees with
+    itself.
+    """
+
+    HOSTILE = [
+        ("\x00", "makes git and grep read the entry as BINARY"),
+        ("\x1b", "an ANSI escape rewrites the reader's terminal"),
+        ("\t", "a tab is a control character and a bullet is one line of prose"),
+        ("‮", "a bidi override reorders what an operator reads"),
+        ("⁦", "a bidi isolate does the same, in a newer shape"),
+        ("​", "zero width: invisible AND it defeats idempotency"),
+        ("‍", "a joiner is invisible between two visible characters"),
+        ("­", "a soft hyphen renders as nothing, or as a hyphen"),
+        ("﻿", "a BOM in mid-line is invisible everywhere"),
+    ]
+
+    @pytest.mark.parametrize("char,why", HOSTILE)
+    def test_a_HOSTILE_character_is_400_and_writes_NOTHING(
+        self, scoped_store: Path, char: str, why: str
+    ):
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE,
+                text=f"{BULLET_E}{char}{BULLET_F}", session=SESSION_A,
+            )
+        assert code == 400, (why, code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        # 🔴 The clause's OWN sentence, naming the CODE POINT it refused — so a
+        # green here cannot be a different clause firing, and the message is
+        # actionable for a character the caller cannot see.
+        assert f"U+{ord(char):04X}".encode() in body, (why, body)
+        assert tree_hash(scoped_store) == before
+
+    def test_ORDINARY_non_ASCII_prose_is_still_ACCEPTED(self, scoped_store: Path):
+        """🔴 THE POSITIVE CONTROL. A rule that refused all non-ASCII would pass
+        every case above and quietly make the store English-only."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        text = "the café gauge reads 3 °C low — naïve calibration, 5 µs skew"
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
+            )
+        assert code == 200, code
+        assert headers["X-Store-Status"] == "appended"
+        assert text in path.read_text(encoding="utf-8")
+
+    def test_two_VISUALLY_IDENTICAL_bullets_cannot_both_land(
+        self, scoped_store: Path
+    ):
+        """The idempotency half of the zero-width finding: `A\\u200bB` and `AB`
+        render identically, so accepting the first would let a retry
+        double-record something an operator cannot tell apart on screen."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            first = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_A
+            )
+            after_first = path.read_bytes()
+            second = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE,
+                text=BULLET_D.replace(" ", "​ ", 1), session=SESSION_A,
+            )
+        assert first[0] == 200 and first[1]["X-Store-Status"] == "appended"
+        assert second[0] == 400, second
+        assert path.read_bytes() == after_first
+
+
+class TestADeepJSONBodyIsAnswered:
+    """🔴 `RecursionError` IS NOT A `ValueError`, AND `json.loads` RAISES IT.
+
+    The handler caught `(UnicodeDecodeError, ValueError)`, so a 400 KB body of
+    `[[[[…]]]]` escaped the handler entirely: the connection was dropped with no
+    response, no `X-Store-Status` and — the part that matters — **no audit line**,
+    on a request that had already been metered and authenticated.
+    """
+
+    BODY = b"[" * 200_000 + b"]" * 200_000
+
+    def test_the_deep_body_is_a_400_and_the_AUDIT_LINE_IS_WRITTEN(
+        self, scoped_store: Path
+    ):
+        before = tree_hash(scoped_store)
+        assert len(self.BODY) < api.MAX_DRAIN_BYTES, "the body must reach the parser"
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, headers, body = fetch(
+                bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="POST",
+                data=self.BODY,
+            )
+            lines = await_audit(audit, 1)
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert b"must be JSON" in body, body
+        assert any("result=400" in ln and "status=bad-request" in ln for ln in lines), lines
+        assert tree_hash(scoped_store) == before
+
+    def test_POSITIVE_CONTROL_a_SHALLOW_body_of_the_same_shape_still_parses(
+        self, scoped_store: Path
+    ):
+        """The refusal above must be about the DEPTH, not about brackets or about
+        a large body. A nested list the parser can handle is still refused — as
+        `the body must be a JSON object` — which is a DIFFERENT clause, and that
+        difference is the evidence."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, body = fetch(
+                bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="POST",
+                data=b"[" * 50 + b"]" * 50,
+            )
+        assert code == 400
+        assert b"must be a JSON object" in body, body
+        assert b"must be JSON (" not in body, body
+
+
+class TestTheDedupeScopeIsTheINSERTIONScope:
+    """🔴 A `duplicate` VERDICT DECIDED BY A SECTION THE WRITER WOULD NEVER TOUCH.
+
+    `nuance_insert_index` takes the FIRST `## Nuance / work-history` heading; the
+    duplicate check read `rc.extract_sections`, which CONCATENATES every block
+    sharing a heading. So a genuinely new bullet that happened to match one in
+    the SECOND section answered `200 duplicate` and wrote nothing — content loss
+    in the direction this module's own docstring calls the one that matters, and
+    silent, because the response says the observation is already recorded.
+    """
+
+    FIRST_PROSE = "the mooring pennant chafes against the fairlead"
+    SECOND_PROSE = "the stern gland weeps a drop a minute under way"
+
+    def _twin_heading_entry(self, tmp_path: Path) -> Path:
+        root = tmp_path / "store" / ALLOW_SCOPE
+        root.mkdir(parents=True)
+        path = root / f"{entry_ref(ALLOW_SCOPE)}.md"
+        path.write_text(
+            "\n".join(
+                [
+                    "---",
+                    f"service: {entry_ref(ALLOW_SCOPE)}",
+                    f"scope: {ALLOW_SCOPE}",
+                    "sensitivity: internal",
+                    "---",
+                    "",
+                    "## Nuance / work-history",
+                    f"- 2026-05-03: {self.FIRST_PROSE}",
+                    "",
+                    "## Pointers",
+                    POINTER_LINE,
+                    "",
+                    "## Nuance / work-history",
+                    f"- 2026-05-04: {self.SECOND_PROSE}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_a_bullet_matching_the_SECOND_section_is_APPENDED_not_swallowed(
+        self, tmp_path: Path
+    ):
+        path = self._twin_heading_entry(tmp_path)
+        before = path.read_bytes()
+
+        status, line, _rev = api.append_bullet(
+            path, text=self.SECOND_PROSE, actor="zach", session=SESSION_A,
+            today="2026-05-05",
+        )
+
+        assert status == "appended", (
+            "a bullet matching only the SECOND nuance section was answered "
+            "`duplicate` — the writer refused to record an observation on the "
+            "authority of a section it would never have inserted into"
+        )
+        assert path.read_bytes() != before
+        after = path.read_text(encoding="utf-8")
+        heading = resolver.NUANCE_HEADING
+        # It landed under the FIRST heading — asserted by position in the raw
+        # text, not by re-asking the function under test where that is.
+        first_body = after.split(heading, 2)[1]
+        assert first_body.splitlines()[1] == line, after
+
+    def test_a_bullet_matching_the_FIRST_section_is_STILL_a_duplicate(
+        self, tmp_path: Path
+    ):
+        """🔴 THE POSITIVE CONTROL, and the reason the fix is a NARROWING rather
+        than a removal: within the section the writer actually inserts into,
+        idempotency is unchanged and not one byte is written."""
+        path = self._twin_heading_entry(tmp_path)
+        before = path.read_bytes()
+
+        status, _line, _rev = api.append_bullet(
+            path, text=self.FIRST_PROSE, actor="zach", session=SESSION_A,
+            today="2026-05-05",
+        )
+
+        assert status == "duplicate"
+        assert path.read_bytes() == before
+
+    def test_the_section_body_STOPS_at_the_next_heading(self, tmp_path: Path):
+        """The narrowing is the section boundary itself, so it is asserted
+        directly: `## Pointers` sits between the two nuance blocks and its
+        content belongs to neither."""
+        path = self._twin_heading_entry(tmp_path)
+        lines = path.read_text(encoding="utf-8").splitlines()
+
+        block = api.nuance_block(lines)
+
+        assert block is not None
+        index, body = block
+        assert lines[index - 1] == resolver.NUANCE_HEADING
+        assert self.FIRST_PROSE in body
+        assert self.SECOND_PROSE not in body, body
+        assert POINTER_LINE not in body, body
+
+
+class TestTheRENAMEIsFSYNCedToo:
+    """🔴 DURABILITY WAS ENTIRELY UNPINNED: a mutant deleting `os.fsync(fh)`
+    survived all 479 tests, and there was no directory fsync at all.
+
+    `fsync` on the FILE persists the bytes; the RENAME lives in the parent
+    DIRECTORY and has its own writeback, so a node that lost power after
+    `os.replace` returned could come back with the old name still pointing at the
+    old inode — the append gone, the client told `200 appended`. Atomicity is
+    what a concurrent READER sees; durability is what survives a crash, and
+    `os.replace` gives only the first for free.
+    """
+
+    def _fsynced_kinds(self, monkeypatch, work) -> "list[bool]":
+        """`[is_a_directory, …]` for every fd `os.fsync` was called on."""
+        kinds: "list[bool]" = []
+        real = os.fsync
+
+        def spy(fd):
+            kinds.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+            return real(fd)
+
+        monkeypatch.setattr(os, "fsync", spy)
+        try:
+            work()
+        finally:
+            monkeypatch.undo()
+        return kinds
+
+    def test_an_append_fsyncs_BOTH_the_file_and_its_DIRECTORY(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """🔴 ONE ASSERTION PER FSYNC, so deleting EITHER one goes red — a single
+        "fsync was called" check is green with the directory one removed, which
+        is exactly the mutant that survived."""
+        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        path = entry_file(root, ALLOW_SCOPE)
+
+        kinds = self._fsynced_kinds(
+            monkeypatch,
+            lambda: api.append_bullet(
+                path, text=BULLET_D, actor="zach", session=SESSION_A,
+                today="2026-05-06",
+            ),
+        )
+
+        assert False in kinds, "the entry file itself was never fsynced"
+        assert True in kinds, (
+            "the parent DIRECTORY was never fsynced, so the rename that made the "
+            "append visible is not durable across a crash"
+        )
+
+    def test_a_PUT_fsyncs_BOTH_as_well(self, tmp_path: Path, monkeypatch):
+        """Both write primitives go through `_replace_bytes`, and the test says so
+        rather than assuming it: a second copy of the write would be the
+        predicate-at-two-sites shape this module keeps finding."""
+        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        path = entry_file(root, ALLOW_SCOPE)
+        data = _entry(entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=f"- 2026-05-06: {BULLET_E}").encode()
+        revision = api.entry_revision(path.read_bytes())
+
+        kinds = self._fsynced_kinds(
+            monkeypatch,
+            lambda: api.replace_entry(
+                path, data=data, if_match=[revision], scope=ALLOW_SCOPE,
+                filename=path.name,
+            ),
+        )
+
+        assert False in kinds and True in kinds, kinds
+
+    def test_an_UNFSYNCABLE_directory_does_not_fail_the_write(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Best-effort is a decision, so it is pinned: a filesystem that refuses a
+        directory fd must not turn a completed append into a 503. Trading a rare
+        durability gap for a certain availability one is the wrong trade, and an
+        unasserted `try/except` is the shape that silently becomes the right one
+        for the wrong reason."""
+        root = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        path = entry_file(root, ALLOW_SCOPE)
+        real_open = os.open
+
+        def refuse_dirs(target, flags, *args, **kwargs):
+            if Path(target).is_dir():
+                raise OSError(13, "permission denied")
+            return real_open(target, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", refuse_dirs)
+        status, line, _rev = api.append_bullet(
+            path, text=BULLET_F, actor="zach", session=SESSION_A, today="2026-05-06",
+        )
+        monkeypatch.undo()
+
+        assert status == "appended"
+        assert line in path.read_text(encoding="utf-8")
+
+
+class TestIfMatchIsRead_AS_A_LIST:
+    """🔴 RFC 9110 §13.1.1 SAYS `If-Match` IS A LIST, AND THIS READ IT AS ONE
+    STRING. `If-Match: "stale", "<correct>"` — the header any conformant client
+    builds from more than one candidate revision — compared the WHOLE value
+    against a 16-character hash and answered **412 forever**. Uppercase hex did
+    the same. Fail-closed, and still a precondition no conformant client could
+    ever satisfy; a client that cannot succeed re-sends without one.
+    """
+
+    def _replacement(self) -> bytes:
+        return _entry(
+            entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=f"- 2026-05-07: {BULLET_D}"
+        ).encode()
+
+    def _put(self, base: str, if_match: str):
+        return fetch(
+            entry_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="PUT",
+            data=self._replacement(), extra_headers={"If-Match": if_match},
+        )
+
+    def test_a_LIST_containing_the_CURRENT_revision_SUCCEEDS(self, scoped_store: Path):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        current = api.entry_revision(path.read_bytes())
+        stale = api.entry_revision(b"a revision this store never held")
+        assert stale != current
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(base, f'"{stale}", "{current}"')
+        assert code == 200, (code, body)
+        assert headers["X-Store-Status"] == "replaced"
+        assert path.read_bytes() == self._replacement()
+
+    def test_a_LIST_of_ONLY_stale_revisions_is_still_412_and_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        """🔴 THE NEGATIVE HALF, AND IT IS THE ONE THAT MATTERS: widening the
+        parser must not widen what SATISFIES the precondition. Two wrong tags are
+        still wrong."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        one = api.entry_revision(b"neither of these")
+        two = api.entry_revision(b"is the current revision")
+        assert one != two
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(base, f'"{one}", "{two}"')
+        assert code == 412, code
+        assert headers["X-Store-Status"] == "precondition-failed"
+        assert path.read_bytes() == before
+
+    def test_UPPERCASE_hex_names_the_SAME_revision(self, scoped_store: Path):
+        """`hexdigest()` is lower-case; hex is not. A client that upper-cased its
+        ETag got a 412 it could not diagnose."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        current = api.entry_revision(path.read_bytes())
+        assert current != current.upper(), "the fixture revision has no hex letters"
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, _b = self._put(base, f'"{current.upper()}"')
+        assert code == 200, code
+        assert path.read_bytes() == self._replacement()
+
+    def test_a_LIST_containing_STAR_is_still_REFUSED(self, scoped_store: Path):
+        """`*` turns the guard off while looking like it is on, and hiding it in
+        a list must not smuggle it past the refusal."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        current = api.entry_revision(before)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(base, f'"{current}", *')
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("shape", ["prefix", "superstring"])
+    def test_the_precondition_is_EQUALITY_not_CONTAINMENT(
+        self, scoped_store: Path, shape: str
+    ):
+        """🔴 THE MUTANT A 16-HEX FIXTURE STRUCTURALLY CANNOT SEE. Weakening
+        `current not in tags` to a substring test (`tag in current or current in
+        tag`) survives every other case in this file, because two DISTINCT full
+        revisions are never substrings of one another — so nothing reached the
+        weakened branch. A truncated ETag would then satisfy the precondition and
+        a lost update would go straight through.
+
+        Both directions, because the two containment mutants are different
+        mutants: a PREFIX of the revision, and a string CONTAINING it.
+        """
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        current = api.entry_revision(before)
+        tag = current[:8] if shape == "prefix" else f"00{current}00"
+        assert tag != current
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = self._put(base, f'"{tag}"')
+        assert code == 412, (shape, code)
+        assert headers["X-Store-Status"] == "precondition-failed"
+        assert path.read_bytes() == before
+
+    def test_an_If_Match_naming_NO_entity_tag_is_refused(self, scoped_store: Path):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = self._put(base, " , ")
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert b"names no entity-tag" in body, body
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ('"abc"', ["abc"]),
+            ('W/"abc"', ["abc"]),
+            ('"abc", "def"', ["abc", "def"]),
+            ('"ABC" ,  W/"DeF"', ["abc", "def"]),
+            ("bare", ["bare"]),
+            ("", []),
+            (" , ", []),
+            ("*", ["*"]),
+        ],
+    )
+    def test_the_parser_itself(self, raw: str, expected: "list[str]"):
+        assert api.parse_if_match(raw) == expected
+
+
+class TestPUTDoesNotEnforceAttribution:
+    """⚠ AN ACCEPTED LIMIT, PINNED SO IT CANNOT DRIFT INTO BEING ASSUMED. THIS IS
+    NOT A SECURITY GUARANTEE AND NOTHING HERE SHOULD BE READ AS ONE.
+
+    Criterion 4's "every appended bullet records actor and session" is a claim
+    about `POST /bullets`, where the actor is a keyword no request body can
+    populate. A PUT writes the caller's bytes VERBATIM — a forged
+    `[cairn: <somebody else>/…]` trailer included — and this server does not
+    check it.
+
+    Enforcement was considered and DECLINED: PUT exists for the whole-file
+    rewrites the store needs (editing `## Pointers`, turning `OPEN:` into
+    `RESOLVED <sha>:`), and per-bullet enforcement would have to diff the old
+    bullet set against the new one to tell a legitimate rewrite from a forgery,
+    refusing real edits whenever that diff was wrong. The holder of a
+    PUT-capable token is already trusted with the whole file's contents. What is
+    NOT acceptable is claiming otherwise, which is why the claim is scoped to
+    POST in the README, the module docstring and `render_bullet`.
+    """
+
+    FORGED_BULLET = (
+        f"- 2026-05-08: OPEN: {BULLET_F} [cairn: {DANA.identity}/{SESSION_B}]"
+    )
+
+    def test_a_PUT_writes_a_FORGED_attribution_trailer_VERBATIM(
+        self, scoped_store: Path
+    ):
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        data = _entry(
+            entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=self.FORGED_BULLET
+        ).encode()
+        revision = api.entry_revision(path.read_bytes())
+        assert ZACH.identity != DANA.identity, "the forgery must name another holder"
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = fetch(
+                entry_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="PUT",
+                data=data, extra_headers={"If-Match": revision},
+            )
+
+        assert code == 200, code
+        assert headers["X-Store-Status"] == "replaced"
+        # 🔴 The bytes are on disk exactly as `zach` sent them, naming `dana`.
+        assert path.read_bytes() == data
+        assert self.FORGED_BULLET in path.read_text(encoding="utf-8")
+
+    def test_the_SAME_forgery_through_POST_is_ATTRIBUTED_TO_THE_TOKEN(
+        self, scoped_store: Path
+    ):
+        """🔴 THE BOUNDARY, IN ONE PAIR. The identical trailer sent through the
+        POST route does NOT become an attribution: `render_bullet` appends the
+        token's own, so the forged text is demoted to content and the bullet
+        still records who wrote it. That contrast is the whole reason the claim
+        can be scoped to POST rather than dropped."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        text = f"OPEN: {BULLET_F} [cairn: {DANA.identity}/{SESSION_B}]"
+
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
+            )
+
+        assert code == 200 and headers["X-Store-Status"] == "appended"
+        stored = path.read_text(encoding="utf-8")
+        written = [ln for ln in stored.splitlines() if BULLET_F in ln]
+        assert len(written) == 1, stored
+        assert written[0].endswith(f"[cairn: {ZACH.identity}/{SESSION_A}]"), written
+
+
+class TestTheFramingRefusalIsREACHED:
+    """The `if not framed:` branch was dead code as far as the suite could see —
+    a mutant making it inert survived 479 tests. It is EQUIVALENT today
+    (`framed=False` implies `body=b""` by construction, and both write handlers
+    then refuse an empty body downstream), and that is accepted. These guards
+    stop the redundancy from being incidental: one pins the ANSWER a refused
+    framing gets, the other pins the INVARIANT the equivalence rests on.
+    """
+
+    def test_a_CHUNKED_PUT_with_a_CORRECT_If_Match_is_400_and_UNCHANGED(
+        self, scoped_store: Path
+    ):
+        """🔴 EVERY OTHER GUARD IS SATISFIED — a valid token, a resolvable target
+        and the CURRENT revision — so the only thing that can refuse this request
+        is the framing check. A test that sent a stale revision would be green
+        with the branch deleted."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        revision = api.entry_revision(before)
+        body = _entry(
+            entry_ref(ALLOW_SCOPE), ALLOW_SCOPE, nuance=f"- 2026-05-09: {BULLET_E}"
+        ).encode()
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            host = base.split("//", 1)[1]
+            payload = (
+                f"PUT /api/v1/entry/{ALLOW_SCOPE}/{entry_ref(ALLOW_SCOPE)} HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                f"Authorization: Bearer {ZACH_TOKEN}\r\n"
+                f"CF-Connecting-IP: {CLIENT_IP}\r\n"
+                f"If-Match: \"{revision}\"\r\n"
+                f"Transfer-Encoding: chunked\r\n\r\n"
+                f"{len(body):x}\r\n"
+            ).encode() + body + b"\r\n0\r\n\r\n"
+            data = _speak(host, payload)
+            await_audit(audit, 1)
+        assert b"HTTP/1.1 400" in data, data[:200]
+        assert b"X-Store-Status: bad-request" in data, data[:400]
+        assert b"unreadable request body" in data, data[:400]
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        "raw_headers",
+        [
+            b"Transfer-Encoding: chunked\r\n",
+            b"Content-Length: 5\r\nContent-Length: 9\r\n",
+            b"Content-Length: -5\r\n",
+            b"Content-Length: not-a-number\r\n",
+            b"Content-Length: 99999999\r\n",
+        ],
+    )
+    def test_INVARIANT_a_refused_framing_ALWAYS_yields_an_EMPTY_body(
+        self, raw_headers: bytes
+    ):
+        """🔴 THE INVARIANT THE EQUIVALENCE RESTS ON, ASSERTED DIRECTLY. If a
+        refusal could ever return bytes, the `if not framed:` branch would stop
+        being redundant and its absence would be a real defect — so the thing to
+        pin is not the branch but the property that makes it safe."""
+        message = http.client.parse_headers(io.BytesIO(raw_headers + b"\r\n"))
+
+        class _Stub:
+            close_connection = False
+            headers = message
+            rfile = io.BytesIO(b"hello there, this should never be read")
+
+        framed, body = api.StoreRequestHandler._consume_body(_Stub(), keep=True)
+
+        assert framed is False, raw_headers
+        assert body == b"", (raw_headers, body)
+
+    def test_POSITIVE_CONTROL_an_ACCEPTED_framing_DOES_return_the_body(self):
+        """Without this, the invariant above is satisfied by a `_consume_body`
+        that returns an empty body for everything."""
+        message = http.client.parse_headers(io.BytesIO(b"Content-Length: 5\r\n\r\n"))
+
+        class _Stub:
+            close_connection = False
+            headers = message
+            rfile = io.BytesIO(b"hello there")
+
+        framed, body = api.StoreRequestHandler._consume_body(_Stub(), keep=True)
+
+        assert framed is True
+        assert body == b"hello"
+
+
+class TestTheHandlerArgumentCountComesFromTheTABLE:
+    """🔴 `middle = parts[1 : len(parts) - tail_len]` SIZED A HANDLER CALL FROM
+    THE REQUEST. `len(parts)` is attacker-controlled, and the expression was
+    correct only because `_write_route`'s `len(parts) != arity` check rejected
+    the mismatch three lines earlier. Relaxing that check proved the coupling:
+    `PUT /api/v1/entry/<scope>/<ref>/bullets` (4 parts) matched the PUT row
+    (arity 3) and passed FIVE arguments into a four-parameter method — unhandled
+    `TypeError`, connection dropped, no response, no `X-Store-Status`, no audit
+    line.
+
+    The slice now comes from `WRITE_ROUTES`' own `arity`, so a wrong argument
+    count is structurally impossible however the arity check behaves.
+    """
+
+    def test_a_PUT_at_the_BULLETS_path_is_a_405_and_writes_NOTHING(
+        self, scoped_store: Path
+    ):
+        """🔴 ASSERTED ON THE STATUS CODE, NOT ON "something went wrong". The
+        mutant that motivated this fix was previously "killed" only because
+        `fetch` itself raised `RemoteDisconnected` — a transport error that would
+        be equally red for any downstream crash and proves nothing about the
+        arity guard. A real 405 read off the wire is the guard's own answer."""
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        revision = api.entry_revision(before)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, headers, body = fetch(
+                bullets_url(base, ALLOW_SCOPE), token=ZACH_TOKEN, method="PUT",
+                data=b"---\nservice: x\nscope: y\n---\n",
+                extra_headers={"If-Match": revision},
+            )
+            lines = await_audit(audit, 1)
+        assert code == 405, (code, body)
+        assert headers["Allow"] == "GET, HEAD"
+        assert body == b"read-only\n", body
+        assert any("result=405" in ln and "status=method-not-allowed" in ln for ln in lines), lines
+        assert path.read_bytes() == before
+
+    def test_the_route_table_and_every_handler_signature_AGREE(self):
+        """🔴 A LEDGER OVER THE SEAM, not over one side of it. The dispatcher
+        passes `arity - tail_len - 1` path components plus `body` and `path`; a
+        row whose arity disagrees with its handler's signature is a `TypeError`
+        at request time on an internet-reachable route, and nothing else in this
+        file would see it. Fails when a row is added, when a handler grows a
+        parameter, and when either is removed."""
+        import inspect
+
+        for (verb, name), (handler_name, arity, tail) in api.WRITE_ROUTES.items():
+            handler = getattr(api.StoreRequestHandler, handler_name)
+            params = [
+                p
+                for p in inspect.signature(handler).parameters
+                if p != "self"
+            ]
+            expected = (arity - len(tail) - 1) + 2  # path components + body + path
+            assert len(params) == expected, (
+                f"{verb} {name} -> {handler_name}: the table would pass "
+                f"{expected} arguments to a {len(params)}-parameter handler"
+            )
+            assert params[-2:] == ["body", "path"], (verb, name, params)
+
+
+class TestAnUnhandledHandlerErrorIsSTILLAudited:
+    """🔴 A METERED REQUEST MUST NEVER VANISH FROM THE AUDIT TRAIL.
+
+    Two defects in this round reached an unhandled-exception path (a
+    `RecursionError` out of `json.loads`, a `TypeError` from the argument slice),
+    and each dropped the connection with no response, no `X-Store-Status` and no
+    audit line — the mirror image of the unmetered-405 channel `_write`'s
+    docstring says it closed, and reachable by any token holder.
+
+    🔴 THIS IS A BACKSTOP FOR THE UNKNOWN NEXT CASE, NOT A SUBSTITUTE FOR EITHER
+    FIX. Both are fixed at their own site and have their own tests above.
+    """
+
+    def test_an_exception_in_a_handler_is_a_500_with_an_AUDIT_LINE(
+        self, scoped_store: Path, monkeypatch
+    ):
+        def boom(*_a, **_k):
+            raise ZeroDivisionError(
+                f"/data/{DENY_SCOPE}/secret-path-{SESSION_B} blew up"
+            )
+
+        monkeypatch.setattr(api, "append_bullet", boom)
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_D, session=SESSION_A
+            )
+            lines = await_audit(audit, 1)
+        monkeypatch.undo()
+
+        assert code == 500, (code, body)
+        assert headers["X-Store-Status"] == "internal-error"
+        assert body == b"internal error\n", body
+        assert any("result=500" in ln and "status=internal-error" in ln for ln in lines), lines
+        assert tree_hash(scoped_store) == before
+
+    def test_the_500_body_carries_NO_exception_detail(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """🔴 A BACKSTOP THAT ECHOED THE EXCEPTION WOULD OPEN A LEAK CHANNEL WHILE
+        CLOSING AN AUDIT ONE. The raised message names a scope the caller may not
+        see, a path and a session id; none of them may reach the wire.
+
+        🔴 THE ARRIVAL ASSERTIONS COME FIRST, BECAUSE WITHOUT THEM THIS TEST WAS
+        VACUOUS. "the body does not contain the secret" is satisfied by ANY
+        answer the patched `append_bullet` never reached — a 400, a 403, a 404 —
+        and a server-side refusal injected before the dispatch made it pass while
+        the sibling above failed. A leak test must first prove it produced the
+        very answer that could leak.
+        """
+        secret = f"/data/{DENY_SCOPE}/{THIRD_SCOPE}-{SESSION_B}"
+
+        def boom(*_a, **_k):
+            raise ZeroDivisionError(secret)
+
+        monkeypatch.setattr(api, "append_bullet", boom)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_E, session=SESSION_A
+            )
+            lines = await_audit(audit, 1)
+        monkeypatch.undo()
+
+        assert code == 500, (code, body)
+        assert headers["X-Store-Status"] == "internal-error"
+        assert body == b"internal error\n", body
+        assert any(
+            "result=500" in ln and "status=internal-error" in ln for ln in lines
+        ), lines
+        for leaked in (secret, DENY_SCOPE, THIRD_SCOPE, "ZeroDivisionError", "Traceback"):
+            assert leaked.encode() not in body, (leaked, body)
+        assert tuple(sorted(k.lower() for k in headers)) == tuple(
+            sorted(
+                ("cache-control", "connection", "content-length", "content-type",
+                 "date", "server", "x-store-status")
+            )
+        ), sorted(headers)
+
+
+class TestTheWriteRoutesDoNotCarryTheREADHeaders:
+    """🔴 A README SENTENCE IS A CLAIM LIKE ANY OTHER, and this one was false from
+    the moment the write path landed: "Every `/api/*` response carries
+    `X-Store-Status`, `X-Store-Exit` …, `X-Store-Revision` … and
+    `X-Store-Snapshot`". The write routes carry neither `X-Store-Revision` nor
+    `X-Store-Snapshot`, and `X-Store-Exit` only on a 503.
+
+    Pinned on BEHAVIOUR — the header set a write answer actually carries — and
+    then on the corrected sentence, so the doc cannot drift back.
+    """
+
+    def test_a_successful_APPEND_carries_no_read_headers(self, scoped_store: Path):
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_F, session=SESSION_A
+            )
+        assert code == 200
+        lowered = {k.lower() for k in headers}
+        assert "x-store-status" in lowered and "etag" in lowered
+        assert "x-store-revision" not in lowered, sorted(headers)
+        assert "x-store-snapshot" not in lowered, sorted(headers)
+        assert "x-store-exit" not in lowered, sorted(headers)
+
+    def test_a_successful_RECALL_DOES_carry_them(self, scoped_store: Path):
+        """The positive control: the claim is true of the READ routes, which is
+        why the fix is a qualification rather than a deletion."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, _b = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )
+        assert code == 200
+        lowered = {k.lower() for k in headers}
+        for name in ("x-store-status", "x-store-exit", "x-store-revision",
+                     "x-store-snapshot"):
+            assert name in lowered, (name, sorted(headers))
+
+    def test_the_README_no_longer_makes_the_UNQUALIFIED_claim(self):
+        """🔴 PINNED ON THE WHOLE NORMALISED SENTENCE, not on a keyword. A guard
+        that grepped for `X-Store-Revision` would be walked by any reword; a
+        cosmetic edit failing this test is the price of a machine-readable claim.
+        """
+        text = " ".join((API_DIR / "README.md").read_text().split())
+        assert (
+            "Every `/api/*` response carries `X-Store-Status`, `X-Store-Exit` "
+            "(the CLI's own exit code, from the CLI's own `_exit_for`), "
+            "`X-Store-Revision` (the scope's git HEAD, or `unknown` — never a "
+            "fabricated sha) and `X-Store-Snapshot`."
+        ) not in text, "the README still claims all four headers on EVERY /api/* route"
+        assert (
+            "⚠ **The WRITE routes carry NEITHER `X-Store-Revision` NOR "
+            "`X-Store-Snapshot`, and `X-Store-Exit` only on a `503`.**"
+        ) in text
+
+    def test_the_README_scopes_the_attribution_claim_to_POST(self):
+        """The other false-by-scope claim from this round. Same whole-sentence
+        rule, for the same reason."""
+        text = " ".join((API_DIR / "README.md").read_text().split())
+        assert (
+            "🔴 **The ACTOR is derived from the token, never from the body.**"
+        ) not in text, "the README still makes the attribution claim server-wide"
+        assert (
+            "🔴 **On this POST route the ACTOR is derived from the token, never "
+            "from the body.**"
+        ) in text
+        assert (
+            "⚠ **PUT DOES NOT ENFORCE ATTRIBUTION, AND THE POST GUARANTEE ABOVE "
+            "DOES NOT EXTEND TO IT.**"
+        ) in text
+
+
+# =============================================================================
+# The backstop must not become the desync it was added on top of.
+# =============================================================================
+
+# Distinct from every other bullet in this file, so "the write landed" cannot be
+# satisfied by a line some earlier test wrote.
+BULLET_BACKSTOP = "the anchor windlass trips its breaker on a cold morning"
+BULLET_AFTER_PUT = "the chart plotter loses its fix under the bridge"
+
+
+def _raw_exchange(host: str, payload: bytes, *, settle: float = 3.0):
+    """Send `payload` on ONE socket; return `(every byte that came back, saw_eof)`.
+
+    🔴 THE RAW SOCKET IS THE ONLY INSTRUMENT THAT CAN SEE THIS DEFECT. `urllib`
+    and `http.client` parse ONE response and leave whatever follows sitting in
+    the buffer, so a SECOND complete response on the same connection — the thing
+    these tests are about — is structurally invisible to them: the client returns
+    a perfectly good `200` and the trailing `500` goes to whoever gets the
+    pooled connection next. `saw_eof` separates "the server closed" from "the
+    reader gave up waiting", which is the other half a parsed client hides.
+
+    Deliberately NOT `TestNoRequestSmuggling._raw`: that one returns only the
+    split pieces, and the assertion below needs the UNSPLIT bytes to say
+    "nothing trailed the first response".
+    """
+    import socket
+
+    name, port = host.split(":")
+    chunks: "list[bytes]" = []
+    saw_eof = False
+    with socket.create_connection((name, int(port)), timeout=10) as sock:
+        sock.sendall(payload)
+        sock.settimeout(settle)
+        try:
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    saw_eof = True
+                    break
+                chunks.append(chunk)
+        except (TimeoutError, OSError):
+            pass
+    return b"".join(chunks), saw_eof
+
+
+def _responses(raw: bytes) -> "list[bytes]":
+    """The status lines + everything after them, one per response on the wire."""
+    return raw.split(b"HTTP/1.1 ")[1:]
+
+
+def _request(host: str, method: str, target: str, body: bytes | None = None) -> bytes:
+    head = (
+        f"{method} {target} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"Authorization: Bearer {ZACH_TOKEN}\r\n"
+        f"CF-Connecting-IP: {CLIENT_IP}\r\n"
+    )
+    if body is None:
+        return (head + "\r\n").encode()
+    return (head + f"Content-Length: {len(body)}\r\n\r\n").encode() + body
+
+
+class TestTheBackstopNeverSendsASecondResponse:
+    """🔴 THE GUARD ADDED TO CLOSE THE AUDIT HOLE REOPENED THE DESYNC HOLE.
+
+    `_append_bullet` calls `_respond(200, …)` and THEN `_audit(…)`, and both used
+    to sit inside the dispatch backstop's `try`. Anything raising after that
+    `_respond` — a broken audit sink, a full disk on stderr, or simply the next
+    statement somebody adds below it — made the backstop call `_respond(500, …)`
+    on a connection that had already sent a complete `200`. `_respond` has no
+    already-sent guard and only a non-200 sets `close_connection`, so the `200`
+    had already advertised the socket as reusable and a pooling proxy hands the
+    trailing `500` to the NEXT client on it. That is the response-desync class
+    `_drain_body`'s own docstring exists to prevent.
+
+    ⚠ HONEST REACHABILITY: induced here by wrapping the handler. In production
+    the only statement after that `_respond` is `_audit`, so it needs the audit
+    sink to raise — but "no statement will ever be added after a `_respond`" is a
+    promise, not a guard, which is why the fix is a flag inside `_respond` rather
+    than a rule about where code may go.
+    """
+
+    def test_an_exception_AFTER_the_response_sends_NO_second_response(
+        self, scoped_store: Path, monkeypatch
+    ):
+        real = api.StoreRequestHandler._append_bullet
+
+        def then_raise(self, *args, **kwargs):
+            real(self, *args, **kwargs)
+            raise ZeroDivisionError(f"/data/{DENY_SCOPE}/{SESSION_B} after the 200")
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_append_bullet", then_raise)
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        body = json.dumps({"text": BULLET_BACKSTOP, "session": SESSION_A}).encode()
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            host = base.split("//", 1)[1]
+            raw, saw_eof = _raw_exchange(
+                host,
+                _request(
+                    host, "POST",
+                    f"/api/v1/entry/{ALLOW_SCOPE}/{entry_ref(ALLOW_SCOPE)}/bullets",
+                    body,
+                ),
+            )
+            lines = await_audit(audit, 2)
+        monkeypatch.undo()
+
+        # 🔴 THE WRITE LANDED. Without this the test is the vacuous shape this
+        # round has produced three times: a file nothing wrote to trivially has
+        # no second response either. The 200 is a real 200 about a real append.
+        assert BULLET_BACKSTOP in nuance_of(path), path.read_text()
+        answers = _responses(raw)
+        assert len(answers) == 1, (
+            "a SECOND complete response followed the 200 on one connection — a "
+            f"pooling proxy hands it to the next client: {raw!r}"
+        )
+        assert answers[0].startswith(b"200 "), raw
+        assert b"internal error" not in raw, raw
+        assert b"X-Store-Status: internal-error" not in raw, raw
+        # The connection must not be reused after a request that ended in an
+        # unknown state, so the server closes it rather than leaving it pooled.
+        assert saw_eof, "the server left the desynchronised connection open"
+        # And the request still did not vanish from the audit trail: the 200 for
+        # the append that landed, and the 500 the backstop could not send.
+        assert any("result=200" in ln and "status=appended" in ln for ln in lines), lines
+        assert any(
+            "result=500" in ln and "status=internal-error-after-response" in ln
+            for ln in lines
+        ), lines
+
+    def test_POSITIVE_CONTROL_the_raw_reader_CAN_see_a_SECOND_response(
+        self, scoped_store: Path
+    ):
+        """🔴 Otherwise "exactly one response" is a fact about the reader, not
+        about the server. Two genuinely pipelined requests must come back as
+        two, read by the SAME helper and split by the SAME function."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            host = base.split("//", 1)[1]
+            one = f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()
+            raw, _eof = _raw_exchange(host, one + one)
+        assert len(_responses(raw)) == 2, f"the reader cannot see two: {raw!r}"
+
+    def test_an_exception_BEFORE_the_response_still_yields_ONE_500(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """The other arm, on the wire rather than through a parsed client: when
+        nothing has been sent yet the backstop still answers, exactly once."""
+
+        def boom(*_a, **_k):
+            raise ZeroDivisionError(f"/data/{DENY_SCOPE}/{SESSION_B} before the 200")
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_append_bullet", boom)
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        body = json.dumps({"text": BULLET_BACKSTOP, "session": SESSION_B}).encode()
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            host = base.split("//", 1)[1]
+            raw, _eof = _raw_exchange(
+                host,
+                _request(
+                    host, "POST",
+                    f"/api/v1/entry/{ALLOW_SCOPE}/{entry_ref(ALLOW_SCOPE)}/bullets",
+                    body,
+                ),
+            )
+            lines = await_audit(audit, 1)
+        monkeypatch.undo()
+
+        answers = _responses(raw)
+        assert len(answers) == 1, raw
+        assert answers[0].startswith(b"500 "), raw
+        assert b"internal error\n" in raw, raw
+        assert any("result=500" in ln and "status=internal-error" in ln for ln in lines), lines
+        assert path.read_bytes() == before
+
+    def test_a_PUT_that_raises_AFTER_its_response_is_the_SAME_one_answer(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """🔴 THE RULE LIVES IN `_respond`, NOT IN ONE HANDLER — so the second
+        write route inherits it without being told. If the flag had been set at
+        the `_append_bullet` call site instead, this would still send two."""
+        real = api.StoreRequestHandler._replace_entry
+
+        def then_raise(self, *args, **kwargs):
+            real(self, *args, **kwargs)
+            raise ZeroDivisionError("after the PUT response")
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_replace_entry", then_raise)
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        revision = api.entry_revision(path.read_bytes())
+        replacement = _entry(
+            entry_ref(ALLOW_SCOPE), ALLOW_SCOPE,
+            nuance=f"- 2026-04-12: {BULLET_AFTER_PUT}",
+        ).encode()
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            host = base.split("//", 1)[1]
+            head = (
+                f"PUT /api/v1/entry/{ALLOW_SCOPE}/{entry_ref(ALLOW_SCOPE)} HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                f"Authorization: Bearer {ZACH_TOKEN}\r\n"
+                f"CF-Connecting-IP: {CLIENT_IP}\r\n"
+                f"If-Match: {revision}\r\n"
+                f"Content-Length: {len(replacement)}\r\n\r\n"
+            ).encode()
+            raw, _eof = _raw_exchange(host, head + replacement)
+            lines = await_audit(audit, 2)
+        monkeypatch.undo()
+
+        # The replace LANDED — the assertion that stops this being vacuous.
+        assert path.read_bytes() == replacement
+        answers = _responses(raw)
+        assert len(answers) == 1, f"the PUT sent a second response too: {raw!r}"
+        assert answers[0].startswith(b"200 "), raw
+        assert any(
+            "result=500" in ln and "status=internal-error-after-response" in ln
+            for ln in lines
+        ), lines
+
+
+class TestTheREADDispatchIsBackstoppedToo:
+    """🔴 THE WRITE DISPATCH GOT A BACKSTOP; THE READ DISPATCH DID NOT, AND READS
+    ARE THE BUSIER PATH.
+
+    Measured before the fix: an exception inside `_recall` produced a
+    `RemoteDisconnected` at the client, NO response on the wire and ZERO audit
+    lines — on a request that had already been metered, authenticated and
+    authorised. The write backstop's own justification ("a metered request must
+    never vanish from the audit trail") says nothing about the verb, so neither
+    does the guard.
+    """
+
+    def test_an_exception_in_a_READ_handler_is_a_500_with_an_AUDIT_LINE(
+        self, scoped_store: Path, monkeypatch
+    ):
+        secret = f"/data/{DENY_SCOPE}/{THIRD_SCOPE}-{SESSION_B}"
+
+        def boom(*_a, **_k):
+            raise ZeroDivisionError(secret)
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_recall", boom)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            host = base.split("//", 1)[1]
+            raw, _eof = _raw_exchange(
+                host, _request(host, "GET", f"/api/v1/recall/{ALLOW_SCOPE}")
+            )
+            answers = _responses(raw)
+            assert len(answers) == 1, (
+                f"the READ dispatch vanished instead of answering: {raw!r}"
+            )
+            assert answers[0].startswith(b"500 "), raw
+            lines = await_audit(audit, 1)
+        monkeypatch.undo()
+
+        assert b"internal error\n" in raw, raw
+        assert b"X-Store-Status: internal-error" in raw, raw
+        assert any("result=500" in ln and "status=internal-error" in ln for ln in lines), lines
+        # The same leak rule the write backstop carries: an exception string
+        # names paths, scopes and sessions the caller may not see.
+        for leaked in (secret, DENY_SCOPE, THIRD_SCOPE, "ZeroDivisionError", "Traceback"):
+            assert leaked.encode() not in raw, (leaked, raw)
+
+    def test_an_exception_in_the_SNAPSHOT_handler_is_answered_too(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """A second read route, so the guard is pinned on the DISPATCH rather
+        than on one handler's name."""
+
+        def boom(*_a, **_k):
+            raise ZeroDivisionError("snapshot blew up")
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_snapshot", boom)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            host = base.split("//", 1)[1]
+            raw, _eof = _raw_exchange(host, _request(host, "GET", "/api/v1/snapshot"))
+            answers = _responses(raw)
+            assert len(answers) == 1, raw
+            assert answers[0].startswith(b"500 "), raw
+            lines = await_audit(audit, 1)
+        monkeypatch.undo()
+        assert any("result=500" in ln and "status=internal-error" in ln for ln in lines), lines
+
+    def test_an_exception_AFTER_a_READ_response_sends_NO_second_one(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """The already-sent rule is the SHARED one — the read backstop gets it
+        from `_backstop`, not from a second copy that could drift."""
+        real = api.StoreRequestHandler._recall
+
+        def then_raise(self, *args, **kwargs):
+            real(self, *args, **kwargs)
+            raise ZeroDivisionError("after the recall response")
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_recall", then_raise)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            host = base.split("//", 1)[1]
+            raw, saw_eof = _raw_exchange(
+                host, _request(host, "GET", f"/api/v1/recall/{ALLOW_SCOPE}")
+            )
+            lines = await_audit(audit, 2)
+        monkeypatch.undo()
+
+        answers = _responses(raw)
+        assert len(answers) == 1, f"the read path sent a second response: {raw!r}"
+        assert answers[0].startswith(b"200 "), raw
+        # The recall really was SERVED — the anti-vacuity half. An answer that
+        # never rendered the digest would satisfy "exactly one response" too.
+        assert KELP_NUANCE.encode() in raw, raw
+        assert b"internal error" not in raw, raw
+        assert saw_eof, "the desynchronised connection was left open"
+        assert any(
+            "result=500" in ln and "status=internal-error-after-response" in ln
+            for ln in lines
+        ), lines
+
+
+BULLET_SINKLESS = "the gangway sensor sticks when the pontoon ices over"
+
+
+class _RaisingTraceback:
+    """A stand-in for the `traceback` MODULE whose `print_exc` is what is broken.
+
+    🔴 SUBSTITUTED FOR `api.traceback`, NOT FOR `traceback.print_exc` ITSELF.
+    Patching the real module's attribute would break every other importer in the
+    interpreter — pytest's own reporting included — so the swap is scoped to the
+    one module whose behaviour is under test.
+
+    ⚠ HONEST REACHABILITY, stated because it is the weakest part of these two
+    tests: a broken stderr is induced AT `print_exc`, not by closing fd 2 or
+    filling a disk. For the question these tests ask — does a raising log write
+    decide whether the request gets answered — the two are the same
+    control-flow event, and this one is deterministic. `EPIPE` rather than a
+    bare `Exception` because a closed stderr pipe is what actually happens to a
+    pod whose log collector went away, and a guard tuned to a textbook fixture
+    is a guard that has not met production.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def print_exc(self, *_args, **_kwargs):
+        self.calls += 1
+        raise OSError(errno.EPIPE, "stderr is a closed pipe")
+
+
+class TestTheBackstopSurvivesITSOWNLogSink:
+    """🔴 `_backstop`'s FIRST STATEMENT WAS AN UNGUARDED `traceback.print_exc`,
+    AND THE `except` AROUND ITS `_audit` CALL PRINTED AGAIN, ALSO UNGUARDED.
+
+    So the one function whose entire job is "a metered request must never vanish"
+    vanished the request itself whenever the LOG SINK was the broken thing —
+    exactly the case its own docstring reasons about. MEASURED before the fix,
+    handler exception plus a raising `print_exc`: `RemoteDisconnected` at the
+    client, ZERO audit lines.
+
+    NOT a regression: the pre-`ea3d0a16` backstop had the same bare print. What
+    changed is that the docstring grew a paragraph about the broken-sink case and
+    guarded only half of it — the "reads as coverage while providing none" shape,
+    which is worse than no claim because it stops the next reader looking.
+    """
+
+    def test_a_handler_exception_with_a_RAISING_print_exc_STILL_answers_and_audits(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """The FIRST print. Nothing has been sent yet, so the backstop owes a
+        500 and an audit line — and a raising stderr must not cost either."""
+        broken = _RaisingTraceback()
+
+        def boom(*_a, **_k):
+            raise ZeroDivisionError(f"/data/{DENY_SCOPE}/{SESSION_B} before the 200")
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_append_bullet", boom)
+        monkeypatch.setattr(api, "traceback", broken)
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        body = json.dumps({"text": BULLET_SINKLESS, "session": SESSION_B}).encode()
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            host = base.split("//", 1)[1]
+            raw, _eof = _raw_exchange(
+                host,
+                _request(
+                    host, "POST",
+                    f"/api/v1/entry/{ALLOW_SCOPE}/{entry_ref(ALLOW_SCOPE)}/bullets",
+                    body,
+                ),
+            )
+            answers = _responses(raw)
+            assert len(answers) == 1, (
+                "the request VANISHED — the backstop's own log write took the "
+                f"answer with it: {raw!r}"
+            )
+            assert answers[0].startswith(b"500 "), raw
+            lines = await_audit(audit, 1)
+        monkeypatch.undo()
+
+        # The fixture's own positive control: a `print_exc` that was never
+        # called cannot have been the thing under test.
+        assert broken.calls >= 1, "the broken sink was never reached"
+        assert b"internal error\n" in raw, raw
+        assert any(
+            "result=500" in ln and "status=internal-error" in ln for ln in lines
+        ), lines
+        assert path.read_bytes() == before
+        for leaked in (DENY_SCOPE, "ZeroDivisionError", "closed pipe", "Traceback"):
+            assert leaked.encode() not in raw, (leaked, raw)
+
+    def test_a_RAISING_AUDIT_SINK_AND_a_RAISING_print_exc_still_end_the_request(
+        self, scoped_store: Path, monkeypatch, capfd
+    ):
+        """The SECOND print, on the route the docstring calls the only
+        production-reachable one: the AUDIT SINK is what raised. The append has
+        already answered `200`, so the backstop owes only a log entry — and when
+        the log is what is broken it must end the request cleanly anyway.
+
+        🔴 THE OBSERVABLE IS STDERR, NOT THE WIRE, and that is not a weaker
+        claim — it is the claim. The `200` is already out either way, so with
+        the second print unguarded the exception escapes `do_POST`, past
+        `handle_one_request`, into `socketserver.BaseServer.handle_error`, whose
+        banner replaces the operator's traceback. That banner appearing is the
+        failure.
+        """
+        broken = _RaisingTraceback()
+
+        def no_sink(_self, *_a, **_k):
+            raise OSError(errno.EPIPE, "the audit sink is gone")
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_audit", no_sink)
+        monkeypatch.setattr(api, "traceback", broken)
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        body = json.dumps({"text": BULLET_SINKLESS, "session": SESSION_A}).encode()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            host = base.split("//", 1)[1]
+            raw, saw_eof = _raw_exchange(
+                host,
+                _request(
+                    host, "POST",
+                    f"/api/v1/entry/{ALLOW_SCOPE}/{entry_ref(ALLOW_SCOPE)}/bullets",
+                    body,
+                ),
+            )
+        monkeypatch.undo()
+        captured = capfd.readouterr()
+
+        # 🔴 THE WRITE LANDED. Without this every assertion below is satisfied by
+        # a server that refused the append and therefore had nothing to audit.
+        assert BULLET_SINKLESS in nuance_of(path), path.read_text()
+        answers = _responses(raw)
+        assert len(answers) == 1, f"a second response followed the 200: {raw!r}"
+        assert answers[0].startswith(b"200 "), raw
+        assert saw_eof, "the connection was left open after an unknown-state request"
+        # BOTH prints were attempted — the handler's exception and the audit
+        # failure. `>= 1` would be satisfied without ever reaching the second
+        # site, which is the one this test exists for.
+        assert broken.calls == 2, broken.calls
+        assert "Exception occurred during processing of request" not in captured.err, (
+            "the backstop's second log write escaped `do_POST`: socketserver's "
+            f"banner replaced the operator's traceback:\n{captured.err}"
+        )
+
+    def test_NO_stderr_write_in_the_REQUEST_HANDLER_can_raise(self):
+        """🔴 THE LEDGER, BECAUSE THE PER-SITE FIX HAS NOW BEEN NEEDED THREE
+        TIMES. `ea3d0a16` guarded the `_audit` call and left both of
+        `_backstop`'s prints bare; `aa31d431` routed those two through
+        `_print_exc_quietly` and left `_handle`'s `except UnicodeError:` arm bare
+        on the reasoning that `_backstop` would catch it — which it cannot,
+        because they are SIBLING `except` arms of one `try`.
+
+        Each round fixed the site it had measured and left the next one. So this
+        pins the RELATIONSHIP instead: inside `StoreRequestHandler`, the ONLY
+        route to stderr is `_print_exc_quietly`. A new bare `print_exc` — or a
+        `print(..., file=sys.stderr)` — anywhere in a request-handling method
+        fails here, at the edit, rather than in production on the one request
+        whose log sink is broken.
+
+        🔴 SCOPED TO THE HANDLER CLASS, NOT THE FILE. `main()` and the
+        trusted-proxy warner also write stderr; a raise there is a STARTUP
+        failure, which is loud and correct. Only a write on the request path can
+        silently trade a caller's response for a log line.
+
+        🔴 WHAT IT CANNOT SEE, stated so it is not read as more than it is: a
+        write reached through an alias (`_p = traceback.print_exc`), through
+        `logging`, through `sys.stderr.write`, or from a module-level helper the
+        handler calls. It is a ledger of the shape that has actually bitten three
+        times, not a proof that no stderr write exists.
+        """
+        tree = ast.parse(SERVER_PATH.read_text())
+        handler = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.ClassDef) and n.name == "StoreRequestHandler"
+        )
+        offenders = []
+        for node in ast.walk(handler):
+            if isinstance(node, ast.Attribute) and node.attr == "print_exc":
+                offenders.append(f"traceback.print_exc at line {node.lineno}")
+            elif isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if kw.arg != "file":
+                        continue
+                    if isinstance(kw.value, ast.Attribute) and kw.value.attr == "stderr":
+                        offenders.append(f"file=sys.stderr at line {kw.value.lineno}")
+        assert not offenders, (
+            "a stderr write on the REQUEST PATH that can itself raise — a broken "
+            "log sink then decides whether the caller gets an answer. Route it "
+            "through `_print_exc_quietly()`:\n  " + "\n  ".join(offenders)
+        )
+        # Positive control: the detector must be able to SEE the shape it bans,
+        # or the zero above is a fact about the walker and not about the handler.
+        #
+        # 🔴 NON-EMPTY, NOT `== 1`. The upper bound this used to carry BANNED
+        # what the docstring above explicitly blesses: a `traceback.print_exc`
+        # inside `main()` is a startup failure, loud and correct, and adding one
+        # failed this control with "`traceback.print_exc` is spelled at 2 sites"
+        # — a message naming a problem that is not the problem, in a test whose
+        # subject is the handler class. The control's job is only to prove the
+        # walker can see the shape; the file-wide count is not its business.
+        seen = [
+            n.lineno for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and n.attr == "print_exc"
+        ]
+        assert seen, "the print_exc detector sees nothing — it is broken"
+
+
+class TestAnUndecodableEntryNameIsNotTheCallersFault:
+    """🔴 A BADLY-NAMED FILE ANSWERED `400 bad request`, BLAMING THE CALLER FOR A
+    STORE-SIDE PROBLEM — and echoed the codec's internal message while doing it.
+
+    `UnicodeEncodeError` is a `ValueError`, so one legacy byte in a filename
+    (`café.md` written under a non-UTF-8 locale) fell through `_handle`'s
+    caller-error clause: `400 bad request: 'utf-8' codec can't encode character
+    '\\udce9' in position 1906: surrogates not allowed`. The caller sent nothing
+    wrong and can do nothing about it; the four-state doctrine's answer for "I
+    could not look" is a 503.
+
+    Pre-existing, not introduced by the write path — fixed here because it is the
+    same consolidation rule this round is enforcing elsewhere.
+    """
+
+    def _with_bad_name(self, root: Path) -> str:
+        """Drop a file whose NAME holds a byte no UTF-8 decode can round-trip."""
+        name = b"caf\xe9.md".decode("utf-8", "surrogateescape")
+        target = os.path.join(str(root / ALLOW_SCOPE), name)
+        with open(target, "w", encoding="utf-8", errors="surrogateescape") as handle:
+            handle.write(_entry("cafe-entry", ALLOW_SCOPE, nuance=KELP_NUANCE))
+        return name
+
+    def test_a_RECALL_over_a_badly_named_file_is_a_503_not_a_400(
+        self, scoped_store: Path
+    ):
+        self._with_bad_name(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )
+            lines = await_audit(audit, 1)
+        assert code == 503, (code, body)
+        assert headers["X-Store-Status"] == "store-unreachable"
+        assert headers["X-Store-Exit"] == "3"
+        assert any(
+            "result=503" in ln and "status=store-unreachable" in ln for ln in lines
+        ), lines
+
+    def test_a_RAISING_print_exc_in_THIS_arm_STILL_answers_and_audits(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """🔴 SIBLING `except` ARMS DO NOT CATCH EACH OTHER, AND THAT IS WHY THE
+        DEFERRAL WAS WRONG. This arm's `traceback.print_exc` was left bare on the
+        reasoning that it raises BEFORE its `_respond`, so `_handle`'s backstop
+        would still answer the request. `_backstop` is called from the
+        `except Exception:` arm of the SAME `try` as this `except UnicodeError:`
+        — a sibling — so an exception raised in here leaves `_handle` entirely
+        and reaches nothing.
+
+        MEASURED with the badly-named file above, before the fix:
+
+            sink alive  : 503 store-unreachable, 1 audit line
+            sink broken : RemoteDisconnected,    0 audit lines
+
+        Identical outcome, on the identical mechanism, as the `_backstop` bug
+        `aa31d431` fixed — which is why the answer is the same helper.
+
+        The observable is the RAW WIRE, not `fetch`: a `RemoteDisconnected` from
+        a parsed client is a transport error, and a test that dies on one is a
+        test whose own assertion never ran. `_responses(raw)` lets the failure be
+        "no response came back", stated by this test.
+        """
+        broken = _RaisingTraceback()
+        self._with_bad_name(scoped_store)
+        monkeypatch.setattr(api, "traceback", broken)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            host = base.split("//", 1)[1]
+            raw, _eof = _raw_exchange(
+                host, _request(host, "GET", f"/api/v1/recall/{ALLOW_SCOPE}")
+            )
+            answers = _responses(raw)
+            assert len(answers) == 1, (
+                "the request VANISHED — this arm's own log write took the answer "
+                f"with it, past a SIBLING backstop that never sees it: {raw!r}"
+            )
+            assert answers[0].startswith(b"503 "), raw
+            lines = await_audit(audit, 1)
+        monkeypatch.undo()
+
+        # The fixture's own positive control: a `print_exc` that was never called
+        # cannot have been the thing under test.
+        assert broken.calls >= 1, "the broken sink was never reached"
+        assert any(
+            "result=503" in ln and "status=store-unreachable" in ln for ln in lines
+        ), lines
+        # The constant sentence still, and still no codec internals on the wire.
+        assert b"store unreadable: an entry name or body is not valid UTF-8\n" in raw
+        for leaked in (b"codec", b"udce9", b"surrogates", b"closed pipe", b"Traceback"):
+            assert leaked not in raw, (leaked, raw)
+
+    def test_the_503_body_does_NOT_echo_the_CODEC_message(self, scoped_store: Path):
+        """The message names the offending code point and its byte position —
+        facts about a file the caller may not be allowed to know exists, handed
+        out in an error the caller can trigger at will."""
+        self._with_bad_name(scoped_store)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            _code, _headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )
+        for leaked in (b"codec", b"udce9", b"surrogates", b"position", b"bad request"):
+            assert leaked not in body.lower(), (leaked, body)
+        assert body == b"store unreadable: an entry name or body is not valid UTF-8\n"
+
+    def test_POSITIVE_CONTROL_a_REAL_caller_error_is_STILL_a_400(
+        self, scoped_store: Path
+    ):
+        """🔴 Otherwise the fix above is satisfied by answering 503 to
+        everything. `?limit=banana` is the caller's mistake and stays one."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}?limit=banana", token=ZACH_TOKEN
+            )
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert b"bad request" in body
+
+
+class TestOnlyAWriteROUTERetainsItsBody:
+    """🟡 F6 — the pre-auth body buffer. `_consume_body(keep=True)` ran before
+    `_identify_and_meter`, so every write-verb request retained up to
+    `MAX_DRAIN_BYTES` in memory — including unauthenticated ones, and including
+    verbs and paths whose only possible answer is the 405 tail.
+
+    `_write_route` needs `self.command` and `path`, both known before the body is
+    read, so `keep=` can be the route. The DRAIN is unchanged and unconditional:
+    that is what closes the desync, and it is what the smuggling tests pin.
+    """
+
+    def _record_keeps(self, monkeypatch) -> "list[bool]":
+        keeps: "list[bool]" = []
+        real = api.StoreRequestHandler._consume_body
+
+        def spy(self, *, keep: bool):
+            keeps.append(keep)
+            return real(self, keep=keep)
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_consume_body", spy)
+        return keeps
+
+    def test_a_POST_at_a_READ_route_keeps_NOTHING(
+        self, scoped_store: Path, monkeypatch
+    ):
+        keeps = self._record_keeps(monkeypatch)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN,
+                method="POST", data=b"x" * 4096,
+            )
+        monkeypatch.undo()
+        assert code == 405, (code, body)
+        assert keeps == [False], keeps
+
+    def test_an_UNAUTHENTICATED_POST_at_a_READ_route_keeps_NOTHING(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """The case that motivated the fix: no credential, no route, a megabyte
+        held anyway."""
+        keeps = self._record_keeps(monkeypatch)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, _b = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=None,
+                method="POST", data=b"x" * 4096,
+            )
+        monkeypatch.undo()
+        assert code == 401, code
+        assert keeps == [False], keeps
+
+    def test_POSITIVE_CONTROL_a_real_WRITE_route_DOES_keep_its_body(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """🔴 Otherwise `keep == False` everywhere is satisfied by a server that
+        can no longer write at all. The append must still LAND."""
+        keeps = self._record_keeps(monkeypatch)
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_AFTER_PUT,
+                session=SESSION_A,
+            )
+        monkeypatch.undo()
+        assert code == 200, (code, body)
+        assert headers["X-Store-Status"] == "appended"
+        assert BULLET_AFTER_PUT in nuance_of(path), path.read_text()
+        assert keeps == [True], keeps
+
+
+class TestTheSurrogateNoteNamesTheRealGuard:
+    """🟡 The `encode_entry_text` note on the append response used to justify
+    itself with a FALSE premise: that the request body "is decoded `strict`, so
+    it holds no surrogates". The conclusion holds; the reason did not, and a
+    future reader reasoning from it would have deleted the clause that actually
+    does the work.
+    """
+
+    def test_a_JSON_escape_DOES_produce_a_lone_surrogate(self):
+        """🔴 THE MEASUREMENT THAT MAKES THE OLD REASON FALSE. The escape is
+        plain ASCII on the wire, so no decode handler on the raw bytes has any
+        bearing on it — `json` expands it afterwards."""
+        import unicodedata
+
+        raw = b'"\\ud800"'
+        text = json.loads(raw.decode("utf-8"))  # the STRICT decode the note names
+        assert len(text) == 1 and ord(text[0]) == 0xD800
+        assert unicodedata.category(text[0]) == "Cs"
+        with pytest.raises(UnicodeEncodeError):
+            text.encode("utf-8")
+
+    def test_the_Cs_CATEGORY_is_what_actually_refuses_it(self, scoped_store: Path):
+        """So `Cs` in `_FORBIDDEN_CATEGORIES` is LOAD-BEARING, not defensive."""
+        assert "Cs" in api._FORBIDDEN_CATEGORIES
+        before = tree_hash(scoped_store)
+        surrogate = json.loads('"\\ud800"')
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE,
+                text=f"a bullet with {surrogate} in it",
+                session=SESSION_A,
+            )
+        assert code == 400, (code, body)
+        assert headers["X-Store-Status"] == "bad-request"
+        assert b"U+D800 (Cs)" in body, body
+        assert tree_hash(scoped_store) == before
+
+    def test_the_note_no_longer_gives_the_FALSE_reason(self):
+        """🔴 PINNED ON THE WHOLE NORMALISED SENTENCE. A guard that grepped for
+        `strict` would be walked by any reword; the claim is machine-readable
+        because the string is.
+
+        The leading `#` of each comment line is stripped BEFORE normalising —
+        otherwise every sentence that wraps carries a `#` into the middle of
+        itself and no multi-line claim in this file could ever be pinned.
+        """
+        text = " ".join(
+            " ".join(
+                line.strip().lstrip("#").strip()
+                for line in SERVER_PATH.read_text().splitlines()
+            ).split()
+        )
+        assert (
+            "A stored bullet holding an undecodable byte cannot hash-equal any "
+            "body a client can send (the body is decoded `strict`, so it holds "
+            "no surrogates, and the byte survives `bullet_content` into the "
+            "hash)."
+        ) not in text, "the response-encode note still gives the false reason"
+        assert (
+            "the reason is 🔴 `Cs` IN `_FORBIDDEN_CATEGORIES` — WHICH IS "
+            "THEREFORE LOAD-BEARING HERE, NOT MERELY DEFENSIVE, AND MUST NOT BE "
+            "REMOVED ON THE STRENGTH OF THIS COMMENT."
+        ) in text, "the corrected reason is not in the file"

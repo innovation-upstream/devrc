@@ -1,6 +1,6 @@
-# subsystem-store-api — phase 1 + 1.5
+# subsystem-store-api — phase 1 + 1.5 + phase 3
 
-Read-only HTTP layer over the `/analyze-service` subsystem index, so the store is
+HTTP layer over the `/analyze-service` subsystem index, so the store is
 reachable from more than the workbench. Design: `claudedocs/proposal-subsystem-store-homelab.md`.
 
 **Not referenced from `CLAUDE.md` on purpose.** That file loads every session and
@@ -12,9 +12,10 @@ usable is phase 2. Add the pointer when there is something to point at.
 | in | out, until |
 |---|---|
 | the pod, seeded from the local store | — |
-| read-only `GET` API, bearer token **SET** | writes / append endpoints → **phase 3, criteria 4-10** |
-| per-client rate limit + lockout, `CF-Connecting-IP` keying | a WRITE-scoped token → **phase 3, criteria 4-10** |
+| `GET` API, bearer token **SET** | — |
+| per-client rate limit + lockout, `CF-Connecting-IP` keying | — |
 | per-token identity + **scope allowlist** on every read route (phase 3, criteria 1-3) | — |
+| the WRITE path: attributed append + `If-Match` PUT (phase 3, criteria **4-7**) | the re-seed, the cache cutover and retiring the legacy credential → **criteria 8-10**, which are OPERATIONS, not code |
 | cluster-internal `ClusterIP` | 🔴 IngressRoute + DNS → **an UNMERGED PR** |
 | byte-identity verified against local | the CLI wrapper + read-through cache → **phase 2** |
 
@@ -45,14 +46,152 @@ Manifests: `homelab-talos` → `clusters/homelab/apps/subsystem-store/`.
 ## Endpoints
 
 ```
-GET /healthz                              unauthenticated; body is exactly "ok\n"
-GET /api/v1/recall/{scope}[?mode=&ref=&limit=&page=]
-GET /api/v1/search/{scope}?q=…[&threshold=&max_hits=&context=&all_scopes=]
+GET  /healthz                              unauthenticated; body is exactly "ok\n"
+GET  /api/v1/recall/{scope}[?mode=&ref=&limit=&page=]
+GET  /api/v1/search/{scope}?q=…[&threshold=&max_hits=&context=&all_scopes=]
+GET  /api/v1/snapshot[?scope=]             gzipped tar of the entry files
+POST /api/v1/entry/{scope}/{ref}/bullets   append ONE attributed bullet
+PUT  /api/v1/entry/{scope}/{ref}           whole-file replace, `If-Match` REQUIRED
 ```
 
-Every `/api/*` response carries `X-Store-Status`, `X-Store-Exit` (the CLI's own
-exit code, from the CLI's own `_exit_for`), `X-Store-Revision` (the scope's
+### The write path (phase 3, criteria 4-7)
+
+```
+POST /api/v1/entry/{scope}/{ref}/bullets
+Content-Type: application/json
+{"text": "one line, no leading `- `", "session": "<agent session id>"}
+```
+
+🔴 **On this POST route the ACTOR is derived from the token, never from the
+body.** An `actor` key is accepted and DISCARDED — a client-supplied actor would
+let any token-holder attribute a bullet to somebody else. The `session` IS
+caller-supplied, because it is correlation data rather than an identity claim,
+and it is validated against `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`. **The claim is
+scoped to POST on purpose — PUT does not enforce it; see below.**
+
+`text` must be ONE line and must carry no control or formatting characters. The
+line check is `len(text.splitlines()) > 1` (plus a leading/trailing break test)
+rather than a search for `\n`/`\r`, because `str.splitlines()` splits on TEN
+characters: a literal `U+2028` was measured landing at `200 appended` and
+becoming TWO stored bullets — the first with **no attribution trailer at all**,
+the second an `OPEN:` bullet whose leading `[cairn: …]` reads as a different
+person's. Characters in Unicode categories `Cc`, `Cf`, `Cs` and `Co` are refused
+for the same reason a denylist is not: `\x00` makes the entry read as binary to
+`git`/`grep`, `\x1b[…` rewrites the terminal of whoever renders a digest,
+`U+202E` reorders the rendered line, and `U+200B` is invisible while still
+defeating idempotency. (`\t` is `Cc` and is therefore refused too — a bullet is
+one line of prose.)
+
+The bullet lands at the TOP of `## Nuance / work-history` (the store's
+newest-first convention) as:
+
+```
+- YYYY-MM-DD: <text> [cairn: <identity>/<session>]
+```
+
+The attribution is a SUFFIX because the store's bullet grammar is a PREFIX
+grammar: `- [YYYY-MM-DD: ]OPEN:` / `RESOLVED <sha>:` is anchored at position 0,
+so writing the actor between the date and the text makes an appended `OPEN:`
+parse as no marker at all — a silently vanishing badge.
+
+| answer | meaning |
+|---|---|
+| `200` + `X-Store-Status: appended` | the bullet was written |
+| `200` + `X-Store-Status: duplicate` | this CONTENT is already there; **not one byte** was written |
+| `400` | the request body is not a valid append |
+| `403` + `X-Store-Status: legacy-cannot-write` | a BARE (unmapped) token — it has no identity, so no actor can be derived. Give the holder a `<token> <identity> <scopes>` row |
+| `404` + `X-Store-Status: not-found` | the scope is outside your allowlist, OR it does not exist, OR the ref resolves to nothing, OR the entry is malformed — **one answer for all four**, because a refusal distinguishable from an absence is an enumeration API |
+| `422` | the entry has no `## Nuance / work-history` heading |
+| `500` + `X-Store-Status: internal-error` | a handler raised something nobody anticipated. The body is a **constant** — no exception text reaches the wire — the traceback goes to the pod log, and **the audit line is still written**. A metered request must never vanish from the audit trail; two defects in one audit round dropped the connection with no response and no record at all |
+
+🔴 **THE `500` BACKSTOP NEVER SENDS A *SECOND* RESPONSE.** A handler that raises
+*after* it has already answered — `_append_bullet` responds `200` and *then*
+audits — used to produce a complete `200` followed by a complete `500` on one
+connection. The `200` had advertised the socket as reusable, so a pooling proxy
+(Traefik does this by default) hands the trailing `500` to the **next** client on
+it: the response desync the request-body drain exists to prevent, arriving from
+the other direction. `_respond` now records that it has answered, and the
+backstop logs, audits and **closes** instead of answering twice. That case is
+audited as `status=internal-error-after-response`, distinct from the ordinary
+`internal-error` so the two are not conflated in Loki.
+
+The same backstop covers the **READ** dispatch. It used to cover writes only —
+an exception in `/recall`, `/search` or `/snapshot` dropped the connection with
+no response and **zero** audit lines, on a request that had already been metered
+and authorised. "A metered request must never vanish from the audit trail" does
+not distinguish reads from writes, and reads are the busier path.
+
+Appends are **commutative and idempotent**: two writers appending different
+bullets to one entry both survive (the read-modify-write is under an exclusive
+lock on a side file, `.<entry>.md.lock`, invisible to every walker), and
+re-POSTing the same content writes nothing.
+
+🔴 **An append is byte-preserving over ANY existing entry, including one that is
+not valid UTF-8.** The corpus holds files nobody re-encoded — a latin-1 `0xe9`
+in a bullet is a real shape — and the append reads and writes them through a
+single `surrogateescape` codec, so every byte outside the inserted line comes
+back identical and the entry stays appendable. Two earlier answers to those
+bytes were both wrong and are both pinned against: a `replace` decode DESTROYED
+the byte at `200 appended`, and re-encoding plain UTF-8 after a
+`surrogateescape` decode raised, so one legacy byte in one bullet made that
+entry answer `500` to every append forever. The idempotency hash is taken over
+the ORIGINAL bytes, so the correctly-encoded spelling of a legacy bullet is a
+genuinely new bullet rather than a swallowed duplicate.
+
+⚠ **PUT is the deliberate exception: it decodes the body `strict` and answers
+`422` on bytes that are not valid UTF-8.** That is a validation decision about
+untrusted input, not a round trip of the store's own bytes — a PUT can destroy
+content, so it will not write a file the reader cannot parse. The two write
+primitives are meant to disagree exactly here.
+
+```
+PUT /api/v1/entry/{scope}/{ref}
+If-Match: <entry revision>
+<the whole entry file>
+```
+
+🔴 **`If-Match` is REQUIRED (`428` without it) and `*` is refused (`400`).** A
+stale revision is `412` and **the file is unchanged on disk**; the 412 carries
+the current revision as an `ETag` so a client can retry. Bytes the index loader
+would reject are refused `422` rather than written — a PUT is the only
+primitive here that destroys content rather than adding to it.
+
+`If-Match` is read as the **list** RFC 9110 §13.1.1 says it is: `If-Match:
+"stale", "<correct>"` succeeds on the second tag, and hex case is folded, so
+`"3F2A…"` and `"3f2a…"` name the same revision. Reading it as one opaque string
+made both a permanent `412` — fail-closed, and still a precondition a
+conformant client could never satisfy.
+
+⚠ **PUT DOES NOT ENFORCE ATTRIBUTION, AND THE POST GUARANTEE ABOVE DOES NOT
+EXTEND TO IT.** The body is written verbatim: a PUT whose content includes
+`- 2026-08-27: OPEN: … [cairn: someone-else/sess-…]` is stored exactly as sent,
+forged trailer included. This is a **decided limit**, not an oversight — PUT
+exists for the whole-file rewrites the store needs (editing `## Pointers`,
+turning an `OPEN:` bullet into `RESOLVED <sha>:`), and enforcing per-bullet
+attribution would mean diffing the old bullet set against the new one to tell a
+legitimate rewrite from a forged trailer, refusing real edits whenever that diff
+was wrong. A holder of a PUT-capable token is already trusted with the whole
+file. `TestPUTDoesNotEnforceAttribution` pins the limit so it cannot drift into
+being assumed.
+
+⚠ **THE REVISION IS THE ENTRY'S CONTENT HASH — `sha256(entry file)[:16]` — NOT
+the scope's git head.** No scope in the served copy is a git repository, so
+`X-Store-Revision` answers `unknown` for all of them; a precondition keyed on
+it would be satisfied by every caller sending the literal string `unknown`,
+forever. A client can compute the revision itself from the copy `/snapshot`
+gave it.
+
+Every `/api/*` response carries `X-Store-Status`. The **READ** routes
+(`/recall`, `/search`, `/snapshot`) additionally carry `X-Store-Exit` (the CLI's
+own exit code, from the CLI's own `_exit_for`), `X-Store-Revision` (the scope's
 git HEAD, or `unknown` — never a fabricated sha) and `X-Store-Snapshot`.
+
+⚠ **The WRITE routes carry NEITHER `X-Store-Revision` NOR `X-Store-Snapshot`,
+and `X-Store-Exit` only on a `503`.** They carry an `ETag` (the entry revision)
+instead, which is the fact a writer needs and the read headers do not give. This
+paragraph used to claim all four on every `/api/*` response; that was false for
+the write path from the moment it landed. A README sentence is a claim like any
+other.
 
 🔴 **This server does NOT serve the authoritative store — it serves a COPY, and
 nothing syncs that copy.** `seed.sh` pushes it by hand; there is no CronJob and
@@ -85,6 +224,18 @@ store and found nothing → `200` + `X-Store-Status: scope-empty`. Read nothing 
 all → `503` + `X-Store-Status: store-unreachable`, carrying the reader's own
 "this is NOT 'nothing recorded yet'" sentence. A `200` is a claim the store was
 read, and only the first of those can make it.
+
+🔴 **An entry whose NAME is not valid UTF-8 is a `503`, not a `400`.** One legacy
+byte in a filename — `café.md` written under a non-UTF-8 locale — rides a
+surrogate into the rendered digest, and the encode raises `UnicodeEncodeError`,
+which is a `ValueError`. It therefore used to fall through the caller-error
+clause and answer `400 bad request: 'utf-8' codec can't encode character
+'\udce9' in position …`: the caller blamed for a store-side problem it cannot
+fix, and the codec's own message — which names the offending code point and its
+position in a file the caller may not be allowed to know exists — echoed onto the
+wire. It is now `503` + `X-Store-Status: store-unreachable` with a **constant**
+sentence. Measured on `/recall`; `/snapshot` was **not** affected, because
+`tarfile` encodes member names with `surrogateescape`.
 
 🔴 **One hostile FILE no longer costs the whole store.** The index loader
 classifies each `*.md` candidate BEFORE opening it, and REFUSES these kinds —
@@ -441,13 +592,16 @@ layers' job; this layer is the only one that can see a wrong credential.
 
 ## Deferred, and why (not oversights)
 
-- **Separate read/write tokens** — the READ half landed with phase 3 criteria
-  1-3 (identity + scope allowlist above). A WRITE-scoped token is still deferred
-  for the original reason: criteria 4-10 add no verb yet, so it would be a label
-  on a capability that does not exist. `do_POST = do_PUT = do_PATCH = do_DELETE
-  = _reject_write` is untouched and every write verb is still a 405.
-- **Backup CronJob, daily-commit CronJob** — the workbench copy is authoritative
-  until phase 3, so the PVC is a second copy, not the only one.
+- **Separate read/write tokens** — still deferred, and now for a different
+  reason than "there is no verb". Authorization is per SCOPE, and a mapped
+  row's allowlist governs both reads and writes; splitting the two would mean a
+  second field on every row and a second thing to get wrong. What DOES gate
+  writes today is identity: a BARE (legacy) token cannot write at all.
+- **A CLI verb for writing** — `scripts/cairn` still only reads. The API is the
+  contract; the wrapper is a separate change and is not claimed here.
+- **Backup CronJob, daily-commit CronJob** — the workbench copy is
+  authoritative until criteria 8-10 land, so the PVC is a second copy, not the
+  only one.
 - **A `rotate-token` script** — the procedure above is four steps across a SOPS
   file and a `kubectl` restart in another repo, and §2b's "one command" is worth
   building only once phase 2's wrapper exists to be the thing that holds it.
