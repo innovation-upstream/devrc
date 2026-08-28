@@ -391,9 +391,10 @@ EXIT_CODES: dict[str, int] = {
     # --expect-pubkey
     #
     # 🔴 FIVE OUTCOMES, SPLIT BY REMEDY LIKE EVERY BLOCK ABOVE, AND THE SPLIT IS
-    # what keeps a wrong PIPELINE from being read as a wrong KEY. All of them are
-    # reached on a machine holding no age identity and no route to the bucket,
-    # which is the point of the mode.
+    # what keeps a wrong PIPELINE from being read as a wrong KEY. FOUR of the
+    # five are reached on a machine holding no age identity and no route to the
+    # bucket, which is the point of the mode; the fifth is defensive and is
+    # named in the ⚠ immediately below.
     #
     # ⚠ WITH ONE EXCEPTION, STATED BECAUSE THE SENTENCE ABOVE USED TO OVERCLAIM
     # IT: `PUBKEY-DERIVATION-EMPTY` is a DEFENSIVE refusal, not a measured path.
@@ -1660,7 +1661,18 @@ def derive_pubkey_sha(identity_file: Path) -> str:
             f"age-keygen might print there, so it treats it as untrusted. "
             f"Hashing it anyway would publish a digest of an unknown string as "
             f"though it were a public key. Nothing about the escrow was "
-            f"determined; do NOT re-escrow.")
+            # 🔴 THE SAME REFUSAL AS THE `rc != 0` ARM ABOVE, AND FOR THE SAME
+            # REASON. Both arms raise NOT-AN-AGE-IDENTITY, so an operator maps
+            # ONE exit code through to whichever of the two they hit — and this
+            # one used to say only "do NOT re-escrow", without naming what
+            # re-escrowing destroys. The brief this mode was built to is that a
+            # refusal states the stake; half a code's raise sites doing so is
+            # how the other half gets reworded by someone who never saw it.
+            f"determined. 🔴 DO NOT RE-ESCROW ON THIS. What re-escrowing "
+            f"overwrites is the ONLY off-machine copy of the identity every "
+            f"artifact in the bucket is encrypted to, and this run learned "
+            f"NOTHING about whether that copy is good. Re-run under a shell "
+            f"whose `age-keygen` you trust before concluding anything.")
     return hashlib.sha256(p.stdout).hexdigest()[:PUBKEY_SHA_CHARS]
 
 

@@ -132,11 +132,25 @@ standing at, and it has now been proven to recover the key unaided.
    purpose: hand-typed one-liners for this cost three master-password entries on 2026-08-25/26,
    every failure a paste/quoting fault rather than a mistake about the task.
    ✅ **SUPERSEDED IN THE REPO**: this is now `escrow-verify.py --expect-pubkey <sha16>`,
-   tracked and reviewable — see ranked follow-up 13, which this closes. 🔴 **It is NOT yet on
-   either host**: the flag lives on PR #955 and reaches a machine only after that merges AND
-   `ship.sh` converges it, and at the time of writing the workbench checkout is parked on
-   another session's branch, so `ship.sh` would SKIP it. The `~/` copy was deliberately left
-   in place (live host, not the implementing session's to touch).
+   tracked and reviewable — see ranked follow-up 13, which this closes. 🔴 **Being in the repo
+   is not being on a host**: the flag reaches a machine only after PR #955 merges AND
+   `ship.sh` converges that host. 🔴 **Do not take either half on trust — MEASURE both**,
+   because each is volatile and a stale answer here sends you the wrong way twice (skipping a
+   `ship.sh` that would have worked, or trusting a flag that never arrived):
+
+   ```sh
+   # is it on THIS host? — the only authority, and it needs no network
+   escrow-verify.py --help | grep -c -- --expect-pubkey     # 0 = not here yet
+   # would ship.sh converge this host, or SKIP it?
+   scripts/drift-check.sh                                    # READ-ONLY; same rc vocabulary
+   ```
+
+   `ship.sh` converges with `merge --ff-only`, so it **skips and leaves as found** any host it
+   cannot fast-forward — a checkout on another branch, carrying un-pushed commits, or with a
+   conflicted/mid-merge tree. That is the condition to check; which branch a given checkout
+   happened to be on when this line was written is not a fact worth recording, and an earlier
+   revision of this bullet asserted one that was false within the hour. The `~/` copy was
+   deliberately left in place (live host, not the implementing session's to touch).
 3. 🟢 **Residual: the BROWSER clipboard leg alone.** Item 2 proved retrieval and correctness
    over the network from the DR host, so what is left is only a browser's own copy-paste
    mangling. Check it identically when convenient: open the note in the web vault, paste

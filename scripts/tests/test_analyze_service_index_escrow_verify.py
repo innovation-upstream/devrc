@@ -3882,51 +3882,109 @@ def test_age_keygen_exiting_ZERO_with_NON_RECIPIENT_output_is_refused(
     assert ei.value.detail is None, "an unvetted stream reached the detail field"
 
 
-def test_the_NOT_AN_AGE_IDENTITY_advisory_is_pinned_as_WHOLE_SENTENCES(tmp_path):
-    """🔴 A GUARD ON WORDS IS WALKABLE BY REWORDING — and this is the subsystem
-    where a re-escrow instruction on 2026-08-25 would have overwritten a good
-    escrow with a client's key.
+# 🔴 EVERY MESSAGE THAT TELLS AN OPERATOR WHETHER TO DESTROY THEIR ONLY KEY
+# COPY IS PINNED AS A WHOLE NORMALISED STRING — not as sentences, and not with
+# a "the opposite word never appears" companion.
+#
+# TWO AUDIT FINDINGS, ONE FIX:
+#
+#  1. `NOT-AN-AGE-IDENTITY` (35) HAS **TWO** RAISE SITES and only the `rc != 0`
+#     one was pinned. Rewriting the `fullmatch`-failure arm's "do NOT
+#     re-escrow." to "go ahead and overwrite the vault copy from this host."
+#     SURVIVED all 384 tests, and that arm IS reached — by both shapes of
+#     `test_age_keygen_exiting_ZERO_with_NON_RECIPIENT_output_is_refused`,
+#     which assert only the token and stream redaction. The old test's singular
+#     name, "the … advisory", read as covering code 35 while covering half of
+#     it. Both arms are pinned below and the name says so.
+#
+#  2. THE NEGATIVE HALF WAS ITSELF A SPELLED GUARD — in a test whose own
+#     docstring opens "A GUARD ON WORDS IS WALKABLE BY REWORDING".
+#     `assert "Re-escrow the note" not in msg` catches a REPLACEMENT and not an
+#     APPEND: adding "Then overwrite the vault copy from this machine to fix
+#     it." kept every sentence pin and every ordering assertion true, matched
+#     no forbidden literal, and survived all 384 tests.
+#
+# A whole-string equality closes both: nothing can be appended, removed,
+# reordered or reworded without this going red. ⚠ THE TRADE IS REAL — a
+# cosmetic reword now costs a test edit. That is the right price for a message
+# whose subject is whether to overwrite the only off-machine copy of the key
+# every artifact in the bucket is encrypted to.
+_ADVISORY_35_RC_NONZERO = (
+    "the escrowed note did NOT PARSE as an age identity: `age-keygen -y` "
+    "exited 1 and produced 0 bytes of output. This is the mangling this mode "
+    "exists to catch — a note round-tripped through a web vault or a clipboard "
+    "can have its line breaks collapsed, and MEASURED 2026-08-27 (age v1.3.1) "
+    "that gives exactly this. age-keygen's stderr is NOT quoted here: it echoes "
+    "the line it could not parse, which for an identity file is KEY MATERIAL. "
+    "🔴 DO NOT RE-ESCROW ON THIS. What re-escrowing overwrites is the ONLY "
+    "off-machine copy of the identity every artifact in the bucket is encrypted "
+    "to; if the mangling happened on the way OUT of the vault, the stored note "
+    "is fine and you would be replacing a good copy with whatever this machine "
+    "holds. Open the item in the web vault and look at it first.")
 
-    FOUND BY AUDIT: flipping this message's "🔴 DO NOT RE-ESCROW ON THIS." to
-    "Re-escrow the note from this host." SURVIVED the whole suite. Only code
-    36's advisory was pinned. So the refusal and the reason are pinned WHOLE
-    here, and in ORDER — the refusal must be READ FIRST, before the sentence
-    explaining what is at stake.
+_ADVISORY_35_NOT_A_RECIPIENT = (
+    "`age-keygen -y` exited ZERO but its {n} bytes of output are not an age "
+    "recipient (`age1` + 58 base32 characters). The output is NOT quoted — this "
+    "module cannot know what a future age-keygen might print there, so it "
+    "treats it as untrusted. Hashing it anyway would publish a digest of an "
+    "unknown string as though it were a public key. Nothing about the escrow "
+    "was determined. 🔴 DO NOT RE-ESCROW ON THIS. What re-escrowing overwrites "
+    "is the ONLY off-machine copy of the identity every artifact in the bucket "
+    "is encrypted to, and this run learned NOTHING about whether that copy is "
+    "good. Re-run under a shell whose `age-keygen` you trust before concluding "
+    "anything.")
+
+_ADVISORY_37 = (
+    "`age-keygen -y` exited ZERO and printed NOTHING, so there was no public "
+    "key to hash. 🔴 THIS IS THE CHECK NOT RUNNING, NOT A CHECK THAT FAILED, "
+    "and nothing about the escrow was determined. The hand-run pipeline cannot "
+    "tell the two apart: `sha256sum` digests the empty stream and prints "
+    "e3b0c44298fc1c14…, which reads as a confident MISMATCH against a key that "
+    "may be perfectly good. If you see that value anywhere, the command did not "
+    "run. Do NOT re-escrow and do NOT rotate on this.")
+
+
+def test_BOTH_NOT_AN_AGE_IDENTITY_arms_pin_their_WHOLE_advisory(tmp_path,
+                                                                monkeypatch):
+    """🔴 CODE 35 IS RAISED FROM TWO PLACES AND BOTH ARE PINNED WHOLE.
+
+    An operator maps ONE exit code through to whichever arm they hit, so a
+    destructive instruction reworded into either is the same incident. See the
+    block comment above for the two mutants that survived before this existed.
     """
+    # -- arm 1: age-keygen RAN and REFUSED (rc != 0) ------------------------ #
     k = _new_identity(tmp_path, "escrowed.key")
     mangled = k.read_text(encoding="utf-8").replace("\n", " ")
     with pytest.raises(EV.EscrowError) as ei:
         _pubkey_run(tmp_path, FakeBw(), note=mangled,
                     expect=_sha_via_documented_shell(k))
-    msg = ei.value.verdict
     assert ei.value.token == "NOT-AN-AGE-IDENTITY"
+    assert ei.value.exit_code == 35
+    assert _norm(ei.value.verdict) == _norm(_ADVISORY_35_RC_NONZERO)
 
-    refusal = "🔴 DO NOT RE-ESCROW ON THIS."
-    stake = (
-        "What re-escrowing overwrites is the ONLY off-machine copy of the "
-        "identity every artifact in the bucket is encrypted to; if the mangling "
-        "happened on the way OUT of the vault, the stored note is fine and you "
-        "would be replacing a good copy with whatever this machine holds.")
-    remedy = "Open the item in the web vault and look at it first."
-    for piece in (refusal, stake, remedy):
-        assert piece in msg, piece
-    assert msg.index(refusal) < msg.index(stake) < msg.index(remedy), (
-        "the refusal must come BEFORE the reason and the remedy — the "
-        "BYTES-DIFFER-MATERIALLY arm carries the same ordering rule because a "
-        "reader who meets the instruction first acts on it first")
-    # The opposite instruction must never appear on this path.
-    assert "Re-escrow the note" not in msg
-    assert "re-escrow from" not in msg.lower()
+    # -- arm 2: age-keygen exited ZERO with output that is NOT a recipient -- #
+    stdout = b"Warning: whatever\n"
+    monkeypatch.setattr(
+        B, "age_public_key_bytes",
+        lambda _p: subprocess.CompletedProcess([], 0, stdout, b"stderr\n"))
+    with pytest.raises(EV.EscrowError) as ei2:
+        _pubkey_run(tmp_path / "b", FakeBw(),
+                    note=k.read_text(encoding="utf-8"), expect="0" * 16)
+    assert ei2.value.token == "NOT-AN-AGE-IDENTITY"
+    assert ei2.value.exit_code == 35
+    assert _norm(ei2.value.verdict) == _norm(
+        _ADVISORY_35_NOT_A_RECIPIENT.format(n=len(stdout)))
+
+    # 🔴 THE TWO ARMS ARE DIFFERENT MESSAGES — a pin that accidentally matched
+    # both would be pinning neither.
+    assert ei.value.verdict != ei2.value.verdict
 
 
-def test_the_PUBKEY_DERIVATION_EMPTY_advisory_is_pinned_as_WHOLE_SENTENCES(
+def test_the_PUBKEY_DERIVATION_EMPTY_advisory_is_pinned_WHOLE(
         tmp_path, monkeypatch):
-    """The same audit finding as the test above, on code 37. Flipping its
-    "Do NOT re-escrow and do NOT rotate on this." to the opposite SURVIVED.
-
-    This message's whole job is to say the check DID NOT RUN — an operator who
-    reads it as a failed check has been handed a reason to act destructively on
-    a key nothing was ever measured about."""
+    """Code 37, pinned whole for the same reason. Its job is to say the check
+    DID NOT RUN — an operator who reads it as a failed check has been handed a
+    reason to act destructively on a key nothing was ever measured about."""
     monkeypatch.setattr(
         B, "age_public_key_bytes",
         lambda _p: subprocess.CompletedProcess([], 0, b"", b""))
@@ -3934,17 +3992,35 @@ def test_the_PUBKEY_DERIVATION_EMPTY_advisory_is_pinned_as_WHOLE_SENTENCES(
     with pytest.raises(EV.EscrowError) as ei:
         _pubkey_run(tmp_path, FakeBw(), note=k.read_text(encoding="utf-8"),
                     expect="0" * 16)
-    msg = ei.value.verdict
     assert ei.value.token == "PUBKEY-DERIVATION-EMPTY"
+    assert ei.value.exit_code == 37
+    assert _norm(ei.value.verdict) == _norm(_ADVISORY_37)
+    # The empty-input tell is a CONSTANT the module owns, not a literal typed
+    # twice: if it ever changes, the pin above must be re-derived, not patched.
+    assert EV.EMPTY_SHA256_PREFIX in ei.value.verdict
 
-    not_running = ("🔴 THIS IS THE CHECK NOT RUNNING, NOT A CHECK THAT FAILED, "
-                   "and nothing about the escrow was determined.")
-    tell = "If you see that value anywhere, the command did not run."
-    refusal = "Do NOT re-escrow and do NOT rotate on this."
-    for piece in (not_running, tell, refusal):
-        assert piece in msg, piece
-    assert msg.index(not_running) < msg.index(tell) < msg.index(refusal)
-    assert "Re-escrow" not in msg and "rotate the key" not in msg
+
+def test_EVERY_raise_site_of_the_pubkey_codes_is_COVERED_by_a_whole_pin():
+    """🔴 A LEDGER OVER THE RAISE SITES, failing when the set GROWS or SHRINKS.
+
+    The round-2 finding was not that a message was wrong — it was that a SECOND
+    raise site existed and nobody had counted them. A test that pins the arms it
+    knows about cannot see a third one being added. So: count the raise sites of
+    each destructive-advice token in the source, and require the number this
+    file pins whole to match.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    expected = {"NOT-AN-AGE-IDENTITY": 2, "PUBKEY-DERIVATION-EMPTY": 1,
+                "PUBKEY-MISMATCH": 1}
+    for token, count in expected.items():
+        # The raise form is `EscrowError(\n  "<TOKEN>",` — the table entry
+        # (`"<TOKEN>": 35,`) and prose mentions must not be counted.
+        actual = src.count(f'"{token}",')
+        assert actual == count, (
+            f"{token} is raised from {actual} place(s), but this file pins "
+            f"{count} whole-message advisory/advisories for it. A new raise "
+            f"site needs its own WHOLE pin in the same commit — that is exactly "
+            f"the gap round 2 found: one code, two arms, one pinned.")
 
 
 def _secret_line(text: str) -> str:
