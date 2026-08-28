@@ -426,26 +426,32 @@ _MARKUP = r"[*_`~]{0,3}"
 # What the lookaround still excludes — the ONE job `\b` was doing here, and the
 # thing to re-check before touching it: `enforcing:` and `reinforcing:` (the
 # character before the key is an ASCII letter) and `forcings:` (the one after it
-# is). 🔴 "ASCII" IS THE WHOLE SCOPE OF THAT CLAIM AND THE COMMENT USED TO OMIT
-# IT: the class is `[A-Za-z0-9]`, so a non-ASCII word character before the key
-# excludes nothing at all — `\b` DID exclude it, because Python's `\w` is
-# unicode by default.
+# is). 🔴 "ASCII" IS THE WHOLE SCOPE OF THAT CLAIM, AT EVERY POSITION, AND THE
+# COMMENT USED TO OMIT IT: the class is `[A-Za-z0-9]`, so a non-ASCII word
+# character excludes nothing at all — `\b` DID exclude it, because Python's `\w`
+# is unicode by default. That hole is not the leading key's; it is every
+# lookaround's, and the enumeration below is stated by POSITION for that reason.
 #
-# 🔴 FOUR ADMISSIONS, NOT ONE — the comment used to name only the first, and a
-# delta audit measured the other three. All four are new at this commit (none
-# parsed at `503d7136`), all four occur 0 times over both corpora (devrc 126
-# docs, homelab-talos 139), and all four are bounded by the same closed-
-# vocabulary argument as the markup class above:
-#   1. `_FORCING`'s key admits a snake_case identifier ENDING in `_forcing`, so
-#      `some_forcing: none` parses;
-#   2. `_FORCING_ATTEMPT`'s key admits one STARTING with the key, so
-#      `the forcing_fn returns none` is now a NEAR-MISS;
-#   3. …and that pattern's KIND admits a kind followed by `_`, so
-#      `forcing the user_id column` and `forcing the gate_keeper to retry` are
-#      near-misses too;
-#   4. BOTH patterns admit a non-ASCII word character before the key:
-#      `éforcing: gate` and `強forcing: gate` parse to `gate`.
-# Pinned by `test_the_widened_anchors_admit_these_and_the_comment_says_so`.
+# 🔴 THE ADMISSIONS ARE A GRID, NOT A LIST — an enumeration of examples is what
+# undercounted here twice. The widening admits exactly TWO character classes,
+# `_` and any non-ASCII word character, at EACH of the FIVE lookaround positions
+# across the two patterns — ten combinations, and MEASURED 2026-08-28 all ten
+# behave alike: admitted at HEAD, and NO match under the old `\b` spelling of
+# the same pattern. The positions, with the probe that isolates each:
+#   P1 `_FORCING`'s key, LEADING     — `some_forcing: none`, `éforcing: gate`
+#   P2 `_FORCING_ATTEMPT`'s key, LEADING  — `my_forcing = gate`, `éforcing = gate`
+#   P3 `_FORCING_ATTEMPT`'s key, TRAILING — `the forcing_fn returns none`,
+#      `the forcingé returns none`
+#   P4 that pattern's KIND, LEADING  — `forcing = _gate`, `forcing = égate`
+#   P5 that pattern's KIND, TRAILING — `forcing the user_id column`,
+#      `forcing = gateé`
+# (There is no sixth: `_FORCING`'s own KIND, `([A-Za-z-]+)`, carries no trailing
+# lookaround at all.) P1 parses to a kind; P2–P5 become NEAR-MISSES. All ten
+# occur 0 times over both corpora (devrc 126 docs, homelab-talos 139) and all
+# ten are bounded by the same closed-vocabulary argument as the markup class
+# above, so none is being fixed — they are RECORDED, because a comment is a
+# claim too. Pinned cell-by-cell by
+# `test_the_widened_anchors_admit_these_and_the_comment_says_so`.
 #
 # 🔴 SPELLED OUT AT EACH USE SITE rather than folded into one shared constant:
 # `_FORCING` and `_FORCING_ATTEMPT` must stay SEPARATELY MUTABLE, or the
@@ -727,8 +733,8 @@ REFUSAL_MARKERS: tuple[str, ...] = (
 MISSING_FIELD_REMEDY = (
     f"  Tag each item marked {MARK_NO_FIELD} above. A continuation line "
     "counts — the field does not have to sit on the numbered line, but it MUST "
-    "be INDENTED: a flush-left line ENDS the item, so a tag at column 0 under "
-    "it is outside the item and reads as absent."
+    "be INDENTED: a flush-left line ENDS the item once a blank has intervened, "
+    "so a tag at column 0 below one is outside the item and reads as absent."
 )
 
 #: Remedy for a near-miss. 🔴 IT MUST NOT REPEAT `MISSING_FIELD_REMEDY`: an item
@@ -753,13 +759,21 @@ NEAR_MISS_REMEDY = (
 #: and produces a FALSE `forcing: none`: an item nothing asked for, now counted
 #: as honestly self-generated. The refusal itself is right; only the remedy
 #: needed to stop assuming the fenced field is the author's own.
+#:
+#: 🔴 AND IT MUST NAME THE INDENT, for the same reason `MISSING_FIELD_REMEDY`
+#: does. An item's fence is normally preceded by a blank line, so an author who
+#: obeys "move it out of the fence" by unfencing to COLUMN 0 lands on the
+#: boundary line and gets `MARK_NO_FIELD` — a SECOND refusal, telling them to
+#: write a field they have now written twice. Naming the indent here is what
+#: keeps this arm clearable in one step; the sibling arm was fixed first and
+#: this one had the identical hole.
 FENCED_FIELD_REMEDY = (
     f"  🔴 The item(s) marked {MARK_FENCED} carry the field INSIDE a code fence, "
     "where it does not count — a pasted sample is not a declaration. If that "
     "field is YOUR declaration, move it out of the fence onto one of the item's "
-    "own lines. If it is quoted output, a copied example or this tool's own "
-    "vocabulary line, the item is genuinely untagged and needs one of its own — "
-    "do NOT promote the quote."
+    "own lines, INDENTED — at column 0 it reads as absent. If it is quoted "
+    "output, a copied example or this tool's own vocabulary line, the item is "
+    "genuinely untagged and needs one of its own — do NOT promote the quote."
 )
 
 

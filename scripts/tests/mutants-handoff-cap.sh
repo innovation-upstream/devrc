@@ -94,9 +94,10 @@ ROWS=0
 # 🔴 A SUITE THAT NEVER RAN YIELDS ZERO `FAILED` LINES, i.e. "clean", so a
 # harness wired to nothing would score every mutant SURVIVED and every SURVIVES
 # control ok. Count the tests that ran and refuse below a floor. The floor
-# catches COLLAPSE, not growth — deliberately far under the real count (261 as
+# catches COLLAPSE, not growth — deliberately far under the real count (268 as
 # of 2026-08-28; 222 → 237 when the fence/underscore round added 15, → 261 when
-# the round-3 fixes added the legend seam and the anchor/admission pins).
+# the round-3 fixes added the legend seam and the anchor/admission pins, → 268
+# when round 4 replaced the anchor params with the full 5x2 position grid).
 MIN_TESTS=180
 failing() {
   local out n f total
@@ -347,13 +348,13 @@ printf '\n== the refusals stay CLEARABLE: remedy + legend (must be KILLED) ==\n'
 # `forcing: none`.
 run 'fenced-remedy-reverted-to-bare-move-it-out' \
   test_the_FENCED_remedy_is_not_a_bare_move_it_out \
-  '/^    "field is YOUR declaration/d;/^    "own lines. If it is quoted/d;/^    "vocabulary line, the item is/d;/^    "do NOT promote the quote/d;/^    "where it does not count/c\    "where it does not count. Move it out of the fence onto one of its own lines."'
+  '/^    "field is YOUR declaration/d;/^    "own lines, INDENTED/d;/^    "output, a copied example/d;/^    "genuinely untagged and needs/d;/^    "where it does not count/c\    "where it does not count. Move it out of the fence onto one of its own lines."'
 # The other unclearable arm: an author who wrote the tag at COLUMN 0 under the
 # item is told "a continuation line counts" and has already done it. Naming the
 # INDENT is what ends that loop; this reverts only that clause.
 run 'missing-field-remedy-omits-the-indent' \
   test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT \
-  '/^    "be INDENTED: a flush-left/d;/^    "it is outside the item and reads/d;/^    "counts — the field does not have to sit on the numbered line, but it MUST "$/c\    "counts — the field does not have to sit on the numbered line."'
+  '/^    "be INDENTED: a flush-left/d;/^    "so a tag at column 0 below one/d;/^    "counts — the field does not have to sit on the numbered line, but it MUST "$/c\    "counts — the field does not have to sit on the numbered line."'
 # 🔴 THE SKILL-SIDE ROW — the first mutation in this battery that is NOT to the
 # module. It puts SKILL.md's step-5 legend back to the bare "move it out of the
 # fence" it carried at `e34ed6ef`, i.e. the executor's only map telling them to

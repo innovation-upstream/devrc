@@ -2435,9 +2435,10 @@ class TestSkillAndModuleAgree:
         "🔴 The item(s) marked [fenced] carry the field INSIDE a code fence, "
         "where it does not count — a pasted sample is not a declaration. If "
         "that field is YOUR declaration, move it out of the fence onto one of "
-        "the item's own lines. If it is quoted output, a copied example or "
-        "this tool's own vocabulary line, the item is genuinely untagged and "
-        "needs one of its own — do NOT promote the quote."
+        "the item's own lines, INDENTED — at column 0 it reads as absent. If "
+        "it is quoted output, a copied example or this tool's own vocabulary "
+        "line, the item is genuinely untagged and needs one of its own — do "
+        "NOT promote the quote."
     )
     _FENCED_LEGEND = (
         "`[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT "
@@ -2525,8 +2526,15 @@ class TestSkillAndModuleAgree:
     def test_the_legend_clause_locator_can_report_absence(self) -> None:
         """NEGATIVE CONTROL on `_fenced_legend_clause`. A locator that silently
         returned the whole document, or an empty string, would make both
-        assertions above unfalsifiable in one direction. Feed it text that MUST
-        NOT satisfy the check and watch the check fail."""
+        assertions above unfalsifiable in one direction.
+
+        Two halves, and the docstring used to describe only the first as if it
+        covered both. The `_NO_PROMOTE` line is a control on the PREDICATE, not
+        on the locator — it feeds the predicate the bare legend text this suite
+        refuses and shows it goes false, so a predicate that could only ever be
+        true would be caught. The `len` and `startswith` lines are the control
+        on the LOCATOR's own return: bounded rather than the whole document,
+        and anchored on the marker rather than empty."""
         clause = self._fenced_legend_clause()
         assert self._NO_PROMOTE not in "`[fenced]` move it out of the fence."
         assert 0 < len(clause) < 400, f"the locator returned {len(clause)} bytes"
@@ -4399,29 +4407,60 @@ class TestTheWIDENINGDidNotOpenTwoHOLES:
     @pytest.mark.parametrize(
         "line,kind,near_miss",
         (
+            # P1 — `_FORCING`'s key, LEADING. Parses to a kind; the rest are
+            # `_FORCING_ATTEMPT`'s, which can only ever produce a near-miss.
             ("   some_forcing: none", "none", False),
             ("   éforcing: gate", "gate", False),
             ("   強forcing: gate", "gate", False),
+            # P2 — `_FORCING_ATTEMPT`'s key, LEADING. No colon, so `_FORCING`
+            # cannot match and this position is isolated from P1.
+            ("   my_forcing = gate", None, True),
+            ("   éforcing = gate", None, True),
+            # P3 — `_FORCING_ATTEMPT`'s key, TRAILING.
             ("   the forcing_fn returns none", None, True),
+            ("   the forcingé returns none", None, True),
+            ("   the forcing強 returns none", None, True),
+            # P4 — that pattern's KIND, LEADING.
+            ("   forcing = _gate", None, True),
+            ("   forcing = égate", None, True),
+            # P5 — that pattern's KIND, TRAILING.
             ("   forcing the user_id column", None, True),
             ("   forcing the gate_keeper to retry", None, True),
+            ("   forcing = gateé", None, True),
         ),
-        ids=("snake-suffix", "latin1-before", "cjk-before",
-             "attempt-key-snake-prefix", "attempt-kind-then-underscore",
-             "attempt-kind-then-underscore-2"),
+        ids=("P1-key-leading-underscore", "P1-key-leading-latin1",
+             "P1-key-leading-cjk",
+             "P2-attempt-key-leading-underscore", "P2-attempt-key-leading-latin1",
+             "P3-attempt-key-trailing-underscore",
+             "P3-attempt-key-trailing-latin1", "P3-attempt-key-trailing-cjk",
+             "P4-attempt-kind-leading-underscore",
+             "P4-attempt-kind-leading-latin1",
+             "P5-attempt-kind-trailing-underscore",
+             "P5-attempt-kind-trailing-underscore-2",
+             "P5-attempt-kind-trailing-latin1"),
     )
     def test_the_widened_anchors_admit_these_and_the_comment_says_so(
         self, line: str, kind: str | None, near_miss: bool
     ) -> None:
-        """🔴 THE COMMENT'S CLAIM, MADE MACHINE-READABLE. `_FORCING`'s comment
-        used to enumerate the widening's new admissions as *only* "a snake_case
-        identifier ending in `_forcing`". A delta audit measured three more, all
-        RED at `503d7136` (none of these parsed under `\\b`):
+        """🔴 THE COMMENT'S CLAIM, MADE MACHINE-READABLE — AND THE PARAMS ARE A
+        GRID, BECAUSE AN ENUMERATION OF EXAMPLES UNDERCOUNTED IT TWICE.
 
-          * `_FORCING_ATTEMPT`'s KEY admits an identifier STARTING with the key;
-          * its KIND admits a kind followed by `_`;
-          * the class is `[A-Za-z0-9]`, so a NON-ASCII word character before the
-            key excludes nothing — Python's `\\w` is unicode, so `\\b` did.
+        `_FORCING`'s comment first named *only* "a snake_case identifier ending
+        in `_forcing`"; a delta audit found three more and the comment was
+        rewritten to "FOUR ADMISSIONS, NOT ONE"; a second delta audit found six
+        more still. The reason is structural: the widening replaced `\\b` with a
+        `[A-Za-z0-9]` lookaround at FIVE positions, and `\\b` differs from it for
+        TWO character classes — `_`, and any non-ASCII word character, since
+        Python's `\\w` is unicode. That is a 5x2 GRID, so the params enumerate
+        all ten cells rather than the examples anyone happened to notice:
+
+          P1 `_FORCING`'s key, LEADING            P2 `_FORCING_ATTEMPT`'s, LEADING
+          P3 `_FORCING_ATTEMPT`'s key, TRAILING   P4 its KIND, LEADING
+          P5 its KIND, TRAILING
+
+        There is no P6: `_FORCING`'s own KIND, `([A-Za-z-]+)`, carries no
+        trailing lookaround. MEASURED 2026-08-28, all ten cells alike — admitted
+        at HEAD, and NO match under the old `\\b` spelling of the same pattern.
 
         Each is bounded by the same closed-vocabulary argument as the markup
         class, and each occurs 0 times over both corpora, so none is being
@@ -4444,10 +4483,24 @@ class TestTheWIDENINGDidNotOpenTwoHOLES:
         key is a letter" would conclude `éforcing:` is excluded and it is not.
 
         A phrase pin, and a weak one by construction — the behaviour is pinned
-        by the params above; this only keeps the comment from re-narrowing."""
+        by the params above; this only keeps the comment from re-narrowing.
+
+        🔴 NO COUNT IS PINNED HERE ANY MORE, AND THAT IS THE FIX. This used to
+        assert the literal "FOUR ADMISSIONS, NOT ONE" — a guard machine-
+        enforcing a number that a later delta audit measured wrong (ten cells,
+        not four). A count in prose goes stale the moment a position or a
+        character class is added; the params above are the census, and what the
+        comment owes is the SHAPE — that the scope is stated by POSITION rather
+        than by a list of examples, which is the failure mode that undercounted
+        it twice."""
         src = TOOL.read_text(encoding="utf-8")
         assert "an ASCII letter" in src
-        assert "FOUR ADMISSIONS, NOT ONE" in src
+        assert "AT EVERY POSITION" in src
+        assert "THE ADMISSIONS ARE A GRID, NOT A LIST" in src
+        assert "FOUR ADMISSIONS, NOT ONE" not in src, (
+            "the retired count is back in the comment; it was measured wrong "
+            "(ten cells, not four) and pinning it re-enforces the error"
+        )
 
 
 class TestRulesIAndJDidNotMoveTheOtherExits:

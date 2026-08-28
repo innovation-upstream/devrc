@@ -245,19 +245,35 @@ invariant guards rather than coverage of these defects.
   `_FORCING_ATTEMPT` shared the anchor, so the safety net had the same hole.
   Both patterns now anchor on `(?<![A-Za-z0-9])` / `(?![A-Za-z0-9])`, which keeps
   the one job `\b` was doing — `enforcing:`, `reinforcing:` and `forcings:` are
-  still excluded, verified on both patterns. 🔴 **Four things it newly admits,
-  not one.** A delta audit found three more after this section named only the
-  first: (1) a snake_case identifier *ending* in `_forcing` (`some_forcing:
-  none` parses); (2) `_FORCING_ATTEMPT`'s key admits one *starting* with the key
-  (`the forcing_fn returns none` is now a near-miss); (3) that pattern's KIND
-  admits a kind followed by `_` (`forcing the user_id column`, `forcing the
-  gate_keeper to retry`); (4) the class is `[A-Za-z0-9]`, so a **non-ASCII**
-  word character before the key excludes nothing — `éforcing: gate` and
-  `強forcing: gate` parse, and did not under `\b`, whose `\w` is unicode. So
-  "the character before the key is a letter" holds for **ASCII** letters only.
-  All four occur **0** times across both corpora (devrc 126 docs, homelab-talos
-  139), and all four are bounded by the same closed-vocabulary argument as the
-  markup class.
+  still excluded, verified on both patterns — but for **ASCII** letters and
+  digits only, at *every* position. 🔴 **What it newly admits is a GRID, not a
+  list**, and stating it as a list undercounted it twice: this section first
+  named one admission, a delta audit raised it to four, and a second delta audit
+  measured **ten**. The structure is why. `\b` differs from `(?<![A-Za-z0-9])` /
+  `(?![A-Za-z0-9])` for exactly **two** character classes — `_`, and any
+  non-ASCII word character (Python's `\w` is unicode, so `\b` excluded those and
+  the lookaround does not) — and the two patterns carry **five** lookaround
+  positions between them:
+
+  | # | position | `_` probe | non-ASCII probe |
+  |---|----------|-----------|-----------------|
+  | P1 | `_FORCING` key, leading | `some_forcing: none` | `éforcing: gate` |
+  | P2 | `_FORCING_ATTEMPT` key, leading | `my_forcing = gate` | `éforcing = gate` |
+  | P3 | `_FORCING_ATTEMPT` key, trailing | `the forcing_fn returns none` | `the forcingé returns none` |
+  | P4 | …its KIND, leading | `forcing = _gate` | `forcing = égate` |
+  | P5 | …its KIND, trailing | `forcing the user_id column` | `forcing = gateé` |
+
+  There is no P6: `_FORCING`'s own KIND, `([A-Za-z-]+)`, carries no trailing
+  lookaround at all. MEASURED 2026-08-28, **all ten cells alike** — each is
+  admitted at HEAD and matches nothing under the old `\b` spelling of the same
+  pattern. P1 parses to a kind; P2–P5 become near-misses. All ten occur **0**
+  times across both corpora (devrc 126 docs, homelab-talos 139), and all ten are
+  bounded by the same closed-vocabulary argument as the markup class, so none is
+  being fixed — they are recorded. Pinned cell-by-cell by
+  `test_the_widened_anchors_admit_these_and_the_comment_says_so`; the module
+  comment is **not** allowed to re-state a count (`test_the_comment_still_states
+  _the_ASCII_scope` now refuses the retired "FOUR ADMISSIONS, NOT ONE" literal,
+  because a number in prose is what went stale both times).
 
 **Two limits the skill body states in one clause and this section owns in full.**
 A tag written **flush-left on its own line under a blank one**, directly beneath
