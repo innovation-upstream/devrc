@@ -468,6 +468,20 @@ def await_audit(out: "Drained | AuditLog", n: int, timeout: float = 15.0) -> "li
     A caller that means "exactly N, ever" must re-read `out.audit` after
     `out.wait_closed()`. `test_the_STDOUT_audit_stream_names_the_matched_
     fingerprint` does both and is the worked example.
+
+    🔴 AND IT GUARANTEES A COUNT, NEVER AN ORDER — the half that cost a red run
+    after the count race was closed everywhere. `_audit` runs AFTER `_respond`,
+    so a client can send request N+1 while handler N has still not appended:
+    request N's line can land SECOND. `await_audit(audit, 2)` is then perfectly
+    satisfied by two lines in the WRONG order, and a caller reading `lines[0]`
+    attributes one request's fields to another. MEASURED: with every positional
+    site waiting only at the end, `test_a_ROTATION_end_to_end_old_still_works_
+    then_stops` failed on `lines[0]` inside a full-file run.
+
+    So a POSITIONAL read has a second obligation: wait for line N BEFORE issuing
+    request N+1, which makes the position a fact rather than an assumption. A
+    caller that only aggregates (`len`, `any`, `all`, `sum`, `join`) has no such
+    obligation. Every positional site in this file interleaves its waits.
     """
     # `closed` is None for an `AuditLog`: that stream has no EOF to short-circuit
     # on, so the loop simply runs to its deadline. See `AuditLog`.
@@ -3070,7 +3084,10 @@ class TestTokenSetAndOverlapRotation:
         useless on the only deployment shape that needs it.
         """
         with running(store, tokens=(GOOD_TOKEN, SECOND_TOKEN)) as (base, audit):
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            await_audit(audit, 1)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
             lines = await_audit(audit, 2)
         assert len(lines) == 2
@@ -3150,7 +3167,10 @@ class TestTokenSetAndOverlapRotation:
             assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)[0] == 401
         # Step 2: OVERLAP — both accepted, and the log tells them apart.
         with running(store, tokens=(SECOND_TOKEN, GOOD_TOKEN)) as (base, audit):
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
             assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)[0] == 200
+            await_audit(audit, 1)
             assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)[0] == 200
             lines = await_audit(audit, 2)
         assert f"token={api.token_id(GOOD_TOKEN)}" in lines[0]
@@ -3570,8 +3590,11 @@ class TestLockoutOverHTTP:
         self, store: Path
     ):
         with running(store) as (base, audit):
-            for _ in range(5):
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
+            for k in range(5):
                 assert fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)[0] == 401
+                await_audit(audit, k + 1)
             code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
             lines = await_audit(audit, 6)
         assert code == 401, "a locked-out client was served with a valid token"
@@ -3613,8 +3636,10 @@ class TestLockoutOverHTTP:
         """
         with running(store) as (base, audit):
             ordinary = fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
-            for _ in range(5):
+            await_audit(audit, 1)
+            for k in range(5):
                 fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+                await_audit(audit, k + 2)
             locked = fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
             # 🔴 SEVEN REQUESTS, SEVEN LINES, WAITED FOR. `_respond` runs before
             # `_audit` and `ThreadingHTTPServer` uses DAEMON threads, so `fetch`
@@ -3639,10 +3664,15 @@ class TestLockoutOverHTTP:
         inside the window, so it locks out.
         """
         with running(store, tokens=(GOOD_TOKEN, SECOND_TOKEN)) as (base, audit):
-            for _ in range(4):
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
+            for k in range(4):
                 fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+                await_audit(audit, k + 1)
             assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)[0] == 200
+            await_audit(audit, 5)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token="x" * 48)
+            await_audit(audit, 6)
             code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
             lines = await_audit(audit, 7)
         assert code == 401, "a valid token reset the guessing budget"
@@ -3950,8 +3980,12 @@ class TestTheDeployedEntrypoint:
         # See `drain_output`.
         with running_subprocess(store, rotating_token_file) as (base, proc):
             out = drain_output(proc)
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            await_audit(out, 1)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
+            await_audit(out, 2)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
             lines = await_audit(out, 3)
 
@@ -6185,10 +6219,13 @@ class TestTrustedProxyOverHTTP:
         with running(
             store, limiter=limiter, trusted_proxies=(NOT_LOOPBACK_PROXY,)
         ) as (base, audit):
-            for _ in range(5):
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
+            for k in range(5):
                 fetch(
                     f"{base}/api/v1/recall/{SCOPE}", token="w" * 48, client_ip=SPOOF_IP
                 )
+                await_audit(audit, k + 1)
             after = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=SPOOF_IP
             )
@@ -7230,9 +7267,14 @@ class TestEnumerationChannelsAreClosed:
         request on a keep-alive connection.
         """
         with running(scoped_store, tokens=(ZACH, DANA)) as (base, audit):
+            # 🔴 The waits are INTERLEAVED because the read below is POSITIONAL:
+            # `await_audit` guarantees a count, never an order. See its docstring.
             zach_own = fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN)
+            await_audit(audit, 1)
             zach_other = fetch(f"{base}/api/v1/recall/{DENY_SCOPE}", token=ZACH_TOKEN)
+            await_audit(audit, 2)
             dana_own = fetch(f"{base}/api/v1/recall/{DENY_SCOPE}", token=DANA_TOKEN)
+            await_audit(audit, 3)
             dana_other = fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=DANA_TOKEN)
             lines = await_audit(audit, 4)
 
