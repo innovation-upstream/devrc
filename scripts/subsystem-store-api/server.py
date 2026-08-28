@@ -3393,7 +3393,18 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # The SENTENCE IS A CONSTANT. The codec's own message names the
             # offending code point and its position, which is a fact about a
             # file the caller may not be allowed to know exists.
-            traceback.print_exc(file=sys.stderr)
+            #
+            # 🔴 `_print_exc_quietly`, NOT A BARE `print_exc`, AND THE DEFERRAL
+            # THAT LEFT IT BARE WAS MEASURABLY WRONG. The argument was "it raises
+            # before its `_respond`, so `_backstop` still answers" — but
+            # `_backstop` is called from the `except Exception:` arm of THIS SAME
+            # `try`, and SIBLING `except` ARMS DO NOT CATCH EACH OTHER. A raising
+            # stderr in here leaves `_handle` entirely: measured with a
+            # badly-named file, sink alive `503` + 1 audit line, sink broken
+            # `RemoteDisconnected` + ZERO audit lines. Same outcome, same
+            # mechanism, as the `_backstop` bug — so, same helper. A log write
+            # may never decide whether the request gets answered.
+            _print_exc_quietly()
             self._respond(
                 503,
                 b"store unreadable: an entry name or body is not valid UTF-8\n",

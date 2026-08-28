@@ -2101,19 +2101,31 @@ class TestAuditLog:
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
             fetch(f"{base}/api/v1/recall/{SCOPE}")  # rejected
-        assert len(audit) == 2
+            lines = await_audit(audit, 2)
+        assert len(lines) == 2
 
     def test_health_is_NOT_audited(self, store: Path):
         # It is unauthenticated and says nothing; logging it would bury the
         # /api/* lines the log exists for under kubelet probe traffic.
         with running(store) as (base, audit):
             fetch(f"{base}/healthz")
-        assert audit == []
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            lines = await_audit(audit, 1)
+        # 🔴 A REASSURING ZERO NEEDS A POSITIVE CONTROL. `assert audit == []`
+        # read the live list with nothing to wait for, so it was equally happy
+        # with "the probe is not audited" and with "the sink had not appended
+        # yet" — and it would have stayed green with `_audit` wired to nothing
+        # at all. An audited request is issued after the probe; waiting for ITS
+        # line proves the sink works, and the count then says the probe added
+        # none. (Residual: a probe line arriving after this snapshot is still
+        # unobserved — there is no EOF on an in-process sink to wait for.)
+        assert len(lines) == 1, lines
+        assert "/healthz" not in lines[0], lines[0]
 
     def test_the_line_carries_timestamp_path_result_and_a_token_ID(self, store: Path):
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
-        line = audit[0]
+            line = await_audit(audit, 1)[0]
         assert "ts=2" in line
         assert f"path=/api/v1/recall/{SCOPE}" in line
         assert "result=200" in line
@@ -2124,7 +2136,7 @@ class TestAuditLog:
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
-        joined = "\n".join(audit)
+            joined = "\n".join(await_audit(audit, 2))
         assert GOOD_TOKEN not in joined
         assert "w" * 48 not in joined, "a rejected token was echoed into the log"
 
@@ -2133,9 +2145,10 @@ class TestAuditLog:
     ):
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
-        assert "auth=fail" in audit[0]
-        assert "token=-" in audit[0]
-        assert "result=401" in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert "auth=fail" in line
+        assert "token=-" in line
+        assert "result=401" in line
 
     def test_the_token_id_is_a_DIGEST_not_a_prefix_of_the_token(self):
         tid = api.token_id(GOOD_TOKEN)
@@ -3059,14 +3072,15 @@ class TestTokenSetAndOverlapRotation:
         with running(store, tokens=(GOOD_TOKEN, SECOND_TOKEN)) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
-        assert len(audit) == 2
+            lines = await_audit(audit, 2)
+        assert len(lines) == 2
         first, second = api.token_id(GOOD_TOKEN), api.token_id(SECOND_TOKEN)
         assert first != second
-        assert f"token={first}" in audit[0]
-        assert f"token={second}" in audit[1]
-        assert "auth=ok" in audit[0] and "auth=ok" in audit[1]
+        assert f"token={first}" in lines[0]
+        assert f"token={second}" in lines[1]
+        assert "auth=ok" in lines[0] and "auth=ok" in lines[1]
         # And never the credential itself, on either line.
-        joined = "\n".join(audit)
+        joined = "\n".join(lines)
         assert GOOD_TOKEN not in joined and SECOND_TOKEN not in joined
 
     def test_authorize_compares_against_EVERY_token_with_no_early_exit(
@@ -3138,8 +3152,9 @@ class TestTokenSetAndOverlapRotation:
         with running(store, tokens=(SECOND_TOKEN, GOOD_TOKEN)) as (base, audit):
             assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)[0] == 200
             assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)[0] == 200
-        assert f"token={api.token_id(GOOD_TOKEN)}" in audit[0]
-        assert f"token={api.token_id(SECOND_TOKEN)}" in audit[1]
+            lines = await_audit(audit, 2)
+        assert f"token={api.token_id(GOOD_TOKEN)}" in lines[0]
+        assert f"token={api.token_id(SECOND_TOKEN)}" in lines[1]
         # Step 3: the old token is REMOVED. 🔴 This is the assertion that makes
         # the whole exercise mean something.
         with running(store, tokens=(SECOND_TOKEN,)) as (base, _):
@@ -3184,7 +3199,8 @@ class TestClientIpIsCloudflareOnly:
     def test_the_audit_line_carries_the_CF_Connecting_IP(self, store: Path):
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=CLIENT_IP)
-        assert f"ip={CLIENT_IP}" in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert f"ip={CLIENT_IP}" in line
 
     def test_a_spoofed_X_Forwarded_For_does_NOT_win(self, store: Path):
         """🔴 Both headers present, DIFFERENT values. The CF one must be the one
@@ -3197,9 +3213,10 @@ class TestClientIpIsCloudflareOnly:
                 client_ip=CLIENT_IP,
                 extra_headers={"X-Forwarded-For": SPOOF_IP},
             )
+            line = await_audit(audit, 1)[0]
         assert code == 200
-        assert f"ip={CLIENT_IP}" in audit[0]
-        assert SPOOF_IP not in audit[0], "a caller-supplied address was trusted"
+        assert f"ip={CLIENT_IP}" in line
+        assert SPOOF_IP not in line, "a caller-supplied address was trusted"
 
     def test_X_Forwarded_For_ALONE_fails_CLOSED(self, store: Path):
         """The header an attacker controls cannot substitute for the one
@@ -3212,10 +3229,11 @@ class TestClientIpIsCloudflareOnly:
                 client_ip=None,
                 extra_headers={"X-Forwarded-For": SPOOF_IP},
             )
+            line = await_audit(audit, 1)[0]
         assert code == 401
         assert body == b"unauthorized\n"
-        assert "status=no-client-ip" in audit[0]
-        assert SPOOF_IP not in audit[0]
+        assert "status=no-client-ip" in line
+        assert SPOOF_IP not in line
 
     def test_a_MISSING_CF_Connecting_IP_fails_closed_even_with_a_VALID_token(
         self, store: Path
@@ -3224,9 +3242,10 @@ class TestClientIpIsCloudflareOnly:
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=None
             )
+            line = await_audit(audit, 1)[0]
         assert code == 401
         assert body == b"unauthorized\n"
-        assert "auth=fail" in audit[0] and "ip=-" in audit[0]
+        assert "auth=fail" in line and "ip=-" in line
 
     def test_a_MANGLED_CF_Connecting_IP_fails_closed(self, store: Path):
         for value in ("not-an-ip", "", "203.0.113.7, 198.51.100.4", "999.1.1.1"):
@@ -3328,8 +3347,19 @@ class TestClientIpIsCloudflareOnly:
     ):
         with running(store) as (base, audit):
             code, _h, body = fetch(f"{base}/healthz", client_ip=None)
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            lines = await_audit(audit, 1)
         assert (code, body) == (200, b"ok\n")
-        assert audit == []
+        # 🔴 A REASSURING ZERO NEEDS A POSITIVE CONTROL. `assert audit == []`
+        # read the live list with nothing to wait for, so it was equally happy
+        # with "the probe is not audited" and with "the sink had not appended
+        # yet" — and it would have stayed green with `_audit` wired to nothing
+        # at all. An audited request is issued after the probe; waiting for ITS
+        # line proves the sink works, and the count then says the probe added
+        # none. (Residual: a probe line arriving after this snapshot is still
+        # unobserved — there is no EOF on an in-process sink to wait for.)
+        assert len(lines) == 1, lines
+        assert "/healthz" not in lines[0], lines[0]
 
     def test_the_source_never_reads_X_Forwarded_For(self):
         """Secondary, not the guard — `test_a_spoofed_X_Forwarded_For_does_NOT_win`
@@ -3543,10 +3573,11 @@ class TestLockoutOverHTTP:
             for _ in range(5):
                 assert fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)[0] == 401
             code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            lines = await_audit(audit, 6)
         assert code == 401, "a locked-out client was served with a valid token"
         assert body == b"unauthorized\n"
-        assert "status=lockout-triggered" in audit[4]
-        assert "status=locked-out" in audit[5]
+        assert "status=lockout-triggered" in lines[4]
+        assert "status=locked-out" in lines[5]
 
     def test_FOUR_failures_do_not_lock_out_the_boundary_is_not_off_by_one(
         self, store: Path
@@ -3585,12 +3616,20 @@ class TestLockoutOverHTTP:
             for _ in range(5):
                 fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
             locked = fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+            # 🔴 SEVEN REQUESTS, SEVEN LINES, WAITED FOR. `_respond` runs before
+            # `_audit` and `ThreadingHTTPServer` uses DAEMON threads, so `fetch`
+            # returning — and the `with` block exiting — prove nothing about the
+            # last handler having appended yet. Observed failing exactly that
+            # way: `audit[-1]` held the PREVIOUS request's `status=unauthorized`.
+            # This is the hazard `await_audit`'s own docstring names, and this
+            # was one of the few call sites not using it.
+            lines = await_audit(audit, 7)
         assert ordinary[0] == locked[0] == 401
         assert ordinary[2] == locked[2]
         assert _comparable(ordinary[1]) == _comparable(locked[1])
         # …and the audit log DOES tell them apart, or the property is vacuous.
-        assert "status=unauthorized" in audit[0]
-        assert "status=locked-out" in audit[-1]
+        assert "status=unauthorized" in lines[0]
+        assert "status=locked-out" in lines[-1]
 
     def test_a_SUCCESS_does_NOT_buy_more_GUESSES(self, store: Path):
         """🔴 THE INTERLEAVE ATTACK, over HTTP. An attacker holding one accepted
@@ -3605,8 +3644,9 @@ class TestLockoutOverHTTP:
             assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)[0] == 200
             fetch(f"{base}/api/v1/recall/{SCOPE}", token="x" * 48)
             code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
+            lines = await_audit(audit, 7)
         assert code == 401, "a valid token reset the guessing budget"
-        assert "status=lockout-triggered" in audit[5]
+        assert "status=lockout-triggered" in lines[5]
 
     def test_a_WRONG_PATH_does_NOT_lock_out_a_client_holding_the_RIGHT_token(
         self, store: Path
@@ -3626,11 +3666,15 @@ class TestLockoutOverHTTP:
             for path in ("/favicon.ico", "/", "/robots.txt", "/metrics", "/api/v1"):
                 assert fetch(f"{base}{path}", token=GOOD_TOKEN)[0] == 401
             code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            lines = await_audit(audit, 6)
         assert code == 200, "a valid client locked itself out on wrong paths"
         assert POINTER_LINE.encode() in body
-        assert not any("locked-out" in line for line in audit)
+        # 🔴 WAITED FOR, because `not any(...)` over a list that is still filling
+        # is satisfied by an EMPTY one — the racy read makes the negative half of
+        # this test pass for the wrong reason.
+        assert not any("locked-out" in line for line in lines)
         # …and they are still REFUSED and logged, or this would be a hole.
-        assert sum("status=unauthorized" in line for line in audit) == 5
+        assert sum("status=unauthorized" in line for line in lines) == 5
 
     def test_a_WRONG_TOKEN_still_counts_even_on_a_path_that_does_not_exist(
         self, store: Path
@@ -3667,7 +3711,11 @@ class TestLockoutOverHTTP:
                 assert code == 405, f"{method} answered {code}"
                 assert body == b"read-only\n"
                 assert headers["Allow"] == "GET, HEAD"
-        assert all("status=method-not-allowed" in line for line in audit)
+            # `all(...)` over a partially-filled list is vacuously true, so the
+            # count is waited for before it is read.
+            lines = await_audit(audit, 4)
+        assert len(lines) == 4, lines
+        assert all("status=method-not-allowed" in line for line in lines)
 
 
 # =============================================================================
@@ -3967,19 +4015,20 @@ class TestAuditLogCannotBeForged:
     def test_a_NEWLINE_in_the_path_cannot_open_a_second_record(self, store: Path):
         with running(store) as (base, audit):
             code, _h, _b = fetch(f"{base}/api/v1/x%0a{self.FORGED}")
+            lines = await_audit(audit, 1)
         assert code == 401
         # ONE request, ONE record — the property nothing asserted before.
-        assert len(audit) == 1, f"the request produced {len(audit)} audit entries"
-        assert "\n" not in audit[0], "a newline survived into the audit record"
-        assert "\r" not in audit[0]
+        assert len(lines) == 1, f"the request produced {len(lines)} audit entries"
+        assert "\n" not in lines[0], "a newline survived into the audit record"
+        assert "\r" not in lines[0]
         # 🔴 ASSERT THE PARSED FIELDS, NOT THE SPELLING. The escaped text still
         # CONTAINS the characters `auth=ok` inside the path value — a substring
         # check would be red for a record that is perfectly safe, and would then
         # be "fixed" by scrubbing the path into uselessness. What matters is
         # that a splitter sees one `auth` field and it says `fail`.
-        fields = [part for part in audit[0].split() if "=" in part]
+        fields = [part for part in lines[0].split() if "=" in part]
         keys = [part.split("=", 1)[0] for part in fields]
-        assert keys.count("auth") == 1, f"more than one auth field: {audit[0]}"
+        assert keys.count("auth") == 1, f"more than one auth field: {lines[0]}"
         assert keys.count("token") == 1
         parsed = dict(part.split("=", 1) for part in fields)
         assert parsed["auth"] == "fail"
@@ -3993,7 +4042,7 @@ class TestAuditLogCannotBeForged:
         """
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/x%20auth=ok%20token=deadbeef1234")
-        line = audit[0]
+            line = await_audit(audit, 1)[0]
         # 🔴 COUNT THE FIELDS; DO NOT `dict()` THEM. A round-2 mutation sweep
         # caught this test being vacuous: `dict()` lets the LAST occurrence win,
         # and the genuine `auth=fail` the server appends is always last — so
@@ -4012,7 +4061,7 @@ class TestAuditLogCannotBeForged:
     ):
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}%00%09%1b[31m", token=GOOD_TOKEN)
-        line = audit[0]
+            line = await_audit(audit, 1)[0]
         assert "\x00" not in line and "\x1b" not in line and "\t" not in line
         # A log that scrubbed everything would be safe and useless.
         assert SCOPE in line
@@ -4020,8 +4069,9 @@ class TestAuditLogCannotBeForged:
     def test_an_ABSURDLY_long_path_cannot_flood_one_record(self, store: Path):
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/{'z' * 4000}")
-        assert len(audit[0]) < 1000, "one request wrote an unbounded log record"
-        assert "truncated" in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert len(line) < 1000, "one request wrote an unbounded log record"
+        assert "truncated" in line
 
     def test_POSITIVE_CONTROL_an_ordinary_path_is_logged_verbatim(self, store: Path):
         """Without this, every assertion above is satisfied by a `_audit` that
@@ -4029,8 +4079,9 @@ class TestAuditLogCannotBeForged:
         """
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
-        assert f"path=/api/v1/recall/{SCOPE}" in audit[0]
-        assert f"token={api.token_id(GOOD_TOKEN)}" in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert f"path=/api/v1/recall/{SCOPE}" in line
+        assert f"token={api.token_id(GOOD_TOKEN)}" in line
 
 
 class TestNoRequestSmuggling:
@@ -4153,9 +4204,10 @@ class TestWritesAreMeteredLikeEverythingElse:
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", method="POST", client_ip=None
             )
+            line = await_audit(audit, 1)[0]
         assert code == 401
         assert body == b"unauthorized\n"
-        assert "status=no-client-ip" in audit[0]
+        assert "status=no-client-ip" in line
 
     def test_POST_probing_COUNTS_toward_the_lockout(self, store: Path):
         with running(store) as (base, _):
@@ -4216,10 +4268,11 @@ class TestMalformedTargetsAndUnknownMethods:
                         data += chunk
                 except (TimeoutError, OSError):
                     pass
+            lines = await_audit(audit, 1)
         assert data, "the request got no response at all"
         assert b"401" in data.split(b"\r\n")[0], data.split(b"\r\n")[0]
         assert b"unauthorized" in data
-        assert any("status=malformed-target" in line for line in audit)
+        assert any("status=malformed-target" in line for line in lines)
 
     def test_an_UNKNOWN_method_is_the_same_uniform_401_not_a_501_page(
         self, store: Path
@@ -4522,18 +4575,20 @@ class TestMalformedRequestLinesDoNotCrash:
     def test_it_answers_instead_of_crashing(self, store: Path, shape: bytes):
         with running(store) as (base, audit):
             data = _speak(base.split("//", 1)[1], shape)
+            lines = await_audit(audit, 1)
         assert data, "the request got no response at all"
         assert b"unauthorized\n" in data
         # And it was RECORDED — a crash produces no audit line, which is what
         # made this invisible to every wire-level assertion.
-        assert len(audit) == 1, f"{len(audit)} audit lines for one request"
-        assert "auth=fail" in audit[0]
+        assert len(lines) == 1, f"{len(lines)} audit lines for one request"
+        assert "auth=fail" in lines[0]
 
     def test_the_audit_line_survives_a_missing_request_path(self, store: Path):
         with running(store) as (base, audit):
             _speak(base.split("//", 1)[1], b"GET\r\n\r\n")
-        assert "path=-" in audit[0], audit[0]
-        assert "status=malformed-request" in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert "path=-" in line, line
+        assert "status=malformed-request" in line
         # 🔴 `peer=-`, THE THIRD VALUE OF THAT FIELD, AND THE ONLY ONE NOTHING
         # ASSERTED. Six bytes is too little to have headers, so `send_error`
         # answers before `_identify_and_meter` ever runs and `_peer_trusted` is
@@ -4544,8 +4599,8 @@ class TestMalformedRequestLinesDoNotCrash:
         # The untested direction is the dangerous one. It makes the audit log
         # assert TRUST about a request whose peer was never evaluated, which is
         # the one claim this field exists to let an operator rely on.
-        assert "peer=-" in audit[0], audit[0]
-        assert "peer=trusted" not in audit[0], audit[0]
+        assert "peer=-" in line, line
+        assert "peer=trusted" not in line, line
 
     def test_POSITIVE_CONTROL_a_WELL_FORMED_unknown_verb_still_works(
         self, store: Path
@@ -4559,8 +4614,9 @@ class TestMalformedRequestLinesDoNotCrash:
                 f"FROBNICATE /api/v1/recall/{SCOPE} HTTP/1.1\r\n"
                 f"Host: h\r\nCF-Connecting-IP: {CLIENT_IP}\r\n\r\n".encode(),
             )
+            lines = await_audit(audit, 1)
         assert b"401" in data.split(b"\r\n")[0]
-        assert len(audit) == 1
+        assert len(lines) == 1
 
 
 class TestUnknownVerbsAreMeteredToo:
@@ -4587,8 +4643,9 @@ class TestUnknownVerbsAreMeteredToo:
     def test_an_unknown_verb_with_NO_client_ip_fails_closed(self, store: Path):
         with running(store) as (base, audit):
             data = self._verb(base, "OPTIONS", ip=None)
+            line = await_audit(audit, 1)[0]
         assert b"unauthorized" in data
-        assert "status=no-client-ip" in audit[0]
+        assert "status=no-client-ip" in line
 
     def test_a_MALFORMED_request_line_cannot_be_a_keep_alive_channel(
         self, store: Path
@@ -4784,9 +4841,10 @@ class TestEveryAuditFieldIsEscaped:
                 f"FROB\x1b[31mNICATE /api/v1/recall/{SCOPE} HTTP/1.1\r\n"
                 f"Host: h\r\nCF-Connecting-IP: {CLIENT_IP}\r\n\r\n".encode(),
             )
-        assert audit, "no audit line was written"
-        assert "\x1b" not in audit[0], "an escape sequence reached the log"
-        assert "\n" not in audit[0]
+            lines = await_audit(audit, 1)
+        assert lines, "no audit line was written"
+        assert "\x1b" not in lines[0], "an escape sequence reached the log"
+        assert "\n" not in lines[0]
 
 
 # =============================================================================
@@ -5657,6 +5715,92 @@ def test_the_call_site_THRESHOLD_is_load_bearing_not_decorative():
     )
 
 
+def _raw_audit_reads(fn: ast.AST) -> "list[int]":
+    """Lines where `fn` reads the audit records WITHOUT going through the helper.
+
+    A read is `audit` in a Load context or any `.audit` attribute; the argument
+    positions of `await_audit(...)` are subtracted, since naming the list to hand
+    it to the waiter is not reading it.
+    """
+    raw, in_arg = set(), set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and node.id == "audit" \
+                and isinstance(node.ctx, ast.Load):
+            raw.add(node.lineno)
+        elif isinstance(node, ast.Attribute) and node.attr == "audit":
+            raw.add(node.lineno)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == "await_audit":
+            for arg in node.args:
+                for sub in ast.walk(arg):
+                    if isinstance(sub, (ast.Name, ast.Attribute)):
+                        in_arg.add(sub.lineno)
+    return sorted(raw - in_arg)
+
+
+def test_no_test_INDEXES_a_live_audit_list():
+    """🔴 THE SWEEP, MADE DURABLE. `await_audit` existed and was documented, and
+    FORTY test functions still read the live list directly — the helper's own
+    docstring names the hazard and those sites were simply never converted.
+
+    One of them was observed failing: `test_a_LOCKED_OUT_response_is_BYTE_
+    IDENTICAL_to_an_ordinary_401` asserted on `audit[-1]` and got the PREVIOUS
+    request's `status=unauthorized`. `_respond` runs before `_audit`, and
+    `ThreadingHTTPServer` uses DAEMON threads — which `socketserver._Threads`
+    refuses to track — so `server_close()` joins nothing: neither `fetch`
+    returning NOR the `with` block exiting proves the last handler has appended.
+
+    An unknown number of tests carrying a known race is worse than the one that
+    was caught, so the count is pinned here rather than left to the next reader.
+
+    🔴 THE ONE PERMITTED SITE IS PERMITTED STRUCTURALLY, NOT BY NAME.
+    `test_the_STDOUT_audit_stream_names_the_matched_fingerprint` re-reads
+    `out.audit` deliberately, to assert a CEILING ("exactly 3, ever") that a
+    snapshot cannot see — and it is sound only because it calls
+    `out.wait_closed()` first, so the stream has a real EOF behind it. That is
+    the condition checked here. Delete the `wait_closed()` and this fails; it
+    cannot rot into a free pass the way a name exclusion would.
+
+    🔴 WHAT IT CANNOT SEE: a read through an alias (`a = audit; a[0]`), a list
+    passed into a helper, or a differently-named binding. It is a ledger of the
+    shape that actually bit, not a proof that no racy read exists.
+    """
+    tree = ast.parse(Path(__file__).read_text())
+    offenders = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not fn.name.startswith("test"):
+            continue
+        reads = _raw_audit_reads(fn)
+        if not reads:
+            continue
+        waits = any(
+            isinstance(n, ast.Attribute) and n.attr == "wait_closed"
+            for n in ast.walk(fn)
+        )
+        if not waits:
+            offenders.append(f"{fn.name} (line {fn.lineno}) reads at {reads}")
+    assert not offenders, (
+        "these tests index the LIVE audit list: `_respond` runs before `_audit` "
+        "and the handler threads are never joined, so the record may not be "
+        "there yet. Use `lines = await_audit(audit, n)` and index `lines`:\n  "
+        + "\n  ".join(offenders)
+    )
+
+    # Positive control: the detector must be able to SEE a raw read, or the
+    # empty offender list above is a fact about the walker and nothing else.
+    permitted = next(
+        fn for fn in ast.walk(tree)
+        if isinstance(fn, ast.FunctionDef)
+        and fn.name == "test_the_STDOUT_audit_stream_names_the_matched_fingerprint"
+    )
+    assert _raw_audit_reads(permitted), (
+        "the raw-read detector sees nothing — it is broken, and every zero it "
+        "reported above is meaningless"
+    )
+
+
 class TestTrustedProxyAllowlistParsing:
     """Invariant guards on `trusted_network` / `load_trusted_proxies`.
 
@@ -5940,12 +6084,13 @@ class TestTrustedProxyOverHTTP:
         """
         with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
             code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            lines = await_audit(audit, 1)
         assert code == 200, code
-        assert len(audit) == 1
-        assert "peer=untrusted" in audit[0], audit[0]
-        assert "auth=ok" in audit[0], audit[0]
-        assert "result=200" in audit[0], audit[0]
-        assert "status=untrusted-peer" not in audit[0], audit[0]
+        assert len(lines) == 1
+        assert "peer=untrusted" in lines[0], lines[0]
+        assert "auth=ok" in lines[0], lines[0]
+        assert "result=200" in lines[0], lines[0]
+        assert "status=untrusted-peer" not in lines[0], lines[0]
 
     def test_a_TRUSTED_peer_is_annotated_too_so_the_field_is_not_write_only(
         self, store: Path
@@ -5956,8 +6101,9 @@ class TestTrustedProxyOverHTTP:
         """
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
-        assert "peer=trusted" in audit[0], audit[0]
-        assert "peer=untrusted" not in audit[0], audit[0]
+            line = await_audit(audit, 1)[0]
+        assert "peer=trusted" in line, line
+        assert "peer=untrusted" not in line, line
 
     def test_a_WRITE_verb_from_an_untrusted_peer_is_METERED_under_the_peer(
         self, store: Path
@@ -5975,16 +6121,17 @@ class TestTrustedProxyOverHTTP:
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method="POST"
             )
+            lines = await_audit(audit, 1)
         assert code == 405, (code, body)
         assert body == b"read-only\n"
-        assert "peer=untrusted" in audit[0], audit[0]
-        assert f"ip={TRUSTED_PEER}" in audit[0], audit[0]
+        assert "peer=untrusted" in lines[0], lines[0]
+        assert f"ip={TRUSTED_PEER}" in lines[0], lines[0]
         # 🔴 EXACTLY ONE LINE, AND NOTHING CHARGED for a request that AUTHENTICATED
         # — a round-2 correction, not belt and braces. A mutant that mis-handles
         # the identify step's return value answers a SECOND response here and
         # charges the limiter under a `None` key; the GET path hides that on an
         # internal assert.
-        assert len(audit) == 1, audit
+        assert len(lines) == 1, lines
         assert limiter._failures == {} and limiter._locked_until == {}
 
     def test_an_UNKNOWN_VERB_from_an_untrusted_peer_is_METERED_under_the_peer(
@@ -6001,10 +6148,11 @@ class TestTrustedProxyOverHTTP:
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method="FROBNICATE"
             )
+            lines = await_audit(audit, 1)
         assert code == 401, (code, body)
         assert body == b"unauthorized\n"
-        assert "peer=untrusted" in audit[0], audit[0]
-        assert len(audit) == 1, audit
+        assert "peer=untrusted" in lines[0], lines[0]
+        assert len(lines) == 1, lines
         assert list(limiter._failures) == [TRUSTED_PEER], limiter._failures
 
     def test_the_header_is_NOT_READ_AT_ALL_from_an_untrusted_peer(self, store: Path):
@@ -6018,12 +6166,13 @@ class TestTrustedProxyOverHTTP:
         with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=SPOOF_IP)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=None)
-        assert len(audit) == 2, audit
-        assert all(f"ip={TRUSTED_PEER}" in ln for ln in audit), audit
-        assert all(f"ip={SPOOF_IP}" not in ln for ln in audit), audit
+            lines = await_audit(audit, 2)
+        assert len(lines) == 2, lines
+        assert all(f"ip={TRUSTED_PEER}" in ln for ln in lines), lines
+        assert all(f"ip={SPOOF_IP}" not in ln for ln in lines), lines
         # …and the absent header is NOT the `no-client-ip` refusal either: that
         # rule applies only where the header IS the identity.
-        assert all("status=no-client-ip" not in ln for ln in audit), audit
+        assert all("status=no-client-ip" not in ln for ln in lines), lines
 
     def test_an_untrusted_peer_IS_charged_to_ITS_OWN_bucket(self, store: Path):
         """🔴 THIS REPLACES A TEST THAT ASSERTED NOTHING WAS CHARGED. Under the
@@ -6043,16 +6192,29 @@ class TestTrustedProxyOverHTTP:
             after = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=SPOOF_IP
             )
+            lines = await_audit(audit, 6)
         assert after[0] == 401, "an untrusted peer had an unlimited budget"
         assert list(limiter._locked_until) == [TRUSTED_PEER], limiter._locked_until
         assert SPOOF_IP not in limiter._locked_until, limiter._locked_until
-        assert "status=lockout-triggered" in audit[4], audit[4]
+        assert "status=lockout-triggered" in lines[4], lines[4]
 
     def test_healthz_answers_an_untrusted_peer(self, store: Path):
         with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
             code, _h, body = fetch(f"{base}/healthz", client_ip=None)
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            lines = await_audit(audit, 1)
         assert (code, body) == (200, b"ok\n")
-        assert audit == [], "the probe path must not audit, or Loki fills with noise"
+        # 🔴 A REASSURING ZERO NEEDS A POSITIVE CONTROL. `assert audit == []`
+        # read the live list with nothing to wait for, so it was equally happy
+        # with "the probe is not audited" and with "the sink had not appended
+        # yet" — and it would have stayed green with `_audit` wired to nothing
+        # at all. An audited request is issued after the probe; waiting for ITS
+        # line proves the sink works, and the count then says the probe added
+        # none. (Residual: a probe line arriving after this snapshot is still
+        # unobserved — there is no EOF on an in-process sink to wait for.)
+        assert len(lines) == 1, (
+            "the probe path must not audit, or Loki fills with noise", lines)
+        assert "/healthz" not in lines[0], lines[0]
 
     def test_a_CIDR_entry_admits_a_peer_INSIDE_it(self, store: Path):
         """POSITIVE CONTROL for the CIDR arm. Every other test in this class
@@ -6064,8 +6226,9 @@ class TestTrustedProxyOverHTTP:
         # into a fact about the floor rather than about the CIDR arm.
         with running(store, trusted_proxies=("127.0.0.0/24",)) as (base, audit):
             code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            line = await_audit(audit, 1)[0]
         assert code == 200, (code, body)
-        assert "peer=trusted" in audit[0], audit[0]
+        assert "peer=trusted" in line, line
 
     def test_build_server_REFUSES_an_empty_allowlist(self, store: Path):
         with pytest.raises(ValueError) as exc:
@@ -7071,6 +7234,7 @@ class TestEnumerationChannelsAreClosed:
             zach_other = fetch(f"{base}/api/v1/recall/{DENY_SCOPE}", token=ZACH_TOKEN)
             dana_own = fetch(f"{base}/api/v1/recall/{DENY_SCOPE}", token=DANA_TOKEN)
             dana_other = fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=DANA_TOKEN)
+            lines = await_audit(audit, 4)
 
         assert zach_own[1]["X-Store-Status"] == "recalled"
         assert KELP_NUANCE.encode() in zach_own[2]
@@ -7083,8 +7247,8 @@ class TestEnumerationChannelsAreClosed:
         assert KELP_NUANCE.encode() not in dana_other[2]
         # The audit line says WHOSE request each was, which is the only record
         # that can answer "who read what" after the fact.
-        assert "identity=zach" in audit[0] and "identity=zach" in audit[1]
-        assert "identity=dana" in audit[2] and "identity=dana" in audit[3]
+        assert "identity=zach" in lines[0] and "identity=zach" in lines[1]
+        assert "identity=dana" in lines[2] and "identity=dana" in lines[3]
 
     def test_the_audit_line_still_carries_the_FINGERPRINT_not_only_the_identity(
         self, scoped_store: Path
@@ -7095,16 +7259,18 @@ class TestEnumerationChannelsAreClosed:
         """
         with running(scoped_store, tokens=(ZACH,)) as (base, audit):
             fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN)
-        assert f"token={api.token_id(ZACH_TOKEN)}" in audit[0]
-        assert "identity=zach" in audit[0]
-        assert "auth=ok" in audit[0]
-        assert ZACH_TOKEN not in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert f"token={api.token_id(ZACH_TOKEN)}" in line
+        assert "identity=zach" in line
+        assert "auth=ok" in line
+        assert ZACH_TOKEN not in line
 
     def test_a_REJECTED_request_names_no_identity(self, scoped_store: Path):
         with running(scoped_store, tokens=(ZACH,)) as (base, audit):
             fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token="w" * 48)
-        assert "identity=-" in audit[0]
-        assert "auth=fail" in audit[0]
+            line = await_audit(audit, 1)[0]
+        assert "identity=-" in line
+        assert "auth=fail" in line
 
 
 class TestRefusedIsIndistinguishableFromAbsent:
@@ -9157,35 +9323,135 @@ class TestAppendIsCommutativeAndIdempotent:
         """No hook, real overlap, eight racers. A supplement to the forced
         interleave rather than a replacement: it cannot be relied on to catch a
         missing lock (some runs will serialise anyway) but it exercises the lock
-        under genuine contention, which the two-writer version does not."""
+        under genuine contention, which the two-writer version does not.
+
+        🔴 THE FAILURE NAMES ITS OWN MECHANISM, BECAUSE ONE OCCURRENCE IS ALL
+        YOU GET. This failed once in a saturated baseline run and then passed
+        15/15 (3 immediate re-runs, then 12 on a quiet host) — so the
+        discriminator that mattered was never captured, and the two candidate
+        mechanisms call for OPPOSITE actions:
+
+            `'…was lost'` with every code 200  -> an append was lost WITH THE
+              LOCK IN PLACE. A DEFECT. Do not re-run; the serialisation is wrong.
+            a short `codes` list, a `BrokenBarrierError`, or a live thread after
+              `join` -> the WALL-CLOCK BOUND (`barrier.wait(timeout=30)`,
+              `t.join(timeout=60)`) under host saturation. Not about the lock.
+
+        The old assertions could not tell them apart: `codes == [200]*8` reds
+        identically for "a writer was refused" and "a writer never got past the
+        barrier", and `f"{text!r} was lost"` fires without ever saying whether
+        the writer that owned that text actually completed. So every arm below
+        is now labelled with its MECHANISM and carries the per-writer phase and
+        elapsed time — `claude/RULES.md` separates load from a real assertion by
+        WHOSE time moved, and that evidence has to be IN the failure output or
+        the next single occurrence is as unresolvable as this one was.
+
+        🔴 THE TIMEOUTS ARE DELIBERATELY NOT WIDENED. Widening them converts the
+        load case into a pass and leaves the defect case looking identical —
+        which hides exactly the mechanism this instrumentation exists to name.
+        """
         path = entry_file(scoped_store, ALLOW_SCOPE)
         texts = [f"{BULLET_C} on run {n}" for n in range(8)]
         barrier = threading.Barrier(len(texts))
-        codes: "list[int]" = []
+        outcomes: "dict[int, dict]" = {}
         lock = threading.Lock()
+        started = time.time()
         with running(scoped_store, tokens=(ZACH,)) as (base, _):
 
-            def writer(text: str) -> None:
-                barrier.wait(timeout=30)
-                code, _h, _b = post_bullet(
-                    base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
-                )
+            def writer(n: int, text: str) -> None:
+                record = {
+                    "n": n, "phase": "never-started", "code": None,
+                    "error": None, "elapsed": None,
+                }
                 with lock:
-                    codes.append(code)
+                    outcomes[n] = record
+                mark = time.time()
+                try:
+                    barrier.wait(timeout=30)
+                except threading.BrokenBarrierError as exc:
+                    record["phase"] = "barrier-broken"
+                    record["error"] = f"{type(exc).__name__}: {exc}"
+                    record["elapsed"] = round(time.time() - mark, 2)
+                    return
+                record["phase"] = "posting"
+                mark = time.time()
+                try:
+                    code, _h, _b = post_bullet(
+                        base, ZACH_TOKEN, ALLOW_SCOPE, text=text, session=SESSION_A
+                    )
+                except Exception as exc:  # noqa: BLE001 — recorded, then reported
+                    record["phase"] = "post-raised"
+                    record["error"] = f"{type(exc).__name__}: {exc}"
+                    record["elapsed"] = round(time.time() - mark, 2)
+                    return
+                record["phase"] = "posted"
+                record["code"] = code
+                record["elapsed"] = round(time.time() - mark, 2)
 
             threads = [
-                threading.Thread(target=writer, args=(t,), daemon=True) for t in texts
+                threading.Thread(target=writer, args=(n, t), daemon=True)
+                for n, t in enumerate(texts)
             ]
             for t in threads:
                 t.start()
             for t in threads:
                 t.join(timeout=60)
-                assert not t.is_alive()
-        assert codes == [200] * len(texts), codes
+            alive = sorted(n for n, t in enumerate(threads) if t.is_alive())
+            wall = round(time.time() - started, 2)
+
+        rows = sorted(outcomes.values(), key=lambda r: r["n"])
+        report = (
+            f"\n  wall={wall}s for {len(texts)} racers"
+            f" (barrier timeout 30s, join timeout 60s)\n  "
+            + "\n  ".join(
+                f"#{r['n']} phase={r['phase']} code={r['code']} "
+                f"elapsed={r['elapsed']}s err={r['error']}" for r in rows
+            )
+        )
+
+        assert len(outcomes) == len(texts), (
+            "MECHANISM = HARNESS. A writer thread never recorded an outcome at "
+            "all, so the classification below cannot be trusted." + report
+        )
+        assert not alive, (
+            f"MECHANISM = WALL-CLOCK BOUND (join). Writers {alive} were still "
+            "running after join(timeout=60). The host was saturated; this says "
+            "nothing about the entry lock. Re-run on a quiet host — do NOT widen "
+            "the timeout." + report
+        )
+        broken = [r["n"] for r in rows if r["phase"] == "barrier-broken"]
+        assert not broken, (
+            f"MECHANISM = WALL-CLOCK BOUND (barrier). Writers {broken} never got "
+            "past barrier.wait(timeout=30), so they never POSTed and no append "
+            "was lost. Saturation, not the lock." + report
+        )
+        raised = [r["n"] for r in rows if r["phase"] == "post-raised"]
+        assert not raised, (
+            f"MECHANISM = TRANSPORT. The POST from writers {raised} raised "
+            "instead of answering. Read the per-writer error: a connection error "
+            "is not a lost append." + report
+        )
+        assert [r["code"] for r in rows] == [200] * len(texts), (
+            "MECHANISM = REFUSED. Every writer answered, but not all with 200 — "
+            "so a 'was lost' claim would be a fact about the refusal and not "
+            "about the lock." + report
+        )
         stored = path.read_text()
-        for text in texts:
-            assert text in stored, f"{text!r} was lost"
-        assert len(resolver.parse_journal_bullets(nuance_of(path))) == len(texts) + 1
+        lost = [t for t in texts if t not in stored]
+        assert not lost, (
+            "🔴 MECHANISM = LOST APPEND, WITH THE LOCK IN PLACE. All "
+            f"{len(texts)} writers answered 200 and {len(lost)} bullet(s) are "
+            f"absent from the entry: {lost!r}. This is the DEFECT case — the "
+            "read-modify-write is not serialised. Do NOT re-run and move on."
+            + report
+        )
+        bullets = resolver.parse_journal_bullets(nuance_of(path))
+        assert len(bullets) == len(texts) + 1, (
+            "🔴 MECHANISM = LOST OR DUPLICATED BULLET. Every text is present but "
+            f"the journal holds {len(bullets)} bullets for {len(texts)} appends "
+            "plus the fixture's one — a splice landed in the wrong place."
+            + report
+        )
 
     def test_re_POSTing_the_SAME_bullet_leaves_the_entry_BYTE_IDENTICAL(
         self, scoped_store: Path
@@ -11643,6 +11909,64 @@ class TestTheBackstopSurvivesITSOWNLogSink:
             f"banner replaced the operator's traceback:\n{captured.err}"
         )
 
+    def test_NO_stderr_write_in_the_REQUEST_HANDLER_can_raise(self):
+        """🔴 THE LEDGER, BECAUSE THE PER-SITE FIX HAS NOW BEEN NEEDED THREE
+        TIMES. `ea3d0a16` guarded the `_audit` call and left both of
+        `_backstop`'s prints bare; `aa31d431` routed those two through
+        `_print_exc_quietly` and left `_handle`'s `except UnicodeError:` arm bare
+        on the reasoning that `_backstop` would catch it — which it cannot,
+        because they are SIBLING `except` arms of one `try`.
+
+        Each round fixed the site it had measured and left the next one. So this
+        pins the RELATIONSHIP instead: inside `StoreRequestHandler`, the ONLY
+        route to stderr is `_print_exc_quietly`. A new bare `print_exc` — or a
+        `print(..., file=sys.stderr)` — anywhere in a request-handling method
+        fails here, at the edit, rather than in production on the one request
+        whose log sink is broken.
+
+        🔴 SCOPED TO THE HANDLER CLASS, NOT THE FILE. `main()` and the
+        trusted-proxy warner also write stderr; a raise there is a STARTUP
+        failure, which is loud and correct. Only a write on the request path can
+        silently trade a caller's response for a log line.
+
+        🔴 WHAT IT CANNOT SEE, stated so it is not read as more than it is: a
+        write reached through an alias (`_p = traceback.print_exc`), through
+        `logging`, through `sys.stderr.write`, or from a module-level helper the
+        handler calls. It is a ledger of the shape that has actually bitten three
+        times, not a proof that no stderr write exists.
+        """
+        tree = ast.parse(SERVER_PATH.read_text())
+        handler = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.ClassDef) and n.name == "StoreRequestHandler"
+        )
+        offenders = []
+        for node in ast.walk(handler):
+            if isinstance(node, ast.Attribute) and node.attr == "print_exc":
+                offenders.append(f"traceback.print_exc at line {node.lineno}")
+            elif isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if kw.arg != "file":
+                        continue
+                    if isinstance(kw.value, ast.Attribute) and kw.value.attr == "stderr":
+                        offenders.append(f"file=sys.stderr at line {kw.value.lineno}")
+        assert not offenders, (
+            "a stderr write on the REQUEST PATH that can itself raise — a broken "
+            "log sink then decides whether the caller gets an answer. Route it "
+            "through `_print_exc_quietly()`:\n  " + "\n  ".join(offenders)
+        )
+        # Positive control: the detector must be able to SEE the shape it bans,
+        # or the zero above is a fact about the walker and not about the handler.
+        seen = [
+            n.lineno for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and n.attr == "print_exc"
+        ]
+        assert seen, "the print_exc detector sees nothing — it is broken"
+        assert len(seen) == 1, (
+            f"`traceback.print_exc` is spelled at {len(seen)} sites ({seen}); the "
+            "helper is supposed to be the only one"
+        )
+
 
 class TestAnUndecodableEntryNameIsNotTheCallersFault:
     """🔴 A BADLY-NAMED FILE ANSWERED `400 bad request`, BLAMING THE CALLER FOR A
@@ -11682,6 +12006,58 @@ class TestAnUndecodableEntryNameIsNotTheCallersFault:
         assert any(
             "result=503" in ln and "status=store-unreachable" in ln for ln in lines
         ), lines
+
+    def test_a_RAISING_print_exc_in_THIS_arm_STILL_answers_and_audits(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """🔴 SIBLING `except` ARMS DO NOT CATCH EACH OTHER, AND THAT IS WHY THE
+        DEFERRAL WAS WRONG. This arm's `traceback.print_exc` was left bare on the
+        reasoning that it raises BEFORE its `_respond`, so `_handle`'s backstop
+        would still answer the request. `_backstop` is called from the
+        `except Exception:` arm of the SAME `try` as this `except UnicodeError:`
+        — a sibling — so an exception raised in here leaves `_handle` entirely
+        and reaches nothing.
+
+        MEASURED with the badly-named file above, before the fix:
+
+            sink alive  : 503 store-unreachable, 1 audit line
+            sink broken : RemoteDisconnected,    0 audit lines
+
+        Identical outcome, on the identical mechanism, as the `_backstop` bug
+        `aa31d431` fixed — which is why the answer is the same helper.
+
+        The observable is the RAW WIRE, not `fetch`: a `RemoteDisconnected` from
+        a parsed client is a transport error, and a test that dies on one is a
+        test whose own assertion never ran. `_responses(raw)` lets the failure be
+        "no response came back", stated by this test.
+        """
+        broken = _RaisingTraceback()
+        self._with_bad_name(scoped_store)
+        monkeypatch.setattr(api, "traceback", broken)
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            host = base.split("//", 1)[1]
+            raw, _eof = _raw_exchange(
+                host, _request(host, "GET", f"/api/v1/recall/{ALLOW_SCOPE}")
+            )
+            answers = _responses(raw)
+            assert len(answers) == 1, (
+                "the request VANISHED — this arm's own log write took the answer "
+                f"with it, past a SIBLING backstop that never sees it: {raw!r}"
+            )
+            assert answers[0].startswith(b"503 "), raw
+            lines = await_audit(audit, 1)
+        monkeypatch.undo()
+
+        # The fixture's own positive control: a `print_exc` that was never called
+        # cannot have been the thing under test.
+        assert broken.calls >= 1, "the broken sink was never reached"
+        assert any(
+            "result=503" in ln and "status=store-unreachable" in ln for ln in lines
+        ), lines
+        # The constant sentence still, and still no codec internals on the wire.
+        assert b"store unreadable: an entry name or body is not valid UTF-8\n" in raw
+        for leaked in (b"codec", b"udce9", b"surrogates", b"closed pipe", b"Traceback"):
+            assert leaked not in raw, (leaked, raw)
 
     def test_the_503_body_does_NOT_echo_the_CODEC_message(self, scoped_store: Path):
         """The message names the offending code point and its byte position —
