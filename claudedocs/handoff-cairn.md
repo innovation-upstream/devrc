@@ -25,9 +25,15 @@ team instance, each measured rather than assumed.
   - homelab-infra **#438** → `bbc373ed` — `scripts/check-ci-nonfire.py` + 88 tests (rank 4)
   - devrc **#954** → `dcc14c75` — handoff update (rank 4 done, rank 3 blocked)
   - homelab-infra **#459** → `9e5cc33e` — the supersede decision record (rank 5)
-- **Cards:** #366 and **#391** `complete`. **#394 still `open` and genuinely unstarted** — it was
-  the item NOT chosen when the two were offered as a fork, not an item that failed. `cairn-3`,
-  `cairn-4`, `cairn-5` and `cairn-6` claims released.
+- **Cards: #366, #391 and #394 are ALL `complete`.** Every ranked item below is closed. `cairn-3`,
+  `cairn-4`, `cairn-5`, `cairn-6` and `cairn-7` claims released.
+- 🔴 **THIS LINE HAS NOW ROTTED THREE TIMES IN ONE DAY, AND THAT IS THE DURABLE FINDING.** It
+  said rank 3 was blocked (already done by someone else's PR); then that #391 was open (it had
+  shipped an hour earlier); then that #394 was "still `open` and genuinely unstarted" (it completed
+  two hours later). Each correction was true when written and false within hours. **A ranked list
+  that DUPLICATES a status the board already owns will rot every time an item moves** — the board
+  is the authority, this list is a plan. Whoever next edits this doc: point at the board, do not
+  re-copy its statuses.
 - **Clean:** no worktrees of mine in either repo, no stray local or remote branches, no
   background jobs. ⚠ Two things that LOOK like stragglers are not mine — the held
   `cairn-write-path` claim belongs to another session (clawgate #371), and the four
@@ -283,11 +289,23 @@ was being grown by a branch nobody reconciled against.
    - **Still open, deliberately:** the e2e spec does not assert the loser's chip, so the *visual*
      half of criterion 3 is unexercised end to end. Closing condition is mechanical — a merged PR
      touching `containers/clawgate/e2e/tests/tasks.spec.ts`.
-7. **#394** — three source comments claim a machine cannot author as `user`, without naming the
-   path that holds on; one of them decided (b) in my first draft. Repo: `homelab-talos`.
-   🔴 **NOT "authenticate the LAN NodePort"** — trusted-open is deliberate and documented
-   (`api/auth.go:35-39`), and a card to fix something that is off on purpose is worse than no
-   card. Scope is the comments' claims, not the model.
+7. ~~**#394** — three source comments claim a machine cannot author as `user`~~ — **DONE.**
+   homelab-infra **#489** (squash `c04f1934`), card `complete`. **No deploy: comments plus one
+   test file, zero Go behaviour change**, so the running 0.8.9 image is unaffected.
+   - **There were FOUR sites, not three** — `server.go`'s route comment makes the same
+     unqualified claim. All four now state the scope they hold under.
+   - **The decision (criterion 2) is (c)**, and a measurement decided it: **nothing in the
+     codebase branches on a comment's author** — no `Author == "user"`/`== "operator"` outside
+     tests; `commentAuthor()` only maps `""`→`"user"`; push and UI merely display it. That rules
+     out (b): there is no privilege to withdraw. But it does NOT make the answer (a) — the record
+     being *human-read* is exactly why it is load-bearing, since #366's first draft was decided by
+     citing the false sentence. Honest under trusted-open where `user` means "someone on the
+     trusted network"; not honest on a team instance where it must mean a particular person.
+   - **Guard:** `TestPrivilegedAuthorSitesAreLedgered` pins the SET of sites minting a privileged
+     author, failing when it GROWS *or* SHRINKS, reading both the field and const shapes — a
+     field-only scanner would have gone blind when #391 turned merge.go's literal into a const.
+     Battery 4/4 including the positive control. 🔴 It caught its author's own error on first
+     run: two operator function names written from recollection, neither of which exists.
 8. **No card filed for the §(a) guard narrowing, deliberately.** It makes a merge *possible*
    where one is refused today, on a route mutating two tasks with no transaction, and any
    narrowing must test the project delta explicitly AND answer for the second winner-side write
