@@ -190,6 +190,15 @@ j. A RANKED NEXT-STEP MUST NAME AN EXTERNAL FORCING FUNCTION. Same decision, and
    `ranked-list`, no `handoff`. An untagged item or an unrecognised kind is a
    refusal naming the item and printing the vocabulary.
 
+   🔴 THE FIELD MAY SIT ANYWHERE ON THE ITEM, INCLUDING A CONTINUATION LINE, and
+   the refusal DIAGNOSES rather than assuming absence. Both halves are one fix
+   for one measured failure: the first version searched only the numbered line,
+   so it refused 179 of devrc's 257 real ranked items' SHAPE outright and told
+   correctly-tagged items `[no forcing: field]` — a remedy already satisfied, so
+   the re-run was byte-identical and the handoff could never land. `_item_blocks`
+   owns the block boundary; `unforced_report` prints a remedy per CAUSE, and
+   names a near-miss (`forcing function: gate`) or a fenced field specifically.
+
    🔴 WHAT THIS DOES *NOT* DO, stated here rather than discovered later. It
    cannot check that the cited forcing function is REAL, or that it is genuinely
    EXTERNAL. `forcing: incident — the queue is down` is accepted from a session
@@ -389,7 +398,38 @@ EXTERNAL_FORCING_KINDS: frozenset[str] = FORCING_KINDS - {"none"}
 #: a keyword the predicate hunts for in prose.
 FORCING_KEY = "forcing"
 
-_FORCING = re.compile(rf"\b{FORCING_KEY}:\s*([A-Za-z-]+)", re.IGNORECASE)
+# 🔴 THE MARKUP CLASS IS DELIBERATE, AND IT IS BOUNDED BY THE ALLOWLIST, NOT BY
+# TASTE. `**forcing:** gate` is the field, spelled the way a skill body that
+# bolds its field names teaches; refusing it would be a refusal over emphasis
+# characters. Widening here is safe for exactly one reason, and it is structural
+# rather than a judgement about intent: what follows the colon must be a member
+# of a CLOSED vocabulary, so a "false positive" requires prose that literally
+# reads `forcing` + punctuation + one of seven kinds — which is the tag.
+#
+# What this does NOT admit, and both stay NEAR-MISSES reported by
+# `_FORCING_ATTEMPT` below rather than silently accepted: `forcing function:
+# gate` (a word between the key and the colon) and `forcing = gate` (a separator
+# that is not a colon). Those are guesses at the grammar, not the grammar.
+_MARKUP = r"[*_`~]{0,3}"
+_FORCING = re.compile(
+    rf"\b{FORCING_KEY}{_MARKUP}\s*:\s*{_MARKUP}\s*([A-Za-z-]+)", re.IGNORECASE
+)
+
+#: The FAIL-LOUD half of a strict `_FORCING`, and the reason it exists is the
+#: measured failure this pattern was added for: an item that DID carry a tag was
+#: refused with `[no forcing: field]` and a remedy it had already satisfied, so
+#: the session could not recover — every re-run printed the identical refusal.
+#: Same idiom as `subsystem_resolver._NEAR_MISS_MARKER`: keep the grammar strict,
+#: and REPORT the attempts it turns away instead of loosening it.
+#:
+#: The key, then a member of the vocabulary within a short window. Anchored on
+#: the closed set at BOTH ends, so it cannot fire on the bare word `forcing` in
+#: prose — `unforced_report` only consults it for an item it is already refusing,
+#: and the worst case is a refusal that names a line the author is looking at.
+_FORCING_ATTEMPT = re.compile(
+    rf"\b{FORCING_KEY}\b[^\n]{{0,40}}?\b(?:{'|'.join(sorted(FORCING_KINDS))})\b",
+    re.IGNORECASE,
+)
 
 # A TOP-LEVEL numbered item. The indent bound is what keeps a nested `1.` inside
 # an item's own sub-list from being counted as a rank of its own — the ranks are
@@ -409,10 +449,83 @@ class RankedItem(typing.NamedTuple):
     """Lowercased declared kind, or None when the item carries no field at all.
     A kind OUTSIDE `FORCING_KINDS` is reported as declared — the caller needs to
     see what was typed in order to fix it."""
+    near_miss: str | None = None
+    """The line that LOOKS like a tag `_FORCING` could not parse, or None.
+
+    Only ever set when `kind is None` — an item that parsed needs no diagnosis.
+    Its whole purpose is `unforced_report`: without it a tagged-but-unparsed item
+    is told `[no forcing: field]` and handed a remedy it already satisfied, which
+    is a refusal no re-run can clear."""
+    fenced: bool = False
+    """True when the ONLY `forcing:` field this item carries sits inside a code
+    fence, where it does not count. Same reason as `near_miss` — the author can
+    see the field in their file, so `[no forcing: field]` reads as a lie."""
 
     @property
     def is_declared(self) -> bool:
         return self.kind in FORCING_KINDS
+
+
+def _item_blocks(section_body: str) -> list[tuple[re.Match[str], list[str], list[str]]]:
+    """`(match, the item's own visible lines, the fenced lines inside it)`.
+
+    🔴 AN ITEM IS A BLOCK, NOT A LINE, and that is this function's whole reason
+    to exist. MEASURED over the committed corpus: 179 of 257 ranked items in
+    devrc's `claudedocs/` and 99 of 181 in homelab-talos' wrap onto continuation
+    lines. Matching the field on the numbered line alone therefore refused the
+    MAJORITY shape, and told it that it carried no field.
+
+    Where a block ENDS is NOT "the next ranked item", and that is not a taste
+    call — the naive boundary FALSELY TAGS, measured. It attributes a section's
+    trailing paragraph to the last item, and the corpus says what that paragraph
+    is: 14 blocks are followed by unindented prose after a blank line, 10 of them
+    the last item in their section, 7 of those the skill's own copied
+    `🔴 **This list is a WORK QUEUE …**` boilerplate. The template block it is
+    copied from now also carries "```forcing: none``` is the honest opt-out", so
+    appending it VERBATIM under two untagged items and asking the naive boundary
+    returns `kind='none'` for item 2 — an item silently declared self-generated
+    by text its author pasted from the instructions. Pinned by
+    `test_trailing_boilerplate_does_not_tag_the_last_item`. So the walk uses the
+    ordinary markdown rule:
+
+      * a line INSIDE a fence always belongs to the item (never a boundary);
+      * a blank line does not end it — an indented line may follow;
+      * an UNINDENTED, non-blank line ends it once a blank line has intervened;
+      * anything else continues it (markdown's lazy continuation).
+
+    Fenced lines are returned SEPARATELY rather than dropped: they must not count
+    as a tag (`_unfenced`'s contract, and a pasted sample is not a declaration),
+    but an author who put the field in a fence needs to be told that is why.
+    """
+    all_lines = section_body.splitlines()
+    visible = {idx for idx, _ln in _unfenced(section_body)}
+    starts = [
+        i for i in range(len(all_lines))
+        if i in visible and _RANKED_ITEM.match(all_lines[i])
+    ]
+    out: list[tuple[re.Match[str], list[str], list[str]]] = []
+    for n, start in enumerate(starts):
+        limit = starts[n + 1] if n + 1 < len(starts) else len(all_lines)
+        own: list[str] = [all_lines[start]]
+        hidden: list[str] = []
+        blanked = False
+        for i in range(start + 1, limit):
+            line = all_lines[i]
+            if i not in visible:
+                hidden.append(line)
+                blanked = False
+                continue
+            if not line.strip():
+                blanked = True
+                continue
+            if blanked and not line.startswith((" ", "\t")):
+                break
+            blanked = False
+            own.append(line)
+        m = _RANKED_ITEM.match(all_lines[start])
+        assert m is not None  # `starts` is exactly the lines that matched
+        out.append((m, own, hidden))
+    return out
 
 
 def ranked_items(text: str) -> list[RankedItem]:
@@ -428,6 +541,11 @@ def ranked_items(text: str) -> list[RankedItem]:
     Fence-aware via `_unfenced`, for the reason `split_sections` is: a handoff
     routinely pastes a numbered list inside a code block, and a sample command is
     not a work item.
+
+    🔴 THE FIELD IS LOOKED FOR OVER THE ITEM'S WHOLE BLOCK — see `_item_blocks`
+    for the boundary and the measurement behind it. Neither `FORCING_VOCAB_LINE`
+    nor the skill ever said the tag had to sit on the numbered line; the majority
+    of real items wrap, so a numbered-line-only search refused the common shape.
     """
     _fm, body = split_front_matter(text)
     _pre, secs = split_sections(body)
@@ -435,40 +553,105 @@ def ranked_items(text: str) -> list[RankedItem]:
     for heading, section_body in secs:
         if not heading_text(heading).lower().startswith(NEXT_STEPS_PREFIX):
             continue
-        for _idx, line in _unfenced(section_body):
-            m = _RANKED_ITEM.match(line)
-            if not m:
+        for m, own, hidden in _item_blocks(section_body):
+            block = "\n".join(own)
+            found = _FORCING.search(block)
+            if found:
+                out.append(RankedItem(m.group(1), m.group(2), found.group(1).lower()))
                 continue
-            found = _FORCING.search(line)
+            # Nothing parsed. Diagnose WHY, so the refusal can say something the
+            # author has not already done. `_FORCING_ATTEMPT` cannot span a
+            # newline, so the per-line walk sees exactly what a block-wide search
+            # would — and it yields the LINE, which is what a reader needs.
             out.append(
-                RankedItem(m.group(1), m.group(2), found.group(1).lower() if found else None)
+                RankedItem(
+                    m.group(1),
+                    m.group(2),
+                    None,
+                    next((ln.strip() for ln in own if _FORCING_ATTEMPT.search(ln)), None),
+                    any(_FORCING.search(ln) for ln in hidden),
+                )
             )
     return out
 
 
+# 🔴 A STATEMENT OF THE GRAMMAR, NOT AN IMPERATIVE, and the change is the point.
+# This used to open "Tag each item `forcing: <kind>`" and was printed to EVERY
+# refused caller — including one whose items were already tagged, which is a
+# remedy that has been carried out telling you to carry it out. A re-run then
+# printed the identical bytes and there was no way forward. The vocabulary is
+# still needed by every arm (a caller has to see a closed set), so it stays; the
+# instruction moved into the per-cause remedies below, which are conditional.
 FORCING_VOCAB_LINE = (
-    "  Tag each item `forcing: <kind>` — one of: "
-    + ", ".join(sorted(EXTERNAL_FORCING_KINDS))
-    + ".\n"
+    "  The field is `forcing: <kind>`, anywhere on the item's own lines — "
+    "`<kind>` one of: " + ", ".join(sorted(EXTERNAL_FORCING_KINDS)) + ".\n"
     "  `forcing: none` is the honest opt-out for an item nothing outside this "
     "loop asked for. It is ACCEPTED and counted, not refused — but an item "
     "carrying it is not eligible to be worked."
 )
 
+#: Remedy for the plain case: no field anywhere in the item.
+MISSING_FIELD_REMEDY = (
+    "  Tag each item marked [no forcing: field] above. A continuation line "
+    "counts — the field does not have to sit on the numbered line."
+)
+
+#: Remedy for a near-miss. 🔴 IT MUST NOT REPEAT `MISSING_FIELD_REMEDY`: an item
+#: that reaches this arm HAS a field, and being told to add one is the failure
+#: this whole branch exists to end.
+NEAR_MISS_REMEDY = (
+    "  🔴 The item(s) marked [unparsed] DO carry something — the quoted line is "
+    "there and the check could not parse it. Spell the field as the literal key, "
+    "a colon, then the kind: `forcing: gate`. Emphasis around it is fine "
+    "(`**forcing: gate**`, `**forcing:** gate`, `` `forcing: gate` ``); a word "
+    "between the key and the colon is not (`forcing function: gate`), and "
+    "neither is any other separator (`forcing = gate`, `forcing — gate`)."
+)
+
+#: Remedy for a field that parses but sits inside a code fence.
+FENCED_FIELD_REMEDY = (
+    "  🔴 The item(s) marked [fenced] carry the field INSIDE a code fence, where "
+    "it does not count — a pasted sample is not a declaration. Move it out of "
+    "the fence, onto one of the item's own lines."
+)
+
 
 def unforced_report(items: typing.Sequence[RankedItem]) -> str:
-    """Rule (j)'s refusal text, or "" when every ranked item declared a kind."""
+    """Rule (j)'s refusal text, or "" when every ranked item declared a kind.
+
+    🔴 EVERY REMEDY PRINTED HERE IS CONDITIONAL ON THE CAUSE THAT EARNED IT.
+    A refusal that instructs a caller to do a thing the caller has already done
+    is unrecoverable: the fix is a no-op, the re-run is byte-identical, and the
+    session's handoff — which this module is the sole writer of — never lands.
+    """
     bad = [i for i in items if not i.is_declared]
     if not bad:
         return ""
-    rows = [
-        f"  {i.rank}. {_clip(i.text, 96)}"
-        + (f"   [unknown kind: {i.kind!r}]" if i.kind is not None else "   [no forcing: field]")
-        for i in bad[:EXISTING_SHOWN_MAX]
-    ]
+
+    def _mark(i: RankedItem) -> str:
+        if i.kind is not None:
+            return f"   [unknown kind: {i.kind!r}]"
+        if i.near_miss is not None:
+            return f"   [unparsed forcing field on: {_clip(i.near_miss, 72)}]"
+        if i.fenced:
+            return "   [fenced] `forcing:` found, but inside a code fence"
+        return "   [no forcing: field]"
+
+    shown = bad[:EXISTING_SHOWN_MAX]
+    rows = [f"  {i.rank}. {_clip(i.text, 96)}" + _mark(i) for i in shown]
     elided = len(bad) - len(rows)
     if elided:
         rows.append(f"  … and {elided} more.")
+    # Keyed off EVERY bad item, not just the shown ones: a remedy suppressed by
+    # the display cap would be missing for exactly the caller who cannot see the
+    # row that needed it.
+    remedies = []
+    if any(i.kind is None and i.near_miss is None and not i.fenced for i in bad):
+        remedies.append(MISSING_FIELD_REMEDY)
+    if any(i.near_miss is not None for i in bad):
+        remedies.append(NEAR_MISS_REMEDY)
+    if any(i.kind is None and i.near_miss is None and i.fenced for i in bad):
+        remedies.append(FENCED_FIELD_REMEDY)
     return "\n".join(
         [
             f"status=unforced",
@@ -479,6 +662,7 @@ def unforced_report(items: typing.Sequence[RankedItem]) -> str:
             f"get written down as a rank.",
             *rows,
             FORCING_VOCAB_LINE,
+            *remedies,
             "  🔴 EXTERNAL means an incident, a person's request, a failing "
             "gate, a deadline, a measured regression or a security exposure — "
             "NOT the previous session's ranked list. That loop is what this "

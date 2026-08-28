@@ -150,6 +150,49 @@ beside it is prose. And the *"does not get worked"* half is **not enforced**:
 this module writes the doc, it does not consume the queue. The skip belongs in
 `/resume` step 6 and `claim-work`, and is not implemented.
 
+### An item is a BLOCK, and the refusal diagnoses instead of assuming absence
+
+The first version of rule (j) searched for the field on the **numbered line
+only**. MEASURED over the committed corpus: **179 of 257** ranked items in
+devrc's `claudedocs/` and **99 of 181** in homelab-talos' wrap onto continuation
+lines — i.e. the majority shape was structurally unable to pass, and a
+correctly-tagged item was refused *and told* `[no forcing: field]`. That is the
+worst kind of refusal: the printed remedy was already satisfied, so the obvious
+fix was a no-op and the re-run was byte-identical. `/handoff` step 5 is the doc's
+**sole writer**, so the session's handoff simply could not land.
+
+Two changes, and both are needed — the message fix alone would leave the
+majority shape refused, and the behaviour fix alone would still lie about the
+near-misses it does not admit:
+
+* **`_item_blocks` searches the item's whole block.** The boundary is *not* "up
+  to the next numbered item": that attributes a section's trailing paragraph to
+  its last item, and 7 of the 10 corpus blocks with such a paragraph carry the
+  copied `🔴 **This list is a WORK QUEUE …**` boilerplate — whose template block
+  now also contains "`forcing: none` is the honest opt-out". Appending that
+  boilerplate verbatim under two untagged items and asking the naive boundary
+  returns `kind='none'` for item 2, silently declaring it self-generated on text
+  its author pasted from the instructions. So the block ends at the next
+  numbered item **or** at the first unindented non-blank line after a blank one
+  — ordinary markdown list semantics. Fenced lines never end it and never count
+  as a tag.
+* **Every remedy is conditional on the cause.** `[no forcing: field]` (add one),
+  `[unknown kind: …]` (pick from the vocabulary), `[unparsed forcing field on:
+  …]` (the field is there and misspelled), `[fenced]` (it is inside a code
+  fence). The near-miss detector is the `subsystem_resolver._NEAR_MISS_MARKER`
+  idiom: keep the grammar strict and **report** what it turns away rather than
+  loosening it into prose. Precision control: over the **438** real ranked items
+  in both repos' `claudedocs/` — every one of them legacy and untagged — it
+  fires **0** times.
+
+One spelling *was* admitted rather than reported: **`**forcing:** gate`**, i.e.
+emphasis characters between the key and the colon. What follows the colon must
+be a member of a seven-word closed vocabulary, so a "false positive" requires
+prose that literally reads `forcing` + punctuation + one of those kinds — which
+is the tag. Refusing it would be a refusal over emphasis, in a skill body that
+bolds its field names. `forcing function:` and `forcing = gate` are **not**
+admitted: those are guesses at the grammar, and they stay near-misses.
+
 ## Why findings append and the status header does not
 
 The status / next-steps block is current state: two of them in one doc is a

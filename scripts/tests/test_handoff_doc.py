@@ -3607,6 +3607,234 @@ class TestARankedItemMustNameAForcingFunction:
         assert hd.ranked_items("## Goal\n1. ship the thing\n") == []
 
 
+class TestTheFieldIsFoundOnTheWholeItemNotTheNumberedLine:
+    """🔴 RED AT `3f7f2e62` — every test in this class. Rule (j)'s first version
+    ran `_FORCING.search` against the single line `_RANKED_ITEM` had matched, so
+    a tag on any CONTINUATION line of a multi-line item was invisible.
+
+    MEASURED over the committed corpus: 179 of 257 ranked items in devrc's
+    `claudedocs/` and 99 of 181 in homelab-talos' wrap onto continuation lines,
+    so the majority shape was structurally unable to pass. And the refusal it
+    got was the worst kind — `[no forcing: field]` about an item that HAS one,
+    under a printed remedy already satisfied: the obvious fix is a no-op, the
+    re-run is byte-identical, and `/handoff` step 5 is this doc's SOLE writer,
+    so the session's handoff never lands at all.
+
+    Two halves, and the class covers both, because either alone is still broken:
+    the BLOCK search (the behaviour), and a remedy per CAUSE (the message).
+    """
+
+    # 🔴 THE OBSERVED FAILURE, verbatim in shape: two items that BOTH carry a
+    # correct tag, on the last line of a wrapped item. `rc=8` at `3f7f2e62`.
+    OBSERVED = (
+        "## Next steps (ranked)\n"
+        "1. 🔴 **Land the pre-push gate change-scoping** (`devrc#952`).\n"
+        "   The hook scopes to the whole tree, so every push re-runs the full\n"
+        "   suite and the gate is red for reasons the push did not cause.\n"
+        "   forcing: gate — devrc#952's CI leg has been red since 2026-08-26\n"
+        "2. **Fix the `measure.py` latent misreport.**\n"
+        "   It prints a zero where the query returned no rows at all.\n"
+        "   forcing: regression — measured against the 2026-08-20 baseline\n"
+    )
+
+    @staticmethod
+    def _naive_kinds(text: str) -> list[str | None]:
+        """The boundary this change REJECTED: numbered line to the next numbered
+        line, or the end of the section. Kept here as the sensitivity control for
+        `test_trailing_boilerplate_does_not_tag_the_last_item` — without it that
+        assertion could be passing for any reason at all."""
+        _fm, body = hd.split_front_matter(text)
+        _pre, secs = hd.split_sections(body)
+        out: list[str | None] = []
+        for heading, sb in secs:
+            if not hd.heading_text(heading).lower().startswith(hd.NEXT_STEPS_PREFIX):
+                continue
+            lines = [ln for _i, ln in hd._unfenced(sb)]
+            starts = [k for k, ln in enumerate(lines) if hd._RANKED_ITEM.match(ln)]
+            for n, k in enumerate(starts):
+                end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+                m = hd._FORCING.search("\n".join(lines[k:end]))
+                out.append(m.group(1).lower() if m else None)
+        return out
+
+    def test_the_observed_refusal_of_two_correctly_tagged_items_is_gone(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """The exact reported symptom: `rc=8`, `status=unforced`, two items that
+        are both tagged. Reproduced through the TOOL, not just the parser."""
+        upd = write_delta(tmp_path, "wrapped.md", self.OBSERVED)
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=unforced" not in res.stderr
+        assert [i.kind for i in hd.ranked_items(self.OBSERVED)] == ["gate", "regression"]
+
+    @pytest.mark.parametrize(
+        "tagline",
+        (
+            "   forcing: gate — CI red",
+            "   **forcing: gate** — CI red",
+            "   `forcing: gate` — CI red",
+            "   Forcing: Gate — CI red",
+            "   forcing:gate — CI red",
+            # 🔴 THE ONE SPELLING THIS CHANGE ADMITTED rather than reported.
+            # Emphasis BETWEEN the key and the colon, in a skill body that bolds
+            # its field names. Safe structurally, not by a guess about intent:
+            # what follows the colon must be a member of a seven-word closed
+            # vocabulary, so a false positive requires prose that literally reads
+            # `forcing` + punctuation + a kind — which is the tag.
+            "   **forcing:** gate — CI red",
+            "   **forcing**: gate — CI red",
+        ),
+    )
+    def test_an_accepted_spelling_on_a_continuation_line_counts(
+        self, repo: Path, tmp_path: Path, tagline: str
+    ) -> None:
+        text = "## Next steps (ranked)\n1. Land the retry-wrapper fix.\n" + tagline + "\n"
+        res = run_tool(repo, update=write_delta(tmp_path, "spelling.md", text))
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert [i.kind for i in hd.ranked_items(text)] == ["gate"]
+
+    @pytest.mark.parametrize(
+        "attempt",
+        (
+            "forcing function: gate — CI red",   # a word between key and colon
+            "forcing = gate",                    # a separator that is not a colon
+            "forcing — gate",                    # ditto, em dash
+        ),
+    )
+    def test_a_near_miss_is_REFUSED_and_NAMED_never_called_absent(
+        self, repo: Path, tmp_path: Path, attempt: str
+    ) -> None:
+        """🔴 THE MESSAGE HALF. These stay refused — the grammar is deliberately
+        strict, `subsystem_resolver._NEAR_MISS_MARKER`'s reason — but the refusal
+        must say the field is UNPARSED, not ABSENT, and must not print the remedy
+        the author has already carried out."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n   " + attempt + "\n"
+        res = run_tool(repo, update=write_delta(tmp_path, "nearmiss.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        err = res.stderr
+        assert "[no forcing: field]" not in err, (
+            "the item HAS a field — telling it there is none is the reported bug"
+        )
+        assert "Tag each item marked" not in err, (
+            "a remedy already satisfied: the fix is a no-op and the re-run "
+            "prints identical bytes, so the session cannot recover"
+        )
+        assert "unparsed forcing field on:" in err, "say WHICH line, or it cannot be fixed"
+        assert attempt in err, "quote the offending line verbatim"
+
+    def test_a_field_inside_a_FENCE_still_does_not_count_and_says_why(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """`_unfenced`'s contract is preserved — a pasted sample is not a
+        declaration — but the author can SEE the field in their file, so
+        `[no forcing: field]` would read as a lie about the input."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Land the fix.\n"
+            "   ```\n"
+            "   forcing: gate\n"
+            "   ```\n"
+        )
+        assert [i.kind for i in hd.ranked_items(text)] == [None], (
+            "a fenced field must NOT be accepted as a tag"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "fencedtag.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "[fenced]" in res.stderr
+        assert "[no forcing: field]" not in res.stderr
+        assert "code fence" in res.stderr, "name the reason it did not count"
+
+    def test_trailing_boilerplate_does_not_tag_the_last_item(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 WHY THE BLOCK DOES NOT SIMPLY RUN TO THE NEXT NUMBERED ITEM.
+
+        The corpus shows what sits after a ranked list: 14 blocks are followed by
+        unindented prose after a blank line, and 7 of those are the skill's own
+        `🔴 **This list is a WORK QUEUE …**` boilerplate, copied verbatim. The
+        template block it comes from also carries "`forcing: none` is the honest
+        opt-out" — so under the naive boundary the LAST untagged item silently
+        acquires a `none` from text its author pasted out of the instructions.
+
+        The `_naive_kinds` control is what makes this test sensitive: it asserts
+        the rejected boundary DOES tag item 2 on this very input.
+
+        ⚠ NOT RED AT `3f7f2e62` — labelled, not counted as regression coverage.
+        It is the ONE test in this class that passes against the pre-change tree
+        (measured: 15 failed, 1 passed), because a single-line search cannot see
+        the boilerplate either. It guards the ALTERNATIVE fix — the naive block
+        boundary a reader would reach for next — and it is shown reachable by
+        the `naive-block-boundary` row in `scripts/tests/mutants-handoff-cap.sh`,
+        which it kills.
+        """
+        skill = HANDOFF_SKILL.read_text(encoding="utf-8").splitlines()
+        start = next(i for i, ln in enumerate(skill) if "EVERY item MUST carry" in ln)
+        tail = "\n".join(ln.strip() for ln in skill[start : start + 4])
+        assert "forcing: none" in tail, (
+            "the copied boilerplate no longer spells a valid kind, so this test "
+            "proves nothing — re-derive the window or drop it"
+        )
+        text = "## Next steps (ranked)\n1. Fix A.\n2. Fix B.\n\n" + tail + "\n"
+        assert self._naive_kinds(text) == [None, "none"], (
+            "CONTROL: the rejected boundary must still mis-tag this input, or "
+            "the assertion below is vacuous"
+        )
+        assert [i.kind for i in hd.ranked_items(text)] == [None, None]
+        res = run_tool(repo, update=write_delta(tmp_path, "boiler.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+
+    def test_a_genuinely_untagged_multi_line_item_still_reports_ABSENCE(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE PRECISION HALF. The block widened; the DIAGNOSIS must not. A
+        legacy wrapped item using the ordinary English word "forcing" is not an
+        attempt at the field, and reporting it as one would replace one wrong
+        message with another."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. **Land the retry-wrapper fix.** The pre-push hook is forcing a\n"
+            "   full-tree run on every push, which is the thing to scope.\n"
+            "   Files: `githooks/pre-push`, `scripts/lib/git_mainline.py`.\n"
+        )
+        items = hd.ranked_items(text)
+        assert [i.kind for i in items] == [None]
+        assert items[0].near_miss is None and items[0].fenced is False
+        res = run_tool(repo, update=write_delta(tmp_path, "legacy.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "[no forcing: field]" in res.stderr
+        assert "unparsed" not in res.stderr
+        assert "continuation line counts" in res.stderr, (
+            "the remedy must state the thing the old one did not: where the "
+            "field is allowed to sit"
+        )
+
+    def test_the_block_stops_at_the_next_ranked_item(self) -> None:
+        """A tag belongs to the item it is written under, and to no other. Item 1
+        must NOT borrow item 2's."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "   more about A.\n"
+            "2. Fix B.\n"
+            "   forcing: user — the operator asked on 2026-08-26\n"
+        )
+        assert [i.kind for i in hd.ranked_items(text)] == [None, "user"]
+
+    def test_an_indented_paragraph_after_a_blank_line_is_still_the_item(self) -> None:
+        """The other side of the boundary. A blank line does not end a list item
+        when what follows is indented — that is ordinary markdown, and a handoff
+        item with two paragraphs is a shape the corpus has."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "\n"
+            "   The second paragraph, still item 1.\n"
+            "   forcing: security — the token in the log is live\n"
+        )
+        assert [i.kind for i in hd.ranked_items(text)] == ["security"]
+
+
 class TestRulesIAndJDidNotMoveTheOtherExits:
     """INVARIANT GUARDS — not regression coverage, and labelled so.
 
