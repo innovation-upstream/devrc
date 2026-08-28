@@ -277,10 +277,31 @@ do not renumber again without releasing the live claims first.
    route, not the fork). Both logged `suggest sent ok` from the detached child; no scratch leaked.
    ⚠ The two hosts pulled at different moments, so they carry the detach at different commits
    (`a38360a5` / `6cda752c`) — `drift-check.sh` will report that correctly and it is not a defect.
-3. **Decide the terminal widget (audit finding A4 — still open).** clawgate vendors only two
-   hand-written JS files (~3.7 KB) and no third-party bundle, so xterm.js would be the first.
-   Recommendation on record: ship read-only `capture-pane` rendering first; if adopted, vendor and
-   `go:embed` it, never a CDN — clawgate must work on an offline LAN.
+3. ✅ **DECIDED 2026-08-28 (Zach): read-only `capture-pane` rendering first.** A4 is closed as a
+   decision; the BUILD is blocked on item 4 — see the dependency below.
+
+   🔴 **The premise this item carried for two sessions was FALSE, and it was the whole argument.**
+   It read "clawgate vendors only two hand-written JS files (~3.7 KB) and **no third-party bundle**,
+   so xterm.js would be the first." Measured 2026-08-28: the two hand-written files are real but
+   live at `internal/ui/js/{filter-toggle,tag-normalize}.js`, individually `go:embed`ed — and
+   **`web/static/vendor/` already holds FIVE third-party bundles totalling ~245 KB**
+   (`htmx.min.js` 51 KB, `faro-web-sdk.iife.js` 93 KB, `faro-web-tracing.iife.js` 82 KB,
+   `idiomorph-ext.min.js` 10 KB, `sse.js` 9 KB), every one referenced from the Go-built HTML and
+   swept up by `//go:embed static` in `web/static.go`. So xterm.js would be the **sixth**, and the
+   "no precedent" objection does not exist. Vendoring is a solved, offline-safe pattern here: drop
+   the file in `web/static/vendor/`, reference it, done — no build step, no CDN.
+
+   **The decision survives on a BETTER reason, which this item never connected to itself:** an
+   interactive terminal means `send-keys`, which is **arbitrary command execution as Zach on both
+   machines**. Item 5's fail-closed auth wrapper is then a hard prerequisite, so "vendor xterm.js"
+   is not a library choice — it drags the highest-stakes decision in this project forward. Read-only
+   has no write path and therefore no such coupling.
+
+   🔴 **DEPENDENCY — read-only rendering CANNOT be built before item 4.** Measured against the live
+   deployment 2026-08-28: `hostNetwork/hostPID/hostIPC` all false, `nodeName` null, and the only
+   volume is a PVC — so the pod has no path to a host tmux socket, and `capture-pane` output has to
+   be *delivered* from the host. (The image is distroless with no shell, so probe it via the spec,
+   not `kubectl exec`.) Item 4 is the next buildable thing; item 3 needs no further decisions.
 4. **Host-side tmux agent** (phase 2). `devrc`, a new `systemd.user.services` unit on both hosts
    holding an **outbound** connection to clawgate. Source from `scripts/session-manager --json`,
    which already SSHes to the laptop and runs `list-panes -a` + `list-windows -a` on both hosts —
