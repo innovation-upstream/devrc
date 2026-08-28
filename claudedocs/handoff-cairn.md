@@ -1,4 +1,4 @@
-# Handoff: cairn — 2026-08-26
+# Handoff: cairn — 2026-08-27
 
 ## Run this first — the index, one read-only command
 ```bash
@@ -159,15 +159,58 @@ empty. An unknown kind is withheld too — the fail-closed direction.
    unmeasured the absence is UNMEASURED, and transcripts are still reported.
 3. **Convert the six remaining positional audit reads** —
    `scripts/tests/test_subsystem_store_api.py`. One PR covering all 11 sites, each shown red
-   under a forced `_audit` delay. Repo: `devrc`. 🔴 **Do this AFTER #360 lands** — that card may
-   restructure the file substantially.
-4. **Instrument the Tekton non-fire rather than chase it** — a check that flags "PR has required
-   checks pending with no PipelineRun for that sha". Bounded and useful whether or not the root
-   cause is ever found; chasing one dropped webhook is not. Repo: `homelab-talos`.
+   under a forced `_audit` delay. Repo: `devrc`. 🔴 **STILL BLOCKED, and the debt is GROWING.**
+   `origin/feat/cairn-p3-two-token-auth` is 7 commits and **+2747 lines in that exact file**;
+   measured 2026-08-27, its diff vs `main` ADDS 8 positional `audit[...]` reads and removes 0.
+   So this card must be re-scoped against that branch's merged state, not written now — and the
+   site count in this line is already stale.
+4. ~~**Instrument the Tekton non-fire rather than chase it**~~ — **DONE**, homelab-infra #438
+   (squash `bbc373ed`), `scripts/check-ci-nonfire.py` + 88 tests. 🔴 **THE CARD'S OWN SPEC WAS
+   THE FIRST THING THAT HAD TO GO.** "Flag required checks pending with no PipelineRun for that
+   sha" is v1, and v1 was wrong twice over: a pending status is posted from INSIDE the run
+   (`devrc-ci-pipeline.yaml:244`), so its presence PROVES a run existed; and the runs were absent
+   because the pruner keeps 100 **per pipeline**, so devrc's own horizon was ~37 h while the PR
+   it "caught" was 44 h old. Worse, **v1 could not see its own motivating case** — a genuinely
+   dropped delivery posts NO status, leaving an EMPTY rollup, and v1 matched on PENDING entries.
+   The retraction is a public comment on #438, not an edited body.
 5. **#366** — the supersede decision card, `open`. Repo: `homelab-talos`,
    `containers/clawgate/`.
 
 ## Gotchas / decisions / dead-ends
+- 🔴 **#438 took THIRTEEN adversarial rounds, and the shape of what they found is the lesson.**
+  Rounds 1-5 found behaviour defects. Rounds 6-13 found almost none — what they found instead
+  was **prose claiming coverage it did not provide**, which is the same defect class the tool
+  itself exists to catch, reproduced in the artifact describing the tool. Worth reading before
+  budgeting an audit ladder: the late rounds were NOT waste, they were where the durable record
+  got made honest.
+  - **A degenerate combinator hid three unreachable arms.** `max(horizon, evidence_from)` reads
+    as a choice, but `evidence_from` is the `min` over per-pipeline oldest runs and the horizon
+    is a `max` over a **subset** of those same values — so `horizon >= evidence_from` is a
+    theorem. Replaced with an explicit dominance rule and the invariant PINNED by a test, so
+    redefining either input fails loudly instead of quietly making dead code live.
+  - 🔴 **"Verified in isolation" struck again, and it is the most valuable finding of the run.**
+    `--branch` could go **entirely inert** with the whole suite green: each function was pinned,
+    and nothing pinned that `main` handed the override to both. The harness was complicit — the
+    stub was a kwargs-**swallowing** lambda, so one side of the seam was structurally invisible.
+    **A stub that discards what it was given cannot witness what was passed.**
+  - 🔴 **A commit message described a fix that never landed.** The sentence it claimed to
+    correct was byte-identical across both commits. Worse than the original error: a message is
+    the durable record and asserts a tree state a reader can only disprove by diffing.
+  - 🔴 **I overturned a CORRECT audit using a "mutant" that was an INSERTION.** The path I
+    "mutated" held no expression to mutate — the guard short-circuits before it — so my ternary
+    ADDED a branch, killed by crashing rather than by any assertion, and no operator generates
+    it. 803 operator-generated mutants: zero unique to the test I was defending. **Ask whether
+    your mutant is a perturbation of code that exists.**
+  - **Two agent reports were confidently wrong** in ways I would have propagated had I not
+    re-measured: one on which test carries unique load, one on a "no coverage gap". Re-run an
+    auditor's mutation results; the rule earned its keep twice here.
+  - **A positive control can be INERT.** Adding defaults to keyword-only params every caller
+    passes mutates nothing, so its "SURVIVED" was a fact about my control, not the harness.
+  - **Suite-size literals in prose rot.** "survives all 86 tests" went stale inside one commit.
+    Say "the whole suite"; same for absolute totals (687 → 850 → 857 → 886 → 892 in three days).
+  - **Detection power was quantified rather than assumed**: 5 of 7 repos have no at-cap
+    pipeline, and 3 are effectively silent (bounds hours old). Stated in the tool, the PR body
+    and the code — it is the number that decides whether this keeps earning its keep.
 - 🔴 **The store-api retirement was proposed and CLOSED by the operator** (devrc #849,
   homelab-infra #404, both `mergedAt=null`). The pivot: clawgate task **#360** makes the hosted
   store the single datastore and ships the missing phase-2 CLI + phase-3 append write path.
