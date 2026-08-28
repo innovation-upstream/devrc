@@ -85,7 +85,7 @@ ROWS=0
 # 🔴 A SUITE THAT NEVER RAN YIELDS ZERO `FAILED` LINES, i.e. "clean", so a
 # harness wired to nothing would score every mutant SURVIVED and every SURVIVES
 # control ok. Count the tests that ran and refuse below a floor. The floor
-# catches COLLAPSE, not growth — deliberately far under the real count (215).
+# catches COLLAPSE, not growth — deliberately far under the real count (222).
 MIN_TESTS=180
 failing() {
   local out n f total
@@ -194,14 +194,60 @@ run 'declared-means-merely-present' test_a_kind_outside_the_vocabulary_is_refuse
   's|return self.kind in FORCING_KINDS|return self.kind is not None|'
 run 'external-set-includes-none' test_none_is_in_the_vocabulary_but_not_in_the_external_set \
   's|FORCING_KINDS - {"none"}|FORCING_KINDS \| frozenset()|'
+# ⚠ RE-AIMED. This row used to mutate `ranked_items`' own `_unfenced` loop; the
+# fence check moved into `_item_blocks` when the search widened to the whole
+# item, and the `MUTATION DID NOT APPLY` control caught it on the first run
+# rather than scoring the stale row `ok` against an unmutated file.
 run 'ranked-items-not-fence-aware' test_a_numbered_line_inside_a_FENCE_is_not_a_ranked_item \
-  's|for _idx, line in _unfenced(section_body):|for _idx, line in enumerate(section_body.splitlines()):|'
+  's|visible = {idx for idx, _ln in _unfenced(section_body)}|visible = set(range(len(all_lines)))|'
 run 'ranked-items-ignore-the-heading' test_items_outside_a_next_steps_heading_are_not_asked \
   's|if not heading_text(heading).lower().startswith(NEXT_STEPS_PREFIX):|if False:|'
 run 'nested-sub-items-counted-as-ranks' test_a_nested_numbered_line_is_not_a_rank \
   's|r"\^ {0,3}(\\d+)\[.)\]|r"^ *(\\d+)[.)]|'
 run 'self-generated-block-suppressed' test_forcing_none_is_ACCEPTED_and_reported \
   's|none_items = \[i for i in items if i.kind == "none"\]|none_items = []|'
+
+printf '\n== rule (j): the field is found on the WHOLE ITEM (must be KILLED) ==\n'
+# 🔴 THE REVERT ROW. Collapses the item block back to its numbered line — the
+# defect this change fixed. Narrowest expression that can be wrong: the walk's
+# upper bound, leaving the boundary logic below it untouched so the next row
+# still isolates that half.
+run 'block-collapsed-to-the-numbered-line' \
+  test_the_observed_refusal_of_two_correctly_tagged_items_is_gone \
+  's|for i in range(start + 1, limit):|for i in range(start + 1, start + 1):|'
+# 🔴 THE BOUNDARY, ISOLATED FROM THE WALK. Removing only the break gives the
+# NAIVE block — numbered line to the next numbered line — which silently tags
+# the last item from a copied boilerplate paragraph. Without this row, "why not
+# just run to the next item" is an unanswered question in the diff.
+run 'naive-block-boundary' test_trailing_boilerplate_does_not_tag_the_last_item \
+  's|if blanked and not line.startswith((" ", "\\t")):|if False:|'
+# The other side of that boundary, and ISOLATED FROM THE ROW ABOVE: keep the
+# blank-line test, drop only the INDENT test, so a blank line ends the item
+# whatever follows it. A two-paragraph item is a shape the corpus has.
+run 'a-blank-line-ends-the-item' \
+  test_an_indented_paragraph_after_a_blank_line_is_still_the_item \
+  's|if blanked and not line.startswith((" ", "\\t")):|if blanked:|'
+# The fenced lines must stay OUT of the item's own text. Feeding them back in
+# would make a pasted sample a declaration.
+run 'fenced-lines-counted-as-the-item' \
+  test_a_field_inside_a_FENCE_still_does_not_count_and_says_why \
+  's|                hidden.append(line)|                own.append(line)|'
+# …and the diagnosis half of the same case: the field IS in the file, so the
+# refusal must not claim absence.
+run 'fenced-field-not-diagnosed' \
+  test_a_field_inside_a_FENCE_still_does_not_count_and_says_why \
+  's|                    any(_FORCING.search(ln) for ln in hidden),|                    False,|'
+# 🔴 THE MESSAGE HALF. `_FORCING_ATTEMPT` never fires ⇒ a near-miss is reported
+# as `[no forcing: field]` under a remedy the author already satisfied, which is
+# the unrecoverable refusal this whole change exists to end.
+run 'near-miss-never-detected' \
+  test_a_near_miss_is_REFUSED_and_NAMED_never_called_absent \
+  's|next((ln.strip() for ln in own if _FORCING_ATTEMPT.search(ln)), None),|None,|'
+# The admitted spelling. `**forcing:** gate` is accepted BECAUSE the vocabulary
+# is closed; deleting the markup class is the decision reverted.
+run 'markup-between-key-and-colon-rejected' \
+  test_an_accepted_spelling_on_a_continuation_line_counts \
+  's|^_MARKUP = r"\[\*_`~\]{0,3}"|_MARKUP = r""|'
 
 printf '\n== controls ==\n'
 # 🔴 POSITIVE CONTROL — a mutant to a PRE-EXISTING guard (rule d) that the suite
