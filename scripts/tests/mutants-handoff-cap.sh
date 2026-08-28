@@ -338,6 +338,40 @@ run 'near-miss-kind-LEADING-anchor-DELETED' \
   test_a_longer_word_around_the_KIND_is_not_a_near_miss_either \
   "s@rf\"(?<!\[A-Za-z0-9\])(?:{'|'.join(sorted(FORCING_KINDS))})(?!\[A-Za-z0-9\])\"@rf\"(?:{'|'.join(sorted(FORCING_KINDS))})(?!\[A-Za-z0-9\])\"@"
 
+# 🔴 THE COMMENT'S OWN GUARD, ONE ROW PER ASSERTION. Round 4 rewrote the comment
+# above `_FORCING` and `test_the_comment_still_states_the_ASCII_scope` gained
+# three assertions over it, none of which any row showed reachable — the vacuous-
+# guard shape this battery exists to refuse. The rows above pin the BEHAVIOUR of
+# the widening; these pin the RECORD of it, and `claude/RULES.md` is explicit
+# that a comment is a claim too. ⚠ They are also the reason `comment-reword-
+# control` below is scoped to an UNPINNED comment: some comment text here IS
+# behaviour the suite asserts, and that control must stay a control.
+#
+# 🔴 ONE CLAUSE EACH, DELIBERATELY. A mutant that gutted the paragraph would die
+# to whichever of the three assertions runs first and prove nothing about the
+# other two — the same isolation argument as the anchor rows above.
+#
+# (a) The ASCII caveat re-narrowed off the other four lookaround positions —
+# verbatim the wording the comment carried at `6a862d8c`, when it claimed for the
+# leading key alone a hole that all five positions have.
+run 'ascii-scope-narrowed-off-every-position' \
+  test_the_comment_still_states_the_ASCII_scope \
+  's|OF THAT CLAIM, AT EVERY POSITION, AND THE|OF THAT CLAIM AND THE|'
+# (b) The SHAPE claim demoted back to a list. An enumeration of examples is what
+# undercounted the admissions twice, so "stated by POSITION, not by examples" is
+# the property the assertion owns; this reverts it and leaves (a)'s clause and
+# (c)'s refused literal untouched.
+run 'admissions-restated-as-a-list' \
+  test_the_comment_still_states_the_ASCII_scope \
+  's|THE ADMISSIONS ARE A GRID, NOT A LIST|THE ADMISSIONS ARE ENUMERATED BELOW|'
+# (c) The RETIRED COUNT put back. The only `not in` assertion of the three, so
+# the only mutant here that ADDS text rather than removing it. The count went
+# stale twice (four named, ten measured); a comment that re-states one machine-
+# enforces a number already known wrong.
+run 'retired-count-back-in-the-comment' \
+  test_the_comment_still_states_the_ASCII_scope \
+  's|# undercounted here twice\.|# undercounted here twice — FOUR ADMISSIONS, NOT ONE.|'
+
 printf '\n== the refusals stay CLEARABLE: remedy + legend (must be KILLED) ==\n'
 # 🔴 THE ROW THAT WAS MISSING, AND ITS ABSENCE WAS MEASURED. Reverting
 # `FENCED_FIELD_REMEDY` to the bare "move it out of the fence" left the WHOLE
