@@ -519,11 +519,29 @@ SECTION_DIRECTIVES = (
     # The first sentence names the CLONE as well as the worktree because that
     # is the tree the recipe actually writes to: `git -C <clone> worktree add`
     # is a write to the clone, before the worktree it grants exists.
+    #
+    # 🔴 ROUND 10 — BUT IT GRANTED FAR MORE THAN THE RECIPE NEEDS, AND IN THE
+    # ONE TREE WITH REAL BLAST RADIUS. Round 8 widened "fetching and checking
+    # out inside IT" to "inside EITHER", i.e. into the clone — while the recipe
+    # three lines above spells that clone `<your local clone of owner/name>`,
+    # which on this host resolves in practice to `~/workspace/<repo>`, a
+    # long-lived tree other sessions are working in. `worktree add` is the only
+    # write the recipe performs there; `fetch` and `checkout` are exactly the
+    # cross-session writes the `no-fetch` clause exists to prevent, and this
+    # directive was authorising them by name.
+    #
+    # "The clone YOU made" arguably excludes those trees already — but nothing
+    # in the brief disambiguated it and the placeholder invites the
+    # substitution, so the grant is stated as the OPERATION it covers rather
+    # than as an adjective on the tree. The forward-reference sentence is
+    # unchanged and still spells `NO_WRITE_SCOPE`.
     Directive(
         "own-worktree-is-writable",
-        "That worktree is YOURS, and so is the clone you made it from: "
-        "fetching and checking out inside either is fine. The no-write rule "
-        "below is about every checkout you did not make.",
+        "That worktree is YOURS: fetching and checking out inside it is fine. "
+        "In the clone you made it from, `git worktree add` is the ONLY write "
+        "this brief asks for — do not `fetch`, `pull` or `checkout` there, "
+        "whoever made it, because other sessions may be standing in it. The "
+        "no-write rule below is about every checkout you did not make.",
     ),
 )
 
@@ -870,8 +888,19 @@ Facts = namedtuple(
     "Facts",
     "pr repo title base_ref url round_no cwd_repo_dir cwd_repo_slug repo_relation "
     "worktree branch dirty prev_sha emit_from claims claims_round checklist "
-    "ledger assembled_at claims_source head_check",
+    "ledger assembled_at claims_source head_check base_assumed",
 )
+# 🔴 `base_assumed` — ROUND 10's SEVENTH INSTANCE, found by the sweep round 9's
+# auditor asked for and not by a finding. `base_ref` is
+# `data.get("baseRefName") or "main"`: a DEFAULT, and every site printing it
+# presented it as a MEASUREMENT. Measured at `706a6b38` with `baseRefName`
+# absent, rc 0 and silent stderr, THE LEDGER's cross-repo hand-over read
+# "…where `origin/main` names THAT repository's base branch and not this
+# checkout's" — an assertion about a repository nothing was asked about.
+# `--claims-file` mode reaches it on EVERY run: it consults no `gh` and
+# hardcodes `baseRefName: "main"`, exactly as it hardcodes no `headRefOid`,
+# and that second omission already carries a reason string while this one did
+# not. Same shape as finding A one field over.
 # 🔴 `prev_sha` and `emit_from` are TWO ANCHORS out of ONE `audited=` field, and
 # they are deliberately separate fields rather than one: `prev_sha` is
 # `range_anchor` (what this round DIFFS FROM) and `emit_from` is `emit_anchor`
@@ -1387,6 +1416,20 @@ def render_claims(facts):
     return "\n".join(lines)
 
 
+# 🔴 THE ONE SPELLING OF "this script never learned the PR's head commit".
+# Written into a rev spec by `range_tip` and into an `audited=` header by
+# `--emit-claims`, and it is NOT a sha: every site that PRINTS it has to say so,
+# which is what `range_tip_is_a_sha` and `unresolved_tip_note` below are for.
+# Open-coded at the two sites it was one reword away from two different
+# placeholders, only one of which any guard could recognise.
+TIP_PLACEHOLDER = "<the PR's head sha>"
+
+# 🔴 `facts.repo` when NOTHING answered which repository the PR lives in. A
+# sentinel and not a slug, so no command may interpolate it: `gh pr view 900
+# --repo UNKNOWN (not reported by ...)` is a shell error, not a lookup.
+REPO_UNKNOWN = "UNKNOWN (not reported by `gh`; pass --repo owner/name)"
+
+
 def range_tip(facts):
     """🔴 The commit the delta range ENDS at — ONE PREDICATE, ONE PLACE.
 
@@ -1413,7 +1456,120 @@ def range_tip(facts):
     hc = facts.head_check
     if hc is not None and hc.ok:
         return hc.local_sha
-    return hc.pr_sha if (hc is not None and hc.pr_sha) else "<the PR's head sha>"
+    return hc.pr_sha if (hc is not None and hc.pr_sha) else TIP_PLACEHOLDER
+
+
+def range_tip_is_a_sha(facts):
+    """Does `range_tip` name a COMMIT, or the literal placeholder?
+
+    🔴 ROUND 10 — THE TIP END OF ROUND 8's REFUSAL 1b, AND IT IS THE SAME
+    DEFECT. `range_tip` answers `TIP_PLACEHOLDER` whenever the PR's head sha was
+    never learned — a state this script MODELS, with its own reason string — and
+    two sites interpolate that answer straight into a git rev spec: THE RANGE's
+    ``Diff `<anchor>..<tip>` `` and THE LEDGER's cross-repo hand-over. Measured
+    at `706a6b38`, cross-repo + no `headRefOid`, rc 0 and silent stderr:
+
+        Diff **`28492af2..<the PR's head sha>`**
+        …
+        So the range above names the PR's head SHA outright — read from
+        `gh pr view --json headRefOid` …
+
+    two sentences after the brief's own explanation that this run never learned
+    that field, and under THE LEDGER's "THE ATTRIBUTION GATE IS YOURS THIS
+    ROUND — it is not optional" the same token appears inside a `git log` the
+    auditor is told to run. `newest is not None` was read as "we have an
+    anchor"; `repo_relation == "cross"` was read as "we have a tip". Both are
+    the same mistake — a WEAKER fact read as a STRONGER one.
+    """
+    return range_tip(facts) != TIP_PLACEHOLDER
+
+
+def unresolved_tip_note(facts, with_reason=True):
+    """The block EVERY site printing `range_tip` must carry when it is no sha.
+
+    🔴 ONE RULE, ONE PLACE, THREE CONSUMERS — THE RANGE's cross-repo branch,
+    THE RANGE's could-not-verify branch, and THE LEDGER's cross-repo hand-over.
+    Open-coded it would be right at the site the finding was filed against and
+    absent at the siblings, which is the shape rounds 3, 5, 7, 8 and 9 each
+    found somewhere else in this module.
+
+    Empty string when the tip IS a sha, so a caller can concatenate it
+    unconditionally and cannot forget the conditional. `with_reason=False` for
+    the callers that have ALREADY printed `hc.reason` a few lines above — both
+    RANGE branches do; the same string twice in a row reads as two different
+    facts. THE LEDGER's hand-over prints it nowhere else, so it takes the
+    default.
+    """
+    if range_tip_is_a_sha(facts):
+        return ""
+    hc = facts.head_check
+    lookup = f"gh pr view {facts.pr} --json headRefOid"
+    if facts.repo != REPO_UNKNOWN:
+        lookup += f" --repo {facts.repo}"
+    reason = (
+        f"\n\n    {hc.reason if hc is not None else 'no check was made'}\n\n"
+        if with_reason else " "
+    )
+    return (
+        "🔴 **THE TIP OF THAT RANGE IS A PLACEHOLDER, NOT A SHA — the range as "
+        "printed CANNOT BE RUN, and neither can any command below that repeats "
+        f"it.** `{TIP_PLACEHOLDER}` is literal text, not a commit: this run "
+        "never learned the PR's head."
+        + reason
+        + f"Resolve it yourself — `{lookup}` — and substitute the sha "
+        "everywhere this brief spells that placeholder before diffing or "
+        "measuring anything. A command carrying it is not a command that "
+        "returned zero; it is one that never ran."
+    )
+
+
+def assumed_base_note(facts):
+    """The block every site printing `base_ref` must carry when it was GUESSED.
+
+    Empty when the PR's base branch was actually read, so a caller concatenates
+    it unconditionally — the same shape as `unresolved_tip_note`, and for the
+    same reason: a conditional a caller has to remember is one a caller forgets
+    at the second site.
+    """
+    if not facts.base_assumed:
+        return ""
+    return (
+        "🔴 **THAT BASE BRANCH WAS ASSUMED, NOT READ.** `gh` reported no "
+        f"`baseRefName` for this PR, so `{facts.base_ref}` is this script's "
+        "DEFAULT and not a fact about the PR. The base is what the PR is "
+        "diffed against and — from round 2 — what `--not <base>` subtracts "
+        "when the payload figure is measured, so a wrong one silently changes "
+        "what you read, at rc 0. Check the PR's real base branch before "
+        "believing any figure derived from it."
+    )
+
+
+def cross_repo_holds_neither_end(facts):
+    """This checkout holds NEITHER end of the range — ONE PREDICATE, ONE PLACE.
+
+    🔴 ROUND 10 — TWO CONSUMERS, AND THE SECOND ONE DID NOT ADOPT THE FIRST'S
+    ORDERING. `render_range`'s cross-repo branch is ordered after the `hc.ok`
+    branch on purpose, and its comment says why: `repo_relation` compares
+    SLUGS, and a clone whose `origin` names a different repository can still
+    hold the PR's head commit (a renamed remote, a mirror). The sha is the
+    ground truth. `render_ledger` asked `repo_relation == "cross"` alone.
+
+    Measured at `706a6b38` in exactly that state (cross-repo PR, the assembly
+    checkout standing on the PR's head, round 3, rc 0, silent stderr): the
+    ledger MEASURED — 4 commits, 13 added, 2 deleted — and threw the numbers
+    away to print "which holds neither end of the range", two bars under THE
+    RANGE's "verified at assembly time to be PR #900's head commit". Every
+    clause of that sentence was false and the two sections contradicted each
+    other inside one document.
+
+    So the question both sites ask is this one, and it asks the head check
+    FIRST: claim the structural impossibility only once the sha comparison has
+    actually failed.
+    """
+    hc = facts.head_check
+    if hc is not None and hc.ok:
+        return False
+    return facts.repo_relation == "cross"
 
 
 def render_range(facts):
@@ -1426,7 +1582,7 @@ def render_range(facts):
             "description.",
             "",
             f"Base branch: `{facts.base_ref}`.",
-        ])
+        ] + (["", assumed_base_note(facts)] if facts.base_assumed else []))
     # 🔴 `..HEAD` is only meaningful once HEAD has been shown to BE the PR's
     # head. Unverified, the range handed to the auditor points at whatever tree
     # the shared checkout happens to be standing on — reproduced against an
@@ -1510,7 +1666,26 @@ def render_range(facts):
     # can still hold the PR's head commit (a clone with a renamed remote, a
     # mirror). The sha is the ground truth; this branch only claims the
     # structural impossibility once the sha comparison has actually failed.
-    elif facts.repo_relation == "cross":
+    #
+    # 🔴 ROUND 10 — AND IT ASKS THAT ORDERING THROUGH A SHARED PREDICATE NOW.
+    # `render_ledger` re-derived the same decision from `repo_relation` alone
+    # and got it wrong for the renamed-remote clone; see
+    # `cross_repo_holds_neither_end`.
+    elif cross_repo_holds_neither_end(facts):
+        # 🔴 ROUND 10 — THE SECOND SENTENCE IS CONDITIONAL, BECAUSE THE FACT IT
+        # ASSERTS IS. "the range above names the PR's head SHA outright" was
+        # unconditional, and `range_tip` hands out a PLACEHOLDER whenever the
+        # head sha was never learned — so the brief said "read from `gh pr view
+        # --json headRefOid`" two sentences after explaining that this run never
+        # read that field.
+        tail = (
+            "So the range above names the PR's head SHA outright — read from "
+            "`gh pr view --json headRefOid`, not resolved in any tree. Both of "
+            "its ends exist in YOUR worktree, the one WHERE TO WORK told you to "
+            "make, and neither exists here."
+            if range_tip_is_a_sha(facts)
+            else unresolved_tip_note(facts, with_reason=False)
+        )
         note = (
             "🔴 **THIS CHECKOUT CANNOT BE STANDING ON THE PR — that is "
             "STRUCTURAL AND PERMANENT, not a checkout that moved.** WHERE TO "
@@ -1521,12 +1696,13 @@ def render_range(facts):
             "not go looking for one, and do not report this as a finding "
             "against the PR:\n\n"
             f"    {hc.reason if hc is not None else 'no check was made'}\n\n"
-            "So the range above names the PR's head SHA outright — read from "
-            "`gh pr view --json headRefOid`, not resolved in any tree. Both of "
-            "its ends exist in YOUR worktree, the one WHERE TO WORK told you to "
-            "make, and neither exists here."
+            + tail
         )
     else:
+        # 🔴 ROUND 10 — THE PLACEHOLDER REACHES THIS BRANCH TOO. It is the
+        # SAME-REPO spelling of the same state (no `headRefOid`), and the
+        # widest reading of the finding is about `range_tip`'s answer, not
+        # about the cross-repo branch that happened to be filed against.
         note = (
             "🔴 **COULD NOT VERIFY that this checkout is standing on the PR**, "
             "so `..HEAD` is NOT used above — it would name whatever tree the "
@@ -1535,6 +1711,12 @@ def render_range(facts):
             "Resolve the range in a tree that CONTAINS the PR's head before "
             "trusting any number derived from it."
         )
+        # `with_reason=False` for the same reason the cross branch passes it:
+        # `hc.reason` is already printed four lines above, and the same string
+        # twice in a row reads as two different facts.
+        tip_note = unresolved_tip_note(facts, with_reason=False)
+        if tip_note:
+            note += "\n\n" + tip_note
     return "\n".join([
         "## THE RANGE",
         "",
@@ -1553,6 +1735,7 @@ def render_range(facts):
         "",
         f"Base branch: `{facts.base_ref}`.",
         "",
+    ] + ([assumed_base_note(facts), ""] if facts.base_assumed else []) + [
         directive("delta-regressions"),
     ])
 
@@ -1714,7 +1897,25 @@ def render_ledger(facts):
     # WHERE it must run, and says out loud that the gate is the auditor's to
     # compute this round. Ordered before every other branch except round 1,
     # which has no ledger for a reason that has nothing to do with repos.
-    if facts.round_no >= 2 and facts.repo_relation == "cross":
+    #
+    # 🔴 ROUND 10 — AND IT NOW ASKS `cross_repo_holds_neither_end`, NOT
+    # `repo_relation` ALONE. `render_range`'s comment already said why the
+    # cross-repo branch must be ordered after the head check: the relation
+    # compares SLUGS, and a renamed remote or a mirror can name a different
+    # repository while holding the PR's head commit. This site did not adopt
+    # that ordering, so in exactly that state it DISCARDED a successful
+    # measurement to print "which holds neither end of the range" — under a
+    # RANGE section that had just said "verified at assembly time". One rule,
+    # two places, wrong at the second.
+    if facts.round_no >= 2 and cross_repo_holds_neither_end(facts):
+        # 🔴 ROUND 10 — THE HAND-OVER IS THE LOUDEST COMMAND IN THE BRIEF ("it
+        # is not optional and nobody else can compute it") and it repeats
+        # `range_tip`, so when that tip is a PLACEHOLDER the auditor is handed a
+        # `git log` that cannot run, under a banner telling them it is
+        # mandatory. The note goes IMMEDIATELY above the fence, not at the end
+        # of the section, because the fence is what gets copied.
+        tip_note = unresolved_tip_note(facts)
+        base_note = assumed_base_note(facts)
         return "\n".join(lines + [
             "🔴 **NOT MEASURABLE FROM HERE — and that is STRUCTURAL, so it is "
             "true of every round of this PR and not a failure of this run.** "
@@ -1732,6 +1933,9 @@ def render_ledger(facts):
             f"of YOUR clone of `{facts.repo}`, where `{facts.base_ref}` names "
             "THAT repository's base branch and not this checkout's:",
             "",
+        ] + ([tip_note, ""] if tip_note else []) + (
+            [base_note, ""] if base_note else []
+        ) + [
             "```",
             "git -C <your worktree> log --numstat --format= --remerge-diff "
             f"{facts.prev_sha}..{range_tip(facts)} --not {facts.base_ref}",
@@ -1830,7 +2034,7 @@ def render_ledger(facts):
         "a checkout it does not own), so a stale base re-reports upstream work "
         "as this round's payload. If the number looks large, that is the first "
         "thing to check.",
-    ]
+    ] + ([""] + [assumed_base_note(facts)] if facts.base_assumed else [])
     if led.cumulative is None:
         # 🔴 TWO mechanisms, and they need opposite fixes: there was no anchor
         # sha to measure from, or there WAS one and the measurement failed. The
@@ -2384,10 +2588,42 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         repo_relation = "same" if pr_repo == cwd_slug else "cross"
     else:
         repo_relation = "unknown"
-    repo = pr_repo or "UNKNOWN (not reported by `gh`; pass --repo owner/name)"
+    repo = pr_repo or REPO_UNKNOWN
 
     blocks, malformed = parse_claims_blocks(comment_texts)
     newest = newest_block(blocks)
+
+    # 🔴 ROUND 10 — A REFUSAL THAT PRESCRIBES A COMMAND MUST NOT REFUSE THAT
+    # COMMAND. Both refusals below hand the operator a `--emit-claims` re-run as
+    # their mechanical remedy, and both then refused it, byte for byte, because
+    # the refusal is ordered before the emit half and reads the SAME unreadable
+    # block. Measured at `706a6b38`:
+    #
+    #   REFUSAL 1b, over a `round=2` block whose header is `audited=..`
+    #     `… 900 --round 3`                                   -> rc 2
+    #     `… 900 --round 2 --emit-claims --audited abc12345`  -> rc 2, the same
+    #                                                            refusal, empty
+    #                                                            stdout
+    #   REFUSAL 1, at round 3 with no block at all
+    #     `… 900 --round 3`                                   -> rc 2
+    #     `… 900 --round 2 --emit-claims`                     -> rc 2
+    #
+    # (REFUSAL 1's remedy is sound at round 2 — `--round 1 --emit-claims` needs
+    # no block. It is unrunnable from round 3 up, and the operator reads the
+    # repeat as their own typo.)
+    #
+    # The two halves of a run are INDEPENDENT: rendering a DELTA brief needs an
+    # anchor to diff from, and emitting a block needs only a head sha and a
+    # `<from>` the operator supplies. So the refusal keeps its scope — no brief
+    # is emitted and the rc is unchanged — and the run CONTINUES to the emit,
+    # printing the very block the remedy promised. Ordered this way rather than
+    # by rewriting the remedy into prose, for the reason every other refusal
+    # here cites: a mechanical path a machine can run beats a sentence a human
+    # has to interpret.
+    #
+    # `brief_refused` doubles as the return code, so an emit-side refusal
+    # (rc 4) still wins — it is a different failure and needs a different fix.
+    brief_refused = None
 
     # ------------------------------------------------------------------ #
     # 🔴 REFUSAL 1 — a delta round with nothing to be framed on.
@@ -2422,11 +2658,15 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             "would then read as covered. So this is refused, not emitted.",
             "",
             f"  Fix: run `audit-dispatch.py {args.pr} --round "
-            f"{args.round_no - 1} --emit-claims`, fill the skeleton in, and "
-            "post it as a comment on the PR. Or run this round as an explicit "
-            "first, full audit with no --round.",
+            f"{args.round_no - 1} --emit-claims --audited <the tip that round "
+            "read>`, fill the skeleton in, and post it as a comment on the PR. "
+            "That run refuses its own brief for this same reason and STILL "
+            "prints the block — the two halves are independent. Or run this "
+            "round as an explicit first, full audit with no --round.",
         ]), file=err_stream)
-        return 2
+        if not args.emit_claims:
+            return 2
+        brief_refused = 2
 
     # 🔴 A structural problem that still yielded a usable block must not be
     # silent either. The refusal above only fires when there is NO block, so a
@@ -2501,9 +2741,14 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             "<from>..<to>`, or re-run "
             f"`audit-dispatch.py {args.pr} --round {newest.round_no} "
             "--emit-claims --audited <the tip that round read>` and post the "
-            "block it prints.",
+            "block it prints. That run refuses its own brief for this same "
+            "reason — it reads the same unreadable header — and STILL prints "
+            "the block, because emitting one needs the sha you just supplied "
+            "and nothing from the comment.",
         ]), file=err_stream)
-        return 2
+        if not args.emit_claims:
+            return 2
+        brief_refused = 2
 
     # 🔴 `--audited` OVERRIDES THE WRITER'S ANCHOR AND NEVER THE READER'S. It
     # states the tip THIS round's audit read — the same quantity `emit_anchor`
@@ -2556,7 +2801,11 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
     )
 
     ledger = None
+    # 🔴 ROUND 10 — THE DEFAULT IS RECORDED, not silently indistinguishable from
+    # a reading. `or "main"` is a guess, and `--not <base>` is what decides which
+    # commits count as this round's payload.
     base_ref = data.get("baseRefName") or "main"
+    base_assumed = not data.get("baseRefName")
     base_for_range = f"origin/{base_ref}"
     if args.round_no >= 2 and prev_sha:
         ledger = measure_ledger(
@@ -2597,42 +2846,50 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         assembled_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%MZ"),
         claims_source=claims_source,
         head_check=head_check,
+        base_assumed=base_assumed,
     )
 
-    brief = render_brief(facts)
+    # 🔴 THE REFUSAL'S SCOPE IS THE BRIEF, AND ONLY THE BRIEF. A refused run
+    # renders nothing, writes no `--out` file and runs no clause check over a
+    # document that does not exist — it falls straight through to the emit half
+    # below, which is the remedy the refusal just prescribed.
+    if brief_refused is None:
+        brief = render_brief(facts)
 
-    if args.out:
-        Path(args.out).write_text(brief, encoding="utf-8")
-        print(f"wrote {len(brief):,} chars to {args.out}", file=err_stream)
-    else:
-        print(brief, file=out_stream)
+        if args.out:
+            Path(args.out).write_text(brief, encoding="utf-8")
+            print(f"wrote {len(brief):,} chars to {args.out}", file=err_stream)
+        else:
+            print(brief, file=out_stream)
 
-    # ------------------------------------------------------------------ #
-    # REFUSAL 2's opposite number: WARN, never block.
-    # ------------------------------------------------------------------ #
-    # 🔴 Checked against what is ON DISK when there is a disk copy, not against
-    # the string just built. Checking the in-memory brief could only ever pass:
-    # it was rendered FROM `INVARIANT_CLAUSES` a few lines earlier, so every
-    # clause was present by construction and this warning was unreachable for
-    # any input a user could supply. The read-back also catches a write that
-    # lost bytes. `--check FILE` is the other real input.
-    checked_what, checked_text = "the assembled brief", brief
-    if args.out:
-        try:
-            checked_text = Path(args.out).read_text(encoding="utf-8")
-            checked_what = args.out
-        except OSError as e:
-            print(f"⚠ could not re-read {args.out} to check it: {e}",
-                  file=err_stream)
-    gone = missing_clauses(checked_text)
-    if gone:
-        print(
-            f"⚠ {checked_what} is missing invariant clause(s): "
-            + ", ".join(gone)
-            + "\n  This is a WARNING, not a refusal — the brief is still "
-              "emitted. Re-add them by hand, or re-run without --out edits.",
-            file=err_stream,
-        )
+        # -------------------------------------------------------------- #
+        # REFUSAL 2's opposite number: WARN, never block.
+        # -------------------------------------------------------------- #
+        # 🔴 Checked against what is ON DISK when there is a disk copy, not
+        # against the string just built. Checking the in-memory brief could
+        # only ever pass: it was rendered FROM `INVARIANT_CLAUSES` a few lines
+        # earlier, so every clause was present by construction and this warning
+        # was unreachable for any input a user could supply. The read-back also
+        # catches a write that lost bytes. `--check FILE` is the other real
+        # input.
+        checked_what, checked_text = "the assembled brief", brief
+        if args.out:
+            try:
+                checked_text = Path(args.out).read_text(encoding="utf-8")
+                checked_what = args.out
+            except OSError as e:
+                print(f"⚠ could not re-read {args.out} to check it: {e}",
+                      file=err_stream)
+        gone = missing_clauses(checked_text)
+        if gone:
+            print(
+                f"⚠ {checked_what} is missing invariant clause(s): "
+                + ", ".join(gone)
+                + "\n  This is a WARNING, not a refusal — the brief is still "
+                  "emitted. Re-add them by hand, or re-run without --out "
+                  "edits.",
+                file=err_stream,
+            )
 
     if args.emit_claims:
         # 🔴 The PR's OWN head, never the shared checkout's. This sha is what
@@ -2642,7 +2899,7 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         # audited.
         head_sha = (data.get("headRefOid") or "")[:8]
         if not head_sha:
-            head_sha = "<the PR's head sha>"
+            head_sha = TIP_PLACEHOLDER
             print(
                 "⚠ --emit-claims could not read the PR's head sha "
                 "(`headRefOid`), so the block below carries a PLACEHOLDER. "
@@ -2745,7 +3002,18 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         print("Paste this into the PR comment for this round, so the NEXT "
               "round can read it:\n", file=out_stream)
         print(skeleton, file=out_stream)
-    return 0
+        if brief_refused is not None:
+            # 🔴 SAID AT THE POINT THE OPERATOR IS LOOKING, not only in the
+            # refusal scrolled off above: this run printed a BLOCK and no
+            # BRIEF, and it exits non-zero for the brief it withheld.
+            print(
+                "⚠ this run emitted the block above and NO BRIEF — the "
+                "refusal printed earlier still stands and it exits "
+                f"{brief_refused}. Post the block, then re-run the round you "
+                "actually wanted.",
+                file=err_stream,
+            )
+    return brief_refused if brief_refused is not None else 0
 
 
 if __name__ == "__main__":

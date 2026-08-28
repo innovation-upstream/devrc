@@ -83,20 +83,28 @@ HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
 # `mutants-audit-ladder.sh`. A suite that never ran yields zero FAILED lines,
 # i.e. "clean", so a harness wired to nothing would score every mutant SURVIVED.
 #
-# 🔴 RAISED IN ROUND 8, 50 -> 95, and the drift story is the reason it was 50.
-# It was set when the suite held 58 tests and never moved; against today's 100
-# it would pass a run that collected barely half the module — a state that
+# 🔴 RAISED IN ROUND 8, 50 -> 97, and the drift story is the reason it was 50.
+# It was set when the suite held 58 tests and never moved; against round 8's
+# 102 it would pass a run that collected barely half the module — a state that
 # silently drops whole classes of guard while every remaining row still reports
 # a verdict. Derived from the current measurement the way this repo derives
-# every other floor, `m - min(50, max(1, m // 20))` with m = 102 counted from
-# the harness's own positive-control line, NOT hand-picked.
+# every other floor, `m - min(50, max(1, m // 20))`, with `m` COUNTED from the
+# harness's own positive-control line and NOT hand-picked.
+#
+# 🔴 ROUND 10 RAISED IT AGAIN, 97 -> 104, at m = 109. And round 8's comment
+# here was WRONG IN BOTH ITS NUMBERS — it said "50 -> 95" and "against today's
+# 100" three lines above `MIN_TESTS = 97` and beside its own correct `m = 102`.
+# The stated derivation from the stated `m` gave 97; neither figure in the
+# prose was ever the constant. Exactly the drift this file exists to refuse,
+# in the file whose thesis is that unre-run arithmetic rots. Re-derive by
+# COUNTING, never by adding this round's new tests to the last sentence.
 #
 # 🔴 IT IS A COLLAPSE FLOOR, SO IT COMPARES `passed + failed`, NOT `passed`. A
 # mutant is SUPPOSED to make tests fail; what this refuses is a run that
 # COLLECTED too few. A floor that tracks the suite has to be re-derived when
 # the suite grows — the alternative is the one measured above, a number nobody
 # updated for four rounds while the thing it protects doubled.
-MIN_TESTS = 97
+MIN_TESTS = 104
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -121,28 +129,8 @@ HOLE = "HOLE"
 # Mutations. Each takes the script source and returns it changed, or raises.
 # --------------------------------------------------------------------------- #
 
-def drop_entry(kind, cid):
-    """Delete a whole `Clause(...)` / `Directive(...)` entry from its tuple."""
-    def f(t):
-        pat = re.compile(
-            r"    " + kind + r"\(\n        \"" + re.escape(cid)
-            + r"\",\n(?:.*?\n)*?    \),\n"
-        )
-        new, n = pat.subn("", t, count=1)
-        if n != 1:
-            raise AssertionError(
-                f"{kind.lower()} {cid!r} not found in its expected shape"
-            )
-        return new
-    return f
-
-
-def drop_clause(cid):
-    return drop_entry("Clause", cid)
-
-
-def _swap(t, old, new):
-    """🔴 THE TARGET MUST BE UNIQUE, not merely PRESENT.
+def _require_unique(n, what):
+    """🔴 THE TARGET MUST BE UNIQUE, not merely PRESENT — ONE RULE, ONE PLACE.
 
     Round 8 measured the difference, and it is the same shape as everything
     else this file guards. `C5` targets a line starting with EIGHT spaces;
@@ -159,16 +147,52 @@ def _swap(t, old, new):
     pictured." The assert above it already refuses a target that has MOVED;
     this refuses one that has been DUPLICATED, and the two failures need the
     same response — re-target the row.
+
+    🔴 ROUND 10 — LIFTED OUT OF `_swap`, WHICH WAS ONE OF THREE SITES. Round 8
+    applied the lesson to the string mutator and left both REGEX mutators
+    (`drop_entry`, `reword_entry`) doing `pat.subn(…, count=1)` and testing
+    `n != 1` — a predicate that, WITH `count=1`, can only ever be 0 or 1 and so
+    can detect an ABSENT target and never a DUPLICATED one. Milder than
+    `_swap`'s case (a duplicated entry id would score SURVIVED, which is loud)
+    but the same blind spot, at the sites nobody swept. The rule now has one
+    statement and three callers.
     """
-    n = t.count(old)
     if n == 0:
-        raise AssertionError(f"target absent: {old[:70]!r}…")
+        raise AssertionError(f"target absent: {what}")
     if n > 1:
         raise AssertionError(
-            f"target is AMBIGUOUS — {n} occurrences, so `replace(…, 1)` would "
-            f"mutate whichever comes first and not necessarily the one this "
-            f"row means: {old[:70]!r}…"
+            f"target is AMBIGUOUS — {n} occurrences, so a `count=1` "
+            f"substitution would edit whichever comes first and not "
+            f"necessarily the one this row means: {what}"
         )
+
+
+def _sub_unique(pat, repl, t, what):
+    """`_require_unique` in its REGEX spelling — counts MATCHES, then edits."""
+    _require_unique(len(pat.findall(t)), what)
+    return pat.sub(repl, t, count=1)
+
+
+def drop_entry(kind, cid):
+    """Delete a whole `Clause(...)` / `Directive(...)` entry from its tuple."""
+    def f(t):
+        pat = re.compile(
+            r"    " + kind + r"\(\n        \"" + re.escape(cid)
+            + r"\",\n(?:.*?\n)*?    \),\n"
+        )
+        return _sub_unique(
+            pat, "", t, f"{kind.lower()} {cid!r} in its expected shape"
+        )
+    return f
+
+
+def drop_clause(cid):
+    return drop_entry("Clause", cid)
+
+
+def _swap(t, old, new):
+    """A UNIQUE literal substring, replaced once. See `_require_unique`."""
+    _require_unique(t.count(old), f"{old[:70]!r}…")
     return t.replace(old, new, 1)
 
 
@@ -256,10 +280,17 @@ def classify_by_pathspec(t):
 
 
 def the_warning_blocks(t):
-    old = ('              "emitted. Re-add them by hand, or re-run without --out edits.",\n'
-           "            file=err_stream,\n"
-           "        )\n")
-    return _swap(t, old, old + "        return 4\n")
+    # 🔴 RE-TARGETED IN ROUND 10 — the SIXTH catch by assert-before-editing, and
+    # this one was a pure RE-INDENT: the whole brief-rendering block moved
+    # inside `if brief_refused is None:` so a refused run emits no document to
+    # check. Nothing about the warning changed; the row would have scored "the
+    # guard held" on a file it never edited.
+    old = ('                  "emitted. Re-add them by hand, or re-run without '
+           '--out "\n'
+           '                  "edits.",\n'
+           "                file=err_stream,\n"
+           "            )\n")
+    return _swap(t, old, old + "            return 4\n")
 
 
 # --------------------------------------------------------------------------- #
@@ -283,15 +314,12 @@ def reword_entry(kind, cid, new_text):
             r"(    " + kind + r"\(\n        \"" + re.escape(cid) + r"\",\n)"
             r"(?:.*?\n)*?(    \),\n)"
         )
-        new, n = pat.subn(
+        return _sub_unique(
+            pat,
             lambda m: m.group(1) + f'        "{new_text}",\n' + m.group(2),
-            t, count=1,
+            t,
+            f"{kind.lower()} {cid!r} in its expected shape",
         )
-        if n != 1:
-            raise AssertionError(
-                f"{kind.lower()} {cid!r} not found in its expected shape"
-            )
-        return new
     return f
 
 
@@ -403,11 +431,12 @@ def the_check_command_reports_clean(t):
 
 
 def the_out_file_is_not_read_back(t):
+    # 🔴 RE-TARGETED IN ROUND 10, for the same re-indent as `the_warning_blocks`.
     return _swap(
         t,
-        '            checked_text = Path(args.out).read_text(encoding="utf-8")\n'
-        "            checked_what = args.out\n",
-        "            pass\n",
+        '                checked_text = Path(args.out).read_text(encoding="utf-8")\n'
+        "                checked_what = args.out\n",
+        "                pass\n",
     )
 
 
@@ -887,14 +916,20 @@ def the_head_check_stops_comparing_the_two_shas(t):
     return _swap(t, "    if local != pr_head_sha:", "    if False:")
 
 
+# 🔴 RE-TARGETED IN ROUND 10, both of them: the two branches stopped asking
+# `repo_relation` directly and now ask `cross_repo_holds_neither_end`, the
+# shared predicate round 10's finding B introduced. Same mutation — the branch
+# never fires — at the branch's own condition, so it stays distinct from V19,
+# which mutates the PREDICATE and leaves both branches selectable.
 def the_cross_repo_range_diagnoses_a_moved_checkout_again(t):
-    return _swap(t, '    elif facts.repo_relation == "cross":', "    elif False:")
+    return _swap(t, "    elif cross_repo_holds_neither_end(facts):",
+                 "    elif False:")
 
 
 def the_cross_repo_ledger_reports_a_failed_command_again(t):
     return _swap(
         t,
-        '    if facts.round_no >= 2 and facts.repo_relation == "cross":',
+        "    if facts.round_no >= 2 and cross_repo_holds_neither_end(facts):",
         "    if False:",
     )
 
@@ -945,6 +980,117 @@ def the_ledger_provenance_line_hands_out_head_again(t):
         '    measured_tip = hc.local_sha if (hc is not None and hc.ok) else "HEAD"',
         '    measured_tip = "HEAD"',
     )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 V18-V23 — round 10. Base `706a6b38`.
+# --------------------------------------------------------------------------- #
+
+def the_tip_is_always_claimed_to_be_a_sha(t):
+    """Round 10's finding A: the placeholder is handed over as a commit.
+
+    The NARROWEST expression that can be wrong — the predicate's own return,
+    not the branch that consults it. Mutating the enclosing `elif` would take
+    the whole cross-repo branch with it and die for someone else's reason.
+    """
+    return _swap(
+        t,
+        "    return range_tip(facts) != TIP_PLACEHOLDER",
+        "    return True",
+    )
+
+
+def the_ledger_asks_the_repo_relation_before_the_head_check(t):
+    """Round 10's finding B, restored at the predicate both sites now share.
+
+    `if False:` on the head-check short-circuit is the base's behaviour
+    exactly: the relation alone decides, so a renamed-remote clone that HOLDS
+    the PR's head is told it holds neither end of the range.
+    """
+    return _swap(
+        t,
+        "    hc = facts.head_check\n"
+        "    if hc is not None and hc.ok:\n"
+        "        return False\n"
+        '    return facts.repo_relation == "cross"',
+        "    hc = facts.head_check\n"
+        "    if False:\n"
+        "        return False\n"
+        '    return facts.repo_relation == "cross"',
+    )
+
+
+def the_anchorless_refusal_blocks_its_own_remedy(t):
+    """Round 10's finding C at REFUSAL 1b — the site the finding named."""
+    return _swap(
+        t,
+        '            "and nothing from the comment.",\n'
+        "        ]), file=err_stream)\n"
+        "        if not args.emit_claims:\n"
+        "            return 2\n"
+        "        brief_refused = 2\n",
+        '            "and nothing from the comment.",\n'
+        "        ]), file=err_stream)\n"
+        "        return 2\n",
+    )
+
+
+def the_no_block_refusal_blocks_its_own_remedy(t):
+    """Round 10's finding C at REFUSAL 1 — the SIBLING site.
+
+    Kept as its own row rather than folded into the one above: the two
+    refusals are independent `return`s, and a fix applied at the site a finding
+    names while the sibling keeps the defect is this ladder's single most
+    repeated shape.
+    """
+    return _swap(
+        t,
+        '            "round as an explicit first, full audit with no --round.",\n'
+        "        ]), file=err_stream)\n"
+        "        if not args.emit_claims:\n"
+        "            return 2\n"
+        "        brief_refused = 2\n",
+        '            "round as an explicit first, full audit with no --round.",\n'
+        "        ]), file=err_stream)\n"
+        "        return 2\n",
+    )
+
+
+def the_two_placeholder_spellings_drift_apart(t):
+    """Round 10's finding A', at the site the constant was extracted FROM.
+
+    `range_tip`'s fallback stops naming `TIP_PLACEHOLDER` and spells its own
+    near-miss, which is exactly the state the constant was introduced to make
+    impossible: the script emits one string and every guard looks for another.
+    """
+    return _swap(
+        t,
+        "    return hc.pr_sha if (hc is not None and hc.pr_sha) else TIP_PLACEHOLDER",
+        "    return hc.pr_sha if (hc is not None and hc.pr_sha) else "
+        "\"<the PR's head sha, unknown>\"",
+    )
+
+
+def the_assumed_base_is_recorded_as_read(t):
+    """Round 10's SEVENTH instance: the default stops announcing itself.
+
+    The narrowest expression again — the flag's own assignment, not the sites
+    that consult it, so the mutant cannot die of a missing name.
+    """
+    return _swap(
+        t,
+        '    base_assumed = not data.get("baseRefName")',
+        "    base_assumed = False",
+    )
+
+
+def the_clone_grant_permits_fetching_again(t):
+    """Round 10's finding D: round 8's wording, verbatim."""
+    return reword_entry(
+        "Directive", "own-worktree-is-writable",
+        "That worktree is YOURS, and so is the clone you made it from: "
+        "fetching and checking out inside either is fine. The no-write rule "
+        "below is about every checkout you did not make.")(t)
 
 
 def the_toolchain_names_the_shared_checkout_cross_repo_only(t):
@@ -1122,7 +1268,10 @@ ROWS = [
       "test_the_refusal_names_what_it_looked_for_and_where",
       "test_the_refusal_fires_for_a_malformed_block_and_says_which_way",
       # Asserts on the refusal MESSAGE, so no refusal means no message.
-      "test_the_refusal_says_which_comment_kinds_it_cannot_see"},
+      "test_the_refusal_says_which_comment_kinds_it_cannot_see",
+      # 🔴 ROUND 10. The remedy guard opens by requiring rc 2 from REFUSAL 1;
+      # with no refusal there is no rc 2 and no prescription to extract.
+      "test_every_command_a_refusal_prescribes_actually_runs"},
      remove_the_refusal),
     ("C2  claims read from the whole comment",
      {"test_the_brief_carries_the_claims_and_not_the_reasoning_around_them",
@@ -1156,17 +1305,26 @@ ROWS = [
       # decision, which is the finding — and NOT a row gone vague.
       "test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor",
       "test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout",
-      "test_no_cross_repo_brief_claims_its_checkout_was_verified",
-      "test_a_degenerate_range_does_not_blame_a_checkout_it_verified",
-      "test_a_degenerate_self_range_is_named_by_the_ledger_too",
-      "test_a_failed_cumulative_measurement_does_not_print_a_false_cause",
-      "test_an_empty_range_does_not_name_a_cause_the_head_check_refutes",
-      "test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor",
-      "test_the_ledger_refuses_a_failed_command_rather_than_printing_zero",
       "test_the_ledger_refuses_to_measure_a_checkout_that_is_not_the_pr",
-      "test_the_ledger_says_the_base_was_not_fetched",
-      "test_the_ledger_shows_the_files_and_refuses_to_classify_them",
-      "test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head"},
+      "test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head",
+      # 🔴 ROUND 10 — SEVEN OF ROUND 8's THIRTEEN LEFT THIS SET, and their
+      # departure is the FIX, measured. Round 8 made THE LEDGER's branch turn
+      # on `repo_relation` ALONE, so inverting that decision sent the
+      # same-repo `delta` scenario down the hand-over branch and took every
+      # ledger assertion with it. The branch now asks
+      # `cross_repo_holds_neither_end`, which consults the HEAD CHECK first —
+      # and in `delta` that check passes, so the ledger measures whatever the
+      # repo decision says. `..._degenerate_...`, `..._cumulative_...`,
+      # `..._empty_range_...`, `..._refuses_a_failed_command_...`,
+      # `..._says_the_base_was_not_fetched`, `..._shows_the_files_...` and the
+      # fixture seam guard all stopped depending on the repo decision, which
+      # is exactly what round 10's finding B says they should never have.
+      # Re-measured, not reasoned: this set is what the battery reported.
+      "test_a_cross_repo_ledger_prints_a_measurement_the_head_check_vouched_for",
+      "test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha",
+      "test_the_clone_grant_covers_only_the_write_the_recipe_makes",
+      "test_every_section_directive_is_emitted_verbatim_in_the_brief_that_owns_it",
+      "test_the_where_to_work_section_does_not_call_a_private_worktree_the_clone"},
      invert_cross_repo),
     ("C4  numstat failure reads as a clean zero",
      {"test_the_ledger_refuses_a_failed_command_rather_than_printing_zero"},
@@ -1255,7 +1413,12 @@ ROWS = [
      {"test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head",
       "test_the_unknown_head_sha_reason_names_one_cause_not_two",
       "test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout",
-      "test_no_cross_repo_brief_claims_its_checkout_was_verified"},
+      "test_no_brief_claims_a_verification_its_own_fixture_refutes",
+      # 🔴 ROUND 10. With the verified NOTE forced on, the placeholder-tip
+      # branches never render — the unresolved-tip note lives in the two
+      # branches this mutation makes unreachable — so no scenario spells the
+      # placeholder and that guard's own positive control fires.
+      "test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha"},
      range_ignores_the_head_check),
     ("H3  --emit-claims stamps the LOCAL head",
      {"test_emit_claims_stamps_the_prs_head_not_the_local_checkouts",
@@ -1344,7 +1507,10 @@ ROWS = [
       # fails it), and it stops the degenerate scenario being degenerate at
       # all — which is what that test's own positive control requires.
       "test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor",
-      "test_the_degenerate_range_names_shas_at_both_ends"},
+      "test_the_degenerate_range_names_shas_at_both_ends",
+      # 🔴 ROUND 10's one, and it is the same coupling: the renamed-remote
+      # ledger's provenance line is asserted WHOLE, so a moved anchor fails it.
+      "test_a_cross_repo_ledger_prints_a_measurement_the_head_check_vouched_for"},
      range_anchor_reads_the_audited_tip),
     # The OTHER wrong fix: `audited_from` alone. A round-1 bare `audited=<sha>`
     # then anchors nothing, and the remedy chain the delta refusal advertises
@@ -1484,8 +1650,12 @@ ROWS = [
     # 🔴 Y2 leaves a CROSS-REPO auditor with nowhere to work: the brief has
     # just told them to build that worktree themselves precisely so they can
     # fetch in it.
+    # 🔴 ROUND 10 ADDED THE CLONE-GRANT GUARD to this row and to V4. Any reword
+    # of this directive necessarily moves it: it asserts the two sentences that
+    # scope the grant to `worktree add`, and neither replacement carries them.
     ("Y2  own-worktree-is-writable inverted into 'do not fetch'",
      {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
+      "test_the_clone_grant_covers_only_the_write_the_recipe_makes",
       NO_WRITE_SCOPE_GUARD},
      reword_entry(
          "Directive", "own-worktree-is-writable",
@@ -1631,6 +1801,9 @@ ROWS = [
     ("V4  own-worktree scopes the no-write rule to SHARED again",
      {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
       "test_no_forward_reference_scopes_the_no_write_rule_to_a_denied_state",
+      # 🔴 ROUND 10 — see Y2: any reword of this directive drops the two
+      # sentences that scope the clone grant to `worktree add`.
+      "test_the_clone_grant_covers_only_the_write_the_recipe_makes",
       NO_WRITE_SCOPE_GUARD},
      the_own_worktree_grant_scopes_the_rule_to_sharedness_again),
     ("V5  the --audited whitespace input check is removed",
@@ -1681,22 +1854,37 @@ ROWS = [
     # seam guard executes at all. Every member listed rather than trimmed to
     # the "main" one, as N1 and V6 are.
     ("V9  the head check stops comparing the two shas",
-     {"test_no_cross_repo_brief_claims_its_checkout_was_verified",
+     {"test_no_brief_claims_a_verification_its_own_fixture_refutes",
       "test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor",
       "test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout",
       "test_emit_claims_stamps_the_prs_head_not_the_local_checkouts",
       "test_the_ledger_refuses_to_measure_a_checkout_that_is_not_the_pr",
       "test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head",
-      "test_the_range_names_a_sha_and_not_head_when_the_head_is_verified"},
+      "test_the_range_names_a_sha_and_not_head_when_the_head_is_verified",
+      # 🔴 ROUND 10's two, and both are the fourth read rule doing its job:
+      # `cross_repo_holds_neither_end` consults the head check, so disarming it
+      # sends the renamed-remote scenario down the hand-over branch; and
+      # `range_tip` falls back to the placeholder in scenarios that had a
+      # verified sha, so the tip guard's own claim about which scenarios spell
+      # it stops holding.
+      "test_a_cross_repo_ledger_prints_a_measurement_the_head_check_vouched_for",
+      "test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha"},
      the_head_check_stops_comparing_the_two_shas),
     ("V10 the blind-spot rationale hides in a '…' '…' concat",
      {"test_the_blind_spot_rationale_matches_what_the_script_actually_does"},
      the_blind_spot_rationale_hides_in_single_quoted_concat),
+    # 🔴 ROUND 10 GAVE V11 AND V12 ONE KILLER EACH, and in both cases it is the
+    # new guard's OTHER-SIDE positive control: round 10's fixes made two
+    # branches conditional, so each guard also asserts that the branch still
+    # renders its TRUE case. Disable the branch outright and that control
+    # fires — which is the control doing exactly what it is for.
     ("V11 the cross-repo RANGE blames a moved checkout again",
-     {"test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout"},
+     {"test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout",
+      "test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha"},
      the_cross_repo_range_diagnoses_a_moved_checkout_again),
     ("V12 the cross-repo LEDGER reports a failed command again",
-     {"test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor"},
+     {"test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor",
+      "test_a_cross_repo_ledger_prints_a_measurement_the_head_check_vouched_for"},
      the_cross_repo_ledger_reports_a_failed_command_again),
     ("V13 the DEGENERATE range hands out `..HEAD` again",
      {"test_the_degenerate_range_names_shas_at_both_ends"},
@@ -1709,15 +1897,69 @@ ROWS = [
      {"test_the_no_write_forward_reference_states_the_clauses_own_scope",
       "test_each_clause_carries_the_instruction_its_ledger_entry_names"},
      the_no_fetch_clause_narrows_to_this_audit_again),
+    # 🔴 ROUND 10 WIDENED THIS ROW BY ONE, and the width is the fix: the
+    # renamed-remote scenario now REACHES the measuring branch, so it reads the
+    # same provenance line and asserts it whole.
     ("V15 THE LEDGER's provenance line hands out `..HEAD` again",
-     {"test_the_ledgers_provenance_line_names_the_sha_it_resolved_not_head"},
+     {"test_the_ledgers_provenance_line_names_the_sha_it_resolved_not_head",
+      "test_a_cross_repo_ledger_prints_a_measurement_the_head_check_vouched_for"},
      the_ledger_provenance_line_hands_out_head_again),
     ("V16 the skipped-round warning is removed",
      {"test_a_claims_block_more_than_one_round_behind_is_warned_about"},
      the_skipped_round_warning_is_removed),
+    # 🔴 ROUND 10 WIDENED THIS ROW BY TWO. The remedy guard requires rc 2 from
+    # REFUSAL 1b before it can read a prescription out of it, and its negative
+    # control is built from the same refusal's text — with the refusal gone
+    # there is nothing to extract on either side. Both are listed rather than
+    # trimmed: a control that stops being able to fail is exactly the thing the
+    # EXTRA-KILLER report exists to surface.
     ("V17 the no-anchor refusal is removed",
-     {"test_a_block_that_parses_but_yields_no_anchor_is_refused"},
+     {"test_a_block_that_parses_but_yields_no_anchor_is_refused",
+      "test_every_command_a_refusal_prescribes_actually_runs",
+      "test_control_the_prescription_extractor_can_see_a_broken_remedy"},
      the_no_anchor_refusal_is_removed),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 V18-V23 — round 10. Base `706a6b38`.
+    # --------------------------------------------------------------------- #
+    # 🔴 TWO killers, and both are the predicate's real consumers: the brief
+    # side (the placeholder is handed over with no warning) and the ledger pin,
+    # whose second assertion drives `unresolved_tip_note` directly and gets ""
+    # back. Listed in full.
+    ("V18 the tip is always claimed to be a sha",
+     {"test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha",
+      "test_the_tip_placeholder_ledger_matches_the_script"},
+     the_tip_is_always_claimed_to_be_a_sha),
+    ("V19 the cross-repo LEDGER asks the relation before the head check",
+     {"test_a_cross_repo_ledger_prints_a_measurement_the_head_check_vouched_for"},
+     the_ledger_asks_the_repo_relation_before_the_head_check),
+    ("V20 REFUSAL 1b blocks the remedy it prescribes",
+     {"test_every_command_a_refusal_prescribes_actually_runs"},
+     the_anchorless_refusal_blocks_its_own_remedy),
+    # 🔴 V21's killer set is TWO, and the width is the coupling itself: the
+    # constant exists so the script's spelling and the guards' literal cannot
+    # drift. Break it and the ledger pin fires (its own assertion) AND the
+    # placeholder guard's positive control fires — no scenario renders the
+    # string it scans for any more. Listed in full rather than trimmed, the
+    # same treatment N1, V6 and V9 get.
+    ("V21 `range_tip`'s placeholder stops naming TIP_PLACEHOLDER",
+     {"test_the_tip_placeholder_ledger_matches_the_script",
+      "test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha"},
+     the_two_placeholder_spellings_drift_apart),
+    # V22 also moves the WHOLE-STRING directive ledger, necessarily: round 10's
+    # fix was a reword, so restoring the old text is a reword the ledger pins.
+    # Both are listed; the clone-grant guard is the one that fires for THIS
+    # row's reason. Same treatment as V14.
+    ("V22 the clone grant permits fetching there again",
+     {"test_the_clone_grant_covers_only_the_write_the_recipe_makes",
+      "test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
+     the_clone_grant_permits_fetching_again),
+    ("V23 REFUSAL 1 blocks the remedy it prescribes",
+     {"test_every_command_a_refusal_prescribes_actually_runs"},
+     the_no_block_refusal_blocks_its_own_remedy),
+    ("V24 an ASSUMED base branch is recorded as read",
+     {"test_no_brief_states_an_assumed_base_branch_as_a_fact"},
+     the_assumed_base_is_recorded_as_read),
 ]
 
 

@@ -311,6 +311,23 @@ as a guard holding. 🔴 TWO MORE IN ROUND 7 — `Y6` and `Y14`, whose target wa
 `CHECKOUT_STATE_DIRECTIVE`. That makes FOUR rows this assert has caught, every
 one of them after a refactor that nobody thought touched the battery.
 
+🔴 ROUND 10 RE-RAN IT AFTER ITS OWN FIXES — **100 rows, all as expected**, over
+a 109-test positive control. FOUR MORE rows reported MUTATION DID NOT APPLY and
+were re-targeted (`C6` and `K2`, on a pure RE-INDENT — the brief-rendering
+block moved inside `if brief_refused is None:`; `V11` and `V12`, whose branch
+conditions moved onto the shared `cross_repo_holds_neither_end` predicate).
+That makes EIGHT rows this assert has caught. TEN killer sets moved, and the
+notable one is `C3`: SEVEN of the thirteen names round 8 added LEFT it, because
+THE LEDGER stopped turning on `repo_relation` alone — the departure is round
+10's finding B, measured rather than argued.
+
+🔴 ROUND 10's BASE is `706a6b38`, measured the same way: **7 failed, 101
+passed**. FIVE are its regression coverage (`RED_AT_BASE_R9`); of the other
+two, one is the whole-string DIRECTIVE ledger moving with the reword of
+`own-worktree-is-writable`, and one is
+`..._tip_placeholder_ledger_matches_the_script`, red there on an
+`AttributeError` for a name the fix introduces and therefore filed as a guard.
+
 🔴 THE ROUND-3 BATTERY CAUGHT TWO DEFECTS IN THE ROUND-3 TESTS THEMSELVES, and
 they are recorded because both are the shape this file warns about elsewhere:
   * `N5` (delete the LEDGER's self-range branch) SURVIVED a fully green suite,
@@ -827,6 +844,26 @@ def fixture_is_cross_repo(payload, origin):
     return (u.group(1), u.group(2)) != (r.group(1), r.group(2))
 
 
+def fixture_resolved_head(payload, origin, local_head):
+    """What `git rev-parse HEAD` answers in the ASSEMBLY checkout, per fixture.
+
+    🔴 ROUND 10 — LIFTED OUT OF `make_runner` SO A GUARD CAN ASK THE SAME
+    QUESTION. `test_no_brief_claims_a_verification_its_own_fixture_refutes`
+    needs to know whether a scenario models a checkout standing on the PR's
+    head; re-deriving that beside the fake would be a second copy of the rule
+    the fake applies, and the two would disagree the first time either moved —
+    which is the shape this whole module keeps finding in the script.
+
+    It is still a MODEL and not a call into the code under test: what it
+    encodes is the fixture's own three-case default, nothing the script decides.
+    """
+    if local_head is not None:
+        return local_head
+    if fixture_is_cross_repo(payload, origin):
+        return FAKE_ASSEMBLY_HEAD
+    return payload.get("headRefOid")
+
+
 def make_runner(
     *,
     comments=(),
@@ -875,12 +912,7 @@ def make_runner(
     # #900's head commit" — the fixture asserted the state the guard exists to
     # rule out. The freak case (a clone with a renamed remote that really does
     # hold the commit) is still reachable: pass `local_head` explicitly.
-    if local_head is not None:
-        resolved_head = local_head
-    elif fixture_is_cross_repo(payload, origin):
-        resolved_head = FAKE_ASSEMBLY_HEAD
-    else:
-        resolved_head = payload.get("headRefOid")
+    resolved_head = fixture_resolved_head(payload, origin, local_head)
     ranges = []
 
     def default_rev_list(spec):
@@ -1277,10 +1309,22 @@ DIRECTIVE_LEDGER = {
     # sentence is UNCHANGED; what moved to meet it was `no-fetch`, which had
     # scoped itself to "the copy YOU made FOR THIS AUDIT" and so forbade that
     # very command. Both sides are pinned to `NO_WRITE_SCOPE` now.
+    #
+    # 🔴 ROUND 10. Round 8's "and so is the clone you made it from: fetching
+    # and checking out inside EITHER is fine" granted the two operations with
+    # cross-session blast radius over a tree the recipe names only as `<your
+    # local clone of owner/name>` — on this host, in practice,
+    # `~/workspace/<repo>`. The recipe performs exactly ONE write there,
+    # `worktree add`, so that is what the grant now names; `fetch`/`pull`/
+    # `checkout` are refused there explicitly rather than left to the reader's
+    # reading of "you made". The forward-reference sentence is untouched and
+    # still spells `NO_WRITE_SCOPE`.
     "own-worktree-is-writable": (
-        "That worktree is YOURS, and so is the clone you made it from: "
-        "fetching and checking out inside either is fine. The no-write rule "
-        "below is about every checkout you did not make."
+        "That worktree is YOURS: fetching and checking out inside it is fine. "
+        "In the clone you made it from, `git worktree add` is the ONLY write "
+        "this brief asks for — do not `fetch`, `pull` or `checkout` there, "
+        "whoever made it, because other sessions may be standing in it. The "
+        "no-write rule below is about every checkout you did not make."
     ),
 }
 
@@ -1382,6 +1426,47 @@ SCENARIO_RUNS = {
     "cross-repo-delta": lambda: (["900", "--round", "3"],
                                  {"pr": OTHER_REPO_PR,
                                   "comments": [CLAIMS_BLOCK_R2]}),
+    # 🔴 ROUND 10 — THE MISSING CELL'S OWN MIRROR. Round 8 added the
+    # cross-repo × delta pair and left the other axis: a PR whose `headRefOid`
+    # is UNKNOWN. `cross-repo-delta` is built from `OTHER_REPO_PR`, which HAS
+    # one, and the module's single `headRefOid=None` test ran the SAME-repo
+    # fixture — so the state where `range_tip` answers a PLACEHOLDER inside a
+    # cross-repo rev spec was reachable by no scenario at all.
+    "cross-repo-delta-no-head-sha": lambda: (
+        ["900", "--round", "3"],
+        {"pr": dict(OTHER_REPO_PR, headRefOid=None),
+         "comments": [CLAIMS_BLOCK_R2]},
+    ),
+    # The SAME-repo spelling of that state: nothing here is cross-repo, the
+    # head check simply never learned a sha. `range_tip` returns the identical
+    # placeholder, so a fix scoped to the cross-repo branch alone leaves this
+    # one printing an unrunnable rev spec.
+    "delta-no-head-sha": lambda: (
+        ["900", "--round", "3"],
+        {"pr": dict(DEFAULT_PR, headRefOid=None),
+         "comments": [CLAIMS_BLOCK_R2], "local_head": None},
+    ),
+    # 🔴 ROUND 10 — THE STATE `render_range`'s OWN COMMENT SAYS IS REAL and no
+    # scenario modelled: a clone whose `origin` names a different repository
+    # while HOLDING the PR's head commit (a renamed remote, a mirror). The
+    # relation is `cross`; the head check PASSES. It is what separates
+    # "different slug" from "holds neither end of the range", and THE LEDGER
+    # was conflating them.
+    "cross-repo-renamed-remote-delta": lambda: (
+        ["900", "--round", "3"],
+        {"pr": OTHER_REPO_PR, "comments": [CLAIMS_BLOCK_R2],
+         "local_head": FAKE_OTHER_HEAD_OID},
+    ),
+    # 🔴 ROUND 10's SEVENTH INSTANCE, found by sweeping rather than from a
+    # finding: `base_ref` is `data.get("baseRefName") or "main"` — a DEFAULT —
+    # and every site printing it presented it as a fact about the PR. This is
+    # the state `--claims-file` mode is ALWAYS in, because it consults no `gh`
+    # and hardcodes the field.
+    "delta-assumed-base": lambda: (
+        ["900", "--round", "3"],
+        {"pr": {k: v for k, v in DEFAULT_PR.items() if k != "baseRefName"},
+         "comments": [CLAIMS_BLOCK_R2]},
+    ),
 }
 SCENARIOS = tuple(SCENARIO_RUNS)
 
@@ -2521,7 +2606,343 @@ def test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor():
     )
 
 
-def test_no_cross_repo_brief_claims_its_checkout_was_verified():
+# 🔴 ROUND 10 — THE SENTENCE THE CROSS-REPO RANGE SAID UNCONDITIONALLY, kept
+# here so a guard can forbid it in the one state where it is false.
+TIP_IS_A_SHA_CLAIM = "So the range above names the PR's head SHA outright"
+
+# The banner every site printing an unresolved tip must carry.
+TIP_PLACEHOLDER_BANNER = "THE TIP OF THAT RANGE IS A PLACEHOLDER, NOT A SHA"
+
+# 🔴 SPELLED HERE AND NOT READ FROM `ad.TIP_PLACEHOLDER`, deliberately. The
+# red-at-base procedure copies THIS module into a tree holding the BASE script,
+# and `TIP_PLACEHOLDER` does not exist there — reading it would make the guard
+# below die of `AttributeError` for want of a name the fix introduced, which
+# this module says everywhere is not evidence of a defect. The literal is what
+# the base actually printed. `test_the_tip_placeholder_ledger_matches_the_script`
+# is what keeps the two in step.
+TIP_PLACEHOLDER_TEXT = "<the PR's head sha>"
+
+
+def test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha():
+    """🔴 REGRESSION. Red at `706a6b38`, scenario `cross-repo-delta-no-head-sha`.
+
+    Measured there, rc 0 and silent stderr:
+
+        Diff **`aaaa1111..<the PR's head sha>`**
+        …
+            the PR's head sha is not known here (`gh pr view` was consulted and
+            reported no `headRefOid` for this PR)
+        So the range above names the PR's head SHA outright — read from
+        `gh pr view --json headRefOid` …
+
+    and THE LEDGER, under "THE ATTRIBUTION GATE IS YOURS THIS ROUND — it is not
+    optional and nobody else can compute it":
+
+        git -C <your worktree> log … aaaa1111..<the PR's head sha> --not
+        origin/main
+
+    Two sentences apart, the brief says it never learned `headRefOid` and that
+    the range was read from `headRefOid`. `repo_relation == "cross"` was read as
+    "the tip is a known sha" — the same weaker-fact-read-as-stronger shape as
+    round 8's REFUSAL 1b, which refused a non-sha token in a rev spec at the
+    ANCHOR end and left the TIP end alone.
+
+    🔴 DRIVEN OVER EVERY SCENARIO, not over the two that are cross-repo. The
+    placeholder comes from `range_tip`, which knows nothing about repos: the
+    SAME-repo `delta-no-head-sha` scenario prints it from the could-not-verify
+    branch. A fix scoped to the branch the finding was filed against would
+    leave that one unguarded, which is this ladder's most-repeated defect.
+    """
+    seen = 0
+    for scenario in SCENARIOS:
+        brief = brief_for_scenario(scenario)
+        if TIP_PLACEHOLDER_TEXT not in brief:
+            continue
+        seen += 1
+        assert TIP_PLACEHOLDER_BANNER in brief, (
+            f"\n\nscenario {scenario!r}: the brief spells "
+            f"{TIP_PLACEHOLDER_TEXT!r} — inside a git rev spec, and inside the "
+            "command THE LEDGER calls mandatory — and never says it is not a "
+            "sha. A rev spec carrying it cannot run, and rc 0 with silent "
+            "stderr is what the reader has to go on."
+        )
+        assert TIP_IS_A_SHA_CLAIM not in brief, (
+            f"\n\nscenario {scenario!r}: the brief claims the range names the "
+            "PR's head sha outright, in a run whose own reason line says it "
+            "never learned that field. One of the two sentences is false."
+        )
+    assert seen, (
+        "no scenario renders an unresolved tip, so the loop above asserted "
+        "nothing. `cross-repo-delta-no-head-sha` and `delta-no-head-sha` are "
+        "what put the placeholder in a brief; if they were dropped or their "
+        "`headRefOid` came back, this guard covers nothing."
+    )
+    # 🔴 POSITIVE CONTROL for the OTHER side: a scenario with a real tip must
+    # still get the confident sentence, or the fix above is "delete the claim"
+    # rather than "make it conditional".
+    assert TIP_IS_A_SHA_CLAIM in brief_for_scenario("cross-repo-delta"), (
+        "the cross-repo range no longer tells an auditor with a KNOWN head sha "
+        "that both ends of the range resolve in their worktree — the branch "
+        "was made conditional and then never rendered its true case"
+    )
+
+
+ASSUMED_BASE_BANNER = "THAT BASE BRANCH WAS ASSUMED, NOT READ"
+
+
+def test_no_brief_states_an_assumed_base_branch_as_a_fact():
+    """🔴 REGRESSION. Red at `706a6b38`, scenario `delta-assumed-base`.
+
+    🔴 THE SEVENTH INSTANCE, and it came from the sweep round 9's auditor asked
+    for rather than from a finding. `base_ref` is `data.get("baseRefName") or
+    "main"` — a DEFAULT — and every site printing it presented it as a
+    measurement. Measured at the base with `baseRefName` absent, rc 0 and
+    silent stderr, THE LEDGER's cross-repo hand-over read:
+
+        Run this in the worktree WHERE TO WORK told you to make … where
+        `origin/main` names THAT repository's base branch and not this
+        checkout's
+
+    an assertion about a repository nothing was ever asked about. `--claims-file`
+    mode reaches it on EVERY run — it consults no `gh` and hardcodes
+    `baseRefName: "main"`, exactly as it hardcodes no `headRefOid`, and that
+    second omission already carried a reason string while this one did not.
+
+    It matters because `--not <base>` is what decides which commits count as
+    this round's payload, and the payload figure is the ladder's own stop
+    condition: a wrong base moves the number silently, at rc 0.
+
+    🔴 DRIVEN BOTH WAYS over every scenario, so the fix cannot be "print the
+    banner always" — a warning that fires on every run is the permanently-red
+    gate `claude/RULES.md` names.
+    """
+    seen_assumed = seen_read = 0
+    for scenario in SCENARIOS:
+        kw = SCENARIO_RUNS[scenario]()[1]
+        payload = kw.get("pr") or DEFAULT_PR
+        brief = brief_for_scenario(scenario)
+        if payload.get("baseRefName"):
+            seen_read += 1
+            assert ASSUMED_BASE_BANNER not in brief, (
+                f"\n\nscenario {scenario!r}: the brief calls the base branch "
+                "assumed, in a run whose fixture reports "
+                f"{payload['baseRefName']!r}. A banner that fires when the "
+                "field WAS read is a banner every reader learns to skip."
+            )
+            continue
+        seen_assumed += 1
+        assert ASSUMED_BASE_BANNER in brief, (
+            f"\n\nscenario {scenario!r}: `gh` reported no `baseRefName`, so "
+            f"`{payload.get('baseRefName')!r}` fell back to this script's "
+            "default — and the brief states the result as a fact about the "
+            "PR's repository. `--not <base>` decides which commits count as "
+            "this round's payload."
+        )
+    assert seen_assumed and seen_read, (
+        f"only one side was driven ({seen_assumed} assumed, {seen_read} read), "
+        "so this guard pins a constant rather than a relationship"
+    )
+
+
+def test_the_tip_placeholder_ledger_matches_the_script():
+    """🔴 INVARIANT GUARD. Its evidence is mutant V21, not a base ref.
+
+    The guard above spells the placeholder as a LITERAL so it can be red at a
+    base tree that has no `TIP_PLACEHOLDER`. That literal is a second copy, and
+    a second copy that nobody compares is how a guard quietly stops matching
+    what ships. This is the comparison.
+    """
+    assert ad.TIP_PLACEHOLDER == TIP_PLACEHOLDER_TEXT, (
+        f"\n\nthe script writes {ad.TIP_PLACEHOLDER!r} and this module looks "
+        f"for {TIP_PLACEHOLDER_TEXT!r}. Every guard keyed on the literal is "
+        "scanning for a string no brief contains."
+    )
+    assert TIP_PLACEHOLDER_BANNER in ad.unresolved_tip_note(
+        ad.Facts(
+            pr=900, repo="a/b", title="t", base_ref="origin/main", url="",
+            round_no=3, cwd_repo_dir="/x", cwd_repo_slug="a/b",
+            repo_relation="same", worktree=ad.gather_worktree_kind(
+                lambda cmd, cwd=None: UNREADABLE_GIT_DIRS, "/x"),
+            branch="b", dirty=0, prev_sha="aaaa1111", emit_from=None,
+            claims=[], claims_round=None, checklist="", ledger=None,
+            assembled_at="", claims_source="", head_check=None,
+            base_assumed=False,
+        )
+    ), (
+        "the banner every keyed guard looks for is not what the note emits, so "
+        "those guards can never fire"
+    )
+
+
+def test_a_cross_repo_ledger_prints_a_measurement_the_head_check_vouched_for():
+    """🔴 REGRESSION. Red at `706a6b38`, scenario `cross-repo-renamed-remote-delta`.
+
+    `render_range`'s cross-repo branch is ordered after the `hc.ok` branch on
+    purpose, and its comment says why: `repo_relation` compares SLUGS, and a
+    clone with a renamed remote or a mirror can name a different repository
+    while HOLDING the PR's head commit. `render_ledger` did not adopt that
+    ordering — it asked `repo_relation == "cross"` alone.
+
+    Measured at the base in exactly that state (rc 0, silent stderr):
+
+        head_check.ok = True
+        facts.ledger  = 4 commits, 13 added, 2 deleted
+        THE RANGE : "verified at assembly time to be PR #900's head commit"
+        THE LEDGER: "NOT MEASURABLE FROM HERE … which holds neither end of the
+                     range. A number measured here would be a measurement of
+                     another project, so none is printed."
+
+    The measurement SUCCEEDED and was discarded; every clause of that sentence
+    is false; and the two sections contradict each other inside one document.
+    Both sites now ask `cross_repo_holds_neither_end`, which consults the head
+    check first — one rule, one place.
+    """
+    brief = brief_for_scenario("cross-repo-renamed-remote-delta")
+    led = ledger_section(brief)
+    assert "NOT MEASURABLE FROM HERE" not in led, (
+        "\n\nTHE LEDGER calls the measurement structurally impossible in a run "
+        "whose head check PASSED — the checkout holds the PR's head commit, "
+        f"which is what THE RANGE two bars above says.\n{led}"
+    )
+    assert "13        2" in led, (
+        "\n\nTHE LEDGER prints no numbers, so the successful measurement was "
+        f"still thrown away:\n{led}"
+    )
+    assert (
+        f"aaaa1111..{FAKE_OTHER_HEAD_OID} --not origin/main"
+    ) in led, (
+        f"\n\nTHE LEDGER's provenance line does not name the range it "
+        f"measured:\n{led}"
+    )
+    # 🔴 THE OTHER SIDE OF THE PREDICATE, so this is not "delete the branch".
+    # A cross-repo run whose head check FAILED must still hand the gate over.
+    assert "NOT MEASURABLE FROM HERE" in ledger_section(
+        brief_for_scenario("cross-repo-delta")
+    ), (
+        "the cross-repo hand-over stopped rendering for a checkout that really "
+        "does hold neither end of the range — round 8's permanently-red ledger "
+        "is back"
+    )
+
+
+# 🔴 ROUND 10 — A REFUSAL'S REMEDY IS A CLAIM, AND IT WAS FALSE AT BOTH SITES.
+# `<...>` spans are the operator's fill-in-the-blank; a real sha goes in before
+# the command can be run at all.
+_PRESCRIBED_COMMAND = re.compile(r"`audit-dispatch\.py ([^`]+)`")
+_FILL_IN = re.compile(r"<[^>]*>")
+PRESCRIPTION_SHA = "beefcafe"
+
+
+def prescribed_commands(err):
+    """Every `audit-dispatch.py …` command a refusal PRINTED, as argv lists."""
+    return [
+        _FILL_IN.sub(PRESCRIPTION_SHA, m.group(1)).split()
+        for m in _PRESCRIBED_COMMAND.finditer(err)
+    ]
+
+
+def test_every_command_a_refusal_prescribes_actually_runs():
+    """🔴 REGRESSION. Red at `706a6b38`, for BOTH refusals.
+
+    Measured there, over a `round=2` block whose header is `audited=..`:
+
+        900 --round 3                             -> rc 2, refusal
+        900 --round 2 --emit-claims --audited abc12345
+                                                  -> rc 2, the SAME refusal,
+                                                     stdout EMPTY
+
+    and with no block at all:
+
+        900 --round 3                             -> rc 2, refusal
+        900 --round 2 --emit-claims               -> rc 2, stdout EMPTY
+
+    Both refusals hand the operator a `--emit-claims` re-run as their
+    mechanical remedy and then refuse it, because the refusal is ordered before
+    the emit half and re-reads the same unreadable comment. The operator sees
+    the same text twice and reads it as their own typo. (REFUSAL 1's remedy is
+    sound at round 2 — `--round 1 --emit-claims` needs no block — and
+    unrunnable from round 3 up, which is why "it usually works" was true and
+    useless.)
+
+    🔴 THE GUARD IS THE CLASS, NOT THE TWO SITES. It reads the commands out of
+    whatever the refusal printed and RUNS them; a third refusal that prescribes
+    a command it refuses fails here without anyone remembering to add a row.
+    """
+    bad_block = (
+        "```audit-claims round=2 audited=..\n"
+        "1. a claim that parses fine\n"
+        "```"
+    )
+    cases = {
+        "REFUSAL 1b (anchorless block)": {"comments": [bad_block]},
+        "REFUSAL 1 (no block at all)": {"comments": []},
+    }
+    for name, kw in cases.items():
+        rc, _out, err = run_main(["900", "--round", "3"], **kw)
+        assert rc == 2, f"{name}: expected the refusal, got rc {rc}"
+        commands = prescribed_commands(err)
+        # POSITIVE CONTROL for the extractor: a refusal that prescribes nothing
+        # the regex can see would make every assertion below vacuous.
+        assert commands, (
+            f"\n\n{name}: no `audit-dispatch.py …` command was found in the "
+            f"refusal, so this guard checked nothing:\n{err}"
+        )
+        for argv in commands:
+            rc2, out2, err2 = run_main(argv, **kw)
+            assert "```audit-claims" in out2, (
+                f"\n\n{name}: the remedy it prints does not produce the block "
+                f"it promises.\n  ran    : audit-dispatch.py {' '.join(argv)}\n"
+                f"  rc     : {rc2}\n  stdout : {out2[:300]!r}\n"
+                f"  stderr : {err2[:600]!r}\n"
+                "A refusal that prescribes a command it refuses reads to the "
+                "operator as their own error."
+            )
+
+
+def test_control_the_prescription_extractor_can_see_a_broken_remedy():
+    """NEGATIVE CONTROL for the guard above: it must be able to go red.
+
+    Built from a REAL refusal's text with its remedy rewritten to the command
+    that genuinely fails — the delta round itself. If this passes, the guard
+    above is a scan wired to nothing.
+    """
+    bad_block = (
+        "```audit-claims round=2 audited=..\n1. a claim\n```"
+    )
+    _rc, _out, err = run_main(["900", "--round", "3"], comments=[bad_block])
+    broken = err.replace(
+        "audit-dispatch.py 900 --round 2 --emit-claims "
+        "--audited <the tip that round read>",
+        "audit-dispatch.py 900 --round 3",
+    )
+    commands = prescribed_commands(broken)
+    assert ["900", "--round", "3"] in commands, (
+        f"the extractor cannot see the rewritten remedy: {commands}"
+    )
+    rc2, out2, _err2 = run_main(["900", "--round", "3"], comments=[bad_block])
+    assert rc2 == 2 and "```audit-claims" not in out2, (
+        "the control command does not actually fail, so it proves nothing "
+        "about the guard's ability to report one that does"
+    )
+
+
+def scenario_checkout_stands_on_the_pr(name):
+    """Does this scenario's FIXTURE put the assembly checkout on the PR's head?
+
+    Answered from the scenario's own kwargs through `fixture_resolved_head` —
+    the one place that models `git rev-parse HEAD` — so the guard below and the
+    fake cannot drift apart.
+    """
+    _argv, kw = SCENARIO_RUNS[name]()
+    payload = dict(kw.get("pr") or DEFAULT_PR)
+    resolved = fixture_resolved_head(
+        payload, kw.get("origin", FAKE_ORIGIN), kw.get("local_head")
+    )
+    oid = payload.get("headRefOid")
+    return bool(resolved and oid and ad.same_commit(resolved, oid))
+
+
+def test_no_brief_claims_a_verification_its_own_fixture_refutes():
     """🔴 THE SEAM GUARD, and it is also this module's fixture guard.
 
     🔴 INVARIANT GUARD; its evidence is mutant V9, not a base ref. At
@@ -2534,27 +2955,55 @@ def test_no_cross_repo_brief_claims_its_checkout_was_verified():
     head commit" for a PR in another repository. A test written with that
     fixture would have passed in a physically impossible state.
 
-    So this pins the RELATIONSHIP rather than either side: no brief may claim
-    verification of a checkout it has itself just called a different
-    repository, in any scenario this module knows or later adds.
+    🔴 ROUND 10 RESCOPED IT, BECAUSE IT WAS PINNED TO THE WRONG SIDE. Round 8
+    spelled the relationship as "no CROSS-REPO brief may claim verification" —
+    while `render_range`'s own comment three bars away says that state IS real
+    and is why its cross-repo branch is ordered after the head check: a clone
+    with a renamed remote, or a mirror, names a different repository and holds
+    the PR's head commit anyway. The guard passed only because no scenario
+    modelled it; adding `cross-repo-renamed-remote-delta` makes it fail on
+    CORRECT output. Measured — that is the first thing the new scenario did.
+
+    The fact the brief's sentence actually claims is `head_check.ok`, so what
+    this pins is the sentence against the FIXTURE'S OWN modelled `rev-parse
+    HEAD` — in any scenario this module knows or later adds, cross-repo or not.
+    A repo relation is not a head check, which is the whole of round 10's
+    finding B.
     """
-    seen = 0
+    claimed, cross = [], 0
     for scenario in SCENARIOS:
         brief = brief_for_scenario(scenario)
-        if "## WHERE TO WORK — 🔴 CROSS-REPO" not in brief:
+        cross += "## WHERE TO WORK — 🔴 CROSS-REPO" in brief
+        if "verified at assembly time" not in brief:
             continue
-        seen += 1
-        assert "verified at assembly time" not in brief, (
-            f"\n\nscenario {scenario!r}: the brief says this checkout was "
-            "verified to be standing on the PR's head, two bars after saying "
-            "the PR lives in a DIFFERENT repository. One of the two is false, "
-            "and in the fixture it was the head check — the PR's oid was "
-            "handed to the assembly checkout's `rev-parse HEAD`."
+        claimed.append(scenario)
+        kw = SCENARIO_RUNS[scenario]()[1]
+        payload = dict(kw.get("pr") or DEFAULT_PR)
+        modelled = fixture_resolved_head(
+            payload, kw.get("origin", FAKE_ORIGIN), kw.get("local_head")
         )
-    assert seen, (
-        "no scenario renders a CROSS-REPO brief, so the loop above asserted "
-        "nothing. Either the heading moved or the cross-repo scenarios were "
-        "dropped from SCENARIO_RUNS."
+        assert scenario_checkout_stands_on_the_pr(scenario), (
+            f"\n\nscenario {scenario!r}: the brief says this checkout was "
+            "verified to be standing on the PR's head, and this scenario's "
+            "own fixture refutes it —\n"
+            f"  fixture `git rev-parse HEAD` : {modelled!r}\n"
+            f"  fixture PR headRefOid        : {payload.get('headRefOid')!r}\n"
+            "One of the two is false, and a test written in that state would "
+            "pass in a physically impossible world."
+        )
+    # 🔴 TWO POSITIVE CONTROLS, because two different zeroes would read as a
+    # pass. No scenario claiming verification means the loop asserted nothing;
+    # no scenario rendering CROSS-REPO means the configuration this guard was
+    # born in has stopped being covered.
+    assert claimed, (
+        "no scenario renders the 'verified at assembly time' sentence at all, "
+        "so the loop above asserted nothing. Either the sentence moved or "
+        "every delta scenario stopped passing the head check."
+    )
+    assert cross, (
+        "no scenario renders a CROSS-REPO brief, so this guard no longer "
+        "covers the seam it was written for. Either the heading moved or the "
+        "cross-repo scenarios were dropped from SCENARIO_RUNS."
     )
 
 
@@ -3315,6 +3764,85 @@ def test_no_checkout_state_grants_write_permission_over_the_assembly_checkout():
             "is non-negotiable and no state may override it.\n"
             f"{checkout}"
         )
+
+
+# 🔴 ROUND 10 — THE ROUND-8 GRANT, verbatim, kept ONLY as this probe's positive
+# control. Same role as `ROUND_4_WRITE_GRANT` and `ROUND_5_NO_WRITE_SCOPE`
+# above: its job is to be RED AT THE BASE, not to be unwalkable —
+# non-walkability comes from the whole-string `DIRECTIVE_LEDGER` pin.
+ROUND_8_CLONE_GRANT = (
+    "That worktree is YOURS, and so is the clone you made it from: "
+    "fetching and checking out inside either is fine. The no-write rule "
+    "below is about every checkout you did not make."
+)
+
+CLONE_WRITE_GRANT_PHRASES = (
+    "the clone you made it from: fetching",
+    "inside either is fine",
+    "checking out inside either",
+)
+
+# The recipe's own `git -C <clone> …` line, so the verb it runs there is read
+# and not remembered.
+_CLONE_RECIPE = re.compile(r"git -C <your local clone of [^>]*> ([a-z-]+)")
+
+
+def clone_write_grants_in(text):
+    return [p for p in CLONE_WRITE_GRANT_PHRASES if p in text]
+
+
+def test_the_clone_grant_covers_only_the_write_the_recipe_makes():
+    """🔴 REGRESSION. Red at `706a6b38`, scenario `cross-repo`.
+
+    Round 8 widened `own-worktree-is-writable` from "fetching and checking out
+    inside IT" to "inside EITHER" — the worktree AND the clone — to legitimise
+    the `worktree add` its own recipe performs. But the recipe writes to that
+    clone exactly ONCE, and the grant authorised two more operations with
+    cross-session blast radius, over a tree the brief names only as `<your
+    local clone of owner/name>`. On this host that placeholder resolves in
+    practice to `~/workspace/<repo>`: a long-lived checkout other sessions are
+    working in, and a `fetch` or `checkout` there is precisely the write the
+    `no-fetch` clause exists to prevent.
+
+    "The clone YOU made" arguably excludes those trees — but nothing in the
+    brief disambiguated it and the placeholder invites the substitution, so the
+    grant is stated as the OPERATION it covers.
+
+    🔴 THE RELATIONSHIP, not the wording: the verb is read off the recipe LINE,
+    so a recipe that starts running something else in the clone fails here
+    rather than silently acquiring permission for it.
+    """
+    assert clone_write_grants_in(ROUND_8_CLONE_GRANT), (
+        "POSITIVE CONTROL: the probe cannot see round 8's own grant, so a "
+        "clean result below would say nothing at all"
+    )
+    brief = brief_for_scenario("cross-repo")
+    verbs = _CLONE_RECIPE.findall(brief)
+    assert verbs == ["worktree"], (
+        "\n\nWHERE TO WORK's recipe no longer runs exactly one `git -C "
+        f"<clone> …` command, or runs a different one: {verbs}. The grant "
+        "below is scoped to the write the recipe makes, so the two move "
+        "together."
+    )
+    granted = clone_write_grants_in(brief)
+    assert not granted, (
+        f"\n\nthe brief grants the auditor `fetch`/`checkout` inside the clone "
+        f"— {granted}. The recipe's only write there is `{verbs[0]} add`; "
+        "everything else is a cross-session write into a tree the brief calls "
+        "`<your local clone of owner/name>`, which on this host is a shared, "
+        "long-lived checkout.\n"
+        + ad.DIRECTIVE["own-worktree-is-writable"]
+    )
+    grant = ad.DIRECTIVE["own-worktree-is-writable"]
+    assert "`git worktree add` is the ONLY write" in grant, (
+        "\n\nthe grant no longer says which single operation it covers in the "
+        "clone, so the next reader has only 'you made it' to reason from — "
+        f"which is what round 8 reasoned from.\n{grant}"
+    )
+    assert "do not `fetch`, `pull` or `checkout` there" in grant, (
+        "\n\nthe grant no longer refuses the two operations round 8 permitted "
+        f"in the clone.\n{grant}"
+    )
 
 
 def test_every_checkout_state_carries_the_no_write_rule():
@@ -4737,6 +5265,32 @@ RED_AT_BASE_R7: frozenset[str] = frozenset({
     "test_the_no_write_forward_reference_states_the_clauses_own_scope",
 })
 
+# 🔴 ROUND 10's base is the ROUND-9 TREE, `706a6b38`. Measured the same way —
+# `git show 706a6b38:scripts/audit-dispatch.py` into a scratch tree with THIS
+# module copied in unchanged, `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`:
+# **7 failed, 101 passed**. FOUR of the seven are these. Of the other three,
+# one is the whole-string directive ledger moving with round 10's reword of
+# `own-worktree-is-writable`, one is this partition guard itself (the new tests
+# are not in the base module's ledgers), and one is
+# `test_the_tip_placeholder_ledger_matches_the_script`, filed as a guard above
+# because its red there is an `AttributeError` for a name the fix introduces.
+#
+# 🔴 `test_no_brief_claims_a_verification_its_own_fixture_refutes` is NOT here
+# and is not new: round 8 filed it as a guard, and round 10 RESCOPED it. It is
+# still green at this base for the same reason — a base script says nothing
+# about a base fixture — and its evidence is still mutant V9.
+RED_AT_BASE_R9: frozenset[str] = frozenset({
+    "test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha",
+    "test_a_cross_repo_ledger_prints_a_measurement_the_head_check_vouched_for",
+    "test_every_command_a_refusal_prescribes_actually_runs",
+    "test_the_clone_grant_covers_only_the_write_the_recipe_makes",
+    # 🔴 NOT ONE OF ROUND 9's FINDINGS — round 10's own, found by the sweep its
+    # auditor asked for. Red at the base on a WRONG ANSWER, not an absence: the
+    # brief asserted a DEFAULT base branch as a fact about the PR's repository,
+    # at rc 0, inside the hand-over THE LEDGER calls mandatory.
+    "test_no_brief_states_an_assumed_base_branch_as_a_fact",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
@@ -4744,6 +5298,7 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "dd601793": RED_AT_BASE_R5,
     "3619fe68": RED_AT_BASE_R6,
     "28492af2": RED_AT_BASE_R7,
+    "706a6b38": RED_AT_BASE_R9,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
@@ -4867,12 +5422,27 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     # says nothing about a base fixture, the same shape as round 7's guard
     # above. Its evidence is mutant V9, which restores the impossible state
     # from the script side by claiming verification unconditionally.
-    "test_no_cross_repo_brief_claims_its_checkout_was_verified",
+    "test_no_brief_claims_a_verification_its_own_fixture_refutes",
     # There is no gap warning at `28492af2` at all, so a red there would be an
     # absence the fix adds. Same filing as Z5's legend. Mutant V16 removes it
     # again, and the test's own negative control (an ADJACENT block must stay
     # silent) is what stops the warning being satisfied by firing always.
     "test_a_claims_block_more_than_one_round_behind_is_warned_about",
+    # ------------------------------------------------------------------- #
+    # Round 10's two guards. Both WERE run against `706a6b38`; they are here
+    # because of HOW they behave there.
+    # ------------------------------------------------------------------- #
+    # RED at `706a6b38` with `AttributeError: module 'audit_dispatch' has no
+    # attribute 'TIP_PLACEHOLDER'` — an error for want of a name the fix
+    # introduces, not the defect being observed, which this module refuses to
+    # count as regression coverage. Mutant V21 (the two spellings of the
+    # placeholder drift apart) is its evidence.
+    "test_the_tip_placeholder_ledger_matches_the_script",
+    # GREEN at `706a6b38`, and it must be: it is the NEGATIVE CONTROL for
+    # `test_every_command_a_refusal_prescribes_actually_runs`, showing that
+    # guard can see a remedy that genuinely fails. A control that went red at
+    # the base would be a second sample of the thing in doubt.
+    "test_control_the_prescription_extractor_can_see_a_broken_remedy",
 })
 
 # --------------------------------------------------------------------------- #
@@ -4894,6 +5464,14 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
 #
 # `evidence` is `RED@<ref>` — the test was watched to FAIL at that tree — or
 # `GUARD`, meaning its evidence is the mutation battery and NOT a base ref.
+
+# The one evidence token that is legitimately not a mutant: a guard over this
+# module's own bookkeeping, which the battery cannot reach because it mutates
+# the SCRIPT and never this file. Spelled as a sentinel rather than as prose so
+# it cannot be confused with a column somebody forgot to fill in. Defined ABOVE
+# the matrix because a row now names it.
+IN_MODULE_CONTROL = "IN-MODULE CONTROL"
+
 FIX_MATRIX = (
     ("r2/1a ledger measured the OPERATOR'S checkout, not the PR",
      "test_the_ledger_refuses_to_measure_a_checkout_that_is_not_the_pr",
@@ -5149,7 +5727,7 @@ FIX_MATRIX = (
      "RED@28492af2", "V12"),
     ("r7/2c the cross-repo fixture inherited the PR's `headRefOid`, so a "
      "cross-repo test would have passed in a physically impossible state",
-     "test_no_cross_repo_brief_claims_its_checkout_was_verified",
+     "test_no_brief_claims_a_verification_its_own_fixture_refutes",
      "GUARD", "V9"),
     ("r7/3  the round-7 tip fix was HALF-APPLIED: the DEGENERATE branch of the "
      "same if/elif still handed out `..HEAD`, under a banner claiming the "
@@ -5181,6 +5759,41 @@ FIX_MATRIX = (
      "at assembly time\", with THE LEDGER giving the round-1 cause",
      "test_a_block_that_parses_but_yields_no_anchor_is_refused",
      "RED@28492af2", "V17"),
+    # --------------------------------------------------------------------- #
+    # Round 10. Its base is `706a6b38` — the round-9 tree.
+    # --------------------------------------------------------------------- #
+    ("r10/A the range and the ledger asserted the TIP was a sha without "
+     "checking one was known: `Diff `28492af2..<the PR's head sha>`` at rc 0, "
+     "and the same token inside the `git log` THE LEDGER calls mandatory",
+     "test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha",
+     "RED@706a6b38", "V18"),
+    ("r10/A' the two spellings of that placeholder — `range_tip`'s and "
+     "`--emit-claims`' — were open-coded literals with nothing comparing them",
+     "test_the_tip_placeholder_ledger_matches_the_script",
+     "GUARD", "V21"),
+    ("r10/B THE LEDGER's cross-repo branch was not ordered after the head "
+     "check, unlike THE RANGE's: for a renamed-remote clone it DISCARDED a "
+     "successful measurement to print \"holds neither end of the range\"",
+     "test_a_cross_repo_ledger_prints_a_measurement_the_head_check_vouched_for",
+     "RED@706a6b38", "V19"),
+    ("r10/C both refusals prescribed a `--emit-claims` re-run as their "
+     "mechanical remedy and then refused it, byte for byte, with empty stdout",
+     "test_every_command_a_refusal_prescribes_actually_runs",
+     "RED@706a6b38", "V20 V23"),
+    ("r10/C' the negative control for that guard: a remedy that genuinely "
+     "fails must be reported, or the scan is wired to nothing",
+     "test_control_the_prescription_extractor_can_see_a_broken_remedy",
+     "GUARD", IN_MODULE_CONTROL),
+    ("r10/D `own-worktree-is-writable` granted `fetch` and `checkout` in the "
+     "CLONE — a tree the recipe names `<your local clone of owner/name>`, in "
+     "practice a long-lived checkout other sessions are working in",
+     "test_the_clone_grant_covers_only_the_write_the_recipe_makes",
+     "RED@706a6b38", "V22"),
+    ("r10/E the SEVENTH instance, found by sweeping: `base_ref` is "
+     "`baseRefName or \"main\"` — a DEFAULT — and every site printing it stated "
+     "it as a fact about the PR's repository, at rc 0",
+     "test_no_brief_states_an_assumed_base_branch_as_a_fact",
+     "RED@706a6b38", "V24"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
@@ -5199,8 +5812,10 @@ FIX_MATRIX = (
 # seven more: m = 61, and 61 - max(1, 61 // 20) = 58. Counted by asking the
 # constant itself (`len(FIX_MATRIX)`), not by adding 7 to the last sentence.
 # Round 8 added nine: m = 70, and 70 - max(1, 70 // 20) = 67. Counted the same
-# way, by importing the module and printing `len(FIX_MATRIX)`.
-MIN_FIX_MATRIX_ROWS = 67
+# way, by importing the module and printing `len(FIX_MATRIX)`. Round 10 added
+# seven: m = 77, and 77 - max(1, 77 // 20) = 74. Counted the same way again —
+# `len(FIX_MATRIX)` printed from an import, not seven added to the last sentence.
+MIN_FIX_MATRIX_ROWS = 74
 
 # 🔴 THE MUTANTS COLUMN IS AN EVIDENCE CLAIM, AND IT WAS UNGRADED.
 # `fix_matrix_problems` took `_mutants` and threw it away, so rewriting a
@@ -5209,12 +5824,6 @@ MIN_FIX_MATRIX_ROWS = 67
 # base-ref cell having been set to `GUARD` precisely because there is no base
 # ref to point at. It is now resolved against the harness's OWN `ROWS`.
 MUTANT_HARNESS = REPO / "scripts" / "tests" / "mutants-audit-dispatch.py"
-
-# The one evidence token that is legitimately not a mutant: a guard over this
-# module's own bookkeeping, which the battery cannot reach because it mutates
-# the SCRIPT and never this file. Spelled as a sentinel rather than as prose so
-# it cannot be confused with a column somebody forgot to fill in.
-IN_MODULE_CONTROL = "IN-MODULE CONTROL"
 
 
 def _known_mutant_ids():
