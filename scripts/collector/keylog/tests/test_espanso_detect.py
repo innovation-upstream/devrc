@@ -630,7 +630,20 @@ _EXISTING_RESOLUTIONS = [
     # labelled with the word "task" silently takes it, because 'ask' ⊂ 'task'
     # — that exact mutant survived a full green suite on 2026-08-19.
     ("ask", ":acq"),
-    ("feedback", ":acq"), ("dispatch", ":acq"), ("process", ":acq"),
+    # 2026-08-28: :acq SPLIT into :dacq (dispatch) + :acq (the bare ask), so
+    # these three moved to :dacq — a RETARGET, not a relaxation: each still
+    # pins a unique resolution, and the pair below pins the split itself.
+    # Retargeting is only legitimate because the snippet they name was renamed;
+    # had the term merely gone ambiguous, the fix would be the config, not this
+    # table (see the ANTI-VACUITY note on the test that reads it).
+    ("feedback", ":dacq"), ("dispatch", ":dacq"), ("process", ":dacq"),
+    # The split's own guard. 'ask' above must NOT drift to :dacq, and these
+    # must NOT drift back to :acq — the failure mode is one snippet's label or
+    # search_terms swallowing the other's interface words. `_token_matches`
+    # reads the LABEL too, so this fails if either label regains the other's
+    # vocabulary, not only if search_terms do.
+    ("clarify", ":acq"), ("questions", ":acq"),
+    ("elicit", ":dacq"), ("subagent", ":dacq"),
     ("cc", ":cc"), ("kubecl", ":kuc"), ("spine", ":csc"), ("orch", ":cmo"),
     ("home", ":hlt"), ("prod", ":cpk"), ("datap", ":cdp"), ("civit prod", ":cpk"),
 ]
