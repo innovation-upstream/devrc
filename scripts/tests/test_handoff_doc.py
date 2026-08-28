@@ -2540,6 +2540,84 @@ class TestSkillAndModuleAgree:
         assert 0 < len(clause) < 400, f"the locator returned {len(clause)} bytes"
         assert clause.startswith(f"`{hd.MARK_FENCED}`")
 
+    # --- the OTHER prose claim round 4 corrected, and the one nothing pinned ---
+    #
+    # 🔴 THE EXISTING `SKILL_PINS` ENTRY CANNOT SEE THIS DRIFT. That entry is the
+    # substring "`forcing = gate` **with a listed kind**" — which the round-3
+    # wording ALSO contains, verbatim, because the correction moved the
+    # parenthetical rather than the phrase the pin quotes. So the pin is green
+    # against both the true and the false sentence and distinguishes nothing.
+    #
+    # 🔴 WHOLE NORMALISED STRING, for the same reason `_FENCED_REMEDY` is one.
+    _NEAR_MISS_CLAUSE = (
+        "`forcing function:`/`forcing = gate` **with a listed kind** "
+        "(unlisted reads ABSENT), and a fenced field regardless of kind, are "
+        "**near-misses, NAMED** not absent."
+    )
+
+    def _near_miss_clause(self) -> str:
+        """Step 3's near-miss sentence, LOCATED not restated.
+
+        Bounded by the 📖 reference marker that closes every clause in this
+        block, so the locator cannot silently widen to the rest of the file."""
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        start = doc.index("`forcing function:`")
+        return self._norm(doc[start : doc.index("📖", start)])
+
+    def test_the_skill_binds_UNLISTED_reads_ABSENT_to_the_right_antecedent(
+        self,
+    ) -> None:
+        """🔴 RED at `6a862d8c`, where the clause read "…**with a listed kind**,
+        and a fenced field, are **near-misses, NAMED** not absent (an unlisted
+        kind there reads ABSENT)". "there" sat against its nearest antecedent,
+        "a fenced field" — for which it is FALSE.
+
+        RE-MEASURED 2026-08-28 at `976b09b5`, both sides of the distinction:
+
+            fenced `forcing: followup`   -> fenced=True  -> row `[fenced]`
+            fenced `forcing: gate`       -> fenced=True  -> row `[fenced]`
+            `forcing = followup`         -> row `[no forcing: field]`
+            `forcing = gate`             -> row `[unparsed forcing field on: …]`
+
+        i.e. `fenced` is `any(_FORCING.search(ln) …)` and never consults
+        `FORCING_KINDS`, so an unlisted kind inside a fence is NAMED, not
+        absent. Only the `forcing function:` / `forcing = …` spellings fall
+        through to `[no forcing: field]`, because `_FORCING_ATTEMPT` is anchored
+        on the closed vocabulary. Round 4 rebound the parenthetical to those.
+
+        ⚠ NOT regression coverage — the sentence is already correct here. It is
+        the guarantee it never got: the only `SKILL_PINS` entry over it is a
+        substring of the FALSE wording too (see the comment above), so the
+        correction was revertible with the whole suite green.
+
+        Shown reachable by the `skill-near-miss-clause-rebound-to-the-fence`
+        row in `scripts/tests/mutants-handoff-cap.sh`."""
+        assert self._near_miss_clause() == self._norm(self._NEAR_MISS_CLAUSE), (
+            "claude/skills/handoff/SKILL.md's step-3 near-miss sentence no "
+            "longer reads as pinned. If '(unlisted reads ABSENT)' drifted back "
+            "onto 'a fenced field', that is the MEASURED-FALSE binding — a "
+            "fenced field with an unlisted kind is reported `[fenced]`, not "
+            "absent, because `fenced` never consults FORCING_KINDS. Re-measure "
+            "before rewording, and update _NEAR_MISS_CLAUSE in the SAME commit "
+            "for a deliberate reword."
+        )
+
+    def test_the_near_miss_clause_locator_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL on `_near_miss_clause`, in both directions a locator
+        can be vacuous. The PREDICATE half feeds it the round-3 sentence this
+        suite refuses and shows the comparison goes false — an equality that
+        could only ever hold would be caught here. The LOCATOR half shows the
+        return is bounded rather than the whole document, and anchored where it
+        claims to be rather than empty."""
+        clause = self._near_miss_clause()
+        assert self._norm(self._NEAR_MISS_CLAUSE) != self._norm(
+            "`forcing function:`/`forcing = gate` **with a listed kind**, and a "
+            "fenced field, are **near-misses, NAMED** not absent (an unlisted "
+            "kind there reads ABSENT)."
+        )
+        assert 0 < len(clause) < 400, f"the locator returned {len(clause)} bytes"
+        assert clause.startswith("`forcing function:`")
+
     def test_the_tool_is_tracked_by_git(self) -> None:
         """A new file the flake never sees deploys as an absence, silently.
 
@@ -4254,6 +4332,64 @@ class TestTheWIDENINGDidNotOpenTwoHOLES:
             "boundary."
         )
 
+    #: The whole of `MISSING_FIELD_REMEDY`, normalised.
+    #:
+    #: 🔴 A WHOLE STRING, DELIBERATELY, and the same discipline as
+    #: `TestSkillAndModuleAgree._FENCED_REMEDY`. `claude/RULES.md`: when the
+    #: artifact under test IS prose, a guard on WORDS is walkable by REWORDING —
+    #: pin the WHOLE normalised string. A cosmetic reword then costs a test edit;
+    #: that price is the point, because it is what makes the claim
+    #: machine-readable.
+    #:
+    #: 🔴 A LITERAL, NOT `hd.MISSING_FIELD_REMEDY`. The test above asserts the
+    #: constant reaches stderr by comparing the constant against the output that
+    #: PRINTED it — self-referential, so it is the BEHAVIOURAL half and any
+    #: reword passes it. That is what left this clause unguarded.
+    _MISSING_REMEDY = (
+        "Tag each item marked [no forcing: field] above. A continuation line "
+        "counts — the field does not have to sit on the numbered line, but it "
+        "MUST be INDENTED: a flush-left line ENDS the item once a blank has "
+        "intervened, so a tag at column 0 below one is outside the item and "
+        "reads as absent."
+    )
+
+    def test_the_missing_field_remedy_states_the_walks_ACTUAL_boundary(self) -> None:
+        """🔴 THE SCOPE, PINNED. At `6a862d8c` this remedy printed the
+        unqualified "a flush-left line ENDS the item", which is FALSE: the walk
+        breaks on an unindented line only ONCE A BLANK HAS INTERVENED.
+        RE-MEASURED 2026-08-28 at `976b09b5`, both points, `ranked_items` on
+        `## Next steps (ranked)\\n1. Fix A.\\n` plus a col-0 `forcing: gate`:
+
+            no blank between them -> kind='gate'   (the tag PARSES)
+            a blank between them  -> kind=None     (the tag is DROPPED)
+
+        So the unqualified sentence was wrong in the first case, and it
+        contradicted write-gate.md, the constant's own `#:` comment and
+        SKILL.md, all three of which were already scoped.
+
+        ⚠ NOT regression coverage — round 4 already corrected the wording. This
+        is the GUARANTEE that correction never got, labelled as one: the
+        clause was revertible with the whole suite green, because the only
+        assertion over it was the self-referential one in the test above.
+
+        The BEHAVIOURAL half — that this constant actually reaches an
+        executor's stderr rather than sitting unprinted — is
+        `test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT`
+        directly above; a literal-only check would type-check past a constant
+        nobody prints.
+
+        Shown reachable by the `missing-field-remedy-scope-unqualified` row in
+        `scripts/tests/mutants-handoff-cap.sh`."""
+        assert " ".join(hd.MISSING_FIELD_REMEDY.split()) == " ".join(
+            self._MISSING_REMEDY.split()
+        ), (
+            "MISSING_FIELD_REMEDY no longer reads as pinned. If the boundary "
+            "clause was re-widened to a bare 'a flush-left line ENDS the item', "
+            "that is the MEASURED-FALSE wording — a col-0 tag with no blank "
+            "before it parses fine. Re-measure before rewording, and update "
+            "_MISSING_REMEDY in the SAME commit for a deliberate reword."
+        )
+
     @pytest.mark.parametrize(
         "tagline",
         (
@@ -4492,7 +4628,17 @@ class TestTheWIDENINGDidNotOpenTwoHOLES:
         character class is added; the params above are the census, and what the
         comment owes is the SHAPE — that the scope is stated by POSITION rather
         than by a list of examples, which is the failure mode that undercounted
-        it twice."""
+        it twice.
+
+        Shown reachable by the `ascii-scope-narrowed-off-every-position`,
+        `admissions-restated-as-a-list` and `retired-count-back-in-the-comment`
+        rows in `scripts/tests/mutants-handoff-cap.sh` — one per assertion,
+        because a mutant that gutted the paragraph would die to whichever
+        assertion runs first and prove nothing about the other two.
+
+        ⚠ `assert "an ASCII letter" in src` has NO row of its own. It is the
+        antecedent the `AT EVERY POSITION` clause qualifies, and that row moves
+        the clause rather than this phrase; it is carried, not shown reachable."""
         src = TOOL.read_text(encoding="utf-8")
         assert "an ASCII letter" in src
         assert "AT EVERY POSITION" in src

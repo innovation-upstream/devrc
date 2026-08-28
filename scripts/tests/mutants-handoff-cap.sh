@@ -94,10 +94,12 @@ ROWS=0
 # 🔴 A SUITE THAT NEVER RAN YIELDS ZERO `FAILED` LINES, i.e. "clean", so a
 # harness wired to nothing would score every mutant SURVIVED and every SURVIVES
 # control ok. Count the tests that ran and refuse below a floor. The floor
-# catches COLLAPSE, not growth — deliberately far under the real count (268 as
+# catches COLLAPSE, not growth — deliberately far under the real count (271 as
 # of 2026-08-28; 222 → 237 when the fence/underscore round added 15, → 261 when
 # the round-3 fixes added the legend seam and the anchor/admission pins, → 268
-# when round 4 replaced the anchor params with the full 5x2 position grid).
+# when round 4 replaced the anchor params with the full 5x2 position grid, → 271
+# when round 5 pinned the two round-4 prose corrections that were still
+# revertible with the suite green, plus a locator control for the new one).
 MIN_TESTS=180
 failing() {
   local out n f total
@@ -389,6 +391,20 @@ run 'fenced-remedy-reverted-to-bare-move-it-out' \
 run 'missing-field-remedy-omits-the-indent' \
   test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT \
   '/^    "be INDENTED: a flush-left/d;/^    "so a tag at column 0 below one/d;/^    "counts — the field does not have to sit on the numbered line, but it MUST "$/c\    "counts — the field does not have to sit on the numbered line."'
+# 🔴 THE SCOPE OF THAT SAME REMEDY, ISOLATED FROM THE INDENT IMPERATIVE ABOVE.
+# The row above deletes the whole clause; this one keeps "MUST be INDENTED" and
+# reverts ONLY the explanation to the unqualified "a flush-left line ENDS the
+# item" it carried at `6a862d8c` — the wording round 4 measured FALSE (a col-0
+# tag with NO blank before it parses: kind='gate'). Re-measured 2026-08-28.
+#
+# 🔴 IT IS THE ROW THAT SHOWS THE OLD ASSERTION WAS VACUOUS. Under this mutant
+# `test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT` stays
+# GREEN — its first assertion compares the constant against the output that
+# printed that same constant, and its second ("MUST be INDENTED") is untouched.
+# Only the whole-string pin can see it, which is why that pin was added.
+run 'missing-field-remedy-scope-unqualified' \
+  test_the_missing_field_remedy_states_the_walks_ACTUAL_boundary \
+  's|ENDS the item once a blank has intervened, "|ENDS the item, so a tag at column 0 under "|;s|"so a tag at column 0 below one is outside the item|"it is outside the item|'
 # 🔴 THE SKILL-SIDE ROW — the first mutation in this battery that is NOT to the
 # module. It puts SKILL.md's step-5 legend back to the bare "move it out of the
 # fence" it carried at `e34ed6ef`, i.e. the executor's only map telling them to
@@ -397,6 +413,20 @@ run 'missing-field-remedy-omits-the-indent' \
 run_skill 'skill-legend-says-only-move-it-out' \
   test_the_skill_legend_does_not_tell_the_executor_to_promote_a_quote \
   's@\*\*yours[^*]*\*\*[^.]*\.@move it out of the fence.@'
+# 🔴 THE SECOND SKILL-SIDE ROW, and a DIFFERENT sentence — step 3's near-miss
+# clause, not the step-5 legend. It reverts the parenthetical to where it sat at
+# `6a862d8c`, against its nearest antecedent "a fenced field", for which it is
+# FALSE: `fenced` is `any(_FORCING.search(ln) …)` and never consults
+# `FORCING_KINDS`, so a fenced `forcing: followup` is reported `[fenced]`, not
+# absent. Re-measured 2026-08-28.
+#
+# 🔴 AND IT SHOWS WHY A `SKILL_PINS` ENTRY WAS NOT ENOUGH. The pin over this
+# sentence is the substring "`forcing = gate` **with a listed kind**", which the
+# reverted text still contains verbatim — so `test_skill_pins` stays GREEN under
+# this mutant and only the whole-string clause pin can see it.
+run_skill 'skill-near-miss-clause-rebound-to-the-fence' \
+  test_the_skill_binds_UNLISTED_reads_ABSENT_to_the_right_antecedent \
+  's|\*\*with a listed kind\*\* (unlisted reads ABSENT), and a fenced field regardless of kind, are \*\*near-misses, NAMED\*\* not absent\.|**with a listed kind**, and a fenced field, are **near-misses, NAMED** not absent (an unlisted kind there reads ABSENT).|'
 # 🔴 THE SEAM ROW. Renames a marker in the module. SKILL.md's step-5 legend is
 # the executor's only map from a marker to what to do about it, and a rename that
 # left the legend behind would keep every SKILL_PIN green.
