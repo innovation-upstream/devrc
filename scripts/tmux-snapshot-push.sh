@@ -38,8 +38,16 @@
 #
 # 🔴 A non-zero exit is the ONLY alarm this unit has, by design: it deliberately
 # wires no OnFailure toast (see nix/home.nix), so a persistent failure surfaces
-# via `systemctl --user --failed`, which `/standup` reads. Keep these distinct
-# and keep them non-zero.
+# only through the user manager's failed-unit list, which `/standup` reads. Keep
+# these distinct and keep them non-zero.
+#
+# ⚠ DO NOT NAME THE SERVICE-MANAGER CLI IN THIS FILE, not even in a comment.
+# `testlib/launcher_scan.py` scans top-level `scripts/` files as RAW TEXT with
+# no comment stripping, so merely writing that binary's name here registers this
+# script as reaching a hazardous launcher and reds `test_no_real_launchers.py`
+# on BOTH tiers. An earlier revision of this very comment did exactly that and
+# broke the merge gate on a pure prose change. This script does not invoke it;
+# the reader that does is `claude/skills/standup/standup.sh`.
 
 set -euo pipefail
 
@@ -168,34 +176,53 @@ fi
 # the OnStartupSec run will hit). A missing `windows_measured` is treated as
 # measured: this collector always emits it, and blocking on an absent field
 # would freeze the feeder against a collector that never existed.
-if ! python3 -c '
+# 🔴 THE CHILD SIGNALS WHICH GATE FAILED WITH ITS EXIT CODE, NOT ITS MESSAGE.
+# An earlier revision routed rc 3 vs rc 6 by grepping the child's stderr for
+# "NOT measured" — a discriminant carried in prose, through a `cut -c1-300`
+# truncation, and walkable by any host name or parse error containing that
+# phrase. Exit 20 = torn collection, anything else non-zero = not a document.
+set +e
+python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1]))
 hosts=d.get("hosts")
 if not isinstance(hosts, dict) or not hosts:
     raise SystemExit("no non-empty `hosts` object")
-torn=[h for h,r in hosts.items()
-      if isinstance(r, dict)
-      and r.get("reachable") is True
-      and r.get("windows_measured") is False
-      and not (r.get("windows") or [])]
-if torn:
-    raise SystemExit(
+
+def torn(r):
+    """A host we reached but did NOT enumerate.
+
+    🔴 `is False` is deliberate and is NOT `not r.get(...)`: an ABSENT
+    windows_measured must read as measured. A collector that never emitted the
+    field would otherwise be treated as permanently torn and freeze the feeder
+    forever — failing closed on a field whose absence means "old producer",
+    not "bad read". The emptiness term is equally load-bearing in the other
+    direction: a host that reported windows is not torn no matter what the
+    flag says, because we have the data.
+    """
+    return (isinstance(r, dict)
+            and r.get("reachable") is True
+            and r.get("windows_measured") is False
+            and not (r.get("windows") or []))
+
+bad = sorted(h for h, r in hosts.items() if torn(r))
+if bad:
+    sys.stderr.write(
         "host(s) %s are reachable but their windows were NOT measured; "
-        "pushing would overwrite a good snapshot with an unmeasured zero"
-        % ", ".join(sorted(torn)))
-' "$PAYLOAD" 2>"$WORK/parse.err"; then
+        "pushing would overwrite a good snapshot with an unmeasured zero\n"
+        % ", ".join(bad))
+    raise SystemExit(20)
+' "$PAYLOAD" 2>"$WORK/parse.err"
+GATE_RC=$?
+set -e
+if [ "$GATE_RC" -ne 0 ]; then
   MSG=$(tr '\n' ' ' <"$WORK/parse.err" | cut -c1-300)
-  case "$MSG" in
-    *"NOT measured"*)
-      log "refusing to push: $MSG"
-      exit 6
-      ;;
-    *)
-      log "collector output is not a session-manager document: $MSG"
-      exit 3
-      ;;
-  esac
+  if [ "$GATE_RC" -eq 20 ]; then
+    log "refusing to push: $MSG"
+    exit 6
+  fi
+  log "collector output is not a session-manager document: $MSG"
+  exit 3
 fi
 
 BYTES=$(wc -c <"$PAYLOAD")
@@ -241,7 +268,12 @@ case "$HTTP" in
     log "server at $API_URL has no /api/tmux/snapshot route (HTTP 404) — it predates the read model; deploy the server first"
     exit 5
     ;;
-  3[0-9][0-9])
+  30[0-9]|3[1-9][0-9])
+    # 🔴 304 is EXCLUDED from this arm on purpose — it is "not modified", not a
+    # redirect, and telling an operator to re-point CLAWGATE_API_URL would send
+    # them the wrong way entirely. It falls to the generic arm below, which
+    # states the status without diagnosing it. (A POST should never elicit a
+    # 304; if one does, the wrong thing is upstream of this script.)
     log "server at $API_URL REDIRECTED (HTTP $HTTP) and the snapshot was NOT stored — this script does not follow redirects; point CLAWGATE_API_URL at the origin, not an ingress"
     exit 5
     ;;

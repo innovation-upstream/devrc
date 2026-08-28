@@ -389,6 +389,28 @@ def test_a_REDIRECT_is_a_failure_not_a_silent_success(collector, tmp_path, statu
     assert "pushed" not in proc.stdout
 
 
+def test_304_is_rejected_WITHOUT_being_called_a_redirect(collector, tmp_path):
+    """304 is "not modified", not a redirect. Lumping it into the 3xx arm told
+    the operator to re-point CLAWGATE_API_URL at the origin — a diagnosis that
+    would send them off in entirely the wrong direction. It must still fail
+    (nothing was stored), just without the misleading advice."""
+    srv = _Recorder(("127.0.0.1", 0), _Handler, status=304, body=b"")
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        proc = run_push(
+            collector_path=collector(json.dumps(SAMPLE_DOC)),
+            tmp_path=tmp_path,
+            env_extra={"CLAWGATE_API_URL": base_url(srv), "CLAWGATE_HOOK_TOKEN": "t"},
+        )
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert proc.returncode == 5, proc.stdout + proc.stderr
+    assert "REDIRECT" not in proc.stdout, proc.stdout
+    assert "304" in proc.stdout
+
+
 def test_a_TORN_collection_is_refused_rather_than_overwriting_a_good_snapshot(
     server, collector, tmp_path
 ):
@@ -434,6 +456,57 @@ def test_an_UNREACHABLE_host_is_still_pushed(server, collector, tmp_path):
             "workbench": {"reachable": True, "windows_measured": True,
                           "windows": [{"window_id": "@1", "session": "s"}]},
             "laptop": {"reachable": False, "windows_measured": False, "windows": []},
+        },
+    }
+    proc = run_push(
+        collector_path=collector(json.dumps(doc)),
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert len(server.requests) == 1
+
+
+def test_an_ABSENT_windows_measured_reads_as_MEASURED_not_as_torn(
+    server, collector, tmp_path
+):
+    """🔴 Pins the safety property the gate's own comment spends three lines on,
+    and which a mutation survey found UNGUARDED.
+
+    `windows_measured is False` is not `not windows_measured`. A producer that
+    never emitted the field must read as measured — otherwise every host looks
+    permanently torn and the feeder freezes forever, failing closed on a field
+    whose absence means "older collector", not "bad read". A mutant relaxing the
+    test to `is not True` survived the suite before this existed.
+    """
+    doc = {
+        "ts": "2026-08-28T17:04:13Z",
+        "hosts": {"workbench": {"reachable": True, "windows": []}},  # no windows_measured
+    }
+    proc = run_push(
+        collector_path=collector(json.dumps(doc)),
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert len(server.requests) == 1
+
+
+def test_a_host_that_REPORTED_windows_is_not_torn_whatever_the_flag_says(
+    server, collector, tmp_path
+):
+    """The other half of the same predicate, also found unguarded: the emptiness
+    term. If we have the windows, we have the data — the flag cannot make that
+    a tear, and dropping the emptiness check would refuse a perfectly good
+    snapshot."""
+    doc = {
+        "ts": "2026-08-28T17:04:13Z",
+        "hosts": {
+            "workbench": {
+                "reachable": True,
+                "windows_measured": False,          # says unmeasured …
+                "windows": [{"window_id": "@1", "session": "s"}],  # … but we HAVE windows
+            }
         },
     }
     proc = run_push(
@@ -715,15 +788,22 @@ def test_the_unit_PATH_carries_every_binary_the_collector_needs():
     """🔴 A SEAM TEST, and the reason it exists is a measured one.
 
     Under systemd there is no login-shell PATH. `session-manager` has a
-    `python3` shebang, shells out to `tmux`, SSHes to the laptop and reads
-    interface addresses to decide which host it is on. drift-check.service
-    already had to learn this the hard way: without those binaries its child
-    reported COULD NOT MEASURE on every run forever, from a unit that looked
-    correct.
+    `python3` shebang, shells out to `tmux`, SSHes to the laptop (openssh), and
+    runs `awk` via `agent_ledger.py`. drift-check.service already had to learn
+    this the hard way: without its binaries its child reported COULD NOT MEASURE
+    on every run forever, from a unit that looked correct.
 
-    This pins the RELATIONSHIP (unit PATH ⊇ what the child needs), not the
-    presence of a PATH= line — a unit with a PATH naming none of these would
-    satisfy the weaker check while being exactly as broken.
+    ⚠ THIS DOCSTRING USED TO SAY the collector "reads interface addresses to
+    decide which host it is on", justifying `iproute2`. It does not —
+    `local_host_label` reads ACTIVITY_HOST from the environment. That sentence
+    was the audit finding that got iproute2 removed, and removing gawk in the
+    same sweep is what broke the ledger, because nothing here listed it.
+
+    ⚠ AND IT OVERSTATES ITSELF: it says RELATIONSHIP (unit PATH ⊇ what the child
+    needs), but the body checks a HAND-TYPED list of names. It pins what someone
+    remembered, not what the child calls — which is exactly how gawk went
+    missing while this test stayed green. Treat the list below as a ledger to
+    maintain, and re-measure by RUNNING the collector before removing an entry.
     """
     src = HOME_NIX.read_text()
     marker = "systemd.user.services.tmux-snapshot-push"
@@ -734,12 +814,21 @@ def test_the_unit_PATH_carries_every_binary_the_collector_needs():
     path_lines = [ln for ln in block.splitlines() if "PATH=" in ln]
     assert path_lines, "the unit sets no PATH — the collector will not run under systemd"
     path_line = path_lines[0]
-    # MEASURED requirements, not a copied list. session-manager's only external
-    # commands are tmux and ssh (plus its own python3 shebang); the pusher adds
-    # curl, sed and coreutils. An earlier version of this test also asserted
-    # `iproute2`, which nothing uses — a guard whose docstring claimed to pin a
-    # RELATIONSHIP while pinning a binary the relationship does not contain.
-    for needed in ("python3", "tmux", "openssh", "coreutils", "curl", "gnused", "bash"):
+    # 🔴 `gawk` IS ON THIS LIST BECAUSE ITS ABSENCE IS SILENT, and this guard is
+    # why it went missing: an earlier revision dropped gawk from the unit and
+    # from this list in the same commit, so nothing reddened. The collector's
+    # `agent_ledger.read_command` runs `awk 1 …`, and awk lives only in gawk —
+    # coreutils has none. Without it the ledger read returns a well-formed
+    # ZERO (the `2>/dev/null; exit 0` hides the error while the `echo` sentinel
+    # still prints), and 34 of 45 workbench windows silently lose `runtime` and
+    # their ledger-derived age. Measured both ways on this host.
+    #
+    # This list is hand-maintained, which is the honest limitation: it pins what
+    # someone thought to write down, not what the child actually calls. The
+    # docstring above says RELATIONSHIP and this is the weaker thing. Before
+    # removing any entry here, RUN the collector without it and compare the
+    # report — `iproute2` and `gnugrep` were removed that way and stay removed.
+    for needed in ("python3", "tmux", "openssh", "coreutils", "curl", "gnused", "bash", "gawk"):
         assert needed in path_line, f"{needed} missing from the unit PATH: {path_line}"
 
 
@@ -801,9 +890,15 @@ def test_the_unit_does_not_wire_the_DND_defeating_failure_toast():
     fire a DND-bypassing toast on every tick and burn down the one alert channel
     that must keep its meaning.
 
-    The pusher's staleness is already visible where it belongs: the server
-    stamps `receivedAt` on every snapshot, so a feeder that stopped shows up as
-    an old timestamp in the read model rather than as a notification storm.
+    ⚠ THE COMPENSATING CONTROL IS NOT WHAT THIS DOCSTRING USED TO SAY. It
+    claimed the server's `receivedAt` stamp made a stopped feeder visible as a
+    stale timestamp. Nothing reads `GET /api/tmux/snapshot` outside clawgate's
+    own tests — no UI, no page, no script — so that staleness is recorded and
+    unread. The real control is this unit being `Type=oneshot` with distinct
+    non-zero exit codes, which land in the user manager's failed-unit list that
+    `claude/skills/standup/standup.sh` reads. That covers the exit codes and NOT
+    a run that exits 0 having achieved nothing, which is why the redirect and
+    unmeasured-zero cases are handled in the script instead.
     """
     src = HOME_NIX.read_text()
     marker = "systemd.user.services.tmux-snapshot-push"

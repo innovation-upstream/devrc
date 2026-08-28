@@ -2965,18 +2965,32 @@ in
         # on every run forever, from a unit that looked completely correct.
         #
         # `scripts/session-manager` has a `python3` shebang, shells out to
-        # `tmux`, and SSHes to the laptop (openssh) — MEASURED as its only
-        # external commands. The pusher itself adds curl, sed (gnused) and
+        # `tmux`, SSHes to the laptop (openssh), and — via `agent_ledger.py` —
+        # runs `awk` (gawk). The pusher itself adds curl, sed (gnused) and
         # tr/cut/wc/mktemp/rm/timeout (coreutils).
         #
-        # ⚠ This list previously carried gawk, gnugrep and iproute2, and the
-        # comment justified iproute2 as "reads interface addresses to decide
-        # which host it is on". That is false: `local_host_label` reads
-        # ACTIVITY_HOST from the environment or ~/.config/activity-collector/env.
-        # All three were unused and are gone. Copying drift-check's list without
-        # checking which of it applied is how they got here.
+        # 🔴 `gawk` IS LOAD-BEARING AND ITS ABSENCE IS SILENT. A previous
+        # revision of this list dropped it as "unused", asserting the collector's
+        # only external commands were tmux and ssh. That was wrong and it was
+        # MEASURED wrong: `agent_ledger.read_command` runs
+        # `echo "AGENT_LEDGER_V1 …"; awk 1 "$HOME"/.cache/agent-ledger/*.json
+        # 2>/dev/null; exit 0`, and `awk` lives ONLY in gawk — coreutils has no
+        # awk. The `2>/dev/null; exit 0` swallows "awk: command not found" while
+        # `echo` (a shell builtin) still prints the sentinel, so the parser sees
+        # a well-formed ledger reporting ZERO entries — the fabricated-zero class
+        # that sentinel exists to prevent. Side by side on this host, same run
+        # shape: without gawk, 0 of 45 workbench windows carry `runtime` or
+        # `age_source=ledger`; with it, 34 do. rc 0 and a plausible payload
+        # either way.
+        #
+        # ⚠ `gnugrep` and `iproute2` really were unused and stay dropped — the
+        # old comment justified iproute2 as "reads interface addresses to decide
+        # which host it is on", which `local_host_label` does not do (it reads
+        # ACTIVITY_HOST). Verified by a full production-shape run with neither on
+        # PATH. Trimming a copied list is right; trimming it without running the
+        # child is how gawk got removed.
         # Pinned by `test_the_unit_PATH_carries_every_binary_the_collector_needs`.
-        "PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.curl pkgs.gnused pkgs.openssh pkgs.python3 pkgs.tmux ]}"
+        "PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.curl pkgs.gawk pkgs.gnused pkgs.openssh pkgs.python3 pkgs.tmux ]}"
         "HOME=%h"
         # DEFENSIVE, not a fix for a live defect — and the distinction is
         # recorded because getting it wrong nearly shipped a false claim.
