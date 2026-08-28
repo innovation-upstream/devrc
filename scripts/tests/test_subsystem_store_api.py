@@ -13785,13 +13785,27 @@ def test_the_audit_ORDER_detector_can_SEE_the_defect_it_bans():
     )
     assert swapped != src, "the mutation did not apply — this control is vacuous"
 
+    # 🔴 THE LINE NUMBERS ARE COMPUTED FROM THE MUTATED TEXT THIS TEST OWNS, and
+    # the offender must name BOTH. An earlier draft accepted
+    # `"_audit at line" in offenders[0]`, which every offender string contains by
+    # construction — a disjunction that could not fail, sitting inside the one
+    # test whose whole job is to prove the detector points somewhere real. A
+    # detector that flags the right COUNT at the wrong PLACE sends the next
+    # reader to a site that is fine.
+    audit_line = 1 + swapped.splitlines().index(
+        '        self._audit(path, 405, "method-not-allowed")'
+    )
+    respond_line = audit_line - 1
+
     pairs, offenders = _audit_order(swapped)
     assert len(offenders) == 1, (
         f"the detector saw {len(offenders)} offender(s) in a source with "
         f"exactly one reordered site: {offenders}"
     )
-    assert "_write_route_405" in offenders[0] or "method" in offenders[0] \
-        or "_audit at line" in offenders[0], offenders
+    assert (
+        f"_audit at line {audit_line} follows a response at line {respond_line}"
+        in offenders[0]
+    ), (offenders, audit_line, respond_line)
     assert pairs == _AUDIT_BEFORE_RESPOND_PAIRS - 1, (
         f"the pair census did not move when a pair was broken: {pairs}"
     )
