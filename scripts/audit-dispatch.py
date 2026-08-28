@@ -1529,8 +1529,21 @@ def unresolved_tip_note(facts, with_reason=True):
         return ""
     hc = facts.head_check
     lookup = f"gh pr view {facts.pr} --json headRefOid"
+    # 🔴 ROUND 12 — `--repo` IS NEVER OMITTED. Dropping it when the PR's
+    # repository is unknown hands over a bare `gh pr view 900 --json
+    # headRefOid`, which resolves against whatever repository the auditor's
+    # CWD is in — and this note renders in briefs whose WHERE TO WORK section
+    # has just told them that is a DIFFERENT repository. It would return a sha
+    # at rc 0, for another project's PR #900. A `<...>` fill-in cannot run
+    # until the operator supplies the answer, which is the honest outcome for
+    # a fact this run never learned.
     if facts.repo != REPO_UNKNOWN:
         lookup += f" --repo {facts.repo}"
+    else:
+        lookup += (
+            " --repo <owner/name — this run never learned which repository "
+            "the PR is in>"
+        )
     reason = (
         f"\n\n    {hc.reason if hc is not None else 'no check was made'}\n\n"
         if with_reason else " "
@@ -1601,6 +1614,14 @@ def cross_repo_holds_neither_end(facts):
     So the question both sites ask is this one, and it asks the head check
     FIRST: claim the structural impossibility only once the sha comparison has
     actually failed.
+
+    🔴 ROUND 12 — WHAT IT ESTABLISHES IS NARROWER THAN ITS NAME, and both
+    consumers now say so. A failed head check means this checkout is not
+    STANDING on the PR's head; it says nothing about whether either commit
+    EXISTS in the object store, and a mirror or a fork remote behind the PR
+    can hold the round's anchor sha perfectly well. So the rendered sentences
+    read "not confirmed to hold either end" rather than "holds neither end" —
+    the measured claim, not the stronger one it was being read as.
     """
     hc = facts.head_check
     if hc is not None and hc.ok:
@@ -1718,7 +1739,7 @@ def render_range(facts):
             "So the range above names the PR's head SHA outright — read from "
             "`gh pr view --json headRefOid`, not resolved in any tree. Both of "
             "its ends exist in YOUR worktree, the one WHERE TO WORK told you to "
-            "make, and neither exists here."
+            "make, and neither is confirmed here."
             if range_tip_is_a_sha(facts)
             else unresolved_tip_note(facts, with_reason=False)
         )
@@ -1957,9 +1978,9 @@ def render_ledger(facts):
             "true of every round of this PR and not a failure of this run.** "
             f"The PR lives in `{facts.repo}`; this brief was assembled in "
             f"`{facts.cwd_repo_slug or facts.cwd_repo_dir}`, a DIFFERENT "
-            "repository, which holds neither end of the range. A number "
-            "measured here would be a measurement of another project, so none "
-            "is printed.",
+            "repository, which is not confirmed to hold either end of the "
+            "range. A number measured here would be a measurement of another "
+            "project, so none is printed.",
             "",
             "🔴 **THE ATTRIBUTION GATE IS YOURS THIS ROUND — it is not "
             "optional and nobody else can compute it.** The ladder ends on two "

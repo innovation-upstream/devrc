@@ -2663,6 +2663,11 @@ TIP_PLACEHOLDER_BANNER = "THE TIP OF THAT RANGE IS A PLACEHOLDER, NOT A SHA"
 # is what keeps the two in step.
 TIP_PLACEHOLDER_TEXT = "<the PR's head sha>"
 
+# The `gh pr view … --json headRefOid` command the placeholder banner hands
+# over. Matched up to the closing backtick that ends the inline code span, so
+# a missing `--repo` is visible as an absence in the captured text.
+_HEAD_OID_LOOKUP = re.compile(r"`(gh pr view [^`]*--json headRefOid[^`]*)`")
+
 
 def test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha():
     """🔴 REGRESSION. Red at `706a6b38`, scenario `cross-repo-delta-no-head-sha`.
@@ -2694,7 +2699,7 @@ def test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha():
     branch. A fix scoped to the branch the finding was filed against would
     leave that one unguarded, which is this ladder's most-repeated defect.
     """
-    seen = 0
+    seen = lookups = 0
     for scenario in SCENARIOS:
         brief = brief_for_scenario(scenario)
         if TIP_PLACEHOLDER_TEXT not in brief:
@@ -2712,11 +2717,40 @@ def test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha():
             "PR's head sha outright, in a run whose own reason line says it "
             "never learned that field. One of the two sentences is false."
         )
+        # 🔴 ROUND 12 — AND THE COMMAND IT HANDS OVER MUST NAME A REPOSITORY.
+        # `--repo` used to be dropped whenever the PR's repo was UNKNOWN,
+        # handing over a bare `gh pr view 900 --json headRefOid` that resolves
+        # against the auditor's CWD — in a brief that may have just told them
+        # that is a DIFFERENT repository from the PR's. It returns a sha, at
+        # rc 0, for another project's PR #900. Driven by
+        # `claims-file-assumed-base`, whose payload carries no `url` and so
+        # reaches `REPO_UNKNOWN`.
+        for lookup in _HEAD_OID_LOOKUP.findall(brief):
+            lookups += 1
+            assert "--repo " in lookup, (
+                f"\n\nscenario {scenario!r}: the brief tells the auditor to "
+                f"resolve the tip with `{lookup}` — no `--repo`, so it "
+                "resolves against whatever repository their shell is standing "
+                "in and answers about a DIFFERENT PR of the same number, at "
+                "rc 0. When this run never learned the PR's repository the "
+                "honest hand-over is a `<...>` fill-in, which cannot run "
+                "until the operator supplies it."
+            )
     assert seen, (
         "no scenario renders an unresolved tip, so the loop above asserted "
         "nothing. `cross-repo-delta-no-head-sha` and `delta-no-head-sha` are "
         "what put the placeholder in a brief; if they were dropped or their "
         "`headRefOid` came back, this guard covers nothing."
+    )
+    # 🔴 POSITIVE CONTROL for the `--repo` arm: a regex that matches nothing
+    # reports a clean zero indistinguishable from a brief that never hands the
+    # command over. The number has to have moved.
+    assert lookups, (
+        f"{seen} scenario(s) render an unresolved tip and NONE of them spells "
+        "a `gh pr view … --json headRefOid` command the regex can see, so the "
+        "`--repo` assertion above ran zero times. Either the hand-over stopped "
+        "being rendered or `_HEAD_OID_LOOKUP` no longer matches how it is "
+        "spelled."
     )
     # 🔴 POSITIVE CONTROL for the OTHER side: a scenario with a real tip must
     # still get the confident sentence, or the fix above is "delete the claim"
@@ -3120,7 +3154,29 @@ def scenario_checkout_stands_on_the_pr(name):
 
 
 def test_no_brief_claims_a_verification_its_own_fixture_refutes():
-    """🔴 THE SEAM GUARD, and it is also this module's fixture guard.
+    """🔴 THE SEAM GUARD over the brief's claim and the fixture's own model.
+
+    🔴 ROUND 12 CORRECTED THIS HEADING. It used to read "and it is also this
+    module's fixture guard", which is a coverage claim this test does not
+    support: the assertion and the fake BOTH resolve the checkout's HEAD
+    through `fixture_resolved_head`, so a defect IN that function moves both
+    sides together and this guard cannot see it. Measured — regressing
+    `fixture_resolved_head` to round 8's behaviour (default to the PR's own
+    `headRefOid` regardless of repo) leaves THIS TEST GREEN — 4 failed, 105
+    passed, and this is not one of the four. Coverage is not lost; it lives in
+    those four:
+
+        test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout
+        test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor
+        test_a_cross_repo_ledger_prints_a_measurement_the_head_check_vouched_for
+        test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha
+
+    `claude/RULES.md` -> guards-narrower: do not leave a description wider
+    than the code.
+
+    What it DOES pin is the relationship below — the brief's "verified at
+    assembly time" sentence against the scenario's modelled `rev-parse HEAD`,
+    in any scenario this module knows or later adds.
 
     🔴 INVARIANT GUARD; its evidence is mutant V9, not a base ref. At
     `28492af2` the SCRIPT would pass this — the sentence it forbids appears
