@@ -2465,6 +2465,38 @@ def _float_param(params: dict[str, list[str]], name: str) -> float | None:
         raise ValueError(f"{name} must be a number, got {values[-1]!r}") from None
 
 
+def _print_exc_quietly() -> None:
+    """`traceback.print_exc(file=sys.stderr)`, except that it cannot itself raise.
+
+    🔴 THE BACKSTOP EXISTS FOR THE CASE WHERE THE LOG SINK IS BROKEN, SO IT MAY
+    NOT ASSUME THE LOG SINK WORKS. `_backstop` prints twice — once for the
+    handler's own exception, once for an audit call that raised — and a bare
+    `print_exc` at either site re-raises out of `do_POST` on exactly the failure
+    the backstop was written for: stderr is a closed pipe, a full disk, a
+    replaced `sys.stderr`. MEASURED before this helper existed, with a handler
+    exception and a raising `print_exc` together: `RemoteDisconnected` at the
+    client and ZERO audit lines — no response and no record, which is precisely
+    the outcome `_backstop` prevents in every other shape.
+
+    🔴 ONE HELPER, NOT TWO INLINE `try`s. Both call sites obey one rule — "a log
+    write may never decide whether the request gets answered" — and an
+    open-coded predicate at two sites is one that eventually disagrees with
+    itself. It is also what makes the mutation legible: deleting this `except`
+    is one edit that breaks both sites.
+
+    It swallows the failure and reports NOTHING, deliberately: there is nowhere
+    left to report it TO. The request still gets its answer and, where the sink
+    is alive, its audit line — which is the record that matters.
+
+    Called only from inside an `except` block: `sys.exc_info()` is thread-state,
+    so the exception being handled is still the one printed from in here.
+    """
+    try:
+        traceback.print_exc(file=sys.stderr)
+    except Exception:  # noqa: BLE001 — see above; there is no onward channel
+        pass
+
+
 class StoreRequestHandler(BaseHTTPRequestHandler):
     """One GET router. Everything else is a 405."""
 
@@ -2597,8 +2629,19 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         `do_POST`, past `handle_one_request`, and the traceback the operator
         needs is replaced by socketserver's. Print, then try; a sink that cannot
         record cannot be made to.
+
+        🔴 AND SO ARE BOTH PRINTS, WHICH IS THE HALF THIS DOCSTRING USED TO
+        CLAIM WITHOUT THE CODE PROVIDING IT. The paragraph above reasons about
+        "the sink is what raised" and then guarded only the `_audit` call, while
+        both `traceback.print_exc` calls stood bare — so a broken STDERR (a
+        closed pipe, a full disk, a replaced `sys.stderr`), which is the same
+        broken-log-sink case, escaped this function entirely. MEASURED with a
+        handler exception and a raising `print_exc` together: `RemoteDisconnected`
+        and ZERO audit lines. Both prints now go through
+        `_print_exc_quietly`, so nothing this function does to LOG can decide
+        whether the request is answered. See that helper.
         """
-        traceback.print_exc(file=sys.stderr)
+        _print_exc_quietly()
         already = self._responded
         if already:
             # Nothing more may be written. Do not reuse this connection either:
@@ -2621,7 +2664,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 "internal-error-after-response" if already else "internal-error",
             )
         except Exception:  # noqa: BLE001 — see the docstring
-            traceback.print_exc(file=sys.stderr)
+            _print_exc_quietly()
 
     def _respond(
         self,

@@ -45,6 +45,7 @@ status strings are all spelled again here by hand. Importing them would assert
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import http.client
 import importlib.util
@@ -1598,7 +1599,11 @@ class TestSnapshotRoute:
             )
         raw = sum(p.stat().st_size for p in store.glob("*/*.md"))
         with running(store) as (base, _):
-            _c, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+            code, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        # 🔴 THE STATUS, FIRST. This used to be `_c, _h, body` — the code
+        # discarded — so a 9-byte error body satisfied `len(body) < raw` and the
+        # test passed having measured no archive at all.
+        assert code == 200, (code, body)
         assert len(body) < raw, (
             f"archive {len(body)}B vs {raw}B of markdown — compression is off "
             f"or PAX overhead is dominating again"
@@ -1759,10 +1764,22 @@ class TestSnapshotRoute:
         assert not any(n.endswith(".txt") for n in names), names
 
     def test_taking_a_snapshot_leaves_the_store_BYTE_IDENTICAL(self, store: Path):
+        """🔴 THE SNAPSHOTS MUST HAVE HAPPENED. Both `fetch` results used to be
+        discarded, so the only assertion was `tree_hash == before` — which a
+        server that answered 401 to everything satisfies perfectly, having
+        touched nothing because it did nothing. "Unchanged" is only a claim
+        about the archiver if the archiver ran.
+        """
         before = tree_hash(store)
         with running(store) as (base, _):
-            fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
-            fetch(f"{base}/api/v1/snapshot?scope={SCOPE}", token=GOOD_TOKEN)
+            whole, _h, whole_body = fetch(
+                f"{base}/api/v1/snapshot", token=GOOD_TOKEN
+            )
+            scoped, _h2, scoped_body = fetch(
+                f"{base}/api/v1/snapshot?scope={SCOPE}", token=GOOD_TOKEN
+            )
+        assert whole == 200, (whole, whole_body)
+        assert scoped == 200, (scoped, scoped_body)
         assert tree_hash(store) == before
 
 
@@ -10306,6 +10323,15 @@ class TestTextIsValidatedAgainstEVERYLineBreak:
     def test_a_LINE_BREAK_in_text_is_400_and_writes_NOTHING(
         self, scoped_store: Path, break_char: str
     ):
+        """⚠ 8 of these 10 are pinned on the MESSAGE, not on this clause: the
+        eight `Cc` characters are ALSO refused by `_FORBIDDEN_CATEGORIES`, so
+        deleting the line-break predicate leaves them 400 with a different
+        sentence. `must be ONE line` is what keeps them honest — it pins WHICH
+        clause wins, a deliberate UX ordering — but the coverage that only this
+        clause can provide is `U+2028`/`U+2029` (`Zl`/`Zp`, not in
+        `_FORBIDDEN_CATEGORIES`), and it is in this same parametrization.
+        Redundancy, accepted and now stated rather than left invisible.
+        """
         before = tree_hash(scoped_store)
         text = f"{BULLET_D}{break_char}OPEN: {BULLET_E}"
         with running(scoped_store, tokens=(ZACH,)) as (base, _):
@@ -11472,6 +11498,150 @@ class TestTheREADDispatchIsBackstoppedToo:
             "result=500" in ln and "status=internal-error-after-response" in ln
             for ln in lines
         ), lines
+
+
+BULLET_SINKLESS = "the gangway sensor sticks when the pontoon ices over"
+
+
+class _RaisingTraceback:
+    """A stand-in for the `traceback` MODULE whose `print_exc` is what is broken.
+
+    🔴 SUBSTITUTED FOR `api.traceback`, NOT FOR `traceback.print_exc` ITSELF.
+    Patching the real module's attribute would break every other importer in the
+    interpreter — pytest's own reporting included — so the swap is scoped to the
+    one module whose behaviour is under test.
+
+    ⚠ HONEST REACHABILITY, stated because it is the weakest part of these two
+    tests: a broken stderr is induced AT `print_exc`, not by closing fd 2 or
+    filling a disk. For the question these tests ask — does a raising log write
+    decide whether the request gets answered — the two are the same
+    control-flow event, and this one is deterministic. `EPIPE` rather than a
+    bare `Exception` because a closed stderr pipe is what actually happens to a
+    pod whose log collector went away, and a guard tuned to a textbook fixture
+    is a guard that has not met production.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def print_exc(self, *_args, **_kwargs):
+        self.calls += 1
+        raise OSError(errno.EPIPE, "stderr is a closed pipe")
+
+
+class TestTheBackstopSurvivesITSOWNLogSink:
+    """🔴 `_backstop`'s FIRST STATEMENT WAS AN UNGUARDED `traceback.print_exc`,
+    AND THE `except` AROUND ITS `_audit` CALL PRINTED AGAIN, ALSO UNGUARDED.
+
+    So the one function whose entire job is "a metered request must never vanish"
+    vanished the request itself whenever the LOG SINK was the broken thing —
+    exactly the case its own docstring reasons about. MEASURED before the fix,
+    handler exception plus a raising `print_exc`: `RemoteDisconnected` at the
+    client, ZERO audit lines.
+
+    NOT a regression: the pre-`ea3d0a16` backstop had the same bare print. What
+    changed is that the docstring grew a paragraph about the broken-sink case and
+    guarded only half of it — the "reads as coverage while providing none" shape,
+    which is worse than no claim because it stops the next reader looking.
+    """
+
+    def test_a_handler_exception_with_a_RAISING_print_exc_STILL_answers_and_audits(
+        self, scoped_store: Path, monkeypatch
+    ):
+        """The FIRST print. Nothing has been sent yet, so the backstop owes a
+        500 and an audit line — and a raising stderr must not cost either."""
+        broken = _RaisingTraceback()
+
+        def boom(*_a, **_k):
+            raise ZeroDivisionError(f"/data/{DENY_SCOPE}/{SESSION_B} before the 200")
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_append_bullet", boom)
+        monkeypatch.setattr(api, "traceback", broken)
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        before = path.read_bytes()
+        body = json.dumps({"text": BULLET_SINKLESS, "session": SESSION_B}).encode()
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            host = base.split("//", 1)[1]
+            raw, _eof = _raw_exchange(
+                host,
+                _request(
+                    host, "POST",
+                    f"/api/v1/entry/{ALLOW_SCOPE}/{entry_ref(ALLOW_SCOPE)}/bullets",
+                    body,
+                ),
+            )
+            answers = _responses(raw)
+            assert len(answers) == 1, (
+                "the request VANISHED — the backstop's own log write took the "
+                f"answer with it: {raw!r}"
+            )
+            assert answers[0].startswith(b"500 "), raw
+            lines = await_audit(audit, 1)
+        monkeypatch.undo()
+
+        # The fixture's own positive control: a `print_exc` that was never
+        # called cannot have been the thing under test.
+        assert broken.calls >= 1, "the broken sink was never reached"
+        assert b"internal error\n" in raw, raw
+        assert any(
+            "result=500" in ln and "status=internal-error" in ln for ln in lines
+        ), lines
+        assert path.read_bytes() == before
+        for leaked in (DENY_SCOPE, "ZeroDivisionError", "closed pipe", "Traceback"):
+            assert leaked.encode() not in raw, (leaked, raw)
+
+    def test_a_RAISING_AUDIT_SINK_AND_a_RAISING_print_exc_still_end_the_request(
+        self, scoped_store: Path, monkeypatch, capfd
+    ):
+        """The SECOND print, on the route the docstring calls the only
+        production-reachable one: the AUDIT SINK is what raised. The append has
+        already answered `200`, so the backstop owes only a log entry — and when
+        the log is what is broken it must end the request cleanly anyway.
+
+        🔴 THE OBSERVABLE IS STDERR, NOT THE WIRE, and that is not a weaker
+        claim — it is the claim. The `200` is already out either way, so with
+        the second print unguarded the exception escapes `do_POST`, past
+        `handle_one_request`, into `socketserver.BaseServer.handle_error`, whose
+        banner replaces the operator's traceback. That banner appearing is the
+        failure.
+        """
+        broken = _RaisingTraceback()
+
+        def no_sink(_self, *_a, **_k):
+            raise OSError(errno.EPIPE, "the audit sink is gone")
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_audit", no_sink)
+        monkeypatch.setattr(api, "traceback", broken)
+        path = entry_file(scoped_store, ALLOW_SCOPE)
+        body = json.dumps({"text": BULLET_SINKLESS, "session": SESSION_A}).encode()
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            host = base.split("//", 1)[1]
+            raw, saw_eof = _raw_exchange(
+                host,
+                _request(
+                    host, "POST",
+                    f"/api/v1/entry/{ALLOW_SCOPE}/{entry_ref(ALLOW_SCOPE)}/bullets",
+                    body,
+                ),
+            )
+        monkeypatch.undo()
+        captured = capfd.readouterr()
+
+        # 🔴 THE WRITE LANDED. Without this every assertion below is satisfied by
+        # a server that refused the append and therefore had nothing to audit.
+        assert BULLET_SINKLESS in nuance_of(path), path.read_text()
+        answers = _responses(raw)
+        assert len(answers) == 1, f"a second response followed the 200: {raw!r}"
+        assert answers[0].startswith(b"200 "), raw
+        assert saw_eof, "the connection was left open after an unknown-state request"
+        # BOTH prints were attempted — the handler's exception and the audit
+        # failure. `>= 1` would be satisfied without ever reaching the second
+        # site, which is the one this test exists for.
+        assert broken.calls == 2, broken.calls
+        assert "Exception occurred during processing of request" not in captured.err, (
+            "the backstop's second log write escaped `do_POST`: socketserver's "
+            f"banner replaced the operator's traceback:\n{captured.err}"
+        )
 
 
 class TestAnUndecodableEntryNameIsNotTheCallersFault:
