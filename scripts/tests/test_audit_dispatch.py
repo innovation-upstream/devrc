@@ -202,14 +202,82 @@ about a base DOCSTRING. It is filed as a guard, and its red was measured
 separately against `3619fe68`'s test module — where both `REFUTED_PREMISES`
 entries appear, normalised, and would read twice with the ledger present.
 
+🔴 ROUND 8 — a sixth base, `28492af2`, fixing round 7's findings
+------------------------------------------------------------------
+Round 7 returned two 🟡 and four 🟢. The larger 🟡 is the FOURTH instance of
+this ladder's recurring confusion, and it is the REPOSITORY axis: every `git`
+command this script runs goes to the assembly checkout, while every PR fact
+comes from `gh` about a repo that, cross-repo, is a DIFFERENT ONE. So
+`verify_head_is_the_pr` is structurally unable to pass there — THE RANGE
+diagnosed that as a checkout that had moved ("Resolve the range in a tree that
+CONTAINS the PR's head", of which there is none here and never will be), and
+THE LEDGER printed COULD NOT MEASURE on EVERY delta round of such a PR, leaving
+the ladder's own two-consecutive-zero payload gate uncomputed by anybody. No
+test built that state: both cross-repo scenarios ran at ROUND 1 and both delta
+scenarios were same-repo — a textbook isolation seam, and one the existing
+fixture would have hidden, because `OTHER_REPO_PR` inherited `DEFAULT_PR`'s
+`headRefOid` and so modelled the assembly checkout standing on a commit of
+another repository.
+
+The other 🟡: both prose guards were blind to a phrase wrapped across two `#`
+COMMENT lines and to single- or mixed-quote implicit concatenation, while both
+described themselves as handling exactly that — and a wrapped comment block is
+where this ladder writes every round's narrative.
+
+The four 🟢: round 7's tip fix was HALF-APPLIED (the DEGENERATE branch of the
+same `if`/`elif` still handed out `..HEAD`, under a banner claiming the range
+"can never contain anything, whatever the PR looks like"); the forward
+reference named a WIDER set than the clause it describes, differing on exactly
+the clone the brief's own recipe writes to; THE LEDGER's provenance line was
+the last copyable command whose `HEAD` resolves differently for the reader the
+brief invites to re-run it; and the re-derivability line below printed a
+FUNCTION count in a row of NODE-ID counts.
+
+🔴 ROUND 8 ALSO FOUND A FIFTH INSTANCE OF THE SHAPE, by sweeping for it rather
+than from a finding, and it is the sharpest of the six: `newest is not None`
+(a block PARSED) was read as "there is something to diff FROM". `audited=..`
+parses cleanly and yields two EMPTY halves, so a round-3 brief rendered
+``Diff `None..<the PR's head>` `` — a literal Python `None` inside a git rev
+spec — at rc 0, under "verified at assembly time", with THE LEDGER giving the
+ROUND-1 cause ("a first, full audit has no previous round") for a round that
+has one. Refused now, with the two causes named apart.
+
+Measured at `28492af2` the same way:
+
+    9 failed, 93 passed
+
+SIX of the nine are regression coverage (`RED_AT_BASE_R7`). Of the other three:
+two are the whole-string CLAUSE and DIRECTIVE ledgers, which moved with round
+8's reword of `no-fetch` and `own-worktree-is-writable`; one is the
+skipped-round warning guard, red there on an ABSENCE the fix adds. All three
+are filed as guards, not findings.
+
 🔴 AND THE PER-ROUND COUNTS ABOVE ARE CLAIMS ABOUT THE MODULE OF THEIR OWN
 ROUND. Re-running the same procedure with the CURRENT module gives larger
-numbers at every historical ref (54/34/27/19 at
-`abc41024`/`d9eb36a8`/`e06461f7`/`dd601793`), because each later round adds
-tests that are also red at the earlier trees. What is re-derivable, and was
-re-derived in round 7, is the claim the ledgers actually make: every name in
-every `RED_AT_BASE_*` set fails at its own ref. Zero false claims across all
-five refs.
+numbers at every historical ref, because each later round adds tests that are
+also red at the earlier trees. Measured 2026-08-28 with the round-8 module —
+NODE IDS, which is the unit every "N failed" figure in this docstring uses:
+
+    abc41024   64 failed, 38 passed      <- 64 node ids, 61 functions
+    d9eb36a8   41 failed, 61 passed
+    e06461f7   34 failed, 68 passed
+    dd601793   26 failed, 76 passed
+    3619fe68   20 failed, 82 passed
+    28492af2    9 failed, 93 passed
+
+🔴 THE FIRST NUMBER READ **54** UNTIL ROUND 8, AND 54 WAS THE OTHER UNIT — the
+count of distinct FUNCTIONS, where `pytest -q` printed 57, because three of
+them are parametrised. (With round 8's module the same pair reads 61 and 64;
+the gap is the same three.) Nothing else in this docstring switches units
+mid-list —
+`:30` and `:81` both say "N node ids, M functions" precisely so the two cannot
+be confused — so a lone 54 in a row of node-id counts is a claim that does not
+re-derive by the procedure it is filed under. Re-derived, not corrected from
+memory: the script above restores each ref and counts `^FAILED ` lines.
+
+What is re-derivable, and was re-derived again in round 8, is the claim the
+ledgers actually make: every name in every `RED_AT_BASE_*` set fails at its own
+ref. Zero false claims across all six refs.
 
 🔴 THE NEGATIVE-CONTROL MATRIX — measured, and RE-DERIVABLE
 -------------------------------------------------------------
@@ -226,9 +294,9 @@ rows that justified adding a pin. Each row there names the EXACT killer set and
 reports WRONG-KILLER (an expected pin did not fire) separately from EXTRA-KILLER
 (the row no longer isolates what it names).
 
-Re-run 2026-08-28 against HEAD of this branch after the round-7 fixes — **83
-rows, all as expected**, over a 94-test positive control (it was 76 rows over
-89 after round 5) — each mutant applied
+Re-run 2026-08-28 against HEAD of this branch after the round-8 fixes — **93
+rows, all as expected**, over a 102-test positive control (83 rows over 94
+after round 7; 76 over 89 after round 5) — each mutant applied
 to a COPY of
 `scripts/audit-dispatch.py` in a scratch tree (never the worktree), under
 `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`, with the unmutated copy as the
@@ -289,8 +357,10 @@ Printing "SURVIVED as required (control)" over an unguarded sentence is exactly
 the flattering wrong answer this battery exists to refuse.
 
   POS  unmutated copy .............................. 72 passed  <- control
-       (that figure is the ROUND-2 control; today's is 89 — the harness
-        prints the current one, which is the number to read)
+       (that figure is the ROUND-2 control; today's is 102 — the harness
+        prints the current one, which is the number to read, and it is the
+        only one that cannot go stale. This line said 89 through rounds 6 and
+        7 while the paragraph above it said 94, in the same docstring.)
 
   D1   delete the `read-only` clause ............... 4 failed
   D3   delete the `stop-rule` clause ............... 4 failed
@@ -404,10 +474,12 @@ HERMETIC: no test touches the network, spawns a process, or reads a real PR.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
 import json
 import re
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -424,6 +496,85 @@ def _load():
 
 
 ad = _load()
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 8 — THE PROSE NORMALISER, ONE RULE IN ONE PLACE
+# --------------------------------------------------------------------------- #
+# Two guards in this module scan Python SOURCE for a phrase a round has already
+# established is false: `surviving_refuted_premises` and the prose half of
+# `test_the_blind_spot_rationale_matches_what_the_script_actually_does`. Round 7
+# gave each its own copy of the same three-line normaliser, and round 8 measured
+# what both copies could not see. Planted at `28492af2`, one phrase per shape:
+#
+#     shape                                    round 7   round 8
+#     phrase on ONE `#` line                   CAUGHT    CAUGHT
+#     phrase WRAPPED over two `#` lines        MISSED    CAUGHT
+#     phrase wrapped inside one docstring      CAUGHT    CAUGHT
+#     "…" "…"  double-quoted concatenation     CAUGHT    CAUGHT
+#     '…' '…'  single-quoted concatenation     MISSED    CAUGHT
+#     "…" '…'  MIXED-quote concatenation       MISSED    CAUGHT
+#
+# The two MISSED comment rows are the ones that matter, because the wrapped `#`
+# comment is where this ladder writes its narrative: 119 multi-line comment
+# blocks over 766 comment lines in this module alone, one block per round. A
+# round restating a refuted premise in its own `🔴 ROUND N —` header — wrapped,
+# as every one of them is — scored ZERO on both guards and read as clean.
+#
+# 🔴 THE OLD NORMALISER'S DESCRIPTION WAS ALREADY WIDER THAN ITS CODE, twice
+# over, which is the failure `claude/RULES.md` -> guards-narrower names: it said
+# "these live in wrapped comments" while `" ".join(text.split())` leaves the `#`
+# sitting mid-phrase, and "adjacent literals are joined FIRST, exactly as the
+# compiler joins them" while `re.sub(r'"\s*"', "", …)` joins only the
+# double-quoted spelling. Widening the regex would have kept both claims one
+# quoting style ahead of the code, so the reading is handed to the PARSER:
+#
+#   * `ast` yields every string constant with implicit concatenation ALREADY
+#     performed — by the compiler itself, so "exactly as the compiler joins
+#     them" is now true by construction rather than by a regex that approximates
+#     it, and every quoting style (including an f-string joined to a plain
+#     literal) is covered without enumerating any of them.
+#   * `tokenize` yields COMMENT tokens, which cannot be confused with a `#`
+#     inside a string literal, and a run of them on CONSECUTIVE lines is joined
+#     into one chunk — that is what a reader sees when prose is wrapped.
+#
+# Chunks are kept SEPARATE (joined by newline, and no phrase here contains one)
+# so a phrase cannot be manufactured by butting two unrelated blocks together.
+def collapse_ws(text):
+    """-> `text` with every whitespace run collapsed to one space."""
+    return " ".join(text.split())
+
+
+def prose_chunks(source):
+    """-> the prose of Python `source` as chunks, the way a reader reads it.
+
+    A chunk is one contiguous run of comment lines, or one string constant.
+    """
+    chunks, run, prev_line = [], [], None
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if tok.type != tokenize.COMMENT:
+            continue
+        line = tok.start[0]
+        body = re.sub(r"^#+\s?", "", tok.string)
+        if run and line == prev_line + 1:
+            run.append(body)
+        else:
+            if run:
+                chunks.append(" ".join(run))
+            run = [body]
+        prev_line = line
+    if run:
+        chunks.append(" ".join(run))
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            chunks.append(node.value)
+    return [collapse_ws(c) for c in chunks]
+
+
+def flat_prose(source):
+    """-> `prose_chunks` as one string a phrase count can run over."""
+    return "\n".join(prose_chunks(source))
+
 
 # --------------------------------------------------------------------------- #
 # 🔴 THE INDEPENDENT LEDGER — this is what makes the pin two-way.
@@ -473,13 +624,20 @@ CLAUSE_LEDGER = {
     # The axis that is true in every state is OWNERSHIP, not sharedness, and it
     # keeps `own-worktree-is-writable` consistent: the copy YOU made is the one
     # you may write to.
+    # 🔴 ROUND 8 DROPPED "FOR THIS AUDIT", the SECOND narrowing on this clause.
+    # It made the rule forbid the brief's own cross-repo recipe: WHERE TO WORK
+    # says `git -C <your local clone of owner/name> worktree add …`, and that
+    # clone is a checkout the auditor made but did not make FOR THIS AUDIT.
+    # The forward reference in `own-worktree-is-writable` named the wider set
+    # ("every checkout you did not make"), so the two sides disagreed on
+    # precisely the tree the recipe writes to. Both now spell `NO_WRITE_SCOPE`.
     "no-fetch": (
         "**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to any "
-        "checkout that is not the copy YOU made for this audit — including the "
-        "one THE CHECKOUT section names, which is where this brief was "
-        "assembled and is not yours.** Other sessions are in those trees; a "
-        "fetch there is a write with cross-session blast radius, and every ref "
-        "you need is already resolved for you here."
+        "checkout you did not make — including the one THE CHECKOUT section "
+        "names, which is where this brief was assembled and is not yours.** "
+        "Other sessions are in those trees; a fetch there is a write with "
+        "cross-session blast radius, and every ref you need is already "
+        "resolved for you here."
     ),
     "stop-rule": (
         "**A clean round ENDS the ladder — ending it is the CORRECT outcome, "
@@ -590,10 +748,27 @@ FORK_PR = {
     "headRepositoryOwner": {"login": "some-contributor"},
 }
 
+# 🔴 ROUND 8 — THE CROSS-REPO FIXTURE'S HEAD OID IS ITS OWN, AND THE ASSEMBLY
+# CHECKOUT'S IS A THIRD VALUE. `OTHER_REPO_PR` used to inherit `FAKE_HEAD_OID`
+# from `DEFAULT_PR`, and `make_runner`'s `local_head` defaults to the PR's own
+# `headRefOid` — so a cross-repo test written with the plain fixture modelled
+# the assembly checkout of `example-org/devrc` standing on a commit that exists
+# only in `someone-else/otherproj`. That state is PHYSICALLY IMPOSSIBLE, and it
+# is the state round 8's first cross-repo delta render was built in: the brief
+# read "verified at assembly time to be PR #900's head commit" for a PR in
+# another repository. `claude/RULES.md` -> mutation-sweep-blind-spots: pick
+# fixture values that are pairwise distinct, and distinct from any constant the
+# assertion names, or the fixture cannot see the bug.
+FAKE_OTHER_HEAD_OID = "aaaabbbbccccddddeeeeffff00001111a1a1a1a1"
+# What `git rev-parse HEAD` answers in the assembly checkout during a cross-repo
+# run: a commit of the OTHER project, equal to neither of the two above.
+FAKE_ASSEMBLY_HEAD = "9999999988888888777777776666666655555555"
+
 # A genuinely cross-repo PR: it lives in a repository that is NOT the cwd's.
 OTHER_REPO_PR = dict(
     DEFAULT_PR,
     url="https://example.invalid/someone-else/otherproj/pull/900",
+    headRefOid=FAKE_OTHER_HEAD_OID,
     headRepository={
         "name": "otherproj", "nameWithOwner": "someone-else/otherproj",
     },
@@ -630,6 +805,26 @@ CHECKLIST = (
 
 def fake_checklist(_repo_dir):
     return CHECKLIST
+
+
+# 🔴 THE FAKE'S OWN, INDEPENDENT READ of which repository each side names —
+# deliberately NOT `ad.pr_slug` / `ad._slug_from_remote`. A fake that asks the
+# code under test what the world looks like is a second sample of the thing in
+# doubt, not a model of it: `pr_slug` was WRONG for every fork PR for three
+# rounds, and a fixture derived from it would have modelled the same wrong
+# world and hidden the bug. Two lines of regex over the same two inputs is a
+# model; a call into the script is not.
+_FIXTURE_PR_URL = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/\d+")
+_FIXTURE_REMOTE = re.compile(r"[:/]([^/:]+)/([^/:]+?)(?:\.git)?$")
+
+
+def fixture_is_cross_repo(payload, origin):
+    """Does this PR fixture live in a DIFFERENT repository from `origin`?"""
+    u = _FIXTURE_PR_URL.match((payload.get("url") or "").strip())
+    r = _FIXTURE_REMOTE.search((origin or "").strip())
+    if not u or not r:
+        return False
+    return (u.group(1), u.group(2)) != (r.group(1), r.group(2))
 
 
 def make_runner(
@@ -671,7 +866,21 @@ def make_runner(
     """
     payload = dict(pr or DEFAULT_PR)
     payload["comments"] = [{"body": c} for c in comments]
-    resolved_head = local_head if local_head is not None else payload.get("headRefOid")
+    # 🔴 ROUND 8 — THE DEFAULT IS NOW PHYSICALLY POSSIBLE IN BOTH REPO STATES.
+    # "The checkout is standing on the PR" is the right default for a PR in
+    # THIS repository and a flat impossibility for one in another: no commit of
+    # `someone-else/otherproj` is ever `git rev-parse HEAD` in a clone of
+    # `example-org/devrc`. Defaulting to the PR's own oid regardless is how a
+    # cross-repo delta brief rendered "verified at assembly time to be PR
+    # #900's head commit" — the fixture asserted the state the guard exists to
+    # rule out. The freak case (a clone with a renamed remote that really does
+    # hold the commit) is still reachable: pass `local_head` explicitly.
+    if local_head is not None:
+        resolved_head = local_head
+    elif fixture_is_cross_repo(payload, origin):
+        resolved_head = FAKE_ASSEMBLY_HEAD
+    else:
+        resolved_head = payload.get("headRefOid")
     ranges = []
 
     def default_rev_list(spec):
@@ -1058,11 +1267,20 @@ DIRECTIVE_LEDGER = {
     # 🔴 ROUND 6. The second sentence used to read "about the SHARED checkout",
     # which named a scoping the `no-fetch` clause stopped having in round 5 —
     # so a cross-repo brief assembled in a PRIVATE worktree told the reader the
-    # rule was about a state the very next section denies. The scope is now
-    # stated by OWNERSHIP, the way the clause itself states it.
+    # rule was about a state the very next section denies. The scope is stated
+    # by OWNERSHIP.
+    #
+    # 🔴 ROUND 8. The first sentence now names the CLONE as well as the
+    # worktree, because the recipe two lines above it in WHERE TO WORK writes to
+    # the clone — `git -C <your local clone of owner/name> worktree add …` is a
+    # write to the clone, made before the worktree it grants exists. The second
+    # sentence is UNCHANGED; what moved to meet it was `no-fetch`, which had
+    # scoped itself to "the copy YOU made FOR THIS AUDIT" and so forbade that
+    # very command. Both sides are pinned to `NO_WRITE_SCOPE` now.
     "own-worktree-is-writable": (
-        "That worktree is YOURS: fetching and checking out inside it is fine. "
-        "The no-write rule below is about every checkout you did not make."
+        "That worktree is YOURS, and so is the clone you made it from: "
+        "fetching and checking out inside either is fine. The no-write rule "
+        "below is about every checkout you did not make."
     ),
 }
 
@@ -1153,6 +1371,17 @@ SCENARIO_RUNS = {
     "cross-repo": lambda: (["900"], {"pr": OTHER_REPO_PR}),
     "cross-repo-private": lambda: (["900"], {"pr": OTHER_REPO_PR,
                                              "git_dirs": PRIVATE_GIT_DIRS}),
+    # 🔴 ROUND 8 — THE MISSING CELL, and it is a textbook isolation seam. Both
+    # cross-repo scenarios ran at ROUND 1, where THE RANGE and THE LEDGER do
+    # not exist; both delta scenarios were SAME-REPO. So the pair
+    # cross-repo × delta — where every git command goes to a repository that
+    # holds neither end of the range — was covered by nothing, and the two
+    # sections it breaks were each hermetically tested on the other axis.
+    # `claude/RULES.md` -> isolation-seam: ask which surface your fixture does
+    # NOT load.
+    "cross-repo-delta": lambda: (["900", "--round", "3"],
+                                 {"pr": OTHER_REPO_PR,
+                                  "comments": [CLAIMS_BLOCK_R2]}),
 }
 SCENARIOS = tuple(SCENARIO_RUNS)
 
@@ -1466,6 +1695,129 @@ def test_the_newest_claims_block_wins():
         "the range is anchored at the newest block's `<to>`, which is the head "
         "the block was posted at: that range is EMPTY BY CONSTRUCTION whenever "
         "the block sits at the fix tip, which is the normal case"
+    )
+
+
+def test_a_block_that_parses_but_yields_no_anchor_is_refused():
+    """🔴 REGRESSION. Red at `28492af2`, which rendered ``Diff `None..<sha>` ``.
+
+    🔴 THE FIFTH INSTANCE of this ladder's recurring confusion, found by
+    sweeping for the shape rather than from a finding: `newest is not None`
+    (a block PARSED) was read as "there is something to diff FROM". Two
+    different facts. `audited=..` satisfies `\\baudited=(\\S+)`, splits into two
+    EMPTY halves, and `range_anchor` answers None over a block whose claims are
+    perfectly readable — so the delta refusal, which asks only whether a block
+    exists, let it through.
+
+    Measured at the base, `--round 3` over that block, rc 0 and silent stderr:
+
+        THE RANGE : Diff **`None..1111…5555`** … "This checkout's HEAD is
+                    `1111…5555`, verified at assembly time to be PR #900's
+                    head commit"
+        THE LEDGER: "Not measured: a first, full audit has no previous round
+                    to attribute against."
+
+    A literal Python `None` inside a git rev spec — a command that cannot run —
+    under the most confident banner the brief has; and the ROUND-1 cause given
+    for a round-3 brief that HAS a previous round, which is the false-cause
+    shape this module has already fixed at three other sites.
+    """
+    headless = "```audit-claims round=2 audited=..\n1. a claim\n```"
+    # 🔴 POSITIVE CONTROL for the fixture: the block must actually PARSE, with
+    # its claims intact. If it were merely malformed this would be REFUSAL 1's
+    # case, already covered, and the test would prove nothing new.
+    blocks, malformed = ad.parse_claims_blocks([headless])
+    assert len(blocks) == 1 and not malformed, (
+        f"the fixture no longer parses cleanly ({malformed}), so this test is "
+        "exercising the malformed-block path and not the no-anchor one"
+    )
+    assert blocks[0].items == ["a claim"], (
+        "the parsed block carries no claims, so it is not the state this "
+        "refusal is about — a block with nothing in it is REFUSAL 1's case"
+    )
+    assert ad.range_anchor(blocks[0]) is None, (
+        "the fixture now yields an anchor, so it cannot reach this refusal"
+    )
+
+    rc, out, err = run_main(["900", "--round", "3"], comments=[headless])
+    assert rc == 2, (
+        f"\n\na delta round with a block that yields NO ANCHOR exited {rc}. At "
+        "rc 0 the brief hands the auditor a range containing a literal "
+        f"`None`:\n{out[:600]}"
+    )
+    assert "None.." not in out, (
+        f"\n\nthe brief interpolated a literal `None` into the range:\n{out}"
+    )
+    assert "no sha this script can read" in err, (
+        f"\n\nthe refusal does not say WHY it refused:\n{err}"
+    )
+    # 🔴 IT MUST NOT NAME THE ROUND-1 CAUSE. That is the whole point: an anchor
+    # that is missing and an anchor that is unreadable need opposite fixes, and
+    # naming the wrong one sends the operator off to add a block they have.
+    assert "a first, full audit has no previous round" not in err + out, (
+        f"\n\nthe refusal states the ROUND-1 cause over a round-3 brief that "
+        f"HAS a previous round:\n{err}"
+    )
+    assert "NOT the round-1 case" in err, (
+        f"\n\nthe refusal does not distinguish itself from the round-1 case, "
+        f"which is the reader's first guess:\n{err}"
+    )
+    # 🔴 NEGATIVE CONTROL: an ordinary block must still be accepted, or the
+    # refusal above is satisfied by refusing everything.
+    rc2, out2, _ = run_main(["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2])
+    assert rc2 == 0 and "## THE RANGE" in out2, (
+        "the no-anchor refusal now fires for a well-formed block too"
+    )
+
+
+def test_a_claims_block_more_than_one_round_behind_is_warned_about():
+    """🔴 INVARIANT GUARD; its evidence is mutant V16, not a base ref.
+
+    At `28492af2` there is no such warning at all, so a red there would be an
+    absence the fix adds rather than a wrong answer observed — which this
+    module says repeatedly is not evidence of anything. The same filing as the
+    emitted legend (Z5).
+
+    🔴 IT IS THE MIRROR OF A WARNING THAT ALREADY EXISTED, and the asymmetry is
+    the finding: a block from a LATER round warned ("check you are not
+    re-auditing a round that already ran"), a block four rounds EARLIER was
+    silent. `--round 7` over a `round=2` block puts round 2's claims under WHAT
+    WAS CLAIMED FIXED, anchors the range on round 2's sha, and frames the audit
+    on them — a delta over everything since round 2 presented as a delta since
+    round 6.
+
+    🔴 AND IT MUST NEVER BLOCK. Skipping a round number is legitimate, and `gh
+    pr view --json comments` returns ISSUE comments only, so a newer block
+    posted as a REVIEW comment is invisible here — a refusal would be wrong in
+    both cases. Asserted below, because "warns" and "does not block" are two
+    claims and the second is the one a later round would break.
+    """
+    old = ("```audit-claims round=2 audited=aaaa1111..bbbb2222\n"
+           "1. a claim from four rounds ago\n```")
+    rc, out, err = run_main(["900", "--round", "6"], comments=[old])
+    assert rc == 0, f"the gap warning BLOCKED (rc {rc}); it must not: {err}"
+    assert "a claim from four rounds ago" in out, (
+        "the block was not used at all, so this run is not the state the "
+        "warning is about"
+    )
+    assert "round(s) in between" in err, (
+        "\n\nno warning that the newest claims block is FOUR rounds behind the "
+        f"round asked for. The brief presents round 2's claims as this "
+        f"round's framing and says nothing about the gap.\nstderr: {err!r}"
+    )
+    assert "3 round(s)" in err, (
+        f"\n\nthe warning does not count the gap correctly — rounds 3, 4 and 5 "
+        f"posted nothing, so the gap is 3.\nstderr: {err!r}"
+    )
+    # 🔴 NEGATIVE CONTROL: the ADJACENT case must stay silent, or the warning
+    # fires on every ordinary round and is worth nothing.
+    adjacent = ("```audit-claims round=5 audited=aaaa1111..bbbb2222\n"
+                "1. the previous round's claim\n```")
+    rc2, _, err2 = run_main(["900", "--round", "6"], comments=[adjacent])
+    assert rc2 == 0
+    assert "round(s) in between" not in err2, (
+        f"\n\nthe gap warning fires for a block from the IMMEDIATELY previous "
+        f"round, which is the normal case:\nstderr: {err2!r}"
     )
 
 
@@ -1933,7 +2285,7 @@ def test_the_range_names_a_sha_and_not_head_when_the_head_is_verified():
     """
     rc, out, err = run_main(["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2])
     assert rc == 0, err
-    frm, _, tip = rendered_range(out).partition("..")
+    tip = rendered_range(out).partition("..")[2]
     assert tip != "HEAD", (
         "\n\nTHE RANGE tells the auditor to diff `..HEAD`. That token resolves "
         "in THEIR worktree, which this brief has already told them to create "
@@ -1965,16 +2317,244 @@ def test_the_range_names_a_sha_and_not_head_when_the_head_is_verified():
     )[1]
     assert rendered_range(unverified).partition("..")[2] == FAKE_HEAD_OID
 
-    # 🔴 SCOPED TO THE AUDITOR-FACING INSTRUCTION, and this is the control that
-    # says so: THE LEDGER's provenance line keeps `..HEAD`, correctly. That
-    # command ran HERE, in the tree just verified, at assembly time. A fix that
-    # rewrote it would be claiming the assembler measured something it did not.
-    # Asked of the anchor THIS brief rendered, not of a literal, so a mutation
-    # that moves the anchor is not answered by this row.
-    assert f"{frm}..HEAD --not" in out, (
-        "THE LEDGER no longer reports the range it actually measured. It ran "
-        "`git rev-list`/`git log` in the assembly checkout, where `HEAD` is "
-        "the verified head — rewriting that line would misreport provenance."
+    # 🔴 ROUND 7 ASSERTED HERE THAT THE LEDGER'S PROVENANCE LINE KEEPS
+    # `..HEAD` — as the control saying this fix was scoped to the
+    # auditor-facing instruction. Round 8 measured that the scoping argument
+    # never justified the token (`measure_ledger` refuses unless the head check
+    # PASSED, so the sha and `HEAD` named the SAME COMMIT when the command ran),
+    # and moved that line onto the sha as well. The claim now lives in
+    # `test_the_ledgers_provenance_line_names_the_sha_it_resolved_not_head`,
+    # alone, rather than as a control inside a test about a different section —
+    # a control that asserts the OPPOSITE of a later fix is how a round gets
+    # talked out of one.
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 8 — EVERY REF THE BRIEF HANDS OVER RESOLVES WHERE THE READER IS
+# --------------------------------------------------------------------------- #
+def ledger_section(brief):
+    """THE LEDGER block alone, sliced off the next `## ` heading."""
+    start = brief.index("## THE LEDGER")
+    rest = brief[start + len("## THE LEDGER"):]
+    nxt = rest.find("\n## ")
+    return brief[start:start + len("## THE LEDGER")
+                 + (nxt if nxt != -1 else len(rest))]
+
+
+def test_the_ledgers_provenance_line_names_the_sha_it_resolved_not_head():
+    """🔴 REGRESSION. Red at `28492af2`, which printed ``aaaa1111..HEAD --not``.
+
+    Round 7 moved THE RANGE's tip off `HEAD` and kept this line on it, with a
+    provenance argument that is sound as far as it goes: that command really
+    did run here, in the tree just verified. What the argument does not
+    establish is the SPELLING. `measure_ledger` refuses unless the head check
+    passed, so when it ran `HEAD` and `local_sha` were the SAME COMMIT — the
+    sha reports exactly what was measured and is the only spelling that
+    survives being copied.
+
+    And it is copied: this was the last command in the brief whose tip means
+    something else in the reader's worktree, and the paragraph under it invites
+    a re-run ("if the number looks large, that is the first thing to check").
+    Concrete failure: a commit lands after assembly, the auditor re-runs the
+    line in their own tree, `..HEAD` now covers it, and the longer file list
+    reads as the previous round having under-reported its payload.
+    """
+    rc, out, err = run_main(["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2])
+    assert rc == 0, err
+    led = ledger_section(out)
+    # 🔴 POSITIVE CONTROL: a brief with no provenance line at all would satisfy
+    # every "must not contain" below while reporting nothing.
+    assert "--remerge-diff" in led, (
+        f"THE LEDGER prints no provenance command at all, so the assertions "
+        f"below are about nothing:\n{led}"
+    )
+    anchor = rendered_range(out).partition("..")[0]
+    assert f"{anchor}..{FAKE_HEAD_OID} --not" in led, (
+        "\n\nTHE LEDGER's provenance line does not name the sha it resolved. "
+        f"It measured `{anchor}..HEAD` in a checkout whose HEAD was verified "
+        f"to be {FAKE_HEAD_OID}; spelling that sha reports the same commit and "
+        f"re-runs to the same answer anywhere.\n{led}"
+    )
+    assert "..HEAD" not in led, (
+        "\n\nTHE LEDGER still hands the reader a `..HEAD`. That token resolves "
+        "where THEY are standing — a tree cut after this brief was assembled "
+        f"— and the brief tells them to re-run this command.\n{led}"
+    )
+
+
+def test_the_degenerate_range_names_shas_at_both_ends():
+    """🔴 REGRESSION. Red at `28492af2`, which rendered ``aaaa1111..HEAD``.
+
+    Round 7's tip fix was HALF-APPLIED: it moved the VERIFIED branch off the
+    token and its own comment recorded "Only the VERIFIED branch hardcoded
+    `HEAD`", while the DEGENERATE branch of the same `if`/`elif` — four lines
+    above it — still handed one out. The suite stayed fully green, so nothing
+    said otherwise.
+
+    🔴 THE BANNER OVER THAT RANGE MAKES AN ABSOLUTE CLAIM, which is what makes
+    the spelling load-bearing rather than cosmetic: "Both ends of the range
+    name the same commit, so it can never contain anything, whatever the PR
+    looks like." That is a property of the ASSEMBLY tree at assembly time. Under
+    `aaaa1111..HEAD` it is simply false in the auditor's tree the moment a
+    commit lands in between — the range is non-empty there, and the loudest
+    banner in the brief is telling them it cannot be.
+    """
+    brief = brief_for_scenario("degenerate")
+    section = range_section(brief)
+    # 🔴 POSITIVE CONTROL: assert we are reading the DEGENERATE branch. Without
+    # it a fixture change that stops producing a self-range would leave every
+    # assertion below true of the ordinary verified branch instead.
+    assert "DEGENERATE RANGE" in section, (
+        f"this scenario no longer renders the degenerate branch:\n{section}"
+    )
+    frm, _, tip = rendered_range(brief).partition("..")
+    assert tip != "HEAD", (
+        "\n\nthe DEGENERATE branch hands the auditor `..HEAD` while the banner "
+        "under it says the range 'can never contain anything, whatever the PR "
+        f"looks like'. In their tree it can.\n{section}"
+    )
+    assert tip == SELF_RANGE_HEAD, (
+        f"\n\nthe degenerate range ends at {tip!r}, not at the head that was "
+        f"verified ({SELF_RANGE_HEAD})."
+    )
+    assert ad.same_commit(frm, tip), (
+        f"\n\n`{frm}..{tip}` is not a self-range, so the DEGENERATE banner "
+        "above it is being printed over an ordinary range."
+    )
+
+
+def test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout():
+    """🔴 REGRESSION. Red at `28492af2`.
+
+    THE FOURTH INSTANCE OF THIS LADDER'S RECURRING CONFUSION, on the REPOSITORY
+    axis: the repo `gh` was asked about versus the repo `git` was run in. Every
+    git command goes to `repo_dir`, the assembly checkout, while the PR's facts
+    come from `gh` about `facts.repo`. Cross-repo those are different
+    repositories, so `verify_head_is_the_pr` is STRUCTURALLY unable to pass and
+    the could-not-verify branch fires on every cross-repo delta round.
+
+    Measured at the base, in this scenario: the brief said "this checkout's
+    HEAD is `9999…`, but the PR's head is `aaaa…` — the two are DIFFERENT
+    COMMITS", then "Resolve the range in a tree that CONTAINS the PR's head
+    before trusting any number derived from it". Both sentences describe a
+    checkout that has MOVED and can be moved back. Neither is true here: there
+    is no such tree in this repository and there never will be, so the
+    instruction is unfollowable and the reader is sent looking for a fix that
+    does not exist.
+    """
+    brief = brief_for_scenario("cross-repo-delta")
+    section = range_section(brief)
+    assert "CROSS-REPO" in brief, (
+        "this scenario no longer renders the cross-repo branch, so the "
+        "assertions below are about a different configuration"
+    )
+    # 🔴 POSITIVE CONTROL for the slice: a section with no verdict at all would
+    # satisfy every "must not say" below.
+    assert "🔴" in section, f"THE RANGE carries no banner at all:\n{section}"
+    assert "STRUCTURAL AND PERMANENT" in section, (
+        "\n\nTHE RANGE does not tell a cross-repo auditor that this checkout "
+        "CANNOT be standing on the PR. Without that, the two shas it prints "
+        f"read as a checkout that drifted.\n{section}"
+    )
+    assert "Resolve the range in a tree that CONTAINS" not in section, (
+        "\n\nTHE RANGE tells a cross-repo auditor to resolve the range in a "
+        "tree that contains the PR's head. This repository has no such tree "
+        f"and cannot acquire one — the instruction is unfollowable.\n{section}"
+    )
+    # The tip is still the PR's real head sha: naming the impossibility must
+    # not cost the auditor the one ref they CAN use in their own worktree.
+    assert rendered_range(brief).partition("..")[2] == FAKE_OTHER_HEAD_OID, (
+        "\n\nthe cross-repo range no longer ends at the PR's head sha, which "
+        "is the only tip that resolves in the worktree WHERE TO WORK sent "
+        "them to."
+    )
+
+
+def test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor():
+    """🔴 REGRESSION. Red at `28492af2`, which printed COULD NOT MEASURE.
+
+    `measure_ledger` refuses the moment the head check is not ok, and
+    cross-repo that check cannot pass — so THE LEDGER printed its generic
+    failure banner on EVERY delta round of such a PR, with advice ("Re-run the
+    command by hand") that points at the wrong repository. That is the
+    permanently-red gate `claude/RULES.md` names: a section that is red every
+    single time trains the reader to skip it.
+
+    🔴 AND WHAT GETS SKIPPED IS A GATE. The ladder ends on two consecutive
+    rounds of ZERO payload lines. Nobody but the auditor can compute that
+    number for a cross-repo PR, and at the base nothing told them so — the
+    brief reported a failure and moved on, leaving the stop condition
+    permanently unevaluated while reading as though the script had tried.
+    """
+    brief = brief_for_scenario("cross-repo-delta")
+    led = ledger_section(brief)
+    assert "NOT MEASURABLE FROM HERE" in led, (
+        f"\n\nTHE LEDGER does not say the measurement is structurally "
+        f"impossible from this repository:\n{led}"
+    )
+    assert "COULD NOT MEASURE" not in led, (
+        "\n\nTHE LEDGER reports a cross-repo round as a command that failed. "
+        "It did not fail; it was never runnable here, and it never will be — "
+        f"phrasing it as a failure invites a re-run in the wrong repo.\n{led}"
+    )
+    assert "ATTRIBUTION GATE IS YOURS" in led, (
+        "\n\nTHE LEDGER does not tell the auditor that the payload-attribution "
+        "gate is theirs to compute this round. A gate nobody evaluates never "
+        f"fires, and the ladder then runs forever on scaffolding.\n{led}"
+    )
+    # 🔴 THE HAND-OVER MUST BE RUNNABLE, and in the right tree. Asserted as a
+    # whole command line rather than by its parts: three correct fragments in
+    # an unrunnable order is exactly what a fragment pin cannot see.
+    assert (
+        "git -C <your worktree> log --numstat --format= --remerge-diff "
+        f"aaaa1111..{FAKE_OTHER_HEAD_OID} --not origin/main"
+    ) in led, (
+        f"\n\nTHE LEDGER hands over no runnable command, or one whose range "
+        f"is not this round's:\n{led}"
+    )
+    assert "<your worktree>" in led and "your clone of" in led.replace(
+        "YOUR clone of", "your clone of"
+    ), (
+        "\n\nTHE LEDGER does not say WHERE the command must run. `origin/main` "
+        "names this checkout's base branch here and the PR's base branch "
+        f"there; the command is only correct in one of them.\n{led}"
+    )
+
+
+def test_no_cross_repo_brief_claims_its_checkout_was_verified():
+    """🔴 THE SEAM GUARD, and it is also this module's fixture guard.
+
+    🔴 INVARIANT GUARD; its evidence is mutant V9, not a base ref. At
+    `28492af2` the SCRIPT would pass this — the sentence it forbids appears
+    only when the head check succeeded, and the base's cross-repo scenarios all
+    ran at round 1 where THE RANGE does not exist. What was wrong at the base
+    was the FIXTURE: `OTHER_REPO_PR` inherited `headRefOid` from `DEFAULT_PR`
+    and `make_runner` defaults the checkout's HEAD to it, so the first
+    cross-repo delta render printed "verified at assembly time to be PR #900's
+    head commit" for a PR in another repository. A test written with that
+    fixture would have passed in a physically impossible state.
+
+    So this pins the RELATIONSHIP rather than either side: no brief may claim
+    verification of a checkout it has itself just called a different
+    repository, in any scenario this module knows or later adds.
+    """
+    seen = 0
+    for scenario in SCENARIOS:
+        brief = brief_for_scenario(scenario)
+        if "## WHERE TO WORK — 🔴 CROSS-REPO" not in brief:
+            continue
+        seen += 1
+        assert "verified at assembly time" not in brief, (
+            f"\n\nscenario {scenario!r}: the brief says this checkout was "
+            "verified to be standing on the PR's head, two bars after saying "
+            "the PR lives in a DIFFERENT repository. One of the two is false, "
+            "and in the fixture it was the head check — the PR's oid was "
+            "handed to the assembly checkout's `rev-parse HEAD`."
+        )
+    assert seen, (
+        "no scenario renders a CROSS-REPO brief, so the loop above asserted "
+        "nothing. Either the heading moved or the cross-repo scenarios were "
+        "dropped from SCENARIO_RUNS."
     )
 
 
@@ -2822,6 +3402,29 @@ _KIND_LINE = re.compile(r"^\s*kind\s*:\s*(.+)$", re.M)
 # 🔴 Round 5's sentence, verbatim, kept ONLY as the positive control's payload.
 ROUND_5_NO_WRITE_SCOPE = "The no-write rule below is about the SHARED checkout."
 
+# 🔴 ROUND 8 — THE ONE FORM OF WORDS BOTH SIDES MUST USE FOR THE SAME SET.
+# Round 6 found a forward reference scoped to a STATE the clause had stopped
+# naming; round 7 fixed it by rewriting the reference to "every checkout you
+# did not make" while the clause said "any checkout that is not the copy YOU
+# made FOR THIS AUDIT". Still two sets — and the difference is not academic: it
+# lands exactly on the clone WHERE TO WORK tells a cross-repo auditor to run
+# `git worktree add` in, which they made but did not make for this audit.
+# Forbidden under the clause, permitted under the reference, prescribed by the
+# brief.
+#
+# The guard beside it therefore pins a PHRASE both sides must spell, not a
+# vocabulary either may avoid: a scope stated in two forms of words is two
+# scopes, whatever they were meant to mean. `claude/RULES.md` -> spelled-guards:
+# when the artifact under test is prose, pin the string.
+NO_WRITE_SCOPE = "checkout you did not make"
+
+# Round 7's clause scope, kept ONLY as the control's payload — the narrower of
+# the two sets, and the one that forbade the brief's own recipe.
+ROUND_7_CLAUSE_SCOPE = (
+    "**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to any "
+    "checkout that is not the copy YOU made for this audit.**"
+)
+
 
 def no_write_forward_references(text):
     """Sentences that tell the reader what the no-write rule COVERS.
@@ -2920,6 +3523,86 @@ def test_no_forward_reference_scopes_the_no_write_rule_to_a_denied_state():
         "no scenario renders a forward reference to the no-write rule at all, "
         "so the loop above asserted nothing. Either the sentence was deleted "
         "or `no_write_forward_references` no longer matches how it is spelled."
+    )
+
+
+def no_write_scope_disagreements(brief, clause_text):
+    """-> [(which side, sentence)] for each side that does not spell the scope.
+
+    🔴 THE RELATIONSHIP, not either component: the `no-fetch` clause and every
+    sentence that forward-references it must name ONE set, in ONE form of
+    words. Round 6's guard beside this asks a narrower question — does a
+    forward reference name a checkout STATE this brief denies — and a scope
+    can disagree without naming any state at all, which is precisely how round
+    7's fix passed it while narrowing the clause on a different axis.
+    """
+    out = []
+    if NO_WRITE_SCOPE not in norm(clause_text):
+        out.append(("the `no-fetch` clause", norm(clause_text)))
+    for s in no_write_forward_references(brief):
+        if NO_WRITE_SCOPE not in norm(s):
+            out.append(("a forward reference", norm(s)))
+    return out
+
+
+def test_the_no_write_forward_reference_states_the_clauses_own_scope():
+    """🔴 REGRESSION. Red at `28492af2`, on the CLAUSE side.
+
+    Measured there: the clause read "any checkout that is not the copy YOU
+    made FOR THIS AUDIT" and the sentence forward-referencing it read "every
+    checkout you did not make". Two sets, and the difference lands on exactly
+    one tree — the clone WHERE TO WORK tells a cross-repo auditor to write
+    into, three lines earlier: ``git -C <your local clone of owner/name>
+    worktree add …``. That clone is one they made; it is not one they made for
+    this audit. Forbidden by the clause, permitted by the reference,
+    prescribed by the brief.
+
+    🔴 AND THE COMMENT ABOVE THE REFERENCE ASSERTED THEY AGREED — "the scope is
+    stated the way the clause states it" — which is a claim about the clause
+    and was false. A comment is a claim too, and this one would have stopped
+    the next reader checking.
+
+    Round 6 fixed a forward reference that narrowed the rule it named; round 7
+    replaced that narrowing with another on a different axis. So the guard is
+    on the SET both sides must spell, not on the vocabulary either may avoid.
+    """
+    clause = {c.id: c.text for c in ad.INVARIANT_CLAUSES}["no-fetch"]
+
+    # 🔴 TWO POSITIVE CONTROLS, ONE PER SIDE. A predicate that can only see one
+    # of the two is half a guard, and which half is invisible is not something
+    # a clean result can tell you.
+    assert no_write_scope_disagreements(brief_for_scenario("cross-repo"),
+                                        ROUND_7_CLAUSE_SCOPE), (
+        "POSITIVE CONTROL (clause side): the scan cannot see round 7's own "
+        "clause wording, so a clean result below says nothing about the clause"
+    )
+    ref_control = (
+        "## THE CHECKOUT — state at assembly time\n\n"
+        "    kind   : SHARED — other sessions and agents are in this tree\n\n"
+        f"{ROUND_5_NO_WRITE_SCOPE}\n\n## NEXT\n"
+    )
+    assert no_write_scope_disagreements(ref_control, clause), (
+        "POSITIVE CONTROL (reference side): the scan cannot see round 5's own "
+        "sentence, so a clean result below says nothing about the reference"
+    )
+
+    seen = 0
+    for scenario in SCENARIOS:
+        brief = brief_for_scenario(scenario)
+        seen += len(no_write_forward_references(brief))
+        bad = no_write_scope_disagreements(brief, clause)
+        assert not bad, (
+            f"\n\nscenario {scenario!r}: the no-write rule's scope is stated "
+            f"in more than one form of words, so it names more than one set. "
+            f"Every side must spell {NO_WRITE_SCOPE!r}:\n"
+            + "".join(f"  {where}: {text!r}\n" for where, text in bad)
+            + "  The set that matters is the auditor's OWN checkouts, and the "
+            "brief's own cross-repo recipe writes to one of them — a clone "
+            "they made, and did not make for this audit."
+        )
+    assert seen, (
+        "no scenario renders a forward reference to the no-write rule at all, "
+        "so only the clause half of the loop above asserted anything."
     )
 
 
@@ -3283,22 +3966,47 @@ def test_the_blind_spot_rationale_matches_what_the_script_actually_does():
         + "\n".join("  " + " ".join(c) for c in resolving)
     )
 
-    # 🔴 AND THE PROSE MAY NOT SAY OTHERWISE. Normalised the same way
-    # `surviving_refuted_premises` normalises, and for the same two reasons:
-    # these live in wrapped comments and in implicitly-concatenated literals.
-    def flat(text):
-        return " ".join(re.sub(r'"\s*"', "", text).split())
+    # 🔴 AND THE PROSE MAY NOT SAY OTHERWISE. Read through `flat_prose`, the
+    # SHARED normaliser — one rule in one place. Round 7 gave this test its own
+    # copy of `surviving_refuted_premises`'s three-liner, and round 8 measured
+    # both copies blind to the same three shapes; two copies of a predicate are
+    # wrong at both sites in the same direction, which is exactly what happened.
+    script_src = Path(ad.__file__).read_text(encoding="utf-8")
+    script = flat_prose(script_src)
+    module = flat_prose(_THIS_MODULE_SOURCE)
 
-    script = flat(Path(ad.__file__).read_text(encoding="utf-8"))
-    module = flat(_THIS_MODULE_SOURCE)
-    # POSITIVE CONTROL for the scan itself.
-    assert flat(f"x {FALSE_BLIND_SPOT_RATIONALES[0]} y").count(
-        flat(FALSE_BLIND_SPOT_RATIONALES[0])) == 1, (
-        "POSITIVE CONTROL: the normalising counter cannot find a phrase it was "
-        "just handed, so every zero below would be meaningless"
+    # 🔴 POSITIVE CONTROL, ONE PER SHAPE, AND PLANTED INTO REAL SOURCE. Round
+    # 7's control handed the normaliser the bare string `f"x {phrase} y"` —
+    # which is not Python, is not the thing the assertions below scan, and
+    # could not have exercised a comment wrap or a concatenation even in
+    # principle. A control that shares no step with the measurement is not a
+    # control. These plant into the SCRIPT's own source, which is what the
+    # `== 0` assertion below reads.
+    probe = FALSE_BLIND_SPOT_RATIONALES[0]
+    assert not set(probe) & set("\"'\\"), (
+        f"the plants below embed {probe!r} in GENERATED Python source, so a "
+        "quote or a backslash in it would raise SyntaxError instead of "
+        "testing anything. Pick a quote-free ledger entry for this control."
     )
+    pw = probe.split()
+    ph, pt = " ".join(pw[:2]), " ".join(pw[2:])
+    assert ph and pt, f"{probe!r} does not split into two wrappable halves"
+    for shape, payload in {
+        "one `#` line": f"\n# {probe}\n",
+        "two `#` lines": f"\n# {ph}\n# {pt}\n",
+        "wrapped docstring": f'\ndef _plant():\n    """{ph}\n    {pt}"""\n',
+        'concat "…" "…"': f'\n_plant = ("{ph} "\n          "{pt}")\n',
+        "concat '…' '…'": f"\n_plant = ('{ph} '\n          '{pt}')\n",
+        "concat \"…\" '…'": f'\n_plant = ("{ph} "\n' + f"          '{pt}')\n",
+    }.items():
+        assert flat_prose(script_src + payload).count(collapse_ws(probe)) == 1, (
+            f"POSITIVE CONTROL ({shape}): the scan cannot see {probe!r} planted "
+            "into the script in that shape, so the zero asserted below says "
+            "nothing about a rationale written that way — and this ladder "
+            "writes its rationales in wrapped comment blocks."
+        )
     for phrase in FALSE_BLIND_SPOT_RATIONALES:
-        p = flat(phrase)
+        p = collapse_ws(phrase)
         assert script.count(p) == 0, (
             f"\n\n`scripts/audit-dispatch.py` states {phrase!r} of itself, "
             f"{script.count(p)} time(s). It is false — the run above resolved "
@@ -3994,12 +4702,48 @@ RED_AT_BASE_R6: frozenset[str] = frozenset({
     "test_the_range_names_a_sha_and_not_head_when_the_head_is_verified",
 })
 
+# 🔴 ROUND 8's base is the ROUND-7 TREE, `28492af2`. Measured the same way —
+# `git show 28492af2:scripts/audit-dispatch.py` into a scratch tree with THIS
+# module copied in unchanged, `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`:
+# **9 failed, 93 passed**. SIX of the nine are these; of the other three, two
+# are the whole-string clause and directive ledgers moving with round 8's
+# reword, and one is the skipped-round warning guard, which is red there on an
+# ABSENCE the fix adds.
+#
+# 🔴 THREE OF ROUND 8's NEW TESTS ARE **NOT** HERE, for three different
+# reasons, and each is recorded rather than quietly filed:
+#   * `..._claims_block_more_than_one_round_behind_is_warned_about` IS red at
+#     the base, and is filed as a guard anyway: no such warning exists there,
+#     so its red is an absence the fix adds, which this module says everywhere
+#     is not evidence of anything. Its evidence is mutant V16.
+#   * `..._no_cross_repo_brief_claims_its_checkout_was_verified` is GREEN at the
+#     base. What was wrong there was this module's FIXTURE, not the script:
+#     `OTHER_REPO_PR` inherited `DEFAULT_PR`'s `headRefOid`, so the checkout was
+#     modelled as standing on a commit of another repository. Carrying the FIXED
+#     fixture back to the base tree therefore passes. Its evidence is mutant V9.
+#   * `..._refuted_premise_survives_in_this_modules_prose` (round 7's) still
+#     cannot be red under this procedure at all — it scans THIS MODULE, which
+#     the procedure copies in unchanged.
+RED_AT_BASE_R7: frozenset[str] = frozenset({
+    # 🔴 NOT ONE OF ROUND 7's FINDINGS. Found in round 8 by sweeping for the
+    # ladder's recurring shape, which round 7's auditor asked for explicitly:
+    # `newest is not None` was read as "there is an anchor". Red at the base on
+    # a WRONG ANSWER, not an absence — `Diff `None..<sha>`` at rc 0.
+    "test_a_block_that_parses_but_yields_no_anchor_is_refused",
+    "test_the_ledgers_provenance_line_names_the_sha_it_resolved_not_head",
+    "test_the_degenerate_range_names_shas_at_both_ends",
+    "test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout",
+    "test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor",
+    "test_the_no_write_forward_reference_states_the_clauses_own_scope",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
     "e06461f7": RED_AT_BASE_R4,
     "dd601793": RED_AT_BASE_R5,
     "3619fe68": RED_AT_BASE_R6,
+    "28492af2": RED_AT_BASE_R7,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
@@ -4112,6 +4856,23 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     # in-test positive control is what keeps it honest per run. The battery
     # mutates the script and cannot reach it.
     "test_no_refuted_premise_survives_in_this_modules_prose",
+    # ------------------------------------------------------------------- #
+    # Round 8's one guard, and it is GREEN at `28492af2` for a reason worth
+    # keeping: the defect it closes was in this module's FIXTURE, not in the
+    # script. `OTHER_REPO_PR` inherited `DEFAULT_PR`'s `headRefOid` and
+    # `make_runner` defaults the assembly checkout's HEAD to the PR's own oid,
+    # so a cross-repo brief could be rendered with the checkout modelled as
+    # standing on a commit that exists only in the OTHER repository. Carrying
+    # the FIXED fixture back to the base tree therefore passes — a base script
+    # says nothing about a base fixture, the same shape as round 7's guard
+    # above. Its evidence is mutant V9, which restores the impossible state
+    # from the script side by claiming verification unconditionally.
+    "test_no_cross_repo_brief_claims_its_checkout_was_verified",
+    # There is no gap warning at `28492af2` at all, so a red there would be an
+    # absence the fix adds. Same filing as Z5's legend. Mutant V16 removes it
+    # again, and the test's own negative control (an ADJACENT block must stay
+    # silent) is what stops the warning being satisfied by firing always.
+    "test_a_claims_block_more_than_one_round_behind_is_warned_about",
 })
 
 # --------------------------------------------------------------------------- #
@@ -4368,6 +5129,58 @@ FIX_MATRIX = (
      "in a worktree cut AFTER assembly (pre-existing; the third instance)",
      "test_the_range_names_a_sha_and_not_head_when_the_head_is_verified",
      "RED@3619fe68", "V6"),
+
+    # ------------------------------------------------------------------ #
+    # 🔴 ROUND 7's FINDINGS, FIXED IN ROUND 8. Base `28492af2`.
+    # ------------------------------------------------------------------ #
+    ("r7/1  both prose guards were blind to a phrase wrapped across two `#` "
+     "COMMENT lines, and to single/mixed-quote implicit concatenation, while "
+     "both claimed to handle exactly that",
+     "test_the_blind_spot_rationale_matches_what_the_script_actually_does",
+     "RED@3619fe68", "V8, V10"),
+    ("r7/2a cross-repo, the head check CANNOT pass, so THE RANGE diagnosed a "
+     "structural impossibility as a checkout that had moved",
+     "test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout",
+     "RED@28492af2", "V11"),
+    ("r7/2b and THE LEDGER printed COULD NOT MEASURE on EVERY cross-repo delta "
+     "round — a permanently-red gate, with the ladder's own payload-attribution "
+     "gate left uncomputed by anyone",
+     "test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor",
+     "RED@28492af2", "V12"),
+    ("r7/2c the cross-repo fixture inherited the PR's `headRefOid`, so a "
+     "cross-repo test would have passed in a physically impossible state",
+     "test_no_cross_repo_brief_claims_its_checkout_was_verified",
+     "GUARD", "V9"),
+    ("r7/3  the round-7 tip fix was HALF-APPLIED: the DEGENERATE branch of the "
+     "same if/elif still handed out `..HEAD`, under a banner claiming the "
+     "range can never contain anything",
+     "test_the_degenerate_range_names_shas_at_both_ends",
+     "RED@28492af2", "V13"),
+    ("r7/4  the forward reference named a WIDER set than the clause it "
+     "describes, and the difference was the clone the brief's own recipe "
+     "writes to",
+     "test_the_no_write_forward_reference_states_the_clauses_own_scope",
+     "RED@28492af2", "V14"),
+    ("r7/5  THE LEDGER's provenance line was the last command in the brief "
+     "whose `HEAD` resolves differently for the reader the brief invites to "
+     "re-run it",
+     "test_the_ledgers_provenance_line_names_the_sha_it_resolved_not_head",
+     "RED@28492af2", "V15"),
+    # Disclosed by round 7's auditor rather than filed as a finding, and taken
+    # because it is the MIRROR of a warning that already shipped: a block from
+    # a LATER round warned, a block four rounds EARLIER was silent.
+    ("r7/6  a claims block several rounds behind was presented as this round's "
+     "framing, silently — the existing warning covered only the other direction",
+     "test_a_claims_block_more_than_one_round_behind_is_warned_about",
+     "GUARD", "V16"),
+    # 🔴 NOT ROUND 7's FINDING — round 8's own, found by sweeping for the
+    # recurring shape. Filed under round 7's base because that is the tree it
+    # was watched red at.
+    ("r8/1  a block that PARSED was read as a block that yields an ANCHOR: "
+     "`audited=..` rendered ``Diff `None..<sha>` `` at rc 0, under \"verified "
+     "at assembly time\", with THE LEDGER giving the round-1 cause",
+     "test_a_block_that_parses_but_yields_no_anchor_is_refused",
+     "RED@28492af2", "V17"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
@@ -4385,7 +5198,9 @@ FIX_MATRIX = (
 # 54 - max(1, 54 // 20) = 52. Counted again, not extrapolated. Round 7 added
 # seven more: m = 61, and 61 - max(1, 61 // 20) = 58. Counted by asking the
 # constant itself (`len(FIX_MATRIX)`), not by adding 7 to the last sentence.
-MIN_FIX_MATRIX_ROWS = 58
+# Round 8 added nine: m = 70, and 70 - max(1, 70 // 20) = 67. Counted the same
+# way, by importing the module and printing `len(FIX_MATRIX)`.
+MIN_FIX_MATRIX_ROWS = 67
 
 # 🔴 THE MUTANTS COLUMN IS AN EVIDENCE CLAIM, AND IT WAS UNGRADED.
 # `fix_matrix_problems` took `_mutants` and threw it away, so rewriting a
@@ -4644,9 +5459,10 @@ def surviving_refuted_premises(text):
     asserting the premise somewhere else; ZERO means the ledger entry was
     deleted, which is the same failure read from the other end.
 
-    🔴 NORMALISED TWICE OVER, AND THE FIRST TWO DRAFTS WERE NOT — each MISSED
-    an occurrence it was written for, and each reported the module CLEAN with
-    the premise sitting two lines away. Both were measured against `3619fe68`:
+    🔴 NORMALISED FOUR DRAFTS DEEP, AND THE FIRST THREE WERE NOT ENOUGH — each
+    MISSED an occurrence it was written for, and each reported the module CLEAN
+    with the premise sitting two lines away. The first two were measured
+    against `3619fe68`:
 
       * a raw `str.count` scored **0** for both phrases. They live in WRAPPED
         prose, so the source reads `where a dispatched auditor\\n    usually
@@ -4656,15 +5472,21 @@ def surviving_refuted_premises(text):
         spans a Python IMPLICIT CONCATENATION — the phrase is cut in half by a
         closing quote, a newline and an opening quote, and collapsing
         whitespace leaves the two quote characters sitting in the middle of
-        it. So adjacent literals are joined FIRST, exactly as the compiler
-        joins them, and only then is whitespace collapsed.
+        it. So adjacent literals had to be joined first.
+
+    The third — round 7's, the one this replaces — collapsed whitespace over a
+    `re.sub(r'"\\s*"', "", …)`, and scored **0** for a phrase wrapped across two
+    `#` COMMENT lines (the `#` is left sitting mid-phrase) and **0** for the
+    single- and mixed-quote spellings of the concatenation it claimed to join
+    "exactly as the compiler joins them". Measured at `28492af2`; the shape
+    table is beside `flat_prose`, which now does the reading.
 
     That is the "guard whose description is wider than its implementation"
-    failure, twice, in the guard written to catch a claim wider than its code.
+    failure, three times over, in the guard written to catch a claim wider than
+    its code.
     """
-    joined = re.sub(r'"\s*"', "", text)      # implicit string concatenation
-    flat = " ".join(joined.split())           # wrapped prose
-    counts = [(p, flat.count(" ".join(p.split()))) for p, _ in REFUTED_PREMISES]
+    flat = flat_prose(text)
+    counts = [(p, flat.count(collapse_ws(p))) for p, _ in REFUTED_PREMISES]
     return [(p, n) for p, n in counts if n != 1]
 
 
@@ -4691,11 +5513,37 @@ def test_no_refuted_premise_survives_in_this_modules_prose():
     # 🔴 POSITIVE CONTROL, through the same function: a clean result over a
     # scan that matched nothing is indistinguishable from a scan wired to
     # nothing. Plant a second copy and require it to be seen.
-    planted = f"{_THIS_MODULE_SOURCE}\n# {REFUTED_PREMISES[0][0]}\n"
-    assert surviving_refuted_premises(planted), (
-        "POSITIVE CONTROL: the scan cannot see a planted second copy of "
-        f"{REFUTED_PREMISES[0][0]!r}, so a clean result below says nothing"
+    #
+    # 🔴 ROUND 8 — ONE PLANT PER SHAPE, NOT ONE PLANT. Round 7's control planted
+    # a single-line `#` comment and nothing else, which is a shape its
+    # normaliser could already see; the two shapes it could NOT see went
+    # unexercised, so a control that passed said nothing about them. A control
+    # only covers the shapes it plants, and the shapes this ladder actually
+    # writes its prose in are the wrapped comment block and the concatenated
+    # literal.
+    phrase = REFUTED_PREMISES[0][0]
+    assert not set(phrase) & set("\"'\\"), (
+        f"the plants below embed {phrase!r} in GENERATED Python source, so a "
+        "quote or a backslash in it would raise SyntaxError instead of "
+        "testing anything. Pick a quote-free ledger entry for this control."
     )
+    words = phrase.split()
+    head, tail = " ".join(words[:3]), " ".join(words[3:])
+    assert head and tail, f"{phrase!r} does not split into two wrappable halves"
+    for shape, payload in {
+        "one `#` line": f"\n# {phrase}\n",
+        "two `#` lines": f"\n# {head}\n# {tail}\n",
+        "wrapped docstring": f'\ndef _plant():\n    """{head}\n    {tail}"""\n',
+        'concat "…" "…"': f'\n_plant = ("{head} "\n          "{tail}")\n',
+        "concat '…' '…'": f"\n_plant = ('{head} '\n          '{tail}')\n",
+        "concat \"…\" '…'": f'\n_plant = ("{head} "\n' + f"          '{tail}')\n",
+    }.items():
+        assert surviving_refuted_premises(_THIS_MODULE_SOURCE + payload), (
+            f"POSITIVE CONTROL ({shape}): the scan cannot see a planted second "
+            f"copy of {phrase!r} in that shape, so a clean result below says "
+            "nothing about prose written that way — and this ladder writes its "
+            "narrative in wrapped comment blocks."
+        )
     survivors = surviving_refuted_premises(_THIS_MODULE_SOURCE)
     assert not survivors, (
         "\n\nthis module states a premise the ladder has REFUTED:\n"

@@ -194,14 +194,30 @@ INVARIANT_CLAUSES = (
     # switched itself off over a tree that belongs to the dispatching session.
     # The rule that is true in every state is the one about OWNERSHIP: write
     # only to the copy you made.
+    #
+    # 🔴 ROUND 8 — "FOR THIS AUDIT" WAS A SECOND, SMALLER NARROWING, AND IT
+    # FORBADE THE BRIEF'S OWN RECIPE. Round 5 moved this clause off SHAREDNESS
+    # onto ownership and round 7 rewrote the sentence that forward-references it
+    # to say "every checkout you did not make" — a DIFFERENT set, and the
+    # difference lands exactly on the tree WHERE TO WORK tells a cross-repo
+    # auditor to write to: `git -C <your local clone of owner/name> worktree
+    # add …`. That clone is one they made, but not one they made FOR THIS
+    # AUDIT, so the clause forbade the operation the brief had just prescribed
+    # two lines earlier while the forward reference allowed it. Round 6's
+    # finding was a forward reference that narrowed the rule it names; round 7's
+    # fix replaced one narrowing with another on a different axis.
+    #
+    # So both sides now spell ONE set — `NO_WRITE_SCOPE` in the test module
+    # pins that phrase in the clause AND in every forward reference, so a
+    # reword on either side alone fails rather than re-opening the gap.
     Clause(
         "no-fetch",
         "**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to any "
-        "checkout that is not the copy YOU made for this audit — including the "
-        "one THE CHECKOUT section names, which is where this brief was "
-        "assembled and is not yours.** Other sessions are in those trees; a "
-        "fetch there is a write with cross-session blast radius, and every ref "
-        "you need is already resolved for you here.",
+        "checkout you did not make — including the one THE CHECKOUT section "
+        "names, which is where this brief was assembled and is not yours.** "
+        "Other sessions are in those trees; a fetch there is a write with "
+        "cross-session blast radius, and every ref you need is already "
+        "resolved for you here.",
     ),
     Clause(
         "stop-rule",
@@ -487,12 +503,27 @@ SECTION_DIRECTIVES = (
     # 5 deleted, surviving one directive over: the reader can discharge the
     # no-write rule on the grounds that this checkout is not shared.
     #
-    # So the scope is stated the way the clause states it — by OWNERSHIP, which
-    # is true in every checkout state and cannot be discharged by one.
+    # So the scope is stated by OWNERSHIP, which is true in every checkout
+    # state and cannot be discharged by one.
+    #
+    # 🔴 ROUND 8 — AND IT IS NOW THE CLAUSE'S OWN WORDS, NOT MERELY ITS AXIS.
+    # Round 7's comment here read "the scope is stated the way the clause
+    # states it", which was a claim ABOUT THE CLAUSE and was false: the clause
+    # said "the copy YOU made FOR THIS AUDIT" and this sentence said "every
+    # checkout you did not make". Two sets, differing on precisely the clone
+    # the recipe three lines above writes into. `no-fetch` dropped the extra
+    # narrowing, this sentence is unchanged, and both are pinned to the one
+    # phrase `NO_WRITE_SCOPE` — so the guard fails if either side moves alone,
+    # instead of only when a CHECKOUT STATE WORD appears.
+    #
+    # The first sentence names the CLONE as well as the worktree because that
+    # is the tree the recipe actually writes to: `git -C <clone> worktree add`
+    # is a write to the clone, before the worktree it grants exists.
     Directive(
         "own-worktree-is-writable",
-        "That worktree is YOURS: fetching and checking out inside it is fine. "
-        "The no-write rule below is about every checkout you did not make.",
+        "That worktree is YOURS, and so is the clone you made it from: "
+        "fetching and checking out inside either is fine. The no-write rule "
+        "below is about every checkout you did not make.",
     ),
 )
 
@@ -1356,6 +1387,35 @@ def render_claims(facts):
     return "\n".join(lines)
 
 
+def range_tip(facts):
+    """🔴 The commit the delta range ENDS at — ONE PREDICATE, ONE PLACE.
+
+    Read by THE RANGE, which prints it, and by THE LEDGER, which hands it to a
+    cross-repo auditor as part of the command only they can run. Open-coded at
+    both sites it would be wrong at one of them in the same direction, which is
+    `claude/RULES.md` -> consolidation-finds-bugs.
+
+    🔴 IT NEVER RETURNS `HEAD`, and round 8 is where the last caller stopped.
+    Round 7 moved the VERIFIED branch off the token and wrote "Only the
+    VERIFIED branch hardcoded `HEAD`" — while the DEGENERATE branch, four lines
+    above it in the same `if`/`elif`, still handed one out. `HEAD` resolves in
+    the AUDITOR's tree, which is cut after this brief is assembled from a
+    repository other sessions push to; a sha cannot move under them. That
+    argument never depended on which branch produced the range.
+
+    The degenerate case needs no special tip at all: `anchor_is_head` is only
+    true when the head check PASSED, so `local_sha` is the verified PR head and
+    the range renders as `<anchor>..<the commit the anchor abbreviates>` —
+    visibly, and PERMANENTLY, a self-range. That is what makes the banner's
+    "it can never contain anything, whatever the PR looks like" true in the
+    auditor's tree and not merely in this one.
+    """
+    hc = facts.head_check
+    if hc is not None and hc.ok:
+        return hc.local_sha
+    return hc.pr_sha if (hc is not None and hc.pr_sha) else "<the PR's head sha>"
+
+
 def render_range(facts):
     if facts.round_no < 2:
         return "\n".join([
@@ -1379,18 +1439,22 @@ def render_range(facts):
     # "Do not re-audit the whole PR". An auditor obeying that diffs nothing,
     # finds nothing, and the stop-rule clause turns the empty result into "the
     # ladder ENDS". The banner is loud because the failure is silent.
+    tip = range_tip(facts)
     if anchor_is_head(facts.prev_sha, hc):
-        tip = "HEAD"
         note = (
             "🔴 **DEGENERATE RANGE — EMPTY BY CONSTRUCTION. DO NOT AUDIT IT AND "
             "DO NOT REPORT IT CLEAN.**\n\n"
             f"    the anchor `{facts.prev_sha}` IS this checkout's HEAD "
             f"({hc.local_sha})\n\n"
             "Both ends of the range name the same commit, so it can never "
-            "contain anything, whatever the PR looks like. A finding-free pass "
-            "over this range is a fact about the RANGE and is NOT evidence "
-            "about the code — do not let the stop-rule clause below convert it "
-            "into \"the ladder ENDS\".\n\n"
+            "contain anything, whatever the PR looks like — and BOTH ends are "
+            "spelled as shas, so that sentence is true in YOUR tree too. It "
+            "was not while this branch handed out `..HEAD`: that token resolves "
+            "where you are standing, so a commit landing between assembly and "
+            "your audit made the range non-empty and the claim above false. A "
+            "finding-free pass over this range is a fact about the RANGE and is "
+            "NOT evidence about the code — do not let the stop-rule clause "
+            "below convert it into \"the ladder ENDS\".\n\n"
             + directive("degenerate-range-causes")
         )
     # 🔴 ROUND 7 — THE THIRD INSTANCE OF THIS LADDER'S RECURRING CONFUSION, and
@@ -1411,16 +1475,16 @@ def render_range(facts):
     # the brief's own justification asserts the range was verified.
     #
     # Two tells that this is the same inversion and not a new one: the
-    # UNVERIFIED branch three lines down already does the safe thing
-    # (`tip = hc.pr_sha`), and `emit_claims_skeleton` already prefers the
-    # resolved PR head. Only the VERIFIED branch hardcoded `HEAD` — the branch
-    # where being sure was mistaken for the range being stable.
+    # UNVERIFIED branch below already does the safe thing (`tip = hc.pr_sha`),
+    # and `emit_claims_skeleton` already prefers the resolved PR head. Round 7
+    # wrote "Only the VERIFIED branch hardcoded `HEAD`" and round 8 measured
+    # that the DEGENERATE one still did — both now read `range_tip`, which
+    # cannot return the token at all.
     #
     # The ledger below still MEASURES `<anchor>..HEAD`, and correctly: that
     # command runs HERE, now, in the tree just verified. What is handed to
     # ANOTHER process, later, is a sha.
     elif hc is not None and hc.ok:
-        tip = hc.local_sha
         note = (
             f"This checkout's HEAD is `{hc.local_sha}`, verified at assembly "
             f"time to be PR #{facts.pr}'s head commit — so the range above "
@@ -1429,8 +1493,40 @@ def render_range(facts):
             "repository other sessions are pushing to; the sha cannot move "
             "under you."
         )
+    # 🔴 ROUND 8 — THE FOURTH INSTANCE OF THE RECURRING CONFUSION, and this one
+    # is the REPOSITORY axis: the repo `gh` was asked about versus the repo
+    # `git` was run in. Every git command this script issues goes to
+    # `repo_dir` — the assembly checkout — while `gh` was asked about
+    # `facts.repo`. Cross-repo those are different repositories, so the head
+    # check is STRUCTURALLY unable to pass and the unverified branch below fired
+    # every time, phrasing a permanent fact as an operator error: "this
+    # checkout's HEAD is X, but the PR's head is Y", followed by "Resolve the
+    # range in a tree that CONTAINS the PR's head". There is no such tree here
+    # and there never will be, so the instruction is unfollowable and the
+    # diagnosis sends the reader looking for a checkout that moved.
+    #
+    # 🔴 IT IS ORDERED AFTER THE `hc.ok` BRANCH ON PURPOSE. `repo_relation`
+    # compares SLUGS, and a checkout whose `origin` names a different repository
+    # can still hold the PR's head commit (a clone with a renamed remote, a
+    # mirror). The sha is the ground truth; this branch only claims the
+    # structural impossibility once the sha comparison has actually failed.
+    elif facts.repo_relation == "cross":
+        note = (
+            "🔴 **THIS CHECKOUT CANNOT BE STANDING ON THE PR — that is "
+            "STRUCTURAL AND PERMANENT, not a checkout that moved.** WHERE TO "
+            f"WORK above says why: the PR lives in `{facts.repo}` and this "
+            "brief was assembled in "
+            f"`{facts.cwd_repo_slug or facts.cwd_repo_dir}`, a DIFFERENT "
+            "repository. No `git checkout` here can make the two agree, so do "
+            "not go looking for one, and do not report this as a finding "
+            "against the PR:\n\n"
+            f"    {hc.reason if hc is not None else 'no check was made'}\n\n"
+            "So the range above names the PR's head SHA outright — read from "
+            "`gh pr view --json headRefOid`, not resolved in any tree. Both of "
+            "its ends exist in YOUR worktree, the one WHERE TO WORK told you to "
+            "make, and neither exists here."
+        )
     else:
-        tip = hc.pr_sha if (hc is not None and hc.pr_sha) else "<the PR's head sha>"
         note = (
             "🔴 **COULD NOT VERIFY that this checkout is standing on the PR**, "
             "so `..HEAD` is NOT used above — it would name whatever tree the "
@@ -1589,8 +1685,68 @@ def render_toolchain(facts):
     ])
 
 
+def payload_summary_line(facts, cumulative):
+    """🔴 The line the auditor must carry — ONE WRITER, TWO CALLERS.
+
+    The measured branch asks for it and so does the cross-repo hand-over, and
+    round 8 wrote it out twice before the mutation battery objected: the second
+    copy sat at a deeper indentation and made a battery target AMBIGUOUS, so a
+    `replace(…, 1)` mutated the wrong site. Two copies of one sentence are two
+    things to keep in step and, here, a second thing for a pattern to match.
+    """
+    return (f"round {facts.round_no} · payload lines changed THIS round: X "
+            f"(since round 1: {cumulative}) · elapsed: Z")
+
+
 def render_ledger(facts):
     lines = ["## THE LEDGER — payload attribution for this round", ""]
+    # 🔴 ROUND 8 — CROSS-REPO IS "NOT MEASURABLE FROM HERE", NEVER "COULD NOT
+    # MEASURE". The generic banner below describes a command that failed and
+    # tells the reader to re-run it by hand — advice that, cross-repo, points
+    # at the wrong repository. And it fires on EVERY delta round of such a PR,
+    # because `measure_ledger` refuses the moment the head check is not ok and
+    # the head check is structurally unable to pass. A section that is red
+    # every single time is the permanently-red gate `claude/RULES.md` names:
+    # the reader learns to skip it, and the ladder's own two-consecutive-zero
+    # payload-attribution gate silently stops being computed by ANYONE.
+    #
+    # So this states the impossibility, hands over the exact command, says
+    # WHERE it must run, and says out loud that the gate is the auditor's to
+    # compute this round. Ordered before every other branch except round 1,
+    # which has no ledger for a reason that has nothing to do with repos.
+    if facts.round_no >= 2 and facts.repo_relation == "cross":
+        return "\n".join(lines + [
+            "🔴 **NOT MEASURABLE FROM HERE — and that is STRUCTURAL, so it is "
+            "true of every round of this PR and not a failure of this run.** "
+            f"The PR lives in `{facts.repo}`; this brief was assembled in "
+            f"`{facts.cwd_repo_slug or facts.cwd_repo_dir}`, a DIFFERENT "
+            "repository, which holds neither end of the range. A number "
+            "measured here would be a measurement of another project, so none "
+            "is printed.",
+            "",
+            "🔴 **THE ATTRIBUTION GATE IS YOURS THIS ROUND — it is not "
+            "optional and nobody else can compute it.** The ladder ends on two "
+            "consecutive rounds of ZERO payload lines; a gate nobody evaluates "
+            "never fires, and the ladder then runs forever on scaffolding. Run "
+            "this in the worktree WHERE TO WORK told you to make — a worktree "
+            f"of YOUR clone of `{facts.repo}`, where `{facts.base_ref}` names "
+            "THAT repository's base branch and not this checkout's:",
+            "",
+            "```",
+            "git -C <your worktree> log --numstat --format= --remerge-diff "
+            f"{facts.prev_sha}..{range_tip(facts)} --not {facts.base_ref}",
+            "```",
+            "",
+            "Require rc 0, silent stderr and a NON-EMPTY range before believing "
+            "any figure it prints — a failed command is not a zero. Then "
+            "classify the files yourself (payload is what the PR exists to "
+            "ship; scaffolding is the tests, fixtures and notes a round wrote "
+            "to guard it) and carry this line in your summary:",
+            "",
+            "```",
+            payload_summary_line(facts, "Y"),
+            "```",
+        ])
     led = facts.ledger
     if led is None:
         lines += [
@@ -1610,9 +1766,25 @@ def render_ledger(facts):
         ]
         return "\n".join(lines)
 
+    # 🔴 ROUND 8 — PROVENANCE MAY NAME A SHA; IT MAY NOT NAME A TOKEN THE
+    # READER RESOLVES DIFFERENTLY. This line is the only copyable command left
+    # in the brief whose `HEAD` means something else where the auditor stands —
+    # and the paragraph below invites them to re-run it ("if the number looks
+    # large, that is the first thing to check"). Re-run in their worktree,
+    # `<anchor>..HEAD` covers any commit that landed since assembly, so a longer
+    # file list reads as the previous round UNDER-reporting its payload.
+    #
+    # `local_sha` is not a weaker provenance claim than `HEAD`: at the moment
+    # the command ran they were the SAME COMMIT — `measure_ledger` refuses
+    # unless the head check passed — so the sha reports exactly what was
+    # measured AND survives being copied. Only a run with no head check at all
+    # keeps the token, and there `HEAD` is the honest answer, because no sha
+    # was ever established.
+    hc = facts.head_check
+    measured_tip = hc.local_sha if (hc is not None and hc.ok) else "HEAD"
     lines += [
-        f"`git log --numstat --format= --remerge-diff {facts.prev_sha}..HEAD "
-        f"--not {facts.base_ref}` over {led.commits} commit(s):",
+        f"`git log --numstat --format= --remerge-diff {facts.prev_sha}.."
+        f"{measured_tip} --not {facts.base_ref}` over {led.commits} commit(s):",
         "",
         "```",
         f"{'added':>7} {'deleted':>8}  path",
@@ -1647,16 +1819,17 @@ def render_ledger(facts):
         "classification above:",
         "",
         "```",
-        f"round {facts.round_no} · payload lines changed THIS round: X "
-        f"(since round 1: {led.cumulative if led.cumulative is not None else 'Y'}"
-        ") · elapsed: Z",
+        payload_summary_line(
+            facts, led.cumulative if led.cumulative is not None else "Y"),
         "```",
         "",
         "⚠ `<base>` here is `" + facts.base_ref + "` **as it stands in this "
-        "checkout**. This script does not fetch (that would be a write to the "
-        "shared checkout), so a stale base re-reports upstream work as this "
-        "round's payload. If the number looks large, that is the first thing to "
-        "check.",
+        "checkout**, and it is the ONLY end of that command that can mean "
+        "something different where you are standing — both ends of the range "
+        "itself are shas. This script does not fetch (that would be a write to "
+        "a checkout it does not own), so a stale base re-reports upstream work "
+        "as this round's payload. If the number looks large, that is the first "
+        "thing to check.",
     ]
     if led.cumulative is None:
         # 🔴 TWO mechanisms, and they need opposite fixes: there was no anchor
@@ -2274,6 +2447,64 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
     # `--emit-claims` stamps the head the block is posted at into that same
     # field. Reproduced live on devrc #958 and hermetically.
     prev_sha = range_anchor(newest)
+
+    # ------------------------------------------------------------------ #
+    # 🔴 REFUSAL 1b — a block that PARSED but yields no ANCHOR.
+    # ------------------------------------------------------------------ #
+    # 🔴 FOUND IN ROUND 8 BY SWEEPING FOR THE LADDER'S RECURRING SHAPE rather
+    # than from a finding, and it is the FIFTH instance: `newest is not None`
+    # was read as "we have something to diff from". Those are two different
+    # facts. `audited=..` parses cleanly — the regex wants `\S+` and `..`
+    # satisfies it — and yields `audited_from=''`, `audited_to=''`, so
+    # `range_anchor` answers None while `newest` is a perfectly good block with
+    # readable claims.
+    #
+    # Measured at `28492af2`, `--round 3` over such a block, rc 0, silent
+    # stderr:
+    #
+    #     THE RANGE : Diff **`None..1111…5555`** — the fix commits made since
+    #                 the tip round 2 audited.
+    #                 This checkout's HEAD is `1111…5555`, verified at
+    #                 assembly time to be PR #900's head commit
+    #     THE LEDGER: Not measured: a first, full audit has no previous round
+    #                 to attribute against. Start the ledger at your round 2.
+    #
+    # Both halves are wrong in the way this module keeps refusing. The range
+    # hands over a literal Python `None` inside a git rev spec — a command that
+    # cannot run — under the brief's most confident banner; and THE LEDGER
+    # states the ROUND-1 cause ("no previous round") for a round-3 brief that
+    # HAS one, which is the false-cause shape fixed three times already
+    # (`no_sha_reason`, the cumulative reason, the empty-range causes) at the
+    # one site nobody swept.
+    #
+    # Refused rather than banner-ed, for REFUSAL 1's own reason: a delta round
+    # with no anchor is not a delta round, and rendering one anyway produces a
+    # document that reads as covered.
+    if args.round_no >= 2 and newest is not None and not prev_sha:
+        print("\n".join([
+            f"{REFUSAL_HEADER} for round {args.round_no} of PR #{args.pr}.",
+            "",
+            f"  A block WAS found (round={newest.round_no}, "
+            f"{len(newest.items)} claim(s)) and it PARSED — but its `audited=` "
+            "field carries no sha this script can read, so there is nothing to "
+            "diff FROM.",
+            "",
+            "  This is NOT the round-1 case. A first, full audit legitimately "
+            "has no anchor; here a previous round exists and its anchor is "
+            "unreadable, and the two need opposite fixes.",
+            "",
+            "  Without a refusal the brief renders `Diff `None..<the PR's "
+            "head`` — a literal `None` inside a git rev spec, under \"verified "
+            "at assembly time\" — and THE LEDGER reports the round-1 reason.",
+            "",
+            f"  Fix: edit that comment so the header reads `audited="
+            "<from>..<to>`, or re-run "
+            f"`audit-dispatch.py {args.pr} --round {newest.round_no} "
+            "--emit-claims --audited <the tip that round read>` and post the "
+            "block it prints.",
+        ]), file=err_stream)
+        return 2
+
     # 🔴 `--audited` OVERRIDES THE WRITER'S ANCHOR AND NEVER THE READER'S. It
     # states the tip THIS round's audit read — the same quantity `emit_anchor`
     # recovers from the previous block, supplied instead of derived, and for
@@ -2289,6 +2520,31 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             f"⚠ the newest claims block says round={newest.round_no}, and you "
             f"asked for round {args.round_no}. Using it anyway — but check you "
             "are not re-auditing a round that already ran.",
+            file=err_stream,
+        )
+    # 🔴 THE MIRROR OF THE WARNING ABOVE, and its absence was the asymmetry: a
+    # block from a LATER round warned, a block from a much EARLIER one was
+    # silent. `--round 7` over a `round=2` block puts round 2's claims under
+    # WHAT WAS CLAIMED FIXED, anchors the range on round 2's sha, and frames
+    # the whole audit on them — with nothing anywhere saying that four rounds
+    # are missing.
+    #
+    # A WARNING AND NEVER A REFUSAL, for a reason the refusals above do not
+    # share: skipping a round NUMBER is legitimate (a round can be abandoned,
+    # or numbered by hand), and `gh pr view --json comments` returns ISSUE
+    # comments only — so a block posted as a review comment is invisible here
+    # and would make a refusal wrong. The operator can tell those apart and
+    # this script cannot.
+    elif newest is not None and newest.round_no < args.round_no - 1:
+        gap = args.round_no - 1 - newest.round_no
+        print(
+            f"⚠ the newest claims block says round={newest.round_no}, and you "
+            f"asked for round {args.round_no} — {gap} round(s) in between "
+            "posted no `audit-claims` block this script can see. The claims "
+            "below are that OLDER round's and the range is anchored on its "
+            "sha, so this is a delta over everything since, not since the "
+            "previous round. Check for a later block posted as a REVIEW "
+            "comment, which `gh pr view --json comments` does not return.",
             file=err_stream,
         )
 

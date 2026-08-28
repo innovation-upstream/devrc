@@ -82,7 +82,21 @@ HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
 # 🔴 A COLLAPSE floor, not a growth floor — same rule as
 # `mutants-audit-ladder.sh`. A suite that never ran yields zero FAILED lines,
 # i.e. "clean", so a harness wired to nothing would score every mutant SURVIVED.
-MIN_TESTS = 50
+#
+# 🔴 RAISED IN ROUND 8, 50 -> 95, and the drift story is the reason it was 50.
+# It was set when the suite held 58 tests and never moved; against today's 100
+# it would pass a run that collected barely half the module — a state that
+# silently drops whole classes of guard while every remaining row still reports
+# a verdict. Derived from the current measurement the way this repo derives
+# every other floor, `m - min(50, max(1, m // 20))` with m = 102 counted from
+# the harness's own positive-control line, NOT hand-picked.
+#
+# 🔴 IT IS A COLLAPSE FLOOR, SO IT COMPARES `passed + failed`, NOT `passed`. A
+# mutant is SUPPOSED to make tests fail; what this refuses is a run that
+# COLLECTED too few. A floor that tracks the suite has to be re-derived when
+# the suite grows — the alternative is the one measured above, a number nobody
+# updated for four rounds while the thing it protects doubled.
+MIN_TESTS = 97
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -128,8 +142,33 @@ def drop_clause(cid):
 
 
 def _swap(t, old, new):
-    if old not in t:
+    """🔴 THE TARGET MUST BE UNIQUE, not merely PRESENT.
+
+    Round 8 measured the difference, and it is the same shape as everything
+    else this file guards. `C5` targets a line starting with EIGHT spaces;
+    round 8 added a second copy of that sentence inside a nested list at TWELVE
+    spaces, and eight spaces is a substring of twelve — so `replace(…, 1)` hit
+    the NEW site, which had no `led` in scope, and every scenario-driven test
+    died of a `NameError`. The row reported WRONG-KILLER, which is the lucky
+    outcome: a wrong site that happens to stay runnable scores SURVIVED, or
+    KILLED for a reason belonging to a different mutation, and either reads as
+    a measurement of the row's own target.
+
+    `claude/RULES.md`: "A `count=1` text replace on a pattern that occurs more
+    than once is a live hazard — which occurrence you hit is not the one you
+    pictured." The assert above it already refuses a target that has MOVED;
+    this refuses one that has been DUPLICATED, and the two failures need the
+    same response — re-target the row.
+    """
+    n = t.count(old)
+    if n == 0:
         raise AssertionError(f"target absent: {old[:70]!r}…")
+    if n > 1:
+        raise AssertionError(
+            f"target is AMBIGUOUS — {n} occurrences, so `replace(…, 1)` would "
+            f"mutate whichever comes first and not necessarily the one this "
+            f"row means: {old[:70]!r}…"
+        )
     return t.replace(old, new, 1)
 
 
@@ -192,12 +231,27 @@ def numstat_failure_reads_zero(t):
 
 
 def classify_by_pathspec(t):
+    # 🔴 RE-TARGETED IN ROUND 8, and it is the FIFTH row this file's
+    # assert-before-editing has caught after a refactor nobody thought touched
+    # the battery — this time via the new AMBIGUITY check rather than the
+    # absence one. Round 8 added a second copy of this sentence in the
+    # cross-repo hand-over at a deeper indentation, and the old eight-space
+    # target matched THAT line first (eight spaces are a substring of twelve),
+    # mutating a branch with no `led` in scope. The script now writes the line
+    # from one place, `payload_summary_line`, which is what this targets.
     return _swap(
         t,
-        '        f"round {facts.round_no} · payload lines changed THIS round: X "\n',
-        '        f"round {facts.round_no} · payload lines changed THIS round: "\n'
-        "        f\"{sum(a + d for p, (a, d) in led.files.items() "
-        "if 'test' not in p)} \"\n",
+        '    return (f"round {facts.round_no} · payload lines changed THIS '
+        'round: X "\n',
+        '    return (f"round {facts.round_no} · payload lines changed THIS '
+        'round: "\n'
+        # `files` is None whenever the ledger could not measure (cross-repo,
+        # a failed command), and `payload_summary_line` is now reached in
+        # those states too — so the mutant guards it. A mutant that dies of an
+        # AttributeError is killed by its own crash, not by the guard it is
+        # supposed to be testing.
+        "            f\"{sum(a + d for p, (a, d) in ((facts.ledger.files if "
+        "facts.ledger else None) or dict()).items() if 'test' not in p)} \"\n",
     )
 
 
@@ -759,10 +813,137 @@ def the_whitespace_input_check_is_removed(t):
 
 
 def the_verified_range_hands_out_head_again(t):
+    # 🔴 RE-TARGETED IN ROUND 8. Round 7 wrote the tip inline in
+    # `render_range`'s verified branch; round 8 moved it into `range_tip`
+    # because the DEGENERATE branch of the same `if`/`elif` still handed out
+    # the token. One predicate, one place — so this row now mutates the
+    # predicate, and its killer set GREW to include the degenerate range's own
+    # test. That growth is the consolidation working, not a pin doing new work.
     return _swap(
         t,
-        "    elif hc is not None and hc.ok:\n        tip = hc.local_sha\n",
-        '    elif hc is not None and hc.ok:\n        tip = "HEAD"\n',
+        "    if hc is not None and hc.ok:\n        return hc.local_sha\n",
+        '    if hc is not None and hc.ok:\n        return "HEAD"\n',
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 V8-V15 — round 8 (base `28492af2`).
+# --------------------------------------------------------------------------- #
+# V8 and V10 are V3's plant IN THE TWO SHAPES ROUND 7's NORMALISER COULD NOT
+# SEE, and they exist because V3 planted on ONE line: the guard scored 0 for the
+# same sentence wrapped across two `#` lines and for either single-quoted
+# spelling of an implicit concatenation, while its own prose claimed both. The
+# ladder writes every round's narrative into a wrapped comment block, so the
+# shape the battery never exercised is the shape the defect would arrive in.
+
+_BLIND_SPOT_ANCHOR = (
+    "# 🔴 AND THE REASON GIVEN HERE FOR THREE ROUNDS WAS FALSE. It asserted that"
+)
+
+
+def the_blind_spot_rationale_wraps_across_two_comment_lines(t):
+    """V3's false rationale, with the PHRASE ITSELF split by a line break.
+
+    The break falls INSIDE `never resolves a sha` — between "resolves" and "a
+    sha" — because a plant that keeps the phrase whole on one line is just V3
+    with extra text and proves nothing about the wrap.
+    """
+    return _swap(
+        t,
+        _BLIND_SPOT_ANCHOR,
+        "# This script never resolves\n"
+        "# a sha in that checkout, so whether a well-formed token is a real\n"
+        "# commit is a question it cannot answer.\n" + _BLIND_SPOT_ANCHOR,
+    )
+
+
+def the_blind_spot_rationale_hides_in_single_quoted_concat(t):
+    """The same rationale, split by a SINGLE-QUOTED implicit concatenation.
+
+    Round 7 joined adjacent literals with `re.sub(r'"\\s*"', "", …)`, which sees
+    the double-quoted spelling only — while its docstring said the literals are
+    joined "exactly as the compiler joins them". The compiler does not care
+    which quote character was used.
+    """
+    return _swap(
+        t,
+        _BLIND_SPOT_ANCHOR,
+        "_blind_spot_note = ('This script never resolves '\n"
+        "                    'a sha in that checkout.')\n" + _BLIND_SPOT_ANCHOR,
+    )
+
+
+def the_head_check_stops_comparing_the_two_shas(t):
+    """Round 2's fourth read rule, disarmed — `HEAD` is assumed to be the PR's.
+
+    🔴 THE ISOLATING ROW FOR THE CROSS-REPO SEAM GUARD, from the only side a
+    SCRIPT mutation can reach it. What was actually wrong at `28492af2` was the
+    test module's FIXTURE (`OTHER_REPO_PR` inherited `DEFAULT_PR`'s
+    `headRefOid`, so the assembly checkout was modelled as standing on a commit
+    of another repository), and this battery mutates the script and nothing
+    else. Removing the sha comparison reaches the same rendered state — a brief
+    that says CROSS-REPO and "verified at assembly time" in one document.
+    """
+    return _swap(t, "    if local != pr_head_sha:", "    if False:")
+
+
+def the_cross_repo_range_diagnoses_a_moved_checkout_again(t):
+    return _swap(t, '    elif facts.repo_relation == "cross":', "    elif False:")
+
+
+def the_cross_repo_ledger_reports_a_failed_command_again(t):
+    return _swap(
+        t,
+        '    if facts.round_no >= 2 and facts.repo_relation == "cross":',
+        "    if False:",
+    )
+
+
+def the_degenerate_range_hands_out_head_again(t):
+    """Round 7's half-applied state, restored: the OTHER branch of the if/elif."""
+    return _swap(
+        t,
+        "    if anchor_is_head(facts.prev_sha, hc):\n        note = (",
+        '    if anchor_is_head(facts.prev_sha, hc):\n        tip = "HEAD"\n'
+        "        note = (",
+    )
+
+
+def the_no_fetch_clause_narrows_to_this_audit_again(t):
+    """Round 7's clause scope: the copy you made FOR THIS AUDIT, and no other."""
+    return reword_entry(
+        "Clause", "no-fetch",
+        "**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to any "
+        "checkout that is not the copy YOU made for this audit — including the "
+        "one THE CHECKOUT section names, which is where this brief was "
+        "assembled and is not yours.** Other sessions are in those trees; a "
+        "fetch there is a write with cross-session blast radius, and every ref "
+        "you need is already resolved for you here.")(t)
+
+
+def the_no_anchor_refusal_is_removed(t):
+    """The fifth instance restored: a parsed block is read as an anchor."""
+    return _swap(
+        t,
+        "    if args.round_no >= 2 and newest is not None and not prev_sha:",
+        "    if False:",
+    )
+
+
+def the_skipped_round_warning_is_removed(t):
+    """The asymmetry restored: only a block from a LATER round warns."""
+    return _swap(
+        t,
+        "    elif newest is not None and newest.round_no < args.round_no - 1:",
+        "    elif False:",
+    )
+
+
+def the_ledger_provenance_line_hands_out_head_again(t):
+    return _swap(
+        t,
+        '    measured_tip = hc.local_sha if (hc is not None and hc.ok) else "HEAD"',
+        '    measured_tip = "HEAD"',
     )
 
 
@@ -872,6 +1053,17 @@ LEDGER_TRIO = {
 }
 DELETION_CONTROL = "test_control_a_clause_deleted_from_the_constant_is_detected"
 
+# 🔴 ROUND 8's scope guard reads BOTH SIDES of the no-write rule — the
+# `no-fetch` clause AND every sentence in the rendered brief that
+# forward-references it — because a scope stated in two forms of words is two
+# scopes. So every mutation that touches either text trips it, and FIVE
+# pre-existing rows (D2, W2, Y2, Z3, V4) gained it in the same run. That is the
+# guard's width, measured, not five rows going vague: named once here so the
+# coupling stays legible instead of being spelled out five times.
+NO_WRITE_SCOPE_GUARD = (
+    "test_the_no_write_forward_reference_states_the_clauses_own_scope"
+)
+
 # (label, expected killer set, mutation)
 ROWS = [
     ("D1  delete clause read-only",
@@ -882,7 +1074,8 @@ ROWS = [
     # error. A real coupling, and the reason the deleted-clause CONTROL is a
     # separate test from the warn test.
     ("D2  delete clause no-fetch",
-     LEDGER_TRIO | {"test_missing_clause_check_warns_and_never_blocks"},
+     LEDGER_TRIO | {"test_missing_clause_check_warns_and_never_blocks",
+                    NO_WRITE_SCOPE_GUARD},
      drop_clause("no-fetch")),
     ("D3  delete clause stop-rule",
      LEDGER_TRIO | {DELETION_CONTROL}, drop_clause("stop-rule")),
@@ -952,7 +1145,28 @@ ROWS = [
       # is a SAME-repo PR, so the inversion sends it down the cross-repo branch
       # where the WHERE TO WORK section has no private-worktree note at all.
       "test_every_section_directive_is_emitted_verbatim_in_the_brief_that_owns_it",
-      "test_the_where_to_work_section_does_not_call_a_private_worktree_the_clone"},
+      "test_the_where_to_work_section_does_not_call_a_private_worktree_the_clone",
+      # 🔴 ROUND 8 ADDED NINE MORE, and every one is the same coupling seen
+      # from a new angle: round 8 made THE RANGE and THE LEDGER consult
+      # `repo_relation`, so inverting that decision now moves both sections in
+      # every scenario. The delta scenario becomes CROSS and takes the
+      # hand-over branch (so its ledger prints no numbers and no cause at all);
+      # the cross-repo scenarios become SAME and take the measuring branch. The
+      # width is the fix — those two sections used to be blind to the repo
+      # decision, which is the finding — and NOT a row gone vague.
+      "test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor",
+      "test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout",
+      "test_no_cross_repo_brief_claims_its_checkout_was_verified",
+      "test_a_degenerate_range_does_not_blame_a_checkout_it_verified",
+      "test_a_degenerate_self_range_is_named_by_the_ledger_too",
+      "test_a_failed_cumulative_measurement_does_not_print_a_false_cause",
+      "test_an_empty_range_does_not_name_a_cause_the_head_check_refutes",
+      "test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor",
+      "test_the_ledger_refuses_a_failed_command_rather_than_printing_zero",
+      "test_the_ledger_refuses_to_measure_a_checkout_that_is_not_the_pr",
+      "test_the_ledger_says_the_base_was_not_fetched",
+      "test_the_ledger_shows_the_files_and_refuses_to_classify_them",
+      "test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head"},
      invert_cross_repo),
     ("C4  numstat failure reads as a clean zero",
      {"test_the_ledger_refuses_a_failed_command_rather_than_printing_zero"},
@@ -980,7 +1194,8 @@ ROWS = [
      reword_clause("read-only",
                    "**Edit the repo under audit freely if it helps.**")),
     ("W2  reword no-fetch into permission",
-     {"test_each_clause_carries_the_instruction_its_ledger_entry_names"},
+     {"test_each_clause_carries_the_instruction_its_ledger_entry_names",
+      NO_WRITE_SCOPE_GUARD},
      reword_clause("no-fetch",
                    "**`pull` and `checkout` in the shared checkout are fine.**")),
     ("W3  finding-format loses file:line + scenario",
@@ -1026,10 +1241,21 @@ ROWS = [
     # rendered token from opposite sides — "not `..HEAD` when the head is
     # unverified" and "not `..HEAD` when it IS verified" — so a mutation that
     # hardcodes the token necessarily trips both. Recorded, not narrowed.
-    ("H2  the range hands out ..HEAD regardless",
+    # 🔴 RELABELLED IN ROUND 8, because what this mutation MEANS changed under
+    # it and the old label would have gone on describing something it no longer
+    # does. The target (`elif hc is not None and hc.ok:` -> `elif True:`) is
+    # unchanged and still applies — but round 8 moved the tip out of that
+    # branch into `range_tip`, so the branch now selects only the NOTE. The
+    # mutant therefore asserts "verified at assembly time" over an UNVERIFIED
+    # checkout instead of handing out `..HEAD`, and
+    # `..._range_names_a_sha_and_not_head_when_the_head_is_verified` correctly
+    # stopped firing: the tip really is still a sha. Handing out the token is
+    # now V6's job (`range_tip`) and V13's (the degenerate branch).
+    ("H2  the range's verified NOTE ignores the head check",
      {"test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head",
       "test_the_unknown_head_sha_reason_names_one_cause_not_two",
-      "test_the_range_names_a_sha_and_not_head_when_the_head_is_verified"},
+      "test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout",
+      "test_no_cross_repo_brief_claims_its_checkout_was_verified"},
      range_ignores_the_head_check),
     ("H3  --emit-claims stamps the LOCAL head",
      {"test_emit_claims_stamps_the_prs_head_not_the_local_checkouts",
@@ -1112,7 +1338,13 @@ ROWS = [
       "test_a_degenerate_range_does_not_blame_a_checkout_it_verified",
       "test_an_uppercase_audited_sha_still_trips_the_degenerate_guard",
       "test_audited_supplies_the_tip_a_round_one_emit_cannot_derive",
-      "test_audited_without_emit_claims_says_it_changed_nothing"},
+      "test_audited_without_emit_claims_says_it_changed_nothing",
+      # Round 8's two, both real: moving the anchor changes the range the
+      # cross-repo hand-over COMMAND names (asserted whole, so a wrong anchor
+      # fails it), and it stops the degenerate scenario being degenerate at
+      # all — which is what that test's own positive control requires.
+      "test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor",
+      "test_the_degenerate_range_names_shas_at_both_ends"},
      range_anchor_reads_the_audited_tip),
     # The OTHER wrong fix: `audited_from` alone. A round-1 bare `audited=<sha>`
     # then anchors nothing, and the remedy chain the delta refusal advertises
@@ -1152,7 +1384,12 @@ ROWS = [
       # Round 4: both of these read THE RANGE's degenerate banner — one for
       # its cause list, one for an uppercase anchor.
       "test_a_degenerate_range_does_not_blame_a_checkout_it_verified",
-      "test_an_uppercase_audited_sha_still_trips_the_degenerate_guard"},
+      "test_an_uppercase_audited_sha_still_trips_the_degenerate_guard",
+      # Round 8: that test's POSITIVE CONTROL requires the degenerate banner to
+      # be present before it asserts anything about the range, so deleting the
+      # banner kills it on the control rather than on the range spelling. That
+      # is the control doing its job.
+      "test_the_degenerate_range_names_shas_at_both_ends"},
      the_range_ignores_a_self_range),
     ("N5  the ledger calls a self-range merely empty",
      {"test_a_degenerate_self_range_is_named_by_the_ledger_too",
@@ -1248,7 +1485,8 @@ ROWS = [
     # just told them to build that worktree themselves precisely so they can
     # fetch in it.
     ("Y2  own-worktree-is-writable inverted into 'do not fetch'",
-     {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
+     {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
+      NO_WRITE_SCOPE_GUARD},
      reword_entry(
          "Directive", "own-worktree-is-writable",
          "Do not fetch or check out inside it either. The no-write rule "
@@ -1346,7 +1584,8 @@ ROWS = [
     # still ledgered by id and still emitted, which is exactly how the reword
     # shipped.
     ("Z3  no-fetch goes back to conditional-on-SHARED",
-     {"test_each_clause_carries_the_instruction_its_ledger_entry_names"},
+     {"test_each_clause_carries_the_instruction_its_ledger_entry_names",
+      NO_WRITE_SCOPE_GUARD},
      the_no_fetch_clause_is_conditional_again),
     ("Z4  TOOLCHAIN's reason names the SHARED CHECKOUT again",
      {"test_the_toolchain_reason_is_true_in_every_scenario"},
@@ -1391,7 +1630,8 @@ ROWS = [
      the_blind_spot_blames_sha_resolution_again),
     ("V4  own-worktree scopes the no-write rule to SHARED again",
      {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
-      "test_no_forward_reference_scopes_the_no_write_rule_to_a_denied_state"},
+      "test_no_forward_reference_scopes_the_no_write_rule_to_a_denied_state",
+      NO_WRITE_SCOPE_GUARD},
      the_own_worktree_grant_scopes_the_rule_to_sharedness_again),
     ("V5  the --audited whitespace input check is removed",
      {"test_emit_claims_refuses_an_audited_value_whose_whitespace_leaves_the_line"},
@@ -1407,11 +1647,77 @@ ROWS = [
       "test_the_newest_claims_block_wins",
       "test_a_bare_round_one_audited_sha_still_anchors_the_next_round",
       "test_audited_supplies_the_tip_a_round_one_emit_cannot_derive",
-      "test_audited_without_emit_claims_says_it_changed_nothing"},
+      "test_audited_without_emit_claims_says_it_changed_nothing",
+      # 🔴 ROUND 8 — THE GROWTH IS THE CONSOLIDATION, not a pin doing new work.
+      # `range_tip` is now the single writer for BOTH the verified tip and the
+      # degenerate one (`anchor_is_head` implies the head check passed), so a
+      # mutation of the predicate reaches both. That is the whole point of
+      # having one predicate; V13 is the row that isolates the degenerate
+      # branch's own override.
+      "test_the_degenerate_range_names_shas_at_both_ends"},
      the_verified_range_hands_out_head_again),
     ("V7  TOOLCHAIN names the SHARED CHECKOUT, cross-repo only",
      {"test_the_toolchain_reason_is_true_in_every_scenario"},
      the_toolchain_names_the_shared_checkout_cross_repo_only),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 V8-V15 — round 8. Base `28492af2`.
+    # --------------------------------------------------------------------- #
+    # 🔴 V8 AND V10 ARE V3 IN THE SHAPES THE BATTERY NEVER EXERCISED. V3 plants
+    # its false rationale on ONE line, and round 7's normaliser could see
+    # exactly that: measured at `28492af2`, the same sentence wrapped across two
+    # `#` lines scored 0, and so did both single-quoted spellings of an implicit
+    # concatenation. A battery that only ever plants the shape the guard handles
+    # certifies the guard against itself.
+    ("V8  the blind-spot rationale WRAPS over two `#` lines",
+     {"test_the_blind_spot_rationale_matches_what_the_script_actually_does"},
+     the_blind_spot_rationale_wraps_across_two_comment_lines),
+    # 🔴 V9 IS WIDE, AND THE WIDTH IS THE FINDING'S OWN SHAPE — the same
+    # treatment V1 gets, for the same reason. What was wrong at `28492af2` was
+    # the test module's FIXTURE, which this battery cannot mutate; reaching the
+    # same rendered state from the script means disarming the fourth read rule
+    # itself, and SIX consumers of that rule move with it. The row proves the
+    # rendered state is not free, and it is the only script-side evidence the
+    # seam guard executes at all. Every member listed rather than trimmed to
+    # the "main" one, as N1 and V6 are.
+    ("V9  the head check stops comparing the two shas",
+     {"test_no_cross_repo_brief_claims_its_checkout_was_verified",
+      "test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor",
+      "test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout",
+      "test_emit_claims_stamps_the_prs_head_not_the_local_checkouts",
+      "test_the_ledger_refuses_to_measure_a_checkout_that_is_not_the_pr",
+      "test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head",
+      "test_the_range_names_a_sha_and_not_head_when_the_head_is_verified"},
+     the_head_check_stops_comparing_the_two_shas),
+    ("V10 the blind-spot rationale hides in a '…' '…' concat",
+     {"test_the_blind_spot_rationale_matches_what_the_script_actually_does"},
+     the_blind_spot_rationale_hides_in_single_quoted_concat),
+    ("V11 the cross-repo RANGE blames a moved checkout again",
+     {"test_a_cross_repo_range_states_the_impossibility_not_a_moved_checkout"},
+     the_cross_repo_range_diagnoses_a_moved_checkout_again),
+    ("V12 the cross-repo LEDGER reports a failed command again",
+     {"test_a_cross_repo_ledger_hands_the_attribution_gate_to_the_auditor"},
+     the_cross_repo_ledger_reports_a_failed_command_again),
+    ("V13 the DEGENERATE range hands out `..HEAD` again",
+     {"test_the_degenerate_range_names_shas_at_both_ends"},
+     the_degenerate_range_hands_out_head_again),
+    # V14 also moves the WHOLE-STRING clause ledger, necessarily: round 8's fix
+    # was a reword of that clause, so restoring the old text is a reword the
+    # ledger pins. Both are listed; the scope guard is the one that fires for
+    # THIS row's reason, and W2/Z3 above show the ledger firing without it.
+    ("V14 `no-fetch` narrows to the copy made FOR THIS AUDIT again",
+     {"test_the_no_write_forward_reference_states_the_clauses_own_scope",
+      "test_each_clause_carries_the_instruction_its_ledger_entry_names"},
+     the_no_fetch_clause_narrows_to_this_audit_again),
+    ("V15 THE LEDGER's provenance line hands out `..HEAD` again",
+     {"test_the_ledgers_provenance_line_names_the_sha_it_resolved_not_head"},
+     the_ledger_provenance_line_hands_out_head_again),
+    ("V16 the skipped-round warning is removed",
+     {"test_a_claims_block_more_than_one_round_behind_is_warned_about"},
+     the_skipped_round_warning_is_removed),
+    ("V17 the no-anchor refusal is removed",
+     {"test_a_block_that_parses_but_yields_no_anchor_is_refused"},
+     the_no_anchor_refusal_is_removed),
 ]
 
 
