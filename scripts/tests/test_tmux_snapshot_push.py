@@ -315,6 +315,184 @@ def test_a_collector_that_fails_exits_3_and_posts_nothing(server, collector, tmp
     assert "collector failed" in proc.stdout
 
 
+def test_a_failing_collector_REPORTS_ITS_REAL_EXIT_CODE(server, collector, tmp_path):
+    """🔴 REGRESSION GUARD for a bug an audit found and the suite could not see.
+
+    The original code was `if ! timeout …; then rc=$?`, which reads the status of
+    the NEGATED pipeline — 0 exactly when the branch is taken. So every collector
+    failure logged `rc=0`. The sibling test above passes `rc=7` and asserts only
+    that "collector failed" appears, so a mutation replacing the capture with a
+    literal `rc=0` SURVIVED the whole file: the shipped code was byte-equivalent
+    to a mutant nothing could detect.
+
+    This asserts the NUMBER, which is the thing that was wrong.
+    """
+    proc = run_push(
+        collector_path=collector("", rc=42, stderr="ssh exploded"),
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+    assert "rc=42" in proc.stdout, f"real exit code not reported: {proc.stdout!r}"
+    assert "rc=0" not in proc.stdout
+    assert server.requests == []
+
+
+def test_a_collector_TIMEOUT_is_named_rather_than_logged_as_an_empty_diagnostic(
+    server, tmp_path
+):
+    """The worst case of the bug above: `timeout` kills the collector, so stderr
+    is EMPTY and the status is 124. Under the old code that produced
+    `collector failed (rc=0):` — a log line with no information, from the path
+    most likely to happen in production (a wedged ssh to a sleeping laptop)."""
+    slow = tmp_path / "slow-collector"
+    write_exec(slow, "sleep 30\n")
+    proc = run_push(
+        collector_path=slow,
+        tmp_path=tmp_path,
+        env_extra={
+            "CLAWGATE_API_URL": base_url(server),
+            "CLAWGATE_HOOK_TOKEN": "t",
+            "TMUX_PUSH_COLLECT_TIMEOUT": "1",
+        },
+    )
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+    assert "TIMED OUT" in proc.stdout, proc.stdout
+    assert "rc=124" in proc.stdout, proc.stdout
+    assert server.requests == []
+
+
+@pytest.mark.parametrize("status", [301, 302, 307])
+def test_a_REDIRECT_is_a_failure_not_a_silent_success(collector, tmp_path, status):
+    """🔴 An audit finding, and the nastiest shape in this file.
+
+    Success used to be `HTTP < 400`. There is no `-L`, so a 3xx meant curl
+    returned the redirect, the server stored NOTHING, and this script logged
+    "pushed" and exited 0 — at a 2-minute cadence, with no consumer watching the
+    read model, invisible indefinitely. The realistic trigger is pointing
+    CLAWGATE_API_URL at an ingress hostname instead of the origin.
+    """
+    srv = _Recorder(("127.0.0.1", 0), _Handler, status=status, body=b"")
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        proc = run_push(
+            collector_path=collector(json.dumps(SAMPLE_DOC)),
+            tmp_path=tmp_path,
+            env_extra={"CLAWGATE_API_URL": base_url(srv), "CLAWGATE_HOOK_TOKEN": "t"},
+        )
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert proc.returncode == 5, proc.stdout + proc.stderr
+    assert "REDIRECT" in proc.stdout, proc.stdout
+    assert "pushed" not in proc.stdout
+
+
+def test_a_TORN_collection_is_refused_rather_than_overwriting_a_good_snapshot(
+    server, collector, tmp_path
+):
+    """🔴 THE ISOLATION-SEAM GUARD. An audit finding, and the discriminant was
+    being thrown away at exactly the last place that still had it.
+
+    `session-manager` publishes `windows_measured` SEPARATELY from `reachable`
+    so an unmeasured zero is distinguishable from a real one. The clawgate
+    server decodes only `reachable` and `windows`, so the fact dies at ingest —
+    and because the table is a latest-per-host upsert with no reaper, a
+    reachable-but-unenumerated host would replace a good 44-window snapshot with
+    a zero that nothing downstream could ever identify as false.
+    """
+    doc = {
+        "ts": "2026-08-28T17:04:13Z",
+        "hosts": {
+            "workbench": {"reachable": True, "windows_measured": True,
+                          "windows": [{"window_id": "@1", "session": "s"}]},
+            "laptop": {"reachable": True, "windows_measured": False, "windows": []},
+        },
+    }
+    proc = run_push(
+        collector_path=collector(json.dumps(doc)),
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 6, proc.stdout + proc.stderr
+    assert "laptop" in proc.stdout
+    assert server.requests == [], "a torn collection was pushed"
+
+
+def test_an_UNREACHABLE_host_is_still_pushed(server, collector, tmp_path):
+    """The other half of the bound, and it is why the guard keys on
+    `windows_measured` rather than on emptiness.
+
+    A sleeping laptop is a REAL state change, not a torn read — the server keeps
+    the `reachable` flag so a consumer can render it. Refusing this would stop
+    the feeder every night and freeze the workbench's data too.
+    """
+    doc = {
+        "ts": "2026-08-28T17:04:13Z",
+        "hosts": {
+            "workbench": {"reachable": True, "windows_measured": True,
+                          "windows": [{"window_id": "@1", "session": "s"}]},
+            "laptop": {"reachable": False, "windows_measured": False, "windows": []},
+        },
+    }
+    proc = run_push(
+        collector_path=collector(json.dumps(doc)),
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert len(server.requests) == 1
+
+
+def test_a_GENUINELY_MEASURED_zero_is_still_pushed(server, collector, tmp_path):
+    """A workbench that really has no tmux windows — the OnStartupSec run after a
+    reboot, before tmux starts — is real data. Refusing it would be the
+    silent-zero error inverted."""
+    doc = {
+        "ts": "2026-08-28T17:04:13Z",
+        "hosts": {
+            "workbench": {"reachable": True, "windows_measured": True, "windows": []},
+        },
+    }
+    proc = run_push(
+        collector_path=collector(json.dumps(doc)),
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server), "CLAWGATE_HOOK_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert len(server.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "conf_line,expected",
+    [
+        ('CLAWGATE_HOOK_TOKEN=plain', "plain"),
+        ('export CLAWGATE_HOOK_TOKEN=exported', "exported"),
+        ('   CLAWGATE_HOOK_TOKEN=indented', "indented"),
+        ('export   CLAWGATE_HOOK_TOKEN="quoted-export"', "quoted-export"),
+    ],
+)
+def test_the_conf_reader_accepts_the_spellings_a_SOURCEABLE_file_carries(
+    server, collector, tmp_path, conf_line, expected
+):
+    """An audit finding. The reader anchored on a bare `^KEY=` while its comment
+    claimed it matched shell sourcing.
+
+    `~/.claude/clawgate.env` exists to be sourced — `clawgate-hook.sh` sources
+    it — so adding `export ` is an ordinary edit. Under the old anchor that made
+    THIS reader return empty and exit 2 every two minutes while the hook kept
+    working: one file, two readers, silently disagreeing.
+    """
+    proc = run_push(
+        collector_path=collector(json.dumps(SAMPLE_DOC)),
+        tmp_path=tmp_path,
+        conf_text=f"CLAWGATE_API_URL={base_url(server)}\n{conf_line}\n",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert server.requests[0]["auth"] == f"Bearer {expected}"
+
+
 def test_a_collector_emitting_non_json_exits_3(server, collector, tmp_path):
     proc = run_push(
         collector_path=collector("<html>502 Bad Gateway</html>"),
@@ -556,7 +734,12 @@ def test_the_unit_PATH_carries_every_binary_the_collector_needs():
     path_lines = [ln for ln in block.splitlines() if "PATH=" in ln]
     assert path_lines, "the unit sets no PATH — the collector will not run under systemd"
     path_line = path_lines[0]
-    for needed in ("python3", "tmux", "openssh", "coreutils", "iproute2"):
+    # MEASURED requirements, not a copied list. session-manager's only external
+    # commands are tmux and ssh (plus its own python3 shebang); the pusher adds
+    # curl, sed and coreutils. An earlier version of this test also asserted
+    # `iproute2`, which nothing uses — a guard whose docstring claimed to pin a
+    # RELATIONSHIP while pinning a binary the relationship does not contain.
+    for needed in ("python3", "tmux", "openssh", "coreutils", "curl", "gnused", "bash"):
         assert needed in path_line, f"{needed} missing from the unit PATH: {path_line}"
 
 

@@ -32,7 +32,14 @@
 #   2  no usable credentials
 #   3  the collector failed, or produced something that is not a document
 #   4  the push could not reach the server (transport)
-#   5  the server rejected the push (HTTP >= 400)
+#   5  the server did not accept the push (any non-2xx)
+#   6  the collection was TORN — a host was reachable but its windows were not
+#      measured, so pushing would overwrite a good snapshot with a false zero
+#
+# 🔴 A non-zero exit is the ONLY alarm this unit has, by design: it deliberately
+# wires no OnFailure toast (see nix/home.nix), so a persistent failure surfaces
+# via `systemctl --user --failed`, which `/standup` reads. Keep these distinct
+# and keep them non-zero.
 
 set -euo pipefail
 
@@ -57,8 +64,21 @@ log() { printf 'tmux-snapshot-push: %s\n' "$*"; }
 read_conf_key() {
   local key="$1"
   [ -r "$CONF_FILE" ] || return 0
-  # Last assignment wins, matching shell sourcing. Strips surrounding quotes.
-  sed -n "s/^${key}=//p" "$CONF_FILE" | tail -1 | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+  # Last assignment wins, as sourcing would. 🔴 THE ANCHOR ACCEPTS THE TWO
+  # SPELLINGS A SOURCEABLE FILE ACTUALLY CARRIES — a leading `export ` and
+  # leading whitespace. An earlier version anchored on a bare `^KEY=` while its
+  # comment claimed it matched shell sourcing, and it did not: this file's own
+  # header says it is sourced by `clawgate-hook.sh`, so adding `export ` to it is
+  # an ordinary edit that would have made THIS reader return empty and exit 2
+  # every two minutes while the hook kept working — one file, two readers,
+  # silently disagreeing.
+  #
+  # Remaining known divergence, deliberate: a value is taken literally, so no
+  # `$VAR` expansion and no `#` comment stripping. Both would need a real parser,
+  # and the file holds a URL and an opaque token.
+  sed -n "s/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}${key}=//p" "$CONF_FILE" \
+    | tail -1 \
+    | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
 }
 
 API_URL="${CLAWGATE_API_URL:-$(read_conf_key CLAWGATE_API_URL)}"
@@ -97,25 +117,85 @@ fi
 # 🔴 stdout and stderr to SEPARATE files. A merged capture would splice the
 # collector's diagnostics into the JSON document and the failure would present
 # as a malformed payload rather than as the collector complaining.
-if ! timeout "$COLLECT_TIMEOUT" "$SM" --json >"$PAYLOAD" 2>"$COLLECT_ERR"; then
-  rc=$?
-  log "collector failed (rc=$rc): $(tr '\n' ' ' <"$COLLECT_ERR" | cut -c1-400)"
+# 🔴 CAPTURE THE STATUS BEFORE ANY OTHER COMMAND RUNS, AND NOT INSIDE `if !`.
+# `if ! cmd; then rc=$?` reads the status of the NEGATED pipeline, which is 0
+# exactly when the branch is taken — so the old form logged `rc=0` for every
+# failure. The timeout case was the damaging one: rc=0 AND empty stderr, i.e. a
+# log line carrying no information at all, from the one path most likely to
+# happen (a wedged ssh to a sleeping laptop). That defeats this script's own
+# distinct-exit-code doctrine at the header.
+set +e
+timeout "$COLLECT_TIMEOUT" "$SM" --json >"$PAYLOAD" 2>"$COLLECT_ERR"
+COLLECT_RC=$?
+set -e
+if [ "$COLLECT_RC" -ne 0 ]; then
+  # 124 is `timeout`'s own "I killed it" status and it has no stderr of its own,
+  # so name it rather than printing an empty diagnostic.
+  if [ "$COLLECT_RC" -eq 124 ]; then
+    log "collector TIMED OUT after ${COLLECT_TIMEOUT}s (rc=124) — $SM did not finish"
+  else
+    log "collector failed (rc=$COLLECT_RC): $(tr '\n' ' ' <"$COLLECT_ERR" | cut -c1-400)"
+  fi
   exit 3
 fi
 
-# A shallow "did the collector actually produce a document" gate — NOT a copy of
-# the server's schema validation, which stays the single authority for what a
-# valid payload is. This only distinguishes "the collector emitted an error page
-# / nothing" from "the server rejected a real document", because those two need
-# completely different fixes and the HTTP status alone cannot tell them apart.
+# Two gates, and only the first is about the document being a document.
+#
+# The `hosts` check DOES duplicate the server's first check
+# (`SnapshotsFromSessionManager`) — an earlier comment claimed it did not, which
+# was simply wrong. It is duplicated on purpose and only here: it is what
+# separates "the collector emitted an error page / nothing" from "the server
+# rejected a real document", two failures needing completely different fixes
+# that a bare HTTP status cannot tell apart. Everything else about schema
+# validity stays the server's, and this client is strictly looser.
+#
+# 🔴 THE SECOND GATE IS THE ONE THAT MATTERS, AND IT EXISTS BECAUSE THIS CLIENT
+# IS THE LAST PLACE THAT STILL HAS THE FACT.
+#
+# `session-manager` deliberately publishes `windows_measured` SEPARATELY from
+# `reachable`, so an unmeasured zero is distinguishable from a real one. The
+# server's `hostReport` decodes only `reachable` and `windows` — the
+# discriminant is discarded at ingest. Since the table is a latest-per-host
+# upsert with no reaper, a host that was reachable but whose `list-windows` call
+# failed (they are two independent tmux/ssh calls; either can fail alone) would
+# be stored as a MEASURED zero, replacing a good snapshot. Nothing downstream
+# could ever tell.
+#
+# So: refuse the push when a host is reachable but its window enumeration did
+# not happen. Note what is deliberately NOT refused — `reachable: false` (a
+# sleeping laptop is a real state change, and the server keeps the flag), and a
+# genuinely measured zero (a workbench after reboot, before tmux starts, which
+# the OnStartupSec run will hit). A missing `windows_measured` is treated as
+# measured: this collector always emits it, and blocking on an absent field
+# would freeze the feeder against a collector that never existed.
 if ! python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1]))
-if not isinstance(d.get("hosts"), dict) or not d["hosts"]:
+hosts=d.get("hosts")
+if not isinstance(hosts, dict) or not hosts:
     raise SystemExit("no non-empty `hosts` object")
+torn=[h for h,r in hosts.items()
+      if isinstance(r, dict)
+      and r.get("reachable") is True
+      and r.get("windows_measured") is False
+      and not (r.get("windows") or [])]
+if torn:
+    raise SystemExit(
+        "host(s) %s are reachable but their windows were NOT measured; "
+        "pushing would overwrite a good snapshot with an unmeasured zero"
+        % ", ".join(sorted(torn)))
 ' "$PAYLOAD" 2>"$WORK/parse.err"; then
-  log "collector output is not a session-manager document: $(tr '\n' ' ' <"$WORK/parse.err" | cut -c1-300)"
-  exit 3
+  MSG=$(tr '\n' ' ' <"$WORK/parse.err" | cut -c1-300)
+  case "$MSG" in
+    *"NOT measured"*)
+      log "refusing to push: $MSG"
+      exit 6
+      ;;
+    *)
+      log "collector output is not a session-manager document: $MSG"
+      exit 3
+      ;;
+  esac
 fi
 
 BYTES=$(wc -c <"$PAYLOAD")
@@ -141,15 +221,34 @@ if [ "$CURL_RC" -ne 0 ]; then
   exit 4
 fi
 
-if [ "$HTTP" -ge 400 ]; then
-  # 404 is the one worth naming: the server predates the snapshot routes, which
-  # is a deploy-order problem (server first), not a payload problem.
-  if [ "$HTTP" = "404" ]; then
+# 🔴 SUCCESS IS 2xx, NOT "anything under 400", and the difference is a silent
+# forever-failure. The old `[ "$HTTP" -ge 400 ]` accepted:
+#   * a 3xx — there is no `-L`, so pointing CLAWGATE_API_URL at any hostname
+#     that redirects (an ingress, `clawgate.zacx.dev`) makes curl return the
+#     redirect, store NOTHING, and this script log "pushed" and exit 0. At a
+#     2-minute cadence, with no consumer watching the read model, that is
+#     invisible indefinitely.
+#   * `000`, curl's code when it never got a status line.
+#   * an EMPTY string — `[ "" -ge 400 ]` writes "integer expected" to stderr and
+#     is FALSE, and `set -e` does not fire on a test used as an `if` condition
+#     (measured), so it fell through to the success path too.
+# A case on the literal covers all three without any numeric comparison.
+case "$HTTP" in
+  2[0-9][0-9]) : ;;  # accepted
+  404)
+    # Worth naming: a server predating the snapshot routes is a deploy-order
+    # problem (server first), not a payload problem.
     log "server at $API_URL has no /api/tmux/snapshot route (HTTP 404) — it predates the read model; deploy the server first"
-  else
-    log "server rejected the push (HTTP $HTTP): $(tr '\n' ' ' <"$BODY" | cut -c1-300)"
-  fi
-  exit 5
-fi
+    exit 5
+    ;;
+  3[0-9][0-9])
+    log "server at $API_URL REDIRECTED (HTTP $HTTP) and the snapshot was NOT stored — this script does not follow redirects; point CLAWGATE_API_URL at the origin, not an ingress"
+    exit 5
+    ;;
+  *)
+    log "push not accepted (HTTP '${HTTP}'): $(tr '\n' ' ' <"$BODY" | cut -c1-300)"
+    exit 5
+    ;;
+esac
 
 log "pushed ${BYTES}B to $API_URL (HTTP $HTTP): $(tr -d '\n' <"$BODY" | cut -c1-200)"

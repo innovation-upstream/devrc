@@ -2933,10 +2933,23 @@ in
       # burn down the one alert channel that has to keep its meaning. That is the
       # "permanently-red gate trains you to click through" hazard, at 720/day.
       #
-      # Nothing is hidden by this: the server stamps `receivedAt` on every
-      # snapshot, so a feeder that stopped presents as a visibly stale timestamp
-      # in the read model — which is where a staleness signal belongs, next to the
-      # data it describes.
+      # 🔴 WHAT ACTUALLY SURFACES A DEAD FEEDER TODAY IS `/standup`, NOT the
+      # read model. An earlier version of this comment claimed the compensating
+      # control was the server's `receivedAt` stamp showing up as a stale
+      # timestamp. That is not observable by anyone: NOTHING reads
+      # `GET /api/tmux/snapshot` or `EventTmuxChanged` outside clawgate's own
+      # tests — no UI, no page, no script. The staleness is recorded and unread.
+      #
+      # The real control is that this unit is `Type = "oneshot"` with distinct
+      # non-zero exit codes, so a persistent failure lands in
+      # `systemctl --user --failed`, which `claude/skills/standup/standup.sh`
+      # reads. ⚠ That covers the codes (2/3/4/5/6) and NOT a unit that exits 0
+      # while achieving nothing — which is why the two audit findings in that
+      # class (a 3xx read as success, an unmeasured zero pushed as real) were
+      # fixed in the script rather than left to monitoring.
+      #
+      # A read-model staleness check belongs with the first consumer that
+      # renders this data; there is none yet.
     };
     Service = {
       Type = "oneshot";
@@ -2946,15 +2959,24 @@ in
       # leg actually wedged.
       TimeoutStartSec = 150;
       Environment = [
-        # 🔴 EVERY ENTRY HERE IS FOR THE CHILD, and none of it is incidental.
-        # Under systemd there is no login-shell PATH. `scripts/session-manager`
-        # has a `python3` shebang, shells out to `tmux`, SSHes to the laptop
-        # (openssh) and reads interface addresses to decide which host it is on
-        # (iproute2). drift-check.service already paid for this lesson: without
-        # these its child reported COULD NOT MEASURE on every run forever, from a
-        # unit that looked completely correct. curl is this script's own.
+        # 🔴 EVERY ENTRY HERE IS FOR THE CHILD, and under systemd there is no
+        # login-shell PATH to fall back on. drift-check.service already paid for
+        # this lesson: without its binaries the child reported COULD NOT MEASURE
+        # on every run forever, from a unit that looked completely correct.
+        #
+        # `scripts/session-manager` has a `python3` shebang, shells out to
+        # `tmux`, and SSHes to the laptop (openssh) — MEASURED as its only
+        # external commands. The pusher itself adds curl, sed (gnused) and
+        # tr/cut/wc/mktemp/rm/timeout (coreutils).
+        #
+        # ⚠ This list previously carried gawk, gnugrep and iproute2, and the
+        # comment justified iproute2 as "reads interface addresses to decide
+        # which host it is on". That is false: `local_host_label` reads
+        # ACTIVITY_HOST from the environment or ~/.config/activity-collector/env.
+        # All three were unused and are gone. Copying drift-check's list without
+        # checking which of it applied is how they got here.
         # Pinned by `test_the_unit_PATH_carries_every_binary_the_collector_needs`.
-        "PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.curl pkgs.gawk pkgs.gnugrep pkgs.gnused pkgs.iproute2 pkgs.openssh pkgs.python3 pkgs.tmux ]}"
+        "PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.curl pkgs.gnused pkgs.openssh pkgs.python3 pkgs.tmux ]}"
         "HOME=%h"
         # DEFENSIVE, not a fix for a live defect — and the distinction is
         # recorded because getting it wrong nearly shipped a false claim.
@@ -2980,9 +3002,28 @@ in
         # which is STRICTER than systemd: that probe blanks the manager
         # environment, so it measured a condition the unit never runs in.
         #
-        # It is kept because the inherited value comes from whatever populated
-        # the manager environment at login, this unit destroys data rather than
-        # merely failing if it is ever absent, and the cost is one line.
+        # 🔴 BUT THE RETRACTION UNDER-SOLD IT, per a later audit: the inherited
+        # value is UNDECLARED RUNTIME STATE. `TMUX_TMPDIR` appears in no
+        # /etc/nixos file, no /etc/environment.d (which does not exist here), and
+        # not in home-manager's own ~/.config/environment.d/10-home-manager.conf.
+        # Something imports it at login and nobody has written down what. So
+        # "the manager environment already carries it" is a fact about THIS BOOT,
+        # not a property of the configuration, and the fresh-boot case is open.
+        # That is why this line stays.
+        #
+        # ⚠ Two things it does NOT cover, both worth knowing before trusting it:
+        #   * it PINS rather than inherits, so if the interactive tmux server
+        #     ever starts with the socket back in /tmp, this unit looks in the
+        #     wrong place and produces exactly the destructive zero it exists to
+        #     prevent. The two agree today; they are not the same mechanism.
+        #   * the LAPTOP leg gets no such guard — session-manager reaches it over
+        #     ssh through the remote login shell, which sources .zshenv only, and
+        #     nothing in devrc sets TMUX_TMPDIR there. It works because the
+        #     laptop's socket is in /tmp. If the laptop ever acquires this host's
+        #     arrangement it silently reports zero windows — and `tmux` says "no
+        #     server running", which session-manager maps to reachable:true AND
+        #     windows_measured:TRUE, so the torn-collection gate in the pusher
+        #     cannot catch it either. Only an env pin on that side would.
         # `%t` is the user runtime dir (/run/user/UID).
         # Pinned by `test_the_unit_gives_tmux_its_SOCKET_directory`.
         "TMUX_TMPDIR=%t"
@@ -3001,8 +3042,20 @@ in
   # backs an at-a-glance view of which windows are busy/waiting, and a view that
   # is a quarter-hour stale would be answering a question nobody asked. Measured
   # cost on the workbench 2026-08-28, three consecutive samples: 1298 / 1196 /
-  # 1193 ms per collection (it SSHes to the laptop), so 2 minutes is ~1% duty
-  # cycle and ~720 ssh round trips a day. Tighter buys little — tmux state does
+  # 1193 ms per collection, so 2 minutes is ~1% duty cycle.
+  #
+  # ⚠ THE PER-RUN COST IS MORE THAN ONE SSH, and this comment used to say "~720
+  # ssh round trips a day" as though it were. `session-manager --json` makes up
+  # to FOUR ssh invocations to the laptop per run (list-panes, list-windows, the
+  # capture batch, the ledger read) with no ControlMaster, so it is nearer
+  # ~2,880 handshakes/day; it also runs one ClickHouse query per run (~720/day),
+  # which the old figure omitted entirely. Store side: ~720 upserts/day of
+  # ~100 KB jsonb onto a two-row table, i.e. real TOAST/WAL churn for data that
+  # currently has no reader. If that cost ever matters, `--lean` is the lever —
+  # the server keeps only `hosts[].windows` and discards the rest — at the price
+  # of the verbatim/dumb-pipe property.
+  #
+  # Tighter buys little — tmux state does
   # not meaningfully change faster than a human reads it — and would start to be
   # a real share of a core. OnStartupSec gives one prompt run shortly after the
   # user manager starts, i.e. after a workbench reboot, so the view is populated
