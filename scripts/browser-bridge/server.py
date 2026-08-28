@@ -2077,9 +2077,19 @@ class Registry:
 
     @staticmethod
     def _prune_inflight_locked(inst, now):
-        """Drop `inflight` entries that can no longer describe current business.
+        """Drop `inflight` entries that can no longer describe current business,
+        AND sweep the `reaps` index of entries nothing can reach any more.
 
-        TWO conditions, and the second is not optional:
+        🔴 THE SECOND JOB IS IN THE NAME'S BLIND SPOT, WHICH IS HOW A REGRESSION
+        GOT IN. This used to say "Drop `inflight` entries" and nothing else, so a
+        function whose contract read "inflight only" was quietly given authority
+        over the reap-expiry index — and the first draft of that sweep used an
+        inflight-only predicate, deleting the metadata of reaps still queued in
+        the outbox and thereby removing BOTH of a reap's bounds. The sweep's own
+        comment below carries the measurement; this line exists so the contract
+        at the top is as wide as the body.
+
+        TWO conditions for the inflight half, and the second is not optional:
 
         (a) older than INFLIGHT_STALE_S, AND
         (b) NO live submitter is still blocked on it (`cid not in inst.waiters`).
@@ -2109,14 +2119,33 @@ class Registry:
                  if now - t > INFLIGHT_STALE_S and c not in inst.waiters]
         for c in stale:
             del inst.inflight[c]
-        # A reap's `reaps` entry is only ever meaningful while its `inflight`
-        # entry lives: it is created with one and dropped with one on every
-        # normal exit (reply, cancel, expiry-at-pickup). The one path that leaves
-        # it behind is a reap whose reply is LOST — the residual this feature
-        # already discloses. Without this sweep that entry would outlive the
-        # Instance's usefulness (`instance_id` is stable across a browser
-        # restart), so tie its lifetime to the one that is already bounded.
-        for c in [c for c in inst.reaps if c not in inst.inflight]:
+        # Sweep the `reaps` index for entries nothing can reach any more. The one
+        # path that strands one is a reap whose reply is LOST — the residual this
+        # feature discloses — after which it would outlive the Instance's
+        # usefulness, since `instance_id` is stable across a browser restart.
+        #
+        # 🔴 A REAP IS REACHABLE FROM TWO PLACES, AND AN EARLIER DRAFT SWEPT ON
+        # ONLY ONE OF THEM. `inst.reaps[cid]` is the ONLY index from an outbox
+        # entry to its `expires_at`, and it is also what `_cancel_queued_reaps_
+        # locked` matches on. A reap's inflight stamp and its expiry are both set
+        # from the same instant, so the age-prune above fires at EXACTLY the
+        # moment the reap expires — and a reap is never in `waiters`
+        # (deliberately: "NO WAITER"), so condition (b) never shields it. An
+        # inflight-only predicate therefore deleted the metadata of a reap STILL
+        # SITTING IN THE OUTBOX. Measured, red at that draft and green before it:
+        #   * `poll()` found no entry, skipped the expiry branch, and DISPATCHED
+        #     the stale close — removing the exact bound `expires_at` exists to
+        #     provide, in the wedged-extension case it was written for;
+        #   * `_cancel_queued_reaps_locked` could no longer see it, so re-owning
+        #     the tab stopped withdrawing the close — the other bound, gone too.
+        # Neither needs a rare event: `_prune_inflight_locked` runs on EVERY
+        # submit and every ping, and two ordinary ops ahead of the reap in the
+        # serial FIFO can exceed INFLIGHT_STALE_S without any wedge at all.
+        #
+        # So sweep only what BOTH bounded lifetimes have finished with.
+        queued = {c.get("id") for c in inst.outbox}
+        for c in [c for c in inst.reaps
+                  if c not in inst.inflight and c not in queued]:
             del inst.reaps[c]
 
     # --- concurrency backstop (per-instance rate limit + queue-depth cap) --- #

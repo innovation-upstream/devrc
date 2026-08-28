@@ -10050,11 +10050,18 @@ def test_cancelling_does_not_disturb_a_reap_ALREADY_IN_FLIGHT():
 
 
 def test_a_reap_whose_reply_is_lost_does_not_strand_its_bookkeeping():
-    """A `reaps` entry is only meaningful while its `inflight` entry lives.
+    """A DISPATCHED reap whose reply never arrives must not strand its entry.
 
-    The one path that leaves it behind is a reap whose reply never arrives — the
-    residual this feature already discloses. `instance_id` is stable across a
-    browser restart, so the same `Instance` would carry it forever.
+    That is the residual this feature discloses, and `instance_id` is stable
+    across a browser restart, so the same `Instance` would carry it forever.
+
+    ⚠ SCOPE, STATED BECAUSE READING THIS AS COVERAGE OF THE SWEEP IS WHAT
+    STOPPED ANYONE LOOKING AT THE OTHER ARM: this test dispatches before
+    advancing the clock, so `outbox` is empty and it exercises the DISPATCHED
+    case only. The sweep also sees QUEUED reaps, and an earlier predicate got
+    that arm wrong — pinned separately by
+    `test_a_prune_must_not_starve_a_reap_STILL_IN_THE_OUTBOX` and
+    `test_a_prune_must_not_make_a_queued_reap_UNCANCELLABLE`.
     """
     t = {"now": 1000.0}
     reg = S.Registry(clock=lambda: t["now"])
@@ -10085,3 +10092,125 @@ def test_a_reap_whose_reply_is_lost_does_not_strand_its_bookkeeping():
     assert inst.reaps == {}, (
         "the reaps entry must age out with it — otherwise a lost reply strands it "
         "on an Instance that survives a browser restart")
+
+
+def test_a_prune_must_not_starve_a_reap_STILL_IN_THE_OUTBOX():
+    """🔴 THE SWEEP MUST RESPECT BOTH LIFETIMES, NOT JUST `inflight`.
+
+    `inst.reaps[cid]` is the ONLY index from an outbox entry to its `expires_at`,
+    and it is also what `_cancel_queued_reaps_locked` matches on. A reap's
+    inflight stamp and its expiry come from the same instant, so the age-prune
+    fires at exactly the moment the reap expires — and a reap is never in
+    `waiters` (deliberately), so the prune's second condition never shields it.
+
+    An inflight-only sweep therefore deleted the metadata of a reap STILL SITTING
+    IN THE OUTBOX, removing BOTH bounds at once. This test pins both, because
+    they fail together and each alone reads as a smaller bug than it is.
+
+    Not exotic: `_prune_inflight_locked` runs on every submit and every ping, and
+    two ordinary ops ahead of the reap in the serial FIFO can exceed
+    INFLIGHT_STALE_S with no wedge at all.
+    """
+    t = {"now": 1000.0}
+    reg = S.Registry(clock=lambda: t["now"])
+    reg.poll("solo", "only", 0)
+    inst = list(reg._instances.values())[0]
+    with reg._cond:
+        reg._record_ownership_locked(
+            inst, "open", "A", None, {"ok": True, "data": {"tabId": 101}})
+        reg._record_ownership_locked(
+            inst, "open", "A", None,
+            {"ok": True, "data": {"tabId": 202, "orphanTabId": 101}})
+    assert len(inst.reaps) == 1 and len(inst.outbox) == 1, "control: queued"
+
+    # An ordinary prune — what every submit and every ping does — while the reap
+    # is STILL QUEUED and now past its window.
+    t["now"] += S.INFLIGHT_STALE_S + 1
+    with reg._cond:
+        S.Registry._prune_inflight_locked(inst, t["now"])
+    assert len(inst.reaps) == 1, (
+        "a QUEUED reap's metadata must survive the prune — it is the only index "
+        "to its expires_at and the only thing cancellation can match on")
+
+    # (a) EXPIRY still fires: the stale close is dropped, not handed over.
+    got = reg.poll("solo", "only", 0)
+    assert got is None, (
+        f"an expired reap was DISPATCHED ({got}) — after a browser restart the "
+        f"same tab id names a stranger's tab")
+    assert list(inst.outbox) == []
+    assert inst.reaps == {}, "…and dropping it does clean up after itself"
+
+
+def test_a_prune_must_not_make_a_queued_reap_UNCANCELLABLE():
+    """The other half of the same defect, asserted separately because the two
+    have different consequences: this one closes a tab the session CURRENTLY
+    OWNS, which is what `_cancel_queued_reaps_locked` exists to prevent."""
+    t = {"now": 1000.0}
+    reg = S.Registry(clock=lambda: t["now"])
+    reg.poll("solo", "only", 0)
+    inst = list(reg._instances.values())[0]
+    with reg._cond:
+        reg._record_ownership_locked(
+            inst, "open", "A", None, {"ok": True, "data": {"tabId": 101}})
+        reg._record_ownership_locked(
+            inst, "open", "A", None,
+            {"ok": True, "data": {"tabId": 202, "orphanTabId": 101}})
+
+    t["now"] += S.INFLIGHT_STALE_S + 1
+    with reg._cond:
+        S.Registry._prune_inflight_locked(inst, t["now"])
+        n = reg._cancel_queued_reaps_locked(inst, 101)
+    assert n == 1, (
+        f"a re-owned tab must still withdraw its QUEUED reap after a prune "
+        f"(got {n}) — otherwise the server closes a tab it currently owns")
+    assert list(inst.outbox) == []
+
+
+def test_cancelling_nothing_does_not_log_a_cancellation():
+    """The early return's ONLY observable, so without this it has no killing
+    mutation — measured: deleting it survived the whole reap selection.
+
+    `owner_orphan_reap_cancel` means "a queued close was withdrawn". Emitting it
+    with n=0 on every re-`open` that happens to match an already-dispatched reap
+    would make the line mean nothing, which is the same defect as the
+    `result_unknown_id` one this feature already fixed.
+    """
+    reg = S.Registry()
+    reg.poll("solo", "only", 0)
+    inst = list(reg._instances.values())[0]
+    with reg._cond:
+        reg._record_ownership_locked(
+            inst, "open", "A", None, {"ok": True, "data": {"tabId": 101}})
+        reg._record_ownership_locked(
+            inst, "open", "A", None,
+            {"ok": True, "data": {"tabId": 202, "orphanTabId": 101}})
+    reg.poll("solo", "only", 0)          # dispatch it → nothing left to withdraw
+    assert list(inst.outbox) == [] and len(inst.reaps) == 1, "control"
+
+    lines = []
+    real_log = S.log
+    try:
+        S.log = lambda ev, **kw: lines.append((ev, kw))
+        with reg._cond:
+            n = reg._cancel_queued_reaps_locked(inst, 101)
+    finally:
+        S.log = real_log
+    assert n == 0
+    assert [e for e, _ in lines if e == "owner_orphan_reap_cancel"] == [], (
+        f"nothing was withdrawn, so no cancellation may be logged; got {lines}")
+    # Positive control for the capture itself — otherwise an empty `lines` would
+    # prove only that the patch missed.
+    lines.clear()
+    with reg._cond:
+        reg._record_ownership_locked(
+            inst, "open", "A", None,
+            {"ok": True, "data": {"tabId": 303, "orphanTabId": 101}})
+    try:
+        S.log = lambda ev, **kw: lines.append((ev, kw))
+        with reg._cond:
+            n2 = reg._cancel_queued_reaps_locked(inst, 101)
+    finally:
+        S.log = real_log
+    assert n2 == 1
+    assert [e for e, _ in lines if e == "owner_orphan_reap_cancel"], (
+        "control: a REAL withdrawal must log, or the assertion above is vacuous")
