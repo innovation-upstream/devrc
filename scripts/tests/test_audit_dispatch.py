@@ -163,6 +163,54 @@ prints on an unknown key). `url` is what carries the base repo, and it is what
 `pr_slug` reads; `isCrossRepository` decides whether the head fields may stand
 in when there is no url.
 
+🔴 ROUND 7 — a fifth base, `3619fe68`, fixing round 6's findings
+------------------------------------------------------------------
+Round 6 returned two 🟡 and four 🟢, plus a PRE-EXISTING 🔴 found under a
+targeted probe. The 🔴 is the third instance of this ladder's recurring
+confusion and the first on a TIME axis: THE RANGE handed the auditor
+`<from>..HEAD` whenever the head was verified, and `HEAD` resolves in the
+AUDITOR's worktree — cut after assembly, from a repository other sessions push
+to. Round 3 conflated the operator's checkout with the tree under audit; round
+5 conflated the assembling process's cwd with where the auditor stands.
+
+The two 🟡: `own-worktree-is-writable` still said the no-write rule "is about
+the SHARED checkout", naming a scoping round 5 had removed from the clause it
+forward-references — so a cross-repo brief assembled in a PRIVATE worktree
+contradicted itself across three consecutive sections; and the exit-4 round
+trip is line-oriented on BOTH sides, so a TRAILING NEWLINE in `--audited`
+emitted a corrupt block at rc 0. The four 🟢 were all scaffolding: this
+module's own prose still asserted the premise round 5 refuted, the TOOLCHAIN
+equality drove two scenarios that were both same-repo, the no-write
+relationship was spelled as an id PREFIX, and the blind-spot rationale was
+false as stated.
+
+Measured at `3619fe68` the same way — `git show 3619fe68:scripts/audit-dispatch
+.py` into a scratch tree with THIS module copied in unchanged, under
+`PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`:
+
+    12 failed, 82 passed
+
+and only FOUR of the twelve are regression coverage. Of the other eight: ONE is
+round 7's new state-map guard, which ERRORS there for want of a constant the
+fix adds; the rest are pre-existing tests whose expected range spelling moved
+with the tip fix, plus the whole-string directive ledger.
+
+🔴 ONE OF ROUND 7's GUARDS CANNOT BE RED UNDER THAT PROCEDURE AT ALL, and the
+reason is worth naming rather than papering over: it scans THIS MODULE's prose,
+and the procedure copies this module in UNCHANGED. A base SCRIPT says nothing
+about a base DOCSTRING. It is filed as a guard, and its red was measured
+separately against `3619fe68`'s test module — where both `REFUTED_PREMISES`
+entries appear, normalised, and would read twice with the ledger present.
+
+🔴 AND THE PER-ROUND COUNTS ABOVE ARE CLAIMS ABOUT THE MODULE OF THEIR OWN
+ROUND. Re-running the same procedure with the CURRENT module gives larger
+numbers at every historical ref (54/34/27/19 at
+`abc41024`/`d9eb36a8`/`e06461f7`/`dd601793`), because each later round adds
+tests that are also red at the earlier trees. What is re-derivable, and was
+re-derived in round 7, is the claim the ledgers actually make: every name in
+every `RED_AT_BASE_*` set fails at its own ref. Zero false claims across all
+five refs.
+
 🔴 THE NEGATIVE-CONTROL MATRIX — measured, and RE-DERIVABLE
 -------------------------------------------------------------
 🔴 The rows below are transcribed from a harness that is IN THE TREE, and that
@@ -178,8 +226,9 @@ rows that justified adding a pin. Each row there names the EXACT killer set and
 reports WRONG-KILLER (an expected pin did not fire) separately from EXTRA-KILLER
 (the row no longer isolates what it names).
 
-Re-run 2026-08-28 against HEAD of this branch after the round-5 fixes — **76
-rows, all as expected**, over an 89-test positive control — each mutant applied
+Re-run 2026-08-28 against HEAD of this branch after the round-7 fixes — **83
+rows, all as expected**, over a 94-test positive control (it was 76 rows over
+89 after round 5) — each mutant applied
 to a COPY of
 `scripts/audit-dispatch.py` in a scratch tree (never the worktree), under
 `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`, with the unmutated copy as the
@@ -189,7 +238,10 @@ which is the most flattering possible wrong answer. Two rows have done exactly
 that: `C3`, written against the two-state `cross_repo` flag, and `H2`, whose
 branch became an `elif` when round 3 inserted the degenerate-self-range case
 ahead of it. Both were re-targeted; without that assert each would have scored
-as a guard holding.
+as a guard holding. 🔴 TWO MORE IN ROUND 7 — `Y6` and `Y14`, whose target was
+`render_checkout`'s inline state->directive dict, now the module-level
+`CHECKOUT_STATE_DIRECTIVE`. That makes FOUR rows this assert has caught, every
+one of them after a refactor that nobody thought touched the battery.
 
 🔴 THE ROUND-3 BATTERY CAUGHT TWO DEFECTS IN THE ROUND-3 TESTS THEMSELVES, and
 they are recorded because both are the shape this file warns about elsewhere:
