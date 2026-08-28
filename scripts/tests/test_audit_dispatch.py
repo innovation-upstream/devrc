@@ -321,7 +321,7 @@ notable one is `C3`: SEVEN of the thirteen names round 8 added LEFT it, because
 THE LEDGER stopped turning on `repo_relation` alone — the departure is round
 10's finding B, measured rather than argued.
 
-🔴 ROUND 10's BASE is `706a6b38`, measured the same way: **7 failed, 101
+🔴 ROUND 10's BASE is `706a6b38`, measured the same way: **7 failed, 102
 passed**. FIVE are its regression coverage (`RED_AT_BASE_R9`); of the other
 two, one is the whole-string DIRECTIVE ledger moving with the reword of
 `own-worktree-is-writable`, and one is
@@ -5268,12 +5268,14 @@ RED_AT_BASE_R7: frozenset[str] = frozenset({
 # 🔴 ROUND 10's base is the ROUND-9 TREE, `706a6b38`. Measured the same way —
 # `git show 706a6b38:scripts/audit-dispatch.py` into a scratch tree with THIS
 # module copied in unchanged, `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`:
-# **7 failed, 101 passed**. FOUR of the seven are these. Of the other three,
-# one is the whole-string directive ledger moving with round 10's reword of
-# `own-worktree-is-writable`, one is this partition guard itself (the new tests
-# are not in the base module's ledgers), and one is
+# **7 failed, 102 passed**. FIVE of the seven are these. Of the other two, one
+# is the whole-string directive ledger moving with round 10's reword of
+# `own-worktree-is-writable`, and one is
 # `test_the_tip_placeholder_ledger_matches_the_script`, filed as a guard above
 # because its red there is an `AttributeError` for a name the fix introduces.
+# (An earlier run of the same procedure read 7/101 with the partition guard
+# among the failures, because the base module's ledgers did not yet list this
+# round's tests. The figure above is the FINAL one, re-measured after they did.)
 #
 # 🔴 `test_no_brief_claims_a_verification_its_own_fixture_refutes` is NOT here
 # and is not new: round 8 filed it as a guard, and round 10 RESCOPED it. It is
