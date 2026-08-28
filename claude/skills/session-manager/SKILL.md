@@ -174,8 +174,8 @@ So read them from the run, not from here. `report["caveats"]` is structured and 
 prints one footer line each **unconditionally**, so an agent that runs the script cold gets
 them anyway. The vocabulary is the keys of `CAVEATS` in `scripts/session-manager` —
 `claude_detection`, `fuzzyclaw_scope`, `kind_scope`, `ledger_scope`, `waiting_signal`,
-`unsent_prompt` — which `measured_caveats` fills in per scan. That list is gated against the
-script's own `CAVEATS`; the prose this section used to hold was not, and had rotted to five.
+`unsent_prompt`, `pane_preview` — which `measured_caveats` fills in per scan. That list is
+gated both ways against the script's own `CAVEATS`.
 
 ## 🔴 Read the exit code — the two zeroes are different facts
 
