@@ -14,24 +14,77 @@ module exists to make them impossible to delete quietly.
 🔴 WHICH TESTS ARE REGRESSION COVERAGE AND WHICH ARE NOT
 ---------------------------------------------------------
 `claude/RULES.md` requires the distinction, and requires naming the base a test
-was watched red at. Here the honest answer is uncomfortable and is stated rather
-than dressed up:
+was watched red at.
 
-  RED_AT_BASE is **EMPTY, on purpose.** `scripts/audit-dispatch.py` did not
-  exist at `3b79a35a` (this branch's base). Every test below would ERROR at that
-  ref for want of the module, which is not evidence of anything — a test that
-  cannot import the thing it tests is not "red at base" in the sense the rule
-  means. NOTHING here is regression coverage for a bug that shipped.
+  RED_AT_BASE WAS EMPTY AND IS NOT ANY MORE, and the reason is the point of this
+  section. It was empty because `scripts/audit-dispatch.py` did not exist at
+  `3b79a35a` (this branch's base): every test would have ERRORED there for want
+  of the module, which is not evidence of anything.
 
-  Everything here is therefore an INVARIANT GUARD or a STRUCTURAL LEDGER. What
-  makes them non-vacuous is the MUTATION MATRIX below: each was watched to fail
-  against a deliberately mutated copy of the script, and the mutant is named
-  beside the test that caught it. A guard nobody watched go red is a guard
-  nobody has evidence for, whatever its base ref.
+  Round 2's adversarial audit then found NINE defects in the shipped script —
+  three 🔴, six 🟡, every one reproduced live — so there is now a base with a
+  real bug in it: **`abc41024`**, the branch head that carried them. Measured
+  by restoring that script into a scratch tree with this module copied in
+  unchanged, under `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`:
 
-  Both facts are asserted mechanically at the bottom of this module
-  (`test_the_two_ledgers_partition_this_modules_tests`), so a test cannot
-  quietly join or leave either list.
+      24 failed, 34 passed          <- 24 node ids, 21 functions
+
+  Those 21 are `RED_AT_BASE`, and three of them are labelled INSIDE that
+  constant as weaker evidence than the rest: two assert text the fix added
+  rather than observing a wrong answer, and one pins a sentence about a gap
+  this PR documents but does not close.
+
+  Everything else is an INVARIANT GUARD or a STRUCTURAL LEDGER. What makes those
+  non-vacuous is the MUTATION MATRIX below: each was watched to fail against a
+  deliberately mutated copy of the script, and the mutant is named beside the
+  test that caught it. A guard nobody watched go red is a guard nobody has
+  evidence for, whatever its base ref.
+
+  Both ledgers are asserted mechanically at the bottom of this module
+  (`test_the_two_ledgers_partition_this_modules_tests`), which now also refuses
+  an entry appearing in BOTH — a test is regression coverage or it is a guard,
+  and listing it twice makes the count of what was watched red unreadable.
+
+🔴 THE ROUND-2 FIX MATRIX — one line per finding, per `claude/RULES.md`
+-----------------------------------------------------------------------
+Each row names the defect, the test that detects it, and the mutant that proves
+that test executes. Every "red at" cell is `abc41024`.
+
+  finding                              detector (red at abc41024)      mutant
+  1a ledger measured the OPERATOR'S    ..._ledger_refuses_to_measure_   H1
+     checkout, not the PR              a_checkout_that_is_not_the_pr
+  1b range handed out `..HEAD` from    ..._range_does_not_hand_out_a_   H2
+     the wrong tree                    head_that_is_not_the_prs_head
+  1c --emit-claims stamped the LOCAL   ..._emit_claims_stamps_the_prs_  H3
+     head as the audited sha           head_not_the_local_checkouts
+  2  toolchain gated the SHARED        ..._toolchain_gates_the_         T1, T2
+     checkout                          auditors_copy_not_the_shared_...
+  3  fork PRs inverted the cross-repo  ..._fork_pr_against_this_repo_   C3, P1
+     directive; the FIXTURE agreed     is_not_treated_as_cross_repo
+                                       + ..._prs_repo_is_read_from_the_url
+  4  missing_clauses() unreachable     ..._clause_check_runs_over_a_    K1, K2
+                                       file_that_can_actually_be_lossy
+                                       + ..._out_file_is_read_back...
+  5  five clause rewords INVERTED the  ..._each_clause_carries_the_     W1-W5
+     instruction and stayed green      instruction_its_ledger_...      (+S1)
+  6  a FALSE cause printed for a       ..._failed_cumulative_           L1
+     failed cumulative measurement     measurement_does_not_print_a_...
+  7  --round 1 --emit-claims emitted   ..._emit_claims_prints_a_block_  H4
+     a block parsing to garbage        ..._parser_accepts (rows 2, 3)
+                                       + ..._round_one_block_anchors_...
+  8  the parser dropped four shapes    ..._fence_the_parser_cannot_     B1-B5
+     silently, and truncated wrapped   read_is_reported_not_skipped
+     claims                            + 4 siblings
+  9  "repo cannot be determined"       ..._undeterminable_repo_gets_    P2
+     collapsed into SAME-REPO          its_own_branch_not_the_same...
+
+🔴 FINDING 3's PRESCRIPTION WAS WRONG ON ONE POINT, and it is recorded because
+the next person will reach for the same field: the audit said to use
+`isCrossRepository` + **`baseRepository`**. `gh pr view --json` HAS NO
+`baseRepository` FIELD (checked against `gh`'s own field list, which is what it
+prints on an unknown key). `url` is what carries the base repo, and it is what
+`pr_slug` reads; `isCrossRepository` decides whether the head fields may stand
+in when there is no url.
 
 🔴 THE NEGATIVE-CONTROL MATRIX — measured, and RE-DERIVABLE
 -------------------------------------------------------------
@@ -48,22 +101,31 @@ rows that justified adding a pin. Each row there names the EXACT killer set and
 reports WRONG-KILLER (an expected pin did not fire) separately from EXTRA-KILLER
 (the row no longer isolates what it names).
 
-Run 2026-08-27 against HEAD of this branch, each mutant applied to a COPY of
+Re-run 2026-08-27 against HEAD of this branch after the round-2 fixes — **39
+rows, all as expected** — each mutant applied to a COPY of
 `scripts/audit-dispatch.py` in a scratch tree (never the worktree), under
 `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`, with the unmutated copy as the
 positive control. Every mutant asserted its target string present before
 editing — a mutation that silently fails to apply reports "the guard held",
-which is the most flattering possible wrong answer.
+which is the most flattering possible wrong answer. (One row did exactly that
+this round: `C3` had been written against the two-state `cross_repo` flag, and
+reported MUTATION DID NOT APPLY the moment that became three-state
+`repo_relation`. It is re-targeted; without that assert it would have scored as
+a guard holding.)
 
-  POS  unmutated copy .............................. 37 passed  <- control
+The rows below are the pre-existing sixteen. The twenty-three added this round —
+W1-W5 and the SURVIVES control S1, H1-H4, T1-T2, P1-P2, K1-K3, L1, B1-B5 — are
+listed in the harness with their killer sets and are NOT transcribed here; the
+harness is the authority on which rows exist.
+
+  POS  unmutated copy .............................. 58 passed  <- control
 
   D1   delete the `read-only` clause ............... 4 failed
   D3   delete the `stop-rule` clause ............... 4 failed
   D4   delete the `nit-is-not-a-finding` clause .... 4 failed
   D5   delete the `reverify-self-reported` clause .. 4 failed
   D6   delete the `finding-format` clause .......... 4 failed
-  D7   delete the `do-not-merge` clause ............ 4 failed
-         all six kill the same four: ledger_is_pinned_two_way /
+         all five kill the same four: ledger_is_pinned_two_way /
          carries_the_instruction_its_ledger_entry_names /
          rendered_section_holds_exactly /
          control_a_clause_deleted_from_the_constant_is_detected
@@ -73,6 +135,12 @@ which is the most flattering possible wrong answer.
          `no-fetch` BY ID, so deleting that particular clause makes it error.
          Recorded rather than tidied away: it is a real coupling, and it is why
          the deleted-clause CONTROL is a different test from the warn test.
+  D7   delete the `do-not-merge` clause ............ 5 failed
+         the same four, plus out_file_is_read_back_and_checked — the SECOND
+         instance of D2's shape, and for the same reason: that test looks
+         `do-not-merge` up BY ID to model a lossy write. An INDEX would be
+         worse, not better; it would make the test's outcome depend on which
+         OTHER clause a mutation deleted.
   A1   ADD an eighth clause with no ledger entry ... 3 failed
          ledger_is_pinned_two_way / rendered_section_holds_exactly /
          control_a_clause_deleted_from_the_constant_is_detected
@@ -81,25 +149,31 @@ which is the most flattering possible wrong answer.
        is still present and still emitted .......... 1 failed
          carries_the_instruction_its_ledger_entry_names ALONE
          🔴 THE REACHABILITY CONTROL. Every presence pin stays GREEN, so a red
-         here proves the FRAGMENT ledger executes and is not a second spelling
-         of the id ledger beside it.
+         here proves the CLAUSE ledger executes and is not a second spelling
+         of the id ledger beside it. W1-W5 are the same shape, one per
+         instruction that a fragment pin could not see.
   F1   render the invariant section from a hardcoded
-       copy of the bullets, ignoring the constant ... 3 failed
+       copy of the bullets, ignoring the constant ... 4 failed
          ledger_is_pinned_two_way stays GREEN (the ids are untouched);
-         rendered_section_holds_exactly, emitted_verbatim_in_both_kinds and the
-         deleted-clause control go red. This is why the RENDERED section is
-         compared and not only the constant.
+         rendered_section_holds_exactly, emitted_verbatim_in_both_kinds, the
+         deleted-clause control and the `--check` round trip go red. This is
+         why the RENDERED section is compared and not only the constant — and
+         the `--check` row is the one that reaches it through a real FILE.
   C1   the delta refusal removed (a round-N brief is
-       emitted with no claims block) ............... 3 failed
+       emitted with no claims block) ............... 4 failed
          delta_refusal_exits_non_zero / refusal_names_what_it_looked_for /
-         refusal_fires_for_a_malformed_block
+         refusal_fires_for_a_malformed_block / refusal_says_which_comment_kinds
   C2   claims read from the WHOLE comment body
        instead of the fenced block ................. 3 failed
          brief_carries_the_claims_and_not_the_reasoning (the framing
          guarantee) / newest_claims_block_wins / emit_claims round-trip
-  C3   cross-repo decision inverted (`!=` -> `==`) . 3 failed
+  C3   the two KNOWN repo states swapped .......... 4 failed
          cross_repo_tells_the_agent_to_worktree_the_prs_repo /
          same_repo_recommends_the_isolation_flag / decision_comes_from_the_repos
+         / fork_pr_against_this_repo_is_not_treated_as_cross_repo — the last
+         one is what proves the FORK case rides this same decision. The fixture
+         used to encode a model in which it did not, which is how three
+         cross-repo tests and this mutant all passed over a live bug.
   C4   the numstat command's non-zero exit reads as
        a clean zero instead of COULD NOT MEASURE ... 1 failed
          ledger_refuses_a_failed_command_rather_than_printing_zero
@@ -107,8 +181,10 @@ which is the most flattering possible wrong answer.
        pathspec and prints a number for X .......... 1 failed
          ledger_shows_the_files_and_refuses_to_classify_them
   C6   the missing-clause warning BLOCKS
-       (returns non-zero) .......................... 1 failed
-         missing_clause_check_warns_and_never_blocks
+       (returns non-zero) .......................... 2 failed
+         missing_clause_check_warns_and_never_blocks /
+         out_file_is_read_back_and_checked (it too asserts rc 0 over a `--out`
+         run whose file is missing a clause)
 
 🔴 ONE MEASURED NON-RESULT, RECORDED BECAUSE IT LOOKS LIKE COVERAGE:
 `test_every_clause_is_emitted_verbatim_in_both_kinds_of_brief` does **NOT** go
@@ -121,11 +197,22 @@ implementation" failure. The deletion detectors are the ledger tests.
 
 🔴 WHAT THIS MODULE DOES **NOT** ENFORCE
 -----------------------------------------
-1. **It cannot see a clause REWORDED into something weaker** beyond the one
-   fragment its ledger names. `CLAUSE_LEDGER` pins one load-bearing phrase per
-   clause, not the whole sentence, because the whole sentence would live in two
-   places and drift. So a rewrite that keeps the fragment and guts the rest is
-   invisible. Mitigation is review, not this file.
+1. **It cannot see a clause reworded into a SEMANTICALLY IDENTICAL sentence.**
+   🔴 This item used to read "it cannot see a clause REWORDED into something
+   weaker", and that was a live hole, not a documented limit: `CLAUSE_LEDGER`
+   pinned one phrase per clause, and five rewords that INVERTED their clause
+   passed a fully green 37-test suite — including one telling every future
+   auditor that "one confirming round after a clean one is prudent", which is
+   what `claude/RULES.md` forbids.
+
+   The ledger now pins the WHOLE whitespace-normalised clause, the way the
+   sibling module `scripts/tests/test_audit_ladder_stop_rule.py` pins the prose
+   it guards. What remains out of reach is what remains out of reach there too:
+   a restatement in different words that means the same thing. There is no known
+   mechanical fix, and the cost of the pin is that a cosmetic REWORD now fails
+   here — which is the price, deliberately paid, for a machine-readable claim.
+   A pure re-wrap is free: whitespace is normalised, and mutant S1 is the
+   SURVIVES control proving it.
 2. **It proves nothing about BEHAVIOUR.** Nothing here shows any auditor read
    the brief, obeyed the no-fetch clause, or stopped at a clean round. The
    measurement that motivated the script was over transcripts; the verifier for
@@ -170,22 +257,83 @@ ad = _load()
 # --------------------------------------------------------------------------- #
 # If this ledger were derived from `ad.INVARIANT_CLAUSES` the whole test would
 # be vacuous: deleting a clause would delete it from both sides and the
-# comparison would stay green. So the ids and the load-bearing fragment of each
-# clause are RESTATED here by hand, and the duplication is the point.
+# comparison would stay green. So the ids and the WHOLE TEXT of each clause are
+# RESTATED here by hand, and the duplication is the point.
 #
-# Each fragment is the phrase a dispatch measurably LOST when the clause was
-# written from memory (see the module docstring's table). Pinning the phrase
-# rather than the sentence is a deliberate trade: a reword that keeps the phrase
-# is invisible (blind spot 1), and a sentence pinned in two files drifts.
+# 🔴 THESE USED TO BE FRAGMENTS, AND FIVE INSTRUCTION-INVERTING REWORDS PASSED A
+# FULLY GREEN 37-TEST SUITE:
+#
+#   read-only      -> "Edit the repo under audit freely if it helps."
+#   no-fetch       -> "`pull` and `checkout` in the shared checkout are fine."
+#   finding-format -> `file:line` and the scenario requirement deleted
+#   reverify       -> "Where time allows, re-verify…"
+#   stop-rule      -> "one confirming round after a clean one is prudent"
+#
+# The last one makes every future brief instruct auditors to do the thing
+# `claude/RULES.md` forbids. A fragment pin certifies that a PHRASE is present,
+# never that the instruction around it still says what it said.
+#
+# So these are WHOLE, whitespace-normalised strings, the way the sibling module
+# `scripts/tests/test_audit_ladder_stop_rule.py` pins the prose it guards — and
+# for the reason it cites, `claude/RULES.md` -> spelled-guards: "when the
+# artifact under test IS prose, a guard on WORDS is walkable by REWORDING — pin
+# the WHOLE normalised string. A cosmetic reword then fails the test — pay it,
+# for a machine-readable claim."
+#
+# Normalising whitespace is what keeps the price to a REWORD and not a re-wrap:
+# the mutation battery carries a SURVIVES control ("re-wrap a clause across
+# different line breaks") proving a pure re-flow stays green here.
 CLAUSE_LEDGER = {
-    "read-only": "rm -f <copy>/.git",
-    "no-fetch": "Do NOT `git fetch`",
-    "stop-rule": "ending it is the CORRECT outcome, not a failure",
-    "nit-is-not-a-finding": "changes nothing a reader does is NOT a finding",
-    "reverify-self-reported": "self-reported numbers rather than accepting them",
-    "finding-format": "`payload` or `scaffolding` label",
-    "do-not-merge": "Do not merge — report only",
+    "read-only": (
+        "**READ-ONLY — you modify nothing in the repository under audit.** If "
+        "you must mutate something to test a theory, do it in a `cp -a` copy "
+        "and run `rm -f <copy>/.git` FIRST: a worktree's `.git` is a FILE "
+        "pointing at the real git dir, so a commit inside the copy lands on "
+        "the branch you are auditing."
+    ),
+    "no-fetch": (
+        "**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to the "
+        "shared checkout named in THE SHARED CHECKOUT section of this brief.** "
+        "Other sessions are in it; a fetch there is a write with cross-session "
+        "blast radius, and every ref you need is already resolved for you here."
+    ),
+    "stop-rule": (
+        "**A clean round ENDS the ladder — ending it is the CORRECT outcome, "
+        "not a failure.** Rounds continue only while the previous round "
+        "produced a finding that needed fixing. Do not manufacture findings to "
+        "justify the round, and do not run another round to confirm a clean "
+        "one."
+    ),
+    "nit-is-not-a-finding": (
+        "**A nit that changes nothing a reader does is NOT a finding.** If the "
+        "fix would be a reword with no behavioural, decision or correctness "
+        "consequence, leave it out of the findings and say so in one line "
+        "under the verdict instead."
+    ),
+    "reverify-self-reported": (
+        "**Re-verify the fix commit's own self-reported numbers rather than "
+        "accepting them.** Counts, byte sizes, mutation-sweep results and "
+        "\"watched red at <sha>\" claims in a commit message or PR body are "
+        "claims to check against the tree, never evidence."
+    ),
+    "finding-format": (
+        "**Report each finding with `file:line`, a concrete failure scenario "
+        "(the input, the path taken, the wrong output) and a `payload` or "
+        "`scaffolding` label** — payload is what the PR exists to ship; "
+        "scaffolding is the tests, fixtures and notes a round wrote to guard "
+        "it."
+    ),
+    "do-not-merge": (
+        "**Do not merge — report only.** No pushes, no PR comments, no "
+        "`gh pr merge`. Hand the findings back and let the operator act on "
+        "them."
+    ),
 }
+
+
+def norm(text: str) -> str:
+    """Whitespace-normalised. A re-wrap must not fail; a reword must."""
+    return " ".join(text.split())
 
 # Restated, not imported, for the same reason: the bullet extractor below must
 # not be steerable by the module it audits.
@@ -219,13 +367,54 @@ def bullets_in_invariant_section(brief: str) -> list[str]:
 # Fakes for the ONE process boundary
 # --------------------------------------------------------------------------- #
 
+# 🔴 THIS FIXTURE SHARED THE DEFECT IT WAS SUPPOSED TO CATCH. It carried no
+# `isCrossRepository`, no `headRefOid`, and a `url` of the wrong SHAPE
+# (`.../pulls/900`), so every cross-repo test — and mutant C3 — ran against a
+# model of `gh` in which the head repo IS the PR's repo. That model is false for
+# every fork PR, and it is why three tests and a mutation row all passed through
+# the bug.
+#
+# Field shapes are copied from real `gh pr view --json` output (values are
+# synthetic; the host is `example.invalid` on purpose — this repo is public).
+# The load-bearing shape is `url` = `<scheme>://<host>/<owner>/<name>/pull/<n>`,
+# which names the repo the PR LIVES in.
+FAKE_HEAD_OID = "1111111122222222333333334444444455555555"
+
 DEFAULT_PR = {
     "title": "a synthetic PR title",
-    "url": "https://example.invalid/pulls/900",
+    "url": "https://example.invalid/example-org/devrc/pull/900",
     "baseRefName": "main",
-    "headRepository": {"name": "devrc"},
+    "headRefOid": FAKE_HEAD_OID,
+    "isCrossRepository": False,
+    "headRepository": {"name": "devrc", "nameWithOwner": "example-org/devrc"},
     "headRepositoryOwner": {"login": "example-org"},
 }
+
+# A FORK PR: opened from a contributor's fork AGAINST `example-org/devrc`, which
+# is the cwd's repo. Verified against real `gh` output for a fork PR (the head
+# repo is the contributor's, `url` is the base repo's, `isCrossRepository` is
+# true). The correct brief for this is the SAME-REPO one.
+FORK_PR = {
+    "title": "a synthetic fork PR title",
+    "url": "https://example.invalid/example-org/devrc/pull/900",
+    "baseRefName": "main",
+    "headRefOid": FAKE_HEAD_OID,
+    "isCrossRepository": True,
+    "headRepository": {
+        "name": "devrc", "nameWithOwner": "some-contributor/devrc",
+    },
+    "headRepositoryOwner": {"login": "some-contributor"},
+}
+
+# A genuinely cross-repo PR: it lives in a repository that is NOT the cwd's.
+OTHER_REPO_PR = dict(
+    DEFAULT_PR,
+    url="https://example.invalid/someone-else/otherproj/pull/900",
+    headRepository={
+        "name": "otherproj", "nameWithOwner": "someone-else/otherproj",
+    },
+    headRepositoryOwner={"login": "someone-else"},
+)
 
 FAKE_REPO_DIR = "/fake/checkout/devrc"
 FAKE_ORIGIN = "git@github.com:example-org/devrc.git"
@@ -253,10 +442,20 @@ def make_runner(
     rev_list=(0, "4\n", ""),
     numstat=(0, "10\t2\tscripts/foo.py\n3\t0\tscripts/tests/test_foo.py\n", ""),
     head_sha="deadbee",
+    local_head=None,
 ):
-    """A closed-world stand-in for `gh` and `git`. No process is spawned."""
+    """A closed-world stand-in for `gh` and `git`. No process is spawned.
+
+    `local_head` is what `git rev-parse HEAD` returns in the operator's
+    checkout. It DEFAULTS to the PR's own `headRefOid`, i.e. the checkout is
+    standing on the PR — the only state in which the delta half of a brief means
+    what it says. Pass a different sha to model the shared checkout having moved
+    (which it does, constantly), and `None` explicitly for a PR fixture with no
+    `headRefOid`.
+    """
     payload = dict(pr or DEFAULT_PR)
     payload["comments"] = [{"body": c} for c in comments]
+    resolved_head = local_head if local_head is not None else payload.get("headRefOid")
 
     def runner(cmd, cwd=None):
         if cmd[0] == "gh":
@@ -271,6 +470,10 @@ def make_runner(
                 return 0, branch + "\n", ""
             if verb == "rev-parse" and "--short" in cmd:
                 return 0, head_sha + "\n", ""
+            if verb == "rev-parse" and cmd[-1] == "HEAD":
+                return (0, resolved_head + "\n", "") if resolved_head else (
+                    128, "", "fatal: ambiguous argument 'HEAD'"
+                )
             if verb == "remote":
                 return (0, origin + "\n", "") if origin else (1, "", "no origin")
             if verb == "status":
@@ -285,11 +488,17 @@ def make_runner(
 
 
 def run_main(argv, **kw):
-    """-> (rc, stdout, stderr). Always with an injected runner."""
+    """-> (rc, stdout, stderr). Always with an injected runner.
+
+    `runner` is popped BEFORE the default is built: `kw.pop(k, default)`
+    evaluates its default eagerly, so building `make_runner(**kw)` inline passed
+    `runner=` straight into `make_runner` and raised.
+    """
     out, err = io.StringIO(), io.StringIO()
+    runner = kw.pop("runner", None) or make_runner(**kw)
     rc = ad.main(
         argv,
-        runner=kw.pop("runner", make_runner(**kw)),
+        runner=runner,
         stdout=out,
         stderr=err,
         checklist_reader=fake_checklist,
@@ -358,24 +567,35 @@ def test_the_invariant_clause_ledger_is_pinned_two_way():
 
 
 def test_each_clause_carries_the_instruction_its_ledger_entry_names():
-    """🔴 The reachability control for the ledger above.
+    """🔴 The reachability control for the ledger above — and the reword guard.
 
     The id pin passes for a clause whose text has been reworded into something
-    weaker. This is the assertion that sees that — and mutant R1 (reword
-    `stop-rule` to drop "ending it is the CORRECT outcome, not a failure") kills
-    THIS test alone, with every presence pin still green.
+    weaker. This is the assertion that sees that: mutant R1 (reword `stop-rule`)
+    and mutants W1-W5 (five rewords that INVERT the instruction) each kill THIS
+    test alone, with every presence pin still green.
+
+    🔴 WHOLE STRING, whitespace-normalised, not a fragment. With fragments,
+    all five inversions passed a green 37-test suite — including one that told
+    every future auditor "one confirming round after a clean one is prudent",
+    the exact thing `claude/RULES.md` forbids.
     """
     by_id = {c.id: c.text for c in ad.INVARIANT_CLAUSES}
-    for cid, fragment in CLAUSE_LEDGER.items():
+    for cid, pinned in CLAUSE_LEDGER.items():
         assert cid in by_id, f"clause {cid!r} is gone; see the two-way pin above"
-        assert fragment in by_id[cid], (
-            f"\n\nclause {cid!r} no longer contains the phrase this module "
-            f"pins:\n    {fragment!r}\n"
-            f"  It now reads:\n    {by_id[cid]!r}\n"
-            "  That phrase is the part a hand-written brief measurably lost. "
-            "If the reword is deliberate, update CLAUSE_LEDGER in the same "
+        assert norm(pinned) == norm(by_id[cid]), (
+            f"\n\nclause {cid!r} is not, word for word, what this module "
+            f"pins.\n  pinned here :\n    {norm(pinned)!r}\n"
+            f"  in the script:\n    {norm(by_id[cid])!r}\n"
+            "  🔴 This is a WHOLE-STRING pin because the artifact is prose and "
+            "a keyword guard is walkable by rewording (claude/RULES.md, "
+            "spelled-guards). Whitespace is normalised, so a RE-WRAP is free "
+            "and only a REWORD fails.\n"
+            "  If the reword is deliberate, update CLAUSE_LEDGER in the SAME "
             "commit — which is the moment to notice you are rewriting an "
-            "instruction rather than reformatting one."
+            "instruction rather than reformatting one. Five rewords that "
+            "inverted their clause outright passed the fragment version of "
+            "this pin, one of them telling auditors to run a confirming round "
+            "after a clean one."
         )
 
 
@@ -471,7 +691,7 @@ def test_control_a_clause_deleted_from_the_constant_is_detected(monkeypatch):
     assert rc == 0
     bullets = bullets_in_invariant_section(out)
     assert len(bullets) == len(CLAUSE_LEDGER) - 1
-    assert not any(CLAUSE_LEDGER["no-fetch"] in b for b in bullets), (
+    assert not any(norm(CLAUSE_LEDGER["no-fetch"]) in norm(b) for b in bullets), (
         "a clause was removed from INVARIANT_CLAUSES and its instruction still "
         "reached the brief — the section is not rendered from the constant, so "
         "the two-way pin guards nothing."
@@ -604,24 +824,66 @@ def test_the_newest_claims_block_wins():
     )
 
 
-def test_emit_claims_prints_a_block_this_scripts_own_parser_accepts():
+@pytest.mark.parametrize("argv,kw,want_from,want_round", [
+    # The shape the round-trip test used to cover ALONE.
+    (["900", "--round", "3", "--emit-claims"], {"comments": [CLAIMS_BLOCK_R2]},
+     "bbbb2222", 3),
+    # 🔴 REGRESSION, red at `abc41024`. `--round 1 --emit-claims` is the exact
+    # command the delta refusal names as the fix, and with no prior block
+    # `prev_sha` was None, so the PLACEHOLDER `<the sha round 1 audited>` was
+    # interpolated into the header. `_HEADER_AUDITED` then captured `<the`,
+    # found no `..`, and produced `audited_from=''`, `audited_to='<the'` — and
+    # the next round's brief said ``Diff `<the..HEAD` `` with rc 0 and no
+    # refusal at all. The parser already accepts a bare sha; round 1 emits it.
+    (["900", "--emit-claims"], {"comments": []}, "", 1),
+    (["900", "--round", "1", "--emit-claims"], {"comments": []}, "", 1),
+])
+def test_emit_claims_prints_a_block_this_scripts_own_parser_accepts(
+    argv, kw, want_from, want_round
+):
     """A round trip, so the skeleton cannot drift away from the reader.
 
     The next round REFUSES on an unparseable block, so a skeleton the parser
-    rejects would turn `--emit-claims` into a trap.
+    rejects would turn `--emit-claims` into a trap — and it was one for the
+    round-1 shape, which is the one the refusal tells people to run.
     """
-    rc, out, err = run_main(
-        ["900", "--round", "3", "--emit-claims"], comments=[CLAIMS_BLOCK_R2]
-    )
+    rc, out, err = run_main(argv, **kw)
     assert rc == 0, err
     tail = out[out.index("```audit-claims"):]
     blocks, malformed = ad.parse_claims_blocks([tail])
-    assert not malformed, malformed
+    assert not malformed, (
+        f"the block this script EMITS is one its own parser rejects: "
+        f"{malformed}\n{tail}"
+    )
     assert len(blocks) == 1
-    assert blocks[0].round_no == 3
-    assert blocks[0].audited_from == "bbbb2222"
-    assert blocks[0].audited_to == "deadbee"
+    assert blocks[0].round_no == want_round
+    assert blocks[0].audited_from == want_from
+    assert blocks[0].audited_to == FAKE_HEAD_OID[:8], (
+        f"the audited TIP parsed as {blocks[0].audited_to!r}. A placeholder "
+        "that survives into the header is worse than a refusal: it parses, so "
+        "the next round anchors a range on it and reports rc 0."
+    )
+    assert "<the" not in tail, (
+        "a placeholder reached the emitted header; the next round reads this "
+        "field literally"
+    )
     assert len(blocks[0].items) >= 1
+
+
+def test_a_round_one_block_anchors_the_next_rounds_cumulative_figure():
+    """The other half of the round-1 emission: the bare sha IS the anchor.
+
+    `--emit-claims` at round 1 writes `audited=<sha>` with no `..`, and that sha
+    is exactly the quantity `round_one_anchor` needs. Reading it keeps the
+    remedy chain the refusal advertises from dead-ending in a permanently
+    NOT MEASURED cumulative.
+    """
+    r1 = ad.ClaimsBlock(1, "", "aaaa1111", ["a claim"])
+    later = ad.ClaimsBlock(3, "bbbb2222", "cccc3333", ["another"])
+    assert ad.round_one_anchor([r1, later]) == "aaaa1111"
+    # A bare sha on a LATER round is NOT an anchor — it says what that round
+    # audited, and round 1's tip is then genuinely unknown.
+    assert ad.round_one_anchor([ad.ClaimsBlock(2, "", "bbbb2222", ["x"])]) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -639,9 +901,7 @@ def test_cross_repo_tells_the_agent_to_worktree_the_prs_repo_itself():
     repo that is the WRONG tree and the failure is quiet — the agent either
     reports a briefed file missing, or silently audits the wrong repository.
     """
-    pr = dict(DEFAULT_PR, headRepository={"name": "otherproj"},
-              headRepositoryOwner={"login": "someone-else"})
-    rc, out, err = run_main(["900"], pr=pr)
+    rc, out, err = run_main(["900"], pr=OTHER_REPO_PR)
     assert rc == 0, err
 
     assert "git -C" in out and "worktree add" in out, (
@@ -681,11 +941,107 @@ def test_same_repo_recommends_the_isolation_flag_and_does_not_hand_roll():
 def test_the_cross_repo_decision_comes_from_the_repos_not_from_prose():
     """The same run, differing only in the PR's repo, must flip the section."""
     same = run_main(["900"])[1]
-    other = run_main(["900"], pr=dict(
-        DEFAULT_PR, headRepository={"name": "otherproj"},
-        headRepositoryOwner={"login": "someone-else"}))[1]
+    other = run_main(["900"], pr=OTHER_REPO_PR)[1]
     assert (ad.ISOLATION_FORBID in other) and (ad.ISOLATION_FORBID not in same)
     assert (ad.ISOLATION_RECOMMEND in same) and (ad.ISOLATION_RECOMMEND not in other)
+
+
+def test_a_fork_pr_against_this_repo_is_not_treated_as_cross_repo():
+    """🔴 REGRESSION. Red at `abc41024`, where it emitted the CROSS-REPO brief.
+
+    `pr_slug` read `headRepositoryOwner`/`headRepository` — the repo the head
+    BRANCH lives in, which for a fork PR is the contributor's fork. Verified
+    against real `gh` output for a fork PR against `cli/cli`: head reports
+    `ylfeng250/cli` while the PR lives in `cli/cli` and `isCrossRepository` is
+    true. So a fork PR opened against THIS repo computed
+    `repo=some-contributor/devrc != cwd_slug` and emitted the cross-repo branch:
+    "the PR lives in `some-contributor/devrc` … Do NOT use `isolation:
+    \"worktree\"` … `git -C <your local clone of some-contributor/devrc>
+    worktree add`". Every part of that is wrong, `gh pr diff` in the fork fails,
+    and no such clone exists.
+
+    🔴 All three cross-repo tests and mutant C3 passed through this bug because
+    `DEFAULT_PR` encoded the same wrong model. The fixture is corrected; this is
+    the case that could not have passed under it.
+    """
+    rc, out, err = run_main(["900"], pr=FORK_PR)
+    assert rc == 0, err
+
+    assert ad.ISOLATION_RECOMMEND in out, (
+        "\n\na fork PR opened AGAINST this repo got the cross-repo brief. The "
+        "PR lives in the repo this session is standing in; the worktree flag "
+        "is correct here and hand-rolling one against a clone of the fork is "
+        "not."
+    )
+    assert ad.ISOLATION_FORBID not in out
+    assert "some-contributor/devrc" not in out, (
+        "\n\nthe brief names the CONTRIBUTOR'S FORK as the repo to work in. "
+        "That is the head repo, not the PR's repo — `gh pr diff` there fails "
+        "and the local clone the brief tells the agent to use does not exist."
+    )
+    assert "example-org/devrc" in out
+
+
+def test_the_prs_repo_is_read_from_the_url_not_from_the_head_repo():
+    """The unit-level statement of the same fact, driven through `pr_slug`.
+
+    Kept beside the brief-level test because the two fail differently: this one
+    says WHICH field was misread, the one above says what the operator sees.
+    """
+    assert ad.pr_slug(FORK_PR) == "example-org/devrc"
+    assert ad.pr_slug(DEFAULT_PR) == "example-org/devrc"
+    assert ad.pr_slug(OTHER_REPO_PR) == "someone-else/otherproj"
+    # `--repo` still wins over everything: it is the operator stating it.
+    assert ad.pr_slug(FORK_PR, "stated/outright") == "stated/outright"
+    # No url, but `isCrossRepository` false ⇒ the head fields ARE the PR's repo.
+    assert ad.pr_slug({
+        "url": "", "isCrossRepository": False,
+        "headRepository": {"name": "devrc"},
+        "headRepositoryOwner": {"login": "example-org"},
+    }) == "example-org/devrc"
+    # No url and cross-repository ⇒ the head fields are the FORK. Answering
+    # from them would be the bug above, so this returns None and the brief
+    # renders its COULD NOT DETERMINE branch.
+    assert ad.pr_slug({
+        "url": "", "isCrossRepository": True,
+        "headRepository": {"name": "devrc"},
+        "headRepositoryOwner": {"login": "some-contributor"},
+    }) is None
+
+
+def test_an_undeterminable_repo_gets_its_own_branch_not_the_same_repo_one():
+    """🔴 REGRESSION. Red at `abc41024`, where it emitted the SAME-REPO brief.
+
+    `cross_repo` was `bool(cwd_slug and repo and cwd_slug != repo)`, so a falsy
+    `cwd_slug` — no `origin` remote — made the three-state decision evaluate
+    FALSE and silently become "same repo", which recommends the flag whose
+    failure is silent. The measured output contradicted itself in one
+    paragraph: "The PR lives in `<org>/<other-repo>`, which is this session's
+    own repository (`/home/…/devrc`)" followed by the isolation directive.
+    """
+    rc, out, err = run_main(["900"], pr=OTHER_REPO_PR, origin=None)
+    assert rc == 0, err
+
+    assert "COULD NOT DETERMINE" in out, (
+        "\n\nwith no `origin` remote the script still claimed to know which "
+        "repository the PR is in. Three states, not two: not knowing is its "
+        "own answer."
+    )
+    assert ad.ISOLATION_RECOMMEND not in out, (
+        "\n\nthe brief RECOMMENDED `isolation: \"worktree\"` for a PR whose "
+        "repository it could not determine. That flag worktrees the cwd's "
+        "repo; recommending it is only safe once the repos are known to match."
+    )
+    assert ad.ISOLATION_FORBID in out, (
+        "the undetermined branch must default to NOT using the flag"
+    )
+    assert "which is this session's own repository" not in out, (
+        "\n\nthe brief asserted the PR is in this session's repository — the "
+        "self-contradicting claim this branch exists to stop"
+    )
+    assert "--repo owner/name" in out, (
+        "the branch does not tell the operator how to answer the question"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -716,10 +1072,62 @@ def test_the_toolchain_section_names_the_tier_the_merge_gates_on():
         "the wrong-shell diagnosis is missing — it was present in 9 of the "
         "first 9 measured dispatches and absent from 3 of the last 5"
     )
-    assert "nix build /fake/checkout/devrc#checks.x86_64-linux.pytests" in out
-    assert "nix build /fake/checkout/devrc#checks.x86_64-linux.nodetests" in out
+    assert "nix build <your worktree>#checks.x86_64-linux.pytests" in out
+    assert "nix build <your worktree>#checks.x86_64-linux.nodetests" in out
     assert "gate.sh --tier both" in out
     assert "git --version" in out
+
+
+def test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout():
+    """🔴 REGRESSION. Red at `abc41024`, where every command named the shared
+    checkout.
+
+    `r = facts.cwd_repo_dir` was interpolated into all four commands, so the
+    brief said `nix develop <shared> -c bash <shared>/scripts/gate.sh` and
+    `nix build <shared>#checks…`. `gate.sh` resolves its `ROOT` from its own
+    `BASH_SOURCE`, so that runs the suite IN the shared checkout on whatever
+    branch it is standing on, and the `nix build` builds that ref's tree —
+    while WHERE TO WORK three bars earlier told the agent to work elsewhere.
+    The auditor then obeys the next sentence, "name the tier and the base sha",
+    and names the wrong sha.
+
+    `nix develop {r}` is the ONE allowed use: it resolves a dev shell, not a
+    tree under test.
+    """
+    rc, out, err = run_main(["900"])
+    assert rc == 0, err
+
+    toolchain = out[out.index("## TOOLCHAIN"):out.index("## 🔴 NON-NEGOTIABLE")]
+    # 🔴 The COMMANDS, not the prose around them. The prose necessarily names
+    # both the shared path and the two commands in order to explain the rule,
+    # and a check that cannot tell an instruction from its rationale would go
+    # red on the fix that closes the finding.
+    commands, inside = [], False
+    for line in toolchain.splitlines():
+        if line.startswith("```"):
+            inside = not inside
+            continue
+        if inside and line.strip():
+            commands.append(line)
+    assert commands, "no command block found in the toolchain section at all"
+
+    for line in commands:
+        if "gate.sh" in line or "nix build" in line:
+            assert FAKE_REPO_DIR not in line.replace(
+                f"nix develop {FAKE_REPO_DIR}", ""
+            ), (
+                "\n\nthe toolchain section tells the auditor to run the GATE "
+                f"or a `nix build` against the shared checkout:\n    {line}\n"
+                "  gate.sh resolves its root from its own path, so that runs "
+                "the suite in the shared checkout on whatever branch it is "
+                "standing on — not on the tree under audit. Only `nix develop "
+                "<repo>` may name it, and only to resolve the dev shell."
+            )
+    assert "<your worktree>/scripts/gate.sh" in out
+    assert "resolves its root from its own path" in out, (
+        "the section does not say WHY the shared path is wrong there, so the "
+        "next editor puts it back"
+    )
 
 
 def test_the_range_is_generated_from_the_previous_rounds_audited_sha():
@@ -727,6 +1135,117 @@ def test_the_range_is_generated_from_the_previous_rounds_audited_sha():
     assert rc == 0, err
     assert "`bbbb2222..HEAD`" in out, (
         "the delta range is not anchored at the sha the previous round audited"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE FOURTH READ RULE — is this checkout even standing on the PR?
+# --------------------------------------------------------------------------- #
+
+WRONG_HEAD = "9999999988888888777777776666666655555555"
+
+
+def test_the_ledger_refuses_to_measure_a_checkout_that_is_not_the_pr():
+    """🔴 REGRESSION. Red at `abc41024`, which printed a confident ledger.
+
+    `measure_ledger` was handed the operator's checkout and hard-coded `HEAD`,
+    and nothing checked HEAD was the PR's head. Reproduced from a clone standing
+    on an unrelated feature branch against real PR #958: rc 0, silent stderr, a
+    non-empty range — all three advertised read rules satisfied — and a file
+    list belonging to that branch. Standing on `main` produced the banner "🔴
+    Zero changed lines over a NON-EMPTY range. That is a real measurement, not a
+    failure."
+
+    A measurement of the wrong tree is not a measurement, so it earns the same
+    COULD NOT MEASURE the other three failures earn.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2], local_head=WRONG_HEAD
+    )
+    assert rc == 0, err
+    assert "COULD NOT MEASURE" in out, (
+        "\n\nthe ledger printed a number measured against a checkout that is "
+        "NOT standing on the PR. rc 0, silent stderr and a non-empty range are "
+        "all satisfied in that state and the answer is still about another "
+        "tree."
+    )
+    assert "not standing on the PR" in out and WRONG_HEAD in out, (
+        "the COULD NOT MEASURE does not NAME this cause, so the operator "
+        "re-runs the command by hand in the same wrong checkout"
+    )
+    assert "payload lines changed THIS round" not in out, (
+        "a ledger line was printed under a COULD NOT MEASURE"
+    )
+
+
+def test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head():
+    """🔴 REGRESSION. Red at `abc41024`: `<prev>..HEAD` was emitted regardless.
+
+    The range section is the instruction the auditor actually runs. Handing it
+    `..HEAD` while the shared checkout is on another branch points the whole
+    delta audit at the wrong diff — and reads as an ordinary range.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2], local_head=WRONG_HEAD
+    )
+    assert rc == 0, err
+    the_range = out[out.index("## THE RANGE"):out.index("## WHAT WAS CLAIMED")]
+    # The INSTRUCTION, not the explanation of why `..HEAD` is unsafe — that
+    # sentence necessarily contains the token it is warning about.
+    assert "Diff **`bbbb2222..HEAD`**" not in the_range, (
+        f"\n\nthe range still tells the auditor to diff `..HEAD` while this "
+        f"checkout is on {WRONG_HEAD} and the PR's head is {FAKE_HEAD_OID}:\n"
+        f"{the_range}"
+    )
+    assert FAKE_HEAD_OID in the_range, (
+        "the range does not name the PR's actual head sha, which is the only "
+        "thing the auditor can resolve the range against"
+    )
+    assert "COULD NOT VERIFY" in the_range
+
+
+def test_the_range_says_head_was_verified_when_it_was():
+    """The other direction: a verified checkout still gets `..HEAD`, and says so.
+
+    Measured separately from the failure case because "the guard fires" and "the
+    guard does not fire spuriously" are different claims, and a check wired to
+    always fail would satisfy the test above.
+    """
+    rc, out, err = run_main(["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2])
+    assert rc == 0, err
+    the_range = out[out.index("## THE RANGE"):out.index("## WHAT WAS CLAIMED")]
+    assert "`bbbb2222..HEAD`" in the_range
+    assert "COULD NOT VERIFY" not in the_range
+    assert FAKE_HEAD_OID in the_range and "verified at assembly time" in the_range
+
+
+def test_emit_claims_stamps_the_prs_head_not_the_local_checkouts():
+    """🔴 REGRESSION. Red at `abc41024`, which stamped `rev-parse --short HEAD`.
+
+    The `audited=` sha is the field the NEXT round anchors its range and its
+    ledger on. Stamping the local HEAD recorded whatever branch the shared
+    checkout was standing on — `main`'s tip, in the reproduction — as the sha
+    this round audited, and the next round then measured from there.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "3", "--emit-claims"],
+        comments=[CLAIMS_BLOCK_R2],
+        local_head=WRONG_HEAD,
+        head_sha="deadbee",
+    )
+    assert rc == 0, err
+    block = out[out.index("```audit-claims"):]
+    assert "deadbee" not in block, (
+        "\n\nthe emitted block carries the LOCAL checkout's HEAD as the sha "
+        f"this round audited:\n{block}\n"
+        "  The next round anchors on this field."
+    )
+    assert FAKE_HEAD_OID[:8] in block, (
+        "the emitted block does not carry the PR's own head sha"
+    )
+    assert "NOT standing on it" in err, (
+        "the mismatch was stamped over silently; the operator writing the "
+        "claims needs to know the checkout they measured in is not the PR"
     )
 
 
@@ -792,6 +1311,54 @@ def test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor():
     assert rc == 0, err
     assert "(since round 1: Y)" in out
     assert "NOT MEASURED" in out
+    assert "no `audit-claims` block carried a round-1 anchor sha" in out, (
+        "with genuinely no anchor, the no-anchor reason is the TRUE one and "
+        "must still be the one printed"
+    )
+
+
+def test_a_failed_cumulative_measurement_does_not_print_a_false_cause():
+    """🔴 REGRESSION. Red at `abc41024`, which printed a specific, false reason.
+
+    When the cumulative measurement failed, `cumulative` stayed None and the
+    brief stated "NOT MEASURED: no `audit-claims` block carried a round-1 anchor
+    sha" — printed even when one DID. The operator is then sent to add an anchor
+    that already exists, while the real fault (a sha `rev-list` cannot resolve)
+    goes unnamed.
+
+    Two mechanisms, one observable — the exact rule this module cites everywhere
+    else to justify its own COULD-NOT-MEASURE design.
+
+    Driven by failing the SECOND `rev-list` only: the per-round measurement
+    succeeds (so a ledger is rendered) and the cumulative one, from the anchor,
+    does not.
+    """
+    calls = {"n": 0}
+    base = make_runner(comments=[CLAIMS_BLOCK_R2])
+
+    def runner(cmd, cwd=None):
+        if cmd[:2] == ["git", "-C"] and cmd[3] == "rev-list":
+            calls["n"] += 1
+            if calls["n"] > 1:
+                return 128, "", "fatal: bad revision 'aaaa1111..HEAD'"
+        return base(cmd, cwd)
+
+    rc, out, err = run_main(["900", "--round", "3"], runner=runner)
+    assert rc == 0, err
+    assert calls["n"] >= 2, (
+        "the cumulative measurement never ran, so this test proves nothing "
+        "about what happens when it fails"
+    )
+    assert "(since round 1: Y)" in out and "NOT MEASURED" in out
+    assert "no `audit-claims` block carried a round-1 anchor sha" not in out, (
+        "\n\nthe brief blamed a MISSING round-1 anchor for a measurement that "
+        "failed WITH one in hand. That sends the operator to add a block that "
+        "is already there, and leaves the real fault unnamed."
+    )
+    assert "fatal: bad revision" in out, (
+        "the real reason the cumulative figure is missing is not reported"
+    )
+    assert "not a missing anchor" in out
 
 
 def test_the_ledger_says_the_base_was_not_fetched():
@@ -846,6 +1413,99 @@ def test_missing_clauses_is_a_pure_function_over_the_text():
     assert ad.missing_clauses(
         full.replace(ad.INVARIANT_CLAUSES[0].text, "")
     ) == [ad.INVARIANT_CLAUSES[0].id]
+    # A RE-WRAP is not a loss. A brief that has been through an editor or a
+    # paste has different line breaks and the same instructions.
+    rewrapped = "\n".join(
+        "\n".join(c.text.split(" ")) for c in ad.INVARIANT_CLAUSES
+    )
+    assert ad.missing_clauses(rewrapped) == [], (
+        "a pure re-wrap was reported as missing clauses — the check would then "
+        "be red on every hand-edited brief, which is the permanently-red gate "
+        "claude/RULES.md says trains people to click through"
+    )
+
+
+def test_the_clause_check_runs_over_a_file_that_can_actually_be_lossy(tmp_path):
+    """🔴 REGRESSION. Red at `abc41024`, where `--check` did not exist.
+
+    The guard's own docstring said "it exists for a hand-edited `--out` file" —
+    but nothing read `--out` back. Its only caller passed the string
+    `render_brief` had just built out of `INVARIANT_CLAUSES`, so every clause
+    was present BY CONSTRUCTION and no user input could make it fire. The suite
+    reached it only by monkeypatching `render_brief` to a lossy stub: the
+    `unreachable-guards` shape in `claude/RULES.md`.
+
+    It mattered. The hand-written brief that dispatched the audit of this script
+    HAD been edited — several clauses shortened, the checklist paraphrased — and
+    the shipped check could not notice.
+
+    So: round-trip a real brief through a real file, degrade it the way a human
+    editing it would, and check that from the file.
+    """
+    generated = tmp_path / "brief.md"
+    rc, _, err = run_main(["900", "--out", str(generated)])
+    assert rc == 0, err
+    text = generated.read_text(encoding="utf-8")
+
+    # Control: the generated file as written is complete, and says so.
+    # 🔴 The count is READ, not literal. A literal `7` here made every
+    # clause-deletion mutant (D1-D7) and the clause-addition mutant (A1)
+    # extra-kill this test, which is a coupling to the SIZE of a constant this
+    # test does not own — `test_the_rendered_section_holds_exactly_the_
+    # ledgered_clauses` owns that, against the independent ledger.
+    rc, out, err = run_main(["--check", str(generated)])
+    assert rc == 0
+    assert f"all {len(ad.INVARIANT_CLAUSES)} invariant clause(s) present" in out, out
+    assert "missing invariant clause(s)" not in err
+
+    # Now degrade it the way the measured hand-edit did: shorten two clauses.
+    dropped = ad.INVARIANT_CLAUSES[0]
+    shortened = ad.INVARIANT_CLAUSES[2]
+    edited = tmp_path / "edited.md"
+    edited.write_text(
+        text.replace(dropped.text, "").replace(
+            shortened.text, "**A clean round ends the ladder.**"
+        ),
+        encoding="utf-8",
+    )
+    rc, out, err = run_main(["--check", str(edited)])
+    assert rc == 0, "the clause check BLOCKED; it must only warn"
+    assert "missing invariant clause(s)" in err, (
+        f"\n\n`--check` did not notice two clauses removed from a real brief "
+        f"file. stderr was:\n{err}"
+    )
+    assert dropped.id in err and shortened.id in err
+    assert "WARNING, not a refusal" in err
+
+
+def test_the_out_file_is_read_back_and_checked(monkeypatch, tmp_path):
+    """The second real input: what landed on DISK, not the string in memory.
+
+    A write that lost bytes, or a `--out` path something else rewrites, is
+    exactly what this check is described as guarding and could not see.
+    """
+    out_file = tmp_path / "brief.md"
+    real_write = Path.write_text
+    target = next(c for c in ad.INVARIANT_CLAUSES if c.id == "do-not-merge")
+
+    def lossy_write(self, data, *a, **kw):
+        # Model a write that lands short — the file, not the brief, is wrong.
+        if str(self) == str(out_file):
+            data = data.replace(target.text, "(lost in the write)")
+        return real_write(self, data, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", lossy_write)
+    rc, _, err = run_main(["900", "--out", str(out_file)])
+
+    assert rc == 0
+    assert "missing invariant clause(s)" in err and target.id in err, (
+        "\n\nthe brief on disk was missing a clause and the check passed — it "
+        "was still reading the in-memory string, where every clause is present "
+        "by construction"
+    )
+    assert str(out_file) in err, (
+        "the warning does not say WHICH artifact is missing the clause"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -879,6 +1539,137 @@ def test_a_comment_with_no_fence_yields_nothing_and_no_false_malformation():
     assert blocks == [] and malformed == []
 
 
+@pytest.mark.parametrize("label,text,expect", [
+    (
+        "an unclosed fence",
+        "```audit-claims round=2 audited=aa..bb\n1. a claim\n",
+        "never CLOSED",
+    ),
+    (
+        "a 4-backtick opener closed with 3",
+        "````audit-claims round=2 audited=aa..bb\n1. a claim\n```\n",
+        "never CLOSED",
+    ),
+])
+def test_a_fence_the_parser_cannot_read_is_reported_not_skipped(label, text, expect):
+    """🔴 REGRESSION. Red at `abc41024`, where all of these vanished silently.
+
+    The module's own comment promised "A block whose header does not parse is
+    reported as MALFORMED rather than skipped: skipping it silently would
+    produce the same observable as 'no block at all', and those need different
+    fixes." That was false for four shapes, because the old regex required the
+    closing fence to be byte-identical to the opener and dropped anything else
+    with no report. The refusal then said "no `audit-claims` block in any of the
+    1 comment(s) read" — false, and it points at the wrong fix (write a block,
+    rather than close the one you wrote).
+
+    A closing fence SHORTER than the opener does not close it under CommonMark
+    either, so the 4-then-3 case really is unclosed and is now named as such.
+    """
+    blocks, malformed = ad.parse_claims_blocks([text])
+    assert blocks == [], f"{label}: unexpectedly parsed"
+    assert malformed, (
+        f"\n\n{label} was skipped SILENTLY. That produces the same observable "
+        "as 'nobody posted a block', and the two need opposite fixes."
+    )
+    assert expect in malformed[0], malformed
+
+
+def test_a_longer_closing_fence_is_a_valid_close_and_is_read():
+    """The direction that is valid CommonMark and renders CLOSED on GitHub.
+
+    A 3-backtick opener closed with 4 was ALSO dropped silently. The block is
+    well-formed, so the right answer is to read it — not to report it.
+    """
+    blocks, malformed = ad.parse_claims_blocks(
+        ["```audit-claims round=2 audited=aa..bb\n1. a claim\n````\n"]
+    )
+    assert not malformed, malformed
+    assert len(blocks) == 1 and blocks[0].items == ["a claim"]
+
+
+def test_a_claim_that_wraps_onto_a_continuation_line_keeps_its_tail():
+    """🔴 REGRESSION. Red at `abc41024`, where the continuation was DROPPED.
+
+    This one does not fail, it CHANGES THE CLAIM — and the next round is framed
+    on the truncated text, which is the one thing the framing rule above says
+    must be exact.
+    """
+    blocks, malformed = ad.parse_claims_blocks([
+        "```audit-claims round=2 audited=aa..bb\n"
+        "1. the collapsed branch was split so each\n"
+        "   reports its own state\n"
+        "2. a second claim\n"
+        "```"
+    ])
+    assert not malformed, malformed
+    assert blocks[0].items == [
+        "the collapsed branch was split so each reports its own state",
+        "a second claim",
+    ], (
+        "\n\na wrapped claim lost everything after its first line. The next "
+        "round is framed on exactly this text."
+    )
+
+
+def test_a_block_cut_short_by_a_nested_fence_is_reported():
+    """🔴 REGRESSION. Red at `abc41024`: everything after the nested fence went.
+
+    A fence inside the body ends the block — CommonMark and GitHub agree — so
+    the claims after it are outside it. The block still parses, with FEWER
+    claims, and nothing said so.
+    """
+    blocks, malformed = ad.parse_claims_blocks([
+        "```audit-claims round=2 audited=aa..bb\n"
+        "1. tightened the guard, was:\n"
+        "```py\n"
+        "if x: pass\n"
+        "```\n"
+        "2. the claim nobody ever read\n"
+        "```\n"
+    ])
+    assert len(blocks) == 1, "the readable half of the block was lost too"
+    assert any("CUT SHORT by a nested fence" in m for m in malformed), (
+        f"\n\nclaims after a nested fence were dropped with no report. "
+        f"malformed was {malformed}"
+    )
+
+
+def test_a_malformed_fence_beside_a_readable_block_still_warns(tmp_path):
+    """The report has to REACH the operator when a usable block exists.
+
+    The refusal only fires when there is NO block, so a comment holding one
+    readable block and one unreadable fence would otherwise pass as complete.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "3"],
+        comments=[
+            CLAIMS_BLOCK_R2,
+            "```audit-claims round=2 audited=cc..dd\n1. never closed\n",
+        ],
+    )
+    assert rc == 0, err
+    assert "could not read cleanly" in err and "never CLOSED" in err, (
+        f"\n\nan unreadable fence beside a readable block was silent. "
+        f"stderr:\n{err}"
+    )
+    assert "the collapsed branch was split" in out, (
+        "the warning suppressed the block that DID parse"
+    )
+
+
+def test_the_refusal_says_which_comment_kinds_it_cannot_see():
+    """`gh pr view --json comments` returns ISSUE comments only.
+
+    A block posted as a review comment, inside a review thread, or in the PR
+    body is invisible here — so "no block in any of the N comment(s) read" is a
+    claim about a narrower corpus than the operator has in mind.
+    """
+    _, _, err = run_main(["900", "--round", "3"], comments=[])
+    assert "ISSUE comments only" in err
+    assert "REVIEW comment" in err and "DESCRIPTION" in err
+
+
 # --------------------------------------------------------------------------- #
 # HERMETICITY + the ledger-of-ledgers
 # --------------------------------------------------------------------------- #
@@ -910,13 +1701,67 @@ def test_a_gh_failure_is_reported_and_not_papered_over():
     assert "gh pr view 900" in err and "failed" in err
 
 
-# The two ledgers the module docstring commits to. RED_AT_BASE is empty ON
-# PURPOSE and that emptiness is asserted, so nobody can later read this module
-# as carrying regression coverage it does not have.
-RED_AT_BASE: frozenset[str] = frozenset()
+# The two ledgers the module docstring commits to.
+#
+# 🔴 RED_AT_BASE WAS EMPTY, AND IS NOT ANY MORE. It was empty because the script
+# did not exist at this branch's base, so nothing here could be regression
+# coverage for a shipped bug. Round 2's adversarial audit found nine defects in
+# the shipped script, every one reproduced live, and each test below was watched
+# to FAIL against `abc41024` — the branch head that carried them. That is a real
+# base with a real bug in it, so these belong in this list and not the other.
+# The list is the MEASURED one — `git show abc41024:scripts/audit-dispatch.py`
+# into a scratch tree with this module copied in unchanged, run under
+# `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`: **24 failed, 34 passed**
+# (24 node ids, 21 functions; three of them are parametrised rows of one).
+RED_AT_BASE_REF = "abc41024"
+RED_AT_BASE: frozenset[str] = frozenset({
+    "test_a_fork_pr_against_this_repo_is_not_treated_as_cross_repo",
+    "test_the_prs_repo_is_read_from_the_url_not_from_the_head_repo",
+    "test_an_undeterminable_repo_gets_its_own_branch_not_the_same_repo_one",
+    "test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout",
+    "test_the_ledger_refuses_to_measure_a_checkout_that_is_not_the_pr",
+    "test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head",
+    "test_emit_claims_stamps_the_prs_head_not_the_local_checkouts",
+    "test_a_failed_cumulative_measurement_does_not_print_a_false_cause",
+    "test_missing_clauses_is_a_pure_function_over_the_text",
+    "test_the_clause_check_runs_over_a_file_that_can_actually_be_lossy",
+    "test_the_out_file_is_read_back_and_checked",
+    "test_a_fence_the_parser_cannot_read_is_reported_not_skipped",
+    "test_a_longer_closing_fence_is_a_valid_close_and_is_read",
+    "test_a_claim_that_wraps_onto_a_continuation_line_keeps_its_tail",
+    "test_a_block_cut_short_by_a_nested_fence_is_reported",
+    "test_a_malformed_fence_beside_a_readable_block_still_warns",
+    "test_the_refusal_says_which_comment_kinds_it_cannot_see",
+    "test_emit_claims_prints_a_block_this_scripts_own_parser_accepts",
+    "test_a_round_one_block_anchors_the_next_rounds_cumulative_figure",
+    # 🔴 THREE ENTRIES WHOSE REDNESS IS WEAKER EVIDENCE THAN THE REST, said
+    # here rather than left for a reader to assume otherwise. Every other entry
+    # above fails at the base by exercising the defect and observing the wrong
+    # ANSWER. These three fail at the base because they assert text or a branch
+    # the fix ADDED, so their red is a restatement of the diff:
+    #   * `..._names_the_tier_the_merge_gates_on` is a PRE-EXISTING guard whose
+    #     expected strings changed with the fix (`nix build <your worktree>#…`),
+    #     not new coverage;
+    #   * `..._range_says_head_was_verified_when_it_was` is the
+    #     does-not-fire-spuriously control for the head check — necessary (a
+    #     check wired to always fail would satisfy its sibling), and not itself
+    #     a detector;
+    #   * `..._refusal_says_which_comment_kinds_it_cannot_see` pins a sentence.
+    #     The gap it documents — `--json comments` returns issue comments only —
+    #     is NOT closed by this PR, and no test here can close it.
+    "test_the_toolchain_section_names_the_tier_the_merge_gates_on",
+    "test_the_range_says_head_was_verified_when_it_was",
+})
 
 INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     "test_the_invariant_clause_ledger_is_pinned_two_way",
+    # 🔴 GREEN at `abc41024`, MEASURED — and it is the guard for finding 5, so
+    # the temptation to file it as regression coverage is real and is refused
+    # here. The clause TEXTS did not change in this round; what changed is that
+    # this module now pins them WHOLE instead of by fragment. Carrying the new
+    # ledger back to the base tree therefore passes. Its evidence is not a base
+    # ref at all — it is mutants W1-W5, five rewords that INVERT their clause
+    # and each kill this test alone.
     "test_each_clause_carries_the_instruction_its_ledger_entry_names",
     "test_every_clause_is_emitted_verbatim_in_both_kinds_of_brief",
     "test_the_rendered_section_holds_exactly_the_ledgered_clauses",
@@ -928,19 +1773,16 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     "test_a_first_round_needs_no_claims_block",
     "test_the_brief_carries_the_claims_and_not_the_reasoning_around_them",
     "test_the_newest_claims_block_wins",
-    "test_emit_claims_prints_a_block_this_scripts_own_parser_accepts",
     "test_cross_repo_tells_the_agent_to_worktree_the_prs_repo_itself",
     "test_same_repo_recommends_the_isolation_flag_and_does_not_hand_roll",
     "test_the_cross_repo_decision_comes_from_the_repos_not_from_prose",
     "test_the_shared_checkout_state_is_reported_with_the_it_moves_warning",
-    "test_the_toolchain_section_names_the_tier_the_merge_gates_on",
     "test_the_range_is_generated_from_the_previous_rounds_audited_sha",
     "test_the_ledger_shows_the_files_and_refuses_to_classify_them",
     "test_the_ledger_refuses_a_failed_command_rather_than_printing_zero",
     "test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor",
     "test_the_ledger_says_the_base_was_not_fetched",
     "test_missing_clause_check_warns_and_never_blocks",
-    "test_missing_clauses_is_a_pure_function_over_the_text",
     "test_parse_claims_blocks_reads_only_the_fence",
     "test_parse_claims_blocks_reports_a_bad_header_rather_than_skipping_it",
     "test_a_comment_with_no_fence_yields_nothing_and_no_false_malformation",
@@ -959,11 +1801,16 @@ def test_the_two_ledgers_partition_this_modules_tests():
     growing an unlisted test is asserting coverage nobody checked.
     """
     here = {n for n in globals() if n.startswith("test_")}
-    assert RED_AT_BASE == frozenset(), (
-        "RED_AT_BASE is documented as empty because scripts/audit-dispatch.py "
-        "did not exist at 3b79a35a. If a test here IS regression coverage for "
-        "a shipped bug, name the base you watched it red at in the docstring "
-        "before adding it."
+    assert RED_AT_BASE_REF, (
+        "RED_AT_BASE is non-empty, so it must name the base ref every one of "
+        "its tests was watched to FAIL at. 'Watched red' is a claim about a "
+        "specific tree; without the ref it is not a claim at all."
+    )
+    overlap = RED_AT_BASE & INVARIANT_GUARDS_AND_LEDGERS
+    assert not overlap, (
+        f"tests in BOTH ledgers: {sorted(overlap)}. A test is regression "
+        "coverage or it is an invariant guard; listing it twice makes the "
+        "count of what was watched red unreadable."
     )
     unlisted = here - INVARIANT_GUARDS_AND_LEDGERS - RED_AT_BASE
     assert not unlisted, (

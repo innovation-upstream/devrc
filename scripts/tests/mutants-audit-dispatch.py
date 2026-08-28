@@ -42,12 +42,23 @@ every row below is meaningless and this exits 2 without running any of them —
 and it distinguishes "the tree is red" from "pytest is not on PATH", because the
 second one blames the tree for the shell you are in.
 
+🔴 A ROW MAY EXPECT `SURVIVES`. Same convention as
+`scripts/tests/mutants-audit-ladder.sh`: the clause ledger pins WHOLE
+whitespace-normalised strings, so a pure RE-WRAP must stay green. A re-wrap that
+went red would mean the pins are keyed to line breaks and every reflow of the
+source becomes a test failure — which is the permanently-red gate
+`claude/RULES.md` says trains people to click through. A `SURVIVES` row that
+KILLS something is a finding, reported as such.
+
 COVERAGE IS DELIBERATELY PARTIAL. What is here: one deletion per invariant
 clause, an addition, one REWORD that leaves the clause present (the reachability
-control for the fragment ledger), one renderer bypass, and one inversion per
-generated decision. What is NOT here: the `gh`/`git` boundary itself (the suite
-injects a runner and says so), and whether a human classifies the ledger's files
-correctly (nothing mechanical can grade that).
+control for the clause ledger), five rewords that INVERT their clause, a
+re-wrap control, one renderer bypass, and one inversion per generated decision —
+including the four that shipped and were caught in round 2's audit (the head
+check, the toolchain's tree-under-test, the fork-PR repo read, and the
+three-state repo decision). What is NOT here: the `gh`/`git` boundary itself
+(the suite injects a runner and says so), and whether a human classifies the
+ledger's files correctly (nothing mechanical can grade that).
 """
 from __future__ import annotations
 
@@ -66,7 +77,12 @@ TEST_REL = "scripts/tests/test_audit_dispatch.py"
 # 🔴 A COLLAPSE floor, not a growth floor — same rule as
 # `mutants-audit-ladder.sh`. A suite that never ran yields zero FAILED lines,
 # i.e. "clean", so a harness wired to nothing would score every mutant SURVIVED.
-MIN_TESTS = 30
+MIN_TESTS = 50
+
+# A row may name this instead of a killer set: the mutation MUST leave the suite
+# green. See the module docstring — the clause ledger pins whole normalised
+# strings, and a re-wrap that went red would make every reflow a test failure.
+SURVIVES = "SURVIVES"
 
 
 # --------------------------------------------------------------------------- #
@@ -131,9 +147,12 @@ def claims_from_the_whole_comment(t):
 
 
 def invert_cross_repo(t):
+    # Re-targeted when the two-state `cross_repo` flag became the three-state
+    # `repo_relation`. Same mutation: the two KNOWN states swap, and the
+    # "unknown" state is left alone so this row stays distinct from P2.
     return _swap(t,
-                 "cross_repo=bool(cwd_slug and repo and cwd_slug != repo),",
-                 "cross_repo=bool(cwd_slug and repo and cwd_slug == repo),")
+                 '        repo_relation = "same" if pr_repo == cwd_slug else "cross"',
+                 '        repo_relation = "cross" if pr_repo == cwd_slug else "same"')
 
 
 def numstat_failure_reads_zero(t):
@@ -163,6 +182,194 @@ def the_warning_blocks(t):
     return _swap(t, old, old + "        return 4\n")
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 W1-W5 — the five clause REWORDS that INVERT the instruction.
+# --------------------------------------------------------------------------- #
+# Every one of these passed a fully green 37-test suite while `CLAUSE_LEDGER`
+# pinned a FRAGMENT per clause: the fragment stayed present and the instruction
+# around it said the opposite. W5 is the sharp one — it makes every future brief
+# tell auditors to do what `claude/RULES.md` forbids.
+#
+# Each replaces the whole `Clause(...)` entry, so the clause is still PRESENT,
+# still emitted, and still ledgered by id. Only the whole-string pin can see it.
+
+def reword_clause(cid, new_text):
+    def f(t):
+        pat = re.compile(
+            r"(    Clause\(\n        \"" + re.escape(cid) + r"\",\n)"
+            r"(?:.*?\n)*?(    \),\n)"
+        )
+        new, n = pat.subn(
+            lambda m: m.group(1) + f'        "{new_text}",\n' + m.group(2),
+            t, count=1,
+        )
+        if n != 1:
+            raise AssertionError(f"clause {cid!r} not found in its expected shape")
+        return new
+    return f
+
+
+# 🔴 The SURVIVES control. Whitespace inside a clause changes; the instruction
+# does not. `_norm` on both sides is what must absorb it — so a RED here means
+# the pins are keyed to layout, and every reflow of the source becomes a
+# failure.
+def rewrap_a_clause(t):
+    return _swap(
+        t,
+        '"**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to the "',
+        '"**Do NOT  `git fetch`,  `pull`,  `checkout`  or otherwise write to the  "',
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The four decisions round 2's audit found WRONG, one mutant per site.
+# --------------------------------------------------------------------------- #
+
+def ledger_ignores_the_head_check(t):
+    return _swap(t,
+                 "    if head_check is not None and not head_check.ok:",
+                 "    if False:")
+
+
+def range_ignores_the_head_check(t):
+    return _swap(t, "    if hc is not None and hc.ok:", "    if True:")
+
+
+def emit_claims_uses_the_local_head(t):
+    return _swap(
+        t,
+        '        head_sha = (data.get("headRefOid") or "")[:8]\n',
+        '        _rc, _h, _ = runner(["git", "-C", repo_dir, "rev-parse",\n'
+        '                             "--short", "HEAD"])\n'
+        '        head_sha = _h.strip() if _rc == 0 else ""\n',
+    )
+
+
+def emit_claims_interpolates_the_placeholder(t):
+    return _swap(
+        t,
+        "        audited = head_sha\n",
+        '        audited = f"<the sha round 1 audited>..{head_sha}"\n',
+    )
+
+
+def gate_points_at_the_shared_checkout(t):
+    return _swap(
+        t,
+        'f"nix develop {r} -c bash <your worktree>/scripts/gate.sh --tier both",',
+        'f"nix develop {r} -c bash {r}/scripts/gate.sh --tier both",',
+    )
+
+
+def nix_build_points_at_the_shared_checkout(t):
+    return _swap(
+        t,
+        '        "nix build <your worktree>#checks.x86_64-linux.pytests",\n'
+        '        "nix build <your worktree>#checks.x86_64-linux.nodetests",\n',
+        '        f"nix build {r}#checks.x86_64-linux.pytests",\n'
+        '        f"nix build {r}#checks.x86_64-linux.nodetests",\n',
+    )
+
+
+def pr_slug_reads_the_head_repo(t):
+    return _swap(
+        t,
+        '    m = _PR_URL.match((data.get("url") or "").strip())\n'
+        "    if m:\n"
+        '        return f"{m.group(1)}/{m.group(2)}"\n'
+        '    if data.get("isCrossRepository") is False:\n',
+        "    if True:\n",
+    )
+
+
+def unknown_repo_collapses_to_same(t):
+    return _swap(
+        t,
+        "    if pr_repo and cwd_slug:\n"
+        '        repo_relation = "same" if pr_repo == cwd_slug else "cross"\n'
+        "    else:\n"
+        '        repo_relation = "unknown"\n',
+        '    repo_relation = "cross" if (\n'
+        "        pr_repo and cwd_slug and pr_repo != cwd_slug\n"
+        '    ) else "same"\n',
+    )
+
+
+def the_check_command_reports_clean(t):
+    return _swap(t, "    gone = missing_clauses(text)\n", "    gone = []\n")
+
+
+def the_out_file_is_not_read_back(t):
+    return _swap(
+        t,
+        '            checked_text = Path(args.out).read_text(encoding="utf-8")\n'
+        "            checked_what = args.out\n",
+        "            pass\n",
+    )
+
+
+def missing_clauses_is_not_normalised(t):
+    return _swap(
+        t,
+        "    haystack = _norm(brief)\n"
+        "    return [c.id for c in INVARIANT_CLAUSES if _norm(c.text) not in haystack]",
+        '    return [c.id for c in INVARIANT_CLAUSES if c.text not in (brief or "")]',
+    )
+
+
+def the_cumulative_reason_is_dropped(t):
+    return _swap(
+        t,
+        "                ledger = ledger._replace(cumulative_reason=cum.reason)",
+        "                pass",
+    )
+
+
+def an_unclosed_fence_is_skipped_silently(t):
+    return _swap(
+        t,
+        "            if close_at is None:\n                malformed.append(",
+        "            if close_at is None:\n"
+        "                i += 1\n"
+        "                continue\n"
+        "            if False:\n"
+        "                malformed.append(",
+    )
+
+
+def a_longer_closing_fence_stops_closing(t):
+    return _swap(
+        t,
+        'if bm and len(bm.group("fence")) >= len(opener):',
+        'if bm and len(bm.group("fence")) == len(opener):',
+    )
+
+
+def continuation_lines_are_dropped(t):
+    return _swap(
+        t,
+        "        elif items and line.strip():\n"
+        '            items[-1] = f"{items[-1]} {line.strip()}"\n',
+        "",
+    )
+
+
+def the_nested_fence_report_is_removed(t):
+    return _swap(
+        t,
+        "            if any(_CLAIM_ITEM.match(t) for t in tail) and any(",
+        "            if False and any(",
+    )
+
+
+def the_refusal_drops_the_comment_kinds_note(t):
+    return _swap(
+        t,
+        '            "  ⚠ `gh pr view --json comments` returns ISSUE comments only. A "',
+        '            "  ⚠ A "',
+    )
+
+
 LEDGER_TRIO = {
     "test_the_invariant_clause_ledger_is_pinned_two_way",
     "test_each_clause_carries_the_instruction_its_ledger_entry_names",
@@ -190,8 +397,17 @@ ROWS = [
      LEDGER_TRIO | {DELETION_CONTROL}, drop_clause("reverify-self-reported")),
     ("D6  delete clause finding-format",
      LEDGER_TRIO | {DELETION_CONTROL}, drop_clause("finding-format")),
+    # 🔴 D7 is the SECOND asymmetric row, and the same shape as D2:
+    # `test_the_out_file_is_read_back_and_checked` looks the `do-not-merge`
+    # clause up BY ID to model a lossy write, so deleting that particular clause
+    # makes it error. Recorded rather than tidied away — it is a real coupling,
+    # and by-id lookup is still the right thing there (an INDEX would make the
+    # test's outcome depend on which OTHER clause a mutation deleted, which
+    # shows up in a sweep as dying for the wrong reason).
     ("D7  delete clause do-not-merge",
-     LEDGER_TRIO | {DELETION_CONTROL}, drop_clause("do-not-merge")),
+     LEDGER_TRIO | {DELETION_CONTROL,
+                    "test_the_out_file_is_read_back_and_checked"},
+     drop_clause("do-not-merge")),
     ("A1  add an unledgered eighth clause",
      {"test_the_invariant_clause_ledger_is_pinned_two_way",
       "test_the_rendered_section_holds_exactly_the_ledgered_clauses",
@@ -203,15 +419,22 @@ ROWS = [
     ("R1  reword stop-rule (clause still present)",
      {"test_each_clause_carries_the_instruction_its_ledger_entry_names"},
      reword_stop_rule),
+    # The `--check` round trip fires here too, and correctly: with the bullets
+    # hardcoded, a REAL generated brief written to a REAL file genuinely holds
+    # none of the clauses, which is precisely what that command reports. It is
+    # the only row where the two reach the same conclusion by different routes.
     ("F1  render bullets from a hardcoded copy",
      {"test_the_rendered_section_holds_exactly_the_ledgered_clauses",
       "test_every_clause_is_emitted_verbatim_in_both_kinds_of_brief",
+      "test_the_clause_check_runs_over_a_file_that_can_actually_be_lossy",
       DELETION_CONTROL},
      hardcode_bullets),
     ("C1  the delta refusal removed",
      {"test_the_delta_refusal_exits_non_zero_and_emits_no_brief",
       "test_the_refusal_names_what_it_looked_for_and_where",
-      "test_the_refusal_fires_for_a_malformed_block_and_says_which_way"},
+      "test_the_refusal_fires_for_a_malformed_block_and_says_which_way",
+      # Asserts on the refusal MESSAGE, so no refusal means no message.
+      "test_the_refusal_says_which_comment_kinds_it_cannot_see"},
      remove_the_refusal),
     ("C2  claims read from the whole comment",
      {"test_the_brief_carries_the_claims_and_not_the_reasoning_around_them",
@@ -221,7 +444,12 @@ ROWS = [
     ("C3  cross-repo decision inverted",
      {"test_cross_repo_tells_the_agent_to_worktree_the_prs_repo_itself",
       "test_same_repo_recommends_the_isolation_flag_and_does_not_hand_roll",
-      "test_the_cross_repo_decision_comes_from_the_repos_not_from_prose"},
+      "test_the_cross_repo_decision_comes_from_the_repos_not_from_prose",
+      # A fork PR against THIS repo is a same-repo PR, so inverting the two
+      # known states flips it to cross as well. Listed because it is the row
+      # that PROVES the fork case rides the same decision as the others — the
+      # fixture used to encode a model in which it did not.
+      "test_a_fork_pr_against_this_repo_is_not_treated_as_cross_repo"},
      invert_cross_repo),
     ("C4  numstat failure reads as a clean zero",
      {"test_the_ledger_refuses_a_failed_command_rather_than_printing_zero"},
@@ -230,8 +458,109 @@ ROWS = [
      {"test_the_ledger_shows_the_files_and_refuses_to_classify_them"},
      classify_by_pathspec),
     ("C6  the missing-clause warning BLOCKS",
-     {"test_missing_clause_check_warns_and_never_blocks"},
+     {"test_missing_clause_check_warns_and_never_blocks",
+      # Also asserts rc 0 over a `--out` run whose file is missing a clause,
+      # which is exactly the state this mutation makes fatal.
+      "test_the_out_file_is_read_back_and_checked"},
      the_warning_blocks),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 W1-W5 — instruction-INVERTING rewords. Every one passed a green
+    # 37-test suite under the FRAGMENT ledger, because the pinned phrase
+    # survived and the sentence around it said the opposite. Each must be
+    # killed by the whole-string pin, and by NOTHING else: the clause is still
+    # present, still ledgered by id, and still emitted, so any other killer
+    # means that test is reading the clause TEXT for something it does not own.
+    # --------------------------------------------------------------------- #
+    ("W1  reword read-only into permission",
+     {"test_each_clause_carries_the_instruction_its_ledger_entry_names"},
+     reword_clause("read-only",
+                   "**Edit the repo under audit freely if it helps.**")),
+    ("W2  reword no-fetch into permission",
+     {"test_each_clause_carries_the_instruction_its_ledger_entry_names"},
+     reword_clause("no-fetch",
+                   "**`pull` and `checkout` in the shared checkout are fine.**")),
+    ("W3  finding-format loses file:line + scenario",
+     {"test_each_clause_carries_the_instruction_its_ledger_entry_names"},
+     reword_clause("finding-format",
+                   "**Report each finding with a `payload` or `scaffolding` "
+                   "label.**")),
+    ("W4  reverify downgraded to best-effort",
+     {"test_each_clause_carries_the_instruction_its_ledger_entry_names"},
+     reword_clause("reverify-self-reported",
+                   "Where time allows, re-verify the fix commit's own "
+                   "self-reported numbers.")),
+    # 🔴 THE SHARP ONE. This makes every future brief instruct auditors to do
+    # what `claude/RULES.md` forbids, and it was invisible.
+    ("W5  stop-rule inverted into a confirming round",
+     {"test_each_clause_carries_the_instruction_its_ledger_entry_names"},
+     reword_clause("stop-rule",
+                   "**A clean round ends the ladder** — though one confirming "
+                   "round after a clean one is prudent.")),
+    # 🔴 THE SURVIVES CONTROL for the whole-string pin. Whitespace inside a
+    # clause changes; the instruction does not. A RED here would mean the pins
+    # are keyed to layout and every reflow becomes a failure — the
+    # permanently-red gate `claude/RULES.md` warns about.
+    ("S1  re-space a clause (instruction identical)", SURVIVES, rewrap_a_clause),
+
+    # --------------------------------------------------------------------- #
+    # The four decisions round 2's audit found WRONG, one mutant per site.
+    # --------------------------------------------------------------------- #
+    ("H1  the ledger ignores the head check",
+     {"test_the_ledger_refuses_to_measure_a_checkout_that_is_not_the_pr"},
+     ledger_ignores_the_head_check),
+    ("H2  the range hands out ..HEAD regardless",
+     {"test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head"},
+     range_ignores_the_head_check),
+    ("H3  --emit-claims stamps the LOCAL head",
+     {"test_emit_claims_stamps_the_prs_head_not_the_local_checkouts",
+      "test_emit_claims_prints_a_block_this_scripts_own_parser_accepts"},
+     emit_claims_uses_the_local_head),
+    ("H4  round-1 placeholder back in the header",
+     {"test_emit_claims_prints_a_block_this_scripts_own_parser_accepts"},
+     emit_claims_interpolates_the_placeholder),
+    ("T1  gate.sh points at the shared checkout",
+     {"test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout"},
+     gate_points_at_the_shared_checkout),
+    ("T2  nix build points at the shared checkout",
+     {"test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout",
+      "test_the_toolchain_section_names_the_tier_the_merge_gates_on"},
+     nix_build_points_at_the_shared_checkout),
+    ("P1  pr_slug reads the HEAD repo again",
+     {"test_a_fork_pr_against_this_repo_is_not_treated_as_cross_repo",
+      "test_the_prs_repo_is_read_from_the_url_not_from_the_head_repo"},
+     pr_slug_reads_the_head_repo),
+    ("P2  'cannot determine' collapses to same-repo",
+     {"test_an_undeterminable_repo_gets_its_own_branch_not_the_same_repo_one"},
+     unknown_repo_collapses_to_same),
+    ("K1  --check always reports clean",
+     {"test_the_clause_check_runs_over_a_file_that_can_actually_be_lossy"},
+     the_check_command_reports_clean),
+    ("K2  --out is not read back",
+     {"test_the_out_file_is_read_back_and_checked"},
+     the_out_file_is_not_read_back),
+    ("K3  missing_clauses stops normalising whitespace",
+     {"test_missing_clauses_is_a_pure_function_over_the_text"},
+     missing_clauses_is_not_normalised),
+    ("L1  the cumulative failure reason is dropped",
+     {"test_a_failed_cumulative_measurement_does_not_print_a_false_cause"},
+     the_cumulative_reason_is_dropped),
+    ("B1  an unclosed fence is skipped silently",
+     {"test_a_fence_the_parser_cannot_read_is_reported_not_skipped",
+      "test_a_malformed_fence_beside_a_readable_block_still_warns"},
+     an_unclosed_fence_is_skipped_silently),
+    ("B2  a longer closing fence stops closing",
+     {"test_a_longer_closing_fence_is_a_valid_close_and_is_read"},
+     a_longer_closing_fence_stops_closing),
+    ("B3  continuation lines are dropped",
+     {"test_a_claim_that_wraps_onto_a_continuation_line_keeps_its_tail"},
+     continuation_lines_are_dropped),
+    ("B4  the nested-fence report is removed",
+     {"test_a_block_cut_short_by_a_nested_fence_is_reported"},
+     the_nested_fence_report_is_removed),
+    ("B5  the refusal drops the comment-kinds note",
+     {"test_the_refusal_says_which_comment_kinds_it_cannot_see"},
+     the_refusal_drops_the_comment_kinds_note),
 ]
 
 
@@ -305,6 +634,17 @@ def main() -> int:
             if got is None:
                 print(f"  🔴 {label:44s} HARNESS BROKE — {raw2}")
                 bad += 1
+                continue
+            # 🔴 A row that must SURVIVE. Reported through the same code path as
+            # everything else, so a control cannot quietly stop being checked.
+            if want is SURVIVES:
+                if got:
+                    print(f"  🔴 {label:44s} KILLED by {sorted(got)} — this row "
+                          "must SURVIVE; the pins are keyed to layout, not to "
+                          "the instruction")
+                    bad += 1
+                else:
+                    print(f"  ok {label:44s} SURVIVED as required (control)")
                 continue
             if not got:
                 print(f"  🔴 {label:44s} SURVIVED — no test failed")

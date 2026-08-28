@@ -71,10 +71,26 @@ round has something to read.
    `scripts/ladder-depth-sweep.py`'s refused zero: the failure and the
    legitimate case produce the SAME observable, so neither may be reported.
 2. **A brief missing an invariant clause WARNS and never blocks.** That check
-   exists for a hand-edited `--out` file, and `claude/RULES.md` is explicit that
-   a permanently-red gate trains everyone to click through it. Warn-only is the
+   exists for a hand-edited brief, and `claude/RULES.md` is explicit that a
+   permanently-red gate trains everyone to click through it. Warn-only is the
    right severity for a channel whose failure is cosmetic and whose false
-   positive rate is set by whatever a human typed.
+   positive rate is set by whatever a human typed. It runs over `--check FILE`
+   and over the READ-BACK of `--out` — never over the in-memory string, where
+   it was unreachable by construction and could not have fired for any input.
+
+🔴 EVERY NUMBER HERE IS ABOUT THE PR, NOT ABOUT YOUR CHECKOUT
+-------------------------------------------------------------
+The delta half of a brief — the ledger, the `<prev>..HEAD` range, the `audited=`
+sha `--emit-claims` writes for the NEXT round to anchor on — was resolved
+against `HEAD` in the operator's own SHARED checkout, with nothing checking that
+HEAD was the PR at all. From a clone standing on an unrelated branch that
+produced rc 0, silent stderr, a non-empty range and a confident ledger of the
+wrong branch's files; from `main` it produced the banner "🔴 Zero changed lines
+over a NON-EMPTY range. That is a real measurement, not a failure."
+
+So `git rev-parse HEAD == headRefOid` is a FOURTH read rule beside rc 0, silent
+stderr and a non-empty range, and all three consumers emit COULD NOT MEASURE
+naming that cause when it does not hold.
 
 🔴 WHAT THIS SCRIPT DOES NOT DO
 --------------------------------
@@ -185,11 +201,23 @@ ISOLATION_FORBID = 'Do NOT use `isolation: "worktree"`'
 # the two fields that matter. A block whose header does not parse is reported as
 # MALFORMED rather than skipped: skipping it silently would produce the same
 # observable as "no block at all", and those need different fixes.
-_CLAIMS_FENCE = re.compile(
-    r"^(?P<fence>`{3,})audit-claims(?P<header>[^\n]*)\n"
-    r"(?P<body>.*?)^(?P=fence)\s*$",
-    re.M | re.S,
-)
+#
+# 🔴 THAT COMMENT WAS FALSE FOR FOUR SHAPES, so the parser is line-based rather
+# than one regex. The old `^(?P=fence)\s*$` backreference required the CLOSING
+# fence to be byte-identical to the opener, and anything it could not match was
+# dropped with no report at all:
+#   * an UNCLOSED fence — the refusal then said "no `audit-claims` block in any
+#     of the 1 comment(s) read", which is false and points at the wrong fix;
+#   * a 4-backtick opener closed with 3 — not a close under CommonMark either,
+#     so this really is unclosed and is now named as such;
+#   * a 3-backtick opener closed with 4 — which IS a valid CommonMark close and
+#     renders closed on GitHub, so it is now PARSED rather than dropped;
+#   * a nested fence inside the body, which ends the block early and silently
+#     drops every claim after it.
+# A claim that WRAPS onto a continuation line was silently truncated to its
+# first line, changing the claim; continuation lines are now appended.
+_FENCE_OPEN = re.compile(r"^(?P<fence>`{3,})audit-claims(?P<header>[^\n]*)$")
+_FENCE_BARE = re.compile(r"^(?P<fence>`{3,})\s*$")
 _HEADER_ROUND = re.compile(r"\bround=(\d+)\b")
 _HEADER_AUDITED = re.compile(r"\baudited=(\S+)")
 _CLAIM_ITEM = re.compile(r"^\s*(\d+)[.)]\s+(.+?)\s*$")
@@ -197,16 +225,66 @@ _CLAIM_ITEM = re.compile(r"^\s*(\d+)[.)]\s+(.+?)\s*$")
 ClaimsBlock = namedtuple("ClaimsBlock", "round_no audited_from audited_to items")
 
 
+def _items_from_body(body_lines):
+    """Numbered claim lines, with CONTINUATION lines folded into the item above.
+
+    A claim wrapped over two lines used to lose everything after the first —
+    which does not fail, it changes the claim, and the next round is framed on
+    the truncated text.
+    """
+    items = []
+    for line in body_lines:
+        m = _CLAIM_ITEM.match(line)
+        if m:
+            items.append(m.group(2))
+        elif items and line.strip():
+            items[-1] = f"{items[-1]} {line.strip()}"
+    return items
+
+
 def parse_claims_blocks(texts):
     """-> (blocks, malformed_reasons) over an iterable of comment bodies.
 
     Pure and independently testable: the refusal below is only trustworthy if
     this can be driven with no network and no PR.
+
+    🔴 `malformed` is NOT only populated when the block is unusable. A structural
+    problem that still leaves a parseable block (a nested fence that cut the
+    claims in half) is reported too, and `main` warns about it rather than
+    letting a half-read block pass as a whole one.
     """
     blocks, malformed = [], []
     for text in texts:
-        for m in _CLAIMS_FENCE.finditer(text or ""):
-            header = m.group("header")
+        lines = (text or "").splitlines()
+        i = 0
+        while i < len(lines):
+            om = _FENCE_OPEN.match(lines[i])
+            if om is None:
+                i += 1
+                continue
+            opener, header = om.group("fence"), om.group("header")
+
+            body, close_at, j = [], None, i + 1
+            while j < len(lines):
+                bm = _FENCE_BARE.match(lines[j])
+                # CommonMark: a closing fence must be AT LEAST as long as the
+                # opener. A shorter run of backticks is content, not a close.
+                if bm and len(bm.group("fence")) >= len(opener):
+                    close_at = j
+                    break
+                body.append(lines[j])
+                j += 1
+
+            if close_at is None:
+                malformed.append(
+                    "an `audit-claims` fence that is never CLOSED — no line of "
+                    f"{len(opener)} or more backticks follows it (header was: "
+                    f"`{header.strip() or '<empty>'}`). A shorter closing fence "
+                    "does not close it, under CommonMark or here."
+                )
+                i += 1
+                continue
+
             r = _HEADER_ROUND.search(header)
             a = _HEADER_AUDITED.search(header)
             if not r or not a:
@@ -215,26 +293,54 @@ def parse_claims_blocks(texts):
                     f"`round=<n>` and `audited=<sha>..<sha>` (header was:"
                     f" `{header.strip() or '<empty>'}`)"
                 )
+                i = close_at + 1
                 continue
+
             spec = a.group(1)
             frm, _, to = spec.partition("..")
             if not to:
-                # A bare sha is accepted as the audited TIP; the round-1 anchor
-                # is then simply unknown, which the ledger reports rather than
-                # guesses.
+                # A bare sha is accepted as the audited TIP; for a round-1 block
+                # that tip IS the cumulative anchor (see `round_one_anchor`),
+                # and for any later round the anchor is simply unknown, which
+                # the ledger reports rather than guesses.
                 frm, to = "", frm
-            items = [
-                mm.group(2)
-                for mm in (_CLAIM_ITEM.match(ln) for ln in m.group("body").splitlines())
-                if mm
-            ]
+
+            items = _items_from_body(body)
             if not items:
                 malformed.append(
                     f"an `audit-claims round={r.group(1)}` block with no "
                     "numbered claim lines in its body"
                 )
+                i = close_at + 1
                 continue
+
+            # 🔴 The nested-fence report. A fence inside the body ends the block
+            # early — CommonMark and GitHub agree — so the claims after it are
+            # outside it and were dropped with no signal. The tell is claim
+            # line(s) AND a stray fence in the region after the close, which is
+            # what a cut-in-half block leaves behind. Deliberately a report and
+            # not a rejection: the block that DID parse is still used, and a
+            # comment whose trailing prose merely happens to contain both would
+            # otherwise lose a usable block to a heuristic.
+            k = close_at + 1
+            tail = []
+            while k < len(lines) and _FENCE_OPEN.match(lines[k]) is None:
+                tail.append(lines[k])
+                k += 1
+            if any(_CLAIM_ITEM.match(t) for t in tail) and any(
+                _FENCE_BARE.match(t) for t in tail
+            ):
+                malformed.append(
+                    f"an `audit-claims round={r.group(1)}` block that looks CUT "
+                    "SHORT by a nested fence: numbered claim line(s) and a "
+                    "stray fence follow its closing fence, so claims after the "
+                    f"nested fence were not read (read {len(items)}). Indent "
+                    "any code inside a claim, or open the block with four "
+                    "backticks."
+                )
+
             blocks.append(ClaimsBlock(int(r.group(1)), frm, to, items))
+            i = close_at + 1
     return blocks, malformed
 
 
@@ -248,14 +354,29 @@ def newest_block(blocks):
 
 
 def round_one_anchor(blocks):
-    """The left side of the LOWEST-numbered block's range, or None.
+    """The sha ROUND 1 audited, or None.
 
     That is the only sha in the corpus that can anchor the ledger's cumulative
     "since round 1" figure. When no block carries one, the figure is reported
     NOT MEASURED — never derived from the base, which is a different quantity.
+
+    Two spellings carry it, and both are read:
+      * `round=2 audited=A..B` — A is the tip round 1 audited (the usual case);
+      * `round=1 audited=A`    — the bare form `--emit-claims` writes for a
+        round-1 comment, where the audited TIP is itself that same quantity.
+    A bare sha on any LATER round is NOT an anchor: it says what that round
+    audited, and the round-1 tip is then genuinely unknown.
     """
-    ordered = sorted((b for b in blocks if b.audited_from), key=lambda b: b.round_no)
-    return ordered[0].audited_from if ordered else None
+    candidates = []
+    for b in blocks:
+        if b.audited_from:
+            candidates.append((b.round_no, b.audited_from))
+        elif b.round_no == 1 and b.audited_to:
+            candidates.append((b.round_no, b.audited_to))
+    # Stable sort on the round number alone, so a tie resolves to the block seen
+    # first rather than to whichever sha sorts lower.
+    candidates.sort(key=lambda c: c[0])
+    return candidates[0][1] if candidates else None
 
 
 # --------------------------------------------------------------------------- #
@@ -274,12 +395,18 @@ def real_runner(cmd, cwd=None):
 # Facts gathered per invocation
 # --------------------------------------------------------------------------- #
 
-LedgerReport = namedtuple("LedgerReport", "files added deleted commits reason cumulative")
+LedgerReport = namedtuple(
+    "LedgerReport",
+    "files added deleted commits reason cumulative cumulative_reason",
+)
+# 🔴 `head_check` is the FOURTH read rule, beside rc 0 / silent stderr /
+# non-empty range. See `verify_head_is_the_pr`.
+HeadCheck = namedtuple("HeadCheck", "ok reason local_sha pr_sha")
 Facts = namedtuple(
     "Facts",
-    "pr repo title base_ref url round_no cwd_repo_dir cwd_repo_slug cross_repo "
+    "pr repo title base_ref url round_no cwd_repo_dir cwd_repo_slug repo_relation "
     "branch dirty prev_sha claims claims_round checklist ledger assembled_at "
-    "claims_source",
+    "claims_source head_check",
 )
 
 
@@ -311,9 +438,18 @@ def gather_checkout_state(runner, repo_dir):
 
 
 def gh_pr_facts(runner, pr, repo=None):
-    """PR metadata + comment bodies, via `gh`. -> (dict, [comment bodies])."""
+    """PR metadata + comment bodies, via `gh`. -> (dict, [comment bodies]).
+
+    🔴 `headRefOid` and `isCrossRepository` are read because the two decisions
+    that were WRONG without them are the two most expensive ones this script
+    makes: which tree the ledger measured, and which repository the PR lives in.
+    🔴 There is NO `baseRepository` field on `gh pr view --json` (checked
+    against `gh`'s own field list) — `url` is what carries the base repo, and
+    `pr_slug` reads it.
+    """
     cmd = ["gh", "pr", "view", str(pr), "--json",
-           "title,url,baseRefName,headRepository,headRepositoryOwner,comments"]
+           "title,url,baseRefName,headRefOid,isCrossRepository,"
+           "headRepository,headRepositoryOwner,comments"]
     if repo:
         cmd += ["--repo", repo]
     rc, out, err = runner(cmd)
@@ -330,31 +466,126 @@ def gh_pr_facts(runner, pr, repo=None):
     return data, comments
 
 
+# `https://<host>/<owner>/<name>/pull/<n>` — the PR's own URL, which names the
+# repository the PR LIVES IN. Host-agnostic on purpose (GHES spells the host
+# differently and the path shape is the same).
+_PR_URL = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/\d+")
+
+
 def pr_slug(data, override=None):
+    """The repo the PR LIVES IN — NOT the repo its head branch lives in.
+
+    🔴 This read `headRepositoryOwner`/`headRepository` and was therefore wrong
+    for every FORK PR. Verified against real `gh` output for a fork PR against
+    `cli/cli`: `headRepository.nameWithOwner` is `ylfeng250/cli` while `url` is
+    `https://github.com/cli/cli/pull/14280` and `isCrossRepository` is `true`.
+    A fork PR opened against THIS repo therefore computed a slug that differs
+    from the cwd's, took the CROSS-REPO branch, and told the agent to worktree
+    "your local clone of <contributor>/<repo>" — a clone that does not exist,
+    for a repository the PR is not in.
+
+    `gh pr view --json` has no `baseRepository` field, so `url` is the authority
+    and `isCrossRepository` is what says whether the head fields may stand in
+    for it: they are the same repo only when it is false.
+    """
     if override:
         return override
-    owner = (data.get("headRepositoryOwner") or {}).get("login")
-    name = (data.get("headRepository") or {}).get("name")
-    return f"{owner}/{name}" if owner and name else None
+    m = _PR_URL.match((data.get("url") or "").strip())
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    if data.get("isCrossRepository") is False:
+        owner = (data.get("headRepositoryOwner") or {}).get("login")
+        name = (data.get("headRepository") or {}).get("name")
+        if owner and name:
+            return f"{owner}/{name}"
+    # 🔴 None, never a guess. `main` renders a third WHERE-TO-WORK branch for
+    # this, because collapsing "cannot tell" into "same repo" recommends the
+    # flag that is dangerous in exactly the case it cannot rule out.
+    return None
+
+
+def verify_head_is_the_pr(runner, repo_dir, pr_head_sha):
+    """🔴 The FOURTH read rule: is this checkout's HEAD the PR's head commit?
+
+    Everything the delta half of this brief says — the ledger's numbers, the
+    `<prev>..HEAD` range it hands the auditor, and the `audited=` sha
+    `--emit-claims` stamps for the NEXT round to anchor on — is computed against
+    `HEAD` in the operator's own checkout. That checkout is SHARED and moves;
+    nothing here ever checked that it was standing on the PR at all.
+
+    Reproduced from a clone standing on an unrelated feature branch: rc 0,
+    silent stderr, a non-empty range — all three advertised read rules satisfied
+    — and a ledger of that branch's files. Standing on `main` instead produced
+    the confident banner "🔴 Zero changed lines over a NON-EMPTY range. That is
+    a real measurement, not a failure."
+
+    So a failed check returns a `reason` and NO number, exactly like the other
+    three: an unverifiable measurement is not a measurement.
+    """
+    if not pr_head_sha:
+        return HeadCheck(
+            False,
+            "the PR's head sha is not known here (`gh` was not consulted — "
+            "`--claims-file` mode — or reported no `headRefOid`), so nothing "
+            "can confirm this checkout is standing on the PR",
+            None,
+            None,
+        )
+    rc, out, err = runner(["git", "-C", repo_dir, "rev-parse", "HEAD"])
+    local = out.strip()
+    if rc != 0 or not local:
+        return HeadCheck(
+            False,
+            f"`git rev-parse HEAD` in {repo_dir} exited {rc}: "
+            f"{(err or out).strip() or 'no output'}",
+            None,
+            pr_head_sha,
+        )
+    if local != pr_head_sha:
+        return HeadCheck(
+            False,
+            f"this checkout's HEAD is `{local}`, but the PR's head is "
+            f"`{pr_head_sha}` — the two are DIFFERENT COMMITS, so anything "
+            "measured against `HEAD` here is a measurement of another tree",
+            local,
+            pr_head_sha,
+        )
+    return HeadCheck(True, None, local, pr_head_sha)
 
 
 # --------------------------------------------------------------------------- #
 # The ledger — the skill's own command, with the skill's own read rules
 # --------------------------------------------------------------------------- #
 
-def measure_ledger(runner, repo_dir, prev_sha, base):
+def measure_ledger(runner, repo_dir, prev_sha, base, head_check=None):
     """`git log --numstat --format= --remerge-diff <prev>..HEAD --not <base>`.
 
-    🔴 The skill's read rules are enforced here, not assumed: **rc 0, silent
-    stderr, and a non-empty range**. A missing ref or a git without
-    `--remerge-diff` exits 128 with empty output; an unwritable object store
-    makes `--remerge-diff` UNDER-count, exit 0 and print a plausible number,
-    announcing itself only on stderr; and a range whose commits are not in this
-    checkout prints nothing at all, silently, with rc 0. Each of those returns a
-    `reason` and NO number — a failed command is not a zero.
+    🔴 FOUR read rules are enforced here, not assumed: **the checkout's HEAD is
+    the PR's head, rc 0, silent stderr, and a non-empty range**.
+
+    The fourth one came last and is the one that lets the other three pass while
+    the answer is entirely wrong: `HEAD` is resolved in the operator's own
+    SHARED checkout, which is not necessarily standing on the PR. Reproduced
+    from a clone on an unrelated branch — rc 0, silent stderr, a non-empty range
+    and a file list belonging to that branch. `head_check` is
+    `verify_head_is_the_pr`'s verdict; passing None skips it, which is only for
+    a caller that has no PR to compare against.
+
+    A missing ref or a git without `--remerge-diff` exits 128 with empty output;
+    an unwritable object store makes `--remerge-diff` UNDER-count, exit 0 and
+    print a plausible number, announcing itself only on stderr; and a range
+    whose commits are not in this checkout prints nothing at all, silently, with
+    rc 0. Each of those returns a `reason` and NO number — a failed command is
+    not a zero, and neither is a measurement of the wrong tree.
     """
     def fail(reason):
-        return LedgerReport(None, None, None, None, reason, None)
+        return LedgerReport(None, None, None, None, reason, None, None)
+
+    if head_check is not None and not head_check.ok:
+        return fail(
+            "this checkout is not standing on the PR, so `..HEAD` does not "
+            f"mean what this ledger would claim it means: {head_check.reason}"
+        )
 
     rc, out, err = runner(
         ["git", "-C", repo_dir, "rev-list", "--count", f"{prev_sha}..HEAD"]
@@ -401,7 +632,7 @@ def measure_ledger(runner, repo_dir, prev_sha, base):
         files[path] = (cur[0] + na, cur[1] + nd)
         added += na
         deleted += nd
-    return LedgerReport(files, added, deleted, commits, None, None)
+    return LedgerReport(files, added, deleted, commits, None, None, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -425,8 +656,51 @@ def render_worktree_directive(facts):
     repo that is the wrong tree, and the failure is quiet: the agent either
     reports a briefed file missing, or silently audits the wrong repository and
     reports findings about it.
+
+    🔴 THREE states, not two. The decision used to be `bool(cwd_slug and repo
+    and cwd_slug != repo)`, so "could not determine either side" evaluated
+    FALSE and collapsed into the SAME-REPO branch — the one that recommends the
+    flag. With no `origin` remote the output contradicted itself in one
+    paragraph: "The PR lives in `<org>/<other-repo>`, which is this session's
+    own repository (`/home/…/devrc`)", followed by the recommendation. Not
+    knowing is its own answer, and it is the answer that must NOT recommend a
+    flag whose failure mode is silent.
     """
-    if facts.cross_repo:
+    if facts.repo_relation == "unknown":
+        unknown_side = (
+            "this checkout has no `origin` remote to resolve a slug from"
+            if not facts.cwd_repo_slug else
+            "`gh` did not report which repository the PR lives in"
+        )
+        return "\n".join([
+            "## WHERE TO WORK — 🔴 COULD NOT DETERMINE — decide by hand",
+            "",
+            "This script could not establish whether the PR is in THIS "
+            f"session's repository or another one: {unknown_side}.",
+            "",
+            f"    the PR's repo     : {facts.repo}",
+            f"    this checkout     : {facts.cwd_repo_dir}"
+            + (f" (`{facts.cwd_repo_slug}`)" if facts.cwd_repo_slug else
+               " (no `origin` remote)"),
+            "",
+            f"🔴 {ISOLATION_FORBID} until that is answered. The flag builds its "
+            "worktree from the CWD's repo; if that is the wrong repo it fails "
+            "quietly — the agent either reports a briefed file missing or "
+            "silently audits the wrong tree — and this script cannot currently "
+            "rule that out. **Not knowing is not the same as same-repo**, and "
+            "the same-repo branch is the one that recommends the flag.",
+            "",
+            "Answer it, then follow the matching directive:",
+            "",
+            "```",
+            f"gh pr view {facts.pr} --json url          # the repo the PR lives in",
+            f"git -C {facts.cwd_repo_dir} remote get-url origin",
+            "```",
+            "",
+            "Or re-run this script with `--repo owner/name` to state the PR's "
+            "repository outright.",
+        ])
+    if facts.repo_relation == "cross":
         return "\n".join([
             "## WHERE TO WORK — 🔴 CROSS-REPO",
             "",
@@ -496,12 +770,36 @@ def render_range(facts):
             "",
             f"Base branch: `{facts.base_ref}`.",
         ])
+    # 🔴 `..HEAD` is only meaningful once HEAD has been shown to BE the PR's
+    # head. Unverified, the range handed to the auditor points at whatever tree
+    # the shared checkout happens to be standing on — reproduced against an
+    # unrelated feature branch, where it read as an ordinary non-empty range.
+    hc = facts.head_check
+    if hc is not None and hc.ok:
+        tip = "HEAD"
+        note = (
+            f"This checkout's HEAD is `{hc.local_sha}`, verified at assembly "
+            f"time to be PR #{facts.pr}'s head commit — which is what makes "
+            "`..HEAD` mean the PR here."
+        )
+    else:
+        tip = hc.pr_sha if (hc is not None and hc.pr_sha) else "<the PR's head sha>"
+        note = (
+            "🔴 **COULD NOT VERIFY that this checkout is standing on the PR**, "
+            "so `..HEAD` is NOT used above — it would name whatever tree the "
+            "shared checkout is on:\n\n"
+            f"    {hc.reason if hc is not None else 'no check was made'}\n\n"
+            "Resolve the range in a tree that CONTAINS the PR's head before "
+            "trusting any number derived from it."
+        )
     return "\n".join([
         "## THE RANGE",
         "",
         f"A DELTA re-audit, round {facts.round_no}. Diff **`{facts.prev_sha}"
-        "..HEAD`** — the fix commits made since the tip round "
+        f"..{tip}`** — the fix commits made since the tip round "
         f"{facts.claims_round} audited. Do not re-audit the whole PR.",
+        "",
+        note,
         "",
         f"Base branch: `{facts.base_ref}`.",
         "",
@@ -534,9 +832,32 @@ def render_checkout(facts):
 
 
 def render_toolchain(facts):
+    """🔴 The operator's checkout resolves the TOOLCHAIN and nothing else.
+
+    Every command here used to interpolate `facts.cwd_repo_dir`, including the
+    two that name the tree UNDER TEST. `scripts/gate.sh` resolves its own `ROOT`
+    from `BASH_SOURCE`, so `nix develop <shared> -c bash <shared>/scripts/
+    gate.sh` runs the suite in the SHARED CHECKOUT, on whatever branch it is
+    standing on; `nix build <shared>#checks…` builds that flake ref's tree, not
+    the auditor's. Both contradicted WHERE TO WORK three bars above, and the
+    auditor then obeyed the very next sentence — "name the tier and the base
+    sha" — and named the wrong sha.
+
+    `nix develop {r}` is deliberately left pointing at the operator's checkout:
+    that one is only resolving a dev shell (the toolchain), and it is the door
+    the repo's own CLAUDE.md tells everyone to use.
+    """
     r = facts.cwd_repo_dir
     return "\n".join([
         "## TOOLCHAIN — the exact commands, and the two ways they lie",
+        "",
+        "🔴 `<your worktree>` below is **your own copy** — the one WHERE TO WORK "
+        f"told you to make. `{r}` appears ONLY as the argument to `nix develop`, "
+        "where it resolves the dev shell and nothing else. Never point the gate "
+        "or a `nix build` at it: `gate.sh` resolves its root from its own path, "
+        "so running the shared copy runs the suite in the SHARED CHECKOUT on "
+        "whatever branch it is standing on, and a `nix build <ref>#…` builds "
+        "that ref's tree, not yours.",
         "",
         "Run a SUBSET of the suite:",
         "",
@@ -554,7 +875,7 @@ def render_toolchain(facts):
         "read each runner's own `RESULT:` line):",
         "",
         "```",
-        f"nix develop {r} -c bash {r}/scripts/gate.sh --tier both",
+        f"nix develop {r} -c bash <your worktree>/scripts/gate.sh --tier both",
         "```",
         "",
         "🔴 The gate above is the DEV-HOST tier. **The tier the merge actually "
@@ -562,8 +883,8 @@ def render_toolchain(facts):
         "`.git` and is therefore blind to different things:",
         "",
         "```",
-        f"nix build {r}#checks.x86_64-linux.pytests",
-        f"nix build {r}#checks.x86_64-linux.nodetests",
+        "nix build <your worktree>#checks.x86_64-linux.pytests",
+        "nix build <your worktree>#checks.x86_64-linux.nodetests",
         "```",
         "",
         "Name the tier and the base sha in any claim you make about the gate — "
@@ -646,12 +967,32 @@ def render_ledger(facts):
         "check.",
     ]
     if led.cumulative is None:
-        lines += [
-            "",
-            "⚠ The cumulative figure (Y, since round 1) is **NOT MEASURED**: no "
-            "`audit-claims` block carried a round-1 anchor sha. It is not "
-            "derivable from the base, which is a different quantity.",
-        ]
+        # 🔴 TWO mechanisms, and they need opposite fixes: there was no anchor
+        # sha to measure from, or there WAS one and the measurement failed. The
+        # no-anchor sentence used to be printed for both, sending an operator
+        # who already had a round-1 anchor off to add one — reproduced with a
+        # round-1 block whose `audited=` sha makes `rev-list` exit 128. Same
+        # empty-result trap this module refuses everywhere else.
+        if led.cumulative_reason:
+            lines += [
+                "",
+                "⚠ The cumulative figure (Y, since round 1) is **NOT "
+                "MEASURED** — an anchor sha WAS found, and measuring from it "
+                "failed:",
+                "",
+                f"    {led.cumulative_reason}",
+                "",
+                "So this is a broken measurement, not a missing anchor: adding "
+                "another `audit-claims` block will not fix it.",
+            ]
+        else:
+            lines += [
+                "",
+                "⚠ The cumulative figure (Y, since round 1) is **NOT "
+                "MEASURED**: no `audit-claims` block carried a round-1 anchor "
+                "sha. It is not derivable from the base, which is a different "
+                "quantity.",
+            ]
     return "\n".join(lines)
 
 
@@ -729,10 +1070,32 @@ def emit_claims_skeleton(facts, head_sha):
 
     Emitted rather than described, because the next round's assembler reads ONLY
     this shape and a hand-typed near-miss is refused.
+
+    🔴 TWO defects lived in one line here.
+
+    1. With no prior block — a round 1 `--emit-claims`, which is *the remedy the
+       refusal advertises* — `prev_sha` was None and the placeholder
+       `<the sha round 1 audited>` was interpolated INTO the header. The parser
+       then read `audited=<the`, found no `..`, and yielded `audited_from=''`,
+       `audited_to='<the'`; the next round's brief said ``Diff `<the..HEAD` ``
+       with rc 0 and no refusal at all. The parser already accepts a BARE sha as
+       the audited tip, and for round 1 that tip is exactly the quantity the
+       header carries, so the bare form is what is emitted.
+    2. `head_sha` used to be the operator checkout's `git rev-parse --short
+       HEAD` — which is only the PR's head if the shared checkout happens to be
+       standing on it, and is otherwise a record of some other branch's tip
+       going into the field the NEXT round anchors on. The caller now passes the
+       PR's own head sha.
     """
-    frm = facts.prev_sha or "<the sha round 1 audited>"
+    if facts.prev_sha:
+        audited = f"{facts.prev_sha}..{head_sha}"
+    else:
+        # Round 1: no previous tip exists, so the header carries the audited tip
+        # ALONE. `round_one_anchor` reads a round-1 bare sha as the cumulative
+        # anchor, so the ledger stays measurable from here on.
+        audited = head_sha
     return "\n".join([
-        f"```audit-claims round={facts.round_no} audited={frm}..{head_sha}",
+        f"```audit-claims round={facts.round_no} audited={audited}",
         "1. <one line per thing this round's fixes CLAIM to have addressed — "
         "WHAT was claimed, never WHY it is correct>",
         "2. <one line, same rule>",
@@ -744,15 +1107,38 @@ def emit_claims_skeleton(facts, head_sha):
 # The warn-only completeness check
 # --------------------------------------------------------------------------- #
 
-def missing_clauses(brief):
-    """Clause ids whose text is not present verbatim in `brief`.
+def _norm(text):
+    """Whitespace-normalised, so a re-wrap is not a loss but a reword is.
 
-    🔴 WARN-ONLY BY DESIGN. It exists for a `--out` file a human then edits, and
-    `claude/RULES.md` says a permanently-red gate trains everyone to click
-    through it. Blocking here would make the tool refuse to run over an edit
-    that was deliberate.
+    A hand-edited brief gets re-wrapped by editors and by paste; a clause that
+    survived the edit intact should not be reported missing because a line
+    break moved.
     """
-    return [c.id for c in INVARIANT_CLAUSES if c.text not in brief]
+    return " ".join((text or "").split())
+
+
+def missing_clauses(brief):
+    """Clause ids whose text is not present in `brief` (whitespace-normalised).
+
+    🔴 WARN-ONLY BY DESIGN. `claude/RULES.md` says a permanently-red gate trains
+    everyone to click through it, and a brief a human deliberately edited is not
+    a defect. Blocking here would make the tool refuse to run over that edit.
+
+    🔴 IT WAS ALSO UNREACHABLE. The docstring said "it exists for a hand-edited
+    `--out` file" and nothing ever read an `--out` file back: the only caller
+    passed the string `render_brief` had just built out of `INVARIANT_CLAUSES`,
+    so every clause was present BY CONSTRUCTION and the check could not fail for
+    any input a user could supply. The suite reached it only by monkeypatching
+    `render_brief` to a lossy stub — which is the `unreachable-guards` shape in
+    `claude/RULES.md`, and it mattered: the hand-written brief that dispatched
+    the audit of this very script HAD been edited, several clauses shortened and
+    the checklist paraphrased, and the shipped check could not notice.
+
+    Two real inputs now reach it: `--check FILE` (a brief someone edited) and
+    the READ-BACK of `--out` (which also catches a write that lost bytes).
+    """
+    haystack = _norm(brief)
+    return [c.id for c in INVARIANT_CLAUSES if _norm(c.text) not in haystack]
 
 
 # --------------------------------------------------------------------------- #
@@ -787,11 +1173,18 @@ def build_parser():
         prog="audit-dispatch.py",
         description="Assemble an adversarial-audit brief for a PR and print it.",
     )
-    ap.add_argument("pr", type=int, help="the PR number")
+    # `nargs="?"` exists ONLY so `--check FILE` can run with no PR at all — it
+    # inspects a file and consults neither `gh` nor `git`. Every other path
+    # still requires the number, and `main` says so rather than proceeding with
+    # `pr=None`.
+    ap.add_argument("pr", type=int, nargs="?", help="the PR number")
     ap.add_argument("--round", dest="round_no", type=int, default=1,
                     help="round number; >=2 assembles a DELTA re-audit brief")
     ap.add_argument("--repo", help="owner/name, when the PR is not in the cwd's repo")
     ap.add_argument("--out", help="write the brief to this file instead of stdout")
+    ap.add_argument("--check", metavar="FILE",
+                    help="check an EXISTING brief file for missing invariant "
+                         "clauses and exit; consults no PR and no git")
     ap.add_argument("--emit-claims", action="store_true",
                     help="also print an audit-claims block skeleton to paste "
                          "into this round's PR comment")
@@ -801,6 +1194,35 @@ def build_parser():
     return ap
 
 
+def check_brief_file(path, out_stream, err_stream):
+    """`--check FILE` — run the clause check over a brief someone EDITED.
+
+    🔴 This is what makes `missing_clauses` reachable in production. Warn-only,
+    like its in-process sibling: it reports and returns 0, because the operator
+    who edited the brief may have meant to.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"cannot read --check file: {e}", file=err_stream)
+        return 2
+    gone = missing_clauses(text)
+    if gone:
+        print(
+            f"⚠ {path} is missing invariant clause(s): " + ", ".join(gone)
+            + "\n  This is a WARNING, not a refusal. Each is a clause a "
+              "hand-written brief was MEASURED to lose; re-add them, or "
+              "re-generate the brief and edit less.",
+            file=err_stream,
+        )
+    else:
+        print(
+            f"{path}: all {len(INVARIANT_CLAUSES)} invariant clause(s) present.",
+            file=out_stream,
+        )
+    return 0
+
+
 def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
          checklist_reader=None):
     # `checklist_reader` is injected by the test suite so no test depends on
@@ -808,10 +1230,16 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
     # a suite that reads the ambient home is not hermetic, and the sandbox gate
     # tier runs with a different one.
     checklist_reader = checklist_reader or _read_checklist
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     out_stream = stdout or sys.stdout
     err_stream = stderr or sys.stderr
     cwd = cwd or os.getcwd()
+
+    if args.check:
+        return check_brief_file(args.check, out_stream, err_stream)
+    if args.pr is None:
+        parser.error("the PR number is required (or use --check FILE)")
 
     repo_dir, cwd_slug = gather_repo_facts(runner, cwd)
     branch, dirty = gather_checkout_state(runner, repo_dir)
@@ -832,7 +1260,17 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
                   file=err_stream)
             return 3
 
-    repo = pr_slug(data, args.repo) or cwd_slug or "UNKNOWN/UNKNOWN"
+    # 🔴 THREE states. `pr_repo` is None when neither `url`, `isCrossRepository`
+    # nor `--repo` could answer it; falling back to `cwd_slug` there (as this
+    # did) makes the comparison compare the cwd with ITSELF and silently yields
+    # "same repo" — the branch that recommends `isolation: "worktree"`.
+    pr_repo = pr_slug(data, args.repo)
+    if pr_repo and cwd_slug:
+        repo_relation = "same" if pr_repo == cwd_slug else "cross"
+    else:
+        repo_relation = "unknown"
+    repo = pr_repo or "UNKNOWN (not reported by `gh`; pass --repo owner/name)"
+
     blocks, malformed = parse_claims_blocks(comment_texts)
     newest = newest_block(blocks)
 
@@ -858,6 +1296,12 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             f"  looked in : {claims_source}",
             why,
             "",
+            "  ⚠ `gh pr view --json comments` returns ISSUE comments only. A "
+            "block posted as a REVIEW comment, as a reply inside a review "
+            "thread, or in the PR's own DESCRIPTION is invisible to this "
+            "script and is not counted above — check there before concluding "
+            "nobody posted one.",
+            "",
             "  An empty \"what was claimed fixed\" section silently turns a "
             "DELTA re-audit into a blind full audit — a different thing, which "
             "would then read as covered. So this is refused, not emitted.",
@@ -868,6 +1312,20 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             "first, full audit with no --round.",
         ]), file=err_stream)
         return 2
+
+    # 🔴 A structural problem that still yielded a usable block must not be
+    # silent either. The refusal above only fires when there is NO block, so a
+    # comment holding one readable block and one unreadable fence would
+    # otherwise pass as complete.
+    if malformed and newest is not None:
+        print(
+            "⚠ the claims text held "
+            f"{len(malformed)} thing(s) this script could not read cleanly:\n  "
+            + "\n  ".join(malformed)
+            + "\n  A block WAS found and is used below — but check that the "
+              "claims it carries are all of them.",
+            file=err_stream,
+        )
 
     prev_sha = newest.audited_to if newest else None
     claims = list(newest.items) if newest else []
@@ -880,16 +1338,30 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             file=err_stream,
         )
 
+    # 🔴 The FOURTH read rule, computed once and used by all three consumers
+    # that were measuring the operator's checkout instead of the PR: the ledger,
+    # the range section, and the `audited=` sha `--emit-claims` stamps.
+    head_check = verify_head_is_the_pr(runner, repo_dir, data.get("headRefOid"))
+
     ledger = None
     base_ref = data.get("baseRefName") or "main"
     base_for_range = f"origin/{base_ref}"
     if args.round_no >= 2 and prev_sha:
-        ledger = measure_ledger(runner, repo_dir, prev_sha, base_for_range)
+        ledger = measure_ledger(
+            runner, repo_dir, prev_sha, base_for_range, head_check
+        )
         anchor = round_one_anchor(blocks)
         if ledger.reason is None and anchor:
-            cum = measure_ledger(runner, repo_dir, anchor, base_for_range)
+            cum = measure_ledger(
+                runner, repo_dir, anchor, base_for_range, head_check
+            )
             if cum.reason is None:
                 ledger = ledger._replace(cumulative=cum.added + cum.deleted)
+            else:
+                # 🔴 Carry the REASON. Dropping it made the brief print one
+                # specific, false cause ("no block carried a round-1 anchor")
+                # for a measurement that failed with an anchor in hand.
+                ledger = ledger._replace(cumulative_reason=cum.reason)
 
     facts = Facts(
         pr=args.pr,
@@ -900,7 +1372,7 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         round_no=args.round_no,
         cwd_repo_dir=repo_dir,
         cwd_repo_slug=cwd_slug,
-        cross_repo=bool(cwd_slug and repo and cwd_slug != repo),
+        repo_relation=repo_relation,
         branch=branch,
         dirty=dirty,
         prev_sha=prev_sha,
@@ -910,22 +1382,10 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         ledger=ledger,
         assembled_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%MZ"),
         claims_source=claims_source,
+        head_check=head_check,
     )
 
     brief = render_brief(facts)
-
-    # ------------------------------------------------------------------ #
-    # REFUSAL 2's opposite number: WARN, never block.
-    # ------------------------------------------------------------------ #
-    gone = missing_clauses(brief)
-    if gone:
-        print(
-            "⚠ the assembled brief is missing invariant clause(s): "
-            + ", ".join(gone)
-            + "\n  This is a WARNING, not a refusal — the brief is still "
-              "emitted. Re-add them by hand, or re-run without --out edits.",
-            file=err_stream,
-        )
 
     if args.out:
         Path(args.out).write_text(brief, encoding="utf-8")
@@ -933,9 +1393,57 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
     else:
         print(brief, file=out_stream)
 
+    # ------------------------------------------------------------------ #
+    # REFUSAL 2's opposite number: WARN, never block.
+    # ------------------------------------------------------------------ #
+    # 🔴 Checked against what is ON DISK when there is a disk copy, not against
+    # the string just built. Checking the in-memory brief could only ever pass:
+    # it was rendered FROM `INVARIANT_CLAUSES` a few lines earlier, so every
+    # clause was present by construction and this warning was unreachable for
+    # any input a user could supply. The read-back also catches a write that
+    # lost bytes. `--check FILE` is the other real input.
+    checked_what, checked_text = "the assembled brief", brief
+    if args.out:
+        try:
+            checked_text = Path(args.out).read_text(encoding="utf-8")
+            checked_what = args.out
+        except OSError as e:
+            print(f"⚠ could not re-read {args.out} to check it: {e}",
+                  file=err_stream)
+    gone = missing_clauses(checked_text)
+    if gone:
+        print(
+            f"⚠ {checked_what} is missing invariant clause(s): "
+            + ", ".join(gone)
+            + "\n  This is a WARNING, not a refusal — the brief is still "
+              "emitted. Re-add them by hand, or re-run without --out edits.",
+            file=err_stream,
+        )
+
     if args.emit_claims:
-        rc, head, _ = runner(["git", "-C", repo_dir, "rev-parse", "--short", "HEAD"])
-        head_sha = head.strip() if rc == 0 and head.strip() else "<HEAD sha>"
+        # 🔴 The PR's OWN head, never the shared checkout's. This sha is what
+        # the NEXT round anchors its range and its ledger on, so stamping the
+        # local HEAD here recorded whatever branch this checkout was standing
+        # on — `main`'s tip, in the reproduction — as the sha this round
+        # audited.
+        head_sha = (data.get("headRefOid") or "")[:8]
+        if not head_sha:
+            head_sha = "<the PR's head sha>"
+            print(
+                "⚠ --emit-claims could not read the PR's head sha "
+                "(`headRefOid`), so the block below carries a PLACEHOLDER. "
+                "Replace it with the sha this round actually audited before "
+                "posting — the next round reads this field and refuses on a "
+                "near-miss.",
+                file=err_stream,
+            )
+        elif not head_check.ok:
+            print(
+                "⚠ --emit-claims stamped the PR's head sha, which is correct — "
+                "but this checkout is NOT standing on it, so re-read the claims "
+                f"you are about to write: {head_check.reason}",
+                file=err_stream,
+            )
         print("\n" + _bar(), file=out_stream)
         print("Paste this into the PR comment for this round, so the NEXT "
               "round can read it:\n", file=out_stream)
