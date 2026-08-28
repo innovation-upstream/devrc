@@ -6044,3 +6044,208 @@ class TestTheSearchReportCaveat:
         # …but the contract still ships.
         assert "RECALL, NOT LIVE OBSERVATION" in text
         assert "NOT that nothing is open" in text
+
+
+# =============================================================================
+# THE READER COVERS ONE HOST'S STORE, AND MUST SAY WHICH
+# =============================================================================
+#
+# 🔴 SAME DEFECT AS THE WRITER'S, SAME MEASUREMENT (2026-08-27): the store under
+# `~/.claude/analyze-service-index/` is PER-HOST with no replication — workbench
+# 115 entries / 14 scopes, laptop 33 / 11, exactly ONE entry name in common
+# across the four scopes both machines have, seven scopes only on the laptop and
+# ten only on the workbench. `scope-absent` therefore reports one disk, and the
+# old wording ("the store has no `<scope>/` directory") stated it as the fleet's.
+#
+# The guards pin WHOLE NORMALISED STRINGS: prose is walkable by rewording, and
+# the half that mattered — "no other host was consulted, and it may hold this" —
+# is exactly the half a keyword guard would let a reword delete.
+#
+# The host is INJECTED at `subsystem_touch.this_host`, the single call site of
+# `host_identity.this_host` shared by both modules. That the reader moves when
+# the WRITER's seam is patched is not incidental; it is the property being
+# asserted, and `claude/RULES.md` → "verified in isolation is the new vacuous
+# green" is why it gets its own test rather than being assumed.
+
+FIXTURE_HOST = "fixture-host-0123456789abcdef0123456789abcdef"
+
+PER_HOST_CLAUSE = (
+    "the store is PER-HOST and unreplicated; this run read THIS machine's disk "
+    "and consulted no other"
+)
+
+
+def _norm(text: str) -> str:
+    """Whitespace-collapsed, so a rewrap is not a failure but a REWORD is."""
+    return " ".join(text.split())
+
+
+@pytest.fixture()
+def pinned_host(monkeypatch):
+    """One seam, both modules. `raising=False` so a tree without the seam fails
+    these guards on their ASSERTION rather than during setup."""
+    monkeypatch.setattr(st, "this_host", lambda: FIXTURE_HOST, raising=False)
+    return FIXTURE_HOST
+
+
+class TestTheRecallCoversOneHostsStore:
+
+    EXPECTED_HOST_LINE = _norm(f"host: {FIXTURE_HOST} ({PER_HOST_CLAUSE})")
+
+    EXPECTED_RECALL_ABSENT = _norm(
+        f"NOTHING RECORDED YET ON THIS HOST — {FIXTURE_HOST}'s store has no "
+        f"`never-indexed/` directory. This is the ordinary case in most repos (the "
+        f"store is young and its scopes are few), NOT an error and NOT an absence "
+        f"of drift: nothing was checked, so nothing can be concluded from it. Carry "
+        f"on with the resume and say plainly that the index had nothing for this "
+        f"repo ON THIS MACHINE."
+    )
+
+    EXPECTED_SEARCH_ABSENT = _norm(
+        f"NOTHING RECORDED YET ON THIS HOST — {FIXTURE_HOST}'s store has no "
+        f"`never-indexed/` directory, so the query was never run. This is NOT 'no "
+        f"matches': nothing was searched, so nothing can be concluded from it."
+    )
+
+    EXPECTED_NOT_THE_FLEET = _norm(
+        f"NOT A FACT ABOUT THE FLEET — {PER_HOST_CLAUSE}. The other host keeps a "
+        f"DIFFERENT store, not a copy, and it may hold `never-indexed/`."
+    )
+
+    EXPECTED_CAVEAT_CLAUSE = (
+        "This store is PER-HOST and unreplicated, so this window also CANNOT see "
+        "any scope or entry that exists only on the OTHER machine — nothing here "
+        "consulted it, and an absence below is an absence HERE."
+    )
+
+    def test_recall_scope_absent_is_qualified_to_this_host(
+        self, store: Path, pinned_host: str
+    ) -> None:
+        """🔴 THE REGRESSION GUARD on the reader. `scope-absent` is the status
+        `/resume` reports as an ordinary non-finding; stating it of "the store"
+        turns one machine's gap into a claim that nobody has ever recorded the
+        repo. Measured false 2026-08-27."""
+        report = rc.recall(store, "never-indexed")
+        assert report.status == "scope-absent", "the fixture must reach the branch"
+        lines = [_norm(ln) for ln in rc.render_text(report).splitlines()]
+        assert self.EXPECTED_RECALL_ABSENT in lines, (
+            "the recall `scope-absent` verdict is not the pinned sentence.\n"
+            f"  expected: {self.EXPECTED_RECALL_ABSENT}\n"
+            "It must name THIS HOST; 'the store' names a thing that does not exist."
+        )
+        assert self.EXPECTED_NOT_THE_FLEET in lines, (
+            "the recall `scope-absent` verdict no longer says no other host was "
+            "consulted and that the other machine may hold the scope.\n"
+            f"  expected: {self.EXPECTED_NOT_THE_FLEET}"
+        )
+
+    def test_search_scope_absent_is_qualified_to_this_host(
+        self, store: Path, pinned_host: str
+    ) -> None:
+        """The second surface. A reject rendered only where somebody remembered
+        is a reject that will be missed on the path they did not — the module's
+        own rule, applied to its own prose."""
+        report = rc.search(store, "never-indexed", "compaction")
+        assert report.status == "scope-absent", "the fixture must reach the branch"
+        lines = [_norm(ln) for ln in rc.render_search(report).splitlines()]
+        assert self.EXPECTED_SEARCH_ABSENT in lines, (
+            "the search `scope-absent` verdict is not the pinned sentence.\n"
+            f"  expected: {self.EXPECTED_SEARCH_ABSENT}"
+        )
+        assert self.EXPECTED_NOT_THE_FLEET in lines, (
+            f"expected: {self.EXPECTED_NOT_THE_FLEET}"
+        )
+
+    def test_the_known_scopes_line_says_WHOSE_store_holds_them(
+        self, store: Path, pinned_host: str
+    ) -> None:
+        """`scopes the store does hold: …` was the same conflation in miniature —
+        it enumerated one disk under a name that reads as the fleet's."""
+        for text in (
+            rc.render_text(rc.recall(store, "never-indexed")),
+            rc.render_search(rc.search(store, "never-indexed", "compaction")),
+        ):
+            lines = [_norm(ln) for ln in text.splitlines()]
+            assert any(
+                ln.startswith("scopes THIS HOST's store holds:") for ln in lines
+            ), text
+
+    def test_both_reader_surfaces_carry_the_host_header(
+        self, store: Path, pinned_host: str
+    ) -> None:
+        """Directly under `store:`, in the writer's spelling, on both renderers."""
+        for name, text in (
+            ("render_text", rc.render_text(rc.recall(store, SCOPE))),
+            ("render_search", rc.render_search(rc.search(store, SCOPE, "collector"))),
+        ):
+            lines = [_norm(ln) for ln in text.splitlines()]
+            store_at = next(
+                (i for i, ln in enumerate(lines) if ln.startswith("store: ")), None
+            )
+            assert store_at is not None, f"{name} printed no `store:` header at all"
+            following = lines[store_at + 1] if store_at + 1 < len(lines) else "<end>"
+            assert following == self.EXPECTED_HOST_LINE, (
+                f"{name} does not print the host line directly under `store:`.\n"
+                f"  expected: {self.EXPECTED_HOST_LINE}\n"
+                f"  got:      {following!r}"
+            )
+
+    def test_the_caveat_names_the_other_machine_as_something_it_CANNOT_see(
+        self,
+    ) -> None:
+        """🔴 THE CAVEAT IS THE ONE BLOCK PRINTED ON EVERY STATUS, INCLUDING THE
+        ONES THAT SURFACE ENTRIES. `scope-absent` is not the only place the
+        boundary matters: a `recalled` run showing three entries is ALSO silent
+        about a fourth that lives on the other machine, and only the caveat
+        speaks on that path."""
+        text = rc.caveat_text("example-scope/", frozenset())
+        assert self.EXPECTED_CAVEAT_CLAUSE in text, (
+            "the reader's caveat no longer states the per-host boundary.\n"
+            f"  expected: {self.EXPECTED_CAVEAT_CLAUSE}\n"
+            "It lists what this window CANNOT see; the other host's store is on "
+            "that list and is the only item nothing else in the output mentions."
+        )
+        assert "in THIS HOST's store" in text, (
+            "the CANNOT-see list still says 'in this store', which reads as one "
+            "store for the fleet."
+        )
+
+    def test_the_json_reports_carry_the_host(
+        self, store: Path, pinned_host: str
+    ) -> None:
+        assert rc.report_json(rc.recall(store, SCOPE))["store_host"] == FIXTURE_HOST
+        assert (
+            rc.search_json(rc.search(store, SCOPE, "collector"))["store_host"]
+            == FIXTURE_HOST
+        )
+
+    def test_ONE_SEAM_moves_the_reader_and_the_writer_together(
+        self, store: Path, pinned_host: str
+    ) -> None:
+        """🔴 THE SEAM GUARD, and it is not decoration. `claude/RULES.md`: two
+        components each hermetically tested can still be broken TOGETHER, because
+        every test was scoped to one surface. The reader and the writer describe
+        the SAME directory, so they must derive "whose disk is this" from ONE
+        place — `subsystem_touch.store_host`, whose body is the only call of
+        `host_identity.this_host` in either module.
+
+        This asserts the RELATIONSHIP, not a component: patching the writer's seam
+        must move the reader's output too. If the reader ever re-imports
+        `this_host` directly, this goes red while every other guard here stays
+        green, because they all patch the same name.
+        """
+        assert st.store_host() == FIXTURE_HOST
+        assert rc.store_host is st.store_host, (
+            "subsystem_recall no longer shares subsystem_touch's `store_host`. "
+            "Two derivations of the host WILL disagree the first time one is "
+            "edited, and this test is the only thing that sees it."
+        )
+        assert FIXTURE_HOST in rc.render_text(rc.recall(store, "never-indexed"))
+        assert FIXTURE_HOST in st.render_text(
+            st.build_report(
+                st.caller_supplied(["apps/roster/a.yaml", "apps/roster/b.yaml"]),
+                store,
+                "brand-new-repo",
+                today="2026-08-11",
+            )
+        )

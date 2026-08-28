@@ -107,7 +107,6 @@ import hashlib
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -144,6 +143,16 @@ except ImportError as _exc:  # pragma: no cover - a deployment fault, not a code
         f"the strip would bundle and upload somebody else's history under a "
         f"green timer."
     ) from _exc
+
+# 🔴 "WHICH MACHINE AM I" HAS ONE OWNER. Same reasoning as the ledger above and
+# the same mount (`%h/workspace/devrc/scripts` is bound read-only, so `lib/` is
+# on disk beside `testlib/` in every environment that runs this), so the import
+# is a hard failure too rather than a fallback that would let the two hosts share
+# a key prefix and evict each other's backups.
+_LIB_DIR = _SCRIPTS_DIR / "lib"
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
+import host_identity as _host_identity  # noqa: E402
 
 PROG = "analyze-service-index-backup"
 
@@ -1004,19 +1013,14 @@ def prune(uploader, prefix: str, keep: int, just_uploaded: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 # naming
 # --------------------------------------------------------------------------- #
-def host_label() -> str:
-    """Which machine this store came from.
-
-    🔴 Both machines are hostname `nixos` (see MEMORY.md / SECRETS.md), and the
-    two stores are DIVERGENT content. Without a distinct label per host they
-    would share a key prefix and silently evict each other under retention —
-    turning the backup into a second way to lose the data.
-    """
-    for var in ("ASIB_HOST", "ACTIVITY_HOST"):
-        v = os.environ.get(var)
-        if v and v.strip():
-            return re.sub(r"[^A-Za-z0-9._-]", "-", v.strip())
-    return re.sub(r"[^A-Za-z0-9._-]", "-", socket.gethostname() or "unknown")
+# 🔴 `host_label` LIVES IN `scripts/lib/host_identity.py` AND IS RE-EXPORTED HERE.
+# It is no longer only the backup's concern: the /analyze-service reader and
+# writer print the same identity in their headers, because their store is the
+# same per-host, unreplicated directory this file bundles. A second copy of "which
+# machine am I" would drift from this one and be wrong in one of the two places
+# — claude/RULES.md → "One rule, one place". `B.host_label()` keeps working for
+# `restore-verify.py` and `escrow-verify.py`; only the implementation moved.
+host_label = _host_identity.host_label
 
 
 def object_key(host: str, scope: str, when: datetime) -> str:
