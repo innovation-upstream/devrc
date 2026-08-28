@@ -296,6 +296,15 @@ from subsystem_resolver import (  # noqa: E402
 from git_mainline import FALLBACK_BASE_REFS  # noqa: E402
 from git_mainline import resolve_base_ref as _resolve_mainline_ref  # noqa: E402
 
+# 🔴 ONE RULE, ONE PLACE — "which MACHINE's store is this?". The store under
+# `~/.claude/analyze-service-index/` is PER-HOST and unreplicated; measured
+# 2026-08-27 the workbench held 115 entries / 14 scopes and the laptop 33 / 11,
+# with exactly ONE entry name in common across the four scopes both machines
+# have. Every verdict this module prints is therefore a fact about ONE disk, and
+# `host_identity` is what makes the output say so. Same owner as
+# `analyze-service-index/backup.py`, which keys its objects by it.
+from host_identity import this_host  # noqa: E402
+
 __all__ = [
     "WRITER_ID",
     "DEFAULT_STORE_ROOT",
@@ -383,6 +392,9 @@ __all__ = [
     "commit_window_range",
     "escalate_to_commit_window",
     "render_window_escalation",
+    "STORE_IS_PER_HOST",
+    "store_host",
+    "store_host_line",
     "render_text",
     "report_json",
     "new_entry_template",
@@ -4262,11 +4274,49 @@ def render_window_escalation(
     return out
 
 
+#: The ONE sentence naming whose disk was read. Shared by every surface in this
+#: module AND by `subsystem_recall`, which imports it — a header spelled at four
+#: sites is a header that will say four different things, and this one carries a
+#: claim about scope that must not vary between the reader and the writer.
+STORE_IS_PER_HOST = (
+    "the store is PER-HOST and unreplicated; this run read THIS machine's disk "
+    "and consulted no other"
+)
+
+
+def store_host() -> str:
+    """THIS machine's identity — the ONE call site of `host_identity.this_host`.
+
+    🔴 A SINGLE SEAM FOR BOTH MODULES. `subsystem_recall` imports THIS function
+    rather than `this_host` itself, so the name is looked up in this module's
+    globals wherever it is called from: one injection point makes the reader and
+    the writer agree, and a test that needs byte-stable output patches one thing
+    instead of two that can drift apart.
+    """
+    return this_host()
+
+
+def store_host_line(indent: str = "  ") -> str:
+    """`host: <id>  (<the per-host caveat>)` — printed under every `store:` line.
+
+    🔴 WITHOUT THIS THE OUTPUT STATES ONE DISK AS A FACT ABOUT THE FLEET. Measured
+    2026-08-27: the workbench store held 115 entries across 14 scopes, the laptop
+    33 across 11; of the four scope names present on both machines the workbench
+    held 104 entries and the laptop 10, with exactly ONE entry name in common,
+    and seven scopes existed ONLY on the laptop. Nothing syncs them. A verdict
+    printed without naming the host is therefore not a smaller claim than the
+    truth — it is a different, false one.
+    """
+    return f"{indent}host: {store_host()}  ({STORE_IS_PER_HOST})"
+
+
 def render_text(report: TouchReport) -> str:
     """The agent-facing brief.
 
-    Deterministic in the REPORT: same report in, same bytes out — with one
-    documented exception. On a dead end the `SKILL HOMES` block reads the host's
+    Deterministic in the REPORT: same report in, same bytes out — with TWO
+    documented exceptions. The second is `store_host_line`, which reads THIS
+    machine's identity: that is the point of it, and a test that needs byte
+    stability injects `this_host`. On a dead end the `SKILL HOMES` block reads the host's
     `~/.claude/skills`, so its rows vary with what is deployed there. That makes
     the two tiers differ by construction: `flake.nix` exports `HOME=$TMPDIR/home`
     for the sandbox and nothing creates `.claude/skills` in it, so CI always
@@ -4278,6 +4328,7 @@ def render_text(report: TouchReport) -> str:
     out: list[str] = []
     out.append(f"subsystem-touch: status={report.status} scope={report.scope}")
     out.append(f"  store: {report.store_root}")
+    out.append(store_host_line())
     # 🔴 NAMED, NEVER ASSUMED. The write half of this step is told to read the
     # governing README first; printing WHICH file that is makes the instruction
     # followable in the 4-of-5 scopes that have no README of their own, and makes
@@ -4321,10 +4372,23 @@ def render_text(report: TouchReport) -> str:
 
     if report.status == "scope-absent":
         out.append("")
+        # 🔴 "ABSENT HERE" IS NOT "ABSENT ANYWHERE", and the old wording said the
+        # second. MEASURED 2026-08-27: a workbench run probing `vetr-app` printed
+        # `the store has no vetr-app/ directory yet … the FIRST-ENTRY case` while
+        # a `vetr-app` scope with four entries existed ON THE LAPTOP. The status
+        # was right for this disk; the SENTENCE was a claim about a store that
+        # does not exist as one thing.
         out.append(
-            f"SCOPE ABSENT — the store has no `{report.scope}/` directory yet. Every "
-            f"path below is unresolved because there is nothing to resolve against; "
-            f"this is the FIRST-ENTRY case, not a miss."
+            f"SCOPE ABSENT — THIS HOST's store ({store_host()}) has no "
+            f"`{report.scope}/` directory yet. Every path below is unresolved "
+            f"because there is nothing HERE to resolve against; this is the "
+            f"FIRST-ENTRY case FOR THIS HOST, not a miss."
+        )
+        out.append(
+            f"  NOT A FACT ABOUT THE FLEET — {STORE_IS_PER_HOST}. The other host "
+            f"keeps a DIFFERENT store, not a copy, and it may already hold "
+            f"`{report.scope}/`. Nothing is lost by writing a first entry here; "
+            f"just do not report this scope as unrecorded everywhere."
         )
 
     if report.known:
@@ -4513,6 +4577,10 @@ def report_json(report: TouchReport) -> dict:
         "status": report.status,
         "scope": report.scope,
         "store_root": report.store_root,
+        # WHOSE disk `store_root` names. The path is identical on both machines
+        # and the contents are not, so a consumer that logged `store_root` alone
+        # could never tell two hosts' reports apart.
+        "store_host": store_host(),
         "today": report.today,
         "min_paths": report.min_paths,
         "writer_id": WRITER_ID,
@@ -5437,6 +5505,7 @@ def render_validation(report: ValidationReport) -> str:
     out = [
         f"subsystem-touch validate: {report.target}",
         f"  store: {report.store_root}",
+        store_host_line(),
         f"  policy: {report.policy_path or '(none)'}  ({report.policy_basis})",
     ]
     if not report.checked:

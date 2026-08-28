@@ -31,6 +31,7 @@ COPY scripts/lib/subsystem_recall.py   /app/scripts/lib/
 COPY scripts/lib/subsystem_resolver.py /app/scripts/lib/
 COPY scripts/lib/subsystem_touch.py    /app/scripts/lib/
 COPY scripts/lib/git_mainline.py       /app/scripts/lib/
+COPY scripts/lib/host_identity.py      /app/scripts/lib/
 COPY scripts/subsystem-store-api/server.py /app/scripts/subsystem-store-api/
 
 # `subsystem_touch` evaluates `DEFAULT_STORE_ROOT = Path.home() / ".claude" / …`

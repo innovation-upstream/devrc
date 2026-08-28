@@ -176,9 +176,16 @@ CONTRACT SUMMARY
 that mean different things. `RecallReport.status` names which, in values that
 share no spelling:
 
-    "scope-absent"    the store has no `<scope>/` directory — NOTHING RECORDED
-                      YET. The ordinary case in most repos (the store holds 2
-                      scopes; work spans ~12 repos) and NOT an error.
+    "scope-absent"    THIS HOST's store has no `<scope>/` directory — NOTHING
+                      RECORDED YET, HERE. The ordinary case in most repos (the
+                      store holds few scopes; work spans ~12 repos) and NOT an
+                      error. 🔴 IT IS ALSO NOT A FACT ABOUT THE FLEET: the store
+                      is per-host and nothing replicates it, so the OTHER machine
+                      may hold that scope with entries in it. Measured
+                      2026-08-27 — workbench 115 entries / 14 scopes, laptop
+                      33 / 11, seven scopes on the laptop alone and ten on the
+                      workbench alone. Every renderer says so; do not report
+                      this status as "unrecorded" without saying "on this host".
     "scope-empty"     `<scope>/` exists and holds no entries. Also nothing
                       recorded yet, by a DIFFERENT mechanism — someone made the
                       directory. Kept apart on purpose: collapsing them would
@@ -283,10 +290,18 @@ from subsystem_resolver import (  # noqa: E402
 from subsystem_resolver import extract_sections as _extract_sections  # noqa: E402
 from subsystem_touch import (  # noqa: E402
     DEFAULT_STORE_ROOT,
+    STORE_IS_PER_HOST,
     StoreMissingError,
     TouchError,
     scope_for_repo,
+    store_host,
+    store_host_line,
 )
+# 🔴 THE PER-HOST HEADER IS THE WRITER'S SPELLING, IMPORTED, NOT RE-TYPED — and
+# `store_host` rather than `host_identity.this_host` for the same reason. The
+# reader and the writer describe the SAME directory; two spellings of "whose disk
+# is this" would disagree the first time one of them was edited, and this is a
+# claim about the SCOPE of every verdict below it. One seam, in `subsystem_touch`.
 
 __all__ = [
     "RECALL_LABEL",
@@ -677,9 +692,12 @@ def caveat_text(scope: str, badges: "frozenset[str] | None" = None) -> str:
         f"done, and an entry is exactly as fresh as the last time someone pruned it "
         f"(prune-on-resolve is manual), so a bullet may describe a gotcha already "
         f"fixed. This window CANNOT see: live state of any kind, any repo whose scope "
-        f"has no directory in this store, and any work neither `/analyze-service` nor "
+        f"has no directory in THIS HOST's store, and any work neither `/analyze-service` nor "
         f"`/handoff` ever recorded. Treat every line as a POINTER to verify, never as "
-        f"a current reading. `🔴 N OPEN` on an index row means N bullets DECLARE "
+        f"a current reading. This store is PER-HOST and unreplicated, so this window "
+        f"also CANNOT see any scope or entry that exists only on the OTHER machine — "
+        f"nothing here consulted it, and an absence below is an absence HERE. "
+        f"`🔴 N OPEN` on an index row means N bullets DECLARE "
         f"unfinished business — re-check each against the repo, because a remedy that "
         f"has since landed reads exactly like one that has not; the absence of that "
         f"marker means nothing was declared, NOT that nothing is open."
@@ -730,8 +748,9 @@ def render_malformed(
     🔴 ONE RENDERER, PRINTED ON EVERY STATUS BY BOTH SURFACES, IMMEDIATELY AFTER
     THE CAVEAT. Not a footer and not a branch: a reject that renders only on the
     paths somebody remembered is a reject that will be missed on the path they
-    did not, and `scope-absent` — the most common status in most repos — is
-    exactly where a store-wide defect would otherwise never be mentioned.
+    did not, and `scope-absent` — the most common status in most repos, and a
+    statement about THIS HOST's store only — is exactly where a store-wide defect
+    would otherwise never be mentioned.
 
     `elsewhere` is a COUNT with its scopes named, never full rows. A reader is
     scope-scoped, so a broken entry in a scope nobody recalls today is invisible
@@ -1861,10 +1880,16 @@ def _render_listing(report: RecallReport) -> list[str]:
 
 
 def render_text(report: RecallReport) -> str:
-    """The agent-facing recall block. Deterministic: same report in, same bytes out."""
+    """The agent-facing recall block.
+
+    Deterministic in the REPORT with ONE exception: `store_host_line` reads THIS
+    machine's identity, which is the entire point of it — a recall that does not
+    name whose disk it read states one host's store as the fleet's.
+    """
     out: list[str] = [
         f"subsystem-recall: status={report.status} scope={report.scope}",
         f"  store: {report.store_root}",
+        store_host_line(),
         f"  caveat: {report.caveat}",
     ]
 
@@ -1883,13 +1908,25 @@ def render_text(report: RecallReport) -> str:
     if report.status == "scope-absent":
         out.append("")
         out.append(
-            f"NOTHING RECORDED YET — the store has no `{report.scope}/` directory. This is "
-            f"the ordinary case in most repos (the store is young and its scopes are "
-            f"few), NOT an error and NOT an absence of drift: nothing was checked, so "
-            f"nothing can be concluded from it. Carry on with the resume and say plainly "
-            f"that the index had nothing for this repo."
+            f"NOTHING RECORDED YET ON THIS HOST — {store_host()}'s store has no "
+            f"`{report.scope}/` directory. This is the ordinary case in most repos "
+            f"(the store is young and its scopes are few), NOT an error and NOT an "
+            f"absence of drift: nothing was checked, so nothing can be concluded from "
+            f"it. Carry on with the resume and say plainly that the index had nothing "
+            f"for this repo ON THIS MACHINE."
         )
-        out.append(f"  scopes the store does hold: {', '.join(report.known_scopes) or '(none)'}")
+        # 🔴 THE SECOND SENTENCE IS THE ONE THE OLD WORDING LACKED. "The store"
+        # reads as one thing; it is two. Measured 2026-08-27: seven scopes existed
+        # only on the laptop and ten only on the workbench, so "not recorded" is
+        # routinely false of the fleet while true of the disk that was read.
+        out.append(
+            f"  NOT A FACT ABOUT THE FLEET — {STORE_IS_PER_HOST}. The other host keeps "
+            f"a DIFFERENT store, not a copy, and it may hold `{report.scope}/`."
+        )
+        out.append(
+            f"  scopes THIS HOST's store holds: "
+            f"{', '.join(report.known_scopes) or '(none)'}"
+        )
         return "\n".join(out)
 
     if report.status == "scope-empty":
@@ -2113,6 +2150,9 @@ def report_json(report: RecallReport) -> dict:
         "status": report.status,
         "scope": report.scope,
         "store_root": report.store_root,
+        # WHOSE disk. The path is identical on both machines and the contents are
+        # not, so `store_root` alone cannot tell two hosts' reports apart.
+        "store_host": store_host(),
         "label": RECALL_LABEL,
         "caveat": report.caveat,
         "ref": report.ref,
@@ -2734,6 +2774,7 @@ def render_search(report: SearchReport) -> str:
         f"subsystem-recall: status={report.status} scope={report.scope} "
         f"query={report.query!r} threshold={report.threshold:.2f} context={ctx}",
         f"  store: {report.store_root}",
+        store_host_line(),
         f"  caveat: {report.caveat}",
     ]
 
@@ -2752,11 +2793,18 @@ def render_search(report: SearchReport) -> str:
     if report.status == "scope-absent":
         out.append("")
         out.append(
-            f"NOTHING RECORDED YET — the store has no `{report.scope}/` directory, so the "
-            f"query was never run. This is NOT 'no matches': nothing was searched, so "
-            f"nothing can be concluded from it."
+            f"NOTHING RECORDED YET ON THIS HOST — {store_host()}'s store has no "
+            f"`{report.scope}/` directory, so the query was never run. This is NOT "
+            f"'no matches': nothing was searched, so nothing can be concluded from it."
         )
-        out.append(f"  scopes the store does hold: {', '.join(report.known_scopes) or '(none)'}")
+        out.append(
+            f"  NOT A FACT ABOUT THE FLEET — {STORE_IS_PER_HOST}. The other host keeps "
+            f"a DIFFERENT store, not a copy, and it may hold `{report.scope}/`."
+        )
+        out.append(
+            f"  scopes THIS HOST's store holds: "
+            f"{', '.join(report.known_scopes) or '(none)'}"
+        )
         return "\n".join(out)
 
     scanned = (
@@ -2813,6 +2861,9 @@ def search_json(report: SearchReport) -> dict:
         "status": report.status,
         "scope": report.scope,
         "store_root": report.store_root,
+        # WHOSE disk. The path is identical on both machines and the contents are
+        # not, so `store_root` alone cannot tell two hosts' reports apart.
+        "store_host": store_host(),
         "label": RECALL_LABEL,
         "caveat": report.caveat,
         "query": report.query,

@@ -2737,10 +2737,19 @@ def _transplant(root: Path, with_ledger: bool) -> Path:
     Same depth matters: the producer resolves the ledger as
     `Path(__file__).resolve().parents[1] / "testlib"`, so the copy has to sit
     one level under a scripts-like root for either outcome to mean anything.
+
+    🔴 `lib/host_identity.py` GOES IN ON BOTH ARMS, ALWAYS. It is the producer's
+    OTHER hard import (the one owner of `host_label`, shared with the
+    /analyze-service reader and writer), and it is deliberately NOT the variable
+    under test here: omitting it from the `with_ledger=True` arm would make the
+    control fail for the wrong reason and quietly turn the pair below into a
+    measurement of the transplant rather than of the pointer ledger.
     """
     area = root / "analyze-service-index"
     area.mkdir(parents=True)
     shutil.copy(SCRIPT, area / SCRIPT.name)
+    (root / "lib").mkdir(parents=True, exist_ok=True)
+    shutil.copy(SCRIPTS / "lib" / "host_identity.py", root / "lib" / "host_identity.py")
     if with_ledger:
         shutil.copytree(SCRIPTS / "testlib", root / "testlib")
     return area / SCRIPT.name
