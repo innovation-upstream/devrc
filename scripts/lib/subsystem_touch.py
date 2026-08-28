@@ -1062,12 +1062,22 @@ def repo_path_missing_message(
     lead = "repo path does not exist" if not Path(resolved_s).exists() else (
         "repo path is not a directory"
     )
-    head = (
-        f"{lead}: '{resolved_s}'."
-        if given_s == resolved_s
-        else f"{lead}: '{given_s}' → '{resolved_s}' "
-        f"(a bare name is resolved against the current directory)."
-    )
+    # 🔴 THE PARENTHETICAL IS ABOUT A *RELATIVE* INPUT — not about the two
+    # strings merely differing. They also differ when an ABSOLUTE path resolves
+    # through a SYMLINK: measured on NixOS, `--repo /etc/hostname` resolves to
+    # `/nix/store/…-etc-hostname`, and telling that caller their absolute path
+    # "is resolved against the current directory" is a false statement in the
+    # one message whose entire job is to be accurate about their mistake.
+    joined_from_cwd = not Path(given_s).is_absolute()
+    if given_s == resolved_s:
+        head = f"{lead}: '{resolved_s}'."
+    elif joined_from_cwd:
+        head = (
+            f"{lead}: '{given_s}' → '{resolved_s}' "
+            f"(a bare name is resolved against the current directory)."
+        )
+    else:
+        head = f"{lead}: '{given_s}' → '{resolved_s}'."
     remedy = (
         f"--repo takes a PATH, not a repo NAME. Pass an absolute path, one of the "
         f"pre-exported handles ({', '.join(REPO_PATH_HANDLES)}), or --scope <name>, "

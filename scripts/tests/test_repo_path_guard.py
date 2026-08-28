@@ -179,6 +179,43 @@ class TestTheRefusalNamesTheMistake:
             f"not-there` would not help either."
         )
 
+    def test_an_ABSOLUTE_path_that_RESOLVES_ELSEWHERE_still_drops_the_clause(
+        self, tmp_path: Path, store: Path, cwd: Path, capsys
+    ) -> None:
+        """🔴 THE SIBLING GUARD ABOVE IS NARROWER THAN ITS NAME, and this is the
+        gap it leaves.
+
+        It passes a path that does not exist, so `resolve()` returns it unchanged
+        and `given == resolved` — the clause is dropped by the equality branch,
+        not because the path was absolute. An absolute path that resolves
+        SOMEWHERE ELSE takes the other branch entirely.
+
+        MEASURED on NixOS: `--repo /etc/hostname` resolves to
+        `/nix/store/…-etc-hostname`, and the shipped message told that caller
+        their absolute path "is resolved against the current directory" — a false
+        explanation of a real failure, in the one message whose whole job is to
+        name the mistake correctly. The predicate was "the two strings differ";
+        it had to be "the input was relative".
+        """
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        given = link / "missing"
+        assert given.is_absolute()
+        code = rc.main(["--repo", str(given), "--store", str(store)])
+        err = capsys.readouterr().err.strip()
+        assert code == 3
+        assert str(given) != str(given.resolve()), (
+            "fixture is not exercising the branch it exists for — the symlink "
+            "did not make `resolve()` differ from the input"
+        )
+        assert "→" in err, "the arrow should still show where the path landed"
+        assert "current directory" not in err, (
+            "an ABSOLUTE path was blamed on the current directory. The two "
+            "strings differ here because of a SYMLINK, not a cwd-join."
+        )
+
     def test_a_path_that_EXISTS_AS_A_FILE_is_not_reported_as_absent(
         self, tmp_path: Path, store: Path, cwd: Path, capsys
     ) -> None:
