@@ -256,19 +256,40 @@ the browser-bridge and fixed at the source each time.
      `server.py` had already written it down verbatim: *"deterministically ORPHANING
      the live first tab. Nothing reclaims it; only a human closes it."*
 
-   So: `open` now **reaps** that orphan — timeout arm only, after the replacement
-   exists, fire-and-forget, and **only while the op is still alive**. That last clause
-   was NOT in the first draft; a blind audit found the tail, and it was reproduced
-   before being fixed: `execute()` races the op but cannot cancel it, so a merely SLOW
-   `chrome.tabs.create` resumes `open` after `op_timeout:open` has already been
-   answered — and on that path the server KEEPS ownership of a tab that is still live,
-   so a late reap destroys it and strands the session on a dead id.
+   So the orphan is now **reclaimed** — and 🔴 **WHERE that happens took three
+   rounds and two wrong answers, which is the durable lesson here.** Drafts 1 and 2
+   had the EXTENSION close the tab; both were wrong the same way. **Reclaiming is
+   correct only if the `open` result is DELIVERED** — if it is not, the old tab is not
+   an orphan at all: the ownership record still names it, it is still live, and closing
+   it strands the session on a dead id and then, one op later, on the operator's ACTIVE
+   tab. The extension cannot know, because **TWO parties abandon an op on TWO clocks
+   and neither is visible from inside it**:
+   - `execute()` RACES the op against `EXEC_OP_BUDGET_MS` and cannot cancel it, so a
+     merely SLOW `chrome.tabs.create` resumes `open` after `op_timeout:open` was
+     already answered. Found by a blind audit, **reproduced before fixing** (execMs 80,
+     hung `tabs.get`, create at 300 ms → `tabsRemove []` at return, `[5]` 600 ms later);
+   - the SUBMITTER gives up at its own `cmd_timeout`, which starts at **SUBMIT**, so
+     queue time is structurally invisible extension-side (`server.py`: *"The SUBMITTER
+     giving up … does NOT free the extension"*). Found by the DELTA audit of the fix
+     for the first — an elapsed-time guard in the extension closed one and could not
+     close the other.
+
+   Final shape: the extension **reports** `orphanTabId` and closes nothing; the server
+   closes it in `_record_ownership_locked`, which by construction runs only on a
+   delivered result. That deleted the elapsed guard, its `startedAt` stamp, and a
+   fixture problem along with it — **the party that knows should decide.**
+   🔴 **NEW HAZARD THIS CREATED, and it is disclosed rather than fixed**: parallel
+   agents can derive the SAME session id and share one owned tab (observed
+   2026-07-31, recorded in `scripts/browser-bridge/reference/tabs-instances.md`). A
+   re-`open` by one sibling whose probe times out now closes the tab the OTHER is
+   mid-workflow on. Previously that collision was benign.
    🔴 **What is still open and deliberately out of scope**: the OTHER orphan. A
-   `chrome.tabs.create` that hangs and never settles is killed at
+   `chrome.tabs.create` that hangs and NEVER settles is killed at
    `EXEC_OP_BUDGET_MS` while the abandoned create later produces a tab `open` never
-   sees. Closing it needs the choke point to signal abandonment back into the op, which
-   it has no mechanism for. **If you pick that up, it is a choke-point change, not
-   another budget constant** — re-read `execute()`'s narrow-exception rule first.
+   sees — so there is nothing to report. Closing it needs the choke point to signal
+   abandonment back into the op, which it has no mechanism for. **If you pick that up,
+   it is a choke-point change, not another budget constant** — re-read `execute()`'s
+   narrow-exception rule first.
 5. **Removing app-capture's raise** — `civitai/talos-infra`. 🔴 **PREMISE CHANGED**: the
    raise is not inert, only its i3 half is withheld. Re-scope before working it.
 6. **clawgate #358** — filed earlier, picked up by a different session. Not ours; live

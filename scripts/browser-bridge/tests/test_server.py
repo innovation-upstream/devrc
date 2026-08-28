@@ -617,6 +617,14 @@ class FakeExtension(threading.Thread):
                 envelope = {"id": cmd["id"], "ok": False,
                             "error": data["__error__"],
                             "instanceId": self.instance_id}
+                # A real extension can attach a payload to a FAILURE envelope, and
+                # a test needs to model that to prove the server ignores it: any
+                # OTHER key alongside `__error__` becomes `data`. Without this the
+                # "a failed op must not act on data" mutants are unreachable —
+                # `data` is simply absent, so they pass for the wrong reason.
+                extra = {k: v for k, v in data.items() if k != "__error__"}
+                if extra:
+                    envelope["data"] = extra
             else:
                 envelope = {"id": cmd["id"], "ok": True, "data": data,
                             "instanceId": self.instance_id}
@@ -9497,3 +9505,273 @@ def test_net_outranks_is_strict_at_the_boundary():
     assert _net_outranks(181, 180)
     assert not _net_outranks(180, 180), "a tie must not count as outranking"
     assert not _net_outranks(179, 180)
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE ORPHAN REAP IS THE SERVER'S JOB, AND "WE GOT HERE" IS THE WHOLE REASON.
+#
+# When the extension's reuse probe exceeds REUSE_TAB_BUDGET_MS it falls through to
+# a FRESH tab and REPORTS the tabId it thereby orphaned (`orphanTabId`). It does
+# not close it. `_record_ownership_locked` does — and it can, because it runs ONLY
+# on a delivered result.
+#
+# Why that structural fact is load-bearing rather than incidental: reclaiming is
+# correct only if the result IS delivered. If it is not, the old tab is not an
+# orphan at all — the ownership record still names it, it is still live — and
+# closing it strands the session on a dead id, then (one op later) on the
+# OPERATOR'S ACTIVE tab. Two parties abandon an op on two different clocks and
+# NEITHER is visible from inside the extension: execute()'s EXEC_OP_BUDGET_MS race
+# (which cannot cancel the op, so a merely SLOW `chrome.tabs.create` resumes it
+# afterwards) and this server's own `cmd_timeout` (which starts at SUBMIT, so
+# queue time is invisible to any extension-side elapsed check). An extension-side
+# guard closed the first and structurally could not close the second.
+#
+# So the tests below come in pairs: the reclaim HAPPENS on a delivered result, and
+# it DOES NOT on an abandoned one. The negative is the one that pins the design.
+# --------------------------------------------------------------------------- #
+def _orphan_exec(new_ids, live, orphan_of=None, delay=0.0):
+    """Model the SW `open` FALL-THROUGH: always create a fresh tab, and report
+    `orphanTabId` for it when `orphan_of` says to. `close` removes from `live`.
+
+    `delay` sleeps before answering an `open`, so a test can drive the submitter
+    past its own cmd_timeout while the command still completes here — the exact
+    abandonment shape an extension-side elapsed check cannot see.
+    """
+    it = iter(new_ids)
+
+    def _exec(cmd):
+        if cmd["op"] == "open":
+            if delay:
+                time.sleep(delay)
+            tid = next(it)
+            live.add(tid)
+            out = {"tabId": tid, "url": cmd.get("url")}
+            if orphan_of is not None:
+                out["orphanTabId"] = orphan_of(tid, cmd)
+            return out
+        if cmd["op"] == "close":
+            live.discard(cmd.get("tabId"))
+            return {"closed": cmd.get("tabId")}
+        return {"tabId": cmd.get("tabId"), "op": cmd["op"]}
+    return _exec
+
+
+def _wait_closed(ext, tab_id, timeout=3.0):
+    """The reap `close` is enqueued with NO waiter, so nothing in the request path
+    blocks on it — poll the fake's dispatch log instead of sleeping a guess."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if any(c["op"] == "close" and c.get("tabId") == tab_id
+               for c in ext.dispatched):
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_reported_orphan_is_reaped_by_the_server():
+    """A DELIVERED `open` result carrying `orphanTabId` makes the server enqueue a
+    `close` for that tab — the leak `reuse_tab_id`'s comment used to describe as
+    "Nothing reclaims it; only a human closes it"."""
+    srv, reg = _serve()
+    live = {101}
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_orphan_exec([202], live,
+                                              orphan_of=lambda tid, cmd: 101))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _cmd(srv, {"op": "open"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 202
+        # Ownership moves to the FRESH tab (this is what orphans 101).
+        assert reg.owners_snapshot() == {("only", "A"): 202}
+        assert _wait_closed(ext, 101), "the reported orphan was never reaped"
+        assert live == {202}, "the orphaned tab is still open"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_an_abandoned_open_never_reaps_the_orphan():
+    """🔴 THE NEGATIVE THAT PINS THE DESIGN. The submitter gives up at
+    `cmd_timeout` (0.3s here) while the extension answers late (0.8s). The result
+    therefore lands with no waiter, `_record_ownership_locked` is never reached,
+    and the ownership record STILL NAMES 101 — a tab that is live and usable. A
+    reap here would strand the session on a dead id.
+
+    This is the case an extension-side elapsed check could not see: the
+    extension's own budget is untouched, and the clock that expired is this
+    server's, started at SUBMIT.
+    """
+    srv, reg = _serve(cmd_timeout=0.3)
+    live = {101}
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_orphan_exec([202], live, delay=0.8,
+                                              orphan_of=lambda tid, cmd: 101))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _cmd(srv, {"op": "open"}, session="A")
+        assert st == 504, f"expected the submitter to give up, got {st} {body}"
+        # The extension DID complete the open — the control that makes the
+        # assertion below about ABANDONMENT rather than about nothing happening.
+        end = time.monotonic() + 3.0
+        while time.monotonic() < end and 202 not in live:
+            time.sleep(0.01)
+        assert 202 in live, "control: the extension never actually ran the open"
+        # Now the real assertion: no reap, ever.
+        assert not _wait_closed(ext, 101, timeout=0.6), (
+            "an abandoned open must NOT reap: nothing recorded the fresh tab as "
+            "owned, so 101 is still this session's OWNED, LIVE tab")
+        assert live == {101, 202}
+        assert reg.owners_snapshot() == {}, (
+            "an abandoned open records no ownership at all — which is exactly why "
+            "the old tab must not be treated as an orphan")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_a_failed_open_never_reaps_the_orphan():
+    """`ok:false` returns before the `open` branch, so a failing open that somehow
+    carried an orphan report reclaims nothing."""
+    srv, reg = _serve()
+    live = {101}
+
+    def _boom(cmd):
+        if cmd["op"] == "open":
+            # The harness's documented way to model an op-level failure — an
+            # ok:false envelope from the extension, NOT a crashed fake.
+            # 🔴 IT CARRIES AN ORPHAN REPORT ON PURPOSE. Without a payload this
+            # test cannot discriminate: a mutant that moves the reap above the
+            # `if failed: return` finds no `data` and passes for the wrong
+            # reason. Measured — that mutant SURVIVED the first draft.
+            return {"__error__": "open_exploded", "orphanTabId": 101}
+        if cmd["op"] == "close":
+            live.discard(cmd.get("tabId"))
+            return {"closed": cmd.get("tabId")}
+        return {}
+    ext = FakeExtension(srv, instance_id="solo", label="only", executor=_boom)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _cmd(srv, {"op": "open"}, session="A")
+        assert body["result"]["ok"] is False
+        assert body["result"]["data"]["orphanTabId"] == 101, (
+            "control: the failure envelope really did carry the report the server "
+            "must ignore")
+        assert not _wait_closed(ext, 101, timeout=0.4)
+        assert [c for c in ext.dispatched if c["op"] == "close"] == []
+        assert live == {101}
+        assert reg.owners_snapshot() == {}, (
+            "a failed open records no ownership — so nothing was orphaned")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("reported", [
+    pytest.param(lambda tid, cmd: tid, id="equal-to-the-new-tab"),
+    pytest.param(lambda tid, cmd: True, id="a-bool-not-an-int"),
+    pytest.param(lambda tid, cmd: "101", id="a-string"),
+    pytest.param(lambda tid, cmd: None, id="null"),
+    pytest.param(lambda tid, cmd: 101.0, id="a-float"),
+])
+def test_a_malformed_or_self_referential_orphan_report_is_refused(reported):
+    """A report is DATA, never an instruction.
+
+    `== tid` is the one that matters most: closing the tab just recorded as owned
+    would destroy the session's ONLY tab. The bool case is not pedantry — Python
+    makes `isinstance(True, int)` true and `True == 1`, so a hand-crafted envelope
+    could otherwise reap tab 1.
+    """
+    srv, reg = _serve()
+    live = {101}
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_orphan_exec([202], live, orphan_of=reported))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _cmd(srv, {"op": "open"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 202
+        # 🔴 ASSERT NO `close` OF **ANY** TAB, AND SNAPSHOT AFTER THE WAIT.
+        # The first draft did neither and the bool mutant SURVIVED because of it:
+        # it enqueues `close` for tabId `True`, so waiting on a specific id never
+        # sees it — and the dispatch list was snapshotted before the extension had
+        # even polled, so it was empty either way. Two independent reasons the
+        # test could not fail. Wait for a plausible round trip, then look at the
+        # WHOLE list.
+        assert not _wait_closed(ext, 202, timeout=0.4)
+        closes = [c for c in ext.dispatched if c["op"] == "close"]
+        assert closes == [], f"a refused report still enqueued {closes}"
+        assert live == {101, 202}
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_reap_close_is_inflight_while_it_runs_then_fully_released():
+    """The reap takes an `inflight` entry and NO waiter, and both halves matter.
+
+    `inflight` is what `_effective_timeout_locked` reads to tell a BUSY extension
+    from an idle one, so WITHOUT the entry a `ping` landing mid-reap fast-fails a
+    perfectly healthy extension. WITH it but without release, the instance reads
+    busy until INFLIGHT_STALE_S.
+
+    🔴 ASSERTING ONLY THE END STATE IS VACUOUS — `inflight == {}` is equally true
+    of a build that never adds the entry, and measured: that mutant SURVIVED the
+    first draft of this test. So the entry must be caught WHILE the reap is in
+    flight, which is what the slow `close` below buys.
+    """
+    srv, reg = _serve()
+    live = {101}
+    gate = threading.Event()
+
+    def _exec(cmd):
+        if cmd["op"] == "open":
+            live.add(202)
+            return {"tabId": 202, "url": cmd.get("url"), "orphanTabId": 101}
+        if cmd["op"] == "close":
+            # Hold the reap OPEN so its inflight entry is observable. Released by
+            # the test once it has seen the entry.
+            gate.wait(3.0)
+            live.discard(cmd.get("tabId"))
+            return {"closed": cmd.get("tabId")}
+        return {"tabId": cmd.get("tabId"), "op": cmd["op"]}
+
+    ext = FakeExtension(srv, instance_id="solo", label="only", executor=_exec)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        assert _wait_closed(ext, 101), "the reap was never dispatched"
+        inst = list(reg._instances.values())[0]
+
+        # (1) IN FLIGHT: exactly one entry, and NO waiter for it.
+        end = time.monotonic() + 3.0
+        seen = None
+        while time.monotonic() < end:
+            snap = dict(inst.inflight)
+            if snap:
+                seen = snap
+                break
+            time.sleep(0.005)
+        assert seen, ("the reap took no `inflight` entry — a ping landing here "
+                      "would fast-fail a healthy extension")
+        assert len(seen) == 1, f"expected exactly the reap in flight, got {seen}"
+        cid = next(iter(seen))
+        assert cid not in inst.waiters, (
+            "the reap must take NO waiter — nobody will ever pop its result")
+        assert inst.pending == 0, "the reap must not consume a concurrency slot"
+
+        # (2) RELEASED by its own reply, not by INFLIGHT_STALE_S.
+        gate.set()
+        end = time.monotonic() + 3.0
+        while time.monotonic() < end and inst.inflight:
+            time.sleep(0.01)
+        assert inst.inflight == {}, (
+            "the reap's inflight entry must be released by its reply")
+        assert inst.waiters == set()
+        assert live == {202}
+        # And the extension is usable immediately afterwards.
+        st, body = _cmd(srv, {"op": "text"}, session="A")
+        assert st == 200 and body["result"]["ok"] is True
+    finally:
+        gate.set(); ext.stop(); srv.shutdown(); srv.server_close()

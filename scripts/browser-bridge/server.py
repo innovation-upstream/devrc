@@ -2347,6 +2347,44 @@ class Registry:
                 self._owners[okey] = {
                     "tab_id": tid, "last_seen": self._clock()}
                 log("owner_open", key=inst.key, session=session_id, tab=tid)
+                # 🔴 RECLAIM THE ORPHAN — HERE, AND NOWHERE ELSE.
+                #
+                # When the extension's reuse probe exceeds REUSE_TAB_BUDGET_MS it
+                # falls through to a FRESH tab and reports the tabId it thereby
+                # orphaned. The line above has just overwritten the ownership
+                # record, so that old tab now has NO owner and nothing else in the
+                # system will ever revisit it — the leak this block's sibling
+                # comment (see `reuse_tab_id` in submit) used to describe as
+                # "Nothing reclaims it; only a human closes it."
+                #
+                # 🔴 WHY THE CLOSE LIVES ON THIS SIDE. Two earlier attempts had
+                # the EXTENSION close it directly, and both were wrong the same
+                # way: reclaiming is correct only if this result is DELIVERED.
+                # If it is not, the old tab is not an orphan at all — the ownership
+                # record still names it, it is still live, and closing it strands
+                # the session on a dead id (then, one op later, on the operator's
+                # ACTIVE tab). The extension cannot know: TWO parties abandon an
+                # op on TWO clocks, and neither is visible from inside the op —
+                # execute()'s EXEC_OP_BUDGET_MS race, which does not cancel the op
+                # so a merely SLOW `chrome.tabs.create` resumes it afterwards; and
+                # the submitter's own cmd_timeout, which starts at SUBMIT, so
+                # queue time is invisible to any extension-side elapsed check.
+                #
+                # This method is reached ONLY from the delivered-result path in
+                # submit() (after `inst.results.pop(cid)`). A submitter that gave
+                # up raised BridgeTimeout long before here, and a result arriving
+                # after that goes down deliver_result's `result_after_abandon`
+                # branch instead. So "we got here" IS the fact the extension
+                # lacked, and it is structural rather than a check that could
+                # drift.
+                orphan = data.get("orphanTabId") if isinstance(data, dict) else None
+                # `!= tid` is not paranoia: closing the tab we just recorded as
+                # owned would destroy the session's only tab. A report is data,
+                # never an instruction. (`isinstance(orphan, int)` also rejects
+                # the bool a hand-crafted envelope could carry — `True == 1`.)
+                if (isinstance(orphan, int) and not isinstance(orphan, bool)
+                        and orphan != tid):
+                    self._enqueue_reap_close_locked(inst, orphan, session_id)
         elif op == "tabs":
             # Annotate the listing with which tab (if any) THIS session owns, so
             # `browser tabs` can flag it. Metadata only (a tabId, never content).
@@ -2354,6 +2392,43 @@ class Registry:
             if isinstance(data, dict):
                 data["ownedTabId"] = self._owned_tab_locked(
                     inst.key, session_id, touch=False)
+
+    def _enqueue_reap_close_locked(self, inst, tab_id: int, session_id) -> None:
+        """Queue a fire-and-forget `close` for a tab the extension just orphaned.
+
+        🔴 NO WAITER, DELIBERATELY. Every other command in this file is enqueued
+        by a submitter that then blocks on `inst.results[cid]`; this one has no
+        submitter, because the caller it would belong to has already been handed
+        its `open` result. So `cid` is NOT added to `inst.waiters`, and when the
+        reply arrives `deliver_result` finds no waiter, falls to its
+        `result_after_abandon` branch, pops the inflight entry and logs. That is
+        an existing, exercised path — not a new one — and it is why this cannot
+        strand a waiter or a `pending` slot: it takes neither.
+
+        🔴 BUT IT DOES TAKE AN `inflight` ENTRY, and that is the point of the
+        line. `inflight` is what `_effective_timeout_locked` reads to tell a BUSY
+        extension from an idle one; without an entry, a `ping` landing while this
+        close executes would fast-fail against a perfectly healthy extension.
+        The entry is released by the same `deliver_result` branch above, or
+        expires on INFLIGHT_STALE_S if the reply never comes.
+
+        Ordering: appended to the same FIFO outbox as everything else, so it runs
+        before any command submitted after it and cannot overtake one submitted
+        before. It targets a tab NOBODY owns any more, so it cannot race a
+        tab-scoped op for the session's current tab.
+
+        Idempotent by construction: the extension's `close` treats an
+        already-gone tab as success, so a tab that really had died during the
+        probe costs one no-op round trip and nothing else.
+        """
+        cid = secrets.token_hex(8)
+        inst.outbox.append({"id": cid, "op": "close", "tabId": tab_id})
+        _now = self._clock()
+        self._prune_inflight_locked(inst, _now)
+        inst.inflight[cid] = _now
+        log("owner_orphan_reap", key=inst.key, session=session_id, tab=tab_id,
+            id=cid)
+        self._cond.notify_all()   # wake this instance's waiting poller
 
     # --- resolution / introspection --------------------------------------- #
     def _live_instances_locked(self):

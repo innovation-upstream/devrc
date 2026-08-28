@@ -333,15 +333,15 @@ test("open's reuse-probe bound is ordered against the work it wraps (the op-ceil
   // a LOW-side failure — a merely slow probe falls through to a fresh tab and
   // ORPHANS the live one.
   //
-  // ⚠ `open` now REAPS that orphan (service_worker.js), so an earlier wording here
-  // — "with nothing to reclaim it" — no longer holds. THE FLOOR IS NOT WEAKENED BY
-  // THAT, and the reason is worth stating so nobody lowers it on the strength of
-  // the reap: the reap is best-effort and fire-and-forget, so it converts a
-  // guaranteed leak into a probable reclaim, not into a no-op. Every low-side
-  // fall-through still costs a real tab close plus a real tab create — visible
-  // churn in the operator's window — and under the browser-wide stall that would
-  // cause a slow probe in the first place, the reap is exactly the thing least
-  // likely to land.
+  // ⚠ `open` now REPORTS that orphan and the SERVER closes it, so an earlier
+  // wording here — "with nothing to reclaim it" — no longer holds. THE FLOOR IS
+  // NOT WEAKENED BY THAT, and the reason is worth stating so nobody lowers it on
+  // the strength of the reclaim: it turns a guaranteed leak into a reclaim that
+  // happens only when the `open` result was DELIVERED, which is a narrowing, not
+  // a no-op. Every low-side fall-through still costs a real tab close plus a real
+  // tab create — visible churn in the operator's window, and possibly a SIBLING
+  // agent's tab (parallel agents can share one owned tab). Under the very stall
+  // that causes a slow probe, the reclaim is the part least likely to land.
   //
   // ⚠️ BE HONEST ABOUT WHAT THIS FLOOR IS: there is NO measurement of a healthy
   // `chrome.tabs.get` anywhere in this repo, so unlike #797's `> 1365` (anchored to
@@ -354,9 +354,10 @@ test("open's reuse-probe bound is ordered against the work it wraps (the op-ceil
   assert.ok(REUSE_TAB_BUDGET_MS >= 1000,
             `reuse probe (${REUSE_TAB_BUDGET_MS}ms) is below the 1000ms floor. Going `
             + `LOW orphans live tabs: a slow-but-healthy probe falls through to a `
-            + `fresh tab, and the reap that reclaims the old one is best-effort and `
-            + `fire-and-forget — least likely to land under exactly the stall that `
-            + `caused the slow probe, and it costs a real close+create either way. `
+            + `fresh tab, and the server-side reclaim of the old one fires ONLY `
+            + `when that open result was delivered — so it narrows the leak, it `
+            + `does not remove it, and every fall-through still costs a real `
+            + `close+create (possibly of a SIBLING agent's tab). `
             + `The floor is conservative `
             + `(2x activate's measured ~350-500ms round trip), not calibrated — if `
             + `you have measured chrome.tabs.get, replace it with the real band`);

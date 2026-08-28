@@ -29,15 +29,21 @@ Now each session can own its own tab:
   DISCARDS your url.** Calling `browser open <url>` again in a session that already
   owns a **live** tab returns that SAME tabId (it does not leak a second tab —
   EXCEPT when the reuse probe exceeds `REUSE_TAB_BUDGET_MS`, which falls through to
-  a fresh tab and orphans the first — the extension then **reaps** that orphan,
-  best-effort and fire-and-forget, once the replacement exists; only on the
-  TIMEOUT arm, since a REJECTING probe has already named the tab as absent) — and
+  a fresh tab and orphans the first — the extension then **reports** that orphan
+  as `orphanTabId` and the SERVER closes it, from the one place that knows the
+  result was delivered; only on the TIMEOUT arm, since a REJECTING probe has
+  already named the tab as absent) — and
   drops the url on the floor.
-  🔴 **The reap CLOSES a real tab you did not ask it to close.** If you had
+  🔴 **That reclaim CLOSES a real tab you did not ask it to close.** If you had
   `activate`d that tab you were looking at it, and it disappears mid-session
   (scroll position, form state, playing media) with a fresh tab at the requested
-  url in its place. The tell is **`reapAttempted: <tabId>`** in the `open`
-  envelope — ATTEMPTED, never "closed", because nothing awaits the remove. In `extension/service_worker.js`'s `open`, a live
+  url in its place. The tell is **`orphanTabId: <tabId>`** in the `open` envelope.
+  🔴 **AND IT MAY NOT BE YOUR TAB.** Two parallel agents can derive the SAME
+  session id and share one owned tab — see the shared-session bullet below, where
+  `open` handing over a sibling's tab was observed for real. A re-`open` by one
+  sibling whose probe times out therefore closes the tab the OTHER sibling is
+  mid-workflow on. That collision used to be benign; it is not any more.
+  In `extension/service_worker.js`'s `open`, a live
   `reuseTabId` returns `chrome.tabs.get(reuseTabId)` as `{tabId, url, reused: true}`
   and **never calls `chrome.tabs.update`**, so `cmd.url` is never applied and the
   `url` handed back is the tab's **CURRENT** address, not the one you asked for.

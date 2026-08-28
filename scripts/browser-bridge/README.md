@@ -232,7 +232,7 @@ has not been exercised against a third-party authenticated API beyond that.)
 | `tabs`       | `chrome.tabs.query({})`                                   | `{tabs:[...],ownedTabId}` |
 | `nav`        | `chrome.tabs.update(tab,{url})`                           | `{tabId,url}` |
 | `screenshot` | **CDP `Page.captureScreenshot`** (png) — works on a BACKGROUND/occluded tab + each profile's own tab; a foreground tab uses the cheap `captureVisibleTab` fast path. `fullpage` grabs the whole document. The CLI decodes `dataUrl` to a **`.png` on disk** and prints a path, never the base64 (see below) | `{url,dataUrl,via}` |
-| `open`       | `chrome.tabs.create({url,active:false})` — **background/HIDDEN** (`visibilityState:"hidden"` → Chromium throttles it → a heavy SPA won't render → reads return a shell). The escape hatch is **`browser wake`** (or a `--wake` read): it un-throttles the tab and moves NO focus. Reads self-announce this via `hidden`/`note`. On a re-`open` whose reuse probe TIMES OUT, it also **closes the orphaned previous tab** and reports `reapAttempted` | `{tabId,url}` (+`reapAttempted` when it reaped) |
+| `open`       | `chrome.tabs.create({url,active:false})` — **background/HIDDEN** (`visibilityState:"hidden"` → Chromium throttles it → a heavy SPA won't render → reads return a shell). The escape hatch is **`browser wake`** (or a `--wake` read): it un-throttles the tab and moves NO focus. Reads self-announce this via `hidden`/`note`. On a re-`open` whose reuse probe TIMES OUT it **reports the tab it orphaned** as `orphanTabId`, and the SERVER then closes that tab | `{tabId,url}` (+`orphanTabId` when it orphaned one) |
 | `close`      | `chrome.tabs.remove(tabId)`                               | `{closed:tabId}` |
 | `emulate`    | **device emulation** — CDP `Emulation.setDeviceMetricsOverride` / `setTouchEmulationEnabled` / `setUserAgentOverride` (**+`userAgentMetadata`**) / `setEmulatedMedia` / `setTimezoneOverride` / `setGeolocationOverride`, from a named preset or raw params. **Sticky per tab** (re-applied inside every later CDP session) and **owned-tab-only**. `--reset` stops re-applying **and restores the viewport** — it sends an arm-then-clear pair, because a bare `clearDeviceMetricsOverride` is a measured no-op (#319). `--reset --recreate` replaces the tab (new tab id) instead, and is the only remedy for a tab the extension cannot reach | `{tabId,url,emulation,applied,note}` or `{tabId,url,reset,wasEmulating,cleared,restored,note}` |
 | `frames`     | **`chrome.webNavigation.getAllFrames`** — the tab's frames INCLUDING cross-origin OUT-OF-PROCESS iframes (OOPIFs) | `{url,title,frames:[{frameId,url,parentFrameId}]}` |
@@ -1940,21 +1940,29 @@ per-session (multi-step **workflow**) isolation did not.
   tabId as `reuseTabId`; the extension reuses it) instead of creating a second
   real tab — so a double `open` does not orphan the first tab **unless the reuse
   probe exceeds `REUSE_TAB_BUDGET_MS`**, in which case it falls through to a fresh
-  tab and the first one is orphaned — and then **reaped**: the extension closes
-  it, best-effort and fire-and-forget, once the replacement exists. Reaping is
-  deliberately restricted to the *timeout* arm; when the probe REJECTS, the tab is
-  known absent and a `remove` would only risk a recycled tabId. If the owned
-  tab is **gone**, `open` transparently creates a fresh one.
-  🔴 **What this looks like to you, stated because it is the first tab close the
-  extension performs that nobody asked for.** Bridge tabs open `active:false`, but
-  `browser activate` foregrounds them and that is the ordinary workflow — so the
-  page you are *looking at* can vanish mid-session on a re-`open`, taking scroll
-  position, form state and any playing media with it. You get a fresh tab at the
-  requested url in its place. The envelope says so: an `open` that reaped carries
-  **`reapAttempted: <tabId>`** (ATTEMPTED, not closed — nothing awaits the
-  result). An ordinary `open` envelope is unchanged. The reap never fires once the
-  op has already timed out, because on *that* path the old tab is still owned and
-  still usable.
+  tab and the first one is orphaned — and then **reclaimed**. The extension
+  **reports** it as `orphanTabId` and closes nothing; the SERVER issues the
+  `close`, from the one place that knows the `open` result was actually delivered
+  (`_record_ownership_locked`). Reporting is deliberately restricted to the
+  *timeout* arm; when the probe REJECTS, the tab is known absent and a `remove`
+  would only risk a recycled tabId. If the owned tab is **gone**, `open`
+  transparently creates a fresh one.
+  🔴 **What this looks like to you, because it is the one tab close nobody asked
+  for.** Bridge tabs open `active:false`, but `browser activate` foregrounds them
+  and that is the ordinary workflow — so the page you are *looking at* can vanish
+  mid-session on a re-`open`, taking scroll position, form state and any playing
+  media with it. You get a fresh tab at the requested url in its place. The
+  envelope says so: an `open` that orphaned a tab carries
+  **`orphanTabId: <tabId>`**; an ordinary `open` envelope is unchanged.
+  🔴 **And it may not be YOUR tab.** Parallel agents can derive the same session
+  id and therefore share one owned tab (see `reference/tabs-instances.md` — a
+  sibling's tab being handed over was observed 2026-07-31). A re-`open` by one
+  sibling whose probe times out therefore closes the tab the OTHER is mid-workflow
+  on. That collision was previously benign; it is not any more.
+  ⚠ **The reclaim is not guaranteed.** It is a real `close` op that can fail or
+  be lost, and nothing counts how often. What IS structural is that it never fires
+  when the `open` result was not delivered — on those paths the old tab is still
+  owned and still usable, so closing it would be the worse error.
 - **Self-heal on a vanished owned tab.** If the user manually closes an owned
   background tab, the next tab-scoped op dispatches the stale tabId and the
   extension returns `owned_tab_gone` (ok:false). The server then **drops** that
