@@ -1157,6 +1157,65 @@ def test_a_valid_recipient_override_is_accepted(tmp_path, identity):
         os.environ.pop("ASIB_AGE_RECIPIENT", None)
 
 
+def test_resolve_recipient_NEVER_quotes_age_keygens_INPUT_ECHOING_stderr(tmp_path):
+    """🔴 age-keygen's STDERR ECHOES THE LINE IT COULD NOT PARSE, and on a
+    mangled identity that line is the SECRET KEY.
+
+    MEASURED 2026-08-27, age v1.3.1: a secret line carrying an unrecognised
+    identity TYPE — a LEADING SPACE (the likeliest clipboard artifact) or a
+    LOWERCASED `age-secret-key-` prefix — comes back as
+    `unknown identity type: "<the whole secret line>"`. The other manglings
+    (collapsed newlines, truncation, empty) do NOT echo, which is exactly why a
+    guard built only from those is vacuous.
+
+    FOUND BY AUDIT: this branch had NO test at all. Reverting the redaction —
+    putting `p.stderr` back into the `BackupError` — SURVIVED the entire suite,
+    even though `escrow-verify.py`'s half of the same fix was covered.
+
+    ⚠ CASE-INSENSITIVE, against the FIXTURE'S OWN secret: a case-sensitive check
+    reads clean on the lowercased-prefix case while the whole key body is in the
+    message.
+    """
+    key = tmp_path / "throwaway.key"
+    r = subprocess.run([AGE_KEYGEN, "-o", str(key)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    text = key.read_text(encoding="utf-8")
+    secret = [ln for ln in text.splitlines()
+              if ln.startswith("AGE-SECRET-KEY-")][0]
+    body = secret.split("AGE-SECRET-KEY-", 1)[-1]
+
+    for label, mangled in (
+            ("a LEADING SPACE on the secret line",
+             text.replace(secret, " " + secret)),
+            ("a LOWERCASED key prefix",
+             text.replace("AGE-SECRET-KEY-", "age-secret-key-")),
+    ):
+        bad = tmp_path / "mangled.key"
+        bad.write_text(mangled, encoding="utf-8")
+
+        # POSITIVE CONTROL: this input really does put the secret in stderr, so
+        # the assertion below is about redaction and not about an empty stream.
+        probe = subprocess.run([AGE_KEYGEN, "-y", str(bad)], capture_output=True)
+        assert probe.returncode != 0, label
+        assert secret.lower() in probe.stderr.decode("utf-8", "replace").lower(), (
+            f"{label}: age-keygen did not echo the secret, so this test cannot "
+            f"see a leak. Re-measure — the redaction it guards may now be "
+            f"untested rather than unnecessary.")
+
+        os.environ.pop("ASIB_AGE_RECIPIENT", None)
+        with pytest.raises(B.BackupError) as exc:
+            B.resolve_recipient(bad)
+        rendered = str(exc.value).lower()
+        assert secret.lower() not in rendered, label
+        assert body.lower() not in rendered, label
+        assert "age-secret-key-" not in rendered, label
+        # It still has to be USEFUL: the exit code and the stdout byte count are
+        # what an operator acts on, plus the command to run by hand.
+        assert "could not derive an age recipient" in rendered
+        assert "rc=1" in rendered
+        assert "stderr is deliberately not quoted" in rendered
+
+
 def test_the_derived_recipient_is_the_one_that_can_decrypt(tmp_path, identity):
     """🔴 The reason the recipient is DERIVED rather than hardcoded.
 

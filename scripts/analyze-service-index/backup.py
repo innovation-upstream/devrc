@@ -544,6 +544,44 @@ def same_identity_file(a: Path, b: Path) -> bool:
         return a == b
 
 
+def age_public_key_bytes(identity: Path) -> subprocess.CompletedProcess:
+    """`age-keygen -y <identity>` — the completed process, stdout as BYTES.
+
+    🔴 THE ONE PLACE IN THIS SUBSYSTEM THAT SHELLS OUT TO `age-keygen -y`, and
+    it deliberately CLASSIFIES NOTHING. Two callers want different things from
+    the same command and would otherwise open-code it twice:
+
+      * `resolve_recipient()` below wants the public key as a STRING to encrypt
+        to, and raises `BackupError` when it cannot have one;
+      * `escrow-verify.py --expect-pubkey` wants the RAW STDOUT BYTES, because
+        the check an operator runs by hand is
+        `age-keygen -y <file> | sha256sum`, and a digest taken over reassembled
+        text is a claim about the reassembly rather than about what the command
+        printed. MEASURED 2026-08-27, age v1.3.1: stdout is exactly the `age1…`
+        recipient plus ONE `\\n`, so `printf '%s' "$out" | sha256sum` — which
+        drops that newline — yields a DIFFERENT digest and a false mismatch on
+        a perfectly good key.
+
+    🔴 `capture_output=True` WITHOUT `text=True`: the bytes are the point. It
+    also keeps stderr as bytes, which matters because age-keygen's parse errors
+    ECHO THE OFFENDING INPUT LINE — key material, on exactly the failure this
+    is called for. Callers must not quote it.
+
+    Does NOT check that `age-keygen` is on PATH: each caller has its own token
+    and its own message for that, and a `FileNotFoundError` here would erase the
+    distinction.
+
+    🔴 `argv[0]` IS A BARE LITERAL, NOT A MODULE CONSTANT, AND THAT IS LOAD-
+    BEARING: `test_every_git_invocation_takes_its_environment_from_git_env`
+    walks this file's AST and REFUSES to certify a `subprocess` site whose
+    `argv[0]` it cannot read statically. Hoisting "age-keygen" to a name made
+    that guard report an unrecognised site — correctly, since it can no longer
+    tell a git call from an age one. Keep the literal here.
+    """
+    return subprocess.run(["age-keygen", "-y", str(identity)],
+                          capture_output=True)
+
+
 def resolve_recipient(identity: Path) -> str:
     """The age recipient to encrypt to, DERIVED from the identity we can decrypt with.
 
@@ -576,14 +614,20 @@ def resolve_recipient(identity: Path) -> str:
             "and set explicitly on the systemd unit's PATH; add it there rather "
             "than working around it."
         )
-    p = subprocess.run(["age-keygen", "-y", str(identity)],
-                       capture_output=True, text=True)
+    p = age_public_key_bytes(identity)
     if p.returncode != 0:
+        # 🔴 age-keygen's stderr ECHOES THE OFFENDING INPUT LINE — measured
+        # 2026-08-27: a non-identity file comes back as `unknown identity type:
+        # "<the line>"`. On a file that IS an identity but is subtly mangled,
+        # that line is the SECRET KEY. It is not quoted here.
         raise BackupError(
             f"could not derive an age recipient from {identity} (rc="
-            f"{p.returncode}): {p.stderr.strip()}"
+            f"{p.returncode}, {len(p.stdout)} bytes of stdout). age-keygen's "
+            f"stderr is deliberately NOT quoted: it echoes the input line it "
+            f"could not parse, which for an identity file is key material. Run "
+            f"`age-keygen -y {identity}` by hand to read it."
         )
-    recipient = p.stdout.strip()
+    recipient = p.stdout.decode("utf-8", "replace").strip()
     if not recipient.startswith("age1"):
         raise BackupError(
             f"age-keygen -y on {identity} produced {recipient!r}, which is not an "

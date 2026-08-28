@@ -131,8 +131,30 @@ standing at, and it has now been proven to recover the key unaided.
    commit and no backup**, alongside `~/bw-login-teeup.sh`. Both put the quoting in a file on
    purpose: hand-typed one-liners for this cost three master-password entries on 2026-08-25/26,
    every failure a paste/quoting fault rather than a mistake about the task.
-   **Follow-up: upstream the proof script into `scripts/analyze-service-index/` so it is
-   managed, shipped to both hosts, and re-runnable** — see ranked follow-up 13.
+   ✅ **SUPERSEDED IN THE REPO**: this is now `escrow-verify.py --expect-pubkey <sha16>`,
+   tracked and reviewable — see ranked follow-up 13, which this closes. 🔴 **Being in the repo
+   is not being on a host**: the flag reaches a machine only after PR #955 merges AND
+   `ship.sh` converges that host. 🔴 **Do not take either half on trust — MEASURE both**,
+   because each is volatile and a stale answer here sends you the wrong way twice (skipping a
+   `ship.sh` that would have worked, or trusting a flag that never arrived):
+
+   ```sh
+   # is it on THIS host? — the only authority, and it needs no network.
+   # 🔴 BY PATH, not a bare name: escrow-verify.py is NOT on PATH and nothing in
+   # nix/ puts it there, so `escrow-verify.py --help` prints 0 whether or not the
+   # flag has landed — the same answer either way, which is no answer at all.
+   scripts/analyze-service-index/escrow-verify.py --help \
+     | grep -c -- --expect-pubkey                            # 0 = not here yet
+   # would ship.sh converge this host, or SKIP it?
+   scripts/drift-check.sh                                    # READ-ONLY; same rc vocabulary
+   ```
+
+   `ship.sh` converges with `merge --ff-only`, so it **skips and leaves as found** any host it
+   cannot fast-forward — a checkout on another branch, carrying un-pushed commits, or with a
+   conflicted/mid-merge tree. That is the condition to check; which branch a given checkout
+   happened to be on when this line was written is not a fact worth recording, and an earlier
+   revision of this bullet asserted one that was false within the hour. The `~/` copy was
+   deliberately left in place (live host, not the implementing session's to touch).
 3. 🟢 **Residual: the BROWSER clipboard leg alone.** Item 2 proved retrieval and correctness
    over the network from the DR host, so what is left is only a browser's own copy-paste
    mangling. Check it identically when convenient: open the note in the web vault, paste
@@ -291,17 +313,51 @@ Kept because each cost a round, and none is a logic bug.
     its numbers — never quote these.
 12. Second A/B against a doc-poor repo (tests whether "selection, not knowledge"
     generalises past n=1).
-13. 🟡 **Upstream the DR rehearsal.** `~/bw-escrow-proof.sh` exists on the **laptop only**,
-    in no commit and no backup — the exact "stranded work" shape, and `drift-check.sh`
-    cannot see it because it lives in `$HOME`, not the repo. It proved a real property on
-    2026-08-27 and deserves to be an artifact: move it to
-    `scripts/analyze-service-index/escrow-retrieval-proof.sh`, reference it from
-    `SECRETS.md`, and it ships to both hosts like everything else.
-    Worth keeping when it moves: the four distinct verdicts (proven / did-not-parse /
-    empty-input / mismatch), the explicit `bw unlock --raw` emptiness check, the
-    `shred`-on-every-path handling, and the "189/3 is NOT the check" line.
-    *Closes when:* the script is in `scripts/`, deployed to both hosts, and the
-    `~/`-only copies are gone.
+13. ✅ **CLOSED — the DR rehearsal is upstreamed as `escrow-verify.py --expect-pubkey`.**
+    Not as the standalone `escrow-retrieval-proof.sh` this item proposed: a second script
+    would have been a second `bw` path, a second vault-state ladder and a second
+    throwaway-identity `finally`, and the copy nobody exercises is the broken one. It is a
+    MODE on the existing verifier instead, reusing `_fetch_note()` (one `bw` sequence,
+    pinned behaviourally against the byte-comparison mode) and `_create_private_file`/
+    `_shred`. `age-keygen -y` now has exactly one call site in the subsystem —
+    `backup.age_public_key_bytes()`, which `resolve_recipient()` also uses.
+
+    Everything this item asked to keep, kept: **five** distinct verdicts rather than four
+    (`39` malformed pin / `38` age-keygen absent / `35` did-not-parse / `37` empty-output /
+    `36` mismatch — the pin's own code is the addition, because a typo could only ever
+    mismatch and a mismatch's remedy chain ends at overwriting the escrow);
+    shred-on-every-path; and the byte count printed **beside** a sentence saying it is not
+    the check. The `bw unlock --raw` **exited-zero-printing-nothing** check is covered
+    structurally rather than copied — this tool never runs `bw unlock`, so an empty session
+    surfaces as `12 VAULT-LOCKED` from `bw status`, which is the authority; the sibling
+    "exited zero, printed nothing" cases it *can* see already had codes (`15
+    SERVER-UNKNOWN`, `20 NOTE-EMPTY`).
+
+    Measured while building it, all 2026-08-27, age v1.3.1: `age-keygen -y` stdout is
+    exactly `age1…` + one `\n` (63 B), so `printf '%s'` really does yield a different
+    digest; a CRLF-rewritten identity derives the **correct** pubkey (so the mode says
+    PROVEN where the byte comparison says DIFFERS-MATERIALLY — both true, pinned); a note
+    reduced to its secret line alone also derives correctly, because the `#` lines are
+    comments; and age-keygen's stderr **echoes the input line it could not parse**, which
+    on a mangled identity is the secret key — so no stream is quoted on that path.
+
+    🔴 **The echo needs an unrecognised identity TYPE prefix, and the first version of the
+    leak guard missed that entirely.** Re-measured 2026-08-27 over ten inputs,
+    case-INSENSITIVELY against the fixture's own secret: collapsed newlines, an emptied
+    note and a truncated secret line leak **nothing** — while a **leading space** (the
+    likeliest web-vault clipboard artifact) and a **lowercased `age-secret-key-` prefix**
+    leak the **whole** secret line. So the original three-mangler guard was VACUOUS:
+    re-quoting `p.stderr` survived the full suite and printed the entire key. Both leaking
+    manglers are now fixtures, with a positive control asserting they really do echo, and
+    `backup.py`'s half of the same fix — which had **no** test at all — is covered too.
+    `age --decrypt` does **not** echo, so `restore-verify.py`'s stderr quoting is safe.
+
+    ⚠ **`~/bw-escrow-proof.sh` on the laptop is now SUPERSEDED but was NOT touched** — it is
+    a live host and not this session's to modify. Remove it (and `~/bw-login-teeup.sh` if it
+    is only the login tee-up) once you have run
+    `escrow-verify.py --expect-pubkey 288c4d24cfdb5aa1` from that host and seen it pass.
+    *Closes when:* — closed on the repo side. The `~/`-only copies are the operator's to
+    delete.
 
 ## `#896` filed, NOT fixed — each with its closing condition
 
