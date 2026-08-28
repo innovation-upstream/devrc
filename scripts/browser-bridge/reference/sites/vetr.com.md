@@ -102,6 +102,15 @@ $BB --instance <key> --tab $TAB nav http://127.0.0.1:5174/user --wake
 because the boot that mattered already happened. That failure looks exactly like
 a bad token.
 
+**Measured 2026-08-27 against the hermetic stack, laptop, Brave profile `work`:**
+the seed half of this works. Before the seed, `/user` issues only `/api/config`;
+after the seed + second `nav` the app issues `/api/auth/me` and renders the
+**authed dashboard skeleton** rather than redirecting to auth. The token was
+independently confirmed valid (`/api/auth/me` → `E2E Owner`, id 1, tz `UTC`).
+
+🔴 **But see "the render problem" below — the seed authenticating is NOT the same
+as the page becoming drivable, and in that run it did not.**
+
 - **Role** is `vetr-profile` — a plain zustand-persist key, **NOT** under the
   Capacitor prefix: `{state:{profile:"user"|"vet"|"servicer"},version:0}`. A vet
   token whose `me()` has no `vet` relation redirects to `/vet/register`; that is
@@ -136,6 +145,45 @@ availability slot you were about to measure.
 It only fires for an **authed** user with a differing saved profile tz, so a
 logged-out walk never sees it.
 
+## 🔴 THE RENDER PROBLEM — unresolved, and it gates the whole drive lane
+
+Measured 2026-08-27 against the hermetic stack (the same origin that had just
+served **53 passed / 7 skipped / 0 failed** to Playwright minutes earlier):
+
+| route | in a bridge-driven tab |
+|---|---|
+| `/` (welcome) | rendered content **once** ("Vetr — One App for Every Pet Need"), and on a later `nav` showed only the empty splash `<section>` |
+| `/choose-experience` (logged-OUT, 4 green Playwright tests) | **blank** — app shell mounts, zero interactive elements, `textContent` is just the react-router bootstrap script. 6+ attempts, `--wake` up to 10s, storage cleared |
+| `/user` (authed) | authenticated, but a **permanent skeleton**: `/api/auth/me` + `/api/config` fire and then **no dashboard queries at all**, versus the full `/api/user/pets`+`/api/indicators`+… fan-out the same origin served Playwright |
+| `/user/appointments` | blank |
+
+**What was ruled OUT:**
+- Not the server — all three paths return an **identical** 5176-byte SPA-fallback
+  `index.html`, HTTP 200 (`cmp` clean).
+- Not throttling. The tab was `activate`d: `visibilityState` went `visible`, the
+  skeleton shimmer advanced (so animations run) — and it was **still blank, with
+  still no new API calls**.
+- Not the seeded keys — `localStorage.clear()` then re-`nav` reproduced it.
+- Not a bad token — verified server-side.
+
+**Mechanism is UNKNOWN.** Do not guess one from this file. Two candidates were
+never separated: a hydration race on non-root paths (the shell's baked
+`__reactRouterContext` is for `/`), or something about a bridge-driven tab that a
+Playwright context does not reproduce. The `/` result moving between two reads
+says it is at least partly **racy**, not a hard failure.
+
+**So, until this is root-caused:**
+- 🔴 **Do not treat a blank vetr route as a bug in vetr.** Playwright renders these
+  same routes green. Reproduce it in the suite before reporting anything.
+- **Enter at `/` and navigate in-app** rather than deep-linking a route.
+- **For anything that must actually work, use the Playwright/ux-audit harness, not
+  the bridge.** The bridge's proven vetr capability today is *reading the welcome
+  screen and proving an auth seed took*, not walking the funnel.
+- `js` runs in an **ISOLATED world**: `window` state does **not** survive between
+  calls (`window.__x = …` then reading it back returns nothing), and a returned
+  **Promise is not awaited** (`async` expressions come back empty). Use one
+  self-contained synchronous expression, or `curl` the API directly.
+
 ## Other traps
 
 - **`wake` every page.** The SPA boots hidden in a bridge-opened tab and a
@@ -164,10 +212,18 @@ logged-out walk never sees it.
 
 ## What the browser bridge is FOR here (and what it is not)
 
-The Playwright suite is the regression gate: 28 spec files, and **most of it
-self-skips** without the hermetic env — a bare `npm run e2e` resolves roughly 25
-passed / 35 skipped. Nothing runs it automatically (GitHub Actions is dark
-org-wide; Tekton runs only `vitest`/`typecheck`/`a11y`).
+The Playwright suite is the regression gate: 28 spec files, 55 static `test()`
+calls (viewport-parameterized describes multiply that). **Its coverage depends
+entirely on the env**: a bare `npm run e2e` resolves ~25 passed / 35 skipped,
+because every authed spec self-skips without the `E2E_*` vars. Under the full
+hermetic stack it is **53 passed / 7 skipped / 0 failed** (measured 2026-08-27,
+10.7m). Nothing runs it automatically — GitHub Actions is dark org-wide and
+Tekton runs only `vitest`/`typecheck`/`a11y`.
+
+⚠ On the **laptop**, `~/.config/vetr/authnet.env` holds PROD creds while the
+harness forces `ANET_ENDPOINT=sandbox`, so `e2e:mint-tokens` fails the card
+provision with `E00007` and leaves `owner_has_saved_card:false`. The saved-card
+specs then self-skip. Do not read a green laptop run as covering them.
 
 So the bridge's job is the **exploratory half the suite does not cover**:
 reproducing a UX report, walking a flow with no spec (pool decline/expire,
