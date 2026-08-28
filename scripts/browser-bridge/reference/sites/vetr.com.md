@@ -308,7 +308,11 @@ Read the named flags **before** the `z9999` array — the array alone is ambiguo
 2. **`splash`** ⇒ the brand splash. 🔴 **It matches the `z9999` filter too** —
    `splash.tsx:108` is `fixed … z-[9999]` — and its `textContent` is **"Vetr"**, so
    without this flag you would read it as an unknown modal and go looking for a
-   dismiss that does not exist. It clears itself; wait it out.
+   dismiss that does not exist. It has no dismiss — but **do not just "wait it
+   out"**: it self-clears on a time floor only on a **landing** entry. On any other
+   entry it also waits for `isFetching === 0`, so a hung query keeps it up
+   indefinitely (see the splash-timing table above). If it does not clear, the
+   question is which query is stuck, not which overlay this is.
 3. **`toast`** ⇒ a toast is live. That div is only rendered while at least one toast
    exists, so its presence is a binary answer — and it will *also* appear in `z9999`.
 4. **A `z9999` entry reading "Timezone Mismatch Detected"** ⇒ the modal above; the
@@ -326,9 +330,11 @@ Read the named flags **before** the `z9999` array — the array alone is ambiguo
 
 The first row is why the `splash` flag exists: the splash really does land in `z9999`
 with the text **"Vetr"**, and without the flag you would read it as an unnamed modal.
-⚠ **Not verified: the toast-present case** — no toast could be triggered on demand
-(the interceptor's are gated off, see below), so step 3's *positive* half rests on
-the library's behaviour, not a measurement here.
+⚠ **Not verified: the toast-present case.** The *interceptor* toasts cannot be
+triggered (gated off — see below), and no action-handler toast was exercised, so
+step 3's *positive* half rests on the library's behaviour rather than a measurement
+here. Toasts **are** reachable in Lane A by clicking; if you exercise one, add the
+row.
 
 ⚠ **Keep the strict `=== "9999"`.** Measured on the same page, a regex
 (`/9999/.test(zIndex)`) returns **an extra element**: `PullToRefresh.tsx:183`,
