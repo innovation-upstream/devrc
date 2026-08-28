@@ -16,27 +16,36 @@ gap that trace found — the autonomous `browser agent` is BLIND to `site_notes`
 registered host it runs without that site's flow notes.
 
 ## State now
-- **All three PRs MERGED and verified BY CONTENT** (a squash never makes the head an
-  ancestor, so ancestry lies — never verify one that way):
-  - **#940** `880786cf` — the `site_notes` gap: SKILL.md sentence, `reference/agent.md`
-    section, `browser_tool_impl.mjs` rationale, 3 guarded tests.
-  - **#956** `c6b9b77e` — this handoff doc.
-  - **#957** `c1bf2ad9` — rank 1 closed. Doc now 206 lines on `origin/main`.
-- **#956 and #957 both merged CLEANLY through the gate** (`devrc-pytests` +
-  `devrc-nodetests` both `success`, no bypass). Only #940 was bypassed.
-- Base clone `~/workspace/devrc` re-synced `--ff-only` to `c1bf2ad9`, working tree clean,
-  in sync with `origin/main`. **All session worktrees removed**; scratch files deleted.
-- #940 was merged with `devrc-pytests` RED by operator instruction. Mechanism:
-  `enforce_admins` lifted → `--admin` squash → `enforce_admins` restored **and verified**.
-  Required checks stayed in force for non-admins throughout. Snapshot:
-  `<scratchpad>/main-protection-backup.json`.
-- **4 audit rounds ran on #940, each found real findings; round 5 never run** (operator
-  chose to merge). Rounds 1–4: 6🟡, 3, 3, 1 — three of the four rounds' findings were
-  introduced *by the previous round's fix*.
-- ⚠ **`devrc-pytests` runs take ~21–26 min.** Measured three times: 21m (#940's earlier
-  commit), ~24m (#956), ~26m (#957). Budget a watcher accordingly — a 30-min poll loop
-  nearly expired on #957, and a watcher timeout prints something that *looks* like a
-  failing check but is not.
+- **Branch / PR:** `devrc` `main` @ `9bc7f5eb`, clean, in sync with `origin/main`.
+  **devrc#966 MERGED** (squash `9bc7f5eb`, 2026-08-28) — verified BY CONTENT, never by
+  ancestry: all three files present on `origin/main` and `vetr.com.md`'s blob OID is
+  identical to the branch tip. Worktree removed; base clone fast-forwarded `--ff-only`.
+- **DONE — the site-notes registry has its first new entry since #940.**
+  `scripts/browser-bridge/reference/sites/vetr.com.md` (29,331 B) + the `_index.json`
+  key, plus the generic `elementFromPoint` off-viewport trap relocated into
+  `reference/css-hit-test.md` where every host gets it. 12 commits, 3 files, +517/−2.
+  Gate green on the final head with real counts: `devrc-nodetests` 1295/1295,
+  `devrc-pytests` 17824 passed / 2 skipped / 0 failed.
+- **`SKILL.md` NOT touched** — re-measured **12,028 B**, unchanged, so rank 3's 10-byte
+  slack is exactly as the prior doc left it. The site-notes design (SKILL.md names the
+  DIRECTORY, never a site) is what let a 29 KB file ship without moving that number.
+- **vetr E2E coverage traced and MEASURED**, which was the session's original ask:
+  28 spec files / 55 static `test()` calls in `vetr-app/e2e/`, plus two sibling
+  harnesses (`tests/e2e/a11y-gate/` ratchet, `tests/e2e/ux-audit/` 15-view walk).
+  Coverage is entirely env-dependent: **~25 passed / 35 skipped bare** vs
+  **53 passed / 7 skipped / 0 failed** under the hermetic stack (10.7 min). Nothing runs
+  it automatically — Actions quota-dark org-wide, Tekton runs only
+  `vitest`/`typecheck`/`a11y` + `vetr-api-pest`.
+- **Deploy/verify status — LIVE and verified end-to-end.** Resolving against the
+  INSTALLED clone (what the running bridge reads, `_SITES_DIR` is hardcoded there):
+  `vetr.com`/`app.`/`api.`/`admin.vetr.com` → `reference/sites/vetr.com.md`;
+  `notvetr.com`, `127.0.0.1`, `localhost` → `''`; positive control `civitai.com` still
+  hits. No bridge restart was needed, as the mtime+size stamp invalidation predicts.
+- 🔴 **Extension markers MOVED during this session — the prior doc's warning fired.**
+  Measured 2026-08-28 at handoff time: deployed **`b817ef1e88267a40`**; `work`
+  `e1ee86a50a811d40` **stale**, `personal` `04bbd6f9c695141d` **stale**. Earlier in the
+  SAME session `work` read `stale: false` against a deployed `e1ee86a50a811d40`. Both
+  readings were true when taken. Re-read at the moment you act; do not carry the hex.
 
 ## Open investigations — live diagnosis state
 
@@ -121,38 +130,94 @@ resolution was originally closed on a SINGLE data point and said so.
   than a flaky test — two greens are consistent with both. The claim to carry forward is
   the narrow one: **nothing broken from #940 is sitting on `main`.**
 
+### A reused browser-bridge tab stops rendering the vetr SPA (root cause UNKNOWN)
+- **Symptom + exact repro:** after ~8 `nav`s in one bridge-owned tab, every vetr route
+  renders nothing — app shell present, `textContent` only the react-router bootstrap
+  script. Reproduced on `/choose-experience` (logged-OUT, 4 green Playwright tests
+  against the same origin), `/user`, `/user/appointments`; 6+ attempts, `--wake` up to
+  10s, `localStorage.clear()`. **A `close` + fresh `open` of the SAME url renders
+  everything immediately.**
+- **Observed (with values):** stalled tab shows `HydrateFallback`
+  (`vetr-app/app/root.tsx:377-398`) — `data-testid="app-boot-skeleton"`,
+  `aria-hidden="true"`, `className="relative flex h-dvh flex-col"`, **exactly 3
+  children**, no text nodes. That is the pre-hydration paint, i.e. the JS bundle never
+  executed. On a fresh tab the same URLs return
+  `{boot:false, splash:true, toast:false, z9999:["Vetr"]}` then the full authed
+  dashboard (1232 chars) with the complete query fan-out.
+- **Ruled out** (do NOT re-run these): **server** — all paths return an identical
+  5176-byte SPA-fallback `index.html`, 200, `cmp` clean · **throttling** — `activate`d
+  the tab, `visibilityState: visible`, animations advancing, still stalled · **seeded
+  keys** — `localStorage.clear()` reproduces · **the token** — verified server-side ·
+  **GTM/Brave Shields** — `TagManager.initialize` is try/caught non-fatal
+  (`root.tsx:288`) · **the error boundary** — renders a visible "Oops!" (`root.tsx:400`)
+  · **the brand splash** — it renders the literal text "Vetr" and these reads had zero
+  `innerText`.
+- **Leading hypothesis:** none worth defending. It is a bridge/tab-lifecycle issue, not
+  a vetr defect — Playwright renders these routes green against the same origin.
+- **Next probe:** on the next occurrence, before closing the tab, capture
+  `performance.getEntriesByType("resource").filter(r=>/\.js$/.test(r.name))` and compare
+  the module-chunk set against a working tab's. That distinguishes "chunk never
+  requested" from "requested and never executed", which is the fork nothing so far has
+  separated.
+
+### The toast branch of the vetr overlay discriminator is UNMEASURED
+- **Symptom + exact repro:** n/a — a coverage gap, not a bug.
+- **Observed:** the *negative* half is measured — with no toast live,
+  `.Toastify__toast-container` is absent and the always-mounted wrapper is a
+  `<section class="Toastify">`, so it never enters the snippet's `div` filter.
+- **Ruled out:** triggering it via the axios interceptor — both interceptor toasts are
+  gated on `config?.toastr`, and vetr-api's `GET /config` sends no such key (0 matches
+  across `vetr-api/{app,config,routes}` with a positive control that fires).
+- **Leading hypothesis:** the library renders the container div only while ≥1 toast is
+  live, making presence a binary answer.
+- **Next probe:** in Lane A, click any action handler that raises a toast (~14 non-test
+  files call `toast.*`), then re-run the discriminator and add the row to
+  `vetr.com.md`'s results table.
+
 ## Next steps (ranked)
 
-1. ✅ **RESOLVED 2026-08-27 — settle the `devrc-pytests` red.** Answered free by #956's
-   own check, then corroborated by #957's. Nothing broken on `main`. Kept at rank 1 with
-   its number intact so any live `claim-work` slug still resolves; nothing to do.
-2. **Reload the browser-bridge extension in BOTH Brave profiles** (repo: none — operator
-   action, an agent cannot do it). Both `work` and `personal` report
+🔴 Ranks 1–4 keep their numbers so any live `claim-work` slug still resolves.
+
+1. ✅ **RESOLVED 2026-08-27 — the `devrc-pytests` red.** Unchanged; nothing to do.
+2. **Reload the browser-bridge extension in BOTH Brave profiles** (repo: none —
+   operator action, an agent cannot do it). 🔴 **Re-confirmed 2026-08-28 and now MORE
+   stale than the prior doc recorded:** deployed marker moved to `b817ef1e88267a40`, so
+   `work` (`e1ee86a50a811d40`) AND `personal` (`04bbd6f9c695141d`) both report
    `extension_stale: true`. Fix: `brave://extensions` → **Remove** → **Load unpacked**
    `~/.local/share/browser-bridge-ext/` (a ↻ reload is unreliable — the long-poll keeps
-   the old worker alive). **Verify: `browser whoami` → require `extension_stale: false`;
-   `null` = undecidable, NOT ok.**
-   🔴 **The MARKER VALUES below are a 2026-08-27 SNAPSHOT, not constants — do not assert
-   them.** Measured then: loaded `04bbd6f9c695141d`, deployed `e1ee86a50a811d40`, both
-   reporting version `0.8.1` (the case a version compare cannot see); loaded code predated
-   2026-08-24, missing `b20b7835` (#797) and `b242fc2d` (#814), both bounded-hang fixes —
-   so the symptom is a wedged op, not an error. **IN FLIGHT: devrc#950 touches
-   `extension/build_id.js`, so the DEPLOYED marker changes when it lands.** Re-read both
-   values from `browser whoami` at the moment you act; the `extension_stale` verdict is
-   the durable check, the hex strings are not.
-3. **Decide the SKILL.md byte budget** (repo: devrc; file
-   `scripts/browser-bridge/SKILL.md`). **12,028 B** against the **12,038 B** enforced
-   ceiling = **10 bytes of slack** (was 77 before #940). The next edit larger than that
-   fails `test_skill_md_keeps_working_headroom`. `skill-audit.py` says "no prune needed"
-   (a BYTES verdict) and the staleness pass came back clean, so nothing was churned.
-   Demotion candidates, each with an existing sidecar home: `text` row 383 B →
-   `read-envelopes.md`; `wake` row 361 B → `spa-wake.md`; `screenshot` row 343 B → a new
-   topic. Any one buys 200–300 B. Closes when a demotion PR merges, or the operator says
-   in writing that 10 bytes is acceptable.
-4. **Optional: round 5 delta audit of the merged #940** (repo: devrc; file
-   `scripts/browser-bridge/reference/agent.md`). Rounds 1–4 each found something real and
-   round 5 was skipped by operator choice. Scope is prose in one file; no code path ships
-   behaviour change. Closes when a round returns no findings, or the operator declines.
+   the old worker alive). **Verify: `browser whoami` → `extension_stale: false` on both;
+   `null` = undecidable, NOT ok.** Do not assert the hex values — re-read them at the
+   moment you act; they moved once already inside a single session.
+   🔴 **Carried forward from the 2026-08-27 entry, because it is the durable half:** the
+   stale build predated 2026-08-24 and was missing `b20b7835` (#797) and `b242fc2d`
+   (#814), both bounded-hang fixes — **so the symptom of a stale extension is a WEDGED
+   OP, not an error.** Both profiles report version `0.8.1` while differing in build,
+   which is exactly the case a version compare cannot see. The missing-commit list is
+   itself a snapshot and is now a floor, since the deployed marker has moved again.
+3. **Decide the SKILL.md byte budget** (repo: devrc; `scripts/browser-bridge/SKILL.md`).
+   Unchanged by this session — **re-measured 12,028 B** against the 12,038 B ceiling,
+   **10 bytes of slack**. Demotion candidates and their sidecar homes are in the prior
+   entry. Closes when a demotion PR merges, or the operator says in writing that 10
+   bytes is acceptable.
+4. **Optional: round 5 delta audit of the merged #940** (repo: devrc;
+   `scripts/browser-bridge/reference/agent.md`). Unchanged.
+5. **Measure the toast row of the vetr discriminator** (repo: devrc; file
+   `scripts/browser-bridge/reference/sites/vetr.com.md`). The only branch of the shipped
+   procedure that rests on library behaviour rather than a measurement, and the file
+   says so. Recipe is in the "Open investigations" block above. Closes when the results
+   table carries a toast-present row.
+6. **Root-cause the tired-tab stall** (repo: devrc, `scripts/browser-bridge/`). See the
+   investigation block for the six eliminations already paid for and the one probe that
+   separates the remaining fork. Closes when the mechanism is named in
+   `reference/spa-wake.md` (it is bridge-generic, not vetr-specific), or when an
+   operator dismisses it in writing as not worth chasing.
+7. **Consider adding `vetr.com` to `CLIENT_DOMAINS`** (repo: devrc;
+   `scripts/testlib/client_host_scan.py:78-81`). devrc is PUBLIC and `vetr.com` is not
+   in the redaction list, so nothing flagged that `vetr.com.md` names a real business's
+   live payment rail and admin login URL. **Operator ruled 2026-08-28: "disclosure is
+   not severe, ignore"** — so this is NOT a defect to fix, and the file stays as
+   merged. Listed only so the next session does not re-raise it. Closes as already
+   decided.
 
 ## Gotchas / decisions / dead-ends
 
@@ -212,27 +277,61 @@ resolution was originally closed on a SINGLE data point and said so.
 - ⚠ **`gh pr merge --auto` is unavailable on this repo** (`Auto merge is not allowed for
   this repository`), so merge-when-green must be a watcher, not a GitHub feature.
 
+- 🔴 **Eight audit rounds on #966, and EVERY round found a real defect introduced by the
+  previous round's fix.** All were the same class: *a confidently-stated wrong mechanism
+  or over-broad absolute*, always in newly-added explanatory prose, never in the
+  citations. Round 3 was strictly a regression — it replaced a correct "unexplained"
+  with a wrong explanation. Severity decayed monotonically (round 1: a false safety
+  claim about real money; round 8: an unbounded "wait it out").
+- 🔴 **THE fix that broke the cycle: run the instrument.** Seven rounds *reasoned* about
+  what a DOM query returns and produced seven false claims. The round that **ran** it
+  produced zero, and correctly retracted a prior round for a reason no source-reading
+  reaches: **Chromium clamps an out-of-range `z-index` to the 32-bit max.** Measured on
+  a live page — `"999999999999"` → `"2147483647"`, which `/9999/` does NOT match. The
+  source says one number, the browser says another. **When an exclusion depends on what
+  an instrument COMPUTES rather than what the source SAYS, run the instrument.**
+- 🔴 **An instrument change invalidates the exclusions derived under the old
+  instrument.** Rounds 1–6 established "the splash is `pointer-events-none`, so a
+  hit-test never returns it" — true. Round 6 swapped to a computed-style DOM query,
+  where `pointer-events` is irrelevant, and carried the exclusion across unchanged. The
+  splash matched, its text is "Vetr", and it fell through to "a different modal".
+- **The one edit shape that never introduced a defect in 8 rounds: a pure NARROWING**
+  (adding a qualification to an absolute). That is why the ladder stopped at round 8
+  rather than running a 9th to confirm two narrowings.
+- **Withdrawn mid-session:** an early finding that "every non-root vetr route renders
+  blank in a bridge tab" and that the drive lane was unusable. It was a tired tab. The
+  drive lane works — fresh tab, seed, second `nav` lands the full authed dashboard.
+- **`innerText` / button-counts / `elementFromPoint` are all bad blankness detectors**
+  and each gave a confident wrong answer here: `innerText` needs layout and returns `""`
+  on an occluded tab; the chooser renders three role cards and counts 0 `button,a`;
+  `elementFromPoint` returns `null` for an OFF-VIEWPORT point, identical to "covered"
+  (vetr's off-canvas menu sits at `x = -249`). The last one is now generic, in
+  `reference/css-hit-test.md`.
+- **Registry routing is HOST-based, so the hermetic lane never surfaces these notes.**
+  `127.0.0.1`/`localhost` resolve to nothing — i.e. the only lane allowed to click is
+  the lane that will never hand you the file. Load it deliberately; and the autonomous
+  `browser agent` never sees `site_notes` at all (the #940 gap).
+- **`e2e:mint-tokens` REVOKES every prior `e2e` token** (`E2EMintTokens.php:77`), so a
+  re-mint 401s the tab you already seeded and it reads logged-OUT.
+- **Laptop `~/.config/vetr/authnet.env` holds PROD creds** while the harness forces
+  `ANET_ENDPOINT=sandbox` → `e2e:mint-tokens` fails the card provision with `E00007`
+  and leaves `owner_has_saved_card:false`, silently self-skipping the saved-card specs.
+
 ## How to verify
+
 ```bash
-# 1. both PRs landed, by CONTENT (a squash is never an ancestor — ancestry would lie)
-git -C ~/workspace/devrc fetch origin
-git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/SKILL.md | grep -c 'never sees'   # 1
-git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/browser_tool.test.mjs | grep -c 'SITE NOTES'  # 3
-git -C ~/workspace/devrc show origin/main:claudedocs/handoff-browser-agent-site-notes.md | wc -l   # ~182+
-gh pr view 940 --repo innovation-upstream/devrc --json state,mergeCommit   # MERGED / 880786cf
-gh pr view 956 --repo innovation-upstream/devrc --json state,mergeCommit   # MERGED / c6b9b77e
+# 1. the entry is live in the INSTALLED clone (what the running bridge reads)
+cd ~/workspace/devrc/scripts/browser-bridge && nix develop --command python3 -c "
+import sys; sys.path.insert(0,'.')
+import server as S
+for h in ['civitai.com','vetr.com','app.vetr.com','admin.vetr.com','notvetr.com','127.0.0.1']:
+    print(f'{h:16} -> {S._site_notes_path(h)!r}')"
+# expect: civitai.com (POSITIVE CONTROL) and the three vetr hosts hit; the last two ''.
 
-# 2. branch protection really was restored after #940's bypass
-gh api repos/innovation-upstream/devrc/branches/main/protection \
-  --jq '{enforce_admins:.enforce_admins.enabled, contexts:.required_status_checks.contexts}'
-# expect: enforce_admins true, both tekton contexts
+# 2. the registry ledger is intact (negative control: drop the entry -> this goes RED)
+cd ~/workspace/devrc/scripts/browser-bridge && nix develop --command \
+  python3 -m pytest tests/test_site_notes.py tests/test_skill_size.py -q     # expect 75 passed
 
-# 3. the guards actually guard (each mutant must go RED with its OWN assertion)
-nix-shell -p nodejs --run \
-  "node --test ~/workspace/devrc/scripts/browser-bridge/tests/browser_tool.test.mjs"   # 91 pass
-#   mutants: forward site_notes in the `upload` branch; make summarizeResult return ""
-#   for every op but context; reword OR MOVE the SKILL.md sentence out of ## FIRST DECISION.
-
-# 4. the byte ceiling
-python3 ~/workspace/devrc/scripts/skill-audit.py ~/workspace/devrc/scripts/browser-bridge/SKILL.md
+# 3. the squash landed BY CONTENT (ancestry is false forever after a squash)
+git -C ~/workspace/devrc cat-file -e origin/main:scripts/browser-bridge/reference/sites/vetr.com.md && echo present
 ```
