@@ -94,6 +94,62 @@ push to that branch: several repos (devrc among them) forbid committing there at
 all, so it names the preserve-on-a-topic-branch route instead. A wrong pasteable
 command is worse than a descriptive one.
 
+## §C — one doc per effort, and the forcing function (2026-08-28)
+
+Meta-work was re-measured at ~23% → ~29% of output tokens. Notably **`devrc`'s
+own share FELL** (19.5% → 17.4%), so the tooling is not the runaway; the growth
+is in **documenting of work**. 20 of 70 commits to `homelab-talos` in three days
+were handoff docs, and a prior audit found 538 docs created in 15 days, 98 of
+them rewritten 3+ times. Operator's call: **no cap on meta-work — tooling IS the
+product — but cap the documenting.** Two rules, both enforced in
+`scripts/lib/handoff_doc.py` (rules i and j there) rather than stated here.
+
+### Why the topic slug is the key, and why nothing fuzzy-matches
+
+`--topic` already decides the path, so "same effort" is answered by "same slug".
+MEASURED over the 123 real `claudedocs/handoff-*.md` in devrc + homelab-talos:
+
+```
+55 of 123 (44%) carry a full ISO date in the slug
+collapsing by date:  remix-session x8 (homelab-talos)
+                     browser-bridge x3 (devrc)
+                     activity-telemetry, agent-setup-audit,
+                     insights-telemetry-unify, repo-cos-precision-iteration  x2
+```
+
+Every one is the same effort wearing a new filename. So a dated topic is refused
+with **no bypass** — under a one-doc-per-effort rule a date in the slug has no
+legitimate use, and a bypass would be taken every time.
+
+The second arm cannot be made crisp and is not pretended to be. Whether
+`remix-session` and `remix-hardening-session` are one effort is a judgement, and
+🔴 **no similarity heuristic is attempted** — it would be the clever-inference
+guard the standing rules forbid, and wrong in both directions on that exact
+pair. What IS deterministic: creating the N+1th doc stops being the *silent
+default*. The caller is shown the list and must pass `--new-effort`.
+
+### Why `forcing: none` is accepted rather than refused
+
+Rule (j) breaks the self-generating loop: each session's handoff manufactures
+the next session's queue, so the work never runs out and none of it was ever
+asked for by anything outside the loop. The vocabulary is a **closed
+allowlist**, which is what a rewording cannot walk — `RULES.md` is right that a
+*blocklist* of self-referential phrases would be defeated by any synonym, but an
+allowlist refuses anything outside it by default. There is deliberately no
+`followup`, `cleanup`, `polish` or `tech-debt`; their absence is what forces a
+self-generated item onto `none`, where it is counted.
+
+Refusing `none` outright would not delete those items — it would teach sessions
+to type `incident` falsely, moving the population underground where nothing can
+measure it. Measured baseline for that population: of **384 ranked items across
+83 docs**, only **89 (23%)** cite a PR, issue or `IN FLIGHT` marker of any kind.
+
+🔴 **Two things this does NOT do.** It cannot check that a cited forcing function
+is real or genuinely external — the enumeration is structural, the evidence
+beside it is prose. And the *"does not get worked"* half is **not enforced**:
+this module writes the doc, it does not consume the queue. The skip belongs in
+`/resume` step 6 and `claim-work`, and is not implemented.
+
 ## Why findings append and the status header does not
 
 The status / next-steps block is current state: two of them in one doc is a

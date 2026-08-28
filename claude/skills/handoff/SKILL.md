@@ -11,6 +11,8 @@ Goal: capture everything needed to continue this work in a fresh session with **
 
 Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topic from the current work.
 
+🔴 **ONE DOC PER EFFORT, UPDATED IN PLACE — the slug IS the key** (operator, 2026-08-28). **Never date the topic** (a dated slug is per-session by construction — next session's date differs); **never mint a fresh slug for an effort that already has a doc.** Step 5 refuses both and names the fix. 📖 `~/.claude/skills/handoff/reference/write-gate.md` §C.
+
 ## Steps
 
 1. **Snapshot live state** (don't trust memory — observe):
@@ -90,8 +92,9 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    - **Next probe:** the single most useful command/observation to run next, written so it can be executed verbatim.
 
    ## Next steps (ranked)
-   1. ...
-   2. ...
+   1. ... forcing: incident — <the external signal, with its evidence>
+   2. ... forcing: none
+   🔴 **EVERY item MUST carry `forcing: <kind>`** or step 5 refuses (`status=unforced`). CLOSED vocabulary: `incident`, `user`, `gate`, `deadline`, `regression`, `security`, `none` — an unrecognised kind is refused, so there is no `followup`/`tech-debt` to hide under. **EXTERNAL = an incident, a person's request, a failing gate, a deadline, a measured regression, a security exposure — NOT the previous session's ranked list.** `forcing: none` is the honest opt-out: **accepted and counted, and not eligible to be worked.** ⚠ The tool cannot check a cited forcing function is real or external — it makes the claim mandatory and greppable, nothing more.
    🔴 **This list is a WORK QUEUE, and `claim-work` is its LOCK** — every
    `/resume` session draws from it, so a *better* ranked list produces *more*
    duplicate work, not less. **NUMBER the items and keep the numbering stable:
@@ -148,6 +151,8 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    🔴 **`This replace DROPS N line(s) that look DURABLE` — a WARNING, never a refusal.** Durable content under a REPLACE heading (usually `State now`) is deleted on the next update, and in a long diff a stale-status `-` line looks exactly like a measured-finding `-` line. So the tool classifies the deletions **above** the diff, with base line numbers. **Nothing is blocked and no exit code changes** — replacing stale status is the ordinary case. When it fires, either move that line under an APPEND heading or carry it forward. 🔴 **It is a FLOOR: a silent run is NOT evidence that nothing durable was dropped** — read the diff anyway.
 
    `status=proposed` ⇒ the diff is on screen and nothing has been written: not the doc, not a commit, not a ref. `no-advance` (4) and `no-change` (5) print **no diff at all** — a session that went nowhere gets no offer, not an empty one — report the line and stop.
+
+   🔴 **Three refusals enforce the 2026-08-28 cap. All write NOTHING, each prints its own fix, and re-running after fixing your scratch file is safe.** `status=dated-topic` (7) — dated slug ⇒ per-session doc; **no bypass exists**, re-run without the date. `status=new-doc` (7) — no doc for this topic and the repo has others, which it lists; if one IS this effort re-run with ITS topic — 🔴 `--new-effort` asserts genuine newness, it is **not a way past the list**. `status=unforced` (8) — a ranked item names no forcing function or an unrecognised kind. ⚠ `forcing: none` items print an **advisory** above the diff; the write proceeds.
 
    🔴 **Exit 3 usually means nothing was written — but READ THE MESSAGE, because one arm of it committed.** Usually the rollback unlinks a NEW doc entirely, so the session's handoff exists only in your scratch file. **The exception announces itself**: when the commit landed and a later step failed, the run prints a note saying so and telling you not to re-run — re-running would append your findings a second time. 🔴 **So `status=failed` is not by itself "nothing happened", and neither is exit 3 a reliable tell** — a bad `--repo` or an unreadable `--update` exits 3 printing no `status=` line at all, and `push-failed` uses exit 3 too. **Keep the scratch file until you have seen a commit sha**, name its path in your report if step 5 never lands, and delete it once the commit exists.
 

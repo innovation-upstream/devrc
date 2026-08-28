@@ -111,8 +111,15 @@ UPDATE_DOC = f"""## State now
 ## Open investigations — live diagnosis state
 {NEW_FINDING_C}
 ## Next steps (ranked)
-1. Watch the drain rate for a day.
+1. Watch the drain rate for a day. forcing: gate — the load soak blocks the release
 """
+
+# 🔴 The fixture BASE_DOC's ranked items carry NO `forcing:` field, ON PURPOSE.
+# Rule (j) reads the UPDATE, never the merged doc, so a repo full of legacy
+# untagged items must keep updating cleanly — a gate that refused on history
+# would be red on every established repo, which `claude/RULES.md` calls worse
+# than no gate. `test_legacy_base_items_are_not_retroactively_refused` is the
+# guard, and it can only be honest while the base above stays untagged.
 
 
 # Hermetic git: the sandbox and the dev host must behave the same, so no global
@@ -252,8 +259,9 @@ def update_file(tmp_path: Path) -> Path:
 
 
 def run_tool(repo: Path, *extra: str, update: Path | None = None, advanced: str | None
-             = "the drain loop is fixed and the at-max reading was corrected"):
-    argv = [sys.executable, str(TOOL), "--repo", str(repo), "--topic", "sample-topic"]
+             = "the drain loop is fixed and the at-max reading was corrected",
+             topic: str = "sample-topic"):
+    argv = [sys.executable, str(TOOL), "--repo", str(repo), "--topic", topic]
     if update is not None:
         argv += ["--update", str(update)]
     if advanced is not None:
@@ -2628,10 +2636,15 @@ class TestBlockedCommitLeavesNoTrace:
         assert not doc.exists()
         self._block_commits(repo)
 
+        # `--new-effort` is rule (i-b)'s assertion, added 2026-08-28: this repo
+        # already carries `handoff-sample-topic.md`, so creating a SECOND doc is
+        # now refused (exit 7) unless the caller says it is a new effort. Here it
+        # genuinely is — this test is about the ROLLBACK path, and without the
+        # flag the run would never reach the commit it needs to see refused.
         res = subprocess.run(
             [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
              "brand-new-topic", "--update", str(update_file), "--advanced",
-             "a first-ever handoff for this topic", "--confirm"],
+             "a first-ever handoff for this topic", "--new-effort", "--confirm"],
             capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
         )
 
@@ -3289,3 +3302,344 @@ class TestRuleHDidNotMoveTheExitCodes:
         res = run_tool(work, update=noop)
         assert res.returncode == hd.EXIT_NO_CHANGE, res.stdout + res.stderr
         assert STALE_HEAD not in res.stdout + res.stderr
+
+
+# --------------------------------------------------------------------------
+# rules (i) and (j) — one doc per effort, and a forcing function per rank
+# (operator decision 2026-08-28; see the module docstring and
+#  claude/skills/handoff/reference/write-gate.md §C)
+# --------------------------------------------------------------------------
+
+FORCED_UPDATE = """## State now
+- Branch / PR: `feat/sample` / #99
+
+## Next steps (ranked)
+1. Watch the drain rate for a day. forcing: gate — the load soak blocks the release
+"""
+
+
+def write_delta(tmp_path: Path, name: str, text: str) -> Path:
+    """A named delta file. NAMED per-test rather than reusing `update.md`,
+    because several tests in this class write two different deltas in one
+    tmp_path and a shared name would let one silently read the other's bytes."""
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+class TestADatedTopicIsRefused:
+    """Rule (i-a). A slug carrying a date names a PER-SESSION doc: next
+    session's date differs, so it can never be updated in place.
+
+    🔴 RED AT `origin/main` — before this change every case below exited 0 and
+    wrote the doc. That is the regression this class covers, and it is why the
+    write-nothing assertions hash the whole tree rather than checking the file.
+    """
+
+    @pytest.mark.parametrize(
+        "topic,token",
+        [
+            ("browser-bridge-2026-08-01", "2026-08-01"),   # devrc spelling: trailing
+            ("2026-07-18-remix-session", "2026-07-18"),    # homelab spelling: leading
+            # 🔴 the token is `2026`, not `2026-07`: the year-month arm was
+            # DELETED as a dead predicate (see `_TOPIC_DATE`), and the bare-year
+            # arm catches this spelling. Asserting `2026-07` here would have
+            # passed either way — the refusal echoes the topic, which contains
+            # it — which is how the redundant arm stayed invisible.
+            ("remix-2026-07-session", "2026"),             # year-month spelling
+            ("q3-2026-cleanup", "2026"),                   # bare year
+        ],
+        ids=["trailing-iso", "leading-iso", "year-month", "bare-year"],
+    )
+    def test_every_dated_spelling_in_the_corpus_is_refused(
+        self, repo: Path, update_file: Path, topic: str, token: str
+    ) -> None:
+        before = tree_hash(repo)
+        res = run_tool(repo, update=update_file, topic=topic)
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, res.stdout + res.stderr
+        assert "status=dated-topic" in res.stderr
+        assert token in res.stderr, "the refusal must name the date it found"
+        assert tree_hash(repo) == before, "a refusal wrote something"
+
+    def test_the_refusal_names_the_undated_topic_to_use(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """A refusal with no pasteable fix is one people work around."""
+        res = run_tool(repo, update=update_file, topic="2026-07-18-remix-session")
+        assert "--topic remix-session" in res.stderr, res.stderr
+
+    def test_new_effort_does_NOT_bypass_a_dated_topic(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE BYPASS TEST. `--new-effort` is rule (i-b)'s assertion; if it
+        also let a dated slug through, the crisp half of the rule would be
+        one flag away from inert — and that flag is right there in the OTHER
+        refusal's remedy text, so a session would find it."""
+        before = tree_hash(repo)
+        res = run_tool(
+            repo, "--new-effort", update=update_file, topic="remix-2026-08-01"
+        )
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT
+        assert "status=dated-topic" in res.stderr
+        assert tree_hash(repo) == before
+
+    def test_an_undated_topic_is_NOT_refused(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 POSITIVE CONTROL. A guard that refuses everything is not a guard,
+        and `_TOPIC_DATE` is a regex over a caller-supplied string — the
+        cheapest place for an over-broad pattern to hide."""
+        res = run_tool(repo, update=update_file, topic="sample-topic")
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+    @pytest.mark.parametrize(
+        "topic", ["h2-planning", "ipv6-rollout", "s3-403-triage", "phase-2-store"]
+    )
+    def test_ordinary_numbers_in_a_slug_are_not_dates(self, topic: str) -> None:
+        """The over-broad direction, at four points. A slug is allowed to carry
+        digits — `h2`, `ipv6`, `403`, `phase-2` — and a pattern that ate them
+        would make the rule unpredictable at the moment a session obeys it."""
+        assert hd.topic_carries_a_date(topic) is None
+
+
+class TestASecondDocForAnExistingEffortIsRefused:
+    """Rule (i-b). Creating the N+1th doc stops being the SILENT DEFAULT.
+
+    🔴 WHAT THIS DOES NOT CLAIM: it does not detect that two slugs are the same
+    effort. No fuzzy match is attempted or wanted. What it pins is that the
+    caller is shown the list and must make an explicit assertion.
+    """
+
+    def test_a_new_topic_is_refused_and_lists_what_exists(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        before = tree_hash(repo)
+        res = run_tool(repo, update=update_file, topic="remix-hardening-session")
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, res.stdout + res.stderr
+        assert "status=new-doc" in res.stderr
+        assert "handoff-sample-topic.md" in res.stderr, (
+            "the refusal must LIST the existing docs — without the list it is a "
+            "block with no way to comply, and --new-effort becomes reflexive"
+        )
+        assert tree_hash(repo) == before
+
+    def test_new_effort_lands_it(self, repo: Path, update_file: Path) -> None:
+        """The assertion works — otherwise the rule bans new efforts outright."""
+        res = run_tool(repo, "--new-effort", update=update_file, topic="genuinely-new")
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+    def test_updating_an_EXISTING_doc_never_asks(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE SILENCE THAT MATTERS. The ordinary path — updating in place —
+        is the behaviour this whole change is trying to make normal, so it must
+        not acquire a flag. If this ever fails, the rule is inverted."""
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=new-doc" not in res.stdout + res.stderr
+
+    def test_the_FIRST_doc_in_a_repo_needs_no_flag(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE BOOTSTRAP CASE, and the one an over-eager rule would break.
+        A repo with no handoff docs at all has no effort to duplicate, so
+        `existing` is empty and the question is never asked. Requiring
+        `--new-effort` here would gate the one case that is unambiguously
+        correct."""
+        origin = tmp_path / "origin.git"
+        _sh("git", "init", "-q", "--bare", "-b", "main", str(origin), cwd=tmp_path)
+        work = tmp_path / "fresh"
+        work.mkdir()
+        _sh("git", "init", "-q", "-b", "main", cwd=work)
+        for k, v in (("user.name", "T"), ("user.email", "t@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=work)
+        _sh("git", "remote", "add", "origin", str(origin), cwd=work)
+        (work / "README.md").write_text("fresh\n", encoding="utf-8")
+        _sh("git", "add", "--", "README.md", cwd=work)
+        _sh("git", "commit", "-q", "-m", "seed", cwd=work)
+
+        res = run_tool(work, update=update_file, topic="first-effort")
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+
+class TestARankedItemMustNameAForcingFunction:
+    """Rule (j). The closed vocabulary is the structural half; the truth of the
+    evidence beside it is NOT checkable and is not claimed to be."""
+
+    def test_an_untagged_item_is_refused_and_writes_nothing(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        upd = write_delta(
+            tmp_path, "untagged.md",
+            "## Next steps (ranked)\n1. Re-read the retry wrapper.\n",
+        )
+        before = tree_hash(repo)
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "status=unforced" in res.stderr
+        assert "Re-read the retry wrapper" in res.stderr, "name the offending item"
+        assert tree_hash(repo) == before
+
+    def test_a_kind_outside_the_vocabulary_is_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE POINT OF AN ALLOWLIST. `followup` is precisely the label a
+        self-generated item reaches for, and it is refused BY DEFAULT rather
+        than by being enumerated as banned — which is what a rewording cannot
+        walk around."""
+        upd = write_delta(
+            tmp_path, "followup.md",
+            "## Next steps (ranked)\n1. Tidy the docs. forcing: followup\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "'followup'" in res.stderr, "say WHAT was typed, or it cannot be fixed"
+
+    def test_the_refusal_prints_the_whole_vocabulary(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """A closed set the caller cannot see is a guessing game."""
+        upd = write_delta(
+            tmp_path, "vocab.md", "## Next steps (ranked)\n1. Do a thing.\n"
+        )
+        res = run_tool(repo, update=upd)
+        for kind in hd.EXTERNAL_FORCING_KINDS:
+            assert kind in res.stderr, f"{kind} missing from the printed vocabulary"
+
+    @pytest.mark.parametrize("kind", sorted(hd.EXTERNAL_FORCING_KINDS))
+    def test_every_external_kind_is_accepted(
+        self, repo: Path, tmp_path: Path, kind: str
+    ) -> None:
+        """🔴 POSITIVE CONTROL, PER MEMBER. A set constant is exactly the place a
+        typo survives a green suite: one unreachable member would refuse an item
+        the skill's own vocabulary told the author to write."""
+        upd = write_delta(
+            tmp_path, f"kind-{kind}.md",
+            f"## Next steps (ranked)\n1. Do the thing. forcing: {kind} — evidence\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+    def test_forcing_none_is_ACCEPTED_and_reported(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 Refusing `none` would not delete self-generated items — it would
+        teach sessions to type `incident` falsely, moving the population
+        underground. So it lands, and it is COUNTED where a reader sees it."""
+        upd = write_delta(
+            tmp_path, "none.md",
+            "## Next steps (ranked)\n1. Refactor the parser. forcing: none\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+        assert "forcing: none" in res.stdout and "NO external forcing" in res.stdout
+        assert "Refactor the parser" in res.stdout
+
+    def test_the_self_generated_block_is_SILENT_when_every_item_is_external(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The ordinary run must not carry a reassuring "0 self-generated" line —
+        `dropped_durable_report`'s stated reason, applied to the same shape."""
+        res = run_tool(repo, update=update_file)
+        assert "NO external forcing" not in res.stdout
+
+    def test_legacy_base_items_are_not_retroactively_refused(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE PERMANENTLY-RED-GATE GUARD, and the reason rule (j) reads the
+        UPDATE rather than the merge. `BASE_DOC`'s two ranked items carry no
+        `forcing:` field — as every one of the 384 real ranked items in the
+        corpus does not. If this ever fails, the rule became a gate that no
+        established repo can pass, which `claude/RULES.md` calls worse than no
+        gate at all."""
+        assert "forcing:" not in BASE_DOC, (
+            "the fixture stopped being legacy, so this test proves nothing"
+        )
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == 0, res.stdout + res.stderr
+
+    def test_an_update_with_no_next_steps_section_is_not_asked(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """Omitting a section leaves it ALONE (the merge's contract), so an
+        update that touches no ranks changes no ranks and must not be gated."""
+        upd = write_delta(
+            tmp_path, "nosteps.md",
+            "## State now\n- Branch / PR: `feat/sample` / #101\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+
+    def test_a_numbered_line_inside_a_FENCE_is_not_a_ranked_item(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """Fence awareness, for the reason `split_sections` has it: a handoff
+        pastes numbered output constantly, and a sample log line is not a work
+        item to be tagged."""
+        upd = write_delta(
+            tmp_path, "fenced.md",
+            "## Next steps (ranked)\n"
+            "1. Watch the drain rate. forcing: incident — paging since 09:00Z\n"
+            "```\n1. this is sample output, not a rank\n2. neither is this\n```\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert len(hd.ranked_items(upd.read_text(encoding="utf-8"))) == 1
+
+    def test_a_nested_numbered_line_is_not_a_rank(self) -> None:
+        """The ranks are half a claim's identity (`claim-work --slug-for <doc>
+        <rank>`), so counting a sub-item as a rank would re-point live claims."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix it. forcing: gate — CI red\n"
+            "    1. sub-step, not a rank\n"
+        )
+        assert [i.rank for i in hd.ranked_items(text)] == ["1"]
+
+    def test_items_outside_a_next_steps_heading_are_not_asked(self) -> None:
+        """Scoped to the queue. A numbered list under `## Goal` is prose."""
+        assert hd.ranked_items("## Goal\n1. ship the thing\n") == []
+
+
+class TestRulesIAndJDidNotMoveTheOtherExits:
+    """INVARIANT GUARDS — not regression coverage, and labelled so.
+
+    The new refusals sit BEFORE rules (d) and (h) in `main()`, which is exactly
+    the shape that silently steals another rule's exit code.
+    """
+
+    def test_no_advance_is_still_4_on_an_undated_existing_doc(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        res = run_tool(repo, update=update_file, advanced="nothing")
+        assert res.returncode == hd.EXIT_NO_ADVANCE, res.stdout + res.stderr
+
+    def test_no_change_is_still_5(self, repo: Path, tmp_path: Path) -> None:
+        noop = write_delta(
+            tmp_path, "noop2.md",
+            "## Goal\nMake the sample subsystem stop dropping work under load.\n",
+        )
+        res = run_tool(repo, update=noop)
+        assert res.returncode == hd.EXIT_NO_CHANGE, res.stdout + res.stderr
+
+    def test_the_new_codes_do_not_collide_with_the_old(self) -> None:
+        codes = [
+            hd.EXIT_OK, hd.EXIT_USAGE, hd.EXIT_FAIL, hd.EXIT_NO_ADVANCE,
+            hd.EXIT_NO_CHANGE, hd.EXIT_BEHIND, hd.EXIT_DOC_PER_EFFORT,
+            hd.EXIT_UNFORCED,
+        ]
+        assert len(set(codes)) == len(codes), f"exit codes collide: {codes}"
+
+    def test_none_is_in_the_vocabulary_but_not_in_the_external_set(self) -> None:
+        """`EXTERNAL_FORCING_KINDS` is DERIVED. If it ever became a second
+        literal list, a kind added to one and not the other would silently
+        un-count items — the N-sites-wrong-at-N-1 shape."""
+        assert "none" in hd.FORCING_KINDS
+        assert "none" not in hd.EXTERNAL_FORCING_KINDS
+        assert hd.EXTERNAL_FORCING_KINDS < hd.FORCING_KINDS

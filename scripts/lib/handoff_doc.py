@@ -146,6 +146,70 @@ h. A BASE THAT IS THE WRONG DOCUMENT SAYS SO, LOUDLY. Rule (g)'s bucket line was
    heuristic tells fire on 0 and 1 of them. The rejected looser variants and
    their rates are recorded at `CANONICAL_HEADING_PREFIXES`.
 
+i. ONE DOC PER EFFORT, UPDATED IN PLACE — AND THE TOPIC SLUG IS THE KEY. Operator
+   decision 2026-08-28, on a re-measurement of meta-work: `devrc`'s own share
+   FELL (19.5% -> 17.4%), so the tooling is not the runaway — the growth is in
+   DOCUMENTING of work. 20 of 70 commits to `homelab-talos` in three days were
+   handoff docs; a prior audit found 538 docs created in 15 days, 98 of them
+   rewritten 3+ times. The cap is therefore on the documenting, not on the
+   tooling, and it is TWO refusals here rather than a paragraph in the skill:
+
+     i-a. A `--topic` CARRYING A DATE IS REFUSED, unconditionally and with no
+        escape flag. This is the crisp half and it needs no inference at all: a
+        slug with a date in it is BY CONSTRUCTION a per-session doc, because
+        next session's date differs and the doc can therefore never be updated
+        in place. MEASURED over the 123 real `claudedocs/handoff-*.md` in devrc
+        + homelab-talos: 55 (44%) carry a full ISO date. Collapsing them by
+        stripping the date exposes the duplication the rule exists to stop —
+        `remix-session` x8 in homelab-talos, `browser-bridge` x3 in devrc,
+        four more 2x families. Every one is the same effort wearing a new
+        filename. There is deliberately NO bypass: a date in a handoff topic
+        has no legitimate use under a one-doc-per-effort rule, and a bypass
+        would be taken every time.
+
+     i-b. CREATING A DOC IN A REPO THAT ALREADY HAS HANDOFF DOCS REQUIRES
+        `--new-effort`, and the refusal LISTS the existing docs, newest first.
+        This is the half that cannot be made crisp, and it is not pretended
+        otherwise: "is this the same effort as one of those?" is a judgement,
+        and 🔴 NO FUZZY MATCH IS ATTEMPTED — a similarity heuristic here would
+        be exactly the clever-inference guard the operator's standing rule
+        forbids, and it would be wrong in both directions on slugs like
+        `remix-session` / `remix-hardening-session`. What IS deterministic is
+        that creating the N+1th doc stops being the SILENT DEFAULT: the caller
+        is shown the list and must make an explicit assertion. A session that
+        genuinely starts a new effort types one flag; a session that was about
+        to mint `remix-session-2` sees `remix-session` in the list first.
+
+j. A RANKED NEXT-STEP MUST NAME AN EXTERNAL FORCING FUNCTION. Same decision, and
+   it is the half that breaks the self-generating loop: each session's handoff
+   manufactures the next session's queue, so the work never runs out and none of
+   it was ever asked for by anything outside the loop. So every numbered item in
+   a `## Next steps` section the update brings must carry `forcing: <kind>`,
+   `<kind>` drawn from a CLOSED enumeration (`FORCING_KINDS`) that contains no
+   member a previous handoff can satisfy — there is no `followup`, no
+   `ranked-list`, no `handoff`. An untagged item or an unrecognised kind is a
+   refusal naming the item and printing the vocabulary.
+
+   🔴 WHAT THIS DOES *NOT* DO, stated here rather than discovered later. It
+   cannot check that the cited forcing function is REAL, or that it is genuinely
+   EXTERNAL. `forcing: incident — the queue is down` is accepted from a session
+   inventing it. The enumeration is structural; the evidence beside it is prose
+   and is not verifiable by any check this module could run. What it buys is
+   that the claim becomes MANDATORY, ATTRIBUTABLE and GREPPABLE, and that the
+   closed vocabulary gives a self-generated item no honest label to hide under.
+
+   🔴 SO `none` IS A MEMBER OF THE SET, ON PURPOSE. Refusing self-generated items
+   outright would not delete them — it would teach sessions to type `incident`
+   falsely, moving the failure underground where nothing can count it. `forcing:
+   none` is accepted, and every run that carries one prints a block naming those
+   items as declared self-generated and NOT eligible to be worked. That makes the
+   population measurable, which is the precondition for capping it.
+
+   ⚠ AND THE "DOES NOT GET WORKED" HALF IS NOT ENFORCED HERE. This module is the
+   doc's writer, not the queue's consumer; the skip belongs in `/resume` step 6
+   and `claim-work`, and is NOT implemented. What ships here is the declaration
+   those consumers would need to read.
+
 EXIT CODES
   0  proposed (diff shown, nothing written) — or written/pushed under --confirm.
      `written` WITHOUT `--push` also reports the branch and that it is not pushed
@@ -153,6 +217,9 @@ EXIT CODES
   3  operational failure (unreadable input, git refused) — nothing written
   4  no-advance      — rule (d), no diff printed
   5  no-change       — merge is a no-op, no diff printed, no empty commit
+  6  behind          — --push and the remote moved; nothing written
+  7  doc-per-effort  — rule (i): a dated topic, or an unasserted new doc
+  8  unforced        — rule (j): a ranked item names no forcing function
 """
 
 from __future__ import annotations
@@ -209,6 +276,244 @@ bitten this repo twice (2026-08-06, 2026-08-09).
 Refusing BEFORE the write keeps the tool's existing property — a failure writes
 nothing — instead of trading it for a commit the caller has to know how to undo.
 """
+
+EXIT_DOC_PER_EFFORT = 7
+"""Rule (i). The doc's IDENTITY is wrong: a dated topic, or an unasserted new doc.
+
+Two statuses share this code the way `failed` and `push-failed` share 3 — they
+are one class ("this run would create a doc that should not exist") with two
+different remedies. Nothing is written on either.
+"""
+
+EXIT_UNFORCED = 8
+"""Rule (j). A ranked next-step names no forcing function. Nothing is written."""
+
+
+# --- rule (i): one doc per effort --------------------------------------------
+#
+# 🔴 THE TOPIC SLUG IS THE KEY, and it is a key the CALLER SUPPLIES rather than
+# one this module infers. That is the whole design: `--topic` already decides the
+# path (`claudedocs/handoff-<topic>.md`), so "same effort" is answered by "same
+# slug" and by nothing else. No similarity metric, no token overlap, no embedding
+# — a fuzzy match would be wrong in both directions on the real corpus and would
+# make the rule unpredictable at the moment a session is trying to obey it.
+
+# i-a. A date ANYWHERE in the slug. Both spellings occur in the corpus and the
+# rule must catch both: devrc trails it (`browser-bridge-2026-08-01`) while
+# homelab-talos leads with it (`2026-07-18-remix-session`). The bare-year arm
+# catches `handoff-q3-2026-cleanup`, which the ISO arm alone would let through.
+#
+# 🔴 TWO ARMS, NOT THREE — and the third was DELETED after the mutation battery
+# scored it SURVIVED. A `\d{4}-\d{2}(?!\d)` year-month arm sat between these two
+# and no test could tell whether it was there: for `remix-2026-07-session` it
+# matched `2026-07` while the bare-year arm matches `2026`, so BOTH arms reach
+# the same verdict and differ only in the token the refusal quotes. That is the
+# dead-predicate shape `remote_has_commits_we_lack` already records in this file
+# ("two branches reaching one outcome cannot be told apart by any test"). The
+# only input it would have caught alone is a year outside 19xx/20xx — a slug like
+# `1888-07-notes` — which no handoff doc in either corpus carries. Deleting it
+# costs no coverage: `test_every_dated_spelling_in_the_corpus_is_refused` still
+# refuses that spelling, through the arm that remains.
+_TOPIC_DATE = re.compile(r"\d{4}-\d{2}-\d{2}|(?<!\d)(?:19|20)\d{2}(?!\d)")
+
+#: How many rows any of rules (i)/(j)'s listings show before eliding — the
+#: existing-docs list, the unforced items and the self-generated items alike.
+#: Each is an aid to recognising what to fix, not an inventory: devrc alone has
+#: 77 handoff docs, and 77 lines of filenames would bury the remedy under
+#: itself. Same reasoning as `DROPPED_SHOWN_MAX`, one number rather than three
+#: so the three blocks cannot drift into different shapes.
+EXISTING_SHOWN_MAX = 12
+
+
+def topic_carries_a_date(topic: str) -> str | None:
+    """The date-looking token in this topic slug, or None. Rule (i-a).
+
+    One place, so the CLI refusal and the tests ask the same question — the
+    `advance_is_real` pattern.
+    """
+    m = _TOPIC_DATE.search(topic)
+    return m.group(0) if m else None
+
+
+def existing_handoff_docs(repo: Path) -> list[str]:
+    """Every `claudedocs/handoff-*.md` in this repo, NEWEST FIRST.
+
+    Newest first because the doc a session is about to duplicate is
+    overwhelmingly the one it or a recent session last touched — putting it at
+    the top is what makes the list scannable rather than merely complete.
+
+    Sorted by mtime with the NAME as a tiebreak, so the order is deterministic
+    in a fixture repo where every file is written in the same second. A
+    non-deterministic list would make the refusal's own text untestable.
+    """
+    docs = (repo / "claudedocs").glob("handoff-*.md")
+    try:
+        return [
+            p.name
+            for p in sorted(docs, key=lambda p: (-p.stat().st_mtime, p.name))
+        ]
+    except OSError:
+        return []
+
+
+# --- rule (j): a ranked item names an external forcing function ---------------
+#
+# 🔴 A CLOSED ENUMERATION, WHICH IS THE PART A REWORDING CANNOT WALK. `RULES.md`
+# warns that "a guard on WORDS is walkable by REWORDING", and it is right about a
+# BLOCKLIST — a list of self-referential phrases to reject would be defeated by
+# any synonym. This is the inverted shape: an ALLOWLIST the author must pick from.
+# Rewording buys nothing, because a kind outside the set is refused by default.
+#
+# What each member asserts, and every one of them is a thing OUTSIDE this loop:
+#   incident    something is broken or degraded in a live system, now
+#   user        a person asked for it — the operator, a customer, a colleague
+#   gate        a check that is failing or blocking: CI, a test, an alert, review
+#   deadline    a dated commitment to someone outside this session
+#   regression  a measured behaviour change against a previous measurement
+#   security    an exposure, a vulnerability, a leaked or rotating credential
+#   none        🔴 NOT AN EXTERNAL FUNCTION — a DECLARATION that there is none.
+#
+# 🔴 THERE IS DELIBERATELY NO `followup`, `handoff`, `cleanup`, `polish` OR
+# `tech-debt`. Those are the labels a self-generated item would reach for, and
+# their absence is what forces such an item onto `none`, where it is counted.
+FORCING_KINDS: frozenset[str] = frozenset(
+    {"incident", "user", "gate", "deadline", "regression", "security", "none"}
+)
+
+#: The kinds that assert something outside the loop — `FORCING_KINDS` minus the
+#: honest opt-out. Derived, never a second literal list: adding a kind above and
+#: forgetting it here is exactly the drift that would silently un-count items.
+EXTERNAL_FORCING_KINDS: frozenset[str] = FORCING_KINDS - {"none"}
+
+#: The field key, in the same spirit as `CLAWGATE_TASK_KEY` — a NAMED FIELD, not
+#: a keyword the predicate hunts for in prose.
+FORCING_KEY = "forcing"
+
+_FORCING = re.compile(rf"\b{FORCING_KEY}:\s*([A-Za-z-]+)", re.IGNORECASE)
+
+# A TOP-LEVEL numbered item. The indent bound is what keeps a nested `1.` inside
+# an item's own sub-list from being counted as a rank of its own — the ranks are
+# half a claim's identity (`claim-work --slug-for <doc> <rank>`), so miscounting
+# them would re-point live claims.
+_RANKED_ITEM = re.compile(r"^ {0,3}(\d+)[.)]\s+(\S.*)$")
+
+NEXT_STEPS_PREFIX = "next steps"
+
+
+class RankedItem(typing.NamedTuple):
+    """One numbered next-step, and the forcing kind it declared (if any)."""
+
+    rank: str
+    text: str
+    kind: str | None
+    """Lowercased declared kind, or None when the item carries no field at all.
+    A kind OUTSIDE `FORCING_KINDS` is reported as declared — the caller needs to
+    see what was typed in order to fix it."""
+
+    @property
+    def is_declared(self) -> bool:
+        return self.kind in FORCING_KINDS
+
+
+def ranked_items(text: str) -> list[RankedItem]:
+    """Every top-level numbered item under a `## Next steps` heading of `text`.
+
+    🔴 READS THE UPDATE, NEVER THE MERGED DOC, and the choice is load-bearing in
+    both directions. `Next steps` is a REPLACE-bucket heading, so the update's
+    items ARE the doc's items — checking the update is checking what lands. And
+    checking the MERGE would refuse on legacy items the base already carries,
+    turning rule (j) into a permanently-red gate on every repo with history,
+    which `claude/RULES.md` names as worse than no gate.
+
+    Fence-aware via `_unfenced`, for the reason `split_sections` is: a handoff
+    routinely pastes a numbered list inside a code block, and a sample command is
+    not a work item.
+    """
+    _fm, body = split_front_matter(text)
+    _pre, secs = split_sections(body)
+    out: list[RankedItem] = []
+    for heading, section_body in secs:
+        if not heading_text(heading).lower().startswith(NEXT_STEPS_PREFIX):
+            continue
+        for _idx, line in _unfenced(section_body):
+            m = _RANKED_ITEM.match(line)
+            if not m:
+                continue
+            found = _FORCING.search(line)
+            out.append(
+                RankedItem(m.group(1), m.group(2), found.group(1).lower() if found else None)
+            )
+    return out
+
+
+FORCING_VOCAB_LINE = (
+    "  Tag each item `forcing: <kind>` — one of: "
+    + ", ".join(sorted(EXTERNAL_FORCING_KINDS))
+    + ".\n"
+    "  `forcing: none` is the honest opt-out for an item nothing outside this "
+    "loop asked for. It is ACCEPTED and counted, not refused — but an item "
+    "carrying it is not eligible to be worked."
+)
+
+
+def unforced_report(items: typing.Sequence[RankedItem]) -> str:
+    """Rule (j)'s refusal text, or "" when every ranked item declared a kind."""
+    bad = [i for i in items if not i.is_declared]
+    if not bad:
+        return ""
+    rows = [
+        f"  {i.rank}. {_clip(i.text, 96)}"
+        + (f"   [unknown kind: {i.kind!r}]" if i.kind is not None else "   [no forcing: field]")
+        for i in bad[:EXISTING_SHOWN_MAX]
+    ]
+    elided = len(bad) - len(rows)
+    if elided:
+        rows.append(f"  … and {elided} more.")
+    return "\n".join(
+        [
+            f"status=unforced",
+            f"NOTHING WRITTEN — not the doc, not a commit, not a ref.",
+            f"{len(bad)} of {len(items)} ranked next-step(s) name no forcing "
+            f"function. Operator decision 2026-08-28: a ranked item that names "
+            f"no EXTERNAL forcing function does not get worked, so it does not "
+            f"get written down as a rank.",
+            *rows,
+            FORCING_VOCAB_LINE,
+            "  🔴 EXTERNAL means an incident, a person's request, a failing "
+            "gate, a deadline, a measured regression or a security exposure — "
+            "NOT the previous session's ranked list. That loop is what this "
+            "refusal exists to break: each handoff manufacturing the next "
+            "session's queue is how the work never runs out and none of it was "
+            "ever asked for.",
+        ]
+    )
+
+
+SELF_GENERATED_NOTE = (
+    "  These are ACCEPTED and the write proceeds — declaring one honestly is the "
+    "point. They are not eligible to be worked: a session picking from this "
+    "queue should skip them and do something an external signal asked for."
+)
+
+
+def self_generated_report(items: typing.Sequence[RankedItem]) -> str:
+    """Rule (j)'s advisory block for `forcing: none` items, or "".
+
+    Silent when there are none, for `dropped_durable_report`'s stated reason: a
+    reassuring "0 self-generated items" on every run is a line that gets skimmed
+    and then read as a guarantee.
+    """
+    none_items = [i for i in items if i.kind == "none"]
+    if not none_items:
+        return ""
+    return "\n".join(
+        [
+            f"🔴 {len(none_items)} of {len(items)} ranked next-step(s) declare "
+            f"`{FORCING_KEY}: none` — NO external forcing function:",
+            *[f"  {i.rank}. {_clip(i.text, 96)}" for i in none_items[:EXISTING_SHOWN_MAX]],
+            SELF_GENERATED_NOTE,
+        ]
+    )
 
 # Rule (c). A section whose heading starts with one of these is DIAGNOSIS STATE
 # and appends; everything else is CURRENT STATE and is replaced. Matching is on
@@ -1547,6 +1852,14 @@ def build_parser() -> argparse.ArgumentParser:
         "offered and nothing is written (rule d).",
     )
     p.add_argument(
+        "--new-effort",
+        action="store_true",
+        help="rule (i-b): assert that this topic is a genuinely NEW effort and "
+        "not a second doc for one that already has one. Required only when the "
+        "doc does not exist AND the repo already has handoff docs; the refusal "
+        "lists them so the right one can be updated instead.",
+    )
+    p.add_argument(
         "--confirm",
         action="store_true",
         help="land it: write the doc and make exactly one commit of that path. "
@@ -1580,6 +1893,58 @@ def main(argv: list[str] | None = None) -> int:
     relpath = f"claudedocs/handoff-{args.topic}.md"
     doc = repo / relpath
 
+    # ---- rule (i): is this the RIGHT DOCUMENT to be writing at all? ----------
+    # 🔴 ASKED BEFORE RULE (d), and the order is deliberate: rule (d) asks
+    # whether this doc's CONTENT advanced, which is only a meaningful question
+    # once the doc is the right one. A dated topic that also went nowhere should
+    # be told about the date — re-running it with a better `--advanced` would
+    # otherwise "fix" it into creating the per-session doc.
+    dated = topic_carries_a_date(args.topic)
+    if dated:
+        print(
+            f"status=dated-topic\n"
+            f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+            f"  `--topic {args.topic}` carries a date ({dated}), so it names a "
+            f"PER-SESSION document: next session's date differs, so this doc can "
+            f"never be updated in place and a second one gets created instead.\n"
+            f"  Operator decision 2026-08-28: ONE handoff doc per effort, updated "
+            f"in place. Drop the date — `--topic "
+            f"{_TOPIC_DATE.sub('', args.topic).strip('-_') or '<effort>'}` — and "
+            f"the existing doc for this effort will be found and updated.\n"
+            f"  🔴 There is no flag to bypass this. MEASURED over the 123 real "
+            f"handoff docs in devrc + homelab-talos: 55 (44%) carry a date, and "
+            f"collapsing them by date exposes `remix-session` x8 and "
+            f"`browser-bridge` x3 — the same effort, once per session.",
+            file=sys.stderr,
+        )
+        return EXIT_DOC_PER_EFFORT
+
+    if not doc.exists() and not args.new_effort:
+        existing = existing_handoff_docs(repo)
+        if existing:
+            shown = existing[:EXISTING_SHOWN_MAX]
+            elided = len(existing) - len(shown)
+            print(
+                "status=new-doc\n"
+                "NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+                f"  {relpath} does not exist, and this repo already has "
+                f"{len(existing)} handoff doc(s). Creating a second doc for an "
+                f"effort that already has one is the thing the one-doc-per-effort "
+                f"rule caps (operator decision 2026-08-28).\n"
+                "  If one of these IS this effort, re-run with its topic — the "
+                "update lands in place and nothing is lost:\n"
+                + "\n".join(f"    {name}" for name in shown)
+                + (f"\n    … and {elided} more." if elided else "")
+                + "\n  If this really is a NEW effort, say so: re-run with "
+                "`--new-effort`.\n"
+                "  🔴 No similarity matching is done here on purpose — whether "
+                "two slugs are the same effort is a judgement, and a heuristic "
+                "guess would be wrong in both directions. This refusal exists to "
+                "put the list in front of you, not to decide for you.",
+                file=sys.stderr,
+            )
+            return EXIT_DOC_PER_EFFORT
+
     # ---- rule (d): the advance question, asked BEFORE anything is computed ---
     if not advance_is_real(args.advanced):
         print(
@@ -1598,6 +1963,16 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"cannot read --update: {exc}", file=sys.stderr)
         return EXIT_FAIL
+
+    # ---- rule (j): every ranked next-step names a forcing function ----------
+    # Read from the UPDATE, so legacy items already in the base are never
+    # retroactively refused — see `ranked_items`. An update that brings no
+    # `Next steps` section at all touches no ranks and is not asked the question.
+    items = ranked_items(update_text)
+    unforced = unforced_report(items)
+    if unforced:
+        print(unforced, file=sys.stderr)
+        return EXIT_UNFORCED
 
     base_text = doc.read_text(encoding="utf-8") if doc.exists() else ""
     if base_text:
@@ -1646,6 +2021,11 @@ def main(argv: list[str] | None = None) -> int:
     warning = dropped_durable_report(report.dropped)
     if warning:
         print(warning)
+    # Rule (j)'s advisory half, beside the other two and for the same reason:
+    # above the diff, because it is a statement about what the diff is adding.
+    self_generated = self_generated_report(items)
+    if self_generated:
+        print(self_generated)
     print(diff, end="" if diff.endswith("\n") else "\n")
 
     if not args.confirm:
