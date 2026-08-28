@@ -154,7 +154,9 @@ independently (`/api/auth/me` → `E2E Owner`, id 1, tz `UTC`).
 `root.tsx` compares the profile timezone against the device timezone on boot and
 can open a **`fixed inset-0 z-[9999]` overlay** (`FeedbackModalRenderer.tsx:35`).
 It intercepts every click, so the page reads fine and every input op silently
-does nothing.
+does nothing. ⚠ That renderer is **shared by ten `<FeedbackModal>` callers** — this
+modal is identified by its **title**, never by its z-index (see "`z-index: 9999`
+does NOT identify the timezone modal" below).
 
 **Measured, both controls.** WITHOUT the opt-out: the modal fires — "Timezone
 Mismatch Detected / Your device timezone (America/Winnipeg) doesn't match…" — its
@@ -231,23 +233,37 @@ Conflating these produced two wrong findings in a row, in opposite directions.
 | text | **none** (`aria-hidden`) | renders **"Vetr"** as `<span>` per letter |
 | when | before the JS bundle executes | **after** hydration, first visit per tab (`sessionStorage.splashSeen`, a raw key — no Capacitor prefix) |
 | holds for | until hydration | **depends on the ENTRY path, not on auth** — see below |
-| blocks clicks | it *is* the page | **no** — `pointer-events-none`, so a hit-test can **never** return it. A `z-9999` element that *does* block is the timezone modal above, not this |
+| blocks clicks | it *is* the page | **no** — `pointer-events-none`, so a hit-test can never return it. But do **not** infer the converse: see below |
 
 🔴 **The splash's duration is keyed on LANDING vs non-landing — never on authed
 vs logged-out.** `landingEntry` is the **entry** URL matching
 `LANDING_PREFIXES = ["/user/vets", "/user/servicers", "/user/shop"]`
 (`splash.tsx:17`), captured once at first mount:
 
-| entry | floor | waits for in-flight queries? |
-|---|---|---|
-| **landing** (`/user/vets/:id`, `/user/servicers…`, `/user/shop…`) | **300ms** (`LANDING_FLOOR_MS`, `:18,39`) | **no** — `navigation.state === "idle"` only (`:60-61`) |
-| anything else (incl. `/auth/login`, `/user`) | **2000ms** (`minimumVisibleTime`, `:29`) | **yes** — `&& isFetching === 0` (`:62`) |
+Matching is exact-or-slash (`:20-22`), so `/user/vetsomething` does **not** count.
+`debounceMs` (200, `:29`) is added to **both** branches (`:70,78` —
+`remaining + debounceMs`), so the real floors are:
+
+| entry | constant | **real floor** | waits for in-flight queries? |
+|---|---|---|---|
+| **landing** (`/user/vets/:id`, `/user/servicers…`, `/user/shop…`) | 300ms (`LANDING_FLOOR_MS`, `:18,39`) | **500ms** | **no** — `navigation.state === "idle"` only (`:60-61`) |
+| anything else (incl. `/auth/login`, `/user`) | 2000ms (`minimumVisibleTime`, `:29`) | **~2200ms** | **yes** — `&& isFetching === 0` (`:62`) |
 
 Note both landing paths are **authed** routes, so an auth-keyed rule would get them
-exactly backwards. Add `debounceMs` 200 (`:78`) and a 500ms fade (`:97`): the real
-non-landing floor is ~2.2s, and `[data-testid=brand-splash]` **stays in the DOM at
-`opacity-0` for ~500ms after it looks gone** — and `opacity:0` text still counts in
-`innerText`.
+exactly backwards. The floors are minimums, not durations — a non-landing entry
+waits as long as queries stay in flight.
+
+`landingEntry` is captured **once at first mount** from the entry URL
+(`useRef`, `:36-38`), so navigating in or out of a landing route later does **not**
+change the behaviour. `<Splash />` is rendered with no props
+(`GeneralComponents.tsx:10`), so the `:29` defaults are what actually apply.
+
+⚠ **The testid outlives the visible splash by the 500ms fade.** `visible→false`
+applies `opacity-0` and arms a 500ms unmount timer at the same moment (`:94-100`,
+`transition-opacity duration-500`), so for that 500ms
+`[data-testid=brand-splash]` is still in the DOM, mid-fade — and its text still
+counts in `innerText`, because nothing sets `display:none`, `visibility:hidden` or
+`aria-hidden` on it.
 
 🔴 **The brand `Splash` is LIVE — do not read anywhere that it was removed.** An
 earlier revision of this file claimed it "was *replaced* by" the skeleton, citing
@@ -261,8 +277,36 @@ This matters operationally because **the remedy above is "open a fresh tab"** �
 and a fresh tab is exactly the case that gets the brand splash: an opaque
 full-viewport orange→lime overlay which, on a **non-landing** entry, holds ~2.2s
 *and* waits for every in-flight query. That is the state most easily mistaken for a
-stall. On a **landing** entry it is a 300ms flash instead — so the same walk looks
+stall. On a **landing** entry it is a ~500ms flash instead — so the same walk looks
 different depending only on which URL you entered at.
+
+### 🔴 `z-index: 9999` does NOT identify the timezone modal
+
+An earlier revision of this file said a `z-9999` blocker "is **always** the timezone
+modal". **False, and it sends you to a remedy that cannot work.** `z-[9999]` +
+`pointer-events: auto` is the **shared** `FeedbackModalRenderer` backdrop
+(`FeedbackModalRenderer.tsx:35`) — the timezone modal (`root.tsx:334`) is just *one*
+of **ten** `<FeedbackModal>` callers. The others include the exact surfaces this file
+routes you to:
+
+- `routes/user/vets/vet-view.tsx:1764` — `/user/vets/:id`, the landing route above
+- `routes/user/bookings/booking-checkout.tsx:88` and
+  `routes/user/appointments/appointment-checkout.tsx:143` — the checkout screens the
+  gateway trap below sends you into
+- plus `bookings/index.tsx`, `appointments/index.tsx`, `servicer-service-view.tsx`,
+  `my-pets-create.tsx`, `pages/contact.tsx`, `professional-report.tsx`,
+  `PetOwnerHomeBookingCard.tsx`
+
+And a **separate** z-9999 blocker that is not a `FeedbackModal` at all:
+`components/UpdateApp.tsx:9` (`fixed inset-0 z-[9999]`, no `pointer-events-none`),
+rendered from `root.tsx:321`.
+
+🔴 **So read the modal's TITLE, never its z-index.** Only
+"Timezone Mismatch Detected" is cleared by `timezone_mismatch_dismissed`; a
+success/error `FeedbackModal` needs its own dismiss, and `UpdateApp` is a
+force-upgrade screen. What the splash row above *does* license is the one-way
+inference: the splash is `pointer-events-none`, so whatever a hit-test returns, it
+is not the splash.
 
 So, precisely: a read with **zero `innerText`** does rule the brand splash out —
 splash renders text. What it does **not** rule out is stalled hydration, because
@@ -314,7 +358,8 @@ up where it belongs, in `reference/css-hit-test.md`.
   (`app/components/payments/authnet-hosted-add-card.tsx:12-14`), cross-site to the
   app origin. So `--frame` does **not** explain the loss for the one iframe this
   file sends you into. Without `--frame` at all, `js` is **MAIN** world
-  (`service_worker.js:864-871`; `:841-846` under `--wake`).
+  (`service_worker.js:864-871`; under `--wake` the branch is `:849`, asserted in the
+  comment at `:841-846`).
 
   Net: the observation is **still unexplained** for a top-frame call, which is what
   it was made on. `reference/frames-cdp.md:45-46` is authoritative on the split; the
