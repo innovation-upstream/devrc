@@ -2109,6 +2109,15 @@ class Registry:
                  if now - t > INFLIGHT_STALE_S and c not in inst.waiters]
         for c in stale:
             del inst.inflight[c]
+        # A reap's `reaps` entry is only ever meaningful while its `inflight`
+        # entry lives: it is created with one and dropped with one on every
+        # normal exit (reply, cancel, expiry-at-pickup). The one path that leaves
+        # it behind is a reap whose reply is LOST — the residual this feature
+        # already discloses. Without this sweep that entry would outlive the
+        # Instance's usefulness (`instance_id` is stable across a browser
+        # restart), so tie its lifetime to the one that is already bounded.
+        for c in [c for c in inst.reaps if c not in inst.inflight]:
+            del inst.reaps[c]
 
     # --- concurrency backstop (per-instance rate limit + queue-depth cap) --- #
     def _admit_locked(self, inst: Instance):
@@ -2222,14 +2231,24 @@ class Registry:
             # the same inversion is easy to reintroduce from either direction.
             #
             # What survives is a WEAKER residual, stated so nobody re-derives the
-            # stronger claim from this block:
+            # stronger claim from this block. ⚠ THIS LIST IS LOAD-BEARING AND HAS
+            # BEEN INCOMPLETE ONCE — it is where the "what is still broken"
+            # answer is supposed to live, so add to it when you add a bound:
             #   * the reclaim is best-effort — a real `close` op that can fail or
             #     be lost, with no counter for how often;
             #   * a DIFFERENT orphan is still unreclaimed: if `chrome.tabs.create`
             #     hangs and NEVER settles, the op is killed at EXEC_OP_BUDGET_MS
             #     and the abandoned create later produces a tab the extension
             #     never sees, so there is nothing to report. Neither side can
-            #     close that one.
+            #     close that one;
+            #   * CANCELLATION IS PRE-DISPATCH ONLY. Re-owning a tab withdraws a
+            #     reclaim still in the outbox, but once the extension has taken
+            #     it there is nothing to withdraw — one poll round trip in which
+            #     a re-owned tab can still be closed (was unbounded before);
+            #   * AN EXPIRED RECLAIM IS DROPPED, so that orphan is never
+            #     reclaimed at all. A leaked tab, taken deliberately over
+            #     dispatching a stale tabId that a browser restart has reassigned
+            #     to somebody else's tab.
             reuse_tab_id = None
             if op == "open" and session_id is not None and tab is None:
                 reuse_tab_id = self._owned_tab_locked(inst.key, session_id,
@@ -2518,25 +2537,49 @@ class Registry:
         at enqueue time, and a concurrent `open` can hand the same tab back to a
         session before the close is dispatched.
 
-        Only removes entries still sitting in the outbox — once dispatched there
+        Only removes entries still sitting in the OUTBOX — once dispatched there
         is nothing to withdraw, which is a real (much narrower) residual: the
         window is one poll round trip rather than unbounded.
+
+        🔴 AND THAT SCOPE MUST GOVERN THE BOOKKEEPING TOO, WHICH AN EARLIER DRAFT
+        GOT WRONG IN EXACTLY THE WAY THIS DOCSTRING HID. `inst.reaps` holds reaps
+        the extension has ALREADY PICKED UP as well as queued ones. The first
+        version selected from `reaps` and then popped `reaps` + `inflight` for
+        every match, while removing only the queued ones from the outbox — so a
+        cancel landing one poll round trip later erased the bookkeeping of a reap
+        that was still genuinely executing. Two measured harms, both re-opening
+        something this feature had just closed:
+          * the `inflight` entry is what `_effective_timeout_locked` reads to
+            tell a BUSY extension from a wedged one. Dropping it collapsed a
+            `ping`'s deadline from 20.0s to 2.0s while the close was really
+            running — the false wedge `_enqueue_reap_close_locked` adds that line
+            to prevent, and whose documented remedy is restarting the operator's
+            live browser.
+          * the reap's own reply then matched nothing, so `deliver_result`
+            returned False and the reply was logged `result_unknown_id` — the
+            lost-reply tell that branch exists to stop emitting.
+        It also contradicted the sibling path: the EXPIRY drop pops only the one
+        entry it removed, and its test asserts exactly that ("the reap already in
+        flight is still outstanding"). Same invariant, two call sites.
+
+        So the pops below are keyed on what was ACTUALLY REMOVED from the outbox,
+        never on what merely matched the tab.
         """
-        stale = [c for c in inst.reaps
-                 if inst.reaps[c].get("tab_id") == tab_id]
-        if not stale:
+        match = {c for c in inst.reaps
+                 if inst.reaps[c].get("tab_id") == tab_id}
+        if not match:
             return 0
-        drop = set(stale)
-        kept = deque(c for c in inst.outbox if c.get("id") not in drop)
-        removed = len(inst.outbox) - len(kept)
-        inst.outbox = kept
-        for c in stale:
+        withdrawn = {c.get("id") for c in inst.outbox if c.get("id") in match}
+        if not withdrawn:
+            return 0          # all matches are already in flight — leave them be
+        inst.outbox = deque(c for c in inst.outbox
+                            if c.get("id") not in withdrawn)
+        for c in withdrawn:
             inst.reaps.pop(c, None)
             inst.inflight.pop(c, None)
-        if removed:
-            log("owner_orphan_reap_cancel", key=inst.key, tab=tab_id,
-                n=removed)
-        return removed
+        log("owner_orphan_reap_cancel", key=inst.key, tab=tab_id,
+            n=len(withdrawn))
+        return len(withdrawn)
 
     # --- resolution / introspection --------------------------------------- #
     def _live_instances_locked(self):

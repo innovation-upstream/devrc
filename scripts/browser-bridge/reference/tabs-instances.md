@@ -43,10 +43,13 @@ Now each session can own its own tab:
   `open` handing over a sibling's tab was observed for real. A re-`open` by one
   sibling whose probe times out therefore closes the tab the OTHER sibling is
   mid-workflow on. That collision used to be benign; it is not any more. Two
-  things bound it: **re-owning a tab withdraws any reclaim queued for it** (so a
-  sibling's own next `open`, if it reuses that tab, cancels the close), and a
+  things bound it, and neither is absolute: **re-owning a tab withdraws any
+  reclaim still QUEUED for it** (so a sibling's own next `open`, if it reuses that
+  tab, cancels the close — but *not* once the close has been handed to the
+  extension, which leaves one poll round trip in which it still lands), and a
   reclaim not picked up within `INFLIGHT_STALE_S` is **dropped rather than
-  dispatched** — after a Brave restart the same tab id names a different tab.
+  dispatched** — after a Brave restart the same tab id names a different tab, so
+  that orphan is then never reclaimed at all.
   In `extension/service_worker.js`'s `open`, a live
   `reuseTabId` returns `chrome.tabs.get(reuseTabId)` as `{tabId, url, reused: true}`
   and **never calls `chrome.tabs.update`**, so `cmd.url` is never applied and the

@@ -1328,14 +1328,21 @@ Two changes close it:
       ⚠ **Cost:** falling through on a merely *slow* `tabs.get` opens a second tab
       while the first is still live and unowned, i.e. the exact tab leak the reuse
       path exists to prevent. A rare orphaned tab is traded for a
-      guaranteed-terminating op — **and that orphan is now reaped**: `open` closes
-      it itself, on the timeout arm only, *after* the replacement exists, and
-      fire-and-forget (awaiting `chrome.tabs.remove` would add a new unbounded
-      `chrome.*` await to the success path — the very class this bound exists to
-      remove). Best-effort, not a guarantee: the browser-wide stall that hung
-      `tabs.get` can hang `tabs.remove` too, and a *different* orphan — one from a
-      hung `chrome.tabs.create`, whose op is killed at `EXEC_OP_BUDGET_MS` while
-      the abandoned create still settles — is still unreclaimed by design.
+      guaranteed-terminating op — **and that orphan is now reclaimed**: `open`
+      REPORTS it as `orphanTabId` and closes nothing; the SERVER issues the
+      `close`, from the one place that knows the `open` result was delivered.
+      (An earlier revision of this paragraph said `open` "closes it itself,
+      fire-and-forget". That was the FIRST design, superseded — the extension
+      calls `chrome.tabs.remove` **never**, pinned by `service_worker.test.mjs`.
+      Recorded rather than quietly rewritten: this same paragraph, in two files,
+      has now been the stale one twice.) Best-effort, not a guarantee: the
+      reclaim is a real op that can fail or be lost; it is withdrawn if the
+      session re-owns that tab before it is dispatched, and dropped rather than
+      dispatched if it is not picked up within `INFLIGHT_STALE_S`. A *different*
+      orphan — one from a `chrome.tabs.create` that hangs and never settles,
+      whose op is killed at `EXEC_OP_BUDGET_MS` while the abandoned create still
+      produces a tab nobody sees — cannot even be reported, and is unreclaimed by
+      design.
       ⚠ **Evidence, honestly:** unlike (1), there is **no live measurement of a
       hung `chrome.tabs.get`** — this is the same mechanism reasoned about from
       the code (the await is unbounded; the catch is structurally blind to a
@@ -1960,14 +1967,17 @@ per-session (multi-step **workflow**) isolation did not.
   sibling whose probe times out therefore closes the tab the OTHER is mid-workflow
   on. That collision was previously benign; it is not any more.
   ⚠ **The reclaim is not guaranteed, and it is bounded on both sides.** It is a
-  real `close` op that can fail or be lost, and nothing counts how often. Three
-  things ARE structural: it never fires when the `open` result was not delivered
+  real `close` op that can fail or be lost, and nothing counts how often. One
+  thing IS structural: it never fires when the `open` result was not delivered
   (on those paths the old tab is still owned and still usable, so closing it would
-  be the worse error); **re-owning a tab withdraws any reclaim queued for it**, so
-  a second `open` that healthily reuses the tab cancels the close; and a reclaim
-  that has not been picked up within `INFLIGHT_STALE_S` is **dropped rather than
-  dispatched**, because after a Brave restart the same tab id names a different
-  tab.
+  be the worse error). Two more bound it, both with a real edge:
+  **re-owning a tab withdraws any reclaim still QUEUED for it** — so a second
+  `open` that healthily reuses the tab cancels the close, *unless the close has
+  already been handed to the extension*, which leaves a window of one poll round
+  trip; and a reclaim not picked up within `INFLIGHT_STALE_S` is **dropped rather
+  than dispatched**, because after a Brave restart the same tab id names a
+  different tab — so that orphan is then never reclaimed at all, which is the
+  trade deliberately taken over closing a stranger's tab.
 - **Self-heal on a vanished owned tab.** If the user manually closes an owned
   background tab, the next tab-scoped op dispatches the stale tabId and the
   extension returns `owned_tab_gone` (ok:false). The server then **drops** that

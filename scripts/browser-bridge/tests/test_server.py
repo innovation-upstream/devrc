@@ -9935,3 +9935,153 @@ def test_a_reap_reply_is_recognised_not_logged_as_an_unknown_id():
     # A genuinely unknown id still reads as unknown — the control that proves the
     # branch above did not simply make deliver_result answer True to everything.
     assert reg.deliver_result("deadbeefdeadbeef", {"ok": True}) is False
+
+
+def test_cancelling_does_not_disturb_a_reap_ALREADY_IN_FLIGHT():
+    """🔴 CANCELLATION IS SCOPED TO THE OUTBOX, AND THE BOOKKEEPING MUST AGREE.
+
+    `inst.reaps` holds reaps the extension has ALREADY PICKED UP as well as
+    queued ones. An earlier draft selected from `reaps` and then popped
+    `reaps` + `inflight` for every match while removing only the QUEUED ones from
+    the outbox — so a re-`open` landing one poll round trip late erased the
+    bookkeeping of a close that was still genuinely executing.
+
+    Both harms are asserted here, because both re-open something this feature had
+    just closed, and neither is visible from the outbox alone:
+      * `inflight` is what `_effective_timeout_locked` reads to tell a BUSY
+        extension from a wedged one. Dropping it collapses a `ping`'s deadline
+        while the close is really running — the false wedge whose documented
+        remedy is restarting the operator's live browser.
+      * `deliver_result` recognises a reap through `reaps`. Dropping the entry
+        sends its reply down the abandoned-command branch, which logs
+        `result_unknown_id` — the lost-reply tell that branch exists to stop
+        emitting.
+
+    Same invariant the EXPIRY path already asserts ("the reap already in flight
+    is still outstanding"), at the other call site.
+    """
+    # FROZEN clock, so the two deadline reads below are exactly comparable. With
+    # the real monotonic clock they differ by microseconds of elapsed `age` and an
+    # equality assertion fails for a reason that has nothing to do with the bug
+    # (measured: 19.99997930 vs 19.99996640 — while the DEFECT collapses it to
+    # 2.0, i.e. the signal is ~18s and the noise ~1e-5s).
+    t = {"now": 5000.0}
+    reg = S.Registry(clock=lambda: t["now"])
+    reg.poll("solo", "only", 0)
+    inst = list(reg._instances.values())[0]
+
+    with reg._cond:
+        reg._record_ownership_locked(
+            inst, "open", "A", None, {"ok": True, "data": {"tabId": 101}})
+        reg._record_ownership_locked(
+            inst, "open", "A", None,
+            {"ok": True, "data": {"tabId": 202, "orphanTabId": 101}})
+    cid = next(iter(inst.reaps))
+
+    # DISPATCH it — this is the whole difference from the queued-cancel test.
+    got = reg.poll("solo", "only", 0)
+    assert got is not None and got["id"] == cid and got["tabId"] == 101
+    assert list(inst.outbox) == [], "control: it really is out of the outbox now"
+    with reg._cond:
+        busy = reg._effective_timeout_locked(inst, 20.0, 2.0)
+    assert busy > 2.0, (
+        f"control: an in-flight reap must read BUSY (got {busy})")
+
+    # …and now the session re-owns 101 while that close is still executing.
+    with reg._cond:
+        reg._record_ownership_locked(
+            inst, "open", "A", None,
+            {"ok": True, "data": {"tabId": 101, "reused": True}})
+
+    assert cid in inst.inflight, (
+        "an ALREADY-DISPATCHED reap must keep its inflight entry — without it a "
+        "ping landing here fast-fails a perfectly healthy extension")
+    with reg._cond:
+        still_busy = reg._effective_timeout_locked(inst, 20.0, 2.0)
+    assert still_busy == busy > 2.0, (
+        f"the ping deadline moved {busy} -> {still_busy}: the false wedge is back "
+        f"(the defect collapses it to the 2.0 fast deadline)")
+    assert cid in inst.reaps, "…and its reaps entry, or its reply is unrecognised"
+    assert reg.deliver_result(cid, {"id": cid, "ok": True,
+                                    "data": {"closed": 101}}) is True, (
+        "the in-flight reap's reply must still be RECOGNISED — otherwise it is "
+        "logged result_unknown_id, retiring the lost-reply signal")
+
+    # 🔴 THE DISCRIMINATING FIXTURE: ONE DISPATCHED **AND** ONE QUEUED REAP FOR
+    # THE SAME TAB, WHICH IS THE ONLY SHAPE THAT SEPARATES THE TWO SCOPES.
+    #
+    # Everything above is guarded by the early return ("all matches are already
+    # in flight — leave them be"), so a mutant that widens ONLY the pop loops is
+    # unreachable and survives: measured, two of them did. With a withdrawable
+    # reap present the early return does not fire, the loops run, and the
+    # difference between `for c in withdrawn` and `for c in match` becomes
+    # observable — which is the whole content of this fix.
+    #
+    # Reachable, not contrived: reap A for tab 101 is dispatched; the session
+    # later re-owns 101 and orphans it again, queuing reap B for the same tab;
+    # then a third open reuses 101 and cancels. B must go, A must not.
+    with reg._cond:
+        reg._record_ownership_locked(
+            inst, "open", "A", None, {"ok": True, "data": {"tabId": 101}})
+        reg._record_ownership_locked(
+            inst, "open", "A", None,
+            {"ok": True, "data": {"tabId": 303, "orphanTabId": 101}})
+    a_cid = next(iter(inst.reaps))                 # queued reap for 101
+    reg.poll("solo", "only", 0)                    # dispatch it
+    with reg._cond:
+        reg._record_ownership_locked(
+            inst, "open", "A", None,
+            {"ok": True, "data": {"tabId": 404, "orphanTabId": 101}})
+    b_cid = [c for c in inst.reaps if c != a_cid][0]   # queued reap for 101
+    assert [c["id"] for c in inst.outbox] == [b_cid], "control: A out, B queued"
+    assert a_cid in inst.inflight and b_cid in inst.inflight
+
+    with reg._cond:
+        n = reg._cancel_queued_reaps_locked(inst, 101)
+    assert n == 1, f"exactly the QUEUED reap may be withdrawn, not {n}"
+    assert list(inst.outbox) == [], "B leaves the outbox"
+    assert b_cid not in inst.reaps and b_cid not in inst.inflight, (
+        "B's bookkeeping goes with it")
+    assert a_cid in inst.inflight, (
+        "🔴 A IS STILL EXECUTING. Popping its inflight entry here is the false "
+        "wedge — a ping landing now fast-fails a healthy extension")
+    assert a_cid in inst.reaps, (
+        "🔴 …and popping its reaps entry sends its reply to result_unknown_id")
+
+
+def test_a_reap_whose_reply_is_lost_does_not_strand_its_bookkeeping():
+    """A `reaps` entry is only meaningful while its `inflight` entry lives.
+
+    The one path that leaves it behind is a reap whose reply never arrives — the
+    residual this feature already discloses. `instance_id` is stable across a
+    browser restart, so the same `Instance` would carry it forever.
+    """
+    t = {"now": 1000.0}
+    reg = S.Registry(clock=lambda: t["now"])
+    reg.poll("solo", "only", 0)
+    inst = list(reg._instances.values())[0]
+
+    with reg._cond:
+        reg._record_ownership_locked(
+            inst, "open", "A", None, {"ok": True, "data": {"tabId": 101}})
+        reg._record_ownership_locked(
+            inst, "open", "A", None,
+            {"ok": True, "data": {"tabId": 202, "orphanTabId": 101}})
+    cid = next(iter(inst.reaps))
+    got = reg.poll("solo", "only", 0)
+    assert got is not None and got["id"] == cid   # dispatched; reply never comes
+
+    # Before the window closes both entries are legitimately outstanding — the
+    # control that makes the assertion below about PRUNING rather than about the
+    # entries never existing.
+    with reg._cond:
+        S.Registry._prune_inflight_locked(inst, t["now"])
+    assert cid in inst.inflight and cid in inst.reaps
+
+    t["now"] += S.INFLIGHT_STALE_S + 1
+    with reg._cond:
+        S.Registry._prune_inflight_locked(inst, t["now"])
+    assert cid not in inst.inflight, "control: inflight ages out as designed"
+    assert inst.reaps == {}, (
+        "the reaps entry must age out with it — otherwise a lost reply strands it "
+        "on an Instance that survives a browser restart")
