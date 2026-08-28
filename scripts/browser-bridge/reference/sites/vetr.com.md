@@ -227,10 +227,27 @@ Conflating these produced two wrong findings in a row, in opposite directions.
 |---|---|---|
 | where | `vetr-app/app/root.tsx:377-398` | `app/components/splash.tsx:105-118`, mounted via `components/GeneralComponents.tsx:1,10` |
 | identify by | `[data-testid=app-boot-skeleton]` | `[data-testid=brand-splash]` |
+| looks like | grey shimmer bars on the page background | **bright orange→lime** full-viewport gradient (`.bg-splash` = `from-[#ff5301] to-[#d1ff27]`, `app/app.css:361-363`) — *not* dark |
 | text | **none** (`aria-hidden`) | renders **"Vetr"** as `<span>` per letter |
-| when | before the JS bundle executes | **after** hydration, first visit per tab (`sessionStorage.splashSeen`) |
-| holds for | until hydration | `minimumVisibleTime` **2000ms**, and on a non-landing route until `navigation.state === "idle" && isFetching === 0` (`splash.tsx:60-62`) |
-| blocks clicks | it *is* the page | no — `pointer-events-none`, but `z-[9999]` and opaque |
+| when | before the JS bundle executes | **after** hydration, first visit per tab (`sessionStorage.splashSeen`, a raw key — no Capacitor prefix) |
+| holds for | until hydration | **depends on the ENTRY path, not on auth** — see below |
+| blocks clicks | it *is* the page | **no** — `pointer-events-none`, so a hit-test can **never** return it. A `z-9999` element that *does* block is the timezone modal above, not this |
+
+🔴 **The splash's duration is keyed on LANDING vs non-landing — never on authed
+vs logged-out.** `landingEntry` is the **entry** URL matching
+`LANDING_PREFIXES = ["/user/vets", "/user/servicers", "/user/shop"]`
+(`splash.tsx:17`), captured once at first mount:
+
+| entry | floor | waits for in-flight queries? |
+|---|---|---|
+| **landing** (`/user/vets/:id`, `/user/servicers…`, `/user/shop…`) | **300ms** (`LANDING_FLOOR_MS`, `:18,39`) | **no** — `navigation.state === "idle"` only (`:60-61`) |
+| anything else (incl. `/auth/login`, `/user`) | **2000ms** (`minimumVisibleTime`, `:29`) | **yes** — `&& isFetching === 0` (`:62`) |
+
+Note both landing paths are **authed** routes, so an auth-keyed rule would get them
+exactly backwards. Add `debounceMs` 200 (`:78`) and a 500ms fade (`:97`): the real
+non-landing floor is ~2.2s, and `[data-testid=brand-splash]` **stays in the DOM at
+`opacity-0` for ~500ms after it looks gone** — and `opacity:0` text still counts in
+`innerText`.
 
 🔴 **The brand `Splash` is LIVE — do not read anywhere that it was removed.** An
 earlier revision of this file claimed it "was *replaced* by" the skeleton, citing
@@ -242,8 +259,10 @@ built `index.html` also contains "Vetr" **twice** (`<title>` and
 
 This matters operationally because **the remedy above is "open a fresh tab"** —
 and a fresh tab is exactly the case that gets the brand splash: an opaque
-full-viewport dark overlay for ≥2s that, on an authed route, additionally waits
-for **every in-flight query**. That is the state most easily mistaken for a stall.
+full-viewport orange→lime overlay which, on a **non-landing** entry, holds ~2.2s
+*and* waits for every in-flight query. That is the state most easily mistaken for a
+stall. On a **landing** entry it is a 300ms flash instead — so the same walk looks
+different depending only on which URL you entered at.
 
 So, precisely: a read with **zero `innerText`** does rule the brand splash out —
 splash renders text. What it does **not** rule out is stalled hydration, because
@@ -282,15 +301,25 @@ up where it belongs, in `reference/css-hit-test.md`.
   self-contained *synchronous* expression, or `curl` the API directly.
 - ⚠ **`window` state may not survive between two consecutive `js` calls.**
   Observed here (`window.__x = …`, then reading it back returned nothing).
-  🔴 **Check whether your call used `--frame` first — that IS the answer:**
-  `--frame` eval runs `Page.createIsolatedWorld` and gets a **brand-new isolated
-  world on every call** (`extension/service_worker.js:539-542`), so page globals
-  are invisible and cross-call state is gone by design. This file tells you to use
-  `--frame` for the authnet hosted-CIM iframe, so it is the likely case. Without
-  `--frame`, `js` is **MAIN** world (`service_worker.js:864-871` default,
-  `:841-846` under `--wake`) and the disappearance is **unexplained** — either way,
-  do not rely on cross-call globals. Note the ISOLATED-world line in the CLI header
-  is about `text`/`html`, not `js`.
+  **`--frame` has TWO eval branches and only one of them explains it** — so this is
+  not a general answer:
+  - **same-process** frame → `Page.createIsolatedWorld` with a **fresh world per
+    call** (`extension/service_worker.js:537-544`) ⇒ globals invisible, cross-call
+    state gone by design.
+  - **cross-origin OOPIF** → evaluated in that frame's own flat session's
+    **default (MAIN) context** (`:546-549`) ⇒ globals *do* persist.
+
+  ⚠ **vetr's authnet hosted-CIM iframe is the OOPIF case, not the isolated one** —
+  it is served from `accept.authorize.net`
+  (`app/components/payments/authnet-hosted-add-card.tsx:12-14`), cross-site to the
+  app origin. So `--frame` does **not** explain the loss for the one iframe this
+  file sends you into. Without `--frame` at all, `js` is **MAIN** world
+  (`service_worker.js:864-871`; `:841-846` under `--wake`).
+
+  Net: the observation is **still unexplained** for a top-frame call, which is what
+  it was made on. `reference/frames-cdp.md:45-46` is authoritative on the split; the
+  ISOLATED-world line in the CLI header is about `text`/`html`, not `js`. Either
+  way, do not rely on cross-call globals.
 
 ## Other traps
 
