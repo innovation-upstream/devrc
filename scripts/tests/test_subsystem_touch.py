@@ -4856,6 +4856,17 @@ class TestPrNegativeControls:
         # fixes; `test_no_two_sentinels_share_a_spelling` is what keeps them
         # from collapsing into one.
         "entry-file": "index entry file not found",
+        # ⚠ THE COMMON PREFIX OF TWO SPELLINGS, ON PURPOSE. `RepoPathMissingError`
+        # says "repo path does not exist" when nothing is there and "repo path is
+        # not a directory" when something is — two mistakes with two next moves.
+        # The map allows ONE phrase per class (`len(SENTINELS) == len(covered)`),
+        # so the phrase is the part they share: it attributes either spelling to
+        # this class, and `test_no_two_sentinels_share_a_spelling` still proves it
+        # collides with nothing else. Shares no spelling with "store root not
+        # found" (the STORE, not the repo) nor with "git command failed" — which
+        # is the whole point of the class: this condition is a READING, not a
+        # subprocess failure. Behaviour is pinned in test_repo_path_guard.py.
+        "repo-path": "repo path",
         # PR-source sentinels
         "remote": "repo has no usable github remote",
         "gh-missing": "gh cli not found",
@@ -4925,6 +4936,11 @@ class TestPrNegativeControls:
             # one: a missing path and a file that will not parse have different
             # fixes, and the validator's own output must not conflate them.
             "EntryFileMissingError",
+            # `--repo` naming something that is not a directory, refused BEFORE
+            # git runs. Its own sentinel rather than `GitError`'s: "git command
+            # failed" is a true statement about the subprocess and a useless one
+            # about the argument, which is exactly what it used to print.
+            "RepoPathMissingError",
         }
         assert declared == covered, (
             "subsystem_touch declares an error class this sentinel map does not "
