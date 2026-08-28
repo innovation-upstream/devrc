@@ -411,8 +411,34 @@ FORCING_KEY = "forcing"
 # gate` (a word between the key and the colon) and `forcing = gate` (a separator
 # that is not a colon). Those are guesses at the grammar, not the grammar.
 _MARKUP = r"[*_`~]{0,3}"
+
+# 🔴 NOT `\b`, AND THE DIFFERENCE IS THE WHOLE POINT: `_` IS A WORD CHARACTER.
+# MEASURED at `503d7136`, i.e. against the commit that widened `_MARKUP` above to
+# admit emphasis: `**forcing: gate**` parsed to `gate`, while `_forcing: gate_`,
+# `__forcing: gate__` and `_forcing_: gate` all came back `kind=None,
+# near_miss=None` — `\bforcing` has no boundary to match when the character
+# before the key is itself a word character. So the widening admitted ONE of
+# markdown's two emphasis characters and refused the other with
+# `[no forcing: field]` plus a remedy the author had already carried out: the
+# unrecoverable refusal `_FORCING_ATTEMPT` exists to end, reintroduced by the
+# change meant to end it, in the exact spelling class it set out to admit.
+#
+# What the lookaround still excludes — the ONE job `\b` was doing here, and the
+# thing to re-check before touching it: `enforcing:` and `reinforcing:` (the
+# character before the key is a letter) and `forcings:` (the one after it is).
+# What it newly ADMITS is a snake_case identifier ending in `_forcing`, so
+# `some_forcing: none` would parse. MEASURED: `_forcing` appears 0 times in
+# either corpus (devrc 126 docs, homelab-talos 139), and the case is bounded by
+# the same closed-vocabulary argument as the markup class above.
+#
+# 🔴 SPELLED OUT AT EACH USE SITE rather than folded into one shared constant:
+# `_FORCING` and `_FORCING_ATTEMPT` must stay SEPARATELY MUTABLE, or the
+# `forcing-key-anchored-on-word-boundary` / `near-miss-key-anchored-on-word-
+# boundary` rows in `mutants-handoff-cap.sh` cannot isolate one from the other
+# and neither proves anything about the pattern it names.
 _FORCING = re.compile(
-    rf"\b{FORCING_KEY}{_MARKUP}\s*:\s*{_MARKUP}\s*([A-Za-z-]+)", re.IGNORECASE
+    rf"(?<![A-Za-z0-9]){FORCING_KEY}{_MARKUP}\s*:\s*{_MARKUP}\s*([A-Za-z-]+)",
+    re.IGNORECASE,
 )
 
 #: The FAIL-LOUD half of a strict `_FORCING`, and the reason it exists is the
@@ -426,8 +452,19 @@ _FORCING = re.compile(
 #: the closed set at BOTH ends, so it cannot fire on the bare word `forcing` in
 #: prose — `unforced_report` only consults it for an item it is already refusing,
 #: and the worst case is a refusal that names a line the author is looking at.
+#:
+#: 🔴 THE ANCHORS ARE THE LOOKAROUNDS `_FORCING` USES, NOT `\b`, AND FOR THE
+#: SAME MEASURED REASON — see the comment above it. This pattern is the SAFETY
+#: NET for a tag `_FORCING` cannot parse, and at `503d7136` it shared the broken
+#: `\b` anchor, so it had the identical hole: `_forcing = gate_` fell straight
+#: through to `[no forcing: field]`. A net with the same gap as the thing it
+#: catches for is not a net. BOTH ends of BOTH tokens are anchored: the trailing
+#: `_` of `_forcing: gate_` is a word character too, so `\b` failed on the KIND
+#: as well as on the key.
 _FORCING_ATTEMPT = re.compile(
-    rf"\b{FORCING_KEY}\b[^\n]{{0,40}}?\b(?:{'|'.join(sorted(FORCING_KINDS))})\b",
+    rf"(?<![A-Za-z0-9]){FORCING_KEY}(?![A-Za-z0-9])"
+    rf"[^\n]{{0,40}}?"
+    rf"(?<![A-Za-z0-9])(?:{'|'.join(sorted(FORCING_KINDS))})(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 
@@ -488,10 +525,30 @@ def _item_blocks(section_body: str) -> list[tuple[re.Match[str], list[str], list
     `test_trailing_boilerplate_does_not_tag_the_last_item`. So the walk uses the
     ordinary markdown rule:
 
-      * a line INSIDE a fence always belongs to the item (never a boundary);
+      * a line INSIDE a fence always belongs to the item (never a boundary) —
+        and it does NOT clear the "a blank line has intervened" memory either;
       * a blank line does not end it — an indented line may follow;
       * an UNINDENTED, non-blank line ends it once a blank line has intervened;
       * anything else continues it (markdown's lazy continuation).
+
+    🔴 THE SECOND HALF OF THE FIRST BULLET IS A FIX, NOT A RESTATEMENT, and it
+    is the ACCEPT direction. At `503d7136` the fence branch below reset
+    `blanked`, so the first VISIBLE line after a fence close could never be a
+    boundary and the rule the third bullet states was simply not the rule the
+    code ran. MEASURED: an item whose own properly-INDENTED fence follows a blank
+    line swallowed the section's trailing `🔴 **This list is a WORK QUEUE …**`
+    boilerplate and `ranked_items` returned `kind='none'` — the untagged item
+    ACCEPTED, counted as self-generated, and rule (j) passing. That is the very
+    counterfactual this docstring cites two paragraphs up as the reason the naive
+    boundary was rejected, re-entered through the fence path. Pinned by
+    `test_a_fence_does_not_erase_the_blank_line_boundary`, and its cost side — an
+    indented tag after the item's own fence, with and without a blank between —
+    by `test_an_indented_fence_does_not_cost_the_tag_that_follows_it`.
+
+    ⚠ A fence with NO preceding blank still absorbs the following unindented
+    line. That is genuine markdown lazy continuation and is left alone. A fence
+    opened at column 0 after a blank line is a KNOWN, UNTESTED gap: markdown ends
+    the list item there, and this walk does not.
 
     Fenced lines are returned SEPARATELY rather than dropped: they must not count
     as a tag (`_unfenced`'s contract, and a pasted sample is not a declaration),
@@ -513,7 +570,6 @@ def _item_blocks(section_body: str) -> list[tuple[re.Match[str], list[str], list
             line = all_lines[i]
             if i not in visible:
                 hidden.append(line)
-                blanked = False
                 continue
             if not line.strip():
                 blanked = True
@@ -590,9 +646,37 @@ FORCING_VOCAB_LINE = (
     "carrying it is not eligible to be worked."
 )
 
+# 🔴 THE FOUR PER-CAUSE MARKERS `unforced_report` PUTS ON A REFUSED ROW, AND
+# THIS IS THEIR SINGLE SOURCE — because there is a SECOND READER outside this
+# module. SKILL.md's step-5 legend maps each marker to what the executor should
+# DO about it, and only ONE of the four means "add a field"; that legend is the
+# whole reason the other three stopped getting the add-a-field remedy.
+#
+# 🔴 A `SKILL_PINS` ENTRY PER MARKER WOULD NOT COVER THE DRIFT THIS CLOSES. A pin
+# asserts the literal is still IN the skill, so renaming `[fenced]` here goes red
+# in this module's own tests, gets fixed here, and leaves the skill's legend
+# naming a marker the tool no longer prints — with the pin still green, because
+# the skill does still contain the old token.
+# `test_every_refusal_MARKER_the_module_prints_reaches_the_skill` derives its
+# check from `REFUSAL_MARKERS` instead, so a rename here is what goes red there.
+#
+# Each is the PREFIX its row begins with, not the whole row: the two that carry a
+# value (`[unknown kind: 'x']`, `[unparsed forcing field on: …]`) cannot be
+# pinned whole, and the token is the half a rename would move.
+MARK_NO_FIELD = "[no forcing: field]"
+MARK_UNKNOWN_KIND = "[unknown kind"
+MARK_UNPARSED = "[unparsed"
+MARK_FENCED = "[fenced]"
+REFUSAL_MARKERS: tuple[str, ...] = (
+    MARK_NO_FIELD,
+    MARK_UNKNOWN_KIND,
+    MARK_UNPARSED,
+    MARK_FENCED,
+)
+
 #: Remedy for the plain case: no field anywhere in the item.
 MISSING_FIELD_REMEDY = (
-    "  Tag each item marked [no forcing: field] above. A continuation line "
+    f"  Tag each item marked {MARK_NO_FIELD} above. A continuation line "
     "counts — the field does not have to sit on the numbered line."
 )
 
@@ -600,19 +684,31 @@ MISSING_FIELD_REMEDY = (
 #: that reaches this arm HAS a field, and being told to add one is the failure
 #: this whole branch exists to end.
 NEAR_MISS_REMEDY = (
-    "  🔴 The item(s) marked [unparsed] DO carry something — the quoted line is "
-    "there and the check could not parse it. Spell the field as the literal key, "
-    "a colon, then the kind: `forcing: gate`. Emphasis around it is fine "
-    "(`**forcing: gate**`, `**forcing:** gate`, `` `forcing: gate` ``); a word "
-    "between the key and the colon is not (`forcing function: gate`), and "
-    "neither is any other separator (`forcing = gate`, `forcing — gate`)."
+    f"  🔴 The item(s) marked {MARK_UNPARSED}] DO carry something — the quoted "
+    "line is there and the check could not parse it. Spell the field as the "
+    "literal key, a colon, then the kind: `forcing: gate`. Emphasis around it "
+    "is fine (`**forcing: gate**`, `**forcing:** gate`, `_forcing: gate_`, "
+    "`` `forcing: gate` ``); a word between the key and the colon is not "
+    "(`forcing function: gate`), and neither is any other separator "
+    "(`forcing = gate`, `forcing — gate`)."
 )
 
 #: Remedy for a field that parses but sits inside a code fence.
+#:
+#: 🔴 IT MUST NOT SAY ONLY "MOVE IT OUT". The commonest thing a fence under a
+#: ranked item quotes is this tool's OWN vocabulary line — an author pasting the
+#: instructions, or a transcript of a previous refusal. Obeying a bare "move it
+#: out of the fence" on that input promotes a quoted example into a declaration
+#: and produces a FALSE `forcing: none`: an item nothing asked for, now counted
+#: as honestly self-generated. The refusal itself is right; only the remedy
+#: needed to stop assuming the fenced field is the author's own.
 FENCED_FIELD_REMEDY = (
-    "  🔴 The item(s) marked [fenced] carry the field INSIDE a code fence, where "
-    "it does not count — a pasted sample is not a declaration. Move it out of "
-    "the fence, onto one of the item's own lines."
+    f"  🔴 The item(s) marked {MARK_FENCED} carry the field INSIDE a code fence, "
+    "where it does not count — a pasted sample is not a declaration. If that "
+    "field is YOUR declaration, move it out of the fence onto one of the item's "
+    "own lines. If it is quoted output, a copied example or this tool's own "
+    "vocabulary line, the item is genuinely untagged and needs one of its own — "
+    "do NOT promote the quote."
 )
 
 
@@ -629,13 +725,17 @@ def unforced_report(items: typing.Sequence[RankedItem]) -> str:
         return ""
 
     def _mark(i: RankedItem) -> str:
+        # 🔴 EVERY ROW BEGINS WITH ITS `REFUSAL_MARKERS` TOKEN, spelled from the
+        # constant and never re-typed here. The skill's step-5 legend is the
+        # executor's only map from a marker to what to do about it, and the
+        # derived test that keeps the two in step reads those constants.
         if i.kind is not None:
-            return f"   [unknown kind: {i.kind!r}]"
+            return f"   {MARK_UNKNOWN_KIND}: {i.kind!r}]"
         if i.near_miss is not None:
-            return f"   [unparsed forcing field on: {_clip(i.near_miss, 72)}]"
+            return f"   {MARK_UNPARSED} forcing field on: {_clip(i.near_miss, 72)}]"
         if i.fenced:
-            return "   [fenced] `forcing:` found, but inside a code fence"
-        return "   [no forcing: field]"
+            return f"   {MARK_FENCED} `forcing:` found, but inside a code fence"
+        return f"   {MARK_NO_FIELD}"
 
     shown = bad[:EXISTING_SHOWN_MAX]
     rows = [f"  {i.rank}. {_clip(i.text, 96)}" + _mark(i) for i in shown]

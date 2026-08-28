@@ -193,6 +193,65 @@ is the tag. Refusing it would be a refusal over emphasis, in a skill body that
 bolds its field names. `forcing function:` and `forcing = gate` are **not**
 admitted: those are guesses at the grammar, and they stay near-misses.
 
+#### The two holes that widening opened, and what the boundary still cannot do
+
+Both were **introduced** by the widening above and found by a delta re-audit of
+it. Both are now pinned by `TestTheWIDENINGDidNotOpenTwoHOLES` — **7 of its 13
+cases red at `503d7136`**, and its docstring says which, because the other 6 are
+invariant guards rather than coverage of these defects.
+
+* **A fence erased the boundary's memory — the ACCEPT direction.** `_item_blocks`
+  cleared its "a blank line has intervened" flag on every line inside a fence, so
+  the first *visible* line after a fence close could never be a boundary.
+  Measured: an item whose own correctly-**indented** fence follows a blank line
+  swallowed the trailing `🔴 **This list is a WORK QUEUE …**` boilerplate and
+  `ranked_items` returned `kind='none'` — an untagged item accepted, counted as
+  self-generated, and rule (j) passing. That is the counterfactual this section
+  cites as the reason the naive boundary was rejected, re-entered through the
+  fence path. A fence with *no* preceding blank still absorbs the following
+  unindented line: that is genuine markdown lazy continuation and is left alone.
+* **`\b` cannot see past an underscore.** `_` is a word character, so
+  `\bforcing` has no boundary to match in `_forcing: gate_`. Measured at
+  `503d7136`: `**forcing: gate**` → `gate`; `_forcing: gate_`,
+  `__forcing: gate__` and `_forcing_: gate` → `kind=None, near_miss=None`, i.e.
+  `[no forcing: field]` and a remedy already carried out — for one of markdown's
+  two emphasis characters, in the class the widening existed to admit.
+  `_FORCING_ATTEMPT` shared the anchor, so the safety net had the same hole.
+  Both patterns now anchor on `(?<![A-Za-z0-9])` / `(?![A-Za-z0-9])`, which keeps
+  the one job `\b` was doing — `enforcing:`, `reinforcing:` and `forcings:` are
+  still excluded, verified on both patterns. It newly admits a snake_case
+  identifier ending in `_forcing`; `_forcing` occurs **0** times across both
+  corpora (devrc 126 docs, homelab-talos 139), and the case is bounded by the
+  same closed-vocabulary argument as the markup class.
+
+**Two limits the skill body states in one clause and this section owns in full.**
+A tag written **flush-left on its own line under a blank one**, directly beneath
+its item, is *outside* the block: it is the boundary line, so it is dropped
+before the near-miss scan ever runs. MEASURED 2026-08-28 — `1. Fix A.` + blank +
+`forcing: gate — CI red` at column 0 gives
+`kind=None, near_miss=None, fenced=False` and the row
+`1. Fix A.   [no forcing: field]`, while the same tag INDENTED, or flush-left
+with no blank before it, both parse to `gate`. The fix is to indent it.
+
+That case is why **SKILL.md no longer claims the tool "never tells you to add a
+field you already wrote"** — the sentence was wider than the code. Note the
+weaker claim it was replaced with is the honest one in both directions: this walk
+cannot support a "never", because nothing scans the dropped tail, and scanning it
+would name the pasted `🔴 **This list is a WORK QUEUE …**` boilerplate under
+every untagged last item in the corpus — text the author did not write. The
+alternative fix was considered and rejected on that ground, not on cost.
+
+Separately, a fence opened at **column 0** after a blank line is a known,
+untested gap — markdown ends the list item there and the walk does not.
+
+`FENCED_FIELD_REMEDY` deliberately does **not** say only "move it out of the
+fence". The commonest thing a fence under a ranked item quotes is this tool's own
+vocabulary line — pasted instructions, or a transcript of an earlier refusal — so
+obeying a bare "move it out" promotes a quoted example into a declaration and
+produces a **false `forcing: none`**: an item nothing asked for, now counted as
+honestly self-generated. The refusal is right; the remedy had to stop assuming
+the fenced field was the author's own.
+
 ## Why findings append and the status header does not
 
 The status / next-steps block is current state: two of them in one doc is a

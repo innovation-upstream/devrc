@@ -2339,6 +2339,55 @@ class TestSkillAndModuleAgree:
                 f"shared branch. Document it, or stop emitting it."
             )
 
+    def test_every_refusal_MARKER_the_module_prints_reaches_the_skill(self) -> None:
+        """🔴 THE SEAM. SKILL.md's step-5 legend now enumerates the four rule-(j)
+        row markers and tells the executor that **only one of them means "add a
+        field"** — that legend is the whole reason the other three stopped
+        getting the add-a-field remedy, i.e. it is load-bearing prose, not a
+        summary. Every marker is pinned on the MODULE side by the tests above;
+        nothing pinned the SKILL side.
+
+        🔴 DERIVED FROM `hd.REFUSAL_MARKERS`, and deliberately NOT four
+        `SKILL_PINS` entries, which is what this repo would ordinarily reach
+        for. A pin asserts the literal is still IN the skill — so renaming
+        `[fenced]` in the module goes red in the module's own tests, gets fixed
+        there, and leaves the legend naming a marker the tool no longer prints,
+        with the pin STILL GREEN because the skill does still contain the old
+        token. A pin catches deletion from the skill; only derivation catches
+        the rename, and the rename is the drift the auditor named.
+
+        Same idiom, and the same reason, as
+        `test_every_exit_code_the_module_can_return_is_documented` directly
+        above: a hand-written list is exactly how `behind` reached the skill's
+        only audience undocumented.
+
+        Shown reachable by the `refusal-marker-renamed` row in
+        `scripts/tests/mutants-handoff-cap.sh`.
+        """
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        assert len(hd.REFUSAL_MARKERS) == 4, (
+            "a fifth cause was added or one was dropped — the skill's legend "
+            "enumerates them, so it needs the same edit in the same commit"
+        )
+        assert len(set(hd.REFUSAL_MARKERS)) == 4, "two markers collapsed onto one token"
+        for marker in hd.REFUSAL_MARKERS:
+            assert marker in doc, (
+                f"scripts/lib/handoff_doc.py prints a refused row starting "
+                f"{marker!r} and claude/skills/handoff/SKILL.md's step-5 legend "
+                f"never mentions it. The executor's only map from a marker to "
+                f"what to do about it would send them to the wrong remedy — and "
+                f"three of the four mean something OTHER than 'add a field'. "
+                f"Update the legend, or stop printing the marker."
+            )
+
+    def test_the_marker_pin_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL on the loop above — it iterates a module constant, so
+        without this it is indistinguishable from a loop over an empty tuple that
+        can only pass. A token shaped exactly like a marker, which the skill must
+        not contain."""
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        assert "[no forcing: declaration]" not in doc
+
     def test_the_tool_is_tracked_by_git(self) -> None:
         """A new file the flake never sees deploys as an absence, silently.
 
@@ -3833,6 +3882,196 @@ class TestTheFieldIsFoundOnTheWholeItemNotTheNumberedLine:
             "   forcing: security — the token in the log is live\n"
         )
         assert [i.kind for i in hd.ranked_items(text)] == ["security"]
+
+
+class TestTheWIDENINGDidNotOpenTwoHOLES:
+    """🔴 RED AT `503d7136` — and both defects were INTRODUCED by the round that
+    widened rule (j)'s search from the numbered line to the whole item. Delta
+    re-audited and reproduced 2026-08-28 before either was touched.
+
+    **The fence erased the boundary's memory.** `_item_blocks` reset its
+    "a blank line has intervened" flag on every line inside a fence, so the first
+    VISIBLE line after a fence close could never be a boundary. An item with its
+    own correctly-INDENTED fence therefore swallowed the section's trailing
+    paragraph — the skill's `🔴 **This list is a WORK QUEUE …**` boilerplate,
+    which spells `forcing: none` — and `ranked_items` returned `kind='none'`.
+    An UNTAGGED item accepted, counted as self-generated, and the gate passed.
+    That is the exact counterfactual `_item_blocks`' own docstring cites as its
+    reason for rejecting the naive boundary, re-entered through the fence path,
+    and it is the ACCEPT direction: nothing downstream refuses it.
+
+    **`\\b` cannot see past an underscore.** `_MARKUP` was widened to
+    ``[*_`~]{0,3}`` to admit emphasis, but both patterns anchored the key on
+    `\\b{FORCING_KEY}` — and `_` is a word character, so `_forcing: gate_` has no
+    boundary to match. Measured at `503d7136`: `**forcing: gate**` parsed to
+    `gate`; `_forcing: gate_`, `__forcing: gate__` and `_forcing_: gate` all came
+    back `kind=None, near_miss=None`, i.e. `[no forcing: field]` plus a remedy
+    the author had already carried out — the unrecoverable refusal, for one of
+    markdown's two emphasis characters, in the very spelling class that round set
+    out to admit. `_FORCING_ATTEMPT` shared the anchor, so the safety net that
+    exists to catch exactly this had the identical hole.
+
+    🔴 THE MATRIX, PER TEST AND MEASURED — deliberately not "every test in this
+    class", which would be false here and is exactly the kind of blanket claim a
+    reader stops checking. **7 failed, 6 passed at `503d7136`:**
+
+      * `test_a_fence_does_not_erase_the_blank_line_boundary` — RED,
+        `assert ['none'] == [None]`.
+      * `test_UNDERSCORE_emphasis_parses_like_asterisk_emphasis` — RED on 3 of 4
+        params. `` _`forcing: gate`_ `` PASSED: the backtick between the `_` and
+        the key hands `\\b` a boundary to match, so that one param is an
+        INVARIANT GUARD carried along, not regression coverage.
+      * `test_an_UNDERSCORE_emphasised_near_miss_is_NAMED_not_called_absent` —
+        RED on all 3 params.
+      * `test_an_indented_fence_does_not_cost_the_tag_that_follows_it` — PASSED,
+        both params. It is the COST side of the fence fix rather than coverage
+        of the defect, and is shown reachable by the `a-blank-line-ends-the-item`
+        and `block-collapsed-to-the-numbered-line` mutation rows, which it kills.
+      * `test_a_longer_word_around_the_key_is_STILL_not_the_field` — PASSED.
+        Labelled an invariant guard in its own docstring.
+    """
+
+    @staticmethod
+    def _boilerplate_tail() -> str:
+        """The skill's own trailing paragraph, READ FROM THE SKILL — the same
+        window `test_trailing_boilerplate_does_not_tag_the_last_item` derives,
+        and for its reason: a hand-copied constant would quietly stop being the
+        text the corpus actually pastes under a ranked list."""
+        skill = HANDOFF_SKILL.read_text(encoding="utf-8").splitlines()
+        start = next(i for i, ln in enumerate(skill) if "EVERY item MUST carry" in ln)
+        tail = "\n".join(ln.strip() for ln in skill[start : start + 4])
+        assert "forcing: none" in tail, (
+            "the copied boilerplate no longer spells a valid kind, so this test "
+            "proves nothing — re-derive the window or drop it"
+        )
+        return tail
+
+    def test_a_fence_does_not_erase_the_blank_line_boundary(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE ACCEPT DIRECTION, which is the one that costs something: the
+        gate PASSES on an item nobody tagged.
+
+        Distinct from the col-0-fence gap declared in the last round's report —
+        the fence here is INDENTED, i.e. genuinely the item's own, so a rule
+        about fences at column 0 does not reach it.
+        """
+        tail = self._boilerplate_tail()
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "\n"
+            "   ```\n"
+            "   ./scripts/measure.py --since 2026-08-01\n"
+            "   ```\n" + tail + "\n"
+        )
+        items = hd.ranked_items(text)
+        assert [i.kind for i in items] == [None], (
+            "the item carries NO tag — the `none` is boilerplate its author "
+            "pasted out of the instructions, being read as a declaration"
+        )
+        assert items[0].fenced is False and items[0].near_miss is None, (
+            "and the diagnosis must stay the plain one: nothing in the item's "
+            "own fence looks like a field, and nothing in it is a near-miss"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "fencebound.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "[no forcing: field]" in res.stderr
+
+    @pytest.mark.parametrize("gap", ("", "\n"), ids=("no-blank", "blank"))
+    def test_an_indented_fence_does_not_cost_the_tag_that_follows_it(
+        self, gap: str
+    ) -> None:
+        """The other side of the same boundary, measured at BOTH points: a tag on
+        an indented line after the item's own fence still counts, whether or not
+        a blank line sits between them. Dropping the memory reset must not buy
+        the fix above at the price of this shape, which the corpus has.
+
+        ⚠ PASSED at `503d7136`, both params — labelled, not counted as
+        regression coverage. It is the COST side of the fix, and it is shown
+        reachable by the `a-blank-line-ends-the-item` and
+        `block-collapsed-to-the-numbered-line` rows in
+        `scripts/tests/mutants-handoff-cap.sh`, which it kills."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "\n"
+            "   ```\n"
+            "   ./scripts/measure.py --since 2026-08-01\n"
+            "   ```\n" + gap + "   forcing: regression — vs the 2026-08-20 baseline\n"
+        )
+        assert [i.kind for i in hd.ranked_items(text)] == ["regression"], repr(gap)
+
+    @pytest.mark.parametrize(
+        "tagline",
+        (
+            "   _forcing: gate_ — CI red",
+            "   __forcing: gate__ — CI red",
+            "   _forcing_: gate — CI red",
+            "   _`forcing: gate`_ — CI red",
+        ),
+    )
+    def test_UNDERSCORE_emphasis_parses_like_asterisk_emphasis(
+        self, repo: Path, tmp_path: Path, tagline: str
+    ) -> None:
+        """`*` and `_` are the SAME markdown construct. Admitting one and
+        refusing the other with `[no forcing: field]` is a refusal over which of
+        two interchangeable characters the author's editor inserted — and it is
+        unrecoverable, because the remedy it prints is already done.
+
+        ⚠ The last param passed at `503d7136` — see the class docstring's
+        matrix. It is kept as an invariant guard, not counted as coverage."""
+        text = "## Next steps (ranked)\n1. Land the retry-wrapper fix.\n" + tagline + "\n"
+        assert [i.kind for i in hd.ranked_items(text)] == ["gate"]
+        res = run_tool(repo, update=write_delta(tmp_path, "underscore.md", text))
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=unforced" not in res.stderr
+
+    @pytest.mark.parametrize(
+        "attempt",
+        (
+            "_forcing = gate_",
+            "_forcing function: gate_",
+            "__forcing — gate__",
+        ),
+    )
+    def test_an_UNDERSCORE_emphasised_near_miss_is_NAMED_not_called_absent(
+        self, repo: Path, tmp_path: Path, attempt: str
+    ) -> None:
+        """🔴 THE SAFETY NET'S OWN HOLE. `_FORCING_ATTEMPT` shared the broken
+        anchor, so an emphasised near-miss fell all the way through to
+        `[no forcing: field]` — the one refusal a re-run cannot clear — for a
+        spelling the skill now actively tells authors is fine."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n   " + attempt + "\n"
+        res = run_tool(repo, update=write_delta(tmp_path, "usnearmiss.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "[no forcing: field]" not in res.stderr, (
+            "the item HAS a field — telling it there is none is the reported bug"
+        )
+        assert "Tag each item marked" not in res.stderr
+        assert "[unparsed forcing field on:" in res.stderr
+        assert attempt in res.stderr, "quote the offending line verbatim"
+
+    @pytest.mark.parametrize(
+        "line",
+        (
+            "   The pre-push hook is enforcing: gate-scoped runs, which is fine.",
+            "   reinforcing: gate — a longer word merely ENDING with the key",
+            "   forcings: gate — plural, so not the key either",
+        ),
+    )
+    def test_a_longer_word_around_the_key_is_STILL_not_the_field(
+        self, line: str
+    ) -> None:
+        """INVARIANT GUARD — labelled, not counted as regression coverage: this
+        passes at `503d7136` too. It pins the ONE job `\\b` was doing, so the
+        lookbehind that replaced it cannot buy underscore emphasis by admitting
+        `enforcing:` — in BOTH patterns, or the near-miss net starts quoting
+        ordinary prose back at an author as an unparsed field."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n" + line + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind is None, f"{line!r} was accepted as the field"
+        assert item.near_miss is None, f"{line!r} was reported as a near-miss"
 
 
 class TestRulesIAndJDidNotMoveTheOtherExits:

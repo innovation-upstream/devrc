@@ -85,7 +85,8 @@ ROWS=0
 # 🔴 A SUITE THAT NEVER RAN YIELDS ZERO `FAILED` LINES, i.e. "clean", so a
 # harness wired to nothing would score every mutant SURVIVED and every SURVIVES
 # control ok. Count the tests that ran and refuse below a floor. The floor
-# catches COLLAPSE, not growth — deliberately far under the real count (222).
+# catches COLLAPSE, not growth — deliberately far under the real count (237 as
+# of 2026-08-28; it was 222 before the fence/underscore round added 15).
 MIN_TESTS=180
 failing() {
   local out n f total
@@ -248,6 +249,48 @@ run 'near-miss-never-detected' \
 run 'markup-between-key-and-colon-rejected' \
   test_an_accepted_spelling_on_a_continuation_line_counts \
   's|^_MARKUP = r"\[\*_`~\]{0,3}"|_MARKUP = r""|'
+
+printf '\n== the two holes the widening opened (must be KILLED) ==\n'
+# 🔴 THE F1 REVERT ROW. Puts back the one statement that erased the "a blank line
+# has intervened" memory on the fence path. Narrowest expression that can be
+# wrong: the assignment alone, appended to the line it used to follow, so the
+# `hidden.append` half and the boundary test below both stay untouched and the
+# rows that isolate THEM are unaffected.
+run 'fence-resets-the-blank-line-memory' \
+  test_a_fence_does_not_erase_the_blank_line_boundary \
+  's@                hidden.append(line)@                hidden.append(line); blanked = False@'
+# 🔴 THE F2 REVERT ROWS, ONE PER PATTERN — they are spelled out at each use site
+# precisely so these two can be isolated. A single shared constant would make one
+# sed mutate both and neither row would prove anything about the pattern it names.
+#
+# `_FORCING` back on `\b`: `_` is a word character, so `_forcing: gate_` stops
+# parsing and an italic-underscore tag gets `[no forcing: field]` — a remedy its
+# author has already carried out.
+run 'forcing-key-anchored-on-word-boundary' \
+  test_UNDERSCORE_emphasis_parses_like_asterisk_emphasis \
+  's@rf"(?<!\[A-Za-z0-9\]){FORCING_KEY}{_MARKUP}@rf"\\b{FORCING_KEY}{_MARKUP}@'
+# …and the SAFETY NET's own anchor, isolated from it. Under this mutant the tag
+# still parses, so only the near-miss arm can see the difference: an emphasised
+# near-miss falls through to `[no forcing: field]`, which is the unrecoverable
+# refusal `_FORCING_ATTEMPT` exists to prevent.
+run 'near-miss-key-anchored-on-word-boundary' \
+  test_an_UNDERSCORE_emphasised_near_miss_is_NAMED_not_called_absent \
+  's@rf"(?<!\[A-Za-z0-9\]){FORCING_KEY}(?!\[A-Za-z0-9\])"@rf"\\b{FORCING_KEY}\\b"@'
+# The KIND's own anchors in the same pattern, isolated from the key's. `\b` fails
+# on the trailing `_` of `_forcing = gate_` too, so the net has TWO holes and
+# closing only the key's would leave it half-open.
+run 'near-miss-kind-anchored-on-word-boundary' \
+  test_an_UNDERSCORE_emphasised_near_miss_is_NAMED_not_called_absent \
+  "s@rf\"(?<!\[A-Za-z0-9\])(?:{'|'.join(sorted(FORCING_KINDS))})(?!\[A-Za-z0-9\])\"@rf\"\\\\b(?:{'|'.join(sorted(FORCING_KINDS))})\\\\b\"@"
+# 🔴 THE SEAM ROW. Renames a marker in the module. SKILL.md's step-5 legend is
+# the executor's only map from a marker to what to do about it, and a rename that
+# left the legend behind would keep every SKILL_PIN green.
+# ⚠ It also kills the module-side fenced test — unavoidable, because the SAME
+# constant feeds the printed row and the skill check. The row is here to prove
+# the DERIVED test can see a rename at all; `want` names that test.
+run 'refusal-marker-renamed' \
+  test_every_refusal_MARKER_the_module_prints_reaches_the_skill \
+  's@^MARK_FENCED = "\[fenced\]"@MARK_FENCED = "[in-a-fence]"@'
 
 printf '\n== controls ==\n'
 # 🔴 POSITIVE CONTROL — a mutant to a PRE-EXISTING guard (rule d) that the suite
