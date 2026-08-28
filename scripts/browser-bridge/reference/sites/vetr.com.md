@@ -69,8 +69,9 @@ environment into the API's `.env` **verbatim, with no test-mode assertion**. Pro
 runs `sk_live`/`pk_live`, and Lane A is the lane where you are told to click
 Book. So on the stripe rail, **export the test keys first** —
 `~/.config/vetr/stripe-test.env` (`pk_test`/`sk_test`/`whsec`) — and never run it
-with a live key in the shell. Keyless works for every non-payment flow (the API
-falls back to a placeholder secret).
+with a live key in the shell. Keyless works for every non-payment flow — the key
+is simply left **empty** (`vetr-api/config/services.php` has no default), and the
+payment/pool-loop specs self-skip.
 
 🔴 **You must mint your own token — the script does NOT give you one.** It
 captures `e2e:mint-tokens`, validates the JSON with `jq empty` and **discards
@@ -81,12 +82,20 @@ below has no input. Mint one yourself — there is no system PHP on NixOS, so
 borrow the one the script already built:
 
 ```bash
-PHP=$(ls /nix/store/*vetr-e2e-tools*/bin/php | head -1)
-(cd ~/workspace/scratch/vetr/vetr-api && "$PHP" artisan e2e:mint-tokens)   # → JSON
+# /tmp/vetr-e2e-tools is the script's own -o output link (e2e-hermetic-nixos.sh:126,139).
+# Use it, NOT a /nix/store glob: the glob's lexicographic winner is an arbitrary
+# PAST build (measured: 8.4.19 vs the live 8.4.24) and, unlike this link, is not a
+# GC root. Requires the KEEP_UP stack to be up — it needs the .env the script wrote.
+(cd ~/workspace/scratch/vetr/vetr-api && /tmp/vetr-e2e-tools/bin/php artisan e2e:mint-tokens)
 ```
 
-Re-minting is safe: `--seed` is opt-in (`vetr-api/app/Console/Commands/E2EMintTokens.php`),
-so a bare run issues fresh tokens without touching the seeded data.
+🔴 **Re-minting REVOKES the token already in your tab.** `E2EMintTokens.php:77`
+does `$user->tokens()->where('name','e2e')->delete()` for every fixture before
+issuing new ones — so the tab you seeded goes 401 and reads logged-OUT, which this
+file elsewhere teaches you to read as a seeding-order mistake. **Re-seed after
+every mint.** (`--seed` *is* opt-in, so a bare run leaves seeded rows alone — but
+it is not otherwise inert: it also touches Stripe/CIM to provision the saved card,
+`:112-138`.)
 
 ## 🔴 The auth seed — and why Playwright's version does NOT transfer
 
@@ -210,12 +219,36 @@ still stalled); **not the seeded keys**; **not the token**; **not GTM/Brave
 Shields** (`TagManager.initialize` is try/caught non-fatal, `root.tsx:288`);
 **not the error boundary** (it renders a visible "Oops!", `root.tsx:400`).
 
-⚠ **Do NOT reuse the earlier claim that the brand splash rules this out.** An
-earlier revision of this file argued "not the splash, it renders the literal text
-'Vetr'". That was **wrong and self-defeating**: the `~2s` dark "Vetr" splash was
-*replaced* by the textless skeleton above (`root.tsx:378-384` says so), and the
-served `index.html` contains "Vetr" only in its `<title>`. Stalled hydration is
-the live hypothesis, not an excluded one.
+### 🔴 vetr has TWO full-screen boot overlays. Tell them apart by TEXT.
+
+Conflating these produced two wrong findings in a row, in opposite directions.
+
+| | `HydrateFallback` | brand `Splash` |
+|---|---|---|
+| where | `vetr-app/app/root.tsx:377-398` | `app/components/splash.tsx:105-118`, mounted via `components/GeneralComponents.tsx:1,10` |
+| identify by | `[data-testid=app-boot-skeleton]` | `[data-testid=brand-splash]` |
+| text | **none** (`aria-hidden`) | renders **"Vetr"** as `<span>` per letter |
+| when | before the JS bundle executes | **after** hydration, first visit per tab (`sessionStorage.splashSeen`) |
+| holds for | until hydration | `minimumVisibleTime` **2000ms**, and on a non-landing route until `navigation.state === "idle" && isFetching === 0` (`splash.tsx:60-62`) |
+| blocks clicks | it *is* the page | no — `pointer-events-none`, but `z-[9999]` and opaque |
+
+🔴 **The brand `Splash` is LIVE — do not read anywhere that it was removed.** An
+earlier revision of this file claimed it "was *replaced* by" the skeleton, citing
+`root.tsx:378-384`. **That is false.** That comment says the pre-hydration paint
+*used to be blank, which read as* a ~2s dark "Vetr" splash — it is about the
+**blank**, not about `splash.tsx`, which is still imported and still rendered. The
+built `index.html` also contains "Vetr" **twice** (`<title>` and
+`apple-mobile-web-app-title`), neither of them rendered text.
+
+This matters operationally because **the remedy above is "open a fresh tab"** —
+and a fresh tab is exactly the case that gets the brand splash: an opaque
+full-viewport dark overlay for ≥2s that, on an authed route, additionally waits
+for **every in-flight query**. That is the state most easily mistaken for a stall.
+
+So, precisely: a read with **zero `innerText`** does rule the brand splash out —
+splash renders text. What it does **not** rule out is stalled hydration, because
+`HydrateFallback` is textless too. Two different textless-vs-texted states; check
+for both by `data-testid`, never by emptiness.
 
 🔴 **So: if a vetr route reads blank, `close` the tab and `open` a fresh one
 BEFORE forming any theory.** Why a reused tab reaches that state is a
@@ -230,10 +263,12 @@ up where it belongs, in `reference/css-hit-test.md`.
 
 - **`innerText` needs layout**; a backgrounded/occluded tab returns `""` for a
   page that is rendering fine. Use `textContent` for "is anything in the DOM",
-  and a **`screenshot` for what state it is in** — the screenshot is the only
-  thing that separated "pre-hydration skeleton" from "mounted but data-less".
-- **A button/link count of 0 means nothing.** The chooser renders three role
-  cards and still counted 0 `button,a`.
+  and a **`screenshot`** when you need to see which state it is in. (Cheaper and
+  deterministic for the boot states specifically: query the two `data-testid`s in
+  the table above.)
+- **A button/link count of 0 means nothing** — a pre-hydration skeleton has no
+  text *and* no controls, by construction. Measured: the chooser renders three
+  role cards and still counted 0 `button,a`.
 - **`elementFromPoint` returns `null` for an off-viewport point**, which reads
   identically to "covered by an overlay". vetr renders an off-canvas menu at
   negative x, so its controls sit at e.g. `x = -249`. **Filter to in-viewport
@@ -245,13 +280,17 @@ up where it belongs, in `reference/css-hit-test.md`.
 - **A returned Promise is not awaited.** An `async` expression comes back empty,
   with no error — consistent with `SKILL.md`'s "evaluates ONE EXPRESSION". Use one
   self-contained *synchronous* expression, or `curl` the API directly.
-- ⚠ **`window` state did not survive between two consecutive `js` calls** on the
-  same page (`window.__x = …`, then reading it back returned nothing). **This is
-  UNEXPLAINED and it contradicts the mechanism docs** — `reference/spa-wake.md`
-  states `js`/`eval` is **MAIN** world "by definition" (the ISOLATED-world note in
-  the CLI header is about `text`/`html`, not `js`). So do not conclude "isolated
-  world" from this, and do not rely on cross-call globals either. If you need the
-  mechanism, resolve it in `spa-wake.md` — not here.
+- ⚠ **`window` state may not survive between two consecutive `js` calls.**
+  Observed here (`window.__x = …`, then reading it back returned nothing).
+  🔴 **Check whether your call used `--frame` first — that IS the answer:**
+  `--frame` eval runs `Page.createIsolatedWorld` and gets a **brand-new isolated
+  world on every call** (`extension/service_worker.js:539-542`), so page globals
+  are invisible and cross-call state is gone by design. This file tells you to use
+  `--frame` for the authnet hosted-CIM iframe, so it is the likely case. Without
+  `--frame`, `js` is **MAIN** world (`service_worker.js:864-871` default,
+  `:841-846` under `--wake`) and the disappearance is **unexplained** — either way,
+  do not rely on cross-call globals. Note the ISOLATED-world line in the CLI header
+  is about `text`/`html`, not `js`.
 
 ## Other traps
 
