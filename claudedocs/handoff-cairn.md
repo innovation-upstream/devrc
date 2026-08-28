@@ -104,19 +104,29 @@ empty. An unknown kind is withheld too — the fail-closed direction.
 - **Next probe:** check the EventListener pod logs for that delivery id, and whether GitHub's
   webhook delivery log shows a non-2xx for it.
 
-### Six remaining positional audit reads — same class as a fixed flake
-- **Observed:** `scripts/tests/test_subsystem_store_api.py` has **38** audit-list reads, all
-  after the `with` block and none waiting; **12** make more than one auditable request and
-  **7** read positionally. #882 fixed one of the seven.
-- **Leading hypothesis:** the other six are latent instances of the same race — a list appended
-  to by `ThreadingHTTPServer` handler threads, read by index.
-- 🔴 **`await_audit()` guarantees the lines EXIST, not their ORDER** — that is why flake 2 fired
-  despite already calling it. Any conversion must assert a multiset or select by identity.
-- **Closing condition (stated, mechanical):** a PR converting all 11 sites and showing each red
-  under a forced `_audit` delay.
-- **Rejected deliberately:** `daemon_threads = False` — measured to work, but several tests
-  leave a request unfinished on purpose and an unbounded join in a required check is a blind
-  trade.
+### ~~Six remaining positional audit reads~~ — CLOSED, and the numbers below are the stale ones
+🔴 **This block is kept only to show how its own framing rotted — read rank 3, not this.** Every
+number here was true when written and every one of them was wrong within a day, because the file
+was being grown by a branch nobody reconciled against.
+
+- **What it said:** `scripts/tests/test_subsystem_store_api.py` has **38** audit-list reads;
+  **12** make more than one auditable request and **7** read positionally; #882 fixed one of the
+  seven, so **six** remain across **11** sites.
+- **What was there on 2026-08-28:** **59** subscript lines across **~40** test functions. The
+  eliminations aged fine; the population they were counted over did not.
+- 🔴 **`await_audit()` guarantees the lines EXIST, not their ORDER** — still true, still the
+  reason a conversion must assert a multiset or select by identity, and independently rediscovered
+  by the branch that did the work: `92f6650e`'s subject is *"closing the audit COUNT race exposed
+  an ORDER race underneath it, and made it likelier"*.
+- **Closing condition, and how it was actually met:** the card asked for each of 11 sites shown
+  red under a forced `_audit` delay. #948 met it differently and, on balance, better — ONE site
+  observed failing for real (`test_a_LOCKED_OUT_response_is_BYTE_IDENTICAL_to_an_ordinary_401`
+  read `audit[-1]` and got the previous request's `status=unauthorized`), plus a reachable
+  structural ledger that fails when the class regrows. Forty per-site red demonstrations would
+  have proven less and rotted faster.
+- **Rejected deliberately, and still rejected:** `daemon_threads = False` — measured to work, but
+  several tests leave a request unfinished on purpose and an unbounded join in a required check is
+  a blind trade.
 
 ## Next steps (ranked)
 1. ~~**Fix the sanitizer leak**~~ — **DONE**, see the diagnosis above. The proposed fix was
@@ -141,13 +151,39 @@ empty. An unknown kind is withheld too — the fail-closed direction.
    `clawgate-unreachable` (8). The pair that matters is *"the answer is no"* vs *"there was no
    answer"*. 🔴 **An unmeasured live half is never rendered as "no window"** — if any host goes
    unmeasured the absence is UNMEASURED, and transcripts are still reported.
-3. **Convert the six remaining positional audit reads** —
-   `scripts/tests/test_subsystem_store_api.py`. One PR covering all 11 sites, each shown red
-   under a forced `_audit` delay. Repo: `devrc`. 🔴 **STILL BLOCKED, and the debt is GROWING.**
-   `origin/feat/cairn-p3-two-token-auth` is 7 commits and **+2747 lines in that exact file**;
-   measured 2026-08-27, its diff vs `main` ADDS 8 positional `audit[...]` reads and removes 0.
-   So this card must be re-scoped against that branch's merged state, not written now — and the
-   site count in this line is already stale.
+3. ~~**Convert the remaining positional audit reads**~~ — **NOT MINE TO WRITE: already done, in
+   full, inside someone else's open PR.** Re-scoped 2026-08-28 and the correct answer was to
+   write nothing. `scripts/tests/test_subsystem_store_api.py`, repo `devrc`.
+   - **The named blocker merged.** `feat/cairn-p3-two-token-auth` is PR **#915**, merged
+     `2026-08-27T21:15:04Z` (squash `d60c968c`). Verified by CONTENT, not ancestry: that file on
+     `origin/main` and on the branch tip are the **same blob** `26688d49`.
+   - 🔴 **THE ESTIMATE IN THIS LINE WAS UNDERSTATED ~5×, AND THAT IS THE REUSABLE PART.** "Six
+     remaining … all 11 sites" was measured before #915. On `origin/main` the file carries **59**
+     `audit[...]` subscript lines, and the converting branch's own guard docstring puts the real
+     population at **FORTY test functions**. A site count in prose is a measurement with an
+     expiry date on a file another branch is actively growing; re-measure, never carry it.
+   - **PR #948** (`feat/cairn-p3-write-path`, head `92f6650e`, +4066/−112 in that exact file)
+     removes **58** positional reads and adds **2** — and both additions are inside comments. On
+     its head, 3 `audit[...]` occurrences remain in 12,264 lines, **all three in docstrings**:
+     zero live positional reads.
+   - **It ships the durable half this card only implied.** Two AST guards —
+     `test_no_test_INDEXES_a_live_audit_list` (ledgers every raw read; permits exactly one site
+     **structurally**, via `wait_closed()`, never by name) and
+     `test_every_audit_reading_test_goes_through_the_shared_helper` (anti-vacuity: fails when
+     coverage SHRINKS) — plus a threshold test proving `== 3` can tell three readers from two.
+   - **Mutation-tested rather than trusted** (detached worktree at `92f6650e`, pristine restored):
+     reinserting one `assert audit[0]` into a converted test drove
+     `test_no_test_INDEXES_a_live_audit_list` **red with its own message**, naming the offending
+     function and line. Killed by the guard's own assertion — not by a crash, not by a neighbour.
+   - 🔴 **THE CLAIM LOCK COULD NOT SEE THIS AND THE PR SWEEP COULD.** #948 had been public ~16 h.
+     The other session claimed `cairn-write-path` (clawgate #371, criteria 4–7, the *write path*),
+     so the slug never collided with `cairn-3` — the duplicate was real and the hard lock was
+     blind to it by construction. `gh pr list --state open` is what caught it. This is the exact
+     "not covered" class in `claudedocs/design-claim-by-push.md`; the sweep is not a fallback.
+   - **Left to do:** nothing to write. #948 is `MERGEABLE`/`CLEAN` with both required checks
+     green, and is 26 behind `main` under `strict: false` — so its green is a claim about its
+     BRANCH. The merged-tree gate belongs to the #371 session (a `devrc-integ-948` worktree on
+     `integ/948-merged` already exists). Do not run it a second time without coordinating.
 4. ~~**Instrument the Tekton non-fire rather than chase it**~~ — **DONE**, homelab-infra #438
    (squash `bbc373ed`), `scripts/check-ci-nonfire.py` + 88 tests. 🔴 **THE CARD'S OWN SPEC WAS
    THE FIRST THING THAT HAD TO GO.** "Flag required checks pending with no PipelineRun for that
@@ -191,6 +227,19 @@ empty. An unknown kind is withheld too — the fail-closed direction.
    of the record is the reasoning a card would cite.
 
 ## Gotchas / decisions / dead-ends
+- 🔴 **A HARD CLAIM LOCK CANNOT SEE A DUPLICATE NOBODY CLAIMED — and this handoff produced one.**
+  Rank 3 was fully implemented in open PR #948 for ~16 h before anyone here looked. The other
+  session had claimed `cairn-write-path` for the *write path*; this reader derived `cairn-3` for
+  the *test conversion*; the slugs never collided and both sessions were correct to claim what
+  they claimed. **The overlap was in the DIFF, not in the description**, which is the one place a
+  slug lock structurally cannot look. `gh pr list --state open` found it in one command.
+  Corollary for this doc's own ranked list: **a ranked item can be completed by a PR that never
+  names it**, so re-scoping means diffing the file, not reading titles.
+- 🔴 **A SITE COUNT IN PROSE IS A MEASUREMENT WITH AN EXPIRY DATE.** Rank 3's "six remaining …
+  all 11 sites" was ~5× low within a day because a concurrent branch was growing the same file.
+  Same family as the suite-size literals below, but worse: a suite total reads as trivia, whereas
+  a site count reads as *scope* and is what a session budgets against. Re-measure at the moment
+  you act; never carry the number forward.
 - 🔴 **#438 took THIRTEEN adversarial rounds, and the shape of what they found is the lesson.**
   Rounds 1-5 found behaviour defects. Rounds 6-13 found almost none — what they found instead
   was **prose claiming coverage it did not provide**, which is the same defect class the tool
