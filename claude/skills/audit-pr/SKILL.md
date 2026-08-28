@@ -33,6 +33,22 @@ only in a `cp -a` copy — **`rm -f <copy>/.git` first**, since a worktree's is 
 real git dir, so a commit in the copy lands on your branch — and verify your worktree clean
 yourself at the end.
 
+🔴 **Tell it to reap its LOAD GENERATORS by resolved PID, and sweep for them yourself afterwards —
+an auditor's own "cleaned up" claim is not evidence.** Measured twice in ONE session, from two
+different rounds: a timing/stress probe spawned `while :; do :; done` shells whose cleanup
+(`kill %1 %2 …` in one, `kill $LOADPIDS` in the other) reaped nothing, so they reparented to init
+and ran on — **74 orphans saturating ~11 cores for 45 minutes**, then **20 more at ~87% CPU each
+for 6h17m**. Both rounds reported cleanly. 🔴 The cost is not the CPU: the first batch was still
+running during the NEXT round, which measured its timings under that load and reported the
+degraded numbers as a finding — **a leak from round N silently corrupts round N+1's evidence**.
+So brief it to record each PID it spawns and kill those exact PIDs, and at session end sweep
+yourself: `ps -eo pid,ppid,comm` for `ppid==1` shells, confirm each via `/proc/<pid>/cmdline`,
+kill by **resolved PID**. Never let a pattern reach `pkill -f` — it matches your own shell.
+
+🔴 **And give it a UNIQUE name/port for any container or scratch dir it creates.** Subagents share
+one scratchpad path and the branch namespace, so two audit rounds that both pick `cgpg` or port
+55432 collide silently and one reports a green computed against the other's database.
+
 **Audit for:**
 1. **Risks** — what breaks in production.
 2. **Regressions** — behaviour this silently alters or removes.
