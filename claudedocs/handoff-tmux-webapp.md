@@ -302,10 +302,36 @@ do not renumber again without releasing the live claims first.
    volume is a PVC — so the pod has no path to a host tmux socket, and `capture-pane` output has to
    be *delivered* from the host. (The image is distroless with no shell, so probe it via the spec,
    not `kubectl exec`.) Item 4 is the next buildable thing; item 3 needs no further decisions.
-4. **Host-side tmux agent** (phase 2). `devrc`, a new `systemd.user.services` unit on both hosts
-   holding an **outbound** connection to clawgate. Source from `scripts/session-manager --json`,
-   which already SSHes to the laptop and runs `list-panes -a` + `list-windows -a` on both hosts —
-   do not write a second collector.
+4. **Host-side tmux agent** (phase 2). **SERVER HALF DONE — `ZacxDev/homelab-infra#468`, merged as
+   `32f49804`. The host-side pusher is the remaining half.**
+
+   🔴 **Two decisions here were made AGAINST this doc, on measurement.** (a) It specified a unit on
+   EACH host; `session-manager --json` already collects BOTH from the workbench (it SSHes to the
+   laptop) in **~970 ms**, returning 43 workbench + 28 laptop windows — so ONE agent, and the schema
+   is per-host so a second reporter can be added later with no server change. (b) It sketched a
+   WebSocket; rank 3 deferred the interactive terminal, so a persistent socket buys nothing today
+   and adds reconnect/backoff state to get wrong. **Periodic HTTPS POST.**
+
+   **What shipped:** `POST/GET /api/tmux/snapshot` behind `requireHookToken`, migration `0027`
+   (latest-per-host, no reaper — a snapshot is current-state, so there is nothing to retain and no
+   reaper to get wrong, which is the mistake `attention_entries` paid for), and `internal/tmux`,
+   which exists to own the VOCABULARY BOUNDARY: session-manager spells its tmux session `session`,
+   so the collision arrives WITH THE PAYLOAD and is renamed to `tmuxSessionName` at ingest.
+
+   **Still to do — the pusher.** A timer + `curl` on the workbench posting `session-manager --json`
+   VERBATIM; the server normalises, so the host stays a dumb pipe. 🔴 **Deploy order is
+   server-first** — it already is, so a pusher shipped now degrades to a 404 it treats as an
+   unreachable server. **The server is MERGED but NOT DEPLOYED** (immutable image pin, no Flux
+   automation): build + push + bump both `deployment.yaml` and `client.go`'s `buildVersion`.
+
+   **Five audit rounds ran. Every round found a defect the PREVIOUS round's fix introduced** —
+   round 1 an atomicity bug; fixing it caused a 30%-reproducible deadlock (randomised map order vs
+   row locks); fixing THAT left a guard three separate mutants walked through; and `UseNumber`,
+   added so a nanosecond timestamp is not corrupted, re-opened an amplification that a 32-char cap
+   missed (`1e100000` is 8 chars) and `ParseFloat` then closed only half of (it returns `0, nil` on
+   UNDERFLOW). Round 5 was the first with **no behaviour defect**. Stopped there — one round short
+   of the mechanical two-zero-payload gate — because round 5 was auditing test code round 4 wrote.
+   Residual amplification measured **8.1x**, ratio-bounded, down from 1,107x.
 5. **Fail-closed terminal-write auth wrapper** — before any write endpoint exists, not after.
    `internal/api/auth.go`. 🔴 Must NOT reuse `requireHookToken`: it is enforce-when-set
    (`auth.go:51-54`), so an unset token would silently yield an open remote shell on both machines.
@@ -351,6 +377,25 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
   `session-manager`'s waiting-detection is read-only and cheap to add if the queue misses cases.
 
 ## Gotchas
+- 🔴 **A TRUNCATED READ, WRITTEN DOWN, IS INDISTINGUISHABLE FROM A FACT — and I did it TWICE in one
+  session.** A `jq … | head -2` made the laptop look like it had no clawgate Stop hook registered
+  (it does), and a `print(sorted(d.keys())[:8])` made session-manager look like it emits no
+  timestamp — that claim then went into a 🔴 migration comment as "measured", and it was wrong by
+  17 days (`ts` was added 2026-08-11). Both truncations were MINE, in the instrument, and both read
+  back as findings about the world. **Never slice the output of the command you are about to quote**
+  — and when a claim is going into a comment as a measurement, re-run it unsliced.
+- 🔴 **A BOUND NEEDS BOTH HALVES, AND A FIXTURE DERIVED FROM THE CONSTANT PINS NOTHING.** Measured
+  repeatedly on #468: asserting only what a bound REJECTS let an off-by-one silently narrow it, and
+  asserting only what it ADMITS let the branch be deleted. Worse, a reject-side fixture built as
+  `strings.Repeat("0", MaxNumberLiteralLen)` scales WITH the constant — setting it to 1,000,000,000
+  survived the whole suite while the test allocated 1 GB fixtures and passed. Pin a literal value,
+  and pin the constant itself.
+- 🔴 **A GUARD ON A CALL'S PRESENCE IS NOT A GUARD ON ITS EFFECT.** Four successive attempts to pin
+  one ordering requirement were each walked through: asserting the helper (deleting the call site
+  passed), asserting the call exists (dropping the assignment and moving it below the loop both
+  passed), asserting SOME loop ranges over it (a decoy loop passed), and OR-ing across loops (a
+  second unsorted loop passed). What finally held was quantifying over EVERY write loop and binding
+  the check to the loop that actually writes. **Ask what the code must DO, then assert that.**
 - 🔴 **A PERIODIC SWEEP'S INTERVAL MUST BE SMALLER THAN THE PROCESS LIFETIME, AND A TICKER'S FIRST
   TICK LANDS ONE WHOLE INTERVAL IN.** `time.NewTicker(24h)` in a pod that lives 5h fires **never**,
   and every surface reads healthy: the code is correct, the unit tests pass, the leader lease
