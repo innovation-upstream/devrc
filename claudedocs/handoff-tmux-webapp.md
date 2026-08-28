@@ -9,30 +9,49 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Phase 1 (the attention queue) is SHIPPED, DEPLOYED and VERIFIED LIVE. Phases 2–6 are untouched.**
+**Phase 1 (the attention queue) is SHIPPED, DEPLOYED and VERIFIED LIVE. Phase 2's SERVER HALF is
+MERGED but NOT DEPLOYED. Phases 3–6 are untouched.**
+
+🔴 **LIVE VERSION IS 0.8.7** (`clawgatectl health`, 2026-08-28). This line has been stale twice —
+read it from the cluster, never from this doc.
 
 *How the design got here (carried forward):* settled 2026-08-26 across two rounds — a greenfield
 session, then an audit that reopened four decisions — then a re-platform onto clawgate that resolved
 three of them outright. The sections below from `## Platform` down are that design, still current.
 
-- **clawgate 0.8.3 is live** — built, pushed (`sha256:c07436c3…`), pinned, Flux-reconciled,
-  pod `Running`/ready. Verified via `clawgatectl health` through the LAN NodePort, not from the
-  rollout's own success claim.
-- **`ZacxDev/homelab-infra#422`** — the attention queue — merged as **`5a008e4f`**.
-  **`#427`** (one-line `buildVersion` fix) merged as **`f2f8cb7e`**;
-  **`#432`** was closed after fast-forwarding onto the branch to keep one reviewable PR.
-- **`innovation-upstream/devrc#890`** — this doc's audited rewrite — merged as **`f53ef8a6`**.
-- **Both hosts are on clawgatectl 0.8.3** with the `attention` verb, converged via `scripts/ship.sh`
-  (both at `d3875d64`).
-- **Verified through the real path, not inferred:** a genuine `AskUserQuestion` produced a
-  `kind=question priority=high` entry sorted **above ten `idle` rows** — the priority-ordering fix
-  demonstrated in production. Repeated from the laptop after its hook was fixed: entry id 149,
-  `host=laptop`, hook `exit=0` with empty stdout (still defers). Test entry resolved afterwards.
+**Shipped, newest first:**
+- **`ZacxDev/homelab-infra#468`** — the tmux snapshot ingest, phase 2's server half — merged as
+  **`32f49804`**. `POST/GET /api/tmux/snapshot`, migration `0027`, and `internal/tmux`, which owns
+  the vocabulary boundary. 🔴 **MERGED IS NOT DEPLOYED** — the image pin is an immutable literal
+  with no Flux automation, so this needs 0.8.8 built + pushed + BOTH version literals bumped.
+- **`ZacxDev/homelab-infra#457`** — the idle reaper's own cadence — merged as `3a66e3e0`, deployed
+  as **0.8.7** (pin `cc51b9b4`) and verified over 4.5h of production sweeps. See rank 1.
+- **`#451`** (detached suggest POST) merged as `a38360a5`, live on BOTH hosts (hook files verified
+  byte-identical, `f793ab9c…`).
+- **`#422`** (the attention queue) merged as `5a008e4f`; **`#427`** (one-line `buildVersion` fix) as
+  `f2f8cb7e`; **`#432`** closed after fast-forwarding onto the branch to keep one reviewable PR.
+- **`innovation-upstream/devrc#890`** — this doc's audited rewrite — merged as `f53ef8a6`;
+  **`#959`** (ranks 1/3/4 + the lessons below) as `660e0671`.
+
+**Phase 1 was verified through the real path, not inferred (carried forward):** a genuine
+`AskUserQuestion` produced a `kind=question priority=high` entry sorted **above ten `idle` rows** —
+the priority-ordering fix demonstrated in production. Repeated from the laptop after its hook was
+fixed: entry id 149, `host=laptop`, hook `exit=0` with empty stdout (still defers). Test entry
+resolved afterwards.
 
 **What the feature is:** attention entries (migration `0026`), kinds `question` (high) / `idle`
 (low), raised by the `AskUserQuestion` path, the Stop hook, and `clawgatectl attention
 raise|ls|resolve`; surfaced in an htmx tab and pushed via the pre-existing `POST /api/notify`.
 🔴 An entry is **not** a decision object — no approve/deny, it carries a *destination*.
+
+**Live health at handoff (2026-08-28 09:53Z), read from the cluster:** pod
+`clawgate-7c78695584-mcc74`, image `0.8.7`, `restarts=0`, up since 07:21:45Z — it **rolled cleanly**
+during the session, which wiped the earlier sweep history with the old pod. The queue is bounded:
+`open=23`, **`idle_past_4h=0`** (baseline before the fix: 64 open / 21 eligible). 🔴 **The reaper
+has logged no `attention-reap: resolved` line since that roll, and that is CORRECT, not a
+regression** — the pass is silent when it resolves nothing, and nothing has been eligible. This is
+exactly the case the unconditional boot line exists for: `07:21:46 attention reaper: sweeping every
+30m0s …` is the only thing distinguishing a healthy silent sweep from a reaper that never started.
 
 **The laptop had a five-month-old hook.** Its `PermissionRequest` hook was registered at
 `~/.claude/clawgate-hook.sh` — a regular file (not a symlink; `readlink -f` resolves to itself),
@@ -42,13 +61,23 @@ this feature exists for, silently, on one host. Repointed at the repo path via `
 timestamped backup (21 hooks / 7 keys preserved, one-line diff). The stale 0.3.1 copy is still on
 disk, now referenced by nothing.
 
-**Seven audit rounds ran; the ladder stopped when a round came back clean, never on a verdict.**
-Three compounding defects would have made the queue bury the questions it exists to surface
-(idle never reaped + priority absent from the sort + a 100-row limit taking the *oldest*).
+**Seven audit rounds ran on #422; the ladder stopped when a round came back clean, never on a
+verdict.** Three compounding defects would have made the queue bury the questions it exists to
+surface (idle never reaped + priority absent from the sort + a 100-row limit taking the *oldest*).
 **Nine separate instruments were caught measuring nothing**, including three harnesses built to
 check earlier ones, one that scored an *unmutated* tree as SURVIVED, and a CI timer that had both
 fire-and-forget tests passing on literally nothing. Two of those predated this work and were found
 only because the **merged tree** was gated instead of the branch.
+
+🔴 **#468 ran FIVE more rounds, and the pattern there is the finding: every round found a defect the
+PREVIOUS round's fix had introduced.** An atomicity fix caused a 30%-reproducible deadlock
+(randomised map order vs row locks); fixing that left a guard three separate mutants walked through;
+and `UseNumber`, added so a nanosecond timestamp would not be corrupted, re-opened a read
+amplification that a 32-char cap missed (`1e100000` is 8 chars) and `ParseFloat` then closed only
+half of (it returns `0, nil` on UNDERFLOW). Round 5 was the first with **no behaviour defect**.
+⚠ **Stopped there — ONE round short of the mechanical two-zero-payload gate** — because round 5 was
+auditing test code round 4 wrote, and round 6 would have audited test code round 5 wrote. That is a
+judgement, not the rule; a sixth round is a legitimate thing to ask for.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -505,6 +534,39 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
   diverged devrc `main`, and by the time it was approved another session had switched that checkout
   to a feature branch — the command would have reset *that branch* and destroyed its pointer. The
   divergence had also already been fixed by its owner. One `git branch --show-current` caught it.
+
+- 🔴 **AN AUDIT SUBAGENT'S LOAD GENERATORS LEAK, AND IT HAS NOW HAPPENED TWICE IN ONE SESSION —
+  treat it as a property of the briefing, not as bad luck.** Both times a stress test spawned
+  `while :; do :; done` shells and its cleanup (`kill %1 %2 …` once, `kill $LOADPIDS` the other)
+  failed to reap them; they reparented to init and ran on. Measured: **74 orphans saturating ~11
+  cores for 45 minutes**, then **20 more at ~87% CPU each for 6h17m — roughly 17 cores**. The first
+  batch corrupted the very timing measurements the NEXT audit round then reported, so the cost is
+  not just CPU: it silently poisons the evidence. 🔴 Two agents reported "no load generators
+  spawned"/"all cleaned up" while these were running — a subagent's own cleanup claim is not
+  evidence. **Sweep for them yourself at session end**: `ps -eo pid,ppid,comm` for `ppid==1` zsh,
+  confirm each via `/proc/<pid>/cmdline`, kill by RESOLVED pid, never let a pattern reach `pkill -f`.
+  🔴 The durable fix landed in the **`audit-pr` skill's briefing** (record spawned PIDs, reap by
+  PID, sweep yourself afterwards, and give every container/scratch dir a UNIQUE name+port) — that is
+  its home, not this queue, because it is a lesson about our own tooling rather than about clawgate.
+- 🔴 **A TRUNCATED READ, WRITTEN DOWN, IS INDISTINGUISHABLE FROM A FACT — done TWICE this session,
+  both times by me, both times in the instrument.** A `jq … | head -2` made the laptop look like it
+  had no clawgate Stop hook registered (it does), and a `print(sorted(d.keys())[:8])` made
+  session-manager look like it emits no timestamp — that one went into a 🔴 migration comment as
+  "measured" and was wrong by 17 days (`ts` was added 2026-08-11). **Never slice the output of the
+  command you are about to quote**, and re-run unsliced before a claim becomes a comment.
+- 🔴 **A BOUND NEEDS BOTH HALVES, AND A FIXTURE DERIVED FROM THE CONSTANT PINS NOTHING.** Asserting
+  only what a bound REJECTS let an off-by-one silently narrow it; asserting only what it ADMITS let
+  the branch be deleted. And a reject-side fixture built as `strings.Repeat("0", MaxLen)` scales
+  WITH the constant — raising it to 1,000,000,000 survived the whole suite while the test allocated
+  1 GB fixtures and passed in 13s. Pin a literal value, and pin the constant itself.
+- 🔴 **A GUARD ON A CALL'S PRESENCE IS NOT A GUARD ON ITS EFFECT.** Four successive attempts to pin
+  ONE ordering requirement were each walked through: assert the helper (deleting the call site
+  passed), assert the call exists (dropping the assignment, and moving it below the loop, both
+  passed), assert SOME loop ranges over it (a decoy loop passed), OR across loops (a second unsorted
+  loop passed). What held was quantifying over EVERY write loop and binding the check to the loop
+  that actually writes.
+- ⚠ **`gh pr view --json mergeable` answers `UNKNOWN` for a while after a push** — GitHub is still
+  computing it. It is not a conflict; re-read it a few seconds later before acting.
 
 ## How to verify
 
