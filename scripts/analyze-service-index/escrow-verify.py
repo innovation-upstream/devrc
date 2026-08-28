@@ -12,20 +12,39 @@ right up until the moment somebody needed them, because that verifier runs on
 the machine that still HAS the key.
 
 So the key is escrowed into the operator's self-hosted Vaultwarden as a Secure
-Note. This script answers the three questions that escrow raises, and it refuses
+Note. This script answers the four questions that escrow raises, and it refuses
 to answer any of them by silence:
 
   1. IS IT STILL THERE?    the note exists, exactly once, and is not empty;
   2. IS IT STILL CORRECT?  its bytes equal the on-disk identity, byte-for-byte;
-  3. DOES IT STILL WORK?   `--decrypt-check` writes the ESCROWED bytes to a
+  3. IS IT THE RIGHT KEY?  `--expect-pubkey <sha16>` derives the escrowed copy's
+                           PUBLIC half with `age-keygen -y` and compares its
+                           sha256 prefix against a pin the operator supplies;
+  4. DOES IT STILL WORK?   `--decrypt-check` writes the ESCROWED bytes to a
                            throwaway identity and decrypts a REAL artifact out
                            of the bucket with it.
 
-🔴 (2) AND (3) ARE DIFFERENT CLAIMS AND ONLY ONE OF THEM MATTERS ALONE.
+🔴 (2), (3) AND (4) ARE DIFFERENT CLAIMS AND NONE OF THEM STANDS FOR ANOTHER.
 Byte equality proves the two copies agree; it cannot prove either of them opens
 anything, because it never asks age. Decryption proves the ESCROWED COPY —
 not the on-disk one — reconstructs history. A run without `--decrypt-check`
 says so in its own verdict line rather than letting "verified" stand for both.
+
+🔴 (3) IS THE ONLY ONE THAT RUNS ON A DISASTER-RECOVERY MACHINE, AND THAT IS
+WHY IT EXISTS. (2) resolves an ON-DISK identity — a genuine DR host has none,
+which is what makes it a disaster, so the default mode ends there with
+`IDENTITY-MISSING` and answers nothing. (4) needs MinIO reachable, the bucket,
+a kubeconfig and a `python3` carrying `minio`; a bare recovery machine has none
+of that either. `--expect-pubkey` needs only `bw` and `age-keygen`, reads NO
+on-disk identity and contacts NO bucket. It was rehearsed by hand from the
+second host on 2026-08-27; this is that rehearsal, upstreamed.
+
+⚠ (3) IS A CLAIM ABOUT WHICH KEY, NOT ABOUT WHICH BYTES, AND (2) AND (3) CAN
+DISAGREE ON PURPOSE. MEASURED 2026-08-27, age v1.3.1: a CRLF-rewritten copy of
+an identity still derives the CORRECT public key, so (3) says PROVEN while (2)
+says `DIFFERS-MATERIALLY`. Both are true — the copy is not byte-identical and
+is still the same usable key. Neither answer is the other's, which is exactly
+why they are separate modes with separate codes.
 
 🔴 EVERY EMPTY OUTCOME IS A FAILURE
 -----------------------------------
@@ -65,10 +84,28 @@ send the operator hunting for corruption that is not there.
 🔴 NO KEY MATERIAL IS EVER PRINTED, LOGGED, OR PASSED IN ARGV
 --------------------------------------------------------------
   * the note is read out of `bw list items --search`'s JSON on stdout and stays
-    in memory; nothing derived from it reaches a message. A mismatch reports
-    BYTE COUNTS AND A CLASSIFICATION, never the differing content, and never a
-    hash of it either (a hash of a 189-byte key with a known format is not a
-    protection worth arguing about in a public repo's issue tracker).
+    in memory; nothing derived from its SECRET half reaches a message. A
+    mismatch reports BYTE COUNTS AND A CLASSIFICATION, never the differing
+    content, and never a hash OF THE SECRET HALF either (a hash of a 189-byte
+    key with a known format is not a protection worth arguing about in a public
+    repo's issue tracker).
+    🔴 `--expect-pubkey` PRINTS A HASH, AND THE DISTINCTION THAT MAKES IT SAFE
+    IS PUBLIC HALF vs SECRET HALF — not "hashes are fine now". An age identity
+    file carries both: `AGE-SECRET-KEY-1…` (the secret) and the `age1…`
+    RECIPIENT derived from it (the public half, the thing you hand out to be
+    encrypted TO). `age-keygen -y` emits ONLY the recipient — measured
+    2026-08-27, age v1.3.1: exactly `age1…` + one `\\n`, 63 bytes, nothing else
+    on stdout — so a sha256 prefix of that output discloses nothing a
+    ciphertext header does not already carry. The pin `288c4d24cfdb5aa1` is
+    already committed in this public repo for that reason. The paragraph above
+    is unchanged in force for the SECRET half: it is never printed, never
+    hashed into a message, and never passed in argv.
+    🔴 AND age-keygen's STDERR IS NOT SAFE, on exactly the failure this mode
+    exists to catch. Measured: a file it cannot parse comes back as `unknown
+    identity type: "<the offending line>"` — it ECHOES ITS INPUT, and on a
+    subtly-mangled identity that line is the SECRET KEY. So the
+    `NOT-AN-AGE-IDENTITY` refusal reports the exit code and the stdout byte
+    count and quotes no stream at all.
   * `bw`'s stdout is NEVER quoted in an error message. Every subprocess result
     here is handled as redacted by construction — `_run()` has no path that
     interpolates output into an exception.
@@ -109,16 +146,23 @@ Usage:
                      [--decrypt-check [--scope S] [--bucket B | --from-dir DIR]
                                       [--host H | --prefix P] [--store DIR]]
                      [--work-dir DIR] [--timeout SECONDS] [--print-plan]
+    escrow-verify.py --expect-pubkey SHA16 [--item-name NAME]
+                     [--expect-server URL] [--work-dir DIR] [--timeout SECONDS]
 
-  --print-plan   pure text; runs no `bw`, touches no network, reads no key.
+  --expect-pubkey  needs NO on-disk identity and NO bucket. Mutually exclusive
+                   with --identity (it reads none) and with --decrypt-check
+                   (which needs the bucket the DR host cannot reach).
+  --print-plan     pure text; runs no `bw`, touches no network, reads no key.
 """
 from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -218,6 +262,35 @@ NIX_SHELL_HINT = ("nix-shell -p "
                   + " ".join(_quote_nix_package(p) for p in NIX_SHELL_PACKAGES)
                   + " --run '<command>'")
 
+# 🔴 A SECOND, SMALLER LEDGER — because `--expect-pubkey` NEEDS LESS, and
+# advertising the decrypt shell for it would be advertising a dependency set
+# the mode does not have. That matters in the one place this mode is for: on a
+# recovery machine `python3.withPackages(p:[p.minio])` is a large download the
+# operator has no reason to wait for, and `jq` is not used by this script at
+# all. The whole claim of this mode is "only `bw` and `age-keygen`", so the
+# hint it hands over has to be exactly that.
+#
+# `age-keygen` ships inside nixpkgs' `age` package — the PACKAGE is named here,
+# the BINARY is named by `PUBKEY_TOOLS`, and `test_the_pubkey_shell_provisions_
+# every_tool_that_path_runs` pins that the advertised shell really provides
+# every binary the path executes. Naming the binary as a package would render a
+# hint that does not resolve, which is the 2026-08-25 failure in a new spelling.
+PUBKEY_NIX_SHELL_PACKAGES: tuple[str, ...] = (
+    "bitwarden-cli",   # `bw` — fetching the note is the only network step
+    "age",             # provides `age-keygen`, which derives the PUBLIC half
+)
+
+PUBKEY_NIX_SHELL_HINT = (
+    "nix-shell -p "
+    + " ".join(_quote_nix_package(p) for p in PUBKEY_NIX_SHELL_PACKAGES)
+    + " --run '<command>'")
+
+# The executables the `--expect-pubkey` path actually runs, named here so the
+# ledger above can be checked against them mechanically rather than by someone
+# remembering. `bw` is resolved through `BitwardenCLI.require_available`, which
+# has its own token; `age-keygen` is the one this module preflights.
+PUBKEY_TOOLS: tuple[str, ...] = ("bw", "age-keygen")
+
 # 🔴 THERE IS DELIBERATELY NO `_DIR_MODE` ALIAS HERE. Directory mode is enforced
 # by `B._private_dir()`, which owns the number; re-exporting it would be a second
 # name for one constant, and an unused one at that. `_FILE_MODE` earns its keep
@@ -305,13 +378,82 @@ EXIT_CODES: dict[str, int] = {
     "RESTORE-FAILED": 26,       # decrypt returned: the key WORKS, data is bad
     "STORE-UNREACHABLE": 27,
     "NO-ARTIFACT": 28,
+    # --expect-pubkey
+    #
+    # 🔴 FIVE OUTCOMES, SPLIT BY REMEDY LIKE EVERY BLOCK ABOVE, AND THE SPLIT IS
+    # what keeps a wrong PIPELINE from being read as a wrong KEY. All five are
+    # reachable on a machine holding no age identity and no route to the bucket,
+    # which is the point of the mode.
+    #
+    #   * EXPECT-PUBKEY-MALFORMED — the fault is in YOUR ARGV. Raised before any
+    #     `bw` call, because an expectation that could only ever mismatch must
+    #     not cost a master password, and reporting it as a MISMATCH would
+    #     accuse a good escrow of being the wrong key.
+    #   * AGE-KEYGEN-MISSING — the tool is absent. See `preflight_pubkey_tools`
+    #     for why this is NOT `AGE-MISSING` (29).
+    #   * NOT-AN-AGE-IDENTITY — age-keygen RAN and REFUSED. This is the
+    #     whitespace-mangling failure the mode exists to catch; measured
+    #     2026-08-27, collapsing an identity's newlines to spaces gives exactly
+    #     this (rc=1, zero bytes of stdout).
+    #   * PUBKEY-DERIVATION-EMPTY — age-keygen exited ZERO and printed NOTHING.
+    #     The check did NOT RUN; it did not fail. A naive shell pipeline hashes
+    #     the empty stream here and reports a confident MISMATCH.
+    #   * PUBKEY-MISMATCH — it parsed, and it is a DIFFERENT key.
+    "EXPECT-PUBKEY-MALFORMED": 39,
+    "AGE-KEYGEN-MISSING": 38,
+    "NOT-AN-AGE-IDENTITY": 35,
+    "PUBKEY-DERIVATION-EMPTY": 37,
+    "PUBKEY-MISMATCH": 36,
 }
+
+# 🔴 THE RANGE BELOW 40 IS NOW FULL: 10–39 are all claimed, and
+# `restore-verify.py` starts at 40 precisely so an operator mapping a number
+# during a recovery gets one answer. `test_the_TWO_exit_code_TABLES_never_
+# collide` is what holds that, in both keys and values. A SIXTH cause added here
+# cannot simply take 40 — moving restore-verify's floor is the change, and it is
+# a change to a documented table a human reads under pressure, not a renumber.
 
 # The three answers a byte comparison may give. Named constants because the test
 # suite pins the literal strings and a verdict is a machine-readable claim.
 CLASS_IDENTICAL = "IDENTICAL"
 CLASS_TRAILING_NEWLINE = "DIFFERS-TRAILING-NEWLINE-ONLY"
 CLASS_MATERIAL = "DIFFERS-MATERIALLY"
+
+# --------------------------------------------------------------------------- #
+# --expect-pubkey
+# --------------------------------------------------------------------------- #
+# How many hex characters of the sha256 the operator pins. 16 because that is
+# what `… | sha256sum | cut -c1-16` prints, and that command — not this file —
+# is what an operator runs by hand on a machine where this script is not
+# installed. A pin the tool and the hand-run command cannot both produce is a
+# pin that gets abandoned mid-recovery.
+PUBKEY_SHA_CHARS = 16
+
+# 🔴 sha256 OF EMPTY INPUT. It is NOT a branch condition — `derive_pubkey_sha`
+# refuses on an empty stdout before hashing anything, so this digest can never
+# be computed here. It is named so the refusal MESSAGE can hand it over: in the
+# hand-run shell pipeline an `age-keygen` that printed nothing is invisible, and
+# `sha256sum` cheerfully digests the empty stream. Seeing this value means the
+# command DID NOT RUN, which is not the same as a check that failed.
+EMPTY_SHA256_PREFIX = "e3b0c44298fc1c14"
+
+# An age recipient: `age1` plus 58 lowercase base32 characters. Checked so that
+# an `age-keygen` which one day exits 0 while printing something else cannot be
+# hashed and reported as a public key. The same shape `backup.resolve_recipient`
+# enforces on `ASIB_AGE_RECIPIENT`.
+AGE_PUBKEY_RE = re.compile(r"age1[0-9a-z]{58}")
+
+# The two lengths `sha256sum` output is legitimately trimmed to: the full digest
+# or the documented `cut -c1-16` prefix. Anything else is a typo, and a typo
+# must not be reported as a wrong key.
+_ACCEPTED_PIN_LENGTHS = (PUBKEY_SHA_CHARS, 64)
+
+# 🔴 THERE IS DELIBERATELY NO `ASIB_ESCROW_PUBKEY` ENVIRONMENT FALLBACK, unlike
+# `--expect-server` / `ASIB_ESCROW_SERVER`. That variable only PINS a value; this
+# flag SELECTS A MODE — presence switches the run from "compare against the
+# on-disk identity" to "derive the public half and compare a hash", and a run
+# whose whole meaning is decided by an exported variable is the shape this file
+# already got burned by (`SOPS_AGE_KEY_FILE`, 2026-08-25). It must be typed.
 
 
 class EscrowError(B.BackupError):
@@ -718,6 +860,34 @@ def _decrypt_phase_probe(RV):
 # --------------------------------------------------------------------------- #
 # verdict
 # --------------------------------------------------------------------------- #
+def _server_clauses(server_pinned: bool, server_session_reason: str | None) -> str:
+    """The two SERVER sentences, in ONE place, for every verdict this file has.
+
+    🔴 TWO INDEPENDENT FACTS, NEVER MERGED INTO ONE SENTENCE: whether the
+    operator PINNED a server, and whether the session cross-check could be made
+    at all. The old line asserted the second unconditionally while the code
+    skipped it silently.
+
+    🔴 HOISTED OUT OF `EscrowVerdict.line()` when `PubkeyVerdict` arrived, and
+    that is the whole reason it is a function. Both verdicts report the same two
+    facts about the same `check_server()` result; open-coded twice they would
+    have drifted, and the drift is inaudible because each verdict's own test
+    pins its own wording. Its output is byte-identical to what `EscrowVerdict`
+    emitted before the hoist — the pre-existing whole-string pins are the
+    control that says so.
+    """
+    pin = ("server PINNED and matched" if server_pinned
+           else "server NOT PINNED (--expect-server / ASIB_ESCROW_SERVER "
+                "unset)")
+    if server_session_reason is None:
+        session = ("session cross-check RAN: the CLI's configured server "
+                   "matched the authenticated session's")
+    else:
+        session = (f"session cross-check NOT COMPARED "
+                   f"({server_session_reason})")
+    return f"{pin}; {session}"
+
+
 @dataclass
 class EscrowVerdict:
     """What this run PROVED. Every field is a measured number or a literal."""
@@ -755,20 +925,7 @@ class EscrowVerdict:
                      f"chosen by {self.identity_source}, so this 'matches' is a "
                      f"claim about that file, not about "
                      f"{B.DEFAULT_IDENTITY}")
-        # 🔴 TWO INDEPENDENT FACTS, NEVER MERGED INTO ONE SENTENCE: whether the
-        # operator PINNED a server, and whether the session cross-check could be
-        # made at all. The old line asserted the second unconditionally while
-        # the code skipped it silently.
-        pin = ("server PINNED and matched" if self.server_pinned
-               else "server NOT PINNED (--expect-server / ASIB_ESCROW_SERVER "
-                    "unset)")
-        if self.server_session_reason is None:
-            session = ("session cross-check RAN: the CLI's configured server "
-                       "matched the authenticated session's")
-        else:
-            session = (f"session cross-check NOT COMPARED "
-                       f"({self.server_session_reason})")
-        pin = f"{pin}; {session}"
+        pin = _server_clauses(self.server_pinned, self.server_session_reason)
         if not self.decrypt_checked:
             return (f"{head}; {pin}; NOT DECRYPT-CHECKED — byte equality proves "
                     f"the two copies agree, NOT that either of them opens an "
@@ -777,6 +934,54 @@ class EscrowVerdict:
                 f"{self.decrypt_key} (scope {self.decrypt_scope}) and restored "
                 f"{self.decrypt_commits} commit(s) over {self.decrypt_refs} "
                 f"ref(s)")
+
+
+@dataclass
+class PubkeyVerdict:
+    """What an `--expect-pubkey` run PROVED. Its own type, not a flag on the one
+    above.
+
+    🔴 A SEPARATE VERDICT BECAUSE IT IS A SEPARATE CLAIM. `EscrowVerdict` says
+    "the note matches the file at <path>", and every field it carries
+    (`disk_bytes`, `identity`, `identity_source`, `classification`) is about a
+    local identity this mode deliberately never reads. Folding this into it
+    would mean rendering those fields as zero/None and letting a reader decide
+    which parts of the sentence were measured — which is the "unmeasured scope
+    printed in the word used for a measured one" failure this file's own
+    `server_session_reason` exists to prevent.
+
+    🔴 `pubkey_sha` IS PRINTED; THE RECIPIENT ITSELF IS NOT. Both are public,
+    so this is not a secrecy line — it is that the sha16 is the thing the
+    operator pinned and can compare, and the full `age1…` recipient is a longer
+    string nobody checks, in a message that ends up pasted into a public tracker.
+    """
+    item_name: str
+    server: str
+    server_pinned: bool
+    pubkey_sha: str
+    expected_sha: str
+    escrow_bytes: int
+    escrow_lines: int
+    server_session_reason: str | None = None
+
+    def line(self) -> str:
+        return (
+            f"{PROG}: ESCROW PROVEN FROM THIS HOST — the Secure Note "
+            f"{self.item_name!r} derives public-key sha {self.pubkey_sha}, "
+            f"which is the {PUBKEY_SHA_CHARS}-hex pin you gave. NO on-disk "
+            f"identity was read and NO artifact store was contacted: this mode "
+            f"needs only `bw` and `age-keygen`, which is what lets it run on a "
+            f"recovery machine that has neither the key nor a route to the "
+            f"bucket. Fetched {self.escrow_bytes} bytes / {self.escrow_lines} "
+            f"lines — 🔴 THAT COUNT IS NOT THE CHECK: every age identity file "
+            f"is the same size, so an unrelated key passes a byte/line "
+            f"comparison; the sha is what discriminates. WHAT THIS DOES NOT "
+            f"PROVE: that any artifact opens — for that run --decrypt-check; "
+            f"nor that the note is BYTE-IDENTICAL to a local copy — a "
+            f"CRLF-rewritten note derives this same correct public key "
+            f"(measured, age v1.3.1), so the default byte comparison can call "
+            f"the same note DIFFERS-MATERIALLY and both answers are true. "
+            f"{_server_clauses(self.server_pinned, self.server_session_reason)}")
 
 
 # --------------------------------------------------------------------------- #
@@ -1285,6 +1490,210 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
 
 
 # --------------------------------------------------------------------------- #
+# --expect-pubkey
+# --------------------------------------------------------------------------- #
+def normalise_expected_pubkey_sha(raw: str) -> str:
+    """The operator's pin, lowercased and trimmed to `PUBKEY_SHA_CHARS`.
+
+    🔴 A MALFORMED PIN IS ITS OWN FAILURE, NEVER A MISMATCH. A typo can only
+    ever produce "the escrowed key is not the one you named" — a sentence about
+    the ESCROW, from a fault in the ARGV, whose documented remedy elsewhere in
+    this subsystem is to re-escrow. That is the exact shape that overwrote a
+    good copy once already.
+
+    🔴 THE VALUE IS NEVER ECHOED. It is a public-half digest and would be safe
+    to print — but the flag is also where a hurried operator can paste the wrong
+    clipboard entry, and this file's stance is that nothing whose provenance it
+    cannot see reaches a message. Length and "is it hex" are enough to fix a
+    typo.
+
+    Two lengths are accepted because `sha256sum` legitimately produces both: the
+    full 64-character digest, and the `cut -c1-16` prefix the runbook prints.
+    """
+    s = raw.strip().lower()
+    if len(s) not in _ACCEPTED_PIN_LENGTHS:
+        why = (f"it is {len(s)} characters long, and a sha256 digest is "
+               f"{_ACCEPTED_PIN_LENGTHS[1]} or, cut to the documented prefix, "
+               f"{_ACCEPTED_PIN_LENGTHS[0]}")
+    elif not re.fullmatch(r"[0-9a-f]+", s):
+        why = (f"it is {len(s)} characters long, which is right, but not all of "
+               f"them are hexadecimal")
+    else:
+        return s[:PUBKEY_SHA_CHARS]
+    raise EscrowError(
+            "EXPECT-PUBKEY-MALFORMED",
+            f"--expect-pubkey is not a sha256 digest: {why}. "
+            f"(The value itself is NOT echoed.) Produce it with "
+            f"`age-keygen -y <identity> | sha256sum | cut -c1-"
+            f"{PUBKEY_SHA_CHARS}` on a machine that holds the key. NOTHING HAS "
+            f"BEEN CHECKED and the vault was NOT contacted — this refusal is "
+            f"raised before any `bw` call, so no master password is spent on a "
+            f"pin that could only ever mismatch. 🔴 ITS OWN CODE, NOT "
+            f"PUBKEY-MISMATCH: a typo is a fact about what you typed, and "
+            f"reporting it as a mismatch would accuse an intact escrow of being "
+            f"the wrong key — whose remedy is to overwrite it.")
+
+
+def preflight_pubkey_tools(*, which=None) -> None:
+    """Refuse an `--expect-pubkey` whose TOOL is absent — BEFORE the vault.
+
+    🔴 THE ORDERING IS THE WHOLE POINT, and it is `#851`'s lesson rather than a
+    new one: a precondition checked AFTER the vault round-trip costs a master
+    password. That failure recurred once because the fix corrected WHICH shell
+    was advertised without changing WHEN the check ran, so this is placed the
+    same way `preflight_decrypt_imports` is — ahead of `require_available`, and
+    ahead of anything that touches the filesystem.
+
+    🔴 ITS OWN TOKEN, NOT `AGE-MISSING` (29), FOR THREE REASONS:
+      * a different BINARY. `age` and `age-keygen` are separate executables. An
+        operator handed a message about `age`, who then runs `which age` and
+        sees it, concludes the tool is broken and stops trusting the verdict;
+      * a different CLAIM. `AGE-MISSING`'s message says the escrowed key "cannot
+        be tested against anything" and points at the artifacts — true of a
+        decrypt run, false here, where nothing was ever going to be decrypted;
+      * a different TABLE ROW. SECRETS.md documents 29 under `--decrypt-check`.
+        An operator mapping a number during a recovery would land on a row about
+        a check they did not run.
+    """
+    which = shutil.which if which is None else which
+    if which("age-keygen") is not None:
+        return
+    raise EscrowError(
+        "AGE-KEYGEN-MISSING",
+        f"`age-keygen` is not on PATH, so the escrowed note's PUBLIC half "
+        f"cannot be derived and --expect-pubkey can prove nothing. NOTHING HAS "
+        f"BEEN CHECKED and the vault was NOT contacted — this refusal is raised "
+        f"before any `bw` call, so a master password is not spent on a run that "
+        f"cannot finish. This is an ENVIRONMENT fault and says NOTHING about "
+        f"the escrow: do not read it as a verdict on the key. It is a DIFFERENT "
+        f"binary from `age` (exit {EXIT_CODES['AGE-MISSING']}), so `which age` "
+        f"succeeding does not contradict this. It ships in nixpkgs' `age` "
+        f"package: {PUBKEY_NIX_SHELL_HINT}")
+
+
+def derive_pubkey_sha(identity_file: Path) -> str:
+    """`sha256(age-keygen -y <file>)[:16]`, or a classified refusal.
+
+    🔴 THE DIGEST IS TAKEN OVER `age-keygen`'s RAW STDOUT, byte for byte —
+    never over a reassembled string. MEASURED 2026-08-27, age v1.3.1: stdout is
+    the `age1…` recipient plus exactly one `\\n` (63 bytes), and
+    `printf '%s' "$out" | sha256sum` — which drops that newline — yields a
+    DIFFERENT digest. Hashing `recipient + "\\n"` would agree with the hand-run
+    pipeline today and stop agreeing the moment age changes its output by a
+    byte, which is precisely when the disagreement would be read as a bad key.
+
+    🔴 THREE FAILURES, THREE CODES, because "nothing came out" has three causes
+    with opposite remedies:
+      * the tool is absent          -> refused earlier by `preflight_pubkey_tools`
+      * it ran and REFUSED (rc!=0)  -> NOT-AN-AGE-IDENTITY: the note is mangled
+      * it exited 0 printing NOTHING-> PUBKEY-DERIVATION-EMPTY: the check did
+                                       not run, and a shell pipeline would
+                                       silently digest the empty stream instead.
+
+    🔴 NEITHER STREAM IS QUOTED. age-keygen's stderr ECHOES the input line it
+    could not parse — measured — and on a mangled identity that line is the
+    secret key. The refusals report the exit code and the stdout byte count.
+    """
+    p = B.age_public_key_bytes(identity_file)
+    if p.returncode != 0:
+        raise EscrowError(
+            "NOT-AN-AGE-IDENTITY",
+            f"the escrowed note did NOT PARSE as an age identity: `age-keygen "
+            f"-y` exited {p.returncode} and produced {len(p.stdout)} bytes of "
+            f"output. This is the mangling this mode exists to catch — a note "
+            f"round-tripped through a web vault or a clipboard can have its "
+            f"line breaks collapsed, and MEASURED 2026-08-27 (age v1.3.1) that "
+            f"gives exactly this. age-keygen's stderr is NOT quoted here: it "
+            f"echoes the line it could not parse, which for an identity file is "
+            f"KEY MATERIAL. 🔴 DO NOT RE-ESCROW ON THIS. What re-escrowing "
+            f"overwrites is the ONLY off-machine copy of the identity every "
+            f"artifact in the bucket is encrypted to; if the mangling happened "
+            f"on the way OUT of the vault, the stored note is fine and you "
+            f"would be replacing a good copy with whatever this machine holds. "
+            f"Open the item in the web vault and look at it first.")
+    if not p.stdout:
+        raise EscrowError(
+            "PUBKEY-DERIVATION-EMPTY",
+            f"`age-keygen -y` exited ZERO and printed NOTHING, so there was no "
+            f"public key to hash. 🔴 THIS IS THE CHECK NOT RUNNING, NOT A CHECK "
+            f"THAT FAILED, and nothing about the escrow was determined. The "
+            f"hand-run pipeline cannot tell the two apart: `sha256sum` digests "
+            f"the empty stream and prints {EMPTY_SHA256_PREFIX}…, which reads "
+            f"as a confident MISMATCH against a key that may be perfectly good. "
+            f"If you see that value anywhere, the command did not run. Do NOT "
+            f"re-escrow and do NOT rotate on this.")
+    text = p.stdout.decode("utf-8", "replace").strip()
+    if not AGE_PUBKEY_RE.fullmatch(text):
+        raise EscrowError(
+            "NOT-AN-AGE-IDENTITY",
+            f"`age-keygen -y` exited ZERO but its {len(p.stdout)} bytes of "
+            f"output are not an age recipient (`age1` + 58 base32 characters). "
+            f"The output is NOT quoted — this module cannot know what a future "
+            f"age-keygen might print there, so it treats it as untrusted. "
+            f"Hashing it anyway would publish a digest of an unknown string as "
+            f"though it were a public key. Nothing about the escrow was "
+            f"determined; do NOT re-escrow.")
+    return hashlib.sha256(p.stdout).hexdigest()[:PUBKEY_SHA_CHARS]
+
+
+def pubkey_check(*, escrow_bytes: bytes, work_dir: Path,
+                 expected_sha: str) -> str:
+    """Derive the ESCROWED copy's public half and compare it. Returns the sha.
+
+    🔴 THE ESCROWED BYTES, NOT ANY ON-DISK KEY. `age-keygen` needs a FILE, so
+    the fetched note is written to one — through the SAME `_create_private_file`
+    / `_shred` machinery `--decrypt-check` uses, at the SAME
+    `ESCROW_IDENTITY_FILENAME`, inside the same 0700 directory. A second
+    throwaway-identity implementation would be a second `finally` to get wrong,
+    and the copy nobody exercises is the broken one.
+
+    🔴 THE `finally` COVERS EVERY PATH OUT — success, each classified refusal
+    and any unexpected exception — for the same reason it does there: a failed
+    run is exactly when a plaintext copy of a decryption key is most likely to
+    be left behind and least likely to be noticed. The signal handlers installed
+    by `main()` make SIGTERM/SIGINT/SIGHUP unwind, so the timer-driven stop path
+    reaches it too.
+    """
+    identity = work_dir / ESCROW_IDENTITY_FILENAME
+    try:
+        with os.fdopen(_create_private_file(identity), "wb") as fh:
+            fh.write(escrow_bytes)
+        got = derive_pubkey_sha(identity)
+    finally:
+        _shred(identity)
+
+    if got == expected_sha:
+        return got
+
+    raise EscrowError(
+        "PUBKEY-MISMATCH",
+        f"the escrowed note IS a valid age identity, and its public half is NOT "
+        f"the one you pinned: derived {got}, expected {expected_sha} (the first "
+        f"{PUBKEY_SHA_CHARS} hex characters of sha256 over `age-keygen -y`'s "
+        f"stdout). Both values are PUBLIC halves; no key material is disclosed "
+        f"by either. "
+        # 🔴 ORDER IS LOAD-BEARING, the same way it is in the
+        # BYTES-DIFFER-MATERIALLY arm: the refusal comes BEFORE any remedy, so
+        # the operator cannot read the dangerous instruction first.
+        f"🔴 DO NOT RE-ESCROW OR ROTATE ON THIS ALONE — CHECK THE PIPELINE "
+        f"FIRST. A wrong pipeline produces a FALSE MISMATCH ON A GOOD KEY: "
+        f"MEASURED 2026-08-27, `printf '%s' \"$out\" | sha256sum` drops the "
+        f"trailing newline age-keygen emits and yields a different digest, and "
+        f"{EMPTY_SHA256_PREFIX}… is sha256 of EMPTY INPUT, i.e. the command "
+        f"never ran. Re-derive the expectation from a key you KNOW is right and "
+        f"watch it reproduce before believing this. "
+        f"WHAT RE-ESCROWING WOULD OVERWRITE: the Secure Note is the ONLY "
+        f"off-machine copy of the identity every artifact in the bucket is "
+        f"encrypted to. Overwriting it from a machine holding a DIFFERENT key "
+        f"destroys the escrow and every backup with it — and that is not "
+        f"hypothetical here: on 2026-08-25 an exported SOPS_AGE_KEY_FILE "
+        f"pointed this subsystem's comparison at an unrelated key and the "
+        f"advice given was to re-escrow. Confirm which identity the bucket's "
+        f"artifacts actually open with — `restore-verify.py`, or this script's "
+        f"--decrypt-check — before touching the note.")
+
+
+# --------------------------------------------------------------------------- #
 # provenance
 # --------------------------------------------------------------------------- #
 # The exact sentence `--print-plan` prints when the on-disk file is NOT the
@@ -1469,16 +1878,82 @@ def provenance_clauses(identity: Path, identity_source: str | None
 # --------------------------------------------------------------------------- #
 # the run
 # --------------------------------------------------------------------------- #
+def _fetch_note(bw: BitwardenCLI, item_name: str, expect_server: str | None
+                ) -> tuple[str, bool, str | None, bytes]:
+    """The whole `bw` path, in ONE place: `(server, pinned, why-not-compared,
+    the note's bytes)`.
+
+    🔴 EXTRACTED, NOT DUPLICATED, WHEN `--expect-pubkey` ARRIVED. Both modes ask
+    the vault the identical four questions in the identical order — is the tool
+    there, is the vault unlocked, which server answered, and is there exactly
+    one Secure Note of that name carrying a body. A second copy of that sequence
+    would be a second place for an ordering to drift, and the drift is silent:
+    each mode's own tests would still pass while, say, one mode checked the
+    server after reading the note. `test_the_bw_SEQUENCE_is_IDENTICAL_in_both_
+    modes` pins that they stay one sequence.
+
+    Every step raises its own `EscrowError` with its own token; nothing here
+    swallows or reclassifies one.
+    """
+    bw.require_available()
+    status = check_vault_state(bw)
+    server, pinned, session_reason = check_server(bw, status, expect_server)
+    item = find_escrow_item(bw, item_name)
+    return server, pinned, session_reason, read_note(item, item_name)
+
+
 def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
         identity_source: str | None = None,
         expect_server: str | None = None, decrypt: bool = False,
         bucket: str = DEFAULT_BUCKET, prefix: str | None = None,
         store: Path = DEFAULT_STORE, scope_filter: str | None = None,
         from_dir: Path | None = None, work_dir: Path | None = None,
-        now: datetime | None = None,
-        downloader_factory=None) -> EscrowVerdict:
-    """Byte check, then optionally the decrypt check. Raises `EscrowError`."""
+        now: datetime | None = None, expect_pubkey: str | None = None,
+        downloader_factory=None) -> EscrowVerdict | PubkeyVerdict:
+    """Byte check, then optionally the decrypt check. Raises `EscrowError`.
+
+    With `expect_pubkey` set this is instead the PUBLIC-HALF check: no on-disk
+    identity is read and no artifact store is opened. See `_fetch_note`.
+    """
     now = now or datetime.now(timezone.utc)
+
+    if expect_pubkey is not None:
+        # 🔴 THE CLI REFUSES THIS PAIR AS AN ARGUMENT ERROR; THE KEYWORD API
+        # MUST NOT SILENTLY PREFER ONE. A caller that asked for both and got
+        # only the public-half check would read the verdict as covering the
+        # decrypt too — the "unmeasured scope reported in the word used for a
+        # measured one" failure this module already fixed once for
+        # `server_session_reason`. Not an `EscrowError`: it is a programming
+        # error, not a fact about the escrow, so it must not have an exit code
+        # in the table an operator maps numbers through.
+        if decrypt:
+            raise ValueError(
+                "expect_pubkey and decrypt=True are different claims needing "
+                "different machines; run() will not silently answer one of "
+                "them. main() refuses this pair as an argument error.")
+        # 🔴 ARGV FIRST, THEN THE TOOL, THEN THE VAULT. Both refusals are pure
+        # and cost nothing, and both must land before `bw`:
+        #   * the pin is checked first because its fault is in what the operator
+        #     just typed and they can fix it without leaving the prompt;
+        #   * `age-keygen` is checked second because a run that cannot derive
+        #     the public half cannot finish, and #851 is the lesson that a
+        #     precondition checked after the vault costs a master password.
+        expected = normalise_expected_pubkey_sha(expect_pubkey)
+        preflight_pubkey_tools()
+        if work_dir is None:
+            raise ValueError(
+                "expect_pubkey requires work_dir; main() always passes one")
+        server, pinned, session_reason, escrow = _fetch_note(
+            bw, item_name, expect_server)
+        sha = pubkey_check(escrow_bytes=escrow, work_dir=work_dir,
+                           expected_sha=expected)
+        return PubkeyVerdict(
+            item_name=item_name, server=server, server_pinned=pinned,
+            server_session_reason=session_reason,
+            pubkey_sha=sha, expected_sha=expected,
+            escrow_bytes=len(escrow),
+            escrow_lines=len(escrow.decode("utf-8", "replace").splitlines()),
+        )
 
     # 🔴 THE LOCAL SIDE FIRST, before any network call. It needs no vault, and
     # an absent or empty on-disk identity makes the comparison meaningless — so
@@ -1501,11 +1976,8 @@ def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
 
     disk = read_identity(identity)
 
-    bw.require_available()
-    status = check_vault_state(bw)
-    server, pinned, session_reason = check_server(bw, status, expect_server)
-    item = find_escrow_item(bw, item_name)
-    escrow = read_note(item, item_name)
+    server, pinned, session_reason, escrow = _fetch_note(
+        bw, item_name, expect_server)
 
     chose, redirect = provenance_clauses(identity, identity_source)
 
@@ -1570,8 +2042,44 @@ def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
 def print_plan(*, identity: Path, item_name: str, expect_server: str | None,
                decrypt: bool, bucket: str, prefix: str, store: Path,
                scope_filter: str | None, from_dir: Path | None,
-               identity_source: str | None = None) -> None:
+               identity_source: str | None = None,
+               expect_pubkey: str | None = None) -> None:
     """Pure text. Runs no `bw`, touches no network, reads no key material."""
+    if expect_pubkey is not None:
+        print("mode:      --expect-pubkey — the PUBLIC half only.")
+        print("identity:  NOT READ. This mode needs no on-disk age identity, "
+              "which is the")
+        print(f"           point: a disaster-recovery host has none. "
+              f"{identity} is NOT opened.")
+        print(f"item:      {item_name!r} (exact name match; `bw list items "
+              f"--search` is FUZZY, so its results are candidates)")
+        print(f"type:      must be {ITEM_TYPE_SECURE_NOTE} (Secure Note) — "
+              f"checked as STATE, not by the name alone")
+        print("server:    read from `bw config server` AT RUN TIME and "
+              "cross-checked against the session's own serverUrl.")
+        print("           NEVER hardcoded here — this repo is public.")
+        print(f"           pin: {'--expect-server / ASIB_ESCROW_SERVER is SET' if expect_server else 'NOT PINNED'}")
+        print("derive:    the fetched note is written 0600 into a 0700 dir and "
+              "`age-keygen -y` is run on it;")
+        print(f"           the first {PUBKEY_SHA_CHARS} hex characters of "
+              f"sha256 over that command's RAW STDOUT")
+        print("           are compared with the pin. The public half is not "
+              "key material; the SECRET half")
+        print("           is never printed, hashed into a message, or passed "
+              "in argv.")
+        print("           The throwaway file is overwritten and unlinked in a "
+              "finally that covers")
+        print("           success, every refusal and every unexpected "
+              "exception.")
+        print("store:     NOT CONTACTED. No bucket, no kubeconfig, no `minio`.")
+        print("proves:    that the vault holds THIS key — not that any "
+              "artifact opens (--decrypt-check),")
+        print("           and not that the note is byte-identical to a local "
+              "copy (the default mode).")
+        print(f"tools:     {', '.join(PUBKEY_TOOLS)} — "
+              f"{PUBKEY_NIX_SHELL_HINT}")
+        print(f"exit codes: {', '.join(f'{t}={c}' for t, c in sorted(EXIT_CODES.items(), key=lambda kv: kv[1]))}")
+        return
     present = identity.is_file()
     size = identity.stat().st_size if present else 0
     print(f"identity:  {identity} ({size} bytes)" if present
@@ -1692,6 +2200,17 @@ def main(argv: list[str] | None = None) -> int:
                          f"{DEFAULT_TIMEOUT})")
     ap.add_argument("--decrypt-check", dest="decrypt", action="store_true",
                     help="ALSO decrypt a real artifact with the ESCROWED bytes")
+    # 🔴 NO `default=os.environ.get(...)`. See the comment on
+    # `_ACCEPTED_PIN_LENGTHS`: this flag SELECTS A MODE, and a mode chosen by an
+    # exported variable is how `SOPS_AGE_KEY_FILE` produced a confident wrong
+    # answer on 2026-08-25.
+    ap.add_argument("--expect-pubkey", default=None, metavar="SHA",
+                    help=f"DISASTER-RECOVERY MODE: derive the ESCROWED note's "
+                         f"PUBLIC half with `age-keygen -y` and require its "
+                         f"sha256 to start with this. Reads NO on-disk identity "
+                         f"and contacts NO bucket. Produce the value with "
+                         f"`age-keygen -y <identity> | sha256sum | cut -c1-"
+                         f"{PUBKEY_SHA_CHARS}` on a machine that holds the key.")
     ap.add_argument("--bucket", default=os.environ.get("ASIB_BUCKET", DEFAULT_BUCKET))
     ap.add_argument("--host", default=None,
                     help="--decrypt-check: use this host label's artifacts")
@@ -1713,6 +2232,30 @@ def main(argv: list[str] | None = None) -> int:
                     help="print what would happen; run no `bw`, read no key")
     args = ap.parse_args(argv)
 
+    # 🔴 REFUSED AS AN ARGUMENT ERROR (exit 2 + usage), NOT AS A CLASSIFIED
+    # ESCROW CODE. Neither combination is a fact about the escrow, and giving
+    # them a token in `EXIT_CODES` would put "you typed two flags that disagree"
+    # in the table an operator maps numbers through during a recovery.
+    if args.expect_pubkey is not None:
+        if args.decrypt:
+            ap.error(
+                "--expect-pubkey and --decrypt-check ask different questions "
+                "and need different machines. --expect-pubkey proves the vault "
+                "holds the RIGHT key using only `bw` and `age-keygen`; "
+                "--decrypt-check proves a real artifact OPENS, and needs the "
+                "bucket, a kubeconfig and a python carrying `minio` — which is "
+                "exactly what a recovery host does not have. Run them "
+                "separately, and read the two verdicts as the two separate "
+                "claims they are.")
+        if args.identity is not None:
+            ap.error(
+                "--expect-pubkey reads NO on-disk identity — that is the whole "
+                "point of the mode, because a genuine disaster-recovery host "
+                "has none. Passing --identity would look like the file was "
+                "compared when it never gets opened. Drop --identity for the "
+                "public-half check, or drop --expect-pubkey for the byte "
+                "comparison against that file.")
+
     # 🔴 RESOLVE THE PATH AND WHAT CHOSE IT TOGETHER. An explicit --identity is
     # its own source: it is the one choice the operator definitely made on
     # purpose, so it must not be reported as an environment redirect.
@@ -1730,7 +2273,7 @@ def main(argv: list[str] | None = None) -> int:
                    expect_server=args.expect_server, decrypt=args.decrypt,
                    bucket=str(args.from_dir) if args.from_dir else args.bucket,
                    prefix=prefix, store=args.store, scope_filter=args.scope,
-                   from_dir=args.from_dir)
+                   from_dir=args.from_dir, expect_pubkey=args.expect_pubkey)
         return EXIT_OK
 
     bw = BitwardenCLI(bw=args.bw, timeout=args.timeout)
@@ -1740,16 +2283,37 @@ def main(argv: list[str] | None = None) -> int:
     # to look in the wrong place. Same convention as restore-verify.py.
     source = str(args.from_dir) if args.from_dir is not None else args.bucket
 
-    def _go(work: Path | None) -> EscrowVerdict:
+    def _go(work: Path | None) -> EscrowVerdict | PubkeyVerdict:
         return run(bw=bw, identity=identity, item_name=args.item_name,
                    identity_source=identity_source,
                    expect_server=args.expect_server, decrypt=args.decrypt,
                    bucket=source, prefix=prefix, store=args.store,
                    scope_filter=args.scope, from_dir=args.from_dir,
-                   work_dir=work)
+                   expect_pubkey=args.expect_pubkey, work_dir=work)
+
+    def _preflight() -> None:
+        """Every refusal `run()` would raise before touching the vault, raised
+        here too — so it lands BEFORE `_private_dir` creates or chmods anything.
+
+        🔴 IT MIRRORS `run()`'s ORDER RATHER THAN INVENTING ONE. `run()` is the
+        API the tests drive and it re-runs all of these; both are pure, so the
+        duplication is idempotent. What is NOT idempotent is the directory this
+        guards, which is why the copy exists at all.
+        """
+        if args.expect_pubkey is not None:
+            normalise_expected_pubkey_sha(args.expect_pubkey)
+            preflight_pubkey_tools()
+        if args.decrypt:
+            preflight_decrypt_tools()
+            if args.from_dir is None:
+                preflight_decrypt_imports()
+
+    # Both `--decrypt-check` and `--expect-pubkey` write a throwaway copy of the
+    # escrowed key to disk, so both need a private directory; nothing else does.
+    needs_work_dir = args.decrypt or args.expect_pubkey is not None
 
     try:
-        if not args.decrypt:
+        if not needs_work_dir:
             verdict = _go(None)
         elif args.work_dir is not None:
             # 🔴 PREFLIGHT BEFORE THE DIRECTORY IS TOUCHED. `_private_dir`
@@ -1757,10 +2321,7 @@ def main(argv: list[str] | None = None) -> int:
             # to 0700; doing that and then refusing left a filesystem change
             # behind a message that says nothing happened. The refusal must be
             # the first thing that acts, not merely the first thing reported.
-            if args.decrypt:
-                preflight_decrypt_tools()
-                if args.from_dir is None:
-                    preflight_decrypt_imports()
+            _preflight()
             verdict = _go(B._private_dir(args.work_dir))
         else:
             with tempfile.TemporaryDirectory(prefix="asi-escrow-verify.") as td:

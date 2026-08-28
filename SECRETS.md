@@ -240,20 +240,57 @@ nix-shell -p bitwarden-cli jq 'python3.withPackages(p:[p.minio])' --run '
                                   # which file the comparison will actually use
 ```
 
-#### The path this all exists for: no CLI, no on-disk key
+#### 🔴 The DISASTER path: no on-disk key, no bucket — `--expect-pubkey`
 
-Everything above runs `bw` **on a machine that already holds the key**. In the
-disaster you are on another device, reading the note out of the **web vault** and
-pasting it into a file — a path that can silently mangle whitespace.
+Everything above runs `bw` **on a machine that already holds the key**, and that
+is exactly the machine you will not be standing at. The default mode compares the
+note against an **on-disk identity**; a genuine recovery host has none, so it
+exits `23 IDENTITY-MISSING` and answers nothing. `--decrypt-check` needs MinIO,
+the bucket and a `python3` carrying `minio`. Neither can ask the question the
+disaster actually poses: **is the copy in the vault the RIGHT key?**
+
+`--expect-pubkey` is that question, and it needs **only `bw` and `age-keygen`** —
+no identity file, no bucket, no kubeconfig. It fetches the note through the same
+`bw` path, writes it to a 0600 throwaway inside a 0700 dir (shredded and unlinked
+on **every** path out, refusals included), derives the **public** half with
+`age-keygen -y`, and compares the first 16 hex characters of its sha256 with your
+pin.
+
+```sh
+nix-shell -p bitwarden-cli age --run '
+  # 1. locked dry pass — exits 12 VAULT-LOCKED, or 38/39 if the shell or the
+  #    pin is wrong. No password spent either way.
+  python3 scripts/analyze-service-index/escrow-verify.py --expect-pubkey 288c4d24cfdb5aa1
+  # 2. the ONE step nothing can automate
+  export BW_SESSION="$(bw unlock --raw)"
+  # 3. the claim that matters
+  python3 scripts/analyze-service-index/escrow-verify.py --expect-pubkey 288c4d24cfdb5aa1
+'
+```
+
+It is mutually exclusive with `--identity` (it reads none) and with
+`--decrypt-check` (which needs the bucket a recovery host cannot reach); both
+combinations are refused as **argument errors, exit 2**, never as an escrow code.
 
 ✅ **Rehearsed for real on 2026-08-27 from the laptop** — the host you would
 actually be standing at if the workbench is the one you lost. The note was
-fetched over the network on that host and its **public** half matched:
-`pubkey sha 288c4d24cfdb5aa1 == expected`. So *retrieval and correctness* from a
-second machine are proven; what remains unexercised is only a **browser's own
-clipboard**, checked identically below.
+fetched over the network on that host and its public half matched:
+`pubkey sha 288c4d24cfdb5aa1 == expected`. That rehearsal was an ad-hoc script in
+no commit; this flag is it, upstreamed. What remains unexercised is only a
+**browser's own clipboard**, checked identically below.
 
-🔴 **Do NOT verify that paste by its size.** *Every* age identity file is exactly
+🔴 **The public half is not key material — and the secret half's rules are
+unchanged.** `age-keygen -y` prints only the `age1…` recipient (measured, age
+v1.3.1: exactly 63 bytes, `age1…` + one `\n`), which is why the pin above is
+committed in a public repo. The secret half is never printed, never hashed into a
+message, and never passed in argv. ⚠ **age-keygen's stderr is NOT safe** — a file
+it cannot parse comes back as `unknown identity type: "<the offending line>"`,
+i.e. it echoes its input, which on a mangled identity is the secret key. The tool
+quotes no stream at all on that path.
+
+##### Verifying a hand-pasted note (the browser-clipboard leg)
+
+🔴 **Do NOT verify a paste by its size.** *Every* age identity file is exactly
 **189 bytes / 3 lines** — the `# created:` and `# public key:` lines are
 fixed-width — so a completely unrelated key passes a byte/line check. Measured
 2026-08-27: a freshly generated throwaway key is byte-for-byte the same size as
@@ -268,12 +305,32 @@ shred -u /tmp/paste.key
 
 It catches both mangling modes: altered key material moves the hash, and broken
 framing makes `age-keygen` fail outright rather than print a wrong answer.
+This is the same pipeline `--expect-pubkey` runs, and a test pins the two to each
+other so the runbook and the tool can never drift into disagreeing.
 
 ⚠ **Pipe it exactly as written.** `printf '%s' "$out" | sha256sum` strips the
 trailing newline and yields `be0206821107ea94` — a **false mismatch on a good
 key** (measured, and briefly believed). And `e3b0c442…` is the sha256 of *empty
 input*: it means the command never ran, which is not the same as a failed check.
 Run a known-good control through the same pipeline before trusting a mismatch.
+
+⚠ **What `--expect-pubkey` does NOT see: a CRLF rewrite.** Measured 2026-08-27 —
+a CRLF-mangled identity still derives the **correct** public key, so this mode
+says PROVEN. That is not a blind spot but a different question: the copy is not
+byte-identical and is still the same usable key. The default byte comparison is
+what reports it, as `22 BYTES-DIFFER-MATERIALLY`. The same is true of a note
+reduced to its `AGE-SECRET-KEY-1…` line alone — the `#` lines are comments.
+
+🔴 **Five outcomes, and only one of them means the vault holds a different key.**
+Reading these wrong is how a good escrow gets overwritten:
+
+| code | meaning | what to do |
+|---|---|---|
+| `39` `EXPECT-PUBKEY-MALFORMED` | the pin is not a 16- or 64-char hex digest — **your argv**, not the escrow. Raised before any `bw` call | fix the pin; re-derive it with `age-keygen -y <identity> \| sha256sum \| cut -c1-16`. Nothing was checked and the vault was not contacted |
+| `38` `AGE-KEYGEN-MISSING` | `age-keygen` is not on PATH. Raised before any `bw` call | environment fault, says nothing about the escrow. It is a **different binary from `age`** (code `29`), so `which age` succeeding does not contradict it — `nix-shell -p bitwarden-cli age` |
+| `35` `NOT-AN-AGE-IDENTITY` | `age-keygen` ran and **refused**: the fetched note does not parse | the mangling this mode exists to catch. 🔴 **Do not re-escrow** — if the mangling happened on the way *out* of the vault the stored note is fine, and you would replace a good copy. Open the item in the web vault and look at it |
+| `37` `PUBKEY-DERIVATION-EMPTY` | `age-keygen` exited **zero** printing nothing | 🔴 **the check did not run — it did not fail.** A hand-run pipeline would digest the empty stream and print `e3b0c442…` as a confident mismatch. Nothing was determined; do not re-escrow or rotate |
+| `36` `PUBKEY-MISMATCH` | it parsed, and it is a **different key** | 🔴 **check your pipeline first** — `printf '%s'` drops a newline and gives a false mismatch on a good key (measured). Re-escrowing overwrites the **only** off-machine copy of the identity every artifact is encrypted to; on 2026-08-25 an exported `SOPS_AGE_KEY_FILE` pointed this subsystem at a client's key and the advice given was to re-escrow. Confirm which identity the artifacts open with (`restore-verify.py`, or `--decrypt-check`) **before** touching the note |
 
 Two levels, and they are **different claims**. The default compares the note to
 the on-disk identity **byte for byte** — which proves the two copies agree, and
