@@ -254,10 +254,14 @@ def rewrap_a_clause(t):
     # CHECKOUT section became three-state, and this row immediately reported
     # MUTATION DID NOT APPLY. Third time an assert-before-editing has caught a
     # row that would otherwise have scored as "the guard held".
+    # 🔴 RE-TARGETED AGAIN in round 5, for the fourth such catch: the clause
+    # went back to being unconditional ("write to any checkout that is not the
+    # copy YOU made"), and this row reported MUTATION DID NOT APPLY on the
+    # first run after that edit.
     return _swap(
         t,
-        '"**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to a "',
-        '"**Do NOT  `git fetch`,  `pull`,  `checkout`  or otherwise write to a  "',
+        '"**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to any "',
+        '"**Do NOT  `git fetch`,  `pull`,  `checkout`  or otherwise write to  any "',
     )
 
 
@@ -614,6 +618,115 @@ def the_round_one_range_points_at_the_pr_description(t):
     )
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 Z1-Z8 — round 5.
+# --------------------------------------------------------------------------- #
+# Round 4 removed the false SHARED claim from the private checkout state and
+# replaced it with a WRITE GRANT over a tree that is not the auditor's, and
+# reworded the `no-fetch` clause from unconditional to conditional on a state
+# `gather_worktree_kind` cannot know (it measures the ASSEMBLER's cwd). Z1-Z3
+# restore each half. Z4 puts the toolchain's refuted rationale back, Z5-Z7 the
+# two `--emit-claims` holes, Z8 the unscoped cause clause.
+
+
+def the_private_state_grants_writing_again(t):
+    """Round 4's text, verbatim — 'yours alone … Writing here is fine'."""
+    return reword_entry(
+        "Directive", "checkout-private",
+        "🔴 **This is a PRIVATE worktree — yours alone.** Its `.git` is a link "
+        "into a shared repository, but the WORKING TREE is not shared, so "
+        "files appearing, vanishing or changing under you is **NOT expected "
+        "here and IS worth reporting** — that is the sibling-agent clobber "
+        "`claude/RULES.md` describes, not background noise. **If something "
+        "moves, report it with what moved and when.** Writing here is fine: "
+        "the no-write clause below is about a SHARED checkout, and this is "
+        "not one.")(t)
+
+
+def the_shared_state_drops_the_no_write_rule(t):
+    """Round 4's `checkout-moves`, which stated no rule of its own."""
+    return reword_entry(
+        "Directive", "checkout-moves",
+        "🔴 **This checkout is SHARED with other sessions and agents. It "
+        "MOVES UNDER YOU** — the branch can change, files can appear and "
+        "vanish, and commits can land mid-audit. That is expected and is NOT "
+        "your fault and NOT a finding. **Report what you observed moving and "
+        "carry on; do not chase it, and do not try to restore it.**")(t)
+
+
+def a_fourth_checkout_state_arrives_with_no_rule(t):
+    """A new `checkout-*` state nobody checked carries the no-write rule."""
+    marker = ")\n\nDIRECTIVE = {d.id: d.text for d in SECTION_DIRECTIVES}"
+    return _swap(t, marker,
+                 '    Directive("checkout-detached", "🔴 **This checkout is on '
+                 'a DETACHED HEAD.** Nobody wrote a rule for it."),\n' + marker)
+
+
+def the_no_fetch_clause_is_conditional_again(t):
+    """Round 4's spelling: armed only when the section says SHARED."""
+    return reword_entry(
+        "Clause", "no-fetch",
+        "**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to a "
+        "SHARED checkout — THE CHECKOUT section of this brief says whether "
+        "the one it names is shared.** Other sessions are in a shared tree; a "
+        "fetch there is a write with cross-session blast radius, and every "
+        "ref you need is already resolved for you here.")(t)
+
+
+def the_toolchain_reason_names_the_shared_checkout_again(t):
+    return _swap(
+        t,
+        '        "so running that copy runs the suite in a checkout that is NOT yours — "\n'
+        '        "the one this brief was assembled in, on whatever branch it is standing "\n'
+        '        "on, holding none of your mutations — and a `nix build <ref>#…` builds "\n',
+        '        "so running the shared copy runs the suite in the SHARED CHECKOUT on "\n'
+        '        "whatever branch it is standing on, and a `nix build <ref>#…` builds "\n',
+    )
+
+
+def the_emitted_block_loses_its_legend(t):
+    return _swap(
+        t,
+        '        "  legend: `<from>` = the tip THIS round\'s audit READ · `<to>` = the "\n'
+        '        "head THIS round\'s FIXES produced. Different shas — `<from>` is older.",\n'
+        '        "",\n',
+        "",
+    )
+
+
+def the_emitted_block_is_not_round_tripped(t):
+    return _swap(t,
+                 "        if facts.emit_from:\n"
+                 "            why = emitted_block_reads_back_as_written(",
+                 "        if False:\n"
+                 "            why = emitted_block_reads_back_as_written(")
+
+
+def an_empty_audited_is_ignored_again(t):
+    return _swap(t,
+                 "    if args.audited is not None and not args.audited.strip():",
+                 "    if False:")
+
+
+def the_degenerate_causes_stop_scoping_the_omission(t):
+    """Round 4's clause: the omission is blamed on every round."""
+    return _swap(
+        t,
+        '        "`<from>` position — which is what a bare round-1 `audited=<sha>` "\n'
+        '        "always means, and what `--emit-claims` records when `--audited` is "\n'
+        '        "omitted AT ROUND 1; from round 2 on, omitting it is correct, because "\n'
+        '        "`<from>` is then recovered from the previous block\'s `<to>`. "\n'
+        '        "`<from>` is the tip the PREVIOUS round AUDITED, so "\n'
+        '        "re-emit that block with `--audited <that round\'s actual tip sha>` "\n'
+        '        "and re-assemble — or nothing has been committed and pushed to "\n',
+        '        "`<from>` position — which is what `--emit-claims` records when "\n'
+        '        "`--audited` is omitted, and what a bare round-1 `audited=<sha>` "\n'
+        '        "always means; `<from>` is the tip the PREVIOUS round AUDITED, so "\n'
+        '        "re-emit that block with `--audited <the tip that round actually "\n'
+        '        "read>` and re-assemble — or nothing has been committed and pushed to "\n',
+    )
+
+
 # 🔴 The SURVIVES control for the directive ledger. Whitespace changes; the
 # instruction does not. A RED here means the new pin is keyed to layout.
 def rewrap_a_directive(t):
@@ -882,10 +995,21 @@ ROWS = [
     # produces a superset rather than an empty range, so nothing else notices.
     # `--audited` routes through `emit_from`, so swapping the writer's anchor
     # to `prev_sha` breaks the flag as well — round 4's addition.
+    # 🔴 KILLER SET GREW IN ROUND 5, for the same STRUCTURAL reason as Y7 and
+    # recorded rather than engineered away: this mutation makes the round-1
+    # branch fall through to the bare spelling, so a `--audited` value never
+    # reaches the header at all — and a guard that reads the PRINTED header
+    # correctly stays silent, because there is nothing wrong with what was
+    # printed. No end-to-end test of "a bad `--audited` is refused" can survive
+    # a mutant that stops the value being emitted. The alternative — asserting
+    # the printed `<from>` EQUALS `emit_from` — was measured and rejected: it
+    # made this row kill five tests and would answer a wrong-field bug in
+    # production with a misleading "it does not parse".
     ("N3  --emit-claims writes the RANGE anchor as `<from>`",
      {"test_emit_claims_records_the_tip_this_round_audited_not_the_range_anchor",
       "test_emit_claims_prints_a_block_this_scripts_own_parser_accepts",
-      "test_audited_supplies_the_tip_a_round_one_emit_cannot_derive"},
+      "test_audited_supplies_the_tip_a_round_one_emit_cannot_derive",
+      "test_emit_claims_refuses_an_audited_value_its_own_parser_cannot_read"},
      emit_claims_writes_the_range_anchor),
     ("N4  THE RANGE renders a self-range with no banner",
      {"test_a_degenerate_self_range_is_reported_not_rendered_as_a_clean_diff",
@@ -938,8 +1062,14 @@ ROWS = [
     # `test_the_shared_checkout_state_is_reported_with_the_it_moves_warning` —
     # and inverts the operative sentence into an instruction to WRITE to the
     # shared checkout, contradicting the `no-fetch` clause two bars later.
+    # 🔴 KILLER SET GREW IN ROUND 5, and the growth is the news: this
+    # replacement text also drops the no-write sentence round 5 added to every
+    # checkout state, so the per-state rule ledger fires as well. Leaving the
+    # old one-element set would have reported EXTRA-KILLER forever; narrowing
+    # the mutation to avoid it would remove the second hazard from the row.
     ("X3  checkout-moves inverted into 'restore anything you see move'",
-     {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
+     {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
+      "test_every_checkout_state_carries_the_no_write_rule"},
      reword_entry(
          "Directive", "checkout-moves",
          "🔴 **This checkout is SHARED with other sessions and agents. It "
@@ -1006,8 +1136,15 @@ ROWS = [
       # The `checkout-unknown` directive then reaches no brief at all.
       "test_every_section_directive_is_emitted_verbatim_in_the_brief_that_owns_it"},
      the_unknown_worktree_state_collapses_to_shared),
+    # 🔴 KILLER SET GREW IN ROUND 5, and the growth is a real second
+    # consequence rather than a row losing its focus: with `--audited` ignored,
+    # `emit_from` is None at round 1, the round-trip refusal is never reached,
+    # and a value this script's own parser cannot read is emitted in silence.
+    # No test of "a bad `--audited` is refused" can survive the flag being
+    # dropped on the floor, so the coupling is in the code, not in the pins.
     ("Y7  --audited is parsed and ignored",
-     {"test_audited_supplies_the_tip_a_round_one_emit_cannot_derive"},
+     {"test_audited_supplies_the_tip_a_round_one_emit_cannot_derive",
+      "test_emit_claims_refuses_an_audited_value_its_own_parser_cannot_read"},
      the_audited_flag_is_ignored),
     ("Y8  --audited without --emit-claims is silent again",
      {"test_audited_without_emit_claims_says_it_changed_nothing"},
@@ -1035,6 +1172,63 @@ ROWS = [
      {"test_a_private_worktree_is_not_described_as_shared_and_is_not_absolved",
       "test_every_section_directive_is_emitted_verbatim_in_the_brief_that_owns_it"},
      a_private_worktree_is_called_shared),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 Z1-Z8 — round 5.
+    # --------------------------------------------------------------------- #
+    # 🔴 Z1 IS THE INVERSION OF THE CORRECTED WRITE RULE, restored verbatim from
+    # round 4. Three pins fire, each a different claim: the whole-string ledger
+    # (the text moved), the permission probe (a grant appeared) and the
+    # per-state no-write ledger (the rule vanished).
+    #
+    # 🔴 A FOURTH WAS PREDICTED AND DID NOT FIRE, recorded because the
+    # prediction was wrong and the harness is what said so:
+    # `..._private_worktree_is_not_described_as_shared_and_is_not_absolved`
+    # stays GREEN under Z1, correctly. Round 4's text carries neither of its two
+    # negatives, and both of its positives survive — "PRIVATE linked worktree"
+    # comes from the `kind :` LINE, which this mutation does not touch, and
+    # "report it with what moved and when" is in round 4's text verbatim. That
+    # test covers the SHARED/PRIVATE description; the write GRANT is a claim it
+    # never made, which is exactly why round 5 needed a new probe.
+    ("Z1  the private state grants writing again",
+     {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
+      "test_no_checkout_state_grants_write_permission_over_the_assembly_checkout",
+      "test_every_checkout_state_carries_the_no_write_rule"},
+     the_private_state_grants_writing_again),
+    ("Z2  the SHARED state drops its own no-write rule",
+     {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
+      "test_every_checkout_state_carries_the_no_write_rule"},
+     the_shared_state_drops_the_no_write_rule),
+    ("Z2b a fourth checkout state arrives with no rule",
+     {"test_the_section_directive_ledger_is_pinned_two_way",
+      "test_the_directive_render_scenario_ledger_is_pinned_two_way",
+      "test_every_checkout_state_carries_the_no_write_rule"},
+     a_fourth_checkout_state_arrives_with_no_rule),
+    # 🔴 Z3 is the other half of round 4's regression: the clause that forbids
+    # the write was made conditional on a state this script cannot know. Killed
+    # by the whole-string CLAUSE ledger alone — the clause is still present,
+    # still ledgered by id and still emitted, which is exactly how the reword
+    # shipped.
+    ("Z3  no-fetch goes back to conditional-on-SHARED",
+     {"test_each_clause_carries_the_instruction_its_ledger_entry_names"},
+     the_no_fetch_clause_is_conditional_again),
+    ("Z4  TOOLCHAIN's reason names the SHARED CHECKOUT again",
+     {"test_the_toolchain_reason_is_true_in_both_checkout_states"},
+     the_toolchain_reason_names_the_shared_checkout_again),
+    ("Z5  the emitted block loses its legend",
+     {"test_the_emitted_skeleton_carries_a_legend_for_its_two_fields"},
+     the_emitted_block_loses_its_legend),
+    ("Z6  the emitted block is not round-tripped",
+     {"test_emit_claims_refuses_an_audited_value_its_own_parser_cannot_read"},
+     the_emitted_block_is_not_round_tripped),
+    ("Z7  an EMPTY --audited is ignored again",
+     {"test_emit_claims_refuses_an_audited_value_its_own_parser_cannot_read"},
+     an_empty_audited_is_ignored_again),
+    ("Z8  the degenerate causes stop scoping the omission",
+     {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
+      "test_the_degenerate_cause_list_scopes_the_omitted_flag_to_round_one",
+      "test_a_degenerate_range_does_not_blame_a_checkout_it_verified"},
+     the_degenerate_causes_stop_scoping_the_omission),
 ]
 
 

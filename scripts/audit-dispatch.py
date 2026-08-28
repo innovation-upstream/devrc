@@ -88,8 +88,8 @@ broken question, not a clean round, and the range section, the ledger and
 auditor who diffs nothing finds nothing, and the `stop-rule` clause then
 converts that into "the ladder ENDS".
 
-🔴 TWO REFUSALS, AND THEY ARE NOT THE SAME KIND
-------------------------------------------------
+🔴 THREE REFUSALS, AND THEY ARE NOT THE SAME KIND
+--------------------------------------------------
 1. **`--round N` for N ≥ 2 with no parseable claims block REFUSES to emit**
    (exit 2), naming what it looked for and where. An empty "what was claimed
    fixed" section silently turns a delta re-audit into a blind full audit — a
@@ -103,6 +103,17 @@ converts that into "the ladder ENDS".
    positive rate is set by whatever a human typed. It runs over `--check FILE`
    and over the READ-BACK of `--out` — never over the in-memory string, where
    it was unreachable by construction and could not have fired for any input.
+3. **`--emit-claims` REFUSES (exit 4) to print a block whose `<from>` this
+   script's OWN parser reads back as something else**, and refuses an empty
+   `--audited` outright. The flag used to accept any string: `abc 123` emitted
+   ``audited=abc 123..<head>``, which parses back as `from=''`, `to='abc'`, so
+   the next round diffed `abc..HEAD`; `e06461f7..dd601793` corrupted `<to>`
+   instead and cascaded into the round after that. A refusal and NOT a warning,
+   because the failure is silent at every downstream station — nothing reports
+   the block malformed, and the self-range guard cannot fire on it. 🔴 A
+   well-formed token that is not a commit round-trips and is NOT caught: this
+   script never resolves a sha, and saying otherwise would be a guard whose
+   description is wider than its implementation.
 
 🔴 EVERY NUMBER HERE IS ABOUT THE PR, NOT ABOUT YOUR CHECKOUT
 -------------------------------------------------------------
@@ -166,11 +177,20 @@ INVARIANT_CLAUSES = (
         "pointing at the real git dir, so a commit inside the copy lands on the "
         "branch you are auditing.",
     ),
+    # 🔴 UNCONDITIONAL, and round 5 put it back that way. Round 4 reworded this
+    # to fire only "to a SHARED checkout — THE CHECKOUT section … says whether
+    # the one it names is shared", which armed it on a STATE this script cannot
+    # know: `gather_worktree_kind` measures the tree the ASSEMBLER stood in, and
+    # in the production configuration it answers `private`, so the prohibition
+    # switched itself off over a tree that belongs to the dispatching session.
+    # The rule that is true in every state is the one about OWNERSHIP: write
+    # only to the copy you made.
     Clause(
         "no-fetch",
-        "**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to a "
-        "SHARED checkout — THE CHECKOUT section of this brief says whether the "
-        "one it names is shared.** Other sessions are in a shared tree; a "
+        "**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to any "
+        "checkout that is not the copy YOU made for this audit — including the "
+        "one THE CHECKOUT section names, which is where this brief was "
+        "assembled and is not yours.** Other sessions are in those trees; a "
         "fetch there is a write with cross-session blast radius, and every ref "
         "you need is already resolved for you here.",
     ),
@@ -345,14 +365,23 @@ SECTION_DIRECTIVES = (
     # rather than to one site" — and which then missed the two sites that same
     # commit was writing. A sweep that does not read the diff it is part of is
     # not a sweep.
+    # 🔴 ROUND 5 SCOPED THE FIRST CAUSE TO ROUND 1. It read "`--emit-claims`
+    # records [the fix tip] when `--audited` is omitted", flat — but from round
+    # 2 on, omitting the flag is CORRECT: `emit_from` falls back to
+    # `emit_anchor(newest)`, which is the previous block's `<to>`, i.e. the tip
+    # this round read. An operator hitting this banner on a round-3 brief was
+    # told their emit was wrong and pushed toward hand-typing a value into
+    # `--audited`, which is how a placeholder reached the header.
     Directive(
         "degenerate-range-causes",
         "Either the `audited=` block was written with the fix tip in its "
-        "`<from>` position — which is what `--emit-claims` records when "
-        "`--audited` is omitted, and what a bare round-1 `audited=<sha>` "
-        "always means; `<from>` is the tip the PREVIOUS round AUDITED, so "
-        "re-emit that block with `--audited <the tip that round actually "
-        "read>` and re-assemble — or nothing has been committed and pushed to "
+        "`<from>` position — which is what a bare round-1 `audited=<sha>` "
+        "always means, and what `--emit-claims` records when `--audited` is "
+        "omitted AT ROUND 1; from round 2 on, omitting it is correct, because "
+        "`<from>` is then recovered from the previous block's `<to>`. "
+        "`<from>` is the tip the PREVIOUS round AUDITED, so "
+        "re-emit that block with `--audited <that round's actual tip sha>` "
+        "and re-assemble — or nothing has been committed and pushed to "
         "the PR since that sha was recorded, in which case there is no delta "
         "to audit yet. 🔴 What is NOT a cause: the round's fix commits being "
         "absent from this checkout. This checkout was VERIFIED at assembly "
@@ -361,13 +390,20 @@ SECTION_DIRECTIVES = (
         "unmeasurable — so fetching or checking out here could not help, and "
         "the `no-fetch` clause forbids it anyway.",
     ),
+    # 🔴 ROUND 5 added the no-write sentence here. It was the ONLY one of the
+    # three checkout states that did not carry it — the `no-fetch` clause was
+    # doing the work from another section — which is what let round 4 reword
+    # that clause into a conditional one and leave the private state with a
+    # write GRANT and no rule anywhere. All three states now state it, and the
+    # test module pins that as a RELATIONSHIP over the `checkout-*` set rather
+    # than as a phrase in one directive.
     Directive(
         "checkout-moves",
         "🔴 **This checkout is SHARED with other sessions and agents. It MOVES "
         "UNDER YOU** — the branch can change, files can appear and vanish, and "
         "commits can land mid-audit. That is expected and is NOT your fault and "
-        "NOT a finding. **Report what you observed moving and carry on; do not "
-        "chase it, and do not try to restore it.**",
+        "NOT a finding. **Write nothing to it**, and report what you observed "
+        "moving and carry on; do not chase it, and do not try to restore it.",
     ),
     # 🔴 THE OTHER TWO THIRDS OF THE CHECKOUT DECISION. `checkout-moves` used to
     # be printed unconditionally under a heading reading THE SHARED CHECKOUT,
@@ -379,16 +415,40 @@ SECTION_DIRECTIVES = (
     # a finding, which suppresses exactly the sibling-agent clobber
     # `claude/RULES.md` ("the SESSION surface") says to report. Git answers it
     # in one read this script never made — see `gather_worktree_kind`.
+    # 🔴 ROUND 5 — THE PREMISE, NOT THE SENTENCE. Round 4 fixed the false SHARED
+    # claim and replaced it with a WRITE GRANT ("yours alone … writing here is
+    # fine") over a tree that is not the auditor's, plus an absolution inverted
+    # the unsafe way ("movement is NOT expected here").
+    #
+    # Both errors have ONE cause: `gather_worktree_kind` measures the cwd of the
+    # ASSEMBLING process, and the consumer is a DIFFERENT process. This script
+    # prints a brief for pasting into an `Agent` dispatch, and WHERE TO WORK
+    # tells that agent to stand somewhere else (`isolation: "worktree"`, or its
+    # own `git worktree add`). So "private" here means private to the session
+    # that BUILT the brief — which is live in that tree, so movement IS
+    # expected — and under the other configuration (no isolation, inherited
+    # cwd) the same tree is shared with the dispatcher and with sibling
+    # auditors. "Yours alone" is wrong either way.
+    #
+    # Observed live: the round-5 brief named this session's own agent worktree,
+    # classified it PRIVATE and printed "Writing here is fine", and the
+    # operator's hand-written dispatch had to CONTRADICT the generated brief in
+    # prose. Retyping a correction over generated text is the failure this
+    # script exists to remove.
+    #
+    # So this states only what the script knows: the path is where the brief was
+    # ASSEMBLED. It grants nothing.
     Directive(
         "checkout-private",
-        "🔴 **This is a PRIVATE worktree — yours alone.** Its `.git` is a link "
-        "into a shared repository, but the WORKING TREE is not shared, so "
-        "files appearing, vanishing or changing under you is **NOT expected "
-        "here and IS worth reporting** — that is the sibling-agent clobber "
-        "`claude/RULES.md` describes, not background noise. **If something "
-        "moves, report it with what moved and when.** Writing here is fine: "
-        "the no-write clause below is about a SHARED checkout, and this is "
-        "not one.",
+        "🔴 **This is the checkout this brief was ASSEMBLED in — not "
+        "necessarily the one you are standing in.** Git reports it as a "
+        "PRIVATE linked worktree: its `.git` is a link into a shared "
+        "repository, and the working tree belongs to the session that BUILT "
+        "this brief, which is not you. That session is live in it, so files "
+        "here can appear, vanish and change. **Write nothing to it** — the "
+        "path is a fact about where the brief was built, never a tree you may "
+        "work in. If you do see something move here, report it with what moved "
+        "and when, and do not try to restore it.",
     ),
     Directive(
         "checkout-unknown",
@@ -623,13 +683,16 @@ def range_anchor(block):
         delta round wants.
       * a BARE `audited=<sha>` (the round-1 spelling) has no `<from>`
         -> fall back to `<to>`. That single sha is only an anchor if it is the
-        tip the round AUDITED, so `--emit-claims --audited <sha>` is how it is
-        supplied. 🔴 WITH `--audited` OMITTED, `--emit-claims` stamps the PR's
-        CURRENT head — which is the head the round's FIXES produced, not the
-        tip it read — and this fallback then makes `<sha>..HEAD` a self-range.
-        That is why `--emit-claims` warns on exactly that spelling instead of
-        emitting it silently: the two bullets are otherwise jointly saying
-        "the common case for the round-1 spelling is a broken range".
+        tip the round AUDITED. 🔴 THE BARE FORM IS WHAT YOU GET WITH `--audited`
+        OMITTED, and the flag is how you AVOID it: passing
+        `--emit-claims --audited <sha>` writes a TWO-SHA `audited=<sha>..<head>`
+        block, which takes the first bullet's path and never this one. Omitted,
+        `--emit-claims` stamps the PR's CURRENT head as that single sha — the
+        head the round's FIXES produced, not the tip it read — and this fallback
+        then makes `<sha>..HEAD` a self-range. That is why `--emit-claims` warns
+        on exactly that spelling instead of emitting it silently: the two
+        bullets are otherwise jointly saying "the common case for the round-1
+        spelling is a broken range".
 
     The WRITER's counterpart is `emit_anchor` — a different quantity, and
     conflating them is what this pair exists to prevent.
@@ -766,17 +829,30 @@ WorktreeKind = namedtuple("WorktreeKind", "kind git_dir common_dir reason")
 def gather_worktree_kind(runner, repo_dir):
     """🔴 SHARED checkout, PRIVATE linked worktree, or COULD NOT DETERMINE.
 
+    🔴 IT MEASURES THE TREE THIS PROCESS IS ASSEMBLING IN, AND NOTHING ELSE.
+    The consumer is a DIFFERENT process: this script prints a brief for pasting
+    into an `Agent` dispatch, and WHERE TO WORK tells that agent to make its own
+    copy (`isolation: "worktree"`, or a hand-rolled `git worktree add`). So a
+    `private` answer means "private to the session that ran THIS script" — never
+    "private to the auditor", and never a licence to write here. Round 4's
+    docstring claimed this is "where a dispatched auditor usually stands"; that
+    was false, and the `checkout-private` directive was written against it,
+    granting write permission over a tree belonging to the dispatching session.
+    Under the other configuration (no isolation, an inherited cwd) the same tree
+    is shared with the dispatcher and with sibling auditors — so no state this
+    function can return makes the tree the auditor's own.
+
     THREE states, the same shape as `render_worktree_directive`'s repo decision
     and for the same reason: collapsing "cannot tell" into either answer picks
     the branch whose failure is silent.
 
     THE BRIEF ASSERTED "SHARED" OF WHATEVER `--show-toplevel` RETURNED. Run
-    from `…/.claude/worktrees/agent-…` — which is where a dispatched auditor
-    usually stands — it printed a heading reading THE SHARED CHECKOUT over "This
-    checkout is SHARED with other sessions and agents. It MOVES UNDER YOU …
-    That is expected and is NOT your fault and NOT a finding." All four claims
-    are false for a private per-agent worktree, and the DIRECTION is what makes
-    it consequential: the auditor is told to disregard exactly the
+    from `…/.claude/worktrees/agent-…` it printed a heading reading THE SHARED
+    CHECKOUT over "This checkout is SHARED with other sessions and agents. It
+    MOVES UNDER YOU … That is expected and is NOT your fault and NOT a finding."
+    Two of those claims are false for a per-agent worktree (it is one session's,
+    not many; movement in it is worth naming), and the DIRECTION is what makes
+    it consequential: the reader is told to disregard exactly the
     sibling-agent clobber `claude/RULES.md` says to report.
 
     Git answers it in one read:
@@ -1327,9 +1403,12 @@ def render_checkout(facts):
         else f"{facts.dirty} uncommitted path(s)"
     )
     wt = facts.worktree
+    # 🔴 "tree is yours" was FALSE and is gone. This is the tree the ASSEMBLER
+    # stood in; the auditor is dispatched elsewhere. See `gather_worktree_kind`.
     kind_line = {
         "shared": "SHARED — other sessions and agents are in this tree",
-        "private": "PRIVATE worktree — linked to a shared repo, tree is yours",
+        "private": "PRIVATE linked worktree — belongs to the session that "
+                   "assembled this brief, not to you",
     }.get(wt.kind, "🔴 COULD NOT DETERMINE")
     lines = [
         "## THE CHECKOUT — state at assembly time",
@@ -1373,6 +1452,18 @@ def render_toolchain(facts):
     `nix develop {r}` is deliberately left pointing at the operator's checkout:
     that one is only resolving a dev shell (the toolchain), and it is the door
     the repo's own CLAUDE.md tells everyone to use.
+
+    🔴 ROUND 5 — THE RATIONALE IS STATE-INDEPENDENT, AND THAT IS DELIBERATE.
+    The round-2 fix moved the COMMANDS off `r` but left the sentence explaining
+    WHY saying "runs the suite in the SHARED CHECKOUT" — a claim about a state
+    THE CHECKOUT section may have just denied. In the private state that
+    sentence is false, the auditor sees the brief refute its own reason two bars
+    apart, and the round-2 finding re-opens in a new state: gate the un-mutated
+    head, then obey the next sentence ("name the tier and the base sha") and
+    name a tree that does not contain what was tested. This section knows
+    nothing about where the auditor stands, so it says only what is true in
+    every state — that copy is not yours and holds none of your mutations.
+    `test_the_toolchain_reason_is_true_in_both_checkout_states` drives both.
     """
     r = facts.cwd_repo_dir
     return "\n".join([
@@ -1382,8 +1473,9 @@ def render_toolchain(facts):
         f"told you to make. `{r}` appears ONLY as the argument to `nix develop`, "
         "where it resolves the dev shell and nothing else. Never point the gate "
         "or a `nix build` at it: `gate.sh` resolves its root from its own path, "
-        "so running the shared copy runs the suite in the SHARED CHECKOUT on "
-        "whatever branch it is standing on, and a `nix build <ref>#…` builds "
+        "so running that copy runs the suite in a checkout that is NOT yours — "
+        "the one this brief was assembled in, on whatever branch it is standing "
+        "on, holding none of your mutations — and a `nix build <ref>#…` builds "
         "that ref's tree, not yours.",
         "",
         "Run a SUBSET of the suite:",
@@ -1640,12 +1732,111 @@ def emit_claims_skeleton(facts, head_sha):
         # about, because it is an assumption and not a measurement.
         audited = head_sha
     return "\n".join([
+        # 🔴 THE LEGEND, added in round 5. The code and the docstrings above
+        # were adjudicated correct and consistent; the failure is at the HUMAN
+        # end, because a person reasons from the emitted block and the block
+        # carried no key to its own two fields. The operator wrote them the
+        # wrong way round in two consecutive briefs and the agent had to
+        # override both. It sits OUTSIDE the fence, so the parser drops it.
+        "  legend: `<from>` = the tip THIS round's audit READ · `<to>` = the "
+        "head THIS round's FIXES produced. Different shas — `<from>` is older.",
+        "",
         f"```audit-claims round={facts.round_no} audited={audited}",
         "1. <one line per thing this round's fixes CLAIM to have addressed — "
         "WHAT was claimed, never WHY it is correct>",
         "2. <one line, same rule>",
         "```",
     ])
+
+
+# 🔴 THE ROUND-TRIP GUARD — round 5. `--audited` accepted ANY string and the
+# emitter's own parser then truncated it, in silence, at both ends of the
+# pipeline. Measured through the real code at `dd601793`:
+#
+#     --audited                emitted header            parses back as
+#     `abc 123`                audited=abc 123..<head>   from='', to='abc'
+#     `<the tip … read>`       audited=<the tip …>..…    from='', to='<the'
+#     `e06461f7..dd601793`     audited=e06461f7..dd6…    from='e06461f7',
+#                                                        to='dd601793..<head>'
+#
+# No warning at emit, none at parse, and the self-range guard cannot fire on any
+# of them. Worse, `degenerate-range-causes` INSTRUCTS the operator to re-emit
+# "with `--audited <the tip that round actually read>`", so pasting the
+# placeholder reproduces it — which is how the round-3 bug re-opened.
+#
+# The check is the pipeline itself: emit the block, feed it back through
+# `parse_claims_blocks`, and require what comes back to RECONSTRUCT the header
+# that was written. Pinned to what is actually PRINTED rather than to a
+# validation regex that could drift from the emitter.
+#
+# 🔴 IT COMPARES THE HEADER WITH ITSELF, NEVER WITH `emit_from` — and that is
+# the whole reason it isolates. The first draft asserted
+# `parsed_from == facts.emit_from`, which turned it into a SECOND assertion
+# about WHICH field the emitter uses; that claim is owned by `emit_anchor` and
+# `test_emit_claims_records_the_tip_this_round_audited_not_the_range_anchor`,
+# and duplicating it made mutants N3 and Y7 cascade into five unrelated tests
+# and would have answered a wrong-field bug in production with a misleading
+# "it does not parse" refusal. Measured by the battery, which reported both as
+# EXTRA-KILLER. This asks only whether the printed field survives the FORMAT.
+#
+# 🔴 NAMED BLIND SPOT: a well-formed token that is not a commit (`zzzzzzzz`)
+# round-trips perfectly and is NOT caught. This script never resolves the sha —
+# it does not `git cat-file` anything in a checkout it refuses to write to — so
+# "is it a real commit" is a question it cannot answer, and pretending otherwise
+# would be a guard whose description is wider than its implementation.
+EMIT_REFUSAL_HEADER = "🔴 REFUSING TO EMIT an `audit-claims` block"
+
+# The RAW text after `audited=`, to end of line — deliberately NOT `\S+`, which
+# is what `_HEADER_AUDITED` uses and is exactly the truncation being detected.
+_EMITTED_AUDITED = re.compile(
+    r"^`{3,}audit-claims[^\n]*?\baudited=([^\n]*)$", re.M
+)
+
+
+def emitted_block_reads_back_as_written(skeleton):
+    """-> None when the block this run would print reads back intact, else why.
+
+    Pure, and driven by the tests directly as well as through `main`: a refusal
+    is only trustworthy if it can be exercised with no PR and no git.
+    """
+    m = _EMITTED_AUDITED.search(skeleton)
+    if not m:
+        return "the block this run would emit carries no `audited=` field at all"
+    raw = m.group(1).rstrip()
+    blocks, malformed = parse_claims_blocks([skeleton])
+    if len(blocks) != 1:
+        why = "; ".join(malformed) or "no reason reported"
+        return (
+            "the block this run would emit does not parse as exactly one "
+            f"`audit-claims` block ({len(blocks)} found: {why})"
+        )
+    b = blocks[0]
+    back = f"{b.audited_from}..{b.audited_to}" if b.audited_from else b.audited_to
+    if back != raw:
+        return (
+            f"the header carries `audited={raw}`, but this script's OWN parser "
+            f"reads it back as `<from>`={b.audited_from!r}, "
+            f"`<to>`={b.audited_to!r} — reconstructing {back!r}. The field is "
+            "read as one whitespace-free token, so anything from the first "
+            "space onward is silently DISCARDED"
+        )
+    for label, field in (("`<from>`", b.audited_from), ("`<to>`", b.audited_to)):
+        if ".." in field:
+            return (
+                f"{label} came back as {field!r}, which carries an embedded "
+                "`..`. The header splits on the FIRST dot-pair, so a range "
+                "written into one half leaves the other half holding a range "
+                "— and that corruption is copied forward into the next round's "
+                "own block"
+            )
+        if "<" in field or ">" in field:
+            return (
+                f"{label} came back as {field!r}, which is a PLACEHOLDER and "
+                "not a sha. The next round would anchor its delta range and "
+                "its whole ledger on it, and nothing downstream reports it "
+                "malformed"
+            )
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -1744,7 +1935,10 @@ def build_parser():
                     help="the tip THIS round's audit read — written as the "
                          "`<from>` of the `--emit-claims` block. Round 1 has "
                          "no previous block to derive it from; without this, "
-                         "HEAD is ASSUMED and said so on stderr.")
+                         "HEAD is ASSUMED and said so on stderr. ONE sha: no "
+                         "whitespace, no `..`, no placeholder — the emitted "
+                         "block is fed back through this script's own parser "
+                         "and a value that does not survive is REFUSED.")
     ap.add_argument("--claims-file",
                     help="read claims-block text from this file instead of the "
                          "PR's comments (offline/testing seam)")
@@ -1797,6 +1991,27 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         return check_brief_file(args.check, out_stream, err_stream)
     if args.pr is None:
         parser.error("the PR number is required (or use --check FILE)")
+
+    # 🔴 An EMPTY `--audited` is the fifth row of round 5's measured table: it
+    # is falsy, so it falls straight through to `emit_anchor(newest)` and the
+    # flag is IGNORED IN SILENCE — including at round 1, where there is no
+    # block to fall back to and the bare `audited=<head>` spelling is written
+    # instead. Refused rather than warned: there is no reading of `--audited ""`
+    # that the operator meant.
+    if args.audited is not None and not args.audited.strip():
+        print("\n".join([
+            f"{EMIT_REFUSAL_HEADER}: `--audited` was given an EMPTY value "
+            f"({args.audited!r}).",
+            "",
+            "  An empty string is falsy, so it is indistinguishable from the "
+            "flag being omitted: the anchor silently falls back to the previous "
+            "block's `<to>`, or — at round 1, where there is no previous block "
+            "— to the bare `audited=<head>` spelling whose next round is EMPTY "
+            "BY CONSTRUCTION.",
+            "",
+            "  Pass the sha this round's audit actually read, or omit the flag.",
+        ]), file=err_stream)
+        return 4
 
     # A flag that silently does nothing is the shape this module refuses
     # everywhere else: `--audited` is written by `--emit-claims` and by nothing
@@ -2092,10 +2307,43 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
                     "anyway.)",
                     file=err_stream,
                 )
+        # 🔴 THE ROUND TRIP, and it is asked of the BLOCK THAT WOULD BE PRINTED
+        # — not of `args.audited` against a validation regex, which is a second
+        # spelling of the emitter that can drift from it. It compares the
+        # header with ITSELF and never with `emit_from`: see
+        # `emitted_block_reads_back_as_written` for why that isolation matters.
+        #
+        # Gated on `facts.emit_from` because the BARE spelling deliberately has
+        # no `<from>`, and its hazard is a different one that already has its
+        # own loud warning six lines above — gating any wider would make the
+        # placeholder `<to>` of a headRefOid-less run a refusal instead of the
+        # warning it already is. Everything the gate does cover comes from a
+        # human: `--audited` typed on the command line, or `emit_anchor`
+        # recovered from a block someone typed into a PR comment.
+        skeleton = emit_claims_skeleton(facts, head_sha)
+        if facts.emit_from:
+            why = emitted_block_reads_back_as_written(skeleton)
+            if why:
+                print("\n".join([
+                    f"{EMIT_REFUSAL_HEADER} for round {args.round_no} of PR "
+                    f"#{args.pr}: it would not survive this script's own "
+                    "parser.",
+                    "",
+                    f"  {why}.",
+                    "",
+                    "  the block that was NOT emitted:",
+                    "",
+                    "      " + "\n      ".join(skeleton.splitlines()),
+                    "",
+                    "  Re-run with `--audited <a single sha, no spaces and no "
+                    "`..`>` — the tip THIS round's audit read. A placeholder "
+                    "in angle brackets is not a sha; neither is a range.",
+                ]), file=err_stream)
+                return 4
         print("\n" + _bar(), file=out_stream)
         print("Paste this into the PR comment for this round, so the NEXT "
               "round can read it:\n", file=out_stream)
-        print(emit_claims_skeleton(facts, head_sha), file=out_stream)
+        print(skeleton, file=out_stream)
     return 0
 
 
