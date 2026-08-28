@@ -17,44 +17,56 @@ defect class — a wait whose only backstop is someone else's timeout** — foun
 the browser-bridge and fixed at the source each time.
 
 ## State now
-- **The bridge-unbounded-waits arc is CLOSED.** All three fixes merged and verified
-  earlier; nothing further was needed on them. Carried forward because the shas and
-  constants are the durable record:
+- 🔴 **THE QUEUE IS DOWN TO TWO OPEN ITEMS: 5 and 6.** Items 1, 2, 3, 4 and 7 are DONE.
+  Everything this arc opened in `devrc`'s browser-bridge is merged.
 
-  | PR | defect | constant | merge |
-  |---|---|---|---|
-  | #797 | `captureVisibleTab` can HANG, so the `catch` that promised a CDP fallthrough never ran; op died at the 18 s `EXEC_OP_BUDGET_MS` | `FAST_CAPTURE_BUDGET_MS = 1500` | `b20b78355` |
-  | #814 | `open`'s `chrome.tabs.get` — same shape, the audit's predicted regeneration | `REUSE_TAB_BUDGET_MS = 2000` | `b242fc2df` |
-  | #820 | test safety-nets TIGHTER than the CLI's own `curl -m 60`, at 31 sites | `CLI_TIMEOUT_S = 300` | `366de0912` |
+**Durable record, CARRIED FORWARD** (this section is REPLACE-on-update, so these live here
+deliberately — the shas and constants are the arc's only compact index):
 
-- **talos-infra issues filed by earlier sessions:** #1288 (`app-requests` list semantics),
-  #1289 (the dropped `SHARED_LIST_RESULT`, see the open investigation below), #1293.
-  **#1297 is now CLOSED** — all three of its items are done.
-- **#1306 MERGED** as squash `0e4fc872a` (2026-08-26): removed two RETRACTED claims that
-  were still being PRINTED at runtime by `app-capture`, and closed #1297 items 2 and 3.
-- 🔴 **NEW 2026-08-27: talos-infra #1316 MERGED** as squash `4379c27cf` — #1297 item 1,
-  the frame-relative declared crop. Verified on `origin/trunk` **by content** (a squash
-  merge never makes the branch head an ancestor, so ancestry proves nothing):
-  `RECT_Y_APP_FRAME` ×8 in `frame.py`, the iframe-bottom bound present, `yFrom` in
-  `app-requests.json`, `_measuredGeometry` in `playable-collections.json`, `F13d` in the
-  suite, `M181` in the battery. `tekton / gitops-ci` = SUCCESS on the head SHA,
-  `total_count: 1` (0 is NEVER settled in this repo). Branch left undeleted; worktree
-  removed.
-  - **What it added:** a THIRD crop form — `crop.rect` with `"yFrom": "appFrame"` used
-    *alongside* `fromAppFrame`, anchoring only `y` to the app iframe's top edge. Shipped
-    crops: `app-requests` `x=446 y=507 w=804 h=524`; `playable-collections`
-    `x=306 y=0 w=1084 h=573`. Both re-run end to end with `--render`, both states clean,
-    store-bounds green. **Nothing was attached to any listing.**
-  - Suite **142 PASS / 0 FAIL**; mutants M160–M181 (M176 retired with its reason
-    recorded), all killed by their own declared gate.
-- **NINE audit rounds ran on #1316; round 9 was clean and ended the ladder.** The
-  production code has been unchanged since round 4 — every finding after that was a
-  claim in prose or coverage bookkeeping wider than the code. Details in Gotchas.
+| PR | defect | constant | merge |
+|---|---|---|---|
+| devrc #797 | `captureVisibleTab` can HANG, so the `catch` that promised a CDP fallthrough never ran; op died at the 18 s `EXEC_OP_BUDGET_MS` | `FAST_CAPTURE_BUDGET_MS = 1500` | `b20b78355` |
+| devrc #814 | `open`'s `chrome.tabs.get` — same shape, the audit's predicted regeneration | `REUSE_TAB_BUDGET_MS = 2000` | `b242fc2df` |
+| devrc #820 | test safety-nets TIGHTER than the CLI's own `curl -m 60`, at 31 sites | `CLI_TIMEOUT_S = 300` | `366de0912` |
+| devrc #937 | item 3 — the 429 stall; measured, hypothesis did not survive, test made self-diagnosing instead | — | `7ffa4593a` |
+| devrc #950 | item 4 — the `open` orphan reclaim, server-side (this session) | `orphanTabId` + `expires_at` | `359146dd` |
+
+- **Earlier talos-infra work in this arc, all merged:** #1306 (`0e4fc872a`, 2026-08-26 —
+  stopped `plan.py`/`capture.sh` printing two retracted claims); **#1316** (`4379c27cf`,
+  2026-08-27 — the frame-relative declared crop, a THIRD crop form: `crop.rect` with
+  `"yFrom": "appFrame"` alongside `fromAppFrame`, anchoring only `y` to the app iframe's
+  top edge; shipped crops `app-requests` `x=446 y=507 w=804 h=524` and
+  `playable-collections` `x=306 y=0 w=1084 h=573`; NINE audit rounds, round 9 clean, and
+  the production code was unchanged after round 4); **#1333** (`05e3110ca`, 2026-08-27 —
+  `sensei`'s crop). Issues filed by earlier sessions: **#1288** (`app-requests` list
+  semantics), **#1289** (the dropped `SHARED_LIST_RESULT` — see the open investigation
+  below), **#1293**. **#1297 is CLOSED** — all three items done.
+  🔴 **Nothing from any of those was ever attached to a listing.**
+- 🔴 **NEW 2026-08-28: devrc #950 MERGED** as squash **`359146dd`** — queue item 4, the
+  `open` orphan reclaim. Verified on `origin/main` **by content** (a squash merge never
+  makes the branch head an ancestor, so ancestry proves nothing): `orphanTabId` ×4 in
+  `service_worker.js`; `_enqueue_reap_close_locked` ×7, `_cancel_queued_reaps_locked` ×4,
+  `expires_at` ×6, `inst.reaps` ×12 in `server.py`; build marker `b817ef1e88267a40`; and
+  **`open()` calls `chrome.tabs.remove` ZERO times** — the extension reports, it does not
+  close. Both gates SUCCESS bound to the merged head (`combined=success sha=792ebf33 n=2`;
+  nodetests 1297/1297, pytests `collected=17821 passed=17819 failed=0`).
+- **devrc #946 MERGED** as `fbee3800c` — the queue correction that marked item 3 DONE.
+- **The 670-line squash body carries ALL SEVEN audit rounds**, so the two design reversals
+  and the self-inflicted regression are in the durable record on `main`, not just here.
+- **Claim `bridge-unbounded-waits-4` RELEASED.** Worktree removed, base clone re-synced
+  (`--ff-only` to `359146dd`, no divergence), remote branch gone.
+- **Subsystem store updated** — `~/.claude/analyze-service-index/devrc/browser-bridge.md`
+  went 26 → 32 nuance bullets and still parses; the pre-existing `🔴 1 OPEN` (the
+  cross-instance `browser sessions` op) is untouched. **Read it before re-deriving any of
+  the reap's invariants** — that is where they live now, not in this doc.
 - **IN FLIGHT: nothing of ours.** No open PR, no half-written branch, no worktree.
-- 🔴 **`--repo devrc` primary clone is on `main`** with two pre-existing untracked/deleted
-  files that are **not ours** (`nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`,
-  and a deletion of `claudedocs/handoff-discord-embed-ext-rescue.md`). Do not "rescue" or
-  restore either.
+- 🔴 **`--repo devrc` primary clone is on `main`** with one pre-existing untracked file
+  that is **not ours** (`nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`). Do
+  not "rescue" it.
+- ⚠ **No `clawgate-task:` field is recorded for this session, and that is not a clean bill
+  of health.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks — with its positive
+  control confirming the board was reachable. A wrong session id also answers `200` with an
+  empty array, so "touched no task" and "the id is wrong" are indistinguishable here.
 
 ## Open investigations — live diagnosis state
 
@@ -221,79 +233,41 @@ the browser-bridge and fixed at the source each time.
   commit statuses plus local reproduction.
 
 ## Next steps (ranked)
-🔴 **Numbering is STABLE and is half a claim's identity — do not re-rank.** Items 1,
-2, 3, 4 and 7 are DONE and are kept in place rather than renumbered.
+🔴 **Numbering is STABLE and is half a claim's identity — do not re-rank.** Items 1, 2,
+3, 4 and 7 are DONE and are kept in place rather than renumbered. **Only 5 and 6 are open.**
 
-1. ✅ **DONE (#1316, squash `4379c27cf`, 2026-08-27)** — crops declared for `app-requests`
-   and `playable-collections`; talos-infra #1297 closed.
-2. ✅ **DONE (#1306)** — `plan.py`/`capture.sh` no longer print the two retracted claims.
-3. ✅ **DONE (devrc #937, squash `7ffa4593a`, 2026-08-27)** — but NOT as this item was
-   framed, and the difference is the point. The item asked for the stall to be fixed at
-   its source. **Measured first, and the leading hypothesis did not survive**: the
-   fixture takes 0.027–0.036 s idle and stayed under 0.10 s at 2× core load, so the
-   "starved `ThreadingHTTPServer` thread" theory needs a ~10,000× change this load model
-   does not produce. (Weakened, NOT refuted — the load generators are `nice -n 19`
-   because this runs on the operator's desktop, so the model is deliberately gentle.)
-   `browser eval` makes exactly ONE `_curl POST /cmd` bounded at `-m 60`, so one hung
-   request cannot reach a 300 s net. And the test was green in CI throughout.
-   So nothing was patched. The test is now SELF-DIAGNOSING instead: three seam
-   timestamps reported on failure, separating "the request never reached the handler"
-   from "the CLI hung AFTER the reply". Watched firing in BOTH directions with two fake
-   CLIs, not merely reasoned about. **See the new investigation block below — the cause
-   may never have been this test at all.**
-4. ✅ **DONE (devrc PR #950)** — and, like item 3, **NOT as this item was framed**. The
-   item said to bound `chrome.tabs.create` as the third instance of the #797/#814
-   unbounded-await class. **Two measurements refused that remedy**, and the refusal is
-   the deliverable:
-   - `execute()`'s own rule forbids it: a local bound is granted only to *"an await
-     inside a `try` whose `catch` implements a RECOVERY (a second, working path) … If a
-     hung step has no alternative to fall through to, the choke point below is already
-     the right and only answer — do NOT add a bound for it."* `chrome.tabs.create` has
-     no second path, so a bound could only relabel `op_timeout:open` and leak the same
-     tab 2 s earlier.
-   - the harm the item NAMES — "leaks one tab per `open` while returning success" — is
-     the **reuse-probe fall-through**, which needs no hang in `create` at all, and
-     `server.py` had already written it down verbatim: *"deterministically ORPHANING
-     the live first tab. Nothing reclaims it; only a human closes it."*
-
-   So the orphan is now **reclaimed** — and 🔴 **WHERE that happens took three
-   rounds and two wrong answers, which is the durable lesson here.** Drafts 1 and 2
-   had the EXTENSION close the tab; both were wrong the same way. **Reclaiming is
-   correct only if the `open` result is DELIVERED** — if it is not, the old tab is not
-   an orphan at all: the ownership record still names it, it is still live, and closing
-   it strands the session on a dead id and then, one op later, on the operator's ACTIVE
-   tab. The extension cannot know, because **TWO parties abandon an op on TWO clocks
-   and neither is visible from inside it**:
-   - `execute()` RACES the op against `EXEC_OP_BUDGET_MS` and cannot cancel it, so a
-     merely SLOW `chrome.tabs.create` resumes `open` after `op_timeout:open` was
-     already answered. Found by a blind audit, **reproduced before fixing** (execMs 80,
-     hung `tabs.get`, create at 300 ms → `tabsRemove []` at return, `[5]` 600 ms later);
-   - the SUBMITTER gives up at its own `cmd_timeout`, which starts at **SUBMIT**, so
-     queue time is structurally invisible extension-side (`server.py`: *"The SUBMITTER
-     giving up … does NOT free the extension"*). Found by the DELTA audit of the fix
-     for the first — an elapsed-time guard in the extension closed one and could not
-     close the other.
-
-   Final shape: the extension **reports** `orphanTabId` and closes nothing; the server
-   closes it in `_record_ownership_locked`, which by construction runs only on a
-   delivered result. That deleted the elapsed guard, its `startedAt` stamp, and a
-   fixture problem along with it — **the party that knows should decide.**
-   🔴 **NEW HAZARD THIS CREATED, and it is disclosed rather than fixed**: parallel
-   agents can derive the SAME session id and share one owned tab (observed
-   2026-07-31, recorded in `scripts/browser-bridge/reference/tabs-instances.md`). A
-   re-`open` by one sibling whose probe times out now closes the tab the OTHER is
-   mid-workflow on. Previously that collision was benign.
-   🔴 **What is still open and deliberately out of scope**: the OTHER orphan. A
-   `chrome.tabs.create` that hangs and NEVER settles is killed at
-   `EXEC_OP_BUDGET_MS` while the abandoned create later produces a tab `open` never
-   sees — so there is nothing to report. Closing it needs the choke point to signal
-   abandonment back into the op, which it has no mechanism for. **If you pick that up,
-   it is a choke-point change, not another budget constant** — re-read `execute()`'s
-   narrow-exception rule first.
+1. ✅ **DONE (talos-infra #1316, squash `4379c27cf`, 2026-08-27)** — crops declared for
+   `app-requests` and `playable-collections`; talos-infra #1297 closed.
+2. ✅ **DONE (talos-infra #1306)** — `plan.py`/`capture.sh` no longer print the two
+   retracted claims.
+3. ✅ **DONE (devrc #937, squash `7ffa4593a`, 2026-08-27)** — but NOT as framed. The item
+   asked for the `test_browser_cli_backs_off_on_429` stall to be fixed at its source;
+   measuring first killed the leading hypothesis (the fixture takes 0.027–0.036 s idle and
+   stayed under 0.10 s at 2× core load, against the ~10,000× a starved-thread theory needs).
+   Nothing was patched; the test is SELF-DIAGNOSING instead, watched firing in both
+   directions with two fake CLIs. See the investigation block above — the cause may never
+   have been that test.
+4. ✅ **DONE (devrc #950, squash `359146dd`, 2026-08-28)** — and, like item 3, **NOT as
+   framed; the refusal is the deliverable.** The item said to bound `chrome.tabs.create`.
+   `execute()`'s own rule grants a local bound only where the `catch` implements a
+   RECOVERY, and `tabs.create` has none — a bound would relabel `op_timeout:open` while
+   leaking the same tab. The harm the item NAMED is the reuse-probe fall-through, which
+   `server.py` had already written down: *"deterministically ORPHANING the live first tab.
+   Nothing reclaims it; only a human closes it."*
+   **Final architecture, after TWO wrong designs:** the extension REPORTS `orphanTabId` and
+   closes nothing; the SERVER closes it in `_record_ownership_locked`, which by construction
+   runs only on a DELIVERED result — plus an `expires_at` lifetime checked at pickup and a
+   `_cancel_queued_reaps_locked` withdrawal when a session re-owns the tab.
+   **Seven audit rounds; the seventh was clean and ended the ladder.**
+   🔴 **Still out of scope, and the one thing to re-read before touching this again:** a
+   `chrome.tabs.create` that hangs and NEVER settles produces a tab `open` never sees, so
+   there is nothing to report. Closing it needs the choke point to signal abandonment back
+   into the op — **a choke-point change, not another budget constant.**
 5. **Removing app-capture's raise** — `civitai/talos-infra`. 🔴 **PREMISE CHANGED**: the
    raise is not inert, only its i3 half is withheld. Re-scope before working it.
+   **OPEN — unclaimed.**
 6. **clawgate #358** — filed earlier, picked up by a different session. Not ours; live
-   state NOT re-checked, so treat as unknown rather than still-in-flight.
+   state NOT re-checked, so treat as unknown rather than still-in-flight. **OPEN.**
 7. ✅ **DONE (talos-infra #1333, squash `05e3110ca`, 2026-08-27)** — `sensei`'s shipped
    crop settled and fixed. `y: 97` sat **44px ABOVE** the iframe top (141), inside the
    rewards banner. Converted to the anchored form. **Nothing was attached to any
@@ -491,22 +465,90 @@ the browser-bridge and fixed at the source each time.
   CONTENT of a red status, not the colour: the totals and the verdict disagreed, and the
   verdict was the wrong one. Three runs of one commit gave three different answers.
 
+- 🔴 **2026-08-28 / #950 — A QUEUE ITEM'S REMEDY CAN BE FORBIDDEN BY THE FILE IT NAMES.
+  Read the target's own rules before building what a ranked item asks for.** Item 4 asked
+  for a bound on `chrome.tabs.create`; `execute()`'s comment grants a local bound *only* to
+  "an await inside a `try` whose `catch` implements a RECOVERY … If a hung step has no
+  alternative to fall through to, the choke point below is already the right and only
+  answer — do NOT add a bound for it." Two items in a row (3 and 4) were DONE-but-not-as-
+  framed. **Measuring before building is what produced both**, and in both cases the
+  refusal was worth more than the requested change.
+- 🔴 **2026-08-28 — TWO PARTIES ABANDON A BRIDGE OP, ON TWO CLOCKS, AND NEITHER IS VISIBLE
+  FROM INSIDE THE OP.** (a) `execute()` RACES the op against `EXEC_OP_BUDGET_MS` and does
+  NOT cancel it, so a merely SLOW `chrome.tabs.create` resumes `open` long after
+  `op_timeout:open` was answered. (b) The SUBMITTER gives up at its own `cmd_timeout`,
+  which starts at SUBMIT, so QUEUE TIME is structurally invisible extension-side —
+  `server.py` says so already: *"The SUBMITTER giving up … does NOT free the extension."*
+  An extension-side elapsed guard closed (a) and **structurally could not** close (b);
+  that is what forced the decision server-side. On both paths the server KEEPS ownership of
+  the old tab, so a late close strands the session on a dead id and, one op later, on the
+  **operator's ACTIVE tab**. Reproduce with an injected clock — do not reason about it.
+- 🔴 **2026-08-28 — A DOCSTRING NARROWER THAN ITS BODY IS HOW A REGRESSION GETS WRITTEN,
+  not merely how one hides.** `_prune_inflight_locked` said "Drop `inflight` entries" while
+  it had been given authority over the reap-expiry index, so the sweep predicate was
+  written to match the CONTRACT rather than the DATA. The inflight-only sweep deleted the
+  metadata of reaps still QUEUED — removing BOTH the expiry and the cancellation bound in
+  one line, red at that head and green at its own base, with all 883 tests green over it.
+  **Ask of any helper you extend: is the contract line as wide as the body now?**
+- 🔴 **2026-08-28 — SEVEN of this PR's OWN tests were vacuous or over-claiming across the
+  ladder** (four caught by mutants I ran, three by auditors). The recurring shapes, all
+  cheap to check: driving `OPS.<op>` directly does not exercise `execute()`'s race; an
+  assertion snapshotted before the fake extension polls is empty either way, and waiting on
+  a SPECIFIC id misses a mutant that acts on another; `assert x == {}` as an end state is
+  equally true of code that never populated `x` (seed it, assert the seed took); an early
+  return can short-circuit the loop a mutant widens, making two mutants equivalent until a
+  discriminating fixture exists; `len(calls) == 1` observes that a call RAN, not that it
+  SETTLED; bare wall-clock "nothing happened within N seconds" negatives are
+  load-dependent vacuous passes (drain a FIFO sentinel first); and comparing two
+  live-monotonic-clock reads for equality fails on ~1e-5 s when the signal is ~18 s.
+- 🔴 **2026-08-28 — DO NOT FILE THE REAL-PROCESS TEST FLAKE CLASS; IT IS ALREADY OWNED.**
+  Four instances measured: `test_browser_agent.py` failed 4× at the SAME wrapper-hang line
+  558 with a DIFFERENT test each time — and one of those reproduced in a **clean worktree at
+  `origin/main`**, which is what exonerated the diff. Plus, in CI,
+  `scripts/dl-router/tests/test_server.py::test_learn_…` and
+  `scripts/tests/test_subsystem_store_api.py::…test_POSITIVE_CONTROL_…`; that second CI run
+  reported `collected=1781` against the usual `17816`, i.e. it **TRUNCATED** rather than
+  completing red. All later passed. **devrc#882 ("three real-process races") is MERGED**, a
+  live `fix/three-real-process-test-flakes` branch exists, and #810/#787/#899/#544/#740/#648
+  are prior work in the same area. A new object is the duplicate class the object-leak
+  measurement puts at 47% survival. Evidence lives in #950's commit messages instead.
+- **2026-08-28 — the discriminating control for "is CI's red mine?" is CHEAP: run the same
+  suite from a clean worktree at `origin/main`.** Two CI reds on #950 were in subsystems the
+  PR touched **zero** files in, and both went green on the next run. Naming the file and
+  checking `git diff --name-only origin/main...HEAD` for it took seconds and settled each.
+- **2026-08-28 — a comment-only edit to `extension/protocol.js` STILL moves the build
+  marker**, because `gen-build-marker.py` hashes `manifest.json`, `options.js`,
+  `protocol.js` and `service_worker.js`. Two build-marker gates caught exactly this and
+  were right. Editing `server.py` or any test does NOT move it.
+- **2026-08-28 — zsh ate `$M:claudedocs/...` during merge verification** (CLAUDE.md gotcha
+  #11: history-style modifiers on `$VAR:`), producing `origin/mainlaudedocs/...` and three
+  bogus zeros in a content check. **Brace it — `${M}:path` — or the verification lies.**
+
 ## How to verify
 ```bash
-# 1. both PRs landed, by CONTENT (squash merges — ancestry proves nothing)
-git -C $DATAPACKET fetch origin trunk -q
-S=.claude/skills/app-capture/scripts
-git -C $DATAPACKET show origin/trunk:$S/recipes/sensei.json | grep -c yFrom            # 2
-git -C $DATAPACKET show origin/trunk:$S/recipes/app-requests.json | grep -c yFrom       # 2
-git -C $DATAPACKET show origin/trunk:tests/mutants-app-capture.sh | grep -c M182        # 2
-git -C $DATAPACKET show origin/trunk:tests/run-tests-app-capture.sh | grep -c '"sensei": "appFrame"'  # 1
+# 1. devrc #950 landed, by CONTENT (squash merge — ancestry proves nothing)
+DEV=/home/zach/workspace/devrc
+git -C "$DEV" fetch origin main -q
+M=origin/main   # 🔴 BRACE IT below: zsh eats `$M:claudedocs` as a history modifier
+SW=$(git -C "$DEV" show "${M}:scripts/browser-bridge/extension/service_worker.js")
+SRV=$(git -C "$DEV" show "${M}:scripts/browser-bridge/server.py")
+printf '%s' "$SW"  | command grep -ac orphanTabId                 # 4
+printf '%s' "$SRV" | command grep -ac _enqueue_reap_close_locked  # 7
+printf '%s' "$SRV" | command grep -ac _cancel_queued_reaps_locked # 4
+printf '%s' "$SRV" | command grep -ac expires_at                  # 6
+# the load-bearing NEGATIVE: the extension closes no tab
+printf '%s' "$SW" | awk '/^  async open\(cmd\)/{f=1} f&&/^  \},$/{f=0} f' \
+  | command grep -ac 'tabs.remove'                                # 0
 
-# 2. suite + doc-rot, from a clean worktree at trunk
-WT=/tmp/wt-verify
-git -C $DATAPACKET worktree add --detach "$WT" origin/trunk
-(cd "$WT" && bash tests/run-tests-app-capture.sh | tail -3)          # 142 PASS / 0 FAIL
-(cd "$WT" && bash scripts/validate-skill-paths.sh --all | tail -2)   # 1535 refs, PASS
-(cd "$WT" && MUTANTS_ONLY="M179 M182" bash tests/mutants-app-capture.sh)  # both KILLED
-git -C $DATAPACKET worktree remove --force "$WT"
-# 🔴 ~4 mutants per run MAX, and NEVER two batteries at once — see Gotchas
+# 2. suites, from a clean worktree at main
+WT=/tmp/wt-verify950
+git -C "$DEV" worktree add --detach "$WT" origin/main
+(cd "$WT/scripts/browser-bridge" && node --test tests/service_worker.test.mjs \
+   | command grep -aE '^ℹ (pass|fail)')                           # 33 pass / 0 fail
+(cd "$WT" && python3 -m pytest scripts/browser-bridge/tests/test_server.py \
+   -q -k "orphan or reap or cancel" | tail -2)                    # 18 passed
+(cd "$WT" && python3 scripts/browser-bridge/gen-build-marker.py --check)  # OK b817ef1e88267a40
+git -C "$DEV" worktree remove --force "$WT"
+# 🔴 test_browser_agent.py fails NONDETERMINISTICALLY at line 558 on a loaded box —
+# known pre-existing flake class, reproduced at origin/main. Not a #950 regression.
 ```
