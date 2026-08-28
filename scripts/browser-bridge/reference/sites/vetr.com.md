@@ -287,27 +287,40 @@ False — z-9999 is shared. **Identify the blocker, don't infer it:**
 
 ```js
 // one expression. NB the modal has no data-testid — find it by computed style.
+// textContent, not innerText: innerText is "" on an occluded tab (see below).
 (function(){
   var z = [].slice.call(document.querySelectorAll("div")).filter(function(e){
     var s = getComputedStyle(e);
     return s.position === "fixed" && s.zIndex === "9999";
   });
   return JSON.stringify({
-    boot:  !!document.querySelector("[data-testid=app-boot-skeleton]"),
-    toast: !!document.querySelector(".Toastify__toast-container"),
-    z9999: z.map(function(e){ return (e.innerText || "").trim().slice(0, 80); })
+    boot:   !!document.querySelector("[data-testid=app-boot-skeleton]"),
+    splash: !!document.querySelector("[data-testid=brand-splash]"),
+    toast:  !!document.querySelector(".Toastify__toast-container"),
+    z9999:  z.map(function(e){ return (e.textContent || "").trim().slice(0, 80); })
   });
 })()
 ```
 
-1. **`.Toastify__toast-container` present** ⇒ a toast is live. That div is only
-   rendered while at least one toast exists, so its presence is a binary answer.
-2. **A `z9999` entry reading "Timezone Mismatch Detected"** ⇒ the modal above; that
-   is the *only* one `timezone_mismatch_dismissed` clears.
-3. **Any other title** ⇒ a different `<FeedbackModal>`; dismiss it on its own terms.
+Read the named flags **before** the `z9999` array — the array alone is ambiguous:
 
-(That filter is the one measured against this app: it returned the timezone modal
-plus its inner panel, and the modal as topmost for all 35 in-viewport controls.)
+1. **`boot`** ⇒ stalled pre-hydration; nothing else you read is about the route.
+2. **`splash`** ⇒ the brand splash. 🔴 **It matches the `z9999` filter too** —
+   `splash.tsx:108` is `fixed … z-[9999]` — and its `textContent` is **"Vetr"**, so
+   without this flag you would read it as an unknown modal and go looking for a
+   dismiss that does not exist. It clears itself; wait it out.
+3. **`toast`** ⇒ a toast is live. That div is only rendered while at least one toast
+   exists, so its presence is a binary answer — and it will *also* appear in `z9999`.
+4. **A `z9999` entry reading "Timezone Mismatch Detected"** ⇒ the modal above; the
+   *only* one `timezone_mismatch_dismissed` clears.
+5. **Any other `z9999` text, with all three flags false** ⇒ a different
+   `<FeedbackModal>`; dismiss it on its own terms.
+
+⚠ **This exact expression has not been run against the app** — it is assembled from
+parts that were. Do not quote it as measured. What *was* measured used a **regex**
+(`/9999/.test(zIndex)`), which is not the same filter: it also matches
+`#top-bar-bg`'s `z-index: 999999999999`, so it returned an extra empty-text element.
+Strict `=== "9999"` above avoids that; if you loosen it, expect the over-match back.
 
 **Why a title and not a z-index.** `z-[9999]` + `pointer-events: auto` is the
 **shared** `FeedbackModalRenderer` backdrop (`FeedbackModalRenderer.tsx:35`), and the
@@ -326,12 +339,16 @@ rendered as plain text (`FeedbackModal.tsx:8`, `FeedbackModalRenderer.tsx:60`), 
 `root.tsx:161`, `--toastify-z-index: 9999` at `ReactToastify.css:29`, applied `:52`;
 stylesheet imported `root.tsx:30`). Two things about it that are easy to get wrong:
 
-- ⚠ **A toast implies a prior click.** vetr's toasts come from **component action
-  handlers** (~68 `toast.*` calls across 14 non-test files). The axios interceptor's
-  two toasts are gated on `config?.toastr` (`axios.tsx:151,197`) — and **vetr-api's
-  `GET /config` never sends a `toastr` key**, so they do not fire; the third
-  (`:192`) is a client-side HEIC-conversion failure only. So a toast does not appear
-  from a passive read.
+- ⚠ **A toast implies a prior click.** vetr's toasts are raised from **component
+  action handlers**. The two in the axios interceptor are gated on `config?.toastr`
+  (`axios.tsx:151,197`) — and **vetr-api's `GET /config` sends no `toastr` key**, so
+  they do not fire; the third (`:192`) is a client-side HEIC-conversion failure only.
+  So a toast does not appear from a passive read. (Caveat the doc owes you: `config`
+  is the *cached* payload, so a stale cache — or storage you seeded by hand, which
+  this file teaches — could still carry `toastr`.)
+- ⚠ **Clicking the toast body will not dismiss it** — vetr passes
+  `closeOnClick={false}` (`root.tsx:166`). Use its close button. Worth knowing in the
+  one section of this file about clicks that do nothing.
 - ⚠ **At mobile widths it is a full-width top strip, not a corner box** —
   `ReactToastify.css:115-117` sets `width: 100vw` at `≤480px`, and this file tells you
   to `emulate` 390×844. Don't rule it out because your control is on the left.
