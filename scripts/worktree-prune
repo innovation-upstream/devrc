@@ -324,14 +324,42 @@ def _git_raw(cwd: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.Co
     line `execute_removals` re-checks MID-REMOVAL. Ask what a call ANSWERS with,
     not only what you passed it.
 
-    🔴 STILL OPEN, MEASURED, NOT FIXED HERE: with `core.quotePath=false` set on
-    a host, `git status --porcelain=v1` (`worktree_dirty`) and `git diff
-    --name-only` (`landing_signals` / `_paths_differ`) both emit raw path bytes
-    and both abort. #944 deliberately stopped short of them: the diff arm is the
-    one that decides DEAD, wants its own fixture and its own audit, and a fix to
-    `status` ALONE buys nothing observable — the scan would still die in the
-    diff arm — while reading as coverage. Do not read this helper, or the sites
-    that use it, as evidence the abort class is closed.
+    🔴 …AND THE ABORT MOVED A SECOND TIME, WHICH IS THE REASON THIS PARAGRAPH
+    EXISTS. The three fixes above are all about GIT'S OUTPUT, and the round that
+    made them still shipped a run-killing abort — at `print()`, in the REPORT.
+    The row's `repo` field never came from git at all: it is
+    `discover_repos`/argv, already `os.fsdecode`d, and it went into the row raw
+    while `render_text` printed it. So a REPO whose own directory name was
+    undecodable raised `UnicodeEncodeError` at `worktree-prune`'s single
+    `print(render_text(…))` — zero rows, rc 1, bare traceback, every OTHER
+    repo's rows lost with it, under DEFAULT git config and in the DEFAULT output
+    format. Closed by `row_fs` + `ROW_PATH_FIELDS`, which make "which spelling
+    of this path do I want?" one predicate instead of one per site. The lesson
+    is not about git: a decoding split is only finished when EVERY path-shaped
+    field on the object obeys it, including the ones this tool wrote itself.
+
+    🔴 STILL OPEN, MEASURED, NOT FIXED HERE — and the `git diff --name-only` arm
+    has TWO hazards, not the one an earlier wording of this docstring named:
+
+      * `git status --porcelain=v1` (`worktree_dirty`) emits raw path bytes
+        under `core.quotePath=false` and ABORTS. Loud; loses the run.
+      * `git diff --name-only` (`landing_signals` / `_paths_differ`) does the
+        same under `core.quotePath=false` — but under the DEFAULT
+        `core.quotePath=true` it is WORSE, because it does not abort at all.
+        Git returns the quoted literal `"caf\\303\\251.md"`; the tool feeds that
+        literal straight back as a pathspec; the pathspec matches nothing; git
+        exits 0 with empty output; `_paths_differ` reads that as `False` and
+        `content-identical` fires. The result is a SILENT, CONFIDENT, WRONG
+        `dead` with `removable=True` on a branch whose work never landed — on a
+        stock host, with no flag set. Filed as devrc#975; NOT fixed here, and it
+        is the more dangerous of the two by a wide margin because nothing about
+        the run looks abnormal.
+
+    #944 deliberately stopped short of both: the diff arm is the one that
+    decides DEAD, wants its own fixture and its own audit, and a fix to `status`
+    ALONE buys nothing observable — the scan would still be wrong in the diff
+    arm — while reading as coverage. Do not read this helper, or the sites that
+    use it, as evidence the abort class is closed.
     """
     return subprocess.run(
         ["git", "--no-optional-locks", "-C", str(cwd), *args],
@@ -340,7 +368,15 @@ def _git_raw(cwd: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.Co
 
 
 def _printable(raw: bytes) -> str:
-    """Path bytes rendered for a HUMAN — lossy on purpose, and never for I/O.
+    """Path bytes rendered for a HUMAN — lossy on purpose, and never used to
+    REACH anything.
+
+    🔴 That is narrower than "never touches the filesystem", which is what this
+    line used to say and is not true: the printable path is glob-matched, and
+    `_path_candidates` resolves it (`readlink`/`lstat`) so a filter can match
+    either spelling of a symlinked tree. Benign — `_resolve_or_none` is
+    best-effort and a failure costs one candidate form — but it is I/O, and the
+    absolute wording made two comments in this file disagree.
 
     🔴 Display and filesystem access need DIFFERENT decodings, and using one
     for both is how the crash comes back. `os.fsdecode` (surrogateescape)
@@ -365,6 +401,41 @@ def _printable_path(p) -> str:
     wrong at N-1 of them.
     """
     return _printable(os.fsencode(p))
+
+
+# 🔴 THE LEDGER of every row field that is a PATH, and therefore carries two
+# spellings. `row_fs` below is the only way to ask for the filesystem one; the
+# bare key is always the printable one. Read by the seam guard in the test
+# suite, which fails when this set GROWS or SHRINKS — a new path field that
+# forgets its `_fs` twin is exactly the defect that got here.
+ROW_PATH_FIELDS = ("path", "repo")
+
+
+def row_fs(row: "dict", field: str = "path") -> str:
+    """The FILESYSTEM spelling of a row's path field. THE one place that asks.
+
+    🔴 THIS EXISTS BECAUSE THE SPLIT WAS APPLIED AT N SITES AND MISSED AT N+1.
+    Every row carries each path in `ROW_PATH_FIELDS` twice — `path`/`path_fs`,
+    `repo`/`repo_fs` — and reaching for the wrong one is #944 in whichever
+    direction you get it wrong: the printable form handed to `stat` names
+    nothing and the row silently degrades to `cannot-tell`, while the
+    filesystem form handed to `print()` raises `UnicodeEncodeError` and takes
+    the whole run down. The first fix for #944 open-coded
+    `r.get("path_fs") or r["path"]` at the worktree path and left `repo` as the
+    raw `os.fsdecode` string, which `render_text` then printed — a REPO whose
+    own directory name is undecodable still aborted the run, at `print()`
+    instead of inside `subprocess.run`, taking every OTHER repo's rows with it.
+    A predicate spelled at N sites is wrong at N-1 of them; this is the one
+    spelling.
+
+    Also the IDENTITY form. `_printable` is lossy — two distinct byte sequences
+    render to the same U+FFFD string — so anything that GROUPS, COUNTS or
+    COMPARES rows must key on this and not on what it prints.
+
+    The fallback to the printable field is for HAND-BUILT rows (tests, and an
+    `--out` payload written by an older build); `scan_repo` always sets both.
+    """
+    return row.get(f"{field}_fs") or row[field]
 
 
 def _git_ok(cwd: Path, *args: str) -> "str | None":
@@ -449,17 +520,43 @@ def parse_worktree_porcelain(data: bytes) -> "list[dict]":
     comes back — #935 round 3 measured both directions:
 
         `path`     `_printable`, U+FFFD. What the report prints and what JSON
-                   serialises. NEVER used for I/O: U+FFFD sent to the
-                   filesystem names nothing and the worktree is never found.
+                   serialises. Never used to REACH the worktree: U+FFFD sent to
+                   the filesystem names nothing and the worktree is never found.
+                   🔴 NOT "never touches the filesystem", which is what this
+                   said and is false — `scan_repo` hands it to `path_excluded`,
+                   which resolves symlinks (`_path_candidates` →
+                   `_resolve_or_none` → `Path.resolve()`, i.e. `readlink`/
+                   `lstat`). That is deliberate and benign: the glob has to be
+                   matched against the string the operator SAW, `resolve()` is
+                   best-effort and a miss costs one candidate form, never a
+                   removal. But it IS I/O, and the absolute claim was a comment
+                   the code contradicted.
         `path_fs`  `os.fsdecode`, surrogateescape. What reaches the filesystem
-                   and git's argv. NEVER printed: a lone surrogate raises
-                   `UnicodeEncodeError` at `print()`, which MOVES the abort
-                   from git's output to the report instead of removing it.
+                   and git's argv, and what row identity is settled on. NEVER
+                   printed: a lone surrogate raises `UnicodeEncodeError` at
+                   `print()`, which MOVES the abort from git's output to the
+                   report instead of removing it.
 
     `path` is the reported field and `path_fs` the derived one round THIS way
     because the failure modes are not symmetric: a display site that forgets to
     convert CRASHES, while a filesystem site that forgets degrades to
     `cannot-tell` — the tool's own designed degradation, and never a removal.
+
+    🔴 THE SAME SPLIT APPLIES TO EVERY PATH ON THE ROW, NOT JUST THIS ONE. The
+    round that introduced it applied it here and to the submodule store and
+    stopped, leaving `repo` raw — and `render_text` prints `repo`, so the abort
+    simply moved to a repo whose OWN directory name was undecodable. The row
+    fields that split are enumerated in `ROW_PATH_FIELDS`; `row_fs` is the only
+    place that chooses between the two spellings.
+
+    🔴 A NOTE ON `bytes.splitlines()` BELOW, WHICH IS A QUIET IMPROVEMENT AND
+    NOT MERELY A PORT: `str.splitlines()` — what this parser used while it took
+    `str` — also splits on `\\v`, `\\f`, `\\x1c`-`\\x1e`, U+0085 and U+2028/9,
+    none of which git treats as a record separator. A worktree path containing
+    any of them was therefore torn into two bogus records. `bytes.splitlines()`
+    splits only on `\\n`, `\\r` and `\\r\\n`, so reading bytes fixed a
+    record-splitting bug nobody had reported. Strictly better; do not "restore"
+    the str form.
     """
     rows: list[dict] = []
     cur: "dict | None" = None
@@ -1238,7 +1335,17 @@ def scan_repo(repo: Path, gh_cmd: str, use_gh: bool, pr_limit: int, jobs: int,
         # `parse_worktree_porcelain` for why they are not interchangeable.
         path = Path(wt["path_fs"])
         row: dict = {
-            "repo": str(repo),
+            # 🔴 THE REPO PATH SPLITS THE SAME WAY, and the first fix for #944
+            # missed it: `repo` came from `discover_repos`/argv, i.e. already
+            # `os.fsdecode`d, and went into the row RAW. `render_text` prints
+            # `row["repo"]` in its per-repo table, so a REPO whose own
+            # directory name held an undecodable byte died at `print()` — and
+            # took every other repo's rows down with it, since the whole report
+            # is built before any of it is written. Every field here obeys the
+            # same rule: the bare key is what gets PRINTED, the `_fs` twin is
+            # what reaches the filesystem. See `row_fs`.
+            "repo": _printable_path(repo),
+            "repo_fs": str(repo),
             "repo_slug": slug,
             "path": wt["path"],
             "path_fs": wt["path_fs"],
@@ -1371,7 +1478,10 @@ def summarize(rows: "list[dict]", exclude_globs: "list[str] | None" = None,
 
     return {
         "worktrees": len(rows),
-        "repos": len({r["repo"] for r in rows}),
+        # 🔴 Counted on the IDENTITY form, not the printed one: `_printable` is
+        # lossy, so two repos whose names differ only in an undecodable byte
+        # render identically and would have been counted as one.
+        "repos": len({row_fs(r, "repo") for r in rows}),
         "counts": counts,
         "removable": sum(1 for r in rows if r.get("removable")),
         "excluded": len(excluded),
@@ -1477,16 +1587,30 @@ def verdict_label(row: "dict") -> str:
 
 def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
     lines: list[str] = []
+    # 🔴 #944, THE SITE THE FIRST ROUND MISSED. This table is the one place the
+    # REPO path is printed, and it used to print `r["repo"]` — the raw
+    # `os.fsdecode` string. A repo whose own directory name held an undecodable
+    # byte therefore raised `UnicodeEncodeError` here, at `print(render_text(…))`
+    # in `main`, and because the whole report is built before a byte of it is
+    # written, EVERY other repo's rows died with it: zero rows, rc 1, bare
+    # traceback, under default git config and in the default output format.
+    # So: GROUPED on the identity form (`_printable` is lossy and would merge
+    # two distinct repos into one table row, and one summary count), DISPLAYED
+    # from the printable one.
     per_repo: dict[str, dict] = {}
+    repo_disp: dict[str, str] = {}
     for r in rows:
-        d = per_repo.setdefault(r["repo"], {v: 0 for v in VERDICTS})
+        key = row_fs(r, "repo")
+        repo_disp.setdefault(key, r["repo"])
+        d = per_repo.setdefault(key, {v: 0 for v in VERDICTS})
         d[r["verdict"]] += 1
         d["excluded"] = d.get("excluded", 0) + (1 if r.get("excluded_by") else 0)
     lines.append(f"{'repo':<58} {'dead':>5} {'orphan':>7} {'live':>5} {'cannot-tell':>12} "
                  f"{'excluded':>9}")
-    for repo in sorted(per_repo):
-        d = per_repo[repo]
-        lines.append(f"{repo[-58:]:<58} {d[DEAD]:>5} {d[ORPHAN]:>7} {d[LIVE]:>5} "
+    for key in sorted(per_repo):
+        d = per_repo[key]
+        disp = repo_disp[key]
+        lines.append(f"{disp[-58:]:<58} {d[DEAD]:>5} {d[ORPHAN]:>7} {d[LIVE]:>5} "
                      f"{d[CANNOT_TELL]:>12} {d.get('excluded', 0):>9}")
     c = summary["counts"]
     lines.append("")
@@ -1857,10 +1981,13 @@ def execute_removals(rows: "list[dict]", confirm: "int | None") -> int:
         # of what was done. `path_fs` REACHES the worktree; `disp` SHOWS it, and
         # every `_log` below uses `disp` because a lone surrogate raises
         # `UnicodeEncodeError` at `print()` and would abort the loop just the
-        # same. `.get` with a fallback so a hand-built row keeps working.
-        path = Path(r.get("path_fs") or r["path"])
+        # same. `row_fs` carries the hand-built-row fallback.
+        path = Path(row_fs(r, "path"))
         disp = r["path"]
-        repo = Path(r["repo"])
+        # 🔴 …and the REPO by its filesystem form too. This is `git -C`'s cwd
+        # and the `worktree remove` argv: the printable form names no directory,
+        # so every removal in a repo with an undecodable name would have failed.
+        repo = Path(row_fs(r, "repo"))
         if r.get("verdict") != DEAD:
             _log(f"SKIP {disp}: verdict is {r.get('verdict')}, not {DEAD}")
             skipped += 1
@@ -2001,7 +2128,17 @@ def build_parser() -> argparse.ArgumentParser:
 def collect_repos(args) -> "list[Path]":
     repos: list[Path] = [Path(r).expanduser() for r in args.repo]
     if args.repos_from:
-        for line in Path(args.repos_from).expanduser().read_text(encoding="utf-8").splitlines():
+        # 🔴 `errors="surrogateescape"`, not strict — #944's class, at the one
+        # remaining input. A repo list is a list of PATHS, and a path is bytes:
+        # strict utf-8 raised `UnicodeDecodeError` here on a file naming a repo
+        # whose directory name is undecodable, aborting before a single row was
+        # classified. surrogateescape is also the RIGHT decoding rather than
+        # merely a survivable one — it is exactly what `os.fsdecode` gives argv,
+        # so `--repos-from` and `--repo` now hand `collect_repos` the same
+        # string for the same directory. The printable form is derived later, in
+        # `scan_repo`; nothing prints this.
+        for line in Path(args.repos_from).expanduser().read_text(
+                encoding="utf-8", errors="surrogateescape").splitlines():
             line = line.split("#", 1)[0].strip()
             if line:
                 repos.append(Path(line).expanduser())

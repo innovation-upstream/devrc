@@ -701,9 +701,13 @@ printf '\n== #944 — the mid-EXECUTE abort, which is the worst of them ==\n'
 # 🔴 An abort inside this loop fires AFTER some removals and BEFORE the
 # `execute: removed= skipped= failed=` line — the operator is left deleting
 # things with no record of what was deleted. Four lines, four mutants.
+# 🔴 ANCHOR MOVED, deliberately and once: the open-coded
+# `Path(r.get("path_fs") or r["path"])` became `Path(row_fs(r, "path"))` when the
+# delta round unified the four sites that choose a spelling. Same mutation, same
+# killer — only the expression it anchors on changed.
 run 'executor-reaches-the-worktree-by-its-lossy-name' \
   test_execute_removes_an_undecodable_worktree_and_prints_its_accounting \
-  's|^        path = Path(r.get("path_fs") or r\["path"\])$|        path = Path(r["path"])|'
+  's|^        path = Path(row_fs(r, "path"))$|        path = Path(r["path"])|'
 # 🔴 Identity settled on the LOSSY form: U+FFFD collapses distinct byte
 # sequences, so this comparison has to be made on the bytes.
 run 'executor-matches-the-live-row-on-the-lossy-path' \
@@ -732,6 +736,57 @@ run 'submodule-store-path-printed-raw' \
 run 'submodule-store-entry-names-printed-raw' \
   test_a_submodule_store_under_an_undecodable_worktree_NAME_is_named_printably \
   's|^            names = sorted(_printable_path(p.name) for p in modules.iterdir())$|            names = sorted(p.name for p in modules.iterdir())|'
+
+printf '\n== #944 DELTA — the REPO path, the fourth site the first round missed ==\n'
+# 🔴 THE DELTA FINDING ITSELF. `row["repo"]` never came from git — it is
+# `discover_repos`/argv, already `os.fsdecode`d — and it went into the row RAW
+# while `render_text` printed it. So the first fix for #944 MOVED the abort:
+# `UnicodeDecodeError` inside `subprocess.run` on `origin/main` became
+# `UnicodeEncodeError` at `print(render_text(…))` on its own HEAD, under DEFAULT
+# git config and in the DEFAULT output format. This mutant IS that bug.
+run 'repo-reported-in-its-filesystem-form' \
+  test_an_undecodable_REPO_DIRECTORY_NAME_does_not_abort_the_report \
+  's|^            "repo": _printable_path(repo),$|            "repo": str(repo),|'
+# 🔴 THE OTHER DIRECTION, and it is not the same mutant: the printable form
+# reaching the FILESYSTEM. `repo` is `git -C`'s cwd for the executor's
+# `list_worktrees` re-check and for the removal itself, so U+FFFD here names no
+# directory and every removal in such a repo fails — silently, one row at a time,
+# rather than loudly.
+run 'repo_fs-derived-from-the-lossy-string' \
+  test_execute_removes_a_worktree_in_an_undecodable_REPO_and_accounts_for_it \
+  's|^            "repo_fs": str(repo),$|            "repo_fs": _printable_path(repo),|'
+run 'executor-reaches-the-repo-by-its-lossy-name' \
+  test_execute_removes_a_worktree_in_an_undecodable_REPO_and_accounts_for_it \
+  's|^        repo = Path(row_fs(r, "repo"))$|        repo = Path(r["repo"])|'
+# 🔴 GROUPING and DISPLAY are two decisions on adjacent lines and each gets its
+# own mutant. Mutating the pair together would prove nothing about either.
+# GROUPING on the lossy form: `_printable` collapses distinct byte sequences, so
+# two repos differing only in an undecodable byte merge into ONE table row whose
+# counts are silently summed. No crash — a quietly wrong report.
+run 'per-repo-table-grouped-on-the-lossy-path' \
+  test_two_repos_differing_only_in_an_undecodable_byte_are_not_merged \
+  's|^        key = row_fs(r, "repo")$|        key = r["repo"]|'
+# …and the same collapse in the summary's own scope line, which is a separate
+# computation in a separate function and would survive the mutant above.
+run 'repo-count-taken-on-the-lossy-path' \
+  test_two_repos_differing_only_in_an_undecodable_byte_are_not_merged \
+  's|^        "repos": len({row_fs(r, "repo") for r in rows}),$|        "repos": len({r["repo"] for r in rows}),|'
+# DISPLAY of the identity form — the crash half, isolated from the grouping half.
+run 'per-repo-table-prints-the-identity-form' \
+  test_an_undecodable_REPO_DIRECTORY_NAME_does_not_abort_the_report \
+  's|^        disp = repo_disp\[key\]$|        disp = key|'
+# 🔴 THE LEDGER, and the only mutant the seam guard is the sole killer of: a NEW
+# path-shaped field arriving on the row without being declared. The encodability
+# half of that guard is already exercised by `repo-reported-in-its-filesystem-form`
+# above; this is the structural half, and without it the ledger could shrink to
+# nothing and stay green.
+run 'an-undeclared-fs-field-appears-on-the-row' \
+  test_every_reported_row_field_is_printable_and_the_fs_twins_are_declared \
+  's|^            "repo_slug": slug,$|&\n            "undeclared_fs": str(repo),|'
+# 🔴 `--repos-from` was the last strict-utf-8 read of a PATH in the tool.
+run 'repos-from-read-with-strict-decoding' \
+  test_repos_from_reads_a_repo_path_that_is_not_valid_utf8 \
+  's|^                encoding="utf-8", errors="surrogateescape").splitlines():$|                encoding="utf-8").splitlines():|'
 
 printf '\n== POSITIVE CONTROLS — mutants whose fate is KNOWN ==\n'
 # 🔴 A comment-only edit MUST survive. If it kills something, the harness is
