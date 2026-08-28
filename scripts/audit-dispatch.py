@@ -62,6 +62,31 @@ right — is dropped on the floor. `--emit-claims` prints a correctly-formed
 skeleton for the operator to paste into the round's PR comment, so the NEXT
 round has something to read.
 
+🔴 `audited=<from>..<to>` HAS EXACTLY ONE MEANING, AND TWO READERS
+------------------------------------------------------------------
+    `<from>` is the tip that round's AUDIT read.
+    `<to>`   is the head that round's FIXES produced.
+
+It meant something different to the writer and the reader for two rounds, and
+the range that fell out was EMPTY BY CONSTRUCTION: `--emit-claims` stamps the
+PR's CURRENT head into `<to>`, while the next round diffed `<to>..HEAD` — and
+those coincide, because the block is posted at the fix tip. Reproduced live on
+devrc #958 (`audited=abc41024..d9eb36a8`, and `--round 3` rendered
+``Diff `d9eb36a8..HEAD` `` with HEAD *being* `d9eb36a8`) and hermetically.
+
+So there are two named readers of the one field, and they return DIFFERENT shas:
+
+  * `range_anchor` = `<from>` or, for a bare round-1 `audited=<sha>`, `<to>`.
+    What a delta round DIFFS FROM — everything since the previously-audited tip.
+  * `emit_anchor`  = `<to>`. What `--emit-claims` WRITES as the next block's
+    `<from>`, because the tip THIS round audited is where the last one stopped.
+
+`anchor_is_head` is the third piece: a `<sha>..HEAD` whose `<sha>` IS HEAD is a
+broken question, not a clean round, and the range section, the ledger and
+`--emit-claims` each say so LOUDLY rather than rendering an empty diff — an
+auditor who diffs nothing finds nothing, and the `stop-rule` clause then
+converts that into "the ladder ENDS".
+
 🔴 TWO REFUSALS, AND THEY ARE NOT THE SAME KIND
 ------------------------------------------------
 1. **`--round N` for N ≥ 2 with no parseable claims block REFUSES to emit**
@@ -187,6 +212,88 @@ INVARIANT_CLAUSES = (
 )
 
 INVARIANTS_HEADING = "## 🔴 NON-NEGOTIABLE — every audit, every round"
+
+# --------------------------------------------------------------------------- #
+# THE SECTION DIRECTIVES — verbatim instruction prose that is NOT a clause.
+# --------------------------------------------------------------------------- #
+# 🔴 WHOLE-STRING PINNING COVERED 7 OF 11 VERBATIM BLOCKS, and three inversions
+# walked straight through a fully green 58-test suite. Round 2 made whole-string
+# pinning the standard for auditor instructions and then applied it to
+# `INVARIANT_CLAUSES` alone; these three blocks are verbatim, non-generated
+# instruction prose that shipped in every delta brief with nothing watching:
+#
+#   site             mutation applied alone                       result
+#   render_claims    keep "never WHY IT IS CORRECT", rewrite the  58 passed
+#                    sentence to "the fix round already verified
+#                    each of these, so take them as established"
+#   render_range     delete the whole "Also hunt for regressions" 58 passed
+#   render_checkout  invert "NOT a finding … do not chase it"     58 passed
+#                    into "a finding worth reporting. Restore
+#                    anything you see move."
+#
+# The first inverts this module's own headline 🔴 rule into the exact framed
+# audit it documents; the third tells the auditor to WRITE to the shared
+# checkout, contradicting the `no-fetch` clause two bars later in the same
+# brief. Same shape as W1-W5: the pinned fragment survives, the instruction
+# around it says the opposite.
+#
+# They are NOT invariant clauses — an invariant clause renders in every brief,
+# and two of these are meaningless in a round-1 one ("this fix round" when
+# there has been no fix round). So they stay in the sections that own them and
+# get their own ledger, pinned WHOLE and two-way by the test module exactly as
+# `INVARIANT_CLAUSES` is.
+#
+# 🔴 WHICH VERBATIM BLOCKS ARE **NOT** PINNED, said plainly rather than left to
+# read as covered: the toolchain section's wrong-shell paragraph and its
+# name-the-tier sentence, the ledger's classify-these-yourself and stale-base
+# paragraphs, the round-1 read-the-whole-diff line, and the OUTPUT contract.
+# Each is guarded by a FRAGMENT assertion aimed at one specific hazard
+# (`test_the_toolchain_*`, `test_the_ledger_*`), which is weaker than a whole
+# string and is not claimed to be more. They are unpinned because pinning every
+# sentence makes the brief unrewordable, and the three above were chosen by a
+# measured inversion, not by inventory.
+
+Directive = namedtuple("Directive", "id text")
+
+SECTION_DIRECTIVES = (
+    Directive(
+        "claims-framing",
+        "🔴 This is WHAT WAS CLAIMED, never WHY IT IS CORRECT — nothing here is "
+        "established. Three successive FRAMED audits confirmed a claim purely "
+        "because the prompt handed them the answer; one BLIND audit refuted it "
+        "in a single pass. Verify each item against the diff and state, per "
+        "item: **actually fixed / partially / not / made worse**.",
+    ),
+    Directive(
+        "delta-regressions",
+        "Also hunt for **regressions this fix round itself introduced** — the "
+        "guard that is now too strict, the branch that is now unreachable, the "
+        "narrowed check that now rejects a legitimate case, the rule reworded "
+        "wider on one axis and narrower on another.",
+    ),
+    Directive(
+        "checkout-moves",
+        "🔴 **This checkout is SHARED with other sessions and agents. It MOVES "
+        "UNDER YOU** — the branch can change, files can appear and vanish, and "
+        "commits can land mid-audit. That is expected and is NOT your fault and "
+        "NOT a finding. **Report what you observed moving and carry on; do not "
+        "chase it, and do not try to restore it.**",
+    ),
+)
+
+DIRECTIVE = {d.id: d.text for d in SECTION_DIRECTIVES}
+
+
+def directive(did):
+    """The verbatim block `did` — or a LOUD placeholder if it was deleted.
+
+    Never a `KeyError` and never silence. A deleted directive must leave a mark
+    a human reading the brief can see AND that the rendered-section pin can
+    fail on; raising instead would make every test in the suite error, which
+    scores a deletion as "killed" for the wrong reason and tells the operator
+    nothing.
+    """
+    return DIRECTIVE.get(did) or f"⚠ MISSING VERBATIM BLOCK `{did}`"
 
 # The two mutually exclusive worktree directives. Which one a brief carries is
 # decided by a FACT (the PR's repo vs the cwd's repo), never by the author's
@@ -353,6 +460,69 @@ def newest_block(blocks):
     return best
 
 
+def range_anchor(block):
+    """🔴 What a DELTA round must diff FROM — `audited_from`, not `audited_to`.
+
+    THE FIELD MEANT TWO DIFFERENT THINGS TO THE WRITER AND THE READER, and the
+    range that fell out was EMPTY BY CONSTRUCTION. `--emit-claims` stamps the
+    PR's CURRENT head into `<to>`; this function used to be spelled
+    `newest.audited_to` at the one call site, so the next round diffed
+    `<the head at emit time>..HEAD` — and those coincide, because the block is
+    posted at the fix tip. Reproduced live on devrc #958: the round-2 comment
+    carried `audited=abc41024..d9eb36a8`, and `--round 3` rendered
+    ``Diff `d9eb36a8..HEAD` `` with HEAD *being* `d9eb36a8`.
+
+    That is worse than a wrong number. THE RANGE section does not consult the
+    ledger, so it printed the empty range under "verified at assembly time to be
+    PR #958's head commit" followed by "Do not re-audit the whole PR" — an
+    auditor obeying it diffs nothing, finds nothing, and the `stop-rule` clause
+    then converts that into "the ladder ENDS".
+
+    THE SEMANTICS, stated once so both sides can be checked against it:
+
+        `audited=<from>..<to>` records that the round's fix took the tree from
+        `<from>` — the tip that round's AUDIT read — to `<to>`, the head its
+        fixes produced.
+
+    So a delta round reads EVERYTHING SINCE THE PREVIOUSLY-AUDITED TIP:
+
+      * HEAD == `<to>` (the block was posted at the fix tip, the common case)
+        -> the range is exactly that round's fix commits;
+      * more commits landed after the block was posted
+        -> they are included too, which is what a delta round wants;
+      * a round-1 BARE `audited=<sha>` has no `<from>`
+        -> fall back to `<to>`, which for that spelling IS the anchor.
+
+    The WRITER's counterpart is `emit_anchor` — a different quantity, and
+    conflating them is what this pair exists to prevent.
+    """
+    if block is None:
+        return None
+    return block.audited_from or block.audited_to or None
+
+
+def emit_anchor(block):
+    """🔴 What `--emit-claims` must write as `<from>` — `audited_to`.
+
+    The mirror image of `range_anchor`, and NOT the same sha. A round-N block
+    records the tip round N's AUDIT read; that tip is the head the previous
+    round's block ended at, i.e. the newest block's `audited_to`.
+
+    Spelling this `range_anchor` instead — the obvious "one anchor for
+    everything" simplification — writes the tip round N-1 audited into round N's
+    block, so round N+1 re-audits round N-1's fix commits as well. A superset,
+    not an empty range, which is why it would survive a casual read; the two
+    readers are kept separate and named so the next editor has to choose.
+
+    With no prior block (a round-1 `--emit-claims`) there is no `<from>` at all
+    and the bare `audited=<sha>` spelling is emitted instead — see
+    `emit_claims_skeleton`.
+    """
+    if block is None:
+        return None
+    return block.audited_to or None
+
+
 def round_one_anchor(blocks):
     """The sha ROUND 1 audited, or None.
 
@@ -361,11 +531,20 @@ def round_one_anchor(blocks):
     NOT MEASURED — never derived from the base, which is a different quantity.
 
     Two spellings carry it, and both are read:
-      * `round=2 audited=A..B` — A is the tip round 1 audited (the usual case);
+      * `round=2 audited=A..B` — A is the tip ROUND 2's audit read, which is the
+        head round 1's fixes produced (the usual case);
       * `round=1 audited=A`    — the bare form `--emit-claims` writes for a
-        round-1 comment, where the audited TIP is itself that same quantity.
+        round-1 comment, which is that same head.
     A bare sha on any LATER round is NOT an anchor: it says what that round
     audited, and the round-1 tip is then genuinely unknown.
+
+    ⚠ NAMED PRECISELY BECAUSE THE OLD WORDING WAS WRONG ("A is the tip round 1
+    audited"). Both spellings resolve to the head AFTER round 1's fixes, so the
+    cumulative figure is "since round 1's fixes landed", not "since round 1
+    read the tree" — round 1's own fix commits are BELOW it. That is a real,
+    pre-existing limit of the quantity, not a defect this function can close,
+    and it is written here so nobody re-derives the stronger claim from the
+    name.
     """
     candidates = []
     for b in blocks:
@@ -405,9 +584,14 @@ HeadCheck = namedtuple("HeadCheck", "ok reason local_sha pr_sha")
 Facts = namedtuple(
     "Facts",
     "pr repo title base_ref url round_no cwd_repo_dir cwd_repo_slug repo_relation "
-    "branch dirty prev_sha claims claims_round checklist ledger assembled_at "
-    "claims_source head_check",
+    "branch dirty prev_sha emit_from claims claims_round checklist ledger "
+    "assembled_at claims_source head_check",
 )
+# 🔴 `prev_sha` and `emit_from` are TWO ANCHORS out of ONE `audited=` field, and
+# they are deliberately separate fields rather than one: `prev_sha` is
+# `range_anchor` (what this round DIFFS FROM) and `emit_from` is `emit_anchor`
+# (what `--emit-claims` WRITES as the next block's `<from>`). Collapsing them is
+# the defect this round fixed, in one direction or the other.
 
 
 def _slug_from_remote(url):
@@ -504,7 +688,7 @@ def pr_slug(data, override=None):
     return None
 
 
-def verify_head_is_the_pr(runner, repo_dir, pr_head_sha):
+def verify_head_is_the_pr(runner, repo_dir, pr_head_sha, no_sha_reason=None):
     """🔴 The FOURTH read rule: is this checkout's HEAD the PR's head commit?
 
     Everything the delta half of this brief says — the ledger's numbers, the
@@ -521,13 +705,24 @@ def verify_head_is_the_pr(runner, repo_dir, pr_head_sha):
 
     So a failed check returns a `reason` and NO number, exactly like the other
     three: an unverifiable measurement is not a measurement.
+
+    🔴 `no_sha_reason` IS THE THIRD FALSE-CAUSE SITE, found by sweeping for the
+    class rather than fixing the two the audit named. The message here used to
+    read "`gh` was not consulted — `--claims-file` mode — or reported no
+    `headRefOid`", offering two causes with nothing to choose between them —
+    and the CALLER knows which one it is, because it is the caller that decided
+    whether to consult `gh` at all. So the caller names it, and this function
+    keeps a truthful fallback for a caller that genuinely cannot say.
     """
     if not pr_head_sha:
+        why = no_sha_reason or (
+            "`gh` was not consulted, or reported no `headRefOid` — this caller "
+            "did not say which"
+        )
         return HeadCheck(
             False,
-            "the PR's head sha is not known here (`gh` was not consulted — "
-            "`--claims-file` mode — or reported no `headRefOid`), so nothing "
-            "can confirm this checkout is standing on the PR",
+            f"the PR's head sha is not known here ({why}), so nothing can "
+            "confirm this checkout is standing on the PR",
             None,
             None,
         )
@@ -551,6 +746,49 @@ def verify_head_is_the_pr(runner, repo_dir, pr_head_sha):
             pr_head_sha,
         )
     return HeadCheck(True, None, local, pr_head_sha)
+
+
+def same_commit(a, b):
+    """Do two shas of DIFFERENT LENGTHS name the same commit?
+
+    `audited=` carries an 8-char abbreviation; `git rev-parse HEAD` returns 40.
+    A plain `==` between them is False for every real self-range, which is the
+    quiet way this whole guard would fail to fire. Empty is never equal to
+    anything — `"x".startswith("")` is True, and treating a MISSING anchor as
+    "the same commit" would report a self-range for the round-1 case.
+    """
+    a, b = (a or ""), (b or "")
+    if not a or not b:
+        return False
+    return a.startswith(b) or b.startswith(a)
+
+
+def anchor_is_head(anchor, head_check):
+    """🔴 Is `<anchor>..HEAD` EMPTY BY CONSTRUCTION rather than merely empty?
+
+    ONE PREDICATE, ONE PLACE — the range renderer, the ledger and
+    `--emit-claims` all ask it, and a predicate open-coded at three sites is
+    wrong at two of them in the same direction.
+
+    A range whose two ends are the SAME COMMIT can never contain anything, so
+    "it is empty" says nothing about the PR: it is a fact about the range. That
+    distinction is the whole point. An ordinary empty range is a real
+    measurement ("nothing has landed since"); a self-range is a broken question,
+    and reporting it as the first is how a round with ZERO commits examined gets
+    written up as clean.
+
+    The length mismatch is handled by `same_commit`, not here — and it is not
+    cosmetic: `audited=` carries 8 chars, `rev-parse HEAD` returns 40, so a
+    plain `==` answers False for every real self-range this exists to catch.
+
+    An UNVERIFIED checkout answers False rather than True: when HEAD is not the
+    PR's head, `local_sha` is some other branch's tip and comparing an anchor
+    against it says nothing about the range the auditor will run. That case
+    already has its own COULD NOT VERIFY banner.
+    """
+    if head_check is None or not head_check.ok:
+        return False
+    return same_commit(anchor, head_check.local_sha)
 
 
 # --------------------------------------------------------------------------- #
@@ -600,11 +838,41 @@ def measure_ledger(runner, repo_dir, prev_sha, base, head_check=None):
     except ValueError:
         return fail(f"`git rev-list --count` printed {out.strip()!r}, not a number")
     if commits == 0:
+        # 🔴 THREE causes, and TWO OF THEM ARE REFUTED BY `head_check` — which is
+        # a parameter of this very function, already required `ok` twelve lines
+        # above. The old text named "the fixes are not committed yet, or this
+        # checkout does not have them" unconditionally, so a brief printed
+        # "verified at assembly time to be PR #958's head commit" and "this
+        # checkout does not have them" in one document. Same false-cause shape
+        # as the cumulative reason below, and the reason that fix is now applied
+        # to the CLASS rather than to one site.
+        if anchor_is_head(prev_sha, head_check):
+            return fail(
+                f"the range `{prev_sha}..HEAD` is EMPTY BY CONSTRUCTION, not "
+                f"merely empty: `{prev_sha}` IS this checkout's HEAD "
+                f"({head_check.local_sha}), so both ends of the range are the "
+                "same commit and it could not contain anything whatever the "
+                "PR looks like. That is a broken question, NOT a clean round — "
+                "do not read a finding-free audit over it as evidence of "
+                "anything. The round's fix commits are not in this checkout, "
+                "or the `audited=` field was written with the fix tip in the "
+                "`<from>` position; `<from>` is the tip the PREVIOUS round "
+                "audited."
+            )
+        if head_check is not None and head_check.ok:
+            return fail(
+                f"the range `{prev_sha}..HEAD` is EMPTY — and this checkout's "
+                f"HEAD ({head_check.local_sha}) IS the PR's head, so it is not "
+                "a case of the commits being elsewhere: nothing has landed on "
+                f"the PR itself since `{prev_sha}`. The fixes for this round "
+                "are not committed and pushed yet."
+            )
         return fail(
             f"the range `{prev_sha}..HEAD` is EMPTY — nothing has landed since "
             "the sha that round audited, so there is no delta to audit. Either "
             "the fixes are not committed yet, or this checkout does not have "
-            "them."
+            "them. (No head check was made here, which is why both remain "
+            "live.)"
         )
 
     rc, out, err = runner([
@@ -741,11 +1009,7 @@ def render_claims(facts):
     lines = [
         "## WHAT WAS CLAIMED FIXED",
         "",
-        "🔴 This is WHAT WAS CLAIMED, never WHY IT IS CORRECT — nothing here is "
-        "established. Three successive FRAMED audits confirmed a claim purely "
-        "because the prompt handed them the answer; one BLIND audit refuted it "
-        "in a single pass. Verify each item against the diff and state, per "
-        "item: **actually fixed / partially / not / made worse**.",
+        directive("claims-framing"),
         "",
     ]
     lines += [f"{i}. {c}" for i, c in enumerate(facts.claims, 1)]
@@ -775,7 +1039,32 @@ def render_range(facts):
     # the shared checkout happens to be standing on — reproduced against an
     # unrelated feature branch, where it read as an ordinary non-empty range.
     hc = facts.head_check
-    if hc is not None and hc.ok:
+    # 🔴 AND `..HEAD` is not meaningful when the ANCHOR is HEAD. This section
+    # does not consult the ledger, so a self-range used to be rendered here with
+    # full confidence — "verified at assembly time to be PR #958's head commit"
+    # over ``Diff `d9eb36a8..HEAD` `` with HEAD *being* `d9eb36a8`, followed by
+    # "Do not re-audit the whole PR". An auditor obeying that diffs nothing,
+    # finds nothing, and the stop-rule clause turns the empty result into "the
+    # ladder ENDS". The banner is loud because the failure is silent.
+    if anchor_is_head(facts.prev_sha, hc):
+        tip = "HEAD"
+        note = (
+            "🔴 **DEGENERATE RANGE — EMPTY BY CONSTRUCTION. DO NOT AUDIT IT AND "
+            "DO NOT REPORT IT CLEAN.**\n\n"
+            f"    the anchor `{facts.prev_sha}` IS this checkout's HEAD "
+            f"({hc.local_sha})\n\n"
+            "Both ends of the range name the same commit, so it can never "
+            "contain anything, whatever the PR looks like. A finding-free pass "
+            "over this range is a fact about the RANGE and is NOT evidence "
+            "about the code — do not let the stop-rule clause below convert it "
+            "into \"the ladder ENDS\".\n\n"
+            "Either the round's fix commits are not in this checkout, or the "
+            f"`audited=` block was written with the fix tip in its `<from>` "
+            "position. `<from>` is the tip the PREVIOUS round audited; `<to>` "
+            "is the head that round's fixes produced. Fix that and re-assemble "
+            "before auditing anything."
+        )
+    elif hc is not None and hc.ok:
         tip = "HEAD"
         note = (
             f"This checkout's HEAD is `{hc.local_sha}`, verified at assembly "
@@ -803,10 +1092,7 @@ def render_range(facts):
         "",
         f"Base branch: `{facts.base_ref}`.",
         "",
-        "Also hunt for **regressions this fix round itself introduced** — the "
-        "guard that is now too strict, the branch that is now unreachable, the "
-        "narrowed check that now rejects a legitimate case, the rule reworded "
-        "wider on one axis and narrower on another.",
+        directive("delta-regressions"),
     ])
 
 
@@ -823,11 +1109,7 @@ def render_checkout(facts):
         f"    dirty  : {dirty}",
         f"    read at: {facts.assembled_at}",
         "",
-        "🔴 **This checkout is SHARED with other sessions and agents. It MOVES "
-        "UNDER YOU** — the branch can change, files can appear and vanish, and "
-        "commits can land mid-audit. That is expected and is NOT your fault and "
-        "NOT a finding. **Report what you observed moving and carry on; do not "
-        "chase it, and do not try to restore it.**",
+        directive("checkout-moves"),
     ])
 
 
@@ -1086,9 +1368,16 @@ def emit_claims_skeleton(facts, head_sha):
        standing on it, and is otherwise a record of some other branch's tip
        going into the field the NEXT round anchors on. The caller now passes the
        PR's own head sha.
+
+    🔴 A THIRD, from round 3: the `<from>` written here is `facts.emit_from`
+    (`emit_anchor` — the newest block's `audited_to`, i.e. the tip THIS round's
+    audit read), NOT `facts.prev_sha` (`range_anchor` — what THIS round diffed
+    from). They are different shas and the single-anchor spelling is wrong on
+    one side whichever one you pick: write `prev_sha` here and the next round
+    re-audits the previous round's fix commits as well.
     """
-    if facts.prev_sha:
-        audited = f"{facts.prev_sha}..{head_sha}"
+    if facts.emit_from:
+        audited = f"{facts.emit_from}..{head_sha}"
     else:
         # Round 1: no previous tip exists, so the header carries the audited tip
         # ALONE. `round_one_anchor` reads a round-1 bare sha as the cumulative
@@ -1252,9 +1541,20 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             return 2
         claims_source = f"`{args.claims_file}`"
         data = {"title": f"PR #{args.pr}", "url": "", "baseRefName": "main"}
+        # 🔴 THE CALLER KNOWS WHICH CAUSE IT IS. See `verify_head_is_the_pr`:
+        # naming both leaves the reader with a list instead of an answer, and
+        # this branch is the one that decided not to consult `gh`.
+        no_sha_reason = (
+            "this run is `--claims-file` mode, which consults no `gh` and so "
+            "never learns the PR's `headRefOid`"
+        )
     else:
         data, comment_texts = gh_pr_facts(runner, args.pr, args.repo)
         claims_source = f"PR #{args.pr}'s comments"
+        no_sha_reason = (
+            "`gh pr view` was consulted and reported no `headRefOid` for this "
+            "PR"
+        )
         if data.get("_error"):
             print(f"🔴 `gh pr view {args.pr}` failed: {data['_error']}",
                   file=err_stream)
@@ -1327,7 +1627,12 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             file=err_stream,
         )
 
-    prev_sha = newest.audited_to if newest else None
+    # 🔴 TWO anchors, ONE field. See `range_anchor` / `emit_anchor`: reading
+    # `audited_to` here made the delta range EMPTY BY CONSTRUCTION, because
+    # `--emit-claims` stamps the head the block is posted at into that same
+    # field. Reproduced live on devrc #958 and hermetically.
+    prev_sha = range_anchor(newest)
+    emit_from = emit_anchor(newest)
     claims = list(newest.items) if newest else []
     claims_round = newest.round_no if newest else None
     if newest is not None and newest.round_no >= args.round_no:
@@ -1341,7 +1646,9 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
     # 🔴 The FOURTH read rule, computed once and used by all three consumers
     # that were measuring the operator's checkout instead of the PR: the ledger,
     # the range section, and the `audited=` sha `--emit-claims` stamps.
-    head_check = verify_head_is_the_pr(runner, repo_dir, data.get("headRefOid"))
+    head_check = verify_head_is_the_pr(
+        runner, repo_dir, data.get("headRefOid"), no_sha_reason
+    )
 
     ledger = None
     base_ref = data.get("baseRefName") or "main"
@@ -1376,6 +1683,7 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         branch=branch,
         dirty=dirty,
         prev_sha=prev_sha,
+        emit_from=emit_from,
         claims=claims,
         claims_round=claims_round,
         checklist=checklist_reader(repo_dir),
@@ -1442,6 +1750,24 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
                 "⚠ --emit-claims stamped the PR's head sha, which is correct — "
                 "but this checkout is NOT standing on it, so re-read the claims "
                 f"you are about to write: {head_check.reason}",
+                file=err_stream,
+            )
+        # 🔴 A SELF-RANGE in the block being WRITTEN. `<from>` is the tip this
+        # round audited and `<to>` is the head its fixes produced; equal means
+        # no fix commits exist yet, so the block claims a round that changed
+        # nothing and the NEXT round will anchor on an empty range. Emitted
+        # silently until round 3: `--round 2 --emit-claims` and `--round 3
+        # --emit-claims` both printed `audited=d9eb36a8..d9eb36a8` with no
+        # warning at all.
+        if same_commit(facts.emit_from, head_sha):
+            print(
+                "🔴 --emit-claims is writing a SELF-RANGE: "
+                f"`audited={head_sha}..{head_sha}`. The two ends are the same "
+                "commit, so the block records a round whose fixes changed "
+                "NOTHING, and the next round's delta range will be EMPTY BY "
+                "CONSTRUCTION — which reads as a clean round. Commit and push "
+                "this round's fixes, then re-run; do not post this block as it "
+                "stands.",
                 file=err_stream,
             )
         print("\n" + _bar(), file=out_stream)

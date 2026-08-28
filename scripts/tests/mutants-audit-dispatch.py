@@ -89,16 +89,24 @@ SURVIVES = "SURVIVES"
 # Mutations. Each takes the script source and returns it changed, or raises.
 # --------------------------------------------------------------------------- #
 
-def drop_clause(cid):
+def drop_entry(kind, cid):
+    """Delete a whole `Clause(...)` / `Directive(...)` entry from its tuple."""
     def f(t):
         pat = re.compile(
-            r"    Clause\(\n        \"" + re.escape(cid) + r"\",\n(?:.*?\n)*?    \),\n"
+            r"    " + kind + r"\(\n        \"" + re.escape(cid)
+            + r"\",\n(?:.*?\n)*?    \),\n"
         )
         new, n = pat.subn("", t, count=1)
         if n != 1:
-            raise AssertionError(f"clause {cid!r} not found in its expected shape")
+            raise AssertionError(
+                f"{kind.lower()} {cid!r} not found in its expected shape"
+            )
         return new
     return f
+
+
+def drop_clause(cid):
+    return drop_entry("Clause", cid)
 
 
 def _swap(t, old, new):
@@ -193,10 +201,14 @@ def the_warning_blocks(t):
 # Each replaces the whole `Clause(...)` entry, so the clause is still PRESENT,
 # still emitted, and still ledgered by id. Only the whole-string pin can see it.
 
-def reword_clause(cid, new_text):
+def reword_entry(kind, cid, new_text):
+    """Replace an entry's TEXT, leaving it present, ledgered by id and emitted.
+
+    Only a WHOLE-STRING pin can see this. Every presence check stays green.
+    """
     def f(t):
         pat = re.compile(
-            r"(    Clause\(\n        \"" + re.escape(cid) + r"\",\n)"
+            r"(    " + kind + r"\(\n        \"" + re.escape(cid) + r"\",\n)"
             r"(?:.*?\n)*?(    \),\n)"
         )
         new, n = pat.subn(
@@ -204,9 +216,15 @@ def reword_clause(cid, new_text):
             t, count=1,
         )
         if n != 1:
-            raise AssertionError(f"clause {cid!r} not found in its expected shape")
+            raise AssertionError(
+                f"{kind.lower()} {cid!r} not found in its expected shape"
+            )
         return new
     return f
+
+
+def reword_clause(cid, new_text):
+    return reword_entry("Clause", cid, new_text)
 
 
 # 🔴 The SURVIVES control. Whitespace inside a clause changes; the instruction
@@ -232,7 +250,12 @@ def ledger_ignores_the_head_check(t):
 
 
 def range_ignores_the_head_check(t):
-    return _swap(t, "    if hc is not None and hc.ok:", "    if True:")
+    # 🔴 RE-TARGETED in round 3, and the reason is the one C3 records: the
+    # branch became `elif` when the degenerate-self-range case was inserted
+    # ahead of it, and this row immediately reported MUTATION DID NOT APPLY.
+    # Without that assert it would have scored as "the guard held" — the most
+    # flattering possible wrong answer.
+    return _swap(t, "    elif hc is not None and hc.ok:", "    elif True:")
 
 
 def emit_claims_uses_the_local_head(t):
@@ -367,6 +390,94 @@ def the_refusal_drops_the_comment_kinds_note(t):
         t,
         '            "  ⚠ `gh pr view --json comments` returns ISSUE comments only. A "',
         '            "  ⚠ A "',
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 N1-N7 — the round-3 findings, one mutant per site.
+# --------------------------------------------------------------------------- #
+# N1 restores the shipped defect outright: `audited=` meant `<to>` to the
+# WRITER and `<to>` to the READER, so `<to>..HEAD` had HEAD on both ends and the
+# delta range was EMPTY BY CONSTRUCTION. N3 is its mirror image — the "one
+# anchor for everything" simplification, which is wrong in the other direction
+# and would NOT show up as an empty range, only as a superset.
+
+def range_anchor_reads_the_audited_tip(t):
+    return _swap(
+        t,
+        "    return block.audited_from or block.audited_to or None",
+        "    return block.audited_to or None",
+    )
+
+
+def range_anchor_loses_the_bare_fallback(t):
+    return _swap(
+        t,
+        "    return block.audited_from or block.audited_to or None",
+        "    return block.audited_from or None",
+    )
+
+
+def emit_claims_writes_the_range_anchor(t):
+    return _swap(
+        t,
+        "    if facts.emit_from:\n"
+        '        audited = f"{facts.emit_from}..{head_sha}"\n',
+        "    if facts.prev_sha:\n"
+        '        audited = f"{facts.prev_sha}..{head_sha}"\n',
+    )
+
+
+def the_range_ignores_a_self_range(t):
+    return _swap(t, "    if anchor_is_head(facts.prev_sha, hc):", "    if False:")
+
+
+def the_ledger_ignores_a_self_range(t):
+    return _swap(t, "        if anchor_is_head(prev_sha, head_check):",
+                 "        if False:")
+
+
+def emit_claims_drops_the_self_range_warning(t):
+    return _swap(t, "        if same_commit(facts.emit_from, head_sha):",
+                 "        if False:")
+
+
+def the_empty_range_names_the_refuted_causes(t):
+    return _swap(t, "        if head_check is not None and head_check.ok:\n",
+                 "        if False:\n")
+
+
+def the_unknown_head_reason_names_both_causes(t):
+    """The THIRD false-cause site: ignore what the caller knows and list both."""
+    return _swap(
+        t,
+        "        why = no_sha_reason or (\n",
+        "        why = None or (\n",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 X1-X3 — the three verbatim instruction blocks that shipped UNPINNED.
+# --------------------------------------------------------------------------- #
+# Each of these, applied alone, left the round-2 suite fully green at 58 passed.
+# X1 and X3 preserve the fragment an existing test pins and invert the sentence
+# around it — the walkable-by-rewording shape from `claude/RULES.md`. Only the
+# whole-string DIRECTIVE_LEDGER can see them.
+
+def add_unledgered_directive(t):
+    marker = ")\n\nDIRECTIVE = {d.id: d.text for d in SECTION_DIRECTIVES}"
+    return _swap(t, marker,
+                 '    Directive("unledgered", "**A fourth instruction nobody '
+                 'reviewed.**"),\n' + marker)
+
+
+# 🔴 The SURVIVES control for the directive ledger. Whitespace changes; the
+# instruction does not. A RED here means the new pin is keyed to layout.
+def rewrap_a_directive(t):
+    return _swap(
+        t,
+        '"Also hunt for **regressions this fix round itself introduced** — the "',
+        '"Also  hunt  for **regressions this fix round itself introduced**  — the "',
     )
 
 
@@ -509,8 +620,16 @@ ROWS = [
     ("H1  the ledger ignores the head check",
      {"test_the_ledger_refuses_to_measure_a_checkout_that_is_not_the_pr"},
      ledger_ignores_the_head_check),
+    # 🔴 H2 GAINED A SECOND KILLER in round 3, and it is a real coupling rather
+    # than a row gone vague: the COULD-NOT-VERIFY branch is the ONLY place a
+    # `head_check.reason` is rendered, so a mutation that never takes that
+    # branch necessarily hides the reason text that
+    # `..._unknown_head_sha_reason_names_one_cause_not_two` reads. Recorded in
+    # the same spirit as D2 and D7 — the alternative would be to weaken that
+    # test into asserting nothing about the brief.
     ("H2  the range hands out ..HEAD regardless",
-     {"test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head"},
+     {"test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head",
+      "test_the_unknown_head_sha_reason_names_one_cause_not_two"},
      range_ignores_the_head_check),
     ("H3  --emit-claims stamps the LOCAL head",
      {"test_emit_claims_stamps_the_prs_head_not_the_local_checkouts",
@@ -561,6 +680,96 @@ ROWS = [
     ("B5  the refusal drops the comment-kinds note",
      {"test_the_refusal_says_which_comment_kinds_it_cannot_see"},
      the_refusal_drops_the_comment_kinds_note),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 N1-N7 — round 3. The two anchors, the self-range guards, and the
+    # empty-range reason that named causes `head_check` refutes.
+    # --------------------------------------------------------------------- #
+    # 🔴 N1 IS THE SHIPPED DEFECT RESTORED, and its killer set is deliberately
+    # WIDE: reading `<to>` as the delta anchor moves the range for every
+    # consumer at once, and a narrow expectation here would be the wrong
+    # claim. It is listed in full rather than trimmed to the "main" one.
+    ("N1  the range anchors on `<to>` again",
+     {"test_the_range_is_generated_from_the_previous_rounds_audited_sha",
+      "test_the_ledger_measures_from_the_tip_the_previous_round_audited",
+      "test_the_newest_claims_block_wins",
+      "test_the_range_says_head_was_verified_when_it_was",
+      "test_a_degenerate_self_range_is_reported_not_rendered_as_a_clean_diff",
+      "test_a_degenerate_self_range_is_named_by_the_ledger_too",
+      "test_a_bare_round_one_audited_sha_still_anchors_the_next_round"},
+     range_anchor_reads_the_audited_tip),
+    # The OTHER wrong fix: `audited_from` alone. A round-1 bare `audited=<sha>`
+    # then anchors nothing, and the remedy chain the delta refusal advertises
+    # dead-ends.
+    ("N2  the bare round-1 fallback is dropped",
+     {"test_a_bare_round_one_audited_sha_still_anchors_the_next_round",
+      "test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor"},
+     range_anchor_loses_the_bare_fallback),
+    # 🔴 THE MIRROR IMAGE, and the reason the two readers are separate
+    # functions: "one anchor everywhere" is wrong on the WRITER's side, and it
+    # produces a superset rather than an empty range, so nothing else notices.
+    ("N3  --emit-claims writes the RANGE anchor as `<from>`",
+     {"test_emit_claims_records_the_tip_this_round_audited_not_the_range_anchor",
+      "test_emit_claims_prints_a_block_this_scripts_own_parser_accepts"},
+     emit_claims_writes_the_range_anchor),
+    ("N4  THE RANGE renders a self-range with no banner",
+     {"test_a_degenerate_self_range_is_reported_not_rendered_as_a_clean_diff"},
+     the_range_ignores_a_self_range),
+    ("N5  the ledger calls a self-range merely empty",
+     {"test_a_degenerate_self_range_is_named_by_the_ledger_too"},
+     the_ledger_ignores_a_self_range),
+    ("N6  --emit-claims writes `X..X` in silence",
+     {"test_emit_claims_warns_when_the_block_it_writes_is_a_self_range"},
+     emit_claims_drops_the_self_range_warning),
+    ("N7  the empty-range reason names the refuted causes",
+     {"test_an_empty_range_does_not_name_a_cause_the_head_check_refutes"},
+     the_empty_range_names_the_refuted_causes),
+    ("N8  the unknown-head reason ignores what the caller knows",
+     {"test_the_unknown_head_sha_reason_names_one_cause_not_two"},
+     the_unknown_head_reason_names_both_causes),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 X1-X3 — the three unpinned verbatim blocks. Each passed a fully green
+    # 58-test suite before `SECTION_DIRECTIVES` existed.
+    # --------------------------------------------------------------------- #
+    # 🔴 X1 KEEPS the fragment `test_the_brief_carries_the_claims_...` pins
+    # ("never WHY IT IS CORRECT") and inverts the sentence around it into the
+    # framed audit the module's headline rule forbids. Any other killer would
+    # mean some test is reading this text for something it does not own.
+    ("X1  claims-framing inverted into 'take them as established'",
+     {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
+     reword_entry(
+         "Directive", "claims-framing",
+         "🔴 This is WHAT WAS CLAIMED, never WHY IT IS CORRECT. The fix round "
+         "already verified each of these, so take them as established unless "
+         "something obvious contradicts one.")),
+    ("X2  the delta-regressions instruction deleted outright",
+     {"test_the_section_directive_ledger_is_pinned_two_way",
+      "test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
+     drop_entry("Directive", "delta-regressions")),
+    # 🔴 X3 KEEPS "MOVES UNDER YOU" and "NOT a finding" — both pinned by
+    # `test_the_shared_checkout_state_is_reported_with_the_it_moves_warning` —
+    # and inverts the operative sentence into an instruction to WRITE to the
+    # shared checkout, contradicting the `no-fetch` clause two bars later.
+    ("X3  checkout-moves inverted into 'restore anything you see move'",
+     {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
+     reword_entry(
+         "Directive", "checkout-moves",
+         "🔴 **This checkout is SHARED with other sessions and agents. It "
+         "MOVES UNDER YOU** — the branch can change, files can appear and "
+         "vanish, and commits can land mid-audit. That is NOT a finding in "
+         "itself, but it is worth reporting. Restore anything you see move.")),
+    ("XA  add an unledgered fourth directive",
+     {"test_the_section_directive_ledger_is_pinned_two_way",
+      # It ships in the constant and reaches NO brief, which is its own
+      # hazard: an instruction nobody reads is not an instruction.
+      "test_every_section_directive_is_emitted_verbatim_in_the_delta_brief"},
+     add_unledgered_directive),
+    # 🔴 The SURVIVES control for the directive ledger — the sibling of S1. A
+    # RED here means the new pin is keyed to layout, and every reflow of the
+    # source becomes a test failure.
+    ("XS  re-space a directive (instruction identical)",
+     SURVIVES, rewrap_a_directive),
 ]
 
 

@@ -45,38 +45,55 @@ was watched red at.
   an entry appearing in BOTH — a test is regression coverage or it is a guard,
   and listing it twice makes the count of what was watched red unreadable.
 
-🔴 THE ROUND-2 FIX MATRIX — one line per finding, per `claude/RULES.md`
------------------------------------------------------------------------
-Each row names the defect, the test that detects it, and the mutant that proves
-that test executes. Every "red at" cell is `abc41024`.
+🔴 THE FIX MATRIX IS `FIX_MATRIX`, NOT THIS DOCSTRING
+------------------------------------------------------
+One row per finding — the defect, the test that detects it, the EVIDENCE for
+that test (a base ref it was watched red at, or `GUARD` when its evidence is the
+mutation battery instead), and the mutants. It is a module-level constant near
+the bottom, graded against the two ledgers by
+`test_the_fix_matrix_evidence_matches_the_two_ledgers`, and that test carries an
+in-module negative control.
 
-  finding                              detector (red at abc41024)      mutant
-  1a ledger measured the OPERATOR'S    ..._ledger_refuses_to_measure_   H1
-     checkout, not the PR              a_checkout_that_is_not_the_pr
-  1b range handed out `..HEAD` from    ..._range_does_not_hand_out_a_   H2
-     the wrong tree                    head_that_is_not_the_prs_head
-  1c --emit-claims stamped the LOCAL   ..._emit_claims_stamps_the_prs_  H3
-     head as the audited sha           head_not_the_local_checkouts
-  2  toolchain gated the SHARED        ..._toolchain_gates_the_         T1, T2
-     checkout                          auditors_copy_not_the_shared_...
-  3  fork PRs inverted the cross-repo  ..._fork_pr_against_this_repo_   C3, P1
-     directive; the FIXTURE agreed     is_not_treated_as_cross_repo
-                                       + ..._prs_repo_is_read_from_the_url
-  4  missing_clauses() unreachable     ..._clause_check_runs_over_a_    K1, K2
-                                       file_that_can_actually_be_lossy
-                                       + ..._out_file_is_read_back...
-  5  five clause rewords INVERTED the  ..._each_clause_carries_the_     W1-W5
-     instruction and stayed green      instruction_its_ledger_...      (+S1)
-  6  a FALSE cause printed for a       ..._failed_cumulative_           L1
-     failed cumulative measurement     measurement_does_not_print_a_...
-  7  --round 1 --emit-claims emitted   ..._emit_claims_prints_a_block_  H4
-     a block parsing to garbage        ..._parser_accepts (rows 2, 3)
-                                       + ..._round_one_block_anchors_...
-  8  the parser dropped four shapes    ..._fence_the_parser_cannot_     B1-B5
-     silently, and truncated wrapped   read_is_reported_not_skipped
-     claims                            + 4 siblings
-  9  "repo cannot be determined"       ..._undeterminable_repo_gets_    P2
-     collapsed into SAME-REPO          its_own_branch_not_the_same...
+🔴 IT USED TO BE A PROSE TABLE HERE, UNDER THE HEADER "detector (red at
+abc41024)" and the sentence "Every 'red at' cell is `abc41024`" — AND THAT WAS
+FALSE FOR ONE ROW. Finding 5's detector,
+`test_each_clause_carries_the_instruction_its_ledger_entry_names`, is GREEN at
+`abc41024` and is not among the 24 that failed there; the constant fifty lines
+below said exactly that, and the table said the opposite. Its real evidence is
+mutants W1-W5, which is arguably stronger than a base ref — only the LABEL was
+wrong, and a reader checking whether that finding had been watched red would
+have read the table and stopped. A table nobody can check acquires this kind of
+error, so the record moved into data and the prose stops here.
+
+🔴 ROUND 3 — a second base, and it is `d9eb36a8`, not `abc41024`
+-----------------------------------------------------------------
+Round 3's audit found defects in the ROUND-2 tree: the delta range was EMPTY BY
+CONSTRUCTION (`audited=` meant `<to>` to the reader and `<to>` to the writer, so
+`<to>..HEAD` had HEAD on both ends), the empty-range reason named two causes
+`head_check` refutes, and three verbatim instruction blocks shipped unpinned
+while three inversions passed a fully green 58-test suite.
+
+`RED_AT_BASE_REFS` maps each base ref to the tests watched red there. Round 3's
+set is measured against `git show d9eb36a8:scripts/audit-dispatch.py` restored
+into a scratch tree with THIS module copied in unchanged, under
+`PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`:
+
+    14 failed, 58 passed         <- 14 node ids, 14 functions
+
+🔴 AND ONLY **NINE** OF THOSE FOURTEEN ARE IN `RED_AT_BASE_R3`. The other five
+fail with `AttributeError: module 'audit_dispatch' has no attribute
+'SECTION_DIRECTIVES'` (four) or `... 'range_anchor'` (one) — they ERROR for
+want of a name the fix introduced, which this module's opening section already
+says is not evidence of anything. Counting them would inflate the regression
+tally with five tests that never reached an assertion, so they are filed as
+guards with the mutation battery as their evidence, and the gap between 14 and
+9 is written down here rather than left for a reader to reconcile.
+
+One of the nine is labelled INSIDE the constant as weaker evidence than the
+rest (it is the does-not-fire-spuriously control for the new banner, so its red
+restates the diff). Round 3's guards are listed in
+`INVARIANT_GUARDS_AND_LEDGERS` with the reason each is a guard and the mutant
+that proves it executes.
 
 🔴 FINDING 3's PRESCRIPTION WAS WRONG ON ONE POINT, and it is recorded because
 the next person will reach for the same field: the audit said to use
@@ -101,24 +118,35 @@ rows that justified adding a pin. Each row there names the EXACT killer set and
 reports WRONG-KILLER (an expected pin did not fire) separately from EXTRA-KILLER
 (the row no longer isolates what it names).
 
-Re-run 2026-08-27 against HEAD of this branch after the round-2 fixes — **39
+Re-run 2026-08-28 against HEAD of this branch after the round-3 fixes — **52
 rows, all as expected** — each mutant applied to a COPY of
 `scripts/audit-dispatch.py` in a scratch tree (never the worktree), under
 `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`, with the unmutated copy as the
 positive control. Every mutant asserted its target string present before
 editing — a mutation that silently fails to apply reports "the guard held",
-which is the most flattering possible wrong answer. (One row did exactly that
-this round: `C3` had been written against the two-state `cross_repo` flag, and
-reported MUTATION DID NOT APPLY the moment that became three-state
-`repo_relation`. It is re-targeted; without that assert it would have scored as
-a guard holding.)
+which is the most flattering possible wrong answer. Two rows have done exactly
+that: `C3`, written against the two-state `cross_repo` flag, and `H2`, whose
+branch became an `elif` when round 3 inserted the degenerate-self-range case
+ahead of it. Both were re-targeted; without that assert each would have scored
+as a guard holding.
 
-The rows below are the pre-existing sixteen. The twenty-three added this round —
-W1-W5 and the SURVIVES control S1, H1-H4, T1-T2, P1-P2, K1-K3, L1, B1-B5 — are
-listed in the harness with their killer sets and are NOT transcribed here; the
-harness is the authority on which rows exist.
+🔴 THE ROUND-3 BATTERY CAUGHT TWO DEFECTS IN THE ROUND-3 TESTS THEMSELVES, and
+they are recorded because both are the shape this file warns about elsewhere:
+  * `N5` (delete the LEDGER's self-range branch) SURVIVED a fully green suite,
+    because the test asserting "EMPTY BY CONSTRUCTION" was reading the WHOLE
+    brief and matching THE RANGE section's banner instead. Two sections saying
+    the same phrase is not two guards. Fixed by slicing the ledger section.
+  * `H3` and `C2` came back EXTRA-KILLER against new rows that had duplicated a
+    neighbouring test's assertion (the `<to>` sha) and had parsed the FIRST
+    `audit-claims` fence in the output rather than the emitted one.
 
-  POS  unmutated copy .............................. 58 passed  <- control
+The rows below are the pre-existing sixteen. The thirty-six added since —
+W1-W5 + S1, H1-H4, T1-T2, P1-P2, K1-K3, L1, B1-B5 in round 2; N1-N8, X1-X3, XA
+and the SURVIVES control XS in round 3 — are listed in the harness with their
+killer sets and are NOT transcribed here; the harness is the authority on which
+rows exist.
+
+  POS  unmutated copy .............................. 72 passed  <- control
 
   D1   delete the `read-only` clause ............... 4 failed
   D3   delete the `stop-rule` clause ............... 4 failed
@@ -439,7 +467,7 @@ def make_runner(
     toplevel=FAKE_REPO_DIR,
     branch="feat/some-branch",
     status=" M scripts/a.py\n?? scripts/b.py\n",
-    rev_list=(0, "4\n", ""),
+    rev_list=None,
     numstat=(0, "10\t2\tscripts/foo.py\n3\t0\tscripts/tests/test_foo.py\n", ""),
     head_sha="deadbee",
     local_head=None,
@@ -452,10 +480,32 @@ def make_runner(
     what it says. Pass a different sha to model the shared checkout having moved
     (which it does, constantly), and `None` explicitly for a PR fixture with no
     `headRefOid`.
+
+    🔴 `rev_list` USED TO BE A CONSTANT `(0, "4\\n", "")`, and that made the
+    DEGENERATE self-range STRUCTURALLY INVISIBLE to this whole module: a fake
+    `git rev-list` that answers "4 commits" whatever range it is asked about
+    cannot model `<sha>..HEAD` where `<sha>` IS HEAD, so no test here could
+    observe the state that shipped in every round-3 brief. The default is now a
+    FUNCTION of the range spec — a self-range counts 0, anything else counts 4 —
+    and every request is recorded on `runner.ranges` so a test can assert WHICH
+    range was measured, not merely that something was.
+
+    Pass a tuple to pin one canned answer (the old behaviour, still used by the
+    read-rule rows), or a callable taking the range spec.
     """
     payload = dict(pr or DEFAULT_PR)
     payload["comments"] = [{"body": c} for c in comments]
     resolved_head = local_head if local_head is not None else payload.get("headRefOid")
+    ranges = []
+
+    def default_rev_list(spec):
+        """0 commits for a self-range, 4 otherwise — what real `git` would say."""
+        left, _, right = spec.partition("..")
+        if right == "HEAD":
+            right = resolved_head or ""
+        if left and right and (right.startswith(left) or left.startswith(right)):
+            return 0, "0\n", ""
+        return 0, "4\n", ""
 
     def runner(cmd, cwd=None):
         if cmd[0] == "gh":
@@ -479,11 +529,18 @@ def make_runner(
             if verb == "status":
                 return 0, status, ""
             if verb == "rev-list":
-                return rev_list
+                spec = cmd[-1]
+                ranges.append(spec)
+                if callable(rev_list):
+                    return rev_list(spec)
+                if rev_list is not None:
+                    return rev_list
+                return default_rev_list(spec)
             if verb == "log":
                 return numstat
         raise AssertionError(f"unexpected command in a hermetic test: {cmd}")
 
+    runner.ranges = ranges
     return runner
 
 
@@ -699,6 +756,157 @@ def test_control_a_clause_deleted_from_the_constant_is_detected(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 THE SECTION-DIRECTIVE LEDGER — the SECOND independent whole-string pin.
+# --------------------------------------------------------------------------- #
+# Round 2 made whole-string pinning the standard for auditor instructions and
+# then applied it to `INVARIANT_CLAUSES` ALONE. Three further blocks of
+# verbatim, non-generated instruction prose shipped in every delta brief
+# unpinned, and each of these inversions, applied on its own, left the suite
+# fully green at 58 passed:
+#
+#   render_claims    keep the pinned fragment "never WHY IT IS CORRECT" and
+#                    rewrite the operative sentence to "The fix round already
+#                    verified each of these, so take them as established
+#                    unless something obvious contradicts one."
+#   render_range     delete the whole "Also hunt for regressions this fix round
+#                    itself introduced" instruction
+#   render_checkout  invert "NOT a finding … do not chase it, and do not try to
+#                    restore it" into "a finding worth reporting. Restore
+#                    anything you see move."
+#
+# The first inverts the script's own headline 🔴 rule into the framed audit it
+# documents; the third tells the auditor to WRITE to the shared checkout, two
+# bars before the `no-fetch` clause forbids it. Exactly the W1-W5 shape — the
+# pinned fragment survives and the instruction says the opposite.
+#
+# RESTATED BY HAND, not imported, for the same reason `CLAUSE_LEDGER` is: a
+# ledger derived from the constant it audits deletes from both sides at once.
+DIRECTIVE_LEDGER = {
+    "claims-framing": (
+        "🔴 This is WHAT WAS CLAIMED, never WHY IT IS CORRECT — nothing here is "
+        "established. Three successive FRAMED audits confirmed a claim purely "
+        "because the prompt handed them the answer; one BLIND audit refuted it "
+        "in a single pass. Verify each item against the diff and state, per "
+        "item: **actually fixed / partially / not / made worse**."
+    ),
+    "delta-regressions": (
+        "Also hunt for **regressions this fix round itself introduced** — the "
+        "guard that is now too strict, the branch that is now unreachable, the "
+        "narrowed check that now rejects a legitimate case, the rule reworded "
+        "wider on one axis and narrower on another."
+    ),
+    "checkout-moves": (
+        "🔴 **This checkout is SHARED with other sessions and agents. It MOVES "
+        "UNDER YOU** — the branch can change, files can appear and vanish, and "
+        "commits can land mid-audit. That is expected and is NOT your fault "
+        "and NOT a finding. **Report what you observed moving and carry on; do "
+        "not chase it, and do not try to restore it.**"
+    ),
+}
+
+
+def test_the_section_directive_ledger_is_pinned_two_way():
+    """A directive with no ledger entry, or an entry naming none, fails.
+
+    🔴 INVARIANT GUARD. Its evidence is mutants X1-X3 and XA, not a base ref:
+    `SECTION_DIRECTIVES` does not exist at `d9eb36a8`, so "red at the base"
+    here would only restate that the fix added a constant.
+    """
+    in_script = {d.id for d in ad.SECTION_DIRECTIVES}
+    in_ledger = set(DIRECTIVE_LEDGER)
+    dropped = in_ledger - in_script
+    assert not dropped, (
+        f"\n\nsection directive(s) {sorted(dropped)} are ledgered here but no "
+        "longer exist in SECTION_DIRECTIVES. Each is verbatim auditor "
+        "instruction prose that was MEASURED to be invertible while the suite "
+        "stayed green; deleting one needs its ledger entry deleted in the same "
+        "commit, with the message saying which instruction the brief now lacks."
+    )
+    added = in_script - in_ledger
+    assert not added, (
+        f"\n\nsection directive(s) {sorted(added)} ship in the brief with no "
+        "ledger entry here — an unreviewed instruction riding into every "
+        "future dispatch. Add the WHOLE text to DIRECTIVE_LEDGER."
+    )
+
+
+def test_each_section_directive_carries_the_instruction_its_ledger_entry_names():
+    """WHOLE string, whitespace-normalised — the guard the three inversions beat.
+
+    🔴 INVARIANT GUARD; mutants X1 (claims-framing inverted) and X3
+    (checkout-moves inverted) each kill this test ALONE, with every presence
+    pin still green. XS (a pure re-space) must SURVIVE it.
+    """
+    by_id = {d.id: d.text for d in ad.SECTION_DIRECTIVES}
+    for did, pinned in DIRECTIVE_LEDGER.items():
+        assert did in by_id, f"directive {did!r} is gone; see the two-way pin"
+        assert norm(pinned) == norm(by_id[did]), (
+            f"\n\ndirective {did!r} is not, word for word, what this module "
+            f"pins.\n  pinned here :\n    {norm(pinned)!r}\n"
+            f"  in the script:\n    {norm(by_id[did])!r}\n"
+            "  🔴 A fragment guard on prose is walkable by rewording "
+            "(claude/RULES.md, spelled-guards), and these three were walked: "
+            "each inversion above passed a fully green 58-test suite. "
+            "Whitespace is normalised, so a RE-WRAP is free and only a REWORD "
+            "fails. If the reword is deliberate, update DIRECTIVE_LEDGER in "
+            "the SAME commit — that is the moment to notice you are rewriting "
+            "an instruction rather than reformatting one."
+        )
+
+
+def test_every_section_directive_is_emitted_verbatim_in_the_delta_brief():
+    """POSITIVE CONTROL: the constant is not the artifact, the brief is.
+
+    All three ship in a DELTA brief. Two of them (`claims-framing`,
+    `delta-regressions`) are deliberately absent from a round-1 brief — "this
+    fix round" is meaningless when there has not been one — which is why they
+    are directives owned by their sections rather than invariant clauses.
+    """
+    rc, out, err = run_main(["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2])
+    assert rc == 0, err
+    assert len(out) > 3_000, (
+        f"the assembled brief is only {len(out)} chars — every presence "
+        "assertion below would be a claim about nothing."
+    )
+    for directive in ad.SECTION_DIRECTIVES:
+        assert directive.text in out, (
+            f"directive {directive.id!r} is in SECTION_DIRECTIVES but does NOT "
+            "reach the emitted delta brief."
+        )
+    rc, out1, err = run_main(["900"])
+    assert rc == 0, err
+    assert ad.DIRECTIVE["checkout-moves"] in out1, (
+        "the shared-checkout warning is missing from a ROUND-1 brief — that "
+        "one is not delta-specific and the checkout moves under a first audit "
+        "exactly as much"
+    )
+
+
+def test_control_a_directive_deleted_from_the_constant_is_detected(monkeypatch):
+    """NEGATIVE CONTROL, in process: a deletion must be visible in the BRIEF.
+
+    Deleting a directive renders a loud placeholder rather than raising, so
+    that a deletion cannot take every test in the module down with it and score
+    as "killed" for the wrong reason. This proves the placeholder path is real
+    and that the instruction genuinely leaves the brief.
+    """
+    kept = tuple(d for d in ad.SECTION_DIRECTIVES if d.id != "delta-regressions")
+    monkeypatch.setattr(ad, "SECTION_DIRECTIVES", kept)
+    monkeypatch.setattr(ad, "DIRECTIVE", {d.id: d.text for d in kept})
+    rc, out, err = run_main(["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2])
+    assert rc == 0, err
+    assert norm(DIRECTIVE_LEDGER["delta-regressions"]) not in norm(out), (
+        "a directive was removed from the constant and its instruction still "
+        "reached the brief — the section is not rendered from the constant, so "
+        "the two-way pin guards nothing"
+    )
+    assert "MISSING VERBATIM BLOCK `delta-regressions`" in out, (
+        "the deletion is SILENT in the brief. A missing instruction that "
+        "leaves no mark is exactly the loss this ledger exists to prevent."
+    )
+
+
+# --------------------------------------------------------------------------- #
 # 🔴 REFUSAL 1 — a delta round with nothing to be framed on
 # --------------------------------------------------------------------------- #
 
@@ -819,8 +1027,19 @@ def test_the_newest_claims_block_wins():
     assert rc == 0, err
     assert "a newer claim" in out
     assert "an older claim" not in out
-    assert "cccc3333..HEAD" in out, (
-        "the range must be anchored at the NEWEST audited tip, not the oldest"
+    # 🔴 The NEWEST BLOCK's `<from>`, not the oldest block's and not that
+    # block's `<to>`. `<to>` (`cccc3333`) is the head round 4's fixes produced
+    # and is where the block was POSTED, so anchoring there is the self-range
+    # defect round 3 fixed — see `range_anchor`.
+    assert "bbbb2222..HEAD" in out, (
+        "the range must be anchored at the newest BLOCK's `<from>` — the tip "
+        "that round's audit read — not at the oldest block, and not at the "
+        "newest block's `<to>`, which is the head it was posted at"
+    )
+    assert "cccc3333..HEAD" not in out, (
+        "the range is anchored at the newest block's `<to>`, which is the head "
+        "the block was posted at: that range is EMPTY BY CONSTRUCTION whenever "
+        "the block sits at the fix tip, which is the normal case"
     )
 
 
@@ -1131,10 +1350,30 @@ def test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout():
 
 
 def test_the_range_is_generated_from_the_previous_rounds_audited_sha():
+    """🔴 REGRESSION. Red at `d9eb36a8`, which anchored on `<to>`.
+
+    `audited=<from>..<to>` records that the round's fix took the tree from
+    `<from>` — the tip that round's AUDIT read — to `<to>`, the head its fixes
+    produced. A delta round therefore reads everything since the
+    previously-audited tip, which is `<from>`.
+
+    Anchoring on `<to>` made the range EMPTY BY CONSTRUCTION, because
+    `--emit-claims` stamps the PR's CURRENT head into that field: the block is
+    posted at the fix tip, so `<to>` IS HEAD. Reproduced live on devrc #958 —
+    the round-2 comment carried `audited=abc41024..d9eb36a8` and `--round 3`
+    rendered ``Diff `d9eb36a8..HEAD` `` with HEAD being `d9eb36a8`.
+    """
     rc, out, err = run_main(["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2])
     assert rc == 0, err
-    assert "`bbbb2222..HEAD`" in out, (
-        "the delta range is not anchored at the sha the previous round audited"
+    assert "`aaaa1111..HEAD`" in out, (
+        "\n\nthe delta range is not anchored at the tip the previous round "
+        "AUDITED (`<from>`). The fixture's block is "
+        "`audited=aaaa1111..bbbb2222`."
+    )
+    assert "`bbbb2222..HEAD`" not in out, (
+        "\n\nthe range is anchored at `<to>` — the head the block was posted "
+        "at. Whenever the block sits at the fix tip (the normal case) that "
+        "range is empty, and THE RANGE section prints it with no warning."
     )
 
 
@@ -1192,7 +1431,7 @@ def test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head():
     the_range = out[out.index("## THE RANGE"):out.index("## WHAT WAS CLAIMED")]
     # The INSTRUCTION, not the explanation of why `..HEAD` is unsafe — that
     # sentence necessarily contains the token it is warning about.
-    assert "Diff **`bbbb2222..HEAD`**" not in the_range, (
+    assert "Diff **`aaaa1111..HEAD`**" not in the_range, (
         f"\n\nthe range still tells the auditor to diff `..HEAD` while this "
         f"checkout is on {WRONG_HEAD} and the PR's head is {FAKE_HEAD_OID}:\n"
         f"{the_range}"
@@ -1214,9 +1453,261 @@ def test_the_range_says_head_was_verified_when_it_was():
     rc, out, err = run_main(["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2])
     assert rc == 0, err
     the_range = out[out.index("## THE RANGE"):out.index("## WHAT WAS CLAIMED")]
-    assert "`bbbb2222..HEAD`" in the_range
+    assert "`aaaa1111..HEAD`" in the_range
     assert "COULD NOT VERIFY" not in the_range
+    assert "DEGENERATE RANGE" not in the_range, (
+        "the self-range banner fired on an ordinary, non-degenerate range — "
+        "the anchor `aaaa1111` is not this checkout's HEAD"
+    )
     assert FAKE_HEAD_OID in the_range and "verified at assembly time" in the_range
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 3 — `audited=` HAS ONE MEANING AND TWO READERS
+# --------------------------------------------------------------------------- #
+# `<from>` is the tip that round's AUDIT read; `<to>` is the head its FIXES
+# produced. Reading `<to>` as the delta anchor made the range EMPTY BY
+# CONSTRUCTION, because `--emit-claims` stamps the PR's current head into that
+# same field and the block is posted at the fix tip.
+
+# A checkout standing on the sha the round-2 fixture names as its `<from>`, so
+# `<from>..HEAD` is a SELF-RANGE. 40 chars, like real `rev-parse` output —
+# `same_commit` has to bridge the length difference, and a `==` would not.
+SELF_RANGE_HEAD = "aaaa1111000000000000000000000000000000ff"
+SELF_RANGE_PR = dict(DEFAULT_PR, headRefOid=SELF_RANGE_HEAD)
+
+# A PR whose head IS the round-2 fixture's `<to>` — the state the live PR was
+# in when `--round 3 --emit-claims` printed `audited=d9eb36a8..d9eb36a8`.
+AT_FIX_TIP_HEAD = "bbbb2222000000000000000000000000000000ff"
+AT_FIX_TIP_PR = dict(DEFAULT_PR, headRefOid=AT_FIX_TIP_HEAD)
+
+
+def test_the_ledger_measures_from_the_tip_the_previous_round_audited():
+    """🔴 REGRESSION. Red at `d9eb36a8`, which ran `rev-list bbbb2222..HEAD`.
+
+    The strongest form of the anchor claim: not what the brief SAYS, but which
+    range `git` was actually asked about. The ledger and THE RANGE section are
+    separate consumers of the same anchor and were wrong together.
+    """
+    runner = make_runner(comments=[CLAIMS_BLOCK_R2])
+    rc, out, err = run_main(["900", "--round", "3"], runner=runner)
+    assert rc == 0, err
+    assert runner.ranges, (
+        "no `git rev-list` ran at all, so this test proves nothing about which "
+        "range the ledger measures"
+    )
+    assert runner.ranges[0] == "aaaa1111..HEAD", (
+        f"\n\nthe ledger measured {runner.ranges[0]!r}. The fixture's block is "
+        "`audited=aaaa1111..bbbb2222`, so the tip the previous round AUDITED "
+        "is `aaaa1111`; `bbbb2222` is the head that round's fixes produced and "
+        "is where the block was posted."
+    )
+
+
+def test_a_degenerate_self_range_is_reported_not_rendered_as_a_clean_diff():
+    """🔴 REGRESSION. Red at `d9eb36a8`, which rendered it with full confidence.
+
+    THE RANGE section does not consult the ledger, so a `<sha>..HEAD` whose
+    `<sha>` IS HEAD was printed under "verified at assembly time to be PR
+    #958's head commit" followed by "Do not re-audit the whole PR". An auditor
+    obeying that diffs nothing, finds nothing, reports a clean round — and the
+    `stop-rule` clause in the same brief converts that into "the ladder ENDS".
+    Zero claims checked, and the brief reads as covered.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2], pr=SELF_RANGE_PR
+    )
+    assert rc == 0, err
+    the_range = out[out.index("## THE RANGE"):out.index("## WHAT WAS CLAIMED")]
+    assert "DEGENERATE RANGE" in the_range, (
+        f"\n\nthe brief handed out a range whose two ends are the same commit "
+        f"with no warning:\n{the_range}"
+    )
+    assert "EMPTY BY CONSTRUCTION" in the_range
+    assert "verified at assembly time" not in the_range, (
+        "the confident head-verified sentence is still printed over a range "
+        "that cannot contain anything — both were in the live round-3 brief"
+    )
+    # 🔴 The stop-rule interaction is the reason this is 🔴 and not 🟡: the
+    # banner has to say that a finding-free pass here is NOT a clean round.
+    assert "NOT evidence" in the_range and "ladder ENDS" in the_range, (
+        "the banner does not tell the auditor that an empty result here is a "
+        "fact about the RANGE, so the stop-rule clause converts it into a "
+        "clean round anyway"
+    )
+
+
+def test_a_degenerate_self_range_is_named_by_the_ledger_too():
+    """🔴 REGRESSION. Red at `d9eb36a8`: the ledger called it merely EMPTY.
+
+    Two consumers, one hazard. "The range is empty" is a real measurement about
+    the PR; "the range cannot contain anything" is a fact about the range, and
+    the responses differ — the first says wait for the fixes, the second says
+    the `audited=` field or this checkout is wrong.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2], pr=SELF_RANGE_PR
+    )
+    assert rc == 0, err
+    # 🔴 THE LEDGER SECTION ALONE. Asserting over the whole brief made this
+    # test pass on THE RANGE section's banner instead — mutant N5 (delete the
+    # ledger's self-range branch) SURVIVED a fully green suite until this slice
+    # was added. Two sections saying the same phrase is not two guards.
+    ledger = out[out.index("## THE LEDGER"):]
+    assert "COULD NOT MEASURE" in ledger
+    assert "EMPTY BY CONSTRUCTION" in ledger, (
+        "\n\nthe ledger reported a self-range as an ordinary empty one, which "
+        "sends the operator to wait for commits that would not help"
+    )
+    assert SELF_RANGE_HEAD in ledger, (
+        "the reason does not name the HEAD it collided with, so the operator "
+        "cannot see that the two ends are the same commit"
+    )
+    assert "payload lines changed THIS round" not in ledger
+
+
+def test_an_empty_range_does_not_name_a_cause_the_head_check_refutes():
+    """🔴 REGRESSION. Red at `d9eb36a8`, which named two refuted causes.
+
+    The COULD NOT MEASURE for an empty range said "Either the fixes are not
+    committed yet, or this checkout does not have them" — while `head_check`, a
+    parameter of that same function already required `ok` twelve lines above,
+    proves this checkout IS the PR's head and refutes the second outright. The
+    live round-3 brief printed "verified at assembly time to be PR #958's head
+    commit" and "this checkout does not have them" in one document.
+
+    Same false-cause shape as the cumulative reason fixed in round 2 — that fix
+    was scoped to one site rather than to the class.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "3"],
+        comments=[CLAIMS_BLOCK_R2],
+        rev_list=(0, "0\n", ""),
+    )
+    assert rc == 0, err
+    assert "COULD NOT MEASURE" in out and "is EMPTY" in out
+    assert "this checkout does not have them" not in out, (
+        "\n\nthe brief offered 'this checkout does not have them' as a cause "
+        "for an empty range in a checkout it had just VERIFIED to be the PR's "
+        "head. The reader cannot tell which half to act on."
+    )
+    assert "IS the PR's head" in out, (
+        "the surviving cause is not stated positively, so the reader is left "
+        "with a list rather than an answer"
+    )
+
+
+def test_the_unknown_head_sha_reason_names_one_cause_not_two(tmp_path):
+    """🔴 REGRESSION. Red at `d9eb36a8` — the THIRD site of the same shape.
+
+    Round 2 fixed one false-cause message and round 3's audit found a second;
+    this is the third, found by sweeping the class rather than the two named.
+    `verify_head_is_the_pr` reported "the PR's head sha is not known here
+    (`gh` was not consulted — `--claims-file` mode — or reported no
+    `headRefOid`)" — two causes with nothing to choose between them, in a
+    function whose CALLER is the thing that decided whether to consult `gh` at
+    all.
+    """
+    claims = tmp_path / "claims.md"
+    claims.write_text(CLAIMS_BLOCK_R2, encoding="utf-8")
+    rc, out, err = run_main(
+        ["900", "--round", "3", "--claims-file", str(claims)],
+        pr=dict(DEFAULT_PR, headRefOid=None),
+        local_head=WRONG_HEAD,
+    )
+    assert rc == 0, err
+    the_range = out[out.index("## THE RANGE"):out.index("## WHAT WAS CLAIMED")]
+    assert "COULD NOT VERIFY" in the_range
+    assert "`--claims-file` mode" in the_range, (
+        "the reason does not name the cause that actually applies"
+    )
+    assert "or reported no `headRefOid`" not in the_range, (
+        "\n\nthe reason still offers a second cause the caller had already "
+        "ruled out. A reader cannot tell which half to act on, and one of them "
+        "sends them to check `gh` output that was never fetched."
+    )
+
+
+def test_emit_claims_records_the_tip_this_round_audited_not_the_range_anchor():
+    """The WRITER's anchor is `<to>`, and it is NOT the reader's.
+
+    🔴 INVARIANT GUARD, green at `d9eb36a8` — recorded as such rather than
+    filed with the regressions it sits beside. The base got this right by
+    accident: it used ONE anchor for both sides, and `<to>` happens to be the
+    correct one HERE. It exists because the obvious simplification of the
+    round-3 fix — "one anchor, use `range_anchor` everywhere" — is wrong in the
+    other direction and would ship a block whose `<from>` makes the NEXT round
+    re-audit this round's predecessor as well. Mutant N3 kills it.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "3", "--emit-claims"], comments=[CLAIMS_BLOCK_R2]
+    )
+    assert rc == 0, err
+    # 🔴 `rindex`, not `index`: the EMITTED skeleton is the last fence in the
+    # output, and a brief that reproduces a comment verbatim would otherwise
+    # hand this test the INPUT block to parse. Mutant C2 fired here on `index`
+    # — a killer that says nothing about the anchor this test owns.
+    tail = out[out.rindex("```audit-claims"):]
+    blocks, malformed = ad.parse_claims_blocks([tail])
+    assert not malformed and len(blocks) == 1, f"{malformed}\n{tail}"
+    assert blocks[0].audited_from == "bbbb2222", (
+        f"\n\nthe emitted `<from>` is {blocks[0].audited_from!r}. It must be "
+        "the tip THIS round's audit read — the newest block's `<to>` — not the "
+        "sha this round diffed FROM (`aaaa1111`), which would make the next "
+        "round re-audit the previous round's fix commits as well."
+    )
+    # The `<to>` half is owned by `..._stamps_the_prs_head_not_the_local_...`
+    # and is deliberately NOT re-asserted here: duplicating it made mutant H3
+    # kill this row too, which reads as coverage of the anchor and is not.
+
+
+def test_emit_claims_warns_when_the_block_it_writes_is_a_self_range():
+    """🔴 REGRESSION. Red at `d9eb36a8`, which emitted it in silence.
+
+    Measured on the live PR: `--round 2 --emit-claims` and `--round 3
+    --emit-claims` BOTH printed `audited=d9eb36a8..d9eb36a8` with no warning of
+    any kind. A block like that records a round whose fixes changed nothing,
+    and the next round then anchors a range that is empty by construction.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "3", "--emit-claims"],
+        comments=[CLAIMS_BLOCK_R2],
+        pr=AT_FIX_TIP_PR,
+        # The LOCAL `rev-parse --short HEAD` is made to agree with the PR's
+        # head here on purpose: the warning must fire because the two ends of
+        # the range are equal, not because of WHICH sha `--emit-claims` reads.
+        # With the two disagreeing, mutant H3 (read the local head) killed this
+        # row as well, and a row that dies for someone else's reason is not
+        # evidence for this one.
+        head_sha="bbbb2222",
+    )
+    assert rc == 0, err
+    assert "SELF-RANGE" in err, (
+        "\n\n`--emit-claims` wrote `audited=bbbb2222..bbbb2222` and said "
+        f"nothing. stderr was:\n{err}"
+    )
+    assert "EMPTY BY CONSTRUCTION" in err and "do not post this block" in err
+
+
+def test_a_bare_round_one_audited_sha_still_anchors_the_next_round():
+    """The round-1 spelling has no `<from>`, and must fall back to `<to>`.
+
+    🔴 INVARIANT GUARD, green at `d9eb36a8` — the bare form was already read
+    correctly there, by the same accident. `--emit-claims` at round 1 writes
+    `audited=<sha>` with no `..`, so a fix that reached for `audited_from`
+    ALONE would leave the round-2 range with no anchor at all, breaking the
+    exact remedy chain the delta refusal advertises. Mutant N2 kills it.
+    """
+    bare_r1 = "```audit-claims round=1 audited=aaaa1111\n1. a round-1 claim\n```"
+    rc, out, err = run_main(["900", "--round", "2"], comments=[bare_r1])
+    assert rc == 0, err
+    assert "`aaaa1111..HEAD`" in out, (
+        "a bare round-1 `audited=<sha>` no longer anchors the round-2 range; "
+        f"stderr was:\n{err}"
+    )
+    assert ad.range_anchor(ad.ClaimsBlock(1, "", "aaaa1111", ["x"])) == "aaaa1111"
+    assert ad.range_anchor(ad.ClaimsBlock(2, "cc", "dd", ["x"])) == "cc"
+    assert ad.emit_anchor(ad.ClaimsBlock(2, "cc", "dd", ["x"])) == "dd"
 
 
 def test_emit_claims_stamps_the_prs_head_not_the_local_checkouts():
@@ -1713,8 +2204,15 @@ def test_a_gh_failure_is_reported_and_not_papered_over():
 # into a scratch tree with this module copied in unchanged, run under
 # `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`: **24 failed, 34 passed**
 # (24 node ids, 21 functions; three of them are parametrised rows of one).
-RED_AT_BASE_REF = "abc41024"
-RED_AT_BASE: frozenset[str] = frozenset({
+#
+# 🔴 THERE ARE NOW TWO BASES, AND ONE SHARED REF WOULD BE A LIE ABOUT BOTH.
+# Round 3's audit found defects in the ROUND-2 tree, so its regression tests
+# were watched red at `d9eb36a8`, not at `abc41024` — where several of them
+# would fail for a different reason entirely (the code they exercise did not
+# exist). "Watched red" is a claim about a SPECIFIC tree, so each set carries
+# its own, and the partition test refuses a set with no ref or a ref with no
+# set.
+RED_AT_BASE_R2: frozenset[str] = frozenset({
     "test_a_fork_pr_against_this_repo_is_not_treated_as_cross_repo",
     "test_the_prs_repo_is_read_from_the_url_not_from_the_head_repo",
     "test_an_undeterminable_repo_gets_its_own_branch_not_the_same_repo_one",
@@ -1753,6 +2251,45 @@ RED_AT_BASE: frozenset[str] = frozenset({
     "test_the_range_says_head_was_verified_when_it_was",
 })
 
+# 🔴 ROUND 3's base is the ROUND-2 TREE. Every entry here was watched to FAIL
+# against `d9eb36a8` by restoring `git show d9eb36a8:scripts/audit-dispatch.py`
+# into a scratch tree with THIS module copied in unchanged, under
+# `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`. The measured counts are in
+# the round-3 section of the module docstring.
+#
+# They are NOT listed under `abc41024`: several exercise code that round 2
+# ADDED (the head check, the read-back), so a red there would be an import-time
+# accident rather than the defect being observed.
+RED_AT_BASE_R3: frozenset[str] = frozenset({
+    "test_the_range_is_generated_from_the_previous_rounds_audited_sha",
+    # Pre-existing, and it MOVED LEDGERS this round: its anchor assertion was
+    # `cccc3333..HEAD` (the newest block's `<to>`), which is the defect. It now
+    # asserts `bbbb2222..HEAD` and observes the wrong answer at `d9eb36a8`.
+    "test_the_newest_claims_block_wins",
+    "test_the_ledger_measures_from_the_tip_the_previous_round_audited",
+    "test_a_degenerate_self_range_is_reported_not_rendered_as_a_clean_diff",
+    "test_a_degenerate_self_range_is_named_by_the_ledger_too",
+    "test_emit_claims_warns_when_the_block_it_writes_is_a_self_range",
+    "test_an_empty_range_does_not_name_a_cause_the_head_check_refutes",
+    "test_the_unknown_head_sha_reason_names_one_cause_not_two",
+    # 🔴 ONE WEAKER ENTRY, said rather than left to assume: this is the
+    # does-not-fire-spuriously control for the degenerate-range banner, and it
+    # is red at `d9eb36a8` because the anchor it asserts (`aaaa1111..HEAD`)
+    # is the FIXED one. Its red is a restatement of the diff, not a defect
+    # observed — the same class as the three flagged under `abc41024`.
+    "test_the_range_says_head_was_verified_when_it_was",
+})
+
+# 🔴 ONE TEST, TWO BASES. `..._range_says_head_was_verified_when_it_was` is red
+# at both refs for two DIFFERENT reasons, so it is listed under both — which is
+# why the per-ref sets may overlap each other even though neither may overlap
+# the guard ledger.
+RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
+    "abc41024": RED_AT_BASE_R2,
+    "d9eb36a8": RED_AT_BASE_R3,
+}
+RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
+
 INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     "test_the_invariant_clause_ledger_is_pinned_two_way",
     # 🔴 GREEN at `abc41024`, MEASURED — and it is the guard for finding 5, so
@@ -1772,12 +2309,10 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     "test_the_refusal_fires_for_a_malformed_block_and_says_which_way",
     "test_a_first_round_needs_no_claims_block",
     "test_the_brief_carries_the_claims_and_not_the_reasoning_around_them",
-    "test_the_newest_claims_block_wins",
     "test_cross_repo_tells_the_agent_to_worktree_the_prs_repo_itself",
     "test_same_repo_recommends_the_isolation_flag_and_does_not_hand_roll",
     "test_the_cross_repo_decision_comes_from_the_repos_not_from_prose",
     "test_the_shared_checkout_state_is_reported_with_the_it_moves_warning",
-    "test_the_range_is_generated_from_the_previous_rounds_audited_sha",
     "test_the_ledger_shows_the_files_and_refuses_to_classify_them",
     "test_the_ledger_refuses_a_failed_command_rather_than_printing_zero",
     "test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor",
@@ -1789,7 +2324,234 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     "test_nothing_here_spawns_a_subprocess",
     "test_a_gh_failure_is_reported_and_not_papered_over",
     "test_the_two_ledgers_partition_this_modules_tests",
+    # ------------------------------------------------------------------- #
+    # Round 3's guards. None is red at `d9eb36a8` and each says why in its
+    # own docstring; their evidence is the mutation battery.
+    # ------------------------------------------------------------------- #
+    # GREEN at `d9eb36a8` by ACCIDENT: the base used one anchor for both the
+    # reader and the writer, and `<to>` happens to be right on the writer's
+    # side. This pins that, so the obvious "one anchor everywhere"
+    # simplification of the round-3 fix goes red. Mutant N3.
+    "test_emit_claims_records_the_tip_this_round_audited_not_the_range_anchor",
+    # The BEHAVIOURAL half is green at `d9eb36a8` — the bare round-1 spelling
+    # was already read correctly there. The test does fail at that ref, but
+    # with `AttributeError: ... no attribute 'range_anchor'` from the unit
+    # assertions at its foot, which is not the defect being observed. Mutant
+    # N2 (drop the bare fallback) is what proves it executes.
+    "test_a_bare_round_one_audited_sha_still_anchors_the_next_round",
+    # 🔴 These four DO fail at `d9eb36a8` — with `AttributeError: module
+    # 'audit_dispatch' has no attribute 'SECTION_DIRECTIVES'`. That is an
+    # error for want of a name the fix introduced, not the defect being
+    # observed, so they are NOT counted as regression coverage. Mutants X1-X3,
+    # XA, and the XS survives-control are their evidence.
+    "test_the_section_directive_ledger_is_pinned_two_way",
+    "test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
+    "test_every_section_directive_is_emitted_verbatim_in_the_delta_brief",
+    "test_control_a_directive_deleted_from_the_constant_is_detected",
+    # Guards over THIS module's own bookkeeping. The mutation battery mutates
+    # the SCRIPT, never this module, so it cannot reach them — their evidence
+    # is the in-module negative control beside each.
+    "test_the_fix_matrix_evidence_matches_the_two_ledgers",
+    "test_control_the_fix_matrix_checker_catches_a_wrong_evidence_label",
 })
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE FIX MATRIX AS DATA — because the prose version carried a FALSE LABEL.
+# --------------------------------------------------------------------------- #
+# Round 2's matrix lived in the module docstring under the column header
+# "detector (red at abc41024)" and the sentence "Every 'red at' cell is
+# `abc41024`". Row 5's detector —
+# `test_each_clause_carries_the_instruction_its_ledger_entry_names` — is GREEN
+# at that ref and is not among the 24 that failed there; the constant fifty
+# lines below said so, and the table said the opposite. Its real evidence is
+# mutants W1-W5, which is arguably stronger; only the LABEL was wrong.
+#
+# A table nobody can check acquires exactly this kind of error, so the matrix
+# is now DATA and the two ledgers are what grade it. Prose may still describe
+# it; prose may no longer be the record.
+#
+#   (finding, detector test name, evidence, mutants)
+#
+# `evidence` is `RED@<ref>` — the test was watched to FAIL at that tree — or
+# `GUARD`, meaning its evidence is the mutation battery and NOT a base ref.
+FIX_MATRIX = (
+    ("r2/1a ledger measured the OPERATOR'S checkout, not the PR",
+     "test_the_ledger_refuses_to_measure_a_checkout_that_is_not_the_pr",
+     "RED@abc41024", "H1"),
+    ("r2/1b range handed out `..HEAD` from the wrong tree",
+     "test_the_range_does_not_hand_out_a_head_that_is_not_the_prs_head",
+     "RED@abc41024", "H2"),
+    ("r2/1c --emit-claims stamped the LOCAL head as the audited sha",
+     "test_emit_claims_stamps_the_prs_head_not_the_local_checkouts",
+     "RED@abc41024", "H3"),
+    ("r2/2  toolchain gated the SHARED checkout",
+     "test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout",
+     "RED@abc41024", "T1, T2"),
+    ("r2/3  fork PRs inverted the cross-repo directive",
+     "test_a_fork_pr_against_this_repo_is_not_treated_as_cross_repo",
+     "RED@abc41024", "C3, P1"),
+    ("r2/3b the PR's repo was read from the HEAD repo",
+     "test_the_prs_repo_is_read_from_the_url_not_from_the_head_repo",
+     "RED@abc41024", "P1"),
+    ("r2/4  missing_clauses() was unreachable",
+     "test_the_clause_check_runs_over_a_file_that_can_actually_be_lossy",
+     "RED@abc41024", "K1"),
+    ("r2/4b the --out file was never read back",
+     "test_the_out_file_is_read_back_and_checked",
+     "RED@abc41024", "K2"),
+    # 🔴 THE ROW THE PROSE TABLE MISLABELLED. Green at `abc41024`, measured.
+    ("r2/5  five clause rewords INVERTED the instruction and stayed green",
+     "test_each_clause_carries_the_instruction_its_ledger_entry_names",
+     "GUARD", "W1-W5, R1"),
+    ("r2/6  a FALSE cause printed for a failed cumulative measurement",
+     "test_a_failed_cumulative_measurement_does_not_print_a_false_cause",
+     "RED@abc41024", "L1"),
+    ("r2/7  --round 1 --emit-claims emitted a block parsing to garbage",
+     "test_emit_claims_prints_a_block_this_scripts_own_parser_accepts",
+     "RED@abc41024", "H4"),
+    ("r2/8  the parser dropped four fence shapes silently",
+     "test_a_fence_the_parser_cannot_read_is_reported_not_skipped",
+     "RED@abc41024", "B1"),
+    ("r2/9  'repo cannot be determined' collapsed into SAME-REPO",
+     "test_an_undeterminable_repo_gets_its_own_branch_not_the_same_repo_one",
+     "RED@abc41024", "P2"),
+
+    ("r3/1a the delta range anchored on `<to>`, so it was empty by construction",
+     "test_the_range_is_generated_from_the_previous_rounds_audited_sha",
+     "RED@d9eb36a8", "N1"),
+    ("r3/1a' the same, over the NEWEST of several blocks",
+     "test_the_newest_claims_block_wins",
+     "RED@d9eb36a8", "N1"),
+    ("r3/1b the LEDGER measured that same wrong range",
+     "test_the_ledger_measures_from_the_tip_the_previous_round_audited",
+     "RED@d9eb36a8", "N1"),
+    ("r3/1c THE RANGE rendered a self-range with full confidence",
+     "test_a_degenerate_self_range_is_reported_not_rendered_as_a_clean_diff",
+     "RED@d9eb36a8", "N4"),
+    ("r3/1d the ledger called a self-range an ordinary empty one",
+     "test_a_degenerate_self_range_is_named_by_the_ledger_too",
+     "RED@d9eb36a8", "N5"),
+    ("r3/1e --emit-claims wrote `X..X` in silence",
+     "test_emit_claims_warns_when_the_block_it_writes_is_a_self_range",
+     "RED@d9eb36a8", "N6"),
+    ("r3/1f the WRITER's anchor must stay `<to>` under the fix",
+     "test_emit_claims_records_the_tip_this_round_audited_not_the_range_anchor",
+     "GUARD", "N3"),
+    ("r3/1g a bare round-1 `audited=<sha>` must still anchor round 2",
+     "test_a_bare_round_one_audited_sha_still_anchors_the_next_round",
+     "GUARD", "N2"),
+    ("r3/2  the empty-range reason named two causes head_check refutes",
+     "test_an_empty_range_does_not_name_a_cause_the_head_check_refutes",
+     "RED@d9eb36a8", "N7"),
+    ("r3/2' the same shape at a THIRD site, found by sweeping the class",
+     "test_the_unknown_head_sha_reason_names_one_cause_not_two",
+     "RED@d9eb36a8", "N8"),
+    ("r3/3  three verbatim instruction blocks shipped unpinned",
+     "test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
+     "GUARD", "X1, X3 (XA, XS controls)"),
+    ("r3/4  a 'watched RED at abc41024' label was wrong",
+     "test_the_fix_matrix_evidence_matches_the_two_ledgers",
+     "GUARD", "its own in-module negative control"),
+)
+
+# A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
+# grades every row correctly and asserts nothing.
+MIN_FIX_MATRIX_ROWS = 20
+
+
+def fix_matrix_problems(rows, red_by_ref, guards, known_tests):
+    """-> a list of complaints. Shared by the guard and its negative control.
+
+    Kept as a function precisely so the control can drive the SAME code with a
+    deliberately wrong row: a checker whose only caller is the happy path is a
+    checker nobody has watched go red.
+    """
+    problems = []
+    for finding, detector, evidence, _mutants in rows:
+        if detector not in known_tests:
+            problems.append(f"{finding}: names no test called {detector!r}")
+            continue
+        if evidence.startswith("RED@"):
+            ref = evidence[len("RED@"):]
+            if ref not in red_by_ref:
+                problems.append(f"{finding}: unknown base ref {ref!r}")
+            elif detector not in red_by_ref[ref]:
+                problems.append(
+                    f"{finding}: claims {detector} was watched RED at {ref}, "
+                    f"but it is not in that ref's RED_AT_BASE set"
+                )
+        elif evidence == "GUARD":
+            if detector not in guards:
+                problems.append(
+                    f"{finding}: labelled GUARD but {detector} is filed as "
+                    "regression coverage"
+                )
+        else:
+            problems.append(f"{finding}: evidence {evidence!r} is neither "
+                            "RED@<ref> nor GUARD")
+    return problems
+
+
+def test_the_fix_matrix_evidence_matches_the_two_ledgers():
+    """🔴 Every detector's EVIDENCE LABEL is graded by the ledgers, not by prose.
+
+    🔴 INVARIANT GUARD. The mutation battery mutates `scripts/audit-dispatch.py`
+    and never this module, so it cannot reach this test; its evidence is
+    `test_control_the_fix_matrix_checker_catches_a_wrong_evidence_label`, which
+    drives the same function with a row that must be rejected.
+
+    This exists because the prose table said `RED@abc41024` for a detector that
+    is GREEN there, fifty lines above a constant that said so. A reader
+    checking whether finding 5 had been watched red would have read the table
+    and stopped.
+    """
+    assert len(FIX_MATRIX) >= MIN_FIX_MATRIX_ROWS, (
+        f"the fix matrix has {len(FIX_MATRIX)} rows (floor "
+        f"{MIN_FIX_MATRIX_ROWS}). A matrix that shrank grades every remaining "
+        "row correctly and asserts nothing about the findings it dropped."
+    )
+    here = {n for n in globals() if n.startswith("test_")}
+    problems = fix_matrix_problems(
+        FIX_MATRIX, RED_AT_BASE_REFS, INVARIANT_GUARDS_AND_LEDGERS, here
+    )
+    assert not problems, (
+        "\n\nthe fix matrix claims evidence the ledgers do not support:\n  "
+        + "\n  ".join(problems)
+        + "\n  A 'watched RED at <sha>' label is a measurement claim. Move the "
+          "row to GUARD, or add the detector to that ref's RED_AT_BASE set "
+          "AFTER watching it fail there."
+    )
+
+
+def test_control_the_fix_matrix_checker_catches_a_wrong_evidence_label():
+    """NEGATIVE CONTROL: the checker above must be able to go red.
+
+    Four deliberately wrong rows, one per rejection path. A checker that
+    returns an empty list for these is wired to nothing, and the guard beside
+    it would pass for any matrix at all.
+    """
+    guards = frozenset({"test_a_guard"})
+    red = {"aaaa1111": frozenset({"test_a_regression"})}
+    known = {"test_a_guard", "test_a_regression"}
+    bad = (
+        ("mislabelled guard", "test_a_guard", "RED@aaaa1111", "-"),
+        ("mislabelled regression", "test_a_regression", "GUARD", "-"),
+        ("unknown ref", "test_a_regression", "RED@ffff9999", "-"),
+        ("nonexistent detector", "test_vanished", "GUARD", "-"),
+        ("nonsense evidence", "test_a_guard", "probably fine", "-"),
+    )
+    problems = fix_matrix_problems(bad, red, guards, known)
+    assert len(problems) == len(bad), (
+        f"the checker reported {len(problems)} problem(s) for {len(bad)} "
+        f"deliberately wrong rows: {problems}"
+    )
+    # And it must NOT fire on correct rows — a checker that rejects everything
+    # is as useless as one that accepts everything.
+    good = (
+        ("ok guard", "test_a_guard", "GUARD", "-"),
+        ("ok regression", "test_a_regression", "RED@aaaa1111", "-"),
+    )
+    assert fix_matrix_problems(good, red, guards, known) == []
 
 
 def test_the_two_ledgers_partition_this_modules_tests():
@@ -1801,11 +2563,16 @@ def test_the_two_ledgers_partition_this_modules_tests():
     growing an unlisted test is asserting coverage nobody checked.
     """
     here = {n for n in globals() if n.startswith("test_")}
-    assert RED_AT_BASE_REF, (
+    assert RED_AT_BASE_REFS, (
         "RED_AT_BASE is non-empty, so it must name the base ref every one of "
         "its tests was watched to FAIL at. 'Watched red' is a claim about a "
         "specific tree; without the ref it is not a claim at all."
     )
+    for ref, names in RED_AT_BASE_REFS.items():
+        assert ref and names, (
+            f"base ref {ref!r} maps to {sorted(names)} — a ref with no tests, "
+            "or a set with no ref, is half a claim. Delete it or fill it in."
+        )
     overlap = RED_AT_BASE & INVARIANT_GUARDS_AND_LEDGERS
     assert not overlap, (
         f"tests in BOTH ledgers: {sorted(overlap)}. A test is regression "
