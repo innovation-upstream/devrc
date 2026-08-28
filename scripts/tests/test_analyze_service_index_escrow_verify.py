@@ -29,6 +29,7 @@ where `bw` IS installed, and vice versa.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -3771,26 +3772,15 @@ def test_a_DIFFERENT_key_is_PUBKEY_MISMATCH_and_REFUSES_to_advise_re_escrowing(
     exc = ei.value
     assert exc.token == "PUBKEY-MISMATCH" and exc.exit_code == 36
 
-    msg = exc.verdict
-    refusal = ("🔴 DO NOT RE-ESCROW OR ROTATE ON THIS ALONE — CHECK THE "
-               "PIPELINE FIRST.")
-    overwrite = (
-        "WHAT RE-ESCROWING WOULD OVERWRITE: the Secure Note is the ONLY "
-        "off-machine copy of the identity every artifact in the bucket is "
-        "encrypted to. Overwriting it from a machine holding a DIFFERENT key "
-        "destroys the escrow and every backup with it")
-    assert refusal in msg
-    assert overwrite in msg
-    # 🔴 ORDER, not merely presence: the refusal must be READ FIRST. The
-    # BYTES-DIFFER-MATERIALLY arm carries the same rule for the same reason.
-    assert msg.index(refusal) < msg.index(overwrite)
-    # The measured false-mismatch pipeline is named, with the empty-input tell.
-    assert "printf '%s' \"$out\" | sha256sum" in msg
-    assert EV.EMPTY_SHA256_PREFIX in msg
-    # Both digests are PUBLIC halves; the message says so rather than leaving a
-    # reader to wonder whether a secret just got printed.
-    assert ("Both values are PUBLIC halves; no key material is disclosed by "
-            "either.") in msg
+    # 🔴 THE WHOLE NORMALISED STRING, like its three siblings. Substrings plus
+    # ordering — what this test used to assert — cannot see an APPEND, and an
+    # appended "Then re-escrow the note from this host…" is the last thing the
+    # operator reads. Measured: that mutant survived all 240 tests.
+    expected_sha = _sha_via_documented_shell(other)
+    got_sha = _sha_via_documented_shell(escrowed)
+    assert got_sha != expected_sha, "the fixture keys must disagree"
+    assert _norm(exc.verdict) == _norm(
+        _ADVISORY_36.format(got=got_sha, expected=expected_sha))
 
 
 def test_a_pin_differing_only_in_its_LAST_character_is_a_MISMATCH(tmp_path):
@@ -3943,6 +3933,43 @@ _ADVISORY_37 = (
     "may be perfectly good. If you see that value anywhere, the command did not "
     "run. Do NOT re-escrow and do NOT rotate on this.")
 
+# 🔴 CODE 36 WAS THE ONE THE LEDGER CERTIFIED AND NOBODY PINNED.
+# Round 3 measured it: appending "Then re-escrow the note from this host to
+# bring the vault copy back into agreement." to the END of this verdict — the
+# last thing an operator reads, directly contradicting the message's own
+# "🔴 DO NOT RE-ESCROW OR ROTATE ON THIS ALONE" — passed all 240 tests. Its test
+# asserted substrings plus ordering and carried no forbidden-literal guard at
+# all, so it was round 2's "an append walks a spelled guard" finding still live,
+# on the single message this delta had newly declared covered.
+_ADVISORY_36 = (
+    "the escrowed note IS a valid age identity, and its public half is NOT the "
+    "one you pinned: derived {got}, expected {expected} (the first 16 hex "
+    "characters of sha256 over `age-keygen -y`'s stdout). Both values are "
+    "PUBLIC halves; no key material is disclosed by either. 🔴 DO NOT RE-ESCROW "
+    "OR ROTATE ON THIS ALONE — CHECK THE PIPELINE FIRST. A wrong pipeline "
+    "produces a FALSE MISMATCH ON A GOOD KEY: MEASURED 2026-08-27, "
+    "`printf '%s' \"$out\" | sha256sum` drops the trailing newline age-keygen "
+    "emits and yields a different digest, and e3b0c44298fc1c14… is sha256 of "
+    "EMPTY INPUT, i.e. the command never ran. Re-derive the expectation from a "
+    "key you KNOW is right and watch it reproduce before believing this. WHAT "
+    "RE-ESCROWING WOULD OVERWRITE: the Secure Note is the ONLY off-machine copy "
+    "of the identity every artifact in the bucket is encrypted to. Overwriting "
+    "it from a machine holding a DIFFERENT key destroys the escrow and every "
+    "backup with it — and that is not hypothetical here: on 2026-08-25 an "
+    "exported SOPS_AGE_KEY_FILE pointed this subsystem's comparison at an "
+    "unrelated key and the advice given was to re-escrow. Confirm which "
+    "identity the bucket's artifacts actually open with — `restore-verify.py`, "
+    "or this script's --decrypt-check — before touching the note.")
+
+# 🔴 THE LEDGER READS THIS, so the expected raise-site count is DERIVED from the
+# pins that actually exist rather than hand-typed beside them. Bumping a number
+# without adding a pin used to pass green while the docstring claimed otherwise.
+_WHOLE_PINNED_ADVISORIES: dict[str, tuple[str, ...]] = {
+    "NOT-AN-AGE-IDENTITY": (_ADVISORY_35_RC_NONZERO, _ADVISORY_35_NOT_A_RECIPIENT),
+    "PUBKEY-DERIVATION-EMPTY": (_ADVISORY_37,),
+    "PUBKEY-MISMATCH": (_ADVISORY_36,),
+}
+
 
 def test_BOTH_NOT_AN_AGE_IDENTITY_arms_pin_their_WHOLE_advisory(tmp_path,
                                                                 monkeypatch):
@@ -3974,10 +4001,10 @@ def test_BOTH_NOT_AN_AGE_IDENTITY_arms_pin_their_WHOLE_advisory(tmp_path,
     assert ei2.value.exit_code == 35
     assert _norm(ei2.value.verdict) == _norm(
         _ADVISORY_35_NOT_A_RECIPIENT.format(n=len(stdout)))
-
-    # 🔴 THE TWO ARMS ARE DIFFERENT MESSAGES — a pin that accidentally matched
-    # both would be pinning neither.
-    assert ei.value.verdict != ei2.value.verdict
+    # (That the two arms are DIFFERENT messages is asserted where it can
+    # actually fail — on the pin CONSTANTS, in the ledger test below. Asserting
+    # it on the rendered verdicts here could never fire: both are already
+    # pinned to distinct constants by equality two lines up.)
 
 
 def test_the_PUBKEY_DERIVATION_EMPTY_advisory_is_pinned_WHOLE(
@@ -3995,32 +4022,144 @@ def test_the_PUBKEY_DERIVATION_EMPTY_advisory_is_pinned_WHOLE(
     assert ei.value.token == "PUBKEY-DERIVATION-EMPTY"
     assert ei.value.exit_code == 37
     assert _norm(ei.value.verdict) == _norm(_ADVISORY_37)
-    # The empty-input tell is a CONSTANT the module owns, not a literal typed
-    # twice: if it ever changes, the pin above must be re-derived, not patched.
-    assert EV.EMPTY_SHA256_PREFIX in ei.value.verdict
+    # 🔴 NO `assert EV.EMPTY_SHA256_PREFIX in verdict` HERE. It read as an extra
+    # guarantee and could never fire: `_ADVISORY_37` hardcodes the same literal,
+    # so the whole-string pin above fails first on any change to it. Its comment
+    # claimed the value was "a constant the module owns, not a literal typed
+    # twice" — it IS typed twice. The constant's own correctness is asserted
+    # where it CAN fail, in
+    # `test_the_EMPTY_SHA_CONSTANT_really_is_sha256_of_NOTHING`.
+
+
+def _raise_sites_by_token(src: str) -> tuple[dict[str, int], list[int]]:
+    """`({token: raise-site count}, [unresolvable line numbers])`, by AST WALK.
+
+    🔴 AN AST WALK, NOT A `str.count`. The predecessor counted the literal
+    `"<TOKEN>",` in the source, and an audit measured it wrong in BOTH
+    directions:
+
+      * BLIND to 8 of 10 real spellings — a third raise site written with
+        SINGLE quotes survived, and so did one holding the token in a module
+        CONSTANT. Also invisible: a space before the comma, the comma on the
+        next line, a table lookup, concatenation, an f-string, the `token=`
+        kwarg, an `*args` splat. A predicate that misses most spellings cannot
+        do the one job this ledger exists for — catching a raise site nobody
+        counted.
+      * FALSE-ACCUSING the other way — a pure PROSE COMMENT containing the
+        token made it report "raised from 3 place(s)". A docs-only edit broke a
+        raise-site test, and the ledger's own comment claimed prose was not
+        counted.
+
+    So the token is resolved from the AST: a string literal, or a `Name` bound
+    to a module-level string constant. 🔴 A token this CANNOT resolve is
+    returned as unresolvable and the caller FAILS on it — "cannot say" must
+    never render as compliant, the same stance `backup.py`'s git-subprocess
+    walker takes.
+    """
+    tree = ast.parse(src)
+    consts: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                and isinstance(node.value.value, str):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    consts[tgt.id] = node.value.value
+
+    counts: dict[str, int] = {}
+    unresolved: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
+            continue
+        fn = node.exc.func
+        fname = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
+        if fname != "EscrowError":
+            continue
+        tok = node.exc.args[0] if node.exc.args else None
+        for kw in node.exc.keywords:
+            if kw.arg == "token":
+                tok = kw.value
+        if isinstance(tok, ast.Constant) and isinstance(tok.value, str):
+            counts[tok.value] = counts.get(tok.value, 0) + 1
+        elif isinstance(tok, ast.Name) and tok.id in consts:
+            counts[consts[tok.id]] = counts.get(consts[tok.id], 0) + 1
+        else:
+            unresolved.append(node.lineno)
+    return counts, unresolved
+
+
+def test_the_raise_site_WALKER_sees_the_spellings_a_substring_count_MISSED():
+    """POSITIVE + NEGATIVE CONTROL FOR THE LEDGER'S OWN INSTRUMENT.
+
+    A walker wired to nothing returns `{}` and the ledger below passes over an
+    empty world. So: it finds the real module's sites; it resolves the two
+    spellings that defeated the substring count; it does NOT count prose; and it
+    REFUSES a shape it cannot read.
+    """
+    real, unresolved = _raise_sites_by_token(SCRIPT.read_text(encoding="utf-8"))
+    assert not unresolved
+    assert sum(real.values()) >= 10, real
+
+    single = 'raise EscrowError(\n    \'NOT-AN-AGE-IDENTITY\',\n    "x")\n'
+    assert _raise_sites_by_token(single)[0] == {"NOT-AN-AGE-IDENTITY": 1}
+
+    held = ('TOK = "NOT-AN-AGE-IDENTITY"\n'
+            'raise EscrowError(TOK, "x")\n')
+    assert _raise_sites_by_token(held)[0] == {"NOT-AN-AGE-IDENTITY": 1}
+
+    kwarg = 'raise EscrowError(token="PUBKEY-MISMATCH", verdict="x")\n'
+    assert _raise_sites_by_token(kwarg)[0] == {"PUBKEY-MISMATCH": 1}
+
+    prose = '# a comment mentioning "NOT-AN-AGE-IDENTITY", at length\nx = 1\n'
+    assert _raise_sites_by_token(prose)[0] == {}, "prose was counted as a raise"
+
+    table = 'EXIT_CODES = {"NOT-AN-AGE-IDENTITY": 35}\n'
+    assert _raise_sites_by_token(table)[0] == {}, "a table entry was counted"
+
+    splat = 'args = ()\nraise EscrowError(*args)\n'
+    assert _raise_sites_by_token(splat)[1], "an unreadable shape was let through"
 
 
 def test_EVERY_raise_site_of_the_pubkey_codes_is_COVERED_by_a_whole_pin():
     """🔴 A LEDGER OVER THE RAISE SITES, failing when the set GROWS or SHRINKS.
 
     The round-2 finding was not that a message was wrong — it was that a SECOND
-    raise site existed and nobody had counted them. A test that pins the arms it
-    knows about cannot see a third one being added. So: count the raise sites of
-    each destructive-advice token in the source, and require the number this
-    file pins whole to match.
+    raise site existed and nobody had counted them, and a test pinning the arms
+    it knows about cannot see a third being added.
+
+    🔴 THE EXPECTED COUNT IS DERIVED FROM THE PINS THAT EXIST, never typed
+    beside them. Round 3 found the hand-typed version certifying a whole-pin for
+    `PUBKEY-MISMATCH` that did not exist — so the ledger read as coverage while
+    that message was the one message an append could walk.
     """
-    src = SCRIPT.read_text(encoding="utf-8")
-    expected = {"NOT-AN-AGE-IDENTITY": 2, "PUBKEY-DERIVATION-EMPTY": 1,
-                "PUBKEY-MISMATCH": 1}
-    for token, count in expected.items():
-        # The raise form is `EscrowError(\n  "<TOKEN>",` — the table entry
-        # (`"<TOKEN>": 35,`) and prose mentions must not be counted.
-        actual = src.count(f'"{token}",')
-        assert actual == count, (
-            f"{token} is raised from {actual} place(s), but this file pins "
-            f"{count} whole-message advisory/advisories for it. A new raise "
-            f"site needs its own WHOLE pin in the same commit — that is exactly "
-            f"the gap round 2 found: one code, two arms, one pinned.")
+    counts, unresolved = _raise_sites_by_token(SCRIPT.read_text(encoding="utf-8"))
+    assert not unresolved, (
+        f"EscrowError raised at line(s) {unresolved} with a token this walker "
+        f"cannot resolve. It refuses to read that as compliant — spell the "
+        f"token as a literal or a module-level constant, or widen "
+        f"`_raise_sites_by_token` in the same commit.")
+
+    for token, pins in _WHOLE_PINNED_ADVISORIES.items():
+        assert counts.get(token, 0) == len(pins), (
+            f"{token} is raised from {counts.get(token, 0)} place(s), but this "
+            f"file declares {len(pins)} whole-message pin(s) for it. A new "
+            f"raise site needs its own WHOLE pin in the SAME commit.")
+
+    # Each declared pin is non-empty, pairwise distinct, and actually READ by a
+    # test in this file — a constant nothing loads is a pin in name only.
+    all_pins = [p for pins in _WHOLE_PINNED_ADVISORIES.values() for p in pins]
+    assert all(p.strip() for p in all_pins)
+    assert len(set(all_pins)) == len(all_pins), "two pins are the same string"
+
+    names = {"_ADVISORY_35_RC_NONZERO", "_ADVISORY_35_NOT_A_RECIPIENT",
+             "_ADVISORY_37", "_ADVISORY_36"}
+    assert len(names) == len(all_pins), (
+        "this name list and _WHOLE_PINNED_ADVISORIES have drifted apart")
+    loaded = {n.id
+              for n in ast.walk(ast.parse(
+                  Path(__file__).read_text(encoding="utf-8")))
+              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    missing = names - loaded
+    assert not missing, f"declared but never asserted anywhere: {sorted(missing)}"
 
 
 def _secret_line(text: str) -> str:

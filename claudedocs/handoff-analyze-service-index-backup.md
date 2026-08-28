@@ -139,8 +139,12 @@ standing at, and it has now been proven to recover the key unaided.
    `ship.sh` that would have worked, or trusting a flag that never arrived):
 
    ```sh
-   # is it on THIS host? — the only authority, and it needs no network
-   escrow-verify.py --help | grep -c -- --expect-pubkey     # 0 = not here yet
+   # is it on THIS host? — the only authority, and it needs no network.
+   # 🔴 BY PATH, not a bare name: escrow-verify.py is NOT on PATH and nothing in
+   # nix/ puts it there, so `escrow-verify.py --help` prints 0 whether or not the
+   # flag has landed — the same answer either way, which is no answer at all.
+   scripts/analyze-service-index/escrow-verify.py --help \
+     | grep -c -- --expect-pubkey                            # 0 = not here yet
    # would ship.sh converge this host, or SKIP it?
    scripts/drift-check.sh                                    # READ-ONLY; same rc vocabulary
    ```
