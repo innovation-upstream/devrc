@@ -9,21 +9,34 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Phase 1 (the attention queue) is SHIPPED, DEPLOYED and VERIFIED LIVE. Phase 2's SERVER HALF is
-MERGED but NOT DEPLOYED. Phases 3–6 are untouched.**
+**Phase 1 (the attention queue) is SHIPPED. Phase 2 (the tmux read model) is COMPLETE — BOTH
+halves shipped, deployed, and observed running UNATTENDED. Phases 3–6 are untouched.**
 
-🔴 **LIVE VERSION IS 0.8.7** (`clawgatectl health`, 2026-08-28). This line has been stale twice —
-read it from the cluster, never from this doc.
+🔴 **DO NOT READ A VERSION FROM THIS DOC** — `clawgatectl health` is the only authority. It said
+**0.8.9** on 2026-08-28, the THIRD value this line carried in three readings that day
+(0.8.7 → 0.8.8 shipped here → 0.8.9 from a concurrent session, mid-session). The snapshot
+routes were re-verified on 0.8.9 after that supersession (200 with token, 401 without).
 
 *How the design got here (carried forward):* settled 2026-08-26 across two rounds — a greenfield
 session, then an audit that reopened four decisions — then a re-platform onto clawgate that resolved
 three of them outright. The sections below from `## Platform` down are that design, still current.
 
 **Shipped, newest first:**
+- **`innovation-upstream/devrc#974`** — the host-side pusher, phase 2's remaining half — merged as
+  **`f0308e46`** and shipped to both hosts. `scripts/tmux-snapshot-push.sh` + a serverMode-gated
+  systemd timer (2 min). ✅ **VERIFIED BY AN UNATTENDED TICK**, which is the only proof that counts
+  here: every earlier success was a hand-run. Journal `pushed …B … HTTP 200` at 2m0s spacing with
+  `Result=success`, and `receivedAt` advancing `20:02:52 → 20:04:52` while the push count went 3 → 4.
+- **`innovation-upstream/devrc#970`** — merged as **`8ca23613`**. ⚠ Its kickoff named head sha
+  `e5773b1c`, which had **never been pushed** and existed only in a local worktree — so GitHub's
+  head was `6e2ced2d` throughout, and that, not a Tekton fault, is why no PipelineRun ever appeared
+  for it. The kickoff also said to remove that worktree, which would have **destroyed the audit-pr
+  fix**; it was pushed first.
 - **`ZacxDev/homelab-infra#468`** — the tmux snapshot ingest, phase 2's server half — merged as
-  **`32f49804`**. `POST/GET /api/tmux/snapshot`, migration `0027`, and `internal/tmux`, which owns
-  the vocabulary boundary. 🔴 **MERGED IS NOT DEPLOYED** — the image pin is an immutable literal
-  with no Flux automation, so this needs 0.8.8 built + pushed + BOTH version literals bumped.
+  **`32f49804`**, then DEPLOYED as **0.8.8** (pin `628a963a`). `POST/GET /api/tmux/snapshot`,
+  migration `0027`, and `internal/tmux`, which owns the vocabulary boundary. 🔴 Merging it had
+  changed nothing running — the image pin is an immutable literal with no Flux image automation —
+  which is exactly why it sat inert until the pin moved.
 - **`ZacxDev/homelab-infra#457`** — the idle reaper's own cadence — merged as `3a66e3e0`, deployed
   as **0.8.7** (pin `cc51b9b4`) and verified over 4.5h of production sweeps. See rank 1.
 - **`#451`** (detached suggest POST) merged as `a38360a5`, live on BOTH hosts (hook files verified
@@ -44,7 +57,8 @@ resolved afterwards.
 raise|ls|resolve`; surfaced in an htmx tab and pushed via the pre-existing `POST /api/notify`.
 🔴 An entry is **not** a decision object — no approve/deny, it carries a *destination*.
 
-**Live health at handoff (2026-08-28 09:53Z), read from the cluster:** pod
+⚠ **SUPERSEDED READING, kept for the reasoning below it** — the pod and version named here
+rolled several times the same day. **Live health at handoff (2026-08-28 09:53Z):** pod
 `clawgate-7c78695584-mcc74`, image `0.8.7`, `restarts=0`, up since 07:21:45Z — it **rolled cleanly**
 during the session, which wiped the earlier sweep history with the old pod. The queue is bounded:
 `open=23`, **`idle_past_4h=0`** (baseline before the fix: 64 open / 21 eligible). 🔴 **The reaper
@@ -78,6 +92,11 @@ half of (it returns `0, nil` on UNDERFLOW). Round 5 was the first with **no beha
 ⚠ **Stopped there — ONE round short of the mechanical two-zero-payload gate** — because round 5 was
 auditing test code round 4 wrote, and round 6 would have audited test code round 5 wrote. That is a
 judgement, not the rule; a sixth round is a legitimate thing to ask for.
+
+**Lowest-numbered OPEN item is rank 3** (read-only `capture-pane` rendering). ⚠ Its
+`🔴 DEPENDENCY — cannot be built before item 4` paragraph is **SATISFIED as of 2026-08-28**: item 4
+immediately below it is ✅ DONE, and the delivery path it was waiting for now exists and runs every
+2 minutes. Nothing else about rank 3 changed; it still needs no further decisions.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -614,6 +633,70 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
   that actually writes.
 - ⚠ **`gh pr view --json mergeable` answers `UNKNOWN` for a while after a push** — GitHub is still
   computing it. It is not a conflict; re-read it a few seconds later before acting.
+
+- 🔴 **A MUTATION CAN REPORT `killed` AGAINST A TEST THAT WAS ALREADY RED — it dies for free,
+  and the sweep looks clean.** Measured here: a 304-handling test was added and the sweep run
+  immediately after; the mutant "died" because the test was failing *with and without* it. The
+  shipped pattern `30[0-9]` had never excluded 304 at all. The missing control is the cheap
+  one — **run the new test UNMUTATED first and watch it pass** — and a sweep's own `M0` control
+  does not cover it if `M0` exercises a *different* test. Report the pair (green baseline,
+  red mutant) or the kill means nothing.
+- 🔴 **A GREEN MUTATION SWEEP IS A CLAIM ABOUT THE MUTATIONS YOU IMAGINED, AND MINE OMITTED THE
+  WHOLE DIAGNOSTIC SURFACE.** An auditor mutated `COLLECT_RC=$?` to a literal `0` and it
+  SURVIVED a fully green file, because every test asserted *that* a failure was reported and
+  none asserted the *number*. The shipped code was byte-equivalent to an undetectable mutant.
+  Across this work the sweeps totalled 24/24 killed and still found **less than the adversarial
+  reader did**.
+- 🔴 **`if ! cmd; then rc=$?` IS ALWAYS 0** — it reads the status of the *negated* pipeline,
+  which is 0 exactly when the branch is taken. Worst on the likeliest path: `timeout` gives
+  status 124 *and* empty stderr, so the log line carries no information whatsoever. Capture
+  outside the condition (`set +e; cmd; rc=$?; set -e`).
+- 🔴 **`HTTP < 400` IS NOT SUCCESS.** Without `-L`, a 3xx means curl returns the redirect and
+  the server stores nothing — while the script logs "pushed" and exits 0. `000` and an EMPTY
+  status do the same: `[ "" -ge 400 ]` prints "integer expected" and is FALSE, and **`set -e`
+  does not fire for a test used as an `if` condition** (measured). Match 2xx explicitly.
+- 🔴 **`env -i` IS STRICTER THAN systemd, so a probe built on it measures a condition the unit
+  never runs in.** `Environment=` **ADDS to** the user-manager environment rather than replacing
+  it. I diagnosed a live `TMUX_TMPDIR` bug this way and was wrong; what exposed it was
+  `drift-check.service` having run fine for weeks under the same declared env — corroborating
+  evidence disagreeing with my conclusion, not my own re-check. Use
+  `systemd-run --user --wait --collect --pipe` to observe the real thing. ⚠ systemd expands
+  `${VAR-DEFAULT}` in `ExecStart` itself and does not understand the `-` default, which yields
+  false "unset" readings.
+- 🔴 **TRIMMING A COPIED PATH LIST WITHOUT RUNNING THE CHILD IS HOW A SILENT ZERO GETS BORN.**
+  Dropping `gawk` as "unused" broke the agent ledger: `agent_ledger.read_command` runs `awk 1`,
+  `awk` lives ONLY in gawk (coreutils has none), and its `2>/dev/null; exit 0` swallows the
+  error while the `echo` sentinel still prints — so the parser sees a well-formed ledger
+  reporting ZERO. Measured 0 vs 34 of 45 windows carrying `runtime`. rc 0 and a plausible
+  payload either way, and the laptop leg was unaffected, so the result looked *correct*.
+  `gnugrep`/`iproute2` genuinely were unused; the difference was only ever discoverable by
+  running the collector without each one.
+- 🔴 **A PURE PROSE CHANGE CAN RED THE MERGE GATE.** `testlib/launcher_scan.py` scans top-level
+  `scripts/` files as RAW TEXT with **no comment stripping**, so merely *naming* a hazardous
+  binary in a comment registers that script as reaching it. A one-line explanatory comment put
+  `test_no_real_launchers.py` red on both tiers. Describe the mechanism without spelling the
+  binary.
+- 🔴 **DO NOT RUN AN AUDIT AGENT AND THE GATING SANDBOX AT THE SAME TIME.**
+  `test_live_cotenants_sees_another_process_in_the_repo` asserts a fresh tmp repo has no
+  tenants; a concurrent agent running `git` in the repo reds it (`['90235:git'] == []`). I
+  contaminated my own gate this way and it passed cleanly once the box was quiet — the
+  "round N's leak corrupts round N+1's evidence" shape, applied to the gate instead of a
+  timing probe.
+- ⚠ **THE ZSH `MULTIOS` TRAP BIT AGAIN, in a session that had already read the rule.**
+  `cmd 2>&1 >/dev/null | head` delivers **stdout**, not stderr, so a "no skew warning" reading
+  was of the wrong stream. Give each stream its own file and read both.
+- 🔴 **NOTHING READS `GET /api/tmux/snapshot`** outside clawgate's own tests — no UI, no page,
+  no script. So the read model's `receivedAt` staleness is **recorded and unread**, and any
+  design that names it as a compensating control is naming a control that does not exist. The
+  feeder's real alarm is its distinct non-zero exit codes landing in the user manager's
+  failed-unit list, which `/standup` reads — that covers the codes and **NOT** a run that exits
+  0 having achieved nothing, which is why the redirect and unmeasured-zero cases had to be
+  fixed in the script rather than left to monitoring.
+- ⚠ **The pusher's real per-run cost is ~4x the obvious estimate:** `session-manager --json`
+  makes up to FOUR ssh invocations per remote host (list-panes, list-windows, the capture
+  batch, the ledger read) with no `ControlMaster` — ~2,880 handshakes/day, not 720 — plus one
+  ClickHouse query per run. `--lean` is the lever if that ever matters, at the cost of the
+  verbatim/dumb-pipe property.
 
 ## How to verify
 
