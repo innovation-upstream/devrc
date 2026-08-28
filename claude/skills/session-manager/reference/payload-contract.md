@@ -15,6 +15,8 @@ _Moved verbatim out of `SKILL.md` on 2026-08-21, when the body was cut from 23,2
 | `--lean` | 🔴 **with `--json`, prefer this.** The agent-shaped view: rows trimmed to the fields that answer this tool's question, **untruncated**, with every measurement discriminator and the caveats kept |
 | `--host workbench\|laptop\|all` | default `all`; `tail` resolves `all` to LOCAL |
 | `--claude-only` | drop the **shell** rows (`CLASS=shell`) — a `cluster` dispatch is an agent and is KEPT. Every count then describes the FILTERED set; `summary.excluded_shells` says how many went and `summary.kinds_excluded_by_filter` names any kind removed entirely |
+| `--match SUBSTR` | **repeatable**, `scan`/`list`/`detail`. Keep only rows whose **`task`, `label` or `codename`** contains SUBSTR, case-insensitively. Terms are **ANDed** (a row must match all — the same default `find-session.py` uses), and one term may satisfy itself in a different field from another. Every count then describes the MATCHED set; see below |
+| `--match-path` | add **`path`** to the fields `--match` searches. **OFF by default, and that is the feature** |
 | `--no-ch` | skip ClickHouse — the client is never constructed |
 | `--no-capture` | skip the pane scrape; **every** `waiting_probable` AND `unsent_prompt` becomes `null` (both roll-up numbers `null`, never `0`) |
 | `--fuzzyclaw` / `--no-fuzzyclaw` | the task-file join is **OFF by default** (see below) |
@@ -23,6 +25,71 @@ _Moved verbatim out of `SKILL.md` on 2026-08-21, when the body was cut from 23,2
 | `--stale-threshold <secs>` | default 3600; `age >= threshold` is stale |
 | `--lines N` | `tail` scrollback depth (default 100) |
 
+
+## 🔴 `--match` — asking the LIVE scan "which window is about X"
+
+This is the flag that makes `session-manager` the right instrument for *"find the thing I
+lost track of"*. Measured 2026-08-28: the transcript-archive walk (`find-session.py`) takes
+**30.1 s**; `session-manager --json --lean --no-ch` takes **1.82 s** and 66 of its 72 rows
+carried a populated `task`. For a question about what is running NOW, the archive is the
+wrong corpus. `find-session.py --live` drives exactly this flag.
+
+🔴 **`path` IS NOT SEARCHED BY DEFAULT, AND THE NUMBERS ARE WHY.** One query substring, one
+72-row scan:
+
+| matched against | rows hit |
+|---|---|
+| `task` | **1** — the correct window |
+| `path` | **29** — nearly every window shares a repo path |
+
+A filter whose answer is 40% of the fleet is the unfiltered scan wearing a filter's
+authority. Pass `--match-path` when you genuinely mean "everything in that checkout".
+
+**What the payload tells you, so a zero is never ambiguous** — in `report["filters"]` and
+mirrored into `summary`:
+
+| key | meaning |
+|---|---|
+| `filters.match` / `summary.match` | the terms. **`null`, never `[]`**, when no filter ran |
+| `filters.match_fields` / `summary.match_fields` | what was ACTUALLY searched — this is where you see whether `path` was in the set |
+| `filters.matched` | rows that survived, stated positively |
+| `filters.excluded_by_match` / `summary.excluded_by_match` | rows the filter dropped. `null`, never `0`, when no filter ran |
+
+**Exit code**: reachable hosts + zero matches is **`3` (EXIT_EMPTY)**, never `0`. No host
+reachable is still **`4`** — the zero is unmeasured either way the rows are filtered.
+
+`--match` composes with `--claude-only`; both narrow the same row set and share ONE
+`kinds_excluded_by_filter` answer. It has no effect on `tail`, which says so on stderr.
+
+## 🔴 `detail <session>:<index>` — the output SHAPE, and the two row keys
+
+**`detail --json` returns the FULL REPORT**, with `hosts[*].windows` narrowed to the one
+matching row. It does **not** return `{"window": {...}}`. `main()` calls `filter_report`,
+which keeps every host's reachability facts — dropping them would turn *"unreachable"* into
+*"not found"*. So read `blob["hosts"][<host>]["windows"][0]`, not `blob["window"]`.
+
+**The row keys are `window_index` and `path`** — not `window`, not `cwd`. A `.get("window")`
+returns `None` forever and reads exactly like a measured null.
+
+🔴 **A MISS IS NOW LOUD.** An address matching no window used to hand back a silent empty
+window list, byte-identical to *"found it, the window is idle"*. It now prints to **stderr**
+and records the same facts structurally:
+
+```
+detail: NO SUCH WINDOW 'scratch3:3' — session 'scratch3' has windows ['1', '2'];
+you asked for index '3' (searched: workbench); NOT searched: laptop — unreachable, …
+```
+
+| key | meaning |
+|---|---|
+| `filters.detail_target` | the address you asked for |
+| `filters.detail_matched` | rows matched. `0` is the miss; **`null` means NO host answered** |
+| `filters.detail_sibling_indices` | the indices that DO exist for that session name. `[]` = no such session; **`null` = unmeasured** |
+
+🔴 **Nothing is printed and the fields are `null` when no host was reachable.** An address
+that could not be CHECKED is not an address that does not EXIST — the exit code is `4` there,
+not `3`, and saying "no such window" would send you to re-check your spelling instead of your
+SSH. **Do not guess an index from the session NAME**: `scratch3`'s windows are `1` and `2`.
 
 ## Summary buckets, and `kind` vs `CLASS`
 
@@ -97,6 +164,20 @@ The table's old CODENAME column is now LABEL and renders `Grove (S)`.
 window, read from the slot table's own `key` field. It is **`null` (never `""`) on tiers 2
 and 3**: no binding exists for a session outside the table, so quoting a key there would
 send the operator to press something and land nowhere.
+
+🔴 **QUOTE `hotkey_display`, NEVER DERIVE THE CHORD FROM `hotkey` YOURSELF.** Every row
+carries `hotkey_display` (in `LEAN_ROW_FIELDS` too): `null` when `hotkey` is null,
+`Alt+<k>` for a lower-case key, `Alt+Shift+<K>` for an upper-case one.
+
+**Case is significant and it is NOT a Shift convention.** Per `scripts/tmux-scratch-slots.sh`,
+`M-v` → `scratch3`/violet and `M-V` → `scratch4`/**Vapor** — two DIFFERENT sessions.
+Measured 2026-08-28: a run read `hotkey: v` off a row, answered `Alt+Shift+V`, and sent the
+operator to a real window that was the wrong one. The derivation lives in ONE function now
+(`hotkey_display`) and its result is on the row, so no reader has to perform it.
+
+⚠ The TABLE's `LABEL` cell still shows the RAW key — `violet (v)`, `Vapor (V)` — because the
+column is 14 characters and `Yarrow (Alt+Shift+Y)` is 20. That parenthesis is a **key**, not
+a chord; run it through the rule above (or read `--json`) before quoting it to a human.
 
 🔴 **`label` is NOT an address — `session:window` still is.** Two sessions sitting in one
 repo resolve to the SAME label, so quote both. New non-scratch sessions get a real tmux name

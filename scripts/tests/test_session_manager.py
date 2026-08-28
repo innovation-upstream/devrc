@@ -1741,6 +1741,12 @@ def test_json_golden_schema_and_values():
         # fixture's, not the real table's — pinned so a hardcoded map cannot
         # satisfy it.
         "hotkey": "S",
+        # 🔴 ...and the CHORD, derived from it in one place. `S` is UPPERCASE in
+        # this fixture, so the shifted spelling is the correct one — and the
+        # lower-case sibling (`Alt+v` from `v`) is pinned separately, because a
+        # single-case golden cannot tell `f"Alt+Shift+{k}"` from a function that
+        # returns the shifted form unconditionally.
+        "hotkey_display": "Alt+Shift+S",
         "pane_id": "%11",
         "path": "/home/zach/workspace/repo-alpha",
         "command": "claude",
@@ -1826,6 +1832,13 @@ def test_json_golden_schema_and_values():
         "claude_only": False,
         "excluded_shells": None,
         "kinds_excluded_by_filter": None,
+        # 🔴 The `--match` trio under the SAME null-not-zero rule: no filter was
+        # asked for, so the terms are null (never `[]`), the field list is null
+        # (never the default tuple — publishing it would assert a search that
+        # never ran) and the excluded count is null, never `0`.
+        "match": None,
+        "match_fields": None,
+        "excluded_by_match": None,
         "hosts_reachable": ["laptop", "workbench"],
         "hosts_unreachable": [],
         "fuzzyclaw_live": 1,
@@ -4685,7 +4698,13 @@ def test_main_json_end_to_end_carries_the_split_and_the_filter(
     assert blob["filters"] == {"claude_only": True, "excluded_shells": 2,
                                # the filter RAN and removed no whole kind —
                                # `[]`, not None, and not absent
-                               "kinds_excluded_by_filter": []}
+                               "kinds_excluded_by_filter": [],
+                               # 🔴 ...and the OTHER row filter did NOT run, so
+                               # every one of its keys is null. `matched: 0`
+                               # here would say "a --match ran and matched
+                               # nothing" over a scan that returned two rows.
+                               "match": None, "match_fields": None,
+                               "matched": None, "excluded_by_match": None}
 
 
 def test_detail_under_claude_only_explains_its_own_emptiness(monkeypatch):
@@ -6501,7 +6520,13 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
     expected = {
         "kind",
         "host", "session", "window_index", "window_id", "window_name",
-        "codename", "label", "label_source", "hotkey", "pane_id", "path",
+        "codename", "label", "label_source", "hotkey",
+        # 🔴 The DERIVED chord, riding with `hotkey` for the same reason
+        # `label_source` rides with `label`. The raw key alone left the
+        # `v`-vs-`V` case rule in the CONSUMER's head, and a consumer performed
+        # it wrong against a live fleet — see `sm.hotkey_display`.
+        "hotkey_display",
+        "pane_id", "path",
         "command",
         "task", "claude", "busy", "age_secs", "age_source", "status",
         "waiting_probable", "waiting_signals", "waiting_status",
@@ -7068,6 +7093,11 @@ def test_the_LEAN_row_field_ledger_fails_when_it_grows_or_shrinks():
     assert set(sm.LEAN_ROW_FIELDS) == {
         "kind",
         "host", "session", "window_index", "label", "label_source", "hotkey",
+        # 🔴 The chord, derived ONCE. This is the AGENT-shaped view, and the
+        # agent is exactly the reader that rendered `hotkey: v` as
+        # `Alt+Shift+V`; dropping it here puts the derivation back where it
+        # already failed.
+        "hotkey_display",
         "path", "task", "runtime", "claude", "busy", "status", "age_secs",
         "age_source",
         "waiting_probable", "waiting_signals", "waiting_status",
@@ -10245,4 +10275,621 @@ def test_measured_not_measured_is_PURE_and_shares_nothing_with_the_constant():
         entry["owner_skill"] = "clobbered"
     assert sm.NOT_MEASURED_POPULATIONS == before
     assert sm.measured_not_measured({})[0]["note"] != "clobbered"
+
+
+# =========================================================================== #
+# §14 — LIVE-FIRST LOOKUP: `hotkey_display`, `--match`, and the LOUD detail miss
+#
+# 🔴 THE THREE DEFECTS THIS SECTION PINS, all measured on one real run
+# (2026-08-28, "find this thing I lost track of"): 127 s, 9 tool calls, 5 of
+# them pure flailing.
+#
+#   1. `detail <addr>` that matched NOTHING returned a silent empty window list
+#      — byte-identical to "found it, the window is idle". The run guessed index
+#      `3` from the session name `scratch3`; the real index was `2`, and nothing
+#      said so. (`test_a_detail_miss_*`)
+#   2. The row carried `hotkey: v` and the answer rendered `Alt+Shift+V`. Per
+#      `scripts/tmux-scratch-slots.sh`, `M-v` is scratch3/violet and `M-V` is
+#      scratch4/Vapor — DIFFERENT sessions, so the operator was sent to a real
+#      window that was the wrong one. (`test_hotkey_display_*`)
+#   3. There was no way to ask the live scan "which window is about X", so the
+#      30 s transcript archive was used for a question about NOW. (`test_match_*`)
+#
+# 🔴 WHICH OF THESE ARE REGRESSION COVERAGE. Everything below was watched RED at
+# 9e452d34 EXCEPT the tests named in `INVARIANT_GUARDS_ADDED_HERE`, which pin
+# behaviour the pre-change tree already had. They are listed rather than left to
+# be assumed, because counting an invariant guard as a fixed bug is how a suite
+# claims coverage it does not have.
+# =========================================================================== #
+#
+# MEASURED, not asserted: replayed against a detached worktree at 9e452d34 with
+# this exact file copied in — 45 collected §14 nodes, 38 RED and 7 GREEN. The 7
+# are precisely the set below.
+INVARIANT_GUARDS_ADDED_HERE = frozenset({
+    # `exit_code_for` already returned EXIT_EMPTY for a detail miss over a
+    # reachable fleet, and EXIT_UNAVAILABLE when nothing answered. What was
+    # missing was the MESSAGE and the structured count, not the code. Pinned so
+    # a later refactor of the miss path cannot quietly fold the two together.
+    "test_the_detail_exit_CODES_were_already_right_and_stay_right",
+    # `render_label` is UNCHANGED by this work. This asserts it stayed that way.
+    "test_render_label_states_the_KEY_and_never_a_CHORD",
+    # `filter_report` already copied the report before narrowing it; the new
+    # `detail_*` bookkeeping is what could have broken that.
+    "test_filter_report_does_not_MUTATE_the_report_it_narrows",
+    # A POSITIVE CONTROL on the `--match` fixture, not a bug: it asserts the
+    # UNFILTERED shape, so it passes wherever `fold_windows` works. Without it a
+    # `0 rows` verdict below could not be told from a fixture that built none.
+    "test_the_match_fixture_produces_the_rows_the_probes_below_assume",
+    # A NEGATIVE control on the miss message: a `detail` that FINDS its window
+    # printed nothing before this change and prints nothing after it.
+    "test_main_detail_HIT_prints_no_miss_line",
+    # This ledger's own gate.
+    "test_the_invariant_guard_ledger_names_only_tests_that_exist",
+    # `detail --json` always returned the full report shape; the observed run
+    # assumed otherwise. Pinning a shape that was always right is not a fix —
+    # it is what makes the reference doc's new claim machine-checked.
+    "test_detail_json_is_the_FULL_REPORT_SHAPE_not_a_bare_window",
+})
+
+
+def test_the_invariant_guard_ledger_names_only_tests_that_exist():
+    """A ledger that names a deleted test asserts nothing while reading as if it
+    does. Both directions are not available here (a regression test is not
+    enumerated), so at minimum every name must resolve."""
+    for name in INVARIANT_GUARDS_ADDED_HERE:
+        assert name in globals(), (
+            f"{name!r} is listed as an invariant guard but no such test exists")
+
+
+# --------------------------------------------------------------------------- #
+# hotkey_display — ONE writer for a chord whose CASE selects the session
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("key,expect", [
+    ("v", "Alt+v"),
+    ("V", "Alt+Shift+V"),
+    # A second letter, so a mutant that hardcodes the `v`/`V` pair dies. The
+    # fixture letters are pairwise distinct from each other AND from every
+    # letter the assertions elsewhere in this file name.
+    ("q", "Alt+q"),
+    ("Q", "Alt+Shift+Q"),
+    # Neither upper nor lower: `bind -n M-7` needs no Shift.
+    ("7", "Alt+7"),
+    # 🔴 `resolve_label` returns None on tiers 2 and 3 and that is load-bearing.
+    (None, None),
+    # ...and "" must NOT become `Alt+`, which would read as a real chord.
+    ("", None),
+])
+def test_hotkey_display_maps_CASE_to_the_shift_modifier(key, expect):
+    assert sm.hotkey_display(key) == expect
+
+
+def test_the_two_CASES_of_one_letter_are_DIFFERENT_CHORDS():
+    """🔴 THE DEFECT, stated as the thing that must not be true again.
+
+    Both cases are asserted AND asserted to DIFFER. A mutant that returns
+    `f"Alt+Shift+{k}"` unconditionally, or that normalises the key's case,
+    satisfies exactly one of the first two lines and fails the third.
+    """
+    lower, upper = sm.hotkey_display("v"), sm.hotkey_display("V")
+    assert lower == "Alt+v"
+    assert upper == "Alt+Shift+V"
+    assert lower != upper, (
+        "the two cases collapsed to one chord — `M-v` is scratch3/violet and "
+        "`M-V` is scratch4/Vapor, so this sends the operator to the wrong "
+        "live window")
+    # ...and the case is PRESERVED, not normalised: `Alt+V` (no Shift) and
+    # `Alt+Shift+v` are each a chord bound to nothing.
+    assert "Alt+V" not in lower and upper != "Alt+Shift+v"
+
+
+def test_the_case_significance_is_READ_OUT_OF_the_slot_table_not_asserted_here():
+    """🔴 A SEAM guard: "case selects a different session" is a fact about
+    `scripts/tmux-scratch-slots.sh`, and this reads it there.
+
+    A hand-written pair here would agree with the table today and drift the
+    first time a slot is rekeyed — the same reason
+    `test_the_hotkey_comes_from_the_SLOT_TABLE_not_a_second_map` reads its
+    expectation out of the table text rather than restating it.
+    """
+    table = os.path.normpath(os.path.join(_HERE, "..", "tmux-scratch-slots.sh"))
+    slots = sm.load_scratch_slots(paths=[table])
+    assert slots, "positive control: the real slot table parsed as EMPTY"
+    by_key = {}
+    for session, entry in slots.items():
+        by_key.setdefault(entry["key"], []).append(session)
+    pairs = [(k, k.upper()) for k in sorted(by_key)
+             if k.islower() and k.upper() in by_key]
+    assert pairs, (
+        "no lower/upper key pair exists in the slot table any more, so the case "
+        "rule `hotkey_display` encodes is no longer load-bearing — re-justify "
+        "the function or delete it; do not leave this test asserting a dead fact")
+    for lo, up in pairs:
+        assert by_key[lo] != by_key[up], (
+            f"{lo!r} and {up!r} map to the same session, so case selects nothing")
+        assert sm.hotkey_display(lo) != sm.hotkey_display(up)
+
+
+def test_hotkey_display_is_None_on_the_TIERS_THAT_HAVE_NO_KEY():
+    """Tiers 2 and 3 carry `hotkey: None`; the derived chord must be None too —
+    never `""`, never invented."""
+    rows = sm.fold_windows(
+        sm.parse_panes("%91|9001|no-slot-here|1|w-n|/w/synth-juliet|zsh|title"),
+        "workbench", slots={}, now=NOW)
+    assert rows[0]["label_source"] == "path"
+    assert rows[0]["hotkey"] is None
+    assert rows[0]["hotkey_display"] is None
+
+
+def test_hotkey_display_rides_on_every_row_and_in_the_LEAN_view():
+    """The derivation is performed ONCE, by the producer — so the consumer that
+    got it wrong never has to perform it at all."""
+    report = base_gather()
+    rows = [r for h in report["hosts"].values() for r in h["windows"]]
+    assert rows, "positive control: the fixture must produce rows"
+    for r in rows:
+        assert r["hotkey_display"] == sm.hotkey_display(r["hotkey"])
+    assert "hotkey_display" in sm.LEAN_ROW_FIELDS
+    lean = sm.lean_report(report)
+    for r in [x for h in lean["hosts"].values() for x in h["windows"]]:
+        assert "hotkey_display" in r
+
+
+def test_render_label_states_the_KEY_and_never_a_CHORD():
+    """INVARIANT GUARD — `render_label` is deliberately NOT routed through
+    `hotkey_display`, and this pins the two surfaces apart.
+
+    The LABEL column is 14 characters (`_trunc(render_label(r), 14)`), and
+    `Yarrow (Alt+Shift+Y)` is 20 — routing it through would produce a truncated
+    stub MORE ambiguous than the raw key, not less. So the table states the key
+    with its case intact and the chord travels on the row.
+    """
+    assert sm.render_label({"label": "violet", "hotkey": "v"}) == "violet (v)"
+    assert sm.render_label({"label": "Vapor", "hotkey": "V"}) == "Vapor (V)"
+    for row in ({"label": "violet", "hotkey": "v"},
+                {"label": "Vapor", "hotkey": "V"}):
+        assert "Alt+" not in sm.render_label(row), (
+            "the table started spelling a chord; if that is deliberate, check "
+            "the 14-char LABEL column still fits it before changing this test")
+    assert len(sm.render_label({"label": "Yarrow", "hotkey": "Y"})) <= 14
+
+
+# --------------------------------------------------------------------------- #
+# --match — the FIELD SET is the feature, and `path` is not in it
+# --------------------------------------------------------------------------- #
+# 🔴 THE FIXTURE IS THE `29 of 72` SHAPE AT THREE-ROW SCALE. Both non-slot
+# windows sit under the same `zzpapaya` directory and neither one's LABEL or
+# TASK says that word (their labels are the deeper leaves `zzsigma`/`zztheta`):
+#
+#   `zzkiwi`    -> 1 row  (a task, and only one of them)
+#   `zzsigma`   -> 1 row  (a label)
+#   `zzpapaya`  -> 0 rows by default, 2 rows under --match-path
+#
+# Every token is pairwise distinct and none appears in any constant the
+# assertions name, so a mutant that hardcodes a field name or a literal cannot
+# survive by coincidence.
+MATCH_PANES = "\n".join([
+    f"%31|3001|match-one|1|w-one|/home/zach/workspace/zzpapaya/zzsigma|claude"
+    f"|{BRAILLE} refactor the zzkiwi cache",
+    f"%32|3002|match-two|4|w-two|/home/zach/workspace/zzpapaya/zztheta|claude"
+    f"|{SPARKLE} unrelated zzmango work",
+    # A slot session, so `codename` is populated and tier 1 is exercised.
+    f"%33|3003|scratch2|9|w-three|/home/zach/tmp|claude|{SPARKLE} third thing",
+])
+MATCH_WINDOWS = "@31|1|match-one\n@32|4|match-two\n@33|9|scratch2\n"
+
+
+def match_gather(**kw):
+    """`base_gather` over MATCH_PANES, with an EMPTY but REACHABLE laptop.
+
+    Reachable-and-empty rather than absent: every exit-code assertion below
+    depends on "the fleet answered", and a fixture that could not tell that from
+    "the fleet is down" would grade the wrong thing.
+    """
+    defaults = dict(
+        runner=make_runner(local_panes=MATCH_PANES,
+                           local_windows=MATCH_WINDOWS,
+                           remote_panes="", remote_windows=""),
+        use_fuzzyclaw=False)
+    defaults.update(kw)
+    return base_gather(**defaults)
+
+
+def _sessions(report):
+    return sorted(r["session"] for h in report["hosts"].values()
+                  for r in h["windows"])
+
+
+def test_the_match_fixture_produces_the_rows_the_probes_below_assume():
+    """POSITIVE CONTROL on the instrument, before any of its verdicts.
+
+    A zero from `--match` is indistinguishable from a zero produced by a fixture
+    that never built the rows. This asserts the unfiltered shape — three rows,
+    the labels the path leaves give them, the codename tier 1 supplies, and that
+    the shared path segment appears in NO other matched field.
+    """
+    rows = {r["session"]: r for h in match_gather()["hosts"].values()
+            for r in h["windows"]}
+    assert sorted(rows) == ["match-one", "match-two", "scratch2"]
+    assert rows["match-one"]["label"] == "zzsigma"
+    assert rows["match-two"]["label"] == "zztheta"
+    assert rows["scratch2"]["codename"] == "Vapor"
+    for r in rows.values():
+        assert "zzpapaya" not in (r["task"] or "")
+        assert "zzpapaya" not in (r["label"] or "")
+        assert "zzpapaya" not in (r["codename"] or "")
+    assert sum("zzpapaya" in r["path"] for r in rows.values()) == 2
+
+
+def test_match_does_NOT_search_path_by_default():
+    """🔴 THE MEASUREMENT, AS A TEST. On the live fleet one query substring hit
+    1 of 72 rows on `task` and 29 of 72 on `path`, because nearly every window
+    shares a repo path. A filter whose answer is 40% of the fleet is the
+    unfiltered scan wearing a filter's authority."""
+    assert _sessions(match_gather(match=["zzpapaya"])) == []
+    assert "path" not in sm.match_fields()
+    assert sm.MATCH_FIELDS == ("task", "label", "codename")
+
+
+def test_match_path_ADDS_path_and_is_the_positive_control_for_the_zero_above():
+    """🔴 Without this, the `0 rows` above is indistinguishable from a filter
+    wired to nothing. Same term, same fixture, one flag — and the number moves
+    from 0 to 2."""
+    got = match_gather(match=["zzpapaya"], match_path=True)
+    assert _sessions(got) == ["match-one", "match-two"]
+    assert sm.match_fields(True) == ("task", "label", "codename", "path")
+    assert got["summary"]["match_fields"] == ["task", "label", "codename", "path"]
+
+
+@pytest.mark.parametrize("term,expect", [
+    ("zzkiwi", ["match-one"]),          # task
+    ("ZZKIWI", ["match-one"]),          # ...case-insensitively
+    ("zzsigma", ["match-one"]),         # label (tier 2, the cwd leaf)
+    ("zzmango", ["match-two"]),         # a DIFFERENT row's task
+    ("vapor", ["scratch2"]),            # tier-1 codename/label, lower-cased
+    ("zznothinghere", []),
+])
+def test_match_searches_task_label_and_codename(term, expect):
+    assert _sessions(match_gather(match=[term])) == expect
+
+
+def test_match_terms_are_ANDed_like_find_sessions_default():
+    """Two tools read as one instrument; an OR here against the archive's AND
+    would return different sets for the same words with nothing saying so."""
+    assert _sessions(match_gather(match=["zzkiwi"])) == ["match-one"]
+    assert _sessions(match_gather(match=["zzmango"])) == ["match-two"]
+    # Together they match nothing, because no row carries both.
+    assert _sessions(match_gather(match=["zzkiwi", "zzmango"])) == []
+    # A pair that DOES co-occur on one row still matches — across two DIFFERENT
+    # fields, which is the shape an OR-vs-AND mutant cannot fake.
+    assert _sessions(match_gather(match=["zzkiwi", "zzsigma"])) == ["match-one"]
+
+
+def test_row_matches_finds_a_CODENAME_that_disagrees_with_the_LABEL():
+    """🔴 STATED HONESTLY, AND NOT COUNTED AS REGRESSION COVERAGE.
+
+    On today's rows `label` EQUALS `codename` whenever a codename exists
+    (`resolve_label` tier 1 returns the codename AS the label), so `codename` in
+    `MATCH_FIELDS` adds no reach against production rows right now. It is in the
+    set so that a change to that precedence — a path label winning over a slot
+    name — cannot silently make a session unfindable by the name its hotkeys
+    use. This drives the predicate directly with a row where the two DISAGREE,
+    so the field is proven wired rather than assumed.
+    """
+    row = {"task": "zzalpha", "label": "zzbravo", "codename": "zzcharlie",
+           "path": "zzdelta"}
+    assert sm.row_matches(row, ["zzcharlie"]) is True
+    assert sm.row_matches(row, ["zzbravo"]) is True
+    assert sm.row_matches(row, ["zzalpha"]) is True
+    assert sm.row_matches(row, ["zzdelta"]) is False
+    assert sm.row_matches(row, ["zzdelta"], sm.match_fields(True)) is True
+
+
+def test_a_term_may_not_SPAN_two_fields():
+    """Joining the fields into one haystack would match text that exists in no
+    field — a hit no reader can explain."""
+    row = {"task": "abc", "label": "def", "codename": None, "path": None}
+    assert sm.row_matches(row, ["abc"]) is True
+    assert sm.row_matches(row, ["def"]) is True
+    assert sm.row_matches(row, ["abcdef"]) is False
+
+
+def test_an_EMPTY_term_list_matches_everything_rather_than_nothing():
+    """"No filter was requested" and "a filter that rejects the world" are
+    different facts. The CALLER decides whether a filter ran."""
+    assert sm.row_matches({"task": "anything"}, []) is True
+    got = match_gather(match=[])
+    assert len(_sessions(got)) == 3
+    assert got["filters"]["match"] is None
+    assert got["summary"]["excluded_by_match"] is None
+
+
+def test_every_count_and_caveat_describes_the_MATCHED_set():
+    """🔴 The rule `--claude-only` already follows: a filtered report may not
+    print a summary describing the unfiltered scan."""
+    got = match_gather(match=["zzkiwi"])
+    assert got["summary"]["total_sessions"] == 1
+    assert got["summary"]["claude"] == 1
+    assert sum(b["total"] for b in got["summary"]["status"].values()) == 1
+    assert got["summary"]["kind"] == {"tmux": 1}
+    assert got["summary"]["match"] == ["zzkiwi"]
+    assert got["summary"]["match_fields"] == ["task", "label", "codename"]
+    assert got["summary"]["excluded_by_match"] == 2
+    assert got["filters"]["matched"] == 1
+    # ...and the CAVEATS were RE-DERIVED, not inherited. When the filter removes
+    # every row, `kinds_produced` must be empty rather than still claiming
+    # `tmux` — the caveat line and the table it sits under cannot disagree.
+    empty = match_gather(match=["zznothinghere"])
+    assert empty["caveats"]["kind_scope"]["kinds_produced"] == []
+    assert empty["caveats"]["kind_scope"]["kinds_excluded_by_filter"] == ["tmux"]
+
+
+def test_match_and_claude_only_COMPOSE_and_share_one_kinds_excluded_answer():
+    """Two row filters over one row set, and ONE answer to "which whole kinds
+    did a filter remove" — computed across both rather than once per flag."""
+    got = match_gather(match=["zzkiwi"], claude_only=True)
+    assert _sessions(got) == ["match-one"]
+    assert got["filters"]["excluded_shells"] == 0     # every fixture row is claude
+    assert got["filters"]["excluded_by_match"] == 2
+    assert got["filters"]["kinds_excluded_by_filter"] == []
+
+
+def test_the_filters_key_says_a_filter_RAN_so_zero_rows_is_never_zero_windows():
+    """A consumer reading an empty row list must be able to tell "nothing
+    matched these words in these fields" from "the fleet has no windows"."""
+    got = match_gather(match=["zznothinghere"])
+    assert got["filters"]["match"] == ["zznothinghere"]
+    assert got["filters"]["match_fields"] == ["task", "label", "codename"]
+    assert got["filters"]["matched"] == 0
+    assert got["filters"]["excluded_by_match"] == 3
+    # ...and with NO filter every one of those is null, never 0/[].
+    unfiltered = match_gather()
+    for key in ("match", "match_fields", "matched", "excluded_by_match"):
+        assert unfiltered["filters"][key] is None, key
+
+
+def test_a_match_with_zero_hits_on_a_REACHABLE_fleet_is_EMPTY_not_OK():
+    """🔴 `EXIT_OK` here would tell a caller the scan succeeded AND found the
+    thing. The rows are gone; the hosts answered; that is EXIT_EMPTY."""
+    assert sm.exit_code_for(match_gather(match=["zznothinghere"])) == sm.EXIT_EMPTY
+    assert sm.exit_code_for(match_gather(match=["zzkiwi"])) == sm.EXIT_OK
+
+
+def test_a_match_with_zero_hits_on_an_UNREACHABLE_fleet_is_UNAVAILABLE():
+    """The zero is UNMEASURED there, and it must not read as a real zero."""
+    down = make_runner(local_rc=1, local_err="tmux: connection failed",
+                       remote_rc=255, remote_err="ssh: no route")
+    got = base_gather(runner=down, use_fuzzyclaw=False, match=["zzkiwi"])
+    assert sm.exit_code_for(got) == sm.EXIT_UNAVAILABLE
+
+
+def test_main_match_end_to_end_through_the_CLI(monkeypatch, capsys,
+                                               absent_blocked_cache):
+    """END-TO-END, because every test above injects `gather()`."""
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner",
+                        make_runner(local_panes=MATCH_PANES,
+                                    local_windows=MATCH_WINDOWS))
+    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
+    rc = sm.main(["scan", "--json", "--no-ch", "--lean", "--host", "workbench",
+                  "--match", "zzkiwi"])
+    blob = json.loads(capsys.readouterr().out)
+    assert rc == sm.EXIT_OK
+    rows = [r for h in blob["hosts"].values() for r in h["windows"]]
+    assert [r["session"] for r in rows] == ["match-one"]
+    assert blob["filters"]["match"] == ["zzkiwi"]
+    assert blob["filters"]["match_fields"] == ["task", "label", "codename"]
+    assert blob["summary"]["excluded_by_match"] == 2
+    # the lean row carries the chord, which is what the live-first caller reads
+    assert "hotkey_display" in rows[0]
+
+    rc_empty = sm.main(["scan", "--json", "--no-ch", "--host", "workbench",
+                        "--match", "zznothinghere"])
+    capsys.readouterr()
+    assert rc_empty == sm.EXIT_EMPTY
+
+
+def test_the_TABLE_states_the_match_filter_and_the_fields_it_searched():
+    """An empty table under a `--match` is otherwise indistinguishable from an
+    empty fleet — and a reader who cannot see that `path` was excluded cannot
+    tell why their repo-shaped query found nothing."""
+    text = sm.render_table(match_gather(match=["zzkiwi"]))
+    assert "FILTER --match 'zzkiwi'" in text
+    assert "1 row(s) matched, 2 excluded" in text
+    assert "fields searched = task, label, codename" in text
+    # ...and no such line at all when no filter ran.
+    assert "FILTER --match" not in sm.render_table(match_gather())
+
+
+def test_match_has_no_effect_on_tail_and_SAYS_so(monkeypatch, capsys):
+    """A silently ignored flag is how a caller concludes it was honoured."""
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner", make_runner())
+    sm.main(["tail", "scratch7:3", "--host", "workbench", "--match", "zzkiwi"])
+    assert "no effect on `tail`" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# detail — a miss must be LOUD, and must name the indices that DO exist
+# --------------------------------------------------------------------------- #
+# 🔴 THE OBSERVED FAILURE, REPRODUCED EXACTLY: a session named `scratch3` whose
+# real window index is `2`, asked for as `scratch3:3` because the reader took
+# the digit out of the session NAME.
+SCRATCH3_PANES = "\n".join([
+    "%41|4001|scratch3|1|w-a|/home/zach/workspace/zzsigma|zsh|a bare shell",
+    f"%42|4002|scratch3|2|w-b|/home/zach/workspace/zztheta|claude"
+    f"|{BRAILLE} the work that was lost track of",
+])
+SCRATCH3_WINDOWS = "@41|1|scratch3\n@42|2|scratch3\n"
+
+
+def scratch3_gather(**kw):
+    defaults = dict(
+        runner=make_runner(local_panes=SCRATCH3_PANES,
+                           local_windows=SCRATCH3_WINDOWS,
+                           remote_panes="", remote_windows=""),
+        use_fuzzyclaw=False)
+    defaults.update(kw)
+    return base_gather(**defaults)
+
+
+def test_a_detail_miss_NAMES_THE_INDICES_THAT_DO_EXIST():
+    """🔴 THE FIX FOR THE OBSERVED RUN. `scratch3:3` does not exist; `1` and `2`
+    do, and saying so is what turns a dead end into a next step."""
+    report = sm.filter_report(scratch3_gather(), "scratch3", "3")
+    msg = sm.detail_not_found_message(report)
+    assert msg is not None, "a miss returned NO message — the silent empty is back"
+    assert "NO SUCH WINDOW 'scratch3:3'" in msg
+    assert "session 'scratch3' has windows ['1', '2']" in msg
+    assert "you asked for index '3'" in msg
+    # ...and the same facts structurally, so a --json consumer never parses prose
+    assert report["filters"]["detail_target"] == "scratch3:3"
+    assert report["filters"]["detail_matched"] == 0
+    assert report["filters"]["detail_sibling_indices"] == ["1", "2"]
+
+
+def test_the_sibling_indices_are_sorted_NUMERICALLY_not_lexically():
+    """`[1, 2, 10]`, not `[1, 10, 2]` — in a message whose whole job is to be
+    read. The fixture indices overshoot the single digits deliberately: a set
+    that never crosses 9 cannot tell the two sorts apart."""
+    panes = "\n".join(
+        f"%5{i}|500{i}|manywin|{i}|w-{i}|/w/synth-kilo|zsh|t" for i in (2, 10, 1))
+    windows = "".join(f"@5{i}|{i}|manywin\n" for i in (2, 10, 1))
+    report = sm.filter_report(
+        base_gather(runner=make_runner(local_panes=panes, local_windows=windows,
+                                       remote_panes="", remote_windows=""),
+                    use_fuzzyclaw=False),
+        "manywin", "99")
+    assert report["filters"]["detail_sibling_indices"] == ["1", "2", "10"]
+
+
+def test_a_detail_miss_on_an_UNKNOWN_SESSION_says_that_instead():
+    """Two different next steps: fix the index, or find the right session."""
+    report = sm.filter_report(scratch3_gather(), "zznosuchsession", "1")
+    msg = sm.detail_not_found_message(report)
+    assert "no session named 'zznosuchsession'" in msg
+    assert "has windows" not in msg
+    assert report["filters"]["detail_sibling_indices"] == []
+
+
+def test_a_detail_that_FINDS_its_window_says_NOTHING():
+    """NEGATIVE CONTROL. Without it, "report every detail as missing" is a
+    mutation that passes every probe above."""
+    report = sm.filter_report(scratch3_gather(), "scratch3", "2")
+    assert report["filters"]["detail_matched"] == 1
+    assert sm.detail_not_found_message(report) is None
+
+
+def test_a_detail_miss_over_an_UNREACHABLE_FLEET_is_UNMEASURED_not_NOT_FOUND():
+    """🔴 An address that could not be CHECKED is not an address that does not
+    EXIST. Saying "no such window" here states a fact about a machine nobody
+    talked to, and sends the reader to re-check their spelling instead of their
+    SSH."""
+    down = make_runner(local_rc=1, local_err="tmux: connection failed",
+                       remote_rc=255, remote_err="ssh: no route")
+    report = sm.filter_report(base_gather(runner=down, use_fuzzyclaw=False),
+                              "scratch3", "3")
+    assert sm.detail_not_found_message(report) is None
+    assert report["filters"]["detail_matched"] is None
+    assert report["filters"]["detail_sibling_indices"] is None, (
+        "an EMPTY sibling list here would assert a measured absence of windows "
+        "on hosts that never answered")
+    assert sm.exit_code_for(report) == sm.EXIT_UNAVAILABLE
+
+
+def test_a_PARTIAL_fleet_miss_names_the_host_it_could_not_search():
+    """One host answered and one did not: the miss is real on the first and
+    UNMEASURED on the second, and the message says both."""
+    runner = make_runner(local_panes=SCRATCH3_PANES,
+                         local_windows=SCRATCH3_WINDOWS,
+                         remote_rc=255, remote_err="ssh: no route")
+    report = sm.filter_report(base_gather(runner=runner, use_fuzzyclaw=False),
+                              "scratch3", "3")
+    msg = sm.detail_not_found_message(report)
+    assert "searched: workbench" in msg
+    assert "NOT searched: laptop" in msg
+    assert "not a measured absence on that host" in msg
+    # the siblings still come from the host that DID answer
+    assert report["filters"]["detail_sibling_indices"] == ["1", "2"]
+
+
+def test_the_detail_exit_CODES_were_already_right_and_stay_right():
+    """INVARIANT GUARD — NOT regression coverage.
+
+    `exit_code_for` already separated a reachable miss (3) from an unmeasured
+    one (4) before this change; what was missing was the message and the
+    structured count. Pinned so a refactor of the miss path cannot fold the two
+    codes together while the new message keeps looking right.
+    """
+    hit = sm.filter_report(scratch3_gather(), "scratch3", "2")
+    miss = sm.filter_report(scratch3_gather(), "scratch3", "3")
+    down = sm.filter_report(
+        base_gather(runner=make_runner(local_rc=1, local_err="tmux: down",
+                                       remote_rc=255, remote_err="ssh: no route"),
+                    use_fuzzyclaw=False),
+        "scratch3", "3")
+    assert sm.exit_code_for(hit) == sm.EXIT_OK
+    assert sm.exit_code_for(miss) == sm.EXIT_EMPTY
+    assert sm.exit_code_for(down) == sm.EXIT_UNAVAILABLE
+
+
+def test_main_detail_MISS_is_loud_on_STDERR_and_leaves_stdout_parseable(
+        monkeypatch, capsys):
+    """END-TO-END. The human line goes to stderr so a `--json` consumer's stdout
+    is untouched — and the same facts sit in `filters` for a consumer that never
+    reads stderr at all."""
+    monkeypatch.setattr(sm, "gather", lambda **kw: scratch3_gather())
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    rc = sm.main(["detail", "scratch3:3", "--json", "--no-ch"])
+    cap = capsys.readouterr()
+    assert rc == sm.EXIT_EMPTY
+    assert "NO SUCH WINDOW 'scratch3:3'" in cap.err
+    assert "['1', '2']" in cap.err
+    blob = json.loads(cap.out)
+    assert blob["filters"]["detail_matched"] == 0
+    assert blob["filters"]["detail_sibling_indices"] == ["1", "2"]
+
+
+def test_main_detail_HIT_prints_no_miss_line(monkeypatch, capsys):
+    """NEGATIVE CONTROL on the CLI wiring, not just on the pure function."""
+    monkeypatch.setattr(sm, "gather", lambda **kw: scratch3_gather())
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    rc = sm.main(["detail", "scratch3:2", "--json", "--no-ch"])
+    cap = capsys.readouterr()
+    assert rc == sm.EXIT_OK
+    assert "NO SUCH WINDOW" not in cap.err
+
+
+def test_filter_report_does_not_MUTATE_the_report_it_narrows():
+    """INVARIANT GUARD. `filters` is written through on the narrowed COPY; the
+    original must not grow `detail_*` keys, or a second `filter_report` over the
+    same report would inherit the first one's verdict."""
+    report = scratch3_gather()
+    before = copy.deepcopy(report["filters"])
+    sm.filter_report(report, "scratch3", "3")
+    assert report["filters"] == before
+
+
+def test_detail_json_is_the_FULL_REPORT_SHAPE_not_a_bare_window(monkeypatch,
+                                                                capsys):
+    """🔴 THE FIRST OF THE FIVE WASTED CALLS IN THE OBSERVED RUN: it assumed
+    `detail --json` returns `{"window": {...}}`. It returns the whole report
+    with `hosts[*].windows` NARROWED — hosts keep their reachability facts,
+    because dropping them would turn "unreachable" into "not found".
+
+    INVARIANT GUARD on the shape (it was always this), pinned because the
+    reference doc now states it and a claim nothing checks is the failure mode
+    this repo keeps re-finding.
+    """
+    monkeypatch.setattr(sm, "gather", lambda **kw: scratch3_gather())
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    sm.main(["detail", "scratch3:2", "--json", "--no-ch"])
+    blob = json.loads(capsys.readouterr().out)
+    assert "window" not in blob, "detail grew a bare `window` key"
+    assert set(blob) >= {"hosts", "summary", "filters", "caveats",
+                         "session_history"}
+    assert set(blob["hosts"]) == {"workbench", "laptop"}
+    row = blob["hosts"]["workbench"]["windows"][0]
+    # ...and the two row keys the same run got wrong.
+    assert row["window_index"] == "2" and "window" not in row
+    assert row["path"] and "cwd" not in row
 

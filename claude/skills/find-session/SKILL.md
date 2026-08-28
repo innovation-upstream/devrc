@@ -1,7 +1,7 @@
 ---
 name: find-session
 description: "Find a past Claude Code OR opencode session by keyword — searches both runtimes on both hosts and returns ranked sessions with the resume command. Use to recover 'the session where we did X'."
-argument-hint: "<term> [<term> …] [--project SUBSTR] [--since YYYY-MM-DD] [--any] [--limit N] [--claude-only|--opencode-only]"
+argument-hint: "<term> [<term> …] [--live [--deep] [--tail N]] [--project SUBSTR] [--since YYYY-MM-DD] [--any] [--limit N] [--claude-only|--opencode-only]"
 allowed-tools: Bash, Read
 ---
 
@@ -11,7 +11,54 @@ Goal: kill the hand-typed "find the session where we did pr 235 / migrated the r
 
 Query: `$ARGUMENTS`.
 
-## What to do
+## 🔴 If the user thinks it might still be RUNNING, use `--live` — 1.8 s, not 30 s
+
+Measured 2026-08-28: the transcript walk below takes **30.1 s**; the live cross-host tmux
+scan takes **1.82 s**, and its rows already carry the task, the label, the hotkey, the
+status, `waiting_probable`, the path and the session id. For *"find that thing I lost
+track of, is it still running, which window, where did it leave off"* the archive is the
+**wrong instrument** — it searches the past for a question about now.
+
+```bash
+python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tail 80]
+```
+
+- **Live first, archive only as a fallback.** If any live window matched, the 30 s walk is
+  skipped entirely and the output says so. `--deep` runs both.
+- **Matched against `task`, `label` and `codename` — deliberately NOT `path`.** Measured on
+  a 72-row scan: one substring hit **1** row on `task` and **29** on `path`, because nearly
+  every window shares a repo path. The LIVE header prints the field list it searched, so
+  surface it if a query the user expected to hit found nothing.
+- **`--tail N` answers "where did it leave off"** by printing that window's scrollback —
+  only when the match resolved to **exactly one** window. 🔴 **It REFUSES otherwise**:
+  several matched → exit 3, listing the candidates with a ready-made command for each
+  (*do not pick one for them* — a scrollback printed from the wrong window reads as a
+  correct answer); none matched → exit 3; the fleet was not measured → exit 4.
+- **Quote `hotkey_display` from the output verbatim; never re-derive a chord.** `M-v` opens
+  `scratch3`/violet and `M-V` opens `scratch4`/**Vapor** — different sessions. A previous
+  run read `hotkey: v` and answered `Alt+Shift+V`, sending the operator to the wrong window.
+- 🔴 **An unreachable host is never "not running".** `LIVE: SCAN FAILED` / `LIVE: NO HOST
+  ANSWERED` / a `NOT searched: <host>` line each mean the fleet was **not measured** —
+  say so in your answer rather than reporting the empty result as an absence. The tool
+  falls back to the archive in all three cases and labels why.
+- Archive hits are annotated **`<LIVE>` / `<CLOSED>` / `<UNMEASURED>`** by joining on
+  `claude_session_id` against a second, *unfiltered* live scan. `UNMEASURED` means no live
+  scan answered — it is not `CLOSED`.
+- Exit codes: `0` found · `2` usage (e.g. `--tail` without `--live`) · `3` `--tail` could
+  not resolve to one window · `4` the live fleet was not measured. `--live` composes with
+  `--json`, which then emits `{live, archive, tail}` instead of the bare array.
+- 🔴 **NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED FILE.** `--live --json` passes
+  the live rows through verbatim, and one of them is `unsent_prompt` — text the operator
+  typed and never sent. `--tail` output is a whole pane of it. devrc is a **PUBLIC** repo,
+  as is every `claudedocs/` note, commit message, PR body and fixture an agent writes into
+  it. Report either as a **count, a length or a shape**, never verbatim. (The human `--live`
+  section deliberately does not print `unsent_prompt` at all.)
+
+The live scan is `session-manager scan --json --lean --no-ch --match …`; the match
+predicate lives THERE, not in `find-session.py`, so the two tools cannot disagree. Details:
+`~/.claude/skills/session-manager/reference/payload-contract.md`.
+
+## What to do (the archive search)
 
 1. Run the search helper:
    ```bash
@@ -50,4 +97,4 @@ Notes:
   sessions, and there are ~6x more of them than there are sessions).
 - To actually re-enter a session, the user runs `claude --resume <id>` themselves (a session can't resume into another from here).
 
-Pair: `/resume` (re-enter from a handoff doc), `/handoff` (so next time there's a doc instead of archaeology).
+Pair: `/resume` (re-enter from a handoff doc), `/handoff` (so next time there's a doc instead of archaeology), `session-manager` (the live fleet in full — this skill's `--live` is a one-question slice of it).
