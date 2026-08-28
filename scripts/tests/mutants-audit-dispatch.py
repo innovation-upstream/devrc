@@ -73,6 +73,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT_REL = "scripts/audit-dispatch.py"
 TEST_REL = "scripts/tests/test_audit_dispatch.py"
+# 🔴 THIS FILE IS A THIRD INPUT TO THE SUITE, not only its driver. Round 4 made
+# the fix matrix's mutants column an evidence claim graded against `ROWS`
+# below, so the test module IMPORTS this file — and a scratch tree without it
+# fails at collection, which reads as "the mutant killed everything".
+HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
 
 # 🔴 A COLLAPSE floor, not a growth floor — same rule as
 # `mutants-audit-ladder.sh`. A suite that never ran yields zero FAILED lines,
@@ -83,6 +88,19 @@ MIN_TESTS = 50
 # green. See the module docstring — the clause ledger pins whole normalised
 # strings, and a re-wrap that went red would make every reflow a test failure.
 SURVIVES = "SURVIVES"
+
+# 🔴 A THIRD expectation, and it is NOT a synonym for SURVIVES. `SURVIVES` is a
+# CONTROL: the pin must not be keyed to layout, and a red there is a defect in
+# the pin. `HOLE` is a MEASURED GAP: the mutation survives because nothing
+# guards that sentence, which the script's own ledger comment says out loud
+# rather than letting three unguarded blocks read as covered. The two print
+# differently on purpose — "SURVIVED as required (control)" over a documented
+# hole would be the flattering wrong answer this whole file exists to refuse.
+#
+# A HOLE that starts being KILLED is good news and is reported as an ACTION:
+# promote the row to the killer set that now fires, and delete its line from
+# the ledger comment in `scripts/audit-dispatch.py`.
+HOLE = "HOLE"
 
 
 # --------------------------------------------------------------------------- #
@@ -232,10 +250,14 @@ def reword_clause(cid, new_text):
 # the pins are keyed to layout, and every reflow of the source becomes a
 # failure.
 def rewrap_a_clause(t):
+    # 🔴 RE-TARGETED in round 4 — the `no-fetch` clause was reworded when THE
+    # CHECKOUT section became three-state, and this row immediately reported
+    # MUTATION DID NOT APPLY. Third time an assert-before-editing has caught a
+    # row that would otherwise have scored as "the guard held".
     return _swap(
         t,
-        '"**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to the "',
-        '"**Do NOT  `git fetch`,  `pull`,  `checkout`  or otherwise write to the  "',
+        '"**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to a "',
+        '"**Do NOT  `git fetch`,  `pull`,  `checkout`  or otherwise write to a  "',
     )
 
 
@@ -438,7 +460,11 @@ def the_ledger_ignores_a_self_range(t):
 
 
 def emit_claims_drops_the_self_range_warning(t):
-    return _swap(t, "        if same_commit(facts.emit_from, head_sha):",
+    # 🔴 RE-TARGETED in round 4: the predicate became
+    # `same_commit(next_anchor, head_sha)` when the guard was moved onto the
+    # anchor the NEXT round will use. Disabling it now silences BOTH spellings
+    # of the warning, which is why this row gained a second killer.
+    return _swap(t, "        if same_commit(next_anchor, head_sha):",
                  "        if False:")
 
 
@@ -469,6 +495,123 @@ def add_unledgered_directive(t):
     return _swap(t, marker,
                  '    Directive("unledgered", "**A fourth instruction nobody '
                  'reviewed.**"),\n' + marker)
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 Y1-Y14 — round 4.
+# --------------------------------------------------------------------------- #
+# Y1 and Y2 are the two OPERATIVE verbatim blocks that were still unpinned after
+# round 3's sweep — each inverted alone against all 199 audit-related tests, all
+# green. Y3-Y5 are the three that remain unpinned by choice, and they are
+# recorded as DOCUMENTED HOLES rather than as controls: a hole that survives is
+# not a guard doing its job.
+
+def the_audited_flag_is_ignored(t):
+    return _swap(t,
+                 "    emit_from = args.audited or emit_anchor(newest)",
+                 "    emit_from = emit_anchor(newest)")
+
+
+def the_ignored_audited_flag_is_silent(t):
+    return _swap(t,
+                 "    if args.audited and not args.emit_claims:",
+                 "    if False:")
+
+
+def the_round_one_emit_warning_is_unreachable_again(t):
+    """The round-3 spelling restored: ask `emit_from`, which is None at round 1."""
+    return _swap(
+        t,
+        "        next_anchor = range_anchor(\n"
+        '            ClaimsBlock(args.round_no, facts.emit_from or "", head_sha, [])\n'
+        "        )\n",
+        "        next_anchor = facts.emit_from\n",
+    )
+
+
+def the_ledger_hand_rolls_its_degenerate_causes(t):
+    return _swap(
+        t,
+        '                "anything. " + directive("degenerate-range-causes")\n',
+        '                "anything. The round\'s fix commits are not in this "\n'
+        '                "checkout, or the `audited=` field was written with "\n'
+        '                "the fix tip in the `<from>` position."\n',
+    )
+
+
+def the_range_hand_rolls_its_degenerate_causes(t):
+    return _swap(
+        t,
+        '            + directive("degenerate-range-causes")\n',
+        '            + "Either the round\'s fix commits are not in this "\n'
+        '            "checkout, or the `audited=` block was written with the "\n'
+        '            "fix tip in its `<from>` position."\n',
+    )
+
+
+def same_commit_is_case_sensitive(t):
+    return _swap(t,
+                 '    a, b = (a or "").lower(), (b or "").lower()',
+                 '    a, b = (a or ""), (b or "")')
+
+
+def the_git_dirs_are_compared_as_strings(t):
+    return _swap(
+        t,
+        "    git_dir, common_dir = _resolved(lines[0]), _resolved(lines[1])",
+        "    git_dir, common_dir = lines[0], lines[1]",
+    )
+
+
+def the_unknown_worktree_state_collapses_to_shared(t):
+    return _swap(t,
+                 '        }.get(wt.kind, "checkout-unknown")),',
+                 '        }.get(wt.kind, "checkout-moves")),')
+
+
+def a_private_worktree_is_called_shared(t):
+    return _swap(t,
+                 '            "private": "checkout-private",',
+                 '            "private": "checkout-moves",')
+
+
+def where_to_work_drops_the_private_note(t):
+    return _swap(t,
+                 '    if facts.worktree.kind == "private":',
+                 "    if False:")
+
+
+# 🔴 Y3-Y5 — the DOCUMENTED HOLES. Each inverts an operative sentence that is
+# deliberately NOT pinned, and each must SURVIVE. A row that starts being killed
+# is GOOD NEWS and is reported as an action, not as a pass: promote it to a
+# killer set and delete its line from the ledger comment in the script.
+
+def the_output_contract_drops_the_per_finding_format(t):
+    return _swap(
+        t,
+        '        "Findings by severity (🔴 deploy-blocking / 🟡 should-fix / 🟢 nit), "\n'
+        '        "each in the format required above. ',
+        '        "Findings by severity, a one-paragraph summary is enough. ',
+    )
+
+
+def the_toolchain_drops_name_the_tier(t):
+    return _swap(
+        t,
+        '        "Name the tier and the base sha in any claim you make about the gate — "',
+        '        "There is no need to name the tier or the base sha. "',
+    )
+
+
+def the_round_one_range_points_at_the_pr_description(t):
+    return _swap(
+        t,
+        '            f"A FIRST, FULL audit: read the whole PR diff (`gh pr diff "\n'
+        '            f"{facts.pr}`) and the code it touches, not just the PR "\n'
+        '            "description.",\n',
+        '            "A FIRST, FULL audit: the PR description is the fastest "\n'
+        '            "way in.",\n',
+    )
 
 
 # 🔴 The SURVIVES control for the directive ledger. Whitespace changes; the
@@ -560,7 +703,15 @@ ROWS = [
       # known states flips it to cross as well. Listed because it is the row
       # that PROVES the fork case rides the same decision as the others — the
       # fixture used to encode a model in which it did not.
-      "test_a_fork_pr_against_this_repo_is_not_treated_as_cross_repo"},
+      "test_a_fork_pr_against_this_repo_is_not_treated_as_cross_repo",
+      # 🔴 TWO MORE IN ROUND 4, and both are real couplings rather than a row
+      # gone vague. `own-worktree-is-writable` is rendered ONLY by the
+      # cross-repo branch, so inverting the decision means the cross-repo
+      # scenario brief no longer carries it; and the private-worktree scenario
+      # is a SAME-repo PR, so the inversion sends it down the cross-repo branch
+      # where the WHERE TO WORK section has no private-worktree note at all.
+      "test_every_section_directive_is_emitted_verbatim_in_the_brief_that_owns_it",
+      "test_the_where_to_work_section_does_not_call_a_private_worktree_the_clone"},
      invert_cross_repo),
     ("C4  numstat failure reads as a clean zero",
      {"test_the_ledger_refuses_a_failed_command_rather_than_printing_zero"},
@@ -635,6 +786,15 @@ ROWS = [
      {"test_emit_claims_stamps_the_prs_head_not_the_local_checkouts",
       "test_emit_claims_prints_a_block_this_scripts_own_parser_accepts"},
      emit_claims_uses_the_local_head),
+    # 🔴 H4 BRIEFLY GAINED A KILLER IN ROUND 4 AND GAVE IT BACK, recorded
+    # because the give-back is the evidence. The round-1 assumption test first
+    # asserted `audited_to == <the PR head>`; that made mutant H3 (read the
+    # LOCAL head) kill it for someone else's reason, so the assertion was
+    # weakened to "the block is the BARE spelling". H4 then stopped killing it
+    # — correctly: the placeholder header parses to `audited_from=""`,
+    # `audited_to="<the"`, which IS bare-shaped, and the warning still fires
+    # because it reads `facts.emit_from`, not the emitted text. The row that
+    # owns the round-1 header's parseability is the one below.
     ("H4  round-1 placeholder back in the header",
      {"test_emit_claims_prints_a_block_this_scripts_own_parser_accepts"},
      emit_claims_interpolates_the_placeholder),
@@ -696,30 +856,54 @@ ROWS = [
       "test_the_range_says_head_was_verified_when_it_was",
       "test_a_degenerate_self_range_is_reported_not_rendered_as_a_clean_diff",
       "test_a_degenerate_self_range_is_named_by_the_ledger_too",
-      "test_a_bare_round_one_audited_sha_still_anchors_the_next_round"},
+      "test_a_bare_round_one_audited_sha_still_anchors_the_next_round",
+      # Round 4's four. All four read a range that N1 moves: two assert the
+      # degenerate banner (which no longer fires when the anchor changes) and
+      # two assert the anchor a `--audited` block produces.
+      "test_a_degenerate_range_does_not_blame_a_checkout_it_verified",
+      "test_an_uppercase_audited_sha_still_trips_the_degenerate_guard",
+      "test_audited_supplies_the_tip_a_round_one_emit_cannot_derive",
+      "test_audited_without_emit_claims_says_it_changed_nothing"},
      range_anchor_reads_the_audited_tip),
     # The OTHER wrong fix: `audited_from` alone. A round-1 bare `audited=<sha>`
     # then anchors nothing, and the remedy chain the delta refusal advertises
     # dead-ends.
+    # 🔴 N2 GAINED A KILLER IN ROUND 4, and it is the one that shows the two
+    # fixes are the SAME mechanism: the round-1 assumption warning asks
+    # `range_anchor` what the next round will anchor on, so dropping the bare
+    # fallback makes that anchor None and the warning silent again.
     ("N2  the bare round-1 fallback is dropped",
      {"test_a_bare_round_one_audited_sha_still_anchors_the_next_round",
-      "test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor"},
+      "test_the_cumulative_figure_is_not_measured_without_a_round_one_anchor",
+      "test_a_round_one_emit_claims_says_head_is_an_assumption_not_a_measurement"},
      range_anchor_loses_the_bare_fallback),
     # 🔴 THE MIRROR IMAGE, and the reason the two readers are separate
     # functions: "one anchor everywhere" is wrong on the WRITER's side, and it
     # produces a superset rather than an empty range, so nothing else notices.
+    # `--audited` routes through `emit_from`, so swapping the writer's anchor
+    # to `prev_sha` breaks the flag as well — round 4's addition.
     ("N3  --emit-claims writes the RANGE anchor as `<from>`",
      {"test_emit_claims_records_the_tip_this_round_audited_not_the_range_anchor",
-      "test_emit_claims_prints_a_block_this_scripts_own_parser_accepts"},
+      "test_emit_claims_prints_a_block_this_scripts_own_parser_accepts",
+      "test_audited_supplies_the_tip_a_round_one_emit_cannot_derive"},
      emit_claims_writes_the_range_anchor),
     ("N4  THE RANGE renders a self-range with no banner",
-     {"test_a_degenerate_self_range_is_reported_not_rendered_as_a_clean_diff"},
+     {"test_a_degenerate_self_range_is_reported_not_rendered_as_a_clean_diff",
+      # Round 4: both of these read THE RANGE's degenerate banner — one for
+      # its cause list, one for an uppercase anchor.
+      "test_a_degenerate_range_does_not_blame_a_checkout_it_verified",
+      "test_an_uppercase_audited_sha_still_trips_the_degenerate_guard"},
      the_range_ignores_a_self_range),
     ("N5  the ledger calls a self-range merely empty",
-     {"test_a_degenerate_self_range_is_named_by_the_ledger_too"},
+     {"test_a_degenerate_self_range_is_named_by_the_ledger_too",
+      "test_a_degenerate_range_does_not_blame_a_checkout_it_verified"},
      the_ledger_ignores_a_self_range),
+    # 🔴 N6 now silences BOTH spellings of the warning — see the re-targeting
+    # note on its mutation. Recorded rather than narrowed: one predicate
+    # guards both, and pretending otherwise would mean asserting less.
     ("N6  --emit-claims writes `X..X` in silence",
-     {"test_emit_claims_warns_when_the_block_it_writes_is_a_self_range"},
+     {"test_emit_claims_warns_when_the_block_it_writes_is_a_self_range",
+      "test_a_round_one_emit_claims_says_head_is_an_assumption_not_a_measurement"},
      emit_claims_drops_the_self_range_warning),
     ("N7  the empty-range reason names the refuted causes",
      {"test_an_empty_range_does_not_name_a_cause_the_head_check_refutes"},
@@ -745,7 +929,10 @@ ROWS = [
          "something obvious contradicts one.")),
     ("X2  the delta-regressions instruction deleted outright",
      {"test_the_section_directive_ledger_is_pinned_two_way",
-      "test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
+      "test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
+      # Round 4: the scenario map and the render check both name it too.
+      "test_the_directive_render_scenario_ledger_is_pinned_two_way",
+      "test_every_section_directive_is_emitted_verbatim_in_the_brief_that_owns_it"},
      drop_entry("Directive", "delta-regressions")),
     # 🔴 X3 KEEPS "MOVES UNDER YOU" and "NOT a finding" — both pinned by
     # `test_the_shared_checkout_state_is_reported_with_the_it_moves_warning` —
@@ -759,17 +946,95 @@ ROWS = [
          "MOVES UNDER YOU** — the branch can change, files can appear and "
          "vanish, and commits can land mid-audit. That is NOT a finding in "
          "itself, but it is worth reporting. Restore anything you see move.")),
+    # 🔴 RE-TARGETED KILLER SET in round 4, and the swap is the interesting
+    # part. The "it reaches no brief" hazard used to be caught by the emitted
+    # test, which iterated the SCRIPT's directives; that test is now driven by
+    # the scenario map, so an unledgered directive is caught one step earlier —
+    # by the scenario pin, which reads `SECTION_DIRECTIVES` and finds an id
+    # nobody said where to render. The hazard is still covered; the guard that
+    # covers it moved, and pretending otherwise would leave a DEAD pin here.
     ("XA  add an unledgered fourth directive",
      {"test_the_section_directive_ledger_is_pinned_two_way",
-      # It ships in the constant and reaches NO brief, which is its own
-      # hazard: an instruction nobody reads is not an instruction.
-      "test_every_section_directive_is_emitted_verbatim_in_the_delta_brief"},
+      "test_the_directive_render_scenario_ledger_is_pinned_two_way"},
      add_unledgered_directive),
     # 🔴 The SURVIVES control for the directive ledger — the sibling of S1. A
     # RED here means the new pin is keyed to layout, and every reflow of the
     # source becomes a test failure.
     ("XS  re-space a directive (instruction identical)",
      SURVIVES, rewrap_a_directive),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 Y1-Y14 — round 4.
+    # --------------------------------------------------------------------- #
+    # 🔴 Y1 INVERTS THE SENTENCE THAT DEFINES THE DELTA SCOPE. It lived inside
+    # a generated f-string, where no whole-string pin could reach it, and the
+    # inversion "Re-audit the whole PR as well" passed every audit-related
+    # test. Killed by the whole-string ledger ALONE — the directive is still
+    # present, still ledgered by id and still emitted, so any other killer
+    # would mean some test is reading this text for something it does not own.
+    ("Y1  delta-scope inverted into 're-audit the whole PR'",
+     {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
+     reword_entry(
+         "Directive", "delta-scope",
+         "**Audit that range, and re-audit the whole PR as well.** A delta "
+         "round is cheap and re-reading everything costs little.")),
+    # 🔴 Y2 leaves a CROSS-REPO auditor with nowhere to work: the brief has
+    # just told them to build that worktree themselves precisely so they can
+    # fetch in it.
+    ("Y2  own-worktree-is-writable inverted into 'do not fetch'",
+     {"test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
+     reword_entry(
+         "Directive", "own-worktree-is-writable",
+         "Do not fetch or check out inside it either. The no-write rule "
+         "covers every checkout you touch.")),
+    # 🔴 Y3-Y5 — DOCUMENTED HOLES, not controls. See `HOLE` above.
+    ("Y3  OUTPUT drops the per-finding format (NO GUARD)",
+     HOLE, the_output_contract_drops_the_per_finding_format),
+    ("Y4  toolchain drops 'name the tier and base sha' (NO GUARD)",
+     HOLE, the_toolchain_drops_name_the_tier),
+    ("Y5  round-1 range points at the PR description (NO GUARD)",
+     HOLE, the_round_one_range_points_at_the_pr_description),
+    # 🔴 Y5b is the one measurement that makes the three-state worktree read
+    # correct: git answers `/abs/.git` and `../.git` in a repo SUBDIRECTORY —
+    # different strings, the same directory — so a string compare calls every
+    # subdirectory of an ordinary clone a PRIVATE worktree.
+    ("Y5b the two git dirs compared as strings",
+     {"test_gather_worktree_kind_resolves_paths_before_comparing_them"},
+     the_git_dirs_are_compared_as_strings),
+    ("Y6  the UNKNOWN worktree state collapses to SHARED",
+     {"test_an_unreadable_worktree_state_is_its_own_answer_and_keeps_the_no_write",
+      # The `checkout-unknown` directive then reaches no brief at all.
+      "test_every_section_directive_is_emitted_verbatim_in_the_brief_that_owns_it"},
+     the_unknown_worktree_state_collapses_to_shared),
+    ("Y7  --audited is parsed and ignored",
+     {"test_audited_supplies_the_tip_a_round_one_emit_cannot_derive"},
+     the_audited_flag_is_ignored),
+    ("Y8  --audited without --emit-claims is silent again",
+     {"test_audited_without_emit_claims_says_it_changed_nothing"},
+     the_ignored_audited_flag_is_silent),
+    # 🔴 Y9 RESTORES THE UNREACHABLE SPELLING: asked of `emit_from`, which is
+    # None for the round-1 case the warning exists to cover.
+    ("Y9  the round-1 emit warning goes back to `emit_from`",
+     {"test_a_round_one_emit_claims_says_head_is_an_assumption_not_a_measurement"},
+     the_round_one_emit_warning_is_unreachable_again),
+    ("Y10 the LEDGER hand-rolls the refuted cause again",
+     {"test_a_degenerate_range_does_not_blame_a_checkout_it_verified",
+      "test_the_degenerate_range_causes_have_exactly_one_writer_per_consumer"},
+     the_ledger_hand_rolls_its_degenerate_causes),
+    ("Y11 THE RANGE hand-rolls the refuted cause again",
+     {"test_a_degenerate_range_does_not_blame_a_checkout_it_verified",
+      "test_the_degenerate_range_causes_have_exactly_one_writer_per_consumer"},
+     the_range_hand_rolls_its_degenerate_causes),
+    ("Y12 same_commit goes back to case-sensitive",
+     {"test_an_uppercase_audited_sha_still_trips_the_degenerate_guard"},
+     same_commit_is_case_sensitive),
+    ("Y13 WHERE TO WORK drops the private-worktree note",
+     {"test_the_where_to_work_section_does_not_call_a_private_worktree_the_clone"},
+     where_to_work_drops_the_private_note),
+    ("Y14 a PRIVATE worktree is described as SHARED again",
+     {"test_a_private_worktree_is_not_described_as_shared_and_is_not_absolved",
+      "test_every_section_directive_is_emitted_verbatim_in_the_brief_that_owns_it"},
+     a_private_worktree_is_called_shared),
 ]
 
 
@@ -805,6 +1070,7 @@ def main() -> int:
         (root / "scripts" / "tests").mkdir(parents=True)
         shutil.copy(REPO / SCRIPT_REL, root / SCRIPT_REL)
         shutil.copy(REPO / TEST_REL, root / TEST_REL)
+        shutil.copy(REPO / HARNESS_REL, root / HARNESS_REL)
         if (root / ".git").exists():
             print("🔴 the copy carries a .git — refusing to run")
             return 2
@@ -846,6 +1112,20 @@ def main() -> int:
                 continue
             # 🔴 A row that must SURVIVE. Reported through the same code path as
             # everything else, so a control cannot quietly stop being checked.
+            # 🔴 A DOCUMENTED HOLE. Same code path, a different verdict line,
+            # because "SURVIVED as required (control)" printed over an
+            # unguarded sentence is the flattering wrong answer.
+            if want is HOLE:
+                if got:
+                    print(f"  ⚠ {label:44s} NOW KILLED by {sorted(got)} — a "
+                          "guard covers this now. Promote the row to that "
+                          "killer set and delete its line from the ledger "
+                          "comment in scripts/audit-dispatch.py.")
+                    bad += 1
+                else:
+                    print(f"  ok {label:44s} SURVIVED — DOCUMENTED HOLE "
+                          "(nothing guards it; the script's ledger says so)")
+                continue
             if want is SURVIVES:
                 if got:
                     print(f"  🔴 {label:44s} KILLED by {sorted(got)} — this row "

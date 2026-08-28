@@ -95,6 +95,32 @@ restates the diff). Round 3's guards are listed in
 `INVARIANT_GUARDS_AND_LEDGERS` with the reason each is a guard and the mutant
 that proves it executes.
 
+🔴 ROUND 4 — a third base, `e06461f7`
+--------------------------------------
+Round 4's audit found four 🟡 in the ROUND-3 tree, **two of them in code that
+round wrote**: the round-1 -> round-2 hop was empty by construction and
+`--emit-claims` was silent about it (the self-range warning was spelled on a
+field that is None at round 1, so it was structurally unreachable for the one
+spelling it was for); both new degenerate-range messages blamed "the round's
+fix commits are not in this checkout" over a checkout `anchor_is_head` had
+just verified to BE the PR's head; the "which blocks are NOT pinned" comment
+claimed a coverage that did not exist over an enumeration that was incomplete;
+and THE SHARED CHECKOUT asserted "shared" of whatever cwd was, including a
+private per-agent worktree — telling that auditor the movement it should
+report is expected and not a finding.
+
+Measured at `e06461f7` the same way: **15 failed, 68 passed**, of which FIVE
+are regression coverage. `RED_AT_BASE_R4` carries them and the constant says
+why the other ten are guards.
+
+🔴 THE FIX MATRIX GAINED TWO CHECKS IT DID NOT HAVE, and both were holes the
+round-4 audit found in this module's own bookkeeping: the `mutants` column was
+DISCARDED by `fix_matrix_problems` (rewriting a GUARD row to name a mutant that
+does not exist left the suite green, while for a GUARD row that column IS the
+evidence), and nothing required a `RED_AT_BASE` entry to appear in the matrix
+at all — nine round-2 detectors and one round-3 detector were in that state,
+so five findings could have dropped out with nothing going red.
+
 🔴 FINDING 3's PRESCRIPTION WAS WRONG ON ONE POINT, and it is recorded because
 the next person will reach for the same field: the audit said to use
 `isCrossRepository` + **`baseRepository`**. `gh pr view --json` HAS NO
@@ -118,8 +144,9 @@ rows that justified adding a pin. Each row there names the EXACT killer set and
 reports WRONG-KILLER (an expected pin did not fire) separately from EXTRA-KILLER
 (the row no longer isolates what it names).
 
-Re-run 2026-08-28 against HEAD of this branch after the round-3 fixes — **52
-rows, all as expected** — each mutant applied to a COPY of
+Re-run 2026-08-28 against HEAD of this branch after the round-4 fixes — **67
+rows, all as expected**, over an 83-test positive control — each mutant applied
+to a COPY of
 `scripts/audit-dispatch.py` in a scratch tree (never the worktree), under
 `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`, with the unmutated copy as the
 positive control. Every mutant asserted its target string present before
@@ -140,13 +167,30 @@ they are recorded because both are the shape this file warns about elsewhere:
     neighbouring test's assertion (the `<to>` sha) and had parsed the FIRST
     `audit-claims` fence in the output rather than the emitted one.
 
-The rows below are the pre-existing sixteen. The thirty-six added since —
+The rows below are the pre-existing sixteen. Everything added since —
 W1-W5 + S1, H1-H4, T1-T2, P1-P2, K1-K3, L1, B1-B5 in round 2; N1-N8, X1-X3, XA
-and the SURVIVES control XS in round 3 — are listed in the harness with their
-killer sets and are NOT transcribed here; the harness is the authority on which
-rows exist.
+and the SURVIVES control XS in round 3; Y1-Y14 in round 4 — is listed in the
+harness with its killer set and is NOT transcribed here; the harness is the
+authority on which rows exist.
+
+🔴 ROUND 4 RE-TARGETED FIVE PRE-EXISTING ROWS AND SHIFTED SEVEN KILLER SETS,
+and both kinds are worth reading before trusting any row here. S1 and N6
+reported MUTATION DID NOT APPLY (the `no-fetch` clause was reworded; the emit
+warning's predicate moved onto the next round's anchor) — without the
+assert-before-editing rule each would have scored as "the guard held". XA's
+expected set had to CHANGE rather than grow: the hazard it names is now caught
+one guard earlier, and leaving the old name there would have left a DEAD pin
+reading as coverage.
+
+🔴 ROUND 4 ALSO INTRODUCED A THIRD EXPECTATION, `HOLE`, and it is not a synonym
+for `SURVIVES`. `SURVIVES` is a control (a pin must not be keyed to layout);
+`HOLE` is a measured GAP (Y3-Y5: three operative sentences nothing guards).
+Printing "SURVIVED as required (control)" over an unguarded sentence is exactly
+the flattering wrong answer this battery exists to refuse.
 
   POS  unmutated copy .............................. 72 passed  <- control
+       (that figure is the ROUND-2 control; today's is 83 — the harness
+        prints the current one, which is the number to read)
 
   D1   delete the `read-only` clause ............... 4 failed
   D3   delete the `stop-rule` clause ............... 4 failed
@@ -263,6 +307,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -319,11 +364,19 @@ CLAUSE_LEDGER = {
         "pointing at the real git dir, so a commit inside the copy lands on "
         "the branch you are auditing."
     ),
+    # 🔴 REWORDED IN ROUND 4, deliberately, and the ledger moves with it. The
+    # clause used to name "THE SHARED CHECKOUT section", a heading that only
+    # existed because the brief asserted SHARED of every checkout. THE CHECKOUT
+    # section is now three-state, so the clause names the section and lets the
+    # section say whether the tree it describes is shared — otherwise the
+    # clause forbids an auditor from writing to their OWN private worktree,
+    # contradicting `own-worktree-is-writable` in the same brief.
     "no-fetch": (
-        "**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to the "
-        "shared checkout named in THE SHARED CHECKOUT section of this brief.** "
-        "Other sessions are in it; a fetch there is a write with cross-session "
-        "blast radius, and every ref you need is already resolved for you here."
+        "**Do NOT `git fetch`, `pull`, `checkout` or otherwise write to a "
+        "SHARED checkout — THE CHECKOUT section of this brief says whether "
+        "the one it names is shared.** Other sessions are in a shared tree; a "
+        "fetch there is a write with cross-session blast radius, and every ref "
+        "you need is already resolved for you here."
     ),
     "stop-rule": (
         "**A clean round ENDS the ladder — ending it is the CORRECT outcome, "
@@ -447,6 +500,25 @@ OTHER_REPO_PR = dict(
 FAKE_REPO_DIR = "/fake/checkout/devrc"
 FAKE_ORIGIN = "git@github.com:example-org/devrc.git"
 
+# 🔴 The two paths `gather_worktree_kind` reads, in the shapes REAL git prints
+# them — measured at four points (repo root, repo subdirectory, linked
+# worktree, and this session's own agent worktree):
+#
+#     repo root        `.git`                          `.git`
+#     repo subdirectory `/abs/path/.git`               `../.git`
+#     linked worktree  `/abs/.git/worktrees/<name>`    `/abs/.git`
+#
+# The SUBDIRECTORY row is why the script resolves both paths before comparing
+# them: textually different, the same directory. A string compare there calls
+# every subdirectory of an ordinary clone a private worktree — wrong in the
+# direction that DROPS the no-write instruction.
+SHARED_GIT_DIRS = (0, ".git\n.git\n", "")
+PRIVATE_COMMON_DIR = f"{FAKE_REPO_DIR}/.git"
+PRIVATE_GIT_DIRS = (
+    0, f"{PRIVATE_COMMON_DIR}/worktrees/agent-7f3a\n{PRIVATE_COMMON_DIR}\n", ""
+)
+UNREADABLE_GIT_DIRS = (128, "", "fatal: not a git repository")
+
 CHECKLIST = (
     "**Audit for:**\n1. **Risks** — what breaks in production.\n"
     "9. **Second-order consequences** — ripple effects."
@@ -471,6 +543,7 @@ def make_runner(
     numstat=(0, "10\t2\tscripts/foo.py\n3\t0\tscripts/tests/test_foo.py\n", ""),
     head_sha="deadbee",
     local_head=None,
+    git_dirs=SHARED_GIT_DIRS,
 ):
     """A closed-world stand-in for `gh` and `git`. No process is spawned.
 
@@ -514,6 +587,13 @@ def make_runner(
             return 0, gh_stdout if gh_stdout is not None else json.dumps(payload), ""
         if cmd[:2] == ["git", "-C"]:
             verb = cmd[3]
+            # 🔴 BEFORE the other `rev-parse` rows: this one is identified by
+            # its FLAGS, and `cmd[-1] == "HEAD"` below would not match it but
+            # a future re-ordering could. `git_dirs` defaults to the SHARED
+            # answer, which is what every pre-existing test in this module
+            # assumes and asserts.
+            if verb == "rev-parse" and "--git-common-dir" in cmd:
+                return git_dirs
             if verb == "rev-parse" and "--show-toplevel" in cmd:
                 return 0, toplevel + "\n", ""
             if verb == "rev-parse" and "--abbrev-ref" in cmd:
@@ -802,7 +882,128 @@ DIRECTIVE_LEDGER = {
         "and NOT a finding. **Report what you observed moving and carry on; do "
         "not chase it, and do not try to restore it.**"
     ),
+    # ---------------------------------------------------------------- #
+    # 🔴 ROUND 4's five. Two of them (`delta-scope`,
+    # `own-worktree-is-writable`) are Y1 and Y2 — verbatim operative prose
+    # measured invertible against all 199 audit-related tests while every one
+    # stayed green. Two more are the states `checkout-moves` asserted its way
+    # past, and the fifth is the one writer for a cause list that was FALSE at
+    # both of its two sites.
+    # ---------------------------------------------------------------- #
+    "delta-scope": (
+        "**Audit ONLY that range — do NOT re-audit the whole PR.** Everything "
+        "below the range is work a previous round already dispositioned; "
+        "re-reading it re-reports findings that were answered, buries the "
+        "delta this round exists to examine, and makes the round's cost "
+        "indistinguishable from a first full audit."
+    ),
+    "degenerate-range-causes": (
+        "Either the `audited=` block was written with the fix tip in its "
+        "`<from>` position — which is what `--emit-claims` records when "
+        "`--audited` is omitted, and what a bare round-1 `audited=<sha>` "
+        "always means; `<from>` is the tip the PREVIOUS round AUDITED, so "
+        "re-emit that block with `--audited <the tip that round actually "
+        "read>` and re-assemble — or nothing has been committed and pushed to "
+        "the PR since that sha was recorded, in which case there is no delta "
+        "to audit yet. 🔴 What is NOT a cause: the round's fix commits being "
+        "absent from this checkout. This checkout was VERIFIED at assembly "
+        "time to be the PR's head commit, and that verification is the very "
+        "thing that makes this range DEGENERATE rather than merely "
+        "unmeasurable — so fetching or checking out here could not help, and "
+        "the `no-fetch` clause forbids it anyway."
+    ),
+    "checkout-private": (
+        "🔴 **This is a PRIVATE worktree — yours alone.** Its `.git` is a link "
+        "into a shared repository, but the WORKING TREE is not shared, so "
+        "files appearing, vanishing or changing under you is **NOT expected "
+        "here and IS worth reporting** — that is the sibling-agent clobber "
+        "`claude/RULES.md` describes, not background noise. **If something "
+        "moves, report it with what moved and when.** Writing here is fine: "
+        "the no-write clause below is about a SHARED checkout, and this is "
+        "not one."
+    ),
+    "checkout-unknown": (
+        "🔴 **COULD NOT DETERMINE whether this checkout is shared** — the "
+        "`git rev-parse --git-dir --git-common-dir` read that decides it did "
+        "not answer. **Treat it as SHARED and write nothing to it.** But do "
+        "NOT treat anything you see move as expected: that absolution belongs "
+        "to a checkout KNOWN to be shared, and this one is not known to be "
+        "anything. If something moves, report it AND report that its cause "
+        "could not be established here."
+    ),
+    "own-worktree-is-writable": (
+        "That worktree is YOURS: fetching and checking out inside it is fine. "
+        "The no-write rule below is about the SHARED checkout."
+    ),
 }
+
+# 🔴 WHICH BRIEF EACH DIRECTIVE SHIPS IN — a second, independent ledger, and it
+# exists because the emitted-verbatim test used to assert that EVERY directive
+# reaches a DELTA brief. That was true while all three shipped unconditionally;
+# it is false the moment a directive is owned by a STATE (a private worktree, a
+# cross-repo PR, a degenerate range), and the cheap fix — dropping the
+# conditional ones from the check — would have retired the only test that
+# proves a directive reaches an artifact at all.
+#
+# Each value names a scenario built by `brief_for_scenario` below. Pinned
+# two-way against `DIRECTIVE_LEDGER`, so a directive with no scenario (an
+# instruction nobody can be shown to receive) fails, and a scenario naming no
+# directive fails.
+DIRECTIVE_RENDERS_IN = {
+    "claims-framing": "delta",
+    "delta-scope": "delta",
+    "delta-regressions": "delta",
+    "degenerate-range-causes": "degenerate",
+    "checkout-moves": "delta",
+    "checkout-private": "private-worktree",
+    "checkout-unknown": "unreadable-worktree",
+    "own-worktree-is-writable": "cross-repo",
+}
+
+
+_CHECKOUT_HEADING = re.compile(r"^## THE (?:SHARED )?CHECKOUT\b.*$", re.M)
+
+
+def checkout_section(brief):
+    """The checkout block, sliced WITHOUT depending on the round-4 heading.
+
+    🔴 Deliberately matches the OLD spelling (`## THE SHARED CHECKOUT`) as well
+    as the new one. Slicing on the new heading alone made two round-4 tests
+    fail at `e06461f7` with `ValueError: substring not found` — an error for
+    want of a name the fix introduced, which `claude/RULES.md` says is not
+    evidence of anything. With both spellings matched, the same tests fail
+    there on the WRONG ANSWER instead, which is the claim they are making.
+    """
+    m = _CHECKOUT_HEADING.search(brief)
+    assert m, f"no checkout section in the brief at all:\n{brief[:400]}"
+    rest = brief[m.end():]
+    nxt = rest.find("\n## ")
+    return brief[m.start():m.end() + (nxt if nxt != -1 else len(rest))]
+
+
+def brief_for_scenario(name):
+    """-> the stdout of a run that MUST carry the directive(s) mapped to it."""
+    if name == "delta":
+        argv, kw = ["900", "--round", "3"], {"comments": [CLAIMS_BLOCK_R2]}
+    elif name == "degenerate":
+        argv, kw = ["900", "--round", "3"], {
+            "comments": [CLAIMS_BLOCK_R2], "pr": SELF_RANGE_PR,
+        }
+    elif name == "private-worktree":
+        argv, kw = ["900"], {"git_dirs": PRIVATE_GIT_DIRS}
+    elif name == "unreadable-worktree":
+        argv, kw = ["900"], {"git_dirs": UNREADABLE_GIT_DIRS}
+    elif name == "cross-repo":
+        argv, kw = ["900"], {"pr": OTHER_REPO_PR}
+    else:
+        raise AssertionError(f"no such scenario: {name!r}")
+    rc, out, err = run_main(argv, **kw)
+    assert rc == 0, f"scenario {name!r} exited {rc}: {err}"
+    assert len(out) > 3_000, (
+        f"scenario {name!r} produced only {len(out)} chars — a presence "
+        "assertion over it would be a claim about nothing"
+    )
+    return out
 
 
 def test_the_section_directive_ledger_is_pinned_two_way():
@@ -854,31 +1055,70 @@ def test_each_section_directive_carries_the_instruction_its_ledger_entry_names()
         )
 
 
-def test_every_section_directive_is_emitted_verbatim_in_the_delta_brief():
+def test_the_directive_render_scenario_ledger_is_pinned_two_way():
+    """Every directive names a brief that carries it, and vice versa.
+
+    🔴 INVARIANT GUARD; its evidence is mutants XA and Y1/Y2 (a directive added
+    with no scenario, or one whose section stops rendering it). Without this,
+    a directive could be added to `SECTION_DIRECTIVES`, ledgered whole, and
+    reach NO brief at all — an instruction nobody receives, pinned word for
+    word, reading as coverage.
+    """
+    # 🔴 Against the SCRIPT's ids, not only against the sibling ledger. Two
+    # test-module constants compared with each other are unreachable by the
+    # mutation battery — a guard with no possible evidence — and the claim that
+    # matters is about the directives that SHIP, not about this file's
+    # bookkeeping. Mutant XA (add an unledgered directive) is what proves it
+    # executes.
+    in_script = {d.id for d in ad.SECTION_DIRECTIVES}
+    scoped = set(DIRECTIVE_RENDERS_IN)
+    assert in_script == scoped, (
+        "\n\n`SECTION_DIRECTIVES` and `DIRECTIVE_RENDERS_IN` disagree.\n"
+        f"  ships but never shown to render: {sorted(in_script - scoped)}\n"
+        f"  scoped but not in the script   : {sorted(scoped - in_script)}\n"
+        "  A directive with no scenario is an instruction nobody can be shown "
+        "to receive; a scenario with no directive asserts nothing."
+    )
+    assert set(DIRECTIVE_LEDGER) == scoped, (
+        "\n\n`DIRECTIVE_LEDGER` and `DIRECTIVE_RENDERS_IN` disagree: "
+        f"{sorted(set(DIRECTIVE_LEDGER) ^ scoped)}"
+    )
+
+
+def test_every_section_directive_is_emitted_verbatim_in_the_brief_that_owns_it():
     """POSITIVE CONTROL: the constant is not the artifact, the brief is.
 
-    All three ship in a DELTA brief. Two of them (`claims-framing`,
-    `delta-regressions`) are deliberately absent from a round-1 brief — "this
-    fix round" is meaningless when there has not been one — which is why they
-    are directives owned by their sections rather than invariant clauses.
+    🔴 THIS USED TO ASSERT THAT EVERY DIRECTIVE REACHES A DELTA BRIEF, which
+    was true only while all three shipped unconditionally. Five of the eight
+    are now owned by a STATE — a degenerate range, a private worktree, an
+    unreadable one, a cross-repo PR — so the delta brief carries three of them
+    and the old assertion would have to be weakened to nothing. It is driven by
+    `DIRECTIVE_RENDERS_IN` instead: each directive is looked for in a brief
+    built for ITS state, and the two-way pin above stops a directive from
+    quietly having no state at all.
     """
-    rc, out, err = run_main(["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2])
-    assert rc == 0, err
-    assert len(out) > 3_000, (
-        f"the assembled brief is only {len(out)} chars — every presence "
-        "assertion below would be a claim about nothing."
-    )
-    for directive in ad.SECTION_DIRECTIVES:
-        assert directive.text in out, (
-            f"directive {directive.id!r} is in SECTION_DIRECTIVES but does NOT "
-            "reach the emitted delta brief."
-        )
-    rc, out1, err = run_main(["900"])
-    assert rc == 0, err
-    assert ad.DIRECTIVE["checkout-moves"] in out1, (
-        "the shared-checkout warning is missing from a ROUND-1 brief — that "
-        "one is not delta-specific and the checkout moves under a first audit "
-        "exactly as much"
+    # 🔴 Compared against the SCRIPT's own text, not against `DIRECTIVE_LEDGER`.
+    # This test owns RENDERING; text drift is owned by
+    # `..._carries_the_instruction_its_ledger_entry_names`. Reading the ledger
+    # here would make every reword kill both, and a row that dies to two guards
+    # cannot show which one is alive — mutants X1 and X3 exist precisely to
+    # prove the whole-string ledger fires ALONE.
+    by_scenario = {}
+    for did, scenario in DIRECTIVE_RENDERS_IN.items():
+        by_scenario.setdefault(scenario, []).append(did)
+    for scenario, dids in sorted(by_scenario.items()):
+        out = brief_for_scenario(scenario)
+        for did in sorted(dids):
+            assert did in ad.DIRECTIVE, f"directive {did!r} is gone"
+            assert ad.DIRECTIVE[did] in out, (
+                f"\n\ndirective {did!r} is scoped to the {scenario!r} brief "
+                "but does NOT reach it — the section that owns it stopped "
+                "rendering it, so the instruction ships to nobody."
+            )
+    # The shared-checkout warning is not delta-specific: a first audit stands
+    # in the same tree and it moves exactly as much.
+    assert ad.DIRECTIVE["checkout-moves"] in run_main(["900"])[1], (
+        "the shared-checkout warning is missing from a ROUND-1 brief"
     )
 
 
@@ -1741,6 +1981,360 @@ def test_emit_claims_stamps_the_prs_head_not_the_local_checkouts():
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 ROUND 4 — THE ROUND-1 -> ROUND-2 HOP, WHICH WAS EMPTY BY CONSTRUCTION
+# --------------------------------------------------------------------------- #
+# Round 3 spelled the self-range warning on `same_commit(facts.emit_from, head)`
+# — and for a ROUND-1 `--emit-claims` there is no prior block, so `emit_from` is
+# None and the guard is STRUCTURALLY UNREACHABLE. The bare block it writes
+# instead carries the identical hazard: `range_anchor` falls back to `<to>`, and
+# `<to>` IS the head it was just stamped at. Round 1 is the remedy the delta
+# refusal ADVERTISES, so the unreachable case was the advertised one — and this
+# PR's own live round-1 block (`audited=abc41024`, bare, the round-1 FIX tip) is
+# the instance.
+
+def test_a_round_one_emit_claims_says_head_is_an_assumption_not_a_measurement():
+    """🔴 REGRESSION. Red at `e06461f7`, which emitted it in total silence.
+
+    The observable at the base is not a wrong sha — it is NO STDERR AT ALL over
+    a block whose single sha makes the next round's range empty by
+    construction. The next round then renders DEGENERATE and the tip round 1
+    actually read is recorded nowhere.
+    """
+    rc, out, err = run_main(["900", "--round", "1", "--emit-claims"])
+    assert rc == 0, err
+    tail = out[out.rindex("```audit-claims"):]
+    blocks, malformed = ad.parse_claims_blocks([tail])
+    assert not malformed and len(blocks) == 1, f"{malformed}\n{tail}"
+    # 🔴 The BARE spelling, and deliberately NOT `audited_to == <the PR head>`:
+    # that claim is owned by `..._stamps_the_prs_head_not_the_local_checkouts`,
+    # and re-asserting it here made mutant H3 (read the LOCAL head) kill this
+    # row too — a row that dies for someone else's reason is not evidence for
+    # the one it names.
+    assert blocks[0].audited_from == "" and blocks[0].audited_to, (
+        "the round-1 block is not the bare `audited=<sha>` spelling this "
+        f"warning is about: {blocks[0]!r}"
+    )
+    assert "ASSUMED" in err, (
+        "\n\n`--emit-claims` at round 1 stamped the PR's CURRENT head into the "
+        "field the next round anchors on and said nothing. It runs AFTER the "
+        "round's fixes land, so that head is the one the FIXES produced — not "
+        f"the tip the round read. stderr was:\n{err}"
+    )
+    assert "EMPTY BY CONSTRUCTION" in err and "--audited" in err, (
+        "the warning does not say what goes wrong next, or how to supply the "
+        f"sha it could not derive. stderr was:\n{err}"
+    )
+
+
+def test_audited_supplies_the_tip_a_round_one_emit_cannot_derive():
+    """🔴 INVARIANT GUARD — `--audited` does not exist at `e06461f7`.
+
+    A test that fails there fails with `unrecognized arguments`, which is an
+    error for want of a name the fix introduced and is not evidence of
+    anything. Its evidence is mutant Y7 (the flag is parsed and ignored).
+
+    The assertion is END TO END on purpose: the emitted block is fed back
+    through this script's OWN parser as the next round's comment, because the
+    only thing that matters about the field is what the next round anchors on.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "1", "--emit-claims", "--audited", "abcd1234"]
+    )
+    assert rc == 0, err
+    tail = out[out.rindex("```audit-claims"):]
+    blocks, malformed = ad.parse_claims_blocks([tail])
+    assert not malformed and len(blocks) == 1, f"{malformed}\n{tail}"
+    assert blocks[0].audited_from == "abcd1234", (
+        f"\n\n`--audited abcd1234` did not reach the block's `<from>`: "
+        f"{blocks[0]!r}. That field is the ONLY way a round-1 comment can "
+        "record the tip its audit read; --emit-claims runs after the fixes and "
+        "cannot derive it."
+    )
+    # The `<to>` half is owned by `..._stamps_the_prs_head_not_the_local_...`
+    # and is deliberately not re-asserted here — see the sibling test.
+    assert "ASSUMED" not in err, (
+        f"the assumption warning still fired with --audited passed: {err}"
+    )
+
+    emitted = "\n".join(tail.splitlines()[:4])
+    rc2, out2, err2 = run_main(["900", "--round", "2"], comments=[emitted])
+    assert rc2 == 0, err2
+    assert "`abcd1234..HEAD`" in out2, (
+        "\n\nthe next round does not anchor on the tip round 1 audited, so the "
+        "round-1 -> round-2 hop still loses round 1's own fix commits."
+    )
+    assert "DEGENERATE RANGE" not in out2
+
+
+def test_audited_without_emit_claims_says_it_changed_nothing():
+    """🔴 INVARIANT GUARD (the flag does not exist at `e06461f7`); mutant Y8.
+
+    A flag that silently does nothing is the shape this module refuses
+    everywhere else. `--audited` is written by `--emit-claims` and by nothing
+    else, so an operator who passes it to a plain assembly run must not read
+    the silence as "recorded".
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "3", "--audited", "abcd1234"],
+        comments=[CLAIMS_BLOCK_R2],
+    )
+    assert rc == 0, err
+    assert "--audited" in err and "changed NOTHING" in err, (
+        f"the ignored flag was accepted in silence; stderr was:\n{err}"
+    )
+    assert "`aaaa1111..HEAD`" in out, (
+        "worse than silence: `--audited` moved the range this round DIFFS "
+        "from. It is the WRITER's anchor and must not touch the reader's."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 4 — THE DEGENERATE-RANGE CAUSES, WHICH `anchor_is_head` REFUTES
+# --------------------------------------------------------------------------- #
+# `anchor_is_head` returns True only when `head_check.ok` — this checkout is
+# VERIFIED to be the PR's head. Both degenerate-range messages nevertheless
+# offered "the round's fix commits are not in this checkout", sending the
+# operator to fetch commits into a checkout that already has them, which the
+# brief's own `no-fetch` clause forbids there.
+
+# The spellings a message could use to claim the commits are absent. 🔴 This
+# probe is NOT what makes the guard non-walkable — a reword could step around
+# it. Its job is to be RED AT THE BASE, i.e. to observe the wrong answer that
+# shipped. Non-walkability comes from the whole-string `DIRECTIVE_LEDGER` pin
+# on `degenerate-range-causes` and from the writer ledger below it.
+ABSENT_COMMIT_CLAIMS = (
+    "not in this checkout",
+    "does not have them",
+    "checkout does not have",
+)
+
+
+def test_a_degenerate_range_does_not_blame_a_checkout_it_verified():
+    """🔴 REGRESSION. Red at `e06461f7`, at BOTH of its two sites.
+
+    The round-3 fix for this class said in its own commit message that it went
+    "to the CLASS rather than to one site" — and then wrote two new sites with
+    the same false cause nine lines below the one it fixed. So this asserts
+    over both consumers in one test: they are one hazard with two renderers,
+    and a test scoped to either would have passed at the base.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "3"], comments=[CLAIMS_BLOCK_R2], pr=SELF_RANGE_PR
+    )
+    assert rc == 0, err
+    sections = {
+        "THE RANGE": out[out.index("## THE RANGE"):out.index("## WHAT WAS CLAIMED")],
+        "THE LEDGER": out[out.index("## THE LEDGER"):],
+    }
+    for name, text in sections.items():
+        assert "EMPTY BY CONSTRUCTION" in text, (
+            f"{name} does not report the degenerate range at all, so this "
+            "test is asserting over the wrong slice"
+        )
+        for phrase in ABSENT_COMMIT_CLAIMS:
+            assert phrase not in text, (
+                f"\n\n{name} offers {phrase!r} as a cause for a range it "
+                "reached only because `anchor_is_head` confirmed this checkout "
+                "IS the PR's head commit. The operator is told to get commits "
+                "into a checkout that already has them — and the `no-fetch` "
+                "clause forbids that action there."
+            )
+        assert norm(DIRECTIVE_LEDGER["degenerate-range-causes"]) in norm(text), (
+            f"\n\n{name} does not carry the ledgered cause list, so it is "
+            "hand-rolling its own again — which is how the two sites drifted "
+            "apart from the one nine lines above them."
+        )
+
+
+def test_the_degenerate_range_causes_have_exactly_one_writer_per_consumer():
+    """🔴 INVARIANT GUARD, and the STRUCTURAL half of the pair above.
+
+    A seam guard in the `claude/RULES.md` sense: an asserted ledger of every
+    site that renders this cause list, failing when the set GROWS (a third
+    consumer joined with nobody reading its prose) or SHRINKS (a consumer went
+    back to hand-rolling). The phrase probe above cannot see either.
+
+    🔴 THE RESIDUAL BLIND SPOT, said rather than left to read as covered: a
+    BRAND-NEW degenerate surface that never calls `directive()` at all is
+    invisible here. Nothing mechanical in this module can see prose that has
+    not been written yet.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    sites, fn = set(), None
+    for line in src.splitlines():
+        m = re.match(r"def (\w+)\(", line)
+        if m:
+            fn = m.group(1)
+        if 'directive("degenerate-range-causes")' in line and fn:
+            sites.add(fn)
+    assert sites == {"measure_ledger", "render_range"}, (
+        f"\n\nthe degenerate-range cause list is rendered by {sorted(sites)}, "
+        "not by exactly the two consumers this ledger names.\n"
+        "  GREW: a new site renders auditor-facing prose that nobody reviewed "
+        "against `head_check`'s guarantee.\n"
+        "  SHRANK: a consumer is hand-rolling its own causes again — which is "
+        "the defect, not a refactor."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 4 — "THE SHARED CHECKOUT" NAMED WHATEVER CWD WAS
+# --------------------------------------------------------------------------- #
+
+def test_a_private_worktree_is_not_described_as_shared_and_is_not_absolved():
+    """🔴 REGRESSION. Red at `e06461f7`, which asserted SHARED of every tree.
+
+    Run from `…/.claude/worktrees/agent-…` — where a dispatched auditor
+    usually stands — the brief printed a heading reading THE SHARED CHECKOUT
+    over "This checkout is SHARED with other sessions and agents. It MOVES
+    UNDER YOU … That is expected and is NOT your fault and NOT a finding."
+
+    🔴 The DIRECTION is the consequential half, and it is what this asserts:
+    an auditor in a private worktree who watches files move is told it is
+    expected and not a finding, which suppresses exactly the sibling-agent
+    clobber `claude/RULES.md` says to report.
+    """
+    checkout = checkout_section(brief_for_scenario("private-worktree"))
+    # 🔴 THE NEGATIVES FIRST, deliberately. Asserting "PRIVATE worktree" is
+    # present first would make this test fail at the base for want of a WORD
+    # the fix introduced; failing on the two false claims below is failing on
+    # the wrong ANSWER, which is what makes this regression coverage rather
+    # than a restatement of the diff.
+    assert "SHARED with other sessions" not in checkout, (
+        f"\n\nthe brief calls a PRIVATE per-agent worktree shared:\n{checkout}"
+    )
+    assert "NOT a finding" not in checkout, (
+        "\n\nthe brief absolves movement in a tree that is the auditor's "
+        "alone. That absolution is what suppresses a sibling-agent clobber "
+        "report — the one signal a private worktree can produce."
+    )
+    assert "PRIVATE worktree" in checkout
+    assert "IS worth reporting" in checkout
+
+
+def test_an_unreadable_worktree_state_is_its_own_answer_and_keeps_the_no_write():
+    """🔴 INVARIANT GUARD — the third state; mutant Y6 collapses it.
+
+    Same three-state rule as `render_worktree_directive`: not knowing is its
+    own answer, and it must keep the conservative instruction (write nothing)
+    WITHOUT the absolution (movement is expected). Collapsing it either way
+    picks a branch whose failure is silent.
+    """
+    checkout = checkout_section(brief_for_scenario("unreadable-worktree"))
+    assert "COULD NOT DETERMINE" in checkout
+    assert "write nothing to it" in checkout, (
+        "the unknown state dropped the conservative no-write instruction"
+    )
+    assert "NOT a finding" not in checkout, (
+        "the unknown state kept the absolution. The conservative half of "
+        "'treat it as shared' is the no-write rule; the absolution is the "
+        "half that costs a report."
+    )
+    # And the SHARED state still says what it always said.
+    shared = brief_for_scenario("delta")
+    assert "SHARED with other sessions" in shared and "NOT a finding" in shared
+
+
+def test_gather_worktree_kind_resolves_paths_before_comparing_them():
+    """🔴 INVARIANT GUARD — `gather_worktree_kind` does not exist at the base.
+
+    🔴 MEASURED AT THREE SHAPES, because one measurement here is not a claim:
+    real `git rev-parse --git-dir --git-common-dir` answers `.git`/`.git` at a
+    repo ROOT, `/abs/path/.git`/`../.git` in a repo SUBDIRECTORY, and
+    `/abs/.git/worktrees/<n>`/`/abs/.git` in a linked worktree. The middle row
+    is the trap: textually different, the same directory. Comparing the strings
+    calls every subdirectory of an ordinary clone a PRIVATE worktree — wrong in
+    the direction that drops the no-write instruction. `gather_repo_facts`
+    falls back to the raw cwd when `--show-toplevel` fails, so that row is
+    reachable in production. Mutant Y5b.
+    """
+    def stub(answer):
+        def runner(cmd, cwd=None):
+            assert "--git-common-dir" in cmd, cmd
+            return answer
+        return runner
+
+    root = ad.gather_worktree_kind(stub(SHARED_GIT_DIRS), FAKE_REPO_DIR)
+    assert root.kind == "shared", root
+
+    subdir = ad.gather_worktree_kind(
+        stub((0, f"{FAKE_REPO_DIR}/.git\n../.git\n", "")),
+        f"{FAKE_REPO_DIR}/sub",
+    )
+    assert subdir.kind == "shared", (
+        f"\n\na SUBDIRECTORY of an ordinary clone was classified {subdir!r}. "
+        "git answers `/abs/.git` and `../.git` there — different strings, the "
+        "same directory."
+    )
+
+    linked = ad.gather_worktree_kind(stub(PRIVATE_GIT_DIRS), FAKE_REPO_DIR)
+    assert linked.kind == "private", linked
+
+    for broken in (UNREADABLE_GIT_DIRS, (0, ".git\n", "")):
+        got = ad.gather_worktree_kind(stub(broken), FAKE_REPO_DIR)
+        assert got.kind == "unknown" and got.reason, (
+            f"a read that answered {broken!r} was not reported as unknown: "
+            f"{got!r}"
+        )
+
+
+def test_the_where_to_work_section_does_not_call_a_private_worktree_the_clone():
+    """🔴 REGRESSION. Red at `e06461f7`.
+
+    The repo RELATION is unaffected — a linked worktree really is the same
+    repository, and the isolation recommendation stays correct. The PATH is
+    not the shared clone, and the brief said it was: "the PR lives in
+    `<org>/devrc`, which is this session's own repository
+    (`…/worktrees/agent-…`)".
+    """
+    out = brief_for_scenario("private-worktree")
+    where = out[out.index("## WHERE TO WORK"):out.index("## THE RANGE")]
+    assert ad.ISOLATION_RECOMMEND in where, (
+        "the private-worktree case is still a SAME-REPO PR and the flag is "
+        "still right; only the description of the path was wrong"
+    )
+    assert "this session's own repository" not in where, (
+        f"\n\nthe brief names a private per-agent worktree as the session's "
+        f"repository, full stop:\n{where}"
+    )
+    assert "PRIVATE linked worktree" in where
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 4 — `same_commit` WAS CASE-SENSITIVE
+# --------------------------------------------------------------------------- #
+
+def test_an_uppercase_audited_sha_still_trips_the_degenerate_guard():
+    """🔴 REGRESSION. Red at `e06461f7`, where one shift key disarmed the guard.
+
+    `git rev-parse` prints lowercase, but `audited=` is TYPED BY A HUMAN into a
+    PR comment. Compared case-sensitively, `ABC41024` is not the same commit as
+    `abc41024ff…`, `anchor_is_head` answers False at all three call sites, and
+    the confident "verified at assembly time to be PR #<n>'s head commit"
+    banner comes back over a range that cannot contain anything.
+    """
+    assert ad.same_commit("ABC41024", "abc41024ff00112233445566778899aabbccddee"), (
+        "`same_commit` is case-sensitive, so an upper- or mixed-case "
+        "`audited=` sha disables every degenerate-range guard in this script"
+    )
+    upper = (
+        "```audit-claims round=2 audited=AAAA1111..BBBB2222\n"
+        "1. a claim whose anchor was typed in upper case\n"
+        "```"
+    )
+    rc, out, err = run_main(
+        ["900", "--round", "3"], comments=[upper], pr=SELF_RANGE_PR
+    )
+    assert rc == 0, err
+    the_range = out[out.index("## THE RANGE"):out.index("## WHAT WAS CLAIMED")]
+    assert "DEGENERATE RANGE" in the_range, (
+        f"\n\nan UPPERCASE anchor equal to HEAD rendered as an ordinary "
+        f"range:\n{the_range}"
+    )
+    assert "verified at assembly time" not in the_range
+
+
+# --------------------------------------------------------------------------- #
 # THE LEDGER
 # --------------------------------------------------------------------------- #
 
@@ -2284,9 +2878,40 @@ RED_AT_BASE_R3: frozenset[str] = frozenset({
 # at both refs for two DIFFERENT reasons, so it is listed under both — which is
 # why the per-ref sets may overlap each other even though neither may overlap
 # the guard ledger.
+# 🔴 ROUND 4's base is the ROUND-3 TREE, `e06461f7`. Measured the same way —
+# `git show e06461f7:scripts/audit-dispatch.py` into a scratch tree with THIS
+# module copied in unchanged, `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`:
+#
+#     15 failed, 68 passed
+#
+# and only these FIVE are regression coverage. The other TEN fail there for
+# reasons this module already says are not evidence: `SystemExit: 2` from an
+# argparse flag the fix introduced (2), `AttributeError` for a function it
+# introduced (1), and an assertion over a directive, a worktree state or a
+# ledger that does not exist in that tree (7). They are filed as guards, with
+# the mutation battery as their evidence.
+#
+# 🔴 TWO OF THE FIVE ONLY BECAME REGRESSION COVERAGE AFTER BEING REWRITTEN, and
+# it is recorded because the first draft of each was the vacuous shape:
+#   * the private-worktree test sliced on the round-4 heading `## THE CHECKOUT`
+#     and died at the base with `ValueError: substring not found` — for want of
+#     a heading the fix introduced. `checkout_section` now matches the OLD
+#     spelling too, and it fails there on the false SHARED claim instead;
+#   * its assertions were ordered positive-first, so it failed on the absence
+#     of the word "PRIVATE". The negatives run first now, so the red is the
+#     wrong ANSWER.
+RED_AT_BASE_R4: frozenset[str] = frozenset({
+    "test_a_round_one_emit_claims_says_head_is_an_assumption_not_a_measurement",
+    "test_a_degenerate_range_does_not_blame_a_checkout_it_verified",
+    "test_a_private_worktree_is_not_described_as_shared_and_is_not_absolved",
+    "test_the_where_to_work_section_does_not_call_a_private_worktree_the_clone",
+    "test_an_uppercase_audited_sha_still_trips_the_degenerate_guard",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
+    "e06461f7": RED_AT_BASE_R4,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
@@ -2346,8 +2971,34 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     # XA, and the XS survives-control are their evidence.
     "test_the_section_directive_ledger_is_pinned_two_way",
     "test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
-    "test_every_section_directive_is_emitted_verbatim_in_the_delta_brief",
+    "test_every_section_directive_is_emitted_verbatim_in_the_brief_that_owns_it",
     "test_control_a_directive_deleted_from_the_constant_is_detected",
+    # ------------------------------------------------------------------- #
+    # Round 4's guards. Each says in its own docstring why it is one, and
+    # every one of them WAS run against `e06461f7` — they are here because of
+    # HOW they failed there, not because nobody looked.
+    # ------------------------------------------------------------------- #
+    # `--audited` does not exist at `e06461f7`, so both die with `SystemExit:
+    # 2` from argparse. Mutants Y7 (the flag is parsed and ignored) and Y8
+    # (the ignored-flag warning removed) are their evidence.
+    "test_audited_supplies_the_tip_a_round_one_emit_cannot_derive",
+    "test_audited_without_emit_claims_says_it_changed_nothing",
+    # The STRUCTURAL half of the false-cause pair: a ledger of every site that
+    # renders the shared cause list, red when the set grows or shrinks. At the
+    # base the directive does not exist, so its red there is an absence.
+    # Mutants Y10 and Y11 (each site hand-rolls its own causes again).
+    "test_the_degenerate_range_causes_have_exactly_one_writer_per_consumer",
+    # The THIRD worktree state. `e06461f7` has no unknown branch at all, so
+    # "the unknown state kept the absolution" is not a defect it has — it is a
+    # state it lacks. Mutant Y6 collapses it back into SHARED.
+    "test_an_unreadable_worktree_state_is_its_own_answer_and_keeps_the_no_write",
+    # `AttributeError: ... no attribute 'gather_worktree_kind'`. Mutant Y5b
+    # (compare the two paths as strings) is what proves the resolution step
+    # executes — and the SUBDIRECTORY row is what proves it is needed.
+    "test_gather_worktree_kind_resolves_paths_before_comparing_them",
+    # Reads `SECTION_DIRECTIVES` against the scenario map; mutant XA (a
+    # directive added with no scenario) is its evidence.
+    "test_the_directive_render_scenario_ledger_is_pinned_two_way",
     # Guards over THIS module's own bookkeeping. The mutation battery mutates
     # the SCRIPT, never this module, so it cannot reach them — their evidence
     # is the in-module negative control beside each.
@@ -2451,15 +3102,166 @@ FIX_MATRIX = (
      "GUARD", "X1, X3 (XA, XS controls)"),
     ("r3/4  a 'watched RED at abc41024' label was wrong",
      "test_the_fix_matrix_evidence_matches_the_two_ledgers",
-     "GUARD", "its own in-module negative control"),
+     "GUARD", "IN-MODULE CONTROL"),
+
+    # ------------------------------------------------------------------ #
+    # 🔴 NINE ROUND-2 DETECTORS AND ONE ROUND-3 DETECTOR THAT WERE WATCHED
+    # RED AND HAD NO ROW. Nothing required a `RED_AT_BASE` entry to appear
+    # here, so a finding could be dropped from the matrix while its test
+    # stayed green and its ledger entry stayed put — the matrix would grade
+    # clean and assert nothing about the finding it had lost.
+    # `..._evidence_matches_the_two_ledgers` now requires the containment.
+    # ------------------------------------------------------------------ #
+    ("r2/2' the toolchain named the wrong tier in its gate commands",
+     "test_the_toolchain_section_names_the_tier_the_merge_gates_on",
+     "RED@abc41024", "T2"),
+    ("r2/4c missing_clauses() compared un-normalised text, so a re-wrap read "
+     "as a loss",
+     "test_missing_clauses_is_a_pure_function_over_the_text",
+     "RED@abc41024", "K3"),
+    ("r2/7b a bare round-1 block must anchor the NEXT round's cumulative figure",
+     "test_a_round_one_block_anchors_the_next_rounds_cumulative_figure",
+     "RED@abc41024", "-"),
+    ("r2/8a a 4-backtick opener closed with 3 was dropped in silence",
+     "test_a_malformed_fence_beside_a_readable_block_still_warns",
+     "RED@abc41024", "B1"),
+    ("r2/8b a longer closing fence closes under CommonMark and was dropped",
+     "test_a_longer_closing_fence_is_a_valid_close_and_is_read",
+     "RED@abc41024", "B2"),
+    ("r2/8c a claim wrapping onto a second line was silently truncated",
+     "test_a_claim_that_wraps_onto_a_continuation_line_keeps_its_tail",
+     "RED@abc41024", "B3"),
+    ("r2/8d a block cut short by a nested fence lost every claim after it",
+     "test_a_block_cut_short_by_a_nested_fence_is_reported",
+     "RED@abc41024", "B4"),
+    ("r2/8e the refusal did not say which comment kinds it cannot see",
+     "test_the_refusal_says_which_comment_kinds_it_cannot_see",
+     "RED@abc41024", "B5"),
+    ("r2/9' the head-verified note is the does-not-fire-spuriously control",
+     "test_the_range_says_head_was_verified_when_it_was",
+     "RED@d9eb36a8", "N1"),
+
+    # ------------------------------------------------------------------ #
+    # 🔴 ROUND 4. Base `e06461f7`.
+    # ------------------------------------------------------------------ #
+    ("r4/1a the round-1 -> round-2 hop was EMPTY BY CONSTRUCTION, and silent: "
+     "the self-range warning was spelled on a field that is None at round 1",
+     "test_a_round_one_emit_claims_says_head_is_an_assumption_not_a_measurement",
+     "RED@e06461f7", "Y9"),
+    ("r4/1b round 1 had no way to record the tip it AUDITED, only the tip its "
+     "fixes produced",
+     "test_audited_supplies_the_tip_a_round_one_emit_cannot_derive",
+     "GUARD", "Y7"),
+    ("r4/1c --audited without --emit-claims was a silent no-op",
+     "test_audited_without_emit_claims_says_it_changed_nothing",
+     "GUARD", "Y8"),
+    ("r4/2  BOTH degenerate-range messages blamed a checkout `head_check` had "
+     "just verified — written by the commit whose message claimed a class fix",
+     "test_a_degenerate_range_does_not_blame_a_checkout_it_verified",
+     "RED@e06461f7", "Y10, Y11"),
+    ("r4/2' the cause list must have exactly one writer per consumer",
+     "test_the_degenerate_range_causes_have_exactly_one_writer_per_consumer",
+     "GUARD", "Y10, Y11"),
+    ("r4/3  Y1/Y2: two OPERATIVE verbatim blocks shipped unpinned — the "
+     "delta-scope sentence and the cross-repo 'that worktree is YOURS'",
+     "test_each_section_directive_carries_the_instruction_its_ledger_entry_names",
+     "GUARD", "Y1, Y2"),
+    ("r4/3' a directive that reaches NO brief is an instruction nobody receives",
+     "test_the_directive_render_scenario_ledger_is_pinned_two_way",
+     "GUARD", "XA"),
+    ("r4/4a THE SHARED CHECKOUT named whatever cwd was, including a PRIVATE "
+     "per-agent worktree — and absolved the movement it should have reported",
+     "test_a_private_worktree_is_not_described_as_shared_and_is_not_absolved",
+     "RED@e06461f7", "Y14"),
+    ("r4/4b WHERE TO WORK called that worktree the session's own repository",
+     "test_the_where_to_work_section_does_not_call_a_private_worktree_the_clone",
+     "RED@e06461f7", "Y13"),
+    ("r4/4c not knowing is its own state: keep the no-write, drop the "
+     "absolution",
+     "test_an_unreadable_worktree_state_is_its_own_answer_and_keeps_the_no_write",
+     "GUARD", "Y6"),
+    ("r4/4d the two git dirs are compared as RESOLVED paths, never as strings",
+     "test_gather_worktree_kind_resolves_paths_before_comparing_them",
+     "GUARD", "Y5b"),
+    ("r4/5  same_commit was case-sensitive, so an uppercase `audited=` sha "
+     "disarmed every degenerate-range guard",
+     "test_an_uppercase_audited_sha_still_trips_the_degenerate_guard",
+     "RED@e06461f7", "Y12"),
+    ("r4/6  this matrix's own mutants column was UNGRADED, and every "
+     "RED_AT_BASE entry could drop out of it silently",
+     "test_the_fix_matrix_evidence_matches_the_two_ledgers",
+     "GUARD", "IN-MODULE CONTROL"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
-# grades every row correctly and asserts nothing.
-MIN_FIX_MATRIX_ROWS = 20
+# grades every row correctly and asserts nothing. Derived from the current
+# measurement the way this repo derives every other floor —
+# `m - min(50, max(1, m // 20))` — rather than hand-picked, because a
+# hand-picked floor drifts from what it is protecting. At m = 48 that is 46.
+MIN_FIX_MATRIX_ROWS = 46
+
+# 🔴 THE MUTANTS COLUMN IS AN EVIDENCE CLAIM, AND IT WAS UNGRADED.
+# `fix_matrix_problems` took `_mutants` and threw it away, so rewriting a
+# GUARD row's column to `"Z99 — a mutant that does not exist"` left the suite
+# fully green — while for a GUARD row that column IS the whole evidence, the
+# base-ref cell having been set to `GUARD` precisely because there is no base
+# ref to point at. It is now resolved against the harness's OWN `ROWS`.
+MUTANT_HARNESS = REPO / "scripts" / "tests" / "mutants-audit-dispatch.py"
+
+# The one evidence token that is legitimately not a mutant: a guard over this
+# module's own bookkeeping, which the battery cannot reach because it mutates
+# the SCRIPT and never this file. Spelled as a sentinel rather than as prose so
+# it cannot be confused with a column somebody forgot to fill in.
+IN_MODULE_CONTROL = "IN-MODULE CONTROL"
 
 
-def fix_matrix_problems(rows, red_by_ref, guards, known_tests):
+def _known_mutant_ids():
+    """Every mutant id the harness actually carries, read from the harness.
+
+    Imported, not restated: a ledger of mutant ids kept here by hand would go
+    stale in exactly the direction that makes a false claim pass.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "mutants_audit_dispatch", MUTANT_HARNESS
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return {label.split()[0] for label, _want, _mutate in mod.ROWS}
+
+
+KNOWN_MUTANT_IDS = _known_mutant_ids()
+
+_RANGE = re.compile(r"\b([A-Za-z]{1,2})(\d+)\s*-\s*(?:([A-Za-z]{1,2}))?(\d+)\b")
+_ID = re.compile(r"\b([A-Za-z]{1,2}\d+[a-z]?)\b")
+
+
+def mutant_ids(column, known=()):
+    """The mutant ids a matrix cell names, with `W1-W5` ranges expanded.
+
+    🔴 DIGIT-FORM IDS ARE FOUND BY SHAPE; digitless ones (`XA`, `XS`) only by
+    membership in `known`. Said plainly because it is the blind spot: a
+    digitless id somebody TYPO'd (`XB`) is invisible here, while a digit-form
+    invention (`Z99`) is caught. Widening the shape to digitless tokens makes
+    `IN`, `A` and every capitalised word in a prose cell into a mutant id, and
+    a checker that fires on prose is one nobody keeps.
+    """
+    rest, out = column, set()
+    for m in _RANGE.finditer(column):
+        pre, lo, pre2, hi = m.group(1), int(m.group(2)), m.group(3), int(m.group(4))
+        if pre2 and pre2 != pre:
+            continue
+        out.update(f"{pre}{n}" for n in range(lo, hi + 1))
+        rest = rest.replace(m.group(0), " ")
+    out.update(_ID.findall(rest))
+    for k in known:
+        if not any(c.isdigit() for c in k) and re.search(
+            rf"\b{re.escape(k)}\b", column
+        ):
+            out.add(k)
+    return out
+
+
+def fix_matrix_problems(rows, red_by_ref, guards, known_tests, known_mutants):
     """-> a list of complaints. Shared by the guard and its negative control.
 
     Kept as a function precisely so the control can drive the SAME code with a
@@ -2467,7 +3269,22 @@ def fix_matrix_problems(rows, red_by_ref, guards, known_tests):
     checker nobody has watched go red.
     """
     problems = []
-    for finding, detector, evidence, _mutants in rows:
+    for finding, detector, evidence, mutants in rows:
+        named = mutant_ids(mutants, known_mutants)
+        unknown = named - known_mutants
+        if unknown:
+            problems.append(
+                f"{finding}: names mutant(s) {sorted(unknown)}, which the "
+                "harness's own ROWS do not carry"
+            )
+        if evidence == "GUARD" and not named and mutants.strip() != IN_MODULE_CONTROL:
+            problems.append(
+                f"{finding}: labelled GUARD, but its mutants column "
+                f"{mutants!r} names no mutant. For a GUARD row that column IS "
+                f"the evidence — there is no base ref to point at. Use "
+                f"{IN_MODULE_CONTROL!r} only for a guard the battery cannot "
+                "reach at all."
+            )
         if detector not in known_tests:
             problems.append(f"{finding}: names no test called {detector!r}")
             continue
@@ -2510,9 +3327,15 @@ def test_the_fix_matrix_evidence_matches_the_two_ledgers():
         f"{MIN_FIX_MATRIX_ROWS}). A matrix that shrank grades every remaining "
         "row correctly and asserts nothing about the findings it dropped."
     )
+    assert KNOWN_MUTANT_IDS, (
+        "no mutant ids were read out of the harness at all, so the mutants "
+        "column below would be graded against an empty set and every row "
+        "would pass. Positive control: the harness carries dozens."
+    )
     here = {n for n in globals() if n.startswith("test_")}
     problems = fix_matrix_problems(
-        FIX_MATRIX, RED_AT_BASE_REFS, INVARIANT_GUARDS_AND_LEDGERS, here
+        FIX_MATRIX, RED_AT_BASE_REFS, INVARIANT_GUARDS_AND_LEDGERS, here,
+        KNOWN_MUTANT_IDS,
     )
     assert not problems, (
         "\n\nthe fix matrix claims evidence the ledgers do not support:\n  "
@@ -2521,26 +3344,47 @@ def test_the_fix_matrix_evidence_matches_the_two_ledgers():
           "row to GUARD, or add the detector to that ref's RED_AT_BASE set "
           "AFTER watching it fail there."
     )
+    # 🔴 CONTAINMENT, and it is the half that was missing entirely: every test
+    # filed as regression coverage names a FINDING, and a finding with no row
+    # here is a finding this matrix silently stopped asserting anything about.
+    # Nine round-2 detectors and one round-3 detector were in that state.
+    orphaned = RED_AT_BASE - {row[1] for row in FIX_MATRIX}
+    assert not orphaned, (
+        f"\n\n{len(orphaned)} test(s) are filed as regression coverage for a "
+        f"real defect and appear in NO matrix row: {sorted(orphaned)}\n"
+        "  The ledger says each was watched RED at a named base, so each is a "
+        "finding. Give it a row, or explain in the ledger why it is not one."
+    )
 
 
 def test_control_the_fix_matrix_checker_catches_a_wrong_evidence_label():
     """NEGATIVE CONTROL: the checker above must be able to go red.
 
-    Four deliberately wrong rows, one per rejection path. A checker that
-    returns an empty list for these is wired to nothing, and the guard beside
-    it would pass for any matrix at all.
+    ONE deliberately wrong row per rejection path — **count them in `bad`**,
+    which is what the assertion does. The docstring used to say "Four" over
+    five rows and five paths; a hand-written count beside data that grows is a
+    claim nobody re-reads, and this module has now carried two of them.
+
+    🔴 The last two paths are round 4's: the mutants column was DISCARDED, so
+    a GUARD row could name `"Z99 — a mutant that does not exist"`, or name
+    nothing at all, and grade clean — while for a GUARD row that column is the
+    entire evidence.
     """
     guards = frozenset({"test_a_guard"})
     red = {"aaaa1111": frozenset({"test_a_regression"})}
     known = {"test_a_guard", "test_a_regression"}
+    mutants = frozenset({"M1", "M2"})
     bad = (
         ("mislabelled guard", "test_a_guard", "RED@aaaa1111", "-"),
-        ("mislabelled regression", "test_a_regression", "GUARD", "-"),
+        ("mislabelled regression", "test_a_regression", "GUARD", "M1"),
         ("unknown ref", "test_a_regression", "RED@ffff9999", "-"),
-        ("nonexistent detector", "test_vanished", "GUARD", "-"),
-        ("nonsense evidence", "test_a_guard", "probably fine", "-"),
+        ("nonexistent detector", "test_vanished", "GUARD", "M1"),
+        ("nonsense evidence", "test_a_guard", "probably fine", "M1"),
+        ("mutant that does not exist", "test_a_guard", "GUARD",
+         "Z99 — a mutant that does not exist"),
+        ("guard whose evidence column is empty", "test_a_guard", "GUARD", "-"),
     )
-    problems = fix_matrix_problems(bad, red, guards, known)
+    problems = fix_matrix_problems(bad, red, guards, known, mutants)
     assert len(problems) == len(bad), (
         f"the checker reported {len(problems)} problem(s) for {len(bad)} "
         f"deliberately wrong rows: {problems}"
@@ -2548,10 +3392,22 @@ def test_control_the_fix_matrix_checker_catches_a_wrong_evidence_label():
     # And it must NOT fire on correct rows — a checker that rejects everything
     # is as useless as one that accepts everything.
     good = (
-        ("ok guard", "test_a_guard", "GUARD", "-"),
-        ("ok regression", "test_a_regression", "RED@aaaa1111", "-"),
+        ("ok guard", "test_a_guard", "GUARD", "M1"),
+        ("ok guard, range spelling", "test_a_guard", "GUARD", "M1-M2"),
+        ("ok guard the battery cannot reach", "test_a_guard", "GUARD",
+         IN_MODULE_CONTROL),
+        ("ok regression with no mutant", "test_a_regression", "RED@aaaa1111",
+         "-"),
     )
-    assert fix_matrix_problems(good, red, guards, known) == []
+    assert fix_matrix_problems(good, red, guards, known, mutants) == []
+    # 🔴 POSITIVE CONTROL for the range expander itself: a reassuring empty set
+    # is indistinguishable from a parser wired to nothing.
+    assert mutant_ids("W1-W5, R1") == {"W1", "W2", "W3", "W4", "W5", "R1"}
+    assert mutant_ids("X1, X3 (XA, XS controls)", {"XA", "XS"}) == {
+        "X1", "X3", "XA", "XS"
+    }
+    assert mutant_ids("Y5b") == {"Y5b"}
+    assert mutant_ids(IN_MODULE_CONTROL, {"XA"}) == set()
 
 
 def test_the_two_ledgers_partition_this_modules_tests():
