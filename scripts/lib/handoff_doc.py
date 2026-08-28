@@ -425,11 +425,27 @@ _MARKUP = r"[*_`~]{0,3}"
 #
 # What the lookaround still excludes — the ONE job `\b` was doing here, and the
 # thing to re-check before touching it: `enforcing:` and `reinforcing:` (the
-# character before the key is a letter) and `forcings:` (the one after it is).
-# What it newly ADMITS is a snake_case identifier ending in `_forcing`, so
-# `some_forcing: none` would parse. MEASURED: `_forcing` appears 0 times in
-# either corpus (devrc 126 docs, homelab-talos 139), and the case is bounded by
-# the same closed-vocabulary argument as the markup class above.
+# character before the key is an ASCII letter) and `forcings:` (the one after it
+# is). 🔴 "ASCII" IS THE WHOLE SCOPE OF THAT CLAIM AND THE COMMENT USED TO OMIT
+# IT: the class is `[A-Za-z0-9]`, so a non-ASCII word character before the key
+# excludes nothing at all — `\b` DID exclude it, because Python's `\w` is
+# unicode by default.
+#
+# 🔴 FOUR ADMISSIONS, NOT ONE — the comment used to name only the first, and a
+# delta audit measured the other three. All four are new at this commit (none
+# parsed at `503d7136`), all four occur 0 times over both corpora (devrc 126
+# docs, homelab-talos 139), and all four are bounded by the same closed-
+# vocabulary argument as the markup class above:
+#   1. `_FORCING`'s key admits a snake_case identifier ENDING in `_forcing`, so
+#      `some_forcing: none` parses;
+#   2. `_FORCING_ATTEMPT`'s key admits one STARTING with the key, so
+#      `the forcing_fn returns none` is now a NEAR-MISS;
+#   3. …and that pattern's KIND admits a kind followed by `_`, so
+#      `forcing the user_id column` and `forcing the gate_keeper to retry` are
+#      near-misses too;
+#   4. BOTH patterns admit a non-ASCII word character before the key:
+#      `éforcing: gate` and `強forcing: gate` parse to `gate`.
+# Pinned by `test_the_widened_anchors_admit_these_and_the_comment_says_so`.
 #
 # 🔴 SPELLED OUT AT EACH USE SITE rather than folded into one shared constant:
 # `_FORCING` and `_FORCING_ATTEMPT` must stay SEPARATELY MUTABLE, or the
@@ -545,10 +561,34 @@ def _item_blocks(section_body: str) -> list[tuple[re.Match[str], list[str], list
     indented tag after the item's own fence, with and without a blank between —
     by `test_an_indented_fence_does_not_cost_the_tag_that_follows_it`.
 
+    🔴 THAT FIX HAS A MEASURED COST, IT IS DELIBERATE, AND REVERSING IT WOULD
+    REOPEN THE ACCEPT BUG. Shape: item, blank line, the item's OWN INDENTED
+    fence, then a tag at COLUMN 0. At `503d7136` that parsed (`kind='gate'`);
+    here the blank's memory survives the fence, so the col-0 line IS the
+    boundary and the tag is dropped — `kind=None, near_miss=None, fenced=False`,
+    i.e. `[no forcing: field]` printed at an author who DID write the field on a
+    continuation line. The walk cannot tell that col-0 tag from col-0 pasted
+    boilerplate, and falsely ACCEPTING an untagged item is worse than refusing a
+    tagged one, so the trade stands. Two things pay for it: the corpus impact is
+    **0 of 442** ranked items, and `MISSING_FIELD_REMEDY` now says the field
+    must be INDENTED, which is what makes this refusal clearable instead of
+    unrecoverable. Pinned by the `col-0` params of
+    `test_an_indented_fence_does_not_cost_the_tag_that_follows_it` and by
+    `test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT`.
+
     ⚠ A fence with NO preceding blank still absorbs the following unindented
-    line. That is genuine markdown lazy continuation and is left alone. A fence
-    opened at column 0 after a blank line is a KNOWN, UNTESTED gap: markdown ends
-    the list item there, and this walk does not.
+    line — because THIS walk's boundary requires a blank to have intervened and
+    none has. 🔴 THAT IS THIS WALK'S RULE, NOT MARKDOWN'S. The docstring used to
+    justify it as "genuine markdown lazy continuation" and that reason is wrong:
+    in CommonMark, lazy continuation applies to a PARAGRAPH's continuation
+    lines, not to a line following a fenced code block inside a list item —
+    there the fenced block has ended and an unindented line is not part of the
+    item at all. The BEHAVIOUR is kept, and only its justification changed: it
+    is the PERMISSIVE direction (it can only hand an author back a tag they
+    wrote, never invent one for an untagged item) and no corpus item depends on
+    the strict reading. A fence opened at column 0 after a blank line is a
+    KNOWN, UNTESTED gap: markdown ends the list item there, and this walk does
+    not.
 
     Fenced lines are returned SEPARATELY rather than dropped: they must not count
     as a tag (`_unfenced`'s contract, and a pasted sample is not a declaration),
@@ -675,9 +715,20 @@ REFUSAL_MARKERS: tuple[str, ...] = (
 )
 
 #: Remedy for the plain case: no field anywhere in the item.
+#:
+#: 🔴 THE SECOND HALF IS NOT DECORATION. "A continuation line counts" alone is
+#: read as a promise this walk does not keep: a tag written at COLUMN 0 under
+#: the item — after a blank, or after the item's own indented fence — is the
+#: BOUNDARY line, so it is outside the block and never scanned. An author who
+#: has already written the field there is then told to write it, which is the
+#: unrecoverable refusal this whole branch exists to end; naming the INDENT is
+#: the only thing that makes that arm clearable. See `_item_blocks` for the
+#: measurement and for why the boundary is not loosened instead.
 MISSING_FIELD_REMEDY = (
     f"  Tag each item marked {MARK_NO_FIELD} above. A continuation line "
-    "counts — the field does not have to sit on the numbered line."
+    "counts — the field does not have to sit on the numbered line, but it MUST "
+    "be INDENTED: a flush-left line ENDS the item, so a tag at column 0 under "
+    "it is outside the item and reads as absent."
 )
 
 #: Remedy for a near-miss. 🔴 IT MUST NOT REPEAT `MISSING_FIELD_REMEDY`: an item

@@ -76,7 +76,16 @@ find "$ROOT" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
 MOD="$ROOT/scripts/lib/handoff_doc.py"
 SUITE="$ROOT/scripts/tests/test_handoff_doc.py"
 cp -a "$MOD" "$T/mod.orig"
-restore() { cp -a "$T/mod.orig" "$MOD"; }
+# 🔴 THE SKILL BODY IS A SECOND MUTABLE ARTEFACT, AND IT HAS TO BE. Rule (j)'s
+# refusal is only actionable through SKILL.md's step-5 legend — the module's own
+# comment calls that legend "the executor's only map from a marker to what to do
+# about it" — so a guard on the legend is a guard on behaviour the executor gets,
+# and `run` alone could never show one reachable: every row before this mutated
+# the module only. MEASURED: at `e34ed6ef` the legend told the executor to do the
+# exact thing `FENCED_FIELD_REMEDY`'s comment says is harmful, and the whole
+# suite was green.
+SKILL="$ROOT/claude/skills/handoff/SKILL.md"
+cp -a "$SKILL" "$T/skill.orig"
 
 FAILURES=0
 ROWS=0
@@ -85,8 +94,9 @@ ROWS=0
 # 🔴 A SUITE THAT NEVER RAN YIELDS ZERO `FAILED` LINES, i.e. "clean", so a
 # harness wired to nothing would score every mutant SURVIVED and every SURVIVES
 # control ok. Count the tests that ran and refuse below a floor. The floor
-# catches COLLAPSE, not growth — deliberately far under the real count (237 as
-# of 2026-08-28; it was 222 before the fence/underscore round added 15).
+# catches COLLAPSE, not growth — deliberately far under the real count (261 as
+# of 2026-08-28; 222 → 237 when the fence/underscore round added 15, → 261 when
+# the round-3 fixes added the legend seam and the anchor/admission pins).
 MIN_TESTS=180
 failing() {
   local out n f total
@@ -104,17 +114,21 @@ failing() {
   sed -n 's/^FAILED [^:]*::\([A-Za-z0-9_]*\)::\([A-Za-z0-9_]*\).*/\2/p;s/^FAILED [^:]*::\([A-Za-z0-9_]*\)$/\1/p' <<<"$out" | sort -u
 }
 
-run() { # run <name> <expect: a test name | SURVIVES> <sed-expr>
-  local name="$1" want="$2" expr="$3"
+# 🔴 ONE IMPLEMENTATION, TWO TARGETS. `run` mutates the module, `run_skill` the
+# skill body; everything else — the DID-NOT-APPLY diff, the harness floor, the
+# WRONG-KILLER check, the restore — is shared, because a second copy of this
+# logic is the shape `claude/RULES.md` says regenerates the same bug at N sites.
+_run() { # _run <file> <pristine-copy> <name> <want> <sed-expr>
+  local file="$1" orig="$2" name="$3" want="$4" expr="$5"
   ROWS=$((ROWS+1))
-  sed "$expr" "$MOD" > "$T/m" 2>/dev/null
-  if cmp -s "$MOD" "$T/m"; then
+  sed "$expr" "$file" > "$T/m" 2>/dev/null
+  if cmp -s "$file" "$T/m"; then
     printf '  🔴 %-44s MUTATION DID NOT APPLY — result meaningless\n' "$name"
     FAILURES=$((FAILURES+1)); return
   fi
-  cat "$T/m" > "$MOD"
+  cat "$T/m" > "$file"
   local killers; killers="$(failing)"
-  restore
+  cp -a "$orig" "$file"
   if grep -q __HARNESS_BROKE__ <<<"$killers"; then
     printf '  🔴 %-44s HARNESS BROKE — %s\n' "$name" "$killers"
     FAILURES=$((FAILURES+1)); return
@@ -143,6 +157,13 @@ run() { # run <name> <expect: a test name | SURVIVES> <sed-expr>
   fi
   printf '  🔴 %-44s WRONG-KILLER — died to: %s (wanted %s)\n' \
     "$name" "$(tr '\n' ',' <<<"$killers")" "$want"; FAILURES=$((FAILURES+1))
+}
+
+run() {       # run <name> <expect: a test name | SURVIVES> <sed-expr>
+  _run "$MOD" "$T/mod.orig" "$@"
+}
+run_skill() { # run_skill <name> <expect: a test name | SURVIVES> <sed-expr>
+  _run "$SKILL" "$T/skill.orig" "$@"
 }
 
 printf 'mutating a COPY at %s (your worktree is untouched)\n' "$ROOT"
@@ -279,15 +300,77 @@ run 'near-miss-key-anchored-on-word-boundary' \
 # The KIND's own anchors in the same pattern, isolated from the key's. `\b` fails
 # on the trailing `_` of `_forcing = gate_` too, so the net has TWO holes and
 # closing only the key's would leave it half-open.
-run 'near-miss-kind-anchored-on-word-boundary' \
+#
+# 🔴 SPLIT INTO THREE ROWS, AND THE SPLIT IS THE FINDING. One row used to revert
+# BOTH ends in a single sed, and its killing fixture — `_forcing = gate_`, whose
+# `gate` is preceded by a SPACE — can only exercise the TRAILING anchor. So the
+# comment on `_FORCING_ATTEMPT` claiming "BOTH ends of BOTH tokens are anchored"
+# had three of four anchors shown reachable, not four.
+#
+# 🔴 AND THE LEADING KIND ANCHOR FAILS IN TWO DIRECTIONS, WHICH ONE ROW CANNOT
+# COVER — the first draft of this pair had exactly one row and the battery
+# reported it SURVIVED. MEASURED at `e34ed6ef`, per fixture:
+#
+#                            HEAD  leading→\b  leading DELETED  trailing→\b
+#   _forcing = gate_          M        M              M              .
+#   forcing = _gate           M        .              M              M
+#   forcing = mygate          .        .              M              .
+#
+# `\b` excludes `mygate` exactly as the lookbehind does, so the over-match
+# fixture cannot kill the `\b` mutant; and `forcing = _gate` survives the
+# TRAILING mutant, so it isolates the leading end. One row per direction, each
+# with the only fixture that separates it.
+run 'near-miss-kind-TRAILING-anchor-on-word-boundary' \
   test_an_UNDERSCORE_emphasised_near_miss_is_NAMED_not_called_absent \
-  "s@rf\"(?<!\[A-Za-z0-9\])(?:{'|'.join(sorted(FORCING_KINDS))})(?!\[A-Za-z0-9\])\"@rf\"\\\\b(?:{'|'.join(sorted(FORCING_KINDS))})\\\\b\"@"
+  "s@rf\"(?<!\[A-Za-z0-9\])(?:{'|'.join(sorted(FORCING_KINDS))})(?!\[A-Za-z0-9\])\"@rf\"(?<!\[A-Za-z0-9\])(?:{'|'.join(sorted(FORCING_KINDS))})\\\\b\"@"
+# UNDER-MATCH on the leading end: an EMPHASISED KIND (`forcing = _gate`) stops
+# being a near-miss and falls through to `[no forcing: field]` — the refusal a
+# re-run cannot clear, for the very spelling class the underscore round existed
+# to admit.
+run 'near-miss-kind-LEADING-anchor-on-word-boundary' \
+  test_an_EMPHASISED_KIND_is_still_seen_by_the_near_miss_net \
+  "s@rf\"(?<!\[A-Za-z0-9\])(?:{'|'.join(sorted(FORCING_KINDS))})(?!\[A-Za-z0-9\])\"@rf\"\\\\b(?:{'|'.join(sorted(FORCING_KINDS))})(?!\[A-Za-z0-9\])\"@"
+# OVER-MATCH on the same end: with the anchor gone entirely, `forcing = mygate`
+# becomes a near-miss and the tool quotes ordinary prose back at an author as
+# "an unparsed forcing field".
+run 'near-miss-kind-LEADING-anchor-DELETED' \
+  test_a_longer_word_around_the_KIND_is_not_a_near_miss_either \
+  "s@rf\"(?<!\[A-Za-z0-9\])(?:{'|'.join(sorted(FORCING_KINDS))})(?!\[A-Za-z0-9\])\"@rf\"(?:{'|'.join(sorted(FORCING_KINDS))})(?!\[A-Za-z0-9\])\"@"
+
+printf '\n== the refusals stay CLEARABLE: remedy + legend (must be KILLED) ==\n'
+# 🔴 THE ROW THAT WAS MISSING, AND ITS ABSENCE WAS MEASURED. Reverting
+# `FENCED_FIELD_REMEDY` to the bare "move it out of the fence" left the WHOLE
+# suite green at `e34ed6ef` — the only fenced test asserted `[fenced]` and "code
+# fence", both of which the bare text keeps. So the corrected remedy was prose,
+# not a guarantee. Obeying the bare instruction on a fence quoting this tool's
+# own vocabulary line promotes a quoted example into a declaration: a FALSE
+# `forcing: none`.
+run 'fenced-remedy-reverted-to-bare-move-it-out' \
+  test_the_FENCED_remedy_is_not_a_bare_move_it_out \
+  '/^    "field is YOUR declaration/d;/^    "own lines. If it is quoted/d;/^    "vocabulary line, the item is/d;/^    "do NOT promote the quote/d;/^    "where it does not count/c\    "where it does not count. Move it out of the fence onto one of its own lines."'
+# The other unclearable arm: an author who wrote the tag at COLUMN 0 under the
+# item is told "a continuation line counts" and has already done it. Naming the
+# INDENT is what ends that loop; this reverts only that clause.
+run 'missing-field-remedy-omits-the-indent' \
+  test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT \
+  '/^    "be INDENTED: a flush-left/d;/^    "it is outside the item and reads/d;/^    "counts — the field does not have to sit on the numbered line, but it MUST "$/c\    "counts — the field does not have to sit on the numbered line."'
+# 🔴 THE SKILL-SIDE ROW — the first mutation in this battery that is NOT to the
+# module. It puts SKILL.md's step-5 legend back to the bare "move it out of the
+# fence" it carried at `e34ed6ef`, i.e. the executor's only map telling them to
+# do the thing the module's own comment calls harmful. Nothing could show that
+# guard reachable while every row mutated the module only.
+run_skill 'skill-legend-says-only-move-it-out' \
+  test_the_skill_legend_does_not_tell_the_executor_to_promote_a_quote \
+  's@\*\*yours[^*]*\*\*[^.]*\.@move it out of the fence.@'
 # 🔴 THE SEAM ROW. Renames a marker in the module. SKILL.md's step-5 legend is
 # the executor's only map from a marker to what to do about it, and a rename that
 # left the legend behind would keep every SKILL_PIN green.
-# ⚠ It also kills the module-side fenced test — unavoidable, because the SAME
-# constant feeds the printed row and the skill check. The row is here to prove
-# the DERIVED test can see a rename at all; `want` names that test.
+# ⚠ It also kills the module-side fenced test and the three legend tests —
+# unavoidable, because the SAME constant feeds the printed row, the skill check
+# and `_fenced_legend_clause`'s anchor (which is derived from `MARK_FENCED` for
+# exactly that reason: a rename must not leave a locator hunting for a marker
+# nobody prints). The row is here to prove the DERIVED test can see a rename at
+# all; `want` names that test.
 run 'refusal-marker-renamed' \
   test_every_refusal_MARKER_the_module_prints_reaches_the_skill \
   's@^MARK_FENCED = "\[fenced\]"@MARK_FENCED = "[in-a-fence]"@'

@@ -1483,6 +1483,27 @@ SKILL_PINS: list[tuple[str, str]] = [
         "This step CREATES the doc as well as updating it",
         "🔴 …and the gate step claims the new-doc case, so it is not left orphaned",
     ),
+    # 🔴 The skill scoped the block boundary to "the first unindented line after
+    # a blank one". A col-0 tag after the item's OWN indented fence has a FENCE,
+    # not a blank, immediately above it — so an author reading that sentence
+    # concluded the opposite of what the walk does, and got `[no forcing: field]`
+    # for a field they had written. Behaviour pinned by the `col-0` params of
+    # `test_an_indented_fence_does_not_cost_the_tag_that_follows_it`; this pins
+    # that the skill still states the scope.
+    (
+        "which an intervening FENCE does not reset",
+        "rule (j): the block boundary is stated as WIDE as the walk is",
+    ),
+    # 🔴 The same over-claim on the other side of that sentence: the skill said
+    # flatly that `forcing function:` / `forcing = gate` "are near-misses, NAMED
+    # not absent". `_FORCING_ATTEMPT` is anchored on the CLOSED VOCABULARY, so
+    # that holds only when the value IS a listed kind — `forcing function:
+    # followup` gets `[no forcing: field]`. Behaviour pinned by
+    # `test_a_near_miss_with_an_UNLISTED_kind_is_NOT_named_it_reads_ABSENT`.
+    (
+        "`forcing = gate` **with a listed kind**",
+        "rule (j): the near-miss promise is scoped to the closed vocabulary",
+    ),
 ]
 
 
@@ -2387,6 +2408,129 @@ class TestSkillAndModuleAgree:
         not contain."""
         doc = HANDOFF_SKILL.read_text(encoding="utf-8")
         assert "[no forcing: declaration]" not in doc
+
+    # --- the seam the marker loop above CANNOT see: the legend's INSTRUCTION ---
+    #
+    # 🔴 THE BLIND SPOT, NAMED. `test_every_refusal_MARKER_the_module_prints
+    # _reaches_the_skill` asserts the TOKEN `[fenced]` is present. It stayed
+    # green for a whole round while the legend's instruction beside that token
+    # — "move it out of the fence" — was the exact thing
+    # `FENCED_FIELD_REMEDY`'s own comment says is harmful, because obeying it on
+    # a fence that quotes this tool's vocabulary line promotes a quoted example
+    # into a declaration and produces a FALSE `forcing: none`.
+    #
+    # 🔴 AND THE MODULE SIDE WAS UNPINNED TOO. MEASURED 2026-08-28 at
+    # `e34ed6ef`: reverting `FENCED_FIELD_REMEDY` to a bare
+    # "…where it does not count. Move it out of the fence onto one of the item's
+    # own lines." left the WHOLE suite green — 237 passed — because
+    # `test_a_field_inside_a_FENCE_still_does_not_count_and_says_why` asserts
+    # only `"[fenced]"` and `"code fence"`, both of which the bare text keeps.
+    # So the corrected remedy was documentation, not a guarantee.
+    #
+    # 🔴 WHOLE NORMALISED STRINGS, DELIBERATELY. `claude/RULES.md`: when the
+    # artifact under test IS prose, a guard on WORDS is walkable by REWORDING,
+    # so the whole string is pinned and a cosmetic reword costs a test edit.
+    # That price is the point — it makes the claim machine-readable.
+    _FENCED_REMEDY = (
+        "🔴 The item(s) marked [fenced] carry the field INSIDE a code fence, "
+        "where it does not count — a pasted sample is not a declaration. If "
+        "that field is YOUR declaration, move it out of the fence onto one of "
+        "the item's own lines. If it is quoted output, a copied example or "
+        "this tool's own vocabulary line, the item is genuinely untagged and "
+        "needs one of its own — do NOT promote the quote."
+    )
+    _FENCED_LEGEND = (
+        "`[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT "
+        "promote it** 📖 write-gate §C."
+    )
+    #: The one instruction BOTH sides must carry. Derived rather than restated:
+    #: the skill assertion reads it off the module, so dropping it from either
+    #: side goes red, which is the relationship the token loop cannot see.
+    _NO_PROMOTE = "do NOT promote"
+
+    @staticmethod
+    def _norm(s: str) -> str:
+        return " ".join(s.split())
+
+    def _fenced_legend_clause(self) -> str:
+        """The step-5 legend's `[fenced]` clause, LOCATED not restated.
+
+        Anchored on the module's own `MARK_FENCED`, so a rename that the token
+        loop above forces into the skill lands here too rather than leaving this
+        test looking for a marker nobody prints."""
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        legend = doc.index("Read each row's marker")
+        start = doc.index(f"`{hd.MARK_FENCED}`", legend)
+        end = doc.index("⚠", start)
+        return self._norm(doc[start:end])
+
+    def test_the_FENCED_remedy_is_not_a_bare_move_it_out(self) -> None:
+        """🔴 THE MODULE HALF. Shown reachable by the
+        `fenced-remedy-reverted-to-bare-move-it-out` row in
+        `scripts/tests/mutants-handoff-cap.sh`, which reverts this constant to
+        the bare text measured green above and is killed here.
+
+        ⚠ NOT regression coverage — the remedy is already correct at
+        `e34ed6ef`. It is the guarantee that was missing, labelled as one."""
+        assert self._norm(hd.FENCED_FIELD_REMEDY) == self._norm(self._FENCED_REMEDY)
+        assert self._NO_PROMOTE in hd.FENCED_FIELD_REMEDY
+
+    def test_the_printed_refusal_carries_that_remedy_verbatim(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """A constant nobody prints is not a remedy. The BEHAVIOURAL half: the
+        real refusal text an executor reads must contain it."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Land the fix.\n"
+            "   ```\n"
+            "   forcing: gate\n"
+            "   ```\n"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "fencedremedy.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert self._norm(hd.FENCED_FIELD_REMEDY) in self._norm(res.stderr)
+
+    def test_the_skill_legend_does_not_tell_the_executor_to_promote_a_quote(
+        self,
+    ) -> None:
+        """🔴 THE SKILL HALF, AND THE ONE THAT WAS ACTUALLY BROKEN. RED at
+        `e34ed6ef`, where the clause reads ``[fenced]` move it out of the
+        fence.` — the module's own comment calls that instruction harmful, and
+        the module comment elsewhere calls this legend "the executor's only map
+        from a marker to what to do about it".
+
+        The `_NO_PROMOTE` assertion is DERIVED from the module constant, so it
+        also fails if the module drops the instruction — that is the seam, and
+        it is what the marker-token loop above structurally cannot see.
+
+        Shown reachable by the `skill-legend-says-only-move-it-out` row in
+        `scripts/tests/mutants-handoff-cap.sh`."""
+        clause = self._fenced_legend_clause()
+        assert self._NO_PROMOTE in hd.FENCED_FIELD_REMEDY, (
+            "the module stopped telling the caller not to promote a quoted "
+            "field; the skill legend below is derived from it, so fix the "
+            "module first"
+        )
+        assert self._NO_PROMOTE in clause, (
+            f"claude/skills/handoff/SKILL.md's step-5 legend maps {hd.MARK_FENCED} "
+            f"to {clause!r}. FENCED_FIELD_REMEDY says the commonest fenced field "
+            f"is a QUOTE of this tool's own vocabulary line, and that obeying a "
+            f"bare 'move it out of the fence' promotes it into a declaration — a "
+            f"false `forcing: none`. The legend must not instruct the harm the "
+            f"module documents."
+        )
+        assert clause == self._norm(self._FENCED_LEGEND)
+
+    def test_the_legend_clause_locator_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL on `_fenced_legend_clause`. A locator that silently
+        returned the whole document, or an empty string, would make both
+        assertions above unfalsifiable in one direction. Feed it text that MUST
+        NOT satisfy the check and watch the check fail."""
+        clause = self._fenced_legend_clause()
+        assert self._NO_PROMOTE not in "`[fenced]` move it out of the fence."
+        assert 0 < len(clause) < 400, f"the locator returned {len(clause)} bytes"
+        assert clause.startswith(f"`{hd.MARK_FENCED}`")
 
     def test_the_tool_is_tracked_by_git(self) -> None:
         """A new file the flake never sees deploys as an absence, silently.
@@ -3772,6 +3916,36 @@ class TestTheFieldIsFoundOnTheWholeItemNotTheNumberedLine:
         assert "unparsed forcing field on:" in err, "say WHICH line, or it cannot be fixed"
         assert attempt in err, "quote the offending line verbatim"
 
+    @pytest.mark.parametrize(
+        "attempt",
+        ("forcing function: followup", "forcing = tech-debt", "forcing — someday"),
+    )
+    def test_a_near_miss_with_an_UNLISTED_kind_is_NOT_named_it_reads_ABSENT(
+        self, repo: Path, tmp_path: Path, attempt: str
+    ) -> None:
+        """🔴 THE SCOPE OF THE TEST ABOVE, WHICH SKILL.md USED TO OVERSTATE.
+        `_FORCING_ATTEMPT` is anchored on the CLOSED VOCABULARY at both ends —
+        that anchoring is the entire reason it is safe to run over prose — so a
+        near-miss whose VALUE is not a listed kind matches nothing and falls
+        through to `[no forcing: field]`.
+
+        The skill said flatly that ``forcing function:`` / ``forcing = gate``
+        "are near-misses, NAMED not absent"; measured at `e34ed6ef`,
+        `forcing function: followup` gets `[no forcing: field]`. The sentence is
+        now scoped to a listed kind, and this is what makes that scoping a
+        claim rather than a promise.
+
+        ⚠ NOT a defect and NOT being fixed: loosening the kind anchor is how the
+        net starts quoting ordinary prose back at an author. It is a documented
+        limit — `claude/RULES.md`, a comment is a claim too."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n   " + attempt + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind is None and item.near_miss is None, repr(attempt)
+        res = run_tool(repo, update=write_delta(tmp_path, "unlisted.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert hd.MARK_NO_FIELD in res.stderr
+        assert "unparsed forcing field on:" not in res.stderr
+
     def test_a_field_inside_a_FENCE_still_does_not_count_and_says_why(
         self, repo: Path, tmp_path: Path
     ) -> None:
@@ -3978,29 +4152,99 @@ class TestTheWIDENINGDidNotOpenTwoHOLES:
         assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
         assert "[no forcing: field]" in res.stderr
 
-    @pytest.mark.parametrize("gap", ("", "\n"), ids=("no-blank", "blank"))
+    @pytest.mark.parametrize(
+        "gap,indent,expected",
+        (
+            ("", "   ", "regression"),
+            ("\n", "   ", "regression"),
+            ("", "", None),
+            ("\n", "", None),
+        ),
+        ids=("no-blank-indented", "blank-indented", "no-blank-col0", "blank-col0"),
+    )
     def test_an_indented_fence_does_not_cost_the_tag_that_follows_it(
-        self, gap: str
+        self, gap: str, indent: str, expected: str | None
     ) -> None:
-        """The other side of the same boundary, measured at BOTH points: a tag on
-        an indented line after the item's own fence still counts, whether or not
-        a blank line sits between them. Dropping the memory reset must not buy
-        the fix above at the price of this shape, which the corpus has.
+        """Both sides of the same boundary, measured at FOUR points.
 
-        ⚠ PASSED at `503d7136`, both params — labelled, not counted as
-        regression coverage. It is the COST side of the fix, and it is shown
+        **INDENTED (the cost side of the fix).** A tag on an indented line after
+        the item's own fence still counts, whether or not a blank line sits
+        between them — dropping the memory reset must not buy the fix above at
+        the price of this shape, which the corpus has. ⚠ PASSED at `503d7136`,
+        both params: labelled, not counted as regression coverage. Shown
         reachable by the `a-blank-line-ends-the-item` and
         `block-collapsed-to-the-numbered-line` rows in
-        `scripts/tests/mutants-handoff-cap.sh`, which it kills."""
+        `scripts/tests/mutants-handoff-cap.sh`, which they kill.
+
+        🔴 **COLUMN 0 — the cost the fix DID charge, asserted as DELIBERATE.**
+        The `no-blank-col0` param is RED at `503d7136`, where it returned
+        `kind='regression'`: the fence used to clear the "a blank has
+        intervened" flag, so a col-0 line after it continued the item. Here the
+        blank before the fence still counts, that line IS the boundary, and the
+        tag is dropped. **This is not a bug to fix on sight.** The walk cannot
+        tell an author's col-0 tag from col-0 pasted boilerplate — which is
+        exactly what `test_a_fence_does_not_erase_the_blank_line_boundary`
+        refuses — and falsely ACCEPTING an untagged item is worse than refusing
+        a tagged one. Corpus impact: **0 of 442** ranked items. What makes the
+        refusal clearable rather than unrecoverable is `MISSING_FIELD_REMEDY`
+        naming the indent, pinned by
+        `test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT`.
+        (`blank-col0` was already absent at `503d7136` — an invariant guard
+        carried along, not coverage of this change.)"""
         text = (
             "## Next steps (ranked)\n"
             "1. Fix A.\n"
             "\n"
             "   ```\n"
             "   ./scripts/measure.py --since 2026-08-01\n"
-            "   ```\n" + gap + "   forcing: regression — vs the 2026-08-20 baseline\n"
+            "   ```\n" + gap + indent
+            + "forcing: regression — vs the 2026-08-20 baseline\n"
         )
-        assert [i.kind for i in hd.ranked_items(text)] == ["regression"], repr(gap)
+        item = hd.ranked_items(text)[0]
+        assert item.kind == expected, (repr(gap), repr(indent))
+        if expected is None:
+            # The DIAGNOSIS half: a dropped boundary line is not in the item's
+            # own lines and not in its fenced lines either, so the row must be
+            # the plain one — anything else would be a claim about a line this
+            # walk never looked at.
+            assert item.near_miss is None and item.fenced is False
+
+    def test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 RED at `e34ed6ef`. The remedy said only "A continuation line
+        counts — the field does not have to sit on the numbered line", which is
+        read as a promise this walk does not keep: the col-0 param above HAS a
+        tag on a continuation line and is told it carries none.
+
+        That is the unrecoverable-refusal shape the whole ladder exists to
+        remove — the printed fix is already done, so the re-run is byte-
+        identical. The boundary is deliberately NOT loosened (see the docstring
+        above); naming the INDENT is what makes the refusal clearable instead.
+
+        Shown reachable by the `missing-field-remedy-omits-the-indent` row in
+        `scripts/tests/mutants-handoff-cap.sh`."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "\n"
+            "   ```\n"
+            "   ./scripts/measure.py --since 2026-08-01\n"
+            "   ```\n"
+            "forcing: regression — vs the 2026-08-20 baseline\n"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "col0tag.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert hd.MARK_NO_FIELD in res.stderr
+        norm = " ".join(res.stderr.split())
+        assert " ".join(hd.MISSING_FIELD_REMEDY.split()) in norm
+        assert "MUST be INDENTED" in norm, (
+            "the author HAS written the field on a continuation line and is "
+            "being told to write one. Without the indent instruction the fix "
+            "the refusal prints is a no-op and the re-run prints identical "
+            "bytes — the unrecoverable refusal, re-entered through the fence "
+            "boundary."
+        )
 
     @pytest.mark.parametrize(
         "tagline",
@@ -4072,6 +4316,138 @@ class TestTheWIDENINGDidNotOpenTwoHOLES:
         item = hd.ranked_items(text)[0]
         assert item.kind is None, f"{line!r} was accepted as the field"
         assert item.near_miss is None, f"{line!r} was reported as a near-miss"
+
+    @pytest.mark.parametrize(
+        "line",
+        (
+            "   forcing = mygate — a longer word merely ENDING with a kind",
+            "   forcing — theincident, which is not the vocabulary word",
+            "   forcing = wontregression, nor is that one",
+        ),
+    )
+    def test_a_longer_word_around_the_KIND_is_not_a_near_miss_either(
+        self, line: str
+    ) -> None:
+        """🔴 THE LEADING ANCHOR ON THE **KIND**, WHICH NOTHING DISTINGUISHED.
+
+        `_FORCING_ATTEMPT` anchors both ends of both tokens, and the module's
+        comment claims exactly that — but the only fixture exercising the kind's
+        anchors was `_forcing = gate_`, whose `gate` is at the END of the line,
+        so it can only see the TRAILING one. MEASURED at `e34ed6ef`: DELETING
+        the LEADING `(?<![A-Za-z0-9])` before the kind alternation makes
+        `forcing = mygate` a near-miss, and the full suite stayed green — 237
+        passed against the `e34ed6ef` test file. Three of four anchors were
+        shown reachable; this is the fourth.
+
+        The stake is not cosmetic: `_FORCING_ATTEMPT` QUOTES the line it matched
+        back at the author as "an unparsed forcing field", so a leaky kind
+        anchor means ordinary prose containing a vocabulary word inside a longer
+        word gets read back as a malformed tag.
+
+        ⚠ INVARIANT GUARD, not regression coverage — green at `503d7136` too
+        (`\\b` excluded these as well). It is shown reachable by the
+        `near-miss-kind-LEADING-anchor-DELETED` row in
+        `scripts/tests/mutants-handoff-cap.sh`. 🔴 It is deliberately NOT the
+        killer for `near-miss-kind-LEADING-anchor-on-word-boundary`: MEASURED,
+        `\\b` excludes `mygate` exactly as the lookbehind does, so that row needs
+        the OPPOSITE direction, which
+        `test_an_EMPHASISED_KIND_is_still_seen_by_the_near_miss_net` supplies.
+        Two failure directions, two rows, two fixtures — the first draft of this
+        pair pointed the `\\b` row at THIS test and the battery reported it
+        SURVIVED, which is how the distinction was found."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n" + line + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind is None, f"{line!r} was accepted as the field"
+        assert item.near_miss is None, f"{line!r} was reported as a near-miss"
+
+    @pytest.mark.parametrize(
+        "attempt", ("forcing = _gate — CI red", "forcing — _incident")
+    )
+    def test_an_EMPHASISED_KIND_is_still_seen_by_the_near_miss_net(
+        self, repo: Path, tmp_path: Path, attempt: str
+    ) -> None:
+        """🔴 THE OTHER DIRECTION ON THE SAME ANCHOR, AND THE ONE THAT ISOLATES
+        IT. The round that replaced `\\b` with `(?<![A-Za-z0-9])` did it on the
+        KEY *and* the KIND for one reason — `_` is a word character — but every
+        fixture put the emphasis around the KEY (`_forcing = gate_`), where the
+        kind's LEADING anchor is never exercised: `gate` there is preceded by a
+        space, which `\\b` handles fine.
+
+        This puts the emphasis on the KIND instead. MEASURED at `e34ed6ef`
+        across all three one-anchor mutants: `forcing = _gate` is a near-miss at
+        HEAD, is NOT one when the kind's leading anchor becomes `\\b`, and IS
+        still one when the TRAILING anchor becomes `\\b` — so it separates the
+        two ends, which `_forcing = gate_` (killed only by the trailing row)
+        cannot.
+
+        ⚠ INVARIANT GUARD, not regression coverage: this is current behaviour,
+        red only against the mutant. Shown reachable by the
+        `near-miss-kind-LEADING-anchor-on-word-boundary` row in
+        `scripts/tests/mutants-handoff-cap.sh`."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n   " + attempt + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind is None, f"{attempt!r} was accepted as the field"
+        assert item.near_miss is not None, (
+            f"{attempt!r} fell through to [no forcing: field] — the refusal a "
+            f"re-run cannot clear, for an emphasised kind"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "emphkind.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert hd.MARK_NO_FIELD not in res.stderr
+        assert attempt in res.stderr, "quote the offending line verbatim"
+
+    @pytest.mark.parametrize(
+        "line,kind,near_miss",
+        (
+            ("   some_forcing: none", "none", False),
+            ("   éforcing: gate", "gate", False),
+            ("   強forcing: gate", "gate", False),
+            ("   the forcing_fn returns none", None, True),
+            ("   forcing the user_id column", None, True),
+            ("   forcing the gate_keeper to retry", None, True),
+        ),
+        ids=("snake-suffix", "latin1-before", "cjk-before",
+             "attempt-key-snake-prefix", "attempt-kind-then-underscore",
+             "attempt-kind-then-underscore-2"),
+    )
+    def test_the_widened_anchors_admit_these_and_the_comment_says_so(
+        self, line: str, kind: str | None, near_miss: bool
+    ) -> None:
+        """🔴 THE COMMENT'S CLAIM, MADE MACHINE-READABLE. `_FORCING`'s comment
+        used to enumerate the widening's new admissions as *only* "a snake_case
+        identifier ending in `_forcing`". A delta audit measured three more, all
+        RED at `503d7136` (none of these parsed under `\\b`):
+
+          * `_FORCING_ATTEMPT`'s KEY admits an identifier STARTING with the key;
+          * its KIND admits a kind followed by `_`;
+          * the class is `[A-Za-z0-9]`, so a NON-ASCII word character before the
+            key excludes nothing — Python's `\\w` is unicode, so `\\b` did.
+
+        Each is bounded by the same closed-vocabulary argument as the markup
+        class, and each occurs 0 times over both corpora, so none is being
+        fixed. They are pinned so the comment stops being the only record —
+        `claude/RULES.md`: a comment is a claim too.
+
+        ⚠ NOT regression coverage: this asserts CURRENT behaviour. Its evidence
+        is the base measurement above, and it is shown reachable by the four
+        anchor rows in `scripts/tests/mutants-handoff-cap.sh`."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n" + line + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind == kind, f"{line!r} -> {item.kind!r}"
+        assert (item.near_miss is not None) is near_miss, (
+            f"{line!r} -> near_miss={item.near_miss!r}"
+        )
+
+    def test_the_comment_still_states_the_ASCII_scope(self) -> None:
+        """The half above cannot see: the module's prose must SAY the exclusion
+        is ASCII-only, because a maintainer reading "the character before the
+        key is a letter" would conclude `éforcing:` is excluded and it is not.
+
+        A phrase pin, and a weak one by construction — the behaviour is pinned
+        by the params above; this only keeps the comment from re-narrowing."""
+        src = TOOL.read_text(encoding="utf-8")
+        assert "an ASCII letter" in src
+        assert "FOUR ADMISSIONS, NOT ONE" in src
 
 
 class TestRulesIAndJDidNotMoveTheOtherExits:

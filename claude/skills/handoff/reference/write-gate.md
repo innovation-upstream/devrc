@@ -68,6 +68,12 @@ has to behave correctly; it is the absence of one.
 default-mode run, because a gate that has only ever been watched to accept is
 not a gate.
 
+⚠ SKILL.md's opening sentence for step 5 used to add *"step 4's index write is
+gated"* as the contrast. That gate was retired 2026-08-15 and step 4 is now a
+pointer to `subsystem-index`, so the contrast had become false in two ways; it
+was demoted here rather than deleted, and the skill body is where its bytes were
+reclaimed from.
+
 ### …and the half of that sentence that was FALSE
 
 "Cheap and reversible" was written of the **file** and read as if it covered the
@@ -209,7 +215,27 @@ invariant guards rather than coverage of these defects.
   self-generated, and rule (j) passing. That is the counterfactual this section
   cites as the reason the naive boundary was rejected, re-entered through the
   fence path. A fence with *no* preceding blank still absorbs the following
-  unindented line: that is genuine markdown lazy continuation and is left alone.
+  unindented line, because this walk's boundary needs a blank to have intervened
+  and none has. 🔴 **That is this walk's rule, not markdown's** — the sentence
+  here used to justify it as "genuine markdown lazy continuation" and that is
+  wrong: in CommonMark lazy continuation covers a *paragraph's* continuation
+  lines, not a line following a fenced code block inside a list item, where the
+  block has ended and the unindented line is outside the item. The behaviour is
+  kept and only its justification changed — it is the permissive direction (it
+  can only hand back a tag the author wrote, never invent one) and no corpus
+  item depends on the strict reading.
+
+  **The fix's own cost, deliberate and measured.** Item → blank → the item's
+  **own indented** fence → a tag at **column 0** parsed at `503d7136`
+  (`kind='gate'`) and does not here: the blank's memory now survives the fence,
+  so that col-0 line is the boundary and the tag is dropped —
+  `kind=None, near_miss=None, fenced=False`, i.e. `[no forcing: field]` at an
+  author who *did* write the field on a continuation line. **Not reversed, and
+  it must not be:** the walk cannot tell that col-0 tag from col-0 pasted
+  boilerplate, and falsely ACCEPTING an untagged item is worse than refusing a
+  tagged one. Corpus impact **0 of 442** ranked items. What pays for it is
+  `MISSING_FIELD_REMEDY`, which now says the field must be **indented** — that
+  is what turns this arm from unrecoverable into clearable.
 * **`\b` cannot see past an underscore.** `_` is a word character, so
   `\bforcing` has no boundary to match in `_forcing: gate_`. Measured at
   `503d7136`: `**forcing: gate**` → `gate`; `_forcing: gate_`,
@@ -219,10 +245,19 @@ invariant guards rather than coverage of these defects.
   `_FORCING_ATTEMPT` shared the anchor, so the safety net had the same hole.
   Both patterns now anchor on `(?<![A-Za-z0-9])` / `(?![A-Za-z0-9])`, which keeps
   the one job `\b` was doing — `enforcing:`, `reinforcing:` and `forcings:` are
-  still excluded, verified on both patterns. It newly admits a snake_case
-  identifier ending in `_forcing`; `_forcing` occurs **0** times across both
-  corpora (devrc 126 docs, homelab-talos 139), and the case is bounded by the
-  same closed-vocabulary argument as the markup class.
+  still excluded, verified on both patterns. 🔴 **Four things it newly admits,
+  not one.** A delta audit found three more after this section named only the
+  first: (1) a snake_case identifier *ending* in `_forcing` (`some_forcing:
+  none` parses); (2) `_FORCING_ATTEMPT`'s key admits one *starting* with the key
+  (`the forcing_fn returns none` is now a near-miss); (3) that pattern's KIND
+  admits a kind followed by `_` (`forcing the user_id column`, `forcing the
+  gate_keeper to retry`); (4) the class is `[A-Za-z0-9]`, so a **non-ASCII**
+  word character before the key excludes nothing — `éforcing: gate` and
+  `強forcing: gate` parse, and did not under `\b`, whose `\w` is unicode. So
+  "the character before the key is a letter" holds for **ASCII** letters only.
+  All four occur **0** times across both corpora (devrc 126 docs, homelab-talos
+  139), and all four are bounded by the same closed-vocabulary argument as the
+  markup class.
 
 **Two limits the skill body states in one clause and this section owns in full.**
 A tag written **flush-left on its own line under a blank one**, directly beneath
@@ -231,7 +266,11 @@ before the near-miss scan ever runs. MEASURED 2026-08-28 — `1. Fix A.` + blank
 `forcing: gate — CI red` at column 0 gives
 `kind=None, near_miss=None, fenced=False` and the row
 `1. Fix A.   [no forcing: field]`, while the same tag INDENTED, or flush-left
-with no blank before it, both parse to `gate`. The fix is to indent it.
+with no blank before it, both parse to `gate`. 🔴 **The blank need not be the
+line immediately above:** the memory survives the item's own fence, so
+item → blank → indented fence → col-0 tag is the same case (that one *did*
+parse at `503d7136`; see the cost note above). The fix in every variant is to
+**indent it**, which is why `MISSING_FIELD_REMEDY` now says so.
 
 That case is why **SKILL.md no longer claims the tool "never tells you to add a
 field you already wrote"** — the sentence was wider than the code. Note the
