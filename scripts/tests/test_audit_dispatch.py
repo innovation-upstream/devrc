@@ -1056,13 +1056,23 @@ def test_each_section_directive_carries_the_instruction_its_ledger_entry_names()
 
 
 def test_the_directive_render_scenario_ledger_is_pinned_two_way():
-    """Every directive names a brief that carries it, and vice versa.
+    """Every directive names a SCENARIO, and every scenario names a directive.
 
-    🔴 INVARIANT GUARD; its evidence is mutants XA and Y1/Y2 (a directive added
-    with no scenario, or one whose section stops rendering it). Without this,
-    a directive could be added to `SECTION_DIRECTIVES`, ledgered whole, and
-    reach NO brief at all — an instruction nobody receives, pinned word for
-    word, reading as coverage.
+    🔴 THE SENTENCE ABOVE IS EXACTLY AS WIDE AS THE CODE BELOW, and its first
+    draft was not: it read "every directive names a brief THAT CARRIES IT",
+    which claims a rendering check this test does not make. Whether the
+    scenario's brief actually carries the directive is
+    `..._emitted_verbatim_in_the_brief_that_owns_it`, next door. Splitting them
+    is deliberate — one owns the LEDGER, one owns the RENDER — and describing
+    this one as if it did both is the "guard whose description is wider than
+    its implementation" failure `claude/RULES.md` names, which is also 🟡3 of
+    the round this test was written in.
+
+    🔴 INVARIANT GUARD; its evidence is mutant XA (a directive added with no
+    scenario) and X2 (one deleted). Without it a directive could be added to
+    `SECTION_DIRECTIVES`, ledgered whole, and be scoped to nothing at all —
+    after which the render check has no scenario to look in and passes
+    vacuously.
     """
     # 🔴 Against the SCRIPT's ids, not only against the sibling ledger. Two
     # test-module constants compared with each other are unreachable by the
@@ -3197,8 +3207,15 @@ FIX_MATRIX = (
 # grades every row correctly and asserts nothing. Derived from the current
 # measurement the way this repo derives every other floor —
 # `m - min(50, max(1, m // 20))` — rather than hand-picked, because a
-# hand-picked floor drifts from what it is protecting. At m = 48 that is 46.
-MIN_FIX_MATRIX_ROWS = 46
+# hand-picked floor drifts from what it is protecting.
+#
+# 🔴 COUNTED, not estimated. This comment first said "at m = 48 that is 46" and
+# BOTH numbers were wrong: the matrix holds 47 rows, and the formula gives
+# 47 - max(1, 2) = 45. Caught by counting the rows instead of trusting the
+# sentence — which is the same move as 🟢 "count them in the ledger" elsewhere
+# in this round, and it is recorded because an arithmetic claim nobody re-runs
+# is precisely what 🟡3 was about.
+MIN_FIX_MATRIX_ROWS = 45
 
 # 🔴 THE MUTANTS COLUMN IS AN EVIDENCE CLAIM, AND IT WAS UNGRADED.
 # `fix_matrix_problems` took `_mutants` and threw it away, so rewriting a
