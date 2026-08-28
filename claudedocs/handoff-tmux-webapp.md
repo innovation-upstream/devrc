@@ -54,7 +54,7 @@ only because the **merged tree** was gated instead of the branch.
 | | |
 |---|---|
 | Source | `~/workspace/homelab-talos/containers/clawgate/` (Go, module `github.com/zacxdev/clawgate`) |
-| Live version | **0.8.1** (`clawgatectl health`, 2026-08-26) |
+| Live version | **0.8.5** (ReplicaSet image, 2026-08-27 21:17Z) — ⚠ this row has been stale twice; read it from the cluster, never from here |
 | Cluster / ns | **workbench**, ns `clawgate`; GitOps from `trunk` |
 | Stack | Go + **htmx** (136 `hx-*` attributes in `internal/ui/*.go`; UI is Go-built HTML, **not** template files) |
 | LAN URL | `http://192.168.50.250:30302` (NodePort) — 🔴 **no human auth** |
@@ -203,11 +203,70 @@ open one, not "the first in the list". *History, carried forward:* the 2026-08-2
 superseded an earlier 1–7 list, so a claim slug minted before that date may name a different item —
 do not renumber again without releasing the live claims first.
 
-1. **Watch the 4h idle reaper fire.** `homelab-talos`, `containers/clawgate/internal/api/server.go`
-   (`attentionIdleReapAfter`). It has **never run against production data** — the one behaviour in
-   this feature nobody has observed. Idle entries accumulate fast (53 open seen within ~2h). Tell:
-   `retention: resolved N idle attention entry(ies) not seen for 4h` in the server log. If the rate
-   outpaces it, that constant is the single knob.
+1. ✅ **DONE 2026-08-27 — it had never fired because it COULD NOT. `ZacxDev/homelab-infra#457`.**
+   Not an observation task: the reaper was inert in production for the whole of its life.
+
+   **Mechanism.** The reap's only caller was `retentionPass`, whose only caller was
+   `RunRetention`'s **24h** ticker — and `time.NewTicker` delivers its FIRST tick one whole
+   interval in. Sweeping once required a pod to survive 24h. Measured: since the feature shipped
+   (0.8.3, ReplicaSet created `2026-08-27T16:00:08Z`) the longest-lived pod managed **5h02m**
+   (0.8.4 got 15m, 0.8.5 2h41m, `restarts=0`); clawgate deploys far oftener than daily. The live
+   pod's log held **zero** `retention:` lines. 🔴 The leader lease was **ruled out** as a rival
+   mechanism rather than assumed innocent — `leader(background-loops): acquired lease` appears 30s
+   after boot. The ticker was the sole blocker.
+
+   **The second defect, which outlives the restart story:** even a pod that never restarted swept
+   every 24h against a 4h window — an entry sat up to **6× its own window** past eligibility. This
+   doc used to call the 4h constant "the single knob". It never was; the sweep interval was.
+
+   **Fix:** a dedicated leader-gated `RunAttentionReap` on `api.AttentionReapInterval` (30m), with
+   `retentionPass` still calling the same extracted pass daily as a backstop — one implementation,
+   two schedulers. Four audit rounds; the ladder stopped on the **attribution gate** (two
+   consecutive rounds whose fixes changed zero payload lines), not on a verdict.
+
+   🔴 **The diagnostic tell has CHANGED — the old string no longer exists.** Two lines now:
+   - at boot, unconditionally: `attention reaper: sweeping every 30m0s for idle entries not seen for 4h0m0s`
+   - on a sweep that resolved something: `attention-reap: resolved N idle attention entry(ies) not seen for 4h0m0s`
+
+   The prefix moved off `retention:` deliberately: two schedulers drive the pass now, so a
+   `retention:` line could no longer say *which* swept. And the **entry line is the load-bearing
+   one** — the pass is silent when it resolves nothing, so without it a pod whose reaper never
+   started and a pod sweeping a healthy empty queue emit byte-identical logs. That
+   indistinguishability is exactly what hid this bug, and "0 log lines" was the evidence for it.
+
+   **SHIPPED — clawgate 0.8.7 is live** (`3a66e3e0` merged; pin `cc51b9b4`; Flux reconciled; pod
+   `clawgate-7c78695584-zqdjf` Running/ready). ⚠ The pin had moved to **0.8.6 under me** mid-session
+   (a concurrent ship), so 0.8.7 was derived from the LIVE pin re-read at the moment of acting —
+   and 0.8.6 was confirmed **by content** to predate the merge and not contain the fix.
+   First evidence in this feature's history that the reaper exists at runtime:
+   `02:04:10 attention reaper: sweeping every 30m0s …` followed by
+   `02:04:40 leader(background-loops): acquired lease`.
+
+   **Forced end-to-end validation (2026-08-28), because waiting 30m is not the only option — but
+   restarting the pod is NOT a way to force it: that RESETS the ticker and makes it strictly
+   worse.** There is no on-demand route. So the deployed tree was run against a throwaway Postgres
+   with **one line changed** (the interval to 5s) and **synthetic** rows — never copied production
+   entries, which carry captured session text. Result:
+   `attention-reap: resolved 3 idle attention entry(ies) not seen for 4h0m0s`, taking exactly the
+   3 stale `idle` rows while 2 fresh `idle`, a stale `question` and a stale `manual` all survived,
+   with `created_at` backdated 30 days on **every** row so the reap provably keys on `updated_at`.
+   A negative control ran first: two sweeps with nothing stale resolved nothing and logged nothing.
+   🔴 **This closes a real gap — every unit test runs against a FAKE store, so the `pgstore` SQL had
+   never been exercised by the loop against a real Postgres.** 🔴 **But it changed the very variable
+   the bug was about (the interval), so it is NOT a substitute for observing the 30m production
+   tick** — that is what the boot line's `every 30m0s`, the AST cadence guard and the `main()`
+   ledger are for.
+
+   ✅ **VERIFIED IN PRODUCTION 2026-08-28 — the behaviour nobody had ever observed.** Six sweeps
+   over 4.5h, every one landing on exactly `:04:10` / `:34:10` (boot 02:04:10 + n×30m0s), so the
+   cadence is measured over many ticks rather than inferred from one:
+   `02:34:10` resolved **23**, then 8 / 1 / 2 / 5 / 11 at 04:04, 05:04, 05:34, 06:04, 06:34.
+   The bound is holding, checked against the DB and not just the log: open **64 → 11**, resolved
+   45 → 107, **idle entries still past the 4h window = 0**, and both `question` rows preserved.
+   Steady state ~11 against `attentionPanelLimit` 100 — the runaway this feature was losing to is
+   closed.
+
+   Claim `tmux-webapp-1` released.
 2. ✅ **DONE 2026-08-27 — `ZacxDev/homelab-infra#451`, merged as `a38360a5`. Deployed and verified
    on BOTH hosts.** The suggest POST is detached (payload renamed to a **sibling of `WORKDIR`**,
    fork, child `rm`s before it logs). Claim `tmux-webapp-2` released.
@@ -218,14 +277,61 @@ do not renumber again without releasing the live claims first.
    route, not the fork). Both logged `suggest sent ok` from the detached child; no scratch leaked.
    ⚠ The two hosts pulled at different moments, so they carry the detach at different commits
    (`a38360a5` / `6cda752c`) — `drift-check.sh` will report that correctly and it is not a defect.
-3. **Decide the terminal widget (audit finding A4 — still open).** clawgate vendors only two
-   hand-written JS files (~3.7 KB) and no third-party bundle, so xterm.js would be the first.
-   Recommendation on record: ship read-only `capture-pane` rendering first; if adopted, vendor and
-   `go:embed` it, never a CDN — clawgate must work on an offline LAN.
-4. **Host-side tmux agent** (phase 2). `devrc`, a new `systemd.user.services` unit on both hosts
-   holding an **outbound** connection to clawgate. Source from `scripts/session-manager --json`,
-   which already SSHes to the laptop and runs `list-panes -a` + `list-windows -a` on both hosts —
-   do not write a second collector.
+3. ✅ **DECIDED 2026-08-28 (Zach): read-only `capture-pane` rendering first.** A4 is closed as a
+   decision; the BUILD is blocked on item 4 — see the dependency below.
+
+   🔴 **The premise this item carried for two sessions was FALSE, and it was the whole argument.**
+   It read "clawgate vendors only two hand-written JS files (~3.7 KB) and **no third-party bundle**,
+   so xterm.js would be the first." Measured 2026-08-28: the two hand-written files are real but
+   live at `internal/ui/js/{filter-toggle,tag-normalize}.js`, individually `go:embed`ed — and
+   **`web/static/vendor/` already holds FIVE third-party bundles totalling ~245 KB**
+   (`htmx.min.js` 51 KB, `faro-web-sdk.iife.js` 93 KB, `faro-web-tracing.iife.js` 82 KB,
+   `idiomorph-ext.min.js` 10 KB, `sse.js` 9 KB), every one referenced from the Go-built HTML and
+   swept up by `//go:embed static` in `web/static.go`. So xterm.js would be the **sixth**, and the
+   "no precedent" objection does not exist. Vendoring is a solved, offline-safe pattern here: drop
+   the file in `web/static/vendor/`, reference it, done — no build step, no CDN.
+
+   **The decision survives on a BETTER reason, which this item never connected to itself:** an
+   interactive terminal means `send-keys`, which is **arbitrary command execution as Zach on both
+   machines**. Item 5's fail-closed auth wrapper is then a hard prerequisite, so "vendor xterm.js"
+   is not a library choice — it drags the highest-stakes decision in this project forward. Read-only
+   has no write path and therefore no such coupling.
+
+   🔴 **DEPENDENCY — read-only rendering CANNOT be built before item 4.** Measured against the live
+   deployment 2026-08-28: `hostNetwork/hostPID/hostIPC` all false, `nodeName` null, and the only
+   volume is a PVC — so the pod has no path to a host tmux socket, and `capture-pane` output has to
+   be *delivered* from the host. (The image is distroless with no shell, so probe it via the spec,
+   not `kubectl exec`.) Item 4 is the next buildable thing; item 3 needs no further decisions.
+4. **Host-side tmux agent** (phase 2). **SERVER HALF DONE — `ZacxDev/homelab-infra#468`, merged as
+   `32f49804`. The host-side pusher is the remaining half.**
+
+   🔴 **Two decisions here were made AGAINST this doc, on measurement.** (a) It specified a unit on
+   EACH host; `session-manager --json` already collects BOTH from the workbench (it SSHes to the
+   laptop) in **~970 ms**, returning 43 workbench + 28 laptop windows — so ONE agent, and the schema
+   is per-host so a second reporter can be added later with no server change. (b) It sketched a
+   WebSocket; rank 3 deferred the interactive terminal, so a persistent socket buys nothing today
+   and adds reconnect/backoff state to get wrong. **Periodic HTTPS POST.**
+
+   **What shipped:** `POST/GET /api/tmux/snapshot` behind `requireHookToken`, migration `0027`
+   (latest-per-host, no reaper — a snapshot is current-state, so there is nothing to retain and no
+   reaper to get wrong, which is the mistake `attention_entries` paid for), and `internal/tmux`,
+   which exists to own the VOCABULARY BOUNDARY: session-manager spells its tmux session `session`,
+   so the collision arrives WITH THE PAYLOAD and is renamed to `tmuxSessionName` at ingest.
+
+   **Still to do — the pusher.** A timer + `curl` on the workbench posting `session-manager --json`
+   VERBATIM; the server normalises, so the host stays a dumb pipe. 🔴 **Deploy order is
+   server-first** — it already is, so a pusher shipped now degrades to a 404 it treats as an
+   unreachable server. **The server is MERGED but NOT DEPLOYED** (immutable image pin, no Flux
+   automation): build + push + bump both `deployment.yaml` and `client.go`'s `buildVersion`.
+
+   **Five audit rounds ran. Every round found a defect the PREVIOUS round's fix introduced** —
+   round 1 an atomicity bug; fixing it caused a 30%-reproducible deadlock (randomised map order vs
+   row locks); fixing THAT left a guard three separate mutants walked through; and `UseNumber`,
+   added so a nanosecond timestamp is not corrupted, re-opened an amplification that a 32-char cap
+   missed (`1e100000` is 8 chars) and `ParseFloat` then closed only half of (it returns `0, nil` on
+   UNDERFLOW). Round 5 was the first with **no behaviour defect**. Stopped there — one round short
+   of the mechanical two-zero-payload gate — because round 5 was auditing test code round 4 wrote.
+   Residual amplification measured **8.1x**, ratio-bounded, down from 1,107x.
 5. **Fail-closed terminal-write auth wrapper** — before any write endpoint exists, not after.
    `internal/api/auth.go`. 🔴 Must NOT reuse `requireHookToken`: it is enforce-when-set
    (`auth.go:51-54`), so an unset token would silently yield an open remote shell on both machines.
@@ -245,6 +351,21 @@ ones in the subsystem index (`homelab-talos/clawgate.md`), and the two generic o
 inertness and the zsh `EPOCHREALTIME` trap — in this doc's own **Gotchas**, which appends and
 survives. Nothing was lost by dropping the item; only the false claim that work was outstanding.
 
+10. **Two guard gaps #457's ladder left open deliberately, both scaffolding-scope.** Recorded here
+    because the ladder stopped on the attribution gate (two consecutive zero-payload rounds), not
+    because these were closed.
+    - **`RunSweeper`'s ticker survives `NewTicker`→`NewTimer`** against the whole api package —
+      i.e. the same one-shot defect class, still unguarded on a *different* loop. Pre-existing and
+      unrelated to #457, found incidentally. `RunRetention` and `RunReconciler` are worth the same
+      check. The structural pattern to copy now exists:
+      `TestRunAttentionReapTicksOnTheIntervalItWasGiven`. Closing condition: a mutation of each
+      loop's ticker reds a named test.
+    - **The `main()` wiring ledger pins syntax, not reachability.** Wrapping a loop's start in a
+      condition false in production (`if os.Getenv(...)=="1"`) keeps it green — verified. NOT
+      closable statically, because the start is legitimately inside `if pool != nil`; banning
+      enclosing conditions would red the real code. Documented in-test. The compensating control is
+      the runtime entry log line, which is itself now guarded.
+
 **Parked with the operator (not work items until answered):**
 - Seam tests **skip in `clawgate-ci`** — the Go image has no `jq`. Closing it edits a pipeline every
   PR in the repo runs. `TestSeamASlowSuggestPostCostsTheHookNothing` — the only test driving *real*
@@ -256,6 +377,57 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
   `session-manager`'s waiting-detection is read-only and cheap to add if the queue misses cases.
 
 ## Gotchas
+- 🔴 **A TRUNCATED READ, WRITTEN DOWN, IS INDISTINGUISHABLE FROM A FACT — and I did it TWICE in one
+  session.** A `jq … | head -2` made the laptop look like it had no clawgate Stop hook registered
+  (it does), and a `print(sorted(d.keys())[:8])` made session-manager look like it emits no
+  timestamp — that claim then went into a 🔴 migration comment as "measured", and it was wrong by
+  17 days (`ts` was added 2026-08-11). Both truncations were MINE, in the instrument, and both read
+  back as findings about the world. **Never slice the output of the command you are about to quote**
+  — and when a claim is going into a comment as a measurement, re-run it unsliced.
+- 🔴 **A BOUND NEEDS BOTH HALVES, AND A FIXTURE DERIVED FROM THE CONSTANT PINS NOTHING.** Measured
+  repeatedly on #468: asserting only what a bound REJECTS let an off-by-one silently narrow it, and
+  asserting only what it ADMITS let the branch be deleted. Worse, a reject-side fixture built as
+  `strings.Repeat("0", MaxNumberLiteralLen)` scales WITH the constant — setting it to 1,000,000,000
+  survived the whole suite while the test allocated 1 GB fixtures and passed. Pin a literal value,
+  and pin the constant itself.
+- 🔴 **A GUARD ON A CALL'S PRESENCE IS NOT A GUARD ON ITS EFFECT.** Four successive attempts to pin
+  one ordering requirement were each walked through: asserting the helper (deleting the call site
+  passed), asserting the call exists (dropping the assignment and moving it below the loop both
+  passed), asserting SOME loop ranges over it (a decoy loop passed), and OR-ing across loops (a
+  second unsorted loop passed). What finally held was quantifying over EVERY write loop and binding
+  the check to the loop that actually writes. **Ask what the code must DO, then assert that.**
+- 🔴 **A PERIODIC SWEEP'S INTERVAL MUST BE SMALLER THAN THE PROCESS LIFETIME, AND A TICKER'S FIRST
+  TICK LANDS ONE WHOLE INTERVAL IN.** `time.NewTicker(24h)` in a pod that lives 5h fires **never**,
+  and every surface reads healthy: the code is correct, the unit tests pass, the leader lease
+  acquires, the deploy reports success. This is a general shape, not a Go detail — any cron/ticker
+  whose period exceeds the lifetime of the thing running it is dead code with no error anywhere.
+  🔴 **Two numbers, and neither alone tells you it works:** how STALE a row must be to be taken
+  (the window) and how OFTEN anything looks (the sweep). A 4h window swept every 24h leaves an
+  entry 6× its own window. Ask which one your test pins — every test here pinned the window.
+- 🔴 **A test that calls the pass DIRECTLY cannot see a scheduling defect.** Every existing test of
+  this reaper drove `retentionPass` by hand, which is exactly why a reaper that had never executed
+  looked fully covered. Deleting the `go srv.RunAttentionReap(...)` line from `main.go` left the
+  whole module green — verified as a surviving mutant. The wiring in `main()` needs its own ledger;
+  `containers/clawgate/{leader_wiring,background_loops_wiring,version_pin}_test.go` are the
+  in-repo convention for source-level pinning of things no behavioural test can reach.
+- 🔴 **CADENCE CANNOT BE PINNED ON A WALL CLOCK — measured, both directions.** Asserting "N ticks
+  within a fixed sleep" is an assertion about the *scheduler*: `time.Ticker` DROPS ticks under CPU
+  contention, and that helper was observed landing exactly on its floor. Loosening it to
+  "reaches N eventually" then made interval-scaling mutants (×2…×40 — a 1h-to-20h production sweep)
+  ALL survive; a bound tight enough to catch ×10 is tight enough to flake. There is no good value.
+  Pin it **structurally** instead (AST-assert the ticker is driven by the bare `interval`
+  parameter): deterministic, zero wall time, and it killed the whole class.
+- ⚠ **The deploy runbook's `DOCKER_HOST=ssh://zach@192.168.50.250` is HOST-DEPENDENT and fails on
+  the workbench.** `192.168.50.250` **is** the workbench, so running it there SSHes to itself and
+  dies with `ssh_askpass: exec(): No such file or directory` → `Too many authentication failures`,
+  which reads like a broken credential rather than a wrong host. From the workbench just use the
+  local daemon — it is the same daemon the ssh transport was reaching for. The runbook line is
+  correct *from the laptop*. Check `ip -4 addr | grep 192.168.50.250` before believing the error.
+- ⚠ **A stress test that spawns busy-loops must reap them by RESOLVED PID.** An audit round's
+  `kill %1 %2 …` job-control cleanup failed; 74 `while :; do :; done` shells reparented to init and
+  saturated ~11 cores for 45 minutes — corrupting the very timing measurements the next round then
+  reported. Confirm each PID's `/proc/<pid>/cmdline` before killing, and never let a pattern reach
+  `pkill -f`.
 - 🔴 **Committing to `trunk` deploys the MANIFEST, not the container CODE.** The image pin is an
   immutable literal tag with no Flux image automation, so a commit under `containers/clawgate/**`
   reconciles cleanly and **changes nothing running**. Shipping = build + push image + bump pin.
@@ -337,9 +509,30 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
 ## How to verify
 
 ```bash
-clawgatectl health                 # expect version 0.8.3
+clawgatectl health                 # read the LIVE version; do not expect a number from this doc
 clawgatectl attention ls           # expect JSON; `unknown command "attention"` + exit 0 = stale binary
 ```
+
+**Is the idle reaper actually running?** (rank 1's answer — for ~9h it was NOT, and nothing said so)
+```bash
+# 1. it announced itself at boot. This line is unconditional; its ABSENCE is the alarm.
+KUBECONFIG=$KC_WORKBENCH kubectl -n clawgate logs -l app=clawgate --tail=-1 \
+  | grep 'attention reaper: sweeping every'
+# 2. it has swept something (only logs when N>0, so an empty result is NOT a failure)
+KUBECONFIG=$KC_WORKBENCH kubectl -n clawgate logs -l app=clawgate --tail=-1 | grep 'attention-reap:'
+# 3. the queue is bounded. Count OPEN idle rows past the 4h window — a healthy
+#    steady state is ~30, and anything climbing toward attentionPanelLimit (100) means
+#    the sweep is not keeping up.
+curl -s -H "Authorization: Bearer $CLAWGATE_HOOK_TOKEN" http://192.168.50.250:30302/api/attention \
+  | python3 -c 'import json,sys,datetime as d
+now=d.datetime.now(d.timezone.utc); rows=json.load(sys.stdin)
+idle=[r for r in rows if r["kind"]=="idle"]
+old=[r for r in idle if (now-d.datetime.fromisoformat(r["updatedAt"].replace("Z","+00:00"))).total_seconds()>4*3600]
+print(f"open={len(rows)} idle={len(idle)} idle_past_4h={len(old)}")'
+```
+🔴 **Validate this instrument before quoting a zero** — `GET /api/attention` defaults to
+`state=open`, so cross-check `?state=resolved` and `?state=all` and confirm open+resolved==all.
+Measured 2026-08-27 pre-fix: open=59, resolved=31, all=90 — the filter discriminates.
 - 🔴 **`clawgatectl` is built from the LOCAL `homelab-talos` tree**, so a behind checkout ships a
   binary missing verbs that prints help and **exits 0** under a plausible version label. Both hosts
   need `homelab-talos` current *before* a `home-manager switch`.
