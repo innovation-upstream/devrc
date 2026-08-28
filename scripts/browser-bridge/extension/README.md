@@ -41,15 +41,27 @@ Four hex chars, not five: Chrome caps each dotted component at 65535 and
 `0xFFFF` is exactly 65535. A wider component yields a manifest Chrome **refuses
 to load**, which presents exactly like a dead bridge.
 
-🔴 **`extension_stale` still compares the MARKER and nothing else.** The version
-is a human convenience and is not fail-closed — a version that merely *looks*
-current does not mean the code is. When the two disagree, believe the marker.
+🔴 **An ALL-CLEAR (`extension_stale: false`) comes from the MARKER alone.** The
+verdict is asymmetric and this half is the one that matters: no version-shaped
+signal can ever produce `false`, because the version describes the manifest that
+was LOADED, not the code that is running. A `true` *can* additionally come from
+a version disagreement (`server.py:883-884`, `:887-891`) — so "it compares the
+marker and nothing else" would be wrong, and an earlier draft of this section
+said exactly that. When the two disagree, believe the marker.
 
 🔴 **The marker deliberately does NOT hash the version value.** It hashes every
 other byte of the manifest, but the version is derived FROM the marker, so
-hashing it would make the derivation a recurrence with no fixpoint. Consequence
-worth knowing: a version-only edit does not move the marker, so hand-editing the
-version does not fake a new build — it just fails `--check`.
+hashing it would make the derivation a recurrence with no fixpoint.
+
+Consequence worth knowing, stated precisely because the loose version of it
+misleads: a version-only edit does not move the marker, so hand-editing the
+version cannot fake a new build. But **`--check` only validates the BUILD
+component** — it derives its expectation from the very manifest it is checking,
+so it re-reads a forged release base as the base and passes. Editing
+`0.8.1.43738` to `9.9.9.43738` leaves `--check` printing OK on both lines. What
+catches a forged base is `test_manifest_version_matches_the_declared_build`
+under pytest, against the changelog below. **Do not treat `--check` as the
+anti-forgery gate before a local switch; it is blind to that.**
 
 Bumping the **release** base (`0.8.1` → `0.9.0`) still requires a
 `> **0.9.0 — …**` changelog block below, gated by

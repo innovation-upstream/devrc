@@ -6619,8 +6619,15 @@ COMMITTED_BUILD_MARKER = GEN.read_marker(EXT_DIR / "build_id.js")
 # release declaration and the committed build marker — so asserting that
 # `S.manifest_version()` equals it genuinely cross-checks the manifest against
 # them, rather than reading the manifest and comparing it to itself.
+# Calls GEN.build_component rather than re-slicing the marker here: a second
+# copy of the derivation is how a gate drifts into agreeing with itself (the
+# generator's own docstring says so), and it also localises the failure. A
+# hand-rolled `int(COMMITTED_BUILD_MARKER[:4], 16)` raises TypeError at IMPORT
+# when build_id.js is unreadable — read_marker returns None by contract — which
+# turns one specific gate failure into a collection error that takes every test
+# in this file down with it.
 PINNED_EXT_VERSION = (
-    f"{declared_ext_versions()[0]}.{int(COMMITTED_BUILD_MARKER[:4], 16)}")
+    f"{declared_ext_versions()[0]}.{GEN.build_component(COMMITTED_BUILD_MARKER)}")
 
 
 def test_build_marker_generator_is_wired_to_something(tmp_path):
@@ -6817,6 +6824,77 @@ def test_deriving_from_an_already_derived_version_is_idempotent(tmp_path):
     _set_version(src, once)
     assert GEN.derive_version(src) == once
     assert once.count(".") == 3, once
+
+
+@pytest.mark.parametrize("bad", [
+    "0.8.1-beta",   # a pre-release suffix Chrome rejects
+    "v0.8.1",       # a leading v
+    "0.08.1",       # a leading zero
+    "0.8.1 ",       # trailing whitespace inside the value
+    "0.8.65536",    # one past Chrome's per-component cap
+])
+def test_an_illegal_release_base_is_refused_not_concatenated(tmp_path, bad):
+    """Each of these once produced a manifest Chrome REFUSES TO LOAD, and
+    `--check` certified four of the five as OK.
+
+    The build component had a range guard; the human-owned BASE had none, and
+    the concatenation was never validated. So `0.8.1-beta` became
+    `0.8.1-beta.43738`, was WRITTEN to the manifest, and passed the very command
+    the README tells you to run before deploying. An extension that fails to
+    load presents as a bridge that is down — nothing points at the version."""
+    src = _ext_copy(tmp_path)
+    _set_version(src, bad)
+    with pytest.raises(AssertionError, match="Chrome will not accept"):
+        GEN.derive_version(src)
+    with pytest.raises(AssertionError, match="Chrome will not accept"):
+        GEN.write_manifest_version(src)
+    # ...and the manifest was NOT written on the way to raising.
+    assert GEN.read_manifest_version(src / "manifest.json") == bad
+
+
+@pytest.mark.parametrize("short", ["0.9", "1", ""])
+def test_a_base_with_too_few_components_is_refused(tmp_path, short):
+    """A short base has no fixpoint, so silently accepting it freezes one
+    build's id into the middle of the release forever.
+
+    Measured on the pre-fix code: `0.9` -> `0.9.43738`, whose own base is then
+    read as `0.9.43738` -> `0.9.43738.43738`. It converges only after component
+    3 has become a build id that never updates again, while the scheme claims
+    that position is part of the human release. Slicing cannot tell a
+    3-component base from a 2-component base that already has a build id
+    appended, so the shape is required rather than inferred."""
+    src = _ext_copy(tmp_path)
+    _set_version(src, short)
+    with pytest.raises(AssertionError, match="component"):
+        GEN.derive_version(src)
+
+
+def test_derivation_reaches_a_fixpoint_in_ONE_regeneration(tmp_path):
+    """Stronger than test_regeneration_converges: not just 'the marker is
+    stable', but '--check is clean immediately after ONE write'. That is the
+    property a human depends on — regenerate, then verify.
+
+    ⚠ INVARIANT GUARD, not regression coverage — measured, not assumed: this
+    test PASSES on the pre-fix code, because the shipped manifest's base is a
+    legal 3-component string and the defect only reached a non-3-component one.
+    It pins the property for the shape we ship; the regression coverage for the
+    actual bug is test_a_base_with_too_few_components_is_refused, which is red
+    at the pre-fix tree."""
+    src = _ext_copy(tmp_path)
+    written = GEN.write_manifest_version(src)
+    assert GEN.derive_version(src) == written
+    assert GEN.read_manifest_version(src / "manifest.json") == written
+
+
+def test_build_component_refuses_a_missing_marker():
+    """`read_marker` returns None by contract when build_id.js is unreadable.
+    Indexing that raises TypeError from whichever line called it — and for a
+    MODULE-LEVEL caller that lands at import, turning one gate failure into a
+    collection error that hides every other test in this file."""
+    with pytest.raises(AssertionError, match="need a build marker"):
+        GEN.build_component(None)
+    with pytest.raises(AssertionError, match="need a build marker"):
+        GEN.build_component("ab")
 
 
 def test_a_human_release_bump_is_preserved(tmp_path):

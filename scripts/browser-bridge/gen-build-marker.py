@@ -173,17 +173,76 @@ def read_manifest_version(path=None):
 
 def version_base(version: str) -> str:
     """The human-owned prefix of a version: its first VERSION_BASE_COMPONENTS
-    components, or the whole thing if it is shorter.
+    components.
 
     So `0.8.1` -> `0.8.1` and `0.8.1.47127` -> `0.8.1`. This is what makes the
     scheme idempotent: re-deriving from an already-derived version must not
-    keep appending components."""
-    return ".".join(version.split(".")[:VERSION_BASE_COMPONENTS])
+    keep appending components.
+
+    🔴 STRICT, and the strictness is the point. An earlier version of this
+    function sliced `[:3]` off whatever it was given and returned it verbatim,
+    which is wrong in two directions that both reach a host:
+
+      * a base that is not Chrome-legal (`0.8.1-beta`, `v0.8.1`, `0.08.1`,
+        `0.8.1 `, ``) was concatenated with the build component and WRITTEN,
+        and `--check` then certified the result — producing a manifest Chrome
+        REFUSES TO LOAD, which is indistinguishable from a dead bridge. That is
+        the exact failure VERSION_HEX_CHARS exists to prevent, reached by
+        another door.
+      * a base with FEWER than VERSION_BASE_COMPONENTS components (`0.9`) has
+        no fixpoint: `0.9` -> `0.9.43738`, whose own base is then `0.9.43738`
+        -> `0.9.43738.43738`. It converges only after freezing one build's id
+        into the middle of the release, where it never updates again.
+
+    Slicing cannot distinguish "a 3-component base" from "a 2-component base
+    that already has a build id appended", so the shape is REQUIRED rather than
+    inferred. Fail loudly and name the fix instead."""
+    parts = version.split(".")
+    if len(parts) < VERSION_BASE_COMPONENTS:
+        raise AssertionError(
+            f"manifest version {version!r} has {len(parts)} component(s); the "
+            f"release base must be exactly {VERSION_BASE_COMPONENTS} "
+            f"(e.g. '0.9.0', not '0.9'). A shorter base has no fixpoint: the "
+            f"generated build id would be re-read as part of the base on the "
+            f"next run and frozen there permanently.")
+    base_parts = parts[:VERSION_BASE_COMPONENTS]
+    for p in base_parts:
+        _require_legal_component(p, version)
+    return ".".join(base_parts)
 
 
-def build_component(marker: str) -> int:
+def _require_legal_component(part: str, version: str) -> None:
+    """Raise unless `part` is a component Chrome will accept.
+
+    Chrome's rule: 1-4 dot-separated integers, each 0..65535, no leading zeros.
+    A manifest breaking it does not warn — the extension simply fails to LOAD,
+    which presents as a bridge that is down rather than as a bad version."""
+    if not part.isdigit() or part != str(int(part)) or \
+            int(part) > VERSION_COMPONENT_MAX:
+        raise AssertionError(
+            f"manifest version {version!r} contains component {part!r}, which "
+            f"Chrome will not accept: every component must be a plain integer "
+            f"0..{VERSION_COMPONENT_MAX} with no leading zeros, sign, suffix "
+            f"or whitespace. An extension whose manifest breaks this fails to "
+            f"LOAD, and a bridge that never connects looks nothing like a "
+            f"version problem. Fix the version in extension/manifest.json.")
+
+
+def build_component(marker) -> int:
     """The version's build component: the marker's first VERSION_HEX_CHARS hex
-    chars as an integer, so it moves whenever the CODE moves."""
+    chars as an integer, so it moves whenever the CODE moves.
+
+    Validates its input rather than indexing it blind. `read_marker` returns
+    None by contract when build_id.js is missing or unreadable, and a bare
+    `marker[:4]` on that raises TypeError from whatever line happens to call it
+    — including, for a module-level caller, at IMPORT time, where it becomes a
+    collection error that hides every other test in the file."""
+    if not isinstance(marker, str) or len(marker) < VERSION_HEX_CHARS:
+        raise AssertionError(
+            f"HARNESS: need a build marker of at least {VERSION_HEX_CHARS} hex "
+            f"chars to derive a version component, got {marker!r}. A None here "
+            f"means extension/build_id.js is missing or unreadable — "
+            f"regenerate it: {REGEN_CMD}")
     value = int(marker[:VERSION_HEX_CHARS], 16)
     if not 0 <= value <= VERSION_COMPONENT_MAX:
         raise AssertionError(  # unreachable while VERSION_HEX_CHARS == 4
@@ -203,7 +262,19 @@ def derive_version(ext_dir=None, marker: str | None = None) -> str:
             f"derive a base from.")
     if marker is None:
         marker = compute_marker(ext_dir)
-    return f"{version_base(current)}.{build_component(marker)}"
+    derived = f"{version_base(current)}.{build_component(marker)}"
+    # Validate the CONCATENATION, not just the halves. Each half is checked by
+    # the function that produces it, but "both halves are legal" is not the
+    # claim that matters — Chrome parses the whole string, and this is the last
+    # point before it is written to a manifest and deployed.
+    parts = derived.split(".")
+    if not 1 <= len(parts) <= 4:
+        raise AssertionError(
+            f"derived version {derived!r} has {len(parts)} components; Chrome "
+            f"accepts 1-4.")
+    for p in parts:
+        _require_legal_component(p, derived)
+    return derived
 
 
 def write_manifest_version(ext_dir=None, version: str | None = None) -> str:
