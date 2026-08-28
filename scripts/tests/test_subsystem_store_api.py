@@ -13857,13 +13857,44 @@ def test_the_SINK_call_is_inside_the_lock_not_beside_it():
         f"{loose} — two concurrent handlers can interleave their writes"
     )
 
-    # Positive control, built by removing the real `with` from a copy of the
-    # real file: the detector must flag the call it just uncovered.
+    # 🔴 THE CONTROL'S MUTATION IS STRUCTURAL, NOT A FIXED TWO-LINE STRING, AND
+    # THAT IS A FIX RATHER THAN A FLOURISH. It used to `str.replace` the exact
+    # text `with self._audit_lock:\n    self.audit(line)\n` with the bare call.
+    # MEASURED against an unrelated mutant that added a second statement inside
+    # the block: the two-line pattern still matched, the replacement orphaned the
+    # extra statement at the old indent, and this test died inside `ast.parse`
+    # with `IndentationError` — an exception, from a control whose whole job is
+    # to produce a specific ASSERTION. Lifting the block by its own AST span
+    # keeps the mutant syntactically valid whatever the body holds.
     src = SERVER_PATH.read_text()
-    locked = "        with self._audit_lock:\n            self.audit(line)\n"
-    assert src.count(locked) == 1, "fixture drift: the locked sink call moved"
-    unlocked = src.replace(locked, "        self.audit(line)\n", 1)
+    lines = src.splitlines(keepends=True)
+    audit = next(
+        node for node in ast.walk(ast.parse(src))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_audit"
+    )
+    blocks = [
+        node for node in ast.walk(audit)
+        if isinstance(node, (ast.With, ast.AsyncWith))
+        and any(
+            isinstance(item.context_expr, ast.Attribute)
+            and item.context_expr.attr == "_audit_lock"
+            for item in node.items
+        )
+    ]
+    assert len(blocks) == 1, (
+        f"fixture drift: `_audit` holds {len(blocks)} `_audit_lock` block(s), so "
+        "the control does not know which one to lift"
+    )
+    block = blocks[0]
+    body = lines[block.body[0].lineno - 1:block.body[-1].end_lineno]
+    unlocked = "".join(
+        lines[:block.lineno - 1]
+        + [ln[4:] if ln.startswith("    ") else ln for ln in body]
+        + lines[block.body[-1].end_lineno:]
+    )
     assert unlocked != src, "the mutation did not apply — this control is vacuous"
+    ast.parse(unlocked)  # the mutant must be a SOURCE FILE, not a syntax error
     assert _sink_calls_outside_the_lock(unlocked), (
         "the detector cannot see a sink call outside the lock, so its empty "
         "list above is a fact about the walker and nothing else"
