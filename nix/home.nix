@@ -32,6 +32,26 @@ let
   # (2) is why this flag waited: a timer alerting into a paused queue is WORSE than no
   # timer, because it manufactures the appearance of coverage.
   enableDriftDeadman = true;
+  # tmux-snapshot pusher master switch (scripts/tmux-snapshot-push.sh) — feeds
+  # clawgate's cross-host tmux read model. Gates ONLY whether the timer is wired into
+  # timers.target; the SERVICE definition is always emitted, so
+  # `systemctl --user start tmux-snapshot-push` works by hand regardless.
+  #
+  # ON from the start, deliberately, and the asymmetry with enableInitiativesSync above
+  # is the point: that flag waited because its first write created SCHEMA in a prod
+  # database. This one appends to a read model whose rows are latest-per-host upserts —
+  # a bad push is rejected outright (the server 400s and CHANGES NOTHING, leaving the
+  # previous snapshot in place), and a wrong push is overwritten 2 minutes later. The
+  # write path was also validated by hand before this landed: a real
+  # `session-manager --json` posted to the live 0.8.8 server returned
+  # {"ok":true,"hosts":["laptop","workbench"]} and read back as 2 snapshots / 44 + 28
+  # windows with the `session` -> `tmuxSessionName` rename applied.
+  #
+  # 🔴 It is ALSO serverMode-gated below, which is a correctness requirement and not
+  # just scoping: `session-manager --json` collects BOTH hosts from the workbench (it
+  # SSHes to the laptop), so running it on the laptop too would have each host pushing
+  # a full two-host document and the two would fight over every row.
+  enableTmuxSnapshotPush = true;
   # Graphical host = runs X/i3 (both current NixOS hosts do; only a genuinely headless
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
@@ -2885,6 +2905,92 @@ in
       # but is wired into nothing, so no routine `ship.sh` can silently start a
       # timer nobody has supervised once.
       WantedBy = lib.optionals (serverMode && enableDriftDeadman) [ "timers.target" ];
+    };
+  };
+
+  # ── CLAWGATE TMUX READ-MODEL FEEDER (scripts/tmux-snapshot-push.sh) ──────────
+  # clawgate runs in a pod on the workbench cluster; tmux sockets are unix sockets
+  # on the workbench and laptop HOSTS. The deployment has no hostPath, no
+  # hostNetwork, no hostPID and no nodeName (measured against the live spec
+  # 2026-08-28), so the pod structurally cannot see them. This unit is the
+  # outbound half: it collects on the host and POSTs to the pod, which means no
+  # inbound access to either machine and no SSH credential inside a pod sitting on
+  # an unauthenticated LAN surface.
+  #
+  # ONE unit, not one per host — see the flag's comment above.
+  systemd.user.services.tmux-snapshot-push = {
+    Unit = {
+      Description = "Push this fleet's tmux inventory to clawgate's read model";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      # 🔴 NO OnFailure, DELIBERATELY — pinned by
+      # `test_tmux_snapshot_push.py::test_the_unit_does_not_wire_the_DND_defeating
+      # _failure_toast`. notify-failure@ toasts are wired to DEFEAT do-not-disturb
+      # (zz_notify_failure_bypass, override_pause_level = 100), and that bypass is
+      # justified in this file by a MEASURED rate of ~1 firing in 9 days. This
+      # timer runs every 2 minutes, so any sustained outage — the laptop asleep,
+      # clawgate mid-redeploy — would fire a DND-bypassing toast on EVERY tick and
+      # burn down the one alert channel that has to keep its meaning. That is the
+      # "permanently-red gate trains you to click through" hazard, at 720/day.
+      #
+      # Nothing is hidden by this: the server stamps `receivedAt` on every
+      # snapshot, so a feeder that stopped presents as a visibly stale timestamp
+      # in the read model — which is where a staleness signal belongs, next to the
+      # data it describes.
+    };
+    Service = {
+      Type = "oneshot";
+      # Collector cap (90s) + curl cap (30s) + slack. Both inner bounds live in
+      # the script; this only has to be larger than their sum, or the cgroup is
+      # killed mid-run and the failure reads as a hang rather than as whichever
+      # leg actually wedged.
+      TimeoutStartSec = 150;
+      Environment = [
+        # 🔴 EVERY ENTRY HERE IS FOR THE CHILD, and none of it is incidental.
+        # Under systemd there is no login-shell PATH. `scripts/session-manager`
+        # has a `python3` shebang, shells out to `tmux`, SSHes to the laptop
+        # (openssh) and reads interface addresses to decide which host it is on
+        # (iproute2). drift-check.service already paid for this lesson: without
+        # these its child reported COULD NOT MEASURE on every run forever, from a
+        # unit that looked completely correct. curl is this script's own.
+        # Pinned by `test_the_unit_PATH_carries_every_binary_the_collector_needs`.
+        "PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.curl pkgs.gawk pkgs.gnugrep pkgs.gnused pkgs.iproute2 pkgs.openssh pkgs.python3 pkgs.tmux ]}"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/tmux-snapshot-push.sh";
+      X-Restart-Triggers = [
+        "${../scripts/tmux-snapshot-push.sh}"
+        # The collector is the payload's author: a change to what it emits is a
+        # change to what this unit delivers, with no edit to the pusher at all.
+        "${../scripts/session-manager}"
+      ];
+    };
+  };
+
+  # Every 2 minutes. The cadence is bounded by what it is for: the read model
+  # backs an at-a-glance view of which windows are busy/waiting, and a view that
+  # is a quarter-hour stale would be answering a question nobody asked. Measured
+  # cost on the workbench 2026-08-28, three consecutive samples: 1298 / 1196 /
+  # 1193 ms per collection (it SSHes to the laptop), so 2 minutes is ~1% duty
+  # cycle and ~720 ssh round trips a day. Tighter buys little — tmux state does
+  # not meaningfully change faster than a human reads it — and would start to be
+  # a real share of a core. OnStartupSec gives one prompt run shortly after the
+  # user manager starts, i.e. after a workbench reboot, so the view is populated
+  # before anyone looks at it. No Persistent: that only applies to OnCalendar
+  # timers, not monotonic ones.
+  systemd.user.timers.tmux-snapshot-push = {
+    Unit = {
+      Description = "Periodic timer for the clawgate tmux read-model feeder";
+    };
+    Timer = {
+      OnStartupSec = "1min";
+      OnUnitActiveSec = "2min";
+    };
+    Install = {
+      # serverMode is the workbench-only gate; see the flag's comment. It is a
+      # correctness requirement, not scoping — two hosts each pushing a full
+      # two-host document would fight over every row.
+      WantedBy = lib.optionals (serverMode && enableTmuxSnapshotPush) [ "timers.target" ];
     };
   };
 
