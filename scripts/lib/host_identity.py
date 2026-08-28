@@ -107,13 +107,32 @@ def host_label() -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "-", socket.gethostname() or "unknown")
 
 
+# How much of the machine id `this_host()` prints. 🔴 A PREFIX, NEVER THE WHOLE
+# ID. `/etc/machine-id` is a stable, unique installation identifier, and
+# `this_host()` is a DISPLAY value: it lands on every `/analyze-service`,
+# `/handoff` and `/resume` run, in four rendered headers and four JSON payloads,
+# and `/handoff` writes into `claudedocs/` — which is COMMITTED, in a PUBLIC
+# repo. Tool output also gets pasted into PR bodies routinely. None of the four
+# content gates screens for a machine id, so nothing downstream would catch it.
+# 12 hex separates two machines with room to spare; the job here is to tell the
+# fleet apart, not to identify the hardware. The repo's own prose already
+# truncates it (`restore-verify.py` writes `workbench-d48f…`), so this makes the
+# code match a convention the operator was already following by hand.
+# 🔴 THIS DOES NOT TOUCH `machine_id()` OR `host_label()`. The backup object key
+# is built from `host_label()` and stays FULL — truncating a key prefix would
+# repoint every future object, which is a data-loss shape, not a privacy fix.
+MACHINE_ID_DISPLAY_CHARS = 12
+
+
 def this_host() -> str:
     """An identity that DIFFERS between the two machines on a hand-run.
 
-    `<label>-<machine-id>`, collapsing to just the label when the label already
-    carries the id (the shape the backup unit sets), and to
-    `<label>-machine-id-unreadable` when the id cannot be read at all — never to
-    a bare, shared `nixos` that would read as a fact about the fleet.
+    `<label>-<machine-id-prefix>` — see `MACHINE_ID_DISPLAY_CHARS` for why it is
+    a prefix. Collapses to just the label when the label already carries the id
+    (the shape the backup unit sets, which is operator-chosen and left as they
+    set it), and to `<label>-machine-id-unreadable` when the id cannot be read at
+    all — never to a bare, shared `nixos` that would read as a fact about the
+    fleet.
     """
     label = host_label()
     mid = machine_id()
@@ -121,4 +140,4 @@ def this_host() -> str:
         return f"{label}-{MACHINE_ID_UNREADABLE}"
     if mid in label:
         return label
-    return f"{label}-{mid}"
+    return f"{label}-{mid[:MACHINE_ID_DISPLAY_CHARS]}"

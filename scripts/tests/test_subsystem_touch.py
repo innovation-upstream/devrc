@@ -11963,11 +11963,47 @@ class TestTheStoreIsPerHost:
         hi = injected_machine_id
         monkeypatch.setenv("ASIB_HOST", "a-label-with-no-id")
         assert hi.host_label() == "a-label-with-no-id"
-        assert hi.this_host() == f"a-label-with-no-id-{self.SYNTH_MACHINE_ID}", (
-            "`this_host()` did not join the machine id to the label. On a hand-run "
-            "the label is the SHARED hostname `nixos`, so a bare label makes the "
-            "two machines print an identical identity — the exact failure this "
-            "change exists to fix."
+        expected_prefix = self.SYNTH_MACHINE_ID[: hi.MACHINE_ID_DISPLAY_CHARS]
+        assert hi.this_host() == f"a-label-with-no-id-{expected_prefix}", (
+            "`this_host()` did not join the machine-id PREFIX to the label. On a "
+            "hand-run the label is the SHARED hostname `nixos`, so a bare label "
+            "makes the two machines print an identical identity — the exact "
+            "failure this change exists to fix."
+        )
+        # 🔴 AND THE WHOLE ID MUST NOT APPEAR. `this_host()` is a display value
+        # that reaches committed `claudedocs/` in a PUBLIC repo and no content
+        # gate screens for a machine id, so "it distinguishes the hosts" is only
+        # half the requirement. Asserted as a SEPARATE statement rather than
+        # folded into the equality above, because an equality on a truncated
+        # string is satisfied by a build that never had the rest of the id —
+        # this one fails if a future edit reverts to the full value.
+        assert self.SYNTH_MACHINE_ID not in hi.this_host(), (
+            "`this_host()` printed the WHOLE machine id. It must print at most "
+            f"{hi.MACHINE_ID_DISPLAY_CHARS} hex chars — see MACHINE_ID_DISPLAY_CHARS."
+        )
+
+    def test_the_writer_calls_host_identitys_this_host_NOT_host_label(self) -> None:
+        """🔴 A SEAM GUARD: pins WHICH function the writer imported, not what a
+        patched name returns.
+
+        Every other guard here injects a value into `subsystem_touch.this_host`,
+        so all of them stay green against
+        `from host_identity import host_label as this_host` — the exact
+        "simplification" the sibling test's docstring says it prevents. Measured:
+        that mutant survived all 16 guards while making BOTH machines print
+        `nixos` in production, which is the defect this change exists to fix. A
+        docstring claiming coverage while the body checks something narrower is
+        worse than no guard, because it stops anyone looking.
+
+        Identity, not behaviour: `is` cannot be satisfied by a lookalike.
+        """
+        import host_identity as hi
+        import subsystem_touch as st
+
+        assert st.this_host is hi.this_host, (
+            "`subsystem_touch.this_host` is not `host_identity.this_host`. If it "
+            "was aliased to `host_label`, every header would print the shared "
+            "hostname and the two machines would be indistinguishable again."
         )
 
     def test_the_id_is_not_repeated_when_the_label_already_carries_it(
