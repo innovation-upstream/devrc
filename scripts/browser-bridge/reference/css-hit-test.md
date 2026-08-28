@@ -68,6 +68,22 @@ $BB --instance work js '(function(){
 
 Any `insidePop:false` is the bug, and `hit` is the culprit.
 
+🔴 **`elementFromPoint` returns `null` for a point OUTSIDE the viewport — which is
+indistinguishable from "something is covering it".** Read `null` as *unknown*,
+never as *covered*: it is how a hit-test invents a blocking overlay that does not
+exist. Off-canvas drawers and mobile menus are the common source, and they sit at
+NEGATIVE coordinates (measured on one app: a nav control centred at `x = -249`).
+So **filter to in-viewport centres before hit-testing**, and say how many
+candidates you dropped:
+
+```js
+const cx = r.left + r.width/2, cy = r.top + r.height/2;
+if (cx < 0 || cy < 0 || cx > innerWidth || cy > innerHeight) return "off-viewport";
+```
+
+Corollary: a zero-size rect (`width` or `height` === 0) also has no meaningful
+centre — drop those first too.
+
 **3. Walk the ancestors for the first stacking-context creator.** The offender is
 almost never the element you're staring at. Check each ancestor's computed
 `transform`, `filter`, `opacity` (<1), `isolation`, `will-change`, `contain`, and
