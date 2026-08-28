@@ -316,11 +316,26 @@ Read the named flags **before** the `z9999` array — the array alone is ambiguo
 5. **Any other `z9999` text, with all three flags false** ⇒ a different
    `<FeedbackModal>`; dismiss it on its own terms.
 
-⚠ **This exact expression has not been run against the app** — it is assembled from
-parts that were. Do not quote it as measured. What *was* measured used a **regex**
-(`/9999/.test(zIndex)`), which is not the same filter: it also matches
-`#top-bar-bg`'s `z-index: 999999999999`, so it returned an extra empty-text element.
-Strict `=== "9999"` above avoids that; if you loosen it, expect the over-match back.
+**Measured against the hermetic stack, 2026-08-28, this exact expression:**
+
+| state | result |
+|---|---|
+| fresh tab on `/`, splash up | `{boot:false, splash:true, toast:false, z9999:["Vetr"]}` |
+| authed `/user`, opt-out cleared | `{boot:false, splash:false, toast:false, z9999:["Timezone Mismatch Detected…"]}` |
+| no toast live | `.Toastify__toast-container` **absent**; the always-mounted wrapper is a `<section class="Toastify">`, so it never enters the `div` filter |
+
+The first row is why the `splash` flag exists: the splash really does land in `z9999`
+with the text **"Vetr"**, and without the flag you would read it as an unnamed modal.
+⚠ **Not verified: the toast-present case** — no toast could be triggered on demand
+(the interceptor's are gated off, see below), so step 3's *positive* half rests on
+the library's behaviour, not a measurement here.
+
+⚠ **Keep the strict `=== "9999"`.** Measured on the same page, a regex
+(`/9999/.test(zIndex)`) returns **an extra element**: `PullToRefresh.tsx:183`,
+computed `z-index: 999999`, `pointer-events: none`, 2px tall, empty text. Harmless
+but it makes the array ambiguous — and an earlier revision of this file mis-attributed
+that extra element to the modal's own inner panel, which is `position: relative` and
+can never match at all.
 
 **Why a title and not a z-index.** `z-[9999]` + `pointer-events: auto` is the
 **shared** `FeedbackModalRenderer` backdrop (`FeedbackModalRenderer.tsx:35`), and the
