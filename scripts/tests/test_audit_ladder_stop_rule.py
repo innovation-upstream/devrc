@@ -652,6 +652,31 @@ SKILL_CROSS_REPO_WORKTREE = (
     "for a PR in another repo have the agent run `git -C <that-repo> worktree "
     "add …` itself."
 )
+# 🔴 THE ROUTER TO THE ASSEMBLER. `scripts/audit-dispatch.py` exists because the
+# invariant sections of a brief were being retyped every time and MEASURABLY
+# lost: over one session's 14 dispatches, "do NOT git fetch" appeared in 5,
+# "a clean round ending is correct" in 6, and the payload/scaffolding label in
+# 10 — and the auditor at dispatch 8 fetched in a repo the brief had called
+# read-only, because the clause first appears at dispatch 9.
+#
+# A `flows/`-style tool that nothing NAMES does not fire, so the router line is
+# the whole delivery mechanism and deleting it costs the tool. Pinned WHOLE,
+# including the refusal clause: a router that survives while "REFUSED" is
+# reworded to "warns" describes a different tool — the silent downgrade of a
+# delta re-audit into a blind full audit is precisely what the refusal exists to
+# prevent, and a reader who believes it warns will not check.
+#
+# The path is the `~/workspace/devrc/...` form every other skill uses, for the
+# reason test_doc_path_rot.py records: a skill is read with the cwd in some
+# unrelated project, where a bare `scripts/x.py` resolves to nothing.
+SKILL_ASSEMBLER_ROUTER = (
+    "🔴 **Assemble the brief with "
+    "`~/workspace/devrc/scripts/audit-dispatch.py <pr> [--round N]`** — it "
+    "generates the range, the cross-repo worktree directive, checkout state "
+    "and toolchain, reads the prior round's claims from the fenced "
+    "`audit-claims` block ONLY, and carries the invariant clauses verbatim. "
+    "**A delta round with no parseable block is REFUSED.**"
+)
 SKILL_ENVIRONMENT_BRIEF = (
     "**Brief the auditor on the environment, or it will report false findings** "
     "— a fresh worktree is not a working checkout, and an auditor hitting this "
@@ -1104,6 +1129,9 @@ def test_the_operator_instructions_the_gate_depends_on_are_pinned():
     )
     _assert_pinned_once(
         SKILL_MD, SKILL_CROSS_REPO_WORKTREE, "the cross-repo worktree hazard"
+    )
+    _assert_pinned_once(
+        SKILL_MD, SKILL_ASSEMBLER_ROUTER, "the audit-dispatch.py router"
     )
 
 
