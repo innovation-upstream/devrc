@@ -17,6 +17,7 @@ _Moved verbatim out of `SKILL.md` on 2026-08-21, when the body was cut from 23,2
 | `--claude-only` | drop the **shell** rows (`CLASS=shell`) — a `cluster` dispatch is an agent and is KEPT. Every count then describes the FILTERED set; `summary.excluded_shells` says how many went and `summary.kinds_excluded_by_filter` names any kind removed entirely |
 | `--no-ch` | skip ClickHouse — the client is never constructed |
 | `--no-capture` | skip the pane scrape; **every** `waiting_probable` AND `unsent_prompt` becomes `null` (both roll-up numbers `null`, never `0`) |
+| `--pane-preview` | publish each Claude pane's **visible screen** as `pane_preview`. Costs no extra tmux work (the capture already runs — `waiting`/`unsent` are derived from it and it used to throw the screen away), but makes the document **2.63x** larger: measured live back to back, 122,731 B without / 322,204 B with. Off by default for that reason; `--lean` drops it, so do not pass both |
 | `--fuzzyclaw` / `--no-fuzzyclaw` | the task-file join is **OFF by default** (see below) |
 | `--no-ledger` | skip the per-host agent-ledger read. Rows then have **no age and no session id** — the #419 view, reproducible on demand |
 | `--plain` | `tail` only: strip ANSI at the source instead of `sed`-ing it out |
@@ -120,6 +121,16 @@ unconditionally — an agent that runs the script cold never reads this file:
   **no longer discarded** — the caveat points at `unsent_prompt`, which now carries it.
 - `unsent_prompt` — the status vocabulary, the claude-rows-only scope, and `separate_from:
   waiting_probable` as a FIELD rather than a sentence a consumer has to parse.
+- `pane_preview` — the status vocabulary, the claude-rows-only scope, the opt-in flag and
+  the per-pane byte cap, all as FIELDS. 🔴 It is rendered **even though the field is off by
+  default**, and that is the point: a reader seeing `pane_preview: null` on every row
+  otherwise cannot tell "these panes are blank" from "nobody asked for the text".
+  `pane_preview_status` is the discriminator — `disabled` (never asked, and it beats every
+  other reason), `not_claude` (shells are never captured), `uncaptured` / `skipped` /
+  `error` (asked, not measured), `truncated` (measured, but this is a PREFIX), `ok`.
+  🔴 It is the **visible screen and never scrollback** — scrollback costs ~4,014 B per line
+  fleet-wide and would breach clawgate's 4 MB ingest at ~650 lines/pane. Use `tail` for
+  history, one window at a time.
 
 …plus `report["not_measured"]` and a `▸ NOT MEASURED HERE` section, which are the same idea
 one level out: not a qualification on a number this tool produced, but the list of
