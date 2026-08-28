@@ -1,3 +1,6 @@
+---
+clawgate-task: 366
+---
 # Handoff: cairn — 2026-08-27
 
 ## Run this first — the index, one read-only command
@@ -17,42 +20,23 @@ This doc records what shipped, what the name applies to, and the coupling points
 team instance, each measured rather than assumed.
 
 ## State now
-- Branch `main`, 1 behind origin at snapshot time; two files dirty from another session
-  (`claudedocs/close-the-loop/STATE.md`, `claudedocs/the-algorithm-applied-2026-06-17.md`).
-- **The name is Cairn** (2026-08-26). It names the whole three-noun layer — **sessions ·
-  claimable tasks · subsystems** — not just the index. Chosen over Almanac / Muster / Atlas:
-  one syllable, no collision with the crowded `claw` family, and a cairn is a marker left on a
-  trail so whoever comes next knows the way — which is what a subsystem-index entry is.
-- **Eight PRs merged**, each verified by content on `origin/main` after squash (a squash never
-  makes the branch head an ancestor, so ancestry lies):
-
-  | PR | squash | what |
-  |---|---|---|
-  | #816 | `f881856b` | awaiting-predicate contract — the consolidation was a REGRESSION; shipped a pinned contract |
-  | #819 | `e18e55d7` | transcript-search consolidation — **7 real bugs**, each watched red at base |
-  | #829 | `fed5c5c8` | the explainer page + `scripts/present/` generator |
-  | #855 | `1d67f5e8` | xdist unblock — `main` was red for EVERY PR |
-  | #872 | `30acd174` | three-noun restructure |
-  | #862 | `2d4b2980` | workbench-local serving + daily regeneration |
-  | #882 | `d78af6c8` | three real-process flakes, reproduced on demand and mutation-verified |
-  | #889 | `1f3d854c` | this handoff doc |
-
-- **The explainer page is deployed, not merely merged**: `present-serve.service` active,
-  `present-regen.timer` armed, both `serverMode`-gated. `HTTP 200` at
-  `http://192.168.50.250:8900/`, `X-Present-State: fresh`. `/sanitized` serves the redacted
-  variant. Regenerates 05:06 daily.
-- 🔴 **Workbench-only, deliberately.** 8900 is NOT in `/etc/nixos/configuration.nix`'s
-  `allowedTCPPorts`. From the laptop: `22 OPEN, 443 OPEN, 8899 CLOSED, 8900 CLOSED` — and 8899
-  is `initiatives-viewer` on the identical address with the identical gap, which is why
-  following that precedent warned nobody. LAN/nebula reach is deferred behind a named trigger:
-  *someone not on the workbench actually needs to read it*.
-- **Board state:** #359 `complete` by supersede (not by criteria — none of its five were
-  validated); **#360 `in_progress` in another session** — `98843002…`, project `homelab-talos`,
-  tmux `scratch15:@334`, peer `homelab-talos-02`; **#366 `open`**, the supersede decision card.
-- **#360's session has been told the CLI should ship as `cairn`**, not `scripts/store`, via
-  `SendMessage`. Also passed on: the team-instance direction reframes its criterion 6 token
-  from per-*host* to per-*person*, and `sensitivity: client-confidential` becomes an
-  authorization boundary rather than a transit question.
+- **Branch / PR:** nothing in flight. Three PRs merged this session, each verified **by content**
+  on the target branch rather than by ancestry (a squash is never an ancestor):
+  - homelab-infra **#438** → `bbc373ed` — `scripts/check-ci-nonfire.py` + 88 tests (rank 4)
+  - devrc **#954** → `dcc14c75` — handoff update (rank 4 done, rank 3 blocked)
+  - homelab-infra **#459** → `9e5cc33e` — the supersede decision record (rank 5)
+- **Cards:** #366 `complete`. #391 and #394 `open` — both filed here as follow-ups, correctly
+  unstarted. `cairn-4` and `cairn-5` claims released.
+- **Clean:** no worktrees of mine in either repo, no stray local or remote branches, no
+  background jobs. ⚠ Two things that LOOK like stragglers are not mine — the held
+  `cairn-write-path` claim belongs to another session (clawgate #371), and the four
+  `~/workspace/devrc-handoff-*` worktrees are other efforts.
+- **Deploy/verify:** nothing needed deploying. `check-ci-nonfire.py` is a read-only diagnostic
+  run by hand; it is **not** wired into `run-ci-suite.sh` as a leg and has no consumer.
+- ⚠ **`homelab-talos` carries PRE-EXISTING dirty state on `trunk`** that is not mine and that I
+  did not touch: modified `.claude/skills/deploy/SKILL.md` and `flake.nix`, plus an untracked
+  `claudedocs/handoff-minio-comic-flex.md` — an unsaved handoff doc, one routine `checkout` from
+  silent loss.
 
 ## Open investigations — live diagnosis state
 
@@ -173,8 +157,38 @@ empty. An unknown kind is withheld too — the fail-closed direction.
    it "caught" was 44 h old. Worse, **v1 could not see its own motivating case** — a genuinely
    dropped delivery posts NO status, leaving an EMPTY rollup, and v1 matched on PENDING entries.
    The retraction is a public comment on #438, not an edited body.
-5. **#366** — the supersede decision card, `open`. Repo: `homelab-talos`,
-   `containers/clawgate/`.
+5. ~~**#366 — the supersede decision card**~~ — **DONE**, merged `9e5cc33e`
+   (homelab-infra #459), card `complete`. Record:
+   `homelab-talos/containers/clawgate/supersede-decision-2026-08-28.md`.
+   🔴 **YOUR CARD'S CENTRAL ASSUMPTION WAS FALSE, AND THAT IS THE RESULT.** It asked what
+   happens *"if the `user`-authored audit comment turns out not to be a genuine integrity
+   property"*. It is not one on the LAN: `requireSession` returns `next` unchanged
+   (`internal/api/auth.go:40-42`), so `POST /tasks/merge` answers unauthenticated LAN POSTs —
+   measured, no token/cookie/header, 409, which means the handler RAN. Any machine can already
+   merge and already mint `user`-authored comments (`notes.go:1567`). The "machine gap" is a
+   routing detail, not a boundary.
+   Decisions: **(a) both 409 arms STAY unchanged** — reversed mid-work, because the obvious
+   narrowing is *unsafe*: `project:` is not a routing tag (`routingNamespaces` =
+   {runbook, initiative, gate, auto}), so a `RoutingTags` predicate cannot see a projectless
+   winner adopting the loser's project. **(b) no machine route**, but labelled what it is — a
+   default to the status quo, not a conclusion the evidence forces. **(c) no new status**;
+   descriptive `superseded-by:<winner>` tag, with the *visual* half qualified (3-chip cap,
+   routing-first ordering, Done lane collapsed).
+6. **#391** — make a UI supersede as legible as a hand-rolled one: `merge.go` effect (3) also
+   adds `superseded-by:<winnerID>` to the loser. Additive only; nothing refused today becomes
+   permitted; **no backfill**. Repo: `homelab-talos`, `containers/clawgate/`. Its body was
+   patched mid-session to retract the auth reasoning it inherited — read the card, not the
+   first draft of the record.
+7. **#394** — three source comments claim a machine cannot author as `user`, without naming the
+   path that holds on; one of them decided (b) in my first draft. Repo: `homelab-talos`.
+   🔴 **NOT "authenticate the LAN NodePort"** — trusted-open is deliberate and documented
+   (`api/auth.go:35-39`), and a card to fix something that is off on purpose is worse than no
+   card. Scope is the comments' claims, not the model.
+8. **No card filed for the §(a) guard narrowing, deliberately.** It makes a merge *possible*
+   where one is refused today, on a route mutating two tasks with no transaction, and any
+   narrowing must test the project delta explicitly AND answer for the second winner-side write
+   (a comment a mid-flight agent reads via `GET /agent/task`) that no tag predicate gates. §5.3
+   of the record is the reasoning a card would cite.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **#438 took THIRTEEN adversarial rounds, and the shape of what they found is the lesson.**
@@ -278,41 +292,89 @@ empty. An unknown kind is withheld too — the fail-closed direction.
   written decision with named checkers, not code — because writing acceptance criteria before
   the design is settled is what produced #359's criteria being rewritten mid-flight.
 
+- **The name is Cairn** (2026-08-26) — carried forward from `State now`, where a REPLACE would have
+  dropped it. It names the whole three-noun layer — **sessions · claimable tasks · subsystems** —
+  not just the index. Chosen over Almanac / Muster / Atlas: one syllable, no collision with the
+  crowded `claw` family, and a cairn is a marker left on a trail so whoever comes next knows the
+  way, which is what a subsystem-index entry is. A naming decision is durable; it does not belong
+  under a status heading.
+- 🔴 **#438 took THIRTEEN audit rounds and #459 took FIVE, and the SHAPE is the transferable
+  part.** Early rounds found behaviour defects; later rounds found almost none and instead found
+  **prose claiming coverage it did not provide** — the same defect class each tool exists to
+  catch, reproduced in the artifact describing the tool. The late rounds were not waste; they are
+  where the durable record got made honest. **Every round found something my own review had
+  passed.**
+- 🔴 **A NARROW MEASUREMENT SUPPORTING A WIDE CONCLUSION is the single recurring root cause.**
+  Every 🔴 across both ladders was an instance:
+  - **The one that decided a whole section wrongly:** I argued clawgate's missing `/api` merge
+    route protects `user` audit authorship. `requireSession` returns `next` unchanged
+    (`internal/api/auth.go:40-42`) — a no-op. My own probe disproved it and I did not notice: I
+    ran a POST *from a shell*, which is a machine, and read only the status code. **The clawgate
+    skill states the no-op plainly in the section I had open.** Having the fact is not using it.
+  - **A degenerate combinator hid three unreachable arms.** `max(horizon, evidence_from)` reads as
+    a choice, but `evidence_from` is the `min` over per-pipeline oldest runs and the horizon is a
+    `max` over a SUBSET of those values, so `horizon >= evidence_from` is a *theorem*. Replaced
+    with an explicit dominance rule and the invariant pinned by a test.
+  - **A "runnable procedure" that silently destroys data.** It used `tags` (REPLACE) not `addTags`
+    (MERGE). On #359 — `complete`, tags `devrc/rules/tooling` — there is no error path at all: the
+    `touched` guard lives inside `if cur.Status == StatusInProgress` (`internal/api/notes.go:759`),
+    so the call **silently succeeds** and all three tags are gone.
+- 🔴 **"VERIFIED IN ISOLATION" STRUCK AGAIN, and it is the most valuable single finding.**
+  `--branch` could go **entirely inert with the whole suite green**: each function was pinned, and
+  nothing pinned that `main` handed the override to *both* consumers. The harness was complicit —
+  the stub was a kwargs-**swallowing** lambda. **A stub that discards what it was given cannot
+  witness what was passed.**
+- 🔴 **A COMMIT MESSAGE DESCRIBED A FIX THAT NEVER LANDED.** The sentence it claimed to correct was
+  byte-identical across both commits. Worse than the original error: a message is the durable
+  record and asserts a tree state a reader can only disprove by diffing. **Check the blob, not your
+  intent** (`git show <sha>:<path>`).
+- 🔴 **A CORRECTION CAN UNDERSTATE THE ERROR IT CORRECTS, and that is its own failure.** I wrote
+  that the tag-destroying command "would have 409'd" — it would not; it succeeds silently. Twice
+  more in the same family: a paragraph that **retracted itself four lines later** (present-tense
+  "still carries" beside its own "has been patched"), and the flat chip claim **re-committed inside
+  the fix for a different error**, far above the section that retracts it.
+- 🔴 **VOUCHING FOR A CORRECTION WITHOUT RE-READING IT is the failure one layer out.** A record said
+  "a correction is posted as a comment on #391"; that comment still carried the claim the same
+  commit was retracting. Name the artifact and its timestamp, then go read it.
+- 🔴 **AGENT REPORTS WERE WRONG TWICE, both in ways that would have propagated unchecked.** One
+  concluded a test carried no unique mutation-kill; my own excision sweep found an isolated mutant
+  only it kills. One flagged a citation as off-by-one; the function really does close where I said,
+  and "fixing" it would have *introduced* an error. **Re-run an auditor's measurements before
+  acting on them** — including when they are correcting you.
+- 🔴 **A MUTANT CAN BE AN INSERTION RATHER THAN A PERTURBATION.** I overturned a *correct* audit
+  using a "mutant" on a path that held no expression to mutate — the guard short-circuits before
+  it — so my ternary *added* a branch, killed by crashing rather than by any assertion, and no
+  operator generates it. 803 operator-generated mutants: zero unique to the test I was defending.
+  **Ask whether your mutant perturbs code that exists.**
+- 🔴 **A POSITIVE CONTROL CAN BE INERT.** Adding defaults to keyword-only params every caller
+  passes mutates nothing, so its "SURVIVED" was a fact about my control, not the harness. Validate
+  in both directions: a real behavioural mutant must go RED and a semantic no-op must stay green.
+- **Suite-size literals and absolute totals ROT in prose.** "survives all 86 tests" went stale
+  inside one commit; a `repo-full-name` total moved 687 → 850 → 857 → 886 → 892 in three days.
+  Say "the whole suite" and keep the RATIO; delete the figure rather than renumbering it.
+- **`clawgatectl task create` returns only `{"id":N}` — never infer the id.** I cited "#367" as a
+  follow-up before creating it; #367 exists and is **someone else's open card**. The real ids were
+  #391 and #394. A fabricated cross-reference reads as a commitment a reader can look up.
+- **The CI non-fire tool's detection power is bounded and was quantified rather than assumed:**
+  5 of 7 repos in `tekton-ci` have no at-cap pipeline, so their bound is visibility-only, and 3 are
+  effectively silent (bounds hours to ~1 day old). That is the number that decides whether it keeps
+  earning its keep.
+
 ## How to verify
 ```bash
-# the page is live and current on the workbench
-curl -s -D- -o /dev/null http://192.168.50.250:8900/ | grep -i '^x-present'
-#   expect: X-Present-State: fresh   (and X-Present-Stale: 0)
+# rank 4 — the CI non-fire checker, read-only (gets/lists only)
+KUBECONFIG=$KC_HOMELAB python3 ~/workspace/homelab-talos/scripts/check-ci-nonfire.py \
+  --repo innovation-upstream/devrc
+PYTHONDONTWRITEBYTECODE=1 python3 ~/workspace/homelab-talos/scripts/tests/test_check_ci_nonfire.py
 
-# it carries the three-noun structure
-curl -s http://192.168.50.250:8900/ | grep -c 'Where the three touch'   # expect 1
+# rank 5 — the decision record exists on trunk (content, never ancestry)
+git -C ~/workspace/homelab-talos show \
+  origin/trunk:containers/clawgate/supersede-decision-2026-08-28.md | head -1
 
-# workbench-only is a fact, not an assumption — run FROM THE LAPTOP
-ssh zach@10.42.0.100 '(echo >/dev/tcp/192.168.50.250/8900) 2>/dev/null && echo OPEN || echo CLOSED'
-#   expect: CLOSED   (and 22/443 OPEN, proving the probe works)
-
-# the sanitizer, with BOTH controls — a bare zero cannot tell a working
-# sanitizer from one wired to nothing, so check the page still has content
-# 🔴 `grep -o | wc -l`, NEVER `grep -oc`. With GNU grep, `-c` counts matching
-# LINES and overrides `-o`, so the positive controls below return 1 instead of
-# 37/77 and the fix reads as failed. This host's `grep` is a ugrep WRAPPER where
-# `-oc` does count occurrences — which is exactly why the wrong form looked fine
-# when it was written. The piped form is right under both.
-python3 -m scripts.present.generate --sanitize -o /tmp/san.html   # 2 DEGRADED lines, both honest
-grep -o -i naida /tmp/san.html   | wc -l   # expect 0  — was 2 before the fix
-grep -o -i civitai /tmp/san.html | wc -l   # expect 0  — control: substitution works
-grep -o WITHHELD /tmp/san.html   | wc -l   # >0 — positive control: the page is NOT empty
-grep -o 'name-[0-9][0-9]' /tmp/san.html | wc -l   # >0 — identifiers renamed, not dropped
-grep -o -i ' test ' /tmp/san.html | wc -l  # equal in BOTH builds — prose NOT corrupted
-
-# cairn who — the task -> session -> window -> transcript join
-cairn who 360            # expect rc 0; each session shows BOTH a window line and a transcript line
-cairn who 99999999       # expect rc 7  — task-not-found
-cairn who not-a-number   # expect rc 2  — bad-task-id (clawgate ANSWERED with a 400)
-#   🔴 rc 7 and rc 8 are the pair that matters: "the answer is no" vs "there was no answer".
-#   A session whose window is gone still resolves via its transcript — that is the design,
-#   not a degraded result.
+# the measurement that decided (b) — expect a HANDLER response (409), not 401
+curl -s -X POST http://192.168.50.250:30302/tasks/merge -d 'winner=360&loser=359'
 ```
-🔴 **Do not pin the last four to a literal count here.** They move whenever a skill or an rc
-code is added, and a stale number in a doc reads as a failed fix. Compare the sanitized build
-against the full one from the same commit instead.
+🔴 **`run-ci-suite.sh` reports 6 red files and they are red at the base commit too** — five are a
+missing local `pyyaml` (all pass under `nix-shell -p python3Packages.pyyaml`), one is
+`test-check-subsystem-store-phase1.sh` at `pass=7 fail=17` on both sides. Do not attribute them to
+this work; run the base-commit control before believing otherwise.
