@@ -16,16 +16,16 @@ gap that trace found — the autonomous `browser agent` is BLIND to `site_notes`
 registered host it runs without that site's flow notes.
 
 ## State now
-- **devrc PR #940 MERGED** — squash `880786cf`. Verified **by content** on `origin/main`
-  (a squash never makes the head an ancestor, so ancestry lies): SKILL.md sentence,
-  `reference/agent.md` section, 3 new tests all present.
-- **devrc PR #956 MERGED** — squash `c6b9b77e`, this handoff doc (182 lines).
-  🔴 **Merged CLEANLY through the gate** — `tekton/devrc-pytests: success`,
-  `tekton/devrc-nodetests: success`. No bypass.
-- **The `devrc-pytests` red on #940 is RESOLVED as noise** — see the Open-investigations
-  block below. Nothing broken from #940 is sitting on `main`.
-- Base clone `~/workspace/devrc` re-synced `--ff-only` to `c6b9b77e`. All three worktrees
-  (`devrc-site-notes-agent`, `devrc-handoff-bb`, `/tmp/devrc-main-control-*`) removed.
+- **All three PRs MERGED and verified BY CONTENT** (a squash never makes the head an
+  ancestor, so ancestry lies — never verify one that way):
+  - **#940** `880786cf` — the `site_notes` gap: SKILL.md sentence, `reference/agent.md`
+    section, `browser_tool_impl.mjs` rationale, 3 guarded tests.
+  - **#956** `c6b9b77e` — this handoff doc.
+  - **#957** `c1bf2ad9` — rank 1 closed. Doc now 206 lines on `origin/main`.
+- **#956 and #957 both merged CLEANLY through the gate** (`devrc-pytests` +
+  `devrc-nodetests` both `success`, no bypass). Only #940 was bypassed.
+- Base clone `~/workspace/devrc` re-synced `--ff-only` to `c1bf2ad9`, working tree clean,
+  in sync with `origin/main`. **All session worktrees removed**; scratch files deleted.
 - #940 was merged with `devrc-pytests` RED by operator instruction. Mechanism:
   `enforce_admins` lifted → `--admin` squash → `enforce_admins` restored **and verified**.
   Required checks stayed in force for non-admins throughout. Snapshot:
@@ -33,6 +33,10 @@ registered host it runs without that site's flow notes.
 - **4 audit rounds ran on #940, each found real findings; round 5 never run** (operator
   chose to merge). Rounds 1–4: 6🟡, 3, 3, 1 — three of the four rounds' findings were
   introduced *by the previous round's fix*.
+- ⚠ **`devrc-pytests` runs take ~21–26 min.** Measured three times: 21m (#940's earlier
+  commit), ~24m (#956), ~26m (#957). Budget a watcher accordingly — a 30-min poll loop
+  nearly expired on #957, and a watcher timeout prints something that *looks* like a
+  failing check but is not.
 
 ## Open investigations — live diagnosis state
 
@@ -105,22 +109,37 @@ reading was *corrected*, not that it never existed.
   — SIGTERM — **twice from my own `timeout`, once from my own cleanup `kill`**. Not one
   test was ever observed red locally.
 
+### CORROBORATED 2026-08-27 — rank 1's resolution now rests on TWO independent green runs
+🔴 **Strengthens, does not change, the RESOLVED verdict above.** Recorded because the
+resolution was originally closed on a SINGLE data point and said so.
+- **Second data point:** **#957** (the rank-1 closing commit, also docs-only) branched off
+  a tree containing #940 and came back **`tekton/devrc-pytests: success` +
+  `devrc-nodetests: success`**, merging cleanly. So two independent docs-only PRs on
+  trees containing #940 both passed.
+- **What that does and does not buy.** It further rules out a persistent regression from
+  #940 on `main`. It still does **not** prove #940's own run died of preemption rather
+  than a flaky test — two greens are consistent with both. The claim to carry forward is
+  the narrow one: **nothing broken from #940 is sitting on `main`.**
+
 ## Next steps (ranked)
 
-1. ✅ **RESOLVED 2026-08-27 — settle the `devrc-pytests` red.** Answered for free by
-   #956's own check (docs-only diff on a tree containing #940 → green). Nothing broken on
-   `main`. Kept at rank 1 with its number intact so any live `claim-work` slug still
-   resolves; nothing to do here.
+1. ✅ **RESOLVED 2026-08-27 — settle the `devrc-pytests` red.** Answered free by #956's
+   own check, then corroborated by #957's. Nothing broken on `main`. Kept at rank 1 with
+   its number intact so any live `claim-work` slug still resolves; nothing to do.
 2. **Reload the browser-bridge extension in BOTH Brave profiles** (repo: none — operator
    action, an agent cannot do it). Both `work` and `personal` report
-   `extension_stale: true`: loaded build `04bbd6f9c695141d`, deployed
-   `e1ee86a50a811d40`, versions identical at `0.8.1` — the case a version compare cannot
-   see. Loaded code predates **2026-08-24**, missing `b20b7835` (#797, bound the
-   screenshot fast path) and `b242fc2d` (#814, bound `open`'s reuse probe) — both
-   bounded-hang fixes, so the symptom is a wedged op, not an error. Fix:
-   `brave://extensions` → **Remove** → **Load unpacked** `~/.local/share/browser-bridge-ext/`
-   (a ↻ reload is unreliable — the long-poll keeps the old worker alive). Verify:
-   `browser whoami` → require `extension_stale: false`; `null` = undecidable, NOT ok.
+   `extension_stale: true`. Fix: `brave://extensions` → **Remove** → **Load unpacked**
+   `~/.local/share/browser-bridge-ext/` (a ↻ reload is unreliable — the long-poll keeps
+   the old worker alive). **Verify: `browser whoami` → require `extension_stale: false`;
+   `null` = undecidable, NOT ok.**
+   🔴 **The MARKER VALUES below are a 2026-08-27 SNAPSHOT, not constants — do not assert
+   them.** Measured then: loaded `04bbd6f9c695141d`, deployed `e1ee86a50a811d40`, both
+   reporting version `0.8.1` (the case a version compare cannot see); loaded code predated
+   2026-08-24, missing `b20b7835` (#797) and `b242fc2d` (#814), both bounded-hang fixes —
+   so the symptom is a wedged op, not an error. **IN FLIGHT: devrc#950 touches
+   `extension/build_id.js`, so the DEPLOYED marker changes when it lands.** Re-read both
+   values from `browser whoami` at the moment you act; the `extension_stale` verdict is
+   the durable check, the hex strings are not.
 3. **Decide the SKILL.md byte budget** (repo: devrc; file
    `scripts/browser-bridge/SKILL.md`). **12,028 B** against the **12,038 B** enforced
    ceiling = **10 bytes of slack** (was 77 before #940). The next edit larger than that
@@ -179,6 +198,19 @@ reading was *corrected*, not that it never existed.
   the token accepted (3 links for a different session), but a wrong session id also
   answers `200` with an empty array — so this is a narrow reading, NOT a clean bill of
   health. Per the tool's instruction: no field written, no task created.
+
+- 🔴 **The `open`-reuse-probe orphan named in the gotchas above is BEING FIXED — do not
+  re-derive it.** `devrc#950` (**OPEN** as of 2026-08-27, *"reap the tab `open`'s bounded
+  reuse probe orphans — and NOT by bounding tabs.create"*) touches
+  `extension/{protocol.js,service_worker.js,build_id.js}`, `server.py`,
+  `reference/tabs-instances.md` and three test files. Read it before writing anything new
+  about `REUSE_TAB_BUDGET_MS` or orphaned tabs — and note it changes the extension build
+  marker, which is why rank 2's hex values are a snapshot.
+- ⚠ **A watcher timeout and a failing check look alike — say which you got.** A poll loop
+  that exits on its own budget prints `checks are 'pending'`, one word away from a red.
+  With runs at 21–26 min, a 30-min budget is not comfortable margin.
+- ⚠ **`gh pr merge --auto` is unavailable on this repo** (`Auto merge is not allowed for
+  this repository`), so merge-when-green must be a watcher, not a GitHub feature.
 
 ## How to verify
 ```bash
