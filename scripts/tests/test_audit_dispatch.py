@@ -1332,11 +1332,22 @@ DIRECTIVE_LEDGER = {
     # `checkout` are refused there explicitly rather than left to the reader's
     # reading of "you made". The forward-reference sentence is untouched and
     # still spells `NO_WRITE_SCOPE`.
+    #
+    # 🔴 ROUND 12. That refusal was an ENUMERATION of three verbs, over the one
+    # tree in this brief whose blast radius is outside it: the `no-fetch`
+    # clause is scoped to "every checkout you did not make" and the clone is
+    # deliberately outside it, so this sentence is the ONLY rule covering that
+    # tree. `git -C <clone> remote update` — which is what an auditor reaches
+    # for when `fetch` is refused by name and they still need the PR branch
+    # present before `worktree add` — was unenumerated, and so were `switch`,
+    # `restore`, `reset`, `branch -f` and `gc`. The permission is now stated
+    # positively with a universal refusal after it.
     "own-worktree-is-writable": (
         "That worktree is YOURS: fetching and checking out inside it is fine. "
         "In the clone you made it from, `git worktree add` is the ONLY write "
-        "this brief asks for — do not `fetch`, `pull` or `checkout` there, "
-        "whoever made it, because other sessions may be standing in it. The "
+        "this brief asks for and the ONLY one you may make — every other "
+        "command that writes there is refused, named or not, whoever made "
+        "that clone, because other sessions may be standing in it. The "
         "no-write rule below is about every checkout you did not make."
     ),
 }
@@ -3848,6 +3859,31 @@ CLONE_WRITE_GRANT_PHRASES = (
     "checking out inside either",
 )
 
+# 🔴 ROUND 12 — ROUND 10's OWN GRANT, verbatim, kept as the positive control
+# for the ENUMERATION probe below. Same role as `ROUND_8_CLONE_GRANT`: it must
+# be RED, so a clean result over the shipping grant means something.
+ROUND_10_CLONE_GRANT = (
+    "That worktree is YOURS: fetching and checking out inside it is fine. "
+    "In the clone you made it from, `git worktree add` is the ONLY write "
+    "this brief asks for — do not `fetch`, `pull` or `checkout` there, "
+    "whoever made it, because other sessions may be standing in it. The "
+    "no-write rule below is about every checkout you did not make."
+)
+
+# A CLOSED LIST of refused verbs — "do not `a`, `b` or `c` there". The shape
+# that leaves `remote update`, `switch`, `restore`, `reset`, `branch -f` and
+# `gc` permitted by omission.
+_ENUMERATED_CLONE_REFUSAL = re.compile(
+    r"do not (?:`[a-z][a-z-]*`(?:, )?)+ ?or `[a-z][a-z-]*` there"
+)
+
+# The universal that replaces it: the permitted write stated positively, and
+# everything else refused whether or not anyone thought to name it.
+CLONE_GRANT_CATCH_ALL = (
+    "the ONLY one you may make — every other command that writes there is "
+    "refused, named or not"
+)
+
 # The recipe's own `git -C <clone> …` line, so the verb it runs there is read
 # and not remembered.
 _CLONE_RECIPE = re.compile(r"git -C <your local clone of [^>]*> ([a-z-]+)")
@@ -3877,6 +3913,19 @@ def test_the_clone_grant_covers_only_the_write_the_recipe_makes():
     🔴 THE RELATIONSHIP, not the wording: the verb is read off the recipe LINE,
     so a recipe that starts running something else in the clone fails here
     rather than silently acquiring permission for it.
+
+    🔴 ROUND 12 — AND THE REFUSAL MUST BE A UNIVERSAL, NOT A LIST. Round 10's
+    fix refused `fetch`, `pull` and `checkout` BY NAME, which leaves everything
+    unnamed permitted by omission: `git -C <clone> remote update` is what an
+    auditor reaches for once `fetch` is refused and they still need the PR
+    branch present before `worktree add`, and `switch`, `restore`, `reset`,
+    `branch -f` and `gc` are the same hole. This directive is the ONLY rule
+    covering that tree — the `no-fetch` clause is scoped to every checkout you
+    did NOT make, and round 7 chose that scope precisely so the recipe's
+    `worktree add` stops being forbidden — and it is the only finding in this
+    ladder whose consequence is a cross-session write into `~/workspace/<repo>`
+    while other sessions are working there. So the shipping grant must carry no
+    closed verb list AND must state the catch-all.
     """
     assert clone_write_grants_in(ROUND_8_CLONE_GRANT), (
         "POSITIVE CONTROL: the probe cannot see round 8's own grant, so a "
@@ -3905,9 +3954,27 @@ def test_the_clone_grant_covers_only_the_write_the_recipe_makes():
         "clone, so the next reader has only 'you made it' to reason from — "
         f"which is what round 8 reasoned from.\n{grant}"
     )
-    assert "do not `fetch`, `pull` or `checkout` there" in grant, (
-        "\n\nthe grant no longer refuses the two operations round 8 permitted "
-        f"in the clone.\n{grant}"
+    # 🔴 ROUND 12 — A CATCH-ALL, NOT A LONGER VERB LIST. Positive control
+    # first: the probe must be able to SEE round 10's enumeration, or a clean
+    # result over the shipping grant is a scan wired to nothing.
+    assert _ENUMERATED_CLONE_REFUSAL.search(ROUND_10_CLONE_GRANT), (
+        "POSITIVE CONTROL: the enumeration probe cannot see round 10's own "
+        "`do not `fetch`, `pull` or `checkout` there`, so a clean result "
+        "below would say nothing at all"
+    )
+    assert not _ENUMERATED_CLONE_REFUSAL.search(grant), (
+        "\n\nthe clone grant refuses a CLOSED LIST of verbs. Everything not "
+        "on it is permitted by omission — `remote update` is what an auditor "
+        "reaches for when `fetch` is refused by name and they still need the "
+        "PR branch present before `worktree add`, and `switch`, `restore`, "
+        "`reset`, `branch -f` and `gc` are the same hole. This is the only "
+        "rule covering that tree: the `no-fetch` clause is scoped to every "
+        f"checkout you did NOT make, and the clone is one you did.\n{grant}"
+    )
+    assert CLONE_GRANT_CATCH_ALL in grant, (
+        "\n\nthe grant no longer refuses everything other than the one write "
+        "it permits. A guard on words is walkable by rewording; the refusal "
+        f"here has to be a universal.\n{grant}"
     )
 
 

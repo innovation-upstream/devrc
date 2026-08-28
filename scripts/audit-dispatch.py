@@ -535,12 +535,29 @@ SECTION_DIRECTIVES = (
     # substitution, so the grant is stated as the OPERATION it covers rather
     # than as an adjective on the tree. The forward-reference sentence is
     # unchanged and still spells `NO_WRITE_SCOPE`.
+    #
+    # 🔴 ROUND 12 — ROUND 10 REFUSED THREE VERBS BY NAME AND NOTHING ELSE, AND
+    # THIS IS THE ONE DIRECTIVE IN THE BRIEF WHOSE FAILURE LANDS OUTSIDE IT.
+    # The `no-fetch` clause below is scoped to "every checkout you did not
+    # make", and round 7 chose that scope precisely so `git -C <clone>
+    # worktree add` stops being forbidden — so the clone is DELIBERATELY
+    # outside that clause and this sentence is the only rule covering it.
+    # A closed verb list is walkable by reaching for a verb nobody listed:
+    # the auditor needs the PR branch present before `worktree add`, `fetch`
+    # is refused by name, and `git -C <clone> remote update` is not — nor are
+    # `switch`, `restore`, `reset`, `branch -f` or `gc`. The preceding
+    # sentence scopes what the brief REQUESTS, never what is PERMITTED.
+    #
+    # So the permission is stated POSITIVELY and everything else is refused by
+    # a universal, not by an enumeration: exactly the "assert the state, never
+    # a word another feature can spell" rule in `claude/RULES.md`.
     Directive(
         "own-worktree-is-writable",
         "That worktree is YOURS: fetching and checking out inside it is fine. "
         "In the clone you made it from, `git worktree add` is the ONLY write "
-        "this brief asks for — do not `fetch`, `pull` or `checkout` there, "
-        "whoever made it, because other sessions may be standing in it. The "
+        "this brief asks for and the ONLY one you may make — every other "
+        "command that writes there is refused, named or not, whoever made "
+        "that clone, because other sessions may be standing in it. The "
         "no-write rule below is about every checkout you did not make.",
     ),
 )
