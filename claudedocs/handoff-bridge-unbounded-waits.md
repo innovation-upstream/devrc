@@ -17,8 +17,19 @@ defect class — a wait whose only backstop is someone else's timeout** — foun
 the browser-bridge and fixed at the source each time.
 
 ## State now
-- 🔴 **THE QUEUE IS DOWN TO ONE OPEN ITEM: 6.** Items 1, 2, 3, 4, 5 and 7 are DONE.
-  Everything this arc opened in `devrc`'s browser-bridge is merged.
+- 🔴 **THE QUEUE IS EMPTY — ALL SEVEN ITEMS ARE DONE. This arc is CLOSED.** Item 6 was
+  the last, and it was already `complete` (another session, 2026-08-26); re-checking it
+  live on 2026-08-28 is what closed it here. Everything this arc opened is merged.
+  🔴 **Do not resume this doc expecting work.** What survives it is the record below —
+  in particular the four consecutive items (3, 4, 5, 6) whose REQUESTED change turned out
+  to be the wrong one, each caught by measuring before building. The open
+  investigations further down are NOT queue items: they are live diagnosis state, and
+  each one names its own next probe. The two worth carrying:
+  **(a)** whether `chrome.windows.update({focused:true})` actually takes the operator's
+  screen — now the sharper question, because after #1349 the `spend` path is the ONLY
+  `activate` left without a declared focus flag, and the two readings want OPPOSITE ones;
+  **(b)** the `SHARED_LIST_RESULT` drop (talos-infra #1289). Both need a decision or a
+  live desktop probe, not a code change.
 - 🔴 **NEW 2026-08-28: talos-infra #1349 MERGED** as squash **`0c710aff1`** — queue item
   5. Verified on `origin/trunk` **by content** (a squash never makes the branch head an
   ancestor): `NO_FOCUS_ARG` ×7 and `activate_unconsented` ×4 in `plan.py`, `M183`/`M184`
@@ -314,8 +325,24 @@ deliberately — the shas and constants are the arc's only compact index):
    producer stated the condition; the consumer's summary dropped it. That is the shape
    to look for elsewhere — not a wrong fact, a **correct fact re-summarised without its
    precondition**.
-6. **clawgate #358** — filed earlier, picked up by a different session. Not ours; live
-   state NOT re-checked, so treat as unknown rather than still-in-flight. **OPEN.**
+6. ✅ **DONE (clawgate task 358 = `complete`, by ANOTHER session, 2026-08-26)** — re-checked
+   live 2026-08-28, which is the step this entry had been asking for since it was written.
+   Verified by CONTENT, not by the status field: devrc **#842** → `ad8259cf` (the detector +
+   census), devrc **#871** → `89166956` (73 flags resolved), homelab-infra **#409** — all
+   MERGED; `scripts/dead-guard-scan.py`, `scripts/data/dead-guard-census.tsv` and two mutant
+   batteries are present on `origin/main`. Criteria were AUTHOR-SPECIFIED, so `complete` was
+   that session's to set.
+   🔴 **And it landed the same way items 3, 4 and 5 did — the measurement refuted the
+   premise.** The task was titled *"delete guard branches with zero corpus instances"*;
+   its own closing comment reads **"Nothing was deleted, and that is the finding"** —
+   across 86 flags the count of genuinely dead recognition branches is approximately zero
+   (40 were the guards' own firing paths with no planted positive control, 8 were `except`
+   handlers for conditions the corpus never produces, 9 were recognition branches that are
+   NOT dead, 29 were the scanner's own code). What shipped is the detector and 67 inline
+   justifications, not deletions.
+   **Four consecutive items where the requested change was the wrong one and measuring
+   first is what revealed it.** That is now the most reusable thing this arc produced —
+   see the DONE-but-not-as-framed note under item 4.
 7. ✅ **DONE (talos-infra #1333, squash `05e3110ca`, 2026-08-27)** — `sensei`'s shipped
    crop settled and fixed. `y: 97` sat **44px ABOVE** the iframe top (141), inside the
    rewards banner. Converted to the anchored form. **Nothing was attached to any
