@@ -222,6 +222,22 @@ clause.
 
 ---
 
+## High-yield change-classes — what each one actually hid
+
+Demoted from the skill body to pay for the assembler router line; the CLASS LIST stays in the body
+because it is what decides whether to run an audit at all, and only these anecdotes moved.
+
+Deploy-blocking bugs that surfaced from exactly these classes: a **shutdown data-loss** on a
+concurrency rework; a **trash-path overwrite** on a filesystem/quarantine move; an
+**unauthenticated arbitrary-path scan** on an HTTP endpoint; and a git **`core.fsmonitor` RCE**
+reachable from a repo-local config.
+
+The false positive to expect on the same road: a branch with a **private Go module dep** may need
+`GOPRIVATE`, and a sum-db `500` there is an ENVIRONMENT failure, not a defect in the PR. An auditor
+that reports it as a finding has read a broken toolchain as a broken change.
+
+---
+
 ## Where the rest lives
 
 - The **rejected numeric cap** and devrc #505's ReDoS-introduced-by-the-fix evidence: stated inline

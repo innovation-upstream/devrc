@@ -19,9 +19,19 @@ Target: `$ARGUMENTS`:
 
 ## What to do
 
+🔴 **Assemble the brief with `~/workspace/devrc/scripts/audit-dispatch.py <pr> [--round N]`** — it
+generates the range, the cross-repo worktree directive, checkout state and toolchain, reads the
+prior round's claims from the fenced `audit-claims` block ONLY, and carries the invariant clauses
+verbatim. **A delta round with no parseable block is REFUSED.**
+
+🔴 **Post the round's block with `--round N --emit-claims --audited <the tip that round's audit
+READ>`.** `--emit-claims` runs after the fixes land, so every sha it can see is a FIX tip; omit
+`--audited` and HEAD is *assumed* — it says so on stderr, because the next round then diffs a range
+that is empty by construction and a finding-free pass over it reads as a clean round.
+
 Dispatch a subagent (read-only — it must NOT modify files or merge) to audit the change against this checklist. Have it read the diff and the code it touches, not just the PR description.
 
-**Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, anything security/auth/path-gating. These hide deploy-blocking bugs (shutdown data-loss, trash-path overwrite, an unauthenticated arbitrary-path scan and a git `core.fsmonitor` RCE all surfaced this way). A branch with a **private Go module dep** may need `GOPRIVATE` — a sum-db `500` there is env, not a defect.
+**Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, anything security/auth/path-gating. What each hid, and `GOPRIVATE`: reference file.
 
 **Brief the auditor on the environment, or it will report false findings** — a fresh worktree is
 not a working checkout, and an auditor hitting this cold blames the PR. Whichever apply:

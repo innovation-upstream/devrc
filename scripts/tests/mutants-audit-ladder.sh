@@ -308,6 +308,16 @@ run "cross-repo worktree caveat inverted" \
     '🔴 `isolation:
   "worktree"` worktrees the **cwd'"'"'s** repo, not the PR'"'"'s' \
     'Use `isolation: "worktree"` for any repo'
+# The assembler router. The DELETION is the obvious mutant and the weak one;
+# this inverts the REFUSAL instead, leaving the router itself byte-identical.
+# That is the reading a reader would accept ("it warns, fine") and it describes a
+# different tool: a delta re-audit with no claims block silently becomes a blind
+# full audit, which then reads as covered. The whole-string pin is what catches
+# it — a keyword guard on "audit-dispatch.py" would stay green.
+run "assembler router's REFUSAL downgraded to a warning" \
+    test_the_operator_instructions_the_gate_depends_on_are_pinned "$SKILL" \
+    '**A delta round with no parseable block is REFUSED.**' \
+    'A delta round with no parseable block warns and proceeds.'
 run "stderr-capture rule inverted" \
     test_the_operator_instructions_the_gate_depends_on_are_pinned "$SKILL" \
     'Keep stderr on the terminal — folding it into the sum with
