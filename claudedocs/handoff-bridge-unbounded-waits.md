@@ -17,8 +17,19 @@ defect class — a wait whose only backstop is someone else's timeout** — foun
 the browser-bridge and fixed at the source each time.
 
 ## State now
-- 🔴 **THE QUEUE IS DOWN TO TWO OPEN ITEMS: 5 and 6.** Items 1, 2, 3, 4 and 7 are DONE.
+- 🔴 **THE QUEUE IS DOWN TO ONE OPEN ITEM: 6.** Items 1, 2, 3, 4, 5 and 7 are DONE.
   Everything this arc opened in `devrc`'s browser-bridge is merged.
+- 🔴 **NEW 2026-08-28: talos-infra #1349 MERGED** as squash **`0c710aff1`** — queue item
+  5. Verified on `origin/trunk` **by content** (a squash never makes the branch head an
+  ancestor): `NO_FOCUS_ARG` ×7 and `activate_unconsented` ×4 in `plan.py`, `M183`/`M184`
+  present in `tests/mutants-app-capture.sh`. Gate `tekton / gitops-ci` = SUCCESS bound to
+  the merged head; suite 142 PASS / 0 FAIL; doc-rot 1568 refs PASS.
+  🔴 **THREE MUTATION RUNS IN THIS SESSION HIT THE SHARED-`.venv` `127` STORM** (widespread
+  `got 127` plus the battery's inert-edit control reported MISATTRIBUTED rather than
+  scored). Every one was the instrument, not the code — re-running serially on a quiet
+  box gave `got 127` = 0 each time. Only clean-run numbers were reported. The talos-infra
+  gotcha is right and it fires far more often than "two batteries at once" suggests: a
+  single battery plus ordinary concurrent work was enough.
 
 **Durable record, CARRIED FORWARD** (this section is REPLACE-on-update, so these live here
 deliberately — the shas and constants are the arc's only compact index):
@@ -148,6 +159,16 @@ deliberately — the shas and constants are the arc's only compact index):
   `--focus` — so whether the subsequent `xdotool key --clearmodifiers` reliably lands
   on Brave rests on this same residual. `plan.py` now says so instead of claiming the
   step "STEALS THE OPERATOR'S SCREEN". Behaviour deliberately unchanged.
+- 🔴 **SHARPENED 2026-08-28 by #1349, and this is now the sharper half of the question.**
+  Every OTHER capture-path `activate` now declares `--no-focus`; `spend` is the one that
+  does not, and its exemption is EXPLICIT and gated (a blanket ban dies as mutant M184).
+  So the spend step's raise is withheld today **only** by `run_step`'s command
+  substitution — the exact accident #1349 removed everywhere else. Two readings, and
+  they want opposite flags: if the trusted keypress NEEDS a genuinely raised Brave, this
+  step should say `--focus` out loud (the bridge CLI's own comment says a script that
+  wants the screen should); if it does not, it should say `--no-focus` like its
+  neighbours. **Nobody has measured which.** The probe below settles it, and until then
+  neither flag may be added by sweep — G11 fails if one is.
 
 ### `sensei`'s declared `y: 97` — which side of the iframe top is it on?
 - **Symptom + exact repro:** `sensei.json`'s `crop._notFromAppFrame` asserts `y: 97` is
@@ -263,9 +284,35 @@ deliberately — the shas and constants are the arc's only compact index):
    `chrome.tabs.create` that hangs and NEVER settles produces a tab `open` never sees, so
    there is nothing to report. Closing it needs the choke point to signal abandonment back
    into the op — **a choke-point change, not another budget constant.**
-5. **Removing app-capture's raise** — `civitai/talos-infra`. 🔴 **PREMISE CHANGED**: the
-   raise is not inert, only its i3 half is withheld. Re-scope before working it.
-   **OPEN — unclaimed.**
+5. ✅ **DONE (talos-infra #1349, squash `0c710aff1`, 2026-08-28)** — and, like items 3
+   and 4, **NOT as framed; the refusal is again half the deliverable.** The item said to
+   REMOVE app-capture's raise. Not buildable: `browser activate` does three things and
+   this repo can only choose whether to CALL it — the i3 half is already withheld, the
+   `chrome.tabs.update({active:true})` half is load-bearing (it routes captures onto the
+   `captureVisibleTab` fast path, and mutants M59–M64 exist to kill its removal), and
+   `chrome.windows.update({focused:true})` lives in devrc's extension, ungated, where
+   talos-infra cannot reach it.
+   🔴 **What re-scoping found instead: the withheld property was derived WRONG in five
+   files.** They all said *"`capture.sh` never passes `--focus`, so the raise is
+   withheld"*. That does not follow — the bridge CLI resolves the flag as **"on iff
+   stdout is a TTY"** (`scripts/browser-bridge/browser`, the `activate` case), so
+   omitting it delegates the raise to how the caller happened to be invoked. Measured
+   against an instrumented endpoint, identical argv: `"focus":false` through a command
+   substitution, **`"focus":true` through a PTY**, with `--focus`/`--no-focus` as
+   two-way controls. The CONCLUSION held on every path — `activate` is emitted only by
+   `plan.py` and executed only by `capture.sh`'s `run_step`, which command-substitutes
+   every op — but it rested on an accident of stdio in a helper, in a different repo
+   from the default that decides it, pinned by nothing.
+   **Fix:** `plan.py` now emits `--no-focus` on all three capture-path sites and
+   `guard_activate_placement` refuses a plan that omits it (`activate_unconsented`).
+   **Zero behaviour change, measured both ways.** `spend` is EXEMPT on purpose — see the
+   open investigation below; G11 pins the exemption so a sweep cannot settle it.
+   🔴 **The seam was one-sided: devrc documents its TTY default correctly in FIVE places
+   and even has a pty test for it (`tests/test_browser_cli_args.py:1150`), and carries
+   ZERO instances of the wrong derivation (grepped, with a positive control).** The
+   producer stated the condition; the consumer's summary dropped it. That is the shape
+   to look for elsewhere — not a wrong fact, a **correct fact re-summarised without its
+   precondition**.
 6. **clawgate #358** — filed earlier, picked up by a different session. Not ours; live
    state NOT re-checked, so treat as unknown rather than still-in-flight. **OPEN.**
 7. ✅ **DONE (talos-infra #1333, squash `05e3110ca`, 2026-08-27)** — `sensei`'s shipped
@@ -465,6 +512,36 @@ deliberately — the shas and constants are the arc's only compact index):
   CONTENT of a red status, not the colour: the totals and the verdict disagreed, and the
   verdict was the wrong one. Three runs of one commit gave three different answers.
 
+- 🔴 **2026-08-28 / #1349 — A CORRECT CONCLUSION CAN REST ON A WRONG DERIVATION, AND ONLY
+  THE DERIVATION IS INHERITABLE.** Five files said "`capture.sh` never passes `--focus`,
+  so the raise is withheld". The conclusion was true on every path; the reasoning was
+  not, because the CLI defaults the flag ON for a TTY. **A green suite cannot see this
+  class** — nothing was misbehaving. What makes it expensive is that the SENTENCE is what
+  a reader generalises: anyone writing a sibling caller, or a doc telling an operator to
+  run an `activate` by hand in a terminal, inherits "no flag ⇒ no raise" and is wrong.
+  **The cure is not better prose** — prose had already failed this class four rounds in
+  this arc. It is to make the property TRUE BY CONSTRUCTION (declare the flag) so the
+  sentence becomes correct as written. 🔴 **The tell to hunt: a doc summarising ANOTHER
+  repo's behaviour. Check the producer's own words for a PRECONDITION the summary
+  dropped** — here devrc stated the TTY condition in five places and even pty-tested it,
+  and every talos-infra restatement omitted it.
+- 🔴 **2026-08-28 / #1349 — ADDING A GUARD CLAUSE SILENTLY STALES EVERY FIXTURE THAT WAS
+  MERELY WELL-FORMED-ENOUGH.** The new clause made four existing G11 plants and the
+  `act()` helper die to IT rather than to the clause each is named for, and refused two
+  positive controls outright — which reads as a broken guard and is really a stale
+  fixture. **After adding a clause, re-read what the OTHER cases now die of.**
+  🔴 And the sharper half: **a plant is only isolating if its INSERTION POINT is legal.**
+  The consent clause was written as a plant first; a plant goes in at the `evidence_mode`
+  anchor, nowhere near a screenshot, so the planted step was ALSO misordered and died to
+  `activate_misordered` when the clause was neutered — a kill attributing to the wrong
+  clause, the M96 shape, caught only by running the mutant. Reached through the module
+  API instead, where a step can be legal in every other dimension.
+- 🔴 **2026-08-28 / #1349 — MUTATING A CONSTANT CAN QUIETLY MAKE A MUTANT COMPOUND.**
+  M111 replaces `REFOCUS_ARGS` to test that a re-assert carries no `--wait`. Once the
+  constant also held `NO_FOCUS_ARG`, the naive re-anchor would have dropped BOTH — so it
+  would have died to `activate_unconsented` and stopped testing the `--wait` claim
+  entirely, while still scoring KILLED. **When a constant gains a member, re-read every
+  mutant that REPLACES that constant wholesale.**
 - 🔴 **2026-08-28 / #950 — A QUEUE ITEM'S REMEDY CAN BE FORBIDDEN BY THE FILE IT NAMES.
   Read the target's own rules before building what a ranked item asks for.** Item 4 asked
   for a bound on `chrome.tabs.create`; `execute()`'s comment grants a local bound *only* to
