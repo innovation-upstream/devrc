@@ -482,10 +482,17 @@ def await_audit(out: "Drained | AuditLog", n: int, timeout: float = 15.0) -> "li
     18/19; with a SYNCHRONOUS second `self.audit(...)` emitted inline, the
     SNAPSHOT assertions were already red 19/19. So the ceiling was never
     destroyed — it was NARROWED to the synchronous case, and `settle` widens it
-    back. (The one deferred survivor is the SUBPROCESS site: `running_
-    subprocess` SIGTERMs the child on block exit, so the mutant's own timer dies
-    with it. That is a property of the mutant, not of the assertion — the
-    synchronous mutant kills that site.)
+    back.
+
+    🔴 AND THE ONE DEFERRED SURVIVOR IS A PROPERTY OF THAT SITE'S TEARDOWN, NOT
+    OF THE MUTANT. The survivor is the SUBPROCESS site, and the earlier reading
+    of it — "the mutant's own timer dies with the SIGTERM'd child, so that is a
+    property of the mutant" — was wrong in a way worth correcting rather than
+    quietly rewriting: `running_subprocess` `terminate()`s AND `wait()`s on
+    block exit, so that site structurally cannot observe ANY record deferred
+    past its own teardown — from a mutant, or from a real defect. The blind spot
+    belongs to the fixture. What the synchronous mutant shows is only that the
+    site's assertion works when the extra record arrives BEFORE teardown.
     `test_the_STDOUT_audit_stream_names_the_matched_fingerprint` keeps the
     `wait_closed()` form because a subprocess pipe really does have an EOF.
 
@@ -535,32 +542,73 @@ def await_audit(out: "Drained | AuditLog", n: int, timeout: float = 15.0) -> "li
 
 
 # How long `settle` keeps watching AFTER the server is torn down. It is the
-# width of the ceiling, and it is a real cost — 0.75s at each in-process site
-# that calls it, MEASURED at +8.3s on the whole file (279.2s -> 287.5s). Chosen
-# so a second line deferred by 300ms is caught with margin, on top of whatever
-# `shutdown()`'s 0.5s poll interval happens to contribute — which is 0 to 0.5s
-# and NOT a guarantee, which is exactly why the wait is written down here
-# instead of being leaned on.
+# width of the ceiling, and it is a real cost. Chosen so a second line deferred
+# by 300ms is caught with margin, on top of whatever `shutdown()`'s 0.5s poll
+# interval happens to contribute — which is 0 to 0.5s and NOT a guarantee, which
+# is exactly why the wait is written down here instead of being leaned on.
+#
+# 🔴 THE COST IS 13.76s, AND IT IS MEASURED INSIDE THE HELPER, NOT BY DIFFING
+# TWO SUITE RUNS. An earlier version of this comment claimed "+8.3s (279.2s ->
+# 287.5s)", which was the difference of two single whole-file runs — an
+# instrument that cannot see this effect: four whole-file runs of the SAME tree
+# in one sitting came in at 273.6s, 288.9s, 290.4s and 302.4s, a 28.8s spread
+# over a ~14s quantity. That number was also reasoned from a site count that
+# missed the x5 parametrization on
+# `TestMalformedRequestLinesDoNotCrash.test_it_answers_instead_of_crashing`:
+# 15 call SITES, but 19 call EXECUTIONS.
+#
+# METHOD: a pytest plugin wraps `settle` and sums the helper's OWN wall time
+# over a whole-file run. 19 calls — 1 on the free EOF path (a `Drained`) and 18
+# on the wall-clock path — totalling 13.76s, against 0.00s for the identical
+# run with the grace forced to 0. So 13.76s is attributable to the window, and
+# the arithmetic floor agrees: 18 x 0.75 = 13.5s.
 SETTLE_GRACE_S = 0.75
 
 
 def settle(out: "Drained | AuditLog", n: int, grace: float = SETTLE_GRACE_S) -> "list[str]":
     """EXACTLY `n` audit lines, ever — the CEILING, which `await_audit` cannot give.
 
-    🔴 CALL IT AFTER THE `with running(...)` BLOCK, NEVER INSIDE. Inside, the
-    only thing it could observe is the same snapshot `await_audit` already
-    returned. Outside, `shutdown()`/`server_close()`/`join()` have run and the
-    grace window below runs on top of them, so a line emitted from a later
-    callback, another thread, or after a delay has somewhere to land where this
-    can see it.
+    🔴 CALL IT AFTER THE `with running(...)` BLOCK, NEVER INSIDE, and
+    `test_settle_is_called_AFTER_the_running_block_never_inside` enforces that
+    structurally rather than leaving it to this sentence.
+
+    🔴 AND THE REASON IS TEARDOWN, NOT THE POLL. An earlier version of this
+    paragraph said that inside the block "the only thing it could observe is the
+    same snapshot `await_audit` already returned", and that is not what the code
+    does: the grace loop below would still run its 0.75s inside the block and
+    would still catch a line deferred by 300ms. What it could NOT catch there is
+    the case the ceiling exists for — a line emitted BY teardown, from
+    `shutdown()`/`server_close()`/`thread.join()` or from a handler thread that
+    only finishes as the block exits. None of that has happened yet on the
+    inside, so the window would be spent watching a server that is still up.
 
     🔴 WHY IT IS A WALL-CLOCK WAIT AND NOT AN EVENT. An `AuditLog` has no EOF to
     wait for: `ThreadingHTTPServer` runs handlers as DAEMON threads, which
     `socketserver._Threads.append` drops on the floor, so `server_close()` joins
     nothing and `AuditLog.closed` is honestly `None`. There is no signal here to
     convert into an `Event` — only elapsed time. That makes this ceiling a
-    BOUNDED one and the bound is `grace`: a line emitted a full second late is
-    still unobserved, and no assertion in this file claims otherwise.
+    BOUNDED one, and the bound is `grace` PLUS whatever teardown itself costs
+    before the loop starts. MEASURED against a server patched to emit one extra
+    audit line per request after a delay, over the 19 exact-count items:
+    18/19 red at 300ms, 18/19 red at 1.0s, 0/19 at 1.5s. So the sentence this
+    replaces — "a line emitted a full second late is still unobserved" — was
+    FALSE, and contradicted `SETTLE_GRACE_S`'s own comment just above it: the
+    effective window is roughly 0.75-1.25s, not a flat 0.75s. What is true is
+    that the window is finite and this docstring is where its width is written
+    down; no assertion in this file claims a line arriving after it is caught.
+
+    🔴 A 0.75s WALL-CLOCK BOUND INSIDE AN ASSERTION IS THE SHAPE THAT PRODUCES
+    FLAKES, SO HERE IS WHY THIS ONE CANNOT FAIL FALSELY. The bound is on how
+    long a surplus has to ARRIVE, never on how long anything has to FINISH.
+    (a) Every call site runs `await_audit(out, n)` first, so `len >= n` already
+    holds on entry and the `<= n` assertion can only fire on a genuine surplus —
+    it is not racing the arrival of the n records it expects. (b) The sink
+    handed to `build_server` is `audit.append` and nothing in this file removes
+    an element, so a count that reached n cannot drop back below it. (c) The
+    grace deadline and any deferred emitter are on the SAME wall clock, so a
+    saturated host stretches both and cannot shrink the window relative to what
+    it is watching for. The failure mode this leaves is the honest one — a
+    surplus arriving after the window is MISSED, never a green run turned red.
 
     🔴 A `Drained` DOES HAVE AN EOF, AND THIS TAKES IT. When `out.closed` is a
     real `Event` the grace window is not used at all: the pipe reaching EOF is a
@@ -568,10 +616,16 @@ def settle(out: "Drained | AuditLog", n: int, grace: float = SETTLE_GRACE_S) -> 
     amount of elapsed time and costs nothing. The wall-clock path below exists
     only for the sink that has no such signal.
 
-    🔴 IT FAILS FAST AND IT FAILS SPECIFIC. The `<= n` check runs on every poll,
-    so an extra line is reported the moment it lands rather than at the end of
-    the window, and the message names the surplus records — a bare `== n` at the
-    end reports a number and leaves the reader to go find which line was extra.
+    🔴 IT FAILS FAST, AND IT PRINTS THE WHOLE LEDGER RATHER THAN GUESSING WHICH
+    LINE IS THE EXTRA. The `<= n` check runs on every poll, so an extra line is
+    reported the moment it lands rather than at the end of the window. It used
+    to print `lines[n:]` under the heading "Surplus", which quietly assumed the
+    records arrive in the order they were requested — the exact assumption
+    `await_audit`'s docstring exists to deny ("IT GUARANTEES A COUNT, NEVER AN
+    ORDER"). At an interleaved site a deferred record can land BETWEEN two
+    genuine ones, and the slice then names a genuine record as the intruder.
+    Never a pass/fail difference; purely a message that sends the reader to the
+    wrong line, which is the failure mode the fail-specific claim was about.
     """
     if out.closed is not None:
         # 🔴 `wait_closed()`, NOT `out.closed.wait()`. Identical behaviour and a
@@ -579,7 +633,17 @@ def settle(out: "Drained | AuditLog", n: int, grace: float = SETTLE_GRACE_S) -> 
         # process_it_just_terminated` counts a bare `.wait` attribute as a killer
         # verb, so the raw `Event` form makes this helper — and transitively
         # every test that calls it — a false offender in that seam guard.
-        out.wait_closed(15.0)
+        #
+        # 🔴 AND ITS ANSWER IS ASSERTED, NOT DISCARDED. `wait_closed` returns
+        # whether EOF was actually reached; on a timeout the discarded form
+        # degraded silently into a bare snapshot with no ceiling at all, and
+        # then reported "the closed stream holds ..." about a stream that was
+        # not closed. That is the docstring's "A `Drained` DOES HAVE AN EOF, AND
+        # THIS TAKES IT" claiming a state which did not hold.
+        assert out.wait_closed(15.0), (
+            f"the stream never reached EOF within 15s, so there is no ceiling to "
+            f"check — it holds {len(out.audit)} `{AUDIT_PREFIX}` line(s) so far "
+            f"for an expected {n}.\nfull stream:\n{out.text}")
         lines = out.audit
         assert len(lines) == n, (
             f"the closed stream holds {len(lines)} `{AUDIT_PREFIX}` line(s) for "
@@ -590,8 +654,10 @@ def settle(out: "Drained | AuditLog", n: int, grace: float = SETTLE_GRACE_S) -> 
         lines = out.audit
         assert len(lines) <= n, (
             f"{len(lines)} `{AUDIT_PREFIX}` line(s) for an expected {n} — a "
-            f"record was emitted after the response. Surplus:\n  "
-            + "\n  ".join(lines[n:]))
+            f"record was emitted after the response. The records are NOT "
+            f"ordered by request (see `await_audit`), so which of these is the "
+            f"extra cannot be read off its position; all of them:\n  "
+            + "\n  ".join(lines))
         if time.time() >= deadline:
             break
         time.sleep(0.02)
@@ -4122,6 +4188,25 @@ class TestTheDeployedEntrypoint:
         # gap is real: with the server patched to emit one extra audit line at
         # SIGTERM, the pre-helper code failed and the snapshot check passes.
         # Three requests must produce three records, not "at least three".
+        #
+        # 🔴 AND YES, THESE TWO LINES HAND-ROLL `settle`'s `Drained` BRANCH —
+        # THE ONLY `len(...audit...) ==` LEFT OUTSIDE THE HELPER, AND THE ONLY
+        # REASON `_eof_barriers` NEEDS AN EXEMPTION AT ALL. "One rule, one
+        # place" says convert it, and it is DELIBERATELY not converted, for two
+        # reasons that are worth stating rather than leaving as a smell:
+        #   (1) `settle(out, 3)` would leave this function with no raw audit
+        #       read, which is what the raw-read guard's positive control
+        #       (`assert _raw_audit_reads(permitted)`) and its barrier control
+        #       are built on — the file's only LIVE specimen of the shape that
+        #       guard classifies. Both would have to fall back to synthetic
+        #       sources, i.e. the guard would no longer be exercised against any
+        #       real code in the tree it polices.
+        #   (2) It would move the denominator every ceiling matrix in this PR is
+        #       stated against — 19 exact-count items, 18 of them on `settle`'s
+        #       wall-clock path — so the conversion is not a rename, it is a new
+        #       mutation sweep. It belongs in a change that carries its own
+        #       matrix, not in one that inherits this one's.
+        # If (1) is ever solved with a synthetic fixture, convert this.
         assert len(out.audit) == 3, (
             f"the closed stream holds {len(out.audit)} audit records for 3 "
             f"requests — an extra one was emitted after the snapshot:\n{out.text}")
@@ -5859,31 +5944,167 @@ def test_the_call_site_THRESHOLD_is_load_bearing_not_decorative():
     )
 
 
-def _raw_audit_reads(fn: ast.AST) -> "list[int]":
-    """Lines where `fn` reads the audit records WITHOUT going through the helper.
+# 🔴 THE SAME TWO-PART TREATMENT FOR `settle`, BECAUSE ITS RULE WAS PROSE ONLY.
+# `settle`'s docstring says CALL IT AFTER THE `with running(...)` BLOCK, NEVER
+# INSIDE, and 15 sites were converted to it in one commit — with nothing pinning
+# either fact. This file's own history says what a prose rule is worth here:
+# `await_audit` was documented and FORTY sites ignored it, and the commit that
+# fixed that prescribed a recipe (`out.wait_closed()` on an `AuditLog`) that
+# cannot exist, so nine more sites followed a rule that could not work.
+#
+# The failure this closes is silent and is a REVERSION, not a new mistake:
+# rewrite any `lines = settle(audit, 1)` back to
+# `lines = await_audit(audit, 1); assert len(lines) == 1` and that site's
+# ceiling re-narrows to the synchronous case — which is bit-for-bit the defect
+# the `settle` commit repaired — while every other guard in this file stays
+# green, because that form performs no raw read and so the raw-read ban never
+# fires. A count is the cheapest thing that notices.
+def _settle_call_sites(source: "str | None" = None) -> int:
+    """`settle(...)` CALL expressions — not the functions containing them."""
+    tree = ast.parse(source if source is not None else Path(__file__).read_text())
+    return sum(
+        1 for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "settle"
+    )
+
+
+def _settle_calls_inside_a_with_block(source: "str | None" = None) -> "list[int]":
+    """Lines where a `settle(...)` call sits INSIDE a `with` body. The placement
+    half of the rule, which no count can see.
+    """
+    tree = ast.parse(source if source is not None else Path(__file__).read_text())
+    found = set()
+    for block in ast.walk(tree):
+        if not isinstance(block, (ast.With, ast.AsyncWith)):
+            continue
+        for stmt in block.body:
+            for n in ast.walk(stmt):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                        and n.func.id == "settle":
+                    found.add(n.lineno)
+    return sorted(found)
+
+
+def test_every_exact_count_site_goes_through_settle():
+    """The anti-shrink half: this fails when the ceiling coverage SHRINKS.
+
+    A site that gives up its ceiling — reverting to `await_audit` plus a
+    `len(...) == n` on the snapshot — is invisible to every other guard here.
+    Pinning the number is what makes that revert a red run instead of a silent
+    narrowing back to the synchronous-only ceiling.
+    """
+    assert _settle_call_sites() == 15, (
+        f"expected exactly 15 `settle(...)` call sites, found "
+        f"{_settle_call_sites()}. A ceiling was added or given up; if that is "
+        "intended, update this count AND say in the commit which property the "
+        "file no longer asserts."
+    )
+
+
+def test_the_settle_call_site_THRESHOLD_is_load_bearing_not_decorative():
+    """🔴 The mutant the threshold's own sweep cannot supply, for `settle`.
+
+    Deleting the helper everywhere drives the count to 0 and kills `>= 1`,
+    `>= 14` and `== 15` identically. This removes ONE site from a COPY of the
+    source and requires the count to actually move to 14 — the case that
+    separates a real ceiling census from a floor that fifteen sites could
+    satisfy with one.
+    """
+    src = Path(__file__).read_text()
+    assert _settle_call_sites(src) == 15, "fixture drift: the real count moved"
+
+    # A literal that appears exactly once as real code. (It also appears in this
+    # line, later in the file; `count=1` takes the earlier, real occurrence, and
+    # the assertions below fail loudly if it ever stops doing so.)
+    one_removed = src.replace("lines = settle(audit, 21)",
+                              "lines = []  # mutant", 1)
+    assert one_removed != src, "the mutation did not apply — this test is vacuous"
+    assert _settle_call_sites(one_removed) == 14, (
+        "removing one call site did not move the count, so the threshold cannot "
+        "distinguish fifteen ceilings from fourteen"
+    )
+
+
+def test_settle_is_called_AFTER_the_running_block_never_inside():
+    """The placement half of `settle`'s rule, which the count cannot see.
+
+    Inside the block the grace window watches a server that is still up, so the
+    one thing the ceiling exists for — a record emitted BY teardown — cannot
+    land where it can be seen. A site moved inside keeps the call, keeps the
+    count, and quietly stops asserting the property.
+    """
+    inside = _settle_calls_inside_a_with_block()
+    assert inside == [], (
+        "these `settle(...)` calls are INSIDE a `with` body, where teardown has "
+        f"not run yet and the ceiling is not being tested: lines {inside}"
+    )
+
+    # Positive control: the detector must be able to SEE a misplaced call, or
+    # the empty list above is a fact about the walker and nothing else.
+    misplaced = textwrap.dedent("""
+        def test_x(store):
+            with running(store) as (base, audit):
+                await_audit(audit, 1)
+                lines = settle(audit, 1)
+            assert lines
+    """)
+    flagged = _settle_calls_inside_a_with_block(misplaced)
+    assert len(flagged) == 1, (
+        "the placement detector cannot see a `settle(...)` inside a `with` body: "
+        f"{flagged}"
+    )
+    assert misplaced.splitlines()[flagged[0] - 1].strip() == "lines = settle(audit, 1)", (
+        "the placement detector flagged a line other than the misplaced call, so "
+        "its line numbers cannot be trusted to point anywhere"
+    )
+    correct = textwrap.dedent("""
+        def test_x(store):
+            with running(store) as (base, audit):
+                await_audit(audit, 1)
+            lines = settle(audit, 1)
+            assert lines
+    """)
+    assert _settle_calls_inside_a_with_block(correct) == [], (
+        "the placement detector flags a correctly-placed call, so its zero above "
+        "means nothing"
+    )
+
+
+def _raw_audit_reads(fn: ast.AST) -> "list[tuple[int, str]]":
+    """`(line, owner)` per read of the audit records that skips the helper.
 
     A read is `audit` in a Load context or any `.audit` attribute; the argument
     positions of `await_audit(...)` and `settle(...)` are subtracted, since
     naming the record to hand it to a waiter is not reading it.
+
+    🔴 `owner` IS WHAT MAKES THE BARRIER BELOW CHECKABLE AGAINST THE SAME
+    STREAM. `out.audit` is owned by `out`, a bare `audit[0]` by `audit`, and
+    anything whose base is not a plain name (`f().audit`) owns `""`, which no
+    barrier can match. Without it, `proc_out.wait_closed()` — a barrier on a
+    DIFFERENT stream, standing next to a raw read of `out.audit` — bought that
+    read a pass. An exemption spelled by waiting on the wrong object is a free
+    pass wearing the costume of diligence.
     """
     raw, in_arg = set(), set()
     for node in ast.walk(fn):
         if isinstance(node, ast.Name) and node.id == "audit" \
                 and isinstance(node.ctx, ast.Load):
-            raw.add(node.lineno)
+            raw.add((node.lineno, "audit"))
         elif isinstance(node, ast.Attribute) and node.attr == "audit":
-            raw.add(node.lineno)
+            raw.add((node.lineno,
+                     node.value.id if isinstance(node.value, ast.Name) else ""))
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
                 and node.func.id in ("await_audit", "settle"):
             for arg in node.args:
                 for sub in ast.walk(arg):
                     if isinstance(sub, (ast.Name, ast.Attribute)):
                         in_arg.add(sub.lineno)
-    return sorted(raw - in_arg)
+    return sorted((ln, owner) for ln, owner in raw if ln not in in_arg)
 
 
-def _eof_barriers(fn: ast.AST) -> "list[int]":
-    """Lines where `fn` UNCONDITIONALLY waits for the stream's EOF.
+def _eof_barriers(fn: ast.AST) -> "list[tuple[int, str]]":
+    """`(line, receiver)` per UNCONDITIONAL wait for that stream's EOF in `fn`.
 
     🔴 THE POINT IS "UNCONDITIONALLY", AND IT IS WHY THIS IS NOT AN
     `ast.walk(fn)`. The guard below used to accept a `wait_closed` MENTION
@@ -5893,41 +6114,53 @@ def _eof_barriers(fn: ast.AST) -> "list[int]":
     blanket pass, which is precisely the rot the guard's own docstring claimed
     it was immune to.
 
-    So only the function's straight-line statement sequence counts. `with`
-    bodies are descended into because `with running(...)` is how every test in
-    this file is shaped and its body always runs; `if`/`try`/`for`/`while`/
-    `match` are NOT, because whether their bodies run is exactly the question a
-    static walk cannot answer. A barrier nested in one is not rejected as
-    hostile — it is simply not counted, and the site is asked to hoist it.
+    🔴 AND CLOSING THAT HOLE FOR `if` LEFT IT OPEN SPELLED AS A `with`. This
+    used to descend into `with` bodies, justified by "`with running(...)` is how
+    every test in this file is shaped and its body always runs". That sentence
+    is false for any context manager that suppresses or diverts, and both
+    spellings are one import away: MEASURED against the shipped predicate, a raw
+    `out.audit[0]` was EXEMPTED by a barrier sitting inside
+    `with contextlib.suppress(AttributeError):` and again by one inside
+    `with pytest.raises(AttributeError):` — the same free pass as `if False:`,
+    two characters of diff away from it. `return` had the same hole in the time
+    axis: a barrier after one is unreachable and was counted anyway.
 
-    Only a bare `x.wait_closed()` statement or `y = x.wait_closed()` qualifies:
+    So NOTHING nested counts, and nothing after a terminator counts: only the
+    function's own top-level statement sequence, up to the first
+    `return`/`raise`/`break`/`continue`. A barrier nested in a `with`, an `if`,
+    a `try` or a loop is not rejected as hostile — it is simply not counted, and
+    the site is asked to hoist it, which for the one permitted site in this file
+    is where the barrier already is.
+
+    Only a bare `x.wait_closed()` statement or `y = x.wait_closed()` qualifies,
+    and `x` must be a plain name so it can be matched against the read's owner:
     a call buried in a lambda, a comprehension or an argument list is a mention
     again, one layer down.
     """
-    found: "list[int]" = []
-
-    def scan(body) -> None:
-        for stmt in body:
-            if isinstance(stmt, (ast.With, ast.AsyncWith)):
-                scan(stmt.body)
-                continue
-            value = stmt.value if isinstance(stmt, (ast.Expr, ast.Assign)) else None
-            if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) \
-                    and value.func.attr == "wait_closed":
-                found.append(value.lineno)
-
-    scan(fn.body)
+    found: "list[tuple[int, str]]" = []
+    for stmt in fn.body:
+        if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+            break                       # nothing after this statement runs
+        value = stmt.value if isinstance(stmt, (ast.Expr, ast.Assign)) else None
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) \
+                and value.func.attr == "wait_closed" \
+                and isinstance(value.func.value, ast.Name):
+            found.append((value.lineno, value.func.value.id))
     return sorted(found)
 
 
 def _unguarded_audit_reads(fn: ast.AST) -> "list[int]":
-    """Raw audit reads in `fn` that no EOF barrier precedes. ONE predicate.
+    """Raw audit reads in `fn` that no EOF barrier ON THAT STREAM precedes.
 
-    The guard below and its own controls both need this answer, and an open-coded
-    second copy is how the two drift into disagreeing about what the guard means.
+    ONE predicate: the guard below and its own controls both need this answer,
+    and an open-coded second copy is how the two drift into disagreeing about
+    what the guard means.
     """
     barriers = _eof_barriers(fn)
-    return [r for r in _raw_audit_reads(fn) if not any(b < r for b in barriers)]
+    return sorted({
+        line for line, owner in _raw_audit_reads(fn)
+        if not any(b < line and receiver == owner for b, receiver in barriers)
+    })
 
 
 def test_no_test_INDEXES_a_live_audit_list():
@@ -5962,14 +6195,35 @@ def test_no_test_INDEXES_a_live_audit_list():
     The escape hatch was pure rot channel: `wait_closed` is not even a method on
     `AuditLog`, so no in-process test could ever have called it honestly.
 
+    🔴 AND THE FIRST REPAIR CLOSED THE HOLE FOR `if` AND LEFT IT OPEN FOR
+    `with`. `_eof_barriers` descended into `with` bodies on the claim that such
+    a body "always runs"; `contextlib` and `pytest` are both one line away, and
+    MEASURED against that shipped predicate a barrier inside
+    `with contextlib.suppress(AttributeError):` or `with pytest.raises(...):`
+    exempted a raw read exactly as `if False:` had. Two more of the same family
+    went with it: a barrier after a `return` (unreachable, counted anyway) and a
+    barrier on a DIFFERENT object (`proc_out.wait_closed()` guarding a read of
+    `out.audit`). All four are controls below.
+
+    🔴 A NOTE ON WHY THE `if False:` CONTROL IS NOW BOUND TO `out`. Spelled
+    against `audit`, the barrier line `audit.wait_closed()` is itself a raw
+    `audit` Name-Load read, so the control passed partly because the dead line
+    self-flagged — protection by accident, which evaporates the moment a site
+    binds its stream to `out` the way `Drained` sites do. The control below is
+    written both ways for that reason.
+
     The condition is now `_eof_barriers`: an UNCONDITIONAL `x.wait_closed()`
-    statement, LEXICALLY BEFORE the read. Both halves are controlled below
-    against synthetic sources, so this paragraph is machine-checked and not a
-    claim about code nobody re-read.
+    statement in the function's OWN top-level statement sequence, before any
+    terminator, LEXICALLY BEFORE the read, and on the SAME object the read names.
+    Every clause of that sentence has a control below that separates it from its
+    negation, so the sentence is machine-checked for the shapes enumerated there
+    and is not a claim about code nobody re-read.
 
     🔴 WHAT IT CANNOT SEE: a read through an alias (`a = audit; a[0]`), a list
-    passed into a helper, or a differently-named binding. It is a ledger of the
-    shape that actually bit, not a proof that no racy read exists.
+    passed into a helper, a differently-named binding, or a barrier whose
+    receiver is a plain name that has been REBOUND between the barrier and the
+    read. It is a ledger of the shapes that actually bit plus their nearest
+    siblings, not a proof that no racy read exists.
     """
     tree = ast.parse(Path(__file__).read_text())
     offenders = []
@@ -6006,10 +6260,12 @@ def test_no_test_INDEXES_a_live_audit_list():
     )
 
     # 🔴 CONTROLS FOR THE ESCAPE HATCH ITSELF, not just for the read detector.
-    # A guard whose exemption can be spelled by a dead line is a free pass; the
-    # three shapes below are the ones that separate "unconditional, before" from
-    # "mentioned somewhere", and the first is the mutant that SURVIVED the
-    # previous version.
+    # A guard whose exemption can be spelled by a dead line is a free pass. Each
+    # shape below separates one clause of "unconditional, before, same object"
+    # from its negation; the `if False:` pair is the mutant that SURVIVED the
+    # first version of the guard, and the `with` pair is the mutant that
+    # survived the SECOND — the same hole respelled, which is why they are
+    # enumerated rather than summarised.
     def unguarded(src: str) -> "list[int]":
         return _unguarded_audit_reads(ast.parse(textwrap.dedent(src)).body[0])
 
@@ -6021,6 +6277,49 @@ def test_no_test_INDEXES_a_live_audit_list():
                 audit.wait_closed()
             assert "x" in audit[0]
     """), "a DEAD `wait_closed()` still buys a raw read a free pass"
+
+    # The same shape bound to `out`. Against `audit` the dead barrier line is
+    # ITSELF a raw `audit` read and self-flags, so the control above passes
+    # partly by accident; this one has no such help.
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            if False:
+                out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "a DEAD `wait_closed()` on an `out`-bound stream buys a free pass"
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            with contextlib.suppress(AttributeError):
+                out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "a barrier inside a SUPPRESSING `with` was counted as unconditional"
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            with pytest.raises(AttributeError):
+                out.wait_closed()
+            assert "x" in out.audit[0]
+    """), ("a barrier inside `pytest.raises(...)` — which REQUIRES the body to "
+           "raise, i.e. NOT to complete — was counted as unconditional")
+
+    assert unguarded("""
+        def test_x(out):
+            await_audit(out, 1)
+            return
+            out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "a barrier after a `return` is unreachable and was counted anyway"
+
+    assert unguarded("""
+        def test_x(out, proc_out):
+            await_audit(out, 1)
+            proc_out.wait_closed()
+            assert "x" in out.audit[0]
+    """), "a barrier on a DIFFERENT stream exempted a read of `out.audit`"
 
     assert unguarded("""
         def test_x(out):
