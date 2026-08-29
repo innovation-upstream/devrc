@@ -2576,12 +2576,26 @@ class TestSeedPushVerdict:
         one) and an adjacency where C and en_US disagree. `README.md` beside
         `backblaze.md`/`thing-alpha.md` is that adjacency, and the real store is
         full of it — so the FIRST push after another host seeds would abort."""
+        # 🔴 `locale` IS NOT PRESENT IN THE NIX SANDBOX, and calling it there
+        # raised FileNotFoundError — this test FAILED the gating tier rather
+        # than skipping it. Resolve the binary first, and treat "cannot force
+        # the collation" as a skip that says so. The structural test below
+        # covers this invariant on the tier where this one cannot run; a skip
+        # is not coverage, which is exactly why that one exists.
         enc = "en_US.UTF-8"
-        have = subprocess.run(
-            ["locale", "-a"], capture_output=True, text=True
-        ).stdout.lower()
+        locale_bin = shutil.which("locale")
+        have = ""
+        if locale_bin:
+            have = subprocess.run(
+                [locale_bin, "-a"], capture_output=True, text=True
+            ).stdout.lower()
         if "en_us.utf8" not in have and "en_us.utf-8" not in have:
-            pytest.skip(f"{enc} not generated here; the collation cannot be forced")
+            pytest.skip(
+                f"{enc} is not generated here (locale binary: {locale_bin}), so the "
+                "ambient collation cannot be made to differ from C. This dimension "
+                "is UNCOVERED behaviourally on this tier — see "
+                "test_EVERY_comm_call_in_seed_sh_PINS_its_collation."
+            )
 
         env, dest = fake_cluster
         # 🔴 THE PAIR MUST ACTUALLY INVERT, AND THE FIRST VERSION OF THIS TEST
@@ -2623,6 +2637,36 @@ class TestSeedPushVerdict:
         assert r.returncode == 0, f"rc={r.returncode} stdout={r.stdout} stderr={r.stderr}"
         assert "seed: OK" in r.stdout
         assert "NOTE 1 entry file(s)" in r.stdout
+
+    def test_EVERY_comm_call_in_seed_sh_PINS_its_collation(self):
+        """The STRUCTURAL half of the locale regression, and the half that runs
+        on BOTH tiers.
+
+        🔴 The behavioural test above needs a generated `en_US.UTF-8`. The nix
+        sandbox that GATES THE MERGE has no `locale` binary and no such locale,
+        so there it skips — and a skip is not coverage. Without this, the
+        dimension that produced the round-1 🔴 would be pinned only on the dev
+        host, which is the two-tier blindness `claude/RULES.md` names.
+
+        Pins the whole invariant rather than a keyword: every `comm` the script
+        executes must carry `LC_ALL=C`. Sorting both inputs under C is NOT
+        enough — GNU `comm` compares and order-checks in the ambient locale, so
+        an unpinned `comm` over C-sorted input aborts the script with rc 1 and
+        prints no verdict at all."""
+        offenders = []
+        for i, line in enumerate(SEED_PATH.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue  # the block comment discusses `comm` at length
+            if re.search(r"(?<![\w./-])comm\s", stripped) and not stripped.startswith(
+                "LC_ALL=C comm "
+            ):
+                offenders.append(f"  {SEED_PATH.name}:{i}: {stripped}")
+        assert not offenders, (
+            "a `comm` call in seed.sh does not pin its collation — sorting the "
+            "inputs under LC_ALL=C is not enough, because comm itself collates "
+            "in the AMBIENT locale:\n" + "\n".join(offenders)
+        )
 
     def test_a_TOP_LEVEL_md_in_the_store_is_not_reported_missing(
         self, store: Path, tmp_path: Path, fake_cluster
