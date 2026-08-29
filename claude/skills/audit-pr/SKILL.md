@@ -127,6 +127,20 @@ BLIND** — the diff and the checklist, *not* your conclusions or the prior find
 audits **confirmed** a claim; one blind audit refuted it in a pass. A delta re-audit must name the
 prior findings — frame it as *what was claimed fixed*, never *why it is correct*.
 
+🔴 **AND THE FRAME INCLUDES WHETHER THE WORK SHOULD EXIST AT ALL.** Every round asks *"is this change
+correct?"*; none asks *"should this change exist?"* — so a ladder can verify a mechanism to exhaustion
+while its PREMISE is false, and each clean round makes the object look **more** solid. MEASURED: six
+rounds on a CI gate found real defects every time — a rule **inert on the very corpus it was written
+for**, a guard exiting 0 under a PASS asserting something it had not established, a ledger covering 3
+of 10 cases, a trigger that cancelled its own runs — and the gate was then closed **unmerged**, because
+the recurring event it existed to catch had **never happened once** and was becoming impossible. One
+question from the operator ended it; six rounds could not, because all six were pointed at the
+mechanism. The rounds were not wasted as *findings*, only as *work* — a different axis, and the one
+that decides whether to run round seven.
+**So: state the PREMISE in the ticket body beside the acceptance criteria, so an auditor can attack it**
+— a closing condition proves an object is CLOSABLE, never that it should EXIST. And when a ladder runs
+long, spend one round asking what would have to be true for this work to be unnecessary.
+
 ### 🔴 ATTRIBUTION: a round that changes no PAYLOAD is auditing the LADDER, not the PR
 
 A fix round writes new guards and the next delta round diffs them, so **the ladder manufactures its
