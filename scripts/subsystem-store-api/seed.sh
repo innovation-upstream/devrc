@@ -154,12 +154,61 @@ tar -C "$STAGE" -cf - -- "${members[@]}" \
   | kubectl -n "$ns" exec -i "$pod" -- \
       tar -C "$DEST" --no-same-owner --no-same-permissions -xf -
 
-remote_entries=$(kubectl -n "$ns" exec "$pod" -- \
-  find "$DEST" -maxdepth 2 -name '*.md' -type f | wc -l)
-echo "seed: PUSHED pod=$pod dest=$DEST remote_entries=$remote_entries local_entries=$staged_entries"
+# 🔴 CONTAINMENT ON NAMES, NOT EQUALITY OF COUNTS. This guard used to read
+# `remote_entries != staged_entries -> exit 7`, which is only correct while
+# exactly ONE host ever seeds.
+#
+# The store is PER-HOST and unreplicated, and the extract adds and overwrites
+# but never deletes — so a second host's entries legitimately sit in $DEST that
+# this stage never held. Counting then failed a CORRECT push, and did it AFTER
+# the content had already landed: a failure verdict on a push that worked, which
+# invites a retry that changes nothing. That is the same shape the tar member
+# list above was fixed for. MEASURED 2026-08-28: this host staged 129 over a pod
+# holding 75 (a strict subset, so equality happened to hold); the other host's
+# ~26 would have staged against a remote of 129+ and exited 7 every time,
+# leaving criterion 8 unfinishable by the tool meant to finish it.
+#
+# Equality was also WEAKER than it looked in the single-host case it was written
+# for: 129 staged against 129 remote passes while one staged file is missing and
+# one foreign file makes up the number. The question a push actually has to
+# answer is "did everything I staged land?" — a SUBSET check on NAMES, which is
+# also the `comm -23` the re-seed card prescribes. So this is not a relaxation:
+# it fails strictly more broken pushes than the count did, and stops failing the
+# correct ones.
+#
+# Both sides use `-mindepth 2 -maxdepth 2` so they answer the SAME question —
+# `<scope>/<entry>.md` and nothing else. The old remote count used `-maxdepth 2`
+# alone, which would also have counted a stray top-level `*.md` the stage cannot
+# contain.
+_seed_tmp=$(mktemp -d)
+trap 'rm -rf "$_seed_tmp"' EXIT
+staged_list="$_seed_tmp/staged"; remote_list="$_seed_tmp/remote"
+missing_f="$_seed_tmp/missing";  foreign_f="$_seed_tmp/foreign"
 
-if [[ "$remote_entries" != "$staged_entries" ]]; then
-  echo "seed: MISMATCH — remote holds $remote_entries entry files, the stage held $staged_entries." >&2
+( cd "$STAGE" && find . -mindepth 2 -maxdepth 2 -name '*.md' -type f ) \
+  | sed 's|^\./||' | LC_ALL=C sort > "$staged_list"
+kubectl -n "$ns" exec "$pod" -- \
+  sh -c "cd '$DEST' && find . -mindepth 2 -maxdepth 2 -name '*.md' -type f" \
+  | sed 's|^\./||' | LC_ALL=C sort > "$remote_list"
+
+remote_entries=$(wc -l < "$remote_list" | tr -d ' ')
+comm -23 "$staged_list" "$remote_list" > "$missing_f"
+comm -13 "$staged_list" "$remote_list" > "$foreign_f"
+n_missing=$(wc -l < "$missing_f" | tr -d ' ')
+n_foreign=$(wc -l < "$foreign_f" | tr -d ' ')
+
+echo "seed: PUSHED pod=$pod dest=$DEST remote_entries=$remote_entries staged_entries=$staged_entries"
+
+# Printed BESIDE the verdict, never instead of it: a pod holding entries this
+# host does not have is the NORMAL multi-host state, and silence about it would
+# make the two numbers above look like a discrepancy nobody explained.
+if [[ "$n_foreign" -gt 0 ]]; then
+  echo "seed: NOTE $n_foreign entry file(s) on the pod were not staged by this host — expected when another host also seeds. They were left untouched, not deleted."
+fi
+
+if [[ "$n_missing" -gt 0 ]]; then
+  echo "seed: MISMATCH — $n_missing of $staged_entries staged entry file(s) did NOT land on the pod:" >&2
+  sed 's/^/  /' "$missing_f" >&2
   exit 7
 fi
-echo "seed: OK"
+echo "seed: OK all $staged_entries staged entries are present on the pod"

@@ -2350,12 +2350,170 @@ class TestAuditLog:
 # =============================================================================
 
 
-def run_seed(*args: str) -> subprocess.CompletedProcess:
+def run_seed(*args: str, env: "dict[str, str] | None" = None) -> subprocess.CompletedProcess:
     # `bash <script>` rather than the shebang: `/usr/bin/env` does not exist in
     # the nix sandbox that gates merges (see test_runtime_shebangs.py).
+    #
+    # `env` defaults to None so every existing caller inherits the ambient
+    # environment exactly as before; the push tests pass one to put a fake
+    # `kubectl` on PATH.
     return subprocess.run(
-        ["bash", str(SEED_PATH), *args], capture_output=True, text=True, timeout=120
+        ["bash", str(SEED_PATH), *args],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
     )
+
+
+# 🔴 THE PUSH HALF WAS UNTESTED, AND THAT IS HOW THE COUNT GUARD SHIPPED WRONG.
+# seed.sh's own header says "staging is hermetic and testable, pushing needs a
+# cluster", so every seed test above stops at `--stage`. The verdict that
+# decides whether a push SUCCEEDED therefore lived in the only half nothing
+# exercised, and it was wrong for the multi-host case the store has always had.
+#
+# This fake answers `get pod`, runs the real `tar` extract into a real
+# directory, and runs the remote `find` there too — so the guard executes
+# against a filesystem the test controls rather than against a mock of itself.
+# `$FAKE_DROP` deletes one member AFTER the extract, which is how a staged entry
+# that does not land is simulated without pretending the guard ran.
+FAKE_KUBECTL = r"""#!/usr/bin/env bash
+set -uo pipefail
+[[ "${1:-}" == "-n" ]] && shift 2
+sub="${1:-}"; shift || true
+case "$sub" in
+  get) echo "fake-pod-0" ;;
+  exec)
+    [[ "${1:-}" == "-i" ]] && shift
+    shift                                   # the pod name
+    [[ "${1:-}" == "--" ]] && shift
+    cmd=(); for a in "$@"; do cmd+=("${a///data/$FAKE_DEST}"); done
+    "${cmd[@]}"; rc=$?
+    if [[ -n "${FAKE_DROP:-}" && "${cmd[0]}" == "tar" ]]; then
+      rm -f "$FAKE_DEST/$FAKE_DROP"
+    fi
+    exit $rc ;;
+  *) echo "fake kubectl: unexpected subcommand: $sub" >&2; exit 64 ;;
+esac
+"""
+
+
+@pytest.fixture
+def fake_cluster(tmp_path: Path):
+    """`(env, dest)` — an environment whose `kubectl` is the fake above, and the
+    directory standing in for the pod's `/data`."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    k = bindir / "kubectl"
+    k.write_text(FAKE_KUBECTL)
+    k.chmod(0o755)
+    dest = tmp_path / "pod-data"
+    dest.mkdir()
+    env = {
+        **os.environ,
+        "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_DEST": str(dest),
+    }
+    return env, dest
+
+
+class TestSeedPushVerdict:
+    """🔴 The push verdict must answer "did everything I staged land?" — a
+    SUBSET check on names — and NOT "does the remote hold exactly as many files
+    as the stage", which is only true while one host ever seeds."""
+
+    def _push(self, store: Path, tmp_path: Path, env, **kw):
+        return run_seed(
+            "--store", str(store),
+            "--stage", str(tmp_path / "stage"),
+            "--push", "ns/app",
+            env=env,
+            **kw,
+        )
+
+    def test_POSITIVE_CONTROL_the_fake_cluster_really_receives_the_push(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """Reported BESIDE the verdicts below. A guard asserted against a
+        cluster that received NOTHING is green for the wrong reason — every
+        assertion in this class would hold over an empty directory."""
+        env, dest = fake_cluster
+        r = self._push(store, tmp_path, env)
+        assert r.returncode == 0, r.stderr
+        landed = sorted(p.name for p in (dest / SCOPE).glob("*.md"))
+        assert landed == ["thing-alpha.md"], (
+            f"the fake cluster received {landed!r} — the push did not happen, "
+            "so nothing below is evidence about the guard"
+        )
+        assert "seed: OK" in r.stdout
+
+    def test_entries_from_ANOTHER_HOST_do_not_fail_a_correct_push(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE REGRESSION. Red before this change: the old guard compared
+        COUNTS, so a pod already holding a second host's entries made a correct
+        push exit 7 — after the content had landed. The store is per-host and
+        the extract never deletes, so this is the NORMAL state, not an error."""
+        env, dest = fake_cluster
+        foreign = dest / "a-scope-only-the-laptop-has"
+        foreign.mkdir()
+        (foreign / "from-the-other-host.md").write_text("---\nservice: x\n---\n")
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, (
+            f"a correct multi-host push must not fail. stderr={r.stderr}"
+        )
+        assert "NOTE 1 entry file(s)" in r.stdout, r.stdout
+        assert (foreign / "from-the-other-host.md").exists(), (
+            "the other host's entry was DELETED — the push must add and "
+            "overwrite, never remove"
+        )
+
+    def test_a_staged_entry_that_does_NOT_land_exits_7_and_NAMES_it(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The guard must still bite, and say WHICH file — a bare count told an
+        operator a number and left them to find the gap by hand."""
+        env, dest = fake_cluster
+        env = {**env, "FAKE_DROP": f"{SCOPE}/thing-alpha.md"}
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 7, f"rc={r.returncode} stdout={r.stdout}"
+        assert "MISMATCH" in r.stderr
+        assert f"{SCOPE}/thing-alpha.md" in r.stderr, (
+            "the failure must name the entry that did not land"
+        )
+        assert not (dest / SCOPE / "thing-alpha.md").exists()
+
+    def test_a_missing_entry_is_caught_even_when_the_COUNTS_MATCH(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 The case the old count guard could not see, and the reason this is
+        a STRENGTHENING rather than a relaxation: one staged file absent while a
+        foreign file makes the totals agree. Count-equality passes; containment
+        does not."""
+        env, dest = fake_cluster
+        foreign = dest / "a-scope-only-the-laptop-has"
+        foreign.mkdir()
+        (foreign / "makes-up-the-number.md").write_text("---\nservice: x\n---\n")
+        env = {**env, "FAKE_DROP": f"{SCOPE}/thing-alpha.md"}
+
+        r = self._push(store, tmp_path, env)
+
+        m = re.search(r"STAGED scopes=\d+ entries=(\d+)", r.stdout)
+        assert m is not None, f"seed.sh printed no STAGED line: {r.stdout}"
+        staged = int(m.group(1))
+        remote = len(list(dest.glob("*/*.md")))
+        assert remote == staged, (
+            f"fixture no longer exercises the blind spot: remote={remote} "
+            f"staged={staged} — they must be EQUAL for this test to mean anything"
+        )
+        assert r.returncode == 7, (
+            "counts matched, so the old guard would have passed this broken push"
+        )
+        assert f"{SCOPE}/thing-alpha.md" in r.stderr
 
 
 class TestSeedIsNonDestructive:
