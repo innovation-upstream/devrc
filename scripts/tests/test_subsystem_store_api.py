@@ -2728,6 +2728,35 @@ class TestSeedPushVerdict:
         for clause in ("-mindepth 2", "-maxdepth 2", "! -path './.*'", "-type f"):
             assert clause in staged, f"{clause!r} is no longer pinned: {staged}"
 
+    def test_a_dot_scope_does_not_ship_EVEN_WITH_dotglob_SET(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE SUITE WAS BLIND TO THIS DIMENSION, WHICH IS HOW THE DEFECT GOT
+        IN. Every other test here runs with bash's default options, so a change
+        that made the tar member list depend on the AMBIENT shell passed
+        everything.
+
+        The member list is `"$STAGE"/*/`, correct only while `dotglob` is off. A
+        version of this script restored the caller's `dotglob` before building
+        it; under `BASHOPTS=dotglob` a dot-scope then LANDED on the pod while the
+        remote listing's `! -path './.*'` still excluded it — shipped, never
+        verified, and the NOTE saying "not in the tar member list" was false.
+        Asking which dimension the config fixes is what surfaces this class."""
+        env, dest = fake_cluster
+        hidden = store / ".hidden"
+        hidden.mkdir()
+        (hidden / "h.md").write_text(_entry("h", ".hidden"))
+        env = {**env, "BASHOPTS": "dotglob"}
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        assert not (dest / ".hidden").exists(), (
+            "with dotglob set in the environment the dot-scope SHIPPED — the "
+            "member list must not depend on the ambient shell. pod holds: "
+            f"{sorted(p.name for p in dest.iterdir())}"
+        )
+
     def test_a_DEPTH_2_DIRECTORY_on_the_pod_is_not_an_entry(
         self, store: Path, tmp_path: Path, fake_cluster
     ):
