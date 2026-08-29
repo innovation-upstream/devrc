@@ -1934,8 +1934,22 @@ MIN_TESTS="${MIN_TESTS:-$MIN_TESTS_COMPUTED}"
 
 if [ "$CHECK_FLOORS_ONLY" -eq 1 ]; then
   echo "run-tests: all ${#TARGET_FLOORS[@]} floor(s) pin a known target, both ways (${#ALL_KNOWN_TARGETS[@]} known: hermetic + dev-host)."
+  # A floor for a target OUTSIDE the selected set is printed, but is NOT part of
+  # the global sum below — `MIN_TESTS_COMPUTED` accumulates over $TARGETS, and
+  # under `--set hermetic` a dev-host target is not in it. Say so on the row:
+  # until 2026-08-29 every floor was hermetic, so "printed floors" and "floors
+  # in the sum" were the same list, and the test that pins the total against the
+  # sum read every printed row. Unlabelled, the first dev-host floor made that
+  # test fail while both numbers were correct.
   for entry in "${TARGET_FLOORS[@]}"; do
-    echo "  floor ${entry##*|}  ${entry%%|*}"
+    _ft="${entry%%|*}"
+    _in_set=0
+    for _t in "${TARGETS[@]}"; do [ "$_t" = "$_ft" ] && { _in_set=1; break; }; done
+    if [ "$_in_set" -eq 1 ]; then
+      echo "  floor ${entry##*|}  ${_ft}"
+    else
+      echo "  floor ${entry##*|}  ${_ft}  [not in the $SET set — excluded from the global sum]"
+    fi
   done
   echo "  ----"
   echo "  GLOBAL floor (sum over the $SET set) = $MIN_TESTS_COMPUTED"
