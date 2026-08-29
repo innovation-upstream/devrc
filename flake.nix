@@ -199,6 +199,34 @@
           # Set in BOTH tiers (here and checks.pytests) or the sandbox would
           # misclassify its own repo defects as environment faults.
           export DEVRC_GATE_ENV=1
+          # 🔴 LOCALE_ARCHIVE IS THE LOAD-BEARING HALF, AND IT IS SET IN BOTH
+          # TIERS FOR THE SAME REASON DEVRC_GATE_ENV IS. A test whose subject is
+          # COLLATION must see the same locales in each, or the gating tier
+          # silently degrades to C and stops observing the bug: measured, with
+          # both `comm` calls in seed.sh unpinned, the sandbox reported ONE
+          # failure where the dev host reported TWO.
+          #
+          # ⚠ TWO CORRECTIONS ON THE RECORD, because the first attempt to
+          # correct this was itself wrong.
+          #
+          # An earlier version added `pkgs.glibc.bin` to gateTools, on the
+          # stated grounds that a collation test "cannot run" without the
+          # `locale` binary. MEASURED FALSE: with LOCALE_ARCHIVE set and no
+          # `locale` binary at all, `LC_ALL=en_US.UTF-8 sort` collates
+          # correctly. Only a test's *probe* wanted it; the test now detects the
+          # locale by exercising the capability, so the entry was dropped.
+          #
+          # 🔴 The commit that dropped it then justified the removal by saying
+          # the entry had been "shadowing the system getconf/ldd/iconv for every
+          # human in `nix develop`". ALSO MEASURED FALSE — and after the
+          # removal: `nix develop` still resolves `locale` and `getconf` from a
+          # STORE glibc-bin, because `mkShell`'s stdenv cc-wrapper supplies it
+          # regardless (a bare `mkShell { packages = []; }` resolves them too).
+          # What the removal actually changes is the SANDBOX, which is
+          # `runCommandLocal`/stdenvNoCC and has no cc-wrapper — the opposite
+          # tier from the one that claim credited. The entry is still right to
+          # drop, for the first reason and not the second.
+          export LOCALE_ARCHIVE=${pkgs.glibcLocales}/lib/locale/locale-archive
           echo "devrc: gate toolchain ready — bash scripts/run-tests.sh ." >&2
         '';
       };
@@ -351,6 +379,10 @@
             patchShebangs src/scripts
             # Same marker the devShell sets — see its shellHook for why.
             export DEVRC_GATE_ENV=1
+            # Same reason as the devShell's copy — see its shellHook, which
+            # also records why `pkgs.glibc.bin` is NOT here. Without this the
+            # sandbox has only `C` and a collation test cannot be made to fail.
+            export LOCALE_ARCHIVE=${pkgs.glibcLocales}/lib/locale/locale-archive
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME"
             cd src

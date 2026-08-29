@@ -66,6 +66,7 @@ the last revision before the core/archive split.
 - [worktree-not-session](#worktree-not-session)
 - [cross-repo-worktree](#cross-repo-worktree)
 - [worktree-copy-git](#worktree-copy-git)
+- [worktree-config](#worktree-config)
 - [sibling-agent-kill](#sibling-agent-kill)
 - [shared-queue-lock](#shared-queue-lock)
 
@@ -881,6 +882,55 @@ not `git checkout --`" — is what tells an agent to make these copies in the fi
 **`rm -f <copy>/.git` immediately after any `cp -a` of a worktree.** The copy then has no git
 at all, which is what a scratch tree should have: `git status` inside it errors loudly instead
 of silently operating on the parent.
+
+## worktree-config
+*Supports: 🔴 "its CONFIG and REMOTES" — the sixth surface under "a worktree isolates a
+working DIRECTORY only" — and the mtime clause on "find the WRITER before blaming the VCS
+operation".*
+
+Measured 2026-08-28. `git -C ~/workspace/devrc remote -v` in the shared base clone listed a
+remote nobody had added on purpose:
+
+    localverify	/tmp/verify-remote.git (fetch)
+    localverify	/tmp/verify-remote.git (push)
+
+The target directory did not exist, and the entry was included in `fetch --all` / `remote
+update` because nothing set `remote.localverify.skipDefaultUpdate`.
+
+**The writer.** A session in a *different repo* (`civit-datapacket-talos`), verifying that the
+`githooks` pre-push gate actually fired, ran at `2026-08-23T06:06:49Z`:
+
+    git -C /tmp/wt-hookcheck remote add localverify /tmp/verify-remote.git
+
+`/tmp/wt-hookcheck` was a **worktree of devrc** — its own cleanup 16 seconds later ran
+`git -C ~/workspace/devrc worktree remove --force /tmp/wt-hookcheck`. Remotes live in the
+common config, so the entry was never scoped to the worktree at all. That cleanup removed the
+worktree, the branch and the bare repo it pointed at — but not the remote — which is why a
+live clone ended up carrying a remote aimed at a deleted path for five days.
+
+The same session set devrc's repo-local `core.hooksPath` at `2026-08-21T22:16:14Z` and unset
+it itself at `2026-08-23T21:32:51Z`. `CLAUDE.md` had recorded that value as arriving from
+"something else" with no known writer; this is it. It explains the `githooks/` sighting only —
+the 2026-08-20 `.git/hooks` sightings in devrc and homelab-talos remain unattributed, and the
+value stayed volatile, so the instruction to re-measure it rather than trust prose still holds.
+
+**The attribution error, which is the transferable half.** Two sessions read `.git/config`'s
+**mtime** moving (17:41 → 20:10 → 21:49 → 22:13) and concluded the remote "is written
+repeatedly, not a one-off", which promoted a dead leftover into a live writer worth hunting.
+It was written **once**, five days earlier. That config held **442 `[branch "…"]` sections**,
+and every `checkout -b` / `push -u` in any of ~40 agent worktrees appends one — so the file is
+touched constantly by writers that have nothing to do with the entry under suspicion.
+
+The control that settled it: a watcher hashing the file and diffing on every change. At
+`22:41:41` `localverify` went 2 lines → 0 (the removal). At `22:43:49` the file changed again —
+mtime moved, `localverify` still **0** — and the diff was another session's
+`[branch "docs/handoff-tmux-webapp-rank3-done"]`. The rival mechanism was caught in the act
+two minutes after the removal. **An mtime is a claim that SOMETHING wrote; only a content diff
+says WHAT.** This is [empty-result](#empty-result) in the time axis: "the file changed" is the
+observable that the most causes share, so it identifies none of them.
+
+Removal deleted one leftover ref, `refs/remotes/localverify/hookverify` (`dcda00b5`, a
+throwaway README append), recorded so the step stays reversible.
 
 ## worktree-submodules
 *Supports: 🔴 "its SUBMODULES" (the fifth worktree surface).*

@@ -299,6 +299,15 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
     ts_first = ts_last = None
     term_hits = {t: 0 for t in terms}
     snippets = {}
+    # WHICH SKILLS this session used. Kept OUT of the term surfaces on purpose:
+    # skill invocation is not text the session said, and folding it into the
+    # keyword surface is what makes `find-session signal` return 666 sessions
+    # that merely mention the word. THREE signals — attributed, explicitly
+    # invoked, typed — and no one of them is a superset of the others; see
+    # `skills_used` in session-tailer.py for the measurement behind that.
+    skills_attributed: dict = {}
+    skills_invoked: dict = {}
+    commands_typed: dict = {}
 
     for rec in load_records(path):
         typ = rec.get("type")
@@ -321,6 +330,28 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
                     ts_first = dt
                 if ts_last is None or dt > ts_last:
                     ts_last = dt
+            # `attributionSkill` is a TOP-LEVEL field on the record (a sibling of
+            # `message`), and it is the ONLY signal that sees a skill which
+            # auto-fired from its description rather than being typed.
+            s = canonical_skill_name(rec.get("attributionSkill"))
+            if s:
+                skills_attributed[s] = skills_attributed.get(s, 0) + 1
+            # The EXPLICIT-invocation route: a `Skill` tool_use block. Read
+            # unconditionally rather than only under a wider surface — this is
+            # structure, not searchable text, so the surface knob (which selects
+            # what TERMS match against) must not silently narrow it.
+            # 🔴 `input.skill` ONLY; `input.args` beside it is operator free-text.
+            if typ == "assistant":
+                content = (rec.get("message") or {}).get("content")
+                if isinstance(content, list):
+                    for blk in content:
+                        if (isinstance(blk, dict) and blk.get("type") == "tool_use"
+                                and blk.get("name") == "Skill"):
+                            binp = blk.get("input")
+                            if isinstance(binp, dict):
+                                k = canonical_skill_name(binp.get("skill"))
+                                if k:
+                                    skills_invoked[k] = skills_invoked.get(k, 0) + 1
             msg = rec.get("message") or {}
             is_user = typ == "user" and not rec.get("isMeta")
             if is_user and not genesis:
@@ -330,6 +361,24 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
                     genesis = candidate[:GENESIS_CHARS]
             body = text_of(msg, surface)
             role = "you" if is_user else "claude"
+            if is_user:
+                # Reuses `body` rather than re-flattening the message: this walk
+                # runs once PER TASK over the whole corpus inside
+                # check-clickup-addressed, so a second text_of() per user record
+                # is not free. Under a WIDER surface, re-flatten narrowly
+                # instead — `<command-name>` appearing inside quoted TOOL OUTPUT
+                # is not this session invoking anything.
+                utext = body if surface == SURFACE_TEXT else text_of(msg)
+                # `finditer`, matching the emitter: with `search`, an EMPTY
+                # tag followed by a real one in the same turn made this reader
+                # record nothing while the emitter recorded the command — so
+                # `--skill handoff` missed a session ClickHouse counted. Zero
+                # live instances, but the two readers must not disagree.
+                for cmd_m in _COMMAND_NAME_RE.finditer(utext):
+                    cname = canonical_skill_name(cmd_m.group(1))
+                    if cname:
+                        commands_typed[cname] = commands_typed.get(cname, 0) + 1
+                        break
         else:
             continue
 
@@ -361,7 +410,98 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
         "mtime": mtime,
         "term_hits": term_hits,
         "snippets": snippets,
+        "skills_attributed": skills_attributed,
+        "skills_invoked": skills_invoked,
+        "commands_typed": commands_typed,
     }
+
+
+# 🔴 A DELIBERATE DUPLICATE of `SKILL_NAME_PATTERN` in
+# `scripts/collector/claude/session-tailer.py`, pinned byte-identical by
+# `test_the_two_skill_name_bounds_agree`. It cannot be a shared import:
+# `nix/home.nix` deploys `scripts/collector/claude` ALONE to the daemon's
+# runtime path (this module's own docstring says so, under "each ships on its
+# own deploy path"), so importing this module there would pass every test and
+# break the running service on both hosts. Same rule, two places, one enforced
+# ledger.
+#
+# Applied to ALL THREE routes so the two readers AGREE about what a name is.
+# They diverged twice: first the tailer rejected `not a valid name` and a
+# 4,000-char key while this module accepted both; then a fix bounded only the
+# TYPED route here, leaving attribution and explicit invocation unbounded — so
+# `--skill "not a valid name"` still matched a session ClickHouse reported as
+# having used no such skill. A bound on one of three routes is not a bound.
+SKILL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+SKILL_NAME_RE = re.compile(SKILL_NAME_PATTERN)
+MAX_IDENTITY_CHARS = 256
+
+
+def canonical_skill_name(raw):
+    """The key a skill identity may become, or None if it may not become one.
+
+    Behaviourally identical to `canonical_skill_name` in
+    `scripts/collector/claude/session-tailer.py` — see SKILL_NAME_PATTERN above
+    for why the rule is duplicated rather than imported, and read that copy for
+    the measurement behind each clause. `test_the_two_readers_AGREE_*` fuzzes
+    the two against each other; a hand-picked value list could not see a
+    `split`/`rsplit` divergence and one shipped green.
+    """
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip().lstrip("/").strip()
+    if not s:
+        return None
+    if len(s) > MAX_IDENTITY_CHARS or any(c.isspace() for c in s):
+        return None
+    if "/" in s:
+        if ":" not in s:
+            return None
+        s = s.split(":", 1)[1].strip()
+    if not s or not SKILL_NAME_RE.match(s):
+        return None
+    return s
+
+
+
+
+def session_used_skill(rec, name) -> bool:
+    """Did this session use skill `name`, by ANY of the three routes?
+
+    🔴 EXACT match on the CANONICAL identity, never a substring of it. A
+    substring predicate is how "which sessions used `signal`?" turns back into
+    the keyword search this exists to replace — `sig` would match it, and so
+    would a session that merely wrote the word. Compare the RECORDED NAME, not
+    the prose.
+
+    ⚠ "Exact" is exact on the CANONICAL form, which deliberately drops a
+    path-derived prefix. So `--skill apps/api:deploy` matches a session that
+    used `apps/web:deploy` — both canonicalise to `deploy`. That collision is
+    the same one the emitter makes on purpose (the identity recorded is the
+    skill, not where it was loaded from); it is stated here because the query
+    side is where a user meets it.
+
+    ⚠ `commands_typed` is ORed in, and it holds BUILT-INS: `--skill login`
+    therefore matches sessions that typed `/login`, which is not a skill. That
+    is deliberate — a typed `/name` is the user's own claim to have invoked
+    `name`, and dropping it would lose the typed-only sessions (`handoff`: 3)
+    that no other route sees. Intersect with the skill list if you need purity.
+    """
+    # 🔴 The QUERY goes through the same rule as the CORPUS. It did not, and the
+    # mismatch cost live sessions: the corpus is keyed by `canonical_skill_name`
+    # (so a worktree-qualified identity is stored as `remix`), while the query
+    # was only stripped — so `--skill apps/web:deploy`, the exact spelling the
+    # tailer's own comment tells a reader to expect, matched NOTHING at exit 0
+    # while the corpus held `deploy`.
+    want = (canonical_skill_name(name) or "").lower()
+    if not want:
+        return False
+    for bag in (rec.get("skills_attributed") or {},
+                rec.get("skills_invoked") or {},
+                rec.get("commands_typed") or {}):
+        for got in bag:
+            if (canonical_skill_name(got) or "").lower() == want:
+                return True
+    return False
 
 
 def compile_terms(terms):
@@ -370,7 +510,7 @@ def compile_terms(terms):
 
 def search(terms, *, root=None, match_any=False, since=None, limit=None, project="",
            surface=SURFACE_TEXT, include_sidechains=False,
-           exclude_sessions=(), session_filter=None, stats=None):
+           exclude_sessions=(), session_filter=None, stats=None, skill=""):
     """Rank every transcript matching `terms`.
 
     Args that encode a DELIBERATE per-call-site difference (both defaults measured):
@@ -428,12 +568,23 @@ def search(terms, *, root=None, match_any=False, since=None, limit=None, project
     """
     if surface not in _SURFACE_RANK:
         raise ValueError(f"unknown surface {surface!r}; want one of {SURFACES}")
-    if not terms:
+    # Normalise BEFORE the guard reads it, with the SAME function the predicate
+    # uses. A `skill` that is truthy but normalises to empty (`"  "`, `"/"`)
+    # otherwise slips this guard and then fails the predicate for every session,
+    # returning an EMPTY result corpus-wide instead of raising — the silent zero
+    # this whole change exists to remove, reintroduced one line above it.
+    skill = canonical_skill_name(skill) or ""
+    if not terms and not skill:
         # AND over an empty term list is vacuously true, so this would return the ENTIRE
         # corpus ranked by nothing. Neither CLI can reach it (both reject an empty term
         # list first), which is precisely why it needs a guard here rather than there.
-        raise ValueError("search() needs at least one term; an empty term list would "
-                         "match every transcript in the corpus")
+        #
+        # `skill` is the ONE thing that makes an empty term list meaningful: "which
+        # sessions used skill X" is a complete query with no keyword in it, and it is
+        # itself a narrowing predicate, so the corpus-wide result the guard exists to
+        # prevent cannot arise. A `skill` that matches nothing returns nothing.
+        raise ValueError("search() needs at least one term (or a skill); an empty query "
+                         "would match every transcript in the corpus")
     root = Path(root) if root is not None else DEFAULT_ROOT
     patterns = compile_terms(terms)
     needle = project.lower() if project else ""
@@ -468,8 +619,22 @@ def search(terms, *, root=None, match_any=False, since=None, limit=None, project
             print(f"ERR {path}: {e}", file=sys.stderr)
             continue
 
+        # The skill predicate ANDs with the terms — it NARROWS, never widens. So
+        # `--skill signal` alone answers "which sessions used it", and adding a
+        # term asks "…and mentioned X". Applied before the term test because it
+        # is the cheaper and far more selective of the two.
+        if skill and not session_used_skill(rec, skill):
+            continue
+
         matched_terms = [t for t in terms if rec["term_hits"][t] > 0]
-        ok = bool(matched_terms) if match_any else len(matched_terms) == len(terms)
+        if not terms:
+            # A skill-only query. `match_any` over an empty term list is False,
+            # not vacuously true, so without this the `--skill X --any`
+            # combination would return NOTHING — a silent empty result that
+            # reads exactly like "the skill was never used".
+            ok = True
+        else:
+            ok = bool(matched_terms) if match_any else len(matched_terms) == len(terms)
         if not ok:
             continue
 
@@ -501,3 +666,138 @@ def search(terms, *, root=None, match_any=False, since=None, limit=None, project
             stats["filtered_out_ids"] = filtered_ids
 
     return results if limit is None else results[:limit]
+
+
+# --------------------------------------------------------------------- peers
+
+# 🔴 THE CLAUDE CORPUS IS PER-HOST, AND FOR A LONG TIME ONLY THIS FILE KNEW IT.
+# `opencode_search` has searched every peer over SSH since 2026-08-26, while this
+# module walked `~/.claude/projects` on the LOCAL machine only — yet the shipped
+# skill description said "searches both runtimes on BOTH HOSTS". That sentence
+# was true of one corpus and false of the other, and the failure it caused is why
+# this leg exists: an investigation asked "was the signal skill ever used
+# operationally?", ran on the workbench, got zero, and reported "never" — while
+# five sessions sat in the laptop's Claude transcripts. A doc that ASSERTS
+# coverage is worse than one that omits it, because the reader stops checking.
+#
+# The remote leg runs the PEER'S OWN copy of this module, so the hosts cannot
+# drift into different search semantics without the capability probe below
+# saying so out loud. Every failure path warns on stderr: an unreachable peer
+# and a peer with no matches are different facts and must never print the same
+# thing.
+_REMOTE_SCAN = r"""
+import base64, json, sys
+sys.path.insert(0, "/home/zach/workspace/devrc/scripts/lib")
+req = json.loads(base64.b64decode(sys.argv[2]))
+try:
+    import transcript_search as ts
+except Exception as e:
+    print(json.dumps({"error": "import failed: %s" % e})); raise SystemExit(0)
+# 🔴 CAPABILITY PROBE, not a version string. A peer that has not been shipped yet
+# has no `--skill` support, and silently searching without the filter would
+# return every session matching the TERMS as though it used the skill.
+if req.get("skill") and not hasattr(ts, "canonical_skill_name"):
+    print(json.dumps({"error": "peer is running an older transcript_search with "
+                               "no --skill support (run ship.sh)"}))
+    raise SystemExit(0)
+kw = dict(match_any=req["match_any"], project=req["project"],
+          surface=req["surface"], limit=None)
+if req.get("skill"):
+    kw["skill"] = req["skill"]
+if req.get("since"):
+    from datetime import datetime as _dt
+    kw["since"] = _dt.fromisoformat(req["since"])
+try:
+    rows = ts.search(req["terms"], **kw)
+except Exception as e:
+    print(json.dumps({"error": "search failed: %s" % e})); raise SystemExit(0)
+out = []
+for r in rows:
+    d = {k: r.get(k) for k in ("session_id", "cwd", "branch", "first", "last",
+                               "genesis", "matched_terms", "total_hits",
+                               "snippets", "path", "project_dir")}
+    d["last_local"] = r["last_local"].isoformat()
+    out.append(d)
+print(json.dumps({"rows": out}))
+"""
+
+
+def _peer_warn(msg):
+    """A degraded peer leg, on stderr. Never a quiet zero."""
+    print(msg, file=sys.stderr)
+
+
+def search_peers(terms, *, match_any=False, since=None, project="",
+                 surface=SURFACE_TEXT, skill=""):
+    """Search the OTHER hosts' Claude transcript corpora over SSH.
+
+    Returns rows shaped like `search()`'s, each tagged `host` and
+    `source="claude-remote"`. The peer that IS this machine is skipped — the
+    local walk already covers it.
+
+    Peer configuration is SHARED with `opencode_search.configured_peers()`, so
+    the two corpora cannot disagree about which hosts exist, and
+    `DEVRC_OPENCODE_PEERS=""` makes this leg hermetic for tests BY CONSTRUCTION
+    rather than by SSH merely happening to be absent (which differs between the
+    dev host and the nix sandbox, and is how a sibling test passed in one tier
+    and failed in the other).
+    """
+    import base64
+    import subprocess
+    try:
+        from opencode_search import _own_addresses, configured_peers
+    except Exception as e:                                # pragma: no cover
+        _peer_warn(f"find-session: peer discovery unavailable ({e}) — OTHER "
+                   f"HOSTS' Claude sessions are NOT in these results")
+        return []
+
+    peers = configured_peers()
+    mine = _own_addresses() if peers else set()
+    b64script = base64.b64encode(_REMOTE_SCAN.encode()).decode()
+    b64payload = base64.b64encode(json.dumps({
+        "terms": list(terms), "match_any": match_any, "project": project,
+        "surface": surface, "skill": skill or "",
+        "since": since.isoformat() if since else None,
+    }).encode()).decode()
+
+    rows = []
+    for label, addr, user in peers:
+        if addr in mine:
+            continue                                 # that is us; already walked
+        why = None
+        try:
+            proc = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                 f"{user}@{addr}",
+                 "python3 -c 'import base64,sys;exec(base64.b64decode(sys.argv[1]))' "
+                 f"'{b64script}' '{b64payload}'"],
+                capture_output=True, timeout=180)
+        except Exception as e:
+            why = f"unreachable ({e})"
+        else:
+            if proc.returncode != 0:
+                tail = proc.stderr.decode(errors="replace").strip().splitlines()
+                why = f"rc={proc.returncode} ({tail[-1] if tail else 'no stderr'})"
+            else:
+                try:
+                    got = json.loads(proc.stdout.decode(errors="replace") or "{}")
+                except Exception as e:
+                    why = f"unparseable output ({e})"
+                else:
+                    why = got.get("error")
+        if why:
+            _peer_warn(f"find-session: peer {label} ({addr}): {why} — its Claude "
+                       f"sessions are NOT in these results")
+            continue
+        for d in got.get("rows", []):
+            try:
+                d["last_local"] = datetime.fromisoformat(d["last_local"])
+            except Exception:
+                d["last_local"] = datetime.fromtimestamp(0)
+            d["host"] = label
+            d["source"] = "claude-remote"
+            d.setdefault("title", "")
+            d.setdefault("mtime", d["last_local"])
+            d.setdefault("term_hits", {})
+        rows.extend(got.get("rows", []))
+    return rows

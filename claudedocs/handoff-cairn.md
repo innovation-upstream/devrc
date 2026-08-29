@@ -20,30 +20,31 @@ This doc records what shipped, what the name applies to, and the coupling points
 team instance, each measured rather than assumed.
 
 ## State now
-- **Branch / PR:** nothing in flight. Three PRs merged this session, each verified **by content**
-  on the target branch rather than by ancestry (a squash is never an ancestor):
-  - homelab-infra **#438** → `bbc373ed` — `scripts/check-ci-nonfire.py` + 88 tests (rank 4)
-  - devrc **#954** → `dcc14c75` — handoff update (rank 4 done, rank 3 blocked)
-  - homelab-infra **#459** → `9e5cc33e` — the supersede decision record (rank 5)
-- **Cards: #366, #391 and #394 are ALL `complete`.** Every ranked item below is closed. `cairn-3`,
-  `cairn-4`, `cairn-5`, `cairn-6` and `cairn-7` claims released.
-- 🔴 **THIS LINE HAS NOW ROTTED THREE TIMES IN ONE DAY, AND THAT IS THE DURABLE FINDING.** It
-  said rank 3 was blocked (already done by someone else's PR); then that #391 was open (it had
-  shipped an hour earlier); then that #394 was "still `open` and genuinely unstarted" (it completed
-  two hours later). Each correction was true when written and false within hours. **A ranked list
-  that DUPLICATES a status the board already owns will rot every time an item moves** — the board
-  is the authority, this list is a plan. Whoever next edits this doc: point at the board, do not
-  re-copy its statuses.
-- **Clean:** no worktrees of mine in either repo, no stray local or remote branches, no
-  background jobs. ⚠ Two things that LOOK like stragglers are not mine — the held
-  `cairn-write-path` claim belongs to another session (clawgate #371), and the four
-  `~/workspace/devrc-handoff-*` worktrees are other efforts.
-- **Deploy/verify:** nothing needed deploying. `check-ci-nonfire.py` is a read-only diagnostic
-  run by hand; it is **not** wired into `run-ci-suite.sh` as a leg and has no consumer.
-- ⚠ **`homelab-talos` carries PRE-EXISTING dirty state on `trunk`** that is not mine and that I
-  did not touch: modified `.claude/skills/deploy/SKILL.md` and `flake.nix`, plus an untracked
-  `claudedocs/handoff-minio-comic-flex.md` — an unsaved handoff doc, one routine `checkout` from
-  silent loss.
+🔴 **EVERY RANKED ITEM FROM THE PREVIOUS LIST IS CLOSED.** Cards #366, #391 and #394 are all
+`complete`. The ranked list below is entirely new work.
+
+- **Branch / PR:** nothing of mine in flight. Merged this session, each verified **by content** on
+  the target branch (a squash is never an ancestor):
+  - homelab-infra **#474** → `84a69a4b` — the #391 supersede stamp (rank 6)
+  - homelab-infra **#489** → `c04f1934` — the #394 comment-scope + ledger guard (rank 7)
+  - devrc **#972** → `10643aef`, **#984** → `8a14a556`, **#987** → `69b11f16` — three handoff
+    corrections, one per rot (see Gotchas)
+- **Deployed AND verified — separate claims.** clawgate **0.8.9** shipped (`abc0bdb2`, both version
+  literals), Flux reconciled, pod ready 0 restarts, server reported `0.8.9`. Verified live by a real
+  `POST /tasks/merge` on throwaway tasks #412/#413: loser `open ['throwaway']` →
+  `complete ['superseded-by:412','throwaway']`, winner untouched and the card's verifier returns
+  **rc 1** against it — a negative control, not only a positive one.
+- ⚠ **LIVE IS NOW 0.8.11, NOT 0.8.9** — two releases shipped from other sessions after mine. The
+  feature survived: stamp code still on trunk, and the **running 0.8.11 binary** carries
+  `superseded-by` (1) with positive control `tasks:changed` (3) and a negative control (0). Re-check
+  the live pin rather than trusting this line.
+- **Rank 3 needed no work from me** — it was already done in open PR #948, which merged
+  `2026-08-28T21:11:33Z`. I claimed it, measured, wrote nothing, released the claim.
+- **Clean:** no worktrees, branches or claims of mine in either repo. Both devrc hosts converged and
+  verified at one sha, cross-host agreement **compared** (not the "NOT COMPARED" gap).
+- 🔴 **`~/workspace/devrc` sits on ANOTHER SESSION'S branch** (`feat/flake-lock-and-discord-ext` at
+  time of writing) and `homelab-talos` carries pre-existing dirty files. Neither is mine. **Check
+  `git branch --show-current` before pointing any committing tool at either.**
 
 ## Open investigations — live diagnosis state
 
@@ -136,181 +137,26 @@ was being grown by a branch nobody reconciled against.
   a blind trade.
 
 ## Next steps (ranked)
-1. ~~**Fix the sanitizer leak**~~ — **DONE**, see the diagnosis above. The proposed fix was
-   measured not to work and was replaced: declaration-driven **withholding** of harvested
-   prose, plus name substitution confined to declared identifier cells.
-2. ~~**Build `cairn who <task>`**~~ — **DONE**, PR #917 (squash `c39abe31`), shipped to both
-   hosts. Three things the chain description below did NOT carry, each measured and each
-   changing the design:
-   - 🔴 **A tmux window is TRANSIENT; a transcript is DURABLE, and collapsing them is the trap.**
-     The worked example below *no longer resolves* — #360's window is gone while its 6 MB
-     transcript sits where it was written. A window-keyed resolver answers "nobody" for almost
-     every task older than current uptime. So each session yields TWO independent findings.
-   - **The join key is not always a uuid** — 39 of 41 live windows carried uuids, 2 carried
-     `ses_…` tokens. A shape-validating join silently matches nothing and reports a clean
-     "no live window".
-   - **`session-manager --lean` omits `pane_id`/`window_id`/`codename`** — three of the four
-     things the command prints. Pinned by a test, since `--lean` is the obvious "optimisation".
-
-   Five states are kept distinct because they all print near-nothing: `resolved` ·
-   `no-sessions-recorded` (a UI-filed task genuinely has none — exit 0) ·
-   `sessions-recorded-but-none-located` · `task-not-found` (7) · `bad-task-id` (2) ·
-   `clawgate-unreachable` (8). The pair that matters is *"the answer is no"* vs *"there was no
-   answer"*. 🔴 **An unmeasured live half is never rendered as "no window"** — if any host goes
-   unmeasured the absence is UNMEASURED, and transcripts are still reported.
-3. ~~**Convert the remaining positional audit reads**~~ — **NOT MINE TO WRITE: already done, in
-   full, inside someone else's open PR.** Re-scoped 2026-08-28 and the correct answer was to
-   write nothing. `scripts/tests/test_subsystem_store_api.py`, repo `devrc`.
-   - **The named blocker merged.** `feat/cairn-p3-two-token-auth` is PR **#915**, merged
-     `2026-08-27T21:15:04Z` (squash `d60c968c`). Verified by CONTENT, not ancestry: that file on
-     `origin/main` and on the branch tip are the **same blob** `26688d49`.
-   - 🔴 **THE ESTIMATE IN THIS LINE WAS UNDERSTATED 5.3×–7.3×, AND THAT IS THE REUSABLE PART.** "Six
-     remaining … all 11 sites" was measured before #915. On `origin/main` the file carries **59**
-     `audit[...]` subscript lines across **40** offending test functions (independently
-     re-measured; the guard docstring's "forty" is exactly right), carrying **80** raw read lines
-     by AST. 🔴 **State the CONVENTION with the number, because two defensible ones differ here.**
-     By grep, 59 lines contain `audit[`; by AST, **58** are actual code — the 59th is a comment.
-     Likewise 82 read lines span 41 functions, but one is the PERMITTED site, so the 40 offenders
-     carry 80. Offender-only, code-only, the ratios are **5.3× sites→lines, 6.7×
-     remaining→functions, 7.3× sites→reads**. ⚠ Two earlier drafts each picked the friendlier
-     convention at one end — 7.5× (counting the permitted site) and then 5.4× (counting a
-     comment) — which is the same asymmetry twice, in the paragraph that warns against it. A site
-     count in prose is a measurement with an expiry date on a
-     file another branch is actively growing; re-measure, never carry it.
-   - **PR #948** (`feat/cairn-p3-write-path`), measured at head `92f6650e`, +4066/−112 in that
-     exact file: removes **58** positional reads and adds **2**. Three `audit[...]` occurrences
-     remain in **12,262** lines — two `#` comments (one pre-existing at 3341, one added at 3648)
-     and one docstring line (5781, added). **Zero live positional reads**, re-derived by running
-     the guard's own AST algorithm: 0 offenders.
-     🔴 **An earlier draft of this bullet said "both additions are inside comments" AND "all three
-     in docstrings" — mutually exclusive, since the 2 are a subset of the 3.** It also said
-     12,264, which was a fact about `str.splitlines()`, not the file: it contains one **U+2028**
-     and one **U+2029**, which Python splits on and `wc -l` does not. Both wrong; the
-     load-bearing conclusion (zero live reads) was right, which is exactly how a wrong number
-     survives review.
-   - **Of the three guards named here, #948 adds ONE** — `test_no_test_INDEXES_a_live_audit_list`.
-     `test_every_audit_reading_test_goes_through_the_shared_helper` and
-     `test_the_call_site_THRESHOLD_is_load_bearing_not_decorative` **already exist on `origin/main`
-     and are byte-identical at `92f6650e`** — an earlier draft credited all three to #948.
-     ⚠ **That is a statement about THESE THREE, not about #948.** A previous wording said "it ships
-     ONE durable guard, not three", which is false at its widest reading and understates the PR in
-     the same breath as saying its merged-tree gate is still owed — the disarming shape again, in
-     the correction this time. Measured: #948 takes the file from **360 to 496 test functions**
-     (+137, −1), and several additions are durable structural guards unrelated to audit reads
-     (`test_every_ledgered_write_route_actually_dispatches`,
-     `test_the_write_route_ledger_is_the_whole_write_route_set`,
-     `test_the_verb_ledger_is_the_whole_bound_verb_surface`,
-     `test_the_route_table_and_every_handler_signature_AGREE`, and —
-     with some irony given the count error above —
-     `test_the_set_this_class_exercises_is_the_set_splitlines_ACTUALLY_splits_on`).
-     🔴 **And the pairing was misleading beyond the miscount:** that pre-existing anti-vacuity test
-     pins `_drain_output_call_sites() == 3`, a population of `drain_output(...)` calls **unrelated
-     to the ~40 `await_audit` conversions**. So nothing pins the converted call-site count, and
-     the conversion is *not* protected against silent shrinkage the way "anti-vacuity" implies.
-   - 🔴 **THE GUARD'S EXEMPTION IS WALKABLE, and this doc repeated its docstring's claim
-     unchecked.** The waiver is `any(isinstance(n, ast.Attribute) and n.attr == "wait_closed" for n
-     in ast.walk(fn))` — a token anywhere in the function body, **reachability-blind**. Adding
-     `if False: _unused.wait_closed()` after a raw read exempts the test, on an undefined name in
-     dead code. So "permits exactly one site structurally, it cannot rot into a free pass the way
-     a name exclusion would" is **false**; only "never by name" survives. The guard is real and it
-     caught the mutation below — it is just weaker than it says.
-   - **Mutation-tested rather than trusted** (detached worktree at `92f6650e`, pristine restored):
-     reinserting one `assert audit[0]` into a converted test drove
-     `test_no_test_INDEXES_a_live_audit_list` **red with its own message**, naming the offending
-     function and line. Killed by the guard's own assertion — not by a crash, not by a neighbour.
-     Independently reproduced by an auditor at a different call site.
-   - 🔴 **THE HARD LOCK COULD NOT SEE THIS AND THE PR SWEEP COULD.** #948 had been public ~16 h.
-     The other session claimed `cairn-write-path` (clawgate #371, criteria 4–7, the *write path*);
-     this reader derived `cairn-3` for the test conversion. **Both sides claimed correctly and the
-     slugs simply never collided** — the overlap was in the DIFF, not the description.
-     ⚠ **`design-claim-by-push.md`'s "What is NOT covered" list has no bullet that fits this
-     exactly, and pretending otherwise has now been wrong twice.** A first draft cited "a
-     collision on work that was never claimed at all" (`:661`) — plainly wrong, both sides
-     claimed. The correction cited "Reworded duplicates" (`:665` → `:542`, *"a semantically
-     identical item that two sessions word differently"*), which is a loose fit at best: these
-     were two genuinely DIFFERENT items — a clawgate task and a handoff rank — that happened to
-     be completed by one diff. The honest statement is that the list is **missing this case**:
-     *a correctly-claimed item whose PR incidentally completes a separately-claimed one.* Worth
-     adding there. Either way `gh pr list --state open` is what caught it, and the sweep is not
-     a fallback.
-   - ~~**Left to do: the merged-tree gate**~~ — **MOOT: #948 MERGED `2026-08-28T21:11:33Z`.**
-     Rank 3 is fully closed, by that PR and not by this effort. ⚠ **Whether anyone ever ran the
-     merged-tree gate on it is UNKNOWN and now unanswerable** — the branch is gone. Recorded as an
-     unmeasured gap rather than a clean outcome. The measurements below are pinned to `92f6650e`
-     and remain true of that sha; its head had moved to `47c9849b` by `2026-08-28T17:52Z`.
-     🔴 **An earlier draft said a `devrc-integ-948` worktree on `integ/948-merged` "already
-     exists" and told the reader not to duplicate that work. It does not exist** — no such
-     worktree on either host, no such local or remote branch. It was observed earlier in one
-     session and was gone by the end of it. Under `strict: false` a green check is a claim about
-     the BRANCH, so the merged-tree gate is genuinely still owed and the sentence that disarmed it
-     was built on a stale observation of my own — the failure this file's own rule names.
-4. ~~**Instrument the Tekton non-fire rather than chase it**~~ — **DONE**, homelab-infra #438
-   (squash `bbc373ed`), `scripts/check-ci-nonfire.py` + 88 tests. 🔴 **THE CARD'S OWN SPEC WAS
-   THE FIRST THING THAT HAD TO GO.** "Flag required checks pending with no PipelineRun for that
-   sha" is v1, and v1 was wrong twice over: a pending status is posted from INSIDE the run
-   (`devrc-ci-pipeline.yaml:244`), so its presence PROVES a run existed; and the runs were absent
-   because the pruner keeps 100 **per pipeline**, so devrc's own horizon was ~37 h while the PR
-   it "caught" was 44 h old. Worse, **v1 could not see its own motivating case** — a genuinely
-   dropped delivery posts NO status, leaving an EMPTY rollup, and v1 matched on PENDING entries.
-   The retraction is a public comment on #438, not an edited body.
-5. ~~**#366 — the supersede decision card**~~ — **DONE**, merged `9e5cc33e`
-   (homelab-infra #459), card `complete`. Record:
-   `homelab-talos/containers/clawgate/supersede-decision-2026-08-28.md`.
-   🔴 **YOUR CARD'S CENTRAL ASSUMPTION WAS FALSE, AND THAT IS THE RESULT.** It asked what
-   happens *"if the `user`-authored audit comment turns out not to be a genuine integrity
-   property"*. It is not one on the LAN: `requireSession` returns `next` unchanged
-   (`internal/api/auth.go:40-42`), so `POST /tasks/merge` answers unauthenticated LAN POSTs —
-   measured, no token/cookie/header, 409, which means the handler RAN. Any machine can already
-   merge and already mint `user`-authored comments (`notes.go:1567`). The "machine gap" is a
-   routing detail, not a boundary.
-   Decisions: **(a) both 409 arms STAY unchanged** — reversed mid-work, because the obvious
-   narrowing is *unsafe*: `project:` is not a routing tag (`routingNamespaces` =
-   {runbook, initiative, gate, auto}), so a `RoutingTags` predicate cannot see a projectless
-   winner adopting the loser's project. **(b) no machine route**, but labelled what it is — a
-   default to the status quo, not a conclusion the evidence forces. **(c) no new status**;
-   descriptive `superseded-by:<winner>` tag, with the *visual* half qualified (3-chip cap,
-   routing-first ordering, Done lane collapsed).
-6. ~~**#391** — make a UI supersede as legible as a hand-rolled one~~ — **DONE, SHIPPED AND
-   VERIFIED LIVE.** homelab-infra **#474** (squash `84a69a4b`), deployed by ship commit
-   `abc0bdb2` as **0.8.9**; card `complete`. Merging did NOT deploy it — the pin is an immutable
-   literal with no Flux image automation — so the ship commit is the thing that made it live.
-   - **Verified live, not only by test:** a real `POST /tasks/merge` on throwaway tasks #412/#413
-     (deliberately not #359/#360) moved the loser `open ['throwaway']` →
-     `complete ['superseded-by:412','throwaway']`; the winner stayed untouched and the card's own
-     verifier returns rc 1 against it — a negative control, not just a positive one.
-   - 🔴 **THE CARD'S ASSUMPTION 2 WAS FALSE AND IT DECIDED THE ERROR HANDLING.** It assumed
-     `MaxTags` applies, so a loser at the cap would fail the write — which would have made a
-     checked 500 a *regression*. It does not: `notes.AddTags` runs `NormalizeTags` only.
-   - 🔴 **AN AUDIT CAUGHT A DEFECT THAT INVERTED THE FEATURE'S OWN SIGNAL, AND I DID NOT.** The
-     union is recomputed per request, so the new stamp became an INPUT to the next union: a loser
-     already stamped handed it to the WINNER, which then advertised that it had been superseded.
-     Reachable by a retry after a mid-sequence failure, and by reopening a superseded task. Also
-     made recovery at the tag cap impossible. Fixed by filtering the loser's contribution only.
-   - **Still open, deliberately:** the e2e spec does not assert the loser's chip, so the *visual*
-     half of criterion 3 is unexercised end to end. Closing condition is mechanical — a merged PR
-     touching `containers/clawgate/e2e/tests/tasks.spec.ts`.
-7. ~~**#394** — three source comments claim a machine cannot author as `user`~~ — **DONE.**
-   homelab-infra **#489** (squash `c04f1934`), card `complete`. **No deploy: comments plus one
-   test file, zero Go behaviour change**, so the running 0.8.9 image is unaffected.
-   - **There were FOUR sites, not three** — `server.go`'s route comment makes the same
-     unqualified claim. All four now state the scope they hold under.
-   - **The decision (criterion 2) is (c)**, and a measurement decided it: **nothing in the
-     codebase branches on a comment's author** — no `Author == "user"`/`== "operator"` outside
-     tests; `commentAuthor()` only maps `""`→`"user"`; push and UI merely display it. That rules
-     out (b): there is no privilege to withdraw. But it does NOT make the answer (a) — the record
-     being *human-read* is exactly why it is load-bearing, since #366's first draft was decided by
-     citing the false sentence. Honest under trusted-open where `user` means "someone on the
-     trusted network"; not honest on a team instance where it must mean a particular person.
-   - **Guard:** `TestPrivilegedAuthorSitesAreLedgered` pins the SET of sites minting a privileged
-     author, failing when it GROWS *or* SHRINKS, reading both the field and const shapes — a
-     field-only scanner would have gone blind when #391 turned merge.go's literal into a const.
-     Battery 4/4 including the positive control. 🔴 It caught its author's own error on first
-     run: two operator function names written from recollection, neither of which exists.
-8. **No card filed for the §(a) guard narrowing, deliberately.** It makes a merge *possible*
-   where one is refused today, on a route mutating two tasks with no transaction, and any
-   narrowing must test the project delta explicitly AND answer for the second winner-side write
-   (a comment a mid-flight agent reads via `GET /agent/task`) that no tag predicate gates. §5.3
-   of the record is the reasoning a card would cite.
+1. **Land `rescue/espanso-workbench-2026-08-28`** — repo `devrc`, one file, `nix/home.nix`. It
+   splits the `:acq` espanso trigger into `:dacq` (full dispatch text) and `:acq` (plain "ask
+   clarifying questions"). It was committed to the workbench's `main`, blocked `ship.sh` (rc 8), and
+   **another session reset `main` at 14:34, dropping it** — it survives only because it was pushed
+   to that branch first. Content is NOT on `origin/main` (patch-id compared over 30 days). Needs a
+   PR. Closing condition: merged, then `ship.sh` shows both hosts at the new sha.
+2. **Sync the laptop's `homelab-talos`** — `drift-check.sh` reports **rc 17**: the two hosts build
+   DIFFERENT source for `containers/clawgate` (workbench subtree `68b28b4c`, laptop `c71bc616`), so
+   the laptop's `clawgatectl` is built from stale source. Laptop is clean, 0 ahead, **9 behind**, and
+   the 9 are other people's commits — **my work is on both hosts**. Fix:
+   `git -C ~/workspace/homelab-talos merge --ff-only origin/trunk` on the laptop. Closing condition:
+   drift-check stops reporting rc 17.
+3. **Assert the supersede chip end-to-end** — `containers/clawgate/e2e/tests/tasks.spec.ts` asserts
+   the loser's merge *comment* and the winner's chips, but not the loser's new `superseded-by:` chip.
+   The Go tests cover the write; the **visual** half of #366 criterion 3 is unexercised e2e. Repo
+   `homelab-talos`. Closing condition: a merged PR touching that spec.
+4. **Delete throwaway tasks #412 and #413** — both `complete` and annotated with what they were.
+   Board noise only. ⚠ `DELETE /api/tasks/{id}` is `dismissTask` and tears down a live agent pod;
+   these have none, but read `task-api.md` before reaching for it.
+5. **The Tekton non-fire** (unchanged, see Open investigations) — untouched this session.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **TWO SESSIONS CAN BOTH CLAIM CORRECTLY AND STILL COLLIDE — the lock matches SLUGS, and the
@@ -521,21 +367,102 @@ was being grown by a branch nobody reconciled against.
   effectively silent (bounds hours to ~1 day old). That is the number that decides whether it keeps
   earning its keep.
 
+- 🔴 **THE STATUS LINE ROTTED THREE TIMES IN ONE DAY, AND EACH CORRECTION WAS OVERTAKEN WITHIN
+  HOURS.** (1) rank 3 "STILL BLOCKED" — already done by someone else's open PR; (2) "#391 and #394
+  open" — #391 had shipped an hour earlier; (3) "#394 still `open` and genuinely unstarted" —
+  completed two hours later, and *that sentence was written in the commit fixing (2)*. None was
+  careless; each was measured and true when written. **A ranked list that DUPLICATES a status the
+  board owns will rot every time an item moves.** The board is the authority; this list is a plan.
+- 🔴 **FIVE INSTRUMENTS LIED THIS SESSION, AND EVERY ONE WAS CAUGHT BY A CONTROL, NOT BY SUSPICION.**
+  - `docker manifest inspect` reported the just-pushed 0.8.9 ABSENT. Run against the known-live
+    0.8.8 it said ABSENT too — it fails TLS. **The reassuring-zero, and it had also silently voided
+    my earlier "0.8.9 is free" check.**
+  - `strings` found 0 `superseded-by` in the image — the binary is `/clawgate`, not `/app/clawgate`.
+    A path error reads exactly like absence.
+  - My mutation harness scored three genuine REDs as compile errors: its build check grepped for
+    `cannot`, which the cap test's own failure message contains.
+  - A mutant reported SURVIVED had matched a `return out` in the **wrong function**. A SURVIVED
+    verdict asserts the mutant RAN where you think it did — I checked the test executed at all
+    before believing it.
+  - zsh ate `:c` in `$ref:containers/...` as a history modifier and returned **three identical
+    hashes that were the hash of empty input**. It read as a clean confirmation. `${ref}` + a
+    must-differ control caught it.
+- 🔴 **A GATE'S GREEN IS A CLAIM ABOUT WHAT IT SCANNED.** I quoted `test_doc_path_rot` four times as
+  evidence about `claudedocs/handoff-cairn.md`. Its `CORPUS_DIRS = ("claude", "CLAUDE.md")` — it
+  never walked the file, and its own comment says so. `test_no_captured_text` (JSON only) and
+  `test_no_captured_markup` (html/txt) do not cover it either. The ones that DO are
+  `test_no_public_ips` and `test_no_client_hostnames`.
+- 🔴 **A GUARD WRITTEN TO FIX A TOO-NARROW GUARD WAS ITSELF TOO NARROW — THREE VERSIONS.** v1 ran
+  against `fakeNotes`, so hardening the real store left it green. v2 scanned one file's literal
+  body, so a validating helper and a moved function both passed. v3 walks the package call graph
+  transitively and **FATALs when it cannot find `AddTags` at all** — a not-found decl silently
+  passing is exactly how v2 leaked. Its positive control had to be rebuilt too: the old one only
+  exercised depth 1, which is what the broken version already did.
+- 🔴 **THE #394 LEDGER GUARD CAUGHT ITS OWN AUTHOR ON ITS FIRST RUN.** I wrote two operator entries
+  from recollection — `handleOperatorComment`, `flushOperatorReplies` — and **neither exists**
+  (`dispatchOperatorTool`, `handleOpTaskComment`). Recorded in the guard's own comment: it is the
+  clearest available argument that a ledger is a measurement, not a list.
+- 🔴 **CARRIED FORWARD FROM RANK 6, WHICH IS NOW A REPLACE HEADING: #391's CARD GOT ASSUMPTION 2
+  BACKWARDS, AND IT DECIDED THE ERROR HANDLING.** The card assumed `MaxTags` applies to the stamp
+  write, so a loser at the cap would fail it — which would have made a checked 500 a *regression*.
+  It does not apply: `notes.AddTags` runs `NormalizeTags` and nothing else, and `ValidateTags` has
+  exactly two callers, neither on that path. **An acceptance criterion built on a false assumption
+  produces a correct-looking implementation of the wrong thing** — the criterion said "either check
+  it or explain why a failure is tolerable", and both branches were reasoning about a failure mode
+  that cannot occur.
+- 🔴 **CARRIED FORWARD FROM RANK 3: A RANKED ITEM CAN BE COMPLETED BY A PR THAT NEVER NAMES IT.**
+  Rank 3 was fully implemented in open PR #948 for ~16 h before anyone here looked. Both sessions
+  claimed correctly and the slugs never met (`cairn-write-path` vs `cairn-3`) — **the overlap was in
+  the DIFF, not the description**, which is the one place a slug lock structurally cannot look.
+  `gh pr list --state open` found it in one command. So re-scoping means **diffing the file**, not
+  reading titles. ⚠ `design-claim-by-push.md`'s "What is NOT covered" list has no bullet that fits
+  this exactly — not "never claimed at all" (`:661`) and not really "Reworded duplicates" (`:665`,
+  one item worded two ways; these were two different items completed by one diff). Worth filing
+  there rather than papering over with the nearest label.
+- 🔴 **AN AUDIT FOUND A DEFECT THAT INVERTED #391's OWN SIGNAL, AND MY REVIEW HAD PASSED IT.** The
+  merge union is recomputed per request, so the new stamp became an **input to the next union**: a
+  loser already stamped handed it to the WINNER, which then advertised it had been superseded.
+  Reachable by a retry after a mid-sequence failure (the ordering guarantee deliberately leaves the
+  loser stamped *and* open) and by reopening a superseded task. It also made recovery at the tag cap
+  impossible — 400 where a re-runnable 200 was documented. My comment claimed "a retry re-adds the
+  tag as a no-op": true of `AddTags`, false of the union step.
+- 🔴 **`error` IS NOT `failure`.** `gitops-validate` went red with `COULD NOT RUN: scripts-tests` —
+  the gate says in its own output that a leg which could not run is a broken guard, not a bad
+  change. Cause: `ci-manifest.txt` did not list `test_autoremix.py`; trunk had already fixed it and
+  my branch was 9 behind. Syncing turned it green. **Do not debug your diff against an `error`.**
+- **A blocked required check is not a reason to reach for `--admin`.** devrc's `main` requires both
+  Tekton checks with `enforce_admins: true`; `gh` refused the merge and offered `--admin`. Armed
+  **auto-merge** instead — it commits the decision without bypassing the gate. Distinguish *slow*
+  from *wedged* on the cluster, not from GitHub: a wedged run has `childReferences` `[notify, gate]`
+  and never advances; mine showed `Tasks Completed: 1 (Failed: 0)`.
+- **Merging under `containers/clawgate/**` deploys NOTHING** — immutable literal pin, no Flux image
+  automation. Only a ship commit bumping *both* version literals deploys. #394 needed no ship at all
+  (comments + one test file, zero Go behaviour change) — stated as a decision, not skipped silently.
+- 🔴 **A SQUASH-MERGED BRANCH IS NEVER AN ANCESTOR — verify by CONTENT.** Used throughout for #474,
+  #489, #972, #984, #987, and for the two branch deletions. Likewise, a `clawgate-ci` green on the
+  branch covers the merged tree only if the **subtree OID is identical** — measured (`ee75b13e`
+  both sides) with a control proving the comparison can distinguish trees.
+
 ## How to verify
 ```bash
-# rank 4 — the CI non-fire checker, read-only (gets/lists only)
-KUBECONFIG=$KC_HOMELAB python3 ~/workspace/homelab-talos/scripts/check-ci-nonfire.py \
-  --repo innovation-upstream/devrc
-PYTHONDONTWRITEBYTECODE=1 python3 ~/workspace/homelab-talos/scripts/tests/test_check_ci_nonfire.py
+# the #391 feature, against whatever is LIVE now (re-read the pin; it is not 0.8.9 any more)
+clawgatectl health
+docker pull harbor.homelab.lan/library/clawgate:$(clawgatectl health | jq -r .version) >/dev/null
+cid=$(docker create harbor.homelab.lan/library/clawgate:$(clawgatectl health | jq -r .version)) \
+  && docker cp "$cid":/clawgate /tmp/cg.bin && docker rm "$cid" >/dev/null
+grep -ac 'superseded-by' /tmp/cg.bin   # expect >=1
+grep -ac 'tasks:changed' /tmp/cg.bin   # positive control, expect >=1
 
-# rank 5 — the decision record exists on trunk (content, never ancestry)
-git -C ~/workspace/homelab-talos show \
-  origin/trunk:containers/clawgate/supersede-decision-2026-08-28.md | head -1
+# the #394 ledger guard, and the whole clawgate module
+cd ~/workspace/homelab-talos/containers/clawgate
+nix-shell -p tailwindcss --run "cd $PWD && tailwindcss -i ./web/css/input.css -o ./web/static/app.css --minify"
+nix-shell -p go --run 'go test ./... -count=1'
 
-# the measurement that decided (b) — expect a HANDLER response (409), not 401
-curl -s -X POST http://192.168.50.250:30302/tasks/merge -d 'winner=360&loser=359'
+# host + source parity (this is what surfaces rank 2)
+bash ~/workspace/devrc/scripts/drift-check.sh
 ```
-🔴 **`run-ci-suite.sh` reports 6 red files and they are red at the base commit too** — five are a
-missing local `pyyaml` (all pass under `nix-shell -p python3Packages.pyyaml`), one is
-`test-check-subsystem-store-phase1.sh` at `pass=7 fail=17` on both sides. Do not attribute them to
-this work; run the base-commit control before believing otherwise.
+🔴 **`docker manifest inspect` CANNOT answer "is this tag in harbor" — it bypasses the daemon's
+cert config and fails TLS, reporting ABSENT for every tag including live ones.** Use `docker pull`.
+🔴 **Build `app.css` from INSIDE `containers/clawgate/`** or Tailwind silently emits ~5 KB with no
+utility classes and `TestOpenRoutesNoAuth`/`TestStaticAssetsServed` 404 — which looks exactly like a
+code regression. Expect ~40 KB.
