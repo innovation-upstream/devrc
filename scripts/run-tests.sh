@@ -1802,8 +1802,9 @@ TARGET_FLOORS=(
   # is collected only under `--set all` — but the floor table is checked against
   # hermetic AND dev-host targets both ways, so it needs an entry regardless or
   # GUARD 3a reports it unfloored.
-  # `_suggested_floor 4` = 4 - min(50, max(1, 4/20 = 0 -> 1)) = 3.
-  "scripts/devhost-tests|3"
+  # 2026-08-29 (+3): the $DEVRC_DIR off-session config tests joined it.
+  # `_suggested_floor 7` = 7 - min(50, max(1, 7/20 = 0 -> 1)) = 6.
+  "scripts/devhost-tests|6"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone
