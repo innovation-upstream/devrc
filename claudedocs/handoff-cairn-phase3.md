@@ -18,21 +18,44 @@ Make the hosted subsystem store the single datastore every host reads **and writ
 
 ## State now
 
-**The pod finally runs the write path.** `subsystem-store-api:0.5.0` built, pushed
-(`sha256:7bd5c648…`) and pinned in homelab-infra **`734095ea`**; the running pod's own
-`imageID` confirms the artifact. The symptom flipped on the live store:
+🔴 **CRITERION 10, STEP 1 OF 2, IS DONE AND PROVEN ON THE POD** (2026-08-29, homelab-infra
+`1e0c9250`). The token file now holds **two rows**, and the coexistence *is* the migration —
+no credential moved, no read broke, and the rollback is deleting line 2 with **no image
+change**:
+
+| line | shape | identity | fingerprint | authority |
+|---|---|---|---|---|
+| 1 | `<token>` | `legacy` | `2481e4553f6c` | UNRESTRICTED read · **MAY NOT WRITE** |
+| 2 | `<token> zach <15 scopes>` | `zach` | `8e1e79bb4664` | 15 scopes · **may write** |
+
+Startup banner confirms the load:
+`token-ids=2481e4553f6c:legacy,8e1e79bb4664:zach`, still shouting
+`UNRESTRICTED-SCOPE LEGACY MODE — 1 of 2`.
+
+**Measured on the pod, not in tests** — every line below is from the live audit log:
 
 ```
-POST /api/v1/entry/devrc/present/bullets  405 read-only  ->  403 "this credential has
-                                                              no identity …"
-PUT  /api/v1/entry/devrc/present          405           ->  403
-unauth 401 · authed GET 200 · probe wrote 0 bullets
+POST /api/v1/entry/devrc/subsystem-store-api/bullets  token=2481e4553f6c identity=legacy  403 legacy-cannot-write
+POST /api/v1/entry/no-such-scope-xyzzy/e/bullets      token=8e1e79bb4664 identity=zach    404 scope-unknown
+POST /api/v1/entry/devrc/subsystem-store-api/bullets  token=8e1e79bb4664 identity=zach    200 appended
+GET  /api/v1/recall/devrc                             both fingerprints                   200 (no read lost)
 ```
 
-🔴 **The secret was deployed UNCHANGED, and that is the migration.** `load_tokens` reads one
-row per line; a bare line is the `legacy` identity — unrestricted read, **may not write**.
-Today's secret is a single bare line, so no credential moved and no read broke. Rollback is
-one line back to `0.4.0`.
+…and the bullet was **read back off disk** (`kubectl exec cat`): a single-line insert at the
+top of `## Nuance / work-history`, `13350 → 14603 B`, tagged
+`[cairn: zach/9cfaabff-a4ab-4571-8364-b1a44f83cf9b]`. The request carried a forged
+`"actor":"someone-else"` and it was **discarded** — so criterion 4's forgery case is now
+verified **against the pod**, not only against the image.
+
+**The pod runs `0.6.0`, not `0.5.0`.** A concurrent session bumped it in homelab-infra
+`5a153492` (2026-08-29 15:01, "#996 merged and the pod never moved"); live `imageID` is
+`sha256:80a7c735…`. Any doc still saying 0.5.0 is stale.
+
+🔴 **STEP 2 — deleting the bare line — IS NOT DONE, and its gate is not satisfiable today.**
+The card requires 24 h of audit log with **no** request on `token=2481e4553f6c` *and* a
+deliberate rollback rehearsal. Both hosts' client env (`~/.config/subsystem-store/env`) still
+holds the **legacy** token, so the clock has not started. Move both hosts first, or step 2
+kills every read.
 
 **Criterion 8 — THIS HOST ONLY.** `seed.sh` run from workbench; the card's own check passes:
 `comm -23 <local> <served>` prints **zero lines**. Store went **75 entries / 9 scopes →
@@ -113,27 +136,33 @@ rest on tests, not on production** — they are deployed, not verified there.
 `cairn-phase3-*` claims were live at the time, so nothing was re-pointed — but derive slugs
 fresh: `claim-work --slug-for <this doc> <rank>`.
 
-1. 🔴 **Criterion 10 — the two-step, and it is still the original ask.** Nothing can write
-   today: the only row is the bare legacy one, refused **403** (verified live). **First** add
-   a mapped `<token> <identity> <scopes>` row to secret `subsystem-store-token` (ns
-   `subsystem-store`, homelab) and prove a write lands **end-to-end**; **only then** delete
-   the bare line. Both shapes may coexist — that coexistence *is* the migration and the
-   no-deploy rollback. The card also requires the rollback exercised **before** removal and
-   24h of audit log with no request on the old fingerprint.
-   ⚠ Verify by reading the appended bullet **back off disk** — a 200 is not proof. Route is
-   `POST /api/v1/entry/<scope>/<ref>/bullets`, body field **`text`** (omitting `session`
-   gives 400).
-2. **Criterion 8's laptop half** — the card requires BOTH hosts. This is what `#998` was
+🔴 **RANK 1 (criterion 10 step 1) IS DONE** — see "State now". What follows is the remainder.
+
+1. 🔴 **Move BOTH hosts' client env to the mapped token — this is what starts criterion 10's
+   24 h clock, and nothing else can.** `~/.config/subsystem-store/env` →
+   `SUBSYSTEM_STORE_TOKEN=<the `zach` row's token>` on workbench **and** laptop (the `laptop`
+   skill for the host; `ssh laptop` does not resolve from workbench). Then watch
+   `kubectl -n subsystem-store logs <pod> | grep token=2481e4553f6c` go quiet for 24 h,
+   exercise the rollback once deliberately (delete line 2, confirm reads still work on
+   legacy, put it back), and **only then** delete the bare line. Rollback for the whole thing
+   stays one commit either way. ⚠ Reading the mapped token: `sops -d` the secret file, or
+   `kubectl -n subsystem-store get secret subsystem-store-token -o jsonpath='{.data.token}' |
+   base64 -d` and take field 1 of line 2.
+2. 🔴 **The backup CronJob, and it is now more urgent than it was.** The served copy can hold
+   bytes that exist nowhere else the moment anything writes through the API (see the seed
+   clobber below), and `zach` is a whole-file `PUT` credential over all 15 scopes. The LOCAL
+   store is covered (`commit.sh` per-scope git + `backup.py` encrypted bundles), so "the store
+   has no backup" is wrong — **"the SERVED copy has none" is right**, and that is the gap.
+3. **Criterion 8's laptop half** — the card requires BOTH hosts. This is what `#998` was
    fixed *for*, and it is still unexercised for that purpose. Run `seed.sh` from the laptop
    (`laptop` skill for the host), then `comm -23` per host must print zero lines. Expect the
    NOTE about foreign entries — that is the fixed behaviour, not an error.
-3. **The backup, before criterion 9.** Read allowlist == write allowlist, so the first mapped
-   row makes every read token a whole-file-destructive `PUT` credential. No backup CronJob
-   exists in ns `subsystem-store` (checked).
 4. **Criterion 9 — the cutover.** `subsystem-index` writes through `cairn`; local store
-   becomes a read-only cache (`stat -c %a` = 444, EACCES *watched*).
-5. **Verify criteria 1, 2, 5, 6, 7 against the POD**, not just in tests — they are deployed
-   and unverified there.
+   becomes a read-only cache (`stat -c %a` = 444, EACCES *watched*). 🔴 This is also what makes
+   an API write DURABLE — see the seed clobber below.
+5. **Verify criteria 1, 2, 5, 6, 7 against the POD**, not just in tests. Criterion 4 is now
+   done there (including the forged-`actor` case); 2's denied-scope arm is done for WRITES
+   (404 `scope-unknown`) but not for the three read routes.
 6. **Add the `internal-error` alert** in the monitoring config. Without it the dispatch
    backstop turns a dropped connection into a quiet 500 only the audit log sees.
 7. **`scripts/cairn` has no write verb** — the CLI still only reads, so nothing can drive the
@@ -156,6 +185,42 @@ fresh: `claim-work --slug-for <this doc> <rank>`.
 - `If-Match` uses the **entry content hash**, not `scope_revision`. No scope in the served copy is a git repo, so `scope_revision` answers `"unknown"` for all of them and an `If-Match` on it would be satisfied forever by that literal string.
 - Concurrency is an exclusive `flock` on a **side file** (`.<entry>.md.lock`), because the write is temp-file + `os.replace` — a lock on the entry's own inode is useless across the rename.
 - The entry codec is consolidated behind `decode_entry_text`/`encode_entry_text`. **Four sites were deciding it and one was wrong**, which is what made a latin-1 byte in a nuance bullet permanently unappendable.
+
+**Criterion 10, step 1 — what the operation actually taught (2026-08-29):**
+- 🔴 **AN API WRITE LANDS IN THE SERVED COPY ONLY, AND `seed.sh` OVERWRITES IT.** The push is
+  `rsync -a --delete` SOURCE→STAGE then `tar` STAGE→pod, so the next seed from any host
+  replaces the entry file with the local one and the appended bullet is **gone**. Measured
+  right after the first production append: served `14603 B` **with** the bullet, local
+  `14696 B` **without** it — already divergent in both directions. **"The write path works"
+  and "the bullet survives" are two different claims, and the second is false until criterion
+  9.** Put anything you want kept in the LOCAL store as well.
+- 🔴 **`load_tokens` runs ONCE, at startup — there is NO SIGHUP reload.** A secret edit is
+  inert until the pod is replaced, and with `Recreate` at `replicas: 1` a malformed row is
+  `exit 78`: the store stays **DOWN**, it does not fall back to the old file. Replace the pod
+  with `kubectl delete pod`, not `rollout restart` — the latter costs two rollouts here
+  (homelab-talos `CLAUDE.md`), i.e. two hard read outages for one intended restart.
+- 🔴 **Pre-flight the candidate token file against the DEPLOYED `server.py`, not `main`.**
+  Extract it from the pod (`kubectl exec … tar czf - -C /app scripts`), confirm the sha
+  matches the pod's own copy, then run `load_tokens` over the exact candidate bytes. Five
+  negative controls each fire with their own message and are worth keeping: a space after a
+  scope comma (parses as **4 fields**), a mapped row claiming the reserved identity `legacy`,
+  the **same token on a bare AND a mapped row** (guard 11), two rows claiming one identity
+  (guard 12), a short token (`>= 43`). Import gotcha: `sys.modules[name] = mod` **before**
+  `exec_module`.
+- 🔴 **Guard 11 means "scope a credential its holder already has" CANNOT be done by adding a
+  line below it.** Bare `<tok>` + mapped `<tok> zach …` is refused as *"one credential is
+  given two different authorities"*. A second holder needs a second token — which is why
+  step 1 mints a NEW token rather than mapping the old one.
+- ⚠ **A mapped row's allowlist is a SNAPSHOT; there is no wildcard.** `scopes is None` is
+  reachable only from a bare row, so a scope added to the store is invisible to `zach` until
+  the row is edited — and by criterion 3 that is indistinguishable from a scope that does not
+  exist. Adding a scope is a two-place change.
+- ⚠ **Do not date-prefix your own bullet text** — the server prepends `- <date>: ` itself.
+  The first production append reads `- 2026-08-29: 2026-08-29: …` because of it.
+- ⚠ **`git -C <worktree> diff` on the entry, not a byte-offset compare.** An append at the TOP
+  of `## Nuance / work-history` shifts every later offset, so `diff <(head -c N before)
+  <(head -c N after)` reports "pre-existing bytes changed" when nothing changed. The real diff
+  was a single added line.
 
 **Traps that cost real time — do not re-pay them:**
 - 🔴 **`session` is a REQUIRED body field on the append route.** Omitting it gives 400, and reading "0 occurrences of the forged actor" off that response is a **false green** — nothing was written. Every write probe needs a positive control proving the bullet landed.
@@ -233,9 +298,16 @@ child and a child directory named `*.md` all exit **0**; only the start point yi
 ```bash
 # the deployed pod is the built artifact, not just the pinned spec
 KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod -l app=subsystem-store-api \
-  -o jsonpath='{.items[0].status.containerStatuses[0].imageID}{"\n"}'   # sha256:7bd5c648…
+  -o jsonpath='{.items[0].status.containerStatuses[0].imageID}{"\n"}'   # sha256:80a7c735… (0.6.0)
 
-# the write path is live and legacy still cannot write
+# BOTH token rows are loaded — this is criterion 10 step 1's own check
+POD=$(KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod -l app=subsystem-store-api \
+  -o jsonpath='{.items[0].metadata.name}')
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs $POD | head -2
+#   token-ids=2481e4553f6c:legacy,8e1e79bb4664:zach
+#   UNRESTRICTED-SCOPE LEGACY MODE — 1 of 2 …
+
+# the write path is live and legacy still cannot write (env still holds the LEGACY token)
 set -a; . ~/.config/subsystem-store/env; set +a
 curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $SUBSYSTEM_STORE_TOKEN" \
   -H 'User-Agent: subsystem-store-client/1' "$SUBSYSTEM_STORE_URL/api/v1/recall/devrc"   # 200
@@ -243,6 +315,14 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST -H "Authorization: Bearer $SUBS
   -H 'User-Agent: subsystem-store-client/1' -H 'Content-Type: application/json' \
   -d '{"text":"x","session":"v"}' \
   "$SUBSYSTEM_STORE_URL/api/v1/entry/devrc/agent-ledger/bullets"                          # 403
+
+# 🔴 A 200 IS NOT PROOF — read the bullet back OFF DISK, and diff, do not byte-offset compare
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec $POD -- \
+  cat /data/devrc/subsystem-store-api.md | grep -c '\[cairn: zach/'                       # >= 1
+
+# has the legacy fingerprint gone quiet? (criterion 10 step 2's 24h gate)
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs $POD --since=24h \
+  | grep -c 'token=2481e4553f6c'                                        # must be 0 to proceed
 
 # criterion 8, per host — MUST print zero lines
 POD=$(KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod -l app=subsystem-store-api \
