@@ -17,12 +17,28 @@ asked *"was the signal skill ever used operationally?"*, searched keywords, and 
 **"never"** — the reverse of the truth. This work ships the measurement AND removes the
 doc claim that made the wrong answer look right.
 
-## State now
-- **Branch:** `feat/skill-usage-telemetry`, pushed, clean tree. **PR #1000** OPEN.
-- **Base:** contains `origin/main` as of `6e7e85bf` (merged in at `d382f1e9`).
-- **Gate:** `GATE: RESULT=PASS exit=0`, both tiers, at `bd869dc5` —
-  `TOTAL collected=18651 passed=18649 skipped=2 failed=0`. Tekton checks were still
-  `pending` at hand-off; nothing else blocks.
+## State now — 🟢 MERGED, SHIPPED, AND VERIFIED LIVE (2026-08-29)
+- **PR #1000 MERGED**, squash `538370f5`, 21:28:25Z. Verified **by content** on
+  `origin/main` (a squash never makes the head an ancestor, so `--is-ancestor` would have
+  said "not merged" here and been wrong).
+- **Gated on the MERGED tree, not the branch** — `main` had moved **22 commits** past the
+  PR's base (`6e7e85bf` → `68ea76c6`) and both sides edit `scripts/run-tests.sh`. Built an
+  integration branch off current `main`, merged #1000 into it, ran BOTH tiers there:
+  - sandbox (`nix build .#checks.*`, the tier Tekton gates on): pytests
+    `collected=18683 passed=18681 failed=0`, nodetests `tests=1366 pass=1366 fail=0`,
+    both `RESULT: PASS`. Both derivations were genuinely **built**, not substituted —
+    the log says `these 2 derivations will be built`.
+  - dev-host (`gate.sh --tier both --set all`): `GATE: RESULT=PASS exit=0`,
+    `collected=18690` across **29** targets (one more than the sandbox's 28).
+  - The contested floor held: `scripts/collector/claude/tests collected=172 floor=164`,
+    **no drift-ceiling trip**. The `164` was computed against `07890ebc`; it is still
+    correct against today's `main`. Nothing needed re-pinning.
+- **SHIPPED.** `scripts/ship.sh` converged **both** hosts to `538370f5` and actually
+  **compared** them (`2 hosts compared, both at 538370f5`) — not the one-host
+  `NOT COMPARED` case. Workbench `562 links checked, 0 dangling / 393 repo-sourced,
+  0 stale`; laptop `508 / 0` and `378 / 0`, fast-forwarded from `638959b4` (it was behind).
+  Workbench tree DIRTY but all 4 dirty paths untracked and **none nix-read**, so what
+  deployed IS `origin/main`.
 
 **DONE this session**
 - `scripts/collector/claude/session-tailer.py` — Layer A rollup now carries
@@ -44,11 +60,45 @@ Five blind audit rounds (~50 findings), every guard mutation-tested, gated on th
 tree not the branch. 🔴 **Zero findings were in the shipped mechanism** — all were in
 guards, tests, measurements or sentences.
 
-**NOT deployed.** `skills_used` is **forward-only**: no row carries it until PR #1000 merges
-AND `scripts/ship.sh` runs (the tailer restarts on switch; rows appear on the next 5-min tick).
+**DEPLOYED AND EMITTING.** The consumer was verified, not just the deploy:
+`readlink -f ~/.config/activity-collector/claude/session-tailer.py` →
+`/nix/store/…-hm_claude/session-tailer.py`, `cmp` **byte-identical** to `origin/main`, and
+it carries all three routes. `claude-activity-source` reads `inactive/dead` — **correct**,
+it is a timer-driven oneshot, not a fault.
 
 ## Open investigations — live diagnosis state
-### Does `--skill` reach the laptop? (blocked on ship, not on code)
+### ✅ CLOSED — the emitter works, and the headline claim is now MEASURED
+Ranked item 2 is closed. First two post-deploy rows, with their **positive control**
+(a bare zero would not have been distinguishable from a query wired to nothing):
+
+| ingested_at (UTC) | host | `skills_used` | `skills_invoked` |
+|---|---|---|---|
+| 21:31:30 | workbench | `{"audit-pr":8,"handoff":7,"subsystem-index":20}` | 1 each |
+| 21:41:41 | workbench | `{"resume":72}` | `{"resume":1}` |
+
+`unusable_skill_names` = **0** on both — nothing is being silently rejected. All post-deploy
+rows *have* the field (`have_field=2`), so a future empty one reads as "no skills used",
+never "field absent". Control: 16 `session-summary` rows in the 2h before the deploy, **0**
+with `skills_used` — the forward-only boundary is visible in the data.
+
+🔴 **The headline, now measured rather than asserted:** `find-session signal --claude-only`
+returns **678** sessions; `find-session --skill signal` returns **6**. And **5 of those 6 are
+`[claude-remote]` (the laptop)** — so the originating investigation was wrong *twice over*:
+it matched TEXT instead of USE, and it searched ONE host. Either defect alone produces
+"never used".
+
+Spot-checked one match rather than trusting the count — `6fb90d0d` (vetr) is a **true
+positive**: `attributionSkill: ['audit-pr','clawgate','handoff','signal']` and a `Skill`
+tool_use with `input.skill == 'signal'`. Worth checking because its prompt text mentions a
+"signal-send-path", which is vetr's own feature and exactly the false positive this feature
+exists to avoid. It matched on use, not on that string.
+
+### ✅ CLOSED — does `--skill` reach the laptop? (was blocked on ship, not on code)
+**Resolved: yes.** The refusal message below no longer appears; laptop sessions come back
+tagged `[claude-remote]`. The leading hypothesis was right — the probe was working as
+designed and only needed the peer to carry the new code. Original diagnosis retained below.
+
+<details><summary>original (pre-ship) diagnosis</summary>
 - **Symptom + exact repro:** `find-session.py --skill signal` on the workbench.
 - **Observed (verbatim):**
   `find-session: peer laptop (10.42.0.100): peer is running an older transcript_search with no --skill support (run ship.sh) — its Claude sessions are NOT in these results`
@@ -64,26 +114,48 @@ AND `scripts/ship.sh` runs (the tailer restarts on switch; rows appear on the ne
 - **Next probe:** after merge, `scripts/ship.sh`, then re-run
   `find-session.py --skill signal --limit 20` and expect the laptop's 5 signal sessions.
 
+</details>
+
+## 🔴 The one thing to read before doing items 3 and 4
+**Their literal closing condition is met, and the hazard it was written to protect against
+is NOT yet cleared. Do not treat the non-zero as a green light.**
+
+The followups doc says both close when the item-2 query "returns non-zero". It returns **2**.
+But those 2 rows carry **4 distinct skill identities** (`audit-pr`, `handoff`,
+`subsystem-index`, `resume`) against **34** devrc-managed skills
+(`ls -d claude/skills/*/ | wc -l`, measured 2026-08-29 — the scope is devrc-managed only;
+plugin-provided skills are not counted). `adoption-scan` raises a loud `DEAD` at zero uses,
+so adding the `via: "skill"` arm against this corpus reports **30 of 34 as DEAD** — which is
+precisely the permanently-red-gate outcome the deferral existed to prevent. The deadman has
+the same shape.
+
+The gate was written as a boundary check (`> 0`) when what it actually needs is
+**accumulation**. Suggested replacement, to be pinned when the arm lands — proceed when a
+trailing-7d window shows a plateauing distinct-identity count on both hosts, e.g.:
+```sql
+SELECT host, uniqExact(arrayJoin(JSONExtractKeys(payload,'skills_used'))) AS ids, count()
+FROM activity.events
+WHERE source='claude' AND kind='session-summary' AND ts > now() - INTERVAL 7 DAY
+GROUP BY host
+```
+🔴 Note `host` — at hand-off **both rows are workbench**; the laptop had not yet ticked, so
+a fleet-wide claim cannot be made from this data yet. Re-check both hosts appear.
+
 ## Next steps (ranked)
-1. **Merge PR #1000**, then run `scripts/ship.sh`. Nothing downstream can be verified before
-   this — every other item is gated on rows existing. Repo: `devrc`.
-2. **Verify the emitter live.** After ship + one 5-min tick:
-   ```sql
-   SELECT count() FROM activity.events
-   WHERE source='claude' AND kind='session-summary'
-     AND JSONLength(payload, 'skills_used') > 0
-   ```
-   Non-zero is the precondition items 3 and 4 wait on. Also re-run item 1's `--skill` probe
-   above.
-3. **Add the `adoption-scan` `via: "skill"` registry arm.** Gated on item 2 returning
-   non-zero — adding it earlier reports every skill as `DEAD`.
+1. ✅ **DONE** — PR #1000 merged (`538370f5`) + `scripts/ship.sh`, both hosts at that sha.
+2. ✅ **DONE** — emitter verified live; see the closed investigation above.
+3. **Add the `adoption-scan` `via: "skill"` registry arm** — 🔴 **read the section above
+   first**; the stated gate is met but shipping now yields a red gate. Let identities
+   accumulate, then land it.
    Files: `scripts/session-analysis/adoption-scan.py`, `claude/skills/adoption-scan/SKILL.md`.
-4. **Add the `attributionSkill` deadman.** Same gate as item 3; earlier it is a permanently-red
-   gate. File: `scripts/validation/invariants.py`.
+4. **Add the `attributionSkill` deadman.** Same caveat as 3. File:
+   `scripts/validation/invariants.py`.
 5. **Work `claudedocs/followups-skill-usage-telemetry.md`** — 4 items, each with a closing
    condition: `audit-dispatch.py`'s wrong-toolchain brief, a credential rotation, G4 routing
-   (`adoption-scan` + `activity` never mention `--skill`), G5 the ClickHouse creds/query helper.
-6. **Release the claim** when 1–2 are done: `claim-work --release skill-usage-telemetry`.
+   (`adoption-scan` + `activity` never mention `--skill`), G5 the ClickHouse creds/query
+   helper. **These are NOT gated on data** and are the sensible next work while identities
+   accumulate. G4 is the cheapest and closes the routing gap that caused the whole incident.
+6. ✅ **DONE** — claim `skill-usage-telemetry-1` released.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`find-session`'s "both hosts" claim was HALF FALSE for weeks** and is the root cause of
