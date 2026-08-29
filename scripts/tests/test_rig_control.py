@@ -47,6 +47,9 @@ def _run(*args, env=None):
     """Run rig-control.sh as a subprocess with optional env overrides."""
     full_env = dict(os.environ)
     full_env["PATH"] = str(SCRIPTS) + ":" + full_env.get("PATH", "")
+    # Instant fade-in for tests (skip the 30s ramp)
+    full_env.setdefault("RIG_FADE_STEPS", "1")
+    full_env.setdefault("RIG_FADE_DELAY", "0")
     if env:
         full_env.update(env)
     return subprocess.run(

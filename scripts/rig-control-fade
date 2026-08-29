@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# rig-control-fade — one-shot gradient color updater.
+# Called every 60s by a systemd timer. Reads rig-control-colors.conf,
+# interpolates linearly between the two bracketing waypoints, and sets
+# the chassis RGB via openrgb. Skips if rig-control state is sleeping.
+#
+# Exit 0 always — a failure to set color must not fail the timer unit.
+set -uo pipefail
+
+SELF="$(readlink -f "$0")"
+DIR="$(dirname "$SELF")"
+CONF="$DIR/rig-control-colors.conf"
+STATE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/rig-control/state"
+RGB_DEVICE="${RIG_RGB_DEVICE:-2}"
+
+# --- helpers -----------------------------------------------------------------
+hex_to_rgb() {
+  # "FF6347" -> "255 99 71"
+  local hex="$1"
+  printf '%d %d %d' "0x${hex:0:2}" "0x${hex:2:2}" "0x${hex:4:2}"
+}
+
+rgb_to_hex() {
+  # 255 99 71 -> "FF6347"
+  printf '%02X%02X%02X' "$1" "$2" "$3"
+}
+
+time_to_minutes() {
+  # "HH:MM" -> minutes since midnight
+  local h="${1%%:*}" m="${1##*:}"
+  echo $(( 10#$h * 60 + 10#$m ))
+}
+
+# --- main --------------------------------------------------------------------
+# --print: just print the current interpolated color and exit (used by fade-in)
+print_only=0
+[[ "${1:-}" == "--print" ]] && print_only=1
+
+# Skip if sleeping (but not for --print, which is called during wake)
+if (( print_only == 0 )); then
+  if [[ -f "$STATE_FILE" ]] && read -r _state < "$STATE_FILE" && [[ "$_state" == "sleeping" ]]; then
+    exit 0
+  fi
+fi
+
+# Skip if no config
+if [[ ! -f "$CONF" ]]; then
+  exit 0
+fi
+
+# Current time in minutes since midnight
+now=$(date +%-H%M)
+now=$(( 10#$(date +%-H) * 60 + 10#$(date +%-M) ))
+
+# Parse config into arrays
+declare -a wp_times=()
+declare -a wp_r=() wp_g=() wp_b=()
+
+while IFS= read -r line; do
+  # Strip comments
+  line="${line%%#*}"
+  # Skip blank lines
+  [[ "${line// /}" == "" ]] && continue
+
+  # Parse "HH:MM RRGGBB"
+  time_str="${line%% *}"
+  hex="${line#* }"
+  hex="${hex// /}"
+
+  t=$(time_to_minutes "$time_str")
+  read -r r g b <<< "$(hex_to_rgb "$hex")"
+
+  wp_times+=("$t")
+  wp_r+=("$r")
+  wp_g+=("$g")
+  wp_b+=("$b")
+done < "$CONF"
+
+count=${#wp_times[@]}
+if (( count < 2 )); then
+  exit 0
+fi
+
+# Find the two bracketing waypoints.
+# The schedule wraps at midnight: if now < first waypoint, use last (previous day)
+# and first (today) as the pair.
+prev=$(( count - 1 ))
+found=0
+for (( i = 0; i < count; i++ )); do
+  if (( now >= wp_times[i] )); then
+    prev=$i
+    found=1
+  fi
+done
+
+if (( found == 0 )); then
+  # now is before the first waypoint — we're between last (prev day) and first (today)
+  prev=$(( count - 1 ))
+  next=0
+else
+  next=$(( (prev + 1) % count ))
+fi
+
+t0=${wp_times[$prev]}
+t1=${wp_times[$next]}
+
+# Calculate total span and progress
+if (( t1 > t0 )); then
+  span=$(( t1 - t0 ))
+  progress=$(( now - t0 ))
+elif (( t1 < t0 )); then
+  # Wraps midnight: span = (1440 - t0) + t1
+  span=$(( 1440 - t0 + t1 ))
+  progress=$(( now - t0 ))
+  if (( progress < 0 )); then
+    progress=$(( progress + 1440 ))
+  fi
+else
+  # Same waypoint (degenerate) — use it directly
+  span=1
+  progress=0
+fi
+
+# Avoid division by zero
+if (( span == 0 )); then
+  span=1
+fi
+
+# Interpolate each channel (integer math, scale by 1000 for precision)
+frac=$(( progress * 1000 / span ))
+
+r=$(( wp_r[prev] + (wp_r[next] - wp_r[prev]) * frac / 1000 ))
+g=$(( wp_g[prev] + (wp_g[next] - wp_g[prev]) * frac / 1000 ))
+b=$(( wp_b[prev] + (wp_b[next] - wp_b[prev]) * frac / 1000 ))
+
+hex=$(rgb_to_hex "$r" "$g" "$b")
+
+if (( print_only == 1 )); then
+  echo "$hex"
+else
+  openrgb --device "$RGB_DEVICE" --mode static --color "$hex" >/dev/null 2>&1 || true
+fi
