@@ -6548,30 +6548,37 @@ def test_declared_ext_versions_parser_is_wired_to_something():
 
 
 def test_manifest_version_matches_the_declared_build():
-    """manifest.json's version must be DECLARED in extension/README.md.
+    """manifest.json's RELEASE version must be DECLARED in extension/README.md.
 
     This is the gate that replaces the twice-stale literal. It fails when a bump
     lands with no changelog block — which is a bump nobody can identify in the
     field, and is what both stale bumps looked like.
-    """
+
+    🔴 It compares the BASE (first three components), not the whole version.
+    The 4th component is the marker-derived BUILD id, which moves on every code
+    change by design; requiring a changelog block per build would make this gate
+    fire constantly and get deleted. The split is the point: the README
+    documents RELEASES a human chose, the 4th component identifies BUILDS a
+    machine derived, and each is gated by the test that can actually check it
+    (this one, and test_committed_manifest_version_matches_the_marker)."""
     v = S.manifest_version(path=EXT_DIR / "manifest.json")
     declared = declared_ext_versions()
     assert isinstance(v, str) and v, "manifest.json must carry a version"
-    assert v == declared[0], (
-        f"extension/manifest.json is {v} but the newest version DECLARED in "
-        f"extension/README.md is {declared[0]}. A bump needs BOTH, in one "
-        f"commit: the manifest version, and a `> **{v} — …**` block saying what "
-        f"discriminates this build from the last (a new op, a new `ping` field, "
-        f"or a specific string it emits). Do not 'fix' this by editing a number "
-        f"in the tests — there is no longer one to edit."
+    base = GEN.version_base(v)
+    assert base == declared[0], (
+        f"extension/manifest.json is {v} (release base {base}) but the newest "
+        f"version DECLARED in extension/README.md is {declared[0]}. A release "
+        f"bump needs BOTH, in one commit: the manifest version, and a "
+        f"`> **{base} — …**` block saying what discriminates this build from "
+        f"the last (a new op, a new `ping` field, or a specific string it "
+        f"emits). Do not 'fix' this by editing a number in the tests — there is "
+        f"no longer one to edit. NOTE: the trailing build component is derived "
+        f"from the build marker and needs no changelog block."
     )
 
 
-# The single expected-version handle the rest of this file uses. Derived, on
-# purpose (see the header): every site below is now automatically correct after a
-# bump, and the ONE place that can disagree with the manifest is the README
-# declaration, which the test above gates.
-PINNED_EXT_VERSION = declared_ext_versions()[0]
+# PINNED_EXT_VERSION is defined below, after the build marker is loaded — it is
+# derived from the marker and cannot be computed before it exists.
 
 
 # --------------------------------------------------------------------------- #
@@ -6606,6 +6613,28 @@ def _load_gen_build_marker():
 GEN = _load_gen_build_marker()
 COMMITTED_BUILD_MARKER = GEN.read_marker(EXT_DIR / "build_id.js")
 
+# The single expected-version handle the rest of this file uses.
+#
+# Derived from TWO committed artifacts that are NOT manifest.json — the README
+# release declaration and the committed build marker — so asserting that
+# `S.manifest_version()` equals it genuinely cross-checks the manifest against
+# them, rather than reading the manifest and comparing it to itself.
+# Calls GEN.build_component rather than re-slicing the marker here: a second
+# copy of the derivation is how a gate drifts into agreeing with itself (the
+# generator's own docstring says so).
+#
+# ⚠ What this does NOT fix, stated because an earlier version of this comment
+# claimed it did: the call is still at MODULE scope, so an unreadable
+# build_id.js still kills COLLECTION and hides every test in this file. Measured
+# — delete extension/build_id.js and pytest reports `Interrupted: 1 error during
+# collection`, not one failed gate. The change buys a message that names the
+# file and the regen command instead of a bare TypeError; the blast radius is
+# identical. Moving this into a fixture would fix that, and is deliberately not
+# done here — it would rewrite both call sites for a failure mode that only
+# occurs when a generated file has been deleted.
+PINNED_EXT_VERSION = (
+    f"{declared_ext_versions()[0]}.{GEN.build_component(COMMITTED_BUILD_MARKER)}")
+
 
 def test_build_marker_generator_is_wired_to_something(tmp_path):
     """HARNESS SELF-CHECK for the drift gate below — its positive and negative
@@ -6630,10 +6659,18 @@ def test_build_marker_generator_is_wired_to_something(tmp_path):
     after = GEN.compute_marker(src)
     assert after != before, (before, after)
 
-    # (2) so does a manifest bump
+    # (2) so does a manifest change — but specifically a NON-version one. The
+    #     earlier form of this assertion overwrote the whole manifest with
+    #     `{"version": "0.0.0"}`, which changes every field at once and so
+    #     could not tell "the manifest is hashed" apart from "the version is
+    #     hashed". Since the version is now normalised away (it is DERIVED from
+    #     the marker), that distinction is the whole point — see
+    #     test_marker_ignores_the_version_but_not_the_rest_of_the_manifest.
     src2 = tmp_path / "ext2"
     shutil.copytree(src, src2)
-    (src2 / "manifest.json").write_text('{"version": "0.0.0"}', encoding="utf-8")
+    mf2 = src2 / "manifest.json"
+    mf2.write_text(mf2.read_text(encoding="utf-8").replace(
+        '"permissions": [', '"permissions": ["idle", ', 1), encoding="utf-8")
     assert GEN.compute_marker(src2) != GEN.compute_marker(src)
 
     # (3) build_id.js is EXCLUDED (no self-reference): rewriting it must NOT move
@@ -6673,6 +6710,309 @@ def test_build_marker_check_mode_agrees_with_the_gate():
     verdict as the CI gate above (a check mode that could disagree would be a
     second source of truth about what is current)."""
     assert GEN.main(["--check"]) == 0
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PER-BUILD VERSION. The marker is the fail-closed staleness authority,
+# but it is invisible in `brave://extensions`, where a human only ever sees a
+# VERSION. Two profiles once both read `0.8.1` while running different code —
+# the version was hand-bumped, so it did not move between builds and could not
+# separate them. It is now DERIVED from the marker, so it moves whenever the
+# code moves and a stale profile is legible at a glance.
+#
+# An ALL-CLEAR (`extension_stale: false`) comes from the MARKER alone — that is
+# the half that matters, and no version-shaped signal can produce it. A `true`
+# can ALSO come from a version disagreement (`server.py:883-884`, `:887-891`),
+# so "the marker and nothing else" is wrong in that direction and this comment
+# said exactly that until round 2 caught the third copy of it.
+# The version is a human signal; do not make it load-bearing.
+# --------------------------------------------------------------------------- #
+def _ext_copy(tmp_path, name="ext"):
+    """A throwaway copy of the real extension source."""
+    src = tmp_path / name
+    src.mkdir()
+    shutil.copy(EXT_DIR / "manifest.json", src / "manifest.json")
+    for js in EXT_DIR.glob("*.js"):
+        shutil.copy(js, src / js.name)
+    return src
+
+
+def _set_version(ext_dir, version):
+    mf = ext_dir / "manifest.json"
+    text = GEN.MANIFEST_VERSION_RE.sub(f'"version": "{version}"',
+                                       mf.read_text(encoding="utf-8"), count=1)
+    mf.write_text(text, encoding="utf-8")
+
+
+def test_marker_ignores_the_version_but_not_the_rest_of_the_manifest(tmp_path):
+    """THE EXCLUSION, with its positive control in the same test.
+
+    NEGATIVE half: a version-only edit must NOT move the marker. If it did, the
+    derivation would be a recurrence rather than a definition and regeneration
+    would never converge (see test_regeneration_converges).
+
+    POSITIVE half — the one that stops this being vacuous: a NON-version edit to
+    the very same file must still move it. An exclusion implemented as "skip
+    manifest.json entirely" would pass the negative half and silently stop
+    guarding permissions, the service-worker entry point and the description."""
+    src = _ext_copy(tmp_path)
+    before = GEN.compute_marker(src)
+
+    _set_version(src, "9.9.9.65535")
+    assert GEN.compute_marker(src) == before, (
+        "a version-only change moved the marker — the version<->marker cycle "
+        "is back and regeneration cannot converge")
+
+    mf = src / "manifest.json"
+    mf.write_text(mf.read_text(encoding="utf-8").replace(
+        '"alarms"', '"alarms", "idle"', 1), encoding="utf-8")
+    assert GEN.compute_marker(src) != before, (
+        "a PERMISSIONS change did not move the marker — the exclusion is too "
+        "wide and the manifest is no longer guarded at all")
+
+
+def test_marker_normalisation_does_not_touch_manifest_version_key(tmp_path):
+    """`"manifest_version": 3` must survive normalisation untouched.
+
+    The regex looks for `"version"` with a literal opening quote, which cannot
+    match inside `"manifest_version"`. Pinned because a looser pattern (a bare
+    `version`) would neutralise the MV3 declaration too — producing a manifest
+    Chrome refuses to load, which presents exactly like a dead bridge."""
+    src = _ext_copy(tmp_path)
+    out = GEN.normalised_manifest_bytes(src / "manifest.json").decode("utf-8")
+    assert '"manifest_version": 3' in out, out[:200]
+    assert GEN.VERSION_PLACEHOLDER in out
+    # ...and exactly one substitution happened, not two.
+    assert out.count("<NORMALISED-FOR-MARKER>") == 1, out[:200]
+
+
+def test_normalisation_fails_loudly_on_a_manifest_with_no_version(tmp_path):
+    """NEGATIVE CONTROL. A manifest the regex cannot locate a version in must
+    RAISE, not fall back to hashing raw bytes — the fallback would restore the
+    cycle on precisely the malformed input."""
+    src = _ext_copy(tmp_path)
+    mf = src / "manifest.json"
+    mf.write_text(GEN.MANIFEST_VERSION_RE.sub("", mf.read_text(
+        encoding="utf-8"), count=1), encoding="utf-8")
+    with pytest.raises(AssertionError, match="expected exactly ONE"):
+        GEN.normalised_manifest_bytes(mf)
+
+
+def test_version_build_component_is_the_marker(tmp_path):
+    """The version's last component IS the marker's first 4 hex chars, so the
+    two signals can never disagree about which build is loaded."""
+    src = _ext_copy(tmp_path)
+    marker = GEN.compute_marker(src)
+    version = GEN.derive_version(src, marker=marker)
+    assert version.endswith("." + str(int(marker[:4], 16)))
+    assert version.startswith("0.8.1."), version
+
+
+def test_version_stays_inside_chromes_component_cap(tmp_path):
+    """Chrome caps every dotted component at 65535 and refuses to LOAD a
+    manifest that breaks it — a failure that looks like a dead bridge, not like
+    a bad version. 4 hex chars max out at exactly 65535, so this holds by
+    construction; pinned so widening VERSION_HEX_CHARS fails HERE, loudly,
+    rather than in Brave."""
+    assert int("f" * GEN.VERSION_HEX_CHARS, 16) == GEN.VERSION_COMPONENT_MAX
+    src = _ext_copy(tmp_path)
+    parts = GEN.derive_version(src).split(".")
+    assert 1 <= len(parts) <= 4, parts
+    for p in parts:
+        assert p.isdigit() and 0 <= int(p) <= GEN.VERSION_COMPONENT_MAX, p
+        assert p == str(int(p)), f"leading zero in {p!r} — Chrome rejects it"
+
+
+def test_deriving_from_an_already_derived_version_is_idempotent(tmp_path):
+    """`version_base` takes the first three components, so re-deriving must not
+    keep appending. Without this the version grows a component per build until
+    Chrome rejects it at the 5th."""
+    src = _ext_copy(tmp_path)
+    once = GEN.derive_version(src)
+    _set_version(src, once)
+    assert GEN.derive_version(src) == once
+    _set_version(src, once)
+    assert GEN.derive_version(src) == once
+    assert once.count(".") == 3, once
+
+
+@pytest.mark.parametrize("bad", [
+    "0.8.1-beta",   # a pre-release suffix Chrome rejects
+    "v0.8.1",       # a leading v
+    "0.08.1",       # a leading zero
+    "0.8.1 ",       # trailing whitespace inside the value
+    "0.8.65536",    # one past Chrome's per-component cap
+])
+def test_an_illegal_release_base_is_refused_not_concatenated(tmp_path, bad):
+    """Each of these once produced a manifest Chrome REFUSES TO LOAD, and
+    `--check` certified four of the five as OK.
+
+    The build component had a range guard; the human-owned BASE had none, and
+    the concatenation was never validated. So `0.8.1-beta` became
+    `0.8.1-beta.43738`, was WRITTEN to the manifest, and passed the very command
+    the README tells you to run before deploying. An extension that fails to
+    load presents as a bridge that is down — nothing points at the version."""
+    src = _ext_copy(tmp_path)
+    _set_version(src, bad)
+    with pytest.raises(AssertionError, match="Chrome will not accept"):
+        GEN.derive_version(src)
+    with pytest.raises(AssertionError, match="Chrome will not accept"):
+        GEN.write_manifest_version(src)
+    # ...and the manifest was NOT written on the way to raising.
+    assert GEN.read_manifest_version(src / "manifest.json") == bad
+
+
+@pytest.mark.parametrize("short", ["0.9", "1", ""])
+def test_a_base_with_too_few_components_is_refused(tmp_path, short):
+    """A short base has no fixpoint, so silently accepting it freezes one
+    build's id into the middle of the release forever.
+
+    Measured on the pre-fix code: `0.9` -> `0.9.43738`, whose own base is then
+    read as `0.9.43738` -> `0.9.43738.43738`. It converges only after component
+    3 has become a build id that never updates again, while the scheme claims
+    that position is part of the human release. Slicing cannot tell a
+    3-component base from a 2-component base that already has a build id
+    appended, so the shape is required rather than inferred."""
+    src = _ext_copy(tmp_path)
+    _set_version(src, short)
+    with pytest.raises(AssertionError, match="component"):
+        GEN.derive_version(src)
+
+
+def test_derivation_reaches_a_fixpoint_in_ONE_regeneration(tmp_path):
+    """Stronger than test_regeneration_converges: not just 'the marker is
+    stable', but '--check is clean immediately after ONE write'. That is the
+    property a human depends on — regenerate, then verify.
+
+    ⚠ INVARIANT GUARD, not regression coverage — measured, not assumed: this
+    test PASSES on the pre-fix code, because the shipped manifest's base is a
+    legal 3-component string and the defect only reached a non-3-component one.
+    It pins the property for the shape we ship; the regression coverage for the
+    actual bug is test_a_base_with_too_few_components_is_refused, which is red
+    at the pre-fix tree."""
+    src = _ext_copy(tmp_path)
+    written = GEN.write_manifest_version(src)
+    assert GEN.derive_version(src) == written
+    assert GEN.read_manifest_version(src / "manifest.json") == written
+
+
+@pytest.mark.parametrize("bad", [
+    # ⚠ The 5-component case deliberately contains a part ABOVE 255, so no
+    # four consecutive parts of it can be read as an IPv4 address. devrc is a
+    # PUBLIC repo and `scripts/tests/test_no_public_ips.py` fails the build on
+    # any committed routable IP literal — including one inside a string or a
+    # comment, which is why this note describes the shape instead of quoting
+    # the value that tripped it. An earlier revision used five small ascending
+    # integers, whose first four formed exactly such an address. The current
+    # value doubles as the realistic shape: an already-derived version that
+    # got a second build component appended.
+    "0.8.1-beta", "v0.8.1", "0.08.1", "0.8.1.43738.1", "0.8.65536", "0.8.²",
+    "0.8." + "9" * 5000,
+])
+def test_write_manifest_version_refuses_an_illegal_CALLER_SUPPLIED_version(
+        tmp_path, bad):
+    """The `version=` argument is the ONE path to the manifest that does not go
+    through `derive_version`, so it is the only place this check can fire.
+
+    Round 2 found the previous guard sitting in `derive_version`, where it was
+    UNREACHABLE — `version_base` and `build_component` each validate their own
+    half, so the concatenation is legal by construction — while carrying a
+    comment calling it "the last point before it is written to a manifest".
+    Meanwhile `write_manifest_version(d, "0.8.1-beta")` wrote a manifest Chrome
+    refuses to load, unchecked. A guard that reads as defence-in-depth while
+    being dead is worse than none: it stops anyone looking at the entry point
+    that is actually open.
+
+    Two params pin ValueError routes out of `int(part)`, each closed by a
+    different clause and each raising a bare CPython error without it:
+    `0.8.²` — `'²'.isdigit()` is True while `int('²')` raises (closed by
+    `isascii()`); and the 5000-digit one — CPython refuses `int()` past 4300
+    digits (closed by the `MAX_COMPONENT_DIGITS` length check). Both lose the
+    message naming Chrome's rule and the file to fix."""
+    src = _ext_copy(tmp_path)
+    before = GEN.read_manifest_version(src / "manifest.json")
+    with pytest.raises(AssertionError):
+        GEN.write_manifest_version(src, bad)
+    assert GEN.read_manifest_version(src / "manifest.json") == before, \
+        "the manifest was written on the way to raising"
+
+
+def test_build_component_refuses_a_missing_marker():
+    """`read_marker` returns None by contract when build_id.js is unreadable.
+    Indexing that raises TypeError from whichever line called it — and for a
+    MODULE-LEVEL caller that lands at import, turning one gate failure into a
+    collection error that hides every other test in this file."""
+    with pytest.raises(AssertionError, match="need a build marker"):
+        GEN.build_component(None)
+    with pytest.raises(AssertionError, match="need a build marker"):
+        GEN.build_component("ab")
+
+
+def test_a_human_release_bump_is_preserved(tmp_path):
+    """The first three components are the human's. Bumping 0.8.1 -> 0.9.0 by
+    hand must survive regeneration, with only the build component recomputed."""
+    src = _ext_copy(tmp_path)
+    _set_version(src, "0.9.0")
+    got = GEN.derive_version(src)
+    assert got.startswith("0.9.0."), got
+    assert got == f"0.9.0.{int(GEN.compute_marker(src)[:4], 16)}"
+
+
+def test_regeneration_converges(tmp_path):
+    """THE FIXPOINT. Writing the derived version back into the manifest must not
+    change the marker that derived it — otherwise every build produces a new
+    marker from the previous build's version write, forever.
+
+    This is the property the whole normalisation exists to buy, so it is
+    asserted directly rather than inferred from it."""
+    src = _ext_copy(tmp_path)
+    marker1 = GEN.compute_marker(src)
+    v1 = GEN.write_manifest_version(src)
+    marker2 = GEN.compute_marker(src)
+    assert marker2 == marker1, (marker1, marker2)
+    v2 = GEN.write_manifest_version(src)
+    assert v2 == v1 == GEN.read_manifest_version(src / "manifest.json")
+    assert GEN.compute_marker(src) == marker1
+
+
+def test_committed_manifest_version_matches_the_marker():
+    """THE GATE, version half. Ships alongside the marker gate: an extension
+    change that regenerated neither fails on both, and one that somehow moved
+    only the marker still fails here."""
+    want = GEN.derive_version(EXT_DIR)
+    have = GEN.read_manifest_version(EXT_DIR / "manifest.json")
+    assert have == want, (
+        f"extension/manifest.json declares version {have!r} but the build "
+        f"marker derives {want!r}. The version is what a HUMAN reads in "
+        f"brave://extensions to tell a stale profile from a current one, so a "
+        f"frozen version makes two different builds look identical there. "
+        f"Regenerate in the SAME commit as the source change:\n\n"
+        f"    {GEN.REGEN_CMD}\n")
+
+
+def test_check_mode_goes_red_on_a_stale_version_alone(tmp_path, monkeypatch):
+    """MUTATION CONTROL for the gate above — a check that cannot go red on a
+    stale version while the MARKER is fine is testing only the marker, and the
+    version half would be decorative.
+
+    Both halves are also asserted to report independently: a green marker must
+    not suppress the version's red."""
+    src = _ext_copy(tmp_path)
+    GEN.write_manifest_version(src)
+    (src / "build_id.js").write_text(
+        f'export const BUILD_MARKER = "{GEN.compute_marker(src)}";\n',
+        encoding="utf-8")
+    monkeypatch.setattr(GEN, "EXT_DIR", src)
+    monkeypatch.setattr(GEN, "BUILD_ID_FILE", src / "build_id.js")
+    monkeypatch.setattr(GEN, "MANIFEST_FILE", src / "manifest.json")
+
+    assert GEN.main(["--check"]) == 0, "control: a clean tree must pass"
+
+    # Break ONLY the version. The marker still matches its source.
+    _set_version(src, "0.8.1.1")
+    assert GEN.main(["--check"]) == 1, (
+        "check mode passed with a stale version — the version half of the gate "
+        "is inert")
 
 
 def test_service_worker_imports_the_marker_as_a_literal():
@@ -9015,11 +9355,20 @@ def test_not_owned_tab_is_distinct_from_no_owned_tab():
 def test_poll_budget_warning_still_claims_extension_0_4_0_plus():
     """#248's `applies_to_extension: "0.4.0+"` claim must stay accurate after the
     manifest bump to 0.5.0 — 0.5.0 IS 0.4.0+, so the claim holds and the string
-    must NOT have been 'helpfully' bumped along with the manifest."""
+    must NOT have been 'helpfully' bumped along with the manifest.
+
+    Reads only MAJOR and MINOR, by slice rather than by exact unpack. The version
+    is now `<release>.<build>` (four components — see extension/README.md
+    § Versioning), and the original `major, minor, _ =` raised ValueError on it:
+    a three-way unpack silently encodes 'a version has exactly three
+    components', which is an assumption about FORMAT that this test does not
+    mean to make. Its claim is a lower bound on major.minor and nothing else."""
     manifest = json.loads(
         (Path(__file__).resolve().parents[1] / "extension" / "manifest.json")
         .read_text())
-    major, minor, _ = (int(x) for x in manifest["version"].split("."))
+    parts = manifest["version"].split(".")
+    assert len(parts) >= 2, f"unparseable version {manifest['version']!r}"
+    major, minor = (int(x) for x in parts[:2])
     assert (major, minor) >= (0, 4), \
         f"manifest {manifest['version']} no longer satisfies 0.4.0+"
 
