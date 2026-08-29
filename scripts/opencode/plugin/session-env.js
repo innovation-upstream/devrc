@@ -36,9 +36,9 @@
 //     in this directory.
 //
 // --------------------------------------------------------------------------- #
-// THE RUNTIME CONTRACT — READ OUT OF THE SHIPPED 1.18.18 BINARY, not inferred.
+// THE RUNTIME CONTRACT — READ OUT OF THE SHIPPED 1.18.21 BINARY, not inferred.
 // An earlier version of this header carried these as "⚠ INFERRED"; they were
-// then read directly from /nix/store/…-opencode-1.18.18 and are quoted here so
+// then read directly from /nix/store/…-opencode-1.18.21 and are quoted here so
 // nobody re-derives them from behaviour:
 //
 //   * `Plugin.trigger`:
