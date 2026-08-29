@@ -1348,7 +1348,25 @@ TARGET_FLOORS=(
   # — inside the drift band (max(60, 59/4)) and therefore silent, the same slack
   # the line above was re-pinned for. Rule applied to the gate's own count:
   # 115 - min(50, max(1, 115/20)) = 115 - 5 = 110.
-  "scripts/collector/claude/tests|110"
+  #
+  # 2026-08-29, the skill-usage block (`skills_used` / `skills_invoked` /
+  # `commands_typed` on the Layer-A rollup, devrc#1000): 115 -> 172 collected,
+  # +57 all in the new scripts/collector/claude/tests/test_session_tailer_skills.py.
+  # 🔴 The gate FORCED this one — 172 is above the drift ceiling (floor 110 +
+  # max(60, 110/4) = 170), so the run went RED on the ceiling check, which is
+  # what that check exists for. Number copied VERBATIM from the line the gate
+  # printed on the MERGED tree (this branch + origin/main at 07890ebc):
+  #
+  #   Raise the TARGET_FLOORS entry to "scripts/collector/claude/tests|164"
+  #
+  # — that is the run's own count through the documented rule
+  # (172 - min(50, max(1, 172/20 = 8)) = 164), not arithmetic anyone did by
+  # hand, and not reconciled against the branch-only run (which collected 170
+  # and passed). ⚠ ZERO new skips on this target; the new file needed no
+  # HERMETIC_TARGETS entry because scripts/collector/claude/tests is already a
+  # directory target, and movement on THIS line is the evidence the gate runs
+  # the new file at all.
+  "scripts/collector/claude/tests|164"
   "scripts/collector/i3/tests|12"
   "scripts/collector/browser-ext/tests|12"
   "scripts/collector/opencode/tests|162"
