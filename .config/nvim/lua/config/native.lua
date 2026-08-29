@@ -18,30 +18,38 @@ vim.cmd([[
 -- `osc52 = "OnlyCopy"` (nix/programs/alacritty) so it never will -- wiring
 -- its paste straight through would hang for 10s on every `"+p`.
 if vim.env.DISPLAY == nil or vim.env.DISPLAY == '' then
-  local osc52 = require('vim.ui.clipboard.osc52')
+  -- pcall, not a bare require: this file is sourced by init.lua, so an error
+  -- raised here aborts the rest of it -- map/native.lua, plugins.lua and
+  -- nvim_lsp.lua never load. That would turn a missing clipboard module into
+  -- a broken editor, on exactly the ssh sessions this block exists to serve.
+  -- Failing soft leaves neovim's own `clipboard: No provider`, which is the
+  -- behaviour we had before this block existed.
+  local ok, osc52 = pcall(require, 'vim.ui.clipboard.osc52')
 
-  -- Seeded empty so a paste before any yank returns empty rather than nil.
-  local cache = { ['+'] = { { '' }, 'v' }, ['*'] = { { '' }, 'v' } }
+  if ok then
+    -- Seeded empty so a paste before any yank returns empty rather than nil.
+    local cache = { ['+'] = { { '' }, 'v' }, ['*'] = { { '' }, 'v' } }
 
-  local function copy(reg)
-    local emit = osc52.copy(reg)
-    return function(lines, regtype)
-      cache[reg] = { lines, regtype or 'v' }
-      emit(lines)
+    local function copy(reg)
+      local emit = osc52.copy(reg)
+      return function(lines, regtype)
+        cache[reg] = { lines, regtype or 'v' }
+        emit(lines)
+      end
     end
-  end
 
-  local function paste(reg)
-    return function()
-      return cache[reg]
+    local function paste(reg)
+      return function()
+        return cache[reg]
+      end
     end
-  end
 
-  vim.g.clipboard = {
-    name = 'OSC 52',
-    copy = { ['+'] = copy('+'), ['*'] = copy('*') },
-    paste = { ['+'] = paste('+'), ['*'] = paste('*') },
-  }
+    vim.g.clipboard = {
+      name = 'OSC 52',
+      copy = { ['+'] = copy('+'), ['*'] = copy('*') },
+      paste = { ['+'] = paste('+'), ['*'] = paste('*') },
+    }
+  end
 end
 
 -- Custom command to print absolute path of current file

@@ -175,6 +175,42 @@ def test_paste_is_not_wired_to_the_blocking_reader():
     )
 
 
+def test_the_module_load_cannot_abort_the_rest_of_the_config():
+    """HERMETIC. A bare `require` here would break far more than the clipboard.
+
+    native.lua is sourced by init.lua, which goes on to source map/native.lua,
+    plugins.lua and nvim_lsp.lua. An error raised at require time aborts all of
+    them, so a moved or missing clipboard module would present as a broken
+    editor -- on precisely the ssh sessions this block exists to serve. Failing
+    soft leaves neovim's own `clipboard: No provider`, i.e. the pre-fix
+    behaviour, which is a bad clipboard rather than a bad editor.
+    """
+    block = _guarded_block()
+    assert block, f"no DISPLAY-guarded vim.g.clipboard block found in {NATIVE_LUA}"
+
+    assert "pcall(require" in block, (
+        "the osc52 module is loaded with a bare require; an error would abort "
+        "native.lua and take map/native.lua, plugins.lua and nvim_lsp.lua with it"
+    )
+    # Pin the CONSEQUENCE, not just the call: the provider must be installed
+    # only on the success branch, or a failed require still reaches osc52.copy
+    # on a nil value and raises the very error pcall was added to prevent.
+    #
+    # Checked for presence BEFORE the ordering compare on purpose -- str.find
+    # returns -1 when absent, and -1 < <any real index> is true, so dropping
+    # the branch entirely would satisfy an ordering-only assertion vacuously.
+    ok_branch = block.find("if ok then")
+    assign = block.find("vim.g.clipboard")
+    assert ok_branch != -1, (
+        "no `if ok then` branch: pcall's result is never tested, so a failed "
+        "require falls straight through to osc52.copy on a nil value"
+    )
+    assert ok_branch < assign, (
+        "vim.g.clipboard is assigned outside the `if ok then` branch, so a "
+        "failed require still crashes native.lua"
+    )
+
+
 def test_the_fallback_is_conditional_on_there_being_no_display():
     """HERMETIC. An unconditional provider would break the local X11 path."""
     src = NATIVE_LUA.read_text()
