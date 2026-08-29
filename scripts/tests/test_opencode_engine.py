@@ -806,8 +806,6 @@ HISTORICAL_VERSION_CLAIMS = (
     ("scripts/browser-bridge/README.md", "Measured in the shipped",
      "TaskTool.execute child-session internals — not observable from `debug "
      "agent --pure`, so not re-derived at the new version"),
-    ("scripts/browser-bridge/README.md", "The hosts CONVERGED on 2026-08-15",
-     "dated narrative of a PAST pin move; the version names the move, not the present"),
     ("scripts/browser-bridge/browser", "Measured in the shipped",
      "same TaskTool internals claim as the README's, in the CLI's own comment"),
     ("scripts/browser-bridge/browser", "creates a child session",
@@ -886,14 +884,34 @@ HISTORICAL_VERSION_CLAIMS = (
     # the pre-bump one as evidence that the bump changed nothing — history, not a
     # claim about what runs. Distinct from the deployed-state category above,
     # which is gone: these do not stop being true on the next ship.
-    ("scripts/browser-bridge/README.md", "resolution was measured identical on",
-     "cites the pre-bump measurement as evidence the bump was a no-op"),
-    ("scripts/browser-bridge/README.md", "pins** (measured identical on",
-     "same, for the custom-tool claim"),
-    ("scripts/browser-bridge/reference/agent.md", "the same resolution was measured on",
-     "same, for the misattribution warning"),
-    ("scripts/browser-bridge/reference/agent.md", "and it resolved identically on",
-     "same, for the gate claim"),
+    # 🔴 REWRITTEN AFTER AUDIT (2026-08-29). These four entries used to exempt
+    # sentences that CONJOINED two claims — "both hosts run <v> **and** both
+    # resolve browser-only". The version half is re-derivable at every bump (it
+    # is a `readlink -f` at the consumer); the resolution half is not, because
+    # `browser-agent` is absent from ENGINE_AGENTS and this repo's browser-agent
+    # tests drive a FAKE opencode stub. A conjunction cannot be half-exempt, so
+    # the pin re-key relabelled the unmeasured half along with the measured one —
+    # six claims that read as verified at a version nothing had checked them
+    # against. (No version literals in this comment: see the rule two entries
+    # down — a number here is itself a claim in the pin surface, and this comment
+    # tripped that rule on its first draft, which is the second time in one
+    # session.) The sentences are now SPLIT: the host-version half
+    # carries the pin and is re-derived, and each resolution half is dated to its
+    # last real measurement and exempted here.
+    ("scripts/browser-bridge/README.md", "browser-only RESOLUTION is last verified",
+     "browser-agent resolution — not re-derived at the pin; nothing in CI observes it"),
+    ("scripts/browser-bridge/README.md", "It was NOT re-derived at the",
+     "the pre-bump measurements cited as evidence the bumps were no-ops"),
+    ("scripts/browser-bridge/README.md", "since the check",
+     "custom-tool mechanism — needs the real binary, not re-derived at the pin"),
+    ("scripts/browser-bridge/README.md", "below needs the real binary",
+     "the pre-bump measurement behind that custom-tool claim"),
+    ("scripts/browser-bridge/reference/agent.md", "It has NOT been re-derived at",
+     "the misattribution warning's evidence — measured at three older versions"),
+    ("scripts/browser-bridge/reference/agent.md", "resolution itself is last measured",
+     "browser-agent resolution for the gate claim — not re-derived at the pin"),
+    ("scripts/browser-bridge/reference/agent.md", "and resolved identically on",
+     "the pre-bump measurements behind that gate claim"),
     ("scripts/tests/test_opencode_engine.py", 'Five lines said "both hosts run',
      "this ledger's own record of the exemptions it used to carry"),
     ("scripts/browser-bridge/README.md", "opencode JSON envelope (verified live, opencode",

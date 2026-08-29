@@ -208,8 +208,14 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   analyze-service index` fixture commits on the branch (reproduced twice; task #322). At that
   moment `core.hooksPath` was set **repo-LOCALLY** to `<repo>/githooks`. Hours later, same
   session, it was unset everywhere with no action by anyone here — and `install.sh` sets the
-  key `--global`, so the `--local` value came from something else. **Neither "installed" nor
-  "uninstalled" is safe to carry in prose.** 🔴 **A pre-push gate that runs the suite IN the
+  key `--global`, so the `--local` value came from something else. **That something else is
+  now IDENTIFIED** (2026-08-28): the `civit-datapacket-talos` session
+  `5e58d9a0-0a99-4c9c-bf65-e40b403e4d55` set it at `2026-08-21T22:16:14Z` while verifying the
+  pre-push gate, and unset it itself at `2026-08-23T21:32:51Z` — so "no action by anyone here"
+  was true of *this* repo's sessions and false of the box. It explains the `githooks/`
+  sighting ONLY; the 08-20 `.git/hooks` ones remain unattributed. **Neither "installed" nor
+  "uninstalled" is safe to carry in prose**, and the attribution does not make it stable —
+  re-measure anyway. 🔴 **A pre-push gate that runs the suite IN the
   worktree can corrupt the branch it is pushing** — see #322 before using `--no-verify` to get
   past it, and re-check the branch afterwards. ⚠ **Check for a REPO-LOCAL `core.hooksPath` before installing**: `install.sh` sets the
   key `--global`, and a local one wins — observed pointing at `.git/hooks` (08-20, workbench
