@@ -124,14 +124,38 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
    state and `FakeElement` to set `nodeType = 1`, or the test passes vacuously. Repro script
    + controls: see the closed investigation above. **Do this only after rank 1** — the file
    is another session's live working copy.
-3. **Add the config/remote worktree surface to `claude/RULES.md`** (repo: `devrc`) — a
-   worktree does not isolate `git remote add` or any `git config --local` write. Evidence in
-   the closed investigation above; it cost two sessions a false "written repeatedly".
-4. **Consider `date` in the espanso picker** (repo: `devrc`, `nix/home.nix`) — it still
-   resolves `None`, matching `:eos` and `:roo`, neither of which is *named* `date`, so the
-   exact-trigger tie-break correctly does not apply. Only worth acting on if the keylog
-   dataset shows it is a term actually typed — which it can now answer, because attribution
-   works.
+3. ✅ **DONE — the config/remote worktree surface is in `claude/RULES.md`** as `#1009` (the
+   sixth surface, plus an "an mtime cannot NAME a writer" clause on the find-the-WRITER
+   rule, plus the `worktree-config` archive anchor). It needed a ceiling bump: floor-relative
+   slack was **4 B**, the eviction sweep was re-run by the ledger's own documented method and
+   returned **0 B** for the third consecutive time, and the ledger had already predicted "the
+   next NEW rule pays ceiling". `MAX_BYTES` 41,400 → 42,450, slack held at precedent.
+4. ✅ **ANSWERED — `date` needs NO action, and that is measured, not assumed.** The condition
+   this doc set was "only if the keylog shows it is a term actually typed". It is not: over
+   the observed search stream, **56 term rows and `date` appears ZERO times**, with `ask`
+   visible 4× in the same output as the positive control — so the zero is a measurement and
+   not an empty harness. `date` matching `:eos`/`:roo` at all is a spurious SUBSTRING hit
+   (`date` ⊂ "upd**ate**"); it costs nothing because nobody searches it.
+
+### Opened while closing the above — all blocked until `#1021` lands
+- 🔴 **`#1021` — `main` IS RED, repo-wide.** `test_live_existing_resolutions_not_made_ambiguous`
+  fails on an unmodified `origin/main` checkout: `{'ask': (':acq', None, [':dacq', ':acq'])}`.
+  The 08-28 `:acq`/`:dacq` split cleaned the label but left `"ask"` in BOTH snippets'
+  `search_terms`, so the term names neither and `#999`'s tie-break correctly declines. The
+  comment above those lines already said ":acq owns ask/clarify/questions alone" — the
+  comment was right and the data contradicted it. Measured on the real stream: attribution
+  goes **92/171 → 148/171**, recovering **56 fires** of the config's highest-traffic term.
+  **Nothing else merges until this does.**
+- **`#1015` — the store-api load flake** (see the corrected `#996` note below).
+- **`#1005` / `#1009`** — this doc and the RULES surface; both blocked on `main`.
+- ⚠ **UNEXPLAINED, do not guess:** the CI-only `opencode` version failure (`'1.18.21'` vs
+  `'1.18.18'`). `test_opencode_config.py` passes locally — 640 tests — on a checkout
+  confirmed to BE current `origin/main` and to include the `flake.lock` bump. Same tree,
+  opposite results, so the variable is environmental and not yet identified. Needs the
+  sandbox tier run against that file specifically.
+- **NOT FILED, and deliberately named as such:** the Tekton capacity problem behind the
+  flake. It has no closing condition anyone can check yet, so it is not being minted as a
+  work object — see the object-leak rule.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The ladder never returned a clean round in twelve.** The stop rule assumes
@@ -162,8 +186,19 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 - **Five flakes in `test_subsystem_store_api.py` in one day**, all on unrelated PRs, and
   its assertion message described the OPPOSITE of the failure (`len(answers) == 0`,
   `raw == b''`, under the text "a second response followed the 200"). Four cycles were lost
-  to that message before a pod was read in time. **CLOSED by another session's `#996`**
-  (audit BEFORE responding + serialised sink); `saw_eof` is now asserted 11 times.
+  to that message before a pod was read in time. 🔴 **NOT CLOSED — this doc previously
+  said `#996` closed it, and 2026-08-29 falsifies that.** `#996` fixed audit ordering and
+  serialised the sink; it never touched the CLIENT bound, which is where the flake
+  actually lives. The same file went red again on `TestTheActorComesFromTheTOKEN`, on
+  MULTIPLE unrelated PRs at once, out of `socket.py` with `TimeoutError` — a 15 s
+  localhost read losing the scheduler while 12 Tekton pipelineruns shared the node and
+  this suite ran 637 s under xdist. **6 of 10 devrc runs in one window failed this way.**
+  Fix in `#1015` (one `HANG_TIMEOUT`, 15 s → 60 s, hang-detector proven still to fire at
+  the new bound). 🔴 That is the SYMPTOM: the cause is a 10-minute parallel suite
+  competing with a saturated cluster, which is Tekton capacity and not this repo's file.
+- 🔴 **A fix landing is not the same as a family closing** — and the tell is that the
+  claim was written from the fix's *description* rather than from what it touched. Before
+  writing "closed", name the mechanism and check the fix actually reaches it.
 
 ## How to verify
 ```bash
