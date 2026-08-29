@@ -146,6 +146,15 @@ def live_scan(terms=()):
         detail = (stderr or stdout or "").strip()[:200]
         return dict(out, error=(f"session-manager exited {rc} and produced no "
                                 f"JSON on stdout: {detail!r}"))
+    # 🔴 VALID JSON IS NOT A REPORT. `json.loads("[]")` and `json.loads("null")`
+    # both succeed and then `report.get` raises AttributeError OUTSIDE the try —
+    # crashing a function whose entire contract is to return a status-
+    # discriminated result rather than raise. A truncated pipe or a wrapper that
+    # prints a bare array is enough.
+    if not isinstance(report, dict):
+        return dict(out, error=(f"session-manager exited {rc} and produced "
+                                f"{type(report).__name__}, not a report "
+                                "object, on stdout"))
     hosts = report.get("hosts") or {}
     out["hosts_reachable"] = sorted(k for k, v in hosts.items() if v.get("reachable"))
     out["hosts_unreachable"] = sorted(k for k, v in hosts.items()
@@ -167,6 +176,11 @@ def live_session_ids(res):
     🔴 `None` MEANS UNMEASURED, and it is what stops an archive hit being
     labelled CLOSED on the strength of a scan that never ran. A caller must
     branch on it; `set()` is the measured "the fleet holds no session ids".
+
+    ⚠ A NON-`None` RETURN IS NOT PROOF OF FULL COVERAGE. `status == "ok"` means
+    at least ONE host answered, so this set can be built from a partial fleet.
+    `live_coverage_complete` is the second half of the answer and a caller that
+    wants to say CLOSED needs BOTH — see `live_state_of`.
     """
     if res.get("status") != "ok":
         return None
@@ -174,11 +188,44 @@ def live_session_ids(res):
             if r.get("claude_session_id")}
 
 
-def live_state_of(session_id, live_ids):
-    """`LIVE` / `CLOSED` / `UNMEASURED` for one archive hit."""
+def live_coverage_complete(res):
+    """Did EVERY host answer? Only then can a MISS mean anything.
+
+    🔴 THE DEFECT THIS EXISTS FOR. `live_scan` sets `status: "ok"` when ANY host
+    answers, and `hosts_unreachable` may be non-empty in that state. Off that
+    set alone, every archive hit whose session lives on the DOWN host was
+    stamped `CLOSED` — a confident "that session is finished" about a machine
+    nobody talked to — with `live_ids_measured: true` and no warning printed.
+    On this fleet the laptop is a secondary machine that is frequently asleep,
+    so the partial fleet is the COMMON degraded state, not an exotic one.
+
+    Per-host attribution is deliberately NOT attempted: an archive hit carries a
+    `cwd` and a session id but no host, and the Claude transcript corpus is read
+    from local disk while the opencode corpus is read from both hosts — so there
+    is no sound mapping from a hit to the host that would confirm it. The
+    coarse answer is the one that is true.
+    """
+    return res.get("status") == "ok" and not res.get("hosts_unreachable")
+
+
+def live_state_of(session_id, live_ids, coverage_complete=True):
+    """`LIVE` / `CLOSED` / `UNMEASURED` for one archive hit.
+
+    🔴 A POSITIVE IS A MEASUREMENT WHATEVER THE COVERAGE; A NEGATIVE IS NOT.
+    Finding the id on a host that answered proves the session is live, and no
+    unreachable peer can make that false. Failing to find it proves nothing
+    unless every host answered — so a miss under partial coverage is
+    `UNMEASURED`, never `CLOSED`.
+
+    `coverage_complete` defaults to True so the parameter cannot be forgotten
+    into a silently WEAKER verdict; forgetting it yields the strict old
+    behaviour, which is wrong loudly rather than wrong quietly.
+    """
     if live_ids is None:
         return "UNMEASURED"
-    return "LIVE" if session_id in live_ids else "CLOSED"
+    if session_id in live_ids:
+        return "LIVE"
+    return "CLOSED" if coverage_complete else "UNMEASURED"
 
 
 def fmt_age(secs):
@@ -214,15 +261,32 @@ def live_tail_argv(row, lines):
             "--host", str(row.get("host")), "--plain", "--lines", str(int(lines))]
 
 
+# 🔴 THE TAIL EXIT CODES THAT ARE NOT FAILURES. `session-manager tail` returns
+# 0 for a scrollback and 3 (EXIT_EMPTY) for a window whose scrollback really is
+# empty — a MEASURED empty. Everything else (2 no-such-window, 4 host
+# unreachable, 5 no tmux server) means the scrollback was NOT obtained, and
+# rendering that as "(empty scrollback)" over exit 0 is the silent-zero failure
+# this whole tool exists to refuse. The window closing between the scan and the
+# tail is an ordinary race, not an exotic one.
+TAIL_MEASURED_RCS = (0, 3)
+
+
 def live_tail(row, lines):
+    """One window's scrollback, with `ok` DISCRIMINATED from an empty string.
+
+    `ok` is False whenever the scrollback was not obtained; `rc` travels with
+    it so a caller never has to infer the reason from an empty `text`.
+    """
     try:
         rc, stdout, stderr = RUN(live_tail_argv(row, lines))
     except Exception as e:  # noqa: BLE001
-        return {"rc": None, "text": "", "error": f"{type(e).__name__}: {e}"}
-    return {"rc": rc, "text": stdout, "error": (stderr or "").strip() or None}
+        return {"rc": None, "ok": False, "text": "",
+                "error": f"{type(e).__name__}: {e}"}
+    return {"rc": rc, "ok": rc in TAIL_MEASURED_RCS, "text": stdout,
+            "error": (stderr or "").strip() or None}
 
 
-def render_live(res):
+def render_live(res, limit=None):
     """The LIVE section. Returns a list of lines, ALWAYS non-empty."""
     out = []
     if res["status"] == "error":
@@ -252,7 +316,16 @@ def render_live(res):
         out.append("  (no live window matched these terms on the hosts that "
                    "answered)")
         return out
-    for i, r in enumerate(rows, 1):
+    # 🔴 `--limit` BOUNDS THE DISPLAY, NOT THE MEASUREMENT. The header above
+    # already printed the full match count, and `_tail_outcome` is handed the
+    # UNSLICED list — capping the ambiguity check at the display limit would
+    # turn "several matched, I refuse" into "one is showing, I will tail that
+    # one", which is guessing with extra steps.
+    shown = rows if limit is None or limit <= 0 else rows[:limit]
+    if len(shown) < len(rows):
+        out.append(f"  (showing {len(shown)} of {len(rows)} — raise --limit "
+                   "to see the rest)")
+    for i, r in enumerate(shown, 1):
         # 🔴 `hotkey_display` is READ, never derived here. `M-v` and `M-V` are
         # different sessions; the one writer of that spelling is
         # `session-manager.hotkey_display`, and re-deriving it in this renderer
@@ -432,6 +505,26 @@ def main(argv=None):
     if a.deep and not a.live:
         print("(--deep only means something with --live: without it the "
               "transcript walk always runs)", file=sys.stderr)
+    # 🔴 A FLAG THAT REACHES ONLY ONE LEG MUST SAY SO. `--any`, `--project` and
+    # `--since` are ARCHIVE-only: the live scan has no OR mode (`--match` ANDs),
+    # no cwd filter that is not `--match-path`, and no date axis at all. Left
+    # silent, `find-session.py redis vpn --any --live` sent ANDed terms to the
+    # live leg and then printed "(no live window matched these terms…)" — a
+    # measured absence under semantics the caller did not ask for. This diff
+    # already prints five notices of exactly this class; these are the rest.
+    if a.live:
+        archive_only = []
+        if a.any:
+            archive_only.append("--any (the live scan ANDs; there is no OR mode)")
+        if a.project:
+            archive_only.append("--project (try --match-path on session-manager)")
+        if a.since:
+            archive_only.append("--since (live rows have an age, not a date)")
+        if archive_only:
+            print("(ARCHIVE-ONLY flags, ignored by the live scan: "
+                  + "; ".join(archive_only)
+                  + " — the LIVE section below is NOT filtered by them)",
+                  file=sys.stderr)
 
     # ------------------------------------------------------------------ #
     # THE CLASSIC PATH — unchanged, byte for byte, including `--json`'s
@@ -459,7 +552,7 @@ def main(argv=None):
     # carry the fields the question is actually about.
     # ------------------------------------------------------------------ #
     live = live_scan(a.terms)
-    live_lines = render_live(live)
+    live_lines = render_live(live, limit=a.limit)
 
     # 🔴 ONE PREDICATE, ONE PLACE — `run_archive` is DERIVED from the reason
     # rather than computed beside it. The two were open-coded separately for one
@@ -480,6 +573,11 @@ def main(argv=None):
     run_archive = archive_reason is not None
 
     results, live_ids = [], None
+    # 🔴 `complete` GATES ONLY THE **CLOSED** VERDICT — see `live_state_of`. It
+    # starts True so that a run which never builds an id set (`live_ids is None`)
+    # still reports UNMEASURED through the `live_ids` branch, rather than
+    # depending on this flag at all.
+    coverage_complete = True
     if run_archive:
         results = archive_search(a, since)
         # 🔴 A SECOND, UNFILTERED scan, and it is not waste. The first scan was
@@ -488,7 +586,15 @@ def main(argv=None):
         # archive hit CLOSED off that set would state a measured absence about a
         # window the filter removed. Only on this path, which already costs 30 s,
         # so the fast path never pays for it.
-        live_ids = live_session_ids(live_scan())
+        unfiltered = live_scan()
+        live_ids = live_session_ids(unfiltered)
+        # ...and the COVERAGE of that scan, which is a separate fact from
+        # whether it produced a set at all. A fleet where one host was asleep
+        # yields a perfectly real id set that cannot support a single CLOSED.
+        coverage_complete = live_coverage_complete(unfiltered)
+
+    def _state(sid):
+        return live_state_of(sid, live_ids, coverage_complete)
 
     shown = results[: a.limit]
     tail_row, tail_code, tail_lines, tail_res = None, EXIT_OK, [], None
@@ -496,6 +602,23 @@ def main(argv=None):
         tail_row, tail_code, tail_lines = _tail_outcome(a, live)
         if tail_row is not None:
             tail_res = live_tail(tail_row, a.tail)
+            # 🔴 A TAIL THAT DID NOT RUN IS NOT AN EMPTY WINDOW. `rc` 2/4/5 mean
+            # the window vanished between the scan and the tail, the host went
+            # away, or there is no tmux server — none of which is "the pane is
+            # blank". Nothing branched on `rc` before, so all three printed
+            # "(empty scrollback)" and exited 0.
+            if not tail_res["ok"]:
+                tail_code = EXIT_UNAVAILABLE
+                tail_lines = [
+                    f"TAIL: FAILED — `session-manager tail` exited "
+                    f"{tail_res['rc']} for "
+                    f"{tail_row.get('session')}:{tail_row.get('window_index')} "
+                    f"on {tail_row.get('host')}: "
+                    f"{tail_res.get('error') or 'no stderr'}",
+                    "  🔴 The scrollback was NOT read. This is not an empty "
+                    "window — the window may have closed between the scan and "
+                    "the tail, or the host may have gone away.",
+                ]
 
     if a.json:
         # 🔴 A NEW ENVELOPE, not a widened list. `--json` without `--live` still
@@ -511,11 +634,19 @@ def main(argv=None):
                 "reason": archive_reason or "live matched",
                 "total": len(results),
                 # `live_state` is UNMEASURED, not CLOSED, when no live scan
-                # could supply the id set.
-                "results": [dict(render(r),
-                                 live_state=live_state_of(r["session_id"], live_ids))
+                # could supply the id set — OR when the scan that supplied it
+                # did not cover every host.
+                "results": [dict(render(r), live_state=_state(r["session_id"]))
                             for r in shown],
                 "live_ids_measured": live_ids is not None,
+                # 🔴 THE SECOND HALF, PUBLISHED SEPARATELY, because it is a
+                # different fact. `live_ids_measured: true` with
+                # `live_coverage_complete: false` is the state in which a MISS
+                # proves nothing — and it used to be reported as CLOSED.
+                "live_coverage_complete": (coverage_complete
+                                           if live_ids is not None else None),
+                "live_hosts_unreachable": (unfiltered["hosts_unreachable"]
+                                           if run_archive else None),
             },
             "tail": None if a.tail is None else {
                 "requested_lines": a.tail,
@@ -526,6 +657,12 @@ def main(argv=None):
                 },
                 "refused": tail_row is None,
                 "message": "\n".join(tail_lines) or None,
+                # 🔴 `rc` and `ok` TRAVEL WITH THE TEXT. An empty `text` beside
+                # `ok: false` is "the scrollback was not read"; beside
+                # `ok: true` it is a measured empty pane. Publishing `error`
+                # alone left those indistinguishable whenever stderr was quiet.
+                "rc": (tail_res or {}).get("rc"),
+                "ok": (tail_res or {}).get("ok"),
                 "text": (tail_res or {}).get("text"),
                 "error": (tail_res or {}).get("error"),
             },
@@ -542,6 +679,15 @@ def main(argv=None):
         if live_ids is None:
             print("  ⚠ live/closed state is UNMEASURED — the live scan did not "
                   "answer, so no hit below can be called CLOSED.")
+        elif not coverage_complete:
+            # 🔴 ITS OWN LINE, in the ARCHIVE block. The LIVE section's caveat
+            # says an absence "cannot appear BELOW" and refers to the live row
+            # list; it says nothing about these annotations, which are a
+            # different claim printed under a different heading.
+            print("  ⚠ live/closed state is PARTIAL — "
+                  + ", ".join(unfiltered["hosts_unreachable"])
+                  + " did not answer, so a hit that is NOT marked <LIVE> is "
+                    "UNMEASURED rather than CLOSED.")
         if not results:
             print(f"  No sessions matched: {' '.join(a.terms)}")
         else:
@@ -550,18 +696,23 @@ def main(argv=None):
             print()
             for i, r in enumerate(shown, 1):
                 print("\n".join(render_archive_hit(
-                    i, r, live_state_of(r["session_id"], live_ids))))
+                    i, r, _state(r["session_id"]))))
     if a.tail is not None:
         print()
         if tail_lines:
             print("\n".join(tail_lines))
-        if tail_res is not None:
+        # 🔴 Only a MEASURED tail prints a scrollback block. A failed one has
+        # already printed its FAILED lines above; falling through would append
+        # "(empty scrollback)" under a header claiming to show the last N lines.
+        if tail_res is not None and tail_res["ok"]:
             print(f"TAIL {tail_row.get('host')} "
                   f"{tail_row.get('session')}:{tail_row.get('window_index')} "
                   f"(last {a.tail} lines)")
             if tail_res.get("error"):
                 print(f"  tail reported: {tail_res['error']}")
-            sys.stdout.write(tail_res.get("text") or "  (empty scrollback)\n")
+            sys.stdout.write(tail_res.get("text")
+                             or "  (empty scrollback — MEASURED, the pane "
+                                "really is blank)\n")
     return tail_code
 
 

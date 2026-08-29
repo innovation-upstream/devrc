@@ -1839,6 +1839,10 @@ def test_json_golden_schema_and_values():
         "match": None,
         "match_fields": None,
         "excluded_by_match": None,
+        # 🔴 MIRRORED FROM `filters.matched`, and it is NOT `total_sessions` —
+        # on a `detail` report those two disagree by construction. `None` here
+        # because no row filter ran.
+        "matched": None,
         "hosts_reachable": ["laptop", "workbench"],
         "hosts_unreachable": [],
         "fuzzyclaw_live": 1,
@@ -4704,7 +4708,12 @@ def test_main_json_end_to_end_carries_the_split_and_the_filter(
                                # here would say "a --match ran and matched
                                # nothing" over a scan that returned two rows.
                                "match": None, "match_fields": None,
-                               "matched": None, "excluded_by_match": None}
+                               "matched": None, "excluded_by_match": None,
+                               # `--claude-only` DID run, but this scan is not a
+                               # `detail`, so the pre-filter index map was never
+                               # sampled. `None`, not `{}`: "not sampled" and
+                               # "sampled and empty" are different facts.
+                               "prefilter_window_indices": None}
 
 
 def test_detail_under_claude_only_explains_its_own_emptiness(monkeypatch):
@@ -10584,13 +10593,30 @@ def test_row_matches_finds_a_CODENAME_that_disagrees_with_the_LABEL():
     assert sm.row_matches(row, ["zzdelta"], sm.match_fields(True)) is True
 
 
-def test_a_term_may_not_SPAN_two_fields():
-    """Joining the fields into one haystack would match text that exists in no
-    field — a hit no reader can explain."""
+def test_the_span_fixture_matches_each_field_ALONE():
+    """POSITIVE CONTROL for the span battery below: if neither field matched on
+    its own, "the concatenation does not match" would be true of a predicate
+    wired to nothing."""
     row = {"task": "abc", "label": "def", "codename": None, "path": None}
     assert sm.row_matches(row, ["abc"]) is True
     assert sm.row_matches(row, ["def"]) is True
-    assert sm.row_matches(row, ["abcdef"]) is False
+
+
+# 🔴 EVERY PLAUSIBLE JOIN, NOT ONE. The first version of this guard asserted
+# only `"abcdef"` — a ZERO-separator join — while its docstring claimed the
+# fields are "never joined into one string". An audit mutated `row_matches` to a
+# SPACE-joined haystack and all 653 tests stayed green: the description claimed
+# coverage the body did not provide, which `claude/RULES.md` calls worse than no
+# coverage. The separator set is what makes this a claim about the CLASS.
+@pytest.mark.parametrize("sep", ["", " ", "|", "\n", "\t", "\x00", ", ", " — "],
+                         ids=["empty", "space", "pipe", "newline", "tab",
+                              "nul", "comma-space", "em-dash"])
+def test_a_term_may_not_SPAN_two_fields(sep):
+    """Joining the fields into one haystack would match text that exists in no
+    field — a hit no reader can explain."""
+    row = {"task": "abc", "label": "def", "codename": None, "path": None}
+    assert sm.row_matches(row, ["abc" + sep + "def"]) is False, (
+        f"a term spanning the field boundary matched under a {sep!r} join")
 
 
 def test_an_EMPTY_term_list_matches_everything_rather_than_nothing():
@@ -10892,4 +10918,349 @@ def test_detail_json_is_the_FULL_REPORT_SHAPE_not_a_bare_window(monkeypatch,
     # ...and the two row keys the same run got wrong.
     assert row["window_index"] == "2" and "window" not in row
     assert row["path"] and "cwd" not in row
+
+
+# =========================================================================== #
+# §15 — AUDIT FIX ROUND 1 (against tip a6f09d5a)
+#
+# 🔴 THE TWO DEPLOY-BLOCKERS AN ADVERSARIAL AUDIT FOUND, and three smaller ones.
+# Only the session-manager half is here; `test_find_session_live.py` §2 carries
+# the `find-session.py` half.
+#
+#   R1-2  A `detail` MISS UNDER A ROW FILTER ASSERTED A FALSE MEASURED ABSENCE.
+#         `gather` filters rows BEFORE `filter_report` narrows, so the sibling
+#         list enumerated only the survivors. Reproduced live:
+#           detail scratch3:1 --match datapacket
+#           -> "session 'scratch3' has windows ['2']"
+#         while window 1 existed on BOTH searched hosts. `(searched: laptop,
+#         workbench)` made it read as authoritative — worse than the silent
+#         empty it replaced, which at least asserted nothing.
+#   R1-5  `filters.matched` / `.excluded_by_match` published a measured `0` over
+#         a fleet where NO host answered, while `detail_matched` was already
+#         `None` in that exact state.
+#   R1-6  The table's filter line quoted `total_sessions`, which is a DIFFERENT
+#         number from `filters.matched` on a `detail` — and `filters.matched`
+#         was read by nothing.
+#   R1-7  The span guard was spelled to a zero-separator join (fixed above).
+#
+# 🔴 WHICH OF THESE IS REGRESSION COVERAGE. MEASURED, not asserted: this file
+# and its sibling were copied into a detached worktree at a6f09d5a — 56 new
+# nodes across the two, 46 RED and 10 GREEN. The GREEN ones are named in
+# `R1_INVARIANT_GUARDS` (here) and `R1_INVARIANT_GUARDS` in
+# `test_find_session_live.py`; none of them is evidence a bug was fixed.
+#
+# ⚠ ONE FINDING IN THIS ROUND WAS A GUARD GAP, NOT A CODE DEFECT. The span guard
+# (`test_a_term_may_not_SPAN_two_fields`, widened above) passes at a6f09d5a in
+# both its old and new forms, because `row_matches` was already per-field — the
+# auditor's space-joined MUTANT is what the old spelling could not see. Its
+# evidence is the mutation sweep (N27/N28), not a red-at-tip run.
+# =========================================================================== #
+R1_INVARIANT_GUARDS = frozenset({
+    # A partially reachable fleet already published real counts; R1-5 is only
+    # about the NO-host-answered state.
+    "test_a_PARTIALLY_reachable_fleet_still_publishes_real_counts",
+    # The fixture control for the R1-2 probes.
+    "test_the_scratch3_fixture_really_has_BOTH_windows_before_any_filter",
+    # The positive control for the span battery.
+    "test_the_span_fixture_matches_each_field_ALONE",
+    # 🔴 The PRECONDITION that replaced an unreachable guard — see its docstring.
+    # It held at a6f09d5a too; pinning it is what makes removing the guard safe.
+    "test_an_unreachable_host_carries_NO_rows_which_is_what_makes_the_maps_safe",
+})
+
+
+def test_the_R1_invariant_guard_ledger_names_only_tests_that_exist():
+    for name in R1_INVARIANT_GUARDS:
+        assert name in globals(), (
+            f"{name!r} is listed as an R1 invariant guard but no such test exists")
+
+
+def scratch3_detail(target_index, **kw):
+    """A `detail` report over the scratch3 fixture, WITH the pre-filter map.
+
+    `prefilter_index_map=True` mirrors what `main()` passes for the `detail`
+    subcommand — the parameter exists so a 1-row `--match` scan does not carry a
+    whole fleet's index map back.
+    """
+    kw.setdefault("prefilter_index_map", True)
+    return sm.filter_report(scratch3_gather(**kw), "scratch3", target_index)
+
+
+def test_the_scratch3_fixture_really_has_BOTH_windows_before_any_filter():
+    """POSITIVE CONTROL. Every R1-2 assertion is about a window the filter
+    removes; if the fixture never built it, they would all pass vacuously."""
+    rows = [r for h in scratch3_gather()["hosts"].values() for r in h["windows"]]
+    assert sorted((r["session"], r["window_index"]) for r in rows) == [
+        ("scratch3", "1"), ("scratch3", "2")]
+    # ...and window 1 is the SHELL, so `--claude-only` is what removes it.
+    by_idx = {r["window_index"]: r for r in rows}
+    assert by_idx["1"]["claude"] is False
+    assert by_idx["2"]["claude"] is True
+
+
+@pytest.mark.parametrize("kw,flag", [
+    (dict(claude_only=True), "--claude-only"),
+    # a term that only the CLAUDE window's task carries, so the shell row goes
+    (dict(match=["lost track"]), "--match 'lost track'"),
+], ids=["claude-only", "match"])
+def test_a_detail_MISS_CAUSED_BY_A_ROW_FILTER_says_so_instead_of_NO_SUCH_WINDOW(
+        kw, flag):
+    """🔴 R1-2, THE HEADLINE. The window EXISTS; a row filter removed its row.
+    Calling that "NO SUCH WINDOW" is a flat falsehood, and the `(searched: …)`
+    clause makes it read as authoritative."""
+    report = scratch3_detail("1", **kw)
+    msg = sm.detail_not_found_message(report)
+    assert msg is not None
+    assert "WINDOW 'scratch3:1' EXISTS but a ROW FILTER" in msg
+    assert flag in msg
+    assert "NOT a measured absence" in msg
+    assert "NO SUCH WINDOW" not in msg, (
+        "the filtered-out case still claims the window does not exist")
+    # ...and structurally, for a consumer that never reads stderr
+    assert report["filters"]["detail_filtered_out"] is True
+    assert report["filters"]["detail_matched"] == 0
+
+
+@pytest.mark.parametrize("kw", [
+    dict(claude_only=True),
+    dict(match=["lost track"]),
+], ids=["claude-only", "match"])
+def test_the_sibling_indices_are_measured_BEFORE_the_row_filter(kw):
+    """🔴 R1-2, the other half: the enumerated list must be a fact about the
+    SCAN, not about the filter. `['2']` was the shipped answer."""
+    report = scratch3_detail("9", **kw)
+    assert report["filters"]["detail_sibling_indices"] == ["1", "2"], (
+        "the sibling list is filter-scoped again — it enumerates survivors")
+    msg = sm.detail_not_found_message(report)
+    assert "session 'scratch3' has windows ['1', '2']" in msg
+    # ...and the reader is told a filter was in play, so the count above and the
+    # empty table below cannot be read as disagreeing.
+    assert "measured BEFORE the row filter" in msg
+    assert report["filters"]["detail_filtered_out"] is False
+
+
+def test_WITHOUT_a_row_filter_the_message_makes_NO_filter_claim():
+    """NEGATIVE CONTROL. Without it, "always mention a filter" passes both
+    probes above while lying on the common path."""
+    report = scratch3_detail("9")
+    msg = sm.detail_not_found_message(report)
+    assert "NO SUCH WINDOW 'scratch3:9'" in msg
+    assert "ROW FILTER" not in msg and "BEFORE the row filter" not in msg
+    assert report["filters"]["detail_filtered_out"] is False
+    # ...and nothing was sampled, because no filter ran.
+    assert report["filters"]["prefilter_window_indices"] is None
+
+
+def test_an_unknown_SESSION_under_a_filter_still_says_no_such_session():
+    """The third miss shape keeps its own wording, and still discloses the
+    filter — a `[]` sibling list under a filter is a pre-filter measurement and
+    the reader has to be able to tell."""
+    report = scratch3_detail("1", claude_only=True)
+    report["filters"]["detail_target"] = "zznosuch:1"
+    report["filters"]["detail_sibling_indices"] = []
+    report["filters"]["detail_filtered_out"] = False
+    msg = sm.detail_not_found_message(report)
+    assert "no session named 'zznosuch'" in msg
+    assert "measured BEFORE the row filter --claude-only" in msg
+
+
+def test_the_prefilter_map_is_OPT_IN_so_a_match_scan_does_not_carry_it():
+    """The map exists for `detail`. A 1-row `--match` scan carrying a whole
+    fleet's index map would defeat the flag's entire purpose."""
+    scan = match_gather(match=["zzkiwi"])
+    assert scan["filters"]["prefilter_window_indices"] is None
+    detail_side = match_gather(match=["zzkiwi"], prefilter_index_map=True)
+    pre = detail_side["filters"]["prefilter_window_indices"]
+    assert pre is not None
+    # every session the scan SAW, not just the one row that survived
+    assert sorted(pre) == ["match-one", "match-two", "scratch2"]
+    assert pre["match-one"] == ["1"]
+    # ...and it is never sampled when NO filter ran, because then the rows
+    # themselves are the unfiltered set.
+    assert match_gather(prefilter_index_map=True)[
+        "filters"]["prefilter_window_indices"] is None
+
+
+def test_an_unreachable_host_carries_NO_rows_which_is_what_makes_the_maps_safe():
+    """🔴 THE PRECONDITION, PINNED — because the guard for it was UNREACHABLE.
+
+    Both the pre-filter index map and `filter_report`'s row-derived fallback
+    must not let a host that never answered contribute a measured presence or
+    absence of window indices. `gather` gives an unreachable host `windows: []`,
+    so neither loop can see one — which a mutation sweep confirmed by deleting
+    the `entry["reachable"]` clause from the map and changing NO test. A guard
+    that cannot fire reads as a defence and is not one, so it was removed and
+    the property it depended on is asserted here instead, where a change to
+    `gather` really would red.
+    """
+    runner = make_runner(local_panes=SCRATCH3_PANES,
+                         local_windows=SCRATCH3_WINDOWS,
+                         remote_rc=255, remote_err="ssh: no route")
+    got = base_gather(runner=runner, use_fuzzyclaw=False)
+    assert got["hosts"]["laptop"]["reachable"] is False
+    assert got["hosts"]["laptop"]["windows"] == [], (
+        "an unreachable host carries rows — the pre-filter index map and "
+        "`filter_report`'s sibling fallback both rely on this being impossible")
+    # positive control: the REACHABLE host in the same scan does carry rows, so
+    # the assertion above is not observing an empty scan.
+    assert got["hosts"]["workbench"]["windows"]
+
+
+def test_the_prefilter_map_excludes_hosts_that_never_answered():
+    """The consequence of the precondition above, observed on the map itself.
+
+    INVARIANT GUARD, not regression coverage: it holds whether or not the map
+    filters on reachability, because there is nothing to filter.
+    """
+    runner = make_runner(local_panes=SCRATCH3_PANES,
+                         local_windows=SCRATCH3_WINDOWS,
+                         remote_rc=255, remote_err="ssh: no route")
+    got = base_gather(runner=runner, use_fuzzyclaw=False, claude_only=True,
+                      prefilter_index_map=True)
+    assert got["filters"]["prefilter_window_indices"] == {"scratch3": ["1", "2"]}
+
+
+def test_a_detail_over_an_UNREACHABLE_fleet_leaves_filtered_out_None_too():
+    """The fourth field joins the same rule: nothing was measured, so it is not
+    `False` (which would assert the filter did not remove it)."""
+    down = make_runner(local_rc=1, local_err="tmux: connection failed",
+                       remote_rc=255, remote_err="ssh: no route")
+    report = sm.filter_report(
+        base_gather(runner=down, use_fuzzyclaw=False, claude_only=True,
+                    prefilter_index_map=True),
+        "scratch3", "1")
+    assert report["filters"]["detail_filtered_out"] is None
+    assert report["filters"]["detail_matched"] is None
+    assert report["filters"]["detail_sibling_indices"] is None
+    assert sm.detail_not_found_message(report) is None
+
+
+def test_main_detail_under_a_filter_is_LOUD_about_the_FILTER(monkeypatch,
+                                                             capsys):
+    """END-TO-END, and it pins that `main()` asks `gather` for the pre-filter
+    map on the `detail` subcommand — without that the message regresses."""
+    seen = {}
+
+    def fake_gather(**kw):
+        seen.update(kw)
+        return scratch3_gather(claude_only=kw.get("claude_only", False),
+                               prefilter_index_map=kw.get(
+                                   "prefilter_index_map", False))
+
+    monkeypatch.setattr(sm, "gather", fake_gather)
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    rc = sm.main(["detail", "scratch3:1", "--json", "--no-ch", "--claude-only"])
+    cap = capsys.readouterr()
+    assert seen["prefilter_index_map"] is True, (
+        "main() did not ask for the pre-filter map on a `detail`")
+    assert rc == sm.EXIT_EMPTY
+    assert "EXISTS but a ROW FILTER" in cap.err
+    blob = json.loads(cap.out)
+    assert blob["filters"]["detail_filtered_out"] is True
+
+
+def test_main_SCAN_does_not_ask_for_the_prefilter_map(monkeypatch, capsys):
+    """NEGATIVE CONTROL on the same wiring — a `scan` must not pay for it."""
+    seen = {}
+
+    def fake_gather(**kw):
+        seen.update(kw)
+        return match_gather(match=kw.get("match"))
+
+    monkeypatch.setattr(sm, "gather", fake_gather)
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    sm.main(["scan", "--json", "--no-ch", "--match", "zzkiwi"])
+    capsys.readouterr()
+    assert seen["prefilter_index_map"] is False
+
+
+# --------------------------------------------------------------------------- #
+# R1-5 — a count over a fleet nobody reached is not a zero
+# --------------------------------------------------------------------------- #
+def test_match_counts_are_None_not_ZERO_over_an_unreachable_fleet():
+    """🔴 R1-5. `matched: 0` there says "the filter ran and matched nothing"
+    about a scan that measured nothing. `detail_matched` was already `None` in
+    exactly this state; these now agree with it."""
+    down = make_runner(local_rc=1, local_err="tmux: connection failed",
+                       remote_rc=255, remote_err="ssh: no route")
+    got = base_gather(runner=down, use_fuzzyclaw=False, match=["zzkiwi"])
+    assert got["filters"]["matched"] is None
+    assert got["filters"]["excluded_by_match"] is None
+    assert got["summary"]["matched"] is None
+    assert got["summary"]["excluded_by_match"] is None
+    # ...but WHICH filter was requested is known regardless, so the terms and
+    # the field list are still published. Dropping them would lose the only
+    # thing that distinguishes this from an unfiltered unreachable scan.
+    assert got["filters"]["match"] == ["zzkiwi"]
+    assert got["filters"]["match_fields"] == ["task", "label", "codename"]
+    assert sm.exit_code_for(got) == sm.EXIT_UNAVAILABLE
+
+
+def test_match_counts_ARE_real_zeros_when_the_fleet_ANSWERED():
+    """The measured counterpart, so the None above is a filter decision and not
+    a field wired to null. A reachable fleet with no match publishes `0`."""
+    got = match_gather(match=["zznothinghere"])
+    assert got["filters"]["matched"] == 0
+    assert got["filters"]["excluded_by_match"] == 3
+    assert got["summary"]["matched"] == 0
+
+
+def test_a_PARTIALLY_reachable_fleet_still_publishes_real_counts():
+    """One host answering is a measurement. The null applies only when NOTHING
+    answered — otherwise the flag would go null on the fleet's most common
+    degraded state and stop being readable at all."""
+    runner = make_runner(local_panes=MATCH_PANES, local_windows=MATCH_WINDOWS,
+                         remote_rc=255, remote_err="ssh: no route")
+    got = base_gather(runner=runner, use_fuzzyclaw=False, match=["zzkiwi"])
+    assert got["filters"]["matched"] == 1
+    assert got["filters"]["excluded_by_match"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# R1-6 — the table's filter line quoted the wrong number
+# --------------------------------------------------------------------------- #
+def test_the_table_filter_line_quotes_MATCHED_not_total_sessions():
+    """🔴 R1-6. On a `detail` the two disagree by construction: the row filter
+    matched 2 and `filter_report` then narrowed to 1, so `total_sessions` is 1.
+    The line describes the FILTER, so it must quote the filter's number — which
+    was sitting unread in `filters.matched`."""
+    scan = match_gather(match=["zz"])
+    assert scan["filters"]["matched"] == 2, "fixture: --match zz must hit 2 rows"
+    narrowed = sm.filter_report(scan, "match-one", "1")
+    assert narrowed["summary"]["total_sessions"] == 1, (
+        "fixture broken: the two numbers must DIFFER or this proves nothing")
+    text = sm.render_table(narrowed)
+    assert "2 row(s) matched" in text
+    assert "1 row(s) matched" not in text
+
+
+def test_the_table_filter_line_says_UNMEASURED_rather_than_printing_a_null():
+    """Over an unreachable fleet both counts are None; the sentence must read as
+    a sentence, not print `None row(s) matched`."""
+    down = make_runner(local_rc=1, local_err="tmux: connection failed",
+                       remote_rc=255, remote_err="ssh: no route")
+    text = sm.render_table(
+        base_gather(runner=down, use_fuzzyclaw=False, match=["zzkiwi"]))
+    assert "an unmeasured number of row(s) matched" in text
+    assert "None row(s)" not in text
+
+
+def test_summary_matched_is_MIRRORED_from_filters_not_recomputed():
+    """One writer. A second derivation here is how `total_sessions` came to be
+    quoted in the first place."""
+    scan = match_gather(match=["zz"])
+    assert scan["summary"]["matched"] == scan["filters"]["matched"] == 2
+    narrowed = sm.filter_report(scan, "match-one", "1")
+    assert narrowed["summary"]["matched"] == 2
+    assert narrowed["summary"]["total_sessions"] == 1
+
+
+def test_the_active_row_filter_list_is_ONE_definition():
+    """Both miss messages and the tests name the same set; a second copy would
+    describe filters the first does not."""
+    assert sm._active_row_filters({}) == []
+    assert sm._active_row_filters({"claude_only": True}) == ["--claude-only"]
+    assert sm._active_row_filters({"match": ["a", "b"]}) == ["--match 'a' 'b'"]
+    assert sm._active_row_filters(
+        {"claude_only": True, "match": ["a"]}) == ["--claude-only", "--match 'a'"]
 

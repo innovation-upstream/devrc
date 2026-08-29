@@ -52,8 +52,21 @@ mirrored into `summary`:
 |---|---|
 | `filters.match` / `summary.match` | the terms. **`null`, never `[]`**, when no filter ran |
 | `filters.match_fields` / `summary.match_fields` | what was ACTUALLY searched — this is where you see whether `path` was in the set |
-| `filters.matched` | rows that survived, stated positively |
-| `filters.excluded_by_match` / `summary.excluded_by_match` | rows the filter dropped. `null`, never `0`, when no filter ran |
+| `filters.matched` / `summary.matched` | rows that survived, stated positively |
+| `filters.excluded_by_match` / `summary.excluded_by_match` | rows the filter dropped |
+
+🔴 **`matched` and `excluded_by_match` are `null`, never `0`, in TWO states**: when no
+filter ran, and when **no host was reachable**. A `0` there would say "the filter ran and
+matched nothing" about a scan that measured nothing — the rule `detail_matched` already
+followed. The **terms and the field list are still published** over an unreachable fleet:
+which filter was *requested* is known regardless of whether anything answered.
+⚠ A **partially** reachable fleet publishes real counts — one host answering is a
+measurement. ⚠ `excluded_shells` has the same shape and is deliberately **not**
+null-guarded: it is a pre-existing field and redefining it belongs in its own change.
+
+🔴 **`summary.matched` is NOT `summary.total_sessions`.** On a `detail` they differ by
+construction — the row filter matched N, then `filter_report` narrowed to 0 or 1. The
+table's `FILTER --match` line quotes `matched`, because that line describes the FILTER.
 
 **Exit code**: reachable hosts + zero matches is **`3` (EXIT_EMPTY)**, never `0`. No host
 reachable is still **`4`** — the zero is unmeasured either way the rows are filtered.
@@ -84,7 +97,26 @@ you asked for index '3' (searched: workbench); NOT searched: laptop — unreacha
 |---|---|
 | `filters.detail_target` | the address you asked for |
 | `filters.detail_matched` | rows matched. `0` is the miss; **`null` means NO host answered** |
-| `filters.detail_sibling_indices` | the indices that DO exist for that session name. `[]` = no such session; **`null` = unmeasured** |
+| `filters.detail_sibling_indices` | the indices that exist for that session name **on the hosts that answered, BEFORE any row filter**. `[]` = no such session; **`null` = unmeasured** |
+| `filters.detail_filtered_out` | **`true` = the window EXISTS and a row filter removed it.** `null` = unmeasured |
+
+🔴 **UNDER `--claude-only` / `--match`, A MISS IS USUALLY THE FILTER'S DOING.** Rows are
+filtered in `gather` BEFORE `filter_report` narrows, so a naive sibling list enumerates only
+the survivors. Measured live at an earlier revision: `detail scratch2:1 --claude-only`
+answered *"session 'scratch2' has windows ['2', '3', '4']"* while window 1 existed on BOTH
+searched hosts — a flat falsehood that `(searched: …)` made read as authoritative.
+
+`gather` therefore samples `filters.prefilter_window_indices` (`{session: [index…]}`,
+reachable hosts only, **`detail` only** — a 1-row `--match` scan must not carry a fleet's
+index map back) and the message now distinguishes three misses:
+
+```
+detail: WINDOW 'scratch2:1' EXISTS but a ROW FILTER (--claude-only) removed it — this
+empty result is the FILTER's doing, NOT a measured absence. …
+detail: NO SUCH WINDOW 'scratch2:9' — session 'scratch2' has windows ['1','2','3','4'];
+you asked for index '9' (indices measured BEFORE the row filter --claude-only) …
+detail: NO SUCH WINDOW 'zz:1' — no session named 'zz' exists on any host that answered …
+```
 
 🔴 **Nothing is printed and the fields are `null` when no host was reachable.** An address
 that could not be CHECKED is not an address that does not EXIST — the exit code is `4` there,

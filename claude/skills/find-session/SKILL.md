@@ -1,7 +1,7 @@
 ---
 name: find-session
 description: "Find a past Claude Code OR opencode session by keyword — searches both runtimes on both hosts and returns ranked sessions with the resume command. Use to recover 'the session where we did X'."
-argument-hint: "<term> [<term> …] [--live [--deep] [--tail N]] [--project SUBSTR] [--since YYYY-MM-DD] [--any] [--limit N] [--claude-only|--opencode-only]"
+argument-hint: "<term> [<term> …] [--live [--deep] [--tail N]] [--limit N] [--project SUBSTR (archive only)] [--since YYYY-MM-DD (archive only)] [--any (archive only)] [--claude-only|--opencode-only]"
 allowed-tools: Bash, Read
 ---
 
@@ -42,8 +42,22 @@ python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tai
   say so in your answer rather than reporting the empty result as an absence. The tool
   falls back to the archive in all three cases and labels why.
 - Archive hits are annotated **`<LIVE>` / `<CLOSED>` / `<UNMEASURED>`** by joining on
-  `claude_session_id` against a second, *unfiltered* live scan. `UNMEASURED` means no live
-  scan answered — it is not `CLOSED`.
+  `claude_session_id` against a second, *unfiltered* live scan. 🔴 **A `<CLOSED>` needs
+  FULL coverage; a `<LIVE>` does not.** Finding the id on a host that answered proves the
+  session is live. Failing to find it proves nothing while any host is down — so with the
+  laptop asleep (this fleet's common degraded state) a miss reads `<UNMEASURED>`, the
+  ARCHIVE block prints `live/closed state is PARTIAL`, and the JSON carries
+  `archive.live_coverage_complete: false` beside `live_ids_measured: true`. Do not report
+  an `<UNMEASURED>` hit as finished.
+- 🔴 **`--any`, `--project` and `--since` reach the ARCHIVE leg ONLY** and the tool says so
+  on stderr — the live scan ANDs its terms, has no cwd filter and no date axis. Surface
+  that notice: an empty LIVE section under `--any` is a measured absence under semantics
+  the user did not ask for. `--limit` DOES bound the LIVE section (it prints
+  `showing N of M`) but deliberately does **not** narrow the `--tail` ambiguity check.
+- 🔴 **A failed `--tail` is not an empty window.** `session-manager tail` returning 2/4/5
+  (window closed between the scan and the tail, host gone, no tmux server) prints
+  `TAIL: FAILED — … exited N` and exits 4, with `tail.rc` / `tail.ok` in the JSON. Only
+  rc 0 and rc 3 are measured; rc 3 renders as an explicitly MEASURED empty pane.
 - Exit codes: `0` found · `2` usage (e.g. `--tail` without `--live`) · `3` `--tail` could
   not resolve to one window · `4` the live fleet was not measured. `--live` composes with
   `--json`, which then emits `{live, archive, tail}` instead of the bare array.
