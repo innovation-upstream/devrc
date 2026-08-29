@@ -10,86 +10,61 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 ## Status
 
 **Phase 1 (attention queue) SHIPPED. Phase 2 (tmux read model) COMPLETE. Rank 3 (read-only
-`capture-pane` rendering) is ✅ DONE — BOTH HALVES SHIPPED, DEPLOYED AND VERIFIED LIVE
-2026-08-28. Phases 4–6 untouched; the lowest-numbered OPEN item is now rank 5.**
+`capture-pane` rendering) is ✅ DONE, DEPLOYED, and now IN REAL USE — clawgate **0.8.11** sorts
+what needs a human to the top of the grid. Phases 4–6 untouched; lowest-numbered OPEN item is
+rank 5.**
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC** — `clawgatectl health` is the only authority. It said
-**0.8.10** on 2026-08-28 immediately after this session deployed it. This line has now carried
-**four** values in two days (0.8.7 → 0.8.8 → 0.8.9 from a concurrent session → 0.8.10), which is
-the whole argument for reading the cluster instead of this paragraph.
+**0.8.11** on 2026-08-29. This line has now carried five values in three days.
 
-⚠ **THE PREVIOUS REVISION OF THIS HEADER SAID "MERGED-BUT-NOT-DEPLOYED" AND WARNED THAT THE
-FIRST SIGHT WOULD BE `collector predates the field` ON EVERY CARD. Both were true when written
-and are now FALSE** — the deploy landed within the hour, and because the DATA half shipped first
-the tab rendered real screens immediately. The warning's *reasoning* stands and is why the status
-vocabulary exists; its *reading* does not. Third time this header has gone stale inside a day.
+🔴 **THE WORKBENCH CANNOT BUILD A CONTAINER RIGHT NOW — BUILD ON THE LAPTOP.** Its resolver
+returns a poisoned `registry-1.docker.io`; see **Open investigations** before you try, because
+the failure reads as TLS interception and is not. The working recipe, used end to end for 0.8.11:
 
-**Live at handoff (2026-08-28, measured not assumed):** pod `clawgate-fcd8c945b-44rqj`
-Running/ready, `restarts=0`, image `0.8.10`; `clawgatectl --version` **0.8.10 on BOTH hosts** (no
-skew note — the `buildVersion` half of the bump landed). `GET /ui/tmux` → **200, 208,347 bytes**,
-both host sections, **48 pane screens**, 0 stale badges, 0 unreachable, and the decision-surface
-scan clean **on the live page**. Read model **48 `ok` / 28 `not_claude`**, largest preview
-9,032 B against the 16 KiB cap, **0 truncated**. Feeder ticking unattended at ~450 KB/push,
-**~10.5% of the 4 MB ingest cap**.
+```bash
+DOCKER_HOST=ssh://zach@10.42.0.100 docker build --build-arg VERSION=$VER \
+  -t harbor.homelab.lan/library/clawgate:$VER . && \
+DOCKER_HOST=ssh://zach@10.42.0.100 docker push harbor.homelab.lan/library/clawgate:$VER
+```
 
-**Both host checkouts current:** devrc `main` = `1c0db104` on both (`ship.sh`, cross-host
-agreement at one sha); `homelab-talos` `trunk` = `8c6a8508` on both — the laptop's was **17
-commits behind** and was fast-forwarded this session, because `clawgatectl` is BUILT from that
-tree and a switch there would otherwise have shipped a stale binary. `ship.sh` does NOT converge
-that repo.
+🔴 This **inverts** `clawgate/reference/deploy.md`, whose "Deploy mechanics" runs the build ON the
+workbench via `DOCKER_HOST=ssh://…192.168.50.250` — correct from the laptop, and it SSHes the
+workbench to itself if you run it there.
+
+**Live at handoff (2026-08-29, measured):** pod `clawgate-86766bb749-dwnvl` Running/ready,
+`restarts=0`, image `0.8.11`; trunk pin `clawgate:0.8.11`. `GET /ui/tmux` → 200, **198,858 bytes,
+78 cards**, badge counts **7 `WAITING ON YOU` · 5 `DRAFT UNSENT` · 36 idle · 30 shell**, and
+**0** write-surface hits on the live page. Page height 10,363px, DOWN from 10,932 at 0.8.10 while
+showing strictly more information.
+
+**What 0.8.11 changed, and why it was not visible in tests:** the grid rendered in the producer's
+arrival order, so the windows actually blocked on a human were buried. Three defects, each a
+property of the WHOLE PAGE rather than of one card, and each found only by looking at it:
+- nothing was ranked → `SortForTriage`, badge and sort from ONE `triageRank`, waiting cards ship
+  the matched signal LINE as evidence.
+- **30 of 79 cards were stretched blank** → CSS grid `align-items: stretch` was sizing one-line
+  shell cards to match a 49-line neighbour. `items-start`.
+- **every long line was clipped** → a 272-column pane in a ~530px card. `whitespace-pre-wrap`.
+- (plus: cards opened on the OLDEST half of the screen → `flex-col-reverse`.)
+
+**Shipped, newest first:**
+- **`ZacxDev/homelab-infra#511`** — merged **`396afa9d`**, deployed as **0.8.11**. Triage sort +
+  the three layout fixes. 8 tests, 11/11 mutants. 🔴 Built on the LAPTOP (see above).
+- **`ZacxDev/homelab-infra#496`** — merged **`844a7350`**, deployed as **0.8.10**. The Tmux tab
+  itself: one section per host with independent staleness + reachability badges, one card per
+  window. 🔴 **No decision surface, and that is a PREREQUISITE not a preference** — a write here
+  is `send-keys`, and rank 5's fail-closed wrapper does not exist yet. Asserted on the RENDERED
+  HTML, and re-verified on the LIVE page at 0.8.11 (0 hits).
+- **`innovation-upstream/devrc#992`** — rank 3's DATA path — merged **`3d29aba1`**, shipped to
+  both hosts. `pane_preview` + `pane_preview_status` from the capture batch that ALREADY ran, so
+  zero extra tmux work. 🔴 **No server change was needed** — migration 0027's "unknown fields
+  preserved verbatim" contract held.
+- **`innovation-upstream/devrc#996`** — not this feature, but what unblocked it: a store-api
+  flake was reddening `tekton/devrc-pytests` for three PRs at once, including its own fix.
 
 *How the design got here (carried forward):* settled 2026-08-26 across two rounds — a greenfield
 session, then an audit that reopened four decisions — then a re-platform onto clawgate that resolved
 three of them outright. The sections below from `## Platform` down are that design, still current.
-
-**Shipped, newest first:**
-- **`ZacxDev/homelab-infra#496`** — rank 3's RENDERING half — merged as **`844a7350`** and
-  **DEPLOYED as clawgate 0.8.10** (pin `8c6a8508`). A read-only Tmux tab: one section per host
-  with independent staleness + reachability badges, one card per window carrying the pane's
-  visible screen. 🔴 **No decision surface, and that is a PREREQUISITE not a preference** — a
-  write here is `send-keys`, and rank 5's fail-closed wrapper does not exist yet.
-  ⚠ Adding the tab needed **five** registry entries (`tabKeys`, `tabHeadings`, the sidebar, the
-  JS `TABS` array, the JS `HEADINGS` map); the repo's own guards caught the two that were missed.
-- **`innovation-upstream/devrc#992`** — rank 3's DATA path — merged as **`3d29aba1`**, shipped to
-  both hosts. `session-manager` publishes each Claude pane's visible screen as `pane_preview` +
-  `pane_preview_status`, from the capture batch that ALREADY ran and threw the screen away, so
-  it costs zero extra tmux work. Opt-in `--pane-preview`; the pusher is the one caller that
-  passes it. 🔴 **No server change was needed** — migration 0027's "unknown fields preserved
-  verbatim" contract held, verified end-to-end against live 0.8.9 BEFORE any UI existed
-  (POST 322 KB → 200; GET returned 46 rows `ok` / 26 `not_claude`, rename intact).
-  Gates: BOTH sandbox tiers green on the branch AND on the MERGED tree.
-- **`innovation-upstream/devrc#996`** — not this feature, but it is what UNBLOCKED it:
-  `test_subsystem_store_api.py` had gone broadly flaky under load and was reddening
-  `tekton/devrc-pytests` for **three PRs at once, including its own fix**. Merged `1b1f71ad`.
-- **`innovation-upstream/devrc#974`** — the host-side pusher, phase 2's remaining half — merged as
-  **`f0308e46`** and shipped to both hosts. `scripts/tmux-snapshot-push.sh` + a serverMode-gated
-  systemd timer (2 min). ✅ **VERIFIED BY AN UNATTENDED TICK**, which is the only proof that counts
-  here: every earlier success was a hand-run. Journal `pushed …B … HTTP 200` at 2m0s spacing with
-  `Result=success`, and `receivedAt` advancing `20:02:52 → 20:04:52` while the push count went 3 → 4.
-- **`innovation-upstream/devrc#970`** — merged as **`8ca23613`**. ⚠ Its kickoff named head sha
-  `e5773b1c`, which had **never been pushed** and existed only in a local worktree — so GitHub's
-  head was `6e2ced2d` throughout, and that, not a Tekton fault, is why no PipelineRun ever appeared
-  for it. The kickoff also said to remove that worktree, which would have **destroyed the audit-pr
-  fix**; it was pushed first.
-- **`ZacxDev/homelab-infra#468`** — the tmux snapshot ingest, phase 2's server half — merged as
-  **`32f49804`**, then DEPLOYED as **0.8.8** (pin `628a963a`). `POST/GET /api/tmux/snapshot`,
-  migration `0027`, and `internal/tmux`, which owns the vocabulary boundary. 🔴 Merging it had
-  changed nothing running — the image pin is an immutable literal with no Flux image automation —
-  which is exactly why it sat inert until the pin moved.
-- **`ZacxDev/homelab-infra#457`** — the idle reaper's own cadence — merged as `3a66e3e0`, deployed
-  as **0.8.7** (pin `cc51b9b4`) and verified over 4.5h of production sweeps. See rank 1.
-- **`#451`** (detached suggest POST) merged as `a38360a5`, live on BOTH hosts (hook files verified
-  byte-identical, `f793ab9c…`).
-- **`#422`** (the attention queue) merged as `5a008e4f`; **`#427`** (one-line `buildVersion` fix) as
-  `f2f8cb7e`; **`#432`** closed after fast-forwarding onto the branch to keep one reviewable PR.
-- **`innovation-upstream/devrc#890`** — this doc's audited rewrite — merged as `f53ef8a6`;
-  **`#959`** (ranks 1/3/4 + the lessons below) as `660e0671`.
-
-**Phase 1 was verified through the real path, not inferred (carried forward):** a genuine
-`AskUserQuestion` produced a `kind=question priority=high` entry sorted **above ten `idle` rows** —
-the priority-ordering fix demonstrated in production. Repeated from the laptop after its hook was
-fixed: entry id 149, `host=laptop`, hook `exit=0` with empty stdout (still defers). Test entry
-resolved afterwards.
 
 **What the feature is:** attention entries (migration `0026`), kinds `question` (high) / `idle`
 (low), raised by the `AskUserQuestion` path, the Stop hook, and `clawgatectl attention
@@ -131,11 +106,6 @@ half of (it returns `0, nil` on UNDERFLOW). Round 5 was the first with **no beha
 ⚠ **Stopped there — ONE round short of the mechanical two-zero-payload gate** — because round 5 was
 auditing test code round 4 wrote, and round 6 would have audited test code round 5 wrote. That is a
 judgement, not the rule; a sixth round is a legitimate thing to ask for.
-
-**Lowest-numbered OPEN item is rank 3** (read-only `capture-pane` rendering). ⚠ Its
-`🔴 DEPENDENCY — cannot be built before item 4` paragraph is **SATISFIED as of 2026-08-28**: item 4
-immediately below it is ✅ DONE, and the delivery path it was waiting for now exists and runs every
-2 minutes. Nothing else about rank 3 changed; it still needs no further decisions.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -364,91 +334,52 @@ do not renumber again without releasing the live claims first.
    route, not the fork). Both logged `suggest sent ok` from the detached child; no scratch leaked.
    ⚠ The two hosts pulled at different moments, so they carry the detach at different commits
    (`a38360a5` / `6cda752c`) — `drift-check.sh` will report that correctly and it is not a defect.
-3. ✅ **DONE 2026-08-28 — BOTH HALVES SHIPPED, DEPLOYED AND VERIFIED THROUGH THE REAL PATH.**
-   Data path: `innovation-upstream/devrc#992` (squash `3d29aba1`), shipped to both hosts.
-   Rendering: `ZacxDev/homelab-infra#496` (squash `844a7350`), **deployed as clawgate 0.8.10**
-   (pin `8c6a8508`). Claim `tmux-webapp-3` released.
+3. ✅ **DONE — BOTH HALVES SHIPPED AND DEPLOYED, AND THE TAB IS NOW ACTUALLY TRIAGE.**
+   Data path `innovation-upstream/devrc#992` (`3d29aba1`, both hosts). Renderer
+   `ZacxDev/homelab-infra#496` (`844a7350`, deployed 0.8.10). Triage + layout
+   `ZacxDev/homelab-infra#511` (`396afa9d`, deployed **0.8.11**). Claim released.
 
-   **DECIDED 2026-08-28 (Zach): read-only `capture-pane` rendering first**, over vendoring
-   xterm.js. Carried forward because the REASON outlives the decision and rank 7 will face it
-   again:
-   - 🔴 **THE PREMISE THIS ITEM CARRIED FOR TWO SESSIONS WAS FALSE, and it was the whole
-     argument.** It read "clawgate vendors only two hand-written JS files (~3.7 KB) and **no
-     third-party bundle**, so xterm.js would be the first." Measured 2026-08-28: the two
-     hand-written files live at `internal/ui/js/{filter-toggle,tag-normalize}.js`, individually
-     `go:embed`ed — and **`web/static/vendor/` ALREADY holds FIVE third-party bundles totalling
-     ~245 KB** (`htmx.min.js` 51, `faro-web-sdk.iife.js` 93, `faro-web-tracing.iife.js` 82,
-     `idiomorph-ext.min.js` 10, `sse.js` 9), all swept up by `//go:embed static`. **xterm.js
-     would be the SIXTH; the "no precedent" objection does not exist.** Vendoring is solved and
-     offline-safe here: drop the file in `web/static/vendor/`, reference it, done.
-   - **The decision survives on a BETTER reason:** an interactive terminal means `send-keys` =
-     arbitrary command execution as Zach on both machines, so **item 5's fail-closed wrapper is a
-     hard prerequisite** — "vendor xterm.js" drags the highest-stakes decision in this project
-     forward. Read-only has no write path and therefore no such coupling. That is why the tab
-     that shipped carries no decision surface, enforced by a test.
+   🔴 **THE FIRST VERSION SHIPPED CORRECT AND UNUSABLE, AND ONLY LOOKING AT IT SHOWED THAT.**
+   0.8.10 passed 15 tests and a mutation sweep, rendered every field honestly — and buried the
+   four windows blocked on a human somewhere inside a **10,932px** page whose top-left card was an
+   empty stretched shell. Every defect was a property of the WHOLE PAGE, which no per-card unit
+   test can see. **Open the thing you built.** The fixes (0.8.11):
+   - **Triage sort** — waiting > parked draft > busy > idle > shell. Badge and sort come from ONE
+     `triageRank`, so a promoted card always says why. The waiting card ships the **matched signal
+     line** as evidence: `waiting_probable` is a scrape of a TUI upstream can restyle, so the
+     operator must be able to disagree with the verdict.
+   - 🔴 **Sort runs BEFORE the render cap.** Capping first truncates by arrival order and can
+     discard the one pane blocked on a human while keeping forty idle shells.
+   - 🔴 **The tri-state survives end to end** — `waiting_probable` decodes to `*bool`. `null` means
+     NOT SCRAPED; mapping it onto `false` would assert "this window is fine" about a pane nobody
+     looked at. An unscraped pane ranks the SAME as a measured-calm one (we cannot distinguish
+     them) and is never promoted on a guess. A draft counts only when `unsent_prompt_status == "ok"`.
+   - `items-start` (grid rows were stretching 30 shell cards), `whitespace-pre-wrap` (272-col panes
+     clipped in a ~530px card), `flex-col-reverse` (cards opened on the OLDEST half of the screen).
 
-   🔴 **THE DOC SAID THIS ITEM "NEEDS NO FURTHER DECISIONS" AND THAT WAS WRONG.** It never said
-   WHERE the pane text rides. Measuring first surfaced a real fork — fold it into the existing
-   2-minute push, or build an on-demand rendezvous — that would have been costly to get wrong
-   across two repos. **Zach chose snapshot-carried previews.**
+   🔴 **A STABILITY GUARD TOOK THREE FIXTURES AND THE FIRST TWO READ AS COVERAGE.** A
+   `SliceStable`→`Slice` mutant SURVIVED (a) 6 equal-rank windows — Go's pdqsort uses insertion
+   sort below ~12, which is stable, so it matched by accident; and (b) 40 windows of the SAME rank
+   — pdqsort's all-equal fast path moves nothing, so the mutant is genuinely EQUIVALENT there.
+   Only **INTERLEAVED ranks at n ≥ 20** discriminate, measured directly with a throwaway program
+   before rewriting. **Generalise: a sort-stability fixture must force the sort to PARTITION.**
 
-   **The measurements that constrain the design** (72 live panes, 45 workbench + 27 laptop):
-   - 🔴 **SCROLLBACK IS EXCLUDED ON A HARD BOUND.** ~**4,014 B per line fleet-wide**, so
-     `-S -1000` computes to **6.13 MB** against `maxTmuxPushBytes` (4 MB) — the cap breaches at
-     **~650 lines/pane**. Visible screen only; `tail` serves history one window at a time.
-   - 🔴 **ONLY 22% OF PANES CHANGE PER TICK** (10 of 45 over a real 120 s interval), so 77% of
-     the bytes are resent unchanged. In absolute terms that is cheap (62 MB/day gzipped) — **the
-     objection is STALENESS, not bandwidth.** That is the standing argument for an on-demand
-     path later, and the reason one was NOT built now.
-   - shipped shape: 46 Claude panes carry text, 26 shells report `not_claude`. Per-pane cap
-     16 KiB ≈ 2.4x the largest pane then observed (6,616 B).
+   **Measured cost of the preview payload** (unchanged, and it is what constrains the design):
+   ~**4,014 B per scrollback line fleet-wide**, so scrollback would breach the 4 MB
+   `maxTmuxPushBytes` at **~650 lines/pane** — hence visible-screen-only. Only **22% of panes
+   change per tick**, so the objection to snapshot previews is STALENESS, not bandwidth. Live push
+   ~450 KB, **~10.5% of the cap**. ⚠ The ratio is NOT a constant: 2.63x measured pre-deploy,
+   3.81x on the first production push.
 
-   🔴 **THE RATIO IS NOT A CONSTANT, AND THIS DOC SHOULD NOT BE READ AS IF IT WERE.** The PR and
-   an earlier revision here say **2.63x** (122,731 → 322,204 B, measured back to back). **In
-   production the first post-deploy push was 3.81x** (115,002 → 438,538 B) and it now sits at
-   ~450 KB. Both readings are honest; the ratio moves with pane count and how full each screen
-   is. What is stable is the headroom: **~10.5% of the 4 MB cap**, ~9.6x clear.
+   **Verified live at 0.8.11:** 78 cards, 7 `WAITING ON YOU` + 5 `DRAFT UNSENT` at the top, 30
+   shells last, **0** write-surface hits on the live page. Two of the surfaced drafts were a
+   single word — `yes` and `check` — answers one keystroke from running.
 
-   **Producer, as shipped.** `pane_preview` + `pane_preview_status` on every row, sourced from
-   the capture batch that ALREADY ran (`waiting_probable`/`unsent_prompt` are derived from it and
-   it threw the screen away) — so it costs **zero extra tmux work**. Opt-in `--pane-preview`;
-   `tmux-snapshot-push.sh` is the one caller that passes it, pinned by its own argv test because
-   dropping the flag is a one-word edit that leaves every other test green while the read model
-   stores rows that structurally cannot render. 🔴 **NO SERVER CHANGE WAS NEEDED** — migration
-   0027's "unknown fields preserved verbatim" contract held, verified end-to-end against live
-   0.8.9 before any UI existed.
-
-   **Renderer, as shipped.** `internal/ui/tmux.go` + `internal/api/tmux_ui.go`, `GET /tmux` +
-   `GET /ui/tmux`.
-   - 🔴 **NO DECISION SURFACE, AND IT IS A HARD PREREQUISITE.** A write here is `send-keys` =
-     arbitrary command execution as Zach on both machines, and **item 5's fail-closed wrapper
-     does not exist yet**. `TestTmuxGridCarriesNoDecisionSurface` asserts the RENDERED HTML has
-     no form/button/hx-post — against output, not source, because a helper that emits a button
-     is still a button. **Do not add one before item 5.**
-   - 🔴 **THE FOUR NULLS.** `disabled` (never asked) / `not_claude` (shell, never captured) /
-     `uncaptured`+`skipped`+`error` (asked, not measured) / `truncated` (a PREFIX, shown AND
-     labelled) / `ok`, plus the EMPTY status = "collector predates the field". A test pins that
-     no two share a sentence. This is what makes a half-deployed fleet debuggable.
-   - 🔴 **THE TAB NEEDED FIVE REGISTRY ENTRIES** — `tabKeys`, `tabHeadings`, the sidebar, **the
-     JS `TABS` array** and **the JS `HEADINGS` map**. The existing guards caught the two that
-     were missed (`TestAttentionTabIsWiredIntoEveryTabList`, and the axe scan on two
-     `text-slate-500` uses at 4.24:1). Adding an eighth tab? Expect all five.
-   - 🔴 **THE PANEL POLLS (60 s), it does not await an SSE event.** This read model is fed by an
-     OUTSIDE agent and clawgate emits no `tmux.changed`; an `sse:` trigger would look like
-     working code and never fire. Pinned by a test.
-   - The two HUMAN routes are registered **unconditionally**, outside `registerTmuxRoutes`'
-     nil-store guard, because `Page` renders the panel on every boot — a store-less boot would
-     otherwise paint a tab whose panel 404s. MACHINE routes stay behind the guard.
-
-   ✅ **VERIFIED LIVE 2026-08-28, not inferred.** Pod `clawgate-fcd8c945b-44rqj` Running/ready,
-   `restarts=0`, image `0.8.10`; `clawgatectl health` = 0.8.10; `clawgatectl --version` = 0.8.10
-   on BOTH hosts (no skew note). `GET /ui/tmux` → **200, 208,347 bytes**, both host sections,
-   **48 pane screens**, age badges `1m ago`, 0 stale, 0 unreachable, and the decision-surface
-   scan clean **on the live page**. Read model: 48 `ok` / 28 `not_claude`, largest preview
-   9,032 B against the 16 KiB cap, **0 truncated**.
-
-   Tests: 15 producer + 15 renderer, mutation-swept **10/10** and **11/11** non-equivalent
-   mutants killed, each with a green baseline verified BEFORE and AFTER.
+   **Carried forward, because rank 7 will face it again:** the doc once argued against xterm.js on
+   "clawgate vendors no third-party bundle, so it would be the first". **FALSE, measured:**
+   `web/static/vendor/` already holds FIVE (~245 KB), so xterm.js would be the sixth and the
+   "no precedent" objection does not exist. The decision survives on the real reason — an
+   interactive terminal means `send-keys`, so **item 5 is a hard prerequisite**.
 4. ✅ **DONE 2026-08-28 — BOTH HALVES SHIPPED, DEPLOYED AND OBSERVED RUNNING UNATTENDED.**
    Server: `ZacxDev/homelab-infra#468` (`32f49804`), deployed as clawgate **0.8.8**
    (`628a963a`). Pusher: `innovation-upstream/devrc#974`, squash-merged **`f0308e46`**,
@@ -874,81 +805,95 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
   **3.81x** on the first production push. It moves with pane count and screen fullness. Quote the
   cap headroom (~10.5% of 4 MB) rather than a multiplier.
 
+- 🔴 **A CORRECT, FULLY-TESTED UI CAN BE UNUSABLE, AND ONLY OPENING IT SHOWS THAT.** clawgate
+  0.8.10's tmux grid passed 15 tests and a mutation sweep and rendered every field honestly. On
+  screen it was a **10,932px** page whose top-left card was an empty stretched shell, with the four
+  windows blocked on a human buried somewhere inside it. All three defects — no ranking, CSS-grid
+  `align-items: stretch` inflating 30 one-line shell cards, and 272-column panes clipped in a
+  ~530px card — are properties of the WHOLE PAGE, which no per-card unit test can observe.
+  **Screenshot the thing you shipped.** Corollary: a comment can defend a property the layout does
+  not have — this one claimed wrapping would "destroy" column alignment that was never achievable
+  at that width.
+- 🔴 **A SORT-STABILITY MUTANT SURVIVES A FIXTURE THAT CANNOT PARTITION — TWICE, BOTH READING AS
+  COVERAGE.** `SliceStable`→`Slice` survived 6 equal-rank items (Go's pdqsort falls back to
+  insertion sort below ~12, which IS stable) and survived 40 items of the SAME rank (pdqsort's
+  all-equal fast path moves nothing, so the mutant is genuinely EQUIVALENT). Only **interleaved
+  ranks at n ≥ 20** discriminate — measured with a throwaway program rather than guessed a third
+  time. **Any fixture for a stability claim must force the sort to actually partition.**
+- 🔴 **"THE CERT IS FOR SOMEONE ELSE'S DOMAIN" IS USUALLY STALE DNS, NOT INTERCEPTION — and the
+  giveaway is that the WRONG DOMAIN CHANGES.** Diagnosed wrongly here first. Test the ANSWER SET,
+  not the connection: open TLS to each returned address with the right SNI and compare against a
+  public resolver. Here 4 of 8 were right, 2 hosted unrelated sites, 2 were dead, on a **487-day
+  TTL** from the LAN router. 🔴 **Retrying does not route around it**: the bad IPs are live web
+  servers, so Go's dialer completes TCP, fails TLS, and never tries the next address — 12/12
+  attempts failed. Full evidence in **Open investigations**.
+- 🔴 **A ONE-LINE `configuration.nix` EDIT CAN DRAG IN TEN DAYS OF NIXPKGS.** Adding one dnsmasq
+  server built a generation that also swaps `dbus → dbus-broker`, and
+  `switch-to-configuration switch` **refused** with a switch inhibitor. That refusal is correct;
+  `NIXOS_NO_CHECK=1` on a live desktop is not the answer. **Check how old
+  `/run/current-system` is before assuming a rebuild is cheap** — and note that a BUILT generation
+  is not an ACTIVE one: `/nix/var/nix/profiles/system-<N>-link` can be minutes old while
+  `/run/current-system` is ten days old.
+- ⚠ **`alwaysKeepRunning = true` means a switch will NOT restart that service** (it sets
+  `restartIfChanged = false`), so a config change lands inert. `systemctl restart <svc>` is
+  separately required — and for a caching resolver, so is discarding the poisoned entry.
+- ⚠ **A build can be moved to the other host with no privilege at all.**
+  `DOCKER_HOST=ssh://zach@<other-host> docker build …` streams the context from the local
+  worktree and builds/pushes remotely. It unblocked 0.8.11 when the workbench could not reach
+  docker.io. 🔴 It INVERTS `clawgate/reference/deploy.md`'s direction, which assumes you are on
+  the laptop building on the workbench.
+
 ## How to verify
 
 ```bash
-clawgatectl health                 # read the LIVE version; do not expect a number from this doc
-clawgatectl --version              # must MATCH the server, on BOTH hosts — a mismatch means the
-                                   # buildVersion half of a pin bump was missed (reddens trunk)
+clawgatectl health                 # LIVE version; never expect a number from this doc
+clawgatectl --version              # must MATCH the server on BOTH hosts
 ```
 
-**Is rank 3 actually working?** (the tmux pane grid — end to end, not a unit test)
+**Is the tmux grid actually triaging?** (rank 3's real proof — that it SORTS, not just renders)
 ```bash
-# 1. the FEEDER is passing the flag and the timer — not you — is running it.
-#    A hand-run push proves nothing; the journal is the evidence.
-journalctl --user -u tmux-snapshot-push.service --since -10min | grep pushed
-#    expect ~450 KB every 2m0s. ~115 KB means --pane-preview is NOT being passed.
-
-# 2. the READ MODEL carries screens, and the STATUS FIELD is the discriminator —
-#    never grep the page for a word, pane content can spell it (see Gotchas).
-TOK=$(grep -E '^\s*(export\s+)?CLAWGATE_HOOK_TOKEN=' ~/.claude/clawgate.env | tail -1 | sed 's/.*=//; s/"//g')
-curl -s -H "Authorization: Bearer $TOK" http://192.168.50.250:30302/api/tmux/snapshot \
-  | python3 -c 'import json,sys,collections
-c=collections.Counter(); mx=0
-for r in json.load(sys.stdin):
-    for w in r.get("windows") or []:
-        c[w.get("pane_preview_status")]+=1
-        mx=max(mx,len((w.get("pane_preview") or "").encode()))
-print(dict(c), f"largest={mx:,}B cap=16,384")'
-#    expect {"ok": ~48, "not_claude": ~28}. ALL `disabled` => the collector ran without
-#    --pane-preview. ALL `null`/empty-status => that host is on a collector PREDATING the field.
-
-# 3. the TAB renders it.
-curl -s -o /dev/null -w '%{http_code}\n' http://192.168.50.250:30302/ui/tmux    # 200
-curl -s http://192.168.50.250:30302/ui/tmux | grep -c '<pre'                    # pane screens
+curl -s http://192.168.50.250:30302/ui/tmux > /tmp/tab.html
+python3 - /tmp/tab.html <<'EOF'
+import sys,re,html
+s=open(sys.argv[1],encoding="utf-8").read()
+cards=re.findall(r'<article.*?</article>', s, re.S)
+def badge(c):
+    for b in ("WAITING ON YOU","DRAFT UNSENT"):
+        if b in c: return b
+    return "busy" if ">busy<" in c else ("(shell)" if "shell pane" in c else "(idle)")
+print(f"{len(cards)} cards")
+for c in cards[:8]:
+    t=re.search(r'text-xs font-semibold text-slate-200">([^<]*)', c)
+    print(f"  {badge(c):<16} {html.unescape(t.group(1)) if t else '?'}")
+EOF
 ```
-🔴 **The decision-surface invariant, checked on the LIVE page — item 5's fail-closed auth wrapper
-does not exist yet, so this tab must have no write surface at all:**
+Expect the WAITING/DRAFT cards FIRST and shells LAST. If the order looks like arrival order, the
+sort is not running — check it happens BEFORE the render cap in `internal/api/tmux_ui.go`.
+
+🔴 **The no-decision-surface invariant, on the LIVE page.** Item 5's fail-closed auth wrapper does
+not exist yet, so a write here is `send-keys` = arbitrary command execution as Zach on both hosts:
 ```bash
 curl -s http://192.168.50.250:30302/ui/tmux | grep -cE '<form|<button|hx-post|hx-delete|hx-put'
-# MUST be 0. Anything else means a control reached a tab whose write path is `send-keys`,
-# i.e. arbitrary command execution as Zach on both machines.
+# MUST be 0.
 ```
 
-**Is the idle reaper actually running?** (rank 1's answer — for ~9h it was NOT, and nothing said so)
+**Is the feeder alive?** The journal is the evidence — a hand-run push proves nothing:
 ```bash
-# 1. it announced itself at boot. This line is unconditional; its ABSENCE is the alarm.
-KUBECONFIG=$KC_WORKBENCH kubectl -n clawgate logs -l app=clawgate --tail=-1 \
-  | grep 'attention reaper: sweeping every'
-# 2. it has swept something (only logs when N>0, so an empty result is NOT a failure)
-KUBECONFIG=$KC_WORKBENCH kubectl -n clawgate logs -l app=clawgate --tail=-1 | grep 'attention-reap:'
-# 3. the queue is bounded. Count OPEN idle rows past the 4h window — a healthy
-#    steady state is ~30, and anything climbing toward attentionPanelLimit (100) means
-#    the sweep is not keeping up.
-curl -s -H "Authorization: Bearer $CLAWGATE_HOOK_TOKEN" http://192.168.50.250:30302/api/attention \
-  | python3 -c 'import json,sys,datetime as d
-now=d.datetime.now(d.timezone.utc); rows=json.load(sys.stdin)
-idle=[r for r in rows if r["kind"]=="idle"]
-old=[r for r in idle if (now-d.datetime.fromisoformat(r["updatedAt"].replace("Z","+00:00"))).total_seconds()>4*3600]
-print(f"open={len(rows)} idle={len(idle)} idle_past_4h={len(old)}")'
+journalctl --user -u tmux-snapshot-push.service --since -10min | grep pushed
+# ~450 KB every 2m0s. ~115 KB means --pane-preview is NOT being passed.
 ```
-🔴 **Validate this instrument before quoting a zero** — `GET /api/attention` defaults to
-`state=open`, so cross-check `?state=resolved` and `?state=all` and confirm open+resolved==all.
-Measured 2026-08-27 pre-fix: open=59, resolved=31, all=90 — the filter discriminates.
-- 🔴 **`clawgatectl` is built from the LOCAL `homelab-talos` tree**, so a behind checkout ships a
-  binary missing verbs that prints help and **exits 0** under a plausible version label. Both hosts
-  need `homelab-talos` current *before* a `home-manager switch`. Measured 2026-08-28: the laptop
-  was **17 commits behind** while the workbench was current — `ship.sh` does NOT converge it.
-- **The attention feature's own proof** is end-to-end, not a unit test: trigger a real
-  `AskUserQuestion`, then confirm a `kind=question priority=high` row appears via
-  `curl -H "Authorization: Bearer $CLAWGATE_HOOK_TOKEN" http://192.168.50.250:30302/api/attention`
-  — and that it sorts **above** the `idle` rows. Entry fields are camelCase (`sessionId`), not
-  snake_case.
-- **Per host**, confirm the hook that will actually run:
-  `readlink -f "$(jq -r '.hooks.PermissionRequest[].hooks[].command' ~/.claude/settings.json | sed 's/^CLAUDE_HOST=[a-z]* //')"`
-  must terminate inside `homelab-talos`, and that file must contain `raise_attention_question`.
-- After any deploy: the pod is `Running` **and ready** — `kubectl -n clawgate get pods -l
-  app=clawgate` lists a `Succeeded` leftover too, so a `.items[0]` jsonpath reports the wrong image.
+
+**Building a new clawgate image?** 🔴 **On the LAPTOP** until the docker.io DNS is fixed:
+```bash
+DOCKER_HOST=ssh://zach@10.42.0.100 docker build --build-arg VERSION=$VER \
+  -t harbor.homelab.lan/library/clawgate:$VER -t harbor.homelab.lan/library/clawgate:latest .
+DOCKER_HOST=ssh://zach@10.42.0.100 docker push harbor.homelab.lan/library/clawgate:$VER
+```
+Then bump **both** `clusters/workbench/apps/clawgate/deployment.yaml` and
+`cmd/clawgatectl/client.go`'s `buildVersion` (a test pins them equal; moving one reddens `trunk`
+for every PR), commit to `trunk`, `flux reconcile kustomization clawgate --with-source`.
+⚠ A fresh worktree needs `app.css` built from **inside** `containers/clawgate/` first, or
+`TestOpenRoutesNoAuth` and `TestStaticAssetsServed` 404 and the baseline is red.
 ## Run this first — the index, one read-only command
 ```bash
 python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc
@@ -961,3 +906,67 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 
 ⚠ **This doc spans TWO repos.** The design lives in `devrc`; all the code lives in
 `homelab-talos` (remote `ZacxDev/homelab-infra`) under `containers/clawgate/`.
+## Open investigations — live diagnosis state
+
+### The workbench cannot pull from docker.io — a 487-day-TTL stale record on the LAN router
+
+- **Symptom + exact repro:** any `docker build` or `docker pull` of a docker.io image on the
+  **workbench** fails TLS verification, naming a certificate for an unrelated third-party site.
+  Verbatim: `docker pull node:20-alpine` →
+  `tls: failed to verify certificate: x509: certificate is valid for
+  staging.slipstreammusic.com, api.staging.slipstreammusic.com, *.staging.slipstreammusic.com,
+  not registry-1.docker.io`. **The named domain CHANGES between attempts** (also seen:
+  `eportfoliodev.com`), which is what makes it read as interception.
+
+- **Observed (values, all measured 2026-08-29):**
+  - `dig @127.0.0.1 registry-1.docker.io A` → **TTL 42,048,498 s = 487 days**. Normal is 30–60 s.
+  - The **same answer comes from the LAN router directly**: `dig @192.168.50.1` → identical 8
+    addresses, identical 487-day TTL. dnsmasq is faithfully relaying it, not inventing it.
+  - Opening TLS to each of the 8 with correct SNI: **4 serve `*.docker.com`**;
+    **`54.225.97.128` → `staging.slipstreammusic.com`**; **`54.90.53.108` → `eportfoliodev.com`**;
+    2 (`52.4.106.100`, `98.84.245.6`) do not complete a handshake. Old EC2 elastic IPs Docker
+    released and AWS reassigned.
+  - `dig @1.1.1.1` returns a **completely disjoint** set; **6/6 of those verified `*.docker.com`**.
+  - **The laptop is FINE** — TTL **27 s**, healthy set, pulls succeed. Same LAN, different
+    resolution path. This is why it can build.
+  - Scope is narrow: `auth.docker.io`, `registry.npmjs.org` and `gcr.io` all match the public
+    resolver. `github.com`/`google.com` differ only in normal anycast ways.
+
+- **Ruled out:**
+  - **TLS interception / MITM** — the earlier reading, and WRONG. It is stale DNS: round-robin
+    across good and bad addresses explains both the intermittency and the changing domain.
+  - **A local cache artifact** — the router itself serves the 487-day TTL, so flushing or
+    restarting dnsmasq re-fetches the same record.
+  - **Retrying** — 12 consecutive `docker pull` attempts failed. The bad IPs are LIVE web servers,
+    so Go's dialer completes the TCP connect, fails at TLS, and **never falls through to the next
+    address**. dnsmasq does rotate the answer order; the daemon caches its resolution.
+  - **A proxy / registry mirror** — none configured; `daemon.json` has only the nvidia runtime and
+    the usual insecure-registry entries.
+  - **`/etc/hosts`** — it is a `/nix/store` symlink, not writable; editing it needs a rebuild too.
+
+- **Leading hypothesis:** a stale static/pinned entry on `192.168.50.1` with a hand-set enormous
+  TTL. It is served to the whole LAN, so any other host resolving through the router is exposed.
+
+- **Next probe (verbatim), after activating generation 385:**
+  ```bash
+  dig @127.0.0.1 registry-1.docker.io A | grep ^registry-1     # TTL in TENS of seconds = fixed
+  for ip in $(dig +short @127.0.0.1 registry-1.docker.io A); do
+    echo -n "$ip -> "; openssl s_client -connect "$ip:443" -servername registry-1.docker.io \
+      </dev/null 2>/dev/null | openssl x509 -noout -subject | sed 's/.*CN *= *//'
+  done   # every line must read *.docker.com
+  ```
+
+- **Fix status — STAGED, NOT APPLIED, and it is NOT one command.**
+  `nix/system/apply-dnsmasq-docker-io-pin.sh` (this repo) adds `"/docker.io/1.1.1.1"` ahead of the
+  existing servers; domain-specific entries win in dnsmasq, so every other name still asks the
+  router first (deliberate — it is what bypasses the VPN for LAN names). It was run: the
+  `configuration.nix` edit landed and **generation 385 is BUILT and contains
+  `server=/docker.io/1.1.1.1`**, but 🔴 **`switch-to-configuration switch` REFUSED** —
+  `dbus-implementation : dbus -> broker`. The last switch was 08-19, so ten days of nixpkgs ride
+  along behind a one-line edit. **Do not force it with `NIXOS_NO_CHECK=1`** on a desktop running
+  79 tmux windows. It needs `nixos-rebuild boot` + a reboot at a convenient moment.
+  🔴 Also: `alwaysKeepRunning = true` sets `restartIfChanged = false`, so activation will NOT
+  bounce dnsmasq — `systemctl restart dnsmasq` is separately required, or the 487-day entry stays
+  cached.
+  🔴 **The ROOT CAUSE is the router and the staged fix does not touch it.** Clearing the entry on
+  `192.168.50.1` is the actual repair; the pin only protects this one host.
