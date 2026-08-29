@@ -2599,16 +2599,18 @@ class TestSeedPushVerdict:
         #      unpinned, the sandbox reported ONE failure where the dev host
         #      reported two. The defect was invisible exactly where it counts.
         #
-        # So the locale is now supplied to both tiers (`glibc.bin` in
-        # `gateTools`, `LOCALE_ARCHIVE` in the devShell AND in checks.pytests)
-        # and its absence is a HARD FAILURE naming the cause. A degradation that
-        # silently weakens a test is worse than a red one that says why.
+        # So the locale is now supplied to both tiers by `LOCALE_ARCHIVE`,
+        # exported in the devShell AND in checks.pytests, and its absence is a
+        # HARD FAILURE naming the cause. A degradation that silently weakens a
+        # test is worse than a red one that says why.
+        # (This comment used to add "`glibc.bin` in `gateTools`" — a requirement
+        # the block below deliberately removed. It was left standing four lines
+        # above its own correction; see flake.nix for both retractions.)
         # 🔴 AVAILABILITY IS DETECTED BY EXERCISING THE CAPABILITY, NOT BY
         # PROBING FOR A BINARY. An earlier version ran `locale -a` and asserted
-        # `en_US.utf8` appeared. That was the wrong question twice over: it
-        # needed `pkgs.glibc.bin` on the shared devShell PATH (21 store binaries
-        # shadowing the system `getconf`/`ldd`/`iconv` for every human in
-        # `nix develop`) to answer it, and MEASURED — with `LOCALE_ARCHIVE` set
+        # `en_US.utf8` appeared. That was the wrong question: it needed
+        # `pkgs.glibc.bin` added to gateTools purely to answer it, and MEASURED
+        # — with `LOCALE_ARCHIVE` set
         # and NO `locale` binary at all, `LC_ALL=en_US.UTF-8 sort` collates
         # correctly. The binary was never load-bearing; `LOCALE_ARCHIVE` is.
         #
@@ -2726,6 +2728,94 @@ class TestSeedPushVerdict:
         for clause in ("-mindepth 2", "-maxdepth 2", "! -path './.*'", "-type f"):
             assert clause in staged, f"{clause!r} is no longer pinned: {staged}"
 
+    def test_a_DEPTH_2_DIRECTORY_on_the_pod_is_not_an_entry(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE BEHAVIOURAL HALF OF THE TWO-LISTINGS INVARIANT, and the durable
+        one. The textual identity guard has now lost this race twice: first by
+        capturing only to `-type f`, then — after being 'fixed' — to an escaped
+        `\\( … \\)` group, which recreated the same hole and stayed green across
+        the whole class. A guard over a shell expression's SPELLING keeps
+        finding new shapes to miss; this asserts the STATE instead.
+
+        A depth-2 directory on the pod must not enter `remote_list`. If it does
+        (an `-o -type d` on the remote side, a widened `-maxdepth`), it is
+        reported as another host's entry on every single push."""
+        env, dest = fake_cluster
+        (dest / SCOPE).mkdir(parents=True, exist_ok=True)
+        (dest / SCOPE / "a-subdirectory").mkdir()
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        assert "were not staged by this host" not in r.stdout, (
+            "a DIRECTORY on the pod was counted as an entry and reported as "
+            f"foreign — the two listings disagree: {r.stdout}"
+        )
+
+    def test_a_scope_name_containing_a_BACKSLASH_ESCAPE_counts_correctly(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        r"""`awk -v p=…` INTERPRETS escape sequences, so a scope literally named
+        `a\tb` was searched for as `a<TAB>b` and reported entries=0 beside a
+        non-zero total. Passing it through ENVIRON fixes that — and a straight
+        revert to `-v` was green across the whole class until this existed."""
+        # STAGE-ONLY, deliberately: the count line this pins is printed before
+        # the push, and a backslash in a scope name independently breaks the tar
+        # member list (`tar: a\tb: Cannot stat`) — a pre-existing defect this
+        # round does not touch. Requiring rc 0 would make the test about that
+        # instead, and it would never pass.
+        weird = store / "a\\tb"
+        weird.mkdir()
+        (weird / "n.md").write_text(_entry("n", "a-tb"))
+
+        r = run_seed("--store", str(store), "--stage", str(tmp_path / "stage"))
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        counts = dict(re.findall(r"staged scope (\S+)\s+entries=(\d+)", r.stdout))
+        assert counts.get("a\\tb") == "1", (
+            "a scope whose name contains a backslash escape mis-counted: "
+            f"{counts} — awk -v would read it as a literal tab. {r.stdout}"
+        )
+
+    def test_a_dot_scope_that_is_ALSO_a_symlink_is_announced_ONCE(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The two NOTE arms are `if`/`elif` for a reason: turning the `elif`
+        into a second `if` was green across the class while printing one
+        directory twice under a header that counts them."""
+        env, dest = fake_cluster
+        real = tmp_path / "dotsym-target"
+        real.mkdir()
+        (real / "e.md").write_text(_entry("e", "dotsym"))
+        (store / ".dotsym").symlink_to(real)
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        named = [l for l in r.stdout.splitlines() if ".dotsym" in l and l.startswith("seed:   ")]
+        assert len(named) == 1, f"announced {len(named)} times, want 1: {named}"
+        header = [l for l in r.stdout.splitlines() if l.startswith("seed: NOTE")]
+        assert "1 scope" in header[0], f"the count must match the list: {header}"
+
+    def test_a_scope_whose_md_is_TOO_DEEP_is_not_announced(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """`_holds_md` uses `-maxdepth 1` because only depth-1 `*.md` inside a
+        scope is shippable at all. Widening it survived the class and would
+        announce a scope over files no scope could ever ship."""
+        env, dest = fake_cluster
+        deep = store / ".deep" / "sub"
+        deep.mkdir(parents=True)
+        (deep / "x.md").write_text(_entry("x", "deep"))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        assert ".deep" not in "".join(
+            l for l in r.stdout.splitlines() if l.startswith("seed:   ")
+        ), f"announced a scope whose only .md is too deep to ship: {r.stdout}"
+
     def test_a_SYMLINKED_scope_is_excluded_and_SAID_so(
         self, store: Path, tmp_path: Path, fake_cluster
     ):
@@ -2761,20 +2851,56 @@ class TestSeedPushVerdict:
         a mutation sweep survived both `index($0,p) > 0` (substring) and the
         whole count hardcoded. With scopes `foo` and `xfoo`, a substring test
         counts `xfoo/n.md` against `foo`, so `foo` reports 2 while holding 1."""
+        # 🔴 THE FIXTURE MUST DEFEAT THREE MUTANTS, AND THE FIRST VERSION BEAT
+        # ONLY ONE. It used `foo`/`xfoo` with one entry each, so every true
+        # count was 1 and the assertions were `== "1"` — hardcoding `n=1`
+        # SURVIVED (only `n=0` and `n=2` died), the constant-equals-fixture trap.
+        # And `xfoo` extends `foo` on the LEFT, so dropping the `/` separator
+        # (`P="$name"`) survived too. Hence: one scope with TWO entries, and a
+        # `foo`/`foobar` pair where the separator is what distinguishes them.
         env, dest = fake_cluster
-        for name in ("foo", "xfoo"):
+        for name, n in (("foo", 2), ("foobar", 1), ("xfoo", 1)):
             (store / name).mkdir()
-            (store / name / "n.md").write_text(_entry("n", name))
+            for i in range(n):
+                (store / name / f"n{i}.md").write_text(_entry(f"n{i}", name))
 
         r = self._push(store, tmp_path, env)
 
         assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
         counts = dict(re.findall(r"staged scope (\S+)\s+entries=(\d+)", r.stdout))
-        assert counts.get("foo") == "1", (
-            f"`foo` must count only its own entry, got {counts.get('foo')!r} "
-            f"— a substring match would say 2. {r.stdout}"
+        assert counts.get("foo") == "2", (
+            f"`foo` holds 2 entries, got {counts.get('foo')!r} — a substring "
+            f"match would add xfoo's, a dropped separator would add foobar's. "
+            f"{r.stdout}"
         )
+        assert counts.get("foobar") == "1", counts
         assert counts.get("xfoo") == "1", counts
+
+    def test_a_symlinked_scope_whose_target_is_UNREADABLE_is_still_announced(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 AN ERROR IS NOT "NO". `_holds_md` briefly carried `2>/dev/null`,
+        which turned an unreadable symlink target from a loud over-report into
+        complete silence — no NOTE, rc 0, `seed: OK`, and the operator loses
+        that scope's contents with nothing to say so. `_shippable_entries` does
+        not descend the symlink either, so nothing else surfaces it."""
+        env, dest = fake_cluster
+        locked = tmp_path / "locked-target"
+        locked.mkdir()
+        (locked / "l.md").write_text(_entry("l", "locked"))
+        (store / "lockedsym").symlink_to(locked)
+        locked.chmod(0o000)
+        try:
+            r = self._push(store, tmp_path, env)
+        finally:
+            locked.chmod(0o755)  # so tmp_path cleanup can proceed
+
+        assert "lockedsym" in "".join(
+            l for l in r.stdout.splitlines() if l.startswith("seed:   ")
+        ), (
+            "an unreadable symlinked scope was silently dropped instead of "
+            f"announced: {r.stdout}"
+        )
 
     def test_the_stub_REFUSES_to_run_with_FAKE_DEST_unset(
         self, store: Path, tmp_path: Path, fake_cluster

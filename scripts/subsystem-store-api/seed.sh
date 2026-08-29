@@ -134,18 +134,39 @@ done
 # what has not been established, that sentence was exactly the wrong one to
 # leave. `find "$d"` with the trailing slash follows the link deliberately here:
 # the question is what the operator would LOSE, which is the target's contents.
-_holds_md() { [[ -n "$(find "$1" -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; }
-
-# `shopt -p` captures the CALLER's settings and the eval restores exactly those
-# — `shopt -u` unconditionally would clear an option the caller had set.
+# 🔴 AN ERROR IS NOT "NO", AND `2>/dev/null` MADE IT ONE. This probe briefly
+# carried `2>/dev/null`, which turned a symlinked scope whose target is
+# UNREADABLE from a loud over-report into total silence: no NOTE, rc 0, `seed:
+# OK`, and the operator loses the target's contents with no signal at all. In a
+# block headed "LOUD, NOT SILENT" that was the wrong direction to fail.
+# `_shippable_entries` does not descend the symlink either, so nothing else
+# would have surfaced it. A probe that cannot answer therefore announces.
 #
-# 🔴 `|| true` IS LOAD-BEARING, NOT DEFENSIVE. `shopt -p` EXITS 1 when any named
-# option is UNSET — which is the ordinary case here — so under `set -e` the bare
-# assignment aborted the script after the per-scope lines and before the stamp.
-# Measured: rc 1, and 20 of the file's seed tests went red at once. It still
-# PRINTS the correct restore commands on that non-zero exit, so the capture is
-# sound; only the status is misleading.
-_shopt_saved=$(shopt -p nullglob dotglob || true)
+# `-maxdepth 1` is deliberate: only depth-1 `*.md` inside the scope is shippable
+# at all, so widening it would announce a scope over files that no scope, dot or
+# otherwise, could ever ship.
+_holds_md() {
+  local out rc
+  out=$(find "$1" -maxdepth 1 -name '*.md' -print -quit 2>&1); rc=$?
+  [[ -n "$out" || $rc -ne 0 ]]
+}
+
+# 🔴 UNCONDITIONAL `-u`, AND A RESTORE-THE-CALLER'S-SETTINGS VERSION WAS TRIED
+# HERE AND REVERTED ON EVIDENCE. It looked tidier and was measurably worse:
+#
+#   * The tar member list below is `"$STAGE"/*/`, correct ONLY while `dotglob`
+#     is OFF. Restoring a caller who had it ON made a dot-scope SHIP — measured
+#     under `BASHOPTS=dotglob`, `.hidden/` landed on the pod while the remote
+#     listing's `! -path './.*'` still excluded it, so it was shipped, never
+#     verified, and the NOTE saying "not in the tar member list" became FALSE.
+#     The unconditional reset makes that independent of the ambient shell.
+#   * The property it claimed to protect is UNOBSERVABLE: this file is only ever
+#     run as `bash seed.sh` (checked every reference), and shell options do not
+#     propagate out of a script. The sole consumer of the restore was the member
+#     list twenty lines below it.
+#   * And it was already violated for the other half of the pair — line 62 does
+#     an unconditional `shopt -u nullglob` long before here, so a caller's
+#     `nullglob` is gone regardless.
 shopt -s nullglob dotglob
 for d in "$STAGE"/*/; do
   name=$(basename "$d")
@@ -155,7 +176,7 @@ for d in "$STAGE"/*/; do
     _holds_md "$d" && excluded+=("$name (symlink — tar ships the link, not its contents)")
   fi
 done
-eval "$_shopt_saved"
+shopt -u nullglob dotglob
 if [[ ${#excluded[@]} -gt 0 ]]; then
   echo "seed: NOTE ${#excluded[@]} scope director(ies) hold .md files that will NOT be shipped, and are excluded from the count and the verdict:"
   printf 'seed:   %s\n' "${excluded[@]}"

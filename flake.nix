@@ -206,14 +206,26 @@
           # both `comm` calls in seed.sh unpinned, the sandbox reported ONE
           # failure where the dev host reported TWO.
           #
-          # ⚠ An earlier version of this also added `pkgs.glibc.bin` to
-          # gateTools, on the stated grounds that a collation test "cannot run"
-          # without the `locale` binary. MEASURED FALSE: with LOCALE_ARCHIVE set
-          # and no `locale` binary at all, `LC_ALL=en_US.UTF-8 sort` collates
-          # correctly. Only a test's *probe* wanted the binary, and it cost 21
-          # store binaries (getconf, ldd, iconv, …) shadowing the system copies
-          # for every human in `nix develop`. The test now detects the locale by
-          # exercising the capability instead, so the binary is not needed.
+          # ⚠ TWO CORRECTIONS ON THE RECORD, because the first attempt to
+          # correct this was itself wrong.
+          #
+          # An earlier version added `pkgs.glibc.bin` to gateTools, on the
+          # stated grounds that a collation test "cannot run" without the
+          # `locale` binary. MEASURED FALSE: with LOCALE_ARCHIVE set and no
+          # `locale` binary at all, `LC_ALL=en_US.UTF-8 sort` collates
+          # correctly. Only a test's *probe* wanted it; the test now detects the
+          # locale by exercising the capability, so the entry was dropped.
+          #
+          # 🔴 The commit that dropped it then justified the removal by saying
+          # the entry had been "shadowing the system getconf/ldd/iconv for every
+          # human in `nix develop`". ALSO MEASURED FALSE — and after the
+          # removal: `nix develop` still resolves `locale` and `getconf` from a
+          # STORE glibc-bin, because `mkShell`'s stdenv cc-wrapper supplies it
+          # regardless (a bare `mkShell { packages = []; }` resolves them too).
+          # What the removal actually changes is the SANDBOX, which is
+          # `runCommandLocal`/stdenvNoCC and has no cc-wrapper — the opposite
+          # tier from the one that claim credited. The entry is still right to
+          # drop, for the first reason and not the second.
           export LOCALE_ARCHIVE=${pkgs.glibcLocales}/lib/locale/locale-archive
           echo "devrc: gate toolchain ready — bash scripts/run-tests.sh ." >&2
         '';
