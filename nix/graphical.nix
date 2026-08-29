@@ -714,4 +714,29 @@ lib.mkIf isNixOS {
       WantedBy = [ "timers.target" ];
     };
   };
+
+  # rig-control color gradient — updates chassis RGB every 60s based on the
+  # time-of-day color schedule in rig-control-colors.conf. Skips when sleeping.
+  systemd.user.services.rig-control-fade = lib.mkIf (!isLaptop) {
+    Unit = {
+      Description = "Update chassis RGB to time-of-day gradient color";
+      After = [ "graphical-session.target" ];
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${home}/workspace/devrc/scripts/rig-control-fade";
+    };
+  };
+  systemd.user.timers.rig-control-fade = lib.mkIf (!isLaptop) {
+    Unit = {
+      Description = "Per-minute chassis RGB gradient update";
+    };
+    Timer = {
+      OnBootSec = "60s";
+      OnUnitActiveSec = "60s";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
 }

@@ -141,6 +141,7 @@ test("ENLARGE_CSS targets embed container wrappers", () => {
   assert.match(DEE.ENLARGE_CSS, /\[class\*='mosaicItem'\]/);
   assert.match(DEE.ENLARGE_CSS, /\[class\*='attachment'\]/);
   assert.match(DEE.ENLARGE_CSS, /\[class\*='wrapper-'\]/);
+  assert.match(DEE.ENLARGE_CSS, /\[class\*='wrapper_'\]/);
   assert.match(DEE.ENLARGE_CSS, /\[class\*='imageContainer'\]/);
 });
 
