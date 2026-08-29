@@ -23,9 +23,16 @@ observed failure was a consumer assuming `detail --json` returns
 file builds is parsed by `session-manager`'s OWN parser, and every row field
 this file READS is checked against `session-manager`'s OWN `LEAN_ROW_FIELDS`.
 
-🔴 RED AT BASE, AND WHAT THAT IS WORTH HERE. All 33 nodes were replayed against
-a detached worktree at 9e452d34 and all 33 went red — but for TWO different
-reasons, and conflating them would overstate the coverage:
+🔴 RED AT BASE, AND WHAT THAT IS WORTH HERE. Every node this file held AT THE
+TIME was replayed against a detached worktree at 9e452d34, and all of them went
+red — but for TWO different reasons, and conflating them would overstate the
+coverage:
+
+⚠ NO COUNT HERE, and its absence is deliberate — see the note above
+`R1_INVARIANT_GUARDS`. This sentence used to say "all 33 nodes"; the file
+collects far more now, because four later rounds added to it. A count frozen to
+a sha that the file has since outgrown reads as a live measurement, which is the
+same defect the counts below it were deleted for.
 
   * most are red because the BEHAVIOUR did not exist (no `--live`, no live-first
     ordering, no ambiguity refusal, no LIVE/CLOSED annotation);

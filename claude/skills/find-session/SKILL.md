@@ -70,7 +70,7 @@ python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tai
   copied verbatim and pinned by `scripts/tests/test_find_session_skill_contract.py` — which
   also pins each one against the behaviour it describes. Do not reword them here alone; an
   earlier hand-written version of this table shipped two claims the code contradicted.
-- `0` — the run completed. NOT a claim that anything matched — an empty LIVE section and an empty ARCHIVE section both exit 0.
+- `0` — the run completed. NOT a claim that anything matched — an empty LIVE section and an empty ARCHIVE section both exit 0. 🔴 NOR a claim about coverage: a `--tail` that resolved to ONE window exits 0 even when a host did not answer, so another window may match on the host that was never asked. This is the code a caller ACTS on — read `tail.coverage_complete` before treating the resolution as unique.
 - `2` — bad arguments: `--tail` without `--live`, `--limit` below 1, or an unparseable `--since`.
 - `3` — `--tail` ONLY: it could not resolve to exactly one live window — several matched, or none did on a fleet where every host answered. It carries NO claim about coverage; the candidate list may be incomplete, and `tail.coverage_complete` is the field that says so.
 - `4` — `--tail` ONLY: something the tail needed was NOT measured — the live scan failed or no host answered, or `session-manager tail` itself failed (rc 2/4/5), or nothing matched while a host was unreachable. Without `--tail` a failed scan still exits 0 and says so in the LIVE section.

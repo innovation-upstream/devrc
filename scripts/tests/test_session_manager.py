@@ -10326,9 +10326,14 @@ def test_measured_not_measured_is_PURE_and_shares_nothing_with_the_constant():
 # claims coverage it does not have.
 # =========================================================================== #
 #
-# MEASURED, not asserted: replayed against a detached worktree at 9e452d34 with
-# this exact file copied in — 45 collected §14 nodes, 38 RED and 7 GREEN. The 7
-# are precisely the set below.
+# The GREEN-at-9e452d34 ones are precisely the set below, and a test asserts
+# every name resolves.
+#
+# ⚠ NO COUNT HERE, deliberately — see the note above `R1_INVARIANT_GUARDS`. This
+# comment used to carry "45 collected §14 nodes, 38 RED and 7 GREEN"; §14 has
+# grown across four later rounds, so that number describes a file that no longer
+# exists while reading as a live measurement. The per-round matrices live in the
+# PR body with the sha and method that produced each one.
 INVARIANT_GUARDS_ADDED_HERE = frozenset({
     # `exit_code_for` already returned EXIT_EMPTY for a detail miss over a
     # reachable fleet, and EXIT_UNAVAILABLE when nothing answered. What was

@@ -116,7 +116,12 @@ EXIT_UNAVAILABLE = 4    # --tail only: something the tail needed was not measure
 # coverage: read `tail.coverage_complete` for that.
 EXIT_CONTRACT = (
     (EXIT_OK, "the run completed. NOT a claim that anything matched — an empty "
-              "LIVE section and an empty ARCHIVE section both exit 0."),
+              "LIVE section and an empty ARCHIVE section both exit 0. 🔴 NOR a "
+              "claim about coverage: a `--tail` that resolved to ONE window "
+              "exits 0 even when a host did not answer, so another window may "
+              "match on the host that was never asked. This is the code a "
+              "caller ACTS on — read `tail.coverage_complete` before treating "
+              "the resolution as unique."),
     (EXIT_USAGE, "bad arguments: `--tail` without `--live`, `--limit` below 1, "
                  "or an unparseable `--since`."),
     (EXIT_AMBIGUOUS, "`--tail` ONLY: it could not resolve to exactly one live "
@@ -712,7 +717,12 @@ def main(argv=None):
             since = datetime.fromisoformat(a.since)
         except ValueError:
             print(f"bad --since date: {a.since!r} (want YYYY-MM-DD)", file=sys.stderr)
-            sys.exit(2)
+            # 🔴 `return EXIT_USAGE`, not `sys.exit(2)`. The literal was correct
+            # and `EXIT_CONTRACT` names this path in the exit-2 sentence — but a
+            # renumbering of `EXIT_USAGE` would have moved the constant and left
+            # this literal behind, splitting a documented pair silently. It also
+            # makes the path testable in-process like every other exit.
+            return EXIT_USAGE
 
     if a.tail is not None and not a.live:
         print("--tail requires --live: it prints the scrollback of a LIVE tmux "
