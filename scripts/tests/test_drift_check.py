@@ -273,6 +273,20 @@ class Fleet:
             # gate to answer calls `stub_session_manager()`, exactly like
             # `stub_ssh`.
             DRIFT_SESSION_MANAGER=str(self.bin / "session-manager"),
+            # 🔴 THE FIFTH HERMETICITY SEAM, and the same one the phase-2 gate
+            # already paid for. The branch-protection arm (rc 24) runs `gh`,
+            # which on this machine is authenticated and talks to the real
+            # GitHub. Left to its default every test in this file would query a
+            # live repo over the network — a read-only breach is still a breach,
+            # and the arm's verdict would then depend on the state of a remote
+            # nobody in this suite controls.
+            #
+            # Defaulted to a path inside tmp_path that does not exist, so the arm
+            # takes its no-gh branch. A test that wants it to answer calls
+            # `stub_gh()`, exactly like `stub_ssh`. (Belt and braces: the fixture
+            # origin is a file:// path, so the slug derivation refuses before gh
+            # is ever consulted — two independent reasons, deliberately.)
+            DRIFT_GH=str(self.bin / "gh"),
             # Pinned into tmp_path: the unreachable streak is PERSISTENT state,
             # and left to its default ($XDG_STATE_HOME/…) these tests would both
             # write to the operator's real state dir and inherit a streak from
@@ -303,6 +317,42 @@ class Fleet:
             body.append("echo '%s'" % stdout.replace("'", "'\\''"))
         body.append("exit %d" % exit_code)
         write_exec(self.bin / "ssh", "\n".join(body) + "\n")
+
+    def stub_gh(self, stdout="", exit_code=0, log=None):
+        """Install a stub `gh` that prints `stdout` and exits `exit_code`.
+
+        🔴 `stdout` is the ONE LINE the arm's `--jq` produces, and the shapes
+        used here are MEASURED against the live API on 2026-08-29, not invented:
+
+            true 2      innovation-upstream/devrc, healthy
+                        (contexts tekton/devrc-pytests + tekton/devrc-nodetests)
+            false 0     a repo with no protection object at all
+
+        The third shape — `true 0`, a standing protection object whose
+        required_status_checks was DELETED out of it — is the one the incident
+        actually produced, and it is the reason the verdict reads the COUNT and
+        never `protected`.
+
+        `log` names a file the stub appends its argv to, so a test can assert
+        WHAT was asked rather than only what came back.
+        """
+        body = []
+        if log is not None:
+            body.append('printf "%s\\n" "$*" >> ' + f"'{log}'")
+        if stdout:
+            body.append("echo '%s'" % stdout.replace("'", "'\\''"))
+        body.append("exit %d" % exit_code)
+        write_exec(self.bin / "gh", "\n".join(body) + "\n")
+
+    def set_origin(self, url):
+        """Point the work clone's origin at `url`.
+
+        The arm derives the repo slug from `git ls-remote --get-url origin`, so
+        this is how a test gives it a GitHub remote to reason about. It does NOT
+        make anything reachable — the fixture never has a network — which is the
+        point: the slug and the API answer are independently drivable.
+        """
+        self._run(["git", "-C", str(self.work), "remote", "set-url", "origin", url])
 
     def stub_session_manager(self, payload, exit_code=0):
         """Install a stub `session-manager` that prints `payload` on stdout.
@@ -1687,6 +1737,14 @@ UNIT_PATH_REQUIREMENTS = {
     # below.
     "timeout": "pkgs.coreutils",
     "python3": "pkgs.python3",
+    # The branch-protection arm (rc 24). Same silent-failure shape as `ip` and
+    # `python3` above: without it on the unit PATH the arm reports COULD NOT
+    # MEASURE on every timer run forever, from a unit that looks correct — and
+    # what it watches is the merge gate that was found deleted twice in one day
+    # with nothing else looking. The script resolves it itself (the DRIFT_GH
+    # default is the bare word `gh`), which is what puts it in THIS table rather
+    # than the child one below.
+    "gh": "pkgs.gh",
 }
 
 # 🔴 A SECOND SEAM, AND THE TABLE ABOVE STRUCTURALLY CANNOT SEE IT. The phase-2
@@ -4016,6 +4074,13 @@ def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
                    DRIFT.read_text())
     assert m2, "no DRIFT_PHASE2_TIMEOUT default in drift-check.sh"
     phase2 = int(m2.group(1))
+    # The branch-protection probe (rc 24) is a third capped subprocess, and it
+    # is exactly the kind of addition this seam exists to catch: a network call
+    # added to the script with no corresponding room in the unit's ceiling.
+    m4 = re.search(r'DRIFT_GH_TIMEOUT="\$\{DRIFT_GH_TIMEOUT:-(\d+)\}"',
+                   DRIFT.read_text())
+    assert m4, "no DRIFT_GH_TIMEOUT default in drift-check.sh"
+    gh = int(m4.group(1))
 
     block = _drift_service_block()
     m3 = re.search(r"TimeoutStartSec = (\d+);", block)
@@ -4024,12 +4089,13 @@ def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
 
     # 2 hosts x every source repo, plus the phase-2 scan, plus the 60s this
     # already needed for the two devrc fetches and the ssh round trip.
-    needed = 2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2 + 60
+    needed = 2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2 + gh + 60
     assert ceiling >= needed, (
         "TimeoutStartSec=%d cannot absorb the worst case: %d source fetches at "
-        "%ds + a %ds phase-2 scan + 60s of devrc fetch/ssh = %ds. systemd would "
-        "kill the run and the deadman would report nothing, on a schedule."
-        % (ceiling, 2 * len(EXPECTED_SOURCE_REPOS), cap, phase2, needed)
+        "%ds + a %ds phase-2 scan + a %ds branch-protection probe + 60s of devrc "
+        "fetch/ssh = %ds. systemd would kill the run and the deadman would report "
+        "nothing, on a schedule."
+        % (ceiling, 2 * len(EXPECTED_SOURCE_REPOS), cap, phase2, gh, needed)
     )
 
 
@@ -6125,3 +6191,282 @@ def test_a_CONSISTENT_report_is_accepted(fleet):
     assert rc == 23, f"a well-formed report did not escalate\n{out}"
     assert "juliett-x.txt" in out, out
     assert _nixdirt(out)[3:5] == (4, 1), out
+
+
+# --------------------------------------------------------------------------- #
+# BRANCH PROTECTION ON THE CANONICAL REMOTE (rc 24)
+#
+# The other three parities all take `origin/main` as the reference and ask who
+# has diverged from it. This one asks whether `origin/main` is still a branch
+# anything has to get past a gate to reach.
+#
+# 🔴 THE DESIGN DECISION THESE TESTS EXIST TO PIN, and it is the opposite of the
+# rc-22 one. There, a could-not-measure would have made the arm permanently RED;
+# here, a could-not-measure would make it permanently GREEN — worse, because the
+# natural failure of `gh` (no token, no network) is an EMPTY string, an empty
+# string parses as a count of zero, and zero is the DRIFT value. Both directions
+# are wrong and they are wrong for different reasons, so the arm is tested from
+# both ends: it must fire on a real zero, and it must refuse to fire on an
+# absence.
+#
+# 🔴 AND THE VERDICT MUST READ THE COUNT, NEVER `protected`. The measured
+# incident is `protected: true` with required_status_checks deleted out of the
+# standing object, so an arm keying on the flag reports healthy on the exact
+# state that bit us. `test_a_standing_protection_object_with_checks_deleted…` is
+# that discriminator; it and the healthy case differ ONLY in the count.
+#
+# Every payload below is the line the arm's own `--jq` produces, measured
+# against the live API on 2026-08-29 — see Fleet.stub_gh.
+# --------------------------------------------------------------------------- #
+
+# owner/repo pairwise distinct from every real slug this repo names, so an
+# assertion cannot pass by matching something the script hardcoded.
+BP_SLUG = "fixture-owner/fixture-repo"
+
+
+def _protect(fleet, *args, gh=None, gh_rc=0, log=None, **env):
+    """Run the checker with the rc-24 arm pointed at a fixture slug.
+
+    `gh=None` installs NO stub at all — the DRIFT_GH path stays absent, which is
+    the could-not-measure branch. Any string installs a stub printing it.
+    """
+    fleet.catch_up()
+    if gh is not None:
+        fleet.stub_gh(gh, exit_code=gh_rc, log=log)
+    return fleet.check(*args, DRIFT_PROTECT_SLUG=BP_SLUG, **env)
+
+
+# --- the reds --------------------------------------------------------------- #
+def test_zero_required_checks_is_rc24(fleet):
+    """A branch with no protection object at all — `protected false, 0 checks`."""
+    rc, out = _protect(fleet, "--no-remote", gh="false 0")
+    assert rc == 24, f"an unprotected main did not fire rc 24: {rc}\n{out}"
+    assert "ZERO required status checks" in out, out
+    assert BP_SLUG in out, out
+    # protected=false is a CREATE, not a restore, and the finding must say which.
+    assert "no protection object at all" in out, out
+
+
+def test_a_standing_protection_object_with_checks_deleted_is_still_rc24(fleet):
+    """🔴 THE MEASURED INCIDENT SHAPE, and the discriminator for the whole arm.
+
+    2026-08-29: `required_status_checks` was DELETED out of a protection object
+    that stayed standing, so the branch still reports `protected: true`. An arm
+    that keyed on that flag would call this healthy — which is why the verdict
+    reads the COUNT. This test and `test_required_checks_present_is_not_drift`
+    differ in exactly one field.
+    """
+    rc, out = _protect(fleet, "--no-remote", gh="true 0")
+    assert rc == 24, f"the deleted-sub-resource shape did not fire rc 24: {rc}\n{out}"
+    assert "protected=true" in out, out
+    # And it must hand over the repair that WORKS. PATCH cannot restore a
+    # deleted sub-resource; the break-glass that produced this incident failed
+    # for exactly that reason, from a trap that ran.
+    assert "PATCH CANNOT" in out, out
+    assert "PUT" in out, out
+
+
+# --- the positive control --------------------------------------------------- #
+def test_required_checks_present_is_not_drift(fleet):
+    """🔴 REPORT THIS ALONGSIDE THE REDS. An arm that can only ever say "fine"
+    is indistinguishable from this, and an arm wired to nothing says it too."""
+    rc, out = _protect(fleet, "--no-remote", gh="true 2")
+    assert rc == 0, f"a protected main was reported as drift: {rc}\n{out}"
+    assert "2 required status check(s)" in out, out
+    assert "DRIFT" not in out, out
+
+
+# --- the could-not-measure family: every one of these must NOT be rc 24 ----- #
+def test_no_gh_at_all_is_could_not_measure_not_a_pass(fleet):
+    rc, out = _protect(fleet, "--no-remote", gh=None)
+    assert rc == 0, out
+    assert "[protect] COULD NOT MEASURE" in out, out
+    assert "no usable `gh`" in out, out
+    assert "NOT 'main is protected'" in out, out
+
+
+def test_a_gh_that_ANSWERS_NOTHING_is_refused_rather_than_read_as_zero(fleet):
+    """🔴 THE LOAD-BEARING ONE. `gh` with no credentials prints NOTHING. An
+    empty string read positionally yields a count of 0, and 0 is the DRIFT
+    value — so the failure mode of a broken instrument is a confident finding
+    about a healthy repo, fired on every timer run forever. That is the
+    permanently-red gate `claude/RULES.md` refuses, arrived at from the other
+    direction.
+    """
+    rc, out = _protect(fleet, "--no-remote", gh="", gh_rc=1)
+    assert rc != 24, (
+        "an EMPTY gh answer was read as a count of zero and fired rc 24\n" + out
+    )
+    assert rc == 0, out
+    assert "[protect] COULD NOT MEASURE" in out, out
+    assert "parses as a count of" in out, out
+
+
+@pytest.mark.parametrize("payload", [
+    "true",             # one field: both expansions fall back to the whole string
+    "true 2 extra",     # three fields
+    "yes 0",            # first field is not a boolean — an API shape change
+    "true many",        # count is not a number
+    "  ",               # whitespace only
+])
+def test_a_malformed_answer_is_could_not_measure(fleet, payload):
+    """The contract is exactly `<true|false> <digits>`. Anything else is a
+    reason, never a verdict — including `true` alone, which without the
+    field-count check sets BOTH fields from the same token and renders a
+    well-formed-looking measurement out of one value read twice.
+    """
+    rc, out = _protect(fleet, "--no-remote", gh=payload)
+    assert rc != 24, f"a malformed answer {payload!r} fired rc 24\n{out}"
+    assert rc == 0, out
+    assert "[protect] COULD NOT MEASURE" in out, out
+
+
+def test_a_non_github_origin_is_could_not_measure_not_a_pass(fleet):
+    """The suite's own origin is a local path. The arm must say so rather than
+    report a clean protection state for a remote that has no such API — and it
+    must not echo the URL, because this repo is public and an origin can name a
+    private host."""
+    fleet.catch_up()
+    rc, out = fleet.check("--no-remote")          # no DRIFT_PROTECT_SLUG
+    assert rc == 0, out
+    assert "[protect] COULD NOT MEASURE" in out, out
+    assert "not a github.com owner/repo remote" in out, out
+    assert str(fleet.origin) not in out, "the origin URL was echoed into the report\n" + out
+
+
+# --- the derivation, which the override above bypasses ---------------------- #
+@pytest.mark.parametrize("url,slug", [
+    ("git@github.com:alpha-owner/bravo-repo.git", "alpha-owner/bravo-repo"),
+    ("https://github.com/charlie-owner/delta-repo.git", "charlie-owner/delta-repo"),
+    ("https://github.com/echo-owner/foxtrot-repo", "echo-owner/foxtrot-repo"),
+])
+def test_the_slug_is_derived_from_the_origin_remote(fleet, url, slug):
+    """🔴 THE OVERRIDE THE OTHER TESTS USE MAKES THE DERIVATION UNTESTED, so it
+    is tested here — against the real URL spellings `git remote -v` produces,
+    ssh and https, with and without `.git`.
+
+    `GIT_SSH_COMMAND=/bin/false` keeps the git leg offline: origin now names
+    github.com, and without this the fetch would leave the machine. The fetch
+    failing is expected and is not what is asserted — rc 24 (severity 68)
+    outranks rc 4 (55), so the arm's finding is still the verdict.
+    """
+    fleet.catch_up()
+    fleet.set_origin(url)
+    log = fleet.root / "gh-argv.log"
+    fleet.stub_gh("false 0", log=log)
+    rc, out = fleet.check("--no-remote", GIT_SSH_COMMAND="/bin/false")
+    assert rc == 24, f"{url} did not reach the arm: {rc}\n{out}"
+    assert slug in out, f"{url} did not resolve to {slug}\n{out}"
+    argv = log.read_text()
+    assert f"repos/{slug}/branches/main" in argv, (
+        f"gh was asked about the wrong repo for {url}: {argv!r}"
+    )
+
+
+@pytest.mark.parametrize("url", [
+    "git@gitlab.com:owner/repo.git",
+    "https://github.com.evil.example/owner/repo.git",   # host is NOT github.com
+    "git@github.com:owner.git",                         # no owner/repo pair
+    "https://github.com/owner/group/repo.git",          # three components
+    "https://github.com/owner/",                        # empty repo component
+])
+def test_a_url_that_is_not_an_owner_repo_pair_is_refused_not_guessed(fleet, url):
+    """🔴 FAILS CLOSED. A best-guess slug would be queried, 404, and land in
+    could-not-measure wearing a subject nobody chose — a wrong repo name in the
+    journal is worse than an honest refusal, because it reads as a measurement.
+    """
+    fleet.catch_up()
+    fleet.set_origin(url)
+    log = fleet.root / "gh-argv.log"
+    fleet.stub_gh("false 0", log=log)
+    rc, out = fleet.check("--no-remote", GIT_SSH_COMMAND="/bin/false")
+    assert rc != 24, f"{url} was turned into a slug and queried\n{out}"
+    assert "[protect] COULD NOT MEASURE" in out, out
+    assert not log.exists(), f"gh was called for a non-github origin: {log.read_text()!r}"
+
+
+# --- severity, in both directions ------------------------------------------- #
+def test_unpushed_devrc_commits_still_outrank_an_unprotected_main(fleet):
+    """rc 8 is work that exists on exactly one machine; this one loses nothing
+    and is repaired by one reversible call. Both findings are live here."""
+    fleet.catch_up()
+    fleet.add_local_commit("commit the workbench never pushed")
+    fleet.stub_gh("false 0")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 8, f"rc 24 masked the un-pushed commits: {rc}\n{out}"
+    assert "ZERO required status checks" in out, "the rc24 finding was lost\n" + out
+
+
+def test_an_unprotected_main_outranks_a_merely_behind_host(fleet):
+    """The fixture clone starts one commit BEHIND (rc 10). A host that just
+    needs a ship must not hide a merge gate that is switched off."""
+    fleet.stub_gh("false 0")                       # no catch_up: still behind
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 24, f"rc 10 masked the unprotected main: {rc}\n{out}"
+    assert "local main is BEHIND origin/main" in out, "the rc10 finding was lost\n" + out
+
+
+def test_the_rc24_legend_is_printed_with_the_verdict(fleet):
+    """The journal is the only place this output is ever read."""
+    rc, out = _protect(fleet, "--no-remote", gh="true 0")
+    assert rc == 24, out
+    assert "rc24=" in out, out
+    assert "drift-check: DRIFT (rc=24)" in out, out
+
+
+def test_rc24_is_ranked_between_rc8_and_rc17_in_the_severity_table():
+    """Asserted against severity() itself, not only through the two behavioural
+    orderings above — those pin the pairs they exercise, and the published
+    ladder in the header is a claim about ALL of them."""
+    body = DRIFT.read_text().split("severity() {", 1)[1].split("\n}", 1)[0]
+    body = "\n".join(ln for ln in body.splitlines() if not ln.strip().startswith("#"))
+    ranks = {int(c): int(r) for c, r in re.findall(r"^\s*(\d+)\)\s*echo (\d+)", body, re.M)}
+    assert 24 in ranks, "rc 24 is not ranked in severity(); it would fall to 99, above rc 8"
+    assert ranks[8] > ranks[24] > ranks[17], (
+        "rc 24 is not between rc 8 and rc 17: %r" % {k: ranks[k] for k in (8, 24, 17)}
+    )
+    # ...and the header's published order must agree with the table it describes.
+    header = DRIFT.read_text().split("\nset -", 1)[0]
+    assert "8 > 24 > 17" in header, (
+        "the header's severity ladder does not place rc 24 where severity() does"
+    )
+
+
+# --- passivity, on a surface the git allowlist cannot see -------------------- #
+def test_the_gh_calls_are_read_only():
+    """🔴 THE ALLOWLIST GUARDING THIS FILE IS GIT-SHAPED AND `gh` IS NOT GIT.
+
+    `gh api -X DELETE …/branches/main/protection/required_status_checks` is the
+    break-glass `devrc/CLAUDE.md` publishes verbatim — a plausible thing for a
+    maintainer to paste into the arm that reads this very endpoint — and every
+    static check in this suite would pass with it there. A deadman that can
+    delete the protection it watches is not a deadman.
+    """
+    code = "\n".join(
+        ln for ln in DRIFT.read_text().splitlines() if not ln.strip().startswith("#")
+    )
+    calls = [ln for ln in code.splitlines() if re.search(r"\$DRIFT_GH\"?\s", ln)]
+    assert calls, "no gh invocation found — this guard is wired to nothing"
+    for ln in calls:
+        assert not re.search(r"(?<![\w-])-X(?![\w-])", ln), f"gh call sets a method: {ln}"
+        assert "--method" not in ln, f"gh call sets a method: {ln}"
+        assert not re.search(r"(?<![\w-])-f(?![\w-])", ln), f"gh call sends a body: {ln}"
+        assert "--field" not in ln, f"gh call sends a body: {ln}"
+        assert not re.search(r"(?<![\w-])--input(?![\w-])", ln), f"gh call sends a body: {ln}"
+
+
+def test_the_gh_read_only_guard_can_actually_see_a_write(tmp_path):
+    """🔴 NEGATIVE CONTROL. The guard above passing is indistinguishable from a
+    regex that matches nothing, so watch it go red on the exact line the
+    docstring names.
+    """
+    poisoned = DRIFT.read_text() + (
+        '\ntimeout 5 "$DRIFT_GH" api -X DELETE '
+        '"repos/$BP_SLUG/branches/main/protection/required_status_checks"\n'
+    )
+    code = "\n".join(
+        ln for ln in poisoned.splitlines() if not ln.strip().startswith("#")
+    )
+    calls = [ln for ln in code.splitlines() if re.search(r"\$DRIFT_GH\"?\s", ln)]
+    offenders = [ln for ln in calls if re.search(r"(?<![\w-])-X(?![\w-])", ln)]
+    assert offenders, "the read-only guard cannot see a -X DELETE"

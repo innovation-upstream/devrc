@@ -53,6 +53,11 @@
 #   * a command word produced by EXPANSION (`$g checkout main`, `eval "$cmd"`).
 #     The scanner flags the alias where it can see one being made (`g=git`), but
 #     an alias built from parts, or read from a file, resolves to nothing static.
+#   * 🔴 A NON-GIT MUTATION SURFACE. The allowlist governs `git` verbs; the
+#     branch-protection arm runs `gh`, which can DELETE the very protection it
+#     reads — `devrc/CLAUDE.md` publishes that one-liner verbatim as an escape
+#     hatch, so it is a plausible thing for a maintainer to paste here. Covered
+#     by its own guard (`test_the_gh_calls_are_read_only`), NOT by the scanner.
 #   * anything inside a string that only becomes code on the FAR SIDE of the ssh
 #     hop. The $CHECK payload is scanned because it is literal text in this file;
 #     a payload assembled at runtime would not be. `require_int` plus `%q` on the
@@ -91,8 +96,8 @@
 # one. So:
 #   * 19, 20 and 21 are RESERVED to ship.sh here and must not be taken as DRIFT
 #     codes. 22 is now TAKEN by this script (skillOverrides disagree with the
-#     tier ledger) and 23 by the nix-read untracked ladder, so the next free
-#     code for this script is 24.
+#     tier ledger), 23 by the nix-read untracked ladder and 24 by the
+#     branch-protection arm, so the next free code for this script is 25.
 #   * anything this script adds above 21 is reserved back the other way; ship.sh
 #     documents this in its own header for the same reason.
 #
@@ -161,6 +166,14 @@
 #       artifact by the next switch. Measured 2026-08-25: one such file had sat
 #       on the workbench for ~3 weeks with every check green. See "UNTRACKED IN A
 #       NIX-READ PATH" below. It ranks between rc 15 and rc 12 — see severity().
+#   24  DRIFT — `main` ON THE CANONICAL REMOTE HAS NO REQUIRED STATUS CHECKS, so
+#       the gate every change to this fleet passes through is OFF. 🔴 The FOURTH
+#       kind of parity, and the first three are all blind to it: they ask whether
+#       the two hosts match `origin/main`, and this asks whether `origin/main` is
+#       still a thing worth matching. Both hosts can be byte-identical, every
+#       symlink resolve, every built source be current — and `main` be a branch
+#       anyone can push anything to. See "BRANCH PROTECTION" below. It ranks
+#       between rc 8 and rc 17 — see severity().
 #   16  ACTIONABLE, not drift — the fuzzyclaw PHASE-2 GATE has OPENED: zero rows
 #       still take their `age_secs` from fuzzyclaw alone, so the readers can be
 #       removed. See "THE FUZZYCLAW PHASE-2 GATE" below. It is the LEAST severe
@@ -423,6 +436,69 @@
 # DND-defeating failure toast 4× a day forever — the same permanently-red-gate
 # refusal this file already makes for an unreachable remote, below.
 #
+# ── BRANCH PROTECTION ON THE CANONICAL REMOTE (rc 24) ─────────────────────────
+# 🔴 A FOURTH KIND OF PARITY, AND THE OTHER THREE CANNOT SEE IT. Git parity asks
+# "is this checkout still tracking origin/main?"; host parity asks "is what it
+# describes actually deployed?"; source parity asks "is the code we COMPILE
+# current?". All three take `origin/main` as the reference and ask who has
+# diverged from it. This one asks the question underneath them: is `origin/main`
+# still a branch that anything has to get past a gate to reach?
+#
+# MEASURED 2026-08-29, TWICE IN ONE DAY on innovation-upstream/devrc:
+#   ~19:58Z  `required_status_checks` DELETED as a deliberate, operator-authorised
+#            break-glass to merge two PRs. The restore was written as an EXIT
+#            trap, it RAN, and it left main unprotected anyway — `PATCH` cannot
+#            restore the sub-resource after a DELETE (see the gotcha below).
+#   ~21:56Z  `contexts: null` again, and NOT from the same actor. Independent
+#            evidence that a window was open in between: commit 837d3fde is a
+#            `Merge branch 'main' of github.com:…` — a DIRECT PUSH to main, which
+#            required checks with enforce_admins would have rejected.
+# Both were found by a human happening to look. Nothing on either host could have
+# said so, and this deadman was FULLY GREEN throughout — correctly, because every
+# question it asked was about the two checkouts.
+#
+# 🔴 THE VERDICT IS THE CONTEXT COUNT, NEVER THE `protected` FLAG. The measured
+# incident is `protected: true` with `required_status_checks` GONE: deleting that
+# sub-resource leaves the protection object standing, so a checker keying on
+# `protected` reports healthy on the exact state that bit us. Both shapes are
+# real and both are drift here — measured against the live API 2026-08-29:
+#   protected true,  contexts ["tekton/devrc-pytests","tekton/devrc-nodetests"]
+#   protected false, contexts []          (a repo with no protection at all)
+# so the arm reads `<protected> <context-count>` and branches on the SECOND
+# field, printing the first beside it because the two states need different
+# repairs (restore the sub-resource vs create protection from nothing).
+#
+# 🔴 EVERY NON-ANSWER IS A REASON, NEVER A ZERO — the same rule the phase-2 gate
+# and the tier arm already apply, and it matters more here because the failure
+# mode of a credentials-less `gh` is an empty string, and an empty string parsed
+# as a count is 0, and 0 is the value that means DRIFT. That would make this arm
+# fire on every timer run the moment `gh` lost its token: a permanently-red gate,
+# which `claude/RULES.md` is explicit is worse than no gate. So the arm demands a
+# well-formed `<bool> <int>` line and prints COULD NOT MEASURE for anything else
+# — no `gh`, no network, no auth, a repo it cannot see, an origin that is not a
+# GitHub remote at all. None of those set an rc, and none of them read as a pass.
+#
+# 🔴 THE SLUG IS DERIVED FROM THE CHECKOUT, never hardcoded. `git ls-remote
+# --get-url origin` (local, no network — allowlisted, and the only read-only verb
+# that yields a remote URL without admitting `git config`/`git remote`, whose
+# write forms would breach passivity). A non-GitHub or unparseable origin is a
+# COULD NOT MEASURE, which is also what makes this arm inert against the
+# throwaway file:// origins the suite builds.
+#
+# 🔴 PASSIVITY EXTENDS TO THE API. `gh` can mutate — deleting this very
+# protection is a one-liner `devrc/CLAUDE.md` publishes verbatim — and the git
+# allowlist that guards the rest of this file is structurally blind to it. So the
+# only `gh` this script may run is a plain read: no `-X`/`--method` other than
+# GET, no `-f`/`--field` body. Pinned by
+# `test_drift_check.py::test_the_gh_calls_are_read_only`.
+#
+# 🔴 THE REPAIR IS NOT THE OBVIOUS ONE, so the finding carries it. `gh api -X
+# PATCH …/protection/required_status_checks` CANNOT restore the sub-resource
+# after a DELETE — it returns non-zero and changes nothing. Restoring needs a
+# full `PUT …/branches/main/protection`. That is why the measured break-glass
+# left main unprotected despite a restore trap that ran: the rollback path had
+# never been executed once.
+#
 # ── UNREACHABLE IS NOT DRIFT (the alerting policy) ────────────────────────────
 # 🔴 The timer runs on the WORKBENCH ONLY (gated on the ~/.server-mode marker in
 # nix/home.nix), so its remote leg always ssh's to the LAPTOP — a machine that is
@@ -448,16 +524,18 @@
 # is reading a timer's output, so the single number it hands to systemd must be
 # the worst thing found, or an un-pushed workbench could hide behind a merely
 # behind laptop. Severity order (worst first):
-#     8 > 17 > 14 > 13 > 18 > 6 > 2 > 4 > 3 > 12 > 23 > 15 > 10 > 22 > 16
+#     8 > 24 > 17 > 14 > 13 > 18 > 6 > 2 > 4 > 3 > 12 > 23 > 15 > 10 > 22 > 16
 # 🔴 THAT ORDER IS THE severity() TABLE, NOT THE DIGITS — it never was monotonic
 # (14 outranks 13 outranks 18 outranks 6 outranks 4), 17 is not "less severe
 # than 16" because it is larger, 23 outranks 15 while 22 ranks second-LAST, and
-# 22 is the largest digit here. Every code below 16 that is still free (5, 7, 9,
+# 24 — the LARGEST digit here — ranks SECOND, directly under rc 8. Reading this
+# ladder off the numbers gets that one exactly backwards. Every code below 16
+# that is still free (5, 7, 9,
 # 11) is reserved to a ship.sh meaning this script does not take, so a new DRIFT
 # code has nowhere to go but upward; its rank is stated in severity() and here.
 # 🔴 UPWARD IS NOT EMPTY EITHER: ship.sh owns 19 (hosts-disagree), 20
-# (superseded) and 21 (usage), and this script has now taken 22 and 23, so the
-# next free DRIFT code is 24, not 19. See the reciprocal
+# (superseded) and 21 (usage), and this script has now taken 22, 23 and 24, so
+# the next free DRIFT code is 25, not 19. See the reciprocal
 # reservation under EXIT CODES above — that collision was one increment away.
 # (6 and 2 are both unreachable through this path today — the script exits each
 # directly, before any per-host leg runs — but the order is documented for every
@@ -538,6 +616,19 @@
 #                    gate is local-only, and every value sent over ssh is one
 #                    that has to be proved safe.
 #   DRIFT_PHASE2_TIMEOUT  seconds the phase-2 scan may take (default 60, integer)
+#   DRIFT_GH          the `gh` binary the branch-protection arm (rc 24) runs
+#                    (default `gh`, resolved from PATH). Exists so the suite can
+#                    drive that arm against a stub, and — pointed at a path that
+#                    does not exist — keep every OTHER test from reaching the
+#                    operator's real credentials and the network. Same role as
+#                    DRIFT_SESSION_MANAGER, and for the same measured reason.
+#   DRIFT_GH_TIMEOUT  seconds that probe may take (default 20, integer)
+#   DRIFT_PROTECT_SLUG  owner/repo the rc-24 arm asks about, INSTEAD of deriving
+#                    it from the checkout's origin. Exists for the suite: the
+#                    derivation reads the same `origin` the git leg fetches
+#                    from, so giving the arm a GitHub slug by editing origin
+#                    would send `git fetch` to the real github.com. The derived
+#                    value is the only correct one on a real host.
 #   DRIFT_TIER_LEDGER  path to the skill-listing tier ledger (default: the
 #                    claude/skill-tiers.json beside this script's repo). Exists
 #                    so the suite can drive the rc-22 arm against a fixture
@@ -629,6 +720,16 @@ DRIFT_STATE_DIR="${DRIFT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/drift-
 DRIFT_SESSION_MANAGER="${DRIFT_SESSION_MANAGER:-$_drift_dir/session-manager}"
 DRIFT_PHASE2_TIMEOUT="${DRIFT_PHASE2_TIMEOUT:-60}"
 DRIFT_SRC_FETCH_TIMEOUT="${DRIFT_SRC_FETCH_TIMEOUT:-30}"
+# The branch-protection arm (rc 24). Spelled as an explicit unset-test rather
+# than `${DRIFT_GH:-gh}` so the word `gh` survives word-bounded as a COMMAND
+# NAME: this binary is resolved from the unit's PATH, and
+# `test_every_command_the_checker_runs_is_on_the_unit_path` looks for exactly
+# that spelling. Overridable for the same reason DRIFT_SESSION_MANAGER is — the
+# suite must be able to point the arm at a stub, and at a path that does not
+# exist, without the operator's real credentials or the network ever being
+# reachable from a test.
+if [ -z "${DRIFT_GH+set}" ]; then DRIFT_GH=gh; fi
+DRIFT_GH_TIMEOUT="${DRIFT_GH_TIMEOUT:-20}"
 
 # 🔴 Both tunables are INTERPOLATED INTO A SCRIPT THAT RUNS ON THE OTHER HOST
 # (piped to `bash -s` over ssh), so a non-integer value is remote code execution
@@ -745,6 +846,8 @@ require_int DRIFT_PHASE2_TIMEOUT "$DRIFT_PHASE2_TIMEOUT"
 # Same reasoning as DRIFT_PHASE2_TIMEOUT: not interpolated into a remote payload,
 # but handed to `timeout`, where a non-integer reads as "the tool is broken".
 require_int DRIFT_SRC_FETCH_TIMEOUT "$DRIFT_SRC_FETCH_TIMEOUT"
+# Same again for the branch-protection probe's cap.
+require_int DRIFT_GH_TIMEOUT "$DRIFT_GH_TIMEOUT"
 
 DO_LOCAL=1
 DO_REMOTE=1
@@ -787,6 +890,20 @@ severity() {
   case "${1:-0}" in
     0)  echo 0 ;;
     8)  echo 70 ;;
+    # 24 (main on the canonical remote has no required status checks) sits
+    # between 8 and 17, and it is the LARGEST digit in this table — reading the
+    # ladder off the numbers puts it dead last, which is the wrong end.
+    #   BELOW 8, because rc 8 is work that exists on exactly ONE machine, in no
+    #   commit anyone else has, where a careless rescue destroys the only copy.
+    #   Nothing is lost here and the repair is one reversible API call. A hazard
+    #   that has already cost something outranks one that is merely open.
+    #   ABOVE 17, because 17 is bounded — one package's source is stale on one
+    #   host, and what it can corrupt is what that package does. This is the gate
+    #   on the branch BOTH hosts converge to, so it admits every other failure
+    #   class in this table onto both machines at once, including the un-pushed
+    #   and stale-source ones. It was also measured admitting a direct push to
+    #   main within hours of being opened, so "merely open" is a short state.
+    24) echo 68 ;;
     # 17 (a source repo devrc BUILDS FROM is not current here) sits between 8
     # and 14, and the digit says nothing about that — see the header.
     #   BELOW 8, because a diverged devrc stops every future change to this host,
@@ -2627,6 +2744,112 @@ else
 fi
 echo
 
+# ── BRANCH PROTECTION ON THE CANONICAL REMOTE (rc 24) ─────────────────────────
+# See "BRANCH PROTECTION" in the header for what this measures and why it is a
+# fourth kind of parity. Here: how it refuses to produce a silent zero.
+#
+# 🔴 THE HAZARD THIS SHAPE EXISTS TO AVOID IS SPECIFIC TO THIS ARM. Every other
+# could-not-measure in this file degrades toward "no finding". Here the natural
+# failure — `gh` with no token prints nothing — parses as a count of ZERO, and
+# zero is the DRIFT value. So the arm never derives its verdict from a count it
+# did not positively read: the line must be exactly `<true|false> <digits>`, and
+# anything else is a reason, printed as such, setting no rc.
+bp_slug_of() { # bp_slug_of <remote-url> -> owner/repo, or "" if not GitHub
+  local U="$1" S=""
+  case "$U" in
+    *github.com:*) S="${U##*github.com:}" ;;
+    *github.com/*) S="${U##*github.com/}" ;;
+    *) return 0 ;;
+  esac
+  S="${S%.git}"
+  S="${S%/}"
+  # Exactly two non-empty, slash-free components. A URL that yields anything
+  # else is NOT turned into a best guess: an owner/repo we invented would be
+  # queried, 404, and land in could-not-measure wearing a fabricated subject.
+  case "$S" in
+    /*|*/) return 0 ;;
+    */*/*) return 0 ;;
+    */*) printf '%s' "$S" ;;
+    *) return 0 ;;
+  esac
+}
+
+echo "=== branch protection on the canonical remote (main) ==="
+# 🔴 THE OVERRIDE EXISTS FOR THE SUITE, and it is not a convenience. The
+# derivation reads the SAME `origin` the git leg fetches from, so a test that
+# gave this arm a GitHub slug by editing origin would point `git fetch` at the
+# real github.com — every rc-24 test would then depend on the live state of a
+# remote no test controls, over a network the suite is built not to touch. Same
+# role and same reasoning as DRIFT_TIER_LEDGER; the derived value is the only
+# correct one on a real host, and the derivation keeps its own coverage
+# (`test_the_slug_is_derived_from_the_origin_remote`).
+BP_URL=""
+BP_SLUG="${DRIFT_PROTECT_SLUG:-}"
+if [ -z "$BP_SLUG" ]; then
+  # `ls-remote --get-url` is LOCAL — it expands the configured URL and exits
+  # without contacting anything (measured 0.003s). It is also the only read-only
+  # verb on the passivity allowlist that yields a remote URL; `git config` and
+  # `git remote` both have write forms and are deliberately not allowlisted.
+  BP_URL="$(git -C "$DRIFT_REPO" ls-remote --get-url origin 2>/dev/null)"
+  BP_SLUG="$(bp_slug_of "$BP_URL")"
+fi
+if [ -z "$BP_SLUG" ] && [ -z "$BP_URL" ]; then
+  echo "[protect] COULD NOT MEASURE — no origin remote readable in $DRIFT_REPO."
+  echo "[protect]   This is NOT 'main is protected'. No rc is set."
+elif [ -z "$BP_SLUG" ]; then
+  # The URL itself is deliberately not echoed: this repo is public and an origin
+  # can name a private host. The finding is that it is not a GitHub owner/repo,
+  # which is all the operator needs to know why the arm stayed quiet.
+  echo "[protect] COULD NOT MEASURE — origin is not a github.com owner/repo remote,"
+  echo "[protect]   so there is no branch-protection API to ask. No rc is set."
+elif ! command -v "$DRIFT_GH" >/dev/null 2>&1; then
+  echo "[protect] COULD NOT MEASURE — no usable \`gh\` at $DRIFT_GH."
+  echo "[protect]   This is NOT 'main is protected'. No rc is set."
+else
+  # A plain GET. 🔴 No -X/--method, no -f/--field: `gh` can DELETE this very
+  # protection, and the git allowlist that guards the rest of this file cannot
+  # see a `gh` argv at all. Pinned by test_the_gh_calls_are_read_only.
+  BP_RAW="$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/branches/main" --jq '"\(.protected) \(.protection.required_status_checks.contexts // [] | length)"' 2>/dev/null)"
+  BP_PROT="${BP_RAW%% *}"
+  BP_N="${BP_RAW##* }"
+  # 🔴 THE FIELD COUNT IS PART OF THE CONTRACT, for the reason the phase-2 gate
+  # records: `${x%% *}` and `${x##* }` BOTH fall back to the whole string when
+  # there is no space, so a one-field answer would set `protected` and the count
+  # from the same token and render a well-formed-looking measurement.
+  case "$BP_RAW" in *' '*) ;; *) BP_N=-1 ;; esac
+  case "${BP_RAW#* }" in *' '*) BP_N=-1 ;; esac
+  case "$BP_PROT" in true|false) ;; *) BP_N=-1 ;; esac
+  case "$BP_N" in ''|*[!0-9]*) BP_N=-1 ;; esac
+  if [ "$BP_N" = -1 ]; then
+    echo "[protect] COULD NOT MEASURE — \`gh\` gave no usable answer for $BP_SLUG."
+    echo "[protect]   No network, no credentials, no access to that repo, or an API shape"
+    echo "[protect]   this arm does not recognise. 🔴 An empty answer parses as a count of"
+    echo "[protect]   ZERO, and zero is the DRIFT value — so it is refused here rather than"
+    echo "[protect]   fired as a finding. This is NOT 'main is protected'. No rc is set."
+  elif [ "$BP_N" -gt 0 ]; then
+    echo "[protect] $BP_SLUG main: $BP_N required status check(s) (protected=$BP_PROT)."
+  else
+    echo "[protect] 🔴 DRIFT — $BP_SLUG main has ZERO required status checks (protected=$BP_PROT)."
+    echo "[protect]   The gate every change to this fleet passes through is OFF: anything can"
+    echo "[protect]   land on main, and both hosts converge to main. Measured TWICE on"
+    echo "[protect]   2026-08-29, once leaving a DIRECT PUSH on main that required checks"
+    echo "[protect]   would have rejected. Neither was detected by anything but a human."
+    if [ "$BP_PROT" = true ]; then
+      echo "[protect]   protected=true: the protection object stands and required_status_checks"
+      echo "[protect]   was deleted out of it — the exact break-glass shape. 🔴 PATCH CANNOT"
+      echo "[protect]   restore it; it returns non-zero and changes nothing. Use a full PUT of"
+      echo "[protect]   /repos/$BP_SLUG/branches/main/protection, then READ IT BACK — a restore"
+      echo "[protect]   that has never been run is a hypothesis, and that is how this was missed."
+    else
+      echo "[protect]   protected=false: there is no protection object at all, so this is a"
+      echo "[protect]   create rather than a restore. Same endpoint, full PUT, read it back."
+    fi
+    echo "[protect]   read the live state: gh api /repos/$BP_SLUG/branches/main/protection"
+    note_rc 24
+  fi
+fi
+echo
+
 # ── FUZZYCLAW PHASE-2 GATE ────────────────────────────────────────────────────
 # See "THE FUZZYCLAW PHASE-2 GATE" in the header for what this measures and why
 # it is local-only. Here: how it refuses to produce a silent zero.
@@ -2792,6 +3015,12 @@ if [ "$rc" != 0 ]; then
   echo "       (nix reads the path, but the flake filtered the untracked file OUT of the"
   echo "       artifact — unsaved work, not a deployed one). A host whose nix-read set came EMPTY"
   echo "       is COULD NOT MEASURE, never rc23. (ranks between rc15 and rc12; see severity() )"
+  echo "  rc24=main on the canonical remote has ZERO required status checks — the merge gate"
+  echo "       is OFF for the branch both hosts converge to. protected=true means the checks"
+  echo "       were deleted out of a standing protection object (PATCH cannot restore it; PUT"
+  echo "       the whole thing and read it back). A gh that cannot answer is COULD NOT"
+  echo "       MEASURE, never rc24. (ranks between rc8 and rc17 — the LARGEST digit here"
+  echo "       ranks SECOND; see severity() )"
 fi
 [ -n "$UNCHECKED" ] && echo "drift-check: NOT checked: $UNCHECKED"
 exit "$rc"
