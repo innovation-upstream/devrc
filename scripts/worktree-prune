@@ -33,7 +33,11 @@ records which ones fired:
                     default branch has since built on top of.
   content-identical every path the branch changed since its merge-base has the
                     SAME content in the default branch. This is the signal that
-                    catches a squash merge with no git-level ancestry.
+                    catches a squash merge with no git-level ancestry. It reads
+                    the changed-path set through `diff --name-only -z` as BYTES
+                    and re-encodes it as a pathspec, because a path is bytes and
+                    the round-trip is what the verdict rests on — see the block
+                    below.
   patch-equivalent  `git cherry <default> <head>` finds an equivalent commit
                     upstream for every commit on the branch. Catches rebases
                     and cherry-picks.
@@ -49,6 +53,21 @@ operand reports SAME, not MISSING. If the branch changed nothing since its
 merge-base the changed-path set is EMPTY, and a pathspec-less `git diff` would
 then compare the WHOLE TREES and answer a question nobody asked. That case is
 short-circuited explicitly (`no-content-change`) and never reaches the diff.
+
+🔴 AND THE SAME MIRROR IMAGE ONE LEVEL DOWN, WHICH IS WHY THE CHANGED-PATH SET
+IS READ AS BYTES. A pathspec that matches NOTHING also reports SAME, not
+MISSING: git exits 0 with empty output, which `_paths_differ` reads as "no
+differing paths" and `content-identical` reads as "it landed". Under the default
+`core.quotePath=true` git RENDERS `café.md` as the quoted literal
+`"caf\303\251.md"` — a string, not a filename — so feeding a text-mode
+changed-path listing back as a pathspec produced exactly that empty answer, and
+a branch holding unlanded work under a non-ASCII name was classified `dead` and
+`removable`. Both the listing (`landing_signals`) and the comparison
+(`_paths_differ`) therefore go through `_git_raw` with `-z`, matching what
+`worktree_submodules`' index arm already did for `ls-files`. This was issue
+#975; the `ls-files` half was #935. The trigger needs EVERY genuinely-differing
+path in the set to be non-ASCII — one differing ASCII path already saved the
+row, which is why the tool's own repo never tripped it.
 
 THE VERDICTS
 ------------
@@ -270,6 +289,12 @@ AGENT_WORKTREE_GLOB = "*/.claude/worktrees/*"
 # civitai branch can touch thousands of paths). Pathspecs are therefore batched
 # well under that rather than passed in one go — a truncated-argv failure would
 # show up as "no differing paths", i.e. as a confident, wrong `dead`.
+#
+# 🔴 BYTES IS THE UNIT, AND THE SIZER MUST AGREE. `_paths_differ` measures each
+# pathspec with `len(os.fsencode(p))`, not `len(p)`: a str undercounts a
+# non-ASCII path by up to 4x, so a str-sized batch could exceed this budget and
+# reach exactly the truncation the constant is here to prevent. Measured for
+# #975 alongside the `core.quotePath` bug in the same function.
 PATHSPEC_BATCH_BYTES = 40_000
 
 GIT_TIMEOUT = 180
@@ -308,16 +333,48 @@ def _git_raw(cwd: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.Co
     legislates against — one unreadable row is not a reason to abandon the
     other 750.
 
-    🔴 THIS FIXES ONE CALL, NOT THE CLASS — and the class is NOT confined to
-    `-z` callers, which an earlier wording of this docstring implied. MEASURED:
-    `git worktree list --porcelain` emits the worktree PATH raw and unquoted
-    regardless, so a worktree whose DIRECTORY NAME holds an undecodable byte
-    still takes the whole scan down through `list_worktrees` — identically on
-    `origin/main`, so it is pre-existing here and not this change's doing.
-    Tracked as issue #944 rather than widened into the PR that added this
-    helper; converting the porcelain parser to bytes touches the core scan path
-    and wants its own tests. Do not read this helper as evidence the abort
-    class is closed.
+    ⚠ "TRACKED" IS THE MEASUREMENT ABOVE, NOT THE BOUNDARY OF THE HAZARD. That
+    fixture was tracked because `ls-files` and `diff` only ever see tracked
+    content — but `worktree_dirty` reads `status --porcelain=v1
+    --untracked-files=normal`, so for THAT call an UNTRACKED file nobody ever
+    `git add`ed is enough on its own (measured; see the still-open list below).
+    Read every "tracked filename" in this file as scoped to the arm it sits in.
+
+    🔴 WHICH CALLS GO THROUGH THIS HELPER TODAY — a list of THIS HELPER'S
+    callers, NOT an audit of the file. Three: `worktree_submodules`' `ls-files
+    -s -z` index arm (#935), and — since #975 — both halves of the
+    `content-identical` signal, `landing_signals`' `diff --name-only -z`
+    changed-path listing and `_paths_differ`'s `diff --name-only -z` comparison.
+    An earlier wording added "those are every call in this file that handles a
+    repository path", which is FALSE and is exactly the kind of finished-audit
+    sentence #975 objected to in #944's prose. See the next paragraph for the
+    calls that still do not.
+
+    🔴 THE CLASS IS STILL NOT CLOSED, and it is NOT confined to `-z` callers,
+    which an earlier wording of this docstring implied. Two OTHER calls still
+    read paths through `_git` (strict utf-8), and each takes the WHOLE SCAN down
+    with a bare `UnicodeDecodeError` out of `subprocess.communicate` — before
+    any caller can see it, and with zero classified rows:
+
+      * `git worktree list --porcelain` (`list_worktrees`) emits the worktree
+        PATH raw and unquoted REGARDLESS of `core.quotePath`, so a worktree
+        whose DIRECTORY NAME holds an undecodable byte kills the scan under
+        DEFAULT config. Tracked as issue #944.
+      * `git status --porcelain=v1` (`worktree_dirty`) emits raw path bytes
+        under `core.quotePath=false`. MEASURED at #975's HEAD: one scanned
+        worktree holding a single **UNTRACKED** file named `caf\\xe9.txt`, with
+        that setting, aborts the entire scan.
+
+    Both are pre-existing and neither is any of these changes' doing. Converting
+    them touches the core scan path and the dirty check — each wants its own
+    fixture and its own audit, which is why #975 stopped at the arm that decides
+    `dead`. Do not read this helper as evidence the abort class is closed.
+
+    🔴 AND THE REACH IS WIDER THAN "TRACKED". `scripts/README.md`'s row said
+    "any undecodable TRACKED filename"; `worktree_dirty` reads
+    `--untracked-files=normal`, so an untracked file nobody ever `git add`ed is
+    enough on its own. (Both are now corrected; this repeats the `⚠` note above
+    on purpose, because the two paragraphs are read at different times.)
     """
     return subprocess.run(
         ["git", "--no-optional-locks", "-C", str(cwd), *args],
@@ -641,18 +698,49 @@ def _paths_differ(repo: Path, rev_a: str, rev_b: str, paths: "list[str]") -> "bo
     size = 0
     batches: list[list[str]] = []
     for p in paths:
-        if batch and size + len(p) + 1 > PATHSPEC_BATCH_BYTES:
+        # 🔴 `os.fsencode`, NOT `len(p)`. The budget is named in BYTES because
+        # argv is measured in bytes, and a str undercounts: `len("café.md")` is
+        # 7 for 8 bytes, and one astral code point is 1 char for 4 bytes — up to
+        # a 4x undercount, which would let a batch overrun the very cap this
+        # constant exists to keep it under. Surrogate-escaped bytes are the one
+        # case that IS 1:1, so the ASCII-only measurement that used to justify
+        # `len(p)` could never see this.
+        n = len(os.fsencode(p))
+        if batch and size + n + 1 > PATHSPEC_BATCH_BYTES:
             batches.append(batch)
             batch, size = [], 0
         batch.append(p)
-        size += len(p) + 1
+        size += n + 1
     if batch:
         batches.append(batch)
     for b in batches:
-        r = _git(repo, "diff", "--name-only", rev_a, rev_b, "--", *b)
+        # 🔴 `-z` + BYTES here too, for the OTHER half of the same bug. Without
+        # `-z` this call is `text=True`, i.e. strict utf-8: on a host that sets
+        # `core.quotePath=false` git emits the raw path bytes and one
+        # undecodable tracked filename raises `UnicodeDecodeError` INSIDE
+        # `subprocess.run`, with no `try:` between it and `sys.exit(main())` —
+        # the whole-scan abort class `_git_raw` exists to close. MEASURED on
+        # git 2.55 with a tracked `caf\xe9.txt`: `text=True` raised,
+        # `-z`+bytes returned `b"caf\xe9.txt\x00"`.
+        r = _git_raw(repo, "diff", "--name-only", "-z", rev_a, rev_b, "--", *b)
         if r.returncode != 0:
             return None
-        if r.stdout.strip():
+        # 🔴 `any(p ...)`, NOT `any(p.strip() ...)`. Two separate reasons, and
+        # only the first is obvious:
+        #
+        #   * `bytes.strip()` removes ASCII whitespace but NOT NUL, so testing
+        #     `r.stdout.strip()` on the whole buffer would read a lone separator
+        #     as truthy.
+        #   * 🔴 AND `.strip()` on a RECORD discards a path whose NAME is
+        #     whitespace. A file named `" "` is a legal git path: MEASURED on
+        #     git 2.55, `diff --name-only -z` returns `b" \0"` for it and
+        #     `git diff --name-only <a> <b> -- " "` confirms it genuinely
+        #     differs — so stripping turns a real difference into "no differing
+        #     paths", which is the silent, confident, wrong `dead` this whole
+        #     file is about. With `-z` the ONLY empty record is the trailing
+        #     terminator, so a bare truthiness test is both correct and
+        #     sufficient.
+        if any(p for p in r.stdout.split(b"\0")):
             return True
     return False
 
@@ -682,15 +770,46 @@ def landing_signals(repo: Path, head: str, default_ref: str) -> "dict":
         return {"fired": fired, "checked": checked, "notes": notes, "error": True}
 
     checked.append("content-identical")
-    r = _git(repo, "diff", "--name-only", base, head)
+    # 🔴 `-z` IS LOAD-BEARING HERE FOR THE SAME REASON IT IS IN
+    # `worktree_submodules` — and this is the arm that decides `dead`. Without
+    # `-z`, `core.quotePath` (ON by default) makes git RENDER a non-ASCII path
+    # as a quoted C-escaped literal: `café.md` comes back as the 15-character
+    # string `"caf\303\251.md"`, which is not a filename. `_paths_differ` then
+    # feeds that literal back to git as a PATHSPEC, it matches nothing, and git
+    # exits 0 with EMPTY output — indistinguishable from "this path really is
+    # identical upstream". `content-identical` fires, the verdict is `dead` and
+    # the row is `removable`, on a branch holding unlanded work. MEASURED on git
+    # 2.55, default config: `diff --name-only trunk feature` -> `"caf\303\251.md"`;
+    # the same diff with that literal as a pathspec -> empty, rc 0; with the RAW
+    # name as a pathspec -> the path, correctly. One ASCII path that also
+    # differs saves the row, so the trigger is a changed set whose DIFFERING
+    # members are all non-ASCII.
+    # 🔴 BYTES, not text — see `_git_raw`. `-z` makes git emit the path RAW, so
+    # a strict utf-8 decode here would abort the whole scan on any undecodable
+    # tracked filename. `os.fsdecode` (surrogateescape) to REACH the path: the
+    # str it produces re-encodes to the exact original bytes when `subprocess`
+    # builds the pathspec argv, which is what keeps `_paths_differ`'s
+    # `list[str]` signature honest. No path from this set is ever PRINTED, so
+    # the `_printable` (U+FFFD) direction is deliberately not used here.
+    r = _git_raw(repo, "diff", "--name-only", "-z", base, head)
     if r.returncode != 0:
         notes.append(f"changed-path listing failed rc={r.returncode}")
         return {"fired": fired, "checked": checked, "notes": notes, "error": True}
-    changed = [p for p in r.stdout.splitlines() if p.strip()]
+    # 🔴 `if p`, NOT `if p.strip()` — see the same predicate in `_paths_differ`.
+    # `" "` is a legal filename; stripping the RECORD drops it from the changed
+    # set, and a dropped DIFFERING path is indistinguishable from "identical
+    # upstream". With `-z` the only empty record is the trailing terminator.
+    changed = [os.fsdecode(p) for p in r.stdout.split(b"\0") if p]
     if not changed:
         # 🔴 The empty-operand case, handled here and NOT by a pathspec-less
         # diff. The branch introduced no content relative to its merge-base, so
         # there is nothing that could fail to be present upstream.
+        #
+        # 🔴 THAT SENTENCE IS ONLY TRUE BECAUSE THE FILTER ABOVE IS `if p`.
+        # Under `if p.strip()` a branch that changed ONLY whitespace-named paths
+        # produced an empty set and landed here, so `no-content-change` fired —
+        # and this comment asserted "introduced no content" about a branch that
+        # had. The emptiness has to be git's, not the filter's.
         fired.append("no-content-change")
         notes.append(f"branch changes no path relative to merge-base {base[:12]}")
         return {"fired": fired, "checked": checked, "notes": notes}
