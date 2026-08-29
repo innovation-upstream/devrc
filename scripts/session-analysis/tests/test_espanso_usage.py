@@ -566,6 +566,32 @@ def test_lint_flags_a_trigger_that_is_a_prefix_of_another():
     assert "prefix" in _kinds(findings)
 
 
+def test_lint_uniqueness_is_the_detectors_own_attribute_rule():
+    """`unique` must ask `_attribute`, not re-derive it as `len(matches) == 1`.
+
+    Two snippets whose triggers CONTAIN one another (the 2026-08-28 ':acq' /
+    ':dacq' split) plus a search_term equal to the shorter one's bare name. That
+    term matches BOTH snippets, so the old `len(m) == 1` copy of the rule saw no
+    unique term and reported ':acq' unreachable — while `_attribute` resolves it
+    outright. RED before the consolidation: 'unreachable' was in the kinds.
+    """
+    # Every OTHER declared term of ':acq' is deliberately shared with ':dacq',
+    # so the bare name is its ONLY resolving term — otherwise the snippet has a
+    # unique term anyway and the test passes on the old rule too (measured: the
+    # first version of this fixture did exactly that and was green at base).
+    acq = {"trigger": ":acq", "replace": "ask clarifying questions",
+           "label": "dispatch scope", "search_terms": ["acq"]}
+    dacq = {"trigger": ":dacq", "replace": "dispatch subagent",
+            "label": "dispatch scope extra", "search_terms": ["dispatch"]}
+    findings = M.lint(_ts([acq, dacq]))
+    unreachable = {f["trigger"] for f in findings if f["kind"] == "unreachable"}
+    assert ":acq" not in unreachable, findings
+    # ...and the term is still REPORTED as ambiguous, because it does list two
+    # picker rows. Resolution and reachability stay separate questions.
+    assert any(f["kind"] == "ambiguous" and "'acq'" in f["message"]
+               for f in findings), findings
+
+
 def test_lint_uses_the_detectors_own_label_tokenizer():
     """A hyphenated label word must not be reported as a self-miss: the detector
     splits the label on non-alphanumerics, so 'homelab-talos' is never a token."""
