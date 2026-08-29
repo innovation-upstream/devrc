@@ -8,9 +8,9 @@ and `claude/`, against 120,366 records carrying it in `~/.claude/projects`), so
 most work happens. `adoption-scan` could only see the 9 tools that emit through
 `invocation.py`; skills emit nothing.
 
-🔴 The two fields are INDEPENDENT SIGNALS, and the tests below pin BOTH
-directions of that because both have live instances. A reader that keeps only
-one loses real usage.
+🔴 The THREE fields are INDEPENDENT SIGNALS, and the tests below pin the
+directions that have live instances. A reader that keeps only one loses real
+usage.
 """
 import importlib.util
 import json
@@ -98,8 +98,17 @@ class TestNeitherSignalIsASuperset:
     typed-only, and "measured 8 times". BOTH WERE WRONG: they came from a raw
     file grep, which matches `<command-name>` inside quoted TOOL OUTPUT — the
     exact false positive `test_a_command_quoted_in_TOOL_OUTPUT_is_not_an_
-    invocation` forbids. clawgate's typed-only is 0. `handoff` is the live
-    instance. Do not re-derive either number with a grep."""
+    invocation` forbids. clawgate's typed-only is 0. Do not re-derive either
+    number with a grep.
+
+    The typed-only direction is real but SMALL, and saying "`handoff` is the
+    live instance" was also too narrow. Measured over the whole corpus: 11 names
+    have a typed-only session, of which SIX are built-ins with zero attributed
+    records (`login` 71, `recap` 66, `compact` 10, `exit` 6, `config` 2,
+    `reload-plugins` 1) — which is itself why this field is named
+    `commands_typed` and not `skills_typed`. Among actual SKILLS there are five:
+    `handoff` 3, and `analyze-service` / `app-blocks` / `manage-redis` /
+    `investigate-dp-errors` at 1 each."""
 
     def test_an_AUTO_FIRED_skill_is_seen_with_no_command_ever_typed(self):
         """The case the pre-existing `kind=command` telemetry is structurally
@@ -113,10 +122,15 @@ class TestNeitherSignalIsASuperset:
 
     def test_a_TYPED_command_is_seen_with_no_attributed_record(self):
         """The inverse direction: typed, but no assistant record carried the
-        attribution. Live instance: `handoff`, 3 sessions (NOT `clawgate`, whose
-        typed-only is 0 — see the class docstring's retraction)."""
-        r = S.build_rollup([_command("clawgate", "status"), _assistant()])
-        assert r["commands_typed"] == {"clawgate": 1}
+        attribution.
+
+        The fixture uses `handoff` DELIBERATELY — it is the skill this case
+        actually has live instances for (3). It used to use `clawgate`, whose
+        typed-only count is 0, which made this read as regression coverage for a
+        direction that never happens; against that fixture it was an invariant
+        guard wearing a regression guard's name."""
+        r = S.build_rollup([_command("handoff"), _assistant()])
+        assert r["commands_typed"] == {"handoff": 1}
         assert r["skills_used"] == {}
 
 
@@ -176,10 +190,41 @@ class TestTheNameBoundDoesNotREJECTRealIdentities:
         assert r["skills_used"] == {"cloudflare:wrangler": 1}
         assert r["unusable_skill_names"] == 0
 
-    def test_a_DIRECTORY_scoped_skill_is_recorded(self):
+    def test_a_DIRECTORY_scoped_skill_records_the_SKILL_not_the_PATH(self):
+        """🔴 The prefix is a PATH, and on this fleet it is per-run-unique: the
+        only namespace-qualified identities in 6,113 transcripts are 10 distinct
+        `.claude/worktrees/agent-<17 hex>:remix`, one per agent run. Keeping the
+        whole string would make an unbounded-cardinality ClickHouse key out of a
+        filesystem path — for every session, on both hosts, in a PUBLIC repo.
+
+        So `apps/web:deploy` and `apps/api:deploy` both record `deploy`. That
+        collision is a deliberate trade: the identity measured is the skill, not
+        where it was loaded from."""
         r = S.build_rollup([_typed(), _assistant(skill="apps/web:deploy")])
-        assert r["skills_used"] == {"apps/web:deploy": 1}
+        assert r["skills_used"] == {"deploy": 1}
         assert r["unusable_skill_names"] == 0
+
+    def test_the_LIVE_worktree_qualified_shape_is_recorded(self):
+        """The real value from the corpus, not the doc's illustrative one — the
+        previous bound rejected every one of these while admitting the synthetic
+        example the comment cited."""
+        r = S.build_rollup([_typed(), _assistant(
+            skill=".claude/worktrees/agent-a2fdb76ed5a9fc025:remix")])
+        assert r["skills_used"] == {"remix": 1}
+        assert r["unusable_skill_names"] == 0
+
+    def test_a_BARE_PATH_is_rejected_and_counted(self):
+        """No skill after the prefix — it is a path, not an identity. Rejected
+        rather than recorded, and counted rather than dropped."""
+        r = S.build_rollup([_typed(), _assistant(
+            skill="home/zach/workspace/clients/acme-teardown/.env")])
+        assert r["skills_used"] == {}
+        assert r["unusable_skill_names"] == 1
+
+    def test_a_HOST_PORT_PATH_value_is_rejected(self):
+        r = S.build_rollup([_typed(), _assistant(skill="10.42.0.30:8123/activity")])
+        assert r["skills_used"] == {}
+        assert r["unusable_skill_names"] == 1
 
     def test_the_two_skill_name_bounds_agree(self):
         """🔴 The bound is DUPLICATED in scripts/lib/transcript_search.py and

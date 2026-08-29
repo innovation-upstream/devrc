@@ -333,9 +333,8 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
             # `attributionSkill` is a TOP-LEVEL field on the record (a sibling of
             # `message`), and it is the ONLY signal that sees a skill which
             # auto-fired from its description rather than being typed.
-            skill = rec.get("attributionSkill")
-            if isinstance(skill, str) and skill.strip():
-                s = skill.strip()
+            s = canonical_skill_name(rec.get("attributionSkill"))
+            if s:
                 skills_attributed[s] = skills_attributed.get(s, 0) + 1
             # The EXPLICIT-invocation route: a `Skill` tool_use block. Read
             # unconditionally rather than only under a wider surface — this is
@@ -350,9 +349,8 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
                                 and blk.get("name") == "Skill"):
                             binp = blk.get("input")
                             if isinstance(binp, dict):
-                                nm = binp.get("skill")
-                                if isinstance(nm, str) and nm.strip():
-                                    k = nm.strip()
+                                k = canonical_skill_name(binp.get("skill"))
+                                if k:
                                     skills_invoked[k] = skills_invoked.get(k, 0) + 1
             msg = rec.get("message") or {}
             is_user = typ == "user" and not rec.get("isMeta")
@@ -373,10 +371,9 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
                 utext = body if surface == SURFACE_TEXT else text_of(msg)
                 cmd_m = _COMMAND_NAME_RE.search(utext)
                 if cmd_m:
-                    cname = normalize_skill(cmd_m.group(1))
-                    # Bounded with the SAME rule the emitter uses — see
-                    # SKILL_NAME_PATTERN above for why the two must agree.
-                    if cname and SKILL_NAME_RE.match(cname):
+                    # Same rule as the emitter — see SKILL_NAME_PATTERN.
+                    cname = canonical_skill_name(cmd_m.group(1))
+                    if cname:
                         commands_typed[cname] = commands_typed.get(cname, 0) + 1
         else:
             continue
@@ -424,12 +421,36 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
 # break the running service on both hosts. Same rule, two places, one enforced
 # ledger.
 #
-# Applied here so the two readers AGREE about what a name is. They diverged
-# once: the tailer rejected `not a valid name` and a 4,000-char key while this
-# module accepted both, so `--skill "not a valid name"` could match a session
-# that ClickHouse reported as having used no such skill.
-SKILL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,63}$"
+# Applied to ALL THREE routes so the two readers AGREE about what a name is.
+# They diverged twice: first the tailer rejected `not a valid name` and a
+# 4,000-char key while this module accepted both; then a fix bounded only the
+# TYPED route here, leaving attribution and explicit invocation unbounded — so
+# `--skill "not a valid name"` still matched a session ClickHouse reported as
+# having used no such skill. A bound on one of three routes is not a bound.
+SKILL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
 SKILL_NAME_RE = re.compile(SKILL_NAME_PATTERN)
+
+
+def canonical_skill_name(raw):
+    """The key a skill identity may become, or None if it may not become one.
+
+    Byte-identical in behaviour to `canonical_skill_name` in
+    `scripts/collector/claude/session-tailer.py` — see SKILL_NAME_PATTERN above
+    for why the rule is duplicated rather than imported, and read that copy for
+    the measurement behind dropping a path-derived prefix.
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip().lstrip("/").strip()
+    if not s:
+        return None
+    if "/" in s:
+        if ":" not in s:
+            return None
+        s = s.rsplit(":", 1)[1].strip()
+    if not s or not SKILL_NAME_RE.match(s):
+        return None
+    return s
 
 
 def normalize_skill(name) -> str:

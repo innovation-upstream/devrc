@@ -186,6 +186,83 @@ class TestTheCorpusWideGuardStillHolds:
             ts.search([], root=tmp_path, skill="/")
 
 
+class TestTheBoundAppliesToALLTHREERoutes:
+    """🔴 A bound on ONE of three routes is not a bound. An earlier revision
+    applied it to the typed route only, so the emitter and this module still
+    disagreed: `--skill "not a valid name"` matched a session ClickHouse
+    reported as having used no such skill.
+
+    🔴 These are also the ONLY behavioural tests of the bound on this side.
+    Without them, `SKILL_NAME_RE = re.compile(r".*")` — a mutant that makes the
+    guard inert while still declaring the right pattern — SURVIVED 681 tests."""
+
+    def _rec(self, **kw):
+        d = {"type": "assistant", "timestamp": "2026-08-21T10:01:00.000Z",
+             "cwd": "/srv/repo", "message": {"content": []}}
+        d.update(kw)
+        return json.dumps(d)
+
+    def test_prose_in_ATTRIBUTION_is_rejected(self, tmp_path):
+        p = _write(tmp_path, "s", [_user("hi"),
+                                   self._rec(attributionSkill="not a valid name")])
+        assert ts.scan_transcript(str(p), [], [])["skills_attributed"] == {}
+
+    def test_an_absurdly_long_ATTRIBUTION_is_rejected(self, tmp_path):
+        p = _write(tmp_path, "s", [_user("hi"),
+                                   self._rec(attributionSkill="z" * 4000)])
+        assert ts.scan_transcript(str(p), [], [])["skills_attributed"] == {}
+
+    def test_prose_in_a_TYPED_command_is_rejected(self, tmp_path):
+        p = _write(tmp_path, "s", [
+            _user("<command-name>not a valid name</command-name>"), _assistant()])
+        assert ts.scan_transcript(str(p), [], [])["commands_typed"] == {}
+
+    def test_a_bare_PATH_in_an_INVOCATION_is_rejected(self, tmp_path):
+        """A path is not a skill identity. `input.skill` is model-written and
+        the corpus proves the harness sometimes writes a path there."""
+        p = _write(tmp_path, "s", [_user("hi"), self._rec(message={"content": [
+            {"type": "tool_use", "name": "Skill",
+             "input": {"skill": "home/zach/workspace/clients/acme/.env"}}]})])
+        assert ts.scan_transcript(str(p), [], [])["skills_invoked"] == {}
+
+    def test_a_PATH_QUALIFIED_identity_records_the_SKILL_not_the_path(self, tmp_path):
+        """The live shape on this fleet is `.claude/worktrees/agent-<hex>:remix`
+        — one distinct value PER AGENT RUN. Keeping the whole string would make
+        an unbounded-cardinality key out of a filesystem path; keeping the part
+        after the last `:` records the skill that was actually used."""
+        p = _write(tmp_path, "s", [_user("hi"), self._rec(message={"content": [
+            {"type": "tool_use", "name": "Skill",
+             "input": {"skill": ".claude/worktrees/agent-a2fdb76ed5a9fc025:remix"}}]})])
+        assert ts.scan_transcript(str(p), [], [])["skills_invoked"] == {"remix": 1}
+
+    def test_a_PLUGIN_qualified_identity_is_kept_WHOLE(self, tmp_path):
+        """`cloudflare:wrangler` has no path component — the namespace is
+        bounded and meaningful, so it is not truncated."""
+        p = _write(tmp_path, "s", [_user("hi"),
+                                   self._rec(attributionSkill="cloudflare:wrangler")])
+        got = ts.scan_transcript(str(p), [], [])["skills_attributed"]
+        assert got == {"cloudflare:wrangler": 1}
+
+    def test_the_two_readers_AGREE_on_every_one_of_these(self, tmp_path):
+        """The relationship, not the components: whatever this module records
+        for a name, the emitter must record too. A structural check only — the
+        behavioural cases above are what make it meaningful."""
+        import importlib.util
+        tailer_path = (Path(__file__).resolve().parents[1]
+                       / "collector" / "claude" / "session-tailer.py")
+        spec = importlib.util.spec_from_file_location("st_for_agree", tailer_path)
+        st = importlib.util.module_from_spec(spec)
+        sys.modules["st_for_agree"] = st
+        sys.path.insert(0, str(tailer_path.parent))
+        sys.path.insert(0, str(tailer_path.parent.parent))
+        spec.loader.exec_module(st)
+        for value in ["signal", "cloudflare:wrangler", "not a valid name",
+                      ".claude/worktrees/agent-abc123:remix", "z" * 4000,
+                      "home/zach/x/.env", "10.42.0.30:8123/activity", "/handoff"]:
+            assert st.canonical_skill_name(value) == ts.canonical_skill_name(value), (
+                f"the two readers disagree about {value!r}")
+
+
 class TestTheThirdInvocationRoute:
     """A `Skill` tool_use block — 1,305 in the live corpus. Reading only the
     other two routes undercounted `next-lever` by 87.5% (1 seen of 8)."""

@@ -261,30 +261,67 @@ def _int(v) -> int:
 # So this is a LATENT hazard with zero live instances — bounded here rather than
 # after it ships something.
 #
-# 🔴 `:` and `/` ARE ADMITTED, and that is not slack. A skill identity is
-# documented as namespace-qualified — `plugin:skill` for a plugin skill,
-# `apps/web:deploy` for a directory-scoped one — so a bound drawn around the 37
-# names that happen to exist today would REJECT a real plugin skill the first
-# time one is enabled (14 are cached on this host already). The reject is
-# silent where it hurts: ClickHouse would report the skill as never used while
-# `find-session --skill` still found the session, i.e. exactly the silent zero
-# this work exists to remove, reintroduced inside the guard protecting it. The
-# measurement bounds the SHAPE (no whitespace, no prose, bounded length); it
-# does not get to bound the NAMESPACE.
+# 🔴 `:` IS ADMITTED, `/` IS NOT, AND A PATH-DERIVED PREFIX IS DROPPED RATHER
+# THAN REJECTED. All three follow from what the corpus actually carries.
+#
+# A skill identity can be namespace-qualified: `plugin:skill` for a plugin
+# skill, `<dir>:<skill>` for a directory-scoped one. A bound drawn around the 37
+# bare names that exist today would silently REJECT a plugin skill the first
+# time one is enabled (14 are cached on this host) — ClickHouse would report it
+# as never used while `find-session --skill` still found the session, which is
+# the silent zero this work removes, reintroduced inside the guard protecting it.
+#
+# 🔴 But the directory form's prefix is a PATH, and on this fleet it is
+# per-run-unique. Measured 2026-08-29, the ONLY namespace-qualified identities
+# in 6,113 transcripts are 10 distinct
+# `.claude/worktrees/agent-<17 hex>:remix` — one per agent run. Keeping the
+# whole string would make an unbounded-cardinality ClickHouse map key out of a
+# filesystem path, for every session on both hosts, and this repo is PUBLIC:
+# `home/zach/workspace/clients/<name>/.env` fits the same shape.
+#
+# So `canonical_skill_name` drops a path-derived prefix and keeps the SKILL,
+# and a value that is a bare path with no skill after it is REJECTED and
+# COUNTED. `apps/web:deploy` and `apps/api:deploy` therefore both record
+# `deploy`: the identity we measure is the skill, not where it was loaded from.
+# That is a deliberate loss — the alternative is one key per worktree.
 #
 # 🔴 DUPLICATED, DELIBERATELY, in `scripts/lib/transcript_search.py`, and pinned
 # byte-identical by `test_the_two_skill_name_bounds_agree`. It cannot be a
 # shared import: `nix/home.nix` deploys `scripts/collector/claude` ALONE to
 # `~/.config/activity-collector/claude/`, so an import from `scripts/lib` would
 # pass every test here and break the running daemon on both hosts.
-SKILL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,63}$"
+SKILL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
 SKILL_NAME_RE = re.compile(SKILL_NAME_PATTERN)
+
+
+def canonical_skill_name(raw):
+    """The key a skill identity may become, or None if it may not become one.
+
+    🔴 ONE function for all three routes. The previous revision bounded only the
+    typed route, so the emitter and the search disagreed about what a name IS —
+    `find-session --skill "not a valid name"` matched a session ClickHouse
+    reported as having used no such skill. Every route goes through here.
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip().lstrip("/").strip()
+    if not s:
+        return None
+    if "/" in s:
+        # A path-derived prefix. Keep the skill after it; a bare path is not a
+        # skill identity at all.
+        if ":" not in s:
+            return None
+        s = s.rsplit(":", 1)[1].strip()
+    if not s or not SKILL_NAME_RE.match(s):
+        return None
+    return s
 
 
 def _note_name(bag: dict, raw, rollup: dict) -> None:
     """Record `raw` as a key of `bag`, or count it as unusable. Never both."""
-    name = str(raw).strip().lstrip("/").strip() if raw is not None else ""
-    if not name or not SKILL_NAME_RE.match(name):
+    name = canonical_skill_name(raw)
+    if name is None:
         if raw is not None and str(raw).strip():
             rollup["unusable_skill_names"] += 1
         return
@@ -342,9 +379,12 @@ def _empty_rollup() -> dict:
         "skills_used": {},
         "skills_invoked": {},
         "commands_typed": {},
-        # Names REJECTED by SKILL_NAME_RE — a bounded-charset guard on what may
-        # become a payload key. Counted, never dropped silently: a filter nobody
-        # can count is indistinguishable from one wired to nothing.
+        # Skill/command identities this session offered that could NOT become a
+        # payload key: rejected by `canonical_skill_name` (prose, a bare path, a
+        # 4,000-char blob), AND the command turn whose only `<command-name>` tag
+        # was empty — that one has no value to reject, so it is counted at the
+        # call site instead. Counted, never dropped silently: a filter nobody can
+        # count is indistinguishable from one wired to nothing.
         "unusable_skill_names": 0,
         "input_tokens": 0,
         "output_tokens": 0,
@@ -505,9 +545,14 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
                 # counting nothing, so the loss was invisible. That regression
                 # was introduced by the fix above; `cmd_tag_empty` is what makes
                 # the discarded case observable instead.
+                # `finditer`, not `search`: with `search` a block holding an
+                # empty tag FOLLOWED by a real one saw only the empty one, so
+                # the real command was lost AND `cmd_tag_empty` never fired —
+                # discarded and unobservable at once, which is what the flag
+                # exists to prevent. Across blocks was fixed; within one block
+                # was not.
                 if raw:
-                    m = COMMAND_NAME.search(raw)
-                    if m:
+                    for m in COMMAND_NAME.finditer(raw):
                         val = m.group(1).strip()
                         if val:
                             if cmd_name is None:

@@ -102,10 +102,17 @@ def main(argv=None):
     # It now selects the search surface, which is the only thing it ever meant.
     surface = SURFACE_ALL if a.all else SURFACE_TEXT
 
-    # Read the NORMALISED value, not the raw one: `--skill /` and `--skill "  "`
-    # are truthy but name nothing, and a truthiness guard let them through to
-    # become a corpus-wide empty result (exit 0) or an unhandled traceback.
-    a.skill = normalize_skill(a.skill)
+    # 🔴 A `--skill` that was GIVEN but names nothing is refused OUTRIGHT —
+    # never silently dropped. Normalising first and then testing only
+    # `not terms and not skill` fixed the no-terms case and left a worse one:
+    # `find-session redis --skill /clawgate` typo'd to `--skill /` normalised to
+    # "", the skill predicate was skipped entirely, and an UNFILTERED two-corpus
+    # keyword result came back at exit 0 reading as an answer to the question
+    # that was actually asked.
+    raw_skill, a.skill = a.skill, normalize_skill(a.skill)
+    if raw_skill and not a.skill:
+        print(f"--skill {raw_skill!r} names no skill", file=sys.stderr)
+        sys.exit(2)
     if not a.terms and not a.skill:
         print("nothing to search for: give at least one term, or --skill NAME",
               file=sys.stderr)

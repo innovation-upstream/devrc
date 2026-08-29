@@ -103,8 +103,22 @@ class TestAQueryThatNamesNothingIsRefusedNotAnsweredWithZero:
     def test_it_exits_2_and_says_so(self, corpus, bad):
         code, out, err = run(corpus, ["--skill", bad])
         assert code == 2, f"--skill {bad!r} did not exit 2 (got {code}, stdout={out!r})"
-        assert "nothing to search for" in err
+        assert "names no skill" in err or "nothing to search for" in err
         assert out == "", "a refused query must not print a result set"
+
+    @pytest.mark.parametrize("bad", ["/", "   ", "//"])
+    def test_it_is_STILL_refused_when_search_terms_are_present(self, corpus, bad):
+        """🔴 THE BOUNDARY THE FOUR CASES ABOVE DO NOT PIN. They all run with no
+        terms, so they only exercise the `not terms and not skill` conjunction.
+        With a term present, a `--skill` that normalised to "" was DROPPED and
+        an unfiltered keyword search ran at exit 0 — `find-session redis --skill
+        /clawgate`, typo'd to `--skill /`, answering a different question and
+        reading as an answer to the one asked. Worse than the silent zero."""
+        code, out, err = run(corpus, ["hi", "--skill", bad])
+        assert code == 2, (
+            f"'hi --skill {bad!r}' returned {code} — the skill filter was "
+            f"silently dropped and a keyword result was printed: {out[:200]!r}")
+        assert "names no skill" in err
 
     def test_a_REAL_skill_name_is_NOT_refused(self, corpus):
         """🔴 The negative control for the guard above. A guard that refused
