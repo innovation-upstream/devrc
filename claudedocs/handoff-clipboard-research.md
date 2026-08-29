@@ -16,11 +16,23 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 ## Goal
 Research modern best practices for clipboard and terminal clipboard interaction on Linux/NixOS/i3wm. Determine what's current, what's optimal, and what (if anything) needs changing.
 
-## State now
-- Branch: `main`, behind `origin/main` by 5, ahead by 1
-- **DONE this session:** research report completed — subagent dispatched, findings delivered
-- **NOT DONE:** no code changes, no config changes — pure research
-- Deploy/verify status: N/A — research only, no changes to apply
+## State now — updated 2026-08-29 on resume
+- **Research session (00:37–00:53):** report completed, no code changes. This doc
+  landed on `handoff/clipboard-research` → PR #1014 (it could not be pushed to
+  `main`: protected branch, 2 required checks).
+- **Resume session:** both open decisions resolved, and a bug the research missed
+  was found, fixed and gated.
+  - `unnamedplus` — **declined**, no change.
+  - `"+y` dead with no `DISPLAY` — **fixed** on `fix/nvim-osc52-clipboard`
+    (`.config/nvim/lua/config/native.lua` + `scripts/tests/test_nvim_clipboard_osc52.py`,
+    5 tests, no surviving mutants).
+- 🔴 **Deploy: this file needs NO `home-manager switch`.** `~/.config/nvim/init.lua`
+  is a store copy, but the `init.vim` baked into it sources everything through
+  `$DEVRC_DIR` (set in `nix/graphical.nix:630`) — i.e. straight out of the
+  `~/workspace/devrc` **working tree**. So the nvim change goes live on `git pull`
+  alone. Measured, not inferred: the red/green test drove it by pointing
+  `DEVRC_DIR` at a worktree. `readlink -f` cannot answer this one — the path is
+  reached through an env var, not a symlink.
 
 ## Research findings — clipboard/terminal clipboard best practices (2025-2026)
 
@@ -44,11 +56,41 @@ Research modern best practices for clipboard and terminal clipboard interaction 
 - On X11/i3, tmux OSC 52 + xclip covers the use cases
 - `clipcat` (X11) or `CopyQ` available if history is wanted, but optional
 
-### Neovim clipboard — ONE OPTIONAL IMPROVEMENT
-- Currently: implicit xclip detection (auto-detected, works out of box)
-- `"+y` / `"+p` (system clipboard) work without config
-- **Optional improvement:** add `set clipboard=unnamedplus` to `native.vim` to make `y`/`p` use system clipboard by default
-- Trade-off: convenience vs. vim muscle memory where `y` only yanks to a register
+### Neovim clipboard — ONE REAL BUG (found on resume), ONE DECLINED IMPROVEMENT
+
+🔴 **The original claim on this line was wrong, and the correction is the whole
+value of this section.** It read "`"+y` / `"+p` work without config", full stop.
+That is true **only while `DISPLAY` is set**. Measured 2026-08-29 on nvim 0.12.5
+at two independent points — `--headless` with the real config, and a pty with
+`-u NONE` — with no `DISPLAY` (any ssh session, any bare TTY):
+
+```
+clipboard: No provider. Try ":checkhealth" or ":h clipboard".
+```
+
+Neovim ≥0.10 ships an OSC 52 provider but does **not** auto-enable it here, so
+`"+y` was dead off-display and took `:Absc` (`lua/config/native.lua`, which does
+`setreg('+')`) down with it. The research missed it because every probe ran on
+the local X11 session — **one measurement point, and the failure lives at the
+other one.**
+
+- **FIXED** — `.config/nvim/lua/config/native.lua` now installs an OSC 52
+  provider when `DISPLAY` is absent. Red→green on the exact failing path.
+- 🔴 **Paste is served from a local cache, deliberately.**
+  `vim.ui.clipboard.osc52.paste` queries the terminal and waits 1s + 9s before
+  giving up, and alacritty is configured `osc52 = "OnlyCopy"` so it never
+  answers. Wiring it straight through — **which is what `:h clipboard`'s own
+  example does** — hangs 10s on every `"+p`. The mutant that does exactly that
+  took the suite from 2.7s to 12.7s.
+- Guarded on `DISPLAY` being absent: with a display, neovim's xclip
+  autodetection already works *and* supports a real paste, so it is left alone.
+
+**`set clipboard=unnamedplus` — DECLINED 2026-08-29.** The doc framed the cost as
+"vim muscle memory", which understates it: `unnamedplus` routes **every** delete
+and change (`d`, `c`, `x`, `s`) through the `+` register, so `dd` clobbers the
+system clipboard and the copy-from-browser → edit → paste workflow breaks. Zach
+works via agents rather than long interactive nvim sessions, so the payoff is
+small and the cost is not. `"+y`/`"+p` stay explicit.
 
 ### Espanso + clipboard — ALREADY WORKING, no changes
 - `{{clip}}` variable reads X CLIPBOARD via espanso's own `espanso-clipboard` module
@@ -57,12 +99,23 @@ Research modern best practices for clipboard and terminal clipboard interaction 
 
 ## Open investigations — live diagnosis state
 
-None. Research is complete. The findings above are conclusive.
+None open. ⚠ **But note what this section said before, and why it was wrong:**
+*"None. Research is complete. The findings above are conclusive."* It was written
+after a survey that measured only the local X11 session, and it read as a clean
+bill of health for a setup with a dead clipboard register over ssh. **A research
+doc that names no open question is making a claim, not reporting an absence** —
+the honest version names the dimension it did not vary. Here that dimension was
+`DISPLAY`.
 
 ## Next steps (ranked)
-1. **Decision:** adopt `set clipboard=unnamedplus` in neovim? (optional, affects `y`/`p` muscle memory)
-2. **Decision:** install a clipboard manager for history? (optional — `clipcat` for X11, `cliphist` if/when migrating to Wayland)
-3. **If migrating to Wayland:** replace `xclip` with `wl-clipboard`, evaluate `cliphist` + `wl-clip-persist`
+1. ~~**Decision:** adopt `set clipboard=unnamedplus`~~ — **DECLINED 2026-08-29**,
+   reasoning in the neovim section above. No further action.
+2. **Decision:** install a clipboard manager for history? (optional — `clipcat`
+   for X11, `cliphist` if/when migrating to Wayland). **Still open, not
+   investigated on resume.**
+3. **If migrating to Wayland:** replace `xclip` with `wl-clipboard`, evaluate
+   `cliphist` + `wl-clip-persist`. **Not applicable today** — measured
+   `XDG_SESSION_TYPE=x11`, `WAYLAND_DISPLAY` unset, `wl-copy` absent.
 
 ## Gotchas / decisions / dead-ends
 - OSC 52 supersedes tmux-yank for this setup — no reason to install the plugin
@@ -72,5 +125,11 @@ None. Research is complete. The findings above are conclusive.
 
 ## How to verify
 - tmux clipboard: copy in tmux copy-mode → paste in another app (OSC 52 path)
-- Neovim (if `unnamedplus` adopted): `y` in neovim → paste elsewhere
+- 🔴 **Neovim off-display — the one that was broken.** From the *other* host:
+  `ssh <host>` → `nvim <file>` → `"+yy` → paste locally. Before the fix this
+  printed `clipboard: No provider`; it should now paste. **Verify from a real
+  ssh session, not by unsetting `DISPLAY` locally** — same observable, and only
+  the real path exercises the terminal that has to honour the escape.
+- Neovim on the local X11 session must be UNCHANGED: `:lua print(vim.g.clipboard)`
+  → `nil` (xclip autodetection, untouched by the fix).
 - Espanso: type `:clip` → clipboard contents expand inline
