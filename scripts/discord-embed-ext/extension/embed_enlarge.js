@@ -5,6 +5,7 @@
   var EMOJI_RE = /^https?:\/\/cdn\.discordapp\.com\/emojis\//i;
   var STICKER_RE = /^https?:\/\/cdn\.discordapp\.com\/stickers\//i;
   var ATTR_ENLARGED = "data-dee-enlarged";
+  var ATTR_CLEARED = "data-dee-cleared";
   var STYLE_ID = "dee-enlarge-css";
   var DEBOUNCE_MS = 100;
 
@@ -49,10 +50,22 @@
     "  height: auto !important;",
     "  object-fit: contain !important;",
     "}",
+    ":has(> img[src*='cdn.discordapp.com/attachments/']),",
+    ":has(> img[src*='media.discordapp.net/attachments/']),",
+    ":has(> video[src*='cdn.discordapp.com/attachments/']),",
+    ":has(> video[src*='media.discordapp.net/attachments/']),",
+    ":has(> source[src*='cdn.discordapp.com/attachments/']),",
+    ":has(> source[src*='media.discordapp.net/attachments/']) {",
+    "  max-width: none !important;",
+    "  max-height: none !important;",
+    "  height: auto !important;",
+    "  overflow: visible !important;",
+    "}",
     "[class*='imageWrapper'],",
     "[class*='mosaicItem'],",
     "[class*='attachment'],",
     "[class*='wrapper-'],",
+    "[class*='wrapper_'],",
     "[class*='imageContainer'] {",
     "  max-width: none !important;",
     "  max-height: none !important;",
@@ -76,6 +89,33 @@
     if (el && el.parentElement) el.parentElement.removeChild(el);
   }
 
+  function clearParentConstraints(el) {
+    if (typeof getComputedStyle === "function") {
+      var parent = el.parentElement;
+      var depth = 0;
+      while (parent && parent !== document.body && depth < 8) {
+        if (parent.nodeType !== 1) { parent = parent.parentElement; depth++; continue; }
+        if (parent.getAttribute(ATTR_CLEARED)) break;
+        parent.setAttribute(ATTR_CLEARED, "1");
+        var cs = getComputedStyle(parent);
+        if (cs.overflow === "hidden" || cs.overflowX === "hidden" || cs.overflowY === "hidden") {
+          parent.style.setProperty("overflow", "visible", "important");
+        }
+        if (cs.maxHeight && cs.maxHeight !== "none") {
+          parent.style.setProperty("max-height", "none", "important");
+        }
+        if (cs.maxWidth && cs.maxWidth !== "none") {
+          parent.style.setProperty("max-width", "none", "important");
+        }
+        if (cs.height && cs.height !== "auto") {
+          parent.style.setProperty("height", "auto", "important");
+        }
+        parent = parent.parentElement;
+        depth++;
+      }
+    }
+  }
+
   function markMediaElements(root) {
     if (!root || !root.querySelectorAll) return 0;
     var imgs = root.querySelectorAll("img");
@@ -89,6 +129,7 @@
       if (info.isMedia && !info.element.getAttribute(ATTR_ENLARGED)) {
         info.element.setAttribute(ATTR_ENLARGED, "1");
         info.element.style.setProperty("cursor", "zoom-in", "important");
+        clearParentConstraints(info.element);
         count++;
       }
     }
@@ -106,17 +147,40 @@
     observer = new MutationObserver(function (mutations) {
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(function () {
+        if (observer) observer.disconnect();
+        var found = 0;
         for (var i = 0; i < mutations.length; i++) {
           var added = mutations[i].addedNodes;
           for (var j = 0; j < added.length; j++) {
             var node = added[j];
-            if (node.nodeType === 1) markMediaElements(node);
+            if (node.nodeType === 1) found += markMediaElements(node);
           }
+        }
+        if (found > 0 && observer && doc.body) {
+          observer.observe(doc.body, { childList: true, subtree: true });
         }
       }, DEBOUNCE_MS);
     });
     observer.observe(doc.body, { childList: true, subtree: true });
     return observer;
+  }
+
+  function restoreParentConstraints(el) {
+    if (typeof document !== "undefined" && document.body) {
+      var parent = el.parentElement;
+      var depth = 0;
+      while (parent && parent !== document.body && depth < 8) {
+        if (parent.nodeType !== 1) { parent = parent.parentElement; depth++; continue; }
+        if (!parent.getAttribute(ATTR_CLEARED)) break;
+        parent.removeAttribute(ATTR_CLEARED);
+        parent.style.removeProperty("overflow");
+        parent.style.removeProperty("max-height");
+        parent.style.removeProperty("max-width");
+        parent.style.removeProperty("height");
+        parent = parent.parentElement;
+        depth++;
+      }
+    }
   }
 
   function forget(doc) {
@@ -127,6 +191,7 @@
     removeStylesheet(d);
     var all = d.querySelectorAll("[" + ATTR_ENLARGED + "]");
     for (var i = 0; i < all.length; i++) {
+      restoreParentConstraints(all[i]);
       all[i].removeAttribute(ATTR_ENLARGED);
       all[i].style.removeProperty("cursor");
     }
