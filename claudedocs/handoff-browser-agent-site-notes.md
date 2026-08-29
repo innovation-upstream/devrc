@@ -341,9 +341,12 @@ resolution was originally closed on a SINGLE data point and said so.
   your green is subset-scoped.** It was then reintroduced once, because the comment
   explaining the fix QUOTED the offending literal — the gate scans comments too.
 - 🔴 **FOUR INSTRUMENTS RETURNED CONFIDENT WRONG ANSWERS in this session; none announced
-  itself.** (1) An `8.8.8.8` positive control for the IP gate stayed GREEN — canonical
-  examples are allowlisted, so the control proved nothing; a realistic routable literal
-  does turn it red. (2) A `sed` edit deleted the `START=` assignment on a compound line,
+  itself.** (1) A positive control for the IP gate, built from a WELL-KNOWN public-DNS
+  address, stayed GREEN — scanners allowlist their own canonical examples, so the control
+  proved nothing; a realistic routable literal does turn it red. 🔴 And note where this
+  sentence cannot name that address: this doc is in the gate's own scope, so writing the
+  literal here fails the build. That happened — twice, in the PR body and then in this
+  very line — which is the same trap one level up. (2) A `sed` edit deleted the `START=` assignment on a compound line,
   so a check-watcher reported `settled after 1787979093s` off "no checks reported" — an
   empty result read as a verdict. (3) A zsh `set -- $spec` did NOT word-split, so a
   per-round ledger loop logged the ENTIRE history four times and printed the same number.
