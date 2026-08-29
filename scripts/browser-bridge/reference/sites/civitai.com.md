@@ -300,8 +300,8 @@ under a minute:
    than an unchanged `messages-container`.
 
 Pin a **numeric** before/after alongside them (`[data-testid="buzz-balance"]` here —
-constant at `4,169,692 BUZZ` across the whole run) and sweep for error surfaces the
-container would not show:
+read it once up front and assert it is unchanged across the whole run) and sweep for
+error surfaces the container would not show:
 
 ```bash
 $BB --instance work --tab "$TAB" --frame "$FR" js '(function(){var o=[];document.querySelectorAll("[role=alert], .error, [class*=error], [class*=toast], [class*=notification]").forEach(function(e){o.push((e.innerText||"").trim().slice(0,100))});return JSON.stringify({errors:o})})()'
@@ -322,8 +322,7 @@ unmoved, over ~70 s and two send routes (button and `key Enter`).
   (whole-DOM search).
 - **NOT ruled out:** an `isTrusted`-gated branch on the specific handler under test.
   Synthetic input reaching *one* path is not proof it reaches *another*. Say so in the
-  report rather than claiming a slam dunk — and note that such a gate would still be a
-  bug the app ships.
+  report rather than claiming a slam dunk.
 
 ---
 
