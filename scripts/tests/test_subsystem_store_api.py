@@ -2584,10 +2584,35 @@ class TestSeedPushVerdict:
             pytest.skip(f"{enc} not generated here; the collation cannot be forced")
 
         env, dest = fake_cluster
-        # C sorts `README.md` BEFORE `thing-alpha.md`; en_US sorts it AFTER.
+        # 🔴 THE PAIR MUST ACTUALLY INVERT, AND THE FIRST VERSION OF THIS TEST
+        # DID NOT. `README.md` beside `thing-alpha.md` orders the SAME under
+        # both collations (C: 'R'<'t'; en_US: 'r'<'t'), so nothing was out of
+        # order, `comm` never complained, and the mutant that strips `LC_ALL=C`
+        # from the comm calls SURVIVED a fully green run. The inversion needs a
+        # lowercase sibling sorting BEFORE `README` in en_US and AFTER it in C —
+        # 'b' is 0x62, above 'R' at 0x52, but below 'r' when case is folded.
         (store / SCOPE / "README.md").write_text(_entry("README", SCOPE))
+        (store / SCOPE / "backblaze.md").write_text(_entry("backblaze", SCOPE))
         self._foreign(dest)
         env = {**env, "LC_ALL": enc, "LANG": enc}
+
+        # The control, so this test cannot quietly stop pinning its dimension:
+        # if the two collations ever agree on this pair, the mutant is invisible
+        # and a green here would mean nothing.
+        pair = f"{SCOPE}/README.md\n{SCOPE}/backblaze.md\n"
+        c_order = subprocess.run(
+            ["sort"], input=pair, capture_output=True, text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        ).stdout
+        loc_order = subprocess.run(
+            ["sort"], input=pair, capture_output=True, text=True,
+            env={**os.environ, "LC_ALL": enc},
+        ).stdout
+        assert c_order != loc_order, (
+            "fixture no longer inverts between C and "
+            f"{enc} — comm's order check cannot arm, so this test would pass "
+            "whether or not the collation is pinned"
+        )
 
         r = self._push(store, tmp_path, env)
 
