@@ -333,22 +333,47 @@ def _git_raw(cwd: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.Co
     legislates against — one unreadable row is not a reason to abandon the
     other 750.
 
-    🔴 WHAT IS COVERED, AND WHAT IS STILL NOT. Three call sites read paths
-    through this helper: `worktree_submodules`' `ls-files -s -z` index arm
-    (#935), and — since #975 — BOTH halves of the `content-identical` signal,
-    `landing_signals`' `diff --name-only -z` changed-path listing and
-    `_paths_differ`'s `diff --name-only -z` comparison. Those are every call in
-    this file that handles a repository path.
+    ⚠ "TRACKED" IS THE MEASUREMENT ABOVE, NOT THE BOUNDARY OF THE HAZARD. That
+    fixture was tracked because `ls-files` and `diff` only ever see tracked
+    content — but `worktree_dirty` reads `status --porcelain=v1
+    --untracked-files=normal`, so for THAT call an UNTRACKED file nobody ever
+    `git add`ed is enough on its own (measured; see the still-open list below).
+    Read every "tracked filename" in this file as scoped to the arm it sits in.
+
+    🔴 WHICH CALLS GO THROUGH THIS HELPER TODAY — a list of THIS HELPER'S
+    callers, NOT an audit of the file. Three: `worktree_submodules`' `ls-files
+    -s -z` index arm (#935), and — since #975 — both halves of the
+    `content-identical` signal, `landing_signals`' `diff --name-only -z`
+    changed-path listing and `_paths_differ`'s `diff --name-only -z` comparison.
+    An earlier wording added "those are every call in this file that handles a
+    repository path", which is FALSE and is exactly the kind of finished-audit
+    sentence #975 objected to in #944's prose. See the next paragraph for the
+    calls that still do not.
 
     🔴 THE CLASS IS STILL NOT CLOSED, and it is NOT confined to `-z` callers,
-    which an earlier wording of this docstring implied. MEASURED: `git worktree
-    list --porcelain` emits the worktree PATH raw and unquoted regardless, so a
-    worktree whose DIRECTORY NAME holds an undecodable byte still takes the
-    whole scan down through `list_worktrees` — identically on `origin/main`, so
-    it is pre-existing and not any of these changes' doing. Tracked as issue
-    #944; converting the porcelain parser to bytes touches the core scan path
-    and wants its own tests. Do not read this helper as evidence the abort class
-    is closed.
+    which an earlier wording of this docstring implied. Two OTHER calls still
+    read paths through `_git` (strict utf-8), and each takes the WHOLE SCAN down
+    with a bare `UnicodeDecodeError` out of `subprocess.communicate` — before
+    any caller can see it, and with zero classified rows:
+
+      * `git worktree list --porcelain` (`list_worktrees`) emits the worktree
+        PATH raw and unquoted REGARDLESS of `core.quotePath`, so a worktree
+        whose DIRECTORY NAME holds an undecodable byte kills the scan under
+        DEFAULT config. Tracked as issue #944.
+      * `git status --porcelain=v1` (`worktree_dirty`) emits raw path bytes
+        under `core.quotePath=false`. MEASURED at #975's HEAD: one scanned
+        worktree holding a single **UNTRACKED** file named `caf\\xe9.txt`, with
+        that setting, aborts the entire scan.
+
+    Both are pre-existing and neither is any of these changes' doing. Converting
+    them touches the core scan path and the dirty check — each wants its own
+    fixture and its own audit, which is why #975 stopped at the arm that decides
+    `dead`. Do not read this helper as evidence the abort class is closed.
+
+    🔴 AND THE REACH IS WIDER THAN "TRACKED". An earlier wording of the MEASURED
+    note above said "any undecodable TRACKED filename"; `worktree_dirty` reads
+    `--untracked-files=normal`, so an untracked file nobody ever `git add`ed is
+    enough on its own.
     """
     return subprocess.run(
         ["git", "--no-optional-locks", "-C", str(cwd), *args],
@@ -699,21 +724,22 @@ def _paths_differ(repo: Path, rev_a: str, rev_b: str, paths: "list[str]") -> "bo
         r = _git_raw(repo, "diff", "--name-only", "-z", rev_a, rev_b, "--", *b)
         if r.returncode != 0:
             return None
-        # `bytes.strip()` removes ASCII whitespace but NOT NUL, so a lone
-        # separator (`b"\0"`) would strip to `b"\x00"` — truthy — and the
-        # comparison would answer "differs" over an empty result.
+        # 🔴 `any(p ...)`, NOT `any(p.strip() ...)`. Two separate reasons, and
+        # only the first is obvious:
         #
-        # ⚠ DEFENSIVE, NOT A FIXED BUG, and stated that way rather than implied.
-        # MEASURED on git 2.55: `diff --name-only -z` emits `b""` for an empty
-        # result — never a bare `b"\0"` — for a matching pathspec, a
-        # non-matching one and no pathspec alike. So `r.stdout.strip()` would be
-        # equivalent TODAY, and no test in this suite can tell the two apart;
-        # `test_an_empty_z_record_is_not_read_as_a_difference` is an invariant
-        # guard, not regression coverage, and the battery carries no mutant for
-        # this line because one would survive. Splitting first is still the form
-        # that stays correct if git ever emits a trailing separator, and it
-        # costs nothing.
-        if any(p.strip() for p in r.stdout.split(b"\0")):
+        #   * `bytes.strip()` removes ASCII whitespace but NOT NUL, so testing
+        #     `r.stdout.strip()` on the whole buffer would read a lone separator
+        #     as truthy.
+        #   * 🔴 AND `.strip()` on a RECORD discards a path whose NAME is
+        #     whitespace. A file named `" "` is a legal git path: MEASURED on
+        #     git 2.55, `diff --name-only -z` returns `b" \0"` for it and
+        #     `git diff --name-only <a> <b> -- " "` confirms it genuinely
+        #     differs — so stripping turns a real difference into "no differing
+        #     paths", which is the silent, confident, wrong `dead` this whole
+        #     file is about. With `-z` the ONLY empty record is the trailing
+        #     terminator, so a bare truthiness test is both correct and
+        #     sufficient.
+        if any(p for p in r.stdout.split(b"\0")):
             return True
     return False
 
@@ -768,11 +794,21 @@ def landing_signals(repo: Path, head: str, default_ref: str) -> "dict":
     if r.returncode != 0:
         notes.append(f"changed-path listing failed rc={r.returncode}")
         return {"fired": fired, "checked": checked, "notes": notes, "error": True}
-    changed = [os.fsdecode(p) for p in r.stdout.split(b"\0") if p.strip()]
+    # 🔴 `if p`, NOT `if p.strip()` — see the same predicate in `_paths_differ`.
+    # `" "` is a legal filename; stripping the RECORD drops it from the changed
+    # set, and a dropped DIFFERING path is indistinguishable from "identical
+    # upstream". With `-z` the only empty record is the trailing terminator.
+    changed = [os.fsdecode(p) for p in r.stdout.split(b"\0") if p]
     if not changed:
         # 🔴 The empty-operand case, handled here and NOT by a pathspec-less
         # diff. The branch introduced no content relative to its merge-base, so
         # there is nothing that could fail to be present upstream.
+        #
+        # 🔴 THAT SENTENCE IS ONLY TRUE BECAUSE THE FILTER ABOVE IS `if p`.
+        # Under `if p.strip()` a branch that changed ONLY whitespace-named paths
+        # produced an empty set and landed here, so `no-content-change` fired —
+        # and this comment asserted "introduced no content" about a branch that
+        # had. The emptiness has to be git's, not the filter's.
         fired.append("no-content-change")
         notes.append(f"branch changes no path relative to merge-base {base[:12]}")
         return {"fired": fired, "checked": checked, "notes": notes}

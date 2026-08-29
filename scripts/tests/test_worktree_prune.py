@@ -710,10 +710,23 @@ def test_pathspec_batching_survives_more_paths_than_one_argv_can_hold(tmp_path, 
 # changed set that ACTUALLY differs upstream must be non-ASCII. One differing
 # ASCII path in the same set answers the question correctly and saves the row.
 # `nonascii_universe` therefore builds a branch whose ONLY changed path is
-# non-ASCII, and `test_an_ascii_only_branch_is_still_classified_correctly` is the
-# control that a fix which merely stops firing `content-identical` everywhere —
-# turning every row into `orphan`/`cannot-tell` and destroying the tool — does
-# not pass.
+# non-ASCII.
+#
+# 🔴 WHICH TESTS ACTUALLY STOP A FIX THAT JUST SILENCES THE SIGNAL — MEASURED,
+# because an earlier version of this comment credited the wrong one. Forcing
+# `if not differ:` to `if False:` in a `cp -a` copy of the tree, so
+# `content-identical` can NEVER fire, kills exactly TWO tests:
+#
+#     test_squash_merged_branch_is_dead_not_orphan          (pre-existing, ASCII)
+#     test_content_identical_still_fires_for_a_landed_nonascii_path
+#
+# Six of the eight tests in this section — INCLUDING
+# `test_an_ascii_only_branch_is_still_classified_correctly`, which the earlier
+# comment named as that control — stayed GREEN. Structurally so, not by
+# accident: both branches in `nonascii_universe` are UNLANDED, so the signal is
+# SUPPOSED to stay quiet on both, and a tool that never fires it satisfies the
+# ASCII twin by construction. The control against "silence everything" has to be
+# a fixture where the signal MUST fire, which is what those two are.
 
 NONASCII_NAME = "café.md"
 
@@ -799,11 +812,24 @@ def test_unlanded_work_under_a_nonascii_name_is_not_called_dead(nonascii_univers
 
 
 def test_an_ascii_only_branch_is_still_classified_correctly(nonascii_universe):
-    """🔴 THE CONTROL THE FIX MUST ALSO PASS. A change that simply stopped
-    `content-identical` from ever firing would pass the test above and destroy
-    the tool. This asserts the SAME shape of fixture, differing only in the
-    filename's alphabet, reaches the SAME verdict — so the test above is pinning
-    the encoding, not a blanket refusal to classify."""
+    """⚠ AN INVARIANT GUARD — labelled, not counted as regression coverage.
+
+    It asserts the SAME shape of fixture, differing ONLY in the filename's
+    alphabet, reaches the SAME verdict. What that pins is worth having and is
+    narrow: that the test above's expectation is `orphan` specifically — the
+    verdict an ASCII branch of identical shape genuinely gets — and not a
+    DEGRADED one. If a future change made the non-ASCII row `cannot-tell` while
+    the ASCII twin stayed `orphan`, the pair would disagree and this would go
+    red.
+
+    🔴 IT IS NOT THE CONTROL AGAINST "SILENCE THE SIGNAL EVERYWHERE", which an
+    earlier docstring claimed. MEASURED: with `if not differ:` forced to
+    `if False:` this test PASSES, because both branches here are unlanded and
+    the signal is supposed to stay quiet on both. See the section comment above
+    for the two tests that do go red, and
+    `test_content_identical_still_fires_for_a_landed_nonascii_path` immediately
+    below for this section's own half of that pair.
+    """
     repo, paths, gh = nonascii_universe
     r = row_for(repo, paths["ascii"], gh_cmd=gh)
     assert "content-identical" not in r["landed_signals"], r["evidence"]
@@ -901,19 +927,12 @@ def test_paths_differ_survives_quotepath_false(tmp_path):
 def test_an_empty_z_record_is_not_read_as_a_difference(tmp_path):
     """⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — labelled, not counted.
 
-    `bytes.strip()` removes ASCII whitespace but NOT NUL, so `-z` output of a
-    lone separator (`b"\\0"`) strips to `b"\\x00"`, which is TRUTHY, and
-    `r.stdout.strip()` would read an empty result as "differs". That is why
-    `_paths_differ` splits on the separator before testing.
-
-    🔴 BUT THE BUG IT DESCRIBES IS UNREACHABLE, and saying otherwise would be
-    the vacuous-guard failure this suite exists to avoid. MEASURED on git 2.55:
-    `diff --name-only -z` emits `b""` for an empty result — never `b"\\0"` — with
-    a matching pathspec, a non-matching pathspec and no pathspec alike. So
-    `r.stdout.strip()` is equivalent today and this test cannot tell the two
-    forms apart. It pins the CONTRACT (an identical path answers False), which
-    is worth having; the battery deliberately carries no mutant for that line
-    because one would survive.
+    Pins the emptiness CONTRACT from the other side: a path that is genuinely
+    identical upstream must answer False. Nothing here can distinguish
+    `any(p for p in …split(b"\\0"))` from `r.stdout.strip()`, because MEASURED on
+    git 2.55, `diff --name-only -z` emits `b""` for an empty result and never a
+    bare separator. The predicate's REAL coverage is the whitespace-named-path
+    pair below, which is what makes it reachable and mutant-killable.
     """
     repo = new_repo(tmp_path)
     write(repo / "same.txt", "identical on both sides\n")
@@ -924,6 +943,137 @@ def test_an_empty_z_record_is_not_read_as_a_difference(tmp_path):
     assert wp._paths_differ(repo, "feat/nodiff", "main", ["same.txt"]) is False
 
 
+# ── the whitespace-named path: `if p.strip()` is a second silent wrong `dead` ──
+#
+# 🔴 A SECOND INSTANCE OF THE #975 MECHANISM, in the same two lines, found by the
+# round-1 adversarial audit and PRE-EXISTING at `origin/main`. `bytes.strip()`
+# removes ASCII whitespace, so a `-z` record whose NAME is whitespace — `" "` is
+# a legal git path — was dropped from the changed set. A DROPPED DIFFERING PATH
+# IS INDISTINGUISHABLE FROM "IDENTICAL UPSTREAM": the same empty-observable that
+# the quoting bug produced, reached a different way.
+#
+# MEASURED on git 2.55, a branch adding `a.md` (which then lands identically)
+# and `" "` (which never lands):
+#
+#     diff --name-only -z <merge-base> feat  ->  b" \0a.md\0"  ->  [b" ", b"a.md", b""]
+#       if p.strip()  keeps  ["a.md"]   <- the differing path is gone; verdict `dead`
+#       if p          keeps  [" ", "a.md"]
+#     diff --name-only trunk feat -- " "     ->  b" \n"   <- it GENUINELY differs
+#
+# With `-z` the ONLY empty record is the trailing terminator, so `if p` is both
+# correct and sufficient. Fixing it also makes `_paths_differ`'s emptiness form
+# REACHABLE, which retired a deliberate "no mutant is possible here" note in the
+# battery — production-unreachable is not untestable, and the reverse is just as
+# true: once it is reachable, the note has to go and a real mutant take its place.
+
+
+def test_the_whitespace_named_fixture_really_does_differ_upstream(tmp_path):
+    """If `" "` did not genuinely differ, the regression test below would be
+    asserting a correct verdict that was never in danger."""
+    repo = _whitespace_universe(tmp_path)[0]
+    base = git(repo, "merge-base", "feat/ws", "refs/remotes/origin/main")
+    raw = subprocess.run(["git", "-C", str(repo), "diff", "--name-only", "-z",
+                          base, "feat/ws"], capture_output=True, check=True).stdout
+    assert raw.split(b"\0") == [b" ", b"a.md", b""], raw
+    assert [p for p in raw.split(b"\0") if p.strip()] == [b"a.md"], (
+        "the strip predicate was supposed to DROP the space-named path")
+
+    # 🔴 EXACT BYTES, never `.strip()`. The first draft of this assertion wrote
+    # `differs.stdout.strip() != b""` and FAILED — because `b" \n".strip()` is
+    # `b""`, which is precisely the defect under test, committed inside its own
+    # control. A guard about a stripping bug may not itself strip.
+    differs = subprocess.run(["git", "-C", str(repo), "diff", "--name-only",
+                              "feat/ws", "refs/remotes/origin/main", "--", " "],
+                             capture_output=True, check=False)
+    assert differs.returncode == 0 and differs.stdout == b" \n", (
+        f"the space-named path must genuinely differ upstream, or dropping it "
+        f"costs nothing and this fixture proves nothing (got {differs.stdout!r})")
+    landed = subprocess.run(["git", "-C", str(repo), "diff", "--name-only",
+                             "feat/ws", "refs/remotes/origin/main", "--", "a.md"],
+                            capture_output=True, check=False)
+    assert landed.stdout == b"", (
+        f"a.md must be IDENTICAL upstream, or the surviving path would answer "
+        f"'differs' on its own and the drop would be invisible "
+        f"(got {landed.stdout!r})")
+
+
+def _whitespace_universe(tmp_path: Path):
+    """A branch whose only DIFFERING changed path is named `" "`.
+
+    `a.md` is changed too and lands identically, so the changed set has two
+    members and exactly one of them differs — the arrangement in which dropping
+    the whitespace-named record flips the verdict.
+    """
+    repo = new_repo(tmp_path)
+    git(repo, "checkout", "-q", "-b", "feat/ws")
+    write(repo / "a.md", "landed\n")
+    write(repo / " ", "never lands\n")
+    git(repo, "add", "--", "a.md", " ")
+    git(repo, "commit", "-qm", "two paths, one of which will land")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "checkout", "feat/ws", "--", "a.md")
+    git(repo, "add", "--", "a.md")
+    git(repo, "commit", "-qm", "land a.md only")
+    publish(repo)
+    wt = add_worktree(repo, tmp_path / "wt-ws", "feat/ws")
+    return repo, wt
+
+
+def test_a_whitespace_named_path_is_not_dropped_from_the_changed_set(tmp_path):
+    """🔴 THE REGRESSION TEST, end to end through the tool.
+
+    Watched RED against `origin/main`'s `worktree-prune` in an isolated copy:
+    `verdict='dead'`, `removable=True`, evidence `all 1 changed path(s) have
+    identical content` on a branch that changed TWO.
+    """
+    repo, wt = _whitespace_universe(tmp_path)
+    r = row_for(repo, wt, gh_cmd=gh_stub(tmp_path, [], name="gh-ws"))
+    assert "content-identical" not in r["landed_signals"], (
+        f"content-identical fired on a branch that never landed: {r['evidence']}")
+    assert r["verdict"] == "orphan", r["verdict_reason"]
+    assert r["removable"] is False, r["verdict_reason"]
+
+
+def test_paths_differ_sees_a_whitespace_named_path(tmp_path):
+    """The comparison half of the same predicate, isolated from the listing.
+
+    This is what makes `_paths_differ`'s emptiness test mutant-killable: git
+    answers `b" \\0"`, which `any(p.strip() ...)` reads as EMPTY and
+    `any(p ...)` reads correctly.
+    """
+    repo, _ = _whitespace_universe(tmp_path)
+    assert wp._paths_differ(repo, "feat/ws", "refs/remotes/origin/main", [" "]) is True
+    assert wp._paths_differ(repo, "feat/ws", "refs/remotes/origin/main", ["a.md"]) is False
+
+
+def test_a_whitespace_only_branch_is_not_called_no_content_change(tmp_path):
+    """The OTHER route the drop opens, and the one that makes a comment false.
+
+    A branch changing ONLY whitespace-named paths had its whole changed set
+    filtered away, so it reached the `no-content-change` short-circuit — whose
+    comment asserts "the branch introduced no content relative to its
+    merge-base" about a branch that introduced some. `"\\t"` rather than `" "`
+    so this is not a restatement of the fixture above.
+    """
+    repo = new_repo(tmp_path)
+    git(repo, "checkout", "-q", "-b", "feat/tab")
+    write(repo / "\t", "unlanded\n")
+    git(repo, "add", "--", "\t")
+    git(repo, "commit", "-qm", "a tab-named path")
+    git(repo, "checkout", "-q", "main")
+    write(repo / "elsewhere.txt", "main moved on\n")
+    git(repo, "add", "elsewhere.txt")
+    git(repo, "commit", "-qm", "main moves on")
+    publish(repo)
+    wt = add_worktree(repo, tmp_path / "wt-tab", "feat/tab")
+
+    r = row_for(repo, wt, gh_cmd=gh_stub(tmp_path, [], name="gh-tab"))
+    assert "no-content-change" not in r["landed_signals"], (
+        f"the changed set was filtered away, not empty: {r['evidence']}")
+    assert r["verdict"] == "orphan", r["verdict_reason"]
+    assert r["removable"] is False
+
+
 def test_the_pathspec_batch_sizer_measures_bytes_not_characters(tmp_path, monkeypatch):
     """`PATHSPEC_BATCH_BYTES` is named in BYTES because argv is measured in bytes.
     `len(p)` on a str undercounts a non-ASCII path — up to 4x for an astral code
@@ -932,7 +1082,19 @@ def test_the_pathspec_batch_sizer_measures_bytes_not_characters(tmp_path, monkey
     confident, wrong `dead`.
 
     This captures the argv git is actually handed and asserts its ENCODED size
-    respects the budget. Under `len(p)` sizing the batch is one item too big.
+    respects the budget. MEASURED with this fixture at a 100-byte budget: the
+    byte-correct sizer produces 6 batches of 2 (78-80 bytes each, all under);
+    `len(p)` produces 2 batches of **6**, encoding to **234 and 236 bytes** —
+    2.3x over. An earlier docstring said "one item too big" and "a char-based
+    one fits 3"; both were guesses, and both understated it.
+
+    🔴 BOTH `_git` AND `_git_raw` ARE MONKEYPATCHED, deliberately. Patching only
+    `_git_raw` made this test red on the PRE-CHANGE tool for the WRONG reason —
+    base's `_paths_differ` calls `_git`, so `seen` stayed empty and the run died
+    on the "never called git" assertion without the budget assertion ever
+    executing. It read as regression coverage this test does not supply. The
+    sizer's real coverage is its mutant,
+    `pathspec-batch-sized-in-characters-not-bytes`.
     """
     repo = new_repo(tmp_path)
     # 4 bytes per code point, 1 char per code point: the maximum undercount.
@@ -948,8 +1110,12 @@ def test_the_pathspec_batch_sizer_measures_bytes_not_characters(tmp_path, monkey
         return subprocess.CompletedProcess(args, 0, b"", b"")
 
     monkeypatch.setattr(wp, "_git_raw", fake_git_raw)
-    # 100 bytes: each name is 8*4+len("-NN.txt") ≈ 39-40 bytes, so a
-    # byte-correct sizer fits 2 per batch and a char-based one fits 3.
+    # 🔴 `_git` too — see the docstring. Without it this test cannot distinguish
+    # "the sizer is wrong" from "the tool does not call the function I patched".
+    monkeypatch.setattr(wp, "_git", fake_git_raw)
+    # 100 bytes: each name is 8*4 + len("-NN.txt") = 38-39 bytes but only 14-15
+    # CHARACTERS, so a byte-correct sizer fits 2 per batch and a char-based one
+    # fits 6 — 234-236 encoded bytes against a 100-byte budget.
     monkeypatch.setattr(wp, "PATHSPEC_BATCH_BYTES", 100)
     wp._paths_differ(repo, "main", "main", names)
 
