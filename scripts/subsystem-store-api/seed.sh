@@ -224,7 +224,12 @@ if [[ ${#excluded[@]} -gt 0 ]]; then
   # output says ("tar ships the link, not its contents"), so the block
   # contradicted itself two rows apart. What is true of every state that reaches
   # here is that the directory contributes nothing to the entry set.
-  echo "seed: NOTE ${#excluded[@]} scope director(ies) contribute NO entries, and are excluded from the count and the verdict:"
+  # ⚠ "the ENTRY count", not "the count". The second clause was left unexamined
+  # while the first was corrected twice, and it is loose: `staged_scopes` counts
+  # a SYMLINKED scope and not a dot one, so a store of 3 scope dirs can print
+  # "2 … excluded" beside `scopes=2` and the numbers do not reconcile. What is
+  # excluded on every arm is the ENTRY count and the verdict.
+  echo "seed: NOTE ${#excluded[@]} scope director(ies) contribute NO entries, and are excluded from the entry count and the verdict:"
   printf 'seed:   %s\n' "${excluded[@]}"
 fi
 

@@ -2470,6 +2470,30 @@ class TestSeedPushVerdict:
             env=env,
         )
 
+    # 🔴 ONE PIN, ONE PLACE, PARAMETERISED BY COUNT. This sentence has been
+    # FALSE three times — "hold .md files" asserted contents an unreadable probe
+    # could not read; "will NOT ship" was wrong because a symlinked scope DOES
+    # ship, as a symlink; and "excluded from the count" is loose because
+    # `staged_scopes` counts a symlinked scope and not a dot one. Keyword guards
+    # caught none of them: any rewording satisfies `"X" not in stdout`, and two
+    # such guards had become unfalsifiable — no code path could emit the string
+    # they forbade. When the artifact under test is prose, the normalised WHOLE
+    # is the only machine-readable claim, and a deliberate reword must fail here
+    # and be re-verified. The count is a parameter so a fixture that gains an
+    # excluded scope reports THAT, instead of misdirecting at the wording.
+    @staticmethod
+    def _assert_note_header(stdout: str, n: int) -> None:
+        headers = [l for l in stdout.splitlines() if l.startswith("seed: NOTE")]
+        assert len(headers) == 1, f"expected exactly one NOTE header: {headers}"
+        assert headers[0] == (
+            f"seed: NOTE {n} scope director(ies) contribute NO entries, and are "
+            "excluded from the entry count and the verdict:"
+        ), (
+            "the NOTE header changed. If the COUNT moved, fix the caller; if the "
+            "WORDING moved, re-verify it is true of EVERY state that reaches it "
+            f"— three earlier wordings were not. Got: {headers[0]!r}"
+        )
+
     @staticmethod
     def _foreign(dest: Path, name: str = "from-the-other-host.md") -> Path:
         """An entry the OTHER host seeded. Its presence is what arms GNU comm's
@@ -2927,12 +2951,16 @@ class TestSeedPushVerdict:
     ):
         """🔴 AN ERROR IS NOT "NO".
 
-        ⚠ Read this with `_md_state` open: it deliberately carries
-        `2>/dev/null` TODAY and depends on it. The defect below was never the
-        redirect — it was discarding `find`'s EXIT STATUS, which is the whole
-        discriminator. An earlier version of this docstring blamed the three
-        characters, and deleting them (which no test catches) is exactly what a
-        maintainer would have done next.
+        ⚠ Read this with `_md_state` open. The defect below was never the
+        `2>/dev/null` — it was discarding `find`'s EXIT STATUS, which is the
+        whole discriminator. An earlier version of this docstring blamed the
+        three characters; a later one over-corrected and called them
+        load-bearing. MEASURED, both false: with the redirect removed, stdout is
+        byte-identical and rc is identical over a store with an unreadable
+        dot-symlink — the only difference is one extra `Permission denied` line
+        on stderr, which nothing consumes. The redirect suppresses an
+        EXPECTED-condition diagnostic and nothing more, which is why no test
+        catches its removal and why none should.
 
         The probe briefly treated a failed `find` as "no markdown here",
         which turned an unreadable symlink target from a loud over-report into
@@ -2968,9 +2996,7 @@ class TestSeedPushVerdict:
             "the unreadable case must say so, not borrow the holds-markdown "
             f"wording: {r.stdout}"
         )
-        assert "hold .md files" not in r.stdout, (
-            "the NOTE header asserts contents it could not check: " + r.stdout
-        )
+        self._assert_note_header(r.stdout, 1)
 
     def test_an_UNREADABLE_target_with_NO_markdown_is_not_called_a_holder(
         self, store: Path, tmp_path: Path, fake_cluster
@@ -3010,9 +3036,7 @@ class TestSeedPushVerdict:
             "announced, but not as the state that was actually established: "
             + r.stdout
         )
-        assert "hold .md files" not in r.stdout, (
-            "announced as holding markdown that nobody could read: " + r.stdout
-        )
+        self._assert_note_header(r.stdout, 1)
 
     def test_the_DOT_arm_of_the_unreadable_state_is_reachable_and_covered(
         self, store: Path, tmp_path: Path, fake_cluster
@@ -3052,11 +3076,7 @@ class TestSeedPushVerdict:
         # is satisfied by any rewording. When the artifact under test is prose,
         # the normalised whole is the only machine-readable claim. A deliberate
         # reword must fail here and be re-verified; that cost is the point.
-        header = next(l for l in r.stdout.splitlines() if l.startswith("seed: NOTE"))
-        assert header == (
-            "seed: NOTE 1 scope director(ies) contribute NO entries, and are "
-            "excluded from the count and the verdict:"
-        ), f"the NOTE header changed; re-verify it is true of EVERY state: {header!r}"
+        self._assert_note_header(r.stdout, 1)
 
     def test_the_stub_REFUSES_to_run_with_FAKE_DEST_unset(
         self, store: Path, tmp_path: Path, fake_cluster
@@ -3089,11 +3109,16 @@ class TestSeedPushVerdict:
     def test_an_EMPTY_dot_scope_is_not_announced_as_holding_md_files(
         self, store: Path, tmp_path: Path, fake_cluster
     ):
-        """The NOTE header says the listed directories "hold .md files". Both
-        arms must therefore PROBE for one — the symlink arm used to fire
-        unconditionally, announcing a symlinked scope that held no markdown at
-        all. A change about not claiming the unestablished must not ship that
-        sentence."""
+        """Both arms must PROBE before naming a directory — the symlink arm
+        used to fire unconditionally, announcing a scope that held no markdown
+        at all.
+
+        ⚠ The header no longer says "hold .md files" (it says "contribute NO
+        entries"), so announcing an empty excluded scope would no longer be a
+        FALSE claim — but it is still noise about a directory the operator
+        cannot act on, and the probe is what keeps the list meaningful. Do not
+        "restore" the old wording on the strength of this test's name: it was
+        removed because it asserted contents an unreadable probe cannot read."""
         env, dest = fake_cluster
         empty_real = tmp_path / "empty-target"
         empty_real.mkdir()
