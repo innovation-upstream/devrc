@@ -987,3 +987,78 @@ def test_write_exec_REFUSES_a_caller_supplied_shebang():
     with pytest.raises(AssertionError):
         # The helper's OWN shebang constant, not a literal — see HASHBANG above.
         write_exec(Path("/tmp/never-written-by-this-test"), SHEBANG + "printf x\n")
+
+
+# ── the collector ARGV: the read model is only renderable if the flag is sent ──
+
+
+def test_the_collector_is_invoked_WITH_pane_preview(server, tmp_path):
+    """🔴 THE FLAG IS PART OF THE PAYLOAD CONTRACT AND NOTHING ELSE GUARDS IT.
+
+    `session-manager` publishes `pane_preview` only when asked; it is off by
+    default there because every other consumer reads scalar fields and would pay
+    a 2.63x document for text it ignores (measured on the live fleet: 122,731
+    bytes without, 322,204 with). This caller is the one that wants it, so the
+    flag lives here — which means dropping it is a ONE-WORD edit that leaves
+    every other test in this file green, the push succeeding, the server
+    accepting, and the read model storing rows whose every pane reads
+    `pane_preview_status: disabled`. An inert feature with a green suite.
+
+    That is not hypothetical in this script's history: a previous round deleted
+    `gawk` from the unit's PATH as "unused" and silently lost `runtime` on 34 of
+    45 windows, because the failure logged nothing and exited 0.
+
+    KILLS: removing `--pane-preview`, and misspelling it (argparse would reject
+    an unknown flag at runtime, but this stub does not, so the assertion is on
+    the exact token).
+    """
+    argv_log = tmp_path / "collector-argv.txt"
+    data = tmp_path / "doc.json"
+    data.write_text(json.dumps(SAMPLE_DOC))
+    stub = write_exec(
+        tmp_path / "argv-recording-collector",
+        f'printf "%s\\n" "$@" > {argv_log}\n'
+        f"cat {data}\n",
+    )
+    proc = run_push(
+        collector_path=stub,
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server),
+                   "CLAWGATE_HOOK_TOKEN": "tok-abc"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # POSITIVE CONTROL: the recorder actually ran and captured something, so an
+    # assertion against its contents is not being made about an empty file that
+    # a broken stub would produce just as happily.
+    assert argv_log.exists(), "the argv recorder never ran"
+    args = argv_log.read_text().split()
+    assert args, "the collector was invoked with NO arguments at all"
+    assert "--json" in args, args
+    assert "--pane-preview" in args, args
+
+
+def test_the_collector_is_NOT_asked_for_the_lean_view(server, tmp_path):
+    """🔴 `--lean` would silently defeat the flag above. The lean projection
+    drops every field outside LEAN_ROW_FIELDS, and `pane_preview` is not one of
+    them — so `--json --lean --pane-preview` collects the screens and then
+    throws them away, pushing a document that looks well-formed and renders
+    nothing. Pinned as an ABSENCE because that is the failure mode: adding a
+    flag here is easy and reviewing what it removes is not."""
+    argv_log = tmp_path / "collector-argv.txt"
+    data = tmp_path / "doc.json"
+    data.write_text(json.dumps(SAMPLE_DOC))
+    stub = write_exec(
+        tmp_path / "argv-recording-collector-lean",
+        f'printf "%s\\n" "$@" > {argv_log}\n'
+        f"cat {data}\n",
+    )
+    proc = run_push(
+        collector_path=stub,
+        tmp_path=tmp_path,
+        env_extra={"CLAWGATE_API_URL": base_url(server),
+                   "CLAWGATE_HOOK_TOKEN": "tok-abc"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    args = argv_log.read_text().split()
+    assert args, "the argv recorder captured nothing"
+    assert "--lean" not in args, args

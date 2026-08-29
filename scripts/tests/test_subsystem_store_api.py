@@ -72,6 +72,31 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# 🔴 ONE bound for every "this should already have happened" wait in this module
+# — the localhost HTTP round-trips, `wait_closed`, `await_audit`. These are
+# HANG-DETECTORS: they exist so a broken server fails the test instead of hanging
+# the suite forever, and their value is not a correctness claim about how fast
+# anything must be.
+#
+# It is deliberately NOT used for the raw-socket `settimeout(...)` calls further
+# down. Those are DRAIN bounds — the loop terminator for a `recv`-until-quiet
+# read — so raising one adds its full value to the suite's runtime instead of
+# only to the latency of a genuine failure. Same spelling, opposite meaning; a
+# single shared constant across both would be wrong.
+#
+# Why 60 and not 15: measured 2026-08-29, the devrc Tekton gate was failing
+# ~60% of runs REPO-WIDE (6 of 10 in one window, on unrelated branches) with
+# `TimeoutError` out of `socket.py` — a localhost round-trip that lost the
+# scheduler for >15 s while 12 pipelineruns shared the node and this suite ran
+# 637 s under xdist. The test logic was never reached, so the gate reported a
+# code failure for a capacity problem. 60 s absorbs a 4x scheduling delay and
+# still fails a genuinely hung server well inside the task timeout.
+#
+# 🔴 This is the SYMPTOM fix. The cause is a 10-minute parallel suite competing
+# with a saturated cluster, which belongs to Tekton capacity, not to this file.
+HANG_TIMEOUT = 60.0
+
 API_DIR = ROOT / "scripts" / "subsystem-store-api"
 SERVER_PATH = API_DIR / "server.py"
 SEED_PATH = API_DIR / "seed.sh"
@@ -192,6 +217,7 @@ def running(
     tokens=None,
     limiter=None,
     trusted_proxies=(LOOPBACK_PROXY,),
+    wrap_sink=None,
 ):
     """Bind a real server on :0 and drive it over a real socket.
 
@@ -203,8 +229,19 @@ def running(
     works on it. The response-does-not-imply-the-line race `drain_output`
     documents is NOT a property of the subprocess pipe — it is a property of
     `ThreadingHTTPServer`, and this in-process server has exactly the same one.
+
+    🔴 `wrap_sink` IS THE SEAM THAT MAKES THE ORDERING AND ATOMICITY DEFECTS
+    OBSERVABLE WITHOUT A SLEEP. It takes the recording sink and returns the sink
+    actually installed, so a test can interpose a GATE (hold the first record and
+    watch whether the client sails on) or a deliberately NON-ATOMIC writer (emit
+    the record and its terminator as two writes — the shape `print` really has).
+    The `AuditLog` is still handed every record either way, so `await_audit` and
+    `settle` keep working at those sites. Wrapping here rather than standing up a
+    second server helper means such a test inherits this teardown rather than
+    open-coding a copy of it.
     """
     audit = AuditLog()
+    sink = audit.append if wrap_sink is None else wrap_sink(audit.append)
     httpd = api.build_server(
         host="127.0.0.1",
         port=0,
@@ -212,7 +249,7 @@ def running(
         tokens=(token,) if tokens is None else tuple(tokens),
         trusted_proxies=tuple(trusted_proxies),
         limiter=limiter,
-        audit=audit.append,
+        audit=sink,
     )
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -256,7 +293,7 @@ def fetch(
     for key, value in (extra_headers or {}).items():
         req.add_header(key, value)
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=HANG_TIMEOUT) as resp:
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, dict(exc.headers), exc.read()
@@ -270,7 +307,7 @@ def _raw_request(host: str, path: str, headers: list[tuple[str, str]]) -> int:
     of expressing the "two `CF-Connecting-IP`s" case. `http.client.putheader`
     can.
     """
-    conn = http.client.HTTPConnection(host, timeout=15)
+    conn = http.client.HTTPConnection(host, timeout=HANG_TIMEOUT)
     try:
         conn.putrequest("GET", path, skip_host=True, skip_accept_encoding=True)
         conn.putheader("Host", host)
@@ -335,13 +372,22 @@ class AuditLog(list):
     🔴 IT IS A REAL `list` BECAUSE FORTY-ODD ASSERTIONS READ IT AS ONE, and it
     carries `Drained`'s read surface because `await_audit` is the one helper in
     this file that knows how to wait for a line. The race is NOT a property of
-    the subprocess pipe: `_respond` runs before `_audit` on a
-    `ThreadingHTTPServer`, so an in-process `fetch()` returning proves exactly
-    as little about the audit line as a subprocess one does. Before this class
-    existed the in-process sites had no way to wait at all, and the only thing
-    standing between them and a red run was `shutdown()`'s 0.5s poll interval —
-    a `sleep` nobody wrote down. Measured: with the handler's `_audit` delayed
-    past that interval, the teardown "barrier" vanishes entirely.
+    the subprocess pipe: it is a property of `ThreadingHTTPServer`, so an
+    in-process `fetch()` returning proves exactly as little about the audit line
+    as a subprocess one does. Before this class existed the in-process sites had
+    no way to wait at all, and the only thing standing between them and a red run
+    was `shutdown()`'s 0.5s poll interval — a `sleep` nobody wrote down.
+    Measured: with the handler's `_audit` delayed past that interval, the
+    teardown "barrier" vanishes entirely.
+
+    🔴 AND THE WAIT IS STILL NEEDED NOW THAT `_audit` RUNS BEFORE `_respond`.
+    That ordering makes "the client holds response N" imply "line N is in the
+    sink" for the request the client is holding — but the append is to a plain
+    `list` from a handler thread nothing joins, and requests that are NOT the one
+    being awaited (a `/healthz`, a pipelined second request, a lockout probe) are
+    still in flight. `TestTheAuditLineIsWrittenBEFORETheResponse` pins the new
+    ordering property directly; these helpers keep waiting rather than leaning on
+    it, because a waiter is correct under both.
 
     🔴 `closed` IS `None`, NOT AN UNSET `Event`, AND THAT IS THE HONEST VALUE.
     A `Drained` reaches EOF when the pipe closes, which is a real "no more lines
@@ -393,7 +439,7 @@ class Drained:
         """The whole stream, for `x not in out` style assertions."""
         return "\n".join(self.all)
 
-    def wait_closed(self, timeout: float = 15.0) -> bool:
+    def wait_closed(self, timeout: float = HANG_TIMEOUT) -> bool:
         """Block until the process's stdout reaches EOF. Returns whether it did.
 
         Read `text` only AFTER this. Without it the reader thread may still be
@@ -409,12 +455,15 @@ class Drained:
 def drain_output(proc) -> Drained:
     """Start draining a RUNNING process's stdout; returns the growing record.
 
-    🔴 THE RESPONSE DOES NOT IMPLY THE LOG LINE, and every test that reads audit
-    output has to be written around that. A handler writes its response and only
-    THEN calls `_audit()`, on a ThreadingHTTPServer — so `fetch`/`fetch_from`
-    returning means the response was written, not that the handler thread has
-    reached its `print`. Any test that calls `proc.terminate()` on the client's
-    return is racing the line it is about to assert on.
+    🔴 THE RESPONSE DOES NOT IMPLY EVERY LOG LINE, and every test that reads
+    audit output has to be written around that. A handler used to write its
+    response and only THEN call `_audit()`, on a ThreadingHTTPServer — so
+    `fetch`/`fetch_from` returning meant the response was written, not that the
+    handler thread had reached its `print`. `_audit` now runs FIRST (see
+    `TestTheAuditLineIsWrittenBEFORETheResponse`), which settles the awaited
+    request's own line but says nothing about any OTHER request still in flight
+    on this process. A test that calls `proc.terminate()` on one client's return
+    is still racing every line it has not waited for.
 
     Draining also keeps the pipe buffer from becoming a SECOND timing
     dependency. Teardown stays with `running_subprocess`.
@@ -441,7 +490,7 @@ def drain_output(proc) -> Drained:
     return out
 
 
-def await_audit(out: "Drained | AuditLog", n: int, timeout: float = 15.0) -> "list[str]":
+def await_audit(out: "Drained | AuditLog", n: int, timeout: float = HANG_TIMEOUT) -> "list[str]":
     """Wait for at least `n` audit lines, then return them. RAISES if they never
     arrive.
 
@@ -497,18 +546,30 @@ def await_audit(out: "Drained | AuditLog", n: int, timeout: float = 15.0) -> "li
     `wait_closed()` form because a subprocess pipe really does have an EOF.
 
     🔴 AND IT GUARANTEES A COUNT, NEVER AN ORDER — the half that cost a red run
-    after the count race was closed everywhere. `_audit` runs AFTER `_respond`,
-    so a client can send request N+1 while handler N has still not appended:
-    request N's line can land SECOND. `await_audit(audit, 2)` is then perfectly
-    satisfied by two lines in the WRONG order, and a caller reading `lines[0]`
-    attributes one request's fields to another. MEASURED: with every positional
-    site waiting only at the end, `test_a_ROTATION_end_to_end_old_still_works_
-    then_stops` failed on `lines[0]` inside a full-file run.
+    after the count race was closed everywhere. `_audit` used to run AFTER
+    `_respond`, so a client could send request N+1 while handler N had still not
+    appended: request N's line landed SECOND. `await_audit(audit, 2)` is then
+    perfectly satisfied by two lines in the WRONG order, and a caller reading
+    `lines[0]` attributes one request's fields to another. MEASURED: with every
+    positional site waiting only at the end, `test_a_ROTATION_end_to_end_old_
+    still_works_then_stops` failed on `lines[0]` inside a full-file run.
 
-    So a POSITIONAL read has a second obligation: wait for line N BEFORE issuing
-    request N+1, which makes the position a fact rather than an assumption. A
-    caller that only aggregates (`len`, `any`, `all`, `sum`, `join`) has no such
-    obligation.
+    🔴 THE SERVER-SIDE HALF OF THAT IS NOW FIXED — AND THIS OBLIGATION STAYS.
+    `_audit` runs BEFORE `_respond`, so for a client that issues request N+1
+    only after response N has come back, the records are in request order by
+    construction. Two reasons the rule below does not relax: (a) it is a claim
+    about a SEQUENTIAL client, and a site with two requests genuinely in flight
+    (`threading.Thread`, a pipelined socket, a `/healthz` alongside an API call)
+    gets no ordering promise at all; (b) leaning on it would make every
+    positional site in this file a second, uncounted assertion of the ordering
+    property — so a regression there would show up as forty confusing failures
+    instead of the one guard that exists to state it,
+    `TestTheAuditLineIsWrittenBEFORETheResponse`.
+
+    So a POSITIONAL read keeps its second obligation: wait for line N BEFORE
+    issuing request N+1, which makes the position a fact rather than an
+    assumption. A caller that only aggregates (`len`, `any`, `all`, `sum`,
+    `join`) has no such obligation.
 
     🔴 THE OBLIGATION IS "AT MOST ONE AUDITED REQUEST IS IN FLIGHT PER WAIT",
     NOT "one request per wait" — an earlier draft of this paragraph claimed
@@ -3984,7 +4045,7 @@ def fetch_from(
     """
     host, _, port = base.removeprefix("http://").partition(":")
     conn = http.client.HTTPConnection(
-        host, int(port), timeout=15, source_address=(source_ip, 0)
+        host, int(port), timeout=HANG_TIMEOUT, source_address=(source_ip, 0)
     )
     try:
         headers = {}
@@ -5711,7 +5772,7 @@ class TestTrustedProxyOverTheRealProcess:
             store, token_file, trusted_proxies=NOT_LOOPBACK_PROXY
         ) as (_base, proc):
             proc.terminate()
-            stdout, _err = proc.communicate(timeout=15)
+            stdout, _err = proc.communicate(timeout=HANG_TIMEOUT)
         assert f"trusted-proxies={NOT_LOOPBACK_PROXY}" in stdout, stdout
 
 
@@ -5841,9 +5902,10 @@ def _transitive(seed: dict, funcs: dict) -> dict:
 def test_no_test_reads_an_AUDIT_LINE_from_a_process_it_just_terminated():
     """🔴 THE SEAM GUARD. The hazard is a RELATIONSHIP inside one test — reading
     audit records out of a stream while also being the thing that killed the
-    process producing them. `_respond` runs before `_audit`, so the client's
-    return proves nothing about the line, and terminating on it races the
-    emission.
+    process producing them. A client's return proves nothing about the lines it
+    did not wait for — `_audit` precedes `_respond` for the request in hand and
+    says nothing about any other handler thread — and terminating on it races
+    the emission.
 
     🔴 WHAT IT DELIBERATELY PERMITS:
     `test_the_startup_line_NAMES_the_trusted_proxies` terminates and reads stdout
@@ -6063,8 +6125,8 @@ def test_every_exact_count_site_goes_through_settle():
     guards with their own mutation matrices, and neither belongs in a change
     that inherits this PR's.
     """
-    assert _settle_call_sites() == 15, (
-        f"expected exactly 15 `settle(...)` call sites, found "
+    assert _settle_call_sites() == 21, (
+        f"expected exactly 21 `settle(...)` call sites, found "
         f"{_settle_call_sites()}. A ceiling was added or given up; if that is "
         "intended, update this count AND say in the commit which property the "
         "file no longer asserts."
@@ -6075,13 +6137,13 @@ def test_the_settle_call_site_THRESHOLD_is_load_bearing_not_decorative():
     """🔴 The mutant the threshold's own sweep cannot supply, for `settle`.
 
     Deleting the helper everywhere drives the count to 0 and kills `>= 1`,
-    `>= 14` and `== 15` identically. This removes ONE site from a COPY of the
-    source and requires the count to actually move to 14 — the case that
-    separates a real ceiling census from a floor that fifteen sites could
+    `>= 20` and `== 21` identically. This removes ONE site from a COPY of the
+    source and requires the count to actually move to 20 — the case that
+    separates a real ceiling census from a floor that twenty-one sites could
     satisfy with one.
     """
     src = Path(__file__).read_text()
-    assert _settle_call_sites(src) == 15, "fixture drift: the real count moved"
+    assert _settle_call_sites(src) == 21, "fixture drift: the real count moved"
 
     # A literal that appears exactly once as real code. (It also appears in this
     # line, later in the file; `count=1` takes the earlier, real occurrence, and
@@ -6089,9 +6151,9 @@ def test_the_settle_call_site_THRESHOLD_is_load_bearing_not_decorative():
     one_removed = src.replace("lines = settle(audit, 21)",
                               "lines = []  # mutant", 1)
     assert one_removed != src, "the mutation did not apply — this test is vacuous"
-    assert _settle_call_sites(one_removed) == 14, (
+    assert _settle_call_sites(one_removed) == 20, (
         "removing one call site did not move the count, so the threshold cannot "
-        "distinguish fifteen ceilings from fourteen"
+        "distinguish twenty-one ceilings from twenty"
     )
 
 
@@ -6271,10 +6333,13 @@ def test_no_test_INDEXES_a_live_audit_list():
 
     One of them was observed failing: `test_a_LOCKED_OUT_response_is_BYTE_
     IDENTICAL_to_an_ordinary_401` asserted on `audit[-1]` and got the PREVIOUS
-    request's `status=unauthorized`. `_respond` runs before `_audit`, and
+    request's `status=unauthorized`. `_respond` ran before `_audit` then, and
     `ThreadingHTTPServer` uses DAEMON threads — which `socketserver._Threads`
     refuses to track — so `server_close()` joins nothing: neither `fetch`
     returning NOR the `with` block exiting proves the last handler has appended.
+    The first half of that is fixed (`_audit` is emitted first now); the DAEMON
+    half is not, and a site with a second request in flight has no ordering
+    promise at all, so the ban stands.
 
     An unknown number of tests carrying a known race is worse than the one that
     was caught, so the count is pinned here rather than left to the next reader.
@@ -6358,9 +6423,9 @@ def test_no_test_INDEXES_a_live_audit_list():
         if unguarded:
             offenders.append(f"{fn.name} (line {fn.lineno}) reads at {unguarded}")
     assert not offenders, (
-        "these tests index the LIVE audit list: `_respond` runs before `_audit` "
-        "and the handler threads are never joined, so the record may not be "
-        "there yet. Use `lines = await_audit(audit, n)` and index `lines`, and "
+        "these tests index the LIVE audit list: the handler threads are never "
+        "joined and a request the client is not holding may not have appended "
+        "yet. Use `lines = await_audit(audit, n)` and index `lines`, and "
         "`settle(audit, n)` after the `with` block for an exact count:\n  "
         + "\n  ".join(offenders)
     )
@@ -12269,8 +12334,8 @@ def _request(host: str, method: str, target: str, body: bytes | None = None) -> 
 class TestTheBackstopNeverSendsASecondResponse:
     """🔴 THE GUARD ADDED TO CLOSE THE AUDIT HOLE REOPENED THE DESYNC HOLE.
 
-    `_append_bullet` calls `_respond(200, …)` and THEN `_audit(…)`, and both used
-    to sit inside the dispatch backstop's `try`. Anything raising after that
+    `_append_bullet` used to call `_respond(200, …)` and THEN `_audit(…)`, and
+    both sat inside the dispatch backstop's `try`. Anything raising after that
     `_respond` — a broken audit sink, a full disk on stderr, or simply the next
     statement somebody adds below it — made the backstop call `_respond(500, …)`
     on a connection that had already sent a complete `200`. `_respond` has no
@@ -12279,11 +12344,15 @@ class TestTheBackstopNeverSendsASecondResponse:
     trailing `500` to the NEXT client on it. That is the response-desync class
     `_drain_body`'s own docstring exists to prevent.
 
-    ⚠ HONEST REACHABILITY: induced here by wrapping the handler. In production
-    the only statement after that `_respond` is `_audit`, so it needs the audit
-    sink to raise — but "no statement will ever be added after a `_respond`" is a
-    promise, not a guard, which is why the fix is a flag inside `_respond` rather
-    than a rule about where code may go.
+    ⚠ HONEST REACHABILITY, AND IT IS NOW THINNER THAN IT WAS — WHICH IS A REASON
+    TO KEEP THESE TESTS, NOT TO DELETE THEM. The already-responded arm is
+    induced here by wrapping the handler. It used to have a production route
+    (`_audit` ran after `_respond`, so a raising sink reached it); with the audit
+    emitted FIRST there is no statement after a completed `_respond` at any call
+    site, so nothing in production reaches this arm today. That is precisely the
+    state the fix is a flag inside `_respond` rather than a rule about where code
+    may go: "no statement will ever be added after a `_respond`" is a promise,
+    and the next person to add one gets the guard instead of the desync.
     """
 
     def test_an_exception_AFTER_the_response_sends_NO_second_response(
@@ -12613,16 +12682,31 @@ class TestTheBackstopSurvivesITSOWNLogSink:
         self, scoped_store: Path, monkeypatch, capfd
     ):
         """The SECOND print, on the route the docstring calls the only
-        production-reachable one: the AUDIT SINK is what raised. The append has
-        already answered `200`, so the backstop owes only a log entry — and when
-        the log is what is broken it must end the request cleanly anyway.
+        production-reachable one: the AUDIT SINK is what raised. The backstop
+        owes an answer and a log entry — and when the log is what is broken it
+        must end the request cleanly anyway.
 
         🔴 THE OBSERVABLE IS STDERR, NOT THE WIRE, and that is not a weaker
-        claim — it is the claim. The `200` is already out either way, so with
-        the second print unguarded the exception escapes `do_POST`, past
+        claim — it is the claim. An answer goes out either way, so with the
+        second print unguarded the exception escapes `do_POST`, past
         `handle_one_request`, into `socketserver.BaseServer.handle_error`, whose
         banner replaces the operator's traceback. That banner appearing is the
         failure.
+
+        🔴 THE ANSWER MOVED FROM `200` TO `500`, AND THAT IS THE PRICE OF
+        AUDIT-BEFORE-RESPOND, WRITTEN DOWN RATHER THAN DISCOVERED LATER. This
+        test asserted `200` while `_audit` ran AFTER `_respond`: the append
+        answered, the sink then raised, and the caller was served a request that
+        had no record. Now the sink raises BEFORE any byte is written, so
+        `_responded` is False and the backstop answers `500` — the request is
+        REFUSED rather than silently unrecorded.
+
+        ⚠ AND THE MUTATION STILL LANDED, which is the uncomfortable half and is
+        asserted below rather than glossed: the append is complete before the
+        outcome is known, so a broken sink produces a `500` over a write that
+        happened. That is the fail-closed direction for an audit trail — the
+        operator sees a failure instead of nothing — but it is not free, and a
+        client that retries on `500` will append twice.
         """
         broken = _RaisingTraceback()
 
@@ -12647,11 +12731,18 @@ class TestTheBackstopSurvivesITSOWNLogSink:
         captured = capfd.readouterr()
 
         # 🔴 THE WRITE LANDED. Without this every assertion below is satisfied by
-        # a server that refused the append and therefore had nothing to audit.
+        # a server that refused the append and therefore had nothing to audit —
+        # and it is also the half that makes the `500` below a TRADE rather than
+        # a clean refusal. See the docstring.
         assert BULLET_SINKLESS in nuance_of(path), path.read_text()
         answers = _responses(raw)
-        assert len(answers) == 1, f"a second response followed the 200: {raw!r}"
-        assert answers[0].startswith(b"200 "), raw
+        assert len(answers) == 1, f"a second response followed the answer: {raw!r}"
+        assert answers[0].startswith(b"500 "), (
+            "a request whose audit record could not be written was SERVED. With "
+            "`_audit` before `_respond` the sink raises before any byte is on "
+            "the wire, so the backstop owes a 500 — an unrecordable request is "
+            f"refused, not answered: {raw!r}"
+        )
         assert saw_eof, "the connection was left open after an unknown-state request"
         # BOTH prints were attempted — the handler's exception and the audit
         # failure. `>= 1` would be satisfied without ever reaching the second
@@ -12975,3 +13066,870 @@ class TestTheSurrogateNoteNamesTheRealGuard:
             "THEREFORE LOAD-BEARING HERE, NOT MERELY DEFENSIVE, AND MUST NOT BE "
             "REMOVED ON THE STRENGTH OF THIS COMMENT."
         ) in text, "the corrected reason is not in the file"
+
+
+# =============================================================================
+# THE AUDIT LINE IS WRITTEN *BEFORE* THE RESPONSE, AND THE SINK IS SERIALISED.
+#
+# 🔴 TWO DEFECTS, ONE CALL-SITE SHAPE. Every handler in `server.py` used to
+# `_respond(...)` and only then `_audit(...)`, against a `ThreadingHTTPServer`
+# whose default sink is a bare unlocked `print`.
+#
+#   ORDERING     A SEQUENTIAL client's request N+1 is accepted on a NEW handler
+#                thread the moment response N is on the wire, so handler N+1
+#                could reach the sink before handler N did and the stream came
+#                out in the wrong order. Seen once in the nix sandbox tier:
+#                `test_the_audit_line_names_WHICH_fingerprint_matched` failed on
+#                `token=<A> in audit[0]` with the two records SWAPPED, then
+#                passed on re-run and in ~20 runs after. Rare, and real.
+#   ATOMICITY    `print(line, flush=True)` is TWO writes on one stream — the
+#                record, then the terminator — so two overlapping handlers can
+#                emit `<A><B>\n\n`: one line carrying two requests' fields and
+#                one carrying none.
+#
+# 🔴 AND THEY NEED DIFFERENT FIXES, WHICH IS WHY THEY GET DIFFERENT TESTS.
+# Ordering alone leaves genuinely concurrent callers interleaving; a lock alone
+# leaves a sequential client's records out of order. Each test below is red
+# under exactly one of the two mutants — see the PR's matrix.
+#
+# 🔴 NOTHING HERE WAITS ON A SLEEP TO MAKE ITS VERDICT. The observable is forced
+# by the injected sink (`running(..., wrap_sink=...)`): a GATE that holds the
+# first record so the client's own progress becomes the measurement, and a
+# deliberately NON-ATOMIC writer that cannot help but interleave if it is
+# allowed to run twice at once. The two bounded windows below are windows for a
+# FAILURE to appear in, never a wait for success to finish — the same shape
+# `settle` uses, and for the same reason.
+# =============================================================================
+
+# How long to keep watching for the client to sail past a HELD audit record.
+# It is the width of the ordering claim: with the record held, the response must
+# not have been written, so the client cannot have started its next request. Not
+# a wait for anything to succeed — the gate is released immediately afterwards,
+# whatever we saw. A saturated host stretches the client and this window on the
+# SAME clock, so it cannot turn a green run red; it can only miss a violation.
+_ORDER_PROBE_S = 1.0
+
+# How long the non-atomic sink holds its record open, waiting for a second
+# writer to interleave with it. With the sink serialised no second writer can
+# ever arrive, so this window is spent in full, once, by one test.
+_SPLIT_WINDOW_S = 0.5
+
+# 🔴 A TOKEN THIS SECTION OWNS, AND ITS FINGERPRINT WRITTEN OUT BY HAND. The
+# whole-line pin below must not compute its expectation with `api.token_id` —
+# that asserts `x == x` and stays green through a change to the digest that
+# every operator's grep depends on. sha256("p"*48).hexdigest()[:12].
+PINNED_TOKEN = "p" * 48
+PINNED_TOKEN_ID = "d64bf41c3707"
+
+# 🔴 THE WHOLE RECORD, FIELD FOR FIELD, NOT A KEYWORD. A guard spelled as
+# `"token=" in line` passes on a line whose fields are in the wrong order, on a
+# line that lost `identity=`, and on two records fused into one — which is
+# precisely the atomicity defect. `fullmatch` or nothing.
+_AUDIT_LINE_RE = re.compile(
+    r"store-api audit "
+    r"ts=\S+ ip=\S+ peer=(?:-|trusted|untrusted) method=\S+ path=\S+ "
+    r"token=\S+ identity=\S+ auth=(?:ok|fail) result=\d+ status=\S+"
+)
+
+
+def _poll_until(predicate, timeout: float) -> bool:
+    """Spin until `predicate()` is true or `timeout` elapses. Says which.
+
+    🔴 A POLL RATHER THAN `Event.wait(t)`, AND THE REASON IS A GUARD IN THIS
+    FILE RATHER THAN A PREFERENCE. `_KILLERS` counts a bare `.wait` ATTRIBUTE as
+    terminating a process, so a test that waits on an `Event` and also reads
+    audit records is a false offender in
+    `test_no_test_reads_an_AUDIT_LINE_from_a_process_it_just_terminated` — the
+    same collision that made `settle` spell its barrier `wait_closed()` instead
+    of `closed.wait()`. Polling is the identical synchronisation in a shape that
+    guard can tell apart from a kill.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+class _Rendezvous:
+    """A meeting point for `parties` threads that TIMES OUT instead of blocking.
+
+    Deliberately not `threading.Barrier`: its `wait()` carries the verb
+    `_KILLERS` reads as a process kill (see `_poll_until`), and a broken barrier
+    RAISES where every caller here wants a boolean. It is also sticky on purpose
+    — once enough threads have arrived it stays satisfied — so a late arrival
+    returns immediately rather than hanging on a second generation.
+    """
+
+    def __init__(self, parties: int = 2) -> None:
+        self.parties = parties
+        self.arrived = 0
+        self._lock = threading.Lock()
+
+    def arrive(self, timeout: float) -> bool:
+        """Count this thread in, then wait for the rest. `False` = timed out."""
+        with self._lock:
+            self.arrived += 1
+        return _poll_until(lambda: self.arrived >= self.parties, timeout)
+
+
+class _GatedSink:
+    """Holds the FIRST record handed to it until the test lets go.
+
+    🔴 THIS IS THE WHOLE INSTRUMENT FOR THE ORDERING CLAIM, AND IT WORKS BY
+    MAKING THE CLIENT THE MEASUREMENT. With the record held:
+
+      audit-before-respond -> response 1 is not on the wire, so a sequential
+                              client is still blocked inside its FIRST request
+      respond-before-audit -> response 1 went out before the sink was entered,
+                              so the client has already issued its SECOND
+
+    "Which request has the client started" is a fact about the client, observed
+    from outside the server, and it does not depend on how fast anything runs.
+    """
+
+    def __init__(self) -> None:
+        self.reached = _Rendezvous(parties=1)   # set when the first record is held
+        self.released = False
+        self.seen = 0
+        self._lock = threading.Lock()
+
+    def release(self) -> None:
+        self.released = True
+
+    def __call__(self, inner):
+        def sink(line: str) -> None:
+            with self._lock:
+                self.seen += 1
+                first = self.seen == 1
+            if first:
+                self.reached.arrive(0.0)
+                # A generous ceiling: the test releases explicitly, in a
+                # `finally`, so this bound is only reached if the test itself
+                # died — in which case hanging the server thread would turn one
+                # failure into a suite that never finishes.
+                _poll_until(lambda: self.released, 30.0)
+            inner(line)
+
+        return sink
+
+
+class _SplittingSink:
+    """A sink whose write is NON-ATOMIC in exactly the way `print` is.
+
+    `print(line, flush=True)` writes the record and the terminator separately.
+    This reproduces that split and FORCES the hazard rather than hoping for it:
+    between the two writes it waits for a SECOND writer to arrive, so any sink
+    that admits two threads at once must produce `<A><B>\\n\\n`. When the sink is
+    serialised the second writer can never arrive, the window is spent, and the
+    two records come out whole and terminated.
+
+    `pieces` is an ordinary list appended without a lock ON PURPOSE — the append
+    ORDER is the measurement, and serialising it here would destroy the very
+    thing under test. `list.append` is atomic, so the list itself is safe.
+    """
+
+    def __init__(self, window: float) -> None:
+        self.pieces: "list[str]" = []
+        self.window = window
+        self.mid = _Rendezvous(parties=2)
+
+    @property
+    def stream(self) -> str:
+        """Everything the sink wrote, in the order it wrote it."""
+        return "".join(self.pieces)
+
+    def __call__(self, inner):
+        def sink(line: str) -> None:
+            self.pieces.append(line)
+            self.mid.arrive(self.window)
+            self.pieces.append("\n")
+            inner(line)
+
+        return sink
+
+
+def _tee(records: "list[str]"):
+    """A `wrap_sink` that copies every record into `records` and passes it on.
+
+    The copy is what a test may read while the server is RUNNING: it is the
+    test's own list, so the ban on indexing the live `AuditLog`
+    (`test_no_test_INDEXES_a_live_audit_list`) is not being walked around — that
+    ban is about reading a shared record with no waiter, and these sites are
+    asserting a per-request ordering property the waiter would hide.
+    """
+
+    def wrap(inner):
+        def sink(line: str) -> None:
+            records.append(line)
+            inner(line)
+
+        return sink
+
+    return wrap
+
+
+def _without_ts(line: str) -> str:
+    """The record with its one genuinely varying field replaced by a marker."""
+    return re.sub(r"ts=\S+", "ts=<TS>", line, count=1)
+
+
+class TestTheAuditLineIsWrittenBEFORETheResponse:
+    """§ the record is a PRECONDITION of the answer, not a footnote to it."""
+
+    def test_HOLDING_the_first_record_STOPS_the_client_reaching_the_second(
+        self, store: Path
+    ):
+        """🔴 THE DETERMINISTIC REPRODUCTION. No sleep decides this verdict.
+
+        The sink holds request A's record. Two mutually exclusive states follow,
+        and the client tells us which one we are in: if the response is written
+        before the record, A has already come back and the client has issued B;
+        if the record is written first, the client is still inside A.
+
+        MEASURED at the base ref (`_audit` after `_respond`): `reached` came back
+        `['A', 'B']` and the records came back in the order B, A. Both
+        assertions below are red there, on their own messages.
+        """
+        gate = _GatedSink()
+        reached: "list[str]" = []
+
+        def client(base: str) -> None:
+            for name, scope in (("A", SCOPE), ("B", OTHER_SCOPE)):
+                # Recorded BEFORE the request, so this list means "has issued",
+                # never "has completed" — the client blocking inside A must not
+                # be readable as the same state as never having started it.
+                reached.append(name)
+                fetch(f"{base}/api/v1/recall/{scope}", token=GOOD_TOKEN)
+
+        with running(store, wrap_sink=gate) as (base, audit):
+            worker = threading.Thread(target=client, args=(base,), daemon=True)
+            worker.start()
+            try:
+                assert gate.reached.arrive(15.0), (
+                    "the sink was never handed a record — the gate cannot have "
+                    "measured anything"
+                )
+                # A window for the VIOLATION to appear in. It is released
+                # immediately after, whatever we saw; nothing here waits for a
+                # success to finish.
+                _poll_until(lambda: len(reached) >= 2, _ORDER_PROBE_S)
+                seen = list(reached)
+            finally:
+                gate.release()
+            worker.join(timeout=30)
+            assert not worker.is_alive(), "the client never finished"
+            await_audit(audit, 2)
+
+        assert seen == ["A"], (
+            "the client issued its SECOND request while the FIRST request's "
+            "audit record was still being held — so the response was written "
+            f"before the record. Requests issued: {seen}"
+        )
+        # 🔴 THE ORDER, ASSERTED RATHER THAN ASSUMED — and this is the one site
+        # in the file entitled to read positions without interleaving its waits,
+        # because the ordering IS its subject. See `await_audit`.
+        lines = settle(audit, 2)
+        assert f"path=/api/v1/recall/{SCOPE}" in lines[0], lines
+        assert f"path=/api/v1/recall/{OTHER_SCOPE}" in lines[1], lines
+
+    def test_EVERY_sequential_response_arrives_WITH_its_record_already_written(
+        self, store: Path
+    ):
+        """The same property read at SIX points instead of one, per request.
+
+        ⚠ HONEST LABELLING: at the base ref this is a RACE, not a certain red —
+        the handler reaches its `print` microseconds after the client returns,
+        so it fails only sometimes. It is here because the property it states is
+        the one an operator relies on ("the response implies the record"), and
+        stating it once per request is what makes the claim cover more than a
+        single hand-built scenario. The DETERMINISTIC guard is the gate above.
+        """
+        records: "list[str]" = []
+        wanted = [SCOPE, OTHER_SCOPE, SCOPE, OTHER_SCOPE, SCOPE, OTHER_SCOPE]
+        with running(store, wrap_sink=_tee(records)) as (base, audit):
+            for issued, scope in enumerate(wanted, start=1):
+                code, _headers, _body = fetch(
+                    f"{base}/api/v1/recall/{scope}", token=GOOD_TOKEN
+                )
+                assert code == 200, (scope, code)
+                snapshot = list(records)
+                assert len(snapshot) == issued, (
+                    f"request {issued} (/{scope}) came back with "
+                    f"{len(snapshot)} record(s) written, expected {issued} — "
+                    "the response does not imply the record"
+                )
+                assert f"path=/api/v1/recall/{scope}" in snapshot[-1], (
+                    f"request {issued} was for /{scope} but the newest record "
+                    f"is {snapshot[-1]!r} — the records are out of order"
+                )
+            await_audit(audit, len(wanted))
+        settle(audit, len(wanted))
+
+    def test_the_WHOLE_normalised_record_is_pinned_field_for_field(
+        self, store: Path
+    ):
+        """🔴 PINNED AS ONE STRING, BECAUSE EVERY FIELD IS LOAD-BEARING.
+
+        `token=` is what makes an overlap rotation checkable, `identity=` is
+        which allowlist applied, `peer=` is how `ip=` must be read, and their
+        ORDER is what the operator's grep and the Loki parser are written
+        against. A test spelled as four `in` checks is walked by a reorder, by a
+        dropped field, and by two records fused into one line.
+
+        The expectation is a literal this test owns — the fingerprint included
+        (see `PINNED_TOKEN_ID`) — never a value computed from `server.py`.
+        """
+        with running(store, token=PINNED_TOKEN) as (base, audit):
+            code, _headers, _body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}",
+                token=PINNED_TOKEN,
+                client_ip=CLIENT_IP,
+            )
+            line = await_audit(audit, 1)[0]
+        assert code == 200, code
+        assert _without_ts(line) == (
+            "store-api audit ts=<TS> "
+            f"ip={CLIENT_IP} peer=trusted method=GET "
+            f"path=/api/v1/recall/{SCOPE} "
+            f"token={PINNED_TOKEN_ID} identity=legacy auth=ok "
+            "result=200 status=recalled"
+        ), line
+        # The normaliser must actually have removed something, or the pin above
+        # is over a string that never varied and says nothing about `ts=`.
+        assert _without_ts(line) != line, line
+        assert re.search(r"ts=\d{4}-\d{2}-\d{2}T", line), line
+
+
+class TestTwoConcurrentRequestsCannotINTERLEAVETheirRecords:
+    """§ ordering fixes a SEQUENTIAL client; only a lock fixes overlapping ones.
+
+    🔴 THE HAZARD IS IN THE SINK, NOT IN THE HANDLER. `ThreadingHTTPServer` runs
+    a handler per connection and the shipped sink is `print(line, flush=True)`,
+    which is two writes on one `TextIOWrapper`. The GIL orders the individual
+    writes and says nothing about which pair they belong to, so the failure mode
+    is a stream in which one line holds two requests' fields — `token=` from one
+    caller beside `path=` from another, in the record the rotation procedure and
+    the auth-fail alert both parse.
+    """
+
+    def test_two_CONCURRENT_records_come_out_WHOLE_and_separately_terminated(
+        self, store: Path, monkeypatch
+    ):
+        """🔴 THE INTERLEAVING IS FORCED, NOT AWAITED.
+
+        Two things are arranged, and both are needed:
+
+          THE DOOR   `_audit` is wrapped so both handler threads are parked
+                     immediately BEFORE the serialised region and released
+                     together. Without it, thread A could simply finish before
+                     thread B was scheduled and the unlocked sink would look
+                     serialised — a mutant surviving on timing.
+          THE SPLIT  the sink writes the record, waits for a second writer, then
+                     writes the terminator. If two threads are ever inside it at
+                     once, B's record MUST land between A's two writes.
+
+        So `<A>\\n<B>\\n` is only reachable when the sink is serialised, and
+        `<A><B>\\n\\n` is the certain outcome when it is not. MEASURED with the
+        lock removed: one line holding both records and one empty line, failing
+        on the whole-line regex below.
+        """
+        split = _SplittingSink(window=_SPLIT_WINDOW_S)
+        door = _Rendezvous(parties=2)
+        real_audit = api.StoreRequestHandler._audit
+
+        def at_the_door(self, *args, **kwargs):
+            # OUTSIDE the serialised region on purpose: this parks both threads
+            # at the entrance, it does not hold them apart.
+            door.arrive(15.0)
+            return real_audit(self, *args, **kwargs)
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_audit", at_the_door)
+        with running(store, wrap_sink=split) as (base, audit):
+            workers = [
+                threading.Thread(
+                    target=fetch,
+                    args=(f"{base}/api/v1/recall/{scope}",),
+                    kwargs={"token": GOOD_TOKEN},
+                    daemon=True,
+                )
+                for scope in (SCOPE, OTHER_SCOPE)
+            ]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=30)
+            assert not any(worker.is_alive() for worker in workers), (
+                "a client never came back — the door never opened"
+            )
+            await_audit(audit, 2)
+        monkeypatch.undo()
+
+        # The positive control for the instrument itself: a door nobody reached
+        # would make every assertion below a statement about a sink that was
+        # only ever entered once.
+        assert door.arrived == 2, (
+            f"{door.arrived} handler thread(s) reached the sink — the two "
+            "requests were not concurrent, so nothing was measured"
+        )
+        stream = split.stream
+        assert stream.endswith("\n"), repr(stream)
+        emitted = stream.split("\n")[:-1]
+        assert len(emitted) == 2, (
+            f"the stream holds {len(emitted)} line(s) for two requests: "
+            f"{stream!r}"
+        )
+        for line in emitted:
+            assert line.count(AUDIT_PREFIX) == 1, (
+                f"{line.count(AUDIT_PREFIX)} records were fused into one line — "
+                f"two writers interleaved: {line!r}"
+            )
+            assert _AUDIT_LINE_RE.fullmatch(line), (
+                f"not a whole, well-formed audit record: {line!r}"
+            )
+        paths = sorted(re.search(r"path=(\S+)", line).group(1) for line in emitted)
+        assert paths == sorted(
+            [f"/api/v1/recall/{SCOPE}", f"/api/v1/recall/{OTHER_SCOPE}"]
+        ), paths
+
+    def test_the_LOCK_is_ONE_object_every_handler_class_shares(self, store: Path):
+        """🔴 A PER-INSTANCE LOCK WOULD SERIALISE NOTHING, AND WOULD LOOK FINE.
+
+        `ThreadingHTTPServer` builds a NEW handler instance per connection, so a
+        lock created in `__init__` is a fresh lock per caller — never contended,
+        never wrong-looking, and completely inert. The thing being serialised is
+        one process's stdout, so the lock has to outlive the instance and the
+        server: `build_server`'s `_Handler` subclass must share the base class's.
+        """
+        first = api.build_server(
+            host="127.0.0.1", port=0, store_root=str(store),
+            tokens=(GOOD_TOKEN,), trusted_proxies=(LOOPBACK_PROXY,),
+        )
+        second = api.build_server(
+            host="127.0.0.1", port=0, store_root=str(store),
+            tokens=(GOOD_TOKEN,), trusted_proxies=(LOOPBACK_PROXY,),
+        )
+        try:
+            shared = api.StoreRequestHandler._audit_lock
+            assert first.RequestHandlerClass._audit_lock is shared
+            assert second.RequestHandlerClass._audit_lock is shared, (
+                "two servers in one process hold different audit locks, so "
+                "their records can still interleave on one stdout"
+            )
+        finally:
+            first.server_close()
+            second.server_close()
+
+
+class TestNoRequestEverAuditsTwiceAndNoneVanishes:
+    """§ the record count per request, across the outcomes and the backstop."""
+
+    def test_FOUR_different_outcomes_produce_EXACTLY_four_records(
+        self, store: Path
+    ):
+        """One line per request at four DIFFERENT call sites — a 200, a 401, a
+        404 and a 405 — so "the reorder duplicated or dropped a record" is
+        checked where the reorder happened rather than on one happy path.
+
+        `settle`, not a snapshot: the claim is a CEILING.
+        """
+        with running(store) as (base, audit):
+            ok, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            await_audit(audit, 1)
+            denied, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}")
+            await_audit(audit, 2)
+            missing, _h, _b = fetch(f"{base}/api/v1/nowhere", token=GOOD_TOKEN)
+            await_audit(audit, 3)
+            refused, _h, _b = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method="POST"
+            )
+            await_audit(audit, 4)
+        assert (ok, denied, missing, refused) == (200, 401, 404, 405)
+        lines = settle(audit, 4)
+        assert [int(re.search(r"result=(\d+)", ln).group(1)) for ln in lines] == [
+            200, 401, 404, 405
+        ], lines
+
+    def test_healthz_adds_NOTHING_even_while_an_audited_request_is_in_flight(
+        self, store: Path
+    ):
+        """🔴 `/healthz` IS DELIBERATELY UNAUDITED, AND THE ZERO NEEDS A CONTROL.
+
+        Sequential probes are already pinned by `test_health_is_NOT_audited`.
+        This asks the question the reorder actually changes: the probes run
+        CONCURRENTLY with an audited request, i.e. through the same serialised
+        sink, where a `/healthz` that had acquired a record would be visible as
+        a fifth line. The audited request is the positive control — its record
+        proves the sink was wired to something.
+        """
+        with running(store) as (base, audit):
+            probes = [
+                threading.Thread(
+                    target=fetch, args=(f"{base}/healthz",), daemon=True
+                )
+                for _ in range(4)
+            ]
+            for probe in probes:
+                probe.start()
+            code, _headers, _body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN
+            )
+            for probe in probes:
+                probe.join(timeout=30)
+            assert not any(probe.is_alive() for probe in probes)
+            await_audit(audit, 1)
+        assert code == 200, code
+        lines = settle(audit, 1)
+        assert "/healthz" not in lines[0], lines[0]
+
+    def test_a_handler_that_DIES_before_its_response_has_ALREADY_logged_it(
+        self, store: Path, monkeypatch
+    ):
+        """🔴 THE PAYOFF OF AUDITING FIRST, AND IT IS RED AT THE BASE REF.
+
+        `_respond` is made to raise on its FIRST call only — so the backstop's
+        own `500` still goes out, and the induced failure sits exactly in the
+        window between the decision and the wire.
+
+          base ref (respond first)  ONE record: `result=500
+                                    status=internal-error`. What the request
+                                    actually DID is lost — the outcome was never
+                                    written.
+          here    (audit first)     TWO: the outcome (`result=200
+                                    status=recalled`) already in the stream, and
+                                    the backstop's 500 beside it.
+
+        A duplicate beats a hole: the operator can see that the request was
+        served AND that answering it failed. `settle` pins the ceiling at two, so
+        "audit first" cannot quietly become "audit twice on every request".
+
+        🔴 THE OWN-COPY (`_tee`) IS WHY THIS DIES ON ITS OWN MESSAGE. Waiting for
+        two records first would make the KILLING assertion `await_audit`'s
+        ("expected at least 2, got 1") — a true statement that names a count
+        instead of naming the missing outcome. The copy is read before any
+        waiter, so the failure says which record was lost.
+        """
+        calls = {"n": 0}
+        records: "list[str]" = []
+        real_respond = api.StoreRequestHandler._respond
+
+        def flaky(self, code, body, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ZeroDivisionError("between the record and the wire")
+            return real_respond(self, code, body, **kwargs)
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_respond", flaky)
+        with running(store, wrap_sink=_tee(records)) as (base, audit):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN
+            )
+            await_audit(audit, 1)
+        monkeypatch.undo()
+
+        assert code == 500, (code, body)
+        assert headers["X-Store-Status"] == "internal-error"
+        assert any("result=200 status=recalled" in ln for ln in records), (
+            "the outcome the handler had already decided was NEVER WRITTEN — the "
+            "record died with the response it was waiting for. The trail holds "
+            f"only: {records}"
+        )
+        # And it really was the injected failure, not a store that answered 500
+        # on its own: `_respond` was reached twice, the handler's and the
+        # backstop's.
+        assert calls["n"] == 2, calls
+        lines = settle(audit, 2)
+        assert "result=200 status=recalled" in lines[0], lines
+        assert "result=500 status=internal-error" in lines[1], lines
+
+    def test_an_exception_AFTER_a_completed_response_audits_EXACTLY_TWICE(
+        self, store: Path, monkeypatch
+    ):
+        """The other arm, with the CEILING the existing coverage of it lacks.
+
+        `TestTheREADDispatchIsBackstoppedToo` asserts both records are present;
+        it cannot see a THIRD. The already-responded arm is now reachable only
+        by a statement failing after a completed `_respond` — which is what this
+        wrapper is — so pinning its count is the only way "the reorder did not
+        add a record here" stays a checked claim.
+        """
+        real_recall = api.StoreRequestHandler._recall
+
+        def then_raise(self, *args, **kwargs):
+            real_recall(self, *args, **kwargs)
+            raise ZeroDivisionError("after the recall response")
+
+        monkeypatch.setattr(api.StoreRequestHandler, "_recall", then_raise)
+        with running(store) as (base, audit):
+            code, _headers, _body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN
+            )
+            await_audit(audit, 2)
+        monkeypatch.undo()
+
+        assert code == 200, code
+        lines = settle(audit, 2)
+        assert "result=200 status=recalled" in lines[0], lines
+        assert "result=500 status=internal-error-after-response" in lines[1], lines
+
+
+# =============================================================================
+# THE LEDGERS — the two structural rules, pinned where they are written.
+# =============================================================================
+
+# 🔴 `_backstop` IS THE ONE EXEMPTION, AND IT IS EARNED, NOT GRANTED. The status
+# it records (`internal-error` vs `internal-error-after-response`) is not
+# knowable until `_responded` has been read, and on the already-responded arm the
+# bytes went out before the function was even called. Every other site in the
+# class decides its outcome first and can therefore log it first.
+_AUDITS_AFTER_RESPONDING = frozenset({"_backstop"})
+
+# The number of `_audit(...)` calls that sit immediately in front of the
+# `_respond(...)`/`_unauthorized()` they describe. A census, so DELETING a call
+# site is as loud as reordering one — a route that stops auditing is the failure
+# this whole section is about, and an offender list of zero cannot see it.
+_AUDIT_BEFORE_RESPOND_PAIRS = 33
+
+
+def _respond_names() -> "frozenset[str]":
+    """The methods that put bytes on the wire. `_unauthorized` is a `_respond`."""
+    return frozenset({"_respond", "_unauthorized"})
+
+
+def _self_call(stmt: ast.AST) -> "str | None":
+    """`self.<name>(...)` as a bare statement -> `<name>`; anything else None."""
+    if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Call):
+        return None
+    func = stmt.value.func
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
+            and func.value.id == "self":
+        return func.attr
+    return None
+
+
+def _audit_order(source: "str | None" = None) -> "tuple[int, list[str]]":
+    """`(pairs, offenders)` for the audit-before-respond rule in `server.py`.
+
+    An offender is an `_audit(...)` that appears AFTER a `_respond(...)` or
+    `_unauthorized()` in the same statement sequence — the shape both defects
+    came from. A pair is an `_audit(...)` immediately in front of one.
+
+    Scoped to `StoreRequestHandler` and to each method's own statement
+    sequences, so a helper elsewhere in the file cannot make the count drift.
+    """
+    tree = ast.parse(source if source is not None else SERVER_PATH.read_text())
+    handler = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "StoreRequestHandler"
+    )
+    responders = _respond_names()
+    pairs, offenders = 0, []
+    for method in handler.body:
+        if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if method.name in _AUDITS_AFTER_RESPONDING:
+            continue
+        for node in ast.walk(method):
+            for field in ("body", "orelse", "finalbody"):
+                seq = getattr(node, field, None)
+                if not isinstance(seq, list):
+                    continue
+                responded = None
+                for index, stmt in enumerate(seq):
+                    name = _self_call(stmt)
+                    if name in responders and responded is None:
+                        responded = stmt.lineno
+                    elif name == "_audit":
+                        if responded is not None:
+                            offenders.append(
+                                f"{method.name}: _audit at line {stmt.lineno} "
+                                f"follows a response at line {responded}"
+                            )
+                        following = seq[index + 1] if index + 1 < len(seq) else None
+                        if following is not None and _self_call(following) in responders:
+                            pairs += 1
+    return pairs, sorted(offenders)
+
+
+def test_every_audit_call_site_PRECEDES_its_response():
+    """🔴 THE RULE, PINNED WHERE IT IS WRITTEN RATHER THAN ONLY WHERE IT SHOWS.
+
+    The behavioural guards above catch the reorder on the routes they exercise.
+    This catches it at the EDIT, on all 33 sites at once, including the ones no
+    test drives — and it catches the far likelier regression, which is not
+    somebody reverting the fix but somebody adding the 34th call site by copying
+    the shape of a neighbour they happened to read before this change.
+
+    🔴 WHAT IT CANNOT SEE, so it is not read as more than it is: an `_audit`
+    reached through a helper (`self._log_it()`), a response written by calling
+    `self.wfile.write` directly, and any ordering between two DIFFERENT
+    statement sequences (an `_audit` in an `else:` after a `_respond` in the
+    `if:` is not a violation and is not counted as one).
+    """
+    pairs, offenders = _audit_order()
+    assert not offenders, (
+        "these sites put the response on the wire before the record. A "
+        "sequential client's next request then races the record it precedes, "
+        "and a crash in between loses the outcome entirely — audit first, then "
+        "respond (see `StoreRequestHandler._audit`):\n  " + "\n  ".join(offenders)
+    )
+    assert pairs == _AUDIT_BEFORE_RESPOND_PAIRS, (
+        f"expected {_AUDIT_BEFORE_RESPOND_PAIRS} `_audit(...)` calls sitting "
+        f"immediately in front of a response, found {pairs}. A route was added "
+        "or stopped auditing; if that is intended, update the census AND say in "
+        "the commit which requests no longer appear in the audit trail."
+    )
+
+
+def test_the_audit_ORDER_detector_can_SEE_the_defect_it_bans():
+    """🔴 THE POSITIVE CONTROL, BUILT FROM THE REAL FILE.
+
+    An offender list of zero is a fact about the walker until the walker has
+    been shown the shape. The mutation is applied to a COPY of `server.py` — the
+    405 pair, spelled exactly as it is in the source — and both halves of the
+    verdict must move: one offender named, and the pair census down by one.
+    A control built from a synthetic two-line fixture would prove neither, since
+    the real file's shape (a method body inside a class inside a module, with
+    the pair nested in an `if`) is the thing being parsed.
+    """
+    src = SERVER_PATH.read_text()
+    correct = (
+        '        self._audit(path, 405, "method-not-allowed")\n'
+        '        self._respond(405, b"read-only\\n", headers={"Allow": "GET, HEAD"})\n'
+    )
+    assert src.count(correct) == 1, (
+        "fixture drift: the 405 pair is no longer spelled the way this control "
+        "expects, so the mutation below would not apply"
+    )
+    swapped = src.replace(
+        correct,
+        '        self._respond(405, b"read-only\\n", headers={"Allow": "GET, HEAD"})\n'
+        '        self._audit(path, 405, "method-not-allowed")\n',
+        1,
+    )
+    assert swapped != src, "the mutation did not apply — this control is vacuous"
+
+    # 🔴 THE LINE NUMBERS ARE COMPUTED FROM THE MUTATED TEXT THIS TEST OWNS, and
+    # the offender must name BOTH. An earlier draft accepted
+    # `"_audit at line" in offenders[0]`, which every offender string contains by
+    # construction — a disjunction that could not fail, sitting inside the one
+    # test whose whole job is to prove the detector points somewhere real. A
+    # detector that flags the right COUNT at the wrong PLACE sends the next
+    # reader to a site that is fine.
+    audit_line = 1 + swapped.splitlines().index(
+        '        self._audit(path, 405, "method-not-allowed")'
+    )
+    respond_line = audit_line - 1
+
+    pairs, offenders = _audit_order(swapped)
+    assert len(offenders) == 1, (
+        f"the detector saw {len(offenders)} offender(s) in a source with "
+        f"exactly one reordered site: {offenders}"
+    )
+    assert (
+        f"_audit at line {audit_line} follows a response at line {respond_line}"
+        in offenders[0]
+    ), (offenders, audit_line, respond_line)
+    assert pairs == _AUDIT_BEFORE_RESPOND_PAIRS - 1, (
+        f"the pair census did not move when a pair was broken: {pairs}"
+    )
+
+
+def _sink_calls_outside_the_lock(source: "str | None" = None) -> "list[int]":
+    """Lines in `_audit` where the SINK is called from outside `_audit_lock`."""
+    tree = ast.parse(source if source is not None else SERVER_PATH.read_text())
+    audit = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_audit"
+    )
+    guarded: "list[tuple[int, int]]" = []
+    for node in ast.walk(audit):
+        if not isinstance(node, (ast.With, ast.AsyncWith)):
+            continue
+        for item in node.items:
+            expr = item.context_expr
+            if isinstance(expr, ast.Attribute) and expr.attr == "_audit_lock" \
+                    and isinstance(expr.value, ast.Name) and expr.value.id == "self":
+                guarded.append((node.body[0].lineno, node.body[-1].end_lineno))
+    loose = []
+    for node in ast.walk(audit):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "audit"
+                and isinstance(func.value, ast.Name) and func.value.id == "self"):
+            continue
+        if not any(start <= node.lineno <= end for start, end in guarded):
+            loose.append(node.lineno)
+    return sorted(loose)
+
+
+def test_the_SINK_call_is_inside_the_lock_not_beside_it():
+    """🔴 A LOCK HELD AROUND THE WRONG THING IS A LOCK THAT SERIALISES NOTHING.
+
+    The behavioural guard is
+    `test_two_CONCURRENT_records_come_out_WHOLE_and_separately_terminated`; this
+    is the cheap ledger beside it, because the way this regresses is not a
+    deletion (which that test catches loudly) but a refactor that keeps the
+    `with` and moves the sink call out from under it — leaving a lock, a
+    comment, and no serialisation.
+    """
+    loose = _sink_calls_outside_the_lock()
+    assert loose == [], (
+        "the audit SINK is called from outside `self._audit_lock` at lines "
+        f"{loose} — two concurrent handlers can interleave their writes"
+    )
+
+    # 🔴 THE CONTROL'S MUTATION IS STRUCTURAL, NOT A FIXED TWO-LINE STRING, AND
+    # THAT IS A FIX RATHER THAN A FLOURISH. It used to `str.replace` the exact
+    # text `with self._audit_lock:\n    self.audit(line)\n` with the bare call.
+    # MEASURED against an unrelated mutant that added a second statement inside
+    # the block: the two-line pattern still matched, the replacement orphaned the
+    # extra statement at the old indent, and this test died inside `ast.parse`
+    # with `IndentationError` — an exception, from a control whose whole job is
+    # to produce a specific ASSERTION. Lifting the block by its own AST span
+    # keeps the mutant syntactically valid whatever the body holds.
+    src = SERVER_PATH.read_text()
+    lines = src.splitlines(keepends=True)
+    # 🔴 `audit_fn`, NOT `audit`. This binds an AST FunctionDef, but
+    # `_raw_audit_reads` flags the NAME — deliberately, since it cannot tell an
+    # audit-record read from anything else spelled that way — so a local called
+    # `audit` here makes this a FALSE OFFENDER in
+    # `test_no_test_INDEXES_a_live_audit_list`. MEASURED: it did, in BOTH gate
+    # tiers, on that test. What missed it was checking the edit with a `-k`
+    # filter that excluded the seam guard — a subset run is a claim about the
+    # subset. Renamed rather than widening the guard: the guard is right that a
+    # `test*` function should not carry a bare `audit` Load.
+    audit_fn = next(
+        node for node in ast.walk(ast.parse(src))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_audit"
+    )
+    blocks = [
+        node for node in ast.walk(audit_fn)
+        if isinstance(node, (ast.With, ast.AsyncWith))
+        and any(
+            isinstance(item.context_expr, ast.Attribute)
+            and item.context_expr.attr == "_audit_lock"
+            for item in node.items
+        )
+    ]
+    assert len(blocks) == 1, (
+        f"fixture drift: `_audit` holds {len(blocks)} `_audit_lock` block(s), so "
+        "the control does not know which one to lift"
+    )
+    block = blocks[0]
+    body = lines[block.body[0].lineno - 1:block.body[-1].end_lineno]
+    unlocked = "".join(
+        lines[:block.lineno - 1]
+        + [ln[4:] if ln.startswith("    ") else ln for ln in body]
+        + lines[block.body[-1].end_lineno:]
+    )
+    assert unlocked != src, "the mutation did not apply — this control is vacuous"
+    ast.parse(unlocked)  # the mutant must be a SOURCE FILE, not a syntax error
+    assert _sink_calls_outside_the_lock(unlocked), (
+        "the detector cannot see a sink call outside the lock, so its empty "
+        "list above is a fact about the walker and nothing else"
+    )

@@ -647,10 +647,23 @@ SKILL_REWORD_REGRESSION = (
 # missing, or silently audits the wrong tree. Measured: with the caveat
 # unpinned, replacing it with "use `isolation: \"worktree\"` for any repo" was
 # green.
+# 🔴 ROUND 13 REWORDED IT, and the reword is the finding rather than a shave.
+# The old sentence paraphrased the recipe as "`git -C <that-repo> worktree add
+# …`", which is a recipe that CANNOT BE RUN: `worktree add` resolves the PR's
+# head branch against refs the clone already has, so it is `fatal: invalid
+# reference`, rc 128, in any clone that has not fetched since the PR opened —
+# and unconditionally for a FORK PR, whose branch is never in that clone's
+# `origin`. Measured on real scratch repos, git 2.55.0. The generated brief
+# now prints a namespaced `refs/pull/<n>/head` fetch plus a DETACHED
+# `worktree add`, so this line stops carrying a second, stale copy of the
+# recipe and routes to the one place that owns it.
 SKILL_CROSS_REPO_WORKTREE = (
     "🔴 `isolation: \"worktree\"` worktrees the **cwd's** repo, not the PR's — "
-    "for a PR in another repo have the agent run `git -C <that-repo> worktree "
-    "add …` itself."
+    "for a PR in another repo run the recipe the brief's WHERE TO WORK section "
+    "PRINTS, never a remembered one. It is a namespaced `refs/pull/<n>/head` "
+    "fetch then a **detached** `worktree add`: naming the PR's head branch "
+    "instead fails `rc 128` in any clone that has not fetched it, and always "
+    "for a fork PR."
 )
 # 🔴 THE ROUTER TO THE ASSEMBLER. `scripts/audit-dispatch.py` exists because the
 # invariant sections of a brief were being retyped every time and MEASURABLY

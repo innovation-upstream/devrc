@@ -551,14 +551,40 @@ SECTION_DIRECTIVES = (
     # So the permission is stated POSITIVELY and everything else is refused by
     # a universal, not by an enumeration: exactly the "assert the state, never
     # a word another feature can spell" rule in `claude/RULES.md`.
+    #
+    # 🔴 ROUND 13 — AND THE RECIPE AND THIS RULE COULD NOT BOTH BE OBEYED.
+    # Round 12 left "`git worktree add` is the ONLY write … you may make"
+    # standing over a recipe that named `<the PR's head branch>`, a ref the
+    # clone only has if it has FETCHED — a write this sentence refuses.
+    # Measured on scratch repos, git 2.55.0: `worktree add <path> pr-head` in
+    # an unfetched clone is `fatal: invalid reference`, **rc 128**, and a FORK
+    # PR's branch is never in `origin` so it is rc 128 after any fetch. And
+    # `--detach` + "fetch inside the worktree", the one workaround the old
+    # wording permitted, is NOT a workaround: a linked worktree shares the
+    # clone's ref store and object store, so the fetch wrote
+    # `refs/remotes/fork/pr-head` into the CLONE and `git -C <clone> cat-file
+    # -e <sha>` returned 0. The auditor could either not run the command or
+    # comply with one sentence while violating another.
+    #
+    # The honest answer was that the rule must permit a narrowly-scoped fetch,
+    # so it says so precisely. The permission is still POSITIVE and still ends
+    # in the universal — what changed is that the set it names is now the set
+    # the recipe actually runs, which is what the guard reads it against.
     Directive(
         "own-worktree-is-writable",
-        "That worktree is YOURS: fetching and checking out inside it is fine. "
-        "In the clone you made it from, `git worktree add` is the ONLY write "
-        "this brief asks for and the ONLY one you may make — every other "
-        "command that writes there is refused, named or not, whoever made "
-        "that clone, because other sessions may be standing in it. The "
-        "no-write rule below is about every checkout you did not make.",
+        "That worktree is YOURS: checking out inside it is fine — but it is "
+        "not a separate repository. A linked worktree SHARES the clone's ref "
+        "store and object store, so a fetch run inside it writes to the clone "
+        "as well; there is no fetching into the worktree alone, and a rule "
+        "that pretended otherwise would be obeyed by a command that breaks "
+        "it. So the clone's permission is the set of writes the recipe above "
+        "actually makes, stated positively: the `fetch` into `refs/audit/`, "
+        "the detached `worktree` add, and the `worktree` remove and "
+        "`update-ref` that undo them. Those are the ONLY writes this brief "
+        "asks for and the ONLY ones you may make — every other command that "
+        "writes there is refused, named or not, whoever made that clone, "
+        "because other sessions may be standing in it. The no-write rule "
+        "below is about every checkout you did not make.",
     ),
 )
 
@@ -906,8 +932,24 @@ Facts = namedtuple(
     "pr repo title base_ref url round_no cwd_repo_dir cwd_repo_slug repo_relation "
     "worktree branch dirty prev_sha emit_from claims claims_round checklist "
     "ledger assembled_at claims_source head_check base_assumed "
-    "base_assumed_reason",
+    "base_assumed_reason repo_unknown_reason",
 )
+# 🔴 `repo_unknown_reason` — ROUND 13'S NINTH INSTANCE, AND THE THIRD IN THIS
+# EXACT FAMILY. `no_sha_reason` was `headRefOid`, `base_assumed_reason` was
+# `baseRefName`, and this one is WHICH REPOSITORY THE PR IS IN. Every one of
+# the three is the same mistake — a predicate read as a STRONGER fact than it
+# carries: `repo_relation == "unknown"` was read as "`gh` was asked and had
+# nothing", so `render_worktree_directive` offered exactly two causes (no
+# `origin` remote, else "`gh` did not report it") and had no branch for "`gh`
+# was never consulted". `--claims-file` mode consults no `gh` at all, so a run
+# in that mode with a resolvable cwd slug took the `gh` branch and the brief
+# CONTRADICTED ITSELF inside one document — THE RANGE saying "this run is
+# `--claims-file` mode, which consults no `gh`" while WHERE TO WORK said `gh`
+# was asked and did not answer. Measured at `6349a8b9`: `--round 3
+# --claims-file <f>` in a checkout WITH an `origin` remote, rc 0, silent
+# stderr, both sentences present. The remedy is the mechanism that already
+# exists twice — the branch that DECIDED the cause names it — and not a
+# second pattern.
 # 🔴 `base_assumed` — ROUND 10's SEVENTH INSTANCE, found by the sweep round 9's
 # auditor asked for and not by a finding. `base_ref` is
 # `data.get("baseRefName") or "main"`: a DEFAULT, and every site printing it
@@ -1347,12 +1389,66 @@ def render_worktree_directive(facts):
     flag whose failure mode is silent.
     """
     if facts.repo_relation == "unknown":
-        unknown_side = (
-            "this checkout has no `origin` remote to resolve a slug from"
-            if not facts.cwd_repo_slug else
-            "`gh` did not report which repository the PR lives in"
+        # 🔴 ROUND 13 — TWO BRANCHES FOR THREE CAUSES, AND THE MISSING ONE IS
+        # REACHED BY THE MODE ROUND 12 ADDED. See `repo_unknown_reason` on
+        # `Facts`: the `else` here asserted `gh` had been consulted, which is
+        # false on every `--claims-file` run. The cause is named by the branch
+        # that DECIDED it, exactly as `no_sha_reason` and `base_assumed_reason`
+        # are.
+        #
+        # 🔴 AND THE TWO SIDES ARE NOT MUTUALLY EXCLUSIVE. `repo_relation` is
+        # "unknown" when EITHER side failed to resolve, so both can be, and an
+        # `if`/`else` then reports half the answer as the whole of it.
+        unknown_sides = []
+        if not facts.cwd_repo_slug:
+            unknown_sides.append(
+                "this checkout has no `origin` remote to resolve a slug from"
+            )
+        if facts.repo == REPO_UNKNOWN:
+            unknown_sides.append(
+                facts.repo_unknown_reason
+                or "nothing this run consulted reported which repository the "
+                   "PR lives in"
+            )
+        unknown_side = "; and ".join(unknown_sides) or (
+            "the two sides of the comparison could not be resolved"
         )
-        return "\n".join([
+
+        # 🔴 ROUND 13 — AND THE COMMANDS PRESCRIBED HERE MUST MATCH THE SIDE
+        # THAT IS ACTUALLY UNKNOWN. This block used to print BOTH lookups
+        # unconditionally, including a bare
+        #
+        #     gh pr view 900 --json url          # the repo the PR lives in
+        #
+        # with no `--repo` and no stated cwd. Run in the auditor's own
+        # repository that returns THAT repository's PR #900 at rc 0 — so the
+        # one answer it can produce is "same repo", which is precisely the
+        # answer this branch exists because it cannot rule out. It is the
+        # hazard `unresolved_tip_note` closed for the `headRefOid` lookup,
+        # left unfixed one site over.
+        #
+        # `gh` cannot DISCOVER this at all — `--repo` IS the question — so it
+        # is stated as a CONFIRMATION of a candidate the operator brings, with
+        # a `<...>` fill-in that cannot run until they do.
+        answers = []
+        if facts.repo == REPO_UNKNOWN:
+            answers += [
+                f"# which repository PR #{facts.pr} is in. `gh pr view` cannot "
+                "DISCOVER this: with no `--repo`",
+                "# it resolves against whatever repository your CWD is in, and "
+                "would answer about THAT",
+                f"# repository's PR #{facts.pr}, at rc 0. Read the owner/name "
+                "off the PR's own URL, then",
+                "# confirm it here:",
+                f"gh pr view {facts.pr} --json url --repo <owner/name — this "
+                "run never learned which repository the PR is in>",
+            ]
+        if not facts.cwd_repo_slug:
+            answers += [
+                "# which repository this checkout is in:",
+                f"git -C {facts.cwd_repo_dir} remote get-url origin",
+            ]
+        lines = [
             "## WHERE TO WORK — 🔴 COULD NOT DETERMINE — decide by hand",
             "",
             "This script could not establish whether the PR is in THIS "
@@ -1373,13 +1469,22 @@ def render_worktree_directive(facts):
             "Answer it, then follow the matching directive:",
             "",
             "```",
-            f"gh pr view {facts.pr} --json url          # the repo the PR lives in",
-            f"git -C {facts.cwd_repo_dir} remote get-url origin",
+            *answers,
             "```",
-            "",
-            "Or re-run this script with `--repo owner/name` to state the PR's "
-            "repository outright.",
-        ])
+        ]
+        # 🔴 ROUND 13 — AND THIS REMEDY IS OFFERED ONLY WHERE IT WORKS.
+        # `--repo` states the PR's side; the comparison needs BOTH, so on a
+        # run whose cwd slug is the unresolved half it changes nothing and the
+        # brief was prescribing a re-run that lands in this same branch. Same
+        # class as the two findings above it: a remedy stated for a cause it
+        # does not address.
+        if facts.repo == REPO_UNKNOWN and facts.cwd_repo_slug:
+            lines += [
+                "",
+                "Or re-run this script with `--repo owner/name` to state the "
+                "PR's repository outright.",
+            ]
+        return "\n".join(lines)
     if facts.repo_relation == "cross":
         return "\n".join([
             "## WHERE TO WORK — 🔴 CROSS-REPO",
@@ -1394,11 +1499,55 @@ def render_worktree_directive(facts):
             "fails quietly — the agent either reports a briefed file missing or "
             "silently audits the wrong tree.",
             "",
-            "Create the worktree yourself, against the PR's own clone:",
+            # 🔴 ROUND 13 — THE OLD RECIPE COULD NOT BE RUN AND OBEYED AT THE
+            # SAME TIME, on the one tree in this brief whose failure lands
+            # OUTSIDE it. It was
+            #
+            #     git -C <clone> worktree add /tmp/audit-prN-rR <the PR's head branch>
+            #
+            # and `worktree add` resolves that branch name against refs the
+            # clone ALREADY has. Measured on scratch repos, git 2.55.0:
+            # `fatal: invalid reference: pr-head`, **rc 128**, whenever the
+            # clone has not fetched since the PR opened — the normal case —
+            # and the CERTAIN case for a FORK PR, whose branch is never in
+            # `origin` at all (measured: still rc 128 after a full `fetch`).
+            # The only workaround compatible with the grant below — `worktree
+            # add --detach`, then fetch INSIDE the worktree — writes into the
+            # clone regardless: a linked worktree shares the clone's ref store
+            # and object store, so `refs/remotes/fork/pr-head` appeared in the
+            # clone and `git -C <clone> cat-file -e <sha>` returned 0.
+            #
+            # So the rule had to say what it really permits. It now permits
+            # exactly these writes, and they are ADDITIVE: `refs/pull/N/head`
+            # is the PR's head as GitHub publishes it ON THE BASE REPOSITORY,
+            # so one fetch reaches a fork PR too; it lands in a private
+            # `refs/audit/` namespace nothing else reads, moving no existing
+            # ref; `--detach` creates no `refs/heads/<branch>` (which the old
+            # recipe did, and which fails rc 128 when another worktree already
+            # holds that branch); and the teardown removes both. Measured on
+            # scratch repos: the clone's ref list, HEAD, index, working tree,
+            # config and remotes were byte-identical before and after except
+            # for the one `refs/audit/` ref.
+            "Create the worktree yourself, against the PR's own clone. Every "
+            "write below is ADDITIVE — one ref in a private `refs/audit/` "
+            "namespace nothing else reads, and objects — so no existing ref, "
+            "branch, index or working tree of that clone moves. "
+            f"`refs/pull/{facts.pr}/head` is the PR's head as GitHub publishes "
+            "it on the BASE repository, which is why this reaches a FORK PR "
+            "too; naming the head BRANCH instead cannot, and fails `rc 128` "
+            "for any PR the clone has not fetched since.",
             "",
             "```",
-            f"git -C <your local clone of {facts.repo}> worktree add "
-            f"/tmp/audit-pr{facts.pr}-r{facts.round_no} <the PR's head branch>",
+            f"git -C <your local clone of {facts.repo}> fetch origin "
+            f"refs/pull/{facts.pr}/head:refs/audit/pr{facts.pr}-r{facts.round_no}",
+            f"git -C <your local clone of {facts.repo}> worktree add --detach "
+            f"/tmp/audit-pr{facts.pr}-r{facts.round_no} "
+            f"refs/audit/pr{facts.pr}-r{facts.round_no}",
+            "# when you are done, undo both:",
+            f"git -C <your local clone of {facts.repo}> worktree remove "
+            f"/tmp/audit-pr{facts.pr}-r{facts.round_no}",
+            f"git -C <your local clone of {facts.repo}> update-ref -d "
+            f"refs/audit/pr{facts.pr}-r{facts.round_no}",
             "```",
             "",
             directive("own-worktree-is-writable"),
@@ -1451,8 +1600,18 @@ TIP_PLACEHOLDER = "<the PR's head sha>"
 
 # 🔴 `facts.repo` when NOTHING answered which repository the PR lives in. A
 # sentinel and not a slug, so no command may interpolate it: `gh pr view 900
-# --repo UNKNOWN (not reported by ...)` is a shell error, not a lookup.
-REPO_UNKNOWN = "UNKNOWN (not reported by `gh`; pass --repo owner/name)"
+# --repo UNKNOWN (this run never learned ...)` is a shell error, not a lookup.
+#
+# 🔴 ROUND 13 — ITS TEXT NAMED A CAUSE, AND THE CAUSE WAS OFTEN WRONG. It read
+# "UNKNOWN (not reported by `gh`; pass --repo owner/name)", which is the same
+# false attribution as the WHERE TO WORK branch it prints inside: on a
+# `--claims-file` run nothing was ever reported by `gh` because `gh` was never
+# asked. A SENTINEL cannot know its own cause — the branch that set it does —
+# so this states only what is true of every cause, and the cause itself is
+# carried by `repo_unknown_reason`. The `--repo` hint went with it: it resolves
+# the PR's side only, so on a run whose UNRESOLVED side is the cwd's slug it
+# was advice that changes nothing.
+REPO_UNKNOWN = "UNKNOWN (this run never learned which repository the PR is in)"
 
 
 def range_tip(facts):
@@ -2645,6 +2804,16 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             "this run is `--claims-file` mode, which consults no `gh` and so "
             "never learns the PR's `baseRefName`"
         )
+        # 🔴 ROUND 13 — THE SAME PER-CAUSE RULE, ONE FIELD OVER AGAIN, and the
+        # THIRD time this family has been fixed at one field and left at the
+        # next. `render_worktree_directive` said "`gh` did not report which
+        # repository the PR lives in" for a run that never consulted `gh`, in
+        # a brief whose RANGE section says so two headings away.
+        repo_unknown_reason = (
+            "this run is `--claims-file` mode, which consults no `gh` and so "
+            "never learns which repository the PR lives in — and neither "
+            "`--repo` nor a PR url supplied it"
+        )
     else:
         data, comment_texts = gh_pr_facts(runner, args.pr, args.repo)
         claims_source = f"PR #{args.pr}'s comments"
@@ -2655,6 +2824,10 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         base_assumed_reason = (
             "`gh pr view` was consulted and reported no `baseRefName` for "
             "this PR"
+        )
+        repo_unknown_reason = (
+            "`gh pr view` was consulted and reported no `url` this script "
+            "could read a repository out of, and `--repo` was not passed"
         )
         if data.get("_error"):
             print(f"🔴 `gh pr view {args.pr}` failed: {data['_error']}",
@@ -2930,6 +3103,7 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         head_check=head_check,
         base_assumed=base_assumed,
         base_assumed_reason=base_assumed_reason,
+        repo_unknown_reason=repo_unknown_reason,
     )
 
     # 🔴 THE REFUSAL'S SCOPE IS THE BRIEF, AND ONLY THE BRIEF. A refused run

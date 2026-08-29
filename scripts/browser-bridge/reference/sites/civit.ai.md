@@ -19,6 +19,24 @@ This file is only what is true of **an App Block**.
 deterministically is `capture.sh <recipe>`; only recipe **authoring** needs the
 by-hand flow this file describes.
 
+🔴 **Read the recipe even when you ARE driving by hand — it is the only PER-APP
+source that exists.** This file is per-HOST, and `civit.ai` matches *every*
+`<slug>.civit.ai`: what you are reading is true of all blocks and specific to
+none. Three fields of
+`<talos-infra>/.claude/skills/app-capture/scripts/recipes/<slug>.json` answer
+questions you would otherwise pay for live:
+
+| field | what it saves you |
+|---|---|
+| `ready.testid` + `ready._comment` | the anchor that means BOOTED — **and the rejected candidates, each with the reason it fails**: a validation message that vanishes once the control unblocks, loading art present in one read and absent in the next, the static `#root` shell that exists before boot and in a deadlocked frame |
+| `clickable` | every selector that recipe may activate. 🔴 Read this as a HAZARD list: the spend path rejects untrusted events, but an ordinary authenticated mutation — post, vote, edit, withdraw — does not, so these are the controls that really act on the operator's account. Here no guard will refuse one for you |
+| `states` | the screens known to be reachable, named, in the order that reaches them |
+
+⚠ The pointer is **cross-repo and gated by nothing** — no check in this repo can
+see that path, and app-capture's own doc-rot gate cannot see this file. If the
+recipes move, this rots silently: confirm the directory before concluding an app
+has no recipe.
+
 ---
 
 ## 🔴 A block renders in a CROSS-ORIGIN IFRAME — every DOM op needs `--frame`

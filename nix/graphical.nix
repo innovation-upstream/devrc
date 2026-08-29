@@ -337,13 +337,18 @@ let
       { button = "left"; cmd = "yad --calendar --width=200 --height=200 --undecorated --fixed --close-on-unfocus --no-buttons"; }
     ];
   };
-  # rigcontrol: workbench only. Instant toggle on left-click (sleep ↔ wake),
-  # no yad menu. The block script reads the state file and calls rig-control.sh
-  # sleep or wake directly; i3status-rust passes $BLOCK_BUTTON to the command.
+  # rigcontrol: workbench only. Instant toggle on left-click (sleep ↔ wake).
+  # The click handler runs via setsid -f so it doesn't block the bar during
+  # the ~30s fade-in. i3status-rust does NOT pass $BLOCK_BUTTON to custom
+  # block commands, so the toggle lives in a [[block.click]] handler, not
+  # inside the render script.
   rigcontrolBlock = {
     block = "custom";
     command = "${scriptsDir}/i3blocks-rigcontrol";
     interval = "once";
+    click = [
+      { button = "left"; cmd = "setsid -f ${home}/workspace/devrc/scripts/rig-control-toggle"; }
+    ];
   };
   # claude-runs: workbench only. LIVE count of Claude-Code-in-tmux runs — renders
   # `󰕮 N` (N>0) / bare `󰕮` (N==0) / `󰕮 ?` (could not measure), always neutral
@@ -684,7 +689,7 @@ lib.mkIf isNixOS {
       Description = "Daily 3am sleep mode";
     };
     Timer = {
-      OnCalendar = "03:00:00";
+      OnCalendar = "02:30:00";
       Persistent = true;
     };
     Install = {
@@ -709,6 +714,31 @@ lib.mkIf isNixOS {
     Timer = {
       OnCalendar = "10:15:00";
       Persistent = true;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # rig-control color gradient — updates chassis RGB every 60s based on the
+  # time-of-day color schedule in rig-control-colors.conf. Skips when sleeping.
+  systemd.user.services.rig-control-fade = lib.mkIf (!isLaptop) {
+    Unit = {
+      Description = "Update chassis RGB to time-of-day gradient color";
+      After = [ "graphical-session.target" ];
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${home}/workspace/devrc/scripts/rig-control-fade";
+    };
+  };
+  systemd.user.timers.rig-control-fade = lib.mkIf (!isLaptop) {
+    Unit = {
+      Description = "Per-minute chassis RGB gradient update";
+    };
+    Timer = {
+      OnBootSec = "60s";
+      OnUnitActiveSec = "60s";
     };
     Install = {
       WantedBy = [ "timers.target" ];

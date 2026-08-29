@@ -139,14 +139,17 @@ def test_search_fuzzy_zero_match_still_emits_with_term():
 
 
 def test_search_fuzzy_multiple_match_is_ambiguous():
-    # "date" is a substring of BOTH :date and :datetime → ambiguous → trigger None.
+    # "dat" is a substring of BOTH :date and :datetime → ambiguous → trigger None.
+    # It deliberately NAMES neither: the 2026-08-28 exact-name tie-break resolves
+    # a term that IS one of the candidate triggers (so bare "date" now lands on
+    # :date), and this test is about the ambiguity path, not about that.
     d = _det()
     d.feed_search_open(app=APP, session=SESS, now=0.0)
-    _type(d, "date", now=1.0)
+    _type(d, "dat", now=1.0)
     evs = list(d.feed_char("\n", app=APP, session=SESS, now=5.0))
     assert len(evs) == 1
     assert evs[0].trigger is None
-    assert evs[0].search_term == "date"
+    assert evs[0].search_term == "dat"
 
 
 def test_search_flush_on_idle_without_enter():
@@ -269,15 +272,16 @@ def test_focus_steal_by_espanso_window_keeps_search_and_attributes():
 
 
 def test_focus_steal_ambiguous_term_still_emits_trigger_none():
-    # Same focus-steal path, but an ambiguous term ("date" ⊂ :date and :datetime)
+    # Same focus-steal path, but an ambiguous term ("dat" ⊂ :date and :datetime,
+    # and NAMING neither — see the exact-name note on the ambiguity test above)
     # → trigger=None yet the event is still emitted (real search, unattributed).
     d = _det()
     d.feed_search_open(app="Alacritty", session="win-term", now=0.0)
-    _type(d, "date", app=ESPANSO_WIN, session="win-esp", now=1.0)
+    _type(d, "dat", app=ESPANSO_WIN, session="win-esp", now=1.0)
     out = list(d.feed_char("\n", app=ESPANSO_WIN, session="win-esp", now=6.0))
     assert len(out) == 1
     assert out[0].trigger is None
-    assert out[0].search_term == "date"
+    assert out[0].search_term == "dat"
     assert out[0].method == "search"
     assert out[0].app == "Alacritty"  # origin window preserved
 
@@ -449,7 +453,10 @@ def test_multiword_all_tokens_required():
 
 
 def test_single_word_term_behaviour_unchanged():
-    # The single-token path must be byte-for-byte the old semantics.
+    # The single-token MATCHING path is byte-for-byte the old semantics (the
+    # 2026-08-05 multi-word fix changed nothing here). Attribution has since
+    # gained one tie-break on the AMBIGUOUS branch only — pinned explicitly
+    # below, alongside a term that names nothing and stays ambiguous.
     d = _det_for(CIVIT_BASE)
     assert d._term_matches("prod", ":cpk") is True
     assert d._term_matches("prod", ":cc") is False
@@ -459,13 +466,133 @@ def test_single_word_term_behaviour_unchanged():
     # ...and on the original fixture set too.
     d2 = _det()
     assert d2._attribute("leverage") == ":rnx"
-    assert d2._attribute("date") is None
+    # "dat" matches :date AND :datetime and names neither → still ambiguous.
+    assert d2._attribute("dat") is None
+    # Bare "date" also matches both, but it NAMES :date, so the 2026-08-28
+    # exact-name tie-break takes it. This asserted None before that fix; it is
+    # the one single-token outcome that moved, and only on the branch that used
+    # to return None. Recorded here rather than deleted so the change is visible.
+    assert d2._attribute("date") == ":date"
     assert d2._attribute("zzzzz") is None
 
 
 def test_multiword_term_with_extra_whitespace_is_tokenized():
     d = _det_for(CIVIT_BASE)
     assert d._attribute("  civit   prod  ") == ":cpk"
+
+
+# -- FIX 4: a term that NAMES one of the snippets it matches ------------------
+# 2026-08-28. `:acq` was SPLIT into `:dacq` (dispatch) + `:acq` (the bare ask).
+# Matching is by SUBSTRING, so the bare term "acq" then matched BOTH
+# (`"acq" in ":dacq"` is True) and `_attribute` returned None — every such fire
+# recorded UNATTRIBUTED, live on both hosts. Measured across three trees via the
+# module's own scraper: unique at 7aff8471 (pre-split), AMBIGUOUS at 4f1e4c56
+# (the split) and still AMBIGUOUS at d1a9fd5e.
+#
+# The fix is STRUCTURAL, not a rename: when several snippets match and exactly
+# one of them is NAMED outright by the term (the term IS that trigger, with or
+# without the ':'), that one wins. It closes the whole `:dX` / `:X` class rather
+# than this instance. `test_live_bare_trigger_names_resolve_to_their_own_snippet`
+# is the live-config half of the same claim.
+#
+# 🔴 WHICH OF THESE ARE REGRESSION COVERAGE. Measured against 6349a8b9 (the tree
+# the bug is live on), with the tests below in place and only the fix reverted:
+#   RED at base  — test_bare_acq_resolves_to_acq_not_ambiguous,
+#                  test_acq_end_to_end_through_search_ui,
+#                  test_live_bare_trigger_names_resolve_to_their_own_snippet
+#   GREEN at base — the other four here. They are INVARIANT GUARDS, not
+#                  regression coverage: they pin what the tie-break must NOT do
+#                  (re-point a unique match, break the picker, break the direct
+#                  path, resolve a term naming TWO snippets). Each was
+#                  mutation-checked instead — see the PR body.
+#
+# These fixtures carry the REAL triggers/labels/search_terms from nix/home.nix.
+ACQ_BASE = {"matches": [
+    {"trigger": ":dacq", "replace": "...",
+     "label": "Process feedback: dispatch subagent + elicit scope",
+     "search_terms": ["feedback", "dispatch", "process", "elicit", "scope",
+                      "include"]},
+    {"trigger": ":acq", "replace": "...", "label": "ask clarifying questions",
+     "search_terms": ["ask", "clarify", "clarifying", "questions"]},
+]}
+
+
+def test_bare_acq_resolves_to_acq_not_ambiguous():
+    # RED before the fix: _attribute returned None because "acq" ⊂ ":dacq".
+    d = _det_for(ACQ_BASE)
+    assert d._term_matches("acq", ":acq") is True
+    assert d._term_matches("acq", ":dacq") is True   # the substring collision
+    assert d._attribute("acq") == ":acq"
+    # The colon-spelled form was never ambiguous and must stay put.
+    assert d._attribute(":acq") == ":acq"
+    # ...and the OTHER side of the split is untouched, by either spelling.
+    assert d._attribute("dacq") == ":dacq"
+    assert d._attribute(":dacq") == ":dacq"
+
+
+def test_acq_split_interface_words_still_resolve():
+    # The tie-break must not swallow the words that already resolved uniquely.
+    d = _det_for(ACQ_BASE)
+    for term, want in [("ask", ":acq"), ("clarify", ":acq"),
+                       ("questions", ":acq"), ("feedback", ":dacq"),
+                       ("dispatch", ":dacq"), ("elicit", ":dacq")]:
+        assert d._attribute(term) == want, term
+
+
+def test_naming_tiebreak_only_fires_on_the_ambiguous_branch():
+    # A term matching several snippets and naming NONE of them stays None — the
+    # tie-break is not "pick the shortest" or "pick the first".
+    d = _det_for(ACQ_BASE)
+    assert sorted(t for t in d.ts.triggers if d._term_matches("ac", t)) == [
+        ":acq", ":dacq"]
+    assert d._attribute("ac") is None
+    # A multi-token term cannot name a trigger, so it is unaffected.
+    assert d._attribute("acq zzzzz") is None
+
+
+def test_naming_two_triggers_at_once_stays_ambiguous():
+    # `exactly one` is load-bearing: with both "acq" and ":acq" configured, the
+    # term names BOTH, so there is no winner and None is the honest answer.
+    # (Mutating `len(exact) == 1` to `if exact` is what this catches.)
+    both = {"matches": [
+        {"trigger": ":acq", "replace": "...", "label": "colon form",
+         "search_terms": []},
+        {"trigger": "acq", "replace": "...", "label": "bare form",
+         "search_terms": []},
+    ]}
+    d = _det_for(both)
+    assert d._attribute("acq") is None
+
+
+def test_acq_end_to_end_through_search_ui():
+    # The whole point: a real Ctrl+Space search for "acq" must now be ATTRIBUTED
+    # rather than land as an unattributed row in activity.events.
+    d = _det_for(ACQ_BASE)
+    d.feed_search_open(app=APP, session=SESS, now=0.0)
+    _type(d, "acq", now=1.0)
+    evs = list(d.feed_char("\n", app=APP, session=SESS, now=9.0))
+    assert len(evs) == 1
+    assert evs[0].trigger == ":acq"
+    assert evs[0].search_term == "acq"
+    assert evs[0].method == "search" and evs[0].inferred is True
+
+
+def test_acq_split_direct_triggers_are_unaffected():
+    # The DIRECT path is a different mechanism (ring-endswith, shortest match)
+    # and ':dacq' does not end with ':acq', so typing either fires itself.
+    d = _det_for(ACQ_BASE)
+    assert [e.trigger for e in _type(d, "hello :acq")] == [":acq"]
+    d2 = _det_for(ACQ_BASE)
+    assert [e.trigger for e in _type(d2, "hello :dacq")] == [":dacq"]
+
+
+def test_naming_tiebreak_does_not_reach_the_picker():
+    # Attribution and the espanso PICKER are different questions: the picker
+    # lists every match, and this fix must not remove a row. `_term_matches` is
+    # what the picker guard reads, and it is untouched.
+    d = _det_for(ACQ_BASE)
+    assert {t for t in d.ts.triggers if d._term_matches("acq", t)} == {
+        ":acq", ":dacq"}
 
 
 # --------------------------------------------------------------------------- #
@@ -644,6 +771,12 @@ _EXISTING_RESOLUTIONS = [
     # vocabulary, not only if search_terms do.
     ("clarify", ":acq"), ("questions", ":acq"),
     ("elicit", ":dacq"), ("subagent", ":dacq"),
+    # The split's OTHER half, missed by the row above and by the prefix/suffix
+    # collision guard alike: the bare trigger name "acq" is a SUBSTRING of
+    # ":dacq", so it matched both and every such fire landed UNATTRIBUTED. The
+    # collision guard cannot see it — ":dacq".endswith(":acq") is False. ADDED,
+    # never in place of a row; see the ANTI-VACUITY note below.
+    ("acq", ":acq"), ("dacq", ":dacq"),
     ("cc", ":cc"), ("kubecl", ":kuc"), ("spine", ":csc"), ("orch", ":cmo"),
     ("home", ":hlt"), ("prod", ":cpk"), ("datap", ":cdp"), ("civit prod", ":cpk"),
 ]
@@ -654,7 +787,10 @@ def test_live_existing_resolutions_not_made_ambiguous():
     # 2026-08-19), so the cheap way to "fix" a future failure is to delete the
     # row that broke — which is exactly the regression this guard exists to
     # catch. A floor, not an exact count.
-    assert len(_EXISTING_RESOLUTIONS) >= 20, (
+    # The floor is the CURRENT row count (26 on 2026-08-28, ratcheted up from a
+    # stale 20 that had let four added rows go unprotected). `>=` so adding a
+    # row stays green; deleting one goes red, which is the whole point.
+    assert len(_EXISTING_RESOLUTIONS) >= 26, (
         "_EXISTING_RESOLUTIONS shrank — a pinned resolution was deleted rather "
         "than fixed; that is the failure mode, not the fix"
     )
@@ -762,6 +898,14 @@ def test_live_triggers_have_no_prefix_or_suffix_collisions():
     Where one trigger is a prefix or suffix of another the two disagree, so the
     keylog signal misattributes. Pin zero such pairs — and prove the checker can
     SEE one, so the zero is a real zero and not a check wired to nothing.
+
+    🔴 SCOPE: this covers the DIRECT path ONLY, because that path matches on the
+    ring's SUFFIX. It is structurally blind to the SEARCH path, which matches by
+    SUBSTRING anywhere — ':acq' is a substring of ':dacq' while
+    `":dacq".endswith(":acq")` is False, so that pair passed here for ten days
+    while every bare 'acq' search landed unattributed. The search half is
+    `test_live_bare_trigger_names_resolve_to_their_own_snippet` below; the two
+    together are the claim, neither alone.
     """
     def pairs(trigs):
         found = set()
@@ -783,3 +927,65 @@ def test_live_triggers_have_no_prefix_or_suffix_collisions():
         "mean nothing"
     )
     assert pairs(live) == set(), f"colliding triggers in nix/home.nix: {pairs(live)}"
+
+
+def test_live_bare_trigger_names_resolve_to_their_own_snippet():
+    """Typing a snippet's own name must attribute to THAT snippet.
+
+    The SEARCH-path half of the collision guard above. Search attribution
+    matches by SUBSTRING, so one trigger being a substring of another anywhere
+    (not just at an end) makes the shorter one's own name ambiguous. Measured
+    2026-08-28: ':acq' split into ':dacq' + ':acq' made bare 'acq' match BOTH,
+    `_attribute` returned None, and every such fire was recorded UNATTRIBUTED on
+    both hosts — with the prefix/suffix guard green throughout.
+
+    The expectation is DERIVED from the live config (every trigger, not a typed
+    list), so it cannot be weakened by deleting the row that broke, and a
+    27th snippet is covered the day it is added. It goes RED both if the config
+    regrows such a pair without the fix and if the tie-break in `_attribute` is
+    removed — measured red at 6349a8b9 on 'acq' AND 'alo'.
+
+    ANTI-VACUITY: an empty or tiny trigger set would make this pass while
+    checking nothing, and `_attribute` returning the term itself would satisfy
+    it trivially — so pin a count floor and prove the checker can go RED, by
+    running it over a config that carries a known-bad pair.
+    """
+    live = _live_base()["matches"]
+    trigs = [m["trigger"] for m in live]
+    assert len(trigs) >= 20, f"scraper found only {len(trigs)} snippets: {trigs}"
+
+    def unresolved(base):
+        d = EspansoDetector(ET.load_triggers(base, DEFAULT))
+        bad = {}
+        for t in [m["trigger"] for m in base["matches"]]:
+            bare = t[1:] if t.startswith(":") else t
+            got = d._attribute(bare)
+            if got != t:
+                bad[bare] = (t, got,
+                             sorted(x for x in d.ts.triggers
+                                    if d._term_matches(bare, x)))
+        return bad
+
+    # NEGATIVE CONTROL: seed a snippet whose trigger is an existing one spelled
+    # WITHOUT the colon. Its bare name then names TWO snippets, so the tie-break
+    # cannot break it and `_attribute` must stay None — the one bare-name
+    # ambiguity that survives the fix, and therefore the case that proves this
+    # checker can still go red. (A plain containment pair like ':xmt'/':xmty' is
+    # NOT a valid control here: the tie-break resolves it by design, which is
+    # exactly what this guard asserts about ':acq' vs ':dacq'.)
+    seeded = {"matches": live + [
+        {"trigger": "mt", "replace": "...", "label": "seeded control",
+         "search_terms": []},
+    ]}
+    control = unresolved(seeded)
+    assert "mt" in control, (
+        "the bare-name checker failed its negative control — it did not see "
+        "'mt' naming both ':mt' and a seeded 'mt', so its zero below would "
+        "mean nothing: " + repr(control)
+    )
+
+    bad = unresolved(_live_base())
+    assert not bad, (
+        "these snippets' own names no longer attribute to them "
+        "(name -> (trigger, attributed, matching snippets)): " + repr(bad)
+    )

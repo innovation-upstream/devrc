@@ -104,7 +104,12 @@ HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
 # COLLECTED too few. A floor that tracks the suite has to be re-derived when
 # the suite grows — the alternative is the one measured above, a number nobody
 # updated for four rounds while the thing it protects doubled.
-MIN_TESTS = 104
+#
+# 🔴 ROUND 13 RAISED IT AGAIN, 104 -> 107, at m = 112 — COUNTED from a green
+# run of the module (`112 passed`), not from adding this round's three new
+# tests to the last sentence, which is the arithmetic the paragraph above
+# records going wrong twice.
+MIN_TESTS = 107
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -1112,6 +1117,122 @@ def the_clone_grant_reverts_to_the_enumeration(t):
         "no-write rule below is about every checkout you did not make.")(t)
 
 
+def the_unknown_repo_cause_goes_back_to_two_branches(t):
+    """Round 13's finding F1: round 12's `unknown_side`, verbatim.
+
+    The PREDICATE half. Two branches for three causes, so a `--claims-file`
+    run — which consults no `gh` — is told `gh` did not report, two headings
+    from the same brief's own sentence saying no `gh` was consulted.
+    """
+    return _swap(
+        t,
+        '        unknown_sides = []\n'
+        '        if not facts.cwd_repo_slug:\n'
+        '            unknown_sides.append(\n'
+        '                "this checkout has no `origin` remote to resolve a slug from"\n'
+        '            )\n'
+        '        if facts.repo == REPO_UNKNOWN:\n'
+        '            unknown_sides.append(\n'
+        '                facts.repo_unknown_reason\n'
+        '                or "nothing this run consulted reported which repository the "\n'
+        '                   "PR lives in"\n'
+        '            )\n'
+        '        unknown_side = "; and ".join(unknown_sides) or (\n'
+        '            "the two sides of the comparison could not be resolved"\n'
+        '        )\n',
+        '        unknown_side = (\n'
+        '            "this checkout has no `origin` remote to resolve a slug from"\n'
+        '            if not facts.cwd_repo_slug else\n'
+        '            "`gh` did not report which repository the PR lives in"\n'
+        '        )\n',
+    )
+
+
+def the_claims_file_names_the_gh_cause(t):
+    """Round 13's finding F1: the INPUT half, not the predicate.
+
+    Exactly the V24/V25 split one field over. The three-way branch can be
+    correct while the reason the `--claims-file` branch hands it is the `gh`
+    sentence — and then the brief says the same false thing at rc 0.
+    """
+    return _swap(
+        t,
+        '        repo_unknown_reason = (\n'
+        '            "this run is `--claims-file` mode, which consults no `gh` and so "\n'
+        '            "never learns which repository the PR lives in — and neither "\n'
+        '            "`--repo` nor a PR url supplied it"\n'
+        '        )\n',
+        '        repo_unknown_reason = (\n'
+        '            "`gh pr view` was consulted and reported no `url` this script "\n'
+        '            "could read a repository out of, and `--repo` was not passed"\n'
+        '        )\n',
+    )
+
+
+def the_repo_lookup_drops_repo_again(t):
+    """Round 13's finding F1, sibling: round 12's bare `gh pr view`.
+
+    Run in the auditor's own repository it returns THAT repository's PR of the
+    same number, at rc 0 — so the one answer it can produce is the "same repo"
+    the section it sits in exists because it cannot rule out.
+    """
+    return _swap(
+        t,
+        '                f"gh pr view {facts.pr} --json url --repo <owner/name — this "\n'
+        '                "run never learned which repository the PR is in>",\n',
+        '                f"gh pr view {facts.pr} --json url",\n',
+    )
+
+
+def the_recipe_goes_back_to_naming_the_head_branch(t):
+    """Round 13's finding F2: round 12's recipe, verbatim.
+
+    `worktree add` resolves `<the PR's head branch>` against refs the clone
+    already has, and putting it there is a `fetch` the grant refuses.
+    Measured on scratch repos, git 2.55.0: rc 128 for an unfetched clone, and
+    rc 128 for a FORK PR after any fetch.
+    """
+    return _swap(
+        t,
+        '            "```",\n'
+        '            f"git -C <your local clone of {facts.repo}> fetch origin "\n'
+        '            f"refs/pull/{facts.pr}/head:refs/audit/pr{facts.pr}-r{facts.round_no}",\n'
+        '            f"git -C <your local clone of {facts.repo}> worktree add --detach "\n'
+        '            f"/tmp/audit-pr{facts.pr}-r{facts.round_no} "\n'
+        '            f"refs/audit/pr{facts.pr}-r{facts.round_no}",\n'
+        '            "# when you are done, undo both:",\n'
+        '            f"git -C <your local clone of {facts.repo}> worktree remove "\n'
+        '            f"/tmp/audit-pr{facts.pr}-r{facts.round_no}",\n'
+        '            f"git -C <your local clone of {facts.repo}> update-ref -d "\n'
+        '            f"refs/audit/pr{facts.pr}-r{facts.round_no}",\n'
+        '            "```",\n',
+        '            "```",\n'
+        '            f"git -C <your local clone of {facts.repo}> worktree add "\n'
+        '            f"/tmp/audit-pr{facts.pr}-r{facts.round_no} <the PR\'s head branch>",\n'
+        '            "```",\n',
+    )
+
+
+def the_clone_grant_respells_the_enumeration(t):
+    """Round 13's finding F4, and it is the mutant the OLD probe could not see.
+
+    Measured at `6349a8b9`: re-spelling round 10's `do not …, … or … there` as
+    `never …, … or … in that clone` left the whole 109-test suite GREEN. The
+    closed list is back — `remote update`, `switch`, `restore`, `reset`,
+    `branch -f`, `gc` permitted by omission — and only the whole-string ledger
+    saw the reword at all, which says nothing about the hazard. The verb-SET
+    relationship is what kills it now.
+    """
+    return reword_entry(
+        "Directive", "own-worktree-is-writable",
+        "That worktree is YOURS: fetching and checking out inside it is fine. "
+        "In the clone you made it from, `git worktree add` is the ONLY write "
+        "this brief asks for and the ONLY one you may make — never `fetch`, "
+        "`pull` or `checkout` in that clone, whoever made it, because other "
+        "sessions may be standing in it. The no-write rule below is about "
+        "every checkout you did not make.")(t)
+
+
 def the_claims_file_hardcodes_the_base_ref(t):
     """Round 12's finding: `--claims-file` mode asserting a base it never read.
 
@@ -1195,6 +1316,32 @@ def a_third_prescription_site_nothing_drives(t):
         '            f"  Fix: run `audit-dispatch.py {args.pr} --round 1 "\n'
         '            "--emit-claims --audited <sha>`.",\n'
         "            file=err_stream,\n"
+        "        )\n"
+        "        print(\n",
+    )
+
+
+def a_third_prescription_site_written_through_err_stream(t):
+    """🔴 ROUND 13 — V29's MUTATION IN THE SPELLING THE SCANNER COULD NOT SEE.
+
+    Same planted third prescription, same unreached branch — but written
+    `err_stream.write(...)` instead of `print(..., file=err_stream)`. Round
+    12's `prescription_sites` matched `ast.Call` whose func is the NAME
+    `print`, so an `Attribute` func fell straight out of the set and this
+    mutant SURVIVED a green 109-test suite, while the guard's docstring went
+    on calling itself a class guard. The scanner reads every call now.
+
+    It is deliberately the SAME defect as V29, differing only in the API used
+    to print it — which is the whole finding: the hazard is the unrun
+    prescription, never the function that emitted it.
+    """
+    return _swap(
+        t,
+        "    if args.audited and not args.emit_claims:\n        print(\n",
+        "    if args.audited and not args.emit_claims:\n"
+        "        err_stream.write(\n"
+        '            f"  Fix: run `audit-dispatch.py {args.pr} --round 1 "\n'
+        '            "--emit-claims --audited <sha>`.\\n"\n'
         "        )\n"
         "        print(\n",
     )
@@ -1394,6 +1541,13 @@ ROWS = [
       # that PROVES the fork case rides the same decision as the others — the
       # fixture used to encode a model in which it did not.
       "test_a_fork_pr_against_this_repo_is_not_treated_as_cross_repo",
+      # 🔴 ROUND 13 — ONE MORE, and the SAME coupling as the two below rather
+      # than a new one: the recipe guard reads the `cross-repo` scenario's
+      # WHERE TO WORK section, and the inversion sends that scenario down the
+      # SAME-repo branch, which renders no recipe at all. It fires on the
+      # guard's own "asserting over nothing" assertion, which is the answer
+      # that assertion exists to give.
+      "test_the_cross_repo_recipe_can_actually_be_run",
       # 🔴 TWO MORE IN ROUND 4, and both are real couplings rather than a row
       # gone vague. `own-worktree-is-writable` is rendered ONLY by the
       # cross-repo branch, so inverting the decision means the cross-repo
@@ -1564,12 +1718,24 @@ ROWS = [
      {"test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout",
       "test_the_toolchain_section_names_the_tier_the_merge_gates_on"},
      nix_build_points_at_the_shared_checkout),
+    # 🔴 ROUND 13 WIDENED BOTH KILLER SETS, and both additions are real
+    # couplings. Round 13's `unknown-repo-gh-said-nothing` scenario is a `gh`
+    # payload with NO `url` and `isCrossRepository` TRUE — precisely the fork
+    # shape P1 mutates — so under P1 the head fields answer, the repo becomes
+    # KNOWN, and the unknown branch that guard reads is never rendered. Under
+    # P2 the same scenario collapses into same-repo for the same effect. Both
+    # fire on the "COULD NOT DETERMINE is not in this section" assertion, i.e.
+    # the guard reporting that it was pointed at the wrong section — which is
+    # what that assertion is for. Listed in full rather than trimmed, the same
+    # treatment C3, Y2, V4, V21 and V33 get.
     ("P1  pr_slug reads the HEAD repo again",
      {"test_a_fork_pr_against_this_repo_is_not_treated_as_cross_repo",
-      "test_the_prs_repo_is_read_from_the_url_not_from_the_head_repo"},
+      "test_the_prs_repo_is_read_from_the_url_not_from_the_head_repo",
+      "test_no_brief_blames_gh_for_a_repo_gh_was_never_asked_about"},
      pr_slug_reads_the_head_repo),
     ("P2  'cannot determine' collapses to same-repo",
-     {"test_an_undeterminable_repo_gets_its_own_branch_not_the_same_repo_one"},
+     {"test_an_undeterminable_repo_gets_its_own_branch_not_the_same_repo_one",
+      "test_no_brief_blames_gh_for_a_repo_gh_was_never_asked_about"},
      unknown_repo_collapses_to_same),
     ("K1  --check always reports clean",
      {"test_the_clause_check_runs_over_a_file_that_can_actually_be_lossy"},
@@ -2107,6 +2273,44 @@ ROWS = [
     ("V29 a THIRD prescription site nothing drives",
      {"test_every_command_a_refusal_prescribes_actually_runs"},
      a_third_prescription_site_nothing_drives),
+    # 🔴 ROUND 13. V30 and V31 are the SAME split as V24/V25 one field over:
+    # the PREDICATE that picks a cause, and the INPUT it picks from. Only the
+    # second reaches a tree whose three-way branch is already correct, which is
+    # the state a fix that stopped at `render_worktree_directive` would leave.
+    ("V30 the unknown-repo cause reverts to two branches for three causes",
+     {"test_no_brief_blames_gh_for_a_repo_gh_was_never_asked_about"},
+     the_unknown_repo_cause_goes_back_to_two_branches),
+    ("V31 `--claims-file` hands over the `gh` cause it cannot have",
+     {"test_no_brief_blames_gh_for_a_repo_gh_was_never_asked_about"},
+     the_claims_file_names_the_gh_cause),
+    ("V32 the repo lookup drops `--repo` again",
+     {"test_no_gh_pr_view_this_script_prescribes_omits_repo"},
+     the_repo_lookup_drops_repo_again),
+    # 🔴 V33's killer set is TWO, and the width IS the coupling. Reverting the
+    # recipe makes it unrunnable (its own guard) AND leaves the grant naming
+    # `fetch` and `update-ref` that the recipe no longer runs — which is the
+    # grant/recipe relationship, firing from the other side. Listed in full
+    # rather than trimmed, the same treatment V21 and V22 get.
+    ("V33 the cross-repo recipe names the PR's head BRANCH again",
+     {"test_the_cross_repo_recipe_can_actually_be_run",
+      "test_the_clone_grant_covers_only_the_write_the_recipe_makes"},
+     the_recipe_goes_back_to_naming_the_head_branch),
+    # 🔴 V34 IS THE ROW THAT MEASURED FINDING F4. Run against `6349a8b9` it
+    # SURVIVED a fully green 109-test suite: the old probe matched the literal
+    # `do not …, … or … there` and this re-spelling walks straight past it,
+    # while every presence pin stays green. Same shape as V28 — restoring a
+    # reworded directive necessarily moves the whole-string ledger too — but
+    # the row's own reason is the verb-SET check, which is what replaced the
+    # spelled one.
+    ("V34 the clone grant re-spells the closed verb list",
+     {"test_the_clone_grant_covers_only_the_write_the_recipe_makes",
+      "test_each_section_directive_carries_the_instruction_its_ledger_entry_names"},
+     the_clone_grant_respells_the_enumeration),
+    # 🔴 V35 IS V29 IN A DIFFERENT SPELLING, and that is the entire point: it
+    # SURVIVED at `6349a8b9` because the scanner matched `print` by NAME.
+    ("V35 a third prescription site written through `err_stream.write`",
+     {"test_every_command_a_refusal_prescribes_actually_runs"},
+     a_third_prescription_site_written_through_err_stream),
 ]
 
 

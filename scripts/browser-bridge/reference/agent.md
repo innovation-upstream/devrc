@@ -26,7 +26,7 @@ command unrunnable, which is why fixing the first didn't appear to help:
    be reached. Fixed by probing without injecting.
 
 🔴 **Every doc misattributed both symptoms to an opencode *version* problem for the
-entire arc.** They are not version-related — both hosts run 1.18.18 and both
+entire arc.** They are not version-related — both hosts run 1.18.21 and both
 resolve browser-only, and the same resolution was measured on 1.18.4 and 1.18.16
 before the bumps. Do not re-open that hypothesis.
 
@@ -248,7 +248,7 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   fail-closed property is *verified at runtime* rather than trusted — on any
   opencode where the host-tool denial didn't take, `browser agent` refuses instead
   of running the model unconfined. The gate runs BEFORE the tab is opened, so a
-  gate failure leaks no tab. **Both hosts run 1.18.18 and both resolve
+  gate failure leaks no tab. **Both hosts run 1.18.21 and both resolve
   browser-only**, and it resolved identically on 1.18.4 and 1.18.16 before the
   bumps — there is no version-skew caveat.
   - ⚠ **If you check the gate by hand, redirect to a FILE**
