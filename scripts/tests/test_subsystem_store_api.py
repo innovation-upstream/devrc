@@ -3043,6 +3043,20 @@ class TestSeedPushVerdict:
             "reached the dot arm but not its unreadable state — the wrong "
             f"reason would still read as covered: {note}"
         )
+        # 🔴 PIN THE WHOLE HEADER, NOT A KEYWORD. This one sentence has been
+        # FALSE twice in two rounds, each time on a different axis: "hold .md
+        # files" asserted contents an unreadable probe could not read, and
+        # "will NOT ship" was wrong because a symlinked scope DOES ship — as a
+        # symlink, which the very next line of output says. Both reverts passed
+        # a suite that only checked for absent keywords, because a keyword guard
+        # is satisfied by any rewording. When the artifact under test is prose,
+        # the normalised whole is the only machine-readable claim. A deliberate
+        # reword must fail here and be re-verified; that cost is the point.
+        header = next(l for l in r.stdout.splitlines() if l.startswith("seed: NOTE"))
+        assert header == (
+            "seed: NOTE 1 scope director(ies) contribute NO entries, and are "
+            "excluded from the count and the verdict:"
+        ), f"the NOTE header changed; re-verify it is true of EVERY state: {header!r}"
 
     def test_the_stub_REFUSES_to_run_with_FAKE_DEST_unset(
         self, store: Path, tmp_path: Path, fake_cluster
