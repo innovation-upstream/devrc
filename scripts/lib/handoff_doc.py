@@ -1025,6 +1025,27 @@ def wrong_base_tells(
     return tuple(tells)
 
 
+def nothing_to_merge_into(base_text: str) -> bool:
+    """Is there no usable base document here — missing, empty, or whitespace?
+
+    🔴 ONE predicate, TWO consumers, and they are required to agree. The REFUSAL
+    (`BaseCurrency.replaces_mainline_doc`) decides whether to stop; the WARNING
+    (`wrong_base_report`) decides whether to print the loud "the committed
+    document will be replaced" line instead of a size comparison. Those must
+    describe the same set, or the run that is about to destroy a document
+    announces itself in the mild form.
+
+    MEASURED: they disagreed for exactly one round. The refusal was widened to
+    `.strip()` while the warning kept `if not local.lines:`, which is true only
+    for a strictly 0-line file — so a `"\\n"` local doc got the weak
+    `0 sections / 1 lines` line and never the loud one, in precisely the shape
+    where every section merges as NEW. The two had been equivalent before the
+    widening (`not base_text` ⟺ `splitlines() == []`), which is why the drift
+    was silent.
+    """
+    return not base_text.strip()
+
+
 class BaseCurrency(typing.NamedTuple):
     """Whether the base document is the newest COMMITTED copy this clone can see.
 
@@ -1069,15 +1090,14 @@ class BaseCurrency(typing.NamedTuple):
         currency can never satisfy this — an unanswered question must not
         become a refusal.
 
-        🔴 `.strip()`, NOT a bare falsiness test, and it is the same predicate
-        `wrong_base_tells` already uses. MEASURED against a mainline doc of 6
-        sections: `""` refused (rc 7), but `"\\n"` and `"   \\n\\n"` both exited 0
-        and REPLACED it. The merge treats all three identically — 0 sections, so
-        every section arrives NEW — so a doc that is whitespace is exactly as
-        absent as one that is missing, and the bare test let the guard be walked
-        by a single newline.
+        🔴 `nothing_to_merge_into`, NOT a bare falsiness test. MEASURED against
+        a mainline doc of 6 sections: `""` refused (rc 7), but `"\\n"` and
+        `"   \\n\\n"` both exited 0 and REPLACED it. The merge treats all three
+        identically — 0 sections, so every section arrives NEW — so a doc that is
+        whitespace is exactly as absent as one that is missing, and the bare test
+        let the guard be walked by a single newline.
         """
-        return not base_text.strip() and self.mainline is not None
+        return nothing_to_merge_into(base_text) and self.mainline is not None
 
 
 def base_currency(repo: Path, relpath: str) -> BaseCurrency:
@@ -1121,9 +1141,12 @@ WRONG_BASE_REMEDY = (
     "  Updating a deliberately-behind clone is legitimate, so on its own this is "
     "a WARNING and no exit code changed. It is a FLOOR: a silent run is NOT "
     "evidence that the base is current.\n"
-    "  🔴 The ONE shape that refuses instead — no usable doc here while the "
-    "mainline has one — says so itself below, as `status=stale-base`. If you do "
-    "not see that line, this run is the warning."
+    "  🔴 ONE shape refuses instead — no usable doc here while the mainline has "
+    "one — and it refuses ONLY on `--confirm`, as `status=stale-base` (exit 7). "
+    "A proposal run therefore NEVER prints that line whatever shape it is in, so "
+    "its absence here is not evidence you are in the benign case: if the line "
+    "above says the committed document would be REPLACED, that is the shape, and "
+    "confirming is what will refuse."
 )
 
 
@@ -1133,6 +1156,7 @@ def wrong_base_report(
     relpath: str,
     repo: Path,
     local: DocShape,
+    base_blank: bool,
 ) -> str:
     """Rule (h)'s block, or "" when there is nothing to say.
 
@@ -1156,7 +1180,14 @@ def wrong_base_report(
         # as a formatting artefact; the reader needs to be told the document is
         # not here at all, because that is the case where EVERY section merges as
         # NEW and the committed doc is replaced wholesale by the delta.
-        if not local.lines:
+        #
+        # 🔴 `base_blank`, NOT `not local.lines` — they are NOT the same test.
+        # `doc_shape("\n").lines` is 1, so the line-count form sent a
+        # whitespace-only base down the mild size-comparison branch: the exact
+        # shape this paragraph says must get the loud line. It comes from
+        # `nothing_to_merge_into`, the SAME predicate the refusal uses, so the
+        # warning and the refusal cannot describe different sets again.
+        if base_blank:
             shape = (
                 f" ({currency.mainline.sections} sections / "
                 f"{currency.mainline.lines} lines)"
@@ -1164,7 +1195,8 @@ def wrong_base_report(
                 else ""
             )
             lines.append(
-                f"  there is NO {relpath} in this checkout at all, and "
+                f"  this checkout has no usable {relpath} — missing, empty or "
+                f"whitespace, which the merge treats identically — and "
                 f"{currency.base_ref} has one{shape} — every section will merge "
                 f"as {BUCKET_NEW} and the committed document will be replaced by "
                 f"this delta."
@@ -1715,6 +1747,7 @@ def main(argv: list[str] | None = None) -> int:
         relpath,
         repo,
         doc_shape(base_text),
+        nothing_to_merge_into(base_text),
     )
     if wrong_base:
         print(wrong_base)

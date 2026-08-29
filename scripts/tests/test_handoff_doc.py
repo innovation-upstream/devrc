@@ -3085,7 +3085,12 @@ class TestAStaleBaseIsLoud:
         advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
         out = run_tool(work, update=update_file).stdout
         assert STALE_HEAD in out, out
-        assert "there is NO claudedocs/handoff-sample-topic.md in this checkout" in out
+        # Wording widened deliberately: the trigger is now "no USABLE doc"
+        # (missing, empty or whitespace), because a blank base destroys the
+        # committed document exactly as a missing one does. The old string said
+        # "there is NO <path>", which is false of a file that exists and is blank.
+        assert "no usable claudedocs/handoff-sample-topic.md" in out, out
+        assert "will be replaced by this delta" in out, out
 
     def test_a_CURRENT_clone_prints_NOTHING_new(self, repo: Path,
                                                 update_file: Path) -> None:
@@ -3244,10 +3249,12 @@ class TestBaseCurrencyMeasuresAndSaysWhenItCannot:
         cur = hd.BaseCurrency(None, ("origin/main",), None, None, None,
                               "no mainline ref resolves in this clone")
         loud = hd.wrong_base_report(("a tell",), cur, "d.md", Path("/r"),
-                                    hd.doc_shape(BASE_DOC))
+                                    hd.doc_shape(BASE_DOC),
+                                    hd.nothing_to_merge_into(BASE_DOC))
         assert "base currency UNCHECKED" in loud
         quiet = hd.wrong_base_report((), cur, "d.md", Path("/r"),
-                                     hd.doc_shape(BASE_DOC))
+                                     hd.doc_shape(BASE_DOC),
+                                     hd.nothing_to_merge_into(BASE_DOC))
         assert quiet == "", "an unmeasurable check must not speak on its own"
 
 
@@ -3490,7 +3497,14 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         assert "status=stale-base" not in res.stderr
         assert "THE BASE DOCUMENT IS NOT THE NEWEST COMMITTED COPY" in res.stdout, (
             "the proposal run must still carry the warning")
-        assert "+" in res.stdout, "the diff itself must reach the transcript"
+        # 🔴 A `+`-prefixed line FROM THE UPDATE BODY, not merely "+" anywhere.
+        # `unified()` always emits a `+++` header, so `"+" in res.stdout` was
+        # satisfied by the header alone: MEASURED, a mutant that stripped every
+        # +/- body line from the printed diff left that assertion green. The
+        # message claimed the diff reached the transcript and did not check it.
+        body = [l for l in res.stdout.splitlines()
+                if l.startswith("+") and not l.startswith("+++")]
+        assert body, "the diff's added lines must reach the transcript"
 
     def test_the_override_is_NOT_reachable_by_abbreviation(
         self, tmp_path: Path, update_file: Path
@@ -3507,3 +3521,52 @@ class TestAbsentBasePresentOnMainlineIsRefused:
             assert res.returncode == hd.EXIT_USAGE, (
                 f"{abbrev} was accepted as the override", res.stdout, res.stderr)
             assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    @pytest.mark.parametrize("blank,label", [("", "empty"), ("\n", "one newline")])
+    def test_the_WARNING_and_the_REFUSAL_describe_the_SAME_set(
+        self, tmp_path: Path, update_file: Path, blank: str, label: str
+    ) -> None:
+        """🔴 THE SEAM. Two consumers of one fact, and they drifted for a round.
+
+        The refusal decides whether to stop; the warning decides whether to print
+        the loud "the committed document will be replaced" line or a mild size
+        comparison. When the refusal was widened to `.strip()` the warning kept
+        `if not local.lines:` — true only for a strictly 0-line file — so a
+        `"\\n"` base got `0 sections / 1 lines` and never the loud line, in
+        exactly the shape where every section merges as NEW. They had been
+        equivalent before the widening, which is why the drift was silent.
+
+        So this pins the RELATIONSHIP, on the PROPOSAL run — the one an operator
+        reads before deciding — not either half alone.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        doc = work / "claudedocs" / "handoff-sample-topic.md"
+        doc.parent.mkdir(exist_ok=True)
+        doc.write_text(blank, encoding="utf-8")
+
+        proposal = run_tool(work, update=update_file)  # no --confirm
+        assert proposal.returncode == 0, proposal.stderr
+        assert "will be replaced by this delta" in proposal.stdout, (
+            f"a {label} base got the MILD warning in the shape that replaces the "
+            f"document: {proposal.stdout[-400:]}")
+
+        confirmed = run_tool(work, "--confirm", update=update_file)
+        assert confirmed.returncode == hd.EXIT_STALE_BASE, (
+            "the warning said REPLACED but the refusal did not fire — the two "
+            "halves disagree", confirmed.stdout, confirmed.stderr)
+
+    def test_the_remedy_does_not_tell_a_PROPOSAL_reader_they_are_safe(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 The remedy block once said "if you do not see `status=stale-base`,
+        this run is the warning". The refusal is gated on `--confirm`, so a
+        proposal run can NEVER print that line — the sentence told every reader
+        of the run they use to decide that they were in the benign case,
+        including the ones about to destroy a document.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        out = run_tool(work, update=update_file).stdout
+        assert "will be replaced by this delta" in out
+        assert "If you do not see that line, this run is the warning" not in out
+        assert "ONLY on `--confirm`" in out, (
+            "the remedy must say the refusal is deferred, not absent")
