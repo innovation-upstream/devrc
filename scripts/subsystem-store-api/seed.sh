@@ -185,15 +185,45 @@ trap 'rm -rf "$_seed_tmp"' EXIT
 staged_list="$_seed_tmp/staged"; remote_list="$_seed_tmp/remote"
 missing_f="$_seed_tmp/missing";  foreign_f="$_seed_tmp/foreign"
 
-( cd "$STAGE" && find . -mindepth 2 -maxdepth 2 -name '*.md' -type f ) \
+# 🔴 `! -path './.*'` — THE COMPARED POPULATION MUST BE THE PUSHED ONE. The tar
+# member list (above) and `staged_entries` (further up) are both built from
+# `"$STAGE"/*/`, and without `dotglob` that glob SKIPS dot-directories. A bare
+# `find` does not, so a `.hidden/` scope holding a `.md` would be listed as
+# staged, never archived, never land, and be reported missing — "1 of 1 staged
+# entry file(s) did NOT land" over an entry that was never shipped, which is
+# this script's own bug shape reintroduced one guard lower. Excluded on BOTH
+# sides so the two lists keep answering one question.
+( cd "$STAGE" && find . -mindepth 2 -maxdepth 2 ! -path './.*' -name '*.md' -type f ) \
   | sed 's|^\./||' | LC_ALL=C sort > "$staged_list"
 kubectl -n "$ns" exec "$pod" -- \
-  sh -c "cd '$DEST' && find . -mindepth 2 -maxdepth 2 -name '*.md' -type f" \
+  sh -c "cd '$DEST' && find . -mindepth 2 -maxdepth 2 ! -path './.*' -name '*.md' -type f" \
   | sed 's|^\./||' | LC_ALL=C sort > "$remote_list"
 
 remote_entries=$(wc -l < "$remote_list" | tr -d ' ')
-comm -23 "$staged_list" "$remote_list" > "$missing_f"
-comm -13 "$staged_list" "$remote_list" > "$foreign_f"
+
+# 🔴 `LC_ALL=C` ON `comm` TOO, NOT ONLY ON THE SORTS. Both lists are sorted
+# `LC_ALL=C` above; GNU `comm` compares AND order-checks in the AMBIENT locale,
+# so C-sorted input is "not in sorted order" to a `comm` running under
+# en_US.UTF-8 — which is this host (`LANG=en_US.UTF-8`, `LC_COLLATE` unset).
+#
+# It fires only when the two conditions the multi-host case guarantees are BOTH
+# met: an UNPAIRABLE line (GNU comm arms the order check only after one) and an
+# adjacency where C and locale order disagree — e.g. `<scope>/README.md` beside
+# `<scope>/backblaze.md`, which the real store is full of. So the FIRST push
+# after another host seeds would abort at `set -e` on comm's rc=1, printing
+# three "not in sorted order" diagnostics and NO verdict at all: no PUSHED, no
+# NOTE, no OK, no MISMATCH — content landed, exit code unexplained. Exactly the
+# "failure verdict on a push that worked" this block was written to remove.
+#
+# The PR's own live run could not see it: it had staged == remote exactly, so
+# nothing was unpairable and the order check never armed.
+#
+# 🔴 `--nocheck-order` is NOT the fix — it silences the diagnostic while the SET
+# OPERATION still collates in the ambient locale and returns the WRONG CONTENT
+# (measured: staged `[a/README.md, a/b.md]` vs remote `[a/b.md]` reports BOTH as
+# missing). The collation has to be C on both sides of the comparison.
+LC_ALL=C comm -23 "$staged_list" "$remote_list" > "$missing_f"
+LC_ALL=C comm -13 "$staged_list" "$remote_list" > "$foreign_f"
 n_missing=$(wc -l < "$missing_f" | tr -d ' ')
 n_foreign=$(wc -l < "$foreign_f" | tr -d ' ')
 

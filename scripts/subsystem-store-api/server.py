@@ -2316,9 +2316,18 @@ WRITE_ROUTES: dict[tuple[str, str], tuple[str, int, tuple[str, ...]]] = {
 }
 
 # How deep to walk when dating the served copy. Deliberately the SAME depth
-# `seed.sh` uses for its own `remote_entries` count (`find -maxdepth 2 -name
-# '*.md'`), so the two numbers are answers to the same question and a
-# disagreement between them means something real rather than a units mismatch.
+# `seed.sh` uses for its own entry listings, so the two numbers are answers to
+# the same question and a disagreement between them means something real rather
+# than a units mismatch.
+#
+# ⚠ The expression this comment used to quote — `find -maxdepth 2 -name '*.md'`
+# — is no longer what seed.sh runs. Its push verdict now lists BOTH sides with
+# `find . -mindepth 2 -maxdepth 2 ! -path './.*' -name '*.md' -type f`. The two
+# added clauses move it TOWARD this walk, not away: `_freshness_walk` below
+# already visits only non-dotted directories at depth 2, so it likewise excluded
+# top-level `*.md` and dot-scopes. Quoting the sibling's source verbatim is what
+# let this rot, so the invariant is stated instead: BOTH count `<scope>/*.md`,
+# excluding the store root and any dot-directory.
 _FRESHNESS_MAXDEPTH = 2
 
 

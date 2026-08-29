@@ -51,6 +51,7 @@ import http.client
 import importlib.util
 import json
 from testlib import hermetic_git  # noqa: E402
+from testlib import mockbin  # noqa: E402
 import io
 import os
 import re
@@ -2377,23 +2378,55 @@ def run_seed(*args: str, env: "dict[str, str] | None" = None) -> subprocess.Comp
 # against a filesystem the test controls rather than against a mock of itself.
 # `$FAKE_DROP` deletes one member AFTER the extract, which is how a staged entry
 # that does not land is simulated without pretending the guard ran.
-FAKE_KUBECTL = r"""#!/usr/bin/env bash
-set -uo pipefail
-[[ "${1:-}" == "-n" ]] && shift 2
-sub="${1:-}"; shift || true
+#
+# 🔴 POSIX sh, AND `mockbin.write_exec` OWNS THE SHEBANG. The first version of
+# this stub wrote `#!/usr/bin/env bash` itself. `/usr/bin/env` does not exist in
+# the nix sandbox that gates merges, and the two tiers reported that completely
+# differently: the dev host showed ONE tidy failure in `test_runtime_shebangs`,
+# while the gating tier showed `5 failed` — the guard PLUS all four tests here,
+# which never ran at all (`bad interpreter`, rc 126). The class had zero
+# coverage on the only tier that matters, and the dev-host run could not say so.
+#
+# Resolving the path with `shutil.which` is not enough either: that scanner
+# flags a test writing ANY shebang, and its allowlist is explicitly not the way
+# to green a new site. So the body is POSIX sh — no arrays, no `[[ ]]`, no
+# `${a//…}` — and `write_exec` supplies `#!<sh>`. The `set --` rotate below is
+# the POSIX way to rebuild the argument list without an array, and it preserves
+# arguments containing spaces, which a string accumulator would not.
+FAKE_KUBECTL_BODY = r"""
+# Stands in for kubectl in seed.sh's push half. $FAKE_DEST is the pretend /data;
+# $FAKE_DROP, if set, removes one member AFTER the extract, which is how "a
+# staged entry that did not land" is simulated without faking the guard itself.
+if [ "${1:-}" = "-n" ]; then shift 2; fi
+sub="${1:-}"
+if [ $# -gt 0 ]; then shift; fi
 case "$sub" in
-  get) echo "fake-pod-0" ;;
+  get)
+    echo "fake-pod-0"
+    ;;
   exec)
-    [[ "${1:-}" == "-i" ]] && shift
-    shift                                   # the pod name
-    [[ "${1:-}" == "--" ]] && shift
-    cmd=(); for a in "$@"; do cmd+=("${a///data/$FAKE_DEST}"); done
-    "${cmd[@]}"; rc=$?
-    if [[ -n "${FAKE_DROP:-}" && "${cmd[0]}" == "tar" ]]; then
+    if [ "${1:-}" = "-i" ]; then shift; fi
+    if [ $# -gt 0 ]; then shift; fi
+    if [ "${1:-}" = "--" ]; then shift; fi
+    n=$#
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      a="$1"
+      shift
+      set -- "$@" "$(printf '%s' "$a" | sed "s|/data|$FAKE_DEST|g")"
+      i=$((i + 1))
+    done
+    "$@"
+    rc=$?
+    if [ -n "${FAKE_DROP:-}" ] && [ "${1:-}" = "tar" ]; then
       rm -f "$FAKE_DEST/$FAKE_DROP"
     fi
-    exit $rc ;;
-  *) echo "fake kubectl: unexpected subcommand: $sub" >&2; exit 64 ;;
+    exit "$rc"
+    ;;
+  *)
+    echo "fake kubectl: unexpected subcommand: $sub" >&2
+    exit 64
+    ;;
 esac
 """
 
@@ -2404,9 +2437,7 @@ def fake_cluster(tmp_path: Path):
     directory standing in for the pod's `/data`."""
     bindir = tmp_path / "fakebin"
     bindir.mkdir()
-    k = bindir / "kubectl"
-    k.write_text(FAKE_KUBECTL)
-    k.chmod(0o755)
+    mockbin.write_exec(bindir / "kubectl", FAKE_KUBECTL_BODY)
     dest = tmp_path / "pod-data"
     dest.mkdir()
     env = {
@@ -2422,14 +2453,24 @@ class TestSeedPushVerdict:
     SUBSET check on names — and NOT "does the remote hold exactly as many files
     as the stage", which is only true while one host ever seeds."""
 
-    def _push(self, store: Path, tmp_path: Path, env, **kw):
+    def _push(self, store: Path, tmp_path: Path, env):
         return run_seed(
             "--store", str(store),
             "--stage", str(tmp_path / "stage"),
             "--push", "ns/app",
             env=env,
-            **kw,
         )
+
+    @staticmethod
+    def _foreign(dest: Path, name: str = "from-the-other-host.md") -> Path:
+        """An entry the OTHER host seeded. Its presence is what arms GNU comm's
+        order check — without an unpairable line the check never runs, which is
+        why an exactly-matching push cannot see a collation bug."""
+        d = dest / "a-scope-only-the-laptop-has"
+        d.mkdir(exist_ok=True)
+        p = d / name
+        p.write_text("---\nservice: x\n---\n")
+        return p
 
     def test_POSITIVE_CONTROL_the_fake_cluster_really_receives_the_push(
         self, store: Path, tmp_path: Path, fake_cluster
@@ -2514,6 +2555,88 @@ class TestSeedPushVerdict:
             "counts matched, so the old guard would have passed this broken push"
         )
         assert f"{SCOPE}/thing-alpha.md" in r.stderr
+
+    # --- the three dimensions the first fixture was structurally blind to -----
+    #
+    # 🔴 THE ORIGINAL FIXTURE COULD NOT SEE ANY OF THESE. It was all-lowercase,
+    # all hyphen-slug, no top-level `.md`, no dot-directory — so it pinned none
+    # of the ways the REAL store differs, and a mutation sweep over it left five
+    # survivors. An audit found two live defects in that blind spot. Each test
+    # below is named for the dimension, not the symptom.
+
+    def test_a_README_beside_a_lowercase_sibling_survives_a_UTF8_LOCALE(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 REGRESSION. Both lists are sorted `LC_ALL=C`, but GNU `comm`
+        compares AND order-checks in the AMBIENT locale — so under en_US.UTF-8 a
+        C-sorted list is "not in sorted order", `comm` exits 1, and `set -e`
+        kills the script with NO verdict printed at all.
+
+        Needs BOTH: an unpairable line (comm arms the order check only after
+        one) and an adjacency where C and en_US disagree. `README.md` beside
+        `backblaze.md`/`thing-alpha.md` is that adjacency, and the real store is
+        full of it — so the FIRST push after another host seeds would abort."""
+        enc = "en_US.UTF-8"
+        have = subprocess.run(
+            ["locale", "-a"], capture_output=True, text=True
+        ).stdout.lower()
+        if "en_us.utf8" not in have and "en_us.utf-8" not in have:
+            pytest.skip(f"{enc} not generated here; the collation cannot be forced")
+
+        env, dest = fake_cluster
+        # C sorts `README.md` BEFORE `thing-alpha.md`; en_US sorts it AFTER.
+        (store / SCOPE / "README.md").write_text(_entry("README", SCOPE))
+        self._foreign(dest)
+        env = {**env, "LC_ALL": enc, "LANG": enc}
+
+        r = self._push(store, tmp_path, env)
+
+        assert "not in sorted order" not in r.stderr, (
+            "comm order-checked in the ambient locale over C-sorted input: "
+            f"stderr={r.stderr}"
+        )
+        assert r.returncode == 0, f"rc={r.returncode} stdout={r.stdout} stderr={r.stderr}"
+        assert "seed: OK" in r.stdout
+        assert "NOTE 1 entry file(s)" in r.stdout
+
+    def test_a_TOP_LEVEL_md_in_the_store_is_not_reported_missing(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The store root really does hold a `README.md`. It is not an entry,
+        the tar member list never ships it, and `-mindepth 2` is what keeps it
+        out of the comparison — a dimension no earlier fixture had, so dropping
+        that flag survived the sweep while breaking every real push."""
+        env, dest = fake_cluster
+        (store / "README.md").write_text("# the store's own readme\n")
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        assert "README.md" not in r.stderr
+        assert "seed: OK" in r.stdout
+
+    def test_a_DOT_DIRECTORY_scope_is_not_reported_missing(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """`staged_entries` and the tar member list are both built from
+        `"$STAGE"/*/`, which without `dotglob` skips dot-directories — so a
+        `.hidden/` scope is never archived. A bare `find` would list it as
+        staged and then report it missing: "1 of 1 staged entry file(s) did NOT
+        land" over something that was never shipped. The compared population has
+        to be the PUSHED one."""
+        env, dest = fake_cluster
+        hidden = store / ".hidden"
+        hidden.mkdir()
+        (hidden / "b.md").write_text(_entry("b", ".hidden"))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, (
+            f"a dot-scope is not pushed, so it must not be reported missing. "
+            f"stdout={r.stdout} stderr={r.stderr}"
+        )
+        assert ".hidden" not in r.stderr
+        assert "seed: OK" in r.stdout
 
 
 class TestSeedIsNonDestructive:
