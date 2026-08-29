@@ -17,18 +17,28 @@ two tools and a human gluing them together: an observed run cost 127 s, $0.0056 
 calls, 5 of them pure flailing.
 
 ## State now
-- **PR #989 MERGED** as squash `890df043`. Branch `feat/live-first-session-lookup` (deleted
-  from no worktree; not pinned).
-- **NOT DEPLOYED.** `readlink -f ~/.claude/skills/find-session/SKILL.md` terminates in
-  `/nix/store/b2x8ak…` (a `home.file` copy ⇒ needs a switch), and the deployed SKILL.md
-  contains **0** occurrences of `--live`. The *script* runs from the checkout; the *doc that
-  tells an agent `--live` exists* is stale on both hosts. **Merged ≠ deployed.**
-- 🔴 **`ship.sh` is NOT safe to run blind right now.** The base clone `~/workspace/devrc` is
-  on `feat/flake-lock-and-discord-ext` (behind 6), not `main`. `ship.sh` converges with
-  `merge --ff-only`, so it would **skip the workbench and leave it as found** — the silent
-  drift `CLAUDE.md` warns about. Land or park that branch first.
+- **PR #989 MERGED** as squash `890df043`. This doc's own PR **#1032 MERGED** as `6e7e85bf`.
+- 🔴 **DEPLOYED — this changed after the first draft, and it was done by ANOTHER session, not
+  by this work.** Verified on **both** hosts (a single-host measurement cannot demonstrate a
+  two-host claim):
 
-What shipped, measured:
+  | | workbench | laptop |
+  |---|---|---|
+  | `readlink -f ~/.claude/skills/find-session/SKILL.md` | `/nix/store/djplda84w8bi6ydiz4filgvvark1j0b7-devrc-claude-skills/…` | **identical hash** |
+  | `grep -c -- "--live"` on that file | 9 | 9 |
+
+  `--match` docs: 8 hits in `~/.claude/skills/session-manager/reference/payload-contract.md`.
+  End-to-end from the checkout on `main`: `find-session.py devrc --live` → `LIVE (2 matched;
+  searched: laptop, workbench)`.
+- **The `ship.sh` blocker is gone.** `feat/flake-lock-and-discord-ext` landed (#1010,
+  `2a8a8982`). The base clone is on `main` and was `merge --ff-only`'d to `6e7e85bf`; it was
+  **behind 1, never ahead** — no un-pushed commits, so the diverged-host hazard did not occur.
+- **Still NOT verified:** the partial-fleet path against a genuinely unreachable host. See
+  ranked item 1 — this is the one claim in the whole feature with no live observation behind it.
+- Open issues: **#1029** (three guard-walkability gaps), **#1030** (flake, second mechanism),
+  **#1031** (two deferrals). **#1028 closed**, verified fixed by #1023.
+
+**What shipped — carried forward verbatim, this is durable and not status:**
 
 | | before | after |
 |---|---|---|
@@ -38,7 +48,7 @@ What shipped, measured:
 - `session-manager --match <substr>` — filters `task`/`label`/`codename`; `path` only under
   `--match-path`. **Measured: matching `task` gave 1 useful hit; matching `path` gave 29 of
   72 rows** (nearly every window shares a repo path), which is why `path` is opt-in.
-- `session-manager detail <bad addr>` now exits 3 and **names the indices that do exist**
+- `session-manager detail <bad addr>` exits 3 and **names the indices that do exist**
   (`session 'scratch3' has windows ['1','2']; you asked for index '9'`). Previously a silent
   empty list — the defect that ate 5 of the 9 tool calls in the observed run.
 - `hotkey_display` — one writer. `v` → `Alt+v`, `V` → `Alt+Shift+V`. 🔴 **Case is
@@ -57,10 +67,6 @@ guards pinning guards and no finding was reachable by a `find-session` user.
 Gate on the **merged** tree (`c0e39f23` = `origin/main` + head): PR's own suites **838
 passed**; node 1300/1300. Two pre-existing `main` failures at the time, both reproduced on a
 clean `origin/main` control with the implicated files byte-identical — since fixed by #1023.
-
-Open issues filed: **#1029** (three residual guard-walkability gaps), **#1031** (two
-knowingly-deferred items), **#1030** (flaky required check — see below). **#1028 closed**,
-verified fixed by #1023.
 
 ## Open investigations — live diagnosis state
 
@@ -98,32 +104,31 @@ verified fixed by #1023.
   check whether a hook writes it.
 
 ## Next steps (ranked)
-1. **Deploy.** Land or park `feat/flake-lock-and-discord-ext` in `~/workspace/devrc`, then
-   `scripts/ship.sh`. 🔴 **Read every per-host line, not the final verdict** — one skip hides
-   among greens. Closes when `readlink -f ~/.claude/skills/find-session/SKILL.md` still
-   resolves into `/nix/store` (it always will — it is a `home.file`) **and**
-   `grep -c -- "--live" ~/.claude/skills/find-session/SKILL.md` returns non-zero on BOTH
-   hosts. Repo: `devrc`.
-2. **Verify the live-first loop against a genuinely unreachable host.** 🔴 **No round of the
-   ladder ever did this** — the laptop answered every probe, so every partial-fleet check
-   used a stub `session-manager` (real subprocess, real JSON parse, real `main()`, real exit
-   code; simulated unreachability). The round-1 blocker *was* the partial-fleet path, so this
-   is the one claim with no live observation behind it. Suspend the laptop, then run the
-   `--live --deep` and `--live --tail` cases in **How to verify**. Repo: `devrc`.
-3. **#1030** — the flake's second mechanism (see the investigation block). Repo: `devrc`.
-4. **#1029** — three residual guard-walkability gaps in
+🔴 **RENUMBERED once, deliberately.** The original item 1 (deploy) is DONE, so everything
+shifted up by one. `claim-work --list` was checked first and **no live claim carried a
+`find-session-live-first-*` slug**, so no claim was re-pointed. Keep this numbering stable now.
+
+1. **Verify the live-first loop against a genuinely unreachable host.** 🔴 **No round of the
+   5-round audit ladder ever did this** — the laptop answered every probe, so every
+   partial-fleet check used a stub `session-manager` (real subprocess, real JSON parse, real
+   `main()`, real exit code; simulated unreachability). The round-1 blocker *was* the
+   partial-fleet path. Suspend the laptop, then run the `--live --deep` and `--live --tail`
+   cases in **How to verify**. Repo: `devrc`.
+2. **#1030** — the store-api flake's SECOND mechanism (see the investigation block). ⚠ Someone
+   else holds `devrc-store-api-timeout-flake`, which is the *timeout* mechanism #1023 already
+   fixed — a different failure of the same test. Do not read that claim as covering this.
+   Repo: `devrc`.
+3. **#1029** — three residual guard-walkability gaps in
    `scripts/tests/test_find_session_skill_contract.py`. Repo: `devrc`.
-5. **#1031** — two knowingly-deferred items (`excluded_shells` measured-zero asymmetry; the
+4. **#1031** — two knowingly-deferred items (`excluded_shells` measured-zero asymmetry; the
    row-field ledger's substring `__doc__` guard). Repo: `devrc`.
-6. **Inherited from `handoff-find-session-opencode.md`, still open:**
+5. **Inherited from `handoff-find-session-opencode.md`:**
    `scripts/claude-hooks/tests/test_bash_guard.py:294`'s "no catastrophic backtracking" check
    still asserts on wall-clock and flakes under load. Its sibling item (dirty
-   `embed_enlarge.js`) has since been committed to `feat/flake-lock-and-discord-ext`, so the
-   dirty-nix-read hazard is gone locally but unverified via `ship.sh`. Repo: `devrc`.
+   `embed_enlarge.js`) is CLOSED — it landed as #1010. Repo: `devrc`.
 
 🔴 This list is a WORK QUEUE and `claim-work` is its lock — `claim-work --slug-for <this doc>
-<rank>`, then `claim-work <slug> --subject "<text>"`, and sweep `gh pr list --state open`
-too. Keep the numbering stable: the rank is half a claim's identity.
+<rank>`, then `claim-work <slug> --subject "<text>"`, and sweep `gh pr list --state open` too.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The recurring defect in this work was never a logic bug — it was A CLAIM WIDER THAN
@@ -156,6 +161,25 @@ too. Keep the numbering stable: the rank is half a claim's identity.
 - ⚠ **Concurrency cost, recorded:** #1028 was filed 3 minutes before #1023 fixed the same
   three things. Sweep `gh issue list` / `gh pr list --state open` before filing.
 
+- 🔴 **`~/.claude/skills/session-manager/SKILL.md` contains ZERO mentions of `--match`, and
+  that is CORRECT — do not read it as a failed deploy.** The skill body had 152 B of headroom
+  against its 16,384 B ceiling, so every `--match`/`detail` doc went to
+  `reference/payload-contract.md` (8 hits there). Grepping the skill body for a flag is the
+  wrong deploy check for this subsystem; grep the reference file.
+- 🔴 **"Deployed" was DISCOVERED, not performed by this work.** The first draft of this doc
+  said NOT DEPLOYED and was correct when written; another session shipped in between. Re-run
+  the two-host table above rather than trusting either statement — `readlink -f` is the
+  arbiter, never a diff, and the store hash matching across hosts is what makes it a two-host
+  claim rather than two single-host ones.
+- ⚠ **Concurrent duplicate work is the standing hazard here, measured twice in one session.**
+  #1028 was filed 3 minutes before #1023 fixed the same three things; and `claim-work --list`
+  now shows others already holding `devrc-opencode-pin-1-18-21`,
+  `espanso-ask-tiebreak-main-red` and `devrc-store-api-timeout-flake`. **Sweep
+  `claim-work --list` AND `gh issue/pr list` before filing or starting.**
+- **A `git log <sha>..origin/main` that comes back empty is a claim about the moment you
+  fetched.** `main` moved twice inside this session's closing minutes. Re-fetch immediately
+  before acting, not when you formed the plan.
+
 ## How to verify
 ```bash
 # the whole use case, one command (~1.3s)
@@ -168,12 +192,19 @@ python3 ~/workspace/devrc/scripts/session-manager detail scratch3:9      # rc 3 
 python3 ~/workspace/devrc/scripts/session-manager --json --lean --no-ch --match <t> \
   | python3 -c "import json,sys; r=json.load(sys.stdin); print(r['filters'])"
 
-# hotkey case — v and V MUST differ
+# hotkey case — v and V MUST differ (Alt+v = violet/scratch3, Alt+Shift+V = Vapor/scratch4)
 python3 ~/workspace/devrc/scripts/session-manager --json --lean --no-ch \
   | python3 -c "import json,sys; r=json.load(sys.stdin); \
 print({w['hotkey']: w['hotkey_display'] for h in r['hosts'].values() for w in h.get('windows') or [] if w.get('hotkey')})"
 ```
-🔴 **After deploying, verify against the DEPLOYED artifact, not the checkout** — and on BOTH
-hosts. A single-host measurement cannot demonstrate a two-host claim (that lesson cost the
-predecessor handoff a half-broken feature). `readlink -f` is the arbiter of live-vs-stale,
-never a diff.
+
+**DEPLOY check — run on BOTH hosts, compare the store hash:**
+```bash
+readlink -f ~/.claude/skills/find-session/SKILL.md          # same /nix/store hash on both?
+grep -c -- "--live" ~/.claude/skills/find-session/SKILL.md  # expect >0
+grep -c -- "--match" ~/.claude/skills/session-manager/reference/payload-contract.md  # NOT the SKILL.md
+ssh zach@10.42.0.100 'readlink -f ~/.claude/skills/find-session/SKILL.md; grep -c -- "--live" ~/.claude/skills/find-session/SKILL.md'
+```
+🔴 Verify against the DEPLOYED artifact, not the checkout, and on BOTH hosts. `readlink -f` is
+the arbiter of live-vs-stale, never a diff. Identical `/nix/store` hashes across the two hosts
+is what upgrades two single-host readings into a two-host claim.
