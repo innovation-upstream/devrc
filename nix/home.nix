@@ -266,7 +266,7 @@ in
           # 'ask' ⊂ 'task' is the documented way a neighbour silently steals it.
           # :dacq keeps the words he actually types for THIS snippet (feedback,
           # dispatch, process); :acq owns ask/clarify/questions alone.
-          { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["feedback" "dispatch" "process" "elicit" "scope" "include"]; }
+          { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
           { trigger = ":acq"; replace = "ask clarifying questions"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
           { trigger = ":alo"; replace = "anything left outstanding from this thread? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
