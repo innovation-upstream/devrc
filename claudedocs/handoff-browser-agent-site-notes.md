@@ -16,36 +16,40 @@ gap that trace found — the autonomous `browser agent` is BLIND to `site_notes`
 registered host it runs without that site's flow notes.
 
 ## State now
-- **Branch / PR:** `devrc` `main` @ `9bc7f5eb`, clean, in sync with `origin/main`.
-  **devrc#966 MERGED** (squash `9bc7f5eb`, 2026-08-28) — verified BY CONTENT, never by
-  ancestry: all three files present on `origin/main` and `vetr.com.md`'s blob OID is
-  identical to the branch tip. Worktree removed; base clone fast-forwarded `--ff-only`.
-- **DONE — the site-notes registry has its first new entry since #940.**
-  `scripts/browser-bridge/reference/sites/vetr.com.md` (29,331 B) + the `_index.json`
-  key, plus the generic `elementFromPoint` off-viewport trap relocated into
-  `reference/css-hit-test.md` where every host gets it. 12 commits, 3 files, +517/−2.
-  Gate green on the final head with real counts: `devrc-nodetests` 1295/1295,
-  `devrc-pytests` 17824 passed / 2 skipped / 0 failed.
-- **`SKILL.md` NOT touched** — re-measured **12,028 B**, unchanged, so rank 3's 10-byte
-  slack is exactly as the prior doc left it. The site-notes design (SKILL.md names the
-  DIRECTORY, never a site) is what let a 29 KB file ship without moving that number.
-- **vetr E2E coverage traced and MEASURED**, which was the session's original ask:
-  28 spec files / 55 static `test()` calls in `vetr-app/e2e/`, plus two sibling
-  harnesses (`tests/e2e/a11y-gate/` ratchet, `tests/e2e/ux-audit/` 15-view walk).
-  Coverage is entirely env-dependent: **~25 passed / 35 skipped bare** vs
-  **53 passed / 7 skipped / 0 failed** under the hermetic stack (10.7 min). Nothing runs
-  it automatically — Actions quota-dark org-wide, Tekton runs only
-  `vitest`/`typecheck`/`a11y` + `vetr-api-pest`.
-- **Deploy/verify status — LIVE and verified end-to-end.** Resolving against the
-  INSTALLED clone (what the running bridge reads, `_SITES_DIR` is hardcoded there):
-  `vetr.com`/`app.`/`api.`/`admin.vetr.com` → `reference/sites/vetr.com.md`;
-  `notvetr.com`, `127.0.0.1`, `localhost` → `''`; positive control `civitai.com` still
-  hits. No bridge restart was needed, as the mtime+size stamp invalidation predicts.
-- 🔴 **Extension markers MOVED during this session — the prior doc's warning fired.**
-  Measured 2026-08-28 at handoff time: deployed **`b817ef1e88267a40`**; `work`
-  `e1ee86a50a811d40` **stale**, `personal` `04bbd6f9c695141d` **stale**. Earlier in the
-  SAME session `work` read `stale: false` against a deployed `e1ee86a50a811d40`. Both
-  readings were true when taken. Re-read at the moment you act; do not carry the hex.
+
+- **Branch / PR:** `devrc` `main`. Two PRs merged this session, both verified BY CONTENT
+  (ancestry is false forever after a squash):
+  - **#980** squash **`f93cdc08`** — the SKILL.md prune (rank 3).
+  - **#988** squash **`a8849cfe`** — per-build extension version. **Merged, deployed via
+    `home-manager switch`, and LIVE-VERIFIED on both Brave profiles.**
+  Worktrees removed, base clone fast-forwarded, no `claim-work` claims held.
+- **RANK 2 IS CLOSED — and it is the first time both profiles have been verified
+  EXECUTING the deployed build, not merely registered against it.** `ping` returns the
+  marker frozen into each worker's own module graph:
+  `work` and `personal` both `pong=True buildMarker=aada672ff3a5ded7
+  version=0.8.1.43738 ops=18`, `extension_stale: false` on both.
+- **RANK 3 IS CLOSED.** `SKILL.md` 12,028 B → **11,720 B**. Growth room above the 12,038 B
+  enforced gate went from **10 B (0.05 ops rows) to 318 B (~1.7 rows)**. The prune also
+  fixed a wrong claim the byte audit could not see: the sites row said the CLI names
+  `site_notes` "in every result envelope" — `_annotate_site_notes` is called only from
+  `_handle_cmd` (`server.py:3731`), never from `_whoami`/`do_GET`, and only for a
+  REGISTERED host, so identity reads and unknown hosts carry no field and ABSENCE means
+  nothing.
+- **NEW MECHANISM SHIPPED (#988): `manifest.json` version is now `<release>.<build>`** —
+  currently **`0.8.1.43738`**, where the 4th component is `int(BUILD_MARKER[:4], 16)`.
+  The first three components stay human-owned. `gen-build-marker.py` regenerates both and
+  `--check` verifies both. Rationale, the cycle it had to break, and the exact
+  regenerate/verify commands: `scripts/browser-bridge/extension/README.md` § *Versioning*.
+  🔴 **`extension_stale` is UNCHANGED and still marker-only for the all-clear.** The
+  version is a human convenience, not fail-closed.
+- **Two out-of-scope defects FILED rather than absorbed:** devrc **#1017**
+  (`test_bash_guard.py`'s 2.0 s wall-clock assertion goes red under load — measured
+  2.44–5.40 s) and devrc **#1018** (`audit-dispatch.py`'s cumulative ledger disagrees
+  with the sum of its own per-round figures — 381 printed vs 466 re-derived).
+- **No `clawgate-task:` field.** `clawgate_handoff.sh resolve` exited **5** (0 tasks for
+  this session). Its positive control confirms the board is reachable and the token
+  accepted, but a wrong session id ALSO answers 200 with an empty array — a narrow
+  reading, NOT a clean bill of health. No field written, no task created.
 
 ## Open investigations — live diagnosis state
 
@@ -176,48 +180,29 @@ resolution was originally closed on a SINGLE data point and said so.
 
 ## Next steps (ranked)
 
-🔴 Ranks 1–4 keep their numbers so any live `claim-work` slug still resolves.
+🔴 Ranks keep their numbers so any live `claim-work` slug still resolves.
 
 1. ✅ **RESOLVED 2026-08-27 — the `devrc-pytests` red.** Unchanged; nothing to do.
-2. **Reload the browser-bridge extension in BOTH Brave profiles** (repo: none —
-   operator action, an agent cannot do it). 🔴 **Re-confirmed 2026-08-28 and now MORE
-   stale than the prior doc recorded:** deployed marker moved to `b817ef1e88267a40`, so
-   `work` (`e1ee86a50a811d40`) AND `personal` (`04bbd6f9c695141d`) both report
-   `extension_stale: true`. Fix: `brave://extensions` → **Remove** → **Load unpacked**
-   `~/.local/share/browser-bridge-ext/` (a ↻ reload is unreliable — the long-poll keeps
-   the old worker alive). **Verify: `browser whoami` → `extension_stale: false` on both;
-   `null` = undecidable, NOT ok.** Do not assert the hex values — re-read them at the
-   moment you act; they moved once already inside a single session.
-   🔴 **Carried forward from the 2026-08-27 entry, because it is the durable half:** the
-   stale build predated 2026-08-24 and was missing `b20b7835` (#797) and `b242fc2d`
-   (#814), both bounded-hang fixes — **so the symptom of a stale extension is a WEDGED
-   OP, not an error.** Both profiles report version `0.8.1` while differing in build,
-   which is exactly the case a version compare cannot see. The missing-commit list is
-   itself a snapshot and is now a floor, since the deployed marker has moved again.
-3. **Decide the SKILL.md byte budget** (repo: devrc; `scripts/browser-bridge/SKILL.md`).
-   Unchanged by this session — **re-measured 12,028 B** against the 12,038 B ceiling,
-   **10 bytes of slack**. Demotion candidates and their sidecar homes are in the prior
-   entry. Closes when a demotion PR merges, or the operator says in writing that 10
-   bytes is acceptable.
+2. ✅ **CLOSED 2026-08-29 — extension reloaded and LIVE-VERIFIED in both profiles.**
+   Both execute `aada672ff3a5ded7` / `0.8.1.43738`, `extension_stale: false`, `ping`
+   answering. 🔴 **Read the reload-recipe gotcha below before ever doing this again** —
+   the recipe as written in the old rank 2 is INCOMPLETE and produces a profile that
+   comes back ABSENT rather than stale.
+3. ✅ **CLOSED 2026-08-29 — #980 merged.** 318 B of growth room, up from 10 B.
 4. **Optional: round 5 delta audit of the merged #940** (repo: devrc;
-   `scripts/browser-bridge/reference/agent.md`). Unchanged.
-5. **Measure the toast row of the vetr discriminator** (repo: devrc; file
-   `scripts/browser-bridge/reference/sites/vetr.com.md`). The only branch of the shipped
-   procedure that rests on library behaviour rather than a measurement, and the file
-   says so. Recipe is in the "Open investigations" block above. Closes when the results
-   table carries a toast-present row.
-6. **Root-cause the tired-tab stall** (repo: devrc, `scripts/browser-bridge/`). See the
-   investigation block for the six eliminations already paid for and the one probe that
-   separates the remaining fork. Closes when the mechanism is named in
-   `reference/spa-wake.md` (it is bridge-generic, not vetr-specific), or when an
-   operator dismisses it in writing as not worth chasing.
-7. **Consider adding `vetr.com` to `CLIENT_DOMAINS`** (repo: devrc;
-   `scripts/testlib/client_host_scan.py:78-81`). devrc is PUBLIC and `vetr.com` is not
-   in the redaction list, so nothing flagged that `vetr.com.md` names a real business's
-   live payment rail and admin login URL. **Operator ruled 2026-08-28: "disclosure is
-   not severe, ignore"** — so this is NOT a defect to fix, and the file stays as
-   merged. Listed only so the next session does not re-raise it. Closes as already
-   decided.
+   `scripts/browser-bridge/reference/agent.md`). Untouched this session. Closes when a
+   round returns no findings, or an operator dismisses it in writing.
+5. **Measure the toast row of the vetr overlay discriminator** (repo: devrc; file
+   `scripts/browser-bridge/reference/sites/vetr.com.md`). 🔴 **NEWLY UNBLOCKED** — this
+   needed a working extension, which is now true for the first time. Recipe is in the
+   "Open investigations" block above. Closes when the results table carries a
+   toast-present row.
+6. **Root-cause the tired-tab stall** (repo: devrc, `scripts/browser-bridge/`). Untouched.
+   See the investigation block for the six eliminations already paid for and the one probe
+   that separates the remaining fork. Closes when the mechanism is named in
+   `reference/spa-wake.md`, or an operator dismisses it in writing.
+7. ✅ **Closed as already decided** — operator ruled 2026-08-28 that the `vetr.com`
+   disclosure is not severe. Listed so it is not re-raised.
 
 ## Gotchas / decisions / dead-ends
 
@@ -317,21 +302,100 @@ resolution was originally closed on a SINGLE data point and said so.
   `ANET_ENDPOINT=sandbox` → `e2e:mint-tokens` fails the card provision with `E00007`
   and leaves `owner_has_saved_card:false`, silently self-skipping the saved-card specs.
 
+- **CARRIED FORWARD from the 2026-08-28 `State now` (it was measured evidence sitting
+  under a REPLACE heading, one update from deletion): vetr E2E coverage.** 28 spec files /
+  55 static `test()` calls in `vetr-app/e2e/`, plus two sibling harnesses
+  (`tests/e2e/a11y-gate/` ratchet, `tests/e2e/ux-audit/` 15-view walk). Coverage is
+  **entirely env-dependent**: ~25 passed / 35 skipped bare, vs **53 passed / 7 skipped /
+  0 failed** under the hermetic stack (10.7 min). Nothing runs it automatically — Actions
+  is quota-dark org-wide and Tekton runs only `vitest`/`typecheck`/`a11y` +
+  `vetr-api-pest`.
+- **CARRIED FORWARD, same reason — the durable half of the old rank 2:** the stale builds
+  predated 2026-08-24 and were missing `b20b7835` (#797) and `b242fc2d` (#814), both
+  bounded-hang fixes, **so the symptom of a stale extension is a WEDGED OP, not an
+  error.** Both profiles reported the same version while running different builds, which
+  is exactly the case a version compare could not see — and is what #988 now fixes.
+  (Superseded as a *reading*: both profiles are current as of 2026-08-29.)
+- **devrc#966 merged 2026-08-28** (squash `9bc7f5eb`) — the site-notes registry's first
+  new entry since #940: `reference/sites/vetr.com.md` + its `_index.json` key, plus the
+  generic `elementFromPoint` off-viewport trap relocated into `reference/css-hit-test.md`.
+- 🔴 **THE RELOAD RECIPE IS INCOMPLETE, AND THE FAILURE IS SILENT.** Rank 2 said
+  "`brave://extensions` → Remove → Load unpacked" and stopped. **Remove wipes
+  `chrome.storage.local`** (`reference/errors.md:262`), which holds the bearer token,
+  port and label — so the reloaded extension cannot authenticate and **never appears in
+  the registry at all**. Measured this session: after reloading both profiles, `whoami`
+  reported `connected: 1` with `personal` simply ABSENT — not stale, not erroring.
+  **An absent instance reads as "that Brave window is closed", which is the wrong
+  diagnosis.** The recipe must end: *"…then re-paste token/port/label in Options"*
+  (token at `~/.config/browser-bridge/token`, port `8788`, label exactly `personal` or it
+  registers under an auto-id).
+- 🔴 **A SUBSET SUITE CANNOT FAIL ON A REPO-WIDE GUARD, and four audit rounds inherited
+  that blindness.** #988 shipped a five-component version fixture whose first four parts
+  parsed as a routable IPv4; devrc is PUBLIC and
+  `scripts/tests/test_no_public_ips.py::test_no_unallowlisted_public_ip_literal_is_committed`
+  fails the build on any committed routable IP literal. Every local run was
+  `pytest scripts/browser-bridge/tests/` — "836 passed" was TRUE of a tier that could
+  never collect that guard. All four audit rounds missed it because each was briefed that
+  the subset was sufficient *since Tekton runs the repo-wide gate separately*, which was
+  true and still left the gap. **Tekton is the tier that gates the merge; run it or say
+  your green is subset-scoped.** It was then reintroduced once, because the comment
+  explaining the fix QUOTED the offending literal — the gate scans comments too.
+- 🔴 **FOUR INSTRUMENTS RETURNED CONFIDENT WRONG ANSWERS in this session; none announced
+  itself.** (1) An `8.8.8.8` positive control for the IP gate stayed GREEN — canonical
+  examples are allowlisted, so the control proved nothing; a realistic routable literal
+  does turn it red. (2) A `sed` edit deleted the `START=` assignment on a compound line,
+  so a check-watcher reported `settled after 1787979093s` off "no checks reported" — an
+  empty result read as a verdict. (3) A zsh `set -- $spec` did NOT word-split, so a
+  per-round ledger loop logged the ENTIRE history four times and printed the same number.
+  (4) Two `command grep | xargs` sweeps for version-parsing consumers returned a clean
+  ZERO while a known splitter existed. **Every one was caught only by a control or by a
+  number that could not be true.**
+- 🔴 **The audit ladder's yield was PROSE, not logic: 9 of 13 findings were a claim wider
+  than its code.** Rounds ran 6 → 6 → 1 → 0 and ended clean at round 4. Round 3's single
+  finding PRE-DATED the PR's own tip, so round 2 was the last round whose fixes introduced
+  anything. The standout: the SAME paragraph in `reference/errors.md` named a wrong
+  mechanism THREE times running — first that a branch had widened, then the wrong branch —
+  and was settled only when round 3 stopped reading `annotate_staleness` and **ran** it
+  with two discriminating controls isolating `:887` from `:886` and `:883-884`.
+  A guard that could not fire was also shipped once, commented as "the last point before
+  it is written to a manifest", while the entry point that WAS unguarded
+  (`write_manifest_version`'s caller-supplied `version=`) went unnoticed *because of it*.
+- **`claim-work`'s owner-id is CWD-DEPENDENT.** It is
+  `hash(machine-id || realpath(git-DIR of the ident dir))` (`claim-work.sh:662`), so
+  claiming from `~/workspace/devrc` and releasing from another repo makes the claim look
+  like someone else's and refuses without `--force`. **Claim and release from the same
+  repo dir**, or the slug strands for the full 7-day TTL.
+- **`gh pr merge` prints `failed to run git: fatal: 'main' is already used by worktree`
+  when a worktree holds `main` — the MERGE STILL SUCCEEDED.** That error is `gh`'s local
+  post-merge checkout, not the merge. Confirm with
+  `gh pr view <n> --json state,mergedAt,mergeCommit`, never from the exit path.
+- **The marker deliberately does NOT hash the version value.** The version derives from
+  the marker, so hashing it would make the derivation a recurrence with no fixpoint.
+  Consequence worth knowing: **a release bump does not move the marker at all**, which is
+  the state that genuinely reaches the version-mismatch branch at `server.py:887`.
+
 ## How to verify
 
 ```bash
-# 1. the entry is live in the INSTALLED clone (what the running bridge reads)
-cd ~/workspace/devrc/scripts/browser-bridge && nix develop --command python3 -c "
-import sys; sys.path.insert(0,'.')
-import server as S
-for h in ['civitai.com','vetr.com','app.vetr.com','admin.vetr.com','notvetr.com','127.0.0.1']:
-    print(f'{h:16} -> {S._site_notes_path(h)!r}')"
-# expect: civitai.com (POSITIVE CONTROL) and the three vetr hosts hit; the last two ''.
+# 1. both profiles EXECUTE the deployed build (not merely registered) — the real gate
+for I in work personal; do printf '%-9s ' "$I"; \
+  ~/workspace/devrc/scripts/browser-bridge/browser --instance $I ping; done
+# expect both: pong=True buildMarker=aada672ff3a5ded7 version=0.8.1.43738
 
-# 2. the registry ledger is intact (negative control: drop the entry -> this goes RED)
+# 2. deployed tree matches the repo (read the CONSUMER, not the switch's own output)
+cmp ~/.local/share/browser-bridge-ext/manifest.json \
+    ~/workspace/devrc/scripts/browser-bridge/extension/manifest.json && echo identical
+
+# 3. the version/marker pair is self-consistent; NEGATIVE CONTROL: hand-edit the 4th
+#    component and this goes red naming the regen command
 cd ~/workspace/devrc/scripts/browser-bridge && nix develop --command \
-  python3 -m pytest tests/test_site_notes.py tests/test_skill_size.py -q     # expect 75 passed
+  python3 gen-build-marker.py --check    # expect: build marker OK + manifest version OK
 
-# 3. the squash landed BY CONTENT (ancestry is false forever after a squash)
-git -C ~/workspace/devrc cat-file -e origin/main:scripts/browser-bridge/reference/sites/vetr.com.md && echo present
+# 4. the SKILL.md gate, with its own negative control (pad the file -> RECLAIM: N bytes)
+cd ~/workspace/devrc/scripts/browser-bridge && nix develop --command \
+  python3 -m pytest tests/test_skill_size.py -q                      # expect 4 passed
+
+# 5. 🔴 the repo-wide tier, which the browser-bridge subset is STRUCTURALLY BLIND TO
+cd ~/workspace/devrc && nix develop --command \
+  python3 -m pytest scripts/tests/test_no_public_ips.py -q           # expect 15 passed
 ```
