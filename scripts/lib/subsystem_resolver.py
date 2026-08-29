@@ -373,6 +373,9 @@ class MalformedEntry:
 
 _TASK_REF_SPLIT = ":"
 
+TAG_MAX_RUNES = 64
+"""clawgate's tag length limit, which `lossy_tag_for` derives output for."""
+
 
 @dataclass(frozen=True)
 class TaskRef:
@@ -419,7 +422,7 @@ def parse_task_ref(raw: object) -> TaskRef:
     if not sep:
         raise TaskRefError(
             f"task ref {raw!r} has no `:` — write it as `<system>:<id>`, "
-            f"e.g. `clickup:868kx9eut` or `github:owner/repo#428`"
+            f"e.g. `clickup:868abc123` or `github:owner/repo#428`"
         )
     system, ident = system.strip(), ident.strip()
     if not system:
@@ -434,6 +437,25 @@ def parse_task_ref(raw: object) -> TaskRef:
         raise TaskRefError(
             f"task ref {raw!r} contains whitespace — one ref per list item; "
             f"write several as `tasks: [a, b]`"
+        )
+    # 🔴 A COMMA IS A SEPARATOR IN THE FORM THIS SCHEMA IS WRITTEN IN, so a ref
+    # containing one cannot survive its own serialization: `format_task_refs`
+    # emits `tasks: [clickup:a,b]`, the inline-list reader splits on `,`, and the
+    # entry comes back MALFORMED and invisible to every reader. Rejecting it at
+    # parse time is the only place that keeps "accepted" and "round-trips" the
+    # same set — a writer-side check would still let a hand-written file through.
+    if "," in text:
+        raise TaskRefError(
+            f"task ref {raw!r} contains a comma, which separates items in "
+            f"`tasks: [a, b]` — a ref cannot contain one"
+        )
+    # Control characters (NUL, ESC, a stray newline) round-trip through the file
+    # and reach a terminal, a JSON payload and an error message. Nothing legible
+    # needs them, and a task id containing one is a corrupted read, not an id.
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in text):
+        raise TaskRefError(
+            f"task ref {raw!r} contains a control character — task ids are "
+            f"printable text"
         )
     normalized_system = normalize_ref(system)
     if not normalized_system:
@@ -455,8 +477,16 @@ def format_task_refs(refs: "Sequence[TaskRef | str]") -> str:
     Returns `""` for no refs, so a caller can omit the key entirely rather than
     writing `tasks: []` — an empty list and an absent key mean the same thing and
     the absent one is what 120 of 120 existing entries carry today.
+
+    🔴 A BARE STRING IS RE-PARSED, NOT TRUSTED. The signature accepts `str` for
+    convenience, and passing one through `str()` unchecked would let this
+    function WRITE a line the loader then rejects — a writer that produces
+    MALFORMED output is worse than one that refuses, because the file looks
+    written and the entry is invisible. `parse_task_ref` is the single validator,
+    so calling it here means "accepted by the writer" and "accepted by the
+    reader" cannot describe different sets.
     """
-    items = [str(r) for r in refs]
+    items = [str(r if isinstance(r, TaskRef) else parse_task_ref(r)) for r in refs]
     if not items:
         return ""
     return f"tasks: [{', '.join(items)}]"
@@ -477,8 +507,37 @@ def lossy_tag_for(ref: TaskRef) -> str:
     silent correlation collapse". So the lossless ref is the source of truth and
     the tag is computed FROM it on the way out; anything that parses a tag back
     into a ref is inventing one of the two originals with even odds.
+
+    🔴 THE GRAMMAR IS ENFORCED, NOT MERELY DESCRIBED. A docstring that states a
+    constraint the code does not apply is a claim no reader can rely on, and the
+    two failures here are reachable from refs `parse_task_ref` accepts:
+
+      * an ident of pure punctuation (`github:###`) normalizes to the empty
+        string, yielding the tag `github:` — an EMPTY slug half that collides
+        with every other such ref, which is the correlation collapse again;
+      * a long ident (a deep path, a 200-character id) exceeds 64 runes.
+
+    Both raise rather than returning a tag the destination will reject or, worse,
+    silently truncate. Raising is the correct direction: the caller has a
+    lossless ref in hand and can decide, whereas a bad tag propagates.
+
+    ⚠ `TAG_MAX_RUNES` is clawgate's limit, restated here because this function's
+    output is destined for it. It is not enforced anywhere else in this module.
     """
-    return f"{ref.system}{_TASK_REF_SPLIT}{normalize_ref(ref.ident)}"
+    slug = normalize_ref(ref.ident)
+    if not slug:
+        raise TaskRefError(
+            f"task ref {str(ref)!r} has an id half that normalizes to the empty "
+            f"string, so it has no distinguishable tag form"
+        )
+    tag = f"{ref.system}{_TASK_REF_SPLIT}{slug}"
+    if len(tag) > TAG_MAX_RUNES:
+        raise TaskRefError(
+            f"the tag form of {str(ref)!r} is {len(tag)} runes, over the "
+            f"{TAG_MAX_RUNES}-rune tag limit — the ref itself is still valid; "
+            f"only its lossy tag encoding is not"
+        )
+    return tag
 
 
 # --- The shared predicate ------------------------------------------------------
@@ -1894,11 +1953,11 @@ def parse_front_matter(text: str) -> dict[str, object]:
 
     🔴 THE BLOCK FORM IS PARSED BECAUSE NOT PARSING IT CORRUPTED THE MAPPING —
     it was never merely "ignored". Measured on the real parser before this
-    change, `tasks:` followed by `  - clickup:868kx9eut` and
+    change, `tasks:` followed by `  - clickup:868abc123` and
     `  - github:innovation-upstream/devrc#428` produced::
 
         {'service': 'thing', 'tasks': '',
-         '- clickup': '868kx9eut',
+         '- clickup': '868abc123',
          '- github': 'innovation-upstream/devrc#428'}
 
     — the key silently empty and EVERY item promoted to a phantom front-matter
@@ -1935,22 +1994,90 @@ def parse_front_matter(text: str) -> dict[str, object]:
     def _is_skippable(raw_line: str) -> bool:
         return not raw_line.strip() or raw_line.lstrip().startswith("#")
 
+    def _is_block_item(raw_line: str) -> bool:
+        """🔴 ANY `-`-led line is an ITEM, INCLUDING AN EMPTY ONE.
+
+        The narrower `startswith("- ")` is a defect, not a style choice, and it
+        resurrected the exact corruption this parser was widened to fix. A bare
+        `-`, or `- ` with only trailing whitespace, does not satisfy it, so the
+        block scan TERMINATED there and every ref below was promoted to a
+        phantom key again. Worse than the original bug: `tasks` then reads as
+        falsy, `from_mapping` treats the key as absent, and the entry LOADS
+        CLEAN reporting no tasks — the data is gone and every surface says the
+        file is fine. An empty item in the MIDDLE truncates instead, which is
+        the same failure wearing a success costume.
+
+        So membership is decided by the leading `-` alone; whether the item
+        carries a payload is a separate question, answered in `_block_items_from`.
+        """
+        s = raw_line.strip()
+        return s == "-" or s.startswith("- ")
+
     def _block_items_from(start: int) -> list[str]:
-        """The `- item` run beginning at `start`, stopping at the first line that
-        is not one. Blank and comment lines inside the block are skipped, exactly
-        as they are everywhere else in this parser."""
+        """The `- item` run beginning at `start`.
+
+        Stops at the first line that is neither an item nor a comment. An EMPTY
+        item contributes nothing but does NOT stop the scan — see
+        `_is_block_item`.
+
+        🔴 A BLANK LINE ENDS THE BLOCK — and this is a bound that MATTERS, not a
+        formatting nicety. It limits how far a bare `key:` can reach for items:
+        without it a bare `sensitivity:` binds a `- ` list separated from it by
+        blank lines and an unrelated comment, turning a string-valued key into a
+        list — the precise hazard the bare-key narrowing exists to prevent, and
+        one the lookahead that implements that narrowing would otherwise
+        reintroduce. Comments ARE skipped, because a comment between list items
+        is ordinary and carries no data.
+
+        ⚠ THE EXPLICIT BLANK CHECK BELOW IS NOT WHAT ENFORCES THAT, and saying so
+        matters: a mutation sweep proved removing it is an EQUIVALENT mutant that
+        survives the whole suite. A blank line is already not an item, so
+        `_is_block_item` returns False for it and the scan breaks one line later
+        by the general rule. The check stays as defence-in-depth — if
+        `_is_block_item` ever widens, this is the line that keeps the bound — but
+        the mechanism that actually holds today is `_is_block_item`, and a
+        docstring naming the wrong one is how the next reader deletes the load-
+        bearing half. (`claude/RULES.md`: two mechanisms reaching one outcome
+        cannot be told apart by any test; name the one that holds.)
+        """
         items: list[str] = []
         for j in range(start, len(lines)):
             candidate = lines[j]
-            if _is_skippable(candidate):
-                continue
-            s = candidate.strip()
-            if not s.startswith("- "):
+            if not candidate.strip():
                 break
-            item = s[2:].strip().strip("'\"")
+            if candidate.lstrip().startswith("#"):
+                continue
+            if not _is_block_item(candidate):
+                break
+            item = candidate.strip()[1:].strip().strip("'\"")
             if item:
                 items.append(item)
         return items
+
+    def _block_ends_at(start: int) -> int:
+        """The index of the last line belonging to the block opened before
+        `start` — items and interleaved comments alike.
+
+        🔴 SWALLOWS EMPTY ITEMS TOO. This must agree with `_block_items_from`
+        about MEMBERSHIP even where it disagrees about CONTENT: a member that
+        contributes no item still has to be consumed, or its own internal colon
+        promotes it to a phantom key. The two functions share `_is_block_item`
+        for exactly that reason — the membership predicate lives in ONE place,
+        because two spellings of it are what produced the bug this fixes.
+
+        ⚠ Its blank-line break carries the same caveat as `_block_items_from`'s:
+        measured as an equivalent mutant, kept as defence-in-depth. The rule that
+        actually stops the scan at a blank line is `_is_block_item`.
+        """
+        last = start - 1
+        for j in range(start, len(lines)):
+            if not lines[j].strip():
+                break
+            if lines[j].lstrip().startswith("#") or _is_block_item(lines[j]):
+                last = j
+                continue
+            break
+        return last
 
     consumed_through = -1
     for i, line in enumerate(lines):
@@ -1970,15 +2097,13 @@ def parse_front_matter(text: str) -> dict[str, object]:
             block = _block_items_from(i + 1)
             if block:
                 out[key] = block
-                # Swallow the items so their own internal colons cannot promote
-                # one to a phantom key — the corruption described above.
-                for j in range(i + 1, len(lines)):
-                    if _is_skippable(lines[j]) or lines[j].strip().startswith("- "):
-                        consumed_through = j
-                        continue
-                    break
             else:
                 out[key] = value.strip("'\"")
+            # Swallow UNCONDITIONALLY once any member follows — even when every
+            # item was empty and `block` is `[]`. Consuming only on a non-empty
+            # block is what let an all-empty list leave its members behind to be
+            # re-read as keys.
+            consumed_through = _block_ends_at(i + 1)
         else:
             out[key] = value.strip("'\"")
     return out

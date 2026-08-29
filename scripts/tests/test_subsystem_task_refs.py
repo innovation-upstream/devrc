@@ -29,7 +29,7 @@ provides (`claude/RULES.md`: a guard's description claims coverage).
   pre-change code with the corruption reproduced verbatim::
 
     {'service': 'thing', 'tasks': '',
-     '- clickup': '868kx9eut',
+     '- clickup': '868abc123',
      '- github': 'innovation-upstream/devrc#428'}
 
   INVARIANT GUARDS (green before AND after — they pin behaviour this change must
@@ -76,7 +76,7 @@ TOUCH = REPO / "scripts" / "lib" / "subsystem_touch.py"
 # A ref per shape that matters, kept in one place so a widening cannot quietly
 # drop one. The GitHub one is the reason the `#` cases exist; the Linear and Jira
 # ones are systems that appear NOWHERE in the source and must still round-trip.
-CLICKUP = "clickup:868kx9eut"
+CLICKUP = "clickup:868abc123"
 GITHUB = "github:innovation-upstream/devrc#428"
 CLAWGATE = "clawgate:428"
 LINEAR = "linear:ENG-441"
@@ -130,7 +130,7 @@ class TestTheRefGrammar:
     @pytest.mark.parametrize(
         "raw,system,ident",
         [
-            (CLICKUP, "clickup", "868kx9eut"),
+            (CLICKUP, "clickup", "868abc123"),
             (GITHUB, "github", "innovation-upstream/devrc#428"),
             (CLAWGATE, "clawgate", "428"),
             (LINEAR, "linear", "ENG-441"),
@@ -183,6 +183,36 @@ class TestTheRefGrammar:
     def test_a_non_string_is_rejected_rather_than_coerced(self):
         with pytest.raises(TaskRefError):
             parse_task_ref(428)
+
+    def test_a_COMMA_is_rejected_because_it_cannot_SURVIVE_serialization(self):
+        """🔴 ACCEPTED-BUT-NOT-ROUND-TRIPPABLE IS THE WORST OUTCOME.
+
+        `clickup:a,b` used to parse fine, and `format_task_refs` would then write
+        `tasks: [clickup:a,b]` — which the inline-list reader splits on the comma
+        into `clickup:a` and `b`, the second having no colon, so the whole entry
+        comes back MALFORMED and invisible to every reader. The writer would have
+        produced a file the loader rejects.
+        """
+        with pytest.raises(TaskRefError) as exc:
+            parse_task_ref("clickup:a,b")
+        assert "comma" in str(exc.value)
+
+    @pytest.mark.parametrize("bad", ["clickup:a\x00b", "clickup:a\x1bb", "clickup:a\x7fb"])
+    def test_a_CONTROL_CHARACTER_is_rejected(self, bad):
+        """A NUL or ESC in an id round-trips to disk, into `--json`, and onto a
+        terminal. Nothing legible needs one."""
+        with pytest.raises(TaskRefError) as exc:
+            parse_task_ref(bad)
+        assert "control character" in str(exc.value)
+
+    def test_the_WRITER_refuses_a_bare_string_the_READER_would_reject(self):
+        """`format_task_refs` accepts `str` for convenience; passing one through
+        unchecked would let it WRITE a malformed line. Accepted-by-the-writer and
+        accepted-by-the-reader must be the same set."""
+        with pytest.raises(TaskRefError):
+            format_task_refs(["hello world"])
+        # …and a valid bare string still works, so the convenience is intact.
+        assert format_task_refs([CLICKUP]) == f"tasks: [{CLICKUP}]"
 
 
 # --------------------------------------------------------------------------- #
@@ -312,7 +342,7 @@ class TestBothListForms:
         Measured on the reader before this change, with this exact fixture:
 
             {'service': 'thing', 'tasks': '',
-             '- clickup': '868kx9eut',
+             '- clickup': '868abc123',
              '- github': 'innovation-upstream/devrc#428'}
 
         The key silently empty and EVERY item promoted to a front-matter key by
@@ -340,7 +370,14 @@ class TestBothListForms:
 
     def test_a_key_AFTER_a_block_list_is_still_read(self):
         """The item-swallowing must stop at the first non-item line, or every key
-        below a block list disappears."""
+        below a block list disappears.
+
+        ⚠ This test is RED on origin/main for the PHANTOM-KEY reason, not for the
+        swallow-stop property its name describes — pre-change there is no
+        swallowing to stop. The property in the name is pinned by the sibling
+        test below, which was added after a mutation sweep showed THIS fixture
+        could not observe it.
+        """
         fm = parse_front_matter(
             "---\n"
             "tasks:\n"
@@ -353,6 +390,117 @@ class TestBothListForms:
         assert fm["tasks"] == [CLICKUP]
         assert fm["service"] == "thing"
         assert fm["sensitivity"] == "public"
+
+    def test_the_swallow_STOPS_at_the_first_non_item_line(self):
+        """🔴 THE MUTANT THIS EXISTS FOR: `break` -> `continue` in the swallow
+        loop, which SURVIVED the whole 1,692-test suite.
+
+        The sibling fixture above cannot see it: with nothing skippable after the
+        trailing keys, both versions land on the same `consumed_through`. One
+        extra TRAILING BLANK LINE is the whole difference — under the mutant the
+        loop keeps going past `service:`, swallows it, and the key vanishes.
+
+        Named `\\n` at the end rather than left to the fixture's formatting,
+        because the blank line IS the test.
+        """
+        fm = parse_front_matter(
+            "---\n"
+            "tasks:\n"
+            f"  - {CLICKUP}\n"
+            "service: thing\n"
+            "\n"
+            "---\n"
+        )
+        assert fm["tasks"] == [CLICKUP]
+        assert fm["service"] == "thing", (
+            "a key immediately after a block list was swallowed — the swallow "
+            "loop ran past the first non-item line"
+        )
+
+    def test_TWO_block_lists_in_one_file_do_not_merge(self):
+        """🔴 THE SECOND SURVIVING MUTANT: `break` -> `continue` in
+        `_block_items_from`, which SURVIVED because no fixture had two block
+        lists. Under the mutant the first key absorbs the second key's items.
+        """
+        fm = parse_front_matter(
+            "---\n"
+            "tasks:\n"
+            f"  - {CLICKUP}\n"
+            "aliases:\n"
+            "  - alpha\n"
+            "  - beta\n"
+            "---\n"
+        )
+        assert fm["tasks"] == [CLICKUP], "the first list absorbed the second's items"
+        assert fm["aliases"] == ["alpha", "beta"]
+
+    @pytest.mark.parametrize(
+        "shape,expected",
+        [
+            # 🔴 EVERY ONE OF THESE RESURRECTED THE CORRUPTION THIS PR FIXES.
+            # `- ` with only trailing whitespace, and a bare `-`, do not satisfy
+            # `startswith("- ")`, so the block scan used to TERMINATE on them and
+            # promote every ref below to a phantom key again — and, being falsy,
+            # `tasks` then read as ABSENT, so the entry LOADED CLEAN reporting no
+            # tasks. Strictly worse than the bug it replaced: the old mapping was
+            # at least visibly polluted.
+            ("  - \n  - {C}\n  - {G}\n", ["C", "G"]),   # empty item FIRST — zeroed
+            ("  - {C}\n  - \n  - {G}\n", ["C", "G"]),   # empty item MIDDLE — truncated
+            ("  - {C}\n  - {G}\n  - \n", ["C", "G"]),   # empty item TRAILING
+            ("  -\n  - {C}\n", ["C"]),                  # a BARE dash
+            ("  - \n  -\n", []),                        # every item empty
+        ],
+    )
+    def test_an_EMPTY_block_item_does_not_resurrect_the_phantom_key(
+        self, shape, expected
+    ):
+        body = shape.replace("{C}", CLICKUP).replace("{G}", GITHUB)
+        fm = parse_front_matter(f"---\nservice: thing\ntasks:\n{body}---\n")
+        want = [{"C": CLICKUP, "G": GITHUB}[k] for k in expected]
+        assert not any(k.startswith("-") for k in fm), (
+            f"an empty item left members behind to be re-read as keys: {sorted(fm)}"
+        )
+        assert set(fm) == {"service", "tasks"}
+        if want:
+            assert fm["tasks"] == want
+        else:
+            # Every item empty: no refs, and — crucially — no phantom keys.
+            assert fm["tasks"] in ([], "")
+
+    def test_an_empty_block_item_does_not_SILENTLY_TRUNCATE_the_ref_list(
+        self, tmp_path
+    ):
+        """The same defect at the LOADER, which is where it did its damage: the
+        entry loaded OK carrying only the refs above the empty item, so
+        `--validate`, the index badge and the store API all reported success on a
+        file that had silently lost a task."""
+        store = tmp_path / "store"
+        p = write_entry(
+            store, "devrc", "thing",
+            f"tasks:\n  - {CLICKUP}\n  - \n  - {GITHUB}\n",
+        )
+        assert [str(t) for t in load(p, "devrc").tasks] == [CLICKUP, GITHUB]
+
+    def test_a_bare_key_does_not_bind_a_DISTANT_list(self):
+        """🔴 THE LOOKAHEAD MUST BE BOUNDED, or the bare-key narrowing defeats
+        itself. An unbounded lookahead skips blanks and comments without limit,
+        so a bare `sensitivity:` reaches a `- ` list several lines below and
+        becomes a LIST — the exact type change the narrowing exists to prevent.
+        A blank line ends the block; a comment does not.
+        """
+        fm = parse_front_matter(
+            "---\n"
+            "service: thing\n"
+            "sensitivity:\n"
+            "\n"
+            "# a comment, and then something list-shaped\n"
+            f"- {CLICKUP}\n"
+            "---\n"
+        )
+        assert fm["sensitivity"] == "", (
+            "a bare key reached across a blank line and bound a distant list"
+        )
+        assert isinstance(fm["sensitivity"], str)
 
     def test_a_BARE_key_with_no_items_still_reads_as_a_STRING(self):
         """🔴 THE NARROWING THAT KEEPS THIS ADDITIVE.
@@ -425,6 +573,27 @@ class TestValidateRejectsAndNamesTheFile:
             f"a store with a malformed entry must not validate clean "
             f"(rc={proc.returncode})\n{combined}"
         )
+
+    def test_a_NON_SEQUENCE_tasks_value_raises_MalformedEntry_not_TypeError(self):
+        """🔴 THE THIRD SURVIVING MUTANT: deleting the `_AbcSequence` check
+        SURVIVED, because no test ever fed a non-sequence.
+
+        Without the guard, `from_mapping` iterates an `int` and the caller gets a
+        bare `TypeError` from inside the reader instead of a `MalformedEntryError`
+        naming the file — which is the difference between "this entry is broken,
+        here it is" and a stack trace the operator has to attribute themselves.
+
+        Reachable through the store API and any direct `from_mapping` caller.
+        `parse_front_matter` cannot itself produce a non-sequence today, which is
+        exactly why the guard needs a test rather than a fixture on disk.
+        """
+        with pytest.raises(MalformedEntryError) as exc:
+            SubsystemEntry.from_mapping(
+                {"service": "thing", "scope": "devrc", "tasks": 5},
+                source="thing.md",
+            )
+        assert "`tasks:` must be a list" in str(exc.value)
+        assert "thing.md" in str(exc.value)
 
     def test_a_DUPLICATE_ref_is_deduped_rather_than_rejected(self, tmp_path):
         """Same reasoning as `aliases:`: one task written twice is one task, and
@@ -513,16 +682,54 @@ class TestTheLossyTagIsDerivationOnly:
         assert str(a) != str(b)
         assert lossy_tag_for(a) == lossy_tag_for(b) == "github:zacxdev-homelab-infra-429"
 
-    def test_the_tag_is_legal_in_the_clawgate_grammar(self):
-        """Charset `[a-z0-9._/-]`, at most one colon, 64 runes. Asserted rather
-        than described, because the whole reason the tag is lossy is that the
-        lossless ref does NOT satisfy this."""
-        for raw in (CLICKUP, GITHUB, CLAWGATE, LINEAR):
-            tag = lossy_tag_for(parse_task_ref(raw))
-            assert tag.count(":") == 1, tag
-            assert len(tag) <= 64, tag
-            body = tag.replace(":", "", 1)
-            assert all(c in "abcdefghijklmnopqrstuvwxyz0123456789._/-" for c in body), tag
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            CLICKUP, GITHUB, CLAWGATE, LINEAR,
+            # 🔴 THE FOUR CONSTANTS ALONE MADE THIS TEST'S NAME WIDER THAN ITS
+            # BODY: all four are short and none normalizes to empty, so neither
+            # the length bound nor the empty-slug case could ever be observed.
+            # A description that claims a general property while sampling only
+            # inputs that cannot violate it reads as coverage and provides none.
+            "github:" + "a/" * 40 + "r#1",       # a deep path — over 64 runes
+            "clickup:" + "z" * 200,              # a long id — over 64 runes
+            "weird:...",                          # normalizes to the empty string
+            "weird:###",                          # ditto, all punctuation
+        ],
+    )
+    def test_the_tag_is_legal_in_the_clawgate_grammar_OR_REFUSES(self, raw):
+        """Charset `[a-z0-9._/-]`, at most one colon, 64 runes — ENFORCED.
+
+        A ref whose tag form cannot satisfy the grammar must RAISE, never return
+        a tag the destination will reject or silently truncate. Raising is the
+        right direction: the caller still holds the lossless ref and can decide,
+        whereas a bad tag propagates. So the assertion is "legal or refused",
+        and there is no third outcome.
+        """
+        ref = parse_task_ref(raw)
+        try:
+            tag = lossy_tag_for(ref)
+        except TaskRefError:
+            return  # refused — the other legal outcome
+        assert tag.count(":") == 1, tag
+        assert len(tag) <= 64, tag
+        slug = tag.split(":", 1)[1]
+        assert slug, "an empty slug half collides with every other such ref"
+        assert all(
+            c in "abcdefghijklmnopqrstuvwxyz0123456789._/-" for c in slug
+        ), tag
+
+    def test_the_over_long_and_empty_cases_are_genuinely_REACHED(self):
+        """🔴 THE CONTROL FOR THE TEST ABOVE. `try/except: return` passes
+        vacuously if nothing ever raises, so the two failure modes are asserted
+        to actually FIRE — otherwise the parametrize list would be decoration.
+        """
+        with pytest.raises(TaskRefError) as long_exc:
+            lossy_tag_for(parse_task_ref("clickup:" + "z" * 200))
+        assert "rune" in str(long_exc.value)
+        with pytest.raises(TaskRefError) as empty_exc:
+            lossy_tag_for(parse_task_ref("weird:###"))
+        assert "empty string" in str(empty_exc.value)
 
     def test_no_inverse_is_exported(self):
         import subsystem_resolver as sr
