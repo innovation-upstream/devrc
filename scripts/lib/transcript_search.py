@@ -306,6 +306,7 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
     # — see `skills_used` / `commands_typed` in session-tailer.py for the
     # measurement behind that.
     skills_attributed: dict = {}
+    skills_invoked: dict = {}
     commands_typed: dict = {}
 
     for rec in load_records(path):
@@ -336,6 +337,23 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
             if isinstance(skill, str) and skill.strip():
                 s = skill.strip()
                 skills_attributed[s] = skills_attributed.get(s, 0) + 1
+            # The EXPLICIT-invocation route: a `Skill` tool_use block. Read
+            # unconditionally rather than only under a wider surface — this is
+            # structure, not searchable text, so the surface knob (which selects
+            # what TERMS match against) must not silently narrow it.
+            # 🔴 `input.skill` ONLY; `input.args` beside it is operator free-text.
+            if typ == "assistant":
+                content = (rec.get("message") or {}).get("content")
+                if isinstance(content, list):
+                    for blk in content:
+                        if (isinstance(blk, dict) and blk.get("type") == "tool_use"
+                                and blk.get("name") == "Skill"):
+                            binp = blk.get("input")
+                            if isinstance(binp, dict):
+                                nm = binp.get("skill")
+                                if isinstance(nm, str) and nm.strip():
+                                    k = nm.strip()
+                                    skills_invoked[k] = skills_invoked.get(k, 0) + 1
             msg = rec.get("message") or {}
             is_user = typ == "user" and not rec.get("isMeta")
             if is_user and not genesis:
@@ -390,26 +408,49 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
         "term_hits": term_hits,
         "snippets": snippets,
         "skills_attributed": skills_attributed,
+        "skills_invoked": skills_invoked,
         "commands_typed": commands_typed,
     }
 
 
+def normalize_skill(name) -> str:
+    """The ONE normalisation for a skill name. Both the query and the corpus
+    side go through it.
+
+    🔴 It exists because there were TWO. `search()` normalised with `.strip()`
+    while the predicate also stripped a leading `/`, so `--skill /` was truthy,
+    slipped the empty-query guard, then normalised to `""` INSIDE the predicate
+    and failed every session — returning a corpus-wide **silent zero** with exit
+    0. That is the same silent zero this flag exists to remove, reintroduced
+    through a sibling input. One rule, one place.
+    """
+    if name is None:
+        return ""
+    return str(name).strip().lstrip("/").strip()
+
+
 def session_used_skill(rec, name) -> bool:
-    """Did this session use skill `name`, by EITHER route?
+    """Did this session use skill `name`, by ANY of the three routes?
 
     🔴 EXACT match on the skill's identity, never a substring of it. A substring
     predicate is how "which sessions used `signal`?" turns back into the keyword
     search this exists to replace — `sig` would match it, and so would a session
-    that merely wrote the word. Compare the ATTRIBUTED NAME, not the prose.
+    that merely wrote the word. Compare the RECORDED NAME, not the prose.
+
+    ⚠ `commands_typed` is ORed in, and it holds BUILT-INS: `--skill login`
+    therefore matches sessions that typed `/login`, which is not a skill. That
+    is deliberate — a typed `/name` is the user's own claim to have invoked
+    `name`, and dropping it would lose the typed-only sessions (`handoff`: 3)
+    that no other route sees. Intersect with the skill list if you need purity.
     """
-    if not name:
-        return False
-    want = str(name).strip().lstrip("/").strip().lower()
+    want = normalize_skill(name).lower()
     if not want:
         return False
-    for bag in (rec.get("skills_attributed") or {}, rec.get("commands_typed") or {}):
+    for bag in (rec.get("skills_attributed") or {},
+                rec.get("skills_invoked") or {},
+                rec.get("commands_typed") or {}):
         for got in bag:
-            if str(got).strip().lower() == want:
+            if normalize_skill(got).lower() == want:
                 return True
     return False
 
@@ -478,12 +519,12 @@ def search(terms, *, root=None, match_any=False, since=None, limit=None, project
     """
     if surface not in _SURFACE_RANK:
         raise ValueError(f"unknown surface {surface!r}; want one of {SURFACES}")
-    # Normalise BEFORE the guard reads it. A whitespace-only `skill` is truthy,
-    # so an un-normalised guard let `search([], skill="  ")` through — and every
-    # session then failed the predicate, returning an EMPTY result corpus-wide
-    # instead of raising. That is the silent zero this whole change exists to
-    # remove, reintroduced one line above it.
-    skill = str(skill).strip() if skill else ""
+    # Normalise BEFORE the guard reads it, with the SAME function the predicate
+    # uses. A `skill` that is truthy but normalises to empty (`"  "`, `"/"`)
+    # otherwise slips this guard and then fails the predicate for every session,
+    # returning an EMPTY result corpus-wide instead of raising — the silent zero
+    # this whole change exists to remove, reintroduced one line above it.
+    skill = normalize_skill(skill)
     if not terms and not skill:
         # AND over an empty term list is vacuously true, so this would return the ENTIRE
         # corpus ranked by nothing. Neither CLI can reach it (both reject an empty term

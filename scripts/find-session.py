@@ -30,7 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from transcript_search import (  # noqa: E402
-    DEFAULT_ROOT, SURFACE_ALL, SURFACE_TEXT, search,
+    DEFAULT_ROOT, SURFACE_ALL, SURFACE_TEXT, normalize_skill, search,
 )
 from opencode_search import search_opencode  # noqa: E402
 
@@ -102,6 +102,10 @@ def main(argv=None):
     # It now selects the search surface, which is the only thing it ever meant.
     surface = SURFACE_ALL if a.all else SURFACE_TEXT
 
+    # Read the NORMALISED value, not the raw one: `--skill /` and `--skill "  "`
+    # are truthy but name nothing, and a truthiness guard let them through to
+    # become a corpus-wide empty result (exit 0) or an unhandled traceback.
+    a.skill = normalize_skill(a.skill)
     if not a.terms and not a.skill:
         print("nothing to search for: give at least one term, or --skill NAME",
               file=sys.stderr)
@@ -145,6 +149,16 @@ def main(argv=None):
 
     shown = results[: a.limit]
 
+    # 🔴 The scope disclosure goes to STDERR and is emitted BEFORE the --json
+    # early return. It used to sit after it, so the one consumer that cannot
+    # infer scope from prose — a script reading `--skill X --json` — was the
+    # only one that got a bare `[]` with no indication that half the fleet's
+    # corpus was never searched. stderr keeps stdout valid JSON.
+    if skill_skips_opencode:
+        print("NOT searched: the opencode corpus (--skill has no attribution there); "
+              "these results are Claude Code sessions on THIS host only.",
+              file=sys.stderr)
+
     if a.json:
         print(json.dumps([render(r) for r in shown], indent=2))
         return 0
@@ -152,12 +166,6 @@ def main(argv=None):
     label = " ".join(a.terms)
     if a.skill:
         label = (f"skill={a.skill}" + (f" + {label}" if label else "")).strip()
-
-    # Printed BEFORE the count, and on the empty path too: a zero has to arrive
-    # carrying the scope it was measured over.
-    if skill_skips_opencode:
-        print("NOT searched: the opencode corpus (--skill has no attribution there); "
-              "these results are Claude Code sessions on THIS host only.\n")
 
     if not results:
         print(f"No sessions matched: {label}")

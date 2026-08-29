@@ -23,8 +23,16 @@ the workbench transcript corpus, counting SESSIONS (subagent transcripts exclude
 | skill | attributed | typed `/name` | attributed-only | typed-only |
 |---|---|---|---|---|
 | `browser` | 50 | 0 | **50** | 0 |
-| `clawgate` | 70 | 32 | 42 | 4 |
+| `clawgate` | 72 | 28 | 44 | 0 |
 | `activity` | 8 | 3 | 5 | 0 |
+| `handoff` | 383 | 346 | 40 | **3** |
+
+⚠ An earlier revision of this doc cited `clawgate` **4 typed-only** as the evidence that
+both directions have live instances. That number was **wrong**: it came from a raw file
+grep, which matches `<command-name>` inside quoted **tool output** — the exact false
+positive the shipped code narrows against, and one of the four "typed" sessions was the
+session writing this PR, grepping transcripts. clawgate's typed-only is **0**. The live
+typed-only instance is `handoff` (3). Do not re-derive either number with a grep.
 
 Most skill usage never involves typing the command — the skill **auto-fires from its
 description**. The only field that sees that is Claude Code's own `attributionSkill`,
@@ -100,14 +108,27 @@ Verified against the live corpus: `--skill signal` → **1** session, where the 
 returns 666. Counts cross-checked against an independent grep baseline at two points
 (`activity` 8 = 8, `browser` 50 = 50).
 
-Two coverage limits, both deliberate, both documented in the CLI help and the SKILL.md:
+Coverage limits, all deliberate, all documented in the CLI help and the SKILL.md:
 - It counts **sessions**, so a skill used only inside a dispatched subagent is not counted
   (`activity` had 15 such transcripts against 8 sessions). This matches the corpus
   boundary `find-session` already had, and the one `session-tailer` already had.
 - The **opencode corpus has no per-record attribution**, so that leg is skipped under
-  `--skill` and the omission is **printed**. Running it unfiltered would quietly answer a
-  different question; skipping it silently would hand back a partial count that reads as
-  the whole fleet. Both are the failure this flag exists to end.
+  `--skill` and the omission is **printed to stderr** — including on the `--json` path,
+  which is the one consumer that cannot infer scope from prose. Running it unfiltered
+  would quietly answer a different question; skipping it silently would hand back a
+  partial count that reads as the whole fleet. Both are the failure this flag exists to end.
+- A typed **built-in** matches (`--skill login` finds sessions that typed `/login`): the
+  typed route cannot distinguish a skill from a built-in, and dropping it would lose the
+  typed-only sessions no other route sees.
+
+### Three routes, not two
+
+A first revision read only attribution and typed commands. Claude Code also records an
+explicit **`Skill` tool_use** carrying `input.skill` — 1,305 blocks in the corpus — and
+missing it undercounted real usage by up to **87.5%** on one skill (`next-lever`: 1
+returned, 8 actual; `check-app` 14 vs 19; `resume` 100 vs 103). All three routes are now
+read, and `input.args` beside `input.skill` is **never** kept: it is operator free-text and
+live examples carry account identifiers.
 
 ---
 
@@ -133,6 +154,20 @@ WHERE source='claude' AND kind='session-summary'
 and only then add the registry arm — with a positive control showing a non-zero count
 before quoting any zero.
 
+**The deadman for `attributionSkill` itself.** It is an **undocumented upstream field**. If
+Claude Code renames or drops it, `skills_used` becomes `{}` for every session on both
+hosts, `--skill X` returns 0 for every skill, and *nothing fails* — a permanent silent
+zero, the exact class this work exists to remove. The right home is a
+`scripts/validation/invariants.py` check that at least one recent session carries a
+non-empty `skills_used`. It is **not** in this PR for the same reason as the reader arm:
+until rows accumulate it would be a **permanently-red gate**, which trains everyone to
+click through. Same precondition, same query — add both together.
+
+Note the other two routes fail differently and are less exposed: `Skill` tool_use and
+`<command-name>` are observable shapes in the transcript rather than a single named field,
+so a rename breaks one signal, not all three. That is an argument for keeping three
+fields, not for skipping the deadman.
+
 **P2 (the remote leg for the Claude corpus)** and **P5 (the creds/query helper)** are not
 here either. P2 is the higher-value of the two and is now partly disclosed rather than
 fixed: `--skill` prints that its results are this host only. The false "both hosts" claim
@@ -140,11 +175,10 @@ in `find-session`'s description is **still there** — deliberately untouched, b
 PR #989 is actively rewriting that file and a conflict on a doc line is pure cost. It
 should be corrected in #989's wake, whichever way P2 goes.
 
-**Also outstanding, from the same session:** the ClickHouse reader password should be
-rotated. It was printed in cleartext by a debugging `2>&1` and is persisted in the
-opencode session store. Worth checking whether the opencode `tool.execute.after`
-telemetry carries tool *output* into `activity.events`, which would put it in the table
-too.
+**Also outstanding, from the same session:** a credential-hygiene item was handed to the
+operator out-of-band. It is deliberately not described here — this repo is **PUBLIC**, and
+`SECRETS.md`'s convention is to record **dead** credentials with their rotation, never a
+live exposure and its blast radius.
 
 ---
 

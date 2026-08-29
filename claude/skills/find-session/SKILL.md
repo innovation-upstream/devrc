@@ -35,17 +35,20 @@ Notes:
   unreachable — so any earlier session that "searched with `--all`" searched the narrow
   surface. Re-run a query you trusted it for.
 - 🔴 **"Did we ever USE skill X?" is `--skill NAME`, NEVER a keyword search.** A keyword
-  cannot tell an invocation from the word in prose or in a path: measured 2026-08-29,
-  `find-session.py signal` returned **666** sessions (nearly all `scripts/signal/tests/…`
-  in test output) where `--skill signal` returns **1**. An investigation that used the
-  keyword form concluded "never used operationally" and was wrong. `--skill` reads the
-  per-record skill attribution, so it sees a skill that **auto-fired from its
-  description** as well as one typed as `/name` — and most usage is the former (`browser`:
-  50 attributed sessions, **0** ever typed). Works alone, with no search terms.
-  Two limits, both deliberate: it counts SESSIONS, so a skill used only inside a
-  dispatched **subagent** is not counted (`activity` had 15 such transcripts against 8
-  sessions); and the **opencode corpus has no such attribution**, so that leg is SKIPPED
-  and the omission is printed — do not read the result as fleet-wide.
+  cannot tell an invocation from the word written in prose or in a path: measured
+  2026-08-29, `find-session.py signal` returned **666** sessions where `--skill signal`
+  returns **1**. An investigation that used the keyword form concluded "never used
+  operationally" and was wrong. `--skill` matches on RECORDED IDENTITY across all three
+  invocation routes — the per-record attribution (which is the only one that sees a skill
+  **auto-firing from its description**, and most usage is that: `browser` = 50 attributed
+  sessions, **0** ever typed), an explicit `Skill` tool call, and a typed `/name`. Works
+  alone, with no search terms.
+  Limits, all deliberate: it counts SESSIONS, so a skill used only inside a dispatched
+  **subagent** is not counted (`activity` had 15 such transcripts against 8 sessions); the
+  **opencode corpus has no per-record attribution**, so that leg is SKIPPED and the
+  omission is printed to stderr — do not read the result as fleet-wide; and a typed
+  **built-in** matches too (`--skill login` finds the sessions that typed `/login`), since
+  the typed route cannot tell a skill from a built-in.
 - **Both agent runtimes are searched by default.** opencode rows are tagged `[opencode]`,
   carry `opencode:<host>` as their `file:`, and resume with `opencode --session <id>` (not
   `claude --resume`). `--claude-only` / `--opencode-only` restrict the corpus.

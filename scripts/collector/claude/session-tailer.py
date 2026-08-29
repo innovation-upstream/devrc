@@ -123,7 +123,7 @@ from _shared import (
 )
 # Reuse tailer's noise-filtering so "genuine user message" means the SAME thing
 # in the rollup as in the message stream (DRY — one definition of a real turn).
-from tailer import classify, extract_blocks
+from tailer import COMMAND_NAME, classify, extract_blocks
 
 
 # --------------------------------------------------------------------------- #
@@ -248,6 +248,31 @@ def _int(v) -> int:
 # --------------------------------------------------------------------------- #
 # Rollup
 # --------------------------------------------------------------------------- #
+# 🔴 A BOUND ON WHAT MAY BECOME A PAYLOAD KEY. These maps ship to ClickHouse for
+# every session on both hosts, and their keys come from transcript text.
+# `classify()` returns `(cname + " " + cargs)`, so an EMPTY or whitespace-only
+# `<command-name>` makes `ctext` the ARGS — and the first word of operator
+# free-text then became a key. Three inputs reached it: an empty name tag, a
+# whitespace name tag, and a `<command-name>` holding prose with no args tag. A
+# 4,000-char name also went straight through, multiplying the payload.
+#
+# Measured 2026-08-29 across 6,083 transcripts: 37 distinct real command names,
+# every one `/name`, none empty, none containing whitespace, longest 26 chars.
+# So this is a LATENT hazard with zero live instances — bounded here rather than
+# after it ships something.
+SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _note_name(bag: dict, raw, rollup: dict) -> None:
+    """Record `raw` as a key of `bag`, or count it as unusable. Never both."""
+    name = str(raw).strip().lstrip("/").strip() if raw is not None else ""
+    if not name or not SKILL_NAME_RE.match(name):
+        if raw is not None and str(raw).strip():
+            rollup["unusable_skill_names"] += 1
+        return
+    bag[name] = bag.get(name, 0) + 1
+
+
 def _empty_rollup() -> dict:
     """The zero rollup.
 
@@ -260,33 +285,49 @@ def _empty_rollup() -> dict:
     """
     r = {
         "tool_counts": {},
-        # WHICH SKILLS THIS SESSION USED — two INDEPENDENTLY OBSERVED signals,
+        # WHICH SKILLS THIS SESSION USED — THREE INDEPENDENTLY OBSERVED signals,
         # deliberately not merged into one number.
         #
-        # `skills_used`   {skill: assistant-records attributed to it}, read off
-        #                 Claude Code's own `attributionSkill` field. This is the
-        #                 only signal that sees a skill which AUTO-FIRED from its
-        #                 description rather than being typed.
+        # `skills_used`    {skill: assistant-records attributed to it}, read off
+        #                  Claude Code's own `attributionSkill` field. The only
+        #                  signal that sees a skill which AUTO-FIRED from its
+        #                  description rather than being invoked explicitly.
+        # `skills_invoked` {skill: Skill tool_use blocks}, from a `Skill`
+        #                  tool_use's `input.skill`. The explicit-invocation
+        #                  route. 🔴 `input.args` beside it is operator
+        #                  free-text — take the NAME only.
         # `commands_typed` {command: times typed}, from `<command-name>`. Named
-        #                 for what it actually holds: it includes BUILT-INS
-        #                 (`/login`, `/clear`), which are not skills, so a reader
-        #                 wanting skills must intersect it with the skill list.
+        #                  for what it actually holds: it includes BUILT-INS
+        #                  (`/login`, `/clear`), which are not skills, so a
+        #                  reader wanting skills must intersect with the skill
+        #                  list.
         #
-        # 🔴 NEITHER IS A SUPERSET OF THE OTHER, so a future "simplification"
-        # down to one field loses real usage in both directions. Measured
-        # 2026-08-29 over the workbench corpus, counting SESSIONS (subagent
-        # transcripts excluded, as everywhere else here):
-        #   browser   50 attributed,  0 typed  -> 100% invisible to the typed signal
-        #   clawgate  70 attributed, 32 typed  -> 42 attributed-only, 4 typed-only
-        #   activity   8 attributed,  3 typed  ->  5 attributed-only, 0 typed-only
-        # Both directions have live instances; both have a regression test.
+        # 🔴 NO ONE OF THEM IS A SUPERSET OF THE OTHERS, so a "simplification"
+        # down to one field loses real usage. Measured 2026-08-29 over the
+        # workbench corpus, counting SESSIONS (subagent transcripts excluded)
+        # with THIS module's own counting rule:
+        #   browser    50 attributed,   0 typed  ->  50 attributed-only, 0 typed-only
+        #   clawgate   72 attributed,  28 typed  ->  44 attributed-only, 0 typed-only
+        #   activity    8 attributed,   3 typed  ->   5 attributed-only, 0 typed-only
+        #   handoff   383 attributed, 346 typed  ->  40 attributed-only, 3 TYPED-ONLY
+        # ⚠ An earlier revision cited `clawgate` 4 typed-only as the evidence for
+        # the typed direction. That was WRONG — it came from a raw file grep,
+        # which matches `<command-name>` inside quoted TOOL OUTPUT, the exact
+        # false positive this module narrows against. clawgate's typed-only is
+        # **0**. `handoff` (3) is the real live instance; do not re-derive either
+        # number with a grep.
         #
         # Same convention as `tool_counts`, NOT the `changed_paths` one: an
         # unreadable transcript leaves these `{}` and lets `unreadable` /
         # `stats_unavailable` carry the verdict, rather than encoding
         # unobservability a second time in a different shape.
         "skills_used": {},
+        "skills_invoked": {},
         "commands_typed": {},
+        # Names REJECTED by SKILL_NAME_RE — a bounded-charset guard on what may
+        # become a payload key. Counted, never dropped silently: a filter nobody
+        # can count is indistinguishable from one wired to nothing.
+        "unusable_skill_names": 0,
         "input_tokens": 0,
         "output_tokens": 0,
         "cache_read_tokens": 0,
@@ -382,6 +423,7 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
     r = _empty_rollup()
     tool_counts: dict = r["tool_counts"]
     skills_used: dict = r["skills_used"]
+    skills_invoked: dict = r["skills_invoked"]
     commands_typed: dict = r["commands_typed"]
     languages: dict = r["languages"]
     err_cats: dict = r["tool_error_categories"]
@@ -425,9 +467,22 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
                             err_cats[cat] = err_cats.get(cat, 0) + 1
             # genuine typed / slash-command turns (reusing tailer's classifier).
             genuine = None
+            cmd_name = None
             for raw in extract_blocks(content):
                 if raw and raw.lstrip().startswith("[Request interrupted"):
                     r["user_interruptions"] += 1
+                # 🔴 Read the NAME TAG ITSELF, never `classify`'s text. classify
+                # returns `cname + " " + cargs`, so an empty or whitespace-only
+                # name tag makes the ARGS the whole string and its first word
+                # then looks exactly like a legitimate name — charset-valid,
+                # length-valid, and operator free-text. A bounded charset alone
+                # does NOT close that: the first fix for this tried it and the
+                # regression test still leaked `harbourPermit…`. Parsing the tag
+                # is what distinguishes "no name" from "a name".
+                if cmd_name is None and raw:
+                    m = COMMAND_NAME.search(raw)
+                    if m:
+                        cmd_name = m.group(1)
                 res = classify(raw)
                 if res is not None and genuine is None:
                     genuine = res  # (kind, text)
@@ -436,11 +491,8 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
                 # `classify` returns ("command", "/name args") for a slash
                 # invocation — take the NAME only, so args (which carry operator
                 # free-text) never reach the payload.
-                kind, ctext = genuine
-                if kind == "command":
-                    name = ctext.split(None, 1)[0].lstrip("/").strip()
-                    if name:
-                        commands_typed[name] = commands_typed.get(name, 0) + 1
+                if genuine[0] == "command":
+                    _note_name(commands_typed, cmd_name, r)
 
         elif typ == "assistant":
             msg = obj.get("message") or {}
@@ -449,8 +501,7 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
             # record's top level — a sibling of `message`, not inside it.
             skill = obj.get("attributionSkill")
             if isinstance(skill, str) and skill.strip():
-                s = skill.strip()
-                skills_used[s] = skills_used.get(s, 0) + 1
+                _note_name(skills_used, skill, r)
             model = msg.get("model")
             if model:
                 models.add(model)
@@ -468,6 +519,13 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
                         continue
                     name = block.get("name") or ""
                     tool_counts[name] = tool_counts.get(name, 0) + 1
+                    # The EXPLICIT-invocation route. 🔴 `input.skill` ONLY —
+                    # `input.args` sitting beside it is operator free-text
+                    # ("look up civitai user id …"), and this payload is public.
+                    if name == "Skill":
+                        sinp = block.get("input")
+                        if isinstance(sinp, dict):
+                            _note_name(skills_invoked, sinp.get("skill"), r)
                     inp = block.get("input")
                     # 🔴 A tool_use `input` that is not a dict is a MALFORMED
                     # TRANSCRIPT, not a caller bug — `or {}` kept a truthy list

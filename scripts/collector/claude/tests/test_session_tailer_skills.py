@@ -170,10 +170,90 @@ class TestCommandsTypedIsNotAClaimAboutSkills:
             "a built-in command must never be reported as a skill USE")
 
 
+class TestTheExplicitInvocationRoute:
+    """The THIRD route: a `Skill` tool_use block. 1,305 of them in the live
+    corpus, and reading only the other two undercounted real usage by up to
+    87.5% on a single skill (`next-lever`: 1 seen, 8 actual)."""
+
+    def test_a_Skill_tool_use_is_recorded(self):
+        rec = _assistant()
+        rec["message"]["content"] = [{"type": "tool_use", "name": "Skill",
+                                      "input": {"skill": "audit-pr", "args": "11"}}]
+        r = S.build_rollup([_typed(), rec])
+        assert r["skills_invoked"] == {"audit-pr": 1}
+
+    def test_the_INVOCATION_ARGS_never_reach_the_payload(self):
+        """🔴 `input.args` sits beside `input.skill` and is operator free-text —
+        live examples carry account ids. This payload is public."""
+        secret = "lookUpAccount8753561Fenwick"
+        rec = _assistant()
+        rec["message"]["content"] = [{"type": "tool_use", "name": "Skill",
+                                      "input": {"skill": "postgres-query",
+                                                "args": secret}}]
+        ev = S.build_event("sid", S.build_rollup([_typed(), rec]))
+        assert secret not in ev["payload"]
+        assert "postgres-query" in ev["payload"]
+
+    def test_a_NON_Skill_tool_use_contributes_nothing(self):
+        rec = _assistant()
+        rec["message"]["content"] = [{"type": "tool_use", "name": "Bash",
+                                      "input": {"skill": "not-a-skill"}}]
+        r = S.build_rollup([_typed(), rec])
+        assert r["skills_invoked"] == {}
+
+
 class TestNoOperatorFreeTextReachesThePayload:
     """🔴 devrc is PUBLIC and this payload ships to ClickHouse for every session
     on both hosts. The command NAME is a bounded, low-cardinality token; its
     ARGS are operator free-text."""
+
+    def test_an_EMPTY_command_name_does_not_promote_the_ARGS_to_a_key(self):
+        """🔴 `classify()` returns `cname + " " + cargs`, so an empty name tag
+        makes `ctext` the ARGS and the first word of operator free-text became a
+        payload key. The original guard only ever built a NON-empty name, so it
+        passed while this leaked."""
+        secret = "harbourPermitFenwick2026"
+        ev = S.build_event("sid", S.build_rollup(
+            [_typed(f"<command-name></command-name><command-args>{secret} and more"
+                    "</command-args>"), _assistant()]))
+        assert secret not in ev["payload"]
+
+    def test_a_WHITESPACE_command_name_does_not_either(self):
+        secret = "harbourPermitFenwick2026"
+        ev = S.build_event("sid", S.build_rollup(
+            [_typed(f"<command-name>   </command-name><command-args>{secret}"
+                    "</command-args>"), _assistant()]))
+        assert secret not in ev["payload"]
+
+    def test_PROSE_in_the_name_tag_with_no_args_tag_is_rejected(self):
+        secret = "harbourPermitFenwick2026"
+        ev = S.build_event("sid", S.build_rollup(
+            [_typed(f"<command-name>{secret} and more prose</command-name>"),
+             _assistant()]))
+        assert secret not in ev["payload"]
+
+    def test_an_ABSURDLY_LONG_name_cannot_inflate_the_payload(self):
+        """A 4,000-char name went straight through and multiplied the payload
+        size — for every session, on both hosts."""
+        ev = S.build_event("sid", S.build_rollup(
+            [_typed("<command-name>/" + "z" * 4000 + "</command-name>"), _assistant()]))
+        assert len(ev["payload"]) < 2000
+        assert "zzzz" not in ev["payload"]
+
+    def test_a_rejected_name_is_COUNTED_not_silently_dropped(self):
+        """A filter nobody can count is indistinguishable from one wired to
+        nothing — the repo's own rule."""
+        r = S.build_rollup(
+            [_typed("<command-name>not a valid name</command-name>"), _assistant()])
+        assert r["commands_typed"] == {}
+        assert r["unusable_skill_names"] == 1
+
+    def test_a_LEGITIMATE_name_still_gets_through(self):
+        """The negative control for the guard above: a bound that rejects
+        everything would pass every leak test and break the feature."""
+        r = S.build_rollup([_command("check-clickup-addressed"), _assistant()])
+        assert r["commands_typed"] == {"check-clickup-addressed": 1}
+        assert r["unusable_skill_names"] == 0
 
     def test_only_the_command_NAME_is_kept_never_its_args(self):
         secret = "read the harbour permit thread with Fenwick"

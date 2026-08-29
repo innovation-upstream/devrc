@@ -175,6 +175,48 @@ class TestTheCorpusWideGuardStillHolds:
         with pytest.raises(ValueError):
             ts.search([], root=tmp_path, skill="   ")
 
+    def test_a_BARE_SLASH_is_not_a_query_either(self, tmp_path):
+        """🔴 Two normalisations that disagreed: `search()` stripped whitespace
+        while the predicate ALSO stripped a leading `/`. So `--skill /` was
+        truthy, slipped this guard, normalised to "" inside the predicate, and
+        failed every session — a corpus-wide SILENT ZERO at exit 0. Same silent
+        zero, sibling input. One rule, one place."""
+        _write(tmp_path, "used", [_user("hi"), _assistant(skill="signal")])
+        with pytest.raises(ValueError):
+            ts.search([], root=tmp_path, skill="/")
+
+
+class TestTheThirdInvocationRoute:
+    """A `Skill` tool_use block — 1,305 in the live corpus. Reading only the
+    other two routes undercounted `next-lever` by 87.5% (1 seen of 8)."""
+
+    def _skill_block(self, name, args="some args"):
+        return json.dumps({
+            "type": "assistant", "timestamp": "2026-08-21T10:01:00.000Z",
+            "cwd": "/srv/repo",
+            "message": {"content": [{"type": "tool_use", "name": "Skill",
+                                     "input": {"skill": name, "args": args}}]}})
+
+    def test_a_skill_invoked_only_as_a_TOOL_is_found(self, tmp_path):
+        _write(tmp_path, "invoked", [_user("do the thing"),
+                                     self._skill_block("next-lever")])
+        assert _ids(ts.search([], root=tmp_path, skill="next-lever")) == ["invoked"]
+
+    def test_it_is_read_under_the_NARROW_surface_too(self, tmp_path):
+        """Structure, not searchable text — the surface knob selects what TERMS
+        match against and must not silently narrow this route."""
+        p = _write(tmp_path, "invoked", [_user("hi"), self._skill_block("audit-pr")])
+        rec = ts.scan_transcript(str(p), [], [], surface=ts.SURFACE_TEXT)
+        assert rec["skills_invoked"] == {"audit-pr": 1}
+
+    def test_a_NON_Skill_tool_use_does_not_count(self, tmp_path):
+        p = _write(tmp_path, "bash", [_user("hi"), json.dumps({
+            "type": "assistant", "timestamp": "2026-08-21T10:01:00.000Z",
+            "message": {"content": [{"type": "tool_use", "name": "Bash",
+                                     "input": {"skill": "not-a-skill"}}]}})])
+        rec = ts.scan_transcript(str(p), [], [])
+        assert rec["skills_invoked"] == {}
+
 
 # --------------------------------------------------------------------------- #
 # Scan-level shape
