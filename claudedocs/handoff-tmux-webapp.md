@@ -9,19 +9,58 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Phase 1 (the attention queue) is SHIPPED. Phase 2 (the tmux read model) is COMPLETE — BOTH
-halves shipped, deployed, and observed running UNATTENDED. Phases 3–6 are untouched.**
+**Phase 1 (attention queue) SHIPPED. Phase 2 (tmux read model) COMPLETE. Rank 3 (read-only
+`capture-pane` rendering) is ✅ DONE — BOTH HALVES SHIPPED, DEPLOYED AND VERIFIED LIVE
+2026-08-28. Phases 4–6 untouched; the lowest-numbered OPEN item is now rank 5.**
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC** — `clawgatectl health` is the only authority. It said
-**0.8.9** on 2026-08-28, the THIRD value this line carried in three readings that day
-(0.8.7 → 0.8.8 shipped here → 0.8.9 from a concurrent session, mid-session). The snapshot
-routes were re-verified on 0.8.9 after that supersession (200 with token, 401 without).
+**0.8.10** on 2026-08-28 immediately after this session deployed it. This line has now carried
+**four** values in two days (0.8.7 → 0.8.8 → 0.8.9 from a concurrent session → 0.8.10), which is
+the whole argument for reading the cluster instead of this paragraph.
+
+⚠ **THE PREVIOUS REVISION OF THIS HEADER SAID "MERGED-BUT-NOT-DEPLOYED" AND WARNED THAT THE
+FIRST SIGHT WOULD BE `collector predates the field` ON EVERY CARD. Both were true when written
+and are now FALSE** — the deploy landed within the hour, and because the DATA half shipped first
+the tab rendered real screens immediately. The warning's *reasoning* stands and is why the status
+vocabulary exists; its *reading* does not. Third time this header has gone stale inside a day.
+
+**Live at handoff (2026-08-28, measured not assumed):** pod `clawgate-fcd8c945b-44rqj`
+Running/ready, `restarts=0`, image `0.8.10`; `clawgatectl --version` **0.8.10 on BOTH hosts** (no
+skew note — the `buildVersion` half of the bump landed). `GET /ui/tmux` → **200, 208,347 bytes**,
+both host sections, **48 pane screens**, 0 stale badges, 0 unreachable, and the decision-surface
+scan clean **on the live page**. Read model **48 `ok` / 28 `not_claude`**, largest preview
+9,032 B against the 16 KiB cap, **0 truncated**. Feeder ticking unattended at ~450 KB/push,
+**~10.5% of the 4 MB ingest cap**.
+
+**Both host checkouts current:** devrc `main` = `1c0db104` on both (`ship.sh`, cross-host
+agreement at one sha); `homelab-talos` `trunk` = `8c6a8508` on both — the laptop's was **17
+commits behind** and was fast-forwarded this session, because `clawgatectl` is BUILT from that
+tree and a switch there would otherwise have shipped a stale binary. `ship.sh` does NOT converge
+that repo.
 
 *How the design got here (carried forward):* settled 2026-08-26 across two rounds — a greenfield
 session, then an audit that reopened four decisions — then a re-platform onto clawgate that resolved
 three of them outright. The sections below from `## Platform` down are that design, still current.
 
 **Shipped, newest first:**
+- **`ZacxDev/homelab-infra#496`** — rank 3's RENDERING half — merged as **`844a7350`** and
+  **DEPLOYED as clawgate 0.8.10** (pin `8c6a8508`). A read-only Tmux tab: one section per host
+  with independent staleness + reachability badges, one card per window carrying the pane's
+  visible screen. 🔴 **No decision surface, and that is a PREREQUISITE not a preference** — a
+  write here is `send-keys`, and rank 5's fail-closed wrapper does not exist yet.
+  ⚠ Adding the tab needed **five** registry entries (`tabKeys`, `tabHeadings`, the sidebar, the
+  JS `TABS` array, the JS `HEADINGS` map); the repo's own guards caught the two that were missed.
+- **`innovation-upstream/devrc#992`** — rank 3's DATA path — merged as **`3d29aba1`**, shipped to
+  both hosts. `session-manager` publishes each Claude pane's visible screen as `pane_preview` +
+  `pane_preview_status`, from the capture batch that ALREADY ran and threw the screen away, so
+  it costs zero extra tmux work. Opt-in `--pane-preview`; the pusher is the one caller that
+  passes it. 🔴 **No server change was needed** — migration 0027's "unknown fields preserved
+  verbatim" contract held, verified end-to-end against live 0.8.9 BEFORE any UI existed
+  (POST 322 KB → 200; GET returned 46 rows `ok` / 26 `not_claude`, rename intact).
+  Gates: BOTH sandbox tiers green on the branch AND on the MERGED tree.
+- **`innovation-upstream/devrc#996`** — not this feature, but it is what UNBLOCKED it:
+  `test_subsystem_store_api.py` had gone broadly flaky under load and was reddening
+  `tekton/devrc-pytests` for **three PRs at once, including its own fix**. Merged `1b1f71ad`.
 - **`innovation-upstream/devrc#974`** — the host-side pusher, phase 2's remaining half — merged as
   **`f0308e46`** and shipped to both hosts. `scripts/tmux-snapshot-push.sh` + a serverMode-gated
   systemd timer (2 min). ✅ **VERIFIED BY AN UNATTENDED TICK**, which is the only proof that counts
@@ -325,31 +364,91 @@ do not renumber again without releasing the live claims first.
    route, not the fork). Both logged `suggest sent ok` from the detached child; no scratch leaked.
    ⚠ The two hosts pulled at different moments, so they carry the detach at different commits
    (`a38360a5` / `6cda752c`) — `drift-check.sh` will report that correctly and it is not a defect.
-3. ✅ **DECIDED 2026-08-28 (Zach): read-only `capture-pane` rendering first.** A4 is closed as a
-   decision; the BUILD is blocked on item 4 — see the dependency below.
+3. ✅ **DONE 2026-08-28 — BOTH HALVES SHIPPED, DEPLOYED AND VERIFIED THROUGH THE REAL PATH.**
+   Data path: `innovation-upstream/devrc#992` (squash `3d29aba1`), shipped to both hosts.
+   Rendering: `ZacxDev/homelab-infra#496` (squash `844a7350`), **deployed as clawgate 0.8.10**
+   (pin `8c6a8508`). Claim `tmux-webapp-3` released.
 
-   🔴 **The premise this item carried for two sessions was FALSE, and it was the whole argument.**
-   It read "clawgate vendors only two hand-written JS files (~3.7 KB) and **no third-party bundle**,
-   so xterm.js would be the first." Measured 2026-08-28: the two hand-written files are real but
-   live at `internal/ui/js/{filter-toggle,tag-normalize}.js`, individually `go:embed`ed — and
-   **`web/static/vendor/` already holds FIVE third-party bundles totalling ~245 KB**
-   (`htmx.min.js` 51 KB, `faro-web-sdk.iife.js` 93 KB, `faro-web-tracing.iife.js` 82 KB,
-   `idiomorph-ext.min.js` 10 KB, `sse.js` 9 KB), every one referenced from the Go-built HTML and
-   swept up by `//go:embed static` in `web/static.go`. So xterm.js would be the **sixth**, and the
-   "no precedent" objection does not exist. Vendoring is a solved, offline-safe pattern here: drop
-   the file in `web/static/vendor/`, reference it, done — no build step, no CDN.
+   **DECIDED 2026-08-28 (Zach): read-only `capture-pane` rendering first**, over vendoring
+   xterm.js. Carried forward because the REASON outlives the decision and rank 7 will face it
+   again:
+   - 🔴 **THE PREMISE THIS ITEM CARRIED FOR TWO SESSIONS WAS FALSE, and it was the whole
+     argument.** It read "clawgate vendors only two hand-written JS files (~3.7 KB) and **no
+     third-party bundle**, so xterm.js would be the first." Measured 2026-08-28: the two
+     hand-written files live at `internal/ui/js/{filter-toggle,tag-normalize}.js`, individually
+     `go:embed`ed — and **`web/static/vendor/` ALREADY holds FIVE third-party bundles totalling
+     ~245 KB** (`htmx.min.js` 51, `faro-web-sdk.iife.js` 93, `faro-web-tracing.iife.js` 82,
+     `idiomorph-ext.min.js` 10, `sse.js` 9), all swept up by `//go:embed static`. **xterm.js
+     would be the SIXTH; the "no precedent" objection does not exist.** Vendoring is solved and
+     offline-safe here: drop the file in `web/static/vendor/`, reference it, done.
+   - **The decision survives on a BETTER reason:** an interactive terminal means `send-keys` =
+     arbitrary command execution as Zach on both machines, so **item 5's fail-closed wrapper is a
+     hard prerequisite** — "vendor xterm.js" drags the highest-stakes decision in this project
+     forward. Read-only has no write path and therefore no such coupling. That is why the tab
+     that shipped carries no decision surface, enforced by a test.
 
-   **The decision survives on a BETTER reason, which this item never connected to itself:** an
-   interactive terminal means `send-keys`, which is **arbitrary command execution as Zach on both
-   machines**. Item 5's fail-closed auth wrapper is then a hard prerequisite, so "vendor xterm.js"
-   is not a library choice — it drags the highest-stakes decision in this project forward. Read-only
-   has no write path and therefore no such coupling.
+   🔴 **THE DOC SAID THIS ITEM "NEEDS NO FURTHER DECISIONS" AND THAT WAS WRONG.** It never said
+   WHERE the pane text rides. Measuring first surfaced a real fork — fold it into the existing
+   2-minute push, or build an on-demand rendezvous — that would have been costly to get wrong
+   across two repos. **Zach chose snapshot-carried previews.**
 
-   🔴 **DEPENDENCY — read-only rendering CANNOT be built before item 4.** Measured against the live
-   deployment 2026-08-28: `hostNetwork/hostPID/hostIPC` all false, `nodeName` null, and the only
-   volume is a PVC — so the pod has no path to a host tmux socket, and `capture-pane` output has to
-   be *delivered* from the host. (The image is distroless with no shell, so probe it via the spec,
-   not `kubectl exec`.) Item 4 is the next buildable thing; item 3 needs no further decisions.
+   **The measurements that constrain the design** (72 live panes, 45 workbench + 27 laptop):
+   - 🔴 **SCROLLBACK IS EXCLUDED ON A HARD BOUND.** ~**4,014 B per line fleet-wide**, so
+     `-S -1000` computes to **6.13 MB** against `maxTmuxPushBytes` (4 MB) — the cap breaches at
+     **~650 lines/pane**. Visible screen only; `tail` serves history one window at a time.
+   - 🔴 **ONLY 22% OF PANES CHANGE PER TICK** (10 of 45 over a real 120 s interval), so 77% of
+     the bytes are resent unchanged. In absolute terms that is cheap (62 MB/day gzipped) — **the
+     objection is STALENESS, not bandwidth.** That is the standing argument for an on-demand
+     path later, and the reason one was NOT built now.
+   - shipped shape: 46 Claude panes carry text, 26 shells report `not_claude`. Per-pane cap
+     16 KiB ≈ 2.4x the largest pane then observed (6,616 B).
+
+   🔴 **THE RATIO IS NOT A CONSTANT, AND THIS DOC SHOULD NOT BE READ AS IF IT WERE.** The PR and
+   an earlier revision here say **2.63x** (122,731 → 322,204 B, measured back to back). **In
+   production the first post-deploy push was 3.81x** (115,002 → 438,538 B) and it now sits at
+   ~450 KB. Both readings are honest; the ratio moves with pane count and how full each screen
+   is. What is stable is the headroom: **~10.5% of the 4 MB cap**, ~9.6x clear.
+
+   **Producer, as shipped.** `pane_preview` + `pane_preview_status` on every row, sourced from
+   the capture batch that ALREADY ran (`waiting_probable`/`unsent_prompt` are derived from it and
+   it threw the screen away) — so it costs **zero extra tmux work**. Opt-in `--pane-preview`;
+   `tmux-snapshot-push.sh` is the one caller that passes it, pinned by its own argv test because
+   dropping the flag is a one-word edit that leaves every other test green while the read model
+   stores rows that structurally cannot render. 🔴 **NO SERVER CHANGE WAS NEEDED** — migration
+   0027's "unknown fields preserved verbatim" contract held, verified end-to-end against live
+   0.8.9 before any UI existed.
+
+   **Renderer, as shipped.** `internal/ui/tmux.go` + `internal/api/tmux_ui.go`, `GET /tmux` +
+   `GET /ui/tmux`.
+   - 🔴 **NO DECISION SURFACE, AND IT IS A HARD PREREQUISITE.** A write here is `send-keys` =
+     arbitrary command execution as Zach on both machines, and **item 5's fail-closed wrapper
+     does not exist yet**. `TestTmuxGridCarriesNoDecisionSurface` asserts the RENDERED HTML has
+     no form/button/hx-post — against output, not source, because a helper that emits a button
+     is still a button. **Do not add one before item 5.**
+   - 🔴 **THE FOUR NULLS.** `disabled` (never asked) / `not_claude` (shell, never captured) /
+     `uncaptured`+`skipped`+`error` (asked, not measured) / `truncated` (a PREFIX, shown AND
+     labelled) / `ok`, plus the EMPTY status = "collector predates the field". A test pins that
+     no two share a sentence. This is what makes a half-deployed fleet debuggable.
+   - 🔴 **THE TAB NEEDED FIVE REGISTRY ENTRIES** — `tabKeys`, `tabHeadings`, the sidebar, **the
+     JS `TABS` array** and **the JS `HEADINGS` map**. The existing guards caught the two that
+     were missed (`TestAttentionTabIsWiredIntoEveryTabList`, and the axe scan on two
+     `text-slate-500` uses at 4.24:1). Adding an eighth tab? Expect all five.
+   - 🔴 **THE PANEL POLLS (60 s), it does not await an SSE event.** This read model is fed by an
+     OUTSIDE agent and clawgate emits no `tmux.changed`; an `sse:` trigger would look like
+     working code and never fire. Pinned by a test.
+   - The two HUMAN routes are registered **unconditionally**, outside `registerTmuxRoutes`'
+     nil-store guard, because `Page` renders the panel on every boot — a store-less boot would
+     otherwise paint a tab whose panel 404s. MACHINE routes stay behind the guard.
+
+   ✅ **VERIFIED LIVE 2026-08-28, not inferred.** Pod `clawgate-fcd8c945b-44rqj` Running/ready,
+   `restarts=0`, image `0.8.10`; `clawgatectl health` = 0.8.10; `clawgatectl --version` = 0.8.10
+   on BOTH hosts (no skew note). `GET /ui/tmux` → **200, 208,347 bytes**, both host sections,
+   **48 pane screens**, age badges `1m ago`, 0 stale, 0 unreachable, and the decision-surface
+   scan clean **on the live page**. Read model: 48 `ok` / 28 `not_claude`, largest preview
+   9,032 B against the 16 KiB cap, **0 truncated**.
+
+   Tests: 15 producer + 15 renderer, mutation-swept **10/10** and **11/11** non-equivalent
+   mutants killed, each with a green baseline verified BEFORE and AFTER.
 4. ✅ **DONE 2026-08-28 — BOTH HALVES SHIPPED, DEPLOYED AND OBSERVED RUNNING UNATTENDED.**
    Server: `ZacxDev/homelab-infra#468` (`32f49804`), deployed as clawgate **0.8.8**
    (`628a963a`). Pusher: `innovation-upstream/devrc#974`, squash-merged **`f0308e46`**,
@@ -472,6 +571,34 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
   `session-manager`'s waiting-detection is read-only and cheap to add if the queue misses cases.
 
 ## Gotchas
+- 🔴 **A FAILED `git worktree add` DOES NOT STOP THE NEXT `git -C <path>` — AND I LANDED A
+  MERGE ON ANOTHER SESSION'S BRANCH THIS WAY.** `worktree add /home/zach/workspace/devrc-integ`
+  failed with `fatal: … already exists` (another session was using that path for
+  `integ/963-965`); the very next line, `git -C /home/zach/workspace/devrc-integ merge
+  origin/feat/…`, ran happily **inside their worktree** and committed a merge onto **their**
+  branch. It is silent: no conflict, clean tree, and `git log` afterwards shows exactly what
+  you expect, because you are reading the branch you landed on. Recovered via `git reflog`
+  (pre-merge head `ea9811ed`) + `git reset --keep`, which refuses rather than destroys.
+  **Two rules: give every scratch worktree a PID-UNIQUE name, and branch on `worktree add`'s
+  EXIT CODE before issuing one more `-C` command against that path.** A generic name like
+  `<repo>-integ` is exactly the one another session also picked.
+- 🔴 **THE ZSH NO-WORD-SPLITTING TRAP RETURNED A CONFIDENT `0` FOR EVERY SCROLLBACK DEPTH —
+  in a session that had already read the rule.** `panes=$(tmux list-panes …); for p in $panes`
+  loops **ONCE** on the whole newline-joined string, so `capture-pane -t "%1\n%2\n…"` fails and
+  every total is 0. It does not error; it reports a clean measurement of nothing. The tell was
+  a POSITIVE CONTROL: an earlier inline `for p in $(…)` had already measured 51,406 B for the
+  same host, so a 0 was impossible. Fix: `${=var}`, a real array, or pipe to `bash -s`. 🔴
+  **Never quote a zero from a shell loop you have not positive-controlled** — this is the same
+  family as the `gawk` silent zero this feature already paid for once.
+- ⚠ **`test_subsystem_store_api.py::TestTrustedProxyOverTheRealProcess::test_THE_DEFECT_the_five_forged_attempts_are_CHARGED_TO_THE_FORGER`
+  is a live ~15% flake under load, and its signature is `assert 4 == 5`** ("expected at least 5
+  `store-api audit` lines, got 4"). Its own comment records 3/20 red locally plus two
+  consecutive reds in the nix sandbox. Measured 2026-08-28 while gating #992 on a box at load
+  18–51 from concurrent agents: branch full-target **2 green / 1 red**, `origin/main` green,
+  the test alone **6/6 on both trees**, and BOTH sandbox tiers green. 🔴 **Do not re-run and
+  move on — run the discriminating control** (full target on a clean `origin/main` worktree)
+  and check whether unrelated targets' wall times also moved; here a 273-test target swung
+  9.56 s → 5.52 s between runs, which is load inflating everything, not one assertion.
 - 🔴 **A TRUNCATED READ, WRITTEN DOWN, IS INDISTINGUISHABLE FROM A FACT — and I did it TWICE in one
   session.** A `jq … | head -2` made the laptop look like it had no clawgate Stop hook registered
   (it does), and a `print(sorted(d.keys())[:8])` made session-manager look like it emits no
@@ -685,8 +812,15 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
 - ⚠ **THE ZSH `MULTIOS` TRAP BIT AGAIN, in a session that had already read the rule.**
   `cmd 2>&1 >/dev/null | head` delivers **stdout**, not stderr, so a "no skew warning" reading
   was of the wrong stream. Give each stream its own file and read both.
-- 🔴 **NOTHING READS `GET /api/tmux/snapshot`** outside clawgate's own tests — no UI, no page,
-  no script. So the read model's `receivedAt` staleness is **recorded and unread**, and any
+- ⚠ **OBSOLETE AS OF `ZacxDev/homelab-infra#496` — kept because the REASONING below still
+  governs, and because this doc carried the claim for weeks.** The Tmux tab now reads
+  `GET /api/tmux/snapshot` and renders `receivedAt` as a per-host age badge that turns red past
+  6 minutes (three missed feeder ticks). 🔴 **But a MERGED reader is not a RUNNING one** — the
+  image pin has no Flux automation, so until the pin moves the sentence below is still literally
+  true in production. Re-read it as: the staleness signal is now rendered, and is still not an
+  ALARM — nothing pages anyone, a human has to look at the tab. The original text:
+  **nothing read `GET /api/tmux/snapshot`** outside clawgate's own tests — no UI, no page,
+  no script. So the read model's `receivedAt` staleness was **recorded and unread**, and any
   design that names it as a compensating control is naming a control that does not exist. The
   feeder's real alarm is its distinct non-zero exit codes landing in the user manager's
   failed-unit list, which `/standup` reads — that covers the codes and **NOT** a run that exits
@@ -698,11 +832,87 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
   ClickHouse query per run. `--lean` is the lever if that ever matters, at the cost of the
   verbatim/dumb-pipe property.
 
+- 🔴 **A FAILED `git worktree add` DOES NOT STOP THE NEXT `git -C <path>` — AND IT LANDED A MERGE
+  COMMIT ON ANOTHER SESSION'S BRANCH.** `worktree add /home/zach/workspace/devrc-integ` failed
+  `fatal: … already exists` (another session held that path for `integ/963-965`); the very next
+  line, `git -C /home/zach/workspace/devrc-integ merge origin/feat/…`, ran happily **inside their
+  worktree** and committed onto **their** branch. Silent: no conflict, clean tree, and `git log`
+  afterwards shows exactly what you expect because you are reading the branch you landed on.
+  Recovered via `git reflog` (pre-merge head) + `git reset --keep`, which refuses rather than
+  destroys. **Two rules: PID-unique scratch worktree names, and branch on `worktree add`'s EXIT
+  CODE before issuing one more `-C` against that path.** A generic `<repo>-integ` is precisely the
+  name another session also picked.
+- 🔴 **THE ZSH NO-WORD-SPLITTING TRAP RETURNED A CONFIDENT `0` FOR EVERY SCROLLBACK DEPTH — in a
+  session that had already read the rule, and then AGAIN an hour later.** `panes=$(tmux
+  list-panes …); for p in $panes` loops **ONCE** on the whole newline-joined string, so
+  `capture-pane -t "%1\n%2\n…"` fails and every total is 0. It does not error; it reports a clean
+  measurement of nothing. Only a POSITIVE CONTROL caught it — an earlier inline `for p in $(…)`
+  had already measured 51,406 B for that host, so 0 was impossible. Fix: `${=var}`, a real array,
+  or pipe to `bash -s`. Same family as the `gawk` silent zero this feature already paid for.
+- 🔴 **A `pgrep -f` WAIT LOOP MATCHES ITS OWN COMMAND LINE AND NEVER EXITS.** Two of this
+  session's `until … ! pgrep -f "<pattern>"; do sleep; done` loops spun for **45 and 62 minutes**
+  on an already-loaded box, because the pattern appeared in the loop's own `/proc/<pid>/cmdline`.
+  The condition can never go false. Resolve PIDs and compare `/proc/<pid>/cwd`, or wait on a
+  FILE (`until grep -q DONE "$log"`), never on a pattern that contains itself.
+- 🔴 **A WORD-COUNT OVER RENDERED HTML IS NOT A MEASUREMENT OF STATE — pane CONTENT can spell the
+  word.** Grepping the live `/ui/tmux` page for `truncated` returned 3 and was reported as "3
+  panes hit the truncation path". The read model's own status field said **0 truncated**; the
+  three hits were the word appearing inside CAPTURED PANE TEXT — this very session's terminals
+  discussing truncation. This is the "a guard on WORDS is walkable" rule applied to an ad-hoc
+  probe: **read the STATUS FIELD, never a word count over a page that embeds arbitrary text.**
+- ⚠ **`test_subsystem_store_api.py` was broadly flaky under load on 2026-08-28/29 and blocked
+  EVERY devrc PR, including its own fix.** Four different tests failed across three PRs
+  (`TestTrustedProxyOverTheRealProcess`, `TestTheBackstopNeverSendsASecondResponse` ×2 variants,
+  `TestTheActorComesFromTheTOKEN`). 🔴 **The discriminator that settled it was a DOCS-ONLY PR
+  failing** — a one-markdown-file diff cannot break a store-api test. Each passed 5–6/6 in
+  isolation on clean `origin/main`, and the box was at load 18–51 from concurrent agents. Fixed
+  by devrc#996 (`1b1f71ad`, "audit BEFORE responding, and serialise the audit sink"). **If it
+  recurs: run the full target on a clean `origin/main` worktree before touching your diff, and
+  check whether UNRELATED targets' wall times also moved** — here a 273-test target swung
+  9.56 s → 5.52 s between runs, which is load inflating everything, not one assertion.
+- ⚠ **The pane-preview ratio is NOT a constant.** 2.63x measured back-to-back pre-deploy;
+  **3.81x** on the first production push. It moves with pane count and screen fullness. Quote the
+  cap headroom (~10.5% of 4 MB) rather than a multiplier.
+
 ## How to verify
 
 ```bash
 clawgatectl health                 # read the LIVE version; do not expect a number from this doc
-clawgatectl attention ls           # expect JSON; `unknown command "attention"` + exit 0 = stale binary
+clawgatectl --version              # must MATCH the server, on BOTH hosts — a mismatch means the
+                                   # buildVersion half of a pin bump was missed (reddens trunk)
+```
+
+**Is rank 3 actually working?** (the tmux pane grid — end to end, not a unit test)
+```bash
+# 1. the FEEDER is passing the flag and the timer — not you — is running it.
+#    A hand-run push proves nothing; the journal is the evidence.
+journalctl --user -u tmux-snapshot-push.service --since -10min | grep pushed
+#    expect ~450 KB every 2m0s. ~115 KB means --pane-preview is NOT being passed.
+
+# 2. the READ MODEL carries screens, and the STATUS FIELD is the discriminator —
+#    never grep the page for a word, pane content can spell it (see Gotchas).
+TOK=$(grep -E '^\s*(export\s+)?CLAWGATE_HOOK_TOKEN=' ~/.claude/clawgate.env | tail -1 | sed 's/.*=//; s/"//g')
+curl -s -H "Authorization: Bearer $TOK" http://192.168.50.250:30302/api/tmux/snapshot \
+  | python3 -c 'import json,sys,collections
+c=collections.Counter(); mx=0
+for r in json.load(sys.stdin):
+    for w in r.get("windows") or []:
+        c[w.get("pane_preview_status")]+=1
+        mx=max(mx,len((w.get("pane_preview") or "").encode()))
+print(dict(c), f"largest={mx:,}B cap=16,384")'
+#    expect {"ok": ~48, "not_claude": ~28}. ALL `disabled` => the collector ran without
+#    --pane-preview. ALL `null`/empty-status => that host is on a collector PREDATING the field.
+
+# 3. the TAB renders it.
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.50.250:30302/ui/tmux    # 200
+curl -s http://192.168.50.250:30302/ui/tmux | grep -c '<pre'                    # pane screens
+```
+🔴 **The decision-surface invariant, checked on the LIVE page — item 5's fail-closed auth wrapper
+does not exist yet, so this tab must have no write surface at all:**
+```bash
+curl -s http://192.168.50.250:30302/ui/tmux | grep -cE '<form|<button|hx-post|hx-delete|hx-put'
+# MUST be 0. Anything else means a control reached a tab whose write path is `send-keys`,
+# i.e. arbitrary command execution as Zach on both machines.
 ```
 
 **Is the idle reaper actually running?** (rank 1's answer — for ~9h it was NOT, and nothing said so)
@@ -727,9 +937,10 @@ print(f"open={len(rows)} idle={len(idle)} idle_past_4h={len(old)}")'
 Measured 2026-08-27 pre-fix: open=59, resolved=31, all=90 — the filter discriminates.
 - 🔴 **`clawgatectl` is built from the LOCAL `homelab-talos` tree**, so a behind checkout ships a
   binary missing verbs that prints help and **exits 0** under a plausible version label. Both hosts
-  need `homelab-talos` current *before* a `home-manager switch`.
-- **The feature's own proof** is end-to-end, not a unit test: trigger a real `AskUserQuestion`, then
-  confirm a `kind=question priority=high` row appears via
+  need `homelab-talos` current *before* a `home-manager switch`. Measured 2026-08-28: the laptop
+  was **17 commits behind** while the workbench was current — `ship.sh` does NOT converge it.
+- **The attention feature's own proof** is end-to-end, not a unit test: trigger a real
+  `AskUserQuestion`, then confirm a `kind=question priority=high` row appears via
   `curl -H "Authorization: Bearer $CLAWGATE_HOOK_TOKEN" http://192.168.50.250:30302/api/attention`
   — and that it sorts **above** the `idle` rows. Entry fields are camelCase (`sessionId`), not
   snake_case.

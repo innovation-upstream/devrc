@@ -273,6 +273,50 @@ deliberately — the shas and constants are the arc's only compact index):
   homelab cluster is not in this machine's kubeconfig — so all of the above is from
   commit statuses plus local reproduction.
 
+### 🔴 `tekton/devrc-pytests` goes RED on DOCS-ONLY PRs, and the status names nothing
+- **Symptom + exact repro:** open a devrc PR touching only
+  `claudedocs/handoff-bridge-unbounded-waits.md`. `tekton/devrc-pytests` reports
+  **FAILURE** while `tekton/devrc-nodetests` reports SUCCESS. The status carries **no
+  `description` and no `targetUrl`**, so nothing says which target failed.
+- **Observed (with values), 5 runs over 4 commits, 2026-08-28/29:**
+  - PR **#991** (1 file): `20b18150` → **FAILURE**; `82a35437` (+1 line, a path fix) → SUCCESS.
+  - PR **#994** (same file): `f8a0eae4` → **FAILURE**; **the SAME commit re-triggered by
+    close/reopen → FAILURE again**; `c4314e4a` (+1 prose block) → SUCCESS.
+  - Tally: **3 red / 2 green**. Two of the reds are the **same commit**.
+  - On the red commit, locally: `test_handoff_doc.py`, `test_no_public_ips.py`,
+    `test_resume_state_handoff_resolution.py`, `test_drift_check.py`,
+    `test_doc_path_rot.py` → **737 passed, 0 failed**; `test_doc_path_rot.py` alone → 77 passed.
+- **Ruled out:**
+  - *doc-path-rot rejecting a bad path* — `claudedocs/` is **deliberately not in its
+    corpus** (`CORPUS_DIRS = ("claude", "CLAUDE.md")`; only agent-instruction surfaces are
+    gated). It passed 77/77 even with a genuinely broken path present in the doc.
+  - *`devrc-nodetests`* — SUCCESS in all five runs.
+  - *a local reproduction* — bare `python3 -m pytest scripts/tests` at `origin/main` gives
+    **77 failed / 9711 passed**, but all 12 failing FILES are harness/isolation targets
+    (`test_run_tests_*`, `*_isolation`, `test_no_real_launchers_all_targets.py`) that need
+    the nix dev shell. That is an **environmental** red and does NOT reproduce CI's.
+- **Leading hypothesis: none that survives, and that is the finding.** The
+  same-commit red/red pair argues against a per-run flake; the green-on-the-next-commit
+  pair argues against a deterministic content failure. One mechanism cannot be both, so at
+  least one pair is being misread — most likely the greens, since a one-line prose edit to
+  a markdown file is not a plausible cause of a pytest suite flipping. 🔴 **Do not read
+  "it went green on the next push" as resolved** — that exact reading was made and
+  withdrawn twice in this arc.
+- **Next probe — the ONE fact that settles it:** which of `run-tests.sh`'s ~28 targets
+  exited non-zero. 🔴 **Not obtainable from the civit dispatch hub**: devrc CI runs on the
+  **homelab** cluster and that host carries only `workbench-kubeconfig`, where
+  `kubectl get pipelinerun` answers *"the server doesn't have a resource type"*. From a
+  host with homelab access:
+  ```bash
+  KC=<path to the homelab kubeconfig>   # NOT workbench
+  kubectl --kubeconfig "$KC" -n tekton-pipelines get pipelinerun | grep devrc
+  # then read the failing step's log on the devrc-pytests taskrun pod
+  ```
+  **devrc #943 is filed for exactly this** — "a failing `tekton/devrc-*` status must name
+  the target that exited non-zero" — and it is still OPEN. That issue is the lever here,
+  **not another retrigger**: five runs bought three contradictory samples and zero
+  attribution.
+
 ## Next steps (ranked)
 🔴 **Numbering is STABLE and is half a claim's identity — do not re-rank.** Items 1, 2,
 3, 4 and 7 are DONE and are kept in place rather than renumbered. **Only 5 and 6 are open.**
@@ -637,6 +681,41 @@ deliberately — the shas and constants are the arc's only compact index):
 - **2026-08-28 — zsh ate `$M:claudedocs/...` during merge verification** (CLAUDE.md gotcha
   #11: history-style modifiers on `$VAR:`), producing `origin/mainlaudedocs/...` and three
   bogus zeros in a content check. **Brace it — `${M}:path` — or the verification lies.**
+
+- 🔴 **2026-08-29 — THE SUBSYSTEM-STORE RULE IS "ONCE PER REPO YOU OPENED A PR IN", AND A
+  TWO-REPO SESSION NATURALLY UPDATES ONLY THE ONE IT EDITED LAST.** Measured on this
+  session: PRs landed in **talos-infra** (#1349, the actual deliverable) and **devrc**
+  (#991, #994, both handoff docs). I wrote `devrc/browser-bridge` and `devrc/tests` and
+  **skipped `datapacket-talos` entirely** — the repo the code shipped in, which already
+  had an `app-capture.md` entry waiting. Nothing caught it: not a gate, not the store's
+  own validator, not `/handoff`. It surfaced only when the operator asked "is everything
+  addressed?" and I audited my own run against the protocol line by line. **The tell is
+  structural — count the repos you opened PRs in, then count the scopes you wrote.**
+- 🔴 **2026-08-29 — `claudedocs/` IS EXCLUDED FROM devrc's DOC-PATH GATE ON PURPOSE — do
+  not "fix" it.** `test_doc_path_rot.py` builds its corpus from
+  `CORPUS_DIRS = ("claude", "CLAUDE.md")`; `claudedocs/` is in `ROOTS` (a legal path
+  TARGET) but is never SCANNED as a source. Stated reason: it is the handoff/scratch tree,
+  where "a reference is a pointer rather than an operational instruction", and what is in
+  scope is "exactly what an agent loads as instructions" — `docs/`/`README.md` are out for
+  the opposite reason (humans notice a 404). Same design as talos-infra's gate 0.
+  **Practical consequence: verify a repo path yourself before writing it into a handoff.**
+  Measured: this doc cited `tests/test_browser_cli_args.py:1150` (real path
+  `scripts/browser-bridge/tests/test_browser_cli_args.py`) and passed doc-path-rot 77/77
+  with the bad path present. I first reported this as a *gap*; it is a documented
+  decision, and that misframing would have sent someone to widen a deliberately narrow
+  corpus.
+- **2026-08-29 — the step-1 recall command in this doc did not work from where its readers
+  stand**, fixed in #994 (`c4314e4a`). `subsystem_recall.py --repo` takes a **PATH, not a
+  repo NAME**, so a bare `devrc` resolved against the cwd — and every session in this arc
+  runs from `civit/datapacket-talos`. It died with *"repo path does not exist: 'devrc' →
+  '<cwd>/devrc'"*. Now `--scope devrc`, which names the store directory and runs no git.
+  The error is self-diagnosing, so this was a papercut, not a trap.
+- **2026-08-29 — the arc's LAST act was a clawgate `read`, not a `worked`.** `/handoff`'s
+  resolver returned **exit 6, the no-worked case**: one link, task **#358**, `role=read`
+  (this session read it to VERIFY item 6 was already complete). Per the protocol that
+  means **no `clawgate-task:` field was recorded** — reading a task is not doing its work.
+  Recorded here because "the resolver returned 6" otherwise looks like an unresolved
+  question rather than a correct outcome.
 
 ## How to verify
 ```bash
