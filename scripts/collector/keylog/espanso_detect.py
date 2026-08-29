@@ -21,8 +21,10 @@ Two detection paths:
      keylogger calls `feed_search_open`; subsequent chars accumulate as the
      search TERM (not the direct ring) until a close boundary (Enter, Escape,
      focus change, or idle). We fuzzy-attribute the term to a snippet; a unique
-     match is attributed, zero/multiple → trigger=None, but the search-open +
-     term are recorded regardless. Search events are always `inferred=True`.
+     match is attributed, and when several match, a term that NAMES exactly one
+     of them outright (it IS that trigger, with or without the ':') takes it.
+     Otherwise → trigger=None, but the search-open + term are recorded
+     regardless. Search events are always `inferred=True`.
 
 Honest limitation: "ring ends with a trigger" ≈ "espanso fired", EXCEPT in
 per-app espanso-disabled contexts (still far better than phrase-counting). The
@@ -250,7 +252,26 @@ class EspansoDetector:
         if not t:
             return None
         matched = [trig for trig in self.ts.triggers if self._term_matches(t, trig)]
-        return matched[0] if len(matched) == 1 else None
+        if len(matched) == 1:
+            return matched[0]
+        # Matching is by SUBSTRING (see `_token_matches`), so a term can match a
+        # snippet it merely occurs INSIDE. When ":acq" was split into ":dacq" +
+        # ":acq" on 2026-08-28 the bare term "acq" started matching BOTH
+        # (`"acq" in ":dacq"` is True) and every such fire was recorded
+        # UNATTRIBUTED. A term that NAMES one snippet outright — it equals that
+        # trigger, with or without the leading ":" — is not ambiguous about
+        # which snippet it means, so that snippet wins over the ones that merely
+        # contain it. This is consulted ONLY on the already-ambiguous branch, so
+        # it can never re-point a term that resolves uniquely today; the tie is
+        # broken only when EXACTLY ONE candidate is named outright.
+        exact = [trig for trig in matched if self._names_trigger(t, trig)]
+        return exact[0] if len(exact) == 1 else None
+
+    @staticmethod
+    def _names_trigger(term, trig):
+        """True when `term` IS this trigger, spelled with or without its ':'."""
+        low = (trig or "").lower()
+        return bool(low) and term in (low, low[1:] if low.startswith(":") else low)
 
     def _term_matches(self, term, trig):
         """True when EVERY whitespace-separated token of `term` matches `trig`.

@@ -25,8 +25,15 @@ team instance, each measured rather than assumed.
   - homelab-infra **#438** → `bbc373ed` — `scripts/check-ci-nonfire.py` + 88 tests (rank 4)
   - devrc **#954** → `dcc14c75` — handoff update (rank 4 done, rank 3 blocked)
   - homelab-infra **#459** → `9e5cc33e` — the supersede decision record (rank 5)
-- **Cards:** #366 `complete`. #391 and #394 `open` — both filed here as follow-ups, correctly
-  unstarted. `cairn-4` and `cairn-5` claims released.
+- **Cards: #366, #391 and #394 are ALL `complete`.** Every ranked item below is closed. `cairn-3`,
+  `cairn-4`, `cairn-5`, `cairn-6` and `cairn-7` claims released.
+- 🔴 **THIS LINE HAS NOW ROTTED THREE TIMES IN ONE DAY, AND THAT IS THE DURABLE FINDING.** It
+  said rank 3 was blocked (already done by someone else's PR); then that #391 was open (it had
+  shipped an hour earlier); then that #394 was "still `open` and genuinely unstarted" (it completed
+  two hours later). Each correction was true when written and false within hours. **A ranked list
+  that DUPLICATES a status the board already owns will rot every time an item moves** — the board
+  is the authority, this list is a plan. Whoever next edits this doc: point at the board, do not
+  re-copy its statuses.
 - **Clean:** no worktrees of mine in either repo, no stray local or remote branches, no
   background jobs. ⚠ Two things that LOOK like stragglers are not mine — the held
   `cairn-write-path` claim belongs to another session (clawgate #371), and the four
@@ -226,10 +233,11 @@ was being grown by a branch nobody reconciled against.
      *a correctly-claimed item whose PR incidentally completes a separately-claimed one.* Worth
      adding there. Either way `gh pr list --state open` is what caught it, and the sweep is not
      a fallback.
-   - **Left to do: the merged-tree gate, and no evidence anyone has run it.** #948 was
-   `MERGEABLE`/`CLEAN` with
-     both checks green when measured at `92f6650e`; at
-     **2026-08-28T17:52Z** its head is `47c9849b`, state `BLOCKED`, both checks `PENDING`.
+   - ~~**Left to do: the merged-tree gate**~~ — **MOOT: #948 MERGED `2026-08-28T21:11:33Z`.**
+     Rank 3 is fully closed, by that PR and not by this effort. ⚠ **Whether anyone ever ran the
+     merged-tree gate on it is UNKNOWN and now unanswerable** — the branch is gone. Recorded as an
+     unmeasured gap rather than a clean outcome. The measurements below are pinned to `92f6650e`
+     and remain true of that sha; its head had moved to `47c9849b` by `2026-08-28T17:52Z`.
      🔴 **An earlier draft said a `devrc-integ-948` worktree on `integ/948-merged` "already
      exists" and told the reader not to duplicate that work. It does not exist** — no such
      worktree on either host, no such local or remote branch. It was observed earlier in one
@@ -262,16 +270,42 @@ was being grown by a branch nobody reconciled against.
    default to the status quo, not a conclusion the evidence forces. **(c) no new status**;
    descriptive `superseded-by:<winner>` tag, with the *visual* half qualified (3-chip cap,
    routing-first ordering, Done lane collapsed).
-6. **#391** — make a UI supersede as legible as a hand-rolled one: `merge.go` effect (3) also
-   adds `superseded-by:<winnerID>` to the loser. Additive only; nothing refused today becomes
-   permitted; **no backfill**. Repo: `homelab-talos`, `containers/clawgate/`. Its body was
-   patched mid-session to retract the auth reasoning it inherited — read the card, not the
-   first draft of the record.
-7. **#394** — three source comments claim a machine cannot author as `user`, without naming the
-   path that holds on; one of them decided (b) in my first draft. Repo: `homelab-talos`.
-   🔴 **NOT "authenticate the LAN NodePort"** — trusted-open is deliberate and documented
-   (`api/auth.go:35-39`), and a card to fix something that is off on purpose is worse than no
-   card. Scope is the comments' claims, not the model.
+6. ~~**#391** — make a UI supersede as legible as a hand-rolled one~~ — **DONE, SHIPPED AND
+   VERIFIED LIVE.** homelab-infra **#474** (squash `84a69a4b`), deployed by ship commit
+   `abc0bdb2` as **0.8.9**; card `complete`. Merging did NOT deploy it — the pin is an immutable
+   literal with no Flux image automation — so the ship commit is the thing that made it live.
+   - **Verified live, not only by test:** a real `POST /tasks/merge` on throwaway tasks #412/#413
+     (deliberately not #359/#360) moved the loser `open ['throwaway']` →
+     `complete ['superseded-by:412','throwaway']`; the winner stayed untouched and the card's own
+     verifier returns rc 1 against it — a negative control, not just a positive one.
+   - 🔴 **THE CARD'S ASSUMPTION 2 WAS FALSE AND IT DECIDED THE ERROR HANDLING.** It assumed
+     `MaxTags` applies, so a loser at the cap would fail the write — which would have made a
+     checked 500 a *regression*. It does not: `notes.AddTags` runs `NormalizeTags` only.
+   - 🔴 **AN AUDIT CAUGHT A DEFECT THAT INVERTED THE FEATURE'S OWN SIGNAL, AND I DID NOT.** The
+     union is recomputed per request, so the new stamp became an INPUT to the next union: a loser
+     already stamped handed it to the WINNER, which then advertised that it had been superseded.
+     Reachable by a retry after a mid-sequence failure, and by reopening a superseded task. Also
+     made recovery at the tag cap impossible. Fixed by filtering the loser's contribution only.
+   - **Still open, deliberately:** the e2e spec does not assert the loser's chip, so the *visual*
+     half of criterion 3 is unexercised end to end. Closing condition is mechanical — a merged PR
+     touching `containers/clawgate/e2e/tests/tasks.spec.ts`.
+7. ~~**#394** — three source comments claim a machine cannot author as `user`~~ — **DONE.**
+   homelab-infra **#489** (squash `c04f1934`), card `complete`. **No deploy: comments plus one
+   test file, zero Go behaviour change**, so the running 0.8.9 image is unaffected.
+   - **There were FOUR sites, not three** — `server.go`'s route comment makes the same
+     unqualified claim. All four now state the scope they hold under.
+   - **The decision (criterion 2) is (c)**, and a measurement decided it: **nothing in the
+     codebase branches on a comment's author** — no `Author == "user"`/`== "operator"` outside
+     tests; `commentAuthor()` only maps `""`→`"user"`; push and UI merely display it. That rules
+     out (b): there is no privilege to withdraw. But it does NOT make the answer (a) — the record
+     being *human-read* is exactly why it is load-bearing, since #366's first draft was decided by
+     citing the false sentence. Honest under trusted-open where `user` means "someone on the
+     trusted network"; not honest on a team instance where it must mean a particular person.
+   - **Guard:** `TestPrivilegedAuthorSitesAreLedgered` pins the SET of sites minting a privileged
+     author, failing when it GROWS *or* SHRINKS, reading both the field and const shapes — a
+     field-only scanner would have gone blind when #391 turned merge.go's literal into a const.
+     Battery 4/4 including the positive control. 🔴 It caught its author's own error on first
+     run: two operator function names written from recollection, neither of which exists.
 8. **No card filed for the §(a) guard narrowing, deliberately.** It makes a merge *possible*
    where one is refused today, on a route mutating two tasks with no transaction, and any
    narrowing must test the project delta explicitly AND answer for the second winner-side write
