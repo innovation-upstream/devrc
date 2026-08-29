@@ -259,6 +259,27 @@ class TestAnEmptyTagDoesNotSWALLOWARealCommand:
         r = S.build_rollup([rec, _assistant()])
         assert r["commands_typed"] == {"handoff": 1}
 
+    def test_two_tags_in_one_block_are_NOT_counted(self):
+        """🔴 A KNOWN LIMITATION, pinned so it cannot be re-read as fixed.
+
+        An earlier revision of this PR claimed `finditer` fixed the within-block
+        case. It does not: `classify()` runs its own `search`, hits the empty
+        tag first, yields empty text and returns None — so the turn is never
+        classified as a command and this module's counting branch never runs.
+        The real fix is in `classify()`, which is shared with tailer.py's
+        message stream; changing it would move `kind=command` for every row that
+        source has emitted. Zero live instances (0 of 6,113 transcripts carry
+        two tags in one turn), so the limitation is documented, not fixed.
+
+        If this test ever goes RED because the value became `{'handoff': 1}`,
+        that is `classify()` having changed — check the message-stream telemetry
+        before celebrating."""
+        rec = _typed("<command-name>   </command-name>"
+                     "<command-name>/handoff</command-name>")
+        r = S.build_rollup([rec, _assistant()])
+        assert r["commands_typed"] == {}
+        assert r["unusable_skill_names"] == 0
+
     def test_a_command_turn_whose_only_tag_is_empty_is_COUNTED_as_unusable(self):
         """The discarded case has to be observable, or the filter is
         indistinguishable from one wired to nothing."""

@@ -545,12 +545,21 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
                 # counting nothing, so the loss was invisible. That regression
                 # was introduced by the fix above; `cmd_tag_empty` is what makes
                 # the discarded case observable instead.
-                # `finditer`, not `search`: with `search` a block holding an
-                # empty tag FOLLOWED by a real one saw only the empty one, so
-                # the real command was lost AND `cmd_tag_empty` never fired —
-                # discarded and unobservable at once, which is what the flag
-                # exists to prevent. Across blocks was fixed; within one block
-                # was not.
+                # `finditer`, not `search`, so a block holding an empty tag
+                # FOLLOWED by a real one still sees the real one.
+                #
+                # 🔴 KNOWN LIMITATION, and this comment used to claim otherwise.
+                # For that exact input the command is STILL not counted — but
+                # not here: `classify()` runs its own `search`, hits the empty
+                # tag first, yields empty text and returns None, so `genuine` is
+                # never a command and this branch does not run. `finditer` is
+                # defensive only. The real fix lives in `classify()`, which is
+                # shared with tailer.py's message stream, so changing it moves
+                # `kind=command` for every row that source has ever emitted —
+                # out of scope here, and NOT worth it for a case with zero live
+                # instances (0 of 6,113 transcripts carry two tags in one turn).
+                # `test_two_tags_in_one_block_are_NOT_counted` pins the real
+                # behaviour so nobody re-reads this as fixed.
                 if raw:
                     for m in COMMAND_NAME.finditer(raw):
                         val = m.group(1).strip()
