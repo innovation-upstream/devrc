@@ -3441,3 +3441,69 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
         assert "status=stale-base" not in res.stderr
         assert "status=written" in res.stdout
+
+    @pytest.mark.parametrize(
+        "blank,label",
+        [("", "empty"), ("\n", "one newline"), ("   \n\n", "whitespace")],
+    )
+    def test_a_BLANK_local_doc_is_as_absent_as_a_MISSING_one(
+        self, tmp_path: Path, update_file: Path, blank: str, label: str
+    ) -> None:
+        """🔴 A bare falsiness test let a single newline WALK this guard.
+
+        MEASURED before the fix, against a mainline doc of 6 sections: `""`
+        refused (rc 7), while `"\\n"` and `"   \\n\\n"` both exited 0 and REPLACED
+        the committed document with the delta. The merge treats all three the
+        same — 0 sections, so every section arrives NEW — so the destructive
+        outcome is identical and only the predicate disagreed. `wrong_base_tells`
+        already used `.strip()` 74 lines earlier in the same file.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        doc = work / "claudedocs" / "handoff-sample-topic.md"
+        doc.parent.mkdir(exist_ok=True)
+        doc.write_text(blank, encoding="utf-8")
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_STALE_BASE, (
+            f"a {label} local doc walked the guard", res.stdout, res.stderr)
+        assert doc.read_text(encoding="utf-8") == blank, (
+            "the committed document was replaced by the delta")
+
+    def test_the_PROPOSAL_run_still_shows_the_diff_and_does_not_refuse(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE `args.confirm` HALF OF THE GUARD, which nothing else pins.
+
+        An adversarial mutation that drops `and args.confirm` SURVIVED the whole
+        176-test file: the refusal then fires on the PROPOSAL run too, exiting 7
+        before the diff is printed. `reference/write-gate.md` calls that diff
+        "the only record of what landed", and the proposal run exists to put it
+        in the transcript — so refusing there destroys the thing the two-run
+        shape is for, while writing nothing and looking like a working guard.
+
+        The proposal run must WARN and show the diff; only `--confirm` refuses.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        res = run_tool(work, update=update_file)  # no --confirm
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=proposed" in res.stdout
+        assert "status=stale-base" not in res.stderr
+        assert "THE BASE DOCUMENT IS NOT THE NEWEST COMMITTED COPY" in res.stdout, (
+            "the proposal run must still carry the warning")
+        assert "+" in res.stdout, "the diff itself must reach the transcript"
+
+    def test_the_override_is_NOT_reachable_by_abbreviation(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 The flag's help calls it "deliberately long" so it cannot be passed
+        by reflex — but argparse abbreviates long options by DEFAULT, and `--al`
+        was measured to be accepted and to replace the committed document. A
+        guard spelled as a long name is walkable by shortening it unless
+        `allow_abbrev=False` says otherwise.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        for abbrev in ("--al", "--allow", "--allow-replacing"):
+            res = run_tool(work, "--confirm", abbrev, update=update_file)
+            assert res.returncode == hd.EXIT_USAGE, (
+                f"{abbrev} was accepted as the override", res.stdout, res.stderr)
+            assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()

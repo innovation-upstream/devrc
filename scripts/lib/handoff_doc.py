@@ -136,10 +136,15 @@ h. A BASE THAT IS THE WRONG DOCUMENT SAYS SO, LOUDLY. Rule (g)'s bucket line was
    repo's own MAINLINE (derived, never a hardcoded `main` — this incident's repo
    uses `trunk`) carry commits to this doc that the checkout lacks?
 
-   🔴 IT WARNS AND NEVER REFUSES, like rule (f), and no exit code moved — 4
-   `no-advance` and 5 `no-change` keep their exact meanings. Working on a
-   deliberately-behind clone is legitimate, and a gate that could block the write
-   is one people learn to click through.
+   🔴 IT WARNS in the ordinary stale case and REFUSES in exactly ONE: no usable
+   doc HERE while the mainline has one, where every section arrives NEW and the
+   committed document is REPLACED wholesale. That case alone exits 7
+   (`stale-base`) and carries an explicit `--allow-replacing-mainline-doc`;
+   everything else still warns at exit 0, and 4 `no-advance` / 5 `no-change` keep
+   their exact meanings. Working on a deliberately-behind clone is legitimate —
+   which is why the warning half stayed a warning. The refusal is scoped to the
+   one destructive shape precisely so it does NOT become a gate people learn to
+   click through.
 
    🔴 IT IS SILENT ON THE ORDINARY RUN, MEASURED. All 49 real handoff-doc updates
    in this repo's history were replayed through `merge_report`; the two
@@ -195,12 +200,6 @@ EXIT_FAIL = 3
 EXIT_NO_ADVANCE = 4
 EXIT_NO_CHANGE = 5
 EXIT_BEHIND = 6
-EXIT_STALE_BASE = 7
-"""The doc is absent HERE and present on the mainline, so confirming would
-REPLACE the committed document with this delta. Distinct from EXIT_BEHIND: that
-one asks whether `<remote>/<push-branch>` has moved and only under `--push`; this
-asks whether the BASE DOCUMENT is the real one, against the derived mainline ref,
-and a current feature branch sails past the other check entirely."""
 """--push was asked for and the branch is BEHIND its remote. Nothing written.
 
 🔴 This exists because the alternative is the state this repo has a rule against.
@@ -214,6 +213,17 @@ bitten this repo twice (2026-08-06, 2026-08-09).
 
 Refusing BEFORE the write keeps the tool's existing property — a failure writes
 nothing — instead of trading it for a commit the caller has to know how to undo.
+"""
+
+EXIT_STALE_BASE = 7
+"""There is no usable doc HERE and the mainline has one, so confirming would
+REPLACE the committed document with this delta. Nothing written.
+
+🔴 Distinct from EXIT_BEHIND above, and NEITHER implies the other. That one asks
+whether `<remote>/<push-branch>` has moved, and only under `--push`; this asks
+whether the BASE DOCUMENT is the real one, against the DERIVED mainline ref. A
+feature branch current with its own upstream sails past the other check while the
+mainline copy of the doc is still the one being destroyed.
 """
 
 # Rule (c). A section whose heading starts with one of these is DIAGNOSIS STATE
@@ -897,10 +907,16 @@ def _clip(text: str, limit: int) -> str:
 # said `status=written`. The ONLY tell was one token inside the `buckets:` line,
 # which reads as a routine classification.
 #
-# 🔴 IT WARNS AND NEVER REFUSES, and no exit code moves. Rule (f) already
-# establishes why: a gate that can stop the write becomes a gate people learn to
-# click through, and working on a deliberately-behind clone is legitimate. Exit
-# 4 (`no-advance`) and 5 (`no-change`) keep their exact meanings.
+# 🔴 IT WARNS, EXCEPT IN THE ONE SHAPE THAT DESTROYS THE DOCUMENT. Rule (f)'s
+# reasoning still holds for the ordinary case — a gate that can stop the write
+# becomes a gate people learn to click through, and working on a
+# deliberately-behind clone is legitimate — so behind-but-present stays a warning
+# at exit 0, and 4 (`no-advance`) / 5 (`no-change`) keep their exact meanings.
+# 🔴 But when there is no usable doc HERE and the mainline has one, warning was
+# the wrong call: every section arrives NEW, the committed document is REPLACED,
+# and the y/N that used to stand between that and a push was retired 2026-08-23.
+# That shape exits 7 (`stale-base`) with an explicit override. Scoping the
+# refusal to it is what keeps this from being the clicked-through gate above.
 #
 # 🔴 IT MUST BE SILENT ON THE ORDINARY RUN, and that is measured rather than
 # hoped. Every one of the 49 real handoff-doc updates in this repo's history was
@@ -1052,8 +1068,16 @@ class BaseCurrency(typing.NamedTuple):
         `git show` succeeded, so it carries both facts and an UNMEASURED
         currency can never satisfy this — an unanswered question must not
         become a refusal.
+
+        🔴 `.strip()`, NOT a bare falsiness test, and it is the same predicate
+        `wrong_base_tells` already uses. MEASURED against a mainline doc of 6
+        sections: `""` refused (rc 7), but `"\\n"` and `"   \\n\\n"` both exited 0
+        and REPLACED it. The merge treats all three identically — 0 sections, so
+        every section arrives NEW — so a doc that is whitespace is exactly as
+        absent as one that is missing, and the bare test let the guard be walked
+        by a single newline.
         """
-        return not base_text and self.mainline is not None
+        return not base_text.strip() and self.mainline is not None
 
 
 def base_currency(repo: Path, relpath: str) -> BaseCurrency:
@@ -1091,12 +1115,15 @@ def base_currency(repo: Path, relpath: str) -> BaseCurrency:
 
 
 WRONG_BASE_REMEDY = (
-    "  Settle it BEFORE answering y: read the mainline copy — `git -C {repo} "
+    "  Settle it BEFORE confirming: read the mainline copy — `git -C {repo} "
     "show {ref}:{relpath}` — and re-run against a current clone if it is the "
     "fuller document.\n"
-    "  This is a WARNING, not a refusal, and no exit code changed. Updating a "
-    "deliberately-behind clone is legitimate. It is a FLOOR: a silent run is "
-    "NOT evidence that the base is current."
+    "  Updating a deliberately-behind clone is legitimate, so on its own this is "
+    "a WARNING and no exit code changed. It is a FLOOR: a silent run is NOT "
+    "evidence that the base is current.\n"
+    "  🔴 The ONE shape that refuses instead — no usable doc here while the "
+    "mainline has one — says so itself below, as `status=stale-base`. If you do "
+    "not see that line, this run is the warning."
 )
 
 
@@ -1556,6 +1583,14 @@ def build_parser() -> argparse.ArgumentParser:
         prog="handoff_doc.py",
         description="write or update a handoff doc behind a confirm gate — the "
         "doc's only writer, whether or not it already exists",
+        # 🔴 argparse abbreviates long options by DEFAULT, which makes a guard
+        # spelled as a long name walkable by shortening it. MEASURED: with the
+        # default, `--al` was accepted as `--allow-replacing-mainline-doc` and
+        # replaced the committed document — while that flag's own help text
+        # claimed it was "deliberately long" so it could not be passed by
+        # reflex. A prefix of a destructive override is exactly the reflex it
+        # was named to prevent. No caller here passes an abbreviated flag.
+        allow_abbrev=False,
     )
     p.add_argument("--repo", required=True, help="repo root the handoff lives in")
     p.add_argument("--topic", required=True, help="handoff topic slug")
@@ -1701,7 +1736,9 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"status=stale-base ref={currency.base_ref} path={relpath}\n"
             f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
-            f"  There is no {relpath} in this checkout, and {currency.base_ref} "
+            f"  This checkout has no usable {relpath} — it is missing, empty or "
+            f"whitespace, which the merge treats identically — and "
+            f"{currency.base_ref} "
             f"has one ({currency.mainline.sections} section(s) / "
             f"{currency.mainline.lines} line(s)). Confirming would merge every "
             f"section as NEW and REPLACE that committed document with this "
@@ -1711,9 +1748,15 @@ def main(argv: list[str] | None = None) -> int:
             f"here.\n"
             f"  Read the mainline copy first:\n"
             f"    git -C {repo} show {currency.base_ref}:{relpath}\n"
-            f"  Then either re-run against a current clone, or — if you truly "
-            f"mean to replace it — re-run with "
-            f"--allow-replacing-mainline-doc.",
+            f"  Then re-run against a current clone — that is the fix, not the "
+            f"override.\n"
+            f"  🔴 The override (--allow-replacing-mainline-doc) CANNOT rescue "
+            f"the common shape of this. Being stale-base against the branch you "
+            f"are pushing to implies being BEHIND it, so on the mainline branch "
+            f"`--push` then refuses with status=behind (exit 6) whatever you "
+            f"pass here. It only lands on a branch whose own upstream is "
+            f"current, or with --confirm and no --push. Re-syncing the clone is "
+            f"the route that works in every case.",
             file=sys.stderr,
         )
         return EXIT_STALE_BASE
