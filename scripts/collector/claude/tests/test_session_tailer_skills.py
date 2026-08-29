@@ -84,16 +84,22 @@ class TestSkillCapturePositiveControl:
 # The two directions
 # --------------------------------------------------------------------------- #
 class TestNeitherSignalIsASuperset:
-    """🔴 THE REASON THERE ARE TWO FIELDS. Measured on the workbench corpus
-    2026-08-29, counting SESSIONS (subagent transcripts excluded):
+    """🔴 THE REASON THERE IS MORE THAN ONE FIELD. Measured on the workbench
+    corpus 2026-08-29, counting SESSIONS (subagent transcripts excluded), with
+    this module's own counting rule:
 
-      * `browser`  — 50 attributed, **0** ever typed `/browser`.
-      * `clawgate` — 70 attributed, 32 typed: 42 attributed-only AND
-                     4 typed-but-never-attributed.
+      * `browser`  —  50 attributed,   0 typed -> 50 attributed-only.
+      * `clawgate` —  72 attributed,  28 typed -> 44 attributed-only,
+                                                   **0** typed-only.
+      * `handoff`  — 383 attributed, 346 typed -> 40 attributed-only,
+                                                   **3** typed-only.
 
-    Both directions have live instances, so collapsing to one field is a
-    measurable loss, not a simplification. These two tests are what fail if
-    someone tries it."""
+    ⚠ An earlier revision of this docstring cited `clawgate` 70/32 with 4
+    typed-only, and "measured 8 times". BOTH WERE WRONG: they came from a raw
+    file grep, which matches `<command-name>` inside quoted TOOL OUTPUT — the
+    exact false positive `test_a_command_quoted_in_TOOL_OUTPUT_is_not_an_
+    invocation` forbids. clawgate's typed-only is 0. `handoff` is the live
+    instance. Do not re-derive either number with a grep."""
 
     def test_an_AUTO_FIRED_skill_is_seen_with_no_command_ever_typed(self):
         """The case the pre-existing `kind=command` telemetry is structurally
@@ -106,8 +112,9 @@ class TestNeitherSignalIsASuperset:
             "auto-fire signal is being inferred from the typed one")
 
     def test_a_TYPED_command_is_seen_with_no_attributed_record(self):
-        """The inverse, measured 8 times for `/clawgate` alone: the command was
-        typed but no assistant record carried the attribution."""
+        """The inverse direction: typed, but no assistant record carried the
+        attribution. Live instance: `handoff`, 3 sessions (NOT `clawgate`, whose
+        typed-only is 0 — see the class docstring's retraction)."""
         r = S.build_rollup([_command("clawgate", "status"), _assistant()])
         assert r["commands_typed"] == {"clawgate": 1}
         assert r["skills_used"] == {}
@@ -158,6 +165,65 @@ class TestCounting:
 # --------------------------------------------------------------------------- #
 # Honest naming + leak guard
 # --------------------------------------------------------------------------- #
+class TestTheNameBoundDoesNotREJECTRealIdentities:
+    """🔴 A bound drawn around the names that happen to exist TODAY rejects the
+    ones that arrive tomorrow — and rejects them SILENTLY, which is the failure
+    this whole change removes. A skill identity is namespace-qualified:
+    `plugin:skill`, and `apps/web:deploy` for a directory-scoped one."""
+
+    def test_a_PLUGIN_qualified_skill_is_recorded(self):
+        r = S.build_rollup([_typed(), _assistant(skill="cloudflare:wrangler")])
+        assert r["skills_used"] == {"cloudflare:wrangler": 1}
+        assert r["unusable_skill_names"] == 0
+
+    def test_a_DIRECTORY_scoped_skill_is_recorded(self):
+        r = S.build_rollup([_typed(), _assistant(skill="apps/web:deploy")])
+        assert r["skills_used"] == {"apps/web:deploy": 1}
+        assert r["unusable_skill_names"] == 0
+
+    def test_the_two_skill_name_bounds_agree(self):
+        """🔴 The bound is DUPLICATED in scripts/lib/transcript_search.py and
+        cannot be a shared import: nix/home.nix deploys
+        `scripts/collector/claude` ALONE to the daemon's runtime path, so an
+        import from scripts/lib would pass every test here and break the running
+        service on both hosts. Two copies, one enforced ledger — if they drift,
+        the emitter and the search disagree about what a skill name IS."""
+        lib = (Path(__file__).resolve().parents[3] / "lib" / "transcript_search.py")
+        src = lib.read_text(encoding="utf-8")
+        marker = "SKILL_NAME_PATTERN = r"
+        assert marker in src, f"{lib} no longer defines SKILL_NAME_PATTERN"
+        theirs = src.split(marker, 1)[1].splitlines()[0].strip()
+        assert theirs == repr(S.SKILL_NAME_PATTERN).replace("'", '"') or \
+            theirs.strip('"\'') == S.SKILL_NAME_PATTERN, (
+                f"the two skill-name bounds have drifted: tailer has "
+                f"{S.SKILL_NAME_PATTERN!r}, transcript_search.py has {theirs}")
+
+
+class TestAnEmptyTagDoesNotSWALLOWARealCommand:
+    """🔴 A regression introduced by the fix for the args leak. Latching the
+    first tag MATCH — rather than the first NON-EMPTY one — let an empty tag in
+    an earlier block discard a genuine command in a later block, counting
+    nothing, so the loss was invisible."""
+
+    def test_a_real_command_after_an_empty_tag_is_still_counted(self):
+        rec = _typed()
+        rec["message"]["content"] = [
+            {"type": "text", "text": "<command-name>   </command-name>"},
+            {"type": "text", "text": "<command-name>/handoff</command-name>"},
+        ]
+        r = S.build_rollup([rec, _assistant()])
+        assert r["commands_typed"] == {"handoff": 1}
+
+    def test_a_command_turn_whose_only_tag_is_empty_is_COUNTED_as_unusable(self):
+        """The discarded case has to be observable, or the filter is
+        indistinguishable from one wired to nothing."""
+        r = S.build_rollup(
+            [_typed("<command-name></command-name><command-args>x</command-args>"),
+             _assistant()])
+        assert r["commands_typed"] == {}
+        assert r["unusable_skill_names"] == 1
+
+
 class TestCommandsTypedIsNotAClaimAboutSkills:
     def test_a_BUILT_IN_command_lands_in_commands_typed(self):
         """`/login` and `/clear` are Claude Code built-ins, not skills. The field

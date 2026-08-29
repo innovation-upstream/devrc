@@ -256,11 +256,29 @@ def _int(v) -> int:
 # whitespace name tag, and a `<command-name>` holding prose with no args tag. A
 # 4,000-char name also went straight through, multiplying the payload.
 #
-# Measured 2026-08-29 across 6,083 transcripts: 37 distinct real command names,
+# Measured 2026-08-29 across 6,107 transcripts: 37 distinct real command names,
 # every one `/name`, none empty, none containing whitespace, longest 26 chars.
 # So this is a LATENT hazard with zero live instances — bounded here rather than
 # after it ships something.
-SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+#
+# 🔴 `:` and `/` ARE ADMITTED, and that is not slack. A skill identity is
+# documented as namespace-qualified — `plugin:skill` for a plugin skill,
+# `apps/web:deploy` for a directory-scoped one — so a bound drawn around the 37
+# names that happen to exist today would REJECT a real plugin skill the first
+# time one is enabled (14 are cached on this host already). The reject is
+# silent where it hurts: ClickHouse would report the skill as never used while
+# `find-session --skill` still found the session, i.e. exactly the silent zero
+# this work exists to remove, reintroduced inside the guard protecting it. The
+# measurement bounds the SHAPE (no whitespace, no prose, bounded length); it
+# does not get to bound the NAMESPACE.
+#
+# 🔴 DUPLICATED, DELIBERATELY, in `scripts/lib/transcript_search.py`, and pinned
+# byte-identical by `test_the_two_skill_name_bounds_agree`. It cannot be a
+# shared import: `nix/home.nix` deploys `scripts/collector/claude` ALONE to
+# `~/.config/activity-collector/claude/`, so an import from `scripts/lib` would
+# pass every test here and break the running daemon on both hosts.
+SKILL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,63}$"
+SKILL_NAME_RE = re.compile(SKILL_NAME_PATTERN)
 
 
 def _note_name(bag: dict, raw, rollup: dict) -> None:
@@ -468,6 +486,7 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
             # genuine typed / slash-command turns (reusing tailer's classifier).
             genuine = None
             cmd_name = None
+            cmd_tag_empty = False
             for raw in extract_blocks(content):
                 if raw and raw.lstrip().startswith("[Request interrupted"):
                     r["user_interruptions"] += 1
@@ -479,10 +498,22 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
                 # does NOT close that: the first fix for this tried it and the
                 # regression test still leaked `harbourPermit…`. Parsing the tag
                 # is what distinguishes "no name" from "a name".
-                if cmd_name is None and raw:
+                #
+                # 🔴 Latch the first NON-EMPTY tag, not the first tag. Latching
+                # any match let an EMPTY tag in an earlier block suppress a real
+                # command in a later one — losing a genuine typed command AND
+                # counting nothing, so the loss was invisible. That regression
+                # was introduced by the fix above; `cmd_tag_empty` is what makes
+                # the discarded case observable instead.
+                if raw:
                     m = COMMAND_NAME.search(raw)
                     if m:
-                        cmd_name = m.group(1)
+                        val = m.group(1).strip()
+                        if val:
+                            if cmd_name is None:
+                                cmd_name = val
+                        else:
+                            cmd_tag_empty = True
                 res = classify(raw)
                 if res is not None and genuine is None:
                     genuine = res  # (kind, text)
@@ -492,7 +523,13 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
                 # invocation — take the NAME only, so args (which carry operator
                 # free-text) never reach the payload.
                 if genuine[0] == "command":
-                    _note_name(commands_typed, cmd_name, r)
+                    if cmd_name is not None:
+                        _note_name(commands_typed, cmd_name, r)
+                    elif cmd_tag_empty:
+                        # A command turn whose only name tag was empty. Counted,
+                        # not dropped: `_note_name` cannot see this case because
+                        # it never receives a value for it.
+                        r["unusable_skill_names"] += 1
 
         elif typ == "assistant":
             msg = obj.get("message") or {}

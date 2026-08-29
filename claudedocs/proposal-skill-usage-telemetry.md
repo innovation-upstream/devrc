@@ -39,8 +39,9 @@ description**. The only field that sees that is Claude Code's own `attributionSk
 which sits on **120,366 records** under `~/.claude/projects` and had **zero** references
 anywhere in `scripts/` or `claude/`.
 
-Note both directions have live instances (`clawgate` typed-only = 4). Neither signal is a
-superset of the other, so this is two fields, not one.
+Both directions have live instances — attributed-only is large everywhere, and `handoff`
+carries 3 genuine **typed-only** sessions. No one signal is a superset of the others, so
+this is three fields, not one.
 
 ---
 
@@ -64,8 +65,10 @@ stops checking.
 
 **G3 — no skill-attribution search surface.** The three surfaces are text / tool_use input
 / tool_result output. Skill invocation is in none of them, so the question degraded to
-keyword grep: **666** "matches" for a question whose true answer was **1**, dominated by
-`scripts/signal/tests/…` path noise.
+keyword grep: **666** "matches" across both runtimes (564 Claude-only) for a question whose
+true answer was **1**. Those hits are the word `signal` in ordinary prose and in paths —
+*not*, as an earlier revision of this doc claimed, in test output: `find-session` defaults
+to the text surface, which never reads tool output at all.
 
 **G4 — three skills claim adjacent territory and none owns the question.**
 `adoption-scan` ("is it USED"), `find-session` ("recover a session"), `activity` ("query

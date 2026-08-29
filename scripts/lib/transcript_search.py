@@ -302,9 +302,9 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
     # WHICH SKILLS this session used. Kept OUT of the term surfaces on purpose:
     # skill invocation is not text the session said, and folding it into the
     # keyword surface is what makes `find-session signal` return 666 sessions
-    # that merely mention the word. Two signals, neither a superset of the other
-    # — see `skills_used` / `commands_typed` in session-tailer.py for the
-    # measurement behind that.
+    # that merely mention the word. THREE signals — attributed, explicitly
+    # invoked, typed — and no one of them is a superset of the others; see
+    # `skills_used` in session-tailer.py for the measurement behind that.
     skills_attributed: dict = {}
     skills_invoked: dict = {}
     commands_typed: dict = {}
@@ -373,8 +373,10 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
                 utext = body if surface == SURFACE_TEXT else text_of(msg)
                 cmd_m = _COMMAND_NAME_RE.search(utext)
                 if cmd_m:
-                    cname = cmd_m.group(1).strip().lstrip("/").strip()
-                    if cname:
+                    cname = normalize_skill(cmd_m.group(1))
+                    # Bounded with the SAME rule the emitter uses — see
+                    # SKILL_NAME_PATTERN above for why the two must agree.
+                    if cname and SKILL_NAME_RE.match(cname):
                         commands_typed[cname] = commands_typed.get(cname, 0) + 1
         else:
             continue
@@ -411,6 +413,23 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
         "skills_invoked": skills_invoked,
         "commands_typed": commands_typed,
     }
+
+
+# 🔴 A DELIBERATE DUPLICATE of `SKILL_NAME_PATTERN` in
+# `scripts/collector/claude/session-tailer.py`, pinned byte-identical by
+# `test_the_two_skill_name_bounds_agree`. It cannot be a shared import:
+# `nix/home.nix` deploys `scripts/collector/claude` ALONE to the daemon's
+# runtime path (this module's own docstring says so, under "each ships on its
+# own deploy path"), so importing this module there would pass every test and
+# break the running service on both hosts. Same rule, two places, one enforced
+# ledger.
+#
+# Applied here so the two readers AGREE about what a name is. They diverged
+# once: the tailer rejected `not a valid name` and a 4,000-char key while this
+# module accepted both, so `--skill "not a valid name"` could match a session
+# that ClickHouse reported as having used no such skill.
+SKILL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,63}$"
+SKILL_NAME_RE = re.compile(SKILL_NAME_PATTERN)
 
 
 def normalize_skill(name) -> str:
