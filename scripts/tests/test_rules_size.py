@@ -514,7 +514,39 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # being written. Observed review-round costs in this ledger are 130-170 B, so
 # 430 B survives one and part of a second. It is still under the ~500 B mean
 # bullet, so the next NEW rule pays ceiling, exactly as the entries above insist.
-MAX_BYTES = 41_400
+#
+# 2026-08-28 -- THE NEXT NEW RULE PAID CEILING, exactly as the entry above
+# predicted it would have to. Floor-relative slack going in was 4 B.
+#
+# WHICH INSTRUCTION WOULD NOT FIT: the sixth worktree surface, "its CONFIG and
+# REMOTES" -- `remote add`, `config --local` and `core.hooksPath` write the COMMON
+# config, so they are repo-GLOBAL and a worktree does not scope them. Measured
+# case in the archive under `worktree-config`: a hook-verification session in a
+# DIFFERENT repo added a remote inside a devrc worktree, its cleanup removed the
+# worktree and the remote's target but not the remote, and the shared base clone
+# carried a remote pointing at a deleted path for five days, inside `fetch --all`
+# the whole time. The existing five surfaces do not cover it -- every one of them
+# is about the working tree, the session or the checkout, and this one is about
+# the config file none of them mentions. Paired with it, a clause on the
+# "find the WRITER" rule: an mtime cannot NAME a writer, so a file many writers
+# append to looks "written repeatedly" when it was written once. That misreading
+# is what the case cost -- two sessions hunted a live writer that had not run in
+# five days.
+#
+# EVICTION WAS RE-RUN, NOT ASSUMED EXHAUSTED, by the identical method the entry
+# above documents (core lines >=120 B, whitespace-normalised, longest-common-block
+# against the WHOLE archive with `*Supports:` lines excluded, threshold 34 B) and
+# now against the NEW prose as well: 80 lines scanned, 24 blocks matched, largest
+# still the 107 B sops-retraction checksum-guard sentence that IS the rule, and
+# every other match imperative, scope or failure-shape text the playbook keeps.
+# Yield: 0 B. Third consecutive run to return nothing -- the vein is not merely
+# exhausted for now, it is exhausted structurally, because what remains is rule.
+#
+# NAME THE BASE: RULES.md is 41,121 B at this commit, so post-bump slack is
+# 1,329 B ceiling-relative and 429 B FLOOR-relative -- held at the same precedent
+# as above rather than widened, so the next new rule pays ceiling too and this
+# does not become a habit of buying room in advance.
+MAX_BYTES = 42_450
 
 # Required working margin below the ceiling.
 #

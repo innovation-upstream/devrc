@@ -76,6 +76,25 @@ def patch_runner_source(src: str, targets: list[str], floors: dict[str, int], *,
     assert n == 1, "failed to replace TARGET_FLOORS in the copied runner"
     assert 'TARGET_FLOORS=(\n  "' in patched, "replacement produced an empty floor table"
 
+    # DEVHOST_TARGETS is concatenated with HERMETIC_TARGETS into
+    # ALL_KNOWN_TARGETS, and the floor table pins THAT set both ways. So a
+    # dev-host target surviving into a copy whose TARGET_FLOORS was just
+    # replaced wholesale is "a target with NO entry in TARGET_FLOORS", and the
+    # copy dies on GUARD 3a's FATAL before ever reaching the guard the caller
+    # is testing.
+    #
+    # 🔴 This was a silent no-op until 2026-08-29: DEVHOST_TARGETS had been
+    # EMPTY since the day it was added, so this helper was written — correctly
+    # for the time — as if HERMETIC_TARGETS were the whole target list. The
+    # first entry ever added to it took ~20 harness tests red at once, none of
+    # them about the dev-host tier. Emptied for the same reason as
+    # EXPECTED_SKIPS below: a copy runs a throwaway target list, so the real
+    # runner's tiers are not its business.
+    patched, n = re.subn(
+        r"^DEVHOST_TARGETS=\(.*?^\)", "DEVHOST_TARGETS=()", patched, count=1, flags=re.S | re.M
+    )
+    assert n == 1, "failed to empty DEVHOST_TARGETS in the copied runner"
+
     # EXPECTED_SKIPS pins skips for the REAL target list (one entry, in
     # scripts/repo-cos/tests). A copy that runs a throwaway target observes zero
     # skips and would fail the skip-total accounting -- "FEWER than pinned" --
