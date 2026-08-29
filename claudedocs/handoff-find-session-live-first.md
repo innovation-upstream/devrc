@@ -33,8 +33,14 @@ calls, 5 of them pure flailing.
 - **The `ship.sh` blocker is gone.** `feat/flake-lock-and-discord-ext` landed (#1010,
   `2a8a8982`). The base clone is on `main` and was `merge --ff-only`'d to `6e7e85bf`; it was
   **behind 1, never ahead** — no un-pushed commits, so the diverged-host hazard did not occur.
-- **Still NOT verified:** the partial-fleet path against a genuinely unreachable host. See
-  ranked item 1 — this is the one claim in the whole feature with no live observation behind it.
+- 🔴 **The partial-fleet path is now VERIFIED against a genuinely unreachable host — this was
+  the one claim in the feature with no live observation behind it, and it holds.** Six cases,
+  two independent instruments, every full-fleet control run as the discriminator. Details in
+  "Partial-fleet verification" below. **No defect was found**, so the ladder ends here.
+- **Still NOT verified:** `live_scan`'s `status: "unavailable"` branch (NO host answers). The
+  local host is scanned without ssh, so it cannot be made to fail genuinely — reaching that
+  branch requires a stub, which is exactly what the rank-1 item existed to stop trusting. Say
+  "stub-only" about it rather than "verified".
 - Open issues: **#1029** (three guard-walkability gaps), **#1030** (flake, second mechanism),
   **#1031** (two deferrals). **#1028 closed**, verified fixed by #1023.
 
@@ -67,6 +73,85 @@ guards pinning guards and no finding was reachable by a `find-session` user.
 Gate on the **merged** tree (`c0e39f23` = `origin/main` + head): PR's own suites **838
 passed**; node 1300/1300. Two pre-existing `main` failures at the time, both reproduced on a
 clean `origin/main` control with the implicated files byte-identical — since fixed by #1023.
+
+## Partial-fleet verification — 2026-08-29, the rank-1 item, CLOSED
+
+**The gap it closed.** All five audit rounds replaced `session-manager` with a stub, so
+layers 2–3 — *does the real `session-manager` mark a host `reachable: false` and still
+return the other host's rows?* — had never run. It does:
+
+```
+laptop:    reachable=False  windows=0   error='ssh: connect to host … port 22: Connection timed out'
+workbench: reachable=True   windows=50  error=''
+```
+
+**Instruments.** Nothing downstream of the TCP connect was simulated; both run the real
+openssh binary and the real `session-manager`.
+
+| | what it substitutes | failure shape | laptop error text |
+|---|---|---|---|
+| 1 — `PATH` shim rewriting the destination address | the destination IP only | `Connection timed out` after **4.013 s** (`ConnectTimeout=4`) | names `192.0.2.1` |
+| 2 — `unshare -rn` + `-F /dev/null` | **nothing**; the address stays `10.42.0.100` | `Network is unreachable`, instant | names `10.42.0.100` |
+
+Instrument 2 needs `-F /dev/null` because openssh refuses a root-owned system `ssh_config`
+under the namespace's uid map — a namespace artifact, not the condition under test. ⚠ Its
+first form (`unshare -rn` alone) failed at **config parse, not at the network**: a real ssh
+failure, but the wrong mechanism, and it would have corroborated nothing. The two shapes
+above are genuinely different and agree on every verdict.
+
+**Controls.** Instrument 1: positive — the laptop answers without the shim (rc 0); negative —
+the identical command fails with it (rc 255); pass-through — the same laptop still reachable
+at its LAN address through the shim, so it is not a blanket ssh-killer. Instrument 2: the
+identical command reaches the laptop outside the namespace.
+
+**Results — every full-fleet control run as the discriminator, because "exit 4 under a
+partial fleet" proves nothing unless the same command exits 3 under a complete one.**
+`<W-only>` / `<L-only>` are terms matching exactly ONE window, on the workbench and on the
+laptop respectively. The literals are not reproduced — they came from other sessions' task
+text and this repo is public. Re-derive a pair for your own fleet: any token that
+`find-session.py <tok> --live --json` reports with one row, one on each host.
+
+| case | terms | full fleet | laptop DOWN |
+|---|---|---|---|
+| several live matches, `--tail` | `handoff` | 3 | **3** + `candidate list is INCOMPLETE` |
+| zero live matches, `--tail` | `zzqq-…` | **3** | **4** + `NOT 'there is nothing to tail'` |
+| one live match, `--tail` | `<W-only>` | 0, no caveat | **0** + `resolved on PARTIAL coverage` |
+| **match lives only on the DOWN host**, `--tail` | `<L-only>` | 0, tails the laptop row | **4**, never "not running" |
+| zero live matches, **no** `--tail` | `zzqq-…` | 0 | **0** (contract: only `--tail` yields 3/4) |
+
+🔴 **The decisive pair** — `<L-only> --live --deep --tail 3 --json`, identical command and
+corpus, only the laptop's reachability differing:
+
+| field | full fleet | laptop DOWN |
+|---|---|---|
+| exit | 0 | **4** |
+| `archive.results[].live_state` | `CLOSED, CLOSED` | **`UNMEASURED, UNMEASURED`** |
+| `archive.live_coverage_complete` | `True` | `False` |
+| `archive.live_hosts_unreachable` | `[]` | `['laptop']` |
+| `tail.coverage_complete` / `refused` | `True` / `False` | `False` / `True` |
+
+The `CLOSED → UNMEASURED` flip is the defect `live_coverage_complete` was written for,
+observed live for the first time. `<L-only>` is the strongest single case: the window
+**genuinely exists** — the full-fleet control tails it — and with the host down the tool
+reports UNMEASURED rather than a measured absence.
+
+**A positive still survives partial coverage.** `<W-only> --live --deep`, laptop down:
+`live_state` = `UNMEASURED, LIVE, UNMEASURED, LIVE, …` with `live_coverage_complete: False`.
+Finding an id on a host that answered is a measurement whatever the coverage, exactly as
+`live_state_of` documents.
+
+🔴 **NEW MEASUREMENT — the headline number degrades 6.7× and the before/after table above
+does not say so.** A down laptop costs **exactly 2 ssh calls × `ConnectTimeout=4`** (counted,
+not inferred), a fixed cost that does not scale with match count:
+
+| | full fleet | laptop DOWN |
+|---|---|---|
+| `--live` | 0.73 s | **8.17 s** |
+| `--live --deep` | — | **31.98 s** (`--deep` makes a SECOND scan, so it pays the timeout twice) |
+
+Not a defect — `ConnectTimeout=4` is a deliberate `session-manager` choice — but the "1.25 s,
+one command" headline is a FULL-FLEET number, and this doc calls the partial fleet "the
+COMMON degraded state". Quote the pair, never the 1.25 s alone.
 
 ## Open investigations — live diagnosis state
 
@@ -104,25 +189,22 @@ clean `origin/main` control with the implicated files byte-identical — since f
   check whether a hook writes it.
 
 ## Next steps (ranked)
-🔴 **RENUMBERED once, deliberately.** The original item 1 (deploy) is DONE, so everything
-shifted up by one. `claim-work --list` was checked first and **no live claim carried a
-`find-session-live-first-*` slug**, so no claim was re-pointed. Keep this numbering stable now.
+🔴 **RENUMBERED TWICE, deliberately.** The original item 1 (deploy) and then the
+partial-fleet verification both closed, so everything has shifted up by two. `claim-work
+--list` was checked before each renumber. The rank-1 claim
+`find-session-live-first-1` was **released on completion** — a new rank 1 must be claimed
+under the slug `claim-work --slug-for` prints today, which is the SAME string for a
+DIFFERENT item. Derive it fresh; do not reuse a slug from an older copy of this list.
 
-1. **Verify the live-first loop against a genuinely unreachable host.** 🔴 **No round of the
-   5-round audit ladder ever did this** — the laptop answered every probe, so every
-   partial-fleet check used a stub `session-manager` (real subprocess, real JSON parse, real
-   `main()`, real exit code; simulated unreachability). The round-1 blocker *was* the
-   partial-fleet path. Suspend the laptop, then run the `--live --deep` and `--live --tail`
-   cases in **How to verify**. Repo: `devrc`.
-2. **#1030** — the store-api flake's SECOND mechanism (see the investigation block). ⚠ Someone
+1. **#1030** — the store-api flake's SECOND mechanism (see the investigation block). ⚠ Someone
    else holds `devrc-store-api-timeout-flake`, which is the *timeout* mechanism #1023 already
    fixed — a different failure of the same test. Do not read that claim as covering this.
    Repo: `devrc`.
-3. **#1029** — three residual guard-walkability gaps in
+2. **#1029** — three residual guard-walkability gaps in
    `scripts/tests/test_find_session_skill_contract.py`. Repo: `devrc`.
-4. **#1031** — two knowingly-deferred items (`excluded_shells` measured-zero asymmetry; the
+3. **#1031** — two knowingly-deferred items (`excluded_shells` measured-zero asymmetry; the
    row-field ledger's substring `__doc__` guard). Repo: `devrc`.
-5. **Inherited from `handoff-find-session-opencode.md`:**
+4. **Inherited from `handoff-find-session-opencode.md`:**
    `scripts/claude-hooks/tests/test_bash_guard.py:294`'s "no catastrophic backtracking" check
    still asserts on wall-clock and flakes under load. Its sibling item (dirty
    `embed_enlarge.js`) is CLOSED — it landed as #1010. Repo: `devrc`.
@@ -137,6 +219,14 @@ shifted up by one. `claim-work --list` was checked first and **no live claim car
   fourth exit-2 cause to both the contract and the shipped doc **without implementing it**
   and got 131/131 green. Each new guard written to pin prose is itself a new prose claim.
   That is why the ladder was stopped rather than run again.
+- 🔴 **SUBSTITUTE AS FAR FROM THE CLAIM AS YOU CAN GET — five rounds stubbed the subsystem the
+  claim was ABOUT.** The stub was honest work (real subprocess, real JSON, real `main()`, real
+  exit code) and still could not see layers 2–3, because it *was* layer 2. Verification did
+  not need a suspended laptop; it needed the substitution pushed one layer down, to the
+  transport — after which `session-manager`, the report JSON, the coverage predicates and the
+  exit codes were all genuine. **Ask which layer your fake occupies and whether the claim
+  lives above it.** A netns pushes it to zero layers, at the cost of blacking out the network
+  for everything in the process tree.
 - **Live-first is the whole design.** The archive walk is 30.1 s; the live scan is 1.82 s and
   already carries `task`/`path`/`label`/`hotkey`/`status`/`waiting_signals`/
   `claude_session_id`. For "check on something I believe is in flight", the archive is the
@@ -197,6 +287,34 @@ python3 ~/workspace/devrc/scripts/session-manager --json --lean --no-ch \
   | python3 -c "import json,sys; r=json.load(sys.stdin); \
 print({w['hotkey']: w['hotkey_display'] for h in r['hosts'].values() for w in h.get('windows') or [] if w.get('hotkey')})"
 ```
+
+**PARTIAL-FLEET check — no sudo, no suspend, nothing global mutated.** Instrument 2 is the
+better one (it substitutes no address at all); instrument 1 reproduces a *sleeping* laptop's
+4 s timeout rather than an instant unreachable, which is the shape that costs 8 s.
+```bash
+# --- instrument 2: real address, genuinely unroutable inside a netns ---
+mkdir -p /tmp/fsv/bin && cat > /tmp/fsv/bin/ssh <<'EOF'
+#!/usr/bin/env bash
+# -F /dev/null ONLY: openssh refuses a root-owned system ssh_config under the
+# namespace's uid map. No address substitution.
+exec "$(readlink -f /run/current-system/sw/bin/ssh)" -F /dev/null "$@"
+EOF
+chmod +x /tmp/fsv/bin/ssh
+
+# POSITIVE CONTROL FIRST — this must REACH the laptop, or the run below proves nothing
+ssh -F /dev/null -o BatchMode=yes -o ConnectTimeout=4 zach@10.42.0.100 'echo REACHED'
+
+# then, with the laptop genuinely unreachable:
+unshare -rn env PATH=/tmp/fsv/bin:$PATH \
+  python3 ~/workspace/devrc/scripts/find-session.py <term> --live --tail 3   # 0 / 3 / 4
+# ...and run the SAME command WITHOUT `unshare` every time. A partial-fleet exit code
+# means nothing until the full-fleet control shows a DIFFERENT one.
+```
+🔴 **`unshare -rn` WITHOUT `-F /dev/null` is a trap that looks like it worked**: ssh fails,
+`session-manager` reports `reachable: false`, every downstream assertion passes — but the
+error is `Bad owner or permissions on …/ssh_config.d/…`, a **config-parse** failure, not a
+network one. It is a second sample of "ssh failed", not evidence about an unreachable host.
+Read the `error` string before believing the `reachable: false`.
 
 **DEPLOY check — run on BOTH hosts, compare the store hash:**
 ```bash
