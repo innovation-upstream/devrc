@@ -260,6 +260,33 @@ def _empty_rollup() -> dict:
     """
     r = {
         "tool_counts": {},
+        # WHICH SKILLS THIS SESSION USED — two INDEPENDENTLY OBSERVED signals,
+        # deliberately not merged into one number.
+        #
+        # `skills_used`   {skill: assistant-records attributed to it}, read off
+        #                 Claude Code's own `attributionSkill` field. This is the
+        #                 only signal that sees a skill which AUTO-FIRED from its
+        #                 description rather than being typed.
+        # `commands_typed` {command: times typed}, from `<command-name>`. Named
+        #                 for what it actually holds: it includes BUILT-INS
+        #                 (`/login`, `/clear`), which are not skills, so a reader
+        #                 wanting skills must intersect it with the skill list.
+        #
+        # 🔴 NEITHER IS A SUPERSET OF THE OTHER, so a future "simplification"
+        # down to one field loses real usage in both directions. Measured
+        # 2026-08-29 over the workbench corpus, counting SESSIONS (subagent
+        # transcripts excluded, as everywhere else here):
+        #   browser   50 attributed,  0 typed  -> 100% invisible to the typed signal
+        #   clawgate  70 attributed, 32 typed  -> 42 attributed-only, 4 typed-only
+        #   activity   8 attributed,  3 typed  ->  5 attributed-only, 0 typed-only
+        # Both directions have live instances; both have a regression test.
+        #
+        # Same convention as `tool_counts`, NOT the `changed_paths` one: an
+        # unreadable transcript leaves these `{}` and lets `unreadable` /
+        # `stats_unavailable` carry the verdict, rather than encoding
+        # unobservability a second time in a different shape.
+        "skills_used": {},
+        "commands_typed": {},
         "input_tokens": 0,
         "output_tokens": 0,
         "cache_read_tokens": 0,
@@ -354,6 +381,8 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
     this whole dict — is byte-for-byte what it was. Pinned by a test."""
     r = _empty_rollup()
     tool_counts: dict = r["tool_counts"]
+    skills_used: dict = r["skills_used"]
+    commands_typed: dict = r["commands_typed"]
     languages: dict = r["languages"]
     err_cats: dict = r["tool_error_categories"]
     files: set[str] = set()
@@ -404,10 +433,24 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
                     genuine = res  # (kind, text)
             if genuine is not None:
                 r["user_message_count"] += 1
+                # `classify` returns ("command", "/name args") for a slash
+                # invocation — take the NAME only, so args (which carry operator
+                # free-text) never reach the payload.
+                kind, ctext = genuine
+                if kind == "command":
+                    name = ctext.split(None, 1)[0].lstrip("/").strip()
+                    if name:
+                        commands_typed[name] = commands_typed.get(name, 0) + 1
 
         elif typ == "assistant":
             msg = obj.get("message") or {}
             r["assistant_message_count"] += 1
+            # Claude Code stamps the ACTIVE skill on the assistant record, at the
+            # record's top level — a sibling of `message`, not inside it.
+            skill = obj.get("attributionSkill")
+            if isinstance(skill, str) and skill.strip():
+                s = skill.strip()
+                skills_used[s] = skills_used.get(s, 0) + 1
             model = msg.get("model")
             if model:
                 models.add(model)

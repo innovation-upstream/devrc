@@ -1,7 +1,7 @@
 ---
 name: find-session
 description: "Find a past Claude Code OR opencode session by keyword — searches both runtimes on both hosts and returns ranked sessions with the resume command. Use to recover 'the session where we did X'."
-argument-hint: "<term> [<term> …] [--project SUBSTR] [--since YYYY-MM-DD] [--any] [--limit N] [--claude-only|--opencode-only]"
+argument-hint: "<term> [<term> …] | --skill NAME [--project SUBSTR] [--since YYYY-MM-DD] [--any] [--limit N] [--claude-only|--opencode-only]"
 allowed-tools: Bash, Read
 ---
 
@@ -34,6 +34,18 @@ Notes:
   2026-08-24 — its handler sat behind a check an earlier `continue` had already made
   unreachable — so any earlier session that "searched with `--all`" searched the narrow
   surface. Re-run a query you trusted it for.
+- 🔴 **"Did we ever USE skill X?" is `--skill NAME`, NEVER a keyword search.** A keyword
+  cannot tell an invocation from the word in prose or in a path: measured 2026-08-29,
+  `find-session.py signal` returned **666** sessions (nearly all `scripts/signal/tests/…`
+  in test output) where `--skill signal` returns **1**. An investigation that used the
+  keyword form concluded "never used operationally" and was wrong. `--skill` reads the
+  per-record skill attribution, so it sees a skill that **auto-fired from its
+  description** as well as one typed as `/name` — and most usage is the former (`browser`:
+  50 attributed sessions, **0** ever typed). Works alone, with no search terms.
+  Two limits, both deliberate: it counts SESSIONS, so a skill used only inside a
+  dispatched **subagent** is not counted (`activity` had 15 such transcripts against 8
+  sessions); and the **opencode corpus has no such attribution**, so that leg is SKIPPED
+  and the omission is printed — do not read the result as fleet-wide.
 - **Both agent runtimes are searched by default.** opencode rows are tagged `[opencode]`,
   carry `opencode:<host>` as their `file:`, and resume with `opencode --session <id>` (not
   `claude --resume`). `--claude-only` / `--opencode-only` restrict the corpus.

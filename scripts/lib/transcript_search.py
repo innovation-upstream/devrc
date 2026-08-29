@@ -299,6 +299,14 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
     ts_first = ts_last = None
     term_hits = {t: 0 for t in terms}
     snippets = {}
+    # WHICH SKILLS this session used. Kept OUT of the term surfaces on purpose:
+    # skill invocation is not text the session said, and folding it into the
+    # keyword surface is what makes `find-session signal` return 666 sessions
+    # that merely mention the word. Two signals, neither a superset of the other
+    # — see `skills_used` / `commands_typed` in session-tailer.py for the
+    # measurement behind that.
+    skills_attributed: dict = {}
+    commands_typed: dict = {}
 
     for rec in load_records(path):
         typ = rec.get("type")
@@ -321,6 +329,13 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
                     ts_first = dt
                 if ts_last is None or dt > ts_last:
                     ts_last = dt
+            # `attributionSkill` is a TOP-LEVEL field on the record (a sibling of
+            # `message`), and it is the ONLY signal that sees a skill which
+            # auto-fired from its description rather than being typed.
+            skill = rec.get("attributionSkill")
+            if isinstance(skill, str) and skill.strip():
+                s = skill.strip()
+                skills_attributed[s] = skills_attributed.get(s, 0) + 1
             msg = rec.get("message") or {}
             is_user = typ == "user" and not rec.get("isMeta")
             if is_user and not genesis:
@@ -330,6 +345,19 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
                     genesis = candidate[:GENESIS_CHARS]
             body = text_of(msg, surface)
             role = "you" if is_user else "claude"
+            if is_user:
+                # Reuses `body` rather than re-flattening the message: this walk
+                # runs once PER TASK over the whole corpus inside
+                # check-clickup-addressed, so a second text_of() per user record
+                # is not free. Under a WIDER surface, re-flatten narrowly
+                # instead — `<command-name>` appearing inside quoted TOOL OUTPUT
+                # is not this session invoking anything.
+                utext = body if surface == SURFACE_TEXT else text_of(msg)
+                cmd_m = _COMMAND_NAME_RE.search(utext)
+                if cmd_m:
+                    cname = cmd_m.group(1).strip().lstrip("/").strip()
+                    if cname:
+                        commands_typed[cname] = commands_typed.get(cname, 0) + 1
         else:
             continue
 
@@ -361,7 +389,29 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
         "mtime": mtime,
         "term_hits": term_hits,
         "snippets": snippets,
+        "skills_attributed": skills_attributed,
+        "commands_typed": commands_typed,
     }
+
+
+def session_used_skill(rec, name) -> bool:
+    """Did this session use skill `name`, by EITHER route?
+
+    🔴 EXACT match on the skill's identity, never a substring of it. A substring
+    predicate is how "which sessions used `signal`?" turns back into the keyword
+    search this exists to replace — `sig` would match it, and so would a session
+    that merely wrote the word. Compare the ATTRIBUTED NAME, not the prose.
+    """
+    if not name:
+        return False
+    want = str(name).strip().lstrip("/").strip().lower()
+    if not want:
+        return False
+    for bag in (rec.get("skills_attributed") or {}, rec.get("commands_typed") or {}):
+        for got in bag:
+            if str(got).strip().lower() == want:
+                return True
+    return False
 
 
 def compile_terms(terms):
@@ -370,7 +420,7 @@ def compile_terms(terms):
 
 def search(terms, *, root=None, match_any=False, since=None, limit=None, project="",
            surface=SURFACE_TEXT, include_sidechains=False,
-           exclude_sessions=(), session_filter=None, stats=None):
+           exclude_sessions=(), session_filter=None, stats=None, skill=""):
     """Rank every transcript matching `terms`.
 
     Args that encode a DELIBERATE per-call-site difference (both defaults measured):
@@ -428,12 +478,23 @@ def search(terms, *, root=None, match_any=False, since=None, limit=None, project
     """
     if surface not in _SURFACE_RANK:
         raise ValueError(f"unknown surface {surface!r}; want one of {SURFACES}")
-    if not terms:
+    # Normalise BEFORE the guard reads it. A whitespace-only `skill` is truthy,
+    # so an un-normalised guard let `search([], skill="  ")` through — and every
+    # session then failed the predicate, returning an EMPTY result corpus-wide
+    # instead of raising. That is the silent zero this whole change exists to
+    # remove, reintroduced one line above it.
+    skill = str(skill).strip() if skill else ""
+    if not terms and not skill:
         # AND over an empty term list is vacuously true, so this would return the ENTIRE
         # corpus ranked by nothing. Neither CLI can reach it (both reject an empty term
         # list first), which is precisely why it needs a guard here rather than there.
-        raise ValueError("search() needs at least one term; an empty term list would "
-                         "match every transcript in the corpus")
+        #
+        # `skill` is the ONE thing that makes an empty term list meaningful: "which
+        # sessions used skill X" is a complete query with no keyword in it, and it is
+        # itself a narrowing predicate, so the corpus-wide result the guard exists to
+        # prevent cannot arise. A `skill` that matches nothing returns nothing.
+        raise ValueError("search() needs at least one term (or a skill); an empty query "
+                         "would match every transcript in the corpus")
     root = Path(root) if root is not None else DEFAULT_ROOT
     patterns = compile_terms(terms)
     needle = project.lower() if project else ""
@@ -468,8 +529,22 @@ def search(terms, *, root=None, match_any=False, since=None, limit=None, project
             print(f"ERR {path}: {e}", file=sys.stderr)
             continue
 
+        # The skill predicate ANDs with the terms — it NARROWS, never widens. So
+        # `--skill signal` alone answers "which sessions used it", and adding a
+        # term asks "…and mentioned X". Applied before the term test because it
+        # is the cheaper and far more selective of the two.
+        if skill and not session_used_skill(rec, skill):
+            continue
+
         matched_terms = [t for t in terms if rec["term_hits"][t] > 0]
-        ok = bool(matched_terms) if match_any else len(matched_terms) == len(terms)
+        if not terms:
+            # A skill-only query. `match_any` over an empty term list is False,
+            # not vacuously true, so without this the `--skill X --any`
+            # combination would return NOTHING — a silent empty result that
+            # reads exactly like "the skill was never used".
+            ok = True
+        else:
+            ok = bool(matched_terms) if match_any else len(matched_terms) == len(terms)
         if not ok:
             continue
 

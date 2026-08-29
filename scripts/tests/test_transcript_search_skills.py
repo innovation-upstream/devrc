@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Tests for the `--skill` search predicate (`transcript_search.session_used_skill`).
+
+WHY IT EXISTS. "Which sessions used skill X?" had no answer but a keyword search,
+and a keyword search cannot tell a skill INVOCATION from the word appearing in
+prose or in a path. Measured 2026-08-29 on the live corpus: `find-session.py
+signal` returned **666** sessions, nearly all of them `scripts/signal/tests/...`
+in test output; `--skill signal` returns **1** — the session that actually used
+it. A whole investigation reached the wrong conclusion inside that gap.
+
+🔴 THE HAZARD THIS FILE GUARDS IS A *SPELLED* PREDICATE. A substring or
+case-loose match would quietly turn `--skill` back into the keyword search it
+replaces, and would still pass a naive "it found the right session" test. The
+tests below therefore assert the predicate REJECTS: a prose mention, a path
+fragment, and a prefix of the real name.
+
+Kept in its own file rather than added to `test_transcript_search.py` because
+that module pins its own two red-ledgers against its test-function list.
+"""
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts" / "lib"))
+
+import transcript_search as ts  # noqa: E402
+
+
+def _user(text, **kw):
+    d = {"type": "user", "timestamp": "2026-08-21T10:00:00.000Z",
+         "cwd": "/srv/repo", "message": {"content": text}}
+    d.update(kw)
+    return json.dumps(d)
+
+
+def _assistant(text="ok", *, skill=None, **kw):
+    d = {"type": "assistant", "timestamp": "2026-08-21T10:01:00.000Z",
+         "cwd": "/srv/repo",
+         "message": {"content": [{"type": "text", "text": text}]}}
+    if skill is not None:
+        d["attributionSkill"] = skill
+    d.update(kw)
+    return json.dumps(d)
+
+
+def _write(root, session_id, lines, project="-srv-repo"):
+    d = Path(root) / project
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{session_id}.jsonl"
+    p.write_text("\n".join(lines) + "\n")
+    return p
+
+
+def _ids(results):
+    return sorted(r["session_id"] for r in results)
+
+
+# --------------------------------------------------------------------------- #
+# Positive control
+# --------------------------------------------------------------------------- #
+class TestPositiveControl:
+    """A predicate that matches nothing returns the same reassuring empty list as
+    a skill that was genuinely never used. Prove the number can move first."""
+
+    def test_a_session_that_used_the_skill_IS_returned(self, tmp_path):
+        _write(tmp_path, "used", [_user("hi"), _assistant(skill="signal")])
+        assert _ids(ts.search([], root=tmp_path, skill="signal")) == ["used"]
+
+    def test_a_session_that_did_NOT_is_excluded(self, tmp_path):
+        _write(tmp_path, "used", [_user("hi"), _assistant(skill="signal")])
+        _write(tmp_path, "other", [_user("hi"), _assistant(skill="browser")])
+        assert _ids(ts.search([], root=tmp_path, skill="signal")) == ["used"]
+
+
+# --------------------------------------------------------------------------- #
+# The spelled-predicate hazard
+# --------------------------------------------------------------------------- #
+class TestThePredicateIsStructuralNotSpelled:
+    """🔴 Each of these three passes trivially under a substring match, which is
+    exactly the implementation someone would reach for."""
+
+    def test_a_session_that_merely_MENTIONS_the_word_is_not_a_use(self, tmp_path):
+        """The 666-vs-1 case, in miniature."""
+        _write(tmp_path, "prose", [
+            _user("the signal chat pipeline is down, what do you think?"),
+            _assistant("signal signal signal — no skill was ever loaded here"),
+        ])
+        assert ts.search([], root=tmp_path, skill="signal") == []
+
+    def test_a_PATH_containing_the_name_is_not_a_use(self, tmp_path):
+        """`scripts/signal/tests/...` in test output is what dominated the real
+        keyword search's 666 hits."""
+        _write(tmp_path, "paths", [
+            _user("run the suite"),
+            _assistant("PASSED scripts/signal/tests/test_approval_gate.py :: 508/508"),
+        ])
+        assert ts.search([], root=tmp_path, skill="signal") == []
+
+    def test_a_PREFIX_of_the_skill_name_does_not_match_it(self, tmp_path):
+        _write(tmp_path, "used", [_user("hi"), _assistant(skill="signal")])
+        assert ts.search([], root=tmp_path, skill="sig") == []
+
+    def test_a_LONGER_name_starting_with_it_does_not_match_either(self, tmp_path):
+        _write(tmp_path, "sibling", [_user("hi"), _assistant(skill="signal-extra")])
+        assert ts.search([], root=tmp_path, skill="signal") == []
+
+
+# --------------------------------------------------------------------------- #
+# Both routes into a skill
+# --------------------------------------------------------------------------- #
+class TestBothInvocationRoutes:
+    """Neither signal is a superset of the other — see the measurement in
+    session-tailer.py's `skills_used` comment. The predicate ORs them, so a
+    regression in either route is a real loss of coverage."""
+
+    def test_an_AUTO_FIRED_skill_is_found_with_no_command_ever_typed(self, tmp_path):
+        _write(tmp_path, "auto", [
+            _user("look at the page I have open"),   # no slash command anywhere
+            _assistant(skill="browser"),
+        ])
+        assert _ids(ts.search([], root=tmp_path, skill="browser")) == ["auto"]
+
+    def test_a_TYPED_command_is_found_with_no_attributed_record(self, tmp_path):
+        _write(tmp_path, "typed", [
+            _user("<command-name>/clawgate</command-name>"
+                  "<command-args>status</command-args>"),
+            _assistant("here is the status"),        # no attributionSkill
+        ])
+        assert _ids(ts.search([], root=tmp_path, skill="clawgate")) == ["typed"]
+
+    def test_the_leading_slash_is_accepted_on_the_QUERY_too(self, tmp_path):
+        """`--skill /signal` is what a human types after reading `/signal`
+        somewhere. Rejecting it would be a silent empty result."""
+        _write(tmp_path, "used", [_user("hi"), _assistant(skill="signal")])
+        assert _ids(ts.search([], root=tmp_path, skill="/signal")) == ["used"]
+
+
+# --------------------------------------------------------------------------- #
+# Composition with terms
+# --------------------------------------------------------------------------- #
+class TestCompositionWithTerms:
+    def test_skill_NARROWS_the_term_search_it_does_not_widen_it(self, tmp_path):
+        _write(tmp_path, "both", [_user("harbour permit"), _assistant(skill="signal")])
+        _write(tmp_path, "skill_only", [_user("something else"),
+                                        _assistant(skill="signal")])
+        _write(tmp_path, "term_only", [_user("harbour permit"), _assistant()])
+        got = _ids(ts.search(["harbour permit"], root=tmp_path, skill="signal"))
+        assert got == ["both"], (
+            "a session matching only ONE of the two conditions was returned — "
+            "the skill predicate must AND with the terms, never OR")
+
+    def test_a_skill_only_query_works_under_match_any(self, tmp_path):
+        """🔴 `match_any` over an EMPTY term list is False, not vacuously true,
+        so `--skill X --any` returned NOTHING before this was handled — an empty
+        result indistinguishable from 'the skill was never used'."""
+        _write(tmp_path, "used", [_user("hi"), _assistant(skill="signal")])
+        assert _ids(ts.search([], root=tmp_path, skill="signal",
+                              match_any=True)) == ["used"]
+
+
+# --------------------------------------------------------------------------- #
+# The empty-query guard still holds
+# --------------------------------------------------------------------------- #
+class TestTheCorpusWideGuardStillHolds:
+    def test_no_terms_and_no_skill_still_raises(self, tmp_path):
+        """Relaxing the guard for `skill` must not open the corpus-wide path it
+        was written to close."""
+        with pytest.raises(ValueError):
+            ts.search([], root=tmp_path)
+
+    def test_an_empty_skill_string_is_not_a_query(self, tmp_path):
+        with pytest.raises(ValueError):
+            ts.search([], root=tmp_path, skill="   ")
+
+
+# --------------------------------------------------------------------------- #
+# Scan-level shape
+# --------------------------------------------------------------------------- #
+class TestScanExposesBothBags:
+    def test_scan_transcript_reports_the_two_signals_separately(self, tmp_path):
+        p = _write(tmp_path, "mixed", [
+            _user("<command-name>/signal</command-name>"),
+            _assistant(skill="signal"),
+            _assistant(skill="signal"),
+        ])
+        rec = ts.scan_transcript(str(p), [], [])
+        assert rec["skills_attributed"] == {"signal": 2}
+        assert rec["commands_typed"] == {"signal": 1}
+
+    def test_a_command_quoted_in_TOOL_OUTPUT_is_not_an_invocation(self, tmp_path):
+        """🔴 Under the wider `--all` surface, tool OUTPUT joins the searched
+        text — and this repo's own transcripts routinely contain other
+        transcripts (a `grep` of `~/.claude/projects` prints `<command-name>`
+        lines verbatim). Counting those would make any session that GREPPED for
+        skill usage look like a session that USED the skill, which is the exact
+        confusion this flag exists to end."""
+        p = _write(tmp_path, "grepper", [
+            _user("what did we run?"),
+            json.dumps({"type": "user", "timestamp": "2026-08-21T10:02:00.000Z",
+                        "message": {"content": [{
+                            "type": "tool_result",
+                            "content": "match: <command-name>/signal</command-name>"}]}}),
+        ])
+        rec = ts.scan_transcript(str(p), [], [], surface=ts.SURFACE_ALL)
+        assert rec["commands_typed"] == {}, (
+            "a command name quoted inside tool output was counted as an invocation")
+
+    def test_a_non_string_attribution_is_ignored(self, tmp_path):
+        p = _write(tmp_path, "junk", [
+            _user("hi"),
+            json.dumps({"type": "assistant", "attributionSkill": ["signal"],
+                        "message": {"content": []}}),
+        ])
+        rec = ts.scan_transcript(str(p), [], [])
+        assert rec["skills_attributed"] == {}

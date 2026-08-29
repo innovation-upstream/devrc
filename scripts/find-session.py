@@ -40,7 +40,17 @@ ROOT = DEFAULT_ROOT
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(add_help=True, description="Find past Claude Code and opencode sessions by keyword.")
-    p.add_argument("terms", nargs="+", help="search terms (ANDed unless --any)")
+    p.add_argument("terms", nargs="*", help="search terms (ANDed unless --any)")
+    p.add_argument("--skill", default="",
+                   help="only sessions that USED this skill (exact name). Reads the "
+                        "skill attribution on each record, so it sees a skill that "
+                        "auto-fired as well as one typed as /name — neither of which "
+                        "a keyword search can distinguish from prose. May be used "
+                        "alone, with no search terms. COUNTS SESSIONS: a skill used "
+                        "only inside a dispatched SUBAGENT is not counted, because "
+                        "subagent transcripts are not part of this corpus (measured "
+                        "2026-08-29: `activity` had 15 such transcripts against 8 "
+                        "sessions, `browser` 8 against 50).")
     p.add_argument("--project", default="", help="only sessions whose cwd/project contains this substring")
     p.add_argument("--since", default="", help="only sessions on/after this date (YYYY-MM-DD)")
     p.add_argument("--limit", type=int, default=10, help="max sessions to show (default 10)")
@@ -92,16 +102,36 @@ def main(argv=None):
     # It now selects the search surface, which is the only thing it ever meant.
     surface = SURFACE_ALL if a.all else SURFACE_TEXT
 
+    if not a.terms and not a.skill:
+        print("nothing to search for: give at least one term, or --skill NAME",
+              file=sys.stderr)
+        sys.exit(2)
+
+    # 🔴 `--skill` reads Claude Code's per-record skill attribution, which the
+    # opencode corpus does not have — there, a skill invocation is a tool CALL
+    # named `skill`, a different shape this search does not yet read. So the
+    # opencode leg is SKIPPED under --skill and the omission is PRINTED. Running
+    # it unfiltered would fold in sessions selected on terms alone, quietly
+    # answering a different question; skipping it silently would hand back a
+    # partial count that reads as the whole fleet. Both are the failure this
+    # flag exists to end.
+    skill_skips_opencode = bool(a.skill) and not a.claude_only
+    if a.skill and a.opencode_only:
+        print("--skill cannot be answered from the opencode corpus (no per-record "
+              "skill attribution there); drop --opencode-only", file=sys.stderr)
+        sys.exit(2)
+
     results = []
 
     # Search Claude Code transcripts (default)
     if not a.opencode_only:
         cc_results = search(a.terms, root=ROOT, match_any=a.any, since=since,
-                            project=a.project, surface=surface, limit=None)
+                            project=a.project, surface=surface, limit=None,
+                            skill=a.skill)
         results.extend(cc_results)
 
     # Search opencode sessions (default)
-    if not a.claude_only:
+    if not a.claude_only and not a.skill:
         try:
             oc_results = search_opencode(a.terms, match_any=a.any, since=since,
                                          project=a.project, limit=None)
@@ -119,11 +149,21 @@ def main(argv=None):
         print(json.dumps([render(r) for r in shown], indent=2))
         return 0
 
+    label = " ".join(a.terms)
+    if a.skill:
+        label = (f"skill={a.skill}" + (f" + {label}" if label else "")).strip()
+
+    # Printed BEFORE the count, and on the empty path too: a zero has to arrive
+    # carrying the scope it was measured over.
+    if skill_skips_opencode:
+        print("NOT searched: the opencode corpus (--skill has no attribution there); "
+              "these results are Claude Code sessions on THIS host only.\n")
+
     if not results:
-        print(f"No sessions matched: {' '.join(a.terms)}")
+        print(f"No sessions matched: {label}")
         return 0
 
-    print(f"{len(results)} session(s) matched {' '.join(a.terms)!r}"
+    print(f"{len(results)} session(s) matched {label!r}"
           + (f" (showing {len(shown)})" if len(shown) < len(results) else "") + "\n")
     for i, r in enumerate(shown, 1):
         date = (r["last"] or r["first"])[:16].replace("T", " ")
