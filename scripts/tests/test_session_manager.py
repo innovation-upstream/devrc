@@ -224,8 +224,39 @@ LAPTOP_PANES = (
 )
 # `#{window_id}|#{window_index}|#{session_name}` — session LAST so it may
 # contain '|'. Consistent with LIVE_WINDOWS above and with WORKBENCH_PANES.
-WORKBENCH_WINDOWS = "@41|3|scratch7\n@52|5|misc\n@63|1|other\n"
-LAPTOP_WINDOWS = "@7|1|naida-dev\n"
+# 🔴 WINDOW FIXTURES ARE RENDERED FROM WINDOW_FORMAT, NEVER TYPED.
+#
+# The block further down records that a mutation reverting WINDOW_FORMAT left
+# this whole suite green, "because every fixture feeds parse_windows a
+# pre-rendered string and never goes through the format". That was exactly
+# right, and hand-typed rows are what made it true: the fixtures encoded a
+# field ORDER of their own, so format and fixtures could drift apart silently
+# and only a real tmux would notice.
+#
+# Rendering from the format string closes it. Add a field to WINDOW_FORMAT and
+# every fixture below follows automatically; reorder it and they follow too. The
+# fixtures can no longer disagree with the contract they are supposed to stand
+# in for.
+#
+# pid/start_time default to one fixed pair because most tests do not care; the
+# ones that DO care (the server-identity tests) pass their own.
+def window_rows(*rows, pid="4025325", start_time="1785949442"):
+    """Render `list-windows -F WINDOW_FORMAT` output for (id, index, session)."""
+    out = []
+    for wid, idx, sess in rows:
+        out.append(sm.WINDOW_FORMAT
+                   .replace("#{window_id}", wid)
+                   .replace("#{window_index}", idx)
+                   .replace("#{pid}", pid)
+                   .replace("#{start_time}", start_time)
+                   .replace("#{session_name}", sess))
+    return "".join(line + "\n" for line in out)
+
+
+WORKBENCH_WINDOWS = window_rows(("@41", "3", "scratch7"),
+                                ("@52", "5", "misc"),
+                                ("@63", "1", "other"))
+LAPTOP_WINDOWS = window_rows(("@7", "1", "naida-dev"))
 
 SLOT_TABLE = '\n'.join([
     'SCRATCH_SLOTS=(',
@@ -411,7 +442,25 @@ def test_parse_panes_drops_junk_without_raising(junk):
 # empties, every task file looks stale, and the tool reports a confident,
 # measured, wrong zero. Typed here independently of the implementation.
 # --------------------------------------------------------------------------- #
-EXPECTED_WINDOW_FORMAT = "#{window_id}|#{window_index}|#{session_name}"
+EXPECTED_WINDOW_FORMAT = ("#{window_id}|#{window_index}|#{pid}|#{start_time}"
+                          "|#{session_name}")
+
+
+def test_the_server_identity_fields_come_BEFORE_session_name():
+    """🔴 ORDER, not mere presence. session_name must stay LAST or the bounded
+    maxsplit stops absorbing pipes in a session name, silently corrupting any
+    window whose session contains one. Appending the new fields after it would
+    satisfy a presence check and break exactly that."""
+    for field in ("#{pid}", "#{start_time}"):
+        assert field in sm.WINDOW_FORMAT, f"{field} missing from the format"
+        assert sm.WINDOW_FORMAT.index(field) < sm.WINDOW_FORMAT.index(
+            "#{session_name}"), (
+            f"{field} sits AFTER #{{session_name}}; session_name must be last")
+    # And the property it protects, exercised rather than asserted about.
+    rendered = sm.WINDOW_FORMAT.replace("#{window_id}", "@4") \
+        .replace("#{window_index}", "2").replace("#{pid}", "1") \
+        .replace("#{start_time}", "2").replace("#{session_name}", "weird|name")
+    assert sm.parse_windows(rendered) == {"@4": ("weird|name", "2")}
 
 
 def test_window_format_is_the_pinned_contract_with_tmux():
@@ -443,6 +492,142 @@ def test_the_window_format_survives_the_ssh_quoting_it_must_pass_through():
     assert remote.rstrip().endswith(("'", '"')), "format was not quoted"
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE tmux SERVER SENTINEL — the thing that makes a PERSISTED window id safe.
+#
+# tmux hands out `@0` again after a server restart, so a layout that stored `@41`
+# silently designates a DIFFERENT window afterwards: no error, no mismatch, just
+# the wrong pane on screen. The sentinel is what lets a consumer say "that id is
+# from a server that no longer exists" instead of following it.
+#
+# It is an OPAQUE EQUALITY TOKEN, never a time. Measured 2026-08-29: the laptop's
+# `#{start_time}` read 1609459239 (2021-01-01) while `ps -o lstart=` put the same
+# process at Fri Aug 28 2026 — its tmux started before NTP sync. The host clock
+# is correct now, which is what makes the stale value so convincing. Equality
+# still works perfectly on a wrong-but-stable clock.
+# --------------------------------------------------------------------------- #
+def test_the_server_sentinel_is_read_off_the_rows_list_windows_already_returns():
+    raw = window_rows(("@41", "3", "scratch7"), ("@52", "5", "misc"),
+                      pid="4025325", start_time="1785949442")
+    assert sm.parse_tmux_server_id(raw) == ("4025325:1785949442", None)
+
+
+def test_a_RESTARTED_server_yields_a_DIFFERENT_token():
+    """The whole point, exercised rather than described: same windows, same ids,
+    new server -> the tokens must not compare equal. A sentinel that stayed the
+    same across a restart would be worse than none, because a consumer would
+    trust `@41` precisely when it must not."""
+    before = sm.parse_tmux_server_id(
+        window_rows(("@41", "3", "scratch7"), pid="4025325",
+                    start_time="1785949442"))[0]
+    after = sm.parse_tmux_server_id(
+        window_rows(("@41", "3", "scratch7"), pid="99", start_time="1799999999"))[0]
+    assert before and after
+    assert before != after, "a restarted tmux produced the same sentinel"
+
+
+def test_a_REUSED_PID_still_changes_the_token():
+    """pid alone is not enough — pids are reused across a reboot, and the
+    laptop's server really does sit at pid 2509. start_time is what separates
+    them, which is why the token is the PAIR."""
+    a = sm.parse_tmux_server_id(window_rows(("@1", "1", "s"), pid="2509",
+                                            start_time="1609459239"))[0]
+    b = sm.parse_tmux_server_id(window_rows(("@1", "1", "s"), pid="2509",
+                                            start_time="1785949442"))[0]
+    assert a != b, "same pid, different server, identical token"
+
+
+@pytest.mark.parametrize("raw, why", [
+    ("", "no rows at all"),
+    ("   \n\n", "only blank lines"),
+    ("@1|1|1|2|a\n@2|1|9|9|b\n", "server-level fields disagree across rows"),
+    ("@1|1|||a\n", "tmux rendered the fields empty (older tmux)"),
+])
+def test_an_UNMEASURABLE_sentinel_returns_a_REASON_and_never_a_value(raw, why):
+    """🔴 A wrong token is worse than no token: it would re-point a layout with
+    full confidence. Every path that cannot measure must say so."""
+    value, reason = sm.parse_tmux_server_id(raw)
+    assert value is None, f"{why}: produced a value {value!r} anyway"
+    assert reason, f"{why}: refused silently, with no reason"
+
+
+@pytest.mark.parametrize("raw", [
+    "", "   \n", "@1|1|1|2|a\n", "@1|1|1|2|a\n@2|1|9|9|b\n", "@1|1|||a\n",
+    "garbage\n@3|2|7|8|sess\n",
+])
+def test_EXACTLY_ONE_of_value_and_reason_is_ever_set(raw):
+    """The contract every caller relies on to branch. Asserted across the whole
+    input space rather than per-case, so a future path cannot return both (which
+    reads as success) or neither (which reads as an unset token)."""
+    value, reason = sm.parse_tmux_server_id(raw)
+    assert (value is None) != (reason is None), (
+        f"{raw!r} -> value={value!r} reason={reason!r}")
+
+
+def test_the_sentinel_is_UNMEASURED_when_list_windows_did_not_answer():
+    """🔴 Deriving it from a failed call is how an unmeasured value becomes a
+    confident one — the same shape as `live_window_ids` being None rather than
+    [] on this exact path. A layout consumer must be able to tell "the server
+    restarted" from "we could not ask", because only the first invalidates a
+    stored window id."""
+    runner = make_runner(local_windows_rc=1,
+                         local_windows_err="lost server 500 lines")
+    wb = base_gather(runner=runner)["hosts"]["workbench"]
+
+    assert wb["windows_measured"] is False
+    assert wb["tmux_server_id"] is None, (
+        "a host whose list-windows failed reported a sentinel anyway")
+    assert wb["tmux_server_id_reason"], "refused silently, with no reason"
+
+    # And the healthy host in the SAME report still measures one — so this is a
+    # per-host fact, not the whole report degrading.
+    lap = base_gather(runner=runner)["hosts"]["laptop"]
+    assert lap["tmux_server_id"] == "4025325:1785949442"
+    assert lap["tmux_server_id_reason"] is None
+
+
+def test_COULD_NOT_ASK_and_ASKED_AND_GOT_NOTHING_do_not_share_a_reason():
+    """🔴 THIS TEST EXISTS BECAUSE A MUTANT SURVIVED WITHOUT IT.
+
+    Deleting the `windows_measured` branch — deriving the sentinel from a FAILED
+    call's stdout — left the suite green, because that stdout is `""` and
+    parse_tmux_server_id("") also answers (None, <reason>). Asserting "the value
+    is None and a reason exists" was therefore true on BOTH paths: the guard's
+    name claimed it distinguished them and its body did not.
+
+    The fix pins the RELATIONSHIP rather than a word: the two states are
+    different facts about the world — one host we could not question, one that
+    answered with nothing — and a reason field that collapses them is not doing
+    the only job it has. An equality on the prose would pass a matched pair of
+    wrong edits; an inequality between the two cannot."""
+    could_not_ask = base_gather(runner=make_runner(
+        local_windows_rc=1, local_windows_err="lost server"))["hosts"]["workbench"]
+    asked_got_nothing = base_gather(runner=make_runner(
+        local_windows=""))["hosts"]["workbench"]
+
+    assert could_not_ask["tmux_server_id"] is None
+    assert asked_got_nothing["tmux_server_id"] is None
+    assert could_not_ask["tmux_server_id_reason"], "no reason on the failed call"
+    assert asked_got_nothing["tmux_server_id_reason"], "no reason on the empty call"
+    assert (could_not_ask["tmux_server_id_reason"]
+            != asked_got_nothing["tmux_server_id_reason"]), (
+        "both states report the SAME reason, so the field cannot tell a dead "
+        "host from a silent one — which is the only question it answers")
+
+
+def test_the_fixture_renderer_TRACKS_the_format_it_renders_from():
+    """🔴 POSITIVE CONTROL FOR THE FIXTURES THEMSELVES. window_rows exists so a
+    format change cannot leave hand-typed rows behind — but only if it really
+    renders FROM the format. Assert the rendered row carries every literal the
+    format asks for, and that the parser reads it back."""
+    row = window_rows(("@7", "2", "sess"), pid="11", start_time="22")
+    for value in ("@7", "2", "11", "22", "sess"):
+        assert value in row, f"{value!r} missing from rendered row {row!r}"
+    assert sm.parse_windows(row) == {"@7": ("sess", "2")}
+    assert sm.parse_tmux_server_id(row) == ("11:22", None)
+    assert row.count("|") == sm.WINDOW_FIELD_COUNT - 1
+
+
 def test_the_pane_and_window_formats_agree_on_the_SLOT_fields():
     """The join needs `(session_name, window_index)` from BOTH calls under the
     same names. If one format renamed a field the join would silently miss."""
@@ -457,19 +642,23 @@ def test_the_pane_and_window_formats_agree_on_the_SLOT_fields():
 
 def test_parse_windows_carries_the_SLOT_not_just_the_id():
     """🔴 The value is the point. A set of ids cannot pin a relationship."""
-    got = sm.parse_windows("@1|0|alpha\n@5|12|bravo\n\n  @9|3|charlie  \n")
+    got = sm.parse_windows(window_rows(("@1", "0", "alpha"),
+                                       ("@5", "12", "bravo"),
+                                       ("@9", "3", "charlie")))
     assert got == {"@1": ("alpha", "0"), "@5": ("bravo", "12"),
                    "@9": ("charlie", "3")}
 
 
 def test_parse_windows_session_name_may_contain_pipes():
     """session_name is LAST and absorbs the remainder, same as pane_title."""
-    assert sm.parse_windows("@4|2|weird|name") == {"@4": ("weird|name", "2")}
+    assert sm.parse_windows(window_rows(("@4", "2", "weird|name"))) == {
+        "@4": ("weird|name", "2")}
 
 
 @pytest.mark.parametrize("bad", [
     "@1",              # id only — the OLD format; not enough to pin a slot
-    "@1|3",            # no session
+    "@1|3",            # too few fields
+    "@1|3|1|2",        # still one short: no session
     "nonsense",
     "|3|alpha",        # no id
     "x1|3|alpha",      # id is not a tmux @n
@@ -484,7 +673,8 @@ def test_parse_windows_drops_a_line_that_cannot_pin_a_slot(bad):
 
 
 def test_parse_window_ids_is_derived_from_the_one_parser():
-    assert sm.parse_window_ids("@1|0|a\n@5|1|b\n") == {"@1", "@5"}
+    assert sm.parse_window_ids(window_rows(("@1", "0", "a"),
+                                           ("@5", "1", "b"))) == {"@1", "@5"}
     assert sm.parse_window_ids(WORKBENCH_WINDOWS) == {"@41", "@52", "@63"}
 
 
@@ -1716,11 +1906,18 @@ def test_json_golden_schema_and_values():
     wb = blob["hosts"]["workbench"]
     assert set(wb) == {"reachable", "error", "ssh_target", "windows",
                        "live_window_ids", "windows_measured", "windows_error",
+                       "tmux_server_id", "tmux_server_id_reason",
                        "captures_measured", "captures_status", "captures_seen"}
     assert wb["ssh_target"] is None
     assert wb["live_window_ids"] == ["@41", "@52", "@63"]
     assert wb["windows_measured"] is True
     assert wb["windows_error"] is None
+    # The stability sentinel, carried so a consumer that PERSISTS a window id can
+    # tell "still the same tmux server" from "restarted, every @n is now a
+    # different window". Its value comes from the fixture renderer, so this
+    # asserts the value REACHES the report rather than restating a literal.
+    assert wb["tmux_server_id"] == "4025325:1785949442"
+    assert wb["tmux_server_id_reason"] is None
 
     row = wb["windows"][0]
     assert row == {
@@ -3641,7 +3838,9 @@ _TASK_LIVE_TWIN = {
 }
 # @41 AND @52 both report slot scratch7:3, so both task files pass the
 # relationship guard and then collide at the index.
-_CONTESTED_WINDOWS = "@41|3|scratch7\n@52|3|scratch7\n@63|1|other\n"
+_CONTESTED_WINDOWS = window_rows(("@41", "3", "scratch7"),
+                                 ("@52", "3", "scratch7"),
+                                 ("@63", "1", "other"))
 
 
 def _contested_report():
@@ -4404,12 +4603,13 @@ IDLE_MIX_PANES = "\n".join([
     "%35|3005|hedge|6|win-india|/home/zach/workspace/repo-india|claude"
     "|plain india title",
 ])
-IDLE_MIX_WINDOWS = "@71|2|hollow\n@72|9|quarry\n@73|4|ridge\n@74|7|thicket\n" \
-                   "@75|6|hedge\n"
+IDLE_MIX_WINDOWS = window_rows(("@71", "2", "hollow"), ("@72", "9", "quarry"),
+                               ("@73", "4", "ridge"), ("@74", "7", "thicket"),
+                               ("@75", "6", "hedge"))
 
 SHELLS_ONLY_PANES = (
     "%41|4001|copse|1|win-juliet|/home/zach/tmp/juliet|zsh|* juliet prompt")
-SHELLS_ONLY_WINDOWS = "@81|1|copse\n"
+SHELLS_ONLY_WINDOWS = window_rows(("@81", "1", "copse"))
 
 # 🔴 The REMOTE host needs a shell of its own, or "filter the local host only"
 # is a mutation no fixture can see: the stock laptop fixture is 100% claude.
@@ -4417,7 +4617,8 @@ LAPTOP_MIX_PANES = "\n".join([
     LAPTOP_PANES,
     "%22|2002|thistle|4|win-kilo|/home/zach/tmp/kilo|zsh|* kilo prompt",
 ])
-LAPTOP_MIX_WINDOWS = "@7|1|naida-dev\n@8|4|thistle\n"
+LAPTOP_MIX_WINDOWS = window_rows(("@7", "1", "naida-dev"),
+                                 ("@8", "4", "thistle"))
 
 
 def mix_gather(**kw):
@@ -10550,7 +10751,9 @@ MATCH_PANES = "\n".join([
     # A slot session, so `codename` is populated and tier 1 is exercised.
     f"%33|3003|scratch2|9|w-three|/home/zach/tmp|claude|{SPARKLE} third thing",
 ])
-MATCH_WINDOWS = "@31|1|match-one\n@32|4|match-two\n@33|9|scratch2\n"
+MATCH_WINDOWS = window_rows(("@31", "1", "match-one"),
+                            ("@32", "4", "match-two"),
+                            ("@33", "9", "scratch2"))
 
 
 def match_gather(**kw):
@@ -10816,7 +11019,8 @@ SCRATCH3_PANES = "\n".join([
     f"%42|4002|scratch3|2|w-b|/home/zach/workspace/zztheta|claude"
     f"|{BRAILLE} the work that was lost track of",
 ])
-SCRATCH3_WINDOWS = "@41|1|scratch3\n@42|2|scratch3\n"
+SCRATCH3_WINDOWS = window_rows(("@41", "1", "scratch3"),
+                               ("@42", "2", "scratch3"))
 
 
 def scratch3_gather(**kw):
