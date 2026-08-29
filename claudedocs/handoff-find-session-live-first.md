@@ -34,9 +34,11 @@ calls, 5 of them pure flailing.
   `2a8a8982`). The base clone is on `main` and was `merge --ff-only`'d to `6e7e85bf`; it was
   **behind 1, never ahead** — no un-pushed commits, so the diverged-host hazard did not occur.
 - 🔴 **The partial-fleet path is now VERIFIED against a genuinely unreachable host — this was
-  the one claim in the feature with no live observation behind it, and it holds.** Six cases,
-  two independent instruments, every full-fleet control run as the discriminator. Details in
-  "Partial-fleet verification" below. **No defect was found**, so the ladder ends here.
+  the one claim in the feature with no live observation behind it, and it holds.** Eight
+  cases across two instruments with different failure shapes; the **five** where a control
+  could discriminate were each re-run as the SAME command on a complete fleet, and gave a
+  different answer. Details in "Partial-fleet verification" below. **No defect was found**,
+  so the ladder ends here.
 - **Still NOT verified:** `live_scan`'s `status: "unavailable"` branch (NO host answers). The
   local host is scanned without ssh, so it cannot be made to fail genuinely — reaching that
   branch requires a stub, which is exactly what the rank-1 item existed to stop trusting. Say
@@ -104,8 +106,12 @@ the identical command fails with it (rc 255); pass-through — the same laptop s
 at its LAN address through the shim, so it is not a blanket ssh-killer. Instrument 2: the
 identical command reaches the laptop outside the namespace.
 
-**Results — every full-fleet control run as the discriminator, because "exit 4 under a
-partial fleet" proves nothing unless the same command exits 3 under a complete one.**
+**Results.** The five rows below plus the `--deep` decisive pair and the positive-survives
+case = eight. ⚠ **A control is only listed where the SAME command could discriminate** —
+"exit 4 under a partial fleet" proves nothing unless that command exits 3 under a complete
+one. Two rows (`several matches` and `no --tail`) have no same-command control: their
+full-fleet behaviour is contract-derived, not measured here. Say so rather than implying a
+control for all eight.
 `<W-only>` / `<L-only>` are terms matching exactly ONE window, on the workbench and on the
 laptop respectively. The literals are not reproduced — they came from other sessions' task
 text and this repo is public. Re-derive a pair for your own fleet: any token that
