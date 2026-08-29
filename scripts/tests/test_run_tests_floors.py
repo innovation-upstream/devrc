@@ -128,8 +128,24 @@ def test_the_global_floor_is_the_sum_of_the_per_target_floors():
     """
     proc = _run([str(RUN_TESTS), "--check-floors", str(REPO_ROOT)])
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    per_target = [int(m) for m in re.findall(r"^  floor (\d+)  ", proc.stdout, re.M)]
+    # Only rows for targets IN the selected set feed the global sum. A floor for
+    # a target outside it (the dev-host tier) is printed for completeness and
+    # labelled as excluded -- summing it would compare the total against a set
+    # the run never had. Before 2026-08-29 every floor was hermetic, so the
+    # distinction did not exist and this parser read every printed row.
+    per_target = [
+        int(m)
+        for m, tail in re.findall(r"^  floor (\d+)  (.*)$", proc.stdout, re.M)
+        if "excluded from the global sum" not in tail
+    ]
     assert per_target, f"parsed NO per-target floors -- the parser is broken, not the table.\n{proc.stdout}"
+    # Positive control for the exclusion itself: if the label ever stops being
+    # emitted, the filter above silently becomes a no-op and this test goes back
+    # to summing a set the global floor was never computed over.
+    labelled = re.findall(r"^  floor \d+  .*excluded from the global sum", proc.stdout, re.M)
+    assert len(labelled) == len(re.findall(r"^  floor \d+  ", proc.stdout, re.M)) - len(per_target), (
+        "the excluded-row label is inconsistent with what the filter dropped"
+    )
     m = re.search(r"GLOBAL floor \(sum over the \w+ set\) = (\d+)", proc.stdout)
     assert m, proc.stdout
     assert int(m.group(1)) == sum(per_target), (
