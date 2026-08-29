@@ -16,7 +16,14 @@ whether sessions that resume a handoff end up recording their work. Ship a numbe
 survives adversarial re-derivation, and fix whatever it exposes.
 
 ## State now
-- **Branch / PR:** `zach/skill-chain-usage-audit` off `origin/main` (devrc). No PR at time of writing.
+- **Branch / PR:** `zach/skill-chain-usage-audit` off `origin/main` (devrc) → **devrc#1055,
+  OPEN and BLOCKED**. Both Tekton legs return `COULD NOT RUN: the gate stopped before this
+  leg reported` on both SHAs. 🔴 **It is not this branch** — every PR touched after
+  ~22:23Z reads `ERROR,ERROR` (#1048–#1050, #1055–#1059); the last clean run was #1054 at
+  22:06Z. Pointer for whoever fixes it: in ns `tekton-ci` the recent `devrc-ci-*` runs have
+  `notify-pod` and `report-pod` but **no `gate-pod`**, while sibling `vetr-app-unit-*` runs
+  do; all `tekton-pipelines` controllers are `Running` and the node is `Ready`, so it is
+  neither a controller nor a node outage.
 - **DONE — the measurement.** Window 2026-08-15 → 08-29, both hosts, both runtimes
   (`find-session` stderr silent on every run ⇒ full coverage per its own contract).
   - 391 sessions match `"Canonical handoff (read first)"`; **256** carry a `/resume`
@@ -40,27 +47,45 @@ survives adversarial re-derivation, and fix whatever it exposes.
 
 ## Open investigations — live diagnosis state
 
-### Why 19 sessions ended without invoking `/handoff` at all
-- **Symptom + exact repro:** 19 of 22 losses show NO `handoff_doc.py` invocation anywhere
-  in the transcript — not a refused write, an absent one. Reproduce with
-  `scratchpad/split.py` (classifier below), bucket `7. step 5 never run`.
-- **Observed (with values):** losses by cause — 19 never-run, 2 tool-failed, 1
-  proposed-never-confirmed. Named instances: `handoff-skill-prune-campaign.md` (08-20,
-  appears TWICE — once unconfirmed, once never-run), `handoff-ci-flakes-and-misattribution.md`
-  (08-27), `handoff-app-store-ui-feedback.md` (08-23), `handoff-agent-attention-tooling.md`
-  (08-22), `handoff-clickup-clawgate-mirror.md` (08-22).
-- **Ruled out:** *"much of the gap is the skill correctly declining"* — killed, zero
-  `no-change`/`no-advance` in the loss set. *"docs are written but never committed"* —
-  killed, 0 cases of an on-disk untracked handoff doc across 154 repos.
-- **Leading hypothesis:** `/handoff` is invoked by INTENT, and a session that runs out of
-  context, is interrupted, or simply stops never forms it. The clawgate half of the chain
-  has a `Stop` hook enforcing write-back and scores 86%; the handoff half has no
-  equivalent and its failure mode is exactly "session ended". The asymmetry is visible in
-  the two numbers.
-- **Next probe:** decide whether a `Stop`-hook analogue is warranted, and whether it can be
-  made non-annoying. Before building anything, measure how many of the 19 were
-  context-exhausted vs cleanly ended — the transcripts carry that, and the two want
-  different remedies (an auto-draft vs a nudge).
+### ✅ CLOSED — why the never-run losses ended without invoking `/handoff`
+**Answer: they ended CLEANLY. Context exhaustion is a minority cause, 4:1.** The remedy
+this selects is a **nudge**, not an auto-draft.
+
+Re-derived 2026-08-29 22:5xZ on a fresh population (the prior run's classifier was
+throwaway and is gone; nothing cached was reused). 305 `/resume`-genesis sessions, 276
+graded, 51 with no in-window commit on the resumed doc, of which **32 DID run
+`handoff_doc.py`** (mostly the topic-drift cases below) and **16 never ran it**:
+
+| bucket | n | share |
+|---|---|---|
+| **D cleanly-ended** | **8** | 50.0% |
+| B interrupted-at-end | 4 | 25.0% |
+| **A context-exhausted** | **2** | 12.5% |
+| 0 never-started (zero assistant turns) | 2 | 12.5% |
+
+Only the two A sessions come near a ceiling — peak input **944,856 (0.94)** and
+**965,819 (0.97)** against 1M. Every other session peaked at 0.29–0.60. Three sessions
+have an unresolvable ceiling, so at most one D could flip: **cleanly-ended ≥ 7** is the
+floor.
+
+🔴 **The decisive number for item 2 — a `Stop` hook ALREADY FIRES in these sessions.**
+`stop_hook_summary` rows are present in **8 of 8** cleanly-ended, 2/2 exhausted, 3/4
+interrupted, 0/2 never-started (nothing ran at all) = **13/16**. So a handoff-write
+`Stop` hook is not merely warranted, it is **mechanically reachable in 100% of the
+dominant bucket** — the hook infrastructure demonstrably executes exactly where the
+handoff is being lost. An auto-draft-before-compaction would address 2 of 16.
+
+**Controls** (a detector never watched fire proves nothing): the `handoff_doc.py` probe
+fired on **32 of 48** readable loser transcripts, so the 16 zeros are absences, not a
+dead probe. The compaction-marker detector is real but weak — **20 of 5,961** corpus
+transcripts carry a genuine marker — which is why the token ratio does the work here.
+
+**Reconciliation with the 19 above, which is NOT refuted.** Population grew 256 → 305
+between the two runs; this run's loser set is wider because it also holds the 25
+topic-drift sessions the earlier pass scored as *recorded*. **3 loser transcripts live on
+the laptop and are unreadable from the workbench** (43 of the 305 sessions are remote) and
+29 sessions were dropped because their resumed doc would not resolve. 16 + 3 unreadable
+is consistent with 19; treat the bucket SHARES as the finding, not the denominator.
 
 ### Whether the 25 "topic drift" sessions should count as recorded
 - **Symptom:** 25 sessions resumed doc X and wrote doc Y (`clawgate-usage-audit` →
@@ -73,16 +98,28 @@ survives adversarial re-derivation, and fix whatever it exposes.
   `/resume`'s own known "open-investigation blocks read as current forever" trap.
 
 ## Next steps (ranked)
-1. **Split the 19 never-run losses into context-exhausted vs cleanly-ended** (devrc;
-   reads `~/.claude/projects/**/*.jsonl`, no repo edit). Decides whether the remedy is a
-   hook, a nudge, or nothing. Cheapest item and it gates item 2.
-2. **Decide on a handoff-write `Stop` hook** (devrc `claude/hooks/`, `~/.claude/settings.json`).
-   Only after 1. The clawgate writeback guard (`~/.claude/hooks/clawgate-writeback-guard.py`)
-   is the working precedent — arm-on-read, block-on-Stop, 86% compliance.
+1. ✅ **DONE (2026-08-29)** — split measured: **8 cleanly-ended vs 2 context-exhausted**
+   of 16, plus 4 interrupted-at-end and 2 never-started. See the closed investigation
+   above. It selects a **nudge**, and shows a `Stop` hook already fires in 8/8 of the
+   dominant bucket.
+2. **Build the handoff-write `Stop` hook** (devrc `claude/hooks/`, `~/.claude/settings.json`).
+   No longer "decide" — item 1 decided it. The clawgate writeback guard
+   (`~/.claude/hooks/clawgate-writeback-guard.py`) is the working precedent — arm-on-read,
+   block-on-Stop, 86% compliance. 🔴 Arm it on a `/resume` READ, not on session start, or
+   it fires on every session that never touched a handoff. The 2 never-started sessions
+   are the reminder that a hook cannot reach a session that produced no turns.
 3. **Audit the 25 drift cases for stale abandoned docs** (devrc + datapacket-talos +
    homelab-talos `claudedocs/`). Cheap, and it feeds `/resume` quality directly.
 4. **Deploy the clawgate SKILL.md fix** — `home-manager switch`, then confirm
    `~/.claude/skills/clawgate/SKILL.md` no longer contains "preserve both".
+   🔴 Gated on #1055 merging, which is gated on the CI outage in *State now*.
+5. **Act on the handoff-doc bloat audit** — `claudedocs/proposal-handoff-doc-bloat.md`
+   (landed in this branch). Measured: handoff docs grow **monotonically** (121 of 123
+   revisions grew or held; 16 of 18 docs never shrank once; ×2.55 first→latest), and
+   **~35–44%** of what a `/resume` pays for is dead-but-dated or belongs in a skill.
+   `/handoff` has no budget, no archive step and no eviction verdict; archive adoption
+   across 413 docs is **0**. Proposal adapts `prune-skill`'s method. **Propose-only — the
+   SKILL.md change is not written.** Cheapest first move is `handoff-audit.py`, no gate.
 
 🔴 **This list is a WORK QUEUE, and `claim-work` is its LOCK** — every
 `/resume` session draws from it, so a *better* ranked list produces *more*
@@ -116,6 +153,20 @@ of this doc — re-read them before trusting any similar analysis.**
    `origin/trunk` — `git cat-file -e <upstream>:<path>` before believing a missing file.
 4. **Topic drift breaks a filename join.** 25 sessions wrote a differently-named doc;
    demanding the same basename scored them as losses.
+5. 🔴 **The end-state classifier's interrupt guard was SPELLED, not STRUCTURAL** (found
+   2026-08-29 while doing item 1). Matching `Request interrupted` *anywhere* in a
+   transcript scores a session interrupted at turn 40 that then ran 500 more turns and
+   finished cleanly as "interrupted". **An interrupt anywhere is not an interrupted END** —
+   record the row index and only count interrupts inside the final N conversational rows.
+   Negative control: 2 sessions carry an early interrupt and must NOT bucket as interrupted.
+6. 🔴 **An exhaustion ratio computed against an ASSUMED context ceiling is an artifact
+   generator — and it announces itself with impossible values.** The transcript's model
+   string is `claude-opus-5` and carries **no context tier**, so assuming 200k produced
+   ratios up to **4.83** and scored **11 of 16** sessions as context-exhausted. The true
+   figure is 2. A ratio above 1.0 is the tell; **infer the ceiling from evidence (a peak
+   above 200k refutes the 200k tier) and mark it AMBIGUOUS where evidence is absent**,
+   rather than defaulting a constant. Same class as gotcha 1: the number was wrong because
+   the instrument's own parameter was never validated.
 
    Net effect of 2–4: the rate read **77%** before correction and **91.3%** after. Every
    error was in the instrument, none in the chain.
@@ -149,6 +200,23 @@ clawgatectl task ls --summary --limit 400 | jq '[.[]|select(.createdAt>="2026-08
 # 4. the SKILL.md fix is DEPLOYED (not merely committed)
 grep -c 'preserve both' ~/.claude/skills/clawgate/SKILL.md   # expect 0 AFTER a home-manager switch
 ```
-Classifier scripts used for the split live in this session's scratchpad
-(`split.py`, `verifyE.py`, `reconcile2.py`); they are throwaway and are NOT committed —
-re-derive from the commands above rather than hunting for them.
+```bash
+# 5. item 1's split, end to end. The classifier IS committed this time (see below).
+W=/tmp/chain-work; mkdir -p "$W"
+python3 ~/workspace/devrc/scripts/find-session.py "Canonical handoff (read first)" \
+  --since 2026-08-15 --limit 500 > "$W/chain2.out" 2>"$W/chain2.err"
+test ! -s "$W/chain2.err" || echo "PARTIAL COVERAGE — read chain2.err before believing anything"
+CHAIN_WORKDIR="$W" bash ~/workspace/devrc/claudedocs/skill-chain-loss-index.sh
+CHAIN_WORKDIR="$W" python3 ~/workspace/devrc/claudedocs/skill-chain-loss-classifier.py
+#   expect: 8 cleanly-ended / 4 interrupted-at-end / 2 context-exhausted / 2 never-started
+#   and the INSTRUMENT CONTROLS block non-empty. A run whose controls are absent is void.
+```
+
+🔴 **The prior pass's classifiers (`split.py`, `verifyE.py`) were left in a session
+scratchpad as "throwaway", and item 1 therefore cost a FULL re-derivation** — fresh
+population, fresh 154-repo commit index, a rewritten classifier, and two defects
+re-discovered from scratch (gotchas 5 and 6). **That is why these are committed:**
+`claudedocs/skill-chain-loss-classifier.py` and `claudedocs/skill-chain-loss-index.sh`,
+both parameterised on `CHAIN_WORKDIR` and both verified from the committed copy to
+reproduce the numbers above. `reconcile2.py`/`final.py` (the bucket-E verifier) remain
+uncommitted in the earlier session's scratchpad.
