@@ -288,7 +288,12 @@ class TestTheBoundAppliesToALLTHREERoutes:
             "signal", "/handoff", "cloudflare:wrangler", "not a valid name",
             ".claude/worktrees/agent-abc123:remix", "z" * 4000, "z" * 200,
             "home/zach/x/.env", "10.42.0.30:8123/activity", "", "   ", "/", "//",
-            ":", "::", "a:", ":a", "a::b", "apps/web:deploy",
+            # ⚠ Colon-axis values are spelled with NON-HEX words on purpose:
+            # short hex-letter operands either side of a double colon read as a
+            # routable IPv6 literal to `test_no_public_ips.py`, and this repo is
+            # PUBLIC. The axis under test is the colon count, not the letters.
+            # (That scanner reads comments too — do not write the shape here.)
+            ":", "::", "skill:", ":skill", "skill::name", "apps/web:deploy",
             "apps/web:cloudflare:wrangler", "a/b/c:d:e", "a/b:c/d",
             "not a valid name/x:handoff", ("z" * 4000) + "/a:handoff",
             "café", "sig nal", "a" * 64, "a" * 65, 42, None, True, ["signal"],
