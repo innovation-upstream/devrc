@@ -168,7 +168,7 @@ matters.
 
 ### Size, and what it actually costs
 
-Re-measured **2026-08-19** on engine **1.18.21**, model
+Re-measured **2026-08-19** on engine **1.18.18**, model
 **`openrouter/xiaomi/mimo-v2.5`**. Instrument: opencode's own store,
 `~/.local/share/opencode/opencode-stable.db` (`session` / `message` tables carry
 `cost`, `tokens_input`, `tokens_cache_read`), read read-only.

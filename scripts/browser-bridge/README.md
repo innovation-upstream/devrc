@@ -1742,7 +1742,7 @@ Two consequences, both deliberate:
   says so, and the remedy is for each driver to `open` its own tab.
 
   ⚠ **An opencode `task` subagent gets a DIFFERENT id, not its parent's.**
-  Measured in the shipped 1.18.21 binary: `TaskTool.execute` creates a child
+  Measured in the shipped 1.18.18 binary: `TaskTool.execute` creates a child
   session and the shell tool passes that child's `sessionID`. Telemetry stays
   coherent — each row names the session that really ran the tool — but **routing
   fragments**: parent and subagent own different tabs. This is the exact mirror
@@ -2213,7 +2213,7 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   **Both hosts run 1.18.21 and both resolve browser-only** (verified 2026-08-19:
   the gate replicated ON EACH HOST parses to exactly one enabled tool, `browser`,
   with every host tool present and `false`). There is no version-skew caveat
-  here any more. The hosts CONVERGED on 2026-08-15 and the pin's move to 1.18.21
+  here any more. The hosts CONVERGED on 2026-08-15 and the pin's move to 1.18.18
   had reached both before it was re-keyed — verified at the consumer, both
   `readlink -f $(command -v opencode)` resolving to the same
   `…-opencode-1.18.21` store path — so the pin and the deploy agree. The

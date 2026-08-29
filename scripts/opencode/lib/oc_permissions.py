@@ -4,7 +4,7 @@
 WHY THIS FILE EXISTS
 --------------------
 `scripts/tests/test_opencode_config.py` already carried a faithful port of
-opencode 1.18.21's `Wildcard.match` + its `findLast` resolver, validated against
+opencode 1.18.18's `Wildcard.match` + its `findLast` resolver, validated against
 the real engine (`opencode debug agent <a> --tool bash`: 18 deny cases and 3
 allow cases agreed). `opencode-dispatch preflight` needs exactly that predicate
 to answer "would this command in the brief resolve to `ask`, i.e. be
@@ -103,7 +103,7 @@ def load_config(path: Path | None = None) -> dict:
 # --------------------------------------------------------------------------- #
 # 🔴 the resolver model
 #
-# Faithful port of opencode 1.18.21's `Wildcard.match` + the `findLast` resolver:
+# Faithful port of opencode 1.18.18's `Wildcard.match` + the `findLast` resolver:
 #
 #     pattern.replace(/[.+^${}()|[\]\\]/g,"\\$&").replace(/\*/g,".*")
 #            .replace(/\?/g,".")   ->   new RegExp("^"+p+"$","s")

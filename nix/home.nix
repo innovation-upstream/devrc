@@ -266,7 +266,17 @@ in
           # 'ask' ⊂ 'task' is the documented way a neighbour silently steals it.
           # :dacq keeps the words he actually types for THIS snippet (feedback,
           # dispatch, process); :acq owns ask/clarify/questions alone.
-          { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
+          # 2026-08-29: `"ask"` REMOVED from :dacq below. The split above says in
+          # so many words that ":acq owns ask/clarify/questions alone", and the
+          # label was duly cleaned — but the search_terms were not, so BOTH
+          # snippets went on declaring "ask" exactly. The tie-break added for this
+          # (#999) can only rescue a term that NAMES one trigger outright; neither
+          # of these is named "ask", so the term resolved to None and every fire
+          # of the config's highest-traffic term was recorded UNATTRIBUTED again —
+          # the very outcome the split was meant to prevent. It also turned
+          # `main` red repo-wide. The comment was right and the data was wrong:
+          # this makes the data match it.
+          { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["feedback" "dispatch" "process" "elicit" "scope" "include"]; }
           { trigger = ":acq"; replace = "ask clarifying questions"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
           { trigger = ":alo"; replace = "anything left outstanding from this thread? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
@@ -1603,14 +1613,14 @@ in
   # Concatenating at switch time means it can never drift from the sources
   # Claude Code reads.
   #
-  # COST — re-measured 2026-08-19 on engine 1.18.21 / openrouter/xiaomi/mimo-v2.5.
+  # COST — re-measured 2026-08-19 on engine 1.18.18 / openrouter/xiaomi/mimo-v2.5.
   # The file is 43,676 B = 8,329 input tokens (A/B pair: one trivial prompt in an
   # empty scratch project, under two config dirs identical in every byte except
   # this file — 22,019 input tok with it, 13,690 without).
   # 🔴 That is NOT a per-request tax, and the note that used to stand here
   # implied it was. The file sits at the HEAD of the prompt prefix, which is
   # exactly what a provider prefix-cache retains: of the 2,218 billed requests
-  # this box logged on 1.18.16+1.18.21, only 60 (2.7%) were cold, and a cached
+  # this box logged on 1.18.16+1.18.18, only 60 (2.7%) were cold, and a cached
   # token bills ~50x under an input token. Attributed cost of this file over that
   # window: ~$0.12 of $1.77 total spend (~7%). A COLD first request does pay the
   # full 8,329 — that, not the steady state, is what browser-agent's isolated

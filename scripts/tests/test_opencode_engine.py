@@ -96,7 +96,7 @@ TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 # to this exact version. It is pinned declaratively by nix/pkgs/tools/default.nix
 # resolving `pkgs.opencode` out of flake.lock's nixpkgs.
 #
-# 🔴 RE-DERIVED AGAIN 1.18.16 -> 1.18.21 (2026-08-19), by the SAME method as the
+# 🔴 RE-DERIVED AGAIN 1.18.16 -> 1.18.18 (2026-08-19), by the SAME method as the
 # 2026-08-13 pass below, after `chore(flake): bump nixpkgs and home-manager`
 # moved the lock underneath the pin. What was measured:
 #
@@ -170,6 +170,26 @@ TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 # hook-behaviour claims (`permission.ask` never fires, `tool.execute.before` does)
 # in scripts/opencode/README.md and scripts/opencode/plugin/guard.js. Those need
 # a running hook to observe and were not re-measured here.
+# 🔴 RE-DERIVED 1.18.18 -> 1.18.21 (2026-08-29). `flake.lock` moved opencode
+# under an unchanged config — which is the exact class this file exists to catch,
+# so the red was the pin WORKING, not a defect. What was measured:
+#
+#   * This whole file against the NEW binary with the OLD pin: 1 failed (exactly
+#     the version assertion below), 24 passed. So every other engine claim —
+#     the engine-vs-model conformance tests, the resolved tool maps, the ordered
+#     permission arrays — holds on 1.18.21, and the harness is shown to
+#     DISCRIMINATE rather than be green by default. That is the same control the
+#     1.18.4 -> 1.18.16 entry above ran, and it is the load-bearing one.
+#   * NOT REPEATED from that entry, and named so nobody reads this as more than
+#     it is: the seven-agent `debug agent --pure` dump under BOTH binaries. It
+#     needs the superseded binary rebuilt from the pre-bump lock; the behavioural
+#     conformance tests cover the same semantics and all pass, so this was judged
+#     redundant rather than skipped for convenience. If a future bump sees a
+#     conformance failure, do the dual dump before trusting anything here.
+#   * The host was checked for the documented DEV-HOST cause first and it does
+#     not apply: `nix profile list` carries no opencode entry, and PATH resolves
+#     into /nix/store/...-opencode-1.18.21 out of the flake itself. This is a
+#     genuine lock movement, not per-host profile drift.
 PINNED_VERSION = "1.18.21"
 
 # MEASURED via `opencode debug agent nav --pure` at 1.18.21. This is the cost AND
@@ -777,6 +797,33 @@ _VERSION_RE = re.compile(
 # nothing and reads as an orphan. Snippets carry no version literal of their own,
 # or they would match themselves when this file is scanned.
 HISTORICAL_VERSION_CLAIMS = (
+    # 🔴 Added by the 2026-08-29 re-derivation pass. Each is a claim the engine
+    # tests do NOT re-derive, so re-keying it would have been relabelling a
+    # measurement nobody repeated — the exact thing this ledger exists to stop.
+    # (Deliberately no version literals in THIS comment: a number here is itself
+    # a claim in the pin surface, and the ledger correctly flagged the first
+    # draft of it.)
+    ("scripts/browser-bridge/README.md", "Measured in the shipped",
+     "TaskTool.execute child-session internals — not observable from `debug "
+     "agent --pure`, so not re-derived at the new version"),
+    ("scripts/browser-bridge/README.md", "The hosts CONVERGED on 2026-08-15",
+     "dated narrative of a PAST pin move; the version names the move, not the present"),
+    ("scripts/browser-bridge/browser", "Measured in the shipped",
+     "same TaskTool internals claim as the README's, in the CLI's own comment"),
+    ("scripts/browser-bridge/browser", "creates a child session",
+     "the second half of that TaskTool internals claim"),
+    ("scripts/opencode/README.md", "Re-measured **2026-08-19** on engine",
+     "a dated COST measurement against a specific engine+model pair; a cost is not "
+     "re-derived by the permission/tool conformance tests"),
+    ("nix/home.nix", "COST — re-measured 2026-08-19 on engine",
+     "the same dated cost measurement, at its source"),
+    # 🔴 Version-FREE snippet, and that is a rule, not a style choice: a snippet
+    # containing a version literal makes the ledger entry's OWN source line an
+    # old-version line, so it matches twice and fails. Every entry here obeys it.
+    ("scripts/tests/test_opencode_engine.py", "`flake.lock` moved opencode",
+     "names the 2026-08-29 transition itself"),
+    ("scripts/tests/test_opencode_engine.py", "load-bearing one",
+     "cites the 2026-08-13 transition by its version pair, as prior art for the method"),
     ("nix/pkgs/tools/default.nix", "which drifted: MEASURED",
      "the per-host drift that motivated pinning; a dated fact"),
     ("nix/pkgs/tools/default.nix", "when this pin was introduced",

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# rig-control-toggle — instant sleep/wake toggle for the bar click handler.
+# Called by i3status-rust's [[block.click]] via setsid -f (non-blocking).
+STATE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/rig-control/state"
+RIG="$HOME/workspace/devrc/scripts/rig-control.sh"
+
+if [[ -f "$STATE_FILE" ]] && read -r _s < "$STATE_FILE" && [[ "$_s" == "sleeping" ]]; then
+  "$RIG" wake >/dev/null 2>&1
+else
+  "$RIG" sleep >/dev/null 2>&1
+fi

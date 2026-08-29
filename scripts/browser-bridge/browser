@@ -390,7 +390,7 @@ die() { echo "browser: $*" >&2; exit 1; }
 # returned `--tab <id>` explicitly on every subsequent op — an explicit --tab
 # overrides owned-tab routing entirely, so they never collide. See SKILL.md.
 # 🔴 THAT PARAGRAPH IS ABOUT CLAUDE CODE ONLY, and opencode is now its MIRROR.
-# Measured in the shipped 1.18.21 binary: `TaskTool.execute` creates a CHILD
+# Measured in the shipped 1.18.18 binary: `TaskTool.execute` creates a CHILD
 # session and `ShellTool` passes that child's `sessionID` to `shell.env`, so an
 # opencode `task` subagent exports a DIFFERENT `OPENCODE_SESSION_ID` and lands on
 # tier 0 with an id of its own. Claude siblings SHARE identity and collide on one
@@ -601,7 +601,7 @@ SESSION_ID="$(derive_session_id)"
 #     drivers. The fix is for each driver to `open` its own tab, which that
 #     section already tells you to do; the doc now says so for this case too.
 #   * 🔴 An opencode `task` SUBAGENT gets a DIFFERENT id, not its parent's:
-#     measured in the 1.18.21 binary, `TaskTool.execute` creates a child session
+#     measured in the 1.18.18 binary, `TaskTool.execute` creates a child session
 #     and `ShellTool` passes that child's `sessionID`. Telemetry stays coherent
 #     (each row names the session that really ran the tool) but ROUTING
 #     FRAGMENTS — parent and subagent own different tabs. That is the exact

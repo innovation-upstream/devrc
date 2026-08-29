@@ -72,6 +72,31 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# 🔴 ONE bound for every "this should already have happened" wait in this module
+# — the localhost HTTP round-trips, `wait_closed`, `await_audit`. These are
+# HANG-DETECTORS: they exist so a broken server fails the test instead of hanging
+# the suite forever, and their value is not a correctness claim about how fast
+# anything must be.
+#
+# It is deliberately NOT used for the raw-socket `settimeout(...)` calls further
+# down. Those are DRAIN bounds — the loop terminator for a `recv`-until-quiet
+# read — so raising one adds its full value to the suite's runtime instead of
+# only to the latency of a genuine failure. Same spelling, opposite meaning; a
+# single shared constant across both would be wrong.
+#
+# Why 60 and not 15: measured 2026-08-29, the devrc Tekton gate was failing
+# ~60% of runs REPO-WIDE (6 of 10 in one window, on unrelated branches) with
+# `TimeoutError` out of `socket.py` — a localhost round-trip that lost the
+# scheduler for >15 s while 12 pipelineruns shared the node and this suite ran
+# 637 s under xdist. The test logic was never reached, so the gate reported a
+# code failure for a capacity problem. 60 s absorbs a 4x scheduling delay and
+# still fails a genuinely hung server well inside the task timeout.
+#
+# 🔴 This is the SYMPTOM fix. The cause is a 10-minute parallel suite competing
+# with a saturated cluster, which belongs to Tekton capacity, not to this file.
+HANG_TIMEOUT = 60.0
+
 API_DIR = ROOT / "scripts" / "subsystem-store-api"
 SERVER_PATH = API_DIR / "server.py"
 SEED_PATH = API_DIR / "seed.sh"
@@ -268,7 +293,7 @@ def fetch(
     for key, value in (extra_headers or {}).items():
         req.add_header(key, value)
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=HANG_TIMEOUT) as resp:
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, dict(exc.headers), exc.read()
@@ -282,7 +307,7 @@ def _raw_request(host: str, path: str, headers: list[tuple[str, str]]) -> int:
     of expressing the "two `CF-Connecting-IP`s" case. `http.client.putheader`
     can.
     """
-    conn = http.client.HTTPConnection(host, timeout=15)
+    conn = http.client.HTTPConnection(host, timeout=HANG_TIMEOUT)
     try:
         conn.putrequest("GET", path, skip_host=True, skip_accept_encoding=True)
         conn.putheader("Host", host)
@@ -414,7 +439,7 @@ class Drained:
         """The whole stream, for `x not in out` style assertions."""
         return "\n".join(self.all)
 
-    def wait_closed(self, timeout: float = 15.0) -> bool:
+    def wait_closed(self, timeout: float = HANG_TIMEOUT) -> bool:
         """Block until the process's stdout reaches EOF. Returns whether it did.
 
         Read `text` only AFTER this. Without it the reader thread may still be
@@ -465,7 +490,7 @@ def drain_output(proc) -> Drained:
     return out
 
 
-def await_audit(out: "Drained | AuditLog", n: int, timeout: float = 15.0) -> "list[str]":
+def await_audit(out: "Drained | AuditLog", n: int, timeout: float = HANG_TIMEOUT) -> "list[str]":
     """Wait for at least `n` audit lines, then return them. RAISES if they never
     arrive.
 
@@ -4020,7 +4045,7 @@ def fetch_from(
     """
     host, _, port = base.removeprefix("http://").partition(":")
     conn = http.client.HTTPConnection(
-        host, int(port), timeout=15, source_address=(source_ip, 0)
+        host, int(port), timeout=HANG_TIMEOUT, source_address=(source_ip, 0)
     )
     try:
         headers = {}
@@ -5747,7 +5772,7 @@ class TestTrustedProxyOverTheRealProcess:
             store, token_file, trusted_proxies=NOT_LOOPBACK_PROXY
         ) as (_base, proc):
             proc.terminate()
-            stdout, _err = proc.communicate(timeout=15)
+            stdout, _err = proc.communicate(timeout=HANG_TIMEOUT)
         assert f"trusted-proxies={NOT_LOOPBACK_PROXY}" in stdout, stdout
 
 
