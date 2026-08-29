@@ -2524,6 +2524,21 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
     trusted_proxies: tuple[Any, ...] = ()
     limiter: RateLimiter | None = None
     audit: Callable[[str], None] = staticmethod(lambda line: print(line, flush=True))
+    # 🔴 ONE LOCK, HELD ACROSS THE WHOLE SINK CALL, BECAUSE `print` IS NOT ATOMIC.
+    # `ThreadingHTTPServer` runs one handler per connection concurrently and the
+    # default sink is `print(line, flush=True)`, which is TWO writes on one
+    # `TextIOWrapper` — the record, then the terminator. Two handlers reaching it
+    # together can therefore emit `<A><B>\n\n`: one line holding two requests'
+    # fields and one holding none, in a stream whose entire purpose is to be
+    # greppable per request. Nothing in `BaseHTTPRequestHandler` serialises this;
+    # the GIL orders the individual `write` calls and says nothing about which
+    # pair they belong to.
+    #
+    # It is a CLASS attribute so `build_server`'s `_Handler` subclass inherits
+    # the SAME object: the thing being serialised is one process's stdout, not
+    # one handler instance, so a per-instance lock would serialise nothing (a
+    # fresh handler per connection means a fresh lock per connection).
+    _audit_lock: "threading.Lock" = threading.Lock()
 
     # Per-request identity, reset at the top of every dispatch so a keep-alive
     # connection cannot carry the previous request's fingerprint into this
@@ -2609,7 +2624,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
 
         🔴 A SECOND RESPONSE ON ONE CONNECTION IS A DESYNC, NOT A COURTESY. The
         first version of this backstop called `_respond(500, …)` unconditionally,
-        and `_append_bullet` answers `200` and THEN audits — so anything raising
+        and `_append_bullet` answered `200` and THEN audited — so anything raising
         after that `_respond` (a broken audit sink, a full disk on stderr, or
         simply the next statement somebody adds below it) put a complete `200`
         and a complete `500` on the same socket. Worse than the usual case: the
@@ -2624,11 +2639,27 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
 
         🔴 THE AUDIT IS THE LAST THING AND IS ITSELF GUARDED. "A metered request
         must never vanish from the audit trail" is the point of this function,
-        but if the sink is what raised — the one production-reachable route to
-        the already-responded arm — calling it again re-raises out of
+        but if the sink is what raised — the one production-reachable route into
+        this function at all — calling it again re-raises out of
         `do_POST`, past `handle_one_request`, and the traceback the operator
         needs is replaced by socketserver's. Print, then try; a sink that cannot
         record cannot be made to.
+
+        ⚠ THAT ROUTE NOW ARRIVES ON THE OTHER ARM, AND THE SENTENCE ABOVE USED
+        TO SAY "the already-responded arm". `_audit` runs BEFORE `_respond` at
+        every call site (see `_audit`), so a raising sink raises before any byte
+        is written: `_responded` is False and this function answers `500`. The
+        already-responded arm is now reached only by a statement failing AFTER a
+        completed `_respond`, which in this file means an exception injected by a
+        test — production has no statement there. Both arms are still exercised;
+        which case reaches which one has swapped.
+
+        🔴 THIS IS THE ONE PLACE THAT AUDITS AFTER RESPONDING, AND IT MUST STAY
+        THAT WAY: the status it records (`internal-error` vs
+        `internal-error-after-response`) is not knowable until `_responded` has
+        been read, and on the already-responded arm the bytes went out long
+        before this function was called. `test_every_audit_call_site_PRECEDES_
+        its_response` exempts `_backstop` by name for exactly this reason.
 
         🔴 AND SO ARE BOTH PRINTS, WHICH IS THE HALF THIS DOCSTRING USED TO
         CLAIM WITHOUT THE CODE PROVIDING IT. The paragraph above reasons about
@@ -2733,13 +2764,47 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         `peer=untrusted` also tells the reader how to interpret `ip=`: trusted
         means the field came from `CF-Connecting-IP`, untrusted means it is the
         TCP peer and the header was never read.
+
+        🔴 CALL THIS BEFORE `_respond`, NEVER AFTER — LOG THE DECISION, THEN ACT
+        ON IT. Every one of the 33 call sites in this class used to be
+        `_respond(...)` followed by `_audit(...)`, which put the bytes on the
+        wire first. Two consequences, both measured:
+
+          * ORDER. A SEQUENTIAL client's request N+1 is accepted on a NEW handler
+            thread as soon as request N's response is written, so handler N+1
+            could reach this method before handler N did and the stream came out
+            in the wrong order. Observed once in the nix sandbox tier:
+            `test_the_audit_line_names_WHICH_fingerprint_matched` failed on
+            `token=<A> in audit[0]` with the two lines swapped, then passed on
+            re-run and in ~20 runs after — rare, and real. With the audit first,
+            "the client holds response N" implies "line N is already in the
+            sink", so a sequential client's records are in request order by
+            construction rather than by luck.
+          * WHICH DIRECTION A CRASH FAILS IN. Something raising between the two
+            calls used to lose the record entirely (`_backstop` then logs
+            `internal-error-after-response`, which names the request but not what
+            it did); now it over-reports — the outcome line is already out and
+            the backstop adds its 500 beside it. For an audit trail, a duplicate
+            beats a hole.
+
+        ⚠ AND THE PRICE, STATED BECAUSE IT IS A REAL BEHAVIOUR CHANGE: a sink
+        that RAISES now does so before the response, so a request whose record
+        cannot be written is answered `500` by `_backstop` instead of being
+        served with no record. On the write path that means a landed mutation
+        can be reported as a 500. That is the fail-closed direction for a
+        service whose reason to exist is a complete audit trail, and it is the
+        state `TestTheBackstopSurvivesITSOWNLogSink` pins.
+
+        🔴 THE SINK CALL IS SERIALISED. See `_audit_lock` — the lock, not this
+        ordering, is what stops two CONCURRENT requests interleaving their
+        writes; ordering alone fixes nothing for callers that overlap.
         """
         peer_state = (
             "-"
             if self._peer_trusted is None
             else ("trusted" if self._peer_trusted else "untrusted")
         )
-        self.audit(
+        line = (
             "store-api audit "
             f"ts={datetime.now(timezone.utc).isoformat(timespec='seconds')} "
             f"ip={audit_field(self._client_ip or '-')} "
@@ -2757,6 +2822,14 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             f"auth={'ok' if self._token_fp else 'fail'} "
             f"result={int(result)} status={audit_field(status, limit=32)}"
         )
+        # 🔴 THE FORMATTING IS OUTSIDE THE LOCK AND THE SINK CALL IS INSIDE IT.
+        # Narrow on purpose: every field above is per-request state, so building
+        # the string contends with nothing, while the sink is the one shared
+        # resource. Holding the lock across the sink — rather than around a bare
+        # `write` inside it — is what makes the guarantee hold for an INJECTED
+        # sink too, which is the only shape the tests can observe.
+        with self._audit_lock:
+            self.audit(line)
 
     # --- methods ----------------------------------------------------------------
 
@@ -2979,6 +3052,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 # it did wrong; it discriminates nothing about the store, because
                 # a legacy row is UNRESTRICTED and this answer is the same for
                 # every scope, existing or not.
+                self._audit(path, 403, "legacy-cannot-write")
                 self._respond(
                     403,
                     b"forbidden: this credential has no identity, so a bullet "
@@ -2986,27 +3060,26 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                     b"a `<token> <identity> <scopes>` row\n",
                     headers={"X-Store-Status": "legacy-cannot-write"},
                 )
-                self._audit(path, 403, "legacy-cannot-write")
                 return
             if any(not SAFE_PATH_COMPONENT.fullmatch(p) for p in parts):
                 # The same refusal the read router makes, for the same reason:
                 # these components reach the filesystem. See `_handle`.
+                self._audit(path, 400, "bad-request")
                 self._respond(
                     400, b"bad request: invalid path component\n",
                     headers={"X-Store-Status": "bad-request"},
                 )
-                self._audit(path, 400, "bad-request")
                 return
             if not framed:
                 # `_consume_body` refused the framing (chunked, a duplicated or
                 # negative `Content-Length`, an over-long or slow body). The
                 # connection is already marked for close; the caller is told, and
                 # NOTHING is written from bytes this server could not frame.
+                self._audit(path, 400, "bad-request")
                 self._respond(
                     400, b"bad request: unreadable request body\n",
                     headers={"X-Store-Status": "bad-request"},
                 )
-                self._audit(path, 400, "bad-request")
                 return
             # 🔴 THE SLICE COMES FROM THE TABLE, NOT FROM THE REQUEST. It read
             # `parts[1 : len(parts) - tail_len]`, and `len(parts)` is
@@ -3053,8 +3126,8 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         # 🔴 THE UNCHANGED TAIL. `read-only` is a claim about THIS ROUTE, not
         # about the server: `/api/v1/recall/<scope>` and `/api/v1/snapshot` have
         # no write verb and never will, and that is what this answers.
-        self._respond(405, b"read-only\n", headers={"Allow": "GET, HEAD"})
         self._audit(path, 405, "method-not-allowed")
+        self._respond(405, b"read-only\n", headers={"Allow": "GET, HEAD"})
 
     def _write_route(self, path: str) -> "tuple[str, list[str], int, int] | None":
         """Match one request against `WRITE_ROUTES`, or `None`.
@@ -3162,8 +3235,8 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # into a keep-alive channel. Recorded as an EQUIVALENT MUTANT rather
             # than left as an unexplained survivor.
             self.close_connection = True
-            self._unauthorized()
             self._audit(path, 401, "malformed-request")
+            self._unauthorized()
             return
         self._drain_body()
         if not self._identify_and_meter(path):
@@ -3189,8 +3262,8 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         the operator can still tell a credential-stuffing run from a
         misconfigured client, in a place the attacker cannot read.
         """
-        self._unauthorized()
         self._audit(path, 401, status)
+        self._unauthorized()
 
     def _raw_path(self) -> str:
         """The request target, never parsed. Safe to log; safe on any input.
@@ -3229,8 +3302,8 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # reassigned. Recorded at the declaration; not pinned by any test.
             self._visible_scopes = ()
             self._identity = None
-            self._unauthorized()
             self._audit(self._raw_path(), 401, "malformed-target")
+            self._unauthorized()
             return None
 
     def _identify_and_meter(self, path: str) -> bool:
@@ -3344,11 +3417,11 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # — but "harmless because of where it happens to be mounted" is not a
             # property this file should rely on. Authenticated, so it may be told
             # what it did wrong.
+            self._audit(path, 400, "bad-request")
             self._respond(
                 400, b"bad request: invalid path component\n",
                 headers={"X-Store-Status": "bad-request"},
             )
-            self._audit(path, 400, "bad-request")
             return
 
         try:
@@ -3405,31 +3478,31 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # mechanism, as the `_backstop` bug — so, same helper. A log write
             # may never decide whether the request gets answered.
             _print_exc_quietly()
+            self._audit(path, 503, "store-unreachable")
             self._respond(
                 503,
                 b"store unreadable: an entry name or body is not valid UTF-8\n",
                 headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
             )
-            self._audit(path, 503, "store-unreachable")
             return
         except ValueError as exc:
             # A caller error, and the caller is authenticated, so it may be told
             # what it did wrong.
             body = f"bad request: {exc}\n".encode("utf-8")
-            self._respond(400, body, headers={"X-Store-Status": "bad-request"})
             self._audit(path, 400, "bad-request")
+            self._respond(400, body, headers={"X-Store-Status": "bad-request"})
             return
         except (rc.StoreMissingError, rc.EntryUnreadableError) as exc:
             # 🔴 THE STATE THIS WHOLE DESIGN EXISTS TO KEEP SEPARATE. The store
             # was NOT read. Not a 200, not an empty digest, not "nothing recorded
             # yet" — a 503 that says so, carrying the reader's own sentence.
             body = f"{exc}\n".encode("utf-8")
+            self._audit(path, 503, "store-unreachable")
             self._respond(
                 503,
                 body,
                 headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
             )
-            self._audit(path, 503, "store-unreachable")
             return
         except Exception:  # noqa: BLE001 — deliberate backstop, see `_backstop`
             # 🔴 THE READ DISPATCH VANISHED THE SAME WAY THE WRITE ONE DID, AND
@@ -3444,8 +3517,8 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             self._backstop(path)
             return
 
-        self._respond(404, b"no such endpoint\n", headers={"X-Store-Status": "no-route"})
         self._audit(path, 404, "no-route")
+        self._respond(404, b"no such endpoint\n", headers={"X-Store-Status": "no-route"})
 
     # --- handlers ---------------------------------------------------------------
 
@@ -3474,6 +3547,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         # thing it qualifies has already been believed.
         fresh_header, fresh_prose = snapshot_freshness(self.store_root)
         body = (fresh_prose + "\n\n" + text + "\n").encode("utf-8")
+        self._audit(path, 200, status)
         self._respond(
             200,
             body,
@@ -3491,7 +3565,6 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 "X-Store-Snapshot": fresh_header,
             },
         )
-        self._audit(path, 200, status)
 
     def _recall(self, scope: str, params: dict[str, list[str]]) -> None:
         mode_values = params.get("mode")
@@ -3590,12 +3663,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         if scope_filter is not None and not SAFE_PATH_COMPONENT.fullmatch(scope_filter):
             # Same refusal as a bad path component: this value reaches the
             # filesystem, and the caller is authenticated so it may be told.
+            self._audit(urlsplit(self.path).path, 400, "bad-request")
             self._respond(
                 400,
                 b"bad request: invalid scope\n",
                 headers={"X-Store-Status": "bad-request"},
             )
-            self._audit(urlsplit(self.path).path, 400, "bad-request")
             return
 
         # 🔴 THE FOURTH ENUMERATION CHANNEL, AND THE ONLY ONE `load_store` CANNOT
@@ -3627,12 +3700,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # 🔴 The store was NOT read. Same state, same code and the same
             # reasoning as `_recall`'s: an empty tar and an unreadable store must
             # never render alike, because one of them is a lie.
+            self._audit(urlsplit(self.path).path, 503, "store-unreachable")
             self._respond(
                 503,
                 f"store unreadable: {exc}\n".encode("utf-8"),
                 headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
             )
-            self._audit(urlsplit(self.path).path, 503, "store-unreachable")
             return
 
         def _member(path: Path, arcname: str) -> tarfile.TarInfo:
@@ -3709,12 +3782,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
 
         if unreadable:
             body = ("store unreadable:\n  " + "\n  ".join(unreadable) + "\n").encode()
+            self._audit(urlsplit(self.path).path, 503, "store-unreachable")
             self._respond(
                 503,
                 body,
                 headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
             )
-            self._audit(urlsplit(self.path).path, 503, "store-unreachable")
             return
 
         buf = io.BytesIO()
@@ -3740,15 +3813,16 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                         tar.addfile(_member(entry, arcname), fh)
                     count += 1
         except OSError as exc:
+            self._audit(urlsplit(self.path).path, 503, "store-unreachable")
             self._respond(
                 503,
                 f"store unreadable: {exc}\n".encode("utf-8"),
                 headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
             )
-            self._audit(urlsplit(self.path).path, 503, "store-unreachable")
             return
 
         fresh_header, _prose = snapshot_freshness(self.store_root)
+        self._audit(urlsplit(self.path).path, 200, "snapshot")
         self._respond(
             200,
             buf.getvalue(),
@@ -3768,7 +3842,6 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 "X-Store-Entries": str(count),
             },
         )
-        self._audit(urlsplit(self.path).path, 200, "snapshot")
 
     # --- write handlers (criteria 4-6) ------------------------------------------
 
@@ -3789,10 +3862,10 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         The WIRE does not discriminate; the audit LOG does, via `status`, in a
         place the caller cannot read.
         """
+        self._audit(path, 404, status)
         self._respond(
             404, b"not found\n", headers={"X-Store-Status": "not-found"}
         )
-        self._audit(path, 404, status)
 
     def _resolve_writable(self, scope: str, ref: str, path: str) -> Any:
         """The entry a write targets, or `None` having already answered.
@@ -3816,23 +3889,23 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # The caller is authenticated AND may see this scope, so it may be
             # told: an ambiguous ref is a caller error with a defined remedy, and
             # it names only entries this caller can already read.
+            self._audit(path, 400, "bad-request")
             self._respond(
                 400,
                 f"bad request: {exc}\n".encode("utf-8"),
                 headers={"X-Store-Status": "bad-request"},
             )
-            self._audit(path, 400, "bad-request")
             return None
         except (rc.StoreMissingError, rc.EntryUnreadableError) as exc:
             # 🔴 THE STORE WAS NOT READ. Never a 404 — "I could not look" and
             # "it is not there" are the four-state rule's two states and a write
             # must not conflate them any more than a read may.
+            self._audit(path, 503, "store-unreachable")
             self._respond(
                 503,
                 f"{exc}\n".encode("utf-8"),
                 headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
             )
-            self._audit(path, 503, "store-unreachable")
             return None
         if entry is None:
             # No such ref — and a MALFORMED entry lands here too, because
@@ -3878,21 +3951,21 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # response, no `X-Store-Status` and — the part that matters — NO
             # AUDIT LINE, on a request that had already been metered. It is a
             # caller error like any other malformed body and is answered as one.
+            self._audit(path, 400, "bad-request")
             self._respond(
                 400,
                 f"bad request: body must be JSON ({exc})\n".encode("utf-8"),
                 headers={"X-Store-Status": "bad-request"},
             )
-            self._audit(path, 400, "bad-request")
             return
         problem = _bullet_request_problem(payload)
         if problem is not None:
+            self._audit(path, 400, "bad-request")
             self._respond(
                 400,
                 f"bad request: {problem}\n".encode("utf-8"),
                 headers={"X-Store-Status": "bad-request"},
             )
-            self._audit(path, 400, "bad-request")
             return
         entry = self._resolve_writable(scope, ref, path)
         if entry is None:
@@ -3907,21 +3980,22 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 today=_today(),
             )
         except EntryShapeError as exc:
+            self._audit(path, 422, "entry-shape")
             self._respond(
                 422,
                 f"unprocessable: {exc}\n".encode("utf-8"),
                 headers={"X-Store-Status": "entry-shape"},
             )
-            self._audit(path, 422, "entry-shape")
             return
         except OSError as exc:
+            self._audit(path, 503, "store-unreachable")
             self._respond(
                 503,
                 f"store unreadable: {exc}\n".encode("utf-8"),
                 headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
             )
-            self._audit(path, 503, "store-unreachable")
             return
+        self._audit(path, 200, status)
         self._respond(
             200,
             # 🔴 `encode_entry_text`, because `line` is NOT always the line this
@@ -3957,7 +4031,6 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 "ETag": f'"{revision}"',
             },
         )
-        self._audit(path, 200, status)
 
     def _replace_entry(
         self, scope: str, ref: str, body: bytes, path: str
@@ -3983,34 +4056,34 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         """
         raw = sole_header(self.headers, "If-Match")
         if raw is None:
+            self._audit(path, 428, "precondition-required")
             self._respond(
                 428,
                 b"precondition required: send If-Match with the entry revision "
                 b"(sha256 of the entry file, first 16 hex characters)\n",
                 headers={"X-Store-Status": "precondition-required"},
             )
-            self._audit(path, 428, "precondition-required")
             return
         if_match = parse_if_match(raw)
         if "*" in if_match:
+            self._audit(path, 400, "bad-request")
             self._respond(
                 400,
                 b"bad request: If-Match: * is refused - it matches any revision, "
                 b"which is the same as sending no precondition at all\n",
                 headers={"X-Store-Status": "bad-request"},
             )
-            self._audit(path, 400, "bad-request")
             return
         if not if_match:
             # A header that is present but names NO entity-tag (`If-Match:` or
             # `If-Match: ,`) is not a precondition. Refusing it is the same
             # answer `*` gets, for the same reason: it would gate nothing.
+            self._audit(path, 400, "bad-request")
             self._respond(
                 400,
                 b"bad request: If-Match names no entity-tag\n",
                 headers={"X-Store-Status": "bad-request"},
             )
-            self._audit(path, 400, "bad-request")
             return
         entry = self._resolve_writable(scope, ref, path)
         if entry is None:
@@ -4027,6 +4100,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # 🔴 THE FILE IS UNCHANGED, and the CURRENT revision rides the
             # response: a client told only "no" cannot retry, and a client that
             # cannot retry re-sends without the precondition.
+            self._audit(path, 412, "precondition-failed")
             self._respond(
                 412,
                 b"precondition failed: the entry has changed since that revision\n",
@@ -4035,30 +4109,29 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                     "ETag": f'"{exc.current}"',
                 },
             )
-            self._audit(path, 412, "precondition-failed")
             return
         except (EntryShapeError, UnicodeDecodeError) as exc:
+            self._audit(path, 422, "entry-shape")
             self._respond(
                 422,
                 f"unprocessable: {exc}\n".encode("utf-8"),
                 headers={"X-Store-Status": "entry-shape"},
             )
-            self._audit(path, 422, "entry-shape")
             return
         except OSError as exc:
+            self._audit(path, 503, "store-unreachable")
             self._respond(
                 503,
                 f"store unreadable: {exc}\n".encode("utf-8"),
                 headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
             )
-            self._audit(path, 503, "store-unreachable")
             return
+        self._audit(path, 200, "replaced")
         self._respond(
             200,
             b"replaced\n",
             headers={"X-Store-Status": "replaced", "ETag": f'"{revision}"'},
         )
-        self._audit(path, 200, "replaced")
 
 
 def _today() -> str:
