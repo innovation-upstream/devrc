@@ -51,6 +51,7 @@ import http.client
 import importlib.util
 import json
 from testlib import hermetic_git  # noqa: E402
+from testlib import mockbin  # noqa: E402
 import io
 import os
 import re
@@ -2444,12 +2445,848 @@ class TestAuditLog:
 # =============================================================================
 
 
-def run_seed(*args: str) -> subprocess.CompletedProcess:
+def run_seed(*args: str, env: "dict[str, str] | None" = None) -> subprocess.CompletedProcess:
     # `bash <script>` rather than the shebang: `/usr/bin/env` does not exist in
     # the nix sandbox that gates merges (see test_runtime_shebangs.py).
+    #
+    # `env` defaults to None so every existing caller inherits the ambient
+    # environment exactly as before; the push tests pass one to put a fake
+    # `kubectl` on PATH.
     return subprocess.run(
-        ["bash", str(SEED_PATH), *args], capture_output=True, text=True, timeout=120
+        ["bash", str(SEED_PATH), *args],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
     )
+
+
+# 🔴 THE PUSH HALF WAS UNTESTED, AND THAT IS HOW THE COUNT GUARD SHIPPED WRONG.
+# seed.sh's own header says "staging is hermetic and testable, pushing needs a
+# cluster", so every seed test above stops at `--stage`. The verdict that
+# decides whether a push SUCCEEDED therefore lived in the only half nothing
+# exercised, and it was wrong for the multi-host case the store has always had.
+#
+# This fake answers `get pod`, runs the real `tar` extract into a real
+# directory, and runs the remote `find` there too — so the guard executes
+# against a filesystem the test controls rather than against a mock of itself.
+# `$FAKE_DROP` deletes one member AFTER the extract, which is how a staged entry
+# that does not land is simulated without pretending the guard ran.
+#
+# 🔴 POSIX sh, AND `mockbin.write_exec` OWNS THE SHEBANG. The first version of
+# this stub wrote `#!/usr/bin/env bash` itself. `/usr/bin/env` does not exist in
+# the nix sandbox that gates merges, and the two tiers reported that completely
+# differently: the dev host showed ONE tidy failure in `test_runtime_shebangs`,
+# while the gating tier showed `5 failed` — the guard PLUS all four tests here,
+# which never ran at all (`bad interpreter`, rc 126). The class had zero
+# coverage on the only tier that matters, and the dev-host run could not say so.
+#
+# Resolving the path with `shutil.which` is not enough either: that scanner
+# flags a test writing ANY shebang, and its allowlist is explicitly not the way
+# to green a new site. So the body is POSIX sh — no arrays, no `[[ ]]`, no
+# `${a//…}` — and `write_exec` supplies `#!<sh>`. The `set --` rotate below is
+# the POSIX way to rebuild the argument list without an array, and it preserves
+# arguments containing spaces, which a string accumulator would not.
+FAKE_KUBECTL_BODY = r"""
+# 🔴 AN EXPLICIT TOP-LEVEL `:?` GUARD, NOT `set -u`, AND THAT IS A MEASUREMENT.
+# The bash original had `set -uo pipefail`; the POSIX rewrite dropped it; round 2
+# restored `set -u`. Round 3's sweep showed that restoration SURVIVED its own
+# mutant — the only reference to $FAKE_DEST sits inside a `$( … )`, so an unbound
+# variable there kills the SUBSHELL while the stub carries on with an empty
+# substitution (`s|/data||g`, silently rewriting absolute paths to relative).
+# `:?` at top level exits the stub itself, which is what makes the failure
+# observable — and therefore testable — by a caller.
+: "${FAKE_DEST:?FAKE_DEST must be set - the stub would otherwise rewrite /data to the empty string}"
+# Stands in for kubectl in seed.sh's push half. $FAKE_DEST is the pretend /data;
+# $FAKE_DROP, if set, removes one member AFTER the extract, which is how "a
+# staged entry that did not land" is simulated without faking the guard itself.
+if [ "${1:-}" = "-n" ]; then shift 2; fi
+sub="${1:-}"
+if [ $# -gt 0 ]; then shift; fi
+case "$sub" in
+  get)
+    echo "fake-pod-0"
+    ;;
+  exec)
+    if [ "${1:-}" = "-i" ]; then shift; fi
+    if [ $# -gt 0 ]; then shift; fi
+    if [ "${1:-}" = "--" ]; then shift; fi
+    n=$#
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      a="$1"
+      shift
+      set -- "$@" "$(printf '%s' "$a" | sed "s|/data|$FAKE_DEST|g")"
+      i=$((i + 1))
+    done
+    "$@"
+    rc=$?
+    if [ -n "${FAKE_DROP:-}" ] && [ "${1:-}" = "tar" ]; then
+      rm -f "$FAKE_DEST/$FAKE_DROP"
+    fi
+    exit "$rc"
+    ;;
+  *)
+    echo "fake kubectl: unexpected subcommand: $sub" >&2
+    exit 64
+    ;;
+esac
+"""
+
+
+@pytest.fixture
+def fake_cluster(tmp_path: Path):
+    """`(env, dest)` — an environment whose `kubectl` is the fake above, and the
+    directory standing in for the pod's `/data`."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    mockbin.write_exec(bindir / "kubectl", FAKE_KUBECTL_BODY)
+    dest = tmp_path / "pod-data"
+    dest.mkdir()
+    env = {
+        **os.environ,
+        "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_DEST": str(dest),
+    }
+    return env, dest
+
+
+class TestSeedPushVerdict:
+    """🔴 The push verdict must answer "did everything I staged land?" — a
+    SUBSET check on names — and NOT "does the remote hold exactly as many files
+    as the stage", which is only true while one host ever seeds."""
+
+    def _push(self, store: Path, tmp_path: Path, env):
+        return run_seed(
+            "--store", str(store),
+            "--stage", str(tmp_path / "stage"),
+            "--push", "ns/app",
+            env=env,
+        )
+
+    # 🔴 ONE PIN, ONE PLACE, PARAMETERISED BY COUNT. This sentence has been
+    # FALSE three times — "hold .md files" asserted contents an unreadable probe
+    # could not read; "will NOT ship" was wrong because a symlinked scope DOES
+    # ship, as a symlink; and "excluded from the count" is loose because
+    # `staged_scopes` counts a symlinked scope and not a dot one. Keyword guards
+    # caught none of them: any rewording satisfies `"X" not in stdout`, and two
+    # such guards had become unfalsifiable — no code path could emit the string
+    # they forbade. When the artifact under test is prose, the normalised WHOLE
+    # is the only machine-readable claim, and a deliberate reword must fail here
+    # and be re-verified. The count is a parameter so a fixture that gains an
+    # excluded scope reports THAT, instead of misdirecting at the wording.
+    @staticmethod
+    def _assert_note_header(stdout: str, n: int) -> None:
+        headers = [l for l in stdout.splitlines() if l.startswith("seed: NOTE")]
+        assert len(headers) == 1, f"expected exactly one NOTE header: {headers}"
+        assert headers[0] == (
+            f"seed: NOTE {n} scope director(ies) contribute NO entries, and are "
+            "excluded from the entry count and the verdict:"
+        ), (
+            "the NOTE header changed. If the COUNT moved, fix the caller; if the "
+            "WORDING moved, re-verify it is true of EVERY state that reaches it "
+            f"— three earlier wordings were not. Got: {headers[0]!r}"
+        )
+
+    @staticmethod
+    def _foreign(dest: Path, name: str = "from-the-other-host.md") -> Path:
+        """An entry the OTHER host seeded. Its presence is what arms GNU comm's
+        order check — without an unpairable line the check never runs, which is
+        why an exactly-matching push cannot see a collation bug."""
+        d = dest / "a-scope-only-the-laptop-has"
+        d.mkdir(exist_ok=True)
+        p = d / name
+        p.write_text("---\nservice: x\n---\n")
+        return p
+
+    def test_POSITIVE_CONTROL_the_fake_cluster_really_receives_the_push(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """Reported BESIDE the verdicts below. A guard asserted against a
+        cluster that received NOTHING is green for the wrong reason — every
+        assertion in this class would hold over an empty directory."""
+        env, dest = fake_cluster
+        r = self._push(store, tmp_path, env)
+        assert r.returncode == 0, r.stderr
+        landed = sorted(p.name for p in (dest / SCOPE).glob("*.md"))
+        assert landed == ["thing-alpha.md"], (
+            f"the fake cluster received {landed!r} — the push did not happen, "
+            "so nothing below is evidence about the guard"
+        )
+        assert "seed: OK" in r.stdout
+
+    def test_entries_from_ANOTHER_HOST_do_not_fail_a_correct_push(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE REGRESSION. Red before this change: the old guard compared
+        COUNTS, so a pod already holding a second host's entries made a correct
+        push exit 7 — after the content had landed. The store is per-host and
+        the extract never deletes, so this is the NORMAL state, not an error."""
+        env, dest = fake_cluster
+        foreign = dest / "a-scope-only-the-laptop-has"
+        foreign.mkdir()
+        (foreign / "from-the-other-host.md").write_text("---\nservice: x\n---\n")
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, (
+            f"a correct multi-host push must not fail. stderr={r.stderr}"
+        )
+        assert "NOTE 1 entry file(s)" in r.stdout, r.stdout
+        assert (foreign / "from-the-other-host.md").exists(), (
+            "the other host's entry was DELETED — the push must add and "
+            "overwrite, never remove"
+        )
+
+    def test_a_staged_entry_that_does_NOT_land_exits_7_and_NAMES_it(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The guard must still bite, and say WHICH file — a bare count told an
+        operator a number and left them to find the gap by hand."""
+        env, dest = fake_cluster
+        env = {**env, "FAKE_DROP": f"{SCOPE}/thing-alpha.md"}
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 7, f"rc={r.returncode} stdout={r.stdout}"
+        assert "MISMATCH" in r.stderr
+        assert f"{SCOPE}/thing-alpha.md" in r.stderr, (
+            "the failure must name the entry that did not land"
+        )
+        assert not (dest / SCOPE / "thing-alpha.md").exists()
+
+    def test_a_missing_entry_is_caught_even_when_the_COUNTS_MATCH(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 The case the old count guard could not see, and the reason this is
+        a STRENGTHENING rather than a relaxation: one staged file absent while a
+        foreign file makes the totals agree. Count-equality passes; containment
+        does not."""
+        env, dest = fake_cluster
+        foreign = dest / "a-scope-only-the-laptop-has"
+        foreign.mkdir()
+        (foreign / "makes-up-the-number.md").write_text("---\nservice: x\n---\n")
+        env = {**env, "FAKE_DROP": f"{SCOPE}/thing-alpha.md"}
+
+        r = self._push(store, tmp_path, env)
+
+        m = re.search(r"STAGED scopes=\d+ entries=(\d+)", r.stdout)
+        assert m is not None, f"seed.sh printed no STAGED line: {r.stdout}"
+        staged = int(m.group(1))
+        remote = len(list(dest.glob("*/*.md")))
+        assert remote == staged, (
+            f"fixture no longer exercises the blind spot: remote={remote} "
+            f"staged={staged} — they must be EQUAL for this test to mean anything"
+        )
+        assert r.returncode == 7, (
+            "counts matched, so the old guard would have passed this broken push"
+        )
+        assert f"{SCOPE}/thing-alpha.md" in r.stderr
+
+    # --- the three dimensions the first fixture was structurally blind to -----
+    #
+    # 🔴 THE ORIGINAL FIXTURE COULD NOT SEE ANY OF THESE. It was all-lowercase,
+    # all hyphen-slug, no top-level `.md`, no dot-directory — so it pinned none
+    # of the ways the REAL store differs, and a mutation sweep over it left five
+    # survivors. An audit found two live defects in that blind spot. Each test
+    # below is named for the dimension, not the symptom.
+
+    def test_a_README_beside_a_lowercase_sibling_survives_a_UTF8_LOCALE(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 REGRESSION. Both lists are sorted `LC_ALL=C`, but GNU `comm`
+        compares AND order-checks in the AMBIENT locale — so under en_US.UTF-8 a
+        C-sorted list is "not in sorted order", `comm` exits 1, and `set -e`
+        kills the script with NO verdict printed at all.
+
+        Needs BOTH: an unpairable line (comm arms the order check only after
+        one) and an adjacency where C and en_US disagree. `README.md` beside
+        `backblaze.md`/`thing-alpha.md` is that adjacency, and the real store is
+        full of it — so the FIRST push after another host seeds would abort."""
+        # 🔴 THIS TEST NEITHER SKIPS NOR DEGRADES — IT FAILS IF IT CANNOT RUN,
+        # AND THAT TOOK THREE TRIES TO GET RIGHT.
+        #
+        #   1. It CRASHED the gating tier: no `locale` binary in the nix sandbox,
+        #      so `subprocess.run(["locale", …])` raised FileNotFoundError.
+        #   2. Made to skip, it went red differently: `run-tests.sh` refuses an
+        #      UNPINNED skip, and EXPECTED_SKIPS conditions key on env vars
+        #      (`unset:VAR`) while this predicate is locale AVAILABILITY — an
+        #      unconditional pin reds the dev host, where the test does run.
+        #   3. Made to fall back to C, it passed on BOTH tiers while being
+        #      VACUOUS on the gating one: measured with both `comm` calls
+        #      unpinned, the sandbox reported ONE failure where the dev host
+        #      reported two. The defect was invisible exactly where it counts.
+        #
+        # So the locale is now supplied to both tiers by `LOCALE_ARCHIVE`,
+        # exported in the devShell AND in checks.pytests, and its absence is a
+        # HARD FAILURE naming the cause. A degradation that silently weakens a
+        # test is worse than a red one that says why.
+        # (This comment used to add "`glibc.bin` in `gateTools`" — a requirement
+        # the block below deliberately removed. It was left standing four lines
+        # above its own correction; see flake.nix for both retractions.)
+        # 🔴 AVAILABILITY IS DETECTED BY EXERCISING THE CAPABILITY, NOT BY
+        # PROBING FOR A BINARY. An earlier version ran `locale -a` and asserted
+        # `en_US.utf8` appeared. That was the wrong question: it needed
+        # `pkgs.glibc.bin` added to gateTools purely to answer it, and MEASURED
+        # — with `LOCALE_ARCHIVE` set
+        # and NO `locale` binary at all, `LC_ALL=en_US.UTF-8 sort` collates
+        # correctly. The binary was never load-bearing; `LOCALE_ARCHIVE` is.
+        #
+        # So the check IS the control: sort one inverting pair under C and under
+        # en_US and require the orders to DIFFER. That single assertion answers
+        # "is a non-C collation available" and "does this fixture still invert"
+        # at once — and it cannot pass while the collation is unavailable, which
+        # is exactly the vacuity this test kept falling into.
+        forced = "en_US.UTF-8"
+        pair = f"{SCOPE}/README.md\n{SCOPE}/backblaze.md\n"
+
+        def _sorted_under(lc: str) -> str:
+            return subprocess.run(
+                ["sort"], input=pair, capture_output=True, text=True,
+                env={**os.environ, "LC_ALL": lc},
+            ).stdout
+
+        c_order, loc_order = _sorted_under("C"), _sorted_under(forced)
+        assert c_order != loc_order, (
+            f"`sort` orders {SCOPE}/README.md and {SCOPE}/backblaze.md the same "
+            f"under C and under {forced}, so comm's order check cannot arm and "
+            "this test would pass whether or not the collation is pinned.\n"
+            "Either the fixture stopped inverting, or — far more likely — this "
+            "is a GATE ENVIRONMENT regression rather than a defect in seed.sh: "
+            "flake.nix must export LOCALE_ARCHIVE in BOTH the devShell and "
+            "checks.pytests, or the tier has only the C locale."
+        )
+
+        env, dest = fake_cluster
+        # 🔴 THE PAIR MUST ACTUALLY INVERT, AND THE FIRST VERSION OF THIS TEST
+        # DID NOT. `README.md` beside `thing-alpha.md` orders the SAME under
+        # both collations (C: 'R'<'t'; en_US: 'r'<'t'), so nothing was out of
+        # order, `comm` never complained, and the mutant that strips `LC_ALL=C`
+        # from the comm calls SURVIVED a fully green run. The inversion needs a
+        # lowercase sibling sorting BEFORE `README` in en_US and AFTER it in C —
+        # 'b' is 0x62, above 'R' at 0x52, but below 'r' when case is folded.
+        (store / SCOPE / "README.md").write_text(_entry("README", SCOPE))
+        (store / SCOPE / "backblaze.md").write_text(_entry("backblaze", SCOPE))
+        self._foreign(dest)
+        env = {**env, "LC_ALL": forced, "LANG": forced}
+
+        r = self._push(store, tmp_path, env)
+
+        assert "not in sorted order" not in r.stderr, (
+            f"comm order-checked in the ambient locale (LC_ALL={forced}) over "
+            f"C-sorted input: stderr={r.stderr}"
+        )
+        assert r.returncode == 0, (
+            f"rc={r.returncode} under LC_ALL={forced} "
+            f"stdout={r.stdout} stderr={r.stderr}"
+        )
+        assert "seed: OK" in r.stdout
+        assert "NOTE 1 entry file(s)" in r.stdout
+
+    # 🔴 A STRUCTURAL `comm`-SPELLING GUARD WAS TRIED HERE AND DELETED, ON
+    # EVIDENCE. It regex'd seed.sh for a bare `comm` not prefixed by `LC_ALL=C`.
+    # An audit walked it three ways — `/usr/bin/comm -23 …`, `_cmp=comm` then
+    # `$_cmp -23 …`, and a second `comm` later on an already-prefixed line — and
+    # it ALSO rejected three safe spellings (`env LC_ALL=C comm`, a line
+    # continuation, a global `export LC_ALL=C`). It asserted a WORD, and the
+    # hazard has other shapes. Supplying the locale to both tiers (flake.nix)
+    # lets the behavioural test above assert the STATE instead, everywhere.
+
+    def test_the_two_find_expressions_are_IDENTICAL(self):
+        """Local and remote listings must ask ONE question.
+
+        Every clause carries a case: `-mindepth 2` excludes the store's own
+        top-level `README.md`; `-maxdepth 2` stops a nested directory becoming a
+        phantom entry; `! -path './.*'` matches the tar member list, which is
+        `"$STAGE"/*/` without `dotglob`; `-type f` refuses a DIRECTORY named
+        `*.md` (the server 503'd on exactly that).
+
+        A mutation sweep found the clauses were pinned on the STAGED side only —
+        dropping `! -path './.*'`, widening `-maxdepth`, or dropping `-type f`
+        on the REMOTE side all SURVIVED. Comparing the two expressions to each
+        other catches an asymmetry in either direction, which per-side
+        assertions did not."""
+        # 🔴 CAPTURE TO THE END OF THE EXPRESSION, NOT TO `-type f`. The first
+        # version stopped at the first `-type f` (non-greedy), so everything
+        # AFTER it was invisible: appending `-o -type d` to the remote find
+        # SURVIVED a fully green 34-test run, which would have put depth-2
+        # DIRECTORIES into `remote_list` and reported them as foreign entries on
+        # every push. A guard whose stated purpose is "an asymmetry changes what
+        # the comparison MEANS" must see the whole expression.
+        #
+        # The `cd` target is captured too: `( cd "$1/sub" && find . … )` leaves
+        # both expressions textually identical while the sides walk different
+        # trees.
+        pat = re.compile(
+            r"""cd\s+['"]?(?P<root>[^'"\s&]+)['"]?\s*&&\s*find\s+\.\s+"""
+            r"""(?P<expr>.+?)\s*(?:\)|")"""
+        )
+        found = []
+        for line in SEED_PATH.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue  # comments quote these expressions when explaining them
+            m = pat.search(stripped)
+            if m:
+                found.append((m.group("root"), " ".join(m.group("expr").split())))
+        assert len(found) == 2, (
+            f"expected exactly 2 `cd … && find .` entry listings in seed.sh, "
+            f"found {len(found)}: {found}"
+        )
+        (staged_root, staged), (remote_root, remote) = found
+        assert staged == remote, (
+            "the staged and remote listings no longer ask the same question — "
+            "an asymmetry silently changes what the comparison MEANS:\n"
+            f"  staged: {staged}\n  remote: {remote}"
+        )
+        assert staged_root != remote_root, (
+            "both listings walk the same root, so one of them is not reading "
+            f"what it is supposed to: {staged_root!r} / {remote_root!r}"
+        )
+        for clause in ("-mindepth 2", "-maxdepth 2", "! -path './.*'", "-type f"):
+            assert clause in staged, f"{clause!r} is no longer pinned: {staged}"
+
+    def test_a_dot_scope_does_not_ship_EVEN_WITH_dotglob_SET(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE SUITE WAS BLIND TO THIS DIMENSION, WHICH IS HOW THE DEFECT GOT
+        IN. Every other test here runs with bash's default options, so a change
+        that made the tar member list depend on the AMBIENT shell passed
+        everything.
+
+        The member list is `"$STAGE"/*/`, correct only while `dotglob` is off. A
+        version of this script restored the caller's `dotglob` before building
+        it; under `BASHOPTS=dotglob` a dot-scope then LANDED on the pod while the
+        remote listing's `! -path './.*'` still excluded it — shipped, never
+        verified, and the NOTE saying "not in the tar member list" was false.
+        Asking which dimension the config fixes is what surfaces this class."""
+        env, dest = fake_cluster
+        hidden = store / ".hidden"
+        hidden.mkdir()
+        (hidden / "h.md").write_text(_entry("h", ".hidden"))
+        env = {**env, "BASHOPTS": "dotglob"}
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        # 🔴 POSITIVE CONTROL, AND IT IS FREE. Everything below holds just as
+        # well if BASHOPTS were ignored entirely — by a future bash, by
+        # `set -o posix`, by a typo in the option name — and this test is the
+        # SOLE killer of the caller-restoring shopt regression, so a silent
+        # vacuity here re-opens that class with a green suite. The per-scope
+        # loop DOES honour the ambient option, so a `.hidden` line appears only
+        # when dotglob really armed.
+        assert "staged scope .hidden" in r.stdout, (
+            "BASHOPTS=dotglob did not arm — this test is not exercising the "
+            f"dimension it names, so its pass means nothing. {r.stdout}"
+        )
+        assert not (dest / ".hidden").exists(), (
+            "with dotglob set in the environment the dot-scope SHIPPED — the "
+            "member list must not depend on the ambient shell. pod holds: "
+            f"{sorted(p.name for p in dest.iterdir())}"
+        )
+
+    def test_a_DEPTH_2_DIRECTORY_on_the_pod_is_not_an_entry(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 THE BEHAVIOURAL HALF OF THE TWO-LISTINGS INVARIANT, and the durable
+        one. The textual identity guard has now lost this race twice: first by
+        capturing only to `-type f`, then — after being 'fixed' — to an escaped
+        `\\( … \\)` group, which recreated the same hole and stayed green across
+        the whole class. A guard over a shell expression's SPELLING keeps
+        finding new shapes to miss; this asserts the STATE instead.
+
+        A depth-2 directory on the pod must not enter `remote_list`. If it does
+        (an `-o -type d` on the remote side, a widened `-maxdepth`), it is
+        reported as another host's entry on every single push."""
+        env, dest = fake_cluster
+        # 🔴 THE NAME MATTERS. A directory called `a-subdirectory` is excluded
+        # by `-name '*.md'`, NOT by `-type f` — so the plainest mutant (dropping
+        # `-type f` from the remote find) stayed invisible, caught only by the
+        # textual guard this test was written to replace. Named `*.md`, the only
+        # clause that can exclude it is `-type f`. It is also the exact shape the
+        # server 503'd on: a DIRECTORY named `*.md`.
+        (dest / SCOPE).mkdir(parents=True, exist_ok=True)
+        (dest / SCOPE / "a-subdirectory.md").mkdir()
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        assert "were not staged by this host" not in r.stdout, (
+            "a DIRECTORY on the pod was counted as an entry and reported as "
+            f"foreign — the two listings disagree: {r.stdout}"
+        )
+
+    def test_a_scope_name_containing_a_BACKSLASH_ESCAPE_counts_correctly(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        r"""`awk -v p=…` INTERPRETS escape sequences, so a scope literally named
+        `a\tb` was searched for as `a<TAB>b` and reported entries=0 beside a
+        non-zero total. Passing it through ENVIRON fixes that — and a straight
+        revert to `-v` was green across the whole class until this existed."""
+        # STAGE-ONLY, deliberately: the count line this pins is printed before
+        # the push, and a backslash in a scope name independently breaks the tar
+        # member list (`tar: a\tb: Cannot stat`) — a pre-existing defect this
+        # round does not touch. Requiring rc 0 would make the test about that
+        # instead, and it would never pass.
+        weird = store / "a\\tb"
+        weird.mkdir()
+        (weird / "n.md").write_text(_entry("n", "a-tb"))
+
+        r = run_seed("--store", str(store), "--stage", str(tmp_path / "stage"))
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        counts = dict(re.findall(r"staged scope (\S+)\s+entries=(\d+)", r.stdout))
+        assert counts.get("a\\tb") == "1", (
+            "a scope whose name contains a backslash escape mis-counted: "
+            f"{counts} — awk -v would read it as a literal tab. {r.stdout}"
+        )
+
+    def test_a_dot_scope_that_is_ALSO_a_symlink_is_announced_ONCE(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The two NOTE arms are `if`/`elif` for a reason: turning the `elif`
+        into a second `if` was green across the class while printing one
+        directory twice under a header that counts them."""
+        env, dest = fake_cluster
+        real = tmp_path / "dotsym-target"
+        real.mkdir()
+        (real / "e.md").write_text(_entry("e", "dotsym"))
+        (store / ".dotsym").symlink_to(real)
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        named = [l for l in r.stdout.splitlines() if ".dotsym" in l and l.startswith("seed:   ")]
+        assert len(named) == 1, f"announced {len(named)} times, want 1: {named}"
+        header = [l for l in r.stdout.splitlines() if l.startswith("seed: NOTE")]
+        assert "1 scope" in header[0], f"the count must match the list: {header}"
+
+    def test_a_scope_whose_md_is_TOO_DEEP_is_not_announced(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """`_md_state` uses `-maxdepth 1` because only depth-1 `*.md` inside a
+        scope is shippable at all. Widening it survived the class and would
+        announce a scope over files no scope could ever ship."""
+        env, dest = fake_cluster
+        deep = store / ".deep" / "sub"
+        deep.mkdir(parents=True)
+        (deep / "x.md").write_text(_entry("x", "deep"))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        assert ".deep" not in "".join(
+            l for l in r.stdout.splitlines() if l.startswith("seed:   ")
+        ), f"announced a scope whose only .md is too deep to ship: {r.stdout}"
+
+    def test_a_SYMLINKED_scope_is_excluded_and_SAID_so(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 REGRESSION. `staged_entries` walked `"$STAGE"/*/` with a trailing
+        slash, which RESOLVES a symlinked scope, while the comparison's `find .`
+        does not descend one and `tar` ships the link rather than its target.
+        Measured before the fix: `remote_entries=1 staged_entries=2` followed by
+        `seed: OK all 2 staged entries are present`, rc 0 — a completeness claim
+        over an entry that never landed, and one the OLD count-equality check
+        would have caught. Both sides now come from `_shippable_entries`."""
+        env, dest = fake_cluster
+        real = tmp_path / "outside"
+        real.mkdir()
+        (real / "e.md").write_text(_entry("e", "symscope"))
+        (store / "symscope").symlink_to(real)
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        m = re.search(r"remote_entries=(\d+) staged_entries=(\d+)", r.stdout)
+        assert m and m.group(1) == m.group(2), (
+            "the two counts disagree and the run still succeeded: " + r.stdout
+        )
+        assert "symscope (symlink" in r.stdout, (
+            "a scope that ships NOTHING must be named, not silently dropped: "
+            + r.stdout
+        )
+
+    def test_the_per_scope_count_is_a_PREFIX_match_not_a_substring(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """`entries=N` beside each scope had no coverage in either direction —
+        a mutation sweep survived both `index($0,p) > 0` (substring) and the
+        whole count hardcoded. With scopes `foo` and `xfoo`, a substring test
+        counts `xfoo/n.md` against `foo`, so `foo` reports 2 while holding 1."""
+        # 🔴 THE FIXTURE MUST DEFEAT THREE MUTANTS, AND THE FIRST VERSION BEAT
+        # ONLY ONE. It used `foo`/`xfoo` with one entry each, so every true
+        # count was 1 and the assertions were `== "1"` — hardcoding `n=1`
+        # SURVIVED (only `n=0` and `n=2` died), the constant-equals-fixture trap.
+        # And `xfoo` extends `foo` on the LEFT, so dropping the `/` separator
+        # (`P="$name"`) survived too. Hence: one scope with TWO entries, and a
+        # `foo`/`foobar` pair where the separator is what distinguishes them.
+        env, dest = fake_cluster
+        for name, n in (("foo", 2), ("foobar", 1), ("xfoo", 1)):
+            (store / name).mkdir()
+            for i in range(n):
+                (store / name / f"n{i}.md").write_text(_entry(f"n{i}", name))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        counts = dict(re.findall(r"staged scope (\S+)\s+entries=(\d+)", r.stdout))
+        assert counts.get("foo") == "2", (
+            f"`foo` holds 2 entries, got {counts.get('foo')!r} — a substring "
+            f"match would add xfoo's, a dropped separator would add foobar's. "
+            f"{r.stdout}"
+        )
+        assert counts.get("foobar") == "1", counts
+        assert counts.get("xfoo") == "1", counts
+
+    def test_a_symlinked_scope_whose_target_is_UNREADABLE_is_still_announced(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 AN ERROR IS NOT "NO".
+
+        ⚠ Read this with `_md_state` open. The defect below was never the
+        `2>/dev/null` — it was discarding `find`'s EXIT STATUS, which is the
+        whole discriminator. An earlier version of this docstring blamed the
+        three characters; a later one over-corrected and called them
+        load-bearing. MEASURED, both false: with the redirect removed, stdout is
+        byte-identical and rc is identical over a store with an unreadable
+        dot-symlink — the only difference is one extra `Permission denied` line
+        on stderr, which nothing consumes. The redirect suppresses an
+        EXPECTED-condition diagnostic and nothing more, which is why no test
+        catches its removal and why none should.
+
+        The probe briefly treated a failed `find` as "no markdown here",
+        which turned an unreadable symlink target from a loud over-report into
+        complete silence — no NOTE, rc 0, `seed: OK`, and the operator loses
+        that scope's contents with nothing to say so. `_shippable_entries` does
+        not descend the symlink either, so nothing else surfaces it."""
+        env, dest = fake_cluster
+        locked = tmp_path / "locked-target"
+        locked.mkdir()
+        (locked / "l.md").write_text(_entry("l", "locked"))
+        (store / "lockedsym").symlink_to(locked)
+        locked.chmod(0o000)
+        try:
+            r = self._push(store, tmp_path, env)
+        finally:
+            locked.chmod(0o755)  # so tmp_path cleanup can proceed
+
+        assert r.returncode == 0, (
+            f"rc={r.returncode} — measured 0 today; a future change that "
+            f"aborted after the NOTE would otherwise stay green. {r.stderr}"
+        )
+        assert "lockedsym" in "".join(
+            l for l in r.stdout.splitlines() if l.startswith("seed:   ")
+        ), (
+            "an unreadable symlinked scope was silently dropped instead of "
+            f"announced: {r.stdout}"
+        )
+        # 🔴 AND THE WORDING MUST NOT ASSERT WHAT THE PROBE COULD NOT ESTABLISH.
+        # Announcing on error fixed the silence; reusing the "holds .md files"
+        # wording then claimed markdown in a directory nobody could read — the
+        # same unestablished-claim defect, one round later.
+        assert "UNREADABLE" in r.stdout, (
+            "the unreadable case must say so, not borrow the holds-markdown "
+            f"wording: {r.stdout}"
+        )
+        self._assert_note_header(r.stdout, 1)
+
+    def test_an_UNREADABLE_target_with_NO_markdown_is_not_called_a_holder(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 The case the sibling above CANNOT reach, because its target really
+        does hold `l.md` — so it would pass even while the wording lied.
+
+        Here the target holds no markdown at all and is unreadable. Announcing
+        it is right; announcing it as a directory that "holds .md files" is a
+        claim about bytes nobody could see, and is exactly the defect that the
+        fix for the previous round's silence reintroduced."""
+        env, dest = fake_cluster
+        locked = tmp_path / "empty-locked"
+        locked.mkdir()
+        (locked / "notes.txt").write_text("no markdown here\n")
+        (store / "emptylocked").symlink_to(locked)
+        locked.chmod(0o000)
+        try:
+            r = self._push(store, tmp_path, env)
+        finally:
+            locked.chmod(0o755)  # so tmp_path cleanup can proceed
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        # 🔴 SCOPED TO THE NOTE LINES. `"emptylocked" in r.stdout` was satisfied
+        # by the unrelated per-scope line `staged scope emptylocked entries=0`,
+        # so the half this test exists for — that it is ANNOUNCED — guarded
+        # nothing: reverting `_md_state`'s error state to a plain "no" removed
+        # the NOTE entirely and this assertion stayed green.
+        note = "\n".join(
+            l for l in r.stdout.splitlines() if l.startswith("seed:   ")
+        )
+        assert "emptylocked" in note, (
+            "a scope whose contents could not be read must still be ANNOUNCED, "
+            f"not merely mentioned in the per-scope lines: {r.stdout}"
+        )
+        assert "UNREADABLE" in note, (
+            "announced, but not as the state that was actually established: "
+            + r.stdout
+        )
+        self._assert_note_header(r.stdout, 1)
+
+    def test_the_DOT_arm_of_the_unreadable_state_is_reachable_and_covered(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 The `2)` arm of the DOT branch had no coverage — deleting it left
+        every test green.
+
+        It is reachable, but not the obvious way: a real unreadable dot
+        DIRECTORY never gets here, because `rsync` fails first (rc 23) and
+        `set -e` aborts the staging. The path that does reach it is a
+        dot-NAMED SYMLINK to an unreadable target — the dot branch wins the
+        `if`/`elif`, and the probe cannot read through the link."""
+        env, dest = fake_cluster
+        locked = tmp_path / "dot-locked-target"
+        locked.mkdir()
+        (locked / "d.md").write_text(_entry("d", "dotsym"))
+        (store / ".dotsym").symlink_to(locked)
+        locked.chmod(0o000)
+        try:
+            r = self._push(store, tmp_path, env)
+        finally:
+            locked.chmod(0o755)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        note = "\n".join(l for l in r.stdout.splitlines() if l.startswith("seed:   "))
+        assert ".dotsym" in note, f"the dot arm did not announce it: {r.stdout}"
+        assert "dot-directory — UNREADABLE" in note, (
+            "reached the dot arm but not its unreadable state — the wrong "
+            f"reason would still read as covered: {note}"
+        )
+        # 🔴 PIN THE WHOLE HEADER, NOT A KEYWORD. This one sentence has been
+        # FALSE twice in two rounds, each time on a different axis: "hold .md
+        # files" asserted contents an unreadable probe could not read, and
+        # "will NOT ship" was wrong because a symlinked scope DOES ship — as a
+        # symlink, which the very next line of output says. Both reverts passed
+        # a suite that only checked for absent keywords, because a keyword guard
+        # is satisfied by any rewording. When the artifact under test is prose,
+        # the normalised whole is the only machine-readable claim. A deliberate
+        # reword must fail here and be re-verified; that cost is the point.
+        self._assert_note_header(r.stdout, 1)
+
+    def test_the_stub_REFUSES_to_run_with_FAKE_DEST_unset(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """Pins the `set -u` the bash→POSIX rewrite dropped and round 2 restored.
+
+        Without it an unset `$FAKE_DEST` makes the stub's `sed` become
+        `s|/data||g`, silently rewriting every absolute path to a relative one —
+        the stub then 'works' against the wrong directory and every assertion
+        built on it is meaningless. That regression was re-introducible with a
+        fully green suite until this test existed."""
+        env, _ = fake_cluster
+        env = {k: v for k, v in env.items() if k != "FAKE_DEST"}
+
+        r = self._push(store, tmp_path, env)
+
+        # 🔴 ASSERT THE GUARD'S OWN MESSAGE, NOT MERELY A NON-ZERO RC. `rc != 0`
+        # alone does NOT isolate this: without the guard the stub still fails,
+        # later and for an unrelated reason (`tar -C ""`), so the mutant survived
+        # a green run. The specific string is what proves THIS guard fired.
+        assert r.returncode != 0, (
+            f"the stub ran with FAKE_DEST unset instead of erroring. stdout={r.stdout}"
+        )
+        assert "FAKE_DEST must be set" in r.stderr + r.stdout, (
+            "the stub failed, but not because of its own unset-variable guard — "
+            "so this test does not pin that guard. "
+            f"stderr={r.stderr!r} stdout={r.stdout!r}"
+        )
+
+    def test_an_EMPTY_dot_scope_is_not_announced_as_holding_md_files(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """Both arms must PROBE before naming a directory — the symlink arm
+        used to fire unconditionally, announcing a scope that held no markdown
+        at all.
+
+        ⚠ The header no longer says "hold .md files" (it says "contribute NO
+        entries"), so announcing an empty excluded scope would no longer be a
+        FALSE claim — but it is still noise about a directory the operator
+        cannot act on, and the probe is what keeps the list meaningful. Do not
+        "restore" the old wording on the strength of this test's name: it was
+        removed because it asserted contents an unreadable probe cannot read."""
+        env, dest = fake_cluster
+        empty_real = tmp_path / "empty-target"
+        empty_real.mkdir()
+        (store / "emptysym").symlink_to(empty_real)
+        (store / ".emptydot").mkdir()
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        # Scoped to the NOTE block: both scopes legitimately appear in the
+        # per-scope `entries=0` lines, and asserting over the whole of stdout
+        # would fail on that correct output.
+        note = "\n".join(
+            l for l in r.stdout.splitlines()
+            if l.startswith("seed: NOTE") or l.startswith("seed:   ")
+        )
+        assert "emptysym" not in note, (
+            "a symlinked scope holding NO .md was announced as holding some:\n"
+            + note
+        )
+        assert ".emptydot" not in note, note
+
+    def test_a_TOP_LEVEL_md_in_the_store_is_not_reported_missing(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The store root really does hold a `README.md`. It is not an entry,
+        the tar member list never ships it, and `-mindepth 2` is what keeps it
+        out of the comparison — a dimension no earlier fixture had, so dropping
+        that flag survived the sweep while breaking every real push."""
+        env, dest = fake_cluster
+        (store / "README.md").write_text("# the store's own readme\n")
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        assert "README.md" not in r.stderr
+        assert "seed: OK" in r.stdout
+
+    def test_a_DOT_DIRECTORY_scope_is_not_reported_missing(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """`staged_entries` and the tar member list are both built from
+        `"$STAGE"/*/`, which without `dotglob` skips dot-directories — so a
+        `.hidden/` scope is never archived. A bare `find` would list it as
+        staged and then report it missing: "1 of 1 staged entry file(s) did NOT
+        land" over something that was never shipped. The compared population has
+        to be the PUSHED one."""
+        env, dest = fake_cluster
+        hidden = store / ".hidden"
+        hidden.mkdir()
+        (hidden / "b.md").write_text(_entry("b", ".hidden"))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, (
+            f"a dot-scope is not pushed, so it must not be reported missing. "
+            f"stdout={r.stdout} stderr={r.stderr}"
+        )
+        assert ".hidden" not in r.stderr
+        assert "seed: OK" in r.stdout
+        # 🔴 Excluding it is right; saying nothing about it just moves the lie
+        # from a wrong MISMATCH to a silent omission.
+        assert ".hidden (dot-directory" in r.stdout, (
+            "the excluded scope must be NAMED, not silently dropped: " + r.stdout
+        )
+        # 🔴 AND IT MUST ACTUALLY NOT SHIP. The NOTE says "not in the tar member
+        # list"; that is only true while `dotglob` is off when the member list is
+        # built. Leaving it set SURVIVED the sweep — the entry then lands on the
+        # pod while the remote listing still excludes `./.*`, so it is shipped,
+        # never verified, and the NOTE's sentence becomes false.
+        assert not (dest / ".hidden").exists(), (
+            "the dot-scope was SHIPPED despite the NOTE saying it would not be — "
+            f"pod holds: {sorted(p.name for p in dest.iterdir())}"
+        )
 
 
 class TestSeedIsNonDestructive:
