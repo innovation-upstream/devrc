@@ -79,6 +79,14 @@ ROOT = Path(__file__).resolve().parents[2]
 # the suite forever, and their value is not a correctness claim about how fast
 # anything must be.
 #
+# 🔴 ONE DOCUMENTED EXCEPTION, named here because the sentence above was already
+# falsified once by a change that did not update it: `running_subprocess`'s
+# healthz RETRY probe takes a DEADLINE-RELATIVE bound, not this one. It is a
+# poll inside a 20 s budget rather than a detector, so at this value a single
+# blocked call would outlast the budget it enforces. Any future exception goes
+# in this list or the claim above is false again — which is how two
+# `wait_closed` sites kept a stale bound while the comment said otherwise.
+#
 # It is deliberately NOT used for the raw-socket `settimeout(...)` calls further
 # down. Those are DRAIN bounds — the loop terminator for a `recv`-until-quiet
 # read — so raising one adds its full value to the suite's runtime instead of
@@ -4146,13 +4154,28 @@ def running_subprocess(
                 out, err = proc.communicate()
                 raise AssertionError(f"server exited {proc.returncode}: {err or out}")
             try:
-                # 🔴 A SHORT bound, not HANG_TIMEOUT — this is a RETRY probe
-                # inside a 20 s deadline, not a hang-detector. At the module
-                # default one blocked call would outlast the deadline it sits
-                # in, so the loop could never retry and the 20 s budget became
-                # unenforceable: a server that binds but never answers would
-                # report "never became healthy" after ~60 s instead of ~20 s.
-                if fetch(f"{base}/healthz", client_ip=None, timeout=2)[0] == 200:
+                # 🔴 DEADLINE-RELATIVE, not a fixed short bound — this is a RETRY
+                # probe inside the 20 s budget, not a hang-detector. At the
+                # module default one blocked call outlasts the deadline it sits
+                # in, so the loop could never retry and the budget was
+                # unenforceable. But a fixed `timeout=2` was the wrong correction
+                # and audit measured why: under the very saturation this file's
+                # header documents (round-trips losing the scheduler for >15 s)
+                # EVERY probe would exceed 2 s, so a server that was merely slow
+                # would be reported as one that never came up — reintroducing the
+                # capacity-read-as-failure this module exists to stop, on the
+                # other side. Measured at 4x oversubscription the worst probe was
+                # 0.675 s, i.e. the fixed bound had ~3x headroom where the
+                # documented bad case needs ~8x.
+                #
+                # `deadline - now` keeps BOTH properties: the 20 s budget is
+                # enforceable because no single call can outlast it, and a slow
+                # probe that still answers inside the budget is counted rather
+                # than discarded. The 0.25 s floor keeps the last iteration from
+                # degenerating into a zero-timeout call that cannot succeed.
+                probe_bound = max(0.25, deadline - time.time())
+                if fetch(f"{base}/healthz", client_ip=None,
+                         timeout=probe_bound)[0] == 200:
                     break
             except Exception:
                 time.sleep(0.1)
@@ -6149,10 +6172,17 @@ def _drain_bounds(source: "str | None" = None) -> "list[tuple[int, str]]":
 
     🔴 Returns ALL of them, literal or not. The introducing commit claimed
     "drain bounds ... Verified still at 5 s" off a grep for the literal string
-    `settimeout(5)`, which finds 3 — there are NINE settimeout sites, one of them
-    `settimeout(4)` and five computed from expressions. That grep could not have
-    seen any of those, so the verification was a claim about the pattern, not
-    about the file. This walks the AST instead.
+    `settimeout(5)`, which finds 3 — there are EIGHT settimeout call sites, one
+    of them `settimeout(4)` and four computed from expressions. That grep could
+    not have seen any of those, so the verification was a claim about the
+    pattern, not about the file. This walks the AST instead.
+
+    🔴 The count in the previous sentence said NINE, and was itself wrong — the
+    third miscounted self-report in this ladder, in the artifact written to stop
+    them. It came from counting `grep -n 'settimeout('` OUTPUT LINES, one of
+    which is this very docstring mentioning the name. A grep counts MENTIONS; an
+    AST walk counts CALLS. Re-derive with `_drain_bounds()` rather than trusting
+    any number written here, this one included.
     """
     src = source if source is not None else Path(__file__).read_text()
     return [
@@ -6187,6 +6217,17 @@ def test_the_drain_bounds_were_NOT_swept_into_the_hang_bound():
         f"these DRAIN bounds were bound to the hang constant: {swept}. A drain at "
         f"{HANG_TIMEOUT:g}s adds that to every passing run; it is not a detector."
     )
+    # 🔴 `None` FIRST, and as its own arm. It is the stdlib's "block forever",
+    # so it is the worst value a drain can take — and it slipped a fully green
+    # run of this guard's first draft, because `ast.unparse` renders it as the
+    # string "None", which is not `.isdigit()`, so the size arm below never saw
+    # it. The module-level assert rejects exactly this value for the hang bound;
+    # a drain must not be able to take what the detector refuses.
+    blocking = [(ln, a) for ln, a in bounds if a == "None"]
+    assert not blocking, (
+        f"these drain bounds are `None` — the stdlib's block-forever: {blocking}. "
+        "A recv-until-quiet loop with no bound never terminates."
+    )
     big = [(ln, a) for ln, a in bounds
            if a.lstrip("-").replace(".", "", 1).isdigit() and float(a) > 10]
     assert not big, (
@@ -6206,6 +6247,17 @@ def test_the_drain_guard_catches_the_sweep_it_exists_to_catch():
     swept = [(ln, a) for ln, a in _drain_bounds(mutant) if "HANG_TIMEOUT" in a]
     assert len(swept) == 1, (
         f"sweeping one drain onto HANG_TIMEOUT was not detected: {swept!r}"
+    )
+
+    # 🔴 The mutant that SURVIVED this guard's first draft, kept as a permanent
+    # control. `None` renders as a non-numeric string, so the size arm cannot see
+    # it — only the dedicated arm can, and without this nobody would notice that
+    # arm being deleted.
+    blocking_mutant = src.replace("sock.settimeout(4)", "sock.settimeout(None)", 1)
+    assert blocking_mutant != src, "the None mutation did not apply — vacuous"
+    blocking = [(ln, a) for ln, a in _drain_bounds(blocking_mutant) if a == "None"]
+    assert len(blocking) == 1, (
+        f"a `settimeout(None)` drain — block forever — was not detected: {blocking!r}"
     )
 
 
