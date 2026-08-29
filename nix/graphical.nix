@@ -337,13 +337,18 @@ let
       { button = "left"; cmd = "yad --calendar --width=200 --height=200 --undecorated --fixed --close-on-unfocus --no-buttons"; }
     ];
   };
-  # rigcontrol: workbench only. Instant toggle on left-click (sleep ↔ wake),
-  # no yad menu. The block script reads the state file and calls rig-control.sh
-  # sleep or wake directly; i3status-rust passes $BLOCK_BUTTON to the command.
+  # rigcontrol: workbench only. Instant toggle on left-click (sleep ↔ wake).
+  # The click handler runs via setsid -f so it doesn't block the bar during
+  # the ~30s fade-in. i3status-rust does NOT pass $BLOCK_BUTTON to custom
+  # block commands, so the toggle lives in a [[block.click]] handler, not
+  # inside the render script.
   rigcontrolBlock = {
     block = "custom";
     command = "${scriptsDir}/i3blocks-rigcontrol";
     interval = "once";
+    click = [
+      { button = "left"; cmd = "setsid -f ${home}/workspace/devrc/scripts/rig-control-toggle"; }
+    ];
   };
   # claude-runs: workbench only. LIVE count of Claude-Code-in-tmux runs — renders
   # `󰕮 N` (N>0) / bare `󰕮` (N==0) / `󰕮 ?` (could not measure), always neutral
