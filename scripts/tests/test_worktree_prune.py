@@ -712,21 +712,44 @@ def test_pathspec_batching_survives_more_paths_than_one_argv_can_hold(tmp_path, 
 # `nonascii_universe` therefore builds a branch whose ONLY changed path is
 # non-ASCII.
 #
-# 🔴 WHICH TESTS ACTUALLY STOP A FIX THAT JUST SILENCES THE SIGNAL — MEASURED,
-# because an earlier version of this comment credited the wrong one. Forcing
-# `if not differ:` to `if False:` in a `cp -a` copy of the tree, so
-# `content-identical` can NEVER fire, kills exactly TWO tests:
+# 🔴 WHAT STOPS A FIX THAT JUST SILENCES THE SIGNAL — and the measurement, its
+# METHOD, and what the number is a count OF, because this comment has now been
+# wrong twice in opposite directions.
 #
-#     test_squash_merged_branch_is_dead_not_orphan          (pre-existing, ASCII)
-#     test_content_identical_still_fires_for_a_landed_nonascii_path
+# METHOD: `cp -a` the tree, sever `.git`, sed `landing_signals`' `if not differ:`
+# to `if False:` so `content-identical` can NEVER fire, then run THIS WHOLE FILE
+# under `PYTHONDONTWRITEBYTECODE=1`. Running it under a `-k` filter is how the
+# previous revision of this comment got its answer, and a filtered run cannot
+# answer a question about the file.
 #
-# Six of the eight tests in this section — INCLUDING
-# `test_an_ascii_only_branch_is_still_classified_correctly`, which the earlier
-# comment named as that control — stayed GREEN. Structurally so, not by
+# RESULT: **22 of the file's 220 tests fail** (measured 2026-08-29 at the tip of
+# the #975 branch). Do not maintain that integer — it is a count of a CLASS, and
+# the class is the durable statement: *every end-to-end fixture whose row is
+# `dead` by way of `content-identical`* degrades to `orphan`, so the reds sweep
+# far past this section into the executor, the JSON report, the exclusion tests
+# and the agent-worktree tests (`test_execute_removes_only_the_dead_rows`,
+# `test_json_output_carries_the_evidence_for_every_row`,
+# `test_the_squash_row_is_removable`, `test_without_gh_the_squash_is_still_dead`,
+# and the rest). Re-derive with the method above rather than trusting the number.
+#
+# 🔴 THE PREVIOUS REVISION SAID "kills exactly TWO tests" AND NAMED THEM. That is
+# the reading that matters here, and it was dangerous in a specific way: a
+# maintainer deleting or refactoring those two would have read it as "the
+# protection against silencing the signal is now gone", when ~20 others catch it.
+#
+# WITHIN THIS SECTION the picture is genuinely narrow, and that is the true part
+# of what the old comment was reaching for: of the SEVEN `def test_` between this
+# header and the next, exactly ONE goes red —
+# `test_content_identical_still_fires_for_a_landed_nonascii_path`. Six stay
+# green, INCLUDING `test_an_ascii_only_branch_is_still_classified_correctly`,
+# which an even earlier comment named as the control against exactly this. Not an
 # accident: both branches in `nonascii_universe` are UNLANDED, so the signal is
 # SUPPOSED to stay quiet on both, and a tool that never fires it satisfies the
-# ASCII twin by construction. The control against "silence everything" has to be
-# a fixture where the signal MUST fire, which is what those two are.
+# ASCII twin by construction. A control against "silence everything" has to be a
+# fixture where the signal MUST fire.
+# (`test_squash_merged_branch_is_dead_not_orphan` also goes red and is the
+# pre-existing ASCII half of that pair — but it lives up at the top of this file,
+# NOT in this section; the old comment counted it here and got "eight".)
 
 NONASCII_NAME = "café.md"
 
@@ -814,13 +837,36 @@ def test_unlanded_work_under_a_nonascii_name_is_not_called_dead(nonascii_univers
 def test_an_ascii_only_branch_is_still_classified_correctly(nonascii_universe):
     """⚠ AN INVARIANT GUARD — labelled, not counted as regression coverage.
 
-    It asserts the SAME shape of fixture, differing ONLY in the filename's
-    alphabet, reaches the SAME verdict. What that pins is worth having and is
-    narrow: that the test above's expectation is `orphan` specifically — the
-    verdict an ASCII branch of identical shape genuinely gets — and not a
-    DEGRADED one. If a future change made the non-ASCII row `cannot-tell` while
-    the ASCII twin stayed `orphan`, the pair would disagree and this would go
-    red.
+    🔴 WHAT THE BODY ACTUALLY DOES: it reads ONE row — `paths["ascii"]` — and
+    pins it to `orphan` / not-removable. That is the whole of it, and it is
+    worth having: it establishes that `orphan` is the verdict a branch of this
+    exact shape genuinely gets, so the non-ASCII expectation in the test above is
+    a measured constant rather than a guess.
+
+    ⚠ IT DOES NOT COMPARE THE TWO ROWS, and an earlier version of this docstring
+    claimed it did — "if a future change made the non-ASCII row `cannot-tell`
+    while the ASCII twin stayed `orphan`, the pair would disagree and this would
+    go red". MEASURED: forcing `_paths_differ` to return `None` for any non-ASCII
+    pathspec produces exactly that split — `e2e-nonascii: verdict='cannot-tell'`
+    beside `e2e-ascii: verdict='orphan'` — and THIS TEST PASSES. There is no
+    pair in the body. That is the repo's own named failure shape: a docstring
+    names a RELATIONSHIP, the body inspects one SIDE.
+
+    🔴 AND A PAIR GUARD WAS TRIED AND REJECTED, with the measurement, rather than
+    left as an unclosed gap. A test asserting
+    `(verdict, removable, signals)` equal across the twins was written and run
+    against that same probe: it goes red — but ALONGSIDE
+    `test_unlanded_work_under_a_nonascii_name_is_not_called_dead`, never instead
+    of it, and it was the unique killer of nothing. Structural, not luck: both
+    rows are ALREADY pinned to the literal `orphan` by two separate tests, so any
+    disagreement between them necessarily breaks one of those literal pins first.
+    A pair-equality assertion over two independently-pinned constants is implied
+    by them, and shipping it would have been a guard that reads as coverage while
+    adding none — the thing this docstring was rewritten to stop doing.
+
+    The reds under that probe are
+    `test_unlanded_work_under_a_nonascii_name_is_not_called_dead` and
+    `test_content_identical_still_fires_for_a_landed_nonascii_path`.
 
     🔴 IT IS NOT THE CONTROL AGAINST "SILENCE THE SIGNAL EVERYWHERE", which an
     earlier docstring claimed. MEASURED: with `if not differ:` forced to

@@ -370,10 +370,11 @@ def _git_raw(cwd: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.Co
     fixture and its own audit, which is why #975 stopped at the arm that decides
     `dead`. Do not read this helper as evidence the abort class is closed.
 
-    🔴 AND THE REACH IS WIDER THAN "TRACKED". An earlier wording of the MEASURED
-    note above said "any undecodable TRACKED filename"; `worktree_dirty` reads
+    🔴 AND THE REACH IS WIDER THAN "TRACKED". `scripts/README.md`'s row said
+    "any undecodable TRACKED filename"; `worktree_dirty` reads
     `--untracked-files=normal`, so an untracked file nobody ever `git add`ed is
-    enough on its own.
+    enough on its own. (Both are now corrected; this repeats the `⚠` note above
+    on purpose, because the two paragraphs are read at different times.)
     """
     return subprocess.run(
         ["git", "--no-optional-locks", "-C", str(cwd), *args],
