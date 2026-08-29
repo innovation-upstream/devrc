@@ -14,11 +14,21 @@ key on a missing BINARY, not an env var. A flat pin would have gone red on the
 dev host, where nvim exists and the tests run -- exactly the failure the
 SIGNAL_PG_DSN entry documents. So they moved to the tier that HAS nvim.
 
-🔴 These deliberately load the config the way neovim really loads it -- through
-`$DEVRC_DIR`, as init.vim does -- rather than `nvim --clean -c luafile`. The
-clean form works and is hermetic, but it proves only that the block behaves in
-ISOLATION; it cannot see the block failing to be REACHED (a rename, a source
-line dropped from init.lua). The seam is the part worth testing.
+🔴 SCOPE, stated because an earlier version of this docstring overclaimed it.
+It said these tests load the config "the way neovim really loads it -- through
+$DEVRC_DIR" and were therefore testing the SEAM. That was wrong twice over:
+the fixture SET $DEVRC_DIR itself, so it manufactured the one precondition that
+does not hold in production -- and the config chain was, at that moment,
+completely broken over ssh for exactly that reason, which these tests could not
+see. A correct clipboard fix shipped inert behind a green suite.
+
+So the claim is now the narrower true one: this file covers the BEHAVIOUR of
+the clipboard block, loaded explicitly with `-c luafile`. Whether the block is
+REACHED through init.vim -> init.lua with no session environment is a different
+question, owned by test_nvim_config_loads_offsession.py (which counts E484s
+from the real chain) and by the registration guard in
+scripts/tests/test_nvim_clipboard_osc52.py. Two files, two claims, neither
+pretending to make the other's.
 """
 from __future__ import annotations
 
@@ -48,13 +58,29 @@ def _run_nvim_offdisplay(tmp: Path, keys: str) -> bytes:
     probe.write_text("OSC52-FIXTURE-LINE\n")
     log = tmp / "pty.bin"
 
+    # 🔴 Load THIS tree's block explicitly, not via $DEVRC_DIR. That variable
+    # used to point neovim at this worktree; the repo path is now substituted
+    # into init.vim at BUILD time, so it is no longer read at all -- the old
+    # fixture would have quietly exercised the DEPLOYED clone in
+    # ~/workspace/devrc and passed whatever this branch contains.
+    #
+    # `-c luafile` on a normally-started nvim rather than `-u <init.vim>`:
+    # `-u` bypasses the nix wrapper, so no plugins are on the runtimepath, the
+    # config errors and nvim blocks on a press-ENTER prompt -- the tests hung
+    # for the full timeout. Reaching the block through the whole config chain is
+    # covered separately, by the E484 count in
+    # test_nvim_config_loads_offsession.py; this file covers the BEHAVIOUR.
     env = dict(os.environ)
     env.pop("DISPLAY", None)
+    # Deliberately NOT set -- the config must not need it, and a fixture that
+    # supplies it cannot see it being absent. That is how the first version of
+    # this fix shipped inert.
+    env.pop("DEVRC_DIR", None)
     env["SSH_TTY"] = "/dev/pts/0"
-    env["DEVRC_DIR"] = str(REPO)
 
     subprocess.run(
-        ["script", "-qfc", f"nvim {probe} {keys} -c 'qa!'", str(log)],
+        ["script", "-qfc",
+         f"nvim -c 'luafile {NATIVE_LUA}' {probe} {keys} -c 'qa!'", str(log)],
         env=env,
         capture_output=True,
         timeout=60,
@@ -119,10 +145,10 @@ def test_the_provider_matches_the_environment_it_runs_in():
     scripts/tests/conftest.py exists to prevent.
     """
     env = dict(os.environ)
-    env["DEVRC_DIR"] = str(REPO)
+    env.pop("DEVRC_DIR", None)
     res = subprocess.run(
         [
-            "nvim", "--headless",
+            "nvim", "--headless", "-c", f"luafile {NATIVE_LUA}",
             "-c", 'lua io.write(vim.g.clipboard and "SET" or "UNSET")',
             "-c", "qa!",
         ],
