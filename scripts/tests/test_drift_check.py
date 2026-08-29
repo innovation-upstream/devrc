@@ -6345,16 +6345,23 @@ def test_the_slug_is_derived_from_the_origin_remote(fleet, url, slug):
     is tested here — against the real URL spellings `git remote -v` produces,
     ssh and https, with and without `.git`.
 
-    `GIT_SSH_COMMAND=/bin/false` keeps the git leg offline: origin now names
-    github.com, and without this the fetch would leave the machine. The fetch
-    failing is expected and is not what is asserted — rc 24 (severity 68)
-    outranks rc 4 (55), so the arm's finding is still the verdict.
+    🔴 `GIT_ALLOW_PROTOCOL=file` keeps the git leg offline: origin now names
+    github.com, and without it the fetch would leave the machine. It refuses
+    BOTH ssh and https (measured: `fatal: transport 'ssh' not allowed` in 7ms)
+    while `ls-remote --get-url` still resolves, because that is a config
+    expansion and opens no transport — which is exactly the pairing this test
+    needs. NOT `GIT_SSH_COMMAND`: that covers only the ssh spelling, and
+    `test_push_keepalive.py` requires every such export to carry
+    ServerAliveInterval, which is meaningless on a command that never connects.
+
+    The fetch failing is expected and is not what is asserted — rc 24 (severity
+    68) outranks rc 4 (55), so the arm's finding is still the verdict.
     """
     fleet.catch_up()
     fleet.set_origin(url)
     log = fleet.root / "gh-argv.log"
     fleet.stub_gh("false 0", log=log)
-    rc, out = fleet.check("--no-remote", GIT_SSH_COMMAND="/bin/false")
+    rc, out = fleet.check("--no-remote", GIT_ALLOW_PROTOCOL="file")
     assert rc == 24, f"{url} did not reach the arm: {rc}\n{out}"
     assert slug in out, f"{url} did not resolve to {slug}\n{out}"
     argv = log.read_text()
@@ -6379,7 +6386,7 @@ def test_a_url_that_is_not_an_owner_repo_pair_is_refused_not_guessed(fleet, url)
     fleet.set_origin(url)
     log = fleet.root / "gh-argv.log"
     fleet.stub_gh("false 0", log=log)
-    rc, out = fleet.check("--no-remote", GIT_SSH_COMMAND="/bin/false")
+    rc, out = fleet.check("--no-remote", GIT_ALLOW_PROTOCOL="file")   # see above
     assert rc != 24, f"{url} was turned into a slug and queried\n{out}"
     assert "[protect] COULD NOT MEASURE" in out, out
     assert not log.exists(), f"gh was called for a non-github origin: {log.read_text()!r}"
