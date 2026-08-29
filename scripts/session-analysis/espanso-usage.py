@@ -688,8 +688,9 @@ def render_terms(fires, ts):
     out.append("")
     out.append(f"### unattributed ({unattr_total} fires over "
                f"{len(fires['unattributed'])} distinct terms)")
-    out.append("   `_attribute` returns None whenever a term matches 0 or >=2 "
-               "snippets — by design.")
+    out.append("   `_attribute` returns None whenever a term matches 0 "
+               "snippets, or >=2 with no single one NAMED outright (the term "
+               "IS that trigger, with or without the ':') — by design.")
     out.append(f"{'n':>5}  {'term':28} competing snippets (current config)")
     det = EspansoDetector(ts) if ts is not None else None
     for term, n in sorted(fires["unattributed"], key=lambda r: (-r[1], r[0])):
@@ -994,8 +995,10 @@ def lint(ts):
     🔴 EVERY finding here is about ATTRIBUTION, never about reachability.
     espanso's search UI lists EVERY match as a row and the user picks one, so a
     term matching >=2 snippets shows two rows — it does NOT fail. What breaks is
-    `_attribute`, which returns None on >=2 matches, so the fire is recorded
-    UNATTRIBUTED (`_close_search` emits the row either way). A snippet with no
+    `_attribute`, which returns None on >=2 matches unless exactly one of them
+    is NAMED outright by the term (it IS that trigger, with or without the ':';
+    2026-08-28), so the fire is recorded UNATTRIBUTED
+    (`_close_search` emits the row either way). A snippet with no
     uniquely-resolving term is therefore INVISIBLE TO THIS TOOL, not unreachable
     to the user.
 
@@ -1040,7 +1043,14 @@ def lint(ts):
             if trig not in m:
                 findings.append({"kind": "self-miss", "trigger": trig,
                                  "message": f"own term {t!r} does NOT match itself"})
-            elif len(m) == 1:
+            elif det._attribute(t) == trig:
+                # ASK THE REAL RESOLVER, don't re-derive it. This used to test
+                # `len(m) == 1`, a second copy of `_attribute`'s rule — and the
+                # two diverged on 2026-08-28 when `_attribute` gained a
+                # tie-break for a term that NAMES one of the snippets it
+                # matches. A no-op on today's config (no declared term is a bare
+                # trigger name except 'kickoff', which already matched uniquely)
+                # — the point is that it cannot drift again.
                 unique.append(t)
         if terms and not unique:
             findings.append({"kind": "unreachable", "trigger": trig,
@@ -1067,7 +1077,8 @@ def render_lint(findings, config_path):
     out = [f"## LINT — offline ATTRIBUTION check ({config_path})", "",
            "   🔴 AMBIGUOUS IS NOT DEAD. espanso lists EVERY match as a row and",
            "   the user picks one, so an ambiguous term still fires. What breaks",
-           "   is `_attribute` (None on >=2 matches), so the fire is logged",
+           "   is `_attribute` (None on >=2 matches, unless exactly one is",
+           "   NAMED outright by the term), so the fire is logged",
            "   UNATTRIBUTED — these findings are about TELEMETRY, not reach.",
            "   Fix one by changing which WORDS a snippet spells. NEVER by",
            "   removing its label: espanso then shows the raw expansion as the",
