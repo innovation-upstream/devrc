@@ -1,19 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Discord Embed Enlarge",
-  "version": "0.2.3",
-  "description": "Enlarges Discord's native media embeds beyond the 400x300 cap. Click-to-lightbox with keyboard/mouse navigation. Optional dl-router save integration.",
+  "version": "0.3.0",
+  "description": "Enlarges Discord's native media embeds past their 400x300 cap, with a click-to-open lightbox (zoom, pan, per-message navigation).",
   "permissions": [],
-  "host_permissions": ["http://127.0.0.1:8791/*"],
   "content_scripts": [{
     "matches": ["https://discord.com/*", "https://*.discord.com/*"],
-    "js": ["embed_enlarge.js", "lightbox.js", "save_button.js"],
+    "js": ["embed_enlarge.js", "lightbox.js"],
     "all_frames": true,
     "run_at": "document_idle"
   }],
-  "background": {
-    "service_worker": "service_worker.js"
-  },
   "icons": {
     "16": "icons/icon-16.png",
     "48": "icons/icon-48.png",
