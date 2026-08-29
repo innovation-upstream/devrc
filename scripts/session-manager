@@ -201,11 +201,11 @@ and the roll-ups a caller usually wants are:
                                         which skill owns each
 
 Each row carries: kind, host, session, window_index, window_id, window_name,
-codename, label, label_source, hotkey, pane_id, path, command, task, claude,
-busy, age_secs, age_source, status, waiting_probable, waiting_signals,
-waiting_status, unsent_prompt, unsent_prompt_status, pane_preview,
-pane_preview_status, claude_session_id, runtime,
-ledger, fuzzyclaw, panes. The row ledger is pinned by a test.
+codename, label, label_source, hotkey, hotkey_display, pane_id, path, command,
+task, claude, busy, age_secs, age_source, status, waiting_probable,
+waiting_signals, waiting_status, unsent_prompt, unsent_prompt_status,
+pane_preview, pane_preview_status, claude_session_id, runtime, ledger,
+fuzzyclaw, panes. The row ledger is pinned by a test.
 
 🔴 `waiting_probable` AND `unsent_prompt` ARE TWO SIGNALS, NOT ONE
 --------------------------------------------------------------------------
@@ -262,6 +262,14 @@ field (`scratch2:G:#d79921:Gold`) — never a second copy of that mapping. It is
 `null`, never `""`, for tiers 2 and 3: no `$mod+Shift+<k>` binding EXISTS for
 a session outside the table, and a fabricated key sends the operator to press
 something and land nowhere.
+
+🔴 `hotkey_display` IS THE CHORD, AND IT EXISTS BECAUSE THE CASE RULE IS NOT
+GUESSABLE. `M-v` opens `scratch3` and `M-V` opens `scratch4` — DIFFERENT
+sessions, per `scripts/tmux-scratch-slots.sh`. Measured 2026-08-28: a consumer
+read `hotkey: v` off a row and answered `Alt+Shift+V`, sending the operator to a
+real window that was the wrong one. The derivation now happens in exactly one
+function (`hotkey_display`) and its result rides on the row, so no reader has to
+know the rule. `null` wherever `hotkey` is null, never `""`.
 
 It is ADDITIVE. Two sessions can resolve to the SAME label — `0` and `8` are
 both sitting in one repo today — so a label alone identifies nothing. Every
@@ -769,6 +777,54 @@ def dropped_by_claude_only(row) -> bool:
         it out would delete the evidence rather than surface it.
     """
     return row_class(row) == "shell"
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 `--match` — THE FIELD SET IS THE WHOLE DESIGN, AND `path` IS NOT IN IT
+# --------------------------------------------------------------------------- #
+# Measured on the live fleet 2026-08-28, one 72-row scan, one query substring:
+#
+#   matched against `task`  ->  1 row   (the correct one)
+#   matched against `path`  -> 29 rows
+#
+# 29 of 72 windows share a repo path, so `path` does not DISCRIMINATE — it
+# admits nearly every window that happens to sit in the same checkout, and the
+# one true hit is then indistinguishable from the 28 that merely live nearby.
+# A filter whose answer is "40% of the fleet" is not an answer; it is the
+# unfiltered scan with a filter's authority attached.
+#
+# So the default set is the three fields that say WHAT A WINDOW IS DOING or
+# WHICH ONE IT IS, and `path` is opt-in behind `--match-path` for the case where
+# the operator really is asking "everything in that repo".
+MATCH_FIELDS = ("task", "label", "codename")
+MATCH_FIELD_PATH = "path"
+
+
+def match_fields(match_path=False) -> tuple:
+    """The fields `--match` looks at. ONE definition, so the payload's
+    `filters.match_fields` cannot disagree with what was actually searched."""
+    return MATCH_FIELDS + ((MATCH_FIELD_PATH,) if match_path else ())
+
+
+def row_matches(row, terms, fields=MATCH_FIELDS) -> bool:
+    """Case-insensitive substring match of every term, over `fields`.
+
+    🔴 TERMS ARE **AND**ed, and each term may land in a DIFFERENT field. That is
+    `find-session.py`'s default semantics ("a session must match all"), and the
+    two tools are read as one instrument by the operator asking "find the thing
+    I lost track of" — a filter that ORed here while the archive search ANDed
+    would return different sets for the same words with nothing saying so.
+
+    🔴 EACH TERM IS TESTED PER FIELD, never against the fields joined into one
+    string. A joined haystack lets a term span a field boundary — matching text
+    that exists in no field — which is a hit no reader can explain.
+
+    An EMPTY `terms` matches everything: "no filter was requested" and "a filter
+    that rejects the world" must not be the same call. The caller decides
+    whether a filter ran; this only says whether a row survives one.
+    """
+    hay = [str(row.get(f) or "").casefold() for f in fields]
+    return all(any(str(t).casefold() in h for h in hay) for t in terms)
 
 
 # 🔴 THE TWO LIMITS THAT CHANGE WHAT THE OUTPUT MEANS, CARRIED IN THE OUTPUT.
@@ -1336,11 +1392,52 @@ def resolve_label(session, path, slots=None, home=None) -> dict:
     return {"label": LABEL_FALLBACK, "label_source": "fallback", "hotkey": None}
 
 
+def hotkey_display(hotkey):
+    """The CHORD an operator actually presses, derived from `hotkey` in ONE place.
+
+    `None` -> `None`; a LOWERCASE key -> `Alt+<k>`; an UPPERCASE key ->
+    `Alt+Shift+<K>`.
+
+    🔴 CASE IS SIGNIFICANT AND IT IS NOT A SHIFT CONVENTION. Per
+    `scripts/tmux-scratch-slots.sh`, `M-v` opens `scratch3` (violet) and `M-V`
+    opens `scratch4` (Vapor) — two DIFFERENT sessions. So `Alt+v` and
+    `Alt+Shift+V` are not two spellings of one chord, and lowercasing or
+    uppercasing a key while rendering it sends the operator to a real window
+    that is the wrong one. Measured 2026-08-28: a run read `hotkey: v` off a row
+    and rendered `Alt+Shift+V` in its answer.
+
+    That happened because the DERIVATION lived in the reader's head. It lives
+    here now, and the row carries the answer (`hotkey_display`, in
+    `LEAN_ROW_FIELDS`), so no consumer has to perform it.
+
+    🔴 `None`, NEVER `""`. `resolve_label` returns `hotkey: None` on tiers 2 and
+    3 because no key EXISTS for a session outside the slot table; an empty
+    string here would render as `Alt+` and read as a real chord.
+    """
+    if not hotkey:
+        return None
+    # `.isupper()` and not a manual A-Z range: a digit or a symbol is neither
+    # upper nor lower, so it falls to the un-shifted spelling, which is what
+    # `bind -n M-<key>` binds for it.
+    return f"Alt+Shift+{hotkey}" if hotkey.isupper() else f"Alt+{hotkey}"
+
+
 def render_label(row) -> str:
     """The label as an OPERATOR reads it: `Gold (G)` when a hotkey exists,
     the bare label when none does. One writer, so the table and any other
     surface cannot spell the parenthesis differently — or, worse, print an
-    empty `()` for a session that has no key."""
+    empty `()` for a session that has no key.
+
+    🔴 THE PARENTHESIS HOLDS THE RAW KEY, NOT A CHORD, AND THAT IS DELIBERATE.
+    `hotkey_display` is the one writer of the chord spelling, and it is NOT
+    routed through here: the LABEL column is 14 characters wide (pinned by
+    `test_..._render_label_...<= 14` against `Yarrow (Y)`), and `Yarrow
+    (Alt+Shift+Y)` is 20 — it would be truncated back into an ambiguous stub by
+    the very `_trunc` that renders it. So the table states the KEY, case
+    preserved, and the chord is carried on the row for the consumer that needs
+    it. A test pins that this function never emits `Alt+`, so the two surfaces
+    cannot converge on two spellings of one thing.
+    """
     label = (row or {}).get("label") or "—"
     key = (row or {}).get("hotkey")
     return f"{label} ({key})" if key else label
@@ -2152,6 +2249,11 @@ def fold_windows(panes, host, slots=None, task_index=None,
             # 🔴 `null` for every non-slot session, because no hotkey EXISTS
             # for one. Never "".
             "hotkey": lab["hotkey"],
+            # 🔴 THE CHORD, DERIVED IN ONE PLACE. See `hotkey_display`: `v` and
+            # `V` are different sessions, so the row carries the answer rather
+            # than leaving each consumer to guess whether an upper-case key
+            # means Shift. `null` wherever `hotkey` is null — never "".
+            "hotkey_display": hotkey_display(lab["hotkey"]),
             "pane_id": lead.get("pane_id"),
             "path": lead.get("path", ""),
             "command": lead.get("command", ""),
@@ -2425,6 +2527,24 @@ def summarize(report) -> dict:
         # be read as a statement about what the scan produced when it is a
         # statement about what survived. None — not [] — when no filter ran.
         "kinds_excluded_by_filter": filters.get("kinds_excluded_by_filter"),
+        # 🔴 `--match` TRAVELS WITH ITS COUNTS FOR THE SAME REASON `claude_only`
+        # DOES — every number above describes the MATCHED set. `match` is the
+        # terms (null when no filter ran, never `[]`), `match_fields` names what
+        # was actually searched — the reader's way of seeing that `path` was
+        # excluded, which is the difference between 1 hit and 29 — and
+        # `excluded_by_match` is how many rows the filter dropped, so an empty
+        # table is readable as "the fleet has rows, none said these words"
+        # rather than as "the fleet is empty".
+        "match": filters.get("match"),
+        "match_fields": filters.get("match_fields"),
+        "excluded_by_match": filters.get("excluded_by_match"),
+        # 🔴 `matched` IS MIRRORED HERE TOO, and it is NOT `total_sessions`. On a
+        # `detail` report the two disagree by construction — `filter_report`
+        # narrows a second time, so `total_sessions` is 0 or 1 while `matched`
+        # is what the ROW FILTER matched. The table's filter line quoted
+        # `total_sessions` and therefore reported the wrong number on exactly
+        # that path, while `filters.matched` sat there unread.
+        "matched": filters.get("matched"),
         "hosts_reachable": sorted(k for k, v in report["hosts"].items()
                                   if v["reachable"]),
         "hosts_unreachable": sorted(k for k, v in report["hosts"].items()
@@ -2734,7 +2854,8 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
            slots=None, ch_sql=SQL_RECENT_SESSIONS,
            claude_only=False, use_capture=True, capture_nonce=None,
            clawgate_reader=None, clawgate_path=None,
-           use_ledger=True, ledger_outputs=None, pane_preview=False) -> dict:
+           use_ledger=True, ledger_outputs=None, pane_preview=False,
+           match=None, match_path=False, prefilter_index_map=False) -> dict:
     """Build the whole report. Every source is injectable, so this is the
     function the hermetic suite exercises end-to-end.
 
@@ -2816,9 +2937,24 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         # 🔴 Both counters are None, never 0/[]: the filter has not run yet, so
         # nothing has been excluded BECAUSE nothing has been counted. A `[]`
         # here would tell `measured_caveats` a filter ran and removed no kind.
+        # 🔴 EVERY `--match` counter is None, never 0/[], for the SAME reason as
+        # `excluded_shells` above: no filter has run, so nothing was excluded
+        # BECAUSE nothing was counted. `match: null` and `match: []` would be
+        # indistinguishable statements about whether a filter ran at all, and
+        # "no rows matched" vs "no filter was asked for" is exactly the pair a
+        # consumer reading an empty row list has to tell apart.
         "filters": {"claude_only": bool(claude_only),
                     "excluded_shells": None,
-                    "kinds_excluded_by_filter": None},
+                    "kinds_excluded_by_filter": None,
+                    "match": None,
+                    "match_fields": None,
+                    "matched": None,
+                    "excluded_by_match": None,
+                    # `{session: [index, ...]}` sampled BEFORE the row filters,
+                    # for `detail`. `None` = never sampled (no filter ran, or
+                    # the caller did not ask), which is a different fact from
+                    # `{}` = sampled and the reachable hosts had no rows.
+                    "prefilter_window_indices": None},
         # 🔴 The clawgate approval queue. Filled in below; the skeleton carries
         # a `status` from the first byte so no code path can publish a bare
         # count. See `read_clawgate_queue` for the four outcomes.
@@ -3041,21 +3177,119 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     # the unfiltered rows instead would have swapped one disagreement for
     # another: a line reading "rows in this scan are kind=cluster/tmux" printed
     # over a table with no cluster row in it.
-    if claude_only:
-        excluded = 0
+    #
+    # 🔴 THE TWO ROW FILTERS SHARE ONE PASS AND ONE `kinds_excluded_by_filter`.
+    # `--claude-only` and `--match` both narrow the same row set, and the
+    # question "which whole kinds did A FILTER remove" has ONE answer, not one
+    # per flag. Computing it per flag would let `--claude-only --match foo`
+    # publish the second filter's answer over the first's, which is the
+    # attributes-to-the-build-what-belongs-to-the-filter defect this block was
+    # written to close, re-created between two filters instead of between a
+    # filter and the build. So `kinds_before` is sampled ONCE before either
+    # runs and `kinds_after` ONCE after both, and the per-flag counters
+    # (`excluded_shells`, `excluded_by_match`) stay separate because THOSE are
+    # per-flag facts.
+    match_terms = [t for t in (match or ()) if str(t) != ""]
+    if claude_only or match_terms:
+        excluded_shells, excluded_by_match = 0, 0
+        fields = match_fields(match_path)
         kinds_before, kinds_after = set(), set()
+        # 🔴 THE PRE-FILTER INDEX MAP — `{session: [window_index, ...]}` sampled
+        # BEFORE either filter runs, and it is what makes a `detail` miss honest.
+        #
+        # `filter_report` derives `detail_sibling_indices` from the rows it is
+        # handed, and by then a row filter has already run — so under
+        # `--match`/`--claude-only` it enumerated only the SURVIVORS and printed
+        # a flat falsehood: measured live, `detail scratch3:1 --match datapacket`
+        # answered "session 'scratch3' has windows ['2']" while window 1 existed
+        # on BOTH searched hosts. That is worse than the silent empty it
+        # replaced, because `(searched: laptop, workbench)` makes it read as
+        # authoritative. Sampled here, the sibling list is a fact about the SCAN
+        # rather than about the filter.
+        #
+        # OPT-IN (`prefilter_index_map`), because only `detail` consumes it and
+        # a 1-row `--match` should not carry a 72-row index map back — the whole
+        # point of the flag is a small payload. `None` when it was not recorded,
+        # so `filter_report` can tell "not sampled" from "sampled and empty".
+        prefilter = {} if prefilter_index_map else None
         for host in hosts:
             entry = report["hosts"][host]
-            kinds_before |= {row_kind(r) for r in entry["windows"]}
-            kept = [r for r in entry["windows"]
-                    if not dropped_by_claude_only(r)]
-            kinds_after |= {row_kind(r) for r in kept}
-            excluded += len(entry["windows"]) - len(kept)
-            entry["windows"] = kept
-        report["filters"]["excluded_shells"] = excluded
+            rows_here = entry["windows"]
+            kinds_before |= {row_kind(r) for r in rows_here}
+            if prefilter is not None:
+                # 🔴 NO `and entry["reachable"]` HERE, AND THAT IS DELIBERATE.
+                # The rule is right — a host that never answered must not
+                # contribute a measured presence or absence of window indices —
+                # but as a runtime CHECK it is unreachable: an unreachable host's
+                # `windows` is `[]`, so the loop below visits nothing for it
+                # either way. A mutation sweep proved it: deleting the clause
+                # changed no test. An unreachable guard reads as a defence and is
+                # not one, so the rule is stated as a PRECONDITION instead.
+                #
+                # ⚠ AND THE PRECONDITION IS OVER-DETERMINED, which is why no
+                # single-mechanism mutation reds anything. TWO independent
+                # mechanisms hold it: `run_tmux` returns `stdout: ""` on every
+                # unreachable path, so `fold_windows` produces no rows; AND the
+                # population loop above skips a host that did not answer. An
+                # audit deleted the second and all tests stayed green — correctly,
+                # because the first still held.
+                # `test_an_unreachable_host_carries_NO_rows_...` therefore pins
+                # the PROPERTY and cannot attribute it to either mechanism.
+                # 🔴 So: do not read a green suite as licence to delete the
+                # remaining enforcement. Deleting BOTH is what this depends on
+                # not happening, and nothing here detects it.
+                for r in rows_here:
+                    prefilter.setdefault(str(r.get("session")), set()).add(
+                        str(r.get("window_index")))
+            if claude_only:
+                kept = [r for r in rows_here if not dropped_by_claude_only(r)]
+                excluded_shells += len(rows_here) - len(kept)
+                rows_here = kept
+            if match_terms:
+                kept = [r for r in rows_here
+                        if row_matches(r, match_terms, fields)]
+                excluded_by_match += len(rows_here) - len(kept)
+                rows_here = kept
+            kinds_after |= {row_kind(r) for r in rows_here}
+            entry["windows"] = rows_here
+        if prefilter is not None:
+            report["filters"]["prefilter_window_indices"] = {
+                sess: sorted(idxs, key=_index_sort_key)
+                for sess, idxs in prefilter.items()}
+        # 🔴 A COUNT OVER A FLEET NOBODY REACHED IS NOT A ZERO. With every host
+        # down the loop above visits only empty row lists, so both counters
+        # would publish a confident `0` — "the filter ran and matched nothing"
+        # — about a scan that measured nothing at all. `detail_matched` is
+        # already `None` in exactly this state; these now agree with it.
+        # ⚠ `excluded_shells` has the SAME shape and is deliberately NOT changed
+        # here: it is a pre-existing published field with its own tests, and
+        # redefining it belongs in its own change, not smuggled into this one.
+        fleet_measured = any(h.get("reachable")
+                             for h in report["hosts"].values())
+        if claude_only:
+            report["filters"]["excluded_shells"] = excluded_shells
+        if match_terms:
+            # 🔴 THE TERMS AND THE FIELDS TRAVEL WITH THE VERDICT. A consumer
+            # that finds zero rows must be able to tell "nothing matched these
+            # words in these fields" from "nothing exists" — and must be able
+            # to see that `path` was NOT searched, because that is the
+            # difference between a 1-row answer and a 29-row one (see
+            # `MATCH_FIELDS`). `matched` is the surviving count stated
+            # positively, so a reader never has to subtract to learn it.
+            #
+            # The TERMS and FIELDS are published even over an unreachable fleet:
+            # "which filter was requested" is known regardless of whether
+            # anything answered. Only the COUNTS go null.
+            report["filters"]["match"] = list(match_terms)
+            report["filters"]["match_fields"] = list(fields)
+            report["filters"]["excluded_by_match"] = (
+                excluded_by_match if fleet_measured else None)
+            report["filters"]["matched"] = (
+                sum(len(report["hosts"][h]["windows"]) for h in hosts)
+                if fleet_measured else None)
         # Sorted for a deterministic render, for the same reason as
-        # `kinds_produced`. `[]` — not absent — when the filter ran and removed
-        # no whole kind: the filter DID run, so "which kinds did it remove" is a
+        # `kinds_produced`. `[]` — not absent — when a filter ran and removed
+        # no whole kind: a filter DID run, so "which kinds did it remove" is a
         # measurement whose answer is none. The key is absent only when no
         # filter ran, which is the honest shape for "never measured" and mirrors
         # `excluded_shells` being None rather than 0 in that case.
@@ -3582,6 +3816,26 @@ def render_table(report) -> str:
                        "this scan produced — their absence above is the "
                        "FILTER's doing, not a measured absence".format(
                            "/".join(gone)))
+    if summ.get("match"):
+        # 🔴 The filter is stated where the counts are, and it names the FIELDS.
+        # An empty table under a `--match` is otherwise indistinguishable from
+        # an empty fleet — and a reader who cannot see that `path` was excluded
+        # cannot tell why their repo-shaped query found nothing.
+        # 🔴 `matched`, NOT `total_sessions`. They are the same number on a
+        # `scan` and DIFFERENT on a `detail`, where `filter_report` narrows a
+        # second time — so quoting `total_sessions` printed "1 row(s) matched"
+        # under a filter that matched three, with the right number sitting
+        # unread in `filters.matched`. Both counts are `null`-not-`0` over an
+        # unreachable fleet, and the sentence says so rather than printing a
+        # zero nobody measured.
+        def _n(v):
+            return "an unmeasured number of" if v is None else v
+        out.append("  FILTER --match {}: {} row(s) matched, {} excluded; "
+                   "fields searched = {}".format(
+                       " ".join(repr(t) for t in summ["match"]),
+                       _n(summ.get("matched")),
+                       _n(summ.get("excluded_by_match")),
+                       ", ".join(summ.get("match_fields") or ["?"])))
     if summ.get("hosts_unreachable"):
         out.append("  UNREACHABLE HOSTS: " +
                    ", ".join(summ["hosts_unreachable"]))
@@ -3712,6 +3966,11 @@ LEAN_ROW_FIELDS = (
     # the ambiguity this whole view exists to remove.
     "kind",
     "host", "session", "window_index", "label", "label_source", "hotkey",
+    # 🔴 `hotkey_display` RIDES WITH `hotkey`, and it is not duplication — it is
+    # the DERIVATION, performed once. Dropping it from this view would put the
+    # `v`-vs-`V` case rule back in the reader's head, which is where it produced
+    # a confident answer sending the operator to the wrong live window.
+    "hotkey_display",
     # what it is working on, and WHICH agent is doing it
     "path", "task", "runtime",
     # what state it is in
@@ -4258,6 +4517,24 @@ def build_parser():
                         "set; summary.excluded_shells says how many were "
                         "dropped and summary.kinds_excluded_by_filter names "
                         "any kind removed entirely. No effect on `tail`.")
+    # 🔴 THE FIELD SET IS THE FEATURE. See `MATCH_FIELDS` for the measurement:
+    # one query substring hit 1 row on `task` and 29 of 72 on `path`, because
+    # nearly every window shares a repo path. `path` is therefore opt-in.
+    p.add_argument("--match", action="append", default=None, metavar="SUBSTR",
+                   help="scan/list/detail: keep only rows whose task, label or "
+                        "codename contains SUBSTR (case-insensitive). "
+                        "Repeatable; terms are ANDed, matching "
+                        "find-session.py's default. Every summary count then "
+                        "describes the MATCHED set; summary.match names the "
+                        "terms, summary.match_fields what was searched and "
+                        "summary.excluded_by_match how many rows were dropped. "
+                        "Reachable hosts + zero matches exits 3 (EXIT_EMPTY), "
+                        "never 0. No effect on `tail`.")
+    p.add_argument("--match-path", action="store_true",
+                   help="add `path` to the fields --match searches. OFF by "
+                        "default and measured: one substring matched 1 of 72 "
+                        "rows on `task` and 29 of 72 on `path`, so `path` "
+                        "admits most of the fleet instead of discriminating.")
     p.add_argument("--lines", type=int, default=DEFAULT_TAIL_LINES,
                    help="tail: scrollback lines")
     return p
@@ -4282,6 +4559,11 @@ def main(argv=None):
         if args.claude_only:
             print("(--claude-only has no effect on `tail`: it targets one "
                   "named window)", file=sys.stderr)
+        # Same rule, same reason, one flag over: a silently ignored flag is how
+        # a caller concludes it was honoured.
+        if args.match or args.match_path:
+            print("(--match/--match-path have no effect on `tail`: it targets "
+                  "one named window)", file=sys.stderr)
         # `tail` RETURNS before the shared --lean notice below, so it needs its
         # own. Silently ignoring it here is the exact rule this flag's own
         # justification cites, broken where the precedent sits one line up.
@@ -4373,7 +4655,17 @@ def main(argv=None):
                     use_capture=not args.no_capture,
                     threshold=args.stale_threshold,
                     claude_only=args.claude_only,
-                    pane_preview=args.pane_preview)
+                    pane_preview=args.pane_preview,
+                    match=args.match, match_path=args.match_path,
+                    # 🔴 ONLY `detail` consumes the pre-filter index map, and
+                    # only it pays for it. A 1-row `--match` scan must not carry
+                    # a 72-session index map back — a small payload is the whole
+                    # point of that flag.
+                    prefilter_index_map=(args.subcommand == "detail"))
+
+    if args.match_path and not args.match:
+        print("(--match-path widens --match, which was not given: no row "
+              "filter ran)", file=sys.stderr)
 
     if args.subcommand == "detail":
         if not args.target:
@@ -4385,6 +4677,14 @@ def main(argv=None):
             print(str(e), file=sys.stderr)
             return EXIT_USAGE
         report = filter_report(report, sess, widx)
+        # 🔴 A MISS IS SAID OUT LOUD. `filter_report` used to hand back an empty
+        # window list and nothing else, which reads exactly like a successful
+        # scan of a window that has nothing in it. On stderr, so a `--json`
+        # consumer's stdout is untouched — and the same facts are in
+        # `report["filters"]` for a consumer that never reads stderr at all.
+        miss = detail_not_found_message(report)
+        if miss:
+            print(miss, file=sys.stderr)
         report["session_history"] = detail_history(report,
                                                    use_ch=not args.no_ch)
 
@@ -4573,17 +4873,81 @@ def detail_history(report, use_ch=True, ch_client_factory=None,
     return res
 
 
+def _index_sort_key(idx: str):
+    """Numeric where possible, lexical otherwise — so `[1, 2, 10]` does not
+    render as `[1, 10, 2]` in a message whose whole job is to be read."""
+    return (0, int(idx), "") if idx.isdigit() else (1, 0, idx)
+
+
 def filter_report(report, session, window_index) -> dict:
     """Narrow a report to ONE window. Hosts keep their reachability facts —
-    dropping them would turn "unreachable" into "not found"."""
+    dropping them would turn "unreachable" into "not found".
+
+    🔴 IT ALSO RECORDS THE MISS, and that is not bookkeeping. This function
+    returned an EMPTY window list for a non-matching address and said nothing —
+    byte-identical, on stdout and in the exit path, to "the window exists and
+    has nothing in it". Measured 2026-08-28: a run guessed window index `3` from
+    the session name `scratch3` (the real index was `2`), got the silent empty
+    back, and spent four more tool calls before it worked out that the address
+    was wrong rather than the window idle.
+
+    So the narrowed report carries, in `filters`:
+
+      * `detail_target`            — the address that was asked for;
+      * `detail_matched`           — how many rows it matched (0 is the miss);
+      * `detail_sibling_indices`   — the window indices that exist for that
+        session name **on the hosts that answered, BEFORE any row filter ran**.
+        `[]` means the session name itself matched nothing.
+      * `detail_filtered_out`      — `True` when the target DOES exist but a row
+        filter (`--claude-only` / `--match`) removed it. That is a miss caused
+        by the FILTER, not an absence in the fleet, and the two are different
+        answers.
+
+    🔴 THE SIBLING LIST IS SAMPLED PRE-FILTER, AND THAT IS THE WHOLE POINT.
+    `gather` runs the row filters before this function ever sees the report, so
+    deriving the siblings from the rows handed here enumerated only the
+    SURVIVORS. Measured live: `detail scratch3:1 --match datapacket` answered
+    "session 'scratch3' has windows ['2']" while window 1 existed on both
+    searched hosts. `gather` now records `filters.prefilter_window_indices` for
+    exactly this, and it is preferred whenever present; the row-derived fallback
+    is used only when no filter ran, where the two are identical by
+    construction.
+
+    🔴 ALL FOUR ARE `None` WHEN NO HOST WAS REACHABLE. A miss measured against
+    a fleet nobody could reach is UNMEASURED, not "not found", and an empty
+    sibling list there would assert a measured absence about windows nothing
+    looked at. `exit_code_for` already separates those two (EXIT_UNAVAILABLE vs
+    EXIT_EMPTY) from `hosts[*].reachable`; this keeps the structured fields
+    telling the same story.
+    """
     out = dict(report)
     out["hosts"] = {}
+    reachable = [name for name, h in report["hosts"].items() if h.get("reachable")]
     for name, h in report["hosts"].items():
         h2 = dict(h)
         h2["windows"] = [r for r in h.get("windows", [])
                          if str(r.get("session")) == str(session)
                          and str(r.get("window_index")) == str(window_index)]
         out["hosts"][name] = h2
+    matched = sum(len(h["windows"]) for h in out["hosts"].values())
+    pre = (report.get("filters") or {}).get("prefilter_window_indices")
+    if pre is not None:
+        siblings = list(pre.get(str(session), []))
+    else:
+        # No row filter ran (or nothing sampled), so the rows handed here ARE
+        # the unfiltered set. Reachable hosts only: a host that never answered
+        # cannot contribute a measured absence of window indices.
+        siblings = sorted(
+            {str(r.get("window_index")) for name in reachable
+             for r in report["hosts"][name].get("windows", [])
+             if str(r.get("session")) == str(session)},
+            key=_index_sort_key)
+    filtered_out = bool(matched == 0 and str(window_index) in siblings)
+    out["filters"] = dict(report.get("filters") or {})
+    out["filters"]["detail_target"] = f"{session}:{window_index}"
+    out["filters"]["detail_matched"] = matched if reachable else None
+    out["filters"]["detail_sibling_indices"] = siblings if reachable else None
+    out["filters"]["detail_filtered_out"] = filtered_out if reachable else None
     out["summary"] = summarize(out)
     # 🔴 THE CAVEATS ARE RE-DERIVED HERE TOO. This path re-runs `summarize` and
     # then renders through `render_caveats`, so leaving the inherited caveats
@@ -4594,6 +4958,89 @@ def filter_report(report, session, window_index) -> dict:
     # sites is the failure this whole change keeps re-finding.
     out["caveats"] = measured_caveats(out)
     return out
+
+
+def _active_row_filters(filters) -> list:
+    """Which ROW filters ran, spelled as the flags an operator would drop.
+
+    ONE definition, because two messages and a test all need the same answer and
+    a second copy would name a set the first does not.
+    """
+    out = []
+    if (filters or {}).get("claude_only"):
+        out.append("--claude-only")
+    terms = (filters or {}).get("match")
+    if terms:
+        out.append("--match " + " ".join(repr(t) for t in terms))
+    return out
+
+
+def detail_not_found_message(report):
+    """The LOUD stderr line for a `detail` that matched no window — or `None`.
+
+    PURE, and it returns `None` in exactly two cases, both deliberate:
+
+      * a window WAS found (`detail_matched` non-zero) — nothing to say;
+      * NO host was reachable, so `detail_matched` is `None`. 🔴 An address that
+        could not be checked is UNMEASURED, not "not found". Printing "no such
+        window" over an unreachable fleet states a fact about a machine nobody
+        talked to, and sends the reader to re-check their spelling instead of
+        their SSH. `exit_code_for` returns EXIT_UNAVAILABLE there and the host
+        entries carry `reachable: false` + `error`; this stays quiet rather than
+        contradicting them.
+
+    🔴 IT DISTINGUISHES THREE MISSES, because they are three different next
+    steps and only one of them means the window is not there:
+
+      1. THE FILTER REMOVED IT (`detail_filtered_out`). The window EXISTS; a
+         `--claude-only` / `--match` dropped its row. Saying "NO SUCH WINDOW"
+         here is a flat falsehood, and `(searched: …)` makes it read as
+         authoritative — it was measured live on `detail scratch3:1 --match
+         datapacket`, for a window present on BOTH searched hosts. This is the
+         same class `render_table` already guards with "their absence above is
+         the FILTER's doing, not a measured absence"; that guard existed at one
+         of its two sites.
+      2. WRONG INDEX. The session exists and its indices are named — sampled
+         BEFORE the row filters (see `filter_report`), so the list is a fact
+         about the scan and not about the filter.
+      3. NO SUCH SESSION on any host that answered.
+
+    It also names which hosts were searched and which were not, so a hit that
+    only exists on an unreachable peer cannot be read as absent.
+    """
+    filters = report.get("filters") or {}
+    target = filters.get("detail_target")
+    matched = filters.get("detail_matched")
+    if not target or matched is None or matched:
+        return None
+    hosts = report.get("hosts") or {}
+    searched = sorted(k for k, v in hosts.items() if v.get("reachable"))
+    unsearched = sorted(k for k, v in hosts.items() if not v.get("reachable"))
+    session, _, widx = str(target).partition(":")
+    siblings = filters.get("detail_sibling_indices") or []
+    active = _active_row_filters(filters)
+    if filters.get("detail_filtered_out"):
+        head = (f"detail: WINDOW {target!r} EXISTS but a ROW FILTER "
+                f"({', '.join(active) or 'unknown'}) removed it — this empty "
+                "result is the FILTER's doing, NOT a measured absence. Re-run "
+                "without the filter to inspect it")
+    elif siblings:
+        head = (f"detail: NO SUCH WINDOW {target!r} — session {session!r} has "
+                f"windows {siblings}; you asked for index {widx!r}")
+        if active:
+            head += (f" (indices measured BEFORE the row filter "
+                     f"{', '.join(active)})")
+    else:
+        head = (f"detail: NO SUCH WINDOW {target!r} — no session named "
+                f"{session!r} exists on any host that answered")
+        if active:
+            head += (f" (measured BEFORE the row filter {', '.join(active)})")
+    tail = f" (searched: {', '.join(searched)})"
+    if unsearched:
+        tail += (f"; NOT searched: {', '.join(unsearched)} — unreachable, so "
+                 f"{target!r} may exist there and this is not a measured "
+                 "absence on that host")
+    return head + tail
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ bash guard.
 | search file contents | `grep` | `rg` / `grep` via bash |
 | see what is in a dir | `glob` on `<dir>/*` | `ls` |
 
-There is **no `list` tool** on opencode 1.18.18 — verified against the resolved
+There is **no `list` tool** on opencode 1.18.21 — verified against the resolved
 tool map, which contains exactly `bash, edit, glob, grep, invalid, question,
 read, skill, task, todowrite, webfetch, write`. Use `glob` to enumerate a
 directory.

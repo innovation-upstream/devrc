@@ -269,7 +269,7 @@ existence guard**, and defined a `KC_PROD` that zsh did not have. Add a handle i
   (`*.env` → ask); a blanket allow is appended after it and silently defeats it
   on every agent. The default already allows every non-`.env` read, so the
   correct configuration is to say nothing.
-- **There is no `list` tool and no `websearch` tool** on 1.18.18. The resolved set
+- **There is no `list` tool and no `websearch` tool** on 1.18.21. The resolved set
   is exactly {bash, edit, glob, grep, invalid, question, read, skill, task,
   todowrite, webfetch, write}. Naming a nonexistent tool is a silent no-op that
   reads like configuration.
