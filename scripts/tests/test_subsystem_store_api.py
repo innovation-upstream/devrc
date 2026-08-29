@@ -2394,6 +2394,12 @@ def run_seed(*args: str, env: "dict[str, str] | None" = None) -> subprocess.Comp
 # the POSIX way to rebuild the argument list without an array, and it preserves
 # arguments containing spaces, which a string accumulator would not.
 FAKE_KUBECTL_BODY = r"""
+# 🔴 `set -u`: the bash original had `set -uo pipefail` and the POSIX rewrite
+# dropped it. Without it an unset $FAKE_DEST makes the sed below `s|/data||g`,
+# which silently rewrites every path to a RELATIVE one instead of erroring —
+# the stub would then "work" against the wrong directory. `pipefail` is not
+# POSIX and nothing here pipes, so only `-u` is restored.
+set -u
 # Stands in for kubectl in seed.sh's push half. $FAKE_DEST is the pretend /data;
 # $FAKE_DROP, if set, removes one member AFTER the extract, which is how "a
 # staged entry that did not land" is simulated without faking the guard itself.
@@ -2576,31 +2582,39 @@ class TestSeedPushVerdict:
         one) and an adjacency where C and en_US disagree. `README.md` beside
         `backblaze.md`/`thing-alpha.md` is that adjacency, and the real store is
         full of it — so the FIRST push after another host seeds would abort."""
-        # 🔴 THIS TEST DOES NOT SKIP, AND THAT IS DELIBERATE — TWICE OVER.
+        # 🔴 THIS TEST NEITHER SKIPS NOR DEGRADES — IT FAILS IF IT CANNOT RUN,
+        # AND THAT TOOK THREE TRIES TO GET RIGHT.
         #
-        # First it CRASHED the gating tier: `locale` does not exist in the nix
-        # sandbox, so `subprocess.run(["locale", …])` raised FileNotFoundError
-        # and the tier went 2 failed / 9794 passed. Then, made to skip, it went
-        # red a different way: `run-tests.sh` refuses an UNPINNED skip ("a skip
-        # is a test that did not run"), and its pin conditions key on ENV VARS
-        # (`unset:VAR`) while this predicate is locale AVAILABILITY — so an
-        # unconditional pin would red the DEV HOST, where the locale exists, the
-        # test runs, and the expected skip never happens.
+        #   1. It CRASHED the gating tier: no `locale` binary in the nix sandbox,
+        #      so `subprocess.run(["locale", …])` raised FileNotFoundError.
+        #   2. Made to skip, it went red differently: `run-tests.sh` refuses an
+        #      UNPINNED skip, and EXPECTED_SKIPS conditions key on env vars
+        #      (`unset:VAR`) while this predicate is locale AVAILABILITY — an
+        #      unconditional pin reds the dev host, where the test does run.
+        #   3. Made to fall back to C, it passed on BOTH tiers while being
+        #      VACUOUS on the gating one: measured with both `comm` calls
+        #      unpinned, the sandbox reported ONE failure where the dev host
+        #      reported two. The defect was invisible exactly where it counts.
         #
-        # So it runs everywhere, on the strongest collation available: en_US
-        # where it exists (the real regression), ambient otherwise (weaker, and
-        # the assertion message says which was exercised). The invariant is
-        # carried on every tier by
-        # `test_EVERY_comm_call_in_seed_sh_PINS_its_collation` — which is what
-        # makes running weak here acceptable rather than a silent gap.
+        # So the locale is now supplied to both tiers (`glibc.bin` in
+        # `gateTools`, `LOCALE_ARCHIVE` in the devShell AND in checks.pytests)
+        # and its absence is a HARD FAILURE naming the cause. A degradation that
+        # silently weakens a test is worse than a red one that says why.
+        enc = "en_US.UTF-8"
         locale_bin = shutil.which("locale")
         have = ""
         if locale_bin:
             have = subprocess.run(
                 [locale_bin, "-a"], capture_output=True, text=True
             ).stdout.lower()
-        forced = "en_US.UTF-8" if ("en_us.utf8" in have or "en_us.utf-8" in have) else None
-        enc = forced or "C"
+        assert "en_us.utf8" in have or "en_us.utf-8" in have, (
+            f"{enc} is unavailable (locale binary: {locale_bin}), so this test "
+            "cannot make the ambient collation differ from C and would pass "
+            "vacuously. This is a GATE ENVIRONMENT regression, not a defect in "
+            "seed.sh: flake.nix must keep `pkgs.glibc.bin` in gateTools and "
+            "export LOCALE_ARCHIVE in BOTH the devShell and checks.pytests."
+        )
+        forced = enc
 
         env, dest = fake_cluster
         # 🔴 THE PAIR MUST ACTUALLY INVERT, AND THE FIRST VERSION OF THIS TEST
@@ -2616,71 +2630,100 @@ class TestSeedPushVerdict:
         env = {**env, "LC_ALL": enc, "LANG": enc}
 
         # The control, so this test cannot quietly stop pinning its dimension:
-        # if the two collations ever agree on this pair, the mutant is invisible
-        # and a green here would mean nothing. Only meaningful when a non-C
-        # collation was actually available to force.
-        if forced:
-            pair = f"{SCOPE}/README.md\n{SCOPE}/backblaze.md\n"
-            c_order = subprocess.run(
-                ["sort"], input=pair, capture_output=True, text=True,
-                env={**os.environ, "LC_ALL": "C"},
-            ).stdout
-            loc_order = subprocess.run(
-                ["sort"], input=pair, capture_output=True, text=True,
-                env={**os.environ, "LC_ALL": forced},
-            ).stdout
-            assert c_order != loc_order, (
-                f"fixture no longer inverts between C and {forced} — comm's "
-                "order check cannot arm, so this test would pass whether or not "
-                "the collation is pinned"
-            )
+        # if the two collations ever agree on this pair, comm's order check
+        # cannot arm and a green here would mean nothing.
+        pair = f"{SCOPE}/README.md\n{SCOPE}/backblaze.md\n"
+        c_order = subprocess.run(
+            ["sort"], input=pair, capture_output=True, text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        ).stdout
+        loc_order = subprocess.run(
+            ["sort"], input=pair, capture_output=True, text=True,
+            env={**os.environ, "LC_ALL": forced},
+        ).stdout
+        assert c_order != loc_order, (
+            f"fixture no longer inverts between C and {forced} — comm's order "
+            "check cannot arm, so this test would pass whether or not the "
+            "collation is pinned"
+        )
 
         r = self._push(store, tmp_path, env)
 
-        where = (
-            f"forced LC_ALL={forced}" if forced
-            else "NO non-C locale available here, so this ran under C and is the "
-                 "WEAK half; the strong half is "
-                 "test_EVERY_comm_call_in_seed_sh_PINS_its_collation"
-        )
         assert "not in sorted order" not in r.stderr, (
-            f"comm order-checked in the ambient locale over C-sorted input "
-            f"({where}): stderr={r.stderr}"
+            f"comm order-checked in the ambient locale (LC_ALL={forced}) over "
+            f"C-sorted input: stderr={r.stderr}"
         )
         assert r.returncode == 0, (
-            f"rc={r.returncode} ({where}) stdout={r.stdout} stderr={r.stderr}"
+            f"rc={r.returncode} under LC_ALL={forced} "
+            f"stdout={r.stdout} stderr={r.stderr}"
         )
         assert "seed: OK" in r.stdout
         assert "NOTE 1 entry file(s)" in r.stdout
 
-    def test_EVERY_comm_call_in_seed_sh_PINS_its_collation(self):
-        """The STRUCTURAL half of the locale regression, and the half that runs
-        on BOTH tiers.
+    # 🔴 A STRUCTURAL `comm`-SPELLING GUARD WAS TRIED HERE AND DELETED, ON
+    # EVIDENCE. It regex'd seed.sh for a bare `comm` not prefixed by `LC_ALL=C`.
+    # An audit walked it three ways — `/usr/bin/comm -23 …`, `_cmp=comm` then
+    # `$_cmp -23 …`, and a second `comm` later on an already-prefixed line — and
+    # it ALSO rejected three safe spellings (`env LC_ALL=C comm`, a line
+    # continuation, a global `export LC_ALL=C`). It asserted a WORD, and the
+    # hazard has other shapes. Supplying the locale to both tiers (flake.nix)
+    # lets the behavioural test above assert the STATE instead, everywhere.
 
-        🔴 The behavioural test above needs a generated `en_US.UTF-8`. The nix
-        sandbox that GATES THE MERGE has no `locale` binary and no such locale,
-        so there it skips — and a skip is not coverage. Without this, the
-        dimension that produced the round-1 🔴 would be pinned only on the dev
-        host, which is the two-tier blindness `claude/RULES.md` names.
+    def test_the_two_find_expressions_are_IDENTICAL(self):
+        """Local and remote listings must ask ONE question.
 
-        Pins the whole invariant rather than a keyword: every `comm` the script
-        executes must carry `LC_ALL=C`. Sorting both inputs under C is NOT
-        enough — GNU `comm` compares and order-checks in the ambient locale, so
-        an unpinned `comm` over C-sorted input aborts the script with rc 1 and
-        prints no verdict at all."""
-        offenders = []
-        for i, line in enumerate(SEED_PATH.read_text().splitlines(), 1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue  # the block comment discusses `comm` at length
-            if re.search(r"(?<![\w./-])comm\s", stripped) and not stripped.startswith(
-                "LC_ALL=C comm "
-            ):
-                offenders.append(f"  {SEED_PATH.name}:{i}: {stripped}")
-        assert not offenders, (
-            "a `comm` call in seed.sh does not pin its collation — sorting the "
-            "inputs under LC_ALL=C is not enough, because comm itself collates "
-            "in the AMBIENT locale:\n" + "\n".join(offenders)
+        Every clause carries a case: `-mindepth 2` excludes the store's own
+        top-level `README.md`; `-maxdepth 2` stops a nested directory becoming a
+        phantom entry; `! -path './.*'` matches the tar member list, which is
+        `"$STAGE"/*/` without `dotglob`; `-type f` refuses a DIRECTORY named
+        `*.md` (the server 503'd on exactly that).
+
+        A mutation sweep found the clauses were pinned on the STAGED side only —
+        dropping `! -path './.*'`, widening `-maxdepth`, or dropping `-type f`
+        on the REMOTE side all SURVIVED. Comparing the two expressions to each
+        other catches an asymmetry in either direction, which per-side
+        assertions did not."""
+        src = SEED_PATH.read_text()
+        exprs = re.findall(r"find \. (-mindepth[^\n\"]*?-type f)", src)
+        assert len(exprs) == 2, (
+            f"expected exactly 2 entry-listing find expressions in seed.sh, "
+            f"found {len(exprs)}: {exprs}"
+        )
+        staged, remote = (" ".join(e.split()) for e in exprs)
+        assert staged == remote, (
+            "the staged and remote listings no longer ask the same question — "
+            "an asymmetry silently changes what the comparison MEANS:\n"
+            f"  staged: {staged}\n  remote: {remote}"
+        )
+        for clause in ("-mindepth 2", "-maxdepth 2", "! -path './.*'", "-type f"):
+            assert clause in staged, f"{clause!r} is no longer pinned: {staged}"
+
+    def test_a_SYMLINKED_scope_is_excluded_and_SAID_so(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 REGRESSION. `staged_entries` walked `"$STAGE"/*/` with a trailing
+        slash, which RESOLVES a symlinked scope, while the comparison's `find .`
+        does not descend one and `tar` ships the link rather than its target.
+        Measured before the fix: `remote_entries=1 staged_entries=2` followed by
+        `seed: OK all 2 staged entries are present`, rc 0 — a completeness claim
+        over an entry that never landed, and one the OLD count-equality check
+        would have caught. Both sides now come from `_shippable_entries`."""
+        env, dest = fake_cluster
+        real = tmp_path / "outside"
+        real.mkdir()
+        (real / "e.md").write_text(_entry("e", "symscope"))
+        (store / "symscope").symlink_to(real)
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        m = re.search(r"remote_entries=(\d+) staged_entries=(\d+)", r.stdout)
+        assert m and m.group(1) == m.group(2), (
+            "the two counts disagree and the run still succeeded: " + r.stdout
+        )
+        assert "symscope (symlink" in r.stdout, (
+            "a scope that ships NOTHING must be named, not silently dropped: "
+            + r.stdout
         )
 
     def test_a_TOP_LEVEL_md_in_the_store_is_not_reported_missing(
@@ -2721,6 +2764,11 @@ class TestSeedPushVerdict:
         )
         assert ".hidden" not in r.stderr
         assert "seed: OK" in r.stdout
+        # 🔴 Excluding it is right; saying nothing about it just moves the lie
+        # from a wrong MISMATCH to a silent omission.
+        assert ".hidden (dot-directory" in r.stdout, (
+            "the excluded scope must be NAMED, not silently dropped: " + r.stdout
+        )
 
 
 class TestSeedIsNonDestructive:

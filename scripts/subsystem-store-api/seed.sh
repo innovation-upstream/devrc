@@ -71,15 +71,68 @@ mkdir -p "$STAGE"
 # is not a flag about the source and cannot remove anything from it.
 rsync -a --delete "$STORE"/ "$STAGE"/
 
+_seed_tmp=$(mktemp -d)
+trap 'rm -rf "$_seed_tmp"' EXIT
+staged_list="$_seed_tmp/staged"
+
+# 🔴 ONE PREDICATE FOR THE COUNT AND FOR THE COMPARISON, because two walks with
+# different rules DID disagree and the script said OK anyway.
+#
+# `staged_entries` used to be `find "$d" -maxdepth 1` over `"$STAGE"/*/`. The
+# trailing slash makes a SYMLINKED scope resolve, so that walk counted through
+# it — while the comparison's `find .` does not descend a symlink and `tar`
+# archives the link rather than its target. Measured: a store with `normal/n.md`
+# and a symlinked `symscope/` printed
+#
+#     seed: PUSHED … remote_entries=1 staged_entries=2
+#     seed: OK all 2 staged entries are present on the pod        (rc 0)
+#
+# — the two numbers visibly disagreeing one line apart, one entry silently not
+# landed, and a completeness claim over it. 🔴 AND THE OLD COUNT-EQUALITY CHECK
+# WOULD HAVE CAUGHT THIS (1 != 2 -> exit 7), so the claim this block used to
+# make — that it "fails strictly more broken pushes than the count did" — was
+# FALSE. It is true only now that both sides come from `_shippable_entries`.
+#
+# The predicate is "what the tar will ACTUALLY land": depth-2 `*.md` regular
+# files, under a scope directory that is neither a dot-directory (the member
+# list is `"$STAGE"/*/` without `dotglob`) nor a symlink (`find` does not
+# descend one, and tar ships the link itself).
+_shippable_entries() {
+  ( cd "$1" && find . -mindepth 2 -maxdepth 2 ! -path './.*' -name '*.md' -type f ) \
+    | sed 's|^\./||' | LC_ALL=C sort
+}
+
+_shippable_entries "$STAGE" > "$staged_list"
+staged_entries=$(wc -l < "$staged_list" | tr -d ' ')
+
 staged_scopes=0
-staged_entries=0
+excluded=()
 for d in "$STAGE"/*/; do
   [[ -d "$d" ]] || continue
   staged_scopes=$((staged_scopes + 1))
-  n=$(find "$d" -maxdepth 1 -name '*.md' -type f | wc -l)
-  staged_entries=$((staged_entries + n))
-  printf 'seed: staged scope %-28s entries=%s\n' "$(basename "$d")" "$n"
+  name=$(basename "$d")
+  # `index(...)==1` is a LITERAL prefix test — a scope name is not a regex, and
+  # `grep -c "^$name/"` would mis-count one containing `.` or `[`.
+  n=$(awk -v p="$name/" 'index($0, p) == 1 {c++} END {print c + 0}' "$staged_list")
+  printf 'seed: staged scope %-28s entries=%s\n' "$name" "$n"
+  [[ -L "${d%/}" ]] && excluded+=("$name (symlink — tar ships the link, not its contents)")
 done
+
+# 🔴 LOUD, NOT SILENT. A scope that ships nothing used to produce either a wrong
+# MISMATCH (dot-directory) or a false OK (symlink). Excluding it from the
+# verdict is correct; saying nothing about it would just move the lie.
+shopt -s nullglob dotglob
+for d in "$STAGE"/*/; do
+  name=$(basename "$d")
+  [[ "$name" == .* ]] || continue
+  [[ -n "$(find "$d" -maxdepth 1 -name '*.md' -print -quit)" ]] &&
+    excluded+=("$name (dot-directory — not in the tar member list)")
+done
+shopt -u nullglob dotglob
+if [[ ${#excluded[@]} -gt 0 ]]; then
+  echo "seed: NOTE ${#excluded[@]} scope director(ies) hold .md files that will NOT be shipped, and are excluded from the count and the verdict:"
+  printf 'seed:   %s\n' "${excluded[@]}"
+fi
 
 # The count is printed BESIDE what produced it, never alone. A bare "0 entries"
 # from a run that walked nothing reads exactly like a genuinely empty store —
@@ -172,29 +225,35 @@ tar -C "$STAGE" -cf - -- "${members[@]}" \
 # for: 129 staged against 129 remote passes while one staged file is missing and
 # one foreign file makes up the number. The question a push actually has to
 # answer is "did everything I staged land?" — a SUBSET check on NAMES, which is
-# also the `comm -23` the re-seed card prescribes. So this is not a relaxation:
-# it fails strictly more broken pushes than the count did, and stops failing the
-# correct ones.
+# also the `comm -23` the re-seed card prescribes.
+#
+# ⚠ CORRECTION, measured: this comment used to end "it fails strictly more
+# broken pushes than the count did". That was FALSE as first written. A
+# SYMLINKED scope produced `remote_entries=1 staged_entries=2` and then
+# `seed: OK`, rc 0 — a push the old count-equality check WOULD have failed
+# (1 != 2). Containment only dominates the count once BOTH sides come from one
+# predicate, which is what `_shippable_entries` above now guarantees; before
+# that, the two walks disagreed and the comparison believed the wrong one.
 #
 # Both sides use `-mindepth 2 -maxdepth 2` so they answer the SAME question —
 # `<scope>/<entry>.md` and nothing else. The old remote count used `-maxdepth 2`
 # alone, which would also have counted a stray top-level `*.md` the stage cannot
 # contain.
-_seed_tmp=$(mktemp -d)
-trap 'rm -rf "$_seed_tmp"' EXIT
-staged_list="$_seed_tmp/staged"; remote_list="$_seed_tmp/remote"
+remote_list="$_seed_tmp/remote"
 missing_f="$_seed_tmp/missing";  foreign_f="$_seed_tmp/foreign"
 
-# 🔴 `! -path './.*'` — THE COMPARED POPULATION MUST BE THE PUSHED ONE. The tar
-# member list (above) and `staged_entries` (further up) are both built from
-# `"$STAGE"/*/`, and without `dotglob` that glob SKIPS dot-directories. A bare
-# `find` does not, so a `.hidden/` scope holding a `.md` would be listed as
-# staged, never archived, never land, and be reported missing — "1 of 1 staged
-# entry file(s) did NOT land" over an entry that was never shipped, which is
-# this script's own bug shape reintroduced one guard lower. Excluded on BOTH
-# sides so the two lists keep answering one question.
-( cd "$STAGE" && find . -mindepth 2 -maxdepth 2 ! -path './.*' -name '*.md' -type f ) \
-  | sed 's|^\./||' | LC_ALL=C sort > "$staged_list"
+# 🔴 `$staged_list` IS NOT RECOMPUTED HERE. It is the same file
+# `_shippable_entries` wrote before the push, which is what makes
+# `staged_entries` and the compared set one population rather than two walks
+# that agree by luck. See that function for the symlink case where they did not.
+#
+# The remote side runs the IDENTICAL expression, on purpose: same `-mindepth 2
+# -maxdepth 2` (a `<scope>/<entry>.md` and nothing above or below it), same
+# dot-directory exclusion (the tar cannot put one there), same `-type f` (a
+# DIRECTORY named `*.md` is not an entry — the server 503'd on exactly that).
+# Any clause dropped from one side and not the other silently changes what the
+# comparison means, so `test_the_two_find_expressions_are_IDENTICAL` pins them
+# against each other.
 kubectl -n "$ns" exec "$pod" -- \
   sh -c "cd '$DEST' && find . -mindepth 2 -maxdepth 2 ! -path './.*' -name '*.md' -type f" \
   | sed 's|^\./||' | LC_ALL=C sort > "$remote_list"
