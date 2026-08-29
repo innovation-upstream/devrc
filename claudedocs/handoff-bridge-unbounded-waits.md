@@ -2,8 +2,17 @@
 
 ## Run this first — the index, one read-only command
 ```bash
-python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo devrc
+python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --scope devrc
 ```
+🔴 **`--scope`, not `--repo devrc`** — corrected 2026-08-28 after it failed on a real
+`/resume`. `--repo` takes a **PATH, not a repo NAME**, so a bare `devrc` resolves against
+the CURRENT directory: run from a dispatch hub (this arc's sessions run from
+`civit/datapacket-talos`) it dies with *"repo path does not exist:
+'devrc' → '<cwd>/devrc'"*. `--scope devrc` names the store directory directly and runs no
+git at all, so it is cwd-independent; `--repo "$DEVRC"` also works, via the pre-exported
+handle. The error is self-diagnosing and suggests the fix, so this is a papercut rather
+than a trap — but the command as written did not work from where its readers stand.
+
 Terse pointers this doc does not carry, curated by past sessions and outliving it.
 🔴 RECALL, NOT LIVE OBSERVATION — every line is a pointer to VERIFY, never a current
 reading, and it may describe a gotcha already fixed. `scope-absent`/`scope-empty` means
