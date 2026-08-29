@@ -3289,3 +3289,155 @@ class TestRuleHDidNotMoveTheExitCodes:
         res = run_tool(work, update=noop)
         assert res.returncode == hd.EXIT_NO_CHANGE, res.stdout + res.stderr
         assert STALE_HEAD not in res.stdout + res.stderr
+
+
+def repo_lacking_the_doc(tmp_path: Path) -> Path:
+    """A checkout whose mainline HAS the handoff doc and whose HEAD does not.
+
+    🔴 This is the talos-infra shape, measured 2026-08-29: the doc was authored
+    and pushed from a WORKTREE, the primary clone was never re-synced, and the
+    doc therefore exists at `origin/main` and nowhere in the working tree. It is
+    NOT the new-doc case — a genuinely new doc is absent on BOTH sides.
+    """
+    origin = tmp_path / "origin.git"
+    _sh("git", "init", "-q", "--bare", "-b", "main", str(origin), cwd=tmp_path)
+
+    work = tmp_path / "work"
+    work.mkdir()
+    _sh("git", "init", "-q", "-b", "main", cwd=work)
+    for k, v in (("user.name", "Test Runner"),
+                 ("user.email", "test@example.invalid"),
+                 ("commit.gpgsign", "false")):
+        _sh("git", "config", k, v, cwd=work)
+    _sh("git", "remote", "add", "origin", str(origin), cwd=work)
+    (work / "README.md").write_text("sample\n", encoding="utf-8")
+    _sh("git", "add", "--", "README.md", cwd=work)
+    _sh("git", "commit", "-q", "-m", "seed without the doc", cwd=work)
+    _sh("git", "push", "-q", "origin", "main", cwd=work)
+
+    # The other worktree authors and pushes the doc. `work` never merges it.
+    other = tmp_path / "other"
+    _sh("git", "clone", "-q", str(origin), str(other), cwd=tmp_path)
+    for k, v in (("user.name", "Other"), ("user.email", "o@example.invalid"),
+                 ("commit.gpgsign", "false")):
+        _sh("git", "config", k, v, cwd=other)
+    (other / "claudedocs").mkdir()
+    (other / "claudedocs" / "handoff-sample-topic.md").write_text(
+        BASE_DOC, encoding="utf-8")
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+    _sh("git", "commit", "-q", "-m", "the real handoff, authored elsewhere", cwd=other)
+    _sh("git", "push", "-q", "origin", "main", cwd=other)
+
+    # Fetched, deliberately not merged — exactly the state the tool must judge.
+    _sh("git", "fetch", "-q", "origin", cwd=work)
+    return work
+
+
+class TestAbsentBasePresentOnMainlineIsRefused:
+    """🔴 The doc is absent HERE and present on mainline ⇒ every section merges
+    as NEW and the committed document is REPLACED by the delta.
+
+    The tool already DETECTED this and printed it; it exited 0 anyway. That was
+    survivable while a human answered a y/N, but that prompt was retired
+    2026-08-23, so the warning became the only thing between the diff and a
+    pushed commit — against this skill's own rule that blast radius earns a
+    REFUSAL, not a question. `--push` does not cover it: the `behind` check asks
+    about `<remote>/<push-branch>`, a DIFFERENT ref from the mainline this
+    compares against, so a current feature branch sails past it.
+    """
+
+    def test_it_REFUSES_and_writes_nothing(self, tmp_path: Path,
+                                           update_file: Path) -> None:
+        work = repo_lacking_the_doc(tmp_path)
+        shas_before = commit_shas(work)
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_STALE_BASE, (
+            res.returncode, res.stdout, res.stderr)
+        assert "status=stale-base" in res.stderr, res.stderr
+        assert not (work / "claudedocs" / "handoff-sample-topic.md").exists(), (
+            "the doc was written despite the refusal")
+        assert commit_shas(work) == shas_before, "a commit was made anyway"
+
+    def test_the_refusal_names_the_remedy(self, tmp_path: Path,
+                                          update_file: Path) -> None:
+        """A refusal a caller cannot act on gets worked around."""
+        work = repo_lacking_the_doc(tmp_path)
+        res = run_tool(work, "--confirm", update=update_file)
+        blob = res.stdout + res.stderr
+        assert "origin/main" in blob
+        assert "claudedocs/handoff-sample-topic.md" in blob
+        assert "--allow-replacing-mainline-doc" in blob, (
+            "the override must be named, or the refusal is a dead end")
+
+    def test_the_explicit_override_still_lets_it_through(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 NEGATIVE CONTROL. A refusal with no way past it would make a
+        legitimate re-author impossible and train everyone to route around it."""
+        work = repo_lacking_the_doc(tmp_path)
+        res = run_tool(work, "--confirm", "--allow-replacing-mainline-doc",
+                       update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=written" in res.stdout
+        assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def test_a_GENUINELY_NEW_doc_is_untouched_by_this(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE CASE THIS MUST NOT BREAK. Absent on BOTH sides is the new-doc
+        path the skill says step 5 owns. Refusing it would make first writes
+        impossible — the failure mode that matters more than the one being fixed.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        # Same clone, a topic that exists nowhere — mainline included.
+        argv = [sys.executable, str(TOOL), "--repo", str(work),
+                "--topic", "brand-new-topic", "--update", str(update_file),
+                "--advanced", "first write", "--confirm"]
+        res = subprocess.run(argv, capture_output=True, text=True,
+                             env=dict(os.environ, **GIT_ENV))
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=written" in res.stdout
+        assert (work / "claudedocs" / "handoff-brand-new-topic.md").exists()
+
+    def test_a_doc_PRESENT_locally_but_behind_stays_a_WARNING(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE OTHER CASE THIS MUST NOT BREAK. When the doc exists here, the
+        merge can still classify its sections, so updating a deliberately-behind
+        clone stays legitimate — a warning, exit 0, as the tool already says.
+
+        🔴 THE REMOTE COMMIT MUST TOUCH THE DOC ITSELF. An earlier version of
+        this test used `advance_remote`, which pushes an unrelated `OTHER.md`:
+        `doc_behind` stayed 0, so `mainline` was never read and the case the
+        assertion names could not arise. MEASURED — the mutant that drops the
+        `not base_text` half of the predicate SURVIVED against that fixture,
+        because the fixture could not produce a doc-behind reading at all. The
+        test read as coverage while providing none.
+        """
+        other = tmp_path / "doc-mover"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other),
+            cwd=tmp_path)
+        for k, v in (("user.name", "Other"), ("user.email", "o@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        moved = other / "claudedocs" / "handoff-sample-topic.md"
+        moved.write_text(BASE_DOC + "\n## Added elsewhere\n\nlater work.\n",
+                         encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "advance the DOC itself", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        _sh("git", "fetch", "-q", "origin", cwd=repo)
+
+        # The precondition the old fixture silently lacked: the mainline really
+        # is ahead ON THIS PATH, so `mainline` is populated and the predicate's
+        # two halves are actually distinguishable.
+        behind = _sh("git", "rev-list", "--count", "HEAD..origin/main", "--",
+                     "claudedocs/handoff-sample-topic.md", cwd=repo)
+        assert behind.strip() != "0", (
+            "fixture is vacuous: the mainline is not ahead on the doc path, so "
+            "this test cannot tell the two halves of the predicate apart")
+
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=stale-base" not in res.stderr
+        assert "status=written" in res.stdout

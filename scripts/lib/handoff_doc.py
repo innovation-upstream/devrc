@@ -195,6 +195,12 @@ EXIT_FAIL = 3
 EXIT_NO_ADVANCE = 4
 EXIT_NO_CHANGE = 5
 EXIT_BEHIND = 6
+EXIT_STALE_BASE = 7
+"""The doc is absent HERE and present on the mainline, so confirming would
+REPLACE the committed document with this delta. Distinct from EXIT_BEHIND: that
+one asks whether `<remote>/<push-branch>` has moved and only under `--push`; this
+asks whether the BASE DOCUMENT is the real one, against the derived mainline ref,
+and a current feature branch sails past the other check entirely."""
 """--push was asked for and the branch is BEHIND its remote. Nothing written.
 
 🔴 This exists because the alternative is the state this repo has a rule against.
@@ -1028,6 +1034,27 @@ class BaseCurrency(typing.NamedTuple):
     def stale(self) -> bool:
         return bool(self.doc_behind)
 
+    def replaces_mainline_doc(self, base_text: str) -> bool:
+        """🔴 The one destructive shape: NOTHING here to merge into, and a real
+        document on the mainline. Every section then arrives NEW and the
+        committed copy is replaced wholesale by this delta.
+
+        Deliberately narrower than `stale`, in both directions:
+
+        * a doc PRESENT here but behind is NOT this — the merge can still
+          classify its sections, so updating a knowingly-behind clone stays
+          legitimate and stays a warning;
+        * a doc absent on BOTH sides is the ordinary NEW-doc case that the
+          skill says step 5 owns, and refusing it would make first writes
+          impossible.
+
+        `mainline` is populated only when `doc_behind` is non-zero and the
+        `git show` succeeded, so it carries both facts and an UNMEASURED
+        currency can never satisfy this — an unanswered question must not
+        become a refusal.
+        """
+        return not base_text and self.mainline is not None
+
 
 def base_currency(repo: Path, relpath: str) -> BaseCurrency:
     """Is the base doc behind its mainline? READ-ONLY, and it does NOT fetch.
@@ -1553,6 +1580,15 @@ def build_parser() -> argparse.ArgumentParser:
         "Run this ONLY after a human answered y to the diff the default mode printed.",
     )
     p.add_argument(
+        "--allow-replacing-mainline-doc",
+        action="store_true",
+        help="override the status=stale-base refusal: proceed even though this "
+        "checkout has no copy of the doc while the mainline does, REPLACING the "
+        "committed document with this delta. Deliberately long: the ordinary fix "
+        "is to re-run against a current clone, and an override that reads like a "
+        "routine flag is one that gets passed by reflex.",
+    )
+    p.add_argument(
         "--push",
         action="store_true",
         help="also push the commit. Requires --confirm; this is the half the gate exists for.",
@@ -1634,15 +1670,54 @@ def main(argv: list[str] | None = None) -> int:
     # true of a document that is not the one being replaced. It runs even with no
     # base at all — a doc absent HERE and present on the mainline is the same bug
     # wearing its loudest disguise, every section arriving NEW.
+    # Hoisted: the refusal below needs the SAME reading the warning was rendered
+    # from. Computing it twice would let the two disagree across a concurrent
+    # fetch, and the message would then name numbers the decision did not use.
+    currency = base_currency(repo, relpath)
     wrong_base = wrong_base_report(
         wrong_base_tells(base_text, update_text, report.buckets),
-        base_currency(repo, relpath),
+        currency,
         relpath,
         repo,
         doc_shape(base_text),
     )
     if wrong_base:
         print(wrong_base)
+
+    # 🔴 REFUSE, don't warn. The block above DETECTED this case and printed it
+    # from the day it shipped — and exited 0. That was survivable while a human
+    # answered a y/N here; that prompt was retired 2026-08-23, which left the
+    # warning as the only thing between this diff and a pushed commit. The
+    # governing rule (`subsystem-index` SKILL) is "blast radius earns a REFUSAL,
+    # not a question", and replacing a committed document with a delta is blast
+    # radius. `--push`'s `behind` check does NOT cover it: that one compares
+    # against `<remote>/<push-branch>`, a DIFFERENT ref, so a feature branch
+    # that is current with its own upstream passes it while the mainline copy
+    # of the doc is still the one being destroyed.
+    if currency.replaces_mainline_doc(base_text) and args.confirm and not (
+        args.allow_replacing_mainline_doc
+    ):
+        assert currency.mainline is not None  # implied by the predicate
+        print(
+            f"status=stale-base ref={currency.base_ref} path={relpath}\n"
+            f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+            f"  There is no {relpath} in this checkout, and {currency.base_ref} "
+            f"has one ({currency.mainline.sections} section(s) / "
+            f"{currency.mainline.lines} line(s)). Confirming would merge every "
+            f"section as NEW and REPLACE that committed document with this "
+            f"delta.\n"
+            f"  This is usually a clone that never re-synced after work was "
+            f"committed from a WORKTREE — the doc is real, it is just not "
+            f"here.\n"
+            f"  Read the mainline copy first:\n"
+            f"    git -C {repo} show {currency.base_ref}:{relpath}\n"
+            f"  Then either re-run against a current clone, or — if you truly "
+            f"mean to replace it — re-run with "
+            f"--allow-replacing-mainline-doc.",
+            file=sys.stderr,
+        )
+        return EXIT_STALE_BASE
+
     warning = dropped_durable_report(report.dropped)
     if warning:
         print(warning)
