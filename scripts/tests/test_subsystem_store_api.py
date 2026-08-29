@@ -79,6 +79,14 @@ ROOT = Path(__file__).resolve().parents[2]
 # the suite forever, and their value is not a correctness claim about how fast
 # anything must be.
 #
+# 🔴 ONE DOCUMENTED EXCEPTION, named here because the sentence above was already
+# falsified once by a change that did not update it: `running_subprocess`'s
+# healthz RETRY probe takes a DEADLINE-RELATIVE bound, not this one. It is a
+# poll inside a 20 s budget rather than a detector, so at this value a single
+# blocked call would outlast the budget it enforces. Any future exception goes
+# in this list or the claim above is false again — which is how two
+# `wait_closed` sites kept a stale bound while the comment said otherwise.
+#
 # It is deliberately NOT used for the raw-socket `settimeout(...)` calls further
 # down. Those are DRAIN bounds — the loop terminator for a `recv`-until-quiet
 # read — so raising one adds its full value to the suite's runtime instead of
@@ -95,7 +103,31 @@ ROOT = Path(__file__).resolve().parents[2]
 #
 # 🔴 This is the SYMPTOM fix. The cause is a 10-minute parallel suite competing
 # with a saturated cluster, which belongs to Tekton capacity, not to this file.
+#
+# 🔴 THE COST IS PER HUNG CALL, NOT PER SUITE — corrected after audit. The
+# commit that introduced this said "4x longer to fail … still fits" the 45m gate
+# task budget. That is true of ONE hung call. This module has ~208 `fetch(` and
+# ~112 `await_audit(` sites, so a BROADLY hung server costs ~320x60s ≈ 5.3h
+# serialised where 15 s cost ~80m — and both blow the 45m budget, which is the
+# documented state where nothing is posted and the required checks stay
+# `pending` forever, clearable only by a fresh push. The bound is right for the
+# failure it exists to absorb (one starved round-trip); it is not a defence
+# against a server that is down, and nothing here should be read as claiming so.
 HANG_TIMEOUT = 60.0
+
+# 🔴 The guard the introducing commit CLAIMED and did not write. Its message said
+# "Constant asserted finite and positive (a None/0 would wait forever)" — no such
+# assertion existed; that check lived only in a throwaway probe script, and a
+# verification that ran once and was never committed is exactly the "one-off
+# nobody re-ran" shape this file elsewhere refuses. `None` is the stdlib's
+# spelling for "wait forever", so it is the value that silently turns every
+# hang-detector in this module into a hang.
+assert isinstance(HANG_TIMEOUT, (int, float)) and not isinstance(HANG_TIMEOUT, bool), (
+    f"HANG_TIMEOUT must be a number, got {type(HANG_TIMEOUT).__name__} — `None` is "
+    f"the stdlib's 'block forever', which disables every hang-detector here")
+assert 0 < HANG_TIMEOUT < float("inf"), (
+    f"HANG_TIMEOUT={HANG_TIMEOUT!r} must be finite and positive; 0 or a "
+    f"non-finite value makes these waits unbounded rather than merely slow")
 
 API_DIR = ROOT / "scripts" / "subsystem-store-api"
 SERVER_PATH = API_DIR / "server.py"
@@ -270,6 +302,7 @@ def fetch(
     client_ip: str | None = CLIENT_IP,
     extra_headers: dict[str, str] | None = None,
     data: bytes | None = None,
+    timeout: float = HANG_TIMEOUT,
 ):
     """Return (code, headers, body-bytes) without raising on 4xx/5xx.
 
@@ -293,7 +326,7 @@ def fetch(
     for key, value in (extra_headers or {}).items():
         req.add_header(key, value)
     try:
-        with urllib.request.urlopen(req, timeout=HANG_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, dict(exc.headers), exc.read()
@@ -701,10 +734,10 @@ def settle(out: "Drained | AuditLog", n: int, grace: float = SETTLE_GRACE_S) -> 
         # then reported "the closed stream holds ..." about a stream that was
         # not closed. That is the docstring's "A `Drained` DOES HAVE AN EOF, AND
         # THIS TAKES IT" claiming a state which did not hold.
-        assert out.wait_closed(15.0), (
-            f"the stream never reached EOF within 15s, so there is no ceiling to "
-            f"check — it holds {len(out.audit)} `{AUDIT_PREFIX}` line(s) so far "
-            f"for an expected {n}.\nfull stream:\n{out.text}")
+        assert out.wait_closed(HANG_TIMEOUT), (
+            f"the stream never reached EOF within {HANG_TIMEOUT:g}s, so there is "
+            f"no ceiling to check — it holds {len(out.audit)} `{AUDIT_PREFIX}` "
+            f"line(s) so far for an expected {n}.\nfull stream:\n{out.text}")
         lines = out.audit
         assert len(lines) == n, (
             f"the closed stream holds {len(lines)} `{AUDIT_PREFIX}` line(s) for "
@@ -4121,7 +4154,28 @@ def running_subprocess(
                 out, err = proc.communicate()
                 raise AssertionError(f"server exited {proc.returncode}: {err or out}")
             try:
-                if fetch(f"{base}/healthz", client_ip=None)[0] == 200:
+                # 🔴 DEADLINE-RELATIVE, not a fixed short bound — this is a RETRY
+                # probe inside the 20 s budget, not a hang-detector. At the
+                # module default one blocked call outlasts the deadline it sits
+                # in, so the loop could never retry and the budget was
+                # unenforceable. But a fixed `timeout=2` was the wrong correction
+                # and audit measured why: under the very saturation this file's
+                # header documents (round-trips losing the scheduler for >15 s)
+                # EVERY probe would exceed 2 s, so a server that was merely slow
+                # would be reported as one that never came up — reintroducing the
+                # capacity-read-as-failure this module exists to stop, on the
+                # other side. Measured at 4x oversubscription the worst probe was
+                # 0.675 s, i.e. the fixed bound had ~3x headroom where the
+                # documented bad case needs ~8x.
+                #
+                # `deadline - now` keeps BOTH properties: the 20 s budget is
+                # enforceable because no single call can outlast it, and a slow
+                # probe that still answers inside the budget is counted rather
+                # than discarded. The 0.25 s floor keeps the last iteration from
+                # degenerating into a zero-timeout call that cannot succeed.
+                probe_bound = max(0.25, deadline - time.time())
+                if fetch(f"{base}/healthz", client_ip=None,
+                         timeout=probe_bound)[0] == 200:
                     break
             except Exception:
                 time.sleep(0.1)
@@ -4248,17 +4302,21 @@ class TestTheDeployedEntrypoint:
         # discarded form after `settle` was fixed because `_eof_barriers`
         # accepted only `ast.Expr`/`ast.Assign` and FLAGGED the assert — the
         # guard structurally required the defect. That arm now exists.
-        # 🔴 THE TIMEOUT IS PASSED EXPLICITLY, and the message below hardcodes
-        # it. Taking `Drained.wait_closed`'s default instead would couple this
-        # sentence to a constant declared 3800 lines away: retune that default
-        # and the message silently starts lying about how long it waited. The
-        # duplicated branch has to be kept in step with `settle` on every axis,
-        # and this was the one axis where it was not.
-        assert out.wait_closed(15.0), (
-            f"the stream never reached EOF within 15s, so the ceiling below is "
-            f"a snapshot again and the leak check is racing lines still in "
-            f"flight — it holds {len(out.audit)} audit record(s) so far for 3 "
-            f"requests.\nfull stream:\n{out.text}")
+        # 🔴 THE TIMEOUT IS THE SHARED BOUND, AND THE MESSAGE INTERPOLATES IT.
+        # This used to hardcode 15 s in both places, on the reasoning that taking
+        # `Drained.wait_closed`'s default would couple this sentence to a
+        # constant declared 3800 lines away — "retune that default and the
+        # message silently starts lying about how long it waited". Retuning the
+        # default is exactly what the HANG_TIMEOUT change did, so that argument
+        # inverted: the literal became the thing that lies, and this site (plus
+        # `settle`'s) silently kept the old 15 s bound the rest of the file had
+        # left behind. Interpolating `{HANG_TIMEOUT:g}` satisfies BOTH concerns —
+        # one bound, and a message that cannot disagree with it.
+        assert out.wait_closed(HANG_TIMEOUT), (
+            f"the stream never reached EOF within {HANG_TIMEOUT:g}s, so the "
+            f"ceiling below is a snapshot again and the leak check is racing "
+            f"lines still in flight — it holds {len(out.audit)} audit record(s) "
+            f"so far for 3 requests.\nfull stream:\n{out.text}")
         assert GOOD_TOKEN not in out.text and SECOND_TOKEN not in out.text
         assert "w" * 48 not in out.text
         # 🔴 AND THE CEILING, AFTER THE STREAM IS CLOSED. `lines` above is a
@@ -6032,6 +6090,174 @@ def test_the_call_site_THRESHOLD_is_load_bearing_not_decorative():
     assert _drain_output_call_sites(one_removed) == 2, (
         "removing one call site did not move the count, so the threshold cannot "
         "distinguish three readers from two"
+    )
+
+
+# 🔴 THE SAME TWO-PART TREATMENT FOR THE HANG/DRAIN SPLIT, BECAUSE IT WAS PROSE
+# ONLY — and the prose was already wrong when it landed. `HANG_TIMEOUT`'s comment
+# claims "ONE bound for every … wait in this module", but the commit that wrote
+# it left TWO `wait_closed(15.0)` sites overriding the new default, so the file
+# said one thing and did another until an audit read it. The rule needs teeth,
+# not a better sentence.
+
+
+# The POSITIONAL INDEX of the timeout argument, per callee. A first draft read
+# every positional arg as a bound and flagged 81 false stragglers: `await_audit`
+# takes `(out, n, timeout)`, so its literal `n` — the expected line COUNT — looks
+# exactly like a literal bound. An over-broad finder is not a strict guard, it is
+# a guard nobody can leave green.
+_HANG_DETECTOR_BOUND_ARG = {"wait_closed": 0, "await_audit": 2}
+
+
+def _literal_bound_hang_detectors(source: "str | None" = None) -> "list[tuple[str, int, object]]":
+    """Hang-detector waits bound by a NUMERIC LITERAL instead of `HANG_TIMEOUT`.
+
+    AST-based, so the `wait_closed(15.0)` living inside this file's own
+    AST-fixture STRING is correctly invisible — it is not a call, and a textual
+    grep would report it as a straggler forever.
+
+    Deliberately does NOT look at `settimeout`/`create_connection`: those are
+    DRAIN bounds, pinned separately below. Same spelling, opposite meaning.
+    """
+    src = source if source is not None else Path(__file__).read_text()
+    bad = []
+    for n in ast.walk(ast.parse(src)):
+        if not isinstance(n, ast.Call):
+            continue
+        name = getattr(n.func, "attr", None) or getattr(n.func, "id", None)
+        if name not in _HANG_DETECTOR_BOUND_ARG:
+            continue
+        idx = _HANG_DETECTOR_BOUND_ARG[name]
+        bounds = [n.args[idx]] if len(n.args) > idx else []
+        bounds += [kw.value for kw in n.keywords if kw.arg == "timeout"]
+        for arg in bounds:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, (int, float)):
+                bad.append((name, n.lineno, arg.value))
+    return bad
+
+
+def test_no_hang_detector_is_still_bound_by_a_LITERAL():
+    """🔴 Every hang-detector takes the shared bound, or none at all.
+
+    A literal here is not a style nit: it silently pins one site to the OLD
+    value while every other site moves, which is exactly how two `wait_closed`
+    calls kept a 15 s bound through a change whose whole purpose was to raise it.
+    """
+    stragglers = _literal_bound_hang_detectors()
+    assert not stragglers, (
+        "these hang-detector waits are bound by a literal instead of "
+        f"HANG_TIMEOUT: {stragglers}. Pass HANG_TIMEOUT and interpolate it into "
+        "the message ({HANG_TIMEOUT:g}) so the sentence cannot disagree with the "
+        "bound."
+    )
+
+
+def test_the_literal_bound_DETECTOR_can_actually_see_one():
+    """🔴 The positive control. A guard whose finder is broken reports a clean
+    zero forever, and "no stragglers" would then mean "the walk matched nothing".
+    """
+    src = Path(__file__).read_text()
+    assert _literal_bound_hang_detectors(src) == [], "fixture drift: a straggler is already present"
+
+    mutant = src.replace("out.wait_closed(HANG_TIMEOUT)", "out.wait_closed(15.0)", 1)
+    assert mutant != src, "the mutation did not apply — this test is vacuous"
+    found = _literal_bound_hang_detectors(mutant)
+    assert len(found) == 1 and found[0][0] == "wait_closed" and found[0][2] == 15.0, (
+        f"re-introducing one literal bound did not surface it: {found!r}"
+    )
+
+
+def _drain_bounds(source: "str | None" = None) -> "list[tuple[int, str]]":
+    """Every `sock.settimeout(<x>)` DRAIN bound, as (lineno, rendered arg).
+
+    🔴 Returns ALL of them, literal or not. The introducing commit claimed
+    "drain bounds ... Verified still at 5 s" off a grep for the literal string
+    `settimeout(5)`, which finds 3 — there are EIGHT settimeout call sites, one
+    of them `settimeout(4)` and four computed from expressions. That grep could
+    not have seen any of those, so the verification was a claim about the
+    pattern, not about the file. This walks the AST instead.
+
+    🔴 The count in the previous sentence said NINE, and was itself wrong — the
+    third miscounted self-report in this ladder, in the artifact written to stop
+    them. It came from counting `grep -n 'settimeout('` OUTPUT LINES, one of
+    which is this very docstring mentioning the name. A grep counts MENTIONS; an
+    AST walk counts CALLS. Re-derive with `_drain_bounds()` rather than trusting
+    any number written here, this one included.
+    """
+    src = source if source is not None else Path(__file__).read_text()
+    return [
+        (n.lineno, ast.unparse(n.args[0]))
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.Call)
+        and getattr(n.func, "attr", None) == "settimeout"
+        and n.args
+    ]
+
+
+def test_the_drain_bounds_were_NOT_swept_into_the_hang_bound():
+    """🔴 Pins the RELATIONSHIP, not the numbers.
+
+    The obvious tidy-up — one constant for every timeout in this file — is the
+    defect: a drain is a `recv`-until-quiet loop terminator, so raising one adds
+    its full value to every run of a PASSING suite, where a hang bound only ever
+    costs the latency of a real failure.
+
+    Asserting the exact multiset was the first draft and it was wrong twice over:
+    it went red on a `settimeout(4)` that is perfectly correct, and it would say
+    nothing at all about the five expression-valued sites. What must hold is that
+    no drain is bound by the hang constant, and that literal drains stay small.
+    """
+    bounds = _drain_bounds()
+    assert len(bounds) >= 4, (
+        f"expected at least 4 settimeout sites, found {len(bounds)} — the finder "
+        "is matching less than it used to, so a clean result here means nothing"
+    )
+    swept = [(ln, a) for ln, a in bounds if "HANG_TIMEOUT" in a]
+    assert not swept, (
+        f"these DRAIN bounds were bound to the hang constant: {swept}. A drain at "
+        f"{HANG_TIMEOUT:g}s adds that to every passing run; it is not a detector."
+    )
+    # 🔴 `None` FIRST, and as its own arm. It is the stdlib's "block forever",
+    # so it is the worst value a drain can take — and it slipped a fully green
+    # run of this guard's first draft, because `ast.unparse` renders it as the
+    # string "None", which is not `.isdigit()`, so the size arm below never saw
+    # it. The module-level assert rejects exactly this value for the hang bound;
+    # a drain must not be able to take what the detector refuses.
+    blocking = [(ln, a) for ln, a in bounds if a == "None"]
+    assert not blocking, (
+        f"these drain bounds are `None` — the stdlib's block-forever: {blocking}. "
+        "A recv-until-quiet loop with no bound never terminates."
+    )
+    big = [(ln, a) for ln, a in bounds
+           if a.lstrip("-").replace(".", "", 1).isdigit() and float(a) > 10]
+    assert not big, (
+        f"these literal drain bounds exceed 10s: {big}. A recv-until-quiet "
+        "terminator that large is a stall, not a bound."
+    )
+
+
+def test_the_drain_guard_catches_the_sweep_it_exists_to_catch():
+    """🔴 The mutant that IS the hazard: someone "tidies up" a drain onto the
+    shared constant. Without this, the guard above is a green nobody has watched
+    go red — and its own first draft was green for the wrong reason.
+    """
+    src = Path(__file__).read_text()
+    mutant = src.replace("sock.settimeout(5)", "sock.settimeout(HANG_TIMEOUT)", 1)
+    assert mutant != src, "the mutation did not apply — this test is vacuous"
+    swept = [(ln, a) for ln, a in _drain_bounds(mutant) if "HANG_TIMEOUT" in a]
+    assert len(swept) == 1, (
+        f"sweeping one drain onto HANG_TIMEOUT was not detected: {swept!r}"
+    )
+
+    # 🔴 The mutant that SURVIVED this guard's first draft, kept as a permanent
+    # control. `None` renders as a non-numeric string, so the size arm cannot see
+    # it — only the dedicated arm can, and without this nobody would notice that
+    # arm being deleted.
+    blocking_mutant = src.replace("sock.settimeout(4)", "sock.settimeout(None)", 1)
+    assert blocking_mutant != src, "the None mutation did not apply — vacuous"
+    blocking = [(ln, a) for ln, a in _drain_bounds(blocking_mutant) if a == "None"]
+    assert len(blocking) == 1, (
+        f"a `settimeout(None)` drain — block forever — was not detected: {blocking!r}"
     )
 
 
