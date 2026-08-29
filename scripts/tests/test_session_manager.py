@@ -1766,6 +1766,15 @@ def test_json_golden_schema_and_values():
         # not a thing this row is entitled to say.
         "unsent_prompt": None,
         "unsent_prompt_status": "uncaptured",
+        # 🔴 `disabled`, NOT `uncaptured`, and the difference is the point: this
+        # fixture does not pass `--pane-preview`, so the text was never asked
+        # for. The sibling field above says `uncaptured` because the unsent
+        # scrape WAS asked for and this pane's screen did not reach it. Two
+        # fields riding one capture, reporting two different reasons for the
+        # same null — which is exactly what a consumer needs to tell "nobody
+        # asked" from "asked and missed".
+        "pane_preview": None,
+        "pane_preview_status": "disabled",
         "claude_session_id": "11111111-2222-4333-8444-555555555555",
         # 🔴 `runtime` names WHICH agent recorded the window. Null here because
         # this fixture runs `use_ledger=False`, so no writer answered — and
@@ -5064,7 +5073,8 @@ def test_the_caveats_are_in_the_json_as_structured_fields_not_prose():
     string a consumer would have to parse."""
     cav = mix_gather()["caveats"]
     assert set(cav) == {"claude_detection", "fuzzyclaw_scope", "ledger_scope",
-                        "waiting_signal", "unsent_prompt", "kind_scope"}
+                        "waiting_signal", "unsent_prompt", "kind_scope",
+                        "pane_preview"}
     det = cav["claude_detection"]
     assert det["method"] == "pane_current_command_regex"
     assert det["pattern"] == sm.CLAUDE_RE.pattern == "claude"
@@ -6508,6 +6518,11 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
         # The FOURTH signal. It rides the same capture as `waiting` but is a
         # separate pair of fields on purpose — see `UNSENT_STATUSES`.
         "unsent_prompt", "unsent_prompt_status",
+        # The captured SCREEN, off unless `--pane-preview`. Present on every row
+        # either way — `disabled` is a status, not an absence, so a consumer can
+        # tell "not asked" from "asked and not measured". See
+        # `PREVIEW_STATUSES`.
+        "pane_preview", "pane_preview_status",
         "claude_session_id", "runtime", "ledger", "fuzzyclaw",
         "panes",
     }
@@ -10246,3 +10261,213 @@ def test_measured_not_measured_is_PURE_and_shares_nothing_with_the_constant():
     assert sm.NOT_MEASURED_POPULATIONS == before
     assert sm.measured_not_measured({})[0]["note"] != "clobbered"
 
+
+
+# =========================================================================== #
+# §P — `pane_preview`: the captured screen this tool already had and threw away
+#
+# 🔴 THE DEFECT CLASS THIS SECTION EXISTS FOR. `waiting_probable` and
+# `unsent_prompt` are both DERIVED from the capture batch, which then discarded
+# the screen. Publishing it is cheap — the text is already in `captures` — but it
+# introduces a THIRD field pair riding one capture, and the first two got their
+# own statuses precisely because sharing one is how "not measured" becomes
+# "measured empty". These tests pin that the third does not regress that.
+#
+# Every test here drives `fold_windows` through a real `gather`, because the
+# statuses are decided by which of four capture paths a row took, and a test that
+# calls the builder directly cannot see a path it was never routed down.
+# =========================================================================== #
+
+def test_the_preview_carries_the_pane_SCREEN_VERBATIM_when_asked():
+    """END-TO-END: capture goes in, the screen comes out on the row.
+
+    🔴 Asserts the WHOLE captured string, not a substring of it. A `in` check
+    passes against a preview that dropped every line but one, which is exactly
+    what a truncation bug produces — and a screen-dump field whose contract is
+    "this is what the pane shows" cannot be pinned by a fragment.
+    """
+    rep = waiting_gather(local={"%11": PANE_IDLE}, pane_preview=True)
+    row = _row(rep, "workbench", "scratch7", "3")
+    assert row["pane_preview"] == PANE_IDLE
+    assert row["pane_preview_status"] == "ok"
+
+
+def test_WITHOUT_the_flag_the_status_is_disabled_NOT_a_measured_empty_screen():
+    """🔴 THE NULL-VS-NULL DISTINCTION, and it is the whole reason the status
+    field exists. Off by default, `pane_preview` is null on every row — and a
+    consumer must be able to tell that from a fleet whose panes are genuinely
+    blank. `disabled` says NOTHING WAS ASKED.
+
+    KILLS: emitting the fields only when the flag is on (absence is not a
+    readable status), and defaulting the status to `ok` or `not_claude`.
+    """
+    rep = waiting_gather(local={"%11": PANE_IDLE})
+    row = _row(rep, "workbench", "scratch7", "3")
+    assert row["pane_preview"] is None
+    assert row["pane_preview_status"] == "disabled"
+    # ...and the field PAIR is present on every row, not just the claude one.
+    for host in ("workbench", "laptop"):
+        for r in rep["hosts"][host]["windows"]:
+            assert r["pane_preview_status"] == "disabled"
+            assert r["pane_preview"] is None
+
+
+def test_disabled_BEATS_every_other_reason_including_ones_that_were_measured():
+    """🔴 PRECEDENCE, stated as a test because the implementation computes the
+    other statuses FIRST and then overwrites them.
+
+    The sibling `unsent_prompt_status` on the SAME rows reports the real capture
+    path (`ok` for the captured claude pane, `not_claude` for a shell). If
+    `pane_preview_status` ever reported those instead, a consumer would read
+    `not_claude` and conclude the fleet holds no Claude panes — when in fact
+    nobody asked for the text. The two fields must DISAGREE here, and that
+    disagreement is correct.
+    """
+    rep = waiting_gather(local={"%11": PANE_IDLE})
+    claude = _row(rep, "workbench", "scratch7", "3")
+    assert claude["unsent_prompt_status"] == "ok"        # measured, capture ran
+    assert claude["pane_preview_status"] == "disabled"   # ...but never asked
+    shells = [r for r in rep["hosts"]["workbench"]["windows"] if not r["claude"]]
+    assert shells, "fixture must contain a shell row for this to mean anything"
+    for r in shells:
+        assert r["unsent_prompt_status"] == "not_claude"
+        assert r["pane_preview_status"] == "disabled"
+
+
+def test_a_SHELL_row_reports_not_claude_never_an_empty_screen():
+    """The capture batch is Claude-panes-only, so a shell was never read. `""`
+    would say "this pane's screen is blank", which is a measurement nobody
+    took."""
+    rep = waiting_gather(local={"%11": PANE_IDLE}, pane_preview=True)
+    shells = [r for r in rep["hosts"]["workbench"]["windows"] if not r["claude"]]
+    assert shells
+    for r in shells:
+        assert r["pane_preview"] is None
+        assert r["pane_preview_status"] == "not_claude"
+
+
+def test_a_claude_pane_MISSING_from_the_batch_reports_uncaptured():
+    """The batch ran and answered, and this pane was not in it — distinct from
+    the batch not running at all. Same four-path discipline as `waiting`."""
+    rep = waiting_gather(local={}, pane_preview=True)   # batch ran, no %11 in it
+    row = _row(rep, "workbench", "scratch7", "3")
+    assert row["pane_preview"] is None
+    assert row["pane_preview_status"] == "uncaptured"
+
+
+def test_no_capture_propagates_the_BATCHS_OWN_reason_to_the_preview():
+    """🔴 `skipped` is not `uncaptured`. With `--no-capture` the batch never ran,
+    so the reason belongs to the batch; reporting `uncaptured` would blame the
+    pane for a decision the caller made."""
+    rep = base_gather(use_capture=False, pane_preview=True)
+    row = _row(rep, "workbench", "scratch7", "3")
+    assert row["pane_preview"] is None
+    assert row["pane_preview_status"] == "skipped"
+    assert row["unsent_prompt_status"] == "skipped"      # the sibling agrees here
+
+
+def test_the_preview_status_VOCABULARY_IS_CLOSED():
+    """🔴 Same rule as UNSENT_STATUSES: a status outside the enumeration is one
+    no consumer branches on, and it would be published silently. Swept across
+    every path this file can drive, flag ON and OFF."""
+    reps = [
+        waiting_gather(local={"%11": PANE_IDLE}, pane_preview=True),
+        waiting_gather(local={"%11": PANE_IDLE}),
+        waiting_gather(local={}, pane_preview=True),
+        base_gather(use_capture=False, pane_preview=True),
+        base_gather(runner=make_runner(local_rc=1, remote_rc=1),
+                    pane_preview=True),
+    ]
+    seen = set()
+    for rep in reps:
+        for host in rep["hosts"].values():
+            for r in host["windows"]:
+                seen.add(r["pane_preview_status"])
+    assert seen, "swept nothing — the fixtures produced no rows"
+    assert seen <= set(sm.PREVIEW_STATUSES), f"undeclared status: {seen}"
+    # POSITIVE CONTROL: the sweep really did reach more than one path, so a
+    # vocabulary that happened to hold one value is not what made this pass.
+    assert len(seen) >= 3, seen
+
+
+def test_an_EMPTY_captured_screen_is_ok_with_an_empty_string_NOT_null():
+    """🔴 A pane that was READ and showed nothing is a measurement, and it must
+    not collapse into the null that means "not measured". This is the one case
+    where `pane_preview` is falsy while its status is `ok`, so a consumer
+    testing truthiness rather than the status gets it wrong — which is why the
+    status is the documented discriminator."""
+    assert sm.build_pane_preview("") == {"text": "", "status": "ok"}
+    assert sm.build_pane_preview(None) == {"text": "", "status": "ok"}
+
+
+def test_the_preview_TRUNCATES_and_SAYS_SO_rather_than_going_quietly_short():
+    """🔴 The bound needs BOTH halves — what it admits and what it rejects — and
+    the fixtures are LITERAL sizes, never `"x" * MAX_PANE_PREVIEW_BYTES`. A
+    fixture derived from the constant scales with it, so raising the constant to
+    a billion would keep this green while allocating a gigabyte.
+    """
+    # ADMITS: exactly at the bound is whole, not truncated.
+    at = sm.build_pane_preview("y" * 64, max_bytes=64)
+    assert at == {"text": "y" * 64, "status": "ok"}
+    # REJECTS: one byte over is cut TO the bound and labelled.
+    over = sm.build_pane_preview("y" * 65, max_bytes=64)
+    assert over["status"] == "truncated"
+    assert over["text"] == "y" * 64
+    assert len(over["text"].encode()) == 64
+
+
+def test_truncation_cuts_on_a_CHARACTER_boundary_not_a_byte_offset():
+    """🔴 THE CASE THE REAL FLEET IS MADE OF. Every Claude Code pane is box-
+    drawing glyphs, which are 3 bytes each in UTF-8 — so a byte-offset slice
+    lands mid-sequence on almost every truncation that will ever happen here.
+
+    10 glyphs x 3 bytes = 30 bytes; a cap of 20 falls INSIDE the 7th. The result
+    must be 6 whole glyphs (18 bytes), never a partial sequence, a replacement
+    character, or a UnicodeDecodeError.
+    """
+    screen = "─" * 10
+    assert len(screen.encode()) == 30           # the fixture is what I think
+    out = sm.build_pane_preview(screen, max_bytes=20)
+    assert out["status"] == "truncated"
+    assert out["text"] == "─" * 6
+    assert len(out["text"].encode()) == 18      # under the cap, on a boundary
+    assert "�" not in out["text"]          # no replacement char smuggled in
+
+
+def test_the_per_pane_cap_is_pinned_to_a_LITERAL():
+    """🔴 Pin the CONSTANT, not just behaviour derived from it. Measured
+    2026-08-28 the largest real pane was 6,616 bytes, so 16 KiB is ~2.4x the
+    observed maximum — a guard against a pathological pane, not a routine cut.
+    Changing it is a payload-budget decision that should fail here first."""
+    assert sm.MAX_PANE_PREVIEW_BYTES == 16384
+
+
+def test_the_caveat_names_the_FLAG_and_the_scrollback_EXCLUSION():
+    """🔴 The caveat is the only thing telling a cold reader why every preview is
+    null, and where scrollback went. Pins the two claims a reader acts on, not
+    the prose around them."""
+    cav = base_gather()["caveats"]["pane_preview"]
+    assert cav["opt_in_flag"] == "--pane-preview"
+    assert cav["scope"] == "claude_rows_only"
+    assert cav["max_bytes_per_pane"] == sm.MAX_PANE_PREVIEW_BYTES
+    assert list(cav["statuses"]) == list(sm.PREVIEW_STATUSES)
+    assert "scrollback" in cav["note"]
+    # the footer renders it, so a text-mode reader sees it too
+    line = [ln for ln in sm.render_caveats(base_gather())
+            if "caveat[pane_preview]" in ln]
+    assert len(line) == 1
+    assert "--pane-preview" in line[0] and "scrollback" in line[0]
+
+
+def test_the_flag_reaches_gather_and_is_OFF_in_its_signature():
+    """🔴 The wiring, pinned at the seam. A flag parsed and never passed is the
+    shape that ships an inert feature — and `pane_preview` defaulting to True in
+    `gather` would make every existing consumer pay the 2.9x silently."""
+    import inspect
+    assert (inspect.signature(sm.gather).parameters["pane_preview"].default
+            is False)
+    assert (inspect.signature(sm.fold_windows).parameters["pane_preview"].default
+            is False)
+    p = sm.build_parser()
+    assert p.parse_args(["scan", "--json"]).pane_preview is False
+    assert p.parse_args(["scan", "--json", "--pane-preview"]).pane_preview is True

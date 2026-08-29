@@ -167,6 +167,14 @@ HONEST LIMITS (stated, not implied away — AND CARRIED IN THE OUTPUT as
     it, and a draft taller than the box is not recognised; both report
     `no_input_box`, which is UNMEASURED, never an empty draft. Shell panes are
     never scraped at all. See CAVEATS["unsent_prompt"].
+  * `pane_preview` is OFF unless `--pane-preview` is passed, because it is the
+    one field that changes the payload's order of magnitude (measured live,
+    both forms back to back: 122,731 bytes without, 322,204 with — 2.63x).
+    It is the VISIBLE SCREEN only — never scrollback, which would
+    breach the consumer's 4 MB ingest cap at ~650 lines per pane — and it is
+    capped per pane, with `pane_preview_status: "truncated"` saying so. Shell
+    panes are never captured, so they report `not_claude`, never an empty
+    screen. See CAVEATS["pane_preview"].
   * PR review state, the mail queue, cluster alerts, the durable initiative
     board and GUI windows outside tmux are NOT measured by this tool at all.
     They are enumerated in `report["not_measured"]` with the skill that owns
@@ -195,7 +203,8 @@ and the roll-ups a caller usually wants are:
 Each row carries: kind, host, session, window_index, window_id, window_name,
 codename, label, label_source, hotkey, pane_id, path, command, task, claude,
 busy, age_secs, age_source, status, waiting_probable, waiting_signals,
-waiting_status, unsent_prompt, unsent_prompt_status, claude_session_id, runtime,
+waiting_status, unsent_prompt, unsent_prompt_status, pane_preview,
+pane_preview_status, claude_session_id, runtime,
 ledger, fuzzyclaw, panes. The row ledger is pinned by a test.
 
 🔴 `waiting_probable` AND `unsent_prompt` ARE TWO SIGNALS, NOT ONE
@@ -561,6 +570,66 @@ _PROMPT_MARK_RE = re.compile(r"^\s*❯[ \t]?")
 UNSENT_STATUSES = ("ok", "no_input_box", "uncaptured", "not_claude",
                    "skipped", "error")
 
+# --------------------------------------------------------------------------- #
+# 🔴 `pane_preview` — THE CAPTURED TEXT ITSELF, WHICH THIS TOOL ALREADY HAD AND
+# THREW AWAY.
+#
+# `waiting_probable` and `unsent_prompt` are both DERIVED from the capture batch
+# below, which then discards the screen it read. clawgate's tmux read model
+# (`tmux_snapshots`, migration 0027) wants that screen: a grid of panes an
+# operator can scan without opening 46 terminals. Publishing it costs ZERO extra
+# tmux work — the text is already in `captures` when `fold_windows` runs.
+#
+# 🔴 OFF BY DEFAULT, because it is the one field that changes the payload's
+# ORDER OF MAGNITUDE. Measured 2026-08-28 across the live fleet: the 46 Claude
+# panes (36 workbench + 10 laptop) carry 154,171 bytes of visible screen, which
+# JSON-encodes against a whole report of 122,731 bytes to give 322,204 — a
+# 2.63x document, measured by running both forms back to back rather than by
+# adding an estimate to a baseline (an earlier revision of this comment carried
+# the estimate, 2.9x, and it was wrong by a tenth — the two forms are one
+# command apart, so there was never a reason to project it).
+# Every other consumer (`drift_phase2`, `cairn_who`, the skills) reads
+# a handful of scalar fields and would pay that for nothing, so the text rides
+# an explicit `--pane-preview` and nothing else changes shape.
+#
+# 🔴 VISIBLE SCREEN ONLY — SCROLLBACK IS NOT AN OPTION HERE, and the reason is a
+# hard bound rather than taste. clawgate's ingest caps one push at 4 MB
+# (`maxTmuxPushBytes`). Measured across the same fleet, each extra line of
+# scrollback costs ~4,014 bytes fleet-wide, so `-S -1000` computes to 6.13 MB and
+# the cap is breached at roughly 650 lines per pane. `capture-pane` with no `-S`
+# is the visible screen, and that is deliberate, not a default left unexamined.
+# Scrollback belongs to `tail`, which serves one window on demand.
+#
+# The status vocabulary is UNSENT_STATUSES' five shared reasons — the preview
+# rides the same capture, so it shares every reason a capture did not happen —
+# plus two of its own:
+#   disabled   — `--pane-preview` was not passed. NOT a measurement.
+#   truncated  — the pane WAS captured and its screen exceeded
+#                MAX_PANE_PREVIEW_BYTES, so `pane_preview` holds a PREFIX.
+# 🔴 `truncated` is a separate status rather than a silently short string: a
+# consumer rendering a prefix as if it were the whole screen shows an operator a
+# pane that ends mid-word and reads as a crashed agent.
+PREVIEW_STATUSES = ("ok", "truncated", "uncaptured", "not_claude",
+                    "skipped", "error", "disabled")
+
+# 🔴 THE PER-PANE CAP, AND WHAT IT DOES *NOT* BOUND.
+#
+# Measured 2026-08-28: the largest single visible pane on the fleet was 6,616
+# bytes (workbench) / 3,125 (laptop), against panes up to 343x65. 16 KiB is ~2.4x
+# that largest observed screen, so truncation is a guard against a pathological
+# pane rather than something the normal fleet hits.
+#
+# 🔴 IT BOUNDS ONE PANE, NOT THE DOCUMENT, and the difference is worth stating
+# because the arithmetic is not reassuring at the limit: MaxWindowsPerHost is 600
+# server-side, and 600 x 16 KiB is 9.8 MB — over the 4 MB body cap. Today's fleet
+# is 46 Claude panes, so the reachable worst case is ~750 KB and the cap is ~5x
+# away; it becomes reachable somewhere north of 250 full-screen Claude panes. The
+# backstop is the server's `MaxBytesReader`, which rejects the push LOUDLY (413)
+# and keeps the last good snapshot — stale-and-labelled, which is the failure
+# this read model already chose everywhere else. This comment exists so nobody
+# reads the per-pane cap as a document bound it is not.
+MAX_PANE_PREVIEW_BYTES = 16 * 1024
+
 # 🔴 The per-pane capture batch. ONE tmux invocation per host captures every
 # Claude pane's visible screen, with a `display-message` marker between them —
 # 40 separate `capture-pane` calls over SSH would be 40 round trips.
@@ -846,6 +915,34 @@ CAVEATS = {
                  "different and noisier thing. A draft taller than the input "
                  "box, or a modal that replaces the box, reports "
                  "`no_input_box`, i.e. UNMEASURED, never an empty draft."),
+    },
+    "pane_preview": {
+        "method": "capture_pane_visible_screen",
+        "scope": "claude_rows_only",
+        "statuses": list(PREVIEW_STATUSES),
+        "opt_in_flag": "--pane-preview",
+        "max_bytes_per_pane": MAX_PANE_PREVIEW_BYTES,
+        "note": ("The pane's VISIBLE SCREEN as `capture-pane` returns it, "
+                 "published so a consumer can render a grid without opening "
+                 "every terminal. OFF unless `--pane-preview` is passed: it is "
+                 "a 2.63x document (measured live across 46 Claude panes: "
+                 "122,731 bytes without, 322,204 with), which "
+                 "every consumer reading a scalar field would pay for nothing. "
+                 "🔴 It is the visible screen and NOT scrollback — each extra "
+                 "line costs ~4,014 bytes fleet-wide, so scrollback would "
+                 "breach a 4 MB ingest at ~650 lines per pane; `tail` serves "
+                 "one window's history on demand instead. A screen over "
+                 "max_bytes_per_pane is cut on a character boundary and "
+                 "reported `truncated`, NEVER silently shortened — an "
+                 "unlabelled prefix ends mid-word and reads as a crashed "
+                 "agent. `pane_preview: null` with status `disabled` means the "
+                 "flag was not passed and NOTHING was asked; with any other "
+                 "status it means asked and not measured. Shell panes are "
+                 "never captured (`not_claude`), so a fleet of shells reports "
+                 "no previews rather than empty screens. The text is a "
+                 "point-in-time read: it is exactly as fresh as the scan, and "
+                 "a consumer polling on an interval renders a screen up to one "
+                 "interval old."),
     },
 }
 
@@ -1344,6 +1441,37 @@ def parse_captures(raw, nonce) -> dict:
         elif cur is not None:
             out[cur].append(line)
     return {k: "\n".join(v) for k, v in out.items()}
+
+
+def build_pane_preview(text, max_bytes=MAX_PANE_PREVIEW_BYTES) -> dict:
+    """The captured screen, bounded, with a status that says which it is.
+
+    Returns `{"text": str|None, "status": "ok"|"truncated"}`.
+
+    🔴 THE CAP IS IN BYTES AND THE CUT IS ON A CHARACTER BOUNDARY. The bound
+    that matters is the one on the wire — clawgate's 4 MB body cap counts
+    encoded bytes, not code points — but slicing a UTF-8 encoding at an
+    arbitrary offset can land mid-sequence, and a pane full of box-drawing glyphs
+    (which is every Claude Code TUI) is exactly where that happens. Encoding,
+    slicing and decoding with `errors="ignore"` drops the partial sequence at the
+    tail rather than emitting a replacement character or raising.
+
+    🔴 TRUNCATION IS REPORTED, NEVER SILENT. A prefix that is not labelled is
+    indistinguishable from a pane whose screen really did end there, and the
+    consumer of this field renders it to a human deciding whether an agent is
+    stuck. `ok` means "this is the whole visible screen"; anything else means it
+    is not, and `PREVIEW_STATUSES` enumerates the rest.
+
+    An EMPTY capture is `ok` with an empty string, not None: the pane was read
+    and the screen was blank, which is a measurement. `None` is reserved for the
+    paths where nothing was read at all, and `fold_windows` owns those.
+    """
+    raw = text or ""
+    enc = raw.encode("utf-8")
+    if len(enc) <= max_bytes:
+        return {"text": raw, "status": "ok"}
+    return {"text": enc[:max_bytes].decode("utf-8", errors="ignore"),
+            "status": "truncated"}
 
 
 def _is_status_line(line) -> bool:
@@ -1855,7 +1983,8 @@ def index_tasks_by_window(tasks) -> dict:
 def fold_windows(panes, host, slots=None, task_index=None,
                  threshold=DEFAULT_STALE_THRESHOLD, now=None,
                  slot_window_ids=None, captures=None,
-                 capture_status="skipped", ledger_index=None) -> list:
+                 capture_status="skipped", ledger_index=None,
+                 pane_preview=False) -> list:
     """Collapse panes into one row per (session, window_index).
 
     A window is `claude` if ANY of its panes is; the row's task/busy/pane_id
@@ -1962,15 +2091,24 @@ def fold_windows(panes, host, slots=None, task_index=None,
         # NOT-MEASURED PATHS, but is resolved into its OWN pair of fields. It is
         # NEVER mixed into `w_probable` — see the comment block at
         # `UNSENT_STATUSES` for the measurement that makes that load-bearing.
+        # 🔴 `pane_preview` RIDES THE SAME CAPTURE AGAIN, so it inherits the same
+        # four not-measured paths — but it gets its OWN status for the reason
+        # `unsent_prompt` did: a pane that captured perfectly can still yield a
+        # `truncated` preview, which is a fact about the SCREEN, not about the
+        # capture. `disabled` is checked first and beats every other reason,
+        # because when the flag is off nothing about the pane was asked.
         if not is_claude:
             w_status, w_probable, w_signals = "not_claude", None, None
             u_status, u_text = "not_claude", None
+            p_status, p_text = "not_claude", None
         elif captures is None:
             w_status, w_probable, w_signals = capture_status, None, None
             u_status, u_text = capture_status, None
+            p_status, p_text = capture_status, None
         elif lead.get("pane_id") not in captures:
             w_status, w_probable, w_signals = "uncaptured", None, None
             u_status, u_text = "uncaptured", None
+            p_status, p_text = "uncaptured", None
         else:
             det = detect_waiting(captures[lead.get("pane_id")])
             w_status = "ok"
@@ -1981,6 +2119,15 @@ def fold_windows(panes, host, slots=None, task_index=None,
             # that same text perfectly well.
             uns = detect_unsent_prompt(captures[lead.get("pane_id")])
             u_status, u_text = uns["status"], uns["text"]
+            prev = build_pane_preview(captures[lead.get("pane_id")])
+            p_status, p_text = prev["status"], prev["text"]
+        if not pane_preview:
+            # 🔴 The flag was not passed, so `pane_preview: null` here says
+            # NOTHING WAS ASKED — it is not a measured-empty screen. Overwriting
+            # the status computed above is the point: a row that reports
+            # `not_claude` while the text was never requested would let a
+            # consumer conclude the fleet holds no Claude panes.
+            p_status, p_text = "disabled", None
         rows.append({
             # 🔴 WHAT KIND OF ENTITY THIS ROW IS. Always `tmux` here — this
             # function folds PANES, so by construction every row it builds has
@@ -2034,6 +2181,15 @@ def fold_windows(panes, host, slots=None, task_index=None,
             # `waiting_status` exists to refuse, one signal over.
             "unsent_prompt": u_text,
             "unsent_prompt_status": u_status,
+            # 🔴 THE CAPTURED SCREEN, AND THE PAIR IS THE POINT AGAIN.
+            # `pane_preview` is the text clawgate's read model renders;
+            # `pane_preview_status` is what makes a null readable. `null` +
+            # `disabled` is "you did not ask for it"; `null` + anything else is
+            # "asked and not measured", and `truncated` is "measured, but this
+            # is a PREFIX". Collapsing any of those would render a partial
+            # screen to an operator as though it were the whole pane.
+            "pane_preview": p_text,
+            "pane_preview_status": p_status,
             # Same precedence as `age_secs`, and for the same reason: this is the
             # ONE carrier of the session id into the ClickHouse join, so a stale
             # fuzzyclaw value overwriting a live ledger one would resolve a
@@ -2578,7 +2734,7 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
            slots=None, ch_sql=SQL_RECENT_SESSIONS,
            claude_only=False, use_capture=True, capture_nonce=None,
            clawgate_reader=None, clawgate_path=None,
-           use_ledger=True, ledger_outputs=None) -> dict:
+           use_ledger=True, ledger_outputs=None, pane_preview=False) -> dict:
     """Build the whole report. Every source is injectable, so this is the
     function the hermetic suite exercises end-to-end.
 
@@ -2849,7 +3005,8 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             captures=captures.get(host),
             capture_status=capture_status.get(host, "skipped"),
             # Per host, unlike fuzzyclaw's local-only index above.
-            ledger_index=(ledger_res.get(host) or {}).get("index"))
+            ledger_index=(ledger_res.get(host) or {}).get("index"),
+            pane_preview=pane_preview)
 
     # --- 🔴 --claude-only: drop the shells, and COUNT what was dropped -------
     # The summary then describes the RENDERED set, which is the safe direction:
@@ -3678,6 +3835,7 @@ def render_caveats(report) -> list:
     wt = cav.get("waiting_signal") or {}
     kd = cav.get("kind_scope") or {}
     un = cav.get("unsent_prompt") or {}
+    pv = cav.get("pane_preview") or {}
     return [
         # 🔴 The signal set is ENUMERATED in the footer, because `WAIT: no` is
         # the cell a reader will over-trust. Naming the three things that were
@@ -3731,6 +3889,21 @@ def render_caveats(report) -> list:
         "a modal reports `no_input_box`".format(
             un.get("scope", "claude_rows_only"),
             "/".join(un.get("statuses") or UNSENT_STATUSES)),
+        # 🔴 Printed even though the field is OFF by default, and that is the
+        # whole reason it earns a line. A reader who sees `pane_preview: null`
+        # on every row has no way to tell "these panes are blank" from "nobody
+        # asked for the text" — the same unnamed-population defect `not_measured`
+        # exists for, one field down. The line names the flag that turns it on
+        # and the one thing it will never carry, so a reader does not go looking
+        # for scrollback that is not there.
+        "  caveat[pane_preview]: the captured SCREEN is published on {} only "
+        "and ONLY with {} — without it every row is `pane_preview_status: "
+        "disabled`, which is NOT a measured-empty pane. Visible screen only, "
+        "never scrollback (use `tail`); over {} bytes it is cut and reported "
+        "`truncated`, never silently short".format(
+            pv.get("scope", "claude_rows_only"),
+            pv.get("opt_in_flag", "--pane-preview"),
+            pv.get("max_bytes_per_pane", MAX_PANE_PREVIEW_BYTES)),
         "  caveat[kind_scope]: " + _fmt_kind_scope(kd),
     ]
 
@@ -4060,6 +4233,21 @@ def build_parser():
                    help="skip the per-host pane capture. Every row's "
                         "waiting_probable is then null (never false) and "
                         "summary.waiting.probable is null, never 0.")
+    # 🔴 OPT-IN, and the flag is the whole cost control. See the comment block
+    # at PREVIEW_STATUSES for the measurement: the text is already captured, so
+    # this costs no extra tmux work, but it makes the document 2.63x larger and
+    # every other consumer reads scalars.
+    p.add_argument("--pane-preview", action="store_true",
+                   help="JSON only: publish each Claude pane's VISIBLE SCREEN "
+                        "as `pane_preview`, for a consumer that renders panes "
+                        "(clawgate's tmux read model). Costs no extra tmux "
+                        "work — the capture already happens — but makes the "
+                        "document ~2.63x larger, which is why it is off by "
+                        "default. Visible screen only, never scrollback (use "
+                        "`tail` for history); capped per pane, with "
+                        "`pane_preview_status: truncated` saying so. Without "
+                        "this flag every row reports status `disabled`, which "
+                        "is NOT a measurement.")
     p.add_argument("--plain", action="store_true",
                    help="tail: strip ANSI at the source (drops tmux's -e) "
                         "instead of making every caller sed it out")
@@ -4184,7 +4372,8 @@ def main(argv=None):
                     use_ledger=not args.no_ledger,
                     use_capture=not args.no_capture,
                     threshold=args.stale_threshold,
-                    claude_only=args.claude_only)
+                    claude_only=args.claude_only,
+                    pane_preview=args.pane_preview)
 
     if args.subcommand == "detail":
         if not args.target:
@@ -4202,6 +4391,22 @@ def main(argv=None):
     if args.lean and not args.json:
         print("(--lean shapes the JSON payload; it has no effect without "
               "--json)", file=sys.stderr)
+    # 🔴 SAY SO RATHER THAN COLLECT IT SILENTLY. Without `--json` the preview is
+    # never rendered — no text view prints a pane's screen — so the flag would
+    # otherwise buy an operator a 2.63x in-memory document and no output
+    # difference whatsoever, which reads as the feature being broken.
+    if args.pane_preview and not args.json:
+        print("(--pane-preview shapes the JSON payload; it has no effect "
+              "without --json)", file=sys.stderr)
+    # 🔴 The two flags pull in OPPOSITE directions and the lean view wins.
+    # `--lean` projects rows onto LEAN_ROW_FIELDS, which does not carry the
+    # preview (it is the agent-shaped view; a screen dump is the one thing it
+    # exists to omit). Asking for both is not an error, but it collects the text
+    # and then drops it, so say which one took effect.
+    if args.pane_preview and args.lean and args.json:
+        print("(--lean drops pane_preview: the lean view carries "
+              "lean_row_fields only. Drop --lean to render panes.)",
+              file=sys.stderr)
     # 🔴 COMPUTED BEFORE THE PROJECTION, deliberately. `exit_code_for` reads
     # `hosts[*].reachable`, so running it on the LEAN report would make the exit
     # CONTRACT silently depend on `reachable` staying in `LEAN_HOST_FIELDS` — a
