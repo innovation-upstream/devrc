@@ -19,7 +19,7 @@ with pkgs; [
   # CARRIED FORWARD at an older version instead, each saying so on its own line.
   # Those claims were pinned to a version nothing pinned.
   #
-  # This entry pins them: MEASURED at flake.lock's nixpkgs rev 5c680dac9f02,
+  # This entry pins them: MEASURED at flake.lock's nixpkgs rev c27cdad491a9,
   # `pkgs.opencode` is 1.18.21 — store path
   # /nix/store/iqc8xfx692ym3pds6ky0vhqzscg6kgxd-opencode-1.18.21. (It was
   # 1.18.4 at rev 9bc02893134c when this pin was introduced, and 1.18.16 at rev
