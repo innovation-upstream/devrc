@@ -71,6 +71,11 @@ MARKER_HEX_CHARS = 16
 VERSION_HEX_CHARS = 4
 VERSION_COMPONENT_MAX = 65535
 
+# Digits in the largest legal component (65535 -> 5). Used as a cheap length
+# rejection BEFORE int(), because CPython refuses int() on a string of more than
+# 4300 digits and that ValueError would escape past the guard's own message.
+MAX_COMPONENT_DIGITS = len(str(VERSION_COMPONENT_MAX))
+
 # The human-owned part of the version: everything before the build component.
 # Bump it by hand for a real release; the generator preserves it.
 VERSION_BASE_COMPONENTS = 3
@@ -220,13 +225,23 @@ def _require_legal_component(part: str, version: str) -> None:
     A manifest breaking it does not warn — the extension simply fails to LOAD,
     which presents as a bridge that is down rather than as a bad version.
 
-    `isascii()` guards `isdigit()`, and the order matters: `'²'.isdigit()` is
-    True while `int('²')` RAISES, so testing digit-ness alone let a ValueError
-    escape from the next clause — losing the message that names Chrome's rule
-    and the file to edit, in favour of a bare
-    `invalid literal for int() with base 10`."""
-    if not (part.isascii() and part.isdigit()) or part != str(int(part)) or \
-            int(part) > VERSION_COMPONENT_MAX:
+    TWO cheap clauses run before `int(part)`, and both exist because a
+    ValueError escaping from it loses the message that names Chrome's rule and
+    the file to edit, in favour of a bare CPython error:
+
+      * `isascii()` guards `isdigit()` — `'²'.isdigit()` is True while
+        `int('²')` RAISES;
+      * `len(part) <= MAX_COMPONENT_DIGITS` — CPython refuses `int()` on a
+        string of more than 4300 digits (`Exceeds the limit ... for integer
+        string conversion`), so `'9' * 5000` escaped the same way. No legal
+        component can exceed MAX_COMPONENT_DIGITS anyway, since
+        VERSION_COMPONENT_MAX is 5 digits, so this rejects nothing valid.
+
+    Only then is `int(part)` safe to call."""
+    if not (part.isascii() and part.isdigit()) \
+            or len(part) > MAX_COMPONENT_DIGITS \
+            or part != str(int(part)) \
+            or int(part) > VERSION_COMPONENT_MAX:
         raise AssertionError(
             f"manifest version {version!r} contains component {part!r}, which "
             f"Chrome will not accept: every component must be a plain integer "

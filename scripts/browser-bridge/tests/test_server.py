@@ -6898,6 +6898,7 @@ def test_derivation_reaches_a_fixpoint_in_ONE_regeneration(tmp_path):
 
 @pytest.mark.parametrize("bad", [
     "0.8.1-beta", "v0.8.1", "0.08.1", "1.2.3.4.5", "0.8.65536", "0.8.²",
+    "0.8." + "9" * 5000,
 ])
 def test_write_manifest_version_refuses_an_illegal_CALLER_SUPPLIED_version(
         tmp_path, bad):
@@ -6913,8 +6914,11 @@ def test_write_manifest_version_refuses_an_illegal_CALLER_SUPPLIED_version(
     being dead is worse than none: it stops anyone looking at the entry point
     that is actually open.
 
-    `0.8.²` is here because `'²'.isdigit()` is True while `int('²')` raises —
-    without the `isascii()` guard this leaks a bare ValueError instead of the
+    Two params pin ValueError routes out of `int(part)`, each closed by a
+    different clause and each raising a bare CPython error without it:
+    `0.8.²` — `'²'.isdigit()` is True while `int('²')` raises (closed by
+    `isascii()`); and the 5000-digit one — CPython refuses `int()` past 4300
+    digits (closed by the `MAX_COMPONENT_DIGITS` length check). Both lose the
     message naming Chrome's rule and the file to fix."""
     src = _ext_copy(tmp_path)
     before = GEN.read_manifest_version(src / "manifest.json")
