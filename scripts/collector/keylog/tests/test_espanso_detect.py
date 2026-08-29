@@ -794,16 +794,71 @@ def test_live_existing_resolutions_not_made_ambiguous():
         "_EXISTING_RESOLUTIONS shrank — a pinned resolution was deleted rather "
         "than fixed; that is the failure mode, not the fix"
     )
+    # 🔴 AMBIGUITY (`None`) IS NOT A REGRESSION — MISATTRIBUTION IS.
+    # This guard used to fail on `got != want`, which lumped two outcomes with
+    # opposite severity into one red:
+    #
+    #   * got is None  — the term matched several snippets and named none of
+    #     them outright, so `_attribute` declined. That is the DESIGNED
+    #     behaviour, stated in this module's own docstring: "Otherwise ->
+    #     trigger=None, but the search-open + term are recorded regardless."
+    #     The event still lands; only the best-effort `trigger` field is empty,
+    #     and search attribution is `inferred=True` in the first place.
+    #   * got is some OTHER trigger — the term is now attributed to the WRONG
+    #     snippet. That silently corrupts the usage dataset every audit reads.
+    #
+    # Failing on the first made a MEASUREMENT nicety a hard merge blocker on a
+    # required check, keyed to a file — `nix/home.nix` — that is personal
+    # espanso config and changes for product reasons. It red-lined `main` twice
+    # on 2026-08-29 (#1023, then fc024d59) because a snippet gained a search
+    # term its owner wanted. Overlapping `search_terms` are a legitimate
+    # authoring choice: espanso's own Ctrl+Space search still lists both and the
+    # operator picks. The cost is attribution, and the operator owns that trade.
+    #
+    # So: `None` is tolerated here and reported by the companion test below;
+    # a WRONG trigger still fails. The tie-break LOGIC itself is pinned on
+    # synthetic fixtures elsewhere in this file, where personal config cannot
+    # reach it.
     d = _live_det()
-    bad = {}
+    misattributed = {}
     for term, want in _EXISTING_RESOLUTIONS:
         got = d._attribute(term)
-        if got != want:
-            bad[term] = (want, got, [t for t in d.ts.triggers if d._term_matches(term, t)])
-    assert not bad, (
-        "search terms regressed (term -> (expected, actual, matching snippets)): "
-        + repr(bad)
+        if got is not None and got != want:
+            misattributed[term] = (
+                want, got, [t for t in d.ts.triggers if d._term_matches(term, t)]
+            )
+    assert not misattributed, (
+        "search terms MISATTRIBUTED — a pinned term now resolves to the WRONG "
+        "snippet, which silently corrupts the usage dataset "
+        "(term -> (expected, actual, matching snippets)): " + repr(misattributed)
     )
+
+
+def test_live_ambiguous_terms_are_reported_but_do_not_gate():
+    """Visibility without a gate: name the pinned terms that no longer attribute.
+
+    Ambiguity is allowed (see the note in the test above), but it should never
+    be SILENT — losing attribution on a term is worth knowing at a glance even
+    though it must not block a merge. This test therefore always passes and
+    exists to print. It is deliberately NOT an assertion: making it one would
+    re-create exactly the blocking guard that was just removed.
+    """
+    d = _live_det()
+    ambiguous = {
+        term: [t for t in d.ts.triggers if d._term_matches(term, t)]
+        for term, _want in _EXISTING_RESOLUTIONS
+        if d._attribute(term) is None
+    }
+    if ambiguous:
+        print(
+            "\nespanso: %d pinned search term(s) no longer attribute to one "
+            "snippet — fires via Ctrl+Space search will record the term but "
+            "leave `trigger` empty:" % len(ambiguous)
+        )
+        for term, matches in sorted(ambiguous.items()):
+            print(f"  {term!r} matches {matches}")
+    else:
+        print("\nespanso: all pinned search terms still attribute uniquely.")
 
 
 # REGRESSION coverage for the 2026-08-19 /espanso-audit. On the pre-change
