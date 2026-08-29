@@ -23,8 +23,34 @@ anything matching them literally breaks on the next CSS reshuffle. Instead:
   `media.discordapp.net`, followed by `/attachments/` or `/external/`;
 * **the size cap** is found by walking up at most 8 ancestors and taking the
   first whose *computed* `max-width` ≤ 500px or `max-height` ≤ 400px;
+* **the clip** is found by walking the same 8 ancestors and taking *every* one
+  whose computed `overflow-x` or `overflow-y` is `hidden` or `clip`;
 * **the message boundary** is the first ancestor whose class *contains* the
   substring `message`, or whose id starts with `chat-messages-`.
+
+## Uncapping and unclipping are two different jobs
+
+Removing a size cap does not remove a crop. An ancestor can carry
+`overflow: hidden` and **no px cap at all** — invisible to the cap walk, and the
+thing that actually cuts the enlarged image off. Versions 0.2.0–0.2.3 chased
+this with class-name selectors, `:has()` rules and an unbounded style sweep;
+none of them worked, and the sweep broke Discord's scroller badly enough to
+produce a re-render cascade. Two rules keep this one safe:
+
+* **`auto` and `scroll` are never cleared.** They are scroll containers, and
+  forcing them to `visible` is what broke scrolling before. Only `hidden` and
+  `clip` are clips we may remove.
+* **the walk stops at the message row**, inclusive. Discord's chrome lives
+  above it, so it is out of reach by construction rather than by hoping a depth
+  number lands right. If the boundary heuristic ever rots, the walk degrades to
+  the same bounded 8 ancestors — never an unbounded climb to `<html>`.
+
+Every clear is recorded on the ancestor as `data-dee-unclipped="<value>;<priority>"`
+and `forget()` puts the exact prior declaration back — including removing the
+property outright when the page had no inline `overflow` to begin with. An
+earlier version of this file described the cap walk as the whole mechanism
+while enlarged media stayed visibly cropped; the pair above is what the
+extension actually does.
 
 The last one is a heuristic and the most likely thing to rot. It has a
 `MESSAGE_WALK_DEPTH` of 15 and falls back to treating the media as its own only

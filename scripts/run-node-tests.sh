@@ -244,7 +244,13 @@ SUITES=(
   # for a task the owner answered last. FILE COUNT MOVES 5 -> 6.
   # Floor 179 = 188 - min(50, max(1, 188/20)) = 188 - 9.
   "claude/skills/clickup/test|6|179"
-  "scripts/discord-embed-ext/tests|3|50"
+  # 2026-08-29: the save-button suite is gone with save_button.js (dead on
+  # arrival — dl-router requires a bearer token on every endpoint, /healthz
+  # included, so the probe 401s and the button never mounts). FILE COUNT MOVES
+  # 3 -> 2 while the test count RISES 68 -> 134: v0.2.3 had gutted the suite
+  # along with the implementation.
+  # Floor 128 = 134 - min(50, max(1, 134/20)) = 134 - 6.
+  "scripts/discord-embed-ext/tests|2|128"
 )
 
 # --- discovery roots -----------------------------------------------------------
