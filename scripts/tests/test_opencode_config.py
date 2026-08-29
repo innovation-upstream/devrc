@@ -46,7 +46,7 @@ WHAT IS UNDER TEST (see scripts/opencode/README.md for the measurements):
      manual sweep into a standing assertion — after them, 10 of 77 survive, and
      all ten are non-bash tool rows.
 
-  3. The resolver model itself. opencode 1.18.18 resolves a permission by
+  3. The resolver model itself. opencode 1.18.21 resolves a permission by
      `findLast` over a FLAT ORDERED array (built-in defaults, then agent rules,
      then user config — later wins), matching with a hand-rolled glob→regex:
 
@@ -201,7 +201,7 @@ def agent_permission(name: str) -> dict:
 # --------------------------------------------------------------------------- #
 # 🔴 the resolver model
 #
-# Faithful port of opencode 1.18.18's `Wildcard.match` + the `findLast` resolver.
+# Faithful port of opencode 1.18.21's `Wildcard.match` + the `findLast` resolver.
 # See the module docstring for the verbatim source it was ported from and for
 # how it was validated against the real engine. THE PORT ITSELF now lives in
 # scripts/opencode/lib/oc_permissions.py (imported above) so that
@@ -1739,12 +1739,12 @@ def test_tool_level_permissions_are_pinned_exactly():
 
 @pytest.mark.parametrize("dead", ["list", "websearch"])
 def test_no_nonexistent_tools_in_permission_block(dead):
-    """There is no `list` and no `websearch` tool on 1.18.18. The resolved tool
+    """There is no `list` and no `websearch` tool on 1.18.21. The resolved tool
     map is exactly {bash, edit, glob, grep, invalid, question, read, skill,
     task, todowrite, webfetch, write}. Naming a nonexistent tool is a silent
     no-op that reads like configuration."""
     assert dead not in load_config()["permission"], (
-        f"{dead!r} is not a tool on opencode 1.18.18 — the key does nothing"
+        f"{dead!r} is not a tool on opencode 1.18.21 — the key does nothing"
     )
 
 
@@ -1953,7 +1953,7 @@ def test_nav_has_no_shell():
 def test_nav_is_kept_lean():
     """nav must not carry the skill catalogue or be able to recurse.
 
-    VERIFIED against `opencode debug agent nav` on 1.18.18: with these denies the
+    VERIFIED against `opencode debug agent nav` on 1.18.21: with these denies the
     resolved tool set is exactly {glob, grep, read} (+ the internal `invalid`).
     Without `skill: deny` it also carries {skill, task, todowrite, webfetch} —
     and `skill` alone injects the whole catalogue, measured at ~3,730 tokens on
@@ -1968,7 +1968,7 @@ def test_nav_is_kept_lean():
 
 
 def test_no_agent_promises_a_list_tool():
-    """There is NO `list` tool on opencode 1.18.18."""
+    """There is NO `list` tool on opencode 1.18.21."""
     targets = [AGENT_DIR / f"{n}.md" for n in EXPECTED_AGENTS] + [ADDENDUM]
     bad = []
     for p in targets:
