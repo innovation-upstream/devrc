@@ -684,7 +684,7 @@ lib.mkIf isNixOS {
       Description = "Daily 3am sleep mode";
     };
     Timer = {
-      OnCalendar = "03:00:00";
+      OnCalendar = "02:30:00";
       Persistent = true;
     };
     Install = {
