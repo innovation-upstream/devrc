@@ -115,17 +115,10 @@
       # encrypt/decrypt round trip (it generates its own throwaway identity; the
       # operator's key is never touched), so without age here the whole file is an
       # import error inside the sandbox rather than a green-with-skips.
-      # glibc.bin: provides `locale`, WITHOUT WHICH A COLLATION TEST CANNOT RUN.
-      # MEASURED — the sandbox has no `locale` binary, so
-      # test_subsystem_store_api.py's collation regression fell back to C and its
-      # assertions became trivially true THERE while passing on the dev host:
-      # with both `comm` calls unpinned, that tier reported 1 failure instead of
-      # 2, i.e. the defect was invisible on the tier that gates the merge.
-      # Paired with LOCALE_ARCHIVE below — the binary alone lists only C.
       gateTools = [
         gatePyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq
         pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate
-        pkgs.rsync pkgs.zsh pkgs.age pkgs.glibc.bin
+        pkgs.rsync pkgs.zsh pkgs.age
       ];
     in
     {
@@ -206,9 +199,21 @@
           # Set in BOTH tiers (here and checks.pytests) or the sandbox would
           # misclassify its own repo defects as environment faults.
           export DEVRC_GATE_ENV=1
-          # Set in BOTH tiers, for the same reason DEVRC_GATE_ENV is: a test
-          # whose subject is COLLATION must see the same locales in each, or the
-          # gating tier silently degrades to C and stops observing the bug.
+          # 🔴 LOCALE_ARCHIVE IS THE LOAD-BEARING HALF, AND IT IS SET IN BOTH
+          # TIERS FOR THE SAME REASON DEVRC_GATE_ENV IS. A test whose subject is
+          # COLLATION must see the same locales in each, or the gating tier
+          # silently degrades to C and stops observing the bug: measured, with
+          # both `comm` calls in seed.sh unpinned, the sandbox reported ONE
+          # failure where the dev host reported TWO.
+          #
+          # ⚠ An earlier version of this also added `pkgs.glibc.bin` to
+          # gateTools, on the stated grounds that a collation test "cannot run"
+          # without the `locale` binary. MEASURED FALSE: with LOCALE_ARCHIVE set
+          # and no `locale` binary at all, `LC_ALL=en_US.UTF-8 sort` collates
+          # correctly. Only a test's *probe* wanted the binary, and it cost 21
+          # store binaries (getconf, ldd, iconv, …) shadowing the system copies
+          # for every human in `nix develop`. The test now detects the locale by
+          # exercising the capability instead, so the binary is not needed.
           export LOCALE_ARCHIVE=${pkgs.glibcLocales}/lib/locale/locale-archive
           echo "devrc: gate toolchain ready — bash scripts/run-tests.sh ." >&2
         '';
@@ -362,9 +367,9 @@
             patchShebangs src/scripts
             # Same marker the devShell sets — see its shellHook for why.
             export DEVRC_GATE_ENV=1
-            # Same reason, same pairing: `locale` comes from glibc.bin in
-            # gateTools, the locales themselves from here. Without this the
-            # binary lists only `C` and a collation test cannot be made to fail.
+            # Same reason as the devShell's copy — see its shellHook, which
+            # also records why `pkgs.glibc.bin` is NOT here. Without this the
+            # sandbox has only `C` and a collation test cannot be made to fail.
             export LOCALE_ARCHIVE=${pkgs.glibcLocales}/lib/locale/locale-archive
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME"

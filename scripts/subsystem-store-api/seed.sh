@@ -111,24 +111,51 @@ for d in "$STAGE"/*/; do
   [[ -d "$d" ]] || continue
   staged_scopes=$((staged_scopes + 1))
   name=$(basename "$d")
-  # `index(...)==1` is a LITERAL prefix test — a scope name is not a regex, and
-  # `grep -c "^$name/"` would mis-count one containing `.` or `[`.
-  n=$(awk -v p="$name/" 'index($0, p) == 1 {c++} END {print c + 0}' "$staged_list")
+  # `index(...)==1` is a LITERAL PREFIX test on purpose — twice over. A scope
+  # name is not a regex, so `grep -c "^$name/"` mis-counts one containing `.` or
+  # `[`; and `index(...) > 0` would be a SUBSTRING test, which with scopes `foo`
+  # and `xfoo` counts `xfoo/n.md` against `foo`.
+  # 🔴 Passed through ENVIRON, not `awk -v`: `-v` interprets escape sequences,
+  # so a scope literally named `a\tb` would be searched for as `a<TAB>b` and
+  # report entries=0 beside a non-zero total.
+  n=$(P="$name/" awk 'index($0, ENVIRON["P"]) == 1 {c++} END {print c + 0}' "$staged_list")
   printf 'seed: staged scope %-28s entries=%s\n' "$name" "$n"
-  [[ -L "${d%/}" ]] && excluded+=("$name (symlink — tar ships the link, not its contents)")
 done
 
 # 🔴 LOUD, NOT SILENT. A scope that ships nothing used to produce either a wrong
 # MISMATCH (dot-directory) or a false OK (symlink). Excluding it from the
 # verdict is correct; saying nothing about it would just move the lie.
+#
+# 🔴 BOTH ARMS USE THE SAME PREDICATE — "does it actually hold a `.md`" — and
+# that is a fix, not symmetry for its own sake. The symlink arm used to fire
+# unconditionally, so a symlinked scope holding NO markdown produced the header
+# "1 scope director(ies) hold .md files that will NOT be shipped" over a
+# directory that holds none. In a change whose whole subject is not claiming
+# what has not been established, that sentence was exactly the wrong one to
+# leave. `find "$d"` with the trailing slash follows the link deliberately here:
+# the question is what the operator would LOSE, which is the target's contents.
+_holds_md() { [[ -n "$(find "$1" -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; }
+
+# `shopt -p` captures the CALLER's settings and the eval restores exactly those
+# — `shopt -u` unconditionally would clear an option the caller had set.
+#
+# 🔴 `|| true` IS LOAD-BEARING, NOT DEFENSIVE. `shopt -p` EXITS 1 when any named
+# option is UNSET — which is the ordinary case here — so under `set -e` the bare
+# assignment aborted the script after the per-scope lines and before the stamp.
+# Measured: rc 1, and 20 of the file's seed tests went red at once. It still
+# PRINTS the correct restore commands on that non-zero exit, so the capture is
+# sound; only the status is misleading.
+_shopt_saved=$(shopt -p nullglob dotglob || true)
 shopt -s nullglob dotglob
 for d in "$STAGE"/*/; do
   name=$(basename "$d")
-  [[ "$name" == .* ]] || continue
-  [[ -n "$(find "$d" -maxdepth 1 -name '*.md' -print -quit)" ]] &&
-    excluded+=("$name (dot-directory — not in the tar member list)")
+  if [[ "$name" == .* ]]; then
+    _holds_md "$d" && excluded+=("$name (dot-directory — not in the tar member list)")
+  elif [[ -L "${d%/}" ]]; then
+    _holds_md "$d" && excluded+=("$name (symlink — tar ships the link, not its contents)")
+  fi
 done
-shopt -u nullglob dotglob
+eval "$_shopt_saved"
 if [[ ${#excluded[@]} -gt 0 ]]; then
   echo "seed: NOTE ${#excluded[@]} scope director(ies) hold .md files that will NOT be shipped, and are excluded from the count and the verdict:"
   printf 'seed:   %s\n' "${excluded[@]}"

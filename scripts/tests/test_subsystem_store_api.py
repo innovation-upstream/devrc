@@ -2600,21 +2600,39 @@ class TestSeedPushVerdict:
         # `gateTools`, `LOCALE_ARCHIVE` in the devShell AND in checks.pytests)
         # and its absence is a HARD FAILURE naming the cause. A degradation that
         # silently weakens a test is worse than a red one that says why.
-        enc = "en_US.UTF-8"
-        locale_bin = shutil.which("locale")
-        have = ""
-        if locale_bin:
-            have = subprocess.run(
-                [locale_bin, "-a"], capture_output=True, text=True
-            ).stdout.lower()
-        assert "en_us.utf8" in have or "en_us.utf-8" in have, (
-            f"{enc} is unavailable (locale binary: {locale_bin}), so this test "
-            "cannot make the ambient collation differ from C and would pass "
-            "vacuously. This is a GATE ENVIRONMENT regression, not a defect in "
-            "seed.sh: flake.nix must keep `pkgs.glibc.bin` in gateTools and "
-            "export LOCALE_ARCHIVE in BOTH the devShell and checks.pytests."
+        # 🔴 AVAILABILITY IS DETECTED BY EXERCISING THE CAPABILITY, NOT BY
+        # PROBING FOR A BINARY. An earlier version ran `locale -a` and asserted
+        # `en_US.utf8` appeared. That was the wrong question twice over: it
+        # needed `pkgs.glibc.bin` on the shared devShell PATH (21 store binaries
+        # shadowing the system `getconf`/`ldd`/`iconv` for every human in
+        # `nix develop`) to answer it, and MEASURED — with `LOCALE_ARCHIVE` set
+        # and NO `locale` binary at all, `LC_ALL=en_US.UTF-8 sort` collates
+        # correctly. The binary was never load-bearing; `LOCALE_ARCHIVE` is.
+        #
+        # So the check IS the control: sort one inverting pair under C and under
+        # en_US and require the orders to DIFFER. That single assertion answers
+        # "is a non-C collation available" and "does this fixture still invert"
+        # at once — and it cannot pass while the collation is unavailable, which
+        # is exactly the vacuity this test kept falling into.
+        forced = "en_US.UTF-8"
+        pair = f"{SCOPE}/README.md\n{SCOPE}/backblaze.md\n"
+
+        def _sorted_under(lc: str) -> str:
+            return subprocess.run(
+                ["sort"], input=pair, capture_output=True, text=True,
+                env={**os.environ, "LC_ALL": lc},
+            ).stdout
+
+        c_order, loc_order = _sorted_under("C"), _sorted_under(forced)
+        assert c_order != loc_order, (
+            f"`sort` orders {SCOPE}/README.md and {SCOPE}/backblaze.md the same "
+            f"under C and under {forced}, so comm's order check cannot arm and "
+            "this test would pass whether or not the collation is pinned.\n"
+            "Either the fixture stopped inverting, or — far more likely — this "
+            "is a GATE ENVIRONMENT regression rather than a defect in seed.sh: "
+            "flake.nix must export LOCALE_ARCHIVE in BOTH the devShell and "
+            "checks.pytests, or the tier has only the C locale."
         )
-        forced = enc
 
         env, dest = fake_cluster
         # 🔴 THE PAIR MUST ACTUALLY INVERT, AND THE FIRST VERSION OF THIS TEST
@@ -2627,25 +2645,7 @@ class TestSeedPushVerdict:
         (store / SCOPE / "README.md").write_text(_entry("README", SCOPE))
         (store / SCOPE / "backblaze.md").write_text(_entry("backblaze", SCOPE))
         self._foreign(dest)
-        env = {**env, "LC_ALL": enc, "LANG": enc}
-
-        # The control, so this test cannot quietly stop pinning its dimension:
-        # if the two collations ever agree on this pair, comm's order check
-        # cannot arm and a green here would mean nothing.
-        pair = f"{SCOPE}/README.md\n{SCOPE}/backblaze.md\n"
-        c_order = subprocess.run(
-            ["sort"], input=pair, capture_output=True, text=True,
-            env={**os.environ, "LC_ALL": "C"},
-        ).stdout
-        loc_order = subprocess.run(
-            ["sort"], input=pair, capture_output=True, text=True,
-            env={**os.environ, "LC_ALL": forced},
-        ).stdout
-        assert c_order != loc_order, (
-            f"fixture no longer inverts between C and {forced} — comm's order "
-            "check cannot arm, so this test would pass whether or not the "
-            "collation is pinned"
-        )
+        env = {**env, "LC_ALL": forced, "LANG": forced}
 
         r = self._push(store, tmp_path, env)
 
@@ -2683,17 +2683,42 @@ class TestSeedPushVerdict:
         on the REMOTE side all SURVIVED. Comparing the two expressions to each
         other catches an asymmetry in either direction, which per-side
         assertions did not."""
-        src = SEED_PATH.read_text()
-        exprs = re.findall(r"find \. (-mindepth[^\n\"]*?-type f)", src)
-        assert len(exprs) == 2, (
-            f"expected exactly 2 entry-listing find expressions in seed.sh, "
-            f"found {len(exprs)}: {exprs}"
+        # 🔴 CAPTURE TO THE END OF THE EXPRESSION, NOT TO `-type f`. The first
+        # version stopped at the first `-type f` (non-greedy), so everything
+        # AFTER it was invisible: appending `-o -type d` to the remote find
+        # SURVIVED a fully green 34-test run, which would have put depth-2
+        # DIRECTORIES into `remote_list` and reported them as foreign entries on
+        # every push. A guard whose stated purpose is "an asymmetry changes what
+        # the comparison MEANS" must see the whole expression.
+        #
+        # The `cd` target is captured too: `( cd "$1/sub" && find . … )` leaves
+        # both expressions textually identical while the sides walk different
+        # trees.
+        pat = re.compile(
+            r"""cd\s+['"]?(?P<root>[^'"\s&]+)['"]?\s*&&\s*find\s+\.\s+"""
+            r"""(?P<expr>.+?)\s*(?:\)|")"""
         )
-        staged, remote = (" ".join(e.split()) for e in exprs)
+        found = []
+        for line in SEED_PATH.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue  # comments quote these expressions when explaining them
+            m = pat.search(stripped)
+            if m:
+                found.append((m.group("root"), " ".join(m.group("expr").split())))
+        assert len(found) == 2, (
+            f"expected exactly 2 `cd … && find .` entry listings in seed.sh, "
+            f"found {len(found)}: {found}"
+        )
+        (staged_root, staged), (remote_root, remote) = found
         assert staged == remote, (
             "the staged and remote listings no longer ask the same question — "
             "an asymmetry silently changes what the comparison MEANS:\n"
             f"  staged: {staged}\n  remote: {remote}"
+        )
+        assert staged_root != remote_root, (
+            "both listings walk the same root, so one of them is not reading "
+            f"what it is supposed to: {staged_root!r} / {remote_root!r}"
         )
         for clause in ("-mindepth 2", "-maxdepth 2", "! -path './.*'", "-type f"):
             assert clause in staged, f"{clause!r} is no longer pinned: {staged}"
@@ -2725,6 +2750,78 @@ class TestSeedPushVerdict:
             "a scope that ships NOTHING must be named, not silently dropped: "
             + r.stdout
         )
+
+    def test_the_per_scope_count_is_a_PREFIX_match_not_a_substring(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """`entries=N` beside each scope had no coverage in either direction —
+        a mutation sweep survived both `index($0,p) > 0` (substring) and the
+        whole count hardcoded. With scopes `foo` and `xfoo`, a substring test
+        counts `xfoo/n.md` against `foo`, so `foo` reports 2 while holding 1."""
+        env, dest = fake_cluster
+        for name in ("foo", "xfoo"):
+            (store / name).mkdir()
+            (store / name / "n.md").write_text(_entry("n", name))
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        counts = dict(re.findall(r"staged scope (\S+)\s+entries=(\d+)", r.stdout))
+        assert counts.get("foo") == "1", (
+            f"`foo` must count only its own entry, got {counts.get('foo')!r} "
+            f"— a substring match would say 2. {r.stdout}"
+        )
+        assert counts.get("xfoo") == "1", counts
+
+    def test_the_stub_REFUSES_to_run_with_FAKE_DEST_unset(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """Pins the `set -u` the bash→POSIX rewrite dropped and round 2 restored.
+
+        Without it an unset `$FAKE_DEST` makes the stub's `sed` become
+        `s|/data||g`, silently rewriting every absolute path to a relative one —
+        the stub then 'works' against the wrong directory and every assertion
+        built on it is meaningless. That regression was re-introducible with a
+        fully green suite until this test existed."""
+        env, _ = fake_cluster
+        env = {k: v for k, v in env.items() if k != "FAKE_DEST"}
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode != 0, (
+            "the stub ran with FAKE_DEST unset instead of erroring — `set -u` "
+            f"is missing from FAKE_KUBECTL_BODY. stdout={r.stdout}"
+        )
+
+    def test_an_EMPTY_dot_scope_is_not_announced_as_holding_md_files(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """The NOTE header says the listed directories "hold .md files". Both
+        arms must therefore PROBE for one — the symlink arm used to fire
+        unconditionally, announcing a symlinked scope that held no markdown at
+        all. A change about not claiming the unestablished must not ship that
+        sentence."""
+        env, dest = fake_cluster
+        empty_real = tmp_path / "empty-target"
+        empty_real.mkdir()
+        (store / "emptysym").symlink_to(empty_real)
+        (store / ".emptydot").mkdir()
+
+        r = self._push(store, tmp_path, env)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        # Scoped to the NOTE block: both scopes legitimately appear in the
+        # per-scope `entries=0` lines, and asserting over the whole of stdout
+        # would fail on that correct output.
+        note = "\n".join(
+            l for l in r.stdout.splitlines()
+            if l.startswith("seed: NOTE") or l.startswith("seed:   ")
+        )
+        assert "emptysym" not in note, (
+            "a symlinked scope holding NO .md was announced as holding some:\n"
+            + note
+        )
+        assert ".emptydot" not in note, note
 
     def test_a_TOP_LEVEL_md_in_the_store_is_not_reported_missing(
         self, store: Path, tmp_path: Path, fake_cluster
