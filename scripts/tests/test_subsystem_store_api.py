@@ -2576,26 +2576,31 @@ class TestSeedPushVerdict:
         one) and an adjacency where C and en_US disagree. `README.md` beside
         `backblaze.md`/`thing-alpha.md` is that adjacency, and the real store is
         full of it — so the FIRST push after another host seeds would abort."""
-        # 🔴 `locale` IS NOT PRESENT IN THE NIX SANDBOX, and calling it there
-        # raised FileNotFoundError — this test FAILED the gating tier rather
-        # than skipping it. Resolve the binary first, and treat "cannot force
-        # the collation" as a skip that says so. The structural test below
-        # covers this invariant on the tier where this one cannot run; a skip
-        # is not coverage, which is exactly why that one exists.
-        enc = "en_US.UTF-8"
+        # 🔴 THIS TEST DOES NOT SKIP, AND THAT IS DELIBERATE — TWICE OVER.
+        #
+        # First it CRASHED the gating tier: `locale` does not exist in the nix
+        # sandbox, so `subprocess.run(["locale", …])` raised FileNotFoundError
+        # and the tier went 2 failed / 9794 passed. Then, made to skip, it went
+        # red a different way: `run-tests.sh` refuses an UNPINNED skip ("a skip
+        # is a test that did not run"), and its pin conditions key on ENV VARS
+        # (`unset:VAR`) while this predicate is locale AVAILABILITY — so an
+        # unconditional pin would red the DEV HOST, where the locale exists, the
+        # test runs, and the expected skip never happens.
+        #
+        # So it runs everywhere, on the strongest collation available: en_US
+        # where it exists (the real regression), ambient otherwise (weaker, and
+        # the assertion message says which was exercised). The invariant is
+        # carried on every tier by
+        # `test_EVERY_comm_call_in_seed_sh_PINS_its_collation` — which is what
+        # makes running weak here acceptable rather than a silent gap.
         locale_bin = shutil.which("locale")
         have = ""
         if locale_bin:
             have = subprocess.run(
                 [locale_bin, "-a"], capture_output=True, text=True
             ).stdout.lower()
-        if "en_us.utf8" not in have and "en_us.utf-8" not in have:
-            pytest.skip(
-                f"{enc} is not generated here (locale binary: {locale_bin}), so the "
-                "ambient collation cannot be made to differ from C. This dimension "
-                "is UNCOVERED behaviourally on this tier — see "
-                "test_EVERY_comm_call_in_seed_sh_PINS_its_collation."
-            )
+        forced = "en_US.UTF-8" if ("en_us.utf8" in have or "en_us.utf-8" in have) else None
+        enc = forced or "C"
 
         env, dest = fake_cluster
         # 🔴 THE PAIR MUST ACTUALLY INVERT, AND THE FIRST VERSION OF THIS TEST
@@ -2612,29 +2617,39 @@ class TestSeedPushVerdict:
 
         # The control, so this test cannot quietly stop pinning its dimension:
         # if the two collations ever agree on this pair, the mutant is invisible
-        # and a green here would mean nothing.
-        pair = f"{SCOPE}/README.md\n{SCOPE}/backblaze.md\n"
-        c_order = subprocess.run(
-            ["sort"], input=pair, capture_output=True, text=True,
-            env={**os.environ, "LC_ALL": "C"},
-        ).stdout
-        loc_order = subprocess.run(
-            ["sort"], input=pair, capture_output=True, text=True,
-            env={**os.environ, "LC_ALL": enc},
-        ).stdout
-        assert c_order != loc_order, (
-            "fixture no longer inverts between C and "
-            f"{enc} — comm's order check cannot arm, so this test would pass "
-            "whether or not the collation is pinned"
-        )
+        # and a green here would mean nothing. Only meaningful when a non-C
+        # collation was actually available to force.
+        if forced:
+            pair = f"{SCOPE}/README.md\n{SCOPE}/backblaze.md\n"
+            c_order = subprocess.run(
+                ["sort"], input=pair, capture_output=True, text=True,
+                env={**os.environ, "LC_ALL": "C"},
+            ).stdout
+            loc_order = subprocess.run(
+                ["sort"], input=pair, capture_output=True, text=True,
+                env={**os.environ, "LC_ALL": forced},
+            ).stdout
+            assert c_order != loc_order, (
+                f"fixture no longer inverts between C and {forced} — comm's "
+                "order check cannot arm, so this test would pass whether or not "
+                "the collation is pinned"
+            )
 
         r = self._push(store, tmp_path, env)
 
-        assert "not in sorted order" not in r.stderr, (
-            "comm order-checked in the ambient locale over C-sorted input: "
-            f"stderr={r.stderr}"
+        where = (
+            f"forced LC_ALL={forced}" if forced
+            else "NO non-C locale available here, so this ran under C and is the "
+                 "WEAK half; the strong half is "
+                 "test_EVERY_comm_call_in_seed_sh_PINS_its_collation"
         )
-        assert r.returncode == 0, f"rc={r.returncode} stdout={r.stdout} stderr={r.stderr}"
+        assert "not in sorted order" not in r.stderr, (
+            f"comm order-checked in the ambient locale over C-sorted input "
+            f"({where}): stderr={r.stderr}"
+        )
+        assert r.returncode == 0, (
+            f"rc={r.returncode} ({where}) stdout={r.stdout} stderr={r.stderr}"
+        )
         assert "seed: OK" in r.stdout
         assert "NOTE 1 entry file(s)" in r.stdout
 
