@@ -31,8 +31,6 @@ import tempfile
 import time
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parents[2]
 NATIVE_LUA = REPO / ".config" / "nvim" / "lua" / "config" / "native.lua"
 
@@ -103,16 +101,22 @@ def test_paste_off_display_does_not_block_on_the_terminal():
     )
 
 
-@pytest.mark.skipif(not os.environ.get("DISPLAY"), reason="needs an X display")
-def test_display_present_leaves_neovims_own_autodetection_alone():
-    """With DISPLAY set, the block must not fire -- xclip already works.
+def test_the_provider_matches_the_environment_it_runs_in():
+    """BRANCHES on DISPLAY rather than skipping -- runs in both environments.
 
-    🔴 Asserts on `vim.g.clipboard` and performs NO yank, deliberately. xclip is
-    not stubbed by the no-launch plugin, so yanking here would overwrite the
-    operator's real system clipboard -- the same class of host side effect
+    🔴 An earlier version carried `skipif(not DISPLAY)`. That was an UNPINNED
+    SKIP in the hermetic tier; and once moved here and pinned `unset:DISPLAY`
+    it became the mirror-image accounting error -- the entry APPLIES in the
+    sandbox (no DISPLAY there) while this target is not collected there at all,
+    so the pin could never fire and the run reported "3 of 4 pinned entries
+    apply" against 2 observed skips. A skip is an accounting liability in both
+    directions; a branch is not, and it asserts something in each case instead
+    of nothing in one.
+
+    🔴 Performs NO yank, deliberately, in either branch. xclip is not stubbed
+    by the no-launch plugin, so yanking with a display attached would overwrite
+    the operator's real system clipboard -- the class of host side effect
     scripts/tests/conftest.py exists to prevent.
-
-    Pinned in EXPECTED_SKIPS as `unset:DISPLAY`, matching this skipif exactly.
     """
     env = dict(os.environ)
     env["DEVRC_DIR"] = str(REPO)
@@ -124,10 +128,19 @@ def test_display_present_leaves_neovims_own_autodetection_alone():
         ],
         env=env, capture_output=True, timeout=60,
     )
-    assert b"UNSET" in res.stdout + res.stderr, (
-        "vim.g.clipboard was overridden while DISPLAY is set; that replaces "
-        "neovim's working xclip autodetection with a terminal round trip"
-    )
+    out = res.stdout + res.stderr
+
+    if os.environ.get("DISPLAY"):
+        assert b"UNSET" in out, (
+            "vim.g.clipboard was overridden while DISPLAY is set; that replaces "
+            "neovim's working xclip autodetection -- which supports a real "
+            "paste -- with a terminal round trip"
+        )
+    else:
+        assert b"SET" in out, (
+            "no DISPLAY, yet vim.g.clipboard is unset: the OSC 52 fallback did "
+            "not install, so `\"+y` has no provider at all here"
+        )
 
 
 def test_the_tools_these_tests_need_are_actually_present():

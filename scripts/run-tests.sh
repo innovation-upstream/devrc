@@ -2873,17 +2873,6 @@ EXPECTED_SKIPS=(
   # lands on one core, the fix is to make the CONTROL independent of the
   # runner's mode, not to delete this entry.
   "scripts/tests|only meaningful inside a real xdist worker|unset:DEVRC_XDIST_ACTIVE"
-  # The neovim OSC 52 fix's "with a DISPLAY, do not override neovim's own xclip
-  # autodetection" case. It asserts on vim.g.clipboard and performs NO yank on
-  # purpose — xclip is not stubbed by the no-launch plugin, so yanking would
-  # overwrite the operator's REAL system clipboard.
-  # CONDITIONAL, and the condition is the test's own `skipif` verbatim: expected
-  # only where DISPLAY is unset. On the graphical dev host it RUNS and this entry
-  # correctly does not apply; a flat entry would red that host.
-  # Its two siblings in the same file need no pin — they key on a missing BINARY,
-  # which `unset:VAR` cannot express, which is why the whole file sits in the
-  # dev-host tier where nvim is guaranteed. Only this one is env-conditional.
-  "scripts/devhost-tests|needs an X display|unset:DISPLAY"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a
