@@ -161,6 +161,31 @@ version MATCH can never produce `false`.
 service worker **imports**, so it is frozen into the loaded module graph and
 travels with the code — a stale worker reports the stale marker by construction.
 
+⚠ **The version now MOVES per build.** `manifest.json` is `<release>.<build>`,
+e.g. `0.8.1.43738`, where the 4th component is derived from the marker
+(`extension/README.md` § *Versioning*).
+
+🔴 **This does NOT widen the reach of any branch above, and an earlier draft of
+this paragraph claimed it did.** The version-mismatch branch at
+`server.py:887` runs only `if not stale` — i.e. only when both markers are
+present and AGREE. A code change moves the marker, so the markers DISAGREE,
+`stale` is already `true`, and that branch is never reached. The marker was
+already catching everything else, which is the whole reason it exists.
+
+**The state that DOES reach `:887` is a release bump**, and it is routine rather
+than exotic. Bumping `0.8.1.43738` → `0.9.0.43738` by hand changes only the
+version string — which is normalised OUT of the marker's digest — so the marker
+does not move at all. A worker loaded before the bump therefore reports a
+matching marker with a disagreeing version, which is exactly `:887`. (An earlier
+draft named a degraded config instead, where the server can read the deployed
+`manifest.json` but not its `build_id.js`. That is the WRONG branch: `:879`
+short-circuits on a missing marker and the verdict comes from `:883-884`.)
+
+What the per-build version actually buys is **off-bridge legibility**: a human
+can spot a stale profile in `brave://extensions`, with no bridge call at all,
+because the two profiles now show different numbers. That is a real win and it
+is the only one — it is not a detection improvement, it is a *reporting* one.
+
 The verdict is **ASYMMETRIC**, because the two directions are not equally
 knowable. `false` requires two markers that are present and identical — that is
 the whole of it, and nothing else can produce it. `true` additionally comes from
