@@ -137,22 +137,46 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
    not an empty harness. `date` matching `:eos`/`:roo` at all is a spurious SUBSTRING hit
    (`date` ⊂ "upd**ate**"); it costs nothing because nobody searches it.
 
-### Opened while closing the above — all blocked until `#1021` lands
-- 🔴 **`#1021` — `main` IS RED, repo-wide.** `test_live_existing_resolutions_not_made_ambiguous`
-  fails on an unmodified `origin/main` checkout: `{'ask': (':acq', None, [':dacq', ':acq'])}`.
-  The 08-28 `:acq`/`:dacq` split cleaned the label but left `"ask"` in BOTH snippets'
-  `search_terms`, so the term names neither and `#999`'s tie-break correctly declines. The
-  comment above those lines already said ":acq owns ask/clarify/questions alone" — the
-  comment was right and the data contradicted it. Measured on the real stream: attribution
-  goes **92/171 → 148/171**, recovering **56 fires** of the config's highest-traffic term.
-  **Nothing else merges until this does.**
-- **`#1015` — the store-api load flake** (see the corrected `#996` note below).
-- **`#1005` / `#1009`** — this doc and the RULES surface; both blocked on `main`.
-- ⚠ **UNEXPLAINED, do not guess:** the CI-only `opencode` version failure (`'1.18.21'` vs
-  `'1.18.18'`). `test_opencode_config.py` passes locally — 640 tests — on a checkout
-  confirmed to BE current `origin/main` and to include the `flake.lock` bump. Same tree,
-  opposite results, so the variable is environmental and not yet identified. Needs the
-  sandbox tier run against that file specifically.
+### `main` WAS RED REPO-WIDE — three independent causes, all landed in `#1023`
+Merged as `8e33bf1d`, verified by content. `#1015`/`#1021`/`#1022` were closed as
+superseded: **none of them could go green alone**, because the gate runs the whole suite,
+so each red-tested the others' bug. That deadlock is the reason they were combined.
+1. **espanso `ask`** — the 08-28 `:acq`/`:dacq` split cleaned the label but left `"ask"` in
+   BOTH snippets' `search_terms`, so the term named neither and `#999`'s tie-break correctly
+   declined. The comment above those lines already said ":acq owns ask/clarify/questions
+   alone" — the comment was right and the data contradicted it.
+2. **opencode pin** — `flake.lock` moved the binary 1.18.18 → 1.18.21 under an unchanged
+   config, which is exactly what `test_opencode_engine.py` exists to catch.
+3. **the store-api load flake** — a 15 s localhost read timing out on SCHEDULING.
+
+🔴 **CORRECTIONS to `#1023`'s own commit messages, recorded here because that history is
+merged and will not be rewritten.** All three were caught by audit, and each is a claim I
+made that the tree did not support:
+- **The espanso trade-off is 9 lost multi-word queries, not 8.** `ask agent` also stops
+  reaching `:dacq` — it got there only via the label word `subagent`. `--diff-config` cannot
+  see it: its probe universe forms two-token pairs WITHIN ONE SNIPPET, and `ask` belongs to
+  `:acq`'s word set, so the pair never exists to be tested. **The tool was quoted faithfully
+  and the tool is narrower than the sentence** — none of the 9 has ever been typed, which is
+  the claim that actually matters and which held.
+- **"56 recovered fires" measures ATTRIBUTION, not intent.** Those fires were unattributable
+  by construction, so the share that *meant* `:dacq` is unmeasurable. `ask` no longer lists
+  `:dacq` at all (2 picker rows → 1); `:dacq` keeps all 8 of its unique routes. A legitimate,
+  tool-sanctioned remedy — but "recovered" should not be read as pure gain.
+- **"all 7 sites" / "NINE settimeout sites" were both miscounts** (6 and 8 respectively). The
+  second came from counting `grep` OUTPUT LINES, one of which was a docstring mentioning the
+  name. A grep counts mentions; an AST walk counts calls.
+- ⚠ Three miscounted self-reports in one ladder, the last inside the guard written to stop
+  them. **Re-derive every count from the tree at the moment you quote it.**
+
+### Still open
+- **`#1005`** (this doc) and **`#1009`** (the RULES worktree-config surface) — both were only
+  ever blocked on `main`; rebased onto the green `main`.
+- **`#1033`** — the round-1 audit follow-ups, plus the round-2 findings on top.
+- ✅ **RESOLVED, and it was my instrument, not the environment:** the "CI-only" opencode
+  failure. It reproduces locally in one run. I had been running `test_opencode_config.py`;
+  the failing test is in `test_opencode_**engine**.py`, and my follow-up search returned a
+  false zero because `xargs -0 command grep` has no executable to run — `command` is a shell
+  builtin. **Two instrument errors stacked into a confident "unexplained".**
 - **NOT FILED, and deliberately named as such:** the Tekton capacity problem behind the
   flake. It has no closing condition anyone can check yet, so it is not being minted as a
   work object — see the object-leak rule.
