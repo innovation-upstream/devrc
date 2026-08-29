@@ -10,7 +10,26 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 ## Status
 
 **Phase 1 (the attention queue) is SHIPPED. Phase 2 (the tmux read model) is COMPLETE — BOTH
-halves shipped, deployed, and observed running UNATTENDED. Phases 3–6 are untouched.**
+halves shipped, deployed, and observed running UNATTENDED. Rank 3: BOTH HALVES ARE WRITTEN.
+The rendering half is MERGED (`ZacxDev/homelab-infra#496`, squash `844a7350`); the data path
+is OPEN as `innovation-upstream/devrc#992`. NEITHER IS DEPLOYED. Phases 4–6 untouched.**
+
+🔴 **RANK 3 IS MERGED-BUT-NOT-DEPLOYED, WHICH IS NOT DONE.** Two independent reasons, and
+BOTH must clear before anyone calls it done:
+- **The UI is not running.** clawgate's image pin is an immutable literal with no Flux image
+  automation, so #496 reconciled cleanly and **changed nothing serving**. Shipping is build +
+  push image + bump the pin (and `cmd/clawgatectl/client.go`'s `buildVersion` with it — see
+  the runbook gotcha below). `clawgatectl health` is the evidence, never `git log`.
+- **The screens are not flowing.** #992 is still open, and until it merges AND `ship.sh` runs,
+  the deployed collector emits no `pane_preview` at all — so every card will render
+  `no preview field (collector predates it)`. That string is the tab telling the truth about a
+  half-deployed feature, and it is what you should EXPECT to see first.
+
+🔴 **DO NOT READ AN EMPTY-LOOKING GRID AS A BROKEN RENDERER** until you have confirmed the
+workbench collector is passing `--pane-preview`. The renderer distinguishes those cases ON
+PURPOSE — `disabled` (flag not passed), the empty status (collector predates the field), and
+`ok` — so read the note under each card rather than inferring from a blank pane. That
+distinction is the whole point of the status field and it is what makes this debuggable.
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC** — `clawgatectl health` is the only authority. It said
 **0.8.9** on 2026-08-28, the THIRD value this line carried in three readings that day
@@ -22,6 +41,15 @@ session, then an audit that reopened four decisions — then a re-platform onto 
 three of them outright. The sections below from `## Platform` down are that design, still current.
 
 **Shipped, newest first:**
+- **`innovation-upstream/devrc#992`** — ⚠ **OPEN, NOT MERGED** — rank 3's data path.
+  `session-manager` publishes each Claude pane's visible screen as `pane_preview` +
+  `pane_preview_status`, from the capture batch that ALREADY ran and threw the screen away, so
+  it costs zero extra tmux work. Opt-in `--pane-preview`; the pusher is the one caller that
+  passes it. 🔴 **No server change was needed** — migration 0027's "unknown fields preserved
+  verbatim" contract held, verified end-to-end against live 0.8.9 (POST 322 KB → 200; GET
+  returned 46 rows `ok` / 26 `not_claude` with the `session`→`tmuxSessionName` rename intact).
+  Gates: BOTH sandbox tiers green on the branch AND on the MERGED tree (`devrc-pytests` 18,289
+  passed / 0 failed; `devrc-nodetests` 1300/1300).
 - **`innovation-upstream/devrc#974`** — the host-side pusher, phase 2's remaining half — merged as
   **`f0308e46`** and shipped to both hosts. `scripts/tmux-snapshot-push.sh` + a serverMode-gated
   systemd timer (2 min). ✅ **VERIFIED BY AN UNATTENDED TICK**, which is the only proof that counts
@@ -345,11 +373,61 @@ do not renumber again without releasing the live claims first.
    is not a library choice — it drags the highest-stakes decision in this project forward. Read-only
    has no write path and therefore no such coupling.
 
-   🔴 **DEPENDENCY — read-only rendering CANNOT be built before item 4.** Measured against the live
-   deployment 2026-08-28: `hostNetwork/hostPID/hostIPC` all false, `nodeName` null, and the only
-   volume is a PVC — so the pod has no path to a host tmux socket, and `capture-pane` output has to
-   be *delivered* from the host. (The image is distroless with no shell, so probe it via the spec,
-   not `kubectl exec`.) Item 4 is the next buildable thing; item 3 needs no further decisions.
+   🔴 **DEPENDENCY — SATISFIED.** Item 4 shipped the delivery path (2-minute push). The old
+   text is preserved below for the measurement, which still holds: `hostNetwork/hostPID/hostIPC`
+   all false, `nodeName` null, only volume a PVC — the pod has no path to a host tmux socket, so
+   `capture-pane` output must be *delivered* from the host. (Distroless, no shell: probe via the
+   spec, not `kubectl exec`.)
+
+   **HALF DONE 2026-08-28 — the DATA PATH is open as `innovation-upstream/devrc#992`; the
+   RENDERING is not written.** Claim `tmux-webapp-3` is still HELD, deliberately, because the
+   item is not finished.
+
+   🔴 **THE DOC SAID THIS ITEM "NEEDS NO FURTHER DECISIONS" AND THAT WAS WRONG.** It had never
+   said WHERE the pane text rides. Measuring first surfaced a real fork — fold it into the
+   existing 2-minute push, or build an on-demand rendezvous — that would have been costly to
+   get wrong across two repos. **Zach chose snapshot-carried previews.** The measurement, on
+   72 live panes (45 workbench + 27 laptop), is what settled the rest:
+   - today's push **110,806 B**; visible capture of all 72 panes **249,042 B raw**; JSON
+     escaping/structure overhead **+38.9%**; gzip 5.3x.
+   - 🔴 **SCROLLBACK IS EXCLUDED ON A HARD BOUND.** Each extra line costs **~4,014 B
+     fleet-wide**, so `-S -1000` computes to **6.13 MB** against `maxTmuxPushBytes` (4 MB) and
+     the cap breaches at **~650 lines/pane**. Visible screen only; `tail` serves history.
+   - 🔴 **ONLY 22% OF PANES CHANGE PER TICK** (10 of 45 over a real 120 s interval), so 77% of
+     the bytes are resent unchanged. In absolute terms that is cheap (62 MB/day gzipped) — **the
+     objection is STALENESS, not bandwidth.** A 2-minute-old preview is right for "which session
+     needs me" and useless for watching output scroll. That is the argument for an on-demand
+     path later, and the reason it was NOT built now.
+   - shipped shape: **46 Claude panes** carry the text (36 workbench + 10 laptop); the other 26
+     are shells and report `not_claude`, never an empty screen. Live back-to-back: **122,731 B
+     without, 322,204 with = 2.63x**, **7.7% of the cap**. Per-pane cap 16 KiB ≈ 2.4x the
+     largest real pane observed (6,616 B).
+
+   **THE RENDERING HALF IS MERGED — `ZacxDev/homelab-infra#496`, squash `844a7350`.** A Tmux
+   tab: `internal/ui/tmux.go` (`TmuxPanel` + `RenderTmux`), `internal/api/tmux_ui.go`, and
+   `GET /tmux` + `GET /ui/tmux`. 15 tests, mutation-swept 11/11.
+   - 🔴 **NO DECISION SURFACE, and it is a HARD PREREQUISITE, not a style choice.** A write
+     surface here is `send-keys` = arbitrary command execution as Zach on both machines, and
+     **item 5's fail-closed wrapper does not exist yet**. `TestTmuxGridCarriesNoDecisionSurface`
+     asserts the RENDERED HTML has no form/button/hx-post — against output, not source, because
+     a helper that emits a button is still a button. **Do not add one before item 5.**
+   - 🔴 **THE TAB NEEDED FIVE REGISTRY ENTRIES AND THE GUARDS CAUGHT THE TWO I MISSED**:
+     `tabKeys`, `tabHeadings`, the sidebar, **the JS `TABS` array** and **the JS `HEADINGS`
+     map`**. `TestAttentionTabIsWiredIntoEveryTabList` caught the JS array; the axe contrast
+     scan caught two `text-slate-500` uses (4.24:1). Adding a seventh tab? Expect all five.
+   - 🔴 **THE PANEL POLLS (60s) RATHER THAN AWAITING AN SSE EVENT.** Every sibling panel
+     refreshes on a `*.changed` nudge, but this read model is fed by an OUTSIDE agent and
+     clawgate emits no such event — an `sse:tmux.changed` trigger would look like working code
+     and never fire. Pinned by a test.
+   - **The two HUMAN routes are registered unconditionally**, outside `registerTmuxRoutes`'
+     nil-store guard, because `Page` renders the panel on every boot; a store-less boot would
+     otherwise paint a tab whose panel 404s. The MACHINE routes stay behind the guard.
+
+   **WHAT REMAINS: THE DEPLOY, AND IT IS TWO INDEPENDENT SHIPS.** (a) clawgate image build +
+   pin bump (+ `buildVersion`) to make the tab exist; (b) #992 merged + `ship.sh` to make the
+   screens flow. Closing condition: the Tmux tab renders ≥1 pane whose status is `ok` — not
+   merely that the tab loads, because it loads perfectly well showing "collector predates the
+   field" on every card.
 4. ✅ **DONE 2026-08-28 — BOTH HALVES SHIPPED, DEPLOYED AND OBSERVED RUNNING UNATTENDED.**
    Server: `ZacxDev/homelab-infra#468` (`32f49804`), deployed as clawgate **0.8.8**
    (`628a963a`). Pusher: `innovation-upstream/devrc#974`, squash-merged **`f0308e46`**,
@@ -472,6 +550,34 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
   `session-manager`'s waiting-detection is read-only and cheap to add if the queue misses cases.
 
 ## Gotchas
+- 🔴 **A FAILED `git worktree add` DOES NOT STOP THE NEXT `git -C <path>` — AND I LANDED A
+  MERGE ON ANOTHER SESSION'S BRANCH THIS WAY.** `worktree add /home/zach/workspace/devrc-integ`
+  failed with `fatal: … already exists` (another session was using that path for
+  `integ/963-965`); the very next line, `git -C /home/zach/workspace/devrc-integ merge
+  origin/feat/…`, ran happily **inside their worktree** and committed a merge onto **their**
+  branch. It is silent: no conflict, clean tree, and `git log` afterwards shows exactly what
+  you expect, because you are reading the branch you landed on. Recovered via `git reflog`
+  (pre-merge head `ea9811ed`) + `git reset --keep`, which refuses rather than destroys.
+  **Two rules: give every scratch worktree a PID-UNIQUE name, and branch on `worktree add`'s
+  EXIT CODE before issuing one more `-C` command against that path.** A generic name like
+  `<repo>-integ` is exactly the one another session also picked.
+- 🔴 **THE ZSH NO-WORD-SPLITTING TRAP RETURNED A CONFIDENT `0` FOR EVERY SCROLLBACK DEPTH —
+  in a session that had already read the rule.** `panes=$(tmux list-panes …); for p in $panes`
+  loops **ONCE** on the whole newline-joined string, so `capture-pane -t "%1\n%2\n…"` fails and
+  every total is 0. It does not error; it reports a clean measurement of nothing. The tell was
+  a POSITIVE CONTROL: an earlier inline `for p in $(…)` had already measured 51,406 B for the
+  same host, so a 0 was impossible. Fix: `${=var}`, a real array, or pipe to `bash -s`. 🔴
+  **Never quote a zero from a shell loop you have not positive-controlled** — this is the same
+  family as the `gawk` silent zero this feature already paid for once.
+- ⚠ **`test_subsystem_store_api.py::TestTrustedProxyOverTheRealProcess::test_THE_DEFECT_the_five_forged_attempts_are_CHARGED_TO_THE_FORGER`
+  is a live ~15% flake under load, and its signature is `assert 4 == 5`** ("expected at least 5
+  `store-api audit` lines, got 4"). Its own comment records 3/20 red locally plus two
+  consecutive reds in the nix sandbox. Measured 2026-08-28 while gating #992 on a box at load
+  18–51 from concurrent agents: branch full-target **2 green / 1 red**, `origin/main` green,
+  the test alone **6/6 on both trees**, and BOTH sandbox tiers green. 🔴 **Do not re-run and
+  move on — run the discriminating control** (full target on a clean `origin/main` worktree)
+  and check whether unrelated targets' wall times also moved; here a 273-test target swung
+  9.56 s → 5.52 s between runs, which is load inflating everything, not one assertion.
 - 🔴 **A TRUNCATED READ, WRITTEN DOWN, IS INDISTINGUISHABLE FROM A FACT — and I did it TWICE in one
   session.** A `jq … | head -2` made the laptop look like it had no clawgate Stop hook registered
   (it does), and a `print(sorted(d.keys())[:8])` made session-manager look like it emits no
@@ -685,8 +791,15 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
 - ⚠ **THE ZSH `MULTIOS` TRAP BIT AGAIN, in a session that had already read the rule.**
   `cmd 2>&1 >/dev/null | head` delivers **stdout**, not stderr, so a "no skew warning" reading
   was of the wrong stream. Give each stream its own file and read both.
-- 🔴 **NOTHING READS `GET /api/tmux/snapshot`** outside clawgate's own tests — no UI, no page,
-  no script. So the read model's `receivedAt` staleness is **recorded and unread**, and any
+- ⚠ **OBSOLETE AS OF `ZacxDev/homelab-infra#496` — kept because the REASONING below still
+  governs, and because this doc carried the claim for weeks.** The Tmux tab now reads
+  `GET /api/tmux/snapshot` and renders `receivedAt` as a per-host age badge that turns red past
+  6 minutes (three missed feeder ticks). 🔴 **But a MERGED reader is not a RUNNING one** — the
+  image pin has no Flux automation, so until the pin moves the sentence below is still literally
+  true in production. Re-read it as: the staleness signal is now rendered, and is still not an
+  ALARM — nothing pages anyone, a human has to look at the tab. The original text:
+  **nothing read `GET /api/tmux/snapshot`** outside clawgate's own tests — no UI, no page,
+  no script. So the read model's `receivedAt` staleness was **recorded and unread**, and any
   design that names it as a compensating control is naming a control that does not exist. The
   feeder's real alarm is its distinct non-zero exit codes landing in the user manager's
   failed-unit list, which `/standup` reads — that covers the codes and **NOT** a run that exits
