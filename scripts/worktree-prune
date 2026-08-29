@@ -699,10 +699,20 @@ def _paths_differ(repo: Path, rev_a: str, rev_b: str, paths: "list[str]") -> "bo
         r = _git_raw(repo, "diff", "--name-only", "-z", rev_a, rev_b, "--", *b)
         if r.returncode != 0:
             return None
-        # 🔴 NOT `r.stdout.strip()`. `bytes.strip()` removes ASCII whitespace
-        # but NOT NUL, so a single empty `-z` record (`b"\0"`) strips to
-        # `b"\x00"` — truthy — and every comparison would answer "differs".
-        # Split on the separator first, then test the records.
+        # `bytes.strip()` removes ASCII whitespace but NOT NUL, so a lone
+        # separator (`b"\0"`) would strip to `b"\x00"` — truthy — and the
+        # comparison would answer "differs" over an empty result.
+        #
+        # ⚠ DEFENSIVE, NOT A FIXED BUG, and stated that way rather than implied.
+        # MEASURED on git 2.55: `diff --name-only -z` emits `b""` for an empty
+        # result — never a bare `b"\0"` — for a matching pathspec, a
+        # non-matching one and no pathspec alike. So `r.stdout.strip()` would be
+        # equivalent TODAY, and no test in this suite can tell the two apart;
+        # `test_an_empty_z_record_is_not_read_as_a_difference` is an invariant
+        # guard, not regression coverage, and the battery carries no mutant for
+        # this line because one would survive. Splitting first is still the form
+        # that stays correct if git ever emits a trailing separator, and it
+        # costs nothing.
         if any(p.strip() for p in r.stdout.split(b"\0")):
             return True
     return False

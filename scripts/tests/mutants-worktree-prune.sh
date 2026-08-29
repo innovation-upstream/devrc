@@ -30,6 +30,18 @@
 # hypothetical here: the tool's docstrings are long and several of these
 # patterns anchor on lines that a reword would move.
 #
+# 🔴 AND IT CAUGHT ONE. A pattern matching the Python source `b"\0"` must be
+# written `b"\\0"` inside these SINGLE-quoted sed expressions: single quotes do
+# no escape processing, so bash hands sed exactly what is typed, and `\\` in a
+# BRE is one literal backslash. `b"\\\\0"` — which is what `quotepath-blinds-
+# the-index-arm` carried from #935 — asks sed for TWO backslashes and matches
+# nothing. That mutant still scored `ok` because it has a SECOND s-expression
+# that DID apply, so `cmp` saw a change and the mutant ran a NARROWER mutation
+# than its own comment describes ("flag and parser move together"). The `cmp`
+# gate is per-`run`, not per-expression; a multi-expression mutant can have a
+# dead expression and still report clean. Found while adding the #975 mutants,
+# whose single-expression versions failed loudly with DID NOT APPLY.
+#
 # 🔴 PYTHONDONTWRITEBYTECODE=1 IS LOAD-BEARING, NOT HYGIENE. CPython validates a
 # cached module on mtime-in-whole-SECONDS + size, so a same-length edit landing
 # in the same second as the last import is invisible: the run imports the
@@ -570,7 +582,7 @@ printf '\n== #935 ROUND 2 — the blind audit'"'"'s findings ==\n'
 # the mutant is exactly the round-1 shape.
 run 'quotepath-blinds-the-index-arm' \
   test_a_submodule_path_git_QUOTES_is_still_seen \
-  's|^    ls = _git_raw(path, "ls-files", "-s", "-z")$|    ls = _git_raw(path, "ls-files", "-s")|; s|^    for entry in ls.stdout.split(b"\\\\0"):$|    for entry in ls.stdout.splitlines():|'
+  's|^    ls = _git_raw(path, "ls-files", "-s", "-z")$|    ls = _git_raw(path, "ls-files", "-s")|; s|^    for entry in ls.stdout.split(b"\\0"):$|    for entry in ls.stdout.splitlines():|'
 # 🔴 FINDING 4: this exact mutant SURVIVED the full suite when the auditor ran
 # it — the line had no test at all. It is here so that can never recur.
 run 'blocked-count-drops-the-unanswered-rows' \
@@ -670,14 +682,14 @@ printf '\n== #975 — the SAME quoting bug in the arm that decides `dead` ==\n'
 # mutant's name does not describe.
 run 'quotepath-blinds-the-changed-path-listing' \
   test_unlanded_work_under_a_nonascii_name_is_not_called_dead \
-  's|^    r = _git_raw(repo, "diff", "--name-only", "-z", base, head)$|    r = _git(repo, "diff", "--name-only", base, head)|; s|^    changed = \[os.fsdecode(p) for p in r.stdout.split(b"\\\\0") if p.strip()\]$|    changed = [p for p in r.stdout.splitlines() if p.strip()]|'
+  's|^    r = _git_raw(repo, "diff", "--name-only", "-z", base, head)$|    r = _git(repo, "diff", "--name-only", base, head)|; s|^    changed = \[os.fsdecode(p) for p in r.stdout.split(b"\\0") if p.strip()\]$|    changed = [p for p in r.stdout.splitlines() if p.strip()]|'
 # 🔴 The REACH decoding, isolated. `-z` and bytes stay; only the decode moves to
 # the DISPLAY one. `_printable` puts U+FFFD where the real bytes were, so the
 # pathspec misses and the empty answer comes back — the same wrong `dead`, via
 # the other half of the two-decodings split.
 run 'display-decoding-used-to-build-the-pathspec' \
   test_the_changed_path_listing_survives_an_undecodable_filename \
-  's|^    changed = \[os.fsdecode(p) for p in r.stdout.split(b"\\\\0") if p.strip()\]$|    changed = [_printable(p) for p in r.stdout.split(b"\\\\0") if p.strip()]|'
+  's|^    changed = \[os.fsdecode(p) for p in r.stdout.split(b"\\0") if p.strip()\]$|    changed = [_printable(p) for p in r.stdout.split(b"\\0") if p.strip()]|'
 # 🔴 The blast radius of the FIX, which is what #935 round 2 got wrong: `-z`
 # stops the quoting, but quoting was also silently guaranteeing the output was
 # ASCII. Strict utf-8 then raises INSIDE `subprocess.run` and takes the whole
@@ -687,19 +699,21 @@ run 'strict-decode-of-the-changed-path-listing' \
   's|^    r = _git_raw(repo, "diff", "--name-only", "-z", base, head)$|    r = _git(repo, "diff", "--name-only", "-z", base, head)|'
 # 🔴 The OTHER half — `_paths_differ`'s own call. `core.quotePath=false` is a
 # real host setting and puts raw bytes into a NON-`-z` diff too, so text mode
-# aborts the scan there as well. Flag and emptiness test move together for the
-# same flag-and-parser reason as above.
+# aborts the scan there as well. The emptiness test moves with the flag because
+# `.split(b"\0")` over non-`-z` output is a different parse, not because the
+# emptiness form itself is under test — see the note below.
 run 'quotepath-false-aborts-the-comparison' \
   test_paths_differ_survives_quotepath_false \
-  's|^        r = _git_raw(repo, "diff", "--name-only", "-z", rev_a, rev_b, "--", \*b)$|        r = _git(repo, "diff", "--name-only", rev_a, rev_b, "--", *b)|; s|^        if any(p.strip() for p in r.stdout.split(b"\\\\0")):$|        if r.stdout.strip():|'
-# 🔴 `bytes.strip()` removes ASCII whitespace but NOT NUL, so `b"\0".strip()` is
-# `b"\x00"` — TRUTHY. Reading `-z` output that way makes every comparison answer
-# "differs", `content-identical` never fires again, and every squash-merged
-# branch silently degrades to `orphan`. The emptiness test alone, isolated from
-# the flag.
-run 'nul-not-stripped-so-every-comparison-differs' \
-  test_an_empty_z_record_is_not_read_as_a_difference \
-  's|^        if any(p.strip() for p in r.stdout.split(b"\\\\0")):$|        if r.stdout.strip() or r.stdout:|'
+  's|^        r = _git_raw(repo, "diff", "--name-only", "-z", rev_a, rev_b, "--", \*b)$|        r = _git(repo, "diff", "--name-only", rev_a, rev_b, "--", *b)|; s|^        if any(p.strip() for p in r.stdout.split(b"\\0")):$|        if r.stdout.strip():|'
+# ⚠ NO MUTANT FOR THE EMPTINESS FORM ITSELF, deliberately, and said out loud
+# rather than left as a gap. `any(p.strip() for p in r.stdout.split(b"\0"))`
+# guards against a lone `b"\0"` stripping to a TRUTHY `b"\x00"` — but MEASURED
+# on git 2.55, `diff --name-only -z` emits `b""` for an empty result and never a
+# bare separator, so `r.stdout.strip()` is equivalent today and such a mutant
+# would SURVIVE. Shipping it would assert coverage that does not exist, which
+# this file's header calls worse than none. The line stays because it is the
+# form that keeps working if git changes; the test that touches it is labelled
+# an invariant guard in its own docstring.
 # 🔴 The batch sizer. `len(p)` on a str undercounts a non-ASCII path by up to 4x
 # while the budget is named in BYTES, so a batch can overrun the argv cap the
 # constant exists to stay under — and a truncated argv reads as "no differing

@@ -899,11 +899,22 @@ def test_paths_differ_survives_quotepath_false(tmp_path):
 
 
 def test_an_empty_z_record_is_not_read_as_a_difference(tmp_path):
-    """🔴 `bytes.strip()` removes ASCII whitespace but NOT NUL. `r.stdout.strip()`
-    on `-z` output of a single empty record (`b"\\0"`) yields `b"\\x00"`, which is
-    TRUTHY — so the emptiness test has to split on the separator first. Get this
-    wrong and every comparison answers "differs", `content-identical` never fires
-    again, and every squash-merged branch quietly degrades to `orphan`."""
+    """⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — labelled, not counted.
+
+    `bytes.strip()` removes ASCII whitespace but NOT NUL, so `-z` output of a
+    lone separator (`b"\\0"`) strips to `b"\\x00"`, which is TRUTHY, and
+    `r.stdout.strip()` would read an empty result as "differs". That is why
+    `_paths_differ` splits on the separator before testing.
+
+    🔴 BUT THE BUG IT DESCRIBES IS UNREACHABLE, and saying otherwise would be
+    the vacuous-guard failure this suite exists to avoid. MEASURED on git 2.55:
+    `diff --name-only -z` emits `b""` for an empty result — never `b"\\0"` — with
+    a matching pathspec, a non-matching pathspec and no pathspec alike. So
+    `r.stdout.strip()` is equivalent today and this test cannot tell the two
+    forms apart. It pins the CONTRACT (an identical path answers False), which
+    is worth having; the battery deliberately carries no mutant for that line
+    because one would survive.
+    """
     repo = new_repo(tmp_path)
     write(repo / "same.txt", "identical on both sides\n")
     git(repo, "add", "same.txt")
