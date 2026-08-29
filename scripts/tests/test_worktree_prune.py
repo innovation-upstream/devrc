@@ -864,9 +864,17 @@ def test_an_ascii_only_branch_is_still_classified_correctly(nonascii_universe):
     by them, and shipping it would have been a guard that reads as coverage while
     adding none — the thing this docstring was rewritten to stop doing.
 
-    The reds under that probe are
-    `test_unlanded_work_under_a_nonascii_name_is_not_called_dead` and
+    With that `None` applied at the CALL SITE — `differ = None` in
+    `landing_signals`, rather than inside `_paths_differ` itself — the reds are
+    exactly `test_unlanded_work_under_a_nonascii_name_is_not_called_dead` and
     `test_content_identical_still_fires_for_a_landed_nonascii_path`.
+    ⚠ THE PLACEMENT IS PART OF THE MEASUREMENT, not a detail. Forcing the return
+    inside `_paths_differ` gives FOUR reds, because
+    `test_paths_differ_survives_quotepath_false` and
+    `test_the_pathspec_batch_sizer_measures_bytes_not_characters` call it
+    directly with a non-ASCII path. Both placements leave THIS test green, so
+    the conclusion above holds either way — but an earlier wording named the
+    two-red set beside a probe described as the four-red one.
 
     🔴 IT IS NOT THE CONTROL AGAINST "SILENCE THE SIGNAL EVERYWHERE", which an
     earlier docstring claimed. MEASURED: with `if not differ:` forced to
