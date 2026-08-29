@@ -134,21 +134,33 @@ done
 # what has not been established, that sentence was exactly the wrong one to
 # leave. `find "$d"` with the trailing slash follows the link deliberately here:
 # the question is what the operator would LOSE, which is the target's contents.
-# 🔴 AN ERROR IS NOT "NO", AND `2>/dev/null` MADE IT ONE. This probe briefly
-# carried `2>/dev/null`, which turned a symlinked scope whose target is
-# UNREADABLE from a loud over-report into total silence: no NOTE, rc 0, `seed:
-# OK`, and the operator loses the target's contents with no signal at all. In a
-# block headed "LOUD, NOT SILENT" that was the wrong direction to fail.
-# `_shippable_entries` does not descend the symlink either, so nothing else
-# would have surfaced it. A probe that cannot answer therefore announces.
+# 🔴 THREE STATES, NOT TWO — AND THE THIRD IS WHY. This probe has now been
+# wrong in both directions, one round apart:
+#
+#   * with `2>/dev/null` it was SILENT about a symlinked scope whose target is
+#     unreadable — no NOTE, rc 0, `seed: OK`, and the operator loses that
+#     scope's contents with nothing to say so. Wrong direction under a block
+#     headed "LOUD, NOT SILENT".
+#   * announcing on any error then fixed the silence but reused the "holds .md
+#     files" wording, so an unreadable target with NO markdown in it was
+#     announced as holding some — the exact unestablished claim this whole
+#     change exists to stop making, reintroduced by the fix for the previous
+#     defect.
+#
+# So the caller gets a state, not a boolean, and picks wording that matches what
+# was actually established: 0 = holds markdown · 1 = does not · 2 = COULD NOT
+# CHECK. `find`'s own exit status is the discriminator (measured: rc 1 on an
+# unreadable directory, rc 0 on a readable one), which is why stderr is
+# discarded rather than captured — the rc carries the whole signal, and
+# capturing the text only risked it reaching a message.
 #
 # `-maxdepth 1` is deliberate: only depth-1 `*.md` inside the scope is shippable
 # at all, so widening it would announce a scope over files that no scope, dot or
 # otherwise, could ever ship.
-_holds_md() {
-  local out rc
-  out=$(find "$1" -maxdepth 1 -name '*.md' -print -quit 2>&1); rc=$?
-  [[ -n "$out" || $rc -ne 0 ]]
+_md_state() {
+  local out
+  out=$(find "$1" -maxdepth 1 -name '*.md' -print -quit 2>/dev/null) || return 2
+  [[ -n "$out" ]]
 }
 
 # 🔴 UNCONDITIONAL `-u`, AND A RESTORE-THE-CALLER'S-SETTINGS VERSION WAS TRIED
@@ -170,15 +182,29 @@ _holds_md() {
 shopt -s nullglob dotglob
 for d in "$STAGE"/*/; do
   name=$(basename "$d")
+  # `|| st=$?` keeps a non-zero state out of errexit's way — a bare call would
+  # abort the script on the ordinary "does not hold markdown" answer.
+  st=0
   if [[ "$name" == .* ]]; then
-    _holds_md "$d" && excluded+=("$name (dot-directory — not in the tar member list)")
+    _md_state "$d" || st=$?
+    case $st in
+      0) excluded+=("$name (dot-directory — not in the tar member list)") ;;
+      2) excluded+=("$name (dot-directory — UNREADABLE, contents could not be checked)") ;;
+    esac
   elif [[ -L "${d%/}" ]]; then
-    _holds_md "$d" && excluded+=("$name (symlink — tar ships the link, not its contents)")
+    _md_state "$d" || st=$?
+    case $st in
+      0) excluded+=("$name (symlink — tar ships the link, not its contents)") ;;
+      2) excluded+=("$name (symlink — target UNREADABLE, contents could not be checked)") ;;
+    esac
   fi
 done
 shopt -u nullglob dotglob
 if [[ ${#excluded[@]} -gt 0 ]]; then
-  echo "seed: NOTE ${#excluded[@]} scope director(ies) hold .md files that will NOT be shipped, and are excluded from the count and the verdict:"
+  # 🔴 THE HEADER ASSERTS NOTHING ABOUT CONTENTS. It used to say the listed
+  # directories "hold .md files" — true for the two states that established it,
+  # FALSE for the `could not check` one. Each entry states its own reason.
+  echo "seed: NOTE ${#excluded[@]} scope director(ies) will NOT ship, and are excluded from the count and the verdict:"
   printf 'seed:   %s\n' "${excluded[@]}"
 fi
 

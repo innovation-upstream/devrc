@@ -2751,6 +2751,17 @@ class TestSeedPushVerdict:
         r = self._push(store, tmp_path, env)
 
         assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        # 🔴 POSITIVE CONTROL, AND IT IS FREE. Everything below holds just as
+        # well if BASHOPTS were ignored entirely — by a future bash, by
+        # `set -o posix`, by a typo in the option name — and this test is the
+        # SOLE killer of the caller-restoring shopt regression, so a silent
+        # vacuity here re-opens that class with a green suite. The per-scope
+        # loop DOES honour the ambient option, so a `.hidden` line appears only
+        # when dotglob really armed.
+        assert "staged scope .hidden" in r.stdout, (
+            "BASHOPTS=dotglob did not arm — this test is not exercising the "
+            f"dimension it names, so its pass means nothing. {r.stdout}"
+        )
         assert not (dest / ".hidden").exists(), (
             "with dotglob set in the environment the dot-scope SHIPPED — the "
             "member list must not depend on the ambient shell. pod holds: "
@@ -2771,8 +2782,14 @@ class TestSeedPushVerdict:
         (an `-o -type d` on the remote side, a widened `-maxdepth`), it is
         reported as another host's entry on every single push."""
         env, dest = fake_cluster
+        # 🔴 THE NAME MATTERS. A directory called `a-subdirectory` is excluded
+        # by `-name '*.md'`, NOT by `-type f` — so the plainest mutant (dropping
+        # `-type f` from the remote find) stayed invisible, caught only by the
+        # textual guard this test was written to replace. Named `*.md`, the only
+        # clause that can exclude it is `-type f`. It is also the exact shape the
+        # server 503'd on: a DIRECTORY named `*.md`.
         (dest / SCOPE).mkdir(parents=True, exist_ok=True)
-        (dest / SCOPE / "a-subdirectory").mkdir()
+        (dest / SCOPE / "a-subdirectory.md").mkdir()
 
         r = self._push(store, tmp_path, env)
 
@@ -2924,11 +2941,56 @@ class TestSeedPushVerdict:
         finally:
             locked.chmod(0o755)  # so tmp_path cleanup can proceed
 
+        assert r.returncode == 0, (
+            f"rc={r.returncode} — measured 0 today; a future change that "
+            f"aborted after the NOTE would otherwise stay green. {r.stderr}"
+        )
         assert "lockedsym" in "".join(
             l for l in r.stdout.splitlines() if l.startswith("seed:   ")
         ), (
             "an unreadable symlinked scope was silently dropped instead of "
             f"announced: {r.stdout}"
+        )
+        # 🔴 AND THE WORDING MUST NOT ASSERT WHAT THE PROBE COULD NOT ESTABLISH.
+        # Announcing on error fixed the silence; reusing the "holds .md files"
+        # wording then claimed markdown in a directory nobody could read — the
+        # same unestablished-claim defect, one round later.
+        assert "UNREADABLE" in r.stdout, (
+            "the unreadable case must say so, not borrow the holds-markdown "
+            f"wording: {r.stdout}"
+        )
+        assert "hold .md files" not in r.stdout, (
+            "the NOTE header asserts contents it could not check: " + r.stdout
+        )
+
+    def test_an_UNREADABLE_target_with_NO_markdown_is_not_called_a_holder(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 The case the sibling above CANNOT reach, because its target really
+        does hold `l.md` — so it would pass even while the wording lied.
+
+        Here the target holds no markdown at all and is unreadable. Announcing
+        it is right; announcing it as a directory that "holds .md files" is a
+        claim about bytes nobody could see, and is exactly the defect that the
+        fix for the previous round's silence reintroduced."""
+        env, dest = fake_cluster
+        locked = tmp_path / "empty-locked"
+        locked.mkdir()
+        (locked / "notes.txt").write_text("no markdown here\n")
+        (store / "emptylocked").symlink_to(locked)
+        locked.chmod(0o000)
+        try:
+            r = self._push(store, tmp_path, env)
+        finally:
+            locked.chmod(0o755)  # so tmp_path cleanup can proceed
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        assert "emptylocked" in r.stdout, (
+            "a scope whose contents could not be read must still be announced: "
+            + r.stdout
+        )
+        assert "hold .md files" not in r.stdout, (
+            "announced as holding markdown that nobody could read: " + r.stdout
         )
 
     def test_the_stub_REFUSES_to_run_with_FAKE_DEST_unset(
