@@ -157,10 +157,22 @@ done
 # `-maxdepth 1` is deliberate: only depth-1 `*.md` inside the scope is shippable
 # at all, so widening it would announce a scope over files that no scope, dot or
 # otherwise, could ever ship.
+#
+# 🔴 EVIDENCE BEATS THE ERROR, and the order matters. `|| return 2` alone
+# discards `$out` unread, so a probe that BOTH matched a file AND exited
+# non-zero would report "could not check" over a match it actually had. Not
+# reachable at `-maxdepth 1` — the only rc≠0 sources there are the starting
+# point itself (measured across GNU find 4.11 and bfs 4.1: an unreadable
+# SUBdirectory, a broken symlink child and a child directory named `*.md` all
+# exit 0) — but it becomes reachable the moment someone widens the depth, and
+# nothing in the old comment said the discriminator depended on that. Checking
+# the match first makes the function correct at any depth.
 _md_state() {
-  local out
-  out=$(find "$1" -maxdepth 1 -name '*.md' -print -quit 2>/dev/null) || return 2
-  [[ -n "$out" ]]
+  local out rc
+  out=$(find "$1" -maxdepth 1 -name '*.md' -print -quit 2>/dev/null); rc=$?
+  [[ -n "$out" ]] && return 0
+  [[ $rc -ne 0 ]] && return 2
+  return 1
 }
 
 # 🔴 UNCONDITIONAL `-u`, AND A RESTORE-THE-CALLER'S-SETTINGS VERSION WAS TRIED
@@ -204,7 +216,15 @@ if [[ ${#excluded[@]} -gt 0 ]]; then
   # 🔴 THE HEADER ASSERTS NOTHING ABOUT CONTENTS. It used to say the listed
   # directories "hold .md files" — true for the two states that established it,
   # FALSE for the `could not check` one. Each entry states its own reason.
-  echo "seed: NOTE ${#excluded[@]} scope director(ies) will NOT ship, and are excluded from the count and the verdict:"
+  # 🔴 "CONTRIBUTE NO ENTRIES", NOT "WILL NOT SHIP" — the third wording of this
+  # line, and the second correction. "hold .md files" asserted contents the
+  # probe could not always read; "will NOT ship" then over-claimed on a
+  # different axis, because a symlinked scope DOES ship — as a symlink. Measured:
+  # the tar lands `symscope` on the pod as a link, which the very next line of
+  # output says ("tar ships the link, not its contents"), so the block
+  # contradicted itself two rows apart. What is true of every state that reaches
+  # here is that the directory contributes nothing to the entry set.
+  echo "seed: NOTE ${#excluded[@]} scope director(ies) contribute NO entries, and are excluded from the count and the verdict:"
   printf 'seed:   %s\n' "${excluded[@]}"
 fi
 

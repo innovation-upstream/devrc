@@ -2847,7 +2847,7 @@ class TestSeedPushVerdict:
     def test_a_scope_whose_md_is_TOO_DEEP_is_not_announced(
         self, store: Path, tmp_path: Path, fake_cluster
     ):
-        """`_holds_md` uses `-maxdepth 1` because only depth-1 `*.md` inside a
+        """`_md_state` uses `-maxdepth 1` because only depth-1 `*.md` inside a
         scope is shippable at all. Widening it survived the class and would
         announce a scope over files no scope could ever ship."""
         env, dest = fake_cluster
@@ -2925,7 +2925,16 @@ class TestSeedPushVerdict:
     def test_a_symlinked_scope_whose_target_is_UNREADABLE_is_still_announced(
         self, store: Path, tmp_path: Path, fake_cluster
     ):
-        """🔴 AN ERROR IS NOT "NO". `_holds_md` briefly carried `2>/dev/null`,
+        """🔴 AN ERROR IS NOT "NO".
+
+        ⚠ Read this with `_md_state` open: it deliberately carries
+        `2>/dev/null` TODAY and depends on it. The defect below was never the
+        redirect — it was discarding `find`'s EXIT STATUS, which is the whole
+        discriminator. An earlier version of this docstring blamed the three
+        characters, and deleting them (which no test catches) is exactly what a
+        maintainer would have done next.
+
+        The probe briefly treated a failed `find` as "no markdown here",
         which turned an unreadable symlink target from a loud over-report into
         complete silence — no NOTE, rc 0, `seed: OK`, and the operator loses
         that scope's contents with nothing to say so. `_shippable_entries` does
@@ -2985,12 +2994,54 @@ class TestSeedPushVerdict:
             locked.chmod(0o755)  # so tmp_path cleanup can proceed
 
         assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
-        assert "emptylocked" in r.stdout, (
-            "a scope whose contents could not be read must still be announced: "
+        # 🔴 SCOPED TO THE NOTE LINES. `"emptylocked" in r.stdout` was satisfied
+        # by the unrelated per-scope line `staged scope emptylocked entries=0`,
+        # so the half this test exists for — that it is ANNOUNCED — guarded
+        # nothing: reverting `_md_state`'s error state to a plain "no" removed
+        # the NOTE entirely and this assertion stayed green.
+        note = "\n".join(
+            l for l in r.stdout.splitlines() if l.startswith("seed:   ")
+        )
+        assert "emptylocked" in note, (
+            "a scope whose contents could not be read must still be ANNOUNCED, "
+            f"not merely mentioned in the per-scope lines: {r.stdout}"
+        )
+        assert "UNREADABLE" in note, (
+            "announced, but not as the state that was actually established: "
             + r.stdout
         )
         assert "hold .md files" not in r.stdout, (
             "announced as holding markdown that nobody could read: " + r.stdout
+        )
+
+    def test_the_DOT_arm_of_the_unreadable_state_is_reachable_and_covered(
+        self, store: Path, tmp_path: Path, fake_cluster
+    ):
+        """🔴 The `2)` arm of the DOT branch had no coverage — deleting it left
+        every test green.
+
+        It is reachable, but not the obvious way: a real unreadable dot
+        DIRECTORY never gets here, because `rsync` fails first (rc 23) and
+        `set -e` aborts the staging. The path that does reach it is a
+        dot-NAMED SYMLINK to an unreadable target — the dot branch wins the
+        `if`/`elif`, and the probe cannot read through the link."""
+        env, dest = fake_cluster
+        locked = tmp_path / "dot-locked-target"
+        locked.mkdir()
+        (locked / "d.md").write_text(_entry("d", "dotsym"))
+        (store / ".dotsym").symlink_to(locked)
+        locked.chmod(0o000)
+        try:
+            r = self._push(store, tmp_path, env)
+        finally:
+            locked.chmod(0o755)
+
+        assert r.returncode == 0, f"stdout={r.stdout} stderr={r.stderr}"
+        note = "\n".join(l for l in r.stdout.splitlines() if l.startswith("seed:   "))
+        assert ".dotsym" in note, f"the dot arm did not announce it: {r.stdout}"
+        assert "dot-directory — UNREADABLE" in note, (
+            "reached the dot arm but not its unreadable state — the wrong "
+            f"reason would still read as covered: {note}"
         )
 
     def test_the_stub_REFUSES_to_run_with_FAKE_DEST_unset(
