@@ -73,7 +73,7 @@ fade_in() {
     b=$(( tb * i / steps ))
     openrgb --device "$RGB_DEVICE" --mode static \
       --color "$(printf '%02X%02X%02X' "$r" "$g" "$b")" >/dev/null 2>&1 || true
-    (( i < steps )) && sleep "$delay"
+    if (( i < steps )); then sleep "$delay"; fi
   done
 }
 
