@@ -389,6 +389,20 @@ class TestTheQuerySideUsesTheSameRuleAsTheCorpus:
         self._rec_with(tmp_path, "apps/web:deploy")
         assert _ids(ts.search([], root=tmp_path, skill="apps/web:deploy")) == ["s"]
 
+    def test_search_REFUSES_a_skill_its_own_rule_rejects(self, tmp_path):
+        """🔴 THE CASE THAT MAKES `search()`'s OWN CANONICALISATION LOAD-BEARING,
+        and without which reverting it kills no test.
+
+        `session_used_skill` canonicalises the query internally, so for any
+        VALID name the two sites are redundant and a mutant survives. They
+        differ only for a value the rule REJECTS: canonicalised, `skill`
+        becomes "" and the empty-query guard fires; merely stripped, it stays
+        truthy, slips the guard, then fails the predicate for every session —
+        returning an empty result set instead of raising. That is the silent
+        zero, one guard downstream of where it was fixed."""
+        with pytest.raises(ValueError):
+            ts.search([], root=tmp_path, skill="not a valid name")
+
     def test_a_RECORDED_key_is_matched_through_the_same_rule(self, tmp_path):
         """The per-key half: the bag's keys are canonical already, so this
         pins that the comparison does not depend on which side was normalised."""
