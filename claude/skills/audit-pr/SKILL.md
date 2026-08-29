@@ -14,8 +14,10 @@ Target: `$ARGUMENTS`:
 - A number → that GitHub PR (`gh pr diff <n>`, `gh pr view <n>`).
 - `current` / empty → the current branch's diff vs its base/trunk.
 - Several numbers → audit each, one subagent per PR so they don't collide. 🔴 `isolation:
-  "worktree"` worktrees the **cwd's** repo, not the PR's — for a PR in another repo have the
-  agent run `git -C <that-repo> worktree add …` itself.
+  "worktree"` worktrees the **cwd's** repo, not the PR's — for a PR in another repo run the
+  recipe the brief's WHERE TO WORK section PRINTS, never a remembered one. It is a namespaced
+  `refs/pull/<n>/head` fetch then a **detached** `worktree add`: naming the PR's head branch
+  instead fails `rc 128` in any clone that has not fetched it, and always for a fork PR.
 
 ## What to do
 
