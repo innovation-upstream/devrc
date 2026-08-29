@@ -481,6 +481,17 @@ implementation" failure. The deletion detectors are the ledger tests.
    a wrong `gh --json` field name, or a `git` flag this host's version does not
    have, is out of scope — the seam is tested, not the tools behind it. That is
    deliberate (hermetic), and it is a real blind spot, not a covered one.
+
+   🔴 ROUND 13 PAID FOR IT ONCE. Finding F2 — the cross-repo recipe fails
+   `rc 128` in a clone that has not fetched the PR's branch, and ALWAYS for a
+   fork PR — is exactly a fact about real `git`, and no test here could have
+   seen it. `test_the_cross_repo_recipe_can_actually_be_run` pins the
+   RELATIONSHIP that made it possible (a ref `worktree add` resolves must be
+   one the recipe itself created), which IS machine-readable; the rc-128
+   measurements, and the verification that the replacement recipe runs on a
+   real fork-PR clone and leaves it byte-identical bar one `refs/audit/` ref,
+   were made by hand and recorded in the fix commit. Read the pin as covering
+   the shape, never the tool.
 4. **It does not check that the classification a human writes is CORRECT.** The
    script deliberately refuses to classify payload vs scaffolding; nothing
    mechanical can grade the answer.
@@ -1342,13 +1353,31 @@ DIRECTIVE_LEDGER = {
     # present before `worktree add` — was unenumerated, and so were `switch`,
     # `restore`, `reset`, `branch -f` and `gc`. The permission is now stated
     # positively with a universal refusal after it.
+    #
+    # 🔴 ROUND 13. The grant and the recipe it covers could not BOTH be obeyed.
+    # `worktree add <the PR's head branch>` resolves a ref the clone only has
+    # after a FETCH, and this sentence refused every write but `worktree add` —
+    # measured rc 128 on scratch repos for an unfetched clone, and rc 128 for a
+    # FORK PR after any fetch, because that branch is never in `origin`. The
+    # one compliant workaround (`--detach`, then fetch inside the worktree)
+    # writes into the clone anyway: a linked worktree shares the clone's ref
+    # store and object store. So the recipe changed to a namespaced, additive
+    # `refs/pull/<n>/head` fetch plus a DETACHED add, and this grant now names
+    # that set. Still positive, still ending in the universal.
     "own-worktree-is-writable": (
-        "That worktree is YOURS: fetching and checking out inside it is fine. "
-        "In the clone you made it from, `git worktree add` is the ONLY write "
-        "this brief asks for and the ONLY one you may make — every other "
-        "command that writes there is refused, named or not, whoever made "
-        "that clone, because other sessions may be standing in it. The "
-        "no-write rule below is about every checkout you did not make."
+        "That worktree is YOURS: checking out inside it is fine — but it is "
+        "not a separate repository. A linked worktree SHARES the clone's ref "
+        "store and object store, so a fetch run inside it writes to the clone "
+        "as well; there is no fetching into the worktree alone, and a rule "
+        "that pretended otherwise would be obeyed by a command that breaks "
+        "it. So the clone's permission is the set of writes the recipe above "
+        "actually makes, stated positively: the `fetch` into `refs/audit/`, "
+        "the detached `worktree` add, and the `worktree` remove and "
+        "`update-ref` that undo them. Those are the ONLY writes this brief "
+        "asks for and the ONLY ones you may make — every other command that "
+        "writes there is refused, named or not, whoever made that clone, "
+        "because other sessions may be standing in it. The no-write rule "
+        "below is about every checkout you did not make."
     ),
 }
 
@@ -1507,6 +1536,21 @@ SCENARIO_RUNS = {
     "claims-file-assumed-base": lambda: (
         ["900", "--round", "3", "--claims-file", str(CLAIMS_FILE)],
         {},
+    ),
+    # 🔴 ROUND 13 — THE OTHER SIDE OF `repo_unknown_reason`, so its guard is
+    # not "delete the `gh` sentence". `gh` IS consulted here and genuinely
+    # reports nothing this script can read a repository out of: no `url`, and
+    # `isCrossRepository` true, so the head fields are the FORK's and
+    # `pr_slug` refuses to answer from them. `repo_relation` is "unknown" for
+    # a reason that IS about `gh`, and the brief must say so.
+    #
+    # `claims-file-assumed-base` above is the OPPOSITE cause and needed no new
+    # scenario: round 12 added it, and it was already rendering the WHERE TO
+    # WORK contradiction this round found — `gh` blamed by a run that consults
+    # no `gh`, at rc 0, with the truth two headings away in THE RANGE.
+    "unknown-repo-gh-said-nothing": lambda: (
+        ["900"],
+        {"pr": dict(DEFAULT_PR, url="", isCrossRepository=True)},
     ),
 }
 SCENARIOS = tuple(SCENARIO_RUNS)
@@ -2162,8 +2206,200 @@ def test_an_undeterminable_repo_gets_its_own_branch_not_the_same_repo_one():
         "\n\nthe brief asserted the PR is in this session's repository — the "
         "self-contradicting claim this branch exists to stop"
     )
-    assert "--repo owner/name" in out, (
-        "the branch does not tell the operator how to answer the question"
+    # 🔴 ROUND 13 CHANGED WHICH REMEDY THIS ASSERTS, and the old one was the
+    # finding. It pinned "`--repo owner/name`" — but this run's unresolved half
+    # is the CWD's slug, and `--repo` states the PR's. `repo_relation` needs
+    # BOTH, so re-running with `--repo` lands in this exact branch again: a
+    # remedy prescribed for a cause it cannot address, the same class as the
+    # false `gh` attribution two guards below. What answers THIS run's question
+    # is the origin lookup, so that is what the brief now offers and what this
+    # pins.
+    assert f"git -C {FAKE_REPO_DIR} remote get-url origin" in out, (
+        "the branch does not tell the operator how to answer the question it "
+        "could not answer — which side is unresolved here is the CWD's slug"
+    )
+    assert "`--repo owner/name` to state" not in out, (
+        "\n\nthe brief offers `--repo owner/name` as the remedy for a run "
+        "whose unresolved half is the CWD's slug. `--repo` states the PR's "
+        "side; the comparison needs both, so that re-run lands right back in "
+        "this branch."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 13 — THE NINTH INSTANCE OF ONE MISTAKE, AND THE THIRD IN ITS FAMILY
+# --------------------------------------------------------------------------- #
+# A predicate read as a STRONGER fact than it carries. `headRefOid` (round 10),
+# `baseRefName` (round 12), and now WHICH REPOSITORY THE PR IS IN: the brief
+# said "`gh` did not report which repository the PR lives in" for a run that
+# consults no `gh` at all, two headings from its own sentence saying so.
+#
+# The two probes below are deliberately different shapes. The first reads the
+# CAUSE the brief states and drives BOTH causes, so its fix cannot be "delete
+# the `gh` sentence". The second is a CLASS guard over every scenario: no
+# `gh pr view` this script hands an auditor may omit `--repo`, whatever section
+# prints it.
+
+def where_to_work_section(brief):
+    """The WHERE TO WORK block alone, sliced off the next `## ` heading."""
+    start = brief.index("## WHERE TO WORK")
+    rest = brief[start + len("## WHERE TO WORK"):]
+    nxt = rest.find("\n## ")
+    return brief[start:start + len("## WHERE TO WORK")
+                 + (nxt if nxt != -1 else len(rest))]
+
+
+# 🔴 EVERY WAY THIS SECTION CAN ATTRIBUTE THE UNKNOWN TO `gh`. Not one phrase:
+# the defect had TWO spellings in one section — the branch sentence ("`gh` did
+# not report which repository the PR lives in") and the `REPO_UNKNOWN` sentinel
+# printed three lines under it ("UNKNOWN (not reported by `gh`; …)") — and a
+# guard on either alone is satisfied while the other still lies.
+_BLAMES_GH = re.compile(
+    r"reported by `gh`"
+    r"|`gh[^`]*` (?:was consulted|did not report)"
+    r"|`gh[^`]*`[^.]*? reported no"
+)
+
+# The literal cause the `--claims-file` branch owns. Every OTHER section of the
+# same brief already spells this for `headRefOid` and `baseRefName`; the point
+# is that WHERE TO WORK now agrees with them.
+CLAIMS_FILE_CAUSE = "consults no `gh`"
+
+
+def test_no_brief_blames_gh_for_a_repo_gh_was_never_asked_about():
+    """🔴 REGRESSION. Red at `6349a8b9`, scenario `claims-file-assumed-base`.
+
+    `render_worktree_directive` had TWO branches for the unknown state — no
+    `origin` remote, else "`gh` did not report which repository the PR lives
+    in" — and no third for "`gh` was never consulted". `--claims-file` mode
+    with a resolvable cwd slug therefore took the `gh` branch, and round 12's
+    own new scenario rendered a brief that CONTRADICTS ITSELF: THE RANGE says
+    "this run is `--claims-file` mode, which consults no `gh`" while WHERE TO
+    WORK says `gh` was asked and did not answer. Measured at that base with a
+    real checkout: rc 0, silent stderr.
+
+    Both causes are driven. A guard that only checked the claims-file side
+    would be satisfied by deleting the `gh` sentence outright, which would
+    make the brief silent about a cause that is real and common.
+    """
+    where = where_to_work_section(brief_for_scenario("claims-file-assumed-base"))
+    assert "COULD NOT DETERMINE" in where, (
+        f"\n\nthe scenario stopped rendering the unknown branch, so this "
+        f"guard is asserting over the wrong section:\n{where}"
+    )
+    assert not _BLAMES_GH.search(where), (
+        "\n\nWHERE TO WORK blames `gh` for not reporting the PR's repository "
+        "in a run that consulted no `gh`. The same brief says so itself two "
+        "headings away — one document, two contradictory statements, at rc 0 "
+        f"and with silent stderr.\n{where}"
+    )
+    assert CLAIMS_FILE_CAUSE in where, (
+        "\n\nWHERE TO WORK does not name the cause this run actually has. "
+        "The branch that DECIDED not to consult `gh` is the one that knows "
+        "why, exactly as `no_sha_reason` and `base_assumed_reason` are set "
+        f"there.\n{where}"
+    )
+
+    # 🔴 THE OTHER SIDE, so the fix is not "delete the sentence". Here `gh`
+    # really was consulted and really reported nothing readable.
+    where = where_to_work_section(
+        brief_for_scenario("unknown-repo-gh-said-nothing")
+    )
+    assert "COULD NOT DETERMINE" in where, (
+        f"\n\nthe `gh`-was-asked scenario no longer reaches the unknown "
+        f"branch:\n{where}"
+    )
+    assert _BLAMES_GH.search(where), (
+        "\n\nWHERE TO WORK stopped naming `gh` even for a run that DID "
+        "consult it and got nothing back. That is the real cause here, and "
+        "a brief that will not name it sends the operator looking at the "
+        f"wrong thing.\n{where}"
+    )
+    assert CLAIMS_FILE_CAUSE not in where, (
+        "\n\nthe `gh` scenario now claims to be `--claims-file` mode: the "
+        f"per-cause reason is stuck on one value.\n{where}"
+    )
+
+
+# 🔴 EVERY `gh pr view` THIS SCRIPT HANDS OVER, wherever it prints one. Round
+# 12 fixed exactly one site (`unresolved_tip_note`'s `headRefOid` lookup) and
+# left the sibling in WHERE TO WORK — so this reads the class, not the site.
+#
+# 🔴 THE PR NUMBER IS THE DISCRIMINATOR, and it is a real one rather than a
+# convenience. A COMMAND the auditor is meant to run names the PR
+# (`gh pr view 900 --json url`); a PROVENANCE sentence names only the API the
+# script itself read a field from ("read from `gh pr view --json headRefOid`")
+# and is not something anyone types. Requiring `--repo` on the second would be
+# a fix to prose that never runs — the "widen the implementation to the
+# sentence, but no wider" half of `claude/RULES.md` -> guards-narrower. The
+# NEGATIVE control below pins that both readings are live.
+_GH_PR_VIEW = re.compile(r"gh pr view \d+[^\n`]*")
+
+# A provenance mention, verbatim from THE LEDGER's cross-repo hand-over. It
+# must NOT be flagged: it is not a command.
+PROVENANCE_GH_MENTION = (
+    "read from `gh pr view --json headRefOid`, not resolved in any tree"
+)
+
+# The bare lookup round 12 left in place: run in the auditor's own repository
+# it returns THAT repository's PR #900 at rc 0, so the only answer it can ever
+# produce is "same repo" — the answer the section it sits in exists because it
+# cannot rule out.
+ROUND_12_UNQUALIFIED_LOOKUP = (
+    "gh pr view 900 --json url          # the repo the PR lives in"
+)
+
+
+def unqualified_gh_lookups_in(text):
+    return [c for c in _GH_PR_VIEW.findall(text) if "--repo" not in c]
+
+
+def test_no_gh_pr_view_this_script_prescribes_omits_repo():
+    """🔴 REGRESSION. Red at `6349a8b9`, scenario `claims-file-assumed-base`.
+
+    `gh pr view <n> --json <field>` with no `--repo` resolves against whatever
+    repository the auditor's CWD is in. Every brief that prints one has ALSO
+    just told them their CWD may be — or definitely is — a different
+    repository from the PR's, so the command returns another project's PR
+    #<n>, at rc 0, and reads as confirmation.
+
+    Round 12 closed this for the `headRefOid` lookup and wrote a paragraph
+    explaining why; the `--json url` lookup one section over kept the bare
+    form. So this guard is over the CLASS and over every scenario, rather than
+    over the one site a finding was filed against — `claude/RULES.md` ->
+    guards-narrower.
+    """
+    assert unqualified_gh_lookups_in(ROUND_12_UNQUALIFIED_LOOKUP), (
+        "POSITIVE CONTROL: the probe cannot see round 12's own bare lookup, "
+        "so a clean result below would say nothing at all"
+    )
+    # 🔴 NEGATIVE CONTROL, and it is not decoration: without it the cheapest
+    # way to green this guard is to bolt `--repo` onto a PROVENANCE sentence
+    # nobody runs, which fixes nothing and makes the next reader think the
+    # class is covered.
+    assert not unqualified_gh_lookups_in(PROVENANCE_GH_MENTION), (
+        "NEGATIVE CONTROL: the probe flags a sentence describing where the "
+        "script read a field, not a command anyone types. Widened that far it "
+        "demands `--repo` on prose and stops meaning anything."
+    )
+    seen = 0
+    for scenario in SCENARIOS:
+        brief = brief_for_scenario(scenario)
+        found = _GH_PR_VIEW.findall(brief)
+        seen += len(found)
+        bare = unqualified_gh_lookups_in(brief)
+        assert not bare, (
+            f"\n\nscenario {scenario!r} hands the auditor a `gh pr view` with "
+            f"no `--repo`: {bare}\n"
+            "  It resolves against their CWD's repository, returns that "
+            "project's PR of the same number at rc 0, and the one answer it "
+            "can produce is the 'same repo' this brief cannot rule out."
+        )
+    # 🔴 A ZERO HERE IS NOT A PASS. If no scenario prints a `gh pr view` at
+    # all, the loop above proved nothing about a class it never observed.
+    assert seen, (
+        "no scenario in this module renders a `gh pr view` command, so the "
+        "sweep above is a scan wired to nothing"
     )
 
 
@@ -2878,6 +3114,7 @@ def test_the_tip_placeholder_ledger_matches_the_script():
             claims=[], claims_round=None, checklist="", ledger=None,
             assembled_at="", claims_source="", head_check=None,
             base_assumed=False, base_assumed_reason=None,
+            repo_unknown_reason=None,
         )
     ), (
         "the banner every keyed guard looks for is not what the note emits, so "
@@ -2950,8 +3187,8 @@ PRESCRIPTION_SHA = "beefcafe"
 _PRESCRIPTION_LITERAL = "`audit-dispatch.py "
 
 
-def prescription_sites():
-    """-> {(first line, last line)} of every `print()` that prescribes a re-run.
+def prescription_sites(src=None):
+    """-> {(first line, last line)} of every CALL that prescribes a re-run.
 
     🔴 ROUND 12 — READ OUT OF THE SCRIPT, NOT LISTED HERE. The guard below
     calls itself a CLASS guard ("a third refusal that prescribes a command it
@@ -2961,16 +3198,68 @@ def prescription_sites():
     reached by a different input would be prescribed, unrun, and unreported,
     while the docstring went on promising otherwise. `claude/RULES.md` ->
     guards-narrower: make the implementation as wide as the sentence.
+
+    🔴 ROUND 13 — AND ROUND 12's OWN IMPLEMENTATION WAS NARROWER THAN ITS OWN
+    SENTENCE, in exactly the shape it had just named. It matched `ast.Call`
+    whose func is the NAME `print`, so two real spellings SURVIVED a fully
+    green 109-test suite when measured: a prescription written through
+    `err_stream.write(...)` (the func is an Attribute, not a Name), and
+    `print(_CONST, file=...)` where the literal lives in a module constant so
+    the CALL's own source segment does not contain it. Coverage was complete
+    by accident — both shipping sites are bare `print()` — which is the worst
+    version of this defect, because the docstring reads as a guarantee.
+    Neither shape is exotic: the script already writes to `err_stream` by name
+    all over `main`, and it already hoists shared prose into constants
+    (`TIP_PLACEHOLDER`, `REPO_UNKNOWN`).
+
+    So the scan is over EVERY call, by two routes: the literal appearing in
+    the call's own source, or the call referencing a name bound to a string
+    that carries it. `src` is injectable so the controls below can feed it
+    both survivors — a scanner asserted to be wide, and never fed a case it
+    must catch, is the "reassuring zero" this module refuses everywhere else.
     """
-    src = SCRIPT.read_text(encoding="utf-8")
-    out = set()
-    for node in ast.walk(ast.parse(src)):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id == "print"):
+    src = SCRIPT.read_text(encoding="utf-8") if src is None else src
+    tree = ast.parse(src)
+
+    carriers = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
             continue
-        if _PRESCRIPTION_LITERAL in (ast.get_source_segment(src, node) or ""):
+        if _PRESCRIPTION_LITERAL in (
+                ast.get_source_segment(src, node.value) or ""):
+            carriers |= {t.id for t in node.targets
+                         if isinstance(t, ast.Name)}
+
+    out = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        carried = carriers & {
+            n.id for n in ast.walk(node) if isinstance(n, ast.Name)
+        }
+        if carried or _PRESCRIPTION_LITERAL in (
+                ast.get_source_segment(src, node) or ""):
             out.add((node.lineno, node.end_lineno))
     return out
+
+
+# 🔴 THE TWO SPELLINGS ROUND 12's SCANNER COULD NOT SEE, measured SURVIVING a
+# green 109-test suite at `6349a8b9`. They are the controls for the widened
+# one: each MUST be found, or the docstring above is a coverage claim over an
+# implementation that does not make it.
+PRESCRIPTION_SURVIVORS = {
+    "written through `err_stream.write`, not `print`": (
+        'def f(err_stream):\n'
+        '    err_stream.write(\n'
+        '        "Fix: run `audit-dispatch.py 900 --round 1 --emit-claims`."\n'
+        '    )\n'
+    ),
+    "the literal hoisted into a module constant": (
+        'REMEDY = "Fix: run `audit-dispatch.py 900 --round 1 --emit-claims`."\n'
+        'def f(err_stream):\n'
+        '    print(REMEDY, file=err_stream)\n'
+    ),
+}
 
 
 def run_main_traced(argv, **kw):
@@ -3069,11 +3358,22 @@ def test_every_command_a_refusal_prescribes_actually_runs():
     # assertion at the foot vacuously true, which is the reassuring zero
     # `claude/RULES.md` says to feed a case that must move.
     assert sites, (
-        "no `print()` in the script prescribes an `audit-dispatch.py` re-run "
-        f"at all — {_PRESCRIPTION_LITERAL!r} matched nothing, so the coverage "
+        "no call in the script prescribes an `audit-dispatch.py` re-run at "
+        f"all — {_PRESCRIPTION_LITERAL!r} matched nothing, so the coverage "
         "assertion below would pass over an empty set. Either the remedies "
-        "moved out of `print()` or the literal changed."
+        "moved or the literal changed."
     )
+    # 🔴 ROUND 13 — AND THE SCANNER'S WIDTH IS MEASURED, NOT ASSERTED. Both
+    # spellings below SURVIVED this guard at `6349a8b9` while it matched only
+    # a bare `print()`. Feeding them here is what makes `prescription_sites`'s
+    # docstring a claim the implementation actually keeps: `claude/RULES.md`
+    # -> guards-narrower, applied to the guard that names that rule.
+    for shape, source in PRESCRIPTION_SURVIVORS.items():
+        assert prescription_sites(source), (
+            f"POSITIVE CONTROL: the scanner cannot see a prescription {shape}. "
+            "It reports a clean sweep of the sites it happens to recognise, "
+            "which is not the class its docstring names."
+        )
     reached = set()
     for name, kw in cases.items():
         rc, _out, err, executed = run_main_traced(["900", "--round", "3"], **kw)
@@ -4029,24 +4329,149 @@ ROUND_10_CLONE_GRANT = (
 # A CLOSED LIST of refused verbs — "do not `a`, `b` or `c` there". The shape
 # that leaves `remote update`, `switch`, `restore`, `reset`, `branch -f` and
 # `gc` permitted by omission.
+#
+# 🔴 ROUND 13 — THIS PROBE IS ITSELF A SPELLED GUARD, and it was measured
+# walkable. Re-spelling round 10's enumeration as "never `fetch`, `pull` or
+# `checkout` in that clone" leaves it — and the whole 109-test suite — green:
+# the enumeration is back, permitting `remote update` and `switch` by omission
+# again, and nothing sees it. It is KEPT, because a second check that fails
+# differently is worth its cost, but it is no longer the thing the guard
+# relies on: `git_verbs_named_in` below asserts the STATE (which git verbs the
+# grant names) instead of a phrase, and no rewording moves that.
 _ENUMERATED_CLONE_REFUSAL = re.compile(
     r"do not (?:`[a-z][a-z-]*`(?:, )?)+ ?or `[a-z][a-z-]*` there"
 )
 
-# The universal that replaces it: the permitted write stated positively, and
+# 🔴 ROUND 13's OWN RE-SPELLING, verbatim, as the second positive control for
+# the structural probe. Measured GREEN against the shipping suite at
+# `6349a8b9` while re-introducing the enumeration round 12 removed.
+ROUND_13_RESPELLED_ENUMERATION = (
+    "That worktree is YOURS: fetching and checking out inside it is fine. "
+    "In the clone you made it from, `git worktree add` is the ONLY write "
+    "this brief asks for and the ONLY one you may make — never `fetch`, "
+    "`pull` or `checkout` in that clone, whoever made it, because other "
+    "sessions may be standing in it. The no-write rule below is about every "
+    "checkout you did not make."
+)
+
+# The universal that replaces it: the permitted writes stated positively, and
 # everything else refused whether or not anyone thought to name it.
 CLONE_GRANT_CATCH_ALL = (
-    "the ONLY one you may make — every other command that writes there is "
+    "the ONLY ones you may make — every other command that writes there is "
     "refused, named or not"
 )
 
-# The recipe's own `git -C <clone> …` line, so the verb it runs there is read
-# and not remembered.
+# The recipe's own `git -C <clone> …` lines, so what it runs there is READ and
+# not remembered. `_CLONE_RECIPE` keeps the verb-only reading the grant/recipe
+# relationship is built on; `_CLONE_RECIPE_CMD` keeps the whole command, which
+# is what the ref-provenance probe needs.
 _CLONE_RECIPE = re.compile(r"git -C <your local clone of [^>]*> ([a-z-]+)")
+_CLONE_RECIPE_CMD = re.compile(r"^git -C <your local clone of [^>]*> (.+)$", re.M)
+
+# 🔴 ROUND 13 — ROUND 12's RECIPE LINE, verbatim, as the positive control for
+# the ref-provenance probe. It is the line that CANNOT BE RUN: `worktree add`
+# resolves `<the PR's head branch>` against refs the clone already has, and
+# nothing in the recipe puts it there. Measured on scratch repos with git
+# 2.55.0 — `fatal: invalid reference: pr-head`, rc 128, both for a clone that
+# has not fetched since the PR opened and (after a full fetch) for a FORK PR,
+# whose branch is never in `origin`.
+ROUND_12_CLONE_RECIPE = (
+    "git -C <your local clone of someone-else/otherproj> worktree add "
+    "/tmp/audit-pr900-r1 <the PR's head branch>"
+)
 
 
 def clone_write_grants_in(text):
     return [p for p in CLONE_WRITE_GRANT_PHRASES if p in text]
+
+
+def git_verbs_named_in(text):
+    """Every git SUBCOMMAND a backticked span in `text` names.
+
+    🔴 ROUND 13 — THE STATE, NOT A PHRASE. The hazard the enumeration probe
+    means to catch is "this grant names git verbs the recipe does not run",
+    and that is a fact about the SET of verbs, not about the words "do not" or
+    "never". Reading the set makes every re-spelling of a closed list fail
+    identically, which is the `claude/RULES.md` spelled-guards remedy.
+
+    A token counts when it is the first word of a backticked span (after an
+    optional leading `git`) and is not path-shaped — so `refs/audit/` and
+    `refs/pull/<n>/head` are excluded by the slash and no vocabulary of known
+    verbs is needed, which is what would re-introduce a closed list inside the
+    guard itself.
+    """
+    out = set()
+    for span in re.findall(r"`([^`]+)`", text):
+        toks = span.split()
+        if toks and toks[0] == "git":
+            toks = toks[1:]
+        if not toks:
+            continue
+        head = toks[0]
+        if "/" in head or not re.fullmatch(r"[a-z][a-z-]*", head):
+            continue
+        out.add(head)
+    return out
+
+
+def clone_recipe_commands(text):
+    """The `git -C <clone> …` commands the recipe runs, whole, in order."""
+    return [m.group(1) for m in _CLONE_RECIPE_CMD.finditer(text)]
+
+
+def _worktree_add_committish(cmd):
+    """-> what a `worktree add` line asks git to RESOLVE, or None."""
+    parts = cmd.split()
+    if parts[:2] != ["worktree", "add"]:
+        return None
+    rest = [p for p in parts[2:] if not p.startswith("--")]
+    return " ".join(rest[1:]) or None
+
+
+def unrunnable_recipe_steps(cmds):
+    """-> the reasons this recipe cannot be run as written. Empty is the pass.
+
+    🔴 THE RELATIONSHIP, not a spelling: every ref a `worktree add` resolves in
+    the clone must be one an EARLIER line of the same recipe created there.
+    Round 12's recipe named the PR's head BRANCH, which is a ref the clone only
+    has if it has fetched — and fetching there is the write the grant refuses,
+    so the recipe and the rule could not both be obeyed. A fork PR's branch is
+    not in that clone's `origin` at any point, so no permitted fetch would help
+    either.
+    """
+    created, problems = set(), []
+    for cmd in cmds:
+        parts = cmd.split()
+        if parts[:1] == ["fetch"]:
+            for p in parts[1:]:
+                if ":" in p:
+                    src, dst = p.split(":", 1)
+                    created.add(dst)
+                    if not src.startswith("refs/pull/"):
+                        problems.append(
+                            f"the fetch reads {src!r}, which is not the "
+                            "`refs/pull/<n>/head` GitHub publishes on the BASE "
+                            "repository — a fork PR's head is reachable by no "
+                            "other ref in that clone's `origin`"
+                        )
+        tip = _worktree_add_committish(cmd)
+        if tip is None:
+            continue
+        if tip not in created:
+            problems.append(
+                f"`worktree add` resolves {tip!r}, which no earlier line of "
+                "this recipe put in the clone. git answers `fatal: invalid "
+                "reference`, rc 128, unless the clone happens to have fetched "
+                "it already — and putting it there is a write the grant "
+                "refuses"
+            )
+        if "--detach" not in cmd.split():
+            problems.append(
+                "`worktree add` is not `--detach`ed, so it creates "
+                "`refs/heads/<branch>` in the SHARED clone and fails rc 128 "
+                "when another worktree already holds that branch"
+            )
+    return problems
 
 
 def test_the_clone_grant_covers_only_the_write_the_recipe_makes():
@@ -4089,26 +4514,54 @@ def test_the_clone_grant_covers_only_the_write_the_recipe_makes():
     )
     brief = brief_for_scenario("cross-repo")
     verbs = _CLONE_RECIPE.findall(brief)
-    assert verbs == ["worktree"], (
-        "\n\nWHERE TO WORK's recipe no longer runs exactly one `git -C "
-        f"<clone> …` command, or runs a different one: {verbs}. The grant "
-        "below is scoped to the write the recipe makes, so the two move "
-        "together."
+    assert verbs, (
+        "\n\nWHERE TO WORK's recipe no longer runs any `git -C <clone> …` "
+        "command, so the grant below is scoped to nothing and every check "
+        "under it is vacuous."
     )
     granted = clone_write_grants_in(brief)
     assert not granted, (
-        f"\n\nthe brief grants the auditor `fetch`/`checkout` inside the clone "
-        f"— {granted}. The recipe's only write there is `{verbs[0]} add`; "
-        "everything else is a cross-session write into a tree the brief calls "
-        "`<your local clone of owner/name>`, which on this host is a shared, "
-        "long-lived checkout.\n"
+        f"\n\nthe brief grants the auditor blanket `fetch`/`checkout` inside "
+        f"the clone — {granted}. Its writes there are {sorted(set(verbs))}, "
+        "each one narrowly scoped; a blanket grant is a cross-session write "
+        "into a tree the brief calls `<your local clone of owner/name>`, "
+        "which on this host is a shared, long-lived checkout.\n"
         + ad.DIRECTIVE["own-worktree-is-writable"]
     )
     grant = ad.DIRECTIVE["own-worktree-is-writable"]
-    assert "`git worktree add` is the ONLY write" in grant, (
-        "\n\nthe grant no longer says which single operation it covers in the "
+    assert "the ONLY writes this brief asks for" in grant, (
+        "\n\nthe grant no longer says which operations it covers in the "
         "clone, so the next reader has only 'you made it' to reason from — "
         f"which is what round 8 reasoned from.\n{grant}"
+    )
+    # 🔴 ROUND 13 — THE RELATIONSHIP, READ BOTH WAYS. The grant must name the
+    # verbs the recipe runs and NO OTHERS. Naming fewer leaves a write the
+    # brief itself asks for unpermitted (which is finding F2: `worktree add`
+    # over a ref only a forbidden `fetch` could supply). Naming more is the
+    # closed-verb-list hazard in its structural spelling — round 10's
+    # `fetch`/`pull`/`checkout` and round 13's re-wording of it both land here,
+    # because both name verbs the recipe does not run.
+    #
+    # Positive controls FIRST, and there are two, because the regex probe
+    # below could see round 10's phrasing and could NOT see round 13's.
+    for label, control in (
+        ("round 10's enumeration", ROUND_10_CLONE_GRANT),
+        ("round 13's re-spelling of it", ROUND_13_RESPELLED_ENUMERATION),
+    ):
+        assert git_verbs_named_in(control) != set(verbs), (
+            f"POSITIVE CONTROL: the verb-set probe reads {label} as agreeing "
+            "with the recipe, so a clean result below would say nothing at all"
+        )
+    assert git_verbs_named_in(grant) == set(verbs), (
+        "\n\nthe grant names git verbs the recipe does not run, or omits ones "
+        f"it does: grant {sorted(git_verbs_named_in(grant))} vs recipe "
+        f"{sorted(set(verbs))}.\n"
+        "  MORE than the recipe: a closed list of refused verbs, whatever "
+        "words wrap it — everything unnamed is permitted by omission, and "
+        "this directive is the ONLY rule covering that tree.\n"
+        "  FEWER: the brief asks for a write it does not permit, which is a "
+        "recipe the auditor can obey or run but not both.\n"
+        f"{grant}"
     )
     # 🔴 ROUND 12 — A CATCH-ALL, NOT A LONGER VERB LIST. Positive control
     # first: the probe must be able to SEE round 10's enumeration, or a clean
@@ -4128,9 +4581,78 @@ def test_the_clone_grant_covers_only_the_write_the_recipe_makes():
         f"checkout you did NOT make, and the clone is one you did.\n{grant}"
     )
     assert CLONE_GRANT_CATCH_ALL in grant, (
-        "\n\nthe grant no longer refuses everything other than the one write "
-        "it permits. A guard on words is walkable by rewording; the refusal "
+        "\n\nthe grant no longer refuses everything other than the writes it "
+        "permits. A guard on words is walkable by rewording; the refusal "
         f"here has to be a universal.\n{grant}"
+    )
+
+
+def test_the_cross_repo_recipe_can_actually_be_run():
+    """🔴 REGRESSION. Red at `6349a8b9`, scenario `cross-repo`.
+
+    Round 12's recipe was one line:
+
+        git -C <clone> worktree add /tmp/audit-pr900-r1 <the PR's head branch>
+
+    and `worktree add` resolves that branch against refs the clone ALREADY
+    has. Measured on scratch repos, git 2.55.0:
+
+      * clone has not fetched since the PR opened (the normal case)
+            -> `fatal: invalid reference: pr-head`, rc 128
+      * FORK PR, after a full `git fetch origin` (the CERTAIN case — that
+        branch is never in the base repo's `origin`)
+            -> `fatal: invalid reference: fork-pr-head`, rc 128
+
+    Putting the ref there is a `fetch` in the clone, which
+    `own-worktree-is-writable` refuses. The one workaround that wording
+    permitted — `worktree add --detach`, then fetch INSIDE the worktree — is
+    not a workaround at all: a linked worktree shares the clone's ref store
+    and object store, so the fetch wrote `refs/remotes/fork/pr-head` into the
+    CLONE, added a remote to the CLONE's config, and `git -C <clone> cat-file
+    -e <sha>` returned 0. The auditor could either not run the recipe or
+    comply with one sentence while violating another — on the ONE tree in this
+    brief whose failure lands outside it, a cross-session write into
+    `~/workspace/<repo>` while other sessions are working there.
+
+    Same class as `test_every_command_a_refusal_prescribes_actually_runs` one
+    section over: a prescription that cannot be run.
+
+    🔴 WHAT THIS DOES NOT DO is spawn git — the module is hermetic and says so
+    (blind spot 3 in its docstring). The rc-128 measurements above were made
+    by hand on real repos and are recorded in the fix commit; what this pins
+    is the RELATIONSHIP that made them possible, which is machine-readable:
+    a ref `worktree add` resolves must be one the recipe itself created.
+    """
+    # 🔴 POSITIVE CONTROL. The probe must be able to SEE round 12's line, or a
+    # clean result below is a scan wired to nothing.
+    control = unrunnable_recipe_steps(
+        clone_recipe_commands(ROUND_12_CLONE_RECIPE)
+    )
+    assert any("invalid reference" in p for p in control), (
+        "POSITIVE CONTROL: the probe does not flag round 12's own recipe, "
+        f"which is the line measured at rc 128: {control}"
+    )
+
+    brief = brief_for_scenario("cross-repo")
+    cmds = clone_recipe_commands(brief)
+    assert cmds, (
+        "\n\nWHERE TO WORK's cross-repo recipe runs no `git -C <clone> …` "
+        "command at all, so this guard is asserting over nothing"
+    )
+    assert any(c.split()[:2] == ["worktree", "add"] for c in cmds), (
+        f"\n\nthe recipe no longer creates a worktree: {cmds}. The section's "
+        "whole job is to hand a cross-repo auditor a tree to work in."
+    )
+    problems = unrunnable_recipe_steps(cmds)
+    assert not problems, (
+        "\n\nWHERE TO WORK's recipe cannot be run as written:\n  - "
+        + "\n  - ".join(problems)
+        + "\n\nThat section is the only place a cross-repo auditor is told "
+        "where to work, and the tree it names is a long-lived checkout other "
+        "sessions are standing in. A recipe that fails rc 128 sends them "
+        "looking for a verb that gets the ref there — which is exactly the "
+        "cross-session write `own-worktree-is-writable` exists to refuse.\n"
+        + "\n".join(cmds)
     )
 
 
@@ -5620,6 +6142,34 @@ RED_AT_BASE_R9: frozenset[str] = frozenset({
     "test_no_brief_states_an_assumed_base_branch_as_a_fact",
 })
 
+# 🔴 ROUND 13. Three tests, watched RED at `6349a8b9` — the tree round 12's
+# work MERGED into, which is why round 13 audited it rather than a branch. Each
+# is red there on a WRONG ANSWER, not on an absence:
+#
+#   test_no_brief_blames_gh_for_a_repo_gh_was_never_asked_about
+#       WHERE TO WORK: "`gh` did not report which repository the PR lives in"
+#       in a `--claims-file` run, whose own RANGE section two headings away
+#       says the run consults no `gh`. rc 0, silent stderr.
+#   test_no_gh_pr_view_this_script_prescribes_omits_repo
+#       the same section prescribes `gh pr view 900 --json url` with no
+#       `--repo`, which in the auditor's own repo returns THAT repo's PR #900
+#       at rc 0 — so it can only ever confirm "same repo".
+#   test_the_cross_repo_recipe_can_actually_be_run
+#       `worktree add <path> <the PR's head branch>` names a ref the clone has
+#       only if it FETCHED, and the grant beneath it refuses every write but
+#       `worktree add`. Measured rc 128 on real scratch repos, git 2.55.0.
+#
+# `test_an_undeterminable_repo_gets_its_own_branch_not_the_same_repo_one` and
+# `test_the_clone_grant_covers_only_the_write_the_recipe_makes` are NOT
+# repeated here — both were already filed at earlier refs, and both are red at
+# this one too for round 13's reasons. A test belongs to the ref it was FIRST
+# watched red at.
+RED_AT_BASE_R13: frozenset[str] = frozenset({
+    "test_no_brief_blames_gh_for_a_repo_gh_was_never_asked_about",
+    "test_no_gh_pr_view_this_script_prescribes_omits_repo",
+    "test_the_cross_repo_recipe_can_actually_be_run",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
@@ -5628,6 +6178,7 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "3619fe68": RED_AT_BASE_R6,
     "28492af2": RED_AT_BASE_R7,
     "706a6b38": RED_AT_BASE_R9,
+    "6349a8b9": RED_AT_BASE_R13,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
@@ -6123,6 +6674,36 @@ FIX_MATRIX = (
      "it as a fact about the PR's repository, at rc 0",
      "test_no_brief_states_an_assumed_base_branch_as_a_fact",
      "RED@706a6b38", "V24"),
+    # 🔴 ROUND 13, audited against the MERGED tree rather than a branch.
+    ("r13/F1 the NINTH instance and the THIRD in one family: "
+     "`repo_relation == \"unknown\"` read as \"`gh` was asked and had "
+     "nothing\", so a `--claims-file` run — which consults no `gh` — rendered "
+     "a brief contradicting itself in two sections, at rc 0",
+     "test_no_brief_blames_gh_for_a_repo_gh_was_never_asked_about",
+     "RED@6349a8b9", "V30 V31"),
+    ("r13/F1' the same section prescribed `gh pr view <n> --json url` with no "
+     "`--repo`, which in the auditor's own repo answers about THAT repo's PR "
+     "of the same number at rc 0 — the hazard round 12 closed one site over",
+     "test_no_gh_pr_view_this_script_prescribes_omits_repo",
+     "RED@6349a8b9", "V32"),
+    ("r13/F2 the cross-repo recipe and its catch-all could not both be "
+     "obeyed: `worktree add <the PR's head branch>` needs a ref only a FETCH "
+     "puts in the clone, and the grant refused every write but `worktree "
+     "add`. Measured rc 128 on real repos, and certain for a fork PR",
+     "test_the_cross_repo_recipe_can_actually_be_run",
+     "RED@6349a8b9", "V33"),
+    ("r13/F3 the prescription scanner was NARROWER THAN ITS OWN DOCSTRING: it "
+     "matched `ast.Call` whose func is the NAME `print`, so a prescription "
+     "via `err_stream.write` or via a module constant SURVIVED a green suite. "
+     "Coverage was complete only by accident of both real sites being bare "
+     "`print()`",
+     "test_every_command_a_refusal_prescribes_actually_runs",
+     "RED@706a6b38", "V20 V23 V29 V35"),
+    ("r13/F4 the closed-verb-list probe was itself SPELLED — re-wording round "
+     "10's enumeration left the whole suite green. Replaced by a verb-SET "
+     "relationship read off the recipe, which no rewording moves",
+     "test_the_clone_grant_covers_only_the_write_the_recipe_makes",
+     "RED@706a6b38", "V22 V28 V34"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
