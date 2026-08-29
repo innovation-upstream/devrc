@@ -49,18 +49,28 @@ python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tai
   ARCHIVE block prints `live/closed state is PARTIAL`, and the JSON carries
   `archive.live_coverage_complete: false` beside `live_ids_measured: true`. Do not report
   an `<UNMEASURED>` hit as finished.
-- 🔴 **`--any`, `--project` and `--since` reach the ARCHIVE leg ONLY** and the tool says so
-  on stderr — the live scan ANDs its terms, has no cwd filter and no date axis. Surface
+- 🔴 **SIX flags reach the ARCHIVE leg ONLY** — `--any`, `--project`, `--since`,
+  `--claude-only`, `--opencode-only`, `--all` — and the tool names them on stderr. Surface
   that notice: an empty LIVE section under `--any` is a measured absence under semantics
-  the user did not ask for. `--limit` DOES bound the LIVE section (it prints
-  `showing N of M`) but deliberately does **not** narrow the `--tail` ambiguity check.
+  the user did not ask for. 🔴 **A CORPUS selector is worse than "not filtered":**
+  `--opencode-only --live` shows tmux windows of any runtime, and if the live leg matches
+  the archive never runs, so **the corpus the user chose is never searched**. The notice
+  says to pass `--deep`; do that rather than reporting the live rows as the answer.
+  `--limit` DOES bound the LIVE section (it prints `showing N of M`) but deliberately does
+  **not** narrow the `--tail` ambiguity check; `--limit` below 1 is a usage error (it used
+  to mean "everything" on one leg and "nothing" on the other).
 - 🔴 **A failed `--tail` is not an empty window.** `session-manager tail` returning 2/4/5
   (window closed between the scan and the tail, host gone, no tmux server) prints
   `TAIL: FAILED — … exited N` and exits 4, with `tail.rc` / `tail.ok` in the JSON. Only
   rc 0 and rc 3 are measured; rc 3 renders as an explicitly MEASURED empty pane.
-- Exit codes: `0` found · `2` usage (e.g. `--tail` without `--live`) · `3` `--tail` could
-  not resolve to one window · `4` the live fleet was not measured. `--live` composes with
-  `--json`, which then emits `{live, archive, tail}` instead of the bare array.
+- Exit codes: `0` found · `2` usage (`--tail` without `--live`, `--limit` below 1) ·
+  `3` `--tail` could not resolve to one window on a FULLY measured fleet ·
+  🔴 **`4` = SOMETHING WAS NOT MEASURED, and it now covers three cases** — the live scan
+  failed or no host answered; the tail resolved but `session-manager tail` failed
+  (rc 2/4/5); or `--tail` found zero matches while a host was unreachable, so the absence
+  is not measured. Branch on `tail.ok` / `tail.rc` / `tail.coverage_complete` in `--json`
+  rather than on `4` alone. `--live` composes with `--json`, which then emits
+  `{live, archive, tail}` instead of the bare array.
 - 🔴 **NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED FILE.** `--live --json` passes
   the live rows through verbatim, and one of them is `unsent_prompt` — text the operator
   typed and never sent. `--tail` output is a whole pane of it. devrc is a **PUBLIC** repo,

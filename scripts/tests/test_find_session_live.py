@@ -746,10 +746,17 @@ def test_fmt_age_states_a_MISSING_age_rather_than_rendering_zero():
 #   R1-8  `live_scan` raised AttributeError on valid-but-non-object JSON,
 #         outside the try, from a function whose contract is to discriminate.
 #
-# 🔴 WHICH OF THESE IS REGRESSION COVERAGE. MEASURED: this file and its sibling
-# were copied into a detached worktree at a6f09d5a — 56 new nodes across the
-# two, 46 RED and 10 GREEN. The six GREEN ones from THIS file are below; none is
-# evidence a bug was fixed.
+# 🔴 WHICH OF THESE IS REGRESSION COVERAGE. MEASURED at NODE level: this file
+# and its sibling were collected at both shas and the head tests run against
+# base source — **66 new nodes across the two, 46 RED and 20 GREEN at a6f09d5a**.
+# SEVEN of the green are from THIS file and are named below.
+#
+# ⚠ An earlier revision said "56 nodes … 10 GREEN" and "the SIX green ones from
+# THIS file". The red count was exact; the rest came from a FUNCTION-level sweep
+# that did not expand `parametrize` and skipped functions whose name already
+# existed at base. This file's own miscount was `test_the_R1_invariant_guard_
+# ledger_names_only_tests_that_exist` — the ledger's gate was itself missing
+# from the ledger.
 # =========================================================================== #
 R1_INVARIANT_GUARDS = frozenset({
     # The strict default of `live_state_of` IS the old behaviour — that is the
@@ -766,13 +773,18 @@ R1_INVARIANT_GUARDS = frozenset({
     "test_the_JSON_live_rows_are_NOT_truncated_by_limit",
     # POSITIVE control on the isinstance guard.
     "test_a_REAL_report_object_still_parses",
+    # This ledger's own gate — it has no behaviour to regress, and it was the
+    # entry this ledger forgot about itself.
+    "test_the_R1_invariant_guard_ledger_names_only_tests_that_exist",
 })
 
 
 def test_the_R1_invariant_guard_ledger_names_only_tests_that_exist():
-    for name in R1_INVARIANT_GUARDS:
-        assert name in globals(), (
-            f"{name!r} is listed as an R1 invariant guard but no such test exists")
+    assert R1_INVARIANT_GUARDS, "the ledger is empty — the gate is wired to nothing"
+    for entry in R1_INVARIANT_GUARDS:
+        func = entry.split("[", 1)[0]
+        assert func in globals(), (
+            f"{entry!r} is listed as an R1 invariant guard but no such test exists")
 
 # 🔴 ROW_VAPOR lives on the LAPTOP and ROW_VIOLET on the WORKBENCH. That split is
 # what makes the partial-fleet probes reachable: with the laptop down, Vapor's
@@ -969,7 +981,7 @@ def test_the_tail_MEASURED_rc_set_is_pinned_to_literals():
 # R1-4 — an archive-only flag must say it did not reach the live leg
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("flag,needle", [
-    (["--any"], "--any (the live scan ANDs; there is no OR mode)"),
+    (["--any"], "--any (the live scan ANDs its terms; there is no OR mode)"),
     (["--project", "zzproj"], "--project"),
     (["--since", "2026-01-01"], "--since"),
 ], ids=["any", "project", "since"])
@@ -1061,7 +1073,13 @@ def test_valid_but_NON_OBJECT_json_is_a_discriminated_error_not_a_crash(body):
         fs.RUN = old
     assert res["status"] == "error"
     assert "not a report object" in res["error"]
-    assert res["rows"] == [] and res["hosts_reachable"] == []
+    assert res["rows"] == []
+    # 🔴 R2-F3: BOTH host lists are `None`, never `[]`. An empty
+    # `hosts_unreachable` is the strongest possible claim — *every host
+    # answered* — about a scan that never ran, and it leaked into the payload as
+    # `archive.live_hosts_unreachable: []`.
+    assert res["hosts_reachable"] is None
+    assert res["hosts_unreachable"] is None
 
 
 def test_a_REAL_report_object_still_parses():
@@ -1074,3 +1092,339 @@ def test_a_REAL_report_object_still_parses():
         fs.RUN = old
     assert res["status"] == "ok"
     assert len(res["rows"]) == 1
+
+
+# =========================================================================== #
+# §3 — AUDIT FIX ROUND 2 (against tip 9f9dcbde)
+#
+#   F1  🟡 `--claude-only` / `--opencode-only` / `--all` still reached ONLY the
+#       archive leg, silently — UNDER a comment whose last line asserted the
+#       class was closed ("these are the rest"). Reproduced on the live fleet:
+#       `--live --opencode-only` returned tmux windows running CLAUDE, and
+#       because the live leg matched, `run_archive` stayed False so the opencode
+#       corpus was never searched at all. The completeness sentence is worse
+#       than the omission: it tells the next reader to stop looking. The set is
+#       DATA now (`ARCHIVE_ONLY_FLAGS`) and is pinned two-way against argparse.
+#   F2  🟡 `_tail_outcome` stated a measured absence under a partial fleet:
+#       "no live window matched, so there is nothing to tail", exit 3, with no
+#       coverage field anywhere in the `tail` JSON — while the ARCHIVE block
+#       three lines earlier correctly printed `⚠ live/closed state is PARTIAL`.
+#   F3  🟡 `hosts_unreachable: []` for a scan that never ran reads as "every
+#       host answered". Fixed at the SOURCE (`live_scan` seeds both host lists
+#       `None`), so no publisher can reintroduce it.
+#   F6  🟢 exit 4 now means three things; documented rather than split.
+#   F8  🟢 `--limit 0` was unbounded on the live leg and empty on the archive
+#       leg — one flag, opposite meanings in one run. Now a usage error.
+#
+# 🔴 MEASURED AT NODE LEVEL against 9f9dcbde — 29 NEW nodes across the two
+# files, 16 RED and 13 GREEN, plus 5 MODIFIED nodes that also went red (the four
+# `test_valid_but_NON_OBJECT_json…` params, whose assertion tightened from `[]`
+# to `None` for F3, and `…ARCHIVE_ONLY_flag…[any]`, whose needle moved). FIVE of
+# the 13 green are from THIS file and are named below.
+#
+# The method is deliberately node-level: round 1's ledger was wrong precisely
+# because it counted FUNCTIONS whose names were new, which skipped `parametrize`
+# expansion and skipped modified-but-same-named tests.
+# =========================================================================== #
+R2_INVARIANT_GUARDS = frozenset({
+    # NEGATIVE control on F1's extra sentence — a non-corpus archive-only flag
+    # must NOT get the corpus warning, or the line becomes noise.
+    "test_a_NON_corpus_archive_only_flag_gets_the_SHORT_notice",
+    # NEGATIVE control on F2 — with every host answering, "there is nothing to
+    # tail" is TRUE and exit 3 is right. "Always say unmeasured" would pass the
+    # partial-fleet probe and make the message useless.
+    "test_a_tail_with_NO_match_on_a_FULL_fleet_is_still_a_MEASURED_absence",
+    # NEGATIVE control on F3 — `unavailable` means the scan RAN, so those host
+    # lists are real measurements and must NOT be nulled with the error paths.
+    "test_an_UNAVAILABLE_scan_publishes_REAL_host_lists",
+    # BOUNDARY control on F8 — `--limit 1` is the smallest legitimate value and
+    # a check one off would reject it (a permanently-red gate).
+    "test_limit_ONE_is_accepted_and_bounds_both_legs",
+    # This ledger's own gate.
+    "test_the_R2_ledger_names_only_tests_that_exist",
+})
+
+
+def test_the_R2_ledger_names_only_tests_that_exist():
+    assert R2_INVARIANT_GUARDS, "the ledger is empty — the gate is wired to nothing"
+    for entry in R2_INVARIANT_GUARDS:
+        assert entry.split("[", 1)[0] in globals(), (
+            f"{entry!r} is listed as an R2 invariant guard but no such test exists")
+
+
+# --------------------------------------------------------------------------- #
+# F1 — the archive-only ledger, and the completeness claim made structural
+# --------------------------------------------------------------------------- #
+def test_the_archive_only_ledger_PARTITIONS_every_argparse_destination():
+    """🔴 F1, STRUCTURALLY. The old inline list was closed by a sentence —
+    "these are the rest" — that was false when written. There is no sentence
+    now: every parser destination is either live-aware or archive-only, and a
+    NEW flag that is neither fails here rather than shipping a silent one-leg
+    filter under a comment claiming the class is closed.
+    """
+    # The destination set is read from a real parse of a minimal argv, so it is
+    # whatever the parser ACTUALLY declares rather than a second hand-written
+    # list — the thing that drifted in the first place.
+    dests = set(vars(fs.parse_args(["zzterm"])))
+    assert dests, "the parser declared no destinations — gate wired to nothing"
+    ledger = {d for d, _, _ in fs.ARCHIVE_ONLY_FLAGS}
+    assert dests == fs.LIVE_AWARE_DESTS | ledger, (
+        "a find-session flag is neither live-aware nor in ARCHIVE_ONLY_FLAGS:\n"
+        f"  unclassified: {sorted(dests - fs.LIVE_AWARE_DESTS - ledger)}\n"
+        f"  named but absent from the parser: "
+        f"{sorted((fs.LIVE_AWARE_DESTS | ledger) - dests)}\n"
+        "Decide which leg it reaches; do not leave it silent.")
+    # the two halves are disjoint — a flag cannot be both
+    assert not (fs.LIVE_AWARE_DESTS & ledger)
+    # ...and the corpus selectors are a SUBSET of the archive-only set
+    assert fs.CORPUS_SELECTOR_DESTS <= ledger
+
+
+def test_the_ledger_contains_the_THREE_FLAGS_THE_SENTENCE_MISSED():
+    """The specific regression, named. A structural partition that happened to
+    classify these as live-aware would pass the test above."""
+    ledger = {d for d, _, _ in fs.ARCHIVE_ONLY_FLAGS}
+    assert {"claude_only", "opencode_only", "all"} <= ledger
+
+
+@pytest.mark.parametrize("flag,dest", [
+    (["--claude-only"], "claude_only"),
+    (["--opencode-only"], "opencode_only"),
+    (["--all"], "all"),
+], ids=["claude-only", "opencode-only", "all"])
+def test_a_CORPUS_flag_with_live_says_the_corpus_was_never_searched(
+        monkeypatch, flag, dest):
+    """🔴 F1's headline: `--live --opencode-only` showed Claude tmux windows and
+    never searched opencode, because a matching live leg skips the archive
+    entirely. The notice has to say THAT, not merely "not filtered by them"."""
+    run = make_run({("zzterm",): (0, live_report([ROW_VIOLET],
+                                                 match_fields=DEFAULT_MATCH_FIELDS))})
+    got = run_main(monkeypatch, ["zzterm", "--live"] + flag, run,
+                   archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    assert "ARCHIVE-ONLY flags, ignored by the live scan" in got["err"]
+    assert "CORPUS selector only steers the ARCHIVE" in got["err"]
+    assert "pass --deep" in got["err"]
+    # ...and the run really did skip the archive, which is what makes the
+    # sentence necessary rather than decorative.
+    assert got["archive_calls"] == 0
+    assert "ARCHIVE: skipped" in got["out"]
+
+
+def test_a_NON_corpus_archive_only_flag_gets_the_SHORT_notice(monkeypatch):
+    """NEGATIVE CONTROL on the extra sentence: `--since` does not steer a corpus,
+    so appending the corpus warning to it would be noise that trains the reader
+    to skip the line."""
+    run = make_run({("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--since", "2026-01-01"], run)
+    assert "ARCHIVE-ONLY flags" in got["err"]
+    assert "CORPUS selector" not in got["err"]
+
+
+def test_archive_only_notice_is_None_when_nothing_applies():
+    """The pure function, so the notice's absence is testable without a run."""
+    ns = fs.parse_args(["zzterm", "--live"])
+    assert fs.archive_only_notice(ns) is None
+    assert fs.archive_only_notice(fs.parse_args(["zzterm", "--live", "--all"]))
+
+
+def test_the_notice_NAMES_every_flag_that_was_passed(monkeypatch):
+    """Several at once must all be listed — reporting only the first would be a
+    count of declarations rather than of instances."""
+    run = make_run({("zzterm",): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch,
+                   ["zzterm", "--live", "--any", "--all", "--project", "zzp"],
+                   run)
+    for spelling in ("--any", "--all", "--project"):
+        assert spelling in got["err"], spelling
+
+
+# --------------------------------------------------------------------------- #
+# F2 — the TAIL block states its own coverage
+# --------------------------------------------------------------------------- #
+def test_a_tail_with_NO_match_under_a_PARTIAL_fleet_is_UNMEASURED(monkeypatch):
+    """🔴 F2. "no live window matched, so there is nothing to tail" is a measured
+    absence, and it was printed with exit 3 while a host had not answered — three
+    lines under an ARCHIVE block that correctly said PARTIAL. The reasoning that
+    earned the ARCHIVE block its own line applies verbatim here."""
+    got = run_main(monkeypatch, ["zzterm", "--live", "--tail", "20"],
+                   partial_run(), archive=[])
+    assert got["rc"] == fs.EXIT_UNAVAILABLE, "still exit 3 (AMBIGUOUS)"
+    assert "TAIL: REFUSED — no live window matched, but laptop did not answer" \
+        in got["out"]
+    assert "NOT 'there is nothing to tail'" in got["out"]
+    assert "UNMEASURED" in got["out"]
+
+
+def test_a_tail_with_NO_match_on_a_FULL_fleet_is_still_a_MEASURED_absence(
+        monkeypatch):
+    """NEGATIVE CONTROL: with every host answering, "there is nothing to tail" is
+    TRUE and the exit code stays 3. "Always say unmeasured" would pass the probe
+    above and make the message useless."""
+    run = make_run({("zzterm",): (3, live_report([], match_fields=DEFAULT_MATCH_FIELDS)),
+                    (): (0, live_report([]))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--tail", "20"], run, archive=[])
+    assert got["rc"] == fs.EXIT_AMBIGUOUS
+    assert "no live window matched, so there is nothing to tail" in got["out"]
+    assert "did not answer" not in got["out"]
+
+
+def test_a_SINGLE_match_under_a_PARTIAL_fleet_still_tails_but_DISCLOSES_it(
+        monkeypatch):
+    """🔴 Refusing here would make `--tail` useless whenever the laptop sleeps —
+    a permanently-red gate. Claiming "this is the one" would be the guess the
+    function exists to refuse. So it tails AND says the resolution may not be
+    unique."""
+    run = make_run({("zzterm",): (0, live_report([ROW_VIOLET],
+                                                 match_fields=DEFAULT_MATCH_FIELDS,
+                                                 **PARTIAL)),
+                    (): (0, live_report([ROW_VIOLET], **PARTIAL))},
+                   tail=(0, "synthetic scrollback\n", ""))
+    got = run_main(monkeypatch, ["zzterm", "--live", "--tail", "20"], run)
+    assert got["rc"] == fs.EXIT_OK
+    assert "resolved on PARTIAL coverage" in got["out"]
+    assert "Another window may match there" in got["out"]
+    assert "synthetic scrollback" in got["out"]
+    assert len(tail_calls(got["calls"])) == 1
+
+
+def test_SEVERAL_matches_under_a_PARTIAL_fleet_say_the_candidate_list_is_SHORT(
+        monkeypatch):
+    """The refusal was already right; the candidate list is also incomplete."""
+    run = make_run({("zzterm",): (0, live_report([ROW_VIOLET, ROW_VAPOR],
+                                                 match_fields=DEFAULT_MATCH_FIELDS,
+                                                 reachable=("workbench", "laptop"),
+                                                 unreachable=())),
+                    (): (0, live_report([ROW_VIOLET, ROW_VAPOR]))})
+    # ...first the FULL-fleet control: no incompleteness line
+    got = run_main(monkeypatch, ["zzterm", "--live", "--tail", "20"], run)
+    assert got["rc"] == fs.EXIT_AMBIGUOUS
+    assert "candidate list is INCOMPLETE" not in got["out"]
+
+    rows = [dict(ROW_VIOLET), dict(ROW_VIOLET, session="scratch5",
+                                   window_index="7")]
+    partial = make_run({("zzterm",): (0, live_report(rows, **PARTIAL,
+                                                     match_fields=DEFAULT_MATCH_FIELDS)),
+                        (): (0, live_report(rows, **PARTIAL))})
+    got2 = run_main(monkeypatch, ["zzterm", "--live", "--tail", "20"], partial)
+    assert got2["rc"] == fs.EXIT_AMBIGUOUS
+    assert "candidate list is INCOMPLETE" in got2["out"]
+    assert tail_calls(got2["calls"]) == []
+
+
+def test_the_tail_JSON_carries_its_OWN_coverage_fields(monkeypatch):
+    """🔴 `archive.*` describes the UNFILTERED scan and is absent entirely on the
+    fast path, so a `tail` consumer could not read coverage from it."""
+    got = run_main(monkeypatch, ["zzterm", "--live", "--json", "--tail", "20"],
+                   partial_run(), archive=[])
+    tail = json.loads(got["out"])["tail"]
+    assert tail["coverage_complete"] is False
+    assert tail["hosts_unreachable"] == ["laptop"]
+    assert tail["refused"] is True
+
+    full = make_run({("zzterm",): (0, live_report([ROW_VIOLET]))},
+                    tail=(0, "x\n", ""))
+    got2 = run_main(monkeypatch, ["zzterm", "--live", "--json", "--tail", "20"],
+                    full)
+    tail2 = json.loads(got2["out"])["tail"]
+    assert tail2["coverage_complete"] is True
+    assert tail2["hosts_unreachable"] == []
+
+
+# --------------------------------------------------------------------------- #
+# F3 — an unmeasured host list is null, never []
+# --------------------------------------------------------------------------- #
+def test_live_hosts_unreachable_is_NULL_for_a_scan_that_never_ran(monkeypatch):
+    """🔴 F3. `[]` reads as the strongest possible claim — every host answered —
+    about a scan that errored. The same round wrote null-never-`[]` into
+    `payload-contract.md` as doctrine."""
+    got = run_main(monkeypatch, ["zzterm", "--live", "--json"],
+                   make_run(boom=OSError("session-manager is not on this host")),
+                   archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    blob = json.loads(got["out"])
+    assert blob["live"]["status"] == "error"
+    assert blob["live"]["hosts_unreachable"] is None
+    assert blob["live"]["hosts_reachable"] is None
+    assert blob["archive"]["live_ids_measured"] is False
+    assert blob["archive"]["live_coverage_complete"] is None
+    assert blob["archive"]["live_hosts_unreachable"] is None, (
+        "an unmeasured scan published an EMPTY unreachable list, which reads as "
+        "'every host answered'")
+
+
+def test_an_UNAVAILABLE_scan_publishes_REAL_host_lists(monkeypatch):
+    """NEGATIVE CONTROL, and the boundary that matters: `unavailable` means the
+    scan RAN and every host was unreachable, so those lists are measurements.
+    Nulling them too would lose the only fact that run produced."""
+    run = make_run({("zzterm",): (4, live_report([], reachable=(),
+                                                 unreachable=("workbench", "laptop"))),
+                    (): (4, live_report([], reachable=(),
+                                        unreachable=("workbench", "laptop")))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--json"], run, archive=[])
+    blob = json.loads(got["out"])
+    assert blob["live"]["status"] == "unavailable"
+    assert blob["live"]["hosts_unreachable"] == ["laptop", "workbench"]
+    assert blob["live"]["hosts_reachable"] == []
+    assert blob["archive"]["live_hosts_unreachable"] == ["laptop", "workbench"]
+
+
+# --------------------------------------------------------------------------- #
+# F8 — one flag, one meaning
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("value", ["0", "-1"], ids=["zero", "negative"])
+def test_limit_below_one_is_a_USAGE_error_on_BOTH_legs(monkeypatch, value):
+    """🔴 F8. `--limit 0` was UNBOUNDED on the live leg (`limit <= 0` meant show
+    everything) and EMPTY on the archive leg (`results[:0]`) — the same flag,
+    the same number, opposite meanings in one run. Rejected rather than
+    silently picking a winner."""
+    got = run_main(monkeypatch, ["zzterm", "--live", "--limit", value],
+                   make_run(), archive=[])
+    assert got["rc"] == fs.EXIT_USAGE
+    assert "--limit must be at least 1" in got["err"]
+    assert got["calls"] == [], "it ran a live scan despite the bad argument"
+    assert got["archive_calls"] == 0
+
+
+def test_limit_below_one_is_rejected_on_the_CLASSIC_path_too(monkeypatch):
+    """The check sits before the `--live` branch, so both legs agree. This IS a
+    behaviour change on the classic path for `--limit < 1`, and it is
+    deliberate: the previous behaviour there was a silent empty result."""
+    got = run_main(monkeypatch, ["zzterm", "--limit", "0"], make_run(),
+                   archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    assert got["rc"] == fs.EXIT_USAGE
+    assert got["archive_calls"] == 0
+
+
+@pytest.mark.parametrize("limit,expect", [
+    (None, 3), (1, 1), (2, 2), (9, 3),
+    # 🔴 THE VALUE THE CLI NOW REJECTS, pinned AT THE FUNCTION anyway. `main`
+    # rejects `--limit < 1`, which makes the old `limit <= 0` special case
+    # unreachable from the CLI — a mutation sweep scored restoring it SURVIVED
+    # for exactly that reason. `render_live` is called directly by tests and by
+    # anything that imports it, so its slice semantics are pinned here rather
+    # than left to depend on a caller's validation. `0` means ZERO rows, the
+    # same as the archive leg's `results[:0]` — never "everything".
+    (0, 0),
+], ids=["none", "one", "two", "over", "zero"])
+def test_render_live_slices_like_the_ARCHIVE_leg_at_every_limit(limit, expect):
+    res = {"status": "ok", "rows": [dict(ROW_VIOLET, session=f"s{i}")
+                                    for i in range(3)],
+           "hosts_reachable": ["workbench"], "hosts_unreachable": [],
+           "match_fields": DEFAULT_MATCH_FIELDS}
+    rendered = "\n".join(fs.render_live(res, limit=limit))
+    shown = sum(1 for line in rendered.splitlines()
+                if line[:1].isdigit() and ". workbench" in line)
+    assert shown == expect, rendered
+    # the header always states the FULL count, whatever the display cap
+    assert "LIVE (3 matched" in rendered
+
+
+def test_limit_ONE_is_accepted_and_bounds_both_legs(monkeypatch):
+    """POSITIVE CONTROL on the boundary — a check one off would reject the
+    smallest legitimate value, which is the permanently-red-gate shape."""
+    rows = [dict(ROW_VIOLET, session=f"s{i}", window_index=str(i))
+            for i in range(3)]
+    run = make_run({("zzterm",): (0, live_report(rows,
+                                                 match_fields=DEFAULT_MATCH_FIELDS))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--limit", "1"], run)
+    assert got["rc"] == fs.EXIT_OK
+    assert "(showing 1 of 3" in got["out"]

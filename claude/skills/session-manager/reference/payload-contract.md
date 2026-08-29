@@ -107,8 +107,8 @@ answered *"session 'scratch2' has windows ['2', '3', '4']"* while window 1 exist
 searched hosts — a flat falsehood that `(searched: …)` made read as authoritative.
 
 `gather` therefore samples `filters.prefilter_window_indices` (`{session: [index…]}`,
-reachable hosts only, **`detail` only** — a 1-row `--match` scan must not carry a fleet's
-index map back) and the message now distinguishes three misses:
+**`detail` only** — a 1-row `--match` scan must not carry a fleet's index map back) and the
+message now distinguishes three misses:
 
 ```
 detail: WINDOW 'scratch2:1' EXISTS but a ROW FILTER (--claude-only) removed it — this
@@ -117,6 +117,12 @@ detail: NO SUCH WINDOW 'scratch2:9' — session 'scratch2' has windows ['1','2',
 you asked for index '9' (indices measured BEFORE the row filter --claude-only) …
 detail: NO SUCH WINDOW 'zz:1' — no session named 'zz' exists on any host that answered …
 ```
+
+⚠ **The map contains only hosts that answered — but not because it filters on that.** An
+unreachable host's `windows` is `[]`, so it contributes nothing wherever rows are read. The
+property is over-determined (`run_tmux` returns empty stdout on every unreachable path
+*and* the population loop skips such a host), so no single-mechanism change reds a test.
+Do not read a green suite as licence to delete the remaining enforcement.
 
 🔴 **Nothing is printed and the fields are `null` when no host was reachable.** An address
 that could not be CHECKED is not an address that does not EXIST — the exit code is `4` there,

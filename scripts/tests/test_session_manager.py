@@ -10608,9 +10608,14 @@ def test_the_span_fixture_matches_each_field_ALONE():
 # SPACE-joined haystack and all 653 tests stayed green: the description claimed
 # coverage the body did not provide, which `claude/RULES.md` calls worse than no
 # coverage. The separator set is what makes this a claim about the CLASS.
-@pytest.mark.parametrize("sep", ["", " ", "|", "\n", "\t", "\x00", ", ", " — "],
-                         ids=["empty", "space", "pipe", "newline", "tab",
-                              "nul", "comma-space", "em-dash"])
+SPAN_SEPARATORS = (
+    ("empty", ""), ("space", " "), ("pipe", "|"), ("newline", "\n"),
+    ("tab", "\t"), ("nul", "\x00"), ("comma-space", ", "), ("em-dash", " — "),
+)
+
+
+@pytest.mark.parametrize("sep", [s for _, s in SPAN_SEPARATORS],
+                         ids=[i for i, _ in SPAN_SEPARATORS])
 def test_a_term_may_not_SPAN_two_fields(sep):
     """Joining the fields into one haystack would match text that exists in no
     field — a hit no reader can explain."""
@@ -10943,17 +10948,31 @@ def test_detail_json_is_the_FULL_REPORT_SHAPE_not_a_bare_window(monkeypatch,
 #         was read by nothing.
 #   R1-7  The span guard was spelled to a zero-separator join (fixed above).
 #
-# 🔴 WHICH OF THESE IS REGRESSION COVERAGE. MEASURED, not asserted: this file
-# and its sibling were copied into a detached worktree at a6f09d5a — 56 new
-# nodes across the two, 46 RED and 10 GREEN. The GREEN ones are named in
-# `R1_INVARIANT_GUARDS` (here) and `R1_INVARIANT_GUARDS` in
-# `test_find_session_live.py`; none of them is evidence a bug was fixed.
+# 🔴 WHICH OF THESE IS REGRESSION COVERAGE. MEASURED at NODE level (params
+# counted individually), by collecting both files at both shas and running the
+# head tests against base source: **66 new nodes across the two files, 46 RED
+# and 20 GREEN at a6f09d5a.**
 #
-# ⚠ ONE FINDING IN THIS ROUND WAS A GUARD GAP, NOT A CODE DEFECT. The span guard
-# (`test_a_term_may_not_SPAN_two_fields`, widened above) passes at a6f09d5a in
-# both its old and new forms, because `row_matches` was already per-field — the
-# auditor's space-joined MUTANT is what the old spelling could not see. Its
-# evidence is the mutation sweep (N27/N28), not a red-at-tip run.
+# ⚠ AN EARLIER REVISION OF THIS PARAGRAPH SAID "56 nodes … 10 GREEN", AND ITS
+# COMPLETENESS SENTENCE WAS FALSE. The red count was exact; the node and green
+# counts were taken from a FUNCTION-level sweep that skipped `parametrize`
+# expansion and skipped functions whose NAME already existed at base. The 10
+# it missed were the 8 `test_a_term_may_not_SPAN_two_fields[…]` params (green at
+# base — disclosed in prose, absent from the machine ledger) and the 2
+# `test_the_R1_invariant_guard_ledger_names_only_tests_that_exist` nodes. A
+# ledger whose sentence claims to name every green while naming 10 of 20 is the
+# "description wider than the implementation" shape both of round 1's blockers
+# had.
+#
+# So the parametrised entries are now DERIVED from the same tuple the
+# `parametrize` reads (`SPAN_SEPARATORS`), not retyped: adding a separator
+# extends the ledger automatically and cannot drift from the test it counts.
+#
+# ⚠ ONE FINDING IN ROUND 1 WAS A GUARD GAP, NOT A CODE DEFECT. The span guard
+# passes at a6f09d5a in both its old and new forms, because `row_matches` was
+# already per-field — the auditor's space-joined MUTANT is what the old spelling
+# could not see. Its evidence is the mutation sweep (N27/N28), not a red-at-tip
+# run. That is why all 8 of its params are GREEN below.
 # =========================================================================== #
 R1_INVARIANT_GUARDS = frozenset({
     # A partially reachable fleet already published real counts; R1-5 is only
@@ -10963,16 +10982,46 @@ R1_INVARIANT_GUARDS = frozenset({
     "test_the_scratch3_fixture_really_has_BOTH_windows_before_any_filter",
     # The positive control for the span battery.
     "test_the_span_fixture_matches_each_field_ALONE",
-    # 🔴 The PRECONDITION that replaced an unreachable guard — see its docstring.
-    # It held at a6f09d5a too; pinning it is what makes removing the guard safe.
-    "test_an_unreachable_host_carries_NO_rows_which_is_what_makes_the_maps_safe",
+    # This ledger's own gate — it has no behaviour to regress.
+    "test_the_R1_invariant_guard_ledger_names_only_tests_that_exist",
+}) | {
+    # 🔴 DERIVED, not retyped. See the paragraph above: these 8 were green at
+    # base and missing from the hand-written ledger.
+    f"test_a_term_may_not_SPAN_two_fields[{ident}]" for ident, _ in SPAN_SEPARATORS
+}
+
+# 🔴 RED AT BASE FOR A HARNESS REASON, NOT A BEHAVIOURAL ONE — a THIRD category,
+# because calling these regression coverage overstates it and calling them
+# invariant guards contradicts the measurement.
+#
+# `test_the_prefilter_map_excludes_hosts_that_never_answered` counts RED at
+# a6f09d5a only because the `prefilter_index_map` kwarg did not exist there, so
+# `gather` raised `TypeError` before any assertion ran. Its own docstring calls
+# it an invariant guard, and that is the truthful description of what it PINS;
+# the red is an artefact of a new parameter name. Both statements are true and
+# the disagreement between them was worth reconciling rather than picking one.
+R1_RED_ONLY_BECAUSE_A_SYMBOL_IS_NEW = frozenset({
+    "test_the_prefilter_map_excludes_hosts_that_never_answered",
 })
 
 
-def test_the_R1_invariant_guard_ledger_names_only_tests_that_exist():
-    for name in R1_INVARIANT_GUARDS:
-        assert name in globals(), (
-            f"{name!r} is listed as an R1 invariant guard but no such test exists")
+@pytest.mark.parametrize("ledger,label", [
+    (R1_INVARIANT_GUARDS, "R1_INVARIANT_GUARDS"),
+    (R1_RED_ONLY_BECAUSE_A_SYMBOL_IS_NEW, "R1_RED_ONLY_BECAUSE_A_SYMBOL_IS_NEW"),
+], ids=["invariant-guards", "harness-red"])
+def test_the_R1_invariant_guard_ledger_names_only_tests_that_exist(ledger, label):
+    """Every ledger entry must resolve to a real test — a name that does not is
+    a claim about coverage that nothing backs.
+
+    Parametrised node ids (`name[param]`) are checked on their FUNCTION half;
+    the param half is derived from the same tuple the `parametrize` reads, so it
+    cannot name an id that does not exist.
+    """
+    assert ledger, f"{label} is empty — the gate is wired to nothing"
+    for entry in ledger:
+        func = entry.split("[", 1)[0]
+        assert func in globals(), (
+            f"{entry!r} is listed in {label} but no such test exists")
 
 
 def scratch3_detail(target_index, **kw):
@@ -11081,29 +11130,58 @@ def test_the_prefilter_map_is_OPT_IN_so_a_match_scan_does_not_carry_it():
         "filters"]["prefilter_window_indices"] is None
 
 
-def test_an_unreachable_host_carries_NO_rows_which_is_what_makes_the_maps_safe():
-    """🔴 THE PRECONDITION, PINNED — because the guard for it was UNREACHABLE.
+@pytest.mark.parametrize("kw,label", [
+    (dict(remote_rc=255, remote_err="ssh: no route"), "ssh-failure"),
+    (dict(remote_rc=1, remote_err="tmux: connection failed"), "tmux-failure"),
+    (dict(remote_rc=127, remote_err="command not found: tmux"), "no-tmux-binary"),
+], ids=["ssh-failure", "tmux-failure", "no-tmux-binary"])
+def test_an_unreachable_host_carries_NO_rows_which_is_what_makes_the_maps_safe(
+        kw, label):
+    """🔴 THE PRECONDITION, PINNED — AND WHAT THIS CAN AND CANNOT SEE.
 
     Both the pre-filter index map and `filter_report`'s row-derived fallback
-    must not let a host that never answered contribute a measured presence or
-    absence of window indices. `gather` gives an unreachable host `windows: []`,
-    so neither loop can see one — which a mutation sweep confirmed by deleting
-    the `entry["reachable"]` clause from the map and changing NO test. A guard
-    that cannot fire reads as a defence and is not one, so it was removed and
-    the property it depended on is asserted here instead, where a change to
-    `gather` really would red.
+    rely on a host that never answered contributing no window indices. This
+    asserts that PROPERTY across three unreachable modes.
+
+    🔴 IT DOES **NOT** PIN ANY ONE ENFORCEMENT OF IT, and an earlier revision of
+    this docstring claimed it did ("where a change to `gather` really would
+    red"). That sentence was false. The property is OVER-DETERMINED: `run_tmux`
+    returns `stdout: ""` on every unreachable path so `fold_windows` yields no
+    rows, AND `gather`'s population loop skips a host that did not answer. An
+    audit deleted the second and all 649 tests stayed green — correctly, because
+    the first still held. So this is an INVARIANT guard on the property; it
+    cannot attribute the property to a mechanism, and a green run here is not
+    licence to delete the remaining enforcement.
+
+    What it does catch is the property actually breaking — e.g. a `gather` that
+    marks an unreachable host `reachable` (mutant N10), or any future path that
+    populates rows for a host with no answer.
     """
     runner = make_runner(local_panes=SCRATCH3_PANES,
-                         local_windows=SCRATCH3_WINDOWS,
-                         remote_rc=255, remote_err="ssh: no route")
+                         local_windows=SCRATCH3_WINDOWS, **kw)
     got = base_gather(runner=runner, use_fuzzyclaw=False)
-    assert got["hosts"]["laptop"]["reachable"] is False
-    assert got["hosts"]["laptop"]["windows"] == [], (
-        "an unreachable host carries rows — the pre-filter index map and "
-        "`filter_report`'s sibling fallback both rely on this being impossible")
-    # positive control: the REACHABLE host in the same scan does carry rows, so
+    # THE INVARIANT, over every host rather than one named one: no row may exist
+    # for any host that did not answer.
+    #
+    # 🔴 THE OBSERVATION IS MATERIALISED BEFORE IT IS JUDGED, so an empty sweep
+    # cannot pass. A mutation sweep caught the earlier `for name in unreachable:`
+    # form SURVIVING a `[:0]` slice — the loop body never ran and every other
+    # assertion in the test still held, which is a guard that reads as coverage
+    # while executing nothing.
+    unreachable = [n for n, h in got["hosts"].items() if not h.get("reachable")]
+    assert unreachable, f"fixture {label}: no host went unreachable"
+    observed = {n: got["hosts"][n]["windows"] for n in unreachable}
+    assert len(observed) == len(unreachable) >= 1, (
+        "the sweep visited fewer hosts than it claimed to")
+    for name, windows in observed.items():
+        assert windows == [], (
+            f"unreachable host {name} carries rows — the pre-filter index map "
+            "and `filter_report`'s sibling fallback both rely on this being "
+            "impossible")
+    # positive control: a REACHABLE host in the same scan does carry rows, so
     # the assertion above is not observing an empty scan.
-    assert got["hosts"]["workbench"]["windows"]
+    assert any(got["hosts"][n]["windows"] for n in got["hosts"]
+               if n not in unreachable)
 
 
 def test_the_prefilter_map_excludes_hosts_that_never_answered():
@@ -11263,4 +11341,97 @@ def test_the_active_row_filter_list_is_ONE_definition():
     assert sm._active_row_filters({"match": ["a", "b"]}) == ["--match 'a' 'b'"]
     assert sm._active_row_filters(
         {"claude_only": True, "match": ["a"]}) == ["--claude-only", "--match 'a'"]
+
+
+# =========================================================================== #
+# §16 — AUDIT FIX ROUND 2 (against tip 9f9dcbde), session-manager half
+#
+#   R2-F5  `test_an_unreachable_host_carries_NO_rows_…` claimed to pin an
+#          invariant "where a change to `gather` really would red". It does not:
+#          the property is OVER-DETERMINED — `run_tmux` returns empty stdout on
+#          every unreachable path AND the population loop skips such a host — so
+#          an audit deleted the second enforcement and all 649 tests stayed
+#          green, correctly. The CODE was never weakened; the SENTENCE was
+#          wider than its assertion, which is the shape of both round-0
+#          blockers. The docstring now says what it can and cannot see, and the
+#          assertion is widened to the property across three unreachable modes
+#          and EVERY host rather than one named one.
+#   R2-F4  The node ledger said 56 nodes / 10 green; the measurement is 66 / 20.
+#          The parametrised entries are DERIVED from `SPAN_SEPARATORS` now.
+# =========================================================================== #
+
+# 🔴 MEASURED AT NODE LEVEL against 9f9dcbde — 29 NEW nodes across the two
+# files, 16 RED and 13 GREEN. EIGHT of the green are from THIS file. They are
+# all controls or prose/ledger guards; none is evidence a bug was fixed.
+#
+# ⚠ `test_the_unreachable_host_precondition_docstring_does_not_OVERCLAIM` is
+# green at EVERY sha BY CONSTRUCTION: the artifact it inspects is a docstring in
+# THIS file, so a run against older SOURCE still reads the new prose. It pins
+# that a retracted overclaim stays retracted; it can never be red-at-base and is
+# not offered as regression coverage.
+R2_INVARIANT_GUARDS = frozenset({
+    # The precondition itself held at 9f9dcbde — F5 was about the SENTENCE, not
+    # the property. All three unreachable modes are green there.
+    *(f"test_an_unreachable_host_carries_NO_rows_which_is_what_makes_the_maps_safe[{i}]"
+      for i in ("ssh-failure", "tmux-failure", "no-tmux-binary")),
+    # Ledger gates and prose guards — structural, no behaviour to regress.
+    "test_the_R1_invariant_guard_ledger_names_only_tests_that_exist",
+    "test_the_R1_ledgers_do_not_OVERLAP",
+    "test_the_span_ledger_entries_are_DERIVED_from_the_parametrize_source",
+    "test_the_unreachable_host_precondition_docstring_does_not_OVERCLAIM",
+})
+
+
+def test_the_R2_ledger_names_only_tests_that_exist():
+    assert R2_INVARIANT_GUARDS, "the ledger is empty — the gate is wired to nothing"
+    for entry in R2_INVARIANT_GUARDS:
+        assert entry.split("[", 1)[0] in globals(), (
+            f"{entry!r} is listed as an R2 invariant guard but no such test exists")
+
+
+def test_the_R1_ledgers_do_not_OVERLAP():
+    """A test cannot be both an invariant guard and red-only-for-a-symbol. The
+    two ledgers partition; an entry in both would make either claim unfalsifiable."""
+    assert not (R1_INVARIANT_GUARDS & R1_RED_ONLY_BECAUSE_A_SYMBOL_IS_NEW)
+
+
+def test_the_span_ledger_entries_are_DERIVED_from_the_parametrize_source():
+    """🔴 R2-F4, structurally. The 8 span params were green at base and absent
+    from the hand-written ledger while its sentence claimed to name every green.
+    Deriving them from the SAME tuple the `parametrize` reads is what stops the
+    two drifting again — this pins that they still are derived, and that the
+    count matches."""
+    span = {e for e in R1_INVARIANT_GUARDS
+            if e.startswith("test_a_term_may_not_SPAN_two_fields[")}
+    assert len(span) == len(SPAN_SEPARATORS) == 8
+    assert span == {f"test_a_term_may_not_SPAN_two_fields[{i}]"
+                    for i, _ in SPAN_SEPARATORS}
+    # ...and the ids really are the ones pytest will generate: no duplicates,
+    # and each separator distinct, so a param cannot silently collapse.
+    idents = [i for i, _ in SPAN_SEPARATORS]
+    assert len(set(idents)) == len(idents)
+    assert len({s for _, s in SPAN_SEPARATORS}) == len(SPAN_SEPARATORS)
+
+
+def test_the_unreachable_host_precondition_docstring_does_not_OVERCLAIM():
+    """🔴 R2-F5 AS A PROSE GUARD. The retracted sentence promised that a change
+    to `gather` "really would red" — it does not, because the property is
+    double-enforced. A docstring wider than its assertion is what this whole PR
+    keeps being audited for, so the retraction is pinned rather than trusted.
+    """
+    doc = test_an_unreachable_host_carries_NO_rows_which_is_what_makes_the_maps_safe.__doc__
+    assert "OVER-DETERMINED" in doc
+    assert "cannot attribute the property to a mechanism" in doc
+    assert "where a change to `gather` really would red" not in doc, (
+        "the retracted overclaim is back in the docstring")
+
+
+def test_the_gather_comment_names_BOTH_enforcements_of_the_precondition():
+    """A maintainer reading only `gather` must not conclude a red gate protects
+    the second enforcement. The comment names both mechanisms and says deleting
+    both is undetected."""
+    import inspect
+    src = inspect.getsource(sm.gather)
+    assert "OVER-DETERMINED" in src
+    assert "do not read a green suite as licence to delete" in src.lower()
 

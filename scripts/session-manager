@@ -3064,14 +3064,24 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
                 # 🔴 NO `and entry["reachable"]` HERE, AND THAT IS DELIBERATE.
                 # The rule is right — a host that never answered must not
                 # contribute a measured presence or absence of window indices —
-                # but as a runtime CHECK it is unreachable: `gather` gives an
-                # unreachable host `windows: []` by construction, so the loop
-                # below visits nothing for it either way. A mutation sweep
-                # proved it: deleting the clause changed no test. An
-                # unreachable guard reads as a defence and is not one, so the
-                # rule is stated as a PRECONDITION and pinned directly by
-                # `test_an_unreachable_host_carries_NO_rows_...`, which is the
-                # thing that can actually fail.
+                # but as a runtime CHECK it is unreachable: an unreachable host's
+                # `windows` is `[]`, so the loop below visits nothing for it
+                # either way. A mutation sweep proved it: deleting the clause
+                # changed no test. An unreachable guard reads as a defence and is
+                # not one, so the rule is stated as a PRECONDITION instead.
+                #
+                # ⚠ AND THE PRECONDITION IS OVER-DETERMINED, which is why no
+                # single-mechanism mutation reds anything. TWO independent
+                # mechanisms hold it: `run_tmux` returns `stdout: ""` on every
+                # unreachable path, so `fold_windows` produces no rows; AND the
+                # population loop above skips a host that did not answer. An
+                # audit deleted the second and all tests stayed green — correctly,
+                # because the first still held.
+                # `test_an_unreachable_host_carries_NO_rows_...` therefore pins
+                # the PROPERTY and cannot attribute it to either mechanism.
+                # 🔴 So: do not read a green suite as licence to delete the
+                # remaining enforcement. Deleting BOTH is what this depends on
+                # not happening, and nothing here detects it.
                 for r in rows_here:
                     prefilter.setdefault(str(r.get("session")), set()).add(
                         str(r.get("window_index")))

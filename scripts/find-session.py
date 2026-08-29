@@ -131,9 +131,19 @@ def live_scan(terms=()):
                         still be non-empty, and a window living only on such a
                         host cannot appear in `rows` — which is why that list
                         travels with the verdict instead of being dropped.
+
+    🔴 BOTH HOST LISTS ARE `None`, NEVER `[]`, ON THE `error` PATHS. The scan did
+    not run, so "which hosts answered" was never measured — and an empty
+    `hosts_unreachable` reads as the strongest possible claim, *every host
+    answered*. It leaked straight into the payload as
+    `archive.live_hosts_unreachable: []` for a scan that never happened, which is
+    the null-never-`[]` rule this same change wrote into `payload-contract.md`.
+    Fixed at the SOURCE rather than at the two publishers, so a third publisher
+    cannot reintroduce it. `status == "unavailable"` is different: the scan DID
+    run and every host really is unreachable, so both lists are real there.
     """
-    out = {"status": "error", "rows": [], "hosts_reachable": [],
-           "hosts_unreachable": [], "match_fields": None, "error": None,
+    out = {"status": "error", "rows": [], "hosts_reachable": None,
+           "hosts_unreachable": None, "match_fields": None, "error": None,
            "rc": None, "terms": [str(t) for t in terms]}
     try:
         rc, stdout, stderr = RUN(live_scan_argv(terms))
@@ -199,11 +209,16 @@ def live_coverage_complete(res):
     On this fleet the laptop is a secondary machine that is frequently asleep,
     so the partial fleet is the COMMON degraded state, not an exotic one.
 
-    Per-host attribution is deliberately NOT attempted: an archive hit carries a
-    `cwd` and a session id but no host, and the Claude transcript corpus is read
-    from local disk while the opencode corpus is read from both hosts — so there
-    is no sound mapping from a hit to the host that would confirm it. The
-    coarse answer is the one that is true.
+    Per-host attribution is deliberately NOT attempted, and the reason is NOT
+    "the hit's host is unknown" — an earlier draft of this docstring said that
+    and it was wrong for half the corpus. A Claude transcript hit's host IS
+    known: `~/.claude/projects` is read from LOCAL disk only, so every Claude hit
+    came from this machine. What makes an inference from that unsound is
+    `claude --resume`: a session recorded on one host can be resumed and running
+    on the OTHER, so "this transcript is local, therefore its live window would
+    be local" does not follow. (The opencode corpus is read from both hosts, so
+    those hits genuinely carry no host.) Either way the coarse answer is the one
+    that is true, and it is what this returns.
     """
     return res.get("status") == "ok" and not res.get("hosts_unreachable")
 
@@ -226,6 +241,74 @@ def live_state_of(session_id, live_ids, coverage_complete=True):
     if session_id in live_ids:
         return "LIVE"
     return "CLOSED" if coverage_complete else "UNMEASURED"
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE ARCHIVE-ONLY FLAG LEDGER — A LIST, NOT A SENTENCE
+# --------------------------------------------------------------------------- #
+# An earlier revision hand-listed three flags here and closed the comment with
+# "this diff already prints five notices of exactly this class; THESE ARE THE
+# REST". That sentence was false when it was written: `--claude-only`,
+# `--opencode-only` and `--all` were missing, and a completeness claim is worse
+# than the omission it decorates, because it tells the next reader to stop
+# looking. Measured on the live fleet:
+#
+#   $ find-session.py <term> --live --opencode-only
+#   LIVE (3 matched; …)  ->  a tmux window running CLAUDE
+#
+# The caller selected the opencode corpus and got Claude windows — and because
+# the live leg matched, `run_archive` stayed False, so the opencode corpus was
+# never searched at all.
+#
+# So the set is DATA and a test pins it against the parser two-way: every
+# argparse destination is either live-aware or in this ledger, and adding a flag
+# without deciding which fails the suite. The sentence cannot drift from the
+# list again because there is no sentence.
+#
+# `(dest, spelling, why)`.
+ARCHIVE_ONLY_FLAGS = (
+    ("any", "--any", "the live scan ANDs its terms; there is no OR mode"),
+    ("project", "--project", "no cwd filter on the live leg — try `--match-path` "
+                             "on session-manager"),
+    ("since", "--since", "live rows carry an age, not a date"),
+    ("claude_only", "--claude-only", "CORPUS selection; live rows have a "
+                                     "`runtime` but the scan has no corpus axis"),
+    ("opencode_only", "--opencode-only", "CORPUS selection; same reason"),
+    ("all", "--all", "widens the TRANSCRIPT search surface only"),
+)
+
+# The destinations that DO reach the live leg (or steer both). Pinned beside the
+# ledger so the two-way test has both halves of the partition in one place.
+LIVE_AWARE_DESTS = frozenset({"terms", "live", "deep", "tail", "limit", "json"})
+
+# Which archive-only flags additionally mean the archive result is the ONLY one
+# that can answer the question — a corpus/surface selector. Named separately
+# because their notice has to say more than "not filtered by them".
+CORPUS_SELECTOR_DESTS = frozenset({"claude_only", "opencode_only", "all"})
+
+
+def archive_only_notice(args):
+    """The stderr line for archive-only flags passed alongside `--live`, or None.
+
+    Derived from `ARCHIVE_ONLY_FLAGS`, so it cannot name a different set from the
+    one the test pins.
+    """
+    named = [(dest, spelling, why) for dest, spelling, why in ARCHIVE_ONLY_FLAGS
+             if getattr(args, dest, None)]
+    if not named:
+        return None
+    line = ("(ARCHIVE-ONLY flags, ignored by the live scan: "
+            + "; ".join(f"{spelling} ({why})" for _, spelling, why in named)
+            + " — the LIVE section below is NOT filtered by them)")
+    if any(dest in CORPUS_SELECTOR_DESTS for dest, _, _ in named):
+        # 🔴 The consequence, not just the fact. A corpus selector says WHICH
+        # ARCHIVE to search, and the archive does not run at all when the live
+        # leg matches — so the corpus the caller explicitly chose can go
+        # unsearched while the run reports success.
+        line += ("\n(...and a CORPUS selector only steers the ARCHIVE, which is "
+                 "SKIPPED when the live scan matches: pass --deep to actually "
+                 "search the corpus you selected)")
+    return line
 
 
 def fmt_age(secs):
@@ -321,7 +404,14 @@ def render_live(res, limit=None):
     # UNSLICED list — capping the ambiguity check at the display limit would
     # turn "several matched, I refuse" into "one is showing, I will tail that
     # one", which is guessing with extra steps.
-    shown = rows if limit is None or limit <= 0 else rows[:limit]
+    #
+    # 🔴 THE SLICE IS THE ARCHIVE LEG'S SLICE, EXACTLY. It used to read
+    # `limit <= 0` as "unbounded", so `--limit 0` showed the whole fleet here and
+    # nothing at all in the ARCHIVE section of the SAME run. `main` now rejects
+    # `--limit < 1` outright, so the only values reaching this are >= 1 (or None
+    # from a direct call) — and the expression no longer carries a second,
+    # contradictory meaning for anything else.
+    shown = rows if limit is None else rows[:limit]
     if len(shown) < len(rows):
         out.append(f"  (showing {len(shown)} of {len(rows)} — raise --limit "
                    "to see the rest)")
@@ -464,15 +554,47 @@ def _tail_outcome(a, live):
     match is ambiguous — `window-triage` §7, "Ambiguity is refused, not
     guessed": a scrollback printed from the wrong window is an answer that reads
     as correct, which is strictly worse than no answer.
+
+    🔴 PARTIAL COVERAGE IS ITS OWN CLAIM AND IS MADE HERE, not inherited. The
+    reason the ARCHIVE block got its own PARTIAL line — "the LIVE section's
+    caveat refers to the live row list, not to these annotations, which are a
+    different claim under a different heading" — applies verbatim to the TAIL
+    block, and was not applied there for one revision. Under a partial fleet:
+
+      * ZERO rows is NOT "there is nothing to tail" (exit 3). The window may be
+        on the host that did not answer, so this is UNMEASURED — exit 4, the
+        same code the fleet-not-measured branch uses, because it is the same
+        fact about a narrower question.
+      * ONE row still tails, but the resolution is DISCLOSED as possibly
+        non-unique. Refusing here would make `--tail` useless whenever the
+        laptop is asleep, which is a permanently-red gate — but claiming "this
+        is the one" is the guess the whole function exists to refuse.
+      * SEVERAL rows already refuse; the candidate list is simply also
+        incomplete, and says so.
     """
     if live["status"] != "ok":
         return None, EXIT_UNAVAILABLE, [
             "TAIL: REFUSED — the live fleet was not measured, so there is no "
             "window to tail. See the LIVE section above."]
+    complete = live_coverage_complete(live)
+    # SUBSCRIPT, not `.get` — the scan result is read by subscript throughout
+    # these four functions on purpose, so `test_the_live_row_field_ledger_...`'s
+    # AST sweep for `<row>.get("field")` cannot pick up a non-row key.
+    missing = ", ".join(live["hosts_unreachable"] or []) or "a host"
     rows = live["rows"]
     if len(rows) == 1:
-        return rows[0], EXIT_OK, []
+        if complete:
+            return rows[0], EXIT_OK, []
+        return rows[0], EXIT_OK, [
+            f"⚠ TAIL: resolved on PARTIAL coverage — {missing} did not answer, "
+            "so this is the only match ON THE HOSTS THAT DID. Another window "
+            "may match there; the scrollback below is real either way."]
     if not rows:
+        if not complete:
+            return None, EXIT_UNAVAILABLE, [
+                f"TAIL: REFUSED — no live window matched, but {missing} did not "
+                "answer, so this is NOT 'there is nothing to tail'. The window "
+                "may be there and UNMEASURED. Use --deep for the archive."]
         return None, EXIT_AMBIGUOUS, [
             "TAIL: REFUSED — no live window matched, so there is nothing to "
             "tail. Narrow or widen the terms, or use --deep for the archive."]
@@ -484,6 +606,9 @@ def _tail_outcome(a, live):
                      + f"    # {r.get('label')} "
                        f"[{r.get('hotkey_display') or 'no hotkey'}] — "
                        f"{r.get('task') or 'no task'}")
+    if not complete:
+        lines.append(f"  ⚠ {missing} did not answer — this candidate list is "
+                     "INCOMPLETE, so a narrower term may still be ambiguous.")
     return None, EXIT_AMBIGUOUS, lines
 
 
@@ -505,26 +630,25 @@ def main(argv=None):
     if a.deep and not a.live:
         print("(--deep only means something with --live: without it the "
               "transcript walk always runs)", file=sys.stderr)
-    # 🔴 A FLAG THAT REACHES ONLY ONE LEG MUST SAY SO. `--any`, `--project` and
-    # `--since` are ARCHIVE-only: the live scan has no OR mode (`--match` ANDs),
-    # no cwd filter that is not `--match-path`, and no date axis at all. Left
-    # silent, `find-session.py redis vpn --any --live` sent ANDed terms to the
-    # live leg and then printed "(no live window matched these terms…)" — a
-    # measured absence under semantics the caller did not ask for. This diff
-    # already prints five notices of exactly this class; these are the rest.
+    # 🔴 `--limit` BELOW 1 MEANT TWO OPPOSITE THINGS IN ONE RUN: the live leg
+    # read `<= 0` as "unbounded, show everything" and the archive leg took
+    # `results[:0]` and showed nothing. One flag, one number, contradictory
+    # halves — and neither reading is useful. Rejected outright instead of
+    # picking a winner, because a degenerate input deserves a message rather
+    # than a silent choice. This is a behaviour change on the classic path for
+    # `--limit < 1` only, and it is deliberate.
+    if a.limit < 1:
+        print(f"--limit must be at least 1 (got {a.limit}). Below 1 the two "
+              "legs disagreed: the live section showed everything and the "
+              "archive section showed nothing.", file=sys.stderr)
+        return EXIT_USAGE
+    # 🔴 A FLAG THAT REACHES ONLY ONE LEG MUST SAY SO — see `ARCHIVE_ONLY_FLAGS`
+    # for the ledger and for why this is data rather than an inline list closed
+    # by a completeness sentence.
     if a.live:
-        archive_only = []
-        if a.any:
-            archive_only.append("--any (the live scan ANDs; there is no OR mode)")
-        if a.project:
-            archive_only.append("--project (try --match-path on session-manager)")
-        if a.since:
-            archive_only.append("--since (live rows have an age, not a date)")
-        if archive_only:
-            print("(ARCHIVE-ONLY flags, ignored by the live scan: "
-                  + "; ".join(archive_only)
-                  + " — the LIVE section below is NOT filtered by them)",
-                  file=sys.stderr)
+        notice = archive_only_notice(a)
+        if notice:
+            print(notice, file=sys.stderr)
 
     # ------------------------------------------------------------------ #
     # THE CLASSIC PATH — unchanged, byte for byte, including `--json`'s
@@ -645,6 +769,12 @@ def main(argv=None):
                 # proves nothing — and it used to be reported as CLOSED.
                 "live_coverage_complete": (coverage_complete
                                            if live_ids is not None else None),
+                # 🔴 `None`, NEVER `[]`, FOR A SCAN THAT NEVER RAN. `live_scan`
+                # now seeds both host lists `None` on its error paths (see its
+                # docstring), so this passes the discriminated value straight
+                # through instead of laundering an unmeasured scan into "every
+                # host answered". `run_archive` False means no second scan was
+                # made at all, which is also not a measurement.
                 "live_hosts_unreachable": (unfiltered["hosts_unreachable"]
                                            if run_archive else None),
             },
@@ -656,6 +786,14 @@ def main(argv=None):
                               f"{tail_row.get('window_index')}",
                 },
                 "refused": tail_row is None,
+                # 🔴 THE TAIL BLOCK CARRIES ITS OWN COVERAGE. A `refused: true`
+                # with zero matches under a partial fleet is UNMEASURED, not
+                # "there is nothing to tail", and a `resolved` row under one is
+                # the only match ON THE HOSTS THAT ANSWERED. Neither fact is
+                # readable from `archive.*`, which describes a different scan
+                # (the unfiltered one) and is absent entirely on the fast path.
+                "coverage_complete": live_coverage_complete(live),
+                "hosts_unreachable": live["hosts_unreachable"],
                 "message": "\n".join(tail_lines) or None,
                 # 🔴 `rc` and `ok` TRAVEL WITH THE TEXT. An empty `text` beside
                 # `ok: false` is "the scrollback was not read"; beside
