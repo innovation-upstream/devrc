@@ -995,10 +995,13 @@ def wrong_base_tells(
     command. An empty tuple is NOT a claim that the base is current; that
     question is `base_currency`'s, and it is the one with hard evidence.
     """
-    if not base_text.strip():
+    if nothing_to_merge_into(base_text):
         # No base at all. Every heading is NEW by construction, so the tell
         # would fire on every genuine first write. `base_currency` still speaks:
         # a doc that is absent HERE and present on the mainline is the same bug.
+        # 🔴 Shares the predicate rather than open-coding `.strip()` a third
+        # time: a third copy is a third chance to drift, and drift between the
+        # first two is what rounds 2 and 3 of this PR's audit were spent on.
         return ()
     base = doc_shape(base_text)
     upd = doc_shape(update_text)
@@ -1028,12 +1031,14 @@ def wrong_base_tells(
 def nothing_to_merge_into(base_text: str) -> bool:
     """Is there no usable base document here — missing, empty, or whitespace?
 
-    🔴 ONE predicate, TWO consumers, and they are required to agree. The REFUSAL
-    (`BaseCurrency.replaces_mainline_doc`) decides whether to stop; the WARNING
-    (`wrong_base_report`) decides whether to print the loud "the committed
-    document will be replaced" line instead of a size comparison. Those must
-    describe the same set, or the run that is about to destroy a document
-    announces itself in the mild form.
+    🔴 ONE predicate, THREE consumers. `wrong_base_tells` asks it to raise a
+    tell; `BaseCurrency.replaces_mainline_doc` builds the REFUSAL on it; and the
+    WARNING reaches it through that same method rather than calling here
+    directly — deliberately, because the warning must describe the refusal's
+    set, not this one's. This function answers only "is there anything here to
+    merge into"; whether that MATTERS additionally needs a mainline copy to
+    lose, and `replaces_mainline_doc` is the only place those two facts are
+    combined.
 
     MEASURED: they disagreed for exactly one round. The refusal was widened to
     `.strip()` while the warning kept `if not local.lines:`, which is true only
@@ -1144,9 +1149,8 @@ WRONG_BASE_REMEDY = (
     "  🔴 ONE shape refuses instead — no usable doc here while the mainline has "
     "one — and it refuses ONLY on `--confirm`, as `status=stale-base` (exit 7). "
     "A proposal run therefore NEVER prints that line whatever shape it is in, so "
-    "its absence here is not evidence you are in the benign case: if the line "
-    "above says the committed document would be REPLACED, that is the shape, and "
-    "confirming is what will refuse."
+    "its absence here is not evidence you are in the benign case: read the line "
+    "above instead, which fires on exactly the shape that refuses."
 )
 
 
@@ -1156,7 +1160,7 @@ def wrong_base_report(
     relpath: str,
     repo: Path,
     local: DocShape,
-    base_blank: bool,
+    replaces_mainline: bool,
 ) -> str:
     """Rule (h)'s block, or "" when there is nothing to say.
 
@@ -1181,13 +1185,20 @@ def wrong_base_report(
         # not here at all, because that is the case where EVERY section merges as
         # NEW and the committed doc is replaced wholesale by the delta.
         #
-        # 🔴 `base_blank`, NOT `not local.lines` — they are NOT the same test.
-        # `doc_shape("\n").lines` is 1, so the line-count form sent a
-        # whitespace-only base down the mild size-comparison branch: the exact
-        # shape this paragraph says must get the loud line. It comes from
-        # `nothing_to_merge_into`, the SAME predicate the refusal uses, so the
-        # warning and the refusal cannot describe different sets again.
-        if base_blank:
+        # 🔴 THE WHOLE REFUSAL PREDICATE, not a half of it. Two rounds got this
+        # wrong in two different ways, and the second was worse than the first:
+        #   round 1 used `not local.lines` — true only for a strictly 0-line
+        #     file, so a `"\n"` base got the mild branch;
+        #   round 2 used the blank half ALONE — which fires when the mainline
+        #     has DELETED this doc (a retirement, revert or rename), where
+        #     nothing is replaced. It then printed "and <ref> has one … will be
+        #     replaced by this delta" about a document that does not exist, and
+        #     the remedy told the operator confirming would refuse. It does not:
+        #     it exits 0 and writes.
+        # So this takes `currency.replaces_mainline_doc(base_text)` itself. The
+        # loud line and the refusal are now the SAME condition by construction
+        # rather than by two expressions that have to be kept in step.
+        if replaces_mainline:
             shape = (
                 f" ({currency.mainline.sections} sections / "
                 f"{currency.mainline.lines} lines)"
@@ -1747,7 +1758,7 @@ def main(argv: list[str] | None = None) -> int:
         relpath,
         repo,
         doc_shape(base_text),
-        nothing_to_merge_into(base_text),
+        currency.replaces_mainline_doc(base_text),
     )
     if wrong_base:
         print(wrong_base)

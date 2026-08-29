@@ -3570,3 +3570,69 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         assert "If you do not see that line, this run is the warning" not in out
         assert "ONLY on `--confirm`" in out, (
             "the remedy must say the refusal is deferred, not absent")
+
+    def test_a_doc_DELETED_on_the_mainline_gets_NEITHER_the_loud_line_nor_a_refusal(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE OTHER ARM OF THE SEAM — the one two rounds of fixes missed.
+
+        `nothing_to_merge_into` is true whenever there is no usable base HERE.
+        The refusal additionally needs a mainline copy to LOSE. The set
+        difference is real: the mainline's commits to this doc DELETED it (a
+        retirement, a revert, a rename), so this checkout never had it and
+        neither does the mainline.
+
+        MEASURED at the round-2 tip: the warning fired on the blank half alone
+        and printed "and <ref> has one … will be replaced by this delta" about a
+        document that does not exist, while `--confirm` exited 0 and wrote — and
+        the remedy told the operator that confirming would refuse.
+
+        So: no loud replacement claim, and no refusal. A first write here is
+        legitimate and must land.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        # Delete it on the mainline, so `doc_behind` is non-zero but `git show`
+        # finds nothing — the shape that populates `mainline` with None.
+        other = tmp_path / "deleter"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "D"), ("user.email", "d@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        _sh("git", "rm", "-q", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "retire the handoff", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        _sh("git", "fetch", "-q", "origin", cwd=work)
+
+        proposal = run_tool(work, update=update_file)
+        assert proposal.returncode == 0, proposal.stderr
+        assert "will be replaced by this delta" not in proposal.stdout, (
+            "claimed a replacement of a document the mainline does not have")
+
+        confirmed = run_tool(work, "--confirm", update=update_file)
+        assert confirmed.returncode == 0, (
+            "a legitimate first write was refused", confirmed.stdout, confirmed.stderr)
+        assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def test_the_remedy_is_pinned_as_a_WHOLE_normalised_string(self) -> None:
+        """🔴 A guard on WORDS is walkable by REWORDING. The previous version
+        asserted the presence of "ONLY on `--confirm`" and the absence of one
+        retired sentence — both satisfied by a reword that reintroduces the exact
+        false meaning ("…refuses ONLY on --confirm. If no status=stale-base
+        appears, you are in the benign case."). `WRONG_BASE_REMEDY` is a module
+        constant, so the whole normalised string can be pinned. A cosmetic reword
+        then fails this test — that is the price of a machine-readable claim.
+        """
+        expected = (
+            "Settle it BEFORE confirming: read the mainline copy — `git -C "
+            "{repo} show {ref}:{relpath}` — and re-run against a current clone "
+            "if it is the fuller document. Updating a deliberately-behind clone "
+            "is legitimate, so on its own this is a WARNING and no exit code "
+            "changed. It is a FLOOR: a silent run is NOT evidence that the base "
+            "is current. 🔴 ONE shape refuses instead — no usable doc here while "
+            "the mainline has one — and it refuses ONLY on `--confirm`, as "
+            "`status=stale-base` (exit 7). A proposal run therefore NEVER prints "
+            "that line whatever shape it is in, so its absence here is not "
+            "evidence you are in the benign case: read the line above instead, "
+            "which fires on exactly the shape that refuses."
+        )
+        assert " ".join(hd.WRONG_BASE_REMEDY.split()) == " ".join(expected.split())
