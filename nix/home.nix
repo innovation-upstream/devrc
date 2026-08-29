@@ -1613,14 +1613,14 @@ in
   # Concatenating at switch time means it can never drift from the sources
   # Claude Code reads.
   #
-  # COST — re-measured 2026-08-19 on engine 1.18.18 / openrouter/xiaomi/mimo-v2.5.
+  # COST — re-measured 2026-08-19 on engine 1.18.21 / openrouter/xiaomi/mimo-v2.5.
   # The file is 43,676 B = 8,329 input tokens (A/B pair: one trivial prompt in an
   # empty scratch project, under two config dirs identical in every byte except
   # this file — 22,019 input tok with it, 13,690 without).
   # 🔴 That is NOT a per-request tax, and the note that used to stand here
   # implied it was. The file sits at the HEAD of the prompt prefix, which is
   # exactly what a provider prefix-cache retains: of the 2,218 billed requests
-  # this box logged on 1.18.16+1.18.18, only 60 (2.7%) were cold, and a cached
+  # this box logged on 1.18.16+1.18.21, only 60 (2.7%) were cold, and a cached
   # token bills ~50x under an input token. Attributed cost of this file over that
   # window: ~$0.12 of $1.77 total spend (~7%). A COLD first request does pay the
   # full 8,329 — that, not the steady state, is what browser-agent's isolated
