@@ -2394,12 +2394,15 @@ def run_seed(*args: str, env: "dict[str, str] | None" = None) -> subprocess.Comp
 # the POSIX way to rebuild the argument list without an array, and it preserves
 # arguments containing spaces, which a string accumulator would not.
 FAKE_KUBECTL_BODY = r"""
-# 🔴 `set -u`: the bash original had `set -uo pipefail` and the POSIX rewrite
-# dropped it. Without it an unset $FAKE_DEST makes the sed below `s|/data||g`,
-# which silently rewrites every path to a RELATIVE one instead of erroring —
-# the stub would then "work" against the wrong directory. `pipefail` is not
-# POSIX and nothing here pipes, so only `-u` is restored.
-set -u
+# 🔴 AN EXPLICIT TOP-LEVEL `:?` GUARD, NOT `set -u`, AND THAT IS A MEASUREMENT.
+# The bash original had `set -uo pipefail`; the POSIX rewrite dropped it; round 2
+# restored `set -u`. Round 3's sweep showed that restoration SURVIVED its own
+# mutant — the only reference to $FAKE_DEST sits inside a `$( … )`, so an unbound
+# variable there kills the SUBSHELL while the stub carries on with an empty
+# substitution (`s|/data||g`, silently rewriting absolute paths to relative).
+# `:?` at top level exits the stub itself, which is what makes the failure
+# observable — and therefore testable — by a caller.
+: "${FAKE_DEST:?FAKE_DEST must be set - the stub would otherwise rewrite /data to the empty string}"
 # Stands in for kubectl in seed.sh's push half. $FAKE_DEST is the pretend /data;
 # $FAKE_DROP, if set, removes one member AFTER the extract, which is how "a
 # staged entry that did not land" is simulated without faking the guard itself.
@@ -2788,9 +2791,17 @@ class TestSeedPushVerdict:
 
         r = self._push(store, tmp_path, env)
 
+        # 🔴 ASSERT THE GUARD'S OWN MESSAGE, NOT MERELY A NON-ZERO RC. `rc != 0`
+        # alone does NOT isolate this: without the guard the stub still fails,
+        # later and for an unrelated reason (`tar -C ""`), so the mutant survived
+        # a green run. The specific string is what proves THIS guard fired.
         assert r.returncode != 0, (
-            "the stub ran with FAKE_DEST unset instead of erroring — `set -u` "
-            f"is missing from FAKE_KUBECTL_BODY. stdout={r.stdout}"
+            f"the stub ran with FAKE_DEST unset instead of erroring. stdout={r.stdout}"
+        )
+        assert "FAKE_DEST must be set" in r.stderr + r.stdout, (
+            "the stub failed, but not because of its own unset-variable guard — "
+            "so this test does not pin that guard. "
+            f"stderr={r.stderr!r} stdout={r.stdout!r}"
         )
 
     def test_an_EMPTY_dot_scope_is_not_announced_as_holding_md_files(
@@ -2865,6 +2876,15 @@ class TestSeedPushVerdict:
         # from a wrong MISMATCH to a silent omission.
         assert ".hidden (dot-directory" in r.stdout, (
             "the excluded scope must be NAMED, not silently dropped: " + r.stdout
+        )
+        # 🔴 AND IT MUST ACTUALLY NOT SHIP. The NOTE says "not in the tar member
+        # list"; that is only true while `dotglob` is off when the member list is
+        # built. Leaving it set SURVIVED the sweep — the entry then lands on the
+        # pod while the remote listing still excludes `./.*`, so it is shipped,
+        # never verified, and the NOTE's sentence becomes false.
+        assert not (dest / ".hidden").exists(), (
+            "the dot-scope was SHIPPED despite the NOTE saying it would not be — "
+            f"pod holds: {sorted(p.name for p in dest.iterdir())}"
         )
 
 
