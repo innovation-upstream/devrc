@@ -3,4 +3,5 @@
 !scripts/lib/subsystem_resolver.py
 !scripts/lib/subsystem_touch.py
 !scripts/lib/git_mainline.py
+!scripts/lib/host_identity.py
 !scripts/subsystem-store-api/server.py

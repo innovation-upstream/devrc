@@ -63,7 +63,7 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    ## Run this first — the index, one read-only command
    ```bash
-   python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo <repo>
+   python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo <path>
    ```
    Terse pointers this doc does not carry, curated by past sessions and outliving it.
    🔴 RECALL, NOT LIVE OBSERVATION — every line is a pointer to VERIFY, never a current

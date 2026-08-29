@@ -32,6 +32,26 @@ let
   # (2) is why this flag waited: a timer alerting into a paused queue is WORSE than no
   # timer, because it manufactures the appearance of coverage.
   enableDriftDeadman = true;
+  # tmux-snapshot pusher master switch (scripts/tmux-snapshot-push.sh) — feeds
+  # clawgate's cross-host tmux read model. Gates ONLY whether the timer is wired into
+  # timers.target; the SERVICE definition is always emitted, so
+  # `systemctl --user start tmux-snapshot-push` works by hand regardless.
+  #
+  # ON from the start, deliberately, and the asymmetry with enableInitiativesSync above
+  # is the point: that flag waited because its first write created SCHEMA in a prod
+  # database. This one appends to a read model whose rows are latest-per-host upserts —
+  # a bad push is rejected outright (the server 400s and CHANGES NOTHING, leaving the
+  # previous snapshot in place), and a wrong push is overwritten 2 minutes later. The
+  # write path was also validated by hand before this landed: a real
+  # `session-manager --json` posted to the live 0.8.8 server returned
+  # {"ok":true,"hosts":["laptop","workbench"]} and read back as 2 snapshots / 44 + 28
+  # windows with the `session` -> `tmuxSessionName` rename applied.
+  #
+  # 🔴 It is ALSO serverMode-gated below, which is a correctness requirement and not
+  # just scoping: `session-manager --json` collects BOTH hosts from the workbench (it
+  # SSHes to the laptop), so running it on the laptop too would have each host pushing
+  # a full two-host document and the two would fight over every row.
+  enableTmuxSnapshotPush = true;
   # Graphical host = runs X/i3 (both current NixOS hosts do; only a genuinely headless
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
@@ -235,7 +255,29 @@ in
           # interface — and the old search_terms (ask/clarify/questions/elicit/…)
           # contained none of the words he actually types: feedback, dispatch,
           # process. Lead the label with "feedback" and add those three terms.
-          { trigger = ":acq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + ask clarifying questions"; search_terms = ["feedback" "dispatch" "process" "ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
+          # 2026-08-28 SPLIT into :dacq (dispatch) + :acq (the bare ask). The
+          # split made 'ask' AMBIGUOUS over the two — and 'ask' is the
+          # highest-traffic term in the whole config (58 fires, 2026-08-06..19),
+          # so an ambiguous 'ask' is recorded UNATTRIBUTED by the keylog
+          # detector. `_token_matches` reads the trigger, every WORD OF THE
+          # LABEL, and search_terms, so dropping the search_terms alone would
+          # NOT have fixed it: the old label spelled "ask clarifying questions"
+          # outright. Both had to move. The label must also avoid "task" —
+          # 'ask' ⊂ 'task' is the documented way a neighbour silently steals it.
+          # :dacq keeps the words he actually types for THIS snippet (feedback,
+          # dispatch, process); :acq owns ask/clarify/questions alone.
+          # 2026-08-29: `"ask"` REMOVED from :dacq below. The split above says in
+          # so many words that ":acq owns ask/clarify/questions alone", and the
+          # label was duly cleaned — but the search_terms were not, so BOTH
+          # snippets went on declaring "ask" exactly. The tie-break added for this
+          # (#999) can only rescue a term that NAMES one trigger outright; neither
+          # of these is named "ask", so the term resolved to None and every fire
+          # of the config's highest-traffic term was recorded UNATTRIBUTED again —
+          # the very outcome the split was meant to prevent. It also turned
+          # `main` red repo-wide. The comment was right and the data was wrong:
+          # this makes the data match it.
+          { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "clarifying" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
+          { trigger = ":acq"; replace = "ask clarifying questions"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
           { trigger = ":alo"; replace = "anything left outstanding from this thread? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
           { trigger = ":kickoff"; replace = "give me the kickoff message to copy paste to next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
@@ -2002,7 +2044,7 @@ in
         # as commas, so a two-word entry becomes two independent substrings.
         # Hence the single distinctive first token. Verified against 12 real
         # alerts on the workbench, all reading "Runaway process: Farthest Fronti".
-        "CPU_MON_IGNORE=anno,logd,farthest"
+        "CPU_MON_IGNORE=anno,logd,farthest,darktide"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/.config/cpu-monitor/cpu-monitor.sh";
       Restart = "always";
@@ -2885,6 +2927,189 @@ in
       # but is wired into nothing, so no routine `ship.sh` can silently start a
       # timer nobody has supervised once.
       WantedBy = lib.optionals (serverMode && enableDriftDeadman) [ "timers.target" ];
+    };
+  };
+
+  # ── CLAWGATE TMUX READ-MODEL FEEDER (scripts/tmux-snapshot-push.sh) ──────────
+  # clawgate runs in a pod on the workbench cluster; tmux sockets are unix sockets
+  # on the workbench and laptop HOSTS. The deployment has no hostPath, no
+  # hostNetwork, no hostPID and no nodeName (measured against the live spec
+  # 2026-08-28), so the pod structurally cannot see them. This unit is the
+  # outbound half: it collects on the host and POSTs to the pod, which means no
+  # inbound access to either machine and no SSH credential inside a pod sitting on
+  # an unauthenticated LAN surface.
+  #
+  # ONE unit, not one per host — see the flag's comment above.
+  systemd.user.services.tmux-snapshot-push = {
+    Unit = {
+      Description = "Push this fleet's tmux inventory to clawgate's read model";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      # 🔴 NO OnFailure, DELIBERATELY — pinned by
+      # `test_tmux_snapshot_push.py::test_the_unit_does_not_wire_the_DND_defeating
+      # _failure_toast`. notify-failure@ toasts are wired to DEFEAT do-not-disturb
+      # (zz_notify_failure_bypass, override_pause_level = 100), and that bypass is
+      # justified in this file by a MEASURED rate of ~1 firing in 9 days. This
+      # timer runs every 2 minutes, so any sustained outage — the laptop asleep,
+      # clawgate mid-redeploy — would fire a DND-bypassing toast on EVERY tick and
+      # burn down the one alert channel that has to keep its meaning. That is the
+      # "permanently-red gate trains you to click through" hazard, at 720/day.
+      #
+      # 🔴 WHAT ACTUALLY SURFACES A DEAD FEEDER TODAY IS `/standup`, NOT the
+      # read model. An earlier version of this comment claimed the compensating
+      # control was the server's `receivedAt` stamp showing up as a stale
+      # timestamp. That is not observable by anyone: NOTHING reads
+      # `GET /api/tmux/snapshot` or `EventTmuxChanged` outside clawgate's own
+      # tests — no UI, no page, no script. The staleness is recorded and unread.
+      #
+      # The real control is that this unit is `Type = "oneshot"` with distinct
+      # non-zero exit codes, so a persistent failure lands in
+      # `systemctl --user --failed`, which `claude/skills/standup/standup.sh`
+      # reads. ⚠ That covers the codes (2/3/4/5/6) and NOT a unit that exits 0
+      # while achieving nothing — which is why the two audit findings in that
+      # class (a 3xx read as success, an unmeasured zero pushed as real) were
+      # fixed in the script rather than left to monitoring.
+      #
+      # A read-model staleness check belongs with the first consumer that
+      # renders this data; there is none yet.
+    };
+    Service = {
+      Type = "oneshot";
+      # Collector cap (90s) + curl cap (30s) + slack. Both inner bounds live in
+      # the script; this only has to be larger than their sum, or the cgroup is
+      # killed mid-run and the failure reads as a hang rather than as whichever
+      # leg actually wedged.
+      TimeoutStartSec = 150;
+      Environment = [
+        # 🔴 EVERY ENTRY HERE IS FOR THE CHILD, and under systemd there is no
+        # login-shell PATH to fall back on. drift-check.service already paid for
+        # this lesson: without its binaries the child reported COULD NOT MEASURE
+        # on every run forever, from a unit that looked completely correct.
+        #
+        # `scripts/session-manager` has a `python3` shebang, shells out to
+        # `tmux`, SSHes to the laptop (openssh), and — via `agent_ledger.py` —
+        # runs `awk` (gawk). The pusher itself adds curl, sed (gnused) and
+        # tr/cut/wc/mktemp/rm/timeout (coreutils).
+        #
+        # 🔴 `gawk` IS LOAD-BEARING AND ITS ABSENCE IS SILENT. A previous
+        # revision of this list dropped it as "unused", asserting the collector's
+        # only external commands were tmux and ssh. That was wrong and it was
+        # MEASURED wrong: `agent_ledger.read_command` runs
+        # `echo "AGENT_LEDGER_V1 …"; awk 1 "$HOME"/.cache/agent-ledger/*.json
+        # 2>/dev/null; exit 0`, and `awk` lives ONLY in gawk — coreutils has no
+        # awk. The `2>/dev/null; exit 0` swallows "awk: command not found" while
+        # `echo` (a shell builtin) still prints the sentinel, so the parser sees
+        # a well-formed ledger reporting ZERO entries — the fabricated-zero class
+        # that sentinel exists to prevent. Side by side on this host, same run
+        # shape: without gawk, 0 of 45 workbench windows carry `runtime` or
+        # `age_source=ledger`; with it, 34 do. rc 0 and a plausible payload
+        # either way.
+        #
+        # ⚠ `gnugrep` and `iproute2` really were unused and stay dropped — the
+        # old comment justified iproute2 as "reads interface addresses to decide
+        # which host it is on", which `local_host_label` does not do (it reads
+        # ACTIVITY_HOST). Verified by a full production-shape run with neither on
+        # PATH. Trimming a copied list is right; trimming it without running the
+        # child is how gawk got removed.
+        # Pinned by `test_the_unit_PATH_carries_every_binary_the_collector_needs`.
+        "PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.curl pkgs.gawk pkgs.gnused pkgs.openssh pkgs.python3 pkgs.tmux ]}"
+        "HOME=%h"
+        # DEFENSIVE, not a fix for a live defect — and the distinction is
+        # recorded because getting it wrong nearly shipped a false claim.
+        #
+        # This host's tmux socket is at $XDG_RUNTIME_DIR/tmux-UID/default, NOT
+        # tmux's compiled-in /tmp/tmux-UID/default. If a unit cannot see
+        # TMUX_TMPDIR, `tmux list-windows -a` fails to connect and — this is the
+        # dangerous part — session-manager reports the host as `reachable: true`
+        # with an EMPTY windows array. That is a perfectly valid document, so
+        # the server accepts it and the latest-per-host upsert REPLACES a good
+        # 44-window snapshot with zero. The server's "a rejected push leaves the
+        # previous snapshot in place" protection cannot help; nothing is
+        # rejected. Silent, and destructive.
+        #
+        # 🔴 BUT IT DOES NOT HAPPEN TODAY, MEASURED BOTH WAYS. `Environment=`
+        # ADDS to the systemd user-manager environment rather than replacing it,
+        # and that environment already carries TMUX_TMPDIR=/run/user/1000
+        # (`systemctl --user show-environment`). A real transient user unit
+        # reports TMUX_TMPDIR set and sees all 44 windows, and drift-check.service
+        # — which execs the same collector with only PATH and HOME set — has been
+        # reporting 42-44 rows in its journal for weeks. An earlier revision of
+        # this comment asserted a live bug on the strength of an `env -i` probe,
+        # which is STRICTER than systemd: that probe blanks the manager
+        # environment, so it measured a condition the unit never runs in.
+        #
+        # 🔴 BUT THE RETRACTION UNDER-SOLD IT, per a later audit: the inherited
+        # value is UNDECLARED RUNTIME STATE. `TMUX_TMPDIR` appears in no
+        # /etc/nixos file, no /etc/environment.d (which does not exist here), and
+        # not in home-manager's own ~/.config/environment.d/10-home-manager.conf.
+        # Something imports it at login and nobody has written down what. So
+        # "the manager environment already carries it" is a fact about THIS BOOT,
+        # not a property of the configuration, and the fresh-boot case is open.
+        # That is why this line stays.
+        #
+        # ⚠ Two things it does NOT cover, both worth knowing before trusting it:
+        #   * it PINS rather than inherits, so if the interactive tmux server
+        #     ever starts with the socket back in /tmp, this unit looks in the
+        #     wrong place and produces exactly the destructive zero it exists to
+        #     prevent. The two agree today; they are not the same mechanism.
+        #   * the LAPTOP leg gets no such guard — session-manager reaches it over
+        #     ssh through the remote login shell, which sources .zshenv only, and
+        #     nothing in devrc sets TMUX_TMPDIR there. It works because the
+        #     laptop's socket is in /tmp. If the laptop ever acquires this host's
+        #     arrangement it silently reports zero windows — and `tmux` says "no
+        #     server running", which session-manager maps to reachable:true AND
+        #     windows_measured:TRUE, so the torn-collection gate in the pusher
+        #     cannot catch it either. Only an env pin on that side would.
+        # `%t` is the user runtime dir (/run/user/UID).
+        # Pinned by `test_the_unit_gives_tmux_its_SOCKET_directory`.
+        "TMUX_TMPDIR=%t"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/tmux-snapshot-push.sh";
+      X-Restart-Triggers = [
+        "${../scripts/tmux-snapshot-push.sh}"
+        # The collector is the payload's author: a change to what it emits is a
+        # change to what this unit delivers, with no edit to the pusher at all.
+        "${../scripts/session-manager}"
+      ];
+    };
+  };
+
+  # Every 2 minutes. The cadence is bounded by what it is for: the read model
+  # backs an at-a-glance view of which windows are busy/waiting, and a view that
+  # is a quarter-hour stale would be answering a question nobody asked. Measured
+  # cost on the workbench 2026-08-28, three consecutive samples: 1298 / 1196 /
+  # 1193 ms per collection, so 2 minutes is ~1% duty cycle.
+  #
+  # ⚠ THE PER-RUN COST IS MORE THAN ONE SSH, and this comment used to say "~720
+  # ssh round trips a day" as though it were. `session-manager --json` makes up
+  # to FOUR ssh invocations to the laptop per run (list-panes, list-windows, the
+  # capture batch, the ledger read) with no ControlMaster, so it is nearer
+  # ~2,880 handshakes/day; it also runs one ClickHouse query per run (~720/day),
+  # which the old figure omitted entirely. Store side: ~720 upserts/day of
+  # ~100 KB jsonb onto a two-row table, i.e. real TOAST/WAL churn for data that
+  # currently has no reader. If that cost ever matters, `--lean` is the lever —
+  # the server keeps only `hosts[].windows` and discards the rest — at the price
+  # of the verbatim/dumb-pipe property.
+  #
+  # Tighter buys little — tmux state does
+  # not meaningfully change faster than a human reads it — and would start to be
+  # a real share of a core. OnStartupSec gives one prompt run shortly after the
+  # user manager starts, i.e. after a workbench reboot, so the view is populated
+  # before anyone looks at it. No Persistent: that only applies to OnCalendar
+  # timers, not monotonic ones.
+  systemd.user.timers.tmux-snapshot-push = {
+    Unit = {
+      Description = "Periodic timer for the clawgate tmux read-model feeder";
+    };
+    Timer = {
+      OnStartupSec = "1min";
+      OnUnitActiveSec = "2min";
+    };
+    Install = {
+      # serverMode is the workbench-only gate; see the flag's comment. It is a
+      # correctness requirement, not scoping — two hosts each pushing a full
+      # two-host document would fight over every row.
+      WantedBy = lib.optionals (serverMode && enableTmuxSnapshotPush) [ "timers.target" ];
     };
   };
 

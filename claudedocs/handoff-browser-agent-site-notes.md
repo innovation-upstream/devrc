@@ -16,27 +16,40 @@ gap that trace found — the autonomous `browser agent` is BLIND to `site_notes`
 registered host it runs without that site's flow notes.
 
 ## State now
-- **All three PRs MERGED and verified BY CONTENT** (a squash never makes the head an
-  ancestor, so ancestry lies — never verify one that way):
-  - **#940** `880786cf` — the `site_notes` gap: SKILL.md sentence, `reference/agent.md`
-    section, `browser_tool_impl.mjs` rationale, 3 guarded tests.
-  - **#956** `c6b9b77e` — this handoff doc.
-  - **#957** `c1bf2ad9` — rank 1 closed. Doc now 206 lines on `origin/main`.
-- **#956 and #957 both merged CLEANLY through the gate** (`devrc-pytests` +
-  `devrc-nodetests` both `success`, no bypass). Only #940 was bypassed.
-- Base clone `~/workspace/devrc` re-synced `--ff-only` to `c1bf2ad9`, working tree clean,
-  in sync with `origin/main`. **All session worktrees removed**; scratch files deleted.
-- #940 was merged with `devrc-pytests` RED by operator instruction. Mechanism:
-  `enforce_admins` lifted → `--admin` squash → `enforce_admins` restored **and verified**.
-  Required checks stayed in force for non-admins throughout. Snapshot:
-  `<scratchpad>/main-protection-backup.json`.
-- **4 audit rounds ran on #940, each found real findings; round 5 never run** (operator
-  chose to merge). Rounds 1–4: 6🟡, 3, 3, 1 — three of the four rounds' findings were
-  introduced *by the previous round's fix*.
-- ⚠ **`devrc-pytests` runs take ~21–26 min.** Measured three times: 21m (#940's earlier
-  commit), ~24m (#956), ~26m (#957). Budget a watcher accordingly — a 30-min poll loop
-  nearly expired on #957, and a watcher timeout prints something that *looks* like a
-  failing check but is not.
+
+- **Branch / PR:** `devrc` `main`. Two PRs merged this session, both verified BY CONTENT
+  (ancestry is false forever after a squash):
+  - **#980** squash **`f93cdc08`** — the SKILL.md prune (rank 3).
+  - **#988** squash **`a8849cfe`** — per-build extension version. **Merged, deployed via
+    `home-manager switch`, and LIVE-VERIFIED on both Brave profiles.**
+  Worktrees removed, base clone fast-forwarded, no `claim-work` claims held.
+- **RANK 2 IS CLOSED — and it is the first time both profiles have been verified
+  EXECUTING the deployed build, not merely registered against it.** `ping` returns the
+  marker frozen into each worker's own module graph:
+  `work` and `personal` both `pong=True buildMarker=aada672ff3a5ded7
+  version=0.8.1.43738 ops=18`, `extension_stale: false` on both.
+- **RANK 3 IS CLOSED.** `SKILL.md` 12,028 B → **11,720 B**. Growth room above the 12,038 B
+  enforced gate went from **10 B (0.05 ops rows) to 318 B (~1.7 rows)**. The prune also
+  fixed a wrong claim the byte audit could not see: the sites row said the CLI names
+  `site_notes` "in every result envelope" — `_annotate_site_notes` is called only from
+  `_handle_cmd` (`server.py:3731`), never from `_whoami`/`do_GET`, and only for a
+  REGISTERED host, so identity reads and unknown hosts carry no field and ABSENCE means
+  nothing.
+- **NEW MECHANISM SHIPPED (#988): `manifest.json` version is now `<release>.<build>`** —
+  currently **`0.8.1.43738`**, where the 4th component is `int(BUILD_MARKER[:4], 16)`.
+  The first three components stay human-owned. `gen-build-marker.py` regenerates both and
+  `--check` verifies both. Rationale, the cycle it had to break, and the exact
+  regenerate/verify commands: `scripts/browser-bridge/extension/README.md` § *Versioning*.
+  🔴 **`extension_stale` is UNCHANGED and still marker-only for the all-clear.** The
+  version is a human convenience, not fail-closed.
+- **Two out-of-scope defects FILED rather than absorbed:** devrc **#1017**
+  (`test_bash_guard.py`'s 2.0 s wall-clock assertion goes red under load — measured
+  2.44–5.40 s) and devrc **#1018** (`audit-dispatch.py`'s cumulative ledger disagrees
+  with the sum of its own per-round figures — 381 printed vs 466 re-derived).
+- **No `clawgate-task:` field.** `clawgate_handoff.sh resolve` exited **5** (0 tasks for
+  this session). Its positive control confirms the board is reachable and the token
+  accepted, but a wrong session id ALSO answers 200 with an empty array — a narrow
+  reading, NOT a clean bill of health. No field written, no task created.
 
 ## Open investigations — live diagnosis state
 
@@ -121,38 +134,75 @@ resolution was originally closed on a SINGLE data point and said so.
   than a flaky test — two greens are consistent with both. The claim to carry forward is
   the narrow one: **nothing broken from #940 is sitting on `main`.**
 
+### A reused browser-bridge tab stops rendering the vetr SPA (root cause UNKNOWN)
+- **Symptom + exact repro:** after ~8 `nav`s in one bridge-owned tab, every vetr route
+  renders nothing — app shell present, `textContent` only the react-router bootstrap
+  script. Reproduced on `/choose-experience` (logged-OUT, 4 green Playwright tests
+  against the same origin), `/user`, `/user/appointments`; 6+ attempts, `--wake` up to
+  10s, `localStorage.clear()`. **A `close` + fresh `open` of the SAME url renders
+  everything immediately.**
+- **Observed (with values):** stalled tab shows `HydrateFallback`
+  (`vetr-app/app/root.tsx:377-398`) — `data-testid="app-boot-skeleton"`,
+  `aria-hidden="true"`, `className="relative flex h-dvh flex-col"`, **exactly 3
+  children**, no text nodes. That is the pre-hydration paint, i.e. the JS bundle never
+  executed. On a fresh tab the same URLs return
+  `{boot:false, splash:true, toast:false, z9999:["Vetr"]}` then the full authed
+  dashboard (1232 chars) with the complete query fan-out.
+- **Ruled out** (do NOT re-run these): **server** — all paths return an identical
+  5176-byte SPA-fallback `index.html`, 200, `cmp` clean · **throttling** — `activate`d
+  the tab, `visibilityState: visible`, animations advancing, still stalled · **seeded
+  keys** — `localStorage.clear()` reproduces · **the token** — verified server-side ·
+  **GTM/Brave Shields** — `TagManager.initialize` is try/caught non-fatal
+  (`root.tsx:288`) · **the error boundary** — renders a visible "Oops!" (`root.tsx:400`)
+  · **the brand splash** — it renders the literal text "Vetr" and these reads had zero
+  `innerText`.
+- **Leading hypothesis:** none worth defending. It is a bridge/tab-lifecycle issue, not
+  a vetr defect — Playwright renders these routes green against the same origin.
+- **Next probe:** on the next occurrence, before closing the tab, capture
+  `performance.getEntriesByType("resource").filter(r=>/\.js$/.test(r.name))` and compare
+  the module-chunk set against a working tab's. That distinguishes "chunk never
+  requested" from "requested and never executed", which is the fork nothing so far has
+  separated.
+
+### The toast branch of the vetr overlay discriminator is UNMEASURED
+- **Symptom + exact repro:** n/a — a coverage gap, not a bug.
+- **Observed:** the *negative* half is measured — with no toast live,
+  `.Toastify__toast-container` is absent and the always-mounted wrapper is a
+  `<section class="Toastify">`, so it never enters the snippet's `div` filter.
+- **Ruled out:** triggering it via the axios interceptor — both interceptor toasts are
+  gated on `config?.toastr`, and vetr-api's `GET /config` sends no such key (0 matches
+  across `vetr-api/{app,config,routes}` with a positive control that fires).
+- **Leading hypothesis:** the library renders the container div only while ≥1 toast is
+  live, making presence a binary answer.
+- **Next probe:** in Lane A, click any action handler that raises a toast (~14 non-test
+  files call `toast.*`), then re-run the discriminator and add the row to
+  `vetr.com.md`'s results table.
+
 ## Next steps (ranked)
 
-1. ✅ **RESOLVED 2026-08-27 — settle the `devrc-pytests` red.** Answered free by #956's
-   own check, then corroborated by #957's. Nothing broken on `main`. Kept at rank 1 with
-   its number intact so any live `claim-work` slug still resolves; nothing to do.
-2. **Reload the browser-bridge extension in BOTH Brave profiles** (repo: none — operator
-   action, an agent cannot do it). Both `work` and `personal` report
-   `extension_stale: true`. Fix: `brave://extensions` → **Remove** → **Load unpacked**
-   `~/.local/share/browser-bridge-ext/` (a ↻ reload is unreliable — the long-poll keeps
-   the old worker alive). **Verify: `browser whoami` → require `extension_stale: false`;
-   `null` = undecidable, NOT ok.**
-   🔴 **The MARKER VALUES below are a 2026-08-27 SNAPSHOT, not constants — do not assert
-   them.** Measured then: loaded `04bbd6f9c695141d`, deployed `e1ee86a50a811d40`, both
-   reporting version `0.8.1` (the case a version compare cannot see); loaded code predated
-   2026-08-24, missing `b20b7835` (#797) and `b242fc2d` (#814), both bounded-hang fixes —
-   so the symptom is a wedged op, not an error. **IN FLIGHT: devrc#950 touches
-   `extension/build_id.js`, so the DEPLOYED marker changes when it lands.** Re-read both
-   values from `browser whoami` at the moment you act; the `extension_stale` verdict is
-   the durable check, the hex strings are not.
-3. **Decide the SKILL.md byte budget** (repo: devrc; file
-   `scripts/browser-bridge/SKILL.md`). **12,028 B** against the **12,038 B** enforced
-   ceiling = **10 bytes of slack** (was 77 before #940). The next edit larger than that
-   fails `test_skill_md_keeps_working_headroom`. `skill-audit.py` says "no prune needed"
-   (a BYTES verdict) and the staleness pass came back clean, so nothing was churned.
-   Demotion candidates, each with an existing sidecar home: `text` row 383 B →
-   `read-envelopes.md`; `wake` row 361 B → `spa-wake.md`; `screenshot` row 343 B → a new
-   topic. Any one buys 200–300 B. Closes when a demotion PR merges, or the operator says
-   in writing that 10 bytes is acceptable.
-4. **Optional: round 5 delta audit of the merged #940** (repo: devrc; file
-   `scripts/browser-bridge/reference/agent.md`). Rounds 1–4 each found something real and
-   round 5 was skipped by operator choice. Scope is prose in one file; no code path ships
-   behaviour change. Closes when a round returns no findings, or the operator declines.
+🔴 Ranks keep their numbers so any live `claim-work` slug still resolves.
+
+1. ✅ **RESOLVED 2026-08-27 — the `devrc-pytests` red.** Unchanged; nothing to do.
+2. ✅ **CLOSED 2026-08-29 — extension reloaded and LIVE-VERIFIED in both profiles.**
+   Both execute `aada672ff3a5ded7` / `0.8.1.43738`, `extension_stale: false`, `ping`
+   answering. 🔴 **Read the reload-recipe gotcha below before ever doing this again** —
+   the recipe as written in the old rank 2 is INCOMPLETE and produces a profile that
+   comes back ABSENT rather than stale.
+3. ✅ **CLOSED 2026-08-29 — #980 merged.** 318 B of growth room, up from 10 B.
+4. **Optional: round 5 delta audit of the merged #940** (repo: devrc;
+   `scripts/browser-bridge/reference/agent.md`). Untouched this session. Closes when a
+   round returns no findings, or an operator dismisses it in writing.
+5. **Measure the toast row of the vetr overlay discriminator** (repo: devrc; file
+   `scripts/browser-bridge/reference/sites/vetr.com.md`). 🔴 **NEWLY UNBLOCKED** — this
+   needed a working extension, which is now true for the first time. Recipe is in the
+   "Open investigations" block above. Closes when the results table carries a
+   toast-present row.
+6. **Root-cause the tired-tab stall** (repo: devrc, `scripts/browser-bridge/`). Untouched.
+   See the investigation block for the six eliminations already paid for and the one probe
+   that separates the remaining fork. Closes when the mechanism is named in
+   `reference/spa-wake.md`, or an operator dismisses it in writing.
+7. ✅ **Closed as already decided** — operator ruled 2026-08-28 that the `vetr.com`
+   disclosure is not severe. Listed so it is not re-raised.
 
 ## Gotchas / decisions / dead-ends
 
@@ -212,27 +262,143 @@ resolution was originally closed on a SINGLE data point and said so.
 - ⚠ **`gh pr merge --auto` is unavailable on this repo** (`Auto merge is not allowed for
   this repository`), so merge-when-green must be a watcher, not a GitHub feature.
 
+- 🔴 **Eight audit rounds on #966, and EVERY round found a real defect introduced by the
+  previous round's fix.** All were the same class: *a confidently-stated wrong mechanism
+  or over-broad absolute*, always in newly-added explanatory prose, never in the
+  citations. Round 3 was strictly a regression — it replaced a correct "unexplained"
+  with a wrong explanation. Severity decayed monotonically (round 1: a false safety
+  claim about real money; round 8: an unbounded "wait it out").
+- 🔴 **THE fix that broke the cycle: run the instrument.** Seven rounds *reasoned* about
+  what a DOM query returns and produced seven false claims. The round that **ran** it
+  produced zero, and correctly retracted a prior round for a reason no source-reading
+  reaches: **Chromium clamps an out-of-range `z-index` to the 32-bit max.** Measured on
+  a live page — `"999999999999"` → `"2147483647"`, which `/9999/` does NOT match. The
+  source says one number, the browser says another. **When an exclusion depends on what
+  an instrument COMPUTES rather than what the source SAYS, run the instrument.**
+- 🔴 **An instrument change invalidates the exclusions derived under the old
+  instrument.** Rounds 1–6 established "the splash is `pointer-events-none`, so a
+  hit-test never returns it" — true. Round 6 swapped to a computed-style DOM query,
+  where `pointer-events` is irrelevant, and carried the exclusion across unchanged. The
+  splash matched, its text is "Vetr", and it fell through to "a different modal".
+- **The one edit shape that never introduced a defect in 8 rounds: a pure NARROWING**
+  (adding a qualification to an absolute). That is why the ladder stopped at round 8
+  rather than running a 9th to confirm two narrowings.
+- **Withdrawn mid-session:** an early finding that "every non-root vetr route renders
+  blank in a bridge tab" and that the drive lane was unusable. It was a tired tab. The
+  drive lane works — fresh tab, seed, second `nav` lands the full authed dashboard.
+- **`innerText` / button-counts / `elementFromPoint` are all bad blankness detectors**
+  and each gave a confident wrong answer here: `innerText` needs layout and returns `""`
+  on an occluded tab; the chooser renders three role cards and counts 0 `button,a`;
+  `elementFromPoint` returns `null` for an OFF-VIEWPORT point, identical to "covered"
+  (vetr's off-canvas menu sits at `x = -249`). The last one is now generic, in
+  `reference/css-hit-test.md`.
+- **Registry routing is HOST-based, so the hermetic lane never surfaces these notes.**
+  `127.0.0.1`/`localhost` resolve to nothing — i.e. the only lane allowed to click is
+  the lane that will never hand you the file. Load it deliberately; and the autonomous
+  `browser agent` never sees `site_notes` at all (the #940 gap).
+- **`e2e:mint-tokens` REVOKES every prior `e2e` token** (`E2EMintTokens.php:77`), so a
+  re-mint 401s the tab you already seeded and it reads logged-OUT.
+- **Laptop `~/.config/vetr/authnet.env` holds PROD creds** while the harness forces
+  `ANET_ENDPOINT=sandbox` → `e2e:mint-tokens` fails the card provision with `E00007`
+  and leaves `owner_has_saved_card:false`, silently self-skipping the saved-card specs.
+
+- **CARRIED FORWARD from the 2026-08-28 `State now` (it was measured evidence sitting
+  under a REPLACE heading, one update from deletion): vetr E2E coverage.** 28 spec files /
+  55 static `test()` calls in `vetr-app/e2e/`, plus two sibling harnesses
+  (`tests/e2e/a11y-gate/` ratchet, `tests/e2e/ux-audit/` 15-view walk). Coverage is
+  **entirely env-dependent**: ~25 passed / 35 skipped bare, vs **53 passed / 7 skipped /
+  0 failed** under the hermetic stack (10.7 min). Nothing runs it automatically — Actions
+  is quota-dark org-wide and Tekton runs only `vitest`/`typecheck`/`a11y` +
+  `vetr-api-pest`.
+- **CARRIED FORWARD, same reason — the durable half of the old rank 2:** the stale builds
+  predated 2026-08-24 and were missing `b20b7835` (#797) and `b242fc2d` (#814), both
+  bounded-hang fixes, **so the symptom of a stale extension is a WEDGED OP, not an
+  error.** Both profiles reported the same version while running different builds, which
+  is exactly the case a version compare could not see — and is what #988 now fixes.
+  (Superseded as a *reading*: both profiles are current as of 2026-08-29.)
+- **devrc#966 merged 2026-08-28** (squash `9bc7f5eb`) — the site-notes registry's first
+  new entry since #940: `reference/sites/vetr.com.md` + its `_index.json` key, plus the
+  generic `elementFromPoint` off-viewport trap relocated into `reference/css-hit-test.md`.
+- 🔴 **THE RELOAD RECIPE IS INCOMPLETE, AND THE FAILURE IS SILENT.** Rank 2 said
+  "`brave://extensions` → Remove → Load unpacked" and stopped. **Remove wipes
+  `chrome.storage.local`** (`reference/errors.md:262`), which holds the bearer token,
+  port and label — so the reloaded extension cannot authenticate and **never appears in
+  the registry at all**. Measured this session: after reloading both profiles, `whoami`
+  reported `connected: 1` with `personal` simply ABSENT — not stale, not erroring.
+  **An absent instance reads as "that Brave window is closed", which is the wrong
+  diagnosis.** The recipe must end: *"…then re-paste token/port/label in Options"*
+  (token at `~/.config/browser-bridge/token`, port `8788`, label exactly `personal` or it
+  registers under an auto-id).
+- 🔴 **A SUBSET SUITE CANNOT FAIL ON A REPO-WIDE GUARD, and four audit rounds inherited
+  that blindness.** #988 shipped a five-component version fixture whose first four parts
+  parsed as a routable IPv4; devrc is PUBLIC and
+  `scripts/tests/test_no_public_ips.py::test_no_unallowlisted_public_ip_literal_is_committed`
+  fails the build on any committed routable IP literal. Every local run was
+  `pytest scripts/browser-bridge/tests/` — "836 passed" was TRUE of a tier that could
+  never collect that guard. All four audit rounds missed it because each was briefed that
+  the subset was sufficient *since Tekton runs the repo-wide gate separately*, which was
+  true and still left the gap. **Tekton is the tier that gates the merge; run it or say
+  your green is subset-scoped.** It was then reintroduced once, because the comment
+  explaining the fix QUOTED the offending literal — the gate scans comments too.
+- 🔴 **FOUR INSTRUMENTS RETURNED CONFIDENT WRONG ANSWERS in this session; none announced
+  itself.** (1) A positive control for the IP gate, built from a WELL-KNOWN public-DNS
+  address, stayed GREEN — scanners allowlist their own canonical examples, so the control
+  proved nothing; a realistic routable literal does turn it red. 🔴 And note where this
+  sentence cannot name that address: this doc is in the gate's own scope, so writing the
+  literal here fails the build. That happened — twice, in the PR body and then in this
+  very line — which is the same trap one level up. (2) A `sed` edit deleted the `START=` assignment on a compound line,
+  so a check-watcher reported `settled after 1787979093s` off "no checks reported" — an
+  empty result read as a verdict. (3) A zsh `set -- $spec` did NOT word-split, so a
+  per-round ledger loop logged the ENTIRE history four times and printed the same number.
+  (4) Two `command grep | xargs` sweeps for version-parsing consumers returned a clean
+  ZERO while a known splitter existed. **Every one was caught only by a control or by a
+  number that could not be true.**
+- 🔴 **The audit ladder's yield was PROSE, not logic: 9 of 13 findings were a claim wider
+  than its code.** Rounds ran 6 → 6 → 1 → 0 and ended clean at round 4. Round 3's single
+  finding PRE-DATED the PR's own tip, so round 2 was the last round whose fixes introduced
+  anything. The standout: the SAME paragraph in `reference/errors.md` named a wrong
+  mechanism THREE times running — first that a branch had widened, then the wrong branch —
+  and was settled only when round 3 stopped reading `annotate_staleness` and **ran** it
+  with two discriminating controls isolating `:887` from `:886` and `:883-884`.
+  A guard that could not fire was also shipped once, commented as "the last point before
+  it is written to a manifest", while the entry point that WAS unguarded
+  (`write_manifest_version`'s caller-supplied `version=`) went unnoticed *because of it*.
+- **`claim-work`'s owner-id is CWD-DEPENDENT.** It is
+  `hash(machine-id || realpath(git-DIR of the ident dir))` (`claim-work.sh:662`), so
+  claiming from `~/workspace/devrc` and releasing from another repo makes the claim look
+  like someone else's and refuses without `--force`. **Claim and release from the same
+  repo dir**, or the slug strands for the full 7-day TTL.
+- **`gh pr merge` prints `failed to run git: fatal: 'main' is already used by worktree`
+  when a worktree holds `main` — the MERGE STILL SUCCEEDED.** That error is `gh`'s local
+  post-merge checkout, not the merge. Confirm with
+  `gh pr view <n> --json state,mergedAt,mergeCommit`, never from the exit path.
+- **The marker deliberately does NOT hash the version value.** The version derives from
+  the marker, so hashing it would make the derivation a recurrence with no fixpoint.
+  Consequence worth knowing: **a release bump does not move the marker at all**, which is
+  the state that genuinely reaches the version-mismatch branch at `server.py:887`.
+
 ## How to verify
+
 ```bash
-# 1. both PRs landed, by CONTENT (a squash is never an ancestor — ancestry would lie)
-git -C ~/workspace/devrc fetch origin
-git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/SKILL.md | grep -c 'never sees'   # 1
-git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/browser_tool.test.mjs | grep -c 'SITE NOTES'  # 3
-git -C ~/workspace/devrc show origin/main:claudedocs/handoff-browser-agent-site-notes.md | wc -l   # ~182+
-gh pr view 940 --repo innovation-upstream/devrc --json state,mergeCommit   # MERGED / 880786cf
-gh pr view 956 --repo innovation-upstream/devrc --json state,mergeCommit   # MERGED / c6b9b77e
+# 1. both profiles EXECUTE the deployed build (not merely registered) — the real gate
+for I in work personal; do printf '%-9s ' "$I"; \
+  ~/workspace/devrc/scripts/browser-bridge/browser --instance $I ping; done
+# expect both: pong=True buildMarker=aada672ff3a5ded7 version=0.8.1.43738
 
-# 2. branch protection really was restored after #940's bypass
-gh api repos/innovation-upstream/devrc/branches/main/protection \
-  --jq '{enforce_admins:.enforce_admins.enabled, contexts:.required_status_checks.contexts}'
-# expect: enforce_admins true, both tekton contexts
+# 2. deployed tree matches the repo (read the CONSUMER, not the switch's own output)
+cmp ~/.local/share/browser-bridge-ext/manifest.json \
+    ~/workspace/devrc/scripts/browser-bridge/extension/manifest.json && echo identical
 
-# 3. the guards actually guard (each mutant must go RED with its OWN assertion)
-nix-shell -p nodejs --run \
-  "node --test ~/workspace/devrc/scripts/browser-bridge/tests/browser_tool.test.mjs"   # 91 pass
-#   mutants: forward site_notes in the `upload` branch; make summarizeResult return ""
-#   for every op but context; reword OR MOVE the SKILL.md sentence out of ## FIRST DECISION.
+# 3. the version/marker pair is self-consistent; NEGATIVE CONTROL: hand-edit the 4th
+#    component and this goes red naming the regen command
+cd ~/workspace/devrc/scripts/browser-bridge && nix develop --command \
+  python3 gen-build-marker.py --check    # expect: build marker OK + manifest version OK
 
-# 4. the byte ceiling
-python3 ~/workspace/devrc/scripts/skill-audit.py ~/workspace/devrc/scripts/browser-bridge/SKILL.md
+# 4. the SKILL.md gate, with its own negative control (pad the file -> RECLAIM: N bytes)
+cd ~/workspace/devrc/scripts/browser-bridge && nix develop --command \
+  python3 -m pytest tests/test_skill_size.py -q                      # expect 4 passed
+
+# 5. 🔴 the repo-wide tier, which the browser-bridge subset is STRUCTURALLY BLIND TO
+cd ~/workspace/devrc && nix develop --command \
+  python3 -m pytest scripts/tests/test_no_public_ips.py -q           # expect 15 passed
 ```

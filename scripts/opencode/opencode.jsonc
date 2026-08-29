@@ -44,7 +44,7 @@
 // patterns has known bypasses, which is the whole reason layer 2 exists.
 //
 // ==========================================================================
-// Mechanics of layer 1 (measured on v1.18.18 — do not re-derive)
+// Mechanics of layer 1 (measured on v1.18.21 — do not re-derive)
 // ==========================================================================
 //
 // 🔴 PERMISSION ORDERING IS LOAD-BEARING AND IS THE INVERSE OF CLAUDE CODE.
@@ -135,7 +135,7 @@
 // "restore consistency" by re-widening any of these four rules to infix without
 // reading those tests first.
 //
-// Other measured facts baked into this file (v1.18.18, EXCEPT where a bullet
+// Other measured facts baked into this file (v1.18.21, EXCEPT where a bullet
 // says otherwise — the 2026-08-19 re-derivation could not reach three of them,
 // and a claim relabelled to a version nothing measured it on is worse than a
 // stale one, because it looks fresh):
@@ -161,7 +161,7 @@
 //     `reference` (now `references`), `maxSteps` (now `steps`).
 //     `theme`/`keybinds`/`tui` moved to a separate ~/.config/opencode/tui.json
 //     and are NOT set here.
-//   * there is NO `list` tool and NO `websearch` tool on 1.18.18. The real set is
+//   * there is NO `list` tool and NO `websearch` tool on 1.18.21. The real set is
 //     exactly {bash, edit, glob, grep, invalid, question, read, skill, task,
 //     todowrite, webfetch, write}. Naming a nonexistent tool here is a no-op.
 {
@@ -252,7 +252,7 @@
     // — a blanket `"read": "allow"` here lands AFTER those and silently defeats
     // the `.env` guard on every agent. The default already allows everything
     // except `.env`, so there is nothing to add.
-    // `list` and `websearch` are absent because NO SUCH TOOLS EXIST on 1.18.18.
+    // `list` and `websearch` are absent because NO SUCH TOOLS EXIST on 1.18.21.
     "glob": "allow",
     "grep": "allow",
     "edit": "allow",

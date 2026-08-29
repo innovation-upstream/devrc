@@ -11,7 +11,7 @@ duplicate of it).
   That is a real gap, and it is exactly the gap the version pin exists to cover:
   a config whose keys are unchanged can have its RESOLVED MEANING changed by the
   binary underneath it. opencode.jsonc's header documents a large set of
-  behaviours annotated "measured on v1.18.18 — do not re-derive" — last-match-
+  behaviours annotated "measured on v1.18.21 — do not re-derive" — last-match-
   wins ordering, hidden agents inheriting the global permission block, the exact
   tool set. A static test cannot see any of those change. This file runs the
   real engine and checks them.
@@ -91,7 +91,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OC_DIR = ROOT / "scripts" / "opencode"
 TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 
-# 🔴 THE PIN. Every "measured on v1.18.18" claim in opencode.jsonc's header, in
+# 🔴 THE PIN. Every "measured on v1.18.21" claim in opencode.jsonc's header, in
 # scripts/opencode/README.md and in test_opencode_config.py's docstrings is keyed
 # to this exact version. It is pinned declaratively by nix/pkgs/tools/default.nix
 # resolving `pkgs.opencode` out of flake.lock's nixpkgs.
@@ -170,9 +170,29 @@ TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 # hook-behaviour claims (`permission.ask` never fires, `tool.execute.before` does)
 # in scripts/opencode/README.md and scripts/opencode/plugin/guard.js. Those need
 # a running hook to observe and were not re-measured here.
-PINNED_VERSION = "1.18.18"
+# 🔴 RE-DERIVED 1.18.18 -> 1.18.21 (2026-08-29). `flake.lock` moved opencode
+# under an unchanged config — which is the exact class this file exists to catch,
+# so the red was the pin WORKING, not a defect. What was measured:
+#
+#   * This whole file against the NEW binary with the OLD pin: 1 failed (exactly
+#     the version assertion below), 24 passed. So every other engine claim —
+#     the engine-vs-model conformance tests, the resolved tool maps, the ordered
+#     permission arrays — holds on 1.18.21, and the harness is shown to
+#     DISCRIMINATE rather than be green by default. That is the same control the
+#     1.18.4 -> 1.18.16 entry above ran, and it is the load-bearing one.
+#   * NOT REPEATED from that entry, and named so nobody reads this as more than
+#     it is: the seven-agent `debug agent --pure` dump under BOTH binaries. It
+#     needs the superseded binary rebuilt from the pre-bump lock; the behavioural
+#     conformance tests cover the same semantics and all pass, so this was judged
+#     redundant rather than skipped for convenience. If a future bump sees a
+#     conformance failure, do the dual dump before trusting anything here.
+#   * The host was checked for the documented DEV-HOST cause first and it does
+#     not apply: `nix profile list` carries no opencode entry, and PATH resolves
+#     into /nix/store/...-opencode-1.18.21 out of the flake itself. This is a
+#     genuine lock movement, not per-host profile drift.
+PINNED_VERSION = "1.18.21"
 
-# MEASURED via `opencode debug agent nav --pure` at 1.18.18. This is the cost AND
+# MEASURED via `opencode debug agent nav --pure` at 1.18.21. This is the cost AND
 # blast-radius pin that test_opencode_config.py's `test_nav_is_kept_lean` only
 # asserts about the CONFIG KEYS; here it is read off the engine's resolved tool
 # map. `skill` alone injects the ~3,730-token catalogue on every request.
@@ -777,6 +797,31 @@ _VERSION_RE = re.compile(
 # nothing and reads as an orphan. Snippets carry no version literal of their own,
 # or they would match themselves when this file is scanned.
 HISTORICAL_VERSION_CLAIMS = (
+    # 🔴 Added by the 2026-08-29 re-derivation pass. Each is a claim the engine
+    # tests do NOT re-derive, so re-keying it would have been relabelling a
+    # measurement nobody repeated — the exact thing this ledger exists to stop.
+    # (Deliberately no version literals in THIS comment: a number here is itself
+    # a claim in the pin surface, and the ledger correctly flagged the first
+    # draft of it.)
+    ("scripts/browser-bridge/README.md", "Measured in the shipped",
+     "TaskTool.execute child-session internals — not observable from `debug "
+     "agent --pure`, so not re-derived at the new version"),
+    ("scripts/browser-bridge/browser", "Measured in the shipped",
+     "same TaskTool internals claim as the README's, in the CLI's own comment"),
+    ("scripts/browser-bridge/browser", "creates a child session",
+     "the second half of that TaskTool internals claim"),
+    ("scripts/opencode/README.md", "Re-measured **2026-08-19** on engine",
+     "a dated COST measurement against a specific engine+model pair; a cost is not "
+     "re-derived by the permission/tool conformance tests"),
+    ("nix/home.nix", "COST — re-measured 2026-08-19 on engine",
+     "the same dated cost measurement, at its source"),
+    # 🔴 Version-FREE snippet, and that is a rule, not a style choice: a snippet
+    # containing a version literal makes the ledger entry's OWN source line an
+    # old-version line, so it matches twice and fails. Every entry here obeys it.
+    ("scripts/tests/test_opencode_engine.py", "`flake.lock` moved opencode",
+     "names the 2026-08-29 transition itself"),
+    ("scripts/tests/test_opencode_engine.py", "load-bearing one",
+     "cites the 2026-08-13 transition by its version pair, as prior art for the method"),
     ("nix/pkgs/tools/default.nix", "which drifted: MEASURED",
      "the per-host drift that motivated pinning; a dated fact"),
     ("nix/pkgs/tools/default.nix", "when this pin was introduced",
@@ -839,14 +884,34 @@ HISTORICAL_VERSION_CLAIMS = (
     # the pre-bump one as evidence that the bump changed nothing — history, not a
     # claim about what runs. Distinct from the deployed-state category above,
     # which is gone: these do not stop being true on the next ship.
-    ("scripts/browser-bridge/README.md", "resolution was measured identical on",
-     "cites the pre-bump measurement as evidence the bump was a no-op"),
-    ("scripts/browser-bridge/README.md", "pins** (measured identical on",
-     "same, for the custom-tool claim"),
-    ("scripts/browser-bridge/reference/agent.md", "the same resolution was measured on",
-     "same, for the misattribution warning"),
-    ("scripts/browser-bridge/reference/agent.md", "and it resolved identically on",
-     "same, for the gate claim"),
+    # 🔴 REWRITTEN AFTER AUDIT (2026-08-29). These four entries used to exempt
+    # sentences that CONJOINED two claims — "both hosts run <v> **and** both
+    # resolve browser-only". The version half is re-derivable at every bump (it
+    # is a `readlink -f` at the consumer); the resolution half is not, because
+    # `browser-agent` is absent from ENGINE_AGENTS and this repo's browser-agent
+    # tests drive a FAKE opencode stub. A conjunction cannot be half-exempt, so
+    # the pin re-key relabelled the unmeasured half along with the measured one —
+    # six claims that read as verified at a version nothing had checked them
+    # against. (No version literals in this comment: see the rule two entries
+    # down — a number here is itself a claim in the pin surface, and this comment
+    # tripped that rule on its first draft, which is the second time in one
+    # session.) The sentences are now SPLIT: the host-version half
+    # carries the pin and is re-derived, and each resolution half is dated to its
+    # last real measurement and exempted here.
+    ("scripts/browser-bridge/README.md", "browser-only RESOLUTION is last verified",
+     "browser-agent resolution — not re-derived at the pin; nothing in CI observes it"),
+    ("scripts/browser-bridge/README.md", "It was NOT re-derived at the",
+     "the pre-bump measurements cited as evidence the bumps were no-ops"),
+    ("scripts/browser-bridge/README.md", "since the check",
+     "custom-tool mechanism — needs the real binary, not re-derived at the pin"),
+    ("scripts/browser-bridge/README.md", "below needs the real binary",
+     "the pre-bump measurement behind that custom-tool claim"),
+    ("scripts/browser-bridge/reference/agent.md", "It has NOT been re-derived at",
+     "the misattribution warning's evidence — measured at three older versions"),
+    ("scripts/browser-bridge/reference/agent.md", "resolution itself is last measured",
+     "browser-agent resolution for the gate claim — not re-derived at the pin"),
+    ("scripts/browser-bridge/reference/agent.md", "and resolved identically on",
+     "the pre-bump measurements behind that gate claim"),
     ("scripts/tests/test_opencode_engine.py", 'Five lines said "both hosts run',
      "this ledger's own record of the exemptions it used to carry"),
     ("scripts/browser-bridge/README.md", "opencode JSON envelope (verified live, opencode",
@@ -922,7 +987,7 @@ HISTORICAL_VERSION_CLAIMS = (
     # rather than wrong. `ship.sh` converged both on 2026-08-15, and the lock's
     # move to the CURRENT pin had reached both before this PR — re-verified at the
     # CONSUMER on 2026-08-19 (both `readlink -f $(command -v opencode)` resolve to
-    # the same …-opencode-1.18.18 store path), so those lines now carry the pinned
+    # the same …-opencode-1.18.21 store path), so those lines now carry the pinned
     # version and need no exemption.
     #
     # The ledger caught its own obsolescence: the moment the lines were updated,
@@ -1101,7 +1166,7 @@ def test_engine_and_model_agree_on_every_pinned_command(engine_name, model_agent
 # --------------------------------------------------------------------------- #
 def test_engine_resolves_navs_tool_set_to_exactly_the_pinned_four():
     """test_opencode_config.py's `test_nav_is_kept_lean` docstring says "VERIFIED
-    against `opencode debug agent nav` on 1.18.18: the resolved tool set is
+    against `opencode debug agent nav` on 1.18.21: the resolved tool set is
     exactly {glob, grep, read} (+ the internal `invalid`)" — but that file
     asserts only the CONFIG KEYS, so the verification was a one-off nobody
     re-ran. This re-runs it every gate.

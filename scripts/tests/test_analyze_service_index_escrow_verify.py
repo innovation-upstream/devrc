@@ -29,9 +29,12 @@ where `bw` IS installed, and vice versa.
 """
 from __future__ import annotations
 
+import ast
+import hashlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -311,7 +314,31 @@ def test_the_exit_code_table_is_pinned_EXACTLY_both_ways():
         # raised BEFORE any `bw` call — the interpreter cannot finish the run,
         # so no master password is spent on one that was never going to
         "DECRYPT-DEPS-MISSING": 34,
+        # --expect-pubkey. The first two are raised BEFORE any `bw` call, for
+        # the same reason 34 is.
+        "NOT-AN-AGE-IDENTITY": 35,
+        "PUBKEY-MISMATCH": 36,
+        "PUBKEY-DERIVATION-EMPTY": 37,
+        "AGE-KEYGEN-MISSING": 38,
+        "EXPECT-PUBKEY-MALFORMED": 39,
     }
+
+
+def test_the_table_STOPS_below_restore_verifys_FLOOR():
+    """🔴 THE RANGE 10–39 IS NOW FULL, AND 40 IS NOT THIS FILE'S TO TAKE.
+
+    `restore-verify.py` starts at 40 so an operator mapping a number during a
+    recovery gets exactly one answer. `test_the_TWO_exit_code_TABLES_never_
+    collide` catches an actual collision — but only AFTER someone has written
+    it, and the obvious next code to reach for is now 40. This says so first,
+    and names the real change: moving restore-verify's floor, which edits a
+    documented table a human reads under pressure.
+    """
+    assert max(EV.EXIT_CODES.values()) == 39
+    assert min(RV.EXIT_CODES.values()) == 40
+    assert set(EV.EXIT_CODES.values()) == set(range(10, 40)), (
+        "10–39 is meant to be exactly full; a gap here means a code was "
+        "removed, and a value above 39 means restore-verify's floor moved")
 
 
 def test_the_SIX_decrypt_outcomes_are_SIX_DISTINCT_codes():
@@ -3326,7 +3353,6 @@ def test_SECRETS_md_exit_codes_agree_with_the_module():
     already claimed it: the merge below silently prefers RV on a shared key, so
     the sentence was true of the intent and not of the code.
     """
-    import re
     doc = (ROOT / "SECRETS.md").read_text(encoding="utf-8")
     pairs = re.findall(r"\|\s*`(\d+)`\s*`([A-Z][A-Z-]+)`\s*\|", doc)
     assert pairs, "no exit-code rows found — the table moved or changed shape"
@@ -3344,6 +3370,17 @@ def test_SECRETS_md_exit_codes_agree_with_the_module():
     assert "DECRYPT-DEPS-MISSING" in documented, (
         "the preflight's code is undocumented — it is the one an operator in "
         "the wrong shell will actually hit")
+    # 🔴 THE WHOLE `--expect-pubkey` TABLE, NOT A SAMPLE. This is the mode an
+    # operator runs DURING the disaster, on a machine where this doc is the
+    # only thing they have; a row missing from it is a number with no meaning
+    # at the worst moment. Enumerated rather than derived from a name pattern,
+    # so adding a sixth outcome fails here until it is documented.
+    for token in ("EXPECT-PUBKEY-MALFORMED", "AGE-KEYGEN-MISSING",
+                  "NOT-AN-AGE-IDENTITY", "PUBKEY-DERIVATION-EMPTY",
+                  "PUBKEY-MISMATCH"):
+        assert token in documented, (
+            f"{token} is undocumented — it is a --expect-pubkey outcome, and "
+            f"that mode is the one used on a disaster-recovery host")
 
 
 def test_a_REFUSED_run_leaves_no_work_dir_behind(monkeypatch, tmp_path):
@@ -3383,3 +3420,1684 @@ def test_a_REFUSED_run_does_not_CHMOD_an_existing_dir(monkeypatch, tmp_path):
     assert rc == EV.EXIT_CODES["DECRYPT-DEPS-MISSING"]
     assert stat.S_IMODE(work.stat().st_mode) == before, (
         "the refused run changed the mode of a directory it did not create")
+
+
+# --------------------------------------------------------------------------- #
+# 20. `--expect-pubkey` — the DISASTER-RECOVERY mode
+#
+# The question the disaster actually poses: "is the copy in the vault the RIGHT
+# key?", asked from a machine that has NO on-disk identity (that is what makes
+# it a disaster) and NO route to the bucket. Rehearsed by hand from the second
+# host on 2026-08-27; this is that rehearsal, upstreamed.
+#
+# 🔴 EVERY FIXTURE HERE IS A FRESHLY GENERATED THROWAWAY KEY. The real
+# identity's public half is already committed in this public repo; its SECRET
+# half must never come near a test.
+# --------------------------------------------------------------------------- #
+def _new_identity(tmp_path: Path, name: str) -> Path:
+    """A REAL, freshly generated age identity. Synthetic and throwaway."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    p = tmp_path / name
+    r = subprocess.run([AGE_KEYGEN, "-o", str(p)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return p
+
+
+def _sha_via_documented_shell(identity: Path) -> str:
+    """The pin, computed by the LITERAL command the runbook tells an operator to
+    type — a second instrument, deliberately not the module's.
+
+    🔴 NEVER DERIVE THE EXPECTATION FROM THE IMPLEMENTATION IT TESTS. If this
+    called `EV.derive_pubkey_sha` the whole section would only prove the module
+    agrees with itself, and the one thing that must hold — that the tool and the
+    hand-run pipeline in SECRETS.md produce the SAME 16 characters — would be
+    unasserted.
+    """
+    p = subprocess.run(
+        ["sh", "-c",
+         f"{shlex.quote(AGE_KEYGEN)} -y {shlex.quote(str(identity))} "
+         f"| sha256sum | cut -c1-16"],
+        capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    return p.stdout.strip()
+
+
+def _pubkey_run(tmp_path: Path, fake: FakeBw, *, note: str, expect: str,
+                identity: Path | None = None, **kw):
+    """`EV.run` in pubkey mode. `identity` defaults to a path that DOES NOT
+    EXIST — the DR host's actual state, and the thing this mode must survive."""
+    fake.items = [_item(notes=note)]
+    return EV.run(bw=_cli(fake),
+                  identity=identity or (tmp_path / "no-such-identity.key"),
+                  item_name=ITEM, now=NOW, expect_pubkey=expect,
+                  work_dir=B._private_dir(tmp_path / "work"), **kw)
+
+
+# -- 20a. validate the INSTRUMENT before reading any verdict from it --------- #
+def test_the_pubkey_fixtures_are_REAL_keys_that_DISAGREE_at_the_SAME_SIZE(tmp_path):
+    """🔴 POSITIVE **AND** NEGATIVE CONTROL FOR THE WHOLE SECTION, plus the
+    vacuous-check lesson this mode exists to replace.
+
+    POSITIVE: two independently generated identities produce two well-formed
+    16-hex shas, so the derivation is doing something.
+    NEGATIVE: those shas DIFFER, so a passing comparison below is discriminating
+    rather than universal.
+    🔴 AND THE SIZES ARE EQUAL. Every age identity file is the same size —
+    measured here, not remembered — so "N bytes, 3 lines" cannot tell an
+    unrelated key from the right one. That is precisely why the sha exists, and
+    why the verdict line prints the byte count with a sentence saying it is not
+    the check.
+    """
+    a, b = _new_identity(tmp_path, "a.key"), _new_identity(tmp_path, "b.key")
+    sha_a, sha_b = _sha_via_documented_shell(a), _sha_via_documented_shell(b)
+    assert re.fullmatch(r"[0-9a-f]{16}", sha_a), sha_a
+    assert re.fullmatch(r"[0-9a-f]{16}", sha_b), sha_b
+    assert sha_a != sha_b, "two different keys hashed the same — the instrument is dead"
+    assert a.stat().st_size == b.stat().st_size
+    assert len(a.read_text(encoding="utf-8").splitlines()) == \
+        len(b.read_text(encoding="utf-8").splitlines())
+
+
+def test_the_module_and_the_DOCUMENTED_SHELL_PIPELINE_produce_the_SAME_sha(tmp_path):
+    """🔴 THE SEAM THAT MAKES THE RUNBOOK AND THE TOOL ONE CLAIM.
+
+    SECRETS.md tells an operator to type `age-keygen -y f | sha256sum |
+    cut -c1-16` on a machine where this script is not installed. If the module
+    hashed anything else — the stripped recipient, the recipient plus a newline
+    it re-added itself — the two would agree today and diverge the moment age
+    changed a byte of its output, and the divergence would be read as a WRONG
+    KEY at the worst possible moment. So they are pinned to each other.
+    """
+    k = _new_identity(tmp_path, "k.key")
+    assert EV.derive_pubkey_sha(k) == _sha_via_documented_shell(k)
+
+
+def test_the_printf_percent_s_pipeline_is_a_REAL_false_mismatch(tmp_path):
+    """🔴 THE TRAP THE MISMATCH MESSAGE WARNS ABOUT, MEASURED HERE RATHER THAN
+    ASSERTED.
+
+    `printf '%s' "$out" | sha256sum` drops the trailing newline `age-keygen`
+    emits and yields a DIFFERENT digest for a perfectly good key. That is a
+    false mismatch whose documented remedy elsewhere in this subsystem is to
+    re-escrow — i.e. to overwrite a good escrow. If this control ever stops
+    reproducing, the warning in `pubkey_check`'s message has become false and
+    must be rewritten, not left standing.
+    """
+    k = _new_identity(tmp_path, "k.key")
+    good = _sha_via_documented_shell(k)
+    stripped = subprocess.run(
+        ["sh", "-c",
+         f'out="$({shlex.quote(AGE_KEYGEN)} -y {shlex.quote(str(k))})"; '
+         f"printf '%s' \"$out\" | sha256sum | cut -c1-16"],
+        capture_output=True, text=True)
+    assert stripped.returncode == 0, stripped.stderr
+    assert stripped.stdout.strip() != good, (
+        "the newline-dropping pipeline agreed with the correct one — the "
+        "warning in PUBKEY-MISMATCH now describes a trap that does not exist")
+    assert EV.derive_pubkey_sha(k) == good
+
+
+def test_the_EMPTY_SHA_CONSTANT_really_is_sha256_of_NOTHING():
+    """A constant quoted in an operator-facing message is a claim. `sha256sum`
+    of an empty stream really does start with it, so "if you see this, the
+    command did not run" is true."""
+    assert hashlib.sha256(b"").hexdigest()[:16] == EV.EMPTY_SHA256_PREFIX
+    p = subprocess.run(["sh", "-c", "printf '' | sha256sum | cut -c1-16"],
+                       capture_output=True, text=True)
+    assert p.stdout.strip() == EV.EMPTY_SHA256_PREFIX
+
+
+# -- 20b. the whole point: no on-disk identity, no bucket ------------------- #
+def test_expect_pubkey_PROVES_the_escrow_with_NO_on_disk_identity(tmp_path,
+                                                                  monkeypatch):
+    """🔴 THE ENTIRE FEATURE, and it is asserted STRUCTURALLY rather than by
+    hoping.
+
+    The identity path handed in does not exist — the DR host's real state, and
+    the state that makes the DEFAULT mode exit `IDENTITY-MISSING` answering
+    nothing. Two saboteurs make "it did not read one" a fact instead of a
+    reading: `read_identity` and `_rv` (the restore/bucket pipeline) both blow
+    the test up if they are called at all.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    note = k.read_text(encoding="utf-8")
+    expect = _sha_via_documented_shell(k)
+
+    def _no_identity(*_a, **_k):
+        pytest.fail("the pubkey path read an on-disk identity")
+
+    def _no_bucket(*_a, **_k):
+        pytest.fail("the pubkey path reached for the restore/bucket pipeline")
+
+    monkeypatch.setattr(EV, "read_identity", _no_identity)
+    monkeypatch.setattr(EV, "_rv", _no_bucket)
+
+    fake = FakeBw()
+    v = _pubkey_run(tmp_path, fake, note=note, expect=expect)
+    assert isinstance(v, EV.PubkeyVerdict)
+    assert v.pubkey_sha == expect == v.expected_sha
+    assert v.escrow_bytes == len(note.encode("utf-8")) > 0
+    assert v.escrow_lines == len(note.splitlines()) > 0
+    assert not (tmp_path / "no-such-identity.key").exists()
+
+
+def test_the_DEFAULT_mode_on_the_SAME_host_answers_NOTHING(tmp_path):
+    """🔴 THE CONTROL THAT MAKES THE TEST ABOVE MEAN SOMETHING.
+
+    Same absent identity, same vault, same note: the default mode exits
+    `IDENTITY-MISSING` and proves nothing at all. Without this pair, "the
+    pubkey mode worked" is a claim about a run, not about a CAPABILITY the
+    other mode lacks — which is the whole reason this mode was built.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    note = k.read_text(encoding="utf-8")
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.run(bw=_cli(FakeBw(items=[_item(notes=note)])),
+               identity=tmp_path / "no-such-identity.key", item_name=ITEM,
+               now=NOW)
+    assert ei.value.token == "IDENTITY-MISSING"
+    assert ei.value.exit_code == 23
+
+
+def test_expect_pubkey_ACCEPTS_the_full_64_char_digest_too(tmp_path):
+    """`sha256sum` prints 64 characters; the runbook cuts them to 16. Pasting
+    the uncut value is not a typo and must not be refused — it is compared on
+    its first 16, which is the same claim."""
+    k = _new_identity(tmp_path, "escrowed.key")
+    note = k.read_text(encoding="utf-8")
+    full = subprocess.run(
+        ["sh", "-c", f"{shlex.quote(AGE_KEYGEN)} -y {shlex.quote(str(k))} "
+                     f"| sha256sum | cut -d' ' -f1"],
+        capture_output=True, text=True).stdout.strip()
+    assert len(full) == 64
+    v = _pubkey_run(tmp_path, FakeBw(), note=note, expect=full.upper())
+    assert v.pubkey_sha == full[:16]
+    # 🔴 THE VERDICT MUST NOT CALL A 64-CHAR PIN "the 16-hex pin you gave" — it
+    # would be describing something the operator did not type, in a module whose
+    # own rule is that unmeasured scope must not borrow a measured word. It says
+    # what was COMPARED instead.
+    assert "what your pin's first 16 hex characters were compared against" \
+        in v.line()
+    assert "pin you gave" not in v.line()
+
+
+def test_the_verdict_line_is_pinned_WHOLE_for_BOTH_server_states(tmp_path):
+    """🔴 THE WHOLE NORMALISED STRING, NOT A SUBSTRING. A guard on the words
+    "ESCROW PROVEN" passes on any sentence containing them, including one that
+    went on to claim the bucket was checked. Flipping any clause here to its
+    opposite must go red."""
+    k = _new_identity(tmp_path, "escrowed.key")
+    note = k.read_text(encoding="utf-8")
+    expect = _sha_via_documented_shell(k)
+    n, lines = len(note.encode("utf-8")), len(note.splitlines())
+
+    head = (
+        f"analyze-service-index-escrow-verify: ESCROW PROVEN FROM THIS HOST — "
+        f"the Secure Note {ITEM!r} derives public-key sha {expect}, which is "
+        f"what your pin's first 16 hex characters were compared against. NO "
+        f"on-disk identity was read and NO artifact "
+        f"store was contacted: this mode needs only `bw` and `age-keygen`, "
+        f"which is what lets it run on a recovery machine that has neither the "
+        f"key nor a route to the bucket. ")
+    tail = (
+        f"Fetched {n} bytes / {lines} lines — 🔴 THAT COUNT IS NOT THE CHECK: "
+        f"every age identity file is the same size, so an unrelated key passes "
+        f"a byte/line comparison; the sha is what discriminates. WHAT THIS DOES "
+        f"NOT PROVE: that any artifact opens — for that run --decrypt-check; "
+        f"nor that the note is BYTE-IDENTICAL to a local copy — a CRLF-rewritten "
+        f"note derives this same correct public key (measured, age v1.3.1), so "
+        f"the default byte comparison can call the same note DIFFERS-MATERIALLY "
+        f"and both answers are true. ")
+
+    unpinned = _pubkey_run(tmp_path, FakeBw(), note=note, expect=expect)
+    assert unpinned.line() == (
+        head + tail
+        + "server NOT PINNED (--expect-server / ASIB_ESCROW_SERVER unset); "
+          "session cross-check RAN: the CLI's configured server matched the "
+          "authenticated session's")
+
+    pinned = _pubkey_run(tmp_path / "b", FakeBw(status={"status": "unlocked"}),
+                         note=note, expect=expect, expect_server=SERVER)
+    assert pinned.line() == (
+        head + tail
+        + "server PINNED and matched; session cross-check NOT COMPARED (`bw "
+          "status` reported serverUrl=null — the CLI's configured server could "
+          "NOT be cross-checked against the authenticated session's)")
+
+
+def test_the_server_clauses_helper_is_the_ONE_writer_for_BOTH_verdicts():
+    """🔴 A SEAM GUARD ON A RELATIONSHIP NEITHER VERDICT OWNS ALONE.
+
+    Both verdict types report the same two facts about the same `check_server()`
+    result. Open-coded twice they drift, and the drift is inaudible because each
+    verdict's own whole-string pin covers only itself. So: exactly one writer,
+    and exactly two callers."""
+    src = SCRIPT.read_text(encoding="utf-8")
+    assert src.count("def _server_clauses(") == 1
+    assert src.count("_server_clauses(") == 3, (
+        "expected one definition and exactly two call sites — one per verdict")
+    for pinned in (True, False):
+        out = EV._server_clauses(pinned, None)
+        assert ("server PINNED and matched" if pinned
+                else "server NOT PINNED") in out
+        assert "session cross-check RAN" in out
+    assert "session cross-check NOT COMPARED (why)" in EV._server_clauses(True, "why")
+
+
+def test_the_bw_SEQUENCE_is_IDENTICAL_in_BOTH_modes(tmp_path):
+    """🔴 BEHAVIOURAL, NOT STRUCTURAL: the two modes must ask the vault the SAME
+    questions in the SAME order.
+
+    A structural check ("both call `_fetch_note`") type-checks past a wrong
+    argument. This records the real argv both modes send to `bw` and asserts
+    they are equal, so an ordering that drifted — reading the note before
+    checking which server answered, say — goes red even though each mode's own
+    tests still pass.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    note = k.read_text(encoding="utf-8")
+
+    byte_mode = FakeBw(items=[_item(notes=note)])
+    EV.run(bw=_cli(byte_mode), identity=_identity(tmp_path, note),
+           item_name=ITEM, now=NOW)
+
+    pub_mode = FakeBw()
+    _pubkey_run(tmp_path / "p", pub_mode, note=note,
+                expect=_sha_via_documented_shell(k))
+
+    assert byte_mode.calls == pub_mode.calls
+    assert len(byte_mode.calls) == 3, byte_mode.calls
+
+
+# -- 20c. the failures, each with its own remedy ---------------------------- #
+def test_a_MANGLED_note_is_NOT_AN_AGE_IDENTITY_and_never_a_mismatch(tmp_path):
+    """🔴 THE FAILURE THIS MODE EXISTS TO CATCH, built the way it really happens.
+
+    A note round-tripped through a web vault or a clipboard can have its line
+    breaks collapsed. MEASURED 2026-08-27 (age v1.3.1): `age-keygen -y` on such
+    a file exits 1 and writes ZERO bytes. Reporting that as PUBKEY-MISMATCH
+    would say "the vault holds the wrong key" about a vault that may hold the
+    right one perfectly — and the remedy for a mismatch is to overwrite it.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    mangled = k.read_text(encoding="utf-8").replace("\n", " ")
+    with pytest.raises(EV.EscrowError) as ei:
+        _pubkey_run(tmp_path, FakeBw(), note=mangled,
+                    expect=_sha_via_documented_shell(k))
+    assert ei.value.token == "NOT-AN-AGE-IDENTITY"
+    assert ei.value.exit_code == 35
+    assert ei.value.exit_code != EV.EXIT_CODES["PUBKEY-MISMATCH"]
+
+
+def test_a_CRLF_note_still_derives_the_CORRECT_key_and_the_verdict_SAYS_SO(tmp_path):
+    """🔴 A MEASURED DISAGREEMENT BETWEEN THE TWO MODES, pinned so nobody
+    'fixes' it.
+
+    MEASURED 2026-08-27, age v1.3.1: a CRLF-rewritten identity still derives the
+    CORRECT public key (rc=0, same 63 bytes). So this mode says PROVEN while the
+    byte comparison calls the same note DIFFERS-MATERIALLY — and both are true:
+    the copy is not byte-identical and is still the same usable key. The verdict
+    line states that limit rather than letting "PROVEN" imply byte fidelity.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    text = k.read_text(encoding="utf-8")
+    crlf = text.replace("\n", "\r\n")
+    expect = _sha_via_documented_shell(k)
+
+    v = _pubkey_run(tmp_path, FakeBw(), note=crlf, expect=expect)
+    assert v.pubkey_sha == expect
+    assert "CRLF-rewritten note derives this same correct public key" in v.line()
+
+    # ... and the OTHER mode, on the same bytes, disagrees on purpose.
+    assert EV.classify(crlf.encode("utf-8"), text.encode("utf-8")) == \
+        EV.CLASS_MATERIAL
+
+
+def test_a_DIFFERENT_key_is_PUBKEY_MISMATCH_and_REFUSES_to_advise_re_escrowing(
+        tmp_path):
+    """🔴 A MISMATCH MUST NOT SEND ANYONE TO OVERWRITE THE ESCROW.
+
+    A wrong PIPELINE produces a false mismatch on a good key (measured, two
+    tests up), and on 2026-08-25 this subsystem's `rc=22` advised re-escrowing
+    while the on-disk side was an unrelated client key. So the message has to
+    refuse first and say what would be destroyed, and both halves are pinned as
+    STATE (the exact sentences), not as the presence of a word.
+    """
+    escrowed = _new_identity(tmp_path, "escrowed.key")
+    other = _new_identity(tmp_path, "other.key")
+    with pytest.raises(EV.EscrowError) as ei:
+        _pubkey_run(tmp_path, FakeBw(),
+                    note=escrowed.read_text(encoding="utf-8"),
+                    expect=_sha_via_documented_shell(other))
+    exc = ei.value
+    assert exc.token == "PUBKEY-MISMATCH" and exc.exit_code == 36
+
+    # 🔴 THE WHOLE NORMALISED STRING, like its three siblings. Substrings plus
+    # ordering — what this test used to assert — cannot see an APPEND, and an
+    # appended "Then re-escrow the note from this host…" is the last thing the
+    # operator reads. Measured: that mutant survived all 240 tests.
+    expected_sha = _sha_via_documented_shell(other)
+    got_sha = _sha_via_documented_shell(escrowed)
+    assert got_sha != expected_sha, "the fixture keys must disagree"
+    assert _norm(exc.verdict) == _norm(
+        _ADVISORY_36.format(got=got_sha, expected=expected_sha))
+
+
+def test_a_pin_differing_only_in_its_LAST_character_is_a_MISMATCH(tmp_path):
+    """🔴 ALL {PUBKEY_SHA_CHARS} CHARACTERS ARE COMPARED, not a prefix.
+
+    FOUND BY AUDIT: `got == expected_sha` -> `got.startswith(expected_sha[:4])`
+    SURVIVED the whole sweep, because every other mismatch fixture is a
+    different key whose sha differs in the first few hex characters. Nothing
+    asserted the tail mattered. This pin differs from the real one ONLY in its
+    final character, so a prefix comparison of any length below 16 accepts it.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    real = _sha_via_documented_shell(k)
+    # Flip only the LAST character, staying in the hex alphabet so the pin is
+    # well-formed and reaches the comparison rather than the malformed refusal.
+    near_miss = real[:-1] + ("0" if real[-1] != "0" else "1")
+    assert len(near_miss) == len(real) and near_miss != real
+    assert near_miss[:15] == real[:15], "the fixture must differ ONLY at the end"
+
+    with pytest.raises(EV.EscrowError) as ei:
+        _pubkey_run(tmp_path, FakeBw(), note=k.read_text(encoding="utf-8"),
+                    expect=near_miss)
+    assert ei.value.token == "PUBKEY-MISMATCH"
+    assert ei.value.exit_code == 36
+    # POSITIVE CONTROL: the very same fixture with the true pin PROVES, so this
+    # refusal is discriminating rather than universal.
+    v = _pubkey_run(tmp_path / "ok", FakeBw(),
+                    note=k.read_text(encoding="utf-8"), expect=real)
+    assert v.pubkey_sha == real
+
+
+def test_age_keygen_exiting_ZERO_with_NO_OUTPUT_is_the_CHECK_NOT_RUNNING(
+        tmp_path, monkeypatch):
+    """🔴 `e3b0c442…` IS NOT A VERDICT. A naive pipeline hashes the empty stream
+    and prints a confident MISMATCH against a key that may be perfectly good.
+    This must be its own token, and the message must say the command did not
+    run — which is not the same as a check that failed."""
+    monkeypatch.setattr(
+        B, "age_public_key_bytes",
+        lambda _p: subprocess.CompletedProcess([], 0, b"", b""))
+    k = _new_identity(tmp_path, "escrowed.key")
+    with pytest.raises(EV.EscrowError) as ei:
+        _pubkey_run(tmp_path, FakeBw(), note=k.read_text(encoding="utf-8"),
+                    expect="0" * 16)
+    exc = ei.value
+    assert exc.token == "PUBKEY-DERIVATION-EMPTY" and exc.exit_code == 37
+    assert ("🔴 THIS IS THE CHECK NOT RUNNING, NOT A CHECK THAT FAILED, and "
+            "nothing about the escrow was determined.") in exc.verdict
+    assert EV.EMPTY_SHA256_PREFIX in exc.verdict
+    # 🔴 AND IT NEVER PRINTS THAT DIGEST AS THE DERIVED VALUE.
+    assert f"derived {EV.EMPTY_SHA256_PREFIX}" not in exc.verdict
+
+
+@pytest.mark.parametrize("shape", ["no-recipient-at-all", "recipient-PLUS-junk"])
+def test_age_keygen_exiting_ZERO_with_NON_RECIPIENT_output_is_refused(
+        tmp_path, monkeypatch, shape):
+    """A future age-keygen that exits 0 while printing something else must not
+    have that something hashed and published as a public key.
+
+    🔴 THE SECOND SHAPE IS WHAT MAKES THE `fullmatch` LOAD-BEARING. With only
+    the first, `AGE_PUBKEY_RE.fullmatch` -> `.search` SURVIVED a full sweep:
+    output with no recipient anywhere fails both spellings identically, so the
+    widening was invisible. A valid recipient FOLLOWED BY JUNK is the case that
+    tells them apart — `search` accepts it and would hash the whole polluted
+    stream as though it were a public key.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    real_pub = subprocess.run([AGE_KEYGEN, "-y", str(k)],
+                              capture_output=True).stdout.decode().strip()
+    stdout = {
+        "no-recipient-at-all": b"Warning: whatever\n",
+        "recipient-PLUS-junk": (real_pub + " trailing junk\n").encode(),
+    }[shape]
+    stderr = b"a captured stderr stream\n"
+    monkeypatch.setattr(
+        B, "age_public_key_bytes",
+        lambda _p: subprocess.CompletedProcess([], 0, stdout, stderr))
+    with pytest.raises(EV.EscrowError) as ei:
+        _pubkey_run(tmp_path, FakeBw(), note=k.read_text(encoding="utf-8"),
+                    expect="0" * 16)
+    assert ei.value.token == "NOT-AN-AGE-IDENTITY", shape
+    # 🔴 NOT `"Warning" not in msg` — that was a SPELLED guard, satisfied by any
+    # rewording of the stub's output and blind to a message quoting a DIFFERENT
+    # part of the stream. Assert the STATE: no captured stream reaches the
+    # message at all.
+    rendered = str(ei.value)
+    assert stdout.decode().strip() not in rendered, "captured stdout was quoted"
+    assert stderr.decode().strip() not in rendered, "captured stderr was quoted"
+    assert ei.value.detail is None, "an unvetted stream reached the detail field"
+
+
+# 🔴 EVERY MESSAGE THAT TELLS AN OPERATOR WHETHER TO DESTROY THEIR ONLY KEY
+# COPY IS PINNED AS A WHOLE NORMALISED STRING — not as sentences, and not with
+# a "the opposite word never appears" companion.
+#
+# TWO AUDIT FINDINGS, ONE FIX:
+#
+#  1. `NOT-AN-AGE-IDENTITY` (35) HAS **TWO** RAISE SITES and only the `rc != 0`
+#     one was pinned. Rewriting the `fullmatch`-failure arm's "do NOT
+#     re-escrow." to "go ahead and overwrite the vault copy from this host."
+#     SURVIVED all 384 tests, and that arm IS reached — by both shapes of
+#     `test_age_keygen_exiting_ZERO_with_NON_RECIPIENT_output_is_refused`,
+#     which assert only the token and stream redaction. The old test's singular
+#     name, "the … advisory", read as covering code 35 while covering half of
+#     it. Both arms are pinned below and the name says so.
+#
+#  2. THE NEGATIVE HALF WAS ITSELF A SPELLED GUARD — in a test whose own
+#     docstring opens "A GUARD ON WORDS IS WALKABLE BY REWORDING".
+#     `assert "Re-escrow the note" not in msg` catches a REPLACEMENT and not an
+#     APPEND: adding "Then overwrite the vault copy from this machine to fix
+#     it." kept every sentence pin and every ordering assertion true, matched
+#     no forbidden literal, and survived all 384 tests.
+#
+# A whole-string equality closes both: nothing can be appended, removed,
+# reordered or reworded without this going red. ⚠ THE TRADE IS REAL — a
+# cosmetic reword now costs a test edit. That is the right price for a message
+# whose subject is whether to overwrite the only off-machine copy of the key
+# every artifact in the bucket is encrypted to.
+_ADVISORY_35_RC_NONZERO = (
+    "the escrowed note did NOT PARSE as an age identity: `age-keygen -y` "
+    "exited 1 and produced 0 bytes of output. This is the mangling this mode "
+    "exists to catch — a note round-tripped through a web vault or a clipboard "
+    "can have its line breaks collapsed, and MEASURED 2026-08-27 (age v1.3.1) "
+    "that gives exactly this. age-keygen's stderr is NOT quoted here: it echoes "
+    "the line it could not parse, which for an identity file is KEY MATERIAL. "
+    "🔴 DO NOT RE-ESCROW ON THIS. What re-escrowing overwrites is the ONLY "
+    "off-machine copy of the identity every artifact in the bucket is encrypted "
+    "to; if the mangling happened on the way OUT of the vault, the stored note "
+    "is fine and you would be replacing a good copy with whatever this machine "
+    "holds. Open the item in the web vault and look at it first.")
+
+_ADVISORY_35_NOT_A_RECIPIENT = (
+    "`age-keygen -y` exited ZERO but its {n} bytes of output are not an age "
+    "recipient (`age1` + 58 base32 characters). The output is NOT quoted — this "
+    "module cannot know what a future age-keygen might print there, so it "
+    "treats it as untrusted. Hashing it anyway would publish a digest of an "
+    "unknown string as though it were a public key. Nothing about the escrow "
+    "was determined. 🔴 DO NOT RE-ESCROW ON THIS. What re-escrowing overwrites "
+    "is the ONLY off-machine copy of the identity every artifact in the bucket "
+    "is encrypted to, and this run learned NOTHING about whether that copy is "
+    "good. Re-run under a shell whose `age-keygen` you trust before concluding "
+    "anything.")
+
+_ADVISORY_37 = (
+    "`age-keygen -y` exited ZERO and printed NOTHING, so there was no public "
+    "key to hash. 🔴 THIS IS THE CHECK NOT RUNNING, NOT A CHECK THAT FAILED, "
+    "and nothing about the escrow was determined. The hand-run pipeline cannot "
+    "tell the two apart: `sha256sum` digests the empty stream and prints "
+    "e3b0c44298fc1c14…, which reads as a confident MISMATCH against a key that "
+    "may be perfectly good. If you see that value anywhere, the command did not "
+    "run. Do NOT re-escrow and do NOT rotate on this.")
+
+# 🔴 CODE 36 WAS THE ONE THE LEDGER CERTIFIED AND NOBODY PINNED.
+# Round 3 measured it: appending "Then re-escrow the note from this host to
+# bring the vault copy back into agreement." to the END of this verdict — the
+# last thing an operator reads, directly contradicting the message's own
+# "🔴 DO NOT RE-ESCROW OR ROTATE ON THIS ALONE" — passed all 240 tests. Its test
+# asserted substrings plus ordering and carried no forbidden-literal guard at
+# all, so it was round 2's "an append walks a spelled guard" finding still live,
+# on the single message this delta had newly declared covered.
+_ADVISORY_36 = (
+    "the escrowed note IS a valid age identity, and its public half is NOT the "
+    "one you pinned: derived {got}, expected {expected} (the first 16 hex "
+    "characters of sha256 over `age-keygen -y`'s stdout). Both values are "
+    "PUBLIC halves; no key material is disclosed by either. 🔴 DO NOT RE-ESCROW "
+    "OR ROTATE ON THIS ALONE — CHECK THE PIPELINE FIRST. A wrong pipeline "
+    "produces a FALSE MISMATCH ON A GOOD KEY: MEASURED 2026-08-27, "
+    "`printf '%s' \"$out\" | sha256sum` drops the trailing newline age-keygen "
+    "emits and yields a different digest, and e3b0c44298fc1c14… is sha256 of "
+    "EMPTY INPUT, i.e. the command never ran. Re-derive the expectation from a "
+    "key you KNOW is right and watch it reproduce before believing this. WHAT "
+    "RE-ESCROWING WOULD OVERWRITE: the Secure Note is the ONLY off-machine copy "
+    "of the identity every artifact in the bucket is encrypted to. Overwriting "
+    "it from a machine holding a DIFFERENT key destroys the escrow and every "
+    "backup with it — and that is not hypothetical here: on 2026-08-25 an "
+    "exported SOPS_AGE_KEY_FILE pointed this subsystem's comparison at an "
+    "unrelated key and the advice given was to re-escrow. Confirm which "
+    "identity the bucket's artifacts actually open with — `restore-verify.py`, "
+    "or this script's --decrypt-check — before touching the note.")
+
+# 🔴 THE LEDGER READS THIS, so the expected raise-site count is DERIVED from the
+# pins that actually exist rather than hand-typed beside them. Bumping a number
+# without adding a pin used to pass green while the docstring claimed otherwise.
+_WHOLE_PINNED_ADVISORIES: dict[str, tuple[str, ...]] = {
+    "NOT-AN-AGE-IDENTITY": (_ADVISORY_35_RC_NONZERO, _ADVISORY_35_NOT_A_RECIPIENT),
+    "PUBKEY-DERIVATION-EMPTY": (_ADVISORY_37,),
+    "PUBKEY-MISMATCH": (_ADVISORY_36,),
+}
+
+
+def test_BOTH_NOT_AN_AGE_IDENTITY_arms_pin_their_WHOLE_advisory(tmp_path,
+                                                                monkeypatch):
+    """🔴 CODE 35 IS RAISED FROM TWO PLACES AND BOTH ARE PINNED WHOLE.
+
+    An operator maps ONE exit code through to whichever arm they hit, so a
+    destructive instruction reworded into either is the same incident. See the
+    block comment above for the two mutants that survived before this existed.
+    """
+    # -- arm 1: age-keygen RAN and REFUSED (rc != 0) ------------------------ #
+    k = _new_identity(tmp_path, "escrowed.key")
+    mangled = k.read_text(encoding="utf-8").replace("\n", " ")
+    with pytest.raises(EV.EscrowError) as ei:
+        _pubkey_run(tmp_path, FakeBw(), note=mangled,
+                    expect=_sha_via_documented_shell(k))
+    assert ei.value.token == "NOT-AN-AGE-IDENTITY"
+    assert ei.value.exit_code == 35
+    assert _norm(ei.value.verdict) == _norm(_ADVISORY_35_RC_NONZERO)
+
+    # -- arm 2: age-keygen exited ZERO with output that is NOT a recipient -- #
+    stdout = b"Warning: whatever\n"
+    monkeypatch.setattr(
+        B, "age_public_key_bytes",
+        lambda _p: subprocess.CompletedProcess([], 0, stdout, b"stderr\n"))
+    with pytest.raises(EV.EscrowError) as ei2:
+        _pubkey_run(tmp_path / "b", FakeBw(),
+                    note=k.read_text(encoding="utf-8"), expect="0" * 16)
+    assert ei2.value.token == "NOT-AN-AGE-IDENTITY"
+    assert ei2.value.exit_code == 35
+    assert _norm(ei2.value.verdict) == _norm(
+        _ADVISORY_35_NOT_A_RECIPIENT.format(n=len(stdout)))
+    # (That the two arms are DIFFERENT messages is asserted where it can
+    # actually fail — on the pin CONSTANTS, in the ledger test below. Asserting
+    # it on the rendered verdicts here could never fire: both are already
+    # pinned to distinct constants by equality two lines up.)
+
+
+def test_the_PUBKEY_DERIVATION_EMPTY_advisory_is_pinned_WHOLE(
+        tmp_path, monkeypatch):
+    """Code 37, pinned whole for the same reason. Its job is to say the check
+    DID NOT RUN — an operator who reads it as a failed check has been handed a
+    reason to act destructively on a key nothing was ever measured about."""
+    monkeypatch.setattr(
+        B, "age_public_key_bytes",
+        lambda _p: subprocess.CompletedProcess([], 0, b"", b""))
+    k = _new_identity(tmp_path, "escrowed.key")
+    with pytest.raises(EV.EscrowError) as ei:
+        _pubkey_run(tmp_path, FakeBw(), note=k.read_text(encoding="utf-8"),
+                    expect="0" * 16)
+    assert ei.value.token == "PUBKEY-DERIVATION-EMPTY"
+    assert ei.value.exit_code == 37
+    assert _norm(ei.value.verdict) == _norm(_ADVISORY_37)
+    # 🔴 NO `assert EV.EMPTY_SHA256_PREFIX in verdict` HERE. It read as an extra
+    # guarantee and could never fire: `_ADVISORY_37` hardcodes the same literal,
+    # so the whole-string pin above fails first on any change to it. Its comment
+    # claimed the value was "a constant the module owns, not a literal typed
+    # twice" — it IS typed twice. The constant's own correctness is asserted
+    # where it CAN fail, in
+    # `test_the_EMPTY_SHA_CONSTANT_really_is_sha256_of_NOTHING`.
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE DESTRUCTIVE-ADVICE LEDGER — MEMBERSHIP DERIVED, NEVER HAND-LISTED
+# --------------------------------------------------------------------------- #
+# Round 4 found the class still open: SIX more messages took an append with all
+# 241 tests green, including `BYTES-DIFFER-MATERIALLY` — the tool's PRIMARY
+# comparison verdict — gaining "Then re-escrow the note from this host…" as the
+# last thing an operator reads.
+#
+# 🔴 THE CAUSE WAS NOT THE STRUCTURAL APPROACH; IT WAS ITS SCOPE. The previous
+# ledger hand-enumerated THREE tokens while the class is EVERY message carrying
+# destroy-or-not advice — thirteen of them. That is the same hand-typed hazard
+# the previous round removed one level down, reintroduced one level up: a
+# derived count, policed against a hand-written membership list.
+#
+# So membership is now DERIVED FROM THE MODULE: every `raise EscrowError` whose
+# static message text contains a destructive imperative MUST have its whole text
+# pinned below. Two-way — an unpinned destructive message fails, and a pin that
+# matches no site fails as stale.
+#
+# 🔴 IT ALSO CATCHES APPENDS TO MESSAGES THAT ARE NOT DESTRUCTIVE TODAY. Adding
+# "…re-escrow from this host" to any other refusal makes that site newly MATCH
+# the pattern, and it is then not in the pinned set — so it fails. That is the
+# property the hand-listed version could not have: it covers messages nobody
+# thought to list, which is exactly how all six were missed.
+_DESTRUCTIVE_ADVICE = re.compile(r"re-escrow|rotate|delete|overwrite|destroy",
+                                 re.IGNORECASE)
+
+# 🔴 MEASURED, NOT GUESSED — the module raises exactly these four callees today
+# (EscrowError x40, ValueError x3, SystemExit x2, KeyError x1, plus two bare
+# re-raises). Anything else is UNRESOLVABLE rather than skipped: see
+# `_escrow_raise_sites`.
+_KNOWN_NON_ESCROW_RAISES = frozenset({"ValueError", "SystemExit", "KeyError"})
+
+
+def _render_message(node: ast.AST) -> str:
+    """An expression's STATIC text: literals verbatim, anything else as `{expr}`.
+
+    Total by construction, so a message built by concatenating a constant onto a
+    module-level name (`"…" + NIX_SHELL_HINT`) is still readable — it renders as
+    the literal prose plus `{NIX_SHELL_HINT}`. A renderer that gave up there
+    would have excused the one site whose text it could not read, which is how a
+    fail-closed check quietly becomes a fail-open one.
+
+    🔴 CONVERSIONS AND FORMAT SPECS ARE PART OF THE TEXT. `{x}` and `{x!r}` are
+    different operator-facing output, so they must be different pins.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(_render_message(p) for p in node.values)
+    if isinstance(node, ast.FormattedValue):
+        conv = {-1: "", 114: "!r", 115: "!s", 97: "!a"}[node.conversion]
+        spec = ("" if node.format_spec is None
+                else ":" + _render_message(node.format_spec))
+        return "{" + ast.unparse(node.value) + conv + spec + "}"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _render_message(node.left) + _render_message(node.right)
+    return "{" + ast.unparse(node) + "}"
+
+
+def _escrow_raise_sites(src: str):
+    """`([(lineno, token, message text)], [reasons it could not be read])`.
+
+    🔴 AN AST WALK THAT FAILS CLOSED ON ALL THREE AXES — callee, token, message.
+
+    Round 2 found a second raise site nobody had counted. Round 3 replaced a
+    `str.count` that was blind to 8 of 10 spellings and false-accused prose.
+    Round 4 found the remaining hole: the CALLEE test failed OPEN. `if fname !=
+    "EscrowError": continue` silently dropped an ALIASED binding
+    (`_A = EscrowError`), a SUBCLASS, and an attribute callee (`self.Err(...)`)
+    — and a genuine second `PUBKEY-MISMATCH` raise carrying destructive advice,
+    spelled through an alias, survived the whole suite.
+
+    So a callee is either `EscrowError` (counted), or one of the exception types
+    this module is MEASURED to raise (skipped), or UNRESOLVABLE. The module is
+    40/40 literal `EscrowError` today, so this is prospective — which is what a
+    ledger is for.
+    """
+    tree = ast.parse(src)
+
+    consts: dict[str, str] = {}
+    for node in tree.body:
+        # 🔴 `AnnAssign` TOO. Reading only `Assign` made an annotated constant
+        # (`_TOK: str = "PUBKEY-MISMATCH"`) unresolvable, so a refactor that
+        # PRESERVED coverage was false-accused. It failed closed, which is the
+        # safe direction, but a guard that punishes a harmless refactor is a
+        # guard people route around.
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        elif isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        else:
+            continue
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            for tgt in targets:
+                if isinstance(tgt, ast.Name):
+                    consts[tgt.id] = value.value
+
+    sites = []
+    unresolved: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Raise) or node.exc is None:
+            continue                      # a bare `raise` re-raises; not a site
+        exc = node.exc
+        if isinstance(exc, ast.Name):     # `raise ValueError` with no call
+            if exc.id not in _KNOWN_NON_ESCROW_RAISES:
+                unresolved.append(f"line {node.lineno}: raises bare {exc.id!r}")
+            continue
+        if not isinstance(exc, ast.Call):
+            unresolved.append(
+                f"line {node.lineno}: raises a {type(exc).__name__} this walker "
+                f"cannot classify")
+            continue
+        fn = exc.func
+        if isinstance(fn, ast.Name):
+            fname = fn.id
+        else:
+            unresolved.append(
+                f"line {node.lineno}: callee {ast.unparse(fn)!r} is not a plain "
+                f"name, so whether it is EscrowError cannot be read statically")
+            continue
+        if fname in _KNOWN_NON_ESCROW_RAISES:
+            continue
+        if fname != "EscrowError":
+            unresolved.append(
+                f"line {node.lineno}: raises {fname!r}, which is neither "
+                f"EscrowError nor one of the measured non-escrow types "
+                f"{sorted(_KNOWN_NON_ESCROW_RAISES)} — an alias or subclass "
+                f"would hide a raise site from this ledger")
+            continue
+
+        tok = exc.args[0] if exc.args else None
+        msg = exc.args[1] if len(exc.args) > 1 else None
+        for kw in exc.keywords:
+            if kw.arg == "token":
+                tok = kw.value
+            elif kw.arg == "verdict":
+                msg = kw.value
+        if isinstance(tok, ast.Constant) and isinstance(tok.value, str):
+            token = tok.value
+        elif isinstance(tok, ast.Name) and tok.id in consts:
+            token = consts[tok.id]
+        else:
+            unresolved.append(
+                f"line {node.lineno}: token is not a literal or a module-level "
+                f"string constant")
+            continue
+        if msg is None:
+            unresolved.append(f"line {node.lineno}: no message argument found")
+            continue
+        sites.append((node.lineno, token, _render_message(msg)))
+    return sites, unresolved
+
+
+def _raise_sites_by_token(src: str) -> tuple[dict[str, int], list]:
+    """The counting view of `_escrow_raise_sites`, kept for the token ledger."""
+    sites, unresolved = _escrow_raise_sites(src)
+    counts: dict[str, int] = {}
+    for _line, token, _msg in sites:
+        counts[token] = counts.get(token, 0) + 1
+    return counts, unresolved
+
+
+# generated from 13 destructive-advice raise sites
+_PINNED_DESTRUCTIVE_TEXTS: frozenset[str] = frozenset({
+    # ITEM-NOT-FOUND  (escrow-verify.py:1174)
+    (
+        'no vault item is named exactly {item_name!r}. This is the whole '
+        'off-machine copy of the decryption key being absent: every artifact '
+        'in the bucket is still there and none of them can be opened without '
+        'the identity on this one disk. `bw list items --search` was used and'
+        ' it is FUZZY, so a near-miss would have been returned and rejected '
+        'here — check for a renamed item before concluding it was deleted.'
+    ),
+    # ITEM-AMBIGUOUS  (escrow-verify.py:1184)
+    (
+        '{len(matches)} vault items are named exactly {item_name!r}. This '
+        'script cannot tell which one is the escrow, and choosing one would '
+        'turn a coin flip into a verdict — a stale duplicate holding a '
+        'rotated-out key verifies green forever. Delete or rename the '
+        'duplicates so exactly one remains.'
+    ),
+    # NOTE-MISSING  (escrow-verify.py:1224)
+    (
+        'the vault item {item_name!r} exists but its payload carries NO '
+        '`notes` VALUE — the field is absent or null, not empty. That is a '
+        '`bw` output-schema answer, not evidence the escrow was emptied, and '
+        'the note may be perfectly intact. Do NOT re-escrow on this: read the'
+        ' item in the web vault first.'
+    ),
+    # ARTIFACT-EMPTY  (escrow-verify.py:1430)
+    (
+        'the ESCROWED key OPENED {key} and the artifact contains NOTHING. 🔴 '
+        'THE ESCROW IS FINE — age exited ZERO, which a wrong key cannot make '
+        'it do; the payload is a valid encryption of an empty file. Do NOT '
+        're-escrow or rotate on the strength of this. Run `restore-verify.py`'
+        ' to diagnose the artifact.'
+    ),
+    # ARTIFACT-CORRUPT  (escrow-verify.py:1470)
+    (
+        '🔴 {key} is TAMPERED, CORRUPT or TRUNCATED. age authenticated the '
+        'header with the ESCROWED key — which a non-matching identity cannot '
+        'do — began writing plaintext, and then FAILED on the payload. THE '
+        'ESCROW IS FINE; THE BACKUP IS NOT. This is the finding a backup '
+        'verifier exists to make: treat the artifact as unusable, check the '
+        'other retained objects for this scope, and do NOT rotate the key.'
+    ),
+    # DECRYPT-FAILED  (escrow-verify.py:1482)
+    (
+        'age REFUSED {key} without writing any plaintext at all. TWO CAUSES '
+        'PRODUCE THIS AND THEY ARE NOT SEPARABLE FROM HERE: the escrowed '
+        "identity does not match this artifact's recipients, or the "
+        "artifact's HEADER is damaged. Neither is asserted. To tell them "
+        'apart, try a DIFFERENT artifact with this same escrowed copy — '
+        '`--scope <another scope>`, or `restore-verify.py --all` for an older'
+        ' stamp: if another artifact OPENS, the escrowed key is fine and THIS'
+        " object's header is damaged; if none open, the key is the likely "
+        'cause. Do NOT rotate the key before running that.'
+    ),
+    # EXPECT-PUBKEY-MALFORMED  (escrow-verify.py:1548)
+    (
+        '--expect-pubkey is not a sha256 digest: {why}. (The value itself is '
+        'NOT echoed.) Produce it with `age-keygen -y <identity> | sha256sum |'
+        ' cut -c1-{PUBKEY_SHA_CHARS}` on a machine that holds the key. '
+        'NOTHING HAS BEEN CHECKED and the vault was NOT contacted — this '
+        'refusal is raised before any `bw` call, so no master password is '
+        'spent on a pin that could only ever mismatch. 🔴 ITS OWN CODE, NOT '
+        'PUBKEY-MISMATCH: a typo is a fact about what you typed, and '
+        'reporting it as a mismatch would accuse an intact escrow of being '
+        'the wrong key — whose remedy is to overwrite it.'
+    ),
+    # NOT-AN-AGE-IDENTITY  (escrow-verify.py:1628)
+    (
+        'the escrowed note did NOT PARSE as an age identity: `age-keygen -y` '
+        'exited {p.returncode} and produced {len(p.stdout)} bytes of output. '
+        'This is the mangling this mode exists to catch — a note '
+        'round-tripped through a web vault or a clipboard can have its line '
+        'breaks collapsed, and MEASURED 2026-08-27 (age v1.3.1) that gives '
+        "exactly this. age-keygen's stderr is NOT quoted here: it echoes the "
+        'line it could not parse, which for an identity file is KEY MATERIAL.'
+        ' 🔴 DO NOT RE-ESCROW ON THIS. What re-escrowing overwrites is the '
+        'ONLY off-machine copy of the identity every artifact in the bucket '
+        'is encrypted to; if the mangling happened on the way OUT of the '
+        'vault, the stored note is fine and you would be replacing a good '
+        'copy with whatever this machine holds. Open the item in the web '
+        'vault and look at it first.'
+    ),
+    # PUBKEY-DERIVATION-EMPTY  (escrow-verify.py:1644)
+    (
+        '`age-keygen -y` exited ZERO and printed NOTHING, so there was no '
+        'public key to hash. 🔴 THIS IS THE CHECK NOT RUNNING, NOT A CHECK '
+        'THAT FAILED, and nothing about the escrow was determined. The '
+        'hand-run pipeline cannot tell the two apart: `sha256sum` digests the'
+        ' empty stream and prints {EMPTY_SHA256_PREFIX}…, which reads as a '
+        'confident MISMATCH against a key that may be perfectly good. If you '
+        'see that value anywhere, the command did not run. Do NOT re-escrow '
+        'and do NOT rotate on this.'
+    ),
+    # NOT-AN-AGE-IDENTITY  (escrow-verify.py:1656)
+    (
+        '`age-keygen -y` exited ZERO but its {len(p.stdout)} bytes of output '
+        'are not an age recipient (`age1` + 58 base32 characters). The output'
+        ' is NOT quoted — this module cannot know what a future age-keygen '
+        'might print there, so it treats it as untrusted. Hashing it anyway '
+        'would publish a digest of an unknown string as though it were a '
+        'public key. Nothing about the escrow was determined. 🔴 DO NOT '
+        'RE-ESCROW ON THIS. What re-escrowing overwrites is the ONLY '
+        'off-machine copy of the identity every artifact in the bucket is '
+        'encrypted to, and this run learned NOTHING about whether that copy '
+        'is good. Re-run under a shell whose `age-keygen` you trust before '
+        'concluding anything.'
+    ),
+    # PUBKEY-MISMATCH  (escrow-verify.py:1708)
+    (
+        'the escrowed note IS a valid age identity, and its public half is '
+        'NOT the one you pinned: derived {got}, expected {expected_sha} (the '
+        'first {PUBKEY_SHA_CHARS} hex characters of sha256 over `age-keygen '
+        "-y`'s stdout). Both values are PUBLIC halves; no key material is "
+        'disclosed by either. 🔴 DO NOT RE-ESCROW OR ROTATE ON THIS ALONE — '
+        'CHECK THE PIPELINE FIRST. A wrong pipeline produces a FALSE MISMATCH'
+        ' ON A GOOD KEY: MEASURED 2026-08-27, `printf \'%s\' "$out" | '
+        'sha256sum` drops the trailing newline age-keygen emits and yields a '
+        'different digest, and {EMPTY_SHA256_PREFIX}… is sha256 of EMPTY '
+        'INPUT, i.e. the command never ran. Re-derive the expectation from a '
+        'key you KNOW is right and watch it reproduce before believing this. '
+        'WHAT RE-ESCROWING WOULD OVERWRITE: the Secure Note is the ONLY '
+        'off-machine copy of the identity every artifact in the bucket is '
+        'encrypted to. Overwriting it from a machine holding a DIFFERENT key '
+        'destroys the escrow and every backup with it — and that is not '
+        'hypothetical here: on 2026-08-25 an exported SOPS_AGE_KEY_FILE '
+        "pointed this subsystem's comparison at an unrelated key and the "
+        "advice given was to re-escrow. Confirm which identity the bucket's "
+        "artifacts actually open with — `restore-verify.py`, or this script's"
+        ' --decrypt-check — before touching the note.'
+    ),
+    # BYTES-DIFFER-TRAILING-NEWLINE  (escrow-verify.py:2026)
+    (
+        'the escrowed note and {identity} differ ONLY in trailing newlines: '
+        '{len(escrow)} escrowed bytes vs {len(disk)} on disk. (The differing '
+        'content is NOT printed — it is key material.) This is what a copy '
+        'through a web vault that trims looks like. An age identity still '
+        'decrypts without its final newline, so the escrow is very likely '
+        "USABLE — but it is no longer a byte-for-byte copy, and 'very likely'"
+        ' is not what a disaster-recovery artifact gets to be.{chose} '
+        'Re-escrow the file. 🔴 --decrypt-check CANNOT confirm this: this '
+        'refusal is raised BEFORE the decrypt step runs, so the flag produces'
+        ' the identical message and tests nothing. To check the trimmed bytes'
+        ' by hand, write them to a 0600 file yourself and pass it as '
+        '--identity to `restore-verify.py`.'
+    ),
+    # BYTES-DIFFER-MATERIALLY  (escrow-verify.py:2041)
+    (
+        'the escrowed note and {identity} DIFFER: {len(escrow)} escrowed '
+        'bytes vs {len(disk)} on disk, and they are not equal after trailing '
+        'newlines are removed. (The differing content is NOT printed — it is '
+        'key material; compare them by hand if you must.) One of the two '
+        'copies is not the key this subsystem encrypts to.{chose}{redirect} '
+        'Re-escrow from the on-disk identity only after confirming the '
+        "on-disk one is the one the bucket's artifacts open with — "
+        '`restore-verify.py` answers that (pass it the SAME --identity you '
+        'used here, or it will resolve its own).'
+    ),
+})
+
+
+def test_the_raise_site_WALKER_fails_CLOSED_on_every_axis():
+    """POSITIVE + NEGATIVE CONTROL FOR THE LEDGER'S OWN INSTRUMENT.
+
+    A walker wired to nothing returns `{}` and every ledger below passes over an
+    empty world. So: it finds the real module's sites, it resolves the spellings
+    that defeated the substring count, it does NOT count prose or table entries,
+    and it REFUSES every shape it cannot read — including the three callee
+    spellings that used to be dropped silently.
+    """
+    real, unresolved = _raise_sites_by_token(SCRIPT.read_text(encoding="utf-8"))
+    assert not unresolved, unresolved
+    # 🔴 A REAL FLOOR. This used to read `>= 10` while the true count is 40, so a
+    # walker regression losing 75% of the sites still passed its own control.
+    assert sum(real.values()) >= 35, real
+    assert len(real) >= 25, real
+
+    def counts(src):
+        return _raise_sites_by_token(src)[0]
+
+    def refused(src):
+        return _raise_sites_by_token(src)[1]
+
+    assert counts('raise EscrowError(\n    \'NOT-AN-AGE-IDENTITY\',\n    "x")\n') \
+        == {"NOT-AN-AGE-IDENTITY": 1}
+    assert counts('TOK = "NOT-AN-AGE-IDENTITY"\nraise EscrowError(TOK, "x")\n') \
+        == {"NOT-AN-AGE-IDENTITY": 1}
+    assert counts('TOK: str = "PUBKEY-MISMATCH"\nraise EscrowError(TOK, "x")\n') \
+        == {"PUBKEY-MISMATCH": 1}, "an ANNOTATED constant was false-accused"
+    assert counts('raise EscrowError(token="PUBKEY-MISMATCH", verdict="x")\n') \
+        == {"PUBKEY-MISMATCH": 1}
+    assert counts('# a comment mentioning "NOT-AN-AGE-IDENTITY", at length\nx=1\n') \
+        == {}, "prose was counted as a raise"
+    assert counts('EXIT_CODES = {"NOT-AN-AGE-IDENTITY": 35}\n') == {}, \
+        "a table entry was counted"
+    assert counts('try:\n    pass\nexcept Exception:\n    raise\n') == {}, \
+        "a bare re-raise was counted"
+    for ok in ("raise ValueError('x')\n", "raise KeyError('x')\n",
+               "raise SystemExit(3)\n", "raise ValueError\n"):
+        assert counts(ok) == {} and not refused(ok), ok
+
+    # 🔴 THE THREE CALLEE SPELLINGS ROUND 4 PROVED WERE DROPPED SILENTLY.
+    assert refused('_A = EscrowError\nraise _A("PUBKEY-MISMATCH", "x")\n'), \
+        "an ALIASED EscrowError binding was let through"
+    assert refused('class Sub(EscrowError):\n    pass\nraise Sub("T", "x")\n'), \
+        "a SUBCLASS callee was let through"
+    assert refused('raise self.Err("PUBKEY-MISMATCH", "x")\n'), \
+        "an ATTRIBUTE callee was let through"
+    assert refused('args = ()\nraise EscrowError(*args)\n'), \
+        "an unreadable token shape was let through"
+    assert refused('raise EscrowError("PUBKEY-MISMATCH")\n'), \
+        "a raise with no message was let through"
+
+
+def test_the_MESSAGE_RENDERER_reads_the_shapes_this_module_uses():
+    """The renderer is what decides whether a message is destructive, so a shape
+    it silently mis-renders is a message that escapes the ledger."""
+    assert _render_message(ast.parse('"a" "b"').body[0].value) == "ab"
+    assert _render_message(ast.parse('f"x{y}z"').body[0].value) == "x{y}z"
+    assert _render_message(ast.parse('f"{y!r}"').body[0].value) == "{y!r}"
+    assert _render_message(ast.parse('f"{y}"').body[0].value) != "{y!r}", (
+        "a conversion change must be visible to the pin, or `{x}` -> `{x!r}` "
+        "silently rewrites operator-facing output")
+    assert _render_message(ast.parse('"a" + HINT').body[0].value) == "a{HINT}"
+    assert _render_message(ast.parse('f"a{b}" "c"').body[0].value) == "a{b}c"
+
+
+def test_EVERY_destructive_advice_message_is_pinned_WHOLE():
+    """🔴 THE LEDGER OVER THE DESTROY-OR-NOT CLASS, MEMBERSHIP DERIVED.
+
+    Every `raise EscrowError` whose static text carries a destructive imperative
+    must have that whole text pinned. Two-way, so a pin matching no site is a
+    stale pin and fails too.
+
+    🔴 WHY THIS SHAPE. An append is invisible to a substring assertion and to an
+    `.index()` ordering assertion — round 2 established that, and round 4 found
+    six messages still exposed because the previous ledger policed a hand-listed
+    set of three tokens. Deriving membership from the module is what makes the
+    seventh instance fail without anyone remembering to add it.
+
+    ⚠ THE TRADE, STATED: a cosmetic reword of any of these messages now costs a
+    test edit. That is the right price for a message whose subject is whether to
+    overwrite the only off-machine copy of the key every artifact is encrypted
+    to — and it is the trade the previous rounds accepted for three messages,
+    applied consistently to all of them.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    sites, unresolved = _escrow_raise_sites(src)
+    assert not unresolved, (
+        f"the walker refused to classify: {unresolved}. It will not read "
+        f"'cannot say' as compliant — fix the spelling or widen the walker in "
+        f"the same commit.")
+
+    must_pin = {text for _l, _t, text in sites
+                if _DESTRUCTIVE_ADVICE.search(text)}
+    # POSITIVE CONTROL: if this ever collapses to nothing, the pattern or the
+    # renderer has broken and the whole ledger would pass vacuously.
+    assert len(must_pin) >= 12, (
+        f"only {len(must_pin)} destructive-advice message(s) found — the "
+        f"renderer or the pattern has regressed; the measured count is 13")
+
+    unpinned = must_pin - _PINNED_DESTRUCTIVE_TEXTS
+    assert not unpinned, (
+        "these messages carry destroy-or-not advice and are NOT pinned whole. "
+        "An append to any of them reaches the operator with all tests green — "
+        "that is exactly how six were missed. Add each WHOLE text to "
+        "`_PINNED_DESTRUCTIVE_TEXTS`:\n\n"
+        + "\n\n".join(sorted(f"  {t!r}" for t in unpinned)))
+
+    stale = _PINNED_DESTRUCTIVE_TEXTS - must_pin
+    assert not stale, (
+        "these pins match no raise site in the module — the message was "
+        "reworded or removed, so the pin is now guarding nothing:\n\n"
+        + "\n\n".join(sorted(f"  {t!r}" for t in stale)))
+
+
+def test_the_pubkey_TOKENS_each_have_the_whole_pins_they_CLAIM():
+    """🔴 A LEDGER OVER THE RAISE SITES OF THE THREE TOKENS NAMED BELOW.
+
+    Scope stated exactly, because the previous docstring said "failing when the
+    set GROWS or SHRINKS" — wider than the code, which polices only the tokens
+    in `_WHOLE_PINNED_ADVISORIES`. The class-wide guarantee is the test above;
+    this one pins the RENDERED messages, including runtime values a static text
+    cannot show.
+    """
+    counts, unresolved = _raise_sites_by_token(SCRIPT.read_text(encoding="utf-8"))
+    assert not unresolved, unresolved
+
+    for token, pins in _WHOLE_PINNED_ADVISORIES.items():
+        assert counts.get(token, 0) == len(pins), (
+            f"{token} is raised from {counts.get(token, 0)} place(s), but this "
+            f"file declares {len(pins)} whole-message pin(s) for it. A new "
+            f"raise site needs its own WHOLE pin in the SAME commit.")
+
+    all_pins = [p for pins in _WHOLE_PINNED_ADVISORIES.values() for p in pins]
+    assert all(p.strip() for p in all_pins)
+    assert len(set(all_pins)) == len(all_pins), "two pins are the same string"
+
+    names = {"_ADVISORY_35_RC_NONZERO", "_ADVISORY_35_NOT_A_RECIPIENT",
+             "_ADVISORY_37", "_ADVISORY_36"}
+    assert len(names) == len(all_pins), (
+        "this name list and _WHOLE_PINNED_ADVISORIES have drifted apart")
+
+    # 🔴 THE COLLECTION ITSELF IS NOT A READER. `_WHOLE_PINNED_ADVISORIES` loads
+    # all four names, so counting every `Name` Load made `missing` empty BY
+    # CONSTRUCTION for exactly the set it polices: round 4 deleted the sole
+    # assertion reading `_ADVISORY_36` AND re-applied round 3's append, and all
+    # 241 tests passed. So the collection's own node is excluded, and a pin must
+    # be loaded somewhere ELSE.
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    collection_nodes = set()
+    for node in tree.body:
+        tgts = ([node.target] if isinstance(node, ast.AnnAssign)
+                else node.targets if isinstance(node, ast.Assign) else [])
+        if any(isinstance(t, ast.Name) and t.id == "_WHOLE_PINNED_ADVISORIES"
+               for t in tgts):
+            collection_nodes.update(id(n) for n in ast.walk(node))
+    loaded = {n.id for n in ast.walk(tree)
+              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+              and id(n) not in collection_nodes}
+    missing = names - loaded
+    assert not missing, (
+        f"declared but asserted nowhere outside the collection itself: "
+        f"{sorted(missing)} — a pin no test reads is a pin in name only")
+
+
+def _secret_line(text: str) -> str:
+    """The `AGE-SECRET-KEY-1…` line of a throwaway identity."""
+    return [ln for ln in text.splitlines()
+            if ln.startswith("AGE-SECRET-KEY-")][0]
+
+
+# 🔴 THE MANGLINGS THAT ACTUALLY MAKE age-keygen ECHO, MEASURED — NOT GUESSED.
+#
+# The first version of this guard was VACUOUS, and an audit proved it: its three
+# manglers (`\n`->space, emptied, secret line truncated) produce stderr that
+# contains ZERO characters of the secret, so re-quoting `p.stderr` into the
+# NOT-AN-AGE-IDENTITY verdict SURVIVED the entire suite — and that mutated build
+# printed the whole 74-character secret key. The docstring said "a message that
+# echoed it would be caught here". It would not have been.
+#
+# MEASURED 2026-08-27, age v1.3.1, over six inputs, checking stderr
+# case-INSENSITIVELY against the fixture's own secret:
+#
+#   newlines -> spaces            rc=1  145 B  no leak   ("no identities found")
+#   emptied                       rc=1  145 B  no leak   ("no identities found")
+#   secret line truncated by 5    rc=1  181 B  no leak   (bech32 checksum)
+#   non-key text                  rc=1  189 B  no leak
+#   LEADING SPACE on the line     rc=1  243 B  🔴 LEAKS the full secret line
+#   LOWERCASED `age-secret-key-`  rc=1  242 B  🔴 LEAKS the full secret line
+#
+# The echo needs an UNRECOGNISED IDENTITY *TYPE* PREFIX — age-keygen quotes what
+# it could not classify. A line it recognises but cannot parse is rejected
+# without being repeated. So a guard built only from "obviously broken" inputs
+# tests the one shape that CANNOT leak.
+#
+# 🔴 A LEADING SPACE IS THE LIKELIEST WEB-VAULT CLIPBOARD ARTIFACT — i.e. the
+# exact mangling this whole mode exists to catch. The leaking cases are the
+# realistic ones; that is what made the vacuous version so quiet.
+_LEAKING = "leaking"
+_NON_LEAKING = "non-leaking"
+
+_MANGLERS = [
+    (lambda t: t.replace("\n", " "), "newlines collapsed to spaces", _NON_LEAKING),
+    (lambda t: "", "emptied", _NON_LEAKING),
+    (lambda t: t.replace(_secret_line(t), _secret_line(t)[:-5]),
+     "the secret line truncated", _NON_LEAKING),
+    (lambda t: t.replace(_secret_line(t), " " + _secret_line(t)),
+     "a LEADING SPACE on the secret line", _LEAKING),
+    (lambda t: t.replace("AGE-SECRET-KEY-", "age-secret-key-"),
+     "a LOWERCASED key prefix", _LEAKING),
+]
+
+
+def test_the_LEAKING_manglers_really_DO_make_age_keygen_echo_the_secret(tmp_path):
+    """🔴 THE POSITIVE CONTROL THE FIRST VERSION OF THIS GUARD LACKED.
+
+    A "no key material in the message" assertion is worth exactly as much as the
+    input's ability to PUT key material there. This runs `age-keygen -y` directly
+    on each fixture and asserts the stderr of the two `_LEAKING` manglers really
+    does contain the secret — and that the three `_NON_LEAKING` ones really do
+    not. If age ever stops echoing, this goes red and tells you the guard below
+    has become vacuous, instead of leaving it silently green forever.
+
+    ⚠ THE COMPARISON IS CASE-INSENSITIVE, and that is not fussiness: a
+    case-SENSITIVE check returns a FALSE NEGATIVE on the lowercased-prefix case
+    while the full key body is sitting in the stream. (The auditor's own first
+    check made exactly that error.)
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    text = k.read_text(encoding="utf-8")
+    secret = _secret_line(text)
+    seen = {_LEAKING: 0, _NON_LEAKING: 0}
+    for mangler, label, kind in _MANGLERS:
+        f = tmp_path / f"probe-{abs(hash(label))}.key"
+        f.write_text(mangler(text), encoding="utf-8")
+        p = subprocess.run([AGE_KEYGEN, "-y", str(f)], capture_output=True)
+        assert p.returncode != 0, f"{label} was ACCEPTED by age-keygen"
+        err = p.stderr.decode("utf-8", "replace").lower()
+        leaked = secret.lower() in err
+        assert leaked == (kind is _LEAKING), (
+            f"{label}: expected {kind}, stderr {'HAS' if leaked else 'lacks'} "
+            f"the secret. The ledger above is now wrong about this age version; "
+            f"re-measure before trusting the guard that reads it.")
+        seen[kind] += 1
+    assert seen[_LEAKING] >= 2 and seen[_NON_LEAKING] >= 3, seen
+
+
+@pytest.mark.parametrize("mangler,label,kind", _MANGLERS)
+def test_NO_pubkey_failure_message_EVER_carries_key_material(tmp_path, mangler,
+                                                             label, kind):
+    """🔴 age-keygen's STDERR ECHOES ITS INPUT on the realistic manglings —
+    measured: an unrecognised identity TYPE comes back as `unknown identity
+    type: "<the line>"`, and on a leading-space or lowercased-prefix paste that
+    line is the SECRET KEY. Quoting it would leak the very thing this module
+    refuses to print, on exactly the failure it exists to report.
+
+    🔴 THE GUARD IS ONLY AS GOOD AS ITS LEAKING FIXTURES. Two of the five
+    manglers put the real secret into age-keygen's stderr — proven by
+    `test_the_LEAKING_manglers_really_DO_make_age_keygen_echo_the_secret` above,
+    which is this test's positive control. Interpolating `p.stderr` into the
+    NOT-AN-AGE-IDENTITY verdict is killed here by those two.
+
+    ⚠ CASE-INSENSITIVE, against the FIXTURE'S OWN secret — a case-sensitive
+    check reads clean on the lowercased-prefix case while the whole key body is
+    in the message.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    text = k.read_text(encoding="utf-8")
+    note = mangler(text)
+    secret = _secret_line(text)
+    body = secret.split("AGE-SECRET-KEY-", 1)[-1]
+    try:
+        _pubkey_run(tmp_path, FakeBw(), note=note,
+                    expect=_sha_via_documented_shell(k))
+    except EV.EscrowError as exc:
+        rendered = str(exc).lower()
+        assert secret.lower() not in rendered, label
+        # The BODY alone, so a message that dropped the prefix while keeping the
+        # key still fails. This is the half a `"AGE-SECRET-KEY-" not in msg`
+        # spelling check cannot see.
+        assert body.lower() not in rendered, label
+        assert "age-secret-key-" not in rendered, label
+        assert exc.detail is None, (
+            "a detail field was populated on a path where the only upstream "
+            "stream available is age-keygen's input-echoing stderr")
+    else:  # pragma: no cover - every mangling above must refuse
+        pytest.fail(f"{label} was accepted as a valid escrow")
+
+
+def test_a_note_stripped_of_its_COMMENT_LINES_still_PROVES(tmp_path):
+    """🔴 MEASURED, AND WRITTEN DOWN BECAUSE IT LOOKS LIKE A BUG.
+
+    The `# created:` / `# public key:` lines an age identity carries are
+    COMMENTS: a note reduced to its `AGE-SECRET-KEY-1…` line alone still parses
+    and derives the SAME public key, so this mode says PROVEN. That is correct —
+    the vault holds a usable copy of the right key — and it is exactly the sort
+    of true-but-surprising outcome someone would 'fix' into a refusal. The byte
+    comparison is the mode that reports the missing lines, as
+    DIFFERS-MATERIALLY.
+
+    (Found by a fixture that assumed this would fail. Kept as a fixture that
+    asserts what actually happens.)
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    text = k.read_text(encoding="utf-8")
+    secret_only = [ln for ln in text.splitlines()
+                   if ln.startswith("AGE-SECRET-KEY-")][0] + "\n"
+    expect = _sha_via_documented_shell(k)
+
+    v = _pubkey_run(tmp_path, FakeBw(), note=secret_only, expect=expect)
+    assert v.pubkey_sha == expect
+    assert v.escrow_lines == 1 and v.escrow_lines != len(text.splitlines())
+    assert EV.classify(secret_only.encode("utf-8"), text.encode("utf-8")) == \
+        EV.CLASS_MATERIAL
+
+
+# -- 20d. the preflights: a precondition checked AFTER the vault costs a
+#         MASTER PASSWORD. #851's lesson, which recurred once because a fix
+#         corrected WHICH shell was advertised without changing WHEN the check
+#         ran. Both refusals here are BEFORE the first `bw` process starts.
+# --------------------------------------------------------------------------- #
+def test_a_MISSING_age_keygen_refuses_BEFORE_A_SINGLE_bw_CALL(tmp_path,
+                                                              monkeypatch):
+    """🔴 THE ORDERING IS THE DELIVERABLE, and `fake.calls == []` is what makes
+    it a fact rather than a reading. A message saying "the vault was NOT
+    contacted" is checkable only against the recorder."""
+    monkeypatch.setattr(EV.shutil, "which",
+                        lambda name: None if name == "age-keygen"
+                        else "/usr/bin/" + name)
+    fake = FakeBw()
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.run(bw=_cli(fake), identity=tmp_path / "absent.key", item_name=ITEM,
+               now=NOW, expect_pubkey="0" * 16,
+               work_dir=B._private_dir(tmp_path / "work"))
+    assert ei.value.token == "AGE-KEYGEN-MISSING" and ei.value.exit_code == 38
+    assert fake.calls == [], (
+        "the vault was contacted before the tool precondition — on the "
+        "documented workflow that is a master password already typed")
+
+
+def test_AGE_KEYGEN_MISSING_is_NOT_the_same_finding_as_AGE_MISSING():
+    """🔴 A DIFFERENT BINARY, A DIFFERENT CLAIM, A DIFFERENT TABLE ROW.
+
+    `AGE-MISSING` (29) names `age`, says the key "cannot be tested against
+    anything", and is documented in SECRETS.md under `--decrypt-check`. An
+    operator handed that message for a `--expect-pubkey` run would run
+    `which age`, see it, and stop trusting the tool — and would land on a doc
+    row about a check they never ran.
+
+    🔴 IT ASSERTS THE TOKEN THE PREFLIGHT ACTUALLY RAISES, not just that the
+    two table entries differ and that the message names `age-keygen`. FOUND BY
+    A MUTATION SWEEP: swapping the raised token to `"AGE-MISSING"` left the
+    table untouched and the message untouched, so this test SURVIVED while the
+    module reported the wrong code. The docstring claimed the split was
+    guarded; the body checked one side of it.
+    """
+    assert EV.EXIT_CODES["AGE-KEYGEN-MISSING"] != EV.EXIT_CODES["AGE-MISSING"]
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.preflight_pubkey_tools(which=lambda _n: None)
+    assert ei.value.token == "AGE-KEYGEN-MISSING"
+    assert ei.value.exit_code == EV.EXIT_CODES["AGE-KEYGEN-MISSING"] == 38
+    msg = ei.value.verdict
+    assert "`age-keygen` is not on PATH" in msg
+    assert "It is a DIFFERENT binary from `age`" in msg
+    # POSITIVE CONTROL: it is not simply always red.
+    EV.preflight_pubkey_tools(which=lambda _n: "/usr/bin/" + _n)
+
+
+@pytest.mark.parametrize("bad,why", [
+    ("", "empty"),
+    ("288c4d24cfdb5aa", "15 chars"),
+    ("288c4d24cfdb5aa1a", "17 chars"),
+    ("288c4d24cfdb5aaz", "16 chars, one not hex"),
+    ("not-a-sha", "prose"),
+    ("0" * 63, "63 chars"),
+])
+def test_a_MALFORMED_pin_is_ITS_OWN_failure_never_a_MISMATCH(tmp_path, bad, why,
+                                                             monkeypatch):
+    """🔴 A TYPO MUST NOT BE REPORTED AS A WRONG KEY. `PUBKEY-MISMATCH`'s
+    documented remedy chain ends at re-escrowing; a malformed pin can only ever
+    mismatch, so routing it there would accuse an intact escrow. Raised before
+    any `bw` call, so no master password is spent on it either."""
+    fake = FakeBw()
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.run(bw=_cli(fake), identity=tmp_path / "absent.key", item_name=ITEM,
+               now=NOW, expect_pubkey=bad,
+               work_dir=B._private_dir(tmp_path / "work"))
+    assert ei.value.token == "EXPECT-PUBKEY-MALFORMED", why
+    assert ei.value.exit_code == 39
+    assert fake.calls == [], why
+    # 🔴 THE VALUE IS NEVER ECHOED — the flag is where a wrong clipboard entry
+    # lands, and this file's stance is that unvetted input never reaches a
+    # message.
+    if bad:
+        assert bad not in str(ei.value), why
+
+
+def test_the_MALFORMED_pin_refusal_is_pinned_as_a_WHOLE_STRING():
+    """🔴 A GUARD ON WORDS IS WALKABLE BY REWORDING. The claim "the vault was
+    NOT contacted" is machine-readable only if the whole sentence is pinned;
+    flipping it to its opposite must fail this test. Two arms, two reasons."""
+    common = (
+        "(The value itself is NOT echoed.) Produce it with `age-keygen -y "
+        "<identity> | sha256sum | cut -c1-16` on a machine that holds the key. "
+        "NOTHING HAS BEEN CHECKED and the vault was NOT contacted — this "
+        "refusal is raised before any `bw` call, so no master password is spent "
+        "on a pin that could only ever mismatch. 🔴 ITS OWN CODE, NOT "
+        "PUBKEY-MISMATCH: a typo is a fact about what you typed, and reporting "
+        "it as a mismatch would accuse an intact escrow of being the wrong key "
+        "— whose remedy is to overwrite it.")
+
+    with pytest.raises(EV.EscrowError) as short:
+        EV.normalise_expected_pubkey_sha("abc")
+    assert short.value.verdict == (
+        "--expect-pubkey is not a sha256 digest: it is 3 characters long, and "
+        "a sha256 digest is 64 or, cut to the documented prefix, 16. " + common)
+
+    with pytest.raises(EV.EscrowError) as nonhex:
+        EV.normalise_expected_pubkey_sha("288c4d24cfdb5aaz")
+    assert nonhex.value.verdict == (
+        "--expect-pubkey is not a sha256 digest: it is 16 characters long, "
+        "which is right, but not all of them are hexadecimal. " + common)
+
+
+def test_the_pin_is_normalised_but_NOT_guessed_at():
+    """Whitespace and case are transport damage a paste really does introduce;
+    a wrong LENGTH is not, and is refused rather than padded or truncated into
+    something that could match."""
+    assert EV.normalise_expected_pubkey_sha("  288C4D24CFDB5AA1\n") == \
+        "288c4d24cfdb5aa1"
+    assert EV.normalise_expected_pubkey_sha("ab" * 32) == "ab" * 8
+    for bad in ("288c4d24cfdb5aa", "288c4d24cfdb5aa1" + "0" * 47):
+        with pytest.raises(EV.EscrowError):
+            EV.normalise_expected_pubkey_sha(bad)
+
+
+def test_the_MALFORMED_pin_OUTRANKS_a_missing_age_keygen(tmp_path, monkeypatch):
+    """Both are pre-vault refusals, so the order is a choice. The pin is
+    reported first because its fault is in what the operator just typed and
+    they can fix it without leaving the prompt; the tool needs a new shell."""
+    monkeypatch.setattr(EV.shutil, "which", lambda _n: None)
+    fake = FakeBw()
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.run(bw=_cli(fake), identity=tmp_path / "absent.key", item_name=ITEM,
+               now=NOW, expect_pubkey="zzz",
+               work_dir=B._private_dir(tmp_path / "work"))
+    assert ei.value.token == "EXPECT-PUBKEY-MALFORMED"
+    assert fake.calls == []
+
+
+def test_a_run_WITHOUT_expect_pubkey_is_NEVER_refused_for_age_keygen(tmp_path,
+                                                                     monkeypatch):
+    """POSITIVE CONTROL ON THE SCOPE. The default byte comparison never runs
+    `age-keygen`, so a host without it must not be refused — a preflight wider
+    than the path it guards is a permanently-red gate."""
+    monkeypatch.setattr(EV.shutil, "which",
+                        lambda name: None if name == "age-keygen"
+                        else "/usr/bin/" + name)
+    v = _run(tmp_path, FakeBw(items=[_item()]))
+    assert v.classification == EV.CLASS_IDENTICAL
+
+
+# -- 20e. the advertised shell must be able to run what it advertises -------- #
+#
+# 🔴 THE PACKAGE IS NOT THE BINARY. `age-keygen` ships inside nixpkgs' `age`
+# package, so a hint that named the BINARY would not resolve — the 2026-08-25
+# failure in a new spelling. This ledger is the mapping, asserted TWO-WAY
+# against both tuples so neither can grow or shrink alone.
+_PUBKEY_PACKAGE_PROVIDES: dict[str, tuple[str, ...]] = {
+    "bitwarden-cli": ("bw",),
+    "age": ("age-keygen",),
+}
+
+
+def test_the_pubkey_shell_provisions_EVERY_tool_that_path_RUNS():
+    """🔴 A LEDGER PINNED IN BOTH DIRECTIONS, not a subset check.
+
+    A package with no binary in `PUBKEY_TOOLS` is dead weight in a hint an
+    operator waits on during a recovery; a tool with no package is the 2026-08-25
+    failure — a shell that parses, starts, unlocks the vault, and then cannot
+    finish. Both are failures here.
+
+    ⚠ SCOPE, stated so this is not read as more than it is: this asserts the
+    LEDGER agrees with the code, not that nixpkgs really packages them that way.
+    That was measured by hand on 2026-08-27 (`nix-shell -p bitwarden-cli age
+    --run 'command -v age-keygen bw'` resolved both out of /nix/store, age-keygen
+    from the `age` derivation); running nix inside the suite would make the gate
+    depend on a substituter.
+    """
+    assert set(_PUBKEY_PACKAGE_PROVIDES) == set(EV.PUBKEY_NIX_SHELL_PACKAGES), (
+        "the ledger and the advertised package list disagree")
+    provided = {b for bins in _PUBKEY_PACKAGE_PROVIDES.values() for b in bins}
+    assert provided == set(EV.PUBKEY_TOOLS), (
+        f"the advertised shell provides {sorted(provided)} but the path runs "
+        f"{sorted(EV.PUBKEY_TOOLS)}")
+    # The mode's whole claim is that it needs LESS than --decrypt-check.
+    assert "python3.withPackages(p:[p.minio])" not in EV.PUBKEY_NIX_SHELL_PACKAGES
+    assert "jq" not in EV.PUBKEY_NIX_SHELL_PACKAGES
+    assert set(EV.PUBKEY_NIX_SHELL_PACKAGES) != set(EV.NIX_SHELL_PACKAGES)
+
+
+def test_the_pubkey_hint_is_accepted_by_a_REAL_SHELL():
+    """Same instrument, same reason as the decrypt hint's: `shlex.split` does
+    not treat `(`/`)` as metacharacters, so only a real shell can see broken
+    quoting in a command an operator will paste."""
+    if shutil.which("bash") is None:
+        pytest.fail("bash is required to validate the hint this module hands out")
+    cmd = EV.PUBKEY_NIX_SHELL_HINT.replace("<command>", "true")
+    ok = subprocess.run(["bash", "-n", "-c", cmd], capture_output=True, text=True)
+    assert ok.returncode == 0, (
+        f"the advertised hint is not valid shell: {ok.stderr.strip()}")
+    assert EV.PUBKEY_NIX_SHELL_HINT.startswith("nix-shell -p ")
+    assert EV.PUBKEY_NIX_SHELL_HINT.endswith(" --run '<command>'")
+    assert "'bitwarden-cli'" not in EV.PUBKEY_NIX_SHELL_HINT, "a bare name was quoted"
+
+
+def test_the_AGE_KEYGEN_MISSING_message_hands_over_the_SMALLER_shell():
+    """The refusal an operator hits on a recovery machine must advertise the
+    shell THIS mode needs, not the decrypt one — that is a large download for
+    packages the run will never touch."""
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.preflight_pubkey_tools(which=lambda _n: None)
+    msg = ei.value.verdict
+    assert EV.PUBKEY_NIX_SHELL_HINT in msg
+    assert EV.NIX_SHELL_HINT not in msg
+
+
+# -- 20f. the no-hash POLICY, reconciled rather than quietly reworded -------- #
+def _norm(s: str) -> str:
+    return " ".join(s.split())
+
+
+def test_the_module_docstring_RECONCILES_the_no_hash_policy():
+    """🔴 A SAFETY COMMENT THAT THE IMPLEMENTATION CONTRADICTS IS WORSE THAN
+    NONE — it stops anyone looking.
+
+    The docstring used to say a mismatch reports byte counts and a
+    classification "never the differing content, and never a hash of it either".
+    This mode prints a hash. The distinction that makes it safe is PUBLIC HALF
+    vs SECRET HALF, and it has to be IN the docstring: leaving the absolute
+    claim standing makes a load-bearing safety sentence false, and someone
+    reading it later would 'restore' the policy by deleting this mode's output.
+
+    Pinned as WHOLE NORMALISED SENTENCES. A guard on the word "public" is
+    walkable by rewording — and flipping either sentence to its opposite has to
+    go red.
+    """
+    doc = _norm(EV.__doc__)
+    assert "never a hash of it either" not in doc, (
+        "the absolute no-hash claim is still standing beside a mode that "
+        "prints a hash — the two contradict")
+    assert _norm(
+        "A mismatch reports BYTE COUNTS AND A CLASSIFICATION, never the "
+        "differing content, and never a hash OF THE SECRET HALF either") in doc
+    assert _norm(
+        "🔴 `--expect-pubkey` PRINTS A HASH, AND THE DISTINCTION THAT MAKES IT "
+        "SAFE IS PUBLIC HALF vs SECRET HALF — not \"hashes are fine now\".") in doc
+    assert _norm(
+        "The paragraph above is unchanged in force for the SECRET half: it is "
+        "never printed, never hashed into a message, and never passed in "
+        "argv.") in doc
+    assert _norm(
+        "🔴 AND age-keygen's STDERR IS NOT SAFE, on exactly the failure this "
+        "mode exists to catch.") in doc
+
+
+def test_the_docstring_names_the_MODE_that_runs_on_a_DR_HOST():
+    """The reason the mode exists, pinned whole: the other two modes cannot run
+    where the disaster puts you. A reader who deletes this mode as redundant
+    with `--decrypt-check` has to delete this sentence first."""
+    doc = _norm(EV.__doc__)
+    assert _norm(
+        "🔴 (3) IS THE ONLY ONE THAT RUNS ON A DISASTER-RECOVERY MACHINE, AND "
+        "THAT IS WHY IT EXISTS.") in doc
+    assert _norm(
+        "`--expect-pubkey` needs only `bw` and `age-keygen`, reads NO on-disk "
+        "identity and contacts NO bucket.") in doc
+
+
+# -- 20g. the CLI: real argv, a real `bw` process, real exit codes ---------- #
+def _run_cli_pubkey(tmp_path: Path, plan: dict, *extra: str,
+                    env_extra: dict | None = None
+                    ) -> subprocess.CompletedProcess:
+    """The CLI in pubkey mode. 🔴 NO `--identity` — that is the point, and the
+    flag is refused alongside `--expect-pubkey` anyway."""
+    stub, planfile = _bw_stub(tmp_path, plan)
+    env = dict(os.environ)
+    env["FAKE_BW_PLAN"] = str(planfile)
+    env.update(env_extra or {})
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--bw", str(stub), "--item-name", ITEM,
+         *extra],
+        capture_output=True, text=True, env=env)
+
+
+def test_the_CLI_PROVES_the_escrow_with_NO_identity_and_NO_bucket_ANYWHERE(
+        tmp_path):
+    """🔴 THE LIVE PROOF, CONSTRUCTED RATHER THAN REASONED ABOUT.
+
+    A real process, real argv, a real `bw`, and an environment where the
+    identity resolution CANNOT find a key: HOME is an empty directory and both
+    identity env vars are cleared, so `resolve_identity()` returns a path that
+    does not exist. It still exits 0 and PROVES the escrow.
+    """
+    k = _new_identity(tmp_path, "escrowed.key")
+    note = k.read_text(encoding="utf-8")
+    expect = _sha_via_documented_shell(k)
+    empty_home = tmp_path / "empty-home"
+    empty_home.mkdir()
+
+    p = _run_cli_pubkey(
+        tmp_path, _plan(items=[_item(notes=note)]),
+        "--expect-pubkey", expect,
+        env_extra={"HOME": str(empty_home), "ASIB_AGE_IDENTITY": "",
+                   "SOPS_AGE_KEY_FILE": ""})
+    assert p.returncode == 0, (p.returncode, p.stdout, p.stderr)
+    assert "ESCROW PROVEN FROM THIS HOST" in p.stdout
+    assert expect in p.stdout
+    assert "NO on-disk identity was read and NO artifact store was contacted" \
+        in p.stdout
+    # 🔴 CONTROL: that HOME really had no key in it, so the run genuinely had
+    # none to fall back on. Without this the test proves nothing about the
+    # absence.
+    assert list(empty_home.rglob("*.key")) == []
+    assert "AGE-SECRET-KEY-" not in p.stdout + p.stderr
+
+
+@pytest.mark.parametrize("note_of,expect_of,token,code", [
+    ("good", "other", "PUBKEY-MISMATCH", 36),
+    ("mangled", "good", "NOT-AN-AGE-IDENTITY", 35),
+])
+def test_the_CLI_exit_code_and_token_are_DISTINCT_per_pubkey_failure(
+        tmp_path, note_of, expect_of, token, code):
+    """🔴 THE DELIVERABLE, END TO END: a timer or a runbook reads the NUMBER."""
+    good = _new_identity(tmp_path, "escrowed.key")
+    other = _new_identity(tmp_path, "other.key")
+    text = good.read_text(encoding="utf-8")
+    note = {"good": text, "mangled": text.replace("\n", " ")}[note_of]
+    expect = _sha_via_documented_shell({"good": good, "other": other}[expect_of])
+
+    p = _run_cli_pubkey(tmp_path, _plan(items=[_item(notes=note)]),
+                        "--expect-pubkey", expect)
+    assert p.returncode == code, (p.returncode, p.stdout, p.stderr)
+    assert token in p.stderr
+    assert code == EV.EXIT_CODES[token]
+    assert "AGE-SECRET-KEY-" not in p.stdout + p.stderr
+
+
+@pytest.mark.parametrize("extra,needle", [
+    (("--decrypt-check",), "ask different questions and need different machines"),
+    (("--identity", "/tmp/whatever.key"), "reads NO on-disk identity"),
+])
+def test_the_CLI_REFUSES_a_contradictory_flag_pair_as_an_ARGUMENT_error(
+        tmp_path, extra, needle):
+    """🔴 EXIT 2 AND A USAGE MESSAGE, NOT A CLASSIFIED ESCROW CODE. Neither
+    combination is a fact about the escrow, and giving them a token would put
+    "you typed two flags that disagree" in the table an operator maps numbers
+    through during a recovery."""
+    p = _run_cli_pubkey(tmp_path, _plan(items=[_item()]),
+                        "--expect-pubkey", "0" * 16, *extra)
+    assert p.returncode == 2, (p.returncode, p.stdout, p.stderr)
+    assert needle in p.stderr
+    assert p.returncode not in EV.EXIT_CODES.values()
+
+
+def test_the_KEYWORD_API_also_refuses_the_pair_rather_than_PREFERRING_one(
+        tmp_path):
+    """🔴 THE CLI'S ARGUMENT CHECK DOES NOT COVER `run()`, WHICH IS THE API THE
+    TESTS AND ANY FUTURE CALLER DRIVE.
+
+    Silently taking the pubkey branch would return a verdict that reads as
+    covering the decrypt check too — the same "unmeasured scope reported in the
+    word used for a measured one" failure this module already fixed for
+    `server_session_reason`. `ValueError`, not `EscrowError`: it is a
+    programming error, not a fact about the escrow, so it must not acquire an
+    exit code in the operator's table."""
+    with pytest.raises(ValueError) as ei:
+        EV.run(bw=_cli(FakeBw()), identity=tmp_path / "absent.key",
+               item_name=ITEM, now=NOW, expect_pubkey="0" * 16, decrypt=True,
+               work_dir=B._private_dir(tmp_path / "work"))
+    assert "different claims needing different machines" in str(ei.value)
+    assert not isinstance(ei.value, EV.EscrowError)
+
+
+def test_the_CLI_print_plan_for_pubkey_mode_runs_NO_bw_and_reads_NO_key(tmp_path):
+    """`--print-plan` is pure text everywhere else; the new mode must not be the
+    one that quietly contacts something. The stub is pointed at a plan that
+    models NOTHING, so any `bw` call would exit 99."""
+    p = _run_cli_pubkey(tmp_path, {}, "--expect-pubkey", "0" * 16,
+                        "--print-plan")
+    assert p.returncode == 0, (p.returncode, p.stdout, p.stderr)
+    assert "identity:  NOT READ." in p.stdout
+    assert "store:     NOT CONTACTED. No bucket, no kubeconfig, no `minio`." \
+        in p.stdout
+    for token in ("NOT-AN-AGE-IDENTITY", "PUBKEY-MISMATCH",
+                  "PUBKEY-DERIVATION-EMPTY", "AGE-KEYGEN-MISSING",
+                  "EXPECT-PUBKEY-MALFORMED"):
+        assert f"{token}={EV.EXIT_CODES[token]}" in p.stdout
+    assert "unmodelled" not in p.stderr
+
+
+def test_a_REFUSED_pubkey_run_leaves_no_work_dir_behind(tmp_path, monkeypatch):
+    """The same rule the decrypt preflight earned: the refusal must be the FIRST
+    THING THAT ACTS, not merely the first thing reported. `_private_dir` creates
+    the whole parent chain and chmods an existing directory to 0700."""
+    monkeypatch.setattr(EV.shutil, "which", lambda _n: None)
+    work = tmp_path / "deep" / "nested" / "work"
+    rc = EV.main(["--expect-pubkey", "0" * 16, "--work-dir", str(work),
+                  "--bw", "/nonexistent/bw"])
+    assert rc == EV.EXIT_CODES["AGE-KEYGEN-MISSING"]
+    assert not work.exists(), "the work dir was created before the refusal"
+    assert not work.parent.exists(), "the parent chain was created too"
+
+
+def test_the_throwaway_identity_is_GONE_after_every_pubkey_path(tmp_path):
+    """The escrowed bytes are written to a file so `age-keygen` can read them.
+    A failed run is exactly when a plaintext copy of a decryption key is most
+    likely to be left behind — so the `finally` is checked on the success path
+    AND on each refusal, by the module's own constant rather than a re-derived
+    name."""
+    k = _new_identity(tmp_path, "escrowed.key")
+    good = k.read_text(encoding="utf-8")
+    other = _new_identity(tmp_path, "other.key")
+
+    cases = [
+        (good, _sha_via_documented_shell(k), None),
+        (good, _sha_via_documented_shell(other), "PUBKEY-MISMATCH"),
+        (good.replace("\n", " "), _sha_via_documented_shell(k),
+         "NOT-AN-AGE-IDENTITY"),
+    ]
+    for i, (note, expect, token) in enumerate(cases):
+        root = tmp_path / f"case{i}"
+        work = B._private_dir(root / "work")
+        try:
+            EV.run(bw=_cli(FakeBw(items=[_item(notes=note)])),
+                   identity=root / "absent.key", item_name=ITEM, now=NOW,
+                   expect_pubkey=expect, work_dir=work)
+            assert token is None
+        except EV.EscrowError as exc:
+            assert exc.token == token, (exc.token, token)
+        left = work / EV.ESCROW_IDENTITY_FILENAME
+        assert not left.exists(), f"case {i} left {left}"
+        assert list(work.iterdir()) == [], f"case {i} left {list(work.iterdir())}"

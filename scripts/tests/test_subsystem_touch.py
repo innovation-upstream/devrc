@@ -4856,6 +4856,17 @@ class TestPrNegativeControls:
         # fixes; `test_no_two_sentinels_share_a_spelling` is what keeps them
         # from collapsing into one.
         "entry-file": "index entry file not found",
+        # ⚠ THE COMMON PREFIX OF TWO SPELLINGS, ON PURPOSE. `RepoPathMissingError`
+        # says "repo path does not exist" when nothing is there and "repo path is
+        # not a directory" when something is — two mistakes with two next moves.
+        # The map allows ONE phrase per class (`len(SENTINELS) == len(covered)`),
+        # so the phrase is the part they share: it attributes either spelling to
+        # this class, and `test_no_two_sentinels_share_a_spelling` still proves it
+        # collides with nothing else. Shares no spelling with "store root not
+        # found" (the STORE, not the repo) nor with "git command failed" — which
+        # is the whole point of the class: this condition is a READING, not a
+        # subprocess failure. Behaviour is pinned in test_repo_path_guard.py.
+        "repo-path": "repo path",
         # PR-source sentinels
         "remote": "repo has no usable github remote",
         "gh-missing": "gh cli not found",
@@ -4925,6 +4936,11 @@ class TestPrNegativeControls:
             # one: a missing path and a file that will not parse have different
             # fixes, and the validator's own output must not conflate them.
             "EntryFileMissingError",
+            # `--repo` naming something that is not a directory, refused BEFORE
+            # git runs. Its own sentinel rather than `GitError`'s: "git command
+            # failed" is a true statement about the subprocess and a useless one
+            # about the argument, which is exactly what it used to print.
+            "RepoPathMissingError",
         }
         assert declared == covered, (
             "subsystem_touch declares an error class this sentinel map does not "
@@ -11750,3 +11766,350 @@ class TestWindowEscalationMutationKills:
         with pytest.raises(AttributeError):
             mod.render_window_escalation(None)
         assert st.render_window_escalation(None) == []
+
+
+# =============================================================================
+# THE STORE IS PER-HOST, AND EVERY VERDICT MUST SAY SO
+# =============================================================================
+#
+# 🔴 THE DEFECT, MEASURED 2026-08-27 — NOT HYPOTHETICAL. `~/.claude/analyze-
+# service-index/` is one directory per machine with NO replication of any kind:
+# no remote on any scope repo, no client for the `subsystem-store-api` pod (which
+# is ClusterIP-only and serves a stale seed), no sync unit. On that day the
+# workbench held 115 entries across 14 scopes and the laptop 33 across 11. Four
+# scope names existed on BOTH; across those four the workbench held 104 entries
+# and the laptop 10, with exactly ONE entry name in common — three of the four
+# overlapped in NOTHING. Seven scopes existed only on the laptop, ten only on the
+# workbench.
+#
+# A workbench run probing a repo whose scope lives on the laptop printed:
+#
+#     SCOPE ABSENT — the store has no `<scope>/` directory yet. … this is the
+#     FIRST-ENTRY case, not a miss.
+#
+# while that scope, with four entries in it, sat on the other machine. The STATUS
+# was right about the disk that was read; the SENTENCE was a claim about "the
+# store" as though there were one. That is the class of bug this file exists to
+# catch — a confident zero — arriving through the prose rather than the logic.
+#
+# 🔴 THE GUARDS PIN WHOLE NORMALISED STRINGS, NOT KEYWORDS. `claude/RULES.md`:
+# when the artifact under test IS prose, a guard on WORDS is walkable by
+# REWORDING — pin the WHOLE normalised string. A guard asserting `"host" in text`
+# would pass on a reword that dropped the "no other host was consulted" half,
+# which is precisely the half that was missing. A cosmetic reword now fails these
+# tests; that is the price of a machine-readable claim.
+#
+# 🔴 THE HOST IS INJECTED, never read from the machine running the suite. The real
+# value differs between the dev host and the nix sandbox (and between the two
+# hosts), so letting it through would pin a moving string — and a real
+# `/etc/machine-id` is not something a PUBLIC repo should carry either. The seam
+# is `subsystem_touch.this_host`, deliberately the ONLY call site of
+# `host_identity.this_host` across both modules, so one patch moves the reader and
+# the writer together.
+
+#: Synthetic. Shaped like the real thing without being any real machine's id.
+FIXTURE_HOST = "fixture-host-0123456789abcdef0123456789abcdef"
+
+
+def _norm(text: str) -> str:
+    """Whitespace-collapsed, so a rewrap is not a failure but a REWORD is."""
+    return " ".join(text.split())
+
+
+@pytest.fixture()
+def pinned_host(monkeypatch):
+    """Inject the host identity into the one seam both modules read.
+
+    `raising=False` on purpose: it makes this fixture usable against a tree where
+    the seam does not exist yet, so the guards below fail on their ASSERTION —
+    the sentence is wrong — rather than on an AttributeError during setup. That
+    is what makes the red-at-base measurement mean something.
+    """
+    monkeypatch.setattr(st, "this_host", lambda: FIXTURE_HOST, raising=False)
+    return FIXTURE_HOST
+
+
+class TestTheStoreIsPerHost:
+    """Every surface reporting on the store must name whose disk it read."""
+
+    EXPECTED_HOST_LINE = _norm(
+        f"host: {FIXTURE_HOST} (the store is PER-HOST and unreplicated; this run "
+        f"read THIS machine's disk and consulted no other)"
+    )
+
+    EXPECTED_SCOPE_ABSENT = _norm(
+        f"SCOPE ABSENT — THIS HOST's store ({FIXTURE_HOST}) has no "
+        f"`brand-new-repo/` directory yet. Every path below is unresolved because "
+        f"there is nothing HERE to resolve against; this is the FIRST-ENTRY case "
+        f"FOR THIS HOST, not a miss."
+    )
+
+    EXPECTED_NOT_THE_FLEET = _norm(
+        "NOT A FACT ABOUT THE FLEET — the store is PER-HOST and unreplicated; this "
+        "run read THIS machine's disk and consulted no other. The other host keeps "
+        "a DIFFERENT store, not a copy, and it may already hold `brand-new-repo/`. "
+        "Nothing is lost by writing a first entry here; just do not report this "
+        "scope as unrecorded everywhere."
+    )
+
+    def _absent_text(self, store: Path) -> str:
+        rep = _report(
+            ["apps/roster/a.yaml", "apps/roster/b.yaml"], store, scope="brand-new-repo"
+        )
+        assert rep.status == "scope-absent", "the fixture must reach the branch under test"
+        return st.render_text(rep)
+
+    def test_scope_absent_says_ABSENT_HERE_not_absent_anywhere(
+        self, store: Path, pinned_host: str
+    ) -> None:
+        """🔴 THE REGRESSION GUARD. The pre-change sentence — "the store has no
+        `<scope>/` directory yet … the FIRST-ENTRY case, not a miss" — was FALSE
+        as stated: measured 2026-08-27, a workbench probe said it of a scope that
+        existed on the laptop with four entries in it. Both halves are pinned:
+        the verdict must be qualified to this host, AND the run must say that no
+        other host's store was consulted and one may hold the scope."""
+        lines = [_norm(ln) for ln in self._absent_text(store).splitlines()]
+        assert self.EXPECTED_SCOPE_ABSENT in lines, (
+            "the `scope-absent` verdict is not the pinned sentence.\n"
+            f"  expected: {self.EXPECTED_SCOPE_ABSENT}\n"
+            "It must name THIS HOST and must not read as a claim about a single, "
+            "fleet-wide store — there is no such thing."
+        )
+        assert self.EXPECTED_NOT_THE_FLEET in lines, (
+            "the `scope-absent` verdict no longer says that NO OTHER HOST WAS "
+            "CONSULTED and that the other machine may hold this scope.\n"
+            f"  expected: {self.EXPECTED_NOT_THE_FLEET}\n"
+            "Without this line the qualified first sentence still reads, to an "
+            "agent, as 'nobody has recorded this anywhere' — which is the false "
+            "claim, not the wording."
+        )
+
+    def test_scope_absent_KEEPS_the_first_entry_guidance(
+        self, store: Path, pinned_host: str
+    ) -> None:
+        """The honesty fix must not delete the useful part. `scope-absent` IS the
+        first-entry case for this host, and an agent that stops writing because
+        the message got hedged is a worse outcome than the false claim."""
+        text = self._absent_text(store)
+        assert "FIRST-ENTRY case FOR THIS HOST" in text
+        assert "Nothing is lost by writing a first entry here" in text
+
+    def test_every_store_header_carries_the_host(
+        self, store: Path, pinned_host: str
+    ) -> None:
+        """🔴 ONE SPELLING, ON EVERY SURFACE. `store_root` is the SAME PATH on
+        both machines and its contents are not, so a header printing the path
+        alone cannot tell two hosts' output apart. Asserted on both of this
+        module's renderers, and immediately UNDER the `store:` line — a host
+        stated somewhere far away is a fact the reader has to go looking for."""
+        checked, malformed = st.validate_scope(store, SCOPE)
+        rendered = {
+            "render_text": st.render_text(
+                _report(["src/collector/a.py", "src/collector/b.py"], store)
+            ),
+            "render_validation": st.render_validation(
+                st.ValidationReport(
+                    store_root=str(store),
+                    target=f"`{SCOPE}/`",
+                    scope=SCOPE,
+                    checked=checked,
+                    malformed=malformed,
+                )
+            ),
+        }
+        for name, text in rendered.items():
+            lines = [_norm(ln) for ln in text.splitlines()]
+            store_at = next(
+                (i for i, ln in enumerate(lines) if ln.startswith("store: ")), None
+            )
+            assert store_at is not None, f"{name} printed no `store:` header at all"
+            following = lines[store_at + 1] if store_at + 1 < len(lines) else "<end>"
+            assert following == self.EXPECTED_HOST_LINE, (
+                f"{name} does not print the host line directly under `store:`.\n"
+                f"  expected: {self.EXPECTED_HOST_LINE}\n"
+                f"  got:      {following!r}\n"
+                "Every run's output must carry WHICH machine's store it read."
+            )
+
+    def test_the_json_report_carries_the_host_too(
+        self, store: Path, pinned_host: str
+    ) -> None:
+        """A consumer that logs `store_root` alone cannot separate two hosts'
+        reports; the path is identical on both machines."""
+        payload = st.report_json(
+            _report(["src/collector/a.py", "src/collector/b.py"], store)
+        )
+        assert payload.get("store_host") == FIXTURE_HOST
+
+    #: A synthetic machine id of the right shape. Real ones never enter this
+    #: PUBLIC repo, and injecting one keeps the test hermetic in BOTH tiers —
+    #: the nix sandbox is not guaranteed a readable `/etc/machine-id`, and a
+    #: `skip` there would be worse than no test (`run-tests.sh` pins the skip set
+    #: exactly, and a suite that skips itself proves nothing).
+    SYNTH_MACHINE_ID = "0123456789abcdef0123456789abcdef"
+
+    @pytest.fixture()
+    def injected_machine_id(self, tmp_path: Path, monkeypatch):
+        import host_identity as hi
+
+        mid = tmp_path / "machine-id"
+        mid.write_text(self.SYNTH_MACHINE_ID + "\n", encoding="utf-8")
+        monkeypatch.setattr(hi, "MACHINE_ID_FILES", (str(mid),))
+        monkeypatch.delenv("ASIB_HOST", raising=False)
+        monkeypatch.delenv("ACTIVITY_HOST", raising=False)
+        return hi
+
+    def test_the_host_id_is_not_a_value_BOTH_MACHINES_PRINT(
+        self, injected_machine_id, monkeypatch
+    ) -> None:
+        """🔴 THE MEASUREMENT THAT DECIDED THE IMPLEMENTATION, pinned so nobody
+        "simplifies" `this_host` back to `host_label`.
+
+        Both NixOS hosts report hostname `nixos`, and `ASIB_HOST`/`ACTIVITY_HOST`
+        are set ONLY under the backup systemd unit — measured on the workbench
+        2026-08-27, `printenv ASIB_HOST ACTIVITY_HOST` exits 1 in an interactive
+        or agent shell, which is every `/analyze-service`, `/handoff` and
+        `/resume` run. So `host_label()` alone yields the SAME string on both
+        machines: a header printing it would read as coverage while
+        distinguishing nothing.
+
+        The control is mechanical rather than a restatement — feed a label that
+        CANNOT contain the machine id and watch the identity grow past it.
+        """
+        hi = injected_machine_id
+        monkeypatch.setenv("ASIB_HOST", "a-label-with-no-id")
+        assert hi.host_label() == "a-label-with-no-id"
+        # 🔴 LITERAL BOUNDS, NOT THE CONSTANT UNDER TEST. An earlier revision of
+        # this test wrote `SYNTH_MACHINE_ID[: hi.MACHINE_ID_DISPLAY_CHARS]` and
+        # asserted only "not the WHOLE id", deriving its expectation from the
+        # very value it was supposed to bound — and nothing else in the repo
+        # references that constant. MEASURED: at 31 the identity carried 31 of
+        # 32 hex chars and the suite stayed GREEN; at 0 it returned a bare
+        # `nixos-`, identical on both machines, which is the exact defect this
+        # change exists to fix — and the suite stayed GREEN. So the numbers here
+        # are this test's own, and moving the constant outside them fails.
+        assert 8 <= hi.MACHINE_ID_DISPLAY_CHARS <= 16, (
+            f"MACHINE_ID_DISPLAY_CHARS is {hi.MACHINE_ID_DISPLAY_CHARS}. Below 8 "
+            "the two machines stop being distinguishable; above 16 this stops "
+            "being a prefix and starts being the identifier itself, in output "
+            "that reaches a PUBLIC repo."
+        )
+        suffix = hi.this_host().rsplit("-", 1)[-1]
+        assert len(suffix) == hi.MACHINE_ID_DISPLAY_CHARS, (
+            f"`this_host()` emitted a {len(suffix)}-char id segment but "
+            f"MACHINE_ID_DISPLAY_CHARS is {hi.MACHINE_ID_DISPLAY_CHARS} — the "
+            "constant and the output have come apart."
+        )
+        expected_prefix = self.SYNTH_MACHINE_ID[: hi.MACHINE_ID_DISPLAY_CHARS]
+        assert hi.this_host() == f"a-label-with-no-id-{expected_prefix}", (
+            "`this_host()` did not join the machine-id PREFIX to the label. On a "
+            "hand-run the label is the SHARED hostname `nixos`, so a bare label "
+            "makes the two machines print an identical identity — the exact "
+            "failure this change exists to fix."
+        )
+        # 🔴 AND THE WHOLE ID MUST NOT APPEAR. `this_host()` is a display value
+        # that reaches committed `claudedocs/` in a PUBLIC repo and no content
+        # gate screens for a machine id, so "it distinguishes the hosts" is only
+        # half the requirement. Asserted as a SEPARATE statement rather than
+        # folded into the equality above, because an equality on a truncated
+        # string is satisfied by a build that never had the rest of the id —
+        # this one fails if a future edit reverts to the full value.
+        assert self.SYNTH_MACHINE_ID not in hi.this_host(), (
+            "`this_host()` printed the WHOLE machine id. It must print at most "
+            f"{hi.MACHINE_ID_DISPLAY_CHARS} hex chars — see MACHINE_ID_DISPLAY_CHARS."
+        )
+
+    def test_the_writer_calls_host_identitys_this_host_NOT_host_label(self) -> None:
+        """🔴 A SEAM GUARD: pins WHICH function the writer imported, not what a
+        patched name returns.
+
+        Every other guard here injects a value into `subsystem_touch.this_host`,
+        so all of them stay green against
+        `from host_identity import host_label as this_host` — the exact
+        "simplification" the sibling test's docstring says it prevents. Measured:
+        that mutant survived all 16 guards while making BOTH machines print
+        `nixos` in production, which is the defect this change exists to fix. A
+        docstring claiming coverage while the body checks something narrower is
+        worse than no guard, because it stops anyone looking.
+
+        Identity, not behaviour: `is` cannot be satisfied by a lookalike.
+        """
+        import host_identity as hi
+        import subsystem_touch as st
+
+        assert st.this_host is hi.this_host, (
+            "`subsystem_touch.this_host` is not `host_identity.this_host`. If it "
+            "was aliased to `host_label`, every header would print the shared "
+            "hostname and the two machines would be indistinguishable again."
+        )
+
+    def test_the_id_is_not_repeated_when_the_label_already_carries_it(
+        self, injected_machine_id, monkeypatch
+    ) -> None:
+        """The systemd unit's shape: `ASIB_HOST=<name>-%m` already ends in the id,
+        so joining it again would print it twice and make the header disagree
+        with the backup's own object keys."""
+        hi = injected_machine_id
+        monkeypatch.setenv("ASIB_HOST", f"workbench-{self.SYNTH_MACHINE_ID}")
+        assert hi.this_host() == f"workbench-{self.SYNTH_MACHINE_ID}"
+
+    def test_an_unreadable_machine_id_SAYS_SO_rather_than_degrading_silently(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """🔴 A HOST CLAIM IS NEVER SILENTLY UNQUALIFIED. With no readable id the
+        identity falls back to the label, which is shared — so the output must
+        say the discriminator is missing instead of printing a bare `nixos` that
+        reads as a specific machine."""
+        import host_identity as hi
+
+        monkeypatch.setattr(hi, "MACHINE_ID_FILES", (str(tmp_path / "absent"),))
+        monkeypatch.setenv("ASIB_HOST", "some-label")
+        assert hi.machine_id() is None, "the fixture must make the id unreadable"
+        assert hi.this_host() == f"some-label-{hi.MACHINE_ID_UNREADABLE}"
+
+    #: The WHOLE bullet, normalised. 🔴 `claude/RULES.md`: when the artifact under
+    #: test IS prose, a guard on WORDS is walkable by REWORDING — pin the whole
+    #: normalised string and pay the cost of a cosmetic reword failing, because
+    #: the alternative is a guard that reads as coverage and provides none. The
+    #: tool and the skill must not disagree about what `scope-absent` MEANS: the
+    #: tool's message is pinned above, and this is its half of the same claim.
+    EXPECTED_SKILL_BULLET = _norm(
+        "- **`no-match` / `scope-absent`** — no existing entry was touched. "
+        "`scope-absent` means this repo has no scope directory yet **in THIS HOST's "
+        "store**: the **first-entry case, not a failure**, and the reason this step "
+        "exists. 🔴 **The store is PER-HOST and unreplicated, so that is never a "
+        "claim about the fleet** — measured 2026-08-27 the workbench held 115 "
+        "entries / 14 scopes and the laptop 33 / 11, seven scopes existed only on "
+        "the laptop, and one probe reported a scope \"absent\" that had four entries "
+        "on the other machine. Write the first entry here anyway; just say \"on this "
+        "host\", and read the `host:` line the tool prints. Nothing to append either "
+        "way; go to the NO ENTRY clause below."
+    )
+
+    def test_the_skill_says_scope_absent_is_a_PER_HOST_finding(self) -> None:
+        """The protocol an agent follows must carry the same qualification the
+        tool prints. Before this, `subsystem-index/SKILL.md` said `scope-absent`
+        "means this repo has no scope directory yet" full stop — so an agent that
+        never read the tool's output still concluded, and reported, that the work
+        was unrecorded everywhere."""
+        lines = [_norm(ln) for ln in INDEX_DOC.read_text(encoding="utf-8").splitlines()]
+        assert self.EXPECTED_SKILL_BULLET in lines, (
+            "claude/skills/subsystem-index/SKILL.md no longer carries the pinned "
+            "`scope-absent` bullet.\n"
+            f"  expected: {self.EXPECTED_SKILL_BULLET}\n"
+            "  Either restore it or change scripts/lib/subsystem_touch.py in the "
+            "SAME commit — the tool's message and the protocol are one claim."
+        )
+
+    def test_a_malformed_machine_id_is_REFUSED_not_passed_through(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Shape-checked, not merely non-empty — the property
+        `restore-verify.py`'s `prefix_belongs_to_this_host` depends on, and the
+        reason that read moved here instead of being copied."""
+        import host_identity as hi
+
+        bad = tmp_path / "machine-id"
+        bad.write_text("not-a-machine-id\n", encoding="utf-8")
+        monkeypatch.setattr(hi, "MACHINE_ID_FILES", (str(bad),))
+        assert hi.machine_id() is None

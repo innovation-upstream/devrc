@@ -193,8 +193,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 import backup as B  # noqa: E402  (sibling module; the producer this verifies)
+import host_identity as _host_identity  # noqa: E402  (the ONE "which machine am I")
 
 PROG = "analyze-service-index-restore-verify"
 
@@ -1087,7 +1089,7 @@ def why_no_live_scope(store: Path, scope: str) -> tuple[str, str]:
 # reader at synthetic files and exercise the REAL function, rather than
 # re-implementing its shape check in the test — which would only ever prove the
 # test agrees with itself.
-_MACHINE_ID_FILES = ("/etc/machine-id", "/var/lib/dbus/machine-id")
+_MACHINE_ID_FILES = _host_identity.MACHINE_ID_FILES
 
 
 def machine_id() -> str | None:
@@ -1105,19 +1107,14 @@ def machine_id() -> str | None:
     artifacts foreign on every hand-run, which is the silent-weakening failure.
     The machine id is exact, needs no systemd, and is the same token already in
     the key.
+
+    🔴 THE READ + SHAPE-CHECK MOVED TO `scripts/lib/host_identity.py`, because
+    the /analyze-service reader and writer need the same answer for their own
+    per-host store and a second copy would drift. `_MACHINE_ID_FILES` STAYS a
+    module global HERE: it is the seam this file's tests point at a fixture, and
+    it is read at call time, so pointing it elsewhere still redirects the read.
     """
-    for p in _MACHINE_ID_FILES:
-        try:
-            v = Path(p).read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-        # \U0001f534 SHAPE-CHECKED, not just non-empty. Returning whatever junk a
-        # file happened to hold would make `prefix_belongs_to_this_host` answer
-        # True for any prefix containing it — an error in the FALSE DATA-LOSS
-        # direction, which is the one that gets someone to act destructively.
-        if re.fullmatch(r"[0-9a-f]{32}", v):
-            return v
-    return None
+    return _host_identity.machine_id(_MACHINE_ID_FILES)
 
 
 def prefix_belongs_to_this_host(prefix: str, this_host: str,

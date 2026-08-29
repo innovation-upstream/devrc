@@ -222,6 +222,106 @@ clause.
 
 ---
 
+## High-yield change-classes — what each one actually hid
+
+Demoted from the skill body to pay for the assembler router line; the CLASS LIST stays in the body
+because it is what decides whether to run an audit at all, and only these anecdotes moved.
+
+Deploy-blocking bugs that surfaced from exactly these classes: a **shutdown data-loss** on a
+concurrency rework; a **trash-path overwrite** on a filesystem/quarantine move; an
+**unauthenticated arbitrary-path scan** on an HTTP endpoint; and a git **`core.fsmonitor` RCE**
+reachable from a repo-local config.
+
+The false positive to expect on the same road: a branch with a **private Go module dep** may need
+`GOPRIVATE`, and a sum-db `500` there is an ENVIRONMENT failure, not a defect in the PR. An auditor
+that reports it as a finding has read a broken toolchain as a broken change.
+
+---
+
+## 2026-08-28 · devrc #958 — TWELVE rounds, ZERO clean ones, and a stop rule that never fired
+
+`feat/audit-dispatch-assembler`, squash-merged `1b2117b6`, shipped to both hosts. Odd rounds were
+adversarial audits, even rounds were fixes. **No round ever returned clean.** The stop rule in the
+skill body — *the first round that returns no findings is the last* — was never exercised, because
+its precondition never occurred. The ladder was ended on a different criterion, stated below.
+
+This is the companion case to #498 above. #498 measured a ladder that ran on **scaffolding**; this
+one ran on payload every round and still would not converge.
+
+### The recurring shape — eight instances, each one level up from the last
+
+Every round found the same defect: **a predicate read as a STRONGER fact than it carries.**
+
+| round | the predicate | what it establishes | what the code read it as |
+|---|---|---|---|
+| 3 | the checkout being inspected | the operator's tree | the tree under audit |
+| 5 | the assembler's cwd | where the brief was BUILT | where the auditor STANDS |
+| 7 | `HEAD` at assembly | the tip verified at assembly time | the tip the auditor resolves later |
+| 8 | `--repo owner/name` | reroutes `gh` | reroutes `git` as well (it does not) |
+| 8 | `newest is not None` | a claims block PARSED | there is something to DIFF FROM |
+| 9 | `repo_relation == "cross"` | two slugs differ | three separate stronger facts |
+| 10 | `baseRefName or "main"` | a DEFAULT was substituted | the base was MEASURED |
+| 12 | `not data.get("baseRefName")` | the payload lacked the key | the base was measured (again, one field over) |
+
+Two lessons the table carries that no single round could:
+
+- **Each fix was applied where the defect was found and NOT at the sibling consumers of the same
+  predicate.** That is why sweeping for the next instance predicted it five times running. `git grep`
+  every consumer of any predicate you touch, and say how many you found.
+- **"A default stated as a fact" recurred twice** (rounds 10 and 12), the second time invisible to
+  the guard written for the first — because the mode that hardcoded the field was the one mode three
+  separate comments called permanently assumed. A fallback is a guess; a predicate that cannot tell
+  a guess from a measurement will report the guess as measured.
+
+### Why the ATTRIBUTION gate could not rescue this ladder
+
+The gate from #498 stops after two consecutive rounds that change no payload. It never fired here,
+and correctly so — round 9 measured 314 payload lines. But the reason is worth recording:
+
+🔴 **This PR's payload IS PROSE.** The script's product is a text brief, so "fixed a real defect" and
+"reworded a warning" are frequently the SAME EDIT. Payload-vs-scaffolding cannot separate them.
+**The attribution gate has a structural blind spot on any PR whose deliverable is text** — a
+generator, a docs tool, a prompt assembler. Do not expect it to terminate those ladders.
+
+### The criterion actually used to stop
+
+Since "a clean round" was unreachable, the ladder was ended on three checkable conditions, all met:
+
+1. no finding is 🔴;
+2. no finding's blast radius exceeds *"the brief contains a false sentence"*;
+3. the recurring shape has been swept at **every** consumer of the predicate the round touched.
+
+Decide a criterion like this **in advance** when entering a guard-hardening ladder. Inventing one
+under fatigue at round 11 is how a ladder either runs forever or stops on the wrong signal.
+
+### What the late rounds actually caught — the case against stopping early
+
+- **Round 10's own report of its work was wrong.** It said a mutation row *"lost seven of round 8's
+  thirteen"* killer names. Round 11 measured it by AST diff: **nine departed of nineteen**; thirteen
+  was what REMAINED. Both numbers in a claim about counting, in the file whose thesis is that
+  arithmetic nobody re-runs rots.
+- **A guard with ZERO battery rows, and walkable.** `test_the_ledger_says_the_base_was_not_fetched`
+  was listed in a ledger whose declared evidence IS the battery, yet no mutant killed it. It still
+  worked — deleting the warning failed that test and only that test — but a reword that gutted the
+  load-bearing qualifier left the suite **fully green at 109 passed**. Round 10 had removed the
+  evidence, not the detector.
+- **Two instrument defects, found by the ladder and not by any gate.** `_swap` asserted its mutation
+  target was PRESENT but not UNIQUE, and a same-round edit created a duplicate at a deeper indent
+  (8 spaces ⊂ 12), so a mutation landed on a branch where the variable was not in scope. Separately,
+  a prose guard normalised wrapped STRINGS but not wrapped `#` COMMENTS while its docstring claimed
+  comments — and the battery's own mutant planted the phrase on ONE line, so the shape was never
+  exercised. **A green sweep is a claim about the mutations you imagined.**
+
+### The generalisation
+
+In the guard-hardening regime — where each fix round writes new guards that become the next round's
+audit surface — **a findings-keyed stop rule does not terminate.** That is not a reason to cap the
+count (see the rejected cap, below), and not a reason to trust the verdict instead of the findings.
+It is a reason to name the stopping condition before you start, and to make it something a round can
+actually satisfy.
+
+---
+
 ## Where the rest lives
 
 - The **rejected numeric cap** and devrc #505's ReDoS-introduced-by-the-fix evidence: stated inline

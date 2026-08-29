@@ -12,16 +12,16 @@ with pkgs; [
   # hosts, which drifted: MEASURED 2026-08-02, laptop 1.18.4 / workbench 1.18.9,
   # each movable independently by a `nix profile upgrade` that nothing records.
   # scripts/opencode/opencode.jsonc documents a large set of load-bearing
-  # behaviours annotated "measured on v1.18.18 — do not re-derive" (last-match-
+  # behaviours annotated "measured on v1.18.21 — do not re-derive" (last-match-
   # wins permission ordering, the hidden title/summary/compaction agents
   # inheriting the global permission block, the exact tool set). A few bullets
   # there — `ask` semantics under `opencode run` among them — are explicitly
   # CARRIED FORWARD at an older version instead, each saying so on its own line.
   # Those claims were pinned to a version nothing pinned.
   #
-  # This entry pins them: MEASURED at flake.lock's nixpkgs rev 5c680dac9f02,
-  # `pkgs.opencode` is 1.18.18 — store path
-  # /nix/store/3y4zcklfn3hfk9gn08csfzd3vwfjhkl0-opencode-1.18.18. (It was
+  # This entry pins them: MEASURED at flake.lock's nixpkgs rev c27cdad491a9,
+  # `pkgs.opencode` is 1.18.21 — store path
+  # /nix/store/iqc8xfx692ym3pds6ky0vhqzscg6kgxd-opencode-1.18.21. (It was
   # 1.18.4 at rev 9bc02893134c when this pin was introduced, and 1.18.16 at rev
   # 044bfe75bfe4; the 2026-08-13 and 2026-08-19 bumps each re-derived the claims
   # against the new binary rather than re-spelling them — see PINNED_VERSION in

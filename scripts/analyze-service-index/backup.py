@@ -107,7 +107,6 @@ import hashlib
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -144,6 +143,16 @@ except ImportError as _exc:  # pragma: no cover - a deployment fault, not a code
         f"the strip would bundle and upload somebody else's history under a "
         f"green timer."
     ) from _exc
+
+# 🔴 "WHICH MACHINE AM I" HAS ONE OWNER. Same reasoning as the ledger above and
+# the same mount (`%h/workspace/devrc/scripts` is bound read-only, so `lib/` is
+# on disk beside `testlib/` in every environment that runs this), so the import
+# is a hard failure too rather than a fallback that would let the two hosts share
+# a key prefix and evict each other's backups.
+_LIB_DIR = _SCRIPTS_DIR / "lib"
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
+import host_identity as _host_identity  # noqa: E402
 
 PROG = "analyze-service-index-backup"
 
@@ -535,6 +544,44 @@ def same_identity_file(a: Path, b: Path) -> bool:
         return a == b
 
 
+def age_public_key_bytes(identity: Path) -> subprocess.CompletedProcess:
+    """`age-keygen -y <identity>` — the completed process, stdout as BYTES.
+
+    🔴 THE ONE PLACE IN THIS SUBSYSTEM THAT SHELLS OUT TO `age-keygen -y`, and
+    it deliberately CLASSIFIES NOTHING. Two callers want different things from
+    the same command and would otherwise open-code it twice:
+
+      * `resolve_recipient()` below wants the public key as a STRING to encrypt
+        to, and raises `BackupError` when it cannot have one;
+      * `escrow-verify.py --expect-pubkey` wants the RAW STDOUT BYTES, because
+        the check an operator runs by hand is
+        `age-keygen -y <file> | sha256sum`, and a digest taken over reassembled
+        text is a claim about the reassembly rather than about what the command
+        printed. MEASURED 2026-08-27, age v1.3.1: stdout is exactly the `age1…`
+        recipient plus ONE `\\n`, so `printf '%s' "$out" | sha256sum` — which
+        drops that newline — yields a DIFFERENT digest and a false mismatch on
+        a perfectly good key.
+
+    🔴 `capture_output=True` WITHOUT `text=True`: the bytes are the point. It
+    also keeps stderr as bytes, which matters because age-keygen's parse errors
+    ECHO THE OFFENDING INPUT LINE — key material, on exactly the failure this
+    is called for. Callers must not quote it.
+
+    Does NOT check that `age-keygen` is on PATH: each caller has its own token
+    and its own message for that, and a `FileNotFoundError` here would erase the
+    distinction.
+
+    🔴 `argv[0]` IS A BARE LITERAL, NOT A MODULE CONSTANT, AND THAT IS LOAD-
+    BEARING: `test_every_git_invocation_takes_its_environment_from_git_env`
+    walks this file's AST and REFUSES to certify a `subprocess` site whose
+    `argv[0]` it cannot read statically. Hoisting "age-keygen" to a name made
+    that guard report an unrecognised site — correctly, since it can no longer
+    tell a git call from an age one. Keep the literal here.
+    """
+    return subprocess.run(["age-keygen", "-y", str(identity)],
+                          capture_output=True)
+
+
 def resolve_recipient(identity: Path) -> str:
     """The age recipient to encrypt to, DERIVED from the identity we can decrypt with.
 
@@ -567,14 +614,20 @@ def resolve_recipient(identity: Path) -> str:
             "and set explicitly on the systemd unit's PATH; add it there rather "
             "than working around it."
         )
-    p = subprocess.run(["age-keygen", "-y", str(identity)],
-                       capture_output=True, text=True)
+    p = age_public_key_bytes(identity)
     if p.returncode != 0:
+        # 🔴 age-keygen's stderr ECHOES THE OFFENDING INPUT LINE — measured
+        # 2026-08-27: a non-identity file comes back as `unknown identity type:
+        # "<the line>"`. On a file that IS an identity but is subtly mangled,
+        # that line is the SECRET KEY. It is not quoted here.
         raise BackupError(
             f"could not derive an age recipient from {identity} (rc="
-            f"{p.returncode}): {p.stderr.strip()}"
+            f"{p.returncode}, {len(p.stdout)} bytes of stdout). age-keygen's "
+            f"stderr is deliberately NOT quoted: it echoes the input line it "
+            f"could not parse, which for an identity file is key material. Run "
+            f"`age-keygen -y {identity}` by hand to read it."
         )
-    recipient = p.stdout.strip()
+    recipient = p.stdout.decode("utf-8", "replace").strip()
     if not recipient.startswith("age1"):
         raise BackupError(
             f"age-keygen -y on {identity} produced {recipient!r}, which is not an "
@@ -1004,19 +1057,14 @@ def prune(uploader, prefix: str, keep: int, just_uploaded: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 # naming
 # --------------------------------------------------------------------------- #
-def host_label() -> str:
-    """Which machine this store came from.
-
-    🔴 Both machines are hostname `nixos` (see MEMORY.md / SECRETS.md), and the
-    two stores are DIVERGENT content. Without a distinct label per host they
-    would share a key prefix and silently evict each other under retention —
-    turning the backup into a second way to lose the data.
-    """
-    for var in ("ASIB_HOST", "ACTIVITY_HOST"):
-        v = os.environ.get(var)
-        if v and v.strip():
-            return re.sub(r"[^A-Za-z0-9._-]", "-", v.strip())
-    return re.sub(r"[^A-Za-z0-9._-]", "-", socket.gethostname() or "unknown")
+# 🔴 `host_label` LIVES IN `scripts/lib/host_identity.py` AND IS RE-EXPORTED HERE.
+# It is no longer only the backup's concern: the /analyze-service reader and
+# writer print the same identity in their headers, because their store is the
+# same per-host, unreplicated directory this file bundles. A second copy of "which
+# machine am I" would drift from this one and be wrong in one of the two places
+# — claude/RULES.md → "One rule, one place". `B.host_label()` keeps working for
+# `restore-verify.py` and `escrow-verify.py`; only the implementation moved.
+host_label = _host_identity.host_label
 
 
 def object_key(host: str, scope: str, when: datetime) -> str:

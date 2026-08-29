@@ -54,19 +54,32 @@ the covering element instead of guessing — in the real case it returned the *n
 card's NSFW-reveal `<button>`, which reading the popover's own CSS would never
 have suggested.
 
+🔴 **`elementFromPoint` returns `null` for a point OUTSIDE the viewport — which is
+indistinguishable from "something is covering it".** Read `null` as *unknown*,
+never as *covered*: it is how a hit-test invents a blocking overlay that does not
+exist. Off-canvas drawers and mobile menus are the common source, and they sit at
+NEGATIVE coordinates (measured on one app: a nav control centred at `x = -249`). A
+zero-size rect has no meaningful centre either. So the probe **skips** both cases
+and labels them, rather than folding them in with the covered points:
+
 ```bash
 $BB --instance work js '(function(){
   const el = document.querySelector(".cm-updated-pop");
   const r  = el.getBoundingClientRect();
+  if (r.width <= 0 || r.height <= 0) return "zero-size rect — nothing to hit-test";
+  const inVp = (x,y) => x >= 0 && y >= 0 && x < innerWidth && y < innerHeight;
   const pts = [[r.left+8, r.top+8], [r.left+r.width/2, r.top+r.height/2], [r.right-8, r.bottom-8]];
   return JSON.stringify(pts.map(([x,y]) => {
+    if (!inVp(x,y)) return {x, y, skipped: "off-viewport"};
     const hit = document.elementFromPoint(x, y);
     return {x, y, hit: hit && hit.className, insidePop: !!hit && el.contains(hit)};
   }));
 })()'
 ```
 
-Any `insidePop:false` is the bug, and `hit` is the culprit.
+Any `insidePop:false` is the bug, and `hit` is the culprit. A `skipped` point is
+**not** evidence either way — if every point is skipped you have measured nothing,
+so say so instead of reporting "not covered".
 
 **3. Walk the ancestors for the first stacking-context creator.** The offender is
 almost never the element you're staring at. Check each ancestor's computed

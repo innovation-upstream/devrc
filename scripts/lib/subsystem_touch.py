@@ -296,6 +296,15 @@ from subsystem_resolver import (  # noqa: E402
 from git_mainline import FALLBACK_BASE_REFS  # noqa: E402
 from git_mainline import resolve_base_ref as _resolve_mainline_ref  # noqa: E402
 
+# 🔴 ONE RULE, ONE PLACE — "which MACHINE's store is this?". The store under
+# `~/.claude/analyze-service-index/` is PER-HOST and unreplicated; measured
+# 2026-08-27 the workbench held 115 entries / 14 scopes and the laptop 33 / 11,
+# with exactly ONE entry name in common across the four scopes both machines
+# have. Every verdict this module prints is therefore a fact about ONE disk, and
+# `host_identity` is what makes the output say so. Same owner as
+# `analyze-service-index/backup.py`, which keys its objects by it.
+from host_identity import this_host  # noqa: E402
+
 __all__ = [
     "WRITER_ID",
     "DEFAULT_STORE_ROOT",
@@ -308,6 +317,8 @@ __all__ = [
     "StoreMissingError",
     "EntryUnreadableError",
     "EntryFileMissingError",
+    "RepoPathMissingError",
+    "repo_path_missing_message",
     "GitError",
     "ExtractorMissingError",
     "TranscriptMissingError",
@@ -383,6 +394,9 @@ __all__ = [
     "commit_window_range",
     "escalate_to_commit_window",
     "render_window_escalation",
+    "STORE_IS_PER_HOST",
+    "store_host",
+    "store_host_line",
     "render_text",
     "report_json",
     "new_entry_template",
@@ -550,6 +564,36 @@ class EntryFileMissingError(TouchError):
     (check the path vs. fix the front matter), and reporting the first as the
     second would make the validator's own output the thing that misleads. They do
     share an exit code, because the skill's handling of both is identical.
+    """
+
+
+class RepoPathMissingError(TouchError):
+    """`--repo` names something that is not a directory.
+
+    Sentinels: 'repo path does not exist' when nothing is there, 'repo path is
+    not a directory' when something is. TWO, because they are two mistakes with
+    two next moves — see `repo_path_missing_message`.
+
+    🔴 ITS OWN SENTINEL, NOT `git command failed`, for `_object_type`'s reason:
+    "the repo path does not exist" is a first-class READING the caller can act
+    on, while `GitError`'s sentinel is a true statement about the subprocess and
+    a useless one about the argument. MEASURED 2026-08-28, from `/tmp`:
+
+        $ subsystem_recall.py --repo datapacket-talos
+        subsystem-recall: git command failed (git -C /tmp/datapacket-talos
+          rev-parse --path-format=absolute --git-common-dir): exit 128: fatal:
+          cannot change to '/tmp/datapacket-talos': No such file or directory
+
+    `--repo` takes a PATH and is resolved against the cwd, so a bare repo NAME
+    becomes `$PWD/<name>` — and the raw git error names neither that rule nor the
+    two ways out. It matters more here than the wording alone suggests: this
+    command is the subsystem store's ONLY read surface, and the store already
+    spent its early life with two writers and no reader. A prescribed first
+    command that answers with a git internals dump is how it goes back to unread.
+
+    The message is built by `repo_path_missing_message` — ONE spelling, used by
+    both CLIs through `scope_for_repo`, and pinned as one by
+    `test_repo_path_guard.py`.
     """
 
 
@@ -945,7 +989,109 @@ def derive_scope(repo_root: str | Path, git_common_dir: str | Path) -> str:
     return normalize_ref(Path(repo_root).name)
 
 
-def scope_for_repo(repo: str | Path) -> str:
+#: Repo-root handles pre-exported into every agent shell, named in the remedy
+#: because they are the spelling that is always absolute and never relative.
+#: PROSE, not a lookup — this module never expands them, which is exactly why a
+#: typo here would be invisible: `$NOPE` expands to nothing and `--repo` gets the
+#: empty string. `nix/agent-handles.nix` is the source of truth and
+#: `test_repo_path_guard.py` pins these against it. A SUBSET of it on purpose:
+#: that file also declares `CIVITAI_CLI`, omitted to keep the line readable.
+REPO_PATH_HANDLES = ("$DEVRC", "$HOMELAB", "$DATAPACKET", "$CIVITAI")
+
+
+def _scope_hint(name: str, store_root: str | Path | None) -> str:
+    """The half of `repo_path_missing_message` that turns a dead end into a route.
+
+    🔴 FOUR READINGS, NOT TWO. "the store has no such scope" and "the store was
+    not looked at" are different facts with different next moves, and folding the
+    second into the first would be the confident zero this repo's rules are
+    mostly about: a scan that walked nothing reporting an all-clear. So an
+    unreadable store root, an absent one, and a `--repo` value that does not
+    normalize to a scope name each say NOT CHECKED and say why.
+    """
+    if not name:
+        return (
+            "Whether the store has a matching scope was NOT CHECKED: that value does "
+            "not normalize to a scope name."
+        )
+    if store_root is None:
+        return (
+            f"Whether the store has a `{name}/` scope was NOT CHECKED: no store root "
+            f"was given."
+        )
+    root = Path(store_root)
+    if not root.is_dir():
+        return (
+            f"Whether the store has a `{name}/` scope was NOT CHECKED: store root "
+            f"'{root}' is not a directory."
+        )
+    if (root / name).is_dir():
+        return (
+            f"The store HAS a `{name}/` scope — you probably meant `--scope {name}`."
+        )
+    return f"The store has no `{name}/` scope, so `--scope {name}` would not help either."
+
+
+def repo_path_missing_message(
+    given: str | Path | None,
+    resolved: str | Path,
+    *,
+    store_root: str | Path | None = None,
+) -> str:
+    """The ONE spelling of "that `--repo` value is not a directory". READ-ONLY.
+
+    🔴 ONE PLACE, TWO CLIs. `subsystem_touch` and `subsystem_recall` both reach
+    this through `scope_for_repo` — which is the same reason the scope RULE lives
+    in one function: a reader and a writer that disagree here would send two
+    operators to two different remedies for one mistake.
+    `test_repo_path_guard.py` fails if a second copy of the wording appears.
+
+    `given` is the RAW value the caller typed and `resolved` is what it became.
+    Both are printed when they differ, because the cwd-join is the whole defect:
+    seeing only `/tmp/datapacket-talos` leaves "where did /tmp come from?"
+    unanswered, and that question is the one the reader actually has. `given` is
+    None for internal callers that never had a raw string.
+    """
+    given_s = str(given) if given is not None else str(resolved)
+    resolved_s = str(resolved)
+    # 🔴 TWO SPELLINGS, because they are two different mistakes. A path that is
+    # absent and a path that exists as a FILE need different next moves, and
+    # telling someone their `notes.md` "does not exist" while they are looking
+    # at it is the kind of confidently-wrong line that makes a reader distrust
+    # the rest of the message.
+    lead = "repo path does not exist" if not Path(resolved_s).exists() else (
+        "repo path is not a directory"
+    )
+    # 🔴 THE PARENTHETICAL IS ABOUT A *RELATIVE* INPUT — not about the two
+    # strings merely differing. They also differ when an ABSOLUTE path resolves
+    # through a SYMLINK: measured on NixOS, `--repo /etc/hostname` resolves to
+    # `/nix/store/…-etc-hostname`, and telling that caller their absolute path
+    # "is resolved against the current directory" is a false statement in the
+    # one message whose entire job is to be accurate about their mistake.
+    joined_from_cwd = not Path(given_s).is_absolute()
+    if given_s == resolved_s:
+        head = f"{lead}: '{resolved_s}'."
+    elif joined_from_cwd:
+        head = (
+            f"{lead}: '{given_s}' → '{resolved_s}' "
+            f"(a bare name is resolved against the current directory)."
+        )
+    else:
+        head = f"{lead}: '{given_s}' → '{resolved_s}'."
+    remedy = (
+        f"--repo takes a PATH, not a repo NAME. Pass an absolute path, one of the "
+        f"pre-exported handles ({', '.join(REPO_PATH_HANDLES)}), or --scope <name>, "
+        f"which names the store directory directly and runs no git at all."
+    )
+    return f"{head} {remedy} {_scope_hint(normalize_ref(Path(given_s).name), store_root)}"
+
+
+def scope_for_repo(
+    repo: str | Path,
+    *,
+    store_root: str | Path | None = None,
+    given: str | Path | None = None,
+) -> str:
     """Ask git where `repo` really lives, then `derive_scope` it. Runs git.
 
     🔴 EXTRACTED SO THERE IS ONE SCOPE-DERIVATION CALL SITE, not two. `main()`
@@ -958,8 +1104,22 @@ def scope_for_repo(repo: str | Path) -> str:
     indistinguishable from the ordinary case. So the recall module imports THIS,
     rather than re-spelling the two `rev-parse` invocations and the worktree
     rule they exist to satisfy.
+
+    🔴 THE NON-DIRECTORY CASE IS CHECKED BEFORE GIT RUNS, and it belongs HERE for
+    the same reason the scope rule does — this is the one seam both halves cross,
+    so a guard placed in the reader alone would leave the writer answering the
+    identical mistake with an identical git dump. `store_root` and `given` exist
+    only for the message: `given` carries the raw pre-`resolve()` string so the
+    cwd-join is visible, and `store_root` is what lets the refusal name the scope
+    the caller probably wanted. Both default to None so every existing call site
+    (`service_recon._scope_of` among them) keeps working, at a slightly poorer
+    message rather than a TypeError.
     """
     repo = Path(repo)
+    if not repo.is_dir():
+        raise RepoPathMissingError(
+            repo_path_missing_message(given, repo, store_root=store_root)
+        )
     common = _git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).strip()
     return derive_scope(_toplevel(repo), common)
 
@@ -4262,11 +4422,49 @@ def render_window_escalation(
     return out
 
 
+#: The ONE sentence naming whose disk was read. Shared by every surface in this
+#: module AND by `subsystem_recall`, which imports it — a header spelled at four
+#: sites is a header that will say four different things, and this one carries a
+#: claim about scope that must not vary between the reader and the writer.
+STORE_IS_PER_HOST = (
+    "the store is PER-HOST and unreplicated; this run read THIS machine's disk "
+    "and consulted no other"
+)
+
+
+def store_host() -> str:
+    """THIS machine's identity — the ONE call site of `host_identity.this_host`.
+
+    🔴 A SINGLE SEAM FOR BOTH MODULES. `subsystem_recall` imports THIS function
+    rather than `this_host` itself, so the name is looked up in this module's
+    globals wherever it is called from: one injection point makes the reader and
+    the writer agree, and a test that needs byte-stable output patches one thing
+    instead of two that can drift apart.
+    """
+    return this_host()
+
+
+def store_host_line(indent: str = "  ") -> str:
+    """`host: <id>  (<the per-host caveat>)` — printed under every `store:` line.
+
+    🔴 WITHOUT THIS THE OUTPUT STATES ONE DISK AS A FACT ABOUT THE FLEET. Measured
+    2026-08-27: the workbench store held 115 entries across 14 scopes, the laptop
+    33 across 11; of the four scope names present on both machines the workbench
+    held 104 entries and the laptop 10, with exactly ONE entry name in common,
+    and seven scopes existed ONLY on the laptop. Nothing syncs them. A verdict
+    printed without naming the host is therefore not a smaller claim than the
+    truth — it is a different, false one.
+    """
+    return f"{indent}host: {store_host()}  ({STORE_IS_PER_HOST})"
+
+
 def render_text(report: TouchReport) -> str:
     """The agent-facing brief.
 
-    Deterministic in the REPORT: same report in, same bytes out — with one
-    documented exception. On a dead end the `SKILL HOMES` block reads the host's
+    Deterministic in the REPORT: same report in, same bytes out — with TWO
+    documented exceptions. The second is `store_host_line`, which reads THIS
+    machine's identity: that is the point of it, and a test that needs byte
+    stability injects `this_host`. On a dead end the `SKILL HOMES` block reads the host's
     `~/.claude/skills`, so its rows vary with what is deployed there. That makes
     the two tiers differ by construction: `flake.nix` exports `HOME=$TMPDIR/home`
     for the sandbox and nothing creates `.claude/skills` in it, so CI always
@@ -4278,6 +4476,7 @@ def render_text(report: TouchReport) -> str:
     out: list[str] = []
     out.append(f"subsystem-touch: status={report.status} scope={report.scope}")
     out.append(f"  store: {report.store_root}")
+    out.append(store_host_line())
     # 🔴 NAMED, NEVER ASSUMED. The write half of this step is told to read the
     # governing README first; printing WHICH file that is makes the instruction
     # followable in the 4-of-5 scopes that have no README of their own, and makes
@@ -4321,10 +4520,23 @@ def render_text(report: TouchReport) -> str:
 
     if report.status == "scope-absent":
         out.append("")
+        # 🔴 "ABSENT HERE" IS NOT "ABSENT ANYWHERE", and the old wording said the
+        # second. MEASURED 2026-08-27: a workbench run probing `vetr-app` printed
+        # `the store has no vetr-app/ directory yet … the FIRST-ENTRY case` while
+        # a `vetr-app` scope with four entries existed ON THE LAPTOP. The status
+        # was right for this disk; the SENTENCE was a claim about a store that
+        # does not exist as one thing.
         out.append(
-            f"SCOPE ABSENT — the store has no `{report.scope}/` directory yet. Every "
-            f"path below is unresolved because there is nothing to resolve against; "
-            f"this is the FIRST-ENTRY case, not a miss."
+            f"SCOPE ABSENT — THIS HOST's store ({store_host()}) has no "
+            f"`{report.scope}/` directory yet. Every path below is unresolved "
+            f"because there is nothing HERE to resolve against; this is the "
+            f"FIRST-ENTRY case FOR THIS HOST, not a miss."
+        )
+        out.append(
+            f"  NOT A FACT ABOUT THE FLEET — {STORE_IS_PER_HOST}. The other host "
+            f"keeps a DIFFERENT store, not a copy, and it may already hold "
+            f"`{report.scope}/`. Nothing is lost by writing a first entry here; "
+            f"just do not report this scope as unrecorded everywhere."
         )
 
     if report.known:
@@ -4513,6 +4725,10 @@ def report_json(report: TouchReport) -> dict:
         "status": report.status,
         "scope": report.scope,
         "store_root": report.store_root,
+        # WHOSE disk `store_root` names. The path is identical on both machines
+        # and the contents are not, so a consumer that logged `store_root` alone
+        # could never tell two hosts' reports apart.
+        "store_host": store_host(),
         "today": report.today,
         "min_paths": report.min_paths,
         "writer_id": WRITER_ID,
@@ -5437,6 +5653,7 @@ def render_validation(report: ValidationReport) -> str:
     out = [
         f"subsystem-touch validate: {report.target}",
         f"  store: {report.store_root}",
+        store_host_line(),
         f"  policy: {report.policy_path or '(none)'}  ({report.policy_basis})",
     ]
     if not report.checked:
@@ -5703,7 +5920,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "touch. READ-ONLY: it never writes to the store."
         ),
     )
-    p.add_argument("--repo", default=".", help="repo to read paths from (default: cwd)")
+    # See the note on the reader's identical flag: "PATH" is what stops the bare
+    # repo NAME that used to reach git as `$PWD/<name>`.
+    p.add_argument(
+        "--repo",
+        default=".",
+        help="PATH to the repo to read paths from — not a repo name (default: cwd)",
+    )
     p.add_argument("--scope", default=None, help="override the derived store scope")
     p.add_argument("--store", default=str(DEFAULT_STORE_ROOT), help="store root")
     p.add_argument(
@@ -5896,8 +6119,12 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
 
         def scope_of() -> str:
             if not _scope_memo:
+                # `given=args.repo` is the raw pre-`resolve()` string; see the
+                # note on `repo_path_missing_message`.
                 _scope_memo.append(
-                    args.scope if args.scope is not None else scope_for_repo(repo)
+                    args.scope
+                    if args.scope is not None
+                    else scope_for_repo(repo, store_root=args.store, given=args.repo)
                 )
             return _scope_memo[0]
 

@@ -14,14 +14,26 @@ Target: `$ARGUMENTS`:
 - A number → that GitHub PR (`gh pr diff <n>`, `gh pr view <n>`).
 - `current` / empty → the current branch's diff vs its base/trunk.
 - Several numbers → audit each, one subagent per PR so they don't collide. 🔴 `isolation:
-  "worktree"` worktrees the **cwd's** repo, not the PR's — for a PR in another repo have the
-  agent run `git -C <that-repo> worktree add …` itself.
+  "worktree"` worktrees the **cwd's** repo, not the PR's — for a PR in another repo run the
+  recipe the brief's WHERE TO WORK section PRINTS, never a remembered one. It is a namespaced
+  `refs/pull/<n>/head` fetch then a **detached** `worktree add`: naming the PR's head branch
+  instead fails `rc 128` in any clone that has not fetched it, and always for a fork PR.
 
 ## What to do
 
+🔴 **Assemble the brief with `~/workspace/devrc/scripts/audit-dispatch.py <pr> [--round N]`** — it
+generates the range, the cross-repo worktree directive, checkout state and toolchain, reads the
+prior round's claims from the fenced `audit-claims` block ONLY, and carries the invariant clauses
+verbatim. **A delta round with no parseable block is REFUSED.**
+
+🔴 **Post the round's block with `--round N --emit-claims --audited <the tip that round's audit
+READ>`.** `--emit-claims` runs after the fixes land, so every sha it can see is a FIX tip; omit
+`--audited` and HEAD is *assumed* — it says so on stderr, because the next round then diffs a range
+that is empty by construction and a finding-free pass over it reads as a clean round.
+
 Dispatch a subagent (read-only — it must NOT modify files or merge) to audit the change against this checklist. Have it read the diff and the code it touches, not just the PR description.
 
-**Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, anything security/auth/path-gating. These hide deploy-blocking bugs (shutdown data-loss, trash-path overwrite, an unauthenticated arbitrary-path scan and a git `core.fsmonitor` RCE all surfaced this way). A branch with a **private Go module dep** may need `GOPRIVATE` — a sum-db `500` there is env, not a defect.
+**Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, anything security/auth/path-gating. What each hid, and `GOPRIVATE`: reference file.
 
 **Brief the auditor on the environment, or it will report false findings** — a fresh worktree is
 not a working checkout, and an auditor hitting this cold blames the PR. Whichever apply:
@@ -32,6 +44,22 @@ parameters**, so `eslint $FILES` checks **zero** files and prints a confident PA
 only in a `cp -a` copy — **`rm -f <copy>/.git` first**, since a worktree's is a FILE pointing at the
 real git dir, so a commit in the copy lands on your branch — and verify your worktree clean
 yourself at the end.
+
+🔴 **Tell it to reap its LOAD GENERATORS by resolved PID, and sweep for them yourself afterwards —
+an auditor's own "cleaned up" claim is not evidence.** Measured twice in ONE session, from two
+different rounds: a timing/stress probe spawned `while :; do :; done` shells whose cleanup
+(`kill %1 %2 …` in one, `kill $LOADPIDS` in the other) reaped nothing, so they reparented to init
+and ran on — **74 orphans saturating ~11 cores for 45 minutes**, then **20 more at ~87% CPU each
+for 6h17m**. Both rounds reported cleanly. 🔴 The cost is not the CPU: the first batch was still
+running during the NEXT round, which measured its timings under that load and reported the
+degraded numbers as a finding — **a leak from round N silently corrupts round N+1's evidence**.
+So brief it to record each PID it spawns and kill those exact PIDs, and at session end sweep
+yourself: `ps -eo pid,ppid,comm` for `ppid==1` shells, confirm each via `/proc/<pid>/cmdline`,
+kill by **resolved PID**. Never let a pattern reach `pkill -f` — it matches your own shell.
+
+🔴 **And give it a UNIQUE name/port for any container or scratch dir it creates.** Subagents share
+one scratchpad path and the branch namespace, so two audit rounds that both pick `cgpg` or port
+55432 collide silently and one reports a green computed against the other's database.
 
 **Audit for:**
 1. **Risks** — what breaks in production.
