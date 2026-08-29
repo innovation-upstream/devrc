@@ -110,18 +110,66 @@ the honest version names the dimension it did not vary. Here that dimension was
 ## Next steps (ranked)
 1. ~~**Decision:** adopt `set clipboard=unnamedplus`~~ — **DECLINED 2026-08-29**,
    reasoning in the neovim section above. No further action.
-2. **Decision:** install a clipboard manager for history? (optional — `clipcat`
-   for X11, `cliphist` if/when migrating to Wayland). **Still open, not
-   investigated on resume.**
+2. ~~**Decision:** install a clipboard manager for history?~~ — **investigated
+   2026-08-29, nothing installed.** Details below; this is a decision on
+   evidence, not the original doc's unexamined "NOT NEEDED".
 3. **If migrating to Wayland:** replace `xclip` with `wl-clipboard`, evaluate
    `cliphist` + `wl-clip-persist`. **Not applicable today** — measured
    `XDG_SESSION_TYPE=x11`, `WAYLAND_DISPLAY` unset, `wl-copy` absent.
+
+### Clipboard managers — investigated on resume, still NOT installed
+
+The original section concluded "NOT NEEDED — tmux OSC 52 + xclip covers the use
+cases". That reasoning was about **transport** and did not address
+**persistence**, which is a real and measured gap:
+
+```
+set CLIPBOARD from a process   ->  [OWNERSHIP-PROBE]
+kill the owning process        ->  Error: target STRING not available
+```
+
+X11 selections are owned by the source client, and no manager is running to
+hold them (verified: none of clipcat/copyq/greenclip/clipmenu/diodon/parcellite
+is installed or running). Close the app you copied from and the clipboard is
+empty. So the original conclusion was right by luck, not by argument.
+
+**Nothing installed anyway, and the reason is NOT security.** An earlier draft
+of this section argued against `greenclip` because its only exclusion mechanism
+is `blacklisted_applications` (per-application, verified against the real
+binary's generated config), so a vault paste out of Brave cannot be excluded
+without excluding Brave itself, leaving up to 50 plaintext secrets in
+`~/.cache/greenclip.history`. 🔴 **That argument is RETRACTED as overweighted**:
+anyone who can read that file can already read `~/.ssh/id_*`, the age
+identities and the `$KC_*` kubeconfigs in the same home directory, and
+`~/.cache` is conventionally excluded from backups. The marginal exposure is
+small. The per-application fact is true; the conclusion drawn from it was not.
+
+The actual reason is **no measured need**. The probe above demonstrates the
+MECHANISM; nothing establishes the FREQUENCY, and no instance of actually
+losing a clipboard was observed. Against that: Zach works entirely via agents
+and the standing direction is to modernize the agent-facing layer rather than
+interactive-CLI ricing — a history picker on `$mod+Shift+v` is the latter — and
+`MEMORY.md`'s "do we need it before hardening" entry exists because a 145 KB
+webhook listener that had never run once was shipped and later retired.
+
+Contrast with the neovim fix above, which shipped precisely because it was
+**not** speculative: `"+y` was reproducibly dead on every ssh session.
+
+**If it is ever wanted, the pick is `greenclip`** (4.3.1 in the pinned nixpkgs,
+attribute `haskellPackages.greenclip` — NOT top-level), because it reuses the
+rofi already bound to `$mod+d` and solves persistence AND history for the same
+machinery, which strictly dominates a persistence-only daemon. `$mod+Shift+v`
+is free. The trigger to revisit is an OBSERVED lost clipboard, not this note.
 
 ## Gotchas / decisions / dead-ends
 - OSC 52 supersedes tmux-yank for this setup — no reason to install the plugin
 - Wayland clipboard is a different ecosystem — `wl-clipboard` is the equivalent of `xclip`
 - Espanso's clipboard access is separate from tmux's OSC 52 but reads the same X CLIPBOARD selection
-- No clipboard manager was installed — current tooling is sufficient
+- No clipboard manager installed — see the section above for the evidence, and
+  note the retracted security argument so it is not re-derived
+- 🔴 `greenclip` has NO top-level nixpkgs attribute; `nix ... nixpkgs#greenclip`
+  fails. It is `haskellPackages.greenclip`. A version check that falls back to
+  that attribute will report 4.3.1 and read as if the top-level one existed
 
 ## How to verify
 - tmux clipboard: copy in tmux copy-mode → paste in another app (OSC 52 path)
