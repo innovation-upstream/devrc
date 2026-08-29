@@ -721,10 +721,28 @@ HERMETIC_TARGETS=(
 )
 
 # --- DEV-HOST-ONLY set ---------------------------------------------------------
-# Targets deferred to the pre-push tier (empty today — nothing here currently
-# needs a live DB/network at runtime; kept so a future DB-bound suite has a home
-# that does NOT block the hermetic flake gate).
-DEVHOST_TARGETS=()
+# Targets deferred to the pre-push tier: they need a HOST TOOL the nix sandbox
+# does not carry, so they cannot block the hermetic flake gate.
+#
+# 🔴 THIS IS THE HOME FOR A TEST THAT WOULD OTHERWISE SKIP, and the distinction
+# is the whole point: a `skipif` in a hermetic target is an UNPINNED SKIP and
+# GUARD 2 rejects it — correctly, because "coverage silently collapsed" is the
+# failure it exists to catch. Pinning is NOT the alternative when the predicate
+# is a MISSING BINARY: EXPECTED_SKIPS' only conditional is `unset:VAR`, it must
+# be the SAME predicate the test uses, and a FLAT pin then reds the dev host
+# where the tool exists and the test runs (see the SIGNAL_PG_DSN entry, which
+# records exactly that going wrong). Move it here instead.
+#
+# scripts/devhost-tests — needs a real `nvim`. Added 2026-08-29 with the OSC 52
+# clipboard fallback: the behavioural red->green tests drive neovim, and the
+# first version of that branch put them in scripts/tests, where the sandbox
+# reported `ERROR: 3 UNPINNED skip group(s)`. Their structural half stays
+# hermetic in scripts/tests/test_nvim_clipboard_osc52.py, which also asserts
+# that THIS registration still exists — drop the line and that test fails,
+# rather than the behavioural suite quietly running in no tier at all.
+DEVHOST_TARGETS=(
+  scripts/devhost-tests
+)
 
 TARGETS=("${HERMETIC_TARGETS[@]}")
 if [ "$SET" = "all" ]; then
@@ -1779,6 +1797,13 @@ TARGET_FLOORS=(
   #   is only 14. Raise the TARGET_FLOORS entry to "scripts/opencode/tests|86"
   # (which is `_suggested_floor 90` = 90 - min(50, max(1, 90/20 = 4)) = 86.)
   "scripts/opencode/tests|86"
+  # 2026-08-29, the neovim OSC 52 clipboard fallback. A DEV-HOST target (see
+  # DEVHOST_TARGETS) holding 4 behavioural tests that drive a real nvim, so it
+  # is collected only under `--set all` — but the floor table is checked against
+  # hermetic AND dev-host targets both ways, so it needs an entry regardless or
+  # GUARD 3a reports it unfloored.
+  # `_suggested_floor 4` = 4 - min(50, max(1, 4/20 = 0 -> 1)) = 3.
+  "scripts/devhost-tests|3"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone
@@ -2848,6 +2873,17 @@ EXPECTED_SKIPS=(
   # lands on one core, the fix is to make the CONTROL independent of the
   # runner's mode, not to delete this entry.
   "scripts/tests|only meaningful inside a real xdist worker|unset:DEVRC_XDIST_ACTIVE"
+  # The neovim OSC 52 fix's "with a DISPLAY, do not override neovim's own xclip
+  # autodetection" case. It asserts on vim.g.clipboard and performs NO yank on
+  # purpose — xclip is not stubbed by the no-launch plugin, so yanking would
+  # overwrite the operator's REAL system clipboard.
+  # CONDITIONAL, and the condition is the test's own `skipif` verbatim: expected
+  # only where DISPLAY is unset. On the graphical dev host it RUNS and this entry
+  # correctly does not apply; a flat entry would red that host.
+  # Its two siblings in the same file need no pin — they key on a missing BINARY,
+  # which `unset:VAR` cannot express, which is why the whole file sits in the
+  # dev-host tier where nvim is guaranteed. Only this one is env-conditional.
+  "scripts/devhost-tests|needs an X display|unset:DISPLAY"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a
