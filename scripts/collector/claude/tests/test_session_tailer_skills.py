@@ -191,11 +191,15 @@ class TestTheNameBoundDoesNotREJECTRealIdentities:
         assert r["unusable_skill_names"] == 0
 
     def test_a_DIRECTORY_scoped_skill_records_the_SKILL_not_the_PATH(self):
-        """🔴 The prefix is a PATH, and on this fleet it is per-run-unique: the
-        only namespace-qualified identities in 6,113 transcripts are 10 distinct
-        `.claude/worktrees/agent-<17 hex>:remix`, one per agent run. Keeping the
+        """🔴 The prefix is a PATH and a path is per-run-unique, so keeping the
         whole string would make an unbounded-cardinality ClickHouse key out of a
         filesystem path — for every session, on both hosts, in a PUBLIC repo.
+
+        ⚠ FORWARD-LOOKING: measured 2026-08-29, **0** namespace-qualified values
+        on either route across the 837 SESSION transcripts these readers walk.
+        The retracted "10 distinct" figure came from a raw grep over the whole
+        directory — the wrong count AND the wrong corpus (both instances are
+        `subagents/` transcripts, a tier excluded by design).
 
         So `apps/web:deploy` and `apps/api:deploy` both record `deploy`. That
         collision is a deliberate trade: the identity measured is the skill, not
@@ -225,6 +229,35 @@ class TestTheNameBoundDoesNotREJECTRealIdentities:
         r = S.build_rollup([_typed(), _assistant(skill="10.42.0.30:8123/activity")])
         assert r["skills_used"] == {}
         assert r["unusable_skill_names"] == 1
+
+    def test_the_two_IDENTITY_LENGTH_bounds_agree(self):
+        """🔴 THE LEDGER'S HOLE. `MAX_IDENTITY_CHARS` was duplicated alongside
+        the pattern but never added to the ledger, and the fuzz test's docstring
+        lists "length" as an axis its generated cases do not vary — so changing
+        either copy to 512 left 546 tests GREEN.
+
+        Divergence costs a silent zero: with the search at 512 and the emitter
+        at 256, `("z"*300) + "/a:handoff"` records `handoff` in the search and
+        nothing in the emitter, so `--skill handoff` returns a session ClickHouse
+        reports as never having used it."""
+        lib = (Path(__file__).resolve().parents[3] / "lib" / "transcript_search.py")
+        src = lib.read_text(encoding="utf-8")
+        marker = "MAX_IDENTITY_CHARS = "
+        assert marker in src, f"{lib} no longer defines MAX_IDENTITY_CHARS"
+        theirs = src.split(marker, 1)[1].split("\n", 1)[0].strip()
+        assert theirs == str(S.MAX_IDENTITY_CHARS), (
+            f"identity-length bounds drifted: tailer={S.MAX_IDENTITY_CHARS}, "
+            f"transcript_search.py={theirs}")
+
+    def test_the_identity_length_BOUNDARY_is_where_the_constant_says(self):
+        """The behavioural half. No test named 256 or any value between it and
+        4000, so the constant could move without anything noticing."""
+        n = S.MAX_IDENTITY_CHARS
+        tail = "/a:handoff"
+        ok = ("z" * (n - len(tail))) + tail          # exactly at the bound
+        too_long = ("z" * (n - len(tail) + 1)) + tail
+        assert S.canonical_skill_name(ok) == "handoff", "the bound rejects at its own limit"
+        assert S.canonical_skill_name(too_long) is None, "one char over is accepted"
 
     def test_the_two_skill_name_bounds_agree(self):
         """🔴 The bound is DUPLICATED in scripts/lib/transcript_search.py and
@@ -268,7 +301,7 @@ class TestAnEmptyTagDoesNotSWALLOWARealCommand:
         classified as a command and this module's counting branch never runs.
         The real fix is in `classify()`, which is shared with tailer.py's
         message stream; changing it would move `kind=command` for every row that
-        source has emitted. Zero live instances (0 of 6,113 transcripts carry
+        source has emitted. Zero live instances (0 session transcripts measured 2026-08-29 carry
         two tags in one turn), so the limitation is documented, not fixed.
 
         If this test ever goes RED because the value became `{'handoff': 1}`,

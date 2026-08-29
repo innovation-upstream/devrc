@@ -61,16 +61,27 @@ def _ids(results):
 def _load_tailer():
     """Load the emitter's copy of the rule WITHOUT leaking import state.
 
-    🔴 The previous revision left `scripts/collector` and
-    `scripts/collector/claude` at the FRONT of `sys.path` and `st_for_agree` in
-    `sys.modules` for the rest of the pytest process — so a later test doing a
-    bare `import tailer|collector|emit|...` would resolve against the collector
-    copy, order-dependently. Restored in `finally`.
+    Leaving `scripts/collector` on `sys.path`, or any of the modules this import
+    creates in `sys.modules`, makes a later bare `import tailer|_shared|
+    changed_paths` in another suite resolve against the COLLECTOR copy —
+    order-dependently. See the LEAKS list below for the full set; restoring
+    `sys.path` alone is not enough, and a previous revision did exactly that.
     """
     import importlib.util
     tailer_path = (Path(__file__).resolve().parents[1]
                    / "collector" / "claude" / "session-tailer.py")
-    saved_path, saved_mod = list(sys.path), sys.modules.get("st_for_agree")
+    # 🔴 `st_for_agree` is NOT the only module this import creates. Executing
+    # session-tailer.py imports `tailer`, `_shared` and `changed_paths` from the
+    # COLLECTOR tree — and `scripts/collector/opencode/tests` import modules of
+    # those same names from a DIFFERENT tree. Restoring `sys.path` does not undo
+    # that: once a name is in `sys.modules`, a later bare import returns the
+    # cached copy whatever the path says. The previous revision restored only
+    # `sys.path` and `st_for_agree`, while its own docstring named `tailer` as
+    # the hazard. Contained today only because run-tests.sh gives each target
+    # its own process — which is exactly what a hand-run subset does not do.
+    LEAKS = ("st_for_agree", "tailer", "_shared", "changed_paths")
+    saved_path = list(sys.path)
+    saved_mods = {k: sys.modules.get(k) for k in LEAKS}
     try:
         sys.path.insert(0, str(tailer_path.parent))
         sys.path.insert(0, str(tailer_path.parent.parent))
@@ -81,10 +92,11 @@ def _load_tailer():
         return st
     finally:
         sys.path[:] = saved_path
-        if saved_mod is None:
-            sys.modules.pop("st_for_agree", None)
-        else:
-            sys.modules["st_for_agree"] = saved_mod
+        for name, mod in saved_mods.items():
+            if mod is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = mod
 
 
 # --------------------------------------------------------------------------- #
@@ -255,10 +267,15 @@ class TestTheBoundAppliesToALLTHREERoutes:
         assert ts.scan_transcript(str(p), [], [])["skills_invoked"] == {}
 
     def test_a_PATH_QUALIFIED_identity_records_the_SKILL_not_the_path(self, tmp_path):
-        """The live shape on this fleet is `.claude/worktrees/agent-<hex>:remix`
-        — one distinct value PER AGENT RUN. Keeping the whole string would make
-        an unbounded-cardinality key out of a filesystem path; keeping the part
-        after the last `:` records the skill that was actually used."""
+        """A path prefix is per-run-unique, so keeping the whole string would
+        make an unbounded-cardinality key out of a filesystem path. What is kept
+        is the part after the FIRST colon following the path — `split`, not
+        `rsplit`, so a directory-scoped PLUGIN skill keeps its namespace.
+
+        ⚠ FORWARD-LOOKING, not backed by live instances: 0 namespace-qualified
+        values on either route across the 837 session transcripts these readers
+        walk. The shape exists in 2 files, both `subagents/`, which are excluded
+        by design."""
         p = _write(tmp_path, "s", [_user("hi"), self._rec(message={"content": [
             {"type": "tool_use", "name": "Skill",
              "input": {"skill": ".claude/worktrees/agent-a2fdb76ed5a9fc025:remix"}}]})])
@@ -339,6 +356,45 @@ class TestTheBoundAppliesToALLTHREERoutes:
         for bad in [42, False, 1.5, None, ["signal"]]:
             assert ts.canonical_skill_name(bad) is None, bad
             assert st.canonical_skill_name(bad) is None, bad
+
+
+class TestTheQuerySideUsesTheSameRuleAsTheCorpus:
+    """🔴 THREE CALL SITES, THREE SURVIVING MUTANTS. Reverting any of
+    `session_used_skill`'s query normalisation, its per-key normalisation, or
+    `search()`'s left 546 tests green.
+
+    🔴 And two of them are UNREACHABLE FROM THE CLI, because `find-session.py`
+    canonicalises before calling `search()` — so no CLI test can ever kill them.
+    A guard on a library function has to be exercised through that function."""
+
+    def _rec_with(self, tmp_path, recorded):
+        p = _write(tmp_path, "s", [_user("hi"), json.dumps({
+            "type": "assistant", "timestamp": "2026-08-21T10:01:00.000Z",
+            "cwd": "/srv/repo", "attributionSkill": recorded,
+            "message": {"content": []}})])
+        return ts.scan_transcript(str(p), [], [])
+
+    def test_a_PATH_QUALIFIED_query_matches_the_recorded_skill(self, tmp_path):
+        """The corpus stores `deploy`; the user types the spelling the tailer's
+        own comment tells them to expect. Without the query going through the
+        same rule this is a silent zero at exit 0."""
+        rec = self._rec_with(tmp_path, "apps/web:deploy")
+        assert rec["skills_attributed"] == {"deploy": 1}
+        assert ts.session_used_skill(rec, "apps/web:deploy") is True
+        assert ts.session_used_skill(rec, "deploy") is True
+
+    def test_search_ITSELF_accepts_a_path_qualified_skill(self, tmp_path):
+        """`search()` normalises its own `skill` argument — exercised directly,
+        because the CLI canonicalises first and would mask a regression here."""
+        self._rec_with(tmp_path, "apps/web:deploy")
+        assert _ids(ts.search([], root=tmp_path, skill="apps/web:deploy")) == ["s"]
+
+    def test_a_RECORDED_key_is_matched_through_the_same_rule(self, tmp_path):
+        """The per-key half: the bag's keys are canonical already, so this
+        pins that the comparison does not depend on which side was normalised."""
+        rec = self._rec_with(tmp_path, ".claude/worktrees/agent-abc123:remix")
+        assert rec["skills_attributed"] == {"remix": 1}
+        assert ts.session_used_skill(rec, "remix") is True
 
 
 class TestTheThirdInvocationRoute:

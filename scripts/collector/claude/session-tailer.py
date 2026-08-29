@@ -256,7 +256,7 @@ def _int(v) -> int:
 # whitespace name tag, and a `<command-name>` holding prose with no args tag. A
 # 4,000-char name also went straight through, multiplying the payload.
 #
-# Measured 2026-08-29 across 6,107 transcripts: 37 distinct real command names,
+# Measured 2026-08-29: 37 distinct real command names across the corpus,
 # every one `/name`, none empty, none containing whitespace, longest 26 chars.
 # So this is a LATENT hazard with zero live instances — bounded here rather than
 # after it ships something.
@@ -271,13 +271,21 @@ def _int(v) -> int:
 # as never used while `find-session --skill` still found the session, which is
 # the silent zero this work removes, reintroduced inside the guard protecting it.
 #
-# 🔴 But the directory form's prefix is a PATH, and on this fleet it is
-# per-run-unique. Measured 2026-08-29, the ONLY namespace-qualified identities
-# in 6,113 transcripts are 10 distinct
-# `.claude/worktrees/agent-<17 hex>:remix` — one per agent run. Keeping the
-# whole string would make an unbounded-cardinality ClickHouse map key out of a
-# filesystem path, for every session on both hosts, and this repo is PUBLIC:
-# `home/zach/workspace/clients/<name>/.env` fits the same shape.
+# 🔴 But the directory form's prefix is a PATH, and a path is per-run-unique.
+# Keeping the whole string would make an unbounded-cardinality ClickHouse map
+# key out of a filesystem path, for every session on both hosts, and this repo
+# is PUBLIC: `home/zach/workspace/clients/<name>/.env` fits the same shape.
+#
+# ⚠ THIS IS A FORWARD-LOOKING BOUND, NOT ONE BACKED BY LIVE INSTANCES, and an
+# earlier revision of this comment claimed otherwise. Measured 2026-08-29 over
+# the 837 SESSION transcripts these readers actually walk: **0**
+# namespace-qualified values on either route (71 distinct `attributionSkill`,
+# 67 distinct `Skill` `input.skill`, none containing `/` or `:`). The
+# `.claude/worktrees/agent-<hex>:remix` shape exists in exactly 2 files, and
+# BOTH are `subagents/` transcripts — a tier `iter_transcripts` excludes by
+# design. The retracted "10 distinct" figure came from a raw grep over the whole
+# directory, which is both the wrong count and the wrong corpus. The rule stands
+# on the documented identity shape and on cardinality, not on a measurement.
 #
 # So `canonical_skill_name` drops a path-derived prefix and keeps the SKILL,
 # and a value that is a bare path with no skill after it is REJECTED and
@@ -587,8 +595,8 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
                 #     `search` the real command is lost; with `finditer` it is
                 #     counted.
                 #
-                # Both shapes have zero live instances (0 of 6,056 transcripts
-                # carry two tags in one turn), and the no-args half cannot be
+                # Both shapes have zero live instances (0 of the session
+                # transcripts measured 2026-08-29 carry two tags in one turn), and the no-args half cannot be
                 # fixed here — its gate is `classify()`, shared with tailer.py's
                 # message stream, where a change moves `kind=command` for every
                 # row that source has emitted. Both halves are pinned by tests.

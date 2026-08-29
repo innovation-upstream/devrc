@@ -369,12 +369,16 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
                 # instead — `<command-name>` appearing inside quoted TOOL OUTPUT
                 # is not this session invoking anything.
                 utext = body if surface == SURFACE_TEXT else text_of(msg)
-                cmd_m = _COMMAND_NAME_RE.search(utext)
-                if cmd_m:
-                    # Same rule as the emitter — see SKILL_NAME_PATTERN.
+                # `finditer`, matching the emitter: with `search`, an EMPTY
+                # tag followed by a real one in the same turn made this reader
+                # record nothing while the emitter recorded the command — so
+                # `--skill handoff` missed a session ClickHouse counted. Zero
+                # live instances, but the two readers must not disagree.
+                for cmd_m in _COMMAND_NAME_RE.finditer(utext):
                     cname = canonical_skill_name(cmd_m.group(1))
                     if cname:
                         commands_typed[cname] = commands_typed.get(cname, 0) + 1
+                        break
         else:
             continue
 
@@ -458,29 +462,23 @@ def canonical_skill_name(raw):
     return s
 
 
-def normalize_skill(name) -> str:
-    """The ONE normalisation for a skill name. Both the query and the corpus
-    side go through it.
-
-    🔴 It exists because there were TWO. `search()` normalised with `.strip()`
-    while the predicate also stripped a leading `/`, so `--skill /` was truthy,
-    slipped the empty-query guard, then normalised to `""` INSIDE the predicate
-    and failed every session — returning a corpus-wide **silent zero** with exit
-    0. That is the same silent zero this flag exists to remove, reintroduced
-    through a sibling input. One rule, one place.
-    """
-    if name is None:
-        return ""
-    return str(name).strip().lstrip("/").strip()
 
 
 def session_used_skill(rec, name) -> bool:
     """Did this session use skill `name`, by ANY of the three routes?
 
-    🔴 EXACT match on the skill's identity, never a substring of it. A substring
-    predicate is how "which sessions used `signal`?" turns back into the keyword
-    search this exists to replace — `sig` would match it, and so would a session
-    that merely wrote the word. Compare the RECORDED NAME, not the prose.
+    🔴 EXACT match on the CANONICAL identity, never a substring of it. A
+    substring predicate is how "which sessions used `signal`?" turns back into
+    the keyword search this exists to replace — `sig` would match it, and so
+    would a session that merely wrote the word. Compare the RECORDED NAME, not
+    the prose.
+
+    ⚠ "Exact" is exact on the CANONICAL form, which deliberately drops a
+    path-derived prefix. So `--skill apps/api:deploy` matches a session that
+    used `apps/web:deploy` — both canonicalise to `deploy`. That collision is
+    the same one the emitter makes on purpose (the identity recorded is the
+    skill, not where it was loaded from); it is stated here because the query
+    side is where a user meets it.
 
     ⚠ `commands_typed` is ORed in, and it holds BUILT-INS: `--skill login`
     therefore matches sessions that typed `/login`, which is not a skill. That
