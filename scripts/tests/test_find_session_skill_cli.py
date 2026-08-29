@@ -166,6 +166,31 @@ class TestTheScopeDisclosure:
         assert "NOT searched" not in err
 
 
+class TestTheGuardDoesNotBREAKTheToolsPRIMARYMODE:
+    """🔴 THE NEGATIVE CONTROL FOR THE `--skill` REFUSAL, and it was missing.
+
+    Every other test here passes `--skill`. Reverting the arg's default from
+    `None` back to `""` makes an OMITTED `--skill` indistinguishable from an
+    empty one, so the refusal fires on every plain keyword search — measured:
+    `find-session signal` exits 2 with no output, the tool's primary mode dead.
+    The whole CLI suite stayed GREEN through that.
+
+    A guard is only as trustworthy as the case that proves it does not fire."""
+
+    def test_a_plain_keyword_search_with_NO_skill_flag_still_works(self, corpus):
+        code, out, err = run(corpus, ["hi"])
+        assert code == 0, (
+            f"a plain keyword search was refused (rc={code}) — the --skill guard "
+            f"is firing when no --skill was given: {err!r}")
+        assert "used" in out, "the keyword search returned no results"
+        assert "names no skill" not in err
+
+    def test_a_plain_keyword_search_still_works_under_json(self, corpus):
+        code, out, err = run(corpus, ["hi", "--json"])
+        assert code == 0, err
+        assert [r["session_id"] for r in json.loads(out)] == ["used"]
+
+
 class TestSkillWithOpencodeOnlyIsRefused:
     def test_it_exits_2_rather_than_returning_an_unfiltered_set(self, corpus):
         """The opencode corpus carries no per-record attribution, so this
