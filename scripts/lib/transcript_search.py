@@ -429,25 +429,30 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
 # having used no such skill. A bound on one of three routes is not a bound.
 SKILL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
 SKILL_NAME_RE = re.compile(SKILL_NAME_PATTERN)
+MAX_IDENTITY_CHARS = 256
 
 
 def canonical_skill_name(raw):
     """The key a skill identity may become, or None if it may not become one.
 
-    Byte-identical in behaviour to `canonical_skill_name` in
+    Behaviourally identical to `canonical_skill_name` in
     `scripts/collector/claude/session-tailer.py` — see SKILL_NAME_PATTERN above
     for why the rule is duplicated rather than imported, and read that copy for
-    the measurement behind dropping a path-derived prefix.
+    the measurement behind each clause. `test_the_two_readers_AGREE_*` fuzzes
+    the two against each other; a hand-picked value list could not see a
+    `split`/`rsplit` divergence and one shipped green.
     """
-    if raw is None:
+    if not isinstance(raw, str):
         return None
-    s = str(raw).strip().lstrip("/").strip()
+    s = raw.strip().lstrip("/").strip()
     if not s:
+        return None
+    if len(s) > MAX_IDENTITY_CHARS or any(c.isspace() for c in s):
         return None
     if "/" in s:
         if ":" not in s:
             return None
-        s = s.rsplit(":", 1)[1].strip()
+        s = s.split(":", 1)[1].strip()
     if not s or not SKILL_NAME_RE.match(s):
         return None
     return s
@@ -483,14 +488,20 @@ def session_used_skill(rec, name) -> bool:
     `name`, and dropping it would lose the typed-only sessions (`handoff`: 3)
     that no other route sees. Intersect with the skill list if you need purity.
     """
-    want = normalize_skill(name).lower()
+    # 🔴 The QUERY goes through the same rule as the CORPUS. It did not, and the
+    # mismatch cost live sessions: the corpus is keyed by `canonical_skill_name`
+    # (so a worktree-qualified identity is stored as `remix`), while the query
+    # was only stripped — so `--skill apps/web:deploy`, the exact spelling the
+    # tailer's own comment tells a reader to expect, matched NOTHING at exit 0
+    # while the corpus held `deploy`.
+    want = (canonical_skill_name(name) or "").lower()
     if not want:
         return False
     for bag in (rec.get("skills_attributed") or {},
                 rec.get("skills_invoked") or {},
                 rec.get("commands_typed") or {}):
         for got in bag:
-            if normalize_skill(got).lower() == want:
+            if (canonical_skill_name(got) or "").lower() == want:
                 return True
     return False
 
@@ -564,7 +575,7 @@ def search(terms, *, root=None, match_any=False, since=None, limit=None, project
     # otherwise slips this guard and then fails the predicate for every session,
     # returning an EMPTY result corpus-wide instead of raising — the silent zero
     # this whole change exists to remove, reintroduced one line above it.
-    skill = normalize_skill(skill)
+    skill = canonical_skill_name(skill) or ""
     if not terms and not skill:
         # AND over an empty term list is vacuously true, so this would return the ENTIRE
         # corpus ranked by nothing. Neither CLI can reach it (both reject an empty term

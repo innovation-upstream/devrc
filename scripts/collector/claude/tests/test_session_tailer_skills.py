@@ -280,6 +280,21 @@ class TestAnEmptyTagDoesNotSWALLOWARealCommand:
         assert r["commands_typed"] == {}
         assert r["unusable_skill_names"] == 0
 
+    def test_two_tags_in_one_block_WITH_ARGS_do_keep_the_real_command(self):
+        """🔴 THE HALF THE RETRACTION MISSED, and the coverage `finditer` never
+        had. With `<command-args>` present, `classify()` builds
+        `(cname + " " + cargs).strip()` — truthy — so it DOES return
+        ("command", …) and the counting branch runs. Under `search` the real
+        command is lost; under `finditer` it is kept.
+
+        Without this test, reverting `finditer` to `search` killed nothing, and
+        the comment beside it invited exactly that revert."""
+        rec = _typed("<command-name>   </command-name>"
+                     "<command-name>/handoff</command-name>"
+                     "<command-args>some args</command-args>")
+        r = S.build_rollup([rec, _assistant()])
+        assert r["commands_typed"] == {"handoff": 1}
+
     def test_a_command_turn_whose_only_tag_is_empty_is_COUNTED_as_unusable(self):
         """The discarded case has to be observable, or the filter is
         indistinguishable from one wired to nothing."""

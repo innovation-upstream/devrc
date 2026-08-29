@@ -292,6 +292,10 @@ def _int(v) -> int:
 # pass every test here and break the running daemon on both hosts.
 SKILL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
 SKILL_NAME_RE = re.compile(SKILL_NAME_PATTERN)
+# Bounds the WHOLE identity before any path-strip. Generous next to the 64-char
+# name bound because a legitimate directory prefix can be long; its job is to
+# stop a multi-kilobyte blob being rewritten into a clean key by the strip.
+MAX_IDENTITY_CHARS = 256
 
 
 def canonical_skill_name(raw):
@@ -302,17 +306,37 @@ def canonical_skill_name(raw):
     `find-session --skill "not a valid name"` matched a session ClickHouse
     reported as having used no such skill. Every route goes through here.
     """
-    if raw is None:
+    # A non-string identity is not a name. Without this the two readers
+    # disagreed: the tailer's own `isinstance` pre-guard dropped `42` while the
+    # search recorded the key `"42"`, so `--skill 42` matched a session
+    # ClickHouse reported as having used no such skill.
+    if not isinstance(raw, str):
         return None
-    s = str(raw).strip().lstrip("/").strip()
+    s = raw.strip().lstrip("/").strip()
     if not s:
         return None
+    # 🔴 CHECKED BEFORE THE PATH-STRIP, and that order is the whole point. The
+    # strip examines only the tail, so a value whose HEAD is prose or megabytes
+    # of junk used to be rewritten into a clean key: `not a valid
+    # name/x:handoff` recorded `handoff`, and `("z"*4000)/a:handoff` did too —
+    # both REJECTED AND COUNTED before the strip existed. That turned "malformed,
+    # visible in unusable_skill_names" into "attributed to a real skill, audit
+    # trail clean", which is worse than what it replaced.
+    if len(s) > MAX_IDENTITY_CHARS or any(c.isspace() for c in s):
+        return None
     if "/" in s:
-        # A path-derived prefix. Keep the skill after it; a bare path is not a
-        # skill identity at all.
+        # A path-derived prefix. Keep what follows the FIRST colon after it; a
+        # bare path is not a skill identity at all.
+        #
+        # `split`, not `rsplit`: for a directory-scoped PLUGIN skill
+        # `apps/web:cloudflare:wrangler`, the directory is `apps/web` and the
+        # identity is `cloudflare:wrangler`. `rsplit` returned `wrangler`,
+        # colliding with a bare `wrangler` and contradicting this module's own
+        # argument that a plugin namespace is bounded and meaningful, so it is
+        # not truncated.
         if ":" not in s:
             return None
-        s = s.rsplit(":", 1)[1].strip()
+        s = s.split(":", 1)[1].strip()
     if not s or not SKILL_NAME_RE.match(s):
         return None
     return s
@@ -548,18 +572,26 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
                 # `finditer`, not `search`, so a block holding an empty tag
                 # FOLLOWED by a real one still sees the real one.
                 #
-                # 🔴 KNOWN LIMITATION, and this comment used to claim otherwise.
-                # For that exact input the command is STILL not counted — but
-                # not here: `classify()` runs its own `search`, hits the empty
-                # tag first, yields empty text and returns None, so `genuine` is
-                # never a command and this branch does not run. `finditer` is
-                # defensive only. The real fix lives in `classify()`, which is
-                # shared with tailer.py's message stream, so changing it moves
-                # `kind=command` for every row that source has ever emitted —
-                # out of scope here, and NOT worth it for a case with zero live
-                # instances (0 of 6,113 transcripts carry two tags in one turn).
-                # `test_two_tags_in_one_block_are_NOT_counted` pins the real
-                # behaviour so nobody re-reads this as fixed.
+                # 🔴 `finditer` IS LOAD-BEARING, and a previous revision of this
+                # comment wrongly called it "defensive only" — which invited a
+                # revert that would silently lose a real command. Whether it
+                # matters depends on `<command-args>`:
+                #
+                #   empty tag + real tag, NO args   -> `classify()` runs its own
+                #     `search`, hits the empty tag, yields empty text, returns
+                #     None. The turn is never a command and this branch does not
+                #     run at all — `finditer` changes nothing.
+                #   empty tag + real tag, WITH args -> `classify()` builds
+                #     `(cname + " " + cargs).strip()`, which is truthy, so it
+                #     returns ("command", …) and this branch DOES run. With
+                #     `search` the real command is lost; with `finditer` it is
+                #     counted.
+                #
+                # Both shapes have zero live instances (0 of 6,056 transcripts
+                # carry two tags in one turn), and the no-args half cannot be
+                # fixed here — its gate is `classify()`, shared with tailer.py's
+                # message stream, where a change moves `kind=command` for every
+                # row that source has emitted. Both halves are pinned by tests.
                 if raw:
                     for m in COMMAND_NAME.finditer(raw):
                         val = m.group(1).strip()

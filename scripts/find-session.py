@@ -30,7 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from transcript_search import (  # noqa: E402
-    DEFAULT_ROOT, SURFACE_ALL, SURFACE_TEXT, normalize_skill, search,
+    DEFAULT_ROOT, SURFACE_ALL, SURFACE_TEXT, canonical_skill_name, search,
 )
 from opencode_search import search_opencode  # noqa: E402
 
@@ -41,7 +41,7 @@ ROOT = DEFAULT_ROOT
 def parse_args(argv=None):
     p = argparse.ArgumentParser(add_help=True, description="Find past Claude Code and opencode sessions by keyword.")
     p.add_argument("terms", nargs="*", help="search terms (ANDed unless --any)")
-    p.add_argument("--skill", default="",
+    p.add_argument("--skill", default=None,
                    help="only sessions that USED this skill (exact name). Reads the "
                         "skill attribution on each record, so it sees a skill that "
                         "auto-fired as well as one typed as /name — neither of which "
@@ -109,8 +109,14 @@ def main(argv=None):
     # "", the skill predicate was skipped entirely, and an UNFILTERED two-corpus
     # keyword result came back at exit 0 reading as an answer to the question
     # that was actually asked.
-    raw_skill, a.skill = a.skill, normalize_skill(a.skill)
-    if raw_skill and not a.skill:
+    raw_skill, a.skill = a.skill, (canonical_skill_name(a.skill) or "")
+    # `is not None`, not truthiness: argparse's default is None for "omitted",
+    # so an explicitly-given `--skill ""` is a DIFFERENT thing and must not slip
+    # through as "no skill was asked for". It did — `find-session hi --skill ""`
+    # ran an unfiltered two-corpus keyword search at exit 0, the exact failure
+    # the guard beside it was written to stop, for the likeliest real spelling
+    # (`--skill "$VAR"` with VAR unset).
+    if raw_skill is not None and not a.skill:
         print(f"--skill {raw_skill!r} names no skill", file=sys.stderr)
         sys.exit(2)
     if not a.terms and not a.skill:

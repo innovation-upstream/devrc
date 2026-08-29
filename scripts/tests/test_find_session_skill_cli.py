@@ -106,7 +106,7 @@ class TestAQueryThatNamesNothingIsRefusedNotAnsweredWithZero:
         assert "names no skill" in err or "nothing to search for" in err
         assert out == "", "a refused query must not print a result set"
 
-    @pytest.mark.parametrize("bad", ["/", "   ", "//"])
+    @pytest.mark.parametrize("bad", ["/", "   ", "//", ""])
     def test_it_is_STILL_refused_when_search_terms_are_present(self, corpus, bad):
         """🔴 THE BOUNDARY THE FOUR CASES ABOVE DO NOT PIN. They all run with no
         terms, so they only exercise the `not terms and not skill` conjunction.

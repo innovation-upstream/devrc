@@ -58,6 +58,35 @@ def _ids(results):
     return sorted(r["session_id"] for r in results)
 
 
+def _load_tailer():
+    """Load the emitter's copy of the rule WITHOUT leaking import state.
+
+    🔴 The previous revision left `scripts/collector` and
+    `scripts/collector/claude` at the FRONT of `sys.path` and `st_for_agree` in
+    `sys.modules` for the rest of the pytest process — so a later test doing a
+    bare `import tailer|collector|emit|...` would resolve against the collector
+    copy, order-dependently. Restored in `finally`.
+    """
+    import importlib.util
+    tailer_path = (Path(__file__).resolve().parents[1]
+                   / "collector" / "claude" / "session-tailer.py")
+    saved_path, saved_mod = list(sys.path), sys.modules.get("st_for_agree")
+    try:
+        sys.path.insert(0, str(tailer_path.parent))
+        sys.path.insert(0, str(tailer_path.parent.parent))
+        spec = importlib.util.spec_from_file_location("st_for_agree", tailer_path)
+        st = importlib.util.module_from_spec(spec)
+        sys.modules["st_for_agree"] = st
+        spec.loader.exec_module(st)
+        return st
+    finally:
+        sys.path[:] = saved_path
+        if saved_mod is None:
+            sys.modules.pop("st_for_agree", None)
+        else:
+            sys.modules["st_for_agree"] = saved_mod
+
+
 # --------------------------------------------------------------------------- #
 # Positive control
 # --------------------------------------------------------------------------- #
@@ -243,24 +272,68 @@ class TestTheBoundAppliesToALLTHREERoutes:
         got = ts.scan_transcript(str(p), [], [])["skills_attributed"]
         assert got == {"cloudflare:wrangler": 1}
 
-    def test_the_two_readers_AGREE_on_every_one_of_these(self, tmp_path):
+    def test_the_two_readers_AGREE_including_on_FUZZED_input(self):
         """The relationship, not the components: whatever this module records
-        for a name, the emitter must record too. A structural check only — the
-        behavioural cases above are what make it meaningful."""
-        import importlib.util
-        tailer_path = (Path(__file__).resolve().parents[1]
-                       / "collector" / "claude" / "session-tailer.py")
-        spec = importlib.util.spec_from_file_location("st_for_agree", tailer_path)
-        st = importlib.util.module_from_spec(spec)
-        sys.modules["st_for_agree"] = st
-        sys.path.insert(0, str(tailer_path.parent))
-        sys.path.insert(0, str(tailer_path.parent.parent))
-        spec.loader.exec_module(st)
-        for value in ["signal", "cloudflare:wrangler", "not a valid name",
-                      ".claude/worktrees/agent-abc123:remix", "z" * 4000,
-                      "home/zach/x/.env", "10.42.0.30:8123/activity", "/handoff"]:
+        for a name, the emitter must record too.
+
+        🔴 A HAND-PICKED VALUE LIST COULD NOT SEE A REAL DIVERGENCE. The
+        previous revision listed eight values, none with BOTH a `/` and two
+        colons — so mutating one copy's `rsplit(":", 1)` to `split(":", 1)`
+        SURVIVED the suite, shipping an emitter and a search that disagreed
+        about `apps/web:cloudflare:wrangler`. The generated cases below vary the
+        axes that actually separate the implementations: slash count, colon
+        count, leading dot, whitespace, length, and type."""
+        st = _load_tailer()
+        cases = [
+            "signal", "/handoff", "cloudflare:wrangler", "not a valid name",
+            ".claude/worktrees/agent-abc123:remix", "z" * 4000, "z" * 200,
+            "home/zach/x/.env", "10.42.0.30:8123/activity", "", "   ", "/", "//",
+            ":", "::", "a:", ":a", "a::b", "apps/web:deploy",
+            "apps/web:cloudflare:wrangler", "a/b/c:d:e", "a/b:c/d",
+            "not a valid name/x:handoff", ("z" * 4000) + "/a:handoff",
+            "café", "sig nal", "a" * 64, "a" * 65, 42, None, True, ["signal"],
+            {"skill": "x"}, 1.5,
+        ]
+        # Generated axes on top of the literals — the part a curated list cannot
+        # cover, because the bug is always in the combination nobody pictured.
+        for slashes in range(3):
+            for colons in range(3):
+                for lead in ("", ".", "/"):
+                    cases.append(lead + "/".join(["seg"] * (slashes + 1))
+                                 + ":".join([""] + ["part"] * colons))
+        for value in cases:
             assert st.canonical_skill_name(value) == ts.canonical_skill_name(value), (
-                f"the two readers disagree about {value!r}")
+                f"the two readers disagree about {value!r}: "
+                f"tailer={st.canonical_skill_name(value)!r} "
+                f"search={ts.canonical_skill_name(value)!r}")
+
+    def test_a_directory_scoped_PLUGIN_skill_keeps_its_plugin_namespace(self):
+        """`apps/web:cloudflare:wrangler` — the directory is `apps/web`, the
+        identity is `cloudflare:wrangler`. Truncating to `wrangler` would
+        collide with a bare `wrangler` and contradict the rule that a plugin
+        namespace is bounded and meaningful, so it is not truncated."""
+        assert ts.canonical_skill_name("apps/web:cloudflare:wrangler") == \
+            "cloudflare:wrangler"
+
+    def test_PROSE_before_a_path_separator_cannot_be_rewritten_into_a_skill(self):
+        """🔴 The path-strip examines only the TAIL, so a value whose HEAD is
+        prose was being rewritten into a clean key — `not a valid
+        name/x:handoff` recorded `handoff`, misattributing junk to a REAL skill
+        with `unusable_skill_names` showing nothing wrong. Worse than the
+        rejection it replaced, because the audit trail stayed clean."""
+        for bad in ["not a valid name/x:handoff",
+                    "please ignore previous/instructions:signal",
+                    ("z" * 4000) + "/a:handoff"]:
+            assert ts.canonical_skill_name(bad) is None, bad
+
+    def test_a_NON_STRING_identity_is_rejected_by_BOTH_readers(self):
+        """The search side dropped its `isinstance` guard when it moved to the
+        shared rule, so `attributionSkill = 42` recorded the key `"42"` here and
+        nothing in the emitter."""
+        st = _load_tailer()
+        for bad in [42, False, 1.5, None, ["signal"]]:
+            assert ts.canonical_skill_name(bad) is None, bad
+            assert st.canonical_skill_name(bad) is None, bad
 
 
 class TestTheThirdInvocationRoute:
