@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- offscreen.html — the extension's clipboard writer, and nothing else.
+
+     An MV3 service worker has no `document`, so it cannot reach the clipboard.
+     This page exists solely so `chrome.offscreen.createDocument({reasons:
+     ["CLIPBOARD"]})` has something to load; the worker creates it on a toolbar
+     click, posts the text, and closes it again. It is never visible, never
+     navigated, and loads no remote resource.
+
+     ⚠ This file is NOT covered by the build marker: gen-build-marker.py hashes
+     `*.js` + manifest.json, so an edit HERE would not move the marker and
+     `extension_stale` could not see it. It is kept deliberately inert — a
+     textarea and a script tag — so there is nothing here to go stale. Any real
+     logic belongs in offscreen.js, which IS hashed. -->
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Browser Bridge — offscreen</title>
+</head>
+<body>
+  <textarea id="sink"></textarea>
+  <script src="offscreen.js"></script>
+</body>
+</html>

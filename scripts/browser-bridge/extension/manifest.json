@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Browser Bridge (command channel)",
-  "version": "0.8.1.43738",
+  "version": "0.8.1.7430",
   "description": "Lets a local Claude Code skill drive the active Brave tab (getHtml/eval/tabs/nav/screenshot/frames/click/type/key/activate/upload/emulate/ping) via a loopback, token-authenticated rendezvous server. Local-only, authorized personal automation.",
-  "permissions": ["scripting", "tabs", "activeTab", "storage", "alarms", "debugger", "webNavigation"],
+  "permissions": ["scripting", "tabs", "activeTab", "storage", "alarms", "debugger", "webNavigation", "offscreen"],
   "host_permissions": ["http://127.0.0.1:8788/*", "<all_urls>"],
   "icons": {
     "16": "icons/icon-16.png",

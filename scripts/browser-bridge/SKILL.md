@@ -9,7 +9,7 @@ description: Drive the user's LIVE, logged-in Brave browser — read the active 
 BB=~/workspace/devrc/scripts/browser-bridge/browser   # ← run it by this exact path
 $BB whoami                          # ORIENT FIRST: HOST + connected profiles + extension_stale
 $BB --instance <key> open <url>     # open a NEW tab THIS session owns → returns tabId
-$BB --instance <key> --tab <id> text   # cheap read of a specific tab
+$BB bw://<host>/<inst>/<tabId> text # cheap read of the tab Zach's icon-click copied
 ```
 
 🔴 **Run `whoami` first on every fresh browser task.** Both hosts are hostname
@@ -47,6 +47,9 @@ Global flags, usable before any op: `--instance <key>` (which profile),
 Env defaults `$BB_INSTANCE`/`$BB_TAB`/`$BB_FRAME` (flag wins; zsh does NOT
 split an unquoted `$F`). ⚠ an export outlives the call — env-routed ops say so
 once, on stderr.
+A toolbar-icon click copies `bw://<host>/<instance>/<tabId>` — one token that IS
+`--instance`+`--tab`, either side of the op. Host verified; mixing it with those
+flags errors.
 Result payloads land under `.result.data`.
 
 | command | does |
