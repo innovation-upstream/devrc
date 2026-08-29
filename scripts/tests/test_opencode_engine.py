@@ -11,7 +11,7 @@ duplicate of it).
   That is a real gap, and it is exactly the gap the version pin exists to cover:
   a config whose keys are unchanged can have its RESOLVED MEANING changed by the
   binary underneath it. opencode.jsonc's header documents a large set of
-  behaviours annotated "measured on v1.18.18 — do not re-derive" — last-match-
+  behaviours annotated "measured on v1.18.21 — do not re-derive" — last-match-
   wins ordering, hidden agents inheriting the global permission block, the exact
   tool set. A static test cannot see any of those change. This file runs the
   real engine and checks them.
@@ -91,7 +91,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OC_DIR = ROOT / "scripts" / "opencode"
 TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 
-# 🔴 THE PIN. Every "measured on v1.18.18" claim in opencode.jsonc's header, in
+# 🔴 THE PIN. Every "measured on v1.18.21" claim in opencode.jsonc's header, in
 # scripts/opencode/README.md and in test_opencode_config.py's docstrings is keyed
 # to this exact version. It is pinned declaratively by nix/pkgs/tools/default.nix
 # resolving `pkgs.opencode` out of flake.lock's nixpkgs.
@@ -170,9 +170,41 @@ TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 # hook-behaviour claims (`permission.ask` never fires, `tool.execute.before` does)
 # in scripts/opencode/README.md and scripts/opencode/plugin/guard.js. Those need
 # a running hook to observe and were not re-measured here.
-PINNED_VERSION = "1.18.18"
+#
+# 🔴 RE-DERIVED AGAIN 1.18.18 -> 1.18.21 (2026-08-29), by the SAME method as the
+# two bumps above, because `chore: update flake.lock` moved the binary without
+# re-keying anything and left this assertion RED on main — so the required
+# `tekton/devrc-pytests` check was failing for every PR in the repo, not just the
+# one that noticed. What was measured, with its controls, so the next bump can
+# repeat it rather than trust this paragraph:
+#
+#   * `debug agent <a> --pure` for ALL SEVEN agents under BOTH binaries — store
+#     paths 3y4zcklfn3hfk9gn08csfzd3vwfjhkl0 (superseded) and
+#     iqc8xfx692ym3pds6ky0vhqzscg6kgxd (current), named by hash so this record
+#     carries no version literal of its own — config dir seeded from this repo,
+#     minimal env, stdout to a file. 7/7 IDENTICAL — permission array, resolved
+#     tool map, model, description, prompt and mode. A cleaner result than the
+#     2026-08-19 pass, which found `compaction`'s built-in prompt had moved.
+#   * SAME-BINARY CONTROL, as the paragraph above demands before any
+#     cross-version verdict is believed: two runs of 1.18.21 collapse to
+#     identical on all seven agents. The readdir nondeterminism that once made
+#     two same-binary runs differ on 434 lines does not arise under this
+#     harness's env, because HOME is an empty temp dir and there is no
+#     ~/.claude/skills or ~/.config/opencode/skills to walk.
+#   * NEGATIVE CONTROL on the comparison itself, so "IDENTICAL" is not just what
+#     it always says: `nav` vs `k8s` on ONE binary reports DIFFERS on seven
+#     top-level keys.
+#   * POSITIVE CONTROL on the captures: 10 top-level keys, 12 resolved tools and
+#     92-119 permission entries per agent, no error markers — the dumps compared
+#     are real engine output, not two identically-failed runs.
+#   * This whole file against the CURRENT binary, before the pin below was
+#     re-keyed: 24 passed, 1 failed — exactly that assertion. And against the
+#     SUPERSEDED binary WITH the re-keyed pin and the renumbered claims: 1
+#     failed, again exactly that assertion. So the pin discriminates in both
+#     directions rather than being green by default.
+PINNED_VERSION = "1.18.21"
 
-# MEASURED via `opencode debug agent nav --pure` at 1.18.18. This is the cost AND
+# MEASURED via `opencode debug agent nav --pure` at 1.18.21. This is the cost AND
 # blast-radius pin that test_opencode_config.py's `test_nav_is_kept_lean` only
 # asserts about the CONFIG KEYS; here it is read off the engine's resolved tool
 # map. `skill` alone injects the ~3,730-token catalogue on every request.
@@ -813,8 +845,27 @@ HISTORICAL_VERSION_CLAIMS = (
     # match. Both entries are now keyed on text only their own line carries.
     ("scripts/tests/test_opencode_engine.py", "not merely re-spelled",
      "names the 2026-08-13 transition itself"),
-    ("scripts/tests/test_opencode_engine.py", "RE-DERIVED AGAIN",
+    ("scripts/tests/test_opencode_engine.py", "(2026-08-19), by the SAME method",
      "names the 2026-08-19 transition itself"),
+    # 🔴 The 2026-08-29 bump. Its own transition line names both versions by
+    # construction; the rest below were NOT re-derived at the new pin, and
+    # renumbering them would turn a dated measurement into a false one that
+    # reads exactly like a fresh reading. Every snippet here is version-FREE,
+    # per the note on _VERSION_RE — one quoting a literal matches itself.
+    ("scripts/tests/test_opencode_engine.py", "(2026-08-29), by the SAME method",
+     "names the 2026-08-29 transition itself"),
+    ("scripts/tests/test_opencode_engine.py", "store path), so those lines now carry the pinned",
+     "dated 2026-08-19 consumer re-verification; a historical record"),
+    ("scripts/opencode/README.md", "Re-measured **2026-08-19** on engine",
+     "dated COST measurement — token/spend figures were not re-measured at the new pin"),
+    ("nix/home.nix", "COST — re-measured 2026-08-19 on engine",
+     "dated COST measurement — the A/B token pair was not re-run at the new pin"),
+    ("scripts/browser-bridge/README.md", "binary: `TaskTool.execute` creates a child",
+     "TaskTool.execute internals — the differential covered agent resolution, not this"),
+    ("scripts/browser-bridge/browser", "binary: `TaskTool.execute` creates a CHILD",
+     "same claim in the CLI; not re-derived"),
+    ("scripts/browser-bridge/browser", "binary, `TaskTool.execute` creates a child session",
+     "same claim again in the CLI's long-form note; not re-derived"),
     ("scripts/tests/test_opencode_engine.py", "deliberately still keyed to",
      "the pin's own note naming the not-re-derived subset"),
     ("scripts/tests/test_opencode_engine.py", "MEASURED 2026-08-11 on the workbench, opencode",
@@ -1101,7 +1152,7 @@ def test_engine_and_model_agree_on_every_pinned_command(engine_name, model_agent
 # --------------------------------------------------------------------------- #
 def test_engine_resolves_navs_tool_set_to_exactly_the_pinned_four():
     """test_opencode_config.py's `test_nav_is_kept_lean` docstring says "VERIFIED
-    against `opencode debug agent nav` on 1.18.18: the resolved tool set is
+    against `opencode debug agent nav` on 1.18.21: the resolved tool set is
     exactly {glob, grep, read} (+ the internal `invalid`)" — but that file
     asserts only the CONFIG KEYS, so the verification was a one-off nobody
     re-ran. This re-runs it every gate.

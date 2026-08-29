@@ -2210,15 +2210,21 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   Because the gate runs **before** the tab is opened, a gate failure leaks no tab.
 
   *Prerequisite:* an opencode whose `debug agent` reports a browser-only tool set.
-  **Both hosts run 1.18.18 and both resolve browser-only** (verified 2026-08-19:
-  the gate replicated ON EACH HOST parses to exactly one enabled tool, `browser`,
-  with every host tool present and `false`). There is no version-skew caveat
-  here any more. The hosts CONVERGED on 2026-08-15 and the pin's move to 1.18.18
-  had reached both before it was re-keyed — verified at the consumer, both
+  **Both hosts run 1.18.21 and both resolve browser-only** — but those are two
+  measurements with two dates, and only the first was re-taken at the current
+  pin. HOSTS: verified 2026-08-29 at the consumer, both
   `readlink -f $(command -v opencode)` resolving to the same
-  `…-opencode-1.18.18` store path — so the pin and the deploy agree. The
+  `…-opencode-1.18.21` store path the flake provides, so the pin and the deploy
+  agree. RESOLUTION: the gate replicated ON EACH HOST — parsing to exactly one
+  enabled tool, `browser`, with every host tool present and `false` — was last
+  run 2026-08-19 on the superseded binary; it carries forward because the
+  2026-08-29 bump's differential found the resolved tool map IDENTICAL across
+  the two binaries for all seven agents, not because it was re-run per host.
+  There is no version-skew caveat
+  here any more. The hosts CONVERGED on 2026-08-15 and the pin's move to 1.18.21
+  had reached both before it was re-keyed. The
   browser-only resolution was measured identical on 1.18.4 and 1.18.16, and again
-  on the 1.18.18 binary, so no bump has changed it. 🔴 The RAW dump is NOT byte-stable, on either binary: the
+  on the 1.18.21 binary, so no bump has changed it. 🔴 The RAW dump is NOT byte-stable, on either binary: the
   `permission` array's order follows a directory walk and varies run to run, so
   `cmp` on two dumps differs for reasons that have nothing to do with the version.
   Compare the resolved tool set, or canonicalise first. So the deploy gap does not
@@ -2311,7 +2317,7 @@ ln -sf ~/workspace/devrc/scripts/browser-bridge/opencode/tools/browser_tool_impl
 the wrapper substitutes them per run.)
 
 **opencode version.** The custom-tool mechanism (`.opencode/tools/*.js`,
-`permission: {"*": deny, …}`) is **verified on 1.18.18, which is what BOTH hosts
+`permission: {"*": deny, …}`) is **verified on 1.18.21, which is what BOTH hosts
 run and what `flake.lock` pins** (measured identical on 1.18.4 before the bump) — `opencode debug agent
 browser-agent` resolves to `bash:false … browser:true`
 (exactly one enabled tool) on each, plus an end-to-end `opencode debug agent …
