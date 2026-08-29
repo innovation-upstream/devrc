@@ -11,7 +11,7 @@ duplicate of it).
   That is a real gap, and it is exactly the gap the version pin exists to cover:
   a config whose keys are unchanged can have its RESOLVED MEANING changed by the
   binary underneath it. opencode.jsonc's header documents a large set of
-  behaviours annotated "measured on v1.18.18 — do not re-derive" — last-match-
+  behaviours annotated "measured on v1.18.21 — do not re-derive" — last-match-
   wins ordering, hidden agents inheriting the global permission block, the exact
   tool set. A static test cannot see any of those change. This file runs the
   real engine and checks them.
@@ -91,12 +91,12 @@ ROOT = Path(__file__).resolve().parents[2]
 OC_DIR = ROOT / "scripts" / "opencode"
 TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 
-# 🔴 THE PIN. Every "measured on v1.18.18" claim in opencode.jsonc's header, in
+# 🔴 THE PIN. Every "measured on v1.18.21" claim in opencode.jsonc's header, in
 # scripts/opencode/README.md and in test_opencode_config.py's docstrings is keyed
 # to this exact version. It is pinned declaratively by nix/pkgs/tools/default.nix
 # resolving `pkgs.opencode` out of flake.lock's nixpkgs.
 #
-# 🔴 RE-DERIVED AGAIN 1.18.16 -> 1.18.18 (2026-08-19), by the SAME method as the
+# 🔴 RE-DERIVED AGAIN 1.18.16 -> 1.18.21 (2026-08-19), by the SAME method as the
 # 2026-08-13 pass below, after `chore(flake): bump nixpkgs and home-manager`
 # moved the lock underneath the pin. What was measured:
 #
@@ -170,9 +170,9 @@ TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 # hook-behaviour claims (`permission.ask` never fires, `tool.execute.before` does)
 # in scripts/opencode/README.md and scripts/opencode/plugin/guard.js. Those need
 # a running hook to observe and were not re-measured here.
-PINNED_VERSION = "1.18.18"
+PINNED_VERSION = "1.18.21"
 
-# MEASURED via `opencode debug agent nav --pure` at 1.18.18. This is the cost AND
+# MEASURED via `opencode debug agent nav --pure` at 1.18.21. This is the cost AND
 # blast-radius pin that test_opencode_config.py's `test_nav_is_kept_lean` only
 # asserts about the CONFIG KEYS; here it is read off the engine's resolved tool
 # map. `skill` alone injects the ~3,730-token catalogue on every request.
@@ -922,7 +922,7 @@ HISTORICAL_VERSION_CLAIMS = (
     # rather than wrong. `ship.sh` converged both on 2026-08-15, and the lock's
     # move to the CURRENT pin had reached both before this PR — re-verified at the
     # CONSUMER on 2026-08-19 (both `readlink -f $(command -v opencode)` resolve to
-    # the same …-opencode-1.18.18 store path), so those lines now carry the pinned
+    # the same …-opencode-1.18.21 store path), so those lines now carry the pinned
     # version and need no exemption.
     #
     # The ledger caught its own obsolescence: the moment the lines were updated,
@@ -1101,7 +1101,7 @@ def test_engine_and_model_agree_on_every_pinned_command(engine_name, model_agent
 # --------------------------------------------------------------------------- #
 def test_engine_resolves_navs_tool_set_to_exactly_the_pinned_four():
     """test_opencode_config.py's `test_nav_is_kept_lean` docstring says "VERIFIED
-    against `opencode debug agent nav` on 1.18.18: the resolved tool set is
+    against `opencode debug agent nav` on 1.18.21: the resolved tool set is
     exactly {glob, grep, read} (+ the internal `invalid`)" — but that file
     asserts only the CONFIG KEYS, so the verification was a one-off nobody
     re-ran. This re-runs it every gate.

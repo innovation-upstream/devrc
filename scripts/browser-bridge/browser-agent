@@ -86,7 +86,7 @@ command -v "$OPENCODE_BIN" >/dev/null 2>&1 || die "opencode not found on PATH ('
 # quoted a passphrase planted at the END of the file, so it arrives in FULL.
 #
 # Cost here: 8,343 input tokens vs 631 with an isolated config dir = ~7.7k
-# EXTRA PER REQUEST (re-measured 2026-08-19 on 1.18.18: 8,329 — the file grew,
+# EXTRA PER REQUEST (re-measured 2026-08-19 on 1.18.21: 8,329 — the file grew,
 # the number did not really move). It is multiplied by the agent-loop step count
 # ($STEPS, default 12), i.e. up to ~100k tokens per browser-agent run. For an
 # agent whose every host tool is DENIED (no shell, no file access), 100% of that

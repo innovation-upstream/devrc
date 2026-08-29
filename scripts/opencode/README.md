@@ -168,7 +168,7 @@ matters.
 
 ### Size, and what it actually costs
 
-Re-measured **2026-08-19** on engine **1.18.18**, model
+Re-measured **2026-08-19** on engine **1.18.21**, model
 **`openrouter/xiaomi/mimo-v2.5`**. Instrument: opencode's own store,
 `~/.local/share/opencode/opencode-stable.db` (`session` / `message` tables carry
 `cost`, `tokens_input`, `tokens_cache_read`), read read-only.
@@ -269,7 +269,7 @@ existence guard**, and defined a `KC_PROD` that zsh did not have. Add a handle i
   (`*.env` → ask); a blanket allow is appended after it and silently defeats it
   on every agent. The default already allows every non-`.env` read, so the
   correct configuration is to say nothing.
-- **There is no `list` tool and no `websearch` tool** on 1.18.18. The resolved set
+- **There is no `list` tool and no `websearch` tool** on 1.18.21. The resolved set
   is exactly {bash, edit, glob, grep, invalid, question, read, skill, task,
   todowrite, webfetch, write}. Naming a nonexistent tool is a silent no-op that
   reads like configuration.
