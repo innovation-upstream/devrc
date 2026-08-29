@@ -99,6 +99,12 @@ ALLOWLIST = {
     # egress iface without sending a packet.
     ("nix/system/apply-dns-travel.sh", "1.1.1.1"): "public resolver written into a travel DNS config",
     ("nix/system/apply-travel-prep.sh", "1.1.1.1"): "public resolver written into a travel DNS config",
+    ("nix/system/apply-dnsmasq-docker-io-pin.sh", "1.1.1.1"):
+        "public resolver: the docker.io lookups are pinned to it to bypass a stale 487-day "
+        "record the LAN router serves. It IS the fix, not an example",
+    ("claudedocs/handoff-tmux-webapp.md", "1.1.1.1"):
+        "public resolver, quoted in the docker.io diagnosis as the control that returned a "
+        "correct 33s-TTL answer where the router returned a 487-day one",
     ("scripts/tests/test_airvpn_menu.py", "1.1.1.1"): "public resolver as a 'some public IP' fixture",
     ("nix/system/apply-dns-travel.sh", "8.8.8.8"): "public resolver written into a travel DNS config",
     ("nix/system/apply-travel-prep.sh", "8.8.8.8"): "public resolver written into a travel DNS config",
