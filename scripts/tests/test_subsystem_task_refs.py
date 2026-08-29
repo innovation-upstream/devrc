@@ -238,6 +238,36 @@ class TestTheRefGrammar:
         # …and a valid bare string still works, so the convenience is intact.
         assert format_task_refs([CLICKUP]) == f"tasks: [{CLICKUP}]"
 
+    @pytest.mark.parametrize(
+        "ident,why",
+        [
+            ("a,b", "a comma is the inline-list separator"),
+            ("a\nb", "a newline breaks the front-matter line in two"),
+        ],
+    )
+    def test_the_WRITER_refuses_a_HAND_BUILT_TaskRef_too(self, ident, why):
+        """🔴 THE MUTANT NOTHING ELSE KILLS. Restoring the
+        `isinstance(r, TaskRef)` short-circuit in `format_task_refs` SURVIVED all
+        76 tests, because every writer fixture passes a bare `str` — which the
+        short-circuited version validated anyway — and nothing anywhere
+        constructs a `TaskRef` directly.
+
+        `TaskRef` is an exported frozen dataclass with no `__post_init__`, so a
+        hand-built one is NOT a validated one: `TaskRef("clickup", "a,b", "x")`
+        constructs happily and, under the short-circuit, rendered
+        `tasks: [clickup:a,b]` — which the inline reader splits into
+        `clickup:a` and `b`, the second having no colon, making the whole entry
+        MALFORMED and invisible to every reader.
+
+        The failure that makes this worth a test: someone re-adds the
+        short-circuit as a performance tweak, the suite stays green, and the
+        writer can once again emit a file the reader rejects. That is exactly the
+        "a sentence claiming they are the same set" this module keeps catching —
+        one layer up, in the guard rather than the code.
+        """
+        with pytest.raises(TaskRefError):
+            format_task_refs([TaskRef(system="clickup", ident=ident, raw="x")])
+
 
 # --------------------------------------------------------------------------- #
 # Criterion 3 — the parser enumerates NO systems
@@ -606,26 +636,24 @@ class TestBothListForms:
         )
 
     def test_a_bare_key_with_NO_list_under_it_stays_a_STRING(self):
-        """The one deliberate divergence from PyYAML, pinned so it stays
-        deliberate: a bare `key:` is the empty STRING here, where YAML says
-        `None`. Every value in this schema is a string — the module docstring
-        gives the reason — and `sensitivity` consumers call string methods.
+        """A deliberate divergence from PyYAML, pinned so it stays deliberate: a
+        bare `key:` is the empty STRING here, where YAML says `None`. Every value
+        in this schema is a string — the module docstring gives the reason — and
+        `sensitivity` consumers call string methods.
 
-        ⚠ This is NOT the claim "a bare key can never become a list". If a list
-        follows, it binds, exactly as YAML says; the case above pins that.
-        """
-        fm = parse_front_matter("---\nservice: thing\nsensitivity:\ncreated_by: x\n---\n")
-        assert fm["sensitivity"] == ""
-        assert isinstance(fm["sensitivity"], str)
+        ⚠ "A deliberate divergence", NOT "the one". An earlier wording said the
+        latter and was wrong by at least four classes, all of them pre-existing
+        rather than introduced here — an empty block item (`['C','G']` vs
+        `['C', None, 'G']`), a trailing `# comment` on an item (kept, and it then
+        makes the ref malformed), a TAB-indented item (accepted; YAML raises),
+        and a `- ` line indented under a key that has a scalar value (dropped;
+        YAML folds it into a multi-line plain scalar). This parser reads a YAML
+        SUBSET and always has. Claiming exhaustiveness in a file whose whole
+        thesis is that such claims are the recurring defect was the wrong
+        sentence to write.
 
-    def test_a_BARE_key_with_no_items_still_reads_as_a_STRING(self):
-        """🔴 THE NARROWING THAT KEEPS THIS ADDITIVE.
-
-        A bare `sensitivity:` used to yield `""` and must keep doing so:
-        `fold_sensitivity` and friends call string methods on it, and handing
-        them a list would raise `AttributeError` from inside a reader, pointing
-        at a file the operator would have to guess at. The block list is
-        recognised by LOOKAHEAD precisely so no existing key changes type.
+        ⚠ Nor is this the claim "a bare key can never become a list". If a list
+        follows, it binds, exactly as YAML says; the differential above pins it.
         """
         fm = parse_front_matter("---\nservice: thing\nsensitivity:\ncreated_by: x\n---\n")
         assert fm["sensitivity"] == ""

@@ -2084,9 +2084,15 @@ def parse_front_matter(text: str) -> dict[str, object]:
         and is not done, because "swallow exactly the members" is the property
         that stays true if the surrounding loop changes.
 
-        ⚠ THE EXACT SWALLOW EXTENT IS CURRENTLY UNOBSERVABLE, measured and stated
-        rather than left for the next mutation sweep to rediscover: removing the
-        blank-line skip here is an EQUIVALENT mutant. It would stop the scan at a
+        ⚠ TWO EQUIVALENT MUTANTS LIVE IN THIS NEIGHBOURHOOD, both measured and
+        stated rather than left for the next sweep to rediscover. The second is
+        narrowing the OUTER loop's skip from `_is_block_item(line)` to
+        `line.strip().startswith("- ")`: a bare `-` has no colon, so
+        `partition(":")` skips it either way. (An earlier note here said "one
+        equivalent mutant remains", which was one short — the same
+        count-nobody-re-derives problem this file keeps correcting elsewhere.)
+
+        The first: removing the blank-line skip here is an EQUIVALENT mutant. It would stop the scan at a
         blank inside a list, leaving the items after it unswallowed — but the
         outer loop now SKIPS every `-`-led line, so those items produce no
         phantom key and nothing downstream can tell the difference. That is
@@ -2116,9 +2122,19 @@ def parse_front_matter(text: str) -> dict[str, object]:
         # implied by a well-behaved scan. Without it, ANY list item the scan does
         # not claim gets `partition(":")`-ed and its own internal colon makes it
         # a front-matter key nobody wrote (`- clickup: 868abc123`), while the
-        # real key reads empty. An orphan list with no owning key is not valid
-        # YAML, so there is nothing to preserve here: skipping is the whole
-        # correct behaviour.
+        # real key reads empty.
+        #
+        # ⚠ TWO SHAPES REACH HERE, and an earlier version of this comment named
+        # only the rarer one. (a) A genuine ORPHAN list — no owning key at all —
+        # which is not valid YAML (`yaml.safe_load` raises), so there is nothing
+        # to preserve and skipping is the whole correct behaviour. (b) FAR more
+        # commonly, a `- ` line under a key that already has a SCALAR value,
+        # where an owning key does exist: YAML folds that into a multi-line plain
+        # scalar, and this parser drops it. That is a pre-existing limit of
+        # reading YAML line by line, not something this skip introduces — the
+        # alternative here is not "fold it correctly", it is "invent a key" —
+        # but the justification has to cover the case it actually meets most
+        # often, or it reads as a proof it has not done.
         if _is_block_item(line):
             continue
         key, sep, value = line.partition(":")
