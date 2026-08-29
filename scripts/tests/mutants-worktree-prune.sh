@@ -657,6 +657,58 @@ run 'unknown-marker-gate-reverted-to-reasons' \
   test_the_marker_gate_is_path_exists_not_reasons \
   's|^                    if subs is None and r.get("path_exists") else "")$|                    if subs is None and r.get("submodule_reasons") else "")|'
 
+printf '\n== #975 — the SAME quoting bug in the arm that decides `dead` ==\n'
+# 🔴 The mechanism #935 fixed for `ls-files`, one function away and never
+# applied to `diff`. Under the DEFAULT `core.quotePath=true` the changed-path
+# listing returns `café.md` as the literal `"caf\303\251.md"`; `_paths_differ`
+# feeds it back as a PATHSPEC, it matches nothing, git exits 0 EMPTY, and
+# `content-identical` fires over unlanded work -> `dead` + `removable`.
+#
+# 🔴 FLAG AND PARSER MOVE TOGETHER, exactly as `quotepath-blinds-the-index-arm`
+# does. Dropping `-z` alone would leave the NUL split in place and the arm
+# would fail at SPLITTING rather than at QUOTING — dying for a reason this
+# mutant's name does not describe.
+run 'quotepath-blinds-the-changed-path-listing' \
+  test_unlanded_work_under_a_nonascii_name_is_not_called_dead \
+  's|^    r = _git_raw(repo, "diff", "--name-only", "-z", base, head)$|    r = _git(repo, "diff", "--name-only", base, head)|; s|^    changed = \[os.fsdecode(p) for p in r.stdout.split(b"\\\\0") if p.strip()\]$|    changed = [p for p in r.stdout.splitlines() if p.strip()]|'
+# 🔴 The REACH decoding, isolated. `-z` and bytes stay; only the decode moves to
+# the DISPLAY one. `_printable` puts U+FFFD where the real bytes were, so the
+# pathspec misses and the empty answer comes back — the same wrong `dead`, via
+# the other half of the two-decodings split.
+run 'display-decoding-used-to-build-the-pathspec' \
+  test_the_changed_path_listing_survives_an_undecodable_filename \
+  's|^    changed = \[os.fsdecode(p) for p in r.stdout.split(b"\\\\0") if p.strip()\]$|    changed = [_printable(p) for p in r.stdout.split(b"\\\\0") if p.strip()]|'
+# 🔴 The blast radius of the FIX, which is what #935 round 2 got wrong: `-z`
+# stops the quoting, but quoting was also silently guaranteeing the output was
+# ASCII. Strict utf-8 then raises INSIDE `subprocess.run` and takes the whole
+# scan down. `_git` here keeps `-z`, so this isolates the DECODING, not the flag.
+run 'strict-decode-of-the-changed-path-listing' \
+  test_the_changed_path_listing_survives_an_undecodable_filename \
+  's|^    r = _git_raw(repo, "diff", "--name-only", "-z", base, head)$|    r = _git(repo, "diff", "--name-only", "-z", base, head)|'
+# 🔴 The OTHER half — `_paths_differ`'s own call. `core.quotePath=false` is a
+# real host setting and puts raw bytes into a NON-`-z` diff too, so text mode
+# aborts the scan there as well. Flag and emptiness test move together for the
+# same flag-and-parser reason as above.
+run 'quotepath-false-aborts-the-comparison' \
+  test_paths_differ_survives_quotepath_false \
+  's|^        r = _git_raw(repo, "diff", "--name-only", "-z", rev_a, rev_b, "--", \*b)$|        r = _git(repo, "diff", "--name-only", rev_a, rev_b, "--", *b)|; s|^        if any(p.strip() for p in r.stdout.split(b"\\\\0")):$|        if r.stdout.strip():|'
+# 🔴 `bytes.strip()` removes ASCII whitespace but NOT NUL, so `b"\0".strip()` is
+# `b"\x00"` — TRUTHY. Reading `-z` output that way makes every comparison answer
+# "differs", `content-identical` never fires again, and every squash-merged
+# branch silently degrades to `orphan`. The emptiness test alone, isolated from
+# the flag.
+run 'nul-not-stripped-so-every-comparison-differs' \
+  test_an_empty_z_record_is_not_read_as_a_difference \
+  's|^        if any(p.strip() for p in r.stdout.split(b"\\\\0")):$|        if r.stdout.strip() or r.stdout:|'
+# 🔴 The batch sizer. `len(p)` on a str undercounts a non-ASCII path by up to 4x
+# while the budget is named in BYTES, so a batch can overrun the argv cap the
+# constant exists to stay under — and a truncated argv reads as "no differing
+# paths", i.e. the same confident, wrong `dead`. Only the SIZER moves; the
+# accumulator keeps its own expression so the mutant cannot die to a mismatch.
+run 'pathspec-batch-sized-in-characters-not-bytes' \
+  test_the_pathspec_batch_sizer_measures_bytes_not_characters \
+  's|^        n = len(os.fsencode(p))$|        n = len(p)|'
+
 printf '\n== POSITIVE CONTROLS — mutants whose fate is KNOWN ==\n'
 # 🔴 A comment-only edit MUST survive. If it kills something, the harness is
 # keying on the file's text and every `ok` above is worthless.

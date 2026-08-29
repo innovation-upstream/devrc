@@ -690,6 +690,266 @@ def test_pathspec_batching_survives_more_paths_than_one_argv_can_hold(tmp_path, 
     assert wp._paths_differ(repo, "feat/many", "feat/many", changed) is False
 
 
+# ── issue #975: the changed-path set is BYTES, and the round-trip is the verdict
+#
+# 🔴 THE DEFECT, and why it is the worst one this tool can have. Under the
+# DEFAULT `core.quotePath=true`, `git diff --name-only` RENDERS a non-ASCII path
+# as a quoted C-escaped literal: `café.md` arrives as the 15-character string
+# `"caf\303\251.md"`. `landing_signals` read that with `text=True` and handed it
+# to `_paths_differ`, which fed it straight back to git as a PATHSPEC. It matched
+# nothing, so git exited 0 with EMPTY output — the same observable as "this path
+# really is identical upstream". `content-identical` fired, the verdict was
+# `dead`, and `removable` was True, on a branch holding UNLANDED work. The tool
+# deletes directories; this is the one verdict it exists not to get wrong.
+#
+# The identical mechanism was already documented and fixed ONE FUNCTION AWAY —
+# `worktree_submodules`' `ls-files -s -z` index arm, issue #935. One rule, two
+# places, wrong at one of them.
+#
+# 🔴 THE TRIGGER IS NARROW, WHICH IS WHY NOTHING CAUGHT IT: every path in the
+# changed set that ACTUALLY differs upstream must be non-ASCII. One differing
+# ASCII path in the same set answers the question correctly and saves the row.
+# `nonascii_universe` therefore builds a branch whose ONLY changed path is
+# non-ASCII, and `test_an_ascii_only_branch_is_still_classified_correctly` is the
+# control that a fix which merely stops firing `content-identical` everywhere —
+# turning every row into `orphan`/`cannot-tell` and destroying the tool — does
+# not pass.
+
+NONASCII_NAME = "café.md"
+
+
+@pytest.fixture()
+def nonascii_universe(tmp_path: Path):
+    """Two branches, identical in every way except the NAME of the file they add.
+
+    Each adds exactly ONE path that main never gets, so both are genuinely
+    unlanded and both must be `orphan`. The only difference between them is
+    whether that path's name survives `core.quotePath`.
+    """
+    repo = new_repo(tmp_path)
+    commit_on_branch(repo, "feat/nonascii", NONASCII_NAME, "unlanded work\n",
+                     "unlanded work under a non-ASCII name")
+    commit_on_branch(repo, "feat/ascii", "plain.md", "unlanded work\n",
+                     "unlanded work under an ASCII name")
+    # Main moves on over an UNRELATED path, so neither branch is an ancestor and
+    # neither has a patch-equivalent upstream.
+    write(repo / "elsewhere.txt", "main moved on\n")
+    git(repo, "add", "elsewhere.txt")
+    git(repo, "commit", "-qm", "main moves on")
+    publish(repo)
+    wts = tmp_path / "wts"
+    wts.mkdir()
+    paths = {
+        "nonascii": add_worktree(repo, wts / "nonascii", "feat/nonascii"),
+        "ascii": add_worktree(repo, wts / "ascii", "feat/ascii"),
+    }
+    return repo, paths, gh_stub(tmp_path, [], name="gh-975")
+
+
+def test_the_nonascii_fixture_really_does_hit_the_quoting_path(nonascii_universe):
+    """If git did not quote, the regression test below would be vacuous — it
+    would be asserting a correct verdict that was never in danger.
+
+    Also pins that the quoted literal is NOT a usable pathspec, which is the
+    actual mechanism, and that the RAW name IS.
+    """
+    repo, _, _ = nonascii_universe
+    # The tool lists `merge-base..head`, not `default..head` — main has moved on
+    # over an unrelated path, and diffing against its tip would drag that path
+    # into the set and make the "every differing path is non-ASCII" trigger
+    # untrue of the thing actually under test.
+    base = git(repo, "merge-base", "feat/nonascii", "refs/remotes/origin/main")
+    quoted = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--name-only", base, "feat/nonascii"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    assert quoted == r'"caf\303\251.md"', (
+        f"git did not quote the path, or the changed set is not the single "
+        f"non-ASCII path this fixture needs ({quoted!r}) — either this host's "
+        "core.quotePath is not the default, or one differing ASCII path is in "
+        "the set and would save the row on its own")
+
+    dead_end = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--name-only", "feat/nonascii", "main",
+         "--", quoted], capture_output=True, text=True, check=False)
+    assert dead_end.returncode == 0 and dead_end.stdout.strip() == "", (
+        "the quoted literal was supposed to match nothing and exit 0 — that "
+        "silent empty answer IS the bug")
+
+    real = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--name-only", "feat/nonascii", "main",
+         "--", NONASCII_NAME], capture_output=True, text=True, check=False)
+    assert real.returncode == 0 and real.stdout.strip() != "", (
+        "the RAW name must match — otherwise 'differs' is unreachable for any "
+        "spelling and the assertion above proves nothing")
+
+
+def test_unlanded_work_under_a_nonascii_name_is_not_called_dead(nonascii_universe):
+    """🔴 THE REGRESSION TEST FOR #975, end to end through the tool.
+
+    Watched RED against `origin/main`'s `worktree-prune` (an isolated copy, not
+    the live file): `verdict='dead'`, `removable=True`. The branch has never
+    landed.
+    """
+    repo, paths, gh = nonascii_universe
+    r = row_for(repo, paths["nonascii"], gh_cmd=gh)
+    assert "content-identical" not in r["landed_signals"], (
+        f"content-identical fired on a branch that never landed: {r['evidence']}")
+    assert r["verdict"] == "orphan", r["verdict_reason"]
+    assert r["removable"] is False, r["verdict_reason"]
+
+
+def test_an_ascii_only_branch_is_still_classified_correctly(nonascii_universe):
+    """🔴 THE CONTROL THE FIX MUST ALSO PASS. A change that simply stopped
+    `content-identical` from ever firing would pass the test above and destroy
+    the tool. This asserts the SAME shape of fixture, differing only in the
+    filename's alphabet, reaches the SAME verdict — so the test above is pinning
+    the encoding, not a blanket refusal to classify."""
+    repo, paths, gh = nonascii_universe
+    r = row_for(repo, paths["ascii"], gh_cmd=gh)
+    assert "content-identical" not in r["landed_signals"], r["evidence"]
+    assert r["verdict"] == "orphan", r["verdict_reason"]
+    assert r["removable"] is False
+
+
+def test_content_identical_still_fires_for_a_landed_nonascii_path(tmp_path):
+    """🔴 THE POSITIVE CONTROL FOR THE SIGNAL ITSELF, under a non-ASCII name.
+
+    The two tests above only prove the signal stays QUIET when it should. If the
+    fix had broken the pathspec round-trip in the other direction — every path
+    reported as differing — they would both still pass while `content-identical`
+    became permanently unreachable for non-ASCII paths, i.e. every squash-merged
+    branch with an accented filename silently downgraded to `orphan`. This
+    squash-merges a non-ASCII path and requires `dead`.
+    """
+    repo = new_repo(tmp_path)
+    git(repo, "checkout", "-q", "-b", "feat/squashed-nonascii")
+    write(repo / NONASCII_NAME, "first\n")
+    git(repo, "add", NONASCII_NAME)
+    git(repo, "commit", "-qm", "part 1")
+    write(repo / NONASCII_NAME, "first\nsecond\n")
+    git(repo, "add", NONASCII_NAME)
+    git(repo, "commit", "-qm", "part 2")
+    git(repo, "checkout", "-q", "main")
+    squash_merge(repo, "feat/squashed-nonascii", NONASCII_NAME, "squash (#975)")
+    wt = add_worktree(repo, tmp_path / "wt", "feat/squashed-nonascii")
+
+    r = row_for(repo, wt, gh_cmd=gh_stub(tmp_path, [], name="gh-sq975"))
+    assert r["landed_signals"] == ["content-identical"], r["evidence"]
+    assert r["verdict"] == "dead"
+    assert r["removable"] is True
+
+
+def test_the_changed_path_listing_survives_an_undecodable_filename(tmp_path):
+    """The blast radius of the FIX, not of the bug — #935's round-2 lesson.
+
+    Quoting was incidentally guaranteeing git's output was ASCII. `-z` removes
+    the quoting, so a strict utf-8 decode would then raise `UnicodeDecodeError`
+    INSIDE `subprocess.run`, with no `try:` between it and `sys.exit(main())` —
+    turning a wrong answer into a whole-scan crash. Both halves therefore read
+    BYTES. MEASURED: `text=True` on this fixture raises; bytes returns
+    `b"caf\\xe9.txt\\x00"`.
+    """
+    undecodable = os.fsdecode(b"caf\xe9.txt")
+    repo = new_repo(tmp_path)
+    git(repo, "checkout", "-q", "-b", "feat/undecodable")
+    write(repo / undecodable, "unlanded\n")
+    git(repo, "add", "--", undecodable)
+    git(repo, "commit", "-qm", "undecodable name")
+    git(repo, "checkout", "-q", "main")
+    write(repo / "elsewhere.txt", "main moved on\n")
+    git(repo, "add", "elsewhere.txt")
+    git(repo, "commit", "-qm", "main moves on")
+    publish(repo)
+    wt = add_worktree(repo, tmp_path / "wt", "feat/undecodable")
+
+    # The control: the OLD text-mode read of this exact listing raises. If it
+    # does not, this fixture is not exercising the crash class.
+    with pytest.raises(UnicodeDecodeError):
+        subprocess.run(["git", "-C", str(repo), "diff", "--name-only", "-z",
+                        "main", "feat/undecodable"],
+                       capture_output=True, text=True, check=False)
+
+    r = row_for(repo, wt, use_gh=False)
+    assert "content-identical" not in r["landed_signals"], r["evidence"]
+    assert r["verdict"] == "cannot-tell", r["verdict_reason"]
+
+
+def test_paths_differ_survives_quotepath_false(tmp_path):
+    """🔴 `core.quotePath=false` is a real host setting, and it puts the RAW
+    bytes into the output of the plain (non-`-z`) diff too. With `text=True` that
+    raised inside `subprocess.run` and took the whole scan down. Both calls now
+    read bytes, so the answer must simply be correct."""
+    undecodable = os.fsdecode(b"caf\xe9.txt")
+    repo = new_repo(tmp_path)
+    git(repo, "config", "core.quotePath", "false")
+    git(repo, "checkout", "-q", "-b", "feat/qpfalse")
+    write(repo / undecodable, "unlanded\n")
+    git(repo, "add", "--", undecodable)
+    git(repo, "commit", "-qm", "work")
+    git(repo, "checkout", "-q", "main")
+
+    # Control: under this config the OLD text-mode listing raises outright.
+    with pytest.raises(UnicodeDecodeError):
+        subprocess.run(["git", "-C", str(repo), "diff", "--name-only",
+                        "main", "feat/qpfalse"],
+                       capture_output=True, text=True, check=False)
+
+    assert wp._paths_differ(repo, "feat/qpfalse", "main", [undecodable]) is True
+    assert wp._paths_differ(repo, "feat/qpfalse", "feat/qpfalse", [undecodable]) is False
+
+
+def test_an_empty_z_record_is_not_read_as_a_difference(tmp_path):
+    """🔴 `bytes.strip()` removes ASCII whitespace but NOT NUL. `r.stdout.strip()`
+    on `-z` output of a single empty record (`b"\\0"`) yields `b"\\x00"`, which is
+    TRUTHY — so the emptiness test has to split on the separator first. Get this
+    wrong and every comparison answers "differs", `content-identical` never fires
+    again, and every squash-merged branch quietly degrades to `orphan`."""
+    repo = new_repo(tmp_path)
+    write(repo / "same.txt", "identical on both sides\n")
+    git(repo, "add", "same.txt")
+    git(repo, "commit", "-qm", "add same.txt")
+    publish(repo)
+    git(repo, "branch", "feat/nodiff")
+    assert wp._paths_differ(repo, "feat/nodiff", "main", ["same.txt"]) is False
+
+
+def test_the_pathspec_batch_sizer_measures_bytes_not_characters(tmp_path, monkeypatch):
+    """`PATHSPEC_BATCH_BYTES` is named in BYTES because argv is measured in bytes.
+    `len(p)` on a str undercounts a non-ASCII path — up to 4x for an astral code
+    point — so a str-sized batch can exceed the very cap the constant exists to
+    keep it under, and a truncated argv shows up as 'no differing paths', i.e. a
+    confident, wrong `dead`.
+
+    This captures the argv git is actually handed and asserts its ENCODED size
+    respects the budget. Under `len(p)` sizing the batch is one item too big.
+    """
+    repo = new_repo(tmp_path)
+    # 4 bytes per code point, 1 char per code point: the maximum undercount.
+    stem = "\U0001F600" * 8
+    names = [stem + "-" + str(i) + ".txt" for i in range(12)]
+    for n in names:
+        assert len(n) < len(os.fsencode(n))
+
+    seen: "list[list[str]]" = []
+
+    def fake_git_raw(cwd, *args, **kw):
+        seen.append([a for a in args[args.index("--") + 1:]])
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(wp, "_git_raw", fake_git_raw)
+    # 100 bytes: each name is 8*4+len("-NN.txt") ≈ 39-40 bytes, so a
+    # byte-correct sizer fits 2 per batch and a char-based one fits 3.
+    monkeypatch.setattr(wp, "PATHSPEC_BATCH_BYTES", 100)
+    wp._paths_differ(repo, "main", "main", names)
+
+    assert seen, "the batcher never called git — this test measured nothing"
+    for batch in seen:
+        encoded = sum(len(os.fsencode(p)) + 1 for p in batch)
+        assert encoded <= 100, (
+            f"a batch of {len(batch)} path(s) encoded to {encoded} bytes, over "
+            f"the {100}-byte budget — the sizer is counting characters")
+
+
 # ── porcelain parsing ─────────────────────────────────────────────────────────
 
 PORCELAIN = """worktree /home/z/repo
