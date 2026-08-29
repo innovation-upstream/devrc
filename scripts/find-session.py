@@ -86,7 +86,51 @@ LIVE_TIMEOUT_SECS = 90
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_AMBIGUOUS = 3      # --tail could not resolve to exactly one window
-EXIT_UNAVAILABLE = 4    # the live fleet was not measured — same code as the sibling
+EXIT_UNAVAILABLE = 4    # --tail only: something the tail needed was not measured
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE EXIT CONTRACT, AS DATA — because the shipped doc got it wrong TWICE
+# --------------------------------------------------------------------------- #
+# `claude/skills/find-session/SKILL.md` is what an agent reads before branching
+# on an exit code, and it shipped two false claims at once:
+#
+#   * "3 = --tail could not resolve to one window on a FULLY MEASURED fleet".
+#     False. Two live matches with a host DOWN also exits 3, while the run
+#     itself prints "this candidate list is INCOMPLETE". A wrapper reading
+#     `rc == 3 => here are all the candidates` reports a complete list under
+#     this fleet's documented common degraded state — the "real but wrong
+#     window" failure this whole change exists to prevent, relocated to the
+#     caller.
+#   * "4 = the live scan failed or no host answered", with no `--tail`
+#     qualifier. False. EVERY source of this code is inside the tail path;
+#     without `--tail` a failed scan exits 0, because the LIVE section says so
+#     in prose and the archive still ran.
+#
+# So the table is DATA here, one sentence per code, and a test pins the shipped
+# doc against it AND pins each sentence against the behaviour it describes.
+# Correcting the prose alone would have left the next drift undetected — which
+# is what happened between the last two rounds.
+#
+# 🔴 THE SENTENCES SAY WHAT THE CODE MEANS, NOT WHAT THE CALLER SHOULD WANT.
+# `3` and `4` are BOTH `--tail`-only, and neither carries any claim about fleet
+# coverage: read `tail.coverage_complete` for that.
+EXIT_CONTRACT = (
+    (EXIT_OK, "the run completed. NOT a claim that anything matched — an empty "
+              "LIVE section and an empty ARCHIVE section both exit 0."),
+    (EXIT_USAGE, "bad arguments: `--tail` without `--live`, `--limit` below 1, "
+                 "or an unparseable `--since`."),
+    (EXIT_AMBIGUOUS, "`--tail` ONLY: it could not resolve to exactly one live "
+                     "window — several matched, or none did on a fleet where "
+                     "every host answered. It carries NO claim about coverage; "
+                     "the candidate list may be incomplete, and "
+                     "`tail.coverage_complete` is the field that says so."),
+    (EXIT_UNAVAILABLE, "`--tail` ONLY: something the tail needed was NOT "
+                       "measured — the live scan failed or no host answered, "
+                       "or `session-manager tail` itself failed (rc 2/4/5), or "
+                       "nothing matched while a host was unreachable. Without "
+                       "`--tail` a failed scan still exits 0 and says so in the "
+                       "LIVE section."),
+)
 
 
 def _default_run(argv, timeout=LIVE_TIMEOUT_SECS):
@@ -223,6 +267,25 @@ def live_coverage_complete(res):
     return res.get("status") == "ok" and not res.get("hosts_unreachable")
 
 
+def live_coverage_state(res):
+    """`True` / `False` / **`None`** — the PUBLISHABLE form of coverage.
+
+    🔴 `live_coverage_complete` is a two-valued PREDICATE and is right for
+    branching: on a scan that never ran, "was coverage complete?" is correctly
+    False, because it certainly was not. But PUBLISHING that False says
+    *measured, and incomplete* about a scan that produced no measurement at all
+    — the exact shape removed from `hosts_unreachable` one field over, in the
+    same commit that introduced this one.
+
+    `None` for `status == "error"` only. `unavailable` is NOT unmeasured here:
+    that scan RAN and every host was genuinely unreachable, so `False` is a real
+    answer.
+    """
+    if res.get("status") == "error":
+        return None
+    return live_coverage_complete(res)
+
+
 def live_state_of(session_id, live_ids, coverage_complete=True):
     """`LIVE` / `CLOSED` / `UNMEASURED` for one archive hit.
 
@@ -300,7 +363,13 @@ def archive_only_notice(args):
     line = ("(ARCHIVE-ONLY flags, ignored by the live scan: "
             + "; ".join(f"{spelling} ({why})" for _, spelling, why in named)
             + " — the LIVE section below is NOT filtered by them)")
-    if any(dest in CORPUS_SELECTOR_DESTS for dest, _, _ in named):
+    # 🔴 ...AND NOT WHEN `--deep` ALREADY FORCES THE ARCHIVE. The sentence exists
+    # to say "the corpus you chose may go unsearched — pass --deep"; with
+    # `--deep` already passed the archive DOES run, so it is advice to do the
+    # thing the caller has done. That is the same "noise that trains the reader
+    # to skip the line" this file refused to append to `--since`.
+    if (any(dest in CORPUS_SELECTOR_DESTS for dest, _, _ in named)
+            and not getattr(args, "deep", False)):
         # 🔴 The consequence, not just the fact. A corpus selector says WHICH
         # ARCHIVE to search, and the archive does not run at all when the live
         # leg matches — so the corpus the caller explicitly chose can go
@@ -441,7 +510,18 @@ def render_live(res, limit=None):
     return out
 
 
-def parse_args(argv=None):
+def build_parser():
+    """The parser, EXPOSED — so the archive-only partition can be checked
+    against the parser's own ACTIONS rather than against a parsed namespace.
+
+    🔴 A namespace is not the flag set. `set(vars(parse_args([...])))` misses any
+    flag declared `default=argparse.SUPPRESS`, which is absent from the namespace
+    entirely — so such a flag was in neither half of the partition and the
+    equality still held. Measured: a `--newest-first` with `SUPPRESS`, classified
+    nowhere, left the whole suite green while the gate's own comment claimed
+    "adding a flag without deciding which fails the suite". Reading `_actions`
+    sees every declared flag whatever its default.
+    """
     p = argparse.ArgumentParser(add_help=True, description="Find past Claude Code and opencode sessions by keyword.")
     p.add_argument("terms", nargs="+", help="search terms (ANDed unless --any)")
     p.add_argument("--project", default="", help="only sessions whose cwd/project contains this substring")
@@ -466,7 +546,19 @@ def parse_args(argv=None):
                    help="with --live: print the last N scrollback lines of the "
                         "matched window. REFUSES on an ambiguous match rather "
                         "than guessing (exit 3), and lists the candidates.")
-    return p.parse_args(argv)
+    return p
+
+
+def parser_dests():
+    """Every destination the parser DECLARES, `help` excluded.
+
+    Read off `_actions`, not off a parsed namespace — see `build_parser`.
+    """
+    return {a.dest for a in build_parser()._actions if a.dest != "help"}
+
+
+def parse_args(argv=None):
+    return build_parser().parse_args(argv)
 
 
 def render(r):
@@ -792,7 +884,12 @@ def main(argv=None):
                 # the only match ON THE HOSTS THAT ANSWERED. Neither fact is
                 # readable from `archive.*`, which describes a different scan
                 # (the unfiltered one) and is absent entirely on the fast path.
-                "coverage_complete": live_coverage_complete(live),
+                # 🔴 `live_coverage_state`, NOT `live_coverage_complete`: the
+                # predicate is two-valued and publishing its `False` for a scan
+                # that never ran claims *measured, and incomplete*. `SKILL.md`
+                # points a branching caller at THIS field, so it is the one
+                # field that must be able to say "unmeasured".
+                "coverage_complete": live_coverage_state(live),
                 "hosts_unreachable": live["hosts_unreachable"],
                 "message": "\n".join(tail_lines) or None,
                 # 🔴 `rc` and `ok` TRAVEL WITH THE TEXT. An empty `text` beside

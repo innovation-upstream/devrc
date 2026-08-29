@@ -49,8 +49,11 @@ python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tai
   ARCHIVE block prints `live/closed state is PARTIAL`, and the JSON carries
   `archive.live_coverage_complete: false` beside `live_ids_measured: true`. Do not report
   an `<UNMEASURED>` hit as finished.
-- 🔴 **SIX flags reach the ARCHIVE leg ONLY** — `--any`, `--project`, `--since`,
-  `--claude-only`, `--opencode-only`, `--all` — and the tool names them on stderr. Surface
+- 🔴 **These flags reach the ARCHIVE leg ONLY** — `--any`, `--project`, `--since`,
+  `--claude-only`, `--opencode-only`, `--all` — and the tool names them on stderr. (That
+  list is `ARCHIVE_ONLY_FLAGS` in the script and is pinned against this line by
+  `test_find_session_skill_contract.py`; it carries no count, because a count is a claim
+  nothing enforces.) Surface
   that notice: an empty LIVE section under `--any` is a measured absence under semantics
   the user did not ask for. 🔴 **A CORPUS selector is worse than "not filtered":**
   `--opencode-only --live` shows tmux windows of any runtime, and if the live leg matches
@@ -63,13 +66,17 @@ python3 /home/zach/workspace/devrc/scripts/find-session.py <terms> --live [--tai
   (window closed between the scan and the tail, host gone, no tmux server) prints
   `TAIL: FAILED — … exited N` and exits 4, with `tail.rc` / `tail.ok` in the JSON. Only
   rc 0 and rc 3 are measured; rc 3 renders as an explicitly MEASURED empty pane.
-- Exit codes: `0` found · `2` usage (`--tail` without `--live`, `--limit` below 1) ·
-  `3` `--tail` could not resolve to one window on a FULLY measured fleet ·
-  🔴 **`4` = SOMETHING WAS NOT MEASURED, and it now covers three cases** — the live scan
-  failed or no host answered; the tail resolved but `session-manager tail` failed
-  (rc 2/4/5); or `--tail` found zero matches while a host was unreachable, so the absence
-  is not measured. Branch on `tail.ok` / `tail.rc` / `tail.coverage_complete` in `--json`
-  rather than on `4` alone. `--live` composes with `--json`, which then emits
+- **Exit codes.** 🔴 These sentences are `EXIT_CONTRACT` in `scripts/find-session.py`,
+  copied verbatim and pinned by `scripts/tests/test_find_session_skill_contract.py` — which
+  also pins each one against the behaviour it describes. Do not reword them here alone; an
+  earlier hand-written version of this table shipped two claims the code contradicted.
+- `0` — the run completed. NOT a claim that anything matched — an empty LIVE section and an empty ARCHIVE section both exit 0.
+- `2` — bad arguments: `--tail` without `--live`, `--limit` below 1, or an unparseable `--since`.
+- `3` — `--tail` ONLY: it could not resolve to exactly one live window — several matched, or none did on a fleet where every host answered. It carries NO claim about coverage; the candidate list may be incomplete, and `tail.coverage_complete` is the field that says so.
+- `4` — `--tail` ONLY: something the tail needed was NOT measured — the live scan failed or no host answered, or `session-manager tail` itself failed (rc 2/4/5), or nothing matched while a host was unreachable. Without `--tail` a failed scan still exits 0 and says so in the LIVE section.
+- Branch on `tail.ok` / `tail.rc` / `tail.coverage_complete` in `--json` rather than on the
+  code alone — `tail.coverage_complete` is `null` when the scan never ran, `false` when it
+  ran and a host was missing. `--live` composes with `--json`, which then emits
   `{live, archive, tail}` instead of the bare array.
 - 🔴 **NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED FILE.** `--live --json` passes
   the live rows through verbatim, and one of them is `unsent_prompt` — text the operator

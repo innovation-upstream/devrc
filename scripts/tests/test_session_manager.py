@@ -10963,25 +10963,22 @@ def test_detail_json_is_the_FULL_REPORT_SHAPE_not_a_bare_window(monkeypatch,
 #         was read by nothing.
 #   R1-7  The span guard was spelled to a zero-separator join (fixed above).
 #
-# 🔴 WHICH OF THESE IS REGRESSION COVERAGE. MEASURED at NODE level (params
-# counted individually), by collecting both files at both shas and running the
-# head tests against base source: **66 new nodes across the two files, 46 RED
-# and 20 GREEN at a6f09d5a.**
+# 🔴 WHICH OF THESE IS REGRESSION COVERAGE. The GREEN-at-base ones are named in
+# `R1_INVARIANT_GUARDS` below; a test asserts every name resolves, and the
+# parametrised entries are DERIVED from the same tuple the `parametrize` reads
+# (`SPAN_SEPARATORS`) so adding a separator extends the ledger automatically.
 #
-# ⚠ AN EARLIER REVISION OF THIS PARAGRAPH SAID "56 nodes … 10 GREEN", AND ITS
-# COMPLETENESS SENTENCE WAS FALSE. The red count was exact; the node and green
-# counts were taken from a FUNCTION-level sweep that skipped `parametrize`
-# expansion and skipped functions whose NAME already existed at base. The 10
-# it missed were the 8 `test_a_term_may_not_SPAN_two_fields[…]` params (green at
-# base — disclosed in prose, absent from the machine ledger) and the 2
-# `test_the_R1_invariant_guard_ledger_names_only_tests_that_exist` nodes. A
-# ledger whose sentence claims to name every green while naming 10 of 20 is the
-# "description wider than the implementation" shape both of round 1's blockers
-# had.
+# ⚠ NO NODE COUNTS, DELIBERATELY. This paragraph carried "56 nodes … 10 GREEN",
+# then "66 … 20 GREEN"; the §15 section carried "29 … 13 GREEN". All three were
+# measured wrong — the first by a function-level sweep that skipped
+# `parametrize` expansion and same-named-but-modified tests, the last because a
+# fix later in the SAME commit added five nodes after the number was typed.
 #
-# So the parametrised entries are now DERIVED from the same tuple the
-# `parametrize` reads (`SPAN_SEPARATORS`), not retyped: adding a separator
-# extends the ledger automatically and cannot drift from the test it counts.
+# A count the next commit invalidates is a claim nothing enforces — the class
+# three consecutive audit rounds kept finding. It cannot be derived at test time
+# (it needs the head tests run against an OLD sha), so it is DELETED rather than
+# corrected: understated coverage that reads as precise is worse than no number.
+# The per-round matrices live in the PR body with their sha and method.
 #
 # ⚠ ONE FINDING IN ROUND 1 WAS A GUARD GAP, NOT A CODE DEFECT. The span guard
 # passes at a6f09d5a in both its old and new forms, because `row_matches` was
@@ -11371,13 +11368,15 @@ def test_the_active_row_filter_list_is_ONE_definition():
 #          blockers. The docstring now says what it can and cannot see, and the
 #          assertion is widened to the property across three unreachable modes
 #          and EVERY host rather than one named one.
-#   R2-F4  The node ledger said 56 nodes / 10 green; the measurement is 66 / 20.
-#          The parametrised entries are DERIVED from `SPAN_SEPARATORS` now.
+#   R2-F4  The node ledger's counts were wrong. They are DELETED now rather than
+#          corrected (a third correction would have been the third wrong
+#          number); the parametrised ledger entries are DERIVED from
+#          `SPAN_SEPARATORS`.
 # =========================================================================== #
 
-# 🔴 MEASURED AT NODE LEVEL against 9f9dcbde — 29 NEW nodes across the two
-# files, 16 RED and 13 GREEN. EIGHT of the green are from THIS file. They are
-# all controls or prose/ledger guards; none is evidence a bug was fixed.
+# 🔴 The GREEN-at-9f9dcbde ones from THIS file are named below. They are all
+# controls or prose/ledger guards; none is evidence a bug was fixed. No counts —
+# see the note above `R1_INVARIANT_GUARDS`.
 #
 # ⚠ `test_the_unreachable_host_precondition_docstring_does_not_OVERCLAIM` is
 # green at EVERY sha BY CONSTRUCTION: the artifact it inspects is a docstring in

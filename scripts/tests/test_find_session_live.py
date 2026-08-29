@@ -46,6 +46,7 @@ real media path or third-party hostname may appear here.
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import importlib.machinery
 import importlib.util
@@ -746,17 +747,22 @@ def test_fmt_age_states_a_MISSING_age_rather_than_rendering_zero():
 #   R1-8  `live_scan` raised AttributeError on valid-but-non-object JSON,
 #         outside the try, from a function whose contract is to discriminate.
 #
-# 🔴 WHICH OF THESE IS REGRESSION COVERAGE. MEASURED at NODE level: this file
-# and its sibling were collected at both shas and the head tests run against
-# base source — **66 new nodes across the two, 46 RED and 20 GREEN at a6f09d5a**.
-# SEVEN of the green are from THIS file and are named below.
+# 🔴 WHICH OF THESE IS REGRESSION COVERAGE. The GREEN-at-base ones are named in
+# `R1_INVARIANT_GUARDS` below, and a test asserts every name resolves.
 #
-# ⚠ An earlier revision said "56 nodes … 10 GREEN" and "the SIX green ones from
-# THIS file". The red count was exact; the rest came from a FUNCTION-level sweep
-# that did not expand `parametrize` and skipped functions whose name already
-# existed at base. This file's own miscount was `test_the_R1_invariant_guard_
-# ledger_names_only_tests_that_exist` — the ledger's gate was itself missing
-# from the ledger.
+# ⚠ NO NODE COUNTS HERE, DELIBERATELY, AND THE REASON IS THE HISTORY. This
+# comment carried "56 nodes … 10 GREEN", then "66 … 20 GREEN"; the sibling
+# section carried "29 … 13 GREEN". EVERY ONE was measured wrong — the first by a
+# function-level sweep that skipped `parametrize` expansion, the last because a
+# later fix in the SAME commit added five nodes after the number was typed.
+#
+# A count that the next commit invalidates is a claim nothing enforces, which is
+# the class three consecutive audit rounds kept finding. It cannot be derived at
+# test time (it needs the head tests run against an OLD sha), so it is DELETED
+# rather than corrected: understated coverage that reads as precise is worse
+# than no number. The per-round matrices live in the PR body, each with the sha
+# and the method that produced it. What stays here is the LEDGER, because a name
+# either resolves or it does not.
 # =========================================================================== #
 R1_INVARIANT_GUARDS = frozenset({
     # The strict default of `live_state_of` IS the old behaviour — that is the
@@ -1116,15 +1122,10 @@ def test_a_REAL_report_object_still_parses():
 #   F8  🟢 `--limit 0` was unbounded on the live leg and empty on the archive
 #       leg — one flag, opposite meanings in one run. Now a usage error.
 #
-# 🔴 MEASURED AT NODE LEVEL against 9f9dcbde — 29 NEW nodes across the two
-# files, 16 RED and 13 GREEN, plus 5 MODIFIED nodes that also went red (the four
-# `test_valid_but_NON_OBJECT_json…` params, whose assertion tightened from `[]`
-# to `None` for F3, and `…ARCHIVE_ONLY_flag…[any]`, whose needle moved). FIVE of
-# the 13 green are from THIS file and are named below.
-#
-# The method is deliberately node-level: round 1's ledger was wrong precisely
-# because it counted FUNCTIONS whose names were new, which skipped `parametrize`
-# expansion and skipped modified-but-same-named tests.
+# 🔴 The GREEN-at-9f9dcbde ones are named in `R2_INVARIANT_GUARDS` below. NO
+# NODE COUNTS — see the note above §2's ledger: this section's count was typed
+# before a later fix in the same commit added five nodes, and was wrong on
+# arrival. The matrix lives in the PR body with its sha and method.
 # =========================================================================== #
 R2_INVARIANT_GUARDS = frozenset({
     # NEGATIVE control on F1's extra sentence — a non-corpus archive-only flag
@@ -1161,11 +1162,14 @@ def test_the_archive_only_ledger_PARTITIONS_every_argparse_destination():
     now: every parser destination is either live-aware or archive-only, and a
     NEW flag that is neither fails here rather than shipping a silent one-leg
     filter under a comment claiming the class is closed.
+
+    🔴 READ OFF `_actions`, NOT OFF A PARSED NAMESPACE (R2 finding 🟢-3). A flag
+    declared `default=argparse.SUPPRESS` never appears in the namespace, so it
+    fell into NEITHER half and the equality still held — the gate's own comment
+    claimed such a flag "fails the suite" while it measurably did not.
+    `test_a_SUPPRESSED_flag_cannot_escape_the_partition` is the control.
     """
-    # The destination set is read from a real parse of a minimal argv, so it is
-    # whatever the parser ACTUALLY declares rather than a second hand-written
-    # list — the thing that drifted in the first place.
-    dests = set(vars(fs.parse_args(["zzterm"])))
+    dests = fs.parser_dests()
     assert dests, "the parser declared no destinations — gate wired to nothing"
     ledger = {d for d, _, _ in fs.ARCHIVE_ONLY_FLAGS}
     assert dests == fs.LIVE_AWARE_DESTS | ledger, (
@@ -1428,3 +1432,182 @@ def test_limit_ONE_is_accepted_and_bounds_both_legs(monkeypatch):
     got = run_main(monkeypatch, ["zzterm", "--live", "--limit", "1"], run)
     assert got["rc"] == fs.EXIT_OK
     assert "(showing 1 of 3" in got["out"]
+
+
+# =========================================================================== #
+# §4 — AUDIT FIX ROUND 3-DELTA (against tip 6914aa33)
+#
+#   R3-🟡2  `tail.coverage_complete` published a measured-looking `false` for a
+#           scan that NEVER RAN, while the sibling `archive.live_coverage_
+#           complete` was `null` in the same document — the exact shape F3
+#           removed from `hosts_unreachable` ONE FIELD OVER, in the same commit.
+#           And `SKILL.md` names this field as the branch point, so the doc
+#           pointed the reader at the one field that could not discriminate.
+#   R3-🟢2  The corpus-consequence sentence fired even under `--deep`, telling a
+#           caller to "pass --deep" in a run that already had.
+#   R3-🟢3  The partition gate read a parsed NAMESPACE, so a flag declared
+#           `default=argparse.SUPPRESS` was in neither half and the equality
+#           still held — while the gate's comment claimed such a flag fails.
+#
+# 🔴 NO NODE COUNTS IN THIS SECTION. Two rounds running, a hand-typed
+# "N new / R red / G green" was measured wrong — the second time because a fix
+# added five nodes AFTER the number was written. A count that a later commit
+# invalidates is a claim nothing enforces, which is the class this whole round
+# is about. The per-round matrices live in the PR body with the sha and method
+# that produced them; the LEDGERS below stay, because a name either resolves or
+# it does not and a test checks that.
+# =========================================================================== #
+R3_GREEN_AT_AUDITED_TIP = frozenset({
+    # NEGATIVE control on the tri-state: a MEASURED partial fleet must still
+    # publish `false`. "Always null" would pass the never-ran probe and destroy
+    # the field on the fleet state it exists for.
+    "test_a_MEASURED_partial_fleet_still_publishes_FALSE",
+    # NEGATIVE control on the --deep suppression: suppressing the corpus
+    # sentence unconditionally would pass that probe and silently undo R2-F1.
+    "test_the_corpus_sentence_STILL_fires_without_deep",
+    # This ledger's own gate — no behaviour to regress.
+    "test_the_R3_ledger_names_only_tests_that_exist",
+})
+
+
+def test_the_R3_ledger_names_only_tests_that_exist():
+    assert R3_GREEN_AT_AUDITED_TIP, "the ledger is empty — gate wired to nothing"
+    for entry in R3_GREEN_AT_AUDITED_TIP:
+        assert entry.split("[", 1)[0] in globals(), (
+            f"{entry!r} is listed in the R3 ledger but no such test exists")
+
+def test_tail_coverage_is_NULL_for_a_scan_that_never_ran(monkeypatch):
+    """🔴 R3-🟡2. `live_coverage_complete` is a two-valued PREDICATE and is right
+    for branching; PUBLISHING its `False` says *measured, and incomplete* about
+    a scan that produced no measurement."""
+    got = run_main(monkeypatch, ["zzterm", "--live", "--json", "--tail", "20"],
+                   make_run(boom=OSError("session-manager is not on this host")),
+                   archive=[])
+    blob = json.loads(got["out"])
+    assert blob["live"]["status"] == "error"
+    assert blob["tail"]["coverage_complete"] is None, (
+        "a scan that never ran published a measured-looking coverage verdict")
+    assert blob["tail"]["hosts_unreachable"] is None
+    # ...and it agrees with its sibling in the SAME document, which is the
+    # inconsistency that made this findable at all.
+    assert blob["archive"]["live_coverage_complete"] is None
+
+
+@pytest.mark.parametrize("status,unreachable,expect", [
+    ("ok", [], True),
+    ("ok", ["laptop"], False),
+    # `unavailable` RAN and every host was unreachable — a real measurement.
+    ("unavailable", ["workbench", "laptop"], False),
+    ("error", None, None),
+], ids=["full", "partial", "unavailable", "never-ran"])
+def test_live_coverage_state_is_the_TRI_STATE_publishable_form(status,
+                                                               unreachable,
+                                                               expect):
+    """The whole truth table, so no cell is reachable only by accident. 🔴 The
+    `unavailable` row is the one that must NOT be `None`: that scan ran."""
+    assert fs.live_coverage_state(
+        {"status": status, "hosts_unreachable": unreachable}) is expect
+
+
+def test_the_PREDICATE_and_the_PUBLISHED_form_differ_only_on_never_ran():
+    """One writer each, and their disagreement is exactly one case. If they
+    agreed everywhere the tri-state would be pointless; if they disagreed
+    anywhere else, branching and publishing would have drifted apart."""
+    cases = [
+        {"status": "ok", "hosts_unreachable": []},
+        {"status": "ok", "hosts_unreachable": ["laptop"]},
+        {"status": "unavailable", "hosts_unreachable": ["a", "b"]},
+        {"status": "error", "hosts_unreachable": None},
+    ]
+    differ = [c for c in cases
+              if fs.live_coverage_complete(c) != fs.live_coverage_state(c)]
+    assert [c["status"] for c in differ] == ["error"]
+
+
+def test_a_MEASURED_partial_fleet_still_publishes_FALSE(monkeypatch):
+    """NEGATIVE CONTROL: "always null" would pass the never-ran probe and
+    destroy the field's usefulness on the fleet state it exists for."""
+    got = run_main(monkeypatch, ["zzterm", "--live", "--json", "--tail", "20"],
+                   partial_run(), archive=[])
+    tail = json.loads(got["out"])["tail"]
+    assert tail["coverage_complete"] is False
+    assert tail["hosts_unreachable"] == ["laptop"]
+
+
+# --------------------------------------------------------------------------- #
+# R3-🟢2 — the corpus sentence must not fire when --deep already ran the archive
+# --------------------------------------------------------------------------- #
+def test_the_corpus_sentence_is_SUPPRESSED_when_deep_already_forced_the_archive(
+        monkeypatch):
+    """🔴 R3-🟢2. The sentence exists to say "the corpus you chose may go
+    unsearched — pass --deep". Printing it in a run that already passed `--deep`
+    is advice to do the thing the caller did — the same "noise that trains the
+    reader to skip the line" this file refused to append to `--since`."""
+    run = make_run({("zzterm",): (0, live_report([ROW_VIOLET],
+                                                 match_fields=DEFAULT_MATCH_FIELDS)),
+                    (): (0, live_report([ROW_VIOLET]))})
+    got = run_main(monkeypatch,
+                   ["zzterm", "--live", "--deep", "--opencode-only"], run,
+                   archive=[archive_hit("dddddddd-4444-4555-8666-777777777777")])
+    # the flag is still NAMED — it genuinely does not filter the live section
+    assert "ARCHIVE-ONLY flags" in got["err"]
+    assert "--opencode-only" in got["err"]
+    # ...but the advice is gone, because the archive DID run
+    assert "pass --deep" not in got["err"]
+    assert got["archive_calls"] == 1
+    assert "ran because: --deep" in got["out"]
+
+
+def test_the_corpus_sentence_STILL_fires_without_deep(monkeypatch):
+    """NEGATIVE CONTROL — suppressing it unconditionally would pass the probe
+    above and silently undo R2-F1."""
+    run = make_run({("zzterm",): (0, live_report([ROW_VIOLET],
+                                                 match_fields=DEFAULT_MATCH_FIELDS))})
+    got = run_main(monkeypatch, ["zzterm", "--live", "--opencode-only"], run)
+    assert "pass --deep" in got["err"]
+
+
+def test_archive_only_notice_reads_deep_off_the_ARGS_not_a_global():
+    """The pure function, both ways, so the branch is pinned without a run."""
+    base = fs.parse_args(["zzterm", "--live", "--opencode-only"])
+    assert "pass --deep" in fs.archive_only_notice(base)
+    deep = fs.parse_args(["zzterm", "--live", "--deep", "--opencode-only"])
+    assert "pass --deep" not in fs.archive_only_notice(deep)
+    assert "--opencode-only" in fs.archive_only_notice(deep)
+
+
+# --------------------------------------------------------------------------- #
+# R3-🟢3 — a SUPPRESSED flag must not escape the partition
+# --------------------------------------------------------------------------- #
+def test_parser_dests_reads_the_ACTIONS_not_a_parsed_namespace():
+    """🔴 The mechanism, stated: `vars(parse_args(...))` cannot see a
+    `SUPPRESS`-defaulted flag at all."""
+    assert fs.parser_dests() == set(vars(fs.parse_args(["zzterm"]))), (
+        "no SUPPRESS flag exists today, so the two views must agree — if they "
+        "do not, one of them is already wrong")
+    assert "help" not in fs.parser_dests()
+
+
+def test_a_SUPPRESSED_flag_cannot_escape_the_partition(monkeypatch):
+    """🔴 R3-🟢3, THE CONTROL THE OLD GATE FAILED. A flag declared with
+    `default=argparse.SUPPRESS` is absent from the namespace, so the old
+    namespace-based equality held with the flag classified NOWHERE — measured
+    94/94 green with exactly this planted. Read off `_actions`, it is caught.
+    """
+    real = fs.build_parser
+
+    def with_suppressed():
+        p = real()
+        p.add_argument("--newest-first", action="store_true",
+                       default=argparse.SUPPRESS,
+                       help="planted: classified in neither half")
+        return p
+
+    monkeypatch.setattr(fs, "build_parser", with_suppressed)
+    dests = fs.parser_dests()
+    assert "newest_first" in dests, (
+        "the destination view cannot see a SUPPRESS-defaulted flag — the "
+        "partition gate is blind to exactly the flag it claims to catch")
+    ledger = {d for d, _, _ in fs.ARCHIVE_ONLY_FLAGS}
+    assert dests != fs.LIVE_AWARE_DESTS | ledger, (
+        "an unclassified flag left the partition equality holding")
