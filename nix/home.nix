@@ -2034,7 +2034,7 @@ in
         # as commas, so a two-word entry becomes two independent substrings.
         # Hence the single distinctive first token. Verified against 12 real
         # alerts on the workbench, all reading "Runaway process: Farthest Fronti".
-        "CPU_MON_IGNORE=anno,logd,farthest"
+        "CPU_MON_IGNORE=anno,logd,farthest,darktide"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/.config/cpu-monitor/cpu-monitor.sh";
       Restart = "always";
