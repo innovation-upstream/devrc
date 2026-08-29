@@ -11,8 +11,9 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 **Phase 1 (attention queue) SHIPPED. Phase 2 (tmux read model) COMPLETE. Rank 3 (read-only
 `capture-pane` rendering) ✅ DONE 2026-08-28. Rank 5 (the fail-closed terminal-write auth
-wrapper) ✅ DONE 2026-08-29 — `ZacxDev/homelab-infra#516`. The lowest-numbered OPEN item is now
-rank 6 (the layout schema + `clawgatectl view`/`panel` verbs).**
+wrapper) ✅ DONE 2026-08-29 — `ZacxDev/homelab-infra#516`, squash `c8635976`, DEPLOYED as clawgate
+0.8.13 and VERIFIED LIVE. The lowest-numbered OPEN item is now rank 6 (the layout schema +
+`clawgatectl view`/`panel` verbs).**
 
 🔴 **RANK 5 SHIPPED THE WRAPPER BUT NOT ITS SECRET, DELIBERATELY.** The SOPS age identity is on
 NEITHER host, so `CLAWGATE_TERMINAL_TOKEN` is wired `optional: true` and the surface boots
@@ -26,9 +27,11 @@ credential at all** (`comment_delete.go:110-130`), and the app's pattern for UI 
 designing the grid UI.
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC** — `clawgatectl health` is the only authority. It said
-**0.8.10** on 2026-08-28 immediately after this session deployed it. This line has now carried
-**four** values in two days (0.8.7 → 0.8.8 → 0.8.9 from a concurrent session → 0.8.10), which is
-the whole argument for reading the cluster instead of this paragraph.
+**0.8.13** at 2026-08-29 20:58Z immediately after this session deployed it. This line has now
+carried **six** values in three days (0.8.7 → 0.8.8 → 0.8.9 from a concurrent session → 0.8.10 →
+0.8.11 → 0.8.13), which is the whole argument for reading the cluster instead of this paragraph.
+⚠ **0.8.12 EXISTS IN HARBOR AND WAS NEVER DEPLOYED** — built before #503 landed on trunk and
+superseded pre-merge; see rank 5. A tag existing is not a tag having shipped.
 
 ⚠ **THE PREVIOUS REVISION OF THIS HEADER SAID "MERGED-BUT-NOT-DEPLOYED" AND WARNED THAT THE
 FIRST SIGHT WOULD BE `collector predates the field` ON EVERY CARD. Both were true when written
@@ -538,8 +541,32 @@ do not renumber again without releasing the live claims first.
    UNDERFLOW). Round 5 was the first with **no behaviour defect**. Stopped there — one round short
    of the mechanical two-zero-payload gate — because round 5 was auditing test code round 4 wrote.
    Residual amplification measured **8.1x**, ratio-bounded, down from 1,107x.
-5. ✅ **DONE 2026-08-29 — `ZacxDev/homelab-infra#516`.** The wrapper exists, is tested, and ships
-   **with no caller**, which was the requirement: "before any write endpoint exists, not after."
+5. ✅ **DONE 2026-08-29 — `ZacxDev/homelab-infra#516`, squash `c8635976`, DEPLOYED as clawgate
+   0.8.13 and VERIFIED LIVE.** The wrapper exists, is tested, and ships **with no caller**, which
+   was the requirement: "before any write endpoint exists, not after."
+
+   ✅ **Verified 2026-08-29 20:58Z, through the real path, with both controls:** pod
+   `clawgate-7c9fd4bcc5-d25v6` Running/ready `restarts=0` image `0.8.13`; `clawgatectl health`
+   (the SERVER, not the deploy) = **0.8.13**; and the boot line present:
+   `terminal write surface: DISABLED (fail-closed) — CLAWGATE_TERMINAL_TOKEN is not set`.
+   🔴 **A BEFORE-CONTROL WAS TAKEN AND VALIDATED** — the running 0.8.11 pod matched that grep
+   **0** times while the same grep shape matched the reaper's boot line **1** time, so the zero
+   was a fact about the log rather than a grep wired to nothing, and the line that appeared after
+   the roll is genuinely new.
+
+   🔴 **WHAT IS *NOT* VERIFIED, AND CANNOT BE YET: the 503 refusal in production.** No route uses
+   the wrapper — that is the entire point of shipping it first — so there is nothing to probe.
+   The refusal behaviour rests on the unit tests plus the mutation sweep, and the LIVE evidence is
+   the boot line alone. Do not upgrade "deployed and announcing DISABLED" into "the refusal was
+   exercised in production"; the first route to use it is what makes that claim available.
+
+   ⚠ **0.8.12 EXISTS IN HARBOR AND WAS NEVER DEPLOYED.** It was built from a tree that predated
+   `e8635c5f` (#503, the `Migrate` advisory-lock fix), which landed on trunk mid-review with **no
+   pin bump** — so 0.8.12 would have carried a pin reading NEWER than trunk while omitting a fix
+   trunk already had, and the next reader would have concluded #503 was deployed. Rebuilt from the
+   merged tree as **0.8.13** (a NEW tag, not a re-push: overwriting a mutable tag has cost this
+   project once). 🔴 **Deploying 0.8.13 therefore also SHIPPED #503** — whose own audit follow-ups
+   are still open as `ZacxDev/homelab-infra#509`.
 
    **What shipped.** `requireTerminalToken` in `internal/api/auth.go`, gated by a **dedicated**
    `CLAWGATE_TERMINAL_TOKEN`. `AuthConfig.TerminalWriteRefusal()` is the single predicate; it
