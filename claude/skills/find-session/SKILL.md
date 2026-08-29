@@ -131,6 +131,21 @@ Notes:
 - **Both agent runtimes are searched by default.** opencode rows are tagged `[opencode]`,
   carry `opencode:<host>` as their `file:`, and resume with `opencode --session <id>` (not
   `claude --resume`). `--claude-only` / `--opencode-only` restrict the corpus.
+- 🔴 **BOTH corpora are now searched on BOTH hosts, and that sentence used to be HALF
+  FALSE.** `opencode` sessions have been searched cross-host since 2026-08-26; Claude
+  transcripts were **local-host only** while this skill's description already claimed
+  "both hosts". That gap is what made a workbench run report a laptop-only skill as never
+  used. The Claude peer leg runs the PEER'S OWN `transcript_search`, so the hosts cannot
+  drift into different semantics silently — and a peer that has not been shipped yet says
+  so by name rather than answering without the filter:
+
+      find-session: peer laptop (10.42.0.100): peer is running an older
+      transcript_search with no --skill support (run ship.sh) — its Claude
+      sessions are NOT in these results
+
+  Remote hits are tagged **`[claude-remote]`**. 🔴 Surface any `peer … NOT in these
+  results` line to the user: the remaining hits then look like a complete answer and are
+  not.
 - 🔴 **A missing host is reported on stderr, never as a quiet zero.** Both hosts' opencode
   DBs are searched from either machine: whichever host you are on is read off local disk,
   the other over SSH. If a peer is unreachable the search prints `… its sessions are NOT in

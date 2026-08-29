@@ -666,3 +666,138 @@ def search(terms, *, root=None, match_any=False, since=None, limit=None, project
             stats["filtered_out_ids"] = filtered_ids
 
     return results if limit is None else results[:limit]
+
+
+# --------------------------------------------------------------------- peers
+
+# 🔴 THE CLAUDE CORPUS IS PER-HOST, AND FOR A LONG TIME ONLY THIS FILE KNEW IT.
+# `opencode_search` has searched every peer over SSH since 2026-08-26, while this
+# module walked `~/.claude/projects` on the LOCAL machine only — yet the shipped
+# skill description said "searches both runtimes on BOTH HOSTS". That sentence
+# was true of one corpus and false of the other, and the failure it caused is why
+# this leg exists: an investigation asked "was the signal skill ever used
+# operationally?", ran on the workbench, got zero, and reported "never" — while
+# five sessions sat in the laptop's Claude transcripts. A doc that ASSERTS
+# coverage is worse than one that omits it, because the reader stops checking.
+#
+# The remote leg runs the PEER'S OWN copy of this module, so the hosts cannot
+# drift into different search semantics without the capability probe below
+# saying so out loud. Every failure path warns on stderr: an unreachable peer
+# and a peer with no matches are different facts and must never print the same
+# thing.
+_REMOTE_SCAN = r"""
+import base64, json, sys
+sys.path.insert(0, "/home/zach/workspace/devrc/scripts/lib")
+req = json.loads(base64.b64decode(sys.argv[2]))
+try:
+    import transcript_search as ts
+except Exception as e:
+    print(json.dumps({"error": "import failed: %s" % e})); raise SystemExit(0)
+# 🔴 CAPABILITY PROBE, not a version string. A peer that has not been shipped yet
+# has no `--skill` support, and silently searching without the filter would
+# return every session matching the TERMS as though it used the skill.
+if req.get("skill") and not hasattr(ts, "canonical_skill_name"):
+    print(json.dumps({"error": "peer is running an older transcript_search with "
+                               "no --skill support (run ship.sh)"}))
+    raise SystemExit(0)
+kw = dict(match_any=req["match_any"], project=req["project"],
+          surface=req["surface"], limit=None)
+if req.get("skill"):
+    kw["skill"] = req["skill"]
+if req.get("since"):
+    from datetime import datetime as _dt
+    kw["since"] = _dt.fromisoformat(req["since"])
+try:
+    rows = ts.search(req["terms"], **kw)
+except Exception as e:
+    print(json.dumps({"error": "search failed: %s" % e})); raise SystemExit(0)
+out = []
+for r in rows:
+    d = {k: r.get(k) for k in ("session_id", "cwd", "branch", "first", "last",
+                               "genesis", "matched_terms", "total_hits",
+                               "snippets", "path", "project_dir")}
+    d["last_local"] = r["last_local"].isoformat()
+    out.append(d)
+print(json.dumps({"rows": out}))
+"""
+
+
+def _peer_warn(msg):
+    """A degraded peer leg, on stderr. Never a quiet zero."""
+    print(msg, file=sys.stderr)
+
+
+def search_peers(terms, *, match_any=False, since=None, project="",
+                 surface=SURFACE_TEXT, skill=""):
+    """Search the OTHER hosts' Claude transcript corpora over SSH.
+
+    Returns rows shaped like `search()`'s, each tagged `host` and
+    `source="claude-remote"`. The peer that IS this machine is skipped — the
+    local walk already covers it.
+
+    Peer configuration is SHARED with `opencode_search.configured_peers()`, so
+    the two corpora cannot disagree about which hosts exist, and
+    `DEVRC_OPENCODE_PEERS=""` makes this leg hermetic for tests BY CONSTRUCTION
+    rather than by SSH merely happening to be absent (which differs between the
+    dev host and the nix sandbox, and is how a sibling test passed in one tier
+    and failed in the other).
+    """
+    import base64
+    import subprocess
+    try:
+        from opencode_search import _own_addresses, configured_peers
+    except Exception as e:                                # pragma: no cover
+        _peer_warn(f"find-session: peer discovery unavailable ({e}) — OTHER "
+                   f"HOSTS' Claude sessions are NOT in these results")
+        return []
+
+    peers = configured_peers()
+    mine = _own_addresses() if peers else set()
+    b64script = base64.b64encode(_REMOTE_SCAN.encode()).decode()
+    b64payload = base64.b64encode(json.dumps({
+        "terms": list(terms), "match_any": match_any, "project": project,
+        "surface": surface, "skill": skill or "",
+        "since": since.isoformat() if since else None,
+    }).encode()).decode()
+
+    rows = []
+    for label, addr, user in peers:
+        if addr in mine:
+            continue                                 # that is us; already walked
+        why = None
+        try:
+            proc = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                 f"{user}@{addr}",
+                 "python3 -c 'import base64,sys;exec(base64.b64decode(sys.argv[1]))' "
+                 f"'{b64script}' '{b64payload}'"],
+                capture_output=True, timeout=180)
+        except Exception as e:
+            why = f"unreachable ({e})"
+        else:
+            if proc.returncode != 0:
+                tail = proc.stderr.decode(errors="replace").strip().splitlines()
+                why = f"rc={proc.returncode} ({tail[-1] if tail else 'no stderr'})"
+            else:
+                try:
+                    got = json.loads(proc.stdout.decode(errors="replace") or "{}")
+                except Exception as e:
+                    why = f"unparseable output ({e})"
+                else:
+                    why = got.get("error")
+        if why:
+            _peer_warn(f"find-session: peer {label} ({addr}): {why} — its Claude "
+                       f"sessions are NOT in these results")
+            continue
+        for d in got.get("rows", []):
+            try:
+                d["last_local"] = datetime.fromisoformat(d["last_local"])
+            except Exception:
+                d["last_local"] = datetime.fromtimestamp(0)
+            d["host"] = label
+            d["source"] = "claude-remote"
+            d.setdefault("title", "")
+            d.setdefault("mtime", d["last_local"])
+            d.setdefault("term_hits", {})
+        rows.extend(got.get("rows", []))
+    return rows

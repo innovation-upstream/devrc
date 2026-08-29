@@ -60,6 +60,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from transcript_search import (  # noqa: E402
     DEFAULT_ROOT, SURFACE_ALL, SURFACE_TEXT, canonical_skill_name, search,
+    search_peers,
 )
 from opencode_search import search_opencode  # noqa: E402
 
@@ -622,6 +623,13 @@ def archive_search(a, since):
                             project=a.project, surface=surface, limit=None,
                             skill=a.skill)
         results.extend(cc_results)
+        # 🔴 The OTHER hosts' Claude corpora. Without this the local walk was the
+        # whole Claude answer while the description promised "both hosts" — the
+        # exact gap that made a workbench run report a laptop-only skill as
+        # never used. Peers that cannot be reached warn on stderr.
+        results.extend(search_peers(a.terms, match_any=a.any, since=since,
+                                    project=a.project, surface=surface,
+                                    skill=a.skill))
 
     # Search opencode sessions (default)
     # 🔴 SKIPPED under `--skill`, and the omission is PRINTED (stderr, so a
@@ -639,7 +647,8 @@ def archive_search(a, since):
             print(f"WARN: opencode search failed: {e}", file=sys.stderr)
     elif a.skill and not a.claude_only:
         print("NOT searched: the opencode corpus (--skill has no attribution "
-              "there); these results are Claude Code sessions on THIS host only.",
+              "there). Claude transcripts WERE searched on every reachable host; "
+              "any peer that could not answer is named on its own line above.",
               file=sys.stderr)
 
     # Re-rank the merged set by the same criteria
