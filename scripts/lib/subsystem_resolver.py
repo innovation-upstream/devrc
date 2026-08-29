@@ -133,6 +133,7 @@ __all__ = [
     "Association",
     "TaskRef",
     "TaskRefError",
+    "TAG_MAX_RUNES",
     "parse_task_ref",
     "format_task_refs",
     "lossy_tag_for",
@@ -452,7 +453,11 @@ def parse_task_ref(raw: object) -> TaskRef:
     # Control characters (NUL, ESC, a stray newline) round-trip through the file
     # and reach a terminal, a JSON payload and an error message. Nothing legible
     # needs them, and a task id containing one is a corrupted read, not an id.
-    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in text):
+    # C0 (0x00-0x1F), DEL (0x7F) and C1 (0x80-0x9F). C1 is included because the
+    # claim is "printable text": omitting it left the check narrower than the
+    # sentence describing it, which is the defect this module keeps finding in
+    # its own guards.
+    if any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in text):
         raise TaskRefError(
             f"task ref {raw!r} contains a control character — task ids are "
             f"printable text"
@@ -478,15 +483,21 @@ def format_task_refs(refs: "Sequence[TaskRef | str]") -> str:
     writing `tasks: []` — an empty list and an absent key mean the same thing and
     the absent one is what 120 of 120 existing entries carry today.
 
-    🔴 A BARE STRING IS RE-PARSED, NOT TRUSTED. The signature accepts `str` for
-    convenience, and passing one through `str()` unchecked would let this
-    function WRITE a line the loader then rejects — a writer that produces
-    MALFORMED output is worse than one that refuses, because the file looks
-    written and the entry is invisible. `parse_task_ref` is the single validator,
-    so calling it here means "accepted by the writer" and "accepted by the
-    reader" cannot describe different sets.
+    🔴 EVERY INPUT IS RE-PARSED, INCLUDING A `TaskRef`. An earlier version
+    short-circuited on `isinstance(r, TaskRef)` and re-parsed only bare strings —
+    which left the claim below false, because `TaskRef` is an exported frozen
+    dataclass with no validation of its own: `TaskRef("clickup", "a,b", "x")`
+    constructs happily and rendered `tasks: [clickup:a,b]`, a line the inline
+    reader splits into `clickup:a` and `b` — MALFORMED entry, invisible to every
+    reader. A hand-built `TaskRef` carrying a newline was worse still.
+
+    So the shortcut is gone. `parse_task_ref` is the single validator and it runs
+    on the way out as well as the way in, which is what makes "accepted by the
+    writer" and "accepted by the reader" the same set rather than merely a
+    sentence claiming they are. Re-parsing a `TaskRef` is a few microseconds
+    against a function that writes one line per entry.
     """
-    items = [str(r if isinstance(r, TaskRef) else parse_task_ref(r)) for r in refs]
+    items = [str(parse_task_ref(str(r))) for r in refs]
     if not items:
         return ""
     return f"tasks: [{', '.join(items)}]"
@@ -2016,36 +2027,40 @@ def parse_front_matter(text: str) -> dict[str, object]:
     def _block_items_from(start: int) -> list[str]:
         """The `- item` run beginning at `start`.
 
-        Stops at the first line that is neither an item nor a comment. An EMPTY
-        item contributes nothing but does NOT stop the scan — see
+        Stops at the first line that is neither an item, a comment, nor blank.
+        An EMPTY item contributes nothing but does NOT stop the scan — see
         `_is_block_item`.
 
-        🔴 A BLANK LINE ENDS THE BLOCK — and this is a bound that MATTERS, not a
-        formatting nicety. It limits how far a bare `key:` can reach for items:
-        without it a bare `sensitivity:` binds a `- ` list separated from it by
-        blank lines and an unrelated comment, turning a string-valued key into a
-        list — the precise hazard the bare-key narrowing exists to prevent, and
-        one the lookahead that implements that narrowing would otherwise
-        reintroduce. Comments ARE skipped, because a comment between list items
-        is ordinary and carries no data.
+        🔴 A BLANK LINE DOES NOT END THE BLOCK, AND AN EARLIER VERSION OF THIS
+        FUNCTION SAID THE OPPOSITE. Making a blank line terminate the scan was a
+        REGRESSION, measured against PyYAML: a list separated from its key by a
+        blank line is ordinary, valid YAML, and breaking there dropped the whole
+        list back out of the scan so its items were promoted to phantom keys —
+        reproducing byte for byte the corruption quoted above, with the entry
+        then LOADING CLEAN because `tasks` was falsy. It was introduced to bound
+        how far a bare `key:` reaches for items; that bound was a fix for a
+        hazard that does not exist, and it cost a correct parse.
 
-        ⚠ THE EXPLICIT BLANK CHECK BELOW IS NOT WHAT ENFORCES THAT, and saying so
-        matters: a mutation sweep proved removing it is an EQUIVALENT mutant that
-        survives the whole suite. A blank line is already not an item, so
-        `_is_block_item` returns False for it and the scan breaks one line later
-        by the general rule. The check stays as defence-in-depth — if
-        `_is_block_item` ever widens, this is the line that keeps the bound — but
-        the mechanism that actually holds today is `_is_block_item`, and a
-        docstring naming the wrong one is how the next reader deletes the load-
-        bearing half. (`claude/RULES.md`: two mechanisms reaching one outcome
-        cannot be told apart by any test; name the one that holds.)
+        🔴 THE `key:` / list BINDING IS NOT OURS TO NARROW. In YAML a `- ` list
+        belongs to the nearest preceding key, however many blank and comment
+        lines intervene — `yaml.safe_load` on `sensitivity:` + blank + comment +
+        `- x` returns `{'sensitivity': ['x']}`. Diverging from that to keep a key
+        string-typed would make this parser disagree with every other reader of
+        the same bytes. The type question belongs to the CONSUMERS, and they
+        already answer it: every reader of `sensitivity` / `created_by` /
+        `namespace` is `isinstance(..., str)`-guarded and degrades to its
+        fail-safe rather than raising.
+
+        What actually closes the phantom-key class is the outer loop refusing to
+        treat a `-`-led line as a key at all — see the `_is_block_item` skip
+        there. That is the right place for it: it holds no matter where a block
+        scan starts or stops, including for an ORPHAN list with no owning key,
+        which is not valid YAML in the first place (`yaml.safe_load` raises).
         """
         items: list[str] = []
         for j in range(start, len(lines)):
             candidate = lines[j]
-            if not candidate.strip():
-                break
-            if candidate.lstrip().startswith("#"):
+            if not candidate.strip() or candidate.lstrip().startswith("#"):
                 continue
             if not _is_block_item(candidate):
                 break
@@ -2056,24 +2071,36 @@ def parse_front_matter(text: str) -> dict[str, object]:
 
     def _block_ends_at(start: int) -> int:
         """The index of the last line belonging to the block opened before
-        `start` — items and interleaved comments alike.
+        `start` — items, interleaved comments and blank lines alike.
 
-        🔴 SWALLOWS EMPTY ITEMS TOO. This must agree with `_block_items_from`
-        about MEMBERSHIP even where it disagrees about CONTENT: a member that
-        contributes no item still has to be consumed, or its own internal colon
-        promotes it to a phantom key. The two functions share `_is_block_item`
-        for exactly that reason — the membership predicate lives in ONE place,
-        because two spellings of it are what produced the bug this fixes.
+        🔴 SWALLOWS EMPTY ITEMS TOO, and must agree with `_block_items_from`
+        about MEMBERSHIP even where it disagrees about CONTENT. The two share
+        `_is_block_item` for exactly that reason — two spellings of one
+        membership rule is what produced the bug this parser was widened to fix.
 
-        ⚠ Its blank-line break carries the same caveat as `_block_items_from`'s:
-        measured as an equivalent mutant, kept as defence-in-depth. The rule that
-        actually stops the scan at a blank line is `_is_block_item`.
+        ⚠ Trailing blanks and comments are NOT swallowed: `last` only advances on
+        a real member, so a block followed by a blank line and then a key leaves
+        that key readable. Consuming to the last blank would be harmless today
+        and is not done, because "swallow exactly the members" is the property
+        that stays true if the surrounding loop changes.
+
+        ⚠ THE EXACT SWALLOW EXTENT IS CURRENTLY UNOBSERVABLE, measured and stated
+        rather than left for the next mutation sweep to rediscover: removing the
+        blank-line skip here is an EQUIVALENT mutant. It would stop the scan at a
+        blank inside a list, leaving the items after it unswallowed — but the
+        outer loop now SKIPS every `-`-led line, so those items produce no
+        phantom key and nothing downstream can tell the difference. That is
+        defence-in-depth working as intended, not dead code: this function is
+        what keeps the members out of the key space if that outer skip is ever
+        narrowed, and the outer skip is what keeps them out if this is. Neither
+        is testable while the other holds, so BOTH are documented instead of one
+        being deleted as unreachable.
         """
         last = start - 1
         for j in range(start, len(lines)):
-            if not lines[j].strip():
-                break
-            if lines[j].lstrip().startswith("#") or _is_block_item(lines[j]):
+            if not lines[j].strip() or lines[j].lstrip().startswith("#"):
+                continue
+            if _is_block_item(lines[j]):
                 last = j
                 continue
             break
@@ -2082,6 +2109,17 @@ def parse_front_matter(text: str) -> dict[str, object]:
     consumed_through = -1
     for i, line in enumerate(lines):
         if i <= consumed_through or _is_skippable(line):
+            continue
+        # 🔴 A `-`-LED LINE IS NEVER A KEY. This single skip is what closes the
+        # phantom-key class, and it closes it independently of where any block
+        # scan begins or ends — which is why it lives here rather than being
+        # implied by a well-behaved scan. Without it, ANY list item the scan does
+        # not claim gets `partition(":")`-ed and its own internal colon makes it
+        # a front-matter key nobody wrote (`- clickup: 868abc123`), while the
+        # real key reads empty. An orphan list with no owning key is not valid
+        # YAML, so there is nothing to preserve here: skipping is the whole
+        # correct behaviour.
+        if _is_block_item(line):
             continue
         key, sep, value = line.partition(":")
         if not sep:
@@ -2098,11 +2136,11 @@ def parse_front_matter(text: str) -> dict[str, object]:
             if block:
                 out[key] = block
             else:
+                # No items followed, so this is an empty scalar, which is what a
+                # bare `key:` has always meant here. ⚠ NOT the same claim as "a
+                # bare key can never become a list": if a list DOES follow, it
+                # binds, exactly as YAML says.
                 out[key] = value.strip("'\"")
-            # Swallow UNCONDITIONALLY once any member follows — even when every
-            # item was empty and `block` is `[]`. Consuming only on a non-empty
-            # block is what let an all-empty list leave its members behind to be
-            # re-read as keys.
             consumed_through = _block_ends_at(i + 1)
         else:
             out[key] = value.strip("'\"")

@@ -34,7 +34,7 @@ provides (`claude/RULES.md`: a guard's description claims coverage).
 
   INVARIANT GUARDS (green before AND after — they pin behaviour this change must
   NOT alter, and they are not evidence that anything was fixed):
-    `test_a_BARE_key_with_no_items_still_reads_as_a_STRING`
+    `test_a_bare_key_with_NO_list_under_it_stays_a_STRING`
     `test_the_LIVE_STORE_shape_is_unaffected_by_the_widening`
 
   NEW-FEATURE TESTS (everything else). On pre-change code these can only raise
@@ -42,6 +42,16 @@ provides (`claude/RULES.md`: a guard's description claims coverage).
   That is a collection failure, not a per-test red, and it is deliberately NOT
   described as one — a module-wide ImportError fails every test for one reason
   and so discriminates between none of them.
+
+🔴 THE ORACLE FOR "WHAT DOES THIS FRONT MATTER MEAN" IS PyYAML, NOT THE AUTHOR.
+`test_the_parse_AGREES_WITH_PyYAML_and_never_invents_a_key` exists because a
+previous guard here pinned my own belief about a bare key, passed, and the
+parser was meanwhile disagreeing with every other reader of the same bytes — it
+had been "fixed" to stop a bare key binding a distant list, which is precisely
+what YAML does. A test that pins the author's model cannot catch the author
+being wrong about the format. PyYAML is TEST-ONLY (`importorskip`) and
+deliberately not a dependency of the module under test; the phantom-key half of
+that test asserts without the oracle, so it still runs where PyYAML is absent.
 
 Hermetic: builds its own store in a tmp dir and NEVER reads the real one, which
 is client-confidential and rewritten by a timer.
@@ -65,6 +75,7 @@ from subsystem_resolver import (  # noqa: E402
     TaskRefError,
     entry_mapping,
     format_task_refs,
+    TAG_MAX_RUNES,
     lossy_tag_for,
     parse_front_matter,
     parse_task_ref,
@@ -197,10 +208,23 @@ class TestTheRefGrammar:
             parse_task_ref("clickup:a,b")
         assert "comma" in str(exc.value)
 
-    @pytest.mark.parametrize("bad", ["clickup:a\x00b", "clickup:a\x1bb", "clickup:a\x7fb"])
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "clickup:a\x00b",   # NUL          — C0
+            "clickup:a\x1bb",   # ESC          — C0
+            "clickup:a\x7fb",   # DEL
+            # 🔴 C1 (0x80-0x9F). Their absence made the check NARROWER THAN THE
+            # SENTENCE describing it ("task ids are printable text"), and the
+            # mutation sweep proved it: narrowing the range back to C0+DEL
+            # survived the whole suite because nothing fed a C1 byte.
+            "clickup:a\x80b",   # PAD          — C1
+            "clickup:a\x9fb",   # APC          — C1, the top of the range
+        ],
+    )
     def test_a_CONTROL_CHARACTER_is_rejected(self, bad):
-        """A NUL or ESC in an id round-trips to disk, into `--json`, and onto a
-        terminal. Nothing legible needs one."""
+        """A NUL, ESC or C1 byte in an id round-trips to disk, into `--json`, and
+        onto a terminal. Nothing legible needs one."""
         with pytest.raises(TaskRefError) as exc:
             parse_task_ref(bad)
         assert "control character" in str(exc.value)
@@ -392,16 +416,18 @@ class TestBothListForms:
         assert fm["sensitivity"] == "public"
 
     def test_the_swallow_STOPS_at_the_first_non_item_line(self):
-        """🔴 THE MUTANT THIS EXISTS FOR: `break` -> `continue` in the swallow
-        loop, which SURVIVED the whole 1,692-test suite.
+        """The swallow must stop at the first line that is not a block member,
+        or every key below a list disappears.
 
-        The sibling fixture above cannot see it: with nothing skippable after the
-        trailing keys, both versions land on the same `consumed_through`. One
-        extra TRAILING BLANK LINE is the whole difference — under the mutant the
-        loop keeps going past `service:`, swallows it, and the key vanishes.
-
-        Named `\\n` at the end rather than left to the fixture's formatting,
-        because the blank line IS the test.
+        ⚠ WHICH TEST KILLS WHICH MUTANT WAS MEASURED, NOT ASSUMED — and an
+        earlier docstring here got it wrong. It claimed to be the killer for
+        `break` -> `continue` in the swallow loop, and cited a trailing blank
+        line as the discriminator. That reasoning described the ROUND-1 loop; the
+        swallow was then reimplemented as `_block_ends_at`, and the mutant is
+        actually killed by `test_TWO_block_lists_in_one_file_do_not_merge`. A
+        test that names a mutant it does not kill is worse than one that names
+        none: it stops anyone checking. This fixture pins the property in its own
+        name, which is real and worth pinning, and claims nothing more.
         """
         fm = parse_front_matter(
             "---\n"
@@ -414,7 +440,7 @@ class TestBothListForms:
         assert fm["tasks"] == [CLICKUP]
         assert fm["service"] == "thing", (
             "a key immediately after a block list was swallowed — the swallow "
-            "loop ran past the first non-item line"
+            "ran past the first non-member line"
         )
 
     def test_TWO_block_lists_in_one_file_do_not_merge(self):
@@ -437,7 +463,11 @@ class TestBothListForms:
     @pytest.mark.parametrize(
         "shape,expected",
         [
-            # 🔴 EVERY ONE OF THESE RESURRECTED THE CORRUPTION THIS PR FIXES.
+            # 🔴 THREE OF THESE FIVE RESURRECTED THE CORRUPTION THIS PR FIXES;
+            # the trailing-empty and all-empty shapes were already GREEN at the
+            # previous tip and are invariant guards, not regression cases. Said
+            # exactly rather than roundly: 'every one of these' overstated the
+            # evidence by two, and a count nobody re-derives is how that sticks.
             # `- ` with only trailing whitespace, and a bare `-`, do not satisfy
             # `startswith("- ")`, so the block scan used to TERMINATE on them and
             # promote every ref below to a phantom key again — and, being falsy,
@@ -481,25 +511,111 @@ class TestBothListForms:
         )
         assert [str(t) for t in load(p, "devrc").tasks] == [CLICKUP, GITHUB]
 
-    def test_a_bare_key_does_not_bind_a_DISTANT_list(self):
-        """🔴 THE LOOKAHEAD MUST BE BOUNDED, or the bare-key narrowing defeats
-        itself. An unbounded lookahead skips blanks and comments without limit,
-        so a bare `sensitivity:` reaches a `- ` list several lines below and
-        becomes a LIST — the exact type change the narrowing exists to prevent.
-        A blank line ends the block; a comment does not.
+    @pytest.mark.parametrize(
+        "label,body",
+        [
+            # 🔴 EVERY ONE OF THESE IS VALID YAML, AND A BLANK-LINE BOUND BROKE
+            # THEM ALL. An earlier fix made a blank line terminate the block
+            # scan, to stop a bare key "reaching" a distant list. That hazard is
+            # not real — in YAML a `- ` list belongs to the nearest preceding
+            # key however many blanks and comments intervene — and the bound
+            # cost a correct parse: the list fell out of the scan and its items
+            # were promoted to phantom keys, reproducing the very corruption
+            # this parser was widened to eliminate, with the entry then LOADING
+            # CLEAN because `tasks` was falsy.
+            ("blank BEFORE the items", "tasks:\n\n  - {C}\n  - {G}\n"),
+            ("blank INSIDE the list", "tasks:\n  - {C}\n\n  - {G}\n"),
+            ("comment inside the list", "tasks:\n  - {C}\n  # note\n  - {G}\n"),
+            ("no blank at all (control)", "tasks:\n  - {C}\n  - {G}\n"),
+            ("a distant list still binds", "service: thing\nsensitivity:\n\n# c\n- {C}\n"),
+            ("two block lists", "tasks:\n  - {C}\naliases:\n  - alpha\n  - beta\n"),
+            ("key after a block", "tasks:\n  - {C}\n\nservice: thing\n"),
+            ("inline list", "tasks: [{C}, {G}]\n"),
+        ],
+    )
+    def test_the_parse_AGREES_WITH_PyYAML_and_never_invents_a_key(self, label, body):
+        """🔴 THE ORACLE IS PyYAML, NOT MY EXPECTATIONS.
+
+        This parser is hand-rolled for reasons the module docstring gives, but it
+        reads a YAML subset, and "what does this mean" is not ours to decide. The
+        previous guard here asserted my own belief about a bare key and passed
+        while the parser was silently disagreeing with every other reader of the
+        same bytes — a test that pins the author's model rather than the format
+        cannot catch the author being wrong about the format.
+
+        ⚠ PyYAML is a TEST-ONLY dependency and is deliberately not imported by
+        the module under test (the docstring explains why: implicit typing turns
+        `service: no` into `False`). Skipped rather than failed when absent, and
+        the phantom-key half is asserted either way — that half needs no oracle.
         """
-        fm = parse_front_matter(
-            "---\n"
-            "service: thing\n"
-            "sensitivity:\n"
-            "\n"
-            "# a comment, and then something list-shaped\n"
-            f"- {CLICKUP}\n"
-            "---\n"
+        text = "---\n" + body.replace("{C}", CLICKUP).replace("{G}", GITHUB) + "---\n"
+        fm = parse_front_matter(text)
+
+        # Half 1 — needs no oracle, so it runs even without PyYAML.
+        assert not any(k.startswith("-") for k in fm), (
+            f"[{label}] a list item was promoted to a front-matter key: {sorted(fm)}"
         )
-        assert fm["sensitivity"] == "", (
-            "a bare key reached across a blank line and bound a distant list"
+
+        # Half 2 — the differential.
+        yaml = pytest.importorskip("yaml", reason="PyYAML is a test-only oracle")
+        expected = yaml.safe_load(
+            body.replace("{C}", CLICKUP).replace("{G}", GITHUB)
         )
+        assert fm == expected, (
+            f"[{label}] this parser disagrees with PyYAML about valid YAML.\n"
+            f"  PyYAML: {expected}\n"
+            f"  ours  : {fm}"
+        )
+
+    @pytest.mark.parametrize(
+        "label,body",
+        [
+            ("orphan item between two keys",
+             "service: thing\n- {C}\nsensitivity: public\n"),
+            ("orphan item after a non-bare key",
+             "service: thing\nsensitivity: public\n- {C}\n"),
+            ("orphan item first",
+             "- {C}\nservice: thing\n"),
+        ],
+    )
+    def test_an_ORPHAN_list_item_is_SKIPPED_never_promoted_to_a_key(self, label, body):
+        """🔴 THE ONLY SHAPE THAT REACHES THE OUTER-LOOP SKIP — and without this
+        test that skip is UNTESTED. A mutation sweep proved it: deleting the
+        `_is_block_item(line): continue` guard from the outer loop SURVIVED the
+        entire suite, because every other fixture has a bare key above its list,
+        so the block scan claims every item and none is ever left for the outer
+        loop to mis-read.
+
+        An orphan `- ` line — one with no owning key — is NOT valid YAML
+        (`yaml.safe_load` raises `ParserError`), so there is no correct value to
+        recover and nothing is lost by skipping it. What matters is that it is
+        not turned into a front-matter key by its own internal colon: without the
+        guard this yields `{'- clickup': '868abc123'}`, a key nobody wrote, in a
+        mapping that is also used as the source label of malformed-entry errors.
+
+        This is the guard that closes the phantom-key class INDEPENDENTLY of
+        where any block scan starts or stops, so it is the one that must not rot.
+        """
+        text = "---\n" + body.replace("{C}", CLICKUP) + "---\n"
+        fm = parse_front_matter(text)
+        assert not any(k.startswith("-") for k in fm), (
+            f"[{label}] an orphan list item became a front-matter key: {sorted(fm)}"
+        )
+        assert CLICKUP.split(":", 1)[1] not in fm.values(), (
+            f"[{label}] the orphan item's id leaked in as some key's value"
+        )
+
+    def test_a_bare_key_with_NO_list_under_it_stays_a_STRING(self):
+        """The one deliberate divergence from PyYAML, pinned so it stays
+        deliberate: a bare `key:` is the empty STRING here, where YAML says
+        `None`. Every value in this schema is a string — the module docstring
+        gives the reason — and `sensitivity` consumers call string methods.
+
+        ⚠ This is NOT the claim "a bare key can never become a list". If a list
+        follows, it binds, exactly as YAML says; the case above pins that.
+        """
+        fm = parse_front_matter("---\nservice: thing\nsensitivity:\ncreated_by: x\n---\n")
+        assert fm["sensitivity"] == ""
         assert isinstance(fm["sensitivity"], str)
 
     def test_a_BARE_key_with_no_items_still_reads_as_a_STRING(self):
@@ -718,6 +834,38 @@ class TestTheLossyTagIsDerivationOnly:
         assert all(
             c in "abcdefghijklmnopqrstuvwxyz0123456789._/-" for c in slug
         ), tag
+
+    def test_the_64_RUNE_BOUND_is_pinned_at_its_own_BOUNDARY(self):
+        """🔴 THE EXACT BOUND WAS UNPINNED: `TAG_MAX_RUNES 64 -> 65` SURVIVED the
+        suite, because every fixture was either short or ~90/200 runes — nothing
+        sat near the edge, so an off-by-one was invisible.
+
+        🔴 AND THE FIRST VERSION OF THIS TEST WAS SELF-DEFEATING: it built both
+        fixtures by ARITHMETIC from `TAG_MAX_RUNES`, so mutating the constant
+        moved the fixtures with it and `64 -> 65` SURVIVED anyway. A fixture
+        derived from the constant under test cannot observe that constant
+        changing — `claude/RULES.md` names exactly this ("pick fixtures … distinct
+        from any CONSTANT the assertion names"), and I walked into it while
+        trying to avoid a different rot.
+
+        So the value is pinned FIRST, as its own assertion, and the fixtures are
+        LITERAL lengths. If the limit legitimately changes, this test fails and
+        says so, which is the point: the bound is a contract with clawgate's tag
+        surface, not an implementation detail.
+        """
+        assert TAG_MAX_RUNES == 64, (
+            "clawgate's tag limit is 64 runes; if it really changed, update the "
+            "literal fixtures below in the same commit"
+        )
+        # `clickup:` is 8 runes, so 56 `z` lands the tag exactly on 64, and 57
+        # puts it one over. Literals, deliberately — see the docstring.
+        at_limit = "clickup:" + "z" * 56
+        over_limit = "clickup:" + "z" * 57
+
+        tag = lossy_tag_for(parse_task_ref(at_limit))
+        assert len(tag) == 64, f"the at-limit fixture stopped straddling: {len(tag)}"
+        with pytest.raises(TaskRefError):
+            lossy_tag_for(parse_task_ref(over_limit))
 
     def test_the_over_long_and_empty_cases_are_genuinely_REACHED(self):
         """🔴 THE CONTROL FOR THE TEST ABOVE. `try/except: return` passes
