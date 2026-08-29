@@ -6897,7 +6897,16 @@ def test_derivation_reaches_a_fixpoint_in_ONE_regeneration(tmp_path):
 
 
 @pytest.mark.parametrize("bad", [
-    "0.8.1-beta", "v0.8.1", "0.08.1", "1.2.3.4.5", "0.8.65536", "0.8.²",
+    # ⚠ The 5-component case deliberately contains a part ABOVE 255, so no
+    # four consecutive parts of it can be read as an IPv4 address. devrc is a
+    # PUBLIC repo and `scripts/tests/test_no_public_ips.py` fails the build on
+    # any committed routable IP literal — including one inside a string or a
+    # comment, which is why this note describes the shape instead of quoting
+    # the value that tripped it. An earlier revision used five small ascending
+    # integers, whose first four formed exactly such an address. The current
+    # value doubles as the realistic shape: an already-derived version that
+    # got a second build component appended.
+    "0.8.1-beta", "v0.8.1", "0.08.1", "0.8.1.43738.1", "0.8.65536", "0.8.²",
     "0.8." + "9" * 5000,
 ])
 def test_write_manifest_version_refuses_an_illegal_CALLER_SUPPLIED_version(
