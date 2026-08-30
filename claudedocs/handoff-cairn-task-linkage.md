@@ -154,12 +154,10 @@ clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg
    `~/workspace/devrc-*` ones. That is a real backlog with its own owner (the
    `worktree-prune` index entry, 🔴 1 OPEN); do NOT mass-remove it as cleanup for this
    effort. One of them is `locked`.
-2. **IN FLIGHT — PR #1039, this doc's own branch.** It carries
-   `claudedocs/handoff-cairn-task-linkage.md`, so THIS FILE does not exist on `main` until
-   it lands. Its effective diff vs `main` is **this one file only** (302 lines); the other
-   10 paths `gh pr view --json files` reports landed on `main` independently and are
-   already identical. It is 33 commits behind `main`, which does not block (`strict:
-   false`). Merge it, or the next `/resume` finds no handoff at the path the kickoff names.
+2. ✅ **DONE 2026-08-30 — #1039 merged as `bd63b7bd`, ClickUp ids redacted first.**
+   THIS FILE now exists on `main`, so the path the kickoff names resolves. Redaction
+   verified by grep **against `origin/main`** with a positive control (24 matches on the
+   same pattern shape), so the zeros are real rather than a broken pattern.
 3. **cg#428 Layer B — criterion 4 (URL resolution).** BLOCKED on devrc#1011. It
    IMPORTS `scripts/collector/mention_scan.py`'s `CLICKUP_TASK_URL` / `_github_url` /
    `clawgate_url`; do not write a second resolver. Files:
@@ -168,9 +166,39 @@ clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg
    `scripts/clickup-mirror/mirror.py`,
    `clusters/workbench/apps/clickup-mirror/config-configmap.yaml`. Run the repo-revert
    probe first (below); a revert is its regression case.
-5. **Decide cg#365's canonical session id.** A decision, not a build.
-6. **Put `cairn` on PATH.** Two lines in `nix/home.nix` mirroring `claim-work`
-   (`:1238`, `mkOutOfStoreSymlink`) + a switch. Small, unblocked.
+5. **cg#365's canonical session id — DECIDED 2026-08-30: stamp BOTH, but fix COVERAGE
+   first.** Operator chose the deterministic route. Three measurements reshaped this from
+   "a decision, not a build" into a build with a known design:
+   - 🔴 **The trailer is on only 46% of the last 100 commits** (33% of the last 200,
+     measured on `origin/main`). So "git blame a line → resolve the session" fails on
+     *half* of commits regardless of which id is stamped. **Coverage is the real hole**,
+     not the id-space mismatch — and it is 46% precisely because the current trailer
+     depends on the agent remembering, i.e. prose where RULES wants structure.
+   - 🔴 **The hook layer's `session_id` IS the transcript uuid** — 69 of 69 per-session
+     state dirs under `~/.cache/claude-clawgate-writeback/s/` are uuid-shaped, **zero**
+     are `session_…` tokens. That is the mechanical confirmation of this doc's own
+     "two disjoint id spaces" finding, and it means a hook can supply the missing half.
+   - ⚠ **Do NOT assume uuid shape when writing it.** `scripts/lib/cairn_who.py:27-32`
+     records that 2 of 41 windows carried a `ses_…` token from a different runtime, and
+     that a join assuming uuid shape "silently matches nothing". Stamp the id **verbatim**.
+   - **Design:** a `PreToolUse` hook records the id keyed by its **Claude-ancestor PID**
+     (NOT a shared state file — that races between concurrent sessions in one repo), and
+     a `prepare-commit-msg` hook reads it and appends both trailers, idempotently.
+   - 🔴 **Install it into the devrc common `.git/hooks/`, NOT via `githooks/install.sh`.**
+     That installer sets `core.hooksPath` **globally** and, by its own header, arms the
+     devrc pre-push test gate by default — the #322 shape, where a pre-push hook that ran
+     the suite rewrote the branch it was pushing. Worktrees share the common dir, so one
+     direct install still covers all ~117.
+6. ✅ **DONE 2026-08-30 — `cairn` is on PATH.** devrc#1079, squash `7ed7d41a`, shipped to
+   BOTH hosts (`ship.sh` → both at `7ed7d41a`, 0 dangling / 0 stale each). ⚠ The
+   "two lines mirroring `claim-work` (`:1238`)" recipe was stale in two ways: the pattern
+   is at **`:1260-1261`**, and `mkOutOfStoreSymlink` is **required, not stylistic** —
+   `scripts/cairn` resolves `lib/` via `Path(__file__).resolve().parent` (`:68`, and
+   `:756/:808/:818` for the lazy `cairn_who` imports), so a store copy would resolve into
+   /nix/store where `scripts/lib/` is not deployed and die on import. That constraint is
+   now a **seam guard** over the relationship (reason + deploy mode), both halves watched
+   to fail with their own assertions. Verified on both hosts at the consumer level:
+   `readlink -f` terminates in the checkout, and `cairn who --help` from `/tmp` exits 0.
 7. **BLOCKED — do not start:** cg#362 and cg#363 wait on the teammate's private-repo
    migration ticket. ⚠ That is the **one** redacted id with no clawgate mirror, so unlike
    the other five it is NOT recoverable from a `clickup:` tag — find it in the ClickUp
@@ -244,6 +272,27 @@ clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg
   three `BLOCKED` and the rest `UNKNOWN`. Confirm the gate is green before assuming
   cg#428 can land.
 
+- 🔴 **THE LOCAL GATE IS RED ON THIS BOX FOR ATTRIBUTION-ONLY REASONS — cg#445, and the
+  first control run was CONFOUNDED.** `gate.sh` in a worktree of the shared clone fails
+  GUARD 10: *"the plugin could not show its `git config --global` write was CONTAINED …
+  Its zero is not evidence"* — `git config --global` exit 255, lock-contended after 6
+  attempts. Not a test failure: the instrument is refusing to vouch for itself, correctly.
+  Cause is the git **common** config, shared by ~117 worktrees plus concurrent sessions.
+  Measured 2×2:
+
+  | | worktree of shared clone | isolated clone |
+  |---|---|---|
+  | `main` unmodified | not measured | **PASS** |
+  | branch under test | **FAIL** | **PASS** |
+
+  ⚠ **The control that comes to hand first proves nothing.** Running `main` in an
+  *isolated clone* against a branch failing in a *worktree* varies the code AND the
+  environment at once — its PASS reads as "your diff is guilty" and would send you
+  debugging an innocent change. Hold the environment fixed and vary only the code.
+  **Tekton is green throughout**, and `CLAUDE.md` explains why the tiers legitimately
+  disagree: GUARD 10's `NOGIT_REPO_LOCAL` is EMPTY in the nix sandbox, so it is not the
+  same guard there. Cost: two ~20-minute runs, and this is the **third** rediscovery
+  (index `devrc/tests`, 2026-08-22 and 2026-08-28).
 - 🔴 **OPERATOR DECISIONS 2026-08-29/30, all four explicit.** (a) **Merge** #1049,
   squash. (b) **Accept the leaked ClickUp id — do NOT rewrite the branch.** (c) **File
   the flake** → cg#439. (d) **Stop the audit ladder at round 3.**
@@ -257,7 +306,11 @@ clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg
   each carry a `clickup:868…` tag on the personal clawgate board, so the whole ClickUp
   column is one `clawgatectl task ls` away for the one reader who has that board.
   ⚠ **Deliberately NOT redacted: the `Claude-Session:` token** in the cg#365 section — it
-  already appears in **9 of the last 200** commit *messages* on `origin/main`. Scrubbing
+  already appears in the commit messages of **5 commits** on `origin/main` (unchanged
+  across the last-100 and last-200 windows). ⚠ **An earlier revision of this line said
+  "9 of the last 200" and that was wrong** — it was a `grep -c` **line** count, and each
+  such commit repeats the token on ~3 lines, so it counted 15 lines as 9 and neither
+  number was a commit count. Count commits, not lines. Scrubbing
   the prose while it sits in the git log is theatre, and would have read as a guarantee
   this repo does not provide.
 - 🔴 **THE "SQUASH KEEPS MAIN CLEAN" CLAIM WAS FALSE, AND IS RETRACTED.** A real
