@@ -21,34 +21,30 @@ durable output is the linkage: which ClickUp ticket, which clawgate card, and wh
 genuinely built versus assumed.
 
 ## State now
-- **Branch / PR:** `feat/cairn-task-refs` @ **485202f8** → **innovation-upstream/devrc#1049**, OPEN.
-  Contains current `origin/main` (merged 3×, `main` moved 4× during gating).
-- **cg#428 is `ready_for_review`, 5 comments.** Criteria **1,2,3,5,6,7,8,9 DONE**.
-  **Criterion 4 (URL resolution) NOT DONE** — Layer B, blocked on devrc#1011.
-- **Shipped:** `tasks:` / `task:` front-matter schema on subsystem entries —
-  `scripts/lib/subsystem_resolver.py` (`TaskRef`, `parse_task_ref`, `format_task_refs`,
-  `lossy_tag_for`, block-list support in `parse_front_matter`, validation in
-  `from_mapping`), read surface in `scripts/lib/subsystem_recall.py`, 77 tests in
-  `scripts/tests/test_subsystem_task_refs.py`, schema documented in
-  `claude/skills/analyze-service/reference/index-store.md` (hash pin updated).
-- **Also carries two gate re-pins** neither side needed alone:
-  `scripts/tests` floor 8217 → **10269** (`scripts/run-tests.sh`), and a skill-listing
-  re-pin that turned out to duplicate #1069 and was resolved to `main`'s copy.
-- **Filed:** **cg#439** — the `test_git_repo_isolation` co-tenancy flake.
-- **Carried forward from the previous session** (its State-now section is replaced by this
-  one, so the provenance is restated rather than lost): cg#428 and cg#429 were CREATED
-  then; cg#362–365 were tagged `project:cairn` and had `repo` hand-corrected
-  (363/364/365 → `innovation-upstream/devrc`, 362 → unset). **Re-probed this session: NOT
-  reverted.** That correction is what rank 4's regression case watches.
-- **Gates at 485202f8: BOTH TIERS GREEN LOCALLY.** dev-host `gate.sh` →
-  `GATE: RESULT=PASS exit=0`; sandbox `nix build .#checks.{pytests,nodetests}` → exit 0
-  (read with no pipe; negative control `.doesnotexist` → exit 1).
-- ✅ **BOTH REQUIRED TEKTON CHECKS PASSED on 485202f8** — `devrc-pytests`
-  `collected=18905 passed=18903 skipped=2 failed=0 (floor 18076)`, `devrc-nodetests`
-  `1366/1366 (floor 1317)`. They sat `pending` for ~20 min first; a bounded poll settled
-  it. Branch protection was NOT touched.
-- **Deploy/verify:** nothing deployed. No `home-manager switch`; nothing in `nix/`.
-  The schema is inert until something writes a `tasks:` key — `/handoff` does not yet.
+- **Branch / PR:** nothing in flight. All work merged to `main`; base clone at `55fca8ff`.
+- **Ranks 1, 2, 5, 6 are DONE.** Every merge verified BY CONTENT (squash makes
+  `merge-base --is-ancestor` false forever):
+  - **rank 1** — devrc#1049 confirmed merged, all 6 blobs at `485202f8` byte-identical
+    to `origin/main`; `cairn-task-linkage-1` was already released; worktree removed.
+  - **rank 2** — devrc#1039 → **`bd63b7bd`**. ClickUp ids redacted first (see Gotchas).
+  - **rank 6** — devrc#1079 → **`7ed7d41a`**. `cairn` on PATH via `mkOutOfStoreSymlink`,
+    shipped to BOTH hosts, verified at the CONSUMER not just the deploy.
+  - **rank 5** — devrc#1083 → **`3568530d`**. The session-id trailer, after **ten**
+    audit rounds. Also devrc#1082 → `3b1a0477` (handoff corrections).
+- **Filed:** **cg#445** — GUARD 10 cannot be measured on this box.
+- 🔴 **DEPLOY STATUS: NOT DEPLOYED.** The hosts are still on `7ed7d41a` from the rank-6
+  work. `scripts/lib/session_trailer.py`, `scripts/claude-hooks/session-stamp.py` and the
+  `~/.claude/hooks/` entries exist in git and are deployed by NOTHING until a
+  `home-manager switch` / `scripts/ship.sh`. Merged ≠ deployed.
+- 🔴 **AND #1083 ACTIVATES NOTHING EVEN AFTER A SWITCH.** Both halves are opt-in operator
+  acts: the `PreToolUse` registration lives in per-host `settings.json` (unmanaged by
+  design), and the git half needs `scripts/install-session-stamp.sh --apply`. Merging
+  changed how zero commits are made.
+- ⚠ **The MERGED TREE was never gated.** Everything was verified on the PR branch at
+  `7e3b751b`; `main` moved twice underneath (`ad891a5c`, `52fdd983`) and `ad891a5c` also
+  touches `nix/home.nix`. `strict: false`, so neither Tekton nor I ran the suite on
+  `main + #1083`. The merge was textually clean and every entry is present — that is a
+  weaker claim than a gated one, and it is the one I can make.
 
 ## The cluster — ClickUp ↔ clawgate ↔ Cairn
 All six ClickUp tickets came from the **2026-08-26 harness / knowledge-sharing meeting**
@@ -140,69 +136,88 @@ clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg
   `git` DESCENDANT the test itself spawned is not excluded.
 - **Next probe:** work cg#439, not this doc.
 
+### CLOSED — the coverage figure, and the instrument that produced three wrong ones
+- **Observed (with values):** `Claude-Session:` trailer coverage on `origin/main` at
+  `3b1a0477`, counted PER COMMIT: **47 of the last 100, 67 of the last 200**. Confirmed by
+  three independent pipe-free methods and by the round-9 auditor.
+- 🔴 **The instrument was the whole story.** Counting with `git show … | grep -q` under
+  `set -o pipefail` UNDERCOUNTS: `grep -q` exits at the first match, `git show` can die of
+  SIGPIPE, and `pipefail` promotes that to a failed pipeline — dropping a commit that DID
+  match. Reproduced on the same 200 commits:
+  ```
+  with `set -o pipefail` + `grep -q`  ->  55   (41 at n=100)
+  with `set -o pipefail` + `grep -c`  ->  67   (no early exit, no SIGPIPE)
+  same loop without pipefail          ->  67
+  pipe-free (one subprocess/commit)   ->  67
+  ```
+  It is a RACE, not a rule — only ~12 of 67 drop, which is why the wrong number lands near
+  the truth and gets believed. And 55 is not even stable (55,55,55,56,55).
+- **Ruled out:** "anchoring changes the count" — it does not (67 either way); anchored vs
+  unanchored only matters when counting LINES.
+- **Every wrong figure in the feature's history traces to that one shape**, including a
+  41%/27% I adopted from an auditor without re-measuring and shipped into a docstring.
+
+### CLOSED — GUARD 10 on this box is an ENVIRONMENT verdict, not a code one (now cg#445)
+- **Observed (with values):** `gate.sh` in a worktree of the shared clone fails GUARD 10
+  with *"the plugin could not show its 'git config --global' write was CONTAINED … Its zero
+  is not evidence"* — `git config --global` exit 255, lock-contended after 6 attempts.
+  Full 2×2, one variable at a time:
+
+  | | worktree of shared clone | isolated clone |
+  |---|---|---|
+  | `main` unmodified | not measured | **PASS** |
+  | branch under test | **FAIL** | **PASS** |
+
+- 🔴 **The control that comes to hand first proves nothing.** Comparing `main`-in-an-
+  isolated-clone against a branch failing in a *worktree* varies the code AND the
+  environment; its PASS reads as "your diff is guilty" and sends the next person debugging
+  an innocent change. Hold the environment fixed; vary only the code.
+- **Ruled out:** the code. Tekton was green throughout, and `CLAUDE.md` explains why the
+  tiers legitimately disagree — GUARD 10's `NOGIT_REPO_LOCAL` is EMPTY in the nix sandbox,
+  so it is not the same guard there.
+
+### CLOSED — `nix build path:<a git WORKTREE>` breaks every git call in the sandbox
+- **Symptom + exact repro:** the merge-gating sandbox tier failed at GUARD 10's preflight,
+  before any test ran, on a branch whose diff could not reach `git config`.
+- **Observed:** a worktree's `.git` is a FILE (`gitdir: …/worktrees/<name>`), and `path:`
+  copies it into the build, so `src` looks like a repo whose gitdir is unreachable:
+  ```
+  $ printf 'gitdir: /nonexistent/worktrees/x\n' > $D/.git
+  $ GIT_CONFIG_GLOBAL=$D/gc git -C $D config --global probe.k v
+  fatal: not a git repository: (null)
+  ```
+- 🔴 **A five-build bisect "proved" it was nixpkgs' `patchShebangs`. That was WRONG and is
+  RETRACTED.** Every bisect copy was a `cp -a` with `.git` removed (per RULES.md's
+  worktree-copy rule), so each step silently varied `.git` presence alongside the file
+  under test. **Build the sandbox tier from a real CLONE, never from a worktree.**
+
 ## Next steps (ranked)
-1. ✅ **DONE 2026-08-29 — #1049 merged, verified BY CONTENT, cleanup complete.**
-   `mergedAt=2026-08-30T03:05:48Z`, squash `ee5b2b7b`. All **6** changed blobs at PR head
-   `485202f8` are byte-**identical** to `origin/main` (`index-store.md`,
-   `subsystem_recall.py`, `subsystem_resolver.py`, `run-tests.sh`,
-   `test_subsystem_resolver.py`, `test_subsystem_task_refs.py`) — the ancestry check was
-   never consulted. Cleanup: `cairn-task-linkage-1` was **already released**; the base
-   clone was **already** at `origin/main` (no ff-merge needed); worktree
-   `~/workspace/devrc-cairn-task-refs` removed after re-verifying `dirty=0 unpushed=0` at
-   the moment of removal. ⚠ **The "three audit leftovers" claim was WRONG** — there are
-   **~60** worktrees under `~/workspace/devrc/.claude/worktrees/agent-*` plus ~40 sibling
-   `~/workspace/devrc-*` ones. That is a real backlog with its own owner (the
-   `worktree-prune` index entry, 🔴 1 OPEN); do NOT mass-remove it as cleanup for this
-   effort. One of them is `locked`.
-2. ✅ **DONE 2026-08-30 — #1039 merged as `bd63b7bd`, ClickUp ids redacted first.**
-   THIS FILE now exists on `main`, so the path the kickoff names resolves. Redaction
-   verified by grep **against `origin/main`** with a positive control (24 matches on the
-   same pattern shape), so the zeros are real rather than a broken pattern.
-3. **cg#428 Layer B — criterion 4 (URL resolution).** BLOCKED on devrc#1011. It
-   IMPORTS `scripts/collector/mention_scan.py`'s `CLICKUP_TASK_URL` / `_github_url` /
+1. **Deploy and verify the session-id trailer end to end.** `scripts/ship.sh` (both hosts),
+   then decide whether to arm it. Files: `scripts/install-session-stamp.sh`,
+   `~/.claude/settings.json` (per-host). The installer is dry-run unless `--apply` and
+   prints the `settings.json` snippet on success.
+   forcing: none — nothing external is waiting on this; it is the natural close of rank 5.
+2. **cg#445 — GUARD 10 is unmeasurable on the workbench**, so `gate.sh`'s pytest tier is
+   red for attribution-only reasons on any run from a worktree of the shared clone. Two
+   ~20-minute control runs were burned this session establishing that, and the index shows
+   the class rediscovered on 2026-08-22 and 2026-08-28 before that.
+   forcing: gate — a required local gate is permanently red for reasons unrelated to any
+   change, which `claude/RULES.md` names as worse than no gate ("it trains everyone to
+   click through").
+3. **cg#428 Layer B — criterion 4 (URL resolution).** BLOCKED on devrc#1011. It must IMPORT
+   `scripts/collector/mention_scan.py`'s `CLICKUP_TASK_URL` / `_github_url` /
    `clawgate_url`; do not write a second resolver. Files:
    `scripts/lib/subsystem_resolver.py`, `scripts/tests/test_subsystem_task_refs.py`.
+   forcing: none — blocked, and nothing external is waiting.
 4. **cg#429 — clickup-mirror per-task repo override.** repo `homelab-talos`, files
    `scripts/clickup-mirror/mirror.py`,
    `clusters/workbench/apps/clickup-mirror/config-configmap.yaml`. Run the repo-revert
-   probe first (below); a revert is its regression case.
-5. **cg#365's canonical session id — DECIDED 2026-08-30: stamp BOTH, but fix COVERAGE
-   first.** Operator chose the deterministic route. Three measurements reshaped this from
-   "a decision, not a build" into a build with a known design:
-   - 🔴 **The trailer is on only 46% of the last 100 commits** (33% of the last 200,
-     measured on `origin/main`). So "git blame a line → resolve the session" fails on
-     *half* of commits regardless of which id is stamped. **Coverage is the real hole**,
-     not the id-space mismatch — and it is 46% precisely because the current trailer
-     depends on the agent remembering, i.e. prose where RULES wants structure.
-   - 🔴 **The hook layer's `session_id` IS the transcript uuid** — 69 of 69 per-session
-     state dirs under `~/.cache/claude-clawgate-writeback/s/` are uuid-shaped, **zero**
-     are `session_…` tokens. That is the mechanical confirmation of this doc's own
-     "two disjoint id spaces" finding, and it means a hook can supply the missing half.
-   - ⚠ **Do NOT assume uuid shape when writing it.** `scripts/lib/cairn_who.py:27-32`
-     records that 2 of 41 windows carried a `ses_…` token from a different runtime, and
-     that a join assuming uuid shape "silently matches nothing". Stamp the id **verbatim**.
-   - **Design:** a `PreToolUse` hook records the id keyed by its **Claude-ancestor PID**
-     (NOT a shared state file — that races between concurrent sessions in one repo), and
-     a `prepare-commit-msg` hook reads it and appends both trailers, idempotently.
-   - 🔴 **Install it into the devrc common `.git/hooks/`, NOT via `githooks/install.sh`.**
-     That installer sets `core.hooksPath` **globally** and, by its own header, arms the
-     devrc pre-push test gate by default — the #322 shape, where a pre-push hook that ran
-     the suite rewrote the branch it was pushing. Worktrees share the common dir, so one
-     direct install still covers all ~117.
-6. ✅ **DONE 2026-08-30 — `cairn` is on PATH.** devrc#1079, squash `7ed7d41a`, shipped to
-   BOTH hosts (`ship.sh` → both at `7ed7d41a`, 0 dangling / 0 stale each). ⚠ The
-   "two lines mirroring `claim-work` (`:1238`)" recipe was stale in two ways: the pattern
-   is at **`:1260-1261`**, and `mkOutOfStoreSymlink` is **required, not stylistic** —
-   `scripts/cairn` resolves `lib/` via `Path(__file__).resolve().parent` (`:68`, and
-   `:756/:808/:818` for the lazy `cairn_who` imports), so a store copy would resolve into
-   /nix/store where `scripts/lib/` is not deployed and die on import. That constraint is
-   now a **seam guard** over the relationship (reason + deploy mode), both halves watched
-   to fail with their own assertions. Verified on both hosts at the consumer level:
-   `readlink -f` terminates in the checkout, and `cairn who --help` from `/tmp` exits 0.
-7. **BLOCKED — do not start:** cg#362 and cg#363 wait on the teammate's private-repo
-   migration ticket. ⚠ That is the **one** redacted id with no clawgate mirror, so unlike
-   the other five it is NOT recoverable from a `clickup:` tag — find it in the ClickUp
-   list by its description (the private-repo migration, from the 2026-08-26 meeting).
+   probe below first; a revert is its regression case.
+   forcing: none — the mechanism is real but has not fired (re-probed this session, still
+   not reverted).
+5. **BLOCKED — do not start:** cg#362 and cg#363 wait on the teammate's private-repo
+   migration ticket.
+   forcing: none — blocked on a third party.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **cg#428 COLLIDES WITH OPEN PR #1011 (`feat/mention-detection-click-to-open`), and
@@ -375,20 +390,86 @@ clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg
   364 deliberately (`clawgate_handoff.sh field` → rc 0 ⇒ leave it alone). 428 is
   cross-linked to 364.
 
+- 🔴 **CARRIED FORWARD from the rank-5 decision block, which a REPLACE heading would
+  otherwise have dropped — the two measurements that settled cg#365's design.**
+  (a) **The hook layer's `session_id` IS the transcript uuid**: 69 of 69 per-session state
+  dirs under `~/.cache/claude-clawgate-writeback/s/` are uuid-shaped, **zero** are
+  `session_…` tokens. That is the mechanical confirmation that the claude.ai token in the
+  commit trailer and the handle `claude --resume` takes are **disjoint id spaces**, and why
+  searching a transcript for its own claude.ai token returns 0.
+  (b) ⚠ **Do NOT assume uuid shape when writing it.** `scripts/lib/cairn_who.py` records 2
+  of 41 windows carrying a `ses_…` token from a different runtime, and that a join assuming
+  uuid shape "silently matches nothing". `session_trailer.py` treats the id as an opaque
+  string throughout — validated for safety, never parsed or normalised.
+- 🔴 **OPERATOR DECISION 2026-08-29 — REDACT THE CLICKUP IDS before this doc landed on
+  public `main`.** Verified LOSSLESS, not assumed: cg#362/363/364/365 each carry a
+  `clickup:868…` tag on the personal clawgate board. The one exception is called out in
+  the doc — the unmirrored private-repo-migration ticket has no card, so it is findable by
+  description only.
+- 🔴 **OPERATOR DECISION 2026-08-30 — STOP THE AUDIT LADDER AT ROUND 10 AND MERGE.** The
+  stop rule (a clean round) had NOT fired, and this was a deliberate override with a
+  stated reason: the feature was behaviourally stable after round 9, and rounds 8-10 found
+  **zero** payload defects — every finding was my verification being weaker than claimed.
+  The rule had stopped measuring what it was built for.
+- 🔴 **TEN ROUNDS, AND THE FINDINGS WERE ALMOST ALL IN THE PREVIOUS ROUND'S REPAIRS.**
+  Worth carrying beyond this PR:
+  - **The same class re-opened one axis narrower, three rounds running.** Self-repair
+    clobbering hooks that were not ours: round 4 any `is_ours` match → round 5 + must name
+    this checkout → round 6 + must actually fail to parse. Each fix was right about the
+    case it named and left a residue beside it.
+  - **The commit that REMOVES a hazard is the likeliest place to introduce its twin.**
+    `is_legacy_ours` was deleted for deleting things that were not ours — and the same
+    commit let the installer overwrite things that were not ours, via a different
+    predicate, a few lines down.
+  - **Six vacuous guards, one signature:** *prose explaining why a case is excluded,
+    standing in for a test of that case.* Two I caught myself, only by running the mutant.
+  - **A seventh shape: a test that arranges the right scenario and asserts the wrong
+    observable.** It set up a broken `$TMPDIR` — exactly the condition needed — then
+    asserted only that a string was absent, which an rc-1 abort satisfies too.
+  - 🔴 **"This is an equivalent mutant, measured" is a label I introduced for honesty and
+    then MISUSED within two commits** — on a `chmod` whose equivalence held only at umask
+    022. A false untestability claim is worse than an unguarded guard: it tells the next
+    reader not to look.
+  - **A tautology I shipped:** `assert target.stat().st_dev == hooks.stat().st_dev` —
+    `target` is a file INSIDE `hooks`, true on every host under every installer forever.
+    It passed against the very installer it was added to catch.
+  - **Fixtures mask dependencies:** deleting the load-bearing `mkdir -p "$HOOKS"` survived
+    every test, because `git init` always creates `.git/hooks`.
+- 🔴 **A refactor changed which promises the code kept.** Hoisting wrapper generation "up
+  for reuse" made the DRY RUN create `.git/hooks` and made read-only paths abort rc 1; and
+  moving a scratch file to `$TMPDIR` turned an atomic `rename(2)` into a cross-filesystem
+  truncate-in-place. Neither looked like a behaviour change.
+- ⚠ **`test_dry_run_changes_nothing` passed through the entire dry-run-writes-to-disk
+  defect** — it asserts only that the hook FILE is absent. A test NAME wider than its
+  assertion reads as coverage and delivers a slice.
+- **`--emit-claims` / `audit-dispatch.py` refuses a delta round with no claims block, and
+  that refusal is correct** — an empty "what was claimed fixed" turns a delta audit into a
+  blind full audit that then reads as covered.
+- **Known-open in #1083, deliberately:** `git commit -v` / `--cleanup=scissors` drops the
+  trailer (editor-driven commits only; `-m`, which agents use, is fine); `transcript_path`
+  is recorded and read by nothing; the same-pid `record()` race was analysed but never
+  reproduced.
+
 ## How to verify
 ```bash
-# the PR and its checks
-gh pr view 1049 --repo innovation-upstream/devrc --json state,mergeable,mergeStateStatus
-gh pr checks 1049 --repo innovation-upstream/devrc
+# rank 5 landed, BY CONTENT (squash — never ancestry)
+git -C ~/workspace/devrc rev-parse origin/main:scripts/lib/session_trailer.py
 
-# both gate tiers on the branch (BOTH are required; they are different tiers)
-nix develop ~/workspace/devrc-cairn-task-refs -c bash ~/workspace/devrc-cairn-task-refs/scripts/gate.sh
-nix build ~/workspace/devrc-cairn-task-refs#checks.x86_64-linux.pytests --no-link; echo "rc=$?"
+# the hooks are deployed but NOT armed — both should be true after a switch
+readlink -f ~/.claude/hooks/session-stamp.py            # -> /nix/store/... (a store copy)
+python3 -c "import json;print([h for h in json.load(open('$HOME/.claude/settings.json')).get('hooks',{}).get('PreToolUse',[])])" | grep -c session-stamp || echo "NOT armed (expected)"
 
-# the schema itself, end to end
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc-cairn-task-refs/scripts/tests/test_subsystem_task_refs.py -q
+# the git half, dry-run — changes nothing
+bash ~/workspace/devrc/scripts/install-session-stamp.sh --repo ~/workspace/devrc
+
+# rank 6 at the CONSUMER, on both hosts
+command -v cairn && readlink -f ~/.local/bin/cairn && (cd /tmp && cairn who --help >/dev/null && echo "lazy import OK")
 
 # cg#362-365 repo values have not reverted (rank 4's regression case)
 clawgatectl task ls --summary 2>/dev/null | jq -r '.[] | select(.id>=362 and .id<=365) | "cg#\(.id) repo=\(.repo)"'
+
+# 🔴 the LOCAL gate must be run from an isolated CLONE, never a worktree
+C=$(mktemp -d); git clone --quiet --no-hardlinks ~/workspace/devrc "$C"
+cd "$C" && nix develop ~/workspace/devrc -c bash scripts/gate.sh
+nix build "path:$C#checks.x86_64-linux.pytests" --no-link   # ONE AT A TIME
 ```
