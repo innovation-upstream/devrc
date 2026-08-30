@@ -260,6 +260,27 @@ debugging, changing or copying a specific pipeline.
    `pod-security.kubernetes.io/enforce: privileged` on the namespace (`686d6ff0`).
    ⚠ That is a **broader** grant than the 7 infra namespaces already carrying it — this one
    runs webhook-triggered CI. The narrow fix is a baseline-compatible cache.
+   🔴 **THAT hostPath IS GONE — `6bec075e` was REVERTED by `7839ef54` 2h20m later
+   (2026-08-29T22:09Z → 2026-08-30T00:29Z), so gotcha #3's node-pinning and §"Adding a
+   pipeline" step 4 describe the LIVE gate, not history.** Re-measured 2026-08-30T18:5xZ on
+   `devrc-ci-vchxk-gate-pod`: `nodeSelector kubernetes.io/hostname=talos-xr6-r7p`, volume
+   `nix-cache` → `persistentVolumeClaim: nix-store-cache` (30Gi, Bound, selected-node
+   `talos-xr6-r7p`); `gitops-validate` on `talos-uvh-gtj` with its own `nix-store-cache-2`.
+   A read of this section taken *during* that 2h20m window is a correct measurement of a
+   state that no longer exists — check the volume live before quoting either shape.
+   🔴 **The revert was NOT the admission failure above — it is a SECOND, INDEPENDENT failure
+   of the same volume, and it is the one to solve first if the unpin is ever retried.** A
+   `DirectoryOrCreate` hostPath is created fresh by kubelet as **root**, so `seed-nix` fills
+   it and then nothing inside the sandbox can take the nix DB lock:
+   `error: opening lock file "/nix/var/nix/db/big-lock": Permission denied` — **75
+   occurrences across 42 tests, on EVERY devrc PR**, byte-identical on two different branches
+   (`devrc-ci-csfzb`/#1057, `devrc-ci-kdcmr`/#1059), against a pre-change run
+   (`devrc-ci-q4d5m`) of `failed=0` over 18,557 passed. The PVC works only because earlier
+   runs populated its `/nix` with ownership the nix build user can use. ⚠ **What the unpin
+   genuinely bought, recorded so it is not re-litigated from zero:** three nodes reachable
+   instead of one, queue wait **17–22m → 0.1m**, wall clock **39.1m median → 17.4m**. Retry
+   it only with the store's ownership solved FIRST and proven on a scratch pipeline — and
+   then reconsider `686d6ff0`, whose `privileged` exemption buys nothing while the PVC is back.
    **(b) `sandbox = false` in the CI pod.** The `nix build .#checks…` tier is only hermetic
    where nix's sandbox is ON. With it off, the *same derivation hash* produced `failed=1` on
    the dev host and `failed=43` in CI — identical inputs, different output, i.e. impure.
