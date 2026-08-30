@@ -108,6 +108,14 @@ def select_verdict(text: str) -> Verdict | None:
 #   (c) a bare line at column 0 inside a heredoc. `\t*` because `<<-` strips
 #       leading TABS at runtime, so a tab-indented heredoc line still lands at
 #       column 0; spaces are never stripped by `<<-`, so they stay safe.
+#       ⚠ KNOWN AND ACCEPTED FALSE POSITIVE, in the opposite direction: one line
+#       cannot tell you its heredoc operator, so a tab-indented body under a
+#       PLAIN `<<EOF` (where tabs are NOT stripped, so it emits at column 1 and
+#       is harmless) is still reported as a COLLISION — which has no ledger, so
+#       the only remedy would be editing the file. Accepted because it is
+#       latent: no file under `scripts/` currently has a tab-indented line.
+#       Prefer spaces in heredoc bodies. If this ever fires for real, the fix is
+#       to make the tab-indented case pinnable, not to drop the `\t*`.
 #
 _ESC = r"(?:\\[nr])*"
 _QUOTED = re.compile(rf"""(['"]){_ESC}{re.escape(RESERVED_PREFIX)}""")
@@ -125,15 +133,32 @@ _HEREDOC = re.compile(rf"""^\t*{re.escape(RESERVED_PREFIX)}""")
 _COMMENT = re.compile(r"^\s*#")
 
 # --- PAYLOAD CLASSIFICATION ---------------------------------------------------
-# Three outcomes, not two. The middle one is the finding an earlier revision of
-# this module got wrong: it called a payload it could not read "benign".
+# Three outcomes, not two, and BENIGN is a WHITELIST.
+#
+# 🔴 The first version of this enumerated the DYNAMIC shapes (`%s`, `{`, `$`) and
+# called everything else benign. That set is unbounded, and an audit found three
+# ordinary spellings it missed — `print("RESULT: " + v)`, `print("RESULT: ".join(p))`
+# and `` echo "RESULT: `cat v`" `` — each reported to the operator as "provably
+# harmless" while emitting a real forged verdict. Enumerating what is DANGEROUS
+# regenerates that bug on the next spelling nobody thought of.
+#
+# So the rule is inverted: a payload is BENIGN only when this module can PROVE
+# the whole emitted string is a CLOSED LITERAL — the quote closes on this line,
+# the text inside carries no interpolation marker, and nothing after the closing
+# quote can append to what gets printed. Everything else is DYNAMIC, which is
+# pinnable but only by a human enumeration. Unknown spellings now fail SAFE.
 _LITERAL_VERDICT = re.compile(r"""\s*\\?["']?\s*(PASS|FAIL)\b""")
-# A format placeholder (`%s`, `%d`), an f-string hole (`{`), or a shell/Make
-# variable (`$`) — the payload is computed at runtime and is unknowable here.
-_DYNAMIC = re.compile(r"""%[-#0-9.*]*[a-zA-Z]|\{|\$""")
-# The quoted literal ENDS at the prefix, so the payload is a separate argument:
-# `print("RESULT:", <expr>)`. Statically unknowable for the same reason.
-_PAYLOAD_IS_ANOTHER_ARG = re.compile(r"""^\s*\\?["']\s*[,)]""")
+
+# Anything that can splice a runtime value into a literal: shell/Make expansion
+# and command substitution (`$`, `` ` ``), an f-string or `.format` hole (`{`),
+# a printf/%-format placeholder (`%`).
+_INTERPOLATION = re.compile(r"""[$`{%]""")
+
+# What may follow the closing quote for the emission to still be a closed
+# literal: nothing, a bracket/paren/terminator, or a trailing comment. A `+`, a
+# `,` introducing another argument, or a `.join(`/`.format(` call all append to
+# what is printed, so any of them means the payload is NOT decidable here.
+_TERMINAL_AFTER_QUOTE = re.compile(r"""^[)\];\s]*(?:\#.*)?$""")
 
 COLLISION = "collision"
 DYNAMIC = "dynamic"
@@ -153,22 +178,35 @@ def classify_payload(line: str) -> str | None:
 
     `None`          — it emits nothing at column 0.
     `COLLISION`     — a literal `PASS`/`FAIL`. Indistinguishable from a verdict.
-    `DYNAMIC`       — the payload is computed at runtime (a format spec, an
-                      f-string hole, a variable, or a separate argument), so
-                      whether it collides CANNOT be decided by reading the
-                      source. 🔴 This is NOT benign, and it must never be
-                      reported as such: `printf "RESULT: %s (exit=%d)" …` really
-                      does emit a forged verdict when `$verdict` is `PASS`.
-    `BENIGN`        — a literal payload that is not `PASS`/`FAIL`.
+    `DYNAMIC`       — this module CANNOT PROVE what gets printed. 🔴 That is not
+                      "probably fine": `printf "RESULT: %s" "$verdict"` and
+                      `` echo "RESULT: `cat v`" `` both emit a real forged
+                      verdict. The DEFAULT, so an unrecognised spelling fails
+                      safe rather than being waved through.
+    `BENIGN`        — PROVED a closed literal that is not `PASS`/`FAIL`.
     """
     if not line_emits_reserved_prefix(line):
         return None
     after = line.split(RESERVED_PREFIX, 1)[1]
     if _LITERAL_VERDICT.match(after):
         return COLLISION
-    if _PAYLOAD_IS_ANOTHER_ARG.match(after) or _DYNAMIC.search(after):
-        return DYNAMIC
-    return BENIGN
+
+    quoted = _QUOTED.search(line)
+    if quoted:
+        quote = quoted.group(1)
+        close = after.find(quote)
+        if close == -1:
+            return DYNAMIC              # the quote never closes on this line
+        inside, rest = after[:close], after[close + 1:]
+        if _INTERPOLATION.search(inside):
+            return DYNAMIC              # a runtime value is spliced in
+        if not _TERMINAL_AFTER_QUOTE.match(rest):
+            return DYNAMIC              # `+ v`, `, v`, `.join(…)` — appends
+        return BENIGN
+
+    # Unquoted `echo RESULT: …` or a heredoc body line: the rest of the line IS
+    # the payload, so it is literal unless something interpolates into it.
+    return DYNAMIC if _INTERPOLATION.search(after) else BENIGN
 
 
 def line_is_collision(line: str) -> bool:
@@ -235,6 +273,50 @@ def dynamic_payload_separate_arg_line() -> str:
     """The payload is a separate argument, so the source cannot decide it —
     `print("RESULT:", "PASS" if bad else "FAIL")` is a forgery in both branches."""
     return 'print("' + RESERVED_PREFIX + '", "PASS" if bad else "FAIL")'
+
+
+def dynamic_payload_concat_line() -> str:
+    """🔴 Missed by the first (blacklist) classifier: `+` concatenation carries
+    no interpolation marker at all, so it was reported as provably benign."""
+    return 'print("' + RESERVED_PREFIX + ' " + verdict)'
+
+
+def dynamic_payload_join_line() -> str:
+    """🔴 Also missed: the literal is a JOINER, and the printed text is the
+    argument list."""
+    return 'print("' + RESERVED_PREFIX + ' ".join(parts))'
+
+
+def dynamic_payload_backtick_line() -> str:
+    """🔴 Also missed: shell command substitution. `cat verdict.txt` printing
+    `PASS` makes this a live forgery."""
+    return 'echo "' + RESERVED_PREFIX + ' `cat verdict.txt`"'
+
+
+def dynamic_payload_unclosed_quote_line() -> str:
+    """The quote does not close on this line, so nothing about the payload is
+    decidable from it."""
+    return 'echo "' + RESERVED_PREFIX + ' continued on the next line...'
+
+
+# One fixture per INTERPOLATION marker, each carrying that marker and no other
+# dynamic signal — so a mutant deleting one alternative cannot be killed by a
+# different arm catching the same fixture. That is exactly how three such
+# mutants survived a fully green suite one round ago.
+INTERPOLATION_FIXTURES = {
+    "$":  'echo "' + RESERVED_PREFIX + ' $verdict"',
+    "`":  'echo "' + RESERVED_PREFIX + ' `cat v`"',
+    "{":  'print(f"' + RESERVED_PREFIX + ' {verdict}")',
+    "%":  'printf "' + RESERVED_PREFIX + ' %s"',
+}
+
+# One fixture per APPEND shape — the arm that has no marker at all and is caught
+# only by `_TERMINAL_AFTER_QUOTE`.
+APPEND_FIXTURES = {
+    "concat":       'print("' + RESERVED_PREFIX + ' " + v)',
+    "join":         'print("' + RESERVED_PREFIX + ' ".join(p))',
+    "another-arg":  'print("' + RESERVED_PREFIX + '", v)',
+}
 
 
 def benign_line() -> str:

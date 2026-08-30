@@ -96,10 +96,13 @@ entry to get green: `NEAR_MISSES` is for payloads the scanner PROVED benign, and
 This is a SOURCE scan, so it sees a literal in the file it scans and nothing
 else. It is structurally blind to:
 
-  * an emission the prefix is BUILT UP into across lines — `v="RESULT:"` on one
-    line and `echo "$v PASS"` on another. (The single-line form `echo "$v PASS"`
-    is caught, as DYNAMIC, because the scan sees the variable; splitting the
-    prefix itself across two statements defeats it.)
+  * an emission whose PREFIX is built up across lines — `v="RESULT:"` on one
+    line and `echo "$v PASS"` on another. Measured: `echo "$v PASS"` alone is
+    not seen at all (no `RESULT:` literal, so no arm fires), and the assignment
+    `v="RESULT:"` is seen but classified BENIGN. 🔴 An earlier revision of this
+    bullet claimed the single-line form was "caught, as DYNAMIC" — false, and
+    false in the UNSAFE direction, which is precisely the defect this file
+    exists to catch. Stated correctly here after being measured;
   * runtime DEDENTING — `textwrap.dedent` strips common leading SPACES, so an
     indented literal inside a triple-quoted block can still reach column 0. The
     `<<-` tab case IS covered (see `_HEREDOC`); the space-stripping one is not,
@@ -114,6 +117,26 @@ else. It is structurally blind to:
   * every population outside the two registries — including pytest PLUGINS,
     which reach column 0 today (see the header). Unscanned, not proven safe.
 
+🔴 TWO MUTANTS ARE KNOWN TO SURVIVE THIS FILE, AND NEITHER IS CLOSED
+--------------------------------------------------------------------
+Recorded because a mutation sweep that reports only its kills is a claim about
+the mutants someone imagined:
+
+  * deleting the `NEAR_MISSES` filter clause from
+    `test_every_benign_prefix_emission_is_pinned` survives. There are ZERO live
+    BENIGN hits, so the clause iterates over nothing — an empty population
+    cannot exercise a filter, and no assertion over the live tree can fix that.
+    What IS closed is the predicate itself:
+    `test_the_ledger_FILTER_works_regardless_of_what_the_live_tree_holds`
+    exercises `_matches` on synthetic ledgers, so the filter is proven to work
+    the moment a BENIGN hit appears. The clause's REACHABILITY is not proven,
+    and saying otherwise would be the vacuous-guard shape this file is about.
+  * rewriting the registry cross-check so both sides are the same computation
+    survives — a comparison cannot detect being edited into a tautology. The
+    check is nonetheless LIVE, which is the part that matters and was measured:
+    breaking the regex to `\\.py"` makes the two extractions disagree (9 vs 5)
+    and fails with its own message.
+
 The scan is aimed at the shape that actually recurred: a copy-pasted literal.
 `test_cleanup_disk_gate.sh` acquired it by copy-paste, and the fix that was left
 behind was a comment. If an indirect emission ever appears, the honest response
@@ -124,6 +147,8 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
@@ -161,6 +186,13 @@ DYNAMIC_PAYLOADS = [
      "`PASS` or `FAIL`, so neither matches `^RESULT: (PASS|FAIL)`. gate.sh's own "
      "comment names this line as why that grep is anchored and narrow"),
 ]
+
+
+def _array_body(name: str) -> str:
+    """The raw text between `NAME=(` and its closing `)` in run-tests.sh."""
+    m = re.search(rf"^{name}=\((.*?)^\)", RUNNER_SRC, re.S | re.M)
+    assert m, f"{name} not found in run-tests.sh — the scan is reading nothing"
+    return m.group(1)
 
 
 def _bash_array(name: str) -> list[str]:
@@ -211,15 +243,23 @@ def test_the_registries_are_non_empty_and_every_entry_exists():
         assert entries, f"{name} parsed as EMPTY — the scan covers nothing"
     missing = [e for e in _registry_entries() if not (REPO / e).is_file()]
     assert not missing, f"registry names a file that does not exist: {missing}"
-    # 🔴 The floor is derived, never a literal. A hand-written total drifts the
-    # moment a registry gains an entry, and an assertion message carrying a
-    # WRONG total sends a debugger hunting a parser bug that is not there — this
-    # one said "ten" while the runner declared nine.
-    declared = sum(len(_bash_array(n)) for n in REGISTRIES)
-    assert len(_registry_entries()) == declared >= 8, (
-        f"parsed {len(_registry_entries())} registry entries against {declared} "
-        f"declared across {REGISTRIES}. The parser is reading the wrong thing."
-    )
+    # 🔴 ROUND-2 FINDING N4. The first attempt compared `_registry_entries()`
+    # against `sum(len(_bash_array(n)) …)` — the SAME computation, so the `==`
+    # could never fail and the message claimed a parser check it did not do.
+    # This cross-checks against a genuinely DIFFERENT extraction: count quoted
+    # script paths inside each array body by regex, rather than by splitting
+    # lines. It is a second reading, not an independent oracle — it would still
+    # miss a hazard both share — but it does catch the line-splitting bugs the
+    # message names.
+    parsed = len(_registry_entries())
+    by_regex = sum(
+        len(re.findall(r'"[^"\n]+\.(?:py|sh)"', _array_body(n)))
+        for n in REGISTRIES)
+    assert parsed == by_regex, (
+        f"two different extractions of the registries disagree: line-splitting "
+        f"saw {parsed}, a quoted-path regex saw {by_regex}. One of them is "
+        "reading the wrong thing.")
+    assert parsed >= 8, f"only {parsed} registry entries — the scan covers ~nothing"
 
 
 def test_the_scan_reads_real_bytes_from_those_files():
@@ -361,11 +401,19 @@ def test_positive_control_a_BENIGN_literal_is_seen_but_not_called_a_collision():
 
 
 def test_positive_control_an_UNREADABLE_payload_is_never_classed_benign():
-    """🔴 ROUND-1 FINDING, pinned. Both of these emit a real forged verdict at
-    runtime; the earlier revision classified both as near-misses and told the
-    operator they "do not collide today"."""
+    """🔴 ROUND-1 AND ROUND-2 FINDINGS, pinned together.
+
+    The first three were the round-1 defect. The last four are the round-2 one:
+    the fix enumerated DANGEROUS shapes, and these carry no marker from that
+    list, so all four were reported to the operator as provably harmless while
+    emitting a real forged verdict. They are why BENIGN is now a whitelist.
+    """
     for line in (G.dynamic_payload_printf_line(),
-                 G.dynamic_payload_separate_arg_line()):
+                 G.dynamic_payload_separate_arg_line(),
+                 G.dynamic_payload_concat_line(),
+                 G.dynamic_payload_join_line(),
+                 G.dynamic_payload_backtick_line(),
+                 G.dynamic_payload_unclosed_quote_line()):
         assert G.line_emits_reserved_prefix(line), f"not seen at all: {line}"
         assert G.classify_payload(line) == G.DYNAMIC, (
             f"a payload the scanner cannot read was classed "
@@ -373,6 +421,35 @@ def test_positive_control_an_UNREADABLE_payload_is_never_classed_benign():
         assert not G.line_is_collision(line), (
             "line_is_collision must stay LITERAL-only; DYNAMIC is carried by "
             "classify_payload so the two ledgers stay distinguishable")
+
+
+@pytest.mark.parametrize("marker", sorted(G.INTERPOLATION_FIXTURES))
+def test_each_interpolation_marker_has_its_OWN_control(marker):
+    """🔴 ROUND-2 FINDING N2. Three mutants each deleting ONE alternative of the
+    old dynamic regex all SURVIVED a fully green suite — every fixture carried
+    two markers, so a different arm always killed it and the deleted one was
+    never the reason. One fixture per marker, carrying that marker alone."""
+    line = G.INTERPOLATION_FIXTURES[marker]
+    others = [m for m in G.INTERPOLATION_FIXTURES if m != marker]
+    payload = line.split(G.RESERVED_PREFIX, 1)[1]
+    assert not any(o in payload for o in others), (
+        f"the {marker!r} fixture also carries {[o for o in others if o in payload]} "
+        "— a mutant deleting this alternative would die for the wrong reason")
+    assert G.classify_payload(line) == G.DYNAMIC, (
+        f"{marker!r} no longer forces DYNAMIC: {line}")
+
+
+@pytest.mark.parametrize("shape", sorted(G.APPEND_FIXTURES))
+def test_each_APPEND_shape_has_its_own_control(shape):
+    """The arm with NO marker at all — caught only by `_TERMINAL_AFTER_QUOTE`.
+    `print("RESULT: " + v)` carries nothing the interpolation class looks for."""
+    line = G.APPEND_FIXTURES[shape]
+    payload = line.split(G.RESERVED_PREFIX, 1)[1]
+    assert not G._INTERPOLATION.search(payload), (
+        f"the {shape!r} fixture carries an interpolation marker, so it would die "
+        "to that arm and prove nothing about the append check")
+    assert G.classify_payload(line) == G.DYNAMIC, (
+        f"{shape!r} no longer forces DYNAMIC: {line}")
 
 
 def test_a_source_COMMENT_quoting_the_grammar_is_not_an_emission():
@@ -402,17 +479,51 @@ def test_positive_control_an_unpinned_collision_is_reported():
 def test_a_ledger_needle_cannot_match_a_DIFFERENT_line_in_the_same_file():
     """🔴 The needle dimension, which the file-path control above cannot reach:
     an over-broad needle would let a pin swallow a NEW offender in a file that
-    already has one. Round 1 measured that broadening this ledger's needle to
-    '' left the suite fully green."""
+    already has one.
+
+    🔴 ROUND-2 FINDING N5: this planted a SHELL offender against a ledger whose
+    only entry pins a `.py` file, so a needle broadened to `'print('` — matching
+    every print in that file — still passed. The planted line must be in the
+    pinned file's OWN language or the control tests nothing.
+    """
     for name, ledger in (("NEAR_MISSES", NEAR_MISSES),
                          ("DYNAMIC_PAYLOADS", DYNAMIC_PAYLOADS)):
         for rel, needle, why in ledger:
             assert needle.strip(), f"{name} entry for {rel} has an EMPTY needle"
-            planted = (rel, 999, G.offending_shell_line())
+            offender = (G.offending_python_escape_line() if rel.endswith(".py")
+                        else G.offending_shell_line())
+            planted = (rel, 999, offender)
             assert not _matches((rel, needle, why), planted), (
                 f"{name}'s needle {needle!r} also matches a planted collision in "
-                f"the SAME file ({rel}) — the pin is too broad to distinguish "
-                "the line it was written for from a new offender beside it")
+                f"the SAME file ({rel}, {offender!r}) — the pin is too broad to "
+                "distinguish the line it was written for from a new offender "
+                "beside it")
+
+
+def test_the_ledger_FILTER_works_regardless_of_what_the_live_tree_holds():
+    """🔴 ROUND-2 FINDING N6. `NEAR_MISSES` is empty and there are zero live
+    BENIGN hits, so every assertion that filters through it iterates over
+    nothing — deleting the filter clause entirely left the suite green. An empty
+    population must not be mistaken for a working predicate.
+
+    So exercise `_matches` against SYNTHETIC ledgers and hits, which is a claim
+    about the predicate rather than about today's tree.
+    """
+    ledger = [("scripts/tests/test_x.sh", "3 problems", "why")]
+    hit_same = ("scripts/tests/test_x.sh", 4, 'echo "RESULT: 3 problems"')
+    hit_other_file = ("scripts/tests/test_y.sh", 4, 'echo "RESULT: 3 problems"')
+    hit_other_line = ("scripts/tests/test_x.sh", 9, 'echo "RESULT: 7 problems"')
+
+    assert any(_matches(e, hit_same) for e in ledger), (
+        "_matches does not match the very line its pin was written for")
+    assert not any(_matches(e, hit_other_file) for e in ledger), (
+        "_matches ignores the PATH — a pin would cover an identical line "
+        "anywhere in the repo")
+    assert not any(_matches(e, hit_other_line) for e in ledger), (
+        "_matches ignores the NEEDLE — a pin would cover any hit in that file")
+    assert not any(_matches(e, hit_same) for e in []), (
+        "an EMPTY ledger matched something, so the empty state is not "
+        "distinguishable from a ledger that is never read")
 
 
 def test_negative_control_an_indented_emission_is_not_flagged():
