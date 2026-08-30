@@ -351,7 +351,8 @@ def resolve_mentions(identifiers, *, body: str, members, contacts,
     # the new one", and never invents a class the matcher does not have.
     cursors: list[list] = []  # [needle, cursor] in first-seen order
     for ident in idents:
-        author = _resolve_one(ident, member_set=member_set, candidates=candidates)
+        author = _resolve_one(ident, member_set=member_set,
+                              candidates=candidates, identity=identity)
         needle = "@" + ident
         slot = next((s for s in cursors if _same_needle(s[0], needle)), None)
         if slot is None:
@@ -375,44 +376,72 @@ def resolve_mentions(identifiers, *, body: str, members, contacts,
 
 
 def _identity_groups(candidates: list) -> dict[str, frozenset]:
-    """`identifier -> every identifier belonging to the SAME PERSON`.
+    """`author id -> the author ids of every contact ROW that is the SAME PERSON`.
+
+    THE ONE DEFINITION OF "these two contact rows are one person". Both
+    `_colliding_needles()` (is this OTHER member's longer name allowed to veto?)
+    and `_resolve_one()` (are these two matches an AMBIGUITY?) ask it, so the two
+    cannot drift apart — round-4 audit F-B, where the second site open-coded the
+    predicate as a per-row author string while its own comment claimed identity.
 
     🔴 ONE PERSON CAN BE TWO CONTACT ROWS, DURABLY. `_promote_placeholder()`'s
     `NOT EXISTS` branch deliberately DECLINES when a real row already holds the
-    uuid, so a phone-only placeholder minted by a draft is left in place forever
+    uuid, so a phone-only PLACEHOLDER minted by a draft is left in place forever
     once an envelope has taught the real row the same number. Both rows then
-    carry that number, and the shared identifier is the only thing that ties
-    them together — which is what this unions on.
+    carry that number, and the shared identifier is the only thing tying them
+    together.
 
-    Round-3 audit F3: `_colliding_needles()` compared raw `_contact_author()`
-    strings, so that person read as TWO people and their own longer name vetoed
-    their own ping — the exact case the `_colliding_needles` docstring claims is
-    excluded. Comparing resolved IDENTITY rather than a row's chosen author id
-    is what makes one person one person.
+    🔴 BUT A SHARED IDENTIFIER ALONE IS NOT ENOUGH, AND ROUND-3'S FIX ASSUMED IT
+    WAS (round-4 audit F-A). `signal.contacts.phone_number` is plain `TEXT` with
+    NO unique constraint, and `_promote_placeholder()` only ever touches
+    `is_placeholder` rows — so `upsert_contact(signal_uuid=B, phone_number=NUM)`
+    while a REAL row A already holds `NUM` simply inserts a SECOND REAL row.
+    That is the ordinary number-recycling / number-change shape, and unioning it
+    merged two genuinely different people into one identity: person B's longer
+    name stopped vetoing, and `--mention Ann` against a body reading
+    `@Ann Smith` PINGED A. A wrong send, not a refusal — the one thing this
+    module promises never to do.
 
-    Rows with no identifier in common stay separate: there is nothing in the
-    data linking them, and merging on a NAME would reopen the prefix collision
-    the collision rule exists for.
+    So the union is gated: two rows are the same person only when they share an
+    identifier AND at least one of them is a PLACEHOLDER, which is exactly the
+    mid-`_promote_placeholder` shape the paragraph above describes and the only
+    one the data can actually justify. Two real rows sharing a number are two
+    people until something other than the number says otherwise; the collision
+    rule then vetoes, and a veto is a refusal.
+
+    Rows with no identifier in common stay separate for the same reason: merging
+    on a NAME would reopen the prefix collision the collision rule exists for.
     """
-    parent: dict[str, str] = {}
+    rows = list(candidates or [])
+    parent = list(range(len(rows)))
 
-    def find(x: str) -> str:
-        while parent.setdefault(x, x) != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
 
-    for contact in (candidates or []):
-        ids = sorted(_contact_ids(contact))
-        for other in ids[1:]:
-            root_a, root_b = find(ids[0]), find(other)
+    for i, row_a in enumerate(rows):
+        for j in range(i + 1, len(rows)):
+            row_b = rows[j]
+            if not (_contact_ids(row_a) & _contact_ids(row_b)):
+                continue
+            if not (row_a.get("is_placeholder") or row_b.get("is_placeholder")):
+                continue
+            root_a, root_b = find(i), find(j)
             if root_a != root_b:
                 parent[root_a] = root_b
 
-    clusters: dict[str, set] = {}
-    for key in list(parent):
-        clusters.setdefault(find(key), set()).add(key)
-    return {key: frozenset(clusters[find(key)]) for key in parent}
+    clusters: dict[int, set] = {}
+    for i, row in enumerate(rows):
+        clusters.setdefault(find(i), set()).add(
+            _norm_member(_contact_author(row)))
+    out: dict[str, set] = {}
+    for i, row in enumerate(rows):
+        key = _norm_member(_contact_author(row))
+        if key:
+            out.setdefault(key, set()).update(clusters[find(i)] - {""})
+    return {key: frozenset(ids) for key, ids in out.items()}
 
 
 def _colliding_needles(ident: str, *, author: str, candidates: list,
@@ -431,12 +460,15 @@ def _colliding_needles(ident: str, *, author: str, candidates: list,
     Restricted to OTHER PEOPLE: a contact with `display_name="Ann"` and
     `profile_name="Ann Marie"` is one person, and their own longer name must not
     veto their own ping. 🔴 "Other person" is decided on RESOLVED IDENTITY —
-    `_identity_groups()`, which unions contact rows sharing any identifier — not
-    on the raw `_contact_author()` string, which splits one person into two the
-    moment they hold both a real row and a durable phone-only placeholder
-    (round-3 audit F3). Restricted to LONGER names because an equal-length match
-    IS this identifier (the matcher is case-insensitive), which is the
-    `MentionNameAmbiguous` case and belongs to `_resolve_one`.
+    `_identity_groups()`, which unions a real row with a durable phone-only
+    PLACEHOLDER for the same person — not on the raw `_contact_author()` string,
+    which splits that person into two (round-3 audit F3). 🔴 And the union is
+    gated on `is_placeholder`, because two REAL rows sharing a recycled phone
+    number are two people: merging them dropped the second person's veto and
+    sent a mention pointing at the FIRST (round-4 audit F-A). Restricted to
+    LONGER names because an equal-length match IS this identifier (the matcher
+    is case-insensitive), which is the `MentionNameAmbiguous` case and belongs
+    to `_resolve_one`.
     """
     width = len(ident.strip())
     identity = identity or {}
@@ -444,7 +476,7 @@ def _colliding_needles(ident: str, *, author: str, candidates: list,
     mine = identity.get(key) or frozenset({key})
     return ["@" + name
             for contact in (candidates or [])
-            if not (_contact_ids(contact) & mine)
+            if _norm_member(_contact_author(contact)) not in mine
             for name in _contact_names_raw(contact)
             if len(name) > width]
 
@@ -473,8 +505,19 @@ def _refuse_overlapping_spans(mentions: list) -> None:
             )
 
 
-def _resolve_one(ident: str, *, member_set: set, candidates: list) -> str:
-    """One `--mention` value → the `author` id, or raise the matching refusal."""
+def _resolve_one(ident: str, *, member_set: set, candidates: list,
+                 identity: dict | None = None) -> str:
+    """One `--mention` value → the `author` id, or raise the matching refusal.
+
+    `identity` is `_identity_groups(candidates)` — the SAME map
+    `_colliding_needles()` uses. Passed in rather than rebuilt so the two sites
+    cannot disagree about who is one person (round-4 audit F-B: this site
+    open-coded the predicate as `_contact_author(contact)`, a per-ROW string,
+    while the comment beside it claimed identity — so one person holding a real
+    row and a durable placeholder row was refused as an AMBIGUITY, and the
+    remedy the message offered was half wrong because one of the two ids it
+    printed was the synthetic placeholder uuid, which is not in `member_set`).
+    """
     ident = ident.strip()
     if looks_like_author_id(ident):
         if _norm_member(ident) not in member_set:
@@ -506,11 +549,22 @@ def _resolve_one(ident: str, *, member_set: set, candidates: list) -> str:
     wanted = ident.lower()
     matched = [c for c in candidates if wanted in _contact_names(c)]
     # De-duplicate by IDENTITY, not by row: one person can legitimately have two
-    # contact rows mid-`_promote_placeholder`, and that is not ambiguity.
-    by_author = {}
+    # contact rows mid-`_promote_placeholder`, and that is not ambiguity. The
+    # identity comes from `_identity_groups()` — the one definition, shared with
+    # `_colliding_needles()` — and the group's REAL row wins over its placeholder
+    # row, so a person who has both resolves to their real Signal id instead of
+    # the synthetic one.
+    identity = identity or {}
+    by_identity: dict = {}
     for contact in matched:
-        by_author.setdefault(_contact_author(contact), contact)
-    if not by_author:
+        key = _norm_member(_contact_author(contact))
+        group = identity.get(key) or frozenset({key})
+        group_key = min(group) if group else key
+        seen = by_identity.get(group_key)
+        if seen is None or (seen.get("is_placeholder")
+                            and not contact.get("is_placeholder")):
+            by_identity[group_key] = contact
+    if not by_identity:
         # 🔴 TRUNCATED, DELIBERATELY. Some names help an operator spot a typo;
         # the WHOLE list is a roster dump, and `draft` needs no approval token,
         # so an unbounded enumeration here is a free membership oracle for any
@@ -527,13 +581,17 @@ def _resolve_one(ident: str, *, member_set: set, candidates: list) -> str:
             + ". Pass a bare uuid or +E.164 instead if the person has no stored "
               "name."
         )
-    if len(by_author) > 1:
+    if len(by_identity) > 1:
+        # The ids PRINTED are the ones a caller can actually pass back: each
+        # group's chosen row's author, not the normalised grouping key.
+        choices = sorted(_contact_author(c) for c in by_identity.values())
         raise MentionNameAmbiguous(
-            f"{ident!r} is AMBIGUOUS — it matches {len(by_author)} members of "
-            f"the target group ({sorted(by_author)!r}). Pass the bare uuid or "
+            f"{ident!r} is AMBIGUOUS — it matches {len(by_identity)} members of "
+            f"the target group ({choices!r}). Pass the bare uuid or "
             f"+E.164 of the one you mean."
         )
-    author, contact = next(iter(by_author.items()))
+    contact = next(iter(by_identity.values()))
+    author = _contact_author(contact)
     if contact.get("is_placeholder"):
         raise MentionResolvesToPlaceholder(
             f"{ident!r} resolves to a PLACEHOLDER contact ({author!r}) — a "

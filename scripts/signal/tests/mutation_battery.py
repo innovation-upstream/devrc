@@ -482,13 +482,19 @@ MUTANTS: list[Mutant] = [
            "test_each_MUTE_PROBE_actually_calls_the_method_it_is_keyed_under", SUITE_EXCL),
 
     # ------------------------------------------------------------------ #
-    # MENTIONS (#1121, round-3 delta audit). Every mutant here is a way the
-    # round-3 fixes revert or over-correct. Two shapes recur and both are
+    # MENTIONS (#1121, round-3 and round-4 delta audits). Every mutant here is a
+    # way the fixes revert or over-correct. Two shapes recur and both are
     # represented deliberately: a SECOND matching rule that agrees with the
     # first only on ASCII (MEN1/MEN2), and an identity check that is either
-    # too narrow (MEN5/MEN7) or too wide (MEN6). The fixture pairs are chosen
-    # so ASCII CANNOT SEE the bug — `ß`/`ss` and `İstanbul`/`istanbul` — which
-    # is exactly why the round-2 fix passed its own battery.
+    # too narrow (MEN5/MEN7/MEN11) or too wide (MEN6/MEN10). The fixture pairs
+    # are chosen so ASCII CANNOT SEE the bug — `ß`/`ss` and `İstanbul`/
+    # `istanbul` — which is exactly why the round-2 fix passed its own battery.
+    #
+    # 🔴 MEN10 IS THE ROW TO READ FIRST. Every other mutant here breaks a
+    # REFUSAL; MEN10 is the round-3 fix as shipped, and it SENDS. An identity
+    # rule has two failure directions and only one of them is loud — which is
+    # why the too-narrow and too-wide mutants come in pairs whose killers cannot
+    # see each other's defect.
     # ------------------------------------------------------------------ #
     Mutant("MEN1", "the cursor's equivalence goes back to `casefold()` — a SECOND "
                    "matching rule. Agrees with `re.IGNORECASE` on ASCII and disagrees "
@@ -538,7 +544,7 @@ MUTANTS: list[Mutant] = [
                    "reads as two people and their own longer name vetoes their own "
                    "ping. The shipped round-2 defect, in its narrowest form.",
            MEN,
-           "            if not (_contact_ids(contact) & mine)",
+           "            if _norm_member(_contact_author(contact)) not in mine",
            "            if _contact_author(contact) != author",
            "test_a_person_in_TWO_contact_rows_does_not_veto_their_OWN_ping",
            SUITE_MENT),
@@ -548,7 +554,7 @@ MUTANTS: list[Mutant] = [
                    "cannot see: it passes under this, while round-2's F2 silently "
                    "reopens and `@Ann` lands on `@Ann Smith` again.",
            MEN,
-           "            if not (_contact_ids(contact) & mine)",
+           "            if _norm_member(_contact_author(contact)) not in mine",
            "            if False",
            "test_a_DIFFERENT_persons_longer_name_still_vetoes", SUITE_MENT),
 
@@ -557,9 +563,56 @@ MUTANTS: list[Mutant] = [
                    "builder rather than the lookup — because a union that silently "
                    "stops merging is not visible at the call site at all.",
            MEN,
-           "        for other in ids[1:]:",
-           "        for other in []:",
+           "            if not (row_a.get(\"is_placeholder\") or row_b.get(\"is_placeholder\")):\n"
+           "                continue",
+           "            if True:\n"
+           "                continue",
            "test_a_person_in_TWO_contact_rows_does_not_veto_their_OWN_ping",
+           SUITE_MENT),
+
+    Mutant("MEN10", "🔴 [round-4 audit F-A] the identity union DROPS its "
+                    "`is_placeholder` gate, so any two rows sharing an identifier "
+                    "merge — which is what round-3's own fix shipped. `phone_number` "
+                    "is TEXT with no UNIQUE constraint and `_promote_placeholder()` "
+                    "only touches placeholder rows, so two REAL rows can durably hold "
+                    "one number (number recycling / a number change). Merging them "
+                    "dropped person B's veto and PINGED person A on a body reading "
+                    "@Ann Smith — the first WRONG SEND in four audit rounds, where "
+                    "every other defect here was a refusal. The OPPOSITE "
+                    "over-correction to MEN7, which MEN7's killer cannot see: it "
+                    "passes under this.",
+           MEN,
+           "            if not (row_a.get(\"is_placeholder\") or row_b.get(\"is_placeholder\")):\n"
+           "                continue",
+           "            if False:\n"
+           "                continue",
+           "test_two_REAL_rows_sharing_a_number_are_TWO_people_not_one",
+           SUITE_MENT),
+
+    Mutant("MEN11", "🔴 [round-4 audit F-B] `_resolve_one()` de-duplicates by the "
+                    "ROW's author string again instead of by identity — the second "
+                    "site of the predicate `_identity_groups()` owns. One person "
+                    "holding a real row and a durable placeholder row is then refused "
+                    "as an AMBIGUITY, and the remedy the message prints is half wrong: "
+                    "one of the two ids is the synthetic placeholder uuid, which is "
+                    "not in `member_set`, so following the advice hits "
+                    "MentionNotAMember.",
+           MEN,
+           "        group = identity.get(key) or frozenset({key})",
+           "        group = frozenset({key})",
+           "test_one_person_with_a_real_AND_a_placeholder_row_is_NOT_ambiguous",
+           SUITE_MENT),
+
+    Mutant("MEN12", "`NAME_HINT_MAX` shrinks 5 -> 4. Found SURVIVING all 908 tests by "
+                    "the round-4 audit (F-C): the only assertion on the truncation "
+                    "derived its expectation from `_mentions.NAME_HINT_MAX` itself, so "
+                    "it agreed with any value. A cap on how much of a group roster a "
+                    "token-free `draft` refusal will enumerate is a privacy constant; "
+                    "an uncovered one drifts in the other direction just as quietly.",
+           MEN,
+           "NAME_HINT_MAX = 5",
+           "NAME_HINT_MAX = 4",
+           "test_the_name_hint_cap_is_a_LITERAL_five_not_whatever_the_module_says",
            SUITE_MENT),
 
     Mutant("MEN8", "`utf16_span()` stops forwarding `avoid` — the exported wrapper "
@@ -650,6 +703,30 @@ def _verdict(rc: int, failures: set[str], killer: str) -> tuple[str, str]:
     if killer in failures:
         return "KILLED", f"by {killer} (+{len(failures) - 1} other)"
     return "KILLED-WRONG-REASON", f"expected {killer}, got {sorted(failures)}"
+
+
+def headline(results) -> str:
+    """The `N/M killed` line. PURE — extracted so it is table-testable.
+
+    🔴 IT USED TO DOUBLE-SUBTRACT (round-4 audit F-D). The count was
+    `len(results) - len(bad) - len(equiv)`, and a row that is BOTH `equivalent`
+    AND bad — an "equivalent" mutant that got KILLED, i.e. precisely the finding
+    the flag exists to surface — was charged to both subtrahends. Observed live
+    as `-1/0 killed`. The exit code and the `!!` lines were correct throughout;
+    only the number a reader scans FIRST was wrong, which is the worst place for
+    one, because a negative headline reads as a glitch in the tool rather than
+    as a finding about the ledger.
+
+    Counted, not subtracted: the numerator is the real mutants that met their
+    expectation, the denominator the real mutants. Equivalent rows are reported
+    separately and never enter either.
+    """
+    real = [r for r in results if not r[0].equivalent]
+    equiv = [r for r in results if r[0].equivalent]
+    killed = [r for r in real if r[1] == r[0].expected]
+    return (f"{len(killed)}/{len(real)} killed by their NAMED test"
+            + (f"  ({len(equiv)} EQUIVALENT, expected to survive)"
+               if equiv else ""))
 
 
 def _git_status(repo: Path) -> tuple[int, str]:
@@ -772,9 +849,7 @@ def main(argv=None) -> int:
     # argument recorded in its `why`.
     bad = [r for r in results if r[1] != r[0].expected]
     equiv = [r for r in results if r[0].equivalent]
-    print(f"\n{len(results) - len(bad) - len(equiv)}/{len(results) - len(equiv)} "
-          f"killed by their NAMED test"
-          + (f"  ({len(equiv)} EQUIVALENT, expected to survive)" if equiv else ""))
+    print("\n" + headline(results))
     for m, verdict, detail in bad:
         expected = f"expected {m.expected}" if m.equivalent else ""
         print(f"  !! {verdict}: {m.id} — {detail} {expected}".rstrip(),

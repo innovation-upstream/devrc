@@ -1854,3 +1854,191 @@ def test_utf16_span_FORWARDS_avoid_so_it_really_is_one_matching_rule():
     body = "@Ann Smith and @Ann ok"
     assert _mentions.utf16_span(body, "@Ann") == (0, 4)
     assert _mentions.utf16_span(body, "@Ann", avoid=["@Ann Smith"]) == (15, 4)
+
+
+# --------------------------------------------------------------------------- #
+# ROUND-4 delta audit
+# --------------------------------------------------------------------------- #
+# --- F-A: two REAL rows sharing a number are TWO PEOPLE --------------------- #
+def test_two_REAL_rows_sharing_a_number_are_TWO_people_not_one():
+    """🔴 RED at fbeca469 — and red by SENDING, not by refusing. Round-4 F-A.
+
+    THE ONLY DEFECT IN FOUR AUDIT ROUNDS THAT PRODUCED A WRONG SEND. Round-3's
+    own fix unioned contact rows on ANY shared identifier, and
+    `signal.contacts.phone_number` is plain `TEXT` with no UNIQUE constraint —
+    so the two real rows below read as ONE person, person B's longer name
+    stopped vetoing, and `--mention Ann` against a body whose visible text is
+    `@Ann Smith` emitted `{'author': uuidA, 'start': 0, 'length': 4}`: a ping
+    for A under B's name on screen.
+
+    The assertion is the REFUSAL, because that is what the module promises —
+    "every failure here is a REFUSAL, never a drop". Measured at fbeca469 this
+    raised nothing at all and returned that mention, so the failure mode this
+    pins is a send, not a wrong exception class.
+    """
+    number = "+15550777"
+    contacts = [
+        {"signal_uuid": ANN_UUID, "phone_number": number, "display_name": "Ann",
+         "profile_name": None, "is_placeholder": False},
+        {"signal_uuid": BOB_UUID, "phone_number": number, "display_name": None,
+         "profile_name": "Ann Smith", "is_placeholder": False},
+    ]
+    with pytest.raises(MentionSpanMissing):
+        _resolve(["Ann"], "@Ann Smith please", members=[number, ANN_UUID, BOB_UUID],
+                 contacts=contacts)
+
+
+def test_the_TWO_REAL_ROW_shape_is_what_the_public_upsert_API_really_produces(db):
+    """🔴 The F-A fixture is not invented — `SignalDB` builds it in three calls.
+
+    No SQL. An envelope teaches a real row a number; a SECOND envelope carries a
+    DIFFERENT uuid with the SAME number (number recycling, or a number change
+    Signal has not reconciled). `_promote_placeholder()` only ever touches
+    `is_placeholder` rows, so it declines silently and the insert lands a second
+    REAL row. Both carry the number; neither is a placeholder.
+
+    MIXED and measured that way: the three `assert` lines on the rows are GREEN
+    at fbeca469 — an INVARIANT GUARD proving the shape is reachable from the
+    public API, not regression coverage. The final `resolve_mentions` assertion
+    is RED at fbeca469 (it returned a mention for ANN_UUID); it is here so both
+    halves are joined in ONE run rather than reasoned about across two.
+    """
+    number = "+15550777"
+    db.upsert_contact(signal_uuid=ANN_UUID, phone_number=number, display_name="Ann")
+    db.upsert_contact(signal_uuid=BOB_UUID, phone_number=number,
+                      profile_name="Ann Smith")
+    rows = db.contacts_by_identifiers([number, ANN_UUID, BOB_UUID])
+    assert len(rows) == 2, f"expected two REAL rows on one number, got {rows!r}"
+    assert {r["phone_number"] for r in rows} == {number}
+    assert sorted(bool(r["is_placeholder"]) for r in rows) == [False, False], \
+        "neither row is a placeholder — that is the whole point of this shape"
+    with pytest.raises(MentionSpanMissing):
+        _mentions.resolve_mentions(
+            ["Ann"], body="@Ann Smith please",
+            members=[number, ANN_UUID, BOB_UUID], contacts=rows, is_group=True)
+
+
+# --- F-B: the de-duplication predicate, consolidated ----------------------- #
+def test_one_person_with_a_real_AND_a_placeholder_row_is_NOT_ambiguous():
+    """🔴 RED at fbeca469 — `MentionNameAmbiguous`. Round-4 F-B.
+
+    `_resolve_one()` de-duplicated its name matches on `_contact_author()`, a
+    per-ROW string, while the comment above it claimed identity. On the durable
+    two-row split — the same one `_colliding_needles()` was fixed for in round 3
+    and which the sibling test above proves the public API produces — ONE person
+    was refused as TWO. Worse, the remedy the message offered ("pass the bare
+    uuid") was half wrong: one of the two ids it printed is the synthetic
+    placeholder uuid, which is not in the membership, so following the advice
+    lands on `MentionNotAMember`.
+
+    Now both sites ask `_identity_groups()`, and the REAL row wins the group, so
+    the author on the wire is a real Signal id rather than the synthetic one.
+    """
+    number = "+15550777"
+    contacts = [
+        {"signal_uuid": ANN_UUID, "phone_number": number, "display_name": "Ann",
+         "profile_name": None, "is_placeholder": False},
+        {"signal_uuid": _signal_db.placeholder_uuid(number),
+         "phone_number": number, "display_name": None, "profile_name": "Ann",
+         "is_placeholder": True},
+    ]
+    assert _resolve(["Ann"], "@Ann hi", members=[number, BOB_UUID],
+                    contacts=contacts) == [
+        {"author": ANN_UUID, "start": 0, "length": 4}]
+
+
+def test_the_F_B_shape_too_is_what_the_public_upsert_API_produces(db):
+    """The same three ordinary `upsert_contact()` calls, both rows named 'Ann'.
+
+    RED at fbeca469 on the final assertion, for the same reason as the test
+    above; the row assertions are GREEN there — INVARIANT GUARDS that the state
+    is reachable without SQL.
+    """
+    number = "+15550777"
+    db.upsert_contact(signal_uuid=ANN_UUID, display_name="Ann")
+    db.upsert_contact(phone_number=number, profile_name="Ann")
+    db.upsert_contact(signal_uuid=ANN_UUID, phone_number=number)
+    rows = db.contacts_by_identifiers([number, ANN_UUID])
+    assert len(rows) == 2 and sorted(bool(r["is_placeholder"]) for r in rows) \
+        == [False, True]
+    assert _mentions.resolve_mentions(
+        ["Ann"], body="@Ann hi", members=[number, BOB_UUID], contacts=rows,
+        is_group=True) == [{"author": ANN_UUID, "start": 0, "length": 4}]
+
+
+def test_two_DIFFERENT_people_answering_to_one_name_are_STILL_ambiguous():
+    """The negative control on F-B: identity-aware must not become blind.
+
+    Bob and Cai share a display name and share NO identifier. A consolidation
+    that collapsed everything into one group would pass the F-B test above and
+    silently start picking one of two strangers to ping.
+
+    GREEN at fbeca469 — an INVARIANT GUARD, not regression coverage. It is here
+    because the fix REPLACES the de-duplication key rather than adding to it.
+    """
+    with pytest.raises(MentionNameAmbiguous) as exc:
+        _resolve(["Bob"], "hello @Bob")
+    message = str(exc.value)
+    assert "matches 2 members" in message
+    assert BOB_UUID in message and CAI_UUID in message, (
+        "the refusal must print ids the caller can actually pass back")
+
+
+def test_a_name_carried_ONLY_by_the_placeholder_row_is_STILL_refused():
+    """The other negative control: consolidation must not launder a placeholder.
+
+    Preferring the REAL row inside an identity group is only safe while a group
+    whose MATCH is a placeholder still refuses. Here the two rows are the same
+    person (the durable split above), but `Ann Smith` is stored only on the
+    synthetic row — so the only thing the name resolves to is a placeholder, and
+    the answer must stay `MentionResolvesToPlaceholder` rather than quietly
+    borrowing the real row's uuid or putting the synthetic one on the wire.
+
+    GREEN at fbeca469 — an INVARIANT GUARD, not regression coverage.
+    """
+    number = "+15550777"
+    contacts = [
+        {"signal_uuid": ANN_UUID, "phone_number": number, "display_name": "Ann",
+         "profile_name": None, "is_placeholder": False},
+        {"signal_uuid": _signal_db.placeholder_uuid(number),
+         "phone_number": number, "display_name": None,
+         "profile_name": "Ann Smith", "is_placeholder": True},
+    ]
+    with pytest.raises(MentionResolvesToPlaceholder):
+        _resolve(["Ann Smith"], "@Ann Smith hi", members=[number, BOB_UUID],
+                 contacts=contacts)
+
+
+# --- F-C: the name-hint cap was uncovered ---------------------------------- #
+def test_the_name_hint_cap_is_a_LITERAL_five_not_whatever_the_module_says():
+    """🔴 Round-4 F-C. `NAME_HINT_MAX = 5 -> 4` SURVIVED all 908 tests.
+
+    GREEN at fbeca469 — an INVARIANT GUARD on a constant nothing had pinned, not
+    regression coverage: no behaviour changed, a hole in the coverage was
+    closed. Its evidence is the MUTANT it now kills (MEN12), which the round-4
+    audit measured surviving the whole suite.
+
+    The neighbouring truncation test derives its expectation from
+    `_mentions.NAME_HINT_MAX` itself, so it agrees with any value the module
+    happens to hold — a test that cannot disagree with the implementation it
+    tests. This one pins the LITERAL, because the constant is a privacy budget:
+    `draft` needs no approval token, so this refusal is a free, repeatable probe
+    and the cap is the only thing bounding how much of a guessed group's roster
+    it enumerates. Drift in either direction should be a deliberate edit here.
+
+    Both halves are asserted from literals — five names printed, seven withheld
+    out of twelve — so a changed cap cannot make the test agree with itself.
+    """
+    assert _mentions.NAME_HINT_MAX == 5
+    many = [{"signal_uuid": f"{i:08d}-1111-4111-8111-111111111111",
+             "phone_number": None, "display_name": f"Member{i:02d}",
+             "profile_name": None, "is_placeholder": False}
+            for i in range(12)]
+    with pytest.raises(MentionNameNotFound) as exc:
+        _resolve(["Zoe"], "hi @Zoe",
+                 members=[c["signal_uuid"] for c in many], contacts=many)
+    message = str(exc.value)
+    printed = [c["display_name"] for c in many
+               if c["display_name"].lower() in message]
+    assert len(printed) == 5, printed
+    assert "+7 not shown" in message
