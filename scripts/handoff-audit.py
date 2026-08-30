@@ -99,14 +99,31 @@ RESUME_COST = 200
 # the JUSTIFICATION for the highest-risk change in that round, which is exactly the
 # kind of number that gets re-quoted instead of re-derived.
 # 🔴 An OPEN section is the LIVE half of the doc, and widening GOTCHAS to a
-# word-boundary search pulled 13 of them in — `Open decisions (yours, not the
+# word-boundary search pulled such sections in — `Open decisions (yours, not the
 # platform's)`, `🔴 PENDING — HUMAN decisions/actions`, `🔴 Parked on YOU —
-# product/ops decisions`. Nothing is mis-booked today (measured: 0 B of retracted
-# bytes, 2 advisory bullets), but any future `- … dead-end …` bullet under
-# `## Open decisions` would be booked as evictable history. The file already owned
-# this guard shape for WORK_STATUS and simply did not apply it to the families.
+# product/ops decisions`. The file already owned this guard shape for WORK_STATUS
+# and simply did not apply it to the families.
+#
+# 🔴 THIS GUARD IS PURELY PREVENTIVE — IT REMEDIES NOTHING TODAY. Measured
+# 2026-08-30 over the 414-doc corpus: it suppresses **10 H2 sections / 14,466 B**,
+# and those sections contain **0 retracted bullets and 0 advisory bullets**. The
+# `retracted` and `RELOCATE_DURABLE` totals are byte-identical with and without it
+# (117,706 B / 232 bullets; 568 advisory). Positive control, so that pair of zeros
+# is an absence and not a dead probe: the same scan finds 232 retracted bullets in
+# the GOTCHAS sections that are NOT suppressed.
+# ⚠ Round 2 wrote this as "13 of them" and "0 B of retracted bytes, 2 advisory
+# bullets". Both are wrong — 10, and 0 advisory. Round 3 caught it, which makes it
+# the second consecutive round whose fix shipped an unreproducible number
+# JUSTIFYING that same fix; round 2's own claim 4 was the first. The value of the
+# guard is entirely forward-looking: a future `- … dead-end …` bullet under
+# `## Open decisions` would otherwise be booked as evictable history.
+#
 # Applied to GOTCHAS ONLY: `Open investigations` is the INVESTIGATIONS family's
-# canonical heading and legitimately contains resolved sub-blocks.
+# canonical heading and legitimately contains resolved sub-blocks. ⚠ That rationale
+# is narrower than it reads — all three families apply a positive per-item
+# predicate inside the section, so the asymmetry is a judgement, not a derivation.
+# It is measured inert either way: 0 headings match both GOTCHAS∧OPEN and
+# INVESTIGATIONS.
 OPEN_SECTION = re.compile(r"\bopen\b|\bpending\b|\bparked\b|\bwaiting\b|\bunresolved\b", re.I)
 
 NEXT_STEPS = re.compile(r"\bnext steps\b|\bdo next\b|\bwhat'?s next\b", re.I)
@@ -408,7 +425,7 @@ def resolve_targets(args):
             found = [p.resolve()]
         elif not p.is_dir():
             print(f"handoff-audit: no such path: {p}", file=sys.stderr)
-            per_root.append((str(p), None))
+            per_root.append((str(p), None, 0))
             continue
         else:
             found = []
@@ -421,7 +438,13 @@ def resolve_targets(args):
                 seen.add(f)
                 uniq.append(f)
                 added += 1
-        per_root.append((str(p), added))
+        # 🔴 `matched` is carried so a 0 can say WHY. Tallying after dedup fixed the
+        # column-does-not-sum-to-the-header defect and re-created, for a different
+        # cause, the very silence this tally exists to break: a fully-overlapping
+        # root and a genuinely empty one both printed a bare `0`. An operator then
+        # hunts for a typo in a path that was in fact wholly covered by an earlier
+        # root. Same shape as the empty-root case in this function's docstring.
+        per_root.append((str(p), added, len(found)))
     return uniq, per_root
 
 
@@ -437,10 +460,17 @@ def render(audits, show_all, n_detail, n_sections, out=sys.stdout, per_root=()):
     p(f"# handoff-doc audit — {len(audits)} doc(s)")
     if per_root:
         p("\n## population (each root as given, and what it contributed)")
-        for root, n in per_root:
-            p(f"  {'NO SUCH PATH' if n is None else format(n, '>5')}  {root}")
+        for root, n, matched in per_root:
+            if n is None:
+                cell = "NO SUCH PATH"
+            elif n == 0 and matched:
+                cell = f"0 (dup)"          # every doc here was already counted
+            else:
+                cell = format(n, ">5")
+            p(f"  {cell:>12}  {root}")
         p("  Counted after dedup, so the column SUMS to the header even when two")
-        p("  roots overlap. A root contributing 0 is shown, not hidden.")
+        p("  roots overlap. `0 (dup)` = every doc here was already counted under an")
+        p("  earlier root; a bare `0` = this path genuinely holds no handoff docs.")
     p(f"\ntarget {TARGET:,} B   ·   hard cap {HARD:,} B")
     p("  🔴 NOT ENFORCED. No gate in this repo measures a handoff doc, so every")
     p("     verdict below is a REFERENCE you may argue with, not a rejection. The")

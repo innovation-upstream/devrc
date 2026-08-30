@@ -405,13 +405,13 @@ def test_resolve_targets_reports_what_each_root_contributed(tmp_path):
     empty.mkdir()
     docs, per_root = HA.resolve_targets([str(tmp_path / "a"), str(empty)])
     assert len(docs) == 1
-    assert per_root == [(str(tmp_path / "a"), 1), (str(empty), 0)]
+    assert per_root == [(str(tmp_path / "a"), 1, 1), (str(empty), 0, 0)]
 
 
 def test_resolve_targets_flags_a_nonexistent_root(tmp_path):
     docs, per_root = HA.resolve_targets([str(tmp_path / "nope")])
     assert docs == []
-    assert per_root == [(str(tmp_path / "nope"), None)]
+    assert per_root == [(str(tmp_path / "nope"), None, 0)]
 
 
 # --- round 2: the corpus SHOUTS a terminal status, so case is the discriminator ---
@@ -448,20 +448,35 @@ def test_resolved_head_is_case_sensitive_on_purpose(tmp_path):
     assert titles == ["Everything else is **CLOSED** — verified"], titles
 
 
-def test_open_sections_are_not_scanned_for_evictable_content(tmp_path):
-    """Widening GOTCHAS to a word-boundary search pulled in the LIVE half of the
-    doc — `Open decisions`, `PENDING — HUMAN decisions/actions`, `Parked on YOU`.
-    Nothing was mis-booked at the time (0 B), so this guard is preventive: a
-    dead-end bullet under an OPEN heading must not be booked as history."""
-    a = _doc(tmp_path, """# Handoff: t — 2026-08-29
+OPEN_VS_CLOSED = """# Handoff: t — 2026-08-29
 
 ## Open decisions (yours, not the platform's)
 - **Dead end (do not re-derive):** we are NOT doing the cache thing.
 
 ## Gotchas / decisions / dead-ends
 - **Dead end (do not re-derive):** the cache theory was REFUTED.
-""")
+"""
+
+
+def test_open_sections_are_not_scanned_for_evictable_content(tmp_path):
+    """Widening GOTCHAS to a word-boundary search pulled in the LIVE half of the
+    doc — `Open decisions`, `PENDING — HUMAN decisions/actions`, `Parked on YOU`.
+    Nothing was mis-booked at the time (0 B), so this guard is preventive: a
+    dead-end bullet under an OPEN heading must not be booked as history."""
+    FIXTURE = OPEN_VS_CLOSED
+    a = _doc(tmp_path, FIXTURE)
+    # 🔴 ASSERT WHICH BULLET, NOT HOW MANY. A count of 1 is satisfied by the
+    # INVERTED guard too (scan only OPEN sections) — proven: mutant
+    # `GOTCHAS.search(title) and OPEN_SECTION.search(title)` leaves a count
+    # assertion green, because exactly one bullet is booked either way. Round 3
+    # found this; it is the "reads as coverage while providing none" shape this
+    # file's round 1 was written to close.
     assert len(a["retracted"]) == 1, "only the closed Gotchas section is scanned"
+    s, e, _b = a["retracted"][0]
+    booked = "".join(FIXTURE.splitlines(keepends=True)[s:e])
+    assert "REFUTED" in booked, (
+        f"the booked bullet came from the OPEN section, not the closed one: {booked!r}"
+    )
 
 
 def test_overlapping_roots_do_not_double_count(tmp_path):
@@ -473,5 +488,7 @@ def test_overlapping_roots_do_not_double_count(tmp_path):
     (cd / "handoff-b.md").write_text("# H\n")
     docs, per_root = HA.resolve_targets([str(tmp_path / "r"), str(cd)])
     assert len(docs) == 2
-    assert sum(n for _r, n in per_root if n is not None) == len(docs)
-    assert per_root == [(str(tmp_path / "r"), 2), (str(cd), 0)]
+    assert sum(n for _r, n, _m in per_root if n is not None) == len(docs)
+    # the overlapping root reports 0 NEW but 2 MATCHED, so its zero is legible as
+    # "already counted" rather than "empty" — round 3's F2.
+    assert per_root == [(str(tmp_path / "r"), 2, 2), (str(cd), 0, 2)]
