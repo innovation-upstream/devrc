@@ -404,6 +404,18 @@ def _ends_in_trailer_block(body: str) -> bool:
     if start == 0:
         return False                 # the last paragraph IS the subject's
     para = lines[start:]
+    if not para:
+        # 🔴 `body` is `rstrip("\n")`, which strips NEWLINES and not a final line
+        # of spaces or tabs. Such a line is falsy under `.strip()`, so the scan
+        # above never moves, `start == len(lines)`, and this slice is EMPTY —
+        # `para[0]` then raised IndexError. Measured: `"fix: v\n\nbody\n   \n"`
+        # stamped fine BEFORE this predicate existed and raised after, so it is
+        # a STRICT regression, and the hook's broad `except` swallowed it into a
+        # commit that succeeded carrying no trailer, with nothing logged.
+        # Reachable via `--cleanup=verbatim` and from any direct library caller;
+        # git's own cleanup strips such lines before the hook on the `-m` path.
+        # A trailing blank paragraph is not a trailer block, so: do not join.
+        return False
     if not _TRAILER_LINE_RE.match(para[0]):
         return False                 # a block cannot open on a continuation
     return all(_TRAILER_LINE_RE.match(text)

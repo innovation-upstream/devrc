@@ -625,3 +625,40 @@ class TestTheSeparatorIsChosenFromTheLastParagraph:
     def test_an_indented_continuation_stays_inside_the_block(self):
         assert st._ends_in_trailer_block(
             "fix: x\n\nbody\n\nCo-Authored-By: A\n    <a@b.c>") is True
+
+
+class TestAWhitespaceOnlyTailDoesNotRaise:
+    """🔴 REGRESSION. `body` is `rstrip("\\n")`, so a final line of SPACES
+    survives; it is falsy under `.strip()`, so the paragraph scan never moves and
+    the slice is EMPTY. Indexing it raised IndexError — and the message was
+    stamped fine BEFORE the paragraph predicate existed, so this is a strict
+    regression, not a pre-existing gap.
+
+    It matters because the failure is SILENT end to end: `prepare_commit_msg.py`
+    calls `append_trailer` outside any try, and the module's broad
+    `except Exception: sys.exit(0)` plus the wrapper's `2>/dev/null` turn the
+    crash into a commit that succeeds carrying no trailer. Nothing is logged.
+    That contradicts the module header's "FAILS OPEN, ALWAYS ... degrades to
+    'no trailer'" — it degraded by crashing, which is a different thing.
+    """
+
+    # Distinct shapes on purpose: after a body, after a trailer block, and a
+    # message that is nothing but whitespace. Each reaches the empty slice by a
+    # different route through the scan.
+    @pytest.mark.parametrize("name,message", [
+        ("spaces-after-body", "fix: v\n\nbody\n   \n"),
+        ("spaces-after-trailer", "subject\n\nCo-Authored-By: A\n  \n"),
+        ("tab-after-body", "fix: v\n\nbody\n\t\n"),
+        ("whitespace-only", "   \n"),
+    ])
+    def test_it_stamps_instead_of_raising(self, name, message):
+        out = st.append_trailer(message, "SID-42")
+        assert "Claude-Session-Id: SID-42" in out
+        # The original body must survive verbatim — a crash-avoidance fix that
+        # silently ate the message would satisfy the assertion above alone.
+        assert out.startswith(message.rstrip("\n"))
+
+    def test_the_predicate_itself_reports_no_block(self):
+        """Pinned separately: a trailing blank paragraph is not a trailer block,
+        so the stamp must be SEPARATED rather than joined to whatever precedes."""
+        assert st._ends_in_trailer_block("fix: v\n\nbody\n   ") is False
