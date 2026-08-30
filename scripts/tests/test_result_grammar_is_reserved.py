@@ -468,21 +468,52 @@ def test_the_unquoted_and_heredoc_arms_are_REACHED_and_correct(shape):
         f"{expected!r}: {line}")
 
 
-@pytest.mark.parametrize("op", sorted(G.SHELL_CONTROL_FIXTURES))
+@pytest.mark.parametrize("op", sorted(G.SEPARATOR_FIXTURES))
 def test_each_COMMAND_SEPARATOR_has_its_OWN_control(op):
     """🔴 ROUND-4 FINDING NEW-4. The first separator class had a killer for `|`
     ALONE — dropping `;`, `&`, `<` or `>` each survived a green suite. That is
     the same "one mutant per alternative" gap already closed for the
     interpolation class in round 2, reintroduced in the fix for round 3.
 
-    Each fixture is a real two-command forgery: drop that operator and the line
-    stops splitting, becomes one command whose payload starts ` ok …`, and is
-    reported BENIGN.
+    Drop that character and the line stops splitting, becomes one command whose
+    payload starts ` ok …`, and is reported BENIGN.
     """
-    line = G.SHELL_CONTROL_FIXTURES[op]
+    line = G.SEPARATOR_FIXTURES[op]
     assert G.classify_payload(line) == G.COLLISION, (
         f"{op!r} no longer splits the line, so the second command's literal "
         f"verdict is invisible: {line}")
+
+
+@pytest.mark.parametrize("op", sorted(G.CHAIN_FIXTURES))
+def test_a_chain_stage_spelling_a_verdict_is_a_collision(op):
+    """`|`, `>(…)` and `<(…)` are not independent commands, but a stage that
+    spells a literal verdict still forges one."""
+    line = G.CHAIN_FIXTURES[op]
+    assert G.classify_payload(line) == G.COLLISION, (
+        f"{op!r} no longer exposes the chain stage's literal verdict: {line}")
+
+
+@pytest.mark.parametrize("shape", sorted(G.CHAIN_TRANSFORM_FIXTURES))
+def test_a_transforming_chain_is_NEVER_reported_benign(shape):
+    """🔴 ROUND-5 FINDING NEW-7 — the one fail-OPEN defect in this ladder.
+
+    No stage here spells a verdict, yet bash really writes `RESULT: PASS` at
+    column 0: the downstream stage REWRITES the upstream text. A revision that
+    reasoned "a pipe is a separator, not a hazard: this emits `RESULT: ok` and
+    nothing else" reported all of these as provably harmless — true of `tee`,
+    false of `sed`/`awk`/`tr` — and the suite PINNED one of them as correct.
+
+    Every other accepted imprecision in this module errs toward DYNAMIC. This
+    was the only one that erred toward BENIGN, which is why the chain path can
+    return COLLISION or DYNAMIC and nothing else.
+    """
+    line = G.CHAIN_TRANSFORM_FIXTURES[shape]
+    verdict = G.classify_payload(line)
+    assert verdict != G.BENIGN, (
+        f"a transforming chain was reported PROVABLY HARMLESS while bash really "
+        f"emits a forged verdict from it: {line}")
+    assert verdict == G.DYNAMIC, (
+        f"expected DYNAMIC (not provable) for {shape!r}, got {verdict!r}: {line}")
 
 
 @pytest.mark.parametrize("shape", sorted(G.SECOND_MENTION_BENIGN))

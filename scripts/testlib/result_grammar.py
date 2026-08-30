@@ -184,21 +184,42 @@ _INTERPOLATION = re.compile(r"""[$`{%]""")
 # error is in the FAIL-SAFE direction, which is why it is accepted rather than
 # tuned — but if it starts firing on ordinary summary lines, widen this class
 # rather than teaching people to pin reflexively.
+#
+# ⚠ SECOND ACCEPTED IMPRECISION, same direction: the separator split is
+# QUOTE-BLIND, so a `;`, `|` or `&` INSIDE a quoted literal cuts the string and
+# breaks the quote-closing proof, giving DYNAMIC. Measured examples —
+# `echo "RESULT: a & b"`, `echo "RESULT: see http://x/?a=1&b=2"`,
+# `echo "RESULT: 3 problems; and counting"`. All are closed literals reported as
+# unprovable. Zero live impact in the scanned population, pinnable in
+# DYNAMIC_PAYLOADS, and fail-SAFE — a revision of this comment claimed the split
+# was "precise in both directions", which it is not.
 _TERMINAL_AFTER_QUOTE = re.compile(r"""^[)\];\s]*(?:\#.*)?$""")
 
-# Shell COMMAND SEPARATORS. Their role is to split a line into the commands it
-# actually runs, so each can be judged on its own — `&&` and `||` need no
-# alternatives of their own because `&` and `|` are in the class.
+# 🔴 TWO DIFFERENT RELATIONSHIPS, and collapsing them into one "separator" list
+# was a fail-OPEN bug.
 #
-# 🔴 They are a SEPARATOR list, not a danger list, and that distinction is the
-# fix for two findings at once. Treating an operator as inherently dangerous
-# made `echo RESULT: ok | tee f` DYNAMIC (it emits `RESULT: ok` — harmless), and
-# judging "is there a second RESULT: anywhere on the line" made
-# `echo "RESULT: 3 problems"  # never print RESULT: PASS here` a COLLISION —
-# unpinnable, so the only remedy was editing someone's prose. Splitting into
-# commands and taking the WORST verdict is precise in both directions.
-_SHELL_CONTROL = re.compile(r"""[;|&]""")
+# `;` and `&` start an INDEPENDENT command: each is judged on its own and the
+# line takes the worst verdict.
+_SEPARATOR = re.compile(r"""[;&]""")
 
+# `|`, `>(…)` and `<(…)` are NOT independent. A pipe's downstream stage INHERITS
+# stdout and REWRITES the upstream stream, and a process substitution runs a
+# second emitter — neither needs the literal `RESULT:` token to put a verdict at
+# column 0. Measured under bash, all of these really emit `RESULT: PASS`:
+#
+#     echo RESULT: ok | sed 's/ok/PASS/'
+#     echo RESULT: PASX | tr X S
+#     echo RESULT: ok | awk '{sub(/ok/,"PASS"); print}'
+#     echo RESULT: ok > >(echo RESULT: PASS)
+#     cat <(echo RESULT: ok) <(echo RESULT: PASS)
+#
+# An earlier revision called a pipe "a separator, not a hazard: this emits
+# `RESULT: ok` and nothing else" — true of `tee`, FALSE of `sed`/`awk`/`tr`, and
+# it reported every line above as provably harmless. Two of them had been
+# COLLISION one revision earlier, so it was a strict regression. This is the one
+# place in this module where being wrong is fail-OPEN, which is why the chain
+# can only ever return COLLISION or DYNAMIC — never BENIGN.
+_CHAIN = re.compile(r"""\||>\(|<\(""")
 
 COLLISION = "collision"
 DYNAMIC = "dynamic"
@@ -235,15 +256,39 @@ def classify_payload(line: str) -> str | None:
     """
     if not line_emits_reserved_prefix(line):
         return None
-    commands = [c for c in _SHELL_CONTROL.split(line) if RESERVED_PREFIX in c]
-    if not commands:                      # no separator on the line
-        commands = [line]
+    # `;`/`&` give INDEPENDENT commands. No fallback for "no separator" is
+    # needed and none is written: `RESULT:` contains no separator character, so
+    # `split` can never cut the token, and a separator-free line simply comes
+    # back as a one-element list. An earlier revision carried an `if not
+    # commands` branch here that NOTHING could reach — a poison mutant in it
+    # survived a full green run.
     worst = None
-    for command in commands:
-        verdict = _classify_one_command(command)
+    for command in _SEPARATOR.split(line):
+        if RESERVED_PREFIX not in command:
+            continue
+        verdict = _classify_chain(command)
         if worst is None or _SEVERITY[verdict] > _SEVERITY[worst]:
             worst = verdict
     return worst
+
+
+def _classify_chain(command: str) -> str:
+    """One command, which may be a PIPELINE or carry a process substitution.
+
+    🔴 Never returns BENIGN. A downstream pipe stage rewrites the stream and a
+    process substitution runs a second emitter, so nothing about the emitted
+    text is provable from the source — the most this can say is "a stage spells
+    a literal verdict" (COLLISION) or "cannot prove" (DYNAMIC).
+    """
+    if not _CHAIN.search(command):
+        return _classify_one_command(command)
+    for fragment in _CHAIN.split(command):
+        if RESERVED_PREFIX not in fragment:
+            continue
+        after = fragment.split(RESERVED_PREFIX, 1)[1]
+        if _LITERAL_VERDICT.match(after):
+            return COLLISION
+    return DYNAMIC
 
 
 def _classify_one_command(command: str) -> str:
@@ -389,30 +434,49 @@ FALLBACK_FIXTURES = {
     # die to the wrong clause — measured twice in this ladder.
     "unquoted-var":      ("echo " + RESERVED_PREFIX + " $v", DYNAMIC),
     "unquoted-literal":  ("echo " + RESERVED_PREFIX + " ok", BENIGN),
-    # A pipe is a SEPARATOR, not a hazard: this emits `RESULT: ok` and nothing
-    # else, so BENIGN is the correct answer rather than a conservative DYNAMIC.
-    "unquoted-pipe":     ("echo " + RESERVED_PREFIX + " ok | tee f", BENIGN),
     # heredoc body: literal TEXT, so a separator there is printed, not run.
     "heredoc-literal":   (RESERVED_PREFIX + " 3 problems; and counting", BENIGN),
     "heredoc-var":       (RESERVED_PREFIX + " $verdict", DYNAMIC),
 }
 
-# One fixture per COMMAND SEPARATOR. Each is a real two-command forgery: the
-# second command emits a literal verdict at column 0, so the line is a
-# COLLISION — and drop that character from `_SHELL_CONTROL` and the line stops
-# splitting, becomes one command whose payload starts ` ok …`, and is reported
-# BENIGN. So every operator has its own killer.
+# `;` and `&` start an INDEPENDENT command. Each fixture is a two-command line
+# whose SECOND command spells a literal verdict; drop that character from
+# `_SEPARATOR` and the line stops splitting, becomes one command whose payload
+# starts ` ok …`, and is reported BENIGN. So every character has its own killer.
 #
-# 🔴 This mirrors INTERPOLATION_FIXTURES deliberately. An audit found the first
-# version of the separator class had a killer for `|` ALONE — the same
-# "one mutant per alternative" gap already closed for the interpolation class,
-# reintroduced in the fix for a different finding.
-SHELL_CONTROL_FIXTURES = {
-    "semicolon":   "echo " + RESERVED_PREFIX + " ok; echo " + RESERVED_PREFIX + " PASS",
+# ⚠ `or-or` is deliberately NOT in this list. `echo X || echo Y` SHORT-CIRCUITS
+# — the first command succeeds, so the second never runs and the line emits only
+# `RESULT: ok`. An earlier revision asserted every fixture here was "a real
+# two-command forgery: the second command emits a literal verdict at column 0",
+# which was measurably false for that one. It lives in CHAIN_FIXTURES, where the
+# claim is the weaker and true one: `|` makes the line unprovable.
+SEPARATOR_FIXTURES = {
+    "semicolon": "echo " + RESERVED_PREFIX + " ok; echo " + RESERVED_PREFIX + " PASS",
+    "ampersand": "echo " + RESERVED_PREFIX + " ok & echo " + RESERVED_PREFIX + " PASS",
+    "and-and":   "echo " + RESERVED_PREFIX + " ok && echo " + RESERVED_PREFIX + " PASS",
+}
+
+# `|`, `>(…)` and `<(…)` do NOT give independent commands — a downstream stage
+# rewrites the stream, a process substitution runs a second emitter. A stage
+# spelling a literal verdict makes the line a COLLISION.
+CHAIN_FIXTURES = {
     "pipe":        "echo " + RESERVED_PREFIX + " ok | echo " + RESERVED_PREFIX + " PASS",
-    "ampersand":   "echo " + RESERVED_PREFIX + " ok & echo " + RESERVED_PREFIX + " PASS",
-    "and-and":     "echo " + RESERVED_PREFIX + " ok && echo " + RESERVED_PREFIX + " PASS",
     "or-or":       "echo " + RESERVED_PREFIX + " ok || echo " + RESERVED_PREFIX + " FAIL",
+    "procsub-out": "echo " + RESERVED_PREFIX + " ok > >(echo " + RESERVED_PREFIX + " PASS)",
+    "procsub-in":  "cat <(echo " + RESERVED_PREFIX + " ok) <(echo "
+                   + RESERVED_PREFIX + " PASS)",
+}
+
+# 🔴 THE FAIL-OPEN CASES. No stage spells a verdict, yet bash really writes
+# `RESULT: PASS` at column 0 — the downstream stage REWRITES the upstream text.
+# A revision that called a pipe "a separator, not a hazard" reported every one of
+# these as provably harmless. They must be DYNAMIC: not provable, never BENIGN.
+CHAIN_TRANSFORM_FIXTURES = {
+    "sed":    "echo " + RESERVED_PREFIX + " ok | sed 's/ok/PASS/'",
+    "tr":     "echo " + RESERVED_PREFIX + " PASX | tr X S",
+    "awk":    "echo " + RESERVED_PREFIX + " ok | awk '{sub(/ok/,\"PASS\"); print}'",
+    "tee":    "echo " + RESERVED_PREFIX + " ok | tee f",
+    "procsub-transform": "echo " + RESERVED_PREFIX + " ok > >(sed 's/ok/PASS/')",
 }
 
 # Lines that MENTION the grammar a second time without running a second
