@@ -2948,6 +2948,15 @@ $BP_RULES_RAW
 EOF
     case "$BP_RULES" in ''|*[!0-9]*) BP_RULES=-1 ;; esac
     case "$BP_RULE_IDS" in *[!0-9,]*) BP_RULE_IDS="" ;; esac
+    # 🔴 AND AN EMPTY FIELD IS A LOST ID, NOT A HARMLESS SEPARATOR. jq emits
+    # `,111` when one selected rule carries a NULL ruleset_id (measured), which
+    # passes the character class above; `tr ',' ' '` then drops the empty and the
+    # loop examines ONE id while $BP_RULES says two. The arm never compares
+    # ids-examined against ids-emitted, so the missing one is invisible and the
+    # run can fire DRIFT having looked at a subset. Reject the whole list instead
+    # — the same all-or-nothing rule the character class already applies, which
+    # routes it to the zero-examined COULD NOT MEASURE arm below.
+    case ",$BP_RULE_IDS," in *,,*) BP_RULE_IDS="" ;; esac
     if [ "$BP_RULES" = -1 ]; then
       # 🔴 The one case that must NOT become a finding: classic says zero and the
       # ruleset half could not be read, so "unprotected" and "protected by a

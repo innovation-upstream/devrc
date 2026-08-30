@@ -124,6 +124,10 @@ TMUX_STOP = "~/.config/tmux/task-hook.sh"
 BCS = "bash ~/.claude/hooks/base-clone-staleness.sh"
 LEDGER = PY + " ~/.claude/hooks/agent-ledger-hook.py"
 WRITEBACK = PY + " ~/.claude/hooks/clawgate-writeback-guard.py"
+# The handoff write guard — the write-back guard's counterpart on the OTHER
+# record, appended after it on the same two events. It is why the whole-set
+# equalities and the "exactly N hook commands" counts below each moved by one.
+HANDOFF_GUARD = PY + " ~/.claude/hooks/handoff-write-guard.py"
 INTERVIEW = PY + " ~/.claude/hooks/clawgate-task-interview-guard.py"
 BASH_GUARD = PY + " ~/.claude/hooks/bash-guard.py"
 # The backgrounded-command capture log (ClickUp 868ktvqf9) — the SECOND entry
@@ -238,9 +242,9 @@ with tempfile.TemporaryDirectory() as tmp:
     # disturb plus the four it appends. Asserted as a SET EQUALITY, not membership
     # checks: equality fails when the set GROWS (a hook registered by accident) as
     # well as when it SHRINKS (one clobbered), which membership checks cannot see.
-    check("2: exactly the six expected Stop hooks, none clobbered, none extra",
+    check("2: exactly the seven expected Stop hooks, none clobbered, none extra",
           set(cmds(d, "Stop")) == {TMUX_STOP, CLAWGATE_STOP, NOTIFY, NEXT_STEP,
-                                   LEDGER, WRITEBACK})
+                                   LEDGER, WRITEBACK, HANDOFF_GUARD})
     check("1: next-step-nudge registered on Stop", NEXT_STEP in cmds(d, "Stop"))
     # Ordering: the two foreign hooks keep their original relative order and stay ahead
     # of everything this script appends. Appending (rather than inserting) is what makes
@@ -344,11 +348,11 @@ with tempfile.TemporaryDirectory() as tmp:
     post = cmds(d, "PostToolUse")
     WB_EXPANDED = PY + " " + home + "/.claude/hooks/clawgate-writeback-guard.py"
     SHELL_HOMEVAR = PY + " $HOME/.claude/hooks/shell-env-nudge.py"
-    check("8: PostToolUse holds exactly the three migrated hooks plus the two appended ones",
+    check("8: PostToolUse holds exactly the three migrated hooks plus the three appended ones",
           set(post) == {PY + " ~/.claude/hooks/audit-pr-nudge.py",
                         SHELL_HOMEVAR, WB_EXPANDED, SEARCH_NUDGE, LEDGER,
-                        BG_CAPTURE})
-    check("8: no hook was double-registered", len(post) == 6)
+                        BG_CAPTURE, HANDOFF_GUARD})
+    check("8: no hook was double-registered", len(post) == 7)
     check("8: the $HOME/ spelling was rewritten in place, not re-added",
           post.count(SHELL_HOMEVAR) == 1
           and PY + " ~/.claude/hooks/shell-env-nudge.py" not in post)
@@ -426,7 +430,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check("3: no duplicate next-step-nudge on Stop", cmds(d2, "Stop").count(NEXT_STEP) == 1)
     check("3: Stop set unchanged by the second run",
           set(cmds(d2, "Stop")) == {TMUX_STOP, CLAWGATE_STOP, NOTIFY, NEXT_STEP,
-                                    LEDGER, WRITEBACK})
+                                    LEDGER, WRITEBACK, HANDOFF_GUARD})
     check("3: no duplicate clawgate-writeback-guard on Stop",
           cmds(d2, "Stop").count(WRITEBACK) == 1)
     check("3: no duplicate clawgate-writeback-guard on PostToolUse",
@@ -744,13 +748,14 @@ with tempfile.TemporaryDirectory() as tmp:
           entries(d12, "PostToolUse") == [
               ("Bash", AUDIT), ("Bash", SHELL), ("Bash", SEARCH_NUDGE),
               (None, LEDGER), ("Bash", LEDGER), (None, WRITEBACK),
-              ("Bash", BG_CAPTURE)])
+              ("Bash", BG_CAPTURE), (None, HANDOFF_GUARD)])
     check("12: Stop healed, keeping the first copy of each and the three survivors",
           entries(d12, "Stop") == [
               (None, TMUX_STOP), (None, CLAWGATE_STOP),
               (None, NOTIFY), (None, NEXT_STEP),
               (None, LEDGER), (None, WRITEBACK),
-              (None, NOTIFY_ARGS), (None, LEDGER), (None, WRITEBACK)])
+              (None, NOTIFY_ARGS), (None, LEDGER), (None, WRITEBACK),
+              (None, HANDOFF_GUARD)])
     # 🔴 The matchered Stop copy is GONE, and the unmatchered one is what stayed.
     # Spelled out on its own because the list equality above would also pass if
     # BOTH had been removed, or if the wrong one had survived.
@@ -917,8 +922,10 @@ for hostile, why, hostile_cwd, expected_reason in HOSTILE_OVERRIDES:
         # 18 -> 19: base-clone-staleness.sh joined SINGLE_EVENT_CMDS on
         # SessionStart, so one converged run holds one more command.
         # 19 -> 20: gh-issue-closing-condition-guard.py joined PRE_BASH_CMDS.
-        check(tag + ": three consecutive runs hold exactly 20 hook commands",
-              counts == [20, 20, 20])
+        # 20 -> 22: handoff-write-guard.py joined BOTH PostToolUse and Stop, so
+        #           one converged run holds two more commands than it did.
+        check(tag + ": three consecutive runs hold exactly 22 hook commands",
+              counts == [22, 22, 22])
         with open(settings) as f:
             d13 = json.load(f)
         written = [c for ev in d13.get("hooks", {}) for c in cmds(d13, ev)
@@ -1097,7 +1104,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check("16: Stop healed to one entry per script, keeping the FIRST of each",
           entries(d16, "Stop") == [
               (None, TMUX_STOP), (None, NOTIFY), (None, NEXT_STEP),
-              ("Bash", LEDGER), ("", WRITEBACK)])
+              ("Bash", LEDGER), ("", WRITEBACK), (None, HANDOFF_GUARD)])
     check("16: exactly four Stop duplicates were removed",
           len([ln for ln in p16.stdout.splitlines() if ln.startswith("  - ")]) == 4)
     # THE CONTROL: unchanged on a matcher-supporting event.

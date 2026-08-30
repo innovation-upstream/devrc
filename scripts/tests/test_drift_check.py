@@ -4062,6 +4062,27 @@ def test_the_source_fetch_timeout_is_not_forwarded_over_ssh(fleet):
 
 
 # --- the SEAM: the script's fetch budget vs the unit's start timeout ---------- #
+def _derive_gh_calls(src):
+    """The rc-24 arm's worst-case gh call count, derived from the script itself.
+
+    🔴 ONE DEFINITION, because the guard that watches this had its OWN copy and
+    was therefore blind to the real one changing: a mutant reverting the
+    derivation to `(sites - 1) + MAX` survived a test that recomputed the formula
+    locally. A guard that re-implements the thing it guards is testing itself.
+
+    Sites outside the ruleset loop run once; sites inside it run up to the loop's
+    bound. Assuming "exactly one site is inside" under-counts the moment a second
+    is added there — the hand-maintained-number failure this derivation replaced.
+    """
+    sites = len(_gh_invocations(src))
+    loop = src[src.index("for BP_ID in"):]
+    loop = loop[:loop.index("\n      done")]
+    in_loop = len(_gh_invocations(loop))
+    cap = re.search(r'DRIFT_GH_RULESET_MAX="\$\{DRIFT_GH_RULESET_MAX:-(\d+)\}"', src)
+    assert cap, "no DRIFT_GH_RULESET_MAX default in drift-check.sh"
+    return sites, in_loop, (sites - in_loop) + in_loop * int(cap.group(1))
+
+
 def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
     """🔴 A SEAM NEITHER FILE'S TESTS OWN.
 
@@ -4110,21 +4131,9 @@ def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
     # own bound, since one of those sites executes up to DRIFT_GH_RULESET_MAX
     # times. Conservative in the safe direction: it over-counts (not every path
     # makes every call), and over-counting a TIMEOUT budget only reserves slack.
-    src = DRIFT.read_text()
-    sites = len(_gh_invocations(src))
+    sites, in_loop, GH_CALLS = _derive_gh_calls(DRIFT.read_text())
     assert sites >= 3, f"the gh call sites cannot be counted: {sites}"
-    # 🔴 WHICH sites are inside the ruleset LOOP decides the multiplier, and
-    # assuming "exactly one" under-counts the moment a second is added there —
-    # the same hand-maintained-number failure this derivation replaced, one level
-    # in. Count them from the loop body itself.
-    loop = src[src.index("for BP_ID in"):]
-    loop = loop[:loop.index("\n      done")]
-    in_loop = len(_gh_invocations(loop))
     assert in_loop >= 1, "no gh call found inside the ruleset loop"
-    m5 = re.search(r'DRIFT_GH_RULESET_MAX="\$\{DRIFT_GH_RULESET_MAX:-(\d+)\}"',
-                   DRIFT.read_text())
-    assert m5, "no DRIFT_GH_RULESET_MAX default in drift-check.sh"
-    GH_CALLS = (sites - in_loop) + in_loop * int(m5.group(1))
     needed = 2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2 + GH_CALLS * gh + 60
     assert ceiling >= needed, (
         "TimeoutStartSec=%d cannot absorb the worst case: %d source fetches at "
@@ -6522,7 +6531,12 @@ _GH_COMMAND_LOOKUP = re.compile(r"^command\s+-[vV](\s|$)")
 # `_walk` breaks at `{`/`}`, so ANY braced spelling is torn apart before the
 # token test can see it. Normalising only the bare `${DRIFT_GH}` left
 # `${DRIFT_GH:-gh}` failing open while the header listed it as covered.
-_BRACED_GH = re.compile(r"\$\{DRIFT_GH(?::-[^}]*)?\}")
+# 🔴 THE WHOLE BRACED FAMILY, not one operator. `${DRIFT_GH:-gh}` was covered
+# while `${DRIFT_GH:=gh}`, `${DRIFT_GH-gh}`, `${DRIFT_GH#x}` and six more
+# spellings still failed open — each one character from the fixed one and
+# meaning the same thing to a maintainer. The negative lookahead keeps
+# `${DRIFT_GH_TIMEOUT}` and `${DRIFT_GHX}` OUT, which are different variables.
+_BRACED_GH = re.compile(r"\$\{DRIFT_GH(?![A-Za-z0-9_])[^}]*\}")
 
 
 def _is_gh_token(tok):
@@ -6571,7 +6585,12 @@ def _gh_invocations(text):
             raw = [t for t in seg.split()
                    if t not in {"!", "if", "then", "elif", "else", "while",
                                 "until", "do", "{", "(", ";"}]
-            if raw and raw[0].rsplit("/", 1)[-1] in _GH_LOOKUP_CMDS:
+            # 🔴 A TEST CONSTRUCT IS NOT AN INVOCATION. Widening the braced
+            # normalisation made `[ -z "${DRIFT_GH+set}" ]` — the arm's own
+            # PRESENCE TEST — normalise to a bare `$DRIFT_GH` inside `[ … ]`,
+            # which then reads as a command word and flagged the file this guard
+            # guards. `[` and `test` evaluate their operands; they run nothing.
+            if raw and raw[0].rsplit("/", 1)[-1] in _GH_LOOKUP_CMDS | {"[", "test"}:
                 continue
             if _GH_COMMAND_LOOKUP.match(" ".join(raw)):
                 continue
@@ -7283,13 +7302,113 @@ def test_the_seam_guard_counts_gh_calls_INSIDE_the_ruleset_loop(fleet):
     loop = loop[:loop.index("\n      done")]
     assert len(_gh_invocations(loop)) >= 1, "no gh call found inside the ruleset loop"
 
-    # A second in-loop call must raise the count, not leave it flat.
+    # 🔴 RUN THE REAL DERIVATION, NOT A LOCAL COPY OF IT. The first version of
+    # this test recomputed the formula inline, so a mutant reverting the actual
+    # derivation survived it — the guard was testing itself. It now calls the
+    # same `_derive_gh_calls` the budget test consumes.
     doubled = src.replace(
         '        BP_RS_RAW="$(timeout',
         '        : "$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/rulesets/$BP_ID/history" --jq \'.x\' 2>/dev/null)"\n'
         '        BP_RS_RAW="$(timeout', 1)
-    loop2 = doubled[doubled.index("for BP_ID in"):]
-    loop2 = loop2[:loop2.index("\n      done")]
-    assert len(_gh_invocations(loop2)) == len(_gh_invocations(loop)) + 1, (
-        "a second gh call added inside the loop did not move the in-loop count"
+    assert doubled != src, "the in-loop probe was not inserted"
+    cap = int(re.search(
+        r'DRIFT_GH_RULESET_MAX="\$\{DRIFT_GH_RULESET_MAX:-(\d+)\}"', src).group(1))
+    _, _, before = _derive_gh_calls(src)
+    _, _, after = _derive_gh_calls(doubled)
+    assert after == before + cap, (
+        "adding a second gh call INSIDE the ruleset loop did not raise the derived "
+        "budget by the loop's bound: %d vs %d (cap %d). A derivation that assumes "
+        "exactly one in-loop site under-reserves the unit's timeout the moment a "
+        "second is added." % (after, before, cap)
+    )
+
+
+# --------------------------------------------------------------------------- #
+# ROUND 6 — a lost id is not a separator, and a cap of 1 must examine ONE.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("rules_answer,shape", [
+    ("2 ,111", "a NULL ruleset_id: jq emits a leading comma (measured)"),
+    ("2 111,", "a trailing empty field"),
+    ("3 111,,222", "an empty field in the middle"),
+])
+def test_a_LOST_ruleset_id_is_refused_rather_than_silently_dropped(fleet, rules_answer, shape):
+    """🔴 AN EMPTY FIELD IS A LOST ID, NOT A HARMLESS SEPARATOR.
+
+    The sanitiser was all-or-nothing for a bad CHARACTER and silently lossy for a
+    dropped id. Measured: jq emits `2 ,111` when one selected rule carries a null
+    `ruleset_id`, which passes the character class; `tr ',' ' '` then drops the
+    empty and the loop examines ONE id while the rule count says two — so the arm
+    could fire DRIFT having looked at a subset, with the missing id accounted for
+    in no counter.
+    """
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules=rules_answer,
+               ruleset={"111": "evaluate 0", "222": "evaluate 0"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc != 24, f"a partially lost id list fired DRIFT ({shape})\n{out}"
+    assert rc == 0, out
+    assert "empty or unusable — 0 examined" in out, out
+
+
+def test_a_cap_of_ONE_examines_exactly_one_ruleset(fleet):
+    """🔴 THE CAP'S BEHAVIOUR, not just its value — and the half that was missing.
+
+    The floor guards that DRIFT_GH_RULESET_MAX is >= 1. Nothing guarded that 1
+    actually examines one: changing the loop's `-gt` to `-ge` makes a cap of 1
+    break BEFORE the first call, so the arm reports COULD NOT MEASURE on every run
+    forever — verbatim the harm the floor's own error message claims to prevent —
+    and 42 protect tests passed with that mutation in place.
+
+    So: with the cap at 1 and a single BINDING ruleset, the verdict must be the
+    gate being ON, which is only reachable if the loop body ran.
+    """
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="1 111", ruleset={"111": "active 0"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG,
+                          DRIFT_GH_RULESET_MAX="1")
+    assert rc == 0, f"a cap of 1 did not examine its one ruleset: {rc}\n{out}"
+    assert "ruleset 111 gates it" in out, out
+    assert "stopped after" not in out, (
+        "a cap of 1 tripped the cap before examining anything\n" + out
+    )
+
+
+def test_the_cap_still_stops_at_its_bound(fleet):
+    """The discriminator for the test above: a cap that never trips is not a
+    bound, and would satisfy `examines exactly one` just as well."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="2 111,222",
+               ruleset={"111": "evaluate 0", "222": "active 0"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG,
+                          DRIFT_GH_RULESET_MAX="1")
+    assert rc == 0, out
+    assert "stopped after 1 ruleset(s)" in out, (
+        "the cap did not stop the loop at its bound\n" + out
+    )
+
+
+@pytest.mark.parametrize("spelling", [
+    "${DRIFT_GH:=gh}", "${DRIFT_GH-gh}", "${DRIFT_GH=gh}", "${DRIFT_GH:?err}",
+    "${DRIFT_GH#x}", "${DRIFT_GH%x}", "${DRIFT_GH/a/b}", "${DRIFT_GH^^}",
+    "${DRIFT_GH:0:20}", "${DRIFT_GH:-gh}",
+])
+def test_every_braced_spelling_of_the_binary_is_scanned(spelling):
+    """`_walk` breaks at `{`, so any braced spelling is torn apart before the
+    token test sees it. Normalising ONE operator left nine siblings failing open,
+    each a character from the fixed one and identical in meaning."""
+    poisoned = DRIFT.read_text() + "\n" + spelling + ' api -X DELETE "repos/x/y/p"\n'
+    calls = _gh_invocations(poisoned)
+    assert any(_gh_violation(argv) for _, argv in calls), (
+        f"the selector failed OPEN on {spelling}"
+    )
+
+
+@pytest.mark.parametrize("other_var", ["${DRIFT_GH_TIMEOUT}", "${DRIFT_GHX}"])
+def test_a_DIFFERENT_variable_is_not_swallowed_by_the_braced_normalisation(other_var):
+    """The other direction: widening to the family must not capture a variable
+    that merely starts with the same letters, or the guard starts reading
+    unrelated lines as gh invocations."""
+    assert _BRACED_GH.search(other_var) is None, (
+        f"{other_var} was normalised as if it were the gh binary"
     )

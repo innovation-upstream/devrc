@@ -1656,7 +1656,17 @@ class TestCommandDocIsPinned:
             # preserves unknown keys), `from_mapping` ignores it, and
             # `subsystem_touch.census` is what reads it. The behavioural half of
             # that claim is `test_subsystem_touch.py::TestEntrySchemaAgreement`.
-            "66ff2115bf38226e8419abee5dc77d6dd8ff9903e0834f869e6c52e7c54f783c",
+            # Re-pinned again when `tasks:` / `task:` were added. Read against
+            # the code as the failure message demands, and the answer differs
+            # from `created_by:` above: `from_mapping` DOES read this one, and
+            # must — an unparseable ref makes the entry MALFORMED, so the field
+            # is part of what decides whether an entry loads at all. Validation
+            # lives there and nowhere else, which is what keeps
+            # `subsystem_touch --validate` from drifting away from the loader.
+            # `parse_front_matter` gained block-list support in the same change;
+            # its behavioural half is
+            # `test_subsystem_task_refs.py::TestBothListForms`.
+            "209a03eae94c3c4d1c7d250c6907ed66a11810e057eec3697c4ae382f5df5031",
             "SubsystemEntry.from_mapping / load_index (+ subsystem_touch.census for created_by)",
         ),
     ]

@@ -11,6 +11,8 @@ Goal: capture everything needed to continue this work in a fresh session with **
 
 Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topic from the current work.
 
+🔴 **ONE DOC PER EFFORT, UPDATED IN PLACE — the slug IS the key** (operator, 2026-08-28). **Never date the topic** (a dated slug is per-session by construction — next session's date differs); **never mint a fresh slug for an effort that already has a doc.** Step 5 refuses both and names the fix. 📖 `~/.claude/skills/handoff/reference/write-gate.md` §C.
+
 ## Steps
 
 1. **Snapshot live state** (don't trust memory — observe):
@@ -90,8 +92,10 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    - **Next probe:** the single most useful command/observation to run next, written so it can be executed verbatim.
 
    ## Next steps (ranked)
-   1. ...
-   2. ...
+   1. ... forcing: incident — <the external signal, with its evidence>
+   2. ... forcing: none
+   🔴 **EVERY item MUST carry `forcing: <kind>`** or step 5 refuses (`status=unforced`). CLOSED vocabulary: `incident`, `user`, `gate`, `deadline`, `regression`, `security`, `none` — an unrecognised kind is refused, so there is no `followup`/`tech-debt` to hide under. **EXTERNAL = an incident, a person's request, a failing gate, a deadline, a measured regression, a security exposure — NOT the previous session's ranked list.** `forcing: none` is the honest opt-out: **accepted and counted, and not eligible to be worked.** ⚠ The tool cannot check a cited forcing function is real or external — it makes the claim mandatory and greppable, nothing more.
+   🔴 **The field may sit anywhere on the item, continuation lines included — but INDENT it.** The block ends at the next item, or at the first unindented line once a blank has intervened, which an intervening FENCE does not reset: trailing prose tags nothing, and a FLUSH-LEFT tag there reads ABSENT. Emphasis is OK (`**forcing:** gate`, `_forcing: gate_`); `forcing function:`/`forcing = gate` **with a listed kind** (unlisted reads ABSENT), and a fenced field regardless of kind, are **near-misses, NAMED** not absent. 📖 write-gate §C.
    🔴 **This list is a WORK QUEUE, and `claim-work` is its LOCK** — every
    `/resume` session draws from it, so a *better* ranked list produces *more*
    duplicate work, not less. **NUMBER the items and keep the numbering stable:
@@ -127,7 +131,7 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    🔴 **`--exclude claudedocs/handoff-<topic>.md`** — pass it on every run. This step runs BEFORE step 5 lands the doc, so on a first run the doc is usually not there yet, but a `--pr`/`--commit` window over work that already carried one will list it, and a repeat run finds the copy the earlier run committed. Without it `claudedocs` is a nomination on every single run.
 
-5. **Land the handoff doc — the write+push gate.** MEASURED: a session re-entered from a handoff, did ten minutes of real analysis, then wrote and **pushed** an updated handoff to a shared branch that nobody approved. `/resume` is read-only and followed its contract; nothing gated the doc's own write+push. (This sentence used to add *"step 4's index write is gated"* as the contrast — that gate was retired 2026-08-15 and step 4 is now a pointer to `subsystem-index`, so the contrast had become false in two ways.)
+5. **Land the handoff doc — the write+push gate.** MEASURED: a session re-entered from a handoff, did ten minutes of real analysis, then wrote and **pushed** an updated handoff to a shared branch that nobody approved. `/resume` is read-only and followed its contract; nothing gated the doc's own write+push. 📖 write-gate.
 
    🔴 **Do NOT forbid updating the handoff** — that one was correct and valuable (it answered the doc's open question *and* corrected a prior misreading), and suppressing it costs the next session the same ten minutes. Make the update **safe**, not rare.
 
@@ -149,6 +153,8 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    `status=proposed` ⇒ the diff is on screen and nothing has been written: not the doc, not a commit, not a ref. `no-advance` (4) and `no-change` (5) print **no diff at all** — a session that went nowhere gets no offer, not an empty one — report the line and stop.
 
+   🔴 **Three refusals enforce the 2026-08-28 cap. All write NOTHING, each prints its own fix, and re-running after fixing your scratch file is safe.** `status=dated-topic` (7) — dated slug ⇒ per-session doc; **no bypass exists**, re-run without the date. `status=new-doc` (7) — no doc for this topic and the repo has others, which it lists; if one IS this effort re-run with ITS topic — 🔴 `--new-effort` asserts genuine newness, it is **not a way past the list**. `status=unforced` (8) — a ranked item names no forcing function or an unrecognised kind. 🔴 **Read each row's marker — only one means "add a field"**: `[no forcing: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell it as `forcing: <kind>` · `[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT promote it** 📖 write-gate §C. ⚠ `forcing: none` items print an **advisory** above the diff; the write proceeds.
+
    🔴 **Exit 3 usually means nothing was written — but READ THE MESSAGE, because one arm of it committed.** Usually the rollback unlinks a NEW doc entirely, so the session's handoff exists only in your scratch file. **The exception announces itself**: when the commit landed and a later step failed, the run prints a note saying so and telling you not to re-run — re-running would append your findings a second time. 🔴 **So `status=failed` is not by itself "nothing happened", and neither is exit 3 a reliable tell** — a bad `--repo` or an unreadable `--update` exits 3 printing no `status=` line at all, and `push-failed` uses exit 3 too. **Keep the scratch file until you have seen a commit sha**, name its path in your report if step 5 never lands, and delete it once the commit exists.
 
    🔴 **Two more statuses exist and both mean NOTHING WAS WRITTEN OR IS SAFE — read them, do not retry blindly.**
@@ -161,6 +167,6 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    🔴 **The refusals and the warnings are the whole protection now — read them before the confirm.** They were advisory when a human answered a prompt; **they are the only reader now.**
 
-   ⚠ **This pushes wherever the checkout sits, `main` included** — operator's explicit call. `branch_is_shared()` picks remedy text only — it blocks nothing, and the tool runs git from inside Python, so no PreToolUse hook sees the inner commit either. Where a repo forbids committing to its shared branch, **check `branch --show-current` yourself first.** 📖 `~/.claude/skills/handoff/reference/write-gate.md`.
+   ⚠ **This pushes wherever the checkout sits, `main` included** — operator's explicit call. `branch_is_shared()` picks remedy text only — it blocks nothing, and the tool runs git from inside Python, so no PreToolUse hook sees the inner commit either. Where a repo forbids committing to its shared branch, **check `branch --show-current` yourself first.** 📖 write-gate.
 
 Keep the doc tight and high-signal — it is read first thing next session, so every line must earn its place. The "Open investigations" blocks are the exception to brevity: a mid-diagnosis bug is worth verbatim evidence, because re-deriving it next session costs far more than the lines do. Pair: `/resume`.

@@ -1259,6 +1259,21 @@ in
   # the last switch's version while the checkout moved on.
   home.file.".local/bin/claim-work".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/claim-work.sh";
+
+  # 🔴 `cairn` — the read-through client for the hosted subsystem store, ON PATH
+  # for the same reason as `claim-work` above: the handoff/resume flow names it as
+  # a bare command, and an agent running in another repo cannot resolve an absolute
+  # devrc path. Bare command on `home.sessionPath` resolves from any cwd.
+  #
+  # 🔴 mkOutOfStoreSymlink is NOT a preference here — it is REQUIRED. `scripts/cairn`
+  # reaches its siblings through `Path(__file__).resolve().parent / "lib"` (:68, and
+  # again at :756/:808/:818 for `cairn_who`), exactly like the opencode CLI above.
+  # `.resolve()` follows the symlink back to the checkout, so `lib/` is found in the
+  # repo. A store copy would resolve `__file__` into /nix/store, where `lib/` is NOT
+  # deployed — the import would fail outright. Only this one path is symlinked;
+  # `scripts/lib/` must not be deployed, same rule as opencode's `lib/`.
+  home.file.".local/bin/cairn".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn";
   # Claude Code hooks managed here (the script only — the settings.json
   # registration is per-host/unmanaged, as for bash-guard.py above, whose script
   # is likewise managed now). audit-pr-nudge fires
@@ -1401,6 +1416,34 @@ in
   # and Stop, per-host, by register-nudge-hook.py.
   home.file.".claude/hooks/clawgate-writeback-guard.py" = {
     source = ../scripts/claude-hooks/clawgate-writeback-guard.py;
+  };
+  # 🔴 THE HANDOFF WRITE GUARD — the write-back guard's counterpart on the OTHER
+  # record. That one makes a clawgate pickup report back to the board; this one makes
+  # a session that RESUMED a handoff doc write one before it stops.
+  #
+  # PostToolUse (NO matcher, same reason as its neighbour) watches for a READ of a
+  # specific handoff doc — a `Read` of `claudedocs/handoff-*.md`, or the `git show
+  # <ref>:claudedocs/…` form these repos use for a doc on an unmerged branch — and for
+  # REAL WORK after it. Stop then measures whether ANY handoff was written since that
+  # read: a `handoff_doc.py` run, a Write/Edit of a handoff doc, or the resumed doc's
+  # own mtime. Three routes unioned, so it self-suppresses however the doc got written
+  # — including under a different topic, which the measurement counts as recorded.
+  #
+  # 🔴 ARMED ON THE READ, NOT ON SessionStart, and that is the design: arming at
+  # session start would fire on every session that never touched a handoff. Measured
+  # over 253 `/resume` sessions (2026-08-15..08-29): 22 (8.7%) never recorded their
+  # work, ZERO of them because the write gate correctly declined, and the dominant
+  # loss bucket is a session that ENDED CLEANLY — 8 of 16 — with a Stop hook already
+  # firing in 8 of 8 of them. `claudedocs/handoff-skill-chain-usage-audit.md`.
+  #
+  # Escalates block, block, notice, silence per doc per session, never blocks when it
+  # could not measure (it says so instead), and every error path exits 0. Unlike its
+  # neighbour it spawns NO subprocess on any path.
+  #
+  # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and the
+  # switch still succeeds with the hook absent — this repo's standing trap.
+  home.file.".claude/hooks/handoff-write-guard.py" = {
+    source = ../scripts/claude-hooks/handoff-write-guard.py;
   };
   # 🔴 THE CLAWGATE TASK INTERVIEW GATE — the write-back guard's counterpart at the
   # OTHER end of a task's life. That one makes a pickup report back; this one makes

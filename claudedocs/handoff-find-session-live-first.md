@@ -43,8 +43,12 @@ calls, 5 of them pure flailing.
   local host is scanned without ssh, so it cannot be made to fail genuinely — reaching that
   branch requires a stub, which is exactly what the rank-1 item existed to stop trusting. Say
   "stub-only" about it rather than "verified".
-- Open issues: **#1029** (three guard-walkability gaps), **#1030** (flake, second mechanism),
-  **#1031** (two deferrals). **#1028 closed**, verified fixed by #1023.
+- Open issues: **#1030 only.** It is HALF closed — #1062 fixed the backlog mechanism
+  (A); the `socket.py` timeout mechanism (B) is confirmed STILL LIVE at 60 s and is now
+  rank 1 with a written closing condition. **#1029 CLOSED** (findings fixed by #1071; its
+  two lower-severity items ACCEPTED by operator decision 2026-08-30 and recorded on the
+  closed issue — they are tracked by nothing now, which is the accepted cost).
+  **#1031 CLOSED** by #1076. **#1028 closed**, verified fixed by #1023.
 
 **What shipped — carried forward verbatim, this is durable and not status:**
 
@@ -161,6 +165,56 @@ COMMON degraded state". Quote the pair, never the 1.25 s alone.
 
 ## Open investigations — live diagnosis state
 
+### `test_subsystem_store_api.py` flake — the BACKLOG mechanism is CLOSED; the TIMEOUT one is NOT
+🔴 **STATUS 2026-08-30. Read this before the block below, which is preserved as the
+diagnosis that led here and is now partly historical.**
+
+- **Mechanism A (backlog) — FIXED, #1062 (`430fe3e1`), closes #1030.** `build_server` never
+  set `request_queue_size`, so the accept queue was the stdlib default **5** against a suite
+  that fires 8 concurrent appends. Controlled experiment through the real `build_server`,
+  200 racers × 3 rounds, varying ONLY the backlog: **5 → 389 `ConnectionResetError`;
+  128 → 0; 4096 → 0.** Fixed as `LISTEN_BACKLOG = 128`, a **class** attribute —
+  `TCPServer.__init__` calls `listen()` before returning, so an instance assignment moves
+  the name and leaves the socket at 5. The regression test counts LANDINGS ON THE SOCKET
+  (fills the accept queue while nothing accepts), so it is deterministic and kills that
+  wrong fix.
+  ⚠ **`net.ipv4.tcp_abort_on_overflow=0` appears to rule this mechanism out, and does not.**
+  That sysctl means overflow drops the SYN rather than resetting, so the theory looks dead.
+  The failing writers' elapsed times cluster at **1.0 s and 2.2 s** — TCP SYN-retransmit
+  intervals — i.e. the reset lands AFTER a retry. Do not re-derive this dead end.
+- **Mechanism B (`TimeoutError` out of `socket.py`) — STILL LIVE, and #1023 did NOT hold.**
+  Observed 2026-08-29 on `devrc-ci-hrqf4` (PR #1040, a **docs-only** diff):
+  `TimeoutError: timed out` at `socket.py:720` in
+  `TestTheActorComesFromTheTOKEN.test_a_FORGED_actor_in_the_body_is_DISCARDED`. #1023 raised
+  `HANG_TIMEOUT` 15 s → 60 s for exactly this; it recurred at 60 s. **This closes the open
+  question in #1030's last comment**, which reported the same test failing on docs-only
+  #1034 and said "I did not capture this run's exception — it may be a fourth". It is not a
+  fourth; it is B.
+- 🔴 **B IS NOT (ONLY) STARVATION — do not start from the load hypothesis.** #1023 attributed
+  it to scheduler starvation and raised the timeout; that framing survived into an earlier
+  draft of this very block, and **two observations hours apart contradict each other:**
+
+  | | 2026-08-29 `devrc-ci-hrqf4` | 2026-08-30 `devrc-ci-8q8rt` |
+  |---|---|---|
+  | exception | `TimeoutError` @ `socket.py:720` | **the same** |
+  | 203-test target vs local | **41×** (3.30 s → 136.90 s) | **1.6×** (3.30 s → 5.28 s) |
+  | its node's CPU | **91%** | **44%** |
+  | all nodes | one saturated | 24–44% |
+
+  Same signature, essentially NO load the second time. So starvation is not sufficient to
+  explain B, and "raise the timeout" / "fix the scheduling" may both miss it. The honest
+  state is **uncharacterised**; treat the load story as a REFUTED first guess, not a lead.
+- ⚠ **The node-pinning fact is still true and still worth knowing, but it is NOT the
+  explanation.** The PipelineRun carries `nodeSelector:
+  kubernetes.io/hostname=talos-xr6-r7p`, so cluster-wide run counts say nothing about
+  whether a devrc run is contended. That mattered for the 91% occurrence and not for the
+  44% one.
+- **The load-vs-assertion discriminator itself is sound and worth reusing:** load inflates
+  EVERY target, a real assertion inflates exactly one. It is what separated the two rows
+  above — and what stopped the 41× occurrence being read as a code defect.
+
+**The original diagnosis, preserved:**
+
 ### `test_subsystem_store_api.py` concurrent-append flake — TWO distinct mechanisms, only one fixed
 - **Symptom + exact repro:** `tekton/devrc-pytests` (a **required** check with
   `enforce_admins: true`) fails intermittently on
@@ -195,25 +249,71 @@ COMMON degraded state". Quote the pair, never the 1.25 s alone.
   check whether a hook writes it.
 
 ## Next steps (ranked)
-🔴 **RENUMBERED TWICE, deliberately.** The original item 1 (deploy) and then the
-partial-fleet verification both closed, so everything has shifted up by two. `claim-work
---list` was checked before each renumber. The rank-1 claim
-`find-session-live-first-1` was **released on completion** — a new rank 1 must be claimed
-under the slug `claim-work --slug-for` prints today, which is the SAME string for a
-DIFFERENT item. Derive it fresh; do not reuse a slug from an older copy of this list.
+🔴 **RENUMBERED THREE TIMES.** Deploy, then the partial-fleet verification, then ranks 1–3
+(#1030/#1029/#1031) all closed, so everything has shifted up by four in total. `claim-work
+--list` was checked before each renumber. 🔴 **The slug `claim-work --slug-for` prints for a
+rank is POSITIONAL — the same string names a DIFFERENT item after every renumber. Derive it
+fresh; never reuse one copied from an older version of this list.** All three
+`find-session-live-first-*` claims were released on completion.
 
-1. **#1030** — the store-api flake's SECOND mechanism (see the investigation block). ⚠ Someone
-   else holds `devrc-store-api-timeout-flake`, which is the *timeout* mechanism #1023 already
-   fixed — a different failure of the same test. Do not read that claim as covering this.
-   Repo: `devrc`.
-2. **#1029** — three residual guard-walkability gaps in
-   `scripts/tests/test_find_session_skill_contract.py`. Repo: `devrc`.
-3. **#1031** — two knowingly-deferred items (`excluded_shells` measured-zero asymmetry; the
-   row-field ledger's substring `__doc__` guard). Repo: `devrc`.
-4. **Inherited from `handoff-find-session-opencode.md`:**
-   `scripts/claude-hooks/tests/test_bash_guard.py:294`'s "no catastrophic backtracking" check
-   still asserts on wall-clock and flakes under load. Its sibling item (dirty
-   `embed_enlarge.js`) is CLOSED — it landed as #1010. Repo: `devrc`.
+**CLOSED since the last revision — do not re-do these:**
+
+| was | issue | landed |
+|---|---|---|
+| rank 1 | **#1030** store-api listen backlog (mechanism A only) | **#1062** → `430fe3e1` |
+| rank 2 | **#1029** three guard-walkability gaps | **#1071** → `3d8caaa1` |
+| rank 3 | **#1031** both deferred items | **#1076** -> `e212415e`, issue CLOSED |
+| rank 4 | inherited `test_bash_guard.py` wall-clock flake | **#1078** -> `9499d6d0` |
+| — | **#1029** issue itself | CLOSED 2026-08-30; its two lower-severity items ACCEPTED, recorded on the closed issue |
+
+🔴 **DEPLOYED AND VERIFIED AT THE CONSUMER, both hosts, 2026-08-30** — not merely merged.
+`readlink -f ~/.claude/skills/session-manager/reference/payload-contract.md` resolves to the
+SAME store hash `1skr5b3gc…` on workbench and laptop, both carrying the #1031 text, both
+checkouts at `e0e29e7b`. The identical hash across hosts is what makes it a two-host claim
+rather than two single-host ones. ⚠ That doc is a `/nix/store` path — `git pull` never
+updates it; only a `home-manager switch` / `ship.sh` does.
+
+⚠ **#1030 is only HALF closed.** #1062 fixed the backlog mechanism; the `socket.py`
+`TimeoutError` mechanism is confirmed still live at `HANG_TIMEOUT = 60 s` — see the
+investigation block, which now carries the captured exception and the node-pinning lead.
+Whether #1030 stays open or is re-filed against mechanism B is a judgement for whoever picks
+it up; the evidence is on the issue.
+
+1. **The store-api flake's mechanism B** — `TimeoutError` out of `socket.py`, which #1023
+   was meant to fix and did not. 🔴 **Do NOT start from the starvation hypothesis: it is
+   REFUTED** (fired at 44% node CPU with 1.6x target inflation, having also fired at 91%
+   with 41x). The mechanism is UNCHARACTERISED. Two facts worth carrying in: the node
+   pinning is real but explains only one of the two occurrences, and the failing tests move
+   around inside `test_subsystem_store_api.py` (four distinct classes so far) while the
+   exception does not. Repo: `devrc`.
+
+   **CLOSING CONDITION — written 2026-08-30 from the four occurrences, while they were
+   fresh. It deliberately does NOT accept a green sample.**
+
+   > Closed when a `TimeoutError` out of `socket.py` is REPRODUCED against
+   > `test_subsystem_store_api.py`'s server fixture on a host whose load is measured and
+   > stated at the time, and the mechanism is NAMED — i.e. someone can say which
+   > `socket`/`http.server` operation blocks, and why, in a sentence that predicts a
+   > CONTROL that behaves differently. A fix then makes that reproduction stop, and the
+   > reproduction is shown to still fire on the pre-fix code.
+   >
+   > **Checked by:** a merged PR carrying (a) the reproduction, (b) the load figure at
+   > which it fired, (c) the named mechanism, (d) a red-at-base / green-at-HEAD matrix.
+   > **A run of N consecutive green CI samples does NOT close this** — that is what #1023
+   > offered, and the mode recurred at its new bound.
+
+   🔴 **What NOT to spend the first hour on, because it is already done and negative:**
+   - *raising the timeout* — #1023 took `HANG_TIMEOUT` 15 s → 60 s and B recurred at 60 s.
+   - *the starvation story* — REFUTED above; two occurrences, 91% and 44% node CPU.
+   - *the listen backlog* — that is mechanism A, FIXED in #1062, and it presents as
+     `ConnectionResetError`, not `TimeoutError`. Different exception, different fix.
+   - *blaming the PR under test* — four occurrences, every one on a diff that could not
+     reach the file, TWICE on docs-only PRs. That is the cheapest discriminator available
+     and it has already been run four times; do not re-run it as if it were open.
+
+   **Start instead from what the four occurrences SHARE:** one file's server fixture, one
+   exception, four different test classes, two very different load levels. Ask what that
+   fixture does that the rest of the suite does not.
 
 🔴 This list is a WORK QUEUE and `claim-work` is its lock — `claim-work --slug-for <this doc>
 <rank>`, then `claim-work <slug> --subject "<text>"`, and sweep `gh pr list --state open` too.
@@ -233,6 +333,28 @@ DIFFERENT item. Derive it fresh; do not reuse a slug from an older copy of this 
   exit codes were all genuine. **Ask which layer your fake occupies and whether the claim
   lives above it.** A netns pushes it to zero layers, at the cost of blacking out the network
   for everything in the process tree.
+- 🔴 **RUN THE TWO CHECK DERIVATIONS SEQUENTIALLY — a combined `nix build` produces FALSE
+  FAILURES.** `nix build .#checks.x86_64-linux.pytests .#checks.x86_64-linux.nodetests`
+  builds both at once, and the nested-`nix` tests inside them contend on the store:
+  measured 2026-08-30, `SQLite database … is busy` evaluating `nix/home.nix` plus
+  `OperationalError('database is locked')` in dl-router — **2 failures on a tree that passes
+  0 one at a time.** Load-dependent, so earlier combined runs were green and looked fine.
+  A combined run's GREEN is trustworthy (a contended run fails loudly, it does not fake a
+  pass); its **RED is not**, until re-checked sequentially. This cost a near-miss report of
+  "#1029 broke the gate".
+- 🔴 **A RED required check: read the EXCEPTION, never the test name.** The same test in
+  `test_subsystem_store_api.py` failed three different ways in one session, each wanting a
+  different response: `ConnectionResetError` (mechanism A — a real defect, now fixed),
+  `TimeoutError` at `socket.py` (mechanism B — uncharacterised; re-triggering a PR that
+  provably cannot reach that file is legitimate, but that is a claim about the DIFF and not
+  a diagnosis of the flake),
+  and 45 × `big-lock: Permission denied` (CI infrastructure, nothing to do with the tree).
+  A fourth red was neither — it was the PR sitting on a **red `main`**, where re-triggering
+  can never help. "Red check → re-trigger" is the reflex that turns a gate into noise.
+- ⚠ **`nix build` reports exit 0 for a FAILED build when its output is piped.** `… | tail`
+  swallows the status; the run that failed 45 tests printed `NIXBUILD_RC=0`. Read the
+  runners' own `RESULT:` lines, which is what the repo already tells you to do — this is the
+  documented trap, hit anyway.
 - **Live-first is the whole design.** The archive walk is 30.1 s; the live scan is 1.82 s and
   already carries `task`/`path`/`label`/`hotkey`/`status`/`waiting_signals`/
   `claude_session_id`. For "check on something I believe is in flight", the archive is the

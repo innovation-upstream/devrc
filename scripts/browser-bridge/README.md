@@ -175,7 +175,10 @@ always-detach) is in the **CDP ops** section below.
 There is **no `cookies` op** in the CLI, `server.py` or the extension, and the
 manifest deliberately does **not** request the `cookies` permission (verified:
 `permissions` is `["scripting","tabs","activeTab","storage","alarms","debugger",
-"webNavigation"]`). A cookie-read op is credential exfiltration by definition —
+"webNavigation","offscreen","clipboardWrite"]` — pinned against the manifest by
+`tests/offscreen_clipboard.test.mjs`, because a prose permission list is exactly
+the claim a reader consults to judge whether this extension is over-permissioned,
+and it had already gone stale once). A cookie-read op is credential exfiltration by definition —
 it hands a live session token to a caller. Adding one would mean, at minimum:
 hard-denying it to the autonomous browser-agent the way `upload` is (see
 *opencode browser-agent*), audit-logging every read, and accepting that session

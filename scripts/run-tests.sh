@@ -673,6 +673,18 @@ HERMETIC_TARGETS=(
   # contract and its exit-0-on-anything backstop are all gated here rather than left
   # to the ungated hand-rolled scripts beside it.
   scripts/claude-hooks/tests/test_clawgate_writeback_guard.py
+  # Same reason again — a FILE, not the directory. The handoff write guard is the
+  # write-back guard's counterpart on the OTHER record — the fourth hook here that
+  # can BLOCK, and the second that blocks at Stop; it fires on both the per-tool-call
+  # hot path and Stop. Its arming
+  # NON-matches (`ls claudedocs/`, a grep, a non-handoff `.md`, a path that resolves
+  # nowhere, a WRITE rather than a read) are the load-bearing half, and its
+  # no-work-after-read false-positive killer, its never-block-when-unmeasurable
+  # contract, its dismissal tombstone (which its precedent shipped BROKEN past three
+  # audit rounds, because every test drove the dismissal and none re-read the card
+  # afterwards) and its exit-0-on-anything backstop are all gated here rather than
+  # left to the ungated hand-rolled scripts beside it.
+  scripts/claude-hooks/tests/test_handoff_write_guard.py
   # Same reason again — a FILE, not the directory. The write-back guard's
   # counterpart at the OTHER end of a task's life: this one denies a `task create`
   # whose body carries no `## Acceptance criteria`, and — deliberately — one whose
@@ -1347,10 +1359,28 @@ TARGET_FLOORS=(
   # never fire: `zsh` is in REQUIRED_TOOLS, so a host without it aborts on
   # GUARD 1 naming the binary rather than running two tests thinner. That is
   # why they are not pinned in EXPECTED_SKIPS.
-  # 10233 = this run's own collected count (10283) put through the documented
-  # rule, copied VERBATIM from what the gate printed. Not arithmetic on the two
-  # sides — that is how this line took eleven values in one day.
-  "scripts/tests|10233"
+  # 🔴 A THREE-WAY CONFLICT ON THE MOST CONFLICT-PRONE LINE IN THIS REPO, and
+  # NEITHER side's number is right for the tree they merge into. `origin/main`
+  # pinned 10269 for the cairn `tasks:` work; this branch pinned 10233 for the
+  # rc-24 arm; the merged tree contains BOTH sets of tests and collects more than
+  # either. Resolving it by taking a side, or by arithmetic across the two, is
+  # exactly how this line took eleven values in one day.
+  #
+  # So the value below is the gate's OWN printed replacement, measured on the
+  # merged tree — the procedure both sides' comments already prescribe, applied
+  # to the tree that actually results.
+  #
+  # Both sides' lessons are kept because they are about different things:
+  #   * main's: the ceiling FIRED ONLY ON THE MERGED TREE. Neither side was over
+  #     alone (10137 and 10112); the SUM crossed it. With `strict: false` nothing
+  #     checks that automatically — building the integration branch by hand is
+  #     the only thing between it and a red main. This conflict IS that case,
+  #     one merge later.
+  #   * and the ORDER: pin the floor only after merging main INTO the branch, or
+  #     the branch lands under its own new floor and its required checks go red —
+  #     trading a merge-time failure for a branch-time one. A floor is a claim
+  #     about a measured tree; pin it on the tree you measured.
+  "scripts/tests|10269"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
@@ -1791,7 +1821,18 @@ TARGET_FLOORS=(
   # collected. Deliberately small — one test per module whose names it pins, plus the
   # two-sided classification guard that fails when a hook module appears or vanishes.
   #   _suggested_floor 13 = 13 - min(50, max(1, 13/20 = 0 -> 1)) = 12.
-  "scripts/claude-hooks/tests/test_on_disk_artifact_names.py|12"
+  # 2026-08-30, the handoff write guard adds three cases to that registry (its own
+  # whole-tree path pin, the doc-key positive control, and the assertion that its
+  # cache root is NOT shared with the write-back guard): 13 -> 16 collected.
+  #   _suggested_floor 16 = 16 - min(50, max(1, 16/20 = 0 -> 1)) = 15.
+  "scripts/claude-hooks/tests/test_on_disk_artifact_names.py|15"
+  # 2026-08-30, the handoff write guard arrives as a NEW target: 69 collected,
+  # 0 skipped, measured by pytest on this branch. It is the write-back guard's
+  # counterpart on the OTHER record — armed on a READ of a handoff doc, gating at
+  # Stop — and the count is dominated by the arming trigger's NON-matches and by
+  # the three satisfaction routes, each checked alone plus its negative control.
+  #   _suggested_floor 69 = 69 - min(50, max(1, 69/20 = 3)) = 66.
+  "scripts/claude-hooks/tests/test_handoff_write_guard.py|66"
   # 2026-08-21, the backgrounded-command capture log (868ktvqf9) arrives as a NEW
   # target: 80 collected, 0 skipped, measured by this gate on this branch.
   #   _suggested_floor 80 = 80 - min(50, max(1, 80/20 = 4)) = 76.
@@ -3492,6 +3533,16 @@ SHELL_TESTS=(
   "scripts/tests/test_release_wrapper.sh"
   "scripts/tests/test_resume_state.sh"
   "scripts/tests/test_base_clone_staleness.sh"
+  # Registered in the SAME commit that adds it, for the reason the two entries
+  # above exist: a shell test nothing runs is not a gate. It pins that a BARE
+  # `cleanup-disk.sh` performs no deletion — the script is `allow`-rated by the
+  # opencode ledger while two of its own `rm -rf` commands are `deny`-rated, so
+  # it launders them. Stubs the destructive tools and logs to a FILE (stderr is
+  # swallowed by the script's own `2>/dev/null`), and runs a POSITIVE CONTROL
+  # first so a zero from the bare run is never mistaken for a harness wired to
+  # nothing. Watched red: mutating `APPLY=0` to `APPLY=1` fails it with
+  # "the gate is bypassed".
+  "scripts/tests/test_cleanup_disk_gate.sh"
 )
 # 🔴 THE SHELL TESTS ARE IN THE TIMING CENSUS TOO, and the reason is the census's
 # own honesty: it is presented as an accounting of the run, so a population it
