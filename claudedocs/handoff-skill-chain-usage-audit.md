@@ -28,21 +28,32 @@ survives adversarial re-derivation, and fix whatever it exposes.
   context-exhausted · 2 never-started**, with a `Stop` hook already firing in **8 of 8** of the
   dominant bucket. Clawgate leg: of the 85 tasks that advanced past `open`, **73 (86%)** carry
   a write-back comment; **0** of 186 were agent-dispatched.
-- **DONE — rank 2, the whole point of rank 1: `scripts/claude-hooks/handoff-write-guard.py`.**
-  **devrc#1092, OPEN, `0e65439a`**, branch `zach/handoff-write-guard`, rebased onto current
-  `main` (`4ca8d662`). 3 commits: the hook + two self-audit rounds.
-  🔴 **BOTH GATES GREEN — `tekton/devrc-pytests` SUCCESS and `tekton/devrc-nodetests` SUCCESS.**
-  That is the first PR of this arc ever seen green, and it is a data point for the CI
-  investigation below rather than a claim that the investigation is closed.
-  Armed on a `/resume` **READ** (a `Read` of `claudedocs/handoff-*.md` / `*HANDOFF*.md`, or the
-  `git show <ref>:claudedocs/…` form — the shape this arc's own sessions used), never on
-  `SessionStart`. Three conditions, all required: the read, REAL WORK after it, and no
-  observable handoff write since. Three satisfaction routes UNIONED — a `handoff_doc.py` run,
-  a Write/Edit of ANY handoff doc, or the resumed doc's own mtime — two of them session-level
-  on purpose, because the 25 drift sessions were scored RECORDED and a path-keyed guard would
-  block every one of them. Ladder `block, block, systemMessage, silent`, MAX_DOCS 3, dismissal
-  with a tombstone, fail-open, one exit and it is always 0. Deployment seam wired in
-  `nix/home.nix` + `register-nudge-hook.py` and pinned two-way by the existing tests.
+- ✅ **DONE, MERGED AND LIVE ON BOTH HOSTS — rank 2 + rank 7:
+  `scripts/claude-hooks/handoff-write-guard.py`.** devrc**#1092 MERGED** 2026-08-30T17:31Z as
+  **`ad891a5c`** on `main` (squash — so `merge-base --is-ancestor <branch> main` is false
+  forever; it was verified by CONTENT). `ship.sh` converged **both hosts to `bd1572f3`**, which
+  has `ad891a5c` as an ancestor.
+  🔴 **DEPLOYED *AND* VERIFIED, stated as two separate claims.** Deployed: the store copy's
+  bytes hash **`6d25558e`**, byte-identical to `origin/main:scripts/claude-hooks/handoff-write-guard.py`.
+  Registered (the #452 check — a hook can ship, report a successful switch and sit INERT):
+  `~/.claude/settings.json` on **workbench AND laptop** each carry exactly **1** entry on
+  `PostToolUse` (matcher `None`) and **1** on `Stop`, and **0** on `SessionStart`/`SubagentStop`
+  — which is the design, not an omission. Verified live against the DEPLOYED copy, four cases:
+  (A) read a handoff off a ref → Edit → Stop ⇒ **`decision: block`**; (B) then a `handoff_doc.py`
+  run → Stop ⇒ **empty, self-suppressed**; (C) read with NO work → Stop ⇒ **empty** (the
+  false-positive killer); (D) a session that never touched a handoff leaves **no state dir at
+  all** (the fast path).
+  Design, for the next reader: armed on a `/resume` **READ** (a `Read` of
+  `claudedocs/handoff-*.md` / `*HANDOFF*.md`, or the `git show <ref>:claudedocs/…` form),
+  never on `SessionStart`. Three conditions — the read, REAL WORK after it, no observable
+  handoff write since. Three satisfaction routes UNIONED (a `handoff_doc.py` run, a Write/Edit
+  of ANY handoff doc, the resumed doc's own mtime); two are session-level ON PURPOSE, because
+  the 25 drift sessions were scored RECORDED and a path-keyed guard would block every one.
+  Ladder `block, block, systemMessage, silent`, MAX_DOCS 3, dismissal with a tombstone,
+  fail-open, one exit and it is always 0.
+  Gates were green pre-merge: `tekton/devrc-pytests` + `tekton/devrc-nodetests` both SUCCESS —
+  the first PR of this arc ever seen green, and a data point for the CI investigation below
+  rather than a claim that it is closed.
 - **Branch / PR (the rest of the arc):** `zach/skill-chain-usage-audit` → **devrc#1055, OPEN**.
   Second PR: **devrc#1064, OPEN**, branch `feat/handoff-audit` (the handoff-doc bloat auditor).
 - 🔴 **The LOCAL branch `zach/skill-chain-usage-audit` in the primary clone has DIVERGED from
@@ -54,11 +65,9 @@ survives adversarial re-derivation, and fix whatever it exposes.
   would be REJECTED, and forcing it would delete rank 1's work. **Work detached off
   `origin/zach/skill-chain-usage-audit` and push `HEAD:zach/skill-chain-usage-audit`**; do not
   check that local ref out and do not move it.
-- **Deploy/verify status.** 🔴 **NOTHING IS DEPLOYED, and the hook is INERT until it is.**
-  #1092 is committed and gate-green but needs a `home-manager switch` (operator's call) before
-  a single session is guarded. The clawgate `SKILL.md` fix (rank 4) is likewise committed on
-  #1055 and not live. `handoff-audit.py` is committed on #1064 and wired into no gate, skill
-  or script.
+- **Deploy/verify status of everything ELSE — still nothing.** The clawgate `SKILL.md` fix
+  (rank 4) is committed on #1055 and NOT live; `handoff-audit.py` is committed on #1064 and
+  wired into no gate, skill or script. Only the write guard has shipped.
 
 ## Open investigations — live diagnosis state
 
@@ -200,8 +209,7 @@ rather than removed and renumbered. New work is appended at the end.
 
 1. ✅ **DONE (2026-08-29)** — the end-state split: 8 cleanly-ended vs 2 context-exhausted of 16.
    forcing: none
-2. ✅ **DONE (2026-08-30)** — the handoff-write `Stop` hook. **IN FLIGHT: devrc#1092** (open,
-   both gates green, NOT deployed). Rank 7 is what finishes it.
+2. ✅ **DONE (2026-08-30)** — the handoff-write `Stop` hook. **MERGED as `ad891a5c`.**
    forcing: none
 3. **Audit the 25 drift cases for stale abandoned docs** (devrc + datapacket-talos +
    homelab-talos `claudedocs/`). Untouched. The question: was the ABANDONED doc (X) left with a
@@ -225,21 +233,25 @@ rather than removed and renumbered. New work is appended at the end.
    `talos-xr6-r7p` and a `nix-store-cache` PVC. That skill loads as authoritative for anyone
    debugging this gate. Re-measure before editing — it is a live label/volume, not a git fact.
    forcing: none
-7. 🔴 **Merge devrc#1092, then `home-manager switch`, then verify the hook is LIVE — this is the
-   only step that makes rank 2 real.** A hook that ships to both hosts, reports a successful
-   switch and sits INERT is this repo's own #452, and the registrar's docstring says so. The
-   verification is not "the switch succeeded": it is
-   `python3 -c "import json;print([h['command'] for e in json.load(open('/home/zach/.claude/settings.json'))['hooks']['Stop'] for h in e['hooks']])"`
-   naming `handoff-write-guard.py`, AND a live probe — read a handoff doc, edit a file, and
-   watch the next Stop block. 🔴 Both hosts, not one: the measurement covered both.
-   forcing: user — the operator asked for this hook to be built; it does nothing until deployed.
-8. **Grade the hook against the number it was built to move** — re-run the rank-1 measurement on
-   a post-deploy window and compare the 8.7% loss rate. 🔴 **Design it against the two ways a
-   pre-registered measurement of this shape has already died in these repos**: the treatment
-   must OUTLIVE the wait (a hook is a home-manager generation, so check it is not replaced by an
-   unrelated switch mid-window), and the grading population must EXIST across the whole
-   pre-window (`find-session` coverage, not assumed). Do not cut the window until both are
-   checked. Blocked on rank 7 — a window with no deployed hook in it grades nothing.
+7. ✅ **DONE (2026-08-30)** — merged, shipped to both hosts, registered on both, and probed live
+   against the deployed copy (block · self-suppress · read-with-no-work silent · no state for an
+   untouched session). See `## State now`.
+   forcing: none
+8. 🔴 **Grade the hook against the number it was built to move — THE CLOSING CONDITION OF THIS
+   WHOLE ARC, and it is now unblocked.** Re-run rank 1's measurement on a post-2026-08-30T17:35Z
+   window and compare the **8.7%** loss rate and the **8/16 cleanly-ended** bucket.
+   🔴 **Design it against the two ways a pre-registered measurement of this shape has ALREADY
+   died in these repos.** (a) *The treatment must outlive the wait*: the treatment here is a
+   home-manager generation, and ANY unrelated `ship.sh` replaces it — so before grading, check
+   the deployed blob is still `6d25558e` for the whole window, not just at the end. (b) *The
+   grading population must exist across the whole pre-window*: the pre-period is the 2026-08-15
+   → 08-29 corpus, which is already measured and on disk, so this half is satisfied — say so
+   rather than re-deriving it. Give it enough post-window that `/resume`-genesis sessions
+   ACCUMULATE: the pre-period needed 14 days for 253.
+   🔴 **And name the confound before cutting:** the guard changes the behaviour it measures, so
+   a session that writes a handoff BECAUSE it was blocked is a success, not a contaminated
+   sample — count blocks (they are observable: `~/.cache/claude-handoff-write/s/*/fires-*`) and
+   report them beside the rate rather than treating the rate alone as the result.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -366,6 +378,21 @@ of this doc — re-read them before trusting any similar analysis.**
   UNRESOLVED session, not a clean bill of health: **no `clawgate-task:` field was written and no
   task was created.** Same outcome as the previous session — two consecutive sessions of this arc
   have failed to resolve, which is itself worth a look before a third assumes it is normal.
+
+- 🔴 **`ship.sh` converged both hosts to a sha that is NOT the merge commit, and that is
+  correct — verify by ANCESTRY of the SHIPPED sha, not by equality with your own.** The merge
+  landed `ad891a5c`; `ship.sh` reported both hosts at `bd1572f3`, because other PRs landed in
+  between. Reading "shipped != my merge commit" as a failed deploy is the available mistake;
+  `git merge-base --is-ancestor ad891a5c bd1572f3` is the check. Pair it with the byte check on
+  the deployed artifact (`git hash-object ~/.claude/hooks/<x>` vs
+  `git rev-parse origin/main:<path>`) — the sha says WHAT SHIPPED, the hash says WHAT IS ON
+  DISK, and only the second one is a statement about the running system.
+- 🔴 **"Merged" and "registered" are two claims and only the second one makes a hook do
+  anything.** `nix/home.nix` deploys the FILE; `register-nudge-hook.py` writes the ENTRY into
+  each host's `~/.claude/settings.json`, per host, on switch. This repo's #452 is a hook that
+  shipped to both hosts, reported a successful switch, and sat inert with nothing on screen to
+  say so. The check that separates them is reading `settings.json` for the event names — here,
+  1 on `PostToolUse`, 1 on `Stop`, **0 on `SessionStart`**, on BOTH hosts.
 
 ## How to verify
 ```bash
