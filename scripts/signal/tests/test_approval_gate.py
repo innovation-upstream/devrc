@@ -970,17 +970,148 @@ def test_draft_to_a_phone_number_transmits_to_that_number_not_a_placeholder(db):
     assert poster.calls[0]["json"]["recipients"] == [PEER]
 
 
-def test_emit_draft_task_is_a_graceful_noop_without_a_token(monkeypatch):
+# --------------------------------------------------------------------------- #
+# 🔴 THE TOKEN NOW HAS TWO SOURCES (clawgate task #307), so every test below
+# must pin BOTH — and must pin $HOME. `emit_draft_task` resolves through
+# `scripts/lib/clawgate_env`, whose file tier is `~/.claude/clawgate.env`. A test
+# that only unsets the environment variable would read the OPERATOR'S REAL TOKEN
+# on a dev host and pass or fail on an ambient fact about the machine (green in
+# the nix sandbox, which has no such file, and posting a live card off the dev
+# host). `claude/RULES.md`: a suite whose config pins a dimension is blind on it —
+# here the dimension is the whole defect.
+# --------------------------------------------------------------------------- #
+def _isolate_clawgate_env(monkeypatch, tmp_path, *, file_token=None):
+    """Point the resolver's FILE tier at a tmp home and clear its ENV tier.
+
+    Returns the env-file path (which may not exist — that is the "no token
+    anywhere" case). `$HOME` is moved rather than a constant patched, so the real
+    `~/.claude/clawgate.env` construction is what gets exercised.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    env_file = home / ".claude" / "clawgate.env"
+    if file_token is not None:
+        env_file.write_text("CLAWGATE_HOOK_TOKEN=%s\n" % file_token,
+                            encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("CLAWGATE_HOOK_TOKEN", raising=False)
+    return env_file
+
+
+def test_emit_draft_task_is_a_graceful_noop_without_a_token(monkeypatch, tmp_path,
+                                                            capsys):
+    _isolate_clawgate_env(monkeypatch, tmp_path)     # no file, no env var
     posted = []
     module = types.ModuleType("requests")
     module.post = lambda *a, **k: posted.append(a)
     monkeypatch.setitem(sys.modules, "requests", module)
     assert clawgate.emit_draft_task(draft_id=1, recipient=PEER, body="x") is False
     assert posted == []
+    # 🔴 D3 UNREGRESSED, AND NO LONGER SILENT: it still returns rather than
+    # raising (the draft row is already stored by the time this runs), but it
+    # says what it skipped.
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1, "expected exactly ONE stderr line, got %r" % err
+    assert "#1" in err and "CLAWGATE_HOOK_TOKEN" in err
 
 
-def test_emit_draft_task_posts_the_card_when_a_token_is_set(monkeypatch):
+def test_emit_draft_task_posts_when_the_token_is_ONLY_in_the_env_FILE(
+        monkeypatch, tmp_path, capsys):
+    """🔴 THE DEFECT. This is the exact configuration of the host: the token sits
+    in `~/.claude/clawgate.env` and is absent from the process environment. The
+    old `os.environ.get` produced False and posted nothing, in silence — a real
+    draft was created with no card."""
+    _isolate_clawgate_env(monkeypatch, tmp_path, file_token="tok-from-file")
+    calls = []
+
+    class Resp:
+        def raise_for_status(self):
+            calls.append("raised")
+
+    module = types.ModuleType("requests")
+
+    def post(url, headers=None, json=None, timeout=None):
+        calls.append({"url": url, "headers": headers, "json": json})
+        return Resp()
+
+    module.post = post
+    monkeypatch.setitem(sys.modules, "requests", module)
+
+    assert clawgate.emit_draft_task(draft_id=41, recipient=PEER,
+                                    body="please approve") is True
+    assert calls[0]["headers"]["Authorization"] == "Bearer tok-from-file"
+    assert "41" in calls[0]["json"]["directory"]
+    assert capsys.readouterr().err == "", "a successful post must be silent"
+
+
+def test_emit_draft_task_prefers_the_ENVIRONMENT_over_the_file(monkeypatch,
+                                                               tmp_path):
+    """The precedence, asserted at the PRODUCER and not only in the resolver's own
+    suite: `clawgatectl`'s chain is file -> environment, later overriding
+    earlier, so an exported token wins."""
+    _isolate_clawgate_env(monkeypatch, tmp_path, file_token="tok-from-file")
+    monkeypatch.setenv("CLAWGATE_HOOK_TOKEN", "tok-from-environ")
+    seen = []
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+    module = types.ModuleType("requests")
+    module.post = lambda url, headers=None, json=None, timeout=None: (
+        seen.append(headers["Authorization"]) or Resp())
+    monkeypatch.setitem(sys.modules, "requests", module)
+
+    assert clawgate.emit_draft_task(draft_id=42, recipient=PEER, body="x") is True
+    assert seen == ["Bearer tok-from-environ"], (
+        "precedence is inverted: the exported token must override the file's")
+
+
+def test_emit_draft_task_reads_the_token_ONLY_through_the_shared_resolver():
+    """🔴 THE SEAM, structurally. The fix is worthless if a later edit reaches for
+    `os.environ` again — that is how the two producers came to be wrong in the
+    same direction in the first place. `CLAWGATE_HOOK_TOKEN` must appear in this
+    module NOWHERE outside a comment/docstring, and the resolver call must be
+    present."""
+    src = Path(clawgate.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    # Docstrings legitimately NAME the variable (they explain the precedence);
+    # only a string constant in CODE would be a second read of it.
+    prose = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+            continue
+        body = getattr(node, "body", None) or []
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            prose.add(id(body[0].value))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in prose):
+            assert "CLAWGATE_HOOK_TOKEN" not in node.value, (
+                "scripts/signal/clawgate.py names the token variable in code at "
+                "line %s — it must resolve through "
+                "scripts/lib/clawgate_env.resolve_hook_token, which is the ONE "
+                "place either producer reads it" % getattr(node, "lineno", "?"))
+    assert "resolve_hook_token(" in src, (
+        "the producer no longer calls the shared resolver")
+
+
+def test_the_shared_resolver_the_producer_loads_is_the_repo_one():
+    """POSITIVE CONTROL for the loader. The assertions above would all pass with
+    a resolver that was never found — the ImportError branch also returns False —
+    so prove the explicit-path load actually resolves, and to the file in this
+    repo."""
+    mod = clawgate._clawgate_env()
+    assert mod.TOKEN_VAR == "CLAWGATE_HOOK_TOKEN"
+    assert Path(mod.__file__).resolve() == \
+        (SIGNAL_DIR.parent / "lib" / "clawgate_env.py").resolve()
+
+
+def test_emit_draft_task_posts_the_card_when_a_token_is_set(monkeypatch, tmp_path):
+    _isolate_clawgate_env(monkeypatch, tmp_path)
     monkeypatch.setenv("CLAWGATE_HOOK_TOKEN", "tok-signal-1")
     calls = []
 

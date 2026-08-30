@@ -46,6 +46,16 @@ SIGNAL_DIR = Path(consumer.__file__).resolve().parent
 REQUIREMENTS = SIGNAL_DIR / "requirements.txt"
 DOCKERFILE = SIGNAL_DIR / "Dockerfile"
 DOCKERIGNORE = SIGNAL_DIR / "Dockerfile.dockerignore"
+LIB_DIR = SIGNAL_DIR.parent / "lib"
+
+#: 🔴 Modules from OUTSIDE scripts/signal/ that the image must also carry, and
+#: the reason each one is there. `clawgate.py` loads the shared clawgate
+#: hook-token resolver by explicit path relative to itself, so the image needs it
+#: at the same repo-relative position (clawgate task #307). Pinned as a set so a
+#: COPY added without an entry here fails, AND an entry whose COPY was dropped
+#: fails — the same two-way accounting as the scripts/signal/ list below, because
+#: the failure mode is identical: a module resolved by path that is simply absent.
+EXPECTED_LIB_MODULES = {"clawgate_env.py"}
 
 # PyPI distribution name -> the name you `import`. Asserted TOTAL over
 # requirements.txt by a test below; anything not listed here is treated as
@@ -98,8 +108,26 @@ def imported_names(source: str, *, local: set[str]) -> set[str]:
     return found
 
 
+def image_lib_modules() -> list[Path]:
+    """The scripts/lib/ modules the image carries (EXPECTED_LIB_MODULES, resolved).
+
+    Only the pinned ones: scripts/lib/ holds several modules this service has
+    nothing to do with, and globbing it would make every unrelated addition
+    there a requirement of this image.
+    """
+    return sorted(LIB_DIR / name for name in EXPECTED_LIB_MODULES)
+
+
 def third_party_imports() -> set[str]:
-    modules = runtime_modules()
+    """Third-party imports across EVERY module the image carries.
+
+    🔴 The shared lib modules are included, not just scripts/signal/. They are in
+    the image, so an import they grow is an import the image needs — and it would
+    land inside exactly the same silent reconnect loop. Their basenames also join
+    `local`, so a signal module importing one of them (or vice versa) is not
+    mistaken for a missing PyPI dependency.
+    """
+    modules = runtime_modules() + image_lib_modules()
     local = {p.stem for p in modules}
     found: set[str] = set()
     for path in modules:
@@ -120,15 +148,25 @@ def requirement_dists() -> list[str]:
     return dists
 
 
-def dockerfile_copied_files() -> set[str]:
-    """Basenames of the scripts/signal/ files the Dockerfile COPYs."""
+def _dockerfile_copies(prefix: str) -> set[str]:
+    """Basenames of the COPY sources under `prefix`."""
     copied = set()
     for m in re.finditer(r"^COPY\s+(\S+)\s+\S+\s*$", DOCKERFILE.read_text(encoding="utf-8"),
                          re.MULTILINE):
         src = m.group(1)
-        if src.startswith("scripts/signal/"):
+        if src.startswith(prefix):
             copied.add(Path(src).name)
     return copied
+
+
+def dockerfile_copied_files() -> set[str]:
+    """Basenames of the scripts/signal/ files the Dockerfile COPYs."""
+    return _dockerfile_copies("scripts/signal/")
+
+
+def dockerfile_copied_lib_files() -> set[str]:
+    """Basenames of the scripts/lib/ files the Dockerfile COPYs."""
+    return _dockerfile_copies("scripts/lib/")
 
 
 # --------------------------------------------------------------------------- #
@@ -152,6 +190,9 @@ def test_the_derivations_observe_something():
     assert dockerfile_copied_files(), (
         "HARNESS BROKEN: the Dockerfile COPY regex matched nothing — every "
         "COPY-list assertion below would pass vacuously")
+    assert dockerfile_copied_lib_files(), (
+        "HARNESS BROKEN: the same regex matched no scripts/lib/ COPY, so the "
+        "cross-directory seam test would compare two empty sets")
 
 
 def test_the_ast_walker_can_see_a_new_import():
@@ -270,6 +311,31 @@ def test_dockerfile_copies_every_runtime_module():
         "  in copied but not on_disk: the build will FAIL on a missing source.")
 
 
+def test_dockerfile_copies_the_shared_lib_modules():
+    """🔴 THE CROSS-DIRECTORY SEAM. `clawgate.py` resolves the shared token
+    resolver by PATH, relative to itself — a mechanism with no import error at
+    build time and no requirement in requirements.txt to catch it. If the COPY is
+    dropped, the module is simply not there and the resolver's ImportError path
+    is taken forever; if a lib module is added to EXPECTED_LIB_MODULES with no
+    COPY, same thing.
+
+    Three-way, so no leg can drift alone: the pin, the Dockerfile, and the file
+    actually existing on disk at the position the loader computes.
+    """
+    copied = dockerfile_copied_lib_files()
+    assert copied == EXPECTED_LIB_MODULES, (
+        f"Dockerfile scripts/lib/ COPY list {sorted(copied)} != "
+        f"EXPECTED_LIB_MODULES {sorted(EXPECTED_LIB_MODULES)}.\n"
+        "  pinned but not copied: the image will NOT contain it, and the "
+        "producer degrades to 'no card' forever.\n"
+        "  copied but not pinned: say here WHY the image needs it.")
+    for path in image_lib_modules():
+        assert path.is_file(), (
+            f"{path} is pinned into the image but is not on disk — the COPY "
+            "would fail the build, and the loader in clawgate.py resolves "
+            "exactly this repo-relative position")
+
+
 def test_dockerignore_allowlists_exactly_the_copied_files():
     """The per-Dockerfile ignore file is what makes `COPY`-by-name safe: it denies
     `**` and re-admits only the named paths, so the build context cannot carry a
@@ -283,7 +349,7 @@ def test_dockerignore_allowlists_exactly_the_copied_files():
         "Dockerfile.dockerignore must DENY everything on its first line and "
         f"re-admit by name; it starts with {lines[0]!r}")
     admitted = {Path(ln[1:]).name for ln in lines[1:] if ln.startswith("!")}
-    copied = dockerfile_copied_files()
+    copied = dockerfile_copied_files() | dockerfile_copied_lib_files()
     assert admitted == copied, (
         f"Dockerfile.dockerignore admits {sorted(admitted)} but the Dockerfile "
         f"COPYs {sorted(copied)}")

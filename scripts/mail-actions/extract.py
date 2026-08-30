@@ -31,10 +31,12 @@ Run flags:
   --dry-run         filter only; show survivor counts + what WOULD be extracted; no LLM, no writes
   --limit N         cap rows pulled from the delta (cost cap; default 150)
   --model NAME      OpenRouter model (default $MAIL_ACTIONS_MODEL or deepseek/deepseek-v4-flash)
-  --emit-clawgate   POST a Task card per NEW action item (needs CLAWGATE_HOOK_TOKEN)
+  --emit-clawgate   POST a Task card per NEW action item (needs a resolvable
+                    CLAWGATE_HOOK_TOKEN — see scripts/lib/clawgate_env.py)
   --json            machine-readable summary
 
-Env: OPENROUTER_API_KEY (Stage 2), KUBECONFIG (DB), CLAWGATE_HOOK_TOKEN (optional Stage 4).
+Env: OPENROUTER_API_KEY (Stage 2), KUBECONFIG (DB), CLAWGATE_HOOK_TOKEN (optional
+Stage 4 — read from ~/.claude/clawgate.env first, then the environment).
 """
 from __future__ import annotations
 
