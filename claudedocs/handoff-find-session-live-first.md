@@ -39,11 +39,14 @@ calls, 5 of them pure flailing.
 - **Issues:** #1029 CLOSED (its two lower-severity items ACCEPTED by operator decision and
   recorded on the closed issue — tracked by nothing now, which is the accepted cost).
   #1031 CLOSED. **#1028 closed**, verified fixed by #1023. **#1030 remains open and is now the only queue item.**
-- **IN FLIGHT: `devrc#1100`** — the mechanism-B refutation write-up. Open, checks pending at
-  the time of writing. 🔴 **It carries the three refutations and the `cpu=36%` reframing into
-  the "Open investigations" section of THIS doc**, so that content is deliberately NOT
-  repeated here; if #1100 was closed unmerged, those findings live only on
-  [#1030's comment](https://github.com/innovation-upstream/devrc/issues/1030#issuecomment-5470333259).
+- **NOTHING IN FLIGHT.** The two docs that were open when the paragraph above was first
+  written have both landed: **#1100 → `39ca66fa`** (the mechanism-B refutations and the
+  `cpu=36%` reframing, which live in "Open investigations" below) and **#1102 → `2cec1d45`**
+  (this status block). Verified by CONTENT on `origin/main`, and the merged result was read
+  across the overlapping region — both PRs edited THIS file, so a clean git merge would have
+  proved only the absence of a textual conflict. Ten PRs merged this session, zero open.
+  Worktrees removed, all `find-session-live-first-*` claims released, base clone at
+  `2cec1d45` 0 ahead / 0 behind.
 - **No `clawgate-task:` field.** `clawgate_handoff.sh resolve` exited **5** (nothing
   resolved). An unknown session id also answers `200` with an EMPTY ARRAY, so that is not a
   clean bill of health — it means the board could not attribute this session, not that no
