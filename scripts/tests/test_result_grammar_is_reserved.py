@@ -468,6 +468,62 @@ def test_the_unquoted_and_heredoc_arms_are_REACHED_and_correct(shape):
         f"{expected!r}: {line}")
 
 
+@pytest.mark.parametrize("op", sorted(G.SHELL_CONTROL_FIXTURES))
+def test_each_COMMAND_SEPARATOR_has_its_OWN_control(op):
+    """🔴 ROUND-4 FINDING NEW-4. The first separator class had a killer for `|`
+    ALONE — dropping `;`, `&`, `<` or `>` each survived a green suite. That is
+    the same "one mutant per alternative" gap already closed for the
+    interpolation class in round 2, reintroduced in the fix for round 3.
+
+    Each fixture is a real two-command forgery: drop that operator and the line
+    stops splitting, becomes one command whose payload starts ` ok …`, and is
+    reported BENIGN.
+    """
+    line = G.SHELL_CONTROL_FIXTURES[op]
+    assert G.classify_payload(line) == G.COLLISION, (
+        f"{op!r} no longer splits the line, so the second command's literal "
+        f"verdict is invisible: {line}")
+
+
+@pytest.mark.parametrize("shape", sorted(G.SECOND_MENTION_BENIGN))
+def test_a_second_MENTION_without_a_second_command_is_not_a_collision(shape):
+    """🔴 ROUND-4 FINDING NEW-5. Judging by "is there another RESULT: anywhere
+    on the line" made a trailing comment, and a prefix quoted INSIDE the
+    payload, into COLLISIONs — which have no ledger, so the only remedy was
+    editing someone's prose. That is the very hazard the whole-line comment
+    exemption exists to prevent, and the historical remedy for this entire bug
+    class was "add a comment saying not to do it".
+
+    Splitting into COMMANDS rather than scanning the whole line is what makes
+    these correct: neither runs a second command.
+    """
+    line = G.SECOND_MENTION_BENIGN[shape]
+    assert G.classify_payload(line) != G.COLLISION, (
+        f"a benign second mention was reported as an unpinnable COLLISION: {line}")
+
+
+def test_array_body_strips_comments_so_the_cross_check_cannot_false_fire():
+    """🔴 ROUND-4 FINDING NEW-6. The NEW-3 fix shipped with nothing that would
+    go red if it regressed — reverting the comment strip left the suite green,
+    and it only went red when an auditor planted the comment by hand.
+
+    A comment merely MENTIONING a quoted script path makes the two extractions
+    disagree and fires "One of them is reading the wrong thing", sending a
+    debugger after a parser bug that does not exist.
+    """
+    body = _array_body("SHELL_TESTS")
+    assert not any(ln.strip().startswith("#") for ln in body.splitlines()), (
+        "_array_body returned comment lines, so the quoted-path cross-check "
+        "counts paths that `_bash_array` skips")
+    # The live SHELL_TESTS comment block must actually contain a comment, or
+    # this test passes vacuously against a body that never had one.
+    raw = re.search(r"^SHELL_TESTS=\((.*?)^\)", RUNNER_SRC, re.S | re.M)
+    assert raw and any(ln.strip().startswith("#")
+                       for ln in raw.group(1).splitlines()), (
+        "SHELL_TESTS has no comment lines any more, so this test no longer "
+        "exercises the strip — re-point it at a registry that does")
+
+
 def test_the_fallback_fixtures_actually_reach_the_fallback_arm():
     """Guard the guard above: if every fixture were quoted, the parametrized
     test would pass while still never executing the arm it names."""

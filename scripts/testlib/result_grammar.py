@@ -186,13 +186,26 @@ _INTERPOLATION = re.compile(r"""[$`{%]""")
 # rather than teaching people to pin reflexively.
 _TERMINAL_AFTER_QUOTE = re.compile(r"""^[)\];\s]*(?:\#.*)?$""")
 
-# Shell control operators. Only meaningful for the UNQUOTED command arm, where
-# they can start a second command on the same line.
-_SHELL_CONTROL = re.compile(r"""&&|\|\||[;|&<>]""")
+# Shell COMMAND SEPARATORS. Their role is to split a line into the commands it
+# actually runs, so each can be judged on its own — `&&` and `||` need no
+# alternatives of their own because `&` and `|` are in the class.
+#
+# 🔴 They are a SEPARATOR list, not a danger list, and that distinction is the
+# fix for two findings at once. Treating an operator as inherently dangerous
+# made `echo RESULT: ok | tee f` DYNAMIC (it emits `RESULT: ok` — harmless), and
+# judging "is there a second RESULT: anywhere on the line" made
+# `echo "RESULT: 3 problems"  # never print RESULT: PASS here` a COLLISION —
+# unpinnable, so the only remedy was editing someone's prose. Splitting into
+# commands and taking the WORST verdict is precise in both directions.
+_SHELL_CONTROL = re.compile(r"""[;|&]""")
+
 
 COLLISION = "collision"
 DYNAMIC = "dynamic"
 BENIGN = "benign"
+
+# Ranked so a line holding several commands is judged by its worst one.
+_SEVERITY = {BENIGN: 1, DYNAMIC: 2, COLLISION: 3}
 
 
 def line_emits_reserved_prefix(line: str) -> bool:
@@ -211,31 +224,40 @@ def classify_payload(line: str) -> str | None:
     `DYNAMIC`       — this module CANNOT PROVE what gets printed. 🔴 That is not
                       "probably fine": `printf "RESULT: %s" "$verdict"` and
                       `` echo "RESULT: `cat v`" `` both emit a real forged
-                      verdict. The DEFAULT, so an unrecognised spelling fails
-                      safe rather than being waved through.
+                      verdict. The DEFAULT for the quoted arm, so an
+                      unrecognised spelling fails safe.
     `BENIGN`        — PROVED a closed literal that is not `PASS`/`FAIL`.
+
+    🔴 A line can run SEVERAL commands, and the forgery hides in the second:
+    `echo RESULT: ok && echo RESULT: PASS` really puts `RESULT: PASS` at column
+    0 (measured with `cat -A`). Each command is judged on its own and the line
+    takes the WORST verdict.
     """
     if not line_emits_reserved_prefix(line):
         return None
-    after = line.split(RESERVED_PREFIX, 1)[1]
+    commands = [c for c in _SHELL_CONTROL.split(line) if RESERVED_PREFIX in c]
+    if not commands:                      # no separator on the line
+        commands = [line]
+    worst = None
+    for command in commands:
+        verdict = _classify_one_command(command)
+        if worst is None or _SEVERITY[verdict] > _SEVERITY[worst]:
+            worst = verdict
+    return worst
+
+
+def _classify_one_command(command: str) -> str:
+    """Classify ONE command — no separators inside it by construction."""
+    after = command.split(RESERVED_PREFIX, 1)[1]
     if _LITERAL_VERDICT.match(after):
         return COLLISION
 
-    # 🔴 A line can emit the prefix MORE THAN ONCE, and the SECOND one is where
-    # a forgery hides: `echo RESULT: ok && echo RESULT: PASS` emits BOTH, and
-    # bash really puts `RESULT: PASS` at column 0 (measured with `cat -A`).
-    # Judging the line by its FIRST emission alone called that benign. Judge it
-    # by its WORST.
-    if any(_LITERAL_VERDICT.match(seg)
-           for seg in line.split(RESERVED_PREFIX)[2:]):
-        return COLLISION
-
-    quoted = _QUOTED.search(line)
+    quoted = _QUOTED.search(command)
     if quoted:
         quote = quoted.group(1)
         close = after.find(quote)
         if close == -1:
-            return DYNAMIC              # the quote never closes on this line
+            return DYNAMIC              # the quote never closes here
         inside, rest = after[:close], after[close + 1:]
         if _INTERPOLATION.search(inside):
             return DYNAMIC              # a runtime value is spliced in
@@ -243,21 +265,9 @@ def classify_payload(line: str) -> str | None:
             return DYNAMIC              # `+ v`, `, v`, `.join(…)` — appends
         return BENIGN
 
-    # No quote opened the prefix, so the payload is the rest of the LINE. Two
-    # sub-cases, and they must NOT share one predicate — what can splice a
-    # value in differs between them.
-    if _UNQUOTED.search(line):
-        # A shell/Python COMMAND. A control operator starts a new command, so
-        # it is every bit as dangerous as interpolation:
-        # `echo RESULT: ok && echo RESULT: PASS` really does put `RESULT: PASS`
-        # at column 0 (measured with `cat -A`). An earlier revision returned
-        # BENIGN for exactly that line and told the operator it was provable.
-        if _INTERPOLATION.search(after) or _SHELL_CONTROL.search(after):
-            return DYNAMIC
-        return BENIGN
-
-    # A heredoc body line is literal TEXT — `&&` there is printed, not executed
-    # — so only interpolation can change what is emitted.
+    # Unquoted command, or a heredoc body line: the rest IS the payload, so it
+    # is literal text unless something interpolates into it. 🔴 A NAMED
+    # BLACKLIST, not the whitelist above — see the module docstring.
     return DYNAMIC if _INTERPOLATION.search(after) else BENIGN
 
 
@@ -375,25 +385,46 @@ APPEND_FIXTURES = {
 # round, so both `return BENIGN` and `return DYNAMIC` mutants survived a fully
 # green suite — a branch nothing executes cannot be verified by anything.
 FALLBACK_FIXTURES = {
-    # A SECOND emission on the same line carrying a literal verdict. bash really
-    # puts `RESULT: PASS` at column 0 here (measured with `cat -A`), so this is
-    # a COLLISION, not merely undecidable — and judging the line by its FIRST
-    # emission called it provably harmless.
-    "second-emission-and":  ("echo " + RESERVED_PREFIX + " ok && echo "
-                             + RESERVED_PREFIX + " PASS", COLLISION),
-    "second-emission-semi": ("echo " + RESERVED_PREFIX + " ok; echo "
-                             + RESERVED_PREFIX + " PASS", COLLISION),
-    # 🔴 Each of the next two isolates ONE clause. `unquoted-pipe` carries a
-    # shell operator and NO interpolation and no second prefix; `unquoted-var`
-    # carries interpolation and no operator. Fixtures that carried two signals
-    # let a mutant die to the wrong clause — measured, twice.
-    "unquoted-pipe":     ("echo " + RESERVED_PREFIX + " ok | tee f", DYNAMIC),
+    # 🔴 Each isolates ONE clause. Fixtures carrying two signals let a mutant
+    # die to the wrong clause — measured twice in this ladder.
     "unquoted-var":      ("echo " + RESERVED_PREFIX + " $v", DYNAMIC),
-    # unquoted command, provably fine: one command, literal payload.
     "unquoted-literal":  ("echo " + RESERVED_PREFIX + " ok", BENIGN),
-    # heredoc body: literal TEXT, so `&&` is printed rather than executed.
-    "heredoc-literal":   (RESERVED_PREFIX + " 3 problems and counting", BENIGN),
+    # A pipe is a SEPARATOR, not a hazard: this emits `RESULT: ok` and nothing
+    # else, so BENIGN is the correct answer rather than a conservative DYNAMIC.
+    "unquoted-pipe":     ("echo " + RESERVED_PREFIX + " ok | tee f", BENIGN),
+    # heredoc body: literal TEXT, so a separator there is printed, not run.
+    "heredoc-literal":   (RESERVED_PREFIX + " 3 problems; and counting", BENIGN),
     "heredoc-var":       (RESERVED_PREFIX + " $verdict", DYNAMIC),
+}
+
+# One fixture per COMMAND SEPARATOR. Each is a real two-command forgery: the
+# second command emits a literal verdict at column 0, so the line is a
+# COLLISION — and drop that character from `_SHELL_CONTROL` and the line stops
+# splitting, becomes one command whose payload starts ` ok …`, and is reported
+# BENIGN. So every operator has its own killer.
+#
+# 🔴 This mirrors INTERPOLATION_FIXTURES deliberately. An audit found the first
+# version of the separator class had a killer for `|` ALONE — the same
+# "one mutant per alternative" gap already closed for the interpolation class,
+# reintroduced in the fix for a different finding.
+SHELL_CONTROL_FIXTURES = {
+    "semicolon":   "echo " + RESERVED_PREFIX + " ok; echo " + RESERVED_PREFIX + " PASS",
+    "pipe":        "echo " + RESERVED_PREFIX + " ok | echo " + RESERVED_PREFIX + " PASS",
+    "ampersand":   "echo " + RESERVED_PREFIX + " ok & echo " + RESERVED_PREFIX + " PASS",
+    "and-and":     "echo " + RESERVED_PREFIX + " ok && echo " + RESERVED_PREFIX + " PASS",
+    "or-or":       "echo " + RESERVED_PREFIX + " ok || echo " + RESERVED_PREFIX + " FAIL",
+}
+
+# Lines that MENTION the grammar a second time without running a second
+# command. 🔴 These were COLLISIONs — which have no ledger — under a rule that
+# asked "is there another RESULT: anywhere on the line". The remedy would have
+# been editing someone's prose, the exact hazard the whole-line comment
+# exemption exists to prevent.
+SECOND_MENTION_BENIGN = {
+    "trailing-comment": 'echo "' + RESERVED_PREFIX + ' 3 problems"  # never print '
+                        + RESERVED_PREFIX + ' PASS here',
+    "inside-the-string": 'echo "' + RESERVED_PREFIX + ' see the '
+                         + RESERVED_PREFIX + ' PASS docs"',
 }
 
 
