@@ -632,8 +632,9 @@ class TestSelfRepairIsScopedToOurOwnHook:
         out = subprocess.run([str(INSTALLER), "--repo", str(repo), "--apply"],
                              capture_output=True, text=True)
         assert out.returncode == 0
-        assert "INCOMPLETE" in out.stdout
+        assert "PARTIAL WRITE" in out.stdout, out.stdout
         assert "points at another checkout" not in out.stdout, out.stdout
+        assert "is not ours" not in out.stdout, out.stdout
 
 
 class TestOwnershipDiscriminatesBOTHHalves:
@@ -736,3 +737,84 @@ class TestSelfRepairRequiresTheHookToActuallyBeBroken:
         assert out.returncode == 0, (out.stdout, out.stderr)
         assert subprocess.run(["sh", "-n", str(target)],
                               capture_output=True).returncode == 0
+
+
+class TestEveryTruncationOfOurOwnHookIsRepaired:
+    """🔴 ROUND-7 — the round-6 audit swept every cut point of the generated
+    wrapper and found the guard was right for only SOME of them.
+
+    Round 6 used `sh -n` as the discriminator. Of the wrapper's cut points, the
+    ones landing mid-`if` fail to parse and were repaired; the ones landing on a
+    comment or after `fi` parse CLEANLY and were refused — with two false
+    sentences ("points at another checkout" naming this very checkout, and "is
+    not ours" about our own hook). In those the feature is silently dead:
+    commits succeed, nothing is stamped, and the installer will not fix it.
+
+    The discriminator is now a byte-exact PREFIX of what this run would
+    generate, which is the exact question. This sweeps every cut point rather
+    than sampling one, because sampling one is how round 6 passed.
+    """
+
+    def _hooks(self, repo) -> Path:
+        return Path(git(repo, "rev-parse", "--path-format=absolute",
+                        "--git-common-dir").stdout.strip()) / "hooks"
+
+    def test_every_prefix_of_our_own_hook_is_repaired_without_force(self, repo):
+        install(repo)
+        target = self._hooks(repo) / "prepare-commit-msg"
+        full = target.read_text()
+        lines = full.split("\n")
+        parses_clean = repaired = 0
+        # From 2: a bare `#!/bin/sh` (cut=1) is a byte-exact prefix of our
+        # output but carries no marker, and may be someone's deliberate no-op
+        # hook — the installer refuses it on purpose.
+        for cut in range(2, len(lines)):
+            target.write_text("\n".join(lines[:cut]) + "\n")
+            clean = subprocess.run(["sh", "-n", str(target)],
+                                   capture_output=True).returncode == 0
+            parses_clean += clean
+            out = subprocess.run([str(INSTALLER), "--repo", str(repo), "--apply"],
+                                 capture_output=True, text=True)
+            assert out.returncode == 0, (
+                f"cut at line {cut} (parses={clean}) was refused: {out.stdout}")
+            assert target.read_text() == full, f"cut at line {cut} not restored"
+            assert "points at another checkout" not in out.stdout, (
+                f"cut at line {cut}: false claim about another checkout")
+            repaired += 1
+        # The sweep is only meaningful if it covered BOTH kinds of cut — a sweep
+        # where everything failed to parse would not discriminate the old guard.
+        assert parses_clean > 0, (
+            "no cut point parsed cleanly, so this sweep cannot see the defect "
+            "round 6 shipped")
+        assert repaired == len(lines) - 2, (repaired, len(lines))
+
+    def test_a_bare_shebang_stub_is_NOT_swallowed(self, repo):
+        """🔴 The marker requirement inside `is_truncated_ours`, which the sweep
+        above deliberately excludes and therefore cannot guard.
+
+        A one-line hook IS a byte-exact prefix of our output — but it may be
+        someone's deliberate no-op, disabling the hook on purpose. Replacing it
+        with a working stamper would silently re-enable behaviour they turned
+        off. Measured: without the marker requirement this is repaired.
+        """
+        install(repo)
+        target = self._hooks(repo) / "prepare-commit-msg"
+        mockbin.write_exec(target, "")          # exactly the shebang, nothing else
+        before = target.read_text()
+        out = subprocess.run([str(INSTALLER), "--repo", str(repo), "--apply"],
+                             capture_output=True, text=True)
+        assert out.returncode == 4, (out.returncode, out.stdout)
+        assert target.read_text() == before, "a deliberate no-op stub was replaced"
+
+    def test_a_hook_that_is_NOT_a_prefix_of_ours_is_still_refused(self, repo):
+        """Negative control: the prefix test must not have become 'repair
+        anything shorter'."""
+        install(repo)
+        target = self._hooks(repo) / "prepare-commit-msg"
+        lines = target.read_text().split("\n")
+        # our header, then a body we never wrote — shorter, but not a prefix
+        target.write_text("\n".join(lines[:2]) + "\nimpl=/opt/other/x.py\necho MINE\n")
+        out = subprocess.run([str(INSTALLER), "--repo", str(repo), "--apply"],
+                             capture_output=True, text=True)
+        assert out.returncode == 4, (out.returncode, out.stdout)
+        assert "echo MINE" in target.read_text()
