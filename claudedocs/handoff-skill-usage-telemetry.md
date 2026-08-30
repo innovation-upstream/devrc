@@ -190,6 +190,28 @@ truth-telling channel." Measured, the production consumer was never exposed:
 - **Next probe:** build the integration branch and gate it, then the sandbox tier:
   `git -C <wt> merge origin/main` → `nix develop ~/workspace/devrc --command bash scripts/gate.sh --tier both --set hermetic <wt>` → `nix build .#checks.x86_64-linux.pytests` (alone — a combined invocation produces false failures).
 
+### ✅ CLOSED — the merged tree was gated, and the floor/ceiling worry did not materialise
+Previous entry asked whether this branch's +15 tests could push `scripts/tests` past its
+drift ceiling on the merged tree, since #1065's own commit records that the ceiling "FIRED
+ONLY ON THE MERGED TREE". **Measured, not reasoned:** the merged tree collects
+`19408` repo-wide against a summed floor of `18145`, `failed=0`, and the run printed no
+floor-replacement line — which the gate emits only when a floor actually drifts. No
+`TARGET_FLOORS` edit was needed. The merge itself was textually clean; the upstream
+`run-tests.sh` diff touched only the floor block and its comments, never
+`HOOK_TESTS`/`SHELL_TESTS`, which is what this guard parses.
+
+### ✅ CLOSED — the near-miss is confirmed in PRODUCTION gate output, not just by running the file
+The sandbox `pytests` log for this very branch contains, two lines apart:
+```
+devrc-pytests> RESULT: all good
+devrc-pytests>   TOTAL collected=19408  passed=19406  skipped=2  failed=0  (floor: 18145)
+devrc-pytests> RESULT: PASS (exit=0)
+```
+The first line is `scripts/claude-hooks/tests/test_bash_guard.py:490` emitting into the
+gate's own stream, immediately ahead of the runner's real verdict. That is the hazard's
+exact geometry, observed in a real gate run rather than a fixture: had its payload been
+`PASS` instead of `all good`, a first-match reader would have taken it.
+
 ## 🔴 The one thing to read before doing items 3 and 4
 🟢 **UPDATE 2026-08-30 — the blocker below has LARGELY CLEARED. Read this first; the
 original text is kept underneath because its ARGUMENT is still the right one.**
@@ -232,34 +254,34 @@ a fleet-wide claim cannot be made from this data yet. Re-check both hosts appear
 </details>
 
 ## Next steps (ranked)
-1. **Finish gating rank 7 and open the PR.** Repo `devrc`, branch
-   `fix/result-grammar-scan`. Merge `origin/main` in, run BOTH tiers on the merged tree
-   (sandbox tier one derivation at a time), then `gh pr create`. Files already written:
-   `scripts/testlib/result_grammar.py`, `scripts/tests/test_result_grammar_is_reserved.py`,
-   `scripts/tests/test_gate_exit_truthfulness.py`.
-   forcing: regression — MEASURED, not hypothetical: `test_cleanup_disk_gate.sh` forged
-   `RESULT: PASS (exit=0)` and `test_gate_exit_truthfulness.py` read the forged PASS off a
-   run whose own verdict was FAIL. The work is done; only the gate and the PR remain, and
-   an un-merged branch holding a shipped guard protects nothing.
-2. **Rotate the leaked `activity_reader` credential** (was rank 5; unchanged).
+1. **Audit and merge #1119.** `/audit-pr 1119` first — it is a gate-integrity change, which
+   is the class where a wrong fix is least visible. Then merge, `scripts/ship.sh`, and
+   `claim-work --release skill-usage-telemetry-7`.
+   forcing: regression — MEASURED: `test_cleanup_disk_gate.sh` forged
+   `RESULT: PASS (exit=0)` and the truthfulness guard read the forged PASS off a run whose
+   own verdict was FAIL. The guard is written and green but protects nothing until merged
+   AND shipped.
+2. **Rotate the leaked `activity_reader` credential.**
    forcing: security — a LIVE exposure, an `activity_reader` password in cleartext in the
    opencode session store. Zach's to do; the only item here with an EXTERNAL forcing
    function.
-3. **Release the claim when 1 lands** — `claim-work --release skill-usage-telemetry-7`.
-   forcing: gate — an unreleased ref is the one way `claim-work` blocks another session,
-   and this one is held right now.
-4. **The `adoption-scan` `via: "skill"` registry arm.** Gate re-measured 2026-08-30:
-   26 distinct identities fleet-wide of 35 devrc-managed skills, both hosts reporting, 0
-   rejects. Files: `scripts/session-analysis/adoption-scan.py`,
-   `claude/skills/adoption-scan/SKILL.md`.
-   forcing: none — unchanged from the previous session's honest answer. The incident that
-   forced this effort is already closed by #1000 + #1059. Do not work it on the strength
-   of being written down.
+3. **Bring the laptop's `homelab-talos/containers/clawgate` built source current** —
+   `git -C ~/workspace/homelab-talos pull --ff-only` then a `home-manager switch`, on the
+   laptop. Measured by `drift-check.sh` this session: laptop rc 17, 1 behind; the workbench
+   is CURRENT, so the two hosts build DIFFERENT source (`c919cd32c230` vs `11fde963e9e9`)
+   under the same version string.
+   forcing: regression — this is the 2026-08-14 failure mode's exact shape (a `clawgatectl`
+   whose binary is older than its label). Not this effort's repo, which is why it is ranked
+   below the two above.
+4. **The `adoption-scan` `via: "skill"` registry arm.** Files:
+   `scripts/session-analysis/adoption-scan.py`, `claude/skills/adoption-scan/SKILL.md`.
+   forcing: none — unchanged. The incident that forced this effort is already closed by
+   #1000 + #1059. Do not work it on the strength of being written down.
 5. **The `attributionSkill` deadman.** File: `scripts/validation/invariants.py`.
    forcing: none — guards a hypothetical silent zero; nothing has regressed.
 6. **`claudedocs/followups-skill-usage-telemetry.md`** — `audit-dispatch.py`'s
-   wrong-toolchain brief (⚠ possibly closed by #1104 this session — CHECK before working
-   it) and G5, the ClickHouse creds/query helper.
+   wrong-toolchain brief (⚠ likely CLOSED by #1104, which merged this session — check
+   before working it) and G5, the ClickHouse creds/query helper.
    forcing: none — same reasoning as 4 and 5.
 
 ## Gotchas / decisions / dead-ends
@@ -357,23 +379,32 @@ a fleet-wide claim cannot be made from this data yet. Re-check both hosts appear
   Per the skill that is NOT a clean bill of health — an unknown session id also answers 200
   with an empty array — so no field was written.
 
+- **The base clone `~/workspace/devrc` was sitting on ANOTHER session's branch**
+  (`docs/handoff-bb-resume-0830`), not `main`. The handoff was therefore landed with
+  `--repo <worktree>` so it rode this branch instead. Check `branch --show-current` before
+  letting any tool commit into the shared checkout — `handoff_doc.py` runs git from inside
+  Python, so no PreToolUse hook would have caught it.
+- **A duplicate-sweep zero was validated before being believed:** the title filter returned
+  0 under test and **18** on a positive control using the same filter shape. A zero from an
+  unvalidated filter is indistinguishable from a filter wired to nothing.
+- **`nix build <worktree>#checks…` works** — a linked worktree resolves as a flake ref, and
+  the derivation still builds from tracked files only, so newly `git add`ed files are
+  included and untracked ones are not.
+
 ## How to verify
 ```bash
 # 1. the guard, and the six mutations it was watched red against
 nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc-result-guard/scripts/tests/test_result_grammar_is_reserved.py -q
+  scripts/tests/test_result_grammar_is_reserved.py -q
 
-# 2. the live near-miss — RUN it, do not read it (prints `RESULT: all good` at column 0)
-nix develop ~/workspace/devrc -c python3 \
-  ~/workspace/devrc/scripts/claude-hooks/tests/test_bash_guard.py | tail -4
+# 2. the near-miss, in PRODUCTION gate output — grep the sandbox log, not the source
+nix build .#checks.x86_64-linux.pytests --no-link -L 2>&1 | grep -B1 -A2 'RESULT: all good'
 
-# 3. the two readers now agree — gate.sh must still say `tail -1`
-grep -n "verdict=" ~/workspace/devrc/scripts/gate.sh
+# 3. the two readers still agree — gate.sh must still say `tail -1`
+grep -n 'verdict=' ~/workspace/devrc/scripts/gate.sh
 
-# 4. BOTH tiers on the MERGED tree — the sandbox one is what Tekton gates on,
-#    and a combined nix build of both derivations produces FALSE failures
-nix develop ~/workspace/devrc --command bash scripts/gate.sh --tier both --set hermetic <wt>
-nix build .#checks.x86_64-linux.pytests
+# 4. after merge: it is not live on a host until a switch
+scripts/ship.sh && bash ~/workspace/devrc/scripts/drift-check.sh
 ```
 ## State now — rank 7 BUILT and mutation-verified on a branch; gate IN FLIGHT (2026-08-30)
 
@@ -390,3 +421,25 @@ nix build .#checks.x86_64-linux.pytests
 - 🔴 **`origin/main` MOVED during the session** (`72c786c4` → `ebbe5eaa`; #1065, #1081,
   #1104 landed). One of them touches `scripts/run-tests.sh` — the file this guard PARSES.
   The merged tree has not been gated.
+## State now — rank 7 SHIPPED to PR #1119, both tiers green on the MERGED tree (2026-08-30)
+
+- **Ranks 1, 2, 6 remain DONE.** Reconciled by `resume-state.sh`: clean digest, no gap
+  block, all 8 referenced PRs MERGED, both hosts converged.
+- **Rank 7 is COMPLETE and IN REVIEW — `innovation-upstream/devrc#1119`**, branch
+  `fix/result-grammar-scan`. Not merged; no audit run yet.
+  - `scripts/testlib/result_grammar.py` (new) — the grammar + `select_verdict`.
+  - `scripts/tests/test_result_grammar_is_reserved.py` (new) — the registry scan.
+  - `scripts/tests/test_gate_exit_truthfulness.py` (modified) — both readers now share
+    `select_verdict`.
+- **Gated on the MERGED tree, all four runs green** (`origin/main` moved under the branch
+  mid-session and touched `scripts/run-tests.sh`, so the merge is in — clean, no conflicts):
+  - dev-host `gate.sh --tier both` → `GATE: RESULT=PASS exit=0`
+  - sandbox `nix build .#checks…pytests` → `RESULT: PASS (exit=0)`,
+    `collected=19408 passed=19406 skipped=2 failed=0 (floor: 18145)`
+  - sandbox `nix build .#checks…nodetests` → `RESULT: PASS (exit=0)`,
+    `tests=1420 pass=1420 fail=0 (floor: 1367)`
+  - the two sandbox derivations were built ONE AT A TIME.
+- **Claim `skill-usage-telemetry-7` is still HELD** — deliberately, so nobody re-does the
+  work while #1119 is in review. Release it when #1119 merges.
+- 🔴 **NOT deployed and NOT verified past the merge.** A merged PR changes nothing that
+  nix manages: this guard only runs on a host after `scripts/ship.sh`.
