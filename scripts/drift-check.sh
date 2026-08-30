@@ -2768,7 +2768,13 @@ bp_slug_of() { # bp_slug_of <remote-url> -> owner/repo, or "" if not GitHub
   # with `github.com` followed by the scp `:` or the path `/`.
   local U="$1" S=""
   case "$U" in *://*) U="${U#*://}" ;; esac
-  case "$U" in *@*) U="${U#*@}" ;; esac
+  # 🔴 THE USERINFO STRIP MUST BE ANCHORED TOO, or it re-opens the very class the
+  # host anchor below closes: `https://mirror.example/u@github.com/o/r.git` has an
+  # `@` in its PATH, and stripping to it leaves a string that BEGINS `github.com/`.
+  # Userinfo can only precede the host, so it may not contain a `/`.
+  case "$U" in
+    *@*) case "${U%%@*}" in */*) ;; *) U="${U#*@}" ;; esac ;;
+  esac
   case "$U" in
     github.com:*) S="${U#github.com:}" ;;
     github.com/*) S="${U#github.com/}" ;;
@@ -2886,8 +2892,24 @@ EOF
     # exactly that state, and rc 24 would then fire on every 6-hourly run
     # forever: the DND-bypassing toast 4x/day, i.e. the permanently-red gate this
     # file refuses everywhere else. So ask the ruleset endpoint before deciding.
-    BP_RULES="$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/rules/branches/main" --jq '[.[]|select(.type=="required_status_checks")]|length' 2>/dev/null)"
+    # 🔴 COUNTING RULE DECLARATIONS IS NOT READING THE GATE — the same mistake as
+    # counting classic contexts without `enforce_admins`, reintroduced on the path
+    # added to fix it. A `required_status_checks` rule can list ZERO checks, can
+    # sit in a ruleset whose `enforcement` is not `active`, and can carry
+    # `bypass_actors` letting an admin push straight past it — which is the exact
+    # mechanism of incident 2. So the rule must list at least one check, and the
+    # ruleset it belongs to must be active with nobody bypassing it.
+    #
+    # `/rules/branches/main` exposes `parameters` but NOT `bypass_actors`; the
+    # ruleset DETAIL endpoint carries both and is readable without repo-admin
+    # (measured on astral-sh/uv: `enforcement=active, bypass_actors=0`).
+    BP_RULES_RAW="$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/rules/branches/main" --jq '[.[]|select(.type=="required_status_checks" and ((.parameters.required_status_checks//[])|length)>0)] | "\(length) \(.[0].ruleset_id // 0)"' 2>/dev/null)"
+    BP_RULES=""; BP_RULE_ID=""
+    read -r BP_RULES BP_RULE_ID <<EOF
+$BP_RULES_RAW
+EOF
     case "$BP_RULES" in ''|*[!0-9]*) BP_RULES=-1 ;; esac
+    case "$BP_RULE_ID" in ''|*[!0-9]*) BP_RULE_ID=0 ;; esac
     if [ "$BP_RULES" = -1 ]; then
       # 🔴 The one case that must NOT become a finding: classic says zero and the
       # ruleset half could not be read, so "unprotected" and "protected by a
@@ -2897,8 +2919,36 @@ EOF
       echo "[protect]   ruleset endpoint did not answer, so a ruleset gate cannot be ruled out."
       echo "[protect]   This is NOT 'main is unprotected' and NOT 'main is protected'. No rc."
     elif [ "$BP_RULES" -gt 0 ]; then
-      echo "[protect] $BP_SLUG main: 0 classic required checks, but $BP_RULES ruleset(s) of type"
-      echo "[protect]   required_status_checks apply. The gate is ON, by the newer mechanism."
+      # The rule lists checks. Now ask whether the ruleset holding it actually
+      # BINDS — active, and with no bypass actors.
+      BP_RS_RAW="$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/rulesets/$BP_RULE_ID" --jq '"\(.enforcement) \((.bypass_actors//[])|length)"' 2>/dev/null)"
+      BP_RS_ENF=""; BP_RS_BYPASS=""
+      read -r BP_RS_ENF BP_RS_BYPASS <<EOF
+$BP_RS_RAW
+EOF
+      case "$BP_RS_BYPASS" in ''|*[!0-9]*) BP_RS_BYPASS=-1 ;; esac
+      if [ -z "$BP_RS_ENF" ] || [ "$BP_RS_BYPASS" = -1 ]; then
+        echo "[protect] COULD NOT MEASURE — $BP_SLUG main is gated by ruleset $BP_RULE_ID, but its"
+        echo "[protect]   enforcement/bypass could not be read, so 'the gate binds' is unproven."
+        echo "[protect]   NOT read as protected, and NOT as drift. No rc is set."
+      elif [ "$BP_RS_ENF" != active ]; then
+        echo "[protect] 🔴 DRIFT — $BP_SLUG main's only required-checks ruleset ($BP_RULE_ID) is"
+        echo "[protect]   enforcement=$BP_RS_ENF, not active. A ruleset in evaluate/disabled mode"
+        echo "[protect]   REPORTS and does not block, so nothing gates main."
+        echo "[protect]   fix: set that ruleset's enforcement to active."
+        note_rc 24
+      elif [ "$BP_RS_BYPASS" -gt 0 ]; then
+        echo "[protect] 🔴 DRIFT — $BP_SLUG main's required-checks ruleset ($BP_RULE_ID) is active but"
+        echo "[protect]   carries $BP_RS_BYPASS bypass actor(s). Half a gate, the ruleset spelling of"
+        echo "[protect]   enforce_admins=false: whoever is listed pushes straight past every check,"
+        echo "[protect]   which is the mechanism behind 837d3fde."
+        echo "[protect]   fix: remove the bypass actors, or accept and document them."
+        note_rc 24
+      else
+        echo "[protect] $BP_SLUG main: 0 classic required checks, but $BP_RULES ruleset rule(s) of"
+        echo "[protect]   type required_status_checks apply (ruleset $BP_RULE_ID, enforcement=active,"
+        echo "[protect]   0 bypass actors). The gate is ON, by the newer mechanism."
+      fi
     else
     echo "[protect] 🔴 DRIFT — $BP_SLUG main has ZERO required status checks (protected=$BP_PROT),"
     echo "[protect]   by CLASSIC protection and by RULESETS alike — both were checked."
