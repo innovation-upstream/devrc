@@ -575,6 +575,11 @@ DEFAULT_STORE = "/data"
 DEFAULT_TOKEN_FILE = "/run/secrets/subsystem-store/token"
 DEFAULT_PORT = 8102
 
+# Listen (accept-queue) depth. `socketserver.TCPServer` defaults to 5, which is
+# below this server's own concurrency; see `build_server` for the measurement
+# and for why this must be a CLASS attribute to reach the socket at all.
+LISTEN_BACKLOG = 128
+
 EXIT_CONFIG = 78  # sysexits.h EX_CONFIG — a misconfiguration, not a crash.
 
 
@@ -2316,9 +2321,18 @@ WRITE_ROUTES: dict[tuple[str, str], tuple[str, int, tuple[str, ...]]] = {
 }
 
 # How deep to walk when dating the served copy. Deliberately the SAME depth
-# `seed.sh` uses for its own `remote_entries` count (`find -maxdepth 2 -name
-# '*.md'`), so the two numbers are answers to the same question and a
-# disagreement between them means something real rather than a units mismatch.
+# `seed.sh` uses for its own entry listings, so the two numbers are answers to
+# the same question and a disagreement between them means something real rather
+# than a units mismatch.
+#
+# ⚠ The expression this comment used to quote — `find -maxdepth 2 -name '*.md'`
+# — is no longer what seed.sh runs. Its push verdict now lists BOTH sides with
+# `find . -mindepth 2 -maxdepth 2 ! -path './.*' -name '*.md' -type f`. The two
+# added clauses move it TOWARD this walk, not away: `_freshness_walk` below
+# already visits only non-dotted directories at depth 2, so it likewise excluded
+# top-level `*.md` and dot-scopes. Quoting the sibling's source verbatim is what
+# let this rot, so the invariant is stated instead: BOTH count `<scope>/*.md`,
+# excluding the store root and any dot-directory.
 _FRESHNESS_MAXDEPTH = 2
 
 
@@ -4263,7 +4277,37 @@ def build_server(
     _Handler.limiter = limiter if limiter is not None else RateLimiter()
     if audit is not None:
         _Handler.audit = staticmethod(audit)
-    return ThreadingHTTPServer((host, port), _Handler)
+
+    # 🔴 THE LISTEN BACKLOG IS SET HERE, AND IT MUST BE A CLASS ATTRIBUTE.
+    # `TCPServer.__init__` calls `server_activate()` -> `listen(
+    # self.request_queue_size)` before it returns, so assigning to the INSTANCE
+    # afterwards changes the attribute and NOT the socket — the kernel queue
+    # keeps whatever depth `__init__` used. A test that set it on the instance
+    # and then asserted the attribute would pass while the socket stayed at 5.
+    #
+    # `socketserver.TCPServer.request_queue_size` defaults to **5**, against a
+    # server whose own tests fire 8 simultaneous appends. MEASURED on this host
+    # (#1030), 200 racers x 3 rounds through `build_server`:
+    #
+    #     backlog    5 -> 389 ConnectionResetError, 211/600 answered 200
+    #     backlog  128 ->   0 ConnectionResetError, 600/600 answered 200
+    #     backlog 4096 ->   0 ConnectionResetError, 600/600 answered 200
+    #
+    # The resets are NOT immediate: the failing writers show elapsed times
+    # clustered at 1.0s and 2.2s, which are TCP SYN-retransmit intervals. So
+    # this is an accept-queue overflow that the client experiences as a reset
+    # AFTER retrying, which is why it presents as a load-correlated flake rather
+    # than a clean refusal — and why `net.ipv4.tcp_abort_on_overflow=0` does not
+    # rule the mechanism out, as it first appears to.
+    #
+    # 128 rather than `socket.SOMAXCONN`: SOMAXCONN is host-dependent (4096
+    # here, 128 on older kernels), and a value that changes per host makes the
+    # guard below assert something different per host. Linux silently caps the
+    # request at somaxconn anyway, so 128 is a floor everywhere and exact here.
+    class _Server(ThreadingHTTPServer):
+        request_queue_size = LISTEN_BACKLOG
+
+    return _Server((host, port), _Handler)
 
 
 def main(argv: list[str] | None = None) -> int:

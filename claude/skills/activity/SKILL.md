@@ -73,6 +73,15 @@ Per-source detail that matters when querying:
   `~/.claude/skills/activity/reference/queries.md`).
 - `claude` — tails `~/.claude/projects/**/*.jsonl`. Kinds: `prompt`/`command` (message
   stream), `session-summary` (Layer A rollups), `session-insight` (Layer B facets).
+  🔴 **"Was skill X ever used?" — do NOT hand-write SQL or grep `text` for the name.**
+  The `session-summary` payload carries `skills_used` / `skills_invoked` /
+  `commands_typed` (skill→count maps, forward-only, **first rows 2026-08-29**), and the
+  owning entry point is **`find-session --skill NAME`** — not this skill and not
+  `adoption-scan`, which sees only the 9 `invocation.py` emitters and cannot see a skill
+  at all. Measured 2026-08-29: keyword-searching `signal` returned **678** sessions
+  against **6** real uses, 5 of them on the *laptop* — so a grep, or a one-host search,
+  answers the reverse of the truth. Report "no recorded use since <date>", never
+  "never used".
 - `i3` — `window::focus` + `workspace::focus` → `i3-source`; captures attention even when
   NOT typing. Carries `app`=WM_CLASS + `payload.workspace`.
 - `browser-bridge` — TWO kinds, and the distinction is load-bearing. `kind=cmd` is one row

@@ -151,6 +151,79 @@ h. A BASE THAT IS THE WRONG DOCUMENT SAYS SO, LOUDLY. Rule (g)'s bucket line was
    heuristic tells fire on 0 and 1 of them. The rejected looser variants and
    their rates are recorded at `CANONICAL_HEADING_PREFIXES`.
 
+i. ONE DOC PER EFFORT, UPDATED IN PLACE — AND THE TOPIC SLUG IS THE KEY. Operator
+   decision 2026-08-28, on a re-measurement of meta-work: `devrc`'s own share
+   FELL (19.5% -> 17.4%), so the tooling is not the runaway — the growth is in
+   DOCUMENTING of work. 20 of 70 commits to `homelab-talos` in three days were
+   handoff docs; a prior audit found 538 docs created in 15 days, 98 of them
+   rewritten 3+ times. The cap is therefore on the documenting, not on the
+   tooling, and it is TWO refusals here rather than a paragraph in the skill:
+
+     i-a. A `--topic` CARRYING A DATE IS REFUSED, unconditionally and with no
+        escape flag. This is the crisp half and it needs no inference at all: a
+        slug with a date in it is BY CONSTRUCTION a per-session doc, because
+        next session's date differs and the doc can therefore never be updated
+        in place. MEASURED over the 123 real `claudedocs/handoff-*.md` in devrc
+        + homelab-talos: 55 (44%) carry a full ISO date. Collapsing them by
+        stripping the date exposes the duplication the rule exists to stop —
+        `remix-session` x8 in homelab-talos, `browser-bridge` x3 in devrc,
+        four more 2x families. Every one is the same effort wearing a new
+        filename. There is deliberately NO bypass: a date in a handoff topic
+        has no legitimate use under a one-doc-per-effort rule, and a bypass
+        would be taken every time.
+
+     i-b. CREATING A DOC IN A REPO THAT ALREADY HAS HANDOFF DOCS REQUIRES
+        `--new-effort`, and the refusal LISTS the existing docs, newest first.
+        This is the half that cannot be made crisp, and it is not pretended
+        otherwise: "is this the same effort as one of those?" is a judgement,
+        and 🔴 NO FUZZY MATCH IS ATTEMPTED — a similarity heuristic here would
+        be exactly the clever-inference guard the operator's standing rule
+        forbids, and it would be wrong in both directions on slugs like
+        `remix-session` / `remix-hardening-session`. What IS deterministic is
+        that creating the N+1th doc stops being the SILENT DEFAULT: the caller
+        is shown the list and must make an explicit assertion. A session that
+        genuinely starts a new effort types one flag; a session that was about
+        to mint `remix-session-2` sees `remix-session` in the list first.
+
+j. A RANKED NEXT-STEP MUST NAME AN EXTERNAL FORCING FUNCTION. Same decision, and
+   it is the half that breaks the self-generating loop: each session's handoff
+   manufactures the next session's queue, so the work never runs out and none of
+   it was ever asked for by anything outside the loop. So every numbered item in
+   a `## Next steps` section the update brings must carry `forcing: <kind>`,
+   `<kind>` drawn from a CLOSED enumeration (`FORCING_KINDS`) that contains no
+   member a previous handoff can satisfy — there is no `followup`, no
+   `ranked-list`, no `handoff`. An untagged item or an unrecognised kind is a
+   refusal naming the item and printing the vocabulary.
+
+   🔴 THE FIELD MAY SIT ANYWHERE ON THE ITEM, INCLUDING A CONTINUATION LINE, and
+   the refusal DIAGNOSES rather than assuming absence. Both halves are one fix
+   for one measured failure: the first version searched only the numbered line,
+   so it refused 179 of devrc's 257 real ranked items' SHAPE outright and told
+   correctly-tagged items `[no forcing: field]` — a remedy already satisfied, so
+   the re-run was byte-identical and the handoff could never land. `_item_blocks`
+   owns the block boundary; `unforced_report` prints a remedy per CAUSE, and
+   names a near-miss (`forcing function: gate`) or a fenced field specifically.
+
+   🔴 WHAT THIS DOES *NOT* DO, stated here rather than discovered later. It
+   cannot check that the cited forcing function is REAL, or that it is genuinely
+   EXTERNAL. `forcing: incident — the queue is down` is accepted from a session
+   inventing it. The enumeration is structural; the evidence beside it is prose
+   and is not verifiable by any check this module could run. What it buys is
+   that the claim becomes MANDATORY, ATTRIBUTABLE and GREPPABLE, and that the
+   closed vocabulary gives a self-generated item no honest label to hide under.
+
+   🔴 SO `none` IS A MEMBER OF THE SET, ON PURPOSE. Refusing self-generated items
+   outright would not delete them — it would teach sessions to type `incident`
+   falsely, moving the failure underground where nothing can count it. `forcing:
+   none` is accepted, and every run that carries one prints a block naming those
+   items as declared self-generated and NOT eligible to be worked. That makes the
+   population measurable, which is the precondition for capping it.
+
+   ⚠ AND THE "DOES NOT GET WORKED" HALF IS NOT ENFORCED HERE. This module is the
+   doc's writer, not the queue's consumer; the skip belongs in `/resume` step 6
+   and `claim-work`, and is NOT implemented. What ships here is the declaration
+   those consumers would need to read.
+
 EXIT CODES
   0  proposed (diff shown, nothing written) — or written/pushed under --confirm.
      `written` WITHOUT `--push` also reports the branch and that it is not pushed
@@ -158,6 +231,9 @@ EXIT CODES
   3  operational failure (unreadable input, git refused) — nothing written
   4  no-advance      — rule (d), no diff printed
   5  no-change       — merge is a no-op, no diff printed, no empty commit
+  6  behind          — --push and the remote moved; nothing written
+  7  doc-per-effort  — rule (i): a dated topic, or an unasserted new doc
+  8  unforced        — rule (j): a ranked item names no forcing function
 """
 
 from __future__ import annotations
@@ -215,7 +291,18 @@ Refusing BEFORE the write keeps the tool's existing property — a failure write
 nothing — instead of trading it for a commit the caller has to know how to undo.
 """
 
-EXIT_STALE_BASE = 7
+EXIT_DOC_PER_EFFORT = 7
+"""Rule (i). The doc's IDENTITY is wrong: a dated topic, or an unasserted new doc.
+
+Two statuses share this code the way `failed` and `push-failed` share 3 — they
+are one class ("this run would create a doc that should not exist") with two
+different remedies. Nothing is written on either.
+"""
+
+EXIT_UNFORCED = 8
+"""Rule (j). A ranked next-step names no forcing function. Nothing is written."""
+
+EXIT_STALE_BASE = 9
 """There is no usable doc HERE and the mainline has one, so confirming would
 REPLACE the committed document with this delta. Nothing written.
 
@@ -225,6 +312,573 @@ whether the BASE DOCUMENT is the real one, against the DERIVED mainline ref. A
 feature branch current with its own upstream sails past the other check while the
 mainline copy of the doc is still the one being destroyed.
 """
+
+
+# --- rule (i): one doc per effort --------------------------------------------
+#
+# 🔴 THE TOPIC SLUG IS THE KEY, and it is a key the CALLER SUPPLIES rather than
+# one this module infers. That is the whole design: `--topic` already decides the
+# path (`claudedocs/handoff-<topic>.md`), so "same effort" is answered by "same
+# slug" and by nothing else. No similarity metric, no token overlap, no embedding
+# — a fuzzy match would be wrong in both directions on the real corpus and would
+# make the rule unpredictable at the moment a session is trying to obey it.
+
+# i-a. A date ANYWHERE in the slug. Both spellings occur in the corpus and the
+# rule must catch both: devrc trails it (`browser-bridge-2026-08-01`) while
+# homelab-talos leads with it (`2026-07-18-remix-session`). The bare-year arm
+# catches `handoff-q3-2026-cleanup`, which the ISO arm alone would let through.
+#
+# 🔴 TWO ARMS, NOT THREE — and the third was DELETED after the mutation battery
+# scored it SURVIVED. A `\d{4}-\d{2}(?!\d)` year-month arm sat between these two
+# and no test could tell whether it was there: for `remix-2026-07-session` it
+# matched `2026-07` while the bare-year arm matches `2026`, so BOTH arms reach
+# the same verdict and differ only in the token the refusal quotes. That is the
+# dead-predicate shape `remote_has_commits_we_lack` already records in this file
+# ("two branches reaching one outcome cannot be told apart by any test"). The
+# only input it would have caught alone is a year outside 19xx/20xx — a slug like
+# `1888-07-notes` — which no handoff doc in either corpus carries. Deleting it
+# costs no coverage: `test_every_dated_spelling_in_the_corpus_is_refused` still
+# refuses that spelling, through the arm that remains.
+_TOPIC_DATE = re.compile(r"\d{4}-\d{2}-\d{2}|(?<!\d)(?:19|20)\d{2}(?!\d)")
+
+#: How many rows any of rules (i)/(j)'s listings show before eliding — the
+#: existing-docs list, the unforced items and the self-generated items alike.
+#: Each is an aid to recognising what to fix, not an inventory: devrc alone has
+#: 77 handoff docs, and 77 lines of filenames would bury the remedy under
+#: itself. Same reasoning as `DROPPED_SHOWN_MAX`, one number rather than three
+#: so the three blocks cannot drift into different shapes.
+EXISTING_SHOWN_MAX = 12
+
+
+def topic_carries_a_date(topic: str) -> str | None:
+    """The date-looking token in this topic slug, or None. Rule (i-a).
+
+    One place, so the CLI refusal and the tests ask the same question — the
+    `advance_is_real` pattern.
+    """
+    m = _TOPIC_DATE.search(topic)
+    return m.group(0) if m else None
+
+
+def existing_handoff_docs(repo: Path) -> list[str]:
+    """Every `claudedocs/handoff-*.md` in this repo, NEWEST FIRST.
+
+    Newest first because the doc a session is about to duplicate is
+    overwhelmingly the one it or a recent session last touched — putting it at
+    the top is what makes the list scannable rather than merely complete.
+
+    Sorted by mtime with the NAME as a tiebreak, so the order is deterministic
+    in a fixture repo where every file is written in the same second. A
+    non-deterministic list would make the refusal's own text untestable.
+    """
+    docs = (repo / "claudedocs").glob("handoff-*.md")
+    try:
+        return [
+            p.name
+            for p in sorted(docs, key=lambda p: (-p.stat().st_mtime, p.name))
+        ]
+    except OSError:
+        return []
+
+
+# --- rule (j): a ranked item names an external forcing function ---------------
+#
+# 🔴 A CLOSED ENUMERATION, WHICH IS THE PART A REWORDING CANNOT WALK. `RULES.md`
+# warns that "a guard on WORDS is walkable by REWORDING", and it is right about a
+# BLOCKLIST — a list of self-referential phrases to reject would be defeated by
+# any synonym. This is the inverted shape: an ALLOWLIST the author must pick from.
+# Rewording buys nothing, because a kind outside the set is refused by default.
+#
+# What each member asserts, and every one of them is a thing OUTSIDE this loop:
+#   incident    something is broken or degraded in a live system, now
+#   user        a person asked for it — the operator, a customer, a colleague
+#   gate        a check that is failing or blocking: CI, a test, an alert, review
+#   deadline    a dated commitment to someone outside this session
+#   regression  a measured behaviour change against a previous measurement
+#   security    an exposure, a vulnerability, a leaked or rotating credential
+#   none        🔴 NOT AN EXTERNAL FUNCTION — a DECLARATION that there is none.
+#
+# 🔴 THERE IS DELIBERATELY NO `followup`, `handoff`, `cleanup`, `polish` OR
+# `tech-debt`. Those are the labels a self-generated item would reach for, and
+# their absence is what forces such an item onto `none`, where it is counted.
+FORCING_KINDS: frozenset[str] = frozenset(
+    {"incident", "user", "gate", "deadline", "regression", "security", "none"}
+)
+
+#: The kinds that assert something outside the loop — `FORCING_KINDS` minus the
+#: honest opt-out. Derived, never a second literal list: adding a kind above and
+#: forgetting it here is exactly the drift that would silently un-count items.
+EXTERNAL_FORCING_KINDS: frozenset[str] = FORCING_KINDS - {"none"}
+
+#: The field key, in the same spirit as `CLAWGATE_TASK_KEY` — a NAMED FIELD, not
+#: a keyword the predicate hunts for in prose.
+FORCING_KEY = "forcing"
+
+# 🔴 THE MARKUP CLASS IS DELIBERATE, AND IT IS BOUNDED BY THE ALLOWLIST, NOT BY
+# TASTE. `**forcing:** gate` is the field, spelled the way a skill body that
+# bolds its field names teaches; refusing it would be a refusal over emphasis
+# characters. Widening here is safe for exactly one reason, and it is structural
+# rather than a judgement about intent: what follows the colon must be a member
+# of a CLOSED vocabulary, so a "false positive" requires prose that literally
+# reads `forcing` + punctuation + one of seven kinds — which is the tag.
+#
+# What this does NOT admit, and both stay NEAR-MISSES reported by
+# `_FORCING_ATTEMPT` below rather than silently accepted: `forcing function:
+# gate` (a word between the key and the colon) and `forcing = gate` (a separator
+# that is not a colon). Those are guesses at the grammar, not the grammar.
+_MARKUP = r"[*_`~]{0,3}"
+
+# 🔴 NOT `\b`, AND THE DIFFERENCE IS THE WHOLE POINT: `_` IS A WORD CHARACTER.
+# MEASURED at `503d7136`, i.e. against the commit that widened `_MARKUP` above to
+# admit emphasis: `**forcing: gate**` parsed to `gate`, while `_forcing: gate_`,
+# `__forcing: gate__` and `_forcing_: gate` all came back `kind=None,
+# near_miss=None` — `\bforcing` has no boundary to match when the character
+# before the key is itself a word character. So the widening admitted ONE of
+# markdown's two emphasis characters and refused the other with
+# `[no forcing: field]` plus a remedy the author had already carried out: the
+# unrecoverable refusal `_FORCING_ATTEMPT` exists to end, reintroduced by the
+# change meant to end it, in the exact spelling class it set out to admit.
+#
+# What the lookaround still excludes — the ONE job `\b` was doing here, and the
+# thing to re-check before touching it: `enforcing:` and `reinforcing:` (the
+# character before the key is an ASCII letter) and `forcings:` (the one after it
+# is). 🔴 "ASCII" IS THE WHOLE SCOPE OF THAT CLAIM, AT EVERY POSITION, AND THE
+# COMMENT USED TO OMIT IT: the class is `[A-Za-z0-9]`, so a non-ASCII word
+# character excludes nothing at all — `\b` DID exclude it, because Python's `\w`
+# is unicode by default. That hole is not the leading key's; it is every
+# lookaround's, and the enumeration below is stated by POSITION for that reason.
+#
+# 🔴 THE ADMISSIONS ARE A GRID, NOT A LIST — an enumeration of examples is what
+# undercounted here twice. The widening admits exactly TWO character classes,
+# `_` and any non-ASCII word character, at EACH of the FIVE lookaround positions
+# across the two patterns — ten combinations, and MEASURED 2026-08-28 all ten
+# behave alike: admitted at HEAD, and NO match under the old `\b` spelling of
+# the same pattern. The positions, with the probe that isolates each:
+#   P1 `_FORCING`'s key, LEADING     — `some_forcing: none`, `éforcing: gate`
+#   P2 `_FORCING_ATTEMPT`'s key, LEADING  — `my_forcing = gate`, `éforcing = gate`
+#   P3 `_FORCING_ATTEMPT`'s key, TRAILING — `the forcing_fn returns none`,
+#      `the forcingé returns none`
+#   P4 that pattern's KIND, LEADING  — `forcing = _gate`, `forcing = égate`
+#   P5 that pattern's KIND, TRAILING — `forcing the user_id column`,
+#      `forcing = gateé`
+# (There is no sixth: `_FORCING`'s own KIND, `([A-Za-z-]+)`, carries no trailing
+# lookaround at all.) P1 parses to a kind; P2–P5 become NEAR-MISSES. All ten
+# occur 0 times over both corpora (devrc 126 docs, homelab-talos 139) and all
+# ten are bounded by the same closed-vocabulary argument as the markup class
+# above, so none is being fixed — they are RECORDED, because a comment is a
+# claim too. Pinned cell-by-cell by
+# `test_the_widened_anchors_admit_these_and_the_comment_says_so`.
+#
+# 🔴 SPELLED OUT AT EACH USE SITE rather than folded into one shared constant:
+# `_FORCING` and `_FORCING_ATTEMPT` must stay SEPARATELY MUTABLE, or the
+# `forcing-key-anchored-on-word-boundary` / `near-miss-key-anchored-on-word-
+# boundary` rows in `mutants-handoff-cap.sh` cannot isolate one from the other
+# and neither proves anything about the pattern it names.
+_FORCING = re.compile(
+    rf"(?<![A-Za-z0-9]){FORCING_KEY}{_MARKUP}\s*:\s*{_MARKUP}\s*([A-Za-z-]+)",
+    re.IGNORECASE,
+)
+
+#: The FAIL-LOUD half of a strict `_FORCING`, and the reason it exists is the
+#: measured failure this pattern was added for: an item that DID carry a tag was
+#: refused with `[no forcing: field]` and a remedy it had already satisfied, so
+#: the session could not recover — every re-run printed the identical refusal.
+#: Same idiom as `subsystem_resolver._NEAR_MISS_MARKER`: keep the grammar strict,
+#: and REPORT the attempts it turns away instead of loosening it.
+#:
+#: The key, then a member of the vocabulary within a short window. Anchored on
+#: the closed set at BOTH ends, so it cannot fire on the bare word `forcing` in
+#: prose — `unforced_report` only consults it for an item it is already refusing,
+#: and the worst case is a refusal that names a line the author is looking at.
+#:
+#: 🔴 THE ANCHORS ARE THE LOOKAROUNDS `_FORCING` USES, NOT `\b`, AND FOR THE
+#: SAME MEASURED REASON — see the comment above it. This pattern is the SAFETY
+#: NET for a tag `_FORCING` cannot parse, and at `503d7136` it shared the broken
+#: `\b` anchor, so it had the identical hole: `_forcing = gate_` fell straight
+#: through to `[no forcing: field]`. A net with the same gap as the thing it
+#: catches for is not a net. BOTH ends of BOTH tokens are anchored: the trailing
+#: `_` of `_forcing: gate_` is a word character too, so `\b` failed on the KIND
+#: as well as on the key.
+_FORCING_ATTEMPT = re.compile(
+    rf"(?<![A-Za-z0-9]){FORCING_KEY}(?![A-Za-z0-9])"
+    rf"[^\n]{{0,40}}?"
+    rf"(?<![A-Za-z0-9])(?:{'|'.join(sorted(FORCING_KINDS))})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+# A TOP-LEVEL numbered item. The indent bound is what keeps a nested `1.` inside
+# an item's own sub-list from being counted as a rank of its own — the ranks are
+# half a claim's identity (`claim-work --slug-for <doc> <rank>`), so miscounting
+# them would re-point live claims.
+_RANKED_ITEM = re.compile(r"^ {0,3}(\d+)[.)]\s+(\S.*)$")
+
+NEXT_STEPS_PREFIX = "next steps"
+
+
+class RankedItem(typing.NamedTuple):
+    """One numbered next-step, and the forcing kind it declared (if any)."""
+
+    rank: str
+    text: str
+    kind: str | None
+    """Lowercased declared kind, or None when the item carries no field at all.
+    A kind OUTSIDE `FORCING_KINDS` is reported as declared — the caller needs to
+    see what was typed in order to fix it."""
+    near_miss: str | None = None
+    """The line that LOOKS like a tag `_FORCING` could not parse, or None.
+
+    Only ever set when `kind is None` — an item that parsed needs no diagnosis.
+    Its whole purpose is `unforced_report`: without it a tagged-but-unparsed item
+    is told `[no forcing: field]` and handed a remedy it already satisfied, which
+    is a refusal no re-run can clear."""
+    fenced: bool = False
+    """True when the ONLY `forcing:` field this item carries sits inside a code
+    fence, where it does not count. Same reason as `near_miss` — the author can
+    see the field in their file, so `[no forcing: field]` reads as a lie."""
+
+    @property
+    def is_declared(self) -> bool:
+        return self.kind in FORCING_KINDS
+
+
+def _item_blocks(section_body: str) -> list[tuple[re.Match[str], list[str], list[str]]]:
+    """`(match, the item's own visible lines, the fenced lines inside it)`.
+
+    🔴 AN ITEM IS A BLOCK, NOT A LINE, and that is this function's whole reason
+    to exist. MEASURED over the committed corpus: 179 of 257 ranked items in
+    devrc's `claudedocs/` and 99 of 181 in homelab-talos' wrap onto continuation
+    lines. Matching the field on the numbered line alone therefore refused the
+    MAJORITY shape, and told it that it carried no field.
+
+    Where a block ENDS is NOT "the next ranked item", and that is not a taste
+    call — the naive boundary FALSELY TAGS, measured. It attributes a section's
+    trailing paragraph to the last item, and the corpus says what that paragraph
+    is: 14 blocks are followed by unindented prose after a blank line, 10 of them
+    the last item in their section, 7 of those the skill's own copied
+    `🔴 **This list is a WORK QUEUE …**` boilerplate. The template block it is
+    copied from now also carries "```forcing: none``` is the honest opt-out", so
+    appending it VERBATIM under two untagged items and asking the naive boundary
+    returns `kind='none'` for item 2 — an item silently declared self-generated
+    by text its author pasted from the instructions. Pinned by
+    `test_trailing_boilerplate_does_not_tag_the_last_item`. So the walk uses the
+    ordinary markdown rule:
+
+      * a line INSIDE a fence always belongs to the item (never a boundary) —
+        and it does NOT clear the "a blank line has intervened" memory either;
+      * a blank line does not end it — an indented line may follow;
+      * an UNINDENTED, non-blank line ends it once a blank line has intervened;
+      * anything else continues it (markdown's lazy continuation).
+
+    🔴 THE SECOND HALF OF THE FIRST BULLET IS A FIX, NOT A RESTATEMENT, and it
+    is the ACCEPT direction. At `503d7136` the fence branch below reset
+    `blanked`, so the first VISIBLE line after a fence close could never be a
+    boundary and the rule the third bullet states was simply not the rule the
+    code ran. MEASURED: an item whose own properly-INDENTED fence follows a blank
+    line swallowed the section's trailing `🔴 **This list is a WORK QUEUE …**`
+    boilerplate and `ranked_items` returned `kind='none'` — the untagged item
+    ACCEPTED, counted as self-generated, and rule (j) passing. That is the very
+    counterfactual this docstring cites two paragraphs up as the reason the naive
+    boundary was rejected, re-entered through the fence path. Pinned by
+    `test_a_fence_does_not_erase_the_blank_line_boundary`, and its cost side — an
+    indented tag after the item's own fence, with and without a blank between —
+    by `test_an_indented_fence_does_not_cost_the_tag_that_follows_it`.
+
+    🔴 THAT FIX HAS A MEASURED COST, IT IS DELIBERATE, AND REVERSING IT WOULD
+    REOPEN THE ACCEPT BUG. Shape: item, blank line, the item's OWN INDENTED
+    fence, then a tag at COLUMN 0. At `503d7136` that parsed (`kind='gate'`);
+    here the blank's memory survives the fence, so the col-0 line IS the
+    boundary and the tag is dropped — `kind=None, near_miss=None, fenced=False`,
+    i.e. `[no forcing: field]` printed at an author who DID write the field on a
+    continuation line. The walk cannot tell that col-0 tag from col-0 pasted
+    boilerplate, and falsely ACCEPTING an untagged item is worse than refusing a
+    tagged one, so the trade stands. Two things pay for it: the corpus impact is
+    **0 of 442** ranked items, and `MISSING_FIELD_REMEDY` now says the field
+    must be INDENTED, which is what makes this refusal clearable instead of
+    unrecoverable. Pinned by the `col-0` params of
+    `test_an_indented_fence_does_not_cost_the_tag_that_follows_it` and by
+    `test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT`.
+
+    ⚠ A fence with NO preceding blank still absorbs the following unindented
+    line — because THIS walk's boundary requires a blank to have intervened and
+    none has. 🔴 THAT IS THIS WALK'S RULE, NOT MARKDOWN'S. The docstring used to
+    justify it as "genuine markdown lazy continuation" and that reason is wrong:
+    in CommonMark, lazy continuation applies to a PARAGRAPH's continuation
+    lines, not to a line following a fenced code block inside a list item —
+    there the fenced block has ended and an unindented line is not part of the
+    item at all. The BEHAVIOUR is kept, and only its justification changed: it
+    is the PERMISSIVE direction (it can only hand an author back a tag they
+    wrote, never invent one for an untagged item) and no corpus item depends on
+    the strict reading. A fence opened at column 0 after a blank line is a
+    KNOWN, UNTESTED gap: markdown ends the list item there, and this walk does
+    not.
+
+    Fenced lines are returned SEPARATELY rather than dropped: they must not count
+    as a tag (`_unfenced`'s contract, and a pasted sample is not a declaration),
+    but an author who put the field in a fence needs to be told that is why.
+    """
+    all_lines = section_body.splitlines()
+    visible = {idx for idx, _ln in _unfenced(section_body)}
+    starts = [
+        i for i in range(len(all_lines))
+        if i in visible and _RANKED_ITEM.match(all_lines[i])
+    ]
+    out: list[tuple[re.Match[str], list[str], list[str]]] = []
+    for n, start in enumerate(starts):
+        limit = starts[n + 1] if n + 1 < len(starts) else len(all_lines)
+        own: list[str] = [all_lines[start]]
+        hidden: list[str] = []
+        blanked = False
+        for i in range(start + 1, limit):
+            line = all_lines[i]
+            if i not in visible:
+                hidden.append(line)
+                continue
+            if not line.strip():
+                blanked = True
+                continue
+            if blanked and not line.startswith((" ", "\t")):
+                break
+            blanked = False
+            own.append(line)
+        m = _RANKED_ITEM.match(all_lines[start])
+        assert m is not None  # `starts` is exactly the lines that matched
+        out.append((m, own, hidden))
+    return out
+
+
+def ranked_items(text: str) -> list[RankedItem]:
+    """Every top-level numbered item under a `## Next steps` heading of `text`.
+
+    🔴 READS THE UPDATE, NEVER THE MERGED DOC, and the choice is load-bearing in
+    both directions. `Next steps` is a REPLACE-bucket heading, so the update's
+    items ARE the doc's items — checking the update is checking what lands. And
+    checking the MERGE would refuse on legacy items the base already carries,
+    turning rule (j) into a permanently-red gate on every repo with history,
+    which `claude/RULES.md` names as worse than no gate.
+
+    Fence-aware via `_unfenced`, for the reason `split_sections` is: a handoff
+    routinely pastes a numbered list inside a code block, and a sample command is
+    not a work item.
+
+    🔴 THE FIELD IS LOOKED FOR OVER THE ITEM'S WHOLE BLOCK — see `_item_blocks`
+    for the boundary and the measurement behind it. Neither `FORCING_VOCAB_LINE`
+    nor the skill ever said the tag had to sit on the numbered line; the majority
+    of real items wrap, so a numbered-line-only search refused the common shape.
+    """
+    _fm, body = split_front_matter(text)
+    _pre, secs = split_sections(body)
+    out: list[RankedItem] = []
+    for heading, section_body in secs:
+        if not heading_text(heading).lower().startswith(NEXT_STEPS_PREFIX):
+            continue
+        for m, own, hidden in _item_blocks(section_body):
+            block = "\n".join(own)
+            found = _FORCING.search(block)
+            if found:
+                out.append(RankedItem(m.group(1), m.group(2), found.group(1).lower()))
+                continue
+            # Nothing parsed. Diagnose WHY, so the refusal can say something the
+            # author has not already done. `_FORCING_ATTEMPT` cannot span a
+            # newline, so the per-line walk sees exactly what a block-wide search
+            # would — and it yields the LINE, which is what a reader needs.
+            out.append(
+                RankedItem(
+                    m.group(1),
+                    m.group(2),
+                    None,
+                    next((ln.strip() for ln in own if _FORCING_ATTEMPT.search(ln)), None),
+                    any(_FORCING.search(ln) for ln in hidden),
+                )
+            )
+    return out
+
+
+# 🔴 A STATEMENT OF THE GRAMMAR, NOT AN IMPERATIVE, and the change is the point.
+# This used to open "Tag each item `forcing: <kind>`" and was printed to EVERY
+# refused caller — including one whose items were already tagged, which is a
+# remedy that has been carried out telling you to carry it out. A re-run then
+# printed the identical bytes and there was no way forward. The vocabulary is
+# still needed by every arm (a caller has to see a closed set), so it stays; the
+# instruction moved into the per-cause remedies below, which are conditional.
+FORCING_VOCAB_LINE = (
+    "  The field is `forcing: <kind>`, anywhere on the item's own lines — "
+    "`<kind>` one of: " + ", ".join(sorted(EXTERNAL_FORCING_KINDS)) + ".\n"
+    "  `forcing: none` is the honest opt-out for an item nothing outside this "
+    "loop asked for. It is ACCEPTED and counted, not refused — but an item "
+    "carrying it is not eligible to be worked."
+)
+
+# 🔴 THE FOUR PER-CAUSE MARKERS `unforced_report` PUTS ON A REFUSED ROW, AND
+# THIS IS THEIR SINGLE SOURCE — because there is a SECOND READER outside this
+# module. SKILL.md's step-5 legend maps each marker to what the executor should
+# DO about it, and only ONE of the four means "add a field"; that legend is the
+# whole reason the other three stopped getting the add-a-field remedy.
+#
+# 🔴 A `SKILL_PINS` ENTRY PER MARKER WOULD NOT COVER THE DRIFT THIS CLOSES. A pin
+# asserts the literal is still IN the skill, so renaming `[fenced]` here goes red
+# in this module's own tests, gets fixed here, and leaves the skill's legend
+# naming a marker the tool no longer prints — with the pin still green, because
+# the skill does still contain the old token.
+# `test_every_refusal_MARKER_the_module_prints_reaches_the_skill` derives its
+# check from `REFUSAL_MARKERS` instead, so a rename here is what goes red there.
+#
+# Each is the PREFIX its row begins with, not the whole row: the two that carry a
+# value (`[unknown kind: 'x']`, `[unparsed forcing field on: …]`) cannot be
+# pinned whole, and the token is the half a rename would move.
+MARK_NO_FIELD = "[no forcing: field]"
+MARK_UNKNOWN_KIND = "[unknown kind"
+MARK_UNPARSED = "[unparsed"
+MARK_FENCED = "[fenced]"
+REFUSAL_MARKERS: tuple[str, ...] = (
+    MARK_NO_FIELD,
+    MARK_UNKNOWN_KIND,
+    MARK_UNPARSED,
+    MARK_FENCED,
+)
+
+#: Remedy for the plain case: no field anywhere in the item.
+#:
+#: 🔴 THE SECOND HALF IS NOT DECORATION. "A continuation line counts" alone is
+#: read as a promise this walk does not keep: a tag written at COLUMN 0 under
+#: the item — after a blank, or after the item's own indented fence — is the
+#: BOUNDARY line, so it is outside the block and never scanned. An author who
+#: has already written the field there is then told to write it, which is the
+#: unrecoverable refusal this whole branch exists to end; naming the INDENT is
+#: the only thing that makes that arm clearable. See `_item_blocks` for the
+#: measurement and for why the boundary is not loosened instead.
+MISSING_FIELD_REMEDY = (
+    f"  Tag each item marked {MARK_NO_FIELD} above. A continuation line "
+    "counts — the field does not have to sit on the numbered line, but it MUST "
+    "be INDENTED: a flush-left line ENDS the item once a blank has intervened, "
+    "so a tag at column 0 below one is outside the item and reads as absent."
+)
+
+#: Remedy for a near-miss. 🔴 IT MUST NOT REPEAT `MISSING_FIELD_REMEDY`: an item
+#: that reaches this arm HAS a field, and being told to add one is the failure
+#: this whole branch exists to end.
+NEAR_MISS_REMEDY = (
+    f"  🔴 The item(s) marked {MARK_UNPARSED}] DO carry something — the quoted "
+    "line is there and the check could not parse it. Spell the field as the "
+    "literal key, a colon, then the kind: `forcing: gate`. Emphasis around it "
+    "is fine (`**forcing: gate**`, `**forcing:** gate`, `_forcing: gate_`, "
+    "`` `forcing: gate` ``); a word between the key and the colon is not "
+    "(`forcing function: gate`), and neither is any other separator "
+    "(`forcing = gate`, `forcing — gate`)."
+)
+
+#: Remedy for a field that parses but sits inside a code fence.
+#:
+#: 🔴 IT MUST NOT SAY ONLY "MOVE IT OUT". The commonest thing a fence under a
+#: ranked item quotes is this tool's OWN vocabulary line — an author pasting the
+#: instructions, or a transcript of a previous refusal. Obeying a bare "move it
+#: out of the fence" on that input promotes a quoted example into a declaration
+#: and produces a FALSE `forcing: none`: an item nothing asked for, now counted
+#: as honestly self-generated. The refusal itself is right; only the remedy
+#: needed to stop assuming the fenced field is the author's own.
+#:
+#: 🔴 AND IT MUST NAME THE INDENT, for the same reason `MISSING_FIELD_REMEDY`
+#: does. An item's fence is normally preceded by a blank line, so an author who
+#: obeys "move it out of the fence" by unfencing to COLUMN 0 lands on the
+#: boundary line and gets `MARK_NO_FIELD` — a SECOND refusal, telling them to
+#: write a field they have now written twice. Naming the indent here is what
+#: keeps this arm clearable in one step; the sibling arm was fixed first and
+#: this one had the identical hole.
+FENCED_FIELD_REMEDY = (
+    f"  🔴 The item(s) marked {MARK_FENCED} carry the field INSIDE a code fence, "
+    "where it does not count — a pasted sample is not a declaration. If that "
+    "field is YOUR declaration, move it out of the fence onto one of the item's "
+    "own lines, INDENTED — at column 0 it reads as absent. If it is quoted "
+    "output, a copied example or this tool's own vocabulary line, the item is "
+    "genuinely untagged and needs one of its own — do NOT promote the quote."
+)
+
+
+def unforced_report(items: typing.Sequence[RankedItem]) -> str:
+    """Rule (j)'s refusal text, or "" when every ranked item declared a kind.
+
+    🔴 EVERY REMEDY PRINTED HERE IS CONDITIONAL ON THE CAUSE THAT EARNED IT.
+    A refusal that instructs a caller to do a thing the caller has already done
+    is unrecoverable: the fix is a no-op, the re-run is byte-identical, and the
+    session's handoff — which this module is the sole writer of — never lands.
+    """
+    bad = [i for i in items if not i.is_declared]
+    if not bad:
+        return ""
+
+    def _mark(i: RankedItem) -> str:
+        # 🔴 EVERY ROW BEGINS WITH ITS `REFUSAL_MARKERS` TOKEN, spelled from the
+        # constant and never re-typed here. The skill's step-5 legend is the
+        # executor's only map from a marker to what to do about it, and the
+        # derived test that keeps the two in step reads those constants.
+        if i.kind is not None:
+            return f"   {MARK_UNKNOWN_KIND}: {i.kind!r}]"
+        if i.near_miss is not None:
+            return f"   {MARK_UNPARSED} forcing field on: {_clip(i.near_miss, 72)}]"
+        if i.fenced:
+            return f"   {MARK_FENCED} `forcing:` found, but inside a code fence"
+        return f"   {MARK_NO_FIELD}"
+
+    shown = bad[:EXISTING_SHOWN_MAX]
+    rows = [f"  {i.rank}. {_clip(i.text, 96)}" + _mark(i) for i in shown]
+    elided = len(bad) - len(rows)
+    if elided:
+        rows.append(f"  … and {elided} more.")
+    # Keyed off EVERY bad item, not just the shown ones: a remedy suppressed by
+    # the display cap would be missing for exactly the caller who cannot see the
+    # row that needed it.
+    remedies = []
+    if any(i.kind is None and i.near_miss is None and not i.fenced for i in bad):
+        remedies.append(MISSING_FIELD_REMEDY)
+    if any(i.near_miss is not None for i in bad):
+        remedies.append(NEAR_MISS_REMEDY)
+    if any(i.kind is None and i.near_miss is None and i.fenced for i in bad):
+        remedies.append(FENCED_FIELD_REMEDY)
+    return "\n".join(
+        [
+            f"status=unforced",
+            f"NOTHING WRITTEN — not the doc, not a commit, not a ref.",
+            f"{len(bad)} of {len(items)} ranked next-step(s) name no forcing "
+            f"function. Operator decision 2026-08-28: a ranked item that names "
+            f"no EXTERNAL forcing function does not get worked, so it does not "
+            f"get written down as a rank.",
+            *rows,
+            FORCING_VOCAB_LINE,
+            *remedies,
+            "  🔴 EXTERNAL means an incident, a person's request, a failing "
+            "gate, a deadline, a measured regression or a security exposure — "
+            "NOT the previous session's ranked list. That loop is what this "
+            "refusal exists to break: each handoff manufacturing the next "
+            "session's queue is how the work never runs out and none of it was "
+            "ever asked for.",
+        ]
+    )
+
+
+SELF_GENERATED_NOTE = (
+    "  These are ACCEPTED and the write proceeds — declaring one honestly is the "
+    "point. They are not eligible to be worked: a session picking from this "
+    "queue should skip them and do something an external signal asked for."
+)
+
+
+def self_generated_report(items: typing.Sequence[RankedItem]) -> str:
+    """Rule (j)'s advisory block for `forcing: none` items, or "".
+
+    Silent when there are none, for `dropped_durable_report`'s stated reason: a
+    reassuring "0 self-generated items" on every run is a line that gets skimmed
+    and then read as a guarantee.
+    """
+    none_items = [i for i in items if i.kind == "none"]
+    if not none_items:
+        return ""
+    return "\n".join(
+        [
+            f"🔴 {len(none_items)} of {len(items)} ranked next-step(s) declare "
+            f"`{FORCING_KEY}: none` — NO external forcing function:",
+            *[f"  {i.rank}. {_clip(i.text, 96)}" for i in none_items[:EXISTING_SHOWN_MAX]],
+            SELF_GENERATED_NOTE,
+        ]
+    )
 
 # Rule (c). A section whose heading starts with one of these is DIAGNOSIS STATE
 # and appends; everything else is CURRENT STATE and is replaced. Matching is on
@@ -1192,7 +1846,7 @@ WRONG_BASE_REMEDY = (
     "a WARNING and no exit code changed. It is a FLOOR: a silent run is NOT "
     "evidence that the base is current.\n"
     "  🔴 ONE shape refuses instead — no usable doc here while the mainline has "
-    "one — and it refuses ONLY on `--confirm`, as `status=stale-base` (exit 7). "
+    "one — and it refuses ONLY on `--confirm`, as `status=stale-base` (exit 9). "
     "A proposal run therefore NEVER prints that line whatever shape it is in, so "
     "its absence here is not evidence you are in the benign case: read the line "
     "above instead, which fires on exactly the shape that refuses."
@@ -1700,6 +2354,14 @@ def build_parser() -> argparse.ArgumentParser:
         "offered and nothing is written (rule d).",
     )
     p.add_argument(
+        "--new-effort",
+        action="store_true",
+        help="rule (i-b): assert that this topic is a genuinely NEW effort and "
+        "not a second doc for one that already has one. Required only when the "
+        "doc does not exist AND the repo already has handoff docs; the refusal "
+        "lists them so the right one can be updated instead.",
+    )
+    p.add_argument(
         "--confirm",
         action="store_true",
         help="land it: write the doc and make exactly one commit of that path. "
@@ -1742,6 +2404,58 @@ def main(argv: list[str] | None = None) -> int:
     relpath = f"claudedocs/handoff-{args.topic}.md"
     doc = repo / relpath
 
+    # ---- rule (i): is this the RIGHT DOCUMENT to be writing at all? ----------
+    # 🔴 ASKED BEFORE RULE (d), and the order is deliberate: rule (d) asks
+    # whether this doc's CONTENT advanced, which is only a meaningful question
+    # once the doc is the right one. A dated topic that also went nowhere should
+    # be told about the date — re-running it with a better `--advanced` would
+    # otherwise "fix" it into creating the per-session doc.
+    dated = topic_carries_a_date(args.topic)
+    if dated:
+        print(
+            f"status=dated-topic\n"
+            f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+            f"  `--topic {args.topic}` carries a date ({dated}), so it names a "
+            f"PER-SESSION document: next session's date differs, so this doc can "
+            f"never be updated in place and a second one gets created instead.\n"
+            f"  Operator decision 2026-08-28: ONE handoff doc per effort, updated "
+            f"in place. Drop the date — `--topic "
+            f"{_TOPIC_DATE.sub('', args.topic).strip('-_') or '<effort>'}` — and "
+            f"the existing doc for this effort will be found and updated.\n"
+            f"  🔴 There is no flag to bypass this. MEASURED over the 123 real "
+            f"handoff docs in devrc + homelab-talos: 55 (44%) carry a date, and "
+            f"collapsing them by date exposes `remix-session` x8 and "
+            f"`browser-bridge` x3 — the same effort, once per session.",
+            file=sys.stderr,
+        )
+        return EXIT_DOC_PER_EFFORT
+
+    if not doc.exists() and not args.new_effort:
+        existing = existing_handoff_docs(repo)
+        if existing:
+            shown = existing[:EXISTING_SHOWN_MAX]
+            elided = len(existing) - len(shown)
+            print(
+                "status=new-doc\n"
+                "NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+                f"  {relpath} does not exist, and this repo already has "
+                f"{len(existing)} handoff doc(s). Creating a second doc for an "
+                f"effort that already has one is the thing the one-doc-per-effort "
+                f"rule caps (operator decision 2026-08-28).\n"
+                "  If one of these IS this effort, re-run with its topic — the "
+                "update lands in place and nothing is lost:\n"
+                + "\n".join(f"    {name}" for name in shown)
+                + (f"\n    … and {elided} more." if elided else "")
+                + "\n  If this really is a NEW effort, say so: re-run with "
+                "`--new-effort`.\n"
+                "  🔴 No similarity matching is done here on purpose — whether "
+                "two slugs are the same effort is a judgement, and a heuristic "
+                "guess would be wrong in both directions. This refusal exists to "
+                "put the list in front of you, not to decide for you.",
+                file=sys.stderr,
+            )
+            return EXIT_DOC_PER_EFFORT
+
     # ---- rule (d): the advance question, asked BEFORE anything is computed ---
     if not advance_is_real(args.advanced):
         print(
@@ -1760,6 +2474,16 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"cannot read --update: {exc}", file=sys.stderr)
         return EXIT_FAIL
+
+    # ---- rule (j): every ranked next-step names a forcing function ----------
+    # Read from the UPDATE, so legacy items already in the base are never
+    # retroactively refused — see `ranked_items`. An update that brings no
+    # `Next steps` section at all touches no ranks and is not asked the question.
+    items = ranked_items(update_text)
+    unforced = unforced_report(items)
+    if unforced:
+        print(unforced, file=sys.stderr)
+        return EXIT_UNFORCED
 
     base_text = doc.read_text(encoding="utf-8") if doc.exists() else ""
     if base_text:
@@ -1856,6 +2580,11 @@ def main(argv: list[str] | None = None) -> int:
     warning = dropped_durable_report(report.dropped)
     if warning:
         print(warning)
+    # Rule (j)'s advisory half, beside the other two and for the same reason:
+    # above the diff, because it is a statement about what the diff is adding.
+    self_generated = self_generated_report(items)
+    if self_generated:
+        print(self_generated)
     print(diff, end="" if diff.endswith("\n") else "\n")
 
     if not args.confirm:

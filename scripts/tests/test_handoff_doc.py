@@ -111,8 +111,15 @@ UPDATE_DOC = f"""## State now
 ## Open investigations — live diagnosis state
 {NEW_FINDING_C}
 ## Next steps (ranked)
-1. Watch the drain rate for a day.
+1. Watch the drain rate for a day. forcing: gate — the load soak blocks the release
 """
+
+# 🔴 The fixture BASE_DOC's ranked items carry NO `forcing:` field, ON PURPOSE.
+# Rule (j) reads the UPDATE, never the merged doc, so a repo full of legacy
+# untagged items must keep updating cleanly — a gate that refused on history
+# would be red on every established repo, which `claude/RULES.md` calls worse
+# than no gate. `test_legacy_base_items_are_not_retroactively_refused` is the
+# guard, and it can only be honest while the base above stays untagged.
 
 
 # Hermetic git: the sandbox and the dev host must behave the same, so no global
@@ -252,8 +259,9 @@ def update_file(tmp_path: Path) -> Path:
 
 
 def run_tool(repo: Path, *extra: str, update: Path | None = None, advanced: str | None
-             = "the drain loop is fixed and the at-max reading was corrected"):
-    argv = [sys.executable, str(TOOL), "--repo", str(repo), "--topic", "sample-topic"]
+             = "the drain loop is fixed and the at-max reading was corrected",
+             topic: str = "sample-topic"):
+    argv = [sys.executable, str(TOOL), "--repo", str(repo), "--topic", topic]
     if update is not None:
         argv += ["--update", str(update)]
     if advanced is not None:
@@ -1379,6 +1387,37 @@ class TestRuleFDidNotMoveTheExitCodes:
         assert WARNING_HEAD not in res.stdout + res.stderr
         assert tree_hash(durable_repo) == before
 
+    def test_no_two_exit_constants_share_a_value(self) -> None:
+        """🔴 THE COLLISION THIS SUITE COULD NOT SEE. Every other guard here
+        pins a NAMED constant to a number, so two names sharing one value pass
+        them all: the enumeration below stops at 6, and nothing asks whether the
+        set is injective.
+
+        MEASURED on this PR. `main` landed `EXIT_DOC_PER_EFFORT = 7` while this
+        branch carried `EXIT_STALE_BASE = 7`. The merge conflicted only where
+        the two blocks sat ADJACENT — resolving it the obvious way, by keeping
+        both sides, yields two constants equal to 7 and an exit-code contract
+        where `status=stale-base` and `status=doc-per-effort` are
+        indistinguishable to any caller branching on the number. The doc/code
+        guard did not catch it either: it scrapes `status=` tokens, and both
+        tokens are present and documented.
+
+        A green suite on the merged tree would have said nothing. This is the
+        guard that makes the next PR to claim a code collide LOUDLY.
+        """
+        codes = {n: v for n, v in vars(hd).items()
+                 if n.startswith("EXIT_") and isinstance(v, int)}
+        assert len(codes) >= 8, f"the scraper found too few constants: {codes}"
+        seen: dict[int, str] = {}
+        for name, value in sorted(codes.items()):
+            assert value not in seen, (
+                f"{name} and {seen[value]} are both {value}. Two exit constants "
+                f"sharing a value make their statuses indistinguishable to any "
+                f"caller that branches on the number. Give the newer one the "
+                f"next free code and update the skill's exit-code list with it."
+            )
+            seen[value] = name
+
     def test_the_exit_code_constants_did_not_move(self) -> None:
         """Their VALUES, not just their names — a caller reads the number."""
         assert (hd.EXIT_OK, hd.EXIT_USAGE, hd.EXIT_FAIL) == (0, 2, 3)
@@ -1474,6 +1513,27 @@ SKILL_PINS: list[tuple[str, str]] = [
     (
         "This step CREATES the doc as well as updating it",
         "🔴 …and the gate step claims the new-doc case, so it is not left orphaned",
+    ),
+    # 🔴 The skill scoped the block boundary to "the first unindented line after
+    # a blank one". A col-0 tag after the item's OWN indented fence has a FENCE,
+    # not a blank, immediately above it — so an author reading that sentence
+    # concluded the opposite of what the walk does, and got `[no forcing: field]`
+    # for a field they had written. Behaviour pinned by the `col-0` params of
+    # `test_an_indented_fence_does_not_cost_the_tag_that_follows_it`; this pins
+    # that the skill still states the scope.
+    (
+        "which an intervening FENCE does not reset",
+        "rule (j): the block boundary is stated as WIDE as the walk is",
+    ),
+    # 🔴 The same over-claim on the other side of that sentence: the skill said
+    # flatly that `forcing function:` / `forcing = gate` "are near-misses, NAMED
+    # not absent". `_FORCING_ATTEMPT` is anchored on the CLOSED VOCABULARY, so
+    # that holds only when the value IS a listed kind — `forcing function:
+    # followup` gets `[no forcing: field]`. Behaviour pinned by
+    # `test_a_near_miss_with_an_UNLISTED_kind_is_NOT_named_it_reads_ABSENT`.
+    (
+        "`forcing = gate` **with a listed kind**",
+        "rule (j): the near-miss promise is scoped to the closed vocabulary",
     ),
 ]
 
@@ -2331,6 +2391,264 @@ class TestSkillAndModuleAgree:
                 f"shared branch. Document it, or stop emitting it."
             )
 
+    def test_every_refusal_MARKER_the_module_prints_reaches_the_skill(self) -> None:
+        """🔴 THE SEAM. SKILL.md's step-5 legend now enumerates the four rule-(j)
+        row markers and tells the executor that **only one of them means "add a
+        field"** — that legend is the whole reason the other three stopped
+        getting the add-a-field remedy, i.e. it is load-bearing prose, not a
+        summary. Every marker is pinned on the MODULE side by the tests above;
+        nothing pinned the SKILL side.
+
+        🔴 DERIVED FROM `hd.REFUSAL_MARKERS`, and deliberately NOT four
+        `SKILL_PINS` entries, which is what this repo would ordinarily reach
+        for. A pin asserts the literal is still IN the skill — so renaming
+        `[fenced]` in the module goes red in the module's own tests, gets fixed
+        there, and leaves the legend naming a marker the tool no longer prints,
+        with the pin STILL GREEN because the skill does still contain the old
+        token. A pin catches deletion from the skill; only derivation catches
+        the rename, and the rename is the drift the auditor named.
+
+        Same idiom, and the same reason, as
+        `test_every_exit_code_the_module_can_return_is_documented` directly
+        above: a hand-written list is exactly how `behind` reached the skill's
+        only audience undocumented.
+
+        Shown reachable by the `refusal-marker-renamed` row in
+        `scripts/tests/mutants-handoff-cap.sh`.
+        """
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        assert len(hd.REFUSAL_MARKERS) == 4, (
+            "a fifth cause was added or one was dropped — the skill's legend "
+            "enumerates them, so it needs the same edit in the same commit"
+        )
+        assert len(set(hd.REFUSAL_MARKERS)) == 4, "two markers collapsed onto one token"
+        for marker in hd.REFUSAL_MARKERS:
+            assert marker in doc, (
+                f"scripts/lib/handoff_doc.py prints a refused row starting "
+                f"{marker!r} and claude/skills/handoff/SKILL.md's step-5 legend "
+                f"never mentions it. The executor's only map from a marker to "
+                f"what to do about it would send them to the wrong remedy — and "
+                f"three of the four mean something OTHER than 'add a field'. "
+                f"Update the legend, or stop printing the marker."
+            )
+
+    def test_the_marker_pin_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL on the loop above — it iterates a module constant, so
+        without this it is indistinguishable from a loop over an empty tuple that
+        can only pass. A token shaped exactly like a marker, which the skill must
+        not contain."""
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        assert "[no forcing: declaration]" not in doc
+
+    # --- the seam the marker loop above CANNOT see: the legend's INSTRUCTION ---
+    #
+    # 🔴 THE BLIND SPOT, NAMED. `test_every_refusal_MARKER_the_module_prints
+    # _reaches_the_skill` asserts the TOKEN `[fenced]` is present. It stayed
+    # green for a whole round while the legend's instruction beside that token
+    # — "move it out of the fence" — was the exact thing
+    # `FENCED_FIELD_REMEDY`'s own comment says is harmful, because obeying it on
+    # a fence that quotes this tool's vocabulary line promotes a quoted example
+    # into a declaration and produces a FALSE `forcing: none`.
+    #
+    # 🔴 AND THE MODULE SIDE WAS UNPINNED TOO. MEASURED 2026-08-28 at
+    # `e34ed6ef`: reverting `FENCED_FIELD_REMEDY` to a bare
+    # "…where it does not count. Move it out of the fence onto one of the item's
+    # own lines." left the WHOLE suite green — 237 passed — because
+    # `test_a_field_inside_a_FENCE_still_does_not_count_and_says_why` asserts
+    # only `"[fenced]"` and `"code fence"`, both of which the bare text keeps.
+    # So the corrected remedy was documentation, not a guarantee.
+    #
+    # 🔴 WHOLE NORMALISED STRINGS, DELIBERATELY. `claude/RULES.md`: when the
+    # artifact under test IS prose, a guard on WORDS is walkable by REWORDING,
+    # so the whole string is pinned and a cosmetic reword costs a test edit.
+    # That price is the point — it makes the claim machine-readable.
+    _FENCED_REMEDY = (
+        "🔴 The item(s) marked [fenced] carry the field INSIDE a code fence, "
+        "where it does not count — a pasted sample is not a declaration. If "
+        "that field is YOUR declaration, move it out of the fence onto one of "
+        "the item's own lines, INDENTED — at column 0 it reads as absent. If "
+        "it is quoted output, a copied example or this tool's own vocabulary "
+        "line, the item is genuinely untagged and needs one of its own — do "
+        "NOT promote the quote."
+    )
+    _FENCED_LEGEND = (
+        "`[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT "
+        "promote it** 📖 write-gate §C."
+    )
+    #: The one instruction BOTH sides must carry. Derived rather than restated:
+    #: the skill assertion reads it off the module, so dropping it from either
+    #: side goes red, which is the relationship the token loop cannot see.
+    _NO_PROMOTE = "do NOT promote"
+
+    @staticmethod
+    def _norm(s: str) -> str:
+        return " ".join(s.split())
+
+    def _fenced_legend_clause(self) -> str:
+        """The step-5 legend's `[fenced]` clause, LOCATED not restated.
+
+        Anchored on the module's own `MARK_FENCED`, so a rename that the token
+        loop above forces into the skill lands here too rather than leaving this
+        test looking for a marker nobody prints."""
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        legend = doc.index("Read each row's marker")
+        start = doc.index(f"`{hd.MARK_FENCED}`", legend)
+        end = doc.index("⚠", start)
+        return self._norm(doc[start:end])
+
+    def test_the_FENCED_remedy_is_not_a_bare_move_it_out(self) -> None:
+        """🔴 THE MODULE HALF. Shown reachable by the
+        `fenced-remedy-reverted-to-bare-move-it-out` row in
+        `scripts/tests/mutants-handoff-cap.sh`, which reverts this constant to
+        the bare text measured green above and is killed here.
+
+        ⚠ NOT regression coverage — the remedy is already correct at
+        `e34ed6ef`. It is the guarantee that was missing, labelled as one."""
+        assert self._norm(hd.FENCED_FIELD_REMEDY) == self._norm(self._FENCED_REMEDY)
+        assert self._NO_PROMOTE in hd.FENCED_FIELD_REMEDY
+
+    def test_the_printed_refusal_carries_that_remedy_verbatim(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """A constant nobody prints is not a remedy. The BEHAVIOURAL half: the
+        real refusal text an executor reads must contain it."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Land the fix.\n"
+            "   ```\n"
+            "   forcing: gate\n"
+            "   ```\n"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "fencedremedy.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert self._norm(hd.FENCED_FIELD_REMEDY) in self._norm(res.stderr)
+
+    def test_the_skill_legend_does_not_tell_the_executor_to_promote_a_quote(
+        self,
+    ) -> None:
+        """🔴 THE SKILL HALF, AND THE ONE THAT WAS ACTUALLY BROKEN. RED at
+        `e34ed6ef`, where the clause reads ``[fenced]` move it out of the
+        fence.` — the module's own comment calls that instruction harmful, and
+        the module comment elsewhere calls this legend "the executor's only map
+        from a marker to what to do about it".
+
+        The `_NO_PROMOTE` assertion is DERIVED from the module constant, so it
+        also fails if the module drops the instruction — that is the seam, and
+        it is what the marker-token loop above structurally cannot see.
+
+        Shown reachable by the `skill-legend-says-only-move-it-out` row in
+        `scripts/tests/mutants-handoff-cap.sh`."""
+        clause = self._fenced_legend_clause()
+        assert self._NO_PROMOTE in hd.FENCED_FIELD_REMEDY, (
+            "the module stopped telling the caller not to promote a quoted "
+            "field; the skill legend below is derived from it, so fix the "
+            "module first"
+        )
+        assert self._NO_PROMOTE in clause, (
+            f"claude/skills/handoff/SKILL.md's step-5 legend maps {hd.MARK_FENCED} "
+            f"to {clause!r}. FENCED_FIELD_REMEDY says the commonest fenced field "
+            f"is a QUOTE of this tool's own vocabulary line, and that obeying a "
+            f"bare 'move it out of the fence' promotes it into a declaration — a "
+            f"false `forcing: none`. The legend must not instruct the harm the "
+            f"module documents."
+        )
+        assert clause == self._norm(self._FENCED_LEGEND)
+
+    def test_the_legend_clause_locator_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL on `_fenced_legend_clause`. A locator that silently
+        returned the whole document, or an empty string, would make both
+        assertions above unfalsifiable in one direction.
+
+        Two halves, and the docstring used to describe only the first as if it
+        covered both. The `_NO_PROMOTE` line is a control on the PREDICATE, not
+        on the locator — it feeds the predicate the bare legend text this suite
+        refuses and shows it goes false, so a predicate that could only ever be
+        true would be caught. The `len` and `startswith` lines are the control
+        on the LOCATOR's own return: bounded rather than the whole document,
+        and anchored on the marker rather than empty."""
+        clause = self._fenced_legend_clause()
+        assert self._NO_PROMOTE not in "`[fenced]` move it out of the fence."
+        assert 0 < len(clause) < 400, f"the locator returned {len(clause)} bytes"
+        assert clause.startswith(f"`{hd.MARK_FENCED}`")
+
+    # --- the OTHER prose claim round 4 corrected, and the one nothing pinned ---
+    #
+    # 🔴 THE EXISTING `SKILL_PINS` ENTRY CANNOT SEE THIS DRIFT. That entry is the
+    # substring "`forcing = gate` **with a listed kind**" — which the round-3
+    # wording ALSO contains, verbatim, because the correction moved the
+    # parenthetical rather than the phrase the pin quotes. So the pin is green
+    # against both the true and the false sentence and distinguishes nothing.
+    #
+    # 🔴 WHOLE NORMALISED STRING, for the same reason `_FENCED_REMEDY` is one.
+    _NEAR_MISS_CLAUSE = (
+        "`forcing function:`/`forcing = gate` **with a listed kind** "
+        "(unlisted reads ABSENT), and a fenced field regardless of kind, are "
+        "**near-misses, NAMED** not absent."
+    )
+
+    def _near_miss_clause(self) -> str:
+        """Step 3's near-miss sentence, LOCATED not restated.
+
+        Bounded by the 📖 reference marker that closes every clause in this
+        block, so the locator cannot silently widen to the rest of the file."""
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        start = doc.index("`forcing function:`")
+        return self._norm(doc[start : doc.index("📖", start)])
+
+    def test_the_skill_binds_UNLISTED_reads_ABSENT_to_the_right_antecedent(
+        self,
+    ) -> None:
+        """🔴 RED at `6a862d8c`, where the clause read "…**with a listed kind**,
+        and a fenced field, are **near-misses, NAMED** not absent (an unlisted
+        kind there reads ABSENT)". "there" sat against its nearest antecedent,
+        "a fenced field" — for which it is FALSE.
+
+        RE-MEASURED 2026-08-28 at `976b09b5`, both sides of the distinction:
+
+            fenced `forcing: followup`   -> fenced=True  -> row `[fenced]`
+            fenced `forcing: gate`       -> fenced=True  -> row `[fenced]`
+            `forcing = followup`         -> row `[no forcing: field]`
+            `forcing = gate`             -> row `[unparsed forcing field on: …]`
+
+        i.e. `fenced` is `any(_FORCING.search(ln) …)` and never consults
+        `FORCING_KINDS`, so an unlisted kind inside a fence is NAMED, not
+        absent. Only the `forcing function:` / `forcing = …` spellings fall
+        through to `[no forcing: field]`, because `_FORCING_ATTEMPT` is anchored
+        on the closed vocabulary. Round 4 rebound the parenthetical to those.
+
+        ⚠ NOT regression coverage — the sentence is already correct here. It is
+        the guarantee it never got: the only `SKILL_PINS` entry over it is a
+        substring of the FALSE wording too (see the comment above), so the
+        correction was revertible with the whole suite green.
+
+        Shown reachable by the `skill-near-miss-clause-rebound-to-the-fence`
+        row in `scripts/tests/mutants-handoff-cap.sh`."""
+        assert self._near_miss_clause() == self._norm(self._NEAR_MISS_CLAUSE), (
+            "claude/skills/handoff/SKILL.md's step-3 near-miss sentence no "
+            "longer reads as pinned. If '(unlisted reads ABSENT)' drifted back "
+            "onto 'a fenced field', that is the MEASURED-FALSE binding — a "
+            "fenced field with an unlisted kind is reported `[fenced]`, not "
+            "absent, because `fenced` never consults FORCING_KINDS. Re-measure "
+            "before rewording, and update _NEAR_MISS_CLAUSE in the SAME commit "
+            "for a deliberate reword."
+        )
+
+    def test_the_near_miss_clause_locator_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL on `_near_miss_clause`, in both directions a locator
+        can be vacuous. The PREDICATE half feeds it the round-3 sentence this
+        suite refuses and shows the comparison goes false — an equality that
+        could only ever hold would be caught here. The LOCATOR half shows the
+        return is bounded rather than the whole document, and anchored where it
+        claims to be rather than empty."""
+        clause = self._near_miss_clause()
+        assert self._norm(self._NEAR_MISS_CLAUSE) != self._norm(
+            "`forcing function:`/`forcing = gate` **with a listed kind**, and a "
+            "fenced field, are **near-misses, NAMED** not absent (an unlisted "
+            "kind there reads ABSENT)."
+        )
+        assert 0 < len(clause) < 400, f"the locator returned {len(clause)} bytes"
+        assert clause.startswith("`forcing function:`")
+
     def test_the_tool_is_tracked_by_git(self) -> None:
         """A new file the flake never sees deploys as an absence, silently.
 
@@ -2628,10 +2946,15 @@ class TestBlockedCommitLeavesNoTrace:
         assert not doc.exists()
         self._block_commits(repo)
 
+        # `--new-effort` is rule (i-b)'s assertion, added 2026-08-28: this repo
+        # already carries `handoff-sample-topic.md`, so creating a SECOND doc is
+        # now refused (exit 7) unless the caller says it is a new effort. Here it
+        # genuinely is — this test is about the ROLLBACK path, and without the
+        # flag the run would never reach the commit it needs to see refused.
         res = subprocess.run(
             [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
              "brand-new-topic", "--update", str(update_file), "--advanced",
-             "a first-ever handoff for this topic", "--confirm"],
+             "a first-ever handoff for this topic", "--new-effort", "--confirm"],
             capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
         )
 
@@ -3298,6 +3621,1109 @@ class TestRuleHDidNotMoveTheExitCodes:
         assert STALE_HEAD not in res.stdout + res.stderr
 
 
+# --------------------------------------------------------------------------
+# rules (i) and (j) — one doc per effort, and a forcing function per rank
+# (operator decision 2026-08-28; see the module docstring and
+#  claude/skills/handoff/reference/write-gate.md §C)
+# --------------------------------------------------------------------------
+
+FORCED_UPDATE = """## State now
+- Branch / PR: `feat/sample` / #99
+
+## Next steps (ranked)
+1. Watch the drain rate for a day. forcing: gate — the load soak blocks the release
+"""
+
+
+def write_delta(tmp_path: Path, name: str, text: str) -> Path:
+    """A named delta file. NAMED per-test rather than reusing `update.md`,
+    because several tests in this class write two different deltas in one
+    tmp_path and a shared name would let one silently read the other's bytes."""
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+class TestADatedTopicIsRefused:
+    """Rule (i-a). A slug carrying a date names a PER-SESSION doc: next
+    session's date differs, so it can never be updated in place.
+
+    🔴 RED AT `origin/main` — before this change every case below exited 0 and
+    wrote the doc. That is the regression this class covers, and it is why the
+    write-nothing assertions hash the whole tree rather than checking the file.
+    """
+
+    @pytest.mark.parametrize(
+        "topic,token",
+        [
+            ("browser-bridge-2026-08-01", "2026-08-01"),   # devrc spelling: trailing
+            ("2026-07-18-remix-session", "2026-07-18"),    # homelab spelling: leading
+            # 🔴 the token is `2026`, not `2026-07`: the year-month arm was
+            # DELETED as a dead predicate (see `_TOPIC_DATE`), and the bare-year
+            # arm catches this spelling. Asserting `2026-07` here would have
+            # passed either way — the refusal echoes the topic, which contains
+            # it — which is how the redundant arm stayed invisible.
+            ("remix-2026-07-session", "2026"),             # year-month spelling
+            ("q3-2026-cleanup", "2026"),                   # bare year
+        ],
+        ids=["trailing-iso", "leading-iso", "year-month", "bare-year"],
+    )
+    def test_every_dated_spelling_in_the_corpus_is_refused(
+        self, repo: Path, update_file: Path, topic: str, token: str
+    ) -> None:
+        before = tree_hash(repo)
+        res = run_tool(repo, update=update_file, topic=topic)
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, res.stdout + res.stderr
+        assert "status=dated-topic" in res.stderr
+        assert token in res.stderr, "the refusal must name the date it found"
+        assert tree_hash(repo) == before, "a refusal wrote something"
+
+    def test_the_refusal_names_the_undated_topic_to_use(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """A refusal with no pasteable fix is one people work around."""
+        res = run_tool(repo, update=update_file, topic="2026-07-18-remix-session")
+        assert "--topic remix-session" in res.stderr, res.stderr
+
+    def test_new_effort_does_NOT_bypass_a_dated_topic(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE BYPASS TEST. `--new-effort` is rule (i-b)'s assertion; if it
+        also let a dated slug through, the crisp half of the rule would be
+        one flag away from inert — and that flag is right there in the OTHER
+        refusal's remedy text, so a session would find it."""
+        before = tree_hash(repo)
+        res = run_tool(
+            repo, "--new-effort", update=update_file, topic="remix-2026-08-01"
+        )
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT
+        assert "status=dated-topic" in res.stderr
+        assert tree_hash(repo) == before
+
+    def test_an_undated_topic_is_NOT_refused(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 POSITIVE CONTROL. A guard that refuses everything is not a guard,
+        and `_TOPIC_DATE` is a regex over a caller-supplied string — the
+        cheapest place for an over-broad pattern to hide."""
+        res = run_tool(repo, update=update_file, topic="sample-topic")
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+    @pytest.mark.parametrize(
+        "topic", ["h2-planning", "ipv6-rollout", "s3-403-triage", "phase-2-store"]
+    )
+    def test_ordinary_numbers_in_a_slug_are_not_dates(self, topic: str) -> None:
+        """The over-broad direction, at four points. A slug is allowed to carry
+        digits — `h2`, `ipv6`, `403`, `phase-2` — and a pattern that ate them
+        would make the rule unpredictable at the moment a session obeys it."""
+        assert hd.topic_carries_a_date(topic) is None
+
+
+class TestASecondDocForAnExistingEffortIsRefused:
+    """Rule (i-b). Creating the N+1th doc stops being the SILENT DEFAULT.
+
+    🔴 WHAT THIS DOES NOT CLAIM: it does not detect that two slugs are the same
+    effort. No fuzzy match is attempted or wanted. What it pins is that the
+    caller is shown the list and must make an explicit assertion.
+    """
+
+    def test_a_new_topic_is_refused_and_lists_what_exists(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        before = tree_hash(repo)
+        res = run_tool(repo, update=update_file, topic="remix-hardening-session")
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, res.stdout + res.stderr
+        assert "status=new-doc" in res.stderr
+        assert "handoff-sample-topic.md" in res.stderr, (
+            "the refusal must LIST the existing docs — without the list it is a "
+            "block with no way to comply, and --new-effort becomes reflexive"
+        )
+        assert tree_hash(repo) == before
+
+    def test_new_effort_lands_it(self, repo: Path, update_file: Path) -> None:
+        """The assertion works — otherwise the rule bans new efforts outright."""
+        res = run_tool(repo, "--new-effort", update=update_file, topic="genuinely-new")
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+    def test_updating_an_EXISTING_doc_never_asks(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE SILENCE THAT MATTERS. The ordinary path — updating in place —
+        is the behaviour this whole change is trying to make normal, so it must
+        not acquire a flag. If this ever fails, the rule is inverted."""
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=new-doc" not in res.stdout + res.stderr
+
+    def test_the_FIRST_doc_in_a_repo_needs_no_flag(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE BOOTSTRAP CASE, and the one an over-eager rule would break.
+        A repo with no handoff docs at all has no effort to duplicate, so
+        `existing` is empty and the question is never asked. Requiring
+        `--new-effort` here would gate the one case that is unambiguously
+        correct."""
+        origin = tmp_path / "origin.git"
+        _sh("git", "init", "-q", "--bare", "-b", "main", str(origin), cwd=tmp_path)
+        work = tmp_path / "fresh"
+        work.mkdir()
+        _sh("git", "init", "-q", "-b", "main", cwd=work)
+        for k, v in (("user.name", "T"), ("user.email", "t@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=work)
+        _sh("git", "remote", "add", "origin", str(origin), cwd=work)
+        (work / "README.md").write_text("fresh\n", encoding="utf-8")
+        _sh("git", "add", "--", "README.md", cwd=work)
+        _sh("git", "commit", "-q", "-m", "seed", cwd=work)
+
+        res = run_tool(work, update=update_file, topic="first-effort")
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+
+class TestARankedItemMustNameAForcingFunction:
+    """Rule (j). The closed vocabulary is the structural half; the truth of the
+    evidence beside it is NOT checkable and is not claimed to be."""
+
+    def test_an_untagged_item_is_refused_and_writes_nothing(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        upd = write_delta(
+            tmp_path, "untagged.md",
+            "## Next steps (ranked)\n1. Re-read the retry wrapper.\n",
+        )
+        before = tree_hash(repo)
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "status=unforced" in res.stderr
+        assert "Re-read the retry wrapper" in res.stderr, "name the offending item"
+        assert tree_hash(repo) == before
+
+    def test_a_kind_outside_the_vocabulary_is_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE POINT OF AN ALLOWLIST. `followup` is precisely the label a
+        self-generated item reaches for, and it is refused BY DEFAULT rather
+        than by being enumerated as banned — which is what a rewording cannot
+        walk around."""
+        upd = write_delta(
+            tmp_path, "followup.md",
+            "## Next steps (ranked)\n1. Tidy the docs. forcing: followup\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "'followup'" in res.stderr, "say WHAT was typed, or it cannot be fixed"
+
+    def test_the_refusal_prints_the_whole_vocabulary(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """A closed set the caller cannot see is a guessing game."""
+        upd = write_delta(
+            tmp_path, "vocab.md", "## Next steps (ranked)\n1. Do a thing.\n"
+        )
+        res = run_tool(repo, update=upd)
+        for kind in hd.EXTERNAL_FORCING_KINDS:
+            assert kind in res.stderr, f"{kind} missing from the printed vocabulary"
+
+    @pytest.mark.parametrize("kind", sorted(hd.EXTERNAL_FORCING_KINDS))
+    def test_every_external_kind_is_accepted(
+        self, repo: Path, tmp_path: Path, kind: str
+    ) -> None:
+        """🔴 POSITIVE CONTROL, PER MEMBER. A set constant is exactly the place a
+        typo survives a green suite: one unreachable member would refuse an item
+        the skill's own vocabulary told the author to write."""
+        upd = write_delta(
+            tmp_path, f"kind-{kind}.md",
+            f"## Next steps (ranked)\n1. Do the thing. forcing: {kind} — evidence\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+    def test_forcing_none_is_ACCEPTED_and_reported(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 Refusing `none` would not delete self-generated items — it would
+        teach sessions to type `incident` falsely, moving the population
+        underground. So it lands, and it is COUNTED where a reader sees it."""
+        upd = write_delta(
+            tmp_path, "none.md",
+            "## Next steps (ranked)\n1. Refactor the parser. forcing: none\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+        assert "forcing: none" in res.stdout and "NO external forcing" in res.stdout
+        assert "Refactor the parser" in res.stdout
+
+    def test_the_self_generated_block_is_SILENT_when_every_item_is_external(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The ordinary run must not carry a reassuring "0 self-generated" line —
+        `dropped_durable_report`'s stated reason, applied to the same shape."""
+        res = run_tool(repo, update=update_file)
+        assert "NO external forcing" not in res.stdout
+
+    def test_legacy_base_items_are_not_retroactively_refused(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE PERMANENTLY-RED-GATE GUARD, and the reason rule (j) reads the
+        UPDATE rather than the merge. `BASE_DOC`'s two ranked items carry no
+        `forcing:` field — as every one of the 384 real ranked items in the
+        corpus does not. If this ever fails, the rule became a gate that no
+        established repo can pass, which `claude/RULES.md` calls worse than no
+        gate at all."""
+        assert "forcing:" not in BASE_DOC, (
+            "the fixture stopped being legacy, so this test proves nothing"
+        )
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == 0, res.stdout + res.stderr
+
+    def test_an_update_with_no_next_steps_section_is_not_asked(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """Omitting a section leaves it ALONE (the merge's contract), so an
+        update that touches no ranks changes no ranks and must not be gated."""
+        upd = write_delta(
+            tmp_path, "nosteps.md",
+            "## State now\n- Branch / PR: `feat/sample` / #101\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+
+    def test_a_numbered_line_inside_a_FENCE_is_not_a_ranked_item(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """Fence awareness, for the reason `split_sections` has it: a handoff
+        pastes numbered output constantly, and a sample log line is not a work
+        item to be tagged."""
+        upd = write_delta(
+            tmp_path, "fenced.md",
+            "## Next steps (ranked)\n"
+            "1. Watch the drain rate. forcing: incident — paging since 09:00Z\n"
+            "```\n1. this is sample output, not a rank\n2. neither is this\n```\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert len(hd.ranked_items(upd.read_text(encoding="utf-8"))) == 1
+
+    def test_a_nested_numbered_line_is_not_a_rank(self) -> None:
+        """The ranks are half a claim's identity (`claim-work --slug-for <doc>
+        <rank>`), so counting a sub-item as a rank would re-point live claims."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix it. forcing: gate — CI red\n"
+            "    1. sub-step, not a rank\n"
+        )
+        assert [i.rank for i in hd.ranked_items(text)] == ["1"]
+
+    def test_items_outside_a_next_steps_heading_are_not_asked(self) -> None:
+        """Scoped to the queue. A numbered list under `## Goal` is prose."""
+        assert hd.ranked_items("## Goal\n1. ship the thing\n") == []
+
+
+class TestTheFieldIsFoundOnTheWholeItemNotTheNumberedLine:
+    """🔴 RED AT `3f7f2e62` — every test in this class. Rule (j)'s first version
+    ran `_FORCING.search` against the single line `_RANKED_ITEM` had matched, so
+    a tag on any CONTINUATION line of a multi-line item was invisible.
+
+    MEASURED over the committed corpus: 179 of 257 ranked items in devrc's
+    `claudedocs/` and 99 of 181 in homelab-talos' wrap onto continuation lines,
+    so the majority shape was structurally unable to pass. And the refusal it
+    got was the worst kind — `[no forcing: field]` about an item that HAS one,
+    under a printed remedy already satisfied: the obvious fix is a no-op, the
+    re-run is byte-identical, and `/handoff` step 5 is this doc's SOLE writer,
+    so the session's handoff never lands at all.
+
+    Two halves, and the class covers both, because either alone is still broken:
+    the BLOCK search (the behaviour), and a remedy per CAUSE (the message).
+    """
+
+    # 🔴 THE OBSERVED FAILURE, verbatim in shape: two items that BOTH carry a
+    # correct tag, on the last line of a wrapped item. `rc=8` at `3f7f2e62`.
+    OBSERVED = (
+        "## Next steps (ranked)\n"
+        "1. 🔴 **Land the pre-push gate change-scoping** (`devrc#952`).\n"
+        "   The hook scopes to the whole tree, so every push re-runs the full\n"
+        "   suite and the gate is red for reasons the push did not cause.\n"
+        "   forcing: gate — devrc#952's CI leg has been red since 2026-08-26\n"
+        "2. **Fix the `measure.py` latent misreport.**\n"
+        "   It prints a zero where the query returned no rows at all.\n"
+        "   forcing: regression — measured against the 2026-08-20 baseline\n"
+    )
+
+    @staticmethod
+    def _naive_kinds(text: str) -> list[str | None]:
+        """The boundary this change REJECTED: numbered line to the next numbered
+        line, or the end of the section. Kept here as the sensitivity control for
+        `test_trailing_boilerplate_does_not_tag_the_last_item` — without it that
+        assertion could be passing for any reason at all."""
+        _fm, body = hd.split_front_matter(text)
+        _pre, secs = hd.split_sections(body)
+        out: list[str | None] = []
+        for heading, sb in secs:
+            if not hd.heading_text(heading).lower().startswith(hd.NEXT_STEPS_PREFIX):
+                continue
+            lines = [ln for _i, ln in hd._unfenced(sb)]
+            starts = [k for k, ln in enumerate(lines) if hd._RANKED_ITEM.match(ln)]
+            for n, k in enumerate(starts):
+                end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+                m = hd._FORCING.search("\n".join(lines[k:end]))
+                out.append(m.group(1).lower() if m else None)
+        return out
+
+    def test_the_observed_refusal_of_two_correctly_tagged_items_is_gone(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """The exact reported symptom: `rc=8`, `status=unforced`, two items that
+        are both tagged. Reproduced through the TOOL, not just the parser."""
+        upd = write_delta(tmp_path, "wrapped.md", self.OBSERVED)
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=unforced" not in res.stderr
+        assert [i.kind for i in hd.ranked_items(self.OBSERVED)] == ["gate", "regression"]
+
+    @pytest.mark.parametrize(
+        "tagline",
+        (
+            "   forcing: gate — CI red",
+            "   **forcing: gate** — CI red",
+            "   `forcing: gate` — CI red",
+            "   Forcing: Gate — CI red",
+            "   forcing:gate — CI red",
+            # 🔴 THE ONE SPELLING THIS CHANGE ADMITTED rather than reported.
+            # Emphasis BETWEEN the key and the colon, in a skill body that bolds
+            # its field names. Safe structurally, not by a guess about intent:
+            # what follows the colon must be a member of a seven-word closed
+            # vocabulary, so a false positive requires prose that literally reads
+            # `forcing` + punctuation + a kind — which is the tag.
+            "   **forcing:** gate — CI red",
+            "   **forcing**: gate — CI red",
+        ),
+    )
+    def test_an_accepted_spelling_on_a_continuation_line_counts(
+        self, repo: Path, tmp_path: Path, tagline: str
+    ) -> None:
+        text = "## Next steps (ranked)\n1. Land the retry-wrapper fix.\n" + tagline + "\n"
+        res = run_tool(repo, update=write_delta(tmp_path, "spelling.md", text))
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert [i.kind for i in hd.ranked_items(text)] == ["gate"]
+
+    @pytest.mark.parametrize(
+        "attempt",
+        (
+            "forcing function: gate — CI red",   # a word between key and colon
+            "forcing = gate",                    # a separator that is not a colon
+            "forcing — gate",                    # ditto, em dash
+        ),
+    )
+    def test_a_near_miss_is_REFUSED_and_NAMED_never_called_absent(
+        self, repo: Path, tmp_path: Path, attempt: str
+    ) -> None:
+        """🔴 THE MESSAGE HALF. These stay refused — the grammar is deliberately
+        strict, `subsystem_resolver._NEAR_MISS_MARKER`'s reason — but the refusal
+        must say the field is UNPARSED, not ABSENT, and must not print the remedy
+        the author has already carried out."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n   " + attempt + "\n"
+        res = run_tool(repo, update=write_delta(tmp_path, "nearmiss.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        err = res.stderr
+        assert "[no forcing: field]" not in err, (
+            "the item HAS a field — telling it there is none is the reported bug"
+        )
+        assert "Tag each item marked" not in err, (
+            "a remedy already satisfied: the fix is a no-op and the re-run "
+            "prints identical bytes, so the session cannot recover"
+        )
+        assert "unparsed forcing field on:" in err, "say WHICH line, or it cannot be fixed"
+        assert attempt in err, "quote the offending line verbatim"
+
+    @pytest.mark.parametrize(
+        "attempt",
+        ("forcing function: followup", "forcing = tech-debt", "forcing — someday"),
+    )
+    def test_a_near_miss_with_an_UNLISTED_kind_is_NOT_named_it_reads_ABSENT(
+        self, repo: Path, tmp_path: Path, attempt: str
+    ) -> None:
+        """🔴 THE SCOPE OF THE TEST ABOVE, WHICH SKILL.md USED TO OVERSTATE.
+        `_FORCING_ATTEMPT` is anchored on the CLOSED VOCABULARY at both ends —
+        that anchoring is the entire reason it is safe to run over prose — so a
+        near-miss whose VALUE is not a listed kind matches nothing and falls
+        through to `[no forcing: field]`.
+
+        The skill said flatly that ``forcing function:`` / ``forcing = gate``
+        "are near-misses, NAMED not absent"; measured at `e34ed6ef`,
+        `forcing function: followup` gets `[no forcing: field]`. The sentence is
+        now scoped to a listed kind, and this is what makes that scoping a
+        claim rather than a promise.
+
+        ⚠ NOT a defect and NOT being fixed: loosening the kind anchor is how the
+        net starts quoting ordinary prose back at an author. It is a documented
+        limit — `claude/RULES.md`, a comment is a claim too."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n   " + attempt + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind is None and item.near_miss is None, repr(attempt)
+        res = run_tool(repo, update=write_delta(tmp_path, "unlisted.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert hd.MARK_NO_FIELD in res.stderr
+        assert "unparsed forcing field on:" not in res.stderr
+
+    def test_a_field_inside_a_FENCE_still_does_not_count_and_says_why(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """`_unfenced`'s contract is preserved — a pasted sample is not a
+        declaration — but the author can SEE the field in their file, so
+        `[no forcing: field]` would read as a lie about the input."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Land the fix.\n"
+            "   ```\n"
+            "   forcing: gate\n"
+            "   ```\n"
+        )
+        assert [i.kind for i in hd.ranked_items(text)] == [None], (
+            "a fenced field must NOT be accepted as a tag"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "fencedtag.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "[fenced]" in res.stderr
+        assert "[no forcing: field]" not in res.stderr
+        assert "code fence" in res.stderr, "name the reason it did not count"
+
+    def test_trailing_boilerplate_does_not_tag_the_last_item(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 WHY THE BLOCK DOES NOT SIMPLY RUN TO THE NEXT NUMBERED ITEM.
+
+        The corpus shows what sits after a ranked list: 14 blocks are followed by
+        unindented prose after a blank line, and 7 of those are the skill's own
+        `🔴 **This list is a WORK QUEUE …**` boilerplate, copied verbatim. The
+        template block it comes from also carries "`forcing: none` is the honest
+        opt-out" — so under the naive boundary the LAST untagged item silently
+        acquires a `none` from text its author pasted out of the instructions.
+
+        The `_naive_kinds` control is what makes this test sensitive: it asserts
+        the rejected boundary DOES tag item 2 on this very input.
+
+        ⚠ NOT RED AT `3f7f2e62` — labelled, not counted as regression coverage.
+        It is the ONE test in this class that passes against the pre-change tree
+        (measured: 15 failed, 1 passed), because a single-line search cannot see
+        the boilerplate either. It guards the ALTERNATIVE fix — the naive block
+        boundary a reader would reach for next — and it is shown reachable by
+        the `naive-block-boundary` row in `scripts/tests/mutants-handoff-cap.sh`,
+        which it kills.
+        """
+        skill = HANDOFF_SKILL.read_text(encoding="utf-8").splitlines()
+        start = next(i for i, ln in enumerate(skill) if "EVERY item MUST carry" in ln)
+        tail = "\n".join(ln.strip() for ln in skill[start : start + 4])
+        assert "forcing: none" in tail, (
+            "the copied boilerplate no longer spells a valid kind, so this test "
+            "proves nothing — re-derive the window or drop it"
+        )
+        text = "## Next steps (ranked)\n1. Fix A.\n2. Fix B.\n\n" + tail + "\n"
+        assert self._naive_kinds(text) == [None, "none"], (
+            "CONTROL: the rejected boundary must still mis-tag this input, or "
+            "the assertion below is vacuous"
+        )
+        assert [i.kind for i in hd.ranked_items(text)] == [None, None]
+        res = run_tool(repo, update=write_delta(tmp_path, "boiler.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+
+    def test_a_genuinely_untagged_multi_line_item_still_reports_ABSENCE(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE PRECISION HALF. The block widened; the DIAGNOSIS must not. A
+        legacy wrapped item using the ordinary English word "forcing" is not an
+        attempt at the field, and reporting it as one would replace one wrong
+        message with another."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. **Land the retry-wrapper fix.** The pre-push hook is forcing a\n"
+            "   full-tree run on every push, which is the thing to scope.\n"
+            "   Files: `githooks/pre-push`, `scripts/lib/git_mainline.py`.\n"
+        )
+        items = hd.ranked_items(text)
+        assert [i.kind for i in items] == [None]
+        assert items[0].near_miss is None and items[0].fenced is False
+        res = run_tool(repo, update=write_delta(tmp_path, "legacy.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "[no forcing: field]" in res.stderr
+        assert "unparsed" not in res.stderr
+        assert "continuation line counts" in res.stderr, (
+            "the remedy must state the thing the old one did not: where the "
+            "field is allowed to sit"
+        )
+
+    def test_the_block_stops_at_the_next_ranked_item(self) -> None:
+        """A tag belongs to the item it is written under, and to no other. Item 1
+        must NOT borrow item 2's."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "   more about A.\n"
+            "2. Fix B.\n"
+            "   forcing: user — the operator asked on 2026-08-26\n"
+        )
+        assert [i.kind for i in hd.ranked_items(text)] == [None, "user"]
+
+    def test_an_indented_paragraph_after_a_blank_line_is_still_the_item(self) -> None:
+        """The other side of the boundary. A blank line does not end a list item
+        when what follows is indented — that is ordinary markdown, and a handoff
+        item with two paragraphs is a shape the corpus has."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "\n"
+            "   The second paragraph, still item 1.\n"
+            "   forcing: security — the token in the log is live\n"
+        )
+        assert [i.kind for i in hd.ranked_items(text)] == ["security"]
+
+
+class TestTheWIDENINGDidNotOpenTwoHOLES:
+    """🔴 RED AT `503d7136` — and both defects were INTRODUCED by the round that
+    widened rule (j)'s search from the numbered line to the whole item. Delta
+    re-audited and reproduced 2026-08-28 before either was touched.
+
+    **The fence erased the boundary's memory.** `_item_blocks` reset its
+    "a blank line has intervened" flag on every line inside a fence, so the first
+    VISIBLE line after a fence close could never be a boundary. An item with its
+    own correctly-INDENTED fence therefore swallowed the section's trailing
+    paragraph — the skill's `🔴 **This list is a WORK QUEUE …**` boilerplate,
+    which spells `forcing: none` — and `ranked_items` returned `kind='none'`.
+    An UNTAGGED item accepted, counted as self-generated, and the gate passed.
+    That is the exact counterfactual `_item_blocks`' own docstring cites as its
+    reason for rejecting the naive boundary, re-entered through the fence path,
+    and it is the ACCEPT direction: nothing downstream refuses it.
+
+    **`\\b` cannot see past an underscore.** `_MARKUP` was widened to
+    ``[*_`~]{0,3}`` to admit emphasis, but both patterns anchored the key on
+    `\\b{FORCING_KEY}` — and `_` is a word character, so `_forcing: gate_` has no
+    boundary to match. Measured at `503d7136`: `**forcing: gate**` parsed to
+    `gate`; `_forcing: gate_`, `__forcing: gate__` and `_forcing_: gate` all came
+    back `kind=None, near_miss=None`, i.e. `[no forcing: field]` plus a remedy
+    the author had already carried out — the unrecoverable refusal, for one of
+    markdown's two emphasis characters, in the very spelling class that round set
+    out to admit. `_FORCING_ATTEMPT` shared the anchor, so the safety net that
+    exists to catch exactly this had the identical hole.
+
+    🔴 THE MATRIX, PER TEST AND MEASURED — deliberately not "every test in this
+    class", which would be false here and is exactly the kind of blanket claim a
+    reader stops checking. **7 failed, 6 passed at `503d7136`:**
+
+      * `test_a_fence_does_not_erase_the_blank_line_boundary` — RED,
+        `assert ['none'] == [None]`.
+      * `test_UNDERSCORE_emphasis_parses_like_asterisk_emphasis` — RED on 3 of 4
+        params. `` _`forcing: gate`_ `` PASSED: the backtick between the `_` and
+        the key hands `\\b` a boundary to match, so that one param is an
+        INVARIANT GUARD carried along, not regression coverage.
+      * `test_an_UNDERSCORE_emphasised_near_miss_is_NAMED_not_called_absent` —
+        RED on all 3 params.
+      * `test_an_indented_fence_does_not_cost_the_tag_that_follows_it` — PASSED,
+        both params. It is the COST side of the fence fix rather than coverage
+        of the defect, and is shown reachable by the `a-blank-line-ends-the-item`
+        and `block-collapsed-to-the-numbered-line` mutation rows, which it kills.
+      * `test_a_longer_word_around_the_key_is_STILL_not_the_field` — PASSED.
+        Labelled an invariant guard in its own docstring.
+    """
+
+    @staticmethod
+    def _boilerplate_tail() -> str:
+        """The skill's own trailing paragraph, READ FROM THE SKILL — the same
+        window `test_trailing_boilerplate_does_not_tag_the_last_item` derives,
+        and for its reason: a hand-copied constant would quietly stop being the
+        text the corpus actually pastes under a ranked list."""
+        skill = HANDOFF_SKILL.read_text(encoding="utf-8").splitlines()
+        start = next(i for i, ln in enumerate(skill) if "EVERY item MUST carry" in ln)
+        tail = "\n".join(ln.strip() for ln in skill[start : start + 4])
+        assert "forcing: none" in tail, (
+            "the copied boilerplate no longer spells a valid kind, so this test "
+            "proves nothing — re-derive the window or drop it"
+        )
+        return tail
+
+    def test_a_fence_does_not_erase_the_blank_line_boundary(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE ACCEPT DIRECTION, which is the one that costs something: the
+        gate PASSES on an item nobody tagged.
+
+        Distinct from the col-0-fence gap declared in the last round's report —
+        the fence here is INDENTED, i.e. genuinely the item's own, so a rule
+        about fences at column 0 does not reach it.
+        """
+        tail = self._boilerplate_tail()
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "\n"
+            "   ```\n"
+            "   ./scripts/measure.py --since 2026-08-01\n"
+            "   ```\n" + tail + "\n"
+        )
+        items = hd.ranked_items(text)
+        assert [i.kind for i in items] == [None], (
+            "the item carries NO tag — the `none` is boilerplate its author "
+            "pasted out of the instructions, being read as a declaration"
+        )
+        assert items[0].fenced is False and items[0].near_miss is None, (
+            "and the diagnosis must stay the plain one: nothing in the item's "
+            "own fence looks like a field, and nothing in it is a near-miss"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "fencebound.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "[no forcing: field]" in res.stderr
+
+    @pytest.mark.parametrize(
+        "gap,indent,expected",
+        (
+            ("", "   ", "regression"),
+            ("\n", "   ", "regression"),
+            ("", "", None),
+            ("\n", "", None),
+        ),
+        ids=("no-blank-indented", "blank-indented", "no-blank-col0", "blank-col0"),
+    )
+    def test_an_indented_fence_does_not_cost_the_tag_that_follows_it(
+        self, gap: str, indent: str, expected: str | None
+    ) -> None:
+        """Both sides of the same boundary, measured at FOUR points.
+
+        **INDENTED (the cost side of the fix).** A tag on an indented line after
+        the item's own fence still counts, whether or not a blank line sits
+        between them — dropping the memory reset must not buy the fix above at
+        the price of this shape, which the corpus has. ⚠ PASSED at `503d7136`,
+        both params: labelled, not counted as regression coverage. Shown
+        reachable by the `a-blank-line-ends-the-item` and
+        `block-collapsed-to-the-numbered-line` rows in
+        `scripts/tests/mutants-handoff-cap.sh`, which they kill.
+
+        🔴 **COLUMN 0 — the cost the fix DID charge, asserted as DELIBERATE.**
+        The `no-blank-col0` param is RED at `503d7136`, where it returned
+        `kind='regression'`: the fence used to clear the "a blank has
+        intervened" flag, so a col-0 line after it continued the item. Here the
+        blank before the fence still counts, that line IS the boundary, and the
+        tag is dropped. **This is not a bug to fix on sight.** The walk cannot
+        tell an author's col-0 tag from col-0 pasted boilerplate — which is
+        exactly what `test_a_fence_does_not_erase_the_blank_line_boundary`
+        refuses — and falsely ACCEPTING an untagged item is worse than refusing
+        a tagged one. Corpus impact: **0 of 442** ranked items. What makes the
+        refusal clearable rather than unrecoverable is `MISSING_FIELD_REMEDY`
+        naming the indent, pinned by
+        `test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT`.
+        (`blank-col0` was already absent at `503d7136` — an invariant guard
+        carried along, not coverage of this change.)"""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "\n"
+            "   ```\n"
+            "   ./scripts/measure.py --since 2026-08-01\n"
+            "   ```\n" + gap + indent
+            + "forcing: regression — vs the 2026-08-20 baseline\n"
+        )
+        item = hd.ranked_items(text)[0]
+        assert item.kind == expected, (repr(gap), repr(indent))
+        if expected is None:
+            # The DIAGNOSIS half: a dropped boundary line is not in the item's
+            # own lines and not in its fenced lines either, so the row must be
+            # the plain one — anything else would be a claim about a line this
+            # walk never looked at.
+            assert item.near_miss is None and item.fenced is False
+
+    def test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 RED at `e34ed6ef`. The remedy said only "A continuation line
+        counts — the field does not have to sit on the numbered line", which is
+        read as a promise this walk does not keep: the col-0 param above HAS a
+        tag on a continuation line and is told it carries none.
+
+        That is the unrecoverable-refusal shape the whole ladder exists to
+        remove — the printed fix is already done, so the re-run is byte-
+        identical. The boundary is deliberately NOT loosened (see the docstring
+        above); naming the INDENT is what makes the refusal clearable instead.
+
+        Shown reachable by the `missing-field-remedy-omits-the-indent` row in
+        `scripts/tests/mutants-handoff-cap.sh`."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix A.\n"
+            "\n"
+            "   ```\n"
+            "   ./scripts/measure.py --since 2026-08-01\n"
+            "   ```\n"
+            "forcing: regression — vs the 2026-08-20 baseline\n"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "col0tag.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert hd.MARK_NO_FIELD in res.stderr
+        norm = " ".join(res.stderr.split())
+        assert " ".join(hd.MISSING_FIELD_REMEDY.split()) in norm
+        assert "MUST be INDENTED" in norm, (
+            "the author HAS written the field on a continuation line and is "
+            "being told to write one. Without the indent instruction the fix "
+            "the refusal prints is a no-op and the re-run prints identical "
+            "bytes — the unrecoverable refusal, re-entered through the fence "
+            "boundary."
+        )
+
+    #: The whole of `MISSING_FIELD_REMEDY`, normalised.
+    #:
+    #: 🔴 A WHOLE STRING, DELIBERATELY, and the same discipline as
+    #: `TestSkillAndModuleAgree._FENCED_REMEDY`. `claude/RULES.md`: when the
+    #: artifact under test IS prose, a guard on WORDS is walkable by REWORDING —
+    #: pin the WHOLE normalised string. A cosmetic reword then costs a test edit;
+    #: that price is the point, because it is what makes the claim
+    #: machine-readable.
+    #:
+    #: 🔴 A LITERAL, NOT `hd.MISSING_FIELD_REMEDY`. The test above asserts the
+    #: constant reaches stderr by comparing the constant against the output that
+    #: PRINTED it — self-referential, so it is the BEHAVIOURAL half and any
+    #: reword passes it. That is what left this clause unguarded.
+    _MISSING_REMEDY = (
+        "Tag each item marked [no forcing: field] above. A continuation line "
+        "counts — the field does not have to sit on the numbered line, but it "
+        "MUST be INDENTED: a flush-left line ENDS the item once a blank has "
+        "intervened, so a tag at column 0 below one is outside the item and "
+        "reads as absent."
+    )
+
+    def test_the_missing_field_remedy_states_the_walks_ACTUAL_boundary(self) -> None:
+        """🔴 THE SCOPE, PINNED. At `6a862d8c` this remedy printed the
+        unqualified "a flush-left line ENDS the item", which is FALSE: the walk
+        breaks on an unindented line only ONCE A BLANK HAS INTERVENED.
+        RE-MEASURED 2026-08-28 at `976b09b5`, both points, `ranked_items` on
+        `## Next steps (ranked)\\n1. Fix A.\\n` plus a col-0 `forcing: gate`:
+
+            no blank between them -> kind='gate'   (the tag PARSES)
+            a blank between them  -> kind=None     (the tag is DROPPED)
+
+        So the unqualified sentence was wrong in the first case, and it
+        contradicted write-gate.md, the constant's own `#:` comment and
+        SKILL.md, all three of which were already scoped.
+
+        ⚠ NOT regression coverage — round 4 already corrected the wording. This
+        is the GUARANTEE that correction never got, labelled as one: the
+        clause was revertible with the whole suite green, because the only
+        assertion over it was the self-referential one in the test above.
+
+        The BEHAVIOURAL half — that this constant actually reaches an
+        executor's stderr rather than sitting unprinted — is
+        `test_the_missing_field_remedy_tells_a_FLUSH_LEFT_author_to_INDENT`
+        directly above; a literal-only check would type-check past a constant
+        nobody prints.
+
+        Shown reachable by the `missing-field-remedy-scope-unqualified` row in
+        `scripts/tests/mutants-handoff-cap.sh`."""
+        assert " ".join(hd.MISSING_FIELD_REMEDY.split()) == " ".join(
+            self._MISSING_REMEDY.split()
+        ), (
+            "MISSING_FIELD_REMEDY no longer reads as pinned. If the boundary "
+            "clause was re-widened to a bare 'a flush-left line ENDS the item', "
+            "that is the MEASURED-FALSE wording — a col-0 tag with no blank "
+            "before it parses fine. Re-measure before rewording, and update "
+            "_MISSING_REMEDY in the SAME commit for a deliberate reword."
+        )
+
+    @pytest.mark.parametrize(
+        "tagline",
+        (
+            "   _forcing: gate_ — CI red",
+            "   __forcing: gate__ — CI red",
+            "   _forcing_: gate — CI red",
+            "   _`forcing: gate`_ — CI red",
+        ),
+    )
+    def test_UNDERSCORE_emphasis_parses_like_asterisk_emphasis(
+        self, repo: Path, tmp_path: Path, tagline: str
+    ) -> None:
+        """`*` and `_` are the SAME markdown construct. Admitting one and
+        refusing the other with `[no forcing: field]` is a refusal over which of
+        two interchangeable characters the author's editor inserted — and it is
+        unrecoverable, because the remedy it prints is already done.
+
+        ⚠ The last param passed at `503d7136` — see the class docstring's
+        matrix. It is kept as an invariant guard, not counted as coverage."""
+        text = "## Next steps (ranked)\n1. Land the retry-wrapper fix.\n" + tagline + "\n"
+        assert [i.kind for i in hd.ranked_items(text)] == ["gate"]
+        res = run_tool(repo, update=write_delta(tmp_path, "underscore.md", text))
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=unforced" not in res.stderr
+
+    @pytest.mark.parametrize(
+        "attempt",
+        (
+            "_forcing = gate_",
+            "_forcing function: gate_",
+            "__forcing — gate__",
+        ),
+    )
+    def test_an_UNDERSCORE_emphasised_near_miss_is_NAMED_not_called_absent(
+        self, repo: Path, tmp_path: Path, attempt: str
+    ) -> None:
+        """🔴 THE SAFETY NET'S OWN HOLE. `_FORCING_ATTEMPT` shared the broken
+        anchor, so an emphasised near-miss fell all the way through to
+        `[no forcing: field]` — the one refusal a re-run cannot clear — for a
+        spelling the skill now actively tells authors is fine."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n   " + attempt + "\n"
+        res = run_tool(repo, update=write_delta(tmp_path, "usnearmiss.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert "[no forcing: field]" not in res.stderr, (
+            "the item HAS a field — telling it there is none is the reported bug"
+        )
+        assert "Tag each item marked" not in res.stderr
+        assert "[unparsed forcing field on:" in res.stderr
+        assert attempt in res.stderr, "quote the offending line verbatim"
+
+    @pytest.mark.parametrize(
+        "line",
+        (
+            "   The pre-push hook is enforcing: gate-scoped runs, which is fine.",
+            "   reinforcing: gate — a longer word merely ENDING with the key",
+            "   forcings: gate — plural, so not the key either",
+        ),
+    )
+    def test_a_longer_word_around_the_key_is_STILL_not_the_field(
+        self, line: str
+    ) -> None:
+        """INVARIANT GUARD — labelled, not counted as regression coverage: this
+        passes at `503d7136` too. It pins the ONE job `\\b` was doing, so the
+        lookbehind that replaced it cannot buy underscore emphasis by admitting
+        `enforcing:` — in BOTH patterns, or the near-miss net starts quoting
+        ordinary prose back at an author as an unparsed field."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n" + line + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind is None, f"{line!r} was accepted as the field"
+        assert item.near_miss is None, f"{line!r} was reported as a near-miss"
+
+    @pytest.mark.parametrize(
+        "line",
+        (
+            "   forcing = mygate — a longer word merely ENDING with a kind",
+            "   forcing — theincident, which is not the vocabulary word",
+            "   forcing = wontregression, nor is that one",
+        ),
+    )
+    def test_a_longer_word_around_the_KIND_is_not_a_near_miss_either(
+        self, line: str
+    ) -> None:
+        """🔴 THE LEADING ANCHOR ON THE **KIND**, WHICH NOTHING DISTINGUISHED.
+
+        `_FORCING_ATTEMPT` anchors both ends of both tokens, and the module's
+        comment claims exactly that — but the only fixture exercising the kind's
+        anchors was `_forcing = gate_`, whose `gate` is at the END of the line,
+        so it can only see the TRAILING one. MEASURED at `e34ed6ef`: DELETING
+        the LEADING `(?<![A-Za-z0-9])` before the kind alternation makes
+        `forcing = mygate` a near-miss, and the full suite stayed green — 237
+        passed against the `e34ed6ef` test file. Three of four anchors were
+        shown reachable; this is the fourth.
+
+        The stake is not cosmetic: `_FORCING_ATTEMPT` QUOTES the line it matched
+        back at the author as "an unparsed forcing field", so a leaky kind
+        anchor means ordinary prose containing a vocabulary word inside a longer
+        word gets read back as a malformed tag.
+
+        ⚠ INVARIANT GUARD, not regression coverage — green at `503d7136` too
+        (`\\b` excluded these as well). It is shown reachable by the
+        `near-miss-kind-LEADING-anchor-DELETED` row in
+        `scripts/tests/mutants-handoff-cap.sh`. 🔴 It is deliberately NOT the
+        killer for `near-miss-kind-LEADING-anchor-on-word-boundary`: MEASURED,
+        `\\b` excludes `mygate` exactly as the lookbehind does, so that row needs
+        the OPPOSITE direction, which
+        `test_an_EMPHASISED_KIND_is_still_seen_by_the_near_miss_net` supplies.
+        Two failure directions, two rows, two fixtures — the first draft of this
+        pair pointed the `\\b` row at THIS test and the battery reported it
+        SURVIVED, which is how the distinction was found."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n" + line + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind is None, f"{line!r} was accepted as the field"
+        assert item.near_miss is None, f"{line!r} was reported as a near-miss"
+
+    @pytest.mark.parametrize(
+        "attempt", ("forcing = _gate — CI red", "forcing — _incident")
+    )
+    def test_an_EMPHASISED_KIND_is_still_seen_by_the_near_miss_net(
+        self, repo: Path, tmp_path: Path, attempt: str
+    ) -> None:
+        """🔴 THE OTHER DIRECTION ON THE SAME ANCHOR, AND THE ONE THAT ISOLATES
+        IT. The round that replaced `\\b` with `(?<![A-Za-z0-9])` did it on the
+        KEY *and* the KIND for one reason — `_` is a word character — but every
+        fixture put the emphasis around the KEY (`_forcing = gate_`), where the
+        kind's LEADING anchor is never exercised: `gate` there is preceded by a
+        space, which `\\b` handles fine.
+
+        This puts the emphasis on the KIND instead. MEASURED at `e34ed6ef`
+        across all three one-anchor mutants: `forcing = _gate` is a near-miss at
+        HEAD, is NOT one when the kind's leading anchor becomes `\\b`, and IS
+        still one when the TRAILING anchor becomes `\\b` — so it separates the
+        two ends, which `_forcing = gate_` (killed only by the trailing row)
+        cannot.
+
+        ⚠ INVARIANT GUARD, not regression coverage: this is current behaviour,
+        red only against the mutant. Shown reachable by the
+        `near-miss-kind-LEADING-anchor-on-word-boundary` row in
+        `scripts/tests/mutants-handoff-cap.sh`."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n   " + attempt + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind is None, f"{attempt!r} was accepted as the field"
+        assert item.near_miss is not None, (
+            f"{attempt!r} fell through to [no forcing: field] — the refusal a "
+            f"re-run cannot clear, for an emphasised kind"
+        )
+        res = run_tool(repo, update=write_delta(tmp_path, "emphkind.md", text))
+        assert res.returncode == hd.EXIT_UNFORCED, res.stdout + res.stderr
+        assert hd.MARK_NO_FIELD not in res.stderr
+        assert attempt in res.stderr, "quote the offending line verbatim"
+
+    @pytest.mark.parametrize(
+        "line,kind,near_miss",
+        (
+            # P1 — `_FORCING`'s key, LEADING. Parses to a kind; the rest are
+            # `_FORCING_ATTEMPT`'s, which can only ever produce a near-miss.
+            ("   some_forcing: none", "none", False),
+            ("   éforcing: gate", "gate", False),
+            ("   強forcing: gate", "gate", False),
+            # P2 — `_FORCING_ATTEMPT`'s key, LEADING. No colon, so `_FORCING`
+            # cannot match and this position is isolated from P1.
+            ("   my_forcing = gate", None, True),
+            ("   éforcing = gate", None, True),
+            # P3 — `_FORCING_ATTEMPT`'s key, TRAILING.
+            ("   the forcing_fn returns none", None, True),
+            ("   the forcingé returns none", None, True),
+            ("   the forcing強 returns none", None, True),
+            # P4 — that pattern's KIND, LEADING.
+            ("   forcing = _gate", None, True),
+            ("   forcing = égate", None, True),
+            # P5 — that pattern's KIND, TRAILING.
+            ("   forcing the user_id column", None, True),
+            ("   forcing the gate_keeper to retry", None, True),
+            ("   forcing = gateé", None, True),
+        ),
+        ids=("P1-key-leading-underscore", "P1-key-leading-latin1",
+             "P1-key-leading-cjk",
+             "P2-attempt-key-leading-underscore", "P2-attempt-key-leading-latin1",
+             "P3-attempt-key-trailing-underscore",
+             "P3-attempt-key-trailing-latin1", "P3-attempt-key-trailing-cjk",
+             "P4-attempt-kind-leading-underscore",
+             "P4-attempt-kind-leading-latin1",
+             "P5-attempt-kind-trailing-underscore",
+             "P5-attempt-kind-trailing-underscore-2",
+             "P5-attempt-kind-trailing-latin1"),
+    )
+    def test_the_widened_anchors_admit_these_and_the_comment_says_so(
+        self, line: str, kind: str | None, near_miss: bool
+    ) -> None:
+        """🔴 THE COMMENT'S CLAIM, MADE MACHINE-READABLE — AND THE PARAMS ARE A
+        GRID, BECAUSE AN ENUMERATION OF EXAMPLES UNDERCOUNTED IT TWICE.
+
+        `_FORCING`'s comment first named *only* "a snake_case identifier ending
+        in `_forcing`"; a delta audit found three more and the comment was
+        rewritten to "FOUR ADMISSIONS, NOT ONE"; a second delta audit found six
+        more still. The reason is structural: the widening replaced `\\b` with a
+        `[A-Za-z0-9]` lookaround at FIVE positions, and `\\b` differs from it for
+        TWO character classes — `_`, and any non-ASCII word character, since
+        Python's `\\w` is unicode. That is a 5x2 GRID, so the params enumerate
+        all ten cells rather than the examples anyone happened to notice:
+
+          P1 `_FORCING`'s key, LEADING            P2 `_FORCING_ATTEMPT`'s, LEADING
+          P3 `_FORCING_ATTEMPT`'s key, TRAILING   P4 its KIND, LEADING
+          P5 its KIND, TRAILING
+
+        There is no P6: `_FORCING`'s own KIND, `([A-Za-z-]+)`, carries no
+        trailing lookaround. MEASURED 2026-08-28, all ten cells alike — admitted
+        at HEAD, and NO match under the old `\\b` spelling of the same pattern.
+
+        Each is bounded by the same closed-vocabulary argument as the markup
+        class, and each occurs 0 times over both corpora, so none is being
+        fixed. They are pinned so the comment stops being the only record —
+        `claude/RULES.md`: a comment is a claim too.
+
+        ⚠ NOT regression coverage: this asserts CURRENT behaviour. Its evidence
+        is the base measurement above, and it is shown reachable by the four
+        anchor rows in `scripts/tests/mutants-handoff-cap.sh`."""
+        text = "## Next steps (ranked)\n1. Land the fix.\n" + line + "\n"
+        item = hd.ranked_items(text)[0]
+        assert item.kind == kind, f"{line!r} -> {item.kind!r}"
+        assert (item.near_miss is not None) is near_miss, (
+            f"{line!r} -> near_miss={item.near_miss!r}"
+        )
+
+    def test_the_comment_still_states_the_ASCII_scope(self) -> None:
+        """The half above cannot see: the module's prose must SAY the exclusion
+        is ASCII-only, because a maintainer reading "the character before the
+        key is a letter" would conclude `éforcing:` is excluded and it is not.
+
+        A phrase pin, and a weak one by construction — the behaviour is pinned
+        by the params above; this only keeps the comment from re-narrowing.
+
+        🔴 NO COUNT IS PINNED HERE ANY MORE, AND THAT IS THE FIX. This used to
+        assert the literal "FOUR ADMISSIONS, NOT ONE" — a guard machine-
+        enforcing a number that a later delta audit measured wrong (ten cells,
+        not four). A count in prose goes stale the moment a position or a
+        character class is added; the params above are the census, and what the
+        comment owes is the SHAPE — that the scope is stated by POSITION rather
+        than by a list of examples, which is the failure mode that undercounted
+        it twice.
+
+        Shown reachable by the `ascii-scope-narrowed-off-every-position`,
+        `admissions-restated-as-a-list` and `retired-count-back-in-the-comment`
+        rows in `scripts/tests/mutants-handoff-cap.sh` — one per assertion,
+        because a mutant that gutted the paragraph would die to whichever
+        assertion runs first and prove nothing about the other two.
+
+        ⚠ `assert "an ASCII letter" in src` has NO row of its own. It is the
+        antecedent the `AT EVERY POSITION` clause qualifies, and that row moves
+        the clause rather than this phrase; it is carried, not shown reachable."""
+        src = TOOL.read_text(encoding="utf-8")
+        assert "an ASCII letter" in src
+        assert "AT EVERY POSITION" in src
+        assert "THE ADMISSIONS ARE A GRID, NOT A LIST" in src
+        assert "FOUR ADMISSIONS, NOT ONE" not in src, (
+            "the retired count is back in the comment; it was measured wrong "
+            "(ten cells, not four) and pinning it re-enforces the error"
+        )
+
+
+class TestRulesIAndJDidNotMoveTheOtherExits:
+    """INVARIANT GUARDS — not regression coverage, and labelled so.
+
+    The new refusals sit BEFORE rules (d) and (h) in `main()`, which is exactly
+    the shape that silently steals another rule's exit code.
+    """
+
+    def test_no_advance_is_still_4_on_an_undated_existing_doc(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        res = run_tool(repo, update=update_file, advanced="nothing")
+        assert res.returncode == hd.EXIT_NO_ADVANCE, res.stdout + res.stderr
+
+    def test_no_change_is_still_5(self, repo: Path, tmp_path: Path) -> None:
+        noop = write_delta(
+            tmp_path, "noop2.md",
+            "## Goal\nMake the sample subsystem stop dropping work under load.\n",
+        )
+        res = run_tool(repo, update=noop)
+        assert res.returncode == hd.EXIT_NO_CHANGE, res.stdout + res.stderr
+
+    def test_the_new_codes_do_not_collide_with_the_old(self) -> None:
+        codes = [
+            hd.EXIT_OK, hd.EXIT_USAGE, hd.EXIT_FAIL, hd.EXIT_NO_ADVANCE,
+            hd.EXIT_NO_CHANGE, hd.EXIT_BEHIND, hd.EXIT_DOC_PER_EFFORT,
+            hd.EXIT_UNFORCED,
+        ]
+        assert len(set(codes)) == len(codes), f"exit codes collide: {codes}"
+
+    def test_none_is_in_the_vocabulary_but_not_in_the_external_set(self) -> None:
+        """`EXTERNAL_FORCING_KINDS` is DERIVED. If it ever became a second
+        literal list, a kind added to one and not the other would silently
+        un-count items — the N-sites-wrong-at-N-1 shape."""
+        assert "none" in hd.FORCING_KINDS
+        assert "none" not in hd.EXTERNAL_FORCING_KINDS
+        assert hd.EXTERNAL_FORCING_KINDS < hd.FORCING_KINDS
+
 def repo_lacking_the_doc(tmp_path: Path) -> Path:
     """A checkout whose mainline HAS the handoff doc and whose HEAD does not.
 
@@ -3638,7 +5064,7 @@ class TestAbsentBasePresentOnMainlineIsRefused:
             "changed. It is a FLOOR: a silent run is NOT evidence that the base "
             "is current. 🔴 ONE shape refuses instead — no usable doc here while "
             "the mainline has one — and it refuses ONLY on `--confirm`, as "
-            "`status=stale-base` (exit 7). A proposal run therefore NEVER prints "
+            "`status=stale-base` (exit 9). A proposal run therefore NEVER prints "
             "that line whatever shape it is in, so its absence here is not "
             "evidence you are in the benign case: read the line above instead, "
             "which fires on exactly the shape that refuses."

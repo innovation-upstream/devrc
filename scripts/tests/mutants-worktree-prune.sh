@@ -30,6 +30,18 @@
 # hypothetical here: the tool's docstrings are long and several of these
 # patterns anchor on lines that a reword would move.
 #
+# 🔴 AND IT CAUGHT ONE. A pattern matching the Python source `b"\0"` must be
+# written `b"\\0"` inside these SINGLE-quoted sed expressions: single quotes do
+# no escape processing, so bash hands sed exactly what is typed, and `\\` in a
+# BRE is one literal backslash. `b"\\\\0"` — which is what `quotepath-blinds-
+# the-index-arm` carried from #935 — asks sed for TWO backslashes and matches
+# nothing. That mutant still scored `ok` because it has a SECOND s-expression
+# that DID apply, so `cmp` saw a change and the mutant ran a NARROWER mutation
+# than its own comment describes ("flag and parser move together"). The `cmp`
+# gate is per-`run`, not per-expression; a multi-expression mutant can have a
+# dead expression and still report clean. Found while adding the #975 mutants,
+# whose single-expression versions failed loudly with DID NOT APPLY.
+#
 # 🔴 PYTHONDONTWRITEBYTECODE=1 IS LOAD-BEARING, NOT HYGIENE. CPython validates a
 # cached module on mtime-in-whole-SECONDS + size, so a same-length edit landing
 # in the same second as the last import is invisible: the run imports the
@@ -570,7 +582,7 @@ printf '\n== #935 ROUND 2 — the blind audit'"'"'s findings ==\n'
 # the mutant is exactly the round-1 shape.
 run 'quotepath-blinds-the-index-arm' \
   test_a_submodule_path_git_QUOTES_is_still_seen \
-  's|^    ls = _git_raw(path, "ls-files", "-s", "-z")$|    ls = _git_raw(path, "ls-files", "-s")|; s|^    for entry in ls.stdout.split(b"\\\\0"):$|    for entry in ls.stdout.splitlines():|'
+  's|^    ls = _git_raw(path, "ls-files", "-s", "-z")$|    ls = _git_raw(path, "ls-files", "-s")|; s|^    for entry in ls.stdout.split(b"\\0"):$|    for entry in ls.stdout.splitlines():|'
 # 🔴 FINDING 4: this exact mutant SURVIVED the full suite when the auditor ran
 # it — the line had no test at all. It is here so that can never recur.
 run 'blocked-count-drops-the-unanswered-rows' \
@@ -656,6 +668,201 @@ run 'unknown-marker-never-prints' \
 run 'unknown-marker-gate-reverted-to-reasons' \
   test_the_marker_gate_is_path_exists_not_reasons \
   's|^                    if subs is None and r.get("path_exists") else "")$|                    if subs is None and r.get("submodule_reasons") else "")|'
+
+printf '\n== #944 — an undecodable worktree DIRECTORY NAME ==\n'
+# 🔴 THE HEADLINE ARM. `worktree list --porcelain` emits the path raw and
+# unquoted — `core.quotePath` does not apply to it, so unlike the `-z` case
+# there was never any quoting keeping this ASCII. Strict decoding took the whole
+# scan down: zero rows out of 800, from ONE bad directory name.
+run 'porcelain-read-with-strict-decoding' \
+  test_an_undecodable_worktree_DIRECTORY_NAME_does_not_abort_the_scan \
+  's|^    r = _git_raw(repo, "worktree", "list", "--porcelain")$|    r = _git(repo, "worktree", "list", "--porcelain")|'
+# 🔴 THE ARM THE ISSUE DID NOT NAME, and the reason this mutant is not a
+# duplicate of the one above: `rev-parse --git-path` ANSWERS with a path we
+# never passed it (`…/worktrees/<DIRECTORY NAME>/modules`), so fixing only the
+# porcelain read MOVED the abort here instead of removing it — under default git
+# config, with no submodule in the fixture, on a line `execute_removals` re-runs
+# BETWEEN REMOVALS. Its killer touches no porcelain at all.
+run 'git-path-answer-read-with-strict-decoding' \
+  test_the_submodule_check_survives_an_undecodable_worktree_NAME \
+  's|^    gp = _git_raw(path, "rev-parse", "--git-path", "modules")$|    gp = _git(path, "rev-parse", "--git-path", "modules")|'
+# 🔴 THE TWO DECODINGS, ONE MUTANT EACH — the same pairing #935 round 3
+# established, now on the worktree path rather than the submodule path. Neither
+# direction is covered by the other: swapping them produces a SILENT wrong
+# answer and a CRASH respectively, and a battery with only one of these would
+# certify a fix that still fails half the time.
+#
+# DIRECTION 1 — `_printable` reaching the filesystem. U+FFFD names nothing, so
+# the directory reads as absent and the row degrades to `cannot-tell`: no
+# traceback, no exception, just a tool that quietly stopped being able to answer.
+run 'display-decoding-used-to-reach-the-worktree' \
+  test_an_undecodable_worktree_NAME_is_classified_from_the_real_filesystem_path \
+  's|^        path = Path(wt\["path_fs"\])$|        path = Path(wt["path"])|'
+# …and the same direction at its SOURCE, in the parser rather than at the use.
+run 'parser-derives-path-fs-from-the-lossy-string' \
+  test_an_undecodable_worktree_NAME_is_classified_from_the_real_filesystem_path \
+  's|^            cur = {"path": value, "path_fs": os.fsdecode(value_raw),$|            cur = {"path": value, "path_fs": value,|'
+# DIRECTION 2 — `os.fsdecode` reaching the report. A lone surrogate raises
+# `UnicodeEncodeError` at `print()`, which MOVES the abort rather than removing
+# it. This is the failure the issue warned about by name.
+run 'filesystem-decoding-used-for-the-reported-path' \
+  test_an_undecodable_worktree_NAME_survives_being_rendered_and_printed \
+  's|^            "path": wt\["path"\],$|            "path": wt["path_fs"],|'
+
+printf '\n== #944 — the mid-EXECUTE abort, which is the worst of them ==\n'
+# 🔴 An abort inside this loop fires AFTER some removals and BEFORE the
+# `execute: removed= skipped= failed=` line — the operator is left deleting
+# things with no record of what was deleted. Four lines, four mutants.
+# 🔴 ANCHOR MOVED, deliberately and once: the open-coded
+# `Path(r.get("path_fs") or r["path"])` became `Path(row_fs(r, "path"))` when the
+# delta round unified the four sites that choose a spelling. Same mutation, same
+# killer — only the expression it anchors on changed.
+run 'executor-reaches-the-worktree-by-its-lossy-name' \
+  test_execute_removes_an_undecodable_worktree_and_prints_its_accounting \
+  's|^        path = Path(row_fs(r, "path"))$|        path = Path(r["path"])|'
+# 🔴 Identity settled on the LOSSY form: U+FFFD collapses distinct byte
+# sequences, so this comparison has to be made on the bytes.
+run 'executor-matches-the-live-row-on-the-lossy-path' \
+  test_execute_removes_an_undecodable_worktree_and_prints_its_accounting \
+  's|^        live = \[w for w in list_worktrees(repo) if Path(w\["path_fs"\]) == path\]$|        live = [w for w in list_worktrees(repo) if Path(w["path"]) == path]|'
+# 🔴 The success LOG, not the removal: printing the filesystem form aborts the
+# loop just as surely as decoding did, one line after the deletion happened.
+run 'executor-logs-the-filesystem-form-of-the-path' \
+  test_execute_removes_an_undecodable_worktree_and_prints_its_accounting \
+  's|^            _log(f"REMOVED {disp}")$|            _log(f"REMOVED {path}")|'
+# 🔴 The REFUSAL arm — git names the path back at us in the error, so the one
+# call whose whole job is to report a removal that did not happen was itself the
+# abort.
+run 'refusal-stderr-read-with-strict-decoding' \
+  test_a_refused_removal_of_an_undecodable_worktree_still_accounts_for_it \
+  's|^        res = _git_raw(repo, "worktree", "remove", str(path))$|        res = _git(repo, "worktree", "remove", str(path))|'
+
+printf '\n== #944 — _printable_path, for a path we only hold as surrogates ==\n'
+run 'submodule-store-path-printed-raw' \
+  test_a_submodule_store_under_an_undecodable_worktree_NAME_is_named_printably \
+  's|^                      f"({_printable_path(modules)}), {held} — "$|                      f"({modules}), {held} — "|'
+# 🔴 A SECOND mutant because the store path and the ENTRY NAMES inside it are
+# two different surrogate sources, and the fixture makes both undecodable on
+# purpose — an ASCII entry name would make this mutant behaviour-free and it
+# would be scored SURVIVED on a line whose whole point is that it is covered.
+run 'submodule-store-entry-names-printed-raw' \
+  test_a_submodule_store_under_an_undecodable_worktree_NAME_is_named_printably \
+  's|^            names = sorted(_printable_path(p.name) for p in modules.iterdir())$|            names = sorted(p.name for p in modules.iterdir())|'
+
+printf '\n== #944 DELTA — the REPO path, the fourth site the first round missed ==\n'
+# 🔴 THE DELTA FINDING ITSELF. `row["repo"]` never came from git — it is
+# `discover_repos`/argv, already `os.fsdecode`d — and it went into the row RAW
+# while `render_text` printed it. So the first fix for #944 MOVED the abort:
+# `UnicodeDecodeError` inside `subprocess.run` on `origin/main` became
+# `UnicodeEncodeError` at `print(render_text(…))` on its own HEAD, under DEFAULT
+# git config and in the DEFAULT output format. This mutant IS that bug.
+run 'repo-reported-in-its-filesystem-form' \
+  test_an_undecodable_REPO_DIRECTORY_NAME_does_not_abort_the_report \
+  's|^            "repo": _printable_path(repo),$|            "repo": str(repo),|'
+# 🔴 THE OTHER DIRECTION, and it is not the same mutant: the printable form
+# reaching the FILESYSTEM. `repo` is `git -C`'s cwd for the executor's
+# `list_worktrees` re-check and for the removal itself, so U+FFFD here names no
+# directory and every removal in such a repo fails — silently, one row at a time,
+# rather than loudly.
+run 'repo_fs-derived-from-the-lossy-string' \
+  test_execute_removes_a_worktree_in_an_undecodable_REPO_and_accounts_for_it \
+  's|^            "repo_fs": str(repo),$|            "repo_fs": _printable_path(repo),|'
+run 'executor-reaches-the-repo-by-its-lossy-name' \
+  test_execute_removes_a_worktree_in_an_undecodable_REPO_and_accounts_for_it \
+  's|^        repo = Path(row_fs(r, "repo"))$|        repo = Path(r["repo"])|'
+# 🔴 GROUPING and DISPLAY are two decisions on adjacent lines and each gets its
+# own mutant. Mutating the pair together would prove nothing about either.
+# GROUPING on the lossy form: `_printable` collapses distinct byte sequences, so
+# two repos differing only in an undecodable byte merge into ONE table row whose
+# counts are silently summed. No crash — a quietly wrong report.
+run 'per-repo-table-grouped-on-the-lossy-path' \
+  test_two_repos_differing_only_in_an_undecodable_byte_are_not_merged \
+  's|^        key = row_fs(r, "repo")$|        key = r["repo"]|'
+# …and the same collapse in the summary's own scope line, which is a separate
+# computation in a separate function and would survive the mutant above.
+run 'repo-count-taken-on-the-lossy-path' \
+  test_two_repos_differing_only_in_an_undecodable_byte_are_not_merged \
+  's|^        "repos": len({row_fs(r, "repo") for r in rows}),$|        "repos": len({r["repo"] for r in rows}),|'
+# DISPLAY of the identity form — the crash half, isolated from the grouping half.
+run 'per-repo-table-prints-the-identity-form' \
+  test_an_undecodable_REPO_DIRECTORY_NAME_does_not_abort_the_report \
+  's|^        disp = repo_disp\[key\]$|        disp = key|'
+# 🔴 THE LEDGER, and the only mutant the seam guard is the sole killer of: a NEW
+# path-shaped field arriving on the row without being declared. The encodability
+# half of that guard is already exercised by `repo-reported-in-its-filesystem-form`
+# above; this is the structural half, and without it the ledger could shrink to
+# nothing and stay green.
+run 'an-undeclared-fs-field-appears-on-the-row' \
+  test_every_reported_row_field_is_printable_and_the_fs_twins_are_declared \
+  's|^            "repo_slug": slug,$|&\n            "undeclared_fs": str(repo),|'
+# 🔴 `--repos-from` was the last strict-utf-8 read of a PATH in the tool.
+run 'repos-from-read-with-strict-decoding' \
+  test_repos_from_reads_a_repo_path_that_is_not_valid_utf8 \
+  's|^                encoding="utf-8", errors="surrogateescape").splitlines():$|                encoding="utf-8").splitlines():|'
+printf '\n== #975 — the SAME quoting bug in the arm that decides `dead` ==\n'
+# 🔴 The mechanism #935 fixed for `ls-files`, one function away and never
+# applied to `diff`. Under the DEFAULT `core.quotePath=true` the changed-path
+# listing returns `café.md` as the literal `"caf\303\251.md"`; `_paths_differ`
+# feeds it back as a PATHSPEC, it matches nothing, git exits 0 EMPTY, and
+# `content-identical` fires over unlanded work -> `dead` + `removable`.
+#
+# 🔴 FLAG AND PARSER MOVE TOGETHER, exactly as `quotepath-blinds-the-index-arm`
+# does. Dropping `-z` alone would leave the NUL split in place and the arm
+# would fail at SPLITTING rather than at QUOTING — dying for a reason this
+# mutant's name does not describe.
+run 'quotepath-blinds-the-changed-path-listing' \
+  test_unlanded_work_under_a_nonascii_name_is_not_called_dead \
+  's|^    r = _git_raw(repo, "diff", "--name-only", "-z", base, head)$|    r = _git(repo, "diff", "--name-only", base, head)|; s|^    changed = \[os.fsdecode(p) for p in r.stdout.split(b"\\0") if p\]$|    changed = [p for p in r.stdout.splitlines() if p.strip()]|'
+# 🔴 The REACH decoding, isolated. `-z` and bytes stay; only the decode moves to
+# the DISPLAY one. `_printable` puts U+FFFD where the real bytes were, so the
+# pathspec misses and the empty answer comes back — the same wrong `dead`, via
+# the other half of the two-decodings split.
+run 'display-decoding-used-to-build-the-pathspec' \
+  test_the_changed_path_listing_survives_an_undecodable_filename \
+  's|^    changed = \[os.fsdecode(p) for p in r.stdout.split(b"\\0") if p\]$|    changed = [_printable(p) for p in r.stdout.split(b"\\0") if p.strip()]|'
+# 🔴 The blast radius of the FIX, which is what #935 round 2 got wrong: `-z`
+# stops the quoting, but quoting was also silently guaranteeing the output was
+# ASCII. Strict utf-8 then raises INSIDE `subprocess.run` and takes the whole
+# scan down. `_git` here keeps `-z`, so this isolates the DECODING, not the flag.
+run 'strict-decode-of-the-changed-path-listing' \
+  test_the_changed_path_listing_survives_an_undecodable_filename \
+  's|^    r = _git_raw(repo, "diff", "--name-only", "-z", base, head)$|    r = _git(repo, "diff", "--name-only", "-z", base, head)|'
+# 🔴 The OTHER half — `_paths_differ`'s own call. `core.quotePath=false` is a
+# real host setting and puts raw bytes into a NON-`-z` diff too, so text mode
+# aborts the scan there as well. The emptiness test moves with the flag because
+# `.split(b"\0")` over non-`-z` output is a different parse, not because the
+# emptiness form itself is under test — see the note below.
+run 'quotepath-false-aborts-the-comparison' \
+  test_paths_differ_survives_quotepath_false \
+  's|^        r = _git_raw(repo, "diff", "--name-only", "-z", rev_a, rev_b, "--", \*b)$|        r = _git(repo, "diff", "--name-only", rev_a, rev_b, "--", *b)|; s|^        if any(p for p in r.stdout.split(b"\\0")):$|        if r.stdout.strip():|'
+# 🔴 THE WHITESPACE-NAMED PATH — a SECOND instance of the #975 mechanism in the
+# same two lines, found by the round-1 adversarial audit and pre-existing at
+# `origin/main`. `bytes.strip()` removes ASCII whitespace, so a `-z` record whose
+# NAME is whitespace (`" "` is a legal git path) was dropped from the changed
+# set — and a dropped DIFFERING path is indistinguishable from "identical
+# upstream". Two sites, one predicate, one mutant each.
+#
+# ⚠ THIS RETIRES A NOTE THAT USED TO SIT HERE saying no mutant for the emptiness
+# form was possible, because `diff --name-only -z` never emits a bare separator
+# so `r.stdout.strip()` was equivalent. That was true of the NUL reading and
+# false of the predicate: `.strip()` also eats a whitespace NAME, which git does
+# emit. Production-unreachable is not untestable, and the reverse holds too — a
+# "coverage is impossible here" note has to be deleted the moment it becomes
+# possible, or it stops anyone looking.
+run 'changed-path-listing-drops-a-whitespace-named-path' \
+  test_a_whitespace_named_path_is_not_dropped_from_the_changed_set \
+  's|^    changed = \[os.fsdecode(p) for p in r.stdout.split(b"\\0") if p\]$|    changed = [os.fsdecode(p) for p in r.stdout.split(b"\\0") if p.strip()]|'
+run 'comparison-drops-a-whitespace-named-path' \
+  test_paths_differ_sees_a_whitespace_named_path \
+  's|^        if any(p for p in r.stdout.split(b"\\0")):$|        if any(p.strip() for p in r.stdout.split(b"\\0")):|'
+# 🔴 The batch sizer. `len(p)` on a str undercounts a non-ASCII path by up to 4x
+# while the budget is named in BYTES, so a batch can overrun the argv cap the
+# constant exists to stay under — and a truncated argv reads as "no differing
+# paths", i.e. the same confident, wrong `dead`. Only the SIZER moves; the
+# accumulator keeps its own expression so the mutant cannot die to a mismatch.
+run 'pathspec-batch-sized-in-characters-not-bytes' \
+  test_the_pathspec_batch_sizer_measures_bytes_not_characters \
+  's|^        n = len(os.fsencode(p))$|        n = len(p)|'
 
 printf '\n== POSITIVE CONTROLS — mutants whose fate is KNOWN ==\n'
 # 🔴 A comment-only edit MUST survive. If it kills something, the harness is

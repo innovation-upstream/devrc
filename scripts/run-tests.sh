@@ -1347,7 +1347,27 @@ TARGET_FLOORS=(
   # never fire: `zsh` is in REQUIRED_TOOLS, so a host without it aborts on
   # GUARD 1 naming the binary rather than running two tests thinner. That is
   # why they are not pinned in EXPECTED_SKIPS.
-  "scripts/tests|8217"
+  # 2026-08-29, the cairn `tasks:` schema (#1049): 10319 collected, against a
+  # ceiling of 8217 + 2054 = 10271. The gate printed this replacement itself —
+  # `"scripts/tests|10269"`, i.e. 10319 - min(50, max(1, 10319/20)) = 10319 - 50
+  # — so it is that run's own count put through the documented rule, not a number
+  # anyone computed from the two sides.
+  #
+  # 🔴 IT FIRED ONLY ON THE MERGED TREE, WHICH IS THE WHOLE ARGUMENT FOR GATING
+  # ONE. Neither side was over on its own: `origin/main` collected 10137 and the
+  # PR branch collected 10112, both comfortably under. The SUM crossed it. A PR
+  # green on its own branch and a main green on its own can still produce a red
+  # merge, and with `strict: false` on this repo nothing checks that
+  # automatically — the only thing between this and a red main was building the
+  # integration branch by hand.
+  #
+  # ⚠ AND THE FIX HAS AN ORDER. Pinning 10269 while the branch still collected
+  # 10112 would have put the branch UNDER its own new floor and turned its
+  # required checks red — trading a merge-time failure for a branch-time one. So
+  # `origin/main` is merged INTO the branch first, making the branch the tree the
+  # number describes. A floor is a claim about a measured tree; pin it on the
+  # tree you measured.
+  "scripts/tests|10269"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
@@ -1366,7 +1386,25 @@ TARGET_FLOORS=(
   # — inside the drift band (max(60, 59/4)) and therefore silent, the same slack
   # the line above was re-pinned for. Rule applied to the gate's own count:
   # 115 - min(50, max(1, 115/20)) = 115 - 5 = 110.
-  "scripts/collector/claude/tests|110"
+  #
+  # 2026-08-29, the skill-usage block (`skills_used` / `skills_invoked` /
+  # `commands_typed` on the Layer-A rollup, devrc#1000): 115 -> 172 collected,
+  # +57 all in the new scripts/collector/claude/tests/test_session_tailer_skills.py.
+  # 🔴 The gate FORCED this one — 172 is above the drift ceiling (floor 110 +
+  # max(60, 110/4) = 170), so the run went RED on the ceiling check, which is
+  # what that check exists for. Number copied VERBATIM from the line the gate
+  # printed on the MERGED tree (this branch + origin/main at 07890ebc):
+  #
+  #   Raise the TARGET_FLOORS entry to "scripts/collector/claude/tests|164"
+  #
+  # — that is the run's own count through the documented rule
+  # (172 - min(50, max(1, 172/20 = 8)) = 164), not arithmetic anyone did by
+  # hand, and not reconciled against the branch-only run (which collected 170
+  # and passed). ⚠ ZERO new skips on this target; the new file needed no
+  # HERMETIC_TARGETS entry because scripts/collector/claude/tests is already a
+  # directory target, and movement on THIS line is the evidence the gate runs
+  # the new file at all.
+  "scripts/collector/claude/tests|164"
   "scripts/collector/i3/tests|12"
   "scripts/collector/browser-ext/tests|12"
   "scripts/collector/opencode/tests|162"
@@ -1802,8 +1840,9 @@ TARGET_FLOORS=(
   # is collected only under `--set all` — but the floor table is checked against
   # hermetic AND dev-host targets both ways, so it needs an entry regardless or
   # GUARD 3a reports it unfloored.
-  # `_suggested_floor 4` = 4 - min(50, max(1, 4/20 = 0 -> 1)) = 3.
-  "scripts/devhost-tests|3"
+  # 2026-08-29 (+3): the $DEVRC_DIR off-session config tests joined it.
+  # `_suggested_floor 7` = 7 - min(50, max(1, 7/20 = 0 -> 1)) = 6.
+  "scripts/devhost-tests|6"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone
@@ -3470,6 +3509,16 @@ SHELL_TESTS=(
   "scripts/tests/test_release_wrapper.sh"
   "scripts/tests/test_resume_state.sh"
   "scripts/tests/test_base_clone_staleness.sh"
+  # Registered in the SAME commit that adds it, for the reason the two entries
+  # above exist: a shell test nothing runs is not a gate. It pins that a BARE
+  # `cleanup-disk.sh` performs no deletion — the script is `allow`-rated by the
+  # opencode ledger while two of its own `rm -rf` commands are `deny`-rated, so
+  # it launders them. Stubs the destructive tools and logs to a FILE (stderr is
+  # swallowed by the script's own `2>/dev/null`), and runs a POSITIVE CONTROL
+  # first so a zero from the bare run is never mistaken for a harness wired to
+  # nothing. Watched red: mutating `APPLY=0` to `APPLY=1` fails it with
+  # "the gate is bypassed".
+  "scripts/tests/test_cleanup_disk_gate.sh"
 )
 # 🔴 THE SHELL TESTS ARE IN THE TIMING CENSUS TOO, and the reason is the census's
 # own honesty: it is presented as an accounting of the run, so a population it

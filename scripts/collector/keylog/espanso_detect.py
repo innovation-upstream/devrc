@@ -52,6 +52,56 @@ SEARCH_TERM_MAX = 64
 # variants, so match by substring rather than the exact class.
 ESPANSO_SEARCH_WM_CLASS = ".espanso-wrapped"
 
+# 🔴 SEARCH_TERMS SERVE TWO CONSUMERS THAT WANT OPPOSITE THINGS, and this table
+# is where the conflict is resolved instead of being fought out in the config.
+# The espanso PICKER wants recall — every word that should list a row, listed on
+# every snippet it should list (see `_PICKER_ROWS` in the tests: ambiguity there
+# means "two rows", which is the feature). `_attribute` wants precision — one
+# snippet, or nothing, so telemetry can name it. A term deliberately spelled on
+# two snippets for the picker's sake therefore has NO unique answer to read off
+# the config, and before this table the only way to give attribution one was to
+# delete the term from the picker — trading a real search route for a telemetry
+# row. That trade was made twice (2026-08-28, 2026-08-29) and reverted by hand
+# both times.
+#
+# So: term -> the snippet that OWNS it for attribution, consulted ONLY on the
+# already-ambiguous branch and ONLY over the snippets the term genuinely matches
+# (`owner in matched` below). Both clauses are load-bearing — the table can
+# never re-point a term that resolves uniquely today, and can never invent a
+# resolution to a snippet the term does not reach. A term that is ambiguous and
+# NOT listed here still resolves to None; silence is not a licence to guess.
+#
+# 'ask' is the highest-traffic term in the whole config (58 fires, 2026-08-06..19)
+# and ':dacq' spells it — plus 'clarifying', which 'clarify' is a substring of —
+# because "ask"/"clarify" is how the dispatch snippet is actually searched for.
+# ':acq' ("ask clarifying questions") is what a bare 'ask' MEANS.
+#
+# 🔴 BLIND SPOT, MEASURED — THE LOOKUP IS AN EXACT-STRING MATCH, SO PREFIXES OF
+# AN OWNED TERM ARE NOT OWNED. `_term_matches` is a SUBSTRING test, so a typed
+# prefix reaches both snippets and lands on the ambiguous branch, where
+# `.get(t)` then misses because the typed string is not a key. Measured
+# 2026-08-30 against the real keylog search stream (661 espanso rows): "ask"
+# resolves because it is typed EXACTLY, 118 times — but "clar" (1 fire ever)
+# now resolves to None, where before ":dacq" spelled "clarifying" it reached
+# ":acq". Prefix typing is the norm here, not the exception: "rec"/"recom",
+# "kic", "orch" are all how the picker is really driven.
+#
+# NOT fixed with per-prefix entries — "cla"/"clari"/"clarif" are equally valid
+# prefixes and the table cannot enumerate them. The real options are to make the
+# lookup prefix-aware (an owner claims a typed term that is a prefix of an owned
+# one AND matches that owner) or to accept it. ACCEPTED, on the measurement: one
+# fire in the entire recorded history does not justify the mechanism, and a
+# prefix-aware lookup can re-point terms the exact form never touched, so it
+# needs its own mutation battery.
+#
+# Same measurement, recorded so it is not re-litigated: "clarifying" has been
+# typed ZERO times, so it gets no entry — an owner justified by intuition rather
+# than the search stream is exactly what this comment exists to prevent.
+_AMBIGUOUS_TERM_OWNER = {
+    "ask": ":acq",
+    "clarify": ":acq",
+}
+
 
 def _is_espanso_search_window(app) -> bool:
     """True when `app` is espanso's own search window (which steals X focus)."""
@@ -265,7 +315,17 @@ class EspansoDetector:
         # it can never re-point a term that resolves uniquely today; the tie is
         # broken only when EXACTLY ONE candidate is named outright.
         exact = [trig for trig in matched if self._names_trigger(t, trig)]
-        return exact[0] if len(exact) == 1 else None
+        if len(exact) == 1:
+            return exact[0]
+        # Still ambiguous, and no candidate is named outright. A term may be
+        # spelled on two snippets ON PURPOSE, for the picker's sake — see
+        # `_AMBIGUOUS_TERM_OWNER`. `owner in matched` keeps the declaration
+        # honest: it picks among the snippets this term actually reaches and
+        # cannot invent one, so a stale entry goes inert rather than wrong.
+        owner = _AMBIGUOUS_TERM_OWNER.get(t)
+        if owner is not None and owner in matched:
+            return owner
+        return None
 
     @staticmethod
     def _names_trigger(term, trig):

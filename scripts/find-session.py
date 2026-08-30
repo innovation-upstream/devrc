@@ -59,7 +59,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from transcript_search import (  # noqa: E402
-    DEFAULT_ROOT, SURFACE_ALL, SURFACE_TEXT, search,
+    DEFAULT_ROOT, SURFACE_ALL, SURFACE_TEXT, canonical_skill_name, search,
+    search_peers,
 )
 from opencode_search import search_opencode  # noqa: E402
 
@@ -123,7 +124,11 @@ EXIT_CONTRACT = (
               "caller ACTS on — read `tail.coverage_complete` before treating "
               "the resolution as unique."),
     (EXIT_USAGE, "bad arguments: `--tail` without `--live`, `--limit` below 1, "
-                 "or an unparseable `--since`."),
+                 "an unparseable `--since`, a query that names nothing (no "
+                 "terms and no `--skill`, or a `--skill` that canonicalises "
+                 "to empty), or `--skill` with `--opencode-only` — that "
+                 "corpus carries no skill attribution, so the combination "
+                 "has no answer rather than an empty one."),
     (EXIT_AMBIGUOUS, "`--tail` ONLY: it could not resolve to exactly one live "
                      "window — several matched, or none did on a fleet where "
                      "every host answered. It carries NO claim about coverage; "
@@ -343,6 +348,9 @@ ARCHIVE_ONLY_FLAGS = (
                                      "`runtime` but the scan has no corpus axis"),
     ("opencode_only", "--opencode-only", "CORPUS selection; same reason"),
     ("all", "--all", "widens the TRANSCRIPT search surface only"),
+    ("skill", "--skill", "the live scan has NO skill-attribution axis — a "
+                         "window's task/label/codename cannot say which skill "
+                         "ran in it"),
 )
 
 # The destinations that DO reach the live leg (or steer both). Pinned beside the
@@ -352,7 +360,8 @@ LIVE_AWARE_DESTS = frozenset({"terms", "live", "deep", "tail", "limit", "json"})
 # Which archive-only flags additionally mean the archive result is the ONLY one
 # that can answer the question — a corpus/surface selector. Named separately
 # because their notice has to say more than "not filtered by them".
-CORPUS_SELECTOR_DESTS = frozenset({"claude_only", "opencode_only", "all"})
+CORPUS_SELECTOR_DESTS = frozenset({"claude_only", "opencode_only", "all",
+                                   "skill"})
 
 
 def archive_only_notice(args):
@@ -528,7 +537,17 @@ def build_parser():
     sees every declared flag whatever its default.
     """
     p = argparse.ArgumentParser(add_help=True, description="Find past Claude Code and opencode sessions by keyword.")
-    p.add_argument("terms", nargs="+", help="search terms (ANDed unless --any)")
+    p.add_argument("terms", nargs="*", help="search terms (ANDed unless --any)")
+    p.add_argument("--skill", default=None,
+                   help="only sessions that USED this skill (exact canonical "
+                        "identity). Reads the per-record skill attribution, an "
+                        "explicit `Skill` tool call, and a typed /name — so it "
+                        "sees a skill that AUTO-FIRED, which no keyword search "
+                        "can distinguish from prose. May be used alone, with no "
+                        "search terms. Counts SESSIONS: a skill used only inside "
+                        "a dispatched SUBAGENT is not counted. The opencode "
+                        "corpus has no such attribution, so that leg is SKIPPED "
+                        "and the omission is printed.")
     p.add_argument("--project", default="", help="only sessions whose cwd/project contains this substring")
     p.add_argument("--since", default="", help="only sessions on/after this date (YYYY-MM-DD)")
     p.add_argument("--limit", type=int, default=10, help="max sessions to show (default 10)")
@@ -601,22 +620,54 @@ def archive_search(a, since):
     # Search Claude Code transcripts (default)
     if not a.opencode_only:
         cc_results = search(a.terms, root=ROOT, match_any=a.any, since=since,
-                            project=a.project, surface=surface, limit=None)
+                            project=a.project, surface=surface, limit=None,
+                            skill=a.skill)
         results.extend(cc_results)
+        # 🔴 The OTHER hosts' Claude corpora. Without this the local walk was the
+        # whole Claude answer while the description promised "both hosts" — the
+        # exact gap that made a workbench run report a laptop-only skill as
+        # never used. Peers that cannot be reached warn on stderr.
+        results.extend(search_peers(a.terms, match_any=a.any, since=since,
+                                    project=a.project, surface=surface,
+                                    skill=a.skill))
 
     # Search opencode sessions (default)
-    if not a.claude_only:
+    # 🔴 SKIPPED under `--skill`, and the omission is PRINTED (stderr, so a
+    # `--json` stdout stays parseable). That corpus has no per-record skill
+    # attribution — there a skill invocation is a tool CALL, a different shape
+    # this search does not read. Running it unfiltered would fold in sessions
+    # selected on TERMS alone, quietly answering a different question; skipping
+    # it silently would hand back a partial count that reads as the whole fleet.
+    if not a.claude_only and not a.skill:
         try:
             oc_results = search_opencode(a.terms, match_any=a.any, since=since,
                                          project=a.project, limit=None)
             results.extend(oc_results)
         except Exception as e:
             print(f"WARN: opencode search failed: {e}", file=sys.stderr)
+    elif a.skill and not a.claude_only:
+        print("NOT searched: the opencode corpus (--skill has no attribution "
+              "there). Claude transcripts WERE searched on every reachable host; "
+              "any peer that could not answer is named on its own line above.",
+              file=sys.stderr)
 
     # Re-rank the merged set by the same criteria
     results.sort(key=lambda r: (len(r["matched_terms"]), r["total_hits"], r["last_local"]),
                  reverse=True)
     return results
+
+
+def _query_label(a):
+    """What the run actually searched for, for the human-facing lines.
+
+    `--skill` can carry the whole query, so `' '.join(a.terms)` alone prints an
+    empty string and reads as "matched nothing" rather than "matched no session
+    that used this skill".
+    """
+    label = " ".join(a.terms)
+    if getattr(a, "skill", ""):
+        label = (f"skill={a.skill}" + (f" + {label}" if label else "")).strip()
+    return label
 
 
 def render_archive_hit(i, r, state=None):
@@ -724,6 +775,29 @@ def main(argv=None):
             # makes the path testable in-process like every other exit.
             return EXIT_USAGE
 
+    # 🔴 A `--skill` that was GIVEN but names nothing is REFUSED, never silently
+    # dropped. Canonicalised with the same rule the corpus is keyed by, so
+    # `--skill apps/web:deploy` matches the recorded `deploy`; `--skill /` and
+    # `--skill ""` name nothing and would otherwise slip the guard below and run
+    # an UNFILTERED keyword search at exit 0, answering a different question.
+    raw_skill, a.skill = a.skill, (canonical_skill_name(a.skill) or "")
+    if raw_skill is not None and not a.skill:
+        print(f"--skill {raw_skill!r} names no skill", file=sys.stderr)
+        return EXIT_USAGE
+    if not a.terms and not a.skill:
+        print("nothing to search for: give at least one term, or --skill NAME",
+              file=sys.stderr)
+        return EXIT_USAGE
+    if a.skill and a.opencode_only:
+        print("--skill cannot be answered from the opencode corpus (no "
+              "per-record skill attribution there); drop --opencode-only",
+              file=sys.stderr)
+        return EXIT_USAGE
+    if a.live and not a.terms:
+        print("--live matches on a window's task/label/codename, so it needs at "
+              "least one term; --skill alone is an ARCHIVE query", file=sys.stderr)
+        return EXIT_USAGE
+
     if a.tail is not None and not a.live:
         print("--tail requires --live: it prints the scrollback of a LIVE tmux "
               "window, which the transcript archive cannot supply.",
@@ -792,7 +866,13 @@ def main(argv=None):
     # The order is the point: "we could not look" must never launder into "we
     # looked and there is nothing".
     archive_reason = (
-        "--deep" if a.deep
+        # 🔴 FIRST, and unconditional. `--skill` is answerable ONLY by the
+        # archive (see ARCHIVE_ONLY_FLAGS), so if the live leg matched and this
+        # clause were absent, `run_archive` would stay False and the skill
+        # filter would never run — returning live rows chosen on TERMS ALONE
+        # under a heading the caller reads as a skill answer.
+        "--skill (answerable only from the transcript corpus)" if a.skill
+        else "--deep" if a.deep
         else "the live scan was UNMEASURED" if live["status"] != "ok"
         else "no live match" if not live["rows"]
         else None)
@@ -934,7 +1014,7 @@ def main(argv=None):
                   + " did not answer, so a hit that is NOT marked <LIVE> is "
                     "UNMEASURED rather than CLOSED.")
         if not results:
-            print(f"  No sessions matched: {' '.join(a.terms)}")
+            print(f"  No sessions matched: {_query_label(a)}")
         else:
             if len(shown) < len(results):
                 print(f"  (showing {len(shown)})")

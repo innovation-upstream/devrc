@@ -112,28 +112,41 @@ POSITIONAL_BUCKET = "_wait_events positional (no until=)"
 # 🔴 Measured by THIS module's own `classify_wait_calls()` -- never by grep, and
 # never by hand -- over `scripts/browser-bridge/tests` at:
 #
-#     BASE SHA   20beb3c4  ("docs(handoff): #783's residual is DECIDED ...")
-#     DATE       2026-08-26
+#     BASE SHA   this branch (PR #1074), the commit that lowers the pin to 47.
+#                Deliberately not a hex sha: the measurement is OF the commit
+#                doing the lowering, so any sha written here would be the one
+#                before the change it describes.
+#     DATE       2026-08-30
 #
-# Full breakdown at that sha, all six buckets, 62 call sites total:
+# Full breakdown at that commit, re-measured by `classify_wait_calls()` (never by
+# hand), all six buckets, 62 call sites total:
 #
-#     48  _wait_events positional (no until=)   <- RATCHETED
+#     47  _wait_events positional (no until=)   <- RATCHETED
 #              38  of which n literal 1 / defaulted
 #               9  of which n >= 2
-#               1  of which n dynamic
+#               0  of which n dynamic
 #      5  _wait_events until=                        SAFE
 #      4  _wait_ops op-only                          discriminated by op
-#      2  _wait_ops where=                           discriminated by op + row
+#      3  _wait_ops where=                           discriminated by op + row
 #      3  _wait_payload op-only                      discriminated by op
 #
-# ⚠ The 38/1 split is where a SECOND counting method disagreed, and it is worth
-# recording because it is the same class of error the AST rule exists to stop.
-# A first-pass probe treated a NON-LITERAL `n` as the default 1 and reported
-# `39 n=1 + 9 n>=2`; the classifier below reports the one dynamic site
-# (`_wait_events(spool_dir, len(ORIGIN_TOKENS))`, in
-# `test_the_two_origin_tokens_are_distinct_and_recorded_verbatim`) as its own
-# sub-bucket. The two agree on 48, which is the number that is ratcheted -- the
-# sub-split is informational and nothing gates on it.
+# ⚠ The dynamic sub-bucket went 1 -> 0 and `_wait_ops where=` 2 -> 3: the SAME
+# site moved between them. `_wait_events(spool_dir, len(ORIGIN_TOKENS))` in
+# `test_the_two_origin_tokens_are_distinct_and_recorded_verbatim` became
+# `_wait_ops(spool_dir, "tabs", …, where=_routed_to(inst))` after it flaked in
+# the sandbox tier (2026-08-29, both origin tokens verbatim but REVERSED).
+#
+# 🔴 AND THE SUB-SPLIT EARNED ITS KEEP -- read this before calling it
+# informational. The `_wait_events` docstring audited its own n>=2 sites and
+# concluded "All 8 remaining real waits are order-safe". That audit could not
+# see the site that actually flaked, because its own counting (`39 n=1 + 5
+# until= + 9 n>=2`) folded the DYNAMIC site into n=1 -- exactly the first-pass
+# error recorded here, where a NON-LITERAL `n` reads as the default 1. A site
+# whose `n` is `len(...)` is an n>=2 site in every way that matters to ordering,
+# and bucketing it as n=1 is what let an order-dependent assertion sit outside
+# an order-safety audit for four days. The two methods still agree on the
+# RATCHETED total; they disagreed about which bucket, and the bucket was the
+# part that mattered.
 #
 # ⚠ The `_wait_ops op-only` figure of 4 includes ONE call that is not a test
 # site: `_wait_payload`'s own body calls `_wait_ops(spool_dir, op, 1, **kw)`.
@@ -151,7 +164,7 @@ POSITIONAL_BUCKET = "_wait_events positional (no until=)"
 #: How many positional `_wait_events` call sites the corpus is allowed to have.
 #: Two-way: growing this is a REGRESSION, shrinking it is a WIN that must be
 #: banked by editing this number and the ledger in the same commit.
-PINNED_POSITIONAL_TOTAL = 48
+PINNED_POSITIONAL_TOTAL = 47
 
 #: Per-enclosing-function ledger of the same 48 sites, keyed
 #: `<file>::<dotted function path>`. Line numbers are deliberately NOT pinned --
@@ -197,7 +210,6 @@ PINNED_POSITIONAL_SITES = {
     "test_server.py::test_the_release_short_circuit_attributes_an_ordinary_session": 1,
     "test_server.py::test_the_same_id_fills_the_session_when_no_origin_is_declared": 1,
     "test_server.py::test_the_session_column_carries_the_bare_id_not_the_wire_tag": 1,
-    "test_server.py::test_the_two_origin_tokens_are_distinct_and_recorded_verbatim": 1,
     "test_server.py::test_upload_dispatches_and_audit_event_has_op_domain_path": 1,
     "test_server.py::test_wait_events_reports_a_timeout_instead_of_returning_short": 1,
     "test_server.py::test_wake_telemetry_is_metadata_only": 1,
