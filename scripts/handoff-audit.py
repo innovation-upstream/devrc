@@ -104,19 +104,27 @@ RESUME_COST = 200
 # product/ops decisions`. The file already owned this guard shape for WORK_STATUS
 # and simply did not apply it to the families.
 #
-# 🔴 THIS GUARD IS PURELY PREVENTIVE — IT REMEDIES NOTHING TODAY. Measured
-# 2026-08-30 over the 414-doc corpus: it suppresses **10 H2 sections / 14,466 B**,
-# and those sections contain **0 retracted bullets and 0 advisory bullets**. The
-# `retracted` and `RELOCATE_DURABLE` totals are byte-identical with and without it
-# (117,706 B / 232 bullets; 568 advisory). Positive control, so that pair of zeros
-# is an absence and not a dead probe: the same scan finds 232 retracted bullets in
-# the GOTCHAS sections that are NOT suppressed.
-# ⚠ Round 2 wrote this as "13 of them" and "0 B of retracted bytes, 2 advisory
-# bullets". Both are wrong — 10, and 0 advisory. Round 3 caught it, which makes it
-# the second consecutive round whose fix shipped an unreproducible number
-# JUSTIFYING that same fix; round 2's own claim 4 was the first. The value of the
-# guard is entirely forward-looking: a future `- … dead-end …` bullet under
+# 🔴 THIS GUARD IS PURELY PREVENTIVE — IT REMEDIES NOTHING TODAY. What it does:
+# suppresses **10 H2 sections / 14,466 B**, and those sections contain
+# **0 retracted bullets and 0 advisory bullets**. Positive control, so that pair of
+# zeros is an absence and not a dead probe: the same two scans find hundreds of
+# each in the GOTCHAS sections that are NOT suppressed. The guard's value is
+# entirely forward-looking — a future `- … dead-end …` bullet under
 # `## Open decisions` would otherwise be booked as evictable history.
+#
+# 🔴 THE ABSOLUTE CORPUS TOTALS THAT USED TO SIT HERE ARE GONE ON PURPOSE. DO NOT
+# PUT THEM BACK. Three consecutive rounds each corrected the figure justifying this
+# guard and each correction was itself unreproducible by the next round: round 2
+# wrote "13 sections / 2 advisory bullets" (wrong); round 3 corrected it to 10/0
+# and added "117,706 B / 232 bullets; 568 advisory" (wrong within hours); round 4
+# showed no single corpus state yields both that gross and that advisory count.
+# The cause is not carelessness — THE CORPUS IS A SET OF LIVE, SHARED, CONTINUOUSLY
+# WRITTEN TREES. Measured across four rounds it went 414→413→414 docs and the
+# advisory count 568→573→577 while nobody touched this code. A pinned absolute
+# total is stale before the commit lands.
+# What IS stable is the guard's OWN effect, which is what the comment needs to
+# claim: 10 sections, 14,466 B, 0 and 0 — identical in every round. Re-derive the
+# corpus figures by RUNNING the tool; do not read them from a comment.
 #
 # Applied to GOTCHAS ONLY: `Open investigations` is the INVESTIGATIONS family's
 # canonical heading and legitimately contains resolved sub-blocks. ⚠ That rationale
@@ -418,7 +426,7 @@ def resolve_targets(args):
     # the full 87 under a header reading 87 — a traceability feature contradicting
     # its own total. Counting only the NEWLY-UNIQUE docs makes the column sum to
     # the header by construction, and gives the second root an honest 0.
-    seen, uniq, per_root = set(), [], []
+    seen, uniq, per_root, unreadable = set(), [], [], []
     for a in args:
         p = Path(os.path.expanduser(a))
         if p.is_file():
@@ -430,8 +438,19 @@ def resolve_targets(args):
         else:
             found = []
             for base in (p, p / "claudedocs"):
-                if base.is_dir():
-                    found += [f.resolve() for f in sorted(base.glob("handoff-*.md"))]
+                if not base.is_dir():
+                    continue
+                # 🔴 `glob` yields NOTHING on a permission-denied directory and
+                # raises nothing, so an unreadable root scored a bare 0 under a
+                # legend asserting it "genuinely holds no handoff docs" — the very
+                # "a 0 that cannot say why" silence this tally exists to break,
+                # re-created by widening the claim without widening the check.
+                if not os.access(base, os.R_OK | os.X_OK):
+                    print(f"handoff-audit: cannot read {base} — its docs (if any) "
+                          "are NOT counted", file=sys.stderr)
+                    unreadable.append(str(base))
+                    continue
+                found += [f.resolve() for f in sorted(base.glob("handoff-*.md"))]
         added = 0
         for f in found:
             if f not in seen:
@@ -445,14 +464,15 @@ def resolve_targets(args):
         # hunts for a typo in a path that was in fact wholly covered by an earlier
         # root. Same shape as the empty-root case in this function's docstring.
         per_root.append((str(p), added, len(found)))
-    return uniq, per_root
+    return uniq, per_root, unreadable
 
 
 def _pct(a, b):
     return (100.0 * a / b) if b else 0.0
 
 
-def render(audits, show_all, n_detail, n_sections, out=sys.stdout, per_root=()):
+def render(audits, show_all, n_detail, n_sections, out=sys.stdout, per_root=(),
+           unreadable=()):
     p = lambda *a: print(*a, file=out)
     audits = sorted(audits, key=lambda a: -a["size"])
     over = [a for a in audits if a["status"] != "OK"]
@@ -470,7 +490,9 @@ def render(audits, show_all, n_detail, n_sections, out=sys.stdout, per_root=()):
             p(f"  {cell:>12}  {root}")
         p("  Counted after dedup, so the column SUMS to the header even when two")
         p("  roots overlap. `0 (dup)` = every doc here was already counted under an")
-        p("  earlier root; a bare `0` = this path genuinely holds no handoff docs.")
+        p("  earlier root; a bare `0` = nothing matched `handoff-*.md` under it.")
+        for u in unreadable:
+            p(f"  🔴 UNREADABLE, so its docs are NOT in any number above: {u}")
     p(f"\ntarget {TARGET:,} B   ·   hard cap {HARD:,} B")
     p("  🔴 NOT ENFORCED. No gate in this repo measures a handoff doc, so every")
     p("     verdict below is a REFERENCE you may argue with, not a rejection. The")
@@ -578,7 +600,7 @@ def main(argv=None):
     ap.add_argument("--csv", action="store_true")
     args = ap.parse_args(argv)
 
-    targets, per_root = resolve_targets(args.paths or [str(Path.cwd())])
+    targets, per_root, unreadable = resolve_targets(args.paths or [str(Path.cwd())])
     if not targets:
         sys.exit("no handoff-*.md found under: "
                  + ", ".join(args.paths or [str(Path.cwd())])
@@ -587,7 +609,8 @@ def main(argv=None):
     if args.csv:
         render_csv(audits)
     else:
-        render(audits, args.all, args.detail, args.sections, per_root=per_root)
+        render(audits, args.all, args.detail, args.sections, per_root=per_root,
+               unreadable=unreadable)
 
 
 if __name__ == "__main__":

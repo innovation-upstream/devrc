@@ -403,13 +403,13 @@ def test_resolve_targets_reports_what_each_root_contributed(tmp_path):
     (full / "handoff-one.md").write_text("# H\n")
     empty = tmp_path / "b"
     empty.mkdir()
-    docs, per_root = HA.resolve_targets([str(tmp_path / "a"), str(empty)])
+    docs, per_root, _unread = HA.resolve_targets([str(tmp_path / "a"), str(empty)])
     assert len(docs) == 1
     assert per_root == [(str(tmp_path / "a"), 1, 1), (str(empty), 0, 0)]
 
 
 def test_resolve_targets_flags_a_nonexistent_root(tmp_path):
-    docs, per_root = HA.resolve_targets([str(tmp_path / "nope")])
+    docs, per_root, _unread = HA.resolve_targets([str(tmp_path / "nope")])
     assert docs == []
     assert per_root == [(str(tmp_path / "nope"), None, 0)]
 
@@ -486,9 +486,35 @@ def test_overlapping_roots_do_not_double_count(tmp_path):
     cd.mkdir(parents=True)
     (cd / "handoff-a.md").write_text("# H\n")
     (cd / "handoff-b.md").write_text("# H\n")
-    docs, per_root = HA.resolve_targets([str(tmp_path / "r"), str(cd)])
+    docs, per_root, _unread = HA.resolve_targets([str(tmp_path / "r"), str(cd)])
     assert len(docs) == 2
     assert sum(n for _r, n, _m in per_root if n is not None) == len(docs)
     # the overlapping root reports 0 NEW but 2 MATCHED, so its zero is legible as
     # "already counted" rather than "empty" — round 3's F2.
     assert per_root == [(str(tmp_path / "r"), 2, 2), (str(cd), 0, 2)]
+
+
+def test_an_unreadable_root_is_reported_not_silently_zero(tmp_path):
+    """🔴 `glob` yields nothing on a permission-denied directory and raises nothing,
+    so an unreadable root scored a bare 0 under a legend asserting it "genuinely
+    holds no handoff docs". It held one. Round 4 found it: the legend was widened
+    without widening the check.
+
+    Both directions in one test — the readable root must NOT be reported, so the
+    guard cannot pass by flagging everything.
+    """
+    import os
+    good = tmp_path / "good" / "claudedocs"
+    good.mkdir(parents=True)
+    (good / "handoff-a.md").write_text("# H\n")
+    locked = tmp_path / "locked" / "claudedocs"
+    locked.mkdir(parents=True)
+    (locked / "handoff-z.md").write_text("# H\n")
+    os.chmod(locked, 0o000)
+    try:
+        docs, per_root, unreadable = HA.resolve_targets(
+            [str(tmp_path / "good"), str(tmp_path / "locked")])
+        assert len(docs) == 1
+        assert unreadable == [str(locked)], unreadable
+    finally:
+        os.chmod(locked, 0o755)
