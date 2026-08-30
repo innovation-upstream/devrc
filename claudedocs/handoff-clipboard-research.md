@@ -18,93 +18,31 @@ Research modern best practices for clipboard and terminal clipboard interaction 
 
 ## State now
 
-- **Rank 1 is DONE, and this is the first claim in this effort verified under the
-  real systemd unit rather than by hand.** `drift-check.sh` gained **rc 24**: an
-  unprotected-`main` detector. Merged as **#1065 → `ebbe5eaa`**, both hosts
-  converged and compared at **`809486fa`**.
-- **Live proof**, from `journalctl --user -u drift-check` after `systemctl --user
-  start drift-check` on the workbench (the only host the timer runs on):
+- **Rank 1 is DONE and CLOSED OUT.** `drift-check.sh` gained **rc 24**, an
+  unprotected-`main` detector: merged **#1065 → `ebbe5eaa`**, and this handoff
+  merged **#1116 → `db790e08`**. Both hosts converged and **compared** at
+  **`e9437342`** (`ship: converged + verified — 2 hosts compared, both at …`).
+- **Verified live under the real systemd unit**, not by reading files —
+  `systemctl --user start drift-check` then the journal:
   ```
   [protect] innovation-upstream/devrc main: 2 required status check(s) — tekton/devrc-pytests,tekton/devrc-nodetests
   [protect]   enforce_admins=true — the checks bind admins too.
   drift-check: no drift on the host(s) CHECKED: workbench (local), laptop (remote)
   ```
-  `gh` resolves on the unit's own PATH on **both** hosts (checked by running
-  `command -v gh` under the unit's `Environment` PATH, not by reading home.nix).
-- **Two side PRs shipped from this thread:** **#1069** (re-pin skill-tier
-  measurements — `main` was RED for every PR until it landed) and the
-  `TARGET_FLOORS` merge-conflict resolution.
-- **Also fixed while verifying:** the laptop's `homelab-talos` was 31 commits
-  behind with **1 touching `containers/clawgate`** — the subtree `clawgatectl`
-  is compiled from. Fast-forwarded + re-switched; `drift-check` now reports both
-  hosts' built sources CURRENT. ⚠ `clawgatectl --version` read **0.8.18 before
-  and after** — the version string was NOT the signal; the deadman was.
-### Earlier — the 2026-08-29 record (how the clipboard fix shipped INERT)
-Kept because its content is durable, not status: the inert-fix story, the
-E484 chain and the verified-on-the-real-path claim. It is no longer under a
-`State now` heading, so a future status replace cannot silently delete it.
-
-- **Research session (00:37–00:53):** report completed, no code changes. This doc
-  landed on `handoff/clipboard-research` → PR #1014 (it could not be pushed to
-  `main`: protected branch, 2 required checks).
-- **Resume session:** both open decisions resolved, and a bug the research missed
-  was found, fixed and gated.
-  - `unnamedplus` — **declined**, no change.
-  - `"+y` dead with no `DISPLAY` — fixed in **#1027**, which then turned out to
-    be INERT in production until **#1043**. See the block below before trusting
-    anything in this section.
-- 🔴 **THE CLIPBOARD FIX (#1027) SHIPPED INERT. #1043 is what made it work.**
-  Everything above this line was written before that was known; the paragraph
-  that used to sit here claimed the change "goes live on `git pull` alone,
-  no `home-manager switch`" and cited `$DEVRC_DIR` as the mechanism. Both
-  halves were wrong, and it is quoted rather than deleted because the way it
-  was wrong is the reusable part.
-
-  Measured over real ssh to the laptop, against the deployed copy, AFTER #1027
-  had merged and shipped:
-
-  ```
-  Error in /home/zach/.config/nvim/init.lua:
-  E484: Can't open file /.config/nvim/config/native.vim
-  clipboard: No provider. Try ":checkhealth" or ":h clipboard".
-  ```
-
-  `$DEVRC_DIR` was set in exactly ONE place — a systemd user service's
-  `Environment=` block in `nix/graphical.nix` — so it existed only inside a
-  graphical session. `init.vim` sourced every other config file through it, so
-  off-session the first `source` raised E484 and **aborted the entire nvim
-  config**: no options, no leader mappings, no lua half, no plugin config.
-  neovim had been running unconfigured over ssh, on a bare TTY, in units and in
-  cron — invisible because the only place anyone reads a config error is the
-  terminal in front of them, which is the one place the variable was set.
-
-  🔴 **Why no test caught it, which is the lesson worth keeping:** #1027's
-  red/green harness **set `$DEVRC_DIR` itself**, manufacturing the one
-  precondition that does not hold in production. **A fixture that supplies an
-  environment cannot observe that environment being absent.** The fix was
-  correct, merged, green, mutation-tested — and did nothing where it mattered.
-
-- **Fixed in #1043**: nix substitutes the repo path into `init.vim` at BUILD
-  time, `init.lua` self-locates via `debug.getinfo`, and `lazygit.lua` — found
-  by the new guard, not by hand — stopped pointing at
-  `nil/.config/lazygit/config.yml`. Guards: a hermetic relationship test that
-  NO file under `.config/nvim` reads `$DEVRC_DIR` at runtime (comments
-  stripped, mutation-tested), plus a dev-host red/green counting E484s from the
-  real chain.
-
-- 🔴 **Deploy: a `home-manager switch` IS required** (the corrected claim).
-  `init.vim` is `builtins.readFile`'d into the store, so the substitution
-  happens at build time. Files it sources — `native.lua`, `native.vim` — are
-  still read from the `~/workspace/devrc` working tree at runtime, so edits to
-  THOSE remain live on `git pull`. The two are different questions and the old
-  paragraph collapsed them into one.
-
-- ✅ **VERIFIED on the real path, 2026-08-29**, both hosts at `638959b4`:
-  `ssh` → `nvim` → `"+yy` on the laptop went from `E484=9, No provider,
-  OSC52=0` to `E484=0, No provider=0, OSC52=1`, payload decoding to the exact
-  yanked line. Workbench resolves the same substituted store `init.vim`. This
-  is the first claim in this effort verified on the path that actually failed
-  rather than a reconstruction of it.
+  `gh` resolves on the unit's own `Environment` PATH on **both** hosts. The timer
+  runs on the **workbench only**, so that host is the one that matters.
+- **Side work that unblocked this:** **#1069** re-pinned the skill-tier
+  measurements — `main` was RED for every open PR until it landed. The
+  `TARGET_FLOORS` three-way conflict was resolved by measuring the merged tree,
+  not by taking a side.
+- **Also fixed:** the laptop's `homelab-talos` was 31 commits behind with **1
+  touching `containers/clawgate`**, the subtree `clawgatectl` compiles from.
+  Fast-forwarded + re-switched; both hosts' built sources now CURRENT.
+  ⚠ `clawgatectl --version` read **0.8.18 before and after** — the version string
+  was not the signal, the deadman was.
+- Claims released (`clipboard-research-1`, `quiesce-workload-rescue`,
+  `skill-tier-measurement-repin`); this session's worktrees and `refs/audit/*`
+  removed.
 
 ## Research findings — clipboard/terminal clipboard best practices (2025-2026)
 
@@ -350,6 +288,109 @@ is free. The trigger to revisit is an OBSERVED lost clipboard, not this note.
   line is the instrument; the version was silent.
 - **Squash merges:** verify by CONTENT. `merge-base --is-ancestor <head> main`
   returns **false after every squash, forever**, and reads as "not merged".
+
+### Earlier — the 2026-08-29 record (how the clipboard fix shipped INERT)
+Kept because its content is durable, not status: the inert-fix story, the
+E484 chain and the verified-on-the-real-path claim. It is no longer under a
+`State now` heading, so a future status replace cannot silently delete it.
+
+- **Research session (00:37–00:53):** report completed, no code changes. This doc
+  landed on `handoff/clipboard-research` → PR #1014 (it could not be pushed to
+  `main`: protected branch, 2 required checks).
+- **Resume session:** both open decisions resolved, and a bug the research missed
+  was found, fixed and gated.
+  - `unnamedplus` — **declined**, no change.
+  - `"+y` dead with no `DISPLAY` — fixed in **#1027**, which then turned out to
+    be INERT in production until **#1043**. See the block below before trusting
+    anything in this section.
+- 🔴 **THE CLIPBOARD FIX (#1027) SHIPPED INERT. #1043 is what made it work.**
+  Everything above this line was written before that was known; the paragraph
+  that used to sit here claimed the change "goes live on `git pull` alone,
+  no `home-manager switch`" and cited `$DEVRC_DIR` as the mechanism. Both
+  halves were wrong, and it is quoted rather than deleted because the way it
+  was wrong is the reusable part.
+
+  Measured over real ssh to the laptop, against the deployed copy, AFTER #1027
+  had merged and shipped:
+
+  ```
+  Error in /home/zach/.config/nvim/init.lua:
+  E484: Can't open file /.config/nvim/config/native.vim
+  clipboard: No provider. Try ":checkhealth" or ":h clipboard".
+  ```
+
+  `$DEVRC_DIR` was set in exactly ONE place — a systemd user service's
+  `Environment=` block in `nix/graphical.nix` — so it existed only inside a
+  graphical session. `init.vim` sourced every other config file through it, so
+  off-session the first `source` raised E484 and **aborted the entire nvim
+  config**: no options, no leader mappings, no lua half, no plugin config.
+  neovim had been running unconfigured over ssh, on a bare TTY, in units and in
+  cron — invisible because the only place anyone reads a config error is the
+  terminal in front of them, which is the one place the variable was set.
+
+  🔴 **Why no test caught it, which is the lesson worth keeping:** #1027's
+  red/green harness **set `$DEVRC_DIR` itself**, manufacturing the one
+  precondition that does not hold in production. **A fixture that supplies an
+  environment cannot observe that environment being absent.** The fix was
+  correct, merged, green, mutation-tested — and did nothing where it mattered.
+
+- **Fixed in #1043**: nix substitutes the repo path into `init.vim` at BUILD
+  time, `init.lua` self-locates via `debug.getinfo`, and `lazygit.lua` — found
+  by the new guard, not by hand — stopped pointing at
+  `nil/.config/lazygit/config.yml`. Guards: a hermetic relationship test that
+  NO file under `.config/nvim` reads `$DEVRC_DIR` at runtime (comments
+  stripped, mutation-tested), plus a dev-host red/green counting E484s from the
+  real chain.
+
+- 🔴 **Deploy: a `home-manager switch` IS required** (the corrected claim).
+  `init.vim` is `builtins.readFile`'d into the store, so the substitution
+  happens at build time. Files it sources — `native.lua`, `native.vim` — are
+  still read from the `~/workspace/devrc` working tree at runtime, so edits to
+  THOSE remain live on `git pull`. The two are different questions and the old
+  paragraph collapsed them into one.
+
+- ✅ **VERIFIED on the real path, 2026-08-29**, both hosts at `638959b4`:
+  `ssh` → `nvim` → `"+yy` on the laptop went from `E484=9, No provider,
+  OSC52=0` to `E484=0, No provider=0, OSC52=1`, payload decoding to the exact
+  yanked line. Workbench resolves the same substituted store `init.vim`. This
+  is the first claim in this effort verified on the path that actually failed
+  rather than a reconstruction of it.
+
+🔴 **RELOCATED 2026-08-30 (second attempt), and the first attempt is the lesson.**
+This block was moved out of `## State now — updated 2026-08-29` into a `###`
+subsection — but left INSIDE `## State now`, which REPLACES. The very next update
+was about to delete it, and `handoff_doc.py` said so. **Nesting durable content
+under a REPLACE heading does not protect it; only the SECTION's bucket decides.**
+It now sits under `## Gotchas`, which appends.
+
+
+- 🔴 **`ship.sh` rc 19 — EVERY PER-HOST LINE READ ✅ VERIFIED AND THE FLEET WAS
+  STILL WRONG.** Measured 2026-08-30: the workbench landed `db790e08` and the
+  laptop `e9437342`, each reporting `✅ VERIFIED — on branch main at origin/main
+  (clean tree) + switched`. `origin/main` moved BETWEEN the two legs' fetches
+  (#1046 merged mid-run), so both hosts converged correctly to different commits.
+  This is the whole reason `ship.sh` compares the two landed shas: a per-host
+  verdict cannot see it, and reading the per-host lines — which is otherwise the
+  right instinct — would have called it clean.
+  **Diagnose before re-running**: `git merge-base --is-ancestor <older> <newer>`.
+  True ⇒ benign, main simply advanced; re-run `ship.sh` and it converges. False
+  ⇒ genuine divergence, do not re-run blind. A one-host run reports
+  `cross-host agreement NOT COMPARED`, which is a different claim from agreement.
+- 🔴 **A DATED STATUS HEADING CANNOT BE REPLACED, and the doc had one.**
+  `handoff_doc.py` buckets by EXACT heading, so `## State now — updated
+  <date>` never matches the next session's `## State now — updated <other date>`:
+  the delta is bucketed NEW and **appends a second status section** while the
+  stale one stays at the top. Measured here — the doc briefly opened with
+  2026-08-29 status and carried the current state 300 lines below. Normalised to
+  the template's bare `## State now`; the 2026-08-29 content was kept under
+  `### Earlier — the 2026-08-29 record`, a non-status heading a replace cannot
+  touch. Same failure mode as a dated topic slug, one level down.
+- 🔴 **The write gate caught a RETRACTION about to be deleted.** The greenclip
+  security retraction sat under `## Next steps` — a REPLACE heading — so every
+  future status update would have silently removed it. `handoff_doc.py` flagged
+  it as a durable line being dropped; it now lives under `## Gotchas`, which
+  appends. **Where a durable claim SITS decides whether it survives**, and a
+  retraction is the class that must.
 
 ## How to verify
 - 🔴 **The rc-24 arm, under the real unit** — not by reading the file:
