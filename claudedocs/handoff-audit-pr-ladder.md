@@ -390,45 +390,82 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   rank 1 as "merge both PRs" (unmerged) and an investigation block still said the tier verdict
   was open. When a ranked item is redefined, re-read the status section against the NEW item.
 
+- 🔴 **AN APPEND-ONLY SECTION CANNOT BE CORRECTED BY APPENDING A CORRECTION.** `handoff_doc.py`
+  merges `Open investigations` / `Findings` / `Gotchas` by APPENDING and keeps earlier text
+  verbatim — which is the right default, and it means a delta claiming to "remove" a sentence in
+  one of those sections removes nothing. Measured: round 1's claim that an unverifiable `sha256`
+  citation had been removed was FALSE in exactly this way — the retraction landed under Gotchas
+  while the original line kept making the claim ~140 lines above it. **To correct a line in an
+  append-only section you must EDIT THE FILE, and say in the commit that you did and why.** Read
+  the tool's `buckets:` line before believing a removal.
+- 🔴 **A NUMBER NOTHING ASSERTS ON WILL DRIFT, AND A GREEN SUITE WILL NEVER SAY SO.** The
+  `op-selected` count in `_wait_events`' docstring has now been wrong twice — first left behind
+  by `#1074`, then re-staled one commit later by my own audit-fix, which added a `_wait_ops` call
+  while sequencing the guard test. `git grep op-selected` finds only prose; no test reads it. The
+  structural tell is general: **a count quoted in prose in a file whose tests never read it is
+  unpinned by construction.** Either pin it or stop quoting it — re-deriving it by hand each time
+  is what has already failed twice.
+- 🔴 **RE-DERIVE AFTER COMMITTING, NOT AFTER WRITING.** Both stalings share one mechanism: the
+  number was correct when measured and the *fix itself* then changed the tree. The measurement
+  and the commit are different moments, and only the second one is what a reader will check.
+
 ## How to verify
+🔴 **`<TREE>` below means A TREE YOU CHOSE — a worktree at the commit you mean to measure.**
+Never `~/workspace/devrc`: that is the SHARED base clone, its branch is whatever another
+session left it on, and `git fetch` does not move its working tree. An earlier revision of
+this block warned about exactly that and then hardcoded it three lines later, so the bucket
+re-derivation printed `62 / where=3` while annotating `64 / where=5`. A command that reads a
+tree you did not pin is not a verification.
+
 ```bash
-# --- the sandbox tier. THREE things the earlier version of this block got wrong ---
-# (a) `nix build` prints NO build log without -L, so a RESULT line never appears;
-# (b) an already-built derivation prints NOTHING at all, so silence is not a verdict;
-# (c) `~/workspace/devrc` is the SHARED base clone and may be on another session's branch.
-# So: point it at the tree you mean, and read the DERIVATION's own log.
-nix build /path/to/the/tree/you/mean#checks.x86_64-linux.pytests --no-link -L
-DRV=$(nix path-info --derivation /path/to/the/tree/you/mean#checks.x86_64-linux.pytests)
+# --- the sandbox tier. FOUR things an earlier version of this block got wrong ---
+# (a) `nix build` prints no build log for a build that SUCCEEDS without -L;
+# (b) an already-built derivation prints NOTHING at all, -L or not, so silence is not a verdict;
+# (c) a FAILING build DOES print the tail of the builder log inline (bounded by `log-lines`);
+# (d) `~/workspace/devrc` is the SHARED base clone — see above.
+nix build "<TREE>#checks.x86_64-linux.pytests" --no-link -L
+DRV=$(nix path-info --derivation "<TREE>#checks.x86_64-linux.pytests")
 nix log "$DRV" > /tmp/pytests.log            # works even when the build was cached
-grep -n 'RESULT:' /tmp/pytests.log           # RESULT: PASS (exit=0)
+grep -n 'RESULT:' /tmp/pytests.log           # TWO hits: `RESULT: all good`, then
+                                             # `RESULT: PASS (exit=0)` — the LAST is the verdict
 grep -c 'panic: test timed out' /tmp/pytests.log   # 0
 # repeat for .nodetests — ONE AT A TIME; a combined invocation produces FALSE failures.
+# nodetests prints FIVE `# fail 0` blocks: 569 browser-bridge, 508 dl-router, 21 browser-ext,
+# 188 clickup skill, 134 discord-embed-ext.
 
 # --- #1109 landed by CONTENT, never ancestry (a squash merge is never an ancestor) ---
 git -C ~/workspace/devrc fetch origin main
 # BOTH pair sites sequence: each waits for row one before issuing command two
 git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/test_server.py \
   | grep -cE '_wait_ops\(spool_dir, "tabs", 1, where=_routed_to\(inst\)\)'   # 2
+# POSITIVE CONTROL for that grep, because a zero from a dead pattern is indistinguishable
+# from a real zero: the same pattern returns 1 at 2579e2f3 and 0 at 2cec1d45.
 git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/test_server.py \
   | grep -cE '^\s+(absent, empty|first, second) = _wait_ops'                 # 0
-# the ratchet's PIN did NOT move — sequencing adds a wait, it converts nothing
 git -C ~/workspace/devrc show origin/main:scripts/tests/test_positional_spool_reader_ratchet.py \
   | grep -m1 'PINNED_POSITIONAL_TOTAL ='                                     # 47
 
-# --- re-derive the bucket counts rather than trusting any prose that quotes them ---
-nix develop ~/workspace/devrc -c python3 -c "
+# --- re-derive the bucket counts. NOTE `<TREE>` — this is the command that got it wrong. ---
+nix develop ~/workspace/devrc -c python3 - "<TREE>" <<'PY'
 import sys, collections
-sys.path.insert(0, '/home/zach/workspace/devrc/scripts/tests')
+tree = sys.argv[1]
+sys.path.insert(0, tree + "/scripts/tests")
 import test_positional_spool_reader_ratchet as R
 recs = R.classify_wait_calls(R.TARGET_DIR)
-print(len(recs), 'call sites')
-for b,c in sorted(collections.Counter(r['bucket'] for r in recs).items()): print(' %3d  %s'%(c,b))
-"   # after #1109: 64 sites, _wait_ops where= 5, positional 47
+assert str(R.TARGET_DIR).startswith(tree), ("measuring the WRONG tree", R.TARGET_DIR)
+print(R.TARGET_DIR)
+print(len(recs), "call sites")
+for b, c in sorted(collections.Counter(r["bucket"] for r in recs).items()):
+    print("  %3d  %s" % (c, b))
+PY
+# at #1109's head: 64 sites, _wait_ops where= 5, _wait_events positional 47 (the PIN, unmoved).
+# The assert is the point: TARGET_DIR resolves from the ratchet module's OWN __file__, so
+# importing it from the wrong path silently measures the wrong corpus.
 
 # --- the CONTROL that makes the fix non-vacuous, for EITHER pair site ---
 # swap the two _cmd_sess calls, keeping the sequencing, in a .git-free `cp -a` copy.
 # Expect RED at the first row's ["session"] with KeyError: 'session', and the
-# `pair[0] == <first row>` line still GREEN. Measured on both sites.
+# `pair[0] == <first row>` line still GREEN. Measured on both sites, twice, independently.
 ```
 ## Open investigations — live diagnosis state
 
