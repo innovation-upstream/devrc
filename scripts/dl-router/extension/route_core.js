@@ -236,14 +236,22 @@ const DISCORD_ORIGIN_HOST = "cdn.discordapp.com";
  * exception, so the exception is expressed here, once, rather than by
  * weakening that rule for everyone.
  *
- * THE HOST IS FOLDED, and it is not decoration. `playerSourceKey` keys on
- * `scheme://host + path`, so the proxy copy and the original -- the SAME
- * attachment path served from two hosts -- would key differently and file as
- * two assets. Save an image once from Chrome's own "Save image as..." and once
- * from this extension's menu and the ledger holds two rows that never
- * accumulate a hit: exactly the miss this key exists to remove. The docstring
- * above says the PATH is the identity; folding the host is what makes the
- * implementation as wide as that sentence.
+ * THE AUTHORITY IS FOLDED -- host, SCHEME and PORT, not just the host.
+ * `playerSourceKey` keys on `scheme://host + path` (and `host` carries a
+ * non-default port), so the proxy copy and the original -- the SAME attachment
+ * path served from two hosts -- would key differently and file as two assets.
+ * Save an image once from Chrome's own "Save image as..." and once from this
+ * extension's menu and the ledger holds two rows that never accumulate a hit:
+ * exactly the miss this key exists to remove. The docstring above says the
+ * PATH is the identity; folding the authority is what makes the implementation
+ * as wide as that sentence.
+ *
+ * Scheme and port fold out as a consequence of rebuilding the key from a fixed
+ * origin rather than from the input. Stated because it is real, not because it
+ * matters here: Discord is https-only and portless, so no live URL exercises
+ * either axis, and the tests below pin the host axis only.
+ *
+ * The READ side must fold identically -- see `haveUrl` in service_worker.js.
  */
 export function discordSourceKey(url) {
   if (!discordChannelId(url)) return "";

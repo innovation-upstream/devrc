@@ -1356,7 +1356,15 @@ export async function playerDownload(msg, sender) {
 export async function haveUrl(embedUrl) {
   await ready();
   if (!state.config.enabled) return { ok: false, have: false };
-  const key = playerSourceKey(embedUrl);
+  // THE READ MUST USE THE SAME FOLD AS THE WRITE. `discordSourceKey` folds
+  // a Discord attachment's host to the origin before the ledger records it, so
+  // asking with the bare `playerSourceKey` of a `media.discordapp.net` URL
+  // looks up a key the write side never stores -- a badge that can only miss,
+  // which is the failure this whole docstring is about. Not reachable today
+  // (no Discord `[site_rules."<host>".player]` rule exists, so nothing asks
+  // with a CDN URL), but nothing else pins it, and the first operator to add
+  // one would hit it.
+  const key = discordSourceKey(embedUrl) || playerSourceKey(embedUrl);
   if (!key) return { ok: false, have: false };
   try {
     const out = await api("GET", `/have?url=${encodeURIComponent(key)}`,
@@ -1408,8 +1416,22 @@ export async function onMenuClicked(info, tab) {
   const directFile = discordSourceKey(target) !== "";
   const streaming = manifest || (!directFile && info.mediaType === "video");
   if (streaming) {
-    // HLS/DASH has no single file to save -- hand the PAGE url to yt-dlp.
-    const url = isHttpUrl(info.pageUrl) ? info.pageUrl : target;
+    // HLS/DASH has no single file to save -- hand the PAGE url to yt-dlp,
+    // because on the sites this was built for the page is what yt-dlp knows
+    // how to resolve.
+    //
+    // A DISCORD MANIFEST IS THE ONE CASE WHERE THAT IS BACKWARDS, and the cell
+    // only became reachable when the manifest test moved outside the bypass.
+    // `info.pageUrl` there is `discord.com/channels/<guild>/<channel>` -- an
+    // authenticated SPA route, not a media page -- while `target` IS the
+    // manifest yt-dlp consumes natively. Handing over the page throws away the
+    // only usable URL, and the failure is INVISIBLE: `/fetch` has no allowlist
+    // so the job is accepted, `submitFetch` toasts "filed to <dir>" as soon as
+    // the POST returns, and nothing ever polls the job -- `jobId` is returned
+    // once and dropped. That is a success toast with no file, which is exactly
+    // the silent wrong answer the manifest test was moved out here to prevent.
+    const url = (manifest && directFile) ? target
+      : (isHttpUrl(info.pageUrl) ? info.pageUrl : target);
     await startFetch(url, info, tab);
     return;
   }

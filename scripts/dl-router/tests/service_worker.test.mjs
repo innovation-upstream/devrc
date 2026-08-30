@@ -592,23 +592,38 @@ test("a Discord .m3u8 is still treated as a stream, not saved as a file", async 
   // The bypass must not reach a manifest: downloading a ~200-byte playlist and
   // calling it the media is a silent wrong answer where the old path failed
   // loudly.
+  // 🔴 `auto: true` and a POSITIVE assertion, because the absence alone is the
+  // F4 defect wearing a different hat. MEASURED: with only
+  // `downloads.length === 0`, a mutant that made a Discord manifest do NOTHING
+  // AT ALL survived the whole 527-test suite. An absence cannot tell "handed
+  // to the stream path" from "silently dropped".
   reset();
+  const manifestUrl = "https://cdn.discordapp.com/attachments"
+    + "/119283746551234567/998877665544332211/live.m3u8?ex=1";
   fetchHandler = async (url) => {
     if (url.endsWith("/match")) {
       return { ok: true, status: 200,
-        json: async () => ({ dir: "other", auto: false, reason: "no match" }) };
+        json: async () => ({ dir: "Jane Doe", auto: true,
+          reason: "tag=='Jane Doe'" }) };
     }
     return { ok: true, status: 200, json: async () => ({ jobId: "j10" }) };
   };
   await SW.onMenuClicked({
     menuItemId: SW.MENU_ID,
     mediaType: "video",
-    srcUrl: "https://cdn.discordapp.com/attachments"
-      + "/119283746551234567/998877665544332211/live.m3u8?ex=1",
+    srcUrl: manifestUrl,
     pageUrl: "https://discord.com/channels/1/2",
   }, {});
   assert.equal(calls.downloads.length, 0,
     "a manifest must never be handed to chrome.downloads");
+  const fetchCall = calls.fetches.find((f) => f.url.endsWith("/fetch"));
+  assert.ok(fetchCall, "the manifest must actually reach the yt-dlp path");
+  // 🔴 And it must get the MANIFEST, not the Discord page. `discord.com/
+  // channels/<guild>/<channel>` is an authenticated SPA route yt-dlp cannot
+  // resolve, and the job's failure is unobservable -- nothing polls `jobId`,
+  // so the user would get a "filed" toast and no file.
+  assert.equal(JSON.parse(fetchCall.opts.body).url, manifestUrl,
+    "a Discord manifest must be handed over as itself, not as the page url");
 });
 
 test("the menu routes a stream through the matched dir, not the catch-all", () => {
@@ -2546,6 +2561,25 @@ test("dlr:have asks the ledger by the NORMALISED embed url", async () => {
   assert.equal(calls.fetches[0].url,
     `http://127.0.0.1:8791/have?url=${encodeURIComponent(EMBED_URL)}`);
 });
+
+test("dlr:have folds a Discord attachment the SAME WAY the ledger write does",
+  async () => {
+    // 🔴 A SEAM, not a component. The write side folds a Discord attachment's
+    // authority to the origin before the ledger records it; if the read side
+    // asked with the bare proxy key it would look up a string the writer never
+    // stores, and the badge could only ever miss -- "a badge that never lights
+    // actively asserts you do not have this". Neither side is wrong alone,
+    // which is exactly why this has to be pinned as a RELATIONSHIP.
+    reset();
+    fetchHandler = async () => ({ ok: true, status: 200,
+      json: async () => ({ ok: true, have: true, dir: "Jane Doe" }) });
+    const path = "/attachments/119283746551234567/998877665544332211/a.png";
+    await SW.haveUrl(`https://media.discordapp.net${path}?format=webp&width=550`);
+    const asked = decodeURIComponent(calls.fetches[0].url.split("url=")[1]);
+    // The literal the WRITE side produces, spelled out rather than computed
+    // from the function under test.
+    assert.equal(asked, `https://cdn.discordapp.com${path}`);
+  });
 
 test("a ledger miss is a miss, and a dead sidecar is also a miss", async () => {
   reset();
