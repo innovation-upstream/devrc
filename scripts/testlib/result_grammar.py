@@ -134,6 +134,10 @@ _HEREDOC = re.compile(rf"""^\t*{re.escape(RESERVED_PREFIX)}""")
 # permanently red with no remedy but rewording someone's prose.
 _COMMENT = re.compile(r"^\s*#")
 
+# An escaped newline INSIDE a payload — the emitted text becomes several lines,
+# each starting at column 0. `_ESC` only covers escapes BEFORE the prefix.
+_EMBEDDED_NEWLINE = re.compile(r"\\[nr]")
+
 # --- PAYLOAD CLASSIFICATION ---------------------------------------------------
 # Three outcomes, not two, and BENIGN is a WHITELIST.
 #
@@ -218,7 +222,9 @@ _SEPARATOR = re.compile(r"""[;&]""")
 # it reported every line above as provably harmless. Two of them had been
 # COLLISION one revision earlier, so it was a strict regression. This is the one
 # place in this module where being wrong is fail-OPEN, which is why the chain
-# can only ever return COLLISION or DYNAMIC — never BENIGN.
+# can only ever return COLLISION or DYNAMIC — never BENIGN. (It was not the
+# ONLY fail-open this module has had: the embedded-newline payload above was
+# a second, found one round later. Prefer measuring to claiming uniqueness.)
 _CHAIN = re.compile(r"""\||>\(|<\(""")
 
 COLLISION = "collision"
@@ -257,8 +263,12 @@ def classify_payload(line: str) -> str | None:
     `DYNAMIC`       — this module CANNOT PROVE what gets printed. 🔴 That is not
                       "probably fine": `printf "RESULT: %s" "$verdict"` and
                       `` echo "RESULT: `cat v`" `` both emit a real forged
-                      verdict. The DEFAULT for the quoted arm, so an
-                      unrecognised spelling fails safe.
+                      verdict. The DEFAULT for the quoted arm — but "fails safe"
+                      was too strong a claim for a while: an escaped newline
+                      INSIDE the payload returned BENIGN for a line that really
+                      forged on its second output line, because the proof is per
+                      LINE and only the first was proved. Closed; the shape is
+                      pinned by EMBEDDED_NEWLINE_FIXTURES.
     `BENIGN`        — PROVED a closed literal that is not `PASS`/`FAIL`.
 
     🔴 A line can run SEVERAL commands, and the forgery hides in the second:
@@ -319,6 +329,19 @@ def _classify_one_command(command: str) -> str:
             return DYNAMIC              # a runtime value is spliced in
         if not _TERMINAL_AFTER_QUOTE.match(rest):
             return DYNAMIC              # `+ v`, `, v`, `.join(…)` — appends
+        if _EMBEDDED_NEWLINE.search(inside):
+            # 🔴 The closed-literal proof is PER LINE, and an escaped newline
+            # inside the payload starts ANOTHER line at column 0 that the proof
+            # never looked at. `printf "RESULT: ok\nRESULT: FAIL\n"` really
+            # writes `RESULT: FAIL` there, and this returned BENIGN for it —
+            # a fail-open in the one direction this module must not have.
+            #
+            # DYNAMIC rather than COLLISION on purpose: whether the escape is
+            # INTERPRETED depends on the emitter (`printf` and `echo -e` expand
+            # it, a bare `echo` prints it literally), and this module cannot
+            # tell. COLLISION has no ledger, so guessing wrong that way would be
+            # an unpinnable false positive on a benign line.
+            return DYNAMIC
         return BENIGN
 
     # Unquoted command, or a heredoc body line: the rest IS the payload, so it
@@ -514,6 +537,24 @@ CHAIN_TRANSFORM_FIXTURES = {
 SEVERITY_RUNG_FIXTURES = {
     "benign-then-dynamic": ("echo " + RESERVED_PREFIX + " ok; echo "
                             + RESERVED_PREFIX + " $v", DYNAMIC),
+}
+
+# 🔴 EMBEDDED-NEWLINE PAYLOADS. An escaped newline inside the payload starts
+# another line at column 0, and the closed-literal proof is PER LINE — it proved
+# only the first and returned BENIGN while bash really wrote a verdict on the
+# second. Each is DYNAMIC (not provable), never BENIGN.
+#
+#   name -> (line, verdict, does bash REALLY forge?)
+EMBEDDED_NEWLINE_FIXTURES = {
+    "printf-two-lines": ('printf "' + RESERVED_PREFIX + ' ok\\n'
+                         + RESERVED_PREFIX + ' FAIL\\n"', DYNAMIC, True),
+    "echo-e-two-lines": ('echo -e "' + RESERVED_PREFIX + ' ok\\n'
+                         + RESERVED_PREFIX + ' PASS"', DYNAMIC, True),
+    # A bare `echo` does NOT expand the escape, so this one forges nothing — it
+    # is DYNAMIC because the module cannot tell the two apart, which is exactly
+    # why this class is DYNAMIC rather than COLLISION.
+    "bare-echo-literal": ('echo "' + RESERVED_PREFIX + ' ok\\n'
+                          + RESERVED_PREFIX + ' PASS"', DYNAMIC, False),
 }
 
 # Lines that MENTION the grammar a second time without running a second

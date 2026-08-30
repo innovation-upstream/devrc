@@ -559,6 +559,40 @@ def test_a_transforming_chain_is_NEVER_reported_benign(shape):
         "element is that this claim is data a test checks, not prose")
 
 
+@pytest.mark.parametrize("shape", sorted(G.EMBEDDED_NEWLINE_FIXTURES))
+def test_an_embedded_newline_payload_is_never_reported_benign(shape):
+    """🔴 ROUND-8 FINDING NEW-15 — the SECOND fail-open in this module.
+
+    The closed-literal proof is PER LINE. An escaped newline inside the payload
+    starts another line at column 0 that the proof never looked at, so
+    `printf "RESULT: ok\\nRESULT: FAIL\\n"` was reported BENIGN while bash really
+    wrote `RESULT: FAIL` there. The failure message would then have told the
+    operator it "cannot collide today — pin it with that reason", putting a real
+    forgery into the ledger reserved for provably-harmless payloads.
+
+    DYNAMIC rather than COLLISION because whether the escape is INTERPRETED
+    depends on the emitter: `printf`/`echo -e` expand it, a bare `echo` does not
+    — and the `bare-echo-literal` fixture is the one that forges nothing, which
+    is why guessing COLLISION would be an unpinnable false positive.
+    """
+    line, expected, _really_forges = G.EMBEDDED_NEWLINE_FIXTURES[shape]
+    verdict = G.classify_payload(line)
+    assert verdict != G.BENIGN, (
+        f"an embedded-newline payload was reported PROVABLY HARMLESS; the proof "
+        f"is per line and only the first line was proved: {line}")
+    assert verdict == expected, (
+        f"expected {expected!r} for {shape!r}, got {verdict!r}: {line}")
+
+
+def test_the_embedded_newline_ledger_covers_BOTH_answers():
+    """The class exists because the module CANNOT tell an expanding emitter from
+    a literal one. A ledger where every entry forges would not show that."""
+    flags = {f for _line, _v, f in G.EMBEDDED_NEWLINE_FIXTURES.values()}
+    assert flags == {True, False}, (
+        f"really_forges takes only {flags}; the `bare-echo` case is the whole "
+        "reason this class is DYNAMIC rather than COLLISION")
+
+
 FORGE_TOOLS = ("bash", "sed", "tr", "awk", "tee")
 
 
@@ -589,8 +623,11 @@ def test_the_really_forges_flags_are_MEASURED_against_real_bash(tmp_path):
         "NEW-14 was.")
 
     bash = shutil.which("bash")
-    for shape, (line, _verdict, really_forges) in sorted(
-            G.CHAIN_TRANSFORM_FIXTURES.items()):
+    # 🔴 BOTH ground-truth ledgers. A second ledger carrying unmeasured flags is
+    # NEW-14 again — the whole finding was a field that READ as verified.
+    ledger = {**{f"chain/{k}": v for k, v in G.CHAIN_TRANSFORM_FIXTURES.items()},
+              **{f"newline/{k}": v for k, v in G.EMBEDDED_NEWLINE_FIXTURES.items()}}
+    for shape, (line, _verdict, really_forges) in sorted(ledger.items()):
         # `wait` so a process substitution's output is flushed before bash exits;
         # cwd=tmp_path so `tee f` writes into the sandbox, not the repo.
         proc = subprocess.run([bash, "-c", line + "\nwait\n"], cwd=str(tmp_path),
