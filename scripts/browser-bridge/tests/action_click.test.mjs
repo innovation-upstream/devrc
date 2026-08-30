@@ -348,60 +348,59 @@ test("registerActionClick is a no-op where chrome.action is absent", () => {
   assert.equal(registerActionClick({}), false, "no onClicked → nothing to wire");
 });
 
-test("🔴 startBackground()'s call to it carries no condition", () => {
-  // 🔴 THE NAME IS NARROWER THAN "UNCONDITIONALLY" ON PURPOSE. This walks the
-  // function body and pins the statement; it cannot prove REACHABILITY, and an
-  // audit demonstrated the gap: inserting `if (globalThis.__x) return;` as the
-  // first line of startBackground() leaves the call unconditional, at depth 1,
-  // and never executed — all 568 tests stay green. The check below now also
-  // refuses an early return ABOVE the call, which closes the demonstrated
-  // mutant; it still does not close "unreachable" in general. A description
-  // that reads as coverage while providing less is worse than none, so the
-  // sentence is trimmed to what the body actually decides.
+test("🔴 nothing can exit startBackground() before it wires the click", () => {
+  // 🔴 THIS IS THE SOLE COVERAGE OF THE WIRING. No test calls startBackground()
+  // — every suite sets BROWSER_BRIDGE_NO_AUTOSTART, because it also starts the
+  // poll loop — so if this check has a hole, the toolbar click can be dead with
+  // the whole suite green. It has had two.
+  //
+  // Round 2 pinned the statement text: `if (false) registerActionClick();` died,
+  // but `if (globalThis.__x) return;` above the call SURVIVED, because the guard
+  // only looked at the call's own line.
+  // Round 3 added an early-exit scan anchored with /^\s*(return|throw)/ — which
+  // could not match `if (…) return;`, a line starting with `if`.
+  // Round 4 widened WHERE on the line the token may sit, and still missed
+  // `if (…) { return; }` — the braced spelling, which is the idiom this very
+  // file uses — because the scan filtered to lines whose depth was 1 AT THEIR
+  // END, and a `return` inside braces ends at depth 2.
+  //
+  // Three misses, one shape: the check kept reasoning about LINES. So it no
+  // longer does. It takes the raw source between the function's opening brace
+  // and the call, strips comments and string literals (the token appears in
+  // both, and matching those would fail loud but for the wrong reason), and
+  // asserts no `return`/`throw` survives at ANY depth. There is nothing left
+  // for a spelling to hide behind.
   const src = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "..", "extension", "service_worker.js"),
     "utf8");
   const start = src.indexOf("function startBackground()");
   assert.notEqual(start, -1, "startBackground vanished — re-point this guard");
-  // Walk the function body tracking brace depth, so a call moved inside ANY
-  // nested block is seen as nested rather than as present.
-  let depth = 0, i = src.indexOf("{", start), end = -1;
-  const lines = [];
-  let lineStart = i;
-  for (; i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") { depth--; if (depth === 0) { end = i; break; } }
-    else if (src[i] === "\n") {
-      lines.push({ text: src.slice(lineStart, i), depth });
-      lineStart = i + 1;
-    }
-  }
-  assert.notEqual(end, -1, "could not find the end of startBackground");
-  const hits = lines.filter((l) => /(^|[^.\w])registerActionClick\s*\(/.test(l.text));
-  assert.equal(hits.length, 1,
-    `expected exactly one registerActionClick call in startBackground, found ${hits.length}`);
-  assert.equal(hits[0].depth, 1,
-    "the call is nested inside a block — a click may never be wired");
-  assert.equal(hits[0].text.trim(), "registerActionClick();",
-    "the call carries a condition or a guard — pin the whole statement, because " +
-    "`if (false) registerActionClick();` is the mutant this test exists to kill");
-  // No early exit above it at the function's own level. This is the audit's
-  // `if (globalThis.__x) return;` mutant: the call stays syntactically
-  // unconditional while becoming dead.
-  // 🔴 THE TOKEN ANYWHERE ON THE LINE, NOT ANCHORED AT ITS START. The first
-  // version used /^\s*(return|throw)\b/, which cannot match the very mutant the
-  // comment above names: `if (globalThis.__x) return;` is a line beginning with
-  // `if`. An audit measured it SURVIVING all 568 tests — a guard passing on the
-  // case its own comment claims is closed, which is worse than no guard because
-  // it stops the next reader re-testing it. No depth-1 line above the call
-  // contains either token today, so this cannot false-positive on the body as
-  // written.
-  const idx = lines.indexOf(hits[0]);
-  const above = lines.slice(0, idx).filter((l) => l.depth === 1);
-  const early = above.find((l) => /(^|[^.\w])(return|throw)\b/.test(l.text));
-  assert.ok(!early,
-    "an early exit sits above the call — it is syntactically unconditional and " +
-    `never reached: ${early && early.text.trim()}`);
+  const open = src.indexOf("{", start);
+  const call = src.indexOf("registerActionClick()", open);
+  assert.notEqual(call, -1,
+    "registerActionClick() is not called in startBackground() at all — a click " +
+    "can never reach the handler");
+
+  // Everything the function does BEFORE wiring the click.
+  const before = src.slice(open + 1, call);
+  const stripped = before
+    .replace(/\/\*[\s\S]*?\*\//g, " ")      // block comments
+    .replace(/\/\/[^\n]*/g, " ")             // line comments
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')      // double-quoted strings
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")      // single-quoted
+    .replace(/`(?:[^`\\]|\\.)*`/g, "``");     // templates
+
+  // ANTI-VACUITY: the stripper must leave the real statements behind, or this
+  // whole assertion is a claim about an empty string.
+  assert.match(stripped, /chrome\.runtime\.onInstalled/,
+    "comment/string stripping ate the function body — the check below would " +
+    "pass vacuously");
+
+  const early = stripped.match(/(^|[^.\w])(return|throw)\b/);
+  assert.equal(early, null,
+    "an early return/throw sits between the start of startBackground() and the " +
+    "click wiring — the toolbar click would never be registered, and no other " +
+    `test would notice. Found: ${early && early[0].trim()}`);
 });
 
 // --------------------------------------------------------------------------- //

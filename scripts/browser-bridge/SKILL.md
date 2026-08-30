@@ -50,7 +50,7 @@ once, on stderr.
 A toolbar-icon click copies `bw://<host>/<instance>/<tabId>` — one token that IS
 `--instance`+`--tab`, either side of the op; the host field is verified. 🔴 For
 `type`/`js`/`eval`/`agent` it is a reference only BEFORE the op — after it, it is
-the text/goal you send. `agent` refuses a LEADING one and any `--tab`.
+the text/goal you send. `agent` refuses a LEADING one, `--tab` and `--frame`.
 Result payloads land under `.result.data`.
 
 | command | does |

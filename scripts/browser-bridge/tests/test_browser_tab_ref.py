@@ -691,7 +691,7 @@ def test_agent_refuses_a_frame_from_any_source(bridge, argv, env, source, word):
     assert bridge.bodies == [], f"nothing may be dispatched: {bridge.bodies}"
 
 
-@pytest.mark.parametrize("var", ["BB_TAB", "BB_FRAME"])
+@pytest.mark.parametrize("var", ["BB_TAB", "BB_FRAME", "BB_INSTANCE"])
 def test_the_agent_arm_does_not_LEAK_routing_env_to_its_children(bridge, tmp_path, var):
     """🔴 The guard closes the DOOR; this closes the SEAM.
 
@@ -719,7 +719,8 @@ def test_the_agent_arm_does_not_LEAK_routing_env_to_its_children(bridge, tmp_pat
                        f'printf "SEEN {var}=[%s]\\n" "${{{var}-<unset>}}"\n')
 
     clear = {"--tab": '', "--frame": ''}["--tab" if var == "BB_TAB" else "--frame"]
-    flag = "--tab" if var == "BB_TAB" else "--frame"
+    flag = {"BB_TAB": "--tab", "BB_FRAME": "--frame",
+            "BB_INSTANCE": "--instance"}[var]
     r = subprocess.run(
         ["bash", str(stub_dir / "browser"), flag, clear, "--instance", "main",
          "agent", "some goal"],
@@ -735,23 +736,71 @@ def test_the_agent_arm_does_not_LEAK_routing_env_to_its_children(bridge, tmp_pat
 
 
 def test_POSITIVE_CONTROL_the_stub_agent_can_see_an_inherited_var(bridge, tmp_path):
-    """The two assertions above are ABSENCES — prove the stub can see a leak.
+    """The assertions above are ABSENCES — prove the stub can see a leak.
 
-    If the stub simply never observed the environment, `[<unset>]` would be
-    reported for a variable that WAS inherited, and the guard would pass while
-    testing nothing.
+    If the stub never ran, or never observed the environment, `[<unset>]` would
+    be reported for a variable that WAS inherited and every leak assertion would
+    pass while testing nothing. That is not hypothetical: it is exactly what
+    happened when the stubs carried a `/usr/bin/env` shebang and could not exec
+    in the nix sandbox — this control is what said so.
     """
     stub_dir = tmp_path / "stub-control"
     stub_dir.mkdir()
     (stub_dir / "browser").write_text(CLI.read_text(encoding="utf-8"), encoding="utf-8")
-    mockbin.write_exec(stub_dir / "browser-agent",
-                       'printf "SEEN BB_INSTANCE=[%s]\\n" "${BB_INSTANCE-<unset>}"\n')
-    # BB_INSTANCE is deliberately NOT unset by the agent arm — --instance IS
-    # forwarded, so inheriting it is consistent. That makes it the right control.
+    # 🔴 THE CONTROL MUST NOT REST ON THE DEFECT IT CONTROLS FOR. This used
+    # BB_INSTANCE, on the stated reasoning that the agent arm deliberately does
+    # not unset it — and that reasoning WAS the bug: `--instance ""` forwarded
+    # nothing while BB_INSTANCE survived the exec, so browser-agent's children
+    # drove the wrong Brave profile. Closing that leak would have broken this
+    # control, which is the tell that the control was load-bearing on a defect.
+    # BROWSER_BRIDGE_PORT is read by the CLI and never unset by it, so it
+    # measures inheritance without measuring the thing under test.
+    mockbin.write_exec(
+        stub_dir / "browser-agent",
+        'printf "SEEN BROWSER_BRIDGE_PORT=[%s]\\n" "${BROWSER_BRIDGE_PORT-<unset>}"\n')
     r = subprocess.run(
         ["bash", str(stub_dir / "browser"), "agent", "some goal"],
-        env={**bridge.env_for_stub(), "BB_INSTANCE": "main"},
+        env=bridge.env_for_stub(),
         capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
-    assert "SEEN BB_INSTANCE=[main]" in r.stdout, (
-        f"the stub cannot observe an inherited variable at all, so the leak "
+    assert "SEEN BROWSER_BRIDGE_PORT=[" in r.stdout, (
+        f"the stub never ran or never read the environment, so the leak "
         f"assertions above are vacuous. stdout: {r.stdout!r}")
+    assert "<unset>" not in r.stdout, (
+        f"an inherited variable did NOT reach the stub, so an absence there "
+        f"proves nothing about unsetting. stdout: {r.stdout!r}")
+
+
+def test_SKILL_md_names_every_routing_flag_the_agent_guard_REFUSES():
+    """🔴 The second ledger: the refusal list, not the exemption list.
+
+    The free-text pin above caught SKILL.md drifting on which subcommands treat
+    a trailing reference as text. It does NOT see the other list this sentence
+    carries — which routing flags `agent` refuses — and that one drifted the
+    moment the guard was widened from `--tab` to `--frame`: SKILL.md kept saying
+    "`agent` refuses a LEADING one and any `--tab`", so an agent routing off it
+    writes `browser --frame checkout-iframe agent "fill the form"` and gets rc 1
+    for a reason the file it read does not mention.
+
+    Derived from the guard itself: each `[ -z "$VAR" ] || die "agent cannot
+    honour ..."` line names a variable, and each variable has a flag spelling
+    SKILL.md must name.
+    """
+    cli = CLI.read_text(encoding="utf-8")
+    refused = set(re.findall(
+        r'\[ -z "\$([A-Z]+)" \][^\n]*\|\| die "agent cannot honour', cli))
+    assert refused, (
+        "no `agent cannot honour` refusals parsed out of the CLI — this guard "
+        "now checks nothing. Re-point it at whatever implements the refusal.")
+    flags = {v: f"--{v.lower()}" for v in refused}
+
+    skill = (BB / "SKILL.md").read_text(encoding="utf-8")
+    sentence = re.search(r"`agent` refuses[^\n]*(\n[^\n]*)?", skill)
+    assert sentence, ("SKILL.md no longer describes the `agent` refusal at all — "
+                      "re-point this guard rather than deleting it.")
+    text = sentence.group(0)
+    missing = {v: f for v, f in flags.items() if f"`{f}`" not in text}
+    assert not missing, (
+        f"the CLI refuses {sorted(flags.values())} for `agent`, but SKILL.md's "
+        f"refusal sentence does not name {sorted(missing.values())}. An agent "
+        f"reading SKILL.md will use it and get rc 1 with no warning there. "
+        f"Sentence: {text!r}")

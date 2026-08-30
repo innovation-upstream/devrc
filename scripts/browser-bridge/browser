@@ -2521,9 +2521,21 @@ else:
     # hand browser-agent an environment in which every child `browser` call it
     # makes routes to that tab — a confident answer about the wrong page, rc 0.
     # browser-agent accepts neither flag, so neither variable can mean anything
-    # below this point. BB_INSTANCE is deliberately NOT unset: --instance IS
-    # forwarded, so inheriting it is consistent rather than a leak.
-    unset BB_TAB BB_FRAME
+    # below this point.
+    #
+    # 🔴 BB_INSTANCE IS UNSET TOO, and the reasoning that exempted it was wrong
+    # in exactly one case — the same explicit-empty this comment block is built
+    # on. "`--instance` IS forwarded, so inheriting it is consistent" holds when
+    # a value survives: the arm forwards it explicitly two lines up. It does NOT
+    # hold for `browser --instance "" agent …`, the documented way to clear an
+    # inherited BB_INSTANCE (see the PRECEDENCE note above): INSTANCE is then
+    # empty, so NO --instance is forwarded, while BB_INSTANCE survives the exec
+    # and every child call browser-agent makes re-reads it — driving the WRONG
+    # BRAVE PROFILE, with no advisory, because the flag reset INSTANCE_SRC so
+    # `_note_env_routing` stays silent. Unsetting is safe for the other two
+    # cases precisely because the value is forwarded as an argument when it
+    # exists; the environment copy is never the thing that carries it.
+    unset BB_TAB BB_FRAME BB_INSTANCE
     exec "$HERE/browser-agent" "${aargs[@]}"
     ;;
   # ""|-h|--help|help is handled EARLIER (above the token-file read) so that
