@@ -1101,8 +1101,23 @@ class BaseCurrency(typing.NamedTuple):
         identically — 0 sections, so every section arrives NEW — so a doc that is
         whitespace is exactly as absent as one that is missing, and the bare test
         let the guard be walked by a single newline.
+
+        🔴 AND THE MAINLINE MUST HAVE SOMETHING TO LOSE — `is not None` is not
+        that test. A committed but EMPTY mainline doc parses to
+        `DocShape(0, 0, …)`, which is not None, so the refusal fired on it:
+        MEASURED, an empty committed mainline copy plus no local doc exited 7
+        `NOTHING WRITTEN` and printed "and <ref> has one (0 section(s) / 0
+        line(s))" — a self-contradicting sentence, blocking a legitimate first
+        write in a shape where NOTHING is destroyed. That is the exact mirror of
+        the bug this guard exists to fix, and an earlier docstring here claimed
+        the combination was already right. Both sides must be non-empty for a
+        replacement to cost anything.
         """
-        return nothing_to_merge_into(base_text) and self.mainline is not None
+        return (
+            nothing_to_merge_into(base_text)
+            and self.mainline is not None
+            and bool(self.mainline.lines)
+        )
 
 
 def base_currency(repo: Path, relpath: str) -> BaseCurrency:
@@ -1199,12 +1214,12 @@ def wrong_base_report(
         # loud line and the refusal are now the SAME condition by construction
         # rather than by two expressions that have to be kept in step.
         if replaces_mainline:
-            shape = (
-                f" ({currency.mainline.sections} sections / "
-                f"{currency.mainline.lines} lines)"
-                if currency.mainline is not None
-                else ""
-            )
+            # `replaces_mainline` implies `mainline is not None` AND a
+            # non-zero line count, so there is no absent-shape branch to write:
+            # an `else ""` here would be dead code that reads as a handled case.
+            assert currency.mainline is not None  # implied by replaces_mainline
+            shape = (f" ({currency.mainline.sections} sections / "
+                     f"{currency.mainline.lines} lines)")
             lines.append(
                 f"  this checkout has no usable {relpath} — missing, empty or "
                 f"whitespace, which the merge treats identically — and "

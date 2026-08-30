@@ -3250,11 +3250,11 @@ class TestBaseCurrencyMeasuresAndSaysWhenItCannot:
                               "no mainline ref resolves in this clone")
         loud = hd.wrong_base_report(("a tell",), cur, "d.md", Path("/r"),
                                     hd.doc_shape(BASE_DOC),
-                                    hd.nothing_to_merge_into(BASE_DOC))
+                                    cur.replaces_mainline_doc(BASE_DOC))
         assert "base currency UNCHECKED" in loud
         quiet = hd.wrong_base_report((), cur, "d.md", Path("/r"),
                                      hd.doc_shape(BASE_DOC),
-                                     hd.nothing_to_merge_into(BASE_DOC))
+                                     cur.replaces_mainline_doc(BASE_DOC))
         assert quiet == "", "an unmeasurable check must not speak on its own"
 
 
@@ -3605,6 +3605,14 @@ class TestAbsentBasePresentOnMainlineIsRefused:
 
         proposal = run_tool(work, update=update_file)
         assert proposal.returncode == 0, proposal.stderr
+        # 🔴 ASSERT THE PRECONDITION, not only the two negatives. Every other
+        # assertion here is satisfied by "the currency check never ran" —
+        # MEASURED with a mutant that returns an UNMEASURED BaseCurrency when
+        # `git show` fails: the run then printed NOTHING AT ALL and this test
+        # stayed green, along with the whole 186-test file. The negatives are
+        # only meaningful once the stale path is known to have executed.
+        assert "THE BASE DOCUMENT IS NOT THE NEWEST COMMITTED COPY" in proposal.stdout, (
+            "the stale path never ran, so the negatives below prove nothing")
         assert "will be replaced by this delta" not in proposal.stdout, (
             "claimed a replacement of a document the mainline does not have")
 
@@ -3636,3 +3644,53 @@ class TestAbsentBasePresentOnMainlineIsRefused:
             "which fires on exactly the shape that refuses."
         )
         assert " ".join(hd.WRONG_BASE_REMEDY.split()) == " ".join(expected.split())
+
+    @pytest.mark.parametrize("blank", ["", "\n", "   \n\n"])
+    def test_wrong_base_tells_shares_the_predicate_and_stays_SILENT_on_a_blank_base(
+        self, blank: str
+    ) -> None:
+        """🔴 GUARDS THE CONSOLIDATION ITSELF, which shipped unguarded.
+
+        `wrong_base_tells` used to open-code `not base_text.strip()`; it now
+        calls `nothing_to_merge_into`. MEASURED: mutating that call back to a
+        bare `not base_text` SURVIVED the whole 186-test file — no mutant existed
+        for the line the commit had just changed.
+
+        The consequence is not cosmetic. With the bare test, a first write into a
+        newline-only file raises a tell, so the operator gets the whole
+        "THIS MERGE LOOKS LIKE IT RESOLVED THE WRONG BASE" block on a run where
+        nothing is wrong. Measured: 0 tells at HEAD, 1 tell under the mutant.
+        """
+        assert hd.wrong_base_tells(blank, UPDATE_DOC, {}) == ()
+
+    def test_an_EMPTY_mainline_doc_is_NOT_something_to_lose(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE MIRROR BUG: refusing where NOTHING is destroyed.
+
+        `self.mainline is not None` is not "there is a copy to lose" — a
+        committed but EMPTY mainline doc parses to `DocShape(0, 0, …)`, which is
+        not None. MEASURED before the fix: an empty committed mainline copy plus
+        no local doc exited 7 `NOTHING WRITTEN` and printed "and <ref> has one
+        (0 section(s) / 0 line(s))" — a self-contradicting sentence — blocking a
+        legitimate first write. Replacing nothing with something costs nothing,
+        so it must not refuse.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        other = tmp_path / "emptier"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "E"), ("user.email", "e@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        (other / "claudedocs" / "handoff-sample-topic.md").write_text("", encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+        _sh("git", "commit", "-q", "--allow-empty", "-m", "empty the handoff", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        _sh("git", "fetch", "-q", "origin", cwd=work)
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == 0, (
+            "refused a first write where the mainline copy is EMPTY — nothing "
+            "would have been destroyed", res.stdout, res.stderr)
+        assert "status=stale-base" not in res.stderr
+        assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
