@@ -627,6 +627,37 @@ OWNS_NO_ON_DISK_STATE = {
     "guard_core.py",             # pure predicate library
     "register-nudge-hook.py",    # writes ~/.claude/settings.json; the deployed-path
                                  # seam is pinned by test_registrar_activation.py
+    "session-stamp.py",          # delegates every path to lib/session_trailer.py,
+                                 # exactly as agent-ledger-hook.py and
+                                 # bg-command-capture.py do. Its names ARE pinned —
+                                 # as whole relative paths, in the same form as this
+                                 # file — by tests/test_session_trailer.py::
+                                 # test_the_on_disk_artifact_names_are_pinned_as_whole_paths.
+                                 # 🔴 CACHE_LITERAL below cannot match it, but NOT
+                                 # for the reason an earlier revision of this
+                                 # comment gave. That revision said the state root
+                                 # was "the repo's own <git-common-dir>, not a path
+                                 # under $HOME at all" — the opposite of the fix
+                                 # that landed in the same PR, which moved the state
+                                 # to $XDG_CACHE_HOME|~/.cache/claude-session-trailer
+                                 # precisely because a git-dir-derived root recorded
+                                 # against the WRONG repo. The scan is blind here
+                                 # because the `.cache` literal lives in
+                                 # scripts/lib/session_trailer.py, OUTSIDE this
+                                 # scan's root — a location fact, not a storage one.
+                                 # The enumeration, not the scan, is what covers it.
+                                 # 🔴 `session_trailer.py` is deliberately NOT listed
+                                 # here: this ledger enumerates SOURCE files in
+                                 # scripts/claude-hooks/, and that module's source
+                                 # lives in scripts/lib/. It only appears beside the
+                                 # hook as a DEPLOY artifact (the guard_core.py
+                                 # pattern, because a store copy cannot reach
+                                 # scripts/lib/ through __file__), and that deployed
+                                 # name is pinned by the registrar's
+                                 # HOOK_LIBRARY_MODULES instead. Listing it here
+                                 # made a stale entry naming a path that does not
+                                 # exist, which the corroboration scan then tried to
+                                 # open.
 }
 
 CACHE_LITERAL = re.compile(r'["\'/]\.cache\b|XDG_CACHE_HOME|\.local/share')

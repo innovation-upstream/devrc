@@ -233,6 +233,7 @@ MANAGED_HOOK_SCRIPTS = frozenset({
     "handoff-write-guard.py",
     "next-step-nudge.py",
     "search-tool-nudge.py",
+    "session-stamp.py",
     "shell-env-nudge.py",
 })
 
@@ -272,7 +273,7 @@ MANAGED_SHELL_HOOK_SCRIPTS = frozenset({
 })
 
 HOOK_LIBRARY_MODULES = frozenset({"agent_ledger.py", "bg_command_capture.py",
-                                  "guard_core.py"})
+                                  "guard_core.py", "session_trailer.py"})
 
 REGISTRAR_SCRIPT = "register-nudge-hook.py"
 
