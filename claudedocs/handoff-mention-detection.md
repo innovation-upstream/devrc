@@ -249,12 +249,35 @@ The original diagnosis is kept below because #463 inherits its layout context.
    - 🔴 **THE ACTUAL COST DRIVER IS THE WORKLOAD, NOT THE PLACEMENT.** The gate runs
      **~19,440 collected tests for a three-markdown-file PR**. Storage, scheduling and
      concurrency are all symptoms of paying that per run, ten runs at a time.
-     **`--targets` subsetting is already MERGED and on `main`** — PR #1073,
-     `git grep -n 'DEVRC_TARGETS\|--targets' scripts/run-tests.sh` → ~42 hits. The unbuilt
-     half is wiring impact analysis into the pipeline so a PR runs only the targets its
-     diff can affect. That is the live candidate for this rank; it is a design question
-     (how the affected set is computed, and what it does when it cannot be), NOT a config
-     tweak — see the scoping notes when they land.
+     **`--targets` subsetting is already MERGED and on `main`** — PR #1073.
+   - 🔴 **THIS RANK IS ALREADY OWNED BY ANOTHER EFFORT. DO NOT BUILD HERE — HAND OVER.**
+     `claudedocs/handoff-ci-speedup.md` is the canonical doc, with live claims
+     **`ci-speedup-1`** (taken 1d ago, "cut devrc-ci pytests step from ~21min") and
+     **`ci-speedup-2`** (taken 3h ago, "empirically measure which test files are repo-wide
+     scanners"). It is well ahead of this rank and its ordering CONTRADICTS the obvious
+     one: a path→target mapper is worth **~1.7x alone but ~3.6x after** `scripts/tests` is
+     decomposed, so decomposition comes FIRST and must be **measured, not classified** (its
+     regex classifier over-classifies and is explicitly untrusted). Its estimate history is
+     **3x → 1.7x → uncertain** — three revisions, which is why it refuses to build the
+     mapper on an estimate.
+     🔴 **It also already TRIED the unpin, and that is the big lever, not the mapper:**
+     unpinned, queue wait **17.2m/22.5m → 0.1m** and wall clock **39.1m median → 17.4m**.
+     Reverted because a `DirectoryOrCreate` hostPath is created **root-owned**, so every
+     test shelling out to nix died — `opening lock file "/nix/var/nix/db/big-lock":
+     Permission denied`, **75 occurrences / 42 tests on every PR**, with PVC-era runs at
+     **0** as the control. Retry is gated on a `chown`/`chmod` probe **on a scratch
+     pipeline**, never on `devrc-ci`.
+   - **What THIS session adds for that owner, not found in their doc** (all measured here,
+     2026-08-30): `tekton-supersede` already covers `devrc-ci` (43 keyed runs) so a
+     concurrency cap removes no work; a #396-style split would DEMOTE devrc (~5 concurrent
+     → 1–2); the cache is **69 GB / 25,664 store paths**, not the 30Gi requested; RWX is
+     absent cluster-wide with positive controls (**0 CSI drivers, 0 RWX of 294 PVs**); and
+     **RWO is per-NODE, not per-pod**, so the access mode was never the lever.
+   - ⚠ **Process note, recorded because it is the reusable part:** this rank was
+     investigated for a full session BEFORE anyone ran `claim-work --list`. Two live claims
+     and a more advanced handoff already existed. Nothing was written to the cluster and
+     the findings above are a genuine contribution, but the sweep costs one command and
+     would have reordered the whole effort. Sweep FIRST — the rule names exactly this.
    - Affected surface if anyone does touch the cache: **4 pipelines** (`naida-ux-audit`,
      `remix-ux-audit`, `auditloop-ci`, `devrc-ci`) **+ 4 TriggerTemplate node pins**.
      `gitops-validate` is already on a separate `nix-store-cache-2`; `clawgate-ci`,
