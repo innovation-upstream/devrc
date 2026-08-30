@@ -40,7 +40,10 @@ needs no `zach-prev` identity: guard 12 covers an OVERLAP, and this was a REPLAC
 ✅ **BOTH HOSTS ARE NOW ON THE MAPPED TOKEN** — workbench and laptop each verified through the
 real client (`cairn sync` → 132 entries) and by the audit log (`token=a8f329c534d7
 identity=zach`). `token=2481e4553f6c` count since the rotated pod started: **0**. **Criterion
-10's 24 h clock is running from 2026-08-30T02:11Z.** ⚠ The evidence lives in the POD LOG,
+10's 24 h clock is running from 2026-08-30T02:12:28Z** — the pod's own `startTime`, because
+the log cannot evidence anything earlier than the process that writes it. (An earlier revision
+of this line said `02:11Z`, which was ~90 s optimistic: it dated the clock from the commit
+rather than from the observer.) ⚠ The evidence lives in the POD LOG,
 which resets on restart — a restart inside the window destroys the proof even though the
 property still holds. Read it from Loki if the window must survive one.
 
@@ -154,16 +157,34 @@ fresh: `claim-work --slug-for <this doc> <rank>`.
 
 🔴 **RANK 1 (criterion 10 step 1) IS DONE** — see "State now". What follows is the remainder.
 
-1. 🔴 **Criterion 10 step 2, once the clock expires (≥ 2026-08-31T02:11Z).** Both hosts are
-   already moved. Remaining: confirm `kubectl -n subsystem-store logs <pod> | grep -c
-   token=2481e4553f6c` is still **0** over the full 24 h, then **exercise the rollback once
-   deliberately** — delete line 2, restart the pod, confirm reads still work on legacy, put it
-   back — and **only then** delete the bare line. ⚠ A pod restart inside the window resets the
-   log and destroys the evidence; read it from Loki if that happens. ⚠ Reading the mapped
-   token: `kubectl -n subsystem-store get secret subsystem-store-token -o
-   jsonpath='{.data.token}' | base64 -d` and take field 1 of line 2. 🔴 Deleting line 1 also
-   removes the last unrestricted credential — after it, a scope missing from `zach`'s
-   allowlist is unreadable by anything.
+1. 🔴 **Criterion 10 step 2, once the clock expires (≥ 2026-08-31T02:12:28Z — the pod's
+   `startTime`, not the commit time).** Both hosts are already moved. The checklist, in order:
+   1. `kubectl -n subsystem-store logs <pod> | grep -c token=2481e4553f6c` is still **0**
+      across the full 24 h. ⚠ **A pod restart inside the window resets the log and destroys
+      the evidence** even though the property still holds — read it from Loki if that happens.
+      Confirm `restartCount` and `startTime` before quoting the count.
+   2. **Exercise the rollback once, deliberately** — delete line 2, restart the pod, confirm
+      reads still work on legacy, put it back. The card requires this *before* removal, and it
+      is the only thing that proves the migration is reversible rather than asserted.
+   3. Delete the bare line. 🔴 That removes the **last unrestricted credential**: afterwards a
+      scope missing from `zach`'s 15-entry allowlist is unreadable by anything, and by
+      criterion 3 that is indistinguishable from a scope that does not exist. Re-read the
+      allowlist against `ls /data` first — it is a snapshot, and the store has gained scopes
+      before.
+   4. 🔴 **Shred the legacy token's leftovers, or the retired credential outlives its
+      retirement.** `~/.config/subsystem-store/env.bak-legacy-2026-08-29` exists on **BOTH**
+      hosts and holds the bare token in plaintext; they are the rollback for step 2 and must
+      survive until it lands, then be destroyed:
+      ```bash
+      shred -u ~/.config/subsystem-store/env.bak-legacy-2026-08-29
+      ssh zach@192.168.50.155 'shred -u ~/.config/subsystem-store/env.bak-legacy-2026-08-29'
+      ```
+      Nothing else in this doc or on the card carries this step. "The row is deleted" is not
+      "the credential is gone" while a copy sits on two disks.
+   ⚠ Reading the mapped token: `kubectl -n subsystem-store get secret subsystem-store-token -o
+   jsonpath='{.data.token}' | base64 -d` and take field 1 of line 2. 🔴 **Never pipe it into an
+   `ssh … bash -s` that is also receiving a heredoc** — see the MULTIOS trap above; that is
+   what forced the first rotation.
 2. 🔴 **The backup CronJob, and it is now more urgent than it was.** The served copy can hold
    bytes that exist nowhere else the moment anything writes through the API (see the seed
    clobber below), and `zach` is a whole-file `PUT` credential over all 15 scopes. The LOCAL
