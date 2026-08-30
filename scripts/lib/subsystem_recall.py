@@ -971,6 +971,27 @@ class RecalledEntry:
     rename, a trailing colon or an indent all land here.
     """
 
+    tasks: tuple[str, ...] = ()
+    """The entry's `tasks:` refs as written (`<system>:<id>`), in file order.
+
+    Carried from `SubsystemEntry.tasks` rather than re-parsed from the front
+    matter here: the loader already validated them, and a second parse at the
+    read surface is the duplicated predicate that lets a reader show refs the
+    validator rejected.
+
+    🔴 STRINGS, NOT `TaskRef`s, ON PURPOSE. This dataclass is what the JSON
+    payload is built from, and a `TaskRef` would have to be flattened at the
+    boundary anyway — flattening once, here, keeps the text row and the JSON row
+    quoting the same bytes. The structured form stays available on the
+    `SubsystemEntry` for anything that needs the halves.
+
+    Measured 2026-08-29 before this field existed: **0 of 120** entries in the
+    live store carry a `tasks:` key, so every index row renders byte-identical
+    to what it rendered before. That is the same conditionality the badges above
+    rely on, and it is what makes this additive rather than a reflow of the
+    index.
+    """
+
     @property
     def is_bare(self) -> bool:
         """True when neither COUNTED section had any content.
@@ -1026,6 +1047,7 @@ def read_entry(store_root: str | Path, entry: SubsystemEntry) -> RecalledEntry:
         unverifiable_count=populations["unverifiable"],
         mtime=mtime,
         missing_sections=tuple(h for h in COUNTED_HEADINGS if h not in sections),
+        tasks=tuple(str(t) for t in entry.tasks),
     )
 
 
@@ -1768,6 +1790,21 @@ def listing_line(entry: RecalledEntry, width: int) -> str:
     openness field of any kind. A JSON consumer that wants the populations
     reads `entries[].missing_sections` or runs `--validate`; splitting the row's
     vocabulary across two payloads is how the two start to disagree.
+
+    🔴 A FIFTH BADGE — `🔗 N task(s)` — AND THE BAR ABOVE IS THE REASON IT IS A
+    COUNT AND NOT THE REFS. It clears the "changes what the reader DOES" bar on
+    the same grounds `OPEN` does: an entry joined to a task is an entry whose
+    work has a tracked owner and a closing condition somewhere else, and that is
+    the single fact that decides whether to spend a `--ref`. What it does NOT do
+    is print the refs themselves — `github:innovation-upstream/devrc#428` is 36
+    characters, three of them would triple the row, and the index's whole
+    contract is one line per entry. The refs are printed in the ENTRY BODY, which
+    `--ref <name>` and the featured entry already show; the row says only that
+    there are some.
+
+    Conditional like the other four: measured 2026-08-29, **0 of 120** live
+    entries carry `tasks:`, so no row on the store today renders any differently
+    than it did before this badge existed.
     """
     base = f"  {entry.ref.ljust(width)}  {entry.bullet_count:>3} nuance   {sensitivity_label(entry.sensitivity, entry.declared_sensitivity)}"
     badges: list[str] = []
@@ -1781,6 +1818,8 @@ def listing_line(entry: RecalledEntry, width: int) -> str:
         badges.append(
             "🔴 NO " + ", ".join(short_heading(h) for h in entry.missing_sections)
         )
+    if entry.tasks:
+        badges.append(f"🔗 {len(entry.tasks)} task{'' if len(entry.tasks) == 1 else 's'}")
     if not badges:
         return base
     return base + "   " + "   ".join(badges)
@@ -2048,6 +2087,18 @@ def render_text(report: RecallReport) -> str:
             f"  ### {e.ref}  ({report.scope}/{e.filename}, "
             f"sensitivity={sensitivity_label(e.sensitivity, e.declared_sensitivity)})"
         )
+        if e.tasks:
+            # 🔴 THE REFS THEMSELVES, AND ONLY IN A BODY. The index row carries a
+            # COUNT (`🔗 N tasks`) because it is one line per entry and a ref is
+            # up to 36 characters; the body is already many lines, so printing
+            # them here costs nothing the reader has not already agreed to pay.
+            # Rendered from `e.tasks` — the loader's validated refs — so this can
+            # never show a ref that `--validate` would reject.
+            #
+            # Above the sections deliberately: "which task does this answer" is
+            # identity, like the ref and the sensitivity on the line above, not
+            # content.
+            out.append(f"    tasks: {', '.join(e.tasks)}")
         for heading in SURFACED_HEADINGS:
             body = e.sections.get(heading)
             if body:
@@ -2196,6 +2247,12 @@ def report_json(report: RecallReport) -> dict:
                 "sections": dict(e.sections),
                 "missing_sections": list(e.missing_sections),
                 "is_bare": e.is_bare,
+                # On `entries` (which carry bodies) and NOT on `listing`, matching
+                # where the text surface puts them: the row gets a count, the body
+                # gets the refs. `[]` for an entry with none, never omitted — a
+                # consumer branching on presence would read a missing key as "this
+                # reader is too old to know about tasks", which is a different fact.
+                "tasks": list(e.tasks),
             }
             for e in report.entries
         ],
