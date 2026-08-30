@@ -232,16 +232,20 @@ WRAPPER
 # If a real legacy state is ever found in the wild, add the migration THEN, keyed
 # to the path that was actually installed.
 
-# 🔴 THE SCRATCH FILE LIVES IN $TMPDIR, NOT IN .git/hooks, AND IS MADE AFTER THE
-# UNINSTALL BRANCH. Generating it into the hooks directory made this script WRITE
-# on paths that promise not to: the dry run created `.git/hooks` when it did not
-# exist (falsifying this file's own "changes nothing unless --apply" header), and
-# with the hooks dir mode 500 both the dry run and `--uninstall` aborted rc 1 —
-# a code absent from the exit table above, and byte-for-byte the class already
-# recorded further down as a past defect. `--uninstall` never needed the bytes at
-# all.
-_tmp="$(mktemp "${TMPDIR:-/tmp}/devrc-session-stamp.XXXXXX")"
-cleanup_tmp() { rm -f "$_tmp"; }
+# 🔴 NO SCRATCH FILE IS CREATED BEFORE THE MODE BRANCHES. Generating one into
+# `.git/hooks` up here made this script WRITE on paths that promise not to: the
+# dry run created `.git/hooks` when it did not exist — falsifying this file's own
+# "changes nothing unless --apply" header — and with that directory at mode 500
+# both the dry run and `--uninstall` aborted rc 1, a code absent from the exit
+# table above.
+#
+# ⚠ THE FIRST ATTEMPT AT THIS ONLY RELOCATED THE ABORT. Moving the file to
+# $TMPDIR while still creating it here meant an unwritable or full /tmp produced
+# the same rc 1 on the same read-only paths — the failure keyed on a different
+# directory, not removed. `$_tmp` is now empty until a branch that needs it says
+# otherwise, and `--uninstall` creates nothing at all.
+_tmp=""
+cleanup_tmp() { if [ -n "$_tmp" ]; then rm -f "$_tmp"; fi; }
 trap cleanup_tmp EXIT
 
 if [ "$MODE" = "uninstall" ]; then
@@ -253,7 +257,30 @@ if [ "$MODE" = "uninstall" ]; then
   exit 0
 fi
 
-generate_wrapper "$_tmp"
+# 🔴 THE APPLY PATH STAGES BESIDE THE TARGET, AND THAT IS ABOUT ATOMICITY, NOT
+# TIDINESS. `mv` is an atomic `rename(2)` only WITHIN one filesystem; across a
+# device boundary it degrades to copy-then-unlink, i.e. the destination is opened
+# O_TRUNC and written in place. Staging in $TMPDIR therefore silently undid the
+# atomic install on any host where /tmp is a tmpfs (common on NixOS) or the repo
+# sits on a separate mount. Measured by inode: same-fs -> inode CHANGES (rename);
+# cross-fs -> inode UNCHANGED, and a kill mid-copy leaves an executable,
+# unparseable hook that refuses every commit — exactly the state the atomic write
+# was added to prevent.
+#
+# The READ-ONLY paths still use $TMPDIR, because they never install: they only
+# need the bytes to answer "is the existing hook a prefix of what we would
+# write". And `--uninstall` returns above without creating anything at all —
+# a full /tmp must not be able to stop an uninstall.
+if [ "$MODE" = "apply" ]; then
+  mkdir -p "$HOOKS"
+  _tmp="$TARGET.devrc-install.$$"
+  generate_wrapper "$_tmp"
+else
+  # A dry run that cannot make a scratch file still reports; it just cannot
+  # answer the prefix question. Degrading beats aborting on a read-only path.
+  _tmp="$(mktemp "${TMPDIR:-/tmp}/devrc-session-stamp.XXXXXX" 2>/dev/null || true)"
+  if [ -n "$_tmp" ]; then generate_wrapper "$_tmp"; fi
+fi
 
 # 🔴 CHECKED BEFORE `is_ours`, AND THAT ORDER IS LOAD-BEARING. `is_ours` requires
 # an `^impl=` line, which is line 16 of the 27 this script writes — so a partial
@@ -261,7 +288,7 @@ generate_wrapper "$_tmp"
 # points never reached the prefix check at all (measured: cuts 1-15 refused with
 # rc 4, cuts 16+ repaired). Being a byte-exact prefix of our own output is
 # stronger evidence of authorship than the marker is, so it is asked first.
-if is_truncated_ours "$TARGET" "$_tmp"; then
+if [ -n "$_tmp" ] && is_truncated_ours "$TARGET" "$_tmp"; then
   # 🔴 THE WORDING IS SCOPED TO WHAT THE BYTES ACTUALLY PROVE. A prefix shorter
   # than the `impl=` line (line 16 of 27) is CHECKOUT-INDEPENDENT — lines 1-15 are
   # identical whichever checkout generated them — so calling such a file "this
@@ -387,7 +414,19 @@ mkdir -p "$HOOKS"
 # INVALID /bin/sh hook — measured, `git commit` rc=1 with the commit refused,
 # i.e. this installer could re-create the exact defect the wrapper exists to fix.
 
-chmod +x "$_tmp"
+# EXPLICIT 0755, not `chmod +x`. When the scratch file came from `mktemp` (0600)
+# a bare `+x` yielded 0711, silently changing the installed hook's mode — and a
+# `#!` script needs READ permission for the interpreter to open it, so 0711 is
+# not runnable by anyone but the owner.
+#
+# ⚠ AS OF THE CURRENT STAGING THIS IS AN EQUIVALENT MUTANT, and it is recorded
+# rather than dressed up as a guard: the apply path now stages via a shell
+# redirect, which creates 0644 under the usual umask, so `chmod +x` and
+# `chmod 0755` produce the same mode and the test cannot tell them apart
+# (measured — the `+x` mutant survives the suite). It is kept because the mode
+# would silently change again if staging ever returned to `mktemp`, which is
+# exactly how it changed the first time.
+chmod 0755 "$_tmp"
 mv -f "$_tmp" "$TARGET"
 trap - EXIT
 chmod +x "$SOURCE_ROOT/scripts/git-hooks/prepare_commit_msg.py" 2>/dev/null || true

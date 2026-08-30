@@ -908,3 +908,133 @@ class TestTheInstallerLeavesNoLitterAndHonoursDryRun:
             assert out.returncode == 0, (out.returncode, out.stdout, out.stderr)
         finally:
             hooks.chmod(0o700)
+
+
+class TestTheInstallIsAtomicAndTheModeIsPinned:
+    """🔴 ROUND-9 — the round-8 audit's F1, which was the regression predicted
+    before that round shipped.
+
+    `mv` is an atomic `rename(2)` only WITHIN one filesystem. Staging the scratch
+    file in `$TMPDIR` silently degraded it to copy-then-unlink on any host where
+    /tmp is a tmpfs or the repo is on another mount — the destination opened
+    O_TRUNC and written in place, so a kill mid-copy leaves an executable,
+    unparseable hook that refuses every commit. Measured by INODE:
+
+        same-fs    -> inode CHANGES   (rename)
+        cross-fs   -> inode UNCHANGED (truncate in place)
+
+    The mutant that made the write non-atomic-but-still-executable SURVIVED the
+    whole suite. The inode is the discriminator — the same technique this file
+    already uses for the commit-message write.
+    """
+
+    def _hooks(self, repo) -> Path:
+        return Path(git(repo, "rev-parse", "--path-format=absolute",
+                        "--git-common-dir").stdout.strip()) / "hooks"
+
+    def test_a_reinstall_replaces_the_hook_by_rename_not_in_place(self, repo):
+        install(repo)
+        target = self._hooks(repo) / "prepare-commit-msg"
+        # An identical re-install takes the "already installed ✓" early exit and
+        # writes nothing — so the hook must actually differ for this to observe
+        # a write at all. Truncating takes the repair path.
+        lines = target.read_text().split("\n")
+        target.write_text("\n".join(lines[:20]) + "\n")
+        before = target.stat().st_ino
+        out = subprocess.run([str(INSTALLER), "--repo", str(repo), "--apply"],
+                             capture_output=True, text=True)
+        assert out.returncode == 0, (out.stdout, out.stderr)
+        assert target.stat().st_ino != before, (
+            "the hook was written IN PLACE — a failed write there leaves an "
+            "executable, unparseable hook that refuses every commit")
+
+    def test_the_scratch_file_is_staged_on_the_targets_filesystem(self, repo):
+        """The property that MAKES the rename atomic. Asserting the inode alone
+        would pass on a same-filesystem $TMPDIR and regress silently on a host
+        where /tmp is a tmpfs — which is the configuration this defect needs."""
+        hooks = self._hooks(repo)
+        hooks.mkdir(parents=True, exist_ok=True)
+        install(repo)
+        target = hooks / "prepare-commit-msg"
+        assert target.stat().st_dev == hooks.stat().st_dev
+        # Staging beside the target is what guarantees that on every host.
+        src = (INSTALLER).read_text()
+        assert '_tmp="$TARGET.devrc-install.$$"' in src, (
+            "the apply path no longer stages beside the target, so `mv` is not "
+            "guaranteed to be a rename")
+
+    def test_the_installed_hook_is_0755(self, repo):
+        """`mktemp` creates 0600, so a bare `chmod +x` yields 0711 — and a `#!`
+        script needs READ permission for the interpreter to open it."""
+        install(repo)
+        target = self._hooks(repo) / "prepare-commit-msg"
+        assert oct(target.stat().st_mode)[-3:] == "755"
+
+
+class TestTheRepairNoteAndTheScratchSweepAreThemselvesGuarded:
+    """🔴 ROUND-9 — audit F3 and F5: two guards added by previous rounds that
+    could not fail. Deleting the NOTE block left 45 tests green; so did making
+    the installer ignore `$TMPDIR` entirely, because the sweep asserts a zero it
+    cannot distinguish from "written somewhere else"."""
+
+    def _hooks(self, repo) -> Path:
+        return Path(git(repo, "rev-parse", "--path-format=absolute",
+                        "--git-common-dir").stdout.strip()) / "hooks"
+
+    def _truncate_to(self, repo, nlines):
+        install(repo)
+        target = self._hooks(repo) / "prepare-commit-msg"
+        lines = target.read_text().split("\n")
+        target.write_text("\n".join(lines[:nlines]) + "\n")
+        return target
+
+    def test_the_note_fires_only_when_the_bytes_cannot_name_the_checkout(self, repo):
+        # cut BEFORE the impl= line: the prefix is checkout-independent
+        self._truncate_to(repo, 8)
+        out = subprocess.run([str(INSTALLER), "--repo", str(repo), "--apply"],
+                             capture_output=True, text=True)
+        assert out.returncode == 0
+        assert "which checkout wrote it" in out.stdout, out.stdout
+
+    def test_the_note_is_silent_when_the_bytes_DO_name_the_checkout(self, repo):
+        """Positive control for the branch above."""
+        target = self._truncate_to(repo, 20)   # past the impl= line
+        assert "impl=" in target.read_text()
+        out = subprocess.run([str(INSTALLER), "--repo", str(repo), "--apply"],
+                             capture_output=True, text=True)
+        assert out.returncode == 0
+        assert "which checkout wrote it" not in out.stdout, out.stdout
+
+    def test_the_read_only_path_really_consults_TMPDIR(self, repo):
+        """🔴 POSITIVE CONTROL for `test_no_scratch_file_survives_any_path`, and
+        the first attempt at it was VACUOUS — it asserted `scratch.exists()`,
+        which is true whatever the installer does. Measured: an installer
+        hardcoding /tmp survived it.
+
+        This discriminates behaviourally. Point $TMPDIR at a path that does not
+        exist and leave a TRUNCATED hook in place. If the installer consults
+        $TMPDIR, mktemp fails, the comparison bytes are never made, and the dry
+        run degrades — no PARTIAL WRITE line. If it hardcodes /tmp, mktemp
+        succeeds and the line appears.
+        """
+        install(repo)
+        target = self._hooks(repo) / "prepare-commit-msg"
+        lines = target.read_text().split("\n")
+        target.write_text("\n".join(lines[:20]) + "\n")
+
+        good = subprocess.run([str(INSTALLER), "--repo", str(repo)],
+                              capture_output=True, text=True)
+        assert good.returncode == 0
+        assert "PARTIAL WRITE" in good.stdout, (
+            "baseline: the dry run should detect the partial write")
+
+        env = {**os.environ, "TMPDIR": "/nonexistent/tmpdir/for/this/test"}
+        degraded = subprocess.run([str(INSTALLER), "--repo", str(repo)],
+                                  capture_output=True, text=True, env=env)
+        # rc is 4 here, not 0: without the comparison bytes the truncated hook
+        # falls through to the ordinary "exists and is not ours" refusal. That
+        # is the pre-existing path for an unrecognised hook, and it is exactly
+        # the observable difference this control needs.
+        assert "PARTIAL WRITE" not in degraded.stdout, (
+            "the read-only path did not consult $TMPDIR, so the scratch-file "
+            "sweep's zero cannot mean 'cleaned up'")
