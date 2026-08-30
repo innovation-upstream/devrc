@@ -17,38 +17,39 @@ two tools and a human gluing them together: an observed run cost 127 s, $0.0056 
 calls, 5 of them pure flailing.
 
 ## State now
-- **PR #989 MERGED** as squash `890df043`. This doc's own PR **#1032 MERGED** as `6e7e85bf`.
-- 🔴 **DEPLOYED — this changed after the first draft, and it was done by ANOTHER session, not
-  by this work.** Verified on **both** hosts (a single-host measurement cannot demonstrate a
-  two-host claim):
+- 🔴 **THE WHOLE RANKED QUEUE FROM THIS DOC IS CLOSED.** Eight PRs merged and verified by
+  CONTENT on `origin/main`, not by the merge report:
 
-  | | workbench | laptop |
-  |---|---|---|
-  | `readlink -f ~/.claude/skills/find-session/SKILL.md` | `/nix/store/djplda84w8bi6ydiz4filgvvark1j0b7-devrc-claude-skills/…` | **identical hash** |
-  | `grep -c -- "--live"` on that file | 9 | 9 |
+  | what | merged |
+  |---|---|
+  | partial-fleet verified vs a genuinely unreachable host | `46c246db` (#1040) |
+  | #1030 store-api listen backlog (mechanism A) | `430fe3e1` (#1062) |
+  | #1029 contract guard walkability | `3d8caaa1` (#1071) |
+  | #1031 both deferred items | `e212415e` (#1076) |
+  | inherited `test_bash_guard.py` wall-clock flake | `9499d6d0` (#1078) |
+  | handoff: ranks closed + starvation retraction | `5ec6d5e4` (#1077) |
+  | handoff: queue → mechanism B + its closing condition | `fa20bb18` (#1085) |
+  | CLAUDE.md: sequential nix-check gotcha | `4ca8d662` (#1088) |
 
-  `--match` docs: 8 hits in `~/.claude/skills/session-manager/reference/payload-contract.md`.
-  End-to-end from the checkout on `main`: `find-session.py devrc --live` → `LIVE (2 matched;
-  searched: laptop, workbench)`.
-- **The `ship.sh` blocker is gone.** `feat/flake-lock-and-discord-ext` landed (#1010,
-  `2a8a8982`). The base clone is on `main` and was `merge --ff-only`'d to `6e7e85bf`; it was
-  **behind 1, never ahead** — no un-pushed commits, so the diverged-host hazard did not occur.
-- 🔴 **The partial-fleet path is now VERIFIED against a genuinely unreachable host — this was
-  the one claim in the feature with no live observation behind it, and it holds.** Eight
-  cases across two instruments with different failure shapes; the **five** where a control
-  could discriminate were each re-run as the SAME command on a complete fleet, and gave a
-  different answer. Details in "Partial-fleet verification" below. **No defect was found**,
-  so the ladder ends here.
-- **Still NOT verified:** `live_scan`'s `status: "unavailable"` branch (NO host answers). The
-  local host is scanned without ssh, so it cannot be made to fail genuinely — reaching that
-  branch requires a stub, which is exactly what the rank-1 item existed to stop trusting. Say
-  "stub-only" about it rather than "verified".
-- Open issues: **#1030 only.** It is HALF closed — #1062 fixed the backlog mechanism
-  (A); the `socket.py` timeout mechanism (B) is confirmed STILL LIVE at 60 s and is now
-  rank 1 with a written closing condition. **#1029 CLOSED** (findings fixed by #1071; its
-  two lower-severity items ACCEPTED by operator decision 2026-08-30 and recorded on the
-  closed issue — they are tracked by nothing now, which is the accepted cost).
-  **#1031 CLOSED** by #1076. **#1028 closed**, verified fixed by #1023.
+- 🔴 **DEPLOYED AND VERIFIED AT THE CONSUMER, both hosts** — `readlink -f` on
+  `~/.claude/skills/session-manager/reference/payload-contract.md` gives the SAME store hash
+  `1skr5b3gc…` on workbench and laptop, both carrying the #1031 text, both checkouts at
+  `e0e29e7b`. Identical hash across hosts is what makes it a two-host claim. The ship was run
+  by ANOTHER session; this one only verified it.
+- **Issues:** #1029 CLOSED (its two lower-severity items ACCEPTED by operator decision and
+  recorded on the closed issue — tracked by nothing now, which is the accepted cost).
+  #1031 CLOSED. **#1028 closed**, verified fixed by #1023. **#1030 remains open and is now the only queue item.**
+- **IN FLIGHT: `devrc#1100`** — the mechanism-B refutation write-up. Open, checks pending at
+  the time of writing. 🔴 **It carries the three refutations and the `cpu=36%` reframing into
+  the "Open investigations" section of THIS doc**, so that content is deliberately NOT
+  repeated here; if #1100 was closed unmerged, those findings live only on
+  [#1030's comment](https://github.com/innovation-upstream/devrc/issues/1030#issuecomment-5470333259).
+- **No `clawgate-task:` field.** `clawgate_handoff.sh resolve` exited **5** (nothing
+  resolved). An unknown session id also answers `200` with an EMPTY ARRAY, so that is not a
+  clean bill of health — it means the board could not attribute this session, not that no
+  task exists.
+- 🔴 **`live_scan`'s `status: "unavailable"` branch is still stub-only** — unchanged. The
+  local host is scanned without ssh so it cannot be made to fail genuinely.
 
 **What shipped — carried forward verbatim, this is durable and not status:**
 
@@ -400,34 +401,34 @@ it up; the evidence is on the issue.
 
 ## How to verify
 ```bash
-# the whole use case, one command (~1.3s)
+# the feature, end to end (~1.3s)
 python3 ~/workspace/devrc/scripts/find-session.py <term> --live
-# ...and where it left off, when the match is unique (~1.6s)
-python3 ~/workspace/devrc/scripts/find-session.py <term1> <term2> --live --tail 20
+python3 ~/workspace/devrc/scripts/find-session.py <t1> <t2> --live --tail 20   # ~1.6s
 
 # the two defects the original transcript hit
 python3 ~/workspace/devrc/scripts/session-manager detail scratch3:9      # rc 3 + real indices
-python3 ~/workspace/devrc/scripts/session-manager --json --lean --no-ch --match <t> \
-  | python3 -c "import json,sys; r=json.load(sys.stdin); print(r['filters'])"
 
-# hotkey case — v and V MUST differ (Alt+v = violet/scratch3, Alt+Shift+V = Vapor/scratch4)
-python3 ~/workspace/devrc/scripts/session-manager --json --lean --no-ch \
-  | python3 -c "import json,sys; r=json.load(sys.stdin); \
-print({w['hotkey']: w['hotkey_display'] for h in r['hosts'].values() for w in h.get('windows') or [] if w.get('hotkey')})"
+# the listen-backlog fix (#1062) — measures the SOCKET, not the attribute
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  ~/workspace/devrc/scripts/tests/test_subsystem_store_api.py -q -k TestTheListenBacklog
+
+# #1031 item 1 — null, never 0, over an unreachable fleet
+python3 ~/workspace/devrc/scripts/session-manager scan --json --no-ch --claude-only \
+  --match x --host laptop | python3 -c \
+  "import json,sys; f=json.load(sys.stdin)['filters']; print(f['excluded_shells'])"   # -> None
 ```
 
-**PARTIAL-FLEET check — no sudo, no suspend, nothing global mutated.** Instrument 2 is the
-better one (it substitutes no address at all); instrument 1 reproduces a *sleeping* laptop's
-4 s timeout rather than an instant unreachable, which is the shape that costs 8 s.
+**PARTIAL-FLEET check — CARRIED FORWARD VERBATIM, still the reproduction of record.** No
+sudo, no suspend, nothing global mutated. Instrument 2 is the better one (it substitutes no
+address at all); instrument 1 reproduces a *sleeping* laptop's 4 s timeout rather than an
+instant unreachable.
 ```bash
 # --- instrument 2: real address, genuinely unroutable inside a netns ---
-mkdir -p /tmp/fsv/bin && cat > /tmp/fsv/bin/ssh <<'EOF'
-#!/usr/bin/env bash
+mkdir -p /tmp/fsv/bin && printf '%s\n' '#!/usr/bin/env bash' \
+  'exec "$(readlink -f /run/current-system/sw/bin/ssh)" -F /dev/null "$@"' > /tmp/fsv/bin/ssh
+chmod +x /tmp/fsv/bin/ssh
 # -F /dev/null ONLY: openssh refuses a root-owned system ssh_config under the
 # namespace's uid map. No address substitution.
-exec "$(readlink -f /run/current-system/sw/bin/ssh)" -F /dev/null "$@"
-EOF
-chmod +x /tmp/fsv/bin/ssh
 
 # POSITIVE CONTROL FIRST — this must REACH the laptop, or the run below proves nothing
 ssh -F /dev/null -o BatchMode=yes -o ConnectTimeout=4 zach@10.42.0.100 'echo REACHED'
@@ -443,6 +444,13 @@ unshare -rn env PATH=/tmp/fsv/bin:$PATH \
 error is `Bad owner or permissions on …/ssh_config.d/…`, a **config-parse** failure, not a
 network one. It is a second sample of "ssh failed", not evidence about an unreachable host.
 Read the `error` string before believing the `reachable: false`.
+
+🔴 **RUN THE TWO CHECK DERIVATIONS SEQUENTIALLY.** `nix build .#checks.x86_64-linux.pytests
+.#checks.x86_64-linux.nodetests` in ONE call produced 2 FALSE failures on a tree that passes
+0 one at a time (`SQLite database … is busy`; `OperationalError('database is locked')`) —
+nested-nix store contention. A combined GREEN is trustworthy; a combined RED is not. Now also
+in `CLAUDE.md` (#1088). ⚠ And `nix build … | tail` prints `NIXBUILD_RC=0` for a build that
+just failed 45 tests — read the runners' `RESULT:` lines.
 
 **DEPLOY check — run on BOTH hosts, compare the store hash:**
 ```bash
