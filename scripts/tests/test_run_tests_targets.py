@@ -262,3 +262,186 @@ def test_check_targets_is_cheap_and_runs_no_tests(tmp_path):
         "--check-targets ran a suite; it is supposed to validate the list only.\n"
         f"{proc.stdout}"
     )
+
+
+# --- `--targets`: running a SUBSET of the declared target list -----------------
+# 🔴 EVERY TEST BELOW IS ABOUT ONE HAZARD: a subset run that tests less than the
+# operator thinks it did. The mechanism exists so CI can skip suites a change
+# could not have broken, which means its failure mode is a GREEN run that never
+# executed the suite holding the regression. So the dangerous inputs — a typo, an
+# empty selection, a target from another set — must all be FATAL, and the ones
+# that are merely narrow must SAY they are narrow.
+#
+# These use `--check-floors`, which applies the subset and exits before pytest,
+# so each costs milliseconds rather than a suite run. That is the same trick
+# `_require_check_targets` above documents, for the same reason.
+
+
+def _require_targets_flag(runner: Path) -> None:
+    """Fail FAST and by name if `--targets` is absent from this revision.
+
+    Without it the flag falls through to `*) ROOT="$1"` exactly as
+    `--check-targets` once did, the trailing ROOT overwrites it, and the runner
+    executes the ENTIRE suite — so every assertion below would pass or fail for
+    reasons unrelated to what it claims to test.
+    """
+    assert "--targets" in runner.read_text(), (
+        f"{runner} has no --targets flag, so the subset mechanism does not "
+        "exist in this revision and these guards are vacuous."
+    )
+
+
+def test_a_subset_narrows_the_target_list_and_the_floor_follows():
+    """The floor is DERIVED, so narrowing the list must narrow the floor.
+
+    This is the property that makes a subset run safe to gate on at all: if the
+    floor stayed at the full-set sum, every subset run would fail GUARD 3 and
+    the mechanism would be unusable; if the floor were not derived at all, a
+    subset could collapse to zero tests and still pass.
+    """
+    _require_targets_flag(RUN_TESTS)
+    two = ["scripts/collector/tests", "scripts/opencode/tests"]
+    sub = _run([str(RUN_TESTS), "--targets", " ".join(two), "--check-floors",
+                str(REPO_ROOT)])
+    full = _run([str(RUN_TESTS), "--check-floors", str(REPO_ROOT)])
+    assert sub.returncode == 0, f"subset --check-floors failed:\n{sub.stdout}\n{sub.stderr}"
+
+    def _floor(out: str) -> int:
+        # NOT `\([^)]*\)` — the subset label contains a nested `target(s)`, so a
+        # non-greedy run up to the ` = ` is the only form that reads both.
+        m = re.search(r"GLOBAL floor .*? = (\d+)", out)
+        assert m, f"no GLOBAL floor line in output:\n{out}"
+        return int(m.group(1))
+
+    sub_floor, full_floor = _floor(sub.stdout), _floor(full.stdout)
+    assert 0 < sub_floor < full_floor, (
+        f"a 2-target subset floor ({sub_floor}) must be positive and strictly "
+        f"below the full-set floor ({full_floor}). Equal means the floor is not "
+        "derived from the selection; zero means it collapsed."
+    )
+
+
+def test_a_subset_run_SAYS_it_ran_a_subset():
+    """A narrowed run must announce itself on stderr.
+
+    🔴 The verdict line of a subset run looks exactly like a full one — same
+    PASS, same shape. Whoever reads it has no other way to know that most of the
+    suite did not execute, so the announcement is the only thing separating
+    "the gate passed" from "the gate passed on 2 of 29 targets".
+    """
+    _require_targets_flag(RUN_TESTS)
+    proc = _run([str(RUN_TESTS), "--targets", "scripts/collector/tests",
+                 "--check-floors", str(REPO_ROOT)])
+    # 🔴 stderr SPECIFICALLY, and a string the floor line does not contain.
+    # The first version asserted "SUBSET" in stdout+stderr, which the floor
+    # line's own "a SUBSET of hermetic" satisfies — so deleting the
+    # announcement entirely left the test green. Watched: that mutant survived.
+    assert "selected via --targets" in proc.stderr, (
+        "a --targets run did not announce the narrowing on stderr. The verdict "
+        "line of a subset run is identical to a full one, so this announcement "
+        f"is the only thing that distinguishes them.\n{proc.stderr}"
+    )
+    assert re.search(r"SELECTED target\(s\), a SUBSET", proc.stdout), (
+        "the floor line must say it summed the SELECTED targets, not '$SET' — "
+        f"labelling a subset sum as the full set is a false coverage claim.\n{proc.stdout}"
+    )
+
+
+def test_an_unknown_target_is_FATAL_not_silently_dropped():
+    """The typo case, and the reason the whole mechanism is allowlist-based.
+
+    `scripts/dl-router` (no `/tests`) is a real directory and an obvious thing
+    to type. Under a prefix- or filter-based design it would select NOTHING and
+    the run would exit 0 having tested nothing — indistinguishable from a pass.
+    """
+    _require_targets_flag(RUN_TESTS)
+    proc = _run([str(RUN_TESTS), "--targets", "scripts/dl-router",
+                 "--check-floors", str(REPO_ROOT)])
+    assert proc.returncode == 3, (
+        f"expected exit 3 for an unknown target, got {proc.returncode}.\n"
+        f"{proc.stdout}\n{proc.stderr}"
+    )
+    assert "scripts/dl-router" in proc.stderr, (
+        f"the error must NAME the offending target.\n{proc.stderr}"
+    )
+
+
+def test_an_empty_selection_is_FATAL():
+    """'Nothing to run' is never a verdict this script may reach."""
+    _require_targets_flag(RUN_TESTS)
+    proc = _run([str(RUN_TESTS), "--targets", "   ", "--check-floors",
+                 str(REPO_ROOT)])
+    assert proc.returncode == 3, (
+        f"expected exit 3 for an empty selection, got {proc.returncode}.\n"
+        f"{proc.stdout}\n{proc.stderr}"
+    )
+
+
+def test_a_subset_may_NARROW_the_set_but_never_WIDEN_it():
+    """A devhost target under `--set hermetic` is an error, not an implicit
+    `--set all`.
+
+    The two sets exist because devhost targets need a real desktop; letting
+    `--targets` reach into the other set would run them in an environment that
+    cannot satisfy them, and the failure would look like a code defect.
+    """
+    _require_targets_flag(RUN_TESTS)
+    devhost = "scripts/devhost-tests"
+    assert devhost in RUN_TESTS.read_text(), (
+        f"{devhost} is no longer declared; pick another DEVHOST_TARGETS entry"
+    )
+    proc = _run([str(RUN_TESTS), "--targets", devhost, "--check-floors",
+                 str(REPO_ROOT)])
+    assert proc.returncode == 3, (
+        f"a devhost target under --set hermetic must be FATAL, got "
+        f"{proc.returncode}.\n{proc.stdout}\n{proc.stderr}"
+    )
+
+
+def test_a_pinned_skip_whose_TARGET_did_not_run_does_not_count():
+    """🔴 The guard that a subset run broke, pinned BEHAVIOURALLY.
+
+    EXPECTED_SKIPS entries are keyed by target. `_skip_entry_applies` honoured
+    the entry's CONDITION but not whether its target was in the run, so a subset
+    that excluded every pinned target still counted them:
+
+        ERROR: 1 test(s) skipped, but 2 of 3 pinned entries apply here.
+
+    The run was correct and the guard called it a failure — how a gate teaches
+    people to ignore it.
+
+    ⚠ This asserts BEHAVIOUR, not source text. The first version checked that
+    `for _t in "${TARGETS[@]}"` appeared in the function; deleting the `if` that
+    USES that loop's result left the loop in place and the test green. Watched:
+    that mutant survived. A source check could see the ingredient and not the
+    decision, which is the whole failure mode.
+
+    Runs ONE tiny target that owns no pinned skip, so a broken predicate counts
+    >0 expected skips against 0 observed and the run goes red.
+    """
+    _require_targets_flag(RUN_TESTS)
+    tiny = "scripts/collector/i3/tests"
+    assert tiny in _hermetic_targets(), (
+        f"{tiny} is no longer a declared target; pick another small one that "
+        "does not appear in EXPECTED_SKIPS"
+    )
+    src = RUN_TESTS.read_text()
+    m = re.search(r"EXPECTED_SKIPS=\((.*?)\n\)", src, re.S)
+    assert m, "could not find EXPECTED_SKIPS in run-tests.sh"
+    pinned_dirs = {e.split("|")[0] for e in re.findall(r'^\s*"([^"]+)"', m.group(1), re.M)}
+    assert tiny not in pinned_dirs, (
+        f"{tiny} now owns a pinned skip, so it can no longer isolate this "
+        f"property. Pinned targets: {sorted(pinned_dirs)}"
+    )
+    proc = subprocess.run(
+        ["bash", str(RUN_TESTS), "--targets", tiny, str(REPO_ROOT)],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=300,
+    )
+    combined = proc.stdout + proc.stderr
+    assert "pinned entries apply here" not in combined, (
+        "a subset excluding every pinned-skip target still counted pinned "
+        f"entries — `_skip_entry_applies` is not filtering on TARGETS.\n{combined}"
+    )
+    assert proc.returncode == 0, (
+        f"a single-target subset run should pass, got {proc.returncode}.\n{combined}"
+    )

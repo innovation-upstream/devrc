@@ -176,6 +176,8 @@ trap 'exit 130' INT
 
 SET="hermetic"
 ROOT=""
+# Empty = run the whole selected SET. Populated only by --targets/DEVRC_TARGETS.
+ONLY_TARGETS="${DEVRC_TARGETS:-}"
 CHECK_TARGETS_ONLY=0
 CHECK_FLOORS_ONLY=0
 while [ $# -gt 0 ]; do
@@ -189,6 +191,11 @@ while [ $# -gt 0 ]; do
     # Same idea for GUARD 3's floor table: validate the two-way pin between
     # TARGET_FLOORS and the target list, print the table, exit. No pytest.
     --check-floors) CHECK_FLOORS_ONLY=1; shift ;;
+    # Run a SUBSET of the target list. Space-separated, and every entry must
+    # already be a declared target — see the ONLY_TARGETS block below for why
+    # this cannot be a free-form path filter.
+    --targets) ONLY_TARGETS="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+    --targets=*) ONLY_TARGETS="${1#*=}"; shift ;;
     *) ROOT="$1"; shift ;;
   esac
 done
@@ -747,6 +754,60 @@ DEVHOST_TARGETS=(
 TARGETS=("${HERMETIC_TARGETS[@]}")
 if [ "$SET" = "all" ]; then
   TARGETS+=("${DEVHOST_TARGETS[@]}")
+fi
+
+# --- TARGET SUBSET (--targets / DEVRC_TARGETS) --------------------------------
+# 🔴 A SUBSET IS A CLAIM THAT THE UNSELECTED TARGETS COULD NOT HAVE CAUGHT THE
+# CHANGE, and nothing here can check that claim. So this mechanism is built to
+# make the DANGEROUS mistakes loud and the safe ones cheap:
+#
+#   * An UNKNOWN target is FATAL, never silently dropped. A typo'd path that
+#     quietly selected nothing would exit 0 having run nothing, which is the
+#     single worst outcome a test runner has — it reads exactly like a pass.
+#     (`run-tests.sh --targets scripts/dl-router` — no `/tests` — is the shape
+#     that would otherwise do it.)
+#   * An EMPTY selection is FATAL for the same reason. "Nothing to run" is
+#     never a verdict this script is allowed to reach.
+#   * Selection NARROWS the SET, it does not widen it: asking for a devhost
+#     target under `--set hermetic` is an unknown-target error, not an implicit
+#     `--set all`.
+#
+# ⚠ The FLOOR follows automatically and that is not luck — GUARD 3's global
+# floor is already computed as the SUM OVER `$TARGETS` (see MIN_TESTS_COMPUTED),
+# so narrowing this array narrows the floor with it. Verified by probe: a
+# 2-target run reported `floor: 575 = sum of 2 per-target floors`.
+#
+# 📖 What this does NOT do: pick the targets for you. Mapping changed paths to
+# targets is a separate, fallible decision and lives outside this script.
+if [ -n "$ONLY_TARGETS" ]; then
+  _requested=()
+  # shellcheck disable=SC2206
+  _requested=($ONLY_TARGETS)
+  if [ "${#_requested[@]}" -eq 0 ]; then
+    echo "run-tests: FATAL — --targets was given but resolved to NOTHING." >&2
+    echo "           A run that selects no targets would exit 0 having tested" >&2
+    echo "           nothing. Omit --targets to run the whole '$SET' set." >&2
+    exit 3
+  fi
+  _selected=()
+  for _r in "${_requested[@]}"; do
+    _hit=0
+    for _t in "${TARGETS[@]}"; do
+      [ "$_r" = "$_t" ] && { _hit=1; break; }
+    done
+    if [ "$_hit" -eq 0 ]; then
+      echo "run-tests: FATAL — --targets names '$_r', which is not a target in the '$SET' set." >&2
+      echo "           Targets are exact entries of HERMETIC_TARGETS (plus" >&2
+      echo "           DEVHOST_TARGETS under --set all), not path prefixes." >&2
+      echo "           Run with --check-targets to print the declared list." >&2
+      exit 3
+    fi
+    _selected+=("$_r")
+  done
+  TARGETS=("${_selected[@]}")
+  echo "run-tests: SUBSET — ${#TARGETS[@]} of the '$SET' set selected via --targets." >&2
+  echo "           Unselected targets did NOT run; this verdict is about the" >&2
+  echo "           selected ones only." >&2
 fi
 
 # --- GUARD 3's floor table: PER-TARGET, and NOT an exact total -----------------
@@ -1971,7 +2032,15 @@ if [ "$CHECK_FLOORS_ONLY" -eq 1 ]; then
     fi
   done
   echo "  ----"
-  echo "  GLOBAL floor (sum over the $SET set) = $MIN_TESTS_COMPUTED"
+  # 🔴 SAY WHICH SET IT SUMMED. With `--targets` this is the sum over the
+  # SELECTED targets, not over `$SET` — printing "the hermetic set" there is a
+  # false claim about coverage, and the number it labels is exactly the one a
+  # reader uses to decide whether the run was complete.
+  if [ -n "$ONLY_TARGETS" ]; then
+    echo "  GLOBAL floor (sum over the ${#TARGETS[@]} SELECTED target(s), a SUBSET of $SET) = $MIN_TESTS_COMPUTED"
+  else
+    echo "  GLOBAL floor (sum over the $SET set) = $MIN_TESTS_COMPUTED"
+  fi
   exit 0
 fi
 
@@ -3646,6 +3715,52 @@ _split_skip_entry() {
 # the entry applies HERE, 1 if not. An invalid condition sets `fail` and returns
 # 1 — fail CLOSED, so a typo cannot silently widen a pin.
 _skip_entry_applies() {
+  # 🔴 AN ENTRY WHOSE TARGET DID NOT RUN CANNOT APPLY. This half is separate
+  # from the condition below and was missing until 2026-08-30, when `--targets`
+  # made a partial run reachable: a 2-target subset reported
+  #   ERROR: 1 test(s) skipped, but 2 of 3 pinned entries apply here.
+  # because the signal/Postgres pin was counted while `scripts/signal/tests`
+  # was not in the run at all. The run was correct and the guard called it a
+  # failure — the exact way a gate teaches people to ignore it.
+  #
+  # ⚠ Ordered FIRST deliberately. The condition arm below can set `fail` on a
+  # malformed entry, and an entry belonging to a target this run never touched
+  # must not be able to fail the run. It is still validated on any run that
+  # DOES include its target, which is every full run.
+  # ⚠ GATED ON A SUBSET BEING ACTIVE, and that is not a shortcut — an
+  # unconditional version broke 8 tests in test_conditional_skip_pins.py.
+  # Those drive this predicate with SYNTHETIC ledgers whose entries name dirs
+  # that are not real targets, which is the only way to exercise the condition
+  # grammar (invalid `unset:`, a 4-field entry, an unknown prefix) without
+  # inventing a real skip. Filtering unconditionally made every synthetic entry
+  # inapplicable, so those tests counted ZERO applicable pins and the grammar
+  # checks they exist for stopped running — a guard silently disabled by a
+  # change that looked like a strict improvement.
+  #
+  # 🔴 AND DO NOT WRITE THAT COUNTER'S NAME IN A COMMENT HERE. The harness in
+  # test_conditional_skip_pins.py extracts the real blocks out of this file by
+  # UNIQUE text anchors and asserts each occurs exactly once; the first draft of
+  # this comment quoted the anchor verbatim and broke the extraction — 11 tests
+  # red, from a comment. Prose in this file is load-bearing.
+  #
+  # On a FULL run every EXPECTED_SKIPS dir is a declared target anyway (pinned
+  # by test_a_pinned_skip_... and verified: all three are exact targets), so
+  # this gate costs nothing there and changes behaviour only where the defect
+  # lived.
+  # 🔴 `${ONLY_TARGETS:-}`, NOT `$ONLY_TARGETS`. This function is EXTRACTED from
+  # this file and executed standalone under `bash -uo pipefail` by
+  # test_conditional_skip_pins.py, where neither this variable nor TARGETS
+  # exists. A bare expansion is an unbound-variable abort there — exit 127,
+  # 11 tests red, and the message points at a line number in a synthesised
+  # harness rather than at this file. The default keeps the extracted copy
+  # runnable, and in the real script the variable is always set anyway.
+  if [ -n "${ONLY_TARGETS:-}" ]; then
+    local _in_run=0 _t
+    for _t in "${TARGETS[@]}"; do
+      [ "$edir" = "$_t" ] && { _in_run=1; break; }
+    done
+    if [ "$_in_run" -eq 0 ]; then return 1; fi
+  fi
   case "$econd" in
     "") return 0 ;;
     unset:*)
