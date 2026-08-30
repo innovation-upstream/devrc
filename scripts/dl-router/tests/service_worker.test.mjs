@@ -517,6 +517,63 @@ test("the menu downloads a plain link", async () => {
   assert.deepEqual(calls.downloads[0], { url: "https://example-site.test/f.mp4" });
 });
 
+test("the menu saves the original, not the proxy thumbnail in the src", async () => {
+  // Discord puts a downscaled webp from its resizing proxy in the <img src>
+  // and the posted file on the wrapping <a href>. Taking `srcUrl` because it
+  // is listed first saves the thumbnail and silently calls it the download.
+  reset();
+  const ch = "119283746551234567";
+  const original
+    = `https://cdn.discordapp.com/attachments/${ch}/998877665544332211/a.png`;
+  await SW.onMenuClicked({
+    menuItemId: SW.MENU_ID,
+    mediaType: "image",
+    srcUrl: `https://media.discordapp.net/attachments/${ch}`
+      + "/998877665544332211/a.png?format=webp&width=550",
+    linkUrl: `${original}?ex=1&is=2&hm=3`,
+    pageUrl: "https://discord.com/channels/1/2",
+  }, {});
+  assert.deepEqual(calls.downloads[0], { url: `${original}?ex=1&is=2&hm=3` });
+});
+
+test("a Discord video is downloaded directly, never handed to yt-dlp", async () => {
+  // `mediaType === "video"` exists for players whose src is a `blob:`. A CDN
+  // attachment is a direct file, so that clause would send yt-dlp at
+  // `discord.com/channels/<guild>/<channel>` while the .mp4 sat in `srcUrl`.
+  reset();
+  const clip = "https://cdn.discordapp.com/attachments"
+    + "/119283746551234567/998877665544332211/clip.mp4?ex=1&is=2&hm=3";
+  await SW.onMenuClicked({
+    menuItemId: SW.MENU_ID,
+    mediaType: "video",
+    srcUrl: clip,
+    pageUrl: "https://discord.com/channels/1/2",
+  }, {});
+  assert.deepEqual(calls.downloads[0], { url: clip });
+  assert.equal(calls.fetches.length, 0);
+});
+
+test("a NON-Discord video still takes the yt-dlp path", async () => {
+  // The control for the test above: the direct-file bypass must be the
+  // narrow exception, not a removal of the blob:-player branch.
+  reset();
+  fetchHandler = async (url) => {
+    if (url.endsWith("/match")) {
+      return { ok: true, status: 200,
+        json: async () => ({ dir: "other", auto: false, reason: "no match" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ jobId: "j9" }) };
+  };
+  await SW.onMenuClicked({
+    menuItemId: SW.MENU_ID,
+    mediaType: "video",
+    srcUrl: "https://cdn.example-site.test/v.mp4",
+    pageUrl: "https://example-site.test/v/1",
+  }, {});
+  assert.equal(calls.downloads.length, 0,
+    "an embedded player must still go through yt-dlp");
+});
+
 test("the menu routes a stream through the matched dir, not the catch-all", () => {
   // It used to be hardcoded to `dir: otherDir()` with `.catch(() => {})`: a
   // yt-dlp capture never reached the matched directory, never toasted, never

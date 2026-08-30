@@ -18,8 +18,9 @@
 // suppress listener registration and networking.
 
 import {
-  buildMatchPayload, carryReferrer, correlateCapture, formatDup,
-  handleDetermining, localContext, localDecide, playerSourceKey,
+  buildMatchPayload, carryReferrer, correlateCapture, discordSourceKey,
+  formatDup, handleDetermining, localContext, localDecide, playerSourceKey,
+  preferOriginalUrl,
 } from "./route_core.js";
 import { isHttpUrl, relPathFromAbsolute, sanitizeDirName } from "./sanitize.js";
 import { DEFAULT_PORT, manifestPort as readManifestPort } from "./port.js";
@@ -1383,10 +1384,20 @@ export async function installMenus() {
 export async function onMenuClicked(info, tab) {
   await ready();
   if (info.menuItemId !== MENU_ID || !state.config.enabled) return;
-  const target = info.srcUrl || info.linkUrl || info.pageUrl;
+  // `srcUrl` unless a link proves a better copy of the SAME asset exists --
+  // on Discord an image's src is a downscaled webp from the resizing proxy.
+  const target = preferOriginalUrl(info.srcUrl, info.linkUrl) || info.pageUrl;
   if (!isHttpUrl(target)) return;
-  const streaming = /\.m3u8(\?|$)|\.mpd(\?|$)/i.test(target)
-    || info.mediaType === "video";
+  // A Discord attachment is a DIRECT FILE whatever element it was clicked on,
+  // so it must not take the yt-dlp branch. The `mediaType === "video"` clause
+  // below is there for players whose src is a `blob:` -- a CDN attachment
+  // never is, and handing `discord.com/channels/<guild>/<channel>` to yt-dlp
+  // instead of the .mp4 sitting right there saves nothing and costs a
+  // subprocess.
+  const directFile = discordSourceKey(target) !== "";
+  const streaming = !directFile
+    && (/\.m3u8(\?|$)|\.mpd(\?|$)/i.test(target)
+      || info.mediaType === "video");
   if (streaming) {
     // HLS/DASH has no single file to save -- hand the PAGE url to yt-dlp.
     const url = isHttpUrl(info.pageUrl) ? info.pageUrl : target;

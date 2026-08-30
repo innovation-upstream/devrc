@@ -211,6 +211,65 @@ export function discordAliasKey(channelId) {
 }
 
 /**
+ * The stable ledger identity of a Discord attachment, else "".
+ *
+ * Discord signs every CDN URL (`ex`/`is`/`hm`) and re-signs it on each page
+ * load, so the query names THE REQUEST rather than the asset -- precisely the
+ * case `sourceKey` was introduced for. The path
+ * `/attachments/<channel>/<message>/<name>` is globally unique and never
+ * rotates, so dropping the query is what makes "have I got this already"
+ * answerable at all.
+ *
+ * Without it every re-download of one attachment writes a NEW ledger row and a
+ * lookup can only ever miss -- the failure `haveUrl` already names in its own
+ * words: "a badge that never lights actively asserts you do not have this".
+ * `store.source_url_key` keeps the query on purpose, and is right to: on the
+ * sites it was written for the query IS the asset identity. Discord is the
+ * exception, so the exception is expressed here, once, rather than by
+ * weakening that rule for everyone.
+ */
+export function discordSourceKey(url) {
+  return discordChannelId(url) ? playerSourceKey(url) : "";
+}
+
+// Discord serves one attachment from two hosts: the resizing proxy goes in the
+// <img src>, downscaled to whatever the client asked for and usually
+// re-encoded to webp, while the original sits on the wrapping <a href>. So
+// `info.srcUrl` on an image names A THUMBNAIL, not the file that was posted.
+// (A <video> is unaffected -- its src is already the origin.)
+const DISCORD_PREVIEW_HOST = "media.discordapp.net";
+const DISCORD_ORIGIN_HOST = "cdn.discordapp.com";
+
+/**
+ * Given the two URLs the browser offers for one right-clicked element, the one
+ * a "save this" action should actually fetch.
+ *
+ * NARROW ON PURPOSE. It swaps only when both URLs are Discord attachment URLs
+ * with the SAME path -- i.e. provably the same asset at two resolutions.
+ * A link that merely happens to wrap an image is not evidence of anything, and
+ * preferring `linkUrl` in general would turn every linked thumbnail on every
+ * site into a download of wherever the link pointed.
+ */
+export function preferOriginalUrl(srcUrl, linkUrl) {
+  if (!srcUrl) return linkUrl || "";
+  if (!linkUrl) return srcUrl;
+  if (hostOf(srcUrl) !== DISCORD_PREVIEW_HOST) return srcUrl;
+  if (hostOf(linkUrl) !== DISCORD_ORIGIN_HOST) return srcUrl;
+  // Both must be attachments, not just Discord-hosted: an avatar or an emoji
+  // shares the hosts and must never be swapped for something else.
+  if (!discordChannelId(srcUrl) || !discordChannelId(linkUrl)) return srcUrl;
+  let src;
+  let link;
+  try {
+    src = new URL(srcUrl);
+    link = new URL(linkUrl);
+  } catch {
+    return srcUrl;
+  }
+  return src.pathname === link.pathname ? linkUrl : srcUrl;
+}
+
+/**
  * The stored key for a thread slug. NEAR-VERBATIM: `allTokens`, not
  * `contentTokens`. Stopword stripping belongs to fuzzy matching, never to an
  * identity -- it collided distinct threads (`aster-vale-new-set` and
@@ -597,7 +656,16 @@ export function buildMatchPayload(item, capture, carried) {
     // THE LEDGER'S KEY, when the download has a stable name that its own URL
     // is not (see playerSourceKey). Empty for every ordinary download, and the
     // sidecar then falls back to `url` exactly as it did before.
-    sourceKey: typeof c.sourceKey === "string" ? c.sourceKey : "",
+    //
+    // A Discord attachment BEATS the capture's own key, and the order matters.
+    // The capture's key is `playerSourceKey(embedUrl)` -- the page the media
+    // was embedded in. On the sites that feature was built for one embed page
+    // carries one video, so the page identifies the asset; on Discord one
+    // channel URL carries thousands, so using it would collapse an entire
+    // channel into a single ledger row. The attachment path identifies the
+    // asset exactly, so it wins wherever it exists.
+    sourceKey: discordSourceKey(item?.url)
+      || (typeof c.sourceKey === "string" ? c.sourceKey : ""),
     page: {
       title: c.pageTitle || "",
       url: c.pageUrl || "",
