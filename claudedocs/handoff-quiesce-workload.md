@@ -31,11 +31,36 @@ Wrap the repeated "suspend a Flux kustomization + scale deployment to 0" workflo
 - The actual stash-sense workload remains quiesced (suspended + scaled to 0) — resume when ready
 
 ## Open investigations — live diagnosis state
-(none — the session's work is complete)
+
+🔴 **`aggregator` is wedged for as long as stash-sense stays quiesced** — this was
+NOT known when the section below was first written as "(none — the session's work
+is complete)". Measured 2026-08-30 03:0xZ on the workbench cluster:
+
+```
+aggregator  Ready=False  DependencyNotReady:
+  dependency 'flux-system/stash-sense' revision is not up to date
+  dependsOn:  [media-stack, stash-sense]
+  lastApplied trunk@8cb6ff3a   ·   source now trunk@f93935de
+  retrying every 30s; manages 5 objects in media-stack
+                       (2 ConfigMaps, 2 CronJobs, 1 PVC)
+```
+
+A suspended kustomization can never advance its `lastAppliedRevision`, so any
+dependent stays `DependencyNotReady` indefinitely and **stops applying GitOps
+changes**. Nothing about stash-sense looks wrong while that is true.
+
+**Scoped honestly: nothing has been dropped yet.** 0 of the 70 commits in
+`8cb6ff3a..f93935de` touch `clusters/workbench/apps/aggregator`. It is a latent
+wedge, not an active loss — but the next aggregator commit would silently not
+apply. `aggregator` is the only kustomization that dependsOn `stash-sense`.
+
+**Decision (2026-08-30):** leave stash-sense quiesced, accept the wedge as
+recorded here, and fix the tooling so the next quiesce cannot do this silently
+— `fix/quiesce-dependents-preflight`.
 
 ## Next steps (ranked)
-1. **Resume stash-sense when ready** — `bash ~/workspace/devrc/scripts/resume-workload.sh workbench media-stack stash-sense`
-2. **Use the skill for future quiesces** — `/quiesce-workload <name or PID>` in opencode, or `bash scripts/quiesce-workload.sh <cluster> <namespace> <kustomization>` directly
+1. **Use the skill for future quiesces** — `/quiesce-workload <name or PID>` in opencode, or `bash scripts/quiesce-workload.sh <cluster> <namespace> <kustomization>` directly
+2. **Resume stash-sense when ready** — `bash ~/workspace/devrc/scripts/resume-workload.sh workbench media-stack stash-sense`. This also un-wedges `aggregator`; the resume script now names it so the recovery is checkable.
 
 ## Gotchas / decisions / dead-ends
 - The kustomization name may not match the deployment name exactly — the skill teaches the agent to check `spec.targetRef`

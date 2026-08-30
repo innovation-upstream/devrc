@@ -97,14 +97,29 @@
 #              measurement. Raise it, don't lower it. Per-target floors have no
 #              env override on purpose — the whole point is that they are
 #              reviewed edits.
+#   DEVRC_TARGETS
+#              same as `--targets` (see Usage), for callers that cannot add an
+#              argument. 🔴 An EXPORTED value applies to every run-tests.sh in
+#              the shell, including ones you did not mean to narrow — the
+#              pre-push hook's, and any nested run a test spawns. A subset run
+#              says so in the SUMMARY banner and names this variable as the
+#              source, precisely because nobody TYPED it and it is therefore
+#              the harder of the two to notice. Prefer the flag; export this
+#              only for the length of one command.
 #
 # Usage:
-#   scripts/run-tests.sh [--set hermetic|all] [--check-targets] [--check-floors] [ROOT]
+#   scripts/run-tests.sh [--set hermetic|all] [--check-targets] [--check-floors]
+#                        [--targets "<t1> <t2> ..."] [ROOT]
 #     --set hermetic  (default) — targets safe to run offline in the nix sandbox.
 #     --set all                 — hermetic + any targets deferred to the dev host.
 #     --check-targets           — run GUARD 5 only (validate the target list and
 #                                 exit; no pytest, no tool precondition). Cheap
 #                                 enough to be exercised by a unit test.
+#     --targets "<list>"        — run only these targets, space-separated. Each
+#                                 must be an EXACT entry of the selected set;
+#                                 an unknown name, a duplicate, an empty value
+#                                 or a repeated flag is FATAL (exit 3). Also
+#                                 settable as DEVRC_TARGETS.
 #     --check-floors            — run GUARD 3a only (validate the TARGET_FLOORS
 #                                 two-way pin, print the table and the derived
 #                                 global floor, exit). Same reason: cheap.
@@ -146,6 +161,14 @@ _emit_verdict() {
   local rc="$1"
   [ "$VERDICT_EMITTED" -eq 0 ] || return 0
   VERDICT_EMITTED=1
+  # 🔴 THIS LINE'S FORMAT IS A MACHINE CONTRACT — DO NOT APPEND TO IT.
+  # `test_gate_exit_truthfulness.py` matches it with `^RESULT: (PASS|FAIL)
+  # \(exit=(\d+)\)$`, ANCHORED AT BOTH ENDS. A first draft of the subset work
+  # appended " — SUBSET: N of M" here to make a partial run legible; that is a
+  # real need (see the SUMMARY banner) but this is the wrong place for it, and
+  # the anchored assertion is the only thing that would have said so.
+  # The subset fact goes in the banner and in the line below it, both of which
+  # `gate.sh` prints, and neither of which anything parses.
   if [ "$rc" -eq 0 ]; then
     echo "RESULT: PASS (exit=0)"
   else
@@ -176,6 +199,42 @@ trap 'exit 130' INT
 
 SET="hermetic"
 ROOT=""
+# Empty = run the whole selected SET. Populated only by --targets/DEVRC_TARGETS.
+#
+# 🔴 TWO VARIABLES, because "asked for a subset" and "asked for a NON-EMPTY
+# subset" are different questions and only the first can distinguish
+# `--targets ""` (a broken caller, FATAL) from no flag at all (a full run).
+ONLY_TARGETS="${DEVRC_TARGETS:-}"
+ONLY_TARGETS_GIVEN=0
+ONLY_TARGETS_SOURCE=""
+# 🔴 THE FLAG AND THE ENV VAR ARE TRACKED SEPARATELY, and the reason is a
+# regression this file already shipped once: a single `--targets` on a shell
+# where DEVRC_TARGETS happened to be exported was rejected as
+# "--targets given more than once", naming no environment variable, so the only
+# remedy (`env -u DEVRC_TARGETS`) appeared nowhere and the advice printed was
+# already satisfied. It also broke the ordinary precedence every other tool
+# here has — an explicit flag OVERRIDES ambient configuration.
+#
+# So: only a REPEATED FLAG is fatal. The flag beats the environment and SAYS it
+# did, because a selection the operator did not type is the one worth naming.
+ONLY_TARGETS_FLAG_GIVEN=0
+ONLY_TARGETS_ENV_GIVEN=0
+if [ -n "${DEVRC_TARGETS+x}" ]; then
+  ONLY_TARGETS_GIVEN=1
+  ONLY_TARGETS_ENV_GIVEN=1
+  ONLY_TARGETS_SOURCE="the DEVRC_TARGETS environment variable"
+fi
+# Set once the full target list is known, so the SUBSET note can say "N of M"
+# rather than a bare N that reads like a total.
+SET_TOTAL=0
+# Appended to the SUMMARY banner and to the PARTIAL RUN block below it. Empty on
+# a full run.
+#
+# 🔴 NOT to the `RESULT:` line, and do NOT add it there — that line is matched
+# `^RESULT: (PASS|FAIL) \(exit=(\d+)\)$`, ANCHORED AT BOTH ENDS, by
+# test_gate_exit_truthfulness.py. A draft of this feature appended to it and the
+# anchored assertion was the only thing that objected. See `_emit_verdict`.
+SUBSET_NOTE=""
 CHECK_TARGETS_ONLY=0
 CHECK_FLOORS_ONLY=0
 while [ $# -gt 0 ]; do
@@ -189,6 +248,37 @@ while [ $# -gt 0 ]; do
     # Same idea for GUARD 3's floor table: validate the two-way pin between
     # TARGET_FLOORS and the target list, print the table, exit. No pytest.
     --check-floors) CHECK_FLOORS_ONLY=1; shift ;;
+    # Run a SUBSET of the target list. Space-separated, and every entry must
+    # already be a declared target — see the ONLY_TARGETS block below for why
+    # this cannot be a free-form path filter.
+    # 🔴 REPEATING THE FLAG IS FATAL, not last-wins. Conventional flag
+    # semantics would silently discard the earlier selection, and the caller
+    # that hits this is a WRAPPER appending its own `--targets` on top of one
+    # the operator already passed — so the discarded half is exactly the half
+    # nobody is watching. This whole block's doctrine is that a selection
+    # mistake must be loud.
+    --targets|--targets=*)
+      if [ "$ONLY_TARGETS_FLAG_GIVEN" -eq 1 ]; then
+        echo "run-tests: FATAL — --targets given more than once." >&2
+        echo "           Last-wins would silently discard the earlier selection." >&2
+        echo "           Pass ONE --targets with the whole space-separated list." >&2
+        exit 3
+      fi
+      # The flag WINS over an ambient DEVRC_TARGETS rather than colliding with
+      # it. Announced, not silent: a value the operator did not type is exactly
+      # the one that should be named when it is overridden.
+      if [ "$ONLY_TARGETS_ENV_GIVEN" -eq 1 ]; then
+        echo "run-tests: --targets OVERRIDES the DEVRC_TARGETS environment variable" >&2
+        echo "           (env value: '${ONLY_TARGETS}'). The flag wins." >&2
+      fi
+      ONLY_TARGETS_FLAG_GIVEN=1
+      ONLY_TARGETS_GIVEN=1
+      ONLY_TARGETS_SOURCE="--targets"
+      case "$1" in
+        --targets=*) ONLY_TARGETS="${1#*=}"; shift ;;
+        *)           ONLY_TARGETS="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+      esac
+      ;;
     *) ROOT="$1"; shift ;;
   esac
 done
@@ -759,6 +849,142 @@ DEVHOST_TARGETS=(
 TARGETS=("${HERMETIC_TARGETS[@]}")
 if [ "$SET" = "all" ]; then
   TARGETS+=("${DEVHOST_TARGETS[@]}")
+fi
+# Captured BEFORE any narrowing, so the subset note can say "N of M". Taken
+# here rather than recomputed later because `TARGETS` is the thing that gets
+# narrowed — reading it afterwards would report "N of N" on every subset run,
+# which is precisely the reassuring-but-wrong number this is for.
+SET_TOTAL="${#TARGETS[@]}"
+
+# --- TARGET SUBSET (--targets / DEVRC_TARGETS) --------------------------------
+# 🔴 A SUBSET IS A CLAIM THAT THE UNSELECTED TARGETS COULD NOT HAVE CAUGHT THE
+# CHANGE, and nothing here can check that claim. So this mechanism is built to
+# make the DANGEROUS mistakes loud and the safe ones cheap:
+#
+#   * An UNKNOWN target is FATAL, never silently dropped. A typo'd path that
+#     quietly selected nothing would exit 0 having run nothing, which is the
+#     single worst outcome a test runner has — it reads exactly like a pass.
+#     (`run-tests.sh --targets scripts/dl-router` — no `/tests` — is the shape
+#     that would otherwise do it.)
+#   * An EMPTY selection is FATAL for the same reason. "Nothing to run" is
+#     never a verdict this script is allowed to reach.
+#   * Selection NARROWS the SET, it does not widen it: asking for a devhost
+#     target under `--set hermetic` is an unknown-target error, not an implicit
+#     `--set all`.
+#
+# ⚠ The FLOOR follows automatically and that is not luck — GUARD 3's global
+# floor is already computed as the SUM OVER `$TARGETS` (see MIN_TESTS_COMPUTED),
+# so narrowing this array narrows the floor with it. Verified by probe: a
+# 2-target run reported `floor: 575 = sum of 2 per-target floors`.
+#
+# 📖 What this does NOT do: pick the targets for you. Mapping changed paths to
+# targets is a separate, fallible decision and lives outside this script.
+# 🔴 SELECTION IS REQUESTED, NOT MERELY NON-EMPTY. `ONLY_TARGETS_GIVEN` is set
+# by the flag/env READ, so `--targets ""` and `--targets=` are FATAL below
+# instead of falling through to a full run. An empty VALUE is the likeliest
+# shape of a broken caller — `--targets "$(compute_targets)"` when the computer
+# returned nothing — and silently running everything there is the fail-safe
+# direction but the WRONG report: the operator asked for a subset and was given
+# a full run with no word said.
+if [ "$ONLY_TARGETS_GIVEN" -eq 1 ]; then
+  # 🔴 `set -f` — an unquoted array assignment performs PATHNAME EXPANSION as
+  # well as word splitting, and only the splitting is wanted. Without it,
+  # `--targets 'scripts/collector/*/tests'` selects whatever happens to exist
+  # on disk: delete one of those suites and the glob silently selects fewer and
+  # the run stays GREEN, while a FULL run goes red on GUARD 5 (`does not
+  # exist`). That converts the #276 failure this whole file exists to prevent
+  # into a silent narrowing. Restored immediately after; nothing between these
+  # two lines may rely on globbing.
+  set -f
+  # shellcheck disable=SC2206  # word splitting is intended here; globbing is not, hence set -f
+  _requested=($ONLY_TARGETS)
+  set +f
+  if [ "${#_requested[@]}" -eq 0 ]; then
+    # 🔴 NAME THE KNOB THAT IS ACTUALLY SET. A set-but-EMPTY DEVRC_TARGETS
+    # reaches here with no `--targets` on the command line, and telling that
+    # operator to "omit --targets" is advice they have already followed — the
+    # remedy is `unset DEVRC_TARGETS`, which must therefore appear.
+    echo "run-tests: FATAL — ${ONLY_TARGETS_SOURCE} was given but resolved to NOTHING." >&2
+    echo "           A run that selects no targets would exit 0 having tested" >&2
+    echo "           nothing." >&2
+    # 🔴 THREE STATES, NOT TWO. Reading only the FLAG collapses
+    # flag-empty-WITH-an-ambient-env into the flag-only case and prints "Omit
+    # --targets to run the whole set" — which is FALSE: omitting the flag hands
+    # the selection back to DEVRC_TARGETS and runs a SUBSET, at exit 0, with the
+    # operator having been told it would be the whole set. Obeying the tool then
+    # produces exactly the silently-narrowed run this block exists to prevent.
+    #
+    # Measured on the round-2 tree: `DEVRC_TARGETS=scripts/opencode/tests
+    # run-tests.sh --targets ""` printed that advice, and following it ran
+    # `SUBSET: 1 of 28` and exited 0.
+    if [ "$ONLY_TARGETS_FLAG_GIVEN" -eq 1 ] && [ "$ONLY_TARGETS_ENV_GIVEN" -eq 1 ]; then
+      echo "           BOTH are set. Omit --targets AND \`unset DEVRC_TARGETS\` to run" >&2
+      echo "           the whole '$SET' set — omitting only the flag leaves the" >&2
+      echo "           environment variable selecting a SUBSET." >&2
+    elif [ "$ONLY_TARGETS_FLAG_GIVEN" -eq 1 ]; then
+      echo "           Omit --targets to run the whole '$SET' set." >&2
+    else
+      echo "           \`unset DEVRC_TARGETS\` to run the whole '$SET' set." >&2
+    fi
+    exit 3
+  fi
+  _selected=()
+  for _r in "${_requested[@]}"; do
+    _hit=0
+    for _t in "${TARGETS[@]}"; do
+      [ "$_r" = "$_t" ] && { _hit=1; break; }
+    done
+    if [ "$_hit" -eq 0 ]; then
+      echo "run-tests: FATAL — ${ONLY_TARGETS_SOURCE} names '$_r', which is not a target in the '$SET' set." >&2
+      echo "           Targets are exact entries of HERMETIC_TARGETS (plus" >&2
+      echo "           DEVHOST_TARGETS under --set all), not path prefixes." >&2
+      echo "           Run with --check-targets to print the declared list." >&2
+      exit 3
+    fi
+    # 🔴 A DUPLICATE IS FATAL, not deduped. It inflates every coverage number
+    # this mechanism prints AND DEFEATS THE FLOOR BY ITS OWN DERIVATION: the
+    # repeated target contributes its floor twice and then satisfies the
+    # doubled floor by running twice. Measured — one suite, two executions,
+    # `SUBSET — 2 … TOTAL collected=26 … floor: 24`, exit 0, reading as two
+    # targets' worth of coverage.
+    #
+    # Fatal rather than silently deduped because the caller this exists for is
+    # a path->target MAPPER, which emits duplicates by construction (two
+    # changed files, one owning target). A mapper that does that has a bug, and
+    # quietly collapsing it hides the bug while the numbers still read wrong to
+    # anyone reading the mapper's own output.
+    for _s in ${_selected[@]+"${_selected[@]}"}; do
+      if [ "$_s" = "$_r" ]; then
+        echo "run-tests: FATAL — ${ONLY_TARGETS_SOURCE} names '$_r' more than once." >&2
+        echo "           A duplicate runs one suite twice and counts it twice," >&2
+        echo "           inflating the collected total AND the derived floor, so" >&2
+        echo "           the run satisfies a floor its own duplication created." >&2
+        echo "           De-duplicate the selection before passing it." >&2
+        exit 3
+      fi
+    done
+    _selected+=("$_r")
+  done
+  TARGETS=("${_selected[@]}")
+  # Carried into the SUMMARY header and the PARTIAL RUN block below it.
+  # 🔴 NOT into the `RESULT:` line — see `_emit_verdict`, whose format is pinned
+  # anchored-at-both-ends. An earlier version of THIS COMMENT said "and the
+  # RESULT line — see GUARD 6", which is an instruction to re-create the defect
+  # the same commit had just removed. stderr
+  # alone is not enough: `gate.sh` prints from the SUMMARY banner DOWN, so
+  # anything announced above it is invisible on the surface CLAUDE.md tells
+  # people to read.
+  # 🔴 NAME THE SOURCE. An exported DEVRC_TARGETS narrows every run in the
+  # shell — the pre-push hook's included — and nobody typed it, so it is the
+  # harder of the two to notice. Saying which one selected turns "why did this
+  # only run 3 targets" into a one-line answer.
+  SUBSET_NOTE=" — SUBSET: ${#TARGETS[@]} of ${SET_TOTAL} ${SET} target(s) via ${ONLY_TARGETS_SOURCE}"
+  # "N of M", never a bare N: the denominator is what makes this a coverage
+  # statement rather than a count. Same reason SET_TOTAL is captured before
+  # narrowing.
+  echo "run-tests: SUBSET: ${#TARGETS[@]} of ${SET_TOTAL} '$SET' target(s) selected via ${ONLY_TARGETS_SOURCE}." >&2
+  echo "           Unselected targets did NOT run; this verdict is about the" >&2
+  echo "           selected ones only." >&2
 fi
 
 # --- GUARD 3's floor table: PER-TARGET, and NOT an exact total -----------------
@@ -1956,7 +2182,17 @@ if [ "${#bad_targets[@]}" -gt 0 ]; then
 fi
 
 if [ "$CHECK_TARGETS_ONLY" -eq 1 ]; then
-  echo "run-tests: all ${#TARGETS[@]} $SET target(s) resolve."
+  # 🔴 SAY WHEN THIS IS A SUBSET. `all N hermetic target(s) resolve` after
+  # validating ONE entry of twenty-eight is the same false full-set claim F3
+  # fixed on the floor table and F1 fixed in the SUMMARY banner — this is the
+  # third early-exit surface, and it was missed twice because the three are
+  # nowhere near each other. GUARD 5's coverage is exactly the selection.
+  if [ -n "$SUBSET_NOTE" ]; then
+    echo "run-tests: all ${#TARGETS[@]} SELECTED target(s) resolve — a SUBSET of the $SET set (${SET_TOTAL} target(s)), via ${ONLY_TARGETS_SOURCE}."
+    echo "           GUARD 5 did NOT validate the unselected ones."
+  else
+    echo "run-tests: all ${#TARGETS[@]} $SET target(s) resolve."
+  fi
   for t in "${TARGETS[@]}"; do
     if [ -d "$t" ]; then echo "  dir   $t"; else echo "  file  $t"; fi
   done
@@ -2029,11 +2265,30 @@ if [ "$CHECK_FLOORS_ONLY" -eq 1 ]; then
     if [ "$_in_set" -eq 1 ]; then
       echo "  floor ${entry##*|}  ${_ft}"
     else
-      echo "  floor ${entry##*|}  ${_ft}  [not in the $SET set — excluded from the global sum]"
+      # 🔴 SAY WHY IT IS EXCLUDED, and do not say "$SET" when a SUBSET is what
+      # excluded it. Measured: `--targets scripts/collector/tests
+      # --check-floors` printed 28 rows reading `scripts/tests [not in the
+      # hermetic set …]` — and `scripts/tests` is the FIRST entry of
+      # HERMETIC_TARGETS. The row was describing the selection while naming the
+      # set, which is the same false-label defect fixed on the GLOBAL line one
+      # screen below, missed here because the two are not adjacent.
+      if [ -n "$SUBSET_NOTE" ]; then
+        echo "  floor ${entry##*|}  ${_ft}  [not SELECTED by ${ONLY_TARGETS_SOURCE} — excluded from the global sum]"
+      else
+        echo "  floor ${entry##*|}  ${_ft}  [not in the $SET set — excluded from the global sum]"
+      fi
     fi
   done
   echo "  ----"
-  echo "  GLOBAL floor (sum over the $SET set) = $MIN_TESTS_COMPUTED"
+  # 🔴 SAY WHICH SET IT SUMMED. With `--targets` this is the sum over the
+  # SELECTED targets, not over `$SET` — printing "the hermetic set" there is a
+  # false claim about coverage, and the number it labels is exactly the one a
+  # reader uses to decide whether the run was complete.
+  if [ -n "$ONLY_TARGETS" ]; then
+    echo "  GLOBAL floor (sum over the ${#TARGETS[@]} SELECTED target(s), a SUBSET of $SET) = $MIN_TESTS_COMPUTED"
+  else
+    echo "  GLOBAL floor (sum over the $SET set) = $MIN_TESTS_COMPUTED"
+  fi
   exit 0
 fi
 
@@ -3600,7 +3855,24 @@ for SHELL_TEST in "${SHELL_TESTS[@]}"; do
   TIMINGS+=("$(( $(date +%s) - _st_t0 ))"$'\t'"$_st_rc"$'\t'"$SHELL_TEST")
 done
 
-echo "======================== SUMMARY ($SET set) ========================"
+# 🔴 THE BANNER MUST CARRY THE SUBSET, because this is where `gate.sh` STARTS
+# READING. It locates `^=\{8,\} .*SUMMARY` and prints from there DOWN, so the
+# stderr announcement emitted at the top of the run is excluded by
+# construction — measured: a 1-target run through `gate.sh` showed
+# `SUMMARY (hermetic set)` as its FIRST line and `GATE: RESULT=PASS`. A bare
+# "$SET set" there is a positive claim that the whole set ran, printed on the
+# one surface CLAUDE.md tells people to read.
+echo "======================== SUMMARY ($SET set)${SUBSET_NOTE} ========================"
+# Second, unmissable statement of the same fact, on the line right below the
+# banner — i.e. the SECOND line `gate.sh` prints. The banner is easy to skim
+# past; a run that tested a fraction of the suite should have to say so in a
+# sentence, next to the numbers a reader is about to believe.
+if [ -n "$SUBSET_NOTE" ]; then
+  echo "  🔴 PARTIAL RUN — ${#TARGETS[@]} of ${SET_TOTAL} declared '$SET' target(s) ran."
+  echo "     Every count below is for the SELECTED targets only. The unselected"
+  echo "     ones were NOT executed and this verdict says nothing about them."
+  echo "     Selected: ${TARGETS[*]}"
+fi
 for r in "${RESULTS[@]}"; do echo "  $r"; done
 echo "  ----"
 echo "  TOTAL collected=$TOT_COLLECTED  passed=$TOT_PASSED  skipped=$TOT_SKIPPED  failed=$TOT_FAILED  (floor: $MIN_TESTS = sum of ${#TARGETS[@]} per-target floors)"
@@ -3718,6 +3990,63 @@ _split_skip_entry() {
 # the entry applies HERE, 1 if not. An invalid condition sets `fail` and returns
 # 1 — fail CLOSED, so a typo cannot silently widen a pin.
 _skip_entry_applies() {
+  # 🔴 AN ENTRY WHOSE TARGET DID NOT RUN CANNOT APPLY. This half is separate
+  # from the condition below and was missing until 2026-08-30, when `--targets`
+  # made a partial run reachable: a 2-target subset reported
+  #   ERROR: 1 test(s) skipped, but 2 of 3 pinned entries apply here.
+  # because the signal/Postgres pin was counted while `scripts/signal/tests`
+  # was not in the run at all. The run was correct and the guard called it a
+  # failure — the exact way a gate teaches people to ignore it.
+  #
+  # ⚠ Ordered FIRST deliberately. The condition arm below can set `fail` on a
+  # malformed entry, and an entry belonging to a target this run never touched
+  # must not be able to fail the run. It is still validated on any run that
+  # DOES include its target, which is every full run.
+  # ⚠ GATED ON A SUBSET BEING ACTIVE, and that is not a shortcut — an
+  # unconditional version broke 8 tests in test_conditional_skip_pins.py.
+  # Those drive this predicate with SYNTHETIC ledgers whose entries name dirs
+  # that are not real targets, which is the only way to exercise the condition
+  # grammar (invalid `unset:`, a 4-field entry, an unknown prefix) without
+  # inventing a real skip. Filtering unconditionally made every synthetic entry
+  # inapplicable, so those tests counted ZERO applicable pins and the grammar
+  # checks they exist for stopped running — a guard silently disabled by a
+  # change that looked like a strict improvement.
+  #
+  # 🔴 AND DO NOT WRITE THAT COUNTER'S NAME IN A COMMENT HERE. The harness in
+  # test_conditional_skip_pins.py extracts the real blocks out of this file by
+  # UNIQUE text anchors and asserts each occurs exactly once; the first draft of
+  # this comment quoted the anchor verbatim and broke the extraction — 11 tests
+  # red, from a comment. Prose in this file is load-bearing.
+  #
+  # On a FULL run every EXPECTED_SKIPS dir is a declared target today (all
+  # three checked by hand), so this gate costs nothing there and changes
+  # behaviour only where the defect lived. That relationship is now PINNED by
+  # test_every_expected_skip_dir_is_a_declared_target — an earlier draft of
+  # this comment claimed it was pinned when it was not, which is the shape
+  # RULES.md calls out: reading as coverage while providing none is worse than
+  # none, because it stops anyone looking.
+  #
+  # ⚠ The two halves of the ledger use DIFFERENT path semantics and that is a
+  # live trap: the matching loop below treats a ledger dir as a PREFIX
+  # (`grep -qE "\] $edir/"`), while this filter requires an EXACT `TARGETS`
+  # entry. An entry naming a parent directory — `scripts/collector` for a skip
+  # inside `scripts/collector/tests` — works today and would be silently
+  # dropped here under any subset. The pin above is what keeps that from
+  # landing unnoticed.
+  # 🔴 `${ONLY_TARGETS:-}`, NOT `$ONLY_TARGETS`. This function is EXTRACTED from
+  # this file and executed standalone under `bash -uo pipefail` by
+  # test_conditional_skip_pins.py, where neither this variable nor TARGETS
+  # exists. A bare expansion is an unbound-variable abort there — exit 127,
+  # 11 tests red, and the message points at a line number in a synthesised
+  # harness rather than at this file. The default keeps the extracted copy
+  # runnable, and in the real script the variable is always set anyway.
+  if [ -n "${ONLY_TARGETS:-}" ]; then
+    local _in_run=0 _t
+    for _t in "${TARGETS[@]}"; do
+      [ "$edir" = "$_t" ] && { _in_run=1; break; }
+    done
+    if [ "$_in_run" -eq 0 ]; then return 1; fi
+  fi
   case "$econd" in
     "") return 0 ;;
     unset:*)
