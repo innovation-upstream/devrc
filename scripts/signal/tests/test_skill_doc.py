@@ -284,17 +284,36 @@ def test_the_pre_digest_drain_procedure_is_ORDERED_so_it_can_be_RUN():
     column to select on. An unexecutable runbook step is worse than none, because
     the operator discovers it mid-incident.
 
-    Pinned by ORDER, not by a phrase: the deploy instruction must precede the
-    SELECT, and the erroneous "before rolling this out" must be gone.
+    Pinned by ORDER, not by a phrase.
+
+    🔴 THE PHRASE ASSERTION IS GONE — round-3 audit F2. It read
+    `assert "before rolling this out" not in SKILL_TEXT.lower()` and it passed
+    only because a markdown line-wrap splits the phrase across a newline at
+    SKILL.md's "the old wording had it backwards" paragraph, which quotes those
+    exact words on purpose. So it was green for a typographic reason, and a
+    purely COSMETIC rewrap — identical words, one line instead of two — turned
+    it RED with the message "the reversed ordering is back", which would have
+    been false. A guard on WORDS is walkable by rewording and trippable by
+    reflowing; the state that actually matters is the ORDER, and the assertion
+    below is the one that pins it.
     """
     anchor = "rain the pre-existing approvals"
     assert SKILL_TEXT.count(anchor) == 1, \
         "HARNESS: the drain section anchor is not unique in SKILL.md"
     section = SKILL_TEXT.split(anchor)[1]
-    assert "before rolling this out" not in SKILL_TEXT.lower(), \
-        "the reversed ordering is back"
-    deploy_at = section.lower().index("deploy")
-    query_at = section.index("approved_digest IS NULL")
+    # 🔴 THE COMPARISON IS SCOPED TO THE NUMBERED PROCEDURE, NOT THE WHOLE
+    # SECTION. Measured while removing the phrase assertion: `section` opens
+    # with a paragraph EXPLAINING the ordering, and that paragraph contains the
+    # word "deploy" (offset 741) before the SELECT (offset 1025) — so the index
+    # over the whole section was satisfied by the explanation, whatever order
+    # the steps below it were in. Swapping steps 1 and 2 in SKILL.md left this
+    # test GREEN. It is now anchored on the list itself.
+    parts = section.split("\n   1. ", 1)
+    assert len(parts) == 2, \
+        "HARNESS: the drain procedure is no longer a `1.`-numbered list"
+    procedure = parts[1]
+    deploy_at = procedure.lower().index("deploy")
+    query_at = procedure.index("approved_digest IS NULL")
     assert deploy_at < query_at, (
         "the drain procedure must tell the operator to deploy FIRST — the "
         "column it selects on is created by the new consumer's ensure_schema()")

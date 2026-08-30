@@ -60,7 +60,12 @@ DB = "scripts/signal/_signal_db.py"
 CON = "scripts/signal/consumer.py"
 BP = "scripts/signal/build-push.sh"
 
+MEN = "scripts/signal/_mentions.py"
+SKILL = "claude/skills/signal/SKILL.md"
+
 SUITE_EXCL = "scripts/signal/tests/test_group_exclusions.py"
+SUITE_MENT = "scripts/signal/tests/test_mentions.py"
+SUITE_SKILL = "scripts/signal/tests/test_skill_doc.py"
 SUITE_IMAGE = "scripts/signal/tests/test_image_deps.py"
 SUITE_LIVE = "scripts/signal/tests/test_liveness.py"
 
@@ -451,6 +456,125 @@ MUTANTS: list[Mutant] = [
            "            return recording",
            "            return attr",
            "test_each_MUTE_PROBE_actually_calls_the_method_it_is_keyed_under", SUITE_EXCL),
+
+    # ------------------------------------------------------------------ #
+    # MENTIONS (#1121, round-3 delta audit). Every mutant here is a way the
+    # round-3 fixes revert or over-correct. Two shapes recur and both are
+    # represented deliberately: a SECOND matching rule that agrees with the
+    # first only on ASCII (MEN1/MEN2), and an identity check that is either
+    # too narrow (MEN5/MEN7) or too wide (MEN6). The fixture pairs are chosen
+    # so ASCII CANNOT SEE the bug — `ß`/`ss` and `İstanbul`/`istanbul` — which
+    # is exactly why the round-2 fix passed its own battery.
+    # ------------------------------------------------------------------ #
+    Mutant("MEN1", "the cursor's equivalence goes back to `casefold()` — a SECOND "
+                   "matching rule. Agrees with `re.IGNORECASE` on ASCII and disagrees "
+                   "in BOTH directions on unicode, which is how round-2's fix shipped "
+                   "with both arms live.",
+           MEN,
+           "    return _whole(a, b) and _whole(b, a)",
+           "    return a.casefold() == b.casefold()",
+           "test_the_cursor_does_NOT_merge_two_needles_the_MATCHER_keeps_APART",
+           SUITE_MENT),
+
+    Mutant("MEN2", "the equivalence goes RAW — exact string identity. The OPPOSITE "
+                   "over-correction to MEN1: nothing is ever merged, so `@İstanbul` "
+                   "and `@istanbul` both start at 0 and claim the same span. Needed "
+                   "separately because MEN1's killer stays GREEN under this.",
+           MEN,
+           "    return _whole(a, b) and _whole(b, a)",
+           "    return a == b",
+           "test_the_cursor_DOES_merge_two_needles_the_MATCHER_treats_as_ONE",
+           SUITE_MENT),
+
+    Mutant("MEN3", "🔴 EQUIVALENT MUTANT, recorded rather than counted as a kill. "
+                   "`_whole()` drops its end-of-string check. It cannot change any "
+                   "answer: `re.escape` folds one code point to one, so a match "
+                   "consumes exactly `len(pattern)`, and BOTH directions matching "
+                   "already forces the two needles to be the same length. Kept in the "
+                   "ledger so the next round does not re-derive it — and so that if "
+                   "the matcher ever grows a variable-width element, this row turns "
+                   "into a real mutant and its SURVIVED verdict becomes a finding.",
+           MEN,
+           "        return match is not None and match.end() == len(text)",
+           "        return match is not None",
+           "test_the_cursor_DOES_merge_two_needles_the_MATCHER_treats_as_ONE",
+           SUITE_MENT),
+
+    Mutant("MEN4", "the cursor stops ADVANCING past the match it just claimed. Every "
+                   "repeat of one needle then re-claims the first occurrence, which "
+                   "the overlap guard refuses — the round-2 defect by another route.",
+           MEN,
+           "        slot[1] = idx + len(needle)",
+           "        slot[1] = idx",
+           "test_the_ASCII_case_the_round_2_fix_was_written_for_still_works",
+           SUITE_MENT),
+
+    Mutant("MEN5", "the collision rule reverts to comparing RAW author strings, so one "
+                   "person holding a real row AND a durable phone-only placeholder "
+                   "reads as two people and their own longer name vetoes their own "
+                   "ping. The shipped round-2 defect, in its narrowest form.",
+           MEN,
+           "            if not (_contact_ids(contact) & mine)",
+           "            if _contact_author(contact) != author",
+           "test_a_person_in_TWO_contact_rows_does_not_veto_their_OWN_ping",
+           SUITE_MENT),
+
+    Mutant("MEN6", "the identity check goes VETO-BLIND — every other member's longer "
+                   "name is dropped from `avoid`. The over-correction MEN5's killer "
+                   "cannot see: it passes under this, while round-2's F2 silently "
+                   "reopens and `@Ann` lands on `@Ann Smith` again.",
+           MEN,
+           "            if not (_contact_ids(contact) & mine)",
+           "            if False",
+           "test_a_DIFFERENT_persons_longer_name_still_vetoes", SUITE_MENT),
+
+    Mutant("MEN7", "`_identity_groups()` unions NOTHING, so every row is its own "
+                   "person. Same observable as MEN5 from a different SITE — the "
+                   "builder rather than the lookup — because a union that silently "
+                   "stops merging is not visible at the call site at all.",
+           MEN,
+           "        for other in ids[1:]:",
+           "        for other in []:",
+           "test_a_person_in_TWO_contact_rows_does_not_veto_their_OWN_ping",
+           SUITE_MENT),
+
+    Mutant("MEN8", "`utf16_span()` stops forwarding `avoid` — the exported wrapper "
+                   "silently implements only the `(?!\\w)` half while its docstring "
+                   "promises one matching rule. It has NO production caller, so only "
+                   "a direct test can see it; the next caller inherits the gap.",
+           MEN,
+           "    _, start, length = find_span(body, needle, from_index=from_index, avoid=avoid)",
+           "    _, start, length = find_span(body, needle, from_index=from_index)",
+           "test_utf16_span_FORWARDS_avoid_so_it_really_is_one_matching_rule",
+           SUITE_MENT),
+
+    Mutant("MEN9", "🔴 the drain runbook's steps SWAPPED — the SELECT before the "
+                   "deploy, i.e. exactly the unexecutable order the test is named "
+                   "for. Measured: this SURVIVED the pre-round-3 assertion, which "
+                   "indexed `deploy` over the whole section and found it in the "
+                   "explanatory paragraph above the list. The mutant is what proves "
+                   "the surviving ordering guard is REACHABLE now that the walkable "
+                   "phrase assertion beside it is gone.",
+           SKILL,
+           "   1. Deploy, and let the consumer start (that is what runs `ensure_schema()`\n"
+           "      and adds the column).\n"
+           "   2. Find them:\n"
+           "\n"
+           "      ```sql\n"
+           "      SELECT id, send_state, approval_ref FROM signal.messages\n"
+           "       WHERE send_state = 'approved' AND approved_digest IS NULL;\n"
+           "      ```\n",
+           "   1. Find them:\n"
+           "\n"
+           "      ```sql\n"
+           "      SELECT id, send_state, approval_ref FROM signal.messages\n"
+           "       WHERE send_state = 'approved' AND approved_digest IS NULL;\n"
+           "      ```\n"
+           "\n"
+           "   2. Deploy, and let the consumer start (that is what runs `ensure_schema()`\n"
+           "      and adds the column).\n",
+           "test_the_pre_digest_drain_procedure_is_ORDERED_so_it_can_be_RUN",
+           SUITE_SKILL),
 ]
 
 

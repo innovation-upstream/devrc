@@ -202,7 +202,8 @@ def find_span(body: str, needle: str, *, from_index: int = 0,
         pos = idx + 1
 
 
-def utf16_span(body: str, needle: str, *, from_index: int = 0) -> tuple[int, int]:
+def utf16_span(body: str, needle: str, *, from_index: int = 0,
+               avoid=()) -> tuple[int, int]:
     """`(start, length)` of `needle` in `body`, in UTF-16 code units.
 
     `from_index` is a CODE POINT index into `body` — the search cursor, used so
@@ -210,9 +211,37 @@ def utf16_span(body: str, needle: str, *, from_index: int = 0) -> tuple[int, int
     both claiming the first. Raises `MentionSpanMissing` if the needle is not
     present at or after it. A thin wrapper over `find_span()` so there is exactly
     one matching rule.
+
+    🔴 `avoid` IS FORWARDED, and that is what makes the sentence above true.
+    Round-3 audit F4: this dropped the argument, so it implemented only the
+    `(?!\\w)` half of the rule — pre-round-2 behaviour under a docstring
+    promising the opposite. It has no production caller today, which is exactly
+    why the gap was invisible; the next caller would have inherited it.
     """
-    _, start, length = find_span(body, needle, from_index=from_index)
+    _, start, length = find_span(body, needle, from_index=from_index, avoid=avoid)
     return start, length
+
+
+def _same_needle(a: str, b: str) -> bool:
+    """Can the MATCHER tell these two needles apart?
+
+    🔴 THE EQUIVALENCE THE CURSOR USES, DERIVED FROM THE SEARCH RATHER THAN
+    RESTATED. Each needle's own compiled pattern is run against the other, and
+    both directions must consume the whole string. Anything else is a SECOND
+    matching rule that can — and did — disagree with the first: see the block
+    comment in `resolve_mentions()` for the two unicode pairs where
+    `str.casefold()` and `re.IGNORECASE` diverge in opposite directions.
+
+    Symmetric by construction. NOT assumed transitive: `re`'s folding is
+    per-code-point and unicode case classes are not a partition under it, so the
+    caller reuses the FIRST seen needle this returns True for rather than
+    building equivalence classes.
+    """
+    def _whole(pattern_src: str, text: str) -> bool:
+        match = _needle_pattern(pattern_src).match(text)
+        return match is not None and match.end() == len(text)
+
+    return _whole(a, b) and _whole(b, a)
 
 
 # --------------------------------------------------------------------------- #
@@ -292,38 +321,102 @@ def resolve_mentions(identifiers, *, body: str, members, contacts,
     # Only contacts that are ACTUALLY in this group are candidates. A name that
     # matches somebody in another conversation must not resolve here.
     candidates = [c for c in (contacts or []) if _contact_ids(c) & member_set]
+    identity = _identity_groups(candidates)
 
     out: list[dict] = []
-    cursor_for: dict[str, int] = {}
+    # 🔴 THE CURSOR'S EQUIVALENCE CLASS IS DERIVED FROM THE MATCHER ITSELF.
+    # Two needles share a search cursor iff the SEARCH cannot tell them apart —
+    # decided by `_same_needle()`, which asks the compiled patterns, not by a
+    # second folding function that happens to agree on ASCII.
+    #
+    # Round-2 audit F1 keyed this on `needle.casefold()`, reasoning that
+    # `re.IGNORECASE` and `casefold()` are the same relation. They are NOT, and
+    # they disagree in BOTH directions — round-3 audit F1, both arms measured in
+    # `test_the_cursor_does_NOT_merge_…` / `test_the_cursor_DOES_merge_…`:
+    #
+    #   over-merge  `'@ß'.casefold() == '@ss'.casefold()` is True, but the
+    #               matcher never expands `ß` to `ss`, so one shared cursor made
+    #               `--mention ss --mention ß` search for `@ß` from PAST the
+    #               `@ss` match and refuse a body that contains it.
+    #   under-merge `'@İstanbul'.casefold()` is `'@i̇stanbul'` — a `i` plus a
+    #               combining dot, one code point LONGER — so it keyed apart
+    #               from `'@istanbul'` while `re.IGNORECASE` folds `İ` to `i`
+    #               and matches. Two cursors, both at 0, both landing on the
+    #               first occurrence: `MentionSpansOverlap` on a body that
+    #               genuinely holds two.
+    #
+    # A list, not a dict: matcher equivalence is not guaranteed transitive, so
+    # this is first-match-wins over the needles already seen — which is exactly
+    # "reuse the cursor of an earlier needle this search cannot distinguish from
+    # the new one", and never invents a class the matcher does not have.
+    cursors: list[list] = []  # [needle, cursor] in first-seen order
     for ident in idents:
         author = _resolve_one(ident, member_set=member_set, candidates=candidates)
         needle = "@" + ident
-        # 🔴 THE CURSOR KEY IS CASEFOLDED, BECAUSE THE MATCHER IS CASE-INSENSITIVE.
-        # `_needle_pattern` compiles with `re.IGNORECASE`, so `@Ann` and `@ANN`
-        # are the SAME needle to the search — but keying the cursor on the raw
-        # string made them two dict entries, both starting from 0, both landing
-        # on the same first occurrence. `--mention Ann --mention ANN` against
-        # `"hi @Ann and @ANN ok"` then produced two identical spans and was
-        # refused by `_refuse_overlapping_spans` with a message telling the
-        # operator to give each mention its own `@who` text — which the body
-        # already had. Round-2 audit F1; the key must fold exactly as the
-        # matcher does. `casefold()` may change LENGTH, which is why it is used
-        # only as a dict key and never to compute an offset.
-        key = needle.casefold()
+        slot = next((s for s in cursors if _same_needle(s[0], needle)), None)
+        if slot is None:
+            slot = [needle, 0]
+            cursors.append(slot)
         idx, start, length = find_span(
-            body or "", needle, from_index=cursor_for.get(key, 0),
-            avoid=_colliding_needles(ident, author=author, candidates=candidates))
+            body or "", needle, from_index=slot[1],
+            avoid=_colliding_needles(ident, author=author, candidates=candidates,
+                                     identity=identity))
         # Advance THIS needle's cursor past the occurrence just claimed, so
         # `--mention Ann --mention Ann` takes the first and second "@Ann" rather
         # than pointing both mentions at the same span. Derived from the match
-        # `find_span` returned, NOT from a second search.
-        cursor_for[key] = idx + len(needle)
+        # `find_span` returned, NOT from a second search. `len(needle)` is the
+        # matched width: the pattern is `re.escape(needle)`, and `re` folds one
+        # code point to one code point, so a match is always exactly as long as
+        # the needle even when the two spell the character differently.
+        slot[1] = idx + len(needle)
         out.append({"author": author, "start": start, "length": length})
     _refuse_overlapping_spans(out)
     return out
 
 
-def _colliding_needles(ident: str, *, author: str, candidates: list) -> list[str]:
+def _identity_groups(candidates: list) -> dict[str, frozenset]:
+    """`identifier -> every identifier belonging to the SAME PERSON`.
+
+    🔴 ONE PERSON CAN BE TWO CONTACT ROWS, DURABLY. `_promote_placeholder()`'s
+    `NOT EXISTS` branch deliberately DECLINES when a real row already holds the
+    uuid, so a phone-only placeholder minted by a draft is left in place forever
+    once an envelope has taught the real row the same number. Both rows then
+    carry that number, and the shared identifier is the only thing that ties
+    them together — which is what this unions on.
+
+    Round-3 audit F3: `_colliding_needles()` compared raw `_contact_author()`
+    strings, so that person read as TWO people and their own longer name vetoed
+    their own ping — the exact case the `_colliding_needles` docstring claims is
+    excluded. Comparing resolved IDENTITY rather than a row's chosen author id
+    is what makes one person one person.
+
+    Rows with no identifier in common stay separate: there is nothing in the
+    data linking them, and merging on a NAME would reopen the prefix collision
+    the collision rule exists for.
+    """
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for contact in (candidates or []):
+        ids = sorted(_contact_ids(contact))
+        for other in ids[1:]:
+            root_a, root_b = find(ids[0]), find(other)
+            if root_a != root_b:
+                parent[root_a] = root_b
+
+    clusters: dict[str, set] = {}
+    for key in list(parent):
+        clusters.setdefault(find(key), set()).add(key)
+    return {key: frozenset(clusters[find(key)]) for key in parent}
+
+
+def _colliding_needles(ident: str, *, author: str, candidates: list,
+                       identity: dict | None = None) -> list[str]:
     """`@name` needles of OTHER group members that are LONGER than `@ident`.
 
     🔴 THE HALF OF THE PREFIX RULE `(?!\\w)` CANNOT DO. The right-hand word
@@ -335,16 +428,23 @@ def _colliding_needles(ident: str, *, author: str, candidates: list) -> list[str
     because the test is "does a longer member name occupy this exact offset",
     not "which characters are allowed to follow".
 
-    Restricted to OTHER authors: a contact with `display_name="Ann"` and
+    Restricted to OTHER PEOPLE: a contact with `display_name="Ann"` and
     `profile_name="Ann Marie"` is one person, and their own longer name must not
-    veto their own ping. Restricted to LONGER names because an equal-length
-    match IS this identifier (the matcher is case-insensitive), which is the
+    veto their own ping. 🔴 "Other person" is decided on RESOLVED IDENTITY —
+    `_identity_groups()`, which unions contact rows sharing any identifier — not
+    on the raw `_contact_author()` string, which splits one person into two the
+    moment they hold both a real row and a durable phone-only placeholder
+    (round-3 audit F3). Restricted to LONGER names because an equal-length match
+    IS this identifier (the matcher is case-insensitive), which is the
     `MentionNameAmbiguous` case and belongs to `_resolve_one`.
     """
     width = len(ident.strip())
+    identity = identity or {}
+    key = _norm_member(author)
+    mine = identity.get(key) or frozenset({key})
     return ["@" + name
             for contact in (candidates or [])
-            if _contact_author(contact) != author
+            if not (_contact_ids(contact) & mine)
             for name in _contact_names_raw(contact)
             if len(name) > width]
 

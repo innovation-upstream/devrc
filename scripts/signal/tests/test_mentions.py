@@ -1660,3 +1660,197 @@ def test_a_failed_group_lookup_exits_3_from_main_and_drafts_NOTHING(db, monkeypa
     assert consumer.main(["draft", "--to", GROUP_ADDRESS, "--body", "@Ann hi",
                           "--from-number", "", "--mention", "Ann"]) == 3
     assert db.conn.count("messages") == before, "a draft was left behind"
+
+
+# --------------------------------------------------------------------------- #
+# Round-3 delta audit
+# --------------------------------------------------------------------------- #
+# F1: the CURSOR's fold and the MATCHER's fold were two DIFFERENT equivalence
+# relations. `casefold()` and `re.IGNORECASE` disagree in BOTH directions, so
+# the cursor merged needles the matcher keeps apart and split needles the
+# matcher treats as one. Both arms are measured below against the SAME two
+# unicode pairs, which is what makes the disagreement audible.
+#
+#     '@ß'.casefold() == '@ss'.casefold()               -> True   (over-merge)
+#     re.search(re.escape('@ß'), '@ss', IGNORECASE)     -> None
+#     '@İstanbul'.casefold() != '@istanbul'.casefold()  ->        (under-merge)
+#     re.search(re.escape('@İstanbul'), '@istanbul', I) -> match
+# --------------------------------------------------------------------------- #
+SS_UUID = "44444444-4444-4444-8444-444444444444"
+ESZETT_UUID = "55555555-5555-4555-8555-555555555555"
+IST_DOTTED_UUID = "66666666-6666-4666-8666-666666666666"
+IST_PLAIN_UUID = "77777777-7777-4777-8777-777777777777"
+
+
+def test_the_cursor_does_NOT_merge_two_needles_the_MATCHER_keeps_APART():
+    """🔴 RED at d05a5e7e — `MentionSpanMissing`. Round-3 audit F1, over-merge arm.
+
+    Members `ss` and `ß`. `'@ß'.casefold() == '@ss'.casefold()`, so the
+    casefolded cursor key made these ONE needle and the second lookup started
+    after the first one's match — but the matcher, `re.escape` + `IGNORECASE`,
+    does NOT consider them equal (Python's `re` folds ONE code point at a time
+    and never expands `ß` to `ss`). So `--mention ss --mention ß` against a body
+    holding both, with `@ss` occurring AFTER `@ß`, searched for `@ß` from past
+    the end of the `@ss` match and refused a body that plainly contains it.
+
+    ORDER-DEPENDENT, which is why the fixture puts `@ß` FIRST in the body and
+    `ss` first on the command line: swap either and the bug hides.
+    """
+    contacts = [
+        {"signal_uuid": SS_UUID, "phone_number": None, "display_name": "ss",
+         "profile_name": None, "is_placeholder": False},
+        {"signal_uuid": ESZETT_UUID, "phone_number": None, "display_name": "ß",
+         "profile_name": None, "is_placeholder": False},
+    ]
+    body = "hi @ß and @ss ok"
+    assert _resolve(["ss", "ß"], body, members=[SS_UUID, ESZETT_UUID],
+                    contacts=contacts) == [
+        {"author": SS_UUID, "start": 10, "length": 3},
+        {"author": ESZETT_UUID, "start": 3, "length": 2},
+    ]
+
+
+def test_the_cursor_DOES_merge_two_needles_the_MATCHER_treats_as_ONE():
+    """🔴 RED at d05a5e7e — `MentionSpansOverlap`. Round-3 audit F1, under-merge arm.
+
+    Members `İstanbul` (U+0130, dotted capital I) and `istanbul`.
+    `'İstanbul'.casefold()` is `'i̇stanbul'` — NINE code points, an `i` plus a
+    combining dot — so the two casefold to DIFFERENT keys and each got its own
+    cursor starting at 0. The matcher disagrees: `re.IGNORECASE` folds `İ` to
+    `i`, so both needles matched the FIRST `@İstanbul` and the two mentions
+    claimed the same span. The overlap guard then refused a body that genuinely
+    contains two separate occurrences, telling the operator to give each mention
+    its own `@who` text — which the body already had.
+
+    This is the same defect the round-2 fix was aimed at (`@Ann`/`@ANN`), one
+    fold away: fixing it with a SECOND folding function fixed the ASCII case and
+    left the unicode case live.
+    """
+    contacts = [
+        {"signal_uuid": IST_DOTTED_UUID, "phone_number": None,
+         "display_name": "İstanbul", "profile_name": None, "is_placeholder": False},
+        {"signal_uuid": IST_PLAIN_UUID, "phone_number": None,
+         "display_name": "istanbul", "profile_name": None, "is_placeholder": False},
+    ]
+    body = "hi @İstanbul and @istanbul ok"
+    assert _resolve(["İstanbul", "istanbul"], body,
+                    members=[IST_DOTTED_UUID, IST_PLAIN_UUID],
+                    contacts=contacts) == [
+        {"author": IST_DOTTED_UUID, "start": 3, "length": 9},
+        {"author": IST_PLAIN_UUID, "start": 17, "length": 9},
+    ]
+
+
+def test_the_ASCII_case_the_round_2_fix_was_written_for_still_works():
+    """`--mention Ann --mention ANN` still takes two successive occurrences.
+
+    GREEN at d05a5e7e — an INVARIANT GUARD on the round-2 behaviour the F1 fix
+    must not regress, not regression coverage. It is here because the fix
+    REPLACES the mechanism (a casefolded dict key) rather than adding to it.
+    """
+    assert _resolve(["Ann", "ANN"], "hi @Ann and @ANN ok") == [
+        {"author": ANN_UUID, "start": 3, "length": 4},
+        {"author": ANN_UUID, "start": 12, "length": 4},
+    ]
+
+
+# --- F3: one person split across two contact rows -------------------------- #
+def test_a_person_in_TWO_contact_rows_does_not_veto_their_OWN_ping():
+    """🔴 RED at d05a5e7e — `MentionSpanMissing`. Round-3 audit F3.
+
+    `_colliding_needles()` compared raw `_contact_author()` STRINGS, so one
+    person holding a real uuid row AND a phone-only placeholder row read as TWO
+    people and their own longer name vetoed their own ping. The sibling test
+    `test_a_members_OWN_longer_name_does_not_veto_their_own_ping` pins exactly
+    this behaviour for the ONE-ROW shape, and its docstring says the rule is
+    scoped to other AUTHORS — the two-row shape walked straight through it.
+
+    🔴 THE FIXTURE IS BUILT BY THE PUBLIC API, not by hand and not by SQL, and
+    the order is the durable one: `_promote_placeholder()`'s `NOT EXISTS` branch
+    DECLINES when a real row already holds the uuid, so the placeholder is left
+    in place permanently. Both rows end up carrying the same phone number —
+    which is the only thing that ties them together, and what the fix keys on.
+    """
+    number = "+15550777"
+    contacts = [
+        {"signal_uuid": ANN_UUID, "phone_number": number, "display_name": "Ann",
+         "profile_name": None, "is_placeholder": False},
+        {"signal_uuid": _signal_db.placeholder_uuid(number),
+         "phone_number": number, "display_name": None,
+         "profile_name": "Ann Smith", "is_placeholder": True},
+    ]
+    assert _resolve(["Ann"], "@Ann Smith please", members=[number, BOB_UUID],
+                    contacts=contacts) == [
+        {"author": ANN_UUID, "start": 0, "length": 4}]
+
+
+def test_the_TWO_ROW_shape_is_what_the_public_upsert_API_really_produces(db):
+    """🔴 The fixture above is not invented — this builds it through `SignalDB`.
+
+    Three ordinary `upsert_contact()` calls, no SQL: a uuid-only contact from an
+    envelope, a phone-only draft recipient (which mints a placeholder because no
+    row carries that number yet), then an envelope carrying BOTH. The third call
+    attempts `_promote_placeholder()`, which declines — the uuid is taken — and
+    then writes the phone onto the real row. Two rows, one person, shared phone.
+
+    MIXED, and measured that way: the three `assert len/phone/placeholder` lines
+    are GREEN at d05a5e7e — an INVARIANT GUARD proving the F3 fixture is
+    reachable from the public API, not regression coverage. Without them the
+    test above is a claim about a state nobody has shown the system can reach.
+    The final `resolve_mentions` assertion is RED at d05a5e7e, for the same
+    reason as the test above; it is here so the two halves are joined in ONE
+    run rather than reasoned about across two.
+    """
+    number = "+15550777"
+    db.upsert_contact(signal_uuid=ANN_UUID, display_name="Ann")
+    db.upsert_contact(phone_number=number, profile_name="Ann Smith")
+    db.upsert_contact(signal_uuid=ANN_UUID, phone_number=number)
+    rows = db.contacts_by_identifiers([number, ANN_UUID])
+    assert len(rows) == 2, f"expected the durable two-row split, got {rows!r}"
+    assert {r["phone_number"] for r in rows} == {number}, \
+        "the shared phone number is the only link between the two rows"
+    assert sorted(bool(r["is_placeholder"]) for r in rows) == [False, True]
+    # And the resolver handles what the API produced, end to end.
+    assert _mentions.resolve_mentions(
+        ["Ann"], body="@Ann Smith please", members=[number, BOB_UUID],
+        contacts=rows, is_group=True) == [
+        {"author": ANN_UUID, "start": 0, "length": 4}]
+
+
+def test_a_DIFFERENT_persons_longer_name_still_vetoes():
+    """The negative control on F3: identity-aware must not become veto-blind.
+
+    Two genuinely different people — no shared identifier — and the longer name
+    must still win, exactly as before. A fix that merged everyone into one
+    identity would pass the F3 test and silently reopen round-2's F2.
+
+    GREEN at d05a5e7e — an INVARIANT GUARD, not regression coverage.
+    """
+    contacts = [
+        {"signal_uuid": ANN_UUID, "phone_number": None, "display_name": "Ann",
+         "profile_name": None, "is_placeholder": False},
+        {"signal_uuid": BOB_UUID, "phone_number": None, "display_name": None,
+         "profile_name": "Ann Smith", "is_placeholder": False},
+    ]
+    with pytest.raises(_mentions.MentionSpanMissing):
+        _resolve(["Ann"], "@Ann Smith please", members=[ANN_UUID, BOB_UUID],
+                 contacts=contacts)
+
+
+# --- F4: `utf16_span()` claimed to be a thin wrapper and was not ------------ #
+def test_utf16_span_FORWARDS_avoid_so_it_really_is_one_matching_rule():
+    """🔴 RED at d05a5e7e. Round-3 audit F4.
+
+    `utf16_span()` is exported and its docstring calls it "a thin wrapper over
+    `find_span()` so there is exactly one matching rule". It did not forward
+    `avoid`, so it implemented only the `(?!\\w)` half — pre-round-2 behaviour
+    under a docstring promising the opposite. No production caller today; the
+    next one inherits the gap.
+
+    Both arms, because either alone is green for the wrong reason: WITHOUT
+    `avoid` the hit at 0 stands, WITH it the search skips onto the later
+    occurrence.
+    """
+    body = "@Ann Smith and @Ann ok"
+    assert _mentions.utf16_span(body, "@Ann") == (0, 4)
+    assert _mentions.utf16_span(body, "@Ann", avoid=["@Ann Smith"]) == (15, 4)
