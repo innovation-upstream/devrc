@@ -19,14 +19,18 @@ Make the hosted subsystem store the single datastore every host reads **and writ
 ## State now
 
 🔴 **CRITERION 10, STEP 1 OF 2, IS DONE AND PROVEN ON THE POD** (2026-08-29, homelab-infra
-`1e0c9250`). The token file now holds **two rows**, and the coexistence *is* the migration —
-no credential moved, no read broke, and the rollback is deleting line 2 with **no image
-change**:
+`1e0c9250`). The token file holds **two rows**, and the coexistence *is* the migration — no
+credential moved, no read broke, and the rollback is deleting line 2 with **no image change**:
 
 | line | shape | identity | fingerprint | authority |
 |---|---|---|---|---|
 | 1 | `<token>` | `legacy` | `2481e4553f6c` | UNRESTRICTED read · **MAY NOT WRITE** |
 | 2 | `<token> zach <15 scopes>` | `zach` | `a8f329c534d7` | 15 scopes · **may write** |
+
+Live banner, re-read 2026-08-30T03:0xZ — **this line named the pre-rotation fingerprint until
+now, and was wrong**:
+`token-ids=2481e4553f6c:legacy,a8f329c534d7:zach`, still shouting
+`UNRESTRICTED-SCOPE LEGACY MODE — 1 of 2`.
 
 🔴 **The mapped row was ROTATED once, same day** (homelab-infra `a8d77945`). Its first token
 (`8e1e79bb4664`) was printed in plaintext into a session transcript by a shell mistake — a
@@ -37,21 +41,19 @@ receiving a heredoc**: use two invocations — `printf '%s' "$TOK" | ssh host 'u
 ~/.tok'`, then `ssh host 'bash -s' < script.sh`, the script shredding `~/.tok`. A rotation
 needs no `zach-prev` identity: guard 12 covers an OVERLAP, and this was a REPLACE.
 
-✅ **BOTH HOSTS ARE NOW ON THE MAPPED TOKEN** — workbench and laptop each verified through the
-real client (`cairn sync` → 132 entries) and by the audit log (`token=a8f329c534d7
-identity=zach`). `token=2481e4553f6c` count since the rotated pod started: **0**. **Criterion
-10's 24 h clock is running from 2026-08-30T02:12:28Z** — the pod's own `startTime`, because
-the log cannot evidence anything earlier than the process that writes it. (An earlier revision
-of this line said `02:11Z`, which was ~90 s optimistic: it dated the clock from the commit
-rather than from the observer.) ⚠ The evidence lives in the POD LOG,
-which resets on restart — a restart inside the window destroys the proof even though the
-property still holds. Read it from Loki if the window must survive one.
+✅ **BOTH HOSTS ARE ON THE MAPPED TOKEN.** Workbench and laptop each verified through the real
+client (`cairn sync` → 132 entries) *and* by the audit log (`token=a8f329c534d7
+identity=zach`). **Criterion 10's 24 h clock is running from 2026-08-30T02:12:28Z** — the
+pod's own `startTime`, because the log cannot evidence anything earlier than the process that
+writes it. (An earlier revision said `02:11Z`, ~90 s optimistic: it dated the clock from the
+commit rather than from the observer.) Re-read at 03:0xZ: pod `…-g6qct`, **0 restarts**,
+`token=2481e4553f6c` count **0**, `token=a8f329c534d7` count 2. ⚠ The evidence lives in the
+POD LOG, which resets on restart — a restart inside the window destroys the proof even though
+the property still holds, so confirm `restartCount` and `startTime` before quoting the count,
+and read it from Loki if the window must survive one.
 
-Startup banner confirms the load:
-`token-ids=2481e4553f6c:legacy,8e1e79bb4664:zach`, still shouting
-`UNRESTRICTED-SCOPE LEGACY MODE — 1 of 2`.
-
-**Measured on the pod, not in tests** — every line below is from the live audit log:
+**The write probes below ran PRE-ROTATION**, on `8e1e79bb4664`. They are kept verbatim because
+they are the criterion-4 evidence; the fingerprint they name is simply retired:
 
 ```
 POST /api/v1/entry/devrc/subsystem-store-api/bullets  token=2481e4553f6c identity=legacy  403 legacy-cannot-write
@@ -63,36 +65,32 @@ GET  /api/v1/recall/devrc                             both fingerprints         
 …and the bullet was **read back off disk** (`kubectl exec cat`): a single-line insert at the
 top of `## Nuance / work-history`, `13350 → 14603 B`, tagged
 `[cairn: zach/9cfaabff-a4ab-4571-8364-b1a44f83cf9b]`. The request carried a forged
-`"actor":"someone-else"` and it was **discarded** — so criterion 4's forgery case is now
-verified **against the pod**, not only against the image.
+`"actor":"someone-else"` and it was **discarded** — so criterion 4's forgery case is verified
+**against the pod**, not only against the image.
 
 **The pod runs `0.6.0`, not `0.5.0`.** A concurrent session bumped it in homelab-infra
 `5a153492` (2026-08-29 15:01, "#996 merged and the pod never moved"); live `imageID` is
 `sha256:80a7c735…`. Any doc still saying 0.5.0 is stale.
 
-🔴 **STEP 2 — deleting the bare line — IS NOT DONE, and its gate is not satisfiable today.**
-The card requires 24 h of audit log with **no** request on `token=2481e4553f6c` *and* a
-deliberate rollback rehearsal. Both hosts' client env (`~/.config/subsystem-store/env`) still
-holds the **legacy** token, so the clock has not started. Move both hosts first, or step 2
-kills every read.
+🔴 **STEP 2 — deleting the bare line — IS NOT DONE.** It is now purely time-gated: the window
+opens **2026-08-31T02:12:28Z**, after which the ordered checklist in rank 1 applies (count
+still 0 → rollback rehearsed → delete the row → **shred the backups on both hosts**). (A
+previous revision of this paragraph said the clock had not started because both hosts still
+held the legacy token. That was true when written and is **now false** — both moved
+2026-08-30.)
 
-**Criterion 8 — THIS HOST ONLY.** `seed.sh` run from workbench; the card's own check passes:
-`comm -23 <local> <served>` prints **zero lines**. Store went **75 entries / 9 scopes →
-132 / 15**, stamp `2026-08-20` → fresh. Five scopes had been served *zero* entries
-(`civitai-spine-controller`, `civitai-orchestration`, `homelab-infra`, `claude-pool`,
-`civitai-app-sensei`) and every other scope was short.
-🔴 **The laptop half is NOT done** — the card says "for BOTH hosts". Served **132/15**
-against the card's target **139/19**; the gap is laptop-only. `ssh laptop` does not resolve
-from workbench — use the `laptop` skill's real host.
+**Criterion 8 — STILL THIS HOST ONLY, and do not confuse it with tonight's cutover.** What
+moved on the laptop was its **client token**, not its **seed**. `seed.sh` has still only been
+run from workbench; served **132 entries / 15 scopes** against the card's target **139 / 19**,
+and the gap is laptop-only.
 
-**Merged:** devrc **#990** (the retraction below), **#907** (phase-2 doc), **#998**
-(`seed.sh` multi-host guard, squash **`5e8b9d0b`**). Filed devrc **#1045** for three
-pre-existing `seed.sh` gaps, with a closing condition.
-
-**Deployed AND verified** for criteria 3 and 4 against the pod. 🔴 **Criteria 1, 2, 5, 6, 7
-rest on tests, not on production** — they are deployed, not verified there.
-
-**Criterion 10 was never started**, and it was this session's opening instruction. See rank 1.
+**PR #1048 (this doc) — CI is RUNNING again.** Both Tekton checks went `PENDING` at
+2026-08-30T03:05:22Z off `b3495647`; the head before that sat on 4-hour-old `ERROR`s. A
+close/reopen retrigger earlier produced **no pipelinerun at all** despite the EventListener's
+CEL filter accepting `reopened` — a push does retrigger, a reopen apparently did not.
+devrc-ci's own recent record: **3 Succeeded / 23 Failed / 5 Cancelled** of 31 completed. Until
+this merges the `main` copy is stale — **but it still carries `clawgate-task: 371`**, so a
+`/resume` off the stale copy is routed to the card, where the full evidence lives.
 
 ## Open investigations — live diagnosis state
 
@@ -329,6 +327,55 @@ three assertions into one shared helper) is **unaudited**.
 GNU find 4.11 and bfs 4.1 at `-maxdepth 1`: an unreadable *sub*directory, a broken symlink
 child and a child directory named `*.md` all exit **0**; only the start point yields rc≠0. The
 `2>/dev/null` is **inert**, not load-bearing (stdout byte-identical without it).
+
+**Instrument traps hit while WRITING UP this work — both produced a confident wrong reading:**
+- 🔴 **`clawgatectl` prefixes stdout with a version note when the server is ahead of the
+  binary** (`note: server 0.8.16, clawgatectl built for 0.8.15`). Piping it straight into a
+  JSON parser raises `Expecting value: line 1 column 1`, which reads exactly like "the post
+  failed" — so the post was retried and **comment 514/515 on clawgate #371 are duplicates**.
+  `clawgatectl` has no delete verb. **Parsing a tool's output makes its FORMAT a dependency
+  you did not pin**; strip to the first `{` (`raw[raw.index("{"):]`), or read the exit code
+  and a `grep -o '"id": [0-9]*'` instead of a full parse.
+- 🔴 **An `OPEN:` marker wrapped in emphasis parses as NEAR-MISS, so it declares NOTHING.**
+  `- 2026-08-30: 🔴 **OPEN: …**` scored `🔴 1 NEAR-MISS` and **zero** OPEN on the store index
+  row; unwrapped to `- 2026-08-30: OPEN: …` it scored `🔴 1 OPEN`. The grammar wants the
+  marker bare on the bullet's OPENING line. **Writing a marker is not declaring one** —
+  `subsystem_recall.py --scope <s> --list` and read the badge, with a control (the scope shows
+  9 OPEN markers, so a zero would not have been a detector wired to nothing).
+
+**Operational facts established tonight:**
+- 🔴 **`load_tokens` runs ONCE at startup — there is no SIGHUP reload.** A secret edit is inert
+  until the pod is replaced, and with `Recreate` at `replicas: 1` a malformed row is `exit 78`:
+  the store stays **DOWN**, it does not fall back. Replace the pod with `kubectl delete pod`,
+  **not** `rollout restart` — the latter costs two rollouts here (homelab-infra `CLAUDE.md`),
+  i.e. two hard read outages for one intended restart.
+- 🔴 **Pre-flight a token file against the DEPLOYED `server.py`, not `main`.** Extract it from
+  the pod (`kubectl exec … tar czf - -C /app scripts`), confirm the sha matches the pod's own
+  copy, then run `load_tokens` over the exact candidate bytes. Five negative controls each go
+  red with their own message: a space after a scope comma (parses as **4 fields**), a mapped
+  row claiming reserved `legacy`, the **same token bare AND mapped** (guard 11), two rows
+  claiming one identity (guard 12), a short token (`>= 43`). Import gotcha:
+  `sys.modules[name] = mod` **before** `exec_module`.
+- 🔴 **Guard 11 means "scope a credential its holder already has" CANNOT be done by adding a
+  line below it** — bare `<tok>` + mapped `<tok> zach …` is refused as *"one credential is
+  given two different authorities"*. A second holder needs a second token.
+- ⚠ **A mapped row's allowlist is a SNAPSHOT; there is no wildcard.** `scopes is None` is
+  reachable only from a bare row, so a scope added to the store is invisible to `zach` until
+  the row is edited — and by criterion 3 that is indistinguishable from a scope that does not
+  exist. Adding a scope is a two-place change.
+- ⚠ **Do not date-prefix your own bullet text** — the server prepends `- <date>: ` itself. The
+  first production append reads `- 2026-08-29: 2026-08-29: …` because of it. Left unrepaired
+  deliberately: fixing it needs the whole-file `PUT` against a copy with no backup, and the
+  next `seed.sh` clobbers the bullet regardless.
+- ⚠ **Diff the entry, never byte-offset compare it.** An append at the TOP of `## Nuance /
+  work-history` shifts every later offset, so `diff <(head -c N before) <(head -c N after)`
+  reports "pre-existing bytes changed" when nothing changed.
+- 🔴 **The devrc-ci CPU experiment was tried AND REVERTED — do not re-derive it.**
+  homelab-infra `23887675` raised the pytests step's `requests.cpu` 2→4 to match its limit
+  (pytests 1277s → 808s); `bb62668f` put it back three hours later because it bought queue
+  waits of 17–22 min, three `TaskRunTimeout`s and **zero successful runs in the hour after it
+  shipped**. Both commits are kept. The live Task's `requests.cpu: 2` matches `origin/trunk` by
+  content — so "the fix is not applied yet" is a misreading.
 
 ## How to verify
 
