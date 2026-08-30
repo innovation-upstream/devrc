@@ -237,6 +237,18 @@ def line_emits_reserved_prefix(line: str) -> bool:
                 or _HEREDOC.match(line))
 
 
+def _spells_a_verdict(fragment: str) -> bool:
+    """Does this fragment put a LITERAL `PASS`/`FAIL` right after the prefix?
+
+    🔴 ONE definition, called from both the chain path and the single-command
+    path. They each carried their own copy, and only one copy was covered:
+    mutating the chain's `.match` to `.search` survived a green suite while the
+    identical mutation in the other copy was killed. `claude/RULES.md` → "One
+    rule, one place" — a predicate open-coded at N sites is wrong at N-1 of them.
+    """
+    return bool(_LITERAL_VERDICT.match(fragment.split(RESERVED_PREFIX, 1)[1]))
+
+
 def classify_payload(line: str) -> str | None:
     """What does this line put after the reserved prefix?
 
@@ -285,8 +297,7 @@ def _classify_chain(command: str) -> str:
     for fragment in _CHAIN.split(command):
         if RESERVED_PREFIX not in fragment:
             continue
-        after = fragment.split(RESERVED_PREFIX, 1)[1]
-        if _LITERAL_VERDICT.match(after):
+        if _spells_a_verdict(fragment):
             return COLLISION
     return DYNAMIC
 
@@ -294,7 +305,7 @@ def _classify_chain(command: str) -> str:
 def _classify_one_command(command: str) -> str:
     """Classify ONE command — no separators inside it by construction."""
     after = command.split(RESERVED_PREFIX, 1)[1]
-    if _LITERAL_VERDICT.match(after):
+    if _spells_a_verdict(command):
         return COLLISION
 
     quoted = _QUOTED.search(command)
@@ -467,16 +478,39 @@ CHAIN_FIXTURES = {
                    + RESERVED_PREFIX + " PASS)",
 }
 
-# 🔴 THE FAIL-OPEN CASES. No stage spells a verdict, yet bash really writes
-# `RESULT: PASS` at column 0 — the downstream stage REWRITES the upstream text.
-# A revision that called a pipe "a separator, not a hazard" reported every one of
-# these as provably harmless. They must be DYNAMIC: not provable, never BENIGN.
+# 🔴 THE CHAIN CASES — no stage spells a verdict, so the classifier cannot
+# prove anything about them and must say DYNAMIC.
+#
+# 🔴 EACH ENTRY CARRIES ITS OWN GROUND TRUTH RATHER THAN A LIST-WIDE SENTENCE,
+# and that is a structural fix, not tidiness. Three times in this ladder a
+# comment asserted a property of a whole fixture list that was false for ONE
+# member, each time introduced by the fix for the previous occurrence — most
+# recently a heading claiming "bash really writes RESULT: PASS at column 0" for
+# a list containing `tee`, which emits `RESULT: ok` and forges nothing. `tee`
+# belongs here because a pipe makes the line UNPROVABLE, not because it forges.
+# The shared property is the second element; the differing one is the third, and
+# a test asserts both instead of a reader trusting prose.
+#
+#   name -> (line, classifier verdict, does bash REALLY forge a verdict?)
 CHAIN_TRANSFORM_FIXTURES = {
-    "sed":    "echo " + RESERVED_PREFIX + " ok | sed 's/ok/PASS/'",
-    "tr":     "echo " + RESERVED_PREFIX + " PASX | tr X S",
-    "awk":    "echo " + RESERVED_PREFIX + " ok | awk '{sub(/ok/,\"PASS\"); print}'",
-    "tee":    "echo " + RESERVED_PREFIX + " ok | tee f",
-    "procsub-transform": "echo " + RESERVED_PREFIX + " ok > >(sed 's/ok/PASS/')",
+    "sed":    ("echo " + RESERVED_PREFIX + " ok | sed 's/ok/PASS/'", DYNAMIC, True),
+    "tr":     ("echo " + RESERVED_PREFIX + " PASX | tr X S", DYNAMIC, True),
+    "awk":    ("echo " + RESERVED_PREFIX + " ok | awk '{sub(/ok/,\"PASS\"); print}'",
+               DYNAMIC, True),
+    # Forges NOTHING — emits `RESULT: ok`. Here because a pipe is unprovable.
+    "tee":    ("echo " + RESERVED_PREFIX + " ok | tee f", DYNAMIC, False),
+    "procsub-transform": ("echo " + RESERVED_PREFIX + " ok > >(sed 's/ok/PASS/')",
+                          DYNAMIC, True),
+}
+
+# The `BENIGN < DYNAMIC` rung of `_SEVERITY`. Every SEPARATOR_FIXTURES entry is
+# benign-then-COLLISION, so the top rung is pinned and the lower one was NOT:
+# flattening `_SEVERITY` to `{BENIGN: 1, DYNAMIC: 1, COLLISION: 3}` survived a
+# fully green suite. 🔴 That survivor is fail-OPEN — with `v=PASS` the line below
+# really writes `RESULT: PASS` at column 0, and the mutant calls it BENIGN.
+SEVERITY_RUNG_FIXTURES = {
+    "benign-then-dynamic": ("echo " + RESERVED_PREFIX + " ok; echo "
+                            + RESERVED_PREFIX + " $v", DYNAMIC),
 }
 
 # Lines that MENTION the grammar a second time without running a second

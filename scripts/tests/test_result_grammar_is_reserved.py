@@ -493,27 +493,68 @@ def test_a_chain_stage_spelling_a_verdict_is_a_collision(op):
         f"{op!r} no longer exposes the chain stage's literal verdict: {line}")
 
 
+@pytest.mark.parametrize("shape", sorted(G.SEVERITY_RUNG_FIXTURES))
+def test_the_BENIGN_below_DYNAMIC_rung_is_pinned(shape):
+    """🔴 ROUND-6 FINDING NEW-12, and the surviving mutant was fail-OPEN.
+
+    Every separator fixture is benign-then-COLLISION, so `_SEVERITY`'s top rung
+    was pinned and the lower one was not: flattening it to
+    `{BENIGN: 1, DYNAMIC: 1, COLLISION: 3}` survived a fully green suite. With
+    `v=PASS` the line below really writes `RESULT: PASS` at column 0, and the
+    mutant reports it BENIGN.
+    """
+    line, expected = G.SEVERITY_RUNG_FIXTURES[shape]
+    assert G.classify_payload(line) == expected, (
+        f"a line mixing a BENIGN command with a {expected} one was reported "
+        f"{G.classify_payload(line)!r} — the severity rung is not ordered: {line}")
+
+
+def test_a_chain_stage_MENTIONING_a_verdict_is_not_a_collision():
+    """🔴 ROUND-6 FINDING NEW-13. The chain path carried its OWN copy of the
+    literal-verdict predicate and no fixture covered it: mutating that copy's
+    `.match` to `.search` survived while the identical mutation in the other
+    copy was killed. Direction is fail-safe, but COLLISION has no ledger, so the
+    consequence is an unpinnable false positive whose only remedy is editing
+    prose — round 4's NEW-5 hazard, on a path with no second-mention fixture.
+
+    Both copies are now `_spells_a_verdict`; this covers the chain caller.
+    """
+    line = 'echo "' + G.RESERVED_PREFIX + ' see the PASS docs" | cat'
+    assert G.classify_payload(line) == G.DYNAMIC, (
+        "a chain whose payload merely MENTIONS a verdict word was reported "
+        f"{G.classify_payload(line)!r}: {line}")
+
+
 @pytest.mark.parametrize("shape", sorted(G.CHAIN_TRANSFORM_FIXTURES))
 def test_a_transforming_chain_is_NEVER_reported_benign(shape):
     """🔴 ROUND-5 FINDING NEW-7 — the one fail-OPEN defect in this ladder.
 
-    No stage here spells a verdict, yet bash really writes `RESULT: PASS` at
-    column 0: the downstream stage REWRITES the upstream text. A revision that
-    reasoned "a pipe is a separator, not a hazard: this emits `RESULT: ok` and
-    nothing else" reported all of these as provably harmless — true of `tee`,
-    false of `sed`/`awk`/`tr` — and the suite PINNED one of them as correct.
+    No stage here spells a verdict, yet for most of them bash really writes
+    `RESULT: PASS` at column 0: the downstream stage REWRITES the upstream text.
+    A revision that reasoned "a pipe is a separator, not a hazard: this emits
+    `RESULT: ok` and nothing else" reported all of these as provably harmless —
+    true of `tee`, false of `sed`/`awk`/`tr` — and the suite PINNED one as
+    correct.
 
     Every other accepted imprecision in this module errs toward DYNAMIC. This
     was the only one that erred toward BENIGN, which is why the chain path can
     return COLLISION or DYNAMIC and nothing else.
+
+    🔴 The shared property is asserted; the DIFFERING one is data, not prose —
+    `tee` is in this list because a pipe is unprovable, NOT because it forges.
+    A list-wide sentence claiming otherwise was false for exactly that member,
+    the third time in this ladder a whole-list claim broke on one entry.
     """
-    line = G.CHAIN_TRANSFORM_FIXTURES[shape]
+    line, expected, really_forges = G.CHAIN_TRANSFORM_FIXTURES[shape]
     verdict = G.classify_payload(line)
     assert verdict != G.BENIGN, (
-        f"a transforming chain was reported PROVABLY HARMLESS while bash really "
-        f"emits a forged verdict from it: {line}")
-    assert verdict == G.DYNAMIC, (
-        f"expected DYNAMIC (not provable) for {shape!r}, got {verdict!r}: {line}")
+        f"a chain was reported PROVABLY HARMLESS; a downstream stage can rewrite "
+        f"the stream, and for this one bash really forges={really_forges}: {line}")
+    assert verdict == expected, (
+        f"expected {expected!r} (not provable) for {shape!r}, got {verdict!r}: {line}")
+    assert isinstance(really_forges, bool), (
+        f"{shape!r} carries no ground-truth flag — the whole point of the third "
+        "element is that this claim is data a test checks, not prose")
 
 
 @pytest.mark.parametrize("shape", sorted(G.SECOND_MENTION_BENIGN))
