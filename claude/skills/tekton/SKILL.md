@@ -279,29 +279,22 @@ debugging, changing or copying a specific pipeline.
    (`devrc-ci-csfzb`/#1057, `devrc-ci-kdcmr`/#1059), against a pre-change run
    (`devrc-ci-q4d5m`) of `failed=0` over 18,557 passed. *(Those figures are quoted from
    `7839ef54`; the runs are pruned, so they are not re-derivable — the mechanism below is.)*
-   🔴 **"PVC vs hostPath" IS NOT THE DIFFERENCE, AND `7839ef54`'s OWN STATED CAUSE IS WRONG.**
-   `nix-store-cache` **is** a hostPath: its PV is `hostPath
-   {path: /var/lib/mnt/disk-1/pvc-aef79024…_tekton-ci_nix-store-cache, type: DirectoryOrCreate}`
-   — same disk, same `DirectoryOrCreate`, as `6bec075e`'s `/var/lib/mnt/disk-1/devrc-ci-nix-cache`.
-   The one structural difference measured is the directory's **creation mode**:
-   `local-path-config`'s setup script is `mkdir -m 0777 -p "$VOL_DIR"`, so kubelet's
-   `DirectoryOrCreate` finds it already at **0777**, where a bare hostPath is created at
-   **0755 root:root**. Everything after is the same `cp -a` from the same image, and the gate
-   pod sets no `securityContext`/`fsGroup` at all. 🔴 The revert's *"the PVC works only because
-   earlier runs populated its `/nix`"* is **refuted**: `nix-store-cache-2` was created fresh
-   `2026-08-25T05:33:47Z` for `gitops-validate` — which writes to the store, so it takes the
-   same lock — and has been green since, with no earlier runs to populate it. **So test
-   `chmod 0777` on the hostPath before scoping an ownership-migration story.** (Not yet run —
-   it is the only difference anyone has measured, not a proven cause.)
-   ⚠ **What the unpin bought, and the caveat that decides how to read it:** three nodes
-   reachable instead of one, queue wait **17–22m → 0.1m**, wall clock **39.1m median → 17.4m**
-   — but measured while `requests.cpu` was **4** (`23887675`, 16:03 −05:00). `bb62668f` put it
-   back to **2** at 19:14, 15 min before the revert, and **that is what is live today**; its own
-   subject is *"the equality fixed starvation and bought a queue nothing drained"*, i.e. it
-   targets the same queue. Grading a retry against this pair **over-credits the unpin** — re-take
-   the baseline at cpu 2. Then reconsider `686d6ff0`, whose `privileged` exemption buys nothing
-   while the PVC is back (measured 2026-08-30: 358 live `tekton-ci` pods, **zero** using any
-   baseline-forbidden feature). 🔴 Its own in-file comment is now STALE and says the opposite —
+   🔴 **`nix-store-cache` IS ITSELF A hostPath, so "PVC vs hostPath" is not the difference it
+   reads as** — its PV is `hostPath {path: /var/lib/mnt/disk-1/pvc-aef79024…_tekton-ci_nix-store-cache,
+   type: DirectoryOrCreate}`, same disk and same type as `6bec075e`'s. **Three differences are
+   measured, which one causes the lock failure is UNKNOWN, and `7839ef54`'s stated cause is
+   UNPROVEN rather than refuted** — the candidates, the invalid control to avoid, and the perf
+   baseline's `requests.cpu` caveat are in
+   `~/workspace/devrc/claude/skills/tekton/reference/pipelines.md` → "Retrying the devrc-ci
+   unpin". 🔴 Retry only
+   with the ownership question answered FIRST and **proven on a scratch pipeline**: `7839ef54`
+   chose a full revert over a permission patch because *"the place to find the third failure mode
+   is not production"*, and with `enforce_admins: true` on devrc `main` a wrong guess blocks
+   **everyone's** merges. `686d6ff0`'s `privileged` exemption buys nothing while the PVC is back
+   (measured 2026-08-30 over every live `tekton-ci` pod, **12 distinct pipeline shapes** — count
+   those, never a pod total, which is ~95% terminal and drifts as you read it: **zero** use
+   hostPath, hostNetwork/PID/IPC, privileged, added caps, hostPort or sysctls). 🔴 Its own
+   in-file comment is now STALE and says the opposite —
    `<homelab-infra>/clusters/homelab/apps/tekton-pipelines/triggers/namespace.yaml` still reads
    *"REQUIRED by the gate's hostPath nix cache"* over a precondition already satisfied.
    **(b) `sandbox = false` in the CI pod.** The `nix build .#checks…` tier is only hermetic

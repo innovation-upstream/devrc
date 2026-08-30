@@ -106,3 +106,54 @@ OR'd with a `head_commit` fallback for GitHub's truncation of large pushes.
   `pass`/`fail`, so a crashed `npm install` or an unpullable bats image reports **"your
   change is bad"**. Partly compensated at aggregation: a *missing* verdict file is treated as
   the error class, and the summary separates `FAILED:` from `COULD NOT RUN:`.
+
+## Retrying the devrc-ci unpin — what is measured, and the control that is INVALID
+
+Context: `6bec075e` (2026-08-29T22:09Z) replaced the node-pinned `nix-store-cache` PVC with a
+per-node hostPath; `7839ef54` (2026-08-30T00:29Z) reverted it after 42 tests failed on every
+devrc PR with `error: opening lock file "/nix/var/nix/db/big-lock": Permission denied`. The
+SKILL.md gotcha 6(a) carries the summary; this is the diagnosis state.
+
+🔴 **`nix-store-cache` is itself a hostPath** — PV
+`hostPath {path: /var/lib/mnt/disk-1/pvc-aef79024…_tekton-ci_nix-store-cache, type: DirectoryOrCreate}`,
+the same disk and the same `DirectoryOrCreate` as the reverted
+`/var/lib/mnt/disk-1/devrc-ci-nix-cache`. So the storage KIND is not the variable.
+
+**Three measured differences. Which one causes the lock failure is UNKNOWN** — `7839ef54`'s
+*"the PVC works only because earlier runs populated its `/nix` with ownership the nix build user
+can use"* is **unproven, not refuted**:
+
+1. **Root-directory mode.** `local-path-config`'s setup script is `mkdir -m 0777 -p "$VOL_DIR"`,
+   so kubelet's `DirectoryOrCreate` finds the dir already at **0777**; a bare hostPath is created
+   **0755 root:root**. ⚠ Weak on its own: both volumes are filled by the identical
+   `cp -a /nix/. /nix-cache/` from the identical image, and `cp -a` preserves modes below the
+   root — so `/nix/var/nix/db` is the same either way, and 0755 already grants `r-x` to other.
+   A bare `chmod 0777` on the root adds write **at the root level only**, which is not where the
+   quoted error is. Cheap to try; do not expect it to be sufficient.
+2. 🔴 **Build users — and this is what makes the obvious control invalid.** The gate's
+   `NIX_CONFIG` is `experimental-features = nix-command flakes` only, so nix drops to an
+   unprivileged **`nixbld`** user. `gitops-validate`'s `warm-tools` adds `build-users-group =`,
+   which **disables build users**, so it runs as **root**. A fresh `nix-store-cache-2` (created
+   `2026-08-25T05:33:47Z`) staying healthy therefore says nothing about build-user ownership:
+   root can always take the lock. **Do not cite `gitops-validate` as a control for this.**
+3. **A heal that already exists, on the gate only.** The `pytests`/`nodetests` steps run
+   `mkdir -p /nix/var/nix/profiles/per-user && chmod 755 /nix/var/nix/profiles …` against the
+   same root-owned-store problem one path over, with a MEASURED failure recorded beside it
+   (`could not set permissions on '/nix/var/nix/profiles/per-user' to 755: Operation not
+   permitted`, probes `devrc-ci-probe8-qbbg4` / `-probe10-b6jzh`) and the note that it
+   *"re-heals a fresh cache PVC"*. **Read that comment before designing anything** — it is the
+   closest thing to a worked diagnosis of this class that exists, and it shows a fresh volume
+   being made usable by an explicit heal rather than by accumulated history.
+
+🔴 **Prove any fix on a scratch pipeline, never on `devrc-ci`.** `7839ef54` deliberately chose a
+full revert over a permission patch: *"this volume has now broken CI twice in one evening … the
+place to find the third failure mode is not production."* devrc `main` is `enforce_admins: true`
+with both gate legs required, so a wrong guess blocks every contributor's merges.
+
+**The perf baseline is not re-usable as recorded.** The unpin's quoted wins — three nodes
+reachable instead of one, queue wait **17–22m → 0.1m**, wall clock **39.1m median → 17.4m** — are
+quoted from `7839ef54` and are not re-derivable (the runs are pruned). They were taken while
+`requests.cpu` was **4** (`23887675`, 2026-08-29 16:03 −05:00); `bb62668f` put it back to **2** at
+19:14, 15 min before the revert, and **2 is live today**. `bb62668f`'s own subject — *"the equality
+fixed starvation and bought a queue nothing drained"* — targets the same queue the unpin is
+credited with draining. **Re-take the baseline at cpu 2 before grading a retry.**
