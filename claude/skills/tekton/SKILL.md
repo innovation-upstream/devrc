@@ -247,6 +247,27 @@ debugging, changing or copying a specific pipeline.
     EventListener log is what discriminates: `kubectl -n tekton-ci logs -l eventlistener --since=15m`
     shows `"/trigger":"<name>"` and `ResolvedParams` for an event that DID match.
 
+6. **A gate pod rejected at ADMISSION posts a FAILED TEST, so it reads as a bad change.**
+   Two ways this has bitten, both on `devrc-ci`, both 2026-08-29/30:
+   **(a) PodSecurity.** `tekton-ci` carried no `pod-security.kubernetes.io/*` label, so it
+   inherited the cluster default `baseline`, which forbids **hostPath** outright. When
+   `6bec075e` swapped the gate's RWO PVC for a per-node hostPath nix cache, every gate pod
+   died with `pods "devrc-ci-<id>-gate-pod" is forbidden: violates PodSecurity
+   "baseline:latest": hostPath volumes (volume "nix-cache")`. Admission failure does **not**
+   retry into success — the pod is never created, the `gate` TaskRun reads
+   `PodAdmissionFailed` while `notify`/`report` succeed, and both required checks post
+   `COULD NOT RUN`, so with `enforce_admins: true` **nothing could merge**. Fixed by
+   `pod-security.kubernetes.io/enforce: privileged` on the namespace (`686d6ff0`).
+   ⚠ That is a **broader** grant than the 7 infra namespaces already carrying it — this one
+   runs webhook-triggered CI. The narrow fix is a baseline-compatible cache.
+   **(b) `sandbox = false` in the CI pod.** The `nix build .#checks…` tier is only hermetic
+   where nix's sandbox is ON. With it off, the *same derivation hash* produced `failed=1` on
+   the dev host and `failed=43` in CI — identical inputs, different output, i.e. impure.
+   🔴 **Before debugging any diff against a red `devrc-ci` run, check both:**
+   `kubectl get taskrun <run>-gate -n tekton-ci -o jsonpath='{.status.conditions[*].message}'`
+   and `kubectl exec -n tekton-ci <gate-pod> -c step-pytests -- sh -c 'nix config show | grep "^sandbox "'`.
+   A red check whose cause is either of these is a **broken gate, not a bad change**.
+
 ## What / where
 
 - **Tekton Operator v0.80.0** → Pipelines **1.12.2** / Triggers **0.36.0** / Dashboard
