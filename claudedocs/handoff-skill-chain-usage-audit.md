@@ -23,28 +23,42 @@ survives adversarial re-derivation, and fix whatever it exposes.
   their genesis line; **253 graded** (98.8%). **231 / 253 = 91.3% RECORDED** — 206 updated the
   doc they resumed, 25 landed under a different topic (drift, not loss). **22 / 253 = 8.7%
   real loss** — 19 never invoked `handoff_doc.py`, 2 tool failures, 1 stopped at the confirm
-  gate. Legitimate declines (`no-change`/`no-advance`): **ZERO** — the hypothesis that the gap
-  was the skill correctly refusing to write is REFUTED. Clawgate leg: of the 85 tasks that
-  advanced past `open`, **73 (86%) carry a write-back comment**; **0** of 186 were
-  agent-dispatched.
-- **Branch / PR:** `zach/skill-chain-usage-audit` → **devrc#1055, OPEN**, `a5982acc`. Second
-  PR from this arc: **devrc#1064, OPEN**, branch `feat/handoff-audit`, head `466a0938`
-  (5 commits: the tool + four audit-ladder fix rounds).
-- 🔴 **Neither PR has ever been seen GREEN in CI, and neither failure is attributable to its
-  diff.** See the open investigation below before re-diagnosing either.
-- **DONE — rank 1 (the gating item).** 16 never-run losses split by session end-state:
-  **8 cleanly-ended · 4 interrupted-at-end · 2 context-exhausted · 2 never-started.**
-  Classifier committed this time: `claudedocs/skill-chain-loss-classifier.py` +
-  `claudedocs/skill-chain-loss-index.sh`, both parameterised on `CHAIN_WORKDIR` and verified
-  from the committed copy to reproduce the numbers.
-- **DONE — rank 5's first move.** `scripts/handoff-audit.py` + `scripts/tests/test_handoff_audit.py`
-  (23 tests) on #1064, plus `claudedocs/proposal-handoff-doc-bloat.md`. Corpus, 414 docs:
-  **7.74 MB ≈ 1.94M tokens · 203 over the 12,288 B reference target · 44 over the 40,960 B cap ·
-  ~14% structurally-terminal.** 🔴 That 14% is a FLOOR — the tool sees only content that is
-  *structurally marked* terminal; the read-based estimate over 5 docs was 35–44%.
-- **Deploy/verify status:** nothing is deployed. The clawgate `SKILL.md` fix (rank 4) is
-  committed on #1055 and NOT live — it needs `home-manager switch` after that PR merges.
-  `handoff-audit.py` is committed on #1064 and wired into no gate, skill or script.
+  gate. Legitimate declines (`no-change`/`no-advance`): **ZERO**. Rank 1's end-state split of
+  the 16 readable never-run losses: **8 cleanly-ended · 4 interrupted-at-end · 2
+  context-exhausted · 2 never-started**, with a `Stop` hook already firing in **8 of 8** of the
+  dominant bucket. Clawgate leg: of the 85 tasks that advanced past `open`, **73 (86%)** carry
+  a write-back comment; **0** of 186 were agent-dispatched.
+- **DONE — rank 2, the whole point of rank 1: `scripts/claude-hooks/handoff-write-guard.py`.**
+  **devrc#1092, OPEN, `0e65439a`**, branch `zach/handoff-write-guard`, rebased onto current
+  `main` (`4ca8d662`). 3 commits: the hook + two self-audit rounds.
+  🔴 **BOTH GATES GREEN — `tekton/devrc-pytests` SUCCESS and `tekton/devrc-nodetests` SUCCESS.**
+  That is the first PR of this arc ever seen green, and it is a data point for the CI
+  investigation below rather than a claim that the investigation is closed.
+  Armed on a `/resume` **READ** (a `Read` of `claudedocs/handoff-*.md` / `*HANDOFF*.md`, or the
+  `git show <ref>:claudedocs/…` form — the shape this arc's own sessions used), never on
+  `SessionStart`. Three conditions, all required: the read, REAL WORK after it, and no
+  observable handoff write since. Three satisfaction routes UNIONED — a `handoff_doc.py` run,
+  a Write/Edit of ANY handoff doc, or the resumed doc's own mtime — two of them session-level
+  on purpose, because the 25 drift sessions were scored RECORDED and a path-keyed guard would
+  block every one of them. Ladder `block, block, systemMessage, silent`, MAX_DOCS 3, dismissal
+  with a tombstone, fail-open, one exit and it is always 0. Deployment seam wired in
+  `nix/home.nix` + `register-nudge-hook.py` and pinned two-way by the existing tests.
+- **Branch / PR (the rest of the arc):** `zach/skill-chain-usage-audit` → **devrc#1055, OPEN**.
+  Second PR: **devrc#1064, OPEN**, branch `feat/handoff-audit` (the handoff-doc bloat auditor).
+- 🔴 **The LOCAL branch `zach/skill-chain-usage-audit` in the primary clone has DIVERGED from
+  `origin/` and is the STALE side** — measured 2026-08-30: it is missing rank 1's classifier,
+  `skill-chain-loss-index.sh`, `proposal-handoff-doc-bloat.md` and 272 lines of this doc
+  (`git diff --stat origin/zach/skill-chain-usage-audit..zach/skill-chain-usage-audit` = 4
+  files, 73 insertions, 813 deletions). It is not an ancestor, so this is not a
+  fast-forward-behind clone — a `git push origin zach/skill-chain-usage-audit` from that clone
+  would be REJECTED, and forcing it would delete rank 1's work. **Work detached off
+  `origin/zach/skill-chain-usage-audit` and push `HEAD:zach/skill-chain-usage-audit`**; do not
+  check that local ref out and do not move it.
+- **Deploy/verify status.** 🔴 **NOTHING IS DEPLOYED, and the hook is INERT until it is.**
+  #1092 is committed and gate-green but needs a `home-manager switch` (operator's call) before
+  a single session is guarded. The clawgate `SKILL.md` fix (rank 4) is likewise committed on
+  #1055 and not live. `handoff-audit.py` is committed on #1064 and wired into no gate, skill
+  or script.
 
 ## Open investigations — live diagnosis state
 
@@ -141,31 +155,92 @@ is consistent with 19; treat the bucket SHARES as the finding, not the denominat
   measure PEAK over a full run before proposing a right-size, and note the `tekton` skill records
   four *other* fixes as already-rejected-with-measurements.
 
+### Both PRs of this arc are red on tests neither one touches — one datapoint AGAINST, not a resolution
+- **New evidence (2026-08-30):** devrc**#1092** — a diff that touches `scripts/run-tests.sh`,
+  `nix/home.nix`, `register-nudge-hook.py` and four hook test files — came back
+  `tekton/devrc-pytests SUCCESS` **and** `tekton/devrc-nodetests SUCCESS` on the first run,
+  with no retry. So the gate is not unconditionally red for this arc's PRs.
+- **What that does and does not license.** It is consistent with the leading hypothesis
+  (environment/timing-sensitive tests that read host state, made worse by node congestion) and
+  it refutes nothing about #1055/#1064 specifically — their failing tests are still
+  unattributed and were never re-run on an unchanged SHA. 🔴 **Do NOT record this as "the CI
+  problem is fixed".** One green run at one moment cannot distinguish "the runner is fine now"
+  from "the queue happened to be empty", which is the same empty-result trap the rest of this
+  doc is about.
+- **Next probe, UNCHANGED and now cheaper to interpret:** re-run #1055's gate on an unchanged
+  SHA and see whether the SAME test fails. A different test ⇒ environment/timing; the same test
+  ⇒ a real runner-vs-local divergence worth fixing in the test. #1092's green makes the
+  "different test" reading more likely, not proven.
+
+### The local suite's 76 failures are NOT this arc's, and the control says so
+- **Symptom + exact repro:** `python3 -m pytest scripts/tests -q` in a worktree of
+  `zach/handoff-write-guard` → **76 failed, 10368 passed, 1 skipped** in 15m28s.
+- **Observed (with values):** the SAME command in a clean worktree of `origin/main`
+  (`4ca8d662`) → **76 failed, 10368 passed, 1 skipped** in 16m19s, and
+  `diff <(grep ^FAILED base) <(grep ^FAILED branch)` is **EMPTY — the two failure sets are
+  byte-identical**. A positive control was run on the comparison itself (delete one line from
+  one side; `diff` moves), so the empty diff is a measurement and not a comparator wired to
+  nothing. The four suites that read the files this diff touches
+  (`test_run_tests_floors.py`, `test_run_tests_preconditions.py`, `test_run_tests_timing.py`,
+  `test_nogit_isolation.py`) give **49 failed / 38 passed on BOTH** sides.
+- **Ruled out:** *"the new target's floor entry broke the two-way pin"* — the floors suite fails
+  identically without this diff. *"the new HERMETIC_TARGETS entry broke collection"* — same.
+- **Leading hypothesis:** these suites need the nix dev shell (`nix develop`), and a bare
+  `python3 -m pytest` is missing tools they probe for; `assert None is not None` is the shape.
+  The in-cluster gate, which DOES build that shell, is green on the same tree.
+- **Next probe:** run one of them under `nix develop ~/workspace/devrc -c python3 -m pytest …`
+  and see whether it goes green — that would close it. It is NOT this arc's problem either
+  way; it is recorded so the next session does not re-derive the attribution.
+
 ## Next steps (ranked)
-1. ✅ **DONE (2026-08-29)** — the split: 8 cleanly-ended vs 2 context-exhausted of 16. Selects a
-   **nudge**, and shows a `Stop` hook already fires in **8/8** of the dominant bucket.
-2. 🔴 **Build the handoff-write `Stop` hook — the largest outstanding item, and the whole point
-   of rank 1** (devrc `claude/hooks/`, `~/.claude/settings.json`). Precedent:
-   `~/.claude/hooks/clawgate-writeback-guard.py` — arm-on-read, block-on-Stop, 86% compliance.
-   Arm it on a `/resume` READ, not on session start, or it fires on every session that never
-   touched a handoff. The 2 never-started sessions are the reminder that a hook cannot reach a
-   session that produced no turns.
+
+🔴 **The numbering below is STABLE and load-bearing** — `claim-work --slug-for <this doc> <rank>`
+makes the rank half of every claim's identity, so completed items are marked DONE in place
+rather than removed and renumbered. New work is appended at the end.
+
+1. ✅ **DONE (2026-08-29)** — the end-state split: 8 cleanly-ended vs 2 context-exhausted of 16.
+   forcing: none
+2. ✅ **DONE (2026-08-30)** — the handoff-write `Stop` hook. **IN FLIGHT: devrc#1092** (open,
+   both gates green, NOT deployed). Rank 7 is what finishes it.
+   forcing: none
 3. **Audit the 25 drift cases for stale abandoned docs** (devrc + datapacket-talos +
-   homelab-talos `claudedocs/`). Untouched. Feeds `/resume` quality directly.
-4. **Deploy the clawgate SKILL.md fix** — `home-manager switch`, then confirm
+   homelab-talos `claudedocs/`). Untouched. The question: was the ABANDONED doc (X) left with a
+   status header still claiming in-flight work? If so that is a silent staleness generator
+   feeding `/resume`'s own known "open-investigation blocks read as current forever" trap.
+   forcing: none
+4. **Deploy the clawgate `SKILL.md` fix** — `home-manager switch`, then confirm
    `~/.claude/skills/clawgate/SKILL.md` no longer contains "preserve both".
    🔴 IN FLIGHT / blocked: needs devrc#1055 merged.
+   forcing: none
 5. **Act on the handoff-doc bloat proposal** — `claudedocs/proposal-handoff-doc-bloat.md`.
-   The auditor shipped (IN FLIGHT: devrc#1064); the **`/handoff` SKILL.md change is deliberately
-   NOT written** — operator chose propose-only. Next move is the eviction contract
+   The auditor shipped (IN FLIGHT: devrc#1064); the `/handoff` SKILL.md change is deliberately
+   NOT written — operator chose propose-only. Next move is the eviction contract
    (budget + step 4.5 + EVICT_HISTORY/RELOCATE_DURABLE/KEEP_HOT), not a gate: the caps file for
    gate 11 records that the general ratchet rule was replayed over 365 days / 901 commits and
    **REFUTED**, so re-run that replay for handoff docs before proposing one.
+   forcing: none
 6. **Correct the `tekton` skill's stale devrc-ci claims** (devrc `claude/skills/tekton/SKILL.md`).
-   Measured 2026-08-29: the gate pod has **no `nodeSelector`** and uses a per-node **hostPath** at
-   `/var/lib/mnt/disk-1/devrc-ci-nix-cache`; the skill still describes node-pinning to
+   Measured 2026-08-29: the gate pod has **no `nodeSelector`** and uses a per-node **hostPath**
+   at `/var/lib/mnt/disk-1/devrc-ci-nix-cache`; the skill still describes node-pinning to
    `talos-xr6-r7p` and a `nix-store-cache` PVC. That skill loads as authoritative for anyone
    debugging this gate. Re-measure before editing — it is a live label/volume, not a git fact.
+   forcing: none
+7. 🔴 **Merge devrc#1092, then `home-manager switch`, then verify the hook is LIVE — this is the
+   only step that makes rank 2 real.** A hook that ships to both hosts, reports a successful
+   switch and sits INERT is this repo's own #452, and the registrar's docstring says so. The
+   verification is not "the switch succeeded": it is
+   `python3 -c "import json;print([h['command'] for e in json.load(open('/home/zach/.claude/settings.json'))['hooks']['Stop'] for h in e['hooks']])"`
+   naming `handoff-write-guard.py`, AND a live probe — read a handoff doc, edit a file, and
+   watch the next Stop block. 🔴 Both hosts, not one: the measurement covered both.
+   forcing: user — the operator asked for this hook to be built; it does nothing until deployed.
+8. **Grade the hook against the number it was built to move** — re-run the rank-1 measurement on
+   a post-deploy window and compare the 8.7% loss rate. 🔴 **Design it against the two ways a
+   pre-registered measurement of this shape has already died in these repos**: the treatment
+   must OUTLIVE the wait (a hook is a home-manager generation, so check it is not replaced by an
+   unrelated switch mid-window), and the grading population must EXIST across the whole
+   pre-window (`find-session` coverage, not assumed). Do not cut the window until both are
+   checked. Blocked on rank 7 — a window with no deployed hook in it grades nothing.
+   forcing: none
 
 ## Gotchas / decisions / dead-ends
 
@@ -255,6 +330,43 @@ of this doc — re-read them before trusting any similar analysis.**
   154-repo commit index, a rewritten classifier, two defects rediscovered). If a number will be
   quoted, its script belongs in the repo.
 
+- **Decision — the guard's satisfaction anchor is each doc's FIRST READ, not the last work
+  event, and that is the ONE place it diverges from its precedent.** `clawgate-writeback-guard.py`
+  must anchor on work because its pickup ritual posts a "Starting" comment BEFORE the work, so a
+  read anchor would be satisfied at pickup and a missing COMPLETION write-back would be
+  unobservable. `/handoff` runs at the END, so there is no such degenerate case here — and a work
+  anchor would import a false-positive class this record does not have: `write the doc → git
+  commit → git push` leaves the doc's mtime BEFORE the last work event, and the guard would block
+  a session that had just recorded everything. The cost is named rather than hidden: a session
+  that writes its handoff early and then works for hours without updating it scores as recorded.
+  That is exactly what the 91.3% measurement scored too, so the guard and the number agree.
+- 🔴 **A FIXTURE WHOSE THREE VALUES NORMALISE TO ONE STRING CANNOT SEE A MUTANT, and this arc
+  produced a clean example.** The test "one doc read three ways books one ledger slot" used three
+  spellings that `os.path.normpath` collapses to the same string — so it passed with the key
+  mutated from the BASENAME to the FULL PATH, the single survivor of a 27-mutant sweep. The fix is
+  mechanical and general: assert the fixture CAN move (`len(set(spellings)) == 3`) before asserting
+  the code does not. The replacement spellings are the ones a real session produces — the base
+  clone's copy, the throwaway worktree's copy that `/handoff` actually writes, and a `..`-bearing
+  relative resolution.
+- 🔴 **A SELF-AUDIT ROUND ON THE DELTA FOUND A GUARD THAT ARMED NOTHING, and no test could have.**
+  The hook's `Read` arm resolved its path against no base at all, so a RELATIVE `file_path` armed
+  nothing — a silent blind spot, not a wrong answer. It was found by asking what `lib/subsystem_touch.py`
+  (which reads the same payloads out of transcripts) records about that field: *"ABSOLUTE whenever
+  the caller passed an absolute"*, i.e. a relative one reaches the payload verbatim. **The
+  cross-check that found it was reading what ANOTHER module had already measured about the same
+  field**, not re-deriving it.
+- **Decision — the mutation sweep is COMMITTED**, as `claudedocs/handoff-write-guard-mutation-sweep.py`,
+  parameterised on `HWG_TREE` and re-run from the committed copy before its number was quoted.
+  This is the arc's own recorded lesson applied to itself: the previous pass left its classifiers in
+  a session scratchpad as throwaway and it cost rank 1 a full re-derivation.
+- **Dead end (do not re-derive): "the 76 local `scripts/tests` failures are the new floor entry."**
+  Killed by an identical failure SET at `origin/main`. See the investigation block above.
+- 🔴 **`clawgate_handoff.sh resolve` returned rc 5 again this session** (0 tasks, with its positive
+  control confirming the board reachable and the token accepted). Per `/handoff` step 1 that is an
+  UNRESOLVED session, not a clean bill of health: **no `clawgate-task:` field was written and no
+  task was created.** Same outcome as the previous session — two consecutive sessions of this arc
+  have failed to resolve, which is itself worth a look before a third assumes it is normal.
+
 ## How to verify
 ```bash
 # 1. rank 1's split, end to end (the classifier IS committed on #1055)
@@ -267,14 +379,34 @@ CHAIN_WORKDIR="$W" python3 ~/workspace/devrc/claudedocs/skill-chain-loss-classif
 #   expect 8 cleanly-ended / 4 interrupted-at-end / 2 context-exhausted / 2 never-started,
 #   and a non-empty INSTRUMENT CONTROLS block. A run whose controls are absent is void.
 
-# 2. the bloat corpus (#1064). Absolute totals DRIFT — re-derive, never quote a comment.
+# 2. rank 2's hook — its own suite, and the mutation sweep that certifies its guards.
+#    🔴 The sweep EDITS the hook in place and restores it in a `finally`, so give it a CLEAN
+#    worktree, never the primary clone.
+WT=/tmp/hwg
+git -C ~/workspace/devrc worktree add --detach "$WT" origin/zach/handoff-write-guard
+(cd "$WT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest scripts/claude-hooks/tests/ -q)  # expect 2922 passed
+HWG_TREE="$WT" python3 "$WT/claudedocs/handoff-write-guard-mutation-sweep.py"             # expect 29/29 killed
+git -C ~/workspace/devrc worktree remove --force "$WT"
+
+# 3. rank 2's hook, END TO END as a real process, in the shape the 8.7% loss actually takes.
+#    🔴 This is the verification that matters: the suite proves the parts, this proves the whole.
+H=/tmp/hwg-e2e; rm -rf $H; mkdir -p $H/repo/claudedocs $H/home/.claude
+G=~/.claude/hooks/handoff-write-guard.py   # the DEPLOYED copy — see rank 7
+run(){ printf '%s' "$1" | HOME=$H/home python3 $G; }
+run '{"hook_event_name":"PostToolUse","session_id":"e2e","cwd":"/elsewhere","tool_name":"Bash","tool_input":{"command":"git -C '$H'/repo show origin/x:claudedocs/handoff-t.md"}}'
+run '{"hook_event_name":"PostToolUse","session_id":"e2e","tool_name":"Edit","tool_input":{"file_path":"/x/y.py"}}'
+run '{"hook_event_name":"Stop","session_id":"e2e"}'          # expect {"decision":"block", …}
+run '{"hook_event_name":"PostToolUse","session_id":"e2e","tool_name":"Bash","tool_input":{"command":"python3 /r/scripts/lib/handoff_doc.py --repo /r --topic t"}}'
+run '{"hook_event_name":"Stop","session_id":"e2e"}'          # expect EMPTY — it self-suppressed
+
+# 4. the bloat corpus (#1064). Absolute totals DRIFT — re-derive, never quote a comment.
 python3 ~/workspace/devrc/scripts/handoff-audit.py \
   ~/workspace/devrc ~/workspace/homelab-talos ~/workspace/civit/datapacket-talos
 
-# 3. the tool's own suite
+# 5. the auditor's own suite
 nix develop ~/workspace/devrc -c python3 -m pytest \
   ~/workspace/devrc/scripts/tests/test_handoff_audit.py -q -p no:cacheprovider   # expect 23
 
-# 4. rank 4 is deployed (NOT merely committed) — expect 0 only AFTER a home-manager switch
+# 6. rank 4 is DEPLOYED (not merely committed) — expect 0 only AFTER a home-manager switch
 grep -c 'preserve both' ~/.claude/skills/clawgate/SKILL.md
 ```
