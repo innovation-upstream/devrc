@@ -28,6 +28,23 @@ task cards carry DOM ids shaped `task-<id>`. So a clawgate mention resolves to
 drafts' proposed workaround (float `clawgatectl task get N` in a tmux popup) was
 solving a problem that did not exist.
 
+🔴 **But the `#task-<id>` FRAGMENT IS INERT — filed as clawgate task #440.** The
+page is real and the DOM id is correct; the anchor still does not focus or scroll to
+the task. `GET /tasks` serves only the document shell and the cards arrive in a
+LATER htmx fetch, so the browser resolves the fragment when no card exists yet, and
+nothing re-applies it afterwards (`grep` for `location.hash` / `hashchange` /
+`scrollIntoView` across `internal/` + `static/` returns one hit, an unrelated
+dropdown). Clicking a clawgate mention lands you on the board, not on the task.
+
+**This is the exact shape of error the rest of this doc is about, committed by the
+work that corrected the others.** #1011 verified that the URL *resolved* and that
+the DOM id *existed*, then INFERRED navigation from those two facts — and its PR
+body recorded "`#task-{id}` anchor: verified and used", citing `notes_test.go` as
+the evidence. Those tests pin that the id is RENDERED. No test, and no human, ever
+loaded the URL and watched the page move. **An id that exists is not an anchor that
+works** — the same "a declaration is not a code path" trap the drafts fell into
+three times.
+
 **2. Detection did NOT need a new hook.** The drafts specified a `PostToolUse` +
 `Stop` hook and then worried about ~50 ms of Python startup on every tool call.
 `session-tailer.py` already walks the transcript JSONL, already extracts assistant
@@ -76,6 +93,8 @@ match at all.
 - hint mode labels all three shapes in a real terminal: `devrc#1011`, `#370`, `868abc123`
 - activating a label **dispatches to the handler**; `#370` is ambiguous and raised the
   rofi picker showing both candidates — clawgate `#task-370` and the GitHub issue
+  (the picker OFFERS the clawgate URL correctly; where that URL then LANDS is the
+  separate, unfixed defect above — task #440)
 - handler resolution: `devrc#1011` → GitHub issue, `868abc123` → ClickUp, hex colours rejected
 - **`live_config_reload` DID pick up the new config in a 3-day-old window.** Predicted
   otherwise (home-manager swaps a symlink; inotify watchers commonly miss that) —
