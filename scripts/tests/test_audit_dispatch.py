@@ -5281,7 +5281,7 @@ def test_the_toolchain_reason_is_true_in_every_scenario():
 
 
 def test_the_toolchain_prescribes_only_commands_it_probed(tmp_path):
-    """🔴 REGRESSION. Red at `bd1572f3`, on a real target that has none of them.
+    """🔴 REGRESSION. Red at `9e23c379` — #1104 MERGED, and still red there.
 
     Every TOOLCHAIN command interpolated `facts.cwd_repo_dir` into devrc's OWN
     layout, so a brief for a PR in any other repository prescribed scripts that
@@ -6613,15 +6613,27 @@ RED_AT_BASE_R13: frozenset[str] = frozenset({
     "test_the_cross_repo_recipe_can_actually_be_run",
 })
 
-# 🔴 ROUND 14's base is `bd1572f3`, `origin/main` at the time. Measured the
-# same way — `git show bd1572f3:scripts/audit-dispatch.py` into a scratch tree
-# with THIS module copied in unchanged, `PYTHONDONTWRITEBYTECODE=1
-# -p no:cacheprovider`. Both fail on an ASSERTION, not on an import or an
-# arity error: the base script renders a TOOLCHAIN section fine, it just
-# renders devrc's layout into it whatever the target.
+# 🔴 ROUND 14's base is `9e23c379` — `origin/main` with #1104 ALREADY MERGED,
+# and NOT the tree this work started on. It began at `bd1572f3`; #1104 landed
+# mid-run, the branch was rebased onto it, and `bd1572f3` stopped being the
+# merge-base. A ledger still naming it would be a claim about a tree this
+# branch is not built on, so the matrix was RE-MEASURED at the new anchor
+# rather than carried over: `git show 9e23c379:scripts/audit-dispatch.py` into
+# a scratch tree with THIS module copied in unchanged,
+# `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider` -> **4 failed, 111 passed**.
+#
+# 🔴 AND THAT RE-MEASUREMENT IS THE WHOLE POINT: #1104 FIXED THIS SECTION AND
+# BOTH ROWS ARE STILL RED AT ITS MERGE COMMIT. It hedged the prose ("if this
+# repo has one", "exist in SOME repos and not others") and left all four
+# commands inside the FENCES and the `.envrc` sentence hardcoded — so at
+# `9e23c379` the first row still fails on `assert "nix develop" not in line`,
+# a wrapper measured to exit `No module named 'pytest'` on that very target,
+# and the second on the absent hand-over. Both fail on an ASSERTION, not on an
+# import or an arity error: the base script renders a TOOLCHAIN section fine,
+# it just renders devrc's layout into it whatever the target.
 #
 # 🔴 `test_the_flake_checks_probe_reads_an_output_and_not_the_word` is NOT
-# here, deliberately. `_flake_check_names` does not exist at `bd1572f3`, so it
+# here, deliberately. `_flake_check_names` does not exist at `9e23c379`, so it
 # would fail there with `AttributeError` — a claim about the symbol's absence
 # and not about any behaviour. That is the vacuous shape this module refuses to
 # count as regression coverage, so it is filed as an invariant guard and its
@@ -6641,13 +6653,13 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "28492af2": RED_AT_BASE_R7,
     "706a6b38": RED_AT_BASE_R9,
     "6349a8b9": RED_AT_BASE_R13,
-    "bd1572f3": RED_AT_BASE_R14,
+    "9e23c379": RED_AT_BASE_R14,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
 INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     # 🔴 An invariant guard, NOT regression coverage — `_flake_check_names`
-    # does not exist at `bd1572f3`, so its red there would be an
+    # does not exist at `9e23c379`, so its red there would be an
     # `AttributeError` about a missing symbol rather than a wrong answer. Its
     # evidence is its own pair of controls, both taken from real files: the
     # `checks = pr.get(...)` line out of `homelab-infra`'s devShell heredoc
@@ -7178,7 +7190,7 @@ FIX_MATRIX = (
      "test_the_clone_grant_covers_only_the_write_the_recipe_makes",
      "RED@706a6b38", "V22 V28 V34"),
     # --------------------------------------------------------------------- #
-    # Round 14. Its base is `bd1572f3` — `origin/main` at the time.
+    # Round 14. Its base is `9e23c379` — `origin/main` with #1104 merged.
     # --------------------------------------------------------------------- #
     ("r14/1 every TOOLCHAIN command hardcoded devrc's own layout, so a brief "
      "for any other target prescribed scripts that do not exist there. "
@@ -7190,7 +7202,7 @@ FIX_MATRIX = (
      "suite. Four unrunnable prescriptions, one of them manufacturing the "
      "failure it then told the reader to disregard",
      "test_the_toolchain_prescribes_only_commands_it_probed",
-     "RED@bd1572f3", "V36 V38 V39"),
+     "RED@9e23c379", "V36 V38 V39"),
     ("r14/2 and the fix's own trap: cross-repo, the cwd IS a probeable "
      "repository, it is merely the WRONG one. Probing it yields a confident, "
      "fully-formed, entirely irrelevant command list — the same defect with a "
@@ -7198,7 +7210,7 @@ FIX_MATRIX = (
      "fabricated command costs a round and reads as a broken gate, while an "
      "absent one costs a lookup",
      "test_the_toolchain_prescribes_nothing_when_it_cannot_probe",
-     "RED@bd1572f3", "V40"),
+     "RED@9e23c379", "V40"),
     ("r14/3 the `checks` probe matched the WORD and not a flake OUTPUT: "
      "`checks = pr.get(\"statusCheckRollup\", [])`, inside a python heredoc in "
      "`homelab-infra`'s real devShell, answered \"this flake declares checks\" "

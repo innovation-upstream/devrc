@@ -1455,7 +1455,7 @@ def the_degenerate_causes_stop_scoping_the_omission(t):
 
 
 # --------------------------------------------------------------------------- #
-# 🔴 V36-V41 — round 14. Base `bd1572f3`. The target-repo toolchain probes.
+# 🔴 V36-V41 — round 14. Base `9e23c379` (#1104 merged). Target-repo probes.
 # --------------------------------------------------------------------------- #
 # Each probe is broken in BOTH directions where both are reachable: V36 claims
 # an artifact that is absent, V37 denies one that is present. A single
@@ -2434,7 +2434,7 @@ ROWS = [
      a_third_prescription_site_written_through_err_stream),
 
     # --------------------------------------------------------------------- #
-    # 🔴 V36-V41 — round 14. Base `bd1572f3`.
+    # 🔴 V36-V41 — round 14. Base `9e23c379` — `origin/main` with #1104 in.
     # --------------------------------------------------------------------- #
     ("V36 gate.sh prescribed without probing for it",
      {"test_the_toolchain_prescribes_only_commands_it_probed"},
