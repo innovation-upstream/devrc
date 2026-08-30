@@ -44,7 +44,7 @@ target → gate on the a11y-rule delta → post commit status **`tekton/ux-audit
   so the walk runs under an outer `nix-shell -p bash gnumake nix` with **`NIX_PATH` pinned**
   to the repo's `flake.lock` nixpkgs rev. (The base `nixos/nix` image has neither `make` nor
   a guaranteed `bash` on PATH.)
-- Reuses the **SHARED `nix-store-cache` PVC** (both pipelines node-pin to `talos-xr6-r7p`, so
+- Reuses the **SHARED `nix-store-cache` PVC** (remix and naida both node-pin to `talos-xr6-r7p` — as do `auditloop-ci` and `devrc-ci`; derive the set, see the clawgate-ci PVC bullet below — so
   both pods mount the one RWO local PVC; the seed-nix mkdir-lock tolerates concurrent
   same-node seeders). Separate **`remix-auditloop-creds`** SOPS secret (remix's Makefile
   reads `AUDITLOOP_PUSH_TOKEN`, a single string, vs naida's `AUDITLOOP_PUSH_TOKENS` map).
@@ -95,17 +95,26 @@ OR'd with a `head_commit` fallback for GitHub's truncation of large pushes.
   `auditloop-push-main` carries a `(!has(body.deleted) || body.deleted == false)` guard;
   clawgate-ci has no `created`/`deleted` guard.
 - **PVC unpinned.** Per-run **6Gi** RWO `volumeClaimTemplate` with **no**
-  `podTemplate.nodeSelector`. ⚠ **This bullet used to say "*every* other pipeline pins
-  `talos-xr6-r7p`" and that has been false for a while — re-derive it, do not read it.**
-  Census over live pods 2026-08-30 (`kubectl -n tekton-ci get pods -o json`, group by
-  `tekton.dev/pipeline` × `spec.nodeSelector`): **3 pin `talos-xr6-r7p`** — `auditloop-ci`,
-  `devrc-ci`, `naida-ux-audit`; **1 pins `talos-uvh-gtj`** — `gitops-validate`, with its own
-  `nix-store-cache-2` since homelab-infra #396; and **7 pin nothing at all** — `clawgate-ci`,
-  `clawgate-e2e`, `clawgate-ux-audit`, `vetr-api-main`, `vetr-api-pest`, `vetr-app-unit`,
-  `vetr-infra-guards`. So clawgate-ci is **not** the odd one out; floating is the majority.
-  It works because it mounts only the one PVC — the real cost is that it forgoes the shared
-  nix cache. 🔴 Do not "fix" it by pinning to `talos-xr6-r7p`: that concentrates a fourth
-  pipeline onto the node the devrc-ci section below is trying to get load *off*.
+  `podTemplate.nodeSelector` (vs naida 8Gi, remix 12Gi, auditloop 10Gi).
+  🔴 **DO NOT READ A PIN LIST OUT OF THIS FILE — DERIVE IT.** This bullet has now been wrong
+  twice in two days, in opposite directions: it asserted *"every other pipeline pins
+  `talos-xr6-r7p`"* (false since homelab-infra #396 moved `gitops-validate` to
+  `talos-uvh-gtj`), and the correction that replaced it was censused over **live pods**, which
+  silently drops any pipeline that happens to have none right now — it lost `remix-ux-audit`
+  (which DOES pin `talos-xr6-r7p`; 20 retained PipelineRuns) and `vetr-app-e2e`. **Pods are not
+  the defining population; TriggerTemplates are:**
+  `kubectl -n tekton-ci get triggertemplates -o json | jq -r '.items[] | "\(.metadata.name)\t\(([..|objects|select(has("nodeSelector"))|.nodeSelector["kubernetes.io/hostname"]]|first // "<none>"))"'`
+  As of 2026-08-30 that returns 13 rows: **4** pin `talos-xr6-r7p`, **1** pins `talos-uvh-gtj`,
+  **8** pin nothing — so **floating is the majority and clawgate-ci is not the odd one out**,
+  which is the durable point. (A stale in-cluster comment at
+  `<homelab-infra>/clusters/homelab/apps/tekton-pipelines/ci-priority-classes.yaml` still calls
+  it "the ONE pipeline with no nodeSelector".)
+  ⚠ Being unpinned is a deliberate WIN, not only a cost — one RWO PVC means no pin is needed,
+  so it schedules anywhere and survives node loss (`clawgate-ci-pipeline.yaml:58,69`). The cost
+  is that it forgoes the shared nix cache. 🔴 **Do not "fix" that by pinning it to
+  `talos-xr6-r7p`** — it would become the FIFTH pipeline on the node the devrc-ci section below
+  is trying to take load off, and that node's contention is the documented mechanism behind
+  gitops-validate's lost verdicts.
 - **No concurrency control at all** — every matching push gets an independent PipelineRun and
   its own 6Gi PVC.
 - **`error` vs `fail` is implemented for the CSS path ONLY** (`clawgate-ci-pipeline.yaml:329`

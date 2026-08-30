@@ -305,8 +305,16 @@ debugging, changing or copying a specific pipeline.
    the dev host and `failed=43` in CI — identical inputs, different output, i.e. impure.
    🔴 **Before debugging any diff against a red `devrc-ci` run, check both:**
    `kubectl get taskrun <run>-gate -n tekton-ci -o jsonpath='{.status.conditions[*].message}'`
-   and `kubectl exec -n tekton-ci <gate-pod> -c step-pytests -- sh -c 'nix config show | grep "^sandbox "'`.
+   and `kubectl exec -n tekton-ci <gate-pod> -c step-pytests -- sh -c 'ls -d /build; nix config show | grep -E "^(sandbox|sandbox-fallback) "'`.
    A red check whose cause is either of these is a **broken gate, not a bad change**.
+   🔴 **`nix config show` alone CANNOT ANSWER THIS — it reports the CONFIGURED value, and the
+   configured value is `true`.** Measured 2026-08-30 in a live gate pod: `sandbox = true`,
+   `sandbox-fallback = true`, **`/build` does not exist**, and the build sits in
+   `/tmp/nix-build-<drv>-0` — nix fell back to running UNSANDBOXED and said nothing. **`/build`'s
+   absence is the tell**, which is why the command leads with it; a grep for `^sandbox ` returns
+   a reassuring `true` over exactly the condition this gotcha exists to catch. Recorded as a 🔴
+   KNOWN LIMITATION at `devrc-ci-pipeline.yaml:147-154`, where all three fixes are blocked by
+   PodSecurity `baseline:latest`.
 
 ## What / where
 
