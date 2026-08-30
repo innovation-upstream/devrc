@@ -326,7 +326,7 @@ def _wait_ops(spool_dir, op, n=1, where=None, **kw) -> list:
     depending on order at all. Two halves, two remedies — which is exactly the
     point, because a site whose order IS the signal cannot take the sorting one.
 
-    THE TWO SITES IN THIS FILE THAT READ A PAIR POSITIONALLY BOTH SEQUENCE, and
+    BOTH `_wait_ops(..., where=)` SITES THAT READ A PAIR BOTH SEQUENCE, and
     neither can sort, because for both of them order between the rows is the
     assertion:
       * `test_an_absent_origin_header_is_not_the_same_as_an_empty_one` (absent
@@ -338,6 +338,24 @@ def _wait_ops(spool_dir, op, n=1, where=None, **kw) -> list:
     `where=_routed_to(that id)`, so the rows it reads are the rows it caused;
     and each waits for the first row BEFORE issuing the second command, so which
     of the two comes first is fixed by observation rather than by scheduling.
+
+    🔴 READ THAT SCOPE NARROWLY — IT IS TWO `where=` SITES, NOT "THE TWO SITES IN
+    THIS FILE THAT READ A PAIR POSITIONALLY", which is what an earlier draft said
+    and is FALSE. A delta audit re-derived the wider class by AST and found at
+    least SIX members: the two above plus four that take row `[1]` off a BARE
+    `_wait_events(spool_dir, 2)` with no row predicate at all —
+    `test_an_oversized_id_is_dropped_whole_never_truncated`,
+    `test_both_join_sites_answer_the_same_way_for_every_joinable_tier`,
+    `test_activate_telemetry_records_the_consent_decision` and
+    `test_heartbeat_tracks_registry_liveness_across_the_stale_boundary`.
+    Those four are sequenced, so they are not exposed to the OWN-rows hazard —
+    but they carry no `where=`, so they remain exposed to the FOREIGN-row one,
+    and they are among the 47 sites `test_positional_spool_reader_ratchet.py`
+    counts. They are NOT closed by this docstring, and the incremental posture
+    for them is that module's, not this one's. 🔴 A CENSUS SENTENCE WIDENED ON
+    ITS VERB WHILE KEEPING ITS OLD COUNT is precisely the bucketing error that
+    let the site this paragraph is about sit outside an order-safety audit for
+    four days — reintroduced here, by the fix for the previous instance of it.
     That is an INVARIANT THE CODE ENFORCES, replacing the corpus property this
     docstring used to assert ("no current test leaves a `tabs` command in flight
     to time out"). Re-measured 2026-08-26 before removing it — it had NOT lapsed,

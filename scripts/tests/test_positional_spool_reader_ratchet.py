@@ -140,12 +140,21 @@ POSITIONAL_BUCKET = "_wait_events positional (no until=)"
 # ⚠ THEN, on this branch, `_wait_ops where=` went 3 -> 5 and the total 62 -> 64
 # WITHOUT the ratcheted number moving — the shape to expect from an ordering fix:
 # SEQUENCING a pair adds a wait, it does not convert a positional `_wait_events`
-# site. BOTH sites that read a pair positionally now wait for the first row
-# before issuing the second command, so each holds two `where=` calls instead of
-# one: `test_an_absent_origin_header_is_not_the_same_as_an_empty_one` and
-# `test_a_neighbours_row_of_the_same_op_is_not_selected_as_one_of_ours`, the
+# site. Both `_wait_ops(..., where=)` sites that read a PAIR now wait for the
+# first row before issuing the second command, so each holds two `where=` calls
+# instead of one: `test_an_absent_origin_header_is_not_the_same_as_an_empty_one`
+# and `test_a_neighbours_row_of_the_same_op_is_not_selected_as_one_of_ours`, the
 # guard for it — which an audit of this branch found carrying the identical
 # unsequenced race, measured red under the same swap-the-commands control.
+# 🔴 THAT IS TWO `where=` SITES, NOT "the two sites that read a pair
+# positionally" — an earlier draft of this comment said the latter and it is
+# FALSE. Re-derived by AST, the wider class has at least SIX members; the other
+# four take row `[1]` off a bare `_wait_events(spool_dir, 2)` and are therefore
+# IN the 47 this module ratchets. Sequencing closed the OWN-rows hazard for two
+# sites; it closed nothing for those four, whose exposure is the FOREIGN-row one
+# this module exists for. Do not read the sentence above as a census of the
+# ratcheted population — it is not, and conflating the two is the bucketing
+# error recorded three paragraphs up.
 # 🔴 THIS MODULE IS STRUCTURALLY BLIND TO THAT FIX: it
 # ratchets the FOREIGN-row hazard (position vs discrimination) and has no view
 # of the OWN-rows hazard (two rows one predicate cannot separate, because they
