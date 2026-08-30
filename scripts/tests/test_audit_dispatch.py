@@ -1740,6 +1740,39 @@ SCENARIO_RUNS = {
         ["900"],
         {"pr": dict(DEFAULT_PR, url="", isCrossRepository=True)},
     ),
+    # 🔴 ROUND 16 — THE THREE MISSING CELLS OF THE TARGET × CHECKOUT-KIND GRID,
+    # and the reason they are added TOGETHER rather than one per finding. Round
+    # 15 restored the commands pin within each target and guarded its own
+    # non-degeneracy with `any(len(kinds) >= 2)`. Measured at `ba321c06`:
+    #
+    #     probed-devrc-shape    n=6  {private, shared, unknown}
+    #     cross-repo-otherproj  n=5  {private, shared}
+    #     repo-unknown          n=2  {shared}
+    #
+    # `any` is satisfied by the first row alone, so it certified NOTHING about
+    # the other two — and no NOT-PROBED scenario was `unknown` kind at all.
+    # Measured: inserting into `_toolchain_not_probed` a sentence keyed on
+    # `facts.worktree.kind == "unknown"` — one that flatly contradicts WHERE TO
+    # WORK, exactly round 15's F1 in its third state — left the module at
+    # **122 passed**, while the same insertion keyed on `"private"` was killed.
+    #
+    # The grid is now COMPLETE and the assertion asks for the whole row, not for
+    # two of it: every target spans all three checkout states. That is the
+    # mechanical form of the property, so the next un-covered cell is a hole
+    # this guard NAMES rather than one it happens to miss.
+    "cross-repo-unreadable-worktree": lambda: (
+        ["900"], {"pr": OTHER_REPO_PR, "git_dirs": UNREADABLE_GIT_DIRS},
+    ),
+    "unknown-repo-private-worktree": lambda: (
+        ["900"],
+        {"pr": dict(DEFAULT_PR, url="", isCrossRepository=True),
+         "git_dirs": PRIVATE_GIT_DIRS},
+    ),
+    "unknown-repo-unreadable-worktree": lambda: (
+        ["900"],
+        {"pr": dict(DEFAULT_PR, url="", isCrossRepository=True),
+         "git_dirs": UNREADABLE_GIT_DIRS},
+    ),
 }
 SCENARIOS = tuple(SCENARIO_RUNS)
 
@@ -1787,8 +1820,11 @@ TOOLCHAIN_TARGET_OF = {
     "cross-repo-delta": "cross-repo-otherproj",
     "cross-repo-delta-no-head-sha": "cross-repo-otherproj",
     "cross-repo-renamed-remote-delta": "cross-repo-otherproj",
+    "cross-repo-unreadable-worktree": "cross-repo-otherproj",
     "claims-file-assumed-base": "repo-unknown",
     "unknown-repo-gh-said-nothing": "repo-unknown",
+    "unknown-repo-private-worktree": "repo-unknown",
+    "unknown-repo-unreadable-worktree": "repo-unknown",
 }
 
 # The three checkout states, by the phrase `render_checkout_state` prints for
@@ -5454,16 +5490,37 @@ def test_the_toolchain_reason_is_true_in_every_scenario():
             )
     # 🔴 NON-DEGENERACY, and it is what makes the equality above a MEASUREMENT.
     # A partition whose members all share one checkout state cannot see a
-    # sentence keyed on that state — the equality would hold vacuously. At
-    # least one partition must span two of the three states, or this pin is
-    # blind to the exact mutation it was written for.
+    # sentence keyed on that state — the equality would hold vacuously there.
+    #
+    # 🔴 ROUND 16 — `any(len(k) >= 2)` CERTIFIED ONE PARTITION AND CALLED IT
+    # THE PIN. Measured at `ba321c06`: `probed-devrc-shape` spanned all three
+    # states and satisfied it single-handed, while `cross-repo-otherproj` had
+    # {private, shared} and `repo-unknown` had {shared} ALONE — so the
+    # not-probed branch was blind to `unknown` in both of its partitions.
+    # Inserting into `_toolchain_not_probed` a WHERE-TO-WORK-contradicting
+    # sentence keyed on `facts.worktree.kind == "unknown"` left the module at
+    # **122 passed**; the same insertion keyed on `"private"` was killed. That is
+    # round 15's F1 in its third state, one `any` away.
+    #
+    # So the requirement is the WHOLE GRID: every target spans every checkout
+    # state. `any` -> `all` alone would still let a partition sit at two of
+    # three; naming the state set makes the missing cell a named hole rather
+    # than an unnoticed one. `CHECKOUT_KIND_MARKERS` is the enumeration, so
+    # adding a fourth checkout state fails HERE, loudly, instead of quietly
+    # halving what this pin can see.
     kinds = {key: {checkout_kind_of(briefs[s]) for s in members}
              for key, members in by_target.items()}
-    assert any(len(k) >= 2 for k in kinds.values()), (
-        "\n\nno target partition spans two checkout states, so the equality "
-        "above cannot see a sentence that varies with the auditor's own "
-        f"worktree — the mutation this guard exists for. states: {kinds}"
-    )
+    every_state = set(CHECKOUT_KIND_MARKERS)
+    for key, seen in sorted(kinds.items()):
+        assert seen == every_state, (
+            f"\n\ntarget {key!r} spans only {sorted(seen)} of the "
+            f"{sorted(every_state)} checkout states, so the within-target "
+            "equality above is BLIND to a sentence keyed on "
+            f"{sorted(every_state - seen)} in this branch — which is exactly "
+            "the mutation this guard exists for, and it survived a fully green "
+            "suite once already.\n  scenarios in this target: "
+            f"{sorted(by_target[key])}\n  full grid: {kinds}"
+        )
 
 
 def test_the_toolchain_prescribes_only_commands_it_probed(tmp_path):
@@ -5736,6 +5793,102 @@ PY
 """,
 }
 
+# 🔴 ROUND 16 — THE `#` ROW ABOVE IS INERT AGAINST THE STRIPPER, SAID OUT LOUD
+# RATHER THAN LEFT TO READ AS COVERAGE. `CHECKS_ATTR`/`CHECKS_DECL` are anchored
+# `^[ \t]*checks`, and a `#` line comment puts a `#` before the word on every
+# line it comments out — so that row answers `None` at every revision this
+# module has ever had, stripper or no stripper. It is kept because it pins the
+# ANCHOR (a future `re.search` without `^` would fabricate a tier from it), and
+# `test_the_comment_stripper_is_reachable_in_its_own_right` below asserts the
+# comment text really is blanked, which is the claim the row's NAME makes and
+# the row itself cannot support. The load-bearing `#` case is the FALSE-ABSENT
+# one directly below: a comment whose text would otherwise open a string.
+#
+# `# … the ''-string idiom …` is an ordinary sentence to write in a flake, and
+# an unstripped `''` in it opens an indented string that never closes: the real
+# `checks` block after it is blanked and the answer is `None`, in bold.
+CHECKS_COMMENTED_APOSTROPHES = """{
+  outputs = { self }: {
+    # we do not use the ''-string idiom here, and "unbalanced quotes happen
+    checks.x86_64-linux = {
+      unit = 1;
+      lint = 2;
+    };
+  };
+}
+"""
+
+# 🔴 ROUND 16 — A LEGAL NIX IDENTIFIER THAT ENDS IN APOSTROPHES. `'` is an
+# identifier character (this module's own `_NIX_NAME` allows it), so `foo'' = 1;`
+# is ONE token. Measured at `ba321c06`: read as a string opener it blanked the
+# REST OF THE FILE and the answer was `None` — "**no `checks` output**" for a
+# flake whose next binding is the checks block.
+CHECKS_IDENT_WITH_APOSTROPHES = """{
+  outputs = { self }: rec {
+    foo'' = 1;
+    checks.x86_64-linux = {
+      unit = 1;
+      lint = 2;
+    };
+  };
+}
+"""
+
+
+# 🔴 ROUND 16 — THE SHAPE THE FLAT FIXTURES CANNOT REACH, AND IT IS THE SAME
+# CLASS ONE LEVEL DOWN. `shellHook = '' ${lib.optionalString c '' … ''} '';` is
+# an ordinary nixpkgs idiom, and a scanner that walks to "the next `''`" reads
+# the `''` that OPENS the nested string as the OUTER one's terminator. Two
+# consequences, both measured at `ba321c06`, both CONFIDENT answers:
+#
+#   * the interpolation's body is not blanked, it is PROMOTED TO CODE — a flake
+#     declaring no `checks` at all answered `['unit']`, i.e. the brief fenced
+#     `nix build …#checks.x86_64-linux.unit` for a target that has none;
+#   * when that promoted region holds an odd token (an `''${` escape, a lone
+#     `"`), string parity inverts for the rest of the file and a flake that DOES
+#     declare `checks.x86_64-linux = { unit; lint; }` answered `None`.
+#
+# So the fixtures are a PRODUCT, not a row: every inner body × both outer
+# states. A single nested fixture would have covered whichever direction its own
+# body happened to produce and left the other open — which is how the flat F7
+# fixture left this whole class open in the first place.
+def _nested_interp_flake(body, declares):
+    """A flake whose devShell interpolates a NESTED `''…''`, ± a checks output."""
+    return (
+        "{\n"
+        "  outputs = { self }: {\n"
+        "    devShells.x86_64-linux.default = pkgs.mkShell {\n"
+        "      shellHook = ''\n"
+        "        ${lib.optionalString cond ''\n"
+        + body
+        + "        ''}\n"
+        "        echo hi\n"
+        "      '';\n"
+        "    };\n"
+        + ("    checks.x86_64-linux = {\n"
+           "      unit = 1;\n"
+           "      lint = 2;\n"
+           "    };\n" if declares else "")
+        + "  };\n"
+        "}\n"
+    )
+
+
+NESTED_INNER_BODIES = {
+    "plain": "          echo nested\n",
+    "an ''${…} escape": "          export P=''${HOME}/bin\n",
+    "a lone double quote": "          echo \"unbalanced\n",
+    "a `#` character": "          echo '# not a comment'\n",
+    "text that LOOKS like a checks binding": (
+        "          checks = {\n"
+        "          unit = 1;\n"
+        "          }\n"
+    ),
+    "a nested interpolation of its own": (
+        "          echo ${toString ${n}}\n"
+    ),
+}
+
 # devrc's real `checks.${system}` block with nix's two-apostrophe ESCAPES in the
 # build script — `''${VAR}` is a literal `${VAR}`, `'''` is a literal `''`.
 # Neither closes the string, and a scanner that toggles on any `''` thinks both
@@ -5845,6 +5998,156 @@ def test_the_flake_checks_probe_reads_nix_code_and_not_text_that_looks_like_it()
     )
 
 
+def test_a_nested_indented_string_inside_an_interpolation_is_not_a_terminator():
+    """🔴 REGRESSION. Red at `ba321c06` in BOTH directions, on this branch's fix.
+
+    Round 15 taught the scanner nix's three two-apostrophe spellings and left
+    the token that cannot be lexed without a STACK: the `''` that OPENS a nested
+    string inside a `${…}`. `shellHook = '' ${lib.optionalString c '' … ''} '';`
+    is an ordinary nixpkgs idiom, and a flat "walk to the next `''`" reads that
+    opener as the OUTER string's terminator.
+
+    Measured at `ba321c06` through `_flake_check_names`:
+
+        no `checks` output at all           -> ['unit']   (FABRICATED)
+        `checks.x86_64-linux = {unit;lint;}`
+          with an ''${…} escape in the body -> None       ("**no `checks`
+                                                           output**", in bold)
+
+    The first fences `nix build <wt>#checks.x86_64-linux.unit` against a repo
+    that has no such attribute — a command that exits on an attribute error and
+    reads exactly like a broken gate. The second denies the tier the same
+    section calls the one the merge gates on. Both are the CONFIDENT answer; the
+    `[]` valve cannot fire for either, because `CHECKS_DECL` runs over the same
+    mis-lexed text.
+
+    🔴 THE FIXTURES ARE A PRODUCT, NOT A ROW. Which direction a nested fixture
+    exposes depends on the parity of the tokens in its body, so one fixture
+    covers one direction by luck. Every inner body is driven against BOTH outer
+    states, and `test_the_probe_hedges_when_the_nix_scan_did_not_end_cleanly`
+    below pins where the answer goes when the lexer is genuinely lost.
+    """
+    for name, body in NESTED_INNER_BODIES.items():
+        absent = ad._flake_check_names(_nested_interp_flake(body, declares=False))
+        assert absent is None, (
+            f"\n\ninner body {name!r}: the flake declares NO `checks` output "
+            f"and the probe answered {absent!r}. The nested `''` was read as "
+            "the outer string's terminator, so the interpolation body was "
+            "promoted to CODE — and the brief fences a `nix build "
+            "…#checks…<name>` for a repository that has no such attribute."
+        )
+        present = ad._flake_check_names(_nested_interp_flake(body, declares=True))
+        assert present == ["unit", "lint"], (
+            f"\n\ninner body {name!r}: the flake DOES declare "
+            "`checks.x86_64-linux = {{ unit; lint; }}` and the probe answered "
+            f"{present!r}. `None` there is the brief stating in BOLD that the "
+            "repository has no sandbox tier; a short list is a tier run "
+            "half-way. Both are confident, and the nested string is what "
+            "inverted the parity."
+        )
+    # 🔴 THE OTHER TWO SHAPES OF THE SAME CLASS — `''` that is not a string
+    # delimiter at all, and `''` inside a `#` comment.
+    assert ad._flake_check_names(CHECKS_IDENT_WITH_APOSTROPHES) == [
+        "unit", "lint"
+    ], (
+        "`foo'' = 1;` is ONE nix identifier — `'` is an identifier character, "
+        "which `_NIX_NAME` already knew. Read as a string opener it blanks the "
+        "rest of the file and the answer is `None`."
+    )
+    assert ad._flake_check_names(CHECKS_COMMENTED_APOSTROPHES) == [
+        "unit", "lint"
+    ], (
+        "a `#` comment mentioning the `''`-string idiom opened an indented "
+        "string that never closed, blanking the real `checks` block after it"
+    )
+
+
+def test_the_comment_stripper_is_reachable_in_its_own_right():
+    """🔴 THE `#` ROW IN `CHECKS_SHAPES_NOT_CODE` IS INERT, AND THIS IS WHY.
+
+    Both patterns are anchored `^[ \\t]*checks`, and a `#` line comment puts a
+    `#` in front of the word on every line it comments out. So that row answers
+    `None` at every revision this module has ever had — stripper or no stripper
+    — and it reads as coverage of the comment handling while providing none.
+    `claude/RULES.md`: a guard that reads as coverage while providing none is
+    worse than no guard, because it stops anyone looking.
+
+    Two things are pinned here instead, and neither is walkable by the anchor:
+    the comment TEXT is really blanked (so the row's own name becomes true of
+    something), and a `#` comment whose text would otherwise open a string does
+    not blank the code after it — the case the anchor cannot reach and the one
+    that flips a real answer.
+    """
+    text = CHECKS_SHAPES_NOT_CODE["a `#`-commented checks block"]
+    stripped = ad._nix_strip(text)
+    assert "checks" not in stripped, (
+        "the `#`-commented `checks` line survived the strip. The anchored "
+        "regex rejects it anyway, which is why the fixture row cannot see "
+        "this — an unanchored `re.search` would fabricate a tier from it."
+    )
+    assert "packages.default = 1;" in stripped, (
+        "the stripper blanked the CODE after the comment too, so the assertion "
+        "above passes for a stripper that blanks everything"
+    )
+    # The positive control for the whole comment branch: without it the fixture
+    # below answers `None`, because its `''` opens a string that never closes.
+    assert ad._flake_check_names(CHECKS_COMMENTED_APOSTROPHES) == ["unit", "lint"]
+
+
+def test_the_probe_hedges_when_the_nix_scan_did_not_end_cleanly():
+    """🔴 WHERE THE LEXER IS LOST, THE ANSWER IS `[]` — never `None`, never names.
+
+    Round 16's two measured failures both routed to the STRONGEST wrong answer:
+    a fabricated name list one way, a bolded "no `checks` output" the other.
+    `None` and a name list are the two confident sentences; `[]` is the hedge
+    that hands over `CHECKS_DISCRIMINATOR`. So `_nix_scan` reports whether it
+    ended in a state a nix file can be in, and the caller degrades on that
+    BEFORE it reads anything — the valve has to sit above the parse, because
+    both patterns run over the same mis-lexed text.
+
+    A `_PROBE_MAX_BYTES` truncation is the same observable and lands the same
+    way, which is the point: this is a property of the SCAN, not a list of
+    known-bad inputs.
+    """
+    clean_cases = {
+        "devrc's own flake": DEVRC_FLAKE,
+        "homelab-infra's flake": HOMELAB_FLAKE,
+        "an identifier ending in apostrophes": CHECKS_IDENT_WITH_APOSTROPHES,
+        "a nested interpolation": _nested_interp_flake(
+            NESTED_INNER_BODIES["plain"], declares=True),
+    }
+    for name, text in clean_cases.items():
+        assert ad._nix_scan(text)[1] is True, (
+            f"\n\n{name} does not lex cleanly, so `_flake_check_names` now "
+            "hedges `[]` for it — the hedge is only honest while the clean "
+            "cases really are clean, or every repository gets it"
+        )
+    dirty_cases = {
+        "an unterminated indented string": "checks.x86_64-linux = ''\n  unit\n",
+        "an unterminated double quote": 'checks.x86_64-linux = "unit\n',
+        "an unclosed interpolation": "a = ''${\n",
+        "an unclosed block comment": "/* checks.x86_64-linux = {\n  unit = 1;\n",
+        "braces that never balance (a truncated read)":
+            "checks.${system} = {\n",
+    }
+    for name, text in dirty_cases.items():
+        assert ad._nix_scan(text)[1] is False, (
+            f"\n\n{name} was reported as a CLEAN lex, so nothing degrades and "
+            "whatever the patterns then say is stated with full confidence"
+        )
+        assert ad._flake_check_names(text) == [], (
+            f"\n\n{name}: the probe answered "
+            f"{ad._flake_check_names(text)!r} rather than the hedged `[]`. "
+            "`None` states in bold that the repository has no sandbox tier and "
+            "a name list fences a `nix build` at it; the lexer did not finish, "
+            "so it is entitled to neither."
+        )
+    # 🔴 THE POSITIVE CONTROL FOR THE VALVE ITSELF: a hedge that fired on
+    # everything would make every row above pass while destroying the function.
+    assert ad._flake_check_names(DEVRC_FLAKE) == ["pytests", "nodetests"]
+    assert ad._flake_check_names(HOMELAB_FLAKE) is None
+
+
 def test_a_capped_python_test_walk_is_not_reported_as_no_python_tests(tmp_path):
     """🔴 REGRESSION. Red at `5bad0a0c`, where the cap failed SILENTLY.
 
@@ -5917,6 +6220,88 @@ def test_a_capped_python_test_walk_is_not_reported_as_no_python_tests(tmp_path):
         "two of the three answers are spelled the same, so the branches that "
         "distinguish them cannot be reached separately"
     )
+
+
+def test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there(tmp_path):
+    """🔴 REGRESSION. Red at `ba321c06`, on both halves. Two dangling references.
+
+    **The cross-reference.** The `PY_TESTS_NONE` bar said the completed walk
+    "is a different answer from the one above". The branches are mutually
+    exclusive — `if UNKNOWN: return …; if NONE: return …` — so the bar it
+    contrasted itself with is emitted in exactly the runs where this one is
+    not. A reader sent looking for a bar that is never on the page.
+
+    **The diagnosis of an unprescribed command.** With `NONE` and a flake that
+    names pytest, `_toolchain_shell_note` opened with a `python3 -m pytest`
+    wrong-shell bar three lines after the same section said no python subset
+    command is prescribed. Fixed as the general rule and not as a NONE special
+    case: the python-specific bar is emitted only where a `python3 -m pytest`
+    is actually fenced above it, and the language-agnostic one — which is true
+    in every state — is unconditional and self-contained.
+
+    Driven over all THREE `py_tests` states, because "the bar is absent" is
+    satisfied by a note that vanished and "the bar is present" by one that never
+    varies. Both are the failure this pins.
+    """
+    trees = {}
+    for name, py_test in (("none", False), ("found", True)):
+        root = Path(tmp_path / name)
+        _write_repo(root, envrc="use flake\n", gate=DEVRC_GATE,
+                    flake=DEVRC_FLAKE, py_test=py_test)
+        trees[name] = root
+    wide = Path(tmp_path / "unknown")
+    _write_repo(wide, envrc="use flake\n", gate=DEVRC_GATE, flake=DEVRC_FLAKE,
+                py_test=False)
+    for i in range(ad._PROBE_MAX_DIRS + 100):
+        (wide / f"d{i:04d}").mkdir()
+    trees["unknown"] = wide
+    # 🔴 FIXTURE REACH, ESTABLISHED RATHER THAN ASSUMED. Without this the three
+    # rows below could all be the same state and every assertion would be a
+    # claim about one branch wearing three names.
+    assert [ad._python_test_probe(trees[k]) for k in ("none", "found", "unknown")
+            ] == [ad.PY_TESTS_NONE, ad.PY_TESTS_FOUND, ad.PY_TESTS_UNKNOWN]
+
+    sections = {}
+    for name, root in trees.items():
+        rc, out, err = run_main(["900"], toplevel=str(root))
+        assert rc == 0, err
+        sections[name] = toolchain_section(out)
+
+    # 🔴 "the one above", not "from the one above": the narrower spelling is
+    # walkable by "different from the one printed above". Nothing else in this
+    # section says it — the sibling bars say "The runner above" — so the wider
+    # phrase costs no false red and closes the reword.
+    assert "the one above" not in sections["none"], (
+        f"\n\nthe completed-walk bar points at 'the one above'. The capped bar "
+        f"is the only thing it can mean and the two branches are mutually "
+        f"exclusive, so it is never above:\n{sections['none']}"
+    )
+    assert "the walk COMPLETED and found none" in sections["none"], (
+        "the contrast itself was dropped instead of being re-pointed; the two "
+        "answers are the whole reason there are three states"
+    )
+    # The python-specific diagnosis: present exactly where a python command is.
+    for name, section in sections.items():
+        fenced_pytest = any("python3 -m pytest" in c
+                            for c in toolchain_commands(section))
+        diagnosed = "A bare `python3 -m pytest` failing" in section
+        assert diagnosed == fenced_pytest, (
+            f"\n\npy_tests={name!r}: a `python3 -m pytest` wrong-shell bar is "
+            f"{'present' if diagnosed else 'absent'} while such a command is "
+            f"{'fenced' if fenced_pytest else 'NOT fenced'} above it. A "
+            f"diagnosis of a command this section did not prescribe sends the "
+            f"reader looking for something that is not there:\n{section}"
+        )
+        # …and the language-agnostic bar is there in EVERY state, so dropping
+        # the python one is not the note vanishing again (round 15's F9).
+        assert "WRONG SHELL and not a broken gate" in section, (
+            f"\n\npy_tests={name!r}: no wrong-shell diagnosis at all. That is "
+            f"round 15's F9 re-opened by this round's fix:\n{section}"
+        )
+        assert "in EVERY language" in section, (
+            f"py_tests={name!r}: the diagnosis no longer says it covers every "
+            f"language, so it reads as a python note again:\n{section}"
+        )
 
 
 def test_the_wrong_shell_diagnosis_covers_every_command_not_only_pytest(tmp_path):
@@ -6013,39 +6398,121 @@ def test_the_toolchain_head_claim_is_true_of_the_rendered_brief():
     block asks whether the rendered reason IS this constant, never whether the
     constant is TRUE of what follows it. A claim can be pinned byte-for-byte
     and false in every brief that carries it.
+
+    🔴 ROUND 16 — RED AT `ba321c06` TOO, ON ROUND 15'S OWN REPLACEMENT WORDING,
+    AND ON THIS GUARD'S OWN SCOPE. "the prose names it too, to say what was read
+    out of it" is a claim about a STATE, put back into the state-INDEPENDENT
+    constant. Counted at `ba321c06` over all thirteen scenarios the module had
+    there (round 16 adds three more, closing the target x checkout-kind grid):
+
+        probed       (6)  3 prose lines naming the assembly checkout  -> true
+        cross-repo   (5)  1, and it says "is a DIFFERENT repository"  -> false
+        repo-unknown (2)  0 — the path is absent from the section     -> flatly
+
+    and this guard drove ONLY `delta`. A guard narrower than the sentence it
+    certifies is the shape round 15's F2 was filed for, reproduced one round
+    later inside F2's own fix — so the fix is BOTH halves: the clause is now the
+    widest thing true in every state (wherever the path appears outside a
+    `nix develop` argument it is PROSE, never something to run in), and the
+    guard drives every scenario the module has.
+
+    The `assert prose` half is scoped to the states that HAVE prose, and its
+    non-vacuity is asserted globally instead: if no scenario anywhere named the
+    path in prose, the clause should go back to #1104's "ONLY as the argument to
+    `nix develop`", which would then be true again.
     """
     root = FAKE_REPO_DIR
-    tool = toolchain_section(brief_for_scenario("delta"))
-    assert "at most ONCE" not in tool, (
-        "the false COUNT is back. The path appears in prose too; a count over "
-        "the whole section cannot be satisfied while it does"
-    )
-    fenced = toolchain_commands(tool)
-    naming = [c for c in fenced if root in c]
-    assert naming, (
-        "no fenced command names the assembly checkout at all, so the claim "
-        "under test is vacuous here. Check FAKE_REPO_DIR is still probed."
-    )
-    for line in naming:
-        assert line.startswith(f"nix develop {root} -c "), (
-            f"\n\na RUNNABLE command names the assembly checkout somewhere "
-            f"other than as the `nix develop` argument:\n    {line}\n"
-            "  That is the tree under test pointing at somebody else's "
-            "checkout, which is what TOOLCHAIN_HEAD promises never happens."
+    fenced_naming_total, prose_naming_total = 0, 0
+    for scenario in SCENARIOS:
+        tool = toolchain_section(brief_for_scenario(scenario))
+        assert "at most ONCE" not in tool, (
+            f"\n\nscenario {scenario!r}: the false COUNT is back. The path "
+            "appears in prose too; a count over the whole section cannot be "
+            "satisfied while it does"
         )
-        assert line.replace(f"nix develop {root} -c ", "", 1).count(root) == 0, (
-            f"\n\nthe assembly checkout appears a SECOND time in one command, "
-            f"past the `nix develop` argument:\n    {line}"
+        fenced = toolchain_commands(tool)
+        naming = [c for c in fenced if root in c]
+        fenced_naming_total += len(naming)
+        for line in naming:
+            assert line.startswith(f"nix develop {root} -c "), (
+                f"\n\nscenario {scenario!r}: a RUNNABLE command names the "
+                f"assembly checkout somewhere other than as the `nix develop` "
+                f"argument:\n    {line}\n"
+                "  That is the tree under test pointing at somebody else's "
+                "checkout, which is what TOOLCHAIN_HEAD promises never happens."
+            )
+            assert line.replace(
+                f"nix develop {root} -c ", "", 1).count(root) == 0, (
+                f"\n\nscenario {scenario!r}: the assembly checkout appears a "
+                f"SECOND time in one command, past the `nix develop` "
+                f"argument:\n    {line}"
+            )
+        prose_naming_total += len(
+            [ln for ln in tool.splitlines() if root in ln and ln not in fenced])
+        # 🔴 PER-SCENARIO NON-VACUITY, KEYED ON THE DECLARED TARGET — and it is
+        # here because the global counters below LOST a kill without it.
+        # Measured: mutant C3 (the cross-repo decision inverted) was killed by
+        # this guard while it drove `delta` alone, and survived the first
+        # global-counter spelling — the inversion makes the cross-repo
+        # scenarios probe, so the totals stay non-zero and only the
+        # per-scenario shape can see that the WRONG scenarios produced them.
+        # `TOOLCHAIN_TARGET_OF` is the declared intent; a rendering that
+        # disagrees with it is the finding.
+        probed_target = TOOLCHAIN_TARGET_OF[scenario] == "probed-devrc-shape"
+        assert bool(naming) == probed_target, (
+            f"\n\nscenario {scenario!r} is declared "
+            f"{TOOLCHAIN_TARGET_OF[scenario]!r} and "
+            f"{'names' if naming else 'does NOT name'} the assembly checkout "
+            f"in a fenced command. A probed target must run something in that "
+            f"dev shell; a NOT-probed one must prescribe nothing at all — a "
+            f"fenced command there is a confident command list for a "
+            f"repository this run never read.\n  fenced: {fenced}"
         )
-    # 🔴 THE OTHER HALF OF THE REWORDED CLAIM, asserted so the reword is not a
-    # retreat: the prose really does name the path, and says what was read.
-    prose = [ln for ln in tool.splitlines()
-             if root in ln and ln not in fenced]
-    assert len(prose) >= 2, (
-        f"\n\nthe head now says the prose names the path 'to say what was read "
-        f"out of it', and {len(prose)} prose line(s) do. If that drops to "
-        "zero the sentence should go back to #1104's 'ONLY as the argument to "
-        "`nix develop`', which would then be true again."
+    # 🔴 BOTH NON-VACUITY CONTROLS, GLOBAL RATHER THAN PER-SCENARIO — because
+    # neither half is true in every state and pretending otherwise is the
+    # finding. A section that never names the path at all satisfies every loop
+    # above while saying nothing.
+    assert fenced_naming_total, (
+        "no fenced command in ANY scenario names the assembly checkout, so the "
+        "`nix develop` half of the claim is vacuous everywhere. Check "
+        "FAKE_REPO_DIR is still a real directory that gets probed."
+    )
+    assert prose_naming_total, (
+        "no scenario names the assembly checkout in PROSE, so the reworded "
+        "clause describes something that never happens. Put #1104's 'ONLY as "
+        "the argument to `nix develop`' back — it would be true again."
+    )
+    # 🔴 THE WHOLE NORMALISED STRING, and it is the only instrument that works
+    # here. `claude/RULES.md`: when the artifact under test IS prose, a guard on
+    # WORDS is walkable by REWORDING — and this constant has now been reworded
+    # into a false claim TWICE, in the fix for the previous rewording each time
+    # ("at most ONCE" -> "the prose names it too"). Neither loop above can see
+    # it: both are still satisfied by a head that says something untrue about
+    # states it does not render in.
+    #
+    # A cosmetic reword fails here on purpose. Before changing it, RE-COUNT the
+    # prose lines naming the assembly path per target — 3 / 1 / 0 at `ba321c06`
+    # for probed / cross-repo / repo-unknown — and write only what holds in all
+    # three; then paste the new normalised string in.
+    assert " ".join(ad.TOOLCHAIN_HEAD.split()) == (
+        "## TOOLCHAIN — the exact commands, and the two ways they lie 🔴 "
+        "`<your worktree>` below is **your own copy** — the one WHERE TO WORK "
+        "told you to make. The checkout this brief was assembled in appears "
+        "below in RUNNABLE commands only as the argument to `nix develop`, "
+        "where it resolves the dev shell and nothing else; wherever else it "
+        "appears it is PROSE — a statement ABOUT that checkout, never "
+        "something to run in. Never point a gate script or a `nix build` at "
+        "it: a gate script resolves its root from its own path, so running "
+        "that copy runs the suite in a checkout that is NOT yours — one "
+        "holding none of your mutations — and a `nix build <ref>#…` builds "
+        "that ref's tree, not yours."
+    ), (
+        "\n\nTOOLCHAIN_HEAD changed. It is a state-INDEPENDENT constant, so "
+        "every claim in it must hold in all three targets and all three "
+        "checkout states; this pin is whole-string because the last two "
+        "rewordings each replaced a false claim with a different false claim "
+        "and no word-level guard could tell.\n"
+        f"--- now ---\n{' '.join(ad.TOOLCHAIN_HEAD.split())}"
     )
 
 
@@ -7384,6 +7851,29 @@ RED_AT_BASE_R15: frozenset[str] = frozenset({
     "test_an_unreadable_flake_is_not_reported_as_an_absent_one",
 })
 
+# 🔴 ROUND 16. Base `ba321c06` — round 15's OWN head, for the same reason round
+# 15 used `5bad0a0c`: every finding here is a defect this branch shipped one
+# round ago, so that is the tree to watch them go red in.
+#
+# All fail on an ASSERTION, not on an import or a missing symbol — checked,
+# because `claude/RULES.md` says an arity/`AttributeError` red is not regression
+# coverage. `_nix_scan` is NEW in round 16, so
+# `test_the_probe_hedges_when_the_nix_scan_did_not_end_cleanly` would go red at
+# `ba321c06` with `AttributeError` and is filed as an invariant guard instead.
+#
+# 🔴 `test_the_toolchain_head_claim_is_true_of_the_rendered_brief` IS LISTED
+# UNDER TWO REFS, and that is a measurement rather than bookkeeping. At
+# `5bad0a0c` it fails on round 15's false COUNT ("at most ONCE"); at `ba321c06`
+# it fails on round 16's finding — the reworded clause is a claim about a STATE
+# and the guard drove only `delta`, the one state it is true in. Same test, two
+# different assertions, two different trees. It was NOT renamed: a rename would
+# quietly retire the `5bad0a0c` row rather than add to it.
+RED_AT_BASE_R16: frozenset[str] = frozenset({
+    "test_a_nested_indented_string_inside_an_interpolation_is_not_a_terminator",
+    "test_the_toolchain_head_claim_is_true_of_the_rendered_brief",
+    "test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
@@ -7395,6 +7885,7 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "6349a8b9": RED_AT_BASE_R13,
     "9e23c379": RED_AT_BASE_R14,
     "5bad0a0c": RED_AT_BASE_R15,
+    "ba321c06": RED_AT_BASE_R16,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
@@ -7409,6 +7900,19 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     # (which an indentation-only scan reads as one name, because a build
     # script's lines start at column 0).
     "test_the_flake_checks_probe_reads_an_output_and_not_the_word",
+    # 🔴 ROUND 16. Both would fail at `ba321c06` with `AttributeError` —
+    # `_nix_scan` does not exist there — which is a claim about a symbol's
+    # absence and not about any behaviour, the vacuous shape this module refuses
+    # to count. Their evidence is their own controls (the clean/dirty pair, and
+    # the code-survives-the-strip assertion beside the comment one) plus mutants
+    # V53-V56.
+    "test_the_probe_hedges_when_the_nix_scan_did_not_end_cleanly",
+    # 🔴 GREEN at `ba321c06`, MEASURED, and that IS its finding: the `#` row in
+    # `CHECKS_SHAPES_NOT_CODE` is rejected by the anchored regex alone, so it
+    # answers `None` at every revision and tests nothing about the stripper it
+    # is named for. This says so and pins the two `#` claims that are not
+    # walkable by the anchor.
+    "test_the_comment_stripper_is_reachable_in_its_own_right",
     # 🔴 GREEN at `5bad0a0c`, MEASURED — and that is exactly the finding. The
     # three probes it drives BEHAVE correctly there; what was missing was any
     # fixture that entered their branches, so `if tc.ci_suite: -> if True:`,
@@ -8036,6 +8540,60 @@ FIX_MATRIX = (
      "command not found` then reads exactly like a broken gate",
      "test_the_wrong_shell_diagnosis_covers_every_command_not_only_pytest",
      "RED@5bad0a0c", "V50 V51"),
+    # --------------------------------------------------------------------- #
+    # Round 16. Base `ba321c06`. Every row is one of round 15's own fixes with
+    # the CLASS still open one shape further out — which is the pattern worth
+    # naming: each previous round closed the instances it was shown.
+    # --------------------------------------------------------------------- #
+    ("r16/N1 the `''` lex needed a STACK, and round 15 gave it a flag. A `''` "
+     "that OPENS a nested string inside `${…}` was read as the OUTER string's "
+     "terminator, so `shellHook = '' ${lib.optionalString c '' … ''} '';` — an "
+     "ordinary nixpkgs idiom — promoted the interpolation body to CODE. Both "
+     "directions measured at `ba321c06`: a flake with NO checks output answered "
+     "['unit'] (a fenced `nix build` at a non-existent attribute), and one that "
+     "DOES declare checks answered None once the promoted region inverted "
+     "string parity. `foo'' = 1;`, a legal nix identifier, did the same",
+     "test_a_nested_indented_string_inside_an_interpolation_is_not_a_terminator",
+     "RED@ba321c06", "V53 V54"),
+    ("r16/N1b where the lexer cannot be sure the answer is now the HEDGE. Both "
+     "of N1's failures routed to a CONFIDENT answer — a fabricated name list "
+     "one way, a bolded 'no `checks` output' the other — so `_nix_scan` reports "
+     "whether it ended in a state a nix file can be in and the caller degrades "
+     "to `[]` above the parse, not inside it",
+     "test_the_probe_hedges_when_the_nix_scan_did_not_end_cleanly",
+     "GUARD", "V55"),
+    ("r16/nit the `#`-commented row in CHECKS_SHAPES_NOT_CODE is INERT: both "
+     "patterns are anchored `^[ \\t]*checks`, so it answers None at every "
+     "revision, stripper or no stripper, and reads as coverage of the comment "
+     "branch while providing none",
+     "test_the_comment_stripper_is_reachable_in_its_own_right",
+     "GUARD", "V56"),
+    ("r16/N2 round 15's non-degeneracy pin was `any(len(kinds) >= 2)`, which "
+     "one partition satisfied alone. Measured at `ba321c06`: cross-repo spanned "
+     "{private, shared} and repo-unknown {shared} — no NOT-PROBED scenario was "
+     "`unknown` kind at all — so a WHERE-TO-WORK-contradicting sentence keyed "
+     "on `worktree.kind == 'unknown'` in `_toolchain_not_probed` survived at "
+     "122 passed while the same sentence keyed on 'private' was killed. The "
+     "grid is now complete and the assertion asks for the whole row",
+     "test_the_toolchain_reason_is_true_in_every_scenario",
+     "RED@dd601793", "V52 V57 V58"),
+    ("r16/N3 the F2 reword put a state-dependent claim straight back into the "
+     "state-INDEPENDENT constant — 'the prose names it too, to say what was "
+     "read out of it', measured true in 6 scenarios, false in 5, flatly false "
+     "in 2 — and its guard drove `delta` alone, the one state it holds in. Both "
+     "halves fixed: the clause is the widest thing true everywhere, the guard "
+     "drives every scenario, and the constant is pinned WHOLE because two "
+     "rewordings in a row each replaced a false claim with another one",
+     "test_the_toolchain_head_claim_is_true_of_the_rendered_brief",
+     "RED@ba321c06", "V59"),
+    ("r16/N4 two dangling references in one bar: the completed-walk note "
+     "contrasted itself with 'the one above' when the branches are mutually "
+     "exclusive, and the wrong-shell bar opened with a `python3 -m pytest` "
+     "diagnosis three lines after the section said no python command is "
+     "prescribed. Fixed as the general rule — the python bar is emitted only "
+     "where a python command is fenced",
+     "test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there",
+     "RED@ba321c06", "V60 V61"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
@@ -8059,7 +8617,9 @@ FIX_MATRIX = (
 # `len(FIX_MATRIX)` printed from an import, not seven added to the last sentence.
 # Round 15: m = 93 (printed from an import, NOT derived by adding this round's
 # rows to 77 — rounds 11-14 also added some), and 93 - max(1, 93 // 20) = 89.
-MIN_FIX_MATRIX_ROWS = 89
+# Round 16: m = 99 (printed from an import again, NOT 93 plus this round's six),
+# and 99 - min(50, max(1, 99 // 20)) = 99 - 4 = 95.
+MIN_FIX_MATRIX_ROWS = 95
 
 # 🔴 THE MUTANTS COLUMN IS AN EVIDENCE CLAIM, AND IT WAS UNGRADED.
 # `fix_matrix_problems` took `_mutants` and threw it away, so rewriting a

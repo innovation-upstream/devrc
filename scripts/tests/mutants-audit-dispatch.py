@@ -110,11 +110,24 @@ HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
 # tests to the last sentence, which is the arithmetic the paragraph above
 # records going wrong twice.
 #
-# 🔴 ROUND 15 RAISED IT AGAIN, 107 -> 115, at m = 121 — COUNTED from a green run
+# 🔴 ROUND 15 RAISED IT AGAIN, 107 -> 116, at m = 122 — COUNTED from a green run
 # of the module (`122 passed`) and put through the same formula,
-# `122 - min(50, max(1, 122 // 20))`, not derived by adding this round's seven
-# new tests to the last sentence.
-MIN_TESTS = 116
+# `122 - min(50, max(1, 122 // 20))` = 122 - 6 = 116, not derived by adding that
+# round's seven new tests to the last sentence.
+#
+# 🔴 AND THAT SENTENCE WAS WRONG IN BOTH ITS FIGURES — the THIRD time this
+# block has recorded exactly that, which is why it is corrected in place rather
+# than appended to. It read "107 -> 115, at m = 121" while quoting its own
+# correct `122 - min(50, max(1, 122 // 20))` and sitting above `MIN_TESTS = 116`.
+# A reader re-deriving from "m = 121" gets 115 and would "correct" the constant
+# DOWNWARD, loosening the collapse floor by one on the strength of a sentence
+# nobody re-ran. Read the CONSTANT, re-derive from a COUNT, and fix the prose to
+# match — never the other way round.
+#
+# 🔴 ROUND 16 RAISED IT AGAIN, 116 -> 120, at m = 126 — COUNTED from a green run
+# of the module (`126 passed`), `126 - min(50, max(1, 126 // 20))` = 126 - 6 =
+# 120, not derived by adding this round's four new tests to 116.
+MIN_TESTS = 120
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -1528,7 +1541,8 @@ def the_checks_probe_matches_the_word_not_the_output(t):
     `CHECKS_DECL` matches that same heredoc line in the raw source. Same
     hazard, same killers, at the layer that now carries it.
     """
-    return _swap(t, "    code = _nix_strip(text)\n", "    code = text\n")
+    return _swap(t, "    code, clean = _nix_scan(text)\n",
+                 "    code, clean = text, True\n")
 
 
 def a_state_dependent_sentence_moves_into_the_commands_bar(t):
@@ -1582,8 +1596,8 @@ def the_indented_string_escapes_are_terminators_again(t):
     """
     return _swap(
         t,
-        '                    if nxt in ("$", "\'"):     # \'\'${…}  and  \'\'\'  — escapes\n',
-        "                    if False:\n",
+        '                if nxt in ("$", "\'"):         # \'\'${…}  and  \'\'\'  — escapes\n',
+        "                if False:\n",
     )
 
 
@@ -1591,8 +1605,8 @@ def the_envrc_sentence_is_hardcoded_again(t):
     """V39 — the remembered string instead of the file on disk."""
     return _swap(
         t,
-        '            f"broken. This repo\'s `.envrc` is {_fmt_uses(tc)}, which does not "\n',
-        '            "broken. This repo\'s `.envrc` is `use opencode`, which does not "\n',
+        '                f"is broken. This repo\'s `.envrc` is {_fmt_uses(tc)}, which "\n',
+        '                "is broken. This repo\'s `.envrc` is `use opencode`, which "\n',
     )
 
 
@@ -1613,19 +1627,22 @@ def the_probe_reads_the_cwd_repo_cross_repo_too(t):
 
 
 def the_checks_scan_stops_tracking_nix_strings(t):
-    """V41 — the `''…''` skip is dropped. RE-TARGETED IN ROUND 15.
+    """V41 — the `''…''` skip is dropped. RE-TARGETED IN ROUNDS 15 AND 16.
 
-    Same defect, one layer over: the toggle used to live in the name scan and
-    now lives in `_nix_strip`, so the mutation is "an indented string is not a
-    string". A brace inside a build script then moves the depth counter and the
-    block closes early, so a flake's SECOND check name is never read. Isolated
-    to the indented-string branch: `"…"`, `#` and `/* */` handling and the
-    depth arithmetic are untouched.
+    Same defect, one layer over each time: the toggle lived in the name scan,
+    then in `_nix_strip`, and now in the CODE frame of `_nix_scan`, so the
+    mutation is still "an indented string is not a string". A brace inside a
+    build script then moves the depth counter and the block closes early, so a
+    flake's SECOND check name is never read. Isolated to the one branch that
+    OPENS an indented string from code: `"…"`, `#`, `/* */`, the escape
+    handling and the depth arithmetic are untouched.
     """
     return _swap(
         t,
-        '        if two == "\'\'":                       # indented string\n',
-        "        if False:\n",
+        '            if two == "\'\'":\n                blank(i, i + 2)\n'
+        '                stack.append(["ind"])\n',
+        '            if False:\n                blank(i, i + 2)\n'
+        '                stack.append(["ind"])\n',
     )
 
 
@@ -1721,8 +1738,163 @@ def the_wrong_shell_note_is_pytest_only_again(t):
     """
     return _swap(
         t,
-        '            "🔴 The same applies to EVERY command above, in EVERY language. The "\n',
+        '            "🔴 A `<tool>: command not found` from ANY command above is the "\n'
+        '            "WRONG SHELL and not a broken gate — in EVERY language. The "\n',
         '            "🔴 A note about the wrapper. The "\n',
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Round 16 — V53-V61. Base `ba321c06`, this branch's own head one round on.
+# --------------------------------------------------------------------------- #
+
+def a_nested_interpolation_is_string_text_again(t):
+    """V53 — round 16, the FABRICATION direction of the nested-`''` defect.
+
+    Drops the one branch that makes `${…}` inside an indented string re-enter
+    CODE, so the `''` that OPENS a nested string reads as the OUTER one's
+    terminator again and the interpolation body is scanned as code. Measured at
+    `ba321c06` on `shellHook = '' ${lib.optionalString c '' checks = { unit = 1;
+    } ''} '';` — a flake declaring NO checks output answered **`['unit']`**, so
+    the brief fenced `nix build <wt>#checks.x86_64-linux.unit` at a repository
+    that has no such attribute.
+
+    Isolated to that branch: the escape handling, the terminator and the brace
+    arithmetic are untouched, so a kill here is attributable to interpolation
+    tracking alone.
+    """
+    return _swap(
+        t,
+        '            if two == "${":                   # an interpolation: CODE again\n',
+        "            if False:\n",
+    )
+
+
+def an_identifier_ending_in_apostrophes_opens_a_string(t):
+    """V54 — round 16, the DENIAL direction of the same class.
+
+    Drops the maximal-munch identifier branch, so `foo'' = 1;` — a legal nix
+    name, because `'` is an identifier character — is read as `foo` followed by
+    a string opener that never closes. Measured at `ba321c06`: the rest of the
+    file is blanked and the answer is `None`, the brief's bolded "**no `checks`
+    output**", for a flake whose next binding is the checks block.
+    """
+    return _swap(
+        t,
+        '            if ch.isalpha() or ch == "_":\n',
+        "            if False:\n",
+    )
+
+
+def the_lexer_never_admits_it_got_lost(t):
+    """V55 — round 16. The uncertainty valve is welded shut.
+
+    `_nix_scan` reports whether it ended in a state a nix file can be in. With
+    the valve gone, an unterminated string or a `_PROBE_MAX_BYTES` truncation
+    answers with whatever the patterns happen to say over the mis-lexed text —
+    and both of round 16's measured failures routed to the CONFIDENT answer,
+    which is the whole reason the hedge exists.
+    """
+    return _swap(t, "    if not clean:\n        return []\n",
+                 "    if False:\n        return []\n")
+
+
+def the_scan_stops_stripping_line_comments(t):
+    """V56 — round 16. `#` comments are code again.
+
+    The reachability control for the comment branch, and it is NOT the inert
+    `CHECKS_SHAPES_NOT_CODE` row: the anchored regex rejects a `#`-commented
+    `checks` line whatever the stripper does. What this reaches is the other
+    direction — an ordinary sentence in a comment (`# … the ''-string idiom …`)
+    opening an indented string that never closes, blanking the REAL checks
+    block after it.
+    """
+    return _swap(
+        t,
+        '            if ch == "#":                     # line comment\n',
+        "            if False:\n",
+    )
+
+
+def _not_probed_sentence_keyed_on(kind):
+    """A WHERE-TO-WORK-contradicting sentence in the NOT-PROBED commands bar.
+
+    🔴 THE TWO ROWS BUILT FROM THIS ARE A PAIR, AND THE PAIR IS THE POINT.
+    Round 15 pinned the commands bar within each declared target and guarded its
+    own non-degeneracy with `any(len(kinds) >= 2)`. Measured at `ba321c06`, the
+    partition→checkout-state map was
+
+        probed-devrc-shape    n=6  {private, shared, unknown}
+        cross-repo-otherproj  n=5  {private, shared}
+        repo-unknown          n=2  {shared}
+
+    so `any` was satisfied by the first row alone and NO not-probed scenario was
+    `unknown` kind at all. `kind="unknown"` SURVIVED at **122 passed**;
+    `kind="private"` was killed. Same insertion, same file, one word apart —
+    which is what makes the survivor a measurement of the guard's blind spot
+    rather than a claim about it.
+    """
+    def mutate(t):
+        anchor = (
+            '        "`Makefile` target, the repo\'s CI workflow, its `CLAUDE.md` — and "\n'
+            '        "**NAME the one you used, by path**, in your report.",\n'
+        )
+        return _swap(t, anchor, anchor + (
+            f'        ("Your checkout is a {kind.upper()} one, so the SHARED "\n'
+            '         "checkout is the right place to run the gate."\n'
+            f'         if facts.worktree and facts.worktree.kind == "{kind}" else ""),\n'
+        ))
+    mutate.__name__ = f"a_not_probed_sentence_keyed_on_{kind}"
+    return mutate
+
+
+def the_head_reclaims_prose_it_does_not_always_have(t):
+    """V59 — round 16. Round 15's own replacement wording, restored.
+
+    "the prose names it too, to say what was read out of it" is a claim about a
+    STATE frozen into the state-INDEPENDENT constant. Counted at `ba321c06`:
+    true in the 6 probed scenarios (3 prose lines), false in the 5 cross-repo
+    ones (1 line, and it says "is a DIFFERENT repository"), flatly false in the
+    2 repo-unknown ones (0 — the path is absent from the section).
+
+    🔴 IT IS KILLED BY A WHOLE-STRING PIN, NOT BY A WORD. `claude/RULES.md`:
+    when the artifact under test IS prose, a guard on words is walkable by
+    rewording, so the constant is pinned normalised and whole. A cosmetic reword
+    goes red here on purpose — that is the price of a machine-readable claim,
+    and the docstring on the guard says what to re-measure before changing it.
+    """
+    return _swap(
+        t,
+        '    "resolves the dev shell and nothing else; wherever else it appears it is "\n'
+        '    "PROSE — a statement ABOUT that checkout, never something to run in. Never "\n',
+        '    "resolves the dev shell and nothing else; the prose names it too, to say "\n'
+        '    "what was read out of it. Never "\n',
+    )
+
+
+def the_pytest_diagnosis_is_emitted_without_a_pytest_command(t):
+    """V60 — round 16. The bar diagnoses a command the section did not give.
+
+    Measured at `ba321c06`: with `py_tests` NONE and a flake that names pytest,
+    the section said "no python subset command is prescribed" and then opened
+    the wrong-shell bar with `A bare python3 -m pytest failing…` three lines
+    later. The reader goes looking for a command that is not there.
+    """
+    return _swap(t, "        if tc.py_tests == PY_TESTS_FOUND:\n",
+                 "        if True:\n")
+
+
+def the_absence_bar_points_at_a_bar_that_is_never_above_it(t):
+    """V61 — round 16. The dangling cross-reference, restored.
+
+    The UNKNOWN and NONE branches are mutually exclusive (`if UNKNOWN: return
+    …`), so "a different answer from the one above" names a bar that is emitted
+    in exactly the runs where this one is not.
+    """
+    return _swap(
+        t,
+        '            "from \\"the walk did not finish\\", which this brief says instead "\n',
+        '            "from the one above, which this brief says instead "\n',
     )
 
 
@@ -1915,7 +2087,12 @@ ROWS = [
       "test_a_placeholder_tip_is_never_handed_over_as_though_it_were_a_sha",
       "test_the_clone_grant_covers_only_the_write_the_recipe_makes",
       "test_every_section_directive_is_emitted_verbatim_in_the_brief_that_owns_it",
-      "test_the_where_to_work_section_does_not_call_a_private_worktree_the_clone"},
+      "test_the_where_to_work_section_does_not_call_a_private_worktree_the_clone",
+      # 🔴 ROUND 16 ADDED ONE, and it is the same coupling again rather than
+      # a row gone vague: the absence-bar guard drives three PROBED trees,
+      # and the inversion sends all three down the not-probed branch where
+      # the section prescribes nothing and carries no wrong-shell bar.
+      "test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there"},
      invert_cross_repo),
     ("C4  numstat failure reads as a clean zero",
      {"test_the_ledger_refuses_a_failed_command_rather_than_printing_zero"},
@@ -2060,11 +2237,21 @@ ROWS = [
      {"test_a_fork_pr_against_this_repo_is_not_treated_as_cross_repo",
       "test_the_prs_repo_is_read_from_the_url_not_from_the_head_repo",
       "test_no_brief_blames_gh_for_a_repo_gh_was_never_asked_about",
-      "test_the_toolchain_reason_is_true_in_every_scenario"},
+      "test_the_toolchain_reason_is_true_in_every_scenario",
+      # 🔴 ROUND 16: the head-claim guard now asserts, in EVERY scenario, that
+      # a fenced command names the assembly checkout IFF that scenario's
+      # declared target is the probed one. Any mutation that moves a
+      # scenario between the probed and not-probed branches therefore trips
+      # it — which is the same one-decision-reused coupling C3 records, seen
+      # from the guard that was widened to see it.
+      "test_the_toolchain_head_claim_is_true_of_the_rendered_brief"},
      pr_slug_reads_the_head_repo),
     ("P2  'cannot determine' collapses to same-repo",
      {"test_an_undeterminable_repo_gets_its_own_branch_not_the_same_repo_one",
-      "test_no_brief_blames_gh_for_a_repo_gh_was_never_asked_about"},
+      "test_no_brief_blames_gh_for_a_repo_gh_was_never_asked_about",
+      # round 16: the two `repo-unknown` scenarios start PROBING, so the
+      # per-target fenced-command assertion in the head-claim guard fires.
+      "test_the_toolchain_head_claim_is_true_of_the_rendered_brief"},
      unknown_repo_collapses_to_same),
     ("K1  --check always reports clean",
      {"test_the_clause_check_runs_over_a_file_that_can_actually_be_lossy"},
@@ -2373,8 +2560,12 @@ ROWS = [
      {"test_each_clause_carries_the_instruction_its_ledger_entry_names",
       NO_WRITE_SCOPE_GUARD},
      the_no_fetch_clause_is_conditional_again),
+    # 🔴 ROUND 16 GAVE THIS ROW A SECOND KILLER, and that is the point of the
+    # whole-string pin: any edit to `TOOLCHAIN_HEAD` — including one that
+    # reads perfectly well — now has to be re-measured against all three
+    # targets before it lands.
     ("Z4  TOOLCHAIN's reason names the SHARED CHECKOUT again",
-     {"test_the_toolchain_reason_is_true_in_every_scenario"},
+     {"test_the_toolchain_reason_is_true_in_every_scenario", "test_the_toolchain_head_claim_is_true_of_the_rendered_brief"},
      the_toolchain_reason_names_the_shared_checkout_again),
     ("Z5  the emitted block loses its legend",
      {"test_the_emitted_skeleton_carries_a_legend_for_its_two_fields"},
@@ -2679,7 +2870,11 @@ ROWS = [
      {"test_the_flake_checks_probe_reads_an_output_and_not_the_word",
       "test_the_toolchain_prescribes_only_commands_it_probed",
       "test_the_flake_checks_probe_reads_nix_code_and_not_text_that_looks_like_it",
-      "test_the_toolchain_section_names_the_tier_the_merge_gates_on"},
+      "test_the_toolchain_section_names_the_tier_the_merge_gates_on",
+      # round 16: unstripped text also fabricates from the nested fixtures,
+      # and it is what the clean/dirty pair reads.
+      "test_a_nested_indented_string_inside_an_interpolation_is_not_a_terminator",
+      "test_the_probe_hedges_when_the_nix_scan_did_not_end_cleanly"},
      the_checks_probe_matches_the_word_not_the_output),
     # 🔴 ROUND 15 — the `_fmt_uses` fallbacks now have fixtures (a repo with no
     # `.envrc` at all, and one declaring no `use` line), and hardcoding the
@@ -2691,13 +2886,21 @@ ROWS = [
     ("V40 cross-repo, the WRONG repository is probed anyway",
      {"test_the_toolchain_prescribes_nothing_when_it_cannot_probe",
       "test_the_toolchain_reason_is_true_in_every_scenario",
-      "test_no_toolchain_note_claims_a_probe_the_brief_itself_denies"},
+      "test_no_toolchain_note_claims_a_probe_the_brief_itself_denies",
+      # round 16: a not-probed target that prescribes fenced commands is
+      # exactly what the per-target assertion refuses.
+      "test_the_toolchain_head_claim_is_true_of_the_rendered_brief"},
      the_probe_reads_the_cwd_repo_cross_repo_too),
     ("V41 the check-name scan stops tracking nix strings",
      {"test_the_flake_checks_probe_reads_an_output_and_not_the_word",
       "test_the_toolchain_section_names_the_tier_the_merge_gates_on",
       "test_the_flake_checks_probe_reads_nix_code_and_not_text_that_looks_like_it",
-      "test_the_toolchain_prescribes_only_commands_it_probed"},
+      "test_the_toolchain_prescribes_only_commands_it_probed",
+      # round 16: a build script scanned as code is what the nested fixtures
+      # are made of, and an indented string that never opens never closes
+      # either, so the clean/dirty pair sees it too.
+      "test_a_nested_indented_string_inside_an_interpolation_is_not_a_terminator",
+      "test_the_probe_hedges_when_the_nix_scan_did_not_end_cleanly"},
      the_checks_scan_stops_tracking_nix_strings),
 
     # --------------------------------------------------------------------- #
@@ -2715,10 +2918,15 @@ ROWS = [
      {"test_the_flake_checks_probe_reads_nix_code_and_not_text_that_looks_like_it"},
      the_checks_probe_denies_a_shape_it_cannot_enumerate),
     ("V43 `''${…}` and `'''` close an indented string again",
-     {"test_the_flake_checks_probe_reads_nix_code_and_not_text_that_looks_like_it"},
+     {"test_the_flake_checks_probe_reads_nix_code_and_not_text_that_looks_like_it",
+      # round 16: the `an ''${…} escape` nested body reaches it too.
+      "test_a_nested_indented_string_inside_an_interpolation_is_not_a_terminator"},
      the_indented_string_escapes_are_terminators_again),
     ("V44 the walk cap answers 'no python tests' in silence",
-     {"test_a_capped_python_test_walk_is_not_reported_as_no_python_tests"},
+     {"test_a_capped_python_test_walk_is_not_reported_as_no_python_tests",
+      # round 16 drives all three py_tests states, so a cap that answers NONE
+      # is visible from the absence bar too.
+      "test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there"},
      the_walk_cap_answers_no_python_tests),
     ("V45 run-ci-suite.sh prescribed without probing for it",
      {"test_the_toolchain_probes_are_reachable_in_both_directions"},
@@ -2734,17 +2942,61 @@ ROWS = [
      the_gate_tier_flag_is_never_prescribed),
     ("V49 a pytest command for a repo with no python tests",
      {"test_a_capped_python_test_walk_is_not_reported_as_no_python_tests",
-      "test_the_toolchain_probes_are_reachable_in_both_directions"},
+      "test_the_toolchain_probes_are_reachable_in_both_directions",
+      "test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there"},
      the_python_tests_are_assumed_present),
     ("V50 the wrong-shell bar is emitted only beside a pytest command",
      {"test_the_wrong_shell_diagnosis_covers_every_command_not_only_pytest",
       "test_the_toolchain_section_names_the_tier_the_merge_gates_on",
       "test_the_toolchain_prescribes_only_commands_it_probed",
-      "test_the_toolchain_probes_are_reachable_in_both_directions"},
+      "test_the_toolchain_probes_are_reachable_in_both_directions",
+      "test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there"},
      the_wrong_shell_note_goes_back_inside_the_pytest_branch),
     ("V51 the wrong-shell bar stops covering every language",
-     {"test_the_wrong_shell_diagnosis_covers_every_command_not_only_pytest"},
+     {"test_the_wrong_shell_diagnosis_covers_every_command_not_only_pytest",
+      "test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there"},
      the_wrong_shell_note_is_pytest_only_again),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 V53-V61 — round 16. Base `ba321c06`. Three of round 15's fixes left
+    # their CLASS open one shape further out, so every row here is paired with
+    # the row that reaches the OTHER direction of the same defect: V53/V54 for
+    # the nested-`''` lex, V57/V58 for the not-probed blind spot (the second is
+    # the positive control that the first's survival was the GUARD's fault and
+    # not the harness's), V60/V61 for the two dangling references.
+    # --------------------------------------------------------------------- #
+    ("V53 a nested `''` inside `${…}` terminates the outer string again",
+     {"test_a_nested_indented_string_inside_an_interpolation_is_not_a_terminator"},
+     a_nested_interpolation_is_string_text_again),
+    ("V54 `foo'' = 1;` opens a string instead of naming a binding",
+     {"test_a_nested_indented_string_inside_an_interpolation_is_not_a_terminator",
+      # a name that opens a string also leaves the scan UNTERMINATED, so the
+      # clean/dirty pair sees it — a second, independent detector.
+      "test_the_probe_hedges_when_the_nix_scan_did_not_end_cleanly"},
+     an_identifier_ending_in_apostrophes_opens_a_string),
+    ("V55 the lexer's uncertainty valve is welded shut",
+     {"test_the_probe_hedges_when_the_nix_scan_did_not_end_cleanly"},
+     the_lexer_never_admits_it_got_lost),
+    ("V56 `#` line comments are scanned as code",
+     {"test_the_comment_stripper_is_reachable_in_its_own_right",
+      # the `a `#` character` nested body carries a comment too.
+      "test_a_nested_indented_string_inside_an_interpolation_is_not_a_terminator"},
+     the_scan_stops_stripping_line_comments),
+    ("V57 a sentence keyed on the UNKNOWN checkout state, not probed",
+     {"test_the_toolchain_reason_is_true_in_every_scenario"},
+     _not_probed_sentence_keyed_on("unknown")),
+    ("V58 the same sentence keyed on PRIVATE — the positive control",
+     {"test_the_toolchain_reason_is_true_in_every_scenario"},
+     _not_probed_sentence_keyed_on("private")),
+    ("V59 TOOLCHAIN_HEAD reclaims prose it does not always have",
+     {"test_the_toolchain_head_claim_is_true_of_the_rendered_brief"},
+     the_head_reclaims_prose_it_does_not_always_have),
+    ("V60 the pytest wrong-shell bar with no pytest command above it",
+     {"test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there"},
+     the_pytest_diagnosis_is_emitted_without_a_pytest_command),
+    ("V61 the absence bar points at a bar that is never above it",
+     {"test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there"},
+     the_absence_bar_points_at_a_bar_that_is_never_above_it),
 ]
 
 

@@ -2058,8 +2058,8 @@ _PROBE_SKIP_DIRS = {
 }
 
 
-def _nix_strip(text):
-    """`text` with strings and comments BLANKED — same length, same newlines.
+def _nix_scan(text):
+    """-> (`text` with strings/comments BLANKED, `clean`) — same length, same \\n.
 
     🔴 ONE PASS, BEFORE ANY PATTERN RUNS, and the length invariant is what lets
     a `re.M` match index straight back into the scan below. Everything a nix
@@ -2067,8 +2067,8 @@ def _nix_strip(text):
     `"…"` strings, `#` line comments and `/* … */` block comments. Newlines are
     preserved so a line-anchored pattern still sees the same line structure.
 
-    🔴 THE `''` ESCAPES ARE THE POINT, AND THEY ARE THE MEASURED DEFECT. The
-    previous scanner toggled "in string" on ANY `''`, and nix spells three
+    🔴 THE `''` ESCAPES ARE THE POINT, AND THEY WERE THE MEASURED DEFECT. The
+    round-14 scanner toggled "in string" on ANY `''`, and nix spells three
     different things with two apostrophes: `''` opens/closes, `''${…}` is a
     LITERAL `${`, and `'''` is a literal `''`. Measured at `5bad0a0c` on devrc's
     OWN `flake.nix` with a single `echo ''${HOME}` added inside the `pytests`
@@ -2077,18 +2077,46 @@ def _nix_strip(text):
     `nix build` targets named after a shell variable, and `nodetests`, a check
     the merge really does gate on, dropped in silence. A non-empty list is
     indistinguishable from a complete one, so the `[]` valve never fires.
-    devrc's flake carries no `''${` today; one ordinary edit is the whole
-    distance between here and that answer.
 
-    🔴 A STATED LIMIT, not a covered case: `${…}` INTERPOLATIONS inside a string
-    are real nix code and this blanks them with the rest of the string. So a
-    `checks` binding written inside an interpolation is invisible here. That is
-    the SAFE direction — the probe under-reads and the brief hedges — and it is
-    the direction chosen deliberately, because the alternative is a recursive
-    lexer for a heuristic whose whole job is to avoid confident wrong answers.
+    🔴 ROUND 16 — THE ESCAPE FIX LEFT THE SAME CLASS OPEN IN TWO MORE SHAPES,
+    AND `''` IS NOT A TOKEN YOU CAN LEX WITHOUT A STACK. Both measured at
+    `ba321c06` through `_flake_check_names`:
+
+      * `shellHook = '' ${lib.optionalString c '' … ''} '';` — an ordinary
+        nixpkgs idiom. A flat "scan to the next `''`" reads the `''` that OPENS
+        the nested string as the OUTER string's terminator, so the
+        interpolation's body is not blanked, it is PROMOTED TO CODE. A flake
+        declaring no `checks` at all answered `['unit']` — a fabricated
+        `nix build …#checks.x86_64-linux.unit`. And when the promoted region
+        contains an odd token (an `''${` escape, a lone `"`), string parity
+        inverts for the REST OF THE FILE and a flake that really does declare
+        `checks.x86_64-linux = { unit; lint; }` answered `None` — "**no `checks`
+        output**", in bold. Both directions, one root cause.
+      * `foo'' = 1;` — a legal nix identifier, because `'` is an identifier
+        character (`_NIX_NAME` already allows it). Read as a string opener it
+        blanked the rest of the file: `None` again.
+
+    So the scan is a STACK now: `${…}` inside a string pushes a CODE frame,
+    `}` at that frame's depth 0 pops back into the string, and an identifier is
+    consumed by MAXIMAL MUNCH so its trailing apostrophes cannot open anything.
+
+    🔴 AND IT REPORTS ITS OWN UNCERTAINTY, because "the lexer got lost" and "the
+    file has no checks" are different sentences and the second is the confident
+    one. `clean` is False when the scan ends inside a string or an interpolation,
+    when a `/* …` never closes, when a `}` closes nothing, or when the brace
+    count does not return to zero (which is also what a `_PROBE_MAX_BYTES`
+    truncation looks like). The caller degrades to the hedged `[]` on that —
+    never to `None`, never to a name list. Measured across 313 real `flake.nix`
+    files on this host: every one lexes clean, and none changed its answer.
     """
     out = list(text)
-    i, n = 0, len(text)
+    n = len(text)
+    i = 0
+    clean = True
+    # A stack of frames. `["code", depth]` counts braces so a `}` can be told
+    # from an interpolation close; `["ind"]` / `["dq"]` are the two string
+    # flavours. The bottom frame is the file itself.
+    stack = [["code", 0]]
 
     def blank(start, stop):
         for k in range(start, min(stop, n)):
@@ -2096,56 +2124,110 @@ def _nix_strip(text):
                 out[k] = " "
 
     while i < n:
+        frame = stack[-1]
+        kind = frame[0]
+        ch = text[i]
         two = text[i:i + 2]
-        if two == "''":                       # indented string
-            blank(i, i + 2)
-            i += 2
-            while i < n:
-                if text[i:i + 2] == "''":
-                    nxt = text[i + 2:i + 3]
-                    if nxt in ("$", "'"):     # ''${…}  and  '''  — escapes
-                        blank(i, i + 3)
-                        i += 3
-                        continue
-                    if nxt == "\\":           # ''\<c> — an escape sequence
-                        blank(i, i + 4)
-                        i += 4
-                        continue
-                    blank(i, i + 2)           # the terminator
-                    i += 2
-                    break
+        if kind == "code":
+            # 🔴 MAXIMAL MUNCH FIRST. `foo'' = 1;` is ONE identifier in nix, and
+            # a scanner that sees `foo` then `''` opens a string that never
+            # closes and blanks the rest of the file.
+            if ch.isalpha() or ch == "_":
+                j = i + 1
+                while j < n and (text[j].isalnum() or text[j] in "_'-"):
+                    j += 1
+                i = j
+                continue
+            if two == "''":
+                blank(i, i + 2)
+                stack.append(["ind"])
+                i += 2
+                continue
+            if ch == '"':
                 blank(i, i + 1)
+                stack.append(["dq"])
                 i += 1
+                continue
+            if ch == "#":                     # line comment
+                j = text.find("\n", i)
+                j = n if j == -1 else j
+                blank(i, j)
+                i = j
+                continue
+            if two == "/*":                   # block comment
+                j = text.find("*/", i + 2)
+                if j == -1:
+                    clean = False
+                    blank(i, n)
+                    i = n
+                    continue
+                blank(i, j + 2)
+                i = j + 2
+                continue
+            if ch == "{":
+                frame[1] += 1
+                i += 1
+                continue
+            if ch == "}":
+                if frame[1] > 0:
+                    frame[1] -= 1
+                elif len(stack) > 1:          # closes the `${…}` that pushed us
+                    blank(i, i + 1)
+                    stack.pop()
+                else:                         # a `}` with nothing open
+                    clean = False
+                i += 1
+                continue
+            i += 1
             continue
-        if text[i] == '"':                    # ordinary string
+        if kind == "ind":
+            if two == "''":
+                nxt = text[i + 2:i + 3]
+                if nxt in ("$", "'"):         # ''${…}  and  '''  — escapes
+                    blank(i, i + 3)
+                    i += 3
+                    continue
+                if nxt == "\\":               # ''\<c> — an escape sequence
+                    blank(i, i + 4)
+                    i += 4
+                    continue
+                blank(i, i + 2)               # the terminator
+                stack.pop()
+                i += 2
+                continue
+            if two == "${":                   # an interpolation: CODE again
+                blank(i, i + 2)
+                stack.append(["code", 0])
+                i += 2
+                continue
             blank(i, i + 1)
             i += 1
-            while i < n:
-                if text[i] == "\\":
-                    blank(i, i + 2)
-                    i += 2
-                    continue
-                if text[i] == '"':
-                    blank(i, i + 1)
-                    i += 1
-                    break
-                blank(i, i + 1)
-                i += 1
             continue
-        if text[i] == "#":                    # line comment
-            j = text.find("\n", i)
-            j = n if j == -1 else j
-            blank(i, j)
-            i = j
+        # kind == "dq"
+        if ch == "\\":
+            blank(i, i + 2)
+            i += 2
             continue
-        if two == "/*":                       # block comment
-            j = text.find("*/", i + 2)
-            j = n if j == -1 else j + 2
-            blank(i, j)
-            i = j
+        if ch == '"':
+            blank(i, i + 1)
+            stack.pop()
+            i += 1
             continue
+        if two == "${":
+            blank(i, i + 2)
+            stack.append(["code", 0])
+            i += 2
+            continue
+        blank(i, i + 1)
         i += 1
-    return "".join(out)
+    if len(stack) != 1 or stack[0][1] != 0:
+        clean = False
+    return "".join(out), clean
+
+
+def _nix_strip(text):
+    """The blanked text alone — for callers that do not read `clean`."""
+    return _nix_scan(text)[0]
 
 
 def _flake_check_names(text):
@@ -2169,7 +2251,16 @@ def _flake_check_names(text):
     the merge gates on — and it was the answer for `genAttrs`, for flake-parts'
     `perSystem`, and for `checks.<system> = base // {…}`.
 
-    Brace depth over the attrset, run over `_nix_strip`ped source so neither a
+    🔴 ROUND 16 — AND THAT RULE NOW COVERS THE LEXER, WHICH IS WHERE IT WAS
+    MISSING. `_nix_scan` reports whether it ended in a state a nix file can
+    actually be in; when it did not — an unterminated string, an unclosed
+    interpolation or comment, braces that never balance, which is also what a
+    `_PROBE_MAX_BYTES` truncation looks like — this returns `[]` before reading
+    anything. Both of round 16's measured failures routed to a CONFIDENT answer
+    (a fabricated `['unit']` one way, a bolded "no `checks` output" the other),
+    so the valve has to sit above the parse and not inside it.
+
+    Brace depth over the attrset, run over `_nix_scan`ned source so neither a
     build script's braces nor a heredoc's text can move the counter. Measured
     on the two real flakes: `devrc` -> ['pytests', 'nodetests'] (an
     indentation-only scan returned ['pytests'], because a build script's lines
@@ -2178,7 +2269,9 @@ def _flake_check_names(text):
     """
     if not text:
         return None
-    code = _nix_strip(text)
+    code, clean = _nix_scan(text)
+    if not clean:
+        return []
     m = CHECKS_ATTR.search(code)
     if not m:
         return [] if CHECKS_DECL.search(code) else None
@@ -2351,14 +2444,33 @@ def toolchain_probe_root(facts):
 # this block asks whether the rendered text IS this constant and never whether
 # this constant is TRUE — see `test_the_toolchain_head_claim_is_true_of_the_
 # rendered_brief`, which now asks the second question.
+#
+# 🔴 ROUND 16 — AND THE REPLACEMENT PUT A STATE-DEPENDENT CLAIM STRAIGHT BACK
+# INTO THE STATE-INDEPENDENT CONSTANT. "the prose names it too, to say what was
+# read out of it" was measured at `ba321c06` across all thirteen scenarios the
+# module had there:
+#
+#     probed      (6)   3 prose lines naming the assembly checkout   -> true
+#     cross-repo  (5)   1, and it says "is a DIFFERENT repository"   -> false
+#     repo-unknown(2)   0 — the path is absent from the section      -> false
+#
+# and the guard over it drove ONLY `delta`, the one state where the sentence is
+# true — a guard narrower than the sentence it certifies, which is the shape
+# round 15's F2 was filed for, reappearing one round later in its own fix. The
+# clause is now the WIDEST thing true in all three states: wherever the path
+# turns up outside a `nix develop` argument it is PROSE, a statement ABOUT that
+# checkout and never an instruction to run in it. That is mechanically checkable
+# (no fenced line may name it except as the `nix develop` argument), and it is
+# checked in EVERY scenario rather than in one.
 TOOLCHAIN_HEAD = "\n".join([
     "## TOOLCHAIN — the exact commands, and the two ways they lie",
     "",
     "🔴 `<your worktree>` below is **your own copy** — the one WHERE TO WORK "
     "told you to make. The checkout this brief was assembled in appears below "
     "in RUNNABLE commands only as the argument to `nix develop`, where it "
-    "resolves the dev shell and nothing else; the prose names it too, to say "
-    "what was read out of it. Never point a gate script or a `nix build` at "
+    "resolves the dev shell and nothing else; wherever else it appears it is "
+    "PROSE — a statement ABOUT that checkout, never something to run in. Never "
+    "point a gate script or a `nix build` at "
     "it: a gate script resolves its root from its own path, so running that "
     "copy runs the suite in a checkout that is NOT yours — one holding none of "
     "your mutations — and a `nix build <ref>#…` builds that ref's tree, not "
@@ -2444,7 +2556,7 @@ def toolchain_shell(tc):
     return f"nix develop {tc.root} -c " if (tc.flake and tc.flake_pytest) else ""
 
 
-def _toolchain_pytest_lines(facts, tc):
+def _toolchain_pytest_lines(tc):
     """The subset-run command, or the reason there is none. NEVER silence.
 
     🔴 THE SHELL IS PROBED TOO. `nix develop <r> -c python3 -m pytest` was
@@ -2475,13 +2587,21 @@ def _toolchain_pytest_lines(facts, tc):
             "",
         ]
     if tc.py_tests == PY_TESTS_NONE:
+        # 🔴 ROUND 16 — "A DIFFERENT ANSWER FROM THE ONE ABOVE" POINTED AT A BAR
+        # THAT IS NEVER ABOVE IT. The two branches are mutually exclusive
+        # (`if UNKNOWN: return …` above), so the bar this sentence contrasted
+        # itself with is emitted in exactly the runs where this one is not. A
+        # cross-reference to something not on the page is worse than no
+        # cross-reference: the reader goes looking. The contrast is real and
+        # worth keeping, so it now names the OTHER ANSWER instead of a position.
         return [
             f"⚠ No `test_*.py` was found anywhere in `{tc.root}` within depth "
             f"{_PROBE_MAX_DEPTH}, so no python subset command is prescribed — "
-            "the walk COMPLETED and found none, which is a different answer "
-            "from the one above. If this repository's tests are somewhere else "
-            "or are not python, find its runner and **NAME the one you used, "
-            "by path**.",
+            "the walk COMPLETED and found none. That is a different answer "
+            "from \"the walk did not finish\", which this brief says instead "
+            "when it hits its bound, and neither is printed with the other. If "
+            "this repository's tests are somewhere else or are not python, "
+            "find its runner and **NAME the one you used, by path**.",
             "",
         ]
     shell = toolchain_shell(tc)
@@ -2516,25 +2636,39 @@ def _toolchain_shell_note(tc):
     for this repository itself — a worse failure than the one it fixes. The
     honest move is the one taken here: state exactly what was measured, so the
     auditor can check it in one command instead of trusting it.
+
+    🔴 ROUND 16 — AND IT DIAGNOSED A COMMAND THE SECTION HAD JUST REFUSED TO
+    GIVE. The `python3 -m pytest` bar was emitted whenever the shell wrapper
+    was, including when `py_tests` is NONE — three lines after the brief says
+    "no python subset command is prescribed". The language-agnostic bar is the
+    one that is true in every state, so it is now unconditional and
+    self-contained, and the python-specific one is emitted only where a
+    `python3 -m pytest` really is fenced above it. The rule is the general one,
+    not a special case for NONE: a diagnosis of a command this section did not
+    prescribe sends the reader looking for a command that is not there.
     """
     shell = toolchain_shell(tc)
     if shell:
-        return [
-            "🔴 A bare `python3 -m pytest` failing with **`No module named "
-            "pytest`** means you are in the WRONG SHELL, not that the suite is "
-            f"broken. This repo's `.envrc` is {_fmt_uses(tc)}, which does not "
-            "put pytest on PATH; a loaded direnv is not the dev shell. Do not "
-            "report that as a finding and do not build an ad-hoc `nix-shell` "
-            "around it.",
-            "",
-            "🔴 The same applies to EVERY command above, in EVERY language. The "
+        lines = []
+        if tc.py_tests == PY_TESTS_FOUND:
+            lines += [
+                "🔴 A bare `python3 -m pytest` failing with **`No module named "
+                "pytest`** means you are in the WRONG SHELL, not that the suite "
+                f"is broken. This repo's `.envrc` is {_fmt_uses(tc)}, which "
+                "does not put pytest on PATH; a loaded direnv is not the dev "
+                "shell. Do not report that as a finding and do not build an "
+                "ad-hoc `nix-shell` around it.",
+                "",
+            ]
+        return lines + [
+            "🔴 A `<tool>: command not found` from ANY command above is the "
+            "WRONG SHELL and not a broken gate — in EVERY language. The "
             f"`nix develop {tc.root} -c` wrapper is there because `{tc.root}/"
             "flake.nix` mentions `pytest` SOMEWHERE — this brief did not check "
             "where, and that is a python fact deciding the shell for a gate "
-            "that may run node, go or anything else. A `<tool>: command not "
-            "found` from any command above is the WRONG SHELL and not a broken "
-            "gate: find the shell this repository's own runner uses, say which "
-            "in your report, and do not build an ad-hoc `nix-shell` around it.",
+            "that may run node, go or anything else. Find the shell this "
+            "repository's own runner uses, say which in your report, and do "
+            "not build an ad-hoc `nix-shell` around it.",
             "",
         ]
     return [
@@ -2585,7 +2719,7 @@ def _toolchain_probed_runner_note():
     ]
 
 
-def _toolchain_gate_lines(facts, tc):
+def _toolchain_gate_lines(tc):
     """The repo's own runner(s) — or the refusal to name one."""
     shell = toolchain_shell(tc)
     cmds = []
@@ -2632,7 +2766,7 @@ CHECKS_DISCRIMINATOR = (
 )
 
 
-def _toolchain_checks_lines(facts, tc):
+def _toolchain_checks_lines(tc):
     """The sandbox tier — only when the flake really declares one."""
     if not tc.flake:
         return [
@@ -2791,9 +2925,9 @@ def render_toolchain(facts):
         body = _toolchain_not_probed(facts)
     else:
         prescriptions = [
-            *_toolchain_pytest_lines(facts, tc),
-            *_toolchain_gate_lines(facts, tc),
-            *_toolchain_checks_lines(facts, tc),
+            *_toolchain_pytest_lines(tc),
+            *_toolchain_gate_lines(tc),
+            *_toolchain_checks_lines(tc),
         ]
         body = [
             TOOLCHAIN_COMMANDS_HEADING,
