@@ -109,7 +109,12 @@ HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
 # run of the module (`112 passed`), not from adding this round's three new
 # tests to the last sentence, which is the arithmetic the paragraph above
 # records going wrong twice.
-MIN_TESTS = 107
+#
+# 🔴 ROUND 15 RAISED IT AGAIN, 107 -> 115, at m = 121 — COUNTED from a green run
+# of the module (`122 passed`) and put through the same formula,
+# `122 - min(50, max(1, 122 // 20))`, not derived by adding this round's seven
+# new tests to the last sentence.
+MIN_TESTS = 116
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -1400,14 +1405,18 @@ def the_no_fetch_clause_is_conditional_again(t):
 def the_toolchain_reason_names_the_shared_checkout_again(t):
     # Round 14: the reason is `TOOLCHAIN_HEAD`, so the false claim goes back
     # into the constant. Same words, same finding, one indent level out.
+    # Round 15 re-wrapped the constant (the false "at most ONCE" count came out
+    # of it), so the target moved with the wrap — the ASSERT-BEFORE-RUN check
+    # is what caught that rather than a silently unmutated file.
     return _swap(
         t,
-        '    "a gate script resolves its root from its own path, so running that copy "\n'
-        '    "runs the suite in a checkout that is NOT yours — one holding none of your "\n'
-        '    "mutations — and a `nix build <ref>#…` builds that ref\'s tree, not yours.",\n',
-        '    "a gate script resolves its root from its own path, so running the shared "\n'
-        '    "copy runs the suite in the SHARED CHECKOUT on whatever branch it is "\n'
-        '    "standing on, and a `nix build <ref>#…` builds that ref\'s tree.",\n',
+        '    "it: a gate script resolves its root from its own path, so running that "\n'
+        '    "copy runs the suite in a checkout that is NOT yours — one holding none of "\n'
+        '    "your mutations — and a `nix build <ref>#…` builds that ref\'s tree, not "\n'
+        '    "yours.",\n',
+        '    "it: a gate script resolves its root from its own path, so running the "\n'
+        '    "shared copy runs the suite in the SHARED CHECKOUT on whatever branch it "\n'
+        '    "is standing on, and a `nix build <ref>#…` builds that ref\'s tree.",\n',
     )
 
 
@@ -1461,6 +1470,30 @@ def the_degenerate_causes_stop_scoping_the_omission(t):
 # an artifact that is absent, V37 denies one that is present. A single
 # direction grades only half of a predicate, and the half it omits is the one
 # that silently STOPS prescribing a real command.
+#
+# 🔴 ROUND 15 — THAT SENTENCE WAS A RULE THE ROWS DID NOT OBEY, and three
+# probes had NO mutant in either direction. Measured at `5bad0a0c`, each
+# inversion survived a fully green 115-test suite while shipping a fabricated
+# command. The ledger is now explicit, so "both directions" is checkable rather
+# than asserted:
+#
+#     probe            claims-it-exists   denies-it-exists
+#     gate_sh          V36                V37
+#     ci_suite         V45                V46
+#     gate_tier        V47                V48
+#     py_tests         V49                V44 (the hedge collapsing into "none")
+#     check_names      V38 (text as code) V42 (a real shape denied)
+#     probe_root       V40                — (there is no "probe less" defect
+#                                            here; the not-probed branch IS the
+#                                            honest answer, and V7 covers its
+#                                            body being replaced)
+#
+# The cause of the gap was FIXTURE REACH, not a missing assertion:
+# `_write_repo(py_test=False)` was called by nothing, no fixture had a
+# `gate.sh` without `--tier both`, and no test asked whether `run-ci-suite.sh`
+# was ABSENT from the devrc-shaped brief. A branch no fixture enters is a
+# branch no assertion can grade, so the row would have been vacuous even if
+# somebody had written it.
 
 
 def the_gate_is_prescribed_without_probing_for_it(t):
@@ -1479,16 +1512,78 @@ def the_gate_is_never_prescribed_even_where_it_exists(t):
 
 
 def the_checks_probe_matches_the_word_not_the_output(t):
-    """V38 — the loose regex this detection started with.
+    """V38 — the probe reads TEXT rather than CODE. RE-TARGETED IN ROUND 15.
 
-    It matched `checks = pr.get("statusCheckRollup", [])` inside a python
-    heredoc in `homelab-infra`'s real devShell, so a flake declaring NO checks
-    output answered yes and the honest fallback became unreachable.
+    It used to loosen the regex, because the regex WAS the defence: a loose
+    `^\\s*checks\\b[^\\n=]*=` matched `checks = pr.get("statusCheckRollup", [])`
+    inside a python heredoc in `homelab-infra`'s real devShell, so a flake
+    declaring NO checks output answered yes and the honest fallback became
+    unreachable.
+
+    🔴 THAT SPELLING IS NOW INERT, AND SAYING SO IS THE POINT. Round 15's fix
+    strips nix strings and comments BEFORE either pattern runs, so the heredoc
+    is not text any regex can see — loose or strict, the answer is the same and
+    the row would have reported SURVIVED, a hole where a covered hazard used to
+    be. The defence moved, so the mutation moves with it: drop the strip, and
+    `CHECKS_DECL` matches that same heredoc line in the raw source. Same
+    hazard, same killers, at the layer that now carries it.
+    """
+    return _swap(t, "    code = _nix_strip(text)\n", "    code = text\n")
+
+
+def a_state_dependent_sentence_moves_into_the_commands_bar(t):
+    """V52 — round 15's BLOCKING finding, as a row.
+
+    Round 14 moved the reason into a constant and lifted the cross-scenario pin
+    off the COMMANDS bar entirely. This is the sentence that walked the gap:
+    keyed on the AUDITOR's own worktree kind — which no probe reads — and
+    flatly contradicting WHERE TO WORK, exactly as round 5's did. Measured at
+    `5bad0a0c`: **115 passed, SURVIVED**. The same sentence inside the old
+    whole-section `return [...]` at `9e23c379` was killed by this guard, so the
+    finding was reopened by the text sitting three lines lower.
+    """
+    anchor = (
+        '            "standing on another branch, so treat a command that has since "\n'
+        '            "moved as a lookup, never as a finding.",\n'
+    )
+    return _swap(t, anchor, anchor + (
+        '            (f"Your checkout is a PRIVATE linked worktree ({facts.worktree}), so "\n'
+        '             "the SHARED checkout is the right place to run the gate."\n'
+        '             if facts.worktree and facts.worktree.kind == "private" else\n'
+        '             f"Worktree kind: {facts.worktree.kind if facts.worktree else None}."),\n'
+    ))
+
+
+def the_checks_probe_denies_a_shape_it_cannot_enumerate(t):
+    """V42 — round 15. `[]` collapses back into `None`: the CONFIDENT answer.
+
+    A `checks` binding whose names this parse cannot read is "declared, names
+    unreadable"; answering `None` makes the brief state in bold that the
+    repository has NO sandbox tier — the tier the same section calls the one
+    the merge gates on. Measured at `5bad0a0c` for `genAttrs`, flake-parts'
+    `perSystem`, `checks.<system>.default` and `checks.<system> = base // {…}`.
     """
     return _swap(
         t,
-        'r"^[ \\t]*checks(?:\\.[^\\s=]+)?[ \\t]*=[ \\t]*(?:forAllSystems[^\\n]*)?\\{[ \\t]*$",',
-        'r"^[ \\t]*checks\\b[^\\n=]*=",',
+        "        return [] if CHECKS_DECL.search(code) else None\n",
+        "        return None\n",
+    )
+
+
+def the_indented_string_escapes_are_terminators_again(t):
+    """V43 — round 15. `''${…}` and `'''` read as closing an indented string.
+
+    The measured consequence on devrc's OWN flake with one `echo ''${HOME}` in
+    the `pytests` build script: `['pytests', 'nodetests']` -> `['pytests',
+    'rc', 'rc']`. Two fabricated `nix build` targets named after a shell
+    variable, and `nodetests` — a check the merge really gates on — dropped in
+    silence. Isolated to the escape branch: the terminator branch and the depth
+    arithmetic are untouched, so a kill here is attributable to escapes alone.
+    """
+    return _swap(
+        t,
+        '                    if nxt in ("$", "\'"):     # \'\'${…}  and  \'\'\'  — escapes\n',
+        "                    if False:\n",
     )
 
 
@@ -1518,20 +1613,116 @@ def the_probe_reads_the_cwd_repo_cross_repo_too(t):
 
 
 def the_checks_scan_stops_tracking_nix_strings(t):
-    """V41 — drop the `''…''` skip from the check-name scan.
+    """V41 — the `''…''` skip is dropped. RE-TARGETED IN ROUND 15.
 
-    A brace inside a build script then moves the depth counter and the block
-    closes early, so a flake's SECOND check name is never read. Isolated to the
-    string toggle: the surrounding depth arithmetic is untouched, so a kill
-    here is attributable to string tracking and nothing else.
+    Same defect, one layer over: the toggle used to live in the name scan and
+    now lives in `_nix_strip`, so the mutation is "an indented string is not a
+    string". A brace inside a build script then moves the depth counter and the
+    block closes early, so a flake's SECOND check name is never read. Isolated
+    to the indented-string branch: `"…"`, `#` and `/* */` handling and the
+    depth arithmetic are untouched.
     """
     return _swap(
         t,
-        '            if line[i:i + 2] == "\'\'":\n'
-        "                in_str = not in_str\n"
-        "                i += 2\n"
-        "                continue\n",
-        "",
+        '        if two == "\'\'":                       # indented string\n',
+        "        if False:\n",
+    )
+
+
+def the_walk_cap_answers_no_python_tests(t):
+    """V44 — round 15. The cap fails SILENTLY again, as it did at `5bad0a0c`.
+
+    "I stopped looking" collapses into "there are none", which is the confident
+    answer, and the brief then omits the subset command with no note at all.
+    Measured reachable on a real repository: `~/workspace/civit` has 157,319
+    directories within depth ≤ 4 after the skip list and its first `test_*.py`
+    at walk visit 1,185.
+    """
+    return _swap(t,
+                 "                return PY_TESTS_UNKNOWN\n",
+                 "                return PY_TESTS_NONE\n")
+
+
+def the_ci_suite_is_prescribed_without_probing_for_it(t):
+    """V45 — round 15. `run-ci-suite.sh` for a repo that has none.
+
+    V36's shape at the sibling site the both-directions rule above never
+    reached: measured SURVIVING a fully green 115-test suite at `5bad0a0c`,
+    because no fixture asserted that runner was ABSENT from the devrc-shaped
+    brief.
+    """
+    return _swap(t, "    if tc.ci_suite:\n", "    if True:\n")
+
+
+def the_ci_suite_is_never_prescribed_even_where_it_exists(t):
+    """V46 — the mirror of V45: a real `run-ci-suite.sh` goes unmentioned."""
+    return _swap(t, "    if tc.ci_suite:\n", "    if False:\n")
+
+
+def the_gate_tier_flag_is_assumed(t):
+    """V47 — round 15. `--tier both` appended to any repo's gate.sh.
+
+    The EXACT fabrication that field exists to prevent, and it survived at
+    `5bad0a0c`: no fixture had a `gate.sh` lacking `--tier both`, so the branch
+    that omits the flag was entered by nothing.
+    """
+    return _swap(
+        t,
+        '        gate_tier=bool(gate and "--tier" in gate and "both" in gate),\n',
+        "        gate_tier=True,\n",
+    )
+
+
+def the_gate_tier_flag_is_never_prescribed(t):
+    """V48 — the mirror: a `gate.sh` that DOES take `--tier both` runs without
+    it, so the auditor runs one tier and reports on two."""
+    return _swap(
+        t,
+        '        gate_tier=bool(gate and "--tier" in gate and "both" in gate),\n',
+        "        gate_tier=False,\n",
+    )
+
+
+def the_python_tests_are_assumed_present(t):
+    """V49 — round 15. `python3 -m pytest` for a repo with no python tests.
+
+    `_write_repo`'s `py_test=` was never passed `False` by any call site, so
+    the branch that suppresses the command was executed by no test and the
+    inversion SURVIVED at `5bad0a0c`.
+    """
+    return _swap(t,
+                 "    if tc.py_tests == PY_TESTS_NONE:\n",
+                 "    if False:\n")
+
+
+def the_wrong_shell_note_goes_back_inside_the_pytest_branch(t):
+    """V50 — round 15. The diagnosis is emitted only where pytest is.
+
+    The measured state at `5bad0a0c`: the bar lived in
+    `_toolchain_pytest_lines`, so a repository with a real gate, a flake
+    devShell providing `nodejs` and no python tests got a BARE gate command and
+    no wrong-shell diagnosis anywhere in the section. `node: command not found`
+    then reads exactly like a broken gate.
+    """
+    return _swap(
+        t,
+        '        if any(ln.startswith("```") for ln in prescriptions):\n',
+        "        if False:\n",
+    )
+
+
+def the_wrong_shell_note_is_pytest_only_again(t):
+    """V51 — round 15. The language-agnostic sentence is reworded away.
+
+    Leaves the pytest sentence and the phrase `WRONG SHELL` in place, so a
+    guard that asks only for those stays green while an auditor whose gate
+    fails on `node`, `go` or `cargo` has been told nothing. The SPELLED-guard
+    control for V50: the bar is present, and says less than it claims to.
+    """
+    return _swap(
+        t,
+        '            "🔴 The same applies to EVERY command above, in EVERY language. The "\n',
+        '            "🔴 A note about the wrapper. The "\n',
     )
 
 
@@ -1670,6 +1861,17 @@ ROWS = [
       "test_the_toolchain_prescribes_nothing_when_it_cannot_probe",
       "test_the_toolchain_section_names_the_tier_the_merge_gates_on",
       "test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout",
+      # 🔴 ROUND 15 ADDED FIVE MORE, and they are the SAME coupling one layer
+      # on: every one of round 15's new toolchain guards drives a probed
+      # repository, and the inversion sends all five of them down the
+      # not-probed branch, where the section prescribes nothing at all. That
+      # the set grew again is the same evidence the round-14 note records —
+      # one decision, reused, rather than a second derivation free to disagree.
+      "test_a_capped_python_test_walk_is_not_reported_as_no_python_tests",
+      "test_the_toolchain_head_claim_is_true_of_the_rendered_brief",
+      "test_the_toolchain_probes_are_reachable_in_both_directions",
+      "test_the_wrong_shell_diagnosis_covers_every_command_not_only_pytest",
+      "test_an_unreadable_flake_is_not_reported_as_an_absent_one",
       # 🔴 ROUND 8 ADDED NINE MORE, and every one is the same coupling seen
       # from a new angle: round 8 made THE RANGE and THE LEDGER consult
       # `repo_relation`, so inverting that decision now moves both sections in
@@ -1825,12 +2027,20 @@ ROWS = [
     ("H4  round-1 placeholder back in the header",
      {"test_emit_claims_prints_a_block_this_scripts_own_parser_accepts"},
      emit_claims_interpolates_the_placeholder),
+    # 🔴 ROUND 15 ADDED ONE KILLER TO EACH, and it is the same coupling in
+    # both: `TOOLCHAIN_HEAD` promises the assembly checkout appears in RUNNABLE
+    # commands only as the `nix develop` argument, and round 15 added a guard
+    # that checks that promise against the RENDERED brief rather than against
+    # the constant. Pointing the gate or the `nix build` at that path is
+    # exactly the claim it falsifies, so it fires by construction.
     ("T1  gate.sh points at the shared checkout",
-     {"test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout"},
+     {"test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout",
+      "test_the_toolchain_head_claim_is_true_of_the_rendered_brief"},
      gate_points_at_the_shared_checkout),
     ("T2  nix build points at the shared checkout",
      {"test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout",
-      "test_the_toolchain_section_names_the_tier_the_merge_gates_on"},
+      "test_the_toolchain_section_names_the_tier_the_merge_gates_on",
+      "test_the_toolchain_head_claim_is_true_of_the_rendered_brief"},
      nix_build_points_at_the_shared_checkout),
     # 🔴 ROUND 13 WIDENED BOTH KILLER SETS, and both additions are real
     # couplings. Round 13's `unknown-repo-gh-said-nothing` scenario is a `gh`
@@ -1842,10 +2052,15 @@ ROWS = [
     # the guard reporting that it was pointed at the wrong section — which is
     # what that assertion is for. Listed in full rather than trimmed, the same
     # treatment C3, Y2, V4, V21 and V33 get.
+    # 🔴 ROUND 15 — ONE MORE, and it is round 15's own partition pin: with the
+    # fork shape resolving to a KNOWN repo, `unknown-repo-gh-said-nothing`
+    # leaves the `repo-unknown` partition and its commands bar stops matching
+    # `claims-file-assumed-base`'s. The within-target equality is what fires.
     ("P1  pr_slug reads the HEAD repo again",
      {"test_a_fork_pr_against_this_repo_is_not_treated_as_cross_repo",
       "test_the_prs_repo_is_read_from_the_url_not_from_the_head_repo",
-      "test_no_brief_blames_gh_for_a_repo_gh_was_never_asked_about"},
+      "test_no_brief_blames_gh_for_a_repo_gh_was_never_asked_about",
+      "test_the_toolchain_reason_is_true_in_every_scenario"},
      pr_slug_reads_the_head_repo),
     ("P2  'cannot determine' collapses to same-repo",
      {"test_an_undeterminable_repo_gets_its_own_branch_not_the_same_repo_one",
@@ -2236,9 +2451,14 @@ ROWS = [
     # heading with no commands bar under it and no "NOTHING WAS PROBED HERE" —
     # which is exactly what round 14's cross-repo guard reads. Measured, not
     # predicted: the battery reported it as an EXTRA-KILLER first.
+    # 🔴 ROUND 15 — a third killer, same coupling as the second: the mutant
+    # replaces the whole cross-repo section body, so the not-probed branch
+    # renders neither `NOTHING WAS PROBED HERE` nor its "name the runner by
+    # path" hand-over, and round 15's contradiction guard reads exactly those.
     ("V7  TOOLCHAIN names the SHARED CHECKOUT, cross-repo only",
      {"test_the_toolchain_reason_is_true_in_every_scenario",
-      "test_the_toolchain_prescribes_nothing_when_it_cannot_probe"},
+      "test_the_toolchain_prescribes_nothing_when_it_cannot_probe",
+      "test_no_toolchain_note_claims_a_probe_the_brief_itself_denies"},
      the_toolchain_names_the_shared_checkout_cross_repo_only),
 
     # --------------------------------------------------------------------- #
@@ -2445,25 +2665,86 @@ ROWS = [
     # command removes both strings, so both fire — the second for a reason
     # adjacent to what it owns, which is why it is recorded here rather than
     # left to look like an accident.
+    # 🔴 ROUND 15 — two more, both from fixtures that did not exist before.
+    # Suppressing every `gate.sh` removes the ONLY command from two new
+    # single-purpose repos (the no-`--tier` gate and the nodejs-flake gate), and
+    # each guard fires on its own "the command under test is absent" assertion.
     ("V37 gate.sh never prescribed, even where it exists",
      {"test_the_toolchain_section_names_the_tier_the_merge_gates_on",
-      "test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout"},
+      "test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout",
+      "test_the_toolchain_probes_are_reachable_in_both_directions",
+      "test_the_wrong_shell_diagnosis_covers_every_command_not_only_pytest"},
      the_gate_is_never_prescribed_even_where_it_exists),
-    ("V38 the checks probe matches the WORD, not the output",
+    ("V38 the checks probe reads TEXT rather than CODE",
      {"test_the_flake_checks_probe_reads_an_output_and_not_the_word",
-      "test_the_toolchain_prescribes_only_commands_it_probed"},
+      "test_the_toolchain_prescribes_only_commands_it_probed",
+      "test_the_flake_checks_probe_reads_nix_code_and_not_text_that_looks_like_it",
+      "test_the_toolchain_section_names_the_tier_the_merge_gates_on"},
      the_checks_probe_matches_the_word_not_the_output),
+    # 🔴 ROUND 15 — the `_fmt_uses` fallbacks now have fixtures (a repo with no
+    # `.envrc` at all, and one declaring no `use` line), and hardcoding the
+    # sentence removes both of their answers.
     ("V39 the .envrc sentence is hardcoded again",
-     {"test_the_toolchain_prescribes_only_commands_it_probed"},
+     {"test_the_toolchain_prescribes_only_commands_it_probed",
+      "test_the_toolchain_probes_are_reachable_in_both_directions"},
      the_envrc_sentence_is_hardcoded_again),
     ("V40 cross-repo, the WRONG repository is probed anyway",
      {"test_the_toolchain_prescribes_nothing_when_it_cannot_probe",
-      "test_the_toolchain_reason_is_true_in_every_scenario"},
+      "test_the_toolchain_reason_is_true_in_every_scenario",
+      "test_no_toolchain_note_claims_a_probe_the_brief_itself_denies"},
      the_probe_reads_the_cwd_repo_cross_repo_too),
     ("V41 the check-name scan stops tracking nix strings",
      {"test_the_flake_checks_probe_reads_an_output_and_not_the_word",
-      "test_the_toolchain_section_names_the_tier_the_merge_gates_on"},
+      "test_the_toolchain_section_names_the_tier_the_merge_gates_on",
+      "test_the_flake_checks_probe_reads_nix_code_and_not_text_that_looks_like_it",
+      "test_the_toolchain_prescribes_only_commands_it_probed"},
      the_checks_scan_stops_tracking_nix_strings),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 V42-V51 — round 15. Base `5bad0a0c` — THIS BRANCH's own head. Six of
+    # these are the both-directions rule applied where round 14 stated it and
+    # did not apply it: `ci_suite`, `gate_tier` and `py_tests` each had NO
+    # mutant in either direction, and all three inversions were measured
+    # SURVIVING a fully green 115-test suite while shipping a fabricated
+    # command. The cause was fixture reach, not a missing assertion.
+    # --------------------------------------------------------------------- #
+    ("V52 a state-dependent sentence in the COMMANDS bar",
+     {"test_the_toolchain_reason_is_true_in_every_scenario"},
+     a_state_dependent_sentence_moves_into_the_commands_bar),
+    ("V42 a checks shape it cannot enumerate is DENIED, not hedged",
+     {"test_the_flake_checks_probe_reads_nix_code_and_not_text_that_looks_like_it"},
+     the_checks_probe_denies_a_shape_it_cannot_enumerate),
+    ("V43 `''${…}` and `'''` close an indented string again",
+     {"test_the_flake_checks_probe_reads_nix_code_and_not_text_that_looks_like_it"},
+     the_indented_string_escapes_are_terminators_again),
+    ("V44 the walk cap answers 'no python tests' in silence",
+     {"test_a_capped_python_test_walk_is_not_reported_as_no_python_tests"},
+     the_walk_cap_answers_no_python_tests),
+    ("V45 run-ci-suite.sh prescribed without probing for it",
+     {"test_the_toolchain_probes_are_reachable_in_both_directions"},
+     the_ci_suite_is_prescribed_without_probing_for_it),
+    ("V46 run-ci-suite.sh never prescribed, even where it exists",
+     {"test_the_toolchain_prescribes_only_commands_it_probed"},
+     the_ci_suite_is_never_prescribed_even_where_it_exists),
+    ("V47 `--tier both` appended to a gate that never showed it takes one",
+     {"test_the_toolchain_probes_are_reachable_in_both_directions"},
+     the_gate_tier_flag_is_assumed),
+    ("V48 `--tier both` dropped from a gate that does take it",
+     {"test_the_toolchain_section_names_the_tier_the_merge_gates_on"},
+     the_gate_tier_flag_is_never_prescribed),
+    ("V49 a pytest command for a repo with no python tests",
+     {"test_a_capped_python_test_walk_is_not_reported_as_no_python_tests",
+      "test_the_toolchain_probes_are_reachable_in_both_directions"},
+     the_python_tests_are_assumed_present),
+    ("V50 the wrong-shell bar is emitted only beside a pytest command",
+     {"test_the_wrong_shell_diagnosis_covers_every_command_not_only_pytest",
+      "test_the_toolchain_section_names_the_tier_the_merge_gates_on",
+      "test_the_toolchain_prescribes_only_commands_it_probed",
+      "test_the_toolchain_probes_are_reachable_in_both_directions"},
+     the_wrong_shell_note_goes_back_inside_the_pytest_branch),
+    ("V51 the wrong-shell bar stops covering every language",
+     {"test_the_wrong_shell_diagnosis_covers_every_command_not_only_pytest"},
+     the_wrong_shell_note_is_pytest_only_again),
 ]
 
 
