@@ -1387,6 +1387,37 @@ class TestRuleFDidNotMoveTheExitCodes:
         assert WARNING_HEAD not in res.stdout + res.stderr
         assert tree_hash(durable_repo) == before
 
+    def test_no_two_exit_constants_share_a_value(self) -> None:
+        """🔴 THE COLLISION THIS SUITE COULD NOT SEE. Every other guard here
+        pins a NAMED constant to a number, so two names sharing one value pass
+        them all: the enumeration below stops at 6, and nothing asks whether the
+        set is injective.
+
+        MEASURED on this PR. `main` landed `EXIT_DOC_PER_EFFORT = 7` while this
+        branch carried `EXIT_STALE_BASE = 7`. The merge conflicted only where
+        the two blocks sat ADJACENT — resolving it the obvious way, by keeping
+        both sides, yields two constants equal to 7 and an exit-code contract
+        where `status=stale-base` and `status=doc-per-effort` are
+        indistinguishable to any caller branching on the number. The doc/code
+        guard did not catch it either: it scrapes `status=` tokens, and both
+        tokens are present and documented.
+
+        A green suite on the merged tree would have said nothing. This is the
+        guard that makes the next PR to claim a code collide LOUDLY.
+        """
+        codes = {n: v for n, v in vars(hd).items()
+                 if n.startswith("EXIT_") and isinstance(v, int)}
+        assert len(codes) >= 8, f"the scraper found too few constants: {codes}"
+        seen: dict[int, str] = {}
+        for name, value in sorted(codes.items()):
+            assert value not in seen, (
+                f"{name} and {seen[value]} are both {value}. Two exit constants "
+                f"sharing a value make their statuses indistinguishable to any "
+                f"caller that branches on the number. Give the newer one the "
+                f"next free code and update the skill's exit-code list with it."
+            )
+            seen[value] = name
+
     def test_the_exit_code_constants_did_not_move(self) -> None:
         """Their VALUES, not just their names — a caller reads the number."""
         assert (hd.EXIT_OK, hd.EXIT_USAGE, hd.EXIT_FAIL) == (0, 2, 3)
@@ -3377,7 +3408,12 @@ class TestAStaleBaseIsLoud:
         advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
         out = run_tool(work, update=update_file).stdout
         assert STALE_HEAD in out, out
-        assert "there is NO claudedocs/handoff-sample-topic.md in this checkout" in out
+        # Wording widened deliberately: the trigger is now "no USABLE doc"
+        # (missing, empty or whitespace), because a blank base destroys the
+        # committed document exactly as a missing one does. The old string said
+        # "there is NO <path>", which is false of a file that exists and is blank.
+        assert "no usable claudedocs/handoff-sample-topic.md" in out, out
+        assert "will be replaced by this delta" in out, out
 
     def test_a_CURRENT_clone_prints_NOTHING_new(self, repo: Path,
                                                 update_file: Path) -> None:
@@ -3536,10 +3572,12 @@ class TestBaseCurrencyMeasuresAndSaysWhenItCannot:
         cur = hd.BaseCurrency(None, ("origin/main",), None, None, None,
                               "no mainline ref resolves in this clone")
         loud = hd.wrong_base_report(("a tell",), cur, "d.md", Path("/r"),
-                                    hd.doc_shape(BASE_DOC))
+                                    hd.doc_shape(BASE_DOC),
+                                    cur.replaces_mainline_doc(BASE_DOC))
         assert "base currency UNCHECKED" in loud
         quiet = hd.wrong_base_report((), cur, "d.md", Path("/r"),
-                                     hd.doc_shape(BASE_DOC))
+                                     hd.doc_shape(BASE_DOC),
+                                     cur.replaces_mainline_doc(BASE_DOC))
         assert quiet == "", "an unmeasurable check must not speak on its own"
 
 
@@ -4685,3 +4723,532 @@ class TestRulesIAndJDidNotMoveTheOtherExits:
         assert "none" in hd.FORCING_KINDS
         assert "none" not in hd.EXTERNAL_FORCING_KINDS
         assert hd.EXTERNAL_FORCING_KINDS < hd.FORCING_KINDS
+
+def repo_lacking_the_doc(tmp_path: Path) -> Path:
+    """A checkout whose mainline HAS the handoff doc and whose HEAD does not.
+
+    🔴 This is the talos-infra shape, measured 2026-08-29: the doc was authored
+    and pushed from a WORKTREE, the primary clone was never re-synced, and the
+    doc therefore exists at `origin/main` and nowhere in the working tree. It is
+    NOT the new-doc case — a genuinely new doc is absent on BOTH sides.
+    """
+    origin = tmp_path / "origin.git"
+    _sh("git", "init", "-q", "--bare", "-b", "main", str(origin), cwd=tmp_path)
+
+    work = tmp_path / "work"
+    work.mkdir()
+    _sh("git", "init", "-q", "-b", "main", cwd=work)
+    for k, v in (("user.name", "Test Runner"),
+                 ("user.email", "test@example.invalid"),
+                 ("commit.gpgsign", "false")):
+        _sh("git", "config", k, v, cwd=work)
+    _sh("git", "remote", "add", "origin", str(origin), cwd=work)
+    (work / "README.md").write_text("sample\n", encoding="utf-8")
+    _sh("git", "add", "--", "README.md", cwd=work)
+    _sh("git", "commit", "-q", "-m", "seed without the doc", cwd=work)
+    _sh("git", "push", "-q", "origin", "main", cwd=work)
+
+    # The other worktree authors and pushes the doc. `work` never merges it.
+    other = tmp_path / "other"
+    _sh("git", "clone", "-q", str(origin), str(other), cwd=tmp_path)
+    for k, v in (("user.name", "Other"), ("user.email", "o@example.invalid"),
+                 ("commit.gpgsign", "false")):
+        _sh("git", "config", k, v, cwd=other)
+    (other / "claudedocs").mkdir()
+    (other / "claudedocs" / "handoff-sample-topic.md").write_text(
+        BASE_DOC, encoding="utf-8")
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+    _sh("git", "commit", "-q", "-m", "the real handoff, authored elsewhere", cwd=other)
+    _sh("git", "push", "-q", "origin", "main", cwd=other)
+
+    # Fetched, deliberately not merged — exactly the state the tool must judge.
+    _sh("git", "fetch", "-q", "origin", cwd=work)
+    return work
+
+
+class TestAbsentBasePresentOnMainlineIsRefused:
+    """🔴 The doc is absent HERE and present on mainline ⇒ every section merges
+    as NEW and the committed document is REPLACED by the delta.
+
+    The tool already DETECTED this and printed it; it exited 0 anyway. That was
+    survivable while a human answered a y/N, but that prompt was retired
+    2026-08-23, so the warning became the only thing between the diff and a
+    pushed commit — against this skill's own rule that blast radius earns a
+    REFUSAL, not a question. `--push` does not cover it: the `behind` check asks
+    about `<remote>/<push-branch>`, a DIFFERENT ref from the mainline this
+    compares against, so a current feature branch sails past it.
+    """
+
+    def test_it_REFUSES_and_writes_nothing(self, tmp_path: Path,
+                                           update_file: Path) -> None:
+        work = repo_lacking_the_doc(tmp_path)
+        shas_before = commit_shas(work)
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_STALE_BASE, (
+            res.returncode, res.stdout, res.stderr)
+        assert "status=stale-base" in res.stderr, res.stderr
+        assert not (work / "claudedocs" / "handoff-sample-topic.md").exists(), (
+            "the doc was written despite the refusal")
+        assert commit_shas(work) == shas_before, "a commit was made anyway"
+
+    def test_the_refusal_names_the_remedy(self, tmp_path: Path,
+                                          update_file: Path) -> None:
+        """A refusal a caller cannot act on gets worked around."""
+        work = repo_lacking_the_doc(tmp_path)
+        res = run_tool(work, "--confirm", update=update_file)
+        blob = res.stdout + res.stderr
+        assert "origin/main" in blob
+        assert "claudedocs/handoff-sample-topic.md" in blob
+        assert "--allow-replacing-mainline-doc" in blob, (
+            "the override must be named, or the refusal is a dead end")
+
+    def test_the_explicit_override_still_lets_it_through(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 NEGATIVE CONTROL. A refusal with no way past it would make a
+        legitimate re-author impossible and train everyone to route around it."""
+        work = repo_lacking_the_doc(tmp_path)
+        res = run_tool(work, "--confirm", "--allow-replacing-mainline-doc",
+                       update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=written" in res.stdout
+        assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def test_a_GENUINELY_NEW_doc_is_untouched_by_this(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE CASE THIS MUST NOT BREAK. Absent on BOTH sides is the new-doc
+        path the skill says step 5 owns. Refusing it would make first writes
+        impossible — the failure mode that matters more than the one being fixed.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        # Same clone, a topic that exists nowhere — mainline included.
+        argv = [sys.executable, str(TOOL), "--repo", str(work),
+                "--topic", "brand-new-topic", "--update", str(update_file),
+                "--advanced", "first write", "--confirm"]
+        res = subprocess.run(argv, capture_output=True, text=True,
+                             env=dict(os.environ, **GIT_ENV))
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=written" in res.stdout
+        assert (work / "claudedocs" / "handoff-brand-new-topic.md").exists()
+
+    def test_a_doc_PRESENT_locally_but_behind_stays_a_WARNING(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE OTHER CASE THIS MUST NOT BREAK. When the doc exists here, the
+        merge can still classify its sections, so updating a deliberately-behind
+        clone stays legitimate — a warning, exit 0, as the tool already says.
+
+        🔴 THE REMOTE COMMIT MUST TOUCH THE DOC ITSELF. An earlier version of
+        this test used `advance_remote`, which pushes an unrelated `OTHER.md`:
+        `doc_behind` stayed 0, so `mainline` was never read and the case the
+        assertion names could not arise. MEASURED — the mutant that drops the
+        `not base_text` half of the predicate SURVIVED against that fixture,
+        because the fixture could not produce a doc-behind reading at all. The
+        test read as coverage while providing none.
+        """
+        other = tmp_path / "doc-mover"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other),
+            cwd=tmp_path)
+        for k, v in (("user.name", "Other"), ("user.email", "o@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        moved = other / "claudedocs" / "handoff-sample-topic.md"
+        moved.write_text(BASE_DOC + "\n## Added elsewhere\n\nlater work.\n",
+                         encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "advance the DOC itself", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        _sh("git", "fetch", "-q", "origin", cwd=repo)
+
+        # The precondition the old fixture silently lacked: the mainline really
+        # is ahead ON THIS PATH, so `mainline` is populated and the predicate's
+        # two halves are actually distinguishable.
+        behind = _sh("git", "rev-list", "--count", "HEAD..origin/main", "--",
+                     "claudedocs/handoff-sample-topic.md", cwd=repo)
+        assert behind.strip() != "0", (
+            "fixture is vacuous: the mainline is not ahead on the doc path, so "
+            "this test cannot tell the two halves of the predicate apart")
+
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=stale-base" not in res.stderr
+        assert "status=written" in res.stdout
+
+    @pytest.mark.parametrize(
+        "blank,label",
+        [("", "empty"), ("\n", "one newline"), ("   \n\n", "whitespace")],
+    )
+    def test_a_BLANK_local_doc_is_as_absent_as_a_MISSING_one(
+        self, tmp_path: Path, update_file: Path, blank: str, label: str
+    ) -> None:
+        """🔴 A bare falsiness test let a single newline WALK this guard.
+
+        MEASURED before the fix, against a mainline doc of 6 sections: `""`
+        refused (rc 7), while `"\\n"` and `"   \\n\\n"` both exited 0 and REPLACED
+        the committed document with the delta. The merge treats all three the
+        same — 0 sections, so every section arrives NEW — so the destructive
+        outcome is identical and only the predicate disagreed. `wrong_base_tells`
+        already used `.strip()` 74 lines earlier in the same file.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        doc = work / "claudedocs" / "handoff-sample-topic.md"
+        doc.parent.mkdir(exist_ok=True)
+        doc.write_text(blank, encoding="utf-8")
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_STALE_BASE, (
+            f"a {label} local doc walked the guard", res.stdout, res.stderr)
+        assert doc.read_text(encoding="utf-8") == blank, (
+            "the committed document was replaced by the delta")
+
+    def test_the_PROPOSAL_run_still_shows_the_diff_and_does_not_refuse(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE `args.confirm` HALF OF THE GUARD, which nothing else pins.
+
+        An adversarial mutation that drops `and args.confirm` SURVIVED the whole
+        176-test file: the refusal then fires on the PROPOSAL run too, exiting 7
+        before the diff is printed. `reference/write-gate.md` calls that diff
+        "the only record of what landed", and the proposal run exists to put it
+        in the transcript — so refusing there destroys the thing the two-run
+        shape is for, while writing nothing and looking like a working guard.
+
+        The proposal run must WARN and show the diff; only `--confirm` refuses.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        res = run_tool(work, update=update_file)  # no --confirm
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=proposed" in res.stdout
+        assert "status=stale-base" not in res.stderr
+        assert "THE BASE DOCUMENT IS NOT THE NEWEST COMMITTED COPY" in res.stdout, (
+            "the proposal run must still carry the warning")
+        # 🔴 A `+`-prefixed line FROM THE UPDATE BODY, not merely "+" anywhere.
+        # `unified()` always emits a `+++` header, so `"+" in res.stdout` was
+        # satisfied by the header alone: MEASURED, a mutant that stripped every
+        # +/- body line from the printed diff left that assertion green. The
+        # message claimed the diff reached the transcript and did not check it.
+        body = [l for l in res.stdout.splitlines()
+                if l.startswith("+") and not l.startswith("+++")]
+        assert body, "the diff's added lines must reach the transcript"
+
+    def test_the_override_is_NOT_reachable_by_abbreviation(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 The flag's help calls it "deliberately long" so it cannot be passed
+        by reflex — but argparse abbreviates long options by DEFAULT, and `--al`
+        was measured to be accepted and to replace the committed document. A
+        guard spelled as a long name is walkable by shortening it unless
+        `allow_abbrev=False` says otherwise.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        for abbrev in ("--al", "--allow", "--allow-replacing"):
+            res = run_tool(work, "--confirm", abbrev, update=update_file)
+            assert res.returncode == hd.EXIT_USAGE, (
+                f"{abbrev} was accepted as the override", res.stdout, res.stderr)
+            assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    @pytest.mark.parametrize("blank,label", [("", "empty"), ("\n", "one newline")])
+    def test_the_WARNING_and_the_REFUSAL_describe_the_SAME_set(
+        self, tmp_path: Path, update_file: Path, blank: str, label: str
+    ) -> None:
+        """🔴 THE SEAM. Two consumers of one fact, and they drifted for a round.
+
+        The refusal decides whether to stop; the warning decides whether to print
+        the loud "the committed document will be replaced" line or a mild size
+        comparison. When the refusal was widened to `.strip()` the warning kept
+        `if not local.lines:` — true only for a strictly 0-line file — so a
+        `"\\n"` base got `0 sections / 1 lines` and never the loud line, in
+        exactly the shape where every section merges as NEW. They had been
+        equivalent before the widening, which is why the drift was silent.
+
+        So this pins the RELATIONSHIP, on the PROPOSAL run — the one an operator
+        reads before deciding — not either half alone.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        doc = work / "claudedocs" / "handoff-sample-topic.md"
+        doc.parent.mkdir(exist_ok=True)
+        doc.write_text(blank, encoding="utf-8")
+
+        proposal = run_tool(work, update=update_file)  # no --confirm
+        assert proposal.returncode == 0, proposal.stderr
+        assert "will be replaced by this delta" in proposal.stdout, (
+            f"a {label} base got the MILD warning in the shape that replaces the "
+            f"document: {proposal.stdout[-400:]}")
+
+        confirmed = run_tool(work, "--confirm", update=update_file)
+        assert confirmed.returncode == hd.EXIT_STALE_BASE, (
+            "the warning said REPLACED but the refusal did not fire — the two "
+            "halves disagree", confirmed.stdout, confirmed.stderr)
+
+    def test_the_remedy_does_not_tell_a_PROPOSAL_reader_they_are_safe(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 The remedy block once said "if you do not see `status=stale-base`,
+        this run is the warning". The refusal is gated on `--confirm`, so a
+        proposal run can NEVER print that line — the sentence told every reader
+        of the run they use to decide that they were in the benign case,
+        including the ones about to destroy a document.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        out = run_tool(work, update=update_file).stdout
+        assert "will be replaced by this delta" in out
+        assert "If you do not see that line, this run is the warning" not in out
+        assert "ONLY on `--confirm`" in out, (
+            "the remedy must say the refusal is deferred, not absent")
+
+    def test_a_doc_DELETED_on_the_mainline_gets_NEITHER_the_loud_line_nor_a_refusal(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE OTHER ARM OF THE SEAM — the one two rounds of fixes missed.
+
+        `nothing_to_merge_into` is true whenever there is no usable base HERE.
+        The refusal additionally needs a mainline copy to LOSE. The set
+        difference is real: the mainline's commits to this doc DELETED it (a
+        retirement, a revert, a rename), so this checkout never had it and
+        neither does the mainline.
+
+        MEASURED at the round-2 tip: the warning fired on the blank half alone
+        and printed "and <ref> has one … will be replaced by this delta" about a
+        document that does not exist, while `--confirm` exited 0 and wrote — and
+        the remedy told the operator that confirming would refuse.
+
+        So: no loud replacement claim, and no refusal. A first write here is
+        legitimate and must land.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        # Delete it on the mainline, so `doc_behind` is non-zero but `git show`
+        # finds nothing — the shape that populates `mainline` with None.
+        other = tmp_path / "deleter"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "D"), ("user.email", "d@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        _sh("git", "rm", "-q", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "retire the handoff", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        _sh("git", "fetch", "-q", "origin", cwd=work)
+
+        proposal = run_tool(work, update=update_file)
+        assert proposal.returncode == 0, proposal.stderr
+        # 🔴 ASSERT THE PRECONDITION, not only the two negatives. Every other
+        # assertion here is satisfied by "the currency check never ran" —
+        # MEASURED with a mutant that returns an UNMEASURED BaseCurrency when
+        # `git show` fails: the run then printed NOTHING AT ALL and this test
+        # stayed green, along with the whole 186-test file. The negatives are
+        # only meaningful once the stale path is known to have executed.
+        assert "THE BASE DOCUMENT IS NOT THE NEWEST COMMITTED COPY" in proposal.stdout, (
+            "the stale path never ran, so the negatives below prove nothing")
+        assert "will be replaced by this delta" not in proposal.stdout, (
+            "claimed a replacement of a document the mainline does not have")
+
+        confirmed = run_tool(work, "--confirm", update=update_file)
+        assert confirmed.returncode == 0, (
+            "a legitimate first write was refused", confirmed.stdout, confirmed.stderr)
+        assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def test_the_remedy_is_pinned_as_a_WHOLE_normalised_string(self) -> None:
+        """🔴 A guard on WORDS is walkable by REWORDING. The previous version
+        asserted the presence of "ONLY on `--confirm`" and the absence of one
+        retired sentence — both satisfied by a reword that reintroduces the exact
+        false meaning ("…refuses ONLY on --confirm. If no status=stale-base
+        appears, you are in the benign case."). `WRONG_BASE_REMEDY` is a module
+        constant, so the whole normalised string can be pinned. A cosmetic reword
+        then fails this test — that is the price of a machine-readable claim.
+        """
+        expected = (
+            "Settle it BEFORE confirming: read the mainline copy — `git -C "
+            "{repo} show {ref}:{relpath}` — and re-run against a current clone "
+            "if it is the fuller document. Updating a deliberately-behind clone "
+            "is legitimate, so on its own this is a WARNING and no exit code "
+            "changed. It is a FLOOR: a silent run is NOT evidence that the base "
+            "is current. 🔴 ONE shape refuses instead — no usable doc here while "
+            "the mainline has one — and it refuses ONLY on `--confirm`, as "
+            "`status=stale-base` (exit 9). A proposal run therefore NEVER prints "
+            "that line whatever shape it is in, so its absence here is not "
+            "evidence you are in the benign case: read the line above instead, "
+            "which fires on exactly the shape that refuses."
+        )
+        assert " ".join(hd.WRONG_BASE_REMEDY.split()) == " ".join(expected.split())
+
+    @pytest.mark.parametrize("blank", ["", "\n", "   \n\n"])
+    def test_wrong_base_tells_shares_the_predicate_and_stays_SILENT_on_a_blank_base(
+        self, blank: str
+    ) -> None:
+        """🔴 GUARDS THE CONSOLIDATION ITSELF, which shipped unguarded.
+
+        `wrong_base_tells` used to open-code `not base_text.strip()`; it now
+        calls `nothing_to_merge_into`. MEASURED: mutating that call back to a
+        bare `not base_text` SURVIVED the whole 186-test file — no mutant existed
+        for the line the commit had just changed.
+
+        The consequence is not cosmetic. With the bare test, a first write into a
+        newline-only file raises a tell, so the operator gets the whole
+        "THIS MERGE LOOKS LIKE IT RESOLVED THE WRONG BASE" block on a run where
+        nothing is wrong. Measured: 0 tells at HEAD, 1 tell under the mutant.
+        """
+        assert hd.wrong_base_tells(blank, UPDATE_DOC, {}) == ()
+
+    def test_an_EMPTY_mainline_doc_is_NOT_something_to_lose(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE MIRROR BUG: refusing where NOTHING is destroyed.
+
+        `self.mainline is not None` is not "there is a copy to lose" — a
+        committed but EMPTY mainline doc parses to `DocShape(0, 0, …)`, which is
+        not None. MEASURED before the fix: an empty committed mainline copy plus
+        no local doc exited 7 `NOTHING WRITTEN` and printed "and <ref> has one
+        (0 section(s) / 0 line(s))" — a self-contradicting sentence — blocking a
+        legitimate first write. Replacing nothing with something costs nothing,
+        so it must not refuse.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        other = tmp_path / "emptier"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "E"), ("user.email", "e@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        (other / "claudedocs" / "handoff-sample-topic.md").write_text("", encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+        _sh("git", "commit", "-q", "--allow-empty", "-m", "empty the handoff", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        _sh("git", "fetch", "-q", "origin", cwd=work)
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == 0, (
+            "refused a first write where the mainline copy is EMPTY — nothing "
+            "would have been destroyed", res.stdout, res.stderr)
+        assert "status=stale-base" not in res.stderr
+        assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def _mainline_doc(self, tmp_path: Path, work: Path, body: str, msg: str) -> None:
+        """Commit `body` as the mainline copy of the handoff doc, then fetch."""
+        other = tmp_path / f"ml-{abs(hash(body)) % 10**8}"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "M"), ("user.email", "m@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        d = other / "claudedocs"
+        d.mkdir(exist_ok=True)
+        (d / "handoff-sample-topic.md").write_text(body, encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+        # 🔴 NO `--allow-empty`. Git refusing "nothing to commit" is what
+        # catches a fixture body identical to what the mainline already
+        # holds; suppressing it would let a test go silently vacuous.
+        _sh("git", "commit", "-q", "-m", msg, cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        _sh("git", "fetch", "-q", "origin", cwd=work)
+
+    @pytest.mark.parametrize("blank", ["\n", "   \n\n"])
+    def test_a_WHITESPACE_mainline_doc_is_ALSO_not_something_to_lose(
+        self, tmp_path: Path, update_file: Path, blank: str
+    ) -> None:
+        """🔴 The MIRROR bug, one notch along — round 4 fixed only `""`.
+
+        `bool(mainline.lines)` called a whitespace-only mainline "a document to
+        lose": `doc_shape("\\n")` is `DocShape(0, 1)`. MEASURED at that tip, the
+        refusal printed — in ONE sentence — that whitespace is equivalent to
+        absent for the LOCAL copy, and that a 1-line whitespace MAINLINE copy is
+        "one" that would be destroyed. The local side went through
+        `nothing_to_merge_into`; the mainline side was a bare falsiness test on
+        a line count, so the two halves of one equivalence class disagreed.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        self._mainline_doc(tmp_path, work, blank, "whitespace the handoff")
+
+        # 🔴 ASSERT THE MECHANISM. Every assertion below is satisfied by "the
+        # mainline copy was never read at all" — MEASURED, a mutant making
+        # `base_currency` skip the `git show` entirely SURVIVES this test when
+        # run alone, while the sibling headingless test dies to it. The stale
+        # HEADER is not enough either: it prints whenever `doc_behind` is
+        # non-zero. Only the mainline SHAPE line proves the copy was read and
+        # measured, which is the claim this test's name makes.
+        prop = run_tool(work, update=update_file)
+        assert "origin/main: 0 sections /" in prop.stdout, (
+            "the mainline copy was never read, so the negatives below prove "
+            "nothing", prop.stdout[-400:])
+        assert "will be replaced by this delta" not in prop.stdout
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == 0, (
+            "refused a first write against a WHITESPACE mainline copy — nothing "
+            "would have been destroyed", res.stdout, res.stderr)
+        assert "status=stale-base" not in res.stderr
+        assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def test_a_HEADINGLESS_prose_mainline_doc_IS_something_to_lose(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 PINS THE QUANTITY, and it is the fail-OPEN direction.
+
+        MEASURED: swapping `bool(mainline.lines)` for `bool(mainline.sections)`
+        SURVIVED the whole 190-test file. A real prose handoff carrying no `##`
+        heading is `DocShape(sections=0, lines=6)` — under `sections` the guard
+        does not fire and `--confirm` REPLACES that committed document with the
+        delta. That is the exact destruction this PR exists to prevent, and no
+        test could see the difference because every fixture pinned the
+        `lines == 0` boundary rather than the quantity.
+
+        Real content with zero headings must therefore REFUSE.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        prose = ("A real handoff that happens to carry no markdown heading.\n"
+                 "Second line of genuine content.\n"
+                 "Third line, still content.\n")
+        self._mainline_doc(tmp_path, work, prose, "headingless prose handoff")
+
+        # The precondition this test turns on: content, but zero sections.
+        shape = hd.doc_shape(prose)
+        assert shape.sections == 0 and shape.lines > 0, shape
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_STALE_BASE, (
+            "did NOT refuse against a headingless prose mainline doc — that is "
+            "the fail-open direction, and it destroys a real document",
+            res.stdout, res.stderr)
+        assert "status=stale-base" in res.stderr
+
+    def test_a_STALE_BASE_in_a_REALISTIC_repo_is_not_reported_as_a_NEW_effort(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE SHADOW. Every other test in this class uses a repo with NO other
+        handoff docs — and that is the only reason they see the stale-base
+        refusal at all.
+
+        #962's rule (i) refuses `status=new-doc` when the doc does not exist AND
+        the repo already has handoff docs. Every real repo does: talos-infra, the
+        clone this whole guard was built from, has 100+. So in the shape that
+        motivated this PR the run stops at rule (i) and NEVER reaches
+        `status=stale-base`.
+
+        MEASURED on the merge before this fix: realistic repo, doc absent here
+        and present on the mainline, `--confirm` -> rc 7 `status=new-doc`.
+
+        Worse than the wrong code: rule (i) says "If this really is a NEW effort,
+        say so: re-run with `--new-effort`". For a stale clone that is FALSE — the
+        doc exists, upstream — and following it walks the operator around the
+        guard. A doc on the mainline answers rule (i)'s own question: not a new
+        effort, a stale checkout.
+
+        🔴 Neither PR is wrong alone and git reported NO conflict here. Both added
+        refusals to one `main()`; the merge only conflicted where two constant
+        blocks sat adjacent.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        # What makes the repo realistic — and what every other fixture lacks.
+        others = work / "claudedocs"
+        others.mkdir(exist_ok=True)
+        for name in ("handoff-other-effort.md", "handoff-third-thing.md"):
+            (others / name).write_text("# Handoff: other\n\n## State now\n\nx.\n",
+                                       encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs", cwd=work)
+        _sh("git", "commit", "-q", "-m", "this repo has other handoff docs", cwd=work)
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_STALE_BASE, (
+            "rule (i) shadowed the stale-base refusal — the operator is told this "
+            "is a NEW effort when the doc exists on the mainline",
+            res.returncode, res.stdout, res.stderr)
+        assert "status=stale-base" in res.stderr
+        assert "status=new-doc" not in res.stderr
+        assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()

@@ -2960,7 +2960,16 @@ in
         # `claude/skill-tiers.json` through the ledger's own parser instead of a
         # second sed. Without python3 that arm reports COULD NOT MEASURE — no rc,
         # but also no coverage.
-        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux ]}"
+        # 🔴 gh IS FOR THE BRANCH-PROTECTION ARM (rc 24), and leaving it off this
+        # PATH is the same silent failure iproute2 and python3 already record:
+        # the arm prints COULD NOT MEASURE on every timer run, forever, from a
+        # unit that looks correct — and the one thing it watches is a gate that
+        # was found deleted twice in a day with nothing else looking. It reads;
+        # the read-only argv is pinned by `test_the_gh_calls_are_read_only`.
+        # ⚠ gh needs credentials, which are NOT on this PATH: under the user
+        # manager it reads ~/.config/gh (HOME is set below). If that is ever
+        # absent the arm says COULD NOT MEASURE rather than reporting drift.
+        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux pkgs.gh ]}"
         "HOME=%h"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/drift-check.sh";
