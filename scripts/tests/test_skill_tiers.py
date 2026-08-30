@@ -83,19 +83,13 @@ MIN_SKILLS = 30
 # 36-entry total quoted in a 37-entry tree, and one contradicted the number the
 # same change reported to its reviewer.
 # --------------------------------------------------------------------------- #
-# 2026-08-29: 37 -> 38 entries, the `quiesce-workload` skill (#1066). Copied from
-# the printed values, not recomputed. It is tier B, and the deltas say so on
-# their own: `MEASURED_TIER_A_CHARS` and `MEASURED_TIER_A_ENTRIES` did not move
-# at all, the ledger total gained the 19 chars of a name-only entry, and the
-# all-tier-A total gained the 98 the same skill would have cost in full. So the
-# ratchet below is untouched — this is the friction working, not a re-pin.
 MEASURED_ENTRIES = 38
 MEASURED_TIER_A_ENTRIES = 24
 MEASURED_TIER_A_CHARS = 8_909
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
 MEASURED_UNDER_LEDGER_CHARS = 9_120
-# ...and what the same 38 entries would cost with every skill tier A. The
-# difference is what the ledger buys: 3,986 chars.
+# ...and what the same 37 entries would cost with every skill tier A. The
+# difference is what the ledger buys: 3,907 chars.
 MEASURED_ALL_TIER_A_CHARS = 13_106
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
