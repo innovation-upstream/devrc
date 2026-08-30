@@ -256,16 +256,18 @@ clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg
   block to join". Recorded in full as comment 570 on cg#365.
 
 ## Next steps (ranked)
-🔴 **RANKS RENUMBERED this session** — the previous rank 1 (deploy + arm) is DONE, so
+🔴 **RANKS RENUMBERED once this session** — the previous rank 1 (deploy + arm) is DONE, so
 everything shifted. No live `claim-work` claims existed on this doc at renumber time
 (`cairn-task-linkage-1` was taken and released within this session), so nothing was
-silently re-pointed.
+silently re-pointed. **Numbering is stable from here — do not renumber again**; rank 3 is
+kept in place, marked done, rather than removed.
 
-1. **cg#365 — fix the single-paragraph trailer separator.** Diagnosed above and in
-   comment 570; the acceptance criteria are mechanical. Repo `innovation-upstream/devrc`,
-   files `scripts/lib/session_trailer.py` (`append_trailer`) and its tests. Done means
-   `git interpret-trailers --parse` returns the id for all three shapes, pinned by a test
-   watched to fail on pre-change code (single-line RED at the base ref, green at HEAD).
+1. **cg#365 — fix the single-paragraph trailer separator.** Diagnosed in the open-
+   investigation block above and in comment 570 on cg#365; the acceptance criteria are
+   mechanical. Repo `innovation-upstream/devrc`, files `scripts/lib/session_trailer.py`
+   (`append_trailer`) and its tests. Done means `git interpret-trailers --parse` returns
+   the id for all three shapes, pinned by a test watched to fail on pre-change code
+   (single-line RED at the base ref, green at HEAD).
    forcing: user — cg#365 is a mirrored ClickUp ticket (`868kx9ev6`) raised by Zach and
    two teammates at the 2026-08-26 harness meeting; the trailer is now ARMED on both
    hosts, so the defect is live rather than hypothetical.
@@ -275,11 +277,13 @@ silently re-pointed.
    class found on 2026-08-22 and 2026-08-28 before that, each time costing control runs.
    forcing: gate — a required local gate is permanently red for reasons unrelated to any
    change, which `claude/RULES.md` names as worse than no gate.
-3. **Confirm the trailer on real devrc commits.** The only claim this session could not
-   make. `git -C ~/workspace/devrc log -8 --format='%h %(trailers:key=Claude-Session-Id,valueonly)'`
-   on `main` in a day or two — agent commits should carry it. A run of blanks means the
-   arming did not take across other sessions, not that the hook is broken.
-   forcing: none — cheap observation, nothing external waiting.
+3. ✅ **DONE — trailer confirmed on a real devrc commit.** Kept in place so the numbering
+   does not shift. Closed by **`fa64c986`** (the commit that landed this very doc, made
+   from the worktree `devrc-handoff-cairn-arm`): its message carries
+   `Claude-Session-Id: 8cdbb099-…` and `git log -1
+   --format='%(trailers:key=Claude-Session-Id,valueonly)'` returns it. **Do not re-work
+   this item.**
+   forcing: none — closed.
 4. **cg#428 Layer B — criterion 4 (URL resolution).** BLOCKED on devrc#1011. Must IMPORT
    `scripts/collector/mention_scan.py`'s `CLICKUP_TASK_URL` / `_github_url` /
    `clawgate_url`; do not write a second resolver. Files
@@ -577,6 +581,19 @@ silently re-pointed.
   (`clawgate_handoff.sh resolve` → rc 0, `#365 role=worked`), but `field <doc>` → rc 0
   means a readable field is already present ⇒ leave it alone. Same call the previous
   session made for 428.
+
+- 🔴 **A WORKTREE SHARES `.git/hooks` WITH THE CLONE — which is how rank 3 closed itself.**
+  `install-session-stamp.sh` writes into the **common** git dir, so the hook applies to
+  every worktree of that clone, including one created after the install. The commit that
+  landed this doc (`fa64c986`, made by `handoff_doc.py` from a fresh worktree) was stamped
+  and parses. That is the same 123-worktree reach that made arming a blast-radius decision
+  — read it both ways: it is why the feature works everywhere, and why a defect in it
+  would too.
+- ⚠ **`handoff_doc.py` runs git from inside Python, so no PreToolUse hook sees its commit**
+  — including the never-commit-to-`main` guard. This session's doc was landed from a
+  worktree on a topic branch **by hand**, because devrc forbids committing to `main` and
+  the tool would have pushed to whatever branch the checkout sat on. Check
+  `git branch --show-current` yourself before `--confirm --push`.
 
 ## How to verify
 ```bash
