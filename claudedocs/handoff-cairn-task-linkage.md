@@ -52,19 +52,27 @@ genuinely built versus assumed.
 
 ## The cluster — ClickUp ↔ clawgate ↔ Cairn
 All six ClickUp tickets came from the **2026-08-26 harness / knowledge-sharing meeting**
-(Discord voice, ~122 min; Zach + Justin + Koen) — the same date `handoff-cairn.md`
+(Discord voice, ~122 min; Zach + two teammates) — the same date `handoff-cairn.md`
 records as when the system was presented. They are the team-facing half of Cairn.
 **None of them contains the word "cairn"**, which is why they are invisible to a
 name search; the `project:cairn` tag now fixes that.
 
+🔴 **The ClickUp ids are deliberately NOT in this public repo.** They are a real
+team-workspace namespace; this file is on `main` of a PUBLIC repo. The mapping is not
+lost — each mirrored card carries its ticket as a `clickup:` tag on the personal clawgate
+board, so the column below is recoverable in one read:
+```bash
+clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg#\(.id) \(.tags|join(","))"'
+```
+
 | ClickUp | clawgate | what it maps to in Cairn |
 |---|---|---|
-| `868kx9eut` | **cg#364** | the subsystem store + `cairn recall` |
-| `868kx9ety` | **cg#363** | `/handoff` |
-| `868kx9et9` | **cg#362** | `cairn who` / transcripts |
-| `868kx9ev6` | **cg#365** | the `Claude-Session:` commit trailer |
-| `868kx9evj` | — *(not mirrored)* | Justin's private-repo migration — the blocker |
-| `868kp7fe6` | cg#256 | complete; the precedent |
+| *(`clickup:` tag on the card)* | **cg#364** | the subsystem store + `cairn recall` |
+| *(`clickup:` tag on the card)* | **cg#363** | `/handoff` |
+| *(`clickup:` tag on the card)* | **cg#362** | `cairn who` / transcripts |
+| *(`clickup:` tag on the card)* | **cg#365** | the `Claude-Session:` commit trailer |
+| *(not mirrored — no card)* | — | a teammate's private-repo migration — the blocker |
+| *(`clickup:` tag on the card)* | cg#256 | complete; the precedent |
 
 ## Open investigations — live diagnosis state
 
@@ -76,11 +84,18 @@ name search; the `project:cairn` tag now fixes that.
   `mirror.py:641-644` — `plan()` returns UNCHANGED only while
   `row["content_hash"] == content_hash(payload)`, compared against the **ledger**, not
   against clawgate's live state. `repo_for()` (`:351-354`) keys on `list_id` only, and
-  `by_list_id` maps `901111220963` → `civitai/civitai`.
+  `by_list_id` maps the synced-team list id → `civitai/civitai`. (The literal list id is
+  in `config-configmap.yaml`; it is a real workspace id, so it is not written here.)
 - **Ruled out:** "it reverts on the next run" — that was my first reading and it is
   wrong; an unchanged ticket is never patched at all.
 - **Leading hypothesis:** still correct as of session end (verified by re-read), and it
   will revert silently the first time any of those four ClickUp tickets is edited.
+- **RE-PROBED 2026-08-29 — STILL NOT REVERTED.** Live read: cg#363/364/365 all
+  `repo=innovation-upstream/devrc`, cg#362 `repo=` (unset) — exactly the hand-corrected
+  values. Nothing read `civitai/civitai`. ⚠ This is a **negative** observation and it does
+  NOT weaken the hypothesis: the mechanism only fires when a ticket's content hash moves,
+  so "not reverted yet" is the predicted state, not a refutation. The window stays open
+  until one of those four tickets is edited.
 - **Next probe, verbatim:**
   ```bash
   clawgatectl task ls --summary 2>/dev/null | jq -r '.[] | select(.id>=362 and .id<=365) | "cg#\(.id) repo=\(.repo)"'
@@ -126,18 +141,25 @@ name search; the `project:cairn` tag now fixes that.
 - **Next probe:** work cg#439, not this doc.
 
 ## Next steps (ranked)
-1. **Verify #1049 actually merged, then clean up.** Both required checks were GREEN and a
-   squash merge was issued at session end — **confirm by CONTENT, never by ancestry**: a
-   squash makes `merge-base --is-ancestor` false forever. `gh pr view 1049 --json
-   mergedAt,mergeCommit` AND diff the files against `origin/main`. Then `claim-work
-   --release cairn-task-linkage-1`; `git -C ~/workspace/devrc fetch origin && git -C
-   ~/workspace/devrc merge --ff-only origin/main`; `git worktree remove
-   ~/workspace/devrc-cairn-task-refs`. Three worktrees under
-   `~/workspace/devrc/.claude/worktrees/agent-*` are audit leftovers.
-   ⚠ **IN FLIGHT: innovation-upstream/devrc#1049.**
-2. **PR #1039 — this doc's own branch — is still OPEN and unmerged.** It carries
-   `claudedocs/handoff-cairn-task-linkage.md`, so THIS FILE does not exist on `main`.
-   Merge it, or the next `/resume` finds no handoff at the path the kickoff names.
+1. ✅ **DONE 2026-08-29 — #1049 merged, verified BY CONTENT, cleanup complete.**
+   `mergedAt=2026-08-30T03:05:48Z`, squash `ee5b2b7b`. All **6** changed blobs at PR head
+   `485202f8` are byte-**identical** to `origin/main` (`index-store.md`,
+   `subsystem_recall.py`, `subsystem_resolver.py`, `run-tests.sh`,
+   `test_subsystem_resolver.py`, `test_subsystem_task_refs.py`) — the ancestry check was
+   never consulted. Cleanup: `cairn-task-linkage-1` was **already released**; the base
+   clone was **already** at `origin/main` (no ff-merge needed); worktree
+   `~/workspace/devrc-cairn-task-refs` removed after re-verifying `dirty=0 unpushed=0` at
+   the moment of removal. ⚠ **The "three audit leftovers" claim was WRONG** — there are
+   **~60** worktrees under `~/workspace/devrc/.claude/worktrees/agent-*` plus ~40 sibling
+   `~/workspace/devrc-*` ones. That is a real backlog with its own owner (the
+   `worktree-prune` index entry, 🔴 1 OPEN); do NOT mass-remove it as cleanup for this
+   effort. One of them is `locked`.
+2. **IN FLIGHT — PR #1039, this doc's own branch.** It carries
+   `claudedocs/handoff-cairn-task-linkage.md`, so THIS FILE does not exist on `main` until
+   it lands. Its effective diff vs `main` is **this one file only** (302 lines); the other
+   10 paths `gh pr view --json files` reports landed on `main` independently and are
+   already identical. It is 33 commits behind `main`, which does not block (`strict:
+   false`). Merge it, or the next `/resume` finds no handoff at the path the kickoff names.
 3. **cg#428 Layer B — criterion 4 (URL resolution).** BLOCKED on devrc#1011. It
    IMPORTS `scripts/collector/mention_scan.py`'s `CLICKUP_TASK_URL` / `_github_url` /
    `clawgate_url`; do not write a second resolver. Files:
@@ -149,7 +171,10 @@ name search; the `project:cairn` tag now fixes that.
 5. **Decide cg#365's canonical session id.** A decision, not a build.
 6. **Put `cairn` on PATH.** Two lines in `nix/home.nix` mirroring `claim-work`
    (`:1238`, `mkOutOfStoreSymlink`) + a switch. Small, unblocked.
-7. **BLOCKED — do not start:** cg#362 and cg#363 wait on ClickUp `868kx9evj`.
+7. **BLOCKED — do not start:** cg#362 and cg#363 wait on the teammate's private-repo
+   migration ticket. ⚠ That is the **one** redacted id with no clawgate mirror, so unlike
+   the other five it is NOT recoverable from a `clickup:` tag — find it in the ClickUp
+   list by its description (the private-repo migration, from the 2026-08-26 meeting).
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **cg#428 COLLIDES WITH OPEN PR #1011 (`feat/mention-detection-click-to-open`), and
@@ -164,7 +189,8 @@ name search; the `project:cairn` tag now fixes that.
   `mention-detection-2` and a Cairn front-matter slug would never collide.
 - 🔴 **OPERATOR DECISION 2026-08-29 — the scope boundary, and it RETRACTS a finding.**
   *"clickup and cairn will be used by the team (including me), clawgate is only used by
-  me."* Consequences: (a) the clickup-mirror's `scope.assignee_id: 81593871` is
+  me."* Consequences: (a) the clickup-mirror's `scope.assignee_id` pin (a single operator
+  id, in the ConfigMap) is
   **correct by design, not a defect** — this session first reported it as a gap ("the one
   item gating this one is the one item this board cannot show") and that was wrong;
   (b) it **closes** the "should the mirror pull everyone's tasks" question — it should
@@ -221,6 +247,19 @@ name search; the `project:cairn` tag now fixes that.
 - 🔴 **OPERATOR DECISIONS 2026-08-29/30, all four explicit.** (a) **Merge** #1049,
   squash. (b) **Accept the leaked ClickUp id — do NOT rewrite the branch.** (c) **File
   the flake** → cg#439. (d) **Stop the audit ladder at round 3.**
+- 🔴 **OPERATOR DECISION 2026-08-29 — REDACT THE CLICKUP IDS BEFORE THIS DOC LANDS ON
+  PUBLIC `main`.** The previous session's acceptance of the leaked id (decision (b) below)
+  was about a PR ref that was *already public and unrecoverable*; putting the same class
+  of id onto `main` **deliberately** is a different decision and was still avoidable.
+  Redacted from this file: the six `868…` ClickUp task ids, the mirror's `assignee_id`,
+  and the synced-team `list_id`. Two teammates' first names went with them.
+  **The redaction is LOSSLESS and that was verified, not assumed** — cg#362/363/364/365
+  each carry a `clickup:868…` tag on the personal clawgate board, so the whole ClickUp
+  column is one `clawgatectl task ls` away for the one reader who has that board.
+  ⚠ **Deliberately NOT redacted: the `Claude-Session:` token** in the cg#365 section — it
+  already appears in **9 of the last 200** commit *messages* on `origin/main`. Scrubbing
+  the prose while it sits in the git log is theatre, and would have read as a guarantee
+  this repo does not provide.
 - 🔴 **THE "SQUASH KEEPS MAIN CLEAN" CLAIM WAS FALSE, AND IS RETRACTED.** A real
   team-workspace ClickUp id shipped in commit `c7049b11`, which is already pushed to
   `origin/feat/cairn-task-refs` and `refs/pull/1049/head` on a PUBLIC repo. GitHub
