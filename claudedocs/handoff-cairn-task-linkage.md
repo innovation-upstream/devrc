@@ -21,28 +21,34 @@ durable output is the linkage: which ClickUp ticket, which clawgate card, and wh
 genuinely built versus assumed.
 
 ## State now
-- **Branch / PR:** nothing in flight from this session. No code was written; the work
-  products are clawgate cards and comments.
-- 🔴 **The session STARTED on `feat/flake-lock-and-discord-ext` and ENDED on `main`** —
-  the branch changed underneath it, unobserved, in a shared checkout. Nothing was
-  committed while it was wrong. This is the `claude/RULES.md` "re-check WHICH branch
-  before ANY write" class, and it fired for real here.
-- **Created (clawgate):**
-  - **cg#428** — `cairn: subsystem entries carry no task ref — add a lossless
-    multi-system tasks: key (clickup, github, clawgate first-class)`. repo
-    `innovation-upstream/devrc`, dir `scripts/lib`, tags `project:cairn devrc tooling`.
-  - **cg#429** — `clickup-mirror: per-task repo override`. repo `homelab-talos`, dir
-    `scripts/clickup-mirror`, tags `tooling infra tech-debt`.
-- **Mutated (clawgate), all verified by re-read:** cg#362–365 tagged `project:cairn`;
-  `repo` corrected (363/364/365 → `innovation-upstream/devrc`, 362 → unset);
-  one comment each; cg#364 cross-linked to cg#428; cg#383 given fresh measurement.
-- **cg#363's comment was REPLACED, not appended to** — the original asserted a defect
-  that the operator's scope answer disproved. Comment 457 deleted, 467 posted carrying
-  an explicit retraction.
-- **Nothing was written to ClickUp.** Verified after the fact: `No comments on this
-  task.` on the tickets sampled. Writeback is live but its scope is ritual
-  pickup/completion comments, status transitions and PR links — not arbitrary comments.
-- **Deploy/verify:** nothing deployed. No code changed in any repo.
+- **Branch / PR:** `feat/cairn-task-refs` @ **485202f8** → **innovation-upstream/devrc#1049**, OPEN.
+  Contains current `origin/main` (merged 3×, `main` moved 4× during gating).
+- **cg#428 is `ready_for_review`, 5 comments.** Criteria **1,2,3,5,6,7,8,9 DONE**.
+  **Criterion 4 (URL resolution) NOT DONE** — Layer B, blocked on devrc#1011.
+- **Shipped:** `tasks:` / `task:` front-matter schema on subsystem entries —
+  `scripts/lib/subsystem_resolver.py` (`TaskRef`, `parse_task_ref`, `format_task_refs`,
+  `lossy_tag_for`, block-list support in `parse_front_matter`, validation in
+  `from_mapping`), read surface in `scripts/lib/subsystem_recall.py`, 77 tests in
+  `scripts/tests/test_subsystem_task_refs.py`, schema documented in
+  `claude/skills/analyze-service/reference/index-store.md` (hash pin updated).
+- **Also carries two gate re-pins** neither side needed alone:
+  `scripts/tests` floor 8217 → **10269** (`scripts/run-tests.sh`), and a skill-listing
+  re-pin that turned out to duplicate #1069 and was resolved to `main`'s copy.
+- **Filed:** **cg#439** — the `test_git_repo_isolation` co-tenancy flake.
+- **Carried forward from the previous session** (its State-now section is replaced by this
+  one, so the provenance is restated rather than lost): cg#428 and cg#429 were CREATED
+  then; cg#362–365 were tagged `project:cairn` and had `repo` hand-corrected
+  (363/364/365 → `innovation-upstream/devrc`, 362 → unset). **Re-probed this session: NOT
+  reverted.** That correction is what rank 4's regression case watches.
+- **Gates at 485202f8: BOTH TIERS GREEN LOCALLY.** dev-host `gate.sh` →
+  `GATE: RESULT=PASS exit=0`; sandbox `nix build .#checks.{pytests,nodetests}` → exit 0
+  (read with no pipe; negative control `.doesnotexist` → exit 1).
+- ✅ **BOTH REQUIRED TEKTON CHECKS PASSED on 485202f8** — `devrc-pytests`
+  `collected=18905 passed=18903 skipped=2 failed=0 (floor 18076)`, `devrc-nodetests`
+  `1366/1366 (floor 1317)`. They sat `pending` for ~20 min first; a bounded poll settled
+  it. Branch protection was NOT touched.
+- **Deploy/verify:** nothing deployed. No `home-manager switch`; nothing in `nix/`.
+  The schema is inert until something writes a `tasks:` key — `/handoff` does not yet.
 
 ## The cluster — ClickUp ↔ clawgate ↔ Cairn
 All six ClickUp tickets came from the **2026-08-26 harness / knowledge-sharing meeting**
@@ -97,24 +103,53 @@ name search; the `project:cairn` tag now fixes that.
 - **Next probe:** decide rather than measure — stamp the transcript uuid, stamp both, or
   have the ingestion service (cg#362) own the mapping. It is a decision, not a bug.
 
+### CLOSED — the required Tekton checks settled green (was: do they ever settle?)
+- **Observed (with values):** checks were absent entirely (`no checks reported on the
+  branch`) after two pushes, then `pending` for ~20 min on head `485202f8`, then
+  **both PASSED**: pytests `collected=18905 passed=18903 skipped=2 failed=0`, nodetests
+  `1366/1366`. A bounded 25-minute poll settled it; branch protection was never touched.
+- **Ruled out, and worth keeping:** `no checks reported on the branch` is Tekton not
+  having picked the head up yet — it is NOT a pass and NOT `CLAUDE.md`'s recorded
+  stuck-forever mode. Three states, not two, and only the third needs a fresh push.
+- **Resolution:** ordinary queue latency. The rival (a `timeouts.tasks` run leaving
+  checks pending forever) did not fire. Waiting beat reaching for the escape hatch.
+
+### `test_git_repo_isolation` co-tenancy flake — FILED as cg#439, not open here
+- **Observed:** the SAME sandbox derivation failed then passed (identical store path);
+  fails on BOTH tiers; passes **5/5 in isolation**; the counted co-tenant was a `git
+  fetch` from a DIFFERENT test's temp dir (`test_a_hanging_fetch_is_BOUNDE0/hangs`).
+- **Ruled out:** caused by #1049 — the file is byte-identical to `origin/main`, and the
+  same-derivation flip settles it independently.
+- **Leading hypothesis (UNCONFIRMED, in the card):** `live_cotenants`
+  (`scripts/testlib/gitenv.py:810`) excludes `_own_process_lineage()` = ANCESTORS, so a
+  `git` DESCENDANT the test itself spawned is not excluded.
+- **Next probe:** work cg#439, not this doc.
+
 ## Next steps (ranked)
-1. **Read PR #1011 FIRST, then build cg#428 on its grammar.** repo `devrc`, files
-   `scripts/lib/subsystem_recall.py`, `subsystem_touch.py`, `scripts/cairn`,
-   `scripts/tests/test_subsystem_*`. See the 🔴 collision under Gotchas — this is the
-   single highest-value item and its first task is *not* writing a parser.
-   ⚠ **IN FLIGHT: innovation-upstream/devrc#1011**, and #1033/#998 touch the same files.
-2. **cg#429 — clickup-mirror per-task repo override.** repo `homelab-talos`, files
-   `scripts/clickup-mirror/mirror.py`, `clusters/workbench/apps/clickup-mirror/config-configmap.yaml`.
-   Run the first open-investigation probe before starting; a revert is its regression case.
-3. **Decide cg#365's canonical session id.** A decision, not a build. Gates the git-hook
-   card. The operator's "hard cluster dependency is acceptable" answer widens the options.
-4. **Put `cairn` on PATH.** `scripts/cairn` is tracked and executable with tests, and
-   `grep`ing all of `nix/` for "cairn" returns **nothing** — no deploy wiring exists.
-   Two lines in `nix/home.nix` mirroring `claim-work` (`:1238`, an
-   `mkOutOfStoreSymlink`) plus a switch. Small, unblocked, and it is why the tool is
-   invisible today.
-5. **BLOCKED — do not start:** cg#362 and cg#363 both wait on ClickUp `868kx9evj`
-   (Justin's private-repo migration). Not on the clawgate board, correctly (see below).
+1. **Verify #1049 actually merged, then clean up.** Both required checks were GREEN and a
+   squash merge was issued at session end — **confirm by CONTENT, never by ancestry**: a
+   squash makes `merge-base --is-ancestor` false forever. `gh pr view 1049 --json
+   mergedAt,mergeCommit` AND diff the files against `origin/main`. Then `claim-work
+   --release cairn-task-linkage-1`; `git -C ~/workspace/devrc fetch origin && git -C
+   ~/workspace/devrc merge --ff-only origin/main`; `git worktree remove
+   ~/workspace/devrc-cairn-task-refs`. Three worktrees under
+   `~/workspace/devrc/.claude/worktrees/agent-*` are audit leftovers.
+   ⚠ **IN FLIGHT: innovation-upstream/devrc#1049.**
+2. **PR #1039 — this doc's own branch — is still OPEN and unmerged.** It carries
+   `claudedocs/handoff-cairn-task-linkage.md`, so THIS FILE does not exist on `main`.
+   Merge it, or the next `/resume` finds no handoff at the path the kickoff names.
+3. **cg#428 Layer B — criterion 4 (URL resolution).** BLOCKED on devrc#1011. It
+   IMPORTS `scripts/collector/mention_scan.py`'s `CLICKUP_TASK_URL` / `_github_url` /
+   `clawgate_url`; do not write a second resolver. Files:
+   `scripts/lib/subsystem_resolver.py`, `scripts/tests/test_subsystem_task_refs.py`.
+4. **cg#429 — clickup-mirror per-task repo override.** repo `homelab-talos`, files
+   `scripts/clickup-mirror/mirror.py`,
+   `clusters/workbench/apps/clickup-mirror/config-configmap.yaml`. Run the repo-revert
+   probe first (below); a revert is its regression case.
+5. **Decide cg#365's canonical session id.** A decision, not a build.
+6. **Put `cairn` on PATH.** Two lines in `nix/home.nix` mirroring `claim-work`
+   (`:1238`, `mkOutOfStoreSymlink`) + a switch. Small, unblocked.
+7. **BLOCKED — do not start:** cg#362 and cg#363 wait on ClickUp `868kx9evj`.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **cg#428 COLLIDES WITH OPEN PR #1011 (`feat/mention-detection-click-to-open`), and
@@ -183,17 +218,85 @@ name search; the `project:cairn` tag now fixes that.
   three `BLOCKED` and the rest `UNKNOWN`. Confirm the gate is green before assuming
   cg#428 can land.
 
+- 🔴 **OPERATOR DECISIONS 2026-08-29/30, all four explicit.** (a) **Merge** #1049,
+  squash. (b) **Accept the leaked ClickUp id — do NOT rewrite the branch.** (c) **File
+  the flake** → cg#439. (d) **Stop the audit ladder at round 3.**
+- 🔴 **THE "SQUASH KEEPS MAIN CLEAN" CLAIM WAS FALSE, AND IS RETRACTED.** A real
+  team-workspace ClickUp id shipped in commit `c7049b11`, which is already pushed to
+  `origin/feat/cairn-task-refs` and `refs/pull/1049/head` on a PUBLIC repo. GitHub
+  serves that blob indefinitely and the PR ref survives branch deletion — **no merge
+  strategy removes it.** Only a branch rewrite + force-push before merge would, and even
+  that leaves the orphan until GC. The PR body and all comments were redacted and the
+  tree is clean; `origin/main` never carried it. Operator accepted the residue.
+- 🔴 **THE AUDIT LADDER: EACH ROUND'S FIX CREATED THE NEXT DEFECT. Twice.**
+  R1: the block-form fix closed the corruption for CLEAN input only — an empty item
+  (`- ` with trailing space, or a bare `-`) resurrected the phantom-key corruption AND
+  made it worse, because `tasks` then read falsy so the entry LOADED CLEAN with
+  `tasks=[]` and `--validate` printed OK.
+  R2: the fix for THAT added a blank-line bound that broke **valid YAML** — verified
+  against PyYAML — to prevent a hazard that does not exist (a `- ` list binding to the
+  nearest preceding key IS what YAML does). Reverted; the guard moved to the outer loop.
+  R3: sound. No regression over 81,160 fuzzed shapes and 122 live entries.
+- 🔴 **THE ORACLE FOR "WHAT DOES THIS FRONT MATTER MEAN" IS PyYAML, NOT THE AUTHOR.**
+  The guard written for the imaginary hazard asserted my own belief about a bare key,
+  passed, and the parser was meanwhile disagreeing with every other reader of the same
+  bytes. A test that pins the author's model cannot catch the author being wrong about
+  the format. Now a differential over 8 shapes; PyYAML is `importorskip`, present in
+  BOTH tiers (`gatePyEnv`, `flake.nix:100-107`), and the phantom-key half asserts
+  without it.
+- 🔴 **A FIXTURE DERIVED FROM THE CONSTANT UNDER TEST CANNOT SEE THAT CONSTANT CHANGE.**
+  The `TAG_MAX_RUNES` boundary test built both fixtures by arithmetic from the constant,
+  so `64 -> 65` survived anyway. Constant now pinned as its own assertion, fixtures
+  literal. `claude/RULES.md` names this trap; it was walked into while avoiding a
+  different rot.
+- 🔴 **THE DRIFT CEILING FIRED ONLY ON THE MERGED TREE — the argument for gating one.**
+  `origin/main` collected 10137, the branch 10112, both under the 8217+2054=10271
+  ceiling; their merge collects 10319 and crosses it. With `strict: false` nothing
+  checks that automatically. **And the fix has an ORDER**: pinning 10269 while the
+  branch still collected 10112 would have put the branch UNDER its own new floor and
+  turned its required checks red — so `main` is merged INTO the branch first. Pin a
+  floor on the tree you measured.
+- 🔴 **A DUPLICATE LANDED MID-SESSION: #1069 re-pinned the skill-listing measurements
+  while this branch was gating**, doing exactly what commit `8ceabaa4` here did. The
+  pre-merge sweep could not see it — #1069 did not exist when the sweep ran. Resolved to
+  `main`'s copy; **both sides had pinned IDENTICAL values** (38 / 24 / 8,909 / 9,120 /
+  13,106, ceiling 9,200), which is two independent measurements agreeing. `rerere` was
+  DISABLED for that merge — it has previously replayed a stale resolution onto a floor
+  line, and the file next door in this PR is a floor table.
+- 🔴 **`gh pr checks` reported "no checks reported on the branch" TWICE after a push** —
+  that is Tekton not having picked the head up yet, NOT a passing state and NOT the
+  stuck mode. Distinguish before acting on it.
+- ⚠ **TWO EQUIVALENT MUTANTS ARE DOCUMENTED IN THE SOURCE, deliberately not "fixed":**
+  removing either blank-line `break` in `_block_items_from`/`_block_ends_at`, and
+  narrowing the outer skip to `startswith("- ")`. Each is masked by the other guard.
+  Both are named in docstrings so the next reader does not delete the load-bearing half.
+- ⚠ **`git cat-file -e <ref>:<path>` failing can mean the REF is unfetched, not that
+  the path is absent.** That reading nearly concluded this doc did not exist on its own
+  branch. Fetch the ref first, then ask.
+- ⚠ **A SCOPED NUMBER MUST CARRY ITS SCOPE.** "1,729 green" (four suites) and the
+  byte-identity figures (`subsystem_recall.py --scope devrc` text output) were both true
+  and both unreproducible by an auditor who ran the full suite / a different tool.
+- ⚠ **`clawgatectl task create` flags are `--directory` and repeatable `--tag`** — not
+  `--dir`/`--tags`. And its PreToolUse gate cannot read a `--body-file` whose path is a
+  shell substitution; use a heredoc `--body`.
+- **This doc's `clawgate-task:` is 364; this session's WORKED task was 428.** Left as
+  364 deliberately (`clawgate_handoff.sh field` → rc 0 ⇒ leave it alone). 428 is
+  cross-linked to 364.
+
 ## How to verify
 ```bash
-# the two cards exist, with intact bodies and a criteria heading
-for id in 428 429; do clawgatectl task get $id | jq -r '"cg#\(.id) \(.status) repo=\(.repo) criteria=\(if (.body|test("(?m)^## Acceptance criteria")) then "YES" else "NO" end)"'; done
+# the PR and its checks
+gh pr view 1049 --repo innovation-upstream/devrc --json state,mergeable,mergeStateStatus
+gh pr checks 1049 --repo innovation-upstream/devrc
 
-# the four cluster cards carry the tag, and their repo has not reverted
-clawgatectl task ls --summary 2>/dev/null | jq -r '.[] | select(.id>=362 and .id<=365) | "cg#\(.id) repo=\(.repo) tags=\((.tags//[])|join(","))"'
+# both gate tiers on the branch (BOTH are required; they are different tiers)
+nix develop ~/workspace/devrc-cairn-task-refs -c bash ~/workspace/devrc-cairn-task-refs/scripts/gate.sh
+nix build ~/workspace/devrc-cairn-task-refs#checks.x86_64-linux.pytests --no-link; echo "rc=$?"
 
-# ClickUp was not written to
-node ~/.claude/skills/clickup/query.mjs comments 868kx9eut   # expect: No comments on this task.
+# the schema itself, end to end
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  ~/workspace/devrc-cairn-task-refs/scripts/tests/test_subsystem_task_refs.py -q
 
-# the collision this doc is most concerned with
-gh pr view 1011 --repo innovation-upstream/devrc --json files --jq '.files[].path'
+# cg#362-365 repo values have not reverted (rank 4's regression case)
+clawgatectl task ls --summary 2>/dev/null | jq -r '.[] | select(.id>=362 and .id<=365) | "cg#\(.id) repo=\(.repo)"'
 ```
