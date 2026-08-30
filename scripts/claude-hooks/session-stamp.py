@@ -2,11 +2,12 @@
 """PreToolUse hook: record this session's id so `prepare-commit-msg` can stamp it.
 
 WHY A HOOK AND NOT AN INSTRUCTION. The `Claude-Session:` trailer that exists
-today is emitted because the agent is TOLD to emit it, and measured
-line-anchored on `origin/main` at `3b1a0477` (2026-08-30) that lands on 41% of
-the last 100 commits and 27% of the last 200. The rest cannot be resolved to a
-session at all. `claude/RULES.md` — "prefer deterministic/structural fixes over
-prompt-tuning, prose instructions" — is exactly this case.
+today is emitted because the agent is TOLD to emit it, and counted PER COMMIT on
+`origin/main` at `3b1a0477` (2026-08-30) it lands on 47 of the last 100 and 67 of
+the last 200 — 47% and 33%. The rest cannot be resolved to a session at all.
+`claude/RULES.md` — "prefer deterministic/structural fixes over prompt-tuning,
+prose instructions" — is exactly this case. (Two earlier figures here were wrong;
+`scripts/lib/session_trailer.py` records both and why.)
 
 WHAT IT RECORDS. The hook payload's `session_id`: the runtime's own handle,
 which is what `claude --resume` takes. NOT the claude.ai token in the existing

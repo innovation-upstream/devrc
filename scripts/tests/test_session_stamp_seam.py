@@ -305,32 +305,245 @@ class TestTheInterpreterCanNeverBlockACommit:
 
 
 class TestTheMessageFileIsNeverDestroyed:
-    """🔴 ROUND-2 — audit 🟡-1. `open(path,"w")` truncates BEFORE writing, and the
-    write can fail. Measured: a 77-byte message became 0 bytes, the hook exited
-    0, and git then refused with "Aborting commit due to empty commit message" —
-    so the operator lost the message AND the commit."""
+    """🔴 ROUND-2 fix, 🔴 ROUND-3 test. `open(path,"w")` truncates BEFORE writing,
+    and the write can fail. Measured: a 77-byte message became 0 bytes, the hook
+    exited 0, and git then refused with "Aborting commit due to empty commit
+    message" — the operator lost the message AND the commit.
 
-    def test_a_failed_write_leaves_the_original_message_intact(self, repo, tmp_path):
+    ⚠ THE ROUND-2 VERSION OF THIS TEST WAS VACUOUS, and an audit mutation-proved
+    it: it pointed the impl at a path whose PARENT did not exist, so the initial
+    `open(..., "r")` raised and the code returned before reaching any write path
+    at all. Reverting the fix — restoring the truncating write — left the suite
+    86/86 GREEN. The assertion was then made against a different file the hook had
+    never been pointed at.
+
+    What discriminates is the INODE: writing beside and renaming replaces the
+    file, so its inode changes; truncate-in-place keeps it. That is a property of
+    the mechanism rather than of the happy path, so it stays red under the mutant.
+    """
+
+    def test_the_message_is_written_by_rename_not_by_truncation(self, repo, tmp_path):
         install(repo)
         record(repo, "seam-session-1", 4242)
         msg = tmp_path / "COMMIT_EDITMSG"
-        original = "feat: a thing\n\nA body worth not losing.\n"
+        msg.write_text("feat: a thing\n\nA body worth not losing.\n")
+        before = msg.stat().st_ino
+        out = subprocess.run(
+            [sys.executable, str(IMPL), str(msg)],
+            capture_output=True, text=True,
+            env={**os.environ,
+                 "DEVRC_SESSION_TRAILER_PID": "4242",
+                 "DEVRC_SESSION_TRAILER_ROOT": str(state_root_for(repo))},
+        )
+        assert out.returncode == 0, out.stderr
+        text = msg.read_text()
+        # It really did stamp — otherwise the inode check below is vacuous too.
+        assert "Claude-Session-Id: seam-session-1" in text
+        assert "A body worth not losing." in text
+        assert msg.stat().st_ino != before, (
+            "the message file was modified IN PLACE, which means it was truncated "
+            "before writing — a failed write there empties the operator's commit "
+            "message and loses the commit")
+
+    def test_a_message_the_hook_does_not_stamp_is_left_completely_alone(self, repo, tmp_path):
+        """Negative control: no session recorded => no write of any kind, so the
+        inode assertion above is about the WRITE PATH, not about merely running."""
+        install(repo)
+        msg = tmp_path / "COMMIT_EDITMSG"
+        original = "feat: a thing\n"
         msg.write_text(original)
-        # Make the rename fail by pointing the temp path at an unwritable dir.
-        impl = IMPL
-        ro = tmp_path / "ro"
-        ro.mkdir()
-        ro.chmod(0o500)
-        try:
-            out = subprocess.run(
-                [sys.executable, str(impl), str(ro / "nope" / "COMMIT_EDITMSG")],
-                capture_output=True, text=True,
-                env={**os.environ,
-                     "DEVRC_SESSION_TRAILER_PID": "4242",
-                     "DEVRC_SESSION_TRAILER_ROOT": str(state_root_for(repo))},
-            )
-            assert out.returncode == 0
-        finally:
-            ro.chmod(0o700)
-        # The real message, untouched by the failed run.
+        before = msg.stat().st_ino
+        out = subprocess.run(
+            [sys.executable, str(IMPL), str(msg)],
+            capture_output=True, text=True,
+            env={**os.environ,
+                 "DEVRC_SESSION_TRAILER_PID": "999999",
+                 "DEVRC_SESSION_TRAILER_ROOT": str(state_root_for(repo))},
+        )
+        assert out.returncode == 0
         assert msg.read_text() == original
+        assert msg.stat().st_ino == before
+
+
+class TestTheGeneratedWrapperCannotBeInjected:
+    """🔴 ROUND-3 — the round-2 audit's most serious finding.
+
+    `--source` used to be interpolated raw into an UNQUOTED heredoc, so a path
+    containing a double quote or a backtick emitted shell that RAN ON EVERY
+    `git commit` (both verified by the auditor via a marker file), and one
+    containing `$` expanded at hook time to a path that did not exist, silently
+    killing the feature. The heredoc is quoted now and the one interpolated value
+    goes through `printf %q`.
+    """
+
+    def _install_from(self, repo, source_root, env=None):
+        return subprocess.run(
+            [str(INSTALLER), "--repo", str(repo), "--source", str(source_root),
+             "--apply"],
+            capture_output=True, text=True, env={**os.environ, **(env or {})})
+
+    def _fake_checkout(self, tmp_path, name):
+        """A --source whose NAME carries the hostile character."""
+        root = tmp_path / name
+        (root / "scripts" / "git-hooks").mkdir(parents=True)
+        (root / "scripts" / "git-hooks" / "prepare_commit_msg.py").write_text(
+            "import sys; sys.exit(0)\n")
+        return root
+
+    # 🔴 REAL PAYLOADS, NOT TEXTBOOK CHARACTERS. A first version used names like
+    # `quote"root`, which merely BREAKS the quoting — it executes nothing, so the
+    # guard passed against the vulnerable installer and proved nothing. These
+    # close the assignment and run a command, which is what the vulnerability
+    # actually was. (A directory name may contain anything but "/" and NUL.)
+    @pytest.mark.parametrize("name,marker", [
+        ('a";touch "$CANARY";x="b', "PWNED_QUOTE"),
+        ("a`touch $CANARY`b", "PWNED_TICK"),
+        ("a$(touch $CANARY)b", "PWNED_SUBST"),
+        ("space root", "PWNED_SPACE"),
+    ])
+    def test_a_hostile_source_path_cannot_execute_anything(
+            self, repo, tmp_path, name, marker):
+        # 🔴 CANARY IS SET FOR BOTH PHASES, and there is NO early return.
+        # An earlier version set it only when running the hook and bailed out
+        # when the install failed — so the payload's `touch "$CANARY"` ran with
+        # an EMPTY argument during install (a no-op) and any install failure
+        # passed the test vacuously. Measured: that version survived the
+        # vulnerable installer. Injection can fire at EITHER phase — heredoc
+        # expansion happens at install time — so both are armed and both checked.
+        canary = tmp_path / marker
+        env = {"CANARY": str(canary)}
+        root = self._fake_checkout(tmp_path, name)
+        out = self._install_from(repo, root, env=env)
+        assert not canary.exists(), (
+            f"injected shell from --source {name!r} ran during INSTALL")
+
+        hooks = Path(git(repo, "rev-parse", "--path-format=absolute",
+                         "--git-common-dir").stdout.strip()) / "hooks"
+        hook = hooks / "prepare-commit-msg"
+        if out.returncode != 0:
+            # Refusing outright is a safe outcome, but only if it left no hook
+            # behind that would run the payload later.
+            assert not hook.exists(), (
+                "install failed yet still wrote a hook built from a hostile path")
+            return
+        msg = tmp_path / "COMMIT_EDITMSG"
+        msg.write_text("feat: x\n")
+        subprocess.run([str(hook), str(msg)], capture_output=True, text=True,
+                       env={**os.environ, **env})
+        assert not canary.exists(), (
+            f"the generated hook EXECUTED injected shell from --source {name!r}")
+        # …and the path really did survive, so this is not a vacuous pass.
+        # 🔴 Compare the RESOLVED value, not the raw substring: `printf %q` escapes
+        # the hostile characters, which is precisely the fix, so the literal path
+        # is deliberately NOT present in the file.
+        impl_line = [ln for ln in hook.read_text().splitlines()
+                     if ln.startswith("impl=")]
+        assert impl_line, "the generated hook has no impl= line"
+        resolved = subprocess.run(
+            ["sh", "-c", f'{impl_line[0]}; printf %s "$impl"'],
+            capture_output=True, text=True)
+        assert resolved.returncode == 0, resolved.stderr
+        assert resolved.stdout == str(
+            root / "scripts" / "git-hooks" / "prepare_commit_msg.py"), (
+                f"impl resolved to {resolved.stdout!r}")
+
+    def test_the_generated_hook_is_valid_shell_for_every_hostile_path(
+            self, repo, tmp_path):
+        """A syntactically invalid hook is 🔴-1 all over again: git refuses the
+        commit. `sh -n` parses without executing."""
+        root = self._fake_checkout(tmp_path, 'quote"and`tick$var')
+        out = self._install_from(repo, root)
+        if out.returncode != 0:
+            return
+        hook = Path(git(repo, "rev-parse", "--path-format=absolute",
+                        "--git-common-dir").stdout.strip()) / "hooks" / "prepare-commit-msg"
+        chk = subprocess.run(["sh", "-n", str(hook)], capture_output=True, text=True)
+        assert chk.returncode == 0, chk.stderr
+
+
+class TestTheInstallerCannotStrandTheRepo:
+    """🔴 ROUND-3 — audit 🟡-A and 🟡-G, which COMPOUND: a truncated wrapper both
+    refuses every commit and leaves the installer unable to replace it."""
+
+    def _hooks(self, repo) -> Path:
+        return Path(git(repo, "rev-parse", "--path-format=absolute",
+                        "--git-common-dir").stdout.strip()) / "hooks"
+
+    def test_a_marked_hook_with_no_impl_line_does_not_abort_the_installer(self, repo):
+        """`grep … | sed` under `set -euo pipefail` killed the script with an
+        undocumented rc 1 — including on the READ-ONLY default run."""
+        hooks = self._hooks(repo)
+        hooks.mkdir(parents=True, exist_ok=True)
+        mockbin.write_exec(
+            hooks / "prepare-commit-msg",
+            "# Generated by devrc scripts/install-session-stamp.sh\nexit 0\n")
+        dry = subprocess.run([str(INSTALLER), "--repo", str(repo)],
+                             capture_output=True, text=True)
+        assert dry.returncode in (0, 4), (dry.returncode, dry.stdout, dry.stderr)
+        forced = subprocess.run(
+            [str(INSTALLER), "--repo", str(repo), "--apply", "--force"],
+            capture_output=True, text=True)
+        assert forced.returncode == 0, (forced.returncode, forced.stdout, forced.stderr)
+        assert "^impl=" not in forced.stdout
+
+    def test_force_can_replace_a_truncated_wrapper(self, repo):
+        """The compounded state: an executable but INVALID hook. --force must
+        repair it rather than leaving `rm` as the only recovery."""
+        hooks = self._hooks(repo)
+        hooks.mkdir(parents=True, exist_ok=True)
+        install(repo)
+        target = hooks / "prepare-commit-msg"
+        full = target.read_text().splitlines()
+        target.write_text("\n".join(full[:8]) + "\n")   # truncate mid-`if`
+        out = subprocess.run(
+            [str(INSTALLER), "--repo", str(repo), "--apply", "--force"],
+            capture_output=True, text=True)
+        assert out.returncode == 0, (out.stdout, out.stderr)
+        assert subprocess.run(["sh", "-n", str(target)]).returncode == 0
+
+
+class TestOwnershipIsStructuralNotASubstring:
+    """🔴 ROUND-3 — audit 🟡-F. An unanchored marker grep DELETED a foreign hook
+    that merely quoted the marker (measured, with a negative control)."""
+
+    def _hooks(self, repo) -> Path:
+        return Path(git(repo, "rev-parse", "--path-format=absolute",
+                        "--git-common-dir").stdout.strip()) / "hooks"
+
+    def test_a_foreign_hook_quoting_the_marker_is_not_uninstalled(self, repo):
+        hooks = self._hooks(repo)
+        hooks.mkdir(parents=True, exist_ok=True)
+        foreign = hooks / "prepare-commit-msg"
+        mockbin.write_exec(foreign, (
+            "# my own hook, based on the one\n"
+            "# Generated by devrc scripts/install-session-stamp.sh\n"
+            "echo mine\n"))
+        out = subprocess.run([str(INSTALLER), "--repo", str(repo), "--uninstall"],
+                             capture_output=True, text=True)
+        assert out.returncode == 0
+        assert foreign.exists(), "a foreign hook was deleted for quoting the marker"
+        assert "echo mine" in foreign.read_text()
+
+    def test_our_own_hook_IS_uninstalled(self, repo):
+        """Positive control — the anchoring did not simply stop matching."""
+        install(repo)
+        target = self._hooks(repo) / "prepare-commit-msg"
+        assert target.exists()
+        out = subprocess.run([str(INSTALLER), "--repo", str(repo), "--uninstall"],
+                             capture_output=True, text=True)
+        assert out.returncode == 0
+        assert "UNINSTALLED" in out.stdout
+        assert not target.exists()
+
+    def test_a_legacy_symlink_install_is_recognised_and_removable(self, repo):
+        """Audit 🟢-J: the pre-generated-wrapper shape was neither ours nor
+        removable, so an operator had to `rm` it by hand."""
+        hooks = self._hooks(repo)
+        hooks.mkdir(parents=True, exist_ok=True)
+        legacy = hooks / "prepare-commit-msg"
+        legacy.symlink_to("/nonexistent/checkout/scripts/git-hooks/prepare-commit-msg")
+        out = subprocess.run([str(INSTALLER), "--repo", str(repo), "--uninstall"],
+                             capture_output=True, text=True)
+        assert out.returncode == 0
+        assert "UNINSTALLED" in out.stdout
+        assert not legacy.exists() and not legacy.is_symlink()

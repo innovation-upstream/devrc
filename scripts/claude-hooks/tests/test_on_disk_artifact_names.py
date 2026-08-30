@@ -557,12 +557,19 @@ OWNS_NO_ON_DISK_STATE = {
                                  # as whole relative paths, in the same form as this
                                  # file — by tests/test_session_trailer.py::
                                  # test_the_on_disk_artifact_names_are_pinned_as_whole_paths.
-                                 # 🔴 Its state root is the repo's own
-                                 # <git-common-dir>, not a path under $HOME at all,
-                                 # so CACHE_LITERAL below cannot match it — the same
-                                 # blind spot bg-command-capture.py's entry names,
-                                 # for a different root. The enumeration, not the
-                                 # scan, is what covers this entry.
+                                 # 🔴 CACHE_LITERAL below cannot match it, but NOT
+                                 # for the reason an earlier revision of this
+                                 # comment gave. That revision said the state root
+                                 # was "the repo's own <git-common-dir>, not a path
+                                 # under $HOME at all" — the opposite of the fix
+                                 # that landed in the same PR, which moved the state
+                                 # to $XDG_CACHE_HOME|~/.cache/claude-session-trailer
+                                 # precisely because a git-dir-derived root recorded
+                                 # against the WRONG repo. The scan is blind here
+                                 # because the `.cache` literal lives in
+                                 # scripts/lib/session_trailer.py, OUTSIDE this
+                                 # scan's root — a location fact, not a storage one.
+                                 # The enumeration, not the scan, is what covers it.
                                  # 🔴 `session_trailer.py` is deliberately NOT listed
                                  # here: this ledger enumerates SOURCE files in
                                  # scripts/claude-hooks/, and that module's source

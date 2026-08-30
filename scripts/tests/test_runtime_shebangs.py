@@ -77,7 +77,7 @@ PATTERNS = ("test_*.py", "conftest.py", "test_*.sh")
 #   (b) the string is not a shebang at all.
 ALLOWLIST = [
     # Shape (b): not a shebang being WRITTEN, a shebang being ASSERTED. The line
-    # pins that `scripts/git-hooks/prepare-commit-msg` starts with `#!/bin/sh`,
+    # pins that the wrapper the installer GENERATES starts with `#!/bin/sh`,
     # which is a deploy-blocking correctness property rather than a style choice:
     # as `#!/usr/bin/env python3` an unresolvable interpreter made `git commit`
     # exit 1 with the commit REFUSED (measured, with a paired control). /bin/sh

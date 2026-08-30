@@ -1463,7 +1463,7 @@ PINNED_PATH_CLOBBERS = {
         '"PATH"' + ': str(empty_bin)',
         "an EMPTY directory in tmp_path, justified by emptiness like "
         "test_claude_log_rotate.py above. The absence is the whole point of the "
-        "test: `scripts/git-hooks/prepare-commit-msg` must exit 0 when no "
+        "test: the installer-GENERATED prepare-commit-msg must exit 0 when no "
         "python3 can be found, because as a `#!/usr/bin/env python3` hook an "
         "unresolvable interpreter made `git commit` exit 1 with the commit "
         "REFUSED (measured, paired control). No amount of PREPENDING can make "

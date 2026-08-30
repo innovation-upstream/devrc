@@ -18,15 +18,17 @@ SILENTLY and each of which produces a *plausible-looking* commit:
 
 🔴 WHY `has_trailer` DOES NOT USE GIT'S OWN PARSER. Measured on `origin/main` at
 `3b1a0477` (2026-08-30): `git log --format='%(trailers:key=Claude-Session,valueonly)'`
-reports a value for **9** commits where a line-anchored content search finds
-**55** in the same 200, because git only recognises a contiguous trailer block at
-the very END and this repo's messages carry a "Generated with" line after it. A
-test using git's parser as its oracle would enshrine that undercount.
+reports a value for **9** commits where a per-commit content search finds **67**
+in the same 200, because git only recognises a contiguous trailer block at the
+very END and this repo's messages carry a "Generated with" line after it. A test
+using git's parser as its oracle would enshrine that undercount.
 
-⚠ AN EARLIER REVISION OF THIS DOCSTRING SAID 66, and that was wrong: it came
-from an unanchored `grep -c` that also matched commits merely DISCUSSING the
-trailer — including this feature's own, which quote the key in prose. Count
-line-anchored, and re-measure rather than quoting a number with a sha next to it.
+⚠ THREE WRONG COUNTS PRECEDED THAT 67, and they are worth more than the number:
+`grep -c` counts LINES not commits (each such commit repeats the token ~3 times);
+"55" and "41%/27%" came from adopting an auditor's figure WITHOUT re-measuring,
+which overwrote an earlier figure of mine that had been right. Anchoring is a red
+herring — anchored and unanchored give the SAME per-commit count (67 either way).
+Count commits, and re-measure rather than quoting any number here.
 """
 from __future__ import annotations
 
@@ -282,10 +284,13 @@ class TestPrune:
 # a claim: if this test does not exist, or stops pinning whole paths, the ledger
 # entry reads as coverage while providing none.
 #
-# 🔴 The corroboration scan in that file CANNOT see these names — it greps for
-# `.cache` / `.local/share` / XDG_CACHE_HOME literals, and this state lives in
-# the repo's own <git-common-dir>, not under $HOME at all. So the enumeration
-# plus this pin are the whole of the coverage; there is no second net.
+# 🔴 The corroboration scan in that file CANNOT see these names, but NOT because
+# the state is outside $HOME — an earlier revision of this comment said that, and
+# it was the OPPOSITE of the fix in the same PR, which moved the state to
+# $XDG_CACHE_HOME|~/.cache/claude-session-trailer. The scan is blind because it
+# only reads files under scripts/claude-hooks/, and the `.cache` literal lives
+# here in scripts/lib/. So the enumeration plus this pin are the whole of the
+# coverage; there is no second net.
 #
 # Whole paths, not fragments: a pin on the leaf alone stays green when the
 # parent directory is renamed, which is exactly the rename that would strand

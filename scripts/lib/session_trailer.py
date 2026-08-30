@@ -14,21 +14,26 @@ resolve the session -> wake it". Two things break it, and only one was known:
      token returns 0 because they are different namespaces.
 
   2. 🔴 COVERAGE, WHICH IS THE BIGGER HOLE AND WAS NOT KNOWN. Commits on
-     `origin/main` carrying a `Claude-Session:` trailer, counted line-anchored
-     (`^Claude-Session:`) at `3b1a0477` on 2026-08-30: **41% of the last 100,
-     27% of the last 200** — 55 commits in 200. So most of `main` cannot be
-     resolved to a session at all, regardless of WHICH id is stamped. It is that
-     low because the trailer is emitted by PROSE — an instruction the agent must
-     remember — which is exactly what `claude/RULES.md` says to replace with
-     something structural.
+     `origin/main` carrying a `^Claude-Session:` trailer, counted PER COMMIT at
+     `3b1a0477` on 2026-08-30: **47 of the last 100 (47%), 67 of the last 200
+     (33%)**. So half of `main` cannot be resolved to a session at all,
+     regardless of WHICH id is stamped. It is that low because the trailer is
+     emitted by PROSE — an instruction the agent must remember — which is exactly
+     what `claude/RULES.md` says to replace with something structural.
 
-     🔴 COUNT LINE-ANCHORED, AND RE-MEASURE RATHER THAN QUOTING THIS. An earlier
-     revision of this docstring said 46%/33%, from an unanchored `grep -c` that
-     also matched commits merely DISCUSSING the trailer — including this
-     feature's own commits, which quote the key in prose. Two independent
-     re-measurements disagreed with it. The conclusion is unchanged and in fact
-     stronger; the numbers were wrong, and they carry a date and a sha now
-     because they drift.
+     🔴 COUNT COMMITS, NOT LINES — AND RE-MEASURE RATHER THAN QUOTING THIS. Two
+     wrong figures preceded this one, and the second is the instructive one:
+       * "9 of the last 200" came from `grep -c`, which counts LINES; each such
+         commit repeats the token on ~3 lines.
+       * "41% / 27%" was WORSE, because it was an AUDITOR'S number adopted
+         without re-measuring, and it overwrote a figure of my own that had been
+         essentially right. `claude/RULES.md` says to re-verify a subagent's
+         self-reported results; this is the cost of skipping that. Its stated
+         cause was false too: anchoring does NOT change the per-commit count
+         (measured — 67 either way), because anchoring only matters when counting
+         lines.
+     The conclusion never moved; only the numbers did, three times. Hence the sha
+     and the method beside them.
 
 🔴 DO NOT ASSUME UUID SHAPE. `scripts/lib/cairn_who.py` records that 2 of 41
 windows carried a `ses_…` token from a different runtime, and that a join
@@ -208,10 +213,15 @@ def record(session_id: str, pid: int, root=None, transcript_path=None,
             payload["transcript_path"] = transcript_path
         target = state_file(pid, d)
         tmp = target + ".tmp"
-        with open(tmp, "w") as fh:
+        # 🔴 CREATE IT 0600, don't chmod AFTER. `open()` then `os.chmod()` leaves
+        # the file world-readable between the two calls, and it names a session
+        # and may carry a transcript path. Not exploitable on this host (the home
+        # directory is 0700, so nobody can traverse to it) but the window is free
+        # to close and a shared host would not have that protection.
+        fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
             json.dump(payload, fh)
         os.replace(tmp, target)          # atomic: no half-written read
-        os.chmod(target, 0o600)          # it names a session; keep it private
         return True
     except Exception:
         return False
@@ -295,8 +305,20 @@ def _trailer_lines(message: str, key: str):
     repo's messages carry a "Generated with" line after it.
     """
     prefix = key.lower() + ":"
-    return [i for i, line in enumerate((message or "").splitlines())
+    return [i for i, line in enumerate(_lines(message))
             if line.lower().startswith(prefix)]
+
+
+def _lines(message):
+    """Split on "\\n" ONLY — never `splitlines()`.
+
+    🔴 `str.splitlines()` also breaks on \\r, \\x0b, \\x0c, \\x85, \\u2028 and
+    \\u2029, so rejoining with "\\n" REWRITES the message: measured, a CRLF
+    message lost every \\r, and a body containing \\x0b gained a line break the
+    author never wrote. The rewrite path round-trips through this, so a
+    normalising split silently edits prose it was only supposed to read.
+    """
+    return (message or "").split("\n")
 
 
 def has_trailer(message: str, key: str = TRAILER_KEY) -> bool:
@@ -321,10 +343,14 @@ def append_trailer(message: str, session_id: str, key: str = TRAILER_KEY) -> str
     sid = session_id.strip()
     line = "%s: %s" % (key, sid)
 
-    lines = (message or "").splitlines()
+    lines = _lines(message)
     existing = _trailer_lines(message, key)
     if existing:
-        if all(lines[i] == line for i in existing):
+        # 🔴 `len(existing) == 1` matters as much as the value matching. Testing
+        # only "are they all already correct" returned early on a message that
+        # carried the SAME id TWICE, leaving both — measured count 2. Duplicates
+        # collapse whether or not the id is the one being written.
+        if len(existing) == 1 and lines[existing[0]] == line:
             return message                      # already correct — no-op
         # Rewrite the first, drop any duplicates, keep the position.
         keep, first = [], existing[0]
@@ -335,14 +361,14 @@ def append_trailer(message: str, session_id: str, key: str = TRAILER_KEY) -> str
                 continue
             else:
                 keep.append(text)
-        return "\n".join(keep) + ("\n" if (message or "").endswith("\n") else "")
+        return "\n".join(keep)
 
     body = (message or "").rstrip("\n")
     if not body:
         return line + "\n"
     # A trailer is separated from prose by a blank line, but must not gain one
     # when the message already ends in a trailer block.
-    tail = body.splitlines()[-1]
+    tail = _lines(body)[-1]
     is_trailer_tail = bool(re.match(r"^[A-Za-z][A-Za-z0-9-]*:\s", tail))
     sep = "\n" if is_trailer_tail else "\n\n"
     return body + sep + line + "\n"
