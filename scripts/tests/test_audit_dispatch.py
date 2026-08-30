@@ -6622,6 +6622,18 @@ RED_AT_BASE_R13: frozenset[str] = frozenset({
 # a scratch tree with THIS module copied in unchanged,
 # `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider` -> **4 failed, 111 passed**.
 #
+# 🔴 `9e23c379` IS KEPT AS THE ANCHOR EVEN THOUGH MAIN MOVED AGAIN (the branch
+# was rebased a second time, onto `ebbe5eaa`) — and that is a MEASUREMENT, not
+# a convenience. This module's rule is "a test belongs to the ref it was FIRST
+# watched red at", and the two refs are the same tree for this script:
+#   git rev-parse 9e23c379:scripts/audit-dispatch.py
+#   git rev-parse ebbe5eaa:scripts/audit-dispatch.py
+#     -> 0298a689d176d517b4997aa48216b3cfd67ada70   (both)
+# Byte-identical blob, so the red measured at `9e23c379` describes the current
+# merge-base exactly. `9e23c379` is the more informative of the two because it
+# is #1104's OWN merge commit — naming it is what makes "the competing fix
+# landed and this is still red" a checkable claim rather than an assertion.
+#
 # 🔴 AND THAT RE-MEASUREMENT IS THE WHOLE POINT: #1104 FIXED THIS SECTION AND
 # BOTH ROWS ARE STILL RED AT ITS MERGE COMMIT. It hedged the prose ("if this
 # repo has one", "exist in SOME repos and not others") and left all four
