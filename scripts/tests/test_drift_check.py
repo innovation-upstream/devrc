@@ -40,6 +40,7 @@ are not the happy path — they are:
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -273,6 +274,20 @@ class Fleet:
             # gate to answer calls `stub_session_manager()`, exactly like
             # `stub_ssh`.
             DRIFT_SESSION_MANAGER=str(self.bin / "session-manager"),
+            # 🔴 THE FIFTH HERMETICITY SEAM, and the same one the phase-2 gate
+            # already paid for. The branch-protection arm (rc 24) runs `gh`,
+            # which on this machine is authenticated and talks to the real
+            # GitHub. Left to its default every test in this file would query a
+            # live repo over the network — a read-only breach is still a breach,
+            # and the arm's verdict would then depend on the state of a remote
+            # nobody in this suite controls.
+            #
+            # Defaulted to a path inside tmp_path that does not exist, so the arm
+            # takes its no-gh branch. A test that wants it to answer calls
+            # `stub_gh()`, exactly like `stub_ssh`. (Belt and braces: the fixture
+            # origin is a file:// path, so the slug derivation refuses before gh
+            # is ever consulted — two independent reasons, deliberately.)
+            DRIFT_GH=str(self.bin / "gh"),
             # Pinned into tmp_path: the unreachable streak is PERSISTENT state,
             # and left to its default ($XDG_STATE_HOME/…) these tests would both
             # write to the operator's real state dir and inherit a streak from
@@ -303,6 +318,52 @@ class Fleet:
             body.append("echo '%s'" % stdout.replace("'", "'\\''"))
         body.append("exit %d" % exit_code)
         write_exec(self.bin / "ssh", "\n".join(body) + "\n")
+
+    def stub_gh(self, stdout="", exit_code=0, log=None):
+        """Install a stub `gh` that prints `stdout` and exits `exit_code`.
+
+        🔴 `stdout` is the ONE LINE the arm's `--jq` produces, and the shapes
+        used here are MEASURED against the live API on 2026-08-29, not invented:
+
+            true 2      innovation-upstream/devrc, healthy
+                        (contexts tekton/devrc-pytests + tekton/devrc-nodetests)
+            false 0     a repo with no protection object at all
+
+        The third shape — `true 0`, a standing protection object whose
+        required_status_checks was DELETED out of it — is the one the incident
+        actually produced, and it is the reason the verdict reads the COUNT and
+        never `protected`.
+
+        `log` names a file the stub appends its argv to, so a test can assert
+        WHAT was asked rather than only what came back.
+        """
+        body = []
+        if log is not None:
+            body.append('printf "%s\\n" "$*" >> ' + f"'{log}'")
+        # 🔴 The arm makes a SECOND call whose endpoint depends on the first
+        # answer: `…/protection` for enforce_admins when checks exist, or
+        # `…/rules/branches/main` for rulesets when the classic count is zero.
+        # `stdout` is the BRANCH answer; the follow-ups get benign defaults so a
+        # test that only cares about the branch payload still exercises one
+        # decided path. Use `_gh_router` when the follow-up IS the subject.
+        body.append('case "$*" in')
+        body.append('  *rules/branches*) echo 0; exit 0 ;;')
+        body.append('  *branches/main/protection*) echo true; exit 0 ;;')
+        body.append('esac')
+        if stdout:
+            body.append("echo '%s'" % stdout.replace("'", "'\\''"))
+        body.append("exit %d" % exit_code)
+        write_exec(self.bin / "gh", "\n".join(body) + "\n")
+
+    def set_origin(self, url):
+        """Point the work clone's origin at `url`.
+
+        The arm derives the repo slug from `git ls-remote --get-url origin`, so
+        this is how a test gives it a GitHub remote to reason about. It does NOT
+        make anything reachable — the fixture never has a network — which is the
+        point: the slug and the API answer are independently drivable.
+        """
+        self._run(["git", "-C", str(self.work), "remote", "set-url", "origin", url])
 
     def stub_session_manager(self, payload, exit_code=0):
         """Install a stub `session-manager` that prints `payload` on stdout.
@@ -1687,6 +1748,14 @@ UNIT_PATH_REQUIREMENTS = {
     # below.
     "timeout": "pkgs.coreutils",
     "python3": "pkgs.python3",
+    # The branch-protection arm (rc 24). Same silent-failure shape as `ip` and
+    # `python3` above: without it on the unit PATH the arm reports COULD NOT
+    # MEASURE on every timer run forever, from a unit that looks correct — and
+    # what it watches is the merge gate that was found deleted twice in one day
+    # with nothing else looking. The script resolves it itself (the DRIFT_GH
+    # default is the bare word `gh`), which is what puts it in THIS table rather
+    # than the child one below.
+    "gh": "pkgs.gh",
 }
 
 # 🔴 A SECOND SEAM, AND THE TABLE ABOVE STRUCTURALLY CANNOT SEE IT. The phase-2
@@ -3993,6 +4062,27 @@ def test_the_source_fetch_timeout_is_not_forwarded_over_ssh(fleet):
 
 
 # --- the SEAM: the script's fetch budget vs the unit's start timeout ---------- #
+def _derive_gh_calls(src):
+    """The rc-24 arm's worst-case gh call count, derived from the script itself.
+
+    🔴 ONE DEFINITION, because the guard that watches this had its OWN copy and
+    was therefore blind to the real one changing: a mutant reverting the
+    derivation to `(sites - 1) + MAX` survived a test that recomputed the formula
+    locally. A guard that re-implements the thing it guards is testing itself.
+
+    Sites outside the ruleset loop run once; sites inside it run up to the loop's
+    bound. Assuming "exactly one site is inside" under-counts the moment a second
+    is added there — the hand-maintained-number failure this derivation replaced.
+    """
+    sites = len(_gh_invocations(src))
+    loop = src[src.index("for BP_ID in"):]
+    loop = loop[:loop.index("\n      done")]
+    in_loop = len(_gh_invocations(loop))
+    cap = re.search(r'DRIFT_GH_RULESET_MAX="\$\{DRIFT_GH_RULESET_MAX:-(\d+)\}"', src)
+    assert cap, "no DRIFT_GH_RULESET_MAX default in drift-check.sh"
+    return sites, in_loop, (sites - in_loop) + in_loop * int(cap.group(1))
+
+
 def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
     """🔴 A SEAM NEITHER FILE'S TESTS OWN.
 
@@ -4016,6 +4106,13 @@ def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
                    DRIFT.read_text())
     assert m2, "no DRIFT_PHASE2_TIMEOUT default in drift-check.sh"
     phase2 = int(m2.group(1))
+    # The branch-protection probe (rc 24) is a third capped subprocess, and it
+    # is exactly the kind of addition this seam exists to catch: a network call
+    # added to the script with no corresponding room in the unit's ceiling.
+    m4 = re.search(r'DRIFT_GH_TIMEOUT="\$\{DRIFT_GH_TIMEOUT:-(\d+)\}"',
+                   DRIFT.read_text())
+    assert m4, "no DRIFT_GH_TIMEOUT default in drift-check.sh"
+    gh = int(m4.group(1))
 
     block = _drift_service_block()
     m3 = re.search(r"TimeoutStartSec = (\d+);", block)
@@ -4024,12 +4121,26 @@ def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
 
     # 2 hosts x every source repo, plus the phase-2 scan, plus the 60s this
     # already needed for the two devrc fetches and the ssh round trip.
-    needed = 2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2 + 60
+    # 🔴 DERIVED, NOT A LITERAL — this number has now been wrong twice in a row.
+    # Round 2 added a second capped gh call and left the literal at 1; round 3
+    # added a third and set the literal to 3, which a FOURTH call then survived
+    # (measured: adding one more probe kept the suite green). A literal beside
+    # the thing it counts drifts, exactly as the old single MIN_TESTS did.
+    #
+    # So count the gh call SITES in the script itself, and add the ruleset loop's
+    # own bound, since one of those sites executes up to DRIFT_GH_RULESET_MAX
+    # times. Conservative in the safe direction: it over-counts (not every path
+    # makes every call), and over-counting a TIMEOUT budget only reserves slack.
+    sites, in_loop, GH_CALLS = _derive_gh_calls(DRIFT.read_text())
+    assert sites >= 3, f"the gh call sites cannot be counted: {sites}"
+    assert in_loop >= 1, "no gh call found inside the ruleset loop"
+    needed = 2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2 + GH_CALLS * gh + 60
     assert ceiling >= needed, (
         "TimeoutStartSec=%d cannot absorb the worst case: %d source fetches at "
-        "%ds + a %ds phase-2 scan + 60s of devrc fetch/ssh = %ds. systemd would "
-        "kill the run and the deadman would report nothing, on a schedule."
-        % (ceiling, 2 * len(EXPECTED_SOURCE_REPOS), cap, phase2, needed)
+        "%ds + a %ds phase-2 scan + %d branch-protection probes at %ds + 60s of "
+        "devrc fetch/ssh = %ds. systemd would kill the run and the deadman would "
+        "report nothing, on a schedule."
+        % (ceiling, 2 * len(EXPECTED_SOURCE_REPOS), cap, phase2, GH_CALLS, gh, needed)
     )
 
 
@@ -6125,3 +6236,1179 @@ def test_a_CONSISTENT_report_is_accepted(fleet):
     assert rc == 23, f"a well-formed report did not escalate\n{out}"
     assert "juliett-x.txt" in out, out
     assert _nixdirt(out)[3:5] == (4, 1), out
+
+
+# --------------------------------------------------------------------------- #
+# BRANCH PROTECTION ON THE CANONICAL REMOTE (rc 24)
+#
+# The other three parities all take `origin/main` as the reference and ask who
+# has diverged from it. This one asks whether `origin/main` is still a branch
+# anything has to get past a gate to reach.
+#
+# 🔴 THE DESIGN DECISION THESE TESTS EXIST TO PIN, and it is the opposite of the
+# rc-22 one. There, a could-not-measure would have made the arm permanently RED;
+# here, a could-not-measure would make it permanently GREEN — worse, because the
+# natural failure of `gh` (no token, no network) is an EMPTY string, an empty
+# string parses as a count of zero, and zero is the DRIFT value. Both directions
+# are wrong and they are wrong for different reasons, so the arm is tested from
+# both ends: it must fire on a real zero, and it must refuse to fire on an
+# absence.
+#
+# 🔴 AND THE VERDICT MUST READ THE COUNT, NEVER `protected`. The measured
+# incident is `protected: true` with required_status_checks deleted out of the
+# standing object, so an arm keying on the flag reports healthy on the exact
+# state that bit us. `test_a_standing_protection_object_with_checks_deleted…` is
+# that discriminator; it and the healthy case differ ONLY in the count.
+#
+# Every payload below is the line the arm's own `--jq` produces, measured
+# against the live API on 2026-08-29 — see Fleet.stub_gh.
+# --------------------------------------------------------------------------- #
+
+# owner/repo pairwise distinct from every real slug this repo names, so an
+# assertion cannot pass by matching something the script hardcoded.
+BP_SLUG = "fixture-owner/fixture-repo"
+
+
+def _protect(fleet, *args, gh=None, gh_rc=0, log=None, **env):
+    """Run the checker with the rc-24 arm pointed at a fixture slug.
+
+    `gh=None` installs NO stub at all — the DRIFT_GH path stays absent, which is
+    the could-not-measure branch. Any string installs a stub printing it.
+    """
+    fleet.catch_up()
+    if gh is not None:
+        fleet.stub_gh(gh, exit_code=gh_rc, log=log)
+    return fleet.check(*args, DRIFT_PROTECT_SLUG=BP_SLUG, **env)
+
+
+# --- the reds --------------------------------------------------------------- #
+def test_zero_required_checks_is_rc24(fleet):
+    """A branch with no protection object at all — `protected false, 0 checks`."""
+    rc, out = _protect(fleet, "--no-remote", gh="false 0 ")
+    assert rc == 24, f"an unprotected main did not fire rc 24: {rc}\n{out}"
+    assert "ZERO required status checks" in out, out
+    assert BP_SLUG in out, out
+    # protected=false is a CREATE, not a restore, and the finding must say which.
+    assert "no protection object at all" in out, out
+
+
+def test_a_standing_protection_object_with_checks_deleted_is_still_rc24(fleet):
+    """🔴 THE MEASURED INCIDENT SHAPE, and the discriminator for the whole arm.
+
+    2026-08-29: `required_status_checks` was DELETED out of a protection object
+    that stayed standing, so the branch still reports `protected: true`. An arm
+    that keyed on that flag would call this healthy — which is why the verdict
+    reads the COUNT. This test and `test_required_checks_present_is_not_drift`
+    differ in exactly one field.
+    """
+    rc, out = _protect(fleet, "--no-remote", gh="true 0 ")
+    assert rc == 24, f"the deleted-sub-resource shape did not fire rc 24: {rc}\n{out}"
+    assert "protected=true" in out, out
+    # And it must hand over the repair that WORKS. PATCH cannot restore a
+    # deleted sub-resource; the break-glass that produced this incident failed
+    # for exactly that reason, from a trap that ran.
+    assert "PATCH CANNOT" in out, out
+    assert "PUT" in out, out
+
+
+# --- the positive control --------------------------------------------------- #
+def test_required_checks_present_is_not_drift(fleet):
+    """🔴 REPORT THIS ALONGSIDE THE REDS. An arm that can only ever say "fine"
+    is indistinguishable from this, and an arm wired to nothing says it too."""
+    rc, out = _protect(fleet, "--no-remote", gh="true 2 alpha-check,bravo-check")
+    assert rc == 0, f"a protected main was reported as drift: {rc}\n{out}"
+    assert "2 required status check(s)" in out, out
+    assert "alpha-check,bravo-check" in out, out
+    assert "DRIFT" not in out, out
+
+
+# --- the could-not-measure family: every one of these must NOT be rc 24 ----- #
+def test_no_gh_at_all_is_could_not_measure_not_a_pass(fleet):
+    rc, out = _protect(fleet, "--no-remote", gh=None)
+    assert rc == 0, out
+    assert "[protect] COULD NOT MEASURE" in out, out
+    assert "no usable gh binary" in out, out
+    assert "NOT 'main is protected'" in out, out
+
+
+def test_a_gh_that_ANSWERS_NOTHING_is_refused_rather_than_read_as_zero(fleet):
+    """🔴 THE LOAD-BEARING ONE. `gh` with no credentials prints NOTHING. An
+    empty string read positionally yields a count of 0, and 0 is the DRIFT
+    value — so the failure mode of a broken instrument is a confident finding
+    about a healthy repo, fired on every timer run forever. That is the
+    permanently-red gate `claude/RULES.md` refuses, arrived at from the other
+    direction.
+    """
+    rc, out = _protect(fleet, "--no-remote", gh="", gh_rc=1)
+    assert rc != 24, (
+        "an EMPTY gh answer was read as a count of zero and fired rc 24\n" + out
+    )
+    assert rc == 0, out
+    assert "[protect] COULD NOT MEASURE" in out, out
+    assert "parses as a count of" in out, out
+
+
+@pytest.mark.parametrize("payload", [
+    "true",             # one field: count is absent, not zero
+    "0 true names",     # fields transposed: first is not a boolean
+    "yes 0",            # first field is not a boolean — an API shape change
+    "true many",        # count is not a number
+    "  ",               # whitespace only
+])
+def test_a_malformed_answer_is_could_not_measure(fleet, payload):
+    """The contract is exactly `<true|false> <digits>`. Anything else is a
+    reason, never a verdict — including `true` alone, which without the
+    field-count check sets BOTH fields from the same token and renders a
+    well-formed-looking measurement out of one value read twice.
+    """
+    rc, out = _protect(fleet, "--no-remote", gh=payload)
+    assert rc != 24, f"a malformed answer {payload!r} fired rc 24\n{out}"
+    assert rc == 0, out
+    assert "[protect] COULD NOT MEASURE" in out, out
+
+
+def test_a_non_github_origin_is_could_not_measure_not_a_pass(fleet):
+    """The suite's own origin is a local path. The arm must say so rather than
+    report a clean protection state for a remote that has no such API — and it
+    must not echo the URL, because this repo is public and an origin can name a
+    private host."""
+    fleet.catch_up()
+    rc, out = fleet.check("--no-remote")          # no DRIFT_PROTECT_SLUG
+    assert rc == 0, out
+    assert "[protect] COULD NOT MEASURE" in out, out
+    assert "not a github.com owner/repo remote" in out, out
+    assert str(fleet.origin) not in out, "the origin URL was echoed into the report\n" + out
+
+
+# --- the derivation, which the override above bypasses ---------------------- #
+@pytest.mark.parametrize("url,slug", [
+    ("git@github.com:alpha-owner/bravo-repo.git", "alpha-owner/bravo-repo"),
+    ("https://github.com/charlie-owner/delta-repo.git", "charlie-owner/delta-repo"),
+    ("https://github.com/echo-owner/foxtrot-repo", "echo-owner/foxtrot-repo"),
+])
+def test_the_slug_is_derived_from_the_origin_remote(fleet, url, slug):
+    """🔴 THE OVERRIDE THE OTHER TESTS USE MAKES THE DERIVATION UNTESTED, so it
+    is tested here — against the real URL spellings `git remote -v` produces,
+    ssh and https, with and without `.git`.
+
+    🔴 `GIT_ALLOW_PROTOCOL=file` keeps the git leg offline: origin now names
+    github.com, and without it the fetch would leave the machine. It refuses
+    BOTH ssh and https (measured: `fatal: transport 'ssh' not allowed` in 7ms)
+    while `ls-remote --get-url` still resolves, because that is a config
+    expansion and opens no transport — which is exactly the pairing this test
+    needs. NOT `GIT_SSH_COMMAND`: that covers only the ssh spelling, and
+    `test_push_keepalive.py` requires every such export to carry
+    ServerAliveInterval, which is meaningless on a command that never connects.
+
+    The fetch failing is expected and is not what is asserted — rc 24 (severity
+    68) outranks rc 4 (55), so the arm's finding is still the verdict.
+    """
+    fleet.catch_up()
+    fleet.set_origin(url)
+    log = fleet.root / "gh-argv.log"
+    fleet.stub_gh("false 0 ", log=log)
+    rc, out = fleet.check("--no-remote", GIT_ALLOW_PROTOCOL="file")
+    assert rc == 24, f"{url} did not reach the arm: {rc}\n{out}"
+    assert slug in out, f"{url} did not resolve to {slug}\n{out}"
+    argv = log.read_text()
+    assert f"repos/{slug}/branches/main" in argv, (
+        f"gh was asked about the wrong repo for {url}: {argv!r}"
+    )
+
+
+@pytest.mark.parametrize("url", [
+    "git@gitlab.com:owner/repo.git",
+    "https://github.com.evil.example/owner/repo.git",   # host is NOT github.com
+    "git@github.com:owner.git",                         # no owner/repo pair
+    "https://github.com/owner/group/repo.git",          # three components
+    "https://github.com/owner/",                        # empty repo component
+])
+def test_a_url_that_is_not_an_owner_repo_pair_is_refused_not_guessed(fleet, url):
+    """🔴 FAILS CLOSED. A best-guess slug would be queried, 404, and land in
+    could-not-measure wearing a subject nobody chose — a wrong repo name in the
+    journal is worse than an honest refusal, because it reads as a measurement.
+    """
+    fleet.catch_up()
+    fleet.set_origin(url)
+    log = fleet.root / "gh-argv.log"
+    fleet.stub_gh("false 0 ", log=log)
+    rc, out = fleet.check("--no-remote", GIT_ALLOW_PROTOCOL="file")   # see above
+    assert rc != 24, f"{url} was turned into a slug and queried\n{out}"
+    assert "[protect] COULD NOT MEASURE" in out, out
+    assert not log.exists(), f"gh was called for a non-github origin: {log.read_text()!r}"
+
+
+# --- severity, in both directions ------------------------------------------- #
+def test_unpushed_devrc_commits_still_outrank_an_unprotected_main(fleet):
+    """rc 8 is work that exists on exactly one machine; this one loses nothing
+    and is repaired by one reversible call. Both findings are live here."""
+    fleet.catch_up()
+    fleet.add_local_commit("commit the workbench never pushed")
+    fleet.stub_gh("false 0 ")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 8, f"rc 24 masked the un-pushed commits: {rc}\n{out}"
+    assert "ZERO required status checks" in out, "the rc24 finding was lost\n" + out
+
+
+def test_an_unprotected_main_outranks_a_merely_behind_host(fleet):
+    """The fixture clone starts one commit BEHIND (rc 10). A host that just
+    needs a ship must not hide a merge gate that is switched off."""
+    fleet.stub_gh("false 0 ")                       # no catch_up: still behind
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 24, f"rc 10 masked the unprotected main: {rc}\n{out}"
+    assert "local main is BEHIND origin/main" in out, "the rc10 finding was lost\n" + out
+
+
+def test_the_rc24_legend_is_printed_with_the_verdict(fleet):
+    """The journal is the only place this output is ever read."""
+    rc, out = _protect(fleet, "--no-remote", gh="true 0 ")
+    assert rc == 24, out
+    assert "rc24=" in out, out
+    assert "drift-check: DRIFT (rc=24)" in out, out
+
+
+def test_rc24_is_ranked_between_rc8_and_rc17_in_the_severity_table():
+    """Asserted against severity() itself, not only through the two behavioural
+    orderings above — those pin the pairs they exercise, and the published
+    ladder in the header is a claim about ALL of them."""
+    body = DRIFT.read_text().split("severity() {", 1)[1].split("\n}", 1)[0]
+    body = "\n".join(ln for ln in body.splitlines() if not ln.strip().startswith("#"))
+    ranks = {int(c): int(r) for c, r in re.findall(r"^\s*(\d+)\)\s*echo (\d+)", body, re.M)}
+    assert 24 in ranks, "rc 24 is not ranked in severity(); it would fall to 99, above rc 8"
+    assert ranks[8] > ranks[24] > ranks[17], (
+        "rc 24 is not between rc 8 and rc 17: %r" % {k: ranks[k] for k in (8, 24, 17)}
+    )
+    # ...and the header's published order must agree with the table it describes.
+    header = DRIFT.read_text().split("\nset -", 1)[0]
+    assert "8 > 24 > 17" in header, (
+        "the header's severity ladder does not place rc 24 where severity() does"
+    )
+
+
+# --- passivity, on a surface the git allowlist cannot see -------------------- #
+# 🔴 THE ALLOWLIST, built on the tokenizer this file ALREADY has. A second,
+# private tokenizer was the first attempt and it read ZERO calls: `shlex` on
+# `BP_RAW="$(timeout … "$DRIFT_GH" api …)"` collapses the whole quoted command
+# substitution into ONE token, so the guard was wired to nothing while passing.
+# `_walk` splits at `$(` (a command substitution executes) and `_command_tokens`
+# strips assignments/redirections/keywords — the same machinery the git
+# allowlist 350 lines above uses, so improvements to it reach both.
+_GH_TOKENS = {"gh", "$DRIFT_GH", '"$DRIFT_GH"', "${DRIFT_GH}", '"${DRIFT_GH}"'}
+
+# 🔴 THE SELECTOR IS THE HALF THAT FAILS OPEN, and an allowlist behind a leaky
+# selector is still a hole. Measured on five shapes that reached the real script
+# and were never scanned: a trailing `# comment` (the old `_GH_LOOKUP` skipped
+# the WHOLE segment whenever `type`/`which` appeared anywhere in it, comment
+# included), an absolute `/usr/bin/gh`, an alias `G="$DRIFT_GH"`, a
+# `${DRIFT_GH:-gh}` default expansion, and a `\`-continued line. The sibling git
+# scanner in this file already solves three of them (`toks[0].rsplit("/")`,
+# `_ALIASABLE`); this now does the same rather than re-deriving a weaker version.
+_GH_TOKEN_RE = re.compile(r'^"?\$\{?DRIFT_GH(?::-[^}]*)?\}?"?$')
+
+# An ALIAS of the binary defeats any argv scanner, exactly as `g=git` does for
+# the git allowlist. Flag the alias itself — it cannot be resolved statically.
+# `DRIFT_GH=gh` is the canonical DEFINITION of the binary, not an alias of it —
+# excluded by name, because it is the one assignment this guard already knows
+# about. Anything else binding the binary to a second name is unresolvable.
+_GH_ALIAS_RE = re.compile(
+    r'^(?!DRIFT_GH=)[A-Za-z_][A-Za-z_0-9]*='
+    r'"?(\$\{?DRIFT_GH\}?|[\w./-]*/gh|gh)"?$')
+
+# 🔴 ONLY A LOOKUP IS SKIPPED, AND `command` ALONE IS NOT ONE. `type`,
+# `which` and `hash` never execute their argument; `command <x>` DOES — it is
+# the normal way to bypass a shell function or alias, so
+# `command gh api -X DELETE ...` is a real invocation. Widening `command -v`
+# to bare `command` turned a shape the PREVIOUS revision CAUGHT into one that
+# failed open. Measured against the same script text before and after.
+_GH_LOOKUP_CMDS = {"type", "which", "hash"}
+# 🔴 `command` is a lookup ONLY with -v/-V. `-p` is NOT one: `command -p utility`
+# RUNS utility with a default PATH (measured: `bash -c 'command -p echo X'`
+# prints X). Including it here reintroduced, one flag over, the exact hole the
+# previous round removed — the fix for "`command <x>` executes" spelled so that
+# `command -p <x>` did not count as executing.
+_GH_COMMAND_LOOKUP = re.compile(r"^command\s+-[vV](\s|$)")
+
+# `_walk` breaks at `{`/`}`, so ANY braced spelling is torn apart before the
+# token test can see it. Normalising only the bare `${DRIFT_GH}` left
+# `${DRIFT_GH:-gh}` failing open while the header listed it as covered.
+# 🔴 THE WHOLE BRACED FAMILY, not one operator. `${DRIFT_GH:-gh}` was covered
+# while `${DRIFT_GH:=gh}`, `${DRIFT_GH-gh}`, `${DRIFT_GH#x}` and six more
+# spellings still failed open — each one character from the fixed one and
+# meaning the same thing to a maintainer. The negative lookahead keeps
+# `${DRIFT_GH_TIMEOUT}` and `${DRIFT_GHX}` OUT, which are different variables.
+_BRACED_GH = re.compile(r"\$\{DRIFT_GH(?![A-Za-z0-9_])[^}]*\}")
+
+
+def _is_gh_token(tok):
+    return tok in _GH_TOKENS or _GH_TOKEN_RE.match(tok) or \
+        tok.rsplit("/", 1)[-1].strip('"') == "gh"
+
+
+def _strip_trailing_comment(seg):
+    """Drop a trailing ` # …` that is not inside quotes."""
+    out, q = [], None
+    for i, c in enumerate(seg):
+        if q:
+            if c == q:
+                q = None
+        elif c in "'\"":
+            q = c
+        elif c == "#" and (i == 0 or seg[i - 1].isspace()):
+            break
+        out.append(c)
+    return "".join(out)
+
+
+def _gh_invocations(text):
+    r"""Every gh INVOCATION in `text`, as (line, argv-after-the-binary).
+
+    Line continuations are joined first: the arm's own gh lines are 200+ chars,
+    so wrapping one is the natural maintainer edit, and an unjoined scanner then
+    reports "all calls clean" having never seen the half carrying the flags.
+    """
+    # `_walk` breaks at `{`/`}`, so a BARE (unquoted) `${DRIFT_GH}` is split
+    # apart before the token test can see it — measured failing open. This is
+    # the one variable this guard is about, so normalise its braced spelling.
+    joined = _BRACED_GH.sub("$DRIFT_GH", text.replace("\\\n", " "))
+    out = []
+    for ln in joined.splitlines():
+        if not ln.strip() or ln.strip().startswith("#"):
+            continue
+        for raw_seg in _walk(ln):
+            seg = _strip_trailing_comment(raw_seg)
+            # 🔴 The lookup check must read the RAW segment. `_command_tokens`
+            # strips `command` as a TRANSPARENT word, so by the time it returns,
+            # `command -v "$DRIFT_GH"` looks like `-v "$DRIFT_GH"` and the skip
+            # never fires — which made the arm's own existence probe read as an
+            # invocation of something that is not `api`. Measured: a false
+            # positive against this repo's own script.
+            raw = [t for t in seg.split()
+                   if t not in {"!", "if", "then", "elif", "else", "while",
+                                "until", "do", "{", "(", ";"}]
+            # 🔴 A TEST CONSTRUCT IS NOT AN INVOCATION. Widening the braced
+            # normalisation made `[ -z "${DRIFT_GH+set}" ]` — the arm's own
+            # PRESENCE TEST — normalise to a bare `$DRIFT_GH` inside `[ … ]`,
+            # which then reads as a command word and flagged the file this guard
+            # guards. `[` and `test` evaluate their operands; they run nothing.
+            if raw and raw[0].rsplit("/", 1)[-1] in _GH_LOOKUP_CMDS | {"[", "test"}:
+                continue
+            if _GH_COMMAND_LOOKUP.match(" ".join(raw)):
+                continue
+            # 🔴 THE ALIAS CHECK RUNS FIRST, and that ordering is the whole point:
+            # `_command_tokens` STRIPS assignments, so `G="$DRIFT_GH"` yields an
+            # EMPTY token list and an alias scan placed after the empty-guard is
+            # unreachable. Measured — it failed open until this moved up.
+            for tok in seg.split():
+                if _GH_ALIAS_RE.match(tok.rstrip(";")):
+                    out.append((ln, ["<alias-of-gh:unresolvable>"]))
+            toks = _command_tokens(seg)
+            if not toks:
+                continue
+            if toks[0] in _PRINTERS:
+                continue
+            for i, tok in enumerate(toks):
+                if _is_gh_token(tok):
+                    out.append((ln, toks[i + 1:]))
+                    break
+    return out
+
+
+def _gh_violation(argv):
+    """The ALLOWLIST: `api <path> --jq <expr>` and nothing else."""
+    if not argv or argv[0] != "api":
+        return "invokes something other than the read-only `api`"
+    for tok in argv[1:]:
+        if tok.startswith("-") and tok != "--jq":
+            return f"carries an option that is not --jq ({tok!r})"
+    return None
+
+
+def test_the_gh_calls_are_read_only():
+    """🔴 THE ALLOWLIST GUARDING THIS FILE IS GIT-SHAPED AND `gh` IS NOT GIT.
+
+    `gh api -X DELETE …/branches/main/protection/required_status_checks` is the
+    break-glass CLAUDE.md publishes verbatim — a plausible thing for a maintainer
+    to paste into the arm that reads this very endpoint. A deadman that can
+    delete the protection it watches is not a deadman.
+
+    🔴 THIS IS AN ALLOWLIST, AND THE BLOCKLIST IT REPLACED WAS WALKED BY FOUR
+    SPELLINGS — measured in an audit, not imagined: a bare `gh`, an attached
+    `-XDELETE`, `--raw-field` (which makes gh POST and was simply not in the
+    denied set), and `${DRIFT_GH}`. Two of the four were never SCANNED at all,
+    including the docstring's own example. This file argues the same thing about
+    git verbs: "A blocklist of verbs is a game you lose once; an allowlist fails
+    CLOSED on a verb nobody thought of." The gh guard was the blocklist.
+    """
+    calls = _gh_invocations(DRIFT.read_text())
+    assert calls, "no gh invocation found — this guard is wired to nothing"
+    for ln, argv in calls:
+        why = _gh_violation(argv)
+        assert why is None, f"gh call {why}: {ln}"
+
+
+@pytest.mark.parametrize("write_line", [
+    # The literal one-liner CLAUDE.md publishes. Bare `gh` — the blocklist did
+    # not even scan this one.
+    'gh api -X DELETE "repos/$BP_SLUG/branches/main/protection/required_status_checks"',
+    # Attached pflag shorthand: `-XDELETE` parses for gh exactly as `-X DELETE`.
+    'timeout 5 "$DRIFT_GH" api -XDELETE "repos/$BP_SLUG/branches/main/protection"',
+    # --raw-field makes gh POST, and was not in the denied set at all.
+    'timeout 5 "$DRIFT_GH" api --raw-field x=null "repos/$BP_SLUG/branches/main/protection"',
+    # Braced expansion — not matched by the old `$DRIFT_GH` selector.
+    '"${DRIFT_GH}" api -X DELETE "repos/$BP_SLUG/branches/main/protection"',
+    # A different verb entirely.
+    '"$DRIFT_GH" repo delete "$BP_SLUG" --yes',
+    # Hidden behind a printer + separator, the shape the git scanner exists for.
+    'echo "checking" && "$DRIFT_GH" api -X DELETE "repos/$BP_SLUG/branches/main/protection"',
+])
+def test_the_gh_read_only_guard_catches_every_write_spelling(write_line):
+    """🔴 NEGATIVE CONTROL, one case per spelling that WALKED the blocklist.
+
+    The guard passing is indistinguishable from a selector that matches nothing,
+    so each of these must be both SEEN and REJECTED. Every line here was measured
+    passing the previous guard while sitting in the real script.
+
+    It calls the same `_gh_invocations`/`_gh_violation` the guard calls, rather
+    than re-implementing the rule — the previous control re-derived the regex
+    inline, so an edit to the guard was not covered by the thing meant to prove
+    the guard works.
+    """
+    poisoned = DRIFT.read_text() + "\n" + write_line + "\n"
+    calls = _gh_invocations(poisoned)
+    assert calls, "the selector found no gh invocation at all"
+    assert any(_gh_violation(argv) for _, argv in calls), (
+        f"a write spelling walked the read-only guard: {write_line!r}"
+    )
+
+
+def test_the_gh_guard_sees_the_real_calls_and_accepts_them():
+    """🔴 POSITIVE CONTROL, the other direction. A guard that rejects EVERYTHING
+    passes every negative control above while making the arm unshippable, and a
+    selector that sees nothing passes the main guard vacuously — which is exactly
+    what the first version of this did. So: the arm's own calls must be FOUND,
+    and found clean."""
+    calls = _gh_invocations(DRIFT.read_text())
+    assert len(calls) >= 3, (
+        f"expected the arm's three gh calls (branch, protection, rules) to be "
+        f"seen; found {len(calls)}: {[a for _, a in calls]}"
+    )
+    for ln, argv in calls:
+        assert _gh_violation(argv) is None, ln
+
+
+# --------------------------------------------------------------------------- #
+# ROUND 2 — the two ways the arm produced a WRONG VERDICT, both measured live
+# against the real GitHub API before these fixtures were written.
+#
+# 🔴 Both are false-verdict bugs, and they fail in OPPOSITE directions:
+#   * rulesets  -> false DRIFT on a branch that is fully gated (permanently red)
+#   * enforce_admins -> false ALL-CLEAR on a gate an admin walks straight past
+# --------------------------------------------------------------------------- #
+
+def _gh_router(fleet, branch=None, protection=None, rules=None, ruleset=None,
+               log=None):
+    """A `gh` stub that answers per ENDPOINT, which the arm now needs.
+
+    The arm makes up to two calls and which second call it makes depends on the
+    first answer, so a single-payload stub cannot express these cases. Each
+    argument is `"<stdout>"` or `None` meaning "this endpoint fails" (gh exits 1
+    printing its JSON error to stdout, the shape measured on a real 404).
+    """
+    def arm(v):
+        if v is None:
+            return '  echo \'{"message":"Not Found","status":"404"}\'\n  exit 1\n'
+        return "  echo '%s'\n  exit 0\n" % v.replace("'", "'\\''")
+    body = []
+    if log is not None:
+        body.append('printf "%s\\n" "$*" >> ' + f"'{log}'")
+    body.append('case "$*" in')
+    # 🔴 `*/rulesets/*` must precede `*rules/branches*`: the detail path is
+    # `repos/o/r/rulesets/<id>` and the rules path is `repos/o/r/rules/branches/main`.
+    # They do not overlap here, but ordering them by specificity keeps a future
+    # pattern from silently swallowing the other and answering the wrong call.
+    if isinstance(ruleset, dict):
+        # Per-id answers: the arm now examines EVERY ruleset, so a fixture
+        # has to be able to make them differ. That is the whole point of
+        # the multi-ruleset cases.
+        for rid, ans in ruleset.items():
+            body.append('  *"/rulesets/%s "*)\n' % rid + arm(ans) + '  ;;')
+        body.append('  */rulesets/*)\n' + arm(None) + '  ;;')
+    else:
+        body.append('  */rulesets/*)\n' + arm(ruleset) + '  ;;')
+    body.append('  *rules/branches*)\n' + arm(rules) + '  ;;')
+    body.append('  *branches/main/protection*)\n' + arm(protection) + '  ;;')
+    body.append('  *branches/main*)\n' + arm(branch) + '  ;;')
+    body.append('  *)\n  exit 1\n  ;;')
+    body.append('esac')
+    write_exec(fleet.bin / "gh", "\n".join(body) + "\n")
+
+
+def test_a_ruleset_protected_branch_is_not_reported_as_drift(fleet):
+    """🔴 MEASURED FALSE POSITIVE. `astral-sh/uv` carries a ruleset whose types
+    include `required_status_checks` and reads `protected=true, contexts=[]` on
+    the branch endpoint — the classic read calls a fully gated branch wide open.
+
+    GitHub's UI now steers restores toward rulesets, so the most likely next
+    repair of THIS repo produces exactly that state. Firing rc 24 on it would
+    fail the unit every 6h forever, and the OnFailure toast deliberately bypasses
+    do-not-disturb — the permanently-red gate this file refuses everywhere else.
+    """
+    fleet.catch_up()
+    # The live shape, measured on astral-sh/uv: the branch endpoint reports
+    # `true 0` while `/rules/branches/main` carries a required_status_checks rule
+    # listing one check, in an active ruleset with no bypass actors.
+    _gh_router(fleet, branch="true 0 ", rules="1 14744442", ruleset="active 0")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 0, f"a ruleset-gated branch was reported as drift: {rc}\n{out}"
+    assert "gates it" in out, out
+    assert "DRIFT" not in out, out
+
+
+def test_zero_classic_and_zero_rulesets_is_still_rc24(fleet):
+    """The discriminator for the fix above: consulting rulesets must not blunt
+    the finding when there genuinely is no gate by EITHER mechanism."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="false 0 ", rules="0")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 24, f"a genuinely unprotected branch stopped firing: {rc}\n{out}"
+    assert "by CLASSIC protection and by RULESETS alike" in out, out
+
+
+def test_an_unreadable_ruleset_endpoint_is_could_not_measure_not_drift(fleet):
+    """🔴 THE EMPTY-ANSWER-IS-ZERO TRAP, one level up. Classic says zero and the
+    ruleset half did not answer, so "unprotected" and "protected by a ruleset I
+    cannot see" are indistinguishable. Firing here would reintroduce exactly the
+    bug the first round's format guards exist to prevent."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules=None)
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc != 24, f"an unreadable ruleset endpoint fired rc 24\n{out}"
+    assert rc == 0, out
+    assert "ruleset endpoint did not answer" in out, out
+    assert "NOT 'main is unprotected'" in out, out
+
+
+def test_required_checks_with_enforce_admins_FALSE_is_rc24(fleet):
+    """🔴 MEASURED FALSE ALL-CLEAR. Required checks with admin enforcement OFF do
+    not stop an admin pushing straight to main — the exact mechanism behind
+    incident 2 (`837d3fde`, a direct push that required checks *with*
+    enforce_admins would have rejected).
+
+    This is also the state the arm's OWN repair advice most easily produces: a
+    full `PUT …/protection` requires every sub-object and silently accepts a
+    null `enforce_admins`.
+    """
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 2 alpha-check,bravo-check", protection="false")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 24, f"a bypassable gate was reported clean: {rc}\n{out}"
+    assert "enforce_admins is FALSE" in out, out
+    assert "837d3fde" in out, out
+
+
+def test_enforce_admins_is_read_from_the_PROTECTION_endpoint(fleet):
+    """🔴 THE FIELD IS ABSENT ON THE BRANCH ENDPOINT, AND `// false` TURNS THAT
+    INTO A LIE. Measured 2026-08-29 on innovation-upstream/devrc at one moment:
+    `/branches/main` reports `.protection.enforce_admins` ABSENT while
+    `/branches/main/protection` reports `true`.
+
+    Keying on the branch endpoint would have fired rc 24 on our own healthy repo
+    every run — a permanently-red gate created by the fix for a blind spot. So
+    the branch payload here deliberately carries NO enforce_admins information at
+    all, and the protection endpoint is the only place `true` comes from.
+    """
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 2 alpha-check,bravo-check", protection="true")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 0, f"a healthy repo was reported as drift: {rc}\n{out}"
+    assert "enforce_admins=true" in out, out
+    assert "alpha-check,bravo-check" in out, "the context NAMES were not reported\n" + out
+
+
+def test_an_unreadable_protection_endpoint_leaves_enforce_admins_UNKNOWN(fleet):
+    """Checks exist, the second call fails: report UNKNOWN and set no rc. Reading
+    a failed call as 'admins are bound' is the reassuring zero; reading it as
+    FALSE would fire rc 24 whenever that endpoint is flaky."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 2 alpha-check,bravo-check", protection=None)
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 0, f"an unreadable protection endpoint fired: {rc}\n{out}"
+    assert "enforce_admins=UNKNOWN" in out, out
+    assert "NOT read as 'admins are bound'" in out, out
+
+
+@pytest.mark.parametrize("url", [
+    # 🔴 MEASURED: each of these fabricated a slug from a github.com string that
+    # sat in the PATH, not the HOST. The arm then queried a real, unrelated repo
+    # and — if that one is protected — printed a confident green about a remote
+    # it is not watching. An affirmative answer about the wrong subject, which is
+    # worse than no answer.
+    "https://mirror.internal.example/github.com/other-owner/other-repo.git",
+    "git@gitea.internal.example:mirrors/github.com/other-owner/other-repo.git",
+])
+def test_a_github_com_in_the_PATH_does_not_fabricate_a_slug(fleet, url):
+    fleet.catch_up()
+    fleet.set_origin(url)
+    log = fleet.root / "gh-argv-mirror.log"
+    fleet.stub_gh("false 0 ", log=log)
+    rc, out = fleet.check("--no-remote", GIT_ALLOW_PROTOCOL="file")
+    assert rc != 24, f"{url} was turned into a slug and queried\n{out}"
+    assert "not a github.com owner/repo remote" in out, out
+    assert not log.exists(), (
+        f"gh was queried about a fabricated slug: {log.read_text()!r}"
+    )
+
+
+def test_a_trailing_slash_after_dot_git_still_resolves(fleet):
+    """`…/repo.git/` yielded `owner/repo.git`, because `.git` was stripped before
+    the trailing slash — a slug that 404s while looking right."""
+    fleet.catch_up()
+    fleet.set_origin("https://github.com/charlie-owner/delta-repo.git/")
+    log = fleet.root / "gh-argv-slash.log"
+    fleet.stub_gh("false 0 ", log=log)
+    rc, out = fleet.check("--no-remote", GIT_ALLOW_PROTOCOL="file")
+    assert rc == 24, out
+    assert "charlie-owner/delta-repo " in out or "charlie-owner/delta-repo\n" in out, out
+    assert "repos/charlie-owner/delta-repo/branches/main" in log.read_text(), log.read_text()
+
+
+# --------------------------------------------------------------------------- #
+# ROUND 3 — what round 2's own fixes introduced, and the mutant that survived.
+# --------------------------------------------------------------------------- #
+
+def test_an_EMPTY_enforce_admins_answer_is_UNKNOWN_not_bound(fleet):
+    """🔴 A SURVIVING MUTANT closed. Mutating `true)` to `true|"")` — so an empty
+    answer reads as "admins are bound" — survived the whole file, because every
+    existing fixture makes the failing call print a JSON error and exit 1.
+
+    The OTHER failure shape produces EMPTY stdout: `timeout` killing gh, which
+    wraps every call the arm makes. Today's code is correct; nothing pinned it.
+    """
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 2 alpha-check,bravo-check", protection="")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 0, out
+    assert "enforce_admins=UNKNOWN" in out, (
+        "an EMPTY answer was read as a value rather than a non-answer\n" + out
+    )
+
+
+def test_a_ruleset_rule_listing_ZERO_checks_is_not_a_gate(fleet):
+    """The SHELL's behaviour when the filter reports zero gating rules.
+
+    ⚠ SCOPE, stated because the docstring used to overclaim: this feeds the stub
+    a count of 0, so the FILTERING has already happened — it cannot observe a
+    rule with empty parameters being counted. That half is covered by
+    `test_the_rules_jq_counts_gates_not_declarations`, which runs the real jq.
+    Reading as coverage while providing none is worse than no test.
+    """
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="0 0")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 24, f"a ruleset rule with zero checks was read as a gate: {rc}\n{out}"
+    assert "by CLASSIC protection and by RULESETS alike" in out, out
+
+
+def test_a_ruleset_with_BYPASS_ACTORS_is_rc24(fleet):
+    """The ruleset spelling of enforce_admins=false: the rule lists checks, the
+    ruleset is active, and named actors push straight past it — the mechanism
+    behind 837d3fde, invisible to a declaration count."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="1 4471", ruleset="active 2")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 24, f"a bypassable ruleset was reported as a gate: {rc}\n{out}"
+    assert "bypass-actors:2" in out, out
+    assert "837d3fde" in out, out
+
+
+def test_a_ruleset_not_in_ACTIVE_enforcement_is_rc24(fleet):
+    """An `evaluate`-mode ruleset REPORTS and does not block, so nothing gates
+    main — but it declares a required_status_checks rule exactly like a live
+    one."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="1 4471", ruleset="evaluate 0")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 24, f"a dry-run ruleset was reported as a gate: {rc}\n{out}"
+    assert "enforcement:evaluate" in out, out
+
+
+def test_an_active_ruleset_with_no_bypass_is_the_gate(fleet):
+    """🔴 THE POSITIVE CONTROL for the three reds above — without it they are all
+    satisfied by an arm that fires on every ruleset."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="1 4471", ruleset="active 0")
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 0, f"a genuinely gating ruleset was reported as drift: {rc}\n{out}"
+    assert "gates it" in out, out
+
+
+def test_an_unreadable_ruleset_DETAIL_is_could_not_measure(fleet):
+    """The rule exists but whether it BINDS is unproven. Neither protected nor
+    drift — the same refusal the unreadable rules endpoint gets."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="1 4471", ruleset=None)
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 0, f"an unreadable ruleset detail fired: {rc}\n{out}"
+    assert "could not be read" in out, out
+    assert "NOT read as protected" in out, out
+
+
+def test_a_userinfo_at_sign_in_the_PATH_does_not_fabricate_a_slug(fleet):
+    """🔴 THE FIX'S OWN PREPROCESSING RE-OPENED THE CLASS IT CLOSED. Stripping to
+    the first `@` anywhere leaves `github.com/...` when the `@` is in the PATH,
+    so the host anchor then matches a mirror URL. Userinfo can only precede the
+    host, so it may not contain a slash."""
+    fleet.catch_up()
+    fleet.set_origin("https://mirror.internal.example/u@github.com/other-owner/other-repo.git")
+    log = fleet.root / "gh-argv-userinfo.log"
+    fleet.stub_gh("false 0 ", log=log)
+    rc, out = fleet.check("--no-remote", GIT_ALLOW_PROTOCOL="file")
+    assert rc != 24, f"a userinfo @ in the path fabricated a slug\n{out}"
+    assert "not a github.com owner/repo remote" in out, out
+    assert not log.exists(), f"gh was queried: {log.read_text()!r}"
+
+
+@pytest.mark.parametrize("write_line,label", [
+    ('timeout 5 "$DRIFT_GH" api -X DELETE "repos/x/y/protection" # which one',
+     "trailing comment (the old lookup-skip ate the whole segment)"),
+    ('/usr/bin/gh api -X DELETE "repos/x/y/protection"', "absolute path"),
+    ('G="$DRIFT_GH"; "$G" api -X DELETE "repos/x/y/protection"', "alias via a variable"),
+    ('"${DRIFT_GH:-gh}" api -X DELETE "repos/x/y/protection"', "default expansion"),
+    ('timeout 5 "$DRIFT_GH" api \\\n  -X DELETE "repos/x/y/protection"', "line continuation"),
+])
+def test_the_gh_selector_does_not_fail_OPEN(write_line, label):
+    """🔴 THE ALLOWLIST WAS CLOSED AND THE SELECTOR WAS NOT — an allowlist behind
+    a leaky selector is still a hole. Each of these reached the real script and
+    was never SCANNED, so the guard reported "3 calls found, all clean".
+
+    The line-continuation one is the most realistic: the arm's own gh lines are
+    200+ characters, so wrapping one is the natural maintainer edit.
+    """
+    poisoned = DRIFT.read_text() + "\n" + write_line + "\n"
+    calls = _gh_invocations(poisoned)
+    assert any(_gh_violation(argv) for _, argv in calls), (
+        f"the selector failed OPEN on {label}: {write_line!r}"
+    )
+
+
+def test_the_gh_selector_does_not_fail_CLOSED_on_prose_or_a_lookup():
+    """The other direction, and it caught a real false positive against this
+    repo's own script: `_command_tokens` strips `command` as transparent, so the
+    arm's existence probe `command -v "$DRIFT_GH"` read as an invocation of
+    something that is not `api`. A guard that flags the script it guards gets
+    loosened by whoever hits it next."""
+    base = DRIFT.read_text()
+    baseline = len(_gh_invocations(base))
+    for benign in [
+        'echo "run: gh api /repos/x/y/branches/main"',
+        'if ! command -v "$DRIFT_GH" >/dev/null 2>&1; then :; fi',
+        'DRIFT_GH=gh',
+    ]:
+        calls = _gh_invocations(base + "\n" + benign + "\n")
+        assert len(calls) == baseline, f"{benign!r} was read as an invocation"
+        assert not any(_gh_violation(a) for _, a in calls), benign
+
+
+# --------------------------------------------------------------------------- #
+# THE jq EXPRESSIONS THEMSELVES — the blind spot every behavioural test above
+# shares.
+#
+# 🔴 A STUBBED `gh` RETURNS A CANNED STRING, SO THE `--jq` NEVER RUNS. Every test
+# in this file drives the arm through a stub, which means the filters that
+# PRODUCE those strings are exercised by nothing: a mutation removing the
+# `parameters.required_status_checks` guard from the rules filter SURVIVED the
+# whole suite. The behavioural tests pin what the arm does with a count; only
+# this pins where the count comes from.
+#
+# So run the real `jq` (in the gate toolchain, both tiers) over payloads shaped
+# from LIVE responses, and assert the exact line the shell then parses.
+# --------------------------------------------------------------------------- #
+
+_JQ = shutil.which("jq")
+
+
+def _jq_expr_containing(path_fragment):
+    """The `--jq '<expr>'` on the drift-check.sh line naming `path_fragment`."""
+    for ln in DRIFT.read_text().splitlines():
+        if path_fragment in ln and "--jq" in ln and not ln.strip().startswith("#"):
+            m = re.search(r"--jq '([^']*)'", ln)
+            assert m, f"could not extract the jq expression from: {ln}"
+            return m.group(1)
+    raise AssertionError(f"no gh line naming {path_fragment!r} found in drift-check.sh")
+
+
+def _run_jq(expr, payload):
+    out = subprocess.run([_JQ, "-r", expr], input=json.dumps(payload),
+                         capture_output=True, text=True)
+    assert out.returncode == 0, f"jq failed: {out.stderr}\nexpr: {expr}"
+    return out.stdout.rstrip("\n")
+
+
+jq_required = pytest.mark.skipif(_JQ is None, reason="needs jq on PATH")
+
+
+@jq_required
+@pytest.mark.parametrize("payload,expected", [
+    # Live shape, innovation-upstream/devrc.
+    ({"protected": True,
+      "protection": {"required_status_checks": {
+          "contexts": ["tekton/devrc-pytests", "tekton/devrc-nodetests"]}}},
+     "true 2 tekton/devrc-pytests,tekton/devrc-nodetests"),
+    # Live shape, a repo with no protection object at all.
+    ({"protected": False,
+      "protection": {"enabled": False,
+                     "required_status_checks": {"contexts": [], "checks": []}}},
+     "false 0 "),
+    # 🔴 The incident: object standing, required_status_checks DELETED out of it.
+    ({"protected": True, "protection": {"enabled": True}}, "true 0 "),
+])
+def test_the_branch_jq_emits_what_the_shell_parses(payload, expected):
+    assert _run_jq(_jq_expr_containing('"repos/$BP_SLUG/branches/main"'), payload) == expected
+
+
+@jq_required
+@pytest.mark.parametrize("payload,expected", [
+    ({"enforce_admins": {"enabled": True}}, "true"),
+    ({"enforce_admins": {"enabled": False}}, "false"),
+])
+def test_the_protection_jq_reads_enforce_admins(payload, expected):
+    assert _run_jq(_jq_expr_containing("branches/main/protection"), payload) == expected
+
+
+@jq_required
+@pytest.mark.parametrize("payload,expected", [
+    # Live shape, astral-sh/uv: one rule listing one check.
+    ([{"type": "required_status_checks", "ruleset_id": 14744442,
+       "parameters": {"required_status_checks": [{"context": "all required jobs passed"}]}}],
+     "1 14744442"),
+    # 🔴 THE MUTANT THAT SURVIVED THE BEHAVIOURAL SUITE: a rule of the right TYPE
+    # listing ZERO checks gates nothing, and a declaration count says 1.
+    ([{"type": "required_status_checks", "ruleset_id": 99,
+       "parameters": {"required_status_checks": []}}],
+     "0 "),
+    # Rules of other types must not be counted.
+    ([{"type": "deletion", "ruleset_id": 5},
+      {"type": "non_fast_forward", "ruleset_id": 5}],
+     "0 "),
+    ([], "0 "),
+])
+def test_the_rules_jq_counts_gates_not_declarations(payload, expected):
+    assert _run_jq(_jq_expr_containing("rules/branches/main"), payload) == expected
+
+
+@jq_required
+@pytest.mark.parametrize("payload,expected", [
+    ({"enforcement": "active", "bypass_actors": []}, "active 0"),
+    ({"enforcement": "active",
+      "bypass_actors": [{"actor_id": 1}, {"actor_id": 2}]}, "active 2"),
+    ({"enforcement": "evaluate", "bypass_actors": []}, "evaluate 0"),
+    # bypass_actors absent entirely must read as zero, not as null.
+    ({"enforcement": "active"}, "active 0"),
+])
+def test_the_ruleset_detail_jq_reads_enforcement_and_bypass(payload, expected):
+    assert _run_jq(_jq_expr_containing("rulesets/$BP_ID"), payload) == expected
+
+
+@jq_required
+def test_the_jq_harness_can_actually_fail():
+    """🔴 NEGATIVE CONTROL for the four tests above. They compare jq output to a
+    literal, so a helper that silently returned the literal would pass them all.
+    Feed a payload whose correct answer is NOT the healthy one and watch it
+    differ."""
+    expr = _jq_expr_containing("rules/branches/main")
+    gating = [{"type": "required_status_checks", "ruleset_id": 7,
+               "parameters": {"required_status_checks": [{"context": "x"}]}}]
+    empty = [{"type": "required_status_checks", "ruleset_id": 7,
+              "parameters": {"required_status_checks": []}}]
+    assert _run_jq(expr, gating) != _run_jq(expr, empty), (
+        "the jq harness cannot distinguish a gating rule from an empty one"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# ROUND 4 — one ruleset is not all rulesets, and `command <gh>` executes.
+# --------------------------------------------------------------------------- #
+
+def test_a_NON_binding_ruleset_does_not_condemn_a_binding_one(fleet):
+    """🔴 FALSE DRIFT, measured. `/rules/branches/main` returns the rules from
+    EVERY applying ruleset, repo- and ORG-level mixed (the interleaving of repo- and
+    org-level rulesets is real and measured live on astral-sh/uv — though uv
+    itself does NOT exhibit this bug: only one of its entries survives the
+    `required_status_checks` filter, so this case is constructed). Taking
+    only `.[0].ruleset_id` let ONE ruleset decide for all of them: an org-level
+    ruleset in `evaluate` mode sorting first — the standard org rollout pattern —
+    made a genuinely gated branch read "not active" and fire rc 24 every 6h
+    forever. A false drift here IS the permanently-red gate this arm forbids.
+    """
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="2 111,222",
+               ruleset={"111": "evaluate 0", "222": "active 0"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 0, f"a binding ruleset was condemned by a sibling: {rc}\n{out}"
+    assert "ruleset 222 gates it" in out, out
+
+
+def test_ALL_rulesets_non_binding_is_still_rc24(fleet):
+    """The discriminator: examining every ruleset must not blunt the finding when
+    none of them binds."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="2 111,222",
+               ruleset={"111": "evaluate 0", "222": "active 3"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 24, f"no ruleset binds and nothing fired: {rc}\n{out}"
+    assert "NONE of its" in out, out
+    assert "111=enforcement:evaluate" in out, out
+    assert "222=bypass-actors:3" in out, out
+
+
+def test_one_unreadable_ruleset_among_non_binding_ones_is_could_not_measure(fleet):
+    """🔴 NOT DRIFT. No ruleset was PROVEN to bind, but one we could not read may
+    — "unprotected" and "protected by a ruleset I could not examine" are the same
+    observation, which is the empty-answer-is-zero trap one level further in."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="2 111,222",
+               ruleset={"111": "evaluate 0", "222": None})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc != 24, f"an unreadable ruleset was counted as not binding\n{out}"
+    assert rc == 0, out
+    assert "none was PROVEN to bind" in out, out
+    assert "could not be read" in out, out
+
+
+def test_the_ruleset_loop_is_BOUNDED_and_the_cap_is_not_drift(fleet):
+    """The loop is over a set this script does not control, so it is bounded like
+    every sibling listing here — and hitting the cap means we did not look, which
+    must never read as "nothing gates main"."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="3 111,222,333",
+               ruleset={"111": "evaluate 0", "222": "evaluate 0", "333": "active 0"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG,
+                          DRIFT_GH_RULESET_MAX="2")
+    assert rc != 24, f"stopping early was reported as drift: {rc}\n{out}"
+    assert "stopped after 2 ruleset(s)" in out, out
+
+
+@pytest.mark.parametrize("write_line,label", [
+    # 🔴 A REGRESSION THE PREVIOUS REVISION CAUGHT. `command <x>` EXECUTES x — it
+    # is the normal way to bypass a shell function or alias — so widening the
+    # lookup skip from `command -v` to bare `command` opened a hole that had been
+    # closed. `type`/`which`/`hash` never execute and stay skipped.
+    ('command "$DRIFT_GH" api -X DELETE "repos/x/y/protection"', "command <gh>"),
+    ('command ${DRIFT_GH} api -X DELETE "repos/x/y/protection"', "command ${gh}"),
+    # The alias VALUE may be a path, which the sibling git scanner already
+    # handles with rsplit("/") — this half did not.
+    ('G=/usr/bin/gh; "$G" api -X DELETE "repos/x/y/protection"', "path-valued alias"),
+])
+def test_the_gh_selector_does_not_fail_OPEN_round4(write_line, label):
+    poisoned = DRIFT.read_text() + "\n" + write_line + "\n"
+    calls = _gh_invocations(poisoned)
+    assert any(_gh_violation(argv) for _, argv in calls), (
+        f"the selector failed OPEN on {label}: {write_line!r}"
+    )
+
+
+def test_a_command_dash_v_lookup_is_still_skipped():
+    """The other direction of the same fix: `command -v` really is a lookup and
+    must not be read as an invocation, or the arm's own existence probe turns the
+    guard red against the file it guards."""
+    base = DRIFT.read_text()
+    baseline = len(_gh_invocations(base))
+    for benign in ['command -v "$DRIFT_GH" >/dev/null 2>&1',
+                   'type gh >/dev/null 2>&1',
+                   'which gh >/dev/null']:
+        calls = _gh_invocations(base + "\n" + benign + "\n")
+        assert len(calls) == baseline, f"{benign!r} was read as an invocation"
+
+
+# --------------------------------------------------------------------------- #
+# ROUND 5 — a loop that ran ZERO times, and `command -p`.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("rules_answer,why", [
+    ("2 abc", "a non-numeric id blanks the list via the sanitiser"),
+    ("2 ", "jq emitted no ids at all (every selected rule had a null ruleset_id)"),
+])
+def test_a_ruleset_loop_that_runs_ZERO_times_is_not_DRIFT(fleet, rules_answer, why):
+    """🔴 THE WORST CASE TO GET WRONG, and this arm got it wrong for one round.
+
+    The id list can be blanked by the sanitiser (a non-numeric id) or arrive
+    empty from jq, and the loop then runs NOT ONCE. Control fell through to the
+    DRIFT branch and the arm announced "NONE of its 2 required-checks rule(s)
+    binds:" with an EMPTY reason list — "we examined nothing" printed as
+    "nothing gates main".
+
+    That is the inversion this block's own header forbids, and it was STRICTLY
+    WORSE than the revision it replaced: the previous code mapped the same input
+    to a ruleset id of 0, whose detail call 404s into COULD NOT MEASURE.
+    """
+    fleet.catch_up()
+    log = fleet.root / "gh-zero-loop.log"
+    _gh_router(fleet, branch="true 0 ", rules=rules_answer, log=log)
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc != 24, f"a loop that examined nothing fired DRIFT ({why})\n{out}"
+    assert rc == 0, out
+    assert "empty or unusable — 0 examined" in out, out
+    # And it must not have paid for a call it then ignored.
+    assert "rulesets/" not in (log.read_text() if log.exists() else ""), (
+        "a ruleset detail was fetched despite an empty id list"
+    )
+
+
+def test_the_zero_iteration_branch_does_not_swallow_a_real_finding(fleet):
+    """🔴 THE DISCRIMINATOR. A guard that turns every ruleset verdict into
+    could-not-measure would satisfy the test above while disarming the arm."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="1 111", ruleset={"111": "evaluate 0"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 24, f"a genuinely non-binding ruleset stopped firing: {rc}\n{out}"
+    assert "111=enforcement:evaluate" in out, out
+
+
+@pytest.mark.parametrize("write_line,label", [
+    # 🔴 `command -p utility` RUNS utility with a default PATH. Measured:
+    # `bash -c 'command -p echo X'` prints X. Treating -p as a lookup put the
+    # hole back one flag over from where the previous round removed it.
+    ('command -p "$DRIFT_GH" api -X DELETE "repos/x/y/protection"', "command -p <gh>"),
+    # The braced family the token RE already claims to accept.
+    ('${DRIFT_GH:-gh} api -X DELETE "repos/x/y/protection"', "bare ${gh:-default}"),
+    ('timeout 5 ${DRIFT_GH:-gh} api -X DELETE "repos/x/y/protection"', "wrapped bare braced"),
+])
+def test_the_gh_selector_does_not_fail_OPEN_round5(write_line, label):
+    poisoned = DRIFT.read_text() + "\n" + write_line + "\n"
+    calls = _gh_invocations(poisoned)
+    assert any(_gh_violation(argv) for _, argv in calls), (
+        f"the selector failed OPEN on {label}: {write_line!r}"
+    )
+
+
+def test_command_dash_v_and_dash_V_are_still_lookups():
+    """The other direction: `-v`/`-V` genuinely do not execute, and the arm's own
+    existence probe must stay invisible to the guard."""
+    base = DRIFT.read_text()
+    baseline = len(_gh_invocations(base))
+    for benign in ['command -v "$DRIFT_GH" >/dev/null 2>&1',
+                   'command -V "$DRIFT_GH" >/dev/null 2>&1']:
+        calls = _gh_invocations(base + "\n" + benign + "\n")
+        assert len(calls) == baseline, f"{benign!r} was read as an invocation"
+
+
+def test_the_seam_guard_counts_gh_calls_INSIDE_the_ruleset_loop(fleet):
+    """🔴 The multiplier must come from the loop BODY, not from an assumption
+    that exactly one call site sits in it. Adding a second in-loop probe has to
+    move the derived count, or the seam guard under-reserves the unit's budget
+    the moment someone does exactly that."""
+    src = DRIFT.read_text()
+    loop = src[src.index("for BP_ID in"):]
+    loop = loop[:loop.index("\n      done")]
+    assert len(_gh_invocations(loop)) >= 1, "no gh call found inside the ruleset loop"
+
+    # 🔴 RUN THE REAL DERIVATION, NOT A LOCAL COPY OF IT. The first version of
+    # this test recomputed the formula inline, so a mutant reverting the actual
+    # derivation survived it — the guard was testing itself. It now calls the
+    # same `_derive_gh_calls` the budget test consumes.
+    doubled = src.replace(
+        '        BP_RS_RAW="$(timeout',
+        '        : "$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/rulesets/$BP_ID/history" --jq \'.x\' 2>/dev/null)"\n'
+        '        BP_RS_RAW="$(timeout', 1)
+    assert doubled != src, "the in-loop probe was not inserted"
+    cap = int(re.search(
+        r'DRIFT_GH_RULESET_MAX="\$\{DRIFT_GH_RULESET_MAX:-(\d+)\}"', src).group(1))
+    _, _, before = _derive_gh_calls(src)
+    _, _, after = _derive_gh_calls(doubled)
+    assert after == before + cap, (
+        "adding a second gh call INSIDE the ruleset loop did not raise the derived "
+        "budget by the loop's bound: %d vs %d (cap %d). A derivation that assumes "
+        "exactly one in-loop site under-reserves the unit's timeout the moment a "
+        "second is added." % (after, before, cap)
+    )
+
+
+# --------------------------------------------------------------------------- #
+# ROUND 6 — a lost id is not a separator, and a cap of 1 must examine ONE.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("rules_answer,shape", [
+    ("2 ,111", "a NULL ruleset_id: jq emits a leading comma (measured)"),
+    ("2 111,", "a trailing empty field"),
+    ("3 111,,222", "an empty field in the middle"),
+])
+def test_a_LOST_ruleset_id_is_refused_rather_than_silently_dropped(fleet, rules_answer, shape):
+    """🔴 AN EMPTY FIELD IS A LOST ID, NOT A HARMLESS SEPARATOR.
+
+    The sanitiser was all-or-nothing for a bad CHARACTER and silently lossy for a
+    dropped id. Measured: jq emits `2 ,111` when one selected rule carries a null
+    `ruleset_id`, which passes the character class; `tr ',' ' '` then drops the
+    empty and the loop examines ONE id while the rule count says two — so the arm
+    could fire DRIFT having looked at a subset, with the missing id accounted for
+    in no counter.
+    """
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules=rules_answer,
+               ruleset={"111": "evaluate 0", "222": "evaluate 0"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc != 24, f"a partially lost id list fired DRIFT ({shape})\n{out}"
+    assert rc == 0, out
+    assert "empty or unusable — 0 examined" in out, out
+
+
+def test_a_cap_of_ONE_examines_exactly_one_ruleset(fleet):
+    """🔴 THE CAP'S BEHAVIOUR, not just its value — and the half that was missing.
+
+    The floor guards that DRIFT_GH_RULESET_MAX is >= 1. Nothing guarded that 1
+    actually examines one: changing the loop's `-gt` to `-ge` makes a cap of 1
+    break BEFORE the first call, so the arm reports COULD NOT MEASURE on every run
+    forever — verbatim the harm the floor's own error message claims to prevent —
+    and 42 protect tests passed with that mutation in place.
+
+    So: with the cap at 1 and a single BINDING ruleset, the verdict must be the
+    gate being ON, which is only reachable if the loop body ran.
+    """
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="1 111", ruleset={"111": "active 0"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG,
+                          DRIFT_GH_RULESET_MAX="1")
+    assert rc == 0, f"a cap of 1 did not examine its one ruleset: {rc}\n{out}"
+    assert "ruleset 111 gates it" in out, out
+    assert "stopped after" not in out, (
+        "a cap of 1 tripped the cap before examining anything\n" + out
+    )
+
+
+def test_the_cap_still_stops_at_its_bound(fleet):
+    """The discriminator for the test above: a cap that never trips is not a
+    bound, and would satisfy `examines exactly one` just as well."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="2 111,222",
+               ruleset={"111": "evaluate 0", "222": "active 0"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG,
+                          DRIFT_GH_RULESET_MAX="1")
+    assert rc == 0, out
+    assert "stopped after 1 ruleset(s)" in out, (
+        "the cap did not stop the loop at its bound\n" + out
+    )
+
+
+@pytest.mark.parametrize("spelling", [
+    "${DRIFT_GH:=gh}", "${DRIFT_GH-gh}", "${DRIFT_GH=gh}", "${DRIFT_GH:?err}",
+    "${DRIFT_GH#x}", "${DRIFT_GH%x}", "${DRIFT_GH/a/b}", "${DRIFT_GH^^}",
+    "${DRIFT_GH:0:20}", "${DRIFT_GH:-gh}",
+])
+def test_every_braced_spelling_of_the_binary_is_scanned(spelling):
+    """`_walk` breaks at `{`, so any braced spelling is torn apart before the
+    token test sees it. Normalising ONE operator left nine siblings failing open,
+    each a character from the fixed one and identical in meaning."""
+    poisoned = DRIFT.read_text() + "\n" + spelling + ' api -X DELETE "repos/x/y/p"\n'
+    calls = _gh_invocations(poisoned)
+    assert any(_gh_violation(argv) for _, argv in calls), (
+        f"the selector failed OPEN on {spelling}"
+    )
+
+
+@pytest.mark.parametrize("other_var", ["${DRIFT_GH_TIMEOUT}", "${DRIFT_GHX}"])
+def test_a_DIFFERENT_variable_is_not_swallowed_by_the_braced_normalisation(other_var):
+    """The other direction: widening to the family must not capture a variable
+    that merely starts with the same letters, or the guard starts reading
+    unrelated lines as gh invocations."""
+    assert _BRACED_GH.search(other_var) is None, (
+        f"{other_var} was normalised as if it were the gh binary"
+    )
