@@ -1366,9 +1366,27 @@ TARGET_FLOORS=(
   # either. Resolving it by taking a side, or by arithmetic across the two, is
   # exactly how this line took eleven values in one day.
   #
-  # So the value below is the gate's OWN printed replacement, measured on the
-  # merged tree — the procedure both sides' comments already prescribe, applied
-  # to the tree that actually results.
+  # ⚠ AND THE VALUE BELOW IS `origin/main`'s NUMBER, VERIFIED ADEQUATE — it is
+  # NOT a fresh replacement printed on the merged tree, and an earlier revision
+  # of this comment said it was. That was false: the gate PRINTS a replacement
+  # only when a floor drifts, and this one did not, so there was nothing to copy.
+  # What was actually done — and what a reader should repeat — is:
+  #   * merge main IN, then MEASURE the merged tree: 10546 collected;
+  #   * check the surviving candidate still holds: floor 10269 gives a ceiling of
+  #     10269 + 10269/4 = 12836, and 10546 sits inside it, so the gate passes and
+  #     prints nothing. `RESULT: PASS`, both tiers, no failing target.
+  # So main's side was adequate and this branch's 10233 was the stale one. That
+  # is "verify a side against the merged tree", not "take a side" — but it is
+  # also NOT the re-derive-from-the-print recipe, and calling it that would send
+  # the next maintainer looking for output the gate never produced.
+  #
+  # 🔴 The doctrinal value for THIS tree is `_suggested_floor 10546` = 10496, and
+  # it is deliberately NOT pinned: 10496 was measured on the DEV-HOST tier only,
+  # and the sandbox tier collects a different number for this target. Pinning a
+  # one-tier measurement as a floor is how a branch lands under its own floor and
+  # reds the tier nobody measured. 10269 clears both. The cost is 227 tests of
+  # extra slack, far inside the 2567 drift band — re-derive it from a run that
+  # has measured BOTH tiers if you want it tighter.
   #
   # Both sides' lessons are kept because they are about different things:
   #   * main's: the ceiling FIRED ONLY ON THE MERGED TREE. Neither side was over
