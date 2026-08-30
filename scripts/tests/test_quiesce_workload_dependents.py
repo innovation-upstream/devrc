@@ -22,6 +22,8 @@ RED/GREEN MATRIX, measured by checking out `origin/main:scripts/quiesce-workload
 over the fixed copy and re-running this file:
   pre-change (origin/main @ bc0809f6):  7 failed, 2 passed
   post-change (HEAD):                   9 passed
+Re-measured after the fakes were rewritten from bash to POSIX sh (the harness
+changed, so the earlier matrix no longer covered it): same 7/2 and 9.
 
 The 2 that pass on BOTH sides are INVARIANT GUARDS, not regression coverage --
 labelled as such on each. They pin behaviour the bug never violated (the happy
@@ -32,12 +34,24 @@ guard becomes noise and then gets reflexively --force'd.
 
 import json
 import os
-import stat
 import subprocess
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-QUIESCE = REPO / "scripts" / "quiesce-workload.sh"
+SCRIPTS = REPO / "scripts"
+QUIESCE = SCRIPTS / "quiesce-workload.sh"
+
+sys.path.insert(0, str(SCRIPTS))
+
+from testlib.mockbin import write_exec  # noqa: E402
+
+# 🔴 The fake bodies below are POSIX sh, not bash. `write_exec` owns the shebang
+# and it is `#!/bin/sh` on purpose: `#!/usr/bin/env bash` does not exist in the
+# nix build sandbox (the tier Tekton gates on), so a stub written at runtime with
+# one execs on this dev host and ENOENTs there. On NixOS /bin/sh happens to BE
+# bash, so `[[ ]]` would pass here and fail in the sandbox — the exact two-tier
+# blind spot testlib/mockbin.py was written for. Hence `case`, not `[[`.
 
 
 def _ks(name, namespace="flux-system", depends_on=None):
@@ -45,12 +59,6 @@ def _ks(name, namespace="flux-system", depends_on=None):
     if depends_on is not None:
         spec["dependsOn"] = depends_on
     return {"metadata": {"name": name, "namespace": namespace}, "spec": spec}
-
-
-def _fake_bin(bindir: Path, name: str, body: str) -> None:
-    p = bindir / name
-    p.write_text("#!/usr/bin/env bash\n" + body)
-    p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
 def _run(tmp_path, items, *args, kubectl_rc=0):
@@ -66,27 +74,28 @@ def _run(tmp_path, items, *args, kubectl_rc=0):
     scale_log = tmp_path / "scale.called"
 
     # kubectl: serve the kustomization list; record scale; empty pod list.
-    _fake_bin(
-        bindir,
-        "kubectl",
+    write_exec(
+        bindir / "kubectl",
         f"""
-if [[ "$*" == *"get kustomizations"* ]]; then
-  if [[ {kubectl_rc} -ne 0 ]]; then
-    echo "error: the server could not find the requested resource" >&2
-    exit {kubectl_rc}
-  fi
-  cat {listing}
-  exit 0
-fi
-if [[ "$*" == *"scale"* ]]; then
-  echo "$*" >> {scale_log}
-  exit 0
-fi
+case "$*" in
+  *"get kustomizations"*)
+    if [ {kubectl_rc} -ne 0 ]; then
+      echo "error: the server could not find the requested resource" >&2
+      exit {kubectl_rc}
+    fi
+    cat {listing}
+    exit 0
+    ;;
+  *scale*)
+    echo "$*" >> {scale_log}
+    exit 0
+    ;;
+esac
 exit 0
 """,
     )
     # flux: record every suspend. Its existence is the whole assertion.
-    _fake_bin(bindir, "flux", f'echo "$*" >> {suspend_log}\nexit 0\n')
+    write_exec(bindir / "flux", f'echo "$*" >> {suspend_log}\nexit 0\n')
 
     env = dict(os.environ)
     env["PATH"] = f"{bindir}:{env['PATH']}"
