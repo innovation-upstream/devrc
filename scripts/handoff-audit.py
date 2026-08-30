@@ -87,9 +87,17 @@ RESUME_COST = 200
 # Measured over all 413 docs: `Next steps (ranked)` 246, `Gotchas / decisions /
 # dead-ends` 237, `State now` 231, `Open investigations …` 198. The families below
 # are deliberately loose on the tail of the heading and anchored on its head.
-NEXT_STEPS = re.compile(r"^next steps\b|^do next\b|^what'?s next\b", re.I)
-INVESTIGATIONS = re.compile(r"^open investigations\b|^live diagnosis\b", re.I)
-GOTCHAS = re.compile(r"^gotchas\b|dead-ends?\b|^decisions\b", re.I)
+# 🔴 ANCHORED ON `^` THESE MISSED REAL SECTIONS, ALWAYS UNDERSTATING. Measured over
+# the corpus: `^gotchas` missed 70 H2 headings / 102,153 B (`Durable gotchas (this
+# session)`, `🔴🔴 CRITICAL GOTCHAS (…)`, `Key gotchas (…)`) — and in those
+# sections NEITHER the retracted scan NOR the RELOCATE_DURABLE scan ever ran.
+# `^open investigations` missed 16 headings / 63,894 B, two of them fully terminal
+# (`Closed investigations — measured 2026-08-13, do not re-derive`, 4,009 B).
+# Consistent with the FLOOR framing, but a looser floor than the number reads, so
+# the anchors are relaxed to a word-boundary search.
+NEXT_STEPS = re.compile(r"\bnext steps\b|\bdo next\b|\bwhat'?s next\b", re.I)
+INVESTIGATIONS = re.compile(r"\binvestigations?\b|\blive diagnosis\b", re.I)
+GOTCHAS = re.compile(r"\bgotchas?\b|\bdead-ends?\b|\bdecisions\b", re.I)
 
 # A DONE marker on a ranked item. Measured shapes in the first 60 chars of the
 # 2,804 numbered items in the corpus: ✅ 163, DONE 136, **DONE 115, ~~ 106,
@@ -97,10 +105,14 @@ GOTCHAS = re.compile(r"^gotchas\b|dead-ends?\b|^decisions\b", re.I)
 # several docs retire an item without deleting it.
 DONE_MARK = re.compile(r"✅|~~|\bDONE\b|\bSHIPPED\b|\bMERGED\b|\bCLOSED\b|\bLANDED\b")
 # 🔴 Bounded to the item's OWN FIRST PHYSICAL LINE. Unbounded, an item whose BODY
-# merely mentions that some other PR merged is scored as complete — and the body is
-# where that word almost always appears, so the unbounded version marks nearly
-# everything done. It is the same trap as skill-audit's WORK_STATUS/DATED_LESSON
-# split: the strong-looking signal is in the wrong place.
+# merely mentions that some other PR merged is scored as complete. It is the same
+# trap as skill-audit's WORK_STATUS/DATED_LESSON split: the strong-looking signal
+# is in the wrong place.
+# ⚠ This comment used to end "so the unbounded version marks nearly everything
+# done", which is FALSE and was caught by the round-1 audit. Measured: unbounded
+# scores 214 of 1,417 ranked items (15.1%), first-line 194 (13.7%) — the bound
+# removes 20 items, not "nearly everything". Keeping the wrong figure would have
+# had the next reader over-trust the bound and under-look at the rest.
 #
 # 🔴 A CHARACTER BUDGET IS NOT THAT BOUND, and this shipped as `DONE_SCAN = 160`
 # before test_done_marker_is_bounded_to_the_item_head caught it. A ranked item's
@@ -111,7 +123,11 @@ DONE_MARK = re.compile(r"✅|~~|\bDONE\b|\bSHIPPED\b|\bMERGED\b|\bCLOSED\b|\bLAN
 DONE_FIRST_LINE_ONLY = True
 
 # A resolved investigation block, judged on its HEADING only, same reason.
-RESOLVED_HEAD = re.compile(r"✅|\bCLOSED\b|\bRESOLVED\b|\bANSWERED\b|~~")
+# 🔴 `re.I` — this was the ONE matcher here without it while its sibling RETRACTED
+# carried it, so a heading spelling the word in lower case was missed. Costs ~4 KB
+# on the corpus; the inconsistency is the real defect, since nothing made the two
+# behave alike.
+RESOLVED_HEAD = re.compile(r"✅|\bCLOSED\b|\bRESOLVED\b|\bANSWERED\b|~~", re.I)
 
 # A bullet recording something that was retracted or refuted. This is history by
 # construction: the value is the correction, and the correction is one line.
@@ -192,37 +208,80 @@ def _bucket(lines, lo, hi):
     return SA._bytes(lines[lo:hi])
 
 
-def _blocks_by_bullet(lines, lo, hi, pred):
+# 🔴 THE EXTENT CLASS, THIRD INSTANCE. Two were already fixed here — an H1 whose
+# extent was the whole file, and a 160-character DONE scan that reached into an
+# item's body. This is the same defect in the list walkers: a bullet's or a ranked
+# item's extent ran "to the next one of its kind, else the end of the H2", with no
+# HEADING boundary. The last bullet in a section therefore swallowed every H3 that
+# followed it, and the predicate was then applied to the swallowed text.
+#
+# MEASURED on the real 413-doc corpus before this fix:
+#   16 of 237 "retracted" bullets crossed a heading; 44,057 B lay past the first
+#   swallowed heading = 26.5% of that bucket. TEN of them (45,309 B) matched
+#   RETRACTED *only* via swallowed content — they are not retractions at all. The
+#   worst single case booked 16,380 B for a bullet containing no retraction
+#   (datapacket-talos handoff-pr-preview-observability-and-gate15.md:226, whose
+#   extent swallowed 15 headings). 3 ranked items over-reached by 9,928 B.
+#   Corrected: retracted 166,390 -> 116,282 B (-30.1%); gross 14.3% -> 13.4%.
+# The headline survived; the per-bucket line the report prints did not — it was
+# 1.43x high. Clip at the next heading, and test the predicate on the CLIPPED text.
+def _clip(heads, s, e):
+    """`e`, brought back to the first heading strictly after `s`.
+
+    A list item cannot span a heading: the heading ends the block it is in.
+    """
+    for i, _lv, _t in heads:
+        if s < i < e:
+            return i
+    return e
+
+
+def _blocks_by_bullet(lines, heads, inside, lo, hi, pred):
     """(start, end, bytes) for each top-level bullet in [lo,hi) matching `pred`.
 
-    A bullet's extent runs to the next top-level bullet, so a continuation line
-    and any nested sub-bullet travel with it.
+    A bullet's extent runs to the next top-level bullet OR the next heading,
+    whichever comes first, so a continuation line and any nested sub-bullet travel
+    with it and nothing else does. Bullets inside a code fence are not bullets.
     """
-    starts = [i for i in range(lo, hi) if BULLET.match(lines[i])]
+    starts = [i for i in range(lo, hi) if not inside[i] and BULLET.match(lines[i])]
     out = []
     for k, s in enumerate(starts):
-        e = starts[k + 1] if k + 1 < len(starts) else hi
-        if pred("".join(lines[s:e])):
+        e = _clip(heads, s, starts[k + 1] if k + 1 < len(starts) else hi)
+        # 🔴 The BYTES include a fenced example — it is genuinely part of the
+        # bullet — but the PREDICATE must not read it. A bullet followed by a code
+        # block containing the word REFUTED is not a retraction, and matching on
+        # fenced content is the same "matched on text that is not the bullet's own
+        # claim" defect as the swallowed-heading case above, one layer in.
+        probe = "".join(ln for j, ln in enumerate(lines[s:e], start=s) if not inside[j])
+        if pred(probe):
             out.append((s, e, _bucket(lines, s, e)))
     return out
 
 
-def _ranked_items(lines, lo, hi):
+def _ranked_items(lines, heads, inside, lo, hi):
     """(number, start, end, bytes, done) per top-level numbered item in [lo,hi).
 
     Only a strictly-ascending run counts, mirroring skill-audit._corpus_items: a
     nested "1./2." list inside an item restarts, and treating that restart as a
     new rank both inflates the count and mis-attributes the bytes.
+
+    🔴 The ascending-run rule is NOT fence awareness, and the two were confused:
+    a fenced `2. echo x` after a real item 1 ascends, so it was booked as rank 2.
+    The corpus happens to contain no such line today — measured with a positive
+    control proving the detector is wired — but the guard that was supposed to
+    hold this was passing for the ascending-run reason instead.
     """
     starts, last = [], 0
     for i in range(lo, hi):
+        if inside[i]:
+            continue
         m = NUMBERED.match(lines[i])
         if m and int(m.group(1)) > last:
             last = int(m.group(1))
             starts.append((last, i))
     out = []
     for k, (n, s) in enumerate(starts):
-        e = starts[k + 1][1] if k + 1 < len(starts) else hi
+        e = _clip(heads, s, starts[k + 1][1] if k + 1 < len(starts) else hi)
         head = lines[s] if DONE_FIRST_LINE_ONLY else "".join(lines[s:e])
         out.append((n, s, e, _bucket(lines, s, e), bool(DONE_MARK.search(head))))
     return out
@@ -243,17 +302,21 @@ def audit_one(doc):
     size = len(text.encode())
     h2 = SA.sections(lines, heads, 2)
 
+    inside, _unclosed = SA._fence_map(lines)
+
     ranked, resolved, retracted, generic = [], [], [], 0
     for title, s, e, _b in h2:
         if NEXT_STEPS.search(title):
-            ranked += _ranked_items(lines, s, e)
+            ranked += _ranked_items(lines, heads, inside, s, e)
         if INVESTIGATIONS.search(title):
             for t3, s3, e3, b3 in SA.sections(lines, heads, 3, s, e):
                 if RESOLVED_HEAD.search(t3):
                     resolved.append((t3, s3, e3, b3))
         if GOTCHAS.search(title):
-            retracted += _blocks_by_bullet(lines, s, e, lambda t: RETRACTED.search(t))
-            generic += len(_blocks_by_bullet(lines, s, e, lambda t: GENERIC_LESSON.search(t)))
+            retracted += _blocks_by_bullet(lines, heads, inside, s, e,
+                                           lambda t: RETRACTED.search(t))
+            generic += len(_blocks_by_bullet(lines, heads, inside, s, e,
+                                             lambda t: GENERIC_LESSON.search(t)))
 
     # Work-status headings ("## Session 2026-08-28", "### Shipped this session") —
     # skill-audit's EVICT_HISTORY bucket, on THIS corpus's matcher. See the comment
@@ -294,36 +357,53 @@ def audit_one(doc):
 
 
 def resolve_targets(args):
-    out = []
+    """(docs, per_root) — the resolved docs, and what each ARGUMENT contributed.
+
+    🔴 The per-root tally is not decoration. This tool's output is meant to be
+    quoted, and without it a run naming two roots where one holds no docs prints a
+    single total with nothing to say so — an existing-but-empty root contributes
+    silently, because only a NONEXISTENT path warns, and that warning goes to
+    stderr where a redirect loses it. A quoted headline has to be traceable to the
+    population it came from.
+    """
+    out, per_root = [], []
     for a in args:
         p = Path(os.path.expanduser(a))
+        before = len(out)
         if p.is_file():
             out.append(p.resolve())
-            continue
-        if not p.is_dir():
+        elif not p.is_dir():
             print(f"handoff-audit: no such path: {p}", file=sys.stderr)
+            per_root.append((str(p), None))
             continue
-        for base in (p, p / "claudedocs"):
-            if base.is_dir():
-                out += [f.resolve() for f in sorted(base.glob("handoff-*.md"))]
+        else:
+            for base in (p, p / "claudedocs"):
+                if base.is_dir():
+                    out += [f.resolve() for f in sorted(base.glob("handoff-*.md"))]
+        per_root.append((str(p), len(out) - before))
     seen, uniq = set(), []
     for p in out:
         if p not in seen:
             seen.add(p)
             uniq.append(p)
-    return uniq
+    return uniq, per_root
 
 
 def _pct(a, b):
     return (100.0 * a / b) if b else 0.0
 
 
-def render(audits, show_all, n_detail, n_sections, out=sys.stdout):
+def render(audits, show_all, n_detail, n_sections, out=sys.stdout, per_root=()):
     p = lambda *a: print(*a, file=out)
     audits = sorted(audits, key=lambda a: -a["size"])
     over = [a for a in audits if a["status"] != "OK"]
     total = sum(a["size"] for a in audits)
     p(f"# handoff-doc audit — {len(audits)} doc(s)")
+    if per_root:
+        p("\n## population (each root as given, and what it contributed)")
+        for root, n in per_root:
+            p(f"  {'NO SUCH PATH' if n is None else format(n, '>5')}  {root}")
+        p("  A root contributing 0 is shown so a quoted total is traceable to it.")
     p(f"\ntarget {TARGET:,} B   ·   hard cap {HARD:,} B")
     p("  🔴 NOT ENFORCED. No gate in this repo measures a handoff doc, so every")
     p("     verdict below is a REFERENCE you may argue with, not a rejection. The")
@@ -431,7 +511,7 @@ def main(argv=None):
     ap.add_argument("--csv", action="store_true")
     args = ap.parse_args(argv)
 
-    targets = resolve_targets(args.paths or [str(Path.cwd())])
+    targets, per_root = resolve_targets(args.paths or [str(Path.cwd())])
     if not targets:
         sys.exit("no handoff-*.md found under: "
                  + ", ".join(args.paths or [str(Path.cwd())])
@@ -440,7 +520,7 @@ def main(argv=None):
     if args.csv:
         render_csv(audits)
     else:
-        render(audits, args.all, args.detail, args.sections)
+        render(audits, args.all, args.detail, args.sections, per_root=per_root)
 
 
 if __name__ == "__main__":
