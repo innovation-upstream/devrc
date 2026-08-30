@@ -134,26 +134,40 @@ def test_the_skill_exists_and_the_contract_is_not_empty(body):
     assert len(fs.EXIT_CONTRACT) >= 4
 
 
-def _documented_exit_table(body: str) -> dict:
-    """The shipped table as `{code: normalised sentence}` — the PAIRING.
+def _documented_exit_rows(body: str) -> "list[tuple[int, str]]":
+    """EVERY shipped `- `N` — sentence` row, in document order — the PAIRING.
 
     🔴 THIS IS THE WHOLE FIX FOR THE ROUND-4 GAP. Two guards used to stand here:
     one asked whether each sentence appeared SOMEWHERE in the file, the other
     compared only the SET of codes. Neither read which sentence sat beside which
     code, so TRANSPOSING the exit-3 and exit-4 rows — making the shipped skill
     say 3 means "something the tail needed was NOT measured" and 4 means "could
-    not resolve to exactly one live window", exactly inverted — left 122/122
-    passing, and 377/377 across every generic skill gate. Nothing else in the
-    tree reads this file.
+    not resolve to exactly one live window", exactly inverted — left the whole
+    file and every generic skill gate GREEN. Nothing else in the tree reads this
+    file. (The counts that used to sit here were hand-typed and already
+    described a tree that no longer existed — #1029. A count is a claim about a
+    revision; state the OUTCOME, and let the runner report the number.)
 
     The failure that buys is this PR's own founding argument, relocated to the
     caller: a wrapper branches `rc == 3 ⇒ report unmeasured` / `rc == 4 ⇒ here
     are the candidates`, and under the inverted table treats an ambiguous
     multi-window match as a scan failure and an unmeasured tail as a settled
     candidate list.
+
+    🔴 EVERY ROW, NEVER A DICT — #1029 finding 1. This used to be a dict
+    comprehension over `re.findall`, so when a code appeared TWICE the later row
+    silently overwrote the earlier one and only the pinned copy was ever
+    compared. MEASURED on `430fe3e1`: an `## Exit codes (quick reference)` block
+    planted at line 20 with the 3 and 4 sentences INVERTED left 24/24 green,
+    because the real table further down won the overwrite. A reader who stops at
+    the first table gets the inverted meaning, and nothing said so.
+
+    Not hypothetical — `SKILL.md` already carries a second, prose assertion
+    about rc 4 above the pinned table. Returning the rows in document order
+    lets the caller check ALL of them and report WHICH one disagrees.
     """
-    return {int(code): _norm(text)
-            for code, text in re.findall(r"^- `(\d)` — (.*)$", body, re.M)}
+    return [(int(code), _norm(text))
+            for code, text in re.findall(r"^- `(\d)` — (.*)$", body, re.M)]
 
 
 def test_the_doc_table_PAIRS_each_code_with_its_own_contract_sentence(body):
@@ -161,23 +175,39 @@ def test_the_doc_table_PAIRS_each_code_with_its_own_contract_sentence(body):
 
     Set-of-codes plus sentences-appear-somewhere is satisfied by any
     permutation. Equality on `{code: sentence}` is not.
+
+    🔴 AND EVERY ROW IS CHECKED, NOT THE LAST ONE PER CODE (#1029 finding 1).
+    Collapsing to a dict first made a SECOND, contradicting table invisible:
+    whichever row came last won, so an inverted quick-reference above the pinned
+    table read as agreement. Each row is now compared where it sits, and the
+    failure names its ORDINAL so you can find the offending copy.
     """
-    documented = _documented_exit_table(body)
+    rows = _documented_exit_rows(body)
     declared = {code: _norm(text) for code, text in fs.EXIT_CONTRACT}
-    assert documented, (
+    assert rows, (
         "no `- `N` — ...` rows parsed out of the shipped skill body — the table "
         "moved or was reformatted, and this gate is reading nothing. Re-point "
         "it rather than deleting it.")
-    assert documented == declared, (
+    mismatched = [(i, code, text) for i, (code, text) in enumerate(rows, 1)
+                  if declared.get(code) != text]
+    assert not mismatched, (
         "the shipped exit-code table disagrees with `EXIT_CONTRACT`:\n"
         + "".join(
-            f"  exit {c}:\n    doc   : {documented.get(c, '<MISSING>')!r}\n"
+            f"  row #{i} (exit {c}):\n    doc   : {t!r}\n"
             f"    script: {declared.get(c, '<NOT DECLARED>')!r}\n"
-            for c in sorted(set(documented) | set(declared))
-            if documented.get(c) != declared.get(c))
+            for i, c, t in mismatched)
         + "Reword the CONSTANT and copy it here, never the other way round — "
           "the doc is the derived artifact. A code paired with ANOTHER code's "
-          "sentence is the failure this replaced two weaker guards to catch.")
+          "sentence is the failure this replaced two weaker guards to catch. "
+          "If the row number surprises you, the doc carries MORE THAN ONE table "
+          "and you are looking at the wrong copy — which is exactly the gap "
+          "#1029 finding 1 measured.")
+    # ...and every declared code must actually appear. `mismatched` above is
+    # empty for a doc that simply omits a code, so this is a separate claim.
+    assert {code for code, _ in rows} == set(declared), (
+        "the shipped table and `EXIT_CONTRACT` cover different codes:\n"
+        f"  doc   : {sorted({c for c, _ in rows})}\n"
+        f"  script: {sorted(declared)}")
 
 
 def test_the_contract_codes_are_the_scripts_own_EXIT_constants():
@@ -310,16 +340,67 @@ def _tail_path_lines(tree) -> set:
     the `else:` / `elif` body of `if a.tail is not None:` as on the tail path
     when it is definitionally the NO-`--tail` path — the exact complement.
     Measured: a `return EXIT_UNAVAILABLE` planted in such an `else:` was
-    computed as ALLOWED and the suite stayed 122/122 green.
+    computed as ALLOWED and the suite stayed green.
+
+    🔴 AND THE TEST IS MATCHED STRUCTURALLY, NOT BY SUBSTRING (#1029 finding 2).
+    `"a.tail is not None" in ast.unparse(node.test)` is satisfied by
+    `if not (a.tail is not None):` — whose true branch is the exact COMPLEMENT of
+    the tail path — so the whitelist covered the no-`--tail` path under one
+    spelling. MEASURED on `430fe3e1`: planting
+
+        if not (a.tail is not None):
+            if a.deep and a.json:
+                return EXIT_UNAVAILABLE
+
+    in `main` left 24/24 green while `find-session.py … --live --deep --json`
+    (no `--tail`) genuinely exited **4**, falsifying the shipped "`4` — `--tail`
+    ONLY" sentence. Round 4 closed the `else:` spelling; `not (...)` is the same
+    hole wearing a different hat, which is why this now asks the AST what the
+    node IS instead of what its source LOOKS LIKE.
     """
     allowed = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "_tail_outcome":
             allowed |= set(range(node.lineno, node.end_lineno + 1))
-        if isinstance(node, ast.If) and "a.tail is not None" in ast.unparse(node.test):
+        if isinstance(node, ast.If) and _implies_tail_requested(node.test):
             for stmt in node.body:          # the TRUE branch, and nothing else
                 allowed |= set(range(stmt.lineno, stmt.end_lineno + 1))
     return allowed
+
+
+def _is_tail_is_not_none(test) -> bool:
+    """Exactly the node `a.tail is not None` — nothing that merely CONTAINS it.
+
+    Structural, so no spelling (`not (...)`, `... == False`, a walrus) can wear
+    the shape without being it.
+    """
+    return (isinstance(test, ast.Compare)
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.IsNot)
+            and isinstance(test.left, ast.Attribute)
+            and test.left.attr == "tail"
+            and isinstance(test.left.value, ast.Name)
+            and test.left.value.id == "a"
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value is None)
+
+
+def _implies_tail_requested(test) -> bool:
+    """Does entering this branch PROVE `--tail` was passed?
+
+    Only two forms qualify, and both are sound implications:
+      * the bare compare;
+      * an `and` chain containing it — every conjunct holds in the true branch.
+
+    `or` is deliberately NOT accepted: one disjunct being true says nothing
+    about the other, so `a.tail is not None or a.deep` can be entered with no
+    `--tail` at all. Neither is `not`, for the reason in the caller's docstring.
+    """
+    if _is_tail_is_not_none(test):
+        return True
+    return (isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And)
+            and any(_implies_tail_requested(v) for v in test.values))
 
 
 def _contract_lines(tree) -> set:
@@ -362,23 +443,78 @@ def exit_unavailable_sources(tree) -> list:
     return sorted((by_name | by_literal) - skip)
 
 
-@pytest.mark.parametrize("argv,why", [
-    (["zzterm", "--since", "not-a-date"], "an unparseable `--since`"),
-    (["zzterm", "--live", "--limit", "0"], "`--limit` below 1"),
-    (["zzterm", "--tail", "5"], "`--tail` without `--live`"),
-], ids=["since", "limit", "tail-without-live"])
-def test_every_CAUSE_the_exit_2_sentence_NAMES_really_exits_2(argv, why):
-    """🔴 The module docstring claims this file "pins each sentence against the
-    BEHAVIOUR it describes". The exit-2 sentence names three causes and only two
-    were exercised — `--since` was added to the prose and asserted nowhere.
+# =========================================================================== #
+# 🔴 THE EXIT-2 CAUSE LEDGER — THE SENTENCE IS BUILT FROM IT, NOT CHECKED
+#     AGAINST IT (#1029 finding 3)
+# =========================================================================== #
+# The old guard asserted each hand-typed `why` was a SUBSTRING OF the sentence.
+# That direction only proves the probes are honest about what they test; it says
+# nothing about causes the sentence names and nobody probes. Adding a fourth
+# cause to both the contract and the shipped doc WITHOUT implementing it left
+# the suite green — the founding defect of #989 (a claim wider than the thing
+# that enforces it) re-entering through the guard written to stop it.
+#
+# 🔴 AND IT HAD ALREADY HAPPENED. Measured on `430fe3e1`, before this change:
+# the sentence enumerated FIVE causes and exactly THREE were exercised. The two
+# `--skill` causes arrived with #1000 and were asserted nowhere.
+#
+# So the sentence is now RECONSTRUCTED from this ledger and compared whole. A
+# new cause cannot be documented without an entry here, and an entry cannot
+# exist without an argv that is actually run below. Rewording the constant fails
+# until the fragment is updated too — deliberate, and the price of a
+# machine-readable claim (`claude/RULES.md`, "pin the WHOLE normalised string").
+#
+# `(fragment, (argv, ...))` — a fragment may carry MORE THAN ONE argv when it
+# names more than one way in, as the "names nothing" one does.
+EXIT_2_CAUSES = (
+    ("`--tail` without `--live`",
+     (["zzterm", "--tail", "5"],)),
+    ("`--limit` below 1",
+     (["zzterm", "--live", "--limit", "0"],)),
+    ("an unparseable `--since`",
+     (["zzterm", "--since", "not-a-date"],)),
+    ("a query that names nothing (no terms and no `--skill`, or a `--skill` "
+     "that canonicalises to empty)",
+     ([], ["--skill", "/"])),
+    ("`--skill` with `--opencode-only` — that corpus carries no skill "
+     "attribution, so the combination has no answer rather than an empty one.",
+     (["--skill", "browser", "--opencode-only"],)),
+)
 
-    A sentence that enumerates causes is a claim per cause.
+_EXIT_2_PROBES = [(frag, argv) for frag, argvs in EXIT_2_CAUSES for argv in argvs]
+
+
+def test_the_exit_2_sentence_is_EXACTLY_the_cause_ledger_JOINED():
+    """🔴 THE DIRECTION THAT MATTERS. Build the sentence from the ledger and
+    compare it whole, so a cause in the prose with no probe cannot exist.
+
+    A substring check in either direction is walkable; equality is not.
     """
-    assert _norm(why) in _norm(dict(fs.EXIT_CONTRACT)[fs.EXIT_USAGE]), (
-        f"{why!r} is not actually named in the exit-2 sentence — this probe and "
-        "the contract have drifted apart")
+    frags = [frag for frag, _ in EXIT_2_CAUSES]
+    rebuilt = _norm("bad arguments: " + ", ".join(frags[:-1]) + ", or " + frags[-1])
+    declared = _norm(dict(fs.EXIT_CONTRACT)[fs.EXIT_USAGE])
+    assert rebuilt == declared, (
+        "the exit-2 sentence is not the cause ledger joined:\n"
+        f"  from ledger: {rebuilt!r}\n"
+        f"  EXIT_CONTRACT: {declared!r}\n"
+        "If you ADDED a cause to the sentence, add it to `EXIT_2_CAUSES` with an "
+        "argv that really exits 2 — that is the whole point of this guard. If "
+        "you REWORDED the sentence, copy the new wording into the ledger.")
+
+
+@pytest.mark.parametrize(
+    "why,argv", _EXIT_2_PROBES,
+    ids=[f"{i}-{argv and argv[-1] or 'no-args'}"
+         for i, (_, argv) in enumerate(_EXIT_2_PROBES)])
+def test_every_CAUSE_the_exit_2_sentence_NAMES_really_exits_2(why, argv):
+    """🔴 The module docstring claims this file "pins each sentence against the
+    BEHAVIOUR it describes". A sentence that enumerates causes is a claim per
+    cause, and the ledger above makes the enumeration machine-readable.
+    """
     rc, _, err = _run(argv, _runner(_report([])), archive=[])
-    assert rc == fs.EXIT_USAGE, f"{why} did not exit {fs.EXIT_USAGE}"
+    assert rc == fs.EXIT_USAGE, (
+        f"{why!r} is named in the exit-2 sentence but {argv} exited {rc}, "
+        f"not {fs.EXIT_USAGE}")
     assert err.strip(), "it exited 2 without telling the operator why"
 
 
@@ -504,7 +640,22 @@ def test_the_source_scan_IGNORES_the_declaration_and_the_contract_table():
                   if isinstance(n, ast.Constant) and isinstance(n.value, int)
                   and n.value not in (fs.EXIT_UNAVAILABLE, True, False)]
     assert other_ints, "fixture: the module must contain other integer literals"
-    assert not (sources & set(other_ints) - set(exit_unavailable_sources(tree)))
+    # 🔴 PARENTHESISED, AND WITH A MESSAGE (#1029, lower-severity item 1).
+    # This read `sources & set(other_ints) - set(exit_unavailable_sources(tree))`.
+    # `&` and `-` are equal-precedence and left-associative, so it evaluated as
+    # `(sources & other_ints) - sources` — identically EMPTY for every possible
+    # input, asserting nothing while reading as though it pinned something. A
+    # guard that cannot fail is worse than no guard: it tells the next reader to
+    # stop looking. MEASURED before rewriting it, rather than assumed: the
+    # intended property holds on the current tree (overlap is `[]`), so this is
+    # a real claim now and not a permanently-red one.
+    stray = sorted(sources & set(other_ints))
+    assert not stray, (
+        f"lines {stray} carry a NON-exit-4 integer literal and were still "
+        "counted as exit-4 sources, so the scan is keying on something other "
+        "than the value it claims to find:\n"
+        + "".join(f"  {ln}: {inspect.getsource(fs).splitlines()[ln - 1].strip()}\n"
+                  for ln in stray))
 
 
 def test_renaming_the_tail_helper_makes_this_guard_RED_not_vacuous():
