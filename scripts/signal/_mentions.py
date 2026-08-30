@@ -94,13 +94,26 @@ class MentionIdentityUnresolvable(MentionError):
     So it refuses. Identity here is load-bearing twice over — it decides whose
     longer name may veto a span AND whether two name matches are an ambiguity —
     and a guess in either direction is a mention pointing at the wrong human.
-    🔴 IT REFUSES THE WHOLE CALL, INCLUDING A MENTION TYPED AS A BARE UUID.
-    That is not over-reach: identity also builds `_colliding_needles()`'s veto
-    set, so a polluted group drops the OTHER real person's longer name from the
-    avoid list and the span lands on the first characters of THEIR name — the
-    same corrupted render, reached without `_resolve_one()` ever consulting a
-    name. The remedy is in the DATA (delete the stale placeholder row), not in
-    how the mention is spelled.
+    🔴 IT REFUSES A MENTION TYPED AS A BARE UUID TOO, when that uuid is IN the
+    polluted group. That is not over-reach: identity also builds
+    `_colliding_needles()`'s veto set through `mine = identity.get(key)`, so a
+    polluted group drops the OTHER real person's longer name from the avoid list
+    and the span lands on the first characters of THEIR name — the same
+    corrupted render, reached without `_resolve_one()` ever consulting a name.
+    The remedy is in the DATA (delete the stale placeholder row), not in how the
+    mention is spelled.
+
+    🔴 BUT IT IS SCOPED TO THE POLLUTED GROUP, NOT TO THE CALL (round-6 audit
+    F-1). Round 5 refused every `--mention` against a group holding any polluted
+    identity, and generalised one door into all doors: `mine` is the MENTION
+    TARGET'S OWN group and nothing else, so for a member who shares no
+    identifier with the bridge, `mine` is unchanged and both polluted names sit
+    in their veto list either way. Pollution can only corrupt a call whose
+    resolved author — or whose set of name matches, which is what the ambiguity
+    de-duplication reads — lands INSIDE the polluted group. Refusing wider than
+    that bricked every mention in the group for every member over one stale
+    placeholder row, and `consumer.py` exposes no contacts subcommand, so the
+    only remedy was hand-editing Postgres.
     """
 
 
@@ -399,7 +412,25 @@ def resolve_mentions(identifiers, *, body: str, members, contacts,
     return out
 
 
-def _identity_groups(candidates: list) -> dict[str, frozenset]:
+class _IdentityMap(dict):
+    """`_identity_groups()`'s result: the identity map, PLUS the bad groups.
+
+    A `dict` subclass so every reader — `identity.get(key)` in
+    `_colliding_needles()` and in `_resolve_one()` — is untouched by the round-6
+    change, and so a caller that passes a plain `dict` (or nothing) still works:
+    `_refuse_if_polluted()` reads `polluted` through `getattr`, and a map with no
+    pollution record refuses nothing.
+
+    `polluted` maps a member key to `(real rows, all rows)` of the group it is
+    in, for every key in a group holding two or more REAL rows.
+    """
+
+    def __init__(self, groups, polluted):
+        super().__init__(groups)
+        self.polluted = polluted
+
+
+def _identity_groups(candidates: list) -> _IdentityMap:
     """`author id -> the author ids of every contact ROW that is the SAME PERSON`.
 
     THE ONE DEFINITION OF "these two contact rows are one person". Both
@@ -449,10 +480,20 @@ def _identity_groups(candidates: list) -> dict[str, frozenset]:
     The invariant is a property of the RESULTING GROUP, so it is checked on the
     resulting group: **no group may contain two rows that are both real.** Any
     group that does is not one person, and nothing pairwise can say which real
-    row the bridging placeholder belongs to — so this FAILS CLOSED with
-    `MentionIdentityUnresolvable` rather than picking one. Enforced here, on the
-    output, which is why relocating or re-tuning the pair rule cannot reopen it:
-    a merge this function did not intend is caught by what it returns.
+    row the bridging placeholder belongs to — so a mention resolving into such a
+    group FAILS CLOSED with `MentionIdentityUnresolvable` rather than picking
+    one. Detected here, on the output, which is why relocating or re-tuning the
+    pair rule cannot reopen it: a merge this function did not intend is caught by
+    what it returns.
+
+    🔴 DETECTED HERE, REFUSED AT THE CALL SITE (round-6 audit F-1). This
+    function RECORDS the offending groups in `_IdentityMap.polluted` instead of
+    raising, because whether the pollution can corrupt a call depends on WHICH
+    mention is being resolved and this function does not know that. Only
+    `_resolve_one()` does, and it raises for exactly the mentions that land in a
+    polluted group — see `MentionIdentityUnresolvable`. Raising from here made
+    the refusal a property of the GROUP ADDRESS, which blocked correct mentions
+    of members who share nothing with the bridge.
 
     Rows with no identifier in common stay separate for the same reason: merging
     on a NAME would reopen the prefix collision the collision rule exists for.
@@ -484,19 +525,14 @@ def _identity_groups(candidates: list) -> dict[str, frozenset]:
     for i, row in enumerate(rows):
         if not row.get("is_placeholder"):
             real_per_group.setdefault(find(i), []).append(row)
-    for members_ in real_per_group.values():
+    polluted: dict[str, tuple] = {}
+    for root_, members_ in real_per_group.items():
         if len(members_) > 1:
-            authors = sorted({_contact_author(r) for r in members_} - {""})
-            raise MentionIdentityUnresolvable(
-                f"the stored contacts for this group put "
-                f"{len(members_)} DIFFERENT real identities "
-                f"({authors[:NAME_HINT_MAX]!r}) into one identity, bridged by a "
-                f"PLACEHOLDER row that shares an identifier with both. Which of "
-                f"them the placeholder belongs to is not decidable from the "
-                f"rows, and guessing picks who gets notified — so no --mention "
-                f"can be resolved against this group until the stale placeholder "
-                f"contact row is removed."
-            )
+            group_rows = [r for i, r in enumerate(rows) if find(i) == root_]
+            for row in group_rows:
+                key = _norm_member(_contact_author(row))
+                if key:
+                    polluted[key] = (members_, group_rows)
 
     clusters: dict[int, set] = {}
     for i, row in enumerate(rows):
@@ -507,7 +543,70 @@ def _identity_groups(candidates: list) -> dict[str, frozenset]:
         key = _norm_member(_contact_author(row))
         if key:
             out.setdefault(key, set()).update(clusters[find(i)] - {""})
-    return {key: frozenset(ids) for key, ids in out.items()}
+    return _IdentityMap({key: frozenset(ids) for key, ids in out.items()},
+                        polluted)
+
+
+def _unresolvable_message(ident: str, real_rows: list, group_rows: list) -> str:
+    """The `MentionIdentityUnresolvable` text. The operator has to ACT on this.
+
+    🔴 THE COUNT AND THE LIST ARE ONE VALUE (round-6 audit F-1). The count used
+    to be `len(real_rows)` while the list was those rows' authors DE-DUPLICATED
+    into a set, so two real rows carrying the same author string printed
+    `2 DIFFERENT real identities (['Ann'])` — a message that contradicts itself
+    in the one place it is read. The number below is the length of the list
+    below; a truncation says so separately.
+
+    🔴 AND IT NAMES THE BRIDGE. The refusal used to print the two real rows by
+    uuid and never mention the placeholder or the identifier it was minted for,
+    while telling the operator to "remove the stale placeholder contact row" —
+    and `consumer.py` has no contacts subcommand, so their only route is
+    Postgres and they had nothing to select on. The shared identifiers are the
+    intersection of the placeholder rows' ids with the real rows' ids: exactly
+    the values that did the bridging.
+    """
+    authors = sorted({_contact_author(r) for r in real_rows} - {""})
+    shown = authors[:NAME_HINT_MAX]
+    more = len(authors) - len(shown)
+    real_ids: set[str] = set()
+    for row in real_rows:
+        real_ids |= _contact_ids(row)
+    bridges = sorted({i for row in group_rows if row.get("is_placeholder")
+                      for i in (_contact_ids(row) & real_ids)})
+    return (
+        f"{ident!r} resolves into a group of stored contacts that holds "
+        f"{len(shown)} distinct real identities ({shown!r}"
+        + (f", +{more} not shown" if more > 0 else "")
+        + f") merged into ONE identity, bridged by PLACEHOLDER contact row(s) "
+          f"sharing {bridges!r} with them. Which of those identities the "
+          f"placeholder belongs to is not decidable from the rows, and guessing "
+          f"picks who gets notified — so this mention is refused until the stale "
+          f"placeholder contact row for {bridges!r} is removed. Mentions of "
+          f"members outside this identity are unaffected."
+    )
+
+
+def _refuse_if_polluted(ident: str, *, rows: list, identity) -> None:
+    """Raise iff THIS mention lands in an unresolvable identity group.
+
+    🔴 THE SCOPE IS THE WHOLE POINT (round-6 audit F-1) — see
+    `MentionIdentityUnresolvable`. `rows` is the mention's own match set: the
+    contact rows the identifier selected, whether by bare id or by name. If any
+    of them sits in a polluted group then either the resolved author or the
+    ambiguity de-duplication that chose it was computed from a merge that is not
+    one person, and the veto set `_colliding_needles()` builds from
+    `identity.get(key)` is that same merge. If none of them does, nothing this
+    call reads was affected by the pollution and refusing would be a refusal of
+    the group address rather than of the mention.
+    """
+    polluted = getattr(identity, "polluted", None) or {}
+    if not polluted:
+        return
+    for row in rows:
+        hit = polluted.get(_norm_member(_contact_author(row)))
+        if hit:
+            raise MentionIdentityUnresolvable(
+                _unresolvable_message(ident, *hit))
 
 
 def _colliding_needles(ident: str, *, author: str, candidates: list,
@@ -601,6 +700,13 @@ def _resolve_one(ident: str, *, member_set: set, candidates: list,
                 # "not this group", not 40 uuids to eyeball.
                 f"Check --to names the group you meant."
             )
+        # An explicitly-typed id still reads identity: `_colliding_needles()`
+        # builds its veto set from this author's group, so a bare uuid INSIDE a
+        # polluted group is the same corrupted render by another spelling.
+        _refuse_if_polluted(
+            ident, identity=identity,
+            rows=[c for c in candidates
+                  if _norm_member(ident) in _contact_ids(c)])
         for contact in candidates:
             if _norm_member(ident) in _contact_ids(contact) \
                     and contact.get("is_placeholder"):
@@ -614,6 +720,11 @@ def _resolve_one(ident: str, *, member_set: set, candidates: list,
 
     wanted = ident.lower()
     matched = [c for c in candidates if wanted in _contact_names(c)]
+    # Before the de-duplication below reads identity to decide what is ONE
+    # person and what is an AMBIGUITY: if any row this name matched sits in a
+    # polluted group, that decision is being made from a merge that is not one
+    # person, and so is the veto set built from it.
+    _refuse_if_polluted(ident, rows=matched, identity=identity)
     # De-duplicate by IDENTITY, not by row: one person can legitimately have two
     # contact rows mid-`_promote_placeholder`, and that is not ambiguity. The
     # identity comes from `_identity_groups()` — the one definition, shared with

@@ -2153,3 +2153,119 @@ def test_a_placeholder_bridging_ONE_real_row_still_resolves_NORMALLY(db):
         ["Ann"], body="hi @Ann ok", members=[ANN_UUID, number, BOB_UUID],
         contacts=rows, is_group=True) == [
         {"author": ANN_UUID, "start": 3, "length": 4}]
+
+
+# --------------------------------------------------------------------------- #
+# ROUND-6 AUDIT — F-1: the refusal was wider than its own justification
+# --------------------------------------------------------------------------- #
+def test_an_UNRELATED_member_still_resolves_while_ANOTHER_group_is_polluted(db):
+    """🔴 RED at 69e910ac — and red as a REFUSAL, not an import/attribute error.
+
+    Same three-row bridge as the two tests above (real Ann + placeholder + real
+    "Ann Smith", all on one number), plus Bob, an ordinary member on his own
+    number who shares no identifier with any of them. `--mention Bob`.
+
+    Bob's identity group is `{Bob}`. Whether Ann and Ann Smith were merged with
+    EACH OTHER cannot change which names count as "other than Bob", so both of
+    their names are in Bob's veto list either way and nothing about his call
+    reads the polluted group's shape. Measured:
+
+        707412e6 -> [{'author': BOB_UUID, 'start': 3, 'length': 4}]   correct
+        69e910ac -> MentionIdentityUnresolvable                        refused
+
+    Pollution can only corrupt a call whose resolved author (or whose set of
+    name matches) lands INSIDE the polluted group — true of the bare-uuid case
+    the previous round tested, false for every third party. Round 5 generalised
+    one door into all doors, and the cost is not cosmetic: one stale placeholder
+    row bricked every mention in the group for every member, with no CLI route
+    to find or delete the offending row.
+
+    The second half of this test is the load-bearing half: the SAME fixture must
+    still refuse `--mention Ann`. Narrowing that also let Ann through would pass
+    the first assertion and reopen round 5's wrong send.
+    """
+    number = "+15550100"
+    db.upsert_contact(phone_number=number)                       # -> PLACEHOLDER
+    db.upsert_contact(signal_uuid=ANN_UUID, display_name="Ann")
+    db.upsert_contact(signal_uuid=ANN_UUID, phone_number=number)  # promotion declines
+    db.upsert_contact(signal_uuid=CAI_UUID, profile_name="Ann Smith")
+    db.upsert_contact(signal_uuid=CAI_UUID, phone_number=number)  # declines again
+    db.upsert_contact(signal_uuid=BOB_UUID, display_name="Bob",
+                      phone_number="+15550999")
+    rows = db.contacts_by_identifiers([number, ANN_UUID, CAI_UUID, BOB_UUID])
+    assert len(rows) == 4, f"expected the bridge plus Bob, got {rows!r}"
+    members = [ANN_UUID, CAI_UUID, BOB_UUID, number, "+15550999"]
+
+    assert _mentions.resolve_mentions(
+        ["Bob"], body="hi @Bob ok", members=members, contacts=rows,
+        is_group=True) == [{"author": BOB_UUID, "start": 3, "length": 4}], \
+        "an uninvolved member's mention must not be refused by someone else's " \
+        "polluted identity group"
+
+    with pytest.raises(_mentions.MentionError) as exc:
+        _mentions.resolve_mentions(
+            ["Ann"], body="hi @Ann Smith", members=members, contacts=rows,
+            is_group=True)
+    assert type(exc.value).__name__ == "MentionIdentityUnresolvable", \
+        f"the wrong send must STILL be refused: {exc.value!r}"
+
+
+def test_the_unresolvable_refusal_COUNTS_and_LISTS_the_same_identities():
+    """The count and the list in the refusal must agree, and name the bridge.
+
+    RED at 69e910ac twice over, and the fixture is chosen to see BOTH:
+
+      * the count was `len(members_)` — the real ROWS — while the list was those
+        rows' authors DE-DUPLICATED into a set. THREE real rows carrying TWO
+        distinct authors printed `3 DIFFERENT real identities` beside a list of
+        two: a message that contradicts itself in the one place it is read.
+        Measured at 69e910ac on exactly these rows. A two-row fixture cannot see
+        this — its count and its deduped list agree by accident — which is why
+        this test does not reuse the bridge fixture above.
+      * the refusal named the real rows by uuid and never named the placeholder
+        or the identifier it was minted for, while instructing the operator to
+        "remove the stale placeholder contact row". `consumer.py` exposes no
+        contacts subcommand, so their only route is Postgres, and the shared
+        identifier is the only value they could have selected the row on.
+
+    Rows are hand-built rather than driven through `upsert_contact()` because
+    that API de-duplicates on the uuid: one person holding two REAL rows is a
+    state the pure resolver must handle (it is what a restore or a manual repair
+    leaves behind), not one the writer will produce for us.
+    """
+    n1, n2, n3 = "+15550111", "+15550222", "+15550333"
+    ph_uuid = "99999999-9999-4999-8999-999999999999"
+    # Both `Ann` rows are REAL and carry the SAME author, so they cannot union
+    # with each other (the pair gate needs a placeholder) — each is dragged into
+    # the group through its OWN placeholder, which is what makes the group hold
+    # three real rows spelling two identities.
+    rows = [
+        {"signal_uuid": ANN_UUID, "phone_number": n1, "display_name": "Ann",
+         "profile_name": None, "is_placeholder": False},
+        {"signal_uuid": ANN_UUID, "phone_number": n2, "display_name": "Ann",
+         "profile_name": None, "is_placeholder": False},
+        {"signal_uuid": ph_uuid, "phone_number": n1, "display_name": None,
+         "profile_name": None, "is_placeholder": True},
+        {"signal_uuid": ph_uuid, "phone_number": n2, "display_name": None,
+         "profile_name": None, "is_placeholder": True},
+        {"signal_uuid": ph_uuid, "phone_number": n3, "display_name": None,
+         "profile_name": None, "is_placeholder": True},
+        {"signal_uuid": CAI_UUID, "phone_number": n3, "display_name": None,
+         "profile_name": "Ann Smith", "is_placeholder": False},
+    ]
+    with pytest.raises(_mentions.MentionError) as exc:
+        _resolve(["Ann"], "hi @Ann Smith",
+                 members=[ANN_UUID, CAI_UUID, ph_uuid, n1, n2, n3], contacts=rows)
+    assert type(exc.value).__name__ == "MentionIdentityUnresolvable", \
+        f"refused, but with the wrong class: {exc.value!r}"
+    text = str(exc.value)
+    # THREE real rows, TWO real identities. The number printed is the length of
+    # the list printed, so no de-duplication can make them drift apart again.
+    assert "2 distinct real identities" in text, \
+        f"the count must be the length of the list beside it: {text!r}"
+    assert ANN_UUID in text and CAI_UUID in text
+    # The bridge itself: the identifiers the placeholder rows share with the
+    # real rows are the only thing the operator can act on.
+    assert n1 in text and n2 in text and n3 in text, \
+        f"the shared identifiers the placeholders were minted for are the ONE " \
+        f"actionable thing here, and they are absent: {text!r}"

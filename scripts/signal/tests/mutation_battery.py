@@ -634,14 +634,88 @@ MUTANTS: list[Mutant] = [
     Mutant("MEN14", "the group invariant's BOUNDARY moves 1 -> 2, so a group holding "
                     "exactly two real rows — the whole failure mode — passes while a "
                     "three-real-row group still refuses. The narrowest expression that "
-                    "can be wrong here, and the one MEN13 cannot distinguish: a guard "
-                    "deleted and a guard off by one look identical from the call site, "
-                    "and only this one proves the threshold is where the harm starts "
-                    "rather than one past it.",
+                    "can be wrong here, and worth keeping because it pins WHERE the "
+                    "threshold sits rather than merely that a threshold exists. "
+                    "🔴 [round-6 audit] THE LEDGER CLAIM THAT EACH OF MEN13/MEN14 IS "
+                    "'killed by a test the other is not' WAS FALSE, and is retracted: "
+                    "both are killed by the same two tests "
+                    "(`..._bridging_TWO_REAL_rows_is_REFUSED_not_guessed` and "
+                    "`..._survives_a_mention_typed_as_a_BARE_UUID`), and no test can "
+                    "ever separate them in that direction. MEN14 refuses on a strict "
+                    "SUBSET of the states MEN13 refuses on, so its killer set is a "
+                    "strict subset of MEN13's: any test that sees MEN14 sees a missing "
+                    "refusal at exactly two real rows, which MEN13 also misses. The "
+                    "mutants are ORDERED, not independent. Only the other direction is "
+                    "reachable — a THREE-real-row fixture would kill MEN13 and be "
+                    "survived by MEN14 — and this suite has none, so as of this round "
+                    "MEN14 is strictly redundant with MEN13 and is retained for the "
+                    "boundary it documents, not for coverage it adds.",
            MEN,
            "        if len(members_) > 1:",
            "        if len(members_) > 2:",
            "test_a_PLACEHOLDER_bridging_TWO_REAL_rows_is_REFUSED_not_guessed",
+           SUITE_MENT),
+
+    Mutant("MEN15", "🔴 [round-6 audit F-1] the refusal goes back to covering the "
+                    "WHOLE CALL: `_refuse_if_polluted()` ignores the mention's own "
+                    "match set and raises whenever ANY group is polluted. That is the "
+                    "shipped 69e910ac behaviour, and it is wrong in the direction "
+                    "nobody was watching — a refusal, not a send, so every wrong-send "
+                    "test stays green. `_colliding_needles()` reads identity for "
+                    "exactly one thing, `mine = identity.get(key)`, the mention "
+                    "TARGET'S OWN group; an uninvolved member's group is untouched by "
+                    "somebody else's merge and both polluted names are in their veto "
+                    "list either way. One stale placeholder row then bricked every "
+                    "mention in the group for every member, with no CLI route to find "
+                    "or delete the row. MEN13/MEN14's killers cannot see this: they "
+                    "assert a refusal, and this mutant refuses MORE.",
+           MEN,
+           "        hit = polluted.get(_norm_member(_contact_author(row)))\n"
+           "        if hit:",
+           "        hit = next(iter(polluted.values()))\n"
+           "        if hit:",
+           "test_an_UNRELATED_member_still_resolves_while_ANOTHER_group_is_polluted",
+           SUITE_MENT),
+
+    Mutant("MEN16", "the narrowed check goes BLIND instead of wide — "
+                    "`_refuse_if_polluted()` never raises, so the group-level "
+                    "invariant is detected and then discarded. The opposite "
+                    "over-correction to MEN15, which MEN15's killer cannot see (it "
+                    "passes under this), and the one that reopens round 5's wrong "
+                    "send. Detection and refusal are now two sites, so this proves "
+                    "the second one is load-bearing on its own.",
+           MEN,
+           "        hit = polluted.get(_norm_member(_contact_author(row)))\n"
+           "        if hit:",
+           "        hit = polluted.get(_norm_member(_contact_author(row)))\n"
+           "        if False:",
+           "test_a_PLACEHOLDER_bridging_TWO_REAL_rows_is_REFUSED_not_guessed",
+           SUITE_MENT),
+
+    Mutant("MEN17", "the refusal message counts the ROWS while listing the "
+                    "DE-DUPLICATED authors again — round-6 F-1's second defect, which "
+                    "printed `2 DIFFERENT real identities (['Ann'])` for two real rows "
+                    "carrying one author string: a count and a list that contradict "
+                    "each other in the one message the operator has to act on. Every "
+                    "refusal test still passes under it, because they assert the CLASS "
+                    "and not the text.",
+           MEN,
+           "        f\"{len(shown)} distinct real identities ({shown!r}\"",
+           "        f\"{len(real_rows)} distinct real identities ({shown!r}\"",
+           "test_the_unresolvable_refusal_COUNTS_and_LISTS_the_same_identities",
+           SUITE_MENT),
+
+    Mutant("MEN18", "the refusal stops naming the SHARED IDENTIFIER the bridging "
+                    "placeholder was minted for. It still says 'remove the stale "
+                    "placeholder contact row' — and `consumer.py` exposes no contacts "
+                    "subcommand, so the operator's only route is Postgres and this is "
+                    "the only value they could have selected on. An unactionable "
+                    "refusal is a permanent one.",
+           MEN,
+           "    bridges = sorted({i for row in group_rows if row.get(\"is_placeholder\")\n"
+           "                      for i in (_contact_ids(row) & real_ids)})",
+           "    bridges = []",
+           "test_the_unresolvable_refusal_COUNTS_and_LISTS_the_same_identities",
            SUITE_MENT),
 
     Mutant("MEN8", "`utf16_span()` stops forwarding `avoid` — the exported wrapper "
