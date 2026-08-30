@@ -1359,26 +1359,45 @@ TARGET_FLOORS=(
   # never fire: `zsh` is in REQUIRED_TOOLS, so a host without it aborts on
   # GUARD 1 naming the binary rather than running two tests thinner. That is
   # why they are not pinned in EXPECTED_SKIPS.
-  # 2026-08-29, the cairn `tasks:` schema (#1049): 10319 collected, against a
-  # ceiling of 8217 + 2054 = 10271. The gate printed this replacement itself —
-  # `"scripts/tests|10269"`, i.e. 10319 - min(50, max(1, 10319/20)) = 10319 - 50
-  # — so it is that run's own count put through the documented rule, not a number
-  # anyone computed from the two sides.
+  # 🔴 A THREE-WAY CONFLICT ON THE MOST CONFLICT-PRONE LINE IN THIS REPO, and
+  # NEITHER side's number is right for the tree they merge into. `origin/main`
+  # pinned 10269 for the cairn `tasks:` work; this branch pinned 10233 for the
+  # rc-24 arm; the merged tree contains BOTH sets of tests and collects more than
+  # either. Resolving it by taking a side, or by arithmetic across the two, is
+  # exactly how this line took eleven values in one day.
   #
-  # 🔴 IT FIRED ONLY ON THE MERGED TREE, WHICH IS THE WHOLE ARGUMENT FOR GATING
-  # ONE. Neither side was over on its own: `origin/main` collected 10137 and the
-  # PR branch collected 10112, both comfortably under. The SUM crossed it. A PR
-  # green on its own branch and a main green on its own can still produce a red
-  # merge, and with `strict: false` on this repo nothing checks that
-  # automatically — the only thing between this and a red main was building the
-  # integration branch by hand.
+  # ⚠ AND THE VALUE BELOW IS `origin/main`'s NUMBER, VERIFIED ADEQUATE — it is
+  # NOT a fresh replacement printed on the merged tree, and an earlier revision
+  # of this comment said it was. That was false: the gate PRINTS a replacement
+  # only when a floor drifts, and this one did not, so there was nothing to copy.
+  # What was actually done — and what a reader should repeat — is:
+  #   * merge main IN, then MEASURE the merged tree: 10546 collected;
+  #   * check the surviving candidate still holds: floor 10269 gives a ceiling of
+  #     10269 + 10269/4 = 12836, and 10546 sits inside it, so the gate passes and
+  #     prints nothing. `RESULT: PASS`, both tiers, no failing target.
+  # So main's side was adequate and this branch's 10233 was the stale one. That
+  # is "verify a side against the merged tree", not "take a side" — but it is
+  # also NOT the re-derive-from-the-print recipe, and calling it that would send
+  # the next maintainer looking for output the gate never produced.
   #
-  # ⚠ AND THE FIX HAS AN ORDER. Pinning 10269 while the branch still collected
-  # 10112 would have put the branch UNDER its own new floor and turned its
-  # required checks red — trading a merge-time failure for a branch-time one. So
-  # `origin/main` is merged INTO the branch first, making the branch the tree the
-  # number describes. A floor is a claim about a measured tree; pin it on the
-  # tree you measured.
+  # 🔴 The doctrinal value for THIS tree is `_suggested_floor 10546` = 10496, and
+  # it is deliberately NOT pinned: 10496 was measured on the DEV-HOST tier only,
+  # and the sandbox tier collects a different number for this target. Pinning a
+  # one-tier measurement as a floor is how a branch lands under its own floor and
+  # reds the tier nobody measured. 10269 clears both. The cost is 227 tests of
+  # extra slack, far inside the 2567 drift band — re-derive it from a run that
+  # has measured BOTH tiers if you want it tighter.
+  #
+  # Both sides' lessons are kept because they are about different things:
+  #   * main's: the ceiling FIRED ONLY ON THE MERGED TREE. Neither side was over
+  #     alone (10137 and 10112); the SUM crossed it. With `strict: false` nothing
+  #     checks that automatically — building the integration branch by hand is
+  #     the only thing between it and a red main. This conflict IS that case,
+  #     one merge later.
+  #   * and the ORDER: pin the floor only after merging main INTO the branch, or
+  #     the branch lands under its own new floor and its required checks go red —
+  #     trading a merge-time failure for a branch-time one. A floor is a claim
+  #     about a measured tree; pin it on the tree you measured.
   "scripts/tests|10269"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
