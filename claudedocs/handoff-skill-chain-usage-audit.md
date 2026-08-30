@@ -201,6 +201,41 @@ is consistent with 19; treat the bucket SHARES as the finding, not the denominat
   and see whether it goes green — that would close it. It is NOT this arc's problem either
   way; it is recorded so the next session does not re-derive the attribution.
 
+### Rank 6 RE-MEASURED 2026-08-30: the tekton skill was edited TODAY and is still wrong
+- **Why this is worse than "still open".** Another session landed devrc**#1096** (`abdd44b7`,
+  *"docs(tekton): two ADMISSION-class causes of a red devrc-ci check that are NOT your diff"*)
+  on `main` today. It is **+21 lines, 0 deletions** to `claude/skills/tekton/SKILL.md` — rank 6's
+  exact target — and it **did not touch any of the stale claims rank 6 exists for.** So the file
+  now carries a today's-date edit alongside content that is wrong, which is the strongest
+  possible false signal of freshness for the next reader.
+- **Observed (with values), read off `origin/main` at `55fca8ff`:** the claims are still there,
+  with line numbers — `nodeSelector` node-pinning at **39**, the `nix-store-cache` PVC at **41**,
+  the "cold cache ≈ 3 min" tradeoff at **45**, burst-stacking at **48**, and a second
+  `talos-xr6-r7p` + `nix-store-cache` description at **430**. Measured 2026-08-29 against the
+  live gate: **no `nodeSelector`**, and a per-node **hostPath** at
+  `/var/lib/mnt/disk-1/devrc-ci-nix-cache`.
+- **Ruled out:** *"#1096 already did rank 6"* — killed by `git show --stat abdd44b7`: one file,
+  21 insertions, **0 deletions**. An additive edit cannot have corrected a claim.
+- **Next probe (unchanged, and still the right one):** re-derive from the live cluster before
+  editing — it is a label and a volume, not a git fact — then correct lines 39/41/45/48/430 in
+  one edit. 🔴 **Read #1096's new section first**: it is about the same gate and is current, so a
+  correction that contradicts it would be re-deriving something a peer already measured.
+
+### The CI investigation now has evidence from ANOTHER session — read it before re-deriving
+- **New (2026-08-30):** devrc#1096 documents **two ADMISSION-class causes of a red `devrc-ci`
+  check that are NOT your diff.** That is the same class this doc's CI block has been circling,
+  measured independently. **Read `claude/skills/tekton/SKILL.md` around line 253** (`baseline`
+  PSA forbidding hostPath, `6bec075e`'s cache swap, `PodAdmissionFailed`) before running any new
+  probe on #1055/#1064's failures.
+- **What it does NOT settle:** #1055's and #1064's specific failing tests are *not* admission
+  failures — they are tests that read host state and that this doc already attributes to
+  environment/timing. The admission class explains a gate leg that never ran; it does not explain
+  a test that ran and failed. 🔴 **Do not merge the two into one story** — that is the
+  empty-result trap (an absence has many causes, and confirming one proves nothing about
+  another). #1092 going green on both legs is consistent with both readings and settles neither.
+- **Next probe (unchanged):** re-run #1055's gate on an unchanged SHA. A *different* test ⇒
+  environment/timing; the *same* test ⇒ a real runner-vs-local divergence worth fixing.
+
 ## Next steps (ranked)
 
 🔴 **The numbering below is STABLE and load-bearing** — `claim-work --slug-for <this doc> <rank>`
@@ -393,6 +428,21 @@ of this doc — re-read them before trusting any similar analysis.**
   shipped to both hosts, reported a successful switch, and sat inert with nothing on screen to
   say so. The check that separates them is reading `settings.json` for the event names — here,
   1 on `PostToolUse`, 1 on `Stop`, **0 on `SessionStart`**, on BOTH hosts.
+
+- 🔴 **AN ADDITIVE EDIT TO A DOC IS THE STRONGEST FALSE FRESHNESS SIGNAL THERE IS, and the
+  ranked-backlog decay rule does not cover it.** The known rule is "a ranked backlog decays —
+  re-measure each item before working it", and the expected decay is *the item got done*. This is
+  the inverse: rank 6's target file was edited **today**, by a competent session, in a way that
+  makes it *look* maintained while leaving every wrong line intact — because the edit was `+21/-0`
+  in a different section. **`git log -1 <file>` is not evidence about a claim inside that file.**
+  The discriminator is one command: `git show --stat <sha>` — an edit with **0 deletions** cannot
+  have corrected anything. Check that before you downgrade a doc-correction item.
+- **Decision — this session's third `/handoff` wrote only an APPEND delta.** The ranked list was
+  deliberately left untouched: rank 6 already says "re-measure before editing", the new fact is a
+  *warning attached to* that item rather than a change to it, and re-emitting all 8 items under a
+  REPLACE heading to add one clause risks dropping a line for no gain. The finding is keyed to
+  rank 6 by name in the investigation block above, which is where a reader working that item
+  arrives anyway.
 
 ## How to verify
 ```bash
