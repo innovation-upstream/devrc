@@ -59,6 +59,32 @@ drive. `scripts/e2e-hermetic-nixos.sh` self-provisions php84 + chromium from nix
 you do not need to be in a nix shell. Add `-- --grep <spec>` to cut the ~11-minute
 full run down to one spec when you only want the stack.
 
+🔴 **`127.0.0.1:5174` is NOT self-evidently Lane A — the API base is baked into the
+bundle at build time.** `build/client/` is gitignored and persists between runs, and
+an ordinary `npm run build` (the app's default, used for real deploys) bakes
+**`https://api.vetr.com/api`**. Serve *that* tree on `:5174` and every click is a
+Lane-B-forbidden write against **production**, from a URL this file tells you is safe.
+The bring-up script rebuilds with `VITE_API_BASE_URL=http://127.0.0.1:8000/api`
+(`:305-307`) — but it does so **after** `npm ci`, so any failure there leaves the old
+bundle in place. **Check the artifact, not the port**, before the first click:
+
+```bash
+command grep -rho "https://api\.vetr\.com/api\b\|http://127\.0\.0\.1:8000/api\b" \
+  build/client/assets/ | sort | uniq -c
+# want: only the 127.0.0.1 form. One unrelated PROD literal is expected and is NOT
+# the axios base — `https://api.vetr.com/api/auth/social/apple/callback`, a hardcoded
+# OAuth redirect. Anything else prod-shaped ⇒ the bundle is a prod build; rebuild.
+```
+
+⚠ **`npm ci` fails on an ambient Node that `sharp` rejects** (measured 2026-08-29:
+`~/.nix-profile/bin/node` is `v26.8.0-alpha`, and sharp's installer refuses it —
+`Expected Node.js version >=14.15.0 but found 26.8.0-alpha`). The script does not pin
+Node, and its cleanup trap honours `KEEP_UP` even on failure, so **you get a
+half-stack — MySQL and the API up, `:5174` dead — reported as "leaving stack
+running"**. Run it under Node 22 (`nix shell path:<system-channel>#nodejs_22`), or
+do `npm ci` + the build yourself under Node 22 and start
+`node scripts/spa-serve.mjs build/client 5174` by hand.
+
 On the **authnet** rail (the default, matching prod) the stack forces
 `ANET_ENDPOINT=sandbox`, so Authorize.net traffic goes to `apitest.authorize.net`
 — no real money.
@@ -315,6 +341,11 @@ Read the named flags **before** the `z9999` array — the array alone is ambiguo
    question is which query is stuck, not which overlay this is.
 3. **`toast`** ⇒ a toast is live. That div is only rendered while at least one toast
    exists, so its presence is a binary answer — and it will *also* appear in `z9999`.
+   🔴 **N live toasts still produce exactly ONE `z9999` entry, and its text is their
+   messages RUN TOGETHER with no separator** — measured, two toasts read as
+   `"State saved.State saved."`. So a `z9999` entry that looks like one nonsense
+   sentence is the toast container, not a modal with a strange title; check the flag,
+   never the text.
 4. **A `z9999` entry reading "Timezone Mismatch Detected"** ⇒ the modal above; the
    *only* one `timezone_mismatch_dismissed` clears.
 5. **Any other `z9999` text, with all three flags false** ⇒ a different
@@ -327,14 +358,37 @@ Read the named flags **before** the `z9999` array — the array alone is ambiguo
 | fresh tab on `/`, splash up | `{boot:false, splash:true, toast:false, z9999:["Vetr"]}` |
 | authed `/user`, opt-out cleared | `{boot:false, splash:false, toast:false, z9999:["Timezone Mismatch Detected…"]}` |
 | no toast live | `.Toastify__toast-container` **absent**; the always-mounted wrapper is a `<section class="Toastify">`, so it never enters the `div` filter |
+| **1 toast live** (added 2026-08-29) | `{boot:false, splash:false, toast:true, z9999:["State saved."]}` — container is `DIV.Toastify__toast-container.Toastify__toast-container--top-right`, `position: fixed`, `z-index: 9999` exactly, `pointer-events: auto`, **320×81 at (788,16)** in a 1124×1361 viewport |
+| **2 toasts live** | still **one** `z9999` entry, `"State saved.State saved."`; container grows to 320×162 |
+| **1 toast, mobile 393×852** | container is **393×64 at (0,0)** — a full-width strip pinned to the top edge, not a corner box |
+| **hit-test at the container's own centre** | returns `DIV.Toastify__toast-container` — so a live toast **does** swallow a click inside its own rect (`pointer-events: auto` on both container and `.Toastify__toast`) |
 
 The first row is why the `splash` flag exists: the splash really does land in `z9999`
 with the text **"Vetr"**, and without the flag you would read it as an unnamed modal.
-⚠ **Not verified: the toast-present case.** The *interceptor* toasts cannot be
-triggered (gated off — see below), and no action-handler toast was exercised, so
-step 3's *positive* half rests on the library's behaviour rather than a measurement
-here. Toasts **are** reachable in Lane A by clicking; if you exercise one, add the
-row.
+
+**How the toast rows were raised, so they can be re-measured** (2026-08-29, hermetic
+stack, Brave `work`): seed auth per the recipe above, `nav` to
+`/user/profile/state`, then `click button.btn-primary` (Save) →
+`toast.success("State saved.")` (`routes/user/profile/state.tsx:52`). The fixture
+owner already has a state, so Save is enabled on arrival and the write is a no-op
+re-save. Three instrument traps paid for here, all of which returned a confident
+`toast:false`:
+
+- 🔴 **Read at least ~1s AFTER the click.** The mutation is a network round trip; a
+  `js` read issued immediately after `click` returns sees no toast and reads exactly
+  like "the handler never fired".
+- 🔴 **`--wake` UN-PAUSES `pauseOnFocusLoss`.** `wake` applies
+  `Emulation.setFocusEmulationEnabled`, so the page believes it is focused and the
+  5000ms `autoClose` runs. A toast measured as "still up at 10s" was **gone by ~40s**.
+  Confirm presence and whatever you are testing **in the SAME `js` call** — a
+  hit-test done one call later measured a toast that had already closed and reported
+  a reassuring "nothing blocked".
+- ⚠ **`click` takes no flags** — `click <sel> --wake` is rejected outright
+  (`takes exactly one css-selector`), which is easy to miss if you only grep the
+  result for a field name. And under `emulate`, `click` dispatches touch events;
+  on this hidden tab that failed `cdp_timeout:Input.dispatchTouchEvent`, so the
+  mobile row above was measured by resizing a toast that was **already** live rather
+  than by clicking at mobile width.
 
 ⚠ **Keep the strict `=== "9999"`.** Measured on the same page, a regex
 (`/9999/.test(zIndex)`) returns **an extra element**: `PullToRefresh.tsx:183`,
@@ -373,8 +427,13 @@ stylesheet imported `root.tsx:30`). Two things about it that are easy to get wro
 - ⚠ **At mobile widths it is a full-width top strip, not a corner box** —
   `ReactToastify.css:115-117` sets `width: 100vw` at `≤480px`, and this file tells you
   to `emulate` 390×844. Don't rule it out because your control is on the left.
-  `autoClose` is 5000ms but `pauseOnFocusLoss` is set (`root.tsx:168`), and a
-  bridge tab is often unfocused — so treat it as *until dismissed*, not 5s.
+  **Measured at 393×852: `393×64` at `(0,0)`** — i.e. it lies directly over the
+  header row, and it is hit-testable (see the results table), so a back button at
+  `y≈47` sits under it while a toast is live.
+  `autoClose` is 5000ms and `pauseOnFocusLoss` is set (`root.tsx:168`) — but **do not
+  read that as "until dismissed" in a bridge tab**: `wake` enables focus emulation,
+  which un-pauses the timer. Measured: still up at ~10s, gone by ~40s, across reads
+  that each used `--wake`.
 
 ⚠ `UpdateApp.tsx:9` is also `fixed inset-0 z-[9999]`, but **you cannot meet it in a
 browser**: its only trigger (`root.tsx:245`) sits behind

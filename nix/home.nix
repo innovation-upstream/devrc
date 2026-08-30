@@ -266,17 +266,20 @@ in
           # 'ask' ⊂ 'task' is the documented way a neighbour silently steals it.
           # :dacq keeps the words he actually types for THIS snippet (feedback,
           # dispatch, process); :acq owns ask/clarify/questions alone.
-          # 2026-08-29: `"ask"` REMOVED from :dacq below. The split above says in
-          # so many words that ":acq owns ask/clarify/questions alone", and the
-          # label was duly cleaned — but the search_terms were not, so BOTH
-          # snippets went on declaring "ask" exactly. The tie-break added for this
-          # (#999) can only rescue a term that NAMES one trigger outright; neither
-          # of these is named "ask", so the term resolved to None and every fire
-          # of the config's highest-traffic term was recorded UNATTRIBUTED again —
-          # the very outcome the split was meant to prevent. It also turned
-          # `main` red repo-wide. The comment was right and the data was wrong:
-          # this makes the data match it.
-          { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["feedback" "dispatch" "process" "elicit" "scope" "include"]; }
+          # 2026-08-29: `"ask"` was REMOVED from :dacq to make the term resolve
+          # uniquely — and then deliberately RESTORED (with "clarifying"), which
+          # is the state below. Read the removal as a bug report about the
+          # MECHANISM, not about this line: "ask"/"clarify" is how :dacq is
+          # actually searched for, so deleting them bought a telemetry row by
+          # spending a real picker route. Both snippets spelling "ask" is now
+          # SUPPORTED — `espanso_detect._AMBIGUOUS_TERM_OWNER` declares that
+          # :acq owns "ask"/"clarify" for ATTRIBUTION while the picker keeps
+          # listing both rows. 🔴 Adding a term here that another snippet also
+          # spells is therefore fine for the picker but silently costs
+          # attribution unless that table names an owner — the live guard
+          # `test_live_existing_resolutions_not_made_ambiguous` is what tells
+          # you, and it is not optional to read.
+          { trigger = ":dacq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "clarifying" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
           { trigger = ":acq"; replace = "ask clarifying questions"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
           { trigger = ":alo"; replace = "anything left outstanding from this thread? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
@@ -1034,6 +1037,15 @@ in
   # pins it for exactly that reason.
   home.file.".config/activity-collector/changed_paths.py".source =
     ../scripts/collector/changed_paths.py;
+
+  # The mention scanner (source=mentions), imported by claude/session-tailer.py
+  # from the collector ROOT for the same reason changed_paths.py is — and with
+  # the same failure mode if this entry is missing: a green switch, then an
+  # ImportError on the next timer tick that stops the claude summariser dead.
+  # It is ALSO read from the repo by scripts/mention-open.py (the Alacritty hint
+  # handler), which resolves it relative to the checkout, not to this copy.
+  home.file.".config/activity-collector/mention_scan.py".source =
+    ../scripts/collector/mention_scan.py;
 
   # Claude Code activity source (5th source): a periodic tailer that scans the
   # ~/.claude transcripts and emits NEW user-typed messages / slash-commands as

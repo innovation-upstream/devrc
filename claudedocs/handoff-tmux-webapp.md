@@ -10,13 +10,28 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 ## Status
 
 **Phase 1 (attention queue) SHIPPED. Phase 2 (tmux read model) COMPLETE. Rank 3 (read-only
-`capture-pane` rendering) is ✅ DONE — BOTH HALVES SHIPPED, DEPLOYED AND VERIFIED LIVE
-2026-08-28. Phases 4–6 untouched; the lowest-numbered OPEN item is now rank 5.**
+`capture-pane` rendering) ✅ DONE 2026-08-28. Rank 5 (the fail-closed terminal-write auth
+wrapper) ✅ DONE 2026-08-29 — `ZacxDev/homelab-infra#516`, squash `c8635976`, DEPLOYED as clawgate
+0.8.13 and VERIFIED LIVE. The lowest-numbered OPEN item is now rank 6 (the layout schema +
+`clawgatectl view`/`panel` verbs).**
+
+🔴 **RANK 5 SHIPPED THE WRAPPER BUT NOT ITS SECRET, DELIBERATELY.** The SOPS age identity is on
+NEITHER host, so `CLAWGATE_TERMINAL_TOKEN` is wired `optional: true` and the surface boots
+**DISABLED (fail-closed)**. That is the intended resting state — nothing calls it yet — but it
+means "the wrapper is deployed" and "the wrapper would let a legitimate caller through" are
+**two different claims**, and only the first is true today. See rank 5 for the one operator step.
+
+🔴 **A FORK THAT IS NOW RANK 7's, SURFACED WHILE BUILDING RANK 5:** the browser holds **no
+credential at all** (`comment_delete.go:110-130`), and the app's pattern for UI mutation is an
+*open twin route*. That pattern cannot carry `send-keys`. Read rank 5's last paragraph before
+designing the grid UI.
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC** — `clawgatectl health` is the only authority. It said
-**0.8.10** on 2026-08-28 immediately after this session deployed it. This line has now carried
-**four** values in two days (0.8.7 → 0.8.8 → 0.8.9 from a concurrent session → 0.8.10), which is
-the whole argument for reading the cluster instead of this paragraph.
+**0.8.13** at 2026-08-29 20:58Z immediately after this session deployed it. This line has now
+carried **six** values in three days (0.8.7 → 0.8.8 → 0.8.9 from a concurrent session → 0.8.10 →
+0.8.11 → 0.8.13), which is the whole argument for reading the cluster instead of this paragraph.
+⚠ **0.8.12 EXISTS IN HARBOR AND WAS NEVER DEPLOYED** — built before #503 landed on trunk and
+superseded pre-merge; see rank 5. A tag existing is not a tag having shipped.
 
 ⚠ **THE PREVIOUS REVISION OF THIS HEADER SAID "MERGED-BUT-NOT-DEPLOYED" AND WARNED THAT THE
 FIRST SIGHT WOULD BE `collector predates the field` ON EVERY CARD. Both were true when written
@@ -526,9 +541,96 @@ do not renumber again without releasing the live claims first.
    UNDERFLOW). Round 5 was the first with **no behaviour defect**. Stopped there — one round short
    of the mechanical two-zero-payload gate — because round 5 was auditing test code round 4 wrote.
    Residual amplification measured **8.1x**, ratio-bounded, down from 1,107x.
-5. **Fail-closed terminal-write auth wrapper** — before any write endpoint exists, not after.
-   `internal/api/auth.go`. 🔴 Must NOT reuse `requireHookToken`: it is enforce-when-set
-   (`auth.go:51-54`), so an unset token would silently yield an open remote shell on both machines.
+5. ✅ **DONE 2026-08-29 — `ZacxDev/homelab-infra#516`, squash `c8635976`, DEPLOYED as clawgate
+   0.8.13 and VERIFIED LIVE.** The wrapper exists, is tested, and ships **with no caller**, which
+   was the requirement: "before any write endpoint exists, not after."
+
+   ✅ **Verified 2026-08-29 20:58Z, through the real path, with both controls:** pod
+   `clawgate-7c9fd4bcc5-d25v6` Running/ready `restarts=0` image `0.8.13`; `clawgatectl health`
+   (the SERVER, not the deploy) = **0.8.13**; and the boot line present:
+   `terminal write surface: DISABLED (fail-closed) — CLAWGATE_TERMINAL_TOKEN is not set`.
+   🔴 **A BEFORE-CONTROL WAS TAKEN AND VALIDATED** — the running 0.8.11 pod matched that grep
+   **0** times while the same grep shape matched the reaper's boot line **1** time, so the zero
+   was a fact about the log rather than a grep wired to nothing, and the line that appeared after
+   the roll is genuinely new.
+
+   🔴 **WHAT IS *NOT* VERIFIED, AND CANNOT BE YET: the 503 refusal in production.** No route uses
+   the wrapper — that is the entire point of shipping it first — so there is nothing to probe.
+   The refusal behaviour rests on the unit tests plus the mutation sweep, and the LIVE evidence is
+   the boot line alone. Do not upgrade "deployed and announcing DISABLED" into "the refusal was
+   exercised in production"; the first route to use it is what makes that claim available.
+
+   ⚠ **0.8.12 EXISTS IN HARBOR AND WAS NEVER DEPLOYED.** It was built from a tree that predated
+   `e8635c5f` (#503, the `Migrate` advisory-lock fix), which landed on trunk mid-review with **no
+   pin bump** — so 0.8.12 would have carried a pin reading NEWER than trunk while omitting a fix
+   trunk already had, and the next reader would have concluded #503 was deployed. Rebuilt from the
+   merged tree as **0.8.13** (a NEW tag, not a re-push: overwriting a mutable tag has cost this
+   project once). 🔴 **Deploying 0.8.13 therefore also SHIPPED #503** — whose own audit follow-ups
+   are still open as `ZacxDev/homelab-infra#509`.
+
+   **What shipped.** `requireTerminalToken` in `internal/api/auth.go`, gated by a **dedicated**
+   `CLAWGATE_TERMINAL_TOKEN`. `AuthConfig.TerminalWriteRefusal()` is the single predicate; it
+   refuses when the token is unset, shorter than 32 chars, **or equal to the hook token**. A
+   refused request gets **503 and the handler is never called**. `clawgate gentoken` now mints
+   both tokens as independent entropy.
+
+   🔴 **DEDICATED SECRET, DECIDED WITH ZACH BEFORE BUILDING — and the reason is measurable, not
+   stylistic.** The hook token is handed to every hook script on both hosts, written to
+   `~/.claude/clawgate.env`, minted into agent pod env (`internal/agents/values.go`), and travels
+   **in cleartext** to the LAN NodePort many times a day. It is the wrong secret to guard code
+   execution. Reusing it would also have inherited enforce-when-set, i.e. the exact defect.
+
+   🔴 **THE BOOT LINE IS THE LOAD-BEARING DIAGNOSTIC, and it is logged in BOTH directions**
+   (`terminal write surface: ENABLED …` / `DISABLED (fail-closed) — <which refusal>`). A healthy
+   idle surface and one refusing everything are otherwise byte-identical in the log, because
+   nothing calls the surface. That is rank 1's failure shape exactly. The reason names WHICH
+   refusal fired and **never reaches an HTTP response** — the 503 body says only "not configured".
+
+   🔴 **THE SECRET IS NOT PROVISIONED, AND THAT IS THE HANDED-OVER STEP.** The SOPS **age identity
+   is on NEITHER host** (`~/.config/sops/age/` is empty on the workbench and absent on the
+   laptop), so `sops -d` fails rc 128 and I could not add the key. The manifest therefore wires
+   it with **`optional: true`**, which is the fail-closed design rather than a loose end: without
+   it a missing key is a `CreateContainerConfigError` that stops the **whole pod**, turning "the
+   terminal surface is unprovisioned" into a full outage of the approval router. With it the pod
+   boots, logs `DISABLED (fail-closed)`, and 503s that surface. **Adding the key later flips it to
+   ENABLED with no manifest change and no code change.**
+   Operator step: `clawgate gentoken` → take the `CLAWGATE_TERMINAL_TOKEN` line →
+   `sops clusters/workbench/apps/clawgate/secrets.enc.yaml`, add it under `stringData`.
+
+   **The route ledger.** `internal/api/terminal_write_ledger_test.go` **parses** every
+   `mux.HandleFunc` (go/ast, comments discarded) and fails any future write on the terminal path
+   prefixes not behind `requireTerminalToken`. `POST /api/tmux/snapshot` is the one **enumerated**
+   exemption with its reason, pinned **two-way** so it cannot rot. It resolves **aliased** wrappers
+   (`op := s.requireOperatorToken` is real style in `operator.go`). ⚠ **Labelled in-file as an
+   INVARIANT GUARD, not regression coverage** — no bug ever violated it.
+   🔴 A raw-text scanner was rejected on measurement, not taste: this package's own comments
+   discuss `send-keys`, and a prose-only change has reddened both required tiers in the fleet
+   before.
+
+   🔴 **THE SYNTHETIC CONTROLS CALL THE REAL VERDICT.** The first draft had the end-to-end test
+   re-implement the ledger's decision over its fixtures — which proves a COPY works while any
+   mutation of the real loop sails through. Extracted to one `auditTerminalWrites` used by both.
+
+   **Verification.** Mutation sweep **15/15 killed, 0 survived, 0 invalid**, each by its
+   **expected** test; green baseline verified before AND after the refactor; every mutant asserts
+   its edit applied exactly once, so a patch matching nothing reports INVALID rather than
+   SURVIVED. 🔴 **The sweep's own attribution parser was WRONG on the first run** — it printed
+   `FAIL:` for every mutant instead of the test name (`split()[1]` is the literal "FAIL:") — so
+   no kill was attributable. Fixed and re-run before anything was quoted. Full `go test ./...`
+   on the **merged** tree: exit 0, 19 `ok` + 2 no-test-files, 0 FAIL.
+
+   Claim `tmux-webapp-5` released.
+
+   🔴 **A FORK THIS DOC NEVER NAMED, AND IT LANDS ON RANK 7 — NOT ON THIS ITEM.**
+   `comment_delete.go:110-130` records that **the browser holds NO credential at all**: clawgate
+   has no human auth, so the app's established pattern for a UI-driven mutation is an **open twin
+   route** behind the pass-through `requireSession`, precisely because rendering a token into the
+   page would hand it to anyone who can load the open LAN page. **That pattern cannot be used for
+   `send-keys`.** So "what does a human in a browser present to the fail-closed wrapper" is
+   genuinely open. It did NOT block this item — middleware is caller-agnostic; curl and
+   `clawgatectl` can carry the token today. It DOES block a browser terminal, and the three
+   candidate answers (a machine-only surface; a token the operator pastes into that browser once;
+   serving writes only through the Authelia edge) are materially different work.
 6. **Layout schema + `clawgatectl view`/`panel` verbs** (phase 3) — views/panels/targets/state in
    Postgres, so a human drag and an agent call are the same operation.
 7. **The grid UI** (phase 4), then organization ops behind item 5's auth.
@@ -569,6 +671,45 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
 - The **passive backstop was declined**: all three raisers need an agent to cooperate or a hook to
   fire, so an agent that hangs, crashes or is killed raises nothing — and those strand longest.
   `session-manager`'s waiting-detection is read-only and cheap to add if the queue misses cases.
+
+## Open investigations — live diagnosis state
+
+🔴 **THE WORKBENCH STILL CANNOT PULL FROM `docker.io`. BUILD CLAWGATE IMAGES ON THE LAPTOP.**
+Measured 2026-08-29, and the state is subtler than "it is broken":
+
+- **Root cause is the LAN router, not this host.** `192.168.50.1` answers
+  `registry-1.docker.io` with a PINNED 8-address set carrying a TTL of **~42,048,000 s = 487
+  days** (a normal docker.io TTL is 30–60 s). Of those eight, 4 serve the correct
+  `*.docker.com` certificate, **2 serve certificates for unrelated third-party sites** (old EC2
+  elastic IPs Docker released and AWS reassigned), and 2 do not complete a handshake. Every
+  connection round-robins, so ~half of all pulls fail TLS verification **against a different
+  wrong hostname each time** — which is what makes it read as interception rather than staleness.
+- **Flushing does not help**: restarting dnsmasq re-asks the router and gets the same pinned
+  record back. The fix has to be "do not ask the router for this name."
+- **The host-side bypass is WRITTEN AND HALF-APPLIED.** `devrc/nix/system/apply-dnsmasq-docker-io-pin.sh`
+  adds `"/docker.io/1.1.1.1"` ahead of the router in `services.dnsmasq.servers`. 🔴 **The
+  `/etc/nixos/configuration.nix` edit IS in place (mtime 12:27) but the rebuild that activates it
+  has NOT run** — measured directly, not inferred: the **running** unit's config
+  (`-C /nix/store/…-dnsmasq.conf`) contains only `server=192.168.50.1` and `server=1.1.1.1`, with
+  **no** `server=/docker.io/` line, and `dig` still returns the 487-day record while `dig @1.1.1.1`
+  returns a disjoint set with a 33 s TTL. **`sudo nixos-rebuild switch` is the remaining step**; I
+  cannot sudo. The script is idempotent and refuses if the config has drifted.
+- **Router-side is the real repair** and is untouched: clearing the stale entry on
+  `192.168.50.1` fixes every machine on the LAN. The script fixes one hostname on one host.
+
+⚠ **The laptop build path has a SECOND credential leg that is easy to misread as a broken
+build.** `DOCKER_HOST=ssh://zach@10.42.0.100 docker build …` works, but **`docker push` sends
+registry auth from the LOCAL client**, and the workbench's `~/.docker/config.json` has **no
+`harbor.homelab.lan` entry** (only `127.0.0.1:30022` and `ghcr.io`) while the laptop's does. So
+the push failed `unauthorized to access repository: library/clawgate`, which reads like a Harbor
+permissions problem and is not. **Run the push ON the laptop** —
+`ssh zach@10.42.0.100 'docker push harbor.homelab.lan/library/clawgate:<v>'` — the image is
+already on that daemon from the build.
+
+⚠ **The kickoff for this session pointed at an "Open investigations" section of THIS doc that
+did not exist.** The docker.io diagnosis lived only in the header comment of an **untracked**
+`nix/system/apply-dnsmasq-docker-io-pin.sh` — one routine `checkout` from silent deletion. Both
+are fixed: the script is committed, and this section exists.
 
 ## Gotchas
 - 🔴 **A FAILED `git worktree add` DOES NOT STOP THE NEXT `git -C <path>` — AND I LANDED A
@@ -873,6 +1014,31 @@ survives. Nothing was lost by dropping the item; only the false claim that work 
 - ⚠ **The pane-preview ratio is NOT a constant.** 2.63x measured back-to-back pre-deploy;
   **3.81x** on the first production push. It moves with pane count and screen fullness. Quote the
   cap headroom (~10.5% of 4 MB) rather than a multiplier.
+
+- 🔴 **A MUTATION SWEEP'S KILL-ATTRIBUTION PARSER IS ITSELF AN INSTRUMENT, AND MINE WAS WRONG ON
+  THE FIRST RUN.** `--- FAIL: TestFoo (0.00s)` split on whitespace puts the literal **`FAIL:`** at
+  index 1 and the NAME at index 2. My sweep printed `by: FAIL:` for all 15 mutants and still
+  reported a confident **15/15 killed** — the count was true and the *attribution said nothing*,
+  so "killed by an unrelated test" and "killed by the guard I wrote" were indistinguishable. A
+  sweep that cannot name its killer cannot tell you the guard is reachable. Fix the parser and
+  **re-run before quoting the number**; also make a mutant whose patch matches ≠1 time report
+  **INVALID**, never SURVIVED — an edit that never applied runs the original code.
+- 🔴 **A `grep`-filtered test run reports GREP's exit status, not the suite's.**
+  `go test ./... 2>&1 | grep -vE "^ok|no test files"; echo "exit=$?"` printed **`exit=1`** on a
+  fully green 21-package run, because grep matched nothing. Read a verdict from the runner:
+  redirect to a file, echo `$?` from `go test` itself, then COUNT `^ok` and `FAIL` lines. Same
+  family as the `| tail; echo rc=$?` failure this fleet already paid for.
+- ⚠ **A SUBSTRING LEAK-CHECK NEEDS A FIXTURE THAT CANNOT OCCUR IN THE MESSAGE.** A test asserting
+  "the boot log never prints the secret" used the fixture token `"short"` and failed — because the
+  refusal reason contains the word **short**er. `"placeholder"` fails the same way (the reason
+  says "looks like a placeholder"). Pick a nonsense fixture, and note the failure was the
+  instrument, not the code.
+- 🔴 **`web/static/app.css` IS GITIGNORED, so a fresh worktree runs the clawgate suite two tests
+  RED for a reason unrelated to any diff.** `TestOpenRoutesNoAuth` and `TestStaticAssetsServed`
+  fail until `make css` runs — and `tailwindcss` is not on PATH here, so
+  `nix-shell -p tailwindcss_4 --run "tailwindcss -i web/css/input.css -o web/static/app.css --minify"`
+  is the actual command. This already has an entry above; it is repeated because a mutation sweep
+  that widens to the full package will surface it as two mystery kills and look like a real find.
 
 ## How to verify
 

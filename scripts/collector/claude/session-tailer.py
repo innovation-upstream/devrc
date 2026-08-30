@@ -20,6 +20,31 @@ Event shape (via the shared `emit` helper → spool → ClickHouse activity.even
     ts      = the session START instant (UTC, same to_ch_ts conversion tailer uses)
     payload = the rollup JSON (see build_rollup)
 
+SECOND EVENT STREAM: MENTIONS. The same pass also scans each session's ASSISTANT
+TEXT for cross-platform references — clawgate task ids, GitHub issues/PRs,
+ClickUp task ids — and emits one event per distinct mention:
+
+    source  = mentions
+    kind    = mention-detected
+    ts      = the assistant turn's own instant (not the session start)
+    payload = platform / reference_id / url / context / candidates
+
+It rides here rather than in a PostToolUse hook because this file ALREADY walks
+every transcript and ALREADY extracts assistant content blocks — a hook would
+add a ~50 ms Python start to every tool call to re-read data this pass has in
+hand. The cost of that choice, stated plainly: a mention is telemetry-visible on
+the emit-on-settle schedule below (up to ~20 min), not in real time. Nothing
+consumes it in real time.
+
+🔴 MENTIONS ARE DEDUPED PER SESSION, IN THE STATE FILE. A session re-emits its
+rollup up to ~7 times a day (first-seen / interim / settled), and without a
+per-session ledger every mention would be re-emitted on each of those. That is
+the exact row-amplification shape documented below for session-summary itself,
+one source over, so it is closed the same way: the state entry carries the
+mention keys already emitted, and only NEW ones ship. Deliberately capped
+(MENTIONS_PER_SESSION_CAP) so a transcript full of references cannot grow the
+state file without bound.
+
 EMIT-ON-SETTLE (idempotent + mutable-session aware). A session grows until it
 ends, so its summary changes over time. A state file (default
 ~/.local/state/activity/session-summary-state.json, env-overridable via
@@ -112,6 +137,14 @@ if _COLLECTOR_ROOT not in sys.path:
     sys.path.append(_COLLECTOR_ROOT)
 
 import changed_paths as CP  # noqa: E402
+# The mention scanner lives at the collector ROOT for the same reason
+# changed_paths does: it is shared (this tailer emits the telemetry, and
+# scripts/mention-open.py resolves a click with the identical rules), and a
+# module beside `claude/` needs its OWN `home.file` entry in nix/home.nix —
+# `claude/` is a `recursive = true` directory source, a file next to it is not.
+# `scripts/tests/test_collector_deploy_declares.py` derives that requirement
+# from THIS import line, so the deploy cannot silently omit it.
+import mention_scan as MS  # noqa: E402
 
 from _shared import (
     ch_ts_to_epoch,
@@ -123,7 +156,7 @@ from _shared import (
 )
 # Reuse tailer's noise-filtering so "genuine user message" means the SAME thing
 # in the rollup as in the message stream (DRY — one definition of a real turn).
-from tailer import classify, extract_blocks
+from tailer import COMMAND_NAME, classify, extract_blocks
 
 
 # --------------------------------------------------------------------------- #
@@ -248,6 +281,118 @@ def _int(v) -> int:
 # --------------------------------------------------------------------------- #
 # Rollup
 # --------------------------------------------------------------------------- #
+# 🔴 A BOUND ON WHAT MAY BECOME A PAYLOAD KEY. These maps ship to ClickHouse for
+# every session on both hosts, and their keys come from transcript text.
+# `classify()` returns `(cname + " " + cargs)`, so an EMPTY or whitespace-only
+# `<command-name>` makes `ctext` the ARGS — and the first word of operator
+# free-text then became a key. Three inputs reached it: an empty name tag, a
+# whitespace name tag, and a `<command-name>` holding prose with no args tag. A
+# 4,000-char name also went straight through, multiplying the payload.
+#
+# Measured 2026-08-29: 37 distinct real command names across the corpus,
+# every one `/name`, none empty, none containing whitespace, longest 26 chars.
+# So this is a LATENT hazard with zero live instances — bounded here rather than
+# after it ships something.
+#
+# 🔴 `:` IS ADMITTED, `/` IS NOT, AND A PATH-DERIVED PREFIX IS DROPPED RATHER
+# THAN REJECTED. All three follow from what the corpus actually carries.
+#
+# A skill identity can be namespace-qualified: `plugin:skill` for a plugin
+# skill, `<dir>:<skill>` for a directory-scoped one. A bound drawn around the 37
+# bare names that exist today would silently REJECT a plugin skill the first
+# time one is enabled (14 are cached on this host) — ClickHouse would report it
+# as never used while `find-session --skill` still found the session, which is
+# the silent zero this work removes, reintroduced inside the guard protecting it.
+#
+# 🔴 But the directory form's prefix is a PATH, and a path is per-run-unique.
+# Keeping the whole string would make an unbounded-cardinality ClickHouse map
+# key out of a filesystem path, for every session on both hosts, and this repo
+# is PUBLIC: `home/zach/workspace/clients/<name>/.env` fits the same shape.
+#
+# ⚠ THIS IS A FORWARD-LOOKING BOUND, NOT ONE BACKED BY LIVE INSTANCES, and an
+# earlier revision of this comment claimed otherwise. Measured 2026-08-29 over
+# the 837 SESSION transcripts these readers actually walk: **0**
+# namespace-qualified values on either route (71 distinct `attributionSkill`,
+# 67 distinct `Skill` `input.skill`, none containing `/` or `:`). The
+# `.claude/worktrees/agent-<hex>:remix` shape exists in exactly 2 files, and
+# BOTH are `subagents/` transcripts — a tier `iter_transcripts` excludes by
+# design. The retracted "10 distinct" figure came from a raw grep over the whole
+# directory, which is both the wrong count and the wrong corpus. The rule stands
+# on the documented identity shape and on cardinality, not on a measurement.
+#
+# So `canonical_skill_name` drops a path-derived prefix and keeps the SKILL,
+# and a value that is a bare path with no skill after it is REJECTED and
+# COUNTED. `apps/web:deploy` and `apps/api:deploy` therefore both record
+# `deploy`: the identity we measure is the skill, not where it was loaded from.
+# That is a deliberate loss — the alternative is one key per worktree.
+#
+# 🔴 DUPLICATED, DELIBERATELY, in `scripts/lib/transcript_search.py`, and pinned
+# byte-identical by `test_the_two_skill_name_bounds_agree`. It cannot be a
+# shared import: `nix/home.nix` deploys `scripts/collector/claude` ALONE to
+# `~/.config/activity-collector/claude/`, so an import from `scripts/lib` would
+# pass every test here and break the running daemon on both hosts.
+SKILL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+SKILL_NAME_RE = re.compile(SKILL_NAME_PATTERN)
+# Bounds the WHOLE identity before any path-strip. Generous next to the 64-char
+# name bound because a legitimate directory prefix can be long; its job is to
+# stop a multi-kilobyte blob being rewritten into a clean key by the strip.
+MAX_IDENTITY_CHARS = 256
+
+
+def canonical_skill_name(raw):
+    """The key a skill identity may become, or None if it may not become one.
+
+    🔴 ONE function for all three routes. The previous revision bounded only the
+    typed route, so the emitter and the search disagreed about what a name IS —
+    `find-session --skill "not a valid name"` matched a session ClickHouse
+    reported as having used no such skill. Every route goes through here.
+    """
+    # A non-string identity is not a name. Without this the two readers
+    # disagreed: the tailer's own `isinstance` pre-guard dropped `42` while the
+    # search recorded the key `"42"`, so `--skill 42` matched a session
+    # ClickHouse reported as having used no such skill.
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip().lstrip("/").strip()
+    if not s:
+        return None
+    # 🔴 CHECKED BEFORE THE PATH-STRIP, and that order is the whole point. The
+    # strip examines only the tail, so a value whose HEAD is prose or megabytes
+    # of junk used to be rewritten into a clean key: `not a valid
+    # name/x:handoff` recorded `handoff`, and `("z"*4000)/a:handoff` did too —
+    # both REJECTED AND COUNTED before the strip existed. That turned "malformed,
+    # visible in unusable_skill_names" into "attributed to a real skill, audit
+    # trail clean", which is worse than what it replaced.
+    if len(s) > MAX_IDENTITY_CHARS or any(c.isspace() for c in s):
+        return None
+    if "/" in s:
+        # A path-derived prefix. Keep what follows the FIRST colon after it; a
+        # bare path is not a skill identity at all.
+        #
+        # `split`, not `rsplit`: for a directory-scoped PLUGIN skill
+        # `apps/web:cloudflare:wrangler`, the directory is `apps/web` and the
+        # identity is `cloudflare:wrangler`. `rsplit` returned `wrangler`,
+        # colliding with a bare `wrangler` and contradicting this module's own
+        # argument that a plugin namespace is bounded and meaningful, so it is
+        # not truncated.
+        if ":" not in s:
+            return None
+        s = s.split(":", 1)[1].strip()
+    if not s or not SKILL_NAME_RE.match(s):
+        return None
+    return s
+
+
+def _note_name(bag: dict, raw, rollup: dict) -> None:
+    """Record `raw` as a key of `bag`, or count it as unusable. Never both."""
+    name = canonical_skill_name(raw)
+    if name is None:
+        if raw is not None and str(raw).strip():
+            rollup["unusable_skill_names"] += 1
+        return
+    bag[name] = bag.get(name, 0) + 1
+
+
 def _empty_rollup() -> dict:
     """The zero rollup.
 
@@ -260,6 +405,52 @@ def _empty_rollup() -> dict:
     """
     r = {
         "tool_counts": {},
+        # WHICH SKILLS THIS SESSION USED — THREE INDEPENDENTLY OBSERVED signals,
+        # deliberately not merged into one number.
+        #
+        # `skills_used`    {skill: assistant-records attributed to it}, read off
+        #                  Claude Code's own `attributionSkill` field. The only
+        #                  signal that sees a skill which AUTO-FIRED from its
+        #                  description rather than being invoked explicitly.
+        # `skills_invoked` {skill: Skill tool_use blocks}, from a `Skill`
+        #                  tool_use's `input.skill`. The explicit-invocation
+        #                  route. 🔴 `input.args` beside it is operator
+        #                  free-text — take the NAME only.
+        # `commands_typed` {command: times typed}, from `<command-name>`. Named
+        #                  for what it actually holds: it includes BUILT-INS
+        #                  (`/login`, `/clear`), which are not skills, so a
+        #                  reader wanting skills must intersect with the skill
+        #                  list.
+        #
+        # 🔴 NO ONE OF THEM IS A SUPERSET OF THE OTHERS, so a "simplification"
+        # down to one field loses real usage. Measured 2026-08-29 over the
+        # workbench corpus, counting SESSIONS (subagent transcripts excluded)
+        # with THIS module's own counting rule:
+        #   browser    50 attributed,   0 typed  ->  50 attributed-only, 0 typed-only
+        #   clawgate   72 attributed,  28 typed  ->  44 attributed-only, 0 typed-only
+        #   activity    8 attributed,   3 typed  ->   5 attributed-only, 0 typed-only
+        #   handoff   383 attributed, 346 typed  ->  40 attributed-only, 3 TYPED-ONLY
+        # ⚠ An earlier revision cited `clawgate` 4 typed-only as the evidence for
+        # the typed direction. That was WRONG — it came from a raw file grep,
+        # which matches `<command-name>` inside quoted TOOL OUTPUT, the exact
+        # false positive this module narrows against. clawgate's typed-only is
+        # **0**. `handoff` (3) is the real live instance; do not re-derive either
+        # number with a grep.
+        #
+        # Same convention as `tool_counts`, NOT the `changed_paths` one: an
+        # unreadable transcript leaves these `{}` and lets `unreadable` /
+        # `stats_unavailable` carry the verdict, rather than encoding
+        # unobservability a second time in a different shape.
+        "skills_used": {},
+        "skills_invoked": {},
+        "commands_typed": {},
+        # Skill/command identities this session offered that could NOT become a
+        # payload key: rejected by `canonical_skill_name` (prose, a bare path, a
+        # 4,000-char blob), AND the command turn whose only `<command-name>` tag
+        # was empty — that one has no value to reject, so it is counted at the
+        # call site instead. Counted, never dropped silently: a filter nobody can
+        # count is indistinguishable from one wired to nothing.
+        "unusable_skill_names": 0,
         "input_tokens": 0,
         "output_tokens": 0,
         "cache_read_tokens": 0,
@@ -354,6 +545,9 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
     this whole dict — is byte-for-byte what it was. Pinned by a test."""
     r = _empty_rollup()
     tool_counts: dict = r["tool_counts"]
+    skills_used: dict = r["skills_used"]
+    skills_invoked: dict = r["skills_invoked"]
+    commands_typed: dict = r["commands_typed"]
     languages: dict = r["languages"]
     err_cats: dict = r["tool_error_categories"]
     files: set[str] = set()
@@ -396,18 +590,82 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
                             err_cats[cat] = err_cats.get(cat, 0) + 1
             # genuine typed / slash-command turns (reusing tailer's classifier).
             genuine = None
+            cmd_name = None
+            cmd_tag_empty = False
             for raw in extract_blocks(content):
                 if raw and raw.lstrip().startswith("[Request interrupted"):
                     r["user_interruptions"] += 1
+                # 🔴 Read the NAME TAG ITSELF, never `classify`'s text. classify
+                # returns `cname + " " + cargs`, so an empty or whitespace-only
+                # name tag makes the ARGS the whole string and its first word
+                # then looks exactly like a legitimate name — charset-valid,
+                # length-valid, and operator free-text. A bounded charset alone
+                # does NOT close that: the first fix for this tried it and the
+                # regression test still leaked `harbourPermit…`. Parsing the tag
+                # is what distinguishes "no name" from "a name".
+                #
+                # 🔴 Latch the first NON-EMPTY tag, not the first tag. Latching
+                # any match let an EMPTY tag in an earlier block suppress a real
+                # command in a later one — losing a genuine typed command AND
+                # counting nothing, so the loss was invisible. That regression
+                # was introduced by the fix above; `cmd_tag_empty` is what makes
+                # the discarded case observable instead.
+                # `finditer`, not `search`, so a block holding an empty tag
+                # FOLLOWED by a real one still sees the real one.
+                #
+                # 🔴 `finditer` IS LOAD-BEARING, and a previous revision of this
+                # comment wrongly called it "defensive only" — which invited a
+                # revert that would silently lose a real command. Whether it
+                # matters depends on `<command-args>`:
+                #
+                #   empty tag + real tag, NO args   -> `classify()` runs its own
+                #     `search`, hits the empty tag, yields empty text, returns
+                #     None. The turn is never a command and this branch does not
+                #     run at all — `finditer` changes nothing.
+                #   empty tag + real tag, WITH args -> `classify()` builds
+                #     `(cname + " " + cargs).strip()`, which is truthy, so it
+                #     returns ("command", …) and this branch DOES run. With
+                #     `search` the real command is lost; with `finditer` it is
+                #     counted.
+                #
+                # Both shapes have zero live instances (0 of the session
+                # transcripts measured 2026-08-29 carry two tags in one turn), and the no-args half cannot be
+                # fixed here — its gate is `classify()`, shared with tailer.py's
+                # message stream, where a change moves `kind=command` for every
+                # row that source has emitted. Both halves are pinned by tests.
+                if raw:
+                    for m in COMMAND_NAME.finditer(raw):
+                        val = m.group(1).strip()
+                        if val:
+                            if cmd_name is None:
+                                cmd_name = val
+                        else:
+                            cmd_tag_empty = True
                 res = classify(raw)
                 if res is not None and genuine is None:
                     genuine = res  # (kind, text)
             if genuine is not None:
                 r["user_message_count"] += 1
+                # `classify` returns ("command", "/name args") for a slash
+                # invocation — take the NAME only, so args (which carry operator
+                # free-text) never reach the payload.
+                if genuine[0] == "command":
+                    if cmd_name is not None:
+                        _note_name(commands_typed, cmd_name, r)
+                    elif cmd_tag_empty:
+                        # A command turn whose only name tag was empty. Counted,
+                        # not dropped: `_note_name` cannot see this case because
+                        # it never receives a value for it.
+                        r["unusable_skill_names"] += 1
 
         elif typ == "assistant":
             msg = obj.get("message") or {}
             r["assistant_message_count"] += 1
+            # Claude Code stamps the ACTIVE skill on the assistant record, at the
+            # record's top level — a sibling of `message`, not inside it.
+            skill = obj.get("attributionSkill")
+            if isinstance(skill, str) and skill.strip():
+                _note_name(skills_used, skill, r)
             model = msg.get("model")
             if model:
                 models.add(model)
@@ -425,6 +683,13 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
                         continue
                     name = block.get("name") or ""
                     tool_counts[name] = tool_counts.get(name, 0) + 1
+                    # The EXPLICIT-invocation route. 🔴 `input.skill` ONLY —
+                    # `input.args` sitting beside it is operator free-text
+                    # ("look up civitai user id …"), and this payload is public.
+                    if name == "Skill":
+                        sinp = block.get("input")
+                        if isinstance(sinp, dict):
+                            _note_name(skills_invoked, sinp.get("skill"), r)
                     inp = block.get("input")
                     # 🔴 A tool_use `input` that is not a dict is a MALFORMED
                     # TRANSCRIPT, not a caller bug — `or {}` kept a truthy list
@@ -511,15 +776,20 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
     return r
 
 
-def summarize_transcript(path: str, *, absolute_root: str = "") -> dict:
-    """Read a transcript fully and return its rollup. A file that can't be opened
-    or contains no parseable JSON is flagged `unreadable` (never fabricated).
+def load_transcript(path: str) -> list[dict] | None:
+    """Every parseable JSON line of a transcript, or None when the file could not
+    be opened OR held no parseable JSON at all.
 
-    `absolute_root` is forwarded to `build_rollup` — and applied to the two
-    early returns below as well, so a caller that asked for the block gets it in
-    EVERY outcome. An absent key and a None key are different claims, and the
-    OSError path is exactly where the difference was shipped once before (see
-    `_mark_unobservable`)."""
+    Split out of `summarize_transcript` so ONE read serves BOTH consumers — the
+    rollup and the mention scan. Re-reading a 600-transcript corpus twice per
+    tick to answer two questions about the same bytes is exactly the kind of
+    waste that gets noticed as a timer overrun months later.
+
+    None is the UNREADABLE verdict and `[]` is unreachable: `parsed_any` is set
+    on the same line that appends, so a non-None return always has content. The
+    two are still kept distinct at the call site (`is None`) rather than relying
+    on truthiness, because "we read nothing" and "there was nothing" are
+    different claims everywhere else in this file."""
     objects: list[dict] = []
     parsed_any = False
     try:
@@ -535,8 +805,21 @@ def summarize_transcript(path: str, *, absolute_root: str = "") -> dict:
                 parsed_any = True
                 objects.append(obj)
     except OSError:
-        return _unreadable_rollup(absolute_root)
-    if not parsed_any:
+        return None
+    return objects if parsed_any else None
+
+
+def summarize_transcript(path: str, *, absolute_root: str = "") -> dict:
+    """Read a transcript fully and return its rollup. A file that can't be opened
+    or contains no parseable JSON is flagged `unreadable` (never fabricated).
+
+    `absolute_root` is forwarded to `build_rollup` — and applied to the two
+    early returns below as well, so a caller that asked for the block gets it in
+    EVERY outcome. An absent key and a None key are different claims, and the
+    OSError path is exactly where the difference was shipped once before (see
+    `_mark_unobservable`)."""
+    objects = load_transcript(path)
+    if objects is None:
         return _unreadable_rollup(absolute_root)
     return build_rollup(objects, absolute_root=absolute_root)
 
@@ -581,6 +864,116 @@ def build_emit_args(ev: dict) -> list[str]:
 
 def emit_event(emit: str, ev: dict) -> None:
     subprocess.run([emit, *build_emit_args(ev)], check=True)
+
+
+# --------------------------------------------------------------------------- #
+# Mentions (source=mentions) — see the module docstring
+# --------------------------------------------------------------------------- #
+# Per-session ceiling on DISTINCT mentions. Bounds both the emitted rows and the
+# state file (each key is stored so it is never re-emitted). 200 is far above any
+# real session — the point is that a pathological transcript cannot make the
+# state file grow without limit, not that 200 is a meaningful threshold.
+MENTIONS_PER_SESSION_CAP = 200
+
+# Cheap pre-filter before the regex pass. Every pattern in mention_scan requires
+# a literal '#' or the literal '868', so a text block containing neither cannot
+# possibly match and does not need scanning. This is the same short-circuit the
+# rejected hook design needed, applied where it is nearly free.
+_MENTION_HINTS = ("#", "868")
+
+
+def mention_key(m: dict) -> str:
+    """The dedupe identity of a mention: platform + the exact matched text.
+
+    🔴 The RAW text, not the bare id. `devrc#370` and `talos-infra#370` are
+    different references that share an id, and keying on the id alone would emit
+    only the first of them and silently drop the second for the life of the
+    session."""
+    return f"{m['platform']}:{m['raw']}"
+
+
+def collect_mentions(objects: list[dict]) -> list[dict]:
+    """Distinct mentions in this session's ASSISTANT text, in first-seen order.
+
+    Assistant TEXT blocks only — not tool inputs, not tool results, not user
+    messages. A tool result is usually a file the agent read, so scanning it
+    would record the repo's own contents as "mentions"; a user message is the
+    operator, and this stream is about what the AGENT surfaced.
+
+    Sidechain (subagent) turns are skipped for the same reason `build_rollup`
+    skips them: they are not this session's work.
+
+    PURE — no I/O. `ts` is the assistant turn's own instant so a mention lands in
+    ClickHouse at the moment it was written, not at the session's start."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for obj in objects:
+        if not isinstance(obj, dict) or obj.get("isSidechain"):
+            continue
+        if obj.get("type") != "assistant":
+            continue
+        msg = obj.get("message")
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        ts = to_ch_ts(obj.get("timestamp")) if isinstance(obj.get("timestamp"), str) else None
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "text":
+                continue
+            text = block.get("text")
+            if not isinstance(text, str):
+                continue
+            if not any(h in text for h in _MENTION_HINTS):
+                continue
+            for span in MS.scan_mention_spans(text):
+                m = {
+                    "platform": span["platform"],
+                    "id": span["id"],
+                    "raw": span["raw"],
+                    "url": span["url"],
+                    "context": span["context"],
+                    "candidates": ",".join(c["platform"] for c in span["candidates"]),
+                    "ts": ts,
+                }
+                key = mention_key(m)  # ONE definition of the dedupe identity
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(m)
+                if len(out) >= MENTIONS_PER_SESSION_CAP:
+                    return out
+    return out
+
+
+def build_mention_emit_args(ev: dict, m: dict) -> list[str]:
+    """The v1 emit line for one mention. Unknown keys (`platform`,
+    `reference_id`, `url`, `context`, `candidates`) land in the collector's
+    `payload` JSON — no schema change, see collector.parse_line."""
+    args = [
+        "source=mentions",
+        "kind=mention-detected",
+        f"b64:text={m['raw']}",
+        # A plain (non-b64) scalar: the value comes from mention_scan's fixed
+        # platform vocabulary, so it can never carry a tab or an '='.
+        f"platform={m['platform']}",
+        f"b64:reference_id={m['id']}",
+        f"b64:url={m['url']}",
+        f"b64:context={m['context']}",
+        f"b64:candidates={m['candidates']}",
+        f"b64:project={ev['project']}",
+        f"b64:session={ev['session']}",
+        f"b64:cwd={ev['cwd']}",
+        "b64:app=claude-code",
+    ]
+    if m.get("ts"):
+        args.append(f"ts={m['ts']}")
+    return args
+
+
+def emit_mention(emit: str, ev: dict, m: dict) -> None:
+    subprocess.run([emit, *build_mention_emit_args(ev, m)], check=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -650,9 +1043,21 @@ def _stat(path: str):
         return None
 
 
+def _mention_keys(value) -> list[str]:
+    """The stored mention ledger for one transcript, sanitised.
+
+    Anything that is not a list of strings degrades to `[]` — which re-emits
+    those mentions once and re-converges, exactly like a missing `emitted_at`.
+    A corrupt ledger must never be able to make a mention permanently
+    unemittable, and must never crash the timer."""
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, str)][:MENTIONS_PER_SESSION_CAP]
+
+
 def load_state(path: Path) -> dict:
-    """path -> {"sig": str, "emitted_at": float|None} for every transcript we
-    have emitted for.
+    """path -> {"sig": str, "emitted_at": float|None, "mentions": [str]} for
+    every transcript we have emitted for.
 
     Tolerates EVERYTHING: a missing file, truncated/garbage JSON, the v1 schema
     ({"sigs": {path: sig}}), or individual junk entries. Anything it cannot make
@@ -673,16 +1078,17 @@ def load_state(path: Path) -> dict:
         legacy = data.get("sigs")
         if not isinstance(legacy, dict):
             return {}
-        return {str(p): {"sig": str(s), "emitted_at": None}
+        return {str(p): {"sig": str(s), "emitted_at": None, "mentions": []}
                 for p, s in legacy.items() if isinstance(s, str)}
     out: dict = {}
     for p, ent in raw.items():
         if isinstance(ent, dict) and isinstance(ent.get("sig"), str):
             at = ent.get("emitted_at")
             out[str(p)] = {"sig": ent["sig"],
-                           "emitted_at": at if isinstance(at, (int, float)) else None}
+                           "emitted_at": at if isinstance(at, (int, float)) else None,
+                           "mentions": _mention_keys(ent.get("mentions"))}
         elif isinstance(ent, str):  # tolerate a flattened entry
-            out[str(p)] = {"sig": ent, "emitted_at": None}
+            out[str(p)] = {"sig": ent, "emitted_at": None, "mentions": []}
     return out
 
 
@@ -802,6 +1208,7 @@ def run(now: float | None = None) -> int:
     emitted = 0
     scanned = 0
     failed = 0
+    mentions_emitted = 0
     since_checkpoint = 0
     for path, session in iter_transcripts(roots):
         st = _stat(path)
@@ -851,7 +1258,17 @@ def run(now: float | None = None) -> int:
         # The signature is NOT recorded on failure, so the transcript is
         # re-evaluated next tick rather than marked done.
         try:
-            rollup = summarize_transcript(path)
+            # ONE read, TWO answers (see load_transcript). The mention scan is
+            # per-session data derived from the same bytes, so it belongs INSIDE
+            # this try for exactly the reason the rollup does: a malformed value
+            # is a statement about THIS transcript and must not abort the pass.
+            objects = load_transcript(path)
+            if objects is None:
+                rollup = _unreadable_rollup("")
+                mentions = []
+            else:
+                rollup = build_rollup(objects)
+                mentions = collect_mentions(objects)
             ev = build_event(session, rollup)
         except Exception as exc:  # noqa: BLE001 — deliberately broad; see above
             failed += 1
@@ -860,7 +1277,26 @@ def run(now: float | None = None) -> int:
                   file=sys.stderr)
             continue
         emit_event(emit, ev)
-        new_state[path] = {"sig": sig, "emitted_at": now}  # ONLY after a successful emit
+        # 🔴 The session-summary emit comes FIRST and is unchanged. Mentions are
+        # additive: if this loop is ever cut short, the rollup — the thing with
+        # existing consumers and a documented invariant — has already shipped.
+        #
+        # Emitted OUTSIDE the per-session try, like emit_event, because a spool
+        # failure is systemic for every session and must stay a loud abort
+        # rather than becoming a quiet per-session count.
+        already = set(prev.get(path, {}).get("mentions") or [])
+        fresh = [m for m in mentions if mention_key(m) not in already]
+        for m in fresh:
+            emit_mention(emit, ev, m)
+        mentions_emitted += len(fresh)
+        new_state[path] = {  # ONLY after a successful emit
+            "sig": sig,
+            "emitted_at": now,
+            # The union, capped: a mention already shipped must not ship again
+            # even after the session is resumed and re-summarised days later.
+            "mentions": sorted(already | {mention_key(m) for m in mentions}
+                               )[:MENTIONS_PER_SESSION_CAP],
+        }
         emitted += 1
         since_checkpoint += 1
         if since_checkpoint >= CHECKPOINT_EVERY:
@@ -876,7 +1312,11 @@ def run(now: float | None = None) -> int:
     # appears when it is non-zero is one nobody can tell apart from a build that
     # never had the counter — the zero is the reading that makes the non-zero
     # legible.
+    # `mentions` is printed unconditionally, including as 0, for the same reason
+    # `failed` is: a counter that only appears when non-zero is one nobody can
+    # tell apart from a build that never had it.
     print(f"session-tailer: scanned={scanned} emitted={emitted} failed={failed} "
+          f"mentions={mentions_emitted} "
           f"[{breakdown}] settle={settle_s / 60:g}m interim={interim_s / 3600:g}h "
           f"state={sp}")
 
