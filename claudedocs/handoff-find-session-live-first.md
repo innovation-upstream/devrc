@@ -43,9 +43,12 @@ calls, 5 of them pure flailing.
   local host is scanned without ssh, so it cannot be made to fail genuinely — reaching that
   branch requires a stub, which is exactly what the rank-1 item existed to stop trusting. Say
   "stub-only" about it rather than "verified".
-- Open issues: **#1030** is HALF closed — #1062 fixed the backlog mechanism, the
-  `socket.py` timeout mechanism is confirmed STILL LIVE at 60 s. **#1029 closed** by
-  #1071. **#1031 closed** by #1076. **#1028 closed**, verified fixed by #1023.
+- Open issues: **#1030 only.** It is HALF closed — #1062 fixed the backlog mechanism
+  (A); the `socket.py` timeout mechanism (B) is confirmed STILL LIVE at 60 s and is now
+  rank 1 with a written closing condition. **#1029 CLOSED** (findings fixed by #1071; its
+  two lower-severity items ACCEPTED by operator decision 2026-08-30 and recorded on the
+  closed issue — they are tracked by nothing now, which is the accepted cost).
+  **#1031 CLOSED** by #1076. **#1028 closed**, verified fixed by #1023.
 
 **What shipped — carried forward verbatim, this is durable and not status:**
 
@@ -259,7 +262,16 @@ fresh; never reuse one copied from an older version of this list.** All three
 |---|---|---|
 | rank 1 | **#1030** store-api listen backlog (mechanism A only) | **#1062** → `430fe3e1` |
 | rank 2 | **#1029** three guard-walkability gaps | **#1071** → `3d8caaa1` |
-| rank 3 | **#1031** both deferred items | **#1076** (open at time of writing) |
+| rank 3 | **#1031** both deferred items | **#1076** -> `e212415e`, issue CLOSED |
+| rank 4 | inherited `test_bash_guard.py` wall-clock flake | **#1078** -> `9499d6d0` |
+| — | **#1029** issue itself | CLOSED 2026-08-30; its two lower-severity items ACCEPTED, recorded on the closed issue |
+
+🔴 **DEPLOYED AND VERIFIED AT THE CONSUMER, both hosts, 2026-08-30** — not merely merged.
+`readlink -f ~/.claude/skills/session-manager/reference/payload-contract.md` resolves to the
+SAME store hash `1skr5b3gc…` on workbench and laptop, both carrying the #1031 text, both
+checkouts at `e0e29e7b`. The identical hash across hosts is what makes it a two-host claim
+rather than two single-host ones. ⚠ That doc is a `/nix/store` path — `git pull` never
+updates it; only a `home-manager switch` / `ship.sh` does.
 
 ⚠ **#1030 is only HALF closed.** #1062 fixed the backlog mechanism; the `socket.py`
 `TimeoutError` mechanism is confirmed still live at `HANG_TIMEOUT = 60 s` — see the
@@ -267,18 +279,41 @@ investigation block, which now carries the captured exception and the node-pinni
 Whether #1030 stays open or is re-filed against mechanism B is a judgement for whoever picks
 it up; the evidence is on the issue.
 
-1. **Inherited from `handoff-find-session-opencode.md`:**
-   `scripts/claude-hooks/tests/test_bash_guard.py:294`'s "no catastrophic backtracking" check
-   still asserts on wall-clock and flakes under load. Its sibling item (dirty
-   `embed_enlarge.js`) is CLOSED — it landed as #1010. Repo: `devrc`.
-2. **The store-api flake's mechanism B** — `TimeoutError` out of `socket.py`, which #1023
+1. **The store-api flake's mechanism B** — `TimeoutError` out of `socket.py`, which #1023
    was meant to fix and did not. 🔴 **Do NOT start from the starvation hypothesis: it is
    REFUTED** (fired at 44% node CPU with 1.6x target inflation, having also fired at 91%
    with 41x). The mechanism is UNCHARACTERISED. Two facts worth carrying in: the node
    pinning is real but explains only one of the two occurrences, and the failing tests move
    around inside `test_subsystem_store_api.py` (four distinct classes so far) while the
-   exception does not. Repo: `devrc`. Closing condition is NOT yet written; write one
-   before starting, and make it name the MECHANISM rather than a green sample.
+   exception does not. Repo: `devrc`.
+
+   **CLOSING CONDITION — written 2026-08-30 from the four occurrences, while they were
+   fresh. It deliberately does NOT accept a green sample.**
+
+   > Closed when a `TimeoutError` out of `socket.py` is REPRODUCED against
+   > `test_subsystem_store_api.py`'s server fixture on a host whose load is measured and
+   > stated at the time, and the mechanism is NAMED — i.e. someone can say which
+   > `socket`/`http.server` operation blocks, and why, in a sentence that predicts a
+   > CONTROL that behaves differently. A fix then makes that reproduction stop, and the
+   > reproduction is shown to still fire on the pre-fix code.
+   >
+   > **Checked by:** a merged PR carrying (a) the reproduction, (b) the load figure at
+   > which it fired, (c) the named mechanism, (d) a red-at-base / green-at-HEAD matrix.
+   > **A run of N consecutive green CI samples does NOT close this** — that is what #1023
+   > offered, and the mode recurred at its new bound.
+
+   🔴 **What NOT to spend the first hour on, because it is already done and negative:**
+   - *raising the timeout* — #1023 took `HANG_TIMEOUT` 15 s → 60 s and B recurred at 60 s.
+   - *the starvation story* — REFUTED above; two occurrences, 91% and 44% node CPU.
+   - *the listen backlog* — that is mechanism A, FIXED in #1062, and it presents as
+     `ConnectionResetError`, not `TimeoutError`. Different exception, different fix.
+   - *blaming the PR under test* — four occurrences, every one on a diff that could not
+     reach the file, TWICE on docs-only PRs. That is the cheapest discriminator available
+     and it has already been run four times; do not re-run it as if it were open.
+
+   **Start instead from what the four occurrences SHARE:** one file's server fixture, one
+   exception, four different test classes, two very different load levels. Ask what that
+   fixture does that the rest of the suite does not.
 
 🔴 This list is a WORK QUEUE and `claim-work` is its lock — `claim-work --slug-for <this doc>
 <rank>`, then `claim-work <slug> --subject "<text>"`, and sweep `gh pr list --state open` too.
