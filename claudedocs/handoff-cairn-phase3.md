@@ -183,11 +183,33 @@ fresh: `claim-work --slug-for <this doc> <rank>`.
    jsonpath='{.data.token}' | base64 -d` and take field 1 of line 2. 🔴 **Never pipe it into an
    `ssh … bash -s` that is also receiving a heredoc** — see the MULTIOS trap above; that is
    what forced the first rotation.
-2. 🔴 **The backup CronJob, and it is now more urgent than it was.** The served copy can hold
-   bytes that exist nowhere else the moment anything writes through the API (see the seed
-   clobber below), and `zach` is a whole-file `PUT` credential over all 15 scopes. The LOCAL
-   store is covered (`commit.sh` per-scope git + `backup.py` encrypted bundles), so "the store
-   has no backup" is wrong — **"the SERVED copy has none" is right**, and that is the gap.
+2. ~~**The backup CronJob.**~~ ✅ **CLOSED 2026-08-30** — homelab-infra **#551**, squash
+   `c4e0f82b`, Flux-reconciled and adopted (all four objects carry
+   `kustomize.toolkit.fluxcd.io/name`). Daily 03:45 UTC, `subsystem-store-backups` on the
+   archive tenant, 90-day ILM, credential scoped with **no `s3:DeleteObject`** (verified live:
+   `mc rm` → Access Denied, object survives, cross-bucket denied both ways). Alerts in
+   `clusters/homelab/apps/subsystem-store-monitoring/`.
+
+   🔴 **A `git bundle` backup of the served copy would have been GREEN AND EMPTY — that is why
+   this is a whole-tree tar and not a re-pointed `backup.py`.** Measured on `/data` 2026-08-30:
+   `devrc/cairn.md` was **untracked** (in no commit of any scope repo) and the API-appended
+   `[cairn: zach/…]` bullet was in the working tree with **0** occurrences at `HEAD`. A bundle
+   carries committed objects only, so it is structurally blind to exactly the at-risk bytes.
+   Do not "consolidate" the two backups later without re-reading this.
+
+   ⚠ **What it does NOT fix:** the RPO is up to 24 h, and the seed clobber below is unchanged —
+   an API-appended bullet is still overwritten by the next `seed.sh` until criterion 9. The
+   backup makes a clobber *recoverable*, it does not stop it.
+
+   **Seven audit rounds ran on #551** (`/audit-pr`, delta-chained). Two findings worth carrying
+   beyond this PR: a comment inside an **unquoted heredoc executed on the host** (backticked
+   prose → `mc admin user add` ran, output spliced into a script that runs as root in the
+   tenant pod — now guarded by `scripts/tests/test-provision-heredoc.sh`); and a pre-flight that
+   **deleted the credential it existed to protect**, whose *destructive predecessor had been
+   accidentally safe* against a dangling symlink. Removing a bad mechanism can remove a good
+   side effect with it. The ladder stopped on the payload-attribution gate, **not** on a clean
+   round — round 7 still found one 🟡 (fixed); by then fixes were touching 3 executable lines
+   against ~24 of prose.
 3. **Criterion 8's laptop half** — the card requires BOTH hosts. This is what `#998` was
    fixed *for*, and it is still unexercised for that purpose. Run `seed.sh` from the laptop
    (`laptop` skill for the host), then `comm -23` per host must print zero lines. Expect the
@@ -267,7 +289,7 @@ fresh: `claim-work --slug-for <this doc> <rank>`.
 - `RESULT: all good` is a **test fixture's own output** in `gate.sh`; the real verdict is `RESULT: PASS (exit=0)`. A `RESULT:`-matching wait-loop fires ~25 minutes early.
 
 **Residuals shipped deliberately, all documented in-tree:**
-`X-Store-Snapshot newest=` cross-scope timing channel · orphan `.cairn-*.tmp` on SIGKILL · **read allowlist == write allowlist** (🔴 a backup must land before criterion 9, or every read token becomes a whole-file-destructive PUT credential) · ceiling window bounded at 0.75–1.25 s · `fcntl.flock` is single-host advisory, holds at `replicas: 1` only · idempotence-by-content-hash silently drops a genuinely new bullet byte-identical to an existing one · `_WRITE_INTERLEAVE` is an inert test seam in production code, unreachable from outside the process.
+`X-Store-Snapshot newest=` cross-scope timing channel · orphan `.cairn-*.tmp` on SIGKILL · **read allowlist == write allowlist** (🔴 every read token is a whole-file-destructive PUT credential over all 15 scopes — ✅ the backup precondition is SATISFIED as of 2026-08-30, homelab-infra #551, so criterion 9 is no longer blocked on it; the allowlist *split* itself is still owed and is criterion 9's own job) · ceiling window bounded at 0.75–1.25 s · `fcntl.flock` is single-host advisory, holds at `replicas: 1` only · idempotence-by-content-hash silently drops a genuinely new bullet byte-identical to an existing one · `_WRITE_INTERLEAVE` is an inert test seam in production code, unreachable from outside the process.
 
 **On the audit ladder (9 rounds, 11 findings):** six of the eleven were **introduced by a previous round's fix** — including a surrogate crash caused by the fix for the lossy rewrite, and a response desync caused by the backstop added to stop requests vanishing. That is the entire argument for not stopping at the first green. 🔴 A correction on the record: the audit ceiling was twice described as "destroyed"; it was not — the **synchronous** double-emit was always caught, only the **deferred** case was lost.
 
