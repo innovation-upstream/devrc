@@ -26,7 +26,23 @@ change**:
 | line | shape | identity | fingerprint | authority |
 |---|---|---|---|---|
 | 1 | `<token>` | `legacy` | `2481e4553f6c` | UNRESTRICTED read · **MAY NOT WRITE** |
-| 2 | `<token> zach <15 scopes>` | `zach` | `8e1e79bb4664` | 15 scopes · **may write** |
+| 2 | `<token> zach <15 scopes>` | `zach` | `a8f329c534d7` | 15 scopes · **may write** |
+
+🔴 **The mapped row was ROTATED once, same day** (homelab-infra `a8d77945`). Its first token
+(`8e1e79bb4664`) was printed in plaintext into a session transcript by a shell mistake — a
+pipe and a heredoc BOTH feeding one `ssh … bash -s`, which under **zsh MULTIOS are
+CONCATENATED on stdin** rather than one winning, so the token became the remote shell's line 1
+and came back in a `command not found`. **Never feed a secret to a remote shell that is also
+receiving a heredoc**: use two invocations — `printf '%s' "$TOK" | ssh host 'umask 077; cat >
+~/.tok'`, then `ssh host 'bash -s' < script.sh`, the script shredding `~/.tok`. A rotation
+needs no `zach-prev` identity: guard 12 covers an OVERLAP, and this was a REPLACE.
+
+✅ **BOTH HOSTS ARE NOW ON THE MAPPED TOKEN** — workbench and laptop each verified through the
+real client (`cairn sync` → 132 entries) and by the audit log (`token=a8f329c534d7
+identity=zach`). `token=2481e4553f6c` count since the rotated pod started: **0**. **Criterion
+10's 24 h clock is running from 2026-08-30T02:11Z.** ⚠ The evidence lives in the POD LOG,
+which resets on restart — a restart inside the window destroys the proof even though the
+property still holds. Read it from Loki if the window must survive one.
 
 Startup banner confirms the load:
 `token-ids=2481e4553f6c:legacy,8e1e79bb4664:zach`, still shouting
@@ -138,16 +154,16 @@ fresh: `claim-work --slug-for <this doc> <rank>`.
 
 🔴 **RANK 1 (criterion 10 step 1) IS DONE** — see "State now". What follows is the remainder.
 
-1. 🔴 **Move BOTH hosts' client env to the mapped token — this is what starts criterion 10's
-   24 h clock, and nothing else can.** `~/.config/subsystem-store/env` →
-   `SUBSYSTEM_STORE_TOKEN=<the `zach` row's token>` on workbench **and** laptop (the `laptop`
-   skill for the host; `ssh laptop` does not resolve from workbench). Then watch
-   `kubectl -n subsystem-store logs <pod> | grep token=2481e4553f6c` go quiet for 24 h,
-   exercise the rollback once deliberately (delete line 2, confirm reads still work on
-   legacy, put it back), and **only then** delete the bare line. Rollback for the whole thing
-   stays one commit either way. ⚠ Reading the mapped token: `sops -d` the secret file, or
-   `kubectl -n subsystem-store get secret subsystem-store-token -o jsonpath='{.data.token}' |
-   base64 -d` and take field 1 of line 2.
+1. 🔴 **Criterion 10 step 2, once the clock expires (≥ 2026-08-31T02:11Z).** Both hosts are
+   already moved. Remaining: confirm `kubectl -n subsystem-store logs <pod> | grep -c
+   token=2481e4553f6c` is still **0** over the full 24 h, then **exercise the rollback once
+   deliberately** — delete line 2, restart the pod, confirm reads still work on legacy, put it
+   back — and **only then** delete the bare line. ⚠ A pod restart inside the window resets the
+   log and destroys the evidence; read it from Loki if that happens. ⚠ Reading the mapped
+   token: `kubectl -n subsystem-store get secret subsystem-store-token -o
+   jsonpath='{.data.token}' | base64 -d` and take field 1 of line 2. 🔴 Deleting line 1 also
+   removes the last unrestricted credential — after it, a scope missing from `zach`'s
+   allowlist is unreadable by anything.
 2. 🔴 **The backup CronJob, and it is now more urgent than it was.** The served copy can hold
    bytes that exist nowhere else the moment anything writes through the API (see the seed
    clobber below), and `zach` is a whole-file `PUT` credential over all 15 scopes. The LOCAL
