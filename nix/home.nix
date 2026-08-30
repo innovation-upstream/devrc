@@ -1210,6 +1210,32 @@ in
     source = ../scripts/claude-hooks/guard_core.py;
     force = true;
   };
+  # 🔴 session-stamp.py — records this session's RESUMABLE id so the
+  # `prepare-commit-msg` hook can stamp it onto the commit. Measured 2026-08-30:
+  # the prose-emitted `Claude-Session:` trailer lands on only 46% of the last 100
+  # commits on origin/main, so half of `main` cannot be resolved to a session at
+  # all. RULES.md prefers a structural fix over a prose one; this is that fix.
+  #
+  # 🔴 DEPLOYING THIS FILE DOES NOT ACTIVATE IT. The PreToolUse registration
+  # lives in ~/.claude/settings.json, which is per-host and unmanaged by design,
+  # and the git-side half is installed per-clone by
+  # scripts/install-session-stamp.sh (dry-run unless --apply). Both are operator
+  # acts, the same shape as sync-skill-tiers.py. Merging this changes nothing
+  # about how any commit is made until someone opts in.
+  home.file.".claude/hooks/session-stamp.py" = {
+    source = ../scripts/claude-hooks/session-stamp.py;
+    force = true;
+  };
+  # 🔴 session_trailer.py MUST land next to it, for exactly the reason guard_core
+  # does: a home-manager STORE COPY cannot reach scripts/lib/ through __file__
+  # (the #1079 trap), so the hook imports this from its OWN directory. The SAME
+  # source file is reached by the git-side prepare-commit-msg hook through the
+  # install symlink's realpath — one implementation, two carriers, never two
+  # copies of the logic.
+  home.file.".claude/hooks/session_trailer.py" = {
+    source = ../scripts/lib/session_trailer.py;
+    force = true;
+  };
   # `browser` skill — the DELIBERATE EXCEPTION to the store-symlink pattern above.
   # Its source of truth is the browser-bridge subsystem in THIS repo
   # (scripts/browser-bridge/{SKILL.md,browser}), NOT devrc/claude/skills/. So rather
