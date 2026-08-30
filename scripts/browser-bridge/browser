@@ -16,6 +16,21 @@
 # more than one and no --instance, a command ERRORS (it never guesses) and lists
 # the connected instances — pick one with --instance <key>.
 #
+# Tab references (bw://):
+#   Clicking the Browser Bridge toolbar icon copies a reference to the tab you
+#   are looking at — bw://<host>/<instance>/<tabId>, e.g. bw://workbench/main/12345.
+#   Paste it in place of --instance/--tab:
+#
+#     browser screenshot bw://workbench/main/12345
+#     browser bw://workbench/main/12345 text
+#
+#   Either position works. The <host> field is VERIFIED against the bridge before
+#   the command runs, so a reference pasted into a session on the other host
+#   fails loudly instead of driving a same-labelled profile there. Combining a
+#   reference with --instance/--tab is an error, not a precedence question. For
+#   `type`, `js`/`eval` and `agent` — whose argument is arbitrary text — only the
+#   leading position is a reference; a trailing bw://… is the value you meant.
+#
 # Per-session tab isolation (fixes concurrent-session clobbering):
 #   Two Claude sessions driving one browser used to interleave on ONE shared
 #   active tab. Now each session can `open` its OWN tab; the server records the
@@ -328,7 +343,53 @@ TAB_SRC="--tab";           [ -n "${BB_TAB:-}" ]      && TAB_SRC="\$BB_TAB"
 FRAME_SRC="--frame";       [ -n "${BB_FRAME:-}" ]    && FRAME_SRC="\$BB_FRAME"
 ENV_ROUTE_NOTED=0
 
+# --- bw:// tab references ---------------------------------------------------- #
+# A `bw://<host>/<instance>/<tabId>` reference is one pasteable token that means
+# exactly `--instance <instance> --tab <tabId>`, plus an assertion about WHICH
+# HOST it was minted on. The extension produces it when the operator clicks the
+# toolbar icon (extension/protocol.js `buildTabRef` is the one definition of the
+# format); this end consumes it.
+REF=""                        # the raw reference, once seen
+REF_HOST=""                   # its host field — checked against /whoami below
+REF_SAW_INSTANCE_FLAG=0       # an explicit --instance also appeared
+REF_SAW_TAB_FLAG=0            # an explicit --tab also appeared
+# Subcommands whose positional argument is ARBITRARY OPERATOR TEXT, where a
+# leading `bw://` is a value and not a reference: `type` types it into a page,
+# `js`/`eval` evaluate it, `agent` reads it as a goal. For these the reference is
+# accepted ONLY in the leading (pre-subcommand) position, so that
+# `browser type 'bw://…'` still types the literal string. Every other subcommand
+# takes a URL, a selector, a path or a number — none of which can begin `bw://`
+# — so a reference is unambiguous there and may appear in the natural
+# paste order (`browser screenshot bw://…`).
+REF_FREE_TEXT_SUBCOMMANDS="type js eval agent"
+
 die() { echo "browser: $*" >&2; exit 1; }
+
+# parse_tab_ref REF — split a reference into REF_HOST / INSTANCE / TAB, or die
+# with a message that names the offending field. Every field is validated here
+# rather than at the point of use: a reference that parses into the WRONG fields
+# routes a real command at a real browser, so the only safe failure is a loud one.
+parse_tab_ref() {
+  local raw="$1" rest h k t
+  rest="${raw#bw://}"
+  [ "$rest" != "$raw" ] || die "not a bw:// reference: $raw"
+  # EXACTLY two separators. Both `bw://a/b` and `bw://a/b/c/d` are refused rather
+  # than parsed into whichever three fields happen to fall out.
+  case "$rest" in
+    */*/*/*) die "too many '/' in reference: $raw (want bw://<host>/<instance>/<tabId>)" ;;
+    */*/*)   : ;;
+    *)       die "reference must be bw://<host>/<instance>/<tabId> (got: $raw)" ;;
+  esac
+  h="${rest%%/*}"; rest="${rest#*/}"
+  k="${rest%%/*}"; t="${rest#*/}"
+  # The same character class the builder enforces (protocol.js TAB_REF_FIELD_RE).
+  case "$h" in (*[!A-Za-z0-9._-]*|"") die "reference host is not ref-safe: '${h}' in $raw" ;; esac
+  case "$k" in (*[!A-Za-z0-9._-]*|"") die "reference instance is not ref-safe: '${k}' in $raw" ;; esac
+  case "$t" in (*[!0-9]*|"")          die "reference tab id must be numeric: '${t}' in $raw" ;; esac
+  REF_HOST="$h"
+  INSTANCE="$k"; INSTANCE_SRC="the bw:// reference"
+  TAB="$t";      TAB_SRC="the bw:// reference"
+}
 
 # derive_session_id — a STABLE identifier for THIS Claude session, identical
 # across the many `browser` invocations one session makes (each is a fresh
@@ -476,10 +537,15 @@ derive_session_id() {
 # subcommand. --print-session-id short-circuits (no server/token needed).
 while [ $# -gt 0 ]; do
   case "$1" in
-    --instance) shift; [ $# -ge 1 ] || die "usage: browser --instance <key> <subcommand>"; INSTANCE="$1"; INSTANCE_SRC="--instance"; shift ;;
-    --instance=*) INSTANCE="${1#--instance=}"; INSTANCE_SRC="--instance"; shift ;;
-    --tab) shift; [ $# -ge 1 ] || die "usage: browser --tab <id> <subcommand>"; TAB="$1"; TAB_SRC="--tab"; shift ;;
-    --tab=*) TAB="${1#--tab=}"; TAB_SRC="--tab"; shift ;;
+    --instance) shift; [ $# -ge 1 ] || die "usage: browser --instance <key> <subcommand>"; INSTANCE="$1"; INSTANCE_SRC="--instance"; REF_SAW_INSTANCE_FLAG=1; shift ;;
+    --instance=*) INSTANCE="${1#--instance=}"; INSTANCE_SRC="--instance"; REF_SAW_INSTANCE_FLAG=1; shift ;;
+    --tab) shift; [ $# -ge 1 ] || die "usage: browser --tab <id> <subcommand>"; TAB="$1"; TAB_SRC="--tab"; REF_SAW_TAB_FLAG=1; shift ;;
+    --tab=*) TAB="${1#--tab=}"; TAB_SRC="--tab"; REF_SAW_TAB_FLAG=1; shift ;;
+    # A reference in the leading position works for EVERY subcommand, including
+    # the free-text ones. It is only consumed, never applied, here: applying it
+    # before the whole line is read would let a later --instance overwrite it
+    # silently, which is the disagreement the check below refuses outright.
+    bw://*) [ -z "$REF" ] || die "two bw:// references on one command line"; REF="$1"; shift ;;
     --frame) shift; [ $# -ge 1 ] || die "usage: browser --frame <frameId|url-substring> <subcommand>"; FRAME="$1"; FRAME_SRC="--frame"; shift ;;
     --frame=*) FRAME="${1#--frame=}"; FRAME_SRC="--frame"; shift ;;
     --print-session-id) derive_session_id; echo; exit 0 ;;
@@ -520,6 +586,79 @@ for _s in $SUBCOMMANDS; do
   if [ "$_s" = "${1:-}" ]; then _sub_known=1; break; fi
 done
 [ "$_sub_known" -eq 1 ] || die "unknown subcommand: ${1:-} (try: $SUBCOMMANDS)"
+
+# --- consume a bw:// reference given in the natural paste order -------------- #
+# `browser screenshot bw://workbench/main/12345` — the reference AFTER the
+# subcommand, which is how it reads when pasted out of a prompt. Skipped entirely
+# for the free-text subcommands (see REF_FREE_TEXT_SUBCOMMANDS), where such a
+# token is a value the operator meant to send.
+_ref_free_text=0
+for _s in $REF_FREE_TEXT_SUBCOMMANDS; do
+  if [ "$_s" = "${1:-}" ]; then _ref_free_text=1; break; fi
+done
+if [ "$_ref_free_text" -eq 0 ]; then
+  _ref_kept=()
+  _ref_after_ddash=0
+  for _a in "$@"; do
+    # 🔴 `--` ENDS reference scanning. Everything after it is an explicit
+    # positional by the operator's own declaration, and this loop runs BEFORE
+    # each subcommand's own parser, so without this a `browser text -- 'bw://…'`
+    # had its escaped selector eaten as a route and sent NO selector at all
+    # (measured). Narrow — it needs a selector/path/url that literally begins
+    # `bw://` — but `pos_rest` exists in this file precisely because `--` was
+    # silently dropped once before.
+    if [ "$_ref_after_ddash" -eq 0 ] && [ "$_a" = "--" ]; then
+      _ref_after_ddash=1; _ref_kept+=("$_a"); continue
+    fi
+    if [ "$_ref_after_ddash" -eq 0 ]; then
+      case "$_a" in
+        bw://*) [ -z "$REF" ] || die "two bw:// references on one command line"; REF="$_a"; continue ;;
+      esac
+    fi
+    _ref_kept+=("$_a")
+  done
+  set -- ${_ref_kept[@]+"${_ref_kept[@]}"}
+fi
+
+if [ -n "$REF" ]; then
+  # 🔴 A reference and an explicit flag can DISAGREE, and there is no reading of
+  # "last one wins" that is safe: whichever is ignored, the command runs against
+  # a tab the operator did not name. Refuse instead of picking.
+  [ "$REF_SAW_INSTANCE_FLAG" -eq 0 ] || die "--instance conflicts with $REF — pass one or the other"
+  [ "$REF_SAW_TAB_FLAG" -eq 0 ]      || die "--tab conflicts with $REF — pass one or the other"
+  parse_tab_ref "$REF"
+fi
+
+# 🔴 `agent` CANNOT HONOUR A TAB FROM ANY SOURCE — and this check is deliberately
+# on the STATE (`TAB` is set) rather than on the spelling that first exposed it.
+# `browser-agent` has no --tab: the agent arm forwards --instance only, and the
+# autonomous agent always works in its OWN freshly-opened tab. So a tab named
+# here is silently discarded and the agent answers about a DIFFERENT page —
+# confidently, with no error anywhere.
+#
+# 🔴 THE FIRST VERSION OF THIS GUARD ONLY REFUSED `bw://`, and an audit walked
+# straight around it: `browser --tab 12345 agent …` reproduced the identical
+# wrong answer with no mention of the discarded flag, and an exported `$BB_TAB`
+# was worse still — it leaked into browser-agent's OWN child `browser` calls, so
+# the tab reappeared on the wire while `_note_env_routing` claimed a route that
+# `agent` had never honoured. A guard that names one spelling of a hazard does
+# not cover the hazard. `TAB_SRC` names whichever source supplied it, so the
+# refusal is legible whether it came from a reference, a flag or the environment.
+#
+# 🔴 AND `--frame` IS THE SAME HAZARD — the second widening, found the same way.
+# Keying on TAB alone left the SIBLING routing variable untouched:
+# `browser --frame evil.example agent …` discarded the flag in silence (the
+# original F1 shape, unfixed), and an exported `$BB_FRAME` reached
+# browser-agent's environment while `_note_env_routing` printed `routed from the
+# ENVIRONMENT` for a route `agent` had never honoured. browser-agent accepts
+# neither flag. So the guard covers every routing variable the agent cannot
+# keep, not the one that happened to be reported.
+_agent_hint=""
+if [ "${1:-}" = "agent" ]; then
+  [ -n "$INSTANCE" ] && _agent_hint=" Target the profile with --instance ${INSTANCE} instead."
+  [ -z "$TAB" ]   || die "agent cannot honour a tab (${TAB_SRC} gave tab ${TAB}) — browser-agent has no --tab and always works in its own new tab.${_agent_hint}"
+  [ -z "$FRAME" ] || die "agent cannot honour a frame (${FRAME_SRC} gave ${FRAME}) — browser-agent has no --frame and always works in its own new tab.${_agent_hint}"
+fi
 
 SESSION_ID="$(derive_session_id)"
 
@@ -1551,6 +1690,69 @@ sub="${1:-}"; shift || true
 # The flag loop above exits for --help/--print-session-id before reaching this
 # line, so a command that never touches the wire never emits it.
 _note_env_routing
+
+# --- the reference's HOST field, checked against the bridge we are talking to - #
+# 🔴 THIS IS THE POINT OF THE HOST FIELD, and it has to be a real request. This
+# CLI only ever talks to 127.0.0.1, so a reference minted on the workbench and
+# pasted into a laptop session cannot reach the tab it names — but it CAN reach a
+# same-labelled profile on this machine (labels are unique per host, not across
+# hosts) and drive the wrong browser while returning a perfectly ordinary
+# envelope. One cheap diagnostic GET buys a loud failure instead.
+#
+# It FAILS CLOSED on disagreement and OPEN on ignorance: a server that cannot
+# identify its own host answers "unknown", and refusing there would make every
+# reference unusable on a host with no ACTIVITY_HOST rather than catching
+# anything. That case warns on stderr and proceeds — stdout stays pure.
+if [ -n "$REF_HOST" ]; then
+  _wraw="$(_curl GET /whoami)" || die "curl failed talking to ${BASE}/whoami (verifying $REF)"
+  _wcode="${_wraw##*$'\n'}"; _wresp="${_wraw%$'\n'*}"
+  [ "$_wcode" = "200" ] || { echo "$_wresp" >&2; die "HTTP $_wcode from /whoami (verifying $REF)"; }
+  # 🔴 Every shape that is not a host label must come out as the empty string,
+  # WITHOUT raising. A `host` that is a string rather than an object used to
+  # reach `.get` and print an AttributeError traceback to stderr before falling
+  # through to the proceed branch — so a PARSE failure was reported to the
+  # operator as "the bridge cannot identify its host", which is a different fact
+  # and sends them to the wrong place. `_whost_why` keeps the two apart.
+  # Emits `<reason>:<label>` on ONE line. The reason is the parser's own verdict —
+  # deriving it afterwards from the response TEXT was measured wrong: a body with
+  # `"host": "workbench"` contains the key, so a grep for it reported an
+  # unreadable SHAPE as an unidentifiable HOST.
+  _wparsed="$(printf '%s' "$_wresp" | python3 -c '
+import json, sys
+def out(reason, label=""):
+    sys.stdout.write(reason + ":" + label)
+    raise SystemExit(0)
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    out("unreadable")
+if not isinstance(d, dict):
+    out("unreadable")
+h = d.get("host")
+if h is None:
+    out("absent")
+if not isinstance(h, dict):
+    out("unreadable")
+label = h.get("label")
+if label is None:
+    out("absent")
+if not isinstance(label, str):
+    out("unreadable")
+out("ok", label)
+')"
+  _whost="${_wparsed#*:}"
+  case "${_wparsed%%:*}" in
+    unreadable) _whost_why="answered /whoami in a shape this CLI could not read" ;;
+    *)          _whost_why="cannot identify its host" ;;
+  esac
+  if [ -z "$_whost" ] || [ "$_whost" = "unknown" ]; then
+    echo "browser: this bridge ${_whost_why}, so $REF's host field" \
+         "('${REF_HOST}') was NOT verified — proceeding." >&2
+  elif [ "$_whost" != "$REF_HOST" ]; then
+    die "$REF was minted on '${REF_HOST}'; this bridge is '${_whost}'. The tab it names is on the other host — run it there."
+  fi
+fi
+
 case "$sub" in
   health)
     raw="$(_curl GET /health)" || die "curl failed talking to ${BASE}/health"
@@ -2311,6 +2513,29 @@ else:
     aargs=()
     [ -n "$INSTANCE" ] && aargs+=(--instance "$INSTANCE")
     aargs+=("$@")
+    # 🔴 CLOSE THE LEAK AT THE SEAM, not just at the door. The guard above
+    # refuses a tab/frame that REACHES it — but `--tab ""` is an explicit-empty
+    # that clears the shell variable while leaving the EXPORT intact, and that is
+    # the idiom this file documents for `--instance`. An operator who exports
+    # BB_TAB, hits the refusal and clears it the documented way would otherwise
+    # hand browser-agent an environment in which every child `browser` call it
+    # makes routes to that tab — a confident answer about the wrong page, rc 0.
+    # browser-agent accepts neither flag, so neither variable can mean anything
+    # below this point.
+    #
+    # 🔴 BB_INSTANCE IS UNSET TOO, and the reasoning that exempted it was wrong
+    # in exactly one case — the same explicit-empty this comment block is built
+    # on. "`--instance` IS forwarded, so inheriting it is consistent" holds when
+    # a value survives: the arm forwards it explicitly two lines up. It does NOT
+    # hold for `browser --instance "" agent …`, the documented way to clear an
+    # inherited BB_INSTANCE (see the PRECEDENCE note above): INSTANCE is then
+    # empty, so NO --instance is forwarded, while BB_INSTANCE survives the exec
+    # and every child call browser-agent makes re-reads it — driving the WRONG
+    # BRAVE PROFILE, with no advisory, because the flag reset INSTANCE_SRC so
+    # `_note_env_routing` stays silent. Unsetting is safe for the other two
+    # cases precisely because the value is forwarded as an argument when it
+    # exists; the environment copy is never the thing that carries it.
+    unset BB_TAB BB_FRAME BB_INSTANCE
     exec "$HERE/browser-agent" "${aargs[@]}"
     ;;
   # ""|-h|--help|help is handled EARLIER (above the token-file read) so that

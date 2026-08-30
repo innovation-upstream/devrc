@@ -2953,3 +2953,75 @@ export function pollHeaders(instanceId, label, active, extVersion, extId,
 export function resultWithInstance(envelope, instanceId) {
   return { ...envelope, instanceId: String(instanceId || "") };
 }
+
+// --- tab references (`bw://`) ----------------------------------------------- //
+// A self-contained, pasteable handle for ONE tab, on ONE profile, on ONE host:
+//
+//     bw://<host>/<instance>/<tabId>          e.g. bw://workbench/main/12345
+//
+// It exists for the toolbar-click path: the operator is LOOKING at a tab, clicks
+// the Browser Bridge icon, and gets a string they can paste into a prompt —
+// `browser bw://workbench/main/12345 screenshot` then routes straight back to
+// that exact tab. The three fields are precisely the three things a command
+// cannot infer from the paste:
+//
+//   host      WHICH machine's bridge. It is a CHECK, not a route: the CLI only
+//             ever talks to 127.0.0.1, so a ref carried to the other host must
+//             fail loudly instead of silently operating on a same-labelled
+//             profile over there.
+//   instance  the server's routing key — `--instance`.
+//   tabId     Chrome's numeric tab id — `--tab`.
+export const TAB_REF_SCHEME = "bw://";
+
+// 🔴 The instance field is the FULL routing key, never a prefix of it. The
+// server resolves a target with `target in (inst.key, inst.instance_id)`
+// (server.py `_resolve_target_locked`) — an EXACT match against either. So an
+// abbreviated auto-id does not route at all, and a ref built from one would fail
+// as `unknown_instance` on the very first command. `key = label or instance_id`
+// (server.py, `register`), so that is what this mirrors: the label when the
+// profile has one, else the whole UUID.
+export function tabRefKey(label, instanceId) {
+  const l = String(label || "").trim();
+  return l || String(instanceId || "").trim();
+}
+
+// The character class the host and instance fields must satisfy. Deliberately
+// NARROW. The ref is split on `/` by a bash CLI and pasted onto shell command
+// lines, so a `/`, a space or a quote in an operator-chosen label would produce
+// a ref that parses cleanly into the WRONG fields — the silent-wrong-answer
+// shape this subsystem keeps finding. Percent-encoding was the alternative and
+// was rejected: it moves a decoder into bash to serve a label that is set once,
+// by hand, from names that are ASCII in practice (`main`, `work`). A label
+// outside this class is REFUSED with a message naming it, rather than mangled.
+// A bare auto-id (a UUID) is hex + dashes, so it always satisfies this.
+export const TAB_REF_FIELD_RE = /^[A-Za-z0-9._-]+$/;
+
+// Build the ref, or throw an Error whose message is the reason. Every throw is a
+// condition the CLICKING OPERATOR can act on, so the messages are the badge
+// tooltip text — not internal codes.
+export function buildTabRef({ host, label, instanceId, tabId } = {}) {
+  const h = String(host || "").trim();
+  // "unknown" is `resolve_host()`'s own answer when it cannot identify the
+  // machine (server.py). Minting a ref with it would make the host field — the
+  // one thing that catches a cross-host paste — vacuous, and there is no second
+  // chance to check a token once it is on the clipboard.
+  if (!h || h === "unknown") {
+    throw new Error("bridge could not identify this host");
+  }
+  if (!TAB_REF_FIELD_RE.test(h)) {
+    throw new Error(`host label is not ref-safe: ${h}`);
+  }
+  const key = tabRefKey(label, instanceId);
+  if (!key) throw new Error("this profile has no label and no instance id");
+  if (!TAB_REF_FIELD_RE.test(key)) {
+    throw new Error(
+      `instance label is not ref-safe: ${key} — use only letters, digits, . _ -`);
+  }
+  // Chrome tab ids are non-negative integers. `chrome.tabs.TAB_ID_NONE` is -1,
+  // which is a real value a devtools/background target can carry — it must not
+  // become a ref that looks routable.
+  if (!Number.isInteger(tabId) || tabId < 0) {
+    throw new Error(`no routable tab id (got: ${String(tabId)})`);
+  }
+  return `${TAB_REF_SCHEME}${h}/${key}/${tabId}`;
+}
