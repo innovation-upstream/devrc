@@ -260,27 +260,50 @@ debugging, changing or copying a specific pipeline.
    `pod-security.kubernetes.io/enforce: privileged` on the namespace (`686d6ff0`).
    ⚠ That is a **broader** grant than the 7 infra namespaces already carrying it — this one
    runs webhook-triggered CI. The narrow fix is a baseline-compatible cache.
-   🔴 **THAT hostPath IS GONE — `6bec075e` was REVERTED by `7839ef54` 2h20m later
-   (2026-08-29T22:09Z → 2026-08-30T00:29Z), so gotcha #3's node-pinning and §"Adding a
-   pipeline" step 4 describe the LIVE gate, not history.** Re-measured 2026-08-30T18:5xZ on
-   `devrc-ci-vchxk-gate-pod`: `nodeSelector kubernetes.io/hostname=talos-xr6-r7p`, volume
-   `nix-cache` → `persistentVolumeClaim: nix-store-cache` (30Gi, Bound, selected-node
-   `talos-xr6-r7p`); `gitops-validate` on `talos-uvh-gtj` with its own `nix-store-cache-2`.
-   A read of this section taken *during* that 2h20m window is a correct measurement of a
-   state that no longer exists — check the volume live before quoting either shape.
+   🔴 **THAT hostPath IS GONE — `6bec075e` was REVERTED by `7839ef54` 2h19m later
+   (2026-08-29T22:09Z → 2026-08-30T00:29Z), so gotcha #3's node-pinning and
+   §"Adding a new pipeline / new repo" step 4 describe the LIVE gate, not history.**
+   Re-measured 2026-08-30 on `devrc-ci-vchxk-gate-pod`:
+   `nodeSelector kubernetes.io/hostname=talos-xr6-r7p`, volume `nix-cache` →
+   `persistentVolumeClaim: nix-store-cache` (30Gi, Bound, selected-node `talos-xr6-r7p`);
+   `gitops-validate` on `talos-uvh-gtj` with its own `nix-store-cache-2`. A read taken
+   *during* that window is a correct measurement of a state that no longer exists — check the
+   volume live before quoting either shape. ⚠ **And the window you could have OBSERVED it in
+   is shorter than the git interval: ~1h41m, not 2h19m** — for the first 39 minutes
+   (22:09Z→22:48Z) admission rejected every gate pod, so there was nothing to read.
    🔴 **The revert was NOT the admission failure above — it is a SECOND, INDEPENDENT failure
-   of the same volume, and it is the one to solve first if the unpin is ever retried.** A
-   `DirectoryOrCreate` hostPath is created fresh by kubelet as **root**, so `seed-nix` fills
-   it and then nothing inside the sandbox can take the nix DB lock:
+   of the same volume, and it is the one to solve first if the unpin is ever retried.** Nothing
+   in the sandbox could take the nix DB lock:
    `error: opening lock file "/nix/var/nix/db/big-lock": Permission denied` — **75
    occurrences across 42 tests, on EVERY devrc PR**, byte-identical on two different branches
    (`devrc-ci-csfzb`/#1057, `devrc-ci-kdcmr`/#1059), against a pre-change run
-   (`devrc-ci-q4d5m`) of `failed=0` over 18,557 passed. The PVC works only because earlier
-   runs populated its `/nix` with ownership the nix build user can use. ⚠ **What the unpin
-   genuinely bought, recorded so it is not re-litigated from zero:** three nodes reachable
-   instead of one, queue wait **17–22m → 0.1m**, wall clock **39.1m median → 17.4m**. Retry
-   it only with the store's ownership solved FIRST and proven on a scratch pipeline — and
-   then reconsider `686d6ff0`, whose `privileged` exemption buys nothing while the PVC is back.
+   (`devrc-ci-q4d5m`) of `failed=0` over 18,557 passed. *(Those figures are quoted from
+   `7839ef54`; the runs are pruned, so they are not re-derivable — the mechanism below is.)*
+   🔴 **"PVC vs hostPath" IS NOT THE DIFFERENCE, AND `7839ef54`'s OWN STATED CAUSE IS WRONG.**
+   `nix-store-cache` **is** a hostPath: its PV is `hostPath
+   {path: /var/lib/mnt/disk-1/pvc-aef79024…_tekton-ci_nix-store-cache, type: DirectoryOrCreate}`
+   — same disk, same `DirectoryOrCreate`, as `6bec075e`'s `/var/lib/mnt/disk-1/devrc-ci-nix-cache`.
+   The one structural difference measured is the directory's **creation mode**:
+   `local-path-config`'s setup script is `mkdir -m 0777 -p "$VOL_DIR"`, so kubelet's
+   `DirectoryOrCreate` finds it already at **0777**, where a bare hostPath is created at
+   **0755 root:root**. Everything after is the same `cp -a` from the same image, and the gate
+   pod sets no `securityContext`/`fsGroup` at all. 🔴 The revert's *"the PVC works only because
+   earlier runs populated its `/nix`"* is **refuted**: `nix-store-cache-2` was created fresh
+   `2026-08-25T05:33:47Z` for `gitops-validate` — which writes to the store, so it takes the
+   same lock — and has been green since, with no earlier runs to populate it. **So test
+   `chmod 0777` on the hostPath before scoping an ownership-migration story.** (Not yet run —
+   it is the only difference anyone has measured, not a proven cause.)
+   ⚠ **What the unpin bought, and the caveat that decides how to read it:** three nodes
+   reachable instead of one, queue wait **17–22m → 0.1m**, wall clock **39.1m median → 17.4m**
+   — but measured while `requests.cpu` was **4** (`23887675`, 16:03 −05:00). `bb62668f` put it
+   back to **2** at 19:14, 15 min before the revert, and **that is what is live today**; its own
+   subject is *"the equality fixed starvation and bought a queue nothing drained"*, i.e. it
+   targets the same queue. Grading a retry against this pair **over-credits the unpin** — re-take
+   the baseline at cpu 2. Then reconsider `686d6ff0`, whose `privileged` exemption buys nothing
+   while the PVC is back (measured 2026-08-30: 358 live `tekton-ci` pods, **zero** using any
+   baseline-forbidden feature). 🔴 Its own in-file comment is now STALE and says the opposite —
+   `<homelab-infra>/clusters/homelab/apps/tekton-pipelines/triggers/namespace.yaml` still reads
+   *"REQUIRED by the gate's hostPath nix cache"* over a precondition already satisfied.
    **(b) `sandbox = false` in the CI pod.** The `nix build .#checks…` tier is only hermetic
    where nix's sandbox is ON. With it off, the *same derivation hash* produced `failed=1` on
    the dev host and `failed=43` in CI — identical inputs, different output, i.e. impure.
