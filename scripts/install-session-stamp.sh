@@ -200,14 +200,33 @@ if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
     # class this script removed `is_legacy_ours` to close. Requiring the `impl=`
     # line to name THIS checkout keeps the repair (our own hook, cut short, from
     # our own install) while leaving every other shape behind the --force gate.
-    if [ "$_existing" = "impl=$(printf '%q' "$IMPL")" ] && ! is_intact "$TARGET"; then
-      echo "  ⚠ this checkout's own hook is INCOMPLETE (no end sentinel) — repairing"
-      echo "    (a truncated hook refuses every commit, so repairing it does not"
+    # 🔴 AND IT MUST ACTUALLY BE BROKEN — `sh -n` failing, not merely a missing
+    # sentinel. The justification for skipping --force is "this hook refuses
+    # every commit", so the condition has to TEST that, not a proxy for it. It
+    # did not: a hook someone derived from devrc's wrapper on this checkout —
+    # header kept, `impl=` kept, devrc's tail replaced with their own body — is
+    # valid shell, refuses nothing, has no sentinel, and was destroyed with no
+    # --force. Measured. This repo's own test file already records why the proxy
+    # is wrong: "A 0-byte file parses clean too, so 'truncated' is not by itself
+    # a broken-shell state."
+    #
+    # Three conditions, and each is load-bearing: it names THIS checkout (not
+    # merely structurally ours), it lacks the sentinel (so a complete hook is
+    # never rewritten), and it fails to parse (so the "refuses every commit"
+    # premise is true of the file in front of us).
+    if [ "$_existing" = "impl=$(printf '%q' "$IMPL")" ] \
+       && ! is_intact "$TARGET" \
+       && ! sh -n "$TARGET" 2>/dev/null; then
+      echo "  ⚠ this checkout's own hook is INCOMPLETE and does not parse — repairing"
+      echo "    (it would refuse every commit in this repo, so the repair does not"
       echo "     wait for --force)"
       FORCE=1
       _repairing=1
     fi
-    # 🔴 `elif`, not a fall-through. The repair branch above used to fall
+    # 🔴 GUARDED BY `_repairing`, not a fall-through. (An earlier comment here
+    # said "`elif`" — there is no elif; the mechanism is the flag set above and
+    # read below. Behaviourally the same, but an auditor grepping for `elif` to
+    # confirm this landed finds nothing.) The repair branch above used to fall
     # straight into this one, so a single run printed three mutually
     # contradictory lines: "repairing", then "points at another checkout"
     # naming THIS checkout's own path, then "Re-point it with --force" —

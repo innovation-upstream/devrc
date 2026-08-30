@@ -23,15 +23,25 @@ resolve the session -> wake it". Two things break it, and only one was known:
 
      🔴 THE MEASUREMENT ITSELF HAS A TRAP, AND IT HAS BITTEN THREE TIMES.
      Counting with `git show … | grep -q` under `set -o pipefail` UNDERCOUNTS,
-     silently: `grep -q` exits at the first match, `git show` dies of SIGPIPE,
-     and `pipefail` turns that into a failed pipeline — so a commit is dropped
-     from the count EXACTLY WHEN IT MATCHES. Reproduced side by side on the same
-     200 commits:
+     silently: `grep -q` exits at the first match, so `git show` can die of
+     SIGPIPE, and `pipefail` turns that into a failed pipeline — dropping a
+     commit that DID match. Reproduced on the same 200 commits:
 
-         with `set -o pipefail` + `grep -q`  ->  55
+         with `set -o pipefail` + `grep -q`  ->  55   (and 41 at n=100)
+         with `set -o pipefail` + `grep -c`  ->  67   (no early exit, no SIGPIPE)
          same loop without pipefail          ->  67
+         pipe-free (one subprocess/commit)   ->  67
 
-     Every wrong figure in this feature's history — 41%/27%, 55, and one auditor
+     ⚠ TWO THINGS THIS EXPLANATION MUST NOT OVERSTATE, both measured. It is a
+     RACE between grep's exit and git's write, not a rule: only ~12 of the 67
+     matches actually drop, which is why the broken count lands near the truth
+     instead of at zero — and therefore why it is believable. And 55 is not a
+     constant; five runs gave 55, 55, 55, 56, 55. The 67 is stable, the wrong
+     number is not, so someone re-running the broken shape may not even
+     reproduce the same error. The `grep -c` row is the discriminating control —
+     it isolates the early exit from the pipe itself.
+
+     Every wrong figure in this feature's history — 41%/27%, 55, one auditor
      round each — traces to that shape. Count without a pipe (read each message
      into a variable, or one subprocess per commit) and the number is stable.
      `claude/RULES.md`: validate the instrument before reading its verdict.

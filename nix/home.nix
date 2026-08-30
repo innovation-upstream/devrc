@@ -1212,7 +1212,7 @@ in
   };
   # 🔴 session-stamp.py — records this session's RESUMABLE id so the
   # `prepare-commit-msg` hook can stamp it onto the commit. Measured 2026-08-30:
-  # the prose-emitted `Claude-Session:` trailer lands on only 46% of the last 100
+  # the prose-emitted `Claude-Session:` trailer lands on only 47% of the last 100
   # commits on origin/main, so half of `main` cannot be resolved to a session at
   # all. RULES.md prefers a structural fix over a prose one; this is that fix.
   #
