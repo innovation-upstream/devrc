@@ -2456,6 +2456,33 @@ test("THE LEDGER KEY IS THE EMBED URL, NOT THE SIGNED MEDIA URL", async () => {
   assert.notEqual(posted[0].sourceKey, MEDIA_URL);
 });
 
+test("the player WRITE folds a Discord embed the same way the read does",
+  async () => {
+    // 🔴 THE SECOND WRITER. There are TWO sites that turn one URL into a
+    // ledger key -- this one and haveUrl -- and the Discord fold originally
+    // landed on the reader and NOT here, so a lookup asked for a string this
+    // writer never stored. Both go through `ledgerSourceKey` now; this pins
+    // that they agree, which is the relationship, not either half.
+    reset();
+    const path = "/attachments/119283746551234567/998877665544332211/a.mp4";
+    const posted = [];
+    fetchHandler = async (url, opts) => {
+      if (url.endsWith("/match")) posted.push(JSON.parse(opts.body));
+      return { ok: true, status: 200,
+        json: async () => ({ dir: "Jane Doe", confidence: 1, auto: true }) };
+    };
+    await SW.playerDownload(
+      { mediaUrl: "https://cdn.example-cdn.test/v/abc.mp4?sig=1",
+        embedUrl: `https://media.discordapp.net${path}?width=550` },
+      embedSender());
+    SW.onDeterminingFilename(
+      { id: 403, url: "https://cdn.example-cdn.test/v/abc.mp4?sig=1",
+        filename: "f.mp4" }, () => {});
+    await settle(5);
+    // The literal, hand-spelled -- not computed from the function under test.
+    assert.equal(posted[0].sourceKey, `https://cdn.discordapp.com${path}`);
+  });
+
 test("CORRELATION FAILURE DEGRADES TO THE PICKER, never to a wrong subject",
   async () => {
     // The top frame has no content script (a CSP-sandboxed host, a page still

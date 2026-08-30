@@ -249,10 +249,31 @@ const DISCORD_ORIGIN_HOST = "cdn.discordapp.com";
  * Scheme and port fold out as a consequence of rebuilding the key from a fixed
  * origin rather than from the input. Stated because it is real, not because it
  * matters here: Discord is https-only and portless, so no live URL exercises
- * either axis, and the tests below pin the host axis only.
+ * either axis, and tests/identity.test.mjs pins the host axis only.
  *
  * The READ side must fold identically -- see `haveUrl` in service_worker.js.
  */
+/**
+ * THE LEDGER'S KEY FOR ONE URL. One rule, one place.
+ *
+ * Every site that turns a single URL into a `source_urls` key goes through
+ * here: the write in `playerDownload` and the read in `haveUrl`. It was spelled
+ * three different ways across two files for exactly one round, and that is
+ * precisely how the write and the read came to disagree -- the fold landed on
+ * the reader and on one of the two writers, so a lookup asked for a string the
+ * other writer never stored.
+ *
+ * NOT the same rule as `buildMatchPayload`'s `sourceKey`, and it must not be
+ * folded into this. That one arbitrates between TWO candidate keys -- the
+ * download's own URL versus the capture's -- and deliberately yields "" for an
+ * ordinary download so the sidecar falls back to the full URL. Routing this
+ * through here instead would mint a key for EVERY download on every site,
+ * silently changing what the ledger records everywhere.
+ */
+export function ledgerSourceKey(url) {
+  return discordSourceKey(url) || playerSourceKey(url);
+}
+
 export function discordSourceKey(url) {
   if (!discordChannelId(url)) return "";
   let parsed;

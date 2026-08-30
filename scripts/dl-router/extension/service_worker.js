@@ -19,7 +19,7 @@
 
 import {
   buildMatchPayload, carryReferrer, correlateCapture, discordSourceKey,
-  formatDup, handleDetermining, localContext, localDecide, playerSourceKey,
+  formatDup, handleDetermining, ledgerSourceKey, localContext, localDecide,
   preferOriginalUrl,
 } from "./route_core.js";
 import { isHttpUrl, relPathFromAbsolute, sanitizeDirName } from "./sanitize.js";
@@ -1317,8 +1317,11 @@ export async function playerDownload(msg, sender) {
     href: mediaUrl,
     mediaSrc: mediaUrl,
     // The ledger's key. Stable across the signature rotation the media URL is
-    // subject to -- see route_core.playerSourceKey.
-    sourceKey: playerSourceKey(msg && msg.embedUrl),
+    // subject to -- see route_core.ledgerSourceKey, which is also what the READ
+    // in haveUrl uses. This line used to call playerSourceKey directly, so when
+    // the Discord fold landed on the reader it did NOT land here, and a lookup
+    // asked for a string this writer never stored.
+    sourceKey: ledgerSourceKey(msg && msg.embedUrl),
   };
   // WITH NO PROVEN CONTEXT THE CAPTURE CARRIES NO SUBJECT AT ALL. Not the embed
   // page's title, not its URL: an embed page is a bare player, and anything
@@ -1344,8 +1347,10 @@ export async function playerDownload(msg, sender) {
 /**
  * `dlr:have` -- the "already have this" badge's question.
  *
- * Asked BY THE EMBED PAGE URL, normalised through the same `playerSourceKey`
- * the write side uses. Keying this on the media URL instead would mean the
+ * Asked BY THE EMBED PAGE URL, normalised through `ledgerSourceKey` -- the
+ * SAME function the write side calls, which is the point: these two agreeing
+ * is a relationship, not a coincidence, and it broke the one round they were
+ * spelled separately. Keying this on the media URL instead would mean the
  * badge never lit: the signature rotates, so every lookup would miss, and a
  * badge that never lights actively asserts "you do not have this".
  *
@@ -1364,7 +1369,7 @@ export async function haveUrl(embedUrl) {
   // (no Discord `[site_rules."<host>".player]` rule exists, so nothing asks
   // with a CDN URL), but nothing else pins it, and the first operator to add
   // one would hit it.
-  const key = discordSourceKey(embedUrl) || playerSourceKey(embedUrl);
+  const key = ledgerSourceKey(embedUrl);
   if (!key) return { ok: false, have: false };
   try {
     const out = await api("GET", `/have?url=${encodeURIComponent(key)}`,
