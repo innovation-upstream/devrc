@@ -2058,16 +2058,27 @@ def render_toolchain(facts):
         "pytest on PATH; a loaded direnv is not the dev shell. Do not report "
         "that as a finding and do not build an ad-hoc `nix-shell` around it.",
         "",
-        "Run the whole dev-host gate (its EXIT STATUS is authoritative; also "
-        "read each runner's own `RESULT:` line):",
+        "Run the whole dev-host gate, **if this repo has one** — `scripts/gate.sh` "
+        "and the `checks` flake outputs below exist in SOME repos and not "
+        "others. 🔴 Check before you run, and if they are absent that is a "
+        "fact about the repo, NOT a finding about the PR and NOT a reason to "
+        "build an ad-hoc substitute: find how this repo actually runs its "
+        "suite (here it may be `scripts/tests/run-ci-suite.sh` off a manifest) "
+        "and say in your report which tier you actually exercised. Where it "
+        "does exist, its EXIT STATUS is authoritative; also read each "
+        "runner's own `RESULT:` line:",
         "",
         "```",
         f"nix develop {r} -c bash <your worktree>/scripts/gate.sh --tier both",
         "```",
         "",
-        "🔴 The gate above is the DEV-HOST tier. **The tier the merge actually "
-        "gates on is the sandbox one**, which builds from a store copy with no "
-        "`.git` and is therefore blind to different things:",
+        "🔴 The gate above is the DEV-HOST tier. Where a repo ALSO exposes "
+        "`checks` flake outputs, **the tier the merge gates on is the sandbox "
+        "one**, which builds from a store copy with no `.git` and is therefore "
+        "blind to different things. Confirm they exist before quoting a result "
+        "from them — `nix eval <repo>#checks.x86_64-linux --apply builtins.attrNames` "
+        "errors outright in a repo that has none, and a brief that ASSERTED "
+        "they exist sent one audit chasing a tier its repo does not have:",
         "",
         "```",
         "nix build <your worktree>#checks.x86_64-linux.pytests",
