@@ -956,19 +956,44 @@ class TestTheInstallIsAtomicAndTheModeIsPinned:
         hooks.mkdir(parents=True, exist_ok=True)
         install(repo)
         target = hooks / "prepare-commit-msg"
-        assert target.stat().st_dev == hooks.stat().st_dev
-        # Staging beside the target is what guarantees that on every host.
+        # 🔴 THE PREVIOUS ASSERTION HERE WAS A TAUTOLOGY: `target` is a file
+        # INSIDE `hooks`, so its st_dev equals its parent's on every host under
+        # every installer, forever. It passed even against a $TMPDIR-staging
+        # installer. The behavioural discriminator is that an install must
+        # SUCCEED when $TMPDIR is unusable — a $TMPDIR-staging installer cannot.
+        out = subprocess.run(
+            [str(INSTALLER), "--repo", str(repo), "--apply", "--force"],
+            capture_output=True, text=True,
+            env={**os.environ, "TMPDIR": "/nonexistent/tmpdir/for/this/test"})
+        assert out.returncode == 0, (out.stdout, out.stderr)
+        assert target.exists() and oct(target.stat().st_mode)[-3:] == "755"
+        # …and the structural pin as a belt, since the behavioural half above
+        # would also pass on a host whose $TMPDIR happened to share the device.
         src = (INSTALLER).read_text()
         assert '_tmp="$TARGET.devrc-install.$$"' in src, (
             "the apply path no longer stages beside the target, so `mv` is not "
             "guaranteed to be a rename")
 
-    def test_the_installed_hook_is_0755(self, repo):
-        """`mktemp` creates 0600, so a bare `chmod +x` yields 0711 — and a `#!`
-        script needs READ permission for the interpreter to open it."""
-        install(repo)
+    @pytest.mark.parametrize("umask", [0o022, 0o077])
+    def test_the_installed_hook_is_0755_at_any_umask(self, repo, umask):
+        """🔴 THE UMASK IS THE DISCRIMINATOR, and without it this test could not
+        fail. The apply path stages via a redirect, which creates `0666 & ~umask`
+        — so `chmod +x` and `chmod 0755` agree at umask 022 and diverge
+        elsewhere: measured 750 at 027 and 700 at 077. A `#!` script needs READ
+        permission for the interpreter to open it, so 700 is not runnable by
+        anyone but the owner.
+
+        I had labelled this an "equivalent mutant, measured" on the strength of
+        the 022 run alone. It is testable in one argument.
+        """
+        out = subprocess.run(
+            [str(INSTALLER), "--repo", str(repo), "--apply"],
+            capture_output=True, text=True,
+            preexec_fn=lambda: os.umask(umask))
+        assert out.returncode == 0, (out.stdout, out.stderr)
         target = self._hooks(repo) / "prepare-commit-msg"
-        assert oct(target.stat().st_mode)[-3:] == "755"
+        assert oct(target.stat().st_mode)[-3:] == "755", (
+            f"installed mode is umask-dependent (umask {oct(umask)})")
 
 
 class TestTheRepairNoteAndTheScratchSweepAreThemselvesGuarded:
@@ -1031,10 +1056,85 @@ class TestTheRepairNoteAndTheScratchSweepAreThemselvesGuarded:
         env = {**os.environ, "TMPDIR": "/nonexistent/tmpdir/for/this/test"}
         degraded = subprocess.run([str(INSTALLER), "--repo", str(repo)],
                                   capture_output=True, text=True, env=env)
-        # rc is 4 here, not 0: without the comparison bytes the truncated hook
-        # falls through to the ordinary "exists and is not ours" refusal. That
-        # is the pre-existing path for an unrecognised hook, and it is exactly
-        # the observable difference this control needs.
+        # 🔴 ASSERT THE RC, or an ABORT satisfies this too. Dropping the
+        # `2>/dev/null || true` from the dry-run mktemp makes this path exit 1 —
+        # reproducing the very defect this round closed — and printing nothing,
+        # which also contains no "PARTIAL WRITE". The mutant survived on that.
+        assert degraded.returncode in (0, 4), (
+            f"a read-only path aborted (rc {degraded.returncode}) instead of "
+            f"degrading: {degraded.stdout}{degraded.stderr}")
+        assert "SKIPPED" in degraded.stdout, (
+            "the degraded run must SAY the comparison did not happen")
         assert "PARTIAL WRITE" not in degraded.stdout, (
             "the read-only path did not consult $TMPDIR, so the scratch-file "
             "sweep's zero cannot mean 'cleaned up'")
+
+
+class TestReadOnlyPathsNeverDependOnScratchSpace:
+    """🔴 ROUND-10 — audit 🟡-2. The claim this ladder's round 9 existed to close
+    ("a full /tmp must not be able to stop an uninstall") had NO test on either
+    read-only path. Two mutants survived, each with a positive control showing it
+    reproduces the original defect:
+
+      * `--uninstall` re-acquiring a scratch file  -> rc 1 with an unusable TMPDIR
+      * dropping `2>/dev/null || true` on the dry run -> rc 1
+
+    Both are the F2 defect exactly. Guarded here in the only way that can see
+    them: by asserting the RETURN CODE, not just the absence of a string.
+    """
+
+    def _hooks(self, repo) -> Path:
+        return Path(git(repo, "rev-parse", "--path-format=absolute",
+                        "--git-common-dir").stdout.strip()) / "hooks"
+
+    BROKEN_TMPDIR = "/nonexistent/tmpdir/for/this/test"
+
+    def test_uninstall_works_with_no_usable_scratch_space(self, repo):
+        install(repo)
+        target = self._hooks(repo) / "prepare-commit-msg"
+        assert target.exists()
+        out = subprocess.run(
+            [str(INSTALLER), "--repo", str(repo), "--uninstall"],
+            capture_output=True, text=True,
+            env={**os.environ, "TMPDIR": self.BROKEN_TMPDIR})
+        assert out.returncode == 0, (out.returncode, out.stdout, out.stderr)
+        assert "UNINSTALLED" in out.stdout
+        assert not target.exists()
+
+    def test_uninstall_creates_nothing_at_all(self, repo, tmp_path):
+        """The other half: it must not even reach for scratch space."""
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        install(repo)
+        subprocess.run([str(INSTALLER), "--repo", str(repo), "--uninstall"],
+                       capture_output=True, text=True,
+                       env={**os.environ, "TMPDIR": str(scratch)})
+        assert list(scratch.iterdir()) == [], "uninstall touched scratch space"
+
+    def test_a_dry_run_degrades_rather_than_aborting(self, repo):
+        install(repo)
+        out = subprocess.run(
+            [str(INSTALLER), "--repo", str(repo)],
+            capture_output=True, text=True,
+            env={**os.environ, "TMPDIR": self.BROKEN_TMPDIR})
+        assert out.returncode in (0, 4), (out.returncode, out.stdout, out.stderr)
+
+
+class TestTheApplyPathCreatesItsOwnHooksDirectory:
+    """🔴 ROUND-10 — audit 🟢-5. Deleting the LIVE `mkdir -p "$HOOKS"` survived
+    the whole suite, because every fixture uses `git init`, which always creates
+    `.git/hooks`. So the surviving copy was the one a tidy-up would delete, and
+    the failure mode was rc 1 with a raw bash redirect error."""
+
+    def test_apply_succeeds_when_the_hooks_directory_is_absent(self, repo):
+        hooks = Path(git(repo, "rev-parse", "--path-format=absolute",
+                         "--git-common-dir").stdout.strip()) / "hooks"
+        if hooks.exists():
+            for f in hooks.iterdir():
+                f.unlink()
+            hooks.rmdir()
+        assert not hooks.exists()
+        out = subprocess.run([str(INSTALLER), "--repo", str(repo), "--apply"],
+                             capture_output=True, text=True)
+        assert out.returncode == 0, (out.returncode, out.stdout, out.stderr)
+        assert (hooks / "prepare-commit-msg").exists()

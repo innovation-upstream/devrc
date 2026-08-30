@@ -348,7 +348,18 @@ if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
     # just fixed for. `is_ours` currently guarantees `_existing` is non-empty,
     # so the branch is unreachable today; it is written safely anyway because
     # "unreachable" is a property of another function that may be relaxed.
-    if [ "${_repairing:-0}" -ne 1 ]; then
+    # 🔴 …AND ONLY WHEN THE COMPARISON ACTUALLY RAN. With no scratch file (an
+    # unwritable or full /tmp on a read-only path) the prefix check is skipped,
+    # `_repairing` stays 0, and a devrc PARTIAL WRITE fell through to this
+    # branch — printing "points at another checkout" while naming THIS
+    # checkout's own path, then "this is devrc's own hook, not a foreign one",
+    # then "is not ours". That contradictory triple is the exact defect recorded
+    # a few lines below as already fixed; the empty-$_tmp path re-opened it.
+    if [ -z "$_tmp" ]; then
+      echo "  ⚠ could not create a scratch file, so the partial-write check was"
+      echo "    SKIPPED — this hook has not been compared against what would be"
+      echo "    installed. Free up \$TMPDIR and re-run to get a real answer."
+    elif [ "${_repairing:-0}" -ne 1 ]; then
       echo "  ⚠ an EXISTING devrc hook points at another checkout:"
       if [ -n "$_existing" ]; then echo "      $_existing"; fi
       echo "    Re-point it with --force; this is devrc's own hook, not a foreign one."
@@ -368,7 +379,10 @@ if [ "$MODE" = "dry" ]; then
   exit 0
 fi
 
-mkdir -p "$HOOKS"
+# (No `mkdir -p "$HOOKS"` here: the apply branch above already made it, and only
+# MODE=apply can reach this line — uninstall returns and the dry run exits first.
+# A copy here looked like the duplicate and would be the one a tidy-up deleted,
+# leaving the load-bearing one to fail with a raw redirect error and rc 1.)
 
 # 🔴 THE WRAPPER IS GENERATED HERE RATHER THAN SHIPPED, and the reason is
 # devrc#1083's 🟡-9: a shipped file has to be SYMLINKED into .git/hooks, and this
@@ -419,13 +433,18 @@ mkdir -p "$HOOKS"
 # `#!` script needs READ permission for the interpreter to open it, so 0711 is
 # not runnable by anyone but the owner.
 #
-# ⚠ AS OF THE CURRENT STAGING THIS IS AN EQUIVALENT MUTANT, and it is recorded
-# rather than dressed up as a guard: the apply path now stages via a shell
-# redirect, which creates 0644 under the usual umask, so `chmod +x` and
-# `chmod 0755` produce the same mode and the test cannot tell them apart
-# (measured — the `+x` mutant survives the suite). It is kept because the mode
-# would silently change again if staging ever returned to `mktemp`, which is
-# exactly how it changed the first time.
+# ⚠ I LABELLED THIS "AN EQUIVALENT MUTANT, MEASURED" AND THAT WAS FALSE. The
+# redirect creates `0666 & ~umask`, so `chmod +x` and `chmod 0755` agree only at
+# umask 022 — the umask the suite happened to inherit. Measured across three:
+#
+#     umask 022 -> HEAD 755, `+x` mutant 755   (indistinguishable)
+#     umask 027 -> HEAD 755, `+x` mutant 750
+#     umask 077 -> HEAD 755, `+x` mutant 700
+#
+# A hardened login umask or `UMask=0077` in a systemd unit is enough. The test
+# now installs under umask 077, which kills the mutant. Recording an untestable
+# property is fair; recording a TESTABLE one as untestable is worse than saying
+# nothing, because it tells the next reader not to look.
 chmod 0755 "$_tmp"
 mv -f "$_tmp" "$TARGET"
 trap - EXIT
