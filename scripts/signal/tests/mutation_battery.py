@@ -261,7 +261,7 @@ MUTANTS: list[Mutant] = [
     # ------------------------------------------------------------------ #
     Mutant("B1", "`build-push.sh`'s subcommand pin left stale — the control that refuses "
                  "to push an image whose CLI grew a subcommand nobody decided on", BP,
-           'want_choices="approve conversations draft drafts health mute muted reconcile run search send unmute "',
+           'want_choices="approve conversations draft drafts health mute muted reconcile run search send unapprove unmute "',
            'want_choices="approve conversations draft drafts health reconcile run search send "',
            "test_the_build_control_lists_EXACTLY_the_CLI_subcommands", SUITE_IMAGE),
 

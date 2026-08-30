@@ -50,10 +50,15 @@ def _approved_row(draft_id, recipient, body, mentions=None):
     so a fixture that hard-coded one would go stale silently the first time the
     canonical form changed and every test here would refuse for the wrong reason.
     """
-    return {"id": draft_id, "send_state": _signal_db.STATE_APPROVED,
-            "recipient": recipient, "body": body, "mentions": mentions or [],
-            "approved_digest": _signal_db.payload_digest(
-                recipient=recipient, body=body, mentions=mentions or [])}
+    row = {"id": draft_id, "send_state": _signal_db.STATE_APPROVED,
+           "recipient": recipient, "body": body, "mentions": mentions or []}
+    # 🔴 DERIVED FROM THE MODULE, over the WHOLE ROW. The digest now covers a
+    # CANONICAL recipient identity (`recipient_identity()`), not the rendered
+    # `recipient` string — a fixture that recomputed it from `recipient` alone
+    # would encode this test's own idea of the canonical form and stay green
+    # while the two sides disagreed.
+    row["approved_digest"] = _signal_db.draft_payload_digest(row)
+    return row
 
 
 class Poster:

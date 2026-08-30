@@ -48,6 +48,7 @@ code route and will raise `SendGateError`.
 | `draft` | compose an outbound draft — **stores it, transmits nothing** |
 | `drafts` | list drafts with their `send_state` |
 | `approve` | record Zach's clawgate approval for one pending draft |
+| `unapprove` | withdraw an approval: `approved` → `pending`, clearing the digest, so the draft can be approved again. The **only** route out of a digest refusal |
 | `send` | transmit an **approved** draft (refuses anything else) |
 | `reconcile` | resolve a draft stranded in `sending`, after checking Signal yourself |
 | `muted` | list muted groups and how many stored rows each one hides |
@@ -72,6 +73,13 @@ python3 consumer.py drafts --state pending
 python3 consumer.py approve 42 --ref clawgate-task-91
 python3 consumer.py send 42
 
+# `send` refused with "CHANGED after it was approved" (or "NO approval digest")?
+# The draft is still `approved` and cannot be sent under that approval. Read it,
+# then withdraw the approval and give a fresh one — these are the ONLY commands
+# that move it, and both need SIGNAL_APPROVAL_TOKEN:
+python3 consumer.py unapprove 42 --note "body was edited after approval"
+python3 consumer.py approve 42 --ref clawgate-task-92
+
 # a draft stuck in `sending` — check Signal FIRST, then say which happened:
 python3 consumer.py drafts --state sending
 python3 consumer.py reconcile 42 --sent --timestamp 1723000009090   # it did go out
@@ -88,12 +96,19 @@ python3 consumer.py reconcile 42 --not-sent --note "no message in the thread"
 
 The body must already contain the literal `@<who>`. Signal REPLACES that span with
 `@DisplayName` on the receiving client, so if the text is not there, there is nothing
-to replace.
+to replace. The match is **case-insensitive** (so `--mention ANN` finds `@Ann` — name
+resolution has always been case-insensitive, and the span search now agrees with it)
+and is **bounded on the right**: `@Ann` will not match inside `@Anna`, so a member
+whose name is a PREFIX of another member's cannot steal their ping. Two mentions whose
+spans **overlap** are refused (`MentionSpansOverlap`) — overlapping spans are two
+rewrites of the same characters and what the recipient renders is undefined.
 
 🔴 **Every failure is a REFUSAL (exit 3), never a silent drop** — a mention pushes a
 notification through the recipient's mute settings and names a third party, so
 sending fewer than were asked for is a different act from the one that was approved.
-The six refusals, each with its own error class in `scripts/signal/_mentions.py`:
+The refusals, each with its own error class in `scripts/signal/_mentions.py` (all
+subclass `MentionError`, which is a `ValueError`, so `draft` catches them and exits 3
+rather than printing a traceback):
 
 | Situation | Error |
 |---|---|
@@ -103,15 +118,26 @@ The six refusals, each with its own error class in `scripts/signal/_mentions.py`
 | an explicit uuid/E.164 is not in this group | `MentionNotAMember` |
 | the body has no `@<who>` text | `MentionSpanMissing` |
 | `--mention` given for a non-group `--to` | `MentionsRequireAGroup` |
+| two mentions claim overlapping spans | `MentionSpansOverlap` |
+| the group-membership lookup itself failed (bad/empty `--from-number`, HTTP error) | `MentionGroupLookupFailed` |
 
 Names are resolved against **this group's membership only**
 (`GET /v1/groups/<account>/<group-id>` joined against `signal.contacts`) — the
 `members[]` array is MIXED E.164 and bare UUID, so both contact columns are matched.
 A name that matches somebody in a different conversation does not resolve here.
 
-The clawgate approval card lists every `author` the message will ping, above the body
+The clawgate approval card lists everyone the message will ping, above the body
 preview: `@Ann` in the preview is indistinguishable from ordinary prose, and approving
 a message without seeing who it notifies is the failure mode that line exists to close.
+Each line carries the resolved **display name** as well as the `author` id — the id is
+usually a bare uuid, which tells a human nothing they can check — and the offsets are
+labelled **UTF-16 units**, which is what they are.
+
+Refusal messages deliberately do **not** dump the group roster: `draft` needs no
+approval token, so an unbounded membership enumeration in an error would be a free,
+repeatable probe of any group address a caller can guess, muted ones included. A
+"no such name" refusal shows at most `_mentions.NAME_HINT_MAX` names plus a count of
+those withheld; a "not a member" refusal shows the member count only.
 
 ## Muted groups
 
@@ -265,8 +291,38 @@ composes and transmits**.
    *approve → send* (separate CLI invocations, closed by the digest) and
    *mint → POST* (closed by the binding). **Fails closed**: a missing digest is a
    refusal, because "never had one" and "cleared by the writer we are guarding
-   against" are the same observation. The way out is to read the changed draft and
-   `approve` it again.
+   against" are the same observation.
+
+5. 🔴 **The way out of a digest refusal is `unapprove`, then `approve`.** The
+   refusal happens *before* the draft is claimed for sending, so the row stays
+   `approved` — and `approve` is `pending`-only while `reconcile` is
+   `sending`-only. Without `unapprove` a refused draft is **unsendable forever**
+   and the only remedy is hand-editing the row, which is precisely the second
+   writer the digest exists to catch. `unapprove <id> [--note …]` moves
+   `approved → pending` and **NULLs `approved_digest`** (a pending row must never
+   carry a stale one); it needs the same `SIGNAL_APPROVAL_TOKEN` as `approve`,
+   refuses any draft that is not `approved`, and transmits nothing. The next
+   `approve` records a fresh `approval_ref` and recomputes the digest over the
+   draft as it now stands.
+
+   🔴 **The digest is over a CANONICAL recipient identity** — the contact/group
+   ROW ID — not over the recipient string `get_draft()` prints. That string is a
+   projection which flips from a phone number to a uuid when `_promote_
+   placeholder()` learns a real uuid during ordinary background ingest, so
+   hashing it made "DM someone new, then their first message arrives" refuse the
+   send with no adversary involved.
+
+   ⚠️ **Before rolling this out, drain the pre-existing approvals.** Drafts
+   approved *before* `approved_digest` existed carry NULL and fail closed on the
+   first `send`. Find them first:
+
+   ```sql
+   SELECT id, send_state, approval_ref FROM signal.messages
+    WHERE send_state = 'approved' AND approved_digest IS NULL;
+   ```
+
+   Each one is recovered the same way: read it (`drafts --state approved`), then
+   `unapprove <id> --note "pre-digest approval"` and `approve <id> --ref <ref>`.
 
 Every refusal raises **`SendGateError`**. `scripts/signal/tests/test_approval_gate.py`
 attempts six documented bypasses and requires each to fail with that error.

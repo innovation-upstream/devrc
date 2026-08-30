@@ -1115,11 +1115,55 @@ def resolve_draft_mentions(db, *, recipient: str, body: str, identifiers,
         # built out of a phone number.
         return _mentions.resolve_mentions(identifiers, body=body, members=[],
                                           contacts=[], is_group=False)
+    # 🔴 REFUSED HERE, NOT AS A 404. An empty `--from-number` builds
+    # `/v1/groups//<gid>`, which the server answers 404 — and the 404 escaped
+    # `resp.raise_for_status()` as an `HTTPError`, which is NOT a `ValueError`,
+    # so `main()`'s draft handler did not catch it and the operator got a
+    # traceback and exit 1 for a missing argument.
+    if not str(number or "").strip():
+        raise _mentions.MentionGroupLookupFailed(
+            "mentions need the SENDING account number to look the group's "
+            "membership up (`GET /v1/groups/<number>/<id>`), and --from-number "
+            "is empty. Pass --from-number, or set $SIGNAL_ACCOUNT.")
     fetch = member_fetcher or fetch_group_members
-    members = fetch(number, recipient)
+    try:
+        members = fetch(number, recipient)
+    except (_mentions.MentionError, AssertionError):
+        # `MentionError` is already the right shape. `AssertionError` is
+        # re-raised because the suite's "this must never be called" fetchers
+        # raise it: swallowing one would turn a guard that FIRED into a
+        # `MentionGroupLookupFailed` the surrounding test happily accepts —
+        # green for exactly the wrong reason.
+        raise
+    except Exception as exc:  # noqa: BLE001 - deliberately wide; see below
+        # 🔴 ANY failure of the membership lookup is a REFUSAL, in the type the
+        # `draft` handler catches. The transport raises `requests` exceptions,
+        # the JSON decode raises its own, and neither is a `ValueError` — so
+        # every one of them reached the operator as a traceback. Re-raised with
+        # the original type NAMED and chained, so nothing is hidden.
+        raise _mentions.MentionGroupLookupFailed(
+            f"could not read the target group's membership from "
+            f"`GET /v1/groups/<number>/<id>` ({type(exc).__name__}: {exc}), so no "
+            f"--mention can be resolved. Nothing was drafted. Check "
+            f"--from-number and that --to is the group `id`, not its "
+            f"`internal_id`.") from exc
     contacts = db.contacts_by_identifiers(members)
     return _mentions.resolve_mentions(identifiers, body=body, members=members,
                                       contacts=contacts, is_group=True)
+
+
+def mention_author_names(db, mentions) -> dict:
+    """`{author: display name}` for a resolved mentions array. For the CARD.
+
+    The card's job is to tell a HUMAN who a draft will ping, and `author` is
+    usually a bare uuid. Looked up through the same `contacts_by_identifiers`
+    the resolver used, so the name on the card and the name the resolver matched
+    come from one query.
+    """
+    if not mentions:
+        return {}
+    authors = [str(m.get("author")) for m in mentions if m.get("author")]
+    return _mentions.author_names(mentions, db.contacts_by_identifiers(authors))
 
 
 def http_attachment_fetcher(api_url: str | None = None, timeout: float = 30.0):
@@ -1296,6 +1340,13 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("draft_id", type=int)
     a.add_argument("--ref", required=True, help="the clawgate approval reference")
 
+    ua = sub.add_parser(
+        "unapprove",
+        help="withdraw an approval: approved -> pending, so it can be approved "
+             "again (the ONLY route out of a digest refusal)")
+    ua.add_argument("draft_id", type=int)
+    ua.add_argument("--note", help="why, recorded on the row's approval_ref")
+
     sd = sub.add_parser("send", help="transmit an APPROVED draft (gated)")
     sd.add_argument("draft_id", type=int)
 
@@ -1466,13 +1517,29 @@ def main(argv=None) -> int:  # pragma: no cover - thin CLI shell over tested uni
                 return 3
             clawgate.emit_draft_task(
                 draft_id=draft["id"], recipient=args.to, body=args.body,
-                mentions=mentions)
+                mentions=mentions,
+                author_names=mention_author_names(db, mentions))
             print(json.dumps(draft))
         elif args.cmd == "drafts":
             print(json.dumps(db.list_drafts(state=args.state), default=str))
         elif args.cmd == "approve":
-            print(json.dumps(db.approve_draft(args.draft_id, approval_ref=args.ref),
-                             default=str))
+            try:
+                print(json.dumps(db.approve_draft(args.draft_id,
+                                                  approval_ref=args.ref),
+                                 default=str))
+            except SendGateError as exc:
+                # Exit 3 like every sibling refusal. `approve` alone let a
+                # missing token / wrong-state refusal escape as a traceback.
+                print(f"refused: {exc}", file=sys.stderr)
+                return 3
+        elif args.cmd == "unapprove":
+            try:
+                print(json.dumps(db.unapprove_draft(args.draft_id,
+                                                    note=args.note),
+                                 default=str))
+            except SendGateError as exc:
+                print(f"refused: {exc}", file=sys.stderr)
+                return 3
         elif args.cmd == "send":
             try:
                 print(json.dumps(db.send_approved(args.draft_id), default=str))

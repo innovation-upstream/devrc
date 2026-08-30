@@ -42,6 +42,12 @@ _E164_RE = re.compile(r"^\+[1-9]\d{6,14}$")
 # would be silently dropped by the server, and a missing one mis-renders.
 MENTION_KEYS = ("author", "start", "length")
 
+# How many member names a "no such name" refusal may print. See the comment at
+# the raise site: `draft` needs no approval token, so an unbounded enumeration
+# turns a refusal into a free membership oracle for any group address a caller
+# can guess.
+NAME_HINT_MAX = 5
+
 
 class MentionError(ValueError):
     """Base: a `--mention` could not be turned into a wire mention.
@@ -82,6 +88,28 @@ class MentionSpanMissing(MentionError):
     """The body does not contain the `@<identifier>` text this mention covers."""
 
 
+class MentionSpansOverlap(MentionError):
+    """Two mentions claim OVERLAPPING spans of the body.
+
+    Signal REPLACES each `[start, start+length)` span with `@DisplayName` on the
+    receiving client. Two spans that overlap are not two pings on two words —
+    they are two rewrites of the SAME characters, and what the recipient sees is
+    undefined. Refused rather than sent, for the same reason every other failure
+    here is: the operator approved a card describing two distinct pings.
+    """
+
+
+class MentionGroupLookupFailed(MentionError):
+    """The group-membership lookup itself failed, so nothing can be resolved.
+
+    A `MentionError` (hence a `ValueError`) on purpose: `consumer.main()`'s
+    `draft` handler catches `ValueError` and exits 3. Before this existed an
+    HTTP error from `GET /v1/groups/<number>/<id>` — a 404 from an EMPTY
+    `--from-number` being the ordinary case — escaped as a traceback and exit 1,
+    which a caller cannot tell apart from the interpreter dying.
+    """
+
+
 # --------------------------------------------------------------------------- #
 # UTF-16 offsets — the whole point
 # --------------------------------------------------------------------------- #
@@ -96,24 +124,66 @@ def utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+def _needle_pattern(needle: str) -> "re.Pattern":
+    """The ONE definition of "this body says `@who` here".
+
+    🔴 TWO THINGS THE PLAIN `str.find()` GOT WRONG, both silent:
+
+    * **NO BOUNDARY.** `find("@Ann")` matches INSIDE `"@Anna"`. With members
+      `Ann` and `Anna` and a body `"hi @Anna and @Ann ok"`, `--mention Ann`
+      produced span `(3, 4)` — Ann is pinged, Anna's name is the text on screen,
+      and the render is corrupted. `(?!\\w)` requires a non-word character (or
+      end of string) immediately after the needle, so a name that is a PREFIX of
+      another member's name can no longer land on them. The scan CONTINUES past
+      a boundary-failing hit rather than refusing, so the real `@Ann` later in
+      that body is still found.
+    * **CASE.** `_resolve_one()` matches names case-INSENSITIVELY (`.lower()`),
+      so `--mention ANN` resolved to Ann and then died on `MentionSpanMissing`
+      against a body reading `@Ann` — resolution and span search disagreed about
+      what the same argument meant. `re.IGNORECASE` makes the two halves agree.
+      A regex is used rather than lower-casing the body because `str.lower()`
+      and `str.casefold()` can CHANGE LENGTH (`İ`, `ß`), which would silently
+      shift every offset computed from the folded copy.
+    """
+    return re.compile(re.escape(needle) + r"(?!\w)", re.IGNORECASE | re.UNICODE)
+
+
+def find_span(body: str, needle: str, *, from_index: int = 0) -> tuple[int, int, int]:
+    """`(code_point_index, start, length)` of `needle` in `body`.
+
+    `start`/`length` are UTF-16 code units — the wire units. The code-point index
+    is returned as well so the CALLER's search cursor is advanced from the SAME
+    match this span describes; the previous code re-ran `body.find()` to move the
+    cursor, a second copy of the predicate that would now disagree with the
+    boundary-aware search above.
+    """
+    body = body or ""
+    match = _needle_pattern(needle).search(body, from_index)
+    if match is None:
+        raise MentionSpanMissing(
+            f"the draft body does not contain {needle!r}"
+            + (f" at or after character {from_index}" if from_index else "")
+            + " as a whole word. A Signal mention REPLACES an existing span of "
+              "the message text, so the text has to be there — and a match that "
+              "runs straight into more letters (`@Ann` inside `@Anna`) is a "
+              "DIFFERENT person's name, not this one. Add it to --body, or drop "
+              "the --mention."
+        )
+    idx = match.start()
+    return idx, utf16_len(body[:idx]), utf16_len(needle)
+
+
 def utf16_span(body: str, needle: str, *, from_index: int = 0) -> tuple[int, int]:
     """`(start, length)` of `needle` in `body`, in UTF-16 code units.
 
     `from_index` is a CODE POINT index into `body` — the search cursor, used so
     two mentions of the same identifier take successive occurrences instead of
     both claiming the first. Raises `MentionSpanMissing` if the needle is not
-    present at or after it.
+    present at or after it. A thin wrapper over `find_span()` so there is exactly
+    one matching rule.
     """
-    idx = body.find(needle, from_index)
-    if idx < 0:
-        raise MentionSpanMissing(
-            f"the draft body does not contain {needle!r}"
-            + (f" at or after character {from_index}" if from_index else "")
-            + ". A Signal mention REPLACES an existing span of the message text, "
-              "so the text has to be there — add it to --body, or drop the "
-              "--mention."
-        )
-    return utf16_len(body[:idx]), utf16_len(needle)
+    _, start, length = find_span(body, needle, from_index=from_index)
+    return start, length
 
 
 # --------------------------------------------------------------------------- #
@@ -189,15 +259,40 @@ def resolve_mentions(identifiers, *, body: str, members, contacts,
     for ident in idents:
         author = _resolve_one(ident, member_set=member_set, candidates=candidates)
         needle = "@" + ident
-        start, length = utf16_span(body or "", needle,
-                                   from_index=cursor_for.get(needle, 0))
+        idx, start, length = find_span(body or "", needle,
+                                       from_index=cursor_for.get(needle, 0))
         # Advance THIS needle's cursor past the occurrence just claimed, so
         # `--mention Ann --mention Ann` takes the first and second "@Ann" rather
-        # than pointing both mentions at the same span.
-        cursor_for[needle] = (body or "").find(needle,
-                                              cursor_for.get(needle, 0)) + len(needle)
+        # than pointing both mentions at the same span. Derived from the match
+        # `find_span` returned, NOT from a second search.
+        cursor_for[needle] = idx + len(needle)
         out.append({"author": author, "start": start, "length": length})
+    _refuse_overlapping_spans(out)
     return out
+
+
+def _refuse_overlapping_spans(mentions: list) -> None:
+    """🔴 No two mentions may claim the same characters.
+
+    The word boundary above removes the `Ann`-inside-`@Anna` case, but it cannot
+    remove this one: with members `Ann` and `Ann Smith` and a body `@Ann Smith`,
+    `--mention "Ann Smith"` spans `(0, 10)` and `--mention Ann` spans `(0, 4)` —
+    both boundary-legal (a space follows `@Ann`), both starting at 0. The
+    receiving client is handed two overlapping rewrites of one region and what
+    it renders is undefined, so this refuses rather than sending it.
+    """
+    spans = sorted(((m["start"], m["start"] + m["length"], i)
+                    for i, m in enumerate(mentions)), key=lambda s: (s[0], s[1]))
+    for (a_start, a_end, a_i), (b_start, b_end, b_i) in zip(spans, spans[1:]):
+        if b_start < a_end:
+            raise MentionSpansOverlap(
+                f"--mention #{a_i + 1} covers UTF-16 units {a_start}–{a_end} and "
+                f"--mention #{b_i + 1} covers {b_start}–{b_end}; the two spans "
+                f"OVERLAP. A Signal mention REPLACES its span with the member's "
+                f"display name, so overlapping spans are two rewrites of the same "
+                f"characters and the result on the recipient's screen is "
+                f"undefined. Give each mention its own `@who` text in --body."
+            )
 
 
 def _resolve_one(ident: str, *, member_set: set, candidates: list) -> str:
@@ -207,8 +302,17 @@ def _resolve_one(ident: str, *, member_set: set, candidates: list) -> str:
         if _norm_member(ident) not in member_set:
             raise MentionNotAMember(
                 f"{ident!r} is a valid Signal identifier but is NOT a member of "
-                f"the target group, so mentioning it would notify nobody. "
-                f"The group's members are {sorted(member_set)!r}."
+                f"the target group, so mentioning it would notify nobody. The "
+                f"group has {len(member_set)} member(s). "
+                # 🔴 THE ROSTER IS NOT PRINTED. `draft` needs no approval token,
+                # so this refusal is a FREE, repeatable probe available to any
+                # agent that can run the CLI — and it used to interpolate every
+                # member uuid and phone number, for a group the caller may only
+                # have guessed the address of and which may be MUTED. A raw
+                # identifier list is also the least actionable thing that could
+                # go here: the operator typed an id, so the answer they need is
+                # "not this group", not 40 uuids to eyeball.
+                f"Check --to names the group you meant."
             )
         for contact in candidates:
             if _norm_member(ident) in _contact_ids(contact) \
@@ -229,11 +333,21 @@ def _resolve_one(ident: str, *, member_set: set, candidates: list) -> str:
     for contact in matched:
         by_author.setdefault(_contact_author(contact), contact)
     if not by_author:
+        # 🔴 TRUNCATED, DELIBERATELY. Some names help an operator spot a typo;
+        # the WHOLE list is a roster dump, and `draft` needs no approval token,
+        # so an unbounded enumeration here is a free membership oracle for any
+        # group address a caller can guess — muted ones included. A few names
+        # keeps the message actionable; the count keeps it honest about what is
+        # being withheld.
         known = sorted({n for c in candidates for n in _contact_names(c)})
+        shown = known[:NAME_HINT_MAX]
+        more = len(known) - len(shown)
         raise MentionNameNotFound(
-            f"no member of the target group is named {ident!r}. Known member "
-            f"names are {known!r}. Pass a bare uuid or +E.164 instead if the "
-            f"person has no stored name."
+            f"no member of the target group is named {ident!r}. Some known member "
+            f"names: {shown!r}"
+            + (f" (+{more} not shown)" if more > 0 else "")
+            + ". Pass a bare uuid or +E.164 instead if the person has no stored "
+              "name."
         )
     if len(by_author) > 1:
         raise MentionNameAmbiguous(
@@ -264,13 +378,78 @@ def canonical_mentions(mentions) -> tuple:
     must all compare EQUAL (they mean the same thing — no mentions), while any
     difference in author, offset or ORDER must compare unequal.
     """
-    return tuple(
-        (str(m.get("author")), int(m.get("start")), int(m.get("length")))
-        for m in (mentions or [])
-    )
+    return tuple(_one_canonical(m) for m in (mentions or []))
 
 
-def describe_mentions(mentions) -> list[str]:
-    """Human lines for the clawgate card — WHO this message will notify."""
-    return [f"{m['author']} (chars {m['start']}–{m['start'] + m['length']})"
-            for m in (mentions or [])]
+def _one_canonical(mention) -> tuple:
+    """One stored mention → `(author, start, length)`, or a `MentionError`.
+
+    🔴 A MALFORMED STORED ROW IS A REFUSAL, NOT A `TypeError`. The `mentions`
+    column is JSON written by an earlier process; a row carrying `null`, a
+    string, or an entry missing `start` used to reach `int(None)` and raise a
+    bare `TypeError` — which no CLI handler catches (`send` catches
+    `SendGateError`, `draft` catches `ValueError`), so a bad row in the database
+    surfaced as a traceback and exit 1 instead of a refusal and exit 3.
+    `MentionError` is a `ValueError`, and the two send-path call sites in
+    `_signal_db` translate it to `SendGateError`.
+    """
+    if not isinstance(mention, dict):
+        raise MentionError(
+            f"unreadable stored mention {mention!r}: each entry must be an object "
+            f"with {list(MENTION_KEYS)!r}")
+    try:
+        return (str(mention["author"]), int(mention["start"]),
+                int(mention["length"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MentionError(
+            f"unreadable stored mention {mention!r}: it must carry "
+            f"{list(MENTION_KEYS)!r} with an integer start and length ({exc})"
+        ) from exc
+
+
+def describe_mentions(mentions, author_names=None) -> list[str]:
+    """Human lines for the clawgate card — WHO this message will notify.
+
+    🔴 A BARE UUID IS NOT AN ANSWER TO "WHO". The card exists so a human can see
+    who a draft pings before approving it, and
+    `11111111-1111-4111-8111-111111111111` tells them nothing they can check —
+    it is exactly as opaque as the `@Ann` in the preview it was added to
+    disambiguate. `author_names` maps `author` → the resolved display/profile
+    name; the id stays on the line too, because the name is what a human reads
+    and the id is what actually goes on the wire.
+
+    🔴 "chars" WAS WRONG. `start`/`length` are UTF-16 CODE UNITS, and the whole
+    reason `utf16_len()` exists is that those differ from characters the moment
+    an emoji appears earlier in the body. A card that says "chars 3–7" for a body
+    whose `@Ann` starts at character 2 sends the operator checking the wrong
+    thing.
+    """
+    names = author_names or {}
+    lines = []
+    for mention in (mentions or []):
+        author, start, length = _one_canonical(mention)
+        name = str(names.get(author) or "").strip()
+        who = f"{name} <{author}>" if name else f"(no stored name) <{author}>"
+        lines.append(f"{who} — replaces UTF-16 units {start}–{start + length}")
+    return lines
+
+
+def author_names(mentions, contacts) -> dict:
+    """`{author_id: display name}` for the ids in `mentions`. PURE.
+
+    Built from the SAME contact rows the resolver matched against, so the name on
+    the card is the name the resolver used — not a second lookup that could
+    disagree with it.
+    """
+    wanted = {str(m.get("author")) for m in (mentions or [])
+              if isinstance(m, dict) and m.get("author")}
+    out = {}
+    for contact in (contacts or []):
+        name = contact.get("display_name") or contact.get("profile_name")
+        if not str(name or "").strip():
+            continue
+        for ident in _contact_ids(contact):
+            for author in wanted:
+                if _norm_member(author) == ident:
+                    out.setdefault(author, str(name).strip())
+    return out

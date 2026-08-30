@@ -406,6 +406,59 @@ def payload_digest(*, recipient, body, mentions) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+# 🔴 THE ROUTE OUT, NAMED IN THE ERROR THAT SENDS YOU DOWN IT. Both digest
+# refusals used to end "Re-approve it" — an instruction the CLI could not carry
+# out: `approve` is `pending`-only, `reconcile` is `sending`-only, and there was
+# no third subcommand, so a refused draft was stuck in `approved` FOREVER. The
+# text and `unapprove_draft()` ship together; `test_skill_doc` pins the command
+# into SKILL.md and `test_mentions` walks this exact sequence with no raw SQL.
+_REAPPROVE_HINT = (
+    "run `unapprove {draft_id}` to return it to `pending`, then "
+    "`approve {draft_id} --ref <new-clawgate-ref>` — both are operator commands "
+    "and need SIGNAL_APPROVAL_TOKEN"
+)
+
+
+def recipient_identity(draft) -> str:
+    """The STABLE identity of a draft's recipient, for the approval digest.
+
+    🔴 WHY NOT `draft["recipient"]`. That field is a RENDERED PROJECTION, not an
+    identity: `get_draft()`'s `CASE` prints a contact's `phone_number` while the
+    row is a placeholder and its `signal_uuid` once it is not. `_promote_
+    placeholder()` performs exactly that swap as UNATTENDED BACKGROUND INGEST —
+    the moment an envelope arrives from a number we had only a placeholder for.
+
+    So hashing the rendered string made the ordinary "message someone new" path
+    fire the tamper guard: draft a DM to an unknown number → approve → that
+    person's first envelope arrives → the projection changes → `send` refuses,
+    with no adversary, no second writer, and NO CHANGE TO WHO THE MESSAGE GOES
+    TO. The promotion PRESERVES the contact row id (that is the documented point
+    of its `NOT EXISTS` guard), so the row id is stable across exactly the event
+    the rendered form is not.
+
+    Falls back to the address string only for a dict that carries no row ids —
+    the hand-built rows in the unit tests, which have no substrate behind them.
+    """
+    d = draft or {}
+    if d.get("group_id") is not None:
+        return f"group:{d['group_id']}"
+    if d.get("dest_contact_id") is not None:
+        return f"contact:{d['dest_contact_id']}"
+    return f"address:{d.get('recipient')}"
+
+
+def draft_payload_digest(draft) -> str:
+    """The approval digest OF A DRAFT ROW — the one definition, used by both sides.
+
+    `approve_draft()` writes it and `_mint_send_authorization()` re-checks it. A
+    single function so the two can never compute it over different fields, which
+    is the shape that would make the guard either vacuous or permanently red.
+    """
+    d = draft or {}
+    return payload_digest(recipient=recipient_identity(d), body=d.get("body"),
+                          mentions=d.get("mentions"))
+
+
 def _mint_send_authorization(draft: dict) -> SendAuthorization:
     """Mint a one-shot send capability for an APPROVED draft row.
 
@@ -429,24 +482,33 @@ def _mint_send_authorization(draft: dict) -> SendAuthorization:
     # refusal, not a pass, because "no digest" and "digest cleared by the writer
     # we are guarding against" are the same observation.
     recorded = (draft or {}).get("approved_digest")
-    current = payload_digest(recipient=draft.get("recipient"),
-                             body=draft.get("body"),
-                             mentions=draft.get("mentions"))
+    try:
+        current = draft_payload_digest(draft)
+    except _mentions.MentionError as exc:
+        # A stored `mentions` column that cannot be read is a REFUSAL on the send
+        # path, in the error type this path's CLI handler catches — not a bare
+        # TypeError escaping as a traceback.
+        raise SendGateError(
+            f"draft {draft.get('id')!r} carries an unreadable `mentions` column, "
+            f"so what was approved cannot be recomputed: {exc} (D3 approval gate)"
+        ) from exc
     if not recorded:
         raise SendGateError(
             f"draft {draft.get('id')!r} is approved but carries NO approval "
             f"digest, so there is nothing to check the payload against. Either "
             f"it was approved before this binding existed, or the digest was "
-            f"cleared — the two are indistinguishable from here. Re-approve it "
-            f"(D3 approval gate — approve/mutate/send binding)"
+            f"cleared — the two are indistinguishable from here. "
+            + _REAPPROVE_HINT.format(draft_id=draft.get("id"))
+            + " (D3 approval gate — approve/mutate/send binding)"
         )
     if recorded != current:
         raise SendGateError(
             f"draft {draft.get('id')!r} CHANGED after it was approved: the row "
             f"now hashes to {current} but the approval recorded {recorded}. "
-            f"Nothing was sent. Read the draft, then re-approve it if the new "
-            f"text is what you want (D3 approval gate — approve/mutate/send "
-            f"binding)"
+            f"Nothing was sent. Read the draft, then, if the new text is what "
+            f"you want, "
+            + _REAPPROVE_HINT.format(draft_id=draft.get("id"))
+            + " (D3 approval gate — approve/mutate/send binding)"
         )
     auth = object.__new__(SendAuthorization)
     object.__setattr__(auth, "draft_id", draft["id"])
@@ -515,7 +577,14 @@ def spend_authorization(auth: object, *, recipient, body, mentions) -> None:
         mismatches.append(f"recipient {auth.recipient!r} -> {recipient!r}")
     if auth.body != body:
         mismatches.append(f"body {auth.body!r} -> {body!r}")
-    want_mentions = _mentions.canonical_mentions(mentions)
+    try:
+        want_mentions = _mentions.canonical_mentions(mentions)
+    except _mentions.MentionError as exc:
+        # Same translation as the mint side: an unreadable mentions array is a
+        # refusal in the type `send`'s CLI handler catches, not a raw TypeError.
+        raise SendGateError(
+            f"transmit refused: the mentions array offered for draft "
+            f"{auth.draft_id!r} is unreadable — {exc} (D3 approval gate)") from exc
     have_mentions = getattr(auth, "mentions", ())
     if have_mentions != want_mentions:
         mismatches.append(f"mentions {list(have_mentions)!r} -> "
@@ -1622,9 +1691,17 @@ class SignalDB:
         # `_mint_send_authorization()` refuses to send a row that no longer
         # hashes to it. Written in the SAME statement as the state flip so an
         # approved draft can never exist without one.
-        digest = payload_digest(recipient=row.get("recipient"),
-                                body=row.get("body"),
-                                mentions=row.get("mentions"))
+        # 🔴 Over `recipient_identity(row)`, NOT `row["recipient"]` — see that
+        # function: the printed recipient is a projection that background ingest
+        # rewrites, and hashing it made an ordinary placeholder promotion look
+        # like tampering.
+        try:
+            digest = draft_payload_digest(row)
+        except _mentions.MentionError as exc:
+            raise SendGateError(
+                f"approval refused: draft {draft_id!r} carries an unreadable "
+                f"`mentions` column ({exc}), so there is nothing coherent to "
+                f"approve (D3 approval gate)") from exc
         with self._c.cursor() as cur:
             cur.execute(
                 "UPDATE signal.messages SET send_state = %s, approval_ref = %s, "
@@ -1632,6 +1709,58 @@ class SignalDB:
                 (STATE_APPROVED, approval_ref, digest, draft_id),
             )
         self._c.commit()
+        return self._draft_or_raise(draft_id)
+
+    def unapprove_draft(self, draft_id: int, *, note: str | None = None) -> dict:
+        """Return an APPROVED draft to `pending` so it can be approved again.
+
+        🔴 WHY THIS EXISTS — IT CLOSES A TERMINAL DEAD END. The approval digest
+        makes `_mint_send_authorization()` refuse a draft whose payload changed
+        after approval, and that refusal happens BEFORE `_claim_for_sending()`,
+        so the row stays `approved`. But `approve_draft()` is `pending`-only and
+        `reconcile_send()` is `sending`-only, and there was no third command:
+        the refused draft was unsendable forever, and both the refusal text and
+        SKILL.md told the operator to "re-approve it" — something the CLI had no
+        way to do. The only route back was hand-editing the row, which is
+        precisely the second writer the digest exists to catch.
+
+        Gated on `SIGNAL_APPROVAL_TOKEN` **exactly as `approve_draft` is**: this
+        un-does an operator decision, so it is an operator decision. It does NOT
+        send, does not re-approve, and CLEARS `approved_digest` — a `pending`
+        row must never carry a stale one, or the next `approve` would be checked
+        against a digest it did not write.
+
+        `note` is recorded on `approval_ref` when given, and COALESCEd like
+        `reconcile_send`'s so the audit trail is added to, never erased.
+        """
+        if not os.environ.get(APPROVAL_TOKEN_ENV):
+            raise SendGateError(
+                f"unapprove refused: {APPROVAL_TOKEN_ENV} is not set. Withdrawing "
+                f"an approval is the OPERATOR's step, on the same token as "
+                f"`approve` — it is deliberately unavailable to the consumer "
+                f"Deployment and to drafting agents (D3 approval gate)"
+            )
+        row = self._draft_or_raise(draft_id)
+        if row["send_state"] != STATE_APPROVED:
+            raise SendGateError(
+                f"draft {draft_id!r} has send_state={row['send_state']!r}; only "
+                f"{STATE_APPROVED!r} drafts may be unapproved. A draft in "
+                f"{STATE_SENDING!r} is reconciled with `reconcile`, not here — "
+                f"the POST was attempted and its outcome is unknown (D3 approval "
+                f"gate)"
+            )
+        # The SAME guarded transition every other state move uses: names the
+        # state it expects and reads the rowcount, so a concurrent `send` that
+        # claimed the row first is told it lost rather than silently overwritten.
+        self._transition(
+            draft_id,
+            "UPDATE signal.messages SET send_state = %s, approved_digest = NULL, "
+            "approval_ref = COALESCE(%s, approval_ref) "
+            "WHERE id = %s AND send_state = %s",
+            (STATE_PENDING, note, draft_id, STATE_APPROVED),
+            expected=STATE_APPROVED,
+            what="withdraw the approval",
+        )
         return self._draft_or_raise(draft_id)
 
     def _draft_or_raise(self, draft_id: int) -> dict:

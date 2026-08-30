@@ -31,7 +31,8 @@ BODY_PREVIEW_MAX = 800
 
 
 def build_draft_payload(*, draft_id: int, recipient: str, body: str,
-                        mentions: list | None = None) -> dict:
+                        mentions: list | None = None,
+                        author_names: dict | None = None) -> dict:
     """Build the `POST /api/tasks` JSON body for one pending Signal draft.
 
     Pure + side-effect-free so it can be asserted in a unit test.
@@ -43,6 +44,12 @@ def build_draft_payload(*, draft_id: int, recipient: str, body: str,
     mute settings and names them to the whole group. Approving a message without
     seeing who it notifies is the failure mode this line exists to close, so the
     resolved `author` ids go on the card explicitly, above the body.
+
+    🔴 AND THE ID ALONE IS NOT ENOUGH. `author` is usually a bare uuid — five of
+    the seven members of the real group are uuid-only — and a human cannot check
+    a uuid against anything. `author_names` (`{author: display name}`, built by
+    `_mentions.author_names()` from the rows the resolver matched) puts the NAME
+    on the line beside the id, which is the question the card is answering.
     """
     preview = (body or "").strip()
     if len(preview) > BODY_PREVIEW_MAX:
@@ -57,7 +64,7 @@ def build_draft_payload(*, draft_id: int, recipient: str, body: str,
     if mentions:
         lines.append(f"⚠ PINGS {len(mentions)} member(s) — this notifies them "
                      f"THROUGH their mute settings:")
-        for who in _mentions.describe_mentions(mentions):
+        for who in _mentions.describe_mentions(mentions, author_names):
             lines.append(f"  · {who}")
     lines += [
         "",
@@ -74,6 +81,7 @@ def build_draft_payload(*, draft_id: int, recipient: str, body: str,
 
 def emit_draft_task(*, draft_id: int, recipient: str, body: str,
                     mentions: list | None = None,
+                    author_names: dict | None = None,
                     timeout: float = 10.0) -> bool:
     """Post one clawgate Task card for a pending draft. True if posted.
 
@@ -86,7 +94,8 @@ def emit_draft_task(*, draft_id: int, recipient: str, body: str,
     import requests
 
     payload = build_draft_payload(draft_id=draft_id, recipient=recipient,
-                                  body=body, mentions=mentions)
+                                  body=body, mentions=mentions,
+                                  author_names=author_names)
     resp = requests.post(
         ENDPOINT,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},

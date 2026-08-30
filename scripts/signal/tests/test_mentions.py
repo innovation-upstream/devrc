@@ -95,10 +95,15 @@ def _approved_row(draft_id, recipient, body, mentions=None):
     so a fixture that hard-coded one would go stale silently the first time the
     canonical form changed and every test here would refuse for the wrong reason.
     """
-    return {"id": draft_id, "send_state": _signal_db.STATE_APPROVED,
-            "recipient": recipient, "body": body, "mentions": mentions or [],
-            "approved_digest": _signal_db.payload_digest(
-                recipient=recipient, body=body, mentions=mentions or [])}
+    row = {"id": draft_id, "send_state": _signal_db.STATE_APPROVED,
+           "recipient": recipient, "body": body, "mentions": mentions or []}
+    # 🔴 DERIVED FROM THE MODULE, over the WHOLE ROW. The digest now covers a
+    # CANONICAL recipient identity (`recipient_identity()`), not the rendered
+    # `recipient` string — a fixture that recomputed it from `recipient` alone
+    # would encode this test's own idea of the canonical form and stay green
+    # while the two sides disagreed.
+    row["approved_digest"] = _signal_db.draft_payload_digest(row)
+    return row
 
 
 class Poster:
@@ -327,12 +332,21 @@ def _group_draft(db, body="@Ann please look", mentions=None):
                             else mentions)
 
 
-def test_ensure_schema_twice_is_a_no_op(db):
-    """🔴 The migration is `ADD COLUMN IF NOT EXISTS` — idempotent, like the rest.
+def test_ensure_schema_twice_is_a_no_op_ON_THE_SQLITE_SUBSTRATE(db):
+    """The migration is idempotent — **as emulated by `fakepg`**, not on Postgres.
 
-    `ensure_schema()` runs on every consumer start. A migration that raised the
-    second time would crash the pod on restart, and the restart is precisely the
-    moment it runs.
+    🔴 RENAMED, BECAUSE THE OLD NAME CLAIMED COVERAGE THIS DOES NOT HAVE. The
+    hermetic substrate is SQLite, which has no `ADD COLUMN IF NOT EXISTS`;
+    `fakepg` *emulates* the clause. So what runs here asserts that the emulation
+    is idempotent, and would stay green against a real-Postgres spelling error
+    the emulation happens to forgive. The real check is
+    `test_pg_type_compat.py::test_ensure_schema_is_idempotent_on_real_postgres`,
+    which executes the shipped DDL against a live server and SKIPS (loudly,
+    rather than passing vacuously) without `SIGNAL_PG_DSN`.
+
+    What this test DOES still cover, and it is worth keeping: `ensure_schema()`
+    runs on every consumer start, and a second call must not raise or destroy the
+    column's contents — the restart is precisely when it runs.
     """
     db.ensure_schema()
     db.ensure_schema()
@@ -608,15 +622,17 @@ def test_re_approving_the_mutated_draft_is_the_documented_way_out(db):
 
 
 def _reapprove(db, draft_id, ref):
-    """Approval is `pending`-only, so re-approving means resetting the state first.
+    """The operator's recovery, through the PUBLIC API only.
 
-    Done through the substrate rather than through `reconcile_send()` because the
-    draft never entered `sending` — the refusal happened before the claim.
+    🔴 THIS USED TO BE `UPDATE signal.messages SET send_state='pending'` — raw
+    SQL against the substrate, which meant this "positive control" exercised a
+    path NO OPERATOR HAD. `approve_draft()` is pending-only, `reconcile_send()`
+    is sending-only, and there was no third subcommand: the state this helper
+    manufactured was unreachable from the CLI, so the test proved the operator
+    was not stuck by doing something the operator could not do. `unapprove_draft`
+    is the real route, and this helper now takes it.
     """
-    with db.conn.cursor() as cur:
-        cur.execute("UPDATE signal.messages SET send_state = %s WHERE id = %s",
-                    (_signal_db.STATE_PENDING, draft_id))
-    db.conn.commit()
+    db.unapprove_draft(draft_id, note=f"withdrawn before {ref}")
     return db.approve_draft(draft_id, approval_ref=ref)
 
 
@@ -870,3 +886,571 @@ def test_a_mention_free_card_says_nothing_about_pings():
                                            body="a plain message")
     assert "PINGS" not in payload["body"]
     assert "mute settings" not in payload["body"]
+
+
+# --------------------------------------------------------------------------- #
+# 8. ROUND-1 AUDIT FIXES — every test below was watched RED at 182c3280
+# --------------------------------------------------------------------------- #
+
+# --- finding 1: a digest refusal was a TERMINAL DEAD END -------------------- #
+def test_a_refused_draft_is_recoverable_THROUGH_THE_CLI_ALONE(db, monkeypatch,
+                                                              capsys):
+    """🔴 THE DEAD END, walked end to end through `consumer.main()` only.
+
+    RED at 182c3280: `main(["unapprove", …])` exited 2 — argparse `invalid
+    choice`, because the subcommand did not exist. `approve` is pending-only and
+    `reconcile` is sending-only, so a draft the digest refused could not be moved
+    by ANY CLI invocation; the refusal text and SKILL.md both told the operator
+    to "re-approve it", which the CLI could not do.
+
+    Driven through `main()` rather than the DB methods on purpose: the finding is
+    about the surface an operator touches, and a test against `unapprove_draft()`
+    alone would pass with the subcommand still unwired.
+    """
+    draft = _group_draft(db, body="@Ann please look")
+    monkeypatch.setattr(consumer, "SignalDB", lambda *a, **k: _NoCloseDB(db))
+    monkeypatch.setattr(clawgate, "emit_draft_task",
+                        lambda **kw: False)
+
+    assert consumer.main(["approve", str(draft["id"]), "--ref", "cg-1"]) == 0
+    _tamper(db, draft["id"], body="@Ann approve the WIRE TRANSFER")
+
+    # `send` refuses, and the row is left `approved` — the dead end's shape.
+    assert consumer.main(["send", str(draft["id"])]) == 3
+    assert db.get_draft(draft["id"])["send_state"] == _signal_db.STATE_APPROVED
+
+    # The route the refusal NAMES, and it exists.
+    assert consumer.main(["unapprove", str(draft["id"]),
+                          "--note", "body changed"]) == 0
+    assert db.get_draft(draft["id"])["send_state"] == _signal_db.STATE_PENDING
+    assert consumer.main(["approve", str(draft["id"]), "--ref", "cg-2"]) == 0
+
+    poster = Poster()
+    sent = db.send_approved(
+        draft["id"],
+        transmit=lambda a, **kw: consumer.transmit_approved(a, poster=poster, **kw))
+    assert sent["send_state"] == _signal_db.STATE_SENT
+    assert poster.calls[0]["json"]["message"] == "@Ann approve the WIRE TRANSFER"
+
+
+class _NoCloseDB:
+    """Hand `main()` the test's live `db` without letting its `with` close it."""
+
+    def __init__(self, db):
+        self._db = db
+
+    def __enter__(self):
+        return self._db
+
+    def __exit__(self, *exc):
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+def test_the_refusal_text_NAMES_a_command_the_CLI_really_has(db):
+    """🔴 A guard on the STATE, not on a word: the command named in the error
+    must be a real subparser choice.
+
+    RED at 182c3280: the text said "Re-approve it", and the assertion below —
+    that every backticked command in the refusal is in the parser's own choice
+    set — had nothing to find. This reads the CLI's choices from argparse rather
+    than restating them, so renaming the subcommand fails here.
+    """
+    draft = _group_draft(db)
+    db.approve_draft(draft["id"], approval_ref="cg-text")
+    _tamper(db, draft["id"], body="something else entirely")
+    with pytest.raises(SendGateError) as exc:
+        db.send_approved(draft["id"], transmit=lambda a, **kw: None)
+
+    message = str(exc.value)
+    choices = set(consumer.build_parser()._subparsers._group_actions[0].choices)
+    named = {word.strip("`") for word in message.split()
+             if word.startswith("`")} & choices
+    assert "unapprove" in named, message
+    assert "approve" in message and "SIGNAL_APPROVAL_TOKEN" in message
+
+
+def test_unapprove_needs_the_operator_token_EXACTLY_like_approve(db, monkeypatch):
+    """The recovery route must not be a hole in the gate it recovers from."""
+    draft = _group_draft(db)
+    db.approve_draft(draft["id"], approval_ref="cg-tok")
+    monkeypatch.delenv("SIGNAL_APPROVAL_TOKEN", raising=False)
+    with pytest.raises(SendGateError) as exc:
+        db.unapprove_draft(draft["id"])
+    assert "SIGNAL_APPROVAL_TOKEN" in str(exc.value)
+    assert db.get_draft(draft["id"])["send_state"] == _signal_db.STATE_APPROVED
+
+
+def test_unapprove_CLEARS_the_stale_digest(db):
+    """A pending row carrying an old digest would be checked against a digest
+    the next `approve` did not write."""
+    draft = _group_draft(db)
+    db.approve_draft(draft["id"], approval_ref="cg-clear")
+    assert db.get_draft(draft["id"])["approved_digest"]
+    db.unapprove_draft(draft["id"])
+    assert db.get_draft(draft["id"])["approved_digest"] is None
+
+
+def test_unapprove_refuses_anything_that_is_not_approved(db):
+    """Not a state editor — `sending` belongs to `reconcile`, `pending` to nobody."""
+    draft = _group_draft(db)
+    with pytest.raises(SendGateError) as exc:      # still pending
+        db.unapprove_draft(draft["id"])
+    assert "may be unapproved" in str(exc.value)
+
+    db.approve_draft(draft["id"], approval_ref="cg-state")
+    db._claim_for_sending(draft["id"])             # now `sending`
+    with pytest.raises(SendGateError) as exc:
+        db.unapprove_draft(draft["id"])
+    assert "reconcile" in str(exc.value)
+    assert db.get_draft(draft["id"])["send_state"] == _signal_db.STATE_SENDING
+
+
+def test_unapprove_does_not_erase_the_approval_ref_when_given_no_note(db):
+    """The audit record of the approval the attempt rode on is ADDED to, never
+    replaced — the same COALESCE `reconcile_send` needed."""
+    draft = _group_draft(db)
+    db.approve_draft(draft["id"], approval_ref="clawgate-task-777")
+    db.unapprove_draft(draft["id"])
+    assert db.get_draft(draft["id"])["approval_ref"] == "clawgate-task-777"
+
+
+# --- finding 2: the digest bound a RENDERED PROJECTION ---------------------- #
+def test_a_PLACEHOLDER_PROMOTION_between_approve_and_send_does_NOT_refuse(db):
+    """🔴 THE FIRING-WITH-NO-ATTACKER CASE. Red at 182c3280.
+
+    The ordinary "message someone new" path: draft a DM to a number we have
+    never seen, approve it, and then that person's first envelope arrives.
+    `_promote_placeholder()` — unattended background ingest — gives the contact
+    row its real uuid, and `get_draft()`'s recipient CASE flips from printing the
+    NUMBER to printing the UUID. At 182c3280 the digest was taken over that
+    printed string, so `send` refused with "CHANGED after it was approved" — no
+    adversary, no second writer, and NO CHANGE TO WHO THE MESSAGE GOES TO. With
+    finding 1 unfixed the draft was then bricked.
+
+    The promotion is performed by `upsert_message()`, the real ingest path, not
+    by a hand-written UPDATE: the point is that ROUTINE traffic did this.
+    """
+    stranger = "+15550555"
+    stranger_uuid = "44444444-4444-4444-8444-444444444444"
+    draft = db.draft_message(recipient=stranger, body="hi, this is Zach",
+                             self_number=SELF_NUMBER)
+    contact_id = db.get_draft(draft["id"])["dest_contact_id"]
+    db.approve_draft(draft["id"], approval_ref="cg-promote")
+    assert db.get_draft(draft["id"])["recipient"] == stranger
+
+    # ... their first message arrives, carrying both identifiers.
+    db.upsert_message({"message_timestamp": 1723500001234,
+                       "source_uuid": stranger_uuid,
+                       "source_number": stranger,
+                       "source_name": "Stranger", "body": "hello?",
+                       "message_type": "message", "is_outbound": False})
+    promoted = db.get_draft(draft["id"])
+    assert promoted["recipient"] == stranger_uuid, (
+        "the fixture did not actually promote — this test would then pass "
+        "vacuously")
+    assert promoted["dest_contact_id"] == contact_id, "the row id must be stable"
+
+    poster = Poster()
+    sent = db.send_approved(
+        draft["id"],
+        transmit=lambda a, **kw: consumer.transmit_approved(a, poster=poster, **kw))
+    assert sent["send_state"] == _signal_db.STATE_SENT
+    assert poster.calls[0]["json"]["recipients"] == [stranger_uuid]
+
+
+def test_the_digest_is_over_a_STABLE_identity_not_the_rendered_recipient():
+    """The property directly, at the unit level. Red at 182c3280.
+
+    Two rows that address the SAME contact row and differ only in how
+    `get_draft` rendered it must hash the same; two rows addressing DIFFERENT
+    contacts must not. Both halves are asserted so a `recipient_identity` that
+    returned a constant would fail the second.
+    """
+    as_number = {"dest_contact_id": 7, "recipient": "+15550555", "body": "hi",
+                 "mentions": []}
+    as_uuid = {"dest_contact_id": 7, "recipient": ANN_UUID, "body": "hi",
+               "mentions": []}
+    other = {"dest_contact_id": 8, "recipient": ANN_UUID, "body": "hi",
+             "mentions": []}
+    assert (_signal_db.draft_payload_digest(as_number)
+            == _signal_db.draft_payload_digest(as_uuid))
+    assert (_signal_db.draft_payload_digest(other)
+            != _signal_db.draft_payload_digest(as_uuid))
+    # The GROUP branch, pinned separately. Without this a `recipient_identity`
+    # that ignored `group_id` entirely survived every other test, because a group
+    # draft then fell through to the address string — which happens to be stable,
+    # so nothing could tell the two apart. Measured: that mutant SURVIVED a
+    # 663-test run until this pair was added.
+    grp_a = {"group_id": 3, "recipient": GROUP_ADDRESS, "body": "hi",
+             "mentions": []}
+    grp_b = {"group_id": 3, "recipient": "group.SOMETHINGELSE=", "body": "hi",
+             "mentions": []}
+    grp_c = {"group_id": 4, "recipient": GROUP_ADDRESS, "body": "hi",
+             "mentions": []}
+    assert (_signal_db.draft_payload_digest(grp_a)
+            == _signal_db.draft_payload_digest(grp_b))
+    assert (_signal_db.draft_payload_digest(grp_a)
+            != _signal_db.draft_payload_digest(grp_c))
+
+
+def test_re_addressing_a_draft_to_a_DIFFERENT_contact_is_still_refused(db):
+    """🔴 THE GUARD MUST NOT HAVE BEEN LOOSENED. Finding 2's fix relaxes WHAT is
+    hashed, so the case it must still catch is pinned explicitly: a second writer
+    pointing the draft at somebody else entirely.
+
+    GREEN at 182c3280 — an INVARIANT GUARD, not regression coverage. It exists
+    because the fix to finding 2 could have been "stop hashing the recipient",
+    which every finding-2 test would also accept.
+    """
+    draft = db.draft_message(recipient=PEER, body="see you at 6",
+                             self_number=SELF_NUMBER)
+    db.approve_draft(draft["id"], approval_ref="cg-readdress")
+    victim = db.upsert_contact(phone_number="+15550999", display_name="Someone Else")
+    _tamper(db, draft["id"], dest_contact_id=victim)
+
+    poster = Poster()
+    with pytest.raises(SendGateError) as exc:
+        db.send_approved(
+            draft["id"],
+            transmit=lambda a, **kw: consumer.transmit_approved(a, poster=poster,
+                                                                **kw))
+    assert "CHANGED after it was approved" in str(exc.value)
+    assert poster.calls == []
+
+
+# --- finding 3: `@name` was a bare substring match -------------------------- #
+ANNA_UUID = "55555555-5555-4555-8555-555555555555"
+PREFIX_MEMBERS = [ANN_UUID, ANNA_UUID]
+PREFIX_CONTACTS = [
+    {"signal_uuid": ANN_UUID, "phone_number": None, "display_name": "Ann",
+     "profile_name": None, "is_placeholder": False},
+    {"signal_uuid": ANNA_UUID, "phone_number": None, "display_name": "Anna",
+     "profile_name": None, "is_placeholder": False},
+]
+
+
+def test_a_mention_does_NOT_land_inside_a_LONGER_members_name():
+    """🔴 THE WRONG-PERSON PING. Red at 182c3280 — it emitted `(3, 4)`.
+
+    Members `Ann` and `Anna`, body `"hi @Anna and @Ann ok"`. At 182c3280
+    `body.find("@Ann")` returned 3, which sits INSIDE `@Anna`: Ann receives the
+    notification while Anna's name is the text on screen, and the receiving
+    client rewrites four characters out of the middle of someone else's name.
+
+    The literals are written out and cross-checked against the body so a resolver
+    that always emitted 0, or that emitted the code-point index, cannot agree
+    with this test.
+    """
+    body = "hi @Anna and @Ann ok"
+    out = _resolve(["Ann"], body, members=PREFIX_MEMBERS,
+                   contacts=PREFIX_CONTACTS)
+    assert out == [{"author": ANN_UUID, "start": 13, "length": 4}]
+    assert body[13:17] == "@Ann"
+    assert body[3:7] == "@Ann", "the WRONG span 182c3280 chose — inside '@Anna'"
+
+
+def test_the_prefix_pair_in_BOTH_directions_gets_two_distinct_spans():
+    """`--mention Ann --mention Anna` yielded two OVERLAPPING spans at offset 3."""
+    body = "hi @Anna and @Ann ok"
+    out = _resolve(["Ann", "Anna"], body, members=PREFIX_MEMBERS,
+                   contacts=PREFIX_CONTACTS)
+    assert out == [
+        {"author": ANN_UUID, "start": 13, "length": 4},
+        {"author": ANNA_UUID, "start": 3, "length": 5},
+    ]
+
+
+def test_a_mention_at_the_very_END_of_the_body_still_matches():
+    """🔴 The boundary is "non-word char OR end of string".
+
+    A `(?=\\W)` lookahead — the obvious spelling — would break EVERY message
+    ending in the mention, which is the most ordinary shape there is. This is the
+    positive control on finding 3's fix: without it, a boundary check that
+    refused end-of-string would satisfy the two tests above and make the feature
+    unusable.
+
+    GREEN at 182c3280 — an INVARIANT GUARD. It pins what the fix must NOT break.
+    """
+    assert _resolve(["Ann"], "please look @Ann") == [
+        {"author": ANN_UUID, "start": 12, "length": 4}]
+
+
+def test_OVERLAPPING_spans_are_refused_with_their_own_error():
+    """🔴 Boundary-legal and still overlapping. Red at 182c3280 (it sent both).
+
+    Members `Ann` and `Ann Smith`, body `"@Ann Smith please"`. `@Ann` is followed
+    by a SPACE, so the word boundary is satisfied — and the two spans are (0,4)
+    and (0,10). Two rewrites of the same characters; what the recipient renders
+    is undefined.
+    """
+    contacts = [
+        {"signal_uuid": ANN_UUID, "phone_number": None, "display_name": "Ann",
+         "profile_name": None, "is_placeholder": False},
+        {"signal_uuid": BOB_UUID, "phone_number": None,
+         "display_name": "Ann Smith", "profile_name": None,
+         "is_placeholder": False},
+    ]
+    with pytest.raises(_mentions.MentionSpansOverlap) as exc:
+        _resolve(["Ann", "Ann Smith"], "@Ann Smith please",
+                 members=[ANN_UUID, BOB_UUID], contacts=contacts)
+    message = str(exc.value)
+    assert "OVERLAP" in message
+    assert "0–4" in message and "0–10" in message
+
+
+def test_two_ADJACENT_non_overlapping_mentions_are_NOT_refused():
+    """Positive control on the overlap guard: touching is not overlapping.
+
+    `"@Ann@Bob"` — spans (0,4) and (4,4) share the boundary index and nothing
+    else. A guard written with `<=` instead of `<` would refuse this.
+
+    GREEN at 182c3280 — an INVARIANT GUARD on the NEW overlap check, not
+    regression coverage.
+    """
+    body = "@Ann@Bob"
+    out = _resolve(["Ann", "Bob"], body,
+                   contacts=[c for c in CONTACTS if c["display_name"] != "Bob"
+                             or c["signal_uuid"] == BOB_UUID])
+    assert [(m["start"], m["start"] + m["length"]) for m in out] == [(0, 4), (4, 8)]
+
+
+# --- finding 7c: resolution lowercases, the body search did not ------------- #
+def test_a_DIFFERENTLY_CASED_mention_resolves_AND_finds_its_span():
+    """🔴 Red at 182c3280 with `MentionSpanMissing`.
+
+    `_resolve_one()` matches names via `.lower()`, so `--mention ANN` resolved
+    fine and then died in the span search, which was exact. The two halves of one
+    argument disagreed about what it meant.
+    """
+    assert _resolve(["ANN"], "hi @Ann there") == [
+        {"author": ANN_UUID, "start": 3, "length": 4}]
+    assert _resolve(["ann"], "hi @Ann there")[0]["author"] == ANN_UUID
+
+
+def test_case_insensitive_matching_did_not_break_the_utf16_offsets():
+    """🔴 The offsets must be computed on the ORIGINAL body.
+
+    `str.lower()` and `str.casefold()` CHANGE LENGTH on real characters, so the
+    obvious implementation — fold the body, `find()` in the folded copy — reports
+    an offset into a string that is not the one being sent. Measured on this very
+    body: the true `@Ann` is at 9, a `.lower()` implementation says 10, and a
+    `.casefold()` one says 11. All three numbers are asserted as literals so a
+    folding implementation cannot make this test agree with itself.
+    """
+    body = "İ straße @Ann"
+    assert body.find("@Ann") == 9
+    assert body.lower().find("@ann") == 10, "the premise: .lower() SHIFTS it"
+    assert body.casefold().find("@ann") == 11, "and .casefold() shifts it further"
+    assert _resolve(["ann"], body) == [
+        {"author": ANN_UUID, "start": 9, "length": 4}]
+
+
+# --- finding 5: refusal messages leaked the whole group roster -------------- #
+def test_a_not_a_member_refusal_does_NOT_enumerate_the_roster():
+    """🔴 Red at 182c3280 — it interpolated `sorted(member_set)`.
+
+    `draft` needs no approval token, so this refusal is a free, repeatable probe:
+    any caller that can run the CLI could read the FULL membership — uuids and
+    phone numbers — of any group address it can guess, including a MUTED one.
+    """
+    with pytest.raises(MentionNotAMember) as exc:
+        _resolve([OUTSIDER_UUID], f"hello @{OUTSIDER_UUID}")
+    message = str(exc.value)
+    assert "NOT a member of the target group" in message
+    for member in MEMBERS:
+        assert member not in message, f"the refusal leaked {member!r}"
+    assert f"{len(MEMBERS)} member(s)" in message, (
+        "the count is what makes the message honest about what it withheld")
+
+
+def test_a_name_not_found_refusal_TRUNCATES_the_name_list():
+    """🔴 Red at 182c3280 — every stored display/profile name was interpolated.
+
+    Truncation rather than removal: a couple of names help an operator spot a
+    typo. The count of withheld names is stated so the truncation is visible.
+    """
+    many = [{"signal_uuid": f"{i:08d}-1111-4111-8111-111111111111",
+             "phone_number": None, "display_name": f"Member{i:02d}",
+             "profile_name": None, "is_placeholder": False}
+            for i in range(12)]
+    with pytest.raises(MentionNameNotFound) as exc:
+        _resolve(["Zoe"], "hi @Zoe",
+                 members=[c["signal_uuid"] for c in many], contacts=many)
+    message = str(exc.value)
+    # `_contact_names` lower-cases, so that is the form the message carries.
+    shown = [c["display_name"] for c in many
+             if c["display_name"].lower() in message]
+    assert len(shown) == _mentions.NAME_HINT_MAX, shown
+    assert f"+{12 - _mentions.NAME_HINT_MAX} not shown" in message
+
+
+# --- finding 6: the approval card showed a raw UUID ------------------------- #
+def test_the_card_carries_the_resolved_DISPLAY_NAME_not_just_a_uuid():
+    """🔴 Red at 182c3280 — the line was `<uuid> (chars 0–4)`.
+
+    The card exists to tell a HUMAN who a draft will ping. Five of the seven
+    members of the real group are uuid-only, so for most mentions the card said
+    nothing checkable.
+    """
+    payload = clawgate.build_draft_payload(
+        draft_id=32, recipient=GROUP_ADDRESS, body="@Ann please look",
+        mentions=[{"author": ANN_UUID, "start": 0, "length": 4}],
+        author_names={ANN_UUID: "Ann"})
+    assert "Ann <" + ANN_UUID + ">" in payload["body"]
+
+
+def test_the_card_says_UTF16_UNITS_not_chars():
+    """🔴 "chars" was inaccurate, and inaccurate in the direction that matters:
+    with an emoji earlier in the body the two numbers genuinely differ."""
+    payload = clawgate.build_draft_payload(
+        draft_id=33, recipient=GROUP_ADDRESS, body="\U0001F415 @Ann",
+        mentions=[{"author": ANN_UUID, "start": 3, "length": 4}],
+        author_names={ANN_UUID: "Ann"})
+    assert "UTF-16 units 3–7" in payload["body"]
+    assert "chars" not in payload["body"]
+
+
+def test_an_author_with_no_stored_name_says_so_rather_than_going_blank():
+    """A missing name must not silently render as an empty label."""
+    payload = clawgate.build_draft_payload(
+        draft_id=34, recipient=GROUP_ADDRESS, body="@Ann",
+        mentions=[{"author": ANN_UUID, "start": 0, "length": 4}])
+    assert "(no stored name)" in payload["body"]
+    assert ANN_UUID in payload["body"]
+
+
+def test_mention_author_names_resolves_through_the_contacts_table(db):
+    """The seam: `main()` must actually FEED the card names, not just accept them."""
+    db.upsert_contact(signal_uuid=ANN_UUID, display_name="Ann")
+    assert consumer.mention_author_names(
+        db, [{"author": ANN_UUID, "start": 0, "length": 4}]) == {ANN_UUID: "Ann"}
+    assert consumer.mention_author_names(db, []) == {}
+
+
+def test_the_draft_command_passes_the_names_it_resolved_to_the_card(db, monkeypatch):
+    """🔴 Red at 182c3280: `emit_draft_task` took no names, so this asserted a
+    keyword that did not exist. The SEAM — a card that can render a name is
+    useless if the CLI never supplies one.
+    """
+    db.upsert_contact(signal_uuid=ANN_UUID, display_name="Ann")
+    seen = {}
+    monkeypatch.setattr(consumer, "SignalDB", lambda *a, **k: _NoCloseDB(db))
+    monkeypatch.setattr(clawgate, "emit_draft_task",
+                        lambda **kw: seen.update(kw) or True)
+    monkeypatch.setattr(consumer, "fetch_group_members",
+                        lambda number, address: [ANN_UUID])
+    assert consumer.main(["draft", "--to", GROUP_ADDRESS, "--body",
+                          "@Ann please look", "--from-number", SELF_NUMBER,
+                          "--mention", "Ann"]) == 0
+    assert seen["author_names"] == {ANN_UUID: "Ann"}
+    assert ("Ann <" + ANN_UUID + ">"
+            in clawgate.build_draft_payload(
+                draft_id=1, recipient=GROUP_ADDRESS, body="@Ann please look",
+                mentions=seen["mentions"],
+                author_names=seen["author_names"])["body"])
+
+
+# --- finding 7a: a malformed stored `mentions` raised a bare TypeError ------ #
+@pytest.mark.parametrize("bad", [
+    [{"author": ANN_UUID, "start": None, "length": 4}],
+    [{"author": ANN_UUID, "length": 4}],
+    ["not an object"],
+    [None],
+])
+def test_an_unreadable_stored_mention_is_a_MentionError_not_a_TypeError(bad):
+    """🔴 Red at 182c3280 with `TypeError`, which NO CLI handler catches —
+    `send` catches `SendGateError`, `draft` catches `ValueError` — so a bad row
+    in the database surfaced as a traceback and exit 1."""
+    with pytest.raises(_mentions.MentionError):
+        _mentions.canonical_mentions(bad)
+    with pytest.raises(_mentions.MentionError):
+        _mentions.describe_mentions(bad)
+
+
+def test_a_draft_with_an_unreadable_mentions_column_REFUSES_as_a_SendGateError(db):
+    """The same defect on the send path, where it decides an exit code.
+
+    Red at 182c3280: `TypeError: int() argument must be…` escaped
+    `send_approved()` as a traceback.
+    """
+    draft = _group_draft(db)
+    db.approve_draft(draft["id"], approval_ref="cg-bad-mentions")
+    _tamper(db, draft["id"],
+            mentions=json.dumps([{"author": ANN_UUID, "start": None,
+                                  "length": 4}]))
+    poster = Poster()
+    with pytest.raises(SendGateError) as exc:
+        db.send_approved(
+            draft["id"],
+            transmit=lambda a, **kw: consumer.transmit_approved(a, poster=poster,
+                                                                **kw))
+    assert "unreadable" in str(exc.value)
+    assert poster.calls == []
+
+
+def test_spend_authorization_refuses_an_unreadable_mentions_argument():
+    """Window B's half of the same translation."""
+    auth = _signal_db._mint_send_authorization(_approved_row(47, PEER, "hi"))
+    with pytest.raises(SendGateError) as exc:
+        _signal_db.spend_authorization(auth, recipient=PEER, body="hi",
+                                       mentions=[{"author": ANN_UUID}])
+    assert "unreadable" in str(exc.value)
+
+
+# --- finding 7b: a group-API failure escaped `draft` as a traceback --------- #
+def test_a_failing_group_lookup_is_a_REFUSAL_not_a_traceback(db):
+    """🔴 Red at 182c3280: `requests.HTTPError` is not a `ValueError`, so
+    `main()`'s draft handler did not catch it and the operator got a stack trace
+    and exit 1 — indistinguishable from the interpreter dying."""
+    class _HTTPError(Exception):
+        pass
+
+    def fetcher(number, address):
+        raise _HTTPError("404 Client Error for url: /v1/groups//<gid>")
+
+    with pytest.raises(_mentions.MentionGroupLookupFailed) as exc:
+        consumer.resolve_draft_mentions(
+            db, recipient=GROUP_ADDRESS, body="@Ann", identifiers=["Ann"],
+            number=SELF_NUMBER, member_fetcher=fetcher)
+    assert "_HTTPError" in str(exc.value)
+    assert isinstance(exc.value, ValueError), (
+        "the draft handler catches ValueError; anything else still escapes")
+
+
+def test_an_EMPTY_from_number_is_refused_BEFORE_the_404(db):
+    """The ordinary way to hit finding 7b: `--from-number ''` builds
+    `/v1/groups//<gid>`. Named at the argument, not at the HTTP status."""
+    calls = []
+
+    def fetcher(number, address):
+        calls.append((number, address))
+        raise AssertionError("a membership fetch was attempted with no number")
+
+    with pytest.raises(_mentions.MentionGroupLookupFailed) as exc:
+        consumer.resolve_draft_mentions(
+            db, recipient=GROUP_ADDRESS, body="@Ann", identifiers=["Ann"],
+            number="", member_fetcher=fetcher)
+    # 🔴 BOTH halves, because either alone is green for the wrong reason. A
+    # mutant deleting the empty-number guard let the fetch run, its AssertionError
+    # got wrapped into a `MentionGroupLookupFailed` whose generic text also says
+    # "--from-number", and the test SURVIVED — measured. So: the fetch must not
+    # have happened, and the message must name the EMPTY ARGUMENT, not an HTTP
+    # failure.
+    assert calls == [], "the refusal must come BEFORE the doomed lookup"
+    assert "--from-number is empty" in str(exc.value)
+    assert "GET /v1/groups" in str(exc.value)
+
+
+def test_a_failed_group_lookup_exits_3_from_main_and_drafts_NOTHING(db, monkeypatch):
+    """End to end at the surface the operator touches. Red at 182c3280 (exit 1,
+    traceback)."""
+    monkeypatch.setattr(consumer, "SignalDB", lambda *a, **k: _NoCloseDB(db))
+    monkeypatch.setattr(clawgate, "emit_draft_task",
+                        lambda **kw: False)
+    before = db.conn.count("messages")
+    assert consumer.main(["draft", "--to", GROUP_ADDRESS, "--body", "@Ann hi",
+                          "--from-number", "", "--mention", "Ann"]) == 3
+    assert db.conn.count("messages") == before, "a draft was left behind"
