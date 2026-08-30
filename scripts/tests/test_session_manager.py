@@ -6530,6 +6530,33 @@ def test_the_documented_JSON_ROW_PATH_is_where_the_rows_actually_are():
     assert 'report["hosts"][<"workbench"|"laptop">]["windows"]' in sm.__doc__
 
 
+#: Delimits the docstring's row enumeration. BOTH anchors are load-bearing: the
+#: opener alone would run to the end of the docstring and re-admit every name
+#: that merely appears somewhere, which is the gap #1031 item 2 exists to close.
+_ROW_BLOCK_RE = re.compile(
+    r"Each row carries:(.*?)\.\s+The row ledger is pinned by a test\.", re.S)
+
+
+def _documented_row_fields() -> set:
+    """Row names from the docstring's `Each row carries:` block ONLY.
+
+    🔴 A MISSING BLOCK IS LOUD, NEVER AN EMPTY SET. If the docstring is reworded
+    so the anchors stop matching, an empty return would compare unequal to
+    `expected` and read as "the docs dropped every field" — a confusing red for
+    the wrong reason. Worse, an earlier draft that returned `set()` and was
+    compared with `<=` would have gone permanently GREEN. Fail here, naming the
+    anchor, so the fix is to re-point the regex rather than delete the guard.
+    """
+    match = _ROW_BLOCK_RE.search(sm.__doc__ or "")
+    assert match, (
+        "the module docstring has no `Each row carries: … . The row ledger is "
+        "pinned by a test.` block, so this guard is reading nothing. The "
+        "docstring was reworded — re-point `_ROW_BLOCK_RE`, do NOT widen this "
+        "back to a whole-`__doc__` substring check (#1031 item 2).")
+    names = {word.strip() for word in match.group(1).replace("\n", " ").split(",")}
+    return {name for name in names if name}
+
+
 def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
     """🔴 Both directions. A field that disappears turns a consumer's read into
     a permanent None; one that appears undocumented is a contract nobody
@@ -6561,8 +6588,27 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
         "panes",
     }
     assert set(row) == expected
-    for field in expected:
-        assert field in sm.__doc__, f"{field} is undocumented in the header"
+    # 🔴 THE ROW-ENUMERATION BLOCK, NOT THE WHOLE `__doc__` (#1031 item 2).
+    # This used to be `assert field in sm.__doc__` — a substring test across a
+    # 275-line docstring. MEASURED: 24 of the 32 row names also occur elsewhere
+    # in that docstring, including all three fields involved in the #992 merge
+    # region (`hotkey_display`, `pane_preview`, `pane_preview_status`), so
+    # deleting a name from the enumeration left the guard green while the
+    # enumeration it claims to pin was wrong. Re-measured on `715df9e4` before
+    # this change: removing `hotkey_display` from the block -> 2 passed.
+    #
+    # Scoped to the block AND compared as a SET, so it fails in BOTH directions:
+    # a name dropped from the enumeration, and a name added to it that no row
+    # carries. The `in` loop could only ever see the first, and only when the
+    # word appeared nowhere else.
+    documented = _documented_row_fields()
+    assert documented == expected, (
+        "the module docstring's `Each row carries:` block and the row payload "
+        "disagree:\n"
+        f"  in the docstring only: {sorted(documented - expected)}\n"
+        f"  on the row only      : {sorted(expected - documented)}\n"
+        "Update the block — it is the header a consumer reads before touching "
+        "a field.")
 
 
 # =========================================================================== #
@@ -11309,6 +11355,50 @@ def test_a_PARTIALLY_reachable_fleet_still_publishes_real_counts():
     got = base_gather(runner=runner, use_fuzzyclaw=False, match=["zzkiwi"])
     assert got["filters"]["matched"] == 1
     assert got["filters"]["excluded_by_match"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# #1031 item 1 — `excluded_shells` publishes the SAME null, so one render's two
+# FILTER lines cannot disagree about what an unreachable fleet means.
+# --------------------------------------------------------------------------- #
+def test_excluded_shells_is_None_not_ZERO_over_an_unreachable_fleet():
+    """🔴 THE ASYMMETRY THIS CLOSES. Both halves of one output used to read:
+
+        FILTER --claude-only: 0 shell window(s) excluded
+        FILTER --match 'x': an unmeasured number of row(s) matched
+
+    A hard `0` there says "the filter ran and excluded nothing" about a fleet
+    nobody reached. `excluded_by_match` was corrected during the #989 ladder;
+    this field was knowingly deferred (#1031) because it is pre-existing and
+    published, and redefining it wanted its own change. This is that change.
+    """
+    down = make_runner(local_rc=1, local_err="tmux: connection failed",
+                       remote_rc=255, remote_err="ssh: no route")
+    got = base_gather(runner=down, use_fuzzyclaw=False, claude_only=True)
+    assert got["filters"]["excluded_shells"] is None
+    assert got["summary"]["excluded_shells"] is None, (
+        "the summary mirror still publishes a measured-looking count — the two "
+        "publishers disagree, which is the shape this closes")
+
+
+def test_excluded_shells_IS_a_real_zero_when_the_fleet_ANSWERED():
+    """The measured counterpart, so the `None` above is a FILTER DECISION and
+    not a field quietly wired to null. Without this, deleting the count entirely
+    would pass the test above."""
+    runner = make_runner(local_panes=MATCH_PANES, local_windows=MATCH_WINDOWS,
+                         remote_panes="", remote_windows="")
+    got = base_gather(runner=runner, use_fuzzyclaw=False, claude_only=True)
+    assert got["filters"]["excluded_shells"] is not None
+    assert isinstance(got["filters"]["excluded_shells"], int)
+
+
+def test_excluded_shells_survives_a_PARTIALLY_reachable_fleet():
+    """Same boundary as its sibling: one host answering is a measurement, so the
+    null must NOT fire on the fleet's common degraded state."""
+    runner = make_runner(local_panes=MATCH_PANES, local_windows=MATCH_WINDOWS,
+                         remote_rc=255, remote_err="ssh: no route")
+    got = base_gather(runner=runner, use_fuzzyclaw=False, claude_only=True)
+    assert got["filters"]["excluded_shells"] is not None
 
 
 # --------------------------------------------------------------------------- #
