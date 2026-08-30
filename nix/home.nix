@@ -1259,6 +1259,21 @@ in
   # the last switch's version while the checkout moved on.
   home.file.".local/bin/claim-work".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/claim-work.sh";
+
+  # 🔴 `cairn` — the read-through client for the hosted subsystem store, ON PATH
+  # for the same reason as `claim-work` above: the handoff/resume flow names it as
+  # a bare command, and an agent running in another repo cannot resolve an absolute
+  # devrc path. Bare command on `home.sessionPath` resolves from any cwd.
+  #
+  # 🔴 mkOutOfStoreSymlink is NOT a preference here — it is REQUIRED. `scripts/cairn`
+  # reaches its siblings through `Path(__file__).resolve().parent / "lib"` (:68, and
+  # again at :756/:808/:818 for `cairn_who`), exactly like the opencode CLI above.
+  # `.resolve()` follows the symlink back to the checkout, so `lib/` is found in the
+  # repo. A store copy would resolve `__file__` into /nix/store, where `lib/` is NOT
+  # deployed — the import would fail outright. Only this one path is symlinked;
+  # `scripts/lib/` must not be deployed, same rule as opencode's `lib/`.
+  home.file.".local/bin/cairn".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn";
   # Claude Code hooks managed here (the script only — the settings.json
   # registration is per-host/unmanaged, as for bash-guard.py above, whose script
   # is likewise managed now). audit-pr-nudge fires

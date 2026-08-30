@@ -1253,3 +1253,63 @@ class TestTheHarnessItself:
                          token="z" * 48)
         assert proc.returncode != 0
         assert "401" in proc.stderr, proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# 🔴 THE DEPLOY SEAM: `cairn` is on PATH, and HOW it is deployed is load-bearing.
+#
+# `scripts/cairn` reaches its siblings through `Path(__file__).resolve().parent
+# / "lib"`. Deployed as a home-manager STORE COPY, `__file__` resolves into
+# /nix/store — where `scripts/lib/` is deliberately NOT deployed — and every
+# `import subsystem_recall` dies at startup. Deployed as an
+# `mkOutOfStoreSymlink`, `.resolve()` follows the link back into the checkout
+# and `lib/` is found.
+#
+# Neither half is enough on its own, which is why this is one guard over a
+# RELATIONSHIP rather than two component checks:
+#   - pinning only the nix spelling would keep asserting "must be out-of-store"
+#     long after someone rewrote cairn to vendor its imports, i.e. it would
+#     outlive its own reason and nobody could tell;
+#   - pinning only the __file__ lookup would stay green while the deploy line
+#     silently became a store copy and the shipped command stopped starting.
+# So: assert the reason still exists, THEN assert the deploy mode it forces.
+# ---------------------------------------------------------------------------
+
+NIX_HOME = REPO / "nix" / "home.nix"
+
+
+def test_cairn_still_resolves_its_lib_relative_to_its_own_file():
+    """The REASON half of the seam. If this fails, the guard below is pinning a
+    constraint that no longer applies — delete both, don't loosen one."""
+    src = (REPO / "scripts" / "cairn").read_text()
+    assert 'Path(__file__).resolve().parent / "lib"' in src, (
+        "scripts/cairn no longer derives its lib/ path from __file__. The "
+        "out-of-store requirement below may be obsolete — re-derive it rather "
+        "than editing the assertion."
+    )
+    # …and that the path it builds is actually imported from, not dead code.
+    assert "import subsystem_recall" in src, (
+        "scripts/cairn no longer imports from its sibling lib/"
+    )
+    assert (REPO / "scripts" / "lib" / "subsystem_recall.py").exists()
+
+
+def test_cairn_is_deployed_out_of_store_not_as_a_store_copy():
+    """The DEPLOY half. A store copy ships a `cairn` that cannot start."""
+    nix = NIX_HOME.read_text()
+    assert 'home.file.".local/bin/cairn".source' in nix, (
+        "the `cairn` PATH entry is gone from nix/home.nix"
+    )
+    # The whole assignment, whatever it spans, must name mkOutOfStoreSymlink.
+    head = nix.split('home.file.".local/bin/cairn".source', 1)[1]
+    assignment = head.split(";", 1)[0]
+    assert "mkOutOfStoreSymlink" in assignment, (
+        "`cairn` is deployed as a STORE COPY. Its `Path(__file__).resolve()` "
+        "lib lookup will resolve into /nix/store, where scripts/lib/ is not "
+        "deployed, and the command will fail on import. Use "
+        "mkOutOfStoreSymlink, as claim-work/dl-route/opencode-dispatch do.\n"
+        f"got: {assignment.strip()!r}"
+    )
+    assert "${workspace}/devrc/scripts/cairn" in assignment, (
+        f"`cairn` points somewhere unexpected: {assignment.strip()!r}"
+    )
