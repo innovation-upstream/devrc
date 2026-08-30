@@ -16,31 +16,27 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
-- Branch: `main`. **Nothing of this thread is uncommitted or unpushed.** Claims released,
-  worktrees removed.
-- **ALL FOUR handoff ranks are CLOSED**, and every PR merged — verified by CONTENT, never
-  ancestry:
-  - `#1023` → `8e33bf1d` — the three main-unblockers (espanso `ask`, opencode pin, store-api
-    load flake). Merged by someone else mid-audit.
-  - `#1033` → `70eff59c` — audit rounds 1+2 follow-ups
-  - `#1009` → `442bde83` — the RULES worktree-config surface + ceiling bump
-  - `#1005` → `aaa5514c` — this doc, ranks 2–4, and the `#996` retraction
-- **SHIPPED AND VERIFIED AT THE CONSUMER**, not merely deployed. `ship.sh` converged both
-  hosts to `aaa5514c`; the deployed `~/.config/espanso/match/base.yml` now reads
-  `:dacq search_terms = ['feedback','dispatch','process','elicit','scope','include']` with
-  `ask` gone, and the live detector resolves `'ask' -> ':acq'` as a **unique** match (1, not
-  2). Both keylog collectors restarted so the running processes hold it (workbench
-  2360918→1440860, laptop 4136134→601904, both `running`).
-- **Rank 2 closed by its OWNER, not by me.** `git status -s scripts/discord-embed-ext/` is
-  empty and `main` carries `v0.3.0`. 🔴 **The observer defect this thread found is FIXED
-  there** — the `found > 0 && observer` reconnect gate is gone, and the suite floor moved
-  50 → 128, so the observer-lifecycle test the harness never had now exists.
-- **The audit ladder ran TWO rounds and stopped.** Round 1 found 3🟡/4🟢, round 2 confirmed
-  all of them fixed and found 5 more — but round 2's findings were about scaffolding round 1
-  had just written, which is the attribution signal that the ladder has left the PR.
-- ⚠ **No `clawgate-task:` field**: the resolver returned rc 5, 0 tasks. Its positive control
-  proves the board is reachable and the token accepted — but a WRONG session id also answers
-  `200` with an empty array, so that zero is **not** a clean bill of health.
+- Branch: `main`. Nothing uncommitted from this session; worktrees removed, scratch copies deleted.
+- **Three PRs merged, each verified BY CONTENT in `origin/main`** (never by ancestry — a squash
+  merge makes the branch head permanently a non-ancestor):
+  - `#1035` → `ccb31628` — the stale nixpkgs rev in the opencode pin comment. Ground truth:
+    `flake.lock` nixpkgs is `c27cdad491a9…`, and the comment now names it.
+  - `#1060` → `31cd214d` — `espanso_detect._AMBIGUOUS_TERM_OWNER`. `main` was RED; this made it green.
+  - `#1074` → `e9f8ce14` — the browser-bridge ordering flake, the positional-reader ratchet
+    banked 48 → 47, and the prefix blind-spot note on the owner table.
+- **Carried forward from the earlier rounds of this thread** (all merged, all verified by content;
+  kept here so the provenance is not lost when this section is next replaced): `#1023` →
+  `8e33bf1d` (the three main-unblockers), `#1033` → `70eff59c` (audit rounds 1+2 follow-ups),
+  `#1009` → `442bde83` (the RULES worktree-config surface), `#1005` → `aaa5514c` (this doc,
+  ranks 2–4, and the `#996` retraction). All four of that round's ranked items are CLOSED.
+- **Hosts CONVERGED and CROSS-HOST COMPARED**: `ship.sh` → `2 hosts compared, both at e0e29e7b`,
+  clean trees, rc 0. (Run three times this session; `main` moves constantly.)
+- **VALIDATED AT THE CONSUMER, not merely deployed.** `keylog.service` restarted on both hosts
+  (workbench 728078→793959, laptop 1964503→1966203), deployed module
+  `/nix/store/md0d81qm…-hm_keylog`, and the original symptom re-run against it:
+  `ask → :acq`, `clarify → :acq` on BOTH hosts, with `picker rows for 'ask' = [':acq', ':dacq']`
+  — attribution unique while the picker still lists both, which is the whole point.
+- This thread's guards re-run green against a LATER `main` (`5ec6d5e4`, past these merges): **578 passed**.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -116,17 +112,19 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   other "surfaces a worktree does not hand you" in `claude/RULES.md`.
 
 ## Next steps (ranked)
-1. **Merge `#1035`** (repo: `devrc`, `nix/pkgs/tools/default.nix`) — a one-line fix for the
-   stale nixpkgs rev *this thread introduced*. Diff reviewed and the ground truth verified
-   against `flake.lock` independently; only its checks were outstanding.
-2. **Close `#1041` as redundant** (repo: `devrc`) — it opens a PR for commit `8d1f6671`,
-   which is the closed `#1015`'s commit, on the premise that it "never had one raised". It
-   did, and `HANG_TIMEOUT = 60.0` has been on `main` since `8e33bf1d` (18:37) — `#1041` was
-   opened at 20:26, ~2h later. Merging it is a no-op at best. **Comment before closing** so
-   that session stops work rather than re-opening; its measurement is worth keeping.
-3. **Tekton capacity** (repo: `homelab-talos` / the `tekton` skill, NOT devrc) — the real
-   fix behind rank 2's evidence. Needs a decision on whether it becomes work at all; see the
-   open investigation above for why it is not filed.
+1. **Sequence `test_an_absent_origin_header_is_not_the_same_as_an_empty_one`** (repo: `devrc`,
+   `scripts/browser-bridge/tests/test_server.py`). Wait for the first row before issuing the
+   second command. **Closing condition:** the test no longer issues both commands before its
+   first wait, and the full sandbox tier is green — checked by whoever runs
+   `nix build .#checks.x86_64-linux.pytests`.
+2. **Nothing to do about drift-check rc 17 on the workbench — MEASURED, recorded so it is not
+   re-investigated.** `homelab-talos` is 1 commit behind on the `containers/clawgate` built-source
+   subtree (`28352cef`), but that commit touches only `e2e/.gitignore` and
+   `e2e/playwright.config.ts`. Store paths differ (`aqnkgl1y…` workbench vs `6s2ycrcr…` laptop)
+   **and the binaries are byte-identical**: `sha256 6ffdf136b8c8f6d4` on both, `clawgatectl
+   0.8.17`. rc 17 compares subtree tree OIDs on purpose — over-reporting an e2e-config change is
+   the cheap error; missing a Go change is the expensive one. **Closing condition:** it clears
+   itself when that repo is next pulled for a real reason. Do not pull it to silence the code.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The ladder never returned a clean round in twelve.** The stop rule assumes
@@ -214,28 +212,98 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   shipped saying so, and `#1009` then failed at the new 60 s bound. Do not read `#1023` as
   having fixed the flake.
 
+- 🔴 **A COMMENT IS A CLAIM, and this session found one contradicted by the line directly under
+  it.** `nix/home.nix` said `2026-08-29: "ask" REMOVED from :dacq` immediately above a `:dacq`
+  whose `search_terms` spelled `"ask"`. Zach had deliberately re-added it (`fc024d59`, direct to
+  `main`), which turned `main` red repo-wide: `_attribute` returned `None` for `ask` AND
+  `clarify` (the latter via the new `"clarifying"`).
+- 🔴 **The FIX WAS THE MECHANISM, NOT THE CONFIG.** Deleting the terms from `:dacq` had already
+  been the response twice and was reverted by hand both times. `search_terms` serves two
+  consumers that want opposite things — the PICKER wants recall (ambiguity there means *two
+  rows*, which `_PICKER_ROWS` exists to protect) and `_attribute` wants precision. So the config
+  keeps both spellings and `_AMBIGUOUS_TERM_OWNER` declares the owner, consulted ONLY on the
+  already-ambiguous branch, after `_names_trigger`, and ONLY over snippets the term matches
+  (`owner in matched`). An ambiguous term with no entry still returns `None`.
+- **MEASURED, and the answer was DON'T: no further owner entries are justified.** Crossed all 23
+  ambiguous terms against the real keylog stream (661 espanso rows; positive control `ask` = 118
+  fires, 24 of 27 typed terms resolve). Only four typed terms are still unattributed —
+  `ssh la` (5), `ssh` (3), `gpu` (3), `clar` (1) — and the first three are unattributed
+  *because the query genuinely does not identify a snippet*; `None` is the honest answer and an
+  owner entry would fabricate attribution. 🔴 **`clarifying` has been typed ZERO times**, so the
+  one-line entry that "obviously" belonged was pure speculation — same verdict, reached the same
+  way, as the earlier `date` retirement.
+- 🔴 **BLIND SPOT in the mechanism this session shipped: the owner lookup is an EXACT-STRING
+  match while `_term_matches` is a SUBSTRING test, so PREFIXES of an owned term are not owned.**
+  `clar` (1 fire) used to resolve and now does not. **ACCEPTED, not patched** — per-prefix
+  entries cannot enumerate `cla`/`clari`/`clarif`, and a prefix-aware lookup can re-point terms
+  the exact form never touched. Recorded in the code comment.
+- 🔴 **A BUCKETING ERROR is why an order-safety audit had already walked past the flaky test.**
+  `_wait_events`' docstring audits its n>=2 sites and concludes "All 8 remaining real waits are
+  order-safe". The flaky call was `_wait_events(spool_dir, len(ORIGIN_TOKENS))` — an n=2 wait
+  spelled with a NON-LITERAL `n`, which that counting (`39 n=1 + 5 until= + 9 n>=2`) folds into
+  **n=1**, where no ordering argument is required. The ratchet's classifier had it in a `n
+  dynamic` sub-bucket its own comment called "informational" *because both methods agreed on the
+  total of 48*. **They agreed on the number and disagreed on the BUCKET, and the bucket was the
+  part that mattered.**
+- ⚠ **A correction, recorded because the first draft shipped it:** I wrote that the flaky site
+  "was a NINTH n>=2 wait". It never was — it was never counted among the nine. Re-derived from
+  `classify_wait_calls()`, never by hand.
+- **Running SUBSETS is what let a ratchet failure through.** Browser-bridge + keylog passed
+  locally; `test_positional_spool_reader_ratchet` lives in `scripts/tests` and failed in the
+  sandbox tier with `POSITIONAL SPOOL READERS SHRANK: 47 (pinned 48, -1)`. The gate that gates
+  is the sandbox tier — run it, not a subset.
+- 🔴 **`grep -c` answered the OPPOSITE of the truth when verifying the merge.** Checking the
+  ledger entry was removed returned `1` — which was the test NAME appearing in the pin COMMENT,
+  not a ledger row. The ledger-format count is `0`. Grep counts mentions.
+- **The devrc merge gate was WEDGED for the whole repo for ~35 min, and it was not a bad diff.**
+  `homelab-infra` `6bec075e` replaced the gate's RWO PVC with a per-node hostPath cache;
+  `tekton-ci` carries no PSA label so it inherits the cluster default `baseline`, which forbids
+  hostPath — every gate pod failed ADMISSION in ~17s with `COULD NOT RUN: <leg>`. Diagnosed here,
+  **fixed by another session** (`homelab-infra` `686d6ff0`, namespace `pod-security…/enforce:
+  privileged`). 🔴 `error` ≠ `failure`: a check posted as `error` with `COULD NOT RUN` is a broken
+  gate — do not debug your diff against it.
+- **Confirmed working in the wild:** a run that burns its whole 60m budget in `Pending`
+  (`devrc-ci-gwjm9`, `ExceededNodeResources`, never scheduled) still ran its `finally` report and
+  posted `COULD NOT RUN` rather than leaving the check `pending` forever — homelab-infra `#386`'s
+  task-level-timeout fix behaving as designed.
+- **Branch protection moved twice in one night.** `required_status_checks.contexts` was `null`
+  (the documented escape hatch) around 21:44Z and back to both Tekton contexts with
+  `enforce_admins: true` by 22:39Z. Never carry its state in prose — re-measure with
+  `gh api /repos/innovation-upstream/devrc/branches/main/protection`.
+
 ## How to verify
 ```bash
-# --- this thread's closing state (2026-08-29) ---
-# every PR landed by CONTENT, never ancestry
+# --- the espanso owner mechanism, at the CONSUMER (not merely deployed) ---
+systemctl --user show keylog.service -p MainPID -p SubState        # and on the laptop
+nix develop ~/workspace/devrc -c python3 - <<'PY'
+import sys, yaml
+sys.path.insert(0, "/nix/store/md0d81qmkhbszdrs4g5cbwzhsqnxg4s0-hm_keylog")   # re-resolve after any switch
+import espanso_triggers as ET
+from espanso_detect import EspansoDetector
+ts = ET.load_triggers(yaml.safe_load(open("/home/zach/.config/espanso/match/base.yml")),
+                      {"search_shortcut": "CTRL+SPACE"})
+d = EspansoDetector(ts)
+print("ask     ->", d._attribute("ask"))       # :acq
+print("clarify ->", d._attribute("clarify"))   # :acq
+print("picker rows for 'ask':",
+      sorted(x for x in ts.triggers if d._term_matches("ask", x)))   # BOTH :acq and :dacq
+PY
+
+# --- every PR landed by CONTENT, never ancestry ---
 git -C ~/workspace/devrc fetch origin main
-git -C ~/workspace/devrc show origin/main:claude/RULES.md | grep -c 'its CONFIG and REMOTES'        # 1
-git -C ~/workspace/devrc show origin/main:scripts/tests/test_rules_size.py | grep -c 'MAX_BYTES = 42_450'  # 1
-git -C ~/workspace/devrc show origin/main:scripts/tests/test_subsystem_store_api.py | grep -c 'block-forever'  # 1
+git -C ~/workspace/devrc show origin/main:scripts/collector/keylog/espanso_detect.py | grep -c _AMBIGUOUS_TERM_OWNER   # 3
+git -C ~/workspace/devrc show origin/main:scripts/tests/test_positional_spool_reader_ratchet.py | grep -m1 'PINNED_POSITIONAL_TOTAL ='   # 47
+# the ledger entry is GONE — count the LEDGER FORMAT, not the name (a comment mentions it)
+git -C ~/workspace/devrc show origin/main:scripts/tests/test_positional_spool_reader_ratchet.py \
+  | grep -c '"test_server.py::test_the_two_origin_tokens_are_distinct_and_recorded_verbatim"'   # 0
 
-# the espanso fix is LIVE in the deployed config, not merely merged
-nix develop ~/workspace/devrc -c python3 -c "
-import yaml; cfg=yaml.safe_load(open('/home/zach/.config/espanso/match/base.yml'))
-print([m.get('search_terms') for m in cfg['matches'] if m.get('trigger')==':dacq'])"
-# expect NO 'ask'
+# --- drift-check rc 17 is inert here: prove it by the BINARY, not the store path ---
+sha256sum "$(readlink -f "$(command -v clawgatectl)")"                       # 6ffdf136b8c8f6d4…
+ssh zach@192.168.50.155 'sha256sum "$(readlink -f "$(command -v clawgatectl)")"'   # identical
 
-# rank 2's closing condition, and the observer defect that came with it
-git -C ~/workspace/devrc status -s scripts/discord-embed-ext/                                    # empty
-git -C ~/workspace/devrc show origin/main:scripts/discord-embed-ext/extension/embed_enlarge.js \
-  | grep -c 'found > 0 && observer'                                                              # 0 = fixed
-
-# the stale rev still on main (rank 1 fixes it)
-git -C ~/workspace/devrc show origin/main:nix/pkgs/tools/default.nix | sed -n '22,24p'
+# --- the gate: BOTH tiers. The sandbox tier is the one Tekton gates on. ---
+nix develop ~/workspace/devrc --command bash ~/workspace/devrc/scripts/run-tests.sh ~/workspace/devrc
+nix build ~/workspace/devrc#checks.x86_64-linux.pytests ~/workspace/devrc#checks.x86_64-linux.nodetests --no-link
 ```
 ## Open investigations — live diagnosis state
 
@@ -274,3 +342,39 @@ git -C ~/workspace/devrc show origin/main:nix/pkgs/tools/default.nix | sed -n '2
 - 🔴 **DELIBERATELY NOT FILED as a work item.** It has no closing condition anyone can check
   and no named owner, so a ticket would read as covered while nothing could close it — see
   the object-leak rule. Recorded here as an open, unowned condition instead.
+
+### The store-api load flake is NOT closed, and the 15s→60s fix has been OUTRUN
+- **Symptom + exact repro:** `tekton/devrc-pytests` red on
+  `TestTheActorComesFromTheTOKEN.test_a_FORGED_actor_in_the_body_is_DISCARDED`, on PRs whose
+  diff cannot reach store-api. Hit `#1035` and `#1074` this session.
+- **Observed (values):** `TimeoutError: timed out` out of
+  `/nix/store/…-python3-3.12.14-env/lib/python3.12/socket.py:720` — a socket read that never
+  completed, NOT an assertion about actor/token semantics. `scripts/tests` took **568s, 55% of
+  the run** (`devrc-ci-2x7rp`, pipelinerun `Failed` 03:36→04:00Z). `devrc-nodetests` PASSED in
+  the same run (1366/1366).
+- 🔴 **`HANG_TIMEOUT = 60.0` is already on `main`** (from `#1015` via `#1023`, confirmed by
+  content) **and a LOOPBACK read still exhausted it.** The symptom fix did not hold.
+- **Ruled out:** *this change* — the identical tree passed the full sandbox tier locally
+  (`nix build .#checks.x86_64-linux.{pytests,nodetests}` rc=0), and nodetests passed in CI.
+  Not a raised-deadline problem either: 60s of localhost is scheduler starvation, not latency.
+- **Leading hypothesis:** unchanged from the earlier entry — a ~10-minute parallel suite
+  competing with a saturated node. Tekton capacity, not this repo's file.
+- **Next probe:** when it next fires, read `container_cpu_cfs_throttled_periods_total /
+  container_cpu_cfs_periods_total` for `namespace=tekton-ci` (the `tekton` skill's CFS-starvation
+  signature) rather than average CPU — low mean CPU with a high throttle ratio is the tell.
+- **STILL NOT FILED, deliberately.** No closing condition anyone can check, and the `tekton`
+  skill records three fixes already REJECTED with measurements (concurrency capping,
+  ResourceQuota, `retries`). Do not design a fix from the skill.
+
+### A sibling test carries the SAME ordering race — named, not fixed
+- **Symptom:** `test_an_absent_origin_header_is_not_the_same_as_an_empty_one`
+  (`scripts/browser-bridge/tests/test_server.py`) unpacks its pair POSITIONALLY and states in
+  its own docstring that order between its two rows IS the signal. It issues both commands
+  before waiting, so its order is not structurally pinned, and `where=_routed_to(inst)` drops
+  foreign rows without ordering the ones that remain.
+- **Observed:** never seen to fail. The mechanism is identical to the one that DID fail
+  (`#1074`): the emit runs off the critical path after the HTTP response.
+- **Ruled out:** routing as a fix — it closes the foreign-row half only. Measured on `#1074`.
+- **Why untouched:** changing a passing test on a theory is how the next flake gets introduced.
+- **Next probe / fix:** sequence it — wait for the first row, then issue the second, which is
+  `_wait_events`' own sanctioned "order pinned structurally" form.
