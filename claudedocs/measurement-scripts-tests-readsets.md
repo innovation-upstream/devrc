@@ -56,11 +56,13 @@ bound on skippability until someone has tried to break it again.
 
 ⚠ The last step, 1.01x → 1.02x, is the one exception and it was a POLICY
 change, not a defect fix: round 3 deleted the operand-based acquittal (four
-defects came out of guessing scope from argv) and restored an unambiguous `-C`
-rule. That let three files whose only opacity was `git -C <tmp fixture repo>
-<unknown verb>` leave OPAQUE — a command with `-C` at an absolute outside path
-demonstrably operates on another tree. Precision gained, not safety traded; the
-verdict is unchanged either way.
+defects came out of guessing scope from argv) and kept only `-C`. That let
+three files whose only opacity was `git -C <tmp fixture repo> <unknown verb>`
+leave OPAQUE — **for a command whose grammar defines `-C`**, an absolute
+outside value does name another tree. That qualifier is load-bearing and was
+missing here for one round: stated unqualified, it is the exact generalisation
+defect 10 below disproved. Precision gained, not safety traded; the verdict is
+unchanged either way.
 
 ### 🔴 The recommendation this produces: DO NOT BUILD RANK 3
 
@@ -147,7 +149,7 @@ DEVRC_READSET_OUT=/tmp/rs PYTHONPATH=$DEVRC/scripts \
 python3 scripts/lib/readset_classify.py /tmp/rs.*.json --json /tmp/readsets.json
 ```
 
-## This classifier reproduced the bug it exists to fix — nine times
+## This classifier reproduced the bug it exists to fix — ten times
 
 The pattern is the deliverable's real lesson. Every one matched *characters* or
 an *enumeration* rather than the operation actually performed:
@@ -176,6 +178,14 @@ an *enumeration* rather than the operation actually performed:
    blind spot, re-introduced through the exec path. Neither that set nor
    `_GIT_WRITERS` had any test: mutants emptying `_HARMLESS` and removing
    `init` from `_GIT_WRITERS` both **survived a full green suite**.
+
+10. Consulted `-C` before knowing the command, so ANY argv merely containing
+    the token was acquitted — `bash -c '… git -C /tmp/fx rev-parse …'`, where
+    it sits in **script text**, and `bash run-tests.sh -C /tmp/outdir`, where
+    it is another program's flag. 🔴 **Found inside the single acquittal round
+    3 kept BECAUSE it was supposed to be unambiguous** — it is unambiguous only
+    for a command whose grammar defines it. All 38 guards passed with the hole
+    open.
 
 Findings 1, 2 and 4 came from a mutation sweep that also showed **three guards
 were unreachable** — an earlier acquittal always won, so deleting the guard
