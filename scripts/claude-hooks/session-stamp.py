@@ -79,7 +79,23 @@ def main() -> None:
     if not st.valid_id(session_id):
         return
 
-    pid = st.claude_ancestor_pid()
+    # 🔴 TEST-ONLY INJECTION, for the SAME reason the git half has one, and its
+    # absence here was a real defect: a nix-sandbox build has no Claude process
+    # anywhere in its ancestry, so `claude_ancestor_pid()` correctly returns None
+    # and this hook correctly records nothing — which made every recording test
+    # pass on the dev host (where the test process genuinely IS under Claude) and
+    # FAIL in the sandbox. Green in one tier, red in the other, for a reason that
+    # has nothing to do with the code under test. That is the config-blind suite
+    # CLAUDE.md documents, and the seam file's own docstring warns about it.
+    #
+    # It selects WHICH pid is used as the state key; it cannot invent a session,
+    # because `record()` still resolves that pid through /proc and refuses if it
+    # is not a live process.
+    injected = os.environ.get("DEVRC_SESSION_TRAILER_PID")
+    try:
+        pid = int(injected) if injected else st.claude_ancestor_pid()
+    except ValueError:
+        pid = st.claude_ancestor_pid()
     if not pid:
         return
 

@@ -32,6 +32,18 @@ UUID = "d8c216f2-b51d-4c2c-a559-5a5ab4163848"
 def run_hook(payload, root, extra_env=None):
     env = dict(os.environ)
     env["DEVRC_SESSION_TRAILER_ROOT"] = str(root)
+    # 🔴 PIN THE PID, or this file is green here and red in the sandbox. The hook
+    # keys its state on the nearest Claude process above it. Under the dev-host
+    # gate the test process really is a descendant of one, so recording "works";
+    # a nix-sandbox build has no Claude anywhere in its ancestry, the hook
+    # correctly records nothing, and every recording assertion below fails for a
+    # reason unrelated to the code. MEASURED — that is exactly how these four
+    # tests failed in the merge-gating tier while passing locally.
+    #
+    # os.getpid() is used deliberately rather than a made-up number: `record()`
+    # resolves the pid through /proc to pin its start time, so the key has to be
+    # a process that genuinely exists.
+    env.setdefault("DEVRC_SESSION_TRAILER_PID", str(os.getpid()))
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
