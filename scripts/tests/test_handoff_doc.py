@@ -3706,7 +3706,10 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         d.mkdir(exist_ok=True)
         (d / "handoff-sample-topic.md").write_text(body, encoding="utf-8")
         _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
-        _sh("git", "commit", "-q", "--allow-empty", "-m", msg, cwd=other)
+        # 🔴 NO `--allow-empty`. Git refusing "nothing to commit" is what
+        # catches a fixture body identical to what the mainline already
+        # holds; suppressing it would let a test go silently vacuous.
+        _sh("git", "commit", "-q", "-m", msg, cwd=other)
         _sh("git", "push", "-q", "origin", "main", cwd=other)
         _sh("git", "fetch", "-q", "origin", cwd=work)
 
@@ -3726,6 +3729,20 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         """
         work = repo_lacking_the_doc(tmp_path)
         self._mainline_doc(tmp_path, work, blank, "whitespace the handoff")
+
+        # 🔴 ASSERT THE MECHANISM. Every assertion below is satisfied by "the
+        # mainline copy was never read at all" — MEASURED, a mutant making
+        # `base_currency` skip the `git show` entirely SURVIVES this test when
+        # run alone, while the sibling headingless test dies to it. The stale
+        # HEADER is not enough either: it prints whenever `doc_behind` is
+        # non-zero. Only the mainline SHAPE line proves the copy was read and
+        # measured, which is the claim this test's name makes.
+        prop = run_tool(work, update=update_file)
+        assert "origin/main: 0 sections /" in prop.stdout, (
+            "the mainline copy was never read, so the negatives below prove "
+            "nothing", prop.stdout[-400:])
+        assert "will be replaced by this delta" not in prop.stdout
+
         res = run_tool(work, "--confirm", update=update_file)
         assert res.returncode == 0, (
             "refused a first write against a WHITESPACE mainline copy — nothing "
