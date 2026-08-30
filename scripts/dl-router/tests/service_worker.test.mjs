@@ -517,6 +517,115 @@ test("the menu downloads a plain link", async () => {
   assert.deepEqual(calls.downloads[0], { url: "https://example-site.test/f.mp4" });
 });
 
+test("the menu saves the original, not the proxy thumbnail in the src", async () => {
+  // Discord puts a downscaled webp from its resizing proxy in the <img src>
+  // and the posted file on the wrapping <a href>. Taking `srcUrl` because it
+  // is listed first saves the thumbnail and silently calls it the download.
+  reset();
+  const ch = "119283746551234567";
+  const original
+    = `https://cdn.discordapp.com/attachments/${ch}/998877665544332211/a.png`;
+  await SW.onMenuClicked({
+    menuItemId: SW.MENU_ID,
+    mediaType: "image",
+    srcUrl: `https://media.discordapp.net/attachments/${ch}`
+      + "/998877665544332211/a.png?format=webp&width=550",
+    linkUrl: `${original}?ex=1&is=2&hm=3`,
+    pageUrl: "https://discord.com/channels/1/2",
+  }, {});
+  assert.deepEqual(calls.downloads[0], { url: `${original}?ex=1&is=2&hm=3` });
+});
+
+test("a Discord video is downloaded directly, never handed to yt-dlp", async () => {
+  // `mediaType === "video"` exists for players whose src is a `blob:`. A CDN
+  // attachment is a direct file, so that clause would send yt-dlp at
+  // `discord.com/channels/<guild>/<channel>` while the .mp4 sat in `srcUrl`.
+  reset();
+  const clip = "https://cdn.discordapp.com/attachments"
+    + "/119283746551234567/998877665544332211/clip.mp4?ex=1&is=2&hm=3";
+  await SW.onMenuClicked({
+    menuItemId: SW.MENU_ID,
+    mediaType: "video",
+    srcUrl: clip,
+    pageUrl: "https://discord.com/channels/1/2",
+  }, {});
+  assert.deepEqual(calls.downloads[0], { url: clip });
+  assert.equal(calls.fetches.length, 0);
+});
+
+test("a NON-Discord video still takes the yt-dlp path", async () => {
+  // The control for the test above: the direct-file bypass must be the
+  // narrow exception, not a removal of the blob:-player branch.
+  reset();
+  // `auto: true` DELIBERATELY. A below-threshold match queues the picker and
+  // POSTs nothing -- correct behaviour, but then the positive assertion below
+  // would be asserting the picker path instead of the yt-dlp one.
+  fetchHandler = async (url) => {
+    if (url.endsWith("/match")) {
+      return { ok: true, status: 200,
+        json: async () => ({ dir: "Jane Doe", auto: true,
+          reason: "tag=='Jane Doe'" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ jobId: "j9" }) };
+  };
+  await SW.onMenuClicked({
+    menuItemId: SW.MENU_ID,
+    mediaType: "video",
+    srcUrl: "https://cdn.example-site.test/v.mp4",
+    pageUrl: "https://example-site.test/v/1",
+  }, {});
+  assert.equal(calls.downloads.length, 0,
+    "an embedded player must still go through yt-dlp");
+  // 🔴 THE ABSENCE ALONE IS NOT THE ASSERTION. Asserting only
+  // `downloads.length === 0` left this guard green when `startFetch` was
+  // stubbed to a no-op — it passed whether or not the yt-dlp path did
+  // anything, i.e. green for a reason other than the one it names. Pin the
+  // POSITIVE half too.
+  const fetchCall = calls.fetches.find((f) => f.url.endsWith("/fetch"));
+  assert.ok(fetchCall, "the yt-dlp path must actually POST /fetch");
+  assert.equal(JSON.parse(fetchCall.opts.body).url,
+    "https://example-site.test/v/1",
+    "yt-dlp gets the PAGE url for an embedded player");
+});
+
+test("a Discord .m3u8 is still treated as a stream, not saved as a file", async () => {
+  // The bypass must not reach a manifest: downloading a ~200-byte playlist and
+  // calling it the media is a silent wrong answer where the old path failed
+  // loudly.
+  // 🔴 `auto: true` and a POSITIVE assertion, because the absence alone is the
+  // F4 defect wearing a different hat. MEASURED: with only
+  // `downloads.length === 0`, a mutant that made a Discord manifest do NOTHING
+  // AT ALL survived the whole 527-test suite. An absence cannot tell "handed
+  // to the stream path" from "silently dropped".
+  reset();
+  const manifestUrl = "https://cdn.discordapp.com/attachments"
+    + "/119283746551234567/998877665544332211/live.m3u8?ex=1";
+  fetchHandler = async (url) => {
+    if (url.endsWith("/match")) {
+      return { ok: true, status: 200,
+        json: async () => ({ dir: "Jane Doe", auto: true,
+          reason: "tag=='Jane Doe'" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ jobId: "j10" }) };
+  };
+  await SW.onMenuClicked({
+    menuItemId: SW.MENU_ID,
+    mediaType: "video",
+    srcUrl: manifestUrl,
+    pageUrl: "https://discord.com/channels/1/2",
+  }, {});
+  assert.equal(calls.downloads.length, 0,
+    "a manifest must never be handed to chrome.downloads");
+  const fetchCall = calls.fetches.find((f) => f.url.endsWith("/fetch"));
+  assert.ok(fetchCall, "the manifest must actually reach the yt-dlp path");
+  // 🔴 And it must get the MANIFEST, not the Discord page. `discord.com/
+  // channels/<guild>/<channel>` is an authenticated SPA route yt-dlp cannot
+  // resolve, and the job's failure is unobservable -- nothing polls `jobId`,
+  // so the user would get a "filed" toast and no file.
+  assert.equal(JSON.parse(fetchCall.opts.body).url, manifestUrl,
+    "a Discord manifest must be handed over as itself, not as the page url");
+});
+
 test("the menu routes a stream through the matched dir, not the catch-all", () => {
   // It used to be hardcoded to `dir: otherDir()` with `.catch(() => {})`: a
   // yt-dlp capture never reached the matched directory, never toasted, never
@@ -2347,6 +2456,33 @@ test("THE LEDGER KEY IS THE EMBED URL, NOT THE SIGNED MEDIA URL", async () => {
   assert.notEqual(posted[0].sourceKey, MEDIA_URL);
 });
 
+test("the player WRITE folds a Discord embed the same way the read does",
+  async () => {
+    // 🔴 THE SECOND WRITER. There are TWO sites that turn one URL into a
+    // ledger key -- this one and haveUrl -- and the Discord fold originally
+    // landed on the reader and NOT here, so a lookup asked for a string this
+    // writer never stored. Both go through `ledgerSourceKey` now; this pins
+    // that they agree, which is the relationship, not either half.
+    reset();
+    const path = "/attachments/119283746551234567/998877665544332211/a.mp4";
+    const posted = [];
+    fetchHandler = async (url, opts) => {
+      if (url.endsWith("/match")) posted.push(JSON.parse(opts.body));
+      return { ok: true, status: 200,
+        json: async () => ({ dir: "Jane Doe", confidence: 1, auto: true }) };
+    };
+    await SW.playerDownload(
+      { mediaUrl: "https://cdn.example-cdn.test/v/abc.mp4?sig=1",
+        embedUrl: `https://media.discordapp.net${path}?width=550` },
+      embedSender());
+    SW.onDeterminingFilename(
+      { id: 403, url: "https://cdn.example-cdn.test/v/abc.mp4?sig=1",
+        filename: "f.mp4" }, () => {});
+    await settle(5);
+    // The literal, hand-spelled -- not computed from the function under test.
+    assert.equal(posted[0].sourceKey, `https://cdn.discordapp.com${path}`);
+  });
+
 test("CORRELATION FAILURE DEGRADES TO THE PICKER, never to a wrong subject",
   async () => {
     // The top frame has no content script (a CSP-sandboxed host, a page still
@@ -2452,6 +2588,25 @@ test("dlr:have asks the ledger by the NORMALISED embed url", async () => {
   assert.equal(calls.fetches[0].url,
     `http://127.0.0.1:8791/have?url=${encodeURIComponent(EMBED_URL)}`);
 });
+
+test("dlr:have folds a Discord attachment the SAME WAY the ledger write does",
+  async () => {
+    // 🔴 A SEAM, not a component. The write side folds a Discord attachment's
+    // authority to the origin before the ledger records it; if the read side
+    // asked with the bare proxy key it would look up a string the writer never
+    // stores, and the badge could only ever miss -- "a badge that never lights
+    // actively asserts you do not have this". Neither side is wrong alone,
+    // which is exactly why this has to be pinned as a RELATIONSHIP.
+    reset();
+    fetchHandler = async () => ({ ok: true, status: 200,
+      json: async () => ({ ok: true, have: true, dir: "Jane Doe" }) });
+    const path = "/attachments/119283746551234567/998877665544332211/a.png";
+    await SW.haveUrl(`https://media.discordapp.net${path}?format=webp&width=550`);
+    const asked = decodeURIComponent(calls.fetches[0].url.split("url=")[1]);
+    // The literal the WRITE side produces, spelled out rather than computed
+    // from the function under test.
+    assert.equal(asked, `https://cdn.discordapp.com${path}`);
+  });
 
 test("a ledger miss is a miss, and a dead sidecar is also a miss", async () => {
   reset();

@@ -18,8 +18,9 @@
 // suppress listener registration and networking.
 
 import {
-  buildMatchPayload, carryReferrer, correlateCapture, formatDup,
-  handleDetermining, localContext, localDecide, playerSourceKey,
+  buildMatchPayload, carryReferrer, correlateCapture, discordSourceKey,
+  formatDup, handleDetermining, ledgerSourceKey, localContext, localDecide,
+  preferOriginalUrl,
 } from "./route_core.js";
 import { isHttpUrl, relPathFromAbsolute, sanitizeDirName } from "./sanitize.js";
 import { DEFAULT_PORT, manifestPort as readManifestPort } from "./port.js";
@@ -1316,8 +1317,11 @@ export async function playerDownload(msg, sender) {
     href: mediaUrl,
     mediaSrc: mediaUrl,
     // The ledger's key. Stable across the signature rotation the media URL is
-    // subject to -- see route_core.playerSourceKey.
-    sourceKey: playerSourceKey(msg && msg.embedUrl),
+    // subject to -- see route_core.ledgerSourceKey, which is also what the READ
+    // in haveUrl uses. This line used to call playerSourceKey directly, so when
+    // the Discord fold landed on the reader it did NOT land here, and a lookup
+    // asked for a string this writer never stored.
+    sourceKey: ledgerSourceKey(msg && msg.embedUrl),
   };
   // WITH NO PROVEN CONTEXT THE CAPTURE CARRIES NO SUBJECT AT ALL. Not the embed
   // page's title, not its URL: an embed page is a bare player, and anything
@@ -1343,8 +1347,10 @@ export async function playerDownload(msg, sender) {
 /**
  * `dlr:have` -- the "already have this" badge's question.
  *
- * Asked BY THE EMBED PAGE URL, normalised through the same `playerSourceKey`
- * the write side uses. Keying this on the media URL instead would mean the
+ * Asked BY THE EMBED PAGE URL, normalised through `ledgerSourceKey` -- the
+ * SAME function the write side calls, which is the point: these two agreeing
+ * is a relationship, not a coincidence, and it broke the one round they were
+ * spelled separately. Keying this on the media URL instead would mean the
  * badge never lit: the signature rotates, so every lookup would miss, and a
  * badge that never lights actively asserts "you do not have this".
  *
@@ -1355,7 +1361,15 @@ export async function playerDownload(msg, sender) {
 export async function haveUrl(embedUrl) {
   await ready();
   if (!state.config.enabled) return { ok: false, have: false };
-  const key = playerSourceKey(embedUrl);
+  // THE READ MUST USE THE SAME FOLD AS THE WRITE. `discordSourceKey` folds
+  // a Discord attachment's host to the origin before the ledger records it, so
+  // asking with the bare `playerSourceKey` of a `media.discordapp.net` URL
+  // looks up a key the write side never stores -- a badge that can only miss,
+  // which is the failure this whole docstring is about. Not reachable today
+  // (no Discord `[site_rules."<host>".player]` rule exists, so nothing asks
+  // with a CDN URL), but nothing else pins it, and the first operator to add
+  // one would hit it.
+  const key = ledgerSourceKey(embedUrl);
   if (!key) return { ok: false, have: false };
   try {
     const out = await api("GET", `/have?url=${encodeURIComponent(key)}`,
@@ -1383,13 +1397,46 @@ export async function installMenus() {
 export async function onMenuClicked(info, tab) {
   await ready();
   if (info.menuItemId !== MENU_ID || !state.config.enabled) return;
-  const target = info.srcUrl || info.linkUrl || info.pageUrl;
+  // `srcUrl` unless a link proves a better copy of the SAME asset exists --
+  // on Discord an image's src is a downscaled webp from the resizing proxy.
+  const target = preferOriginalUrl(info.srcUrl, info.linkUrl) || info.pageUrl;
   if (!isHttpUrl(target)) return;
-  const streaming = /\.m3u8(\?|$)|\.mpd(\?|$)/i.test(target)
-    || info.mediaType === "video";
+  // A MANIFEST IS ALWAYS A STREAM, including one served from Discord. This
+  // test stays OUTSIDE the bypass below on purpose: an `.m3u8` has no single
+  // file to save, so letting the bypass reach it would download a ~200-byte
+  // playlist and call it the media -- trading a loud failure for a silent
+  // wrong answer.
+  const manifest = /\.m3u8(\?|$)|\.mpd(\?|$)/i.test(target);
+  // Otherwise a Discord attachment is a DIRECT FILE whatever element it was
+  // clicked on, so it must not take the yt-dlp branch: that branch hands
+  // `discord.com/channels/<guild>/<channel>` to yt-dlp while the .mp4 sits
+  // right there in `srcUrl`.
+  //
+  // The `mediaType === "video"` clause it bypasses catches players whose media
+  // URL this listener cannot use directly. Its exact reach is NOT verified
+  // here -- `isHttpUrl` already returned above, so whether a `blob:`-src
+  // <video> can reach this line depends on whether Chrome populates
+  // `info.srcUrl` for one, which needs a browser to answer. The bypass is
+  // scoped to CDN attachments either way, so it does not depend on that.
+  const directFile = discordSourceKey(target) !== "";
+  const streaming = manifest || (!directFile && info.mediaType === "video");
   if (streaming) {
-    // HLS/DASH has no single file to save -- hand the PAGE url to yt-dlp.
-    const url = isHttpUrl(info.pageUrl) ? info.pageUrl : target;
+    // HLS/DASH has no single file to save -- hand the PAGE url to yt-dlp,
+    // because on the sites this was built for the page is what yt-dlp knows
+    // how to resolve.
+    //
+    // A DISCORD MANIFEST IS THE ONE CASE WHERE THAT IS BACKWARDS, and the cell
+    // only became reachable when the manifest test moved outside the bypass.
+    // `info.pageUrl` there is `discord.com/channels/<guild>/<channel>` -- an
+    // authenticated SPA route, not a media page -- while `target` IS the
+    // manifest yt-dlp consumes natively. Handing over the page throws away the
+    // only usable URL, and the failure is INVISIBLE: `/fetch` has no allowlist
+    // so the job is accepted, `submitFetch` toasts "filed to <dir>" as soon as
+    // the POST returns, and nothing ever polls the job -- `jobId` is returned
+    // once and dropped. That is a success toast with no file, which is exactly
+    // the silent wrong answer the manifest test was moved out here to prevent.
+    const url = (manifest && directFile) ? target
+      : (isHttpUrl(info.pageUrl) ? info.pageUrl : target);
     await startFetch(url, info, tab);
     return;
   }
