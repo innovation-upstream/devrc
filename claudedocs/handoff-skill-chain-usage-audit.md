@@ -16,34 +16,35 @@ whether sessions that resume a handoff end up recording their work. Ship a numbe
 survives adversarial re-derivation, and fix whatever it exposes.
 
 ## State now
-- **Branch / PR:** `zach/skill-chain-usage-audit` off `origin/main` (devrc) → **devrc#1055,
-  OPEN and BLOCKED**. Both Tekton legs return `COULD NOT RUN: the gate stopped before this
-  leg reported` on both SHAs. 🔴 **It is not this branch** — every PR touched after
-  ~22:23Z reads `ERROR,ERROR` (#1048–#1050, #1055–#1059); the last clean run was #1054 at
-  22:06Z. Pointer for whoever fixes it: in ns `tekton-ci` the recent `devrc-ci-*` runs have
-  `notify-pod` and `report-pod` but **no `gate-pod`**, while sibling `vetr-app-unit-*` runs
-  do; all `tekton-pipelines` controllers are `Running` and the node is `Ready`, so it is
-  neither a controller nor a node outage.
-- **DONE — the measurement.** Window 2026-08-15 → 08-29, both hosts, both runtimes
-  (`find-session` stderr silent on every run ⇒ full coverage per its own contract).
-  - 391 sessions match `"Canonical handoff (read first)"`; **256** carry a `/resume`
-    kickoff as their genesis line; **253 graded** (98.8%).
-  - **231 / 253 = 91.3% RECORDED** — 206 updated the doc they resumed, 25 landed under a
-    different topic (genuine topic drift, not loss).
-  - **22 / 253 = 8.7% real loss** — 19 never invoked `handoff_doc.py` at all, 2 tool
-    failures (`behind`/`failed`), **1** reached `status=proposed` and never confirmed.
-  - **Legitimate declines (`no-change`/`no-advance`): ZERO.** The hypothesis that a chunk
-    of the gap was the skill correctly refusing to write is REFUTED.
-- **DONE — clawgate leg.** 186 tasks created in-window; of the **85** that advanced past
-  `open`, **73 (86%) carry a write-back comment**. 12 advanced with zero comments
-  (6 `complete`, 4 `in_progress`). **0** of the 186 were agent-dispatched.
-- **DONE — a doc fix**, in this branch: `claude/skills/clawgate/SKILL.md` line 61 said the
-  `Stop` array carries "**two**" unrelated hooks and to "preserve both". Live it carries
-  **four** (`task-hook.sh`, `claude-notify.py`, `next-step-nudge.py`, `agent-ledger-hook.py`)
-  beside clawgate's own two. Rewritten to be count-independent + a re-derive command.
-- **Deploy/verify status:** the SKILL.md edit is committed only. It is NOT live — the
-  deployed copy is a nix `home.file` at `~/.claude/skills/`, so it needs a
-  `home-manager switch` (or `scripts/ship.sh`), never a `git pull`.
+- 🔴 **THE INITIATIVE'S HEADLINE MEASUREMENT, carried forward because it is durable and this
+  section is REPLACED on every update.** Window 2026-08-15 → 08-29, both hosts, both runtimes
+  (`find-session` stderr silent on every run ⇒ full coverage per its own contract):
+  391 sessions match `"Canonical handoff (read first)"`; **256** carry a `/resume` kickoff as
+  their genesis line; **253 graded** (98.8%). **231 / 253 = 91.3% RECORDED** — 206 updated the
+  doc they resumed, 25 landed under a different topic (drift, not loss). **22 / 253 = 8.7%
+  real loss** — 19 never invoked `handoff_doc.py`, 2 tool failures, 1 stopped at the confirm
+  gate. Legitimate declines (`no-change`/`no-advance`): **ZERO** — the hypothesis that the gap
+  was the skill correctly refusing to write is REFUTED. Clawgate leg: of the 85 tasks that
+  advanced past `open`, **73 (86%) carry a write-back comment**; **0** of 186 were
+  agent-dispatched.
+- **Branch / PR:** `zach/skill-chain-usage-audit` → **devrc#1055, OPEN**, `a5982acc`. Second
+  PR from this arc: **devrc#1064, OPEN**, branch `feat/handoff-audit`, head `466a0938`
+  (5 commits: the tool + four audit-ladder fix rounds).
+- 🔴 **Neither PR has ever been seen GREEN in CI, and neither failure is attributable to its
+  diff.** See the open investigation below before re-diagnosing either.
+- **DONE — rank 1 (the gating item).** 16 never-run losses split by session end-state:
+  **8 cleanly-ended · 4 interrupted-at-end · 2 context-exhausted · 2 never-started.**
+  Classifier committed this time: `claudedocs/skill-chain-loss-classifier.py` +
+  `claudedocs/skill-chain-loss-index.sh`, both parameterised on `CHAIN_WORKDIR` and verified
+  from the committed copy to reproduce the numbers.
+- **DONE — rank 5's first move.** `scripts/handoff-audit.py` + `scripts/tests/test_handoff_audit.py`
+  (23 tests) on #1064, plus `claudedocs/proposal-handoff-doc-bloat.md`. Corpus, 414 docs:
+  **7.74 MB ≈ 1.94M tokens · 203 over the 12,288 B reference target · 44 over the 40,960 B cap ·
+  ~14% structurally-terminal.** 🔴 That 14% is a FLOOR — the tool sees only content that is
+  *structurally marked* terminal; the read-based estimate over 5 docs was 35–44%.
+- **Deploy/verify status:** nothing is deployed. The clawgate `SKILL.md` fix (rank 4) is
+  committed on #1055 and NOT live — it needs `home-manager switch` after that PR merges.
+  `handoff-audit.py` is committed on #1064 and wired into no gate, skill or script.
 
 ## Open investigations — live diagnosis state
 
@@ -97,39 +98,74 @@ is consistent with 19; treat the bucket SHARES as the finding, not the denominat
   still claims in-flight work. If so, that is a silent staleness generator feeding
   `/resume`'s own known "open-investigation blocks read as current forever" trap.
 
+### Both PRs are red on tests neither one touches — environment-sensitive, not code
+- **Symptom + exact repro:** `gh pr checks 1055` → `tekton/devrc-pytests FAILURE`; same for #1064.
+- **Observed (with values):** the named failure DIFFERS per run and per PR —
+  #1055 `test_handles_resolve_to_the_exact_expected_paths[repos-HOMELAB-…]`;
+  #1064 first `test_espanso_detect.py::test_live_existing_resolutions_not_made_ambiguous`,
+  later `test_a_hanging_fetch_is_BOUNDED_and_the_memo_spares_a_second_wait`.
+  Three other open PRs (#1046, #1057, #1059) all failed one *shared* test,
+  `TestSkillDocsArePinned.test_the_pinned_docs_are_the_DEPLOYED_ones`.
+  Every one of these reads host state: `nix eval`, the deployed `~/.claude/skills/` copies,
+  live espanso config, or wall-clock timing.
+- **Ruled out:** *"my change broke it"* — for #1055 the test is about `nix/agent-handles.nix`
+  resolving `$HOMELAB` against a synthetic `/home/testuser`, and the diff is markdown plus two
+  `claudedocs/` scripts; **10 passed at `origin/main` AND 10 passed at head on the dev-host
+  tier**, and `origin/main`'s sandbox tier is green with a real build log
+  (`collected=18703 passed=18701 failed=0 · RESULT: PASS`).
+  *"main is red on the sandbox tier"* — killed by that same log.
+  *"the shared hostPath nix cache causes concurrent-eval interference"* — killed: if it did,
+  #1046/#1057/#1059 would fail the nix-eval test, and they fail a filesystem one instead.
+- **Leading hypothesis:** the Tekton runner's environment differs from both local tiers, and the
+  affected population is exactly "tests that read host state". Under node congestion the
+  timing-shaped ones join in.
+- **Next probe:** re-run one PR's gate on an unchanged SHA when the queue is empty and see
+  whether the SAME test fails. A different test ⇒ environment/timing; the same test ⇒ a real
+  runner-vs-local divergence worth fixing in the test.
+
+### Was the devrc-ci outage fully closed?
+- **Symptom:** 2026-08-29 ~22:23–22:48Z every devrc-ci gate leg reported
+  `COULD NOT RUN: the gate stopped before this leg reported`; 8 PRs blocked.
+- **Observed:** `pods "devrc-ci-…-gate-pod" is forbidden: violates PodSecurity "baseline:latest":
+  hostPath volumes (volume "nix-cache")` — `6bec075e` gave the gate a hostPath cache and the ns
+  had no PSA exemption, so the pod was rejected at ADMISSION and never created (hence notify+report
+  pods but no gate pod).
+- **Ruled out:** congestion/preemption (the `tekton` skill's documented 255 signature) — this is
+  `PodAdmissionFailed`, a different reason string entirely.
+- **Resolved by someone else:** `686d6ff0` at 22:48Z added
+  `pod-security.kubernetes.io/enforce: privileged` to ns `tekton-ci`. Verified by the boundary:
+  **5 `PodAdmissionFailed` before, 0 after**, across 14 devrc-ci TaskRuns.
+- **Next probe (the part still open):** the residue is ordinary node congestion —
+  `ExceededNodeResources`, `talos-xr6-r7p` at 89% CPU requests. The gate pod requests **4250m**
+  while three sampled running pods used **1m / 4m / 544m**. That is a lead, not a licence:
+  measure PEAK over a full run before proposing a right-size, and note the `tekton` skill records
+  four *other* fixes as already-rejected-with-measurements.
+
 ## Next steps (ranked)
-1. ✅ **DONE (2026-08-29)** — split measured: **8 cleanly-ended vs 2 context-exhausted**
-   of 16, plus 4 interrupted-at-end and 2 never-started. See the closed investigation
-   above. It selects a **nudge**, and shows a `Stop` hook already fires in 8/8 of the
-   dominant bucket.
-2. **Build the handoff-write `Stop` hook** (devrc `claude/hooks/`, `~/.claude/settings.json`).
-   No longer "decide" — item 1 decided it. The clawgate writeback guard
-   (`~/.claude/hooks/clawgate-writeback-guard.py`) is the working precedent — arm-on-read,
-   block-on-Stop, 86% compliance. 🔴 Arm it on a `/resume` READ, not on session start, or
-   it fires on every session that never touched a handoff. The 2 never-started sessions
-   are the reminder that a hook cannot reach a session that produced no turns.
+1. ✅ **DONE (2026-08-29)** — the split: 8 cleanly-ended vs 2 context-exhausted of 16. Selects a
+   **nudge**, and shows a `Stop` hook already fires in **8/8** of the dominant bucket.
+2. 🔴 **Build the handoff-write `Stop` hook — the largest outstanding item, and the whole point
+   of rank 1** (devrc `claude/hooks/`, `~/.claude/settings.json`). Precedent:
+   `~/.claude/hooks/clawgate-writeback-guard.py` — arm-on-read, block-on-Stop, 86% compliance.
+   Arm it on a `/resume` READ, not on session start, or it fires on every session that never
+   touched a handoff. The 2 never-started sessions are the reminder that a hook cannot reach a
+   session that produced no turns.
 3. **Audit the 25 drift cases for stale abandoned docs** (devrc + datapacket-talos +
-   homelab-talos `claudedocs/`). Cheap, and it feeds `/resume` quality directly.
+   homelab-talos `claudedocs/`). Untouched. Feeds `/resume` quality directly.
 4. **Deploy the clawgate SKILL.md fix** — `home-manager switch`, then confirm
    `~/.claude/skills/clawgate/SKILL.md` no longer contains "preserve both".
-   🔴 Gated on #1055 merging, which is gated on the CI outage in *State now*.
-5. **Act on the handoff-doc bloat audit** — `claudedocs/proposal-handoff-doc-bloat.md`
-   (landed in this branch). Measured: handoff docs grow **monotonically** (121 of 123
-   revisions grew or held; 16 of 18 docs never shrank once; ×2.55 first→latest), and
-   **~35–44%** of what a `/resume` pays for is dead-but-dated or belongs in a skill.
-   `/handoff` has no budget, no archive step and no eviction verdict; archive adoption
-   across 413 docs is **0**. Proposal adapts `prune-skill`'s method. **Propose-only — the
-   SKILL.md change is not written.** Cheapest first move is `handoff-audit.py`, no gate.
-
-🔴 **This list is a WORK QUEUE, and `claim-work` is its LOCK** — every
-`/resume` session draws from it, so a *better* ranked list produces *more*
-duplicate work, not less. **NUMBER the items and keep the numbering stable:
-the rank is half a claim's identity** (`claim-work --slug-for <this doc>
-<rank>`), and re-ranking silently re-points every live claim. Make each item
-cheap to check — name the repo and the files it will touch, and mark anything
-in flight `IN FLIGHT: <repo>#<pr>`; that marker is the SOFT half, the lock is
-the command `/resume` step 6 runs before touching an item. Worktrees do NOT
-prevent this. 📖 `~/.claude/skills/handoff/reference/shared-queue.md`.
+   🔴 IN FLIGHT / blocked: needs devrc#1055 merged.
+5. **Act on the handoff-doc bloat proposal** — `claudedocs/proposal-handoff-doc-bloat.md`.
+   The auditor shipped (IN FLIGHT: devrc#1064); the **`/handoff` SKILL.md change is deliberately
+   NOT written** — operator chose propose-only. Next move is the eviction contract
+   (budget + step 4.5 + EVICT_HISTORY/RELOCATE_DURABLE/KEEP_HOT), not a gate: the caps file for
+   gate 11 records that the general ratchet rule was replayed over 365 days / 901 commits and
+   **REFUTED**, so re-run that replay for handoff docs before proposing one.
+6. **Correct the `tekton` skill's stale devrc-ci claims** (devrc `claude/skills/tekton/SKILL.md`).
+   Measured 2026-08-29: the gate pod has **no `nodeSelector`** and uses a per-node **hostPath** at
+   `/var/lib/mnt/disk-1/devrc-ci-nix-cache`; the skill still describes node-pinning to
+   `talos-xr6-r7p` and a `nix-store-cache` PVC. That skill loads as authoritative for anyone
+   debugging this gate. Re-measure before editing — it is a live label/volume, not a git fact.
 
 ## Gotchas / decisions / dead-ends
 
@@ -182,41 +218,63 @@ of this doc — re-read them before trusting any similar analysis.**
   diverged host is skipped and silently stops receiving changes). `handoff_doc.py --push`
   would have pushed wherever the checkout sits, which was `main`.
 
+- 🔴 **A LIST ITEM'S EXTENT MUST STOP AT THE NEXT HEADING — this class bit the same file THREE
+  TIMES.** An H1 whose extent was the whole file; a 160-character "first line" bound that reached
+  two lines into the body; and bullet/ranked-item walkers that ran to the end of the section,
+  swallowing every H3 after them. The third booked **16,380 B for a bullet containing no
+  retraction** and made one bucket **1.43× high**. Each time the *headline* survived and the
+  *per-bucket* line did not. When you write a block walker, clip at the next heading AND exclude
+  fenced lines from the predicate — the bytes belong to the block, the claim does not.
+- 🔴 **DO NOT PIN ABSOLUTE CORPUS TOTALS IN A COMMENT — the corpus is live shared trees.** Three
+  consecutive audit rounds each corrected the figure justifying one guard, and each correction was
+  itself unreproducible by the next round. Measured across four rounds with nobody touching the
+  code: **414→413→414 docs, advisory count 568→573→577.** The fix is structural — pin the quantity
+  that is STABLE (the guard's own effect: 10 sections / 14,466 B / 0 + 0, identical every round)
+  and tell the reader to re-derive corpus figures by running the tool.
+- 🔴 **A borrowed matcher is only validated on the corpus it was validated on.** Reusing
+  `skill-audit`'s `WORK_STATUS_HEADING` here keyed on a bare `\bsessions?\b`; a handoff doc's H1 is
+  `# Handoff: <topic>` and topics like `session-makework-audit` contain the word, so entire
+  documents scored as evictable history — **1,026,330 B / 343 blocks against a true 236,746 B / 119.**
+- 🔴 **THIS CORPUS SHOUTS A TERMINAL STATUS, so case IS the discriminator.** Adding `re.I` to the
+  resolved-heading matcher looked like fixing an inconsistency and was a pure regression: **10 of 10**
+  new hits were inversions — `bounded, not closed`, `unresolved, and deliberately not resolved`,
+  `was closed — the reusable lesson`, and `fail-closed` as a *term of art*.
+- 🔴 **A COUNT assertion can survive its own inversion.** `assert len(x) == 1` passed with the guard
+  inverted to scan only the wrong sections, because one item is booked either way; it died only to
+  neighbours. Assert the booked item's TEXT.
+- **Decision — stop an audit ladder on CONVERGENCE, not only on a clean round.** Four rounds; every
+  one found something real, so the findings-keyed stop rule never fired. Executable payload per
+  round ran **109 → 62 → 17 → ~15**, and all three of round 4's findings were about text the
+  *previous* round wrote (a comment, a legend from that same commit, a commit message). Stopping was
+  made safe by fixing the recurrence *class* (removing the volatile numbers) rather than its fourth
+  instance.
+- **Dead end (do not re-derive):** the shared-hostPath-nix-cache theory for the CI failures. Killed
+  by the cross-PR table — the PRs that would have to fail the nix-eval test fail a filesystem one.
+- **Decision — commit throwaway analysis scripts.** The previous pass left its classifiers in a
+  session scratchpad as "throwaway", which cost rank 1 a full re-derivation (fresh population, fresh
+  154-repo commit index, a rewritten classifier, two defects rediscovered). If a number will be
+  quoted, its script belongs in the repo.
+
 ## How to verify
 ```bash
-# 1. the population (~30 s; stderr MUST be silent or coverage is partial)
-python3 ~/workspace/devrc/scripts/find-session.py "Canonical handoff (read first)" \
-  --since 2026-08-15 --limit 500 > /tmp/chain.out
-grep -c "opened: '/resume" /tmp/chain.out          # expect 256 for this window
-
-# 2. the doc index — --all is load-bearing, HEAD-only loses ~33%
-for g in $(find ~/workspace -maxdepth 4 -type d -name .git); do r=$(dirname "$g"); \
-  git -C "$r" log --all --since=2026-08-15 --pretty=format:'C%x09%h%x09%ad' --date=short \
-  --diff-filter=AM --name-only -- 'claudedocs/*handoff*' ; done | grep -c '^C'
-
-# 3. the clawgate leg
-clawgatectl task ls --summary --limit 400 | jq '[.[]|select(.createdAt>="2026-08-15" and .status!="open")] | {advanced: length, no_comment: [.[]|select((.commentCount//0)==0)]|length}'
-
-# 4. the SKILL.md fix is DEPLOYED (not merely committed)
-grep -c 'preserve both' ~/.claude/skills/clawgate/SKILL.md   # expect 0 AFTER a home-manager switch
-```
-```bash
-# 5. item 1's split, end to end. The classifier IS committed this time (see below).
+# 1. rank 1's split, end to end (the classifier IS committed on #1055)
 W=/tmp/chain-work; mkdir -p "$W"
 python3 ~/workspace/devrc/scripts/find-session.py "Canonical handoff (read first)" \
   --since 2026-08-15 --limit 500 > "$W/chain2.out" 2>"$W/chain2.err"
-test ! -s "$W/chain2.err" || echo "PARTIAL COVERAGE — read chain2.err before believing anything"
+test ! -s "$W/chain2.err" || echo "PARTIAL COVERAGE — read chain2.err first"
 CHAIN_WORKDIR="$W" bash ~/workspace/devrc/claudedocs/skill-chain-loss-index.sh
 CHAIN_WORKDIR="$W" python3 ~/workspace/devrc/claudedocs/skill-chain-loss-classifier.py
-#   expect: 8 cleanly-ended / 4 interrupted-at-end / 2 context-exhausted / 2 never-started
-#   and the INSTRUMENT CONTROLS block non-empty. A run whose controls are absent is void.
-```
+#   expect 8 cleanly-ended / 4 interrupted-at-end / 2 context-exhausted / 2 never-started,
+#   and a non-empty INSTRUMENT CONTROLS block. A run whose controls are absent is void.
 
-🔴 **The prior pass's classifiers (`split.py`, `verifyE.py`) were left in a session
-scratchpad as "throwaway", and item 1 therefore cost a FULL re-derivation** — fresh
-population, fresh 154-repo commit index, a rewritten classifier, and two defects
-re-discovered from scratch (gotchas 5 and 6). **That is why these are committed:**
-`claudedocs/skill-chain-loss-classifier.py` and `claudedocs/skill-chain-loss-index.sh`,
-both parameterised on `CHAIN_WORKDIR` and both verified from the committed copy to
-reproduce the numbers above. `reconcile2.py`/`final.py` (the bucket-E verifier) remain
-uncommitted in the earlier session's scratchpad.
+# 2. the bloat corpus (#1064). Absolute totals DRIFT — re-derive, never quote a comment.
+python3 ~/workspace/devrc/scripts/handoff-audit.py \
+  ~/workspace/devrc ~/workspace/homelab-talos ~/workspace/civit/datapacket-talos
+
+# 3. the tool's own suite
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  ~/workspace/devrc/scripts/tests/test_handoff_audit.py -q -p no:cacheprovider   # expect 23
+
+# 4. rank 4 is deployed (NOT merely committed) — expect 0 only AFTER a home-manager switch
+grep -c 'preserve both' ~/.claude/skills/clawgate/SKILL.md
+```
