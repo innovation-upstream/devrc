@@ -137,6 +137,59 @@ designed and only needed the peer to carry the new code. Original diagnosis reta
 - **Fix (on that host):** `git -C ~/workspace/homelab-talos pull --ff-only` then a
   `home-manager switch`. Not done here — it is another repo and not this effort's.
 
+### ✅ CLOSED — rank 7's premise, re-measured: the doc's framing overstated the blast radius
+The handoff said a forged line is read "where `test_gate_exit_truthfulness.py`'s
+first-match regex reads it — a red run then reports green through the gate's own
+truth-telling channel." Measured, the production consumer was never exposed:
+
+- **`gate.sh:186` was already correct**: `verdict="$(grep -aE '^RESULT: (PASS|FAIL)' "$log" | tail -1 || true)"` — LAST match, column-anchored, carrying a comment
+  explaining the anchor. A forged line always *precedes* the EXIT-trap verdict, so
+  `tail -1` never selects it.
+- **The exposed reader was the TEST**: `test_gate_exit_truthfulness.py:290` used
+  `re.search(r"^RESULT: (PASS|FAIL) \(exit=(\d+)\)$", proc.stdout, re.M)` — FIRST match,
+  *and* it required the exit-carrying form.
+- **The real vacuous-green path** (this is the one worth keeping): that test's regression
+  claim is "the runner emits a verdict carrying its own exit code". Requiring
+  `\(exit=\d+\)` for SELECTION means a regressed bare `RESULT: FAIL` — the exact shape
+  `origin/main` emitted before #1057 — is **skipped**, and the search continues until it
+  finds a forged exit-carrying line from a registry entry. The guard then certifies the
+  deliverable against a line the runner never wrote. Fixed by selecting on the LOOSE
+  grammar and *then* asserting the shape.
+- **Why a registry entry can inject at all:** `run-tests.sh` inlines `HOOK_TESTS` /
+  `SHELL_TESTS` stdout straight into its own stream — no capture, no prefixing — and
+  `testlib/runner_patch.py:110-119` leaves both registries ALONE unless a caller names
+  them, so `test_the_verdict_line_carries_the_exit_code` drives the REAL ones.
+
+### 🔴 A LIVE near-miss nobody had recorded — `test_bash_guard.py` already emits the prefix at column 0
+- **Observed (verbatim), by RUNNING the file, not reading it:**
+  `nix develop … -c python3 scripts/claude-hooks/tests/test_bash_guard.py | tail -4` →
+  a blank line then `RESULT: all good` at column 0.
+- **Source:** `scripts/claude-hooks/tests/test_bash_guard.py:490` —
+  `print("\nRESULT:", "all good" if not fail else f"{fail} failure(s)")`. It is a
+  **HOOK_TESTS entry**, so that line lands in the runner's stream on every gate run.
+- **Why it is benign TODAY:** the payload is never `PASS`/`FAIL`, so it cannot match the
+  reserved `^RESULT: (PASS|FAIL)`. `gate.sh`'s own comment cites this exact line as the
+  reason its grep is anchored and narrow.
+- **Why it matters:** the obvious refactor to
+  `print("RESULT:", "PASS" if not fail else "FAIL")` collides instantly. It is now pinned
+  two-way in `NEAR_MISSES`, so that refactor fails twice — the pin goes stale AND the
+  collision scan fires.
+
+### 🔴 UNRESOLVED — the merged tree has not been gated, and `run-tests.sh` moved under this branch
+- **Observed:** `origin/main` advanced `72c786c4` → `ebbe5eaa` mid-session. `git diff
+  <base>..origin/main -- scripts/run-tests.sh` = 37 insertions / 18 deletions, all in the
+  `scripts/tests` **floor** block and its comments.
+- **Why it matters here:** this change ADDS 15 tests to `scripts/tests`, and #1065's own
+  commit message records that the drift **ceiling** "FIRED ONLY ON THE MERGED TREE" —
+  neither side over alone, the SUM crossed it.
+- **Measured headroom (so this is probably fine, but it is not verified):** floor
+  `scripts/tests|10269`, drift ceiling `max(60, floor/4)` = 2567 → ceiling 12836. #1065
+  measured the merged tree at 10546; +15 ⇒ ~10561. Inside by a wide margin.
+- **Ruled out:** a textual conflict in the registries — the upstream diff does not touch
+  `HOOK_TESTS`/`SHELL_TESTS`, which is what this guard parses.
+- **Next probe:** build the integration branch and gate it, then the sandbox tier:
+  `git -C <wt> merge origin/main` → `nix develop ~/workspace/devrc --command bash scripts/gate.sh --tier both --set hermetic <wt>` → `nix build .#checks.x86_64-linux.pytests` (alone — a combined invocation produces false failures).
+
 ## 🔴 The one thing to read before doing items 3 and 4
 🟢 **UPDATE 2026-08-30 — the blocker below has LARGELY CLEARED. Read this first; the
 original text is kept underneath because its ARGUMENT is still the right one.**
@@ -179,47 +232,35 @@ a fleet-wide claim cannot be made from this data yet. Re-check both hosts appear
 </details>
 
 ## Next steps (ranked)
-1. ✅ **DONE** — PR #1000 merged (`538370f5`) + `scripts/ship.sh`, both hosts at that sha.
-   forcing: none  (complete — nothing left to work)
-2. ✅ **DONE** — emitter verified live; see the closed investigation above.
-   forcing: none  (complete — nothing left to work)
-3. **Add the `adoption-scan` `via: "skill"` registry arm.** 🔴 **The blocker has largely
-   cleared** — measured 2026-08-30, trailing 7d: **26 distinct identities fleet-wide** of
-   35 devrc-managed skills, **both hosts reporting** (workbench 21, laptop 13), 0 rejects.
-   When this was deferred it was 4 identities on one host, which would have reported 30 of
-   34 as DEAD. Re-run the gate query below before starting; if it still reads ~26, the
-   remaining DEAD verdicts are plausibly *true* and this is ready to build.
-   Files: `scripts/session-analysis/adoption-scan.py`, `claude/skills/adoption-scan/SKILL.md`.
-   forcing: none  — 🔴 the honest answer, not a formality. The INCIDENT that forced this
-   effort (an investigation answering "was `signal` ever used?" with "never") is ALREADY
-   CLOSED by #1000 + #1059: the interactive answer exists and both skills route to it.
-   Nobody outside this loop has asked for the AGGREGATE view. Do not work it on the
-   strength of its being written down here.
-4. **Add the `attributionSkill` deadman.** Same gate as 3, now largely met. File:
-   `scripts/validation/invariants.py`.
-   forcing: none  — guards a HYPOTHETICAL silent zero (an upstream rename of an
-   undocumented field). Nothing has regressed and no one has asked. Same caveat as 3.
-5. **Work `claudedocs/followups-skill-usage-telemetry.md`** — **G4 is DONE and shipped**
-   (#1059). Three remain: `audit-dispatch.py`'s wrong-toolchain brief; **the credential
-   rotation, which is Zach's and is the highest-severity item in this thread** (an
-   `activity_reader` password sits in cleartext in the opencode session store); and G5, the
-   ClickHouse creds/query helper.
-   forcing: security  — the credential rotation is a LIVE exposure (an `activity_reader`
-   password in cleartext in the opencode session store) and is the ONLY item in this doc
-   with a real external forcing function. It is Zach's to do. The other two items in that
-   file are `forcing: none` on the same reasoning as 3 and 4.
-6. ✅ **DONE** — claim `skill-usage-telemetry-1` released.
-   forcing: none  (complete — nothing left to work)
-7. **Structural guard for the reserved `RESULT:` grammar.** Nothing stops a future
-   `SHELL_TESTS`/`HOOK_TESTS` entry printing `RESULT: PASS (exit=0)` at column 0, where
-   `test_gate_exit_truthfulness.py`'s **first-match** regex reads it — a red run then
-   reports green through the gate's own truth-telling channel. `scripts/tests/test_cleanup_disk_gate.sh`
-   did exactly that until audit round 4. **Closes when** a scan of those sources for
-   `^\s*echo "RESULT:` exists and has been watched red against a planted offender.
-   Repo: `devrc`.
-   forcing: regression  — MEASURED, not hypothetical: `test_cleanup_disk_gate.sh` forged
-   that line and `test_gate_exit_truthfulness.py` read the forged PASS off a run whose own
-   verdict was FAIL. Fixed in that one file by prose only; the next copy-paste repeats it.
+1. **Finish gating rank 7 and open the PR.** Repo `devrc`, branch
+   `fix/result-grammar-scan`. Merge `origin/main` in, run BOTH tiers on the merged tree
+   (sandbox tier one derivation at a time), then `gh pr create`. Files already written:
+   `scripts/testlib/result_grammar.py`, `scripts/tests/test_result_grammar_is_reserved.py`,
+   `scripts/tests/test_gate_exit_truthfulness.py`.
+   forcing: regression — MEASURED, not hypothetical: `test_cleanup_disk_gate.sh` forged
+   `RESULT: PASS (exit=0)` and `test_gate_exit_truthfulness.py` read the forged PASS off a
+   run whose own verdict was FAIL. The work is done; only the gate and the PR remain, and
+   an un-merged branch holding a shipped guard protects nothing.
+2. **Rotate the leaked `activity_reader` credential** (was rank 5; unchanged).
+   forcing: security — a LIVE exposure, an `activity_reader` password in cleartext in the
+   opencode session store. Zach's to do; the only item here with an EXTERNAL forcing
+   function.
+3. **Release the claim when 1 lands** — `claim-work --release skill-usage-telemetry-7`.
+   forcing: gate — an unreleased ref is the one way `claim-work` blocks another session,
+   and this one is held right now.
+4. **The `adoption-scan` `via: "skill"` registry arm.** Gate re-measured 2026-08-30:
+   26 distinct identities fleet-wide of 35 devrc-managed skills, both hosts reporting, 0
+   rejects. Files: `scripts/session-analysis/adoption-scan.py`,
+   `claude/skills/adoption-scan/SKILL.md`.
+   forcing: none — unchanged from the previous session's honest answer. The incident that
+   forced this effort is already closed by #1000 + #1059. Do not work it on the strength
+   of being written down.
+5. **The `attributionSkill` deadman.** File: `scripts/validation/invariants.py`.
+   forcing: none — guards a hypothetical silent zero; nothing has regressed.
+6. **`claudedocs/followups-skill-usage-telemetry.md`** — `audit-dispatch.py`'s
+   wrong-toolchain brief (⚠ possibly closed by #1104 this session — CHECK before working
+   it) and G5, the ClickHouse creds/query helper.
+   forcing: none — same reasoning as 4 and 5.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`find-session`'s "both hosts" claim was HALF FALSE for weeks** and is the root cause of
@@ -284,24 +325,68 @@ a fleet-wide claim cannot be made from this data yet. Re-check both hosts appear
   this session is now documented as producing FALSE failures** (CLAUDE.md, #1088). That run
   was **GREEN**, and a combined green is trustworthy — but run them one at a time from now on.
 
+- 🔴 **`gate.sh` was right and the handoff's prose was wrong about which reader was
+  exposed.** Worth knowing generally: the doc named the production channel; the defect was
+  in the TEST that certifies it. Read the consumer before believing a hazard's stated blast
+  radius — `grep -n 'RESULT' scripts/gate.sh` was the whole investigation.
+- 🔴 **A selection predicate open-coded twice, with DIFFERENT semantics, was the bug** —
+  `tail -1` in bash, `re.search` in Python. Consolidating them into
+  `testlib/result_grammar.select_verdict` is what made the disagreement audible;
+  `RULES.md` → "One rule, one place" as a bug-finding instrument, not hygiene.
+- 🔴 **Selecting on the STRICTER grammar is what made the guard forgeable.** Requiring
+  `\(exit=\d+\)` to SELECT means the regressed bare form is skipped rather than reported —
+  the reader walks past the real line looking for a prettier one. Select loosely, assert
+  the shape.
+- **`xargs -0 command grep` exits 127** — `command` is a shell BUILTIN and xargs needs a
+  real executable. Cost one confusing empty result that looked like "no matches" (the
+  documented parsing trap, in a new shape). Use `/run/current-system/sw/bin/grep`.
+- **The `| tail` trap fired again, exactly as documented:** `bash scripts/gate.sh … | tail -30; echo "GATE_RC=$?"` printed `GATE_RC=0` over a run whose own line said
+  `GATE: RESULT=FAIL exit=1`. The verdict line is what survives; read it, never the rc.
+- **`gate.sh` exit 3 is a MISSING ENVIRONMENT, not a code failure** — run it as
+  `nix develop ~/workspace/devrc --command bash scripts/gate.sh …`. The pytest tier needs
+  the flake's `gateTools` on PATH; `.envrc` is `use opencode` and does not provide them.
+- **Mutation battery, all six watched red with this guard's own message and a green control
+  after each restore** (`PYTHONDONTWRITEBYTECODE=1`, the stale-`.pyc` trap):
+  M1 planted collision → `forges_a_verdict_line`; M2 unpinned near-miss →
+  `prefix_emission_is_either_pinned`; M3 near-miss payload changed → BOTH ledger arms;
+  M4 `tail -1`→`head -1` → `shell_reader_still_agrees`; M5 `hits[-1]`→`hits[0]` →
+  `takes_the_last_line_not_the_first`; M6 runner → bare `RESULT: FAIL` →
+  `carries_the_exit_code`.
+- **No `clawgate-task:` recorded, deliberately.** `clawgate_handoff.sh resolve` exited 5
+  (0 tasks for this session) with its positive control confirming the board is reachable.
+  Per the skill that is NOT a clean bill of health — an unknown session id also answers 200
+  with an empty array — so no field was written.
+
 ## How to verify
 ```bash
-# 1. the question that started this — keyword hits vs real uses
-python3 ~/workspace/devrc/scripts/find-session.py signal --claude-only | head -1
-python3 ~/workspace/devrc/scripts/find-session.py --skill signal --limit 20
+# 1. the guard, and the six mutations it was watched red against
+nix develop ~/workspace/devrc -c python3 -m pytest \
+  ~/workspace/devrc-result-guard/scripts/tests/test_result_grammar_is_reserved.py -q
 
-# 2. the ranks 3/4 gate — re-run before building the adoption-scan arm
-#    (expects BOTH hosts present; a one-host reading is not a fleet reading)
-SELECT host, count() AS rows,
-       uniqExact(arrayJoin(JSONExtractKeys(payload,'skills_used'))) AS ids
-FROM activity.events
-WHERE source='claude' AND kind='session-summary'
-  AND ts > now() - INTERVAL 7 DAY AND JSONLength(payload,'skills_used') > 0
-GROUP BY host
+# 2. the live near-miss — RUN it, do not read it (prints `RESULT: all good` at column 0)
+nix develop ~/workspace/devrc -c python3 \
+  ~/workspace/devrc/scripts/claude-hooks/tests/test_bash_guard.py | tail -4
 
-# 3. fleet parity — READ EVERY PER-HOST LINE, not the final verdict
-bash ~/workspace/devrc/scripts/drift-check.sh
+# 3. the two readers now agree — gate.sh must still say `tail -1`
+grep -n "verdict=" ~/workspace/devrc/scripts/gate.sh
 
-# 4. the rescued script's gate (green here, red under an APPLY=0 -> APPLY=1 mutation)
-bash ~/workspace/devrc/scripts/tests/test_cleanup_disk_gate.sh
+# 4. BOTH tiers on the MERGED tree — the sandbox one is what Tekton gates on,
+#    and a combined nix build of both derivations produces FALSE failures
+nix develop ~/workspace/devrc --command bash scripts/gate.sh --tier both --set hermetic <wt>
+nix build .#checks.x86_64-linux.pytests
 ```
+## State now — rank 7 BUILT and mutation-verified on a branch; gate IN FLIGHT (2026-08-30)
+
+- **Ranks 1, 2, 6 remain DONE.** Reconciled this session by `resume-state.sh`: clean
+  digest, no gap block, all 8 referenced PRs MERGED, both hosts converged.
+- **Rank 7 is built, committed and pushed — NOT merged, NOT gated.**
+  Branch `fix/result-grammar-scan` (devrc), based on `72c786c4`, 2 commits:
+  - `8d25c726` — `scripts/testlib/result_grammar.py` (new) + `scripts/tests/test_result_grammar_is_reserved.py` (new) + `scripts/tests/test_gate_exit_truthfulness.py` (modified).
+  - `fa257611` — names what the scan structurally cannot see.
+- **Claim `skill-usage-telemetry-7` is HELD** (`claim-work --release skill-usage-telemetry-7` when done/abandoned).
+- 🔴 **NOT VERIFIED YET.** The dev-host pytest tier was still running when this doc was
+  written; the **sandbox tier (`nix build .#checks.x86_64-linux.pytests`) has NOT been run
+  at all**, and that is the tier Tekton gates on. No PR opened.
+- 🔴 **`origin/main` MOVED during the session** (`72c786c4` → `ebbe5eaa`; #1065, #1081,
+  #1104 landed). One of them touches `scripts/run-tests.sh` — the file this guard PARSES.
+  The merged tree has not been gated.
