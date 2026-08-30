@@ -15,9 +15,32 @@ Detect clawgate/GitHub/ClickUp references in agent output, emit telemetry, and m
 them clickable in the terminal the way a URL already is. **SHIPPED AND VERIFIED LIVE.**
 
 ## State now
+🔴 **ALL FOUR RANKS ARE NOW CLOSED EXCEPT RANK 2 (CI capacity).** Ranks 1 and 3 shipped;
+rank 4 is closed **as obsolete** — read its entry before re-opening it, the reasoning is
+the deliverable. What is genuinely still open is listed under "Still open" below.
+
 - Branch: `main`, clean. `origin/main` was `e0e29e7b` when this doc was written and is
-  `3b1a0477` as of 2026-08-30 — the moves since are other threads' handoff docs, none
-  touching the mention feature
+  `ac64ccb4` as of 2026-08-30 — the moves since are other threads' work, none touching
+  the mention feature. It moved **four times during this session's own gate runs**, which
+  is why every merge here re-checked the merged tree rather than trusting a branch-green.
+- **clawgate is 0.8.19 live** (`clawgatectl health`), pin commit `8503620a` on
+  `homelab-infra` trunk, carrying the `#task-N` deeplink fix.
+
+**Still open, with owners:**
+- **Rank 2, CI capacity** — untouched, and it BIT this session repeatedly. Diagnosis
+  added to that rank.
+- **`innovation-upstream/devrc#1099`** — corrects a false 🔴 claim ("the browser layer is
+  UNGATED by CI") in three places. Correct and locally verified (526 tests); **BLOCKED by
+  the flaky gate**, not by its content. Worktree `devrc-clawgate-ci` is deliberately left
+  on disk holding its branch.
+- **clawgate #463** — the board-scroll layout bug found by verifying #440 live.
+- **clawgate #440** — `ready_for_review`, blocked on #463 for its criterion 1.
+- **`homelab-infra` base clone cannot fast-forward** — `merge --ff-only` refuses on a
+  dirty `flake.nix` (+ `.claude/skills/deploy/SKILL.md`, untracked files); stuck at
+  `93876471` vs trunk `4964d223`. Pre-existing, NOT this session's, and it did not affect
+  the deploy (that went through a clean worktree). Left alone: it is someone's uncommitted
+  work, and this is the silent-drift shape — a base clone that cannot ff stops receiving
+  changes while looking healthy.
 - **Both hosts deployed and converged** (`ship.sh` → `ad5274b6`, cross-host agreement,
   0 dangling artifacts on either)
 
@@ -81,8 +104,32 @@ test + 3 registrations). Not mine to merge.
 
 ## Open investigations — live diagnosis state
 
-### clawgate deeplink `#task-N` is inert — filed as clawgate task #440 (open)
-- **Symptom + exact repro:** open `https://clawgate.zacx.dev/tasks#task-370`. The board
+### ~~clawgate deeplink `#task-N` is inert~~ — FIXED, deployed 0.8.19, verified live
+**CLOSED 2026-08-30.** `taskHashScript()` shipped in `homelab-infra#564` (squash
+`9ff37992`) and reached the running pod as **clawgate 0.8.19** (pin commit `8503620a`).
+The leading hypothesis below was **CORRECT** and is now confirmed by the fix working.
+
+Verified against the deployed pod, not a fixture — headless Chromium at 1280×720 driven
+straight at the LAN NodePort:
+```
+ARRIVE  #task-253  inViewport=true  data-task-hash-focus=true  scrollY 0 -> 20736
+HASHCHG #task-440  inViewport=true  data-task-hash-focus=true  scrollY -> 1204
+PREVIOUS #task-253 data-task-hash-focus=null   NO-RELOAD sentinel="kept"   CONSOLE ERRORS: []
+```
+
+🔴 **The live check found a SECOND, PRE-EXISTING bug that the e2e structurally could not
+— now clawgate task #463 (open).** The bottom of the board cannot be scrolled to:
+`scrollHeight` 21,997 vs maxScroll 21,277, and at maxScroll the last card sits at
+`rect.top +6,510` — **60 of 248 cards unreachable by ANY scroll** (wheel, `scrollTo`,
+`scrollIntoView`). Control proving it is not the new handler: measured on `/tasks` with
+**no fragment**, so the handler never armed, and it reproduces with that code inert.
+So **#440 is `ready_for_review`, NOT `complete`** — its criterion 1 is satisfied for the
+reachable 76% of the board and is unsatisfiable for the rest until #463 lands.
+
+The original diagnosis is kept below because #463 inherits its layout context.
+
+- **Symptom + exact repro (as measured BEFORE the fix):** open
+  `https://clawgate.zacx.dev/tasks#task-370`. The board
   loads; the page does NOT scroll to or focus task 370. Reachable from the shipped
   feature: click a bare `#N` mention → rofi picker → choose the clawgate candidate.
 - **Observed (with values):**
@@ -106,18 +153,71 @@ test + 3 registrations). Not mine to merge.
    REMAINING INTERACTIONS NOW VERIFIED" above. Closed by machine observation on an
    isolated Xvfb rather than by an operator report, because the operator was mid-game
    when the check came due (see Gotchas). No repo change; nothing left open here.
-2. **CI capacity — the durable fix.** `ZacxDev/homelab-infra`,
-   `clusters/homelab/apps/tekton-pipelines/`. Gate pods request far more than they use
-   (nodes at 28–36% CPU while 6 gate pods sat `Pending` on `ExceededNodeResources`).
-   Either cap concurrent `devrc-ci` PipelineRuns or right-size the requests. Closing
-   condition: a `devrc-ci` run scheduling promptly with ≥6 others active.
-3. **Fix `clawgate` deeplink** — clawgate task **#440**, `ZacxDev/homelab-infra`,
-   `containers/clawgate`. Client-side hash handler + `hashchange`, reusing `.card-enter`.
-   Closing condition: #440's 6 criteria, verified by a new spec in
-   `e2e/tests/tasks.spec.ts` shown RED before / GREEN after.
-4. **Document the branch-protection escape hatch's asymmetry** in `devrc/CLAUDE.md` —
-   it currently names the `DELETE` but not that restoring needs a full `PUT` (see
-   Gotchas). Closing condition: merged PR touching that paragraph.
+2. **CI capacity — the durable fix. STILL OPEN, and it is now failing PRs, not just
+   queueing them.** `ZacxDev/homelab-infra`, `clusters/homelab/apps/tekton-pipelines/`.
+   Gate pods request far more than they use (nodes at 28–36% CPU while 6 gate pods sat
+   `Pending` on `ExceededNodeResources`). Either cap concurrent `devrc-ci` PipelineRuns or
+   right-size the requests. Closing condition: a `devrc-ci` run scheduling promptly with
+   ≥6 others active.
+   **Measured 2026-08-30 on one docs-only PR (#1099), three consecutive runs, three
+   different outcomes, none about the diff:**
+   - run 1 `e1183352` → **`ERROR`**, not failure: `TaskRunTimeout`, *"failed to finish
+     within 1h0m0s"*. `seed-nix` alone consumed **~43 of the 60 minutes** (17:58Z→18:41Z),
+     leaving the test steps ~17 min before the TaskRun was killed. Surfaced on the PR as
+     `COULD NOT RUN: pytests — the gate stopped before this leg reported`.
+   - runs 2 and 3 → real verdicts, but red on **`test_subsystem_store_api.py`**, a
+     different test each time. Run 3's failure named its own mechanism (that file's tests
+     are instrumented for exactly this): `MECHANISM = TRANSPORT`, writer #4's POST raised
+     `TimeoutError` at 60.06s. Per-writer elapsed in ONE 8-way race: `0.36s 0.9s 2.03s
+     3.34s 4.93s 6.25s` … then **42.94s** and **60.06s**. The `…was lost` arm — the
+     real-defect arm — did NOT fire, so the entry lock is not implicated.
+   - **Two dimensions, not one.** Requests/scheduling is the known half; the other is that
+     gate SETUP can eat most of its own `timeouts.tasks` budget. A gate whose seed step
+     can consume 70% of its timeout will keep producing `ERROR` on innocent PRs.
+   - **Control, so this is not a guess:** five open PRs were red simultaneously on
+     different tests concentrated in the store-API suite (the tests that stand up a real
+     HTTP server), while six others passed at 19,292–19,431 collected. Unrelated diffs,
+     different tests, one file family = load, not five regressions.
+   - 🔴 **Do NOT "fix" this by widening `test_subsystem_store_api.py`'s timeouts.** That
+     file's docstring forbids it in terms, and correctly: widening converts the load case
+     into a pass and leaves the defect case looking identical.
+   - Cost driver, for whoever takes it: each append holds `_EntryLock` — a blocking
+     `fcntl.flock(LOCK_EX)`, no timeout — across a read-modify-write with **two `fsync`s**
+     (file, then directory). Eight racers serialise through that on a box running ~19.4k
+     tests under xdist.
+3. ~~**Fix `clawgate` deeplink**~~ — **DONE 2026-08-30.** Closing condition was "#440's 6
+   criteria, verified by a new spec in `e2e/tests/tasks.spec.ts` shown RED before / GREEN
+   after"; measured with the SAME spec file on both sides — **3 failed / 1 passed at
+   `3b90b6ee`, 4 passed after**. Merged `homelab-infra#564`, deployed 0.8.19, verified
+   live (see the closed investigation above). ⚠ The **handoff's** closing condition is
+   met; **#440's own** is not — it sits `ready_for_review` behind the newly-filed #463.
+   Successor item is #463, not this rank.
+4. ~~**Document the branch-protection escape hatch's asymmetry**~~ — **CLOSED AS OBSOLETE
+   2026-08-30. Do not re-open it; the paragraph would be redundant AND slightly harmful.**
+   This rank was written before `#1065` merged. Measured today:
+   - **The exact text it asks for already exists**, at the site an operator actually
+     reads — `scripts/drift-check.sh` (on `main`): *"`gh api -X PATCH
+     …/protection/required_status_checks` CANNOT restore the sub-resource after a DELETE
+     — it returns non-zero and changes nothing. Restoring needs a full `PUT
+     …/branches/main/protection`. That is why the measured break-glass left main
+     unprotected despite a restore trap that ran: the rollback path had never been
+     executed once."*
+   - **A deterministic detector now covers the hazard and is LIVE** — rc 24, merged as
+     `#1065`. `drift-check.timer` is `active`+`enabled`; last run 2026-08-30 12:24 CDT.
+     Its verdict is the **context count**, never the `protected` flag. Prose hoped
+     someone would read it; rc 24 fires 4×/day.
+   - Live protection reads healthy: `enforce_admins: true`, `strict: false`, both
+     contexts present with `app_id` 4320115 pinning.
+   🔴 **And the edit as SPECIFIED is the wrong shape.** `CLAUDE.md` still hands over the
+   `DELETE` with no mention of the asymmetry — but "also document the `PUT`" makes a
+   one-way, hard-to-reverse operation MORE usable, exactly when someone reaches for it
+   under pressure (measured 2026-08-30: the devrc gate failed three consecutive runs of
+   an innocent docs PR). It would also have prevented **neither** measured incident: the
+   first one *had* a restore trap, it *ran*, and main was left unprotected anyway. If
+   anything belongs in `CLAUDE.md` it is one clause saying the DELETE is one-way and that
+   rc 24 watches for it — a pointer to the detector, not a copy of the recipe. That is a
+   materially different edit and needs its own decision, so it was NOT made under this
+   item's authority.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A terminal-UI interaction can be verified WITHOUT taking the operator's screen —
