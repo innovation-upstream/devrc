@@ -173,6 +173,51 @@ since the last session that read it. Both are cheap; which one is right depends 
 drift is usually a RENAME (X and Y are the same work) or a genuine SCOPE MOVE — that split
 has not been measured, and the 5 unlinked cases above are the set to read.
 
+### ✅ CLOSED — the audit ladder on #1108, and what SIX rounds on a 21-line docs PR actually taught
+**Every round found something real, and five of the six found the PREVIOUS round's correction
+wrong.** That ratio is the durable finding here, not the PR.
+
+| round | what it caught |
+|---|---|
+| 1 | the PR's recorded cause was falsified by the tree it described |
+| 2 | the R1 fix **deleted a safety instruction** ("proven on a scratch pipeline") and leaned on a control invalid on the exact variable it refuted |
+| 3 | the R2 fix asserted a "measured difference" (root dir 0777 vs 0755) that is **measurably absent** — `cp -a` overwrites the destination root's mode |
+| 4 | the R3 fix rested on a premise the tree contradicts — "the gate runs as `nixbld`"; it runs as **root** (`uid=0`) |
+| 5 | the R4 fix **censused the wrong population** (live pods, not TriggerTemplates), losing `remix-ux-audit`, and left a self-contradiction 50 lines away |
+| 6 | a dead external path in the one class gate 0 cannot see, and the same stale claim left in the **auto-loaded body** |
+
+🔴 **THE GENERATOR, NAMED: a literal fact restated in prose, derived from a population that is
+not the defining one, going stale.** Rounds 2–5 were all the same shape wearing different
+clothes, and each round's fix supplied the next round's finding. **Restating the number a third
+time is what does NOT work.** What closed it was structural — delete the list, ship the
+DERIVATION COMMAND over the defining population, and *run the command before shipping it*.
+Round 6 ran it byte-for-byte out of the markdown (rc 0, reproduces 4/1/8, robust to a missing
+`podTemplate`) and called it *"the first correction in this ladder that I could not falsify
+against the tree."*
+
+🔴 **THE STOP GATE COULD NOT FIRE, AND NOBODY WOULD HAVE NOTICED.** `/audit-pr`'s mechanical
+stop is *two consecutive rounds whose fixes changed zero PAYLOAD lines* — the check that catches
+a ladder auditing its own scaffolding. **On a docs-only PR the payload IS the `.md`, so every
+fix round is 100% payload by construction and the gate can never trip.** Six rounds ran with the
+gate structurally silent. Stopping was a judgement call: round 7 would have re-read two edits
+whose correctness is settled by `ls <path>` and one `grep`. **When you open a ladder on a docs
+PR, say up front that the gate is inert and that you will stop on judgement.**
+
+🔴 **A DIAGNOSTIC A SKILL PRESCRIBES CAN BE UNABLE TO OBSERVE ITS OWN CONDITION.** Gotcha 6(b)
+is titled *"`sandbox = false` in the CI pod"* and instructed the reader, under a 🔴, to run
+`nix config show | grep "^sandbox "`. Measured live: `sandbox = true`, `sandbox-fallback = true`,
+**`/build` absent**, build in `/tmp/nix-build-*` — the pod builds unsandboxed and the
+*configured* value reads `true`. The prescribed command returns a reassuring `true` over exactly
+the condition it exists to catch, so an operator following the 🔴 concludes "not a broken gate,
+debug your diff" — the precise inversion it was written to prevent. **Ask of any detector in a
+doc: does it read the CONFIGURED value or the EFFECTIVE one?**
+
+**Method notes worth reusing:** dispatch each round BLIND to the previous round's reasoning (the
+brief carries only what the fixes CLAIM, never why they are correct); re-derive every auditor
+finding first-hand before acting on it — three of the six rounds' headline numbers moved when I
+checked them; and post the `audit-claims` block per round so the next brief cannot be assembled
+against a range that is empty by construction.
+
 ### ✅ CLOSED — the red `devrc-ci` checks are a CAPACITY problem, and the repo had already diagnosed it
 **Answer: a localhost round-trip losing the scheduler while ~12 pipelineruns share one node.
 The test logic is never reached, so the gate reports a code failure for a capacity problem.**
@@ -397,10 +442,12 @@ rather than removed and renumbered. New work is appended at the end.
    (08-29T22:09Z) swapped the PVC for the hostPath, `7839ef54` (08-30T00:29Z) reverted it.
    Live now: `nodeSelector kubernetes.io/hostname=talos-xr6-r7p`, volume `nix-cache` →
    `persistentVolumeClaim: nix-store-cache` (30Gi Bound). What WAS missing is why the hostPath
-   cannot simply come back — a second, independent blocker (`DirectoryOrCreate` is root-owned,
-   so `big-lock: Permission denied` on 42 tests, every devrc PR) that gotcha 6(a)'s closing
-   "the narrow fix is a baseline-compatible cache" invited someone to walk straight into.
-   Shipped as **devrc#1108, OPEN**.
+   cannot simply come back — a second, independent blocker that gotcha 6(a)'s closing "the
+   narrow fix is a baseline-compatible cache" invited someone to walk straight into.
+   Shipped as **devrc#1108, OPEN** — 7 commits, **audit ladder CLOSED after 6 rounds**, gate
+   re-triggered by empty commit `a3f15123`. 🔴 **Every round found something real, and FIVE of
+   the six found the PREVIOUS round's correction wrong** — that ratio is the finding, not the
+   PR. See "The audit ladder on #1108" below.
    forcing: none
 7. ✅ **DONE (2026-08-30)** — merged, shipped to both hosts, registered on both, and probed live
    against the deployed copy (block · self-suppress · read-with-no-work silent · no state for an
