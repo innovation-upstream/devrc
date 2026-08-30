@@ -453,7 +453,7 @@ update was silently deleting this. It is the durable record step 2 acts on.**
   confirmed on the mapped token and (ii) the legacy line stopping cleanly at the cutover
   instant. Do not quote the zero as though traffic were heavy.
 - ✅ **BOTH step-2 token-file states pre-flighted against the DEPLOYED `server.py` — 8/8.**
-  Harness: `<scratch>/preflight_tokens.py`, run against `/app/scripts` extracted from the pod
+  Harness: **`scripts/tests/preflight-subsystem-store-tokens.py`** (devrc), run against `/app/scripts` extracted from the pod
   (`server.py` sha256 `d17aaea8d521acd58dbc72783fe470c4e355252036f8c6d70afc03fd2aa8e34b`,
   226,998 B, re-verified against the pod's own `sha256sum`). **Synthetic tokens only — the real
   secret never left the pod.**
@@ -532,7 +532,8 @@ KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec $POD -- \
   tar cf - -C /app scripts | tar xf - -C <dir>/deployed
 KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec $POD -- \
   sha256sum /app/scripts/subsystem-store-api/server.py   # must equal the extracted copy
-PYTHONDONTWRITEBYTECODE=1 python3 <scratch>/preflight_tokens.py > out 2> err; echo $?   # 0, "RESULT: 8/8"
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/tests/preflight-subsystem-store-tokens.py <dir> > out 2> err; echo $?
+#   rc 0 and "RESULT: 8/8"; with NO argument it must exit 1 with a usage line (its own negative control)
 
 # (4) step (c)'s precondition and its post-edit proof (token bytes never printed)
 KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec $POD -- ls -1 /data          # 15 scopes
