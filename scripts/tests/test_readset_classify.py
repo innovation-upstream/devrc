@@ -27,8 +27,55 @@ sys.modules["readset_classify"] = rc
 _SPEC.loader.exec_module(rc)
 
 
+_PSPEC = importlib.util.spec_from_file_location(
+    "readset_plugin", REPO_ROOT / "scripts" / "testlib" / "readset_plugin.py")
+rp = importlib.util.module_from_spec(_PSPEC)
+sys.modules["readset_plugin"] = rp
+_PSPEC.loader.exec_module(rp)
+
+
 def _verdict(*execs):
     return rc._exec_verdict(set(execs))
+
+
+# ------------------------------------------------- plugin: path attribution
+
+def test_a_SIBLING_worktree_is_not_inside_this_repo():
+    """🟡 AUDIT R1-F6. `devrc-readsets` startswith `devrc`.
+
+    A bare prefix compare mapped /home/zach/workspace/devrc-readsets/scripts/x
+    to '-readsets/scripts/x' — a phantom trigger prefix. ~45 such sibling
+    worktrees exist on this box, and the corpus has tests built around them.
+    """
+    sibling = str(rp.REPO_ROOT) + "-readsets/scripts/x.py"
+    assert rp._rel(sibling) is None, rp._rel(sibling)
+
+
+def test_a_path_inside_the_repo_is_still_relative_to_it():
+    """The positive control for the sibling guard — it must not over-reject."""
+    inside = str(rp.REPO_ROOT) + "/scripts/lib/x.py"
+    assert rp._rel(inside) == "scripts/lib/x.py"
+    assert rp._rel(str(rp.REPO_ROOT)) == "."
+
+
+def test_a_RELATIVE_path_read_is_not_discarded(monkeypatch):
+    """🟡 AUDIT R1-F7. The `open` event carries the path AS PASSED.
+
+    `open("scripts/x")` under a repo-root cwd used to return None and vanish —
+    under-classification, the unsafe direction.
+    """
+    monkeypatch.chdir(rp.REPO_ROOT)
+    assert rp._rel("scripts/lib/relative_read.py") == "scripts/lib/relative_read.py"
+
+
+def test_os_stat_is_NOT_claimed_as_a_traced_event():
+    """🔴 AUDIT R1-F2. CPython raises no audit event for stat.
+
+    Listing it raised nothing while READING as coverage. Pinning its absence so
+    nobody re-adds it believing it works.
+    """
+    assert "os.stat" not in rp._PATH_EVENTS
+    assert "STAT-ONLY DEPENDENCIES ARE INVISIBLE" in rp.__doc__
 
 
 # --------------------------------------------------------- positive controls
@@ -79,17 +126,18 @@ def test_a_stub_binary_outside_the_repo_is_NOT_a_scan():
     assert scans == []
 
 
-def test_a_SCANNER_binary_living_outside_the_repo_is_acquitted():
-    """Reaches the argv[0] acquittal — nothing else here does.
+def test_a_SCANNER_at_an_absolute_path_scanning_DOT_is_a_scan():
+    """🟡 AUDIT R1-F3 — THIS TEST'S ASSERTION WAS INVERTED BY THE AUDIT.
 
-    🔴 Mutation sweep: deleting that guard left all 12 other tests green. The
-    stub-binary test above never reaches it, because `bw` is not a recognised
-    scanner and is dropped one branch earlier. This uses a basename that IS a
-    scanner (`grep`) at a path outside the tree, with an operand that would
-    otherwise pass, so argv[0] is the only thing left that can acquit it.
+    It used to assert that an absolute-path executable outside the repo was
+    ACQUITTED, and it passed, and it was wrong: where the BINARY lives says
+    nothing about what it READS. `grep -r needle .` at a repo cwd scans this
+    tree whether grep came from /nix/store, /usr/bin or a fixture dir — and the
+    corpus really does invoke git by absolute store path. The old rule
+    acquitted genuine `/nix/store/.../git ls-files` scans.
     """
     scans, _ = _verdict("/tmp/fixtures/bin/grep -r needle .\t@.")
-    assert scans == [], scans
+    assert len(scans) == 1, scans
 
 
 def test_a_git_WRITE_subcommand_at_repo_root_is_not_a_scan():
@@ -148,10 +196,16 @@ def test_reading_the_repo_root_makes_a_file_always_run():
     assert out["scripts/tests/test_x.py"]["always_run"] is True
 
 
-def test_own_directory_reads_do_not_count_as_a_dependency():
-    """Importing yourself is not a dependency on the rest of the tree."""
+def test_reading_only_YOUR_OWN_FILE_is_not_a_dependency():
+    """🟡 AUDIT R1-F8 — THIS TEST'S FIXTURE WAS NARROWED BY THE AUDIT.
+
+    It used to include a sibling `helper.txt` and assert n_paths == 0, which
+    passed and was wrong: excluding the whole parent directory erased every
+    same-directory dependency (fixtures, the doc-path baseline). Only the
+    file's own import is genuinely not a dependency.
+    """
     merged = {"scripts/tests/test_x.py": {
-        "paths": {"scripts/tests/test_x.py", "scripts/tests/helper.txt"},
+        "paths": {"scripts/tests/test_x.py"},
         "execs": set()}}
     out = rc.classify(merged)["scripts/tests/test_x.py"]
     assert out["always_run"] is False
@@ -165,6 +219,93 @@ def test_an_external_read_becomes_a_trigger_prefix():
     out = rc.classify(merged)["scripts/tests/test_x.py"]
     assert out["always_run"] is False
     assert set(out["triggers"]) == {"nix/pkgs", "scripts/lib"}
+
+
+# ------------------------------------------- audit round 1 (PR #1120) fixes
+
+def test_a_nested_pytest_over_a_repo_dir_is_OPAQUE_not_scoped():
+    """🔴 AUDIT R1-F1. The corpus's dominant opacity shape.
+
+    Keying OPAQUE on the literal token `-c` let a nested
+    `python3 -m pytest <repo dir>` fall through BOTH branches and be reported
+    as "scoped — proven bounded" with two trigger prefixes. Real: measured on
+    test_hook_tests_dir_collects.py.
+    """
+    scans, opaque = _verdict(
+        "/nix/store/x/python3 -m pytest -p no:cacheprovider scripts/claude-hooks/tests\t@.")
+    assert scans == [], scans
+    assert len(opaque) == 1, opaque
+
+
+def test_bash_running_a_repo_SCRIPT_is_OPAQUE_not_scoped():
+    """🔴 AUDIT R1-F1, second shape: `bash <repo script> <REPO_ROOT>`.
+
+    No `-c`, so the old rule scored it clean; it is a repo-wide walk.
+    """
+    scans, opaque = _verdict("bash scripts/run-node-tests.sh --check-suites .\t@.")
+    assert scans == [], scans
+    assert len(opaque) == 1, opaque
+
+
+def test_an_UNRECOGNISED_command_is_OPAQUE_never_clean():
+    """🔴 AUDIT R1-F1 generalised: fall-through must be UNKNOWN, not clean."""
+    scans, opaque = _verdict("some-unknown-tool --do-a-thing\t@.")
+    assert scans == []
+    assert len(opaque) == 1, opaque
+
+
+def test_git_by_ABSOLUTE_store_path_is_still_a_scan():
+    """🟡 AUDIT R1-F3. `git` lives in /nix/store here.
+
+    Acquitting on argv[0] being an absolute path outside the repo acquitted
+    real `/nix/store/.../git ls-files` scans — and the corpus does invoke git
+    by absolute store path via the mockbin/gitenv machinery.
+    """
+    scans, _ = _verdict("/nix/store/abc-git-2.55.0/bin/git ls-files\t@.")
+    assert len(scans) == 1, scans
+
+
+def test_a_scan_from_a_repo_SUBDIR_cwd_is_still_a_scan():
+    """🟡 AUDIT R1-F4. The untested twin of the `-C` bug, other route."""
+    scans, _ = _verdict("git ls-files\t@scripts")
+    assert len(scans) == 1, scans
+    scans2, _ = _verdict("rg --files\t@scripts/tests")
+    assert len(scans2) == 1, scans2
+
+
+def test_an_operand_that_IS_the_repo_root_is_not_treated_as_outside():
+    """🔴 REGRESSION INTRODUCED BY THE ROUND-1 FIX ROUND ITSELF.
+
+    Switching the operand check to a separator-terminated prefix made
+    REPO_ROOT itself fail the test — "/…/devrc" does not start with
+    "/…/devrc/" — so `git -C <REPO_ROOT> ls-files` was acquitted. That is the
+    most common way this corpus spells a repo scan: 14 files silently lost
+    their ALWAYS-RUN verdict (22 -> 9) before this was caught by diffing the
+    two classification runs.
+    """
+    root = str(rc.REPO_ROOT)
+    scans, _ = _verdict(f"git -C {root} ls-files --error-unmatch scripts/x.py\t@.")
+    assert len(scans) == 1, scans
+
+
+def test_a_same_directory_fixture_is_a_dependency():
+    """🟡 AUDIT R1-F8. Self-scoping must exclude the FILE, not the DIRECTORY."""
+    merged = {"scripts/tests/test_x.py": {
+        "paths": {"scripts/tests/test_x.py",
+                  "scripts/tests/doc-path-baseline.tsv",
+                  "scripts/tests/fixtures/sample.json"},
+        "execs": set()}}
+    out = rc.classify(merged)["scripts/tests/test_x.py"]
+    assert out["n_paths"] == 2, out["sample_paths"]
+    assert "scripts/tests" in out["triggers"]
+
+
+def test_a_git_WRITE_verb_is_clean_but_an_UNKNOWN_verb_is_opaque():
+    """The fall-through inversion must not make every git call opaque."""
+    scans, opaque = _verdict("git commit -m msg\t@.")
+    assert (scans, opaque) == ([], []), (scans, opaque)
+    scans2, opaque2 = _verdict("git some-new-verb\t@.")
+    assert scans2 == [] and len(opaque2) == 1, (scans2, opaque2)
 
 
 def test_opaque_does_not_silently_become_always_run():

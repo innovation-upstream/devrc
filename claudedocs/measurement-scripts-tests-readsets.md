@@ -1,4 +1,4 @@
-# Measured: what `scripts/tests` actually reads — and what decomposing it is worth
+# Measured: what `scripts/tests` actually reads — and why decomposing it buys ~8%
 
 **Date:** 2026-08-30 · **Effort:** ci-speedup rank 2 · **Claim:** `ci-speedup-2`
 
@@ -13,83 +13,101 @@ attaches a 🔴 to its own input:
 > is between ~8s and 394s and needs **empirical** measurement (change an
 > unrelated file, see what fails), not another regex.
 
-This is that measurement. It is not a regex and it is not a perturbation run —
-it is a **read-set trace**: what each test file actually opens, lists, scans and
-spawns, recorded by a `sys.addaudithook` while the suite runs.
+This is that measurement — a **read-set trace**, not a regex and not
+perturbation: a `sys.addaudithook` records what each test file opens, lists,
+scans and spawns while the suite runs.
 
 ## The answer
 
-143 of 143 collectible test files measured (the other 4 files in the directory
-are `conftest.py` and three `mutation_battery_*`/`mutants-*` harnesses, none of
-them collectible tests). Timing measured in a **separate, untraced** run so the
-hook's overhead is not in the numbers.
+**All 144 test files in `scripts/tests` classified.** Timing comes from a
+separate, untraced run so the hook's overhead is not in the numbers.
 
-| bucket | files | seconds | share |
-|---|---|---|---|
-| **ALWAYS-RUN** — proven to read the tree | 22 | 163.1s | 12.6% |
-| **OPAQUE** — read set UNKNOWN | 18 | 704.3s | 54.5% |
-| **scoped** — proven bounded | 93 | 425.9s | 32.9% |
+🔴 **TWO DENOMINATORS, NAMED — they are not the same number.** 144 files are
+classified; only **133** have timing pytest will show, because `--durations`
+hides everything under 5 ms. An earlier draft of this table quoted the timing
+denominator's file counts under the classification's total and published
+`22 + 18 + 93 = 133` against a claimed 143. Both halves are given below.
 
-- **The proven always-run set is 163.1s.** The handoff bracketed it at "between
-  ~8s and 394s"; it lands in the lower half, and far below the 394s the regex
-  implied.
-- **Best-case speedup from a perfect path→target mapping: 1.49x.** The handoff
-  estimated rank 3 at "~1.7x alone but ~3.6x after". 1.49x is the measured
-  ceiling *today*, and the 3.6x is not reachable while OPAQUE stands.
-- Estimate history is now **3x → 1.7x → uncertain → 1.49x measured.**
+| bucket | files | of which timed | seconds | share of timed |
+|---|---|---|---|---|
+| **ALWAYS-RUN** — proven to read the tree | 27 | 27 | 185.5s | 14.3% |
+| **OPAQUE** — read set UNKNOWN | 61 | 60 | 1010.2s | 78.1% |
+| **scoped** — proven bounded | 56 | 46 | 97.6s | 7.5% |
+| total | **144** | **133** | 1293.3s | |
 
-### Cross-check on the timing
+- **Best-case ceiling for a perfect path→target mapping: 1.08x.**
+- Estimate history: **3x → 1.7x → uncertain → 1.49x → 1.08x measured.** The
+  1.49x was this document's own first answer and it was wrong; see below.
+- The handoff estimated rank 3 at "~1.7x alone but ~3.6x after". Neither is
+  reachable. **Only 7.5% of this suite's time is provably skippable today.**
 
-Summed per-test durations come to **1293.3s** visible, plus ~74s of sub-5ms
-durations pytest hides (27,012 of them, capped at 0.005s each). That totals
-~1367s — and the handoff independently quotes **1367s of work** for this suite,
-derived by a different route. The timing instrument reproduces a number nobody
-fed it.
+### 🔴 The recommendation this produces: DO NOT BUILD RANK 3 YET
 
-## 🔴 The finding that reframes rank 3
+A path→target mapping built on today's tree buys **8%**. The work that raises
+its ceiling is making the opaque subprocesses legible — until then the mapping
+is a large mechanism guarding a rounding error, and every unmeasured file it
+inherits is a chance to skip a test that should have run.
 
-**The blocker is not file layout. It is subprocess opacity.**
+## 🔴 Subprocess opacity is the whole story
 
-54.5% of the suite's time sits in 18 files that shell out to `bash -c` /
-`python -c` with a repo-root cwd. The audit hook is per-interpreter and cannot
-see a child process's reads, so those files' dependencies are genuinely
-unmeasured — and a path→target mapping must fail safe and run them all. Two
-files are most of it:
+**78.1% of suite time** is 61 files that spawn a child process at a repo cwd
+whose reads this tracer cannot see. The audit hook is per-interpreter; a child's
+own `open` calls are invisible. We record argv and cwd, and a consumer must
+treat such a file as must-run.
 
-| file | time | bucket |
-|---|---|---|
-| `test_subsystem_store_api.py` | 313.3s | OPAQUE |
-| `test_run_tests_floors.py` | 171.2s | OPAQUE |
-| `test_run_tests_preconditions.py` | 77.3s | OPAQUE |
-| `test_drift_check.py` | 62.7s | OPAQUE |
+The biggest single contributors are `test_subsystem_store_api.py` and
+`test_run_tests_floors.py`. Making the top few legible — by declaring their repo
+reads, or running the child under a tracer — decides more than any directory
+split, and is the prerequisite for rank 3 being worth building.
 
-Resolving the top two alone adjudicates ~37% of total suite time. That is a
-better next move than splitting directories, and it is cheap to state as a
-target: make those tests' repo reads visible (declare them, or run the child
-under a tracer), then re-run this measurement.
+`test_drift_check.py`, the file the handoff named as the regex's false positive,
+is **OPAQUE** here — not ALWAYS-RUN. "Unproven" is a different and more honest
+answer than either the regex's "repo-wide" or a bare "scoped".
 
-**`test_drift_check.py` is the specific file the handoff named as the regex's
-false positive.** It is not ALWAYS-RUN here. It is OPAQUE — its repo-wide-ness
-is *unproven*, which is a different and more honest answer than either the
-regex's "repo-wide" or a bare "scoped".
+## Why OPAQUE is its own bucket, and why it is the DEFAULT
 
-## Why OPAQUE is its own bucket
+Folding unknown into always-run inflates a number that then reads as measured;
+folding it into scoped is unsafe. RULES.md is explicit that UNMEASURED must not
+be folded into a clean count.
 
-Folding unknown into always-run would inflate a number that then reads as
-measured; folding it into scoped would be unsafe. RULES.md is explicit that
-UNMEASURED must not be folded into a clean count, so it is reported separately
-and a consumer must treat it as must-run.
+🔴 **Opacity is the fall-through, not an enumerated list.** The first version
+named the interpreters it considered opaque (`bash`, `python3`, …) and keyed on
+the literal token `-c`. That implied everything unnamed was transparent, which
+is backwards: a nested `python3 -m pytest <repo dir>` and a
+`bash <repo script> <REPO_ROOT>` — the corpus's two most common opaque shapes —
+matched neither branch and were published as "scoped, proven bounded". Only a
+**recognised, adjudicated** command may now be scored clean.
+
+## What this cannot see — state these with any claim
+
+- **Reads inside a subprocess.** The entire OPAQUE bucket.
+- 🔴 **Stat-only dependencies.** CPython raises **no audit event** for
+  `os.stat`/`os.lstat`/`Path.exists()`/`Path.is_dir()`/`os.path.exists`
+  (measured on 3.12.14, the gate's interpreter). A guard whose only dependency
+  is `(REPO_ROOT / "scripts" / "x.sh").exists()` records an **empty** read set
+  and classifies as bounded — so adding or deleting the very file it polices
+  re-runs nothing. The corpus contains this shape. An earlier version listed
+  `os.stat` in the traced-event set, where it raised nothing while *reading as*
+  coverage.
+- **Symlinks are not followed** — `_rel` avoids `resolve()` so the hook cannot
+  re-enter, so a read reached through a symlink is attributed to the link path.
+- **A test whose outcome depends on a file it never reads** — e.g. one asserting
+  a count someone else computed. No read-tracer can see that; perturbation can,
+  and has the complementary blind spot (an innocuous edit does not trip a
+  scanner that only fails on violations). Neither method suffices alone.
+- **One run.** Single-observation read sets; a data-dependent branch could read
+  more next time. That error direction is under-classification, the unsafe one.
 
 ## The tools
 
 - `scripts/testlib/readset_plugin.py` — the tracer. Opt in with
-  `-p testlib.readset_plugin` and `DEVRC_READSET_OUT=<prefix>`; writes one JSON
-  shard per xdist worker. Attributes **both** collection-time (module-level) and
-  runtest-time reads, because several files in this corpus read `nix/home.nix`
-  at import.
-- `scripts/lib/readset_classify.py` — merges shards and assigns buckets.
-- `scripts/tests/test_readset_classify.py` — 15 guards, every one pinning a bug
-  this classifier actually shipped.
+  `-p testlib.readset_plugin` and `DEVRC_READSET_OUT=<prefix>`; one JSON shard
+  per xdist worker. Attributes **both** collection-time (module-level) and
+  runtest-time reads, because several files here read `nix/home.nix` at import.
+  It is inert unless that `-p` is passed.
+- `scripts/lib/readset_classify.py` — merges shards, assigns buckets.
+- `scripts/tests/test_readset_classify.py` — 27 guards, each pinning a defect
+  one of these two files actually shipped.
 
 Reproduce:
 
@@ -99,41 +117,43 @@ DEVRC_READSET_OUT=/tmp/rs PYTHONPATH=$DEVRC/scripts \
   -p testlib.nolaunch_plugin -p testlib.spool_plugin \
   -p testlib.gitenv_plugin -p testlib.nogit_plugin \
   -p testlib.readset_plugin -n 4 --dist loadfile
-python3 scripts/lib/readset_classify.py /tmp/rs.*.json --json readsets.json
+python3 scripts/lib/readset_classify.py /tmp/rs.*.json --json /tmp/readsets.json
 ```
 
-## What this cannot see — state these with any claim
+## This classifier reproduced the bug it exists to fix — seven times
 
-- **Reads inside a subprocess.** The whole OPAQUE bucket. Argv and cwd are
-  recorded; the child's own `open` calls are not.
-- **A test whose outcome depends on a file it never reads** — e.g. one asserting
-  a count someone else computed. No read-tracer can see that. Perturbation can,
-  and has the complementary blind spot (an innocuous edit does not trip a
-  scanner that only fails on violations). Neither method is sufficient alone.
-- **One run.** These are single-observation read sets; a test with a
-  data-dependent branch could read more on another run. The direction of that
-  error is under-classification, which is the unsafe one.
+The pattern is the deliverable's real lesson. Every one matched *characters* or
+an *enumeration* rather than the operation actually performed:
 
-## Building the classifier reproduced the very bug it exists to fix — four times
-
-Worth recording, because the pattern is the point. Each draft matched
-*characters* rather than *operations*, exactly as the original regex did:
-
-1. Matched the bare tool name → `git init -q /tmp/x` scored as a repo scan.
-2. Matched a read verb anywhere in argv → a stub binary invoked as
-   `/tmp/.../bw --nointeraction status` scored as a repo scan.
-3. Same → `bash -c '<script mentioning git log>'` scored as a repo scan, off the
-   **script text**.
+1. Matched the bare tool name → `git init -q /tmp/x` scored a repo scan.
+2. Matched a read verb anywhere in argv → a stub invoked as
+   `/tmp/.../bw --nointeraction status` scored a repo scan.
+3. Same, off **script text** inside `bash -c '<script mentioning git log>'`.
 4. Took the first non-flag token as the git subcommand → `git -C scripts
-   ls-files` read as subcommand "scripts" and was **acquitted**. This one is
-   under-classification: it moved **15 files** out of ALWAYS-RUN. Fixing it took
-   the count 7 → 22 and the always-run time 104.7s → 163.1s.
+   ls-files` read as subcommand "scripts" and was **acquitted**.
+5. Keyed OPAQUE on the literal `-c` → nested `pytest <repo dir>` and
+   `bash <repo script>` scored "proven bounded".
+6. Acquitted on argv[0] being an absolute path outside the repo → real
+   `/nix/store/.../git ls-files` scans of this tree acquitted.
+7. Required cwd to be exactly `.` → a scan run with `cwd=scripts` acquitted.
 
-A mutation sweep found 1, 2 and 4; three of the guards were **unreachable** —
-an earlier acquittal always won, so deleting the guard changed nothing and the
-test that "covered" it stayed green. A `-C` branch was also found to be dead
-code (never the sole acquitter) and deleted rather than left reading as
-coverage.
+Findings 1, 2 and 4 were caught by a mutation sweep that also showed **three
+guards were unreachable** — an earlier acquittal always won, so deleting the
+guard changed nothing while its "covering" test stayed green. Findings 5, 6 and
+7, plus the `os.stat` and two `_rel` defects, came from an adversarial audit
+that reproduced them on **real corpus files**, not invented argv.
 
-**A classifier built to fix over-classification that itself over-classifies is
-worse than none, because its number reads as measured.**
+🔴 **And the fix round introduced its own regression, in the unsafe direction.**
+Switching the operand check to a separator-terminated prefix made REPO_ROOT
+itself compare as outside the repo — `/…/devrc` does not start with `/…/devrc/`
+— silently acquitting `git -C <REPO_ROOT> ls-files`, the most common way this
+corpus spells a scan. ALWAYS-RUN fell 22 → 9 and it was caught only by diffing
+the two classification runs against each other, not by any test.
+
+Two pre-existing tests had to have their assertions **inverted**: they asserted
+that an absolute-path binary was acquitted, and that a same-directory fixture
+was not a dependency. Both passed. Both were wrong.
+
+**A classifier built to fix over-classification that itself misclassifies is
+worse than none, because its number reads as measured.** That is why every
+number above is stated with its denominator and its blind spots.

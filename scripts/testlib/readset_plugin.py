@@ -37,6 +37,16 @@ WHAT IT CANNOT SEE — state these with the result, never quietly
 - **Reads by a C extension that bypasses the audit events.** Rare here, but it
   is why the runner ships a POSITIVE CONTROL: a file with a known, deliberate
   repo read must appear in the output, or the instrument is wired to nothing.
+- 🔴 **STAT-ONLY DEPENDENCIES ARE INVISIBLE.** CPython raises no audit event for
+  `os.stat`/`os.lstat`/`Path.exists()`/`Path.is_dir()`/`os.path.exists`
+  (measured, 3.12.14). A guard whose only dependency is
+  `(REPO_ROOT / "scripts" / "x.sh").exists()` records an EMPTY read set and
+  classifies as bounded — so deleting or adding the very file it polices
+  re-runs nothing. This is an under-classification and the corpus contains the
+  shape. A consumer must not treat a small read set as proof of independence.
+- **Symlinks are not followed** — `_rel` deliberately avoids `resolve()` to keep
+  the hook from re-entering, so a read reached through a symlink into the repo
+  is attributed to the link's path, not the target's.
 
 Attribution covers BOTH phases, because module-level reads are real: several
 files in this corpus do `(REPO_ROOT / "nix" / "home.nix").read_text()` at import
@@ -55,7 +65,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Events worth paying for. The hook runs on EVERY audited operation in the
 # interpreter, so the first thing it does is a frozenset membership test and an
 # early return; anything more expensive here shows up as suite wall time.
-_PATH_EVENTS = frozenset({"open", "os.listdir", "os.scandir", "os.stat"})
+# 🔴 `os.stat` IS DELIBERATELY ABSENT, AND ITS ABSENCE IS A BLIND SPOT.
+# CPython raises no audit event for `os.stat`/`os.lstat`/`Path.exists()`/
+# `Path.is_dir()`/`os.path.exists` — measured on 3.12.14, the gate's own
+# interpreter. An earlier draft listed "os.stat" here, which raised NOTHING
+# while READING as coverage: a guard asserting `(REPO_ROOT / "x.sh").exists()`
+# recorded a read set of `[]` and classified as `scoped, triggers(0)`.
+# A dead entry in this set is worse than an honest omission, so it is gone and
+# the gap is named in the module docstring and in the published measurement.
+_PATH_EVENTS = frozenset({"open", "os.listdir", "os.scandir"})
 _EXEC_EVENTS = frozenset({"subprocess.Popen", "os.system", "os.exec"})
 _WANTED = _PATH_EVENTS | _EXEC_EVENTS
 
@@ -68,16 +86,38 @@ _current: list[str] = []          # a stack; [-1] is the file being attributed
 _writing = False                  # re-entrancy guard for our own output write
 
 
+_ROOT_S = str(REPO_ROOT)
+_ROOT_PREFIX = _ROOT_S + "/"
+
+
 def _rel(p: str) -> str | None:
-    """Repo-relative path, or None if it is not inside this repo."""
+    """Repo-relative path, or None if it is not inside this repo.
+
+    🔴 THE PREFIX MUST CARRY A SEPARATOR. A bare `p.startswith(REPO_ROOT)`
+    matches SIBLING directories that merely share the name — with REPO_ROOT
+    `/home/zach/workspace/devrc`, the path
+    `/home/zach/workspace/devrc-readsets/scripts/x.py` mapped to
+    `-readsets/scripts/x.py` and became a phantom trigger prefix. Not
+    theoretical: this box carries ~45 `devrc-*` sibling worktrees, and the
+    corpus contains tests that exist to work with sibling clones.
+
+    🔴 A RELATIVE PATH IS STILL A REPO PATH. The `open` audit event carries the
+    path exactly as passed, so `open("scripts/x")` under a repo-root cwd used to
+    be discarded entirely — under-classification, the unsafe direction. Joined
+    against cwd here, still without `resolve()`.
+
+    No `resolve()`: it stats the path, which re-enters the hook. Symlinks into
+    the repo are therefore NOT followed — a named limitation, not an oversight.
+    """
     try:
-        # No resolve() here: it stats the path, which re-enters the hook and is
-        # the single most expensive thing this function could do. Trading exact
-        # symlink resolution for a hook that does not quadratically re-enter.
-        if not p.startswith(str(REPO_ROOT)):
+        if not p.startswith("/"):
+            cwd = os.getcwd()
+            p = cwd + "/" + p if not cwd.endswith("/") else cwd + p
+        if p == _ROOT_S:
+            return "."
+        if not p.startswith(_ROOT_PREFIX):
             return None
-        rel = p[len(str(REPO_ROOT)):].lstrip("/")
-        return rel or "."
+        return p[len(_ROOT_PREFIX):] or "."
     except Exception:
         return None
 

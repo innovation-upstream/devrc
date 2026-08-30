@@ -40,14 +40,48 @@ _GIT_READERS = frozenset({"ls-files", "grep", "diff", "log", "show",
 _DIRECT_SCANNERS = frozenset({"rg", "grep", "egrep", "fgrep", "find",
                               "ugrep", "ack"})
 # Interpreters that run code this tracer cannot see into.
-_OPAQUE_INTERPRETERS = frozenset({"bash", "sh", "zsh", "python", "python3",
-                                  "perl", "env"})
+# 🔴 AN `_OPAQUE_INTERPRETERS` SET LIVED HERE AND IS GONE. Naming the
+# interpreters that are opaque implies everything unnamed is transparent, which
+# is exactly backwards and is what let a nested pytest score as clean. With the
+# fall-through inverted, opacity is the DEFAULT and the set had no readers.
 # git options that consume the NEXT argv token; their value is not a subcommand.
 _GIT_OPTS_WITH_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree",
                                   "--namespace", "--exec-path"})
+# git verbs that WRITE and read nothing of the working tree worth tracking.
+# Anything not here and not in _GIT_READERS is an unknown verb => OPAQUE.
+_GIT_WRITERS = frozenset({"init", "add", "commit", "config", "checkout",
+                          "branch", "tag", "push", "fetch", "clone", "remote",
+                          "reset", "rm", "mv", "stash", "switch", "restore",
+                          "update-ref", "symbolic-ref", "gc", "worktree"})
+# Commands positively adjudicated as reading nothing of this tree. Deliberately
+# TINY: membership here is a claim, and the default for everything else is
+# OPAQUE. Add only after checking what the command actually reads.
+_HARMLESS = frozenset({"true", "false", "echo", "printf", "sleep", "uname",
+                       "id", "whoami", "hostname", "date", "which", "test"})
 
 # A cwd token meaning "this repo" — the two that make a scan repo-wide.
 _REPO_CWD = (".", "<inherited>")
+_ROOT_S = str(REPO_ROOT)
+_ROOT_PREFIX = _ROOT_S + "/"
+
+
+def _is_repo_cwd(cwd: str) -> bool:
+    """True when the command ran anywhere INSIDE this repo.
+
+    🔴 A SUBDIR CWD IS STILL THIS TREE. Matching only "." and "<inherited>"
+    acquitted `git ls-files` run with `cwd=scripts` and `rg --files` run with
+    `cwd=scripts/tests` — real scans of this repo, scored as reading nothing.
+    That is the same under-classification as the `-C` bug, reached by the other
+    route, and the module already documents that `git -C <subdir> ls-files`
+    "genuinely IS a scan of this tree".
+    """
+    if cwd in _REPO_CWD:
+        return True
+    if cwd.startswith("<"):
+        return False                    # <outside-repo> and friends
+    # _rel() already emitted these repo-RELATIVE, so any non-token value here
+    # is a path inside the repo.
+    return not cwd.startswith("/")
 
 
 def _load(shards: list[Path]) -> dict[str, dict[str, set]]:
@@ -96,26 +130,35 @@ def _exec_verdict(execs: set[str]) -> tuple[list[str], list[str]]:
         # `git -C <relative-subdir> ls-files`, genuinely IS a scan of this tree
         # and must keep counting as one. Re-adding a `-C` rule needs a case
         # that this function would otherwise get wrong — there wasn't one.
-        if cwd not in _REPO_CWD:
+        if not _is_repo_cwd(cwd):
             continue                    # scanning someone else's tree
 
         head = toks[0].rsplit("/", 1)[-1]
 
-        # An opaque interpreter: we cannot see what it reads.
-        if head in _OPAQUE_INTERPRETERS and any(t in ("-c",) for t in toks[1:3]):
-            opaque.append(" ".join(toks[:3]))
-            continue
-
         # An absolute OPERAND outside the repo names the real subject. Skip
-        # toks[0] (the executable's own path is not what it reads) — but a stub
-        # binary living in /tmp is itself evidence the work is not in this repo.
+        # toks[0]: the executable's own PATH is not what it reads — `git` lives
+        # in /nix/store here, and acquitting on that acquitted real
+        # `/nix/store/.../git ls-files` scans of this tree.
+        # 🔴 REPO_ROOT ITSELF IS INSIDE THE REPO. Comparing against the
+        # separator-terminated prefix alone excludes the root path, because
+        # "/…/devrc" does not start with "/…/devrc/". A fix round introduced
+        # exactly that and silently acquitted 14 files whose scan is spelled
+        # `git -C <REPO_ROOT> ls-files …` — the single most common form in this
+        # corpus, and under-classification again.
         operands = [t for t in toks[1:] if not t.startswith("-")]
-        if any(t.startswith("/") and not t.startswith(str(REPO_ROOT))
+        if any(t.startswith("/") and t != _ROOT_S and not t.startswith(_ROOT_PREFIX)
                for t in operands):
             continue
-        if toks[0].startswith("/") and not toks[0].startswith(str(REPO_ROOT)):
-            continue                    # a stub/fixture binary outside the repo
 
+        # 🔴 FALL-THROUGH IS OPAQUE, NOT CLEAN. Anything not positively
+        # adjudicated below is UNKNOWN. The first version only marked a child
+        # opaque when the literal token `-c` sat in toks[1:3], so the corpus's
+        # DOMINANT opacity shapes fell through BOTH branches and were reported
+        # as "scoped — proven bounded": a nested `python3 -m pytest <repo dir>`
+        # and `bash <repo script> <REPO_ROOT>` each scored as bounded with two
+        # trigger prefixes. That is under-classification — a real test skipped
+        # when it should have run, the direction this module declares must
+        # never happen. Only a RECOGNISED command may be scored clean.
         if head == "git":
             # 🔴 SKIP THE VALUE OF ANY OPTION THAT TAKES ONE. Taking the first
             # non-flag token as the subcommand reads `git -C scripts ls-files`
@@ -137,8 +180,14 @@ def _exec_verdict(execs: set[str]) -> tuple[list[str], list[str]]:
                 break
             if sub in _GIT_READERS:
                 scans.append(argv)
+            elif sub not in _GIT_WRITERS:
+                opaque.append(" ".join(toks[:3]))   # unknown git verb
         elif head in _DIRECT_SCANNERS:
             scans.append(argv)
+        elif head in _HARMLESS:
+            pass                                    # adjudicated clean
+        else:
+            opaque.append(" ".join(toks[:3]))       # UNKNOWN — never clean
     return scans, opaque
 
 
@@ -153,11 +202,13 @@ def classify(merged: dict[str, dict[str, set]], self_scope: bool = True) -> dict
         if f.startswith("<"):
             continue                    # bookkeeping buckets, not a test file
         paths = set(rec["paths"])
-        # A test reading its own file/dir is not a dependency worth recording —
-        # it is how pytest imports it. Everything else is.
-        own = str(Path(f).parent)
-        external = {p for p in paths
-                    if not (self_scope and (p == f or p.startswith(own + "/")))}
+        # 🔴 ONLY THE FILE ITSELF, NOT ITS DIRECTORY. Excluding everything under
+        # `Path(f).parent` erased every same-directory dependency: for any file
+        # in `scripts/tests/`, that dropped `scripts/tests/doc-path-baseline.tsv`
+        # and all of `scripts/tests/fixtures/`. Change a fixture and a
+        # triggers-driven map re-runs nothing. Importing yourself is the only
+        # read that is genuinely not a dependency.
+        external = {p for p in paths if not (self_scope and p == f)}
         scanners, opaque = _exec_verdict(rec["execs"])
         reads_root = "." in paths
         always = bool(scanners) or reads_root
