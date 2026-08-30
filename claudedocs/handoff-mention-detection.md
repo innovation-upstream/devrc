@@ -162,18 +162,36 @@ The original diagnosis is kept below because #463 inherits its layout context.
    **Measured 2026-08-30 on one docs-only PR (#1099), three consecutive runs, three
    different outcomes, none about the diff:**
    - run 1 `e1183352` → **`ERROR`**, not failure: `TaskRunTimeout`, *"failed to finish
-     within 1h0m0s"*. `seed-nix` alone consumed **~43 of the 60 minutes** (17:58Z→18:41Z),
-     leaving the test steps ~17 min before the TaskRun was killed. Surfaced on the PR as
-     `COULD NOT RUN: pytests — the gate stopped before this leg reported`.
+     within 1h0m0s"*. ~43 minutes elapsed between run start and the test steps starting
+     (17:58Z→18:41Z), leaving them ~17 min before the TaskRun was killed. Surfaced on the
+     PR as `COULD NOT RUN: pytests — the gate stopped before this leg reported`.
+     🔴 **RETRACTED: an earlier revision of this bullet blamed `seed-nix` for those 43
+     minutes. That was INFERENCE FROM A GAP, never a measurement of the step, and it is
+     WRONG.** Measured across 114 retained TaskRuns, `seed-nix` is `min 0.0s / p50 0.0s /
+     max 129.0s` — a no-op on a warm cache, exactly as its sentinel design intends. The
+     gap is **pod SCHEDULING**: Tekton's TaskRun timeout starts at TaskRun creation and
+     includes `Pending`, and gate pods were separately measured sitting `Pending` 11–12
+     minutes with 5 running + 5 queued. Same root cause, wrong mechanism — and naming the
+     step I happened to be able to see would have sent the next person to optimise a step
+     that costs nothing.
    - runs 2 and 3 → real verdicts, but red on **`test_subsystem_store_api.py`**, a
      different test each time. Run 3's failure named its own mechanism (that file's tests
      are instrumented for exactly this): `MECHANISM = TRANSPORT`, writer #4's POST raised
      `TimeoutError` at 60.06s. Per-writer elapsed in ONE 8-way race: `0.36s 0.9s 2.03s
      3.34s 4.93s 6.25s` … then **42.94s** and **60.06s**. The `…was lost` arm — the
      real-defect arm — did NOT fire, so the entry lock is not implicated.
-   - **Two dimensions, not one.** Requests/scheduling is the known half; the other is that
-     gate SETUP can eat most of its own `timeouts.tasks` budget. A gate whose seed step
-     can consume 70% of its timeout will keep producing `ERROR` on innocent PRs.
+   - **ONE dimension, and the premise at the top of this rank is also wrong.** "Gate pods
+     request far more than they use" does not hold: the gate requests 2250m/2752Mi (2 CPU
+     for the xdist pytest step), and `talos-xr6-r7p` measured **90% CPU requested / 91%
+     actual**. It is not over-requesting — it is CONFINED. "Nodes at 28–36%" was true of
+     the three nodes the pods **cannot reach**.
+   - 🔴 **THE ACTUAL CAUSE — a node pin inherited from a node-local PVC.** The shared
+     `nix-store-cache` PVC (`tekton-ci`) is `local-path` / RWO with its PV hard-pinned by
+     nodeAffinity to `talos-xr6-r7p`, so every gate pod inherits
+     `nodeSelector: kubernetes.io/hostname=talos-xr6-r7p`. The scheduler says it plainly:
+     `0/4 nodes are available: 1 Insufficient cpu, 3 node(s) didn't match Pod's node
+     affinity/selector`. Twelve-odd idle cores on the other three nodes are structurally
+     unreachable.
    - **Control, so this is not a guess:** five open PRs were red simultaneously on
      different tests concentrated in the store-API suite (the tests that stand up a real
      HTTP server), while six others passed at 19,292–19,431 collected. Unrelated diffs,
@@ -185,6 +203,36 @@ The original diagnosis is kept below because #463 inherits its layout context.
      `fcntl.flock(LOCK_EX)`, no timeout — across a read-modify-write with **two `fsync`s**
      (file, then directory). Eight racers serialise through that on a box running ~19.4k
      tests under xdist.
+   - 🔴 **"MOVE THE CACHE TO RWX" IS REJECTED — DO NOT RE-DERIVE IT.** Scoped 2026-08-30
+     and it is not a PVC edit, it is "install distributed storage on Talos" first:
+     **0 RWX PVCs of 289, 0 RWX PVs of 298, `kubectl get csidrivers` → none.** Every class
+     (`local-path`, `local-storage`, six `openebs-*`) is node-local by construction, and
+     `ci-priority-classes.yaml:139` already says so. **It was tried and reverted once** —
+     `d149c87f` (#111, 2026-07-16) dropped the cache as unschedulable and recorded RWX as
+     a follow-up *"needing RWX storage or hard node-pinning"*; pinning is the branch that
+     was taken. Costs if anyone revives it: `accessModes`/`storageClassName` are immutable
+     on a bound PVC, so migrating means delete-and-recreate, and with
+     `reclaimPolicy: Delete` + Flux `prune=true` the cache is **destroyed irreversibly** —
+     a revert returns the manifest, not the data. A cold cache is a **correctness**
+     failure, not a slowdown: a recorded ablation produced **43 test failures** on a
+     revision that passes with it. And 5+ concurrent pods write a shared **SQLite** fetcher
+     cache, a git tarball cache, a Go build cache and the nix store's own lock files, with
+     **no locking today** beyond a one-time seed sentinel — cross-node SQLite over NFS is a
+     corruption hazard the current single-node layout simply does not have.
+   - **The pin is not hurting at NORMAL load** — pod-start p90: `naida 14s`, `remix 15s`,
+     `auditloop 24s`, `devrc 31s`, vs unpinned `clawgate-ci 13s`. It falls over in a
+     BURST (5 running + 5 queued). So the lever is concurrency, not storage.
+   - **Best next lever: cap concurrent `devrc-ci` PipelineRuns** — turns a silent 43-minute
+     `Pending` into honest queueing, needs no new storage, reversible. A `tekton-supersede`
+     CronJob already exists, so part of the mechanism may be there. The **#396 static
+     split** (give a pipeline its own cache PVC on another node — done for
+     `gitops-validate`, p90 370s → fixed) is the proven local precedent for cross-pipeline
+     contention, but it will NOT fix devrc-vs-devrc bursts on its own.
+   - Affected surface if anyone does touch the cache: **4 pipelines** (`naida-ux-audit`,
+     `remix-ux-audit`, `auditloop-ci`, `devrc-ci`) **+ 4 TriggerTemplate node pins**.
+     `gitops-validate` is already on a separate `nix-store-cache-2`; `clawgate-ci`,
+     `clawgate-e2e`, `clawgate-ux-audit` and `vetr-infra-guards` deliberately use no nix
+     cache and must not be enlisted into one.
 3. ~~**Fix `clawgate` deeplink**~~ — **DONE 2026-08-30.** Closing condition was "#440's 6
    criteria, verified by a new spec in `e2e/tests/tasks.spec.ts` shown RED before / GREEN
    after"; measured with the SAME spec file on both sides — **3 failed / 1 passed at
