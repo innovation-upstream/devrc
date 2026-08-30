@@ -62,8 +62,12 @@ matched nothing" about a scan that measured nothing — the rule `detail_matched
 followed. The **terms and the field list are still published** over an unreachable fleet:
 which filter was *requested* is known regardless of whether anything answered.
 ⚠ A **partially** reachable fleet publishes real counts — one host answering is a
-measurement. ⚠ `excluded_shells` has the same shape and is deliberately **not**
-null-guarded: it is a pre-existing field and redefining it belongs in its own change.
+measurement. 🔴 **`excluded_shells` and its `summary` mirror now follow the SAME rule**
+(#1031): `null` over an unreachable fleet, a real count otherwise. Until that landed the
+two halves of one render contradicted each other — `FILTER --claude-only: 0 shell
+window(s) excluded` beside `FILTER --match 'x': an unmeasured number of row(s) matched` —
+so a consumer reading the first line learned a measured-looking zero about a fleet nobody
+reached.
 
 🔴 **`summary.matched` is NOT `summary.total_sessions`.** On a `detail` they differ by
 construction — the row filter matched N, then `filter_report` narrowed to 0 or 1. The
