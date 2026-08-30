@@ -117,6 +117,14 @@ def _rel(p: str) -> str | None:
         if not p.startswith("/"):
             cwd = os.getcwd()
             p = cwd + "/" + p if not cwd.endswith("/") else cwd + p
+        # 🔴 COLLAPSE `..` BEFORE THE PREFIX TEST. Joining a relative path
+        # against the cwd can produce `<repo>/scripts/../../devrc-sibling/x`,
+        # which passes `startswith(<repo>/)` and records the phantom trigger
+        # prefix `scripts/..` — the exact sibling-directory failure the
+        # separator-terminated prefix was added to prevent, reached by the
+        # relative route. `normpath` is pure string work: no stat, no syscall.
+        if ".." in p:
+            p = os.path.normpath(p)
         if p == _ROOT_S:
             return "."
         if not p.startswith(_ROOT_PREFIX):

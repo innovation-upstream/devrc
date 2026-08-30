@@ -1,4 +1,4 @@
-# Measured: what `scripts/tests` actually reads — and why decomposing it buys ~1%
+# Measured: what `scripts/tests` actually reads — and why decomposing it buys ~2%
 
 **Date:** 2026-08-30 · **Effort:** ci-speedup rank 2 · **Claim:** `ci-speedup-2`
 
@@ -30,35 +30,43 @@ denominator's file counts under the classification's total and published
 
 | bucket | files | of which timed | seconds | share of timed |
 |---|---|---|---|---|
-| **ALWAYS-RUN** — proven to read the tree | 27 | 27 | 185.5s | 14.3% |
-| **OPAQUE** — read set UNKNOWN | 79 | 78 | 1096.4s | 84.8% |
-| **scoped** — proven bounded | 38 | 28 | 11.4s | 0.9% |
+| **ALWAYS-RUN** — proven to read the tree | 28 | 28 | 193.6s | 15.0% |
+| **OPAQUE** — read set UNKNOWN | 75 | 74 | 1078.3s | 83.4% |
+| **scoped** — proven bounded | 41 | 31 | 21.4s | 1.7% |
 | total | **144** | **133** | 1293.3s | |
 
-- **Best-case ceiling for a perfect path→target mapping: 1.01x.**
-- **99.1% of this suite's time must run on any change.** Provably skippable:
-  **11.4 seconds.**
+- **Best-case ceiling for a perfect path→target mapping: 1.02x.**
+- **98.3% of this suite's time must run on any change.** Provably skippable:
+  **21.4 seconds.**
 - The handoff estimated rank 3 at "~1.7x alone but ~3.6x after". Neither is
   reachable, and neither is anything close to them.
 
 ### 🔴 Estimate history — and why the direction is the finding
 
-**3x → 1.7x → uncertain → 1.49x → 1.08x → 1.01x.**
+**3x → 1.7x → uncertain → 1.49x → 1.08x → 1.01x → 1.02x.**
 
-The last three are this document's own successive answers, each corrected by an
-adversarial audit round. **Every correction moved files OUT of `scoped`, never
-into it.** That one-directional drift is itself the result: a read-tracer's
-natural failure mode is to under-record — anything it cannot see looks like an
-absence of dependency, which reads as "bounded". A classifier built on one will
-be optimistic by construction, and will keep being optimistic in ways that only
-adversarial review surfaces. Treat any future number from this tool as an
-UPPER bound on skippability until someone has tried to break it again.
+The last four are this document's own successive answers, each corrected by an
+adversarial audit round. **The three corrections that fixed a DEFECT all moved
+files out of `scoped`; none ever moved files in.** That one-directional drift
+is the result: a read-tracer under-records by nature — anything it cannot see
+looks like an absence of dependency, which reads as "bounded" — so a classifier
+built on one is optimistic by construction, and keeps being optimistic in ways
+only adversarial review surfaces. Treat any number from this tool as an UPPER
+bound on skippability until someone has tried to break it again.
+
+⚠ The last step, 1.01x → 1.02x, is the one exception and it was a POLICY
+change, not a defect fix: round 3 deleted the operand-based acquittal (four
+defects came out of guessing scope from argv) and restored an unambiguous `-C`
+rule. That let three files whose only opacity was `git -C <tmp fixture repo>
+<unknown verb>` leave OPAQUE — a command with `-C` at an absolute outside path
+demonstrably operates on another tree. Precision gained, not safety traded; the
+verdict is unchanged either way.
 
 ### 🔴 The recommendation this produces: DO NOT BUILD RANK 3
 
-A path→target mapping built on today's tree buys **1%** — eleven seconds of a
-1293-second suite. It would be a large, safety-critical mechanism guarding a
-rounding error, inheriting 79 unmeasured files as chances to skip a test that
+A path→target mapping built on today's tree buys **under 2%** — twenty-one
+seconds of a 1293-second suite. It would be a large, safety-critical mechanism guarding a
+rounding error, inheriting 75 unmeasured files as chances to skip a test that
 should have run.
 
 The work that unlocks it is making the opaque subprocesses legible. That is a
@@ -66,7 +74,7 @@ different, smaller, and far better-scoped task than decomposing a directory.
 
 ## 🔴 Subprocess opacity is the whole story
 
-**84.8% of suite time** is 79 files that spawn a child process at a repo cwd
+**83.4% of suite time** is 75 files that spawn a child process at a repo cwd
 whose reads this tracer cannot see. The audit hook is per-interpreter; a child's
 own `open` calls are invisible. We record argv and cwd, and a consumer must
 treat such a file as must-run.
@@ -125,7 +133,7 @@ matched neither branch and were published as "scoped, proven bounded". Only a
   runtest-time reads, because several files here read `nix/home.nix` at import.
   It is inert unless that `-p` is passed.
 - `scripts/lib/readset_classify.py` — merges shards, assigns buckets.
-- `scripts/tests/test_readset_classify.py` — 34 guards, each pinning a defect
+- `scripts/tests/test_readset_classify.py` — 38 guards, each pinning a defect
   one of these two files actually shipped.
 
 Reproduce:

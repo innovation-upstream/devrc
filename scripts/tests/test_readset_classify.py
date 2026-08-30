@@ -103,17 +103,20 @@ def test_git_init_on_a_tmp_path_is_NOT_a_scan():
     assert opaque == [], opaque
 
 
-def test_a_read_verb_with_an_operand_OUTSIDE_the_repo_is_acquitted():
-    """Reaches the OPERAND acquittal, which nothing else here does.
+def test_a_scanner_with_an_outside_operand_is_OVER_classified_on_purpose():
+    """🔴 POLICY, and this assertion was REVERSED in round 3.
 
-    🔴 Added after a mutation sweep: deleting that acquittal left all 11 other
-    tests GREEN. `git init /tmp/x` never reaches it — the subcommand check
-    acquits `init` first — so the guard was unreachable and the suite was
-    asserting nothing about it. This uses a REAL scanner (`grep`, which would
-    otherwise be scored a scan) pointed at a path outside the tree.
+    It used to assert that an outside operand acquits the command. Deciding
+    that from argv needs a parser per tool — `grep`'s first operand is a
+    PATTERN, an option's value is not a path the command reads from, and four
+    successive defects came out of guessing. The module's stated rule is that
+    ambiguity resolves to ALWAYS-RUN, so a recognised scanner at a repo cwd is
+    now scored a scan unless `-C` says otherwise. Over-classification is the
+    safe direction; measured cost is 13 files moving OPAQUE -> ALWAYS-RUN and
+    ZERO change to `scoped`, so the published ceiling is unaffected.
     """
     scans, _ = _verdict("grep -r needle /tmp/somewhere-else\t@.")
-    assert scans == [], scans
+    assert len(scans) == 1, scans
 
 
 def test_a_stub_binary_outside_the_repo_is_NOT_a_scan():
@@ -169,14 +172,16 @@ def test_a_scan_outside_the_repo_is_acquitted():
     assert scans == []
 
 
-def test_dash_C_at_an_outside_path_is_acquitted_BY_THE_OPERAND_RULE():
-    """Behaviour pin. The acquittal is the operand rule, NOT a `-C` rule.
+def test_dash_C_at_an_outside_path_is_acquitted():
+    """Behaviour pin, and its NAME has been wrong twice — a name is a claim.
 
-    🔴 There used to be a dedicated `-C` branch and this test was written as if
-    it covered it. A mutation sweep disabled that branch and this test stayed
-    GREEN — because `/tmp/fixture` is an absolute operand outside the repo, so
-    the operand rule had already rejected it. The branch was dead code and is
-    gone; the behaviour it claimed to provide is real and still pinned here.
+    Round 1: a dedicated `-C` branch existed and this test was written as if it
+    covered it; a mutation sweep disabled the branch and this stayed GREEN,
+    because the OPERAND rule acquitted `/tmp/fixture` first. The branch was
+    dead code and was deleted, and the name was changed to credit the operand
+    rule. Round 3 then deleted the OPERAND rule (four defects came out of
+    guessing scope from operands) and restored a real `-C` rule — so the name
+    was wrong again, in the other direction. It now names no mechanism.
     """
     scans, _ = _verdict("git -C /tmp/fixture ls-files\t@.")
     assert scans == []
@@ -297,12 +302,68 @@ def test_bash_running_a_repo_script_over_THE_REPO_is_opaque_not_scoped():
     assert scans == [] and len(opaque) == 1, (scans, opaque)
 
 
-def test_an_outside_operand_still_acquits_a_RECOGNISED_scanner():
-    """The narrowing must survive being moved inside the recognised arms."""
+def test_only_dash_C_acquits_a_RECOGNISED_command_now():
+    """🔴 Round-3 policy: `-C` is the ONE acquittal; operands no longer acquit.
+
+    The first assertion was reversed in round 3 for the reason above.
+    """
     scans, opaque = _verdict("grep -r needle /tmp/elsewhere\t@.")
-    assert scans == [] and opaque == [], (scans, opaque)
+    assert len(scans) == 1 and opaque == [], (scans, opaque)
     scans2, _ = _verdict("git -C /tmp/fixture ls-files\t@.")
     assert scans2 == [], scans2
+
+
+def test_the_clean_whitelists_are_PINNED_two_way():
+    """🟡 AUDIT R3-F3. Spot-checks are not coverage for a whitelist.
+
+    `_HARMLESS` and `_GIT_WRITERS` are sets where a WRONG MEMBER IS SILENTLY
+    CLEAN. Round 2 added member spot-checks; a later sweep then showed dropping
+    `stash` or `echo` still survived a full green suite — 3 of 21 and 1 of 10
+    members actually covered. Pinning the exact sets, so adding or removing any
+    member fails here and has to be argued for.
+    """
+    assert rc._HARMLESS == frozenset({
+        "true", "false", "echo", "printf", "sleep", "uname",
+        "id", "whoami", "hostname", "date"}), sorted(rc._HARMLESS)
+    assert rc._GIT_WRITERS == frozenset({
+        "init", "add", "commit", "config", "checkout", "branch", "tag",
+        "push", "fetch", "clone", "remote", "reset", "rm", "mv", "stash",
+        "switch", "restore", "update-ref", "symbolic-ref", "gc",
+        "worktree"}), sorted(rc._GIT_WRITERS)
+
+
+def test_an_option_VALUE_pointing_outside_no_longer_acquits_a_scan():
+    """🔴 AUDIT R3-F1 — the same defect class, fourth occurrence.
+
+    An option's value counted as an operand, so a genuine scan of THIS tree
+    scored clean whenever any absolute outside path appeared anywhere in argv.
+    All of these read this repo:
+    """
+    for argv in ("git ls-files --exclude-from /tmp/ex",
+                 "find . -newer /tmp/stamp",
+                 "grep -rf /tmp/patterns .",
+                 "git grep -f /tmp/pats -- scripts",
+                 "git log --oneline -- scripts /tmp/x"):
+        scans, _ = _verdict(f"{argv}\t@.")
+        assert len(scans) == 1, (argv, scans)
+
+
+def test_dash_C_remains_the_ONE_acquittal_and_still_works():
+    """The single surviving acquittal — unambiguous, unlike an operand."""
+    scans, _ = _verdict("git -C /tmp/fixture ls-files\t@.")
+    assert scans == [], scans
+    root = str(rc.REPO_ROOT)
+    scans2, _ = _verdict(f"git -C {root} ls-files\t@.")
+    assert len(scans2) == 1, scans2
+    scans3, _ = _verdict("git -C scripts ls-files\t@.")
+    assert len(scans3) == 1, scans3
+
+
+def test_a_relative_read_escaping_via_dotdot_is_not_recorded_in_repo(monkeypatch):
+    """🟢 AUDIT R3-F4. `../../devrc-sibling/x` yielded prefix `scripts/..`."""
+    monkeypatch.chdir(rp.REPO_ROOT / "scripts")
+    assert rp._rel("../../devrc-sibling/x.py") is None
+    assert rp._rel("../nix/home.nix") == "nix/home.nix"
 
 
 def test_test_and_which_are_NOT_adjudicated_harmless():

@@ -90,6 +90,31 @@ def _is_repo_cwd(cwd: str) -> bool:
     return not cwd.startswith("/")
 
 
+def _effective_cwd(toks: list[str], cwd: str) -> str:
+    """The tree the command operates on: `-C <path>` wins over the real cwd.
+
+    🔴 THE ONLY SURVIVING ACQUITTAL, and it is here because it is the only one
+    that is UNAMBIGUOUS. `-C` names a directory by definition; an arbitrary
+    operand does not (grep's first operand is a pattern, an option's value is
+    not a path the command reads *from*, and a relative path may or may not
+    escape). Every attempt to infer scope from operands produced a defect.
+
+    A relative `-C` is resolved against the current cwd, so `-C subdir` from a
+    repo cwd stays inside — that case genuinely IS a scan of this tree.
+    """
+    if "-C" not in toks:
+        return cwd
+    i = toks.index("-C")
+    if i + 1 >= len(toks):
+        return cwd
+    target = toks[i + 1]
+    if not target.startswith("/"):
+        return cwd                      # relative: still under the repo cwd
+    if target == _ROOT_S or target.startswith(_ROOT_PREFIX):
+        return "."                      # an absolute path INTO this repo
+    return "<outside-repo>"
+
+
 def _load(shards: list[Path]) -> dict[str, dict[str, set]]:
     merged: dict[str, dict[str, set]] = defaultdict(
         lambda: {"paths": set(), "execs": set()})
@@ -151,20 +176,25 @@ def _exec_verdict(execs: set[str]) -> tuple[list[str], list[str]]:
         # exactly that and silently acquitted 14 files whose scan is spelled
         # `git -C <REPO_ROOT> ls-files …`.
         #
-        # 🔴 THIS IS A NARROWING OF A RECOGNISED COMMAND, NOT A BLANKET
-        # ACQUITTAL — it must NOT run before the fall-through. As an early
-        # `continue` it became the ONLY escape hatch from OPAQUE and fired on
-        # `<interpreter> <repo script> <tmp_path>`, the corpus's commonest
-        # shape: 18,806 execs across 68 of 144 files, leaving 15 of 56
-        # "proven bounded" files holding an acquitted bash/python3/node child
-        # at a repo cwd — including two running `bash <copy of run-tests.sh>
-        # <REPO_ROOT>`, a walk of the whole repo. Same defect class as the
-        # `-c` keying it was written to replace, reached the other way.
-        # An UNRECOGNISED head is opaque no matter where its operands point.
-        operands = [t for t in toks[1:] if not t.startswith("-")]
-        outside_operand = any(
-            t.startswith("/") and t != _ROOT_S and not t.startswith(_ROOT_PREFIX)
-            for t in operands)
+        # 🔴 THE OPERAND-BASED ACQUITTAL IS GONE. Four separate defects came
+        # out of trying to decide, from argv alone, whether a command's
+        # operands point outside this tree — the last three all in the UNSAFE
+        # direction:
+        #   * as an early `continue` it outranked the OPAQUE fall-through;
+        #   * an option VALUE counts as an operand, so
+        #     `git ls-files --exclude-from /tmp/ex`, `find . -newer /tmp/stamp`
+        #     and `grep -rf /tmp/pats .` all scored CLEAN while scanning here;
+        #   * and `grep`'s first operand is a PATTERN, not a path, so no
+        #     path-shaped test can classify it without per-tool argv grammar.
+        # Deciding this correctly needs a parser per tool. Being SAFE needs
+        # only the rule the module already states: ambiguity resolves to
+        # ALWAYS-RUN. So the only acquittal left is `-C`, which is unambiguous
+        # — it names the tree the command operates on. Measured cost of
+        # dropping the rest: 13 files move OPAQUE -> ALWAYS-RUN, ZERO `scoped`
+        # files change, so the published ceiling is unaffected.
+        eff_cwd = _effective_cwd(toks, cwd)
+        if not _is_repo_cwd(eff_cwd):
+            continue                    # -C names another tree
 
         # 🔴 FALL-THROUGH IS OPAQUE, NOT CLEAN. Anything not positively
         # adjudicated below is UNKNOWN. The first version only marked a child
@@ -195,13 +225,11 @@ def _exec_verdict(execs: set[str]) -> tuple[list[str], list[str]]:
                 sub = t
                 break
             if sub in _GIT_READERS:
-                if not outside_operand:             # narrows a RECOGNISED read
-                    scans.append(argv)
+                scans.append(argv)
             elif sub not in _GIT_WRITERS:
                 opaque.append(" ".join(toks[:3]))   # unknown git verb
         elif head in _DIRECT_SCANNERS:
-            if not outside_operand:
-                scans.append(argv)
+            scans.append(argv)
         elif head in _HARMLESS:
             pass                                    # adjudicated clean
         else:
