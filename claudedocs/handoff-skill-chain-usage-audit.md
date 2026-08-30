@@ -68,6 +68,16 @@ survives adversarial re-derivation, and fix whatever it exposes.
 - **Deploy/verify status of everything ELSE — still nothing.** The clawgate `SKILL.md` fix
   (rank 4) is committed on #1055 and NOT live; `handoff-audit.py` is committed on #1064 and
   wired into no gate, skill or script. Only the write guard has shipped.
+- **2026-08-30 session: ranks 3 and 6 both CLOSED, and both by REFUTING their own premise.**
+  Rank 6 → devrc**#1108, OPEN** (the tekton skill was already correct; what shipped is the
+  hostPath revert and its independent second blocker). Rank 3 → the drift question does not
+  discriminate (95.5% vs a **90.3% control**); the real finding is **13 / 26** abandoned docs
+  uncommitted-since-and-still-open, **5** of them with no link from X to Y. Instrument
+  committed as `claudedocs/skill-chain-drift-audit.py` with 4 controls. Gotchas **7–10**
+  below are that session's instrument corrections — the day-granularity `>` alone was a
+  **1.5×** overstatement. 🔴 **Rank 8 is still the arc's closing condition and was deliberately
+  NOT cut today** — the post-window has ~4 hours of `/resume` sessions in it against a
+  pre-period that needed 14 days for 253.
 
 ## Open investigations — live diagnosis state
 
@@ -111,15 +121,48 @@ the laptop and are unreadable from the workbench** (43 of the 305 sessions are r
 29 sessions were dropped because their resumed doc would not resolve. 16 + 3 unreadable
 is consistent with 19; treat the bucket SHARES as the finding, not the denominator.
 
-### Whether the 25 "topic drift" sessions should count as recorded
-- **Symptom:** 25 sessions resumed doc X and wrote doc Y (`clawgate-usage-audit` →
-  `clawgatectl-agent-delivery`; `app-store-copy-and-platform` → `appblock-tool-calling`).
-- **Observed:** counted as RECORDED here, because the work IS on disk and committed.
-- **Leading hypothesis:** this is healthy — scope legitimately moves — but it means the
-  resumed doc goes stale while looking maintained, and nothing links X to Y.
-- **Next probe:** check whether the ABANDONED doc (X) was left with a status header that
-  still claims in-flight work. If so, that is a silent staleness generator feeding
-  `/resume`'s own known "open-investigation blocks read as current forever" trap.
+### ✅ CLOSED — the topic-drift sessions, and why the question as posed does not discriminate
+**Answer: yes, the abandoned doc still declares open work — and that fact is WORTHLESS on
+its own, because 90.3% of the MAINTAINED docs do too.** Measured 2026-08-30 by
+`claudedocs/skill-chain-drift-audit.py` (committed; window 2026-08-15 → 08-30, both hosts,
+both runtimes, `find-session` stderr empty ⇒ full coverage). **330** `/resume`-genesis
+sessions, 298 with a resolved doc, **230 aligned · 29 DRIFT · 24 no-record**; the 29 drift
+sessions abandon **26 distinct docs**.
+
+| predicate | drift-abandoned | maintained (control) |
+|---|---|---|
+| declares open work | **21 / 22 = 95.5%** | **84 / 93 = 90.3%** |
+
+🔴 **The next-probe as written was a corpus measurement wearing a finding's clothes.** A
+handoff doc declaring open work is the NORM, not a symptom of being abandoned — the two
+arms are 5 points apart. Had this been run without the control it would have shipped
+"95.5% of abandoned docs still claim in-flight work" as if drift caused it.
+
+**Two predicates that DO discriminate, and they are the finding:**
+- **13 / 26** abandoned docs declare open work **AND** have received no commit on or after
+  the drift session's date. That is the staleness generator: an unmaintained doc still
+  advertising a ranked backlog.
+- **5 of those 13** have a successor whose text names **neither the abandoned doc nor its
+  topic** — a reader landing on X has no route to Y at all:
+  `claudedocs-audit-arc-2026-08-22` → `opencode-rm-glob-narrowing`;
+  `gate-hardening-and-review-hide-2026-08-23` → `devrc-ci-failing-test-names`;
+  `skill-prune-campaign` → `bulkhead-metric-registry`;
+  `submit-guards-and-app-drift` → `pkgzip-exclusion-rules`;
+  `subsystem-index-per-host` → `b2-orphan-sweep-arming`.
+
+**Controls** (all four green; a run whose control block is absent is void —
+`DRIFT_CONTROLS=1`): positive `handoff-5-new-tasks-2026-08-14.md` → True with 5 booked
+items; negative `handoff-bridge-unbounded-waits.md` → False; **sensitivity** — inject one
+un-done ranked item into that same negative doc and it flips False ⇒ True, so the
+predicate varies with the THING and not merely with the doc; write-detector fired on
+**97 of 120** sampled transcripts, so the zeros are absences.
+
+**Next probe (the part still open):** the remedy is not obvious and should not be guessed.
+The two candidate shapes are a `/handoff` step that writes a `superseded-by:` pointer into
+X when the topic moves, or a `/resume` warning when the doc it is opening has had no commit
+since the last session that read it. Both are cheap; which one is right depends on whether
+drift is usually a RENAME (X and Y are the same work) or a genuine SCOPE MOVE — that split
+has not been measured, and the 5 unlinked cases above are the set to read.
 
 ### Both PRs are red on tests neither one touches — environment-sensitive, not code
 - **Symptom + exact repro:** `gh pr checks 1055` → `tekton/devrc-pytests FAILURE`; same for #1064.
@@ -216,10 +259,28 @@ is consistent with 19; treat the bucket SHARES as the finding, not the denominat
   `/var/lib/mnt/disk-1/devrc-ci-nix-cache`.
 - **Ruled out:** *"#1096 already did rank 6"* — killed by `git show --stat abdd44b7`: one file,
   21 insertions, **0 deletions**. An additive edit cannot have corrected a claim.
-- **Next probe (unchanged, and still the right one):** re-derive from the live cluster before
-  editing — it is a label and a volume, not a git fact — then correct lines 39/41/45/48/430 in
-  one edit. 🔴 **Read #1096's new section first**: it is about the same gate and is current, so a
-  correction that contradicts it would be re-deriving something a peer already measured.
+- ✅ **CLOSED 2026-08-30 — and the re-measure REFUTED the item, not the skill.** The live gate
+  is `nodeSelector kubernetes.io/hostname=talos-xr6-r7p` with `nix-cache` →
+  `persistentVolumeClaim: nix-store-cache` (30Gi Bound on that node; `gitops-validate` has its
+  own `nix-store-cache-2` on `talos-uvh-gtj`), read off `devrc-ci-vchxk-gate-pod`. **Not one of
+  lines 39/41/45/48/430 needed changing.** homelab-infra `6bec075e` (08-29T22:09Z) introduced
+  the hostPath and `7839ef54` (08-30T00:29Z) reverted it — a **2h20m** window, and the 08-29
+  measurement landed inside it.
+- 🔴 **THE TRANSFERABLE LESSON, and it inverts the one this block was written to teach.** The
+  block above warned that an ADDITIVE edit is a false FRESHNESS signal. The symmetric error is
+  the one that actually happened: **a correct live measurement is a false STALENESS signal once
+  the thing it measured moves back.** A doc-correction item carries a measurement whose subject
+  is mutable, so the item decays exactly like the ranked backlog it sits in — and here it decayed
+  in under 24 hours, into an edit that would have INTRODUCED the error it was filed to remove.
+  "Re-measure before editing" was in the item and is what saved it; **write that clause into
+  every doc-correction item whose evidence is a live reading, not a git fact.**
+- **What the re-measure DID find, shipped as devrc#1108:** gotcha 6(a) closes on *"the narrow fix
+  is a baseline-compatible cache"* and never records that the hostPath was reverted, nor why it
+  cannot simply return — `DirectoryOrCreate` is created by kubelet as **root**, so `seed-nix`
+  fills it and nothing in the sandbox can take the nix DB lock (`big-lock: Permission denied`,
+  **75 occurrences over 42 tests, on every devrc PR**, byte-identical on two branches, against a
+  pre-change run of `failed=0` over 18,557 passed). That is a SECOND blocker, independent of
+  PodSecurity, and merging the two into one story is the empty-result trap this doc keeps naming.
 
 ### The CI investigation now has evidence from ANOTHER session — read it before re-deriving
 - **New (2026-08-30):** devrc#1096 documents **two ADMISSION-class causes of a red `devrc-ci`
@@ -246,10 +307,12 @@ rather than removed and renumbered. New work is appended at the end.
    forcing: none
 2. ✅ **DONE (2026-08-30)** — the handoff-write `Stop` hook. **MERGED as `ad891a5c`.**
    forcing: none
-3. **Audit the 25 drift cases for stale abandoned docs** (devrc + datapacket-talos +
-   homelab-talos `claudedocs/`). Untouched. The question: was the ABANDONED doc (X) left with a
-   status header still claiming in-flight work? If so that is a silent staleness generator
-   feeding `/resume`'s own known "open-investigation blocks read as current forever" trap.
+3. ✅ **DONE (2026-08-30)** — and the question as posed does NOT discriminate: 95.5% of
+   abandoned docs declare open work against **90.3% of maintained ones**. The real finding is
+   **13 / 26** abandoned-and-uncommitted-since, of which **5** have a successor that names
+   neither the doc nor its topic. Instrument: `claudedocs/skill-chain-drift-audit.py`
+   (committed, 4 controls). See the CLOSED investigation block above; the successor question
+   (rename vs scope-move) is the one live thread it leaves.
    forcing: none
 4. **Deploy the clawgate `SKILL.md` fix** — `home-manager switch`, then confirm
    `~/.claude/skills/clawgate/SKILL.md` no longer contains "preserve both".
@@ -262,11 +325,16 @@ rather than removed and renumbered. New work is appended at the end.
    gate 11 records that the general ratchet rule was replayed over 365 days / 901 commits and
    **REFUTED**, so re-run that replay for handoff docs before proposing one.
    forcing: none
-6. **Correct the `tekton` skill's stale devrc-ci claims** (devrc `claude/skills/tekton/SKILL.md`).
-   Measured 2026-08-29: the gate pod has **no `nodeSelector`** and uses a per-node **hostPath**
-   at `/var/lib/mnt/disk-1/devrc-ci-nix-cache`; the skill still describes node-pinning to
-   `talos-xr6-r7p` and a `nix-store-cache` PVC. That skill loads as authoritative for anyone
-   debugging this gate. Re-measure before editing — it is a live label/volume, not a git fact.
+6. ✅ **DONE (2026-08-30) — the item's own PREMISE was REFUTED by the re-measure it demanded.**
+   The skill's lines 39/41/45/48/430 are CORRECT and none of them was edited. The 08-29 read
+   was a correct measurement of a state that lived **2h20m**: homelab-infra `6bec075e`
+   (08-29T22:09Z) swapped the PVC for the hostPath, `7839ef54` (08-30T00:29Z) reverted it.
+   Live now: `nodeSelector kubernetes.io/hostname=talos-xr6-r7p`, volume `nix-cache` →
+   `persistentVolumeClaim: nix-store-cache` (30Gi Bound). What WAS missing is why the hostPath
+   cannot simply come back — a second, independent blocker (`DirectoryOrCreate` is root-owned,
+   so `big-lock: Permission denied` on 42 tests, every devrc PR) that gotcha 6(a)'s closing
+   "the narrow fix is a baseline-compatible cache" invited someone to walk straight into.
+   Shipped as **devrc#1108, OPEN**.
    forcing: none
 7. ✅ **DONE (2026-08-30)** — merged, shipped to both hosts, registered on both, and probed live
    against the deployed copy (block · self-suppress · read-with-no-work silent · no state for an
@@ -328,6 +396,39 @@ of this doc — re-read them before trusting any similar analysis.**
 
    Net effect of 2–4: the rate read **77%** before correction and **91.3%** after. Every
    error was in the instrument, none in the chain.
+
+7. 🔴 **A DAY-GRANULARITY DATE COMPARED WITH `>` MAKES SAME-DAY WORK INVISIBLE — and in a
+   corpus where most follow-up lands the same day, that is most of it** (found 2026-08-30
+   doing rank 3). `docs.idx` is built with `--date=short`, so "did this doc get a commit
+   after the session that abandoned it" was asked as `d > session_date` and every commit
+   landing hours later on the same calendar day scored as **never**. The headline read
+   **20 / 27**; with `>=` it is **13 / 26** — a **1.5×** overstatement, and the uncorrected
+   version was internally consistent, plausible, and about to be written up. The tell was
+   the `after` column reading **0 for literally every row**, including this arc's own doc,
+   which had been committed four times that day. **A column that is constant across every
+   row is a claim about your comparison, not about the world** — and prefer `>=` when the
+   two directions are not symmetric: here it can only REMOVE docs from the finding.
+8. 🔴 **THE OBVIOUS POSITIVE CONTROL WAS VOID, AND IT ANNOUNCED ITSELF AS "UNREADABLE"
+   RATHER THAN AS FAILING.** Rank 3's predicate was to be positive-controlled on *this doc*
+   — which declares open work by construction — and the control returned `UNREADABLE`,
+   because the doc lives only on an unmerged branch and the resolver reads
+   `origin/main|trunk|master`. A control that cannot see its subject is not a lenient
+   control, it is **no control**, and a run that prints it beside three green ones reads as
+   4/4. **Resolve controls FROM THE CORPUS** (scan for a doc matching the property) rather
+   than pinning one by name: a pin rots the moment its items close, and it cannot notice
+   that it was never read at all.
+9. 🔴 **A PREDICATE SHOWN True ON ONE DOC AND False ON ANOTHER HAS ONLY BEEN SHOWN TO VARY
+   WITH THE DOC.** The fix is one more control and it is cheap: take the doc that returned
+   False, inject exactly the thing being detected, and watch it flip. Rank 3's
+   `declares_open_work` was only trustworthy once `handoff-bridge-unbounded-waits.md` went
+   `False ⇒ True` on a single injected un-done ranked item.
+10. 🔴 **A DOC'S OWN STATUS PROSE GOES STALE INDEPENDENTLY OF ITS ITEMS — READ THE ITEMS.**
+   Found *in the negative control*, not the population: `handoff-bridge-unbounded-waits.md`
+   opens its ranked list with **"Only 5 and 6 are open"** while all seven items carry
+   ✅ DONE. Items 5 and 6 were finished and the summary sentence was never touched. This is
+   the staleness mechanism rank 3 went looking for, sitting in the instrument's own fixture
+   — and it means any audit of these docs that keys on the header sentence measures a
+   different, older document than the one keyed on the markers.
 
 - **Dead end (do not re-derive): "handoff docs are written but never committed."** Checked
   across 154 repos — **zero** on-disk untracked handoff docs. The hypothesis is refuted.
@@ -475,6 +576,17 @@ run '{"hook_event_name":"PostToolUse","session_id":"e2e","tool_name":"Edit","too
 run '{"hook_event_name":"Stop","session_id":"e2e"}'          # expect {"decision":"block", …}
 run '{"hook_event_name":"PostToolUse","session_id":"e2e","tool_name":"Bash","tool_input":{"command":"python3 /r/scripts/lib/handoff_doc.py --repo /r --topic t"}}'
 run '{"hook_event_name":"Stop","session_id":"e2e"}'          # expect EMPTY — it self-suppressed
+
+# 3b. rank 3's drift audit. Shares chain2.out/docs.idx/allnames.txt with the classifier
+#     above, so run it in the SAME $W. The controls run is NOT optional — a run without
+#     them is void, and one of them was silently UNREADABLE until gotcha 8.
+CHAIN_WORKDIR="$W" DRIFT_CONTROLS=1 python3 ~/workspace/devrc/claudedocs/skill-chain-drift-audit.py
+#   expect 4 lines, ALL beginning OK (positive / negative / sensitivity / write-detector)
+CHAIN_WORKDIR="$W" python3 ~/workspace/devrc/claudedocs/skill-chain-drift-audit.py
+#   expect 29 DRIFT over 26 distinct docs, 13 abandoned-and-still-open, 5 with no link back,
+#   and a CONTROL line near 90% on the maintained arm. If the control arm is far BELOW the
+#   drift arm the predicate has changed meaning — re-read it before quoting either number.
+#   First run takes ~12m (transcript scan); it caches to $W/written.cache.json, then ~20s.
 
 # 4. the bloat corpus (#1064). Absolute totals DRIFT — re-derive, never quote a comment.
 python3 ~/workspace/devrc/scripts/handoff-audit.py \
