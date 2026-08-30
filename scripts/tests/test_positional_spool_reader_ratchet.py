@@ -120,7 +120,7 @@ POSITIONAL_BUCKET = "_wait_events positional (no until=)"
 #     DATE       2026-08-30
 #
 # Full breakdown at that commit, re-measured by `classify_wait_calls()` (never by
-# hand), all six buckets, 63 call sites total:
+# hand), all six buckets, 64 call sites total:
 #
 #     47  _wait_events positional (no until=)   <- RATCHETED
 #              38  of which n literal 1 / defaulted
@@ -128,7 +128,7 @@ POSITIONAL_BUCKET = "_wait_events positional (no until=)"
 #               0  of which n dynamic
 #      5  _wait_events until=                        SAFE
 #      4  _wait_ops op-only                          discriminated by op
-#      4  _wait_ops where=                           discriminated by op + row
+#      5  _wait_ops where=                           discriminated by op + row
 #      3  _wait_payload op-only                      discriminated by op
 #
 # ⚠ The dynamic sub-bucket went 1 -> 0 and `_wait_ops where=` 2 -> 3: the SAME
@@ -137,12 +137,16 @@ POSITIONAL_BUCKET = "_wait_events positional (no until=)"
 # `_wait_ops(spool_dir, "tabs", …, where=_routed_to(inst))` after it flaked in
 # the sandbox tier (2026-08-29, both origin tokens verbatim but REVERSED).
 #
-# ⚠ THEN, on this branch, `_wait_ops where=` went 3 -> 4 and the total 62 -> 63
+# ⚠ THEN, on this branch, `_wait_ops where=` went 3 -> 5 and the total 62 -> 64
 # WITHOUT the ratcheted number moving — the shape to expect from an ordering fix:
 # SEQUENCING a pair adds a wait, it does not convert a positional `_wait_events`
-# site. `test_an_absent_origin_header_is_not_the_same_as_an_empty_one` now waits
-# for its first row before issuing its second command, so it holds two `where=`
-# calls instead of one. 🔴 THIS MODULE IS STRUCTURALLY BLIND TO THAT FIX: it
+# site. BOTH sites that read a pair positionally now wait for the first row
+# before issuing the second command, so each holds two `where=` calls instead of
+# one: `test_an_absent_origin_header_is_not_the_same_as_an_empty_one` and
+# `test_a_neighbours_row_of_the_same_op_is_not_selected_as_one_of_ours`, the
+# guard for it — which an audit of this branch found carrying the identical
+# unsequenced race, measured red under the same swap-the-commands control.
+# 🔴 THIS MODULE IS STRUCTURALLY BLIND TO THAT FIX: it
 # ratchets the FOREIGN-row hazard (position vs discrimination) and has no view
 # of the OWN-rows hazard (two rows one predicate cannot separate, because they
 # satisfy it equally). A green run here says NOTHING about whether a pair site
