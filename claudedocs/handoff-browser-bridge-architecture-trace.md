@@ -17,28 +17,31 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Trace and document the browser-bridge extension's full architecture (three-actor command channel) and the devrc skill+flows pattern (SKILL.md → reference/ → flows/) as observed in the codebase. Research-only session, no code changes.
 
 ## State now
-- Branch: `main`, clean. **The feature is MERGED, SHIPPED and LIVE-VERIFIED.**
-- **devrc #1063** — `bd1572f3` — the toolbar icon copies `bw://<host>/<instance>/<tabId>`; the `browser` CLI expands it into `--instance`+`--tab` from either argument position.
-- **devrc #1103** — `d4a3a000` — `SKILL.md` now says `context` is how you RESOLVE a ref. Net **−27 bytes**.
-- **devrc #1091** — open issue: two defects in the click-wiring guard (below).
-- Deployed: `ship.sh` converged both hosts and verified; the workbench needed a second `home-manager switch` (ship reported `rc=13` consumer-stale, which the trailing `SHIP_RC=0` from a `| tail` hid).
-- 🔴 **LIVE-VERIFIED, both halves, against real Brave — not mocks:**
-  - CLI: `browser bw://workbench/work/<tabId> context` → routed to that exact tabId; a ref minted on `laptop` refused loudly; a malformed ref refused rather than split; ref + `--instance` refused rather than ranked.
-  - Extension: after the operator restarted Brave and clicked the icon, `ping` reports `buildMarker: 66b98084daecd880` and `whoami` reports `stale=False` on the `work` profile. The marker is a literal in the loaded module graph, so it describes RUNNING code, not the load directory.
-- ⚠ **The `personal - other` profile is still on `b817ef1e88267a40`, `stale=True`.** Staleness is PER PROFILE, so the icon click in that profile still runs the old no-op code until it is reloaded.
+- Branch: `docs/handoff-bb-resume-0830`, branched off `origin/docs/handoff-browser-bridge-tab-ref`. **The feature is MERGED, SHIPPED and LIVE-VERIFIED.**
+- **devrc #1063** — `bd1572f3` — the toolbar icon copies `bw://<host>/<instance>/<tabId>`; the `browser` CLI expands it into `--instance`+`--tab` from either argument position. MERGED.
+- **devrc #1103** — `d4a3a000` — `SKILL.md` now says `context` is how you RESOLVE a ref. MERGED.
+- **devrc #1106** — the handoff doc itself. **OPEN, auto-merge SQUASH armed** (2026-08-30 19:13Z). Both required checks `tekton/devrc-pytests` + `tekton/devrc-nodetests` were still `pending` when armed; pipelinerun `devrc-ci-nnkkq` (started 18:53:40Z) was **Running, 1 task complete / 2 incomplete** — genuinely in flight, NOT the wedged-forever `timeouts.tasks` mode.
+- **devrc #1091** — re-checked 2026-08-30: still **OPEN**. Two defects in the click-wiring guard.
+- 🔴 **Rank 1 is CLAIMED BUT NOT EXECUTED.** `claim-work` slug `browser-bridge-architecture-trace-1` taken 2026-08-30 19:12Z (host nixos, owner-id a8e3c2ae2fc0). The stranded branch `origin/docs/browser-bridge-tab-ref-proposal` is **still present at `d923cc4`**. **Release the claim when the deletion lands, or steal it if this is stale.**
+- 🔴 **Live re-verification, 2026-08-30, against real Brave — not the doc's own record:**
+  - `work`: `extension_build 66b98084daecd880`, `extension_build_expected 66b98084daecd880`, `extension_stale: false`. Shipped build is running.
+  - `personal - other`: `extension_build b817ef1e88267a40` vs expected `66b98084daecd880`, `extension_stale: true`. **Rank 3 is still open.**
+- Deployed: `ship.sh` converged both hosts and verified; the workbench needed a second `home-manager switch`.
 
 ## Open investigations — live diagnosis state
 (No unresolved investigations — this was a read-only research session.)
 
 ## Next steps (ranked)
-1. Delete the stranded branch `origin/docs/browser-bridge-tab-ref-proposal` (`d923cc4`). It carries an unmerged edit to THIS doc whose implementation plan is wrong in two measured ways (see Gotchas); leaving it invites someone to land guidance that is known false. Nothing depends on it — this doc supersedes it.
+1. **Delete the stranded branch `origin/docs/browser-bridge-tab-ref-proposal` (`d923cc4`) — but ONLY after #1106 has merged.** Its plan is wrong in two measured ways (see Gotchas), and the record of *why* lives only in #1106 until that merges. Verified 2026-08-30: **no PR was ever opened on it** (`gh pr list --head docs/browser-bridge-tab-ref-proposal --state all` → `[]`), so the stacked-parent hazard does not apply and deleting destroys no PR object. Rollback: `git push origin d923cc4:refs/heads/docs/browser-bridge-tab-ref-proposal`. CLAIMED as `browser-bridge-architecture-trace-1` — release it when done.
    forcing: none
-2. devrc **#1091** — the click-wiring guard goes red on a legitimate `try { … }` and is blinded by a `//`-bearing string above the call. Scaffolding only; cannot affect what ships. The issue carries a four-row mutation table as its closing condition.
+2. **`scripts/resume-state.sh`: the handoff freshness check is blind to a newer copy on an unmerged branch.** It compares the working-tree doc against `origin/<default-branch>` ONLY, so on 2026-08-30 it printed `handoff-read: working-tree copy (identical to origin/main)` — true, and misleading — while the authoritative 86-line copy sat on open PR #1106 and `main` still held the superseded 64-line one. It then reconciled the *superseded* doc and emitted a DRIFT line about `PR #180` belonging to a document that had already been rewritten. **This repo forbids committing to `main`, so a handoff living on an unmerged branch is the NORMAL case here, not an edge case.** Fix: also scan `refs/remotes/origin/*` for a newer copy of the same path, or read the doc's own open PR.
    forcing: none
-3. Reload the extension in the `personal - other` Brave profile so its icon click runs the new code.
+3. devrc **#1091** — the click-wiring guard goes red on a legitimate `try { … }` and is blinded by a `//`-bearing string above the call. Scaffolding only; cannot affect what ships. The issue carries a four-row mutation table as its closing condition.
+   forcing: none
+4. **Reload the extension in the `personal - other` Brave profile.** OPERATOR-ONLY: there is no `reload` among the 18 `ALLOWED_OPS` (`server.py:179-181`) and `SERVER_OPS` is `("release",)`, so the bridge cannot reload itself. Needs a human in `brave://extensions` on that profile, or a full Brave restart. Until then that profile's icon click runs the old no-op code.
    forcing: none
 
-🔴 **Every remaining item is `forcing: none` — that is the honest reading, not an oversight.** The effort is finished: the feature is merged, deployed and verified live. Nothing external is pushing any of these, and per the queue contract none of them is eligible to be worked by a `/resume` session drawing from this list.
+🔴 **Every remaining item is `forcing: none` — the honest reading, not an oversight.** Nothing external pushes any of these, and per the queue contract none is eligible to be worked by a `/resume` drawing from this list. Rank 1 is the exception only because the operator named it directly in a kickoff.
 
 ## Gotchas / decisions / dead-ends
 - The `reference/` vs `flows/` distinction is defined in `CLAUDE.md:127-131`: reference holds facts you verify against; flows holds procedures you execute. A flows file does not auto-fire — something must name it (a SKILL.md table row, or a hook that names the path).
@@ -66,6 +69,10 @@ Trace and document the browser-bridge extension's full architecture (three-actor
 - 🔴 **The two tiers disagree, repeatedly, and only the sandbox gates the merge.** Two of this effort's own tests were green on the dev host and RED in `nix build .#checks…pytests`: one pair asserted `browser agent` had reached the wire (it does so only once its model-backend prerequisites are met, which come from the developer's environment); another wrote a stub with `#!/usr/bin/env bash`, which does not exist in the nix sandbox. The second is what `scripts/testlib/mockbin.py` exists to prevent — its own docstring records four prior sites and warns that "a rule re-derived at every call site regenerates the same bug at the next one".
 - **A `bw://` ref is resolvable with `browser <ref> context`** — 459 bytes, one round trip, no script injection (so no strict-CSP trap) and no dependence on the tab being foregrounded. It echoes back the extension's own `tabId`, so a routing mismatch is visible rather than assumed.
 - **Contention, not code**: `SQLite database … is busy` / `opening lock file "…/big-lock"` / `test_live_cotenants_does_not_count_this_process` counting a live `git` are all the concurrent-nix-build false-failure class now documented in `CLAUDE.md`. Proven here: the SAME tree, same derivation, failed under load and passed quiet.
+
+- 🔴 **2026-08-30 — `resume-state.sh` reconciled the WRONG COPY of this very doc, and said so in words that read as an all-clear.** `handoff-read: working-tree copy (identical to origin/main)` is a claim about tree-vs-`origin/main`, and both were the **superseded 64-line** version while the authoritative 86-line one sat on unmerged PR #1106. Everything downstream was therefore about a rewritten document: the lone DRIFT line named `PR #180`, which the current doc does not mention at all. The digest DID flag `! gh answered for 1 of 2 referenced PR(s)`, which was the only visible tell. **Generalise: a freshness check against mainline cannot see a newer copy on a branch, and in a repo that forbids committing to `main` that is where every fresh handoff lives.** Re-derive the authoritative copy with `git ls-remote --heads origin` + the doc's open PR before trusting the digest's framing.
+- 🔴 **Same trap one level down: `handoff_doc.py` takes its base from `--repo`'s WORKING TREE.** Run from `main` on 2026-08-30 it would have rebuilt this doc from the 64-line copy and discarded the 22 lines PR #1106 added, at exit 0. The fix used here was to `git checkout -b <topic> origin/docs/handoff-browser-bridge-tab-ref` FIRST so the tree carried the authoritative base, then merge into that. **Check `wc -l` of the base against the newest branch copy before confirming any handoff merge.**
+- **The subsystem index's `browser-bridge` `OPEN:` bullet is STILL genuinely open** (re-checked 2026-08-30, not taken on trust): a cross-instance `browser sessions` op. `sessions` is absent from `SUBCOMMANDS` at `scripts/browser-bridge/browser:581`.
 
 ## How to verify
 ```bash
