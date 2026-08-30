@@ -17,7 +17,7 @@ The store is a **pointer/nuance sheet per service** under `~/.claude/analyze-ser
 | Before writing ANYTHING (§4–§5) — store safety, the diff contract, landing, verify | `~/.claude/skills/prune-index/reference/writing-and-safety.md` |
 
 ## 🔴 Store safety — read this before the audit, not after
-- The store is **curated, CLIENT-CONFIDENTIAL, irreplaceable, and has no off-machine backup.** It is not re-derivable by re-running recon.
+- The store is **curated, CLIENT-CONFIDENTIAL, and not re-derivable by re-running recon.** ⚠ This bullet used to read "and has no off-machine backup" — false since 2026-08-21: `analyze-service-index-commit.service` commits each scope hourly and `analyze-service-index-backup.service` sends age-encrypted bundles to MinIO daily (`restore-verify.py` reads them back). **The rules below are unchanged, because they never rested on that** — a prune loses back to the last hourly commit, and **uncommitted state is in no commit and no bundle.** Detail: `~/.claude/skills/analyze-service/reference/index-store.md` → Store safety.
 - **Each `<scope>/` is its own git repo** (the root is not). **Run NO git command inside it** — no `stash`, no `reset --hard`, no `clean`, no `checkout --`, no remote, no push. Set work aside with `cp <file> /tmp/…`.
 - **Never copy an entry's content into devrc, any public repo, a PR body, an issue or a commit message.** Aggregate integers about the corpus are fine; a line of prose is not. devrc `60e6d9d` exists because this data class had to be scrubbed out of a public repo retroactively.
 - Each scope's own `README.md` states the policy governing it — read it before writing there. A scope with no README has no stated policy; the audit reports those.

@@ -3,10 +3,19 @@
 
 🔴 READ-ONLY. This module opens no file for writing, creates no directory, and
 runs no git command inside the store. The store is curated, client-confidential
-and has NO off-machine backup (`claude/skills/analyze-service/reference/index-store.md`
--> "Store safety"), so the audit is a MEASUREMENT and the /prune-index skill is
-what carries the confirm-gated write half. `_git()` below refuses any repo path
-that lies inside the store root, so even the pointer checks cannot reach it.
+and not re-derivable by re-running recon
+(`claude/skills/analyze-service/reference/index-store.md` -> "Store safety"), so
+the audit is a MEASUREMENT and the /prune-index skill is what carries the
+confirm-gated write half. `_git()` below refuses any repo path that lies inside
+the store root, so even the pointer checks cannot reach it.
+
+⚠ This paragraph used to say the store has NO off-machine backup. It does have
+one — hourly local commits plus daily age-encrypted MinIO bundles — and being
+read-only here is unaffected: an audit that wrote would still be an ungated
+second writer, and a prune's real exposure is the uncommitted window, which no
+commit and no bundle holds. Do NOT read the old sentence as "a loss is
+unrecoverable": `scripts/analyze-service-index/restore-verify.py` reads bundles
+back.
 
 WHY THIS EXISTS
 ---------------

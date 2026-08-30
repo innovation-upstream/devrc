@@ -19,9 +19,14 @@ the writing, confirm-gated and diff-first.
 
 🔴 THIS MODULE NEVER WRITES TO THE STORE. Not "does not today" — there is no
 write path here at all, and `TestNeverWrites` hashes a store tree either side of
-every mode to keep it that way. The store is curated, client-confidential and
-has no off-machine backup; the confirm gate lives in the skill, where a human
-sees the diff, and a helper that could write would be a second, ungated writer.
+every mode to keep it that way. The store is curated, client-confidential and not
+re-derivable by re-running recon; the confirm gate lives in the skill, where a
+human sees the diff, and a helper that could write would be a second, ungated
+writer. (This used to read "has no off-machine backup". It IS backed up — hourly
+local commits, daily age-encrypted bundles to MinIO; see
+`claude/skills/analyze-service/reference/index-store.md` -> "Store safety". The
+gate is unchanged: a backup does not un-write a bad append, and the working-tree
+state a bad write lands on is in no commit and no bundle.)
 
 🔴 IT DOES NOT REIMPLEMENT MATCHING. Normalization, kind-splitting, tier
 resolution and path→entry association all come from `subsystem_resolver`, which

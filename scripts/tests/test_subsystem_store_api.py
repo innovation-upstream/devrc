@@ -31,7 +31,10 @@ WHAT IS EXERCISED IN BOTH DIRECTIONS, IN-BAND
     source is deliberately modified, before its "unchanged" verdict is believed.
 
 🔴 NO TEST HERE READS THE REAL STORE. `~/.claude/analyze-service-index/` is
-client-confidential, has no off-machine backup, and this repo is PUBLIC. Every
+client-confidential and not re-derivable by re-running recon, and this repo is
+PUBLIC. (Was "has no off-machine backup" — false; daily age-encrypted bundles go
+to MinIO. The reason no test reads the live store is confidentiality, not
+fragility.) Every
 fixture below is synthetic, under `tmp_path`, with names invented for this file
 and pairwise-distinct fields so a renderer that surfaced the wrong section
 cannot pass by coincidence.

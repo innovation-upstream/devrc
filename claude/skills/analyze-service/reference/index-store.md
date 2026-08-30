@@ -34,9 +34,13 @@ never live state, never re-derived config values.
 hashed region**, so correcting the wording would change a sha that is pinned to
 the resolver's code; the redirect is stated here instead, deliberately.
 
-🔴 **Store safety.** The content is **curated, irreplaceable, not re-derivable by re-running recon**, with no off-machine backup. Inside any scope dir:
+🔴 **Store safety.** The content is **curated, client-confidential, and not re-derivable by re-running recon.** ⚠ **This paragraph used to say "with no off-machine backup". That has been false since 2026-08-21 and it was false in a RECOVERY path** — an agent reading it concludes a loss is unrecoverable and never looks for the restore tooling below. Two layers exist, and neither makes the store disposable:
+- **hourly, local** — each `<scope>/` is its own git repo, committed by `analyze-service-index-commit.service` (`OnCalendar=*-*-* *:00:00`).
+- **daily, off-machine** — `analyze-service-index-backup.service` bundles every scope, **age-encrypted**, to the homelab MinIO `minio-archive` tenant, bucket `analyze-service-index-backups`, key `<host>-<machine-id>/<scope>/<ts>.bundle.age`. Read them back with `scripts/analyze-service-index/restore-verify.py`; `escrow-verify.py` checks the key material.
+
+🔴 **So price a destructive write honestly: you lose back to the last hourly commit locally, the last daily bundle off-machine — and _uncommitted working-tree state is in NEITHER_.** That is the window every rule below defends, and it is why they stand unchanged: they rest on **confidentiality and curation**, never on the absence of a backup. Inside any scope dir:
 - **Never `git stash`** — `refs/stash` is repo-**global** and concurrent sessions share this store, so your stash can be popped or dropped by another session. Set work aside with `cp <file> /tmp/…` instead.
-- **Never `git reset --hard`, `git clean`, or `git checkout --`** — each destroys curated content that has no other copy.
+- **Never `git reset --hard`, `git clean`, or `git checkout --`** — each destroys **uncommitted** curated content, which is exactly the part no commit and no bundle holds.
 - **Never add a remote, never push**, and never copy a line into `devrc` (PUBLIC) or any public repo, issue, PR, gist or commit message. devrc `60e6d9d` exists because this data class had to be scrubbed out of a public repo retroactively.
 - Each scope's own `README.md` states the policy governing it — **read it before writing there**.
 

@@ -76,7 +76,7 @@ better done deterministically. The script does it now; Grep is for reading code.
 
 ## Reference (load only when you need it)
 
-- `~/.claude/skills/analyze-service/reference/index-store.md` — where the index lives, how a ref resolves, the entry schema, 🔴 **store safety** (curated, client-confidential, no backup: never stash/reset/push there), and what each `index:` status means.
+- `~/.claude/skills/analyze-service/reference/index-store.md` — where the index lives, how a ref resolves, the entry schema, 🔴 **store safety** (curated, client-confidential: never stash/reset/push there — and it IS backed up, hourly local + daily off-machine, so read that section before calling a loss unrecoverable), and what each `index:` status means.
 - `~/.claude/skills/analyze-service/reference/write-back.md` — the **opt-in, confirm-gated, diff-first** index update: what counts as notable, auto-discovered pointers, bloat discipline. Read it before writing anything to the store.
 
 ## Measurement + pairs

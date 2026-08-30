@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 # Seed the cluster store from the LOCAL one. Phase 1 (proposal §4).
 #
-# 🔴 THE LOCAL STORE IS THE ONLY COPY, AND THIS SCRIPT NEVER WRITES TO IT.
-# `~/.claude/analyze-service-index/` is client-confidential, has no off-machine
-# backup, and phase 1's whole premise is "local stays authoritative and
-# untouched". So the source is read ONLY:
+# 🔴 THE LOCAL STORE IS AUTHORITATIVE, AND THIS SCRIPT NEVER WRITES TO IT.
+# `~/.claude/analyze-service-index/` is client-confidential, not re-derivable by
+# re-running recon, and phase 1's whole premise is "local stays authoritative and
+# untouched".
+#
+# ⚠ This block used to open "THE LOCAL STORE IS THE ONLY COPY … has no
+# off-machine backup". Both halves are now false — daily age-encrypted bundles go
+# to MinIO (`analyze-service-index-backup.service`) and the pod this script seeds
+# holds a copy too. Neither weakens the rule below: the OTHER copies are lagging
+# derivatives (bundle = last daily commit, pod = last seed), so a write that
+# corrupted the source would be replicated outward, not repaired from them.
+#
+# So the source is read ONLY:
 #   * rsync runs SOURCE -> STAGE. `--delete` is passed, and it is a statement
 #     about the STAGE: rsync's --delete removes files from the DESTINATION that
 #     the source does not have. It cannot reach the source.
