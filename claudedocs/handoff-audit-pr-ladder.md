@@ -18,42 +18,37 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 ## State now
 - Work is on `fix/sequence-absent-vs-empty-origin-pair` (worktree
   `~/workspace/devrc-seq-absent-empty`, commit `2579e2f3`), pushed, open as **`#1109`**.
+  This doc's own update is **`#1111`** (`docs/handoff-audit-pr-ladder-1109`).
+- ✅ **RANK 1's CLOSING CONDITION IS MET. BOTH SANDBOX TIERS ARE GREEN** — built ONE AT A TIME
+  against the branch tree, and the verdict read from each derivation's own log:
+  - `pytests` (`gwzds1c6…-devrc-pytests.drv`) → `RESULT: PASS (exit=0)`, `PASS 48  FAIL 0`,
+    `0` occurrences of `panic: test timed out`.
+  - `nodetests` (`gmaidwminm5hwgw198g3swka1sgjk8c5-devrc-nodetests.drv`) → `RESULT: PASS
+    (exit=0)`, four `# fail 0` blocks (508 / 21 / 188 / 134 tests).
+- **The concurrent sibling build does NOT undermine that green.** A second session was building
+  `pytests` at the same time; CLAUDE.md's rule is directional — a contended run fails loudly
+  rather than faking a pass, so a contended GREEN is trustworthy and only a RED would have needed
+  re-running alone. No re-run was required.
+- ⏳ **NOT MERGED — both PRs' required checks are `PENDING`** (`tekton/devrc-pytests`,
+  `tekton/devrc-nodetests`; `mergeStateStatus: UNKNOWN` while they run). 🔴 Watch for the
+  documented failure mode: a run that hits `timeouts.tasks` never posts, and the check stays
+  `pending` FOREVER — only a fresh push clears it. If these are still pending much later, that is
+  the thing to check, not the diff.
+- **Dev-host tier, separately:** `461 passed` in `scripts/browser-bridge/tests/test_server.py`,
+  `16 passed` in the ratchet.
 - 🔴 **DO NOT ASSUME THE BASE CLONE IS ON `main` — IT WAS NOT.** `~/workspace/devrc` sat on
   `main` at session start and on **`docs/handoff-bb-resume-0830`** (tracking
   `origin/docs/handoff-browser-bridge-tab-ref`, one commit `28ff9d2a`) by the time this doc was
   written — another session's live branch in the shared checkout. Caught by
   `git branch --show-current` immediately before the handoff write; without it `handoff_doc.py`
-  would have committed this doc onto that session's branch, silently and with no conflict. This
-  doc was therefore landed from its own worktree (`~/workspace/devrc-handoff-aplr`,
-  `docs/handoff-audit-pr-ladder-1109`). **Re-check the branch before every write here.**
+  would have committed this doc onto that session's branch, silently and with no conflict.
+  **Re-check the branch before every write here.**
 - **PROVENANCE CARRIED FORWARD** (all merged, all verified by content; kept because this section
   is REPLACED on every update): `#1035` → `ccb31628`, `#1060` → `31cd214d`, `#1074` → `e9f8ce14`,
   `#1023` → `8e33bf1d`, `#1033` → `70eff59c`, `#1009` → `442bde83`, `#1005` → `aaa5514c`.
   All ranked items from those rounds are CLOSED.
-- **Rank 1 SHIPPED as a PR, NOT YET MERGED.** `gh pr view 1109` → `MERGEABLE` / `BLOCKED`
-  (required checks not yet posted). Do not read `BLOCKED` as a conflict — it is the two Tekton
-  contexts having reported nothing yet.
-- 🔴 **IN FLIGHT and UNRESOLVED AT WRITE TIME: the sandbox tier.**
-  `nix build ~/workspace/devrc-seq-absent-empty#checks.x86_64-linux.pytests --no-link` was still
-  running when this doc was written (output file 0 bytes, PID 3263504). **Its verdict is the
-  rank-1 closing condition and nobody has read it.** Log:
-  `/tmp/claude-1000/-home-zach-workspace-devrc/587e19a6-46fd-4055-ba7a-ad236676f160/tasks/bqtr5rthl.output`
-  — and 🔴 that command ends `| tail -40; echo "NIXBUILD_RC=$?"`, which is **`tail`'s** status,
-  not the build's. Read the runners' own `RESULT:` line, never that number.
-- 🔴 **A SECOND SESSION WAS BUILDING THE SAME DERIVATION CONCURRENTLY** (PID 3842562,
-  `devrc-mergegate-1073`). CLAUDE.md documents combined `nix build` invocations producing FALSE
-  failures through store contention; two sessions building `pytests` at once is the same
-  mechanism one level out. **A green from that run is trustworthy; a RED is not until re-run
-  alone.** The other session's process was left untouched.
-- **Verified on the dev-host tier only, and the tier is named on purpose:** `461 passed` in
-  `scripts/browser-bridge/tests/test_server.py`, `16 passed` in
-  `scripts/tests/test_positional_spool_reader_ratchet.py`, both via
-  `nix develop $DEVRC -c python3 -m pytest`. The dev-host tier is NOT the tier the merge is
-  gated on.
-- **Base:** branched off `2cec1d45`. `origin/main` moved to `9e23c379` while this ran (`#1105`,
-  `#1104`). Neither touches either file; **no open PR of the 30 touches either file** (checked by
-  `gh pr list --json files` across all of them). So the merged-tree risk here is semantic-only,
-  and narrow.
+- **Base:** branched off `2cec1d45`; `origin/main` moved to `9e23c379` during the session.
+  **No open PR of the 30 touches either file** (checked via `gh pr list --json files`).
 - Rank 2 (drift-check rc 17 on the workbench) is unchanged and still correctly a no-op.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
@@ -130,24 +125,22 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   other "surfaces a worktree does not hand you" in `claude/RULES.md`.
 
 ## Next steps (ranked)
-1. **Read the sandbox-tier verdict for `#1109` and merge it.** (repo: `devrc`; files:
-   `scripts/browser-bridge/tests/test_server.py`,
-   `scripts/tests/test_positional_spool_reader_ratchet.py`.) IN FLIGHT: `devrc#1109`.
-   If the run finished, read its `RESULT:` line out of the log named in "State now" — **not**
-   the `NIXBUILD_RC` echo, which is `tail`'s. If it went red, **re-run it alone before believing
-   it** (a sibling session was contending on the store). **Closing condition:** `#1109` is merged
-   and its content is present in `origin/main` — verified by diffing the files, never by ancestry
-   (a squash makes the branch head a permanent non-ancestor). Checked by whoever merges it.
+1. **Merge `#1109`, then `#1111`.** (repo: `devrc`.) IN FLIGHT: `devrc#1109`, `devrc#1111`.
+   **The gate work is DONE — both sandbox tiers are green (evidence in "State now"); the only
+   thing outstanding is Tekton reporting.** Do not re-run the local tiers to "re-confirm": the
+   tree has not changed. **Closing condition:** both merged and their content present in
+   `origin/main`, verified by diffing the files — never by ancestry, since a squash merge makes
+   the branch head a permanent non-ancestor. Checked by whoever merges.
    forcing: gate — the two required Tekton contexts on `main` (`enforce_admins: true`), which
-   this PR cannot merge without.
+   neither PR can merge without.
 2. **Nothing to do about drift-check rc 17 on the workbench — MEASURED, recorded so it is not
    re-investigated.** `homelab-talos` is 1 commit behind on the `containers/clawgate` built-source
-   subtree (`28352cef`), but that commit touches only `e2e/.gitignore` and
-   `e2e/playwright.config.ts`. Store paths differ (`aqnkgl1y…` workbench vs `6s2ycrcr…` laptop)
-   **and the binaries are byte-identical**: `sha256 6ffdf136b8c8f6d4` on both, `clawgatectl
-   0.8.17`. rc 17 compares subtree tree OIDs on purpose — over-reporting an e2e-config change is
-   the cheap error; missing a Go change is the expensive one. **Closing condition:** it clears
-   itself when that repo is next pulled for a real reason. Do not pull it to silence the code.
+   subtree (`28352cef`), touching only `e2e/.gitignore` and `e2e/playwright.config.ts`. Store
+   paths differ (`aqnkgl1y…` workbench vs `6s2ycrcr…` laptop) **and the binaries are
+   byte-identical**: `sha256 6ffdf136b8c8f6d4` on both, `clawgatectl 0.8.17`. rc 17 compares
+   subtree tree OIDs on purpose — over-reporting an e2e-config change is the cheap error.
+   **Closing condition:** it clears itself when that repo is next pulled for a real reason. Do
+   not pull it to silence the code.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -322,6 +315,22 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 - **`/handoff` step 1 returned rc 5 (nothing resolved) with its positive control passing**, so no
   `clawgate-task:` field is recorded here. That is not "no task" — an unknown session id also
   answers 200 with an empty array.
+
+- 🔴 **`| tail` ON A `nix build` DOES NOT JUST EAT THE EXIT CODE — IT EATS THE WHOLE VERDICT.**
+  The documented trap is usually stated as "the piped `$?` is `tail`'s". Measured here, the
+  damage was larger: `nix build … 2>&1 | tail -40` left **4 lines** of a **1,451-line** build log
+  — `this derivation will be built`, `building '…drv'`, and the bogus `NIXBUILD_RC=0`. Every
+  `RESULT:` line, the `PASS 48 FAIL 0` table and the whole per-target breakdown were gone. The
+  output was not merely missing a status; it was **indistinguishable from a failed run's**.
+  🔴 **The instrument that answers is `nix log <drv>`** — the derivation keeps its own full log,
+  so a swallowed console capture is recoverable: take the `.drv` path from the surviving
+  `building '…'` line (or `nix path-info --derivation`), write `nix log` to a FILE, and grep it
+  for `RESULT:` and `panic: test timed out`. Do not re-run the build to get its output back.
+- 🔴 **A CONTENDED-BUILD WARNING IS DIRECTIONAL, AND READING IT AS SYMMETRIC WOULD HAVE COST A
+  RE-RUN.** CLAUDE.md says a combined/contended `nix build` produces false FAILURES; a green is
+  trustworthy because contention makes a run fail loudly, not pass falsely. A sibling session was
+  building `pytests` concurrently throughout this one. The green stood, unre-run. **Ask which
+  direction a reliability caveat points before paying for it.**
 
 ## How to verify
 ```bash
