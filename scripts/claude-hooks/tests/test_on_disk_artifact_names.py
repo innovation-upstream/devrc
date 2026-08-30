@@ -551,6 +551,30 @@ OWNS_NO_ON_DISK_STATE = {
     "guard_core.py",             # pure predicate library
     "register-nudge-hook.py",    # writes ~/.claude/settings.json; the deployed-path
                                  # seam is pinned by test_registrar_activation.py
+    "session-stamp.py",          # delegates every path to lib/session_trailer.py,
+                                 # exactly as agent-ledger-hook.py and
+                                 # bg-command-capture.py do. Its names ARE pinned —
+                                 # as whole relative paths, in the same form as this
+                                 # file — by tests/test_session_trailer.py::
+                                 # test_the_on_disk_artifact_names_are_pinned_as_whole_paths.
+                                 # 🔴 Its state root is the repo's own
+                                 # <git-common-dir>, not a path under $HOME at all,
+                                 # so CACHE_LITERAL below cannot match it — the same
+                                 # blind spot bg-command-capture.py's entry names,
+                                 # for a different root. The enumeration, not the
+                                 # scan, is what covers this entry.
+                                 # 🔴 `session_trailer.py` is deliberately NOT listed
+                                 # here: this ledger enumerates SOURCE files in
+                                 # scripts/claude-hooks/, and that module's source
+                                 # lives in scripts/lib/. It only appears beside the
+                                 # hook as a DEPLOY artifact (the guard_core.py
+                                 # pattern, because a store copy cannot reach
+                                 # scripts/lib/ through __file__), and that deployed
+                                 # name is pinned by the registrar's
+                                 # HOOK_LIBRARY_MODULES instead. Listing it here
+                                 # made a stale entry naming a path that does not
+                                 # exist, which the corroboration scan then tried to
+                                 # open.
 }
 
 CACHE_LITERAL = re.compile(r'["\'/]\.cache\b|XDG_CACHE_HOME|\.local/share')

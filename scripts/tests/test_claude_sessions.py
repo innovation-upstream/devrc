@@ -739,6 +739,17 @@ _MENTION_ONLY = {
     # against the three sibling walkers. It names this module because that is
     # the import; it never loads `scripts/lib/`.
     "scripts/tests/test_skip_dirs_ledger.py":    "pins this suite's skip set",
+    # 🔴 Prose only, and deliberately NOT an importer. session_trailer.py carries
+    # its OWN narrower ancestry walk (`read_proc` / `claude_ancestor_pid`) and
+    # names this module to say why they are separate rather than duplicated by
+    # accident: this detector reads tmux panes and needs /proc/uptime and
+    # SC_CLK_TCK for pane ages, while session_trailer runs inside a git hook that
+    # must degrade to "no trailer" if either is unavailable. Importing it would
+    # make a commit hook depend on a tmux-shaped module and on clock facts it has
+    # no use for. It also names `cairn_who.py` for the measured
+    # id-shape caveat. If these two ancestry walks are ever unified, that is a
+    # deliberate change with a test to write — not a silent import.
+    "scripts/lib/session_trailer.py":            "names it to explain the split, on purpose",
 }
 
 _DOC_SUFFIXES = {".md", ".txt", ".org"}

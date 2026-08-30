@@ -234,3 +234,34 @@ class TestPrune:
         os.makedirs(st.state_dir(common), exist_ok=True)
         Path(os.path.join(st.state_dir(common), "notapid.json")).write_text("{}")
         assert st.prune(common, alive=lambda pid: False) == 0
+
+
+# ---------------------------------------------------------------------------
+# 🔴 THE ON-DISK ARTIFACT NAMES, pinned as WHOLE relative paths.
+#
+# `scripts/claude-hooks/tests/test_on_disk_artifact_names.py` classifies
+# `session-stamp.py` as delegating every path to this module, and its entry
+# NAMES the test below as where those paths are pinned. That cross-reference is
+# a claim: if this test does not exist, or stops pinning whole paths, the ledger
+# entry reads as coverage while providing none.
+#
+# 🔴 The corroboration scan in that file CANNOT see these names — it greps for
+# `.cache` / `.local/share` / XDG_CACHE_HOME literals, and this state lives in
+# the repo's own <git-common-dir>, not under $HOME at all. So the enumeration
+# plus this pin are the whole of the coverage; there is no second net.
+#
+# Whole paths, not fragments: a pin on the leaf alone stays green when the
+# parent directory is renamed, which is exactly the rename that would strand
+# every existing session's state.
+# ---------------------------------------------------------------------------
+def test_the_on_disk_artifact_names_are_pinned_as_whole_paths():
+    assert st.STATE_DIRNAME == "claude-session"
+    assert st.state_dir("/COMMON") == "/COMMON/claude-session"
+    assert st.state_file("/COMMON", 4242) == "/COMMON/claude-session/4242.json"
+
+
+def test_the_trailer_keys_are_pinned():
+    """A renamed key silently stops matching every trailer already in history —
+    `has_trailer` would stop seeing them and every amend would add a duplicate."""
+    assert st.TRAILER_KEY == "Claude-Session-Id"
+    assert st.LEGACY_TRAILER_KEY == "Claude-Session"

@@ -21,9 +21,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(_HERE, os.pardir)))
+from testlib import mockbin  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 HOOK = REPO / "githooks" / "prepare-commit-msg"
@@ -153,7 +158,10 @@ class TestTheInstaller:
         hooks = Path(common) / "hooks"
         hooks.mkdir(parents=True, exist_ok=True)
         foreign = hooks / "prepare-commit-msg"
-        foreign.write_text("#!/bin/sh\necho someone elses hook\n")
+        # write_exec owns the shebang — a call site that supplies its own is how
+        # #!/usr/bin/env comes back (testlib/mockbin.py:59, pinned by
+        # test_runtime_shebangs.py).
+        mockbin.write_exec(foreign, "echo someone elses hook\n")
         out = subprocess.run([str(INSTALLER), "--repo", str(repo), "--apply"],
                              capture_output=True, text=True)
         assert out.returncode == 4, out.stdout + out.stderr
