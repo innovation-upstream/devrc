@@ -187,14 +187,28 @@ diagnosis that led here and is now partly historical.**
   question in #1030's last comment**, which reported the same test failing on docs-only
   #1034 and said "I did not capture this run's exception — it may be a fourth". It is not a
   fourth; it is B.
-- 🔴 **Why B happens: devrc CI is PINNED TO ONE NODE.** The PipelineRun carries
-  `nodeSelector: kubernetes.io/hostname=talos-xr6-r7p`. So "the cluster drained" is the
-  wrong load measure — during the failure that node was at **91%** CPU while the others sat
-  at 22–52%, and 87% at re-trigger. Any further work on B should start there, not at the
-  cluster-wide run count.
-- **Load-vs-assertion evidence, same tree, local vs Tekton:** the 203-test target went
-  3.30 s → **136.90 s (41×) and still PASSED**, while every other target inflated 1.8–2.6×.
-  Load inflates EVERY test; a real assertion inflates exactly one.
+- 🔴 **B IS NOT (ONLY) STARVATION — do not start from the load hypothesis.** #1023 attributed
+  it to scheduler starvation and raised the timeout; that framing survived into an earlier
+  draft of this very block, and **two observations hours apart contradict each other:**
+
+  | | 2026-08-29 `devrc-ci-hrqf4` | 2026-08-30 `devrc-ci-8q8rt` |
+  |---|---|---|
+  | exception | `TimeoutError` @ `socket.py:720` | **the same** |
+  | 203-test target vs local | **41×** (3.30 s → 136.90 s) | **1.6×** (3.30 s → 5.28 s) |
+  | its node's CPU | **91%** | **44%** |
+  | all nodes | one saturated | 24–44% |
+
+  Same signature, essentially NO load the second time. So starvation is not sufficient to
+  explain B, and "raise the timeout" / "fix the scheduling" may both miss it. The honest
+  state is **uncharacterised**; treat the load story as a REFUTED first guess, not a lead.
+- ⚠ **The node-pinning fact is still true and still worth knowing, but it is NOT the
+  explanation.** The PipelineRun carries `nodeSelector:
+  kubernetes.io/hostname=talos-xr6-r7p`, so cluster-wide run counts say nothing about
+  whether a devrc run is contended. That mattered for the 91% occurrence and not for the
+  44% one.
+- **The load-vs-assertion discriminator itself is sound and worth reusing:** load inflates
+  EVERY target, a real assertion inflates exactly one. It is what separated the two rows
+  above — and what stopped the 41× occurrence being read as a code defect.
 
 **The original diagnosis, preserved:**
 
@@ -257,11 +271,14 @@ it up; the evidence is on the issue.
    `scripts/claude-hooks/tests/test_bash_guard.py:294`'s "no catastrophic backtracking" check
    still asserts on wall-clock and flakes under load. Its sibling item (dirty
    `embed_enlarge.js`) is CLOSED — it landed as #1010. Repo: `devrc`.
-2. **The store-api flake's mechanism B** — the `socket.py` `TimeoutError` under scheduler
-   starvation, which #1023 was meant to fix and did not. Start at the **node pinning**
-   (`nodeSelector: talos-xr6-r7p`), not at the cluster-wide run count. Repo: `devrc` +
-   `homelab-talos` (the pipeline definition lives there). Closing condition is NOT yet
-   written; write one before starting.
+2. **The store-api flake's mechanism B** — `TimeoutError` out of `socket.py`, which #1023
+   was meant to fix and did not. 🔴 **Do NOT start from the starvation hypothesis: it is
+   REFUTED** (fired at 44% node CPU with 1.6x target inflation, having also fired at 91%
+   with 41x). The mechanism is UNCHARACTERISED. Two facts worth carrying in: the node
+   pinning is real but explains only one of the two occurrences, and the failing tests move
+   around inside `test_subsystem_store_api.py` (four distinct classes so far) while the
+   exception does not. Repo: `devrc`. Closing condition is NOT yet written; write one
+   before starting, and make it name the MECHANISM rather than a green sample.
 
 🔴 This list is a WORK QUEUE and `claim-work` is its lock — `claim-work --slug-for <this doc>
 <rank>`, then `claim-work <slug> --subject "<text>"`, and sweep `gh pr list --state open` too.
@@ -293,7 +310,9 @@ it up; the evidence is on the issue.
 - 🔴 **A RED required check: read the EXCEPTION, never the test name.** The same test in
   `test_subsystem_store_api.py` failed three different ways in one session, each wanting a
   different response: `ConnectionResetError` (mechanism A — a real defect, now fixed),
-  `TimeoutError` at `socket.py` (mechanism B — starvation, legitimately re-triggerable),
+  `TimeoutError` at `socket.py` (mechanism B — uncharacterised; re-triggering a PR that
+  provably cannot reach that file is legitimate, but that is a claim about the DIFF and not
+  a diagnosis of the flake),
   and 45 × `big-lock: Permission denied` (CI infrastructure, nothing to do with the tree).
   A fourth red was neither — it was the PR sitting on a **red `main`**, where re-triggering
   can never help. "Red check → re-trigger" is the reflex that turns a gate into noise.
