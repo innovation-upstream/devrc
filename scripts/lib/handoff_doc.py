@@ -136,10 +136,15 @@ h. A BASE THAT IS THE WRONG DOCUMENT SAYS SO, LOUDLY. Rule (g)'s bucket line was
    repo's own MAINLINE (derived, never a hardcoded `main` — this incident's repo
    uses `trunk`) carry commits to this doc that the checkout lacks?
 
-   🔴 IT WARNS AND NEVER REFUSES, like rule (f), and no exit code moved — 4
-   `no-advance` and 5 `no-change` keep their exact meanings. Working on a
-   deliberately-behind clone is legitimate, and a gate that could block the write
-   is one people learn to click through.
+   🔴 IT WARNS in the ordinary stale case and REFUSES in exactly ONE: no usable
+   doc HERE while the mainline has one, where every section arrives NEW and the
+   committed document is REPLACED wholesale. That case alone exits 7
+   (`stale-base`) and carries an explicit `--allow-replacing-mainline-doc`;
+   everything else still warns at exit 0, and 4 `no-advance` / 5 `no-change` keep
+   their exact meanings. Working on a deliberately-behind clone is legitimate —
+   which is why the warning half stayed a warning. The refusal is scoped to the
+   one destructive shape precisely so it does NOT become a gate people learn to
+   click through.
 
    🔴 IT IS SILENT ON THE ORDINARY RUN, MEASURED. All 49 real handoff-doc updates
    in this repo's history were replayed through `merge_report`; the two
@@ -296,6 +301,17 @@ different remedies. Nothing is written on either.
 
 EXIT_UNFORCED = 8
 """Rule (j). A ranked next-step names no forcing function. Nothing is written."""
+
+EXIT_STALE_BASE = 9
+"""There is no usable doc HERE and the mainline has one, so confirming would
+REPLACE the committed document with this delta. Nothing written.
+
+🔴 Distinct from EXIT_BEHIND above, and NEITHER implies the other. That one asks
+whether `<remote>/<push-branch>` has moved, and only under `--push`; this asks
+whether the BASE DOCUMENT is the real one, against the DERIVED mainline ref. A
+feature branch current with its own upstream sails past the other check while the
+mainline copy of the doc is still the one being destroyed.
+"""
 
 
 # --- rule (i): one doc per effort --------------------------------------------
@@ -1545,10 +1561,16 @@ def _clip(text: str, limit: int) -> str:
 # said `status=written`. The ONLY tell was one token inside the `buckets:` line,
 # which reads as a routine classification.
 #
-# 🔴 IT WARNS AND NEVER REFUSES, and no exit code moves. Rule (f) already
-# establishes why: a gate that can stop the write becomes a gate people learn to
-# click through, and working on a deliberately-behind clone is legitimate. Exit
-# 4 (`no-advance`) and 5 (`no-change`) keep their exact meanings.
+# 🔴 IT WARNS, EXCEPT IN THE ONE SHAPE THAT DESTROYS THE DOCUMENT. Rule (f)'s
+# reasoning still holds for the ordinary case — a gate that can stop the write
+# becomes a gate people learn to click through, and working on a
+# deliberately-behind clone is legitimate — so behind-but-present stays a warning
+# at exit 0, and 4 (`no-advance`) / 5 (`no-change`) keep their exact meanings.
+# 🔴 But when there is no usable doc HERE and the mainline has one, warning was
+# the wrong call: every section arrives NEW, the committed document is REPLACED,
+# and the y/N that used to stand between that and a push was retired 2026-08-23.
+# That shape exits 7 (`stale-base`) with an explicit override. Scoping the
+# refusal to it is what keeps this from being the clicked-through gate above.
 #
 # 🔴 IT MUST BE SILENT ON THE ORDINARY RUN, and that is measured rather than
 # hoped. Every one of the 49 real handoff-doc updates in this repo's history was
@@ -1627,10 +1649,13 @@ def wrong_base_tells(
     command. An empty tuple is NOT a claim that the base is current; that
     question is `base_currency`'s, and it is the one with hard evidence.
     """
-    if not base_text.strip():
+    if nothing_to_merge_into(base_text):
         # No base at all. Every heading is NEW by construction, so the tell
         # would fire on every genuine first write. `base_currency` still speaks:
         # a doc that is absent HERE and present on the mainline is the same bug.
+        # 🔴 Shares the predicate rather than open-coding `.strip()` a third
+        # time: a third copy is a third chance to drift, and drift between the
+        # first two is what rounds 2 and 3 of this PR's audit were spent on.
         return ()
     base = doc_shape(base_text)
     upd = doc_shape(update_text)
@@ -1657,6 +1682,31 @@ def wrong_base_tells(
     return tuple(tells)
 
 
+def nothing_to_merge_into(base_text: str) -> bool:
+    """Is there no usable base document here — missing, empty, or whitespace?
+
+    🔴 ONE predicate, FOUR consumers. `wrong_base_tells` asks it to raise a
+    tell; `BaseCurrency.replaces_mainline_doc` builds the REFUSAL on it; and the
+    WARNING reaches it through that same method rather than calling here
+    directly — deliberately, because the warning must describe the refusal's
+    set, not this one's. This function answers only "is there anything here to
+    merge into"; whether that MATTERS additionally needs a mainline copy to
+    lose AND that copy being itself non-blank, and `replaces_mainline_doc` is the
+    only place those THREE facts are combined. 🔴 It is now FOUR consumers, not
+    three: `base_currency` also runs it over the MAINLINE text, which is what
+    makes both sides of the equivalence class one predicate instead of two.
+
+    MEASURED: they disagreed for exactly one round. The refusal was widened to
+    `.strip()` while the warning kept `if not local.lines:`, which is true only
+    for a strictly 0-line file — so a `"\\n"` local doc got the weak
+    `0 sections / 1 lines` line and never the loud one, in precisely the shape
+    where every section merges as NEW. The two had been equivalent before the
+    widening (`not base_text` ⟺ `splitlines() == []`), which is why the drift
+    was silent.
+    """
+    return not base_text.strip()
+
+
 class BaseCurrency(typing.NamedTuple):
     """Whether the base document is the newest COMMITTED copy this clone can see.
 
@@ -1677,10 +1727,75 @@ class BaseCurrency(typing.NamedTuple):
     """The mainline copy's shape — read ONLY when `doc_behind` is non-zero, so
     the ordinary run costs no extra `git show`."""
     unmeasured: str | None
+    mainline_blank: bool | None = None
+    """Is the mainline copy itself nothing-to-merge-into — missing, empty or
+    whitespace? `None` means NOT MEASURED, never "it has content".
+
+    🔴 A FLAG, not a shape-derived guess, and that is the whole point. Asking
+    `DocShape` this question is what went wrong twice: `bool(lines)` calls a
+    whitespace-only mainline "a document to lose" (`"\\n"` is 1 line), and
+    `bool(sections)` fails OPEN on a real prose doc that happens to carry no
+    `##` heading — MEASURED, `DocShape(sections=0, lines=6)`, which the whole
+    guard exists to protect. Neither quantity answers it, so `base_currency`
+    puts the mainline TEXT through `nothing_to_merge_into` — the same predicate
+    the local side uses — at the point it already holds that text.
+    """
 
     @property
     def stale(self) -> bool:
         return bool(self.doc_behind)
+
+    def replaces_mainline_doc(self, base_text: str) -> bool:
+        """🔴 The one destructive shape: NOTHING here to merge into, and a real
+        document on the mainline. Every section then arrives NEW and the
+        committed copy is replaced wholesale by this delta.
+
+        Deliberately narrower than `stale`, in both directions:
+
+        * a doc PRESENT here but behind is NOT this — the merge can still
+          classify its sections, so updating a knowingly-behind clone stays
+          legitimate and stays a warning;
+        * a doc absent on BOTH sides is the ordinary NEW-doc case that the
+          skill says step 5 owns, and refusing it would make first writes
+          impossible.
+
+        `mainline` is populated only when `doc_behind` is non-zero and the
+        `git show` succeeded, so it carries both facts and an UNMEASURED
+        currency can never satisfy this — an unanswered question must not
+        become a refusal.
+
+        🔴 `nothing_to_merge_into`, NOT a bare falsiness test. MEASURED against
+        a mainline doc of 6 sections: `""` refused (rc 7), but `"\\n"` and
+        `"   \\n\\n"` both exited 0 and REPLACED it. The merge treats all three
+        identically — 0 sections, so every section arrives NEW — so a doc that is
+        whitespace is exactly as absent as one that is missing, and the bare test
+        let the guard be walked by a single newline.
+
+        🔴 AND THE MAINLINE MUST HAVE SOMETHING TO LOSE — `is not None` is not
+        that test. A committed but EMPTY mainline doc parses to
+        `DocShape(0, 0, …)`, which is not None, so the refusal fired on it:
+        MEASURED, an empty committed mainline copy plus no local doc exited 7
+        `NOTHING WRITTEN` and printed "and <ref> has one (0 section(s) / 0
+        line(s))" — a self-contradicting sentence, blocking a legitimate first
+        write in a shape where NOTHING is destroyed. That is the exact mirror of
+        the bug this guard exists to fix, and an earlier docstring here claimed
+        the combination was already right. Both sides must be non-empty for a
+        replacement to cost anything.
+        """
+        # 🔴 `mainline is not None` is REDUNDANT to the predicate and kept on
+        # purpose: it is the type-narrowing contract `wrong_base_report` relies
+        # on when it dereferences `currency.mainline.sections`. Both fields are
+        # assigned in the SAME branch of `base_currency`, so `mainline_blank is
+        # False` already implies it — which makes a mutant that deletes this
+        # line alone EQUIVALENT, not a coverage gap. It is recorded as an
+        # expected SURVIVE in the sweep rather than counted as coverage; the
+        # alternative is deleting a line that documents an invariant two
+        # functions apart.
+        return (
+            nothing_to_merge_into(base_text)
+            and self.mainline is not None
+            and self.mainline_blank is False
+        )
 
 
 def base_currency(repo: Path, relpath: str) -> BaseCurrency:
@@ -1710,20 +1825,31 @@ def base_currency(repo: Path, relpath: str) -> BaseCurrency:
             f"git could not count commits to {relpath} in HEAD..{base_ref}",
         )
     mainline: DocShape | None = None
+    mainline_blank: bool | None = None
     if doc_behind:
         shown = git_allow(repo, "show", f"{base_ref}:{relpath}")
         if shown.code == 0:
             mainline = doc_shape(shown.out)
-    return BaseCurrency(base_ref, ladder, doc_behind, clone_behind, mainline, None)
+            # 🔴 The SAME predicate the local side uses, on the mainline TEXT.
+            # Measured here rather than inferred from `mainline` later, because
+            # this is the only place the text exists.
+            mainline_blank = nothing_to_merge_into(shown.out)
+    return BaseCurrency(base_ref, ladder, doc_behind, clone_behind, mainline,
+                        None, mainline_blank)
 
 
 WRONG_BASE_REMEDY = (
-    "  Settle it BEFORE answering y: read the mainline copy — `git -C {repo} "
+    "  Settle it BEFORE confirming: read the mainline copy — `git -C {repo} "
     "show {ref}:{relpath}` — and re-run against a current clone if it is the "
     "fuller document.\n"
-    "  This is a WARNING, not a refusal, and no exit code changed. Updating a "
-    "deliberately-behind clone is legitimate. It is a FLOOR: a silent run is "
-    "NOT evidence that the base is current."
+    "  Updating a deliberately-behind clone is legitimate, so on its own this is "
+    "a WARNING and no exit code changed. It is a FLOOR: a silent run is NOT "
+    "evidence that the base is current.\n"
+    "  🔴 ONE shape refuses instead — no usable doc here while the mainline has "
+    "one — and it refuses ONLY on `--confirm`, as `status=stale-base` (exit 9). "
+    "A proposal run therefore NEVER prints that line whatever shape it is in, so "
+    "its absence here is not evidence you are in the benign case: read the line "
+    "above instead, which fires on exactly the shape that refuses."
 )
 
 
@@ -1733,7 +1859,11 @@ def wrong_base_report(
     relpath: str,
     repo: Path,
     local: DocShape,
+    replaces_mainline: bool,
 ) -> str:
+    # 🔴 `replaces_mainline` MUST come from `currency.replaces_mainline_doc(...)`
+    # — the assert below makes any other True illegal. The type is a bare
+    # `bool`, so the signature cannot say so and this comment has to.
     """Rule (h)'s block, or "" when there is nothing to say.
 
     Printed when the currency check found the base STALE (hard evidence), or
@@ -1756,15 +1886,30 @@ def wrong_base_report(
         # as a formatting artefact; the reader needs to be told the document is
         # not here at all, because that is the case where EVERY section merges as
         # NEW and the committed doc is replaced wholesale by the delta.
-        if not local.lines:
-            shape = (
-                f" ({currency.mainline.sections} sections / "
-                f"{currency.mainline.lines} lines)"
-                if currency.mainline is not None
-                else ""
-            )
+        #
+        # 🔴 THE WHOLE REFUSAL PREDICATE, not a half of it. Two rounds got this
+        # wrong in two different ways, and the second was worse than the first:
+        #   round 1 used `not local.lines` — true only for a strictly 0-line
+        #     file, so a `"\n"` base got the mild branch;
+        #   round 2 used the blank half ALONE — which fires when the mainline
+        #     has DELETED this doc (a retirement, revert or rename), where
+        #     nothing is replaced. It then printed "and <ref> has one … will be
+        #     replaced by this delta" about a document that does not exist, and
+        #     the remedy told the operator confirming would refuse. It does not:
+        #     it exits 0 and writes.
+        # So this takes `currency.replaces_mainline_doc(base_text)` itself. The
+        # loud line and the refusal are now the SAME condition by construction
+        # rather than by two expressions that have to be kept in step.
+        if replaces_mainline:
+            # `replaces_mainline` implies `mainline is not None` AND a
+            # non-zero line count, so there is no absent-shape branch to write:
+            # an `else ""` here would be dead code that reads as a handled case.
+            assert currency.mainline is not None  # implied by replaces_mainline
+            shape = (f" ({currency.mainline.sections} sections / "
+                     f"{currency.mainline.lines} lines)")
             lines.append(
-                f"  there is NO {relpath} in this checkout at all, and "
+                f"  this checkout has no usable {relpath} — missing, empty or "
+                f"whitespace, which the merge treats identically — and "
                 f"{currency.base_ref} has one{shape} — every section will merge "
                 f"as {BUCKET_NEW} and the committed document will be replaced by "
                 f"this delta."
@@ -2183,6 +2328,14 @@ def build_parser() -> argparse.ArgumentParser:
         prog="handoff_doc.py",
         description="write or update a handoff doc behind a confirm gate — the "
         "doc's only writer, whether or not it already exists",
+        # 🔴 argparse abbreviates long options by DEFAULT, which makes a guard
+        # spelled as a long name walkable by shortening it. MEASURED: with the
+        # default, `--al` was accepted as `--allow-replacing-mainline-doc` and
+        # replaced the committed document — while that flag's own help text
+        # claimed it was "deliberately long" so it could not be passed by
+        # reflex. A prefix of a destructive override is exactly the reflex it
+        # was named to prevent. No caller here passes an abbreviated flag.
+        allow_abbrev=False,
     )
     p.add_argument("--repo", required=True, help="repo root the handoff lives in")
     p.add_argument("--topic", required=True, help="handoff topic slug")
@@ -2213,6 +2366,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="land it: write the doc and make exactly one commit of that path. "
         "Run this ONLY after a human answered y to the diff the default mode printed.",
+    )
+    p.add_argument(
+        "--allow-replacing-mainline-doc",
+        action="store_true",
+        help="override the status=stale-base refusal: proceed even though this "
+        "checkout has no copy of the doc while the mainline does, REPLACING the "
+        "committed document with this delta. Deliberately long: the ordinary fix "
+        "is to re-run against a current clone, and an override that reads like a "
+        "routine flag is one that gets passed by reflex.",
     )
     p.add_argument(
         "--push",
@@ -2268,7 +2430,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_DOC_PER_EFFORT
 
-    if not doc.exists() and not args.new_effort:
+    # 🔴 READ AT RULE (i), NOT AT THE MERGE. Rule (i) asks "is this a new
+    # effort?" and a copy of this doc on the MAINLINE answers it: no — this is a
+    # stale checkout. Without that, rule (i) fires first in every realistic repo
+    # (it needs only "doc absent + repo has handoff docs") and the stale-base
+    # refusal below becomes UNREACHABLE in the exact shape it exists for.
+    # MEASURED on the merge that introduced this: realistic repo, doc absent
+    # here and present on the mainline -> rc 7 `status=new-doc`, telling the
+    # operator to re-run with `--new-effort` for a doc that already exists
+    # upstream. Neither rule is wrong alone and git reported NO conflict.
+    currency = base_currency(repo, relpath)
+
+    if (not doc.exists() and not args.new_effort
+            and not currency.replaces_mainline_doc("")):
         existing = existing_handoff_docs(repo)
         if existing:
             shown = existing[:EXISTING_SHOWN_MAX]
@@ -2358,15 +2532,62 @@ def main(argv: list[str] | None = None) -> int:
     # true of a document that is not the one being replaced. It runs even with no
     # base at all — a doc absent HERE and present on the mainline is the same bug
     # wearing its loudest disguise, every section arriving NEW.
+    # `currency` is read once, up at rule (i) — the refusal here and the warning
+    # below must use the SAME reading, or a concurrent fetch lets them disagree
+    # and the message names numbers the decision did not use.
     wrong_base = wrong_base_report(
         wrong_base_tells(base_text, update_text, report.buckets),
-        base_currency(repo, relpath),
+        currency,
         relpath,
         repo,
         doc_shape(base_text),
+        currency.replaces_mainline_doc(base_text),
     )
     if wrong_base:
         print(wrong_base)
+
+    # 🔴 REFUSE, don't warn. The block above DETECTED this case and printed it
+    # from the day it shipped — and exited 0. That was survivable while a human
+    # answered a y/N here; that prompt was retired 2026-08-23, which left the
+    # warning as the only thing between this diff and a pushed commit. The
+    # governing rule (`subsystem-index` SKILL) is "blast radius earns a REFUSAL,
+    # not a question", and replacing a committed document with a delta is blast
+    # radius. `--push`'s `behind` check does NOT cover it: that one compares
+    # against `<remote>/<push-branch>`, a DIFFERENT ref, so a feature branch
+    # that is current with its own upstream passes it while the mainline copy
+    # of the doc is still the one being destroyed.
+    if currency.replaces_mainline_doc(base_text) and args.confirm and not (
+        args.allow_replacing_mainline_doc
+    ):
+        assert currency.mainline is not None  # implied by the predicate
+        print(
+            f"status=stale-base ref={currency.base_ref} path={relpath}\n"
+            f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+            f"  This checkout has no usable {relpath} — it is missing, empty or "
+            f"whitespace, which the merge treats identically — and "
+            f"{currency.base_ref} "
+            f"has one ({currency.mainline.sections} section(s) / "
+            f"{currency.mainline.lines} line(s)). Confirming would merge every "
+            f"section as NEW and REPLACE that committed document with this "
+            f"delta.\n"
+            f"  This is usually a clone that never re-synced after work was "
+            f"committed from a WORKTREE — the doc is real, it is just not "
+            f"here.\n"
+            f"  Read the mainline copy first:\n"
+            f"    git -C {repo} show {currency.base_ref}:{relpath}\n"
+            f"  Then re-run against a current clone — that is the fix, not the "
+            f"override.\n"
+            f"  🔴 The override (--allow-replacing-mainline-doc) CANNOT rescue "
+            f"the common shape of this. Being stale-base against the branch you "
+            f"are pushing to implies being BEHIND it, so on the mainline branch "
+            f"`--push` then refuses with status=behind (exit 6) whatever you "
+            f"pass here. It only lands on a branch whose own upstream is "
+            f"current, or with --confirm and no --push. Re-syncing the clone is "
+            f"the route that works in every case.",
+            file=sys.stderr,
+        )
+        return EXIT_STALE_BASE
+
     warning = dropped_durable_report(report.dropped)
     if warning:
         print(warning)
