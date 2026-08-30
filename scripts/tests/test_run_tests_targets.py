@@ -45,6 +45,7 @@ as regression coverage"):
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -57,6 +58,9 @@ RUN_TESTS = REPO_ROOT / "scripts" / "run-tests.sh"
 
 # The entry #276 added and the gate then silently refused to run.
 GUARD_CORE_TARGET = "scripts/claude-hooks/tests/test_guard_core.py"
+
+# The default --set, named once so a message cannot drift from the value.
+SETNAME = "hermetic"
 
 
 def _require_check_targets(runner: Path) -> None:
@@ -83,12 +87,25 @@ def _require_check_targets(runner: Path) -> None:
 
 
 def _run(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
+    """Run the runner with a SCRUBBED environment.
+
+    🔴 `DEVRC_TARGETS` is removed, and that is not hygiene — it is what keeps
+    the other guards in this file honest. It selects a subset exactly like
+    `--targets`, so an exported value makes
+    `test_check_targets_accepts_the_real_target_list`,
+    `test_a_file_target_is_accepted` and `test_check_floors_accepts_the_real_table`
+    validate a one-entry list while their names claim they validated the
+    shipped one. The developer most likely to have it exported is the one
+    debugging a subset run — i.e. exactly when these guards matter.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "DEVRC_TARGETS"}
     return subprocess.run(
         ["bash", *args],
         cwd=str(cwd or REPO_ROOT),
         capture_output=True,
         text=True,
         timeout=120,
+        env=env,
     )
 
 
@@ -262,3 +279,746 @@ def test_check_targets_is_cheap_and_runs_no_tests(tmp_path):
         "--check-targets ran a suite; it is supposed to validate the list only.\n"
         f"{proc.stdout}"
     )
+
+
+# --- `--targets`: running a SUBSET of the declared target list -----------------
+# 🔴 EVERY TEST BELOW IS ABOUT ONE HAZARD: a subset run that tests less than the
+# operator thinks it did. The mechanism exists so CI can skip suites a change
+# could not have broken, which means its failure mode is a GREEN run that never
+# executed the suite holding the regression. So the dangerous inputs — a typo, an
+# empty selection, a target from another set — must all be FATAL, and the ones
+# that are merely narrow must SAY they are narrow.
+#
+# These use `--check-floors`, which applies the subset and exits before pytest,
+# so each costs milliseconds rather than a suite run. That is the same trick
+# `_require_check_targets` above documents, for the same reason.
+
+
+def _require_targets_flag(runner: Path) -> None:
+    """Fail FAST and by name if `--targets` is absent from this revision.
+
+    Without it the flag falls through to `*) ROOT="$1"` exactly as
+    `--check-targets` once did, the trailing ROOT overwrites it, and the runner
+    executes the ENTIRE suite — so every assertion below would pass or fail for
+    reasons unrelated to what it claims to test.
+    """
+    assert "--targets" in runner.read_text(), (
+        f"{runner} has no --targets flag, so the subset mechanism does not "
+        "exist in this revision and these guards are vacuous."
+    )
+
+
+def test_a_subset_narrows_the_target_list_and_the_floor_follows():
+    """The floor is DERIVED, so narrowing the list must narrow the floor.
+
+    This is the property that makes a subset run safe to gate on at all: if the
+    floor stayed at the full-set sum, every subset run would fail GUARD 3 and
+    the mechanism would be unusable; if the floor were not derived at all, a
+    subset could collapse to zero tests and still pass.
+    """
+    _require_targets_flag(RUN_TESTS)
+    two = ["scripts/collector/tests", "scripts/opencode/tests"]
+    sub = _run([str(RUN_TESTS), "--targets", " ".join(two), "--check-floors",
+                str(REPO_ROOT)])
+    full = _run([str(RUN_TESTS), "--check-floors", str(REPO_ROOT)])
+    assert sub.returncode == 0, f"subset --check-floors failed:\n{sub.stdout}\n{sub.stderr}"
+
+    def _floor(out: str) -> int:
+        # NOT `\([^)]*\)` — the subset label contains a nested `target(s)`, so a
+        # non-greedy run up to the ` = ` is the only form that reads both.
+        m = re.search(r"GLOBAL floor .*? = (\d+)", out)
+        assert m, f"no GLOBAL floor line in output:\n{out}"
+        return int(m.group(1))
+
+    sub_floor, full_floor = _floor(sub.stdout), _floor(full.stdout)
+    assert 0 < sub_floor < full_floor, (
+        f"a 2-target subset floor ({sub_floor}) must be positive and strictly "
+        f"below the full-set floor ({full_floor}). Equal means the floor is not "
+        "derived from the selection; zero means it collapsed."
+    )
+
+
+def test_a_subset_run_SAYS_it_ran_a_subset():
+    """A narrowed run must announce itself on stderr.
+
+    🔴 The verdict line of a subset run looks exactly like a full one — same
+    PASS, same shape. Whoever reads it has no other way to know that most of the
+    suite did not execute, so the announcement is the only thing separating
+    "the gate passed" from "the gate passed on 2 of 29 targets".
+    """
+    _require_targets_flag(RUN_TESTS)
+    proc = _run([str(RUN_TESTS), "--targets", "scripts/collector/tests",
+                 "--check-floors", str(REPO_ROOT)])
+    # 🔴 stderr SPECIFICALLY, and a string the floor line does not contain.
+    # The first version asserted "SUBSET" in stdout+stderr, which the floor
+    # line's own "a SUBSET of hermetic" satisfies — so deleting the
+    # announcement entirely left the test green. Watched: that mutant survived.
+    assert "selected via --targets" in proc.stderr, (
+        "a --targets run did not announce the narrowing on stderr. The verdict "
+        "line of a subset run is identical to a full one, so this announcement "
+        f"is the only thing that distinguishes them.\n{proc.stderr}"
+    )
+    assert re.search(r"SELECTED target\(s\), a SUBSET", proc.stdout), (
+        "the floor line must say it summed the SELECTED targets, not '$SET' — "
+        f"labelling a subset sum as the full set is a false coverage claim.\n{proc.stdout}"
+    )
+
+
+def test_an_unknown_target_is_FATAL_not_silently_dropped():
+    """The typo case, and the reason the whole mechanism is allowlist-based.
+
+    `scripts/dl-router` (no `/tests`) is a real directory and an obvious thing
+    to type. Under a prefix- or filter-based design it would select NOTHING and
+    the run would exit 0 having tested nothing — indistinguishable from a pass.
+    """
+    _require_targets_flag(RUN_TESTS)
+    proc = _run([str(RUN_TESTS), "--targets", "scripts/dl-router",
+                 "--check-floors", str(REPO_ROOT)])
+    assert proc.returncode == 3, (
+        f"expected exit 3 for an unknown target, got {proc.returncode}.\n"
+        f"{proc.stdout}\n{proc.stderr}"
+    )
+    assert "scripts/dl-router" in proc.stderr, (
+        f"the error must NAME the offending target.\n{proc.stderr}"
+    )
+
+
+def test_an_empty_selection_is_FATAL():
+    """'Nothing to run' is never a verdict this script may reach."""
+    _require_targets_flag(RUN_TESTS)
+    proc = _run([str(RUN_TESTS), "--targets", "   ", "--check-floors",
+                 str(REPO_ROOT)])
+    assert proc.returncode == 3, (
+        f"expected exit 3 for an empty selection, got {proc.returncode}.\n"
+        f"{proc.stdout}\n{proc.stderr}"
+    )
+
+
+def test_a_subset_may_NARROW_the_set_but_never_WIDEN_it():
+    """A devhost target under `--set hermetic` is an error, not an implicit
+    `--set all`.
+
+    The two sets exist because devhost targets need a real desktop; letting
+    `--targets` reach into the other set would run them in an environment that
+    cannot satisfy them, and the failure would look like a code defect.
+    """
+    _require_targets_flag(RUN_TESTS)
+    devhost = "scripts/devhost-tests"
+    assert devhost in RUN_TESTS.read_text(), (
+        f"{devhost} is no longer declared; pick another DEVHOST_TARGETS entry"
+    )
+    proc = _run([str(RUN_TESTS), "--targets", devhost, "--check-floors",
+                 str(REPO_ROOT)])
+    assert proc.returncode == 3, (
+        f"a devhost target under --set hermetic must be FATAL, got "
+        f"{proc.returncode}.\n{proc.stdout}\n{proc.stderr}"
+    )
+
+
+def test_a_pinned_skip_whose_TARGET_did_not_run_does_not_count():
+    """🔴 The guard that a subset run broke, pinned BEHAVIOURALLY.
+
+    EXPECTED_SKIPS entries are keyed by target. `_skip_entry_applies` honoured
+    the entry's CONDITION but not whether its target was in the run, so a subset
+    that excluded every pinned target still counted them:
+
+        ERROR: 1 test(s) skipped, but 2 of 3 pinned entries apply here.
+
+    The run was correct and the guard called it a failure — how a gate teaches
+    people to ignore it.
+
+    ⚠ This asserts BEHAVIOUR, not source text. The first version checked that
+    `for _t in "${TARGETS[@]}"` appeared in the function; deleting the `if` that
+    USES that loop's result left the loop in place and the test green. Watched:
+    that mutant survived. A source check could see the ingredient and not the
+    decision, which is the whole failure mode.
+
+    Runs ONE tiny target that owns no pinned skip, so a broken predicate counts
+    >0 expected skips against 0 observed and the run goes red.
+    """
+    _require_targets_flag(RUN_TESTS)
+    tiny = "scripts/collector/i3/tests"
+    assert tiny in _hermetic_targets(), (
+        f"{tiny} is no longer a declared target; pick another small one that "
+        "does not appear in EXPECTED_SKIPS"
+    )
+    src = RUN_TESTS.read_text()
+    m = re.search(r"EXPECTED_SKIPS=\((.*?)\n\)", src, re.S)
+    assert m, "could not find EXPECTED_SKIPS in run-tests.sh"
+    pinned_dirs = {e.split("|")[0] for e in re.findall(r'^\s*"([^"]+)"', m.group(1), re.M)}
+    assert tiny not in pinned_dirs, (
+        f"{tiny} now owns a pinned skip, so it can no longer isolate this "
+        f"property. Pinned targets: {sorted(pinned_dirs)}"
+    )
+    # Through `_run`, NOT a bare subprocess.run: this test bypassed the scrub
+    # and so inherited an ambient DEVRC_TARGETS, giving the developer debugging
+    # a subset run a spurious RED — the mirror of the vacuous GREEN the scrub
+    # exists to prevent. `_run`'s 120s timeout is ample; this costs ~13s.
+    proc = _run([str(RUN_TESTS), "--targets", tiny, str(REPO_ROOT)])
+    combined = proc.stdout + proc.stderr
+    assert "pinned entries apply here" not in combined, (
+        "a subset excluding every pinned-skip target still counted pinned "
+        f"entries — `_skip_entry_applies` is not filtering on TARGETS.\n{combined}"
+    )
+    assert proc.returncode == 0, (
+        f"a single-target subset run should pass, got {proc.returncode}.\n{combined}"
+    )
+
+
+# --- findings from the round-1 adversarial audit of #1073 ----------------------
+# Each of these kills a mutant that SURVIVED the first six. They are here because
+# an audit found them, not because they were designed in — recorded so the next
+# reader knows which properties were learned the hard way.
+
+
+def test_the_SELECTED_set_is_exactly_what_was_REQUESTED():
+    """🔴 F10. The first six tests asserted the floor MOVED and that the run
+    ANNOUNCED itself — neither pins the selection's identity or size.
+
+    Measured mutant (non-deletion, so the weak deletion sweep could not see it):
+
+        _selected+=("$_r")
+        ->  [ "${#_selected[@]}" -eq 0 ] && _selected+=("$_r")
+
+    i.e. run only the FIRST requested target. It SURVIVED all six new tests AND
+    all 69 tests across the four meta-test files. Production behaviour under it:
+    `--targets "A B"` runs A only, announces "1 of the hermetic set", floors at
+    A's floor alone, and exits 0 — the file header's own named hazard, silently
+    green.
+
+    So this asserts the COUNT and the IDENTITY of what ran, from the floor
+    table, which lists exactly the selected targets.
+    """
+    _require_targets_flag(RUN_TESTS)
+    want = ["scripts/collector/tests", "scripts/opencode/tests"]
+    proc = _run([str(RUN_TESTS), "--targets", " ".join(want), "--check-floors",
+                 str(REPO_ROOT)])
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    selected = {m.group(1) for m in
+                re.finditer(r"^  floor \d+  (\S+)\s*$", proc.stdout, re.M)}
+    assert selected == set(want), (
+        f"the run selected {sorted(selected)} but was asked for {sorted(want)}. "
+        "A selection that silently drops a requested target runs less than the "
+        "operator believes and still exits 0."
+    )
+
+
+def test_a_DUPLICATE_target_is_FATAL():
+    """🔴 F2. A repeat inflates every coverage number AND defeats the floor by
+    its own derivation — the duplicate contributes its floor twice, then
+    satisfies the doubled floor by running twice.
+
+    Measured before the fix: one suite, two executions,
+    `SUBSET — 2 …  TOTAL collected=26 …  floor: 24`, exit 0.
+
+    Reachable by exactly the path->target mapper this is groundwork for, which
+    emits duplicates by construction when two changed files share one target.
+    """
+    _require_targets_flag(RUN_TESTS)
+    t = "scripts/collector/i3/tests"
+    proc = _run([str(RUN_TESTS), "--targets", f"{t} {t}", "--check-floors",
+                 str(REPO_ROOT)])
+    assert proc.returncode == 3, (
+        f"a duplicated target must be FATAL, got {proc.returncode}.\n"
+        f"{proc.stdout}\n{proc.stderr}"
+    )
+    assert "more than once" in proc.stderr, proc.stderr
+
+
+def test_the_value_is_NOT_glob_expanded():
+    """🔴 F8. `_requested=($ONLY_TARGETS)` does PATHNAME EXPANSION as well as
+    word splitting; only the splitting is wanted.
+
+    Measured before the fix: `--targets 'scripts/collector/*/tests'` selected 5
+    targets and exited 0. That makes the selection track the FILESYSTEM — delete
+    one of those suites and the glob silently selects four and stays green,
+    while a FULL run goes red on GUARD 5 (`does not exist`). It converts the
+    #276 failure this file exists for into a silent narrowing.
+
+    A glob must now be FATAL as an unknown target, because after `set -f` the
+    literal `scripts/collector/*/tests` matches no declared entry.
+    """
+    _require_targets_flag(RUN_TESTS)
+    proc = _run([str(RUN_TESTS), "--targets", "scripts/collector/*/tests",
+                 "--check-floors", str(REPO_ROOT)])
+    assert proc.returncode == 3, (
+        f"a glob must not be expanded into a selection, got {proc.returncode}. "
+        f"If this selected several targets, the value was expanded against the "
+        f"filesystem.\n{proc.stdout}\n{proc.stderr}"
+    )
+
+
+def test_an_EMPTY_targets_value_is_FATAL_not_a_full_run():
+    """🟢 G1 → real. `--targets ""` and `--targets=` previously fell through to
+    a FULL run, contradicting the block's own stated rule and the name of
+    `test_an_empty_selection_is_FATAL` (which only ever covered `"   "`).
+
+    Fail-safe in direction, wrong in report: the operator asked for a subset and
+    silently got everything. The likeliest producer is a broken caller —
+    `--targets "$(compute)"` where compute returned nothing.
+    """
+    _require_targets_flag(RUN_TESTS)
+    for args in (["--targets", ""], ["--targets="]):
+        proc = _run([str(RUN_TESTS), *args, "--check-floors", str(REPO_ROOT)])
+        assert proc.returncode == 3, (
+            f"{args} should be FATAL, got {proc.returncode} — an empty value "
+            f"must not fall through to a full run.\n{proc.stdout}\n{proc.stderr}"
+        )
+
+
+def test_repeating_the_flag_is_FATAL_not_last_wins():
+    """🟡 F7. Last-wins silently discards the earlier selection, and the caller
+    that hits it is a WRAPPER appending its own `--targets` on top of the
+    operator's — so the discarded half is the half nobody is watching."""
+    _require_targets_flag(RUN_TESTS)
+    proc = _run([str(RUN_TESTS), "--targets", "scripts/collector/tests",
+                 "--targets", "scripts/opencode/tests", "--check-floors",
+                 str(REPO_ROOT)])
+    assert proc.returncode == 3, (
+        f"--targets twice must be FATAL, got {proc.returncode}.\n{proc.stderr}"
+    )
+
+
+def test_a_partial_run_is_declared_where_gate_sh_actually_LOOKS():
+    """🔴 F1, and the reason it was deploy-blocking.
+
+    `gate.sh` locates `^=\\{8,\\} .*SUMMARY` and prints from there DOWN, so the
+    stderr announcement emitted at the TOP of the run is excluded by
+    construction. Measured before the fix: a 1-target run through `gate.sh`
+    showed `SUMMARY (hermetic set)` as its FIRST line and `GATE: RESULT=PASS` as
+    its last — a positive claim that the whole set ran, on the one surface
+    CLAUDE.md tells people to read.
+
+    Asserted on the SUMMARY region specifically, not on the whole output, so it
+    cannot pass on the strength of the top-of-run announcement.
+    """
+    _require_targets_flag(RUN_TESTS)
+    proc = _run([str(RUN_TESTS), "--targets", "scripts/collector/i3/tests",
+                 str(REPO_ROOT)])
+    assert "SUMMARY" in proc.stdout, f"no SUMMARY banner:\n{proc.stdout[-3000:]}"
+    tail = proc.stdout[proc.stdout.index("SUMMARY"):]
+    assert "SUBSET" in tail or "PARTIAL RUN" in tail, (
+        "the SUMMARY region — everything gate.sh shows an operator — does not "
+        "say the run was partial. A reader sees full-set framing over a "
+        f"fraction of the suite.\n{tail[:1500]}"
+    )
+
+
+def test_every_expected_skip_dir_is_a_declared_target():
+    """🟡 F5. The comment on `_skip_entry_applies` asserted this was pinned; it
+    was not. Pinning it now, because that filter matches a ledger dir EXACTLY
+    against TARGETS while the matching loop treats it as a PREFIX — so an entry
+    naming a parent directory works today and would be silently dropped under
+    any subset.
+    """
+    src = RUN_TESTS.read_text()
+    m = re.search(r"EXPECTED_SKIPS=\((.*?)\n\)", src, re.S)
+    assert m, "could not find EXPECTED_SKIPS in run-tests.sh"
+    dirs = {e.split("|")[0] for e in re.findall(r'^\s*"([^"]+)"', m.group(1), re.M)}
+    assert dirs, "parsed ZERO ledger entries — the parser is broken, not the ledger"
+    # 🔴 HERMETIC_TARGETS ALONE — deliberately NOT the union with
+    # DEVHOST_TARGETS. Measured: with the union, adding
+    # `"scripts/devhost-tests|a devhost-only skip"` to the ledger left this pin
+    # GREEN while a DEFAULT `--set hermetic` run goes red with
+    # `N test(s) skipped, but M of K pinned entries apply here` — because that
+    # target never runs under `--set hermetic`, and the skip filter is gated on
+    # a subset being active (F4), so nothing filters it out. The union made this
+    # guard blind to the exact case it was advertised as catching.
+    declared = set(_hermetic_targets())
+    assert dirs <= declared, (
+        f"EXPECTED_SKIPS names dir(s) that are not declared targets: "
+        f"{sorted(dirs - declared)}. `_skip_entry_applies` matches these "
+        "EXACTLY against TARGETS, so under a subset such an entry is silently "
+        "inapplicable and its skip becomes UNPINNED."
+    )
+
+
+def test_DEVRC_TARGETS_is_equivalent_to_the_flag_and_names_itself():
+    """🟡 F9. The env var was reachable, undocumented and untested: the string
+    `DEVRC_TARGETS` occurred in exactly ONE place in the repo — the line that
+    read it — so a mutant deleting that read survived the entire suite.
+
+    Two properties, because either alone is insufficient:
+
+    1. **Equivalence.** A caller that cannot add an argument must get the same
+       selection, and the same derived floor, as one that can.
+    2. **Attribution.** An EXPORTED value narrows every run-tests.sh in the
+       shell — the pre-push hook's included — and nobody typed it. The run must
+       name the environment as the source, or "why did this only run 3 targets"
+       has no answer in the output.
+    """
+    _require_targets_flag(RUN_TESTS)
+    t = "scripts/collector/i3/tests"
+    src = RUN_TESTS.read_text()
+    assert "DEVRC_TARGETS" in src, "the env override is gone from run-tests.sh"
+
+    flag = _run([str(RUN_TESTS), "--targets", t, "--check-floors", str(REPO_ROOT)])
+    env = subprocess.run(
+        ["bash", str(RUN_TESTS), "--check-floors", str(REPO_ROOT)],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120,
+        env={**os.environ, "DEVRC_TARGETS": t},
+    )
+    assert flag.returncode == 0 and env.returncode == 0, (flag.stderr, env.stderr)
+
+    def _floor(out: str) -> str:
+        m = re.search(r"GLOBAL floor .*? = (\d+)", out)
+        assert m, f"no GLOBAL floor line:\n{out}"
+        return m.group(1)
+
+    assert _floor(flag.stdout) == _floor(env.stdout), (
+        "DEVRC_TARGETS and --targets produced DIFFERENT floors, so they are not "
+        "the same mechanism and the env path is unguarded by every other test "
+        "in this file."
+    )
+    assert "DEVRC_TARGETS" in env.stderr, (
+        "a subset selected by the environment did not name the environment as "
+        f"its source — an ambient value is the one nobody typed.\n{env.stderr}"
+    )
+    assert "DEVRC_TARGETS" not in flag.stderr, (
+        "a flag-selected subset blamed the environment.\n" + flag.stderr
+    )
+
+
+def test_the_meta_test_harness_is_immune_to_an_ambient_DEVRC_TARGETS():
+    """🟡 F9, second half — the one that makes OTHER guards lie.
+
+    `_run` inherits `os.environ`. With `DEVRC_TARGETS` exported, three
+    target-list guards in this file pass VACUOUSLY —
+    `test_check_targets_accepts_the_real_target_list`,
+    `test_a_file_target_is_accepted` and `test_check_floors_accepts_the_real_table`
+    would each validate a one-entry list while claiming to validate the shipped
+    one. A developer debugging a subset run is exactly the person with that
+    variable exported.
+
+    So `_run` must scrub it. This asserts the scrubbing, not the intent.
+    """
+    saved = os.environ.get("DEVRC_TARGETS")
+    os.environ["DEVRC_TARGETS"] = "scripts/collector/i3/tests"
+    try:
+        proc = _run([str(RUN_TESTS), "--check-floors", str(REPO_ROOT)])
+        assert "SUBSET" not in proc.stderr, (
+            "_run leaked an ambient DEVRC_TARGETS into the runner, so every "
+            "full-set assertion in this file can pass against a 1-target run.\n"
+            + proc.stderr
+        )
+        # 🔴 AND it must have RUN. Asserting only the absence of "SUBSET" is
+        # satisfied by a scrub that sets the variable to EMPTY instead of
+        # dropping the key: the runner then exits 3 with `resolved to NOTHING`,
+        # prints no SUBSET line, and this guard stays green over a run that
+        # never happened.
+        assert proc.returncode == 0, (
+            f"the scrubbed run exited {proc.returncode} — an empty-string "
+            f"scrub is not a scrub.\n{proc.stdout}\n{proc.stderr}"
+        )
+    finally:
+        if saved is None:
+            os.environ.pop("DEVRC_TARGETS", None)
+        else:
+            os.environ["DEVRC_TARGETS"] = saved
+
+
+# --- findings from the round-2 delta audit ------------------------------------
+
+
+def test_the_subset_note_reports_N_of_the_FULL_set_not_N_of_N():
+    """🟡 round-2 F5. `SET_TOTAL` is captured BEFORE narrowing, and five lines of
+    comment explain why — but nothing asserted it.
+
+    Measured mutant (non-deletion): `${SET_TOTAL}` -> `${#TARGETS[@]}` at both
+    read sites. Banner becomes `SUBSET: 1 of 1 hermetic target(s)` and the
+    PARTIAL RUN block `1 of 1`. It SURVIVED all 23 tests in this file, with a
+    positive control in the same copy proving the mutated runner was executing.
+
+    "1 of 1" is the reassuring-but-wrong number: it reads as a complete run of a
+    one-target set. The denominator is the whole point of the note.
+    """
+    _require_targets_flag(RUN_TESTS)
+    full = len(_hermetic_targets())
+    assert full >= 10, f"only {full} targets parsed — the parser is broken"
+    proc = _run([str(RUN_TESTS), "--targets", "scripts/collector/i3/tests",
+                 "--check-floors", str(REPO_ROOT)])
+    combined = proc.stdout + proc.stderr
+    m = re.search(r"SUBSET:\s*(\d+)\s+of\s+(\d+)", combined)
+    assert m, f"no 'SUBSET: N of M' in the output:\n{combined[:1200]}"
+    selected, total = int(m.group(1)), int(m.group(2))
+    assert selected == 1, f"expected 1 selected, got {selected}"
+    assert total == full, (
+        f"the note says '{selected} of {total}' but the {SETNAME} set has "
+        f"{full} targets. A denominator equal to the numerator turns a partial "
+        "run into what reads as a complete one."
+    )
+
+    # 🔴 AND THE BANNER, which is a SECOND site with its own copy of the same
+    # expression. Watched: mutating only `SUBSET_NOTE` (the banner) to
+    # `N of N` left this test green, because the early-exit path above reads the
+    # stderr line instead. Two sites, two assertions — pinning one proves
+    # nothing about the other.
+    real = _run([str(RUN_TESTS), "--targets", "scripts/collector/i3/tests",
+                 str(REPO_ROOT)])
+    assert "SUMMARY" in real.stdout, f"no banner:\n{real.stdout[-2000:]}"
+    tail = real.stdout[real.stdout.index("SUMMARY"):]
+    mb = re.search(r"SUBSET:\s*(\d+)\s+of\s+(\d+)", tail)
+    assert mb, f"the SUMMARY region carries no 'N of M':\n{tail[:1200]}"
+    assert int(mb.group(2)) == full, (
+        f"the banner says '{mb.group(1)} of {mb.group(2)}' but the {SETNAME} "
+        f"set has {full} targets."
+    )
+
+
+def test_every_early_exit_surface_declares_a_partial_run():
+    """🟡 round-2 F1/F3/F4 as ONE property, because they were fixed one at a
+    time and a fourth surface would be missed the same way.
+
+    Each of these exits before the SUMMARY banner and is somebody's whole view
+    of the run. Asserted together so a new early-exit path has to answer this
+    test rather than be discovered by the next audit.
+    """
+    _require_targets_flag(RUN_TESTS)
+    t = "scripts/collector/i3/tests"
+    for flag in ("--check-targets", "--check-floors"):
+        proc = _run([str(RUN_TESTS), "--targets", t, flag, str(REPO_ROOT)])
+        assert proc.returncode == 0, f"{flag}: {proc.stdout}\n{proc.stderr}"
+        assert re.search(r"SUBSET|SELECTED", proc.stdout), (
+            f"{flag} printed no subset caveat on stdout — the surface an "
+            f"operator reads. A one-target run reads as the whole set.\n"
+            f"{proc.stdout[:1200]}"
+        )
+
+
+def test_the_flag_OVERRIDES_an_ambient_env_var_and_says_so():
+    """🟡 round-2 F2 — a regression the previous fix round introduced.
+
+    Measured before the fix: a SINGLE `--targets` on a shell with
+    DEVRC_TARGETS exported was rejected `--targets given more than once`
+    (exit 3), naming no environment variable, so the remedy appeared nowhere and
+    the advice printed was already satisfied. It also removed the ordinary
+    precedence that an explicit flag beats ambient configuration.
+    """
+    _require_targets_flag(RUN_TESTS)
+    flagged = "scripts/collector/i3/tests"
+    ambient = "scripts/opencode/tests"
+    env = {**os.environ, "DEVRC_TARGETS": ambient}
+    proc = subprocess.run(
+        ["bash", str(RUN_TESTS), "--targets", flagged, "--check-floors",
+         str(REPO_ROOT)],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert proc.returncode == 0, (
+        "a single --targets alongside an ambient DEVRC_TARGETS must not be "
+        f"fatal, got {proc.returncode}.\n{proc.stdout}\n{proc.stderr}"
+    )
+    rows = {m.group(1) for m in
+            re.finditer(r"^  floor \d+  (\S+)\s*$", proc.stdout, re.M)}
+    assert rows == {flagged}, (
+        f"the flag did not win: selection is {sorted(rows)}, expected "
+        f"[{flagged!r}]. An explicit flag must override ambient configuration."
+    )
+    assert "OVERRIDES" in proc.stderr and "DEVRC_TARGETS" in proc.stderr, (
+        "the override was silent — a selection the operator did NOT type was "
+        f"discarded without a word.\n{proc.stderr}"
+    )
+
+
+def test_a_set_but_EMPTY_env_var_names_the_env_var_in_its_remedy():
+    """🟡 round-2 F3. `DEVRC_TARGETS=` (set, empty) is fatal — defensible — but
+    the message said "Omit --targets", which that operator has already done.
+    The only remedy is `unset DEVRC_TARGETS`, so it has to appear."""
+    _require_targets_flag(RUN_TESTS)
+    env = {**os.environ, "DEVRC_TARGETS": ""}
+    proc = subprocess.run(
+        ["bash", str(RUN_TESTS), "--check-floors", str(REPO_ROOT)],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert proc.returncode == 3, f"expected 3, got {proc.returncode}"
+    # 🔴 The FATAL LINE ITSELF, not just the string somewhere in stderr. The
+    # remedy line below it mentions DEVRC_TARGETS independently, so a bare
+    # `"DEVRC_TARGETS" in proc.stderr` stays green while the headline reverts to
+    # blaming `--targets`. Watched: that mutant survived.
+    fatal = [l for l in proc.stderr.splitlines() if "FATAL" in l]
+    assert fatal, f"no FATAL line at all:\n{proc.stderr}"
+    assert "DEVRC_TARGETS" in fatal[0], (
+        "the FATAL line blames a flag the reader never passed; the variable "
+        f"that IS set is named nowhere on it.\n{fatal[0]}"
+    )
+    assert "--targets" not in fatal[0], (
+        f"the FATAL line names --targets, which was not given.\n{fatal[0]}"
+    )
+
+
+# --- findings from the round-3 delta audit ------------------------------------
+# Round 3's lesson was not a code defect: it was that FIVE of round 2's own
+# message fixes shipped with no guard able to see them regress — including G7,
+# a round-2 finding, fixed and then immediately unpinned. One table below covers
+# the class, so a sixth message does not need a seventh round to notice.
+
+
+ENV_ONLY = {"DEVRC_TARGETS": "scripts/collector/i3/tests"}
+
+
+def _run_env(args: list[str], extra: dict) -> subprocess.CompletedProcess:
+    """Run the runner with EXTRA env, bypassing `_run`'s scrub on purpose."""
+    return subprocess.run(
+        ["bash", *args], cwd=str(REPO_ROOT), capture_output=True, text=True,
+        timeout=120, env={**os.environ, **extra},
+    )
+
+
+def test_no_message_hardcodes_the_flag_when_the_ENVIRONMENT_selected():
+    """🟡 round-3. Every operator-facing string that names the selection source
+    must name the REAL one.
+
+    Five mutants re-hardcoding `--targets` survived round 2's suite: the
+    unknown-target FATAL, the duplicate FATAL, the floor-row label (which IS
+    round-2 finding G7, fixed without a guard), the subset announcement, and the
+    GUARD 5 sentence. All are reachable with DEVRC_TARGETS set and no flag.
+
+    Asserted as a CLASS over the whole output rather than per message, because
+    the failure mode is a NEW message being added unguarded — which a per-message
+    test cannot see.
+    """
+    _require_targets_flag(RUN_TESTS)
+    # (args, must the run succeed?) — each drives a different message path.
+    cases = [
+        (["--check-floors"], True),
+        (["--check-targets"], True),
+    ]
+    for args, ok in cases:
+        proc = _run_env([str(RUN_TESTS), *args, str(REPO_ROOT)], ENV_ONLY)
+        assert (proc.returncode == 0) == ok, (
+            f"{args}: rc={proc.returncode}\n{proc.stdout}\n{proc.stderr}")
+        blob = proc.stdout + proc.stderr
+        assert "DEVRC_TARGETS" in blob, (
+            f"{args}: nothing named the environment variable that selected.\n{blob[:900]}")
+        offenders = [l for l in blob.splitlines()
+                     if "--targets" in l and "DEVRC_TARGETS" not in l
+                     and "OVERRIDES" not in l]
+        assert not offenders, (
+            f"{args}: these lines blame `--targets`, which was never passed — "
+            f"the environment selected:\n  " + "\n  ".join(offenders[:6]))
+
+    # 🔴 `--check-targets` must also say what it did NOT validate. GUARD 5's
+    # whole claim is "every declared target resolves"; under a subset it checked
+    # one of twenty-eight, and the sentence saying so is the difference between
+    # a narrowed claim and a false one. Watched: deleting it passed the file.
+    ct = _run_env([str(RUN_TESTS), "--check-targets", str(REPO_ROOT)], ENV_ONLY)
+    assert "GUARD 5 did NOT validate the unselected ones." in ct.stdout, (
+        "--check-targets under a subset no longer states that GUARD 5 skipped "
+        f"the unselected targets.\n{ct.stdout[:900]}")
+
+    # 🔴 The FATAL paths driven FROM THE ENVIRONMENT, which is the only way to
+    # see them mis-attribute. Driving them with a flag cannot: the flag IS the
+    # source, so a hardcoded "--targets" is accidentally correct and the mutant
+    # survives. Watched: re-hardcoding the unknown-target FATAL passed the whole
+    # file until this loop drove it via DEVRC_TARGETS.
+    for value, needle in (("definitely/not/a/target", "definitely/not/a/target"),
+                          ("scripts/tests scripts/tests", "more than once")):
+        proc = _run_env([str(RUN_TESTS), "--check-floors", str(REPO_ROOT)],
+                        {"DEVRC_TARGETS": value})
+        assert proc.returncode == 3, (
+            f"DEVRC_TARGETS={value!r}: expected 3, got {proc.returncode}\n{proc.stderr}")
+        assert needle in proc.stderr, proc.stderr
+        fatal = [l for l in proc.stderr.splitlines() if "FATAL" in l]
+        assert fatal and "DEVRC_TARGETS" in fatal[0], (
+            "the FATAL line blames `--targets` for a selection the ENVIRONMENT "
+            f"made.\n{fatal[0] if fatal else proc.stderr}")
+
+
+def test_the_empty_selection_remedy_names_EVERY_knob_that_is_set():
+    """🟡 round-3, and the regression that round found.
+
+    The remedy branch read only the FLAG, so flag-empty-WITH-an-ambient-env
+    printed "Omit --targets to run the whole set" — and omitting the flag hands
+    the selection back to DEVRC_TARGETS, running a SUBSET at exit 0. The operator
+    is told the opposite of what happens, and following the advice produces the
+    silently-narrowed run this whole block exists to prevent.
+
+    🔴 The previous round's test for this asserted only on the FATAL headline and
+    never on the remedy, so deleting the entire remedy branch left it green
+    (watched). This asserts the remedy line itself, in all three states.
+    """
+    _require_targets_flag(RUN_TESTS)
+
+    def _remedy(args, env):
+        p = _run_env([str(RUN_TESTS), *args, "--check-floors", str(REPO_ROOT)], env)
+        assert p.returncode == 3, f"{args} {env}: expected 3, got {p.returncode}\n{p.stderr}"
+        return p.stderr
+
+    # flag empty, env ALSO set -> must name BOTH
+    both = _remedy(["--targets", ""], ENV_ONLY)
+    assert "unset DEVRC_TARGETS" in both and "--targets" in both, (
+        "with BOTH set, the remedy must name both knobs; omitting only the flag "
+        f"leaves the environment selecting a subset.\n{both}")
+
+    # env set-but-empty, no flag -> must name the env var, never the flag
+    env_only = _remedy([], {"DEVRC_TARGETS": ""})
+    assert "unset DEVRC_TARGETS" in env_only, env_only
+    assert "Omit --targets" not in env_only, (
+        f"told to omit a flag that was never passed.\n{env_only}")
+
+    # flag empty, NO env -> must name the flag, never the env var
+    flag_only = subprocess.run(
+        ["bash", str(RUN_TESTS), "--targets", "", "--check-floors", str(REPO_ROOT)],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120,
+        env={k: v for k, v in os.environ.items() if k != "DEVRC_TARGETS"},
+    ).stderr
+    assert "Omit --targets" in flag_only, flag_only
+    assert "unset DEVRC_TARGETS" not in flag_only, (
+        f"told to unset a variable that was not set.\n{flag_only}")
+
+
+def test_check_floors_declares_the_subset_on_its_GLOBAL_line():
+    """🟢 round-3. The earlier early-exit test matched `SUBSET|SELECTED` over the
+    whole of stdout — satisfied by the 27 unselected floor-row labels
+    (`[not SELECTED by ...]`), never by the GLOBAL line it was aimed at.
+
+    Watched: reverting the GLOBAL line to `sum over the $SET set` left that test
+    GREEN. This one reads the GLOBAL line specifically.
+    """
+    _require_targets_flag(RUN_TESTS)
+    proc = _run([str(RUN_TESTS), "--targets", "scripts/collector/i3/tests",
+                 "--check-floors", str(REPO_ROOT)])
+    assert proc.returncode == 0, proc.stderr
+    line = [l for l in proc.stdout.splitlines() if "GLOBAL floor" in l]
+    assert line, f"no GLOBAL floor line:\n{proc.stdout[:900]}"
+    assert "SELECTED" in line[0] and "SUBSET" in line[0], (
+        "the GLOBAL floor line does not say it summed a SUBSET — it is the "
+        f"number a reader uses to judge the run's coverage.\n{line[0]}")
+
+
+def test_the_SUMMARY_BANNER_names_the_real_selection_source():
+    """🔴 round-4 M12 — the one surface the class scan structurally could not see.
+
+    `test_no_message_hardcodes_the_flag_when_the_ENVIRONMENT_selected` runs only
+    under `--check-floors` and `--check-targets`, and BOTH exit before
+    `SUBSET_NOTE` is rendered into the SUMMARY banner. So the banner — the line
+    `gate.sh` starts reading, and the whole reason F1 was deploy-blocking — was
+    outside a guard whose docstring says "every operator-facing string".
+
+    Measured: mutating the banner's `${ONLY_TARGETS_SOURCE}` to a hardcoded
+    `--targets` printed
+
+        ==== SUMMARY (hermetic set) — SUBSET: 1 of 28 hermetic target(s) via --targets ====
+
+    for an env-selected run with NO flag on the command line, and SURVIVED all 30
+    tests in this file AND the gating sandbox tier with byte-identical counts.
+    An operator reading that checks their command line, finds no `--targets`, and
+    has no way to attribute the narrowing — the exact question these lines exist
+    to answer.
+
+    This needs a REAL run (no `--check-*`), because the banner only exists on one.
+    """
+    _require_targets_flag(RUN_TESTS)
+    proc = _run_env([str(RUN_TESTS), str(REPO_ROOT)], ENV_ONLY)
+    assert proc.returncode == 0, f"{proc.stdout[-1500:]}\n{proc.stderr[-1500:]}"
+    assert "SUMMARY" in proc.stdout, f"no banner:\n{proc.stdout[-1500:]}"
+    # The SUMMARY region is exactly what gate.sh prints; assert inside it only.
+    tail = proc.stdout[proc.stdout.index("SUMMARY"):]
+    head = tail.splitlines()[0]
+    assert "DEVRC_TARGETS" in head, (
+        "the SUMMARY banner does not name the environment variable that "
+        f"selected — it is the line gate.sh starts reading.\n{head}")
+    assert "--targets" not in head, (
+        f"the banner blames a flag that was never passed.\n{head}")
+    # And the PARTIAL RUN block immediately below it, same reasoning.
+    block = "\n".join(tail.splitlines()[1:6])
+    assert "PARTIAL RUN" in block, f"no PARTIAL RUN block:\n{block}"
