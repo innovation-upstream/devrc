@@ -334,13 +334,23 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   `nix build … 2>&1 | tail -40` discarded 1,447 of 1,451 log lines. **That diagnosis is false and
   its own evidence refutes it:** the surviving lines were the FIRST lines of the stream
   (`this derivation will be built`, `building '…drv'`), and `tail -40` keeps the LAST forty — so
-  nothing was discarded. **The real cause: `nix build` does not print build logs at all without
-  `-L`/`--print-build-logs`.** Paired control, measured, on a builder printing 201 lines plus a
-  `RESULT:` line: **without `-L` → 3 console lines, 0 builder lines**; **with `-L` → `tail -40`
-  keeps 40, including the `RESULT:` line as the last one.** So `tail -40` would have *preserved*
-  the verdict had the log been streaming. 🔴 **The wrong fix this would have taught — "drop the
-  pipe" — leaves you with exactly the same silence.** Use `-L`, or `nix log <drv>` after the
-  fact, which also works when the derivation was already built and the console prints nothing.
+  nothing was discarded. **The real cause: `nix build` does not print the build log of a build
+  that SUCCEEDS without `-L`/`--print-build-logs`.** Paired control, measured, on a builder
+  printing 201 lines plus a `RESULT:` line: **without `-L` → 3 console lines, 0 builder lines**;
+  **with `-L` → `tail -40` keeps 40, including the `RESULT:` line as the last one.** So `tail -40`
+  would have *preserved* the verdict had the log been streaming. 🔴 **The wrong fix this would
+  have taught — "drop the pipe" — leaves you with exactly the same silence.** Use `-L`, or
+  `nix log <drv>` after the fact, which also works when the derivation was already built and the
+  console prints nothing.
+  🔴 **"SUCCEEDS" IS LOAD-BEARING AND WAS ADDED BY A LATER AUDIT — the first version of this
+  bullet said "does not print build logs at all", which is the same over-wide shape it was
+  written to retract.** MEASURED on a FAILING build, no `-L`, non-tty: rc 1, **35 stderr lines,
+  24 of them builder lines, including the `RESULT:` line**, then `For full logs, run: nix log …`.
+  nix prints the tail of a failed builder's log inline, bounded by **`log-lines` (25 here,
+  `nix config show | grep ^log-lines`)**. That is the case you are most often staring at, so a
+  reader carrying "no log without `-L`, ever" mis-reads the one output that matters. ⚠ The
+  "3 console lines" figure is also **non-tty specific** — on a pty the same successful build
+  prints 0 — and assumes the derivation is not already cached (next bullet).
   🔴 **Generalise: a plausible mechanism you already know about is the most dangerous
   explanation, because it stops the search.** The documented `| tail` trap was real, adjacent,
   and not what happened; I reached for it and labelled the result "measured".
@@ -360,8 +370,16 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   live instance. Now stated in its own pin comment.
 - **FOUR stale counts were found in the files this touched** (an earlier revision said "three"
   and then listed four): `_wait_events`' docstring said `53 total`, `39 n=1` and `7 op-selected`
-  — actually 52 / 38 / 11 — and the ratchet's ledger comment said "the same 48 sites" while its
-  pin was 47. One call to `classify_wait_calls()` produces all of them.
+  — actually 52 / 38 / **12** — and the ratchet's ledger comment said "the same 48 sites" while
+  its pin was 47. One call to `classify_wait_calls()` produces all of them.
+  🔴 **AND THE CORRECTION WENT STALE ONE COMMIT LATER — THIRD INSTANCE, INSIDE THE BULLET ABOUT
+  STALE COUNTS.** This said `11 op-selected`, which was true at `2579e2f3` and was invalidated by
+  **my own round-1 audit-fix commit** (`e4777c58`), which added a third `_wait_ops` call while
+  sequencing the guard test: `_wait_ops where=` 3→5, op-selected 11→**12**. I re-derived after
+  writing the fix and did not re-derive after *committing* it. **Nothing pins this number** — no
+  assertion references `op-selected`, so a full green suite says nothing about it, which is why
+  it drifted twice. The tell is structural: a count quoted in prose, in a file whose tests do not
+  read it.
 - ⚠ **An unverifiable corroborating hash is worse than none.** An earlier revision cited
   `sha256 1b42b227…` as proof the control mutation was reverted. It names an intermediate
   working-tree state that reaches no commit, so no reader can reproduce it — while reading as
@@ -505,7 +523,13 @@ for b,c in sorted(collections.Counter(r['bucket'] for r in recs).items()): print
   commands (keeping the sequencing) turns it RED at `absent["session"]` with
   `KeyError: 'session'` — **while `pair[0] == absent` still PASSES**. So the red is the
   assertions being genuinely order-dependent, not the new guard firing: the mutation died for
-  the right reason. File restored byte-identical (`sha256 1b42b227…`, compared before and after).
+  the right reason. File restored afterwards, and the checkable form of that claim is: the
+  worktree file, the commit, and the built store source are byte-identical.
+  ⚠ **This line used to cite `sha256 1b42b227…` as the proof.** That digest names an
+  intermediate working-tree state reaching no commit, so no reader can reproduce it. A later
+  audit found the retraction had been ADDED under Gotchas while this line still MADE the claim —
+  the doc retracting something it also still asserted, ~140 lines apart. **An append-only
+  section cannot be corrected by appending a correction to a different section.**
 - **Ruled out:** routing as the fix (closes the foreign-row half only — measured on `#1074`);
   and a tighter deadline as a concern — the change **doubles** the budget, one 10 s wait becoming
   two, worst case 10 s → 20 s.
