@@ -146,11 +146,19 @@ def _wait_events(spool_dir, n=1, timeout=10.0, until=None) -> list:
     tests are classified like every other site — no self-test exemption**, since
     exempting one of a pair and not the other is what produced the wrong number.
 
-        52 total  =  38 n=1  +  5 until=  +  9 n>=2   (+ 11 op-selected)
+        52 total  =  38 n=1  +  5 until=  +  9 n>=2   (+ 12 op-selected)
 
     Re-derived by the same AST rule whenever this paragraph is touched, because
     a merge moves every bucket and a stale count is what the rule above exists
-    to prevent. The 11 op-selected calls are `_wait_ops`/`_wait_payload`.
+    to prevent. The 12 op-selected calls are `_wait_ops`/`_wait_payload`.
+    🔴 THIS LINE SAID `11` FOR THREE AUDIT ROUNDS AND NOBODY'S RANGE CONTAINED
+    IT. `11` was true when this PR's first commit wrote it and was invalidated by
+    the SECOND commit, which added a `_wait_ops` call while sequencing the guard
+    test. Every delta round after that diffed only the newest range, so the
+    defect sat four lines from the paragraph all three rounds were editing.
+    **A delta ladder cannot see a claim its own earlier commit staled** — and
+    nothing pins this number, since no assertion reads `op-selected`, so a fully
+    green suite says nothing about it either.
     🔴 RE-DERIVE, DO NOT ADJUST: the numbers this line carried before
     2026-08-30 (`53 = 39 + 5 + 9`, `7 op-selected`) had been left behind by
     #1074 and were wrong in three places at once, while reading as precise.
@@ -326,7 +334,7 @@ def _wait_ops(spool_dir, op, n=1, where=None, **kw) -> list:
     depending on order at all. Two halves, two remedies — which is exactly the
     point, because a site whose order IS the signal cannot take the sorting one.
 
-    BOTH `_wait_ops(..., where=)` SITES THAT READ A PAIR BOTH SEQUENCE, and
+    BOTH `_wait_ops(..., where=)` SITES THAT READ A PAIR SEQUENCE, and
     neither can sort, because for both of them order between the rows is the
     assertion:
       * `test_an_absent_origin_header_is_not_the_same_as_an_empty_one` (absent
@@ -338,25 +346,7 @@ def _wait_ops(spool_dir, op, n=1, where=None, **kw) -> list:
     `where=_routed_to(that id)`, so the rows it reads are the rows it caused;
     and each waits for the first row BEFORE issuing the second command, so which
     of the two comes first is fixed by observation rather than by scheduling.
-
-    🔴 READ THAT SCOPE NARROWLY — IT IS TWO `where=` SITES, NOT "THE TWO SITES IN
-    THIS FILE THAT READ A PAIR POSITIONALLY", which is what an earlier draft said
-    and is FALSE. A delta audit re-derived the wider class by AST and found at
-    least SIX members: the two above plus four that take row `[1]` off a BARE
-    `_wait_events(spool_dir, 2)` with no row predicate at all —
-    `test_an_oversized_id_is_dropped_whole_never_truncated`,
-    `test_both_join_sites_answer_the_same_way_for_every_joinable_tier`,
-    `test_activate_telemetry_records_the_consent_decision` and
-    `test_heartbeat_tracks_registry_liveness_across_the_stale_boundary`.
-    Those four are sequenced, so they are not exposed to the OWN-rows hazard —
-    but they carry no `where=`, so they remain exposed to the FOREIGN-row one,
-    and they are among the 47 sites `test_positional_spool_reader_ratchet.py`
-    counts. They are NOT closed by this docstring, and the incremental posture
-    for them is that module's, not this one's. 🔴 A CENSUS SENTENCE WIDENED ON
-    ITS VERB WHILE KEEPING ITS OLD COUNT is precisely the bucketing error that
-    let the site this paragraph is about sit outside an order-safety audit for
-    four days — reintroduced here, by the fix for the previous instance of it.
-    That is an INVARIANT THE CODE ENFORCES, replacing the corpus property this
+    THAT SEQUENCING is an INVARIANT THE CODE ENFORCES, replacing the corpus property this
     docstring used to assert ("no current test leaves a `tabs` command in flight
     to time out"). Re-measured 2026-08-26 before removing it — it had NOT lapsed,
     but it was true for a different reason than the one it gave, and it was never
@@ -376,6 +366,26 @@ def _wait_ops(spool_dir, op, n=1, where=None, **kw) -> list:
         victim each time.
     A corpus property that has to be re-argued every time the corpus grows is not
     a guarantee. The filter is.
+
+    🔴 READ THAT "BOTH SITES" SCOPE NARROWLY — IT IS TWO `where=` SITES, NOT "the
+    two sites in this file that read a pair positionally", which is what an
+    earlier draft said and is FALSE. Re-derived by AST, the wider class has at
+    least SIX members: the two above plus four that take row `[1]` off a BARE
+    `_wait_events(spool_dir, 2)` with no row predicate at all —
+    `test_an_oversized_id_is_dropped_whole_never_truncated`,
+    `test_both_join_sites_answer_the_same_way_for_every_joinable_tier`,
+    `test_activate_telemetry_records_the_consent_decision` and
+    `test_heartbeat_tracks_registry_liveness_across_the_stale_boundary`.
+    Those four each sequence already, so the OWN-rows hazard does not reach them
+    — but they carry no `where=`, so the FOREIGN-row one does, and they are among
+    the 47 sites `test_positional_spool_reader_ratchet.py` counts. They are NOT
+    closed by this docstring; the incremental posture for them is that module's.
+    🔴 A CENSUS SENTENCE WIDENED ON ITS VERB WHILE KEEPING ITS OLD COUNT is the
+    same shape as the bucketing error that let
+    `test_the_two_origin_tokens_are_distinct_and_recorded_verbatim` sit outside an
+    order-safety audit for four days (a non-literal `n` filed as n=1) — and it was
+    reintroduced here by the fix for that very instance, then caught by the next
+    audit round. Widening a verb is a change to the CLAIM; re-derive the count.
 
     🔴 WHY NOT `session` / `sess_src`, which an earlier revision named as the
     remedy here: `sess_src` is the caller's TIER ("claude"), which every

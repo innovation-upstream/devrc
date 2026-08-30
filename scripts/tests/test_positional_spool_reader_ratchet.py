@@ -154,7 +154,11 @@ POSITIONAL_BUCKET = "_wait_events positional (no until=)"
 # sites; it closed nothing for those four, whose exposure is the FOREIGN-row one
 # this module exists for. Do not read the sentence above as a census of the
 # ratcheted population — it is not, and conflating the two is the bucketing
-# error recorded three paragraphs up.
+# error recorded BELOW, under "THE SUB-SPLIT EARNED ITS KEEP" — a non-literal `n`
+# filed as n=1, which kept an order-dependent site outside an order-safety audit
+# for four days. (An earlier draft of this line said "three paragraphs up", which
+# points at the breakdown table and at no error at all. A relative pointer into
+# prose rots on the next insertion; name the heading instead.)
 # 🔴 THIS MODULE IS STRUCTURALLY BLIND TO THAT FIX: it
 # ratchets the FOREIGN-row hazard (position vs discrimination) and has no view
 # of the OWN-rows hazard (two rows one predicate cannot separate, because they
