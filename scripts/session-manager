@@ -2509,8 +2509,11 @@ def summarize(report) -> dict:
         # `--claude-only` every number above describes the FILTERED set (see
         # `gather`), so a reader that does not know the filter ran would read a
         # real "0 agent windows" and a "0 because the shells were dropped"
-        # identically. `excluded_shells` is None — not 0 — when the filter
-        # never ran: nothing was excluded because nothing was ever counted.
+        # identically. `excluded_shells` is None — not 0 — in TWO states: when
+        # the filter never ran (nothing was excluded because nothing was ever
+        # counted), and when NO HOST ANSWERED (#1031 item 1 — a count over a
+        # fleet nobody reached is not a zero). Same rule as `excluded_by_match`;
+        # they used to disagree, and one render printed both.
         #
         # 🔴 IT IS `excluded_shells`, NOT `excluded_non_claude`. The old name
         # was accurate only while the predicate was `r["claude"]` and every row
@@ -3261,13 +3264,23 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         # would publish a confident `0` — "the filter ran and matched nothing"
         # — about a scan that measured nothing at all. `detail_matched` is
         # already `None` in exactly this state; these now agree with it.
-        # ⚠ `excluded_shells` has the SAME shape and is deliberately NOT changed
-        # here: it is a pre-existing published field with its own tests, and
-        # redefining it belongs in its own change, not smuggled into this one.
+        # 🔴 `excluded_shells` NOW AGREES — #1031 item 1. It used to publish a
+        # hard `0` in exactly this state, which made the two FILTER lines of one
+        # render contradict each other about what an unreachable fleet means:
+        #
+        #     FILTER --claude-only: 0 shell window(s) excluded
+        #     FILTER --match 'x': an unmeasured number of row(s) matched
+        #
+        # The deferral was deliberate — it is a pre-existing published field, so
+        # redefining it wanted its own change rather than a drive-by inside the
+        # find-session PR. This is that change. MEASURED before it, on
+        # `715df9e4`, against a genuinely unreachable single-host fleet:
+        # `excluded_shells: 0` beside `excluded_by_match: None`.
         fleet_measured = any(h.get("reachable")
                              for h in report["hosts"].values())
         if claude_only:
-            report["filters"]["excluded_shells"] = excluded_shells
+            report["filters"]["excluded_shells"] = (
+                excluded_shells if fleet_measured else None)
         if match_terms:
             # 🔴 THE TERMS AND THE FIELDS TRAVEL WITH THE VERDICT. A consumer
             # that finds zero rows must be able to tell "nothing matched these

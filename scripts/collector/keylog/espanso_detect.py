@@ -75,6 +75,28 @@ ESPANSO_SEARCH_WM_CLASS = ".espanso-wrapped"
 # and ':dacq' spells it — plus 'clarifying', which 'clarify' is a substring of —
 # because "ask"/"clarify" is how the dispatch snippet is actually searched for.
 # ':acq' ("ask clarifying questions") is what a bare 'ask' MEANS.
+#
+# 🔴 BLIND SPOT, MEASURED — THE LOOKUP IS AN EXACT-STRING MATCH, SO PREFIXES OF
+# AN OWNED TERM ARE NOT OWNED. `_term_matches` is a SUBSTRING test, so a typed
+# prefix reaches both snippets and lands on the ambiguous branch, where
+# `.get(t)` then misses because the typed string is not a key. Measured
+# 2026-08-30 against the real keylog search stream (661 espanso rows): "ask"
+# resolves because it is typed EXACTLY, 118 times — but "clar" (1 fire ever)
+# now resolves to None, where before ":dacq" spelled "clarifying" it reached
+# ":acq". Prefix typing is the norm here, not the exception: "rec"/"recom",
+# "kic", "orch" are all how the picker is really driven.
+#
+# NOT fixed with per-prefix entries — "cla"/"clari"/"clarif" are equally valid
+# prefixes and the table cannot enumerate them. The real options are to make the
+# lookup prefix-aware (an owner claims a typed term that is a prefix of an owned
+# one AND matches that owner) or to accept it. ACCEPTED, on the measurement: one
+# fire in the entire recorded history does not justify the mechanism, and a
+# prefix-aware lookup can re-point terms the exact form never touched, so it
+# needs its own mutation battery.
+#
+# Same measurement, recorded so it is not re-litigated: "clarifying" has been
+# typed ZERO times, so it gets no entry — an owner justified by intuition rather
+# than the search stream is exactly what this comment exists to prevent.
 _AMBIGUOUS_TERM_OWNER = {
     "ask": ":acq",
     "clarify": ":acq",

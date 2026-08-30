@@ -3324,20 +3324,72 @@ def test_the_two_origin_tokens_are_distinct_and_recorded_verbatim(telemetry):
 
     Asserted as distinctness plus verbatim round-trip, so a mutant that collapsed
     them to a single constant dies here rather than in a test that only checks
-    `origin` is truthy."""
+    `origin` is truthy.
+
+    🔴 ORDER IS NOT PART OF THAT CLAIM, AND ASSERTING IT MADE THIS TEST FLAKY.
+    It used to read `seen == list(ORIGIN_TOKENS)` off a bare
+    `_wait_events(spool_dir, 2)`. Observed 2026-08-29 in the `nix build
+    .#checks…pytests` sandbox tier on an unchanged tree:
+    `AssertionError: ['opencode-inherited', 'browser-agent']` — both tokens
+    present, verbatim, REVERSED. A re-run of the identical derivation passed, and
+    the test passed 8/8 in isolation, so the failure is a race and not a
+    regression: the emit runs off the critical path AFTER the HTTP response
+    (see `_wait_events`), so the first command's emit can still be in flight when
+    the second one's lands.
+
+    Two independent defects were in that one line, and routing fixes only one:
+      * FOREIGN ROWS — a bare count assumes every row in the spool is this
+        test's, which `_wait_ops`' docstring measures as false. Fixed the
+        established way: both commands routed to an instance id minted per run,
+        selected with `where=_routed_to(inst)`.
+      * ORDER — routing does NOT pin it. Fixed by comparing SORTED, because
+        which of the two landed first was never something this test set out to
+        pin. Sorting keeps the mutant that matters dead: collapsing both origins
+        to one constant yields `['x','x']`, which no ordering makes equal to two
+        distinct tokens.
+
+    🔴 WHY AN ORDER-SAFETY AUDIT WALKED PAST THIS SITE — A BUCKETING ERROR, not
+    an oversight, and worth more than the fix. `_wait_events`' docstring audits
+    its own n>=2 sites and concludes "All 8 remaining real waits are order-safe".
+    This call was `_wait_events(spool_dir, len(ORIGIN_TOKENS))` — an n=2 wait
+    spelled with a NON-LITERAL `n`, which that docstring's counting
+    (`39 n=1 + 5 until= + 9 n>=2`) folds into the n=1 bucket. n=1 needs no
+    ordering argument, so the site was never in the population the audit
+    examined. `test_positional_spool_reader_ratchet` classifies it correctly, in
+    a `n dynamic` sub-bucket its own comment calls "informational" — and the
+    totals agreeing at 48 is exactly what made the disagreement look harmless.
+    The two counts differed only in WHICH BUCKET, and the bucket was the part
+    that mattered.
+
+    An earlier draft of this docstring said "this site was a NINTH n>=2 site".
+    That was wrong in the same direction as the bug: it was never counted among
+    the nine.
+
+    ⚠ NOT FIXED HERE, and named so it is not mistaken for covered:
+    `test_an_absent_origin_header_is_not_the_same_as_an_empty_one` unpacks its
+    pair POSITIONALLY and says in so many words that order between its two rows
+    IS the signal — so it carries this same race, with routing that cannot help
+    it. It issues both commands before waiting, so its order is not structurally
+    pinned either. It has not been seen to fail, and it was not changed on the
+    strength of a theory; making it safe means sequencing (wait for the first
+    row, then issue the second), which is a change to a passing test and belongs
+    in its own PR."""
     spool_dir = telemetry
     assert len(set(ORIGIN_TOKENS)) == len(ORIGIN_TOKENS), ORIGIN_TOKENS
+    # Unique per RUN, so a test added later cannot defeat the filter.
+    inst = "origin-tokens-" + uuid.uuid4().hex[:12]
     srv, _ = _serve()
-    ext = FakeExtension(srv)
+    ext = FakeExtension(srv, instance_id=inst)
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
         for token in ORIGIN_TOKENS:
-            assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID,
+            assert _cmd_sess(srv, {"op": "tabs", "target": inst}, sid=LEAKED_ID,
                              origin=token)[0] == 200
-        evs = _wait_events(spool_dir, len(ORIGIN_TOKENS))
-        seen = [json.loads(e["payload"])["origin"] for e in evs]
-        assert seen == list(ORIGIN_TOKENS), seen
+        evs = _wait_ops(spool_dir, "tabs", len(ORIGIN_TOKENS),
+                        where=_routed_to(inst))
+        seen = sorted(json.loads(e["payload"])["origin"] for e in evs)
+        assert seen == sorted(ORIGIN_TOKENS), seen
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
