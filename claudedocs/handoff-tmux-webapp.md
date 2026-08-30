@@ -11,7 +11,9 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 **Phases 1–4 SHIPPED. Ranks 5, 6, 7 and 8a are ✅ DONE, deployed and verified live.
 clawgate is at 0.8.18 and `clawgatectl` now MATCHES it on both hosts. The lowest-numbered OPEN
-item is rank 8b, IN FLIGHT as `ZacxDev/homelab-infra#566`.**
+item is rank 8b, IN FLIGHT as `ZacxDev/homelab-infra#566` — its `clawgate-e2e` closing condition
+is MET (124 tests, 2 skipped); only the merge is outstanding, blocked by an INFRASTRUCTURE
+failure (`proxy.golang.org` TLS timeouts), not by the change. Rank 8e's number is now measured.**
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC — `clawgatectl health` is the only authority.** It said
 **0.8.18** at 2026-08-30. The line has carried **nine** values in four days (0.8.7 → 0.8.8 → 0.8.9
@@ -39,8 +41,10 @@ intended resting state.
   `ship.sh` silently skips. Recovered preserve → verify-on-origin → `reset --keep`.
 - **`ZacxDev/homelab-infra#566`** — OPEN, rank 8b: `containers/clawgate/e2e/tests/layout.spec.ts`,
   the layout tab's first browser coverage. 2 tests green locally, mutation-swept **5 killed /
-  0 survived / 0 invalid**. 🔴 **NOT yet green in `clawgate-e2e` — that check has not registered on
-  the PR at all.** See Open investigations.
+  0 survived / 0 invalid**. ✅ **`clawgate-e2e` PASSED — "124 tests, 2 skipped"**, so 8b's closing
+  condition is met. ⚠ `clawgate-ci` on the same PR reads `FAILED: go`, which is **5× TLS handshake
+  timeout against `proxy.golang.org`** — a network failure on a diff with zero Go files. Re-run it;
+  do not debug the diff. See Open investigations.
 - **`innovation-upstream/devrc#1056`** — the tmux server SENTINEL (producer half of rank 6).
   Was stuck with BOTH checks at `ERROR` (a broken gate, not a bad change) and `mergeable: UNKNOWN`.
   Rebased off 34-behind onto current `main` (`c0736f9f`) and force-pushed → now **MERGEABLE** with
@@ -248,16 +252,21 @@ before that date may name a different item — do not renumber again without rel
    - a. ✅ **DONE 2026-08-30 — `clawgatectl` is 0.8.18 on BOTH hosts.** See Status. Closing
      condition (`--version` == `health`) met, then exercised with a cross-host round trip.
    - b. 🔄 **IN FLIGHT: `ZacxDev/homelab-infra#566`** — `layout.spec.ts`, the layout tab's first
-     browser coverage. Green locally + 5/5 mutants killed. **Closing condition is green in
-     `clawgate-e2e`, which has NOT registered on the PR** — read Open investigations first.
+     browser coverage. Green locally + 5/5 mutants killed. ✅ **Closing condition MET:
+     `clawgate-e2e` passed, 124 tests / 2 skipped.** Remaining work is only to land it: `clawgate-ci`
+     needs a re-run (a `proxy.golang.org` TLS timeout, not the diff) and `gitops-validate` says
+     `COULD NOT RUN`. **Neither is a verdict on the change** — read Open investigations first.
    - c. Eight sleep-based timing bets in
      `containers/clawgate/internal/api/{push_task,task_comment}_test.go` (pre-existing; mechanical
      now `awaitPushesSettled` exists).
    - d. A scanner test for in-body `! grep` — closing condition: a test in both bats suites that
      reds on a planted `! grep` assertion.
    - e. **Re-derive `MIN_PASSED` (and check `MAX_SKIPPED`) in `clawgate-e2e-pipeline.yaml`.**
-     Closing condition: the value is set from a real `clawgate-e2e` run that included
-     `layout.spec.ts`. Currently 110, derived from 118 collected; a local run now collects 126.
+     🔴 **THE NUMBER IS NOW MEASURED, from CI, on a run that included `layout.spec.ts`:**
+     `124 tests, 2 skipped`, corroborated by a local `120 passed / 4 flaky / 2 skipped`
+     (`ran_ok = passed + flaky` = 124, the pipeline's own rule). At the existing 110/118 ≈ 93.2%
+     ratio that is **`MIN_PASSED: 115`** (currently 110, i.e. it tolerates losing 14 tests).
+     Closing condition: that value committed. ⚠ `MAX_SKIPPED` is 6 against a measured 2 — leave it.
 
 🔴 **There is no rank 9.** A previous revision listed one — "get three portable lessons into
 MEMORY.md" — and it was NOT a work item: the operator confirmed 2026-08-27 that MEMORY.md is not
@@ -365,7 +374,42 @@ are fixed: the script is committed, and this section exists.
   what runs** — without Docker, `test.skip` on `!dockerAvailable()` leaves 11 of 18 spec files and
   goes green.
 
+### ✅ RESOLVED — `clawgate-e2e` DID register on #566, and it PASSED
+🔴 **This CORRECTS the block below, which is left in place because the mistake is the lesson.**
+`tekton/clawgate-e2e` → **success, "clawgate e2e passed — 124 tests, 2 skipped"** on head
+`88d53d0d`. It had simply not been *scheduled yet* when I read the check list minutes after
+opening the PR. **I read an absence as a fact about the pipeline when it was a fact about the
+CLOCK** — the rival mechanism ("not started yet") was never named, and an empty result cannot
+distinguish the two. Rank 8b's closing condition IS met.
+
+⚠ **The same reading gives rank 8e its number, from BOTH tiers, and they agree:** CI reported
+`124 tests, 2 skipped`; the local full run reported `120 passed / 4 flaky / 2 skipped` in 21.9m,
+and the pipeline's own rule is `ran_ok = passed + flaky` = **124**. Applying the existing
+derivation ratio (110/118 ≈ 93.2%) gives **`MIN_PASSED: 115`**. The 4 flaky were
+`task-comment-delete.spec.ts:44`, `tasks.spec.ts:523`, `tasks.spec.ts:555` and
+`tasks-mobile.spec.ts:854` — all pre-existing, none reachable from an e2e-only diff.
+
+### ✅ RESOLVED — `clawgate-ci` "FAILED: go" on #566 is a NETWORK failure, not a code failure
+- **Observed (with values):** the pipeline run is `clawgate-ci-nndsh` in ns `tekton-ci`, param
+  `revision=88d53d0d…` (MY sha — so it could NOT be dismissed as someone else's), failing step
+  `step-verdict` exit 1 over `go fail / extension pass / hook pass`. The `step-go` log ends with
+  **5×** `net/http: TLS handshake timeout` fetching `github.com/jackc/pgx/v5@v5.10.0`,
+  `github.com/spf13/cobra@v1.10.2` and `github.com/coder/websocket@v1.8.14` from
+  `proxy.golang.org`, then `go leg rc=1`. Not one compile or test error.
+- **Ruled out:** my diff. It contains **zero** Go files (`git show --name-only` on the commit), and
+  the same tree is green locally: `go build ./...` rc 0, `go vet ./...` rc 0 and no output,
+  `go test ./...` **20 ok packages / 0 FAIL** (the 20 is the positive control — an empty filtered
+  output alone would not have proved the runner ran).
+- **How to read it:** this is the same family as the documented docker.io DNS poisoning on this
+  LAN — module fetches over TLS timing out. **Re-run the pipeline; do not debug the diff.**
+- ⚠ `tekton/gitops-validate` on the same PR says **`COULD NOT RUN: scripts-tests`**, which this
+  repo's CLAUDE.md defines as a gate that stopped before a leg reported — also not a verdict on
+  the change.
+
 ### `clawgate-e2e` has not registered as a check on `ZacxDev/homelab-infra#566`
+⚠ **SUPERSEDED — see the RESOLVED block immediately above. The conclusion was WRONG.** Kept
+verbatim because the failure mode is worth recognising: an absent check and a not-yet-scheduled
+check are byte-identical in `gh pr checks`, and I diagnosed the first without naming the second.
 - **Symptom + exact repro:** `gh pr checks 566 --repo ZacxDev/homelab-infra` lists **only**
   `tekton/ux-audit-clawgate` (PENDING). The suite this PR exists to extend is not among them.
 - **Observed (with values):** `gh pr view 566 --json statusCheckRollup` → exactly one row,
