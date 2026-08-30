@@ -145,6 +145,8 @@ is a BEHAVIOURAL check — run each entry and read its stdout — not a wider re
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -555,6 +557,72 @@ def test_a_transforming_chain_is_NEVER_reported_benign(shape):
     assert isinstance(really_forges, bool), (
         f"{shape!r} carries no ground-truth flag — the whole point of the third "
         "element is that this claim is data a test checks, not prose")
+
+
+FORGE_TOOLS = ("bash", "sed", "tr", "awk", "tee")
+
+
+def test_the_really_forges_flags_are_MEASURED_against_real_bash(tmp_path):
+    """🔴 ROUND-7 FINDING NEW-14 — the defect reproduced inside its own fix.
+
+    Round 7 moved the ground truth out of prose and into a `really_forges`
+    field, and the commit message claimed "Corrupting a flag fails the suite; a
+    wrong sentence never could". That was FALSE: the only assertion on the field
+    was `isinstance(..., bool)`, a TYPE check. Measured by the audit, BOTH
+    corruption directions survived a fully green suite — `tee` flipped to True
+    (the exact false claim the field was introduced to kill) and `sed` flipped
+    to False. An assertion that READS as verification while providing none is
+    worse than none, because it stops anyone looking.
+
+    So the flag is now what it always claimed to be: a MEASUREMENT. Each fixture
+    is executed under real bash and its stdout matched against the module's own
+    reserved grammar.
+
+    🔴 A missing tool FAILS rather than skips. If `awk` is absent the flags are
+    unverifiable, and a green run that silently checked nothing is the exact
+    shape this whole file exists to prevent.
+    """
+    missing = [t for t in FORGE_TOOLS if shutil.which(t) is None]
+    assert not missing, (
+        f"cannot verify the ground-truth flags — missing {missing}. This is a "
+        "FAILURE, not a skip: an unverifiable ledger read as verified is what "
+        "NEW-14 was.")
+
+    bash = shutil.which("bash")
+    for shape, (line, _verdict, really_forges) in sorted(
+            G.CHAIN_TRANSFORM_FIXTURES.items()):
+        # `wait` so a process substitution's output is flushed before bash exits;
+        # cwd=tmp_path so `tee f` writes into the sandbox, not the repo.
+        proc = subprocess.run([bash, "-c", line + "\nwait\n"], cwd=str(tmp_path),
+                              capture_output=True, text=True, timeout=60)
+        observed = bool(G.RESERVED_RE.search(proc.stdout))
+        assert observed == really_forges, (
+            f"{shape!r} claims really_forges={really_forges} but bash actually "
+            f"{'DID' if observed else 'did NOT'} write a reserved verdict at "
+            f"column 0.\n  line: {line}\n  stdout: {proc.stdout!r}")
+
+    # Positive + negative control on the DETECTOR itself: a zero from a matcher
+    # wired to nothing is indistinguishable from a fixture that does not forge.
+    forging = subprocess.run([bash, "-c", 'echo "RESULT: PASS (exit=0)"'],
+                             cwd=str(tmp_path), capture_output=True, text=True,
+                             timeout=60)
+    assert G.RESERVED_RE.search(forging.stdout), (
+        "the detector cannot see a verdict bash definitely emitted — every "
+        "really_forges=False above would be a false negative")
+    quiet = subprocess.run([bash, "-c", 'echo "RESULT: ok"'], cwd=str(tmp_path),
+                           capture_output=True, text=True, timeout=60)
+    assert not G.RESERVED_RE.search(quiet.stdout), (
+        "the detector fires on a non-verdict, so every really_forges=True is "
+        "unearned")
+
+
+def test_the_forge_ledger_covers_BOTH_answers():
+    """A ledger where every entry shares the same ground truth proves nothing
+    about the field — the `tee` case is the whole reason it exists."""
+    flags = {f for _line, _v, f in G.CHAIN_TRANSFORM_FIXTURES.values()}
+    assert flags == {True, False}, (
+        f"really_forges takes only {flags} across the chain fixtures; the field "
+        "distinguishes nothing unless both answers are represented")
 
 
 @pytest.mark.parametrize("shape", sorted(G.SECOND_MENTION_BENIGN))

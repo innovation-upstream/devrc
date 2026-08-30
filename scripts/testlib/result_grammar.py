@@ -488,8 +488,11 @@ CHAIN_FIXTURES = {
 # recently a heading claiming "bash really writes RESULT: PASS at column 0" for
 # a list containing `tee`, which emits `RESULT: ok` and forges nothing. `tee`
 # belongs here because a pipe makes the line UNPROVABLE, not because it forges.
-# The shared property is the second element; the differing one is the third, and
-# a test asserts both instead of a reader trusting prose.
+# The shared property is the second element; the differing one is the third.
+# 🔴 BOTH are asserted, and the third by EXECUTING the line under real bash —
+# the first attempt asserted only `isinstance(flag, bool)`, a TYPE check, and
+# both corruption directions survived a green suite. An assertion that reads
+# as verification while providing none is worse than none.
 #
 #   name -> (line, classifier verdict, does bash REALLY forge a verdict?)
 CHAIN_TRANSFORM_FIXTURES = {
