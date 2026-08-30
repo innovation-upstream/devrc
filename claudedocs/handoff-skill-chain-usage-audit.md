@@ -78,6 +78,15 @@ survives adversarial re-derivation, and fix whatever it exposes.
   **1.5×** overstatement. 🔴 **Rank 8 is still the arc's closing condition and was deliberately
   NOT cut today** — the post-window has ~4 hours of `/resume` sessions in it against a
   pre-period that needed 14 days for 253.
+- ✅ **THE CI INVESTIGATION IS CLOSED AND LEAVES THIS ARC.** The red `devrc-ci-pytests` legs are
+  a **capacity** problem — a loopback socket losing the scheduler while ~12 pipelineruns share
+  one node — and `scripts/tests/test_subsystem_store_api.py:99-108` had **already measured and
+  written it down** before this arc started circling it. This doc's "tests that read host state"
+  hypothesis is superseded and was the wrong population. The symptom fix (`8e33bf1d`, #1023,
+  `HANG_TIMEOUT` 15→60 s) is live on `main` and **insufficient — 4 of 11 runs still failed
+  today**. 🔴 **It blocks the arc mechanically:** `main` is `enforce_admins: true` with both legs
+  required, so **#1055, #1064 and #1108 are all held by a failure none of them caused.** The
+  remaining work is Tekton capacity and belongs to the `tekton` skill's owners, not here.
 
 ## Open investigations — live diagnosis state
 
@@ -164,6 +173,64 @@ since the last session that read it. Both are cheap; which one is right depends 
 drift is usually a RENAME (X and Y are the same work) or a genuine SCOPE MOVE — that split
 has not been measured, and the 5 unlinked cases above are the set to read.
 
+### ✅ CLOSED — the red `devrc-ci` checks are a CAPACITY problem, and the repo had already diagnosed it
+**Answer: a localhost round-trip losing the scheduler while ~12 pipelineruns share one node.
+The test logic is never reached, so the gate reports a code failure for a capacity problem.**
+Found 2026-08-30 not by a new probe but by *reading what another module had already measured* —
+the same cross-check shape that found the write guard's unarmed `Read` path.
+
+`scripts/tests/test_subsystem_store_api.py:99-108` on `origin/main`, verbatim:
+
+> Why 60 and not 15: measured 2026-08-29, the devrc Tekton gate was failing **~60% of runs
+> REPO-WIDE (6 of 10 in one window, on unrelated branches)** with `TimeoutError` out of
+> `socket.py` — a localhost round-trip that lost the scheduler for >15 s while 12
+> pipelineruns shared the node and this suite ran 637 s under xdist. The test logic was never
+> reached, so the gate reported a code failure for a capacity problem.
+> 🔴 This is the SYMPTOM fix. The cause is a 10-minute parallel suite competing with a
+> saturated cluster, which belongs to Tekton capacity, not to this file.
+
+- **This CORRECTS this doc's own leading hypothesis.** It said *"the affected population is
+  exactly tests that read host state"*. That is not the population. `nix eval`, the deployed
+  `~/.claude/skills/` copies and live espanso config are host-state reads; a **loopback socket
+  starved by the scheduler** is not — it is any test that makes a localhost call while the node
+  is oversubscribed. Two different populations, and only the second one is measured.
+- **The symptom fix is LANDED AND INSUFFICIENT — say both.** `8e33bf1d` (#1023, 2026-08-29)
+  raised `HANG_TIMEOUT` 15 → 60 s and it is live on `main` (`:119`). Today's runs build from
+  merge previews of that `main`, and **4 of 11 still failed**. So 60 s absorbed some of the
+  delay and not all of it; the remaining fix is Tekton capacity, exactly as the comment says.
+- **Population read, 2026-08-30 19:27→20:51Z.** Swept every resident `devrc-ci-*-gate-pod` and
+  read `step-pytests`' own `verdict=` line: **11 runs, 7 pass / 4 fail**, and the four failures
+  name **four DIFFERENT tests** —
+  `TestTheActorComesFromTheTOKEN.test_a_FORGED_actor_in_the_body_is_DISCARDED[record1-…]`
+  (`wvnl4`, 20:00), `TestOnlyAWriteROUTERetainsItsBody.test_POSITIVE_CONTROL_a_real_WRITE_route_DOES_keep_its_body`
+  (`9stqk`, 20:03), `test_a_hanging_fetch_is_BOUNDED_and_the_memo_spares_a_second_wait`
+  (`qnq4v`, 20:50), plus **#1108**'s `[record0-…]`. With **#1055**'s
+  `test_live_existing_resolutions_not_made_ambiguous` (having failed
+  `test_handles_resolve_to_the_exact_expected_paths[repos-HOMELAB-…]` on its previous run),
+  that is **five distinct failing tests across five diffs that touch none of them.**
+- 🔴 **The single decisive datapoint, and it is an attribution not a correlation:**
+  `devrc-ci-wvnl4` is **PR #1118**, not #1108 (`ci.zacx.dev/supersede-key: pr-1118`), and it
+  failed the **sibling parametrization** — `[record1-…]` against #1108's `[record0-…]` — of the
+  *same* test, with `TimeoutError: timed out` at `python3.12/socket.py:720`. A deterministic
+  defect fails the same case every run. Different generated cases failing on different
+  branches is the signature the in-tree comment describes.
+- **Ruled out:** *"it is this arc's diffs"* — #1108 is markdown-only, one file, one list item,
+  and the module passes **8/8 in 5.16 s** at the PR head on an unloaded host; the diff touches
+  no `.py`, so base and head are byte-identical there. *"the gate is unconditionally red for
+  this arc"* — 7 of 11 runs passed today and #1092 went green on both legs.
+- 🔴 **RETRACTED before it was written up: the "same collected count, different verdict"
+  control.** Two count groups each held both verdicts (10707: pass/**fail**/pass; 10731:
+  pass/pass/**fail**), which reads as one tree disagreeing with itself. It is not — every run
+  carries a distinct `refs/pull/N/merge` preview sha (`7cdb05a8da15`/`6f302194e897`/`182c32809f88`;
+  `e3df913307a2`/`911af220fb62`/`f5b6bddf24ad`). **An equal test COUNT is not an equal TREE.**
+  The attribution above does the work instead, and needs no such control.
+- **Consequence, stated because it blocks the arc:** `main` protection is `enforce_admins: true`
+  with **both** `tekton/devrc-pytests` and `tekton/devrc-nodetests` required (`strict: false`),
+  so a red pytests leg blocks the merge outright — **#1055, #1064 and #1108 are all held by a
+  failure none of them caused.** A re-run is defensible *given the attribution above*; it is not
+  a fix, and the capacity problem is the real defect. It now belongs to Tekton capacity work,
+  not to this arc.
+
 ### Both PRs are red on tests neither one touches — environment-sensitive, not code
 - **Symptom + exact repro:** `gh pr checks 1055` → `tekton/devrc-pytests FAILURE`; same for #1064.
 - **Observed (with values):** the named failure DIFFERS per run and per PR —
@@ -182,12 +249,11 @@ has not been measured, and the 5 unlinked cases above are the set to read.
   *"main is red on the sandbox tier"* — killed by that same log.
   *"the shared hostPath nix cache causes concurrent-eval interference"* — killed: if it did,
   #1046/#1057/#1059 would fail the nix-eval test, and they fail a filesystem one instead.
-- **Leading hypothesis:** the Tekton runner's environment differs from both local tiers, and the
-  affected population is exactly "tests that read host state". Under node congestion the
-  timing-shaped ones join in.
-- **Next probe:** re-run one PR's gate on an unchanged SHA when the queue is empty and see
-  whether the SAME test fails. A different test ⇒ environment/timing; the same test ⇒ a real
-  runner-vs-local divergence worth fixing in the test.
+- ~~**Leading hypothesis:** the affected population is exactly "tests that read host state".~~
+  🔴 **SUPERSEDED AND PARTLY WRONG — see the CLOSED block below.** The mechanism is a **loopback
+  socket starved by the scheduler**, which is not a host-state read at all; it is any test that
+  makes a localhost call while the node is oversubscribed. The two blocks after this one are
+  also superseded and are kept only for the reasoning they rule out.
 
 ### Was the devrc-ci outage fully closed?
 - **Symptom:** 2026-08-29 ~22:23–22:48Z every devrc-ci gate leg reported
