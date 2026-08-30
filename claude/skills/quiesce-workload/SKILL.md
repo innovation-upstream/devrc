@@ -66,6 +66,38 @@ Once you have: `<cluster> <namespace> <kustomization> [deployment]`
 bash ~/workspace/devrc/scripts/quiesce-workload.sh <cluster> <namespace> <kustomization> [deployment]
 ```
 
+🔴 **A suspend wedges every kustomization that `dependsOn` the target, and the
+target itself looks perfectly fine while it does.** A suspended kustomization can
+never advance its `lastAppliedRevision`, so each dependent sits at
+`DependencyNotReady: revision is not up to date` and **stops applying GitOps
+changes entirely**, retrying every 30s for as long as the quiesce lasts.
+
+The script now refuses rather than doing that — **read which refusal you got**:
+- **exit 5** — it named the dependents. Do not reach for `--force` first: decide
+  whether those dependents can afford to stop reconciling for the whole quiesce.
+- **exit 6** — it could not *determine* the dependents (the list query failed).
+  🔴 That is an unanswered question, **not** "none". A failed query returns the
+  same empty set a genuinely-undepended-on kustomization does, which is exactly
+  why it is a separate code and not folded into the clean path.
+- `--force` overrides either, and prints what it is overriding. When you use it,
+  **say in your report that dependents are wedged and name them** — that is the
+  fact the next session needs and the one nothing else will surface.
+
+MEASURED 2026-08-30, workbench: quiescing `stash-sense` wedged `aggregator`
+(`dependsOn: [media-stack, stash-sense]`) at `trunk@8cb6ff3a` while the source
+had moved to `trunk@f93935de`. It was invisible for hours — 0 of the 70 commits
+in that range touched aggregator's own path, so nothing had been dropped and
+there was no symptom to notice. The *next* aggregator commit would not have
+applied.
+
+To check by hand on any cluster:
+```bash
+KUBECONFIG=$KC_<CLUSTER> kubectl get kustomization -A -o json \
+  | jq -r --arg t '<kustomization>' '.items[]
+      | select([(.spec.dependsOn // [])[].name] | index($t))
+      | "\(.metadata.namespace)/\(.metadata.name)"'
+```
+
 ### To resume (unsuspend + scale back up):
 
 ```bash
@@ -80,6 +112,10 @@ State what was done:
 - Which cluster, namespace, kustomization
 - The CPU/memory it was consuming (from the initial `ps` or pod metrics)
 - That it's terminating / scaled to 0
+- **Any dependents left wedged** (only possible via `--force`) — name them, or say
+  plainly that the check could not be made. A quiesce that stops another
+  kustomization reconciling is not a self-contained action, and this is the only
+  place that fact gets recorded.
 - The resume command for when they want it back
 
 ## Reference — cluster handles

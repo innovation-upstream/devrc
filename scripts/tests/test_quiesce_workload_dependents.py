@@ -17,6 +17,17 @@ determined. Asserting the warning text would pass while the suspend still fired.
 The fakes on PATH are what make this hermetic AND what make it a real exercise
 of the script -- the assertion reads the sentinel files the fakes write, so a
 guard that printed the right words and suspended anyway fails here.
+
+RED/GREEN MATRIX, measured by checking out `origin/main:scripts/quiesce-workload.sh`
+over the fixed copy and re-running this file:
+  pre-change (origin/main @ bc0809f6):  7 failed, 2 passed
+  post-change (HEAD):                   9 passed
+
+The 2 that pass on BOTH sides are INVARIANT GUARDS, not regression coverage --
+labelled as such on each. They pin behaviour the bug never violated (the happy
+path still suspending; a same-named kustomization in another namespace not
+counting), and they exist to stop the FIX from over-firing, which is the way a
+guard becomes noise and then gets reflexively --force'd.
 """
 
 import json
@@ -130,7 +141,9 @@ def test_names_every_dependent_not_merely_the_first(tmp_path):
 
 
 def test_suspends_normally_when_nothing_depends_on_it(tmp_path):
-    """The guard must not block the ordinary case -- otherwise it gets --force'd
+    """INVARIANT GUARD (passes pre- and post-change; not regression coverage).
+
+    The guard must not block the ordinary case -- otherwise it gets --force'd
     reflexively and stops being read at all."""
     items = [
         _ks("stash-sense"),
@@ -182,7 +195,9 @@ def test_force_overrides_the_could_not_measure_refusal(tmp_path):
 
 
 def test_a_dependsOn_in_a_different_namespace_is_not_this_kustomization(tmp_path):
-    """dependsOn[].namespace defaults to the DEPENDENT's own namespace. A
+    """INVARIANT GUARD (passes pre- and post-change; not regression coverage).
+
+    dependsOn[].namespace defaults to the DEPENDENT's own namespace. A
     same-named kustomization in another namespace is a different object, and
     counting it would make the guard fire on unrelated names -- the way a guard
     becomes noise and then gets bypassed."""
