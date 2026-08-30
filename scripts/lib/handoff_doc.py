@@ -1031,14 +1031,16 @@ def wrong_base_tells(
 def nothing_to_merge_into(base_text: str) -> bool:
     """Is there no usable base document here — missing, empty, or whitespace?
 
-    🔴 ONE predicate, THREE consumers. `wrong_base_tells` asks it to raise a
+    🔴 ONE predicate, FOUR consumers. `wrong_base_tells` asks it to raise a
     tell; `BaseCurrency.replaces_mainline_doc` builds the REFUSAL on it; and the
     WARNING reaches it through that same method rather than calling here
     directly — deliberately, because the warning must describe the refusal's
     set, not this one's. This function answers only "is there anything here to
     merge into"; whether that MATTERS additionally needs a mainline copy to
-    lose, and `replaces_mainline_doc` is the only place those two facts are
-    combined.
+    lose AND that copy being itself non-blank, and `replaces_mainline_doc` is the
+    only place those THREE facts are combined. 🔴 It is now FOUR consumers, not
+    three: `base_currency` also runs it over the MAINLINE text, which is what
+    makes both sides of the equivalence class one predicate instead of two.
 
     MEASURED: they disagreed for exactly one round. The refusal was widened to
     `.strip()` while the warning kept `if not local.lines:`, which is true only
@@ -1071,6 +1073,19 @@ class BaseCurrency(typing.NamedTuple):
     """The mainline copy's shape — read ONLY when `doc_behind` is non-zero, so
     the ordinary run costs no extra `git show`."""
     unmeasured: str | None
+    mainline_blank: bool | None = None
+    """Is the mainline copy itself nothing-to-merge-into — missing, empty or
+    whitespace? `None` means NOT MEASURED, never "it has content".
+
+    🔴 A FLAG, not a shape-derived guess, and that is the whole point. Asking
+    `DocShape` this question is what went wrong twice: `bool(lines)` calls a
+    whitespace-only mainline "a document to lose" (`"\\n"` is 1 line), and
+    `bool(sections)` fails OPEN on a real prose doc that happens to carry no
+    `##` heading — MEASURED, `DocShape(sections=0, lines=6)`, which the whole
+    guard exists to protect. Neither quantity answers it, so `base_currency`
+    puts the mainline TEXT through `nothing_to_merge_into` — the same predicate
+    the local side uses — at the point it already holds that text.
+    """
 
     @property
     def stale(self) -> bool:
@@ -1113,10 +1128,19 @@ class BaseCurrency(typing.NamedTuple):
         the combination was already right. Both sides must be non-empty for a
         replacement to cost anything.
         """
+        # 🔴 `mainline is not None` is REDUNDANT to the predicate and kept on
+        # purpose: it is the type-narrowing contract `wrong_base_report` relies
+        # on when it dereferences `currency.mainline.sections`. Both fields are
+        # assigned in the SAME branch of `base_currency`, so `mainline_blank is
+        # False` already implies it — which makes a mutant that deletes this
+        # line alone EQUIVALENT, not a coverage gap. It is recorded as an
+        # expected SURVIVE in the sweep rather than counted as coverage; the
+        # alternative is deleting a line that documents an invariant two
+        # functions apart.
         return (
             nothing_to_merge_into(base_text)
             and self.mainline is not None
-            and bool(self.mainline.lines)
+            and self.mainline_blank is False
         )
 
 
@@ -1147,11 +1171,17 @@ def base_currency(repo: Path, relpath: str) -> BaseCurrency:
             f"git could not count commits to {relpath} in HEAD..{base_ref}",
         )
     mainline: DocShape | None = None
+    mainline_blank: bool | None = None
     if doc_behind:
         shown = git_allow(repo, "show", f"{base_ref}:{relpath}")
         if shown.code == 0:
             mainline = doc_shape(shown.out)
-    return BaseCurrency(base_ref, ladder, doc_behind, clone_behind, mainline, None)
+            # 🔴 The SAME predicate the local side uses, on the mainline TEXT.
+            # Measured here rather than inferred from `mainline` later, because
+            # this is the only place the text exists.
+            mainline_blank = nothing_to_merge_into(shown.out)
+    return BaseCurrency(base_ref, ladder, doc_behind, clone_behind, mainline,
+                        None, mainline_blank)
 
 
 WRONG_BASE_REMEDY = (
@@ -1177,6 +1207,9 @@ def wrong_base_report(
     local: DocShape,
     replaces_mainline: bool,
 ) -> str:
+    # 🔴 `replaces_mainline` MUST come from `currency.replaces_mainline_doc(...)`
+    # — the assert below makes any other True illegal. The type is a bare
+    # `bool`, so the signature cannot say so and this comment has to.
     """Rule (h)'s block, or "" when there is nothing to say.
 
     Printed when the currency check found the base STALE (hard evidence), or

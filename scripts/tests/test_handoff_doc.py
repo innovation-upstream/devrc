@@ -3694,3 +3694,73 @@ class TestAbsentBasePresentOnMainlineIsRefused:
             "would have been destroyed", res.stdout, res.stderr)
         assert "status=stale-base" not in res.stderr
         assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def _mainline_doc(self, tmp_path: Path, work: Path, body: str, msg: str) -> None:
+        """Commit `body` as the mainline copy of the handoff doc, then fetch."""
+        other = tmp_path / f"ml-{abs(hash(body)) % 10**8}"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "M"), ("user.email", "m@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        d = other / "claudedocs"
+        d.mkdir(exist_ok=True)
+        (d / "handoff-sample-topic.md").write_text(body, encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+        _sh("git", "commit", "-q", "--allow-empty", "-m", msg, cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        _sh("git", "fetch", "-q", "origin", cwd=work)
+
+    @pytest.mark.parametrize("blank", ["\n", "   \n\n"])
+    def test_a_WHITESPACE_mainline_doc_is_ALSO_not_something_to_lose(
+        self, tmp_path: Path, update_file: Path, blank: str
+    ) -> None:
+        """🔴 The MIRROR bug, one notch along — round 4 fixed only `""`.
+
+        `bool(mainline.lines)` called a whitespace-only mainline "a document to
+        lose": `doc_shape("\\n")` is `DocShape(0, 1)`. MEASURED at that tip, the
+        refusal printed — in ONE sentence — that whitespace is equivalent to
+        absent for the LOCAL copy, and that a 1-line whitespace MAINLINE copy is
+        "one" that would be destroyed. The local side went through
+        `nothing_to_merge_into`; the mainline side was a bare falsiness test on
+        a line count, so the two halves of one equivalence class disagreed.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        self._mainline_doc(tmp_path, work, blank, "whitespace the handoff")
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == 0, (
+            "refused a first write against a WHITESPACE mainline copy — nothing "
+            "would have been destroyed", res.stdout, res.stderr)
+        assert "status=stale-base" not in res.stderr
+        assert (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def test_a_HEADINGLESS_prose_mainline_doc_IS_something_to_lose(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 PINS THE QUANTITY, and it is the fail-OPEN direction.
+
+        MEASURED: swapping `bool(mainline.lines)` for `bool(mainline.sections)`
+        SURVIVED the whole 190-test file. A real prose handoff carrying no `##`
+        heading is `DocShape(sections=0, lines=6)` — under `sections` the guard
+        does not fire and `--confirm` REPLACES that committed document with the
+        delta. That is the exact destruction this PR exists to prevent, and no
+        test could see the difference because every fixture pinned the
+        `lines == 0` boundary rather than the quantity.
+
+        Real content with zero headings must therefore REFUSE.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        prose = ("A real handoff that happens to carry no markdown heading.\n"
+                 "Second line of genuine content.\n"
+                 "Third line, still content.\n")
+        self._mainline_doc(tmp_path, work, prose, "headingless prose handoff")
+
+        # The precondition this test turns on: content, but zero sections.
+        shape = hd.doc_shape(prose)
+        assert shape.sections == 0 and shape.lines > 0, shape
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_STALE_BASE, (
+            "did NOT refuse against a headingless prose mainline doc — that is "
+            "the fail-open direction, and it destroys a real document",
+            res.stdout, res.stderr)
+        assert "status=stale-base" in res.stderr
