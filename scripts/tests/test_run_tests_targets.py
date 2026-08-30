@@ -59,6 +59,9 @@ RUN_TESTS = REPO_ROOT / "scripts" / "run-tests.sh"
 # The entry #276 added and the gate then silently refused to run.
 GUARD_CORE_TARGET = "scripts/claude-hooks/tests/test_guard_core.py"
 
+# The default --set, named once so a message cannot drift from the value.
+SETNAME = "hermetic"
+
 
 def _require_check_targets(runner: Path) -> None:
     """Fail FAST if the runner has no --check-targets flag.
@@ -447,10 +450,11 @@ def test_a_pinned_skip_whose_TARGET_did_not_run_does_not_count():
         f"{tiny} now owns a pinned skip, so it can no longer isolate this "
         f"property. Pinned targets: {sorted(pinned_dirs)}"
     )
-    proc = subprocess.run(
-        ["bash", str(RUN_TESTS), "--targets", tiny, str(REPO_ROOT)],
-        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=300,
-    )
+    # Through `_run`, NOT a bare subprocess.run: this test bypassed the scrub
+    # and so inherited an ambient DEVRC_TARGETS, giving the developer debugging
+    # a subset run a spurious RED — the mirror of the vacuous GREEN the scrub
+    # exists to prevent. `_run`'s 120s timeout is ample; this costs ~13s.
+    proc = _run([str(RUN_TESTS), "--targets", tiny, str(REPO_ROOT)])
     combined = proc.stdout + proc.stderr
     assert "pinned entries apply here" not in combined, (
         "a subset excluding every pinned-skip target still counted pinned "
@@ -612,11 +616,15 @@ def test_every_expected_skip_dir_is_a_declared_target():
     assert m, "could not find EXPECTED_SKIPS in run-tests.sh"
     dirs = {e.split("|")[0] for e in re.findall(r'^\s*"([^"]+)"', m.group(1), re.M)}
     assert dirs, "parsed ZERO ledger entries — the parser is broken, not the ledger"
+    # 🔴 HERMETIC_TARGETS ALONE — deliberately NOT the union with
+    # DEVHOST_TARGETS. Measured: with the union, adding
+    # `"scripts/devhost-tests|a devhost-only skip"` to the ledger left this pin
+    # GREEN while a DEFAULT `--set hermetic` run goes red with
+    # `N test(s) skipped, but M of K pinned entries apply here` — because that
+    # target never runs under `--set hermetic`, and the skip filter is gated on
+    # a subset being active (F4), so nothing filters it out. The union made this
+    # guard blind to the exact case it was advertised as catching.
     declared = set(_hermetic_targets())
-    md = re.search(r"^DEVHOST_TARGETS=\((.*?)^\)", src, re.S | re.M)
-    if md:
-        declared |= {l.strip() for l in md.group(1).splitlines()
-                     if l.strip() and not l.strip().startswith("#")}
     assert dirs <= declared, (
         f"EXPECTED_SKIPS names dir(s) that are not declared targets: "
         f"{sorted(dirs - declared)}. `_skip_entry_applies` matches these "
@@ -693,8 +701,145 @@ def test_the_meta_test_harness_is_immune_to_an_ambient_DEVRC_TARGETS():
             "full-set assertion in this file can pass against a 1-target run.\n"
             + proc.stderr
         )
+        # 🔴 AND it must have RUN. Asserting only the absence of "SUBSET" is
+        # satisfied by a scrub that sets the variable to EMPTY instead of
+        # dropping the key: the runner then exits 3 with `resolved to NOTHING`,
+        # prints no SUBSET line, and this guard stays green over a run that
+        # never happened.
+        assert proc.returncode == 0, (
+            f"the scrubbed run exited {proc.returncode} — an empty-string "
+            f"scrub is not a scrub.\n{proc.stdout}\n{proc.stderr}"
+        )
     finally:
         if saved is None:
             os.environ.pop("DEVRC_TARGETS", None)
         else:
             os.environ["DEVRC_TARGETS"] = saved
+
+
+# --- findings from the round-2 delta audit ------------------------------------
+
+
+def test_the_subset_note_reports_N_of_the_FULL_set_not_N_of_N():
+    """🟡 round-2 F5. `SET_TOTAL` is captured BEFORE narrowing, and five lines of
+    comment explain why — but nothing asserted it.
+
+    Measured mutant (non-deletion): `${SET_TOTAL}` -> `${#TARGETS[@]}` at both
+    read sites. Banner becomes `SUBSET: 1 of 1 hermetic target(s)` and the
+    PARTIAL RUN block `1 of 1`. It SURVIVED all 23 tests in this file, with a
+    positive control in the same copy proving the mutated runner was executing.
+
+    "1 of 1" is the reassuring-but-wrong number: it reads as a complete run of a
+    one-target set. The denominator is the whole point of the note.
+    """
+    _require_targets_flag(RUN_TESTS)
+    full = len(_hermetic_targets())
+    assert full >= 10, f"only {full} targets parsed — the parser is broken"
+    proc = _run([str(RUN_TESTS), "--targets", "scripts/collector/i3/tests",
+                 "--check-floors", str(REPO_ROOT)])
+    combined = proc.stdout + proc.stderr
+    m = re.search(r"SUBSET:\s*(\d+)\s+of\s+(\d+)", combined)
+    assert m, f"no 'SUBSET: N of M' in the output:\n{combined[:1200]}"
+    selected, total = int(m.group(1)), int(m.group(2))
+    assert selected == 1, f"expected 1 selected, got {selected}"
+    assert total == full, (
+        f"the note says '{selected} of {total}' but the {SETNAME} set has "
+        f"{full} targets. A denominator equal to the numerator turns a partial "
+        "run into what reads as a complete one."
+    )
+
+    # 🔴 AND THE BANNER, which is a SECOND site with its own copy of the same
+    # expression. Watched: mutating only `SUBSET_NOTE` (the banner) to
+    # `N of N` left this test green, because the early-exit path above reads the
+    # stderr line instead. Two sites, two assertions — pinning one proves
+    # nothing about the other.
+    real = _run([str(RUN_TESTS), "--targets", "scripts/collector/i3/tests",
+                 str(REPO_ROOT)])
+    assert "SUMMARY" in real.stdout, f"no banner:\n{real.stdout[-2000:]}"
+    tail = real.stdout[real.stdout.index("SUMMARY"):]
+    mb = re.search(r"SUBSET:\s*(\d+)\s+of\s+(\d+)", tail)
+    assert mb, f"the SUMMARY region carries no 'N of M':\n{tail[:1200]}"
+    assert int(mb.group(2)) == full, (
+        f"the banner says '{mb.group(1)} of {mb.group(2)}' but the {SETNAME} "
+        f"set has {full} targets."
+    )
+
+
+def test_every_early_exit_surface_declares_a_partial_run():
+    """🟡 round-2 F1/F3/F4 as ONE property, because they were fixed one at a
+    time and a fourth surface would be missed the same way.
+
+    Each of these exits before the SUMMARY banner and is somebody's whole view
+    of the run. Asserted together so a new early-exit path has to answer this
+    test rather than be discovered by the next audit.
+    """
+    _require_targets_flag(RUN_TESTS)
+    t = "scripts/collector/i3/tests"
+    for flag in ("--check-targets", "--check-floors"):
+        proc = _run([str(RUN_TESTS), "--targets", t, flag, str(REPO_ROOT)])
+        assert proc.returncode == 0, f"{flag}: {proc.stdout}\n{proc.stderr}"
+        assert re.search(r"SUBSET|SELECTED", proc.stdout), (
+            f"{flag} printed no subset caveat on stdout — the surface an "
+            f"operator reads. A one-target run reads as the whole set.\n"
+            f"{proc.stdout[:1200]}"
+        )
+
+
+def test_the_flag_OVERRIDES_an_ambient_env_var_and_says_so():
+    """🟡 round-2 F2 — a regression the previous fix round introduced.
+
+    Measured before the fix: a SINGLE `--targets` on a shell with
+    DEVRC_TARGETS exported was rejected `--targets given more than once`
+    (exit 3), naming no environment variable, so the remedy appeared nowhere and
+    the advice printed was already satisfied. It also removed the ordinary
+    precedence that an explicit flag beats ambient configuration.
+    """
+    _require_targets_flag(RUN_TESTS)
+    flagged = "scripts/collector/i3/tests"
+    ambient = "scripts/opencode/tests"
+    env = {**os.environ, "DEVRC_TARGETS": ambient}
+    proc = subprocess.run(
+        ["bash", str(RUN_TESTS), "--targets", flagged, "--check-floors",
+         str(REPO_ROOT)],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert proc.returncode == 0, (
+        "a single --targets alongside an ambient DEVRC_TARGETS must not be "
+        f"fatal, got {proc.returncode}.\n{proc.stdout}\n{proc.stderr}"
+    )
+    rows = {m.group(1) for m in
+            re.finditer(r"^  floor \d+  (\S+)\s*$", proc.stdout, re.M)}
+    assert rows == {flagged}, (
+        f"the flag did not win: selection is {sorted(rows)}, expected "
+        f"[{flagged!r}]. An explicit flag must override ambient configuration."
+    )
+    assert "OVERRIDES" in proc.stderr and "DEVRC_TARGETS" in proc.stderr, (
+        "the override was silent — a selection the operator did NOT type was "
+        f"discarded without a word.\n{proc.stderr}"
+    )
+
+
+def test_a_set_but_EMPTY_env_var_names_the_env_var_in_its_remedy():
+    """🟡 round-2 F3. `DEVRC_TARGETS=` (set, empty) is fatal — defensible — but
+    the message said "Omit --targets", which that operator has already done.
+    The only remedy is `unset DEVRC_TARGETS`, so it has to appear."""
+    _require_targets_flag(RUN_TESTS)
+    env = {**os.environ, "DEVRC_TARGETS": ""}
+    proc = subprocess.run(
+        ["bash", str(RUN_TESTS), "--check-floors", str(REPO_ROOT)],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert proc.returncode == 3, f"expected 3, got {proc.returncode}"
+    # 🔴 The FATAL LINE ITSELF, not just the string somewhere in stderr. The
+    # remedy line below it mentions DEVRC_TARGETS independently, so a bare
+    # `"DEVRC_TARGETS" in proc.stderr` stays green while the headline reverts to
+    # blaming `--targets`. Watched: that mutant survived.
+    fatal = [l for l in proc.stderr.splitlines() if "FATAL" in l]
+    assert fatal, f"no FATAL line at all:\n{proc.stderr}"
+    assert "DEVRC_TARGETS" in fatal[0], (
+        "the FATAL line blames a flag the reader never passed; the variable "
+        f"that IS set is named nowhere on it.\n{fatal[0]}"
+    )
+    assert "--targets" not in fatal[0], (
+        f"the FATAL line names --targets, which was not given.\n{fatal[0]}"
+    )

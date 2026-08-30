@@ -207,14 +207,33 @@ ROOT=""
 ONLY_TARGETS="${DEVRC_TARGETS:-}"
 ONLY_TARGETS_GIVEN=0
 ONLY_TARGETS_SOURCE=""
+# 🔴 THE FLAG AND THE ENV VAR ARE TRACKED SEPARATELY, and the reason is a
+# regression this file already shipped once: a single `--targets` on a shell
+# where DEVRC_TARGETS happened to be exported was rejected as
+# "--targets given more than once", naming no environment variable, so the only
+# remedy (`env -u DEVRC_TARGETS`) appeared nowhere and the advice printed was
+# already satisfied. It also broke the ordinary precedence every other tool
+# here has — an explicit flag OVERRIDES ambient configuration.
+#
+# So: only a REPEATED FLAG is fatal. The flag beats the environment and SAYS it
+# did, because a selection the operator did not type is the one worth naming.
+ONLY_TARGETS_FLAG_GIVEN=0
+ONLY_TARGETS_ENV_GIVEN=0
 if [ -n "${DEVRC_TARGETS+x}" ]; then
   ONLY_TARGETS_GIVEN=1
+  ONLY_TARGETS_ENV_GIVEN=1
   ONLY_TARGETS_SOURCE="the DEVRC_TARGETS environment variable"
 fi
 # Set once the full target list is known, so the SUBSET note can say "N of M"
 # rather than a bare N that reads like a total.
 SET_TOTAL=0
-# Appended to the SUMMARY banner and the RESULT line. Empty on a full run.
+# Appended to the SUMMARY banner and to the PARTIAL RUN block below it. Empty on
+# a full run.
+#
+# 🔴 NOT to the `RESULT:` line, and do NOT add it there — that line is matched
+# `^RESULT: (PASS|FAIL) \(exit=(\d+)\)$`, ANCHORED AT BOTH ENDS, by
+# test_gate_exit_truthfulness.py. A draft of this feature appended to it and the
+# anchored assertion was the only thing that objected. See `_emit_verdict`.
 SUBSET_NOTE=""
 CHECK_TARGETS_ONLY=0
 CHECK_FLOORS_ONLY=0
@@ -239,12 +258,20 @@ while [ $# -gt 0 ]; do
     # nobody is watching. This whole block's doctrine is that a selection
     # mistake must be loud.
     --targets|--targets=*)
-      if [ "$ONLY_TARGETS_GIVEN" -eq 1 ]; then
+      if [ "$ONLY_TARGETS_FLAG_GIVEN" -eq 1 ]; then
         echo "run-tests: FATAL — --targets given more than once." >&2
         echo "           Last-wins would silently discard the earlier selection." >&2
         echo "           Pass ONE --targets with the whole space-separated list." >&2
         exit 3
       fi
+      # The flag WINS over an ambient DEVRC_TARGETS rather than colliding with
+      # it. Announced, not silent: a value the operator did not type is exactly
+      # the one that should be named when it is overridden.
+      if [ "$ONLY_TARGETS_ENV_GIVEN" -eq 1 ]; then
+        echo "run-tests: --targets OVERRIDES the DEVRC_TARGETS environment variable" >&2
+        echo "           (env value: '${ONLY_TARGETS}'). The flag wins." >&2
+      fi
+      ONLY_TARGETS_FLAG_GIVEN=1
       ONLY_TARGETS_GIVEN=1
       ONLY_TARGETS_SOURCE="--targets"
       case "$1" in
@@ -861,9 +888,18 @@ if [ "$ONLY_TARGETS_GIVEN" -eq 1 ]; then
   _requested=($ONLY_TARGETS)
   set +f
   if [ "${#_requested[@]}" -eq 0 ]; then
-    echo "run-tests: FATAL — --targets was given but resolved to NOTHING." >&2
+    # 🔴 NAME THE KNOB THAT IS ACTUALLY SET. A set-but-EMPTY DEVRC_TARGETS
+    # reaches here with no `--targets` on the command line, and telling that
+    # operator to "omit --targets" is advice they have already followed — the
+    # remedy is `unset DEVRC_TARGETS`, which must therefore appear.
+    echo "run-tests: FATAL — ${ONLY_TARGETS_SOURCE} was given but resolved to NOTHING." >&2
     echo "           A run that selects no targets would exit 0 having tested" >&2
-    echo "           nothing. Omit --targets to run the whole '$SET' set." >&2
+    echo "           nothing." >&2
+    if [ "$ONLY_TARGETS_FLAG_GIVEN" -eq 1 ]; then
+      echo "           Omit --targets to run the whole '$SET' set." >&2
+    else
+      echo "           \`unset DEVRC_TARGETS\` to run the whole '$SET' set." >&2
+    fi
     exit 3
   fi
   _selected=()
@@ -873,7 +909,7 @@ if [ "$ONLY_TARGETS_GIVEN" -eq 1 ]; then
       [ "$_r" = "$_t" ] && { _hit=1; break; }
     done
     if [ "$_hit" -eq 0 ]; then
-      echo "run-tests: FATAL — --targets names '$_r', which is not a target in the '$SET' set." >&2
+      echo "run-tests: FATAL — ${ONLY_TARGETS_SOURCE} names '$_r', which is not a target in the '$SET' set." >&2
       echo "           Targets are exact entries of HERMETIC_TARGETS (plus" >&2
       echo "           DEVHOST_TARGETS under --set all), not path prefixes." >&2
       echo "           Run with --check-targets to print the declared list." >&2
@@ -893,7 +929,7 @@ if [ "$ONLY_TARGETS_GIVEN" -eq 1 ]; then
     # anyone reading the mapper's own output.
     for _s in ${_selected[@]+"${_selected[@]}"}; do
       if [ "$_s" = "$_r" ]; then
-        echo "run-tests: FATAL — --targets names '$_r' more than once." >&2
+        echo "run-tests: FATAL — ${ONLY_TARGETS_SOURCE} names '$_r' more than once." >&2
         echo "           A duplicate runs one suite twice and counts it twice," >&2
         echo "           inflating the collected total AND the derived floor, so" >&2
         echo "           the run satisfies a floor its own duplication created." >&2
@@ -904,7 +940,11 @@ if [ "$ONLY_TARGETS_GIVEN" -eq 1 ]; then
     _selected+=("$_r")
   done
   TARGETS=("${_selected[@]}")
-  # Carried into the SUMMARY header and the RESULT line — see GUARD 6. stderr
+  # Carried into the SUMMARY header and the PARTIAL RUN block below it.
+  # 🔴 NOT into the `RESULT:` line — see `_emit_verdict`, whose format is pinned
+  # anchored-at-both-ends. An earlier version of THIS COMMENT said "and the
+  # RESULT line — see GUARD 6", which is an instruction to re-create the defect
+  # the same commit had just removed. stderr
   # alone is not enough: `gate.sh` prints from the SUMMARY banner DOWN, so
   # anything announced above it is invisible on the surface CLAUDE.md tells
   # people to read.
@@ -913,7 +953,10 @@ if [ "$ONLY_TARGETS_GIVEN" -eq 1 ]; then
   # harder of the two to notice. Saying which one selected turns "why did this
   # only run 3 targets" into a one-line answer.
   SUBSET_NOTE=" — SUBSET: ${#TARGETS[@]} of ${SET_TOTAL} ${SET} target(s) via ${ONLY_TARGETS_SOURCE}"
-  echo "run-tests: SUBSET — ${#TARGETS[@]} of the '$SET' set selected via ${ONLY_TARGETS_SOURCE}." >&2
+  # "N of M", never a bare N: the denominator is what makes this a coverage
+  # statement rather than a count. Same reason SET_TOTAL is captured before
+  # narrowing.
+  echo "run-tests: SUBSET: ${#TARGETS[@]} of ${SET_TOTAL} '$SET' target(s) selected via ${ONLY_TARGETS_SOURCE}." >&2
   echo "           Unselected targets did NOT run; this verdict is about the" >&2
   echo "           selected ones only." >&2
 fi
@@ -2063,7 +2106,17 @@ if [ "${#bad_targets[@]}" -gt 0 ]; then
 fi
 
 if [ "$CHECK_TARGETS_ONLY" -eq 1 ]; then
-  echo "run-tests: all ${#TARGETS[@]} $SET target(s) resolve."
+  # 🔴 SAY WHEN THIS IS A SUBSET. `all N hermetic target(s) resolve` after
+  # validating ONE entry of twenty-eight is the same false full-set claim F3
+  # fixed on the floor table and F1 fixed in the SUMMARY banner — this is the
+  # third early-exit surface, and it was missed twice because the three are
+  # nowhere near each other. GUARD 5's coverage is exactly the selection.
+  if [ -n "$SUBSET_NOTE" ]; then
+    echo "run-tests: all ${#TARGETS[@]} SELECTED target(s) resolve — a SUBSET of the $SET set (${SET_TOTAL} target(s)), via ${ONLY_TARGETS_SOURCE}."
+    echo "           GUARD 5 did NOT validate the unselected ones."
+  else
+    echo "run-tests: all ${#TARGETS[@]} $SET target(s) resolve."
+  fi
   for t in "${TARGETS[@]}"; do
     if [ -d "$t" ]; then echo "  dir   $t"; else echo "  file  $t"; fi
   done
@@ -2144,7 +2197,7 @@ if [ "$CHECK_FLOORS_ONLY" -eq 1 ]; then
       # set, which is the same false-label defect fixed on the GLOBAL line one
       # screen below, missed here because the two are not adjacent.
       if [ -n "$SUBSET_NOTE" ]; then
-        echo "  floor ${entry##*|}  ${_ft}  [not SELECTED by --targets — excluded from the global sum]"
+        echo "  floor ${entry##*|}  ${_ft}  [not SELECTED by ${ONLY_TARGETS_SOURCE} — excluded from the global sum]"
       else
         echo "  floor ${entry##*|}  ${_ft}  [not in the $SET set — excluded from the global sum]"
       fi
