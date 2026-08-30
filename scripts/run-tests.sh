@@ -1347,7 +1347,27 @@ TARGET_FLOORS=(
   # never fire: `zsh` is in REQUIRED_TOOLS, so a host without it aborts on
   # GUARD 1 naming the binary rather than running two tests thinner. That is
   # why they are not pinned in EXPECTED_SKIPS.
-  "scripts/tests|8217"
+  # 2026-08-29, the cairn `tasks:` schema (#1049): 10319 collected, against a
+  # ceiling of 8217 + 2054 = 10271. The gate printed this replacement itself —
+  # `"scripts/tests|10269"`, i.e. 10319 - min(50, max(1, 10319/20)) = 10319 - 50
+  # — so it is that run's own count put through the documented rule, not a number
+  # anyone computed from the two sides.
+  #
+  # 🔴 IT FIRED ONLY ON THE MERGED TREE, WHICH IS THE WHOLE ARGUMENT FOR GATING
+  # ONE. Neither side was over on its own: `origin/main` collected 10137 and the
+  # PR branch collected 10112, both comfortably under. The SUM crossed it. A PR
+  # green on its own branch and a main green on its own can still produce a red
+  # merge, and with `strict: false` on this repo nothing checks that
+  # automatically — the only thing between this and a red main was building the
+  # integration branch by hand.
+  #
+  # ⚠ AND THE FIX HAS AN ORDER. Pinning 10269 while the branch still collected
+  # 10112 would have put the branch UNDER its own new floor and turned its
+  # required checks red — trading a merge-time failure for a branch-time one. So
+  # `origin/main` is merged INTO the branch first, making the branch the tree the
+  # number describes. A floor is a claim about a measured tree; pin it on the
+  # tree you measured.
+  "scripts/tests|10269"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
