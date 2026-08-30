@@ -146,11 +146,17 @@ def _wait_events(spool_dir, n=1, timeout=10.0, until=None) -> list:
     tests are classified like every other site — no self-test exemption**, since
     exempting one of a pair and not the other is what produced the wrong number.
 
-        53 total  =  39 n=1  +  5 until=  +  9 n>=2   (+ 7 op-selected)
+        52 total  =  38 n=1  +  5 until=  +  9 n>=2   (+ 11 op-selected)
 
-    Re-derived by the same AST rule after #807 merged, because the merge
-    moved every bucket and a stale count is what the rule above exists to
-    prevent. The 7 op-selected calls are `_wait_ops`/`_wait_payload`.
+    Re-derived by the same AST rule whenever this paragraph is touched, because
+    a merge moves every bucket and a stale count is what the rule above exists
+    to prevent. The 11 op-selected calls are `_wait_ops`/`_wait_payload`.
+    🔴 RE-DERIVE, DO NOT ADJUST: the numbers this line carried before
+    2026-08-30 (`53 = 39 + 5 + 9`, `7 op-selected`) had been left behind by
+    #1074 and were wrong in three places at once, while reading as precise.
+    The one instrument that produces all of them is
+    `classify_wait_calls()` in `scripts/tests/test_positional_spool_reader_
+    ratchet.py`, whose own pin comment carries the same breakdown by bucket.
 
     n=1 after a single command is exact, not a proxy. Of the 9 n>=2, one is this
     harness's own negative control below (it asserts the timeout fires; no real
@@ -172,11 +178,18 @@ def _wait_events(spool_dir, n=1, timeout=10.0, until=None) -> list:
     CI as `assert 'getHtml' == 'frames'` and `assert 'getHtml' == 'type'`. Use
     `_wait_ops` / `_wait_payload` below to select by op rather than by position.
     The `absent, empty` unpack named above as the order-dependent exception is
-    now `_wait_ops(spool_dir, "tabs", 2, where=_routed_to(inst))`, which keeps
-    the order and drops foreign rows — op alone would NOT have, because both of
-    its rows are `tabs` and a neighbour's `tabs` row selects just as well. See
-    `_wait_ops` for why the extra discriminator is the ROUTING KEY and not the
-    session.
+    now `_wait_ops(spool_dir, "tabs", …, where=_routed_to(inst))`, which drops
+    foreign rows — op alone would NOT have, because both of its rows are `tabs`
+    and a neighbour's `tabs` row selects just as well. See `_wait_ops` for why
+    the extra discriminator is the ROUTING KEY and not the session.
+
+    🔴 THAT SENTENCE USED TO SAY `where=` "keeps the order", AND IT DOES NOT.
+    A per-row predicate cannot order two rows that satisfy it equally, and this
+    test's own two rows carry the same op and the same routing key. The order is
+    pinned by SEQUENCING instead — the site waits for row one before issuing
+    command two — which is what the ordering claim in the paragraph above has
+    always meant by "wait for the earlier event before issuing the next
+    request". `#1074` is what a pair issued together does when it is not.
 
     🔴 AND A TIMEOUT IS NOW LOUD. This used to return a SHORT list silently, so
     every caller's next line — `[0]`, or a filter — failed with a message about
@@ -294,10 +307,21 @@ def _wait_ops(spool_dir, op, n=1, where=None, **kw) -> list:
     foreign or malformed row has to be walked past, not raise — build it out of
     `_payload_field` (`_routed_to` above is the ready-made one).
 
-    THE ONE SITE IN THIS FILE THAT UNPACKS A PAIR USES IT.
+    🔴 AND `where=` IS ONLY HALF THE ORDER STORY — IT SEPARATES YOUR ROWS FROM
+    A NEIGHBOUR'S, IT DOES NOT ORDER YOURS AMONG THEMSELVES. Two commands from
+    one test carry the SAME op and the SAME routing key, so no per-row predicate
+    can tell them apart; their file order is decided by when each `emit_cmd_event`
+    runs, which is after the HTTP response and off the critical path. A caller
+    unpacking a pair positionally must ALSO sequence: wait for row one, then
+    issue command two. `#1074` is the measured case — a pair issued together came
+    back REVERSED in the sandbox tier with `where=` already in place.
+
+    THE ONE SITE IN THIS FILE THAT UNPACKS A PAIR DOES BOTH.
     `test_an_absent_origin_header_is_not_the_same_as_an_empty_one` routes both
     of its commands to an instance id minted per run and selects with
-    `where=_routed_to(that id)`, so the pair it unpacks is the pair it caused.
+    `where=_routed_to(that id)`, so the pair it unpacks is the pair it caused;
+    and it waits for the first row BEFORE issuing the second command, so which
+    of the two comes first is fixed by observation rather than by scheduling.
     That is an INVARIANT THE CODE ENFORCES, replacing the corpus property this
     docstring used to assert ("no current test leaves a `tabs` command in flight
     to time out"). Re-measured 2026-08-26 before removing it — it had NOT lapsed,
@@ -3610,14 +3634,26 @@ def test_an_absent_origin_header_is_not_the_same_as_an_empty_one(telemetry):
     ONLY in whether the header is on the request, which is exactly what
     `session_origin is None` tests and what `or None` in the handler destroyed.
 
-    🔴 BOTH ROWS ARE `tabs`, SO ORDER BETWEEN THEM IS THE SIGNAL — and `op`
-    alone does not select them: a neighbour's `tabs` row landing between the two
-    would be unpacked as one of them and swap these assertions onto someone
-    else's row. So both commands are ROUTED to an instance id minted for this
-    run and the pair is selected with `where=_routed_to(inst)` — the rows this
-    test caused, by construction, not by an argument about what the rest of the
-    corpus happens to emit today. Guarded by
-    `test_a_neighbours_row_of_the_same_op_is_not_selected_as_one_of_ours`.
+    🔴 BOTH ROWS ARE `tabs`, SO ORDER BETWEEN THEM IS THE SIGNAL, AND THE TWO
+    HAZARDS TO ORDER ARE DIFFERENT PROBLEMS WITH DIFFERENT REMEDIES.
+
+      * A FOREIGN row of the same op landing between the two would be unpacked
+        as one of them and swap these assertions onto someone else's row. Both
+        commands are therefore ROUTED to an instance id minted for this run and
+        the pair is selected with `where=_routed_to(inst)` — the rows this test
+        caused, by construction, not by an argument about what the rest of the
+        corpus happens to emit today. Guarded by
+        `test_a_neighbours_row_of_the_same_op_is_not_selected_as_one_of_ours`.
+      * OUR OWN TWO ROWS carry the same op AND the same routing key, so `where=`
+        cannot order them and never could. `emit_cmd_event` runs off the
+        critical path, AFTER the HTTP response, so issuing both commands and
+        then waiting leaves their file order to the scheduler. That is exactly
+        the mechanism that flaked in `#1074` (a sibling pair came back REVERSED
+        in the sandbox tier). The remedy is SEQUENCING: wait for row one, then
+        issue command two. Row two cannot precede a row already observed.
+
+    Never seen to fail here — the fix is to the MECHANISM, not to an observed
+    failure, because the identical mechanism did fail one test over.
     """
     spool_dir = telemetry
     # Unique per RUN, not per file: nothing else in the process can name it, so
@@ -3630,9 +3666,20 @@ def test_an_absent_origin_header_is_not_the_same_as_an_empty_one(telemetry):
         assert _wait_connected(srv, want=True)
         assert _cmd_sess(srv, {"op": "tabs", "target": inst},
                          sid=LEAKED_ID)[0] == 200
+        # 🔴 THE WAIT THAT PINS THE ORDER. Only ONE command has been issued, so
+        # the single routed row this returns IS that command's — not a claim
+        # about scheduling, an observation made before the second command
+        # exists. Do not fold these two waits back into one.
+        absent = _wait_ops(spool_dir, "tabs", 1, where=_routed_to(inst))[0]
         assert _cmd_sess(srv, {"op": "tabs", "target": inst},
                          sid=LEAKED_ID, origin="")[0] == 200
-        absent, empty = _wait_ops(spool_dir, "tabs", 2, where=_routed_to(inst))
+        pair = _wait_ops(spool_dir, "tabs", 2, where=_routed_to(inst))
+        # The spool is append-only and `_wait_ops` preserves file order, so the
+        # row already observed must still be first. Asserted rather than assumed:
+        # if sequencing ever stopped holding, this says SO, instead of surfacing
+        # as an attribution failure that reads like a server regression.
+        assert pair[0] == absent, pair
+        empty = pair[1]
         assert absent["session"] == LEAKED_UUID, absent
         assert "origin" not in json.loads(absent["payload"])
         assert "session" not in empty, empty

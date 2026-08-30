@@ -112,14 +112,15 @@ POSITIONAL_BUCKET = "_wait_events positional (no until=)"
 # 🔴 Measured by THIS module's own `classify_wait_calls()` -- never by grep, and
 # never by hand -- over `scripts/browser-bridge/tests` at:
 #
-#     BASE SHA   this branch (PR #1074), the commit that lowers the pin to 47.
+#     BASE SHA   this branch, which SEQUENCES the pair site (see below).
 #                Deliberately not a hex sha: the measurement is OF the commit
-#                doing the lowering, so any sha written here would be the one
-#                before the change it describes.
+#                doing the change, so any sha written here would be the one
+#                before the change it describes. The RATCHETED number is
+#                unchanged at 47 — the pin has not moved since #1074 lowered it.
 #     DATE       2026-08-30
 #
 # Full breakdown at that commit, re-measured by `classify_wait_calls()` (never by
-# hand), all six buckets, 62 call sites total:
+# hand), all six buckets, 63 call sites total:
 #
 #     47  _wait_events positional (no until=)   <- RATCHETED
 #              38  of which n literal 1 / defaulted
@@ -127,7 +128,7 @@ POSITIONAL_BUCKET = "_wait_events positional (no until=)"
 #               0  of which n dynamic
 #      5  _wait_events until=                        SAFE
 #      4  _wait_ops op-only                          discriminated by op
-#      3  _wait_ops where=                           discriminated by op + row
+#      4  _wait_ops where=                           discriminated by op + row
 #      3  _wait_payload op-only                      discriminated by op
 #
 # ⚠ The dynamic sub-bucket went 1 -> 0 and `_wait_ops where=` 2 -> 3: the SAME
@@ -135,6 +136,18 @@ POSITIONAL_BUCKET = "_wait_events positional (no until=)"
 # `test_the_two_origin_tokens_are_distinct_and_recorded_verbatim` became
 # `_wait_ops(spool_dir, "tabs", …, where=_routed_to(inst))` after it flaked in
 # the sandbox tier (2026-08-29, both origin tokens verbatim but REVERSED).
+#
+# ⚠ THEN, on this branch, `_wait_ops where=` went 3 -> 4 and the total 62 -> 63
+# WITHOUT the ratcheted number moving — the shape to expect from an ordering fix:
+# SEQUENCING a pair adds a wait, it does not convert a positional `_wait_events`
+# site. `test_an_absent_origin_header_is_not_the_same_as_an_empty_one` now waits
+# for its first row before issuing its second command, so it holds two `where=`
+# calls instead of one. 🔴 THIS MODULE IS STRUCTURALLY BLIND TO THAT FIX: it
+# ratchets the FOREIGN-row hazard (position vs discrimination) and has no view
+# of the OWN-rows hazard (two rows one predicate cannot separate, because they
+# satisfy it equally). A green run here says NOTHING about whether a pair site
+# sequences — see `_wait_ops`' docstring in test_server.py, which is where that
+# argument lives.
 #
 # 🔴 AND THE SUB-SPLIT EARNED ITS KEEP -- read this before calling it
 # informational. The `_wait_events` docstring audited its own n>=2 sites and
@@ -166,7 +179,9 @@ POSITIONAL_BUCKET = "_wait_events positional (no until=)"
 #: banked by editing this number and the ledger in the same commit.
 PINNED_POSITIONAL_TOTAL = 47
 
-#: Per-enclosing-function ledger of the same 48 sites, keyed
+#: Per-enclosing-function ledger of the same 47 sites (the number above, and
+#: cross-checked against it by `test_the_ledger_and_the_headline_total_agree` --
+#: this comment said 48 for as long as the pin was 47), keyed
 #: `<file>::<dotted function path>`. Line numbers are deliberately NOT pinned --
 #: they churn on every unrelated edit above them, which would make this a
 #: permanently-red gate. Function names are stable and are what a failure needs
