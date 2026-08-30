@@ -5207,3 +5207,48 @@ class TestAbsentBasePresentOnMainlineIsRefused:
             "the fail-open direction, and it destroys a real document",
             res.stdout, res.stderr)
         assert "status=stale-base" in res.stderr
+
+    def test_a_STALE_BASE_in_a_REALISTIC_repo_is_not_reported_as_a_NEW_effort(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE SHADOW. Every other test in this class uses a repo with NO other
+        handoff docs — and that is the only reason they see the stale-base
+        refusal at all.
+
+        #962's rule (i) refuses `status=new-doc` when the doc does not exist AND
+        the repo already has handoff docs. Every real repo does: talos-infra, the
+        clone this whole guard was built from, has 100+. So in the shape that
+        motivated this PR the run stops at rule (i) and NEVER reaches
+        `status=stale-base`.
+
+        MEASURED on the merge before this fix: realistic repo, doc absent here
+        and present on the mainline, `--confirm` -> rc 7 `status=new-doc`.
+
+        Worse than the wrong code: rule (i) says "If this really is a NEW effort,
+        say so: re-run with `--new-effort`". For a stale clone that is FALSE — the
+        doc exists, upstream — and following it walks the operator around the
+        guard. A doc on the mainline answers rule (i)'s own question: not a new
+        effort, a stale checkout.
+
+        🔴 Neither PR is wrong alone and git reported NO conflict here. Both added
+        refusals to one `main()`; the merge only conflicted where two constant
+        blocks sat adjacent.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        # What makes the repo realistic — and what every other fixture lacks.
+        others = work / "claudedocs"
+        others.mkdir(exist_ok=True)
+        for name in ("handoff-other-effort.md", "handoff-third-thing.md"):
+            (others / name).write_text("# Handoff: other\n\n## State now\n\nx.\n",
+                                       encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs", cwd=work)
+        _sh("git", "commit", "-q", "-m", "this repo has other handoff docs", cwd=work)
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_STALE_BASE, (
+            "rule (i) shadowed the stale-base refusal — the operator is told this "
+            "is a NEW effort when the doc exists on the mainline",
+            res.returncode, res.stdout, res.stderr)
+        assert "status=stale-base" in res.stderr
+        assert "status=new-doc" not in res.stderr
+        assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()

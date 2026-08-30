@@ -2430,7 +2430,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_DOC_PER_EFFORT
 
-    if not doc.exists() and not args.new_effort:
+    # 🔴 READ AT RULE (i), NOT AT THE MERGE. Rule (i) asks "is this a new
+    # effort?" and a copy of this doc on the MAINLINE answers it: no — this is a
+    # stale checkout. Without that, rule (i) fires first in every realistic repo
+    # (it needs only "doc absent + repo has handoff docs") and the stale-base
+    # refusal below becomes UNREACHABLE in the exact shape it exists for.
+    # MEASURED on the merge that introduced this: realistic repo, doc absent
+    # here and present on the mainline -> rc 7 `status=new-doc`, telling the
+    # operator to re-run with `--new-effort` for a doc that already exists
+    # upstream. Neither rule is wrong alone and git reported NO conflict.
+    currency = base_currency(repo, relpath)
+
+    if (not doc.exists() and not args.new_effort
+            and not currency.replaces_mainline_doc("")):
         existing = existing_handoff_docs(repo)
         if existing:
             shown = existing[:EXISTING_SHOWN_MAX]
@@ -2520,10 +2532,9 @@ def main(argv: list[str] | None = None) -> int:
     # true of a document that is not the one being replaced. It runs even with no
     # base at all — a doc absent HERE and present on the mainline is the same bug
     # wearing its loudest disguise, every section arriving NEW.
-    # Hoisted: the refusal below needs the SAME reading the warning was rendered
-    # from. Computing it twice would let the two disagree across a concurrent
-    # fetch, and the message would then name numbers the decision did not use.
-    currency = base_currency(repo, relpath)
+    # `currency` is read once, up at rule (i) — the refusal here and the warning
+    # below must use the SAME reading, or a concurrent fetch lets them disagree
+    # and the message names numbers the decision did not use.
     wrong_base = wrong_base_report(
         wrong_base_tells(base_text, update_text, report.buckets),
         currency,
