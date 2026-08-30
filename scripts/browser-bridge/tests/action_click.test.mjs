@@ -348,7 +348,16 @@ test("registerActionClick is a no-op where chrome.action is absent", () => {
   assert.equal(registerActionClick({}), false, "no onClicked → nothing to wire");
 });
 
-test("🔴 startBackground() calls it UNCONDITIONALLY", () => {
+test("🔴 startBackground()'s call to it carries no condition", () => {
+  // 🔴 THE NAME IS NARROWER THAN "UNCONDITIONALLY" ON PURPOSE. This walks the
+  // function body and pins the statement; it cannot prove REACHABILITY, and an
+  // audit demonstrated the gap: inserting `if (globalThis.__x) return;` as the
+  // first line of startBackground() leaves the call unconditional, at depth 1,
+  // and never executed — all 568 tests stay green. The check below now also
+  // refuses an early return ABOVE the call, which closes the demonstrated
+  // mutant; it still does not close "unreachable" in general. A description
+  // that reads as coverage while providing less is worse than none, so the
+  // sentence is trimmed to what the body actually decides.
   const src = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "..", "extension", "service_worker.js"),
     "utf8");
@@ -376,6 +385,14 @@ test("🔴 startBackground() calls it UNCONDITIONALLY", () => {
   assert.equal(hits[0].text.trim(), "registerActionClick();",
     "the call carries a condition or a guard — pin the whole statement, because " +
     "`if (false) registerActionClick();` is the mutant this test exists to kill");
+  // No early exit above it at the function's own level. This is the audit's
+  // `if (globalThis.__x) return;` mutant: the call stays syntactically
+  // unconditional while becoming dead.
+  const idx = lines.indexOf(hits[0]);
+  const above = lines.slice(0, idx).filter((l) => l.depth === 1);
+  assert.ok(!above.some((l) => /^\s*(return|throw)\b/.test(l.text)),
+    "an early return/throw sits above the call — it is syntactically " +
+    "unconditional and never reached");
 });
 
 // --------------------------------------------------------------------------- //

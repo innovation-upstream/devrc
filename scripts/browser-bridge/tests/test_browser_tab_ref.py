@@ -53,6 +53,7 @@ Run: nix develop ~/workspace/devrc -c python3 -m pytest \\
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -581,3 +582,93 @@ def test_an_unreadable_whoami_never_raises_and_fails_open(bridge, payload, why):
         assert "could not read" in r.stderr, (
             f"{why}: an unreadable SHAPE must be named as such, not reported as "
             f"an unidentifiable host")
+
+
+# --------------------------------------------------------------------------- #
+# SKILL.md names the exemption list — pin it to the CLI's
+# --------------------------------------------------------------------------- #
+def test_SKILL_md_names_every_free_text_subcommand_the_CLI_exempts():
+    """🔴 SKILL.md is the file an AGENT reads; the CLI header is not.
+
+    The exemption is a hand-maintained list in two places, in two languages, and
+    the failure is silent in the direction that matters: add a subcommand to
+    `REF_FREE_TEXT_SUBCOMMANDS` without updating SKILL.md and an agent reads
+    "either side of the op", writes `browser <that-sub> bw://…` expecting
+    routing, and instead sends the reference as TEXT — rc 0, wrong tab, no error.
+    That is the same class as the README permission list that had already gone
+    stale, and this file already carries a seam test of exactly this shape.
+
+    Pinned as a SET, so the order and the surrounding prose stay free.
+    """
+    cli = CLI.read_text(encoding="utf-8")
+    m = re.search(r'^REF_FREE_TEXT_SUBCOMMANDS="([^"]*)"', cli, re.M)
+    assert m, ("REF_FREE_TEXT_SUBCOMMANDS vanished from the CLI — this guard now "
+               "checks nothing. Re-point it at whatever defines the list.")
+    declared = set(m.group(1).split())
+    assert declared, "the CLI's exemption list parsed EMPTY — the pin would be vacuous"
+
+    skill = (BB / "SKILL.md").read_text(encoding="utf-8")
+    # 🔴 PIN THE EXEMPTION SENTENCE, NOT THE PARAGRAPH. The first version of this
+    # guard collected every `backticked` lowercase word in the surrounding
+    # paragraph — and SURVIVED its own negative control, because deleting `agent`
+    # from the exemption list left it named one sentence later ("`agent` REFUSES a
+    # leading one"). A guard satisfied by an unrelated mention of the word is
+    # satisfied by the very rot it exists to catch. Match the slash-separated run
+    # that carries the claim, and nothing else.
+    # `\s+`, not a literal space: SKILL.md is hard-wrapped, so the list can sit on
+    # the line after "For". The first version required a space and went red on a
+    # pure reflow — which was the guard behaving correctly (it said "re-point me"
+    # rather than passing), but the pattern should tolerate wrapping.
+    m2 = re.search(
+        r"For\s+((?:`[a-z]+`/)*`[a-z]+`)\s+it is a reference only BEFORE",
+        skill)
+    assert m2, ("SKILL.md's free-text exemption sentence is gone or reworded past "
+                "this pattern — re-point this guard rather than deleting it; "
+                "without it the list silently stops being a claim about the CLI.")
+    named = set(re.findall(r"`([a-z]+)`", m2.group(1)))
+    assert named, "the exemption sentence parsed EMPTY — the pin would be vacuous"
+    assert named == declared, (
+        f"SKILL.md's free-text list and the CLI's disagree. SKILL.md names "
+        f"{sorted(named)}; the CLI exempts {sorted(declared)}. An agent reading "
+        f"SKILL.md will expect routing for anything missing here and get TEXT — "
+        f"rc 0, wrong tab, no error.")
+
+
+# --------------------------------------------------------------------------- #
+# `agent` refuses a TAB, not a SPELLING
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("argv, env, source", [
+    (["--tab", "12345", "--instance", "main", "agent", "--dry-run", "g"], {}, "--tab"),
+    (["--instance", "main", "agent", "--dry-run", "g"], {"BB_TAB": "12345"}, "$BB_TAB"),
+])
+def test_agent_refuses_a_tab_from_ANY_source(bridge, argv, env, source):
+    """🔴 The first version of this guard refused only the `bw://` spelling, and
+    an audit walked around it in two steps.
+
+    `browser --tab 12345 agent …` reproduced the exact wrong answer the guard
+    exists to prevent — the tab discarded in silence, the agent answering about
+    its own blank tab — with no mention of the dropped flag. An exported
+    `$BB_TAB` was worse: it leaked into browser-agent's OWN child `browser`
+    calls, so the tab reappeared on the wire while `_note_env_routing` announced
+    a route `agent` had never honoured.
+
+    The guard now keys on the STATE (a tab is set) and names whichever source
+    supplied it, which is what makes it cover a hazard rather than a word.
+    """
+    r = bridge.run(*argv, env=env)
+    assert r.returncode != 0, r.stdout
+    assert "agent cannot honour a tab" in r.stderr, r.stderr
+    assert source in r.stderr, f"the refusal must name the source: {r.stderr}"
+    assert bridge.bodies == [], f"nothing may be dispatched: {bridge.bodies}"
+
+
+def test_agent_without_any_tab_is_untouched(bridge):
+    """INVARIANT GUARD: the refusal is scoped to a TAB, not to `agent`.
+
+    A guard widened onto the subcommand rather than the state would break the
+    documented way to run the agent, which is the regression a too-wide fix
+    introduces here.
+    """
+    r = bridge.run("--instance", "main", "agent", "--dry-run", "do a thing")
+    assert "agent cannot honour" not in r.stderr, r.stderr
+    assert "a goal is required" not in r.stderr, r.stderr

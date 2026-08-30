@@ -627,16 +627,27 @@ if [ -n "$REF" ]; then
   [ "$REF_SAW_INSTANCE_FLAG" -eq 0 ] || die "--instance conflicts with $REF — pass one or the other"
   [ "$REF_SAW_TAB_FLAG" -eq 0 ]      || die "--tab conflicts with $REF — pass one or the other"
   parse_tab_ref "$REF"
-  # 🔴 `agent` CANNOT HONOUR THE TAB HALF, so it must not silently keep the other
-  # half. `browser-agent` has no --tab: the agent arm forwards --instance only and
-  # the autonomous agent always works in its OWN freshly-opened tab. Left routing,
-  # the operator clicks the icon on the tab they care about, pastes the reference,
-  # and gets a confident answer about a BLANK page — a wrong answer with no error
-  # anywhere. A reference is a promise about one specific tab; the only honest
-  # response from a subcommand that cannot keep it is to refuse.
-  if [ "${1:-}" = "agent" ]; then
-    die "agent cannot honour ${REF} — it always works in its own new tab (browser-agent has no --tab). Use --instance ${INSTANCE} instead."
-  fi
+fi
+
+# 🔴 `agent` CANNOT HONOUR A TAB FROM ANY SOURCE — and this check is deliberately
+# on the STATE (`TAB` is set) rather than on the spelling that first exposed it.
+# `browser-agent` has no --tab: the agent arm forwards --instance only, and the
+# autonomous agent always works in its OWN freshly-opened tab. So a tab named
+# here is silently discarded and the agent answers about a DIFFERENT page —
+# confidently, with no error anywhere.
+#
+# 🔴 THE FIRST VERSION OF THIS GUARD ONLY REFUSED `bw://`, and an audit walked
+# straight around it: `browser --tab 12345 agent …` reproduced the identical
+# wrong answer with no mention of the discarded flag, and an exported `$BB_TAB`
+# was worse still — it leaked into browser-agent's OWN child `browser` calls, so
+# the tab reappeared on the wire while `_note_env_routing` claimed a route that
+# `agent` had never honoured. A guard that names one spelling of a hazard does
+# not cover the hazard. `TAB_SRC` names whichever source supplied it, so the
+# refusal is legible whether it came from a reference, a flag or the environment.
+if [ "${1:-}" = "agent" ] && [ -n "$TAB" ]; then
+  _agent_hint=""
+  [ -n "$INSTANCE" ] && _agent_hint=" Target the profile with --instance ${INSTANCE} instead."
+  die "agent cannot honour a tab (${TAB_SRC} gave tab ${TAB}) — browser-agent has no --tab and always works in its own new tab.${_agent_hint}"
 fi
 
 SESSION_ID="$(derive_session_id)"

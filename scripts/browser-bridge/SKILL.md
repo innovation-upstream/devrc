@@ -9,7 +9,7 @@ description: Drive the user's LIVE, logged-in Brave browser — read the active 
 BB=~/workspace/devrc/scripts/browser-bridge/browser   # ← run it by this exact path
 $BB whoami                          # ORIENT FIRST: HOST + connected profiles + extension_stale
 $BB --instance <key> open <url>     # open a NEW tab THIS session owns → returns tabId
-$BB bw://<host>/<inst>/<tabId> text # cheap read of the tab Zach's icon-click copied
+$BB bw://<host>/<inst>/<tabId> text # read the tab the icon-click copied
 ```
 
 🔴 **Run `whoami` first on every fresh browser task.** Both hosts are hostname
@@ -48,9 +48,9 @@ Env defaults `$BB_INSTANCE`/`$BB_TAB`/`$BB_FRAME` (flag wins; zsh does NOT
 split an unquoted `$F`). ⚠ an export outlives the call — env-routed ops say so
 once, on stderr.
 A toolbar-icon click copies `bw://<host>/<instance>/<tabId>` — one token that IS
-`--instance`+`--tab`, either side of the op. Host verified; mixing it with those
-flags errors. 🔴 For `type`/`js`/`eval` it is a reference only BEFORE the op —
-after it, it is the text/expression you are sending. `agent` refuses it (own tab).
+`--instance`+`--tab`, either side of the op; the host field is verified. 🔴 For
+`type`/`js`/`eval`/`agent` it is a reference only BEFORE the op — after it, it is
+the text/goal you send. `agent` refuses a LEADING one and any `--tab`.
 Result payloads land under `.result.data`.
 
 | command | does |

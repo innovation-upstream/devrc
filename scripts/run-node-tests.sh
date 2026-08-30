@@ -164,7 +164,7 @@ cd "$ROOT" || { echo "run-node-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # (`nix build .#checks.x86_64-linux.nodetests`); floors sit just under the real
 # totals so ordinary test-writing does not trip them but a collapse does.
 #
-#   scripts/browser-bridge/tests        14 files   468 tests
+#   scripts/browser-bridge/tests        18 files   568 tests
 #   scripts/dl-router/tests             13 files   508 tests
 #   scripts/collector/browser-ext/tests  2 files    21 tests
 #
@@ -187,7 +187,7 @@ cd "$ROOT" || { echo "run-node-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # move that turned the pytest global floor into less than half the real total.
 # A floor is a function of the measurement, not an opinion: `m - min(50, max(1, m/20))`.
 SUITES=(
-  "scripts/browser-bridge/tests|15|490"
+  "scripts/browser-bridge/tests|18|540"
   # Ungated until 2026-08-03: `FILES=` above named browser-bridge alone, so these
   # 508 tests had never run under any gate since dl-router was written.
   "scripts/dl-router/tests|13|500"
