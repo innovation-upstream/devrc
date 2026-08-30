@@ -1825,13 +1825,13 @@ TARGET_FLOORS=(
   # cache root is NOT shared with the write-back guard): 13 -> 16 collected.
   #   _suggested_floor 16 = 16 - min(50, max(1, 16/20 = 0 -> 1)) = 15.
   "scripts/claude-hooks/tests/test_on_disk_artifact_names.py|15"
-  # 2026-08-30, the handoff write guard arrives as a NEW target: 67 collected,
+  # 2026-08-30, the handoff write guard arrives as a NEW target: 68 collected,
   # 0 skipped, measured by pytest on this branch. It is the write-back guard's
   # counterpart on the OTHER record — armed on a READ of a handoff doc, gating at
   # Stop — and the count is dominated by the arming trigger's NON-matches and by
   # the three satisfaction routes, each checked alone plus its negative control.
-  #   _suggested_floor 67 = 67 - min(50, max(1, 67/20 = 3)) = 64.
-  "scripts/claude-hooks/tests/test_handoff_write_guard.py|64"
+  #   _suggested_floor 68 = 68 - min(50, max(1, 68/20 = 3)) = 65.
+  "scripts/claude-hooks/tests/test_handoff_write_guard.py|65"
   # 2026-08-21, the backgrounded-command capture log (868ktvqf9) arrives as a NEW
   # target: 80 collected, 0 skipped, measured by this gate on this branch.
   #   _suggested_floor 80 = 80 - min(50, max(1, 80/20 = 4)) = 76.

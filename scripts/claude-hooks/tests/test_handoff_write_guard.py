@@ -296,6 +296,19 @@ def test_a_subagents_WORK_does_count_once_the_parent_has_read(home, repo):
     assert guard.work_happened(sd)
 
 
+def test_a_subagents_handoff_WRITE_also_counts(home, repo):
+    """The same asymmetry, on the satisfaction side rather than the work side — and it
+    has to hold, or dispatching the write to a subagent would leave the parent blocked
+    for a handoff that is on disk. Same justification: the parent dispatched it."""
+    sd = seed(str(repo / "claudedocs" / DOC))
+    other = str(repo / "claudedocs" / "handoff-elsewhere.md")
+    guard.post_tool_use(
+        payload(tool_name="Write", tool_input={"file_path": other}, agent_id="agt-1"),
+        now=AFTER_READ_EPOCH)
+    assert guard._stamp(sd, guard.STATE_WROTE) is not None
+    assert guard.stop_decision(payload(event="Stop")) == ("silent", "")
+
+
 # --------------------------------------------------------------------------- #
 # 2. THE FALSE-POSITIVE KILLER
 # --------------------------------------------------------------------------- #

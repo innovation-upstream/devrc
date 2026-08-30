@@ -107,6 +107,15 @@ from a measured ladder without a measurement of my own would be speculation. The
 per-doc budget is the same, but MAX_DOCS is 3 rather than 5, so the worst case a
 session can reach is strictly cheaper than the guard this is modelled on.
 
+MULTI-TURN COST, STATED RATHER THAN DISCOVERED IN PRODUCTION. Work that spans several
+turns fires once per turn until the per-doc ladder is spent: at most TWO forced
+continuations and one `systemMessage`, then silence forever for that doc in that
+session. Because the anchor is the READ and not the last work event, a handoff written
+at ANY point after the read ends it permanently — so the ordinary shape is exactly one
+block, the model writes the doc, and the guard never speaks again. The shape that
+costs the full ladder is a session that is told to write a handoff, declines twice,
+and stops; that is the shape this exists for.
+
 🔴 `additionalContext` IS NOT A NON-BLOCKING CHANNEL ON Stop. The CLI pushes it into
 the SAME `blockingErrors` array as `decision:"block"`, so emitting it would force a
 continuation while claiming not to; `systemMessage` is yielded on the message channel
