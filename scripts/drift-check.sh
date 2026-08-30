@@ -2755,12 +2755,28 @@ echo
 # did not positively read: the line must be exactly `<true|false> <digits>`, and
 # anything else is a reason, printed as such, setting no rc.
 bp_slug_of() { # bp_slug_of <remote-url> -> owner/repo, or "" if not GitHub
+  # 🔴 THE HOST MUST BE ANCHORED, NOT MERELY CONTAINED. `*github.com/*` is an
+  # unanchored substring test, and a self-hosted mirror puts that string in the
+  # PATH: `https://mirror.internal.example/github.com/other-owner/other-repo.git`
+  # matched it and yielded `other-owner/other-repo` — a slug this fleet's remote
+  # never named. The arm would then query a REAL, UNRELATED repo and, if that
+  # one is protected, print a confident green about a remote it is not watching.
+  # Not a 404 into could-not-measure: an affirmative answer about the wrong
+  # subject, which is worse than no answer. Measured on three mirror shapes.
+  #
+  # So: strip the scheme, strip any userinfo, and require what REMAINS to BEGIN
+  # with `github.com` followed by the scp `:` or the path `/`.
   local U="$1" S=""
+  case "$U" in *://*) U="${U#*://}" ;; esac
+  case "$U" in *@*) U="${U#*@}" ;; esac
   case "$U" in
-    *github.com:*) S="${U##*github.com:}" ;;
-    *github.com/*) S="${U##*github.com/}" ;;
+    github.com:*) S="${U#github.com:}" ;;
+    github.com/*) S="${U#github.com/}" ;;
     *) return 0 ;;
   esac
+  # Trailing slash BEFORE `.git`, then again after: stripping `.git` first left
+  # `owner/repo.git` for `…/repo.git/`, a slug that 404s while looking right.
+  S="${S%/}"
   S="${S%.git}"
   S="${S%/}"
   # Exactly two non-empty, slash-free components. A URL that yields anything
@@ -2803,33 +2819,89 @@ elif [ -z "$BP_SLUG" ]; then
   echo "[protect] COULD NOT MEASURE — origin is not a github.com owner/repo remote,"
   echo "[protect]   so there is no branch-protection API to ask. No rc is set."
 elif ! command -v "$DRIFT_GH" >/dev/null 2>&1; then
-  echo "[protect] COULD NOT MEASURE — no usable \`gh\` at $DRIFT_GH."
+  echo "[protect] COULD NOT MEASURE — no usable gh binary at $DRIFT_GH."
   echo "[protect]   This is NOT 'main is protected'. No rc is set."
 else
   # A plain GET. 🔴 No -X/--method, no -f/--field: `gh` can DELETE this very
   # protection, and the git allowlist that guards the rest of this file cannot
   # see a `gh` argv at all. Pinned by test_the_gh_calls_are_read_only.
-  BP_RAW="$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/branches/main" --jq '"\(.protected) \(.protection.required_status_checks.contexts // [] | length)"' 2>/dev/null)"
-  BP_PROT="${BP_RAW%% *}"
-  BP_N="${BP_RAW##* }"
-  # 🔴 THE FIELD COUNT IS PART OF THE CONTRACT, for the reason the phase-2 gate
-  # records: `${x%% *}` and `${x##* }` BOTH fall back to the whole string when
-  # there is no space, so a one-field answer would set `protected` and the count
-  # from the same token and render a well-formed-looking measurement.
-  case "$BP_RAW" in *' '*) ;; *) BP_N=-1 ;; esac
-  case "${BP_RAW#* }" in *' '*) BP_N=-1 ;; esac
+  BP_RAW="$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/branches/main" --jq '"\(.protected) \(.protection.required_status_checks.contexts // [] | length) \(.protection.required_status_checks.contexts // [] | join(","))"' 2>/dev/null)"
+  # 🔴 POSITIONAL READ, not `${x%% *}`/`${x##* }`. Those BOTH fall back to the
+  # whole string when there is no space, so a one-field answer set `protected`
+  # and the count from the SAME token — one value read twice, wearing the shape
+  # of a measurement. `read` simply leaves the later fields EMPTY, and empty is
+  # rejected below. The names field is display-only and may legitimately be
+  # empty (a branch with no required checks has no context names).
+  BP_PROT=""; BP_N=""; BP_NAMES=""
+  read -r BP_PROT BP_N BP_NAMES <<EOF
+$BP_RAW
+EOF
   case "$BP_PROT" in true|false) ;; *) BP_N=-1 ;; esac
   case "$BP_N" in ''|*[!0-9]*) BP_N=-1 ;; esac
   if [ "$BP_N" = -1 ]; then
-    echo "[protect] COULD NOT MEASURE — \`gh\` gave no usable answer for $BP_SLUG."
+    echo "[protect] COULD NOT MEASURE — gh gave no usable answer for $BP_SLUG."
     echo "[protect]   No network, no credentials, no access to that repo, or an API shape"
     echo "[protect]   this arm does not recognise. 🔴 An empty answer parses as a count of"
     echo "[protect]   ZERO, and zero is the DRIFT value — so it is refused here rather than"
     echo "[protect]   fired as a finding. This is NOT 'main is protected'. No rc is set."
   elif [ "$BP_N" -gt 0 ]; then
-    echo "[protect] $BP_SLUG main: $BP_N required status check(s) (protected=$BP_PROT)."
+    echo "[protect] $BP_SLUG main: $BP_N required status check(s) — ${BP_NAMES:-<names unavailable>}"
+    # 🔴 A COUNT IS NOT THE GATE — `enforce_admins` IS HALF OF IT. Required checks
+    # with admin enforcement OFF do not stop an admin pushing straight to main,
+    # which is the exact mechanism behind incident 2 (`837d3fde`, a direct push).
+    # So a non-zero count alone is not an all-clear.
+    #
+    # 🔴 AND IT MUST BE READ FROM THE PROTECTION ENDPOINT, NOT THIS ONE. Measured
+    # 2026-08-29: `/branches/main` reports `.protection.enforce_admins` ABSENT for
+    # innovation-upstream/devrc — so `// false` yields **false** — while
+    # `/branches/main/protection` reports `true` for the same branch at the same
+    # moment. Keying on the branch endpoint's value would have fired rc 24 on our
+    # own healthy repo, every run: a permanently-red gate created by the fix for a
+    # blind spot. A second call is the price of reading the field that exists.
+    BP_ENF="$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/branches/main/protection" --jq '.enforce_admins.enabled' 2>/dev/null)"
+    case "$BP_ENF" in
+      true)
+        echo "[protect]   enforce_admins=true — the checks bind admins too."
+        ;;
+      false)
+        echo "[protect] 🔴 DRIFT — $BP_SLUG main requires $BP_N check(s) but enforce_admins is FALSE."
+        echo "[protect]   Half a gate. An admin — the actor in both 2026-08-29 occurrences — can"
+        echo "[protect]   push straight to main past every required check. This is the mechanism"
+        echo "[protect]   that would have let 837d3fde through even with the checks present."
+        echo "[protect]   fix: PUT /repos/$BP_SLUG/branches/main/protection with enforce_admins true."
+        note_rc 24
+        ;;
+      *)
+        echo "[protect]   enforce_admins=UNKNOWN — the protection endpoint did not answer."
+        echo "[protect]   NOT read as 'admins are bound'. No rc is set for this half."
+        ;;
+    esac
   else
-    echo "[protect] 🔴 DRIFT — $BP_SLUG main has ZERO required status checks (protected=$BP_PROT)."
+    # 🔴 ZERO CLASSIC CHECKS IS NOT YET DRIFT — RULESETS ARE A SECOND, NEWER
+    # MECHANISM AND THIS ENDPOINT CANNOT SEE THEM. Measured 2026-08-29:
+    # `astral-sh/uv` reads `protected=true, contexts=[]` here while carrying a
+    # ruleset whose types include `required_status_checks` — a fully gated branch
+    # that the classic read calls wide open. GitHub's UI now steers restores
+    # toward rulesets, so the most likely next repair of THIS repo produces
+    # exactly that state, and rc 24 would then fire on every 6-hourly run
+    # forever: the DND-bypassing toast 4x/day, i.e. the permanently-red gate this
+    # file refuses everywhere else. So ask the ruleset endpoint before deciding.
+    BP_RULES="$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/rules/branches/main" --jq '[.[]|select(.type=="required_status_checks")]|length' 2>/dev/null)"
+    case "$BP_RULES" in ''|*[!0-9]*) BP_RULES=-1 ;; esac
+    if [ "$BP_RULES" = -1 ]; then
+      # 🔴 The one case that must NOT become a finding: classic says zero and the
+      # ruleset half could not be read, so "unprotected" and "protected by a
+      # ruleset I cannot see" are indistinguishable. Firing here would be the
+      # empty-answer-is-zero trap one level up.
+      echo "[protect] COULD NOT MEASURE — $BP_SLUG main has 0 CLASSIC required checks, and the"
+      echo "[protect]   ruleset endpoint did not answer, so a ruleset gate cannot be ruled out."
+      echo "[protect]   This is NOT 'main is unprotected' and NOT 'main is protected'. No rc."
+    elif [ "$BP_RULES" -gt 0 ]; then
+      echo "[protect] $BP_SLUG main: 0 classic required checks, but $BP_RULES ruleset(s) of type"
+      echo "[protect]   required_status_checks apply. The gate is ON, by the newer mechanism."
+    else
+    echo "[protect] 🔴 DRIFT — $BP_SLUG main has ZERO required status checks (protected=$BP_PROT),"
+    echo "[protect]   by CLASSIC protection and by RULESETS alike — both were checked."
     echo "[protect]   The gate every change to this fleet passes through is OFF: anything can"
     echo "[protect]   land on main, and both hosts converge to main. Measured TWICE on"
     echo "[protect]   2026-08-29, once leaving a DIRECT PUSH on main that required checks"
@@ -2844,8 +2916,19 @@ else
       echo "[protect]   protected=false: there is no protection object at all, so this is a"
       echo "[protect]   create rather than a restore. Same endpoint, full PUT, read it back."
     fi
-    echo "[protect]   read the live state: gh api /repos/$BP_SLUG/branches/main/protection"
+    # 🔴 The DIAGNOSTIC must be runnable in the state it is printed in. The
+    # protection endpoint 404s with `Branch not protected` exactly when
+    # protected=false, so pointing an operator at it there hands them an error
+    # under pressure. Name the endpoint that answers in each case.
+    if [ "$BP_PROT" = true ]; then
+      echo "[protect]   read the live state: gh api /repos/$BP_SLUG/branches/main/protection"
+    else
+      echo "[protect]   read the live state: gh api /repos/$BP_SLUG/branches/main --jq .protection"
+      echo "[protect]   (…/branches/main/protection 404s 'Branch not protected' in this state)"
+    fi
+    echo "[protect]   rulesets, the other mechanism: gh api /repos/$BP_SLUG/rules/branches/main"
     note_rc 24
+    fi
   fi
 fi
 echo
