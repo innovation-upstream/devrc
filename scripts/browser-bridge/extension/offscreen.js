@@ -9,6 +9,19 @@
 // clipboard sample uses. It is deprecated-but-supported, and there is no
 // replacement reachable from this context.
 //
+// 🔴 AND IT NEEDS THE `clipboardWrite` PERMISSION — the manifest declares it, and
+// dropping it makes this file silently inert. `execCommand("copy")` is allowed
+// without that permission ONLY inside a short-lived event handler for a user
+// action. This copy is neither: by the time it runs, the worker has awaited
+// config(), the active tab, a NETWORK /whoami round trip and the creation of
+// this very document — and this document never had transient activation at all.
+// Without the permission `execCommand` returns FALSE (it does not throw), which
+// this listener reports honestly as {ok:false}, so the symptom is a ✗ badge and
+// an untouched clipboard on EVERY click, forever. Chrome's own
+// cookbook.offscreen-clipboard-write sample declares `clipboardWrite` for
+// exactly this reason. tests/offscreen_clipboard.test.mjs pins both permissions
+// against the manifest.
+//
 // The listener answers ONLY its own `target`, because chrome.runtime.sendMessage
 // fans out to every extension context except the sender — an options page that
 // grew a listener must not be able to answer for the clipboard.

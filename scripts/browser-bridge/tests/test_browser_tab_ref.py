@@ -70,6 +70,7 @@ class _Stub(BaseHTTPRequestHandler):
     """Records /cmd bodies; answers /whoami with whatever host label is set."""
     bodies: list = []
     host_label = "workbench"
+    host_payload = None
     whoami_hits = 0
 
     def _reply(self, code, payload):
@@ -87,12 +88,27 @@ class _Stub(BaseHTTPRequestHandler):
             self.bodies.append(json.loads(raw))
         except ValueError:
             self.bodies.append({"__unparseable__": raw})
+        # `open` must answer with a tabId: `browser agent` opens its own tab
+        # first and refuses to continue without one, so a stub that omits it
+        # fails every agent case for a harness reason.
+        data = {"value": 1}
+        try:
+            if json.loads(raw).get("op") == "open":
+                data = {"tabId": 4242, "url": "about:blank"}
+        except ValueError:
+            pass
         self._reply(200, {"ok": True, "result": {"id": "c", "ok": True,
-                                                 "data": {"value": 1}}})
+                                                 "data": data}})
 
     def do_GET(self):
         if self.path.startswith("/whoami"):
             type(self).whoami_hits += 1
+            # `host_payload`, when set, REPLACES the whole body — the CLI's parser
+            # has to survive shapes server.py would never emit, and a test that
+            # can only vary the label cannot express those.
+            if self.host_payload is not None:
+                self._reply(200, self.host_payload)
+                return
             host = ({"label": self.host_label} if self.host_label is not None
                     else None)
             self._reply(200, {"ok": True, "host": host, "instances": []})
@@ -108,6 +124,7 @@ def bridge(tmp_path):
     class _Handler(_Stub):
         bodies = []                                  # fresh per test
         host_label = "workbench"
+        host_payload = None
         whoami_hits = 0
 
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
@@ -344,13 +361,23 @@ def test_a_trailing_reference_is_TEXT_for_the_free_text_subcommands(bridge):
     assert "tab" not in body, body
 
 
-@pytest.mark.parametrize("sub", ["js", "eval"])
-def test_js_takes_a_trailing_reference_as_the_expression(bridge, sub):
-    """INVARIANT GUARD (green at d202ef59) — see the test above."""
-    ref_expr = f'"{CANONICAL}"'
-    r = bridge.run(sub, ref_expr)
+@pytest.mark.parametrize("sub, field", [("js", "js"), ("eval", "js")])
+def test_js_takes_a_trailing_reference_as_the_expression(bridge, sub, field):
+    """INVARIANT GUARD (green at d202ef59) — see the test above.
+
+    🔴 THE FIXTURE IS UNQUOTED, AND THAT IS THE WHOLE TEST. An earlier version
+    passed ``'"bw://workbench/main/12345"'`` — a JS string *literal*, which does
+    not start with ``bw://``, so the ``bw://*`` glob could never match it and the
+    guard could not fail however the exemption list was mutated. An audit
+    measured it: dropping ``eval`` from REF_FREE_TEXT_SUBCOMMANDS SURVIVED.
+    A fixture that cannot reach the branch it names is not a guard.
+    """
+    r = bridge.run(sub, CANONICAL)
     assert r.returncode == 0, r.stderr
-    assert "target" not in bridge.bodies[-1], bridge.bodies[-1]
+    body = bridge.bodies[-1]
+    assert body[field] == CANONICAL, body
+    assert "target" not in body, body
+    assert "tab" not in body, body
 
 
 def test_the_LEADING_position_still_routes_a_free_text_subcommand(bridge):
@@ -411,3 +438,117 @@ def test_the_scheme_literal_is_the_same_on_both_sides_of_the_seam():
         f"diverged")
     assert f"    {scheme}*)" in cli, (
         f"the CLI's global-flag loop does not dispatch on {scheme!r}")
+
+
+# --------------------------------------------------------------------------- #
+# `agent` cannot keep the promise a reference makes
+# --------------------------------------------------------------------------- #
+def test_agent_REFUSES_a_reference_rather_than_honouring_half_of_it(bridge):
+    """🔴 The wrong-answer case an audit found, and why refusing beats routing.
+
+    `browser-agent` has no `--tab`: the agent arm forwards `--instance` only, and
+    the autonomous agent always works in its OWN freshly-opened tab. So a routed
+    reference kept the instance and silently dropped the tab — the operator
+    clicks the icon on the tab they care about, pastes the ref, and gets a
+    confident answer about a BLANK page, with no error anywhere.
+
+    A reference is a promise about ONE tab. A subcommand that cannot keep it must
+    refuse, not keep the half it happens to support.
+    """
+    r = bridge.run(CANONICAL, "agent", "--dry-run", "do a thing")
+    assert r.returncode != 0, r.stdout
+    assert "agent cannot honour" in r.stderr
+    assert "--instance main" in r.stderr, "the error must name the way forward"
+    assert bridge.bodies == [], f"nothing may be dispatched: {bridge.bodies}"
+
+
+def test_agent_still_works_with_an_explicit_instance(bridge):
+    """INVARIANT GUARD: the refusal above is scoped to the reference.
+
+    Refusing `--instance` too would break the documented way to target the agent,
+    which is the failure mode a too-wide guard would introduce here.
+
+    🔴 ASSERTS THE REQUEST, NOT THE EXIT CODE, and deliberately. `browser agent`
+    drives a real model backend this stub does not provide, so it exits non-zero
+    here no matter what the parser did. What is under test is the ROUTING the CLI
+    produced, which is visible in the first body it sent — reading rc would make
+    this test a claim about the stub.
+    """
+    bridge.run("--instance", "main", "agent", "--dry-run", "do a thing")
+    assert bridge.bodies, "the agent path sent nothing at all — parse failed early"
+    assert bridge.bodies[0].get("target") == "main", bridge.bodies[0]
+
+
+def test_the_free_text_list_covers_agent_too(bridge):
+    """A TRAILING bw:// is a goal for `agent`, not a route.
+
+    Dropping `agent` from REF_FREE_TEXT_SUBCOMMANDS SURVIVED an audit's mutation
+    because nothing exercised it. With it dropped the token is stripped from the
+    goal and turned into routing — visible here as a `target` that must not exist.
+    Same rc caveat as the test above.
+    """
+    bridge.run("agent", "--dry-run", CANONICAL)
+    assert bridge.bodies, "the agent path sent nothing at all — parse failed early"
+    # 🔴 Assert on the REFERENCE'S values, not on the mere presence of a `tab`.
+    # browser-agent legitimately sends `{"op":"close","tab":<its own>}` to tear
+    # down the tab IT opened; a blanket "no tab anywhere" assertion fails on that
+    # and would read as the parser leaking when it is the agent cleaning up.
+    for b in bridge.bodies:
+        assert b.get("target") != CANONICAL_INSTANCE, (
+            f"the reference was consumed as a route: {b}")
+        assert b.get("tab") != CANONICAL_TAB, (
+            f"the reference was consumed as a route: {b}")
+
+
+# --------------------------------------------------------------------------- #
+# `--` ends reference scanning
+# --------------------------------------------------------------------------- #
+def test_a_double_dash_ENDS_reference_scanning(bridge):
+    """An explicitly-escaped positional is not a route.
+
+    The strip loop runs BEFORE each subcommand's own parser, so without honouring
+    `--` a `browser text -- 'bw://…'` had its selector eaten and sent NO selector
+    at all — the escaped argument vanished and the command silently re-targeted.
+    `pos_rest` exists in this file precisely because `--` was dropped once before.
+    """
+    r = bridge.run("text", "--", CANONICAL)
+    assert r.returncode == 0, r.stderr
+    body = bridge.bodies[-1]
+    assert body.get("selector") == CANONICAL, body
+    assert "target" not in body, body
+    assert "tab" not in body, body
+
+
+def test_a_reference_BEFORE_a_double_dash_still_routes(bridge):
+    """CONTROL for the test above: `--` ends scanning, it does not disable it."""
+    r = bridge.run("text", CANONICAL, "--", "main")
+    assert r.returncode == 0, r.stderr
+    body = bridge.bodies[-1]
+    assert body["target"] == CANONICAL_INSTANCE, body
+    assert body.get("selector") == "main", body
+
+
+# --------------------------------------------------------------------------- #
+# The /whoami parse cannot raise, and says WHICH thing went wrong
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("payload, why", [
+    ({"ok": True, "host": "workbench"}, "host is a string, not an object"),
+    ({"ok": True, "host": {"label": 5}}, "label is not a string"),
+    ({"ok": True}, "no host key at all"),
+    ([1, 2, 3], "the whole body is not an object"),
+])
+def test_an_unreadable_whoami_never_raises_and_fails_open(bridge, payload, why):
+    """A PARSE failure must not surface as a Python traceback, and must not be
+    reported as "the bridge cannot identify its host" — that is a different fact
+    and sends the operator somewhere else entirely."""
+    bridge.handler.host_payload = payload
+    r = bridge.run(CANONICAL, "text")
+    assert r.returncode == 0, f"{why}: {r.stderr}"
+    assert "Traceback" not in r.stderr, f"{why}: {r.stderr}"
+    assert "AttributeError" not in r.stderr, f"{why}: {r.stderr}"
+    assert "NOT verified" in r.stderr, why
+    assert bridge.bodies and bridge.bodies[-1]["target"] == CANONICAL_INSTANCE
+    if why != "no host key at all":
+        assert "could not read" in r.stderr, (
+            f"{why}: an unreadable SHAPE must be named as such, not reported as "
+            f"an unidentifiable host")

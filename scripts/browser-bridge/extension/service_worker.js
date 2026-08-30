@@ -1956,6 +1956,19 @@ function sleep(ms) {
 const TAB_REF_BADGE_MS = 2500;          // how long the ✓/✗ badge stays up
 const TAB_REF_WHOAMI_BUDGET_MS = 3000;  // the /whoami read is on the click path
 const TAB_REF_CLIPBOARD_BUDGET_MS = 3000;
+// The two budgets, read through one function so a test can shorten them without
+// waiting 3s per case — and, more to the point, so the BOUND ITSELF is a seam a
+// test can assert on. Pinning the constant is not the same claim as pinning that
+// the click path uses it (the same gap `loopTiming` exists to close one level
+// up). Production passes nothing and gets the constants above.
+function tabRefTiming() {
+  const o = (typeof globalThis !== "undefined" && globalThis.BROWSER_BRIDGE_TAB_REF_TIMING) || {};
+  return {
+    whoamiMs: o.whoamiMs != null ? o.whoamiMs : TAB_REF_WHOAMI_BUDGET_MS,
+    clipboardMs: o.clipboardMs != null ? o.clipboardMs : TAB_REF_CLIPBOARD_BUDGET_MS,
+    badgeMs: o.badgeMs != null ? o.badgeMs : TAB_REF_BADGE_MS,
+  };
+}
 const OFFSCREEN_URL = "offscreen.html";
 // The message envelope the offscreen document answers. `target` namespaces it so
 // an options page (or any future extension context) that also listens cannot
@@ -2049,7 +2062,7 @@ async function flashBadge(text, color, title) {
         chrome.action.setBadgeText({ text: "" });
         chrome.action.setTitle({ title: "Browser Bridge" });
       } catch (e) { /* the worker may have been suspended; harmless */ }
-    }, TAB_REF_BADGE_MS);
+    }, tabRefTiming().badgeMs);
   } catch (e) { /* feedback is best-effort — never mask the real outcome */ }
 }
 
@@ -2062,11 +2075,11 @@ async function handleActionClick() {
     const cfg = await config();
     const tab = await activeTab();                   // throws no_active_tab
     const host = await promiseWithTimeout(
-      fetchHostLabel(cfg), TAB_REF_WHOAMI_BUDGET_MS, "whoami", {}, "op_timeout");
+      fetchHostLabel(cfg), tabRefTiming().whoamiMs, "whoami", {}, "op_timeout");
     const ref = buildTabRef({
       host, label: cfg.label, instanceId: cfg.instanceId, tabId: tab.id,
     });
-    await promiseWithTimeout(writeClipboard(ref), TAB_REF_CLIPBOARD_BUDGET_MS,
+    await promiseWithTimeout(writeClipboard(ref), tabRefTiming().clipboardMs,
                              "clipboard", {}, "op_timeout");
     await flashBadge("✓", "#1a7f37", `Copied ${ref}`);
     return { ok: true, ref };
@@ -2078,6 +2091,20 @@ async function handleActionClick() {
   }
 }
 
+// Wire the toolbar click to the handler above. Extracted from startBackground()
+// so a test can drive the REGISTRATION rather than only the handler: an audit
+// replaced the whole registration with `if (false) {}` and every one of the 549
+// node tests and 33 pytest cases stayed green, because `handleActionClick` is
+// exported and was only ever called directly. That is the seam nobody owned —
+// on the one path in this subsystem that cannot be live-verified from here.
+// `action` is a parameter so the test can pass its own recorder; production
+// passes nothing and gets chrome.action.
+function registerActionClick(action = (typeof chrome !== "undefined" && chrome.action)) {
+  if (!action || !action.onClicked) return false;
+  action.onClicked.addListener(() => { handleActionClick(); });
+  return true;
+}
+
 // --- MV3 keepalive + background wiring -------------------------------------- //
 // All the real-browser side effects (event listeners, the keepalive alarm, and the
 // immediate loop kick) are grouped here so a unit test can import this module for its
@@ -2086,13 +2113,7 @@ async function handleActionClick() {
 function startBackground() {
   chrome.runtime.onInstalled.addListener(() => loop());
   chrome.runtime.onStartup.addListener(() => loop());
-  // Toolbar click → copy a bw:// tab reference. Registered HERE (not at module
-  // top level) so importing this module under BROWSER_BRIDGE_NO_AUTOSTART still
-  // requires no chrome.action mock; the handler itself is exported and tested
-  // directly.
-  if (chrome.action && chrome.action.onClicked) {
-    chrome.action.onClicked.addListener(() => { handleActionClick(); });
-  }
+  registerActionClick();
   chrome.alarms.create("bridge-keepalive", { periodInMinutes: 1 });
   chrome.alarms.onAlarm.addListener((a) => {
     // keepaliveTick, NOT loop(): a bare loop() call hits `if (running) return`
@@ -2141,8 +2162,17 @@ if (!(typeof globalThis !== "undefined" && globalThis.BROWSER_BRIDGE_NO_AUTOSTAR
 // assert it copies the right string, and refuses rather than copying a wrong
 // one, is to call it against a mocked chrome. Nothing in the extension imports
 // it; the listener above closes over it directly.
+// `registerActionClick`, `OFFSCREEN_CLIPBOARD_TARGET` and `OFFSCREEN_URL` are
+// exported for TESTS only. The first is the wiring seam described above. The
+// other two are the CROSS-FILE literals: this worker names a target string and a
+// page url that only `offscreen.js` and `offscreen.html` can honour, in two
+// other files, with no shared module and no schema — the same shape as the
+// CLI↔protocol.js seam that already has a guard. Renaming either half alone left
+// the whole suite green (measured: 7 of 8 offscreen mutants SURVIVED), so
+// tests/offscreen_clipboard.test.mjs compares them.
 export { execute, OPS, ALLOWED_OPS, cdpAttached, loop, emulationState,
-         documentEmulation, loopTiming, handleActionClick };
+         documentEmulation, loopTiming, handleActionClick, registerActionClick,
+         OFFSCREEN_CLIPBOARD_TARGET, OFFSCREEN_URL };
 
 // A read/reset window onto the loop's private liveness state, for tests.
 export const loopState = {

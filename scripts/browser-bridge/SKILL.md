@@ -49,7 +49,8 @@ split an unquoted `$F`). ⚠ an export outlives the call — env-routed ops say 
 once, on stderr.
 A toolbar-icon click copies `bw://<host>/<instance>/<tabId>` — one token that IS
 `--instance`+`--tab`, either side of the op. Host verified; mixing it with those
-flags errors.
+flags errors. 🔴 For `type`/`js`/`eval` it is a reference only BEFORE the op —
+after it, it is the text/expression you are sending. `agent` refuses it (own tab).
 Result payloads land under `.result.data`.
 
 | command | does |
@@ -107,12 +108,11 @@ users?" needs server-side evidence (RUM, metrics, pod health, anonymous `curl`).
 
 ## This is the user's LIVE session
 
-It's their real browser, not a scratch VM. Don't `nav` a tab that may hold unsaved
-work (a half-typed comment, a form) — `open` your own tab, or an obviously
-disposable one. 🔴 If ANYTHING takes their screen — `activate`, the X-fallback
-capture — RECORD focus AND workspace first and restore BOTH at the end, on
-failure too; restoring focus does not reliably carry the workspace. Why, and the
-commands → `reference/spa-wake.md`.
+Their real browser, not a scratch VM: don't `nav` a tab that may hold unsaved work
+(a half-typed comment, a form) — `open` your own, or an obviously disposable one.
+Anything that takes their screen (`activate`, X-fallback) is governed by RULES.md
+→ "The Operator's Screen Is Not Yours To Take", which loads every session; the
+record/restore commands → `reference/spa-wake.md`.
 
 ## Reference files — load ONE only when its trigger fires
 

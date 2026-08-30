@@ -598,11 +598,24 @@ for _s in $REF_FREE_TEXT_SUBCOMMANDS; do
 done
 if [ "$_ref_free_text" -eq 0 ]; then
   _ref_kept=()
+  _ref_after_ddash=0
   for _a in "$@"; do
-    case "$_a" in
-      bw://*) [ -z "$REF" ] || die "two bw:// references on one command line"; REF="$_a" ;;
-      *)      _ref_kept+=("$_a") ;;
-    esac
+    # 🔴 `--` ENDS reference scanning. Everything after it is an explicit
+    # positional by the operator's own declaration, and this loop runs BEFORE
+    # each subcommand's own parser, so without this a `browser text -- 'bw://…'`
+    # had its escaped selector eaten as a route and sent NO selector at all
+    # (measured). Narrow — it needs a selector/path/url that literally begins
+    # `bw://` — but `pos_rest` exists in this file precisely because `--` was
+    # silently dropped once before.
+    if [ "$_ref_after_ddash" -eq 0 ] && [ "$_a" = "--" ]; then
+      _ref_after_ddash=1; _ref_kept+=("$_a"); continue
+    fi
+    if [ "$_ref_after_ddash" -eq 0 ]; then
+      case "$_a" in
+        bw://*) [ -z "$REF" ] || die "two bw:// references on one command line"; REF="$_a"; continue ;;
+      esac
+    fi
+    _ref_kept+=("$_a")
   done
   set -- ${_ref_kept[@]+"${_ref_kept[@]}"}
 fi
@@ -614,6 +627,16 @@ if [ -n "$REF" ]; then
   [ "$REF_SAW_INSTANCE_FLAG" -eq 0 ] || die "--instance conflicts with $REF — pass one or the other"
   [ "$REF_SAW_TAB_FLAG" -eq 0 ]      || die "--tab conflicts with $REF — pass one or the other"
   parse_tab_ref "$REF"
+  # 🔴 `agent` CANNOT HONOUR THE TAB HALF, so it must not silently keep the other
+  # half. `browser-agent` has no --tab: the agent arm forwards --instance only and
+  # the autonomous agent always works in its OWN freshly-opened tab. Left routing,
+  # the operator clicks the icon on the tab they care about, pastes the reference,
+  # and gets a confident answer about a BLANK page — a wrong answer with no error
+  # anywhere. A reference is a promise about one specific tab; the only honest
+  # response from a subcommand that cannot keep it is to refuse.
+  if [ "${1:-}" = "agent" ]; then
+    die "agent cannot honour ${REF} — it always works in its own new tab (browser-agent has no --tab). Use --instance ${INSTANCE} instead."
+  fi
 fi
 
 SESSION_ID="$(derive_session_id)"
@@ -1663,17 +1686,46 @@ if [ -n "$REF_HOST" ]; then
   _wraw="$(_curl GET /whoami)" || die "curl failed talking to ${BASE}/whoami (verifying $REF)"
   _wcode="${_wraw##*$'\n'}"; _wresp="${_wraw%$'\n'*}"
   [ "$_wcode" = "200" ] || { echo "$_wresp" >&2; die "HTTP $_wcode from /whoami (verifying $REF)"; }
-  _whost="$(printf '%s' "$_wresp" | python3 -c '
+  # 🔴 Every shape that is not a host label must come out as the empty string,
+  # WITHOUT raising. A `host` that is a string rather than an object used to
+  # reach `.get` and print an AttributeError traceback to stderr before falling
+  # through to the proceed branch — so a PARSE failure was reported to the
+  # operator as "the bridge cannot identify its host", which is a different fact
+  # and sends them to the wrong place. `_whost_why` keeps the two apart.
+  # Emits `<reason>:<label>` on ONE line. The reason is the parser's own verdict —
+  # deriving it afterwards from the response TEXT was measured wrong: a body with
+  # `"host": "workbench"` contains the key, so a grep for it reported an
+  # unreadable SHAPE as an unidentifiable HOST.
+  _wparsed="$(printf '%s' "$_wresp" | python3 -c '
 import json, sys
+def out(reason, label=""):
+    sys.stdout.write(reason + ":" + label)
+    raise SystemExit(0)
 try:
     d = json.load(sys.stdin)
 except Exception:
-    sys.exit(0)
-h = d.get("host") if isinstance(d, dict) else None
-sys.stdout.write(str((h or {}).get("label") or ""))
+    out("unreadable")
+if not isinstance(d, dict):
+    out("unreadable")
+h = d.get("host")
+if h is None:
+    out("absent")
+if not isinstance(h, dict):
+    out("unreadable")
+label = h.get("label")
+if label is None:
+    out("absent")
+if not isinstance(label, str):
+    out("unreadable")
+out("ok", label)
 ')"
+  _whost="${_wparsed#*:}"
+  case "${_wparsed%%:*}" in
+    unreadable) _whost_why="answered /whoami in a shape this CLI could not read" ;;
+    *)          _whost_why="cannot identify its host" ;;
+  esac
   if [ -z "$_whost" ] || [ "$_whost" = "unknown" ]; then
-    echo "browser: this bridge cannot identify its host, so $REF's host field" \
+    echo "browser: this bridge ${_whost_why}, so $REF's host field" \
          "('${REF_HOST}') was NOT verified — proceeding." >&2
   elif [ "$_whost" != "$REF_HOST" ]; then
     die "$REF was minted on '${REF_HOST}'; this bridge is '${_whost}'. The tab it names is on the other host — run it there."

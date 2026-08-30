@@ -24,12 +24,25 @@ import assert from "node:assert/strict";
 
 const TAB_ID = 4242;
 
+// 🔴 SLOW, NOT HUNG — and that is the whole design of the two bound tests below.
+// A never-settling stub makes a removed bound show up as a CANCELLED test, and
+// node:test reports cancelled separately from failed: measured, deleting either
+// bound gave `pass 567, fail 0, cancelled 1` against a control of 568, which the
+// runner's floor check would wave through. A stub that answers LATE instead
+// makes the bound's absence a plain assertion failure — the product either
+// times out at its budget (20ms) or returns success at 200ms, and those are
+// different observable outcomes rather than one hang.
+const SLOW_MS = 200;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 const state = {
   storage: { port: 8788, token: "t0ken", label: "main", instanceId: "auto-id-uuid" },
   tab: { id: TAB_ID, url: "https://example.test/x", title: "X", active: true },
   tabs: null,                        // null → query returns [state.tab]
   whoami: { status: 200, body: { ok: true, host: { label: "workbench" } } },
   whoamiThrows: false,
+  whoamiSlowMs: 0,
+  clipboardSlowMs: 0,
   clipboardReply: { ok: true },
   offscreenExists: false,
   offscreenCreateThrows: null,
@@ -42,12 +55,17 @@ function reset() {
   state.tabs = null;
   state.whoami = { status: 200, body: { ok: true, host: { label: "workbench" } } };
   state.whoamiThrows = false;
+  state.whoamiSlowMs = 0;
+  state.clipboardSlowMs = 0;
   state.clipboardReply = { ok: true };
   state.offscreenExists = false;
   state.offscreenCreateThrows = null;
   state.calls = { fetch: [], created: [], closed: [], messages: [], badge: [], title: [] };
 }
 
+// Short budgets so the two timeout cases cost ~40ms instead of 6s. The BOUNDS
+// themselves are asserted below; this only moves where they sit.
+globalThis.BROWSER_BRIDGE_TAB_REF_TIMING = { whoamiMs: 20, clipboardMs: 20, badgeMs: 5 };
 globalThis.BROWSER_BRIDGE_NO_AUTOSTART = true;
 globalThis.chrome = {
   storage: { local: {
@@ -80,7 +98,11 @@ globalThis.chrome = {
     async closeDocument() { state.calls.closed.push(true); state.offscreenExists = false; },
   },
   runtime: {
-    async sendMessage(msg) { state.calls.messages.push(msg); return state.clipboardReply; },
+    async sendMessage(msg) {
+      state.calls.messages.push(msg);
+      if (state.clipboardSlowMs) await sleep(state.clipboardSlowMs);
+      return state.clipboardReply;
+    },
     getManifest() { return { version: "0.0.0.0" }; },
     id: "mockextensionid",
     onInstalled: { addListener() {} },
@@ -94,6 +116,7 @@ globalThis.chrome = {
 
 globalThis.fetch = async (url, init) => {
   state.calls.fetch.push({ url, init });
+  if (state.whoamiSlowMs) await sleep(state.whoamiSlowMs);
   if (state.whoamiThrows) throw new TypeError("Failed to fetch");
   const { status, body } = state.whoami;
   return {
@@ -275,4 +298,119 @@ test("handleActionClick NEVER throws — it is an event-listener body", async ()
   } finally {
     chrome.storage.local.get = realGet;
   }
+});
+
+// --------------------------------------------------------------------------- //
+// THE WIRING — that the handler is reachable from a real click at all
+// --------------------------------------------------------------------------- //
+// 🔴 WHY THESE TWO TESTS EXIST TOGETHER. An audit replaced the whole listener
+// registration with `if (false) {}` and all 549 node tests plus 33 pytest cases
+// stayed green: `handleActionClick` is exported and every test called it
+// directly, so nothing anywhere asserted a real click could reach it. On the one
+// path in this subsystem that cannot be live-verified from here, both ends were
+// unguarded.
+//
+// The first test is BEHAVIOURAL — it drives the listener `registerActionClick`
+// actually registers. The second is STRUCTURAL, and it exists because the
+// behavioural one cannot see the mutant that matters: `registerActionClick` can
+// be perfect while nothing calls it. `startBackground()` cannot simply be run
+// here — it also starts the poll loop, which is a deliberate `while (true)` —
+// so its call site is asserted to be UNCONDITIONAL instead.
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const { registerActionClick } = await import("../extension/service_worker.js");
+
+test("registerActionClick registers a listener that actually performs the copy", async () => {
+  reset();
+  const registered = [];
+  const ok = registerActionClick({ onClicked: { addListener(fn) { registered.push(fn); } } });
+  assert.equal(ok, true);
+  assert.equal(registered.length, 1, "exactly one click listener");
+
+  // Drive it the way Chrome would — with a tab argument, and no await available
+  // to the caller. The listener fires handleActionClick and drops the promise,
+  // so wait for the effect rather than the call.
+  registered[0]({ id: TAB_ID });
+  for (let i = 0; i < 50 && state.calls.messages.length === 0; i++) {
+    await new Promise((r) => setTimeout(r, 2));
+  }
+  assert.equal(copied(), `bw://workbench/main/${TAB_ID}`,
+    "a click must reach the clipboard — this is the whole feature");
+});
+
+test("registerActionClick is a no-op where chrome.action is absent", () => {
+  // `null`, not `undefined`: a default parameter fires only on `undefined`, so
+  // passing that would silently fall back to the mock's own chrome.action and
+  // this test would assert the opposite of what it reads as.
+  assert.equal(registerActionClick(null), false);
+  assert.equal(registerActionClick({}), false, "no onClicked → nothing to wire");
+});
+
+test("🔴 startBackground() calls it UNCONDITIONALLY", () => {
+  const src = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "extension", "service_worker.js"),
+    "utf8");
+  const start = src.indexOf("function startBackground()");
+  assert.notEqual(start, -1, "startBackground vanished — re-point this guard");
+  // Walk the function body tracking brace depth, so a call moved inside ANY
+  // nested block is seen as nested rather than as present.
+  let depth = 0, i = src.indexOf("{", start), end = -1;
+  const lines = [];
+  let lineStart = i;
+  for (; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") { depth--; if (depth === 0) { end = i; break; } }
+    else if (src[i] === "\n") {
+      lines.push({ text: src.slice(lineStart, i), depth });
+      lineStart = i + 1;
+    }
+  }
+  assert.notEqual(end, -1, "could not find the end of startBackground");
+  const hits = lines.filter((l) => /(^|[^.\w])registerActionClick\s*\(/.test(l.text));
+  assert.equal(hits.length, 1,
+    `expected exactly one registerActionClick call in startBackground, found ${hits.length}`);
+  assert.equal(hits[0].depth, 1,
+    "the call is nested inside a block — a click may never be wired");
+  assert.equal(hits[0].text.trim(), "registerActionClick();",
+    "the call carries a condition or a guard — pin the whole statement, because " +
+    "`if (false) registerActionClick();` is the mutant this test exists to kill");
+});
+
+// --------------------------------------------------------------------------- //
+// Bounds and the remaining feedback paths
+// --------------------------------------------------------------------------- //
+test("403 gets the SAME re-paste guidance as 401", () => {
+  // Both are "the bridge rejected your token". Mapping one to a bare HTTP code
+  // sends the operator to the wrong place with no hint about Options.
+  reset();
+  state.whoami = { status: 403, body: {} };
+  return handleActionClick().then((out) => {
+    assert.equal(out.ok, false);
+    assert.match(out.error, /re-paste it in Options/);
+  });
+});
+
+// The explicit timeout is a backstop only; the kill comes from the LATE stub
+// above (see SLOW_MS) so a removed bound fails an assertion rather than wedging.
+test("a /whoami that never answers is BOUNDED, not a hung click", { timeout: 5000 }, async () => {
+  // Without the budget the click hangs forever with no badge and no error, and
+  // the operator has no signal at all. Removing the bound must be visible.
+  reset();
+  state.whoamiSlowMs = SLOW_MS;
+  const out = await handleActionClick();
+  assert.equal(out.ok, false);
+  assert.match(out.error, /op_timeout:whoami/);
+  assert.equal(state.calls.messages.length, 0, "nothing may be copied on a timeout");
+});
+
+// The explicit timeout is a backstop only; the kill comes from the LATE stub
+// above (see SLOW_MS) so a removed bound fails an assertion rather than wedging.
+test("a clipboard write that never answers is BOUNDED too", { timeout: 5000 }, async () => {
+  reset();
+  state.clipboardSlowMs = SLOW_MS;
+  const out = await handleActionClick();
+  assert.equal(out.ok, false);
+  assert.match(out.error, /op_timeout:clipboard/);
 });
