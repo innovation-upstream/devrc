@@ -198,10 +198,22 @@ def test_the_non_pytest_targets_are_covered_and_named():
     # fixtures under a mktemp dir, and every fixture commit carries its identity
     # via `git -c user.email=…`, so it reaches no real remote and needs nothing
     # from the operator's gitconfig.
+    # Fourth entry: `test_cleanup_disk_gate.sh`, registered when it landed, like
+    # the third. It touches no launcher and no spool: it stubs nine binaries into
+    # a mktemp dir and invokes `scripts/cleanup-disk.sh` with PATH set to that dir
+    # ALONE, so a command resolved THROUGH PATH cannot reach a real binary. It
+    # reaches no network and needs nothing from the operator's environment.
+    # 🔴 This justification previously read "so no real binary is reachable and an
+    # unstubbed command fails 'command not found' instead of executing". That was
+    # FALSE — an absolute path bypasses PATH entirely, and audit round 5 showed
+    # such a mutant really deleted a file during the guard run. Corrected here
+    # because a pinned entry's stated reason is the thing the pin rests on, and a
+    # reader who believes the old wording stops looking.
     assert shells == [
         "scripts/tests/test_release_wrapper.sh",
         "scripts/tests/test_resume_state.sh",
         "scripts/tests/test_base_clone_staleness.sh",
+        "scripts/tests/test_cleanup_disk_gate.sh",
     ], shells
     for rel in hooks + shells:
         assert (REPO_ROOT / rel).is_file(), f"{rel} is listed but does not exist"

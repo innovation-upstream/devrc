@@ -3509,6 +3509,16 @@ SHELL_TESTS=(
   "scripts/tests/test_release_wrapper.sh"
   "scripts/tests/test_resume_state.sh"
   "scripts/tests/test_base_clone_staleness.sh"
+  # Registered in the SAME commit that adds it, for the reason the two entries
+  # above exist: a shell test nothing runs is not a gate. It pins that a BARE
+  # `cleanup-disk.sh` performs no deletion — the script is `allow`-rated by the
+  # opencode ledger while two of its own `rm -rf` commands are `deny`-rated, so
+  # it launders them. Stubs the destructive tools and logs to a FILE (stderr is
+  # swallowed by the script's own `2>/dev/null`), and runs a POSITIVE CONTROL
+  # first so a zero from the bare run is never mistaken for a harness wired to
+  # nothing. Watched red: mutating `APPLY=0` to `APPLY=1` fails it with
+  # "the gate is bypassed".
+  "scripts/tests/test_cleanup_disk_gate.sh"
 )
 # 🔴 THE SHELL TESTS ARE IN THE TIMING CENSUS TOO, and the reason is the census's
 # own honesty: it is presented as an accounting of the run, so a population it
