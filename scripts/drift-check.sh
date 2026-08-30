@@ -623,6 +623,11 @@
 #                    operator's real credentials and the network. Same role as
 #                    DRIFT_SESSION_MANAGER, and for the same measured reason.
 #   DRIFT_GH_TIMEOUT  seconds that probe may take (default 20, integer)
+#   DRIFT_GH_RULESET_MAX  how many rulesets the rc-24 arm will examine before it
+#                    stops and reports COULD NOT MEASURE (default 5, >=1). The
+#                    rules endpoint returns one entry per APPLYING ruleset, repo-
+#                    and org-level mixed, so the loop is over a set this script
+#                    does not control.
 #   DRIFT_PROTECT_SLUG  owner/repo the rc-24 arm asks about, INSTEAD of deriving
 #                    it from the checkout's origin. Exists for the suite: the
 #                    derivation reads the same `origin` the git leg fetches
@@ -854,9 +859,18 @@ require_int DRIFT_PHASE2_TIMEOUT "$DRIFT_PHASE2_TIMEOUT"
 require_int DRIFT_SRC_FETCH_TIMEOUT "$DRIFT_SRC_FETCH_TIMEOUT"
 # Same again for the branch-protection probe's cap.
 require_int DRIFT_GH_TIMEOUT "$DRIFT_GH_TIMEOUT"
-# Floored at 1: a cap of 0 would examine no ruleset and report COULD NOT
-# MEASURE forever, which is the silent-blindness shape rc 18 exists for.
-require_positive_int DRIFT_GH_RULESET_MAX "$DRIFT_GH_RULESET_MAX"
+require_int DRIFT_GH_RULESET_MAX "$DRIFT_GH_RULESET_MAX"
+# Floored at 1 HERE rather than via require_positive_int: that helper's zero-arm
+# prints an rc-23 story about nix-read paths and `hits=` counts, none of which
+# applies to this cap — an operator debugging this exit would be sent to a
+# different arm entirely. A cap of 0 examines no ruleset and reports COULD NOT
+# MEASURE forever, which is the silent blindness rc 18 exists for.
+if [ "$DRIFT_GH_RULESET_MAX" -lt 1 ] 2>/dev/null; then
+  echo "drift-check: DRIFT_GH_RULESET_MAX must be >= 1, got: $DRIFT_GH_RULESET_MAX" >&2
+  echo "  0 examines no ruleset, so the branch-protection arm (rc 24) reports COULD" >&2
+  echo "  NOT MEASURE on every run forever while looking correct." >&2
+  exit 2
+fi
 
 DO_LOCAL=1
 DO_REMOTE=1
@@ -2914,9 +2928,14 @@ EOF
     # (measured on astral-sh/uv: `enforcement=active, bypass_actors=0`).
     BP_RULES_RAW="$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/rules/branches/main" --jq '[.[]|select(.type=="required_status_checks" and ((.parameters.required_status_checks//[])|length)>0)] | "\(length) \([.[].ruleset_id]|unique|join(","))"' 2>/dev/null)"
     # 🔴 ONE RULESET IS NOT ALL RULESETS. This endpoint returns the rules from
-    # EVERY ruleset that applies, repo- and ORG-level mixed (measured live on
+    # EVERY ruleset that applies, repo- and ORG-level mixed — measured live on
     # astral-sh/uv, whose list interleaves `ruleset_source_type` Organization and
-    # Repository). Taking `.[0].ruleset_id` let a single ruleset decide the
+    # Repository. ⚠ BUT uv does NOT exhibit this bug and is not evidence of it:
+    # its Organization entries are `deletion`/`pull_request`/etc, so exactly ONE
+    # id survives the `required_status_checks` filter and the old `.[0]` read it
+    # correctly. The mixing is real; a repo that DEMONSTRATES the failure was not
+    # found, and the case below is constructed. Taking `.[0].ruleset_id` let a
+    # single ruleset decide the
     # verdict for all of them: an org-level ruleset in `evaluate` mode sorting
     # first — the standard org rollout pattern — made a genuinely gated branch
     # read `enforcement=evaluate, not active` and fire rc 24 every 6h forever.
@@ -2965,19 +2984,28 @@ EOF
         echo "[protect] $BP_SLUG main: 0 classic required checks, but ruleset $BP_GATE_ID gates it"
         echo "[protect]   (enforcement=active, 0 bypass actors, and its required_status_checks rule"
         echo "[protect]   lists at least one check). The gate is ON, by the newer mechanism."
-      elif [ "$BP_UNREADABLE" -gt 0 ] || [ "$BP_CAPPED" = 1 ]; then
+      elif [ "$BP_SEEN" = 0 ] || [ "$BP_UNREADABLE" -gt 0 ] || [ "$BP_CAPPED" = 1 ]; then
         # 🔴 NOT DRIFT. No ruleset was PROVEN to gate, but one we could not read
         # may. "Unprotected" and "protected by a ruleset I could not examine" are
         # the same observation, which is the empty-answer-is-zero trap again.
         echo "[protect] COULD NOT MEASURE — $BP_SLUG main has 0 CLASSIC required checks and"
-        echo "[protect]   $BP_RULES ruleset rule(s), but none was PROVEN to bind:"
+        echo "[protect]   $BP_RULES required-checks rule(s), but none was PROVEN to bind:"
+        # 🔴 ZERO ITERATIONS IS THE WORST CASE TO GET WRONG. The id list can be
+        # blanked by the sanitiser above (a non-numeric id) or arrive empty from
+        # jq (every selected rule had a null ruleset_id), and the loop then runs
+        # NOT ONCE. Without this arm control fell through to the DRIFT branch and
+        # the arm announced "NONE of its N ruleset(s) binds" with an EMPTY reason
+        # list — "we examined nothing" printed as "nothing gates main", which is
+        # the exact inversion this block's own header forbids, and strictly worse
+        # than the revision it replaced (which 404'd into could-not-measure).
+        [ "$BP_SEEN" = 0 ] && echo "[protect]     the ruleset id list was empty or unusable — 0 examined"
         [ "$BP_UNREADABLE" -gt 0 ] && echo "[protect]     $BP_UNREADABLE ruleset(s) could not be read"
         [ "$BP_CAPPED" = 1 ] && echo "[protect]     stopped after $DRIFT_GH_RULESET_MAX ruleset(s) (DRIFT_GH_RULESET_MAX)"
         [ -n "$BP_WHY" ] && echo "[protect]     examined and not binding:$BP_WHY"
         echo "[protect]   NOT read as protected, and NOT as drift. No rc is set."
       else
         echo "[protect] 🔴 DRIFT — $BP_SLUG main has 0 classic required checks, and NONE of its"
-        echo "[protect]   $BP_RULES required-checks ruleset(s) binds:$BP_WHY"
+        echo "[protect]   $BP_RULES required-checks rule(s) binds:$BP_WHY"
         echo "[protect]   A ruleset in evaluate/disabled mode REPORTS and does not block; one with"
         echo "[protect]   bypass actors is the ruleset spelling of enforce_admins=false, letting"
         echo "[protect]   whoever is listed push straight past every check — the mechanism behind"

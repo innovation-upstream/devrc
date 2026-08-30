@@ -4110,12 +4110,21 @@ def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
     # own bound, since one of those sites executes up to DRIFT_GH_RULESET_MAX
     # times. Conservative in the safe direction: it over-counts (not every path
     # makes every call), and over-counting a TIMEOUT budget only reserves slack.
-    sites = len(_gh_invocations(DRIFT.read_text()))
+    src = DRIFT.read_text()
+    sites = len(_gh_invocations(src))
     assert sites >= 3, f"the gh call sites cannot be counted: {sites}"
+    # 🔴 WHICH sites are inside the ruleset LOOP decides the multiplier, and
+    # assuming "exactly one" under-counts the moment a second is added there —
+    # the same hand-maintained-number failure this derivation replaced, one level
+    # in. Count them from the loop body itself.
+    loop = src[src.index("for BP_ID in"):]
+    loop = loop[:loop.index("\n      done")]
+    in_loop = len(_gh_invocations(loop))
+    assert in_loop >= 1, "no gh call found inside the ruleset loop"
     m5 = re.search(r'DRIFT_GH_RULESET_MAX="\$\{DRIFT_GH_RULESET_MAX:-(\d+)\}"',
                    DRIFT.read_text())
     assert m5, "no DRIFT_GH_RULESET_MAX default in drift-check.sh"
-    GH_CALLS = (sites - 1) + int(m5.group(1))
+    GH_CALLS = (sites - in_loop) + in_loop * int(m5.group(1))
     needed = 2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2 + GH_CALLS * gh + 60
     assert ceiling >= needed, (
         "TimeoutStartSec=%d cannot absorb the worst case: %d source fetches at "
@@ -6503,8 +6512,17 @@ _GH_ALIAS_RE = re.compile(
 # to bare `command` turned a shape the PREVIOUS revision CAUGHT into one that
 # failed open. Measured against the same script text before and after.
 _GH_LOOKUP_CMDS = {"type", "which", "hash"}
-# `command` is a lookup only with -v/-V/-p; anything else after it is executed.
-_GH_COMMAND_LOOKUP = re.compile(r"^command\s+-[vVp](\s|$)")
+# 🔴 `command` is a lookup ONLY with -v/-V. `-p` is NOT one: `command -p utility`
+# RUNS utility with a default PATH (measured: `bash -c 'command -p echo X'`
+# prints X). Including it here reintroduced, one flag over, the exact hole the
+# previous round removed — the fix for "`command <x>` executes" spelled so that
+# `command -p <x>` did not count as executing.
+_GH_COMMAND_LOOKUP = re.compile(r"^command\s+-[vV](\s|$)")
+
+# `_walk` breaks at `{`/`}`, so ANY braced spelling is torn apart before the
+# token test can see it. Normalising only the bare `${DRIFT_GH}` left
+# `${DRIFT_GH:-gh}` failing open while the header listed it as covered.
+_BRACED_GH = re.compile(r"\$\{DRIFT_GH(?::-[^}]*)?\}")
 
 
 def _is_gh_token(tok):
@@ -6537,7 +6555,7 @@ def _gh_invocations(text):
     # `_walk` breaks at `{`/`}`, so a BARE (unquoted) `${DRIFT_GH}` is split
     # apart before the token test can see it — measured failing open. This is
     # the one variable this guard is about, so normalise its braced spelling.
-    joined = text.replace("\\\n", " ").replace("${DRIFT_GH}", "$DRIFT_GH")
+    joined = _BRACED_GH.sub("$DRIFT_GH", text.replace("\\\n", " "))
     out = []
     for ln in joined.splitlines():
         if not ln.strip() or ln.strip().startswith("#"):
@@ -7094,8 +7112,10 @@ def test_the_jq_harness_can_actually_fail():
 
 def test_a_NON_binding_ruleset_does_not_condemn_a_binding_one(fleet):
     """🔴 FALSE DRIFT, measured. `/rules/branches/main` returns the rules from
-    EVERY applying ruleset, repo- and ORG-level mixed (verified live on
-    astral-sh/uv, whose list interleaves both `ruleset_source_type`s). Taking
+    EVERY applying ruleset, repo- and ORG-level mixed (the interleaving of repo- and
+    org-level rulesets is real and measured live on astral-sh/uv — though uv
+    itself does NOT exhibit this bug: only one of its entries survives the
+    `required_status_checks` filter, so this case is constructed). Taking
     only `.[0].ruleset_id` let ONE ruleset decide for all of them: an org-level
     ruleset in `evaluate` mode sorting first — the standard org rollout pattern —
     made a genuinely gated branch read "not active" and fire rc 24 every 6h
@@ -7179,3 +7199,97 @@ def test_a_command_dash_v_lookup_is_still_skipped():
                    'which gh >/dev/null']:
         calls = _gh_invocations(base + "\n" + benign + "\n")
         assert len(calls) == baseline, f"{benign!r} was read as an invocation"
+
+
+# --------------------------------------------------------------------------- #
+# ROUND 5 — a loop that ran ZERO times, and `command -p`.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("rules_answer,why", [
+    ("2 abc", "a non-numeric id blanks the list via the sanitiser"),
+    ("2 ", "jq emitted no ids at all (every selected rule had a null ruleset_id)"),
+])
+def test_a_ruleset_loop_that_runs_ZERO_times_is_not_DRIFT(fleet, rules_answer, why):
+    """🔴 THE WORST CASE TO GET WRONG, and this arm got it wrong for one round.
+
+    The id list can be blanked by the sanitiser (a non-numeric id) or arrive
+    empty from jq, and the loop then runs NOT ONCE. Control fell through to the
+    DRIFT branch and the arm announced "NONE of its 2 required-checks rule(s)
+    binds:" with an EMPTY reason list — "we examined nothing" printed as
+    "nothing gates main".
+
+    That is the inversion this block's own header forbids, and it was STRICTLY
+    WORSE than the revision it replaced: the previous code mapped the same input
+    to a ruleset id of 0, whose detail call 404s into COULD NOT MEASURE.
+    """
+    fleet.catch_up()
+    log = fleet.root / "gh-zero-loop.log"
+    _gh_router(fleet, branch="true 0 ", rules=rules_answer, log=log)
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc != 24, f"a loop that examined nothing fired DRIFT ({why})\n{out}"
+    assert rc == 0, out
+    assert "empty or unusable — 0 examined" in out, out
+    # And it must not have paid for a call it then ignored.
+    assert "rulesets/" not in (log.read_text() if log.exists() else ""), (
+        "a ruleset detail was fetched despite an empty id list"
+    )
+
+
+def test_the_zero_iteration_branch_does_not_swallow_a_real_finding(fleet):
+    """🔴 THE DISCRIMINATOR. A guard that turns every ruleset verdict into
+    could-not-measure would satisfy the test above while disarming the arm."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="1 111", ruleset={"111": "evaluate 0"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 24, f"a genuinely non-binding ruleset stopped firing: {rc}\n{out}"
+    assert "111=enforcement:evaluate" in out, out
+
+
+@pytest.mark.parametrize("write_line,label", [
+    # 🔴 `command -p utility` RUNS utility with a default PATH. Measured:
+    # `bash -c 'command -p echo X'` prints X. Treating -p as a lookup put the
+    # hole back one flag over from where the previous round removed it.
+    ('command -p "$DRIFT_GH" api -X DELETE "repos/x/y/protection"', "command -p <gh>"),
+    # The braced family the token RE already claims to accept.
+    ('${DRIFT_GH:-gh} api -X DELETE "repos/x/y/protection"', "bare ${gh:-default}"),
+    ('timeout 5 ${DRIFT_GH:-gh} api -X DELETE "repos/x/y/protection"', "wrapped bare braced"),
+])
+def test_the_gh_selector_does_not_fail_OPEN_round5(write_line, label):
+    poisoned = DRIFT.read_text() + "\n" + write_line + "\n"
+    calls = _gh_invocations(poisoned)
+    assert any(_gh_violation(argv) for _, argv in calls), (
+        f"the selector failed OPEN on {label}: {write_line!r}"
+    )
+
+
+def test_command_dash_v_and_dash_V_are_still_lookups():
+    """The other direction: `-v`/`-V` genuinely do not execute, and the arm's own
+    existence probe must stay invisible to the guard."""
+    base = DRIFT.read_text()
+    baseline = len(_gh_invocations(base))
+    for benign in ['command -v "$DRIFT_GH" >/dev/null 2>&1',
+                   'command -V "$DRIFT_GH" >/dev/null 2>&1']:
+        calls = _gh_invocations(base + "\n" + benign + "\n")
+        assert len(calls) == baseline, f"{benign!r} was read as an invocation"
+
+
+def test_the_seam_guard_counts_gh_calls_INSIDE_the_ruleset_loop(fleet):
+    """🔴 The multiplier must come from the loop BODY, not from an assumption
+    that exactly one call site sits in it. Adding a second in-loop probe has to
+    move the derived count, or the seam guard under-reserves the unit's budget
+    the moment someone does exactly that."""
+    src = DRIFT.read_text()
+    loop = src[src.index("for BP_ID in"):]
+    loop = loop[:loop.index("\n      done")]
+    assert len(_gh_invocations(loop)) >= 1, "no gh call found inside the ruleset loop"
+
+    # A second in-loop call must raise the count, not leave it flat.
+    doubled = src.replace(
+        '        BP_RS_RAW="$(timeout',
+        '        : "$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/rulesets/$BP_ID/history" --jq \'.x\' 2>/dev/null)"\n'
+        '        BP_RS_RAW="$(timeout', 1)
+    loop2 = doubled[doubled.index("for BP_ID in"):]
+    loop2 = loop2[:loop2.index("\n      done")]
+    assert len(_gh_invocations(loop2)) == len(_gh_invocations(loop)) + 1, (
+        "a second gh call added inside the loop did not move the in-loop count"
+    )
