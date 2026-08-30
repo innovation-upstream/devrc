@@ -4100,13 +4100,22 @@ def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
 
     # 2 hosts x every source repo, plus the phase-2 scan, plus the 60s this
     # already needed for the two devrc fetches and the ssh round trip.
-    # 🔴 TWO capped gh subprocesses, not one: call 1 is always
-    # `/branches/main`, and call 2 is EITHER `/branches/main/protection`
-    # (when checks exist) OR `/rules/branches/main` (when the classic count
-    # is zero, which may itself be followed by the ruleset detail). Round 2
-    # added the second call and left this arithmetic at one, so the seam
-    # this test exists to watch was under-counted by a whole probe.
-    GH_CALLS = 3
+    # 🔴 DERIVED, NOT A LITERAL — this number has now been wrong twice in a row.
+    # Round 2 added a second capped gh call and left the literal at 1; round 3
+    # added a third and set the literal to 3, which a FOURTH call then survived
+    # (measured: adding one more probe kept the suite green). A literal beside
+    # the thing it counts drifts, exactly as the old single MIN_TESTS did.
+    #
+    # So count the gh call SITES in the script itself, and add the ruleset loop's
+    # own bound, since one of those sites executes up to DRIFT_GH_RULESET_MAX
+    # times. Conservative in the safe direction: it over-counts (not every path
+    # makes every call), and over-counting a TIMEOUT budget only reserves slack.
+    sites = len(_gh_invocations(DRIFT.read_text()))
+    assert sites >= 3, f"the gh call sites cannot be counted: {sites}"
+    m5 = re.search(r'DRIFT_GH_RULESET_MAX="\$\{DRIFT_GH_RULESET_MAX:-(\d+)\}"',
+                   DRIFT.read_text())
+    assert m5, "no DRIFT_GH_RULESET_MAX default in drift-check.sh"
+    GH_CALLS = (sites - 1) + int(m5.group(1))
     needed = 2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2 + GH_CALLS * gh + 60
     assert ceiling >= needed, (
         "TimeoutStartSec=%d cannot absorb the worst case: %d source fetches at "
@@ -6484,11 +6493,18 @@ _GH_TOKEN_RE = re.compile(r'^"?\$\{?DRIFT_GH(?::-[^}]*)?\}?"?$')
 # excluded by name, because it is the one assignment this guard already knows
 # about. Anything else binding the binary to a second name is unresolvable.
 _GH_ALIAS_RE = re.compile(
-    r'^(?!DRIFT_GH=)[A-Za-z_][A-Za-z_0-9]*=("?\$\{?DRIFT_GH\}?"?|"?gh"?)$')
+    r'^(?!DRIFT_GH=)[A-Za-z_][A-Za-z_0-9]*='
+    r'"?(\$\{?DRIFT_GH\}?|[\w./-]*/gh|gh)"?$')
 
-# Only skip when the LOOKUP IS THE COMMAND. Anchored at the segment start after
-# transparent words, never "these words appear somewhere in the line".
-_GH_LOOKUP_CMDS = {"command", "type", "which", "hash"}
+# 🔴 ONLY A LOOKUP IS SKIPPED, AND `command` ALONE IS NOT ONE. `type`,
+# `which` and `hash` never execute their argument; `command <x>` DOES — it is
+# the normal way to bypass a shell function or alias, so
+# `command gh api -X DELETE ...` is a real invocation. Widening `command -v`
+# to bare `command` turned a shape the PREVIOUS revision CAUGHT into one that
+# failed open. Measured against the same script text before and after.
+_GH_LOOKUP_CMDS = {"type", "which", "hash"}
+# `command` is a lookup only with -v/-V/-p; anything else after it is executed.
+_GH_COMMAND_LOOKUP = re.compile(r"^command\s+-[vVp](\s|$)")
 
 
 def _is_gh_token(tok):
@@ -6518,7 +6534,10 @@ def _gh_invocations(text):
     so wrapping one is the natural maintainer edit, and an unjoined scanner then
     reports "all calls clean" having never seen the half carrying the flags.
     """
-    joined = text.replace("\\\n", " ")
+    # `_walk` breaks at `{`/`}`, so a BARE (unquoted) `${DRIFT_GH}` is split
+    # apart before the token test can see it — measured failing open. This is
+    # the one variable this guard is about, so normalise its braced spelling.
+    joined = text.replace("\\\n", " ").replace("${DRIFT_GH}", "$DRIFT_GH")
     out = []
     for ln in joined.splitlines():
         if not ln.strip() or ln.strip().startswith("#"):
@@ -6535,6 +6554,8 @@ def _gh_invocations(text):
                    if t not in {"!", "if", "then", "elif", "else", "while",
                                 "until", "do", "{", "(", ";"}]
             if raw and raw[0].rsplit("/", 1)[-1] in _GH_LOOKUP_CMDS:
+                continue
+            if _GH_COMMAND_LOOKUP.match(" ".join(raw)):
                 continue
             # 🔴 THE ALIAS CHECK RUNS FIRST, and that ordering is the whole point:
             # `_command_tokens` STRIPS assignments, so `G="$DRIFT_GH"` yields an
@@ -6668,7 +6689,15 @@ def _gh_router(fleet, branch=None, protection=None, rules=None, ruleset=None,
     # `repos/o/r/rulesets/<id>` and the rules path is `repos/o/r/rules/branches/main`.
     # They do not overlap here, but ordering them by specificity keeps a future
     # pattern from silently swallowing the other and answering the wrong call.
-    body.append('  */rulesets/*)\n' + arm(ruleset) + '  ;;')
+    if isinstance(ruleset, dict):
+        # Per-id answers: the arm now examines EVERY ruleset, so a fixture
+        # has to be able to make them differ. That is the whole point of
+        # the multi-ruleset cases.
+        for rid, ans in ruleset.items():
+            body.append('  *"/rulesets/%s "*)\n' % rid + arm(ans) + '  ;;')
+        body.append('  */rulesets/*)\n' + arm(None) + '  ;;')
+    else:
+        body.append('  */rulesets/*)\n' + arm(ruleset) + '  ;;')
     body.append('  *rules/branches*)\n' + arm(rules) + '  ;;')
     body.append('  *branches/main/protection*)\n' + arm(protection) + '  ;;')
     body.append('  *branches/main*)\n' + arm(branch) + '  ;;')
@@ -6694,7 +6723,7 @@ def test_a_ruleset_protected_branch_is_not_reported_as_drift(fleet):
     _gh_router(fleet, branch="true 0 ", rules="1 14744442", ruleset="active 0")
     rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
     assert rc == 0, f"a ruleset-gated branch was reported as drift: {rc}\n{out}"
-    assert "The gate is ON, by the newer mechanism" in out, out
+    assert "gates it" in out, out
     assert "DRIFT" not in out, out
 
 
@@ -6828,10 +6857,14 @@ def test_an_EMPTY_enforce_admins_answer_is_UNKNOWN_not_bound(fleet):
 
 
 def test_a_ruleset_rule_listing_ZERO_checks_is_not_a_gate(fleet):
-    """🔴 COUNTING DECLARATIONS IS NOT READING THE GATE — the same class as the
-    classic-path bug round 2 was fixing, on the path round 2 added. A
-    `required_status_checks` rule whose own parameters list no checks gates
-    nothing, and was counted."""
+    """The SHELL's behaviour when the filter reports zero gating rules.
+
+    ⚠ SCOPE, stated because the docstring used to overclaim: this feeds the stub
+    a count of 0, so the FILTERING has already happened — it cannot observe a
+    rule with empty parameters being counted. That half is covered by
+    `test_the_rules_jq_counts_gates_not_declarations`, which runs the real jq.
+    Reading as coverage while providing none is worse than no test.
+    """
     fleet.catch_up()
     _gh_router(fleet, branch="true 0 ", rules="0 0")
     rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
@@ -6847,7 +6880,7 @@ def test_a_ruleset_with_BYPASS_ACTORS_is_rc24(fleet):
     _gh_router(fleet, branch="true 0 ", rules="1 4471", ruleset="active 2")
     rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
     assert rc == 24, f"a bypassable ruleset was reported as a gate: {rc}\n{out}"
-    assert "bypass actor(s)" in out, out
+    assert "bypass-actors:2" in out, out
     assert "837d3fde" in out, out
 
 
@@ -6859,7 +6892,7 @@ def test_a_ruleset_not_in_ACTIVE_enforcement_is_rc24(fleet):
     _gh_router(fleet, branch="true 0 ", rules="1 4471", ruleset="evaluate 0")
     rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
     assert rc == 24, f"a dry-run ruleset was reported as a gate: {rc}\n{out}"
-    assert "not active" in out, out
+    assert "enforcement:evaluate" in out, out
 
 
 def test_an_active_ruleset_with_no_bypass_is_the_gate(fleet):
@@ -6869,7 +6902,7 @@ def test_an_active_ruleset_with_no_bypass_is_the_gate(fleet):
     _gh_router(fleet, branch="true 0 ", rules="1 4471", ruleset="active 0")
     rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
     assert rc == 0, f"a genuinely gating ruleset was reported as drift: {rc}\n{out}"
-    assert "The gate is ON, by the newer mechanism" in out, out
+    assert "gates it" in out, out
 
 
 def test_an_unreadable_ruleset_DETAIL_is_could_not_measure(fleet):
@@ -7015,12 +7048,12 @@ def test_the_protection_jq_reads_enforce_admins(payload, expected):
     # listing ZERO checks gates nothing, and a declaration count says 1.
     ([{"type": "required_status_checks", "ruleset_id": 99,
        "parameters": {"required_status_checks": []}}],
-     "0 0"),
+     "0 "),
     # Rules of other types must not be counted.
     ([{"type": "deletion", "ruleset_id": 5},
       {"type": "non_fast_forward", "ruleset_id": 5}],
-     "0 0"),
-    ([], "0 0"),
+     "0 "),
+    ([], "0 "),
 ])
 def test_the_rules_jq_counts_gates_not_declarations(payload, expected):
     assert _run_jq(_jq_expr_containing("rules/branches/main"), payload) == expected
@@ -7036,7 +7069,7 @@ def test_the_rules_jq_counts_gates_not_declarations(payload, expected):
     ({"enforcement": "active"}, "active 0"),
 ])
 def test_the_ruleset_detail_jq_reads_enforcement_and_bypass(payload, expected):
-    assert _run_jq(_jq_expr_containing("rulesets/$BP_RULE_ID"), payload) == expected
+    assert _run_jq(_jq_expr_containing("rulesets/$BP_ID"), payload) == expected
 
 
 @jq_required
@@ -7053,3 +7086,96 @@ def test_the_jq_harness_can_actually_fail():
     assert _run_jq(expr, gating) != _run_jq(expr, empty), (
         "the jq harness cannot distinguish a gating rule from an empty one"
     )
+
+
+# --------------------------------------------------------------------------- #
+# ROUND 4 — one ruleset is not all rulesets, and `command <gh>` executes.
+# --------------------------------------------------------------------------- #
+
+def test_a_NON_binding_ruleset_does_not_condemn_a_binding_one(fleet):
+    """🔴 FALSE DRIFT, measured. `/rules/branches/main` returns the rules from
+    EVERY applying ruleset, repo- and ORG-level mixed (verified live on
+    astral-sh/uv, whose list interleaves both `ruleset_source_type`s). Taking
+    only `.[0].ruleset_id` let ONE ruleset decide for all of them: an org-level
+    ruleset in `evaluate` mode sorting first — the standard org rollout pattern —
+    made a genuinely gated branch read "not active" and fire rc 24 every 6h
+    forever. A false drift here IS the permanently-red gate this arm forbids.
+    """
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="2 111,222",
+               ruleset={"111": "evaluate 0", "222": "active 0"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 0, f"a binding ruleset was condemned by a sibling: {rc}\n{out}"
+    assert "ruleset 222 gates it" in out, out
+
+
+def test_ALL_rulesets_non_binding_is_still_rc24(fleet):
+    """The discriminator: examining every ruleset must not blunt the finding when
+    none of them binds."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="2 111,222",
+               ruleset={"111": "evaluate 0", "222": "active 3"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc == 24, f"no ruleset binds and nothing fired: {rc}\n{out}"
+    assert "NONE of its" in out, out
+    assert "111=enforcement:evaluate" in out, out
+    assert "222=bypass-actors:3" in out, out
+
+
+def test_one_unreadable_ruleset_among_non_binding_ones_is_could_not_measure(fleet):
+    """🔴 NOT DRIFT. No ruleset was PROVEN to bind, but one we could not read may
+    — "unprotected" and "protected by a ruleset I could not examine" are the same
+    observation, which is the empty-answer-is-zero trap one level further in."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="2 111,222",
+               ruleset={"111": "evaluate 0", "222": None})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG)
+    assert rc != 24, f"an unreadable ruleset was counted as not binding\n{out}"
+    assert rc == 0, out
+    assert "none was PROVEN to bind" in out, out
+    assert "could not be read" in out, out
+
+
+def test_the_ruleset_loop_is_BOUNDED_and_the_cap_is_not_drift(fleet):
+    """The loop is over a set this script does not control, so it is bounded like
+    every sibling listing here — and hitting the cap means we did not look, which
+    must never read as "nothing gates main"."""
+    fleet.catch_up()
+    _gh_router(fleet, branch="true 0 ", rules="3 111,222,333",
+               ruleset={"111": "evaluate 0", "222": "evaluate 0", "333": "active 0"})
+    rc, out = fleet.check("--no-remote", DRIFT_PROTECT_SLUG=BP_SLUG,
+                          DRIFT_GH_RULESET_MAX="2")
+    assert rc != 24, f"stopping early was reported as drift: {rc}\n{out}"
+    assert "stopped after 2 ruleset(s)" in out, out
+
+
+@pytest.mark.parametrize("write_line,label", [
+    # 🔴 A REGRESSION THE PREVIOUS REVISION CAUGHT. `command <x>` EXECUTES x — it
+    # is the normal way to bypass a shell function or alias — so widening the
+    # lookup skip from `command -v` to bare `command` opened a hole that had been
+    # closed. `type`/`which`/`hash` never execute and stay skipped.
+    ('command "$DRIFT_GH" api -X DELETE "repos/x/y/protection"', "command <gh>"),
+    ('command ${DRIFT_GH} api -X DELETE "repos/x/y/protection"', "command ${gh}"),
+    # The alias VALUE may be a path, which the sibling git scanner already
+    # handles with rsplit("/") — this half did not.
+    ('G=/usr/bin/gh; "$G" api -X DELETE "repos/x/y/protection"', "path-valued alias"),
+])
+def test_the_gh_selector_does_not_fail_OPEN_round4(write_line, label):
+    poisoned = DRIFT.read_text() + "\n" + write_line + "\n"
+    calls = _gh_invocations(poisoned)
+    assert any(_gh_violation(argv) for _, argv in calls), (
+        f"the selector failed OPEN on {label}: {write_line!r}"
+    )
+
+
+def test_a_command_dash_v_lookup_is_still_skipped():
+    """The other direction of the same fix: `command -v` really is a lookup and
+    must not be read as an invocation, or the arm's own existence probe turns the
+    guard red against the file it guards."""
+    base = DRIFT.read_text()
+    baseline = len(_gh_invocations(base))
+    for benign in ['command -v "$DRIFT_GH" >/dev/null 2>&1',
+                   'type gh >/dev/null 2>&1',
+                   'which gh >/dev/null']:
+        calls = _gh_invocations(base + "\n" + benign + "\n")
+        assert len(calls) == baseline, f"{benign!r} was read as an invocation"
