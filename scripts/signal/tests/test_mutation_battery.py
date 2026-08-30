@@ -70,6 +70,48 @@ def test_every_mutant_actually_CHANGES_the_source(mutant):
 
 
 @pytest.mark.parametrize("mutant", battery.MUTANTS, ids=lambda m: m.id)
+def test_an_EQUIVALENT_mutant_ARGUES_for_itself(mutant):
+    """🔴 `equivalent=True` flips a SURVIVED from a finding into a pass.
+
+    That is exactly the switch somebody reaches for when a mutant will not die
+    and the deadline is close — "call it equivalent and move on" — and it is
+    indistinguishable, in the summary line, from a genuinely unkillable
+    mutation. So the flag has to cost something: the row must say the word in
+    its own `why`, where a reader and a reviewer will see the ARGUMENT next to
+    the claim rather than a bare boolean buried in the call.
+
+    Not a proof of equivalence — nothing static can be — but it makes an
+    unargued one impossible to add quietly.
+    """
+    if not mutant.equivalent:
+        assert mutant.expected == "KILLED"
+        return
+    assert "EQUIVALENT" in mutant.why.upper(), (
+        f"mutant {mutant.id} is flagged equivalent but its description does not "
+        f"say so, let alone argue it: {mutant.why!r}")
+    assert mutant.expected == "SURVIVED"
+
+
+def test_an_equivalent_mutant_that_gets_KILLED_is_a_FAILURE_not_a_pass():
+    """Behavioural, on the pure comparison the runner uses.
+
+    A killed "equivalent" mutant means the equivalence argument was WRONG — the
+    two forms are distinguishable after all — which is a finding about the
+    ledger, not a success. Pinned here because the runner's own summary line
+    would otherwise read `0/0 killed` and look like a clean run.
+    """
+    equiv = battery.Mutant("X", "EQUIVALENT: argued", "p", "a", "b", "k", "s",
+                           equivalent=True)
+    plain = battery.Mutant("Y", "a real mutant", "p", "a", "b", "k", "s")
+    assert equiv.expected == "SURVIVED" and plain.expected == "KILLED"
+    # The runner's failure set is `verdict != m.expected`, so the four cells:
+    assert ("SURVIVED" != equiv.expected) is False   # equivalent survives -> pass
+    assert ("KILLED" != equiv.expected) is True      # equivalent killed   -> FAIL
+    assert ("KILLED" != plain.expected) is False     # real killed         -> pass
+    assert ("SURVIVED" != plain.expected) is True    # real survived       -> FAIL
+
+
+@pytest.mark.parametrize("mutant", battery.MUTANTS, ids=lambda m: m.id)
 def test_every_named_killer_test_EXISTS(mutant):
     """A killer that does not exist can never fire — so the mutant can never die.
 

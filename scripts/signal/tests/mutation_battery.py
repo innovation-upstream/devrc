@@ -5,10 +5,11 @@
     python3 scripts/signal/tests/mutation_battery.py --list      # show the ledger
     python3 scripts/signal/tests/mutation_battery.py --only A1 M4
 
-Exit codes: 0 every mutant killed by its named test · 1 at least one SURVIVED,
-ANCHOR-MISSed or was KILLED-WRONG-REASON · 2 refused to start (dirty tree, an
-unreadable `git status`, a red baseline, a named killer that did not run) ·
-3 a mutant was left in the tree, or that could not be determined.
+Exit codes: 0 every mutant reached its EXPECTED verdict · 1 at least one did not
+(SURVIVED, ANCHOR-MISS, KILLED-WRONG-REASON — or, for an `equivalent=True` row,
+KILLED) · 2 refused to start (dirty tree, an unreadable `git status`, a red
+baseline, a named killer that did not run) · 3 a mutant was left in the tree, or
+that could not be determined.
 
 🔴 WHY THIS FILE EXISTS AT ALL. Eight mutation batteries have been run against
 this module across #514, #537, #540, #546 and #573. Every one of them lived in a
@@ -71,11 +72,34 @@ SUITE_LIVE = "scripts/signal/tests/test_liveness.py"
 
 
 class Mutant:
-    """One way to break the code, and the ONE test that must notice."""
+    """One way to break the code, and the ONE test that must notice.
 
-    def __init__(self, mid, why, path, old, new, killer, suite):
+    `equivalent=True` INVERTS the expected verdict: the mutation is argued to be
+    incapable of changing any observable behaviour, so SURVIVED is the pass and
+    KILLED is the finding — it would mean the argument is wrong and the two
+    forms are not interchangeable after all.
+
+    🔴 WHY THESE ARE RECORDED RATHER THAN DELETED. An equivalent mutant is the
+    one row a reader is most likely to re-derive from scratch next round, and
+    the argument for equivalence is usually a premise about the code around it
+    ("`re` folds one code point to one"). Keeping the row keeps the premise
+    checkable: if that premise ever stops holding, this stops SURVIVING and the
+    runner says so. Deleting the row loses both the finding and the reason.
+    🔴 AND IT MUST NOT MAKE THE RUNNER PERMANENTLY RED — a gate that is always
+    failing is one everybody learns to click through, so `equivalent` is what
+    keeps a legitimate survivor out of the failure set instead of parking a
+    known-red row in it.
+    """
+
+    def __init__(self, mid, why, path, old, new, killer, suite, *,
+                 equivalent: bool = False):
         self.id, self.why, self.path = mid, why, path
         self.old, self.new, self.killer, self.suite = old, new, killer, suite
+        self.equivalent = equivalent
+
+    @property
+    def expected(self) -> str:
+        return "SURVIVED" if self.equivalent else "KILLED"
 
 
 MUTANTS: list[Mutant] = [
@@ -498,7 +522,7 @@ MUTANTS: list[Mutant] = [
            "        return match is not None and match.end() == len(text)",
            "        return match is not None",
            "test_the_cursor_DOES_merge_two_needles_the_MATCHER_treats_as_ONE",
-           SUITE_MENT),
+           SUITE_MENT, equivalent=True),
 
     Mutant("MEN4", "the cursor stops ADVANCING past the match it just claimed. Every "
                    "repeat of one needle then re-claims the first occurrence, which "
@@ -655,7 +679,8 @@ def main(argv=None) -> int:
     if args.list:
         for m, n in anchor_report():
             flag = "" if n == 1 else f"  🔴 ANCHOR MATCHES {n}x"
-            print(f"{m.id:4} {m.path:30} -> {m.killer}{flag}\n     {m.why}\n")
+            tag = "  [EQUIVALENT — expected to SURVIVE]" if m.equivalent else ""
+            print(f"{m.id:4} {m.path:30} -> {m.killer}{flag}{tag}\n     {m.why}\n")
         return 0
 
     # 🔴 A SIGTERM used to leave a mutant in the tree. `finally` covers exceptions
@@ -741,10 +766,19 @@ def main(argv=None) -> int:
     print("\n================ SUMMARY ================")
     for m, verdict, detail in results:
         print(f"  {verdict:20} {m.id}  {m.killer}")
-    bad = [r for r in results if r[1] != "KILLED"]
-    print(f"\n{len(results) - len(bad)}/{len(results)} killed by their NAMED test")
+    # 🔴 COMPARED AGAINST EACH MUTANT'S OWN EXPECTED VERDICT, not against the
+    # constant "KILLED": an `equivalent=True` row PASSES by surviving, and FAILS
+    # loudly if something kills it, because that would disprove the equivalence
+    # argument recorded in its `why`.
+    bad = [r for r in results if r[1] != r[0].expected]
+    equiv = [r for r in results if r[0].equivalent]
+    print(f"\n{len(results) - len(bad) - len(equiv)}/{len(results) - len(equiv)} "
+          f"killed by their NAMED test"
+          + (f"  ({len(equiv)} EQUIVALENT, expected to survive)" if equiv else ""))
     for m, verdict, detail in bad:
-        print(f"  !! {verdict}: {m.id} — {detail}", file=sys.stderr)
+        expected = f"expected {m.expected}" if m.equivalent else ""
+        print(f"  !! {verdict}: {m.id} — {detail} {expected}".rstrip(),
+              file=sys.stderr)
 
     rc_git, after = _git_status(REPO)
     if rc_git != 0:
