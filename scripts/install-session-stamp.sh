@@ -232,14 +232,17 @@ WRAPPER
 # If a real legacy state is ever found in the wild, add the migration THEN, keyed
 # to the path that was actually installed.
 
-# Generate ONCE, before the ownership checks, so the very bytes this run would
-# install are the bytes the prefix test compares against. Removed on every exit
-# path by the trap — an earlier revision left this file behind on a failed write.
-_tmp="$TARGET.devrc-install.$$"
+# 🔴 THE SCRATCH FILE LIVES IN $TMPDIR, NOT IN .git/hooks, AND IS MADE AFTER THE
+# UNINSTALL BRANCH. Generating it into the hooks directory made this script WRITE
+# on paths that promise not to: the dry run created `.git/hooks` when it did not
+# exist (falsifying this file's own "changes nothing unless --apply" header), and
+# with the hooks dir mode 500 both the dry run and `--uninstall` aborted rc 1 —
+# a code absent from the exit table above, and byte-for-byte the class already
+# recorded further down as a past defect. `--uninstall` never needed the bytes at
+# all.
+_tmp="$(mktemp "${TMPDIR:-/tmp}/devrc-session-stamp.XXXXXX")"
 cleanup_tmp() { rm -f "$_tmp"; }
 trap cleanup_tmp EXIT
-mkdir -p "$HOOKS"
-generate_wrapper "$_tmp"
 
 if [ "$MODE" = "uninstall" ]; then
   if is_ours "$TARGET"; then
@@ -250,6 +253,8 @@ if [ "$MODE" = "uninstall" ]; then
   exit 0
 fi
 
+generate_wrapper "$_tmp"
+
 # 🔴 CHECKED BEFORE `is_ours`, AND THAT ORDER IS LOAD-BEARING. `is_ours` requires
 # an `^impl=` line, which is line 16 of the 27 this script writes — so a partial
 # write that stopped earlier is NOT "ours" by that test, and 15 of the 26 cut
@@ -257,10 +262,22 @@ fi
 # rc 4, cuts 16+ repaired). Being a byte-exact prefix of our own output is
 # stronger evidence of authorship than the marker is, so it is asked first.
 if is_truncated_ours "$TARGET" "$_tmp"; then
-  echo "  ⚠ this checkout's own hook is a PARTIAL WRITE of the one this run"
-  echo "    would install — a byte-exact prefix, $(wc -c < "$TARGET") of $(wc -c < "$_tmp")"
-  echo "    bytes. Only a partial write of our OWN output can be that, so"
-  echo "    completing it does not wait for --force."
+  # 🔴 THE WORDING IS SCOPED TO WHAT THE BYTES ACTUALLY PROVE. A prefix shorter
+  # than the `impl=` line (line 16 of 27) is CHECKOUT-INDEPENDENT — lines 1-15 are
+  # identical whichever checkout generated them — so calling such a file "this
+  # checkout's own hook" was false, and it was re-pointed at this checkout with no
+  # --force while announcing the opposite. The repair is still right (a partial
+  # write of our wrapper is dead either way, and refusing it leaves the operator
+  # stuck), so the BEHAVIOUR stands and the CLAIM is narrowed to what is true.
+  echo "  ⚠ a devrc-generated hook here is a PARTIAL WRITE — a byte-exact prefix"
+  echo "    of what this run would install ($(wc -c < "$TARGET") of $(wc -c < "$_tmp") bytes)."
+  echo "    Only a partial write of that output can be a prefix of it, so completing"
+  echo "    it does not wait for --force."
+  if ! grep -q "^impl=$(printf '%q' "$IMPL")\$" "$TARGET" 2>/dev/null; then
+    echo "    NOTE: it stopped before its \`impl=\` line, so which checkout wrote it"
+    echo "    is not recorded in the bytes. It will be completed against THIS one:"
+    echo "      $IMPL"
+  fi
   FORCE=1
   _repairing=1
 fi
@@ -278,34 +295,12 @@ if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
       echo "  already installed (generated wrapper -> this checkout) ✓"
       exit 0
     fi
-    # 🔴 SELF-REPAIR IS SCOPED TO *THIS CHECKOUT'S OWN* HOOK, and the unscoped
-    # version was a real regression — measured side by side against the previous
-    # revision, on a third-party hook derived from devrc's generated wrapper
-    # (the very case `is_ours`'s own comment above records as seen in the wild):
-    #
-    #   before: --apply (no --force) -> rc 4, file UNCHANGED
-    #   after:  --apply (no --force) -> rc 0, file OVERWRITTEN, their body gone
-    #
-    # `is_ours` is a STRUCTURAL claim — a marker line plus an `impl=` line — not
-    # a claim that devrc wrote the file. Gating self-repair on it alone therefore
-    # re-opened, one axis over, the same "destroys something that is not ours"
-    # class this script removed `is_legacy_ours` to close. Requiring the `impl=`
-    # line to name THIS checkout keeps the repair (our own hook, cut short, from
-    # our own install) while leaving every other shape behind the --force gate.
-    # 🔴 AND IT MUST ACTUALLY BE BROKEN — `sh -n` failing, not merely a missing
-    # sentinel. The justification for skipping --force is "this hook refuses
-    # every commit", so the condition has to TEST that, not a proxy for it. It
-    # did not: a hook someone derived from devrc's wrapper on this checkout —
-    # header kept, `impl=` kept, devrc's tail replaced with their own body — is
-    # valid shell, refuses nothing, has no sentinel, and was destroyed with no
-    # --force. Measured. This repo's own test file already records why the proxy
-    # is wrong: "A 0-byte file parses clean too, so 'truncated' is not by itself
-    # a broken-shell state."
-    #
-    # Three conditions, and each is load-bearing: it names THIS checkout (not
-    # merely structurally ours), it lacks the sentinel (so a complete hook is
-    # never rewritten), and it fails to parse (so the "refuses every commit"
-    # premise is true of the file in front of us).
+    # ⚠ 28 LINES OF PROSE HERE DESCRIBED A CONDITION THAT NO LONGER EXISTS, and
+    # asserted the opposite of what this file now does — a maintainer reading it
+    # could reasonably have deleted the wrong thing. It documented the `is_ours`
+    # + missing-sentinel + `sh -n` triple, all three of which were replaced by the
+    # byte-exact prefix test above (see its own comment for why each was wrong).
+    # The history is kept there, at the code that carries it, rather than here.
     # 🔴 GUARDED BY `_repairing`, not a fall-through. (An earlier comment here
     # said "`elif`" — there is no elif; the mechanism is the flag set above and
     # read below. Behaviourally the same, but an auditor grepping for `elif` to

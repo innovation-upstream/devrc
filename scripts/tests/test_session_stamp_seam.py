@@ -687,8 +687,10 @@ class TestSelfRepairRequiresTheHookToActuallyBeBroken:
     kept, `impl=` kept, devrc's tail replaced with their own body) is VALID
     SHELL, refuses nothing, has no sentinel — and was destroyed with no --force.
 
-    The premise is now tested directly: `sh -n` must FAIL before the --force gate
-    is skipped.
+    The discriminator is now a byte-exact PREFIX of what this run would
+    generate — see TestEveryTruncationOfOurOwnHookIsRepaired. What makes THIS
+    fixture discriminate is that a derived hook is not such a prefix; it
+    diverges at the first line its author changed.
     """
 
     def _hooks(self, repo) -> Path:
@@ -698,8 +700,12 @@ class TestSelfRepairRequiresTheHookToActuallyBeBroken:
     def _derived_hook(self, repo):
         """A third-party hook derived from ours: our header, our impl= naming
         THIS checkout, their body, no sentinel — and valid shell."""
+        # 🔴 IMPL is passed as an ARGUMENT, not interpolated into the command
+        # string. The earlier `f'printf "%q" "{IMPL}"'` let the shell expand the
+        # path first — the exact injection `%q` exists to prevent, in the test
+        # for a fix whose whole subject is that injection.
         impl = subprocess.run(
-            ["bash", "-c", f'printf "%q" "{IMPL}"'],
+            ["bash", "-c", 'printf "%q" "$1"', "bash", str(IMPL)],
             capture_output=True, text=True).stdout
         target = self._hooks(repo) / "prepare-commit-msg"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -711,11 +717,12 @@ class TestSelfRepairRequiresTheHookToActuallyBeBroken:
 
     def test_a_valid_derived_hook_is_not_destroyed_without_force(self, repo):
         target = self._derived_hook(repo)
-        # The fixture must be VALID shell, or this test proves nothing about the
-        # `sh -n` condition — it would just be re-testing the sentinel check.
+        # The fixture must NOT be a byte-exact prefix of what the installer
+        # would generate, or this test would be re-testing the prefix path
+        # instead of the refusal. (It is valid shell too, which is what made the
+        # since-removed `sh -n` proxy get this case wrong.)
         assert subprocess.run(["sh", "-n", str(target)],
-                              capture_output=True).returncode == 0, (
-            "fixture is not valid shell, so it cannot discriminate")
+                              capture_output=True).returncode == 0
         out = subprocess.run([str(INSTALLER), "--repo", str(repo), "--apply"],
                              capture_output=True, text=True)
         assert out.returncode == 4, (out.returncode, out.stdout, out.stderr)
@@ -723,8 +730,8 @@ class TestSelfRepairRequiresTheHookToActuallyBeBroken:
             "a valid, commit-serving hook was destroyed without --force")
 
     def test_a_hook_that_really_is_broken_IS_still_repaired(self, repo):
-        """Positive control: adding the `sh -n` condition did not disable
-        self-repair for the case it exists to serve."""
+        """Positive control: the narrowing did not disable self-repair for the
+        case it exists to serve."""
         install(repo)
         target = self._hooks(repo) / "prepare-commit-msg"
         full = target.read_text().split("\n")
@@ -786,6 +793,9 @@ class TestEveryTruncationOfOurOwnHookIsRepaired:
         assert parses_clean > 0, (
             "no cut point parsed cleanly, so this sweep cannot see the defect "
             "round 6 shipped")
+        # NB: `repaired` counts iterations, not repairs — the per-iteration
+        # `assert target.read_text() == full` above is what actually proves each
+        # cut was restored. Kept only as a bound on the sweep's size.
         assert repaired == len(lines) - 2, (repaired, len(lines))
 
     def test_a_bare_shebang_stub_is_NOT_swallowed(self, repo):
@@ -818,3 +828,83 @@ class TestEveryTruncationOfOurOwnHookIsRepaired:
                              capture_output=True, text=True)
         assert out.returncode == 4, (out.returncode, out.stdout)
         assert "echo MINE" in target.read_text()
+
+
+class TestTheInstallerLeavesNoLitterAndHonoursDryRun:
+    """🔴 ROUND-8 — the round-7 audit found the cleanup trap was an UNGUARDED
+    GUARD: deleting `trap cleanup_tmp EXIT` left all 37 tests green while leaking
+    a scratch file on four paths. That is this ladder's signature defect landing
+    on the very claim the commit said it closed.
+
+    It also found the scratch file was being generated INTO `.git/hooks` before
+    the mode branches, so the dry run created that directory when it did not
+    exist — falsifying the installer's own "changes nothing unless --apply"
+    header — and both the dry run and `--uninstall` aborted rc 1 (a code absent
+    from the exit table) when the hooks dir was not writable.
+    """
+
+    def _hooks(self, repo) -> Path:
+        return Path(git(repo, "rev-parse", "--path-format=absolute",
+                        "--git-common-dir").stdout.strip()) / "hooks"
+
+    def _run(self, repo, *args, tmpdir=None):
+        env = {**os.environ}
+        if tmpdir:
+            env["TMPDIR"] = str(tmpdir)
+        return subprocess.run([str(INSTALLER), "--repo", str(repo), *args],
+                              capture_output=True, text=True, env=env)
+
+    @pytest.mark.parametrize("args,setup", [
+        (["--apply"], "clean"),
+        (["--apply"], "installed"),      # the already-installed early exit
+        (["--apply"], "foreign"),        # the rc-4 refusal
+        ([], "clean"),                   # the dry run
+        (["--uninstall"], "clean"),
+    ])
+    def test_no_scratch_file_survives_any_path(self, repo, tmp_path, args, setup):
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        if setup == "installed":
+            install(repo)
+        elif setup == "foreign":
+            hooks = self._hooks(repo)
+            hooks.mkdir(parents=True, exist_ok=True)
+            mockbin.write_exec(hooks / "prepare-commit-msg", "echo not ours\n")
+        self._run(repo, *args, tmpdir=scratch)
+        left = list(scratch.iterdir())
+        assert left == [], f"scratch file(s) left behind on {args or ['dry-run']}: {left}"
+        # …and nothing was littered into the hooks dir either.
+        hooks = self._hooks(repo)
+        if hooks.exists():
+            assert not list(hooks.glob("*devrc-install*"))
+            assert not list(hooks.glob("*devrc-session-stamp*"))
+
+    def test_a_dry_run_does_not_even_create_the_hooks_directory(self, repo):
+        """🔴 The installer's own header promises this. An earlier revision
+        created the directory as a side effect of generating the wrapper before
+        the mode branches, and the test named `test_dry_run_changes_nothing`
+        passed anyway — it only asserted the hook FILE was absent, a name wider
+        than its assertion."""
+        hooks = self._hooks(repo)
+        if hooks.exists():
+            for f in hooks.iterdir():
+                f.unlink()
+            hooks.rmdir()
+        assert not hooks.exists()
+        out = self._run(repo)
+        assert out.returncode == 0, (out.stdout, out.stderr)
+        assert "DRY-RUN" in out.stdout
+        assert not hooks.exists(), "the dry run created .git/hooks"
+
+    @pytest.mark.parametrize("args", [[], ["--uninstall"]])
+    def test_read_only_paths_do_not_abort_on_an_unwritable_hooks_dir(self, repo, args):
+        """Neither path needs to write, so neither may fail because it cannot.
+        Measured rc 1 before — a code this script's own exit table omits."""
+        hooks = self._hooks(repo)
+        hooks.mkdir(parents=True, exist_ok=True)
+        hooks.chmod(0o500)
+        try:
+            out = self._run(repo, *args)
+            assert out.returncode == 0, (out.returncode, out.stdout, out.stderr)
+        finally:
+            hooks.chmod(0o700)
