@@ -31,13 +31,22 @@ RED-AT-BASE MATRIX. Measured against ``d202ef59`` (the commit before this
 change), with only the three new test files copied in:
 
     pytest  scripts/browser-bridge/tests/test_browser_tab_ref.py
-            29 FAILED / 4 passed at d202ef59  →  33 passed at HEAD
+            29 FAILED / 4 passed at d202ef59  →  33 passed at the first tip
     node    tests/tab_ref.test.mjs + tests/action_click.test.mjs
-            34 FAILED / 0 passed at d202ef59  →  34 passed at HEAD
+            34 FAILED / 0 passed at d202ef59  →  34 passed at the first tip
 
 The 4 that were already green are labelled ``INVARIANT GUARD`` in place: they
 pin behaviour this change must NOT take away, and none of them is evidence the
 feature works.
+
+Audit round 1 added the `agent`, ``--`` and /whoami-shape cases; this file now
+holds 43. 🔴 Two of those additions FAILED IN THE NIX SANDBOX while passing on
+the dev host, because they asserted that `browser agent` had reached the wire —
+which it does only once its model-backend prerequisites are met, and those come
+from the developer's own environment. They now key on `browser-agent`'s
+missing-goal refusal, which is decided before any network or backend work and
+therefore reads the same in both tiers. **Ask of any assertion here which tier
+it can be true in.**
 
 Run: nix develop ~/workspace/devrc -c python3 -m pytest \\
        scripts/browser-bridge/tests/test_browser_tab_ref.py -q
@@ -462,42 +471,62 @@ def test_agent_REFUSES_a_reference_rather_than_honouring_half_of_it(bridge):
     assert bridge.bodies == [], f"nothing may be dispatched: {bridge.bodies}"
 
 
+def test_POSITIVE_CONTROL_the_missing_goal_error_is_producible(bridge):
+    """🔴 The two tests below assert an ABSENCE, which is worth nothing until
+    the string is shown to be producible HERE, in THIS environment.
+
+    Both read "`a goal is required` must not appear". A typo in that literal, a
+    reworded error in `browser-agent`, or an environment where the agent path
+    dies even earlier would make each of them pass while testing nothing — the
+    reassuring-zero shape. This case feeds an input that MUST produce it (an
+    `agent` invocation with no goal at all) and watches the string appear.
+    """
+    r = bridge.run("agent", "--dry-run")
+    assert "a goal is required" in r.stderr, (
+        "the missing-goal error is not reachable here, so the two absence "
+        f"assertions below are vacuous. stderr was: {r.stderr!r}")
+
+
 def test_agent_still_works_with_an_explicit_instance(bridge):
     """INVARIANT GUARD: the refusal above is scoped to the reference.
 
     Refusing `--instance` too would break the documented way to target the agent,
     which is the failure mode a too-wide guard would introduce here.
 
-    🔴 ASSERTS THE REQUEST, NOT THE EXIT CODE, and deliberately. `browser agent`
-    drives a real model backend this stub does not provide, so it exits non-zero
-    here no matter what the parser did. What is under test is the ROUTING the CLI
-    produced, which is visible in the first body it sent — reading rc would make
-    this test a claim about the stub.
+    🔴 ASSERTS STDERR, NOT THE REQUEST BODIES, AND THAT IS THE FIX FOR A REAL
+    TWO-TIER BUG. An earlier version asserted that the agent path had sent
+    something to the bridge. It passed on the dev host and FAILED in the nix
+    sandbox — the tier the merge gates on — because `browser agent` reaches the
+    wire only once its model-backend prerequisites are satisfied, and those come
+    from the developer's own environment. The test was therefore a claim about
+    whoever ran it. `browser-agent` refuses a missing goal BEFORE any network or
+    backend work, so every assertion here is decided by argument parsing alone
+    and reads the same in both tiers.
     """
-    bridge.run("--instance", "main", "agent", "--dry-run", "do a thing")
-    assert bridge.bodies, "the agent path sent nothing at all — parse failed early"
-    assert bridge.bodies[0].get("target") == "main", bridge.bodies[0]
+    r = bridge.run("--instance", "main", "agent", "--dry-run", "do a thing")
+    assert "agent cannot honour" not in r.stderr, (
+        "the reference guard fired on an explicit --instance: " + r.stderr)
+    assert "a goal is required" not in r.stderr, (
+        "the goal was eaten before browser-agent saw it: " + r.stderr)
 
 
 def test_the_free_text_list_covers_agent_too(bridge):
-    """A TRAILING bw:// is a goal for `agent`, not a route.
+    """A TRAILING bw:// is a GOAL for `agent`, not a route.
 
     Dropping `agent` from REF_FREE_TEXT_SUBCOMMANDS SURVIVED an audit's mutation
-    because nothing exercised it. With it dropped the token is stripped from the
-    goal and turned into routing — visible here as a `target` that must not exist.
-    Same rc caveat as the test above.
+    because nothing exercised it. The discriminator is deterministic and needs no
+    backend: with `agent` on the list the reference survives as the goal, so
+    `browser-agent` gets one; with `agent` dropped, the token is stripped out as
+    routing and the agent is left with NO goal at all — which it refuses by name,
+    before any network work.
     """
-    bridge.run("agent", "--dry-run", CANONICAL)
-    assert bridge.bodies, "the agent path sent nothing at all — parse failed early"
-    # 🔴 Assert on the REFERENCE'S values, not on the mere presence of a `tab`.
-    # browser-agent legitimately sends `{"op":"close","tab":<its own>}` to tear
-    # down the tab IT opened; a blanket "no tab anywhere" assertion fails on that
-    # and would read as the parser leaking when it is the agent cleaning up.
-    for b in bridge.bodies:
-        assert b.get("target") != CANONICAL_INSTANCE, (
-            f"the reference was consumed as a route: {b}")
-        assert b.get("tab") != CANONICAL_TAB, (
-            f"the reference was consumed as a route: {b}")
+    r = bridge.run("agent", "--dry-run", CANONICAL)
+    assert "a goal is required" not in r.stderr, (
+        "the trailing reference was consumed as a route, leaving no goal: "
+        + r.stderr)
+    assert "agent cannot honour" not in r.stderr, (
+        "a TRAILING reference must be text for `agent`, not a refused route: "
+        + r.stderr)
 
 
 # --------------------------------------------------------------------------- #
