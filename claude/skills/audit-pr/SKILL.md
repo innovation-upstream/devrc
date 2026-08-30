@@ -182,9 +182,15 @@ measures the fixes; it never counts the rounds.
 
 Every round after the first diffs `<previously-audited tip>..HEAD`. A claim that was TRUE when an
 early commit wrote it and was FALSIFIED by a LATER commit of the same PR is inside no round's
-range — not the first (it was true then), not any delta (it is below the range). It is invisible
-for the life of the ladder, and it does not look invisible: it sits in the file everyone is
-editing, reading as precise.
+range — not the first (it was true then), not any delta (it is below the range). It does not look
+missable: it sits in the file everyone is editing, reading as precise.
+
+⚠ **Precisely: the STALE LINE is out of range; the FALSIFYING EDIT is not.** The commit that
+staled it is inside the very next delta, so the information needed is in front of that round —
+what is missing is anything POINTING at the line it invalidated. So the cheap per-round habit is
+real and worth having: *what claim elsewhere in these files could this edit have moved?* And note
+the cause is not only a sibling commit — **a rebase onto a moved base stales counts identically**,
+so do not let the heading narrow your search.
 
 Measured on devrc #1109: `(+ 11 op-selected)` was correct at commit 1 and staled by commit 2,
 which added a `_wait_ops` call. **Three delta rounds walked past it, four lines from the paragraph
@@ -209,6 +215,16 @@ about text round 1 had written, and the gate could not see it.
 beyond "the document contains a false sentence" · and the recurring SHAPE swept at every site
 rather than at the one that was reported. Record what you are NOT fixing, on the PR, so the next
 reader knows it is open rather than absent.
+
+⚠ **THIS DOES NOT OVERRIDE THE FINDINGS-KEYED STOP RULE, AND IT IS NOT A LICENCE TO STOP ON A
+ROUND THAT FOUND THINGS.** That rule still governs: a round returning findings that needed fixing
+is followed by another round. This criterion answers a different question — *what ends a ladder
+whose rounds keep finding real things forever, because the payload is prose and the attribution
+gate cannot fire?* It is the escape hatch for a non-terminating ladder, not a shortcut out of a
+converging one. **"Does not terminate" above means the GATE cannot fire, not that findings never
+run out** — a prose ladder that returns a clean round ends there, exactly like any other. If in
+doubt, run the next round: this criterion is for the case where you can already name why the
+rounds will not stop on their own.
 
 ## Mutation testing: deletion-mutants are the EASY half
 

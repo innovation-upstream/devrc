@@ -2091,11 +2091,19 @@ def render_toolchain(facts):
         "`RESULT:` line was, for the sandbox tier, an instruction to read "
         "something that is never printed. MEASURED 2026-08-30 on a builder "
         "emitting 201 lines plus a `RESULT:` line: without `-L`, **3 console "
-        "lines, 0 builder lines**; with `-L`, the log streams and even a "
-        "`| tail -40` keeps the `RESULT:` line as its last. ⚠ A FAILING build "
-        "is the exception — nix prints the tail of its log inline, bounded by "
-        "`log-lines` (25 by default), which is why the omission survived: the "
-        "red case looked fine.",
+        "lines, 0 builder lines**. ⚠ A FAILING build is the exception — nix "
+        "prints the tail of its log inline, bounded by `log-lines` (25 by "
+        "default), which is why the omission survived: the red case looked fine.",
+        "",
+        "🔴 **AND `-L` WRITES TO STDERR, SO A BARE PIPE OR `>` CAPTURES NOTHING "
+        "— REDIRECT IT.** An earlier draft of this very block said \"even a "
+        "`| tail -40` keeps the `RESULT:` line as its last\", which is FALSE as "
+        "written and was caught by an audit of the commit that added it. "
+        "Measured on the same builder: `-L … | tail -40` with stderr left alone "
+        "keeps **0 lines and 0 `RESULT:` hits**; `-L … 2>&1 | tail -40` keeps 40 "
+        "lines with `RESULT:` last. The `nix log` form below is the opposite — "
+        "it writes to STDOUT, so `>` works there and not here. **Do not carry a "
+        "redirect across from one to the other.**",
         "",
         "🔴 **AND AN ALREADY-BUILT DERIVATION PRINTS NOTHING AT ALL, `-L` OR "
         "NOT — so silence is never a pass.** Read the derivation's own log "
@@ -2103,10 +2111,22 @@ def render_toolchain(facts):
         "",
         "```",
         "DRV=$(nix path-info --derivation <your worktree>#checks.x86_64-linux.pytests)",
-        "nix log \"$DRV\" > /tmp/tier.log   # then grep it, do NOT read an exit code",
+        "nix log \"$DRV\" > /tmp/tier.log || { echo 'NO LOG — never built HERE'; exit 1; }",
+        "test -s /tmp/tier.log || { echo 'EMPTY LOG — do not grep it'; exit 1; }",
         "grep -n 'RESULT:' /tmp/tier.log          # the LAST hit is the verdict",
         "grep -c 'panic: test timed out' /tmp/tier.log",
         "```",
+        "",
+        "🔴 **THE TWO GUARD LINES ABOVE ARE LOAD-BEARING — WITHOUT THEM THIS "
+        "FALLBACK REPORTS A CLEAN RUN FOR A TIER THAT NEVER RAN.** `nix log` on "
+        "a derivation that was never built here exits **1** with "
+        "`build log … is not available`, but `>` has already truncated the file, "
+        "so `grep -c 'panic: test timed out'` prints a reassuring **0** — "
+        "identical to a green run. MEASURED on this repo's own "
+        "`checks.x86_64-linux.nodetests`. An earlier draft of this block even "
+        "said \"do NOT read an exit code\" here, which suppressed the one signal "
+        "that separates the two states. Read the CONTENT, and check there IS "
+        "content first.",
         "",
         "Name the tier and the base sha in any claim you make about the gate — "
         "\"the gate passed\" is true of one run, one tier, one base, and reads "

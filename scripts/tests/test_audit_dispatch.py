@@ -2435,6 +2435,37 @@ def test_the_toolchain_section_names_the_tier_the_merge_gates_on():
     assert "nix build <your worktree>#checks.x86_64-linux.nodetests" in out
     assert "gate.sh --tier both" in out
     assert "git --version" in out
+    _assert_every_nix_build_prints_its_log(out)
+
+
+def _assert_every_nix_build_prints_its_log(out: str) -> None:
+    """EVERY emitted `nix build` line must carry `-L`/`--print-build-logs`.
+
+    🔴 WHY THIS IS STRUCTURAL AND NOT A SPELLING PIN. The two substring asserts
+    above were live, and green, for the whole time the brief emitted
+    `nix build …#checks…pytests` with NO `-L` — under a sentence telling the
+    auditor to "read each runner's own `RESULT:` line". `nix build` prints no
+    build log for a build that SUCCEEDS without `-L`, so the brief instructed a
+    read that could not succeed, and a substring assert on the COMMAND cannot
+    see a missing FLAG. Proven by mutation: stripping ` --no-link -L` from both
+    emitted lines left the whole module green (123 passed, mutant SURVIVED),
+    while renaming `.pytests` -> `.PYTESTS` in the same emitter turned it red —
+    so the harness runs and reaches those lines; it just could not see flags.
+
+    Scanning every `nix build` line rather than pinning two exact strings means
+    a THIRD tier added later is covered automatically, and an unrelated reword
+    of the surrounding prose cannot redden it.
+    """
+    offenders = [
+        line.strip() for line in out.splitlines()
+        if line.strip().startswith("nix build")
+        and "-L" not in line.split()
+        and "--print-build-logs" not in line
+    ]
+    assert not offenders, (
+        "these emitted `nix build` lines carry no `-L`/`--print-build-logs`, so "
+        "a SUCCEEDING build prints no log and the brief's instruction to read a "
+        "`RESULT:` line cannot be followed:\n  " + "\n  ".join(offenders))
 
 
 def test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout():
