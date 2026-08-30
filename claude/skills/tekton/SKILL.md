@@ -149,8 +149,12 @@ debugging, changing or copying a specific pipeline.
    *delays* it — and whether that becomes a lost verdict is decided by the pipeline's own
    headroom, not by the burst. devrc (50m budget) drains and survives; gitops-validate, with
    the tightest budget and the worst latency, is the one that loses. **The lever is scheduling
-   pressure, not the timeout** (#378 family). Note `clawgate-ci` — the one pipeline with **no
-   `nodeSelector`** — has a pod-start max of **18s** rather than 19 minutes.
+   pressure, not the timeout** (#378 family). Note `clawgate-ci` — **no `nodeSelector`** — has a
+   pod-start max of **18s** rather than 19 minutes. ⚠ It was the ONLY unpinned pipeline when
+   this was measured 2026-08-23 and has not been since **2026-08-26**, when the `vetr-*` family
+   landed; **8** are unpinned today. **Derive the set** —
+   `~/workspace/devrc/claude/skills/tekton/reference/pipelines.md` → the clawgate-ci "PVC
+   unpinned" bullet ships the command; never read a pin list out of prose.
 4. **Placeholder imagePullSecret breaks ALL pulls.** A `harbor-cred` dockerconfigjson with a
    non-base64 `auth` placeholder makes every pod fail image pull ("illegal base64 data").
    **Do NOT attach a placeholder imagePullSecret** to the pipeline SA — public images

@@ -107,7 +107,7 @@ OR'd with a `head_commit` fallback for GitHub's truncation of large pushes.
   As of 2026-08-30 that returns 13 rows: **4** pin `talos-xr6-r7p`, **1** pins `talos-uvh-gtj`,
   **8** pin nothing — so **floating is the majority and clawgate-ci is not the odd one out**,
   which is the durable point. (A stale in-cluster comment at
-  `<homelab-infra>/clusters/homelab/apps/tekton-pipelines/ci-priority-classes.yaml` still calls
+  `<homelab-infra>/clusters/homelab/apps/tekton-pipelines/triggers/ci-priority-classes.yaml` still calls
   it "the ONE pipeline with no nodeSelector".)
   ⚠ Being unpinned is a deliberate WIN, not only a cost — one RWO PVC means no pin is needed,
   so it schedules anywhere and survives node loss (`clawgate-ci-pipeline.yaml:58,69`). The cost
