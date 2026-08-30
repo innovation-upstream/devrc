@@ -56,8 +56,14 @@ _GIT_WRITERS = frozenset({"init", "add", "commit", "config", "checkout",
 # Commands positively adjudicated as reading nothing of this tree. Deliberately
 # TINY: membership here is a claim, and the default for everything else is
 # OPAQUE. Add only after checking what the command actually reads.
+# 🔴 `test` AND `which` WERE HERE AND ARE NOT HARMLESS. `test -f
+# scripts/drift-check.sh` at a repo cwd stats a file in this tree, and `which`
+# walks PATH; both scored CLEAN. That is this module's own declared stat-only
+# blind spot re-introduced through the exec path — in the set whose comment
+# claims its members read nothing. Membership here is a CLAIM about a command's
+# filesystem behaviour; check it before adding.
 _HARMLESS = frozenset({"true", "false", "echo", "printf", "sleep", "uname",
-                       "id", "whoami", "hostname", "date", "which", "test"})
+                       "id", "whoami", "hostname", "date"})
 
 # A cwd token meaning "this repo" — the two that make a scan repo-wide.
 _REPO_CWD = (".", "<inherited>")
@@ -143,12 +149,22 @@ def _exec_verdict(execs: set[str]) -> tuple[list[str], list[str]]:
         # separator-terminated prefix alone excludes the root path, because
         # "/…/devrc" does not start with "/…/devrc/". A fix round introduced
         # exactly that and silently acquitted 14 files whose scan is spelled
-        # `git -C <REPO_ROOT> ls-files …` — the single most common form in this
-        # corpus, and under-classification again.
+        # `git -C <REPO_ROOT> ls-files …`.
+        #
+        # 🔴 THIS IS A NARROWING OF A RECOGNISED COMMAND, NOT A BLANKET
+        # ACQUITTAL — it must NOT run before the fall-through. As an early
+        # `continue` it became the ONLY escape hatch from OPAQUE and fired on
+        # `<interpreter> <repo script> <tmp_path>`, the corpus's commonest
+        # shape: 18,806 execs across 68 of 144 files, leaving 15 of 56
+        # "proven bounded" files holding an acquitted bash/python3/node child
+        # at a repo cwd — including two running `bash <copy of run-tests.sh>
+        # <REPO_ROOT>`, a walk of the whole repo. Same defect class as the
+        # `-c` keying it was written to replace, reached the other way.
+        # An UNRECOGNISED head is opaque no matter where its operands point.
         operands = [t for t in toks[1:] if not t.startswith("-")]
-        if any(t.startswith("/") and t != _ROOT_S and not t.startswith(_ROOT_PREFIX)
-               for t in operands):
-            continue
+        outside_operand = any(
+            t.startswith("/") and t != _ROOT_S and not t.startswith(_ROOT_PREFIX)
+            for t in operands)
 
         # 🔴 FALL-THROUGH IS OPAQUE, NOT CLEAN. Anything not positively
         # adjudicated below is UNKNOWN. The first version only marked a child
@@ -179,11 +195,13 @@ def _exec_verdict(execs: set[str]) -> tuple[list[str], list[str]]:
                 sub = t
                 break
             if sub in _GIT_READERS:
-                scans.append(argv)
+                if not outside_operand:             # narrows a RECOGNISED read
+                    scans.append(argv)
             elif sub not in _GIT_WRITERS:
                 opaque.append(" ".join(toks[:3]))   # unknown git verb
         elif head in _DIRECT_SCANNERS:
-            scans.append(argv)
+            if not outside_operand:
+                scans.append(argv)
         elif head in _HARMLESS:
             pass                                    # adjudicated clean
         else:

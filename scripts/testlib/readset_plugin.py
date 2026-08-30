@@ -106,8 +106,12 @@ def _rel(p: str) -> str | None:
     be discarded entirely — under-classification, the unsafe direction. Joined
     against cwd here, still without `resolve()`.
 
-    No `resolve()`: it stats the path, which re-enters the hook. Symlinks into
-    the repo are therefore NOT followed — a named limitation, not an oversight.
+    No `resolve()` — but NOT because it re-enters the hook. An earlier version
+    of this comment said that, and it is false: `Path.resolve()` raises no
+    audit event at all (measured, 3.12.14 — the same fact that makes stat
+    invisible above). The real cost is syscalls per recorded path on a hot
+    path. Consequence either way: symlinks into the repo are NOT followed, and
+    a read reached through one is attributed to the link, not the target.
     """
     try:
         if not p.startswith("/"):
@@ -117,7 +121,10 @@ def _rel(p: str) -> str | None:
             return "."
         if not p.startswith(_ROOT_PREFIX):
             return None
-        return p[len(_ROOT_PREFIX):] or "."
+        # lstrip: a doubled separator (`<ROOT>//scripts`) would otherwise yield
+        # "/scripts", which the classifier's cwd test reads as an ABSOLUTE path
+        # and therefore outside the repo — acquitting a real scan.
+        return p[len(_ROOT_PREFIX):].lstrip("/") or "."
     except Exception:
         return None
 
@@ -140,10 +147,12 @@ def _hook(event: str, args) -> None:
             if isinstance(target, (bytes, int)):
                 return                      # fd or bytes path: not useful here
             s = os.fspath(target) if hasattr(target, "__fspath__") else str(target)
-            if any(part in s for part in _SKIP_PARTS):
-                return
             rel = _rel(s)
-            if rel is not None:
+            # 🔴 FILTER THE NORMALISED PATH, NOT THE RAW ONE. _SKIP_PARTS is
+            # slash-anchored ("/.git/"), so screening the raw string stopped
+            # matching once relative paths began to be kept: a relative
+            # `open(".git/HEAD")` slipped through and was recorded.
+            if rel is not None and not any(part in "/" + rel for part in _SKIP_PARTS):
                 b["paths"].add(rel)
         else:
             # (executable, args, cwd, env) for subprocess.Popen

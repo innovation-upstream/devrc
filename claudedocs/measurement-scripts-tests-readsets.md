@@ -1,4 +1,4 @@
-# Measured: what `scripts/tests` actually reads — and why decomposing it buys ~8%
+# Measured: what `scripts/tests` actually reads — and why decomposing it buys ~1%
 
 **Date:** 2026-08-30 · **Effort:** ci-speedup rank 2 · **Claim:** `ci-speedup-2`
 
@@ -31,26 +31,42 @@ denominator's file counts under the classification's total and published
 | bucket | files | of which timed | seconds | share of timed |
 |---|---|---|---|---|
 | **ALWAYS-RUN** — proven to read the tree | 27 | 27 | 185.5s | 14.3% |
-| **OPAQUE** — read set UNKNOWN | 61 | 60 | 1010.2s | 78.1% |
-| **scoped** — proven bounded | 56 | 46 | 97.6s | 7.5% |
+| **OPAQUE** — read set UNKNOWN | 79 | 78 | 1096.4s | 84.8% |
+| **scoped** — proven bounded | 38 | 28 | 11.4s | 0.9% |
 | total | **144** | **133** | 1293.3s | |
 
-- **Best-case ceiling for a perfect path→target mapping: 1.08x.**
-- Estimate history: **3x → 1.7x → uncertain → 1.49x → 1.08x measured.** The
-  1.49x was this document's own first answer and it was wrong; see below.
+- **Best-case ceiling for a perfect path→target mapping: 1.01x.**
+- **99.1% of this suite's time must run on any change.** Provably skippable:
+  **11.4 seconds.**
 - The handoff estimated rank 3 at "~1.7x alone but ~3.6x after". Neither is
-  reachable. **Only 7.5% of this suite's time is provably skippable today.**
+  reachable, and neither is anything close to them.
 
-### 🔴 The recommendation this produces: DO NOT BUILD RANK 3 YET
+### 🔴 Estimate history — and why the direction is the finding
 
-A path→target mapping built on today's tree buys **8%**. The work that raises
-its ceiling is making the opaque subprocesses legible — until then the mapping
-is a large mechanism guarding a rounding error, and every unmeasured file it
-inherits is a chance to skip a test that should have run.
+**3x → 1.7x → uncertain → 1.49x → 1.08x → 1.01x.**
+
+The last three are this document's own successive answers, each corrected by an
+adversarial audit round. **Every correction moved files OUT of `scoped`, never
+into it.** That one-directional drift is itself the result: a read-tracer's
+natural failure mode is to under-record — anything it cannot see looks like an
+absence of dependency, which reads as "bounded". A classifier built on one will
+be optimistic by construction, and will keep being optimistic in ways that only
+adversarial review surfaces. Treat any future number from this tool as an
+UPPER bound on skippability until someone has tried to break it again.
+
+### 🔴 The recommendation this produces: DO NOT BUILD RANK 3
+
+A path→target mapping built on today's tree buys **1%** — eleven seconds of a
+1293-second suite. It would be a large, safety-critical mechanism guarding a
+rounding error, inheriting 79 unmeasured files as chances to skip a test that
+should have run.
+
+The work that unlocks it is making the opaque subprocesses legible. That is a
+different, smaller, and far better-scoped task than decomposing a directory.
 
 ## 🔴 Subprocess opacity is the whole story
 
-**78.1% of suite time** is 61 files that spawn a child process at a repo cwd
+**84.8% of suite time** is 79 files that spawn a child process at a repo cwd
 whose reads this tracer cannot see. The audit hook is per-interpreter; a child's
 own `open` calls are invisible. We record argv and cwd, and a consumer must
 treat such a file as must-run.
@@ -89,8 +105,11 @@ matched neither branch and were published as "scoped, proven bounded". Only a
   re-runs nothing. The corpus contains this shape. An earlier version listed
   `os.stat` in the traced-event set, where it raised nothing while *reading as*
   coverage.
-- **Symlinks are not followed** — `_rel` avoids `resolve()` so the hook cannot
-  re-enter, so a read reached through a symlink is attributed to the link path.
+- **Symlinks are not followed** — `_rel` avoids `resolve()`, so a read reached
+  through a symlink is attributed to the link, not the target. (An earlier note
+  said `resolve()` was avoided because it re-enters the audit hook. That was
+  false: `Path.resolve()` raises no audit event either. The real cost is
+  syscalls on a hot path — a different argument, and the honest one.)
 - **A test whose outcome depends on a file it never reads** — e.g. one asserting
   a count someone else computed. No read-tracer can see that; perturbation can,
   and has the complementary blind spot (an innocuous edit does not trip a
@@ -106,7 +125,7 @@ matched neither branch and were published as "scoped, proven bounded". Only a
   runtest-time reads, because several files here read `nix/home.nix` at import.
   It is inert unless that `-p` is passed.
 - `scripts/lib/readset_classify.py` — merges shards, assigns buckets.
-- `scripts/tests/test_readset_classify.py` — 27 guards, each pinning a defect
+- `scripts/tests/test_readset_classify.py` — 34 guards, each pinning a defect
   one of these two files actually shipped.
 
 Reproduce:
@@ -120,7 +139,7 @@ DEVRC_READSET_OUT=/tmp/rs PYTHONPATH=$DEVRC/scripts \
 python3 scripts/lib/readset_classify.py /tmp/rs.*.json --json /tmp/readsets.json
 ```
 
-## This classifier reproduced the bug it exists to fix — seven times
+## This classifier reproduced the bug it exists to fix — nine times
 
 The pattern is the deliverable's real lesson. Every one matched *characters* or
 an *enumeration* rather than the operation actually performed:
@@ -136,19 +155,34 @@ an *enumeration* rather than the operation actually performed:
 6. Acquitted on argv[0] being an absolute path outside the repo → real
    `/nix/store/.../git ls-files` scans of this tree acquitted.
 7. Required cwd to be exactly `.` → a scan run with `cwd=scripts` acquitted.
+8. Let the operand acquittal run BEFORE the fall-through, making it the only
+   escape hatch from OPAQUE: **18,806 execs across 68 of 144 files**, leaving
+   15 of the 56 then-"proven bounded" files holding an acquitted
+   `bash`/`python3`/`node` child at a repo cwd — two of them running
+   `bash <copy of run-tests.sh> <REPO_ROOT>`, a walk of the entire repo.
+   🔴 **Same defect class as #5, in the very commit written to fix #5, reached
+   by the other route — and the document shipped in that commit asserted it
+   was closed.**
+9. Put `test` and `which` in a set documented as "reads nothing of this tree".
+   `test -f scripts/drift-check.sh` stats this tree — the module's own stat
+   blind spot, re-introduced through the exec path. Neither that set nor
+   `_GIT_WRITERS` had any test: mutants emptying `_HARMLESS` and removing
+   `init` from `_GIT_WRITERS` both **survived a full green suite**.
 
-Findings 1, 2 and 4 were caught by a mutation sweep that also showed **three
-guards were unreachable** — an earlier acquittal always won, so deleting the
-guard changed nothing while its "covering" test stayed green. Findings 5, 6 and
-7, plus the `os.stat` and two `_rel` defects, came from an adversarial audit
-that reproduced them on **real corpus files**, not invented argv.
+Findings 1, 2 and 4 came from a mutation sweep that also showed **three guards
+were unreachable** — an earlier acquittal always won, so deleting the guard
+changed nothing while its "covering" test stayed green. Findings 5–7 and the
+`os.stat` and `_rel` defects came from a first adversarial audit; 8 and 9 from
+a second, blind delta audit. All were reproduced on **real corpus files**, not
+invented argv.
 
-🔴 **And the fix round introduced its own regression, in the unsafe direction.**
-Switching the operand check to a separator-terminated prefix made REPO_ROOT
-itself compare as outside the repo — `/…/devrc` does not start with `/…/devrc/`
-— silently acquitting `git -C <REPO_ROOT> ls-files`, the most common way this
-corpus spells a scan. ALWAYS-RUN fell 22 → 9 and it was caught only by diffing
-the two classification runs against each other, not by any test.
+🔴 **Both fix rounds introduced their own regressions, both unsafe.** Round 1's
+separator-terminated prefix made REPO_ROOT itself compare as outside the repo
+— `/…/devrc` does not start with `/…/devrc/` — silently acquitting
+`git -C <REPO_ROOT> ls-files`, the commonest scan spelling here; ALWAYS-RUN
+fell 22 → 9, caught only by diffing two classification runs, not by any test.
+Round 2's is #8 above. **Budget for this: a fix round is a code change and
+re-opens the verification gate.**
 
 Two pre-existing tests had to have their assertions **inverted**: they asserted
 that an absolute-path binary was acquitted, and that a same-directory fixture

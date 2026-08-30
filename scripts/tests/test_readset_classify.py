@@ -273,6 +273,69 @@ def test_a_scan_from_a_repo_SUBDIR_cwd_is_still_a_scan():
     assert len(scans2) == 1, scans2
 
 
+def test_an_interpreter_running_a_REPO_SCRIPT_on_a_tmp_arg_is_OPAQUE():
+    """🔴 AUDIT R2-F1. The operand acquittal must not outrank the fall-through.
+
+    As an early `continue` it became the ONLY escape from OPAQUE and fired on
+    the corpus's commonest shape — 18,806 execs across 68 of 144 files, leaving
+    15 of 56 "proven bounded" files holding an acquitted interpreter child.
+    Real: test_claude_log_rotate.py runs `bash <REPO>/scripts/.../rotate.sh
+    /tmp/...` and published triggers that do not include that script, so
+    editing it would re-run nothing.
+    """
+    root = str(rc.REPO_ROOT)
+    scans, opaque = _verdict(
+        f"bash {root}/scripts/claude-log-rotate/rotate.sh /tmp/x/dot-claude\t@.")
+    assert scans == [], scans
+    assert len(opaque) == 1, opaque
+
+
+def test_bash_running_a_repo_script_over_THE_REPO_is_opaque_not_scoped():
+    """🔴 AUDIT R2-F1, the worst real instance: a walk of the whole repo."""
+    root = str(rc.REPO_ROOT)
+    scans, opaque = _verdict(f"bash /tmp/copy/run-tests.sh {root}\t@.")
+    assert scans == [] and len(opaque) == 1, (scans, opaque)
+
+
+def test_an_outside_operand_still_acquits_a_RECOGNISED_scanner():
+    """The narrowing must survive being moved inside the recognised arms."""
+    scans, opaque = _verdict("grep -r needle /tmp/elsewhere\t@.")
+    assert scans == [] and opaque == [], (scans, opaque)
+    scans2, _ = _verdict("git -C /tmp/fixture ls-files\t@.")
+    assert scans2 == [], scans2
+
+
+def test_test_and_which_are_NOT_adjudicated_harmless():
+    """🟡 AUDIT R2-F2. `test -f <repo path>` stats this tree.
+
+    Both were in _HARMLESS and scored CLEAN — the module's own stat blind spot
+    re-introduced through the exec path. A mutation emptying _HARMLESS survived
+    the whole suite, so the set had no coverage at all.
+    """
+    for argv in ("test -f scripts/drift-check.sh", "which drift-check.sh"):
+        scans, opaque = _verdict(f"{argv}\t@.")
+        assert scans == [], (argv, scans)
+        assert len(opaque) == 1, (argv, opaque)
+
+
+def test_a_genuinely_harmless_command_is_still_clean():
+    """Positive control for the set — emptying it must be detectable."""
+    scans, opaque = _verdict("true\t@.")
+    assert (scans, opaque) == ([], []), (scans, opaque)
+
+
+def test_an_unknown_git_verb_is_opaque_but_a_known_writer_is_clean():
+    """🟡 AUDIT R2-F2. _GIT_WRITERS had no guard; dropping a member survived."""
+    for verb in ("init", "config", "worktree"):
+        scans, opaque = _verdict(f"git {verb} something\t@.")
+        assert (scans, opaque) == ([], []), (verb, scans, opaque)
+
+
+def test_a_doubled_separator_in_a_cwd_still_reads_as_inside_the_repo():
+    """🟢 AUDIT R2-F4. `<ROOT>//scripts` yielded '/scripts' -> read as absolute."""
+    assert rp._rel(str(rp.REPO_ROOT) + "//scripts") == "scripts"
+
+
 def test_an_operand_that_IS_the_repo_root_is_not_treated_as_outside():
     """🔴 REGRESSION INTRODUCED BY THE ROUND-1 FIX ROUND ITSELF.
 
