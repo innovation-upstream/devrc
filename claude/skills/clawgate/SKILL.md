@@ -192,10 +192,18 @@ toolchain and the dispatch `curl`. Durable facts only:
   provisions — has **no Cilium**, so `agent-hardening.md` is a **homelab** playbook.
 - **Alloy has no auto-reloader** — if clawgate metrics vanish from homelab Prometheus, restart Alloy
   first (`telemetry.md`).
-- **Red GitHub Actions checks on `homelab-infra` are NOISE** (billing-blocked); the real gate is
-  Tekton `clawgate-ci` (`tekton` skill). 🔴 **But `clawgate-ci` does NOT run Playwright —
-  browser-layer changes are UNGATED.** Run `make e2e` locally and **count**: without Docker,
-  `test.skip` on `!dockerAvailable()` leaves **11 of 18 spec files / 77 of 113 tests**, green.
+- **Red GitHub Actions checks on `homelab-infra` are NOISE** (billing-blocked); the real checks are
+  Tekton (`tekton` skill). 🔴 **`clawgate-ci` does NOT run Playwright — but `clawgate-e2e`, a
+  SEPARATE check, DOES.** This line read "browser-layer changes are UNGATED" and that was false:
+  measured on #564, `tekton/clawgate-e2e` → `clawgate e2e passed — 122 tests, 2 skipped`, running
+  `make e2e` on the PR's own specs. ⚠ It RUNS; whether it BLOCKS is **unmeasured** —
+  `GET /branches/trunk/protection` 403s on this private repo without GitHub Pro, so nobody here can
+  read the required-check list. Do not upgrade "green" to "protected". 🔴 **Its Postgres is REAL,
+  not Docker** — Tekton pods have no daemon, and `clawgate-e2e-pipeline.yaml` says a Docker-based
+  gate would have self-skipped every full-mode spec and gone green having tested almost nothing.
+  That trap is live LOCALLY: without Docker, `test.skip` on `!dockerAvailable()` drops most
+  full-mode spec files silently. So run `make e2e` locally and **count** — compare the collected
+  total against the check's own `N tests, M skipped` string rather than trusting either alone.
 - 🔴 **The browser extension does NOT ship via Flux — merging to `trunk` deploys NOTHING.** Brave
   loads it unpacked from `~/workspace/clawgate-extension/containers/clawgate/extension` (branch
   `clawgate-ext-local`, same path on **BOTH hosts**); deploy = `merge --ff-only origin/trunk` on both
