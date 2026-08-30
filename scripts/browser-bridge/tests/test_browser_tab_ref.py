@@ -64,6 +64,7 @@ from pathlib import Path
 
 import pytest
 from cli_budget import CLI_TIMEOUT_S  # noqa: E402
+from testlib import mockbin  # noqa: E402
 
 BB = Path(__file__).resolve().parent.parent          # scripts/browser-bridge
 CLI = BB / "browser"
@@ -707,10 +708,15 @@ def test_the_agent_arm_does_not_LEAK_routing_env_to_its_children(bridge, tmp_pat
     stub_dir = tmp_path / f"stub-{var}"
     stub_dir.mkdir()
     (stub_dir / "browser").write_text(CLI.read_text(encoding="utf-8"), encoding="utf-8")
-    (stub_dir / "browser-agent").write_text(
-        '#!/usr/bin/env bash\n'
-        f'printf "SEEN {var}=[%s]\\n" "${{{var}-<unset>}}"\n', encoding="utf-8")
-    (stub_dir / "browser-agent").chmod(0o755)
+    # 🔴 write_exec, NOT a hand-written shebang. `#!/usr/bin/env bash` execs on
+    # the NixOS dev host and does NOT exist in the nix build sandbox, so a stub
+    # written that way is green here and ENOENT in the tier the merge gates on.
+    # This file learned it the way the repo already had five times over — see
+    # scripts/testlib/mockbin.py, which exists precisely so the rule is not
+    # re-derived at a sixth call site. The body is POSIX sh; write_exec owns the
+    # shebang so no call site can reintroduce the trap.
+    mockbin.write_exec(stub_dir / "browser-agent",
+                       f'printf "SEEN {var}=[%s]\\n" "${{{var}-<unset>}}"\n')
 
     clear = {"--tab": '', "--frame": ''}["--tab" if var == "BB_TAB" else "--frame"]
     flag = "--tab" if var == "BB_TAB" else "--frame"
@@ -738,10 +744,8 @@ def test_POSITIVE_CONTROL_the_stub_agent_can_see_an_inherited_var(bridge, tmp_pa
     stub_dir = tmp_path / "stub-control"
     stub_dir.mkdir()
     (stub_dir / "browser").write_text(CLI.read_text(encoding="utf-8"), encoding="utf-8")
-    (stub_dir / "browser-agent").write_text(
-        '#!/usr/bin/env bash\nprintf "SEEN BB_INSTANCE=[%s]\\n" "${BB_INSTANCE-<unset>}"\n',
-        encoding="utf-8")
-    (stub_dir / "browser-agent").chmod(0o755)
+    mockbin.write_exec(stub_dir / "browser-agent",
+                       'printf "SEEN BB_INSTANCE=[%s]\\n" "${BB_INSTANCE-<unset>}"\n')
     # BB_INSTANCE is deliberately NOT unset by the agent arm — --instance IS
     # forwarded, so inheriting it is consistent. That makes it the right control.
     r = subprocess.run(
