@@ -307,9 +307,37 @@ it up; the evidence is on the issue.
    - *the starvation story* — REFUTED above; two occurrences, 91% and 44% node CPU.
    - *the listen backlog* — that is mechanism A, FIXED in #1062, and it presents as
      `ConnectionResetError`, not `TimeoutError`. Different exception, different fix.
-   - *blaming the PR under test* — four occurrences, every one on a diff that could not
+   - *blaming the PR under test* — five occurrences, every one on a diff that could not
      reach the file, TWICE on docs-only PRs. That is the cheapest discriminator available
-     and it has already been run four times; do not re-run it as if it were open.
+     and it has already been run five times; do not re-run it as if it were open.
+   - *a leaked handler thread holding the class-level `_audit_lock`* — REFUTED 2026-08-30
+     over the whole file: 641 passed, **0 surviving threads**, lock acquirable. (It was the
+     strongest a-priori candidate: the sink runs inside the lock and the lock is a CLASS
+     attribute shared by every server in the process. ⚠ Refuted on a GREEN run, so not
+     refuted for the failure path.)
+   - *file-descriptor exhaustion* — REFUTED: flat **12–20** FDs across 148 samples over a
+     5-minute run, `before=4 after=4`, against a 524,288 limit.
+   - *CFS CPU throttling of the step container* — REFUTED on two independent grounds:
+     the measured throttle ratio is **0.0266** (2.7% of 100 ms periods → sub-second
+     hiccups, not a 60 s stall), and the suite wants only **36% of ONE core**, so a quota
+     has almost nothing to bite on. A local run under `CPUQuota=100%` took 304.66 s
+     against a 296 s baseline — 3%. (`CPUQuota` itself was positive-controlled: a
+     CPU-bound burner went 0.81 s → 1.70 s at 50%.)
+
+   🔴 **THE REFRAMING, and the most useful thing measured so far: `cpu=36%`.** The suite
+   spends ~64% of wall time BLOCKED ON LOCALHOST SOCKETS, with client and server in the
+   SAME Python process on different threads. This is not a resource-starvation problem —
+   starvation, throttling and FD pressure were all resource stories and all three are
+   dead. Start from **what the round-trip waits on**.
+
+   ⚠ **A THIRD SIGNATURE exists and is NOT tracked by #1030.** Occurrence 5
+   (`devrc-ci-29tv4`, `TestTheBackstopNeverSendsASecondResponse`) had no timeout at all:
+   `AssertionError: the PUT sent a second response too: b''` plus a content mismatch. The
+   file now shows THREE signatures across FIVE test classes — `ConnectionResetError`
+   (fixed), `TimeoutError`, and this. All five involve the same in-process round-trip, and
+   the three are consistent with ONE transient read three ways (awaiting a response ->
+   timeout; checking for a second -> `b''`; comparing content -> mismatch). If that holds,
+   "mechanism B" is the wrong unit.
 
    **Start instead from what the four occurrences SHARE:** one file's server fixture, one
    exception, four different test classes, two very different load levels. Ask what that
