@@ -831,8 +831,15 @@ def _write_repo(root, *, envrc, gate=None, ci_suite=False, flake=None,
     if gate is not None:
         (root / "scripts" / "gate.sh").write_text(gate, encoding="utf-8")
     if ci_suite:
+        # 🔴 NO SHEBANG, and none is wanted. `detect_repo_toolchain` only ever
+        # asks `is_file()` about this path — nothing here is executed, so a
+        # shebang would be decoration that trips
+        # `test_no_test_writes_a_usr_bin_env_shebang_at_runtime` (the repo-wide
+        # guard that says an executable a test WRITES must go through
+        # `testlib.mockbin.write_exec`). Caught by the full gate, not by
+        # running this module alone.
         (root / "scripts" / "tests" / "run-ci-suite.sh").write_text(
-            "#!/usr/bin/env bash\npython3 -m pytest \"$@\"\n", encoding="utf-8")
+            'python3 -m pytest "$@"\n', encoding="utf-8")
     if flake is not None:
         (root / "flake.nix").write_text(flake, encoding="utf-8")
     if py_test:
@@ -921,8 +928,11 @@ PY
 }
 """
 
+# Also shebang-free, and for the same reason as `run-ci-suite.sh` above: the
+# probe reads this text looking for `--tier` and `both` and never runs it. What
+# matters is that both markers are present in the shapes devrc's real
+# `scripts/gate.sh` carries them.
 DEVRC_GATE = """\
-#!/usr/bin/env bash
 #   scripts/gate.sh [--tier pytest|node|both] [--set hermetic|all]
 #     --tier both      (default) run both runners; the gate is red if either is.
 case "$1" in
