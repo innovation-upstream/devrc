@@ -96,9 +96,11 @@ OR'd with a `head_commit` fallback for GitHub's truncation of large pushes.
   clawgate-ci has no `created`/`deleted` guard.
 - **PVC unpinned.** Per-run **6Gi** RWO `volumeClaimTemplate` with **no**
   `podTemplate.nodeSelector`, while *every* other pipeline pins
-  `kubernetes.io/hostname: talos-xr6-r7p` (naida 8Gi, remix 12Gi, gitops-validate 6Gi,
-  auditloop 10Gi). It works today (clawgate pods land on `talos-jkj-deb`) because it mounts
-  only the one PVC — but it forgoes the shared nix cache and is the odd one out.
+  `kubernetes.io/hostname: talos-xr6-r7p` (naida 8Gi, remix 12Gi, auditloop 10Gi).
+  ⚠ **`gitops-validate` is NOT in that list any more** — homelab-infra #396 moved it to
+  `talos-uvh-gtj` with its own `nix-store-cache-2`; this line read `gitops-validate 6Gi` until
+  2026-08-30. It works today (clawgate pods land on `talos-jkj-deb`) because it mounts only the
+  one PVC — but it forgoes the shared nix cache and is the odd one out.
 - **No concurrency control at all** — every matching push gets an independent PipelineRun and
   its own 6Gi PVC.
 - **`error` vs `fail` is implemented for the CSS path ONLY** (`clawgate-ci-pipeline.yaml:329`
@@ -119,23 +121,35 @@ SKILL.md gotcha 6(a) carries the summary; this is the diagnosis state.
 the same disk and the same `DirectoryOrCreate` as the reverted
 `/var/lib/mnt/disk-1/devrc-ci-nix-cache`. So the storage KIND is not the variable.
 
-**Three measured differences. Which one causes the lock failure is UNKNOWN** — `7839ef54`'s
+**Three candidates were listed; ONE IS NOW REFUTED and two stand. Which of the two causes the
+lock failure is UNKNOWN** — `7839ef54`'s
 *"the PVC works only because earlier runs populated its `/nix` with ownership the nix build user
 can use"* is **unproven, not refuted**:
 
-1. **Root-directory mode.** `local-path-config`'s setup script is `mkdir -m 0777 -p "$VOL_DIR"`,
-   so kubelet's `DirectoryOrCreate` finds the dir already at **0777**; a bare hostPath is created
-   **0755 root:root**. ⚠ Weak on its own: both volumes are filled by the identical
-   `cp -a /nix/. /nix-cache/` from the identical image, and `cp -a` preserves modes below the
-   root — so `/nix/var/nix/db` is the same either way, and 0755 already grants `r-x` to other.
-   A bare `chmod 0777` on the root adds write **at the root level only**, which is not where the
-   quoted error is. Cheap to try; do not expect it to be sufficient.
-2. 🔴 **Build users — and this is what makes the obvious control invalid.** The gate's
+1. 🔴 **~~Root-directory mode.~~ REFUTED 2026-08-30 — do not spend a cycle on it.** The theory
+   was that `local-path-config`'s `mkdir -m 0777 -p "$VOL_DIR"` leaves the PVC root at 0777
+   where a bare hostPath is created 0755 root:root. **The live PVC root is 0755**, measured by
+   `kubectl exec <gate-pod> -c step-pytests -- stat -c '%a %U:%G %n' /nix …`:
+   `755 root:root /nix` · `755 root:root /nix/var/nix/db` · **`600 root:root
+   /nix/var/nix/db/big-lock`** · `755 root:root /nix/var/nix/profiles/per-user`.
+   **Mechanism: `cp -a src/. dst/` overwrites the DESTINATION root's own mode with the
+   source's**, so `seed-nix`'s `cp -a /nix/. /nix-cache/` erases whatever the volume root was
+   created with and both arms converge on the image's `/nix`. Controlled locally (GNU coreutils
+   9.11, 0700 source): `dst` at 0755 → 700 **and** `dst` at 0777 → 700.
+   ⚠ **So a `chmod 0777` before the seed measures NOTHING, and its null result reads as
+   evidence.** Note also that the file the error names is **0600 root:root on the volume that
+   WORKS**, so "0755 already grants `r-x` to other" never described it. That deepens the
+   mystery rather than solving it — which is why the heading above says UNKNOWN.
+2. 🔴 **Build users — the one difference still standing, and what makes the obvious control
+   invalid.** The gate's
    `NIX_CONFIG` is `experimental-features = nix-command flakes` only, so nix drops to an
    unprivileged **`nixbld`** user. `gitops-validate`'s `warm-tools` adds `build-users-group =`,
    which **disables build users**, so it runs as **root**. A fresh `nix-store-cache-2` (created
    `2026-08-25T05:33:47Z`) staying healthy therefore says nothing about build-user ownership:
    root can always take the lock. **Do not cite `gitops-validate` as a control for this.**
+   Measured negative worth keeping, because it closes off the obvious remedy: **the gate pod
+   sets no `securityContext` and no `fsGroup` at all**, so there is no kubelet-side ownership
+   fixup to lean on.
 3. **A heal that already exists, on the gate only.** The `pytests`/`nodetests` steps run
    `mkdir -p /nix/var/nix/profiles/per-user && chmod 755 /nix/var/nix/profiles …` against the
    same root-owned-store problem one path over, with a MEASURED failure recorded beside it

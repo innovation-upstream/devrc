@@ -286,14 +286,17 @@ debugging, changing or copying a specific pipeline.
    UNPROVEN rather than refuted** — the candidates, the invalid control to avoid, and the perf
    baseline's `requests.cpu` caveat are in
    `~/workspace/devrc/claude/skills/tekton/reference/pipelines.md` → "Retrying the devrc-ci
-   unpin". 🔴 Retry only
+   unpin" — which records one candidate as **REFUTED**, so read it before proposing an
+   experiment. 🔴 Retry only
    with the ownership question answered FIRST and **proven on a scratch pipeline**: `7839ef54`
    chose a full revert over a permission patch because *"the place to find the third failure mode
    is not production"*, and with `enforce_admins: true` on devrc `main` a wrong guess blocks
    **everyone's** merges. `686d6ff0`'s `privileged` exemption buys nothing while the PVC is back
-   (measured 2026-08-30 over every live `tekton-ci` pod, **12 distinct pipeline shapes** — count
-   those, never a pod total, which is ~95% terminal and drifts as you read it: **zero** use
-   hostPath, hostNetwork/PID/IPC, privileged, added caps, hostPort or sysctls). 🔴 Its own
+   — measured 2026-08-30 over **every live `tekton-ci` pod**: **zero** use hostPath,
+   hostNetwork/PID/IPC, privileged, added caps, hostPort or sysctls. ⚠ Re-run that sweep rather
+   than quoting a COUNT: the pod total is ~95% terminal and drifted 358 → 457 inside one
+   session, and even "distinct pipelines" is population-dependent (live pod labels **11**,
+   PipelineRuns 12, Pipeline CRs 13) — so say which you counted. 🔴 Its own
    in-file comment is now STALE and says the opposite —
    `<homelab-infra>/clusters/homelab/apps/tekton-pipelines/triggers/namespace.yaml` still reads
    *"REQUIRED by the gate's hostPath nix cache"* over a precondition already satisfied.
