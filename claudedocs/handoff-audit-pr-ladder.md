@@ -16,27 +16,47 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
-- Branch: `main`. Nothing uncommitted from this session; worktrees removed, scratch copies deleted.
-- **Three PRs merged, each verified BY CONTENT in `origin/main`** (never by ancestry — a squash
-  merge makes the branch head permanently a non-ancestor):
-  - `#1035` → `ccb31628` — the stale nixpkgs rev in the opencode pin comment. Ground truth:
-    `flake.lock` nixpkgs is `c27cdad491a9…`, and the comment now names it.
-  - `#1060` → `31cd214d` — `espanso_detect._AMBIGUOUS_TERM_OWNER`. `main` was RED; this made it green.
-  - `#1074` → `e9f8ce14` — the browser-bridge ordering flake, the positional-reader ratchet
-    banked 48 → 47, and the prefix blind-spot note on the owner table.
-- **Carried forward from the earlier rounds of this thread** (all merged, all verified by content;
-  kept here so the provenance is not lost when this section is next replaced): `#1023` →
-  `8e33bf1d` (the three main-unblockers), `#1033` → `70eff59c` (audit rounds 1+2 follow-ups),
-  `#1009` → `442bde83` (the RULES worktree-config surface), `#1005` → `aaa5514c` (this doc,
-  ranks 2–4, and the `#996` retraction). All four of that round's ranked items are CLOSED.
-- **Hosts CONVERGED and CROSS-HOST COMPARED**: `ship.sh` → `2 hosts compared, both at e0e29e7b`,
-  clean trees, rc 0. (Run three times this session; `main` moves constantly.)
-- **VALIDATED AT THE CONSUMER, not merely deployed.** `keylog.service` restarted on both hosts
-  (workbench 728078→793959, laptop 1964503→1966203), deployed module
-  `/nix/store/md0d81qm…-hm_keylog`, and the original symptom re-run against it:
-  `ask → :acq`, `clarify → :acq` on BOTH hosts, with `picker rows for 'ask' = [':acq', ':dacq']`
-  — attribution unique while the picker still lists both, which is the whole point.
-- This thread's guards re-run green against a LATER `main` (`5ec6d5e4`, past these merges): **578 passed**.
+- **`#1109`** (`fix/sequence-absent-vs-empty-origin-pair`, head **`e4777c58`**) — the rank-1 fix,
+  plus a round-1 audit-fix commit. **`#1111`** (`docs/handoff-audit-pr-ladder-1109`) — this doc.
+  Both OPEN, neither merged.
+- **Both PRs' required Tekton checks (`devrc-pytests`, `devrc-nodetests`) reported SUCCESS** on the
+  pre-audit tips. 🔴 `#1109` has been pushed to since, so its checks are running again — a green
+  read before `e4777c58` is a claim about `2579e2f3`, not about the tip.
+- **Sandbox tiers, run locally ONE AT A TIME against `2579e2f3`**, verdict read from each
+  derivation's own log: `pytests` (`gwzds1c6…-devrc-pytests.drv`) → `RESULT: PASS (exit=0)`,
+  `PASS 48  FAIL 0`, 0 `panic: test timed out`. `nodetests` (`gmaidwmi…-devrc-nodetests.drv`) →
+  `RESULT: PASS (exit=0)`, **FIVE** `# fail 0` blocks: **569 (browser-bridge)**, 508 (dl-router),
+  21 (browser-ext), 188 (clickup skill), 134 (discord-embed-ext). ⚠ **An earlier revision of this
+  doc said FOUR and omitted the 569** — the browser-bridge one, i.e. the subsystem `#1109`
+  changes. Not re-run since `e4777c58`.
+- **Dev-host tier at `e4777c58`:** 477 passed across `test_server.py` + the ratchet.
+- ⚠ **CORRECTION to this doc's own concurrency claim.** It said a sibling session was building
+  "the same derivation". It was building `devrc-mergegate-1073`'s tree, which is a **different
+  source and therefore a different `.drv`** — the same check ATTRIBUTE, not the same derivation.
+  nix takes a per-derivation lock, so the original wording described something that cannot
+  happen. Store-level contention is real; same-derivation contention was not what occurred, and
+  no surviving artefact measures the overlap. The greens stand on their own logs.
+- 🔴 **DO NOT ASSUME THE BASE CLONE IS ON `main`.** `~/workspace/devrc` was on `main` at session
+  start and on **`docs/handoff-bb-resume-0830`** (created from `origin/docs/handoff-browser-bridge-tab-ref`)
+  when this doc was first written — another session's live branch in the shared checkout. Caught
+  by `git branch --show-current` immediately before the handoff write; without it `handoff_doc.py`
+  would have committed onto that branch, silently. ⚠ The sha that branch sat on is NOT recorded
+  here on purpose: an earlier revision named `28ff9d2a`, which was its head for ~2 minutes and
+  already wrong by the time that revision committed. **The branch name is the durable fact; a
+  moving head is not.** Re-check before every write here.
+- **PROVENANCE** (merged, verified by content, all seven re-checked by an independent audit):
+  `#1035`→`ccb31628`, `#1060`→`31cd214d`, `#1074`→`e9f8ce14`, `#1023`→`8e33bf1d`,
+  `#1033`→`70eff59c`, `#1009`→`442bde83`, `#1005`→`aaa5514c`.
+- **Base:** `#1109` branched off `2cec1d45`; `origin/main` moved repeatedly during the session.
+  ⚠ "No open PR of the 30 touches either file" was true when measured and is **not a durable
+  claim** — there are 37+ open PRs now, and `#1109` itself touches both. Re-derive, don't quote.
+- ✅ **RANK 2 (drift-check rc 17) IS CLOSED, NOT "unchanged".** Measured:
+  `git -C ~/workspace/homelab-talos rev-list --count HEAD..@{upstream} -- containers/clawgate`
+  → **0**, and both hosts now run **`clawgatectl 0.8.18`** (`p85k4nyi…`), not 0.8.17. Its own
+  closing condition — "it clears itself when that repo is next pulled for a real reason" — was
+  met, and an earlier revision of this doc restated it as live **~50 minutes after it had already
+  cleared**. That restatement was carried forward from memory without re-measuring, which is the
+  exact failure this thread is about.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -112,19 +132,13 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   other "surfaces a worktree does not hand you" in `claude/RULES.md`.
 
 ## Next steps (ranked)
-1. **Sequence `test_an_absent_origin_header_is_not_the_same_as_an_empty_one`** (repo: `devrc`,
-   `scripts/browser-bridge/tests/test_server.py`). Wait for the first row before issuing the
-   second command. **Closing condition:** the test no longer issues both commands before its
-   first wait, and the full sandbox tier is green — checked by whoever runs
-   `nix build .#checks.x86_64-linux.pytests`.
-2. **Nothing to do about drift-check rc 17 on the workbench — MEASURED, recorded so it is not
-   re-investigated.** `homelab-talos` is 1 commit behind on the `containers/clawgate` built-source
-   subtree (`28352cef`), but that commit touches only `e2e/.gitignore` and
-   `e2e/playwright.config.ts`. Store paths differ (`aqnkgl1y…` workbench vs `6s2ycrcr…` laptop)
-   **and the binaries are byte-identical**: `sha256 6ffdf136b8c8f6d4` on both, `clawgatectl
-   0.8.17`. rc 17 compares subtree tree OIDs on purpose — over-reporting an e2e-config change is
-   the cheap error; missing a Go change is the expensive one. **Closing condition:** it clears
-   itself when that repo is next pulled for a real reason. Do not pull it to silence the code.
+1. **Merge `#1109`, then `#1111`.** (repo: `devrc`.) IN FLIGHT: `devrc#1109`, `devrc#1111`.
+   🔴 **Wait for `#1109`'s checks to re-report on `e4777c58`** — the SUCCESS recorded above was
+   against `2579e2f3`, before the audit-fix commit. **Closing condition:** both merged and their
+   content present in `origin/main`, verified by diffing the files — never by ancestry, since a
+   squash merge makes the branch head a permanent non-ancestor. Checked by whoever merges.
+   forcing: gate — the two required Tekton contexts on `main` (`enforce_admins: true`), which
+   neither PR can merge without.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The ladder never returned a clean round in twelve.** The stop rule assumes
@@ -271,39 +285,187 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   `enforce_admins: true` by 22:39Z. Never carry its state in prose — re-measure with
   `gh api /repos/innovation-upstream/devrc/branches/main/protection`.
 
+- 🔴 **A GUARD'S OWN DOCSTRING CAN BE THE REASON A HAZARD SURVIVES AN AUDIT OF IT.** `_wait_ops`
+  claimed `where=` "keeps the order" for the one site in the file that unpacks a pair. An
+  order-safety reader who reached that sentence had their question answered — wrongly — and
+  stopped. The hazard was not hidden; it was **vouched for**. When a helper's docstring asserts a
+  property, ask what the code must do to provide it: a per-row predicate is structurally
+  incapable of ordering two rows that both satisfy it.
+- 🔴 **A RATCHET COUNTS THE HAZARD IT WAS BUILT FOR, AND READS AS COVERAGE FOR THE FAMILY.**
+  `test_positional_spool_reader_ratchet.py` ratchets the FOREIGN-row hazard (position vs
+  discrimination) and has **no view at all** of the OWN-rows hazard. It was green throughout,
+  before and after. That blind spot is now written into its pin comment, because the module's
+  framing ("positional spool reads") reads much wider than what it measures.
+- **Three stale counts found in the files this touched, each reading as precise:**
+  `_wait_events`' docstring said `53 total = 39 n=1 + 5 until= + 9 n>=2 (+ 7 op-selected)` —
+  re-derived by AST as `52 = 38 + 5 + 9`, **11** op-selected, wrong in three places at once,
+  left behind by `#1074`; and the ratchet's ledger comment said "the same 48 sites" while its own
+  pin was 47. Both corrected. The instrument that produces all of them is one call to
+  `classify_wait_calls()` — the same rule the handoff already carried, hit again.
+- **Bucket effect of an ordering fix, stated so the next one is not misread:** sequencing a pair
+  **adds** a `_wait_ops where=` call (3 → 4, total 62 → 63) and **converts nothing** — the
+  ratcheted number and the ledger are untouched. A pin that does not move is the expected shape
+  here, not evidence the change did nothing.
+- **The `NIXBUILD_RC=$?` after a `| tail` was written again this session** — the documented trap,
+  reproduced by habit in the very command whose verdict mattered. It is `tail`'s status. The
+  defence that worked was not remembering the rule; it was never quoting the number.
+- **`/handoff` step 1 returned rc 5 (nothing resolved) with its positive control passing**, so no
+  `clawgate-task:` field is recorded here. That is not "no task" — an unknown session id also
+  answers 200 with an empty array.
+
+- 🔴 **`| tail` ON A `nix build` DOES NOT JUST EAT THE EXIT CODE — IT EATS THE WHOLE VERDICT.**
+  The documented trap is usually stated as "the piped `$?` is `tail`'s". Measured here, the
+  damage was larger: `nix build … 2>&1 | tail -40` left **4 lines** of a **1,451-line** build log
+  — `this derivation will be built`, `building '…drv'`, and the bogus `NIXBUILD_RC=0`. Every
+  `RESULT:` line, the `PASS 48 FAIL 0` table and the whole per-target breakdown were gone. The
+  output was not merely missing a status; it was **indistinguishable from a failed run's**.
+  🔴 **The instrument that answers is `nix log <drv>`** — the derivation keeps its own full log,
+  so a swallowed console capture is recoverable: take the `.drv` path from the surviving
+  `building '…'` line (or `nix path-info --derivation`), write `nix log` to a FILE, and grep it
+  for `RESULT:` and `panic: test timed out`. Do not re-run the build to get its output back.
+- 🔴 **A CONTENDED-BUILD WARNING IS DIRECTIONAL, AND READING IT AS SYMMETRIC WOULD HAVE COST A
+  RE-RUN.** CLAUDE.md says a combined/contended `nix build` produces false FAILURES; a green is
+  trustworthy because contention makes a run fail loudly, not pass falsely. A sibling session was
+  building `pytests` concurrently throughout this one. The green stood, unre-run. **Ask which
+  direction a reliability caveat points before paying for it.**
+
+- 🔴 **RETRACTED, AND THE RETRACTION IS THE LESSON: `| tail` WAS NOT WHY THE `nix build` VERDICT
+  WAS UNREADABLE.** An earlier revision of this doc stated, as a measurement, that
+  `nix build … 2>&1 | tail -40` discarded 1,447 of 1,451 log lines. **That diagnosis is false and
+  its own evidence refutes it:** the surviving lines were the FIRST lines of the stream
+  (`this derivation will be built`, `building '…drv'`), and `tail -40` keeps the LAST forty — so
+  nothing was discarded. **The real cause: `nix build` does not print the build log of a build
+  that SUCCEEDS without `-L`/`--print-build-logs`.** Paired control, measured, on a builder
+  printing 201 lines plus a `RESULT:` line: **without `-L` → 3 console lines, 0 builder lines**;
+  **with `-L` → `tail -40` keeps 40, including the `RESULT:` line as the last one.** So `tail -40`
+  would have *preserved* the verdict had the log been streaming. 🔴 **The wrong fix this would
+  have taught — "drop the pipe" — leaves you with exactly the same silence.** Use `-L`, or
+  `nix log <drv>` after the fact, which also works when the derivation was already built and the
+  console prints nothing.
+  🔴 **"SUCCEEDS" IS LOAD-BEARING AND WAS ADDED BY A LATER AUDIT — the first version of this
+  bullet said "does not print build logs at all", which is the same over-wide shape it was
+  written to retract.** MEASURED on a FAILING build, no `-L`, non-tty: rc 1, **35 stderr lines,
+  24 of them builder lines, including the `RESULT:` line**, then `For full logs, run: nix log …`.
+  nix prints the tail of a failed builder's log inline, bounded by **`log-lines` (25 here,
+  `nix config show | grep ^log-lines`)**. That is the case you are most often staring at, so a
+  reader carrying "no log without `-L`, ever" mis-reads the one output that matters. ⚠ The
+  "3 console lines" figure is also **non-tty specific** — on a pty the same successful build
+  prints 0 — and assumes the derivation is not already cached (next bullet).
+  🔴 **Generalise: a plausible mechanism you already know about is the most dangerous
+  explanation, because it stops the search.** The documented `| tail` trap was real, adjacent,
+  and not what happened; I reached for it and labelled the result "measured".
+- 🔴 **AN ALREADY-BUILT DERIVATION PRINTS NOTHING — SILENCE IS NOT A PASS.** `nix build --no-link`
+  on a cached output emits zero lines, with or without `-L`. Any verify block that says "run this
+  and read the verdict" is unrunnable the second time. `nix log <drv>` is the instrument that
+  survives caching.
+- 🔴 **A HELPER'S DOCSTRING CAN BE THE REASON A HAZARD SURVIVES AN AUDIT OF IT.** **`_wait_events`'**
+  docstring (`test_server.py:175` pre-`#1109`) said the pair site's `where=` "keeps the order".
+  An order-safety reader who reached that sentence had their question answered — wrongly — and
+  stopped. ⚠ **This doc first attributed that sentence to `_wait_ops`' docstring. It is
+  `_wait_events`'** — re-derived by AST over `origin/main`. In a lesson about *which* text
+  vouched for the hazard, naming the wrong helper destroys the lesson.
+- 🔴 **A RATCHET COUNTS THE HAZARD IT WAS BUILT FOR AND READS AS COVERAGE FOR THE FAMILY.**
+  `test_positional_spool_reader_ratchet.py` ratchets the FOREIGN-row hazard and has no view of
+  the OWN-rows one. Green before, during and after — including while the guard test carried a
+  live instance. Now stated in its own pin comment.
+- **FOUR stale counts were found in the files this touched** (an earlier revision said "three"
+  and then listed four): `_wait_events`' docstring said `53 total`, `39 n=1` and `7 op-selected`
+  — actually 52 / 38 / **12** — and the ratchet's ledger comment said "the same 48 sites" while
+  its pin was 47. One call to `classify_wait_calls()` produces all of them.
+  🔴 **AND THE CORRECTION WENT STALE ONE COMMIT LATER — THIRD INSTANCE, INSIDE THE BULLET ABOUT
+  STALE COUNTS.** This said `11 op-selected`, which was true at `2579e2f3` and was invalidated by
+  **my own round-1 audit-fix commit** (`e4777c58`), which added a third `_wait_ops` call while
+  sequencing the guard test: `_wait_ops where=` 3→5, op-selected 11→**12**. I re-derived after
+  writing the fix and did not re-derive after *committing* it. **Nothing pins this number** — no
+  assertion references `op-selected`, so a full green suite says nothing about it, which is why
+  it drifted twice. The tell is structural: a count quoted in prose, in a file whose tests do not
+  read it.
+- ⚠ **An unverifiable corroborating hash is worse than none.** An earlier revision cited
+  `sha256 1b42b227…` as proof the control mutation was reverted. It names an intermediate
+  working-tree state that reaches no commit, so no reader can reproduce it — while reading as
+  precise. The claim it supported is independently true (worktree file == commit == built
+  source), and that is what should have been cited.
+- ⚠ **A doc can contradict itself across sections within one commit.** An earlier revision said
+  "RANK 1's CLOSING CONDITION IS MET" in *State now* while the ranked list had already redefined
+  rank 1 as "merge both PRs" (unmerged) and an investigation block still said the tier verdict
+  was open. When a ranked item is redefined, re-read the status section against the NEW item.
+
+- 🔴 **AN APPEND-ONLY SECTION CANNOT BE CORRECTED BY APPENDING A CORRECTION.** `handoff_doc.py`
+  merges `Open investigations` / `Findings` / `Gotchas` by APPENDING and keeps earlier text
+  verbatim — which is the right default, and it means a delta claiming to "remove" a sentence in
+  one of those sections removes nothing. Measured: round 1's claim that an unverifiable `sha256`
+  citation had been removed was FALSE in exactly this way — the retraction landed under Gotchas
+  while the original line kept making the claim ~140 lines above it. **To correct a line in an
+  append-only section you must EDIT THE FILE, and say in the commit that you did and why.** Read
+  the tool's `buckets:` line before believing a removal.
+- 🔴 **A NUMBER NOTHING ASSERTS ON WILL DRIFT, AND A GREEN SUITE WILL NEVER SAY SO.** The
+  `op-selected` count in `_wait_events`' docstring has now been wrong twice — first left behind
+  by `#1074`, then re-staled one commit later by my own audit-fix, which added a `_wait_ops` call
+  while sequencing the guard test. `git grep op-selected` finds only prose; no test reads it. The
+  structural tell is general: **a count quoted in prose in a file whose tests never read it is
+  unpinned by construction.** Either pin it or stop quoting it — re-deriving it by hand each time
+  is what has already failed twice.
+- 🔴 **RE-DERIVE AFTER COMMITTING, NOT AFTER WRITING.** Both stalings share one mechanism: the
+  number was correct when measured and the *fix itself* then changed the tree. The measurement
+  and the commit are different moments, and only the second one is what a reader will check.
+
 ## How to verify
+🔴 **`<TREE>` below means A TREE YOU CHOSE — a worktree at the commit you mean to measure.**
+Never `~/workspace/devrc`: that is the SHARED base clone, its branch is whatever another
+session left it on, and `git fetch` does not move its working tree. An earlier revision of
+this block warned about exactly that and then hardcoded it three lines later, so the bucket
+re-derivation printed `62 / where=3` while annotating `64 / where=5`. A command that reads a
+tree you did not pin is not a verification.
+
 ```bash
-# --- the espanso owner mechanism, at the CONSUMER (not merely deployed) ---
-systemctl --user show keylog.service -p MainPID -p SubState        # and on the laptop
-nix develop ~/workspace/devrc -c python3 - <<'PY'
-import sys, yaml
-sys.path.insert(0, "/nix/store/md0d81qmkhbszdrs4g5cbwzhsqnxg4s0-hm_keylog")   # re-resolve after any switch
-import espanso_triggers as ET
-from espanso_detect import EspansoDetector
-ts = ET.load_triggers(yaml.safe_load(open("/home/zach/.config/espanso/match/base.yml")),
-                      {"search_shortcut": "CTRL+SPACE"})
-d = EspansoDetector(ts)
-print("ask     ->", d._attribute("ask"))       # :acq
-print("clarify ->", d._attribute("clarify"))   # :acq
-print("picker rows for 'ask':",
-      sorted(x for x in ts.triggers if d._term_matches("ask", x)))   # BOTH :acq and :dacq
-PY
+# --- the sandbox tier. FOUR things an earlier version of this block got wrong ---
+# (a) `nix build` prints no build log for a build that SUCCEEDS without -L;
+# (b) an already-built derivation prints NOTHING at all, -L or not, so silence is not a verdict;
+# (c) a FAILING build DOES print the tail of the builder log inline (bounded by `log-lines`);
+# (d) `~/workspace/devrc` is the SHARED base clone — see above.
+nix build "<TREE>#checks.x86_64-linux.pytests" --no-link -L
+DRV=$(nix path-info --derivation "<TREE>#checks.x86_64-linux.pytests")
+nix log "$DRV" > /tmp/pytests.log            # works even when the build was cached
+grep -n 'RESULT:' /tmp/pytests.log           # TWO hits: `RESULT: all good`, then
+                                             # `RESULT: PASS (exit=0)` — the LAST is the verdict
+grep -c 'panic: test timed out' /tmp/pytests.log   # 0
+# repeat for .nodetests — ONE AT A TIME; a combined invocation produces FALSE failures.
+# nodetests prints FIVE `# fail 0` blocks: 569 browser-bridge, 508 dl-router, 21 browser-ext,
+# 188 clickup skill, 134 discord-embed-ext.
 
-# --- every PR landed by CONTENT, never ancestry ---
+# --- #1109 landed by CONTENT, never ancestry (a squash merge is never an ancestor) ---
 git -C ~/workspace/devrc fetch origin main
-git -C ~/workspace/devrc show origin/main:scripts/collector/keylog/espanso_detect.py | grep -c _AMBIGUOUS_TERM_OWNER   # 3
-git -C ~/workspace/devrc show origin/main:scripts/tests/test_positional_spool_reader_ratchet.py | grep -m1 'PINNED_POSITIONAL_TOTAL ='   # 47
-# the ledger entry is GONE — count the LEDGER FORMAT, not the name (a comment mentions it)
+# BOTH pair sites sequence: each waits for row one before issuing command two
+git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/test_server.py \
+  | grep -cE '_wait_ops\(spool_dir, "tabs", 1, where=_routed_to\(inst\)\)'   # 2
+# POSITIVE CONTROL for that grep, because a zero from a dead pattern is indistinguishable
+# from a real zero: the same pattern returns 1 at 2579e2f3 and 0 at 2cec1d45.
+git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/test_server.py \
+  | grep -cE '^\s+(absent, empty|first, second) = _wait_ops'                 # 0
 git -C ~/workspace/devrc show origin/main:scripts/tests/test_positional_spool_reader_ratchet.py \
-  | grep -c '"test_server.py::test_the_two_origin_tokens_are_distinct_and_recorded_verbatim"'   # 0
+  | grep -m1 'PINNED_POSITIONAL_TOTAL ='                                     # 47
 
-# --- drift-check rc 17 is inert here: prove it by the BINARY, not the store path ---
-sha256sum "$(readlink -f "$(command -v clawgatectl)")"                       # 6ffdf136b8c8f6d4…
-ssh zach@192.168.50.155 'sha256sum "$(readlink -f "$(command -v clawgatectl)")"'   # identical
+# --- re-derive the bucket counts. NOTE `<TREE>` — this is the command that got it wrong. ---
+nix develop ~/workspace/devrc -c python3 - "<TREE>" <<'PY'
+import sys, collections
+tree = sys.argv[1]
+sys.path.insert(0, tree + "/scripts/tests")
+import test_positional_spool_reader_ratchet as R
+recs = R.classify_wait_calls(R.TARGET_DIR)
+assert str(R.TARGET_DIR).startswith(tree), ("measuring the WRONG tree", R.TARGET_DIR)
+print(R.TARGET_DIR)
+print(len(recs), "call sites")
+for b, c in sorted(collections.Counter(r["bucket"] for r in recs).items()):
+    print("  %3d  %s" % (c, b))
+PY
+# at #1109's head: 64 sites, _wait_ops where= 5, _wait_events positional 47 (the PIN, unmoved).
+# The assert is the point: TARGET_DIR resolves from the ratchet module's OWN __file__, so
+# importing it from the wrong path silently measures the wrong corpus.
 
-# --- the gate: BOTH tiers. The sandbox tier is the one Tekton gates on. ---
-nix develop ~/workspace/devrc --command bash ~/workspace/devrc/scripts/run-tests.sh ~/workspace/devrc
-nix build ~/workspace/devrc#checks.x86_64-linux.pytests ~/workspace/devrc#checks.x86_64-linux.nodetests --no-link
+# --- the CONTROL that makes the fix non-vacuous, for EITHER pair site ---
+# swap the two _cmd_sess calls, keeping the sequencing, in a .git-free `cp -a` copy.
+# Expect RED at the first row's ["session"] with KeyError: 'session', and the
+# `pair[0] == <first row>` line still GREEN. Measured on both sites, twice, independently.
 ```
 ## Open investigations — live diagnosis state
 
@@ -378,3 +540,60 @@ nix build ~/workspace/devrc#checks.x86_64-linux.pytests ~/workspace/devrc#checks
 - **Why untouched:** changing a passing test on a theory is how the next flake gets introduced.
 - **Next probe / fix:** sequence it — wait for the first row, then issue the second, which is
   `_wait_events`' own sanctioned "order pinned structurally" form.
+
+### RESOLVED — the sibling ordering race, and `where=` was never going to close it
+- **Was:** `test_an_absent_origin_header_is_not_the_same_as_an_empty_one` issued both `tabs`
+  commands, then waited for two rows and unpacked them positionally, while its own docstring
+  says order between them is the signal. `emit_cmd_event` runs off the critical path, after the
+  HTTP response, so file order was the scheduler's.
+- 🔴 **The reason it survived an order-safety pass: `_wait_ops`' docstring said the site's
+  `where=_routed_to(inst)` "keeps the order". IT DOES NOT.** A per-row predicate cannot order two
+  rows that satisfy it EQUALLY, and this test's two do — same op, same routing key. `where=`
+  separates your rows from a NEIGHBOUR's; that is a different hazard with a different remedy.
+  Both hazards are now named separately in the test's docstring and in `_wait_ops`'.
+- **Fix (`#1109`):** wait for row one, then issue command two — `_wait_events`' own sanctioned
+  "order pinned structurally" form. The single routed row returned before the second command
+  EXISTS is the first command's, by observation rather than by argument. `pair[0] == absent`
+  then asserts the append-only order still holds, so a future regression says so rather than
+  surfacing as a bogus attribution failure.
+- **CONTROL, run, because a passing test proves nothing about why it passes:** swapping the two
+  commands (keeping the sequencing) turns it RED at `absent["session"]` with
+  `KeyError: 'session'` — **while `pair[0] == absent` still PASSES**. So the red is the
+  assertions being genuinely order-dependent, not the new guard firing: the mutation died for
+  the right reason. File restored afterwards, and the checkable form of that claim is: the
+  worktree file, the commit, and the built store source are byte-identical.
+  ⚠ **This line used to cite `sha256 1b42b227…` as the proof.** That digest names an
+  intermediate working-tree state reaching no commit, so no reader can reproduce it. A later
+  audit found the retraction had been ADDED under Gotchas while this line still MADE the claim —
+  the doc retracting something it also still asserted, ~140 lines apart. **An append-only
+  section cannot be corrected by appending a correction to a different section.**
+- **Ruled out:** routing as the fix (closes the foreign-row half only — measured on `#1074`);
+  and a tighter deadline as a concern — the change **doubles** the budget, one 10 s wait becoming
+  two, worst case 10 s → 20 s.
+- **Still open:** the verdict of the sandbox tier. See "State now".
+
+### RESOLVED — round 1 of the blind audit found three defects, all in prose I wrote
+- **Method note that earned its keep:** the auditor was dispatched BLIND — the diff and the
+  checklist, not my conclusions. All three findings are the failure mode the PR exists to close.
+- 🔴 **(1) A FALSE HISTORICAL CITATION, introduced by the fix itself.** I wrote that `#1074`'s
+  pair reversed "with `where=` already in place". `git show e9f8ce14` refutes it: the flaking
+  site was a bare positional `_wait_events(spool_dir, len(ORIGIN_TOKENS))` and `#1074` **added**
+  the `where=`. And `where=` did not fix its order either — that site also became
+  `sorted(...) == sorted(ORIGIN_TOKENS)`. **The true version is stronger:** two halves, two
+  remedies, and a site whose order IS the signal cannot take the sorting one.
+- 🔴 **(2) THE GUARD CARRIED THE IDENTICAL RACE.** `test_a_neighbours_row_of_the_same_op_is_not_
+  selected_as_one_of_ours` — the test whose whole job is to protect the site I fixed — issued both
+  commands before waiting, unpacked `first, second` positionally, and still carried the comment
+  `# THE FIX: where= keeps the pair THIS test caused, in order`, the exact sentence the PR
+  retracts twice elsewhere. **The retraction had been applied everywhere except the one place
+  that most needed it.** Also: my sentence "THE ONE SITE IN THIS FILE THAT UNPACKS A PAIR" was
+  wrong on both halves — after my own change the test I named no longer unpacks a pair, and an
+  AST walk finds exactly one tuple-unpack site, which is this one. Now sequenced; control re-run
+  on it specifically (RED at `first["session"]`, `pair[0] == first` passing).
+- 🔴 **(3) THE NEW GUARD'S COMMENT OVER-CLAIMED — in the PR about over-claiming comments.** It
+  said `pair[0] == absent` would report a lost sequencing. It cannot: re-fold the commands and
+  `absent` becomes whatever landed first, which IS `pair[0]` by construction, so it stays green.
+  Narrowed to the append-only-order invariant it really pins, and it now says outright that
+  nothing there can detect the sequencing's removal.
+- **Independently re-derived before fixing** — the `git show`, the AST walk, and the mutation
+  were all re-run here rather than accepted from the agent.
