@@ -30,6 +30,7 @@ NAMESPACE="$2"
 KUSTOMIZATION="$3"
 DEPLOYMENT="${4:-$KUSTOMIZATION}"
 REPLICAS="${5:-1}"
+FLUX_NS="${FLUX_NS:-flux-system}"
 
 case "$CLUSTER" in
   homelab)   KC="${KC_HOMELAB:?KC_HOMELAB not set}" ;;
@@ -38,8 +39,8 @@ case "$CLUSTER" in
   *) echo "Unknown cluster: $CLUSTER (expected homelab | workbench | prod)" >&2; exit 1 ;;
 esac
 
-echo "→ Resuming kustomization $KUSTOMIZATION (flux-system) on $CLUSTER..."
-if ! KUBECONFIG="$KC" flux resume kustomization "$KUSTOMIZATION" -n flux-system; then
+echo "→ Resuming kustomization $KUSTOMIZATION ($FLUX_NS) on $CLUSTER..."
+if ! KUBECONFIG="$KC" flux resume kustomization "$KUSTOMIZATION" -n "$FLUX_NS"; then
   echo "ERROR: flux resume failed" >&2
   exit 2
 fi
@@ -48,6 +49,44 @@ echo "→ Scaling deployment $DEPLOYMENT in $NAMESPACE to $REPLICAS..."
 if ! KUBECONFIG="$KC" kubectl scale deployment "$DEPLOYMENT" -n "$NAMESPACE" --replicas="$REPLICAS"; then
   echo "ERROR: kubectl scale failed" >&2
   exit 3
+fi
+
+# Anything that dependsOn this kustomization was wedged at DependencyNotReady
+# while it was suspended (see quiesce-workload.sh's pre-flight). Name them, so
+# the operator has something specific to re-check rather than a general hope.
+set +e
+KS_JSON=$(KUBECONFIG="$KC" kubectl get kustomizations -A -o json 2>/dev/null)
+KS_RC=$?
+set -e
+if [[ $KS_RC -eq 0 ]]; then
+  set +e
+  DEPENDENTS=$(printf '%s' "$KS_JSON" | python3 -c '
+import json, sys
+target, tns = sys.argv[1], sys.argv[2]
+d = json.load(sys.stdin)
+for k in d.get("items", []):
+    md = k.get("metadata", {}) or {}
+    own = md.get("namespace", "") or ""
+    for dep in (k.get("spec", {}) or {}).get("dependsOn") or []:
+        if dep.get("name") != target:
+            continue
+        if (dep.get("namespace") or own) != tns:
+            continue
+        print("%s/%s" % (own, md.get("name", "")))
+' "$KUSTOMIZATION" "$FLUX_NS" 2>/dev/null)
+  DEP_RC=$?
+  set -e
+  if [[ $DEP_RC -eq 0 && -n "$DEPENDENTS" ]]; then
+    echo ""
+    echo "These dependsOn $KUSTOMIZATION and were wedged while it was suspended —"
+    echo "confirm each goes Ready again (they clear on the next reconcile, not instantly):"
+    printf '%s\n' "$DEPENDENTS" | sed 's/^/     /'
+    echo "  KUBECONFIG=$KC flux get kustomization -n $FLUX_NS"
+  fi
+else
+  echo ""
+  echo "NOTE: could not list kustomizations, so any DEPENDENTS of $KUSTOMIZATION" >&2
+  echo "      were not checked. That is unknown, not clear." >&2
 fi
 
 echo ""

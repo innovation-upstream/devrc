@@ -18,93 +18,27 @@ Research modern best practices for clipboard and terminal clipboard interaction 
 
 ## State now
 
-- **Rank 1 is DONE, and this is the first claim in this effort verified under the
-  real systemd unit rather than by hand.** `drift-check.sh` gained **rc 24**: an
-  unprotected-`main` detector. Merged as **#1065 → `ebbe5eaa`**, both hosts
-  converged and compared at **`809486fa`**.
-- **Live proof**, from `journalctl --user -u drift-check` after `systemctl --user
-  start drift-check` on the workbench (the only host the timer runs on):
-  ```
-  [protect] innovation-upstream/devrc main: 2 required status check(s) — tekton/devrc-pytests,tekton/devrc-nodetests
-  [protect]   enforce_admins=true — the checks bind admins too.
-  drift-check: no drift on the host(s) CHECKED: workbench (local), laptop (remote)
-  ```
-  `gh` resolves on the unit's own PATH on **both** hosts (checked by running
-  `command -v gh` under the unit's `Environment` PATH, not by reading home.nix).
-- **Two side PRs shipped from this thread:** **#1069** (re-pin skill-tier
-  measurements — `main` was RED for every PR until it landed) and the
-  `TARGET_FLOORS` merge-conflict resolution.
-- **Also fixed while verifying:** the laptop's `homelab-talos` was 31 commits
-  behind with **1 touching `containers/clawgate`** — the subtree `clawgatectl`
-  is compiled from. Fast-forwarded + re-switched; `drift-check` now reports both
-  hosts' built sources CURRENT. ⚠ `clawgatectl --version` read **0.8.18 before
-  and after** — the version string was NOT the signal; the deadman was.
-### Earlier — the 2026-08-29 record (how the clipboard fix shipped INERT)
-Kept because its content is durable, not status: the inert-fix story, the
-E484 chain and the verified-on-the-real-path claim. It is no longer under a
-`State now` heading, so a future status replace cannot silently delete it.
-
-- **Research session (00:37–00:53):** report completed, no code changes. This doc
-  landed on `handoff/clipboard-research` → PR #1014 (it could not be pushed to
-  `main`: protected branch, 2 required checks).
-- **Resume session:** both open decisions resolved, and a bug the research missed
-  was found, fixed and gated.
-  - `unnamedplus` — **declined**, no change.
-  - `"+y` dead with no `DISPLAY` — fixed in **#1027**, which then turned out to
-    be INERT in production until **#1043**. See the block below before trusting
-    anything in this section.
-- 🔴 **THE CLIPBOARD FIX (#1027) SHIPPED INERT. #1043 is what made it work.**
-  Everything above this line was written before that was known; the paragraph
-  that used to sit here claimed the change "goes live on `git pull` alone,
-  no `home-manager switch`" and cited `$DEVRC_DIR` as the mechanism. Both
-  halves were wrong, and it is quoted rather than deleted because the way it
-  was wrong is the reusable part.
-
-  Measured over real ssh to the laptop, against the deployed copy, AFTER #1027
-  had merged and shipped:
-
-  ```
-  Error in /home/zach/.config/nvim/init.lua:
-  E484: Can't open file /.config/nvim/config/native.vim
-  clipboard: No provider. Try ":checkhealth" or ":h clipboard".
-  ```
-
-  `$DEVRC_DIR` was set in exactly ONE place — a systemd user service's
-  `Environment=` block in `nix/graphical.nix` — so it existed only inside a
-  graphical session. `init.vim` sourced every other config file through it, so
-  off-session the first `source` raised E484 and **aborted the entire nvim
-  config**: no options, no leader mappings, no lua half, no plugin config.
-  neovim had been running unconfigured over ssh, on a bare TTY, in units and in
-  cron — invisible because the only place anyone reads a config error is the
-  terminal in front of them, which is the one place the variable was set.
-
-  🔴 **Why no test caught it, which is the lesson worth keeping:** #1027's
-  red/green harness **set `$DEVRC_DIR` itself**, manufacturing the one
-  precondition that does not hold in production. **A fixture that supplies an
-  environment cannot observe that environment being absent.** The fix was
-  correct, merged, green, mutation-tested — and did nothing where it mattered.
-
-- **Fixed in #1043**: nix substitutes the repo path into `init.vim` at BUILD
-  time, `init.lua` self-locates via `debug.getinfo`, and `lazygit.lua` — found
-  by the new guard, not by hand — stopped pointing at
-  `nil/.config/lazygit/config.yml`. Guards: a hermetic relationship test that
-  NO file under `.config/nvim` reads `$DEVRC_DIR` at runtime (comments
-  stripped, mutation-tested), plus a dev-host red/green counting E484s from the
-  real chain.
-
-- 🔴 **Deploy: a `home-manager switch` IS required** (the corrected claim).
-  `init.vim` is `builtins.readFile`'d into the store, so the substitution
-  happens at build time. Files it sources — `native.lua`, `native.vim` — are
-  still read from the `~/workspace/devrc` working tree at runtime, so edits to
-  THOSE remain live on `git pull`. The two are different questions and the old
-  paragraph collapsed them into one.
-
-- ✅ **VERIFIED on the real path, 2026-08-29**, both hosts at `638959b4`:
-  `ssh` → `nvim` → `"+yy` on the laptop went from `E484=9, No provider,
-  OSC52=0` to `E484=0, No provider=0, OSC52=1`, payload decoding to the exact
-  yanked line. Workbench resolves the same substituted store `init.vim`. This
-  is the first claim in this effort verified on the path that actually failed
-  rather than a reconstruction of it.
+- **Rank 2 is BUILT, committed and pushed — NOT merged.** Branch
+  `fix/break-glass-restore-recipe`, commit **`b22c1d78`**, based on `53f523ed`.
+  No PR opened yet; the full gate was still running when this doc was written.
+  Files: `CLAUDE.md` (the escape-hatch note), `scripts/tests/test_break_glass_note.py` (new).
+- **What it changes.** The break-glass note handed over
+  `gh api -X DELETE …/branches/main/protection/required_status_checks` and said
+  nothing about closing the window. It now carries the four-step round trip:
+  **capture → open → full `PUT` → read back**, with the capture command run live
+  against the real endpoint and verified to emit all **11** keys the `PUT`
+  requires, in the shape of the restore that actually worked on 2026-08-30.
+- **Rank 1 (rc 24) remains DONE** — #1065 → `ebbe5eaa`, verified live under the
+  real systemd unit. Unchanged by this session.
+- **Verification of the new guard:** red at `53f523ed` with the real finding
+  (`carries no -X PUT`), green at `b22c1d78`; mutation sweep **7/7 killed**,
+  control green, under `PYTHONDONTWRITEBYTECODE=1`.
+- ⚠ **Not merged, not deployed, not shipped.** `CLAUDE.md` is repo-root prose so
+  no `home-manager switch` is needed for it to take effect, but the branch is
+  not on `main` yet — nothing reading `main` sees the corrected note.
+- Claim `clipboard-research-2` is **HELD, not released** (this session still
+  owns rank 2 until the PR lands). Worktrees `devrc-breakglass` and
+  `devrc-baseglass` are still on disk and must be removed at close-out.
 
 ## Research findings — clipboard/terminal clipboard best practices (2025-2026)
 
@@ -207,6 +141,10 @@ of by a human happening to look.
 
 ## Next steps (ranked)
 
+🔴 **Numbering is deliberately STABLE across this update** — rank is half a
+`claim-work` slug's identity, so item 2 is marked done in place rather than
+removed and the rest are not renumbered.
+
 **Closed by this effort — kept so a resume does not re-open them:**
 - ~~adopt `set clipboard=unnamedplus`~~ — **DECLINED 2026-08-29**: it routes every
   `d`/`c`/`x`/`s` through the `+` register, so `dd` clobbers the system clipboard.
@@ -218,27 +156,25 @@ of by a human happening to look.
 - ~~**Add an unprotected-`main` arm to `scripts/drift-check.sh`**~~ — **SHIPPED
   2026-08-30** as rc 24, #1065 → `ebbe5eaa`, verified live under the real unit.
 
-1. **Give the rc-24 arm an UNMEASURED ladder** (devrc). It now has THREE
+1. **Give the rc-24 arm an UNMEASURED ladder** (devrc). It has THREE
    could-not-measure states, and a lapsed/expired `gh` token leaves it blind
-   **forever** while the deadman reads clean — verbatim the rc-18 lesson this same
-   file already records ("a scope that can never be evaluated escalated NEVER").
-   The `enforce_admins` half additionally needs repo-**admin**, which is the
-   credential most likely to lapse. Files: `scripts/drift-check.sh` (reuse the
+   **forever** while the deadman reads clean — verbatim the rc-18 lesson this
+   repo already records ("a scope that can never be evaluated escalated NEVER").
+   The `enforce_admins` half additionally needs repo-**admin**, the credential
+   most likely to lapse. Files: `scripts/drift-check.sh` (reuse the
    `u_streak_bump`/`_streak_file_bump` machinery), `scripts/tests/test_drift_check.py`.
    forcing: none
-2. **Correct `devrc/CLAUDE.md`'s break-glass note** (devrc). It hands over
-   `gh api -X DELETE …/required_status_checks` verbatim and says **nothing about
-   restoring** — and the obvious `PATCH` back **silently fails**, which is why the
-   2026-08-29 break-glass left `main` unprotected despite an EXIT-trap restore that
-   ran. It must carry the full `PUT` payload and say the restore has to be READ
-   BACK. Files: `CLAUDE.md`.
-   forcing: incident — the 2026-08-29 double unprotection; occurrence 1's restore
+2. ~~**Correct `devrc/CLAUDE.md`'s break-glass note**~~ — **BUILT 2026-08-30,
+   IN FLIGHT: branch `fix/break-glass-restore-recipe` @ `b22c1d78`, no PR yet.**
+   Close it out: confirm the gate, open the PR, merge, then
+   `claim-work --release clipboard-research-2` and remove both worktrees.
+   forcing: incident — the 2026-08-29/30 unprotections; occurrence 1's restore
    trap executed and still left main open, occurrence 2 left a direct push
    (`837d3fde`) on main that required checks would have rejected.
 3. **Run `/audit-pr 1043`** (devrc) — the one review the clipboard effort never
-   got, and it touches `nix/programs/`, which every `home-manager switch` depends
-   on. Merged, shipped and verified on the real path, so this is confirmation
-   rather than a gate. Files: `nix/programs/`, `.config/nvim/`.
+   got, and it touches `nix/programs/`, which every `home-manager switch`
+   depends on. Merged, shipped and verified on the real path, so this is
+   confirmation rather than a gate. Files: `nix/programs/`, `.config/nvim/`.
    forcing: none
 4. **Consider recording the transferable lesson in `claude/RULES.md`**: *a fixture
    that supplies an environment cannot observe that environment being absent.*
@@ -249,6 +185,15 @@ of by a human happening to look.
    **CLOSED**, so the cost is a test edit, not safety — but `--paginate` is a
    plausible near-term need on `/rules/branches/main`. Files:
    `scripts/tests/test_drift_check.py`.
+   forcing: none
+6. **OFFERED, NOT BUILT — `scripts/break-glass-merge.sh`** (devrc). The
+   deterministic version of the recipe rank 2 just wrote into prose: capture,
+   open, merge, full `PUT`, read back, and **refuse to exit 0 unless the
+   read-back diff matches the capture key-by-key**. Deliberately not built this
+   session: shipping an *untested* command into a break-glass path is precisely
+   the failure rank 2 corrects, and it cannot be tested end-to-end without
+   opening the window on `main`. Needs an operator decision on how to prove it
+   before it is trusted. Files: `scripts/break-glass-merge.sh` (new).
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -351,8 +296,173 @@ is free. The trigger to revisit is an OBSERVED lost clipboard, not this note.
 - **Squash merges:** verify by CONTENT. `merge-base --is-ancestor <head> main`
   returns **false after every squash, forever**, and reads as "not merged".
 
+### Earlier — the 2026-08-29 record (how the clipboard fix shipped INERT)
+Kept because its content is durable, not status: the inert-fix story, the
+E484 chain and the verified-on-the-real-path claim. It is no longer under a
+`State now` heading, so a future status replace cannot silently delete it.
+
+- **Research session (00:37–00:53):** report completed, no code changes. This doc
+  landed on `handoff/clipboard-research` → PR #1014 (it could not be pushed to
+  `main`: protected branch, 2 required checks).
+- **Resume session:** both open decisions resolved, and a bug the research missed
+  was found, fixed and gated.
+  - `unnamedplus` — **declined**, no change.
+  - `"+y` dead with no `DISPLAY` — fixed in **#1027**, which then turned out to
+    be INERT in production until **#1043**. See the block below before trusting
+    anything in this section.
+- 🔴 **THE CLIPBOARD FIX (#1027) SHIPPED INERT. #1043 is what made it work.**
+  Everything above this line was written before that was known; the paragraph
+  that used to sit here claimed the change "goes live on `git pull` alone,
+  no `home-manager switch`" and cited `$DEVRC_DIR` as the mechanism. Both
+  halves were wrong, and it is quoted rather than deleted because the way it
+  was wrong is the reusable part.
+
+  Measured over real ssh to the laptop, against the deployed copy, AFTER #1027
+  had merged and shipped:
+
+  ```
+  Error in /home/zach/.config/nvim/init.lua:
+  E484: Can't open file /.config/nvim/config/native.vim
+  clipboard: No provider. Try ":checkhealth" or ":h clipboard".
+  ```
+
+  `$DEVRC_DIR` was set in exactly ONE place — a systemd user service's
+  `Environment=` block in `nix/graphical.nix` — so it existed only inside a
+  graphical session. `init.vim` sourced every other config file through it, so
+  off-session the first `source` raised E484 and **aborted the entire nvim
+  config**: no options, no leader mappings, no lua half, no plugin config.
+  neovim had been running unconfigured over ssh, on a bare TTY, in units and in
+  cron — invisible because the only place anyone reads a config error is the
+  terminal in front of them, which is the one place the variable was set.
+
+  🔴 **Why no test caught it, which is the lesson worth keeping:** #1027's
+  red/green harness **set `$DEVRC_DIR` itself**, manufacturing the one
+  precondition that does not hold in production. **A fixture that supplies an
+  environment cannot observe that environment being absent.** The fix was
+  correct, merged, green, mutation-tested — and did nothing where it mattered.
+
+- **Fixed in #1043**: nix substitutes the repo path into `init.vim` at BUILD
+  time, `init.lua` self-locates via `debug.getinfo`, and `lazygit.lua` — found
+  by the new guard, not by hand — stopped pointing at
+  `nil/.config/lazygit/config.yml`. Guards: a hermetic relationship test that
+  NO file under `.config/nvim` reads `$DEVRC_DIR` at runtime (comments
+  stripped, mutation-tested), plus a dev-host red/green counting E484s from the
+  real chain.
+
+- 🔴 **Deploy: a `home-manager switch` IS required** (the corrected claim).
+  `init.vim` is `builtins.readFile`'d into the store, so the substitution
+  happens at build time. Files it sources — `native.lua`, `native.vim` — are
+  still read from the `~/workspace/devrc` working tree at runtime, so edits to
+  THOSE remain live on `git pull`. The two are different questions and the old
+  paragraph collapsed them into one.
+
+- ✅ **VERIFIED on the real path, 2026-08-29**, both hosts at `638959b4`:
+  `ssh` → `nvim` → `"+yy` on the laptop went from `E484=9, No provider,
+  OSC52=0` to `E484=0, No provider=0, OSC52=1`, payload decoding to the exact
+  yanked line. Workbench resolves the same substituted store `init.vim`. This
+  is the first claim in this effort verified on the path that actually failed
+  rather than a reconstruction of it.
+
+🔴 **RELOCATED 2026-08-30 (second attempt), and the first attempt is the lesson.**
+This block was moved out of `## State now — updated 2026-08-29` into a `###`
+subsection — but left INSIDE `## State now`, which REPLACES. The very next update
+was about to delete it, and `handoff_doc.py` said so. **Nesting durable content
+under a REPLACE heading does not protect it; only the SECTION's bucket decides.**
+It now sits under `## Gotchas`, which appends.
+
+
+- 🔴 **`ship.sh` rc 19 — EVERY PER-HOST LINE READ ✅ VERIFIED AND THE FLEET WAS
+  STILL WRONG.** Measured 2026-08-30: the workbench landed `db790e08` and the
+  laptop `e9437342`, each reporting `✅ VERIFIED — on branch main at origin/main
+  (clean tree) + switched`. `origin/main` moved BETWEEN the two legs' fetches
+  (#1046 merged mid-run), so both hosts converged correctly to different commits.
+  This is the whole reason `ship.sh` compares the two landed shas: a per-host
+  verdict cannot see it, and reading the per-host lines — which is otherwise the
+  right instinct — would have called it clean.
+  **Diagnose before re-running**: `git merge-base --is-ancestor <older> <newer>`.
+  True ⇒ benign, main simply advanced; re-run `ship.sh` and it converges. False
+  ⇒ genuine divergence, do not re-run blind. A one-host run reports
+  `cross-host agreement NOT COMPARED`, which is a different claim from agreement.
+- 🔴 **A DATED STATUS HEADING CANNOT BE REPLACED, and the doc had one.**
+  `handoff_doc.py` buckets by EXACT heading, so `## State now — updated
+  <date>` never matches the next session's `## State now — updated <other date>`:
+  the delta is bucketed NEW and **appends a second status section** while the
+  stale one stays at the top. Measured here — the doc briefly opened with
+  2026-08-29 status and carried the current state 300 lines below. Normalised to
+  the template's bare `## State now`; the 2026-08-29 content was kept under
+  `### Earlier — the 2026-08-29 record`, a non-status heading a replace cannot
+  touch. Same failure mode as a dated topic slug, one level down.
+- 🔴 **The write gate caught a RETRACTION about to be deleted.** The greenclip
+  security retraction sat under `## Next steps` — a REPLACE heading — so every
+  future status update would have silently removed it. `handoff_doc.py` flagged
+  it as a durable line being dropped; it now lives under `## Gotchas`, which
+  appends. **Where a durable claim SITS decides whether it survives**, and a
+  retraction is the class that must.
+
+### The 2026-08-30 break-glass correction (rank 2)
+
+- 🔴 **`PATCH` does not "silently fail" — it 404s, and the distinction changes
+  the fix.** The prior handoff recorded the symptom as silent. Primary evidence
+  from two sessions says otherwise: `PATCH …/protection/required_status_checks`
+  returns **`Required status checks not enabled`** once the sub-resource is
+  deleted. It *updates checks that exist*; it cannot recreate a deleted
+  sub-resource. What made it look silent is the idiom around it — a restore
+  inside an EXIT trap written `>/dev/null 2>&1`, which discards the very message
+  that names the cause.
+- 🔴 **The bigger hazard is the one the summary omitted: a PARTIAL `PUT`
+  returns 200 and silently drops every key it does not carry** — `enforce_admins`,
+  force-push and deletion settings included. So "the PUT returned 200" is a claim
+  about the REQUEST, never about the protection, and the read-back is not
+  optional. All **11** keys are load-bearing;
+  `required_status_checks`/`enforce_admins`/`required_pull_request_reviews`/`restrictions`
+  are *required* by the endpoint (the last two are legitimately `null` here), and
+  the `app_id` pinning inside `checks` is what binds the restored context to
+  Tekton rather than to any app that can post the same name.
+- ⚠ **NOT MEASURED and deliberately labelled so in `CLAUDE.md`:** whether
+  `PUT` with `required_status_checks: null` opens the window symmetrically. The
+  `DELETE`/`PUT` asymmetry is what has actually been run. Recording an untested
+  alternative as an option is how the original trap got its untested command.
+- 🔴 **A guard's own positive control caught the guard being vacuous — keep the
+  control.** `test_break_glass_note.py` first parsed `gh api` paths with
+  `/repos/[^\s'"]+`, which swallows the closing **backtick**. `CLAUDE.md` writes
+  the DELETE inline in backticks, so the parser saw **no** DELETE in a document
+  that plainly contained one, and the round-trip assertion passed **VACUOUSLY**
+  on exactly the note it exists to reject. The separate
+  `test_the_note_still_offers_the_escape_hatch` control is what failed and
+  exposed it. **A guard over MARKDOWN must be tested against the markdown
+  rendering, not just the bare command.**
+- 🔴 **Two mutants SURVIVED the first sweep; both were fixture gaps, not logic
+  bugs.** `put-accepts-patch` — nothing fed a `PATCH` on the protection
+  **object**, so widening the verb test to `("PUT","PATCH")` went unnoticed and
+  the guard would have accepted a note recommending an unmeasured restore verb.
+  `checks-anchor-dropped` — `…/required_status_checks/contexts` is a real and
+  different endpoint, misclassified as the sub-resource once the `\Z` anchors
+  went. **The sweep only ever tests the mutations you imagined**; the fix was to
+  vary the axes, not to add more mutants of the same shape.
+- **Why the recipe was not re-verified live:** confirming it would mean `PUT`ing
+  protection back over itself on `main`. The step is already measured by a real
+  run (2026-08-30, read-back diffed key-by-key, "FAITHFUL — every key matches"),
+  so a second confirmation buys little against a write to the protection surface
+  that has already gone wrong three times this week. The capture half *was* run
+  live, because it is a read.
+
+### The kickoff block's own path format is a live trap
+
+- 🔴 **A `devrc/claudedocs/…` prefix in a kickoff does NOT resolve, and the
+  failure is quiet in the direction that matters.** `resume-state.sh` matched no
+  such file, **fell back to the newest of 90** handoff docs
+  (`handoff-browser-bridge-architecture-trace.md`) and reconciled a *different
+  initiative* — DRIFT lines, PR states and all. The only tell was the `!! GAPS`
+  banner naming the file it could not find. Re-running with the repo-relative or
+  absolute path reconciled correctly. **Read the gap banner before the DRIFT
+  block**; a clean-looking digest under a fallback is a digest about other work.
+  `/handoff` emits the prefixed form, so this will recur — pass the path as it
+  exists on disk.
+
 ## How to verify
-- 🔴 **The rc-24 arm, under the real unit** — not by reading the file:
+
+- 🔴 **The rc-24 arm, under the real unit** — not by reading the file. Carried
+  forward from the rank-1 close-out; still the only honest check for that arm:
   ```
   systemctl --user start drift-check
   journalctl --user -u drift-check --since '5 minutes ago' | grep '\[protect\]'
@@ -367,5 +477,26 @@ is free. The trigger to revisit is an OBSERVED lost clipboard, not this note.
   env PATH="$P" sh -c 'command -v gh'
   ```
 - **Both hosts agree:** `scripts/ship.sh` must end `2 hosts compared, both at <sha>` —
-  a one-host run says `cross-host agreement NOT COMPARED`, which is a different claim.
-- Neovim off-display, tmux/espanso clipboard: unchanged, see the section above.
+  a one-host run says `cross-host agreement NOT COMPARED`, a different claim.
+- **The break-glass guard, red at base and green at HEAD** — the claim is the
+  MATRIX, not either half:
+  ```bash
+  git -C ~/workspace/devrc worktree add --detach /tmp/bg-base 53f523ed
+  cp <branch>/scripts/tests/test_break_glass_note.py /tmp/bg-base/scripts/tests/
+  PYTHONDONTWRITEBYTECODE=1 nix develop ~/workspace/devrc -c \
+    python3 -m pytest /tmp/bg-base/scripts/tests/test_break_glass_note.py -q
+  # expect: 1 failed (test_the_break_glass_note_round_trips, "carries no -X PUT")
+  PYTHONDONTWRITEBYTECODE=1 nix develop ~/workspace/devrc -c \
+    python3 -m pytest ~/workspace/devrc/scripts/tests/test_break_glass_note.py -q
+  # expect: all passed
+  ```
+- **The vacuity control is the one that matters** — if
+  `test_the_note_still_offers_the_escape_hatch` fails, the round-trip assertion
+  is passing on a document with no DELETE in it and proves nothing.
+- **The `<!-- merge-gate: other -->` marker must survive the edit** — it sits
+  three lines above the changed region and is parsed by
+  `scripts/tests/test_ci_claim_matches_reality.py`, which must stay green.
+- **Both tiers, one at a time** (the dev-host tier is NOT the tier Tekton gates
+  on): `nix develop <repo> --command bash <repo>/scripts/gate.sh --tier both`,
+  then `nix build .#checks.x86_64-linux.pytests` and
+  `.#checks.x86_64-linux.nodetests` **separately**.

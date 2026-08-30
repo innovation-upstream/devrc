@@ -409,7 +409,29 @@ TMUX_PANES_ARGV = ("tmux", "list-panes", "-a", "-F", PANE_FORMAT)
 # just the existence of an id. session_name is LAST for the same reason
 # pane_title is last above: it is the field that can itself contain '|', so a
 # bounded maxsplit lets it absorb the remainder.
-WINDOW_FORMAT = "#{window_id}|#{window_index}|#{session_name}"
+#
+# 🔴 `#{pid}` AND `#{start_time}` ARE SERVER-LEVEL AND RIDE FREE HERE. tmux
+# expands both identically on EVERY row, so carrying them costs no extra tmux
+# invocation and — the reason it matters — no extra ssh round trip. The pusher
+# already makes up to four ssh calls per run with no ControlMaster (~2,880
+# handshakes/day); a dedicated `display-message` call for this would have been a
+# fifth. Measured on tmux 3.7c on both hosts: `list-windows -a -F
+# '#{pid}|#{start_time}' | sort -u` returns exactly ONE line.
+#
+# 🔴 THEY GO BEFORE session_name, NOT AFTER. session_name must stay last or the
+# bounded maxsplit above stops absorbing pipes in a session name — appending
+# here would silently corrupt any window whose session contains '|'.
+#
+# ⚠ `#{start_time}` IS NOT A TRUSTWORTHY TIMESTAMP AND MUST NEVER BE RENDERED AS
+# A DATE. Measured 2026-08-29: the laptop reported 1609459239 (2021-01-01) while
+# `ps -o lstart=` put the same server process at Fri Aug 28 2026 — its tmux
+# started before NTP sync, with the RTC near 2021, and the value froze there. The
+# host's clock is correct NOW, which is exactly what makes the stale value
+# convincing. It is an OPAQUE EQUALITY TOKEN: the pair (pid, start_time) changing
+# means the server restarted. A wrong-but-stable clock serves that perfectly;
+# reading it as a time does not. pid alone is insufficient — pids are reused
+# across a reboot (the laptop's server sits at pid 2509).
+WINDOW_FORMAT = "#{window_id}|#{window_index}|#{pid}|#{start_time}|#{session_name}"
 TMUX_WINDOWS_ARGV = ("tmux", "list-windows", "-a", "-F", WINDOW_FORMAT)
 
 FUZZYCLAW_DIR = os.path.join(HOME, ".tmux", "tasks")
@@ -1230,6 +1252,37 @@ def parse_panes(raw: str) -> list:
     return panes
 
 
+# The number of '|'-separated fields WINDOW_FORMAT renders, and therefore the
+# maxsplit that lets session_name (last) absorb pipes in its own value. Derived
+# from the format string rather than typed, so the two cannot drift apart.
+WINDOW_FIELD_COUNT = WINDOW_FORMAT.count("|") + 1
+
+
+def split_window_line(line: str):
+    """One tmux `list-windows` row -> (window_id, index, pid, start_time, session).
+
+    🔴 THE ONE PLACE THAT KNOWS THE FIELD ORDER. parse_windows and
+    parse_tmux_server_id both read the SAME rendered rows, and when each carried
+    its own positional unpacking a format change had to be made correctly twice.
+    Returns None for a row that cannot be trusted, so every caller drops the same
+    rows for the same reasons.
+
+    maxsplit is WINDOW_FIELD_COUNT-1 so the LAST field (session_name) absorbs any
+    '|' it contains. A row missing fields, or whose id is not a tmux `@n`, is
+    dropped: a half-parsed window is not a window we can pin a relationship
+    against.
+    """
+    if not line.strip():
+        return None
+    parts = line.split("|", WINDOW_FIELD_COUNT - 1)
+    if len(parts) < WINDOW_FIELD_COUNT:
+        return None
+    wid, idx, pid, started, sess = (p.strip() for p in parts)
+    if not wid.startswith("@") or not idx:
+        return None
+    return wid, idx, pid, started, sess
+
+
 def parse_windows(raw: str) -> dict:
     """`list-windows -a -F WINDOW_FORMAT` -> {window_id: (session, index)}.
 
@@ -1237,23 +1290,63 @@ def parse_windows(raw: str) -> dict:
     file that names @41 talking about the same window that is sitting in
     scratch7:3 right now?", and that is the question the join actually asks.
 
-    session_name is the last field and may contain '|', so maxsplit=2 lets it
-    absorb the remainder. A line that does not carry all three fields, or whose
-    id is not a tmux `@n`, is dropped — a half-parsed window is not a window we
-    can pin a relationship against.
+    The server-identity fields the format also carries are deliberately NOT
+    returned here: this function's contract is the slot join, and widening it
+    would have made every existing caller and fixture care about a value none of
+    them uses. parse_tmux_server_id reads them from the same rows.
     """
     out = {}
     for line in (raw or "").splitlines():
-        if not line.strip():
+        fields = split_window_line(line)
+        if fields is None:
             continue
-        parts = line.split("|", 2)
-        if len(parts) < 3:
-            continue
-        wid, idx, sess = parts[0].strip(), parts[1].strip(), parts[2].strip()
-        if not wid.startswith("@") or not idx:
-            continue
+        wid, idx, _pid, _started, sess = fields
         out[wid] = (sess, idx)
     return out
+
+
+def parse_tmux_server_id(raw: str):
+    """`list-windows` output -> (server_id, reason). Exactly one is non-None.
+
+    The server id is the opaque token "<pid>:<start_time>". It answers ONE
+    question: did the tmux server restart since we last looked? A consumer that
+    stored `@41` against a server id may trust that id only while the token is
+    unchanged — after a restart tmux hands out `@0` again and a stored id
+    silently designates a DIFFERENT window (the failure this exists to prevent).
+
+    🔴 NOT A TIMESTAMP. See WINDOW_FORMAT: one host's start_time was measured
+    5.6 years wrong because its tmux started before NTP sync. Equality is the
+    only operation this value supports.
+
+    🔴 CONSTANCY IS CHECKED, NOT ASSUMED. Both fields are server-level, so every
+    row must agree; taking row zero and moving on would turn a format or parsing
+    fault into a confident wrong token. Rows that disagree yield a reason, never
+    a value — the caller reports UNMEASURED rather than pinning layouts to a
+    coin flip.
+
+    An empty token (tmux rendering an unknown format as "") is a reason too: an
+    older tmux that does not know `#{start_time}` must read as "cannot measure",
+    not as the literal id ":".
+    """
+    seen = set()
+    rows = 0
+    for line in (raw or "").splitlines():
+        fields = split_window_line(line)
+        if fields is None:
+            continue
+        rows += 1
+        _wid, _idx, pid, started, _sess = fields
+        seen.add((pid, started))
+    if rows == 0:
+        return None, "no parseable window rows"
+    if len(seen) > 1:
+        return None, (f"server-level fields differ across rows ({len(seen)} "
+                      "distinct); the format or the parser is wrong")
+    pid, started = seen.pop()
+    if not pid or not started:
+        return None, ("tmux rendered an empty #{pid} or #{start_time} — that "
+                      "tmux does not support one of them")
+    return f"{pid}:{started}", None
 
 
 def parse_window_ids(raw: str) -> set:
@@ -3021,6 +3114,17 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         windows_measured = bool(wins_res["reachable"])
         live = parse_windows(wins_res["stdout"]) if windows_measured else None
         slot_ids[host] = slots_to_window_ids(live) if live is not None else None
+        # The tmux SERVER identity, from the SAME rows list-windows already
+        # returned — see WINDOW_FORMAT for why it rides along instead of costing
+        # a fifth ssh call. Unmeasured when list-windows itself did not answer:
+        # deriving it from a failed call is how an unmeasured value becomes a
+        # confident one.
+        if windows_measured:
+            tmux_server_id, tmux_server_id_reason = parse_tmux_server_id(
+                wins_res["stdout"])
+        else:
+            tmux_server_id, tmux_server_id_reason = None, (
+                "list-windows did not answer on this host")
         report["hosts"][host] = {
             "reachable": bool(panes_res["reachable"]),
             "error": panes_res["error"],
@@ -3028,6 +3132,15 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             "windows": [],
             "windows_measured": windows_measured,
             "windows_error": wins_res["error"],
+            # 🔴 THE STABILITY SENTINEL for anything that PERSISTS a window id.
+            # tmux hands out `@0` again after a server restart, so a stored
+            # `@41` silently designates a different window; a consumer may trust
+            # a stored id only while this token is unchanged. Opaque — compare
+            # it for equality, never render it as a time (WINDOW_FORMAT records
+            # a host that reported a start_time 5.6 years wrong).
+            # Exactly one of these two is non-None, always.
+            "tmux_server_id": tmux_server_id,
+            "tmux_server_id_reason": tmux_server_id_reason,
             "live_window_ids": (sorted(live) if live is not None else None),
             # A THIRD independent measurement, reported separately from the
             # other two for the same reason they are separate from each other:
