@@ -15,7 +15,9 @@ Detect clawgate/GitHub/ClickUp references in agent output, emit telemetry, and m
 them clickable in the terminal the way a URL already is. **SHIPPED AND VERIFIED LIVE.**
 
 ## State now
-- Branch: `main`, clean, level with `origin/main` at `e0e29e7b`
+- Branch: `main`, clean. `origin/main` was `e0e29e7b` when this doc was written and is
+  `3b1a0477` as of 2026-08-30 — the moves since are other threads' handoff docs, none
+  touching the mention feature
 - **Both hosts deployed and converged** (`ship.sh` → `ad5274b6`, cross-host agreement,
   0 dangling artifacts on either)
 
@@ -40,10 +42,37 @@ them clickable in the terminal the way a URL already is. **SHIPPED AND VERIFIED 
 - **operator confirmed `Ctrl+Shift+M` works in a 3-day-old window** — `live_config_reload`
   picked up the symlink swap; no restart needed (I predicted otherwise; wrong)
 
-**NOT verified:** mouse hover-underline specifically (keyboard binding was driven
-instead — same dispatch path, but `mouse.enabled` itself untested); and clicking a
-plain URL post-change, which is the interaction the `hints.enabled` array replacement
-could have silently killed.
+**BOTH REMAINING INTERACTIONS NOW VERIFIED (2026-08-30), off-screen.** Driven on an
+isolated `Xvfb :99` — same `alacritty` binary, same DEPLOYED config
+(`/nix/store/9jmni…-alacritty.toml`, reached through a probe `XDG_CONFIG_HOME` holding
+only a symlink to `~/.config/alacritty`, so `readlink -f` lands on the identical store
+file), real XTEST input, zero impact on the operator's screen. Observable was an
+`xdg-open` **capture handler**, not a browser: a probe `XDG_DATA_HOME` +
+`mimeapps.list` binding `x-scheme-handler/http{,s}` to a `.desktop` whose `Exec`
+appends the URL to a log. Both handlers under test — the URL hint's `xdg-open` and
+`mention-open.py`'s (`scripts/mention-open.py:208`) — funnel through it.
+- **`mouse.enabled` — hover underlines.** Pointer over `devrc#1011` → that text alone
+  renders underlined; the URL on the line above and the plain word below do not.
+  Screenshot, not inference.
+- **`mouse.enabled` — plain left-click dispatches.** Click on the hovered
+  `devrc#1011` → `https://github.com/innovation-upstream/devrc/issues/1011` captured.
+- **The mouse path reaches the AMBIGUOUS branch too.** Left-click on a bare `#370`
+  raised the rofi picker with both rows; arrowing to row **2** and pressing Return
+  opened `…/devrc/issues/370` — so the picker resolves by row CONTENT, not by index.
+- **`Ctrl+Shift+O` still works on a plain URL** — the interaction the `hints.enabled`
+  array replacement could have silently killed. Hint mode labelled the URL `j` (and
+  labelled the mention NOT at all, i.e. the `O` binding is scoped to its own hint);
+  pressing `j` captured `https://example.com/URL-HINT-CLICK` — the whole URL, with the
+  terminal's line WRAP reassembled.
+- **Instrument controls, both watched:** positive — a bare `xdg-open` under the probe
+  env captured a line, so the handler can fire at all; negative — hover+click on
+  `plainwordnothint` left the log at its previous length, so a captured line means a
+  hint fired and not ambient activity.
+
+**Still NOT verified:** that these gestures behave the same in Zach's own
+long-running alacritty windows. `live_config_reload` picking up the symlink swap was
+confirmed for `Ctrl+Shift+M` in a 3-day-old window, and the config is the same file,
+but no mouse gesture has been made in one of those windows.
 
 **IN FLIGHT:** `innovation-upstream/devrc#1057` — someone else's rescue PR. This
 session TRIMMED the two superseded mention drafts out of it (`9a09ad58`, plain
@@ -73,10 +102,10 @@ test + 3 registrations). Not mine to merge.
   NOT in the rendered set (tag filter active) must not fail silently.
 
 ## Next steps (ranked)
-1. **Verify the two unverified interactions** — one gesture each in a terminal:
-   hover-click a `#N` mention (tests `mouse.enabled`, never exercised), and
-   `Ctrl+Shift+O`/click a plain URL (tests that the re-declared URL hint still works).
-   Repo: none — a manual check. Closing condition: operator reports both.
+1. ~~**Verify the two unverified interactions**~~ — **DONE 2026-08-30**, see "BOTH
+   REMAINING INTERACTIONS NOW VERIFIED" above. Closed by machine observation on an
+   isolated Xvfb rather than by an operator report, because the operator was mid-game
+   when the check came due (see Gotchas). No repo change; nothing left open here.
 2. **CI capacity — the durable fix.** `ZacxDev/homelab-infra`,
    `clusters/homelab/apps/tekton-pipelines/`. Gate pods request far more than they use
    (nodes at 28–36% CPU while 6 gate pods sat `Pending` on `ExceededNodeResources`).
@@ -91,6 +120,29 @@ test + 3 registrations). Not mine to merge.
    Gotchas). Closing condition: merged PR touching that paragraph.
 
 ## Gotchas / decisions / dead-ends
+- 🔴 **A terminal-UI interaction can be verified WITHOUT taking the operator's screen —
+  `Xvfb` + the deployed config + an `xdg-open` capture handler.** This is the pattern
+  that closed rank 1, and it generalises to any alacritty/hint/`xdg-open` behaviour.
+  Three pieces: (1) `Xvfb :99` and launch the REAL binary on it, so XTEST input is real
+  input and no `--window` false-negative is possible; (2) a probe `XDG_CONFIG_HOME`
+  containing **only** `mimeapps.list` + a **symlink** to `~/.config/alacritty`, so the
+  config under test is provably the deployed store file (`readlink -f` it and say so) —
+  copying the config would have tested a copy; (3) a probe `XDG_DATA_HOME` with a
+  `.desktop` whose `Exec` appends `%u` to a log, bound to `x-scheme-handler/http{,s}`,
+  so "it opened the right URL" is a grep instead of a browser tab. Run the positive
+  control (`xdg-open` under the probe env) BEFORE trusting any silence from it.
+  ⚠ It does NOT cover the operator's already-running windows — say that separately.
+- 🔴 **`PREV_WS` went stale inside two minutes, and the first attempt put a window on
+  the operator's game.** The recorded `PREV_WS=1`/`PREV_WIN=…` were read, then the
+  probe terminal was launched ~2 min later — by which point the focused workspace was
+  **4** with a fullscreen game on it and `xprintidle` reporting **1 ms**, i.e. hands on
+  the keyboard. The new window landed on THAT workspace (i3 opens on the focused one,
+  not the one you remembered) at 0×0 behind the game. Restoring to the remembered
+  workspace would have been a SECOND theft — yanking them out of the game — so the
+  right move was to kill the probe window and leave the workspace alone. **Re-read
+  focus/idle immediately before the raise, not in the survey that motivated it, and
+  check `xprintidle` before driving XTEST at all** — synthetic keys would otherwise
+  have gone into whatever they were doing.
 - 🔴 **`hints.enabled` is an ARRAY — declaring it REPLACES alacritty's built-in default.**
   No merge. Adding the mention hint without re-declaring the URL hint verbatim would
   silently kill URL clicking, with no error. `test_alacritty_hints.py` pins it.
