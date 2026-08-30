@@ -3,11 +3,22 @@
 WHY
 ---
 `run-tests.sh` inlines the stdout of its `HOOK_TESTS` and `SHELL_TESTS`
-registries straight into its own stream — no capture, no prefixing. (The pytest
-targets are different: pytest captures their stdout and replays it only on
-failure.) So a registry entry printing `RESULT: PASS (exit=0)` at column 0 puts
-a line into the gate's truth-telling channel that is byte-indistinguishable from
-the runner's own verdict, and always *precedes* it.
+registries straight into its own stream — no capture, no prefixing
+(`run-tests.sh` runs them as bare `python "$HOOK_TEST"` / `bash "$SHELL_TEST"`).
+So a registry entry printing `RESULT: PASS (exit=0)` at column 0 puts a line
+into the gate's truth-telling channel that is byte-indistinguishable from the
+runner's own verdict, and always *precedes* it.
+
+⚠ **The pytest targets are excluded because their TEST bodies are captured, NOT
+because nothing in that tier reaches column 0.** An earlier revision said pytest
+"captures their stdout and replays it only on failure" full stop, and that is
+false for PLUGINS: the runner does `python -m pytest … >"$log" 2>&1; cat "$log"`,
+and a plugin writing at import/session scope goes straight through — measured,
+`scripts/testlib/gitenv_plugin.py:243` prints `gitenv(session) …` at column 0 in
+every gate run. No plugin emits the reserved grammar today, so this is an
+adjacent population that is UNSCANNED, not one that is safe by construction. The
+node tier is genuinely safe: node's TAP reporter prefixes test stdout with `# `,
+so a `.test.mjs` cannot reach column 0 (measured, top-level and in-test).
 
 `scripts/tests/test_cleanup_disk_gate.sh` did exactly that until round 4 of
 #1057's audit ladder, and a red run reported green. The fix there was a comment
@@ -34,41 +45,74 @@ registry entry instead — certifying the deliverable against a line the runner
 never wrote. Both readers now share `testlib.result_grammar.select_verdict`,
 and `test_the_shell_reader_still_agrees_with_the_python_one` pins gate.sh to it.
 
-COLLISIONS vs NEAR-MISSES
--------------------------
-A COLLISION emits the reserved grammar (`RESULT: PASS` / `RESULT: FAIL`) and is
-a hard failure. A NEAR-MISS emits the reserved PREFIX with some other payload.
+THREE PAYLOAD CLASSES, NOT TWO
+------------------------------
+An earlier revision of this guard had two, and that was a real defect: it
+classified any payload that was not a literal `PASS`/`FAIL` as a near-miss, and
+told the operator in its own failure message that such a line "does not collide
+today". For a payload the scanner cannot read, that sentence is false —
+`printf "RESULT: %s (exit=%d)" "$verdict" "$rc"` emits a genuine forged verdict
+whenever `$verdict` is `PASS`, and an operator obeying the message would have
+pinned a live forgery and gone green. So:
 
-🔴 There is a live near-miss today and it is pinned below, not hypothetical:
+  * **COLLISION** — a literal `PASS`/`FAIL`. Hard failure, not pinnable.
+  * **DYNAMIC** — the payload is computed at runtime (format placeholder,
+    f-string hole, variable, or a separate argument). Whether it collides
+    **cannot be decided by reading the source**. Pinnable only in
+    `DYNAMIC_PAYLOADS`, where the pin must ENUMERATE the possible values and say
+    why none can be `PASS`/`FAIL`. The scanner is not asserting that — a human is.
+  * **BENIGN** — a literal payload that is not `PASS`/`FAIL`. Provable by the
+    scanner, and the only class `NEAR_MISSES` may pin.
+
+🔴 **DYNAMIC exists because the forgeries and the one live benign line are the
+SAME SHAPE, and no predicate can separate them by source text.** Measured:
+`printf "RESULT: %s (exit=%d)" …`, `print(f"RESULT: {v}")`,
+`print("RESULT:", "PASS" if bad else "FAIL")` and the live
+`print("\\nRESULT:", "all good" if not fail else …)` are all "prefix + a payload
+the scan cannot resolve". So the tempting fix — call every non-literal payload a
+collision — makes this guard RED ON `main` with no remedy but editing
+`test_bash_guard.py`, i.e. a permanently-red gate. That is why the third class is
+pinnable and why its pin is a HUMAN enumeration rather than a scanner proof.
+This is the guard's real boundary, stated rather than left as an implicit fit to
+one file.
+
+🔴 There is a live DYNAMIC emission today, pinned below, not hypothetical:
 `scripts/claude-hooks/tests/test_bash_guard.py` ends with
-`print("\\nRESULT:", "all good" if not fail else …)`, which really does put
-`RESULT: all good` at column 0 of the runner's stream (verified by running it).
-It is harmless only because `all good` is not `PASS`/`FAIL` — gate.sh's own
-comment cites this exact line as the reason its grep is anchored and narrow. The
-pin is two-way, so the obvious refactor to
-`print("RESULT:", "PASS" if not fail else "FAIL")` fails this file twice over:
-the near-miss pin goes stale AND the collision scan fires.
+`print("\\nRESULT:", "all good" if not fail else f"{fail} failure(s)")`, which
+really does put `RESULT: all good` at column 0 of the runner's stream — verified
+by running the file, and visible in the sandbox gate log two lines above the
+runner's own verdict. gate.sh's comment cites this exact line as why its grep is
+anchored and narrow.
 
 HOW TO SATISFY IT
 -----------------
-Print anything else. `PASS`/`FAIL` counts are fine indented or with any other
-leading text (`  RESULT: 3 failure(s)`, `PASS 12  FAIL 0`). Do not add an
-allowlist entry to get green: NEAR_MISSES is for lines that emit the prefix and
-provably cannot collide, and every entry must say why.
+Print anything else. A `PASS`/`FAIL` count is fine indented or behind any other
+leading text (`  RESULT: 3 failure(s)`, `PASS 12  FAIL 0`). Do not add a ledger
+entry to get green: `NEAR_MISSES` is for payloads the scanner PROVED benign, and
+`DYNAMIC_PAYLOADS` is for payloads a human enumerated. Every entry must say why.
 
 🔴 WHAT A GREEN RUN HERE CANNOT SEE
 -----------------------------------
 This is a SOURCE scan, so it sees a literal in the file it scans and nothing
 else. It is structurally blind to:
 
-  * an INDIRECT emission — the prefix built in a variable, returned by a helper,
-    or printed by a subprocess the entry launches. The scan reads text, not
-    behaviour, so `v="RESULT:"; echo "$v PASS"` passes it;
+  * an emission the prefix is BUILT UP into across lines — `v="RESULT:"` on one
+    line and `echo "$v PASS"` on another. (The single-line form `echo "$v PASS"`
+    is caught, as DYNAMIC, because the scan sees the variable; splitting the
+    prefix itself across two statements defeats it.)
+  * runtime DEDENTING — `textwrap.dedent` strips common leading SPACES, so an
+    indented literal inside a triple-quoted block can still reach column 0. The
+    `<<-` tab case IS covered (see `_HEREDOC`); the space-stripping one is not,
+    because deciding it needs the whole string, not the line;
+  * a payload the scan can see but not read — reported as DYNAMIC and pinnable
+    only by a human enumeration, which is an assertion, not a proof;
+  * PROSE inside a triple-quoted docstring. Whole-line `#` comments are exempted;
+    a docstring quoting `"RESULT: PASS"` with double quotes still reads as an
+    emission and would have to be reworded or moved behind backticks;
   * a registry entry that SOURCES another file, whose emissions are that file's
     lines, not the entry's;
-  * every population outside the two registries. The pytest targets are excluded
-    on purpose — pytest captures their stdout and replays it only on failure —
-    but that is an argument about today's runner, not a law.
+  * every population outside the two registries — including pytest PLUGINS,
+    which reach column 0 today (see the header). Unscanned, not proven safe.
 
 The scan is aimed at the shape that actually recurred: a copy-pasted literal.
 `test_cleanup_disk_gate.sh` acquired it by copy-paste, and the fix that was left
@@ -92,15 +136,29 @@ GATE_SRC = (REPO / "scripts" / "gate.sh").read_text(encoding="utf-8")
 
 REGISTRIES = ("HOOK_TESTS", "SHELL_TESTS")
 
-# --- THE PINNED NEAR-MISS LEDGER ----------------------------------------------
+# --- THE TWO PINNED LEDGERS ---------------------------------------------------
 # (relative path, substring the line must contain, why it cannot collide).
-# Accounted BOTH ways, the same discipline as test_runtime_shebangs.py's
-# ALLOWLIST: an unpinned near-miss fails, and a pin matching nothing fails.
-NEAR_MISSES = [
+# Both accounted BOTH ways, the same discipline as test_runtime_shebangs.py's
+# ALLOWLIST: an unpinned hit fails, and a pin matching nothing fails.
+#
+# NEAR_MISSES is for BENIGN payloads — a literal the scanner itself proved is not
+# PASS/FAIL. Nothing qualifies today; the list is live and deliberately empty,
+# which the input guard below distinguishes from "the ledger stopped being read".
+NEAR_MISSES: list[tuple[str, str, str]] = []
+
+# 🔴 DYNAMIC_PAYLOADS is the weaker ledger and says so. The payload is computed
+# at runtime, so the SCANNER proves nothing here — each entry is a HUMAN
+# enumerating the reachable values. Pin one only after reading the code that
+# produces them.
+DYNAMIC_PAYLOADS = [
     ("scripts/claude-hooks/tests/test_bash_guard.py", '"all good"',
-     "emits `RESULT: all good` at column 0 (verified by running it). The payload "
-     "is a free-text summary, never PASS/FAIL, so it cannot match the reserved "
-     "grammar `^RESULT: (PASS|FAIL)` that gate.sh greps for — gate.sh's own "
+     "`print(\"\\nRESULT:\", \"all good\" if not fail else f\"{fail} failure(s)\")` "
+     "— emits `RESULT: all good` at column 0, verified by running the file AND "
+     "observed in a real sandbox gate log two lines above the runner's own "
+     "verdict. The payload is a separate argument, so the scanner cannot read it; "
+     "ENUMERATED by hand, it is exactly two values — the literal `all good`, and "
+     "`f\"{fail} failure(s)\"` where `fail` is an int counter. Neither can be "
+     "`PASS` or `FAIL`, so neither matches `^RESULT: (PASS|FAIL)`. gate.sh's own "
      "comment names this line as why that grep is anchored and narrow"),
 ]
 
@@ -153,9 +211,14 @@ def test_the_registries_are_non_empty_and_every_entry_exists():
         assert entries, f"{name} parsed as EMPTY — the scan covers nothing"
     missing = [e for e in _registry_entries() if not (REPO / e).is_file()]
     assert not missing, f"registry names a file that does not exist: {missing}"
-    assert len(_registry_entries()) >= 8, (
-        f"only {len(_registry_entries())} registry entries parsed; the runner "
-        "declares ten. The parser is reading the wrong thing."
+    # 🔴 The floor is derived, never a literal. A hand-written total drifts the
+    # moment a registry gains an entry, and an assertion message carrying a
+    # WRONG total sends a debugger hunting a parser bug that is not there — this
+    # one said "ten" while the runner declared nine.
+    declared = sum(len(_bash_array(n)) for n in REGISTRIES)
+    assert len(_registry_entries()) == declared >= 8, (
+        f"parsed {len(_registry_entries())} registry entries against {declared} "
+        f"declared across {REGISTRIES}. The parser is reading the wrong thing."
     )
 
 
@@ -180,30 +243,55 @@ def test_no_registry_entry_forges_a_verdict_line():
         + "\n  ".join(f"{p}:{n}: {l.strip()}" for p, n, l in collisions))
 
 
-def test_every_prefix_emission_is_either_pinned_or_absent():
-    """The near-miss population, accounted. A line that emits the prefix
-    without colliding is one refactor from colliding, so it is pinned with a
-    reason rather than left to be rediscovered."""
+def test_no_registry_entry_emits_an_UNREADABLE_payload_unpinned():
+    """🔴 THE FINDING FROM ROUND 1, as a test.
+
+    A DYNAMIC payload is one the scanner CANNOT read — and the earlier revision
+    reported exactly this population with the words "it does not collide today",
+    which is false: `printf "RESULT: %s (exit=%d)" "$verdict" "$rc"` forges a
+    verdict whenever the variable holds PASS. The message must say the payload
+    is unknown, and the pin must come from a human enumeration.
+    """
     unpinned = [h for h in _hits()
-                if not G.line_is_collision(h[2])
-                and not any(_matches(e, h) for e in NEAR_MISSES)]
+                if G.classify_payload(h[2]) == G.DYNAMIC
+                and not any(_matches(e, h) for e in DYNAMIC_PAYLOADS)]
     assert not unpinned, (
-        "a registry entry emits `RESULT:` at column 0 with an unpinned payload. "
-        "It does not collide today; pin it with the reason it cannot, or print "
-        "something else:\n  "
+        "a registry entry emits `RESULT:` at column 0 with a payload this scan "
+        "CANNOT READ (a format placeholder, an f-string hole, a variable, or a "
+        "separate argument). Whether it forges a verdict at runtime is NOT "
+        "decidable here — do not assume it is benign. Either print a literal "
+        "payload the scanner can check, or add a DYNAMIC_PAYLOADS pin that "
+        "ENUMERATES the reachable values and says why none can be PASS/FAIL:\n  "
         + "\n  ".join(f"{p}:{n}: {l.strip()}" for p, n, l in unpinned))
 
 
-def test_every_near_miss_pin_still_matches_something():
-    """Stale-pin accounting. A pin that stops matching means the line moved or
-    changed — left in place it pre-approves whatever appears there next."""
+def test_every_benign_prefix_emission_is_pinned():
+    """The provably-harmless population. A literal non-verdict payload is still
+    one refactor from a collision, so it is pinned with a reason rather than
+    left to be rediscovered."""
+    unpinned = [h for h in _hits()
+                if G.classify_payload(h[2]) == G.BENIGN
+                and not any(_matches(e, h) for e in NEAR_MISSES)]
+    assert not unpinned, (
+        "a registry entry emits `RESULT:` at column 0 with an unpinned literal "
+        "payload. The scanner read it and it is not PASS/FAIL, so it cannot "
+        "collide today — pin it with that reason, or print something else:\n  "
+        + "\n  ".join(f"{p}:{n}: {l.strip()}" for p, n, l in unpinned))
+
+
+def test_every_pin_in_both_ledgers_still_matches_something():
+    """Stale-pin accounting, both ledgers. A pin that stops matching means the
+    line moved or changed — left in place it pre-approves whatever appears
+    there next."""
     hits = _hits()
-    stale = [f"{rel} ~ {needle!r}" for rel, needle, why in NEAR_MISSES
+    stale = [f"{name}: {rel} ~ {needle!r}"
+             for name, ledger in (("NEAR_MISSES", NEAR_MISSES),
+                                  ("DYNAMIC_PAYLOADS", DYNAMIC_PAYLOADS))
+             for rel, needle, why in ledger
              if not any(_matches((rel, needle, why), h) for h in hits)]
     assert not stale, (
-        "NEAR_MISSES entries match nothing — the site changed. Re-verify how "
-        "that file prints its summary, then delete the pin:\n  "
-        + "\n  ".join(stale))
+        "ledger entries match nothing — the site changed. Re-verify how that "
+        "file prints its summary, then delete the pin:\n  " + "\n  ".join(stale))
 
 
 # --------------------------------------------------------------------------- #
@@ -239,21 +327,92 @@ def test_positive_control_the_scan_finds_an_unquoted_collision(tmp_path):
     assert G.line_is_collision(hits[0][1])
 
 
-def test_positive_control_a_near_miss_is_seen_but_not_called_a_collision():
-    """The two populations must be DISTINGUISHED, not merged. A scan that
-    called every prefix emission a collision would fail the live tree and get
-    itself deleted; one that called none would miss the hazard."""
-    near = G.near_miss_line()
-    assert G.line_emits_reserved_prefix(near), "near-miss not seen at all"
-    assert not G.line_is_collision(near), "near-miss misreported as a collision"
+def test_positive_control_the_scan_finds_a_bare_heredoc_line(tmp_path):
+    """🔴 Shape (c). It shipped one round with NO control while the module
+    docstring already claimed every shape had one — and a mutant neutering the
+    arm (`False and _HEREDOC.match(line)`) survived a fully green 15/15 suite."""
+    p = tmp_path / "t.sh"
+    p.write_text("cat <<EOF\n" + G.offending_heredoc_line() + "\nEOF\n",
+                 encoding="utf-8")
+    hits = G.scan_source(p)
+    assert len(hits) == 1, f"scan cannot see a bare heredoc body line: {hits}"
+    assert hits[0][0] == 2
+    assert G.line_is_collision(hits[0][1])
+
+
+def test_positive_control_the_scan_finds_a_TAB_indented_heredoc_line(tmp_path):
+    """`<<-` strips leading TABS at runtime, so a tab-indented body line still
+    lands at column 0 — invisible to a plain `^RESULT:` anchor."""
+    p = tmp_path / "t.sh"
+    p.write_text("cat <<-EOF\n" + G.offending_tab_heredoc_line() + "\nEOF\n",
+                 encoding="utf-8")
+    hits = G.scan_source(p)
+    assert len(hits) == 1, f"scan cannot see a tab-stripped heredoc line: {hits}"
+    assert G.line_is_collision(hits[0][1])
+
+
+def test_positive_control_a_BENIGN_literal_is_seen_but_not_called_a_collision():
+    """The classes must be DISTINGUISHED, not merged. A scan calling every
+    prefix emission a collision would fail the live tree and get itself deleted;
+    one calling none would miss the hazard."""
+    benign = G.benign_line()
+    assert G.line_emits_reserved_prefix(benign), "benign emission not seen at all"
+    assert G.classify_payload(benign) == G.BENIGN, G.classify_payload(benign)
+
+
+def test_positive_control_an_UNREADABLE_payload_is_never_classed_benign():
+    """🔴 ROUND-1 FINDING, pinned. Both of these emit a real forged verdict at
+    runtime; the earlier revision classified both as near-misses and told the
+    operator they "do not collide today"."""
+    for line in (G.dynamic_payload_printf_line(),
+                 G.dynamic_payload_separate_arg_line()):
+        assert G.line_emits_reserved_prefix(line), f"not seen at all: {line}"
+        assert G.classify_payload(line) == G.DYNAMIC, (
+            f"a payload the scanner cannot read was classed "
+            f"{G.classify_payload(line)!r}, not DYNAMIC: {line}")
+        assert not G.line_is_collision(line), (
+            "line_is_collision must stay LITERAL-only; DYNAMIC is carried by "
+            "classify_payload so the two ledgers stay distinguishable")
+
+
+def test_a_source_COMMENT_quoting_the_grammar_is_not_an_emission():
+    """🔴 ROUND-1 FINDING. A comment is prose, not stdout. Without this the scan
+    fires on the very comment documenting the hazard — and
+    `scripts/tests/test_cleanup_disk_gate.sh:206` is exactly that comment,
+    escaping only because it happened to use backticks. Rewording it with double
+    quotes would have turned a required check permanently red, with no remedy
+    but rewording someone's prose to satisfy a scanner."""
+    assert not G.line_emits_reserved_prefix(G.comment_line())
+    assert G.classify_payload(G.comment_line()) is None
+    # …and the control in the other direction: indenting an EMISSION does not
+    # make it a comment. Otherwise this exemption would swallow the hazard.
+    assert G.line_is_collision("    " + G.offending_shell_line())
 
 
 def test_positive_control_an_unpinned_collision_is_reported():
-    """POSITIVE CONTROL for the LEDGER, not the scanner. A pin that is too
+    """POSITIVE CONTROL for the LEDGERS, not the scanner. A pin that is too
     broad would swallow a real offender silently."""
     fabricated = ("scripts/tests/test_brand_new.sh", 7, G.offending_shell_line())
-    assert not any(_matches(e, fabricated) for e in NEAR_MISSES), (
-        "NEAR_MISSES matched a file that is not in it — an entry is too broad")
+    for name, ledger in (("NEAR_MISSES", NEAR_MISSES),
+                         ("DYNAMIC_PAYLOADS", DYNAMIC_PAYLOADS)):
+        assert not any(_matches(e, fabricated) for e in ledger), (
+            f"{name} matched a file that is not in it — an entry is too broad")
+
+
+def test_a_ledger_needle_cannot_match_a_DIFFERENT_line_in_the_same_file():
+    """🔴 The needle dimension, which the file-path control above cannot reach:
+    an over-broad needle would let a pin swallow a NEW offender in a file that
+    already has one. Round 1 measured that broadening this ledger's needle to
+    '' left the suite fully green."""
+    for name, ledger in (("NEAR_MISSES", NEAR_MISSES),
+                         ("DYNAMIC_PAYLOADS", DYNAMIC_PAYLOADS)):
+        for rel, needle, why in ledger:
+            assert needle.strip(), f"{name} entry for {rel} has an EMPTY needle"
+            planted = (rel, 999, G.offending_shell_line())
+            assert not _matches((rel, needle, why), planted), (
+                f"{name}'s needle {needle!r} also matches a planted collision in "
+                f"the SAME file ({rel}) — the pin is too broad to distinguish "
+                "the line it was written for from a new offender beside it")
 
 
 def test_negative_control_an_indented_emission_is_not_flagged():

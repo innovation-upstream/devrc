@@ -95,7 +95,9 @@ def select_verdict(text: str) -> Verdict | None:
 # --------------------------------------------------------------------------- #
 #
 # Three shapes, because the hazard is "the emitted text starts with RESULT:",
-# not "the source says echo". Each has its own positive control in the guard.
+# not "the source says echo". Each has its own positive control in the guard —
+# including shape (c), which went one round with NO control at all while this
+# comment already claimed it had one.
 #
 #   (a) a quoted literal opening with the prefix, optionally behind escaped
 #       newlines — `echo "RESULT: …"`, `print("\nRESULT:", …)`. The `\n` case is
@@ -103,33 +105,80 @@ def select_verdict(text: str) -> Verdict | None:
 #       `RESULT: all good` exactly that way, and a scan blind to it reports a
 #       clean zero for a file that really does write the prefix at column 0.
 #   (b) an UNQUOTED echo/printf argument — `echo RESULT: PASS`.
-#   (c) a bare line already at column 0 inside a heredoc.
+#   (c) a bare line at column 0 inside a heredoc. `\t*` because `<<-` strips
+#       leading TABS at runtime, so a tab-indented heredoc line still lands at
+#       column 0; spaces are never stripped by `<<-`, so they stay safe.
 #
 _ESC = r"(?:\\[nr])*"
 _QUOTED = re.compile(rf"""(['"]){_ESC}{re.escape(RESERVED_PREFIX)}""")
 _UNQUOTED = re.compile(
     rf"""\b(?:echo|printf|print)\b\s+(?:-\S+\s+)*{re.escape(RESERVED_PREFIX)}"""
 )
-_HEREDOC = re.compile(rf"""^{re.escape(RESERVED_PREFIX)}""")
+_HEREDOC = re.compile(rf"""^\t*{re.escape(RESERVED_PREFIX)}""")
+
+# A whole-line source comment is PROSE, not an emission. Without this the scan
+# fires on the very comment that documents the hazard — and there is one:
+# scripts/tests/test_cleanup_disk_gate.sh:206 is the #1057 warning this guard
+# exists to make structural, and it escaped only because it happened to use
+# backticks. Rewording it with double quotes would have turned a required check
+# permanently red with no remedy but rewording someone's prose.
+_COMMENT = re.compile(r"^\s*#")
+
+# --- PAYLOAD CLASSIFICATION ---------------------------------------------------
+# Three outcomes, not two. The middle one is the finding an earlier revision of
+# this module got wrong: it called a payload it could not read "benign".
+_LITERAL_VERDICT = re.compile(r"""\s*\\?["']?\s*(PASS|FAIL)\b""")
+# A format placeholder (`%s`, `%d`), an f-string hole (`{`), or a shell/Make
+# variable (`$`) — the payload is computed at runtime and is unknowable here.
+_DYNAMIC = re.compile(r"""%[-#0-9.*]*[a-zA-Z]|\{|\$""")
+# The quoted literal ENDS at the prefix, so the payload is a separate argument:
+# `print("RESULT:", <expr>)`. Statically unknowable for the same reason.
+_PAYLOAD_IS_ANOTHER_ARG = re.compile(r"""^\s*\\?["']\s*[,)]""")
+
+COLLISION = "collision"
+DYNAMIC = "dynamic"
+BENIGN = "benign"
 
 
 def line_emits_reserved_prefix(line: str) -> bool:
     """True when this source line would put `RESULT:` at column 0 of stdout."""
+    if _COMMENT.match(line):
+        return False
     return bool(_QUOTED.search(line) or _UNQUOTED.search(line)
                 or _HEREDOC.match(line))
 
 
-def line_is_collision(line: str) -> bool:
-    """True when the emitted payload is the RESERVED grammar itself.
+def classify_payload(line: str) -> str | None:
+    """What does this line put after the reserved prefix?
 
-    A collision is indistinguishable from a runner verdict. A line that emits
-    the prefix with some other payload (`RESULT: all good`) is a near-miss:
-    harmless to today's readers, one refactor away from a collision.
+    `None`          — it emits nothing at column 0.
+    `COLLISION`     — a literal `PASS`/`FAIL`. Indistinguishable from a verdict.
+    `DYNAMIC`       — the payload is computed at runtime (a format spec, an
+                      f-string hole, a variable, or a separate argument), so
+                      whether it collides CANNOT be decided by reading the
+                      source. 🔴 This is NOT benign, and it must never be
+                      reported as such: `printf "RESULT: %s (exit=%d)" …` really
+                      does emit a forged verdict when `$verdict` is `PASS`.
+    `BENIGN`        — a literal payload that is not `PASS`/`FAIL`.
     """
     if not line_emits_reserved_prefix(line):
-        return False
+        return None
     after = line.split(RESERVED_PREFIX, 1)[1]
-    return bool(re.match(r"""\s*\\?["']?\s*(PASS|FAIL)\b""", after))
+    if _LITERAL_VERDICT.match(after):
+        return COLLISION
+    if _PAYLOAD_IS_ANOTHER_ARG.match(after) or _DYNAMIC.search(after):
+        return DYNAMIC
+    return BENIGN
+
+
+def line_is_collision(line: str) -> bool:
+    """True only for a literal `PASS`/`FAIL` payload.
+
+    🔴 A `False` here does NOT mean "safe" — see `classify_payload`. Callers
+    that need "is this line proven harmless" must check for `BENIGN`, never
+    `not line_is_collision(...)`.
+    """
+    return classify_payload(line) == COLLISION
 
 
 def scan_source(path: Path) -> list[tuple[int, str]]:
@@ -164,6 +213,36 @@ def offending_unquoted_line() -> str:
     return "echo " + RESERVED_PREFIX + " PASS"
 
 
-def near_miss_line() -> str:
-    """Emits the prefix, but not the reserved grammar. Not a collision."""
-    return 'print("\\n' + RESERVED_PREFIX + '", "all good")'
+def offending_heredoc_line() -> str:
+    """Shape (c) — a bare heredoc body line, already at column 0."""
+    return RESERVED_PREFIX + " PASS (exit=0)"
+
+
+def offending_tab_heredoc_line() -> str:
+    """Shape (c) under `<<-`, which strips leading TABS at runtime — so this
+    lands at column 0 despite being indented in the source."""
+    return "\t" + RESERVED_PREFIX + " PASS (exit=0)"
+
+
+def dynamic_payload_printf_line() -> str:
+    """A REAL forgery the literal check cannot see: the payload is a format
+    placeholder, so it emits `RESULT: PASS (exit=0)` whenever the variable
+    holds `PASS`. Must classify as DYNAMIC, never BENIGN."""
+    return 'printf "' + RESERVED_PREFIX + ' %s (exit=%d)\\n" "$verdict" "$rc"'
+
+
+def dynamic_payload_separate_arg_line() -> str:
+    """The payload is a separate argument, so the source cannot decide it —
+    `print("RESULT:", "PASS" if bad else "FAIL")` is a forgery in both branches."""
+    return 'print("' + RESERVED_PREFIX + '", "PASS" if bad else "FAIL")'
+
+
+def benign_line() -> str:
+    """Emits the prefix with a LITERAL non-verdict payload. Provably harmless,
+    and the only shape the near-miss ledger may pin."""
+    return 'echo "' + RESERVED_PREFIX + ' 3 problems"'
+
+
+def comment_line() -> str:
+    """Prose documenting the hazard, not an emission. Must not be flagged."""
+    return '# DO NOT print "' + RESERVED_PREFIX + ' PASS (exit=0)" here.'
