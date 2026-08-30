@@ -279,19 +279,74 @@ ok = blocked and not err
 fail += not ok
 print(f"{'PASS' if ok else 'FAIL'}  secret inside -m still caught{'  ' + err if err else ''}")
 
-# No pathological backtracking anywhere in the remaining patterns.
-for label, probe in [
-    ("quote+backslash run", 'git commit -m "' + "\\" * 200),
+# --- no pathological backtracking anywhere in the remaining patterns --------
+# 🔴 THE ABSOLUTE WALL-CLOCK IS GONE, AND IT WAS MEASURING THE WRONG THING.
+# This asserted `elapsed < 2.0` around `run()`, which SPAWNS A PYTHON
+# SUBPROCESS — so the number was interpreter startup + imports + JSON framing,
+# with the regex a rounding error inside it. MEASURED on this host: one
+# subprocess round trip on a TRIVIAL command is ~22 ms, and the 32k probe costs
+# ~214 ms of actual matching. On a box carrying agent load (this repo has
+# measured 18–51) startup alone crosses 2 s, so the check went red with no
+# backtracking present at all — a flaky gate on a hook that runs for every Bash
+# call. `claude/RULES.md`: a flaky test is FIXABLE; remove the timing
+# dependency rather than re-running.
+#
+# 🔴 THE FIX IS A RATIO AGAINST A SAME-LENGTH BENIGN CONTROL, IN-PROCESS.
+# Both halves run in the same interpreter, back to back, under whatever load is
+# present — so load scales both and CANCELS, while superlinear backtracking does
+# not. `guard_core` is imported directly because `bash-guard.py` calls `main()`
+# at module level and is not import-safe.
+#
+# MEASURED separation, same host, same moment:
+#     as shipped (fixed)                       -> ratio 0.98x
+#     _BLIND_SHORT reverted to `-[A-Za-z]*A[A-Za-z]*`
+#       (the historical quadratic shape)       -> ratio 6.39x
+# The threshold sits between them with ~3x margin either way. Observed fixed
+# ratios across probes: 0.76x, 0.98x, 1.02x.
+#
+# ⚠ The benign control is the SAME LENGTH and the SAME SHAPE, differing only in
+# the character that carried the historical trigger. A shorter control would
+# make the ratio a length comparison instead of a backtracking one.
+sys.path.insert(0, os.path.dirname(GUARD))
+import guard_core as _gc  # noqa: E402  — after the sys.path hop, deliberately
+
+_BACKTRACK_RATIO_MAX = 3.0
+
+
+def _best_evaluate_secs(cmd, reps=3):
+    """Fastest of `reps` in-process evaluations. MIN, not mean: a scheduler
+    preemption can only make a sample slower, so the minimum is the closest
+    estimate of the work itself and the least sensitive to a noisy box."""
+    best = float("inf")
+    for _ in range(reps):
+        t0 = time.perf_counter()
+        _gc.evaluate(cmd, policy="claude-code", cwd=None)
+        best = min(best, time.perf_counter() - t0)
+    return best
+
+
+for label, probe, benign in [
+    ("quote+backslash run",
+     'git commit -m "' + "\\" * 200,
+     'git commit -m "' + "x" * 200),
     # the old _BLIND_FLAG had two adjacent [A-Za-z]* around the A and went
-    # quadratic when the run failed the trailing boundary: 6s at 32k.
-    ("long -AAAA… run", "git a" + "dd -" + "A" * 32000 + "!"),
+    # quadratic when the run failed the trailing boundary: 6s at 32k. The
+    # control swaps the A's for x's — same length, no trigger.
+    ("long -AAAA… run",
+     "git a" + "dd -" + "A" * 32000 + "!",
+     "git a" + "dd -" + "x" * 32000 + "!"),
 ]:
-    t0 = time.time()
+    t_probe = _best_evaluate_secs(probe)
+    t_benign = _best_evaluate_secs(benign)
+    ratio = t_probe / max(t_benign, 1e-9)
+    # ...and the END-TO-END behaviour is still asserted through the adapter, so
+    # this stays a test of the guard and not only of a regex's shape.
     _, err = run(probe)
-    elapsed = time.time() - t0
-    ok = elapsed < 2.0 and not err
+    ok = ratio < _BACKTRACK_RATIO_MAX and not err
     fail += not ok
-    print(f"{'PASS' if ok else 'FAIL'}  no catastrophic backtracking: {label} ({elapsed:.2f}s)")
+    print(f"{'PASS' if ok else 'FAIL'}  no catastrophic backtracking: {label} "
+          f"({ratio:.2f}x vs a same-length benign control, "
+          f"limit {_BACKTRACK_RATIO_MAX}x){'  ' + err if err else ''}")
 
 # --- check_git_commit_to_main, END TO END THROUGH THE ADAPTER ---------------
 # 🔴 The other cases in this file are pure text shapes. This one is not: the check
