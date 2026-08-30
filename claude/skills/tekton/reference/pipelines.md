@@ -95,12 +95,17 @@ OR'd with a `head_commit` fallback for GitHub's truncation of large pushes.
   `auditloop-push-main` carries a `(!has(body.deleted) || body.deleted == false)` guard;
   clawgate-ci has no `created`/`deleted` guard.
 - **PVC unpinned.** Per-run **6Gi** RWO `volumeClaimTemplate` with **no**
-  `podTemplate.nodeSelector`, while *every* other pipeline pins
-  `kubernetes.io/hostname: talos-xr6-r7p` (naida 8Gi, remix 12Gi, auditloop 10Gi).
-  ⚠ **`gitops-validate` is NOT in that list any more** — homelab-infra #396 moved it to
-  `talos-uvh-gtj` with its own `nix-store-cache-2`; this line read `gitops-validate 6Gi` until
-  2026-08-30. It works today (clawgate pods land on `talos-jkj-deb`) because it mounts only the
-  one PVC — but it forgoes the shared nix cache and is the odd one out.
+  `podTemplate.nodeSelector`. ⚠ **This bullet used to say "*every* other pipeline pins
+  `talos-xr6-r7p`" and that has been false for a while — re-derive it, do not read it.**
+  Census over live pods 2026-08-30 (`kubectl -n tekton-ci get pods -o json`, group by
+  `tekton.dev/pipeline` × `spec.nodeSelector`): **3 pin `talos-xr6-r7p`** — `auditloop-ci`,
+  `devrc-ci`, `naida-ux-audit`; **1 pins `talos-uvh-gtj`** — `gitops-validate`, with its own
+  `nix-store-cache-2` since homelab-infra #396; and **7 pin nothing at all** — `clawgate-ci`,
+  `clawgate-e2e`, `clawgate-ux-audit`, `vetr-api-main`, `vetr-api-pest`, `vetr-app-unit`,
+  `vetr-infra-guards`. So clawgate-ci is **not** the odd one out; floating is the majority.
+  It works because it mounts only the one PVC — the real cost is that it forgoes the shared
+  nix cache. 🔴 Do not "fix" it by pinning to `talos-xr6-r7p`: that concentrates a fourth
+  pipeline onto the node the devrc-ci section below is trying to get load *off*.
 - **No concurrency control at all** — every matching push gets an independent PipelineRun and
   its own 6Gi PVC.
 - **`error` vs `fail` is implemented for the CSS path ONLY** (`clawgate-ci-pipeline.yaml:329`
@@ -138,18 +143,26 @@ can use"* is **unproven, not refuted**:
    9.11, 0700 source): `dst` at 0755 → 700 **and** `dst` at 0777 → 700.
    ⚠ **So a `chmod 0777` before the seed measures NOTHING, and its null result reads as
    evidence.** Note also that the file the error names is **0600 root:root on the volume that
-   WORKS**, so "0755 already grants `r-x` to other" never described it. That deepens the
-   mystery rather than solving it — which is why the heading above says UNKNOWN.
-2. 🔴 **Build users — the one difference still standing, and what makes the obvious control
-   invalid.** The gate's
-   `NIX_CONFIG` is `experimental-features = nix-command flakes` only, so nix drops to an
-   unprivileged **`nixbld`** user. `gitops-validate`'s `warm-tools` adds `build-users-group =`,
-   which **disables build users**, so it runs as **root**. A fresh `nix-store-cache-2` (created
-   `2026-08-25T05:33:47Z`) staying healthy therefore says nothing about build-user ownership:
-   root can always take the lock. **Do not cite `gitops-validate` as a control for this.**
+   WORKS** — see candidate 2 for why that is not a paradox.
+2. 🔴 **Build users — the one difference still standing. 🔴 AND IT IS NOT "the gate runs as
+   `nixbld`" — that phrasing was wrong here until 2026-08-30 and it sends a retry at the wrong
+   process.** Measured in a live gate pod:
+   `kubectl -n tekton-ci exec <gate-pod> -c step-pytests -- sh -c 'id; nix config show'` →
+   **`uid=0(root)`**, `build-users-group = nixbld`, `sandbox = true`. So the step's own nix
+   client is **root** — which is exactly why a 0600 root:root `big-lock` is no obstacle to it.
+   `nixbld` is who nix drops the **sandboxed builder** to, not who takes the store lock.
+   The population that can actually hit this is named by the gate's own step comment:
+   *"devrc has tests that shell out to `nix-instantiate` from INSIDE the build; running as an
+   unprivileged nixbld user…"* — a **nested** nix invocation, inside a sandboxed build,
+   reaching the real store. That is a narrower and far more testable proposition than "the
+   gate runs unprivileged", and it is what a retry should be designed against.
+   The control asymmetry is unchanged: `gitops-validate`'s `warm-tools` sets
+   `build-users-group =` (empty), disabling build users entirely, so a fresh `nix-store-cache-2`
+   (created `2026-08-25T05:33:47Z`) staying healthy says nothing about build-user ownership.
+   **Do not cite `gitops-validate` as a control for this.**
    Measured negative worth keeping, because it closes off the obvious remedy: **the gate pod
-   sets no `securityContext` and no `fsGroup` at all**, so there is no kubelet-side ownership
-   fixup to lean on.
+   sets no `securityContext` and no `fsGroup` at all** (pod-level `{}`, `null` on all six step
+   containers), so there is no kubelet-side ownership fixup to lean on.
 3. **A heal that already exists, on the gate only.** The `pytests`/`nodetests` steps run
    `mkdir -p /nix/var/nix/profiles/per-user && chmod 755 /nix/var/nix/profiles …` against the
    same root-owned-store problem one path over, with a MEASURED failure recorded beside it
