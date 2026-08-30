@@ -805,7 +805,134 @@ OTHER_REPO_PR = dict(
     headRepositoryOwner={"login": "someone-else"},
 )
 
-FAKE_REPO_DIR = "/fake/checkout/devrc"
+# 🔴 A REAL DIRECTORY ON DISK, and it must stay one. `render_toolchain` PROBES
+# the checkout the PR lives in — `scripts/gate.sh`, `flake.nix`'s `checks`
+# outputs, `.envrc` — and prescribes only what it finds. A `/fake/checkout/…`
+# string (what this was) makes every probe answer "absent", so the whole suite
+# would exercise the not-detected branch and NOTHING would cover the devrc
+# shape the pre-existing guards assert. Same class as the `rev_list` constant
+# in `make_runner`: a fixture that cannot enter the branch under test.
+#
+# Written once at import, beside `CLAIMS_FILE` and for the same reason — the
+# `SCENARIO_RUNS` entries are plain callables and cannot take a `tmp_path`.
+# `use opencode`, a `--tier both` gate and `checks.${system}` with TWO names
+# are devrc's real shapes, measured at `/home/zach/workspace/devrc`.
+_FAKE_REPO_TMP = tempfile.TemporaryDirectory(prefix="audit-dispatch-repo-")
+FAKE_REPO_DIR = str(Path(_FAKE_REPO_TMP.name) / "devrc")
+
+
+def _write_repo(root, *, envrc, gate=None, ci_suite=False, flake=None,
+                py_test=True):
+    """Materialise a repo-shaped tree for `detect_repo_toolchain` to probe."""
+    root = Path(root)
+    (root / "scripts" / "tests").mkdir(parents=True, exist_ok=True)
+    if envrc is not None:
+        (root / ".envrc").write_text(envrc, encoding="utf-8")
+    if gate is not None:
+        (root / "scripts" / "gate.sh").write_text(gate, encoding="utf-8")
+    if ci_suite:
+        (root / "scripts" / "tests" / "run-ci-suite.sh").write_text(
+            "#!/usr/bin/env bash\npython3 -m pytest \"$@\"\n", encoding="utf-8")
+    if flake is not None:
+        (root / "flake.nix").write_text(flake, encoding="utf-8")
+    if py_test:
+        (root / "scripts" / "tests" / "test_x.py").write_text(
+            "def test_x():\n    assert True\n", encoding="utf-8")
+    return str(root)
+
+
+# devrc's own flake shape: `checks.${system}` holding exactly `pytests` and
+# `nodetests`, and a dev shell that names pytest. The `''…''` block is not
+# decoration — it is what an indentation-only name scan trips over, and the
+# reason `_flake_check_names` tracks nix strings.
+DEVRC_FLAKE = """\
+{
+  outputs = { self, nixpkgs }:
+    let
+      forAllSystems = f: f;
+    in forAllSystems (system: {
+      devShells.default = pkgs.mkShell {
+        buildInputs = [ pkgs.python3Packages.pytest ];
+        shellHook = ''
+echo "devrc: gate toolchain ready"
+if [ -n "$X" ]; then
+  echo hi
+fi
+        '';
+      };
+      checks.${system} = {
+        pytests =
+        pkgs.runCommandLocal "devrc-pytests"
+          {
+            nativeBuildInputs = [ pkgs.git pkgs.ripgrep ];
+          }
+          ''
+runHook preBuild
+for f in *.py; do echo "{$f}"; done
+grep -c '}' out.txt || true
+python3 -m pytest .
+          '';
+        nodetests =
+        pkgs.runCommandLocal "devrc-nodetests"
+          {
+            nativeBuildInputs = [ pkgs.nodejs ];
+          }
+          ''
+node --test
+          '';
+      };
+    });
+}
+"""
+# 🔴 THE FIXTURE MUST REACH THE BRANCHES IT GRADES, and the first draft did
+# not. `pytests = pkgs.runCommandLocal "…" { } ''…''` kept brace depth at 1 for
+# the whole block, so a mutant that mishandles NESTING could not be observed —
+# a fixture landing exactly on its own boundary. The real file spans the
+# derivation attrset over several lines (depth 2), and its build scripts start
+# at column 0, which is what an indentation-bounded scan trips over. The
+# unbalanced `grep -c '}'` above is the third real shape: a brace inside a
+# `''…''` string that skews depth for anyone not tracking nix strings.
+
+# `homelab-infra`'s shape, measured 2026-08-29: NO `scripts/gate.sh`, NO
+# `checks` output, `.envrc` is `use flake` + `use opencode`, and its real
+# runner is `scripts/tests/run-ci-suite.sh`. The `checks = pr.get(...)` line is
+# VERBATIM from a python heredoc inside that repo's real devShell — it is the
+# string a loose `^\s*checks\b.*=` probe matched, answering "this flake
+# declares checks" for a flake that declares none.
+HOMELAB_FLAKE = """\
+{
+  description = "Homelab infrastructure development shell";
+  outputs = { self, nixpkgs }:
+    {
+      devShells = forAllSystems (system: {
+        default = pkgs.mkShell {
+          buildInputs = with pkgs; [ kubectl fluxcd sops age gh ];
+          shellHook = ''
+python3 - <<'PY'
+def ci_status(checks):
+    if not checks:
+        return "none"
+checks = pr.get("statusCheckRollup", [])
+PY
+          '';
+        };
+      });
+    };
+}
+"""
+
+DEVRC_GATE = """\
+#!/usr/bin/env bash
+#   scripts/gate.sh [--tier pytest|node|both] [--set hermetic|all]
+#     --tier both      (default) run both runners; the gate is red if either is.
+case "$1" in
+  --tier) TIER="${2:-both}" ;;
+esac
+"""
+
+_write_repo(FAKE_REPO_DIR, envrc="use opencode\n", gate=DEVRC_GATE,
+            flake=DEVRC_FLAKE)
+
 FAKE_ORIGIN = "git@github.com:example-org/devrc.git"
 
 # 🔴 The two paths `gather_worktree_kind` reads, in the shapes REAL git prints
@@ -2425,7 +2552,7 @@ def test_the_toolchain_section_names_the_tier_the_merge_gates_on():
     """
     rc, out, err = run_main(["900"])
     assert rc == 0, err
-    assert "nix develop /fake/checkout/devrc -c python3 -m pytest" in out
+    assert f"nix develop {FAKE_REPO_DIR} -c python3 -m pytest" in out
     assert "-p no:cacheprovider" in out
     assert "No module named pytest" in out and "WRONG SHELL" in out, (
         "the wrong-shell diagnosis is missing — it was present in 9 of the "
@@ -4982,6 +5109,26 @@ def toolchain_section(brief):
     return brief[start:brief.index(EXPECTED_INVARIANTS_HEADING, start)]
 
 
+def toolchain_commands(section):
+    """The non-blank lines inside TOOLCHAIN's fences — what it PRESCRIBES.
+
+    🔴 The distinction every guard over this section needs, and the one a
+    substring scan cannot make. The prose must be free to NAME a command in
+    order to say it is ABSENT — "`nix build …#checks…` would fail with an
+    attribute error", "look for `scripts/gate.sh`" — so a scan of the whole
+    section forbids the very sentences that close the fabricated-command
+    finding. Only a fenced line is offered as runnable.
+    """
+    out, inside = [], False
+    for line in section.splitlines():
+        if line.startswith("```"):
+            inside = not inside
+            continue
+        if inside and line.strip():
+            out.append(line)
+    return out
+
+
 def test_the_toolchain_reason_is_true_in_every_scenario():
     """🔴 REGRESSION. Red at `dd601793` in the PRIVATE state.
 
@@ -5005,12 +5152,38 @@ def test_the_toolchain_reason_is_true_in_every_scenario():
     and no mutant row named it. An equality over two same-repo scenarios does
     not pin state-independence — it pins independence of the one axis it
     happened to vary. It now drives every scenario `brief_for_scenario` knows,
-    including the cross-repo pair, and requires the rendered section to be
+    including the cross-repo pair, and requires the rendered REASON to be
     BYTE-IDENTICAL across all of them: that is the claim the section's own
     docstring makes ("this section knows nothing about where the auditor
     stands"), stated as wide as the code it describes.
+
+    🔴 ROUND 14 NARROWED THE SLICE FROM THE SECTION TO THE REASON, AND WIDENED
+    THE PIN FROM AN EQUALITY TO AN IDENTITY. Deliberate; here is all of it.
+
+    The COMMANDS under the reason are now derived from the repository the PR
+    lives in (`detect_repo_toolchain`), because hardcoding devrc's layout
+    prescribed three non-existent commands and one false `.envrc` claim against
+    `homelab-infra`. Target-repo content and audit scenario are DIFFERENT AXES:
+    the `cross-repo` scenarios hold no checkout of the PR's repository to read,
+    so their commands bar honestly says nothing was probed, while a same-repo
+    one lists real commands. A whole-section equality cannot express that, and
+    the only two ways to keep it are to blind the generator (prescribe devrc's
+    layout at every target — the defect) or to probe the WRONG repository
+    cross-repo (the defect, with a new source). It genuinely could not coexist,
+    so the split is stated rather than smuggled.
+
+    🔴 THE PROPERTY IT PROTECTED IS NOT WEAKENED — it became STRUCTURAL. The
+    reason lives in `TOOLCHAIN_HEAD`/`TOOLCHAIN_TAIL`, module-level CONSTANTS
+    taking no argument, so a state-dependent rationale is no longer merely
+    unasserted, it is unwritable without deleting the constant. This guard
+    still drives every scenario, still runs the three phrase assertions over
+    the FULL section, and now checks BOTH that the reason bars are byte-equal
+    across scenarios AND that each IS the constant — which the old equality did
+    not do, and which is what makes "byte-identical to WHAT" answerable. It
+    also fails if every scenario renders the SAME commands bar, the shape this
+    fix would take if the detection were inert.
     """
-    sections = {}
+    sections, reasons = {}, {}
     for scenario in SCENARIOS:
         tool = toolchain_section(brief_for_scenario(scenario))
         sections[scenario] = tool
@@ -5029,23 +5202,252 @@ def test_the_toolchain_reason_is_true_in_every_scenario():
             "the reason no longer names the property that is true in every "
             "state — that copy is not the auditor's"
         )
-    # 🔴 EQUALITY ACROSS EVERY SCENARIO, not across a chosen pair. Compared
-    # against ONE reference so the failure names which scenario diverged.
+        # The reason is everything before the COMMANDS heading. Sliced on that
+        # heading, which is itself a constant, so no scenario can move the
+        # boundary out from under this guard.
+        assert ad.TOOLCHAIN_COMMANDS_HEADING in tool, (
+            f"scenario {scenario!r}: the commands heading is gone, so this "
+            "guard can no longer tell the reason from the prescription and "
+            "would pass over a rationale that had become state-dependent"
+        )
+        reasons[scenario] = tool.split(ad.TOOLCHAIN_COMMANDS_HEADING)[0]
+
     ref_name = SCENARIOS[0]
-    for scenario, tool in sections.items():
-        assert tool == sections[ref_name], (
-            f"\n\nTOOLCHAIN differs between {ref_name!r} and {scenario!r}. It "
-            "is rendered from `facts.cwd_repo_dir` alone and knows nothing "
-            "about where the auditor stands or which repo the PR is in, so a "
-            "scenario-dependent sentence here is a claim it cannot support in "
-            "the branch it is not being read in.\n"
-            f"--- {ref_name} ---\n{sections[ref_name]}\n"
-            f"--- {scenario} ---\n{tool}"
+    for scenario, reason in reasons.items():
+        assert reason == reasons[ref_name], (
+            f"\n\nTOOLCHAIN's REASON differs between {ref_name!r} and "
+            f"{scenario!r}. It knows nothing about where the auditor stands or "
+            "which repo the PR is in, so a scenario-dependent sentence here is "
+            "a claim it cannot support in the branch it is not being read "
+            f"in.\n--- {ref_name} ---\n{reasons[ref_name]}\n"
+            f"--- {scenario} ---\n{reason}"
+        )
+        # 🔴 IDENTITY, not merely equality. Equality across scenarios is silent
+        # about WHAT they all equal: re-deriving the reason from `facts` would
+        # satisfy it under this module's fixtures, where `cwd_repo_dir` holds
+        # one value — which is how round 6 was walked one level up.
+        assert reason.strip() == ad.TOOLCHAIN_HEAD.strip(), (
+            f"\n\nscenario {scenario!r}: the reason bar is no longer "
+            "`TOOLCHAIN_HEAD` rendered verbatim. That constant takes no "
+            "argument — that is what makes state-independence structural — so "
+            "re-deriving or reformatting it here reopens round 5's finding.\n"
+            f"--- rendered ---\n{reason}\n--- constant ---\n{ad.TOOLCHAIN_HEAD}"
+        )
+        assert ad.TOOLCHAIN_TAIL in sections[scenario], (
+            f"scenario {scenario!r}: the state-independent TAIL — name the "
+            "tier and the base sha, and the `git --version` note — is not "
+            "rendered verbatim"
         )
     assert len(sections) == len(SCENARIOS) >= 5, (
         f"only {len(sections)} scenario(s) were driven; an equality over a "
         "handful of them pins independence of the axes they happen to vary "
         "and nothing else — which is exactly how round 6 walked this guard"
+    )
+    # 🔴 THE PIN THAT KEEPS THE SPLIT HONEST, AND IT ASKS ABOUT PRESCRIPTIONS
+    # RATHER THAN TEXT. The first spelling compared the commands bars for
+    # inequality — and MEASURED (mutant V40) it did not fire when the WRONG
+    # repository was probed cross-repo, because that bar names `facts.repo`,
+    # which differs between the scenarios anyway. A text difference is not the
+    # property; the property is that a scenario holding no checkout of the PR's
+    # repository offers NOTHING to run, and one holding a checkout offers
+    # something. Both states must be present, or this whole module is grading
+    # one branch.
+    prescribing = {s: toolchain_commands(t) for s, t in sections.items()}
+    assert any(c for c in prescribing.values()), (
+        "no scenario prescribed a single runnable command — the probe answers "
+        "'absent' everywhere, so every assertion about what it emits is "
+        "vacuous. Check `FAKE_REPO_DIR` is still a real directory on disk."
+    )
+    silent = [s for s, c in prescribing.items() if not c]
+    assert silent, (
+        "\n\nEVERY scenario prescribed commands, including the cross-repo ones "
+        "that hold no checkout of the repository the PR lives in. Either the "
+        "probe is reading the WRONG repository there — a confident, "
+        "fully-formed, entirely irrelevant command list, which is the original "
+        "defect with a new source — or the detection is inert and one "
+        "repository's layout is being prescribed at every target.\n"
+        f"  scenarios: {sorted(prescribing)}"
+    )
+
+
+def test_the_toolchain_prescribes_only_commands_it_probed(tmp_path):
+    """🔴 REGRESSION. Red at `bd1572f3`, on a real target that has none of them.
+
+    Every TOOLCHAIN command interpolated `facts.cwd_repo_dir` into devrc's OWN
+    layout, so a brief for a PR in any other repository prescribed scripts that
+    do not exist there. Measured 2026-08-29 against `ZacxDev/homelab-infra`
+    (PR #530) from a real checkout of it:
+
+        scripts/gate.sh                 ABSENT
+        flake `checks` outputs          NONE, at HEAD and in the working tree
+        .envrc                          `use flake` + `use opencode`
+        its real runner                 scripts/tests/run-ci-suite.sh
+        nix develop <root> -c python3 -m pytest
+                                        ModuleNotFoundError: No module named
+                                        'pytest'
+
+    Four prescriptions, none runnable — and the last is the worst, because the
+    bar under it told the auditor that `No module named pytest` means the WRONG
+    SHELL and not a broken suite, so the brief manufactured a failure and told
+    the reader to disregard the one true signal it produced. An auditor
+    following it hits four missing things and can report the gate broken
+    against a PR that is fine.
+
+    The fixture is that repo's SHAPE, not that repo — its `.envrc`, its runner,
+    and a `flake.nix` whose devShell embeds a python heredoc containing
+    `checks = pr.get("statusCheckRollup", [])`. That line is verbatim from the
+    real file and is the reason the probe matches a flake OUTPUT rather than
+    the word: the first regex here answered "this flake declares checks" for a
+    flake that declares none, which would have prescribed the `nix build` line
+    anyway and left the fallback unreachable.
+    """
+    root = _write_repo(tmp_path / "homelab-talos",
+                       envrc="use flake\nuse opencode\n",
+                       ci_suite=True, flake=HOMELAB_FLAKE)
+    rc, out, err = run_main(["900"], toplevel=root)
+    assert rc == 0, err
+    tool = toolchain_section(out)
+    # 🔴 THE COMMANDS, NOT THE PROSE AROUND THEM — the same distinction
+    # `test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout`
+    # draws, and for the same reason. The prose must be free to NAME an absent
+    # command in order to say it is absent ("`nix build …#checks…` would fail
+    # with an attribute error"); a scan that cannot tell a prescription from
+    # its rationale goes red on the sentence that closes the finding.
+    cmds = toolchain_commands(tool)
+    assert cmds, "no command block at all in a section that probed a real repo"
+
+    for line in cmds:
+        assert "gate.sh" not in line, (
+            f"\n\nthe brief prescribes `gate.sh` for a repository with no "
+            f"`scripts/gate.sh`:\n    {line}\n{tool}"
+        )
+        assert "nix build" not in line, (
+            f"\n\na `nix build …#checks…` is prescribed against a flake that "
+            f"declares no `checks` output; it exits on an attribute error, "
+            f"which reads exactly like a broken gate:\n    {line}\n{tool}"
+        )
+        assert "nix develop" not in line, (
+            f"\n\na `nix develop` wrapper is prescribed around this "
+            f"repository's commands, but its flake names no pytest — that is "
+            f"the wrapper measured to exit `No module named 'pytest'`:\n"
+            f"    {line}\n{tool}"
+        )
+    assert "This repo's `.envrc` is `use opencode`" not in tool, (
+        f"\n\nthe brief asserts this repo's `.envrc` is `use opencode`. It is "
+        f"`use flake` + `use opencode`, and that string was remembered from "
+        f"devrc rather than read:\n{tool}"
+    )
+    assert "`use flake` + `use opencode`" in tool, (
+        f"\n\nthe `.envrc` this brief names is not the one on disk:\n{tool}"
+    )
+    # The runner that DOES exist is named, and the absent tier is called
+    # absent rather than passed over in silence — an auditor who reads no
+    # sandbox line at all goes looking for one.
+    assert "bash <your worktree>/scripts/tests/run-ci-suite.sh" in tool, (
+        f"\n\nthe repository's real runner is not prescribed:\n{tool}"
+    )
+    assert "no `checks` output" in tool, (
+        f"\n\nthe brief is silent about the missing sandbox tier; silence "
+        f"sends the auditor hunting for one:\n{tool}"
+    )
+    # 🔴 And the bare subset command, NOT one wrapped in a shell measured to
+    # have no pytest in it.
+    assert "python3 -m pytest <paths> -q -p no:cacheprovider" in cmds
+
+    # 🔴 THE OTHER `.envrc` BRANCH, AND A FIXTURE THAT CAN SEE THE MUTANT.
+    # The wrong-shell diagnosis has two spellings — one for a repo whose flake
+    # DOES carry pytest, one for a repo that does not — and only the second is
+    # exercised above. MEASURED: with the module's devrc-shaped fixture alone,
+    # hardcoding the sentence back to `use opencode` (mutant V39) SURVIVED a
+    # fully green suite, because that fixture's `.envrc` IS `use opencode` and
+    # a value that can only ever equal the constant cannot see a mutant that
+    # returns the constant. So this one says something else, deliberately.
+    other = _write_repo(tmp_path / "devrc-shaped", envrc="use flake\n",
+                        gate=DEVRC_GATE, flake=DEVRC_FLAKE)
+    rc, out, err = run_main(["900"], toplevel=other)
+    assert rc == 0, err
+    tool = toolchain_section(out)
+    assert "This repo's `.envrc` is `use flake`," in tool, (
+        f"\n\nthe `.envrc` named in the wrong-shell diagnosis is not the one "
+        f"on disk — it says `use flake` and nothing else:\n{tool}"
+    )
+    assert "`use opencode`" not in tool, (
+        f"\n\nthe brief names `use opencode` for a repository whose `.envrc` "
+        f"does not contain it. That string is devrc's, remembered rather than "
+        f"read, and it is the claim an auditor cannot check:\n{tool}"
+    )
+    # …and this shape DOES get the shell wrapper, because its flake carries
+    # pytest. The negative control for the branch above: same code, opposite
+    # answer, so "no `nix develop`" is a measurement and not a constant.
+    assert any(f"nix develop {other} -c python3 -m pytest" in line
+               for line in toolchain_commands(tool)), (
+        f"\n\nthis repository's flake DOES carry pytest, so the subset command "
+        f"must be wrapped in its dev shell. Without this the 'no `nix develop`' "
+        f"assertion above is a constant rather than a "
+        f"measurement:\n{toolchain_commands(tool)}"
+    )
+
+
+def test_the_toolchain_prescribes_nothing_when_it_cannot_probe(tmp_path):
+    """🔴 Cross-repo: no checkout of the PR's repo, so NO command is invented.
+
+    The counterpart to the guard above, and the one that pins the design's
+    whole point: a fabricated command is strictly worse than an absent one.
+    An absent one costs the auditor a lookup; a fabricated one costs a round
+    and can be written up as a finding against a PR that is fine.
+
+    The trap this closes is subtle — the cwd IS a probeable repository here
+    (devrc's shape, `FAKE_REPO_DIR`), it is simply the WRONG one. Probing it
+    would produce a confident, fully-formed, entirely irrelevant command list,
+    which is the original defect with a new source rather than a fix.
+    """
+    tool = toolchain_section(brief_for_scenario("cross-repo"))
+    assert "NOTHING WAS PROBED HERE" in tool, (
+        f"\n\ncross-repo, and the brief still prescribes commands:\n{tool}"
+    )
+    # 🔴 NO FENCED BLOCK AT ALL. The prose deliberately still NAMES
+    # `scripts/gate.sh` and `scripts/tests/run-ci-suite.sh` — as places to go
+    # LOOK — so a substring scan over the whole section would forbid the
+    # hand-over this branch exists to give. What must be empty is the set of
+    # things presented as runnable.
+    assert toolchain_commands(tool) == [], (
+        f"\n\ncross-repo, the brief still hands over runnable commands — read "
+        f"out of `{FAKE_REPO_DIR}`, a DIFFERENT repository from the one the PR "
+        f"lives in:\n{toolchain_commands(tool)}\n{tool}"
+    )
+    assert "NAME the one you used" in tool, (
+        "the hand-over does not ask the auditor to name the runner they "
+        "found, so the report cannot be checked by anyone"
+    )
+
+
+def test_the_flake_checks_probe_reads_an_output_and_not_the_word(tmp_path):
+    """🔴 The three answers `_flake_check_names` must keep distinct.
+
+    `None` (no `checks` output), `[]` (declared but unreadable) and a name list
+    are three different sentences, and collapsing any two either prescribes a
+    command for a repo without it or suppresses one for a repo with it.
+
+    The `homelab-infra` row is the negative control that a loose probe fails,
+    and the `devrc` row is the positive control that an indentation-only scan
+    fails: a build script's lines start at column 0, so bounding the block by
+    indentation stopped at the first of them and returned `['pytests']` alone.
+    """
+    assert ad._flake_check_names(HOMELAB_FLAKE) is None, (
+        "`checks = pr.get(...)` inside a devShell heredoc was read as a flake "
+        "`checks` OUTPUT — the repo declares none"
+    )
+    assert ad._flake_check_names(DEVRC_FLAKE) == ["pytests", "nodetests"], (
+        "the two real check names were not both read out of a devrc-shaped "
+        "flake; a scan that stops at the first low-indent line inside a "
+        "`''…''` build script returns ['pytests']"
+    )
+    assert ad._flake_check_names("") is None
+    assert ad._flake_check_names(None) is None
+    assert ad._flake_check_names("checks.${system} = {\n") == [], (
+        "a truncated/unreadable checks block must answer [] — 'declared but "
+        "I could not read the names' — and not None, which claims the "
+        "repository HAS no sandbox tier"
     )
 
 
@@ -6201,6 +6603,25 @@ RED_AT_BASE_R13: frozenset[str] = frozenset({
     "test_the_cross_repo_recipe_can_actually_be_run",
 })
 
+# 🔴 ROUND 14's base is `bd1572f3`, `origin/main` at the time. Measured the
+# same way — `git show bd1572f3:scripts/audit-dispatch.py` into a scratch tree
+# with THIS module copied in unchanged, `PYTHONDONTWRITEBYTECODE=1
+# -p no:cacheprovider`. Both fail on an ASSERTION, not on an import or an
+# arity error: the base script renders a TOOLCHAIN section fine, it just
+# renders devrc's layout into it whatever the target.
+#
+# 🔴 `test_the_flake_checks_probe_reads_an_output_and_not_the_word` is NOT
+# here, deliberately. `_flake_check_names` does not exist at `bd1572f3`, so it
+# would fail there with `AttributeError` — a claim about the symbol's absence
+# and not about any behaviour. That is the vacuous shape this module refuses to
+# count as regression coverage, so it is filed as an invariant guard and its
+# evidence is its own two controls (the real `homelab-infra` heredoc line, the
+# real devrc two-name block) plus mutants V38 and V41.
+RED_AT_BASE_R14: frozenset[str] = frozenset({
+    "test_the_toolchain_prescribes_only_commands_it_probed",
+    "test_the_toolchain_prescribes_nothing_when_it_cannot_probe",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
@@ -6210,10 +6631,21 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "28492af2": RED_AT_BASE_R7,
     "706a6b38": RED_AT_BASE_R9,
     "6349a8b9": RED_AT_BASE_R13,
+    "bd1572f3": RED_AT_BASE_R14,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
 INVARIANT_GUARDS_AND_LEDGERS = frozenset({
+    # 🔴 An invariant guard, NOT regression coverage — `_flake_check_names`
+    # does not exist at `bd1572f3`, so its red there would be an
+    # `AttributeError` about a missing symbol rather than a wrong answer. Its
+    # evidence is its own pair of controls, both taken from real files: the
+    # `checks = pr.get(...)` line out of `homelab-infra`'s devShell heredoc
+    # (which the first regex here matched, answering "declares checks" for a
+    # flake that declares none) and devrc's two-name `checks.${system}` block
+    # (which an indentation-only scan reads as one name, because a build
+    # script's lines start at column 0).
+    "test_the_flake_checks_probe_reads_an_output_and_not_the_word",
     "test_the_invariant_clause_ledger_is_pinned_two_way",
     # 🔴 GREEN at `abc41024`, MEASURED — and it is the guard for finding 5, so
     # the temptation to file it as regression coverage is real and is refused
@@ -6735,6 +7167,37 @@ FIX_MATRIX = (
      "relationship read off the recipe, which no rewording moves",
      "test_the_clone_grant_covers_only_the_write_the_recipe_makes",
      "RED@706a6b38", "V22 V28 V34"),
+    # --------------------------------------------------------------------- #
+    # Round 14. Its base is `bd1572f3` — `origin/main` at the time.
+    # --------------------------------------------------------------------- #
+    ("r14/1 every TOOLCHAIN command hardcoded devrc's own layout, so a brief "
+     "for any other target prescribed scripts that do not exist there. "
+     "Measured against `ZacxDev/homelab-infra` #530 from a real checkout: no "
+     "`scripts/gate.sh`, no flake `checks` output, `.envrc` is `use flake` + "
+     "`use opencode` and not the `use opencode` asserted, and `nix develop "
+     "<root> -c python3 -m pytest` exits `No module named 'pytest'` — under a "
+     "bar telling the auditor that error means the WRONG SHELL, not a broken "
+     "suite. Four unrunnable prescriptions, one of them manufacturing the "
+     "failure it then told the reader to disregard",
+     "test_the_toolchain_prescribes_only_commands_it_probed",
+     "RED@bd1572f3", "V36 V38 V39"),
+    ("r14/2 and the fix's own trap: cross-repo, the cwd IS a probeable "
+     "repository, it is merely the WRONG one. Probing it yields a confident, "
+     "fully-formed, entirely irrelevant command list — the same defect with a "
+     "new source. Nothing detected must prescribe NOTHING, because a "
+     "fabricated command costs a round and reads as a broken gate, while an "
+     "absent one costs a lookup",
+     "test_the_toolchain_prescribes_nothing_when_it_cannot_probe",
+     "RED@bd1572f3", "V40"),
+    ("r14/3 the `checks` probe matched the WORD and not a flake OUTPUT: "
+     "`checks = pr.get(\"statusCheckRollup\", [])`, inside a python heredoc in "
+     "`homelab-infra`'s real devShell, answered \"this flake declares checks\" "
+     "for a flake that declares none — which would have prescribed the `nix "
+     "build` anyway and left the honest fallback unreachable. The mirror "
+     "error: an indentation-only name scan reads devrc's two-name block as "
+     "one, because a build script's lines start at column 0",
+     "test_the_flake_checks_probe_reads_an_output_and_not_the_word",
+     "GUARD", "V38 V41"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor

@@ -2002,6 +2002,416 @@ def render_checkout(facts):
     return "\n".join(lines)
 
 
+NIX_SYSTEM = "x86_64-linux"
+
+RepoToolchain = namedtuple(
+    "RepoToolchain",
+    "root probed gate_sh gate_tier ci_suite flake flake_pytest check_names "
+    "py_tests envrc_uses envrc_present",
+)
+
+# 🔴 `checks` AS A FLAKE OUTPUT, not as the word "checks". The first spelling of
+# this regex was `^\s*checks\b[^\n=]*=`, and it matched
+#
+#     checks = pr.get("statusCheckRollup", [])
+#
+# inside a python heredoc embedded in `homelab-infra`'s `flake.nix` devShell —
+# a repository whose flake declares NO `checks` output at all. A loose probe
+# that answers YES for a repo without the artifact regenerates the exact defect
+# this detection exists to close, one level down: the fallback would never be
+# reached and a `nix build …#checks…` would be prescribed anyway. So the shapes
+# accepted are the two a flake output can actually take, both requiring the
+# opening brace of an attrset to CLOSE the line.
+CHECKS_ATTR = re.compile(
+    r"^[ \t]*checks(?:\.[^\s=]+)?[ \t]*=[ \t]*(?:forAllSystems[^\n]*)?\{[ \t]*$",
+    re.M,
+)
+_NIX_NAME = re.compile(r"^[ \t]*([A-Za-z_][A-Za-z0-9_'-]*)[ \t]*=")
+_PROBE_MAX_BYTES = 400_000
+_PROBE_MAX_DIRS = 400
+_PROBE_MAX_DEPTH = 4
+_PROBE_SKIP_DIRS = {
+    ".git", "node_modules", "__pycache__", "result", ".direnv", ".venv",
+    "target", "dist", "build", ".mypy_cache", ".pytest_cache",
+}
+
+
+def _flake_check_names(text):
+    """-> the `checks.<system>` attribute names, [] if unreadable, None if none.
+
+    Three answers, because three different sentences are true of them, and
+    collapsing any two prescribes a command for a repo that does not have it:
+    `None` = this flake declares no `checks` output (there IS no sandbox tier);
+    `[]` = it declares one but this parse could not read the names (say so and
+    hand over `nix flake show`); a non-empty list = names to run.
+
+    Brace depth over the attrset, with nix's `''…''` indented strings skipped
+    so a shell body's braces do not close the block early. Measured on the two
+    real flakes: `devrc` -> ['pytests', 'nodetests'] (an indentation-only scan
+    returned ['pytests'], because a build script's lines start at column 0),
+    `homelab-infra` -> None on both its worktree and its HEAD copy.
+    """
+    if not text:
+        return None
+    m = CHECKS_ATTR.search(text)
+    if not m:
+        return None
+    names, depth, in_str = [], 0, False
+    for line in text[m.start():].splitlines()[:4000]:
+        code, i = [], 0
+        while i < len(line):
+            if line[i:i + 2] == "''":
+                in_str = not in_str
+                i += 2
+                continue
+            if not in_str:
+                code.append(line[i])
+            i += 1
+        code = "".join(code)
+        if depth == 1:
+            mm = _NIX_NAME.match(code)
+            if mm:
+                names.append(mm.group(1))
+        depth += code.count("{") - code.count("}")
+        if depth <= 0:
+            break
+    return names
+
+
+def _read_probe(base, rel):
+    """The text of `<base>/<rel>`, or None. Never raises, never writes."""
+    try:
+        p = base / rel
+        if not p.is_file():
+            return None
+        return p.read_text(encoding="utf-8", errors="replace")[:_PROBE_MAX_BYTES]
+    except OSError:
+        return None
+
+
+def _has_python_tests(base):
+    """True if a `test_*.py` exists within a BOUNDED walk of `base`.
+
+    Bounded on purpose — brief generation must not become slow or failure-prone
+    on a large checkout, and an unbounded walk of a monorepo is both. A cap hit
+    answers False, which lands in the honest not-detected wording rather than
+    prescribing a runner for tests nobody confirmed exist.
+    """
+    seen = 0
+    try:
+        base_depth = len(base.parts)
+        for root, dirs, files in os.walk(base):
+            seen += 1
+            if seen > _PROBE_MAX_DIRS:
+                return False
+            dirs[:] = [
+                d for d in dirs
+                if d not in _PROBE_SKIP_DIRS and not d.startswith(".")
+            ]
+            if len(Path(root).parts) - base_depth >= _PROBE_MAX_DEPTH:
+                dirs[:] = []
+            for f in files:
+                if f.startswith("test_") and f.endswith(".py"):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _envrc_uses(text):
+    """The `use …` lines of an `.envrc`, in order. [] if it has none."""
+    if text is None:
+        return None
+    return [ln.strip() for ln in text.splitlines() if ln.strip().startswith("use ")]
+
+
+def detect_repo_toolchain(root):
+    """Probe the repository the PR LIVES IN for the commands that exist there.
+
+    🔴 `root` is None whenever this run holds no checkout of that repository —
+    the cross-repo and unknown-relation branches of WHERE TO WORK. Every field
+    is then falsy and `render_toolchain` prescribes NOTHING, which is the whole
+    point: a fabricated command costs the auditor a round and can be reported
+    as a broken gate against a PR that is fine, so it is strictly worse than an
+    absent one.
+
+    Cheap and side-effect free by construction: `is_file`, a capped `read_text`
+    and one bounded `os.walk`. No build, no `nix` invocation, no network. A
+    probe that cannot answer answers "no".
+    """
+    if not root:
+        return RepoToolchain(None, False, None, False, False, False, False,
+                             None, False, None, False)
+    base = Path(root)
+    gate = _read_probe(base, "scripts/gate.sh")
+    flake = _read_probe(base, "flake.nix")
+    envrc = _read_probe(base, ".envrc")
+    try:
+        ci_suite = (base / "scripts" / "tests" / "run-ci-suite.sh").is_file()
+    except OSError:
+        ci_suite = False
+    return RepoToolchain(
+        root=str(root),
+        probed=True,
+        gate_sh=gate is not None,
+        # A FLAG IS AN ARTIFACT TOO. `--tier both` is devrc's spelling; another
+        # repo's `scripts/gate.sh` need not take it, and appending it blind is
+        # the same fabrication one argument over.
+        gate_tier=bool(gate and "--tier" in gate and "both" in gate),
+        ci_suite=ci_suite,
+        flake=flake is not None,
+        flake_pytest=bool(flake and "pytest" in flake),
+        check_names=_flake_check_names(flake),
+        py_tests=_has_python_tests(base),
+        envrc_uses=_envrc_uses(envrc),
+        envrc_present=envrc is not None,
+    )
+
+
+def toolchain_probe_root(facts):
+    """The checkout to probe — the PR's OWN repository, or None.
+
+    🔴 ONE derivation, reusing the relation WHERE TO WORK already decided. Only
+    the same-repo branch is standing in a checkout of the repository the PR
+    lives in; in the cross-repo branch `cwd_repo_dir` is a DIFFERENT project,
+    and probing it would answer questions about the wrong repository — the
+    original defect with a new source. "Unknown" is not "same": that is the
+    distinction `render_worktree_directive`'s own docstring was written for.
+    """
+    return facts.cwd_repo_dir if facts.repo_relation == "same" else None
+
+
+# 🔴 A CONSTANT, so state-independence is STRUCTURAL and not merely tested.
+# `test_the_toolchain_reason_is_true_in_every_scenario` used to pin this by
+# comparing the whole TOOLCHAIN section across every scenario for byte
+# equality; the commands below it are now derived from the target repository,
+# which is a DIFFERENT axis from the scenario axis that guard varies, so the
+# equality moved onto this block alone. It takes no argument at all, which is
+# the strongest form of the claim its own prose makes: this reason knows
+# nothing about where the auditor stands, and cannot be made to.
+TOOLCHAIN_HEAD = "\n".join([
+    "## TOOLCHAIN — the exact commands, and the two ways they lie",
+    "",
+    "🔴 `<your worktree>` below is **your own copy** — the one WHERE TO WORK "
+    "told you to make. The checkout this brief was assembled in appears below "
+    "at most ONCE, as the argument to `nix develop`, where it resolves the dev "
+    "shell and nothing else. Never point a gate script or a `nix build` at it: "
+    "a gate script resolves its root from its own path, so running that copy "
+    "runs the suite in a checkout that is NOT yours — one holding none of your "
+    "mutations — and a `nix build <ref>#…` builds that ref's tree, not yours.",
+])
+
+# 🔴 ALSO A CONSTANT, and for the same reason. Both notes are true of every
+# repository and every checkout state; only what sits BETWEEN them is derived.
+TOOLCHAIN_TAIL = "\n".join([
+    "Name the tier and the base sha in any claim you make about the gate — "
+    "\"the gate passed\" is true of one run, one tier, one base, and reads "
+    "as a property of the change. 🔴 Name the RUNNER too, by path: everything "
+    "above was PROBED out of this repository rather than assumed, so a claim "
+    "about \"the gate\" that does not say which script produced it cannot be "
+    "checked by anyone reading your report.",
+    "",
+    "`git --version` before you trust a range: `--remerge-diff` needs git "
+    "≥ 2.35, and a git without it exits 128 with EMPTY output, which reads "
+    "exactly like a clean zero.",
+])
+
+TOOLCHAIN_COMMANDS_HEADING = "### The commands — PROBED, not assumed"
+
+
+def _toolchain_not_probed(facts):
+    """The honest refusal: nothing was read, so nothing is prescribed."""
+    return [
+        TOOLCHAIN_COMMANDS_HEADING,
+        "",
+        "🔴 **NOTHING WAS PROBED HERE, SO NOTHING IS PRESCRIBED.** The PR "
+        f"lives in `{facts.repo}`, and this run holds no checkout of that "
+        "repository to read — "
+        + ("WHERE TO WORK could not establish which repository the PR is in"
+           if facts.repo_relation == "unknown" else
+           f"`{facts.cwd_repo_dir}` is a DIFFERENT repository")
+        + ". So this brief does not know what that repository's gate is "
+        "called, or whether it has one.",
+        "",
+        "🔴 **That silence is deliberate — do not read it as \"there is no "
+        "gate\".** A command invented here would cost you a round, and a "
+        "missing script reads exactly like a broken gate, which is a finding "
+        "against a PR that is fine.",
+        "",
+        "Find the runner yourself, in the worktree WHERE TO WORK told you to "
+        "make — `scripts/gate.sh`, `scripts/tests/run-ci-suite.sh`, a "
+        "`Makefile` target, the repo's CI workflow, its `CLAUDE.md` — and "
+        "**NAME the one you used, by path**, in your report.",
+    ]
+
+
+def toolchain_shell(tc):
+    """The `nix develop <r> -c ` prefix, or "" — ONE rule, ONE place.
+
+    🔴 It was two, briefly, and they disagreed: the subset command asked
+    "does this flake provide pytest" and the gate command asked only "is there
+    a flake", so a repository with a flake that does NOT carry the test
+    toolchain got a `nix develop` wrapper around its own runner — which is how
+    `homelab-infra`'s `run-ci-suite.sh`, a script that works because it uses
+    the AMBIENT python, would have been prescribed inside a shell measured to
+    have no pytest in it. A flake alone is not evidence of a test shell.
+
+    `tc.root` is the checkout the brief was assembled in AND a checkout of the
+    PR's repository — the two coincide in the only branch that reaches here,
+    which is why this one use of it is sound where pointing a gate at it is
+    not: it resolves a dev shell, never a tree under test.
+    """
+    return f"nix develop {tc.root} -c " if (tc.flake and tc.flake_pytest) else ""
+
+
+def _toolchain_pytest_lines(facts, tc):
+    """The subset-run command, and the wrong-shell diagnosis that goes with it.
+
+    🔴 THE SHELL IS PROBED TOO. `nix develop <r> -c python3 -m pytest` was
+    emitted unconditionally, and MEASURED against `homelab-infra` it exits
+    `ModuleNotFoundError: No module named 'pytest'` — while the very next bar
+    told the auditor that error means the WRONG SHELL and not a broken suite.
+    So the brief manufactured a failure and then instructed the reader to
+    disregard the one true signal it had produced. That repo's own runner
+    invokes a BARE `python3 -m pytest`, which works.
+    """
+    if not tc.py_tests:
+        return []
+    shell = toolchain_shell(tc)
+    lines = [
+        "Run a SUBSET of the suite:",
+        "",
+        "```",
+        f"{shell}python3 -m pytest <paths> -q -p no:cacheprovider",
+        "```",
+        "",
+    ]
+    if shell:
+        lines.append(
+            "🔴 A bare `python3 -m pytest` failing with **`No module named "
+            "pytest`** means you are in the WRONG SHELL, not that the suite is "
+            f"broken. This repo's `.envrc` is {_fmt_uses(tc)}, which does not "
+            "put pytest on PATH; a loaded direnv is not the dev shell. Do not "
+            "report that as a finding and do not build an ad-hoc `nix-shell` "
+            "around it."
+        )
+    else:
+        lines.append(
+            "⚠ The command above is BARE on purpose: this brief did not detect "
+            "a dev shell that puts pytest on PATH for this repository "
+            + ("(its `flake.nix` names no pytest anywhere)" if tc.flake else
+               "(it has no `flake.nix`)")
+            + f", and its `.envrc` is {_fmt_uses(tc)}. 🔴 If it fails with "
+            "**`No module named pytest`** you are in the WRONG SHELL and not "
+            "looking at a broken suite: find the shell this repository's own "
+            "runner uses, say which in your report, and do not build an ad-hoc "
+            "`nix-shell` around it."
+        )
+    return lines + [""]
+
+
+def _fmt_uses(tc):
+    """The target repo's `.envrc`, as read — never a remembered string."""
+    if not tc.envrc_present:
+        return ("absent from the tree probed (it may be gitignored, in which "
+                "case it never came with your worktree either)")
+    if not tc.envrc_uses:
+        return "present but declares no `use` line"
+    return " + ".join(f"`{u}`" for u in tc.envrc_uses)
+
+
+def _toolchain_gate_lines(facts, tc):
+    """The repo's own runner(s) — or the refusal to name one."""
+    shell = toolchain_shell(tc)
+    cmds = []
+    if tc.gate_sh:
+        tier = " --tier both" if tc.gate_tier else ""
+        cmds.append(f"{shell}bash <your worktree>/scripts/gate.sh{tier}")
+    if tc.ci_suite:
+        cmds.append(f"{shell}bash <your worktree>/scripts/tests/run-ci-suite.sh")
+    if not cmds:
+        return [
+            "🔴 **NO REPO GATE WAS DETECTED.** Neither `scripts/gate.sh` nor "
+            f"`scripts/tests/run-ci-suite.sh` exists in `{tc.root}`, so this "
+            "brief will not name a runner it cannot see — a command that does "
+            "not exist costs you a round and reads exactly like a broken gate. "
+            "Find the runner yourself (a `Makefile` target, the CI workflow, "
+            "the repo's `CLAUDE.md`) and **NAME the one you used, by path**.",
+            "",
+        ]
+    return [
+        "Run the repository's own gate (its EXIT STATUS is authoritative; also "
+        "read each runner's own `RESULT:` line)"
+        + (" — BOTH of these exist here, so say which you ran"
+           if len(cmds) > 1 else "") + ":",
+        "",
+        "```",
+        *cmds,
+        "```",
+        "",
+    ]
+
+
+# 🔴 KEPT FROM #1104, DELIBERATELY, AND IT IS THE ONE THING THERE THIS FILE
+# COULD NOT DERIVE FOR ITSELF. `_flake_check_names` is a REGEX over `flake.nix`,
+# so it can be wrong in both directions — a `checks` output declared through a
+# helper this pattern does not match reads as absent, and a name it does read
+# could still fail to resolve. #1104's discriminator is what lets the auditor
+# CHECK this brief instead of trusting it, and its argument for `nix eval` over
+# `nix flake show` is right and is why it replaced the `flake show` this branch
+# first suggested: `nix eval` on a repo with no `checks` **errors outright**,
+# where a listing that comes back empty is indistinguishable from a listing
+# that failed. An empty result cannot separate two mechanisms; an error can.
+CHECKS_DISCRIMINATOR = (
+    f"nix eval <your worktree>#checks.{NIX_SYSTEM} --apply builtins.attrNames"
+)
+
+
+def _toolchain_checks_lines(facts, tc):
+    """The sandbox tier — only when the flake really declares one."""
+    if not tc.flake:
+        return [
+            f"⚠ `{tc.root}` has no `flake.nix`, so there is no "
+            "`nix build …#checks…` tier to run; the runner above is the only "
+            "gate this brief could find.",
+            "",
+        ]
+    if tc.check_names is None:
+        return [
+            f"⚠ `{tc.root}/flake.nix` declares **no `checks` output**, so this "
+            "repository has no sandbox tier — `nix build <your "
+            f"worktree>#checks.{NIX_SYSTEM}.…` would fail with an attribute "
+            "error, which is a fact about the REPO and not a finding about the "
+            "PR. The runner above is the only gate this brief could find. That "
+            "reading came from a regex over `flake.nix`, so if you want to "
+            f"confirm it rather than trust it: `{CHECKS_DISCRIMINATOR}` errors "
+            "outright in a repo that has none, which an empty listing cannot "
+            "tell you.",
+            "",
+        ]
+    if not tc.check_names:
+        return [
+            f"⚠ `{tc.root}/flake.nix` declares `checks` outputs, but this "
+            "brief could not read their names out of it. List them with "
+            f"`{CHECKS_DISCRIMINATOR}` and run each — do NOT guess a name.",
+            "",
+        ]
+    return [
+        "🔴 The gate above is the DEV-HOST tier. **The tier the merge actually "
+        "gates on is the sandbox one**, which builds from a store copy with no "
+        "`.git` and is therefore blind to different things. These names were "
+        f"read out of `{tc.root}/flake.nix` by a regex; if `nix build` reports "
+        f"one is not an attribute, run `{CHECKS_DISCRIMINATOR}` and use what it "
+        "lists rather than reporting a broken gate:",
+        "",
+        "```",
+        *[f"nix build <your worktree>#checks.{NIX_SYSTEM}.{n}"
+          for n in tc.check_names],
+        "```",
+        "",
+    ]
+
+
 def render_toolchain(facts):
     """🔴 The operator's checkout resolves the TOOLCHAIN and nothing else.
 
@@ -2029,136 +2439,84 @@ def render_toolchain(facts):
     nothing about where the auditor stands, so it says only what is true in
     every state — that copy is not yours and holds none of your mutations.
     `test_the_toolchain_reason_is_true_in_every_scenario` drives EVERY scenario
-    that module knows and requires this section byte-identical across all of
+    that module knows and requires this REASON byte-identical across all of
     them — round 5 drove two, both same-repo, and round 6 measured that a
     cross-repo-only reword walked it.
+
+    🔴 ROUND 14 — THE REASON WAS STATE-INDEPENDENT AND THE COMMANDS WERE
+    DEVRC-SHAPED. Every command below `r = facts.cwd_repo_dir` was hardcoded to
+    THIS repository's layout, so a brief generated for any other target
+    prescribed scripts that do not exist there.
+
+    🔴 THIS REWRITES A FUNCTION #1104 (`9e23c379`) JUST LANDED, AND TAKES THE
+    DECISION THAT PR EXPLICITLY DEFERRED: "a repo-AWARE toolchain section is
+    the bigger fix and is deliberately not taken here — it needs that pin
+    relaxed, which is a design decision for the tool's owner." #1104 hedged the
+    prose — "if this repo has one", "exist in SOME repos and not others" — and
+    left all four commands INSIDE the fences and the `.envrc` sentence
+    hardcoded. Re-measured on merged `origin/main` at `9e23c379`, against a
+    real `homelab-infra` checkout: all four still emitted, and the brief still
+    says "This repo's `.envrc` is `use opencode`" for a file whose `use` lines
+    are `use flake` and `use opencode`. Hedging prose does not stop an auditor
+    copying a fenced command. What IS kept from #1104 is its discriminator —
+    see `CHECKS_DISCRIMINATOR`, which is better than what this branch first
+    wrote and replaced it.
+
+    Measured against `ZacxDev/homelab-infra` for its PR #530, from a real
+    checkout of it:
+
+        scripts/gate.sh                      ABSENT (rc 2, no such file)
+        flake `checks` outputs               NONE declared, at HEAD and in-tree
+        .envrc                               `use flake` + `use opencode`,
+                                             not the `use opencode` asserted
+        its real runner                      scripts/tests/run-ci-suite.sh
+        nix develop <root> -c python3 -m pytest
+                                             ModuleNotFoundError: No module
+                                             named 'pytest'
+
+    Three prescribed commands that cannot run, one false statement about
+    `.envrc` — and the fourth is the worst of the four, because the bar
+    immediately under it told the auditor that `No module named pytest` means
+    the WRONG SHELL and not a broken suite. The brief manufactured a failure
+    and then instructed the reader to disregard the only true signal it had
+    produced. An auditor following it verbatim burns a round on four missing
+    things and can plausibly report the gate broken against a PR that is fine.
+
+    🔴 SO THE SECTION IS SPLIT ON THE AXIS THAT ACTUALLY VARIES. The REASON
+    (`TOOLCHAIN_HEAD`/`TOOLCHAIN_TAIL`) is now a CONSTANT taking no argument —
+    state-independence made structural rather than merely asserted — and only
+    the COMMANDS between them are derived, by `detect_repo_toolchain`, from the
+    repository the PR lives in. Those are two different axes: the guard varies
+    the SCENARIO, and the scenario does not change what is on the target's
+    disk. `toolchain_probe_root` is the single place that decides which
+    checkout may be read, and it reuses the relation WHERE TO WORK already
+    computed rather than deriving a second one.
+
+    🔴 AND WHEN NOTHING CAN BE PROBED, NOTHING IS PRESCRIBED. Cross-repo, this
+    run holds no checkout of the PR's repository; the section then says so and
+    hands the search over, because a fabricated command is strictly worse than
+    an absent one — the absent one costs a lookup, the fabricated one costs a
+    round and can be written up as a finding.
     """
-    r = facts.cwd_repo_dir
-    return "\n".join([
-        "## TOOLCHAIN — the exact commands, and the two ways they lie",
-        "",
-        "🔴 `<your worktree>` below is **your own copy** — the one WHERE TO WORK "
-        f"told you to make. `{r}` appears ONLY as the argument to `nix develop`, "
-        "where it resolves the dev shell and nothing else. Never point the gate "
-        "or a `nix build` at it: `gate.sh` resolves its root from its own path, "
-        "so running that copy runs the suite in a checkout that is NOT yours — "
-        "the one this brief was assembled in, on whatever branch it is standing "
-        "on, holding none of your mutations — and a `nix build <ref>#…` builds "
-        "that ref's tree, not yours.",
-        "",
-        "Run a SUBSET of the suite:",
-        "",
-        "```",
-        f"nix develop {r} -c python3 -m pytest <paths> -q -p no:cacheprovider",
-        "```",
-        "",
-        "🔴 A bare `python3 -m pytest` failing with **`No module named "
-        "pytest`** means you are in the WRONG SHELL, not that the suite is "
-        "broken. This repo's `.envrc` is `use opencode`, which does not put "
-        "pytest on PATH; a loaded direnv is not the dev shell. Do not report "
-        "that as a finding and do not build an ad-hoc `nix-shell` around it.",
-        "",
-        "Run the whole dev-host gate, **if this repo has one** — `scripts/gate.sh` "
-        "and the `checks` flake outputs below exist in SOME repos and not "
-        "others. 🔴 Check before you run, and if they are absent that is a "
-        "fact about the repo, NOT a finding about the PR and NOT a reason to "
-        "build an ad-hoc substitute: find how this repo actually runs its "
-        "suite (here it may be `scripts/tests/run-ci-suite.sh` off a manifest) "
-        "and say in your report which tier you actually exercised. Where it "
-        "does exist, its EXIT STATUS is authoritative; also read each "
-        "runner's own `RESULT:` line:",
-        "",
-        "```",
-        f"nix develop {r} -c bash <your worktree>/scripts/gate.sh --tier both",
-        "```",
-        "",
-        "🔴 The gate above is the DEV-HOST tier. Where a repo ALSO exposes "
-        "`checks` flake outputs, **the tier the merge gates on is the sandbox "
-        "one**, which builds from a store copy with no `.git` and is therefore "
-        "blind to different things. Confirm they exist before quoting a result "
-        "from them — `nix eval <repo>#checks.x86_64-linux --apply builtins.attrNames` "
-        "errors outright in a repo that has none, and a brief that ASSERTED "
-        "they exist sent one audit chasing a tier its repo does not have:",
-        "",
-        "```",
-        "nix build <your worktree>#checks.x86_64-linux.pytests --no-link -L",
-        "nix build <your worktree>#checks.x86_64-linux.nodetests --no-link -L",
-        "```",
-        "",
-        "🔴 **`-L` IS NOT OPTIONAL AND THIS BRIEF USED TO OMIT IT.** `nix build` "
-        "prints NO build log for a build that SUCCEEDS unless you pass "
-        "`-L`/`--print-build-logs` — so the instruction above to read a "
-        "`RESULT:` line was, for the sandbox tier, an instruction to read "
-        "something that is never printed. MEASURED 2026-08-30 on a builder "
-        "emitting 201 lines plus a `RESULT:` line: without `-L`, **3 console "
-        "lines, 0 builder lines**. ⚠ A FAILING build is the exception — nix "
-        "prints the tail of its log inline, bounded by `log-lines` (25 by "
-        "default), which is why the omission survived: the red case looked fine.",
-        "",
-        "⚠ **`--no-link` is deliberate**: you are briefed READ-ONLY, and the "
-        "un-flagged form drops a `result` symlink into your cwd. It changes "
-        "nothing about what is built or logged.",
-        "",
-        "🔴 **AND `-L` WRITES TO STDERR, SO A BARE PIPE OR `>` CAPTURES NOTHING "
-        "— REDIRECT IT.** An earlier draft of this very block said \"even a "
-        "`| tail -40` keeps the `RESULT:` line as its last\", which is FALSE as "
-        "written and was caught by an audit of the commit that added it. "
-        "Measured on the same builder: `-L … | tail -40` with stderr left alone "
-        "keeps **0 lines and 0 `RESULT:` hits**; `-L … 2>&1 | tail -40` keeps 40 "
-        "lines with `RESULT:` last. The `nix log` form below is the opposite — "
-        "it writes to STDOUT, so `>` works there and not here. **Do not carry a "
-        "redirect across from one to the other.**",
-        "",
-        "🔴 **AND AN ALREADY-BUILT DERIVATION PRINTS NOTHING AT ALL, `-L` OR "
-        "NOT — so silence is never a pass.** Read the derivation's own log "
-        "instead, which survives caching and a swallowed console:",
-        "",
-        "```",
-        "DRV=$(nix path-info --derivation <your worktree>#checks.x86_64-linux.pytests)",
-        "[ -n \"$DRV\" ] || { echo 'NO DERIVATION — this repo has no such tier'; exit 1; }",
-        "nix log \"$DRV\" > /tmp/tier.log || { echo 'NO LOG — never built HERE'; exit 1; }",
-        "test -s /tmp/tier.log || { echo 'EMPTY LOG — do not grep it'; exit 1; }",
-        "grep -n 'RESULT:' /tmp/tier.log          # the LAST hit is the verdict",
-        "grep -c 'panic: test timed out' /tmp/tier.log",
-        "```",
-        "",
-        "🔴 **ALL THREE GUARD LINES ARE LOAD-BEARING, AND THEY CLOSE THREE "
-        "DIFFERENT FALSE GREENS — DO NOT DROP ANY OF THEM.**",
-        "",
-        "- **`[ -n \"$DRV\" ]` — the worst one, because it fails LOUD-LOOKING.** "
-        "If the tier does not exist, `nix path-info --derivation` errors to "
-        "STDERR (which the `>` two lines down discards) and `$DRV` is EMPTY. "
-        "`nix log \"\"` does not fail — it resolves the empty installable as `.` "
-        "and prints **the cwd flake's default package log**. MEASURED in a "
-        "throwaway flake: neither of the other two guards fires, `test -s` "
-        "passes because the file is genuinely non-empty, and the auditor greps a "
-        "FOREIGN log reading `RESULT: PASS (exit=0)`. That is an affirmative "
-        "false green off another derivation entirely — strictly worse than the "
-        "silence this block was written to fix. ⚠ A repo with no "
-        "`packages.default` is immune by luck of flake shape, not by design.",
-        "- **`|| { … }` on `nix log`** — a derivation never built HERE exits **1** "
-        "with `build log … is not available`, but `>` has already truncated the "
-        "file, so `grep -c 'panic: test timed out'` prints a reassuring **0**, "
-        "identical to a green run. MEASURED on this repo's own "
-        "`checks.x86_64-linux.nodetests`.",
-        "- **`test -s`** — guards EMPTY only, and claims nothing about a "
-        "truncated log.",
-        "",
-        "An earlier draft of this block said \"do NOT read an exit code\" here, "
-        "which suppressed the one signal separating those states. Read the "
-        "CONTENT — and check there IS content, and that it is YOURS, first. "
-        "⚠ `exit 1` is right for a dispatched agent's fresh shell; pasted into "
-        "an INTERACTIVE shell it closes it, so the diagnosis is echoed before "
-        "each exit.",
-        "",
-        "Name the tier and the base sha in any claim you make about the gate — "
-        "\"the gate passed\" is true of one run, one tier, one base, and reads "
-        "as a property of the change.",
-        "",
-        "`git --version` before you trust a range: `--remerge-diff` needs git "
-        "≥ 2.35, and a git without it exits 128 with EMPTY output, which reads "
-        "exactly like a clean zero.",
-    ])
+    tc = detect_repo_toolchain(toolchain_probe_root(facts))
+    if not tc.probed:
+        body = _toolchain_not_probed(facts)
+    else:
+        body = [
+            TOOLCHAIN_COMMANDS_HEADING,
+            "",
+            f"Everything below was read off `{tc.root}`, a checkout of "
+            f"`{facts.repo}` — the repository this PR lives in. It may be "
+            "standing on another branch, so treat a command that has since "
+            "moved as a lookup, never as a finding.",
+            "",
+            *_toolchain_pytest_lines(facts, tc),
+            *_toolchain_gate_lines(facts, tc),
+            *_toolchain_checks_lines(facts, tc),
+        ]
+    while body and not body[-1]:
+        body.pop()
+    return "\n".join([TOOLCHAIN_HEAD, "", *body, "", TOOLCHAIN_TAIL])
 
 
 def payload_summary_line(facts, cumulative):

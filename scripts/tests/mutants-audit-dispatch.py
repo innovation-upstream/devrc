@@ -389,21 +389,28 @@ def emit_claims_interpolates_the_placeholder(t):
     )
 
 
+# 🔴 T1/T2 RE-TARGETED IN ROUND 14, SAME MUTATION, NEW SITE. The commands moved
+# out of one `return [...]` literal into `_toolchain_gate_lines` /
+# `_toolchain_checks_lines`, which build them from the PROBED repo. The defect
+# they model is unchanged — a command under test pointed at the assembly
+# checkout instead of the auditor's worktree — so the rows keep their ids and
+# their killer sets. Left un-retargeted these would have failed to APPLY, which
+# this harness reports rather than scoring as "the guard held".
 def gate_points_at_the_shared_checkout(t):
     return _swap(
         t,
-        'f"nix develop {r} -c bash <your worktree>/scripts/gate.sh --tier both",',
-        'f"nix develop {r} -c bash {r}/scripts/gate.sh --tier both",',
+        'cmds.append(f"{shell}bash <your worktree>/scripts/gate.sh{tier}")',
+        'cmds.append(f"{shell}bash {tc.root}/scripts/gate.sh{tier}")',
     )
 
 
 def nix_build_points_at_the_shared_checkout(t):
     return _swap(
         t,
-        '        "nix build <your worktree>#checks.x86_64-linux.pytests",\n'
-        '        "nix build <your worktree>#checks.x86_64-linux.nodetests",\n',
-        '        f"nix build {r}#checks.x86_64-linux.pytests",\n'
-        '        f"nix build {r}#checks.x86_64-linux.nodetests",\n',
+        '        *[f"nix build <your worktree>#checks.{NIX_SYSTEM}.{n}"\n'
+        "          for n in tc.check_names],\n",
+        '        *[f"nix build {tc.root}#checks.{NIX_SYSTEM}.{n}"\n'
+        "          for n in tc.check_names],\n",
     )
 
 
@@ -694,10 +701,12 @@ def the_output_contract_drops_the_per_finding_format(t):
 
 
 def the_toolchain_drops_name_the_tier(t):
+    # Round 14: the sentence moved into the `TOOLCHAIN_TAIL` constant, so its
+    # indentation dropped from 8 to 4. Same sentence, same mutation.
     return _swap(
         t,
-        '        "Name the tier and the base sha in any claim you make about the gate — "',
-        '        "There is no need to name the tier or the base sha. "',
+        '    "Name the tier and the base sha in any claim you make about the gate — "',
+        '    "There is no need to name the tier or the base sha. "',
     )
 
 
@@ -1355,19 +1364,25 @@ def the_toolchain_names_the_shared_checkout_cross_repo_only(t):
     suite at 89 green with no row naming it. Only a guard that drives every
     scenario — and requires the section byte-identical across them — can see it.
     """
+    # 🔴 ROUND 14 RE-TARGETED IT, AND THE MUTATION GOT *HARDER* TO WRITE —
+    # which is the point of moving the reason into a no-argument constant.
+    # There is no longer any `facts` in scope where the reason is built, so a
+    # scenario-dependent rationale can only be smuggled back in by APPENDING
+    # one at the render site. That is exactly what this does, and it is still
+    # cross-repo-only: round 5's guard drove two same-repo scenarios and left
+    # this reword at 89 green with no row naming it.
     return _swap(
         t,
-        "    r = facts.cwd_repo_dir\n    return \"\\n\".join([\n"
-        '        "## TOOLCHAIN — the exact commands, and the two ways they lie",',
-        "    r = facts.cwd_repo_dir\n"
-        '    _why = ("so running that copy runs the suite in the SHARED CHECKOUT on "\n'
-        '            "whatever branch it is standing on"\n'
-        '            if facts.repo_relation == "cross" else\n'
-        '            "so running that copy runs the suite in a checkout that is NOT '
-        'yours")\n'
-        "    return \"\\n\".join([\n"
-        '        "## TOOLCHAIN — the exact commands, and the two ways they lie",\n'
-        '        _why,',
+        "    tc = detect_repo_toolchain(toolchain_probe_root(facts))\n",
+        "    tc = detect_repo_toolchain(toolchain_probe_root(facts))\n"
+        '    if facts.repo_relation == "cross":\n'
+        "        return \"\\n\".join([\n"
+        "            TOOLCHAIN_HEAD,\n"
+        '            "so running that copy runs the suite in the SHARED CHECKOUT '
+        'on whatever branch it is standing on",\n'
+        "            TOOLCHAIN_COMMANDS_HEADING,\n"
+        "            TOOLCHAIN_TAIL,\n"
+        "        ])\n",
     )
 
 
@@ -1383,13 +1398,16 @@ def the_no_fetch_clause_is_conditional_again(t):
 
 
 def the_toolchain_reason_names_the_shared_checkout_again(t):
+    # Round 14: the reason is `TOOLCHAIN_HEAD`, so the false claim goes back
+    # into the constant. Same words, same finding, one indent level out.
     return _swap(
         t,
-        '        "so running that copy runs the suite in a checkout that is NOT yours — "\n'
-        '        "the one this brief was assembled in, on whatever branch it is standing "\n'
-        '        "on, holding none of your mutations — and a `nix build <ref>#…` builds "\n',
-        '        "so running the shared copy runs the suite in the SHARED CHECKOUT on "\n'
-        '        "whatever branch it is standing on, and a `nix build <ref>#…` builds "\n',
+        '    "a gate script resolves its root from its own path, so running that copy "\n'
+        '    "runs the suite in a checkout that is NOT yours — one holding none of your "\n'
+        '    "mutations — and a `nix build <ref>#…` builds that ref\'s tree, not yours.",\n',
+        '    "a gate script resolves its root from its own path, so running the shared "\n'
+        '    "copy runs the suite in the SHARED CHECKOUT on whatever branch it is "\n'
+        '    "standing on, and a `nix build <ref>#…` builds that ref\'s tree.",\n',
     )
 
 
@@ -1433,6 +1451,87 @@ def the_degenerate_causes_stop_scoping_the_omission(t):
         '        "always means; `<from>` is the tip the PREVIOUS round AUDITED, so "\n'
         '        "re-emit that block with `--audited <the tip that round actually "\n'
         '        "read>` and re-assemble — or nothing has been committed and pushed to "\n',
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 V36-V41 — round 14. Base `bd1572f3`. The target-repo toolchain probes.
+# --------------------------------------------------------------------------- #
+# Each probe is broken in BOTH directions where both are reachable: V36 claims
+# an artifact that is absent, V37 denies one that is present. A single
+# direction grades only half of a predicate, and the half it omits is the one
+# that silently STOPS prescribing a real command.
+
+
+def the_gate_is_prescribed_without_probing_for_it(t):
+    """V36 — pretend `scripts/gate.sh` exists everywhere. THE ORIGINAL DEFECT."""
+    return _swap(t, "    if tc.gate_sh:\n", "    if True:\n")
+
+
+def the_gate_is_never_prescribed_even_where_it_exists(t):
+    """V37 — the mirror: a real `scripts/gate.sh` goes unmentioned.
+
+    The direction a one-sided mutation misses. A probe wired to always-False
+    keeps every "did not fabricate" assertion green while quietly removing the
+    repository's real gate from every brief.
+    """
+    return _swap(t, "    if tc.gate_sh:\n", "    if False:\n")
+
+
+def the_checks_probe_matches_the_word_not_the_output(t):
+    """V38 — the loose regex this detection started with.
+
+    It matched `checks = pr.get("statusCheckRollup", [])` inside a python
+    heredoc in `homelab-infra`'s real devShell, so a flake declaring NO checks
+    output answered yes and the honest fallback became unreachable.
+    """
+    return _swap(
+        t,
+        'r"^[ \\t]*checks(?:\\.[^\\s=]+)?[ \\t]*=[ \\t]*(?:forAllSystems[^\\n]*)?\\{[ \\t]*$",',
+        'r"^[ \\t]*checks\\b[^\\n=]*=",',
+    )
+
+
+def the_envrc_sentence_is_hardcoded_again(t):
+    """V39 — the remembered string instead of the file on disk."""
+    return _swap(
+        t,
+        '            f"broken. This repo\'s `.envrc` is {_fmt_uses(tc)}, which does not "\n',
+        '            "broken. This repo\'s `.envrc` is `use opencode`, which does not "\n',
+    )
+
+
+def the_probe_reads_the_cwd_repo_cross_repo_too(t):
+    """V40 — probe the WRONG repository rather than admit to knowing nothing.
+
+    The fix's own trap. Cross-repo the cwd IS a probeable repository; it is
+    simply not the one the PR lives in, so this yields a confident,
+    fully-formed, entirely irrelevant command list — the original defect with a
+    new source. It also collapses every scenario onto one commands bar, which
+    is the second thing the scenario guard now refuses.
+    """
+    return _swap(
+        t,
+        '    return facts.cwd_repo_dir if facts.repo_relation == "same" else None\n',
+        "    return facts.cwd_repo_dir\n",
+    )
+
+
+def the_checks_scan_stops_tracking_nix_strings(t):
+    """V41 — drop the `''…''` skip from the check-name scan.
+
+    A brace inside a build script then moves the depth counter and the block
+    closes early, so a flake's SECOND check name is never read. Isolated to the
+    string toggle: the surrounding depth arithmetic is untouched, so a kill
+    here is attributable to string tracking and nothing else.
+    """
+    return _swap(
+        t,
+        '            if line[i:i + 2] == "\'\'":\n'
+        "                in_str = not in_str\n"
+        "                i += 2\n"
+        "                continue\n",
+        "",
     )
 
 
@@ -1556,6 +1655,21 @@ ROWS = [
       # where the WHERE TO WORK section has no private-worktree note at all.
       "test_every_section_directive_is_emitted_verbatim_in_the_brief_that_owns_it",
       "test_the_where_to_work_section_does_not_call_a_private_worktree_the_clone",
+      # 🔴 ROUND 14 ADDED FOUR, and they are the same coupling reaching one
+      # section further. TOOLCHAIN now derives its COMMANDS from the
+      # repository the PR lives in, and `toolchain_probe_root` asks
+      # `repo_relation` to decide which checkout may be read — deliberately
+      # REUSING the decision WHERE TO WORK already made rather than computing
+      # a second one. So inverting that decision swaps the two toolchain
+      # branches wholesale: the same-repo briefs stop prescribing anything and
+      # the cross-repo brief starts prescribing the wrong repository's layout.
+      # That the row's set grew here is the evidence that the reuse is real;
+      # a second, independent derivation would have left C3 untouched and left
+      # the two sections free to disagree.
+      "test_the_toolchain_prescribes_only_commands_it_probed",
+      "test_the_toolchain_prescribes_nothing_when_it_cannot_probe",
+      "test_the_toolchain_section_names_the_tier_the_merge_gates_on",
+      "test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout",
       # 🔴 ROUND 8 ADDED NINE MORE, and every one is the same coupling seen
       # from a new angle: round 8 made THE RANGE and THE LEDGER consult
       # `repo_relation`, so inverting that decision now moves both sections in
@@ -2116,8 +2230,15 @@ ROWS = [
       # branch's own override.
       "test_the_degenerate_range_names_shas_at_both_ends"},
      the_verified_range_hands_out_head_again),
+    # 🔴 ROUND 14 WIDENED THIS KILLER SET, and the addition is a real
+    # coupling rather than a row going vague. This mutant now returns EARLY in
+    # the cross-repo branch, so the section it renders carries the commands
+    # heading with no commands bar under it and no "NOTHING WAS PROBED HERE" —
+    # which is exactly what round 14's cross-repo guard reads. Measured, not
+    # predicted: the battery reported it as an EXTRA-KILLER first.
     ("V7  TOOLCHAIN names the SHARED CHECKOUT, cross-repo only",
-     {"test_the_toolchain_reason_is_true_in_every_scenario"},
+     {"test_the_toolchain_reason_is_true_in_every_scenario",
+      "test_the_toolchain_prescribes_nothing_when_it_cannot_probe"},
      the_toolchain_names_the_shared_checkout_cross_repo_only),
 
     # --------------------------------------------------------------------- #
@@ -2311,6 +2432,38 @@ ROWS = [
     ("V35 a third prescription site written through `err_stream.write`",
      {"test_every_command_a_refusal_prescribes_actually_runs"},
      a_third_prescription_site_written_through_err_stream),
+
+    # --------------------------------------------------------------------- #
+    # 🔴 V36-V41 — round 14. Base `bd1572f3`.
+    # --------------------------------------------------------------------- #
+    ("V36 gate.sh prescribed without probing for it",
+     {"test_the_toolchain_prescribes_only_commands_it_probed"},
+     the_gate_is_prescribed_without_probing_for_it),
+    # Two killers, both measured: one asserts the gate command is PRESENT
+    # (`gate.sh --tier both`), the other asserts the auditor's own worktree is
+    # what it names (`<your worktree>/scripts/gate.sh`). Suppressing the whole
+    # command removes both strings, so both fire — the second for a reason
+    # adjacent to what it owns, which is why it is recorded here rather than
+    # left to look like an accident.
+    ("V37 gate.sh never prescribed, even where it exists",
+     {"test_the_toolchain_section_names_the_tier_the_merge_gates_on",
+      "test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout"},
+     the_gate_is_never_prescribed_even_where_it_exists),
+    ("V38 the checks probe matches the WORD, not the output",
+     {"test_the_flake_checks_probe_reads_an_output_and_not_the_word",
+      "test_the_toolchain_prescribes_only_commands_it_probed"},
+     the_checks_probe_matches_the_word_not_the_output),
+    ("V39 the .envrc sentence is hardcoded again",
+     {"test_the_toolchain_prescribes_only_commands_it_probed"},
+     the_envrc_sentence_is_hardcoded_again),
+    ("V40 cross-repo, the WRONG repository is probed anyway",
+     {"test_the_toolchain_prescribes_nothing_when_it_cannot_probe",
+      "test_the_toolchain_reason_is_true_in_every_scenario"},
+     the_probe_reads_the_cwd_repo_cross_repo_too),
+    ("V41 the check-name scan stops tracking nix strings",
+     {"test_the_flake_checks_probe_reads_an_output_and_not_the_word",
+      "test_the_toolchain_section_names_the_tier_the_merge_gates_on"},
+     the_checks_scan_stops_tracking_nix_strings),
 ]
 
 
