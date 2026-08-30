@@ -2081,8 +2081,31 @@ def render_toolchain(facts):
         "they exist sent one audit chasing a tier its repo does not have:",
         "",
         "```",
-        "nix build <your worktree>#checks.x86_64-linux.pytests",
-        "nix build <your worktree>#checks.x86_64-linux.nodetests",
+        "nix build <your worktree>#checks.x86_64-linux.pytests --no-link -L",
+        "nix build <your worktree>#checks.x86_64-linux.nodetests --no-link -L",
+        "```",
+        "",
+        "🔴 **`-L` IS NOT OPTIONAL AND THIS BRIEF USED TO OMIT IT.** `nix build` "
+        "prints NO build log for a build that SUCCEEDS unless you pass "
+        "`-L`/`--print-build-logs` — so the instruction above to read a "
+        "`RESULT:` line was, for the sandbox tier, an instruction to read "
+        "something that is never printed. MEASURED 2026-08-30 on a builder "
+        "emitting 201 lines plus a `RESULT:` line: without `-L`, **3 console "
+        "lines, 0 builder lines**; with `-L`, the log streams and even a "
+        "`| tail -40` keeps the `RESULT:` line as its last. ⚠ A FAILING build "
+        "is the exception — nix prints the tail of its log inline, bounded by "
+        "`log-lines` (25 by default), which is why the omission survived: the "
+        "red case looked fine.",
+        "",
+        "🔴 **AND AN ALREADY-BUILT DERIVATION PRINTS NOTHING AT ALL, `-L` OR "
+        "NOT — so silence is never a pass.** Read the derivation's own log "
+        "instead, which survives caching and a swallowed console:",
+        "",
+        "```",
+        "DRV=$(nix path-info --derivation <your worktree>#checks.x86_64-linux.pytests)",
+        "nix log \"$DRV\" > /tmp/tier.log   # then grep it, do NOT read an exit code",
+        "grep -n 'RESULT:' /tmp/tier.log          # the LAST hit is the verdict",
+        "grep -c 'panic: test timed out' /tmp/tier.log",
         "```",
         "",
         "Name the tier and the base sha in any claim you make about the gate — "

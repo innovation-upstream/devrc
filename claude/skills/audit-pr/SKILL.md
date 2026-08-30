@@ -178,6 +178,38 @@ not wasted in the sense those rules deny — every one found something real. The
 different axis: real findings *about scaffolding the ladder itself had just written*. The gate
 measures the fixes; it never counts the rounds.
 
+### 🔴 A DELTA ROUND CANNOT SEE A CLAIM THE PR'S OWN EARLIER COMMIT STALED
+
+Every round after the first diffs `<previously-audited tip>..HEAD`. A claim that was TRUE when an
+early commit wrote it and was FALSIFIED by a LATER commit of the same PR is inside no round's
+range — not the first (it was true then), not any delta (it is below the range). It is invisible
+for the life of the ladder, and it does not look invisible: it sits in the file everyone is
+editing, reading as precise.
+
+Measured on devrc #1109: `(+ 11 op-selected)` was correct at commit 1 and staled by commit 2,
+which added a `_wait_ops` call. **Three delta rounds walked past it, four lines from the paragraph
+all three were editing.** It was caught only from OUTSIDE — by the audit of a different PR that
+quoted the same number. Nothing pinned it either: no assertion read `op-selected`, so a fully
+green suite was silent.
+
+**So, once per ladder and NOT per round — cheap, and it is the only thing that closes this:**
+re-derive every COUNT, VERSION and CROSS-REFERENCE the PR's files assert, against the CURRENT
+head, ignoring ranges entirely. Ask the LAST round to do it, or do it before merging. A number
+nothing asserts on is unpinned by construction; either pin it or stop quoting it.
+
+### 🔴 WHEN THE PAYLOAD IS PROSE THE GATE CANNOT FIRE — STOP ON A STATED CRITERION INSTEAD
+
+For a docs/skill/prompt PR the `.md` **is** the payload, so every round is non-zero by
+construction and the two-zero-rounds gate is structurally inert — while the ladder does exactly
+what the gate exists to catch, because "fixed a defect" and "reworded a warning" are the same
+edit. Left alone it does not terminate. Measured on devrc #1111: round 2's findings were mostly
+about text round 1 had written, and the gate could not see it.
+
+**Stop on this, stated in the round's summary and not left implicit:** no 🔴 · no blast radius
+beyond "the document contains a false sentence" · and the recurring SHAPE swept at every site
+rather than at the one that was reported. Record what you are NOT fixing, on the PR, so the next
+reader knows it is open rather than absent.
+
 ## Mutation testing: deletion-mutants are the EASY half
 
 When a PR claims a guard is "mutation-verified", check **what kind**. Deletion is the obvious
