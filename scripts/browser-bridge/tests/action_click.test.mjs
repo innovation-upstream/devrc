@@ -348,28 +348,91 @@ test("registerActionClick is a no-op where chrome.action is absent", () => {
   assert.equal(registerActionClick({}), false, "no onClicked → nothing to wire");
 });
 
-test("🔴 nothing can exit startBackground() before it wires the click", () => {
+// --- the wiring guard's own instrument, tested on a KNOWN input -------------- //
+// Elide comments, string literals, and the bodies of NESTED FUNCTIONS, leaving
+// the statements that belong to the function itself.
+//
+// Nested-function elision is not tidiness: an MV3 worker is mostly callbacks, and
+// `chrome.runtime.onMessage.addListener((m, s, r) => { if (!m) return false; … })`
+// contains `return` statements that exit the CALLBACK, not the worker. A scan
+// that counted those would go red on the most ordinary edit anyone could make to
+// this function — and a permanently-red gate on legitimate work is what trains
+// people to delete the guard, which here is the sole coverage of the wiring.
+function elideNested(code) {
+  const noLiterals = code
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/\/\/[^\n]*/g, " ")
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+    .replace(/`(?:[^`\\]|\\.)*`/g, "``");
+  // Walk once; whenever a `=>` or `function` introduces a block, skip that block.
+  let out = "", i = 0;
+  while (i < noLiterals.length) {
+    const rest = noLiterals.slice(i);
+    const m = rest.match(/^(=>|\bfunction\b)([^{;]*)\{/);
+    if (m) {
+      let depth = 0, j = i + m[0].length - 1;
+      for (; j < noLiterals.length; j++) {
+        if (noLiterals[j] === "{") depth++;
+        else if (noLiterals[j] === "}") { depth--; if (depth === 0) { j++; break; } }
+      }
+      out += " ";                       // the whole callback becomes whitespace
+      i = j;
+      continue;
+    }
+    out += noLiterals[i];
+    i++;
+  }
+  return out;
+}
+
+test("HARNESS: elideNested keeps the function's OWN statements and drops callbacks'", () => {
+  // 🔴 The instrument, validated on input whose answer is known — because the
+  // guard below is a claim about a string this function produced, and an
+  // over-eager elider would make that claim vacuous while looking healthy.
+  const sample = `
+    chrome.runtime.onInstalled.addListener(() => { return loop(); });
+    // return in a comment
+    const msg = "return in a string";
+    if (chrome.debugger) {
+      chrome.debugger.onDetach.addListener((s) => { if (s) return; });
+    }
+    doTheThing();
+  `;
+  const out = elideNested(sample);
+  assert.match(out, /chrome\.runtime\.onInstalled/, "own statements must survive");
+  assert.match(out, /doTheThing\(\)/, "own statements must survive");
+  assert.match(out, /if \(chrome\.debugger\)/, "a plain block is NOT a function");
+  assert.doesNotMatch(out, /(^|[^.\w])return\b/,
+    "every `return` here belongs to a callback, a comment or a string");
+  // POSITIVE CONTROL for the assertion above: a return that IS the function's own
+  // must survive elision, or the guard could never see one.
+  assert.match(elideNested("if (x) { return; } doTheThing();"), /(^|[^.\w])return\b/,
+    "an own-body return was elided — the guard would be blind to the real defect");
+});
+
+test("🔴 the click wiring is reached, unconditionally, before anything can exit", () => {
   // 🔴 THIS IS THE SOLE COVERAGE OF THE WIRING. No test calls startBackground()
   // — every suite sets BROWSER_BRIDGE_NO_AUTOSTART, because it also starts the
-  // poll loop — so if this check has a hole, the toolbar click can be dead with
-  // the whole suite green. It has had two.
+  // poll loop — so if this check has a hole, the toolbar click can be dead in a
+  // real Brave with the whole suite green. It has had FOUR holes:
   //
-  // Round 2 pinned the statement text: `if (false) registerActionClick();` died,
-  // but `if (globalThis.__x) return;` above the call SURVIVED, because the guard
-  // only looked at the call's own line.
-  // Round 3 added an early-exit scan anchored with /^\s*(return|throw)/ — which
-  // could not match `if (…) return;`, a line starting with `if`.
-  // Round 4 widened WHERE on the line the token may sit, and still missed
-  // `if (…) { return; }` — the braced spelling, which is the idiom this very
-  // file uses — because the scan filtered to lines whose depth was 1 AT THEIR
-  // END, and a `return` inside braces ends at depth 2.
+  //   round 2  pinned the call's statement text -> `if (…) return;` ABOVE it survived
+  //   round 3  scanned /^\s*(return|throw)/     -> cannot match a line starting `if`
+  //   round 4  widened WHERE on the line        -> `if (…) { return; }` survived,
+  //            because it filtered to lines at depth 1 measured at their END
+  //   round 5  replaced the line logic with a raw-source scan and DROPPED the two
+  //            older assertions -> `if (false) registerActionClick();` came back
+  //            from the dead, along with `if (x) { registerActionClick(); }` and
+  //            the call moved inside an existing block
   //
-  // Three misses, one shape: the check kept reasoning about LINES. So it no
-  // longer does. It takes the raw source between the function's opening brace
-  // and the call, strips comments and string literals (the token appears in
-  // both, and matching those would fail loud but for the wrong reason), and
-  // asserts no `return`/`throw` survives at ANY depth. There is nothing left
-  // for a spelling to hide behind.
+  // The fourth is the instructive one: rounds 2-4 each traded a hole for a hole
+  // because the fix REPLACED the previous check instead of joining it. So this
+  // asserts THREE independent things, and a future round may add to them but
+  // must not swap one for another:
+  //   (a) the call exists, at the function's own top level (not nested in a block)
+  //   (b) its statement is exactly `registerActionClick();` — no condition
+  //   (c) nothing in the function's OWN statements above it can exit early
   const src = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "..", "extension", "service_worker.js"),
     "utf8");
@@ -381,22 +444,27 @@ test("🔴 nothing can exit startBackground() before it wires the click", () => 
     "registerActionClick() is not called in startBackground() at all — a click " +
     "can never reach the handler");
 
-  // Everything the function does BEFORE wiring the click.
   const before = src.slice(open + 1, call);
-  const stripped = before
-    .replace(/\/\*[\s\S]*?\*\//g, " ")      // block comments
-    .replace(/\/\/[^\n]*/g, " ")             // line comments
-    .replace(/"(?:[^"\\]|\\.)*"/g, '""')      // double-quoted strings
-    .replace(/'(?:[^'\\]|\\.)*'/g, "''")      // single-quoted
-    .replace(/`(?:[^`\\]|\\.)*`/g, "``");     // templates
 
-  // ANTI-VACUITY: the stripper must leave the real statements behind, or this
-  // whole assertion is a claim about an empty string.
-  assert.match(stripped, /chrome\.runtime\.onInstalled/,
-    "comment/string stripping ate the function body — the check below would " +
-    "pass vacuously");
+  // (a) DEPTH: the call must sit at the function's own level. Counting braces in
+  // the elided text means a callback's braces cannot fake the depth either way.
+  const beforeOwn = elideNested(before);
+  let depth = 0;
+  for (const ch of beforeOwn) { if (ch === "{") depth++; else if (ch === "}") depth--; }
+  assert.equal(depth, 0,
+    "registerActionClick() is nested inside a block — it may never run. " +
+    "`if (chrome.action) { registerActionClick(); }` reads as harmless tidying " +
+    "and silently unwires the toolbar click on any build where the guard is false.");
 
-  const early = stripped.match(/(^|[^.\w])(return|throw)\b/);
+  // (b) STATEMENT: no condition on the call's own line.
+  const lineStart = src.lastIndexOf("\n", call) + 1;
+  const lineEnd = src.indexOf("\n", call);
+  assert.equal(src.slice(lineStart, lineEnd).trim(), "registerActionClick();",
+    "the call carries a condition or a guard — `if (false) registerActionClick();` " +
+    "is the round-2 mutant, and it must stay dead");
+
+  // (c) EARLY EXIT: nothing in the function's own statements above it returns.
+  const early = beforeOwn.match(/(^|[^.\w])(return|throw)\b/);
   assert.equal(early, null,
     "an early return/throw sits between the start of startBackground() and the " +
     "click wiring — the toolbar click would never be registered, and no other " +

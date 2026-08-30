@@ -718,11 +718,13 @@ def test_the_agent_arm_does_not_LEAK_routing_env_to_its_children(bridge, tmp_pat
     mockbin.write_exec(stub_dir / "browser-agent",
                        f'printf "SEEN {var}=[%s]\\n" "${{{var}-<unset>}}"\n')
 
-    clear = {"--tab": '', "--frame": ''}["--tab" if var == "BB_TAB" else "--frame"]
     flag = {"BB_TAB": "--tab", "BB_FRAME": "--frame",
             "BB_INSTANCE": "--instance"}[var]
     r = subprocess.run(
-        ["bash", str(stub_dir / "browser"), flag, clear, "--instance", "main",
+        # "" is the EXPLICIT-EMPTY this file documents as the way to clear an
+        # inherited BB_*: it zeroes the shell variable while leaving the export
+        # intact, which is exactly the shape that leaked.
+        ["bash", str(stub_dir / "browser"), flag, "", "--instance", "main",
          "agent", "some goal"],
         env={**bridge.env_for_stub(), var: "999"},
         capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
@@ -804,3 +806,38 @@ def test_SKILL_md_names_every_routing_flag_the_agent_guard_REFUSES():
         f"refusal sentence does not name {sorted(missing.values())}. An agent "
         f"reading SKILL.md will use it and get rc 1 with no warning there. "
         f"Sentence: {text!r}")
+
+
+def test_an_explicitly_cleared_instance_forwards_NOTHING_and_leaks_NOTHING(bridge, tmp_path):
+    """The exact shape the BB_INSTANCE fix's own comment describes.
+
+    The leak matrix above passes `--instance "" --instance main`, so INSTANCE
+    ends up "main" — that pins the unconditional `unset`, but it never exercises
+    the case the defect actually lived in: `--instance ""` ALONE, where nothing
+    is forwarded as an argument and the export was the only thing left carrying
+    a profile. An audit noted the gap; this closes it.
+
+    Both halves matter and they are different claims: no `--instance` reaches
+    browser-agent's argv (so it does not silently route), AND no BB_INSTANCE
+    reaches its environment (so its own child `browser` calls do not either).
+    """
+    stub_dir = tmp_path / "stub-cleared"
+    stub_dir.mkdir()
+    (stub_dir / "browser").write_text(CLI.read_text(encoding="utf-8"), encoding="utf-8")
+    mockbin.write_exec(
+        stub_dir / "browser-agent",
+        'printf "ARGV=[%s]\\n" "$*"\n'
+        'printf "ENV BB_INSTANCE=[%s]\\n" "${BB_INSTANCE-<unset>}"\n')
+    r = subprocess.run(
+        ["bash", str(stub_dir / "browser"), "--instance", "", "agent", "some goal"],
+        env={**bridge.env_for_stub(), "BB_INSTANCE": "work"},
+        capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
+    assert "ARGV=[" in r.stdout, (
+        f"the stub agent never ran, so this test proves nothing: {r.stdout!r} "
+        f"/ {r.stderr!r}")
+    assert "--instance" not in r.stdout.split("ENV ")[0], (
+        f"an explicitly-cleared instance was still forwarded: {r.stdout!r}")
+    assert "ENV BB_INSTANCE=[<unset>]" in r.stdout, (
+        f"BB_INSTANCE survived into browser-agent's environment, so its child "
+        f"`browser` calls would drive profile 'work' — the wrong Brave profile, "
+        f"with nothing on stderr saying so. stdout: {r.stdout!r}")
