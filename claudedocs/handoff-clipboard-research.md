@@ -79,6 +79,16 @@ Research modern best practices for clipboard and terminal clipboard interaction 
   is the first claim in this effort verified on the path that actually failed
   rather than a reconstruction of it.
 
+- **Session closed 2026-08-29 (late).** #1051 landed the doc correction above.
+  Cleanup done: `claim-work --release clipboard-research-1` (rc=0), and the four
+  worktrees this effort created (`devrc-nvim-osc52`, `devrc-handoff-clip`,
+  `devrc-control-main`, `devrc-nvim-devrcdir`) removed. Feature branches were
+  auto-deleted on merge. All four PRs merged: **#1014, #1027, #1043, #1051**.
+- ⚠ **`/audit-pr 1043` was offered and never run** — blocked by this session's
+  operating instructions (no subagent dispatch unless asked), not by circumstance.
+  #1043 touches `nix/programs/`, which every future `home-manager switch` depends
+  on. It is the one review this effort did not get.
+
 ## Research findings — clipboard/terminal clipboard best practices (2025-2026)
 
 ### tmux clipboard — ALREADY OPTIMAL, no changes
@@ -152,15 +162,100 @@ doc that names no open question is making a claim, not reporting an absence** �
 the honest version names the dimension it did not vary. Here that dimension was
 `DISPLAY`.
 
+### `main`'s branch protection keeps ending up OFF, and nothing detects it
+- **Symptom + exact repro:** twice on 2026-08-29 `required_status_checks` on
+  `innovation-upstream/devrc`'s `main` was found deleted. Read it with:
+  `gh api /repos/innovation-upstream/devrc/branches/main/protection --jq '{checks:.required_status_checks.contexts, enforce_admins:.enforce_admins.enabled}'`
+  Unprotected reads `{"checks":null,...}`; healthy reads
+  `{"checks":["tekton/devrc-pytests","tekton/devrc-nodetests"],...}`.
+- **Observed (with values):**
+  - Occurrence 1 was MINE — a deliberate, operator-authorised break-glass at
+    ~19:58Z to merge #1014 + #1027. Window ~2–4 min. See the gotcha below: my
+    "unconditional restore" ran and FAILED.
+  - Occurrence 2 was NOT mine. Protection read `checks: null` again at ~21:56Z
+    when merging #1051, after I had restored and verified it at ~15:57 local
+    (post-#1043 read: both contexts present). Independent evidence a window was
+    open in between: **`837d3fde` (16:46 local) is `Merge branch 'main' of
+    github.com:...` — a DIRECT PUSH to `main`, not a PR merge.** Required checks
+    with `enforce_admins: true` would have rejected it.
+- **Ruled out:** my own `gh pr merge` calls (they do not touch protection);
+  `ship.sh` (never pushes). The #1051 merge itself cannot have caused it — the
+  `checks: null` read was taken BEFORE that merge completed.
+- **Leading hypothesis:** another session used the escape hatch that
+  `devrc/CLAUDE.md` documents verbatim
+  (`gh api -X DELETE .../branches/main/protection/required_status_checks`) and
+  did not restore it. That is a *hypothesis about who*, not a measurement —
+  GitHub's protection-change events are org-audit-log only and were not read.
+- **Next probe:** the durable fix is a detector, not an attribution. Add an arm
+  to `scripts/drift-check.sh` (it already has the rc vocabulary and runs on a
+  timer) asserting `required_status_checks.contexts` is non-empty on `main`,
+  reporting COULD NOT MEASURE when the API does not answer so a zero is never
+  read as a pass. Attribution, if wanted separately:
+  `gh api /orgs/innovation-upstream/audit-log --paginate` (needs org admin;
+  unverified from here).
+
 ## Next steps (ranked)
-1. ~~**Decision:** adopt `set clipboard=unnamedplus`~~ — **DECLINED 2026-08-29**,
-   reasoning in the neovim section above. No further action.
-2. ~~**Decision:** install a clipboard manager for history?~~ — **investigated
-   2026-08-29, nothing installed.** Details below; this is a decision on
-   evidence, not the original doc's unexamined "NOT NEEDED".
-3. **If migrating to Wayland:** replace `xclip` with `wl-clipboard`, evaluate
-   `cliphist` + `wl-clip-persist`. **Not applicable today** — measured
-   `XDG_SESSION_TYPE=x11`, `WAYLAND_DISPLAY` unset, `wl-copy` absent.
+**Closed by this effort — kept so a resume does not re-open them:**
+- ~~adopt `set clipboard=unnamedplus`~~ — **DECLINED 2026-08-29**, reasoning in
+  the neovim section above.
+- ~~install a clipboard manager for history~~ — **investigated 2026-08-29,
+  nothing installed**; the evidence and the retracted security argument moved
+  under Gotchas below, where an APPEND heading keeps them.
+- ~~migrate to Wayland~~ — **not applicable today**: measured
+  `XDG_SESSION_TYPE=x11`, `WAYLAND_DISPLAY` unset, `wl-copy` absent.
+
+**Open:**
+1. **Add an unprotected-`main` arm to `scripts/drift-check.sh`** (devrc). The
+   only thing that would catch someone else's break-glass window; today the
+   detector is a human happening to look. Files: `scripts/drift-check.sh`,
+   `scripts/tests/test_drift_check.py`. See the open investigation above.
+2. **Correct `devrc/CLAUDE.md`'s escape-hatch note** (devrc). It hands over the
+   `DELETE` and says nothing about restoring — and the obvious `PATCH` back
+   SILENTLY FAILS (see gotchas). It should carry the `PUT` payload and say the
+   restore must be read back, not trusted. Files: `CLAUDE.md`.
+3. **Run `/audit-pr` over the merged #1043** (devrc) — the one review this effort
+   never got, and it touches `nix/programs/`, which every `home-manager switch`
+   depends on. Merged, shipped and verified on the real path, so this is
+   confirmation rather than a gate.
+4. **Consider recording the transferable lesson in `claude/RULES.md`**: *a
+   fixture that supplies an environment cannot observe that environment being
+   absent.* Gated — `RULES.md` has an enforced ceiling
+   (`scripts/tests/test_rules_size.py`) and needs an eviction in the SAME
+   commit, so this is an operator call, not a mechanical edit.
+
+## Gotchas / decisions / dead-ends
+- OSC 52 supersedes tmux-yank for this setup — no reason to install the plugin
+- Wayland clipboard is a different ecosystem — `wl-clipboard` is the equivalent of `xclip`
+- Espanso's clipboard access is separate from tmux's OSC 52 but reads the same X CLIPBOARD selection
+- No clipboard manager installed — see the section above for the evidence, and
+  note the retracted security argument so it is not re-derived
+- 🔴 `greenclip` has NO top-level nixpkgs attribute; `nix ... nixpkgs#greenclip`
+  fails. It is `haskellPackages.greenclip`. A version check that falls back to
+  that attribute will report 4.3.1 and read as if the top-level one existed
+
+- 🔴 **`gh api -X PATCH .../branches/main/protection/required_status_checks`
+  CANNOT restore protection after the sub-resource has been DELETEd.** It
+  returns non-zero and changes nothing. Restoring needs a full
+  `PUT /branches/main/protection` with `required_status_checks`,
+  `enforce_admins`, `required_pull_request_reviews: null`, `restrictions: null`
+  and the boolean arms. Measured: my break-glass `restore()` ran correctly as an
+  EXIT trap and still left `main` unprotected, because the command inside the
+  trap had never been executed once. **A rollback path you have never run is a
+  hypothesis** — and reading the state back is the only reason it was caught.
+  Working payload: `scripts/../` n/a — rebuild it from the live config with
+  `gh api .../protection` before deleting anything.
+- 🔴 **The break-glass was AVOIDABLE.** #1023 fixed `main`'s red at 18:37Z; I
+  deleted protection at 19:58Z on a measurement taken over an hour earlier. My
+  *branch* was still red (cut before #1023, and `strict: false` means checks run
+  on the branch, not the merged tree) — but the correct move was to **merge
+  `main` into the branch** and let the gate go green. Re-measure at the moment
+  you act on a destructive step, and re-check whether the cheaper route opened.
+- 🔴 **`pkill`-class cleanup: matching `/proc/<pid>/cwd` against a PREFIX is not
+  enough.** Filtering strays on `/tmp/claude-1000/*` killed an `nvim` belonging
+  to a SIBLING session (`07b11b56…`, not this session's `ba80fa7b…`). Every
+  agent scratchpad lives under that prefix. Match your OWN session id exactly.
+- **Docs-only PRs**: `/audit-pr` was deliberately not offered for #1051 — an
+  adversarial code audit has nothing to bite on in a prose diff.
 
 ### Clipboard managers — investigated on resume, still NOT installed
 
@@ -205,16 +300,6 @@ attribute `haskellPackages.greenclip` — NOT top-level), because it reuses the
 rofi already bound to `$mod+d` and solves persistence AND history for the same
 machinery, which strictly dominates a persistence-only daemon. `$mod+Shift+v`
 is free. The trigger to revisit is an OBSERVED lost clipboard, not this note.
-
-## Gotchas / decisions / dead-ends
-- OSC 52 supersedes tmux-yank for this setup — no reason to install the plugin
-- Wayland clipboard is a different ecosystem — `wl-clipboard` is the equivalent of `xclip`
-- Espanso's clipboard access is separate from tmux's OSC 52 but reads the same X CLIPBOARD selection
-- No clipboard manager installed — see the section above for the evidence, and
-  note the retracted security argument so it is not re-derived
-- 🔴 `greenclip` has NO top-level nixpkgs attribute; `nix ... nixpkgs#greenclip`
-  fails. It is `haskellPackages.greenclip`. A version check that falls back to
-  that attribute will report 4.3.1 and read as if the top-level one existed
 
 ## How to verify
 - tmux clipboard: copy in tmux copy-mode → paste in another app (OSC 52 path)
