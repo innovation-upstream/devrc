@@ -759,6 +759,14 @@ def handoff_read_docs(data):
             v = ti.get(k)
             if isinstance(v, str) and v:
                 raws.append(v)
+        # 🔴 `cwd` IS A BASE HERE TOO, EVEN THOUGH THE TOOL ASKS FOR AN ABSOLUTE PATH.
+        # `lib/subsystem_touch.py` — which reads these same payloads out of transcripts
+        # — records that `file_path` is "ABSOLUTE whenever the caller passed an
+        # absolute", i.e. a relative one reaches the payload verbatim when the caller
+        # passes one. Without a base, such a read resolves nowhere and arms nothing:
+        # a silent blind spot rather than a visible one, which is the shape this file
+        # keeps trying to avoid. There is no `-C` on a Read, so `cwd` is the only base.
+        bases = _bases("", d.get("cwd"))
     elif tool == "Bash":
         cmd = ti.get("command")
         if not isinstance(cmd, str) or not cmd:

@@ -222,6 +222,16 @@ def test_the_second_basename_shape_arms(home, repo):
     assert guard.handoff_read_docs(read_tool(doc)) == [doc]
 
 
+def test_a_RELATIVE_Read_path_resolves_against_cwd(home, repo):
+    """🔴 The Read tool asks for an absolute path, but `lib/subsystem_touch.py` — which
+    reads these same payloads out of transcripts — records that `file_path` is absolute
+    "whenever the caller passed an absolute", i.e. a relative one arrives verbatim.
+    Without `cwd` as a base such a read arms NOTHING, which is a silent blind spot."""
+    got = guard.handoff_read_docs(
+        read_tool("claudedocs/" + DOC, cwd=str(repo)))
+    assert got == [str(repo / "claudedocs" / DOC)]
+
+
 def test_a_relative_path_resolves_against_cwd(home, repo):
     cmd = "head -50 claudedocs/%s" % DOC
     assert guard.handoff_read_docs(bash(cmd, cwd=str(repo))) == [
