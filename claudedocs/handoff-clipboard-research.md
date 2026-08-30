@@ -16,7 +16,34 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 ## Goal
 Research modern best practices for clipboard and terminal clipboard interaction on Linux/NixOS/i3wm. Determine what's current, what's optimal, and what (if anything) needs changing.
 
-## State now — updated 2026-08-29 on resume
+## State now
+
+- **Rank 1 is DONE, and this is the first claim in this effort verified under the
+  real systemd unit rather than by hand.** `drift-check.sh` gained **rc 24**: an
+  unprotected-`main` detector. Merged as **#1065 → `ebbe5eaa`**, both hosts
+  converged and compared at **`809486fa`**.
+- **Live proof**, from `journalctl --user -u drift-check` after `systemctl --user
+  start drift-check` on the workbench (the only host the timer runs on):
+  ```
+  [protect] innovation-upstream/devrc main: 2 required status check(s) — tekton/devrc-pytests,tekton/devrc-nodetests
+  [protect]   enforce_admins=true — the checks bind admins too.
+  drift-check: no drift on the host(s) CHECKED: workbench (local), laptop (remote)
+  ```
+  `gh` resolves on the unit's own PATH on **both** hosts (checked by running
+  `command -v gh` under the unit's `Environment` PATH, not by reading home.nix).
+- **Two side PRs shipped from this thread:** **#1069** (re-pin skill-tier
+  measurements — `main` was RED for every PR until it landed) and the
+  `TARGET_FLOORS` merge-conflict resolution.
+- **Also fixed while verifying:** the laptop's `homelab-talos` was 31 commits
+  behind with **1 touching `containers/clawgate`** — the subtree `clawgatectl`
+  is compiled from. Fast-forwarded + re-switched; `drift-check` now reports both
+  hosts' built sources CURRENT. ⚠ `clawgatectl --version` read **0.8.18 before
+  and after** — the version string was NOT the signal; the deadman was.
+### Earlier — the 2026-08-29 record (how the clipboard fix shipped INERT)
+Kept because its content is durable, not status: the inert-fix story, the
+E484 chain and the verified-on-the-real-path claim. It is no longer under a
+`State now` heading, so a future status replace cannot silently delete it.
+
 - **Research session (00:37–00:53):** report completed, no code changes. This doc
   landed on `handoff/clipboard-research` → PR #1014 (it could not be pushed to
   `main`: protected branch, 2 required checks).
@@ -342,26 +369,3 @@ is free. The trigger to revisit is an OBSERVED lost clipboard, not this note.
 - **Both hosts agree:** `scripts/ship.sh` must end `2 hosts compared, both at <sha>` —
   a one-host run says `cross-host agreement NOT COMPARED`, which is a different claim.
 - Neovim off-display, tmux/espanso clipboard: unchanged, see the section above.
-## State now — updated 2026-08-30
-
-- **Rank 1 is DONE, and this is the first claim in this effort verified under the
-  real systemd unit rather than by hand.** `drift-check.sh` gained **rc 24**: an
-  unprotected-`main` detector. Merged as **#1065 → `ebbe5eaa`**, both hosts
-  converged and compared at **`809486fa`**.
-- **Live proof**, from `journalctl --user -u drift-check` after `systemctl --user
-  start drift-check` on the workbench (the only host the timer runs on):
-  ```
-  [protect] innovation-upstream/devrc main: 2 required status check(s) — tekton/devrc-pytests,tekton/devrc-nodetests
-  [protect]   enforce_admins=true — the checks bind admins too.
-  drift-check: no drift on the host(s) CHECKED: workbench (local), laptop (remote)
-  ```
-  `gh` resolves on the unit's own PATH on **both** hosts (checked by running
-  `command -v gh` under the unit's `Environment` PATH, not by reading home.nix).
-- **Two side PRs shipped from this thread:** **#1069** (re-pin skill-tier
-  measurements — `main` was RED for every PR until it landed) and the
-  `TARGET_FLOORS` merge-conflict resolution.
-- **Also fixed while verifying:** the laptop's `homelab-talos` was 31 commits
-  behind with **1 touching `containers/clawgate`** — the subtree `clawgatectl`
-  is compiled from. Fast-forwarded + re-switched; `drift-check` now reports both
-  hosts' built sources CURRENT. ⚠ `clawgatectl --version` read **0.8.18 before
-  and after** — the version string was NOT the signal; the deadman was.
