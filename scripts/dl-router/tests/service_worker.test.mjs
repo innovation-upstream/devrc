@@ -557,10 +557,14 @@ test("a NON-Discord video still takes the yt-dlp path", async () => {
   // The control for the test above: the direct-file bypass must be the
   // narrow exception, not a removal of the blob:-player branch.
   reset();
+  // `auto: true` DELIBERATELY. A below-threshold match queues the picker and
+  // POSTs nothing -- correct behaviour, but then the positive assertion below
+  // would be asserting the picker path instead of the yt-dlp one.
   fetchHandler = async (url) => {
     if (url.endsWith("/match")) {
       return { ok: true, status: 200,
-        json: async () => ({ dir: "other", auto: false, reason: "no match" }) };
+        json: async () => ({ dir: "Jane Doe", auto: true,
+          reason: "tag=='Jane Doe'" }) };
     }
     return { ok: true, status: 200, json: async () => ({ jobId: "j9" }) };
   };
@@ -572,6 +576,39 @@ test("a NON-Discord video still takes the yt-dlp path", async () => {
   }, {});
   assert.equal(calls.downloads.length, 0,
     "an embedded player must still go through yt-dlp");
+  // 🔴 THE ABSENCE ALONE IS NOT THE ASSERTION. Asserting only
+  // `downloads.length === 0` left this guard green when `startFetch` was
+  // stubbed to a no-op — it passed whether or not the yt-dlp path did
+  // anything, i.e. green for a reason other than the one it names. Pin the
+  // POSITIVE half too.
+  const fetchCall = calls.fetches.find((f) => f.url.endsWith("/fetch"));
+  assert.ok(fetchCall, "the yt-dlp path must actually POST /fetch");
+  assert.equal(JSON.parse(fetchCall.opts.body).url,
+    "https://example-site.test/v/1",
+    "yt-dlp gets the PAGE url for an embedded player");
+});
+
+test("a Discord .m3u8 is still treated as a stream, not saved as a file", async () => {
+  // The bypass must not reach a manifest: downloading a ~200-byte playlist and
+  // calling it the media is a silent wrong answer where the old path failed
+  // loudly.
+  reset();
+  fetchHandler = async (url) => {
+    if (url.endsWith("/match")) {
+      return { ok: true, status: 200,
+        json: async () => ({ dir: "other", auto: false, reason: "no match" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ jobId: "j10" }) };
+  };
+  await SW.onMenuClicked({
+    menuItemId: SW.MENU_ID,
+    mediaType: "video",
+    srcUrl: "https://cdn.discordapp.com/attachments"
+      + "/119283746551234567/998877665544332211/live.m3u8?ex=1",
+    pageUrl: "https://discord.com/channels/1/2",
+  }, {});
+  assert.equal(calls.downloads.length, 0,
+    "a manifest must never be handed to chrome.downloads");
 });
 
 test("the menu routes a stream through the matched dir, not the catch-all", () => {

@@ -210,6 +210,14 @@ export function discordAliasKey(channelId) {
   return KEY_PREFIX_DISCORD + String(channelId);
 }
 
+// Discord serves one attachment from two hosts: the resizing proxy goes in the
+// <img src>, downscaled to whatever the client asked for and usually
+// re-encoded to webp, while the original sits on the wrapping <a href>. So
+// `info.srcUrl` on an image names A THUMBNAIL, not the file that was posted.
+// (A <video> is unaffected -- its src is already the origin.)
+const DISCORD_PREVIEW_HOST = "media.discordapp.net";
+const DISCORD_ORIGIN_HOST = "cdn.discordapp.com";
+
 /**
  * The stable ledger identity of a Discord attachment, else "".
  *
@@ -227,18 +235,26 @@ export function discordAliasKey(channelId) {
  * sites it was written for the query IS the asset identity. Discord is the
  * exception, so the exception is expressed here, once, rather than by
  * weakening that rule for everyone.
+ *
+ * THE HOST IS FOLDED, and it is not decoration. `playerSourceKey` keys on
+ * `scheme://host + path`, so the proxy copy and the original -- the SAME
+ * attachment path served from two hosts -- would key differently and file as
+ * two assets. Save an image once from Chrome's own "Save image as..." and once
+ * from this extension's menu and the ledger holds two rows that never
+ * accumulate a hit: exactly the miss this key exists to remove. The docstring
+ * above says the PATH is the identity; folding the host is what makes the
+ * implementation as wide as that sentence.
  */
 export function discordSourceKey(url) {
-  return discordChannelId(url) ? playerSourceKey(url) : "";
+  if (!discordChannelId(url)) return "";
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "";
+  }
+  return `https://${DISCORD_ORIGIN_HOST}${parsed.pathname || "/"}`;
 }
-
-// Discord serves one attachment from two hosts: the resizing proxy goes in the
-// <img src>, downscaled to whatever the client asked for and usually
-// re-encoded to webp, while the original sits on the wrapping <a href>. So
-// `info.srcUrl` on an image names A THUMBNAIL, not the file that was posted.
-// (A <video> is unaffected -- its src is already the origin.)
-const DISCORD_PREVIEW_HOST = "media.discordapp.net";
-const DISCORD_ORIGIN_HOST = "cdn.discordapp.com";
 
 /**
  * Given the two URLs the browser offers for one right-clicked element, the one
@@ -249,6 +265,19 @@ const DISCORD_ORIGIN_HOST = "cdn.discordapp.com";
  * A link that merely happens to wrap an image is not evidence of anything, and
  * preferring `linkUrl` in general would turn every linked thumbnail on every
  * site into a download of wherever the link pointed.
+ *
+ * KNOWN UNHANDLED VARIANT, stated rather than guessed at: if Discord ever
+ * puts a FULL-SIZE PROXY url on the anchor (`media.discordapp.net?width=4096`)
+ * instead of the origin, this returns `srcUrl` and the downscaled copy is still
+ * what gets saved. Widening to "prefer the anchor whenever the paths match"
+ * would cover it, but nothing in the live corpus shows that shape, and a
+ * URL cannot be read for pixel size -- so the narrow rule stands until a real
+ * instance turns up.
+ *
+ * NOT OBSERVABLE: nothing records whether this ever fires. The extension has
+ * no logging facility and inventing one is out of scope here, so the next
+ * reader cannot answer "is this a no-op in production?" from data. Say so
+ * rather than implying it has been seen to work.
  */
 export function preferOriginalUrl(srcUrl, linkUrl) {
   if (!srcUrl) return linkUrl || "";

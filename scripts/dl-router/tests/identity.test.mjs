@@ -59,19 +59,48 @@ test("hostnames match the shared table byte for byte", () => {
   }
 });
 
-test("the ledger key of every table row is its URL with the query dropped", () => {
+test("every table row's ledger key is signature-free and host-folded", () => {
   // Driven off the SAME table as the channel ids, so a URL shape added there
   // is covered here too rather than needing a second hand-copied list -- the
   // exact failure the table's own `_why` block describes.
+  //
+  // 🔴 IT ASSERTS PROPERTIES, NOT A RE-DERIVED STRING. This used to assert
+  // `=== c.url.split("?")[0]`, which is not the contract: the key also drops
+  // the fragment, lower-cases the host and folds the proxy host to the origin.
+  // A legitimate new fixture row carrying a `#fragment` therefore RED-ed this
+  // guard while the implementation was correct -- a guard that punishes the
+  // fixture growth it advertises. Exact values are pinned by the hand-written
+  // literal tests below, which is where an exact expectation belongs.
   for (const c of URL_CASES.discord) {
     const key = discordSourceKey(c.url);
     if (!c.channel) {
       assert.equal(key, "", c.url);
       continue;
     }
-    assert.equal(key, c.url.split("?")[0], c.url);
-    assert.equal(key.includes("?"), false, c.url);
+    assert.equal(key.includes("?"), false, `query survived: ${c.url}`);
+    assert.equal(key.includes("#"), false, `fragment survived: ${c.url}`);
+    assert.ok(key.startsWith("https://cdn.discordapp.com/"),
+      `host not folded to the origin: ${c.url} -> ${key}`);
+    assert.equal(key.endsWith(new URL(c.url).pathname), true,
+      `path not preserved: ${c.url} -> ${key}`);
   }
+});
+
+test("the proxy copy and the original are ONE ledger row", () => {
+  // The failure this fold exists to remove: save an image once from Chrome's
+  // own "Save image as…" (which yields the proxy src) and once from this
+  // extension's menu (which yields the origin), and a host-scoped key files
+  // them as two assets that never accumulate a hit.
+  const path = `/attachments/${CHANNEL}/998877665544332211/a.png`;
+  const proxy = `https://media.discordapp.net${path}?format=webp&width=550`;
+  const origin = `https://cdn.discordapp.com${path}?ex=1&is=2&hm=3`;
+  assert.equal(discordSourceKey(proxy), discordSourceKey(origin));
+  assert.equal(discordSourceKey(proxy), `https://cdn.discordapp.com${path}`);
+});
+
+test("a fragment never reaches the ledger key", () => {
+  // The shape that RED-ed the old table guard. Pinned so it cannot come back.
+  assert.equal(discordSourceKey(`${CDN}#t=5`), CDN);
 });
 
 // --- Discord ---------------------------------------------------------------- //

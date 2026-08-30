@@ -1388,16 +1388,25 @@ export async function onMenuClicked(info, tab) {
   // on Discord an image's src is a downscaled webp from the resizing proxy.
   const target = preferOriginalUrl(info.srcUrl, info.linkUrl) || info.pageUrl;
   if (!isHttpUrl(target)) return;
-  // A Discord attachment is a DIRECT FILE whatever element it was clicked on,
-  // so it must not take the yt-dlp branch. The `mediaType === "video"` clause
-  // below is there for players whose src is a `blob:` -- a CDN attachment
-  // never is, and handing `discord.com/channels/<guild>/<channel>` to yt-dlp
-  // instead of the .mp4 sitting right there saves nothing and costs a
-  // subprocess.
+  // A MANIFEST IS ALWAYS A STREAM, including one served from Discord. This
+  // test stays OUTSIDE the bypass below on purpose: an `.m3u8` has no single
+  // file to save, so letting the bypass reach it would download a ~200-byte
+  // playlist and call it the media -- trading a loud failure for a silent
+  // wrong answer.
+  const manifest = /\.m3u8(\?|$)|\.mpd(\?|$)/i.test(target);
+  // Otherwise a Discord attachment is a DIRECT FILE whatever element it was
+  // clicked on, so it must not take the yt-dlp branch: that branch hands
+  // `discord.com/channels/<guild>/<channel>` to yt-dlp while the .mp4 sits
+  // right there in `srcUrl`.
+  //
+  // The `mediaType === "video"` clause it bypasses catches players whose media
+  // URL this listener cannot use directly. Its exact reach is NOT verified
+  // here -- `isHttpUrl` already returned above, so whether a `blob:`-src
+  // <video> can reach this line depends on whether Chrome populates
+  // `info.srcUrl` for one, which needs a browser to answer. The bypass is
+  // scoped to CDN attachments either way, so it does not depend on that.
   const directFile = discordSourceKey(target) !== "";
-  const streaming = !directFile
-    && (/\.m3u8(\?|$)|\.mpd(\?|$)/i.test(target)
-      || info.mediaType === "video");
+  const streaming = manifest || (!directFile && info.mediaType === "video");
   if (streaming) {
     // HLS/DASH has no single file to save -- hand the PAGE url to yt-dlp.
     const url = isHttpUrl(info.pageUrl) ? info.pageUrl : target;
