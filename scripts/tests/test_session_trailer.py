@@ -642,9 +642,13 @@ class TestAWhitespaceOnlyTailDoesNotRaise:
     'no trailer'" — it degraded by crashing, which is a different thing.
     """
 
-    # Distinct shapes on purpose: after a body, after a trailer block, and a
-    # message that is nothing but whitespace. Each reaches the empty slice by a
-    # different route through the scan.
+    # Four CONTENT shapes on ONE route, not four routes — measured, because the
+    # first wording of this comment claimed route diversity that is structurally
+    # impossible. An empty slice requires `start == len(lines)`, i.e. the scan
+    # loop ran ZERO iterations; any route where it moves leaves `para` non-empty.
+    # Instrumented: all four give loop-iterations=0. They vary what PRECEDES the
+    # blank tail (body, trailer block, nothing), which is what could plausibly
+    # change the separator decision — not the path into the guard.
     @pytest.mark.parametrize("name,message", [
         ("spaces-after-body", "fix: v\n\nbody\n   \n"),
         ("spaces-after-trailer", "subject\n\nCo-Authored-By: A\n  \n"),
@@ -659,6 +663,17 @@ class TestAWhitespaceOnlyTailDoesNotRaise:
         assert out.startswith(message.rstrip("\n"))
 
     def test_the_predicate_itself_reports_no_block(self):
-        """Pinned separately: a trailing blank paragraph is not a trailer block,
-        so the stamp must be SEPARATED rather than joined to whatever precedes."""
+        """INVARIANT GUARD, not a regression guard — and the distinction is
+        measured, because the first wording of this docstring overclaimed it.
+
+        It does NOT pin a git-visible correctness property: against git 2.55.0,
+        joining and separating parse IDENTICALLY for every whitespace-tail shape,
+        because git treats a whitespace-only line as a paragraph separator. No
+        separator choice here can save a preceding `Co-Authored-By`, and our own
+        stamp parses either way.
+
+        What it does pin is BYTE-IDENTITY with base `a5bc5df6`, which is the
+        strong result: `False` is what makes the output of this whole class match
+        pre-regression behaviour exactly.
+        """
         assert st._ends_in_trailer_block("fix: v\n\nbody\n   ") is False
