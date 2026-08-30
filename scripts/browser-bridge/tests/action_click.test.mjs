@@ -388,11 +388,20 @@ test("🔴 startBackground()'s call to it carries no condition", () => {
   // No early exit above it at the function's own level. This is the audit's
   // `if (globalThis.__x) return;` mutant: the call stays syntactically
   // unconditional while becoming dead.
+  // 🔴 THE TOKEN ANYWHERE ON THE LINE, NOT ANCHORED AT ITS START. The first
+  // version used /^\s*(return|throw)\b/, which cannot match the very mutant the
+  // comment above names: `if (globalThis.__x) return;` is a line beginning with
+  // `if`. An audit measured it SURVIVING all 568 tests — a guard passing on the
+  // case its own comment claims is closed, which is worse than no guard because
+  // it stops the next reader re-testing it. No depth-1 line above the call
+  // contains either token today, so this cannot false-positive on the body as
+  // written.
   const idx = lines.indexOf(hits[0]);
   const above = lines.slice(0, idx).filter((l) => l.depth === 1);
-  assert.ok(!above.some((l) => /^\s*(return|throw)\b/.test(l.text)),
-    "an early return/throw sits above the call — it is syntactically " +
-    "unconditional and never reached");
+  const early = above.find((l) => /(^|[^.\w])(return|throw)\b/.test(l.text));
+  assert.ok(!early,
+    "an early exit sits above the call — it is syntactically unconditional and " +
+    `never reached: ${early && early.text.trim()}`);
 });
 
 // --------------------------------------------------------------------------- //

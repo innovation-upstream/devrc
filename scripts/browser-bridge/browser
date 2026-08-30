@@ -644,10 +644,20 @@ fi
 # `agent` had never honoured. A guard that names one spelling of a hazard does
 # not cover the hazard. `TAB_SRC` names whichever source supplied it, so the
 # refusal is legible whether it came from a reference, a flag or the environment.
-if [ "${1:-}" = "agent" ] && [ -n "$TAB" ]; then
-  _agent_hint=""
+#
+# 🔴 AND `--frame` IS THE SAME HAZARD — the second widening, found the same way.
+# Keying on TAB alone left the SIBLING routing variable untouched:
+# `browser --frame evil.example agent …` discarded the flag in silence (the
+# original F1 shape, unfixed), and an exported `$BB_FRAME` reached
+# browser-agent's environment while `_note_env_routing` printed `routed from the
+# ENVIRONMENT` for a route `agent` had never honoured. browser-agent accepts
+# neither flag. So the guard covers every routing variable the agent cannot
+# keep, not the one that happened to be reported.
+_agent_hint=""
+if [ "${1:-}" = "agent" ]; then
   [ -n "$INSTANCE" ] && _agent_hint=" Target the profile with --instance ${INSTANCE} instead."
-  die "agent cannot honour a tab (${TAB_SRC} gave tab ${TAB}) — browser-agent has no --tab and always works in its own new tab.${_agent_hint}"
+  [ -z "$TAB" ]   || die "agent cannot honour a tab (${TAB_SRC} gave tab ${TAB}) — browser-agent has no --tab and always works in its own new tab.${_agent_hint}"
+  [ -z "$FRAME" ] || die "agent cannot honour a frame (${FRAME_SRC} gave ${FRAME}) — browser-agent has no --frame and always works in its own new tab.${_agent_hint}"
 fi
 
 SESSION_ID="$(derive_session_id)"
@@ -2503,6 +2513,17 @@ else:
     aargs=()
     [ -n "$INSTANCE" ] && aargs+=(--instance "$INSTANCE")
     aargs+=("$@")
+    # 🔴 CLOSE THE LEAK AT THE SEAM, not just at the door. The guard above
+    # refuses a tab/frame that REACHES it — but `--tab ""` is an explicit-empty
+    # that clears the shell variable while leaving the EXPORT intact, and that is
+    # the idiom this file documents for `--instance`. An operator who exports
+    # BB_TAB, hits the refusal and clears it the documented way would otherwise
+    # hand browser-agent an environment in which every child `browser` call it
+    # makes routes to that tab — a confident answer about the wrong page, rc 0.
+    # browser-agent accepts neither flag, so neither variable can mean anything
+    # below this point. BB_INSTANCE is deliberately NOT unset: --instance IS
+    # forwarded, so inheriting it is consistent rather than a leak.
+    unset BB_TAB BB_FRAME
     exec "$HERE/browser-agent" "${aargs[@]}"
     ;;
   # ""|-h|--help|help is handled EARLIER (above the token-file read) so that

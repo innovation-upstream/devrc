@@ -39,8 +39,10 @@ The 4 that were already green are labelled ``INVARIANT GUARD`` in place: they
 pin behaviour this change must NOT take away, and none of them is evidence the
 feature works.
 
-Audit round 1 added the `agent`, ``--`` and /whoami-shape cases; this file now
-holds 43. 🔴 Two of those additions FAILED IN THE NIX SANDBOX while passing on
+Audit rounds 1-3 added the `agent`, ``--``, /whoami-shape, SKILL.md-ledger and
+env-leak cases. (No count here on purpose: the first version of this paragraph
+carried one, and it was stale within the same session. Count the tests if you
+need the number.) 🔴 Two of those additions FAILED IN THE NIX SANDBOX while passing on
 the dev host, because they asserted that `browser agent` had reached the wire —
 which it does only once its model-backend prerequisites are met, and those come
 from the developer's own environment. They now key on `browser-agent`'s
@@ -159,6 +161,12 @@ def bridge(tmp_path):
     class _Bridge:
         handler = _Handler
         bodies = _Handler.bodies
+
+        @staticmethod
+        def env_for_stub():
+            """The same env `run` uses — for tests that invoke a COPY of the CLI
+            beside a stub `browser-agent`, rather than the real one."""
+            return dict(env)
 
         @staticmethod
         def run(*args, **kw):
@@ -488,29 +496,6 @@ def test_POSITIVE_CONTROL_the_missing_goal_error_is_producible(bridge):
         f"assertions below are vacuous. stderr was: {r.stderr!r}")
 
 
-def test_agent_still_works_with_an_explicit_instance(bridge):
-    """INVARIANT GUARD: the refusal above is scoped to the reference.
-
-    Refusing `--instance` too would break the documented way to target the agent,
-    which is the failure mode a too-wide guard would introduce here.
-
-    🔴 ASSERTS STDERR, NOT THE REQUEST BODIES, AND THAT IS THE FIX FOR A REAL
-    TWO-TIER BUG. An earlier version asserted that the agent path had sent
-    something to the bridge. It passed on the dev host and FAILED in the nix
-    sandbox — the tier the merge gates on — because `browser agent` reaches the
-    wire only once its model-backend prerequisites are satisfied, and those come
-    from the developer's own environment. The test was therefore a claim about
-    whoever ran it. `browser-agent` refuses a missing goal BEFORE any network or
-    backend work, so every assertion here is decided by argument parsing alone
-    and reads the same in both tiers.
-    """
-    r = bridge.run("--instance", "main", "agent", "--dry-run", "do a thing")
-    assert "agent cannot honour" not in r.stderr, (
-        "the reference guard fired on an explicit --instance: " + r.stderr)
-    assert "a goal is required" not in r.stderr, (
-        "the goal was eaten before browser-agent saw it: " + r.stderr)
-
-
 def test_the_free_text_list_covers_agent_too(bridge):
     """A TRAILING bw:// is a GOAL for `agent`, not a route.
 
@@ -663,12 +648,106 @@ def test_agent_refuses_a_tab_from_ANY_source(bridge, argv, env, source):
 
 
 def test_agent_without_any_tab_is_untouched(bridge):
-    """INVARIANT GUARD: the refusal is scoped to a TAB, not to `agent`.
+    """INVARIANT GUARD: the refusal is scoped to a ROUTING VARIABLE, not to `agent`.
 
     A guard widened onto the subcommand rather than the state would break the
     documented way to run the agent, which is the regression a too-wide fix
-    introduces here.
+    introduces here — and every widening in this ladder (bw:// -> --tab -> $BB_TAB
+    -> --frame -> $BB_FRAME) had to keep this case green.
+
+    This replaces a near-duplicate (`test_agent_still_works_with_an_explicit_
+    instance`) that had identical input and the same two assertions, differing
+    only in its failure text.
     """
     r = bridge.run("--instance", "main", "agent", "--dry-run", "do a thing")
     assert "agent cannot honour" not in r.stderr, r.stderr
     assert "a goal is required" not in r.stderr, r.stderr
+
+
+# --------------------------------------------------------------------------- #
+# `agent` refuses EVERY routing variable it cannot keep — and leaks none
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("argv, env, source, word", [
+    (["--frame", "evil.example", "--instance", "main", "agent", "g"], {},
+     "--frame", "frame"),
+    (["--instance", "main", "agent", "g"], {"BB_FRAME": "evil.example"},
+     "$BB_FRAME", "frame"),
+])
+def test_agent_refuses_a_frame_from_any_source(bridge, argv, env, source, word):
+    """🔴 The SECOND widening, found the same way as the first.
+
+    Keying the guard on `TAB` alone left the sibling routing variable untouched:
+    `browser --frame evil.example agent …` discarded the flag in silence — the
+    original defect's exact shape — and an exported `$BB_FRAME` reached
+    browser-agent while `_note_env_routing` announced a route `agent` had never
+    honoured. browser-agent accepts neither flag, so neither can mean anything
+    past this point.
+    """
+    r = bridge.run(*argv, env=env)
+    assert r.returncode != 0, r.stdout
+    assert f"agent cannot honour a {word}" in r.stderr, r.stderr
+    assert source in r.stderr, f"the refusal must name the source: {r.stderr}"
+    assert bridge.bodies == [], f"nothing may be dispatched: {bridge.bodies}"
+
+
+@pytest.mark.parametrize("var", ["BB_TAB", "BB_FRAME"])
+def test_the_agent_arm_does_not_LEAK_routing_env_to_its_children(bridge, tmp_path, var):
+    """🔴 The guard closes the DOOR; this closes the SEAM.
+
+    `--tab ""` is an explicit-empty that clears the shell variable while leaving
+    the EXPORT intact — and that is the idiom this file documents for
+    `--instance`. So an operator who exports BB_TAB, hits the refusal, and clears
+    it the documented way still hands browser-agent an environment in which every
+    child `browser` call routes to that tab: a confident answer about the wrong
+    page, rc 0, no error anywhere.
+
+    Driven against a STUB browser-agent that prints its inherited environment, so
+    this needs no model backend and reads the same in both tiers.
+    """
+    stub_dir = tmp_path / f"stub-{var}"
+    stub_dir.mkdir()
+    (stub_dir / "browser").write_text(CLI.read_text(encoding="utf-8"), encoding="utf-8")
+    (stub_dir / "browser-agent").write_text(
+        '#!/usr/bin/env bash\n'
+        f'printf "SEEN {var}=[%s]\\n" "${{{var}-<unset>}}"\n', encoding="utf-8")
+    (stub_dir / "browser-agent").chmod(0o755)
+
+    clear = {"--tab": '', "--frame": ''}["--tab" if var == "BB_TAB" else "--frame"]
+    flag = "--tab" if var == "BB_TAB" else "--frame"
+    r = subprocess.run(
+        ["bash", str(stub_dir / "browser"), flag, clear, "--instance", "main",
+         "agent", "some goal"],
+        env={**bridge.env_for_stub(), var: "999"},
+        capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
+
+    assert "SEEN" in r.stdout, (
+        f"the stub agent never ran, so this test proves nothing: "
+        f"{r.stdout!r} / {r.stderr!r}")
+    assert f"SEEN {var}=[<unset>]" in r.stdout, (
+        f"{var} leaked into browser-agent's environment; its child `browser` "
+        f"calls would route with it. stdout: {r.stdout!r}")
+
+
+def test_POSITIVE_CONTROL_the_stub_agent_can_see_an_inherited_var(bridge, tmp_path):
+    """The two assertions above are ABSENCES — prove the stub can see a leak.
+
+    If the stub simply never observed the environment, `[<unset>]` would be
+    reported for a variable that WAS inherited, and the guard would pass while
+    testing nothing.
+    """
+    stub_dir = tmp_path / "stub-control"
+    stub_dir.mkdir()
+    (stub_dir / "browser").write_text(CLI.read_text(encoding="utf-8"), encoding="utf-8")
+    (stub_dir / "browser-agent").write_text(
+        '#!/usr/bin/env bash\nprintf "SEEN BB_INSTANCE=[%s]\\n" "${BB_INSTANCE-<unset>}"\n',
+        encoding="utf-8")
+    (stub_dir / "browser-agent").chmod(0o755)
+    # BB_INSTANCE is deliberately NOT unset by the agent arm — --instance IS
+    # forwarded, so inheriting it is consistent. That makes it the right control.
+    r = subprocess.run(
+        ["bash", str(stub_dir / "browser"), "agent", "some goal"],
+        env={**bridge.env_for_stub(), "BB_INSTANCE": "main"},
+        capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
+    assert "SEEN BB_INSTANCE=[main]" in r.stdout, (
+        f"the stub cannot observe an inherited variable at all, so the leak "
+        f"assertions above are vacuous. stdout: {r.stdout!r}")
