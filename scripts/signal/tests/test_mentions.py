@@ -2042,3 +2042,114 @@ def test_the_name_hint_cap_is_a_LITERAL_five_not_whatever_the_module_says():
                if c["display_name"].lower() in message]
     assert len(printed) == 5, printed
     assert "+7 not shown" in message
+
+
+# --------------------------------------------------------------------------- #
+# ROUND-5 delta audit
+# --------------------------------------------------------------------------- #
+# --- F-A (relocated): a PLACEHOLDER bridges two real rows ------------------- #
+def test_a_PLACEHOLDER_bridging_TWO_REAL_rows_is_REFUSED_not_guessed(db):
+    """🔴 RED at 707412e6 — and red by SENDING, as a DID NOT RAISE. Round-5 F-A.
+
+    THREE rows on one number, which is what the two-row tests above are
+    structurally blind to. Round 4 gated the union on `is_placeholder`, but the
+    gate is a PER-PAIR predicate inside a union-find, and a union-find joins
+    PATHS: it blocks the direct edge real—real and then real—placeholder and
+    placeholder—real union anyway, so `find(A) == find(C)` and two different
+    people are one identity again. Moving the nodes from identifiers to rows
+    changed WHICH nodes merge; it did not remove transitivity.
+
+    Built through five ordinary `upsert_contact()` calls, NO SQL, each one a
+    mechanism the module's own docstrings describe: a draft names an unknown
+    number and mints a PLACEHOLDER; an envelope teaches real row A that number,
+    `_promote_placeholder()` DECLINING because the uuid is taken (so the
+    placeholder survives, durably); the number is then recycled onto real row C,
+    which declines the same way.
+
+    MIXED and measured that way: the row assertions are GREEN at 707412e6 —
+    INVARIANT GUARDS proving the three-row state is reachable from the public
+    API. The refusal is RED there: it returned
+    `[{'author': ANN_UUID, 'start': 3, 'length': 4}]`, a ping for Ann under text
+    reading `@Ann Smith`, with no exception of any class.
+
+    The `raises` is on the BASE class and the specific class is asserted by NAME
+    on the next line, deliberately: naming the new subclass inside `raises()`
+    makes the test red at 707412e6 with an `AttributeError` on the missing
+    attribute — red for the wrong reason, and blind to whether the call sent.
+    This shape is red there as **DID NOT RAISE**, which is the failure mode
+    being pinned, while still refusing to accept any of the other seven
+    refusals as a pass.
+    """
+    number = "+15550100"
+    db.upsert_contact(phone_number=number)                       # -> PLACEHOLDER
+    db.upsert_contact(signal_uuid=ANN_UUID, display_name="Ann")
+    db.upsert_contact(signal_uuid=ANN_UUID, phone_number=number)  # promotion declines
+    db.upsert_contact(signal_uuid=CAI_UUID, profile_name="Ann Smith")
+    db.upsert_contact(signal_uuid=CAI_UUID, phone_number=number)  # declines again
+    rows = db.contacts_by_identifiers([number, ANN_UUID, CAI_UUID])
+    assert len(rows) == 3, f"expected the three-row bridge, got {rows!r}"
+    assert {r["phone_number"] for r in rows} == {number}
+    assert sorted(bool(r["is_placeholder"]) for r in rows) == [False, False, True], \
+        "two REAL rows and ONE placeholder — the bridge is the whole point"
+    with pytest.raises(_mentions.MentionError) as exc:
+        _mentions.resolve_mentions(
+            ["Ann"], body="hi @Ann Smith",
+            # The synthetic placeholder uuid is deliberately NOT a member: it is
+            # not a Signal identity, and the number it was minted for is.
+            members=[ANN_UUID, CAI_UUID, number], contacts=rows, is_group=True)
+    assert type(exc.value).__name__ == "MentionIdentityUnresolvable", \
+        f"refused, but with the wrong class: {exc.value!r}"
+
+
+def test_the_bridge_refusal_survives_a_mention_typed_as_a_BARE_UUID(db):
+    """The refusal is not routed around by spelling the mention differently.
+
+    `_resolve_one()` never consults identity for a bare uuid — but
+    `_colliding_needles()` does, and a polluted group drops the OTHER real
+    person's longer name from the veto list, so "spell it as a uuid" is not a
+    safe way around an unresolvable identity. This pins that the refusal covers
+    the whole call rather than only the name-lookup door.
+
+    RED at 707412e6 as a DID NOT RAISE — but honestly: what it returned there
+    was a CORRECT mention. A uuid is longer than any of these names, so no veto
+    could apply in THIS body and no wrong send is demonstrated. This is an
+    invariant guard on the SCOPE of the fail-closed rule, not a second wrong-send
+    regression, and it is counted as one.
+    """
+    number = "+15550100"
+    db.upsert_contact(phone_number=number)
+    db.upsert_contact(signal_uuid=ANN_UUID, display_name="Ann")
+    db.upsert_contact(signal_uuid=ANN_UUID, phone_number=number)
+    db.upsert_contact(signal_uuid=CAI_UUID, profile_name="Ann Smith")
+    db.upsert_contact(signal_uuid=CAI_UUID, phone_number=number)
+    rows = db.contacts_by_identifiers([number, ANN_UUID, CAI_UUID])
+    with pytest.raises(_mentions.MentionError) as exc:
+        _mentions.resolve_mentions(
+            [ANN_UUID], body="hi @" + ANN_UUID + " ok",
+            members=[ANN_UUID, CAI_UUID, number], contacts=rows, is_group=True)
+    assert type(exc.value).__name__ == "MentionIdentityUnresolvable", \
+        f"refused, but with the wrong class: {exc.value!r}"
+
+
+def test_a_placeholder_bridging_ONE_real_row_still_resolves_NORMALLY(db):
+    """The negative control: the group check must not refuse the ordinary case.
+
+    The durable two-row split — one person, a real row and the placeholder
+    minted for their number — is the shape `_identity_groups()` EXISTS to merge.
+    Its group holds exactly one real row, so the new invariant says nothing
+    about it and the mention resolves to the real Signal id.
+
+    GREEN at 707412e6 — an INVARIANT GUARD, not regression coverage. It is here
+    because a fix that refused any group containing a placeholder would pass the
+    two tests above and silently break the case round 3 and round 4 both fixed.
+    """
+    number = "+15550100"
+    db.upsert_contact(phone_number=number)
+    db.upsert_contact(signal_uuid=ANN_UUID, display_name="Ann")
+    db.upsert_contact(signal_uuid=ANN_UUID, phone_number=number)
+    rows = db.contacts_by_identifiers([number, ANN_UUID])
+    assert sorted(bool(r["is_placeholder"]) for r in rows) == [False, True]
+    assert _mentions.resolve_mentions(
+        ["Ann"], body="hi @Ann ok", members=[ANN_UUID, number, BOB_UUID],
+        contacts=rows, is_group=True) == [
+        {"author": ANN_UUID, "start": 3, "length": 4}]

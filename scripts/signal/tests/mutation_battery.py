@@ -615,6 +615,35 @@ MUTANTS: list[Mutant] = [
            "test_the_name_hint_cap_is_a_LITERAL_five_not_whatever_the_module_says",
            SUITE_MENT),
 
+    Mutant("MEN13", "🔴 [round-5 audit F-A] the GROUP-LEVEL invariant is deleted, "
+                    "leaving only round-4's per-pair `is_placeholder` gate. That gate "
+                    "cannot survive transitivity: the union-find joins PATHS, so with "
+                    "three rows on one number — real A, placeholder P, real C — the "
+                    "direct edge A—C is blocked and A—P—C unions anyway. Two real "
+                    "people are one identity again and `--mention Ann` pings A under "
+                    "a body reading @Ann Smith. This is the shipped 707412e6 "
+                    "behaviour, and the reason the fix is a check on the FORMED "
+                    "GROUP rather than a third revision of the pair condition. MEN10's "
+                    "killer cannot see it — that fixture has only two rows.",
+           MEN,
+           "        if len(members_) > 1:",
+           "        if False:",
+           "test_a_PLACEHOLDER_bridging_TWO_REAL_rows_is_REFUSED_not_guessed",
+           SUITE_MENT),
+
+    Mutant("MEN14", "the group invariant's BOUNDARY moves 1 -> 2, so a group holding "
+                    "exactly two real rows — the whole failure mode — passes while a "
+                    "three-real-row group still refuses. The narrowest expression that "
+                    "can be wrong here, and the one MEN13 cannot distinguish: a guard "
+                    "deleted and a guard off by one look identical from the call site, "
+                    "and only this one proves the threshold is where the harm starts "
+                    "rather than one past it.",
+           MEN,
+           "        if len(members_) > 1:",
+           "        if len(members_) > 2:",
+           "test_a_PLACEHOLDER_bridging_TWO_REAL_rows_is_REFUSED_not_guessed",
+           SUITE_MENT),
+
     Mutant("MEN8", "`utf16_span()` stops forwarding `avoid` — the exported wrapper "
                    "silently implements only the `(?!\\w)` half while its docstring "
                    "promises one matching rule. It has NO production caller, so only "

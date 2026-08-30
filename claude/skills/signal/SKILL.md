@@ -139,6 +139,7 @@ rather than printing a traceback):
 | `--mention` given for a non-group `--to` | `MentionsRequireAGroup` |
 | two mentions claim overlapping spans | `MentionSpansOverlap` |
 | the group-membership lookup itself failed (bad/empty `--from-number`, HTTP error) | `MentionGroupLookupFailed` |
+| the stored contact rows put two real people into one identity (a placeholder row sharing a number with both) | `MentionIdentityUnresolvable` |
 
 Names are resolved against **this group's membership only**
 (`GET /v1/groups/<account>/<group-id>` joined against `signal.contacts`) — the

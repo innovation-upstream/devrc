@@ -80,6 +80,30 @@ class MentionResolvesToPlaceholder(MentionError):
     """
 
 
+class MentionIdentityUnresolvable(MentionError):
+    """Contact rows for the target group cannot be split into people.
+
+    `_identity_groups()` merges a real contact row with the durable phone-only
+    PLACEHOLDER row for the same person. When THREE rows share one number —
+    two real people plus a placeholder minted for that number — the placeholder
+    is a bridge, and no rule that looks at rows PAIRWISE can say which real row
+    it belongs to. The resulting group would hold two different people under
+    one identity, which is precisely the state that made `--mention Ann` ping A
+    under text reading `@Ann Smith` (round-5 audit F-A).
+
+    So it refuses. Identity here is load-bearing twice over — it decides whose
+    longer name may veto a span AND whether two name matches are an ambiguity —
+    and a guess in either direction is a mention pointing at the wrong human.
+    🔴 IT REFUSES THE WHOLE CALL, INCLUDING A MENTION TYPED AS A BARE UUID.
+    That is not over-reach: identity also builds `_colliding_needles()`'s veto
+    set, so a polluted group drops the OTHER real person's longer name from the
+    avoid list and the span lands on the first characters of THEIR name — the
+    same corrupted render, reached without `_resolve_one()` ever consulting a
+    name. The remedy is in the DATA (delete the stale placeholder row), not in
+    how the mention is spelled.
+    """
+
+
 class MentionNotAMember(MentionError):
     """An explicitly-typed uuid/E.164 is not in the target group's membership."""
 
@@ -409,6 +433,27 @@ def _identity_groups(candidates: list) -> dict[str, frozenset]:
     people until something other than the number says otherwise; the collision
     rule then vetoes, and a veto is a refusal.
 
+    🔴 AND THE GATE ABOVE IS A PER-PAIR PREDICATE, WHICH CANNOT SURVIVE
+    TRANSITIVITY (round-5 audit F-A). The union-find joins PATHS, not just
+    edges, so with three rows on one number — real A, placeholder P, real C —
+    the pair rule blocks the direct edge A—C and then A—P and P—C union anyway:
+    `find(A) == find(C)`, and two real people are one identity again. Every
+    step is reachable through five ordinary `upsert_contact()` calls (a draft
+    mints P for an unknown number; two envelopes each hit the durable-placeholder
+    DECLINE and land a real row carrying the same number). Measured before this
+    fix: `--mention Ann` against `hi @Ann Smith` returned a mention for A.
+    Round 4 moved the nodes from identifiers to rows, which changed WHICH nodes
+    merge and left transitivity untouched — the reason this is not another patch
+    to the pair condition.
+
+    The invariant is a property of the RESULTING GROUP, so it is checked on the
+    resulting group: **no group may contain two rows that are both real.** Any
+    group that does is not one person, and nothing pairwise can say which real
+    row the bridging placeholder belongs to — so this FAILS CLOSED with
+    `MentionIdentityUnresolvable` rather than picking one. Enforced here, on the
+    output, which is why relocating or re-tuning the pair rule cannot reopen it:
+    a merge this function did not intend is caught by what it returns.
+
     Rows with no identifier in common stay separate for the same reason: merging
     on a NAME would reopen the prefix collision the collision rule exists for.
     """
@@ -431,6 +476,27 @@ def _identity_groups(candidates: list) -> dict[str, frozenset]:
             root_a, root_b = find(i), find(j)
             if root_a != root_b:
                 parent[root_a] = root_b
+
+    # 🔴 THE GROUP-LEVEL INVARIANT. Checked on the formed groups, not on the
+    # pairs that formed them, because the property "this group is ONE person"
+    # is not expressible as a pairwise predicate under transitivity.
+    real_per_group: dict[int, list] = {}
+    for i, row in enumerate(rows):
+        if not row.get("is_placeholder"):
+            real_per_group.setdefault(find(i), []).append(row)
+    for members_ in real_per_group.values():
+        if len(members_) > 1:
+            authors = sorted({_contact_author(r) for r in members_} - {""})
+            raise MentionIdentityUnresolvable(
+                f"the stored contacts for this group put "
+                f"{len(members_)} DIFFERENT real identities "
+                f"({authors[:NAME_HINT_MAX]!r}) into one identity, bridged by a "
+                f"PLACEHOLDER row that shares an identifier with both. Which of "
+                f"them the placeholder belongs to is not decidable from the "
+                f"rows, and guessing picks who gets notified — so no --mention "
+                f"can be resolved against this group until the stale placeholder "
+                f"contact row is removed."
+            )
 
     clusters: dict[int, set] = {}
     for i, row in enumerate(rows):
