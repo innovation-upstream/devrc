@@ -56,6 +56,8 @@ import io
 import os
 import re
 import shutil
+import socket
+import socketserver
 import stat
 import tarfile
 import secrets
@@ -14996,3 +14998,134 @@ def test_the_SINK_call_is_inside_the_lock_not_beside_it():
         "the detector cannot see a sink call outside the lock, so its empty "
         "list above is a fact about the walker and nothing else"
     )
+
+
+class TestTheListenBacklogIsDeepEnoughForThisServersOwnConcurrency:
+    """#1030. `socketserver.TCPServer.request_queue_size` defaults to **5**,
+    against a server whose own suite fires 8 simultaneous appends. Overflowing
+    the accept queue does not refuse cleanly: the client retries the SYN and
+    then sees `ConnectionResetError: [Errno 104]`, which reads as a transport
+    flake correlated with host load.
+
+    🔴 THIS IS MEASURED AGAINST THE SOCKET, NOT THE ATTRIBUTE, and that is the
+    whole point of the arm. `TCPServer.__init__` calls `server_activate()` ->
+    `listen(self.request_queue_size)` before it returns, so a fix that assigns
+    to the INSTANCE changes the attribute and leaves the kernel queue at 5. An
+    `assert server.request_queue_size == 128` would pass for that broken fix —
+    it is a claim about a name, and the defect lives in the socket. So the queue
+    is FILLED and the landings are COUNTED.
+
+    Deterministic by construction: nothing ever accepts, so there is no race to
+    lose and no scheduling luck involved. MEASURED on a bare socket — backlog 5
+    admits 6 of 24 (the kernel's documented backlog+1) and backlog 128 admits
+    24 of 24.
+    """
+
+    # Comfortably past the default 5 and comfortably under LISTEN_BACKLOG, and
+    # deliberately not a multiple of either: a bound that sits exactly on a
+    # boundary cannot tell a fix from an off-by-one.
+    ATTEMPTS = 24
+    CONNECT_TIMEOUT = 0.4
+
+    def _fill(self, port: int) -> int:
+        """Connections that LAND while nothing is accepting."""
+        landed, held = 0, []
+        try:
+            for _ in range(self.ATTEMPTS):
+                sock = socket.socket()
+                sock.settimeout(self.CONNECT_TIMEOUT)
+                try:
+                    sock.connect(("127.0.0.1", port))
+                except OSError:
+                    sock.close()
+                    continue
+                landed += 1
+                held.append(sock)
+        finally:
+            for sock in held:
+                sock.close()
+        return landed
+
+    def test_the_SOCKET_build_server_returns_queues_more_than_the_default_five(
+        self, scoped_store: Path
+    ):
+        """RED at `request_queue_size = 5`: only 6 of 24 land."""
+        httpd = api.build_server(
+            host="127.0.0.1", port=0, store_root=str(scoped_store),
+            tokens=(ZACH,), trusted_proxies=(LOOPBACK_PROXY,),
+            limiter=None, audit=None,
+        )
+        # 🔴 `serve_forever` is NEVER started. An accepting server would drain
+        # the queue and every attempt would land whatever the backlog is, which
+        # is the vacuous-green version of this test.
+        try:
+            landed = self._fill(httpd.server_address[1])
+        finally:
+            httpd.server_close()
+        assert landed == self.ATTEMPTS, (
+            f"only {landed} of {self.ATTEMPTS} connections could be QUEUED "
+            "against the server `build_server` returns, so its accept queue is "
+            "shallower than this server's own concurrency. That is #1030: the "
+            "excess connects retry their SYN and then surface as "
+            "ConnectionResetError, which presents as a load-correlated flake "
+            "rather than a refusal. Note this counts LANDINGS on the socket — "
+            "if you 'fixed' it by assigning request_queue_size to the instance, "
+            "the attribute moved and the socket did not, because "
+            "TCPServer.__init__ has already called listen()."
+        )
+
+    def test_the_default_five_would_still_FAIL_this_probe(self):
+        """The positive control for the arm above, and it is not optional.
+
+        Without it, `landed == ATTEMPTS` is unfalsifiable: a probe that can
+        never fail reports a full queue for any backlog at all, and the guard
+        would stay green if `LISTEN_BACKLOG` were reverted to 5 tomorrow. This
+        pins that the probe DISCRIMINATES, using the stdlib default explicitly
+        rather than a number copied from the fix.
+        """
+        srv = socketserver.TCPServer.__new__(socketserver.TCPServer)
+        sock = socket.socket()
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(socketserver.TCPServer.request_queue_size)
+            landed = self._fill(sock.getsockname()[1])
+        finally:
+            sock.close()
+            del srv
+        assert landed < self.ATTEMPTS, (
+            f"the probe queued all {self.ATTEMPTS} connections against a socket "
+            f"listening at the STDLIB DEFAULT backlog of "
+            f"{socketserver.TCPServer.request_queue_size} — so it cannot "
+            "distinguish a deep queue from a shallow one, and the sibling "
+            "test's pass means nothing."
+        )
+
+    def test_build_server_sets_the_backlog_as_a_CLASS_attribute(
+        self, scoped_store: Path
+    ):
+        """The mechanism, pinned separately from the effect.
+
+        The effect test above is the one that matters, but it cannot say WHY it
+        passes — a host whose kernel silently widened the queue would green it.
+        This asserts the class the server is an instance of carries the value,
+        which is the only assignment that reaches `server_activate()`.
+        """
+        httpd = api.build_server(
+            host="127.0.0.1", port=0, store_root=str(scoped_store),
+            tokens=(ZACH,), trusted_proxies=(LOOPBACK_PROXY,),
+            limiter=None, audit=None,
+        )
+        try:
+            assert type(httpd).request_queue_size == api.LISTEN_BACKLOG, (
+                "the server's CLASS does not carry LISTEN_BACKLOG, so "
+                "TCPServer.__init__ listened at whatever it inherited"
+            )
+            assert api.LISTEN_BACKLOG > socketserver.TCPServer.request_queue_size, (
+                f"LISTEN_BACKLOG ({api.LISTEN_BACKLOG}) is not actually deeper "
+                f"than the stdlib default "
+                f"({socketserver.TCPServer.request_queue_size}) it exists to "
+                "replace"
+            )
+        finally:
+            httpd.server_close()

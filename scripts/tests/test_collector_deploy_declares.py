@@ -120,9 +120,19 @@ def test_the_import_works_in_the_DEPLOYED_symlink_layout(tmp_path):
         dst_store.write_bytes(src.read_bytes())
         (dep / rel).symlink_to(dst_store)
 
-    for rel in ("changed_paths.py",
-                "claude/session-tailer.py", "claude/_shared.py", "claude/tailer.py",
-                "opencode/session_tailer.py", "opencode/_shared.py"):
+    # 🔴 DERIVED, not hardcoded. This file's header promises that "a second
+    # shared module added tomorrow is covered without editing this file", and
+    # every assertion above honours that — but this fixture used to carry a
+    # literal list, so the promise stopped exactly here. Adding
+    # `mention_scan.py` to the collector root made this test fail with
+    # `ModuleNotFoundError` in the deployed layout, which is the RIGHT alarm
+    # raised for the WRONG reason: the module was declared in nix/home.nix and
+    # would have deployed fine; it was the fixture that had not been told.
+    # The list now comes from the same `_root_modules()` scan as the rest.
+    root_modules = tuple(f"{m}.py" for m in sorted(_root_modules()))
+    for rel in root_modules + (
+            "claude/session-tailer.py", "claude/_shared.py", "claude/tailer.py",
+            "opencode/session_tailer.py", "opencode/_shared.py"):
         place(rel)
 
     import subprocess
