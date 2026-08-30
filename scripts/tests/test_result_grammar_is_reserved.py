@@ -55,6 +55,25 @@ Print anything else. `PASS`/`FAIL` counts are fine indented or with any other
 leading text (`  RESULT: 3 failure(s)`, `PASS 12  FAIL 0`). Do not add an
 allowlist entry to get green: NEAR_MISSES is for lines that emit the prefix and
 provably cannot collide, and every entry must say why.
+
+🔴 WHAT A GREEN RUN HERE CANNOT SEE
+-----------------------------------
+This is a SOURCE scan, so it sees a literal in the file it scans and nothing
+else. It is structurally blind to:
+
+  * an INDIRECT emission — the prefix built in a variable, returned by a helper,
+    or printed by a subprocess the entry launches. The scan reads text, not
+    behaviour, so `v="RESULT:"; echo "$v PASS"` passes it;
+  * a registry entry that SOURCES another file, whose emissions are that file's
+    lines, not the entry's;
+  * every population outside the two registries. The pytest targets are excluded
+    on purpose — pytest captures their stdout and replays it only on failure —
+    but that is an argument about today's runner, not a law.
+
+The scan is aimed at the shape that actually recurred: a copy-pasted literal.
+`test_cleanup_disk_gate.sh` acquired it by copy-paste, and the fix that was left
+behind was a comment. If an indirect emission ever appears, the honest response
+is a BEHAVIOURAL check — run each entry and read its stdout — not a wider regex.
 """
 from __future__ import annotations
 
