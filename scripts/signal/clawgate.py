@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import os
 
+import _mentions
+
 ENDPOINT = "http://192.168.50.250:30302/api/tasks"
 
 # clawgate renders `directory` as the card title; trim to a sane label length.
@@ -28,11 +30,19 @@ TITLE_MAX = 120
 BODY_PREVIEW_MAX = 800
 
 
-def build_draft_payload(*, draft_id: int, recipient: str, body: str) -> dict:
+def build_draft_payload(*, draft_id: int, recipient: str, body: str,
+                        mentions: list | None = None) -> dict:
     """Build the `POST /api/tasks` JSON body for one pending Signal draft.
 
-    Pure + side-effect-free so it can be asserted in a unit test. Carries the
-    approval command the operator runs, so the card is actionable on its own.
+    Pure + side-effect-free so it can be asserted in a unit test.
+
+    🔴 THE CARD MUST NAME WHO GETS PINGED. A mention is not visible in the body
+    preview as anything but the plain text `@Ann` — which the operator's eye
+    reads as ordinary prose, because that is exactly what it is until the
+    `mentions` array turns it into a notification that bypasses the recipient's
+    mute settings and names them to the whole group. Approving a message without
+    seeing who it notifies is the failure mode this line exists to close, so the
+    resolved `author` ids go on the card explicitly, above the body.
     """
     preview = (body or "").strip()
     if len(preview) > BODY_PREVIEW_MAX:
@@ -43,8 +53,13 @@ def build_draft_payload(*, draft_id: int, recipient: str, body: str) -> dict:
     # is to tell a HUMAN a draft is waiting; approval is an operator step run
     # from an operator shell (it needs `SIGNAL_APPROVAL_TOKEN`, which no agent
     # environment carries).
-    lines = [
-        f"To: {recipient}",
+    lines = [f"To: {recipient}"]
+    if mentions:
+        lines.append(f"⚠ PINGS {len(mentions)} member(s) — this notifies them "
+                     f"THROUGH their mute settings:")
+        for who in _mentions.describe_mentions(mentions):
+            lines.append(f"  · {who}")
+    lines += [
         "",
         preview,
         "",
@@ -58,6 +73,7 @@ def build_draft_payload(*, draft_id: int, recipient: str, body: str) -> dict:
 
 
 def emit_draft_task(*, draft_id: int, recipient: str, body: str,
+                    mentions: list | None = None,
                     timeout: float = 10.0) -> bool:
     """Post one clawgate Task card for a pending draft. True if posted.
 
@@ -69,7 +85,8 @@ def emit_draft_task(*, draft_id: int, recipient: str, body: str,
         return False
     import requests
 
-    payload = build_draft_payload(draft_id=draft_id, recipient=recipient, body=body)
+    payload = build_draft_payload(draft_id=draft_id, recipient=recipient,
+                                  body=body, mentions=mentions)
     resp = requests.post(
         ENDPOINT,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},

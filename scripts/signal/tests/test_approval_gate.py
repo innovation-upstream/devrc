@@ -42,6 +42,20 @@ SELF_NUMBER = "+15559090"
 SERVER_TS = 1723500000001
 
 
+def _approved_row(draft_id, recipient, body, mentions=None):
+    """A hand-built APPROVED draft row, digest included.
+
+    🔴 The digest is COMPUTED, never a literal: `_mint_send_authorization()`
+    fails closed on a row whose payload does not hash to what approval recorded,
+    so a fixture that hard-coded one would go stale silently the first time the
+    canonical form changed and every test here would refuse for the wrong reason.
+    """
+    return {"id": draft_id, "send_state": _signal_db.STATE_APPROVED,
+            "recipient": recipient, "body": body, "mentions": mentions or [],
+            "approved_digest": _signal_db.payload_digest(
+                recipient=recipient, body=body, mentions=mentions or [])}
+
+
 class Poster:
     """Records every HTTP post it is asked to make. It must stay EMPTY on refusal."""
 
@@ -153,8 +167,7 @@ def test_minting_refuses_every_non_approved_state():
 def test_minting_positive_control_an_approved_draft_yields_a_capability():
     """The refusals above are about the STATE, not a minter that never mints."""
     auth = _signal_db._mint_send_authorization(
-        {"id": 8, "send_state": _signal_db.STATE_APPROVED, "recipient": PEER,
-         "body": "ok"})
+        _approved_row(8, PEER, "ok"))
     assert isinstance(auth, _signal_db.SendAuthorization)
     assert auth.draft_id == 8
 
@@ -183,8 +196,7 @@ def test_an_approved_draft_transmits_exactly_once(db):
 
 def test_a_spent_capability_cannot_be_replayed():
     auth = _signal_db._mint_send_authorization(
-        {"id": 9, "send_state": _signal_db.STATE_APPROVED, "recipient": PEER,
-         "body": "replay me"})
+        _approved_row(9, PEER, "replay me"))
     poster = Poster()
     consumer.transmit_approved(auth, recipient=PEER, body="replay me",
                                number=SELF_NUMBER, poster=poster)
@@ -420,12 +432,27 @@ def test_every_function_in_the_ledger_spends_a_capability():
 
 
 def test_the_only_send_call_site_is_inside_transmit_approved():
+    """🔴 The gate call, PINNED WHOLE — arguments included, not just the name.
+
+    It used to assert the literal `spend_authorization(auth)`. That was exactly
+    as wide as the capability was: draft identity and nothing about the message.
+    Now that the capability BINDS the payload, a call that passed only `auth`
+    would not compile — but a call that passed `recipient` and `body` and
+    quietly dropped `mentions` WOULD, and it would send an unbound mention array
+    while every other test in this file stayed green. So the whole call is
+    pinned, normalised for line wrapping, rather than its name.
+    """
     src = Path(consumer.__file__).read_text(encoding="utf-8")
     body = src.split("def transmit_approved(")[1].split("\ndef ")[0]
     assert "SEND_PATH" in body
-    assert "spend_authorization(auth)" in body
+    flat = " ".join(body.split())
+    call = ("spend_authorization(auth, recipient=recipient, body=body, "
+            "mentions=mentions)")
+    assert call in flat, (
+        "the gate call is not the pinned one — every component of the payload "
+        "must be passed, or that component is transmitted UNBOUND")
     # The gate runs BEFORE the URL is even built.
-    assert body.index("spend_authorization(auth)") < body.index("SEND_PATH")
+    assert flat.index(call) < flat.index("SEND_PATH")
 
 
 def test_clawgate_module_cannot_transmit():
@@ -451,7 +478,7 @@ def test_a_failure_after_the_post_leaves_the_draft_inert(db):
     db.approve_draft(draft["id"], approval_ref="cg-crash")
     poster = Poster()
 
-    def transmit_then_die(auth, *, recipient, body, number):
+    def transmit_then_die(auth, *, recipient, body, number, mentions=None):
         poster(f"http://x{consumer.SEND_PATH}", json={"message": body})
         raise ConnectionResetError("pod killed between the POST and the write-back")
 
@@ -481,7 +508,7 @@ def test_the_sending_claim_is_committed_before_anything_is_transmitted(db):
     commits_before = db.conn.commits
     seen = {}
 
-    def transmit(auth, *, recipient, body, number):
+    def transmit(auth, *, recipient, body, number, mentions=None):
         seen["state_at_post"] = db.get_draft(draft["id"])["send_state"]
         seen["commits_at_post"] = db.conn.commits
         return {"timestamp": str(SERVER_TS)}
@@ -605,7 +632,7 @@ def test_a_re_entrant_send_of_the_same_draft_is_refused(db):
     sends = []
     second = {}
 
-    def transmit(auth, *, recipient, body, number):
+    def transmit(auth, *, recipient, body, number, mentions=None):
         sends.append(body)
         if "attempted" not in second:
             second["attempted"] = True
@@ -710,7 +737,7 @@ def test_an_in_flight_sender_cannot_stamp_over_an_OPERATORS_reconcile(db):
     operator_ts = 1723900000111
     api_ts = 1723900000999
 
-    def transmit(auth, *, recipient, body, number):
+    def transmit(auth, *, recipient, body, number, mentions=None):
         # While this send is in flight, the operator reconciles it as sent.
         db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_SENT,
                           server_timestamp=str(operator_ts))
@@ -737,7 +764,7 @@ def test_a_not_sent_reconcile_mid_flight_cannot_become_a_SECOND_transmit(db):
     db.approve_draft(draft["id"], approval_ref="cg-midflight")
     poster = Poster()
 
-    def transmit(auth, *, recipient, body, number):
+    def transmit(auth, *, recipient, body, number, mentions=None):
         poster(f"http://x{consumer.SEND_PATH}", json={"message": body})
         db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_NOT_SENT,
                           note="looked empty at the time")
@@ -879,8 +906,7 @@ def test_the_send_body_carries_number_recipients_and_message(db):
 
 def test_transmit_refuses_an_empty_number_rather_than_earning_a_400():
     auth = _signal_db._mint_send_authorization(
-        {"id": 11, "send_state": _signal_db.STATE_APPROVED, "recipient": PEER,
-         "body": "x"})
+        _approved_row(11, PEER, "x"))
     poster = Poster()
     with pytest.raises(SendGateError) as exc:
         consumer.transmit_approved(auth, recipient=PEER, body="x", number="",

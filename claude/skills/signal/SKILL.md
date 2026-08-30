@@ -62,6 +62,12 @@ python3 consumer.py draft --to +15550100 --body "on my way"   # -> pending + a c
 
 # draft to a GROUP: --to takes the `id` field (group.<double-base64>), NOT internal_id
 python3 consumer.py draft --to 'group.<double-base64>' --body "on my way"
+
+# MENTION group members (repeatable). The body must ALREADY contain the literal
+# `@<who>` text — a Signal mention REPLACES that span, so it has to exist.
+python3 consumer.py draft --to 'group.<double-base64>' \
+        --body "@Ann and @Bob — can one of you take this?" \
+        --mention Ann --mention Bob
 python3 consumer.py drafts --state pending
 python3 consumer.py approve 42 --ref clawgate-task-91
 python3 consumer.py send 42
@@ -71,6 +77,41 @@ python3 consumer.py drafts --state sending
 python3 consumer.py reconcile 42 --sent --timestamp 1723000009090   # it did go out
 python3 consumer.py reconcile 42 --not-sent --note "no message in the thread"
 ```
+
+## Mentions (`draft --mention`, GROUPS only)
+
+`--mention` is repeatable and takes a member's **display name**, or their bare
+**uuid** / **+E.164**. On the wire each becomes
+`{"author", "start", "length"}` — exactly those three keys — where the offsets are
+**UTF-16 code units**, not Python code points: an emoji before the mention shifts
+`start` by **2**, not 1. `_mentions.utf16_len()` is the one place that is computed.
+
+The body must already contain the literal `@<who>`. Signal REPLACES that span with
+`@DisplayName` on the receiving client, so if the text is not there, there is nothing
+to replace.
+
+🔴 **Every failure is a REFUSAL (exit 3), never a silent drop** — a mention pushes a
+notification through the recipient's mute settings and names a third party, so
+sending fewer than were asked for is a different act from the one that was approved.
+The six refusals, each with its own error class in `scripts/signal/_mentions.py`:
+
+| Situation | Error |
+|---|---|
+| no group member answers to that name | `MentionNameNotFound` |
+| two or more members do | `MentionNameAmbiguous` |
+| it resolves to a `is_placeholder` contact (a synthetic id) | `MentionResolvesToPlaceholder` |
+| an explicit uuid/E.164 is not in this group | `MentionNotAMember` |
+| the body has no `@<who>` text | `MentionSpanMissing` |
+| `--mention` given for a non-group `--to` | `MentionsRequireAGroup` |
+
+Names are resolved against **this group's membership only**
+(`GET /v1/groups/<account>/<group-id>` joined against `signal.contacts`) — the
+`members[]` array is MIXED E.164 and bare UUID, so both contact columns are matched.
+A name that matches somebody in a different conversation does not resolve here.
+
+The clawgate approval card lists every `author` the message will ping, above the body
+preview: `@Ann` in the preview is indistinguishable from ordinary prose, and approving
+a message without seeing who it notifies is the failure mode that line exists to close.
 
 ## Muted groups
 
@@ -215,6 +256,17 @@ composes and transmits**.
    exactly `approved` — and `consumer.transmit_approved()` refuses to post without
    one. The capability's constructor refuses direct construction; a spent capability
    cannot be replayed.
+
+4. 🔴 **The approval is bound to the PAYLOAD, not just to the draft id.**
+   `approve` records a SHA-256 digest of `(recipient, body, mentions)` in
+   `signal.messages.approved_digest`; `_mint_send_authorization()` refuses to mint
+   for a row that no longer hashes to it, and `spend_authorization()` re-checks the
+   payload it is about to post against the capability. Two distinct windows:
+   *approve → send* (separate CLI invocations, closed by the digest) and
+   *mint → POST* (closed by the binding). **Fails closed**: a missing digest is a
+   refusal, because "never had one" and "cleared by the writer we are guarding
+   against" are the same observation. The way out is to read the changed draft and
+   `approve` it again.
 
 Every refusal raises **`SendGateError`**. `scripts/signal/tests/test_approval_gate.py`
 attempts six documented bypasses and requires each to fail with that error.
