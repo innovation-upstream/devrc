@@ -895,7 +895,21 @@ if [ "$ONLY_TARGETS_GIVEN" -eq 1 ]; then
     echo "run-tests: FATAL — ${ONLY_TARGETS_SOURCE} was given but resolved to NOTHING." >&2
     echo "           A run that selects no targets would exit 0 having tested" >&2
     echo "           nothing." >&2
-    if [ "$ONLY_TARGETS_FLAG_GIVEN" -eq 1 ]; then
+    # 🔴 THREE STATES, NOT TWO. Reading only the FLAG collapses
+    # flag-empty-WITH-an-ambient-env into the flag-only case and prints "Omit
+    # --targets to run the whole set" — which is FALSE: omitting the flag hands
+    # the selection back to DEVRC_TARGETS and runs a SUBSET, at exit 0, with the
+    # operator having been told it would be the whole set. Obeying the tool then
+    # produces exactly the silently-narrowed run this block exists to prevent.
+    #
+    # Measured on the round-2 tree: `DEVRC_TARGETS=scripts/opencode/tests
+    # run-tests.sh --targets ""` printed that advice, and following it ran
+    # `SUBSET: 1 of 28` and exited 0.
+    if [ "$ONLY_TARGETS_FLAG_GIVEN" -eq 1 ] && [ "$ONLY_TARGETS_ENV_GIVEN" -eq 1 ]; then
+      echo "           BOTH are set. Omit --targets AND \`unset DEVRC_TARGETS\` to run" >&2
+      echo "           the whole '$SET' set — omitting only the flag leaves the" >&2
+      echo "           environment variable selecting a SUBSET." >&2
+    elif [ "$ONLY_TARGETS_FLAG_GIVEN" -eq 1 ]; then
       echo "           Omit --targets to run the whole '$SET' set." >&2
     else
       echo "           \`unset DEVRC_TARGETS\` to run the whole '$SET' set." >&2

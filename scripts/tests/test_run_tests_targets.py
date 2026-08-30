@@ -843,3 +843,143 @@ def test_a_set_but_EMPTY_env_var_names_the_env_var_in_its_remedy():
     assert "--targets" not in fatal[0], (
         f"the FATAL line names --targets, which was not given.\n{fatal[0]}"
     )
+
+
+# --- findings from the round-3 delta audit ------------------------------------
+# Round 3's lesson was not a code defect: it was that FIVE of round 2's own
+# message fixes shipped with no guard able to see them regress — including G7,
+# a round-2 finding, fixed and then immediately unpinned. One table below covers
+# the class, so a sixth message does not need a seventh round to notice.
+
+
+ENV_ONLY = {"DEVRC_TARGETS": "scripts/collector/i3/tests"}
+
+
+def _run_env(args: list[str], extra: dict) -> subprocess.CompletedProcess:
+    """Run the runner with EXTRA env, bypassing `_run`'s scrub on purpose."""
+    return subprocess.run(
+        ["bash", *args], cwd=str(REPO_ROOT), capture_output=True, text=True,
+        timeout=120, env={**os.environ, **extra},
+    )
+
+
+def test_no_message_hardcodes_the_flag_when_the_ENVIRONMENT_selected():
+    """🟡 round-3. Every operator-facing string that names the selection source
+    must name the REAL one.
+
+    Five mutants re-hardcoding `--targets` survived round 2's suite: the
+    unknown-target FATAL, the duplicate FATAL, the floor-row label (which IS
+    round-2 finding G7, fixed without a guard), the subset announcement, and the
+    GUARD 5 sentence. All are reachable with DEVRC_TARGETS set and no flag.
+
+    Asserted as a CLASS over the whole output rather than per message, because
+    the failure mode is a NEW message being added unguarded — which a per-message
+    test cannot see.
+    """
+    _require_targets_flag(RUN_TESTS)
+    # (args, must the run succeed?) — each drives a different message path.
+    cases = [
+        (["--check-floors"], True),
+        (["--check-targets"], True),
+    ]
+    for args, ok in cases:
+        proc = _run_env([str(RUN_TESTS), *args, str(REPO_ROOT)], ENV_ONLY)
+        assert (proc.returncode == 0) == ok, (
+            f"{args}: rc={proc.returncode}\n{proc.stdout}\n{proc.stderr}")
+        blob = proc.stdout + proc.stderr
+        assert "DEVRC_TARGETS" in blob, (
+            f"{args}: nothing named the environment variable that selected.\n{blob[:900]}")
+        offenders = [l for l in blob.splitlines()
+                     if "--targets" in l and "DEVRC_TARGETS" not in l
+                     and "OVERRIDES" not in l]
+        assert not offenders, (
+            f"{args}: these lines blame `--targets`, which was never passed — "
+            f"the environment selected:\n  " + "\n  ".join(offenders[:6]))
+
+    # 🔴 `--check-targets` must also say what it did NOT validate. GUARD 5's
+    # whole claim is "every declared target resolves"; under a subset it checked
+    # one of twenty-eight, and the sentence saying so is the difference between
+    # a narrowed claim and a false one. Watched: deleting it passed the file.
+    ct = _run_env([str(RUN_TESTS), "--check-targets", str(REPO_ROOT)], ENV_ONLY)
+    assert "GUARD 5 did NOT validate the unselected ones." in ct.stdout, (
+        "--check-targets under a subset no longer states that GUARD 5 skipped "
+        f"the unselected targets.\n{ct.stdout[:900]}")
+
+    # 🔴 The FATAL paths driven FROM THE ENVIRONMENT, which is the only way to
+    # see them mis-attribute. Driving them with a flag cannot: the flag IS the
+    # source, so a hardcoded "--targets" is accidentally correct and the mutant
+    # survives. Watched: re-hardcoding the unknown-target FATAL passed the whole
+    # file until this loop drove it via DEVRC_TARGETS.
+    for value, needle in (("definitely/not/a/target", "definitely/not/a/target"),
+                          ("scripts/tests scripts/tests", "more than once")):
+        proc = _run_env([str(RUN_TESTS), "--check-floors", str(REPO_ROOT)],
+                        {"DEVRC_TARGETS": value})
+        assert proc.returncode == 3, (
+            f"DEVRC_TARGETS={value!r}: expected 3, got {proc.returncode}\n{proc.stderr}")
+        assert needle in proc.stderr, proc.stderr
+        fatal = [l for l in proc.stderr.splitlines() if "FATAL" in l]
+        assert fatal and "DEVRC_TARGETS" in fatal[0], (
+            "the FATAL line blames `--targets` for a selection the ENVIRONMENT "
+            f"made.\n{fatal[0] if fatal else proc.stderr}")
+
+
+def test_the_empty_selection_remedy_names_EVERY_knob_that_is_set():
+    """🟡 round-3, and the regression that round found.
+
+    The remedy branch read only the FLAG, so flag-empty-WITH-an-ambient-env
+    printed "Omit --targets to run the whole set" — and omitting the flag hands
+    the selection back to DEVRC_TARGETS, running a SUBSET at exit 0. The operator
+    is told the opposite of what happens, and following the advice produces the
+    silently-narrowed run this whole block exists to prevent.
+
+    🔴 The previous round's test for this asserted only on the FATAL headline and
+    never on the remedy, so deleting the entire remedy branch left it green
+    (watched). This asserts the remedy line itself, in all three states.
+    """
+    _require_targets_flag(RUN_TESTS)
+
+    def _remedy(args, env):
+        p = _run_env([str(RUN_TESTS), *args, "--check-floors", str(REPO_ROOT)], env)
+        assert p.returncode == 3, f"{args} {env}: expected 3, got {p.returncode}\n{p.stderr}"
+        return p.stderr
+
+    # flag empty, env ALSO set -> must name BOTH
+    both = _remedy(["--targets", ""], ENV_ONLY)
+    assert "unset DEVRC_TARGETS" in both and "--targets" in both, (
+        "with BOTH set, the remedy must name both knobs; omitting only the flag "
+        f"leaves the environment selecting a subset.\n{both}")
+
+    # env set-but-empty, no flag -> must name the env var, never the flag
+    env_only = _remedy([], {"DEVRC_TARGETS": ""})
+    assert "unset DEVRC_TARGETS" in env_only, env_only
+    assert "Omit --targets" not in env_only, (
+        f"told to omit a flag that was never passed.\n{env_only}")
+
+    # flag empty, NO env -> must name the flag, never the env var
+    flag_only = subprocess.run(
+        ["bash", str(RUN_TESTS), "--targets", "", "--check-floors", str(REPO_ROOT)],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120,
+        env={k: v for k, v in os.environ.items() if k != "DEVRC_TARGETS"},
+    ).stderr
+    assert "Omit --targets" in flag_only, flag_only
+    assert "unset DEVRC_TARGETS" not in flag_only, (
+        f"told to unset a variable that was not set.\n{flag_only}")
+
+
+def test_check_floors_declares_the_subset_on_its_GLOBAL_line():
+    """🟢 round-3. The earlier early-exit test matched `SUBSET|SELECTED` over the
+    whole of stdout — satisfied by the 27 unselected floor-row labels
+    (`[not SELECTED by ...]`), never by the GLOBAL line it was aimed at.
+
+    Watched: reverting the GLOBAL line to `sum over the $SET set` left that test
+    GREEN. This one reads the GLOBAL line specifically.
+    """
+    _require_targets_flag(RUN_TESTS)
+    proc = _run([str(RUN_TESTS), "--targets", "scripts/collector/i3/tests",
+                 "--check-floors", str(REPO_ROOT)])
+    assert proc.returncode == 0, proc.stderr
+    line = [l for l in proc.stdout.splitlines() if "GLOBAL floor" in l]
+    assert line, f"no GLOBAL floor line:\n{proc.stdout[:900]}"
+    assert "SELECTED" in line[0] and "SUBSET" in line[0], (
+        "the GLOBAL floor line does not say it summed a SUBSET — it is the "
+        f"number a reader uses to judge the run's coverage.\n{line[0]}")
