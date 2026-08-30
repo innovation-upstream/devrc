@@ -127,7 +127,7 @@ if [[ $KS_RC -ne 0 || $DEP_RC -ne 0 ]]; then
 elif [[ -n "$DEPENDENTS" ]]; then
   echo "" >&2
   echo "🔴 $(printf '%s\n' "$DEPENDENTS" | grep -c .) kustomization(s) dependsOn $FLUX_NS/$KUSTOMIZATION:" >&2
-  printf '     %s\n' $(printf '%s\n' "$DEPENDENTS") >&2
+  printf '%s\n' "$DEPENDENTS" | sed 's/^/     /' >&2
   echo "   Suspending $KUSTOMIZATION pins its revision, so each of these will sit" >&2
   echo "   at 'DependencyNotReady: revision is not up to date' and STOP applying" >&2
   echo "   GitOps changes until it is resumed. Nothing about the target workload" >&2

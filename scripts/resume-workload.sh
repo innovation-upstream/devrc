@@ -80,7 +80,7 @@ for k in d.get("items", []):
     echo ""
     echo "These dependsOn $KUSTOMIZATION and were wedged while it was suspended —"
     echo "confirm each goes Ready again (they clear on the next reconcile, not instantly):"
-    printf '     %s\n' $(printf '%s\n' "$DEPENDENTS")
+    printf '%s\n' "$DEPENDENTS" | sed 's/^/     /'
     echo "  KUBECONFIG=$KC flux get kustomization -n $FLUX_NS"
   fi
 else
