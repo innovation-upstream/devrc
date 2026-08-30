@@ -219,15 +219,42 @@ The original diagnosis is kept below because #463 inherits its layout context.
      cache, a git tarball cache, a Go build cache and the nix store's own lock files, with
      **no locking today** beyond a one-time seed sentinel — cross-node SQLite over NFS is a
      corruption hazard the current single-node layout simply does not have.
+     Two further measured facts that close it off. The volume actually holds **69 GB across
+     25,664 store paths** — the PVC *requests* 30Gi, but `local-path` sets no quota so it
+     was never enforced — making this a ≥80 GB provision plus a physical 69 GB copy. And
+     🔴 **RWO was never the blocker**: six pods share that PVC concurrently right now,
+     because RWO is per-**NODE**, not per-pod. Flipping the access mode against
+     `local-path` would change nothing — the provisioner still writes a hostPath and still
+     stamps the same `nodeAffinity`. A per-node `hostPath` cache is separately
+     **FORBIDDEN**: Talos enforces PodSecurity `baseline` cluster-wide and a server
+     dry-run returns `violates PodSecurity "baseline:latest": hostPath volumes`.
    - **The pin is not hurting at NORMAL load** — pod-start p90: `naida 14s`, `remix 15s`,
      `auditloop 24s`, `devrc 31s`, vs unpinned `clawgate-ci 13s`. It falls over in a
      BURST (5 running + 5 queued). So the lever is concurrency, not storage.
-   - **Best next lever: cap concurrent `devrc-ci` PipelineRuns** — turns a silent 43-minute
-     `Pending` into honest queueing, needs no new storage, reversible. A `tekton-supersede`
-     CronJob already exists, so part of the mechanism may be there. The **#396 static
-     split** (give a pipeline its own cache PVC on another node — done for
-     `gitops-validate`, p90 370s → fixed) is the proven local precedent for cross-pipeline
-     contention, but it will NOT fix devrc-vs-devrc bursts on its own.
+   - 🔴 **TWO MORE PLAUSIBLE FIXES ARE ALSO DEAD — both were nearly proposed here, and
+     the arithmetic is what killed them. Do not re-derive either.**
+     - **"Cap concurrent runs / lean on supersede" — NO.** `tekton-supersede` (CronJob,
+       `* * * * *`) ALREADY covers this pipeline: **43** retained `devrc-ci-pipeline` runs
+       carry `ci.zacx.dev/supersede-key`. It cancels older runs sharing a key — same PR,
+       same branch. The 10 pods measured were **10 DISTINCT PRs**, correctly not
+       superseded. Capping would queue genuinely different work; it removes no work.
+       ⚠ A first query for this returned `0` because it used label value `devrc-ci`
+       instead of `devrc-ci-pipeline`. The positive control (a histogram over all
+       pipelines) is what caught it — do not read a bare zero here without one.
+     - **"Do a #396-style static split for `devrc-ci`" — NO, it would make devrc WORSE.**
+       The only viable target node `talos-jkj-deb` has ~4,380m free ⇒ **1–2** concurrent
+       gate pods at 2250m each; devrc currently gets ~**5** on `talos-xr6-r7p`. The split
+       helps the OTHER three pipelines by vacating xr6 and demotes the pipeline it was
+       meant to rescue. (`talos-deu-s2q` is not headroom either: 4 CPU and **99% actual**.)
+   - 🔴 **THE ACTUAL COST DRIVER IS THE WORKLOAD, NOT THE PLACEMENT.** The gate runs
+     **~19,440 collected tests for a three-markdown-file PR**. Storage, scheduling and
+     concurrency are all symptoms of paying that per run, ten runs at a time.
+     **`--targets` subsetting is already MERGED and on `main`** — PR #1073,
+     `git grep -n 'DEVRC_TARGETS\|--targets' scripts/run-tests.sh` → ~42 hits. The unbuilt
+     half is wiring impact analysis into the pipeline so a PR runs only the targets its
+     diff can affect. That is the live candidate for this rank; it is a design question
+     (how the affected set is computed, and what it does when it cannot be), NOT a config
+     tweak — see the scoping notes when they land.
    - Affected surface if anyone does touch the cache: **4 pipelines** (`naida-ux-audit`,
      `remix-ux-audit`, `auditloop-ci`, `devrc-ci`) **+ 4 TriggerTemplate node pins**.
      `gitops-validate` is already on a separate `nix-store-cache-2`; `clawgate-ci`,
