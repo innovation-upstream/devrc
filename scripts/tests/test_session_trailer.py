@@ -16,12 +16,17 @@ SILENTLY and each of which produces a *plausible-looking* commit:
      every re-edit, so a non-idempotent append accretes one trailer per edit and
      nobody notices until a rebased commit has six.
 
-🔴 WHY `has_trailer` DOES NOT USE GIT'S OWN PARSER. Measured on origin/main
-2026-08-30: `git log --format='%(trailers:key=Claude-Session,valueonly)'` reports
-a value for 9 commits where a plain content search finds 66, because git only
-recognises a contiguous trailer block at the very END of the message and this
-repo's messages carry a "Generated with" line after it. A test that used git's
-parser as its oracle would enshrine that undercount.
+🔴 WHY `has_trailer` DOES NOT USE GIT'S OWN PARSER. Measured on `origin/main` at
+`3b1a0477` (2026-08-30): `git log --format='%(trailers:key=Claude-Session,valueonly)'`
+reports a value for **9** commits where a line-anchored content search finds
+**55** in the same 200, because git only recognises a contiguous trailer block at
+the very END and this repo's messages carry a "Generated with" line after it. A
+test using git's parser as its oracle would enshrine that undercount.
+
+⚠ AN EARLIER REVISION OF THIS DOCSTRING SAID 66, and that was wrong: it came
+from an unanchored `grep -c` that also matched commits merely DISCUSSING the
+trailer — including this feature's own, which quote the key in prose. Count
+line-anchored, and re-measure rather than quoting a number with a sha next to it.
 """
 from __future__ import annotations
 
@@ -51,13 +56,45 @@ st = _load()
 # injected rather than sampled from the live box — a test that depended on the
 # real /proc would pass or fail according to what else is running.
 # --------------------------------------------------------------------------
+def _starttime(pid: int) -> int:
+    """A stable synthetic /proc field-22 value, distinct per pid.
+
+    Distinct per pid on purpose: `lookup()` and `prune()` compare the pinned
+    start time against the live one, so a fixture where every pid shared a start
+    time could not tell a recycled pid from the original and the recycle guard
+    would be untestable.
+    """
+    return 1000 + pid
+
+
 def tree(mapping):
     """mapping: {pid: (comm, ppid)} -> a reader compatible with read_proc."""
     def reader(pid):
         got = mapping.get(pid)
         if not got:
             return None
-        return {"comm": got[0], "ppid": got[1]}
+        return {"comm": got[0], "ppid": got[1], "starttime": _starttime(pid)}
+    return reader
+
+
+def LIVE(pid):
+    """A reader for which every pid exists — used when recording."""
+    return {"comm": "claude", "ppid": 1, "starttime": _starttime(pid)}
+
+
+def only(*alive):
+    """A reader where only `alive` pids exist."""
+    def reader(pid):
+        return LIVE(pid) if pid in alive else None
+    return reader
+
+
+def recycled(pid):
+    """A reader where `pid` exists but is a DIFFERENT process than when recorded."""
+    def reader(p):
+        if p != pid:
+            return None
+        return {"comm": "claude", "ppid": 1, "starttime": _starttime(p) + 999}
     return reader
 
 
@@ -92,40 +129,40 @@ class TestRecordAndLookup:
     def test_a_concurrent_session_state_is_never_read(self, tmp_path):
         """🔴 THE CORE SAFETY PROPERTY. Two sessions, one repo, one state dir."""
         common = str(tmp_path)
-        st.record(common, "session-AAA", 111)
-        st.record(common, "session-BBB", 222)
+        st.record("session-AAA", 111, root=common, reader=LIVE)
+        st.record("session-BBB", 222, root=common, reader=LIVE)
 
         # A commit whose ancestry reaches pid 222 must see BBB, never AAA.
         r = tree({900: ("git", 222), 222: ("claude", 1), 1: ("init", 0)})
-        assert st.lookup(common, start_pid=900, reader=r) == "session-BBB"
+        assert st.lookup(start_pid=900, root=common, reader=r) == "session-BBB"
 
         r2 = tree({901: ("git", 111), 111: ("claude", 1), 1: ("init", 0)})
-        assert st.lookup(common, start_pid=901, reader=r2) == "session-AAA"
+        assert st.lookup(start_pid=901, root=common, reader=r2) == "session-AAA"
 
     def test_lookup_is_none_when_no_state_was_recorded_for_this_session(self, tmp_path):
         common = str(tmp_path)
-        st.record(common, "session-AAA", 111)
+        st.record("session-AAA", 111, root=common, reader=LIVE)
         r = tree({900: ("git", 333), 333: ("claude", 1), 1: ("init", 0)})
-        assert st.lookup(common, start_pid=900, reader=r) is None
+        assert st.lookup(start_pid=900, root=common, reader=r) is None
 
     def test_lookup_is_none_outside_a_claude_session(self, tmp_path):
         common = str(tmp_path)
-        st.record(common, "session-AAA", 111)
+        st.record("session-AAA", 111, root=common, reader=LIVE)
         r = tree({900: ("git", 800), 800: ("zsh", 1), 1: ("init", 0)})
-        assert st.lookup(common, start_pid=900, reader=r) is None
+        assert st.lookup(start_pid=900, root=common, reader=r) is None
 
     def test_a_corrupt_state_file_yields_none_rather_than_raising(self, tmp_path):
         common = str(tmp_path)
-        os.makedirs(st.state_dir(common), exist_ok=True)
-        Path(st.state_file(common, 111)).write_text("{not json")
+        os.makedirs(common, exist_ok=True)
+        Path(st.state_file(111, common)).write_text("{not json")
         r = tree({900: ("git", 111), 111: ("claude", 1), 1: ("init", 0)})
-        assert st.lookup(common, start_pid=900, reader=r) is None
+        assert st.lookup(start_pid=900, root=common, reader=r) is None
 
     def test_record_round_trips_the_id_verbatim(self, tmp_path):
         """Opaque-string discipline: a non-uuid id survives unchanged."""
         common = str(tmp_path)
-        st.record(common, "ses_A1b2C3", 111)
-        data = json.loads(Path(st.state_file(common, 111)).read_text())
+        st.record("ses_A1b2C3", 111, root=common, reader=LIVE)
+        data = json.loads(Path(st.state_file(111, common)).read_text())
         assert data["session_id"] == "ses_A1b2C3"
 
 
@@ -219,21 +256,21 @@ class TestHasTrailer:
 class TestPrune:
     def test_dead_sessions_are_removed_and_live_ones_kept(self, tmp_path):
         common = str(tmp_path)
-        st.record(common, "live", 111)
-        st.record(common, "dead", 222)
-        removed = st.prune(common, alive=lambda pid: pid == 111)
+        st.record("live", 111, root=common, reader=LIVE)
+        st.record("dead", 222, root=common, reader=LIVE)
+        removed = st.prune(root=common, reader=only(111))
         assert removed == 1
-        assert os.path.exists(st.state_file(common, 111))
-        assert not os.path.exists(st.state_file(common, 222))
+        assert os.path.exists(st.state_file(111, common))
+        assert not os.path.exists(st.state_file(222, common))
 
     def test_prune_on_a_missing_directory_is_a_no_op_not_an_error(self, tmp_path):
-        assert st.prune(str(tmp_path / "nope")) == 0
+        assert st.prune(root=str(tmp_path / "nope")) == 0
 
     def test_a_non_pid_filename_is_ignored_rather_than_crashing(self, tmp_path):
         common = str(tmp_path)
-        os.makedirs(st.state_dir(common), exist_ok=True)
-        Path(os.path.join(st.state_dir(common), "notapid.json")).write_text("{}")
-        assert st.prune(common, alive=lambda pid: False) == 0
+        os.makedirs(common, exist_ok=True)
+        Path(os.path.join(common, "notapid.json")).write_text("{}")
+        assert st.prune(root=common, reader=lambda pid: None) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -255,13 +292,109 @@ class TestPrune:
 # every existing session's state.
 # ---------------------------------------------------------------------------
 def test_the_on_disk_artifact_names_are_pinned_as_whole_paths():
-    assert st.STATE_DIRNAME == "claude-session"
-    assert st.state_dir("/COMMON") == "/COMMON/claude-session"
-    assert st.state_file("/COMMON", 4242) == "/COMMON/claude-session/4242.json"
+    assert st.STATE_DIRNAME == "claude-session-trailer"
+    assert st.state_file(4242, "/ROOT") == "/ROOT/4242.json"
 
 
-def test_the_trailer_keys_are_pinned():
+def test_the_state_root_honours_XDG_and_falls_back_under_HOME(monkeypatch):
+    monkeypatch.delenv("DEVRC_SESSION_TRAILER_ROOT", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", "/xdg")
+    assert st.state_root() == "/xdg/claude-session-trailer"
+    monkeypatch.delenv("XDG_CACHE_HOME")
+    monkeypatch.setenv("HOME", "/home/someone")
+    assert st.state_root() == "/home/someone/.cache/claude-session-trailer"
+
+
+def test_the_trailer_key_is_pinned():
     """A renamed key silently stops matching every trailer already in history —
-    `has_trailer` would stop seeing them and every amend would add a duplicate."""
+    `has_trailer` goes blind and every amend appends a duplicate."""
     assert st.TRAILER_KEY == "Claude-Session-Id"
-    assert st.LEGACY_TRAILER_KEY == "Claude-Session"
+
+
+# ---------------------------------------------------------------------------
+# Round-2 guards. Each pins a defect the round-1 audit MEASURED, not a defect
+# imagined while writing the fix.
+# ---------------------------------------------------------------------------
+class TestPidRecycling:
+    """🔴 `kernel.pid_max` here is 4194304 and live pids were measured spanning
+    114904–4193245 — the pid space has already wrapped, so recycling is routine.
+    Without a start-time pin, a recycled pid inherits a dead session's id and a
+    commit is stamped with a session that never touched the line."""
+
+    def test_a_recycled_pid_is_a_MISS_not_a_wrong_answer(self, tmp_path):
+        common = str(tmp_path)
+        st.record("dead-session", 4242, root=common, reader=LIVE)
+        # Same pid, different process (different starttime).
+        assert st.lookup(pid=4242, root=common, reader=recycled(4242)) is None
+
+    def test_the_same_process_still_resolves(self, tmp_path):
+        """Positive control: the guard rejects a recycled pid, not every pid."""
+        common = str(tmp_path)
+        st.record("live-session", 4242, root=common, reader=LIVE)
+        assert st.lookup(pid=4242, root=common, reader=LIVE) == "live-session"
+
+    def test_prune_drops_a_recycled_pid_even_though_it_is_alive(self, tmp_path):
+        """The earlier prune kept any file whose pid merely EXISTED — measured
+        keeping a record for pid 1."""
+        common = str(tmp_path)
+        st.record("dead-session", 4242, root=common, reader=LIVE)
+        assert st.prune(root=common, reader=recycled(4242)) == 1
+        assert not os.path.exists(st.state_file(4242, common))
+
+    def test_prune_keeps_the_same_process(self, tmp_path):
+        common = str(tmp_path)
+        st.record("live-session", 4242, root=common, reader=LIVE)
+        assert st.prune(root=common, reader=LIVE) == 0
+        assert os.path.exists(st.state_file(4242, common))
+
+
+class TestAmendByADifferentSession:
+    """🔴 Idempotence keyed on the KEY alone meant session B amending session A's
+    commit kept A's id — B's rewrite attributed to a session that never made it.
+    Reached with no race and no pid reuse, so the pid keying could not help."""
+
+    def test_a_different_session_rewrites_the_trailer(self):
+        msg = st.append_trailer("feat: x\n", "SESS-A")
+        out = st.append_trailer(msg, "SESS-B")
+        assert "Claude-Session-Id: SESS-B" in out
+        assert "SESS-A" not in out
+        assert out.count("Claude-Session-Id:") == 1
+
+    def test_the_same_session_is_still_a_byte_identical_no_op(self):
+        msg = st.append_trailer("feat: x\n", "SESS-A")
+        assert st.append_trailer(msg, "SESS-A") == msg
+
+    def test_a_rewrite_keeps_the_trailer_in_place(self):
+        """Position matters: appending a second block after later prose would
+        put the trailer somewhere git no longer reads as one."""
+        msg = "feat: x\n\nClaude-Session-Id: SESS-A\nCo-Authored-By: Z <z@e>\n"
+        out = st.append_trailer(msg, "SESS-B")
+        lines = out.splitlines()
+        assert lines.index("Claude-Session-Id: SESS-B") < lines.index("Co-Authored-By: Z <z@e>")
+
+    def test_duplicates_already_in_a_message_collapse_to_one(self):
+        msg = "feat: x\n\nClaude-Session-Id: A\nClaude-Session-Id: A\n"
+        out = st.append_trailer(msg, "B")
+        assert out.count("Claude-Session-Id:") == 1
+
+
+class TestQuotedTrailerInProse:
+    """🔴 `has_trailer` used `.strip()`, so an INDENTED example inside a message
+    body counted as a real trailer and that commit silently got no stamp. That
+    is exactly the shape of this feature's own documentation commits."""
+
+    def test_an_indented_example_is_not_a_trailer(self):
+        msg = ("docs: explain the trailer\n\n"
+               "The hook adds a line like:\n\n"
+               "    Claude-Session-Id: some-example-id\n\n"
+               "…at the end of the message.\n")
+        assert st.has_trailer(msg) is False
+        out = st.append_trailer(msg, "REAL-ID")
+        assert "Claude-Session-Id: REAL-ID" in out
+        # the prose example survives untouched
+        assert "    Claude-Session-Id: some-example-id" in out
+
+    def test_a_column_zero_trailer_is_still_seen(self):
+        """Positive control, so the fix is not simply 'never matches'."""
+        msg = "feat: x\n\nClaude-Session-Id: real\n"
+        assert st.has_trailer(msg) is True

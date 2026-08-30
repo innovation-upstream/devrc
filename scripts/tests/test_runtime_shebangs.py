@@ -76,6 +76,20 @@ PATTERNS = ("test_*.py", "conftest.py", "test_*.sh")
 #       (`/bin/sh`, `sys.executable`);
 #   (b) the string is not a shebang at all.
 ALLOWLIST = [
+    # Shape (b): not a shebang being WRITTEN, a shebang being ASSERTED. The line
+    # pins that `scripts/git-hooks/prepare-commit-msg` starts with `#!/bin/sh`,
+    # which is a deploy-blocking correctness property rather than a style choice:
+    # as `#!/usr/bin/env python3` an unresolvable interpreter made `git commit`
+    # exit 1 with the commit REFUSED (measured, with a paired control). /bin/sh
+    # is absolute and sandbox-present, so this allowlisting cannot readmit the
+    # hazard the guard exists to catch — and the assertion is what keeps anyone
+    # from putting `env` back.
+    # 🔴 The pattern deliberately does NOT spell the shebang: this file's own
+    # `test_this_guards_source_does_not_match_itself` would then flag the
+    # allowlist entry, which is the guard correctly refusing to carry the very
+    # literal it exists to find. Match the assertion's shape instead.
+    ("scripts/tests/test_session_stamp_seam.py", "assert first ==",
+     "ASSERTS the hook's shebang (a fail-open requirement), never writes one"),
     ("scripts/tests/test_playwright_nixos.py", "/bin/sh",
      "writes /bin/sh directly — absolute, present in the sandbox"),
     ("scripts/tests/test_notify_failure.py", "_bash",
