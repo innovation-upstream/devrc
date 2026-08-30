@@ -133,7 +133,7 @@ matched neither branch and were published as "scoped, proven bounded". Only a
   runtest-time reads, because several files here read `nix/home.nix` at import.
   It is inert unless that `-p` is passed.
 - `scripts/lib/readset_classify.py` — merges shards, assigns buckets.
-- `scripts/tests/test_readset_classify.py` — 38 guards, each pinning a defect
+- `scripts/tests/test_readset_classify.py` — 40 guards, each pinning a defect
   one of these two files actually shipped.
 
 Reproduce:

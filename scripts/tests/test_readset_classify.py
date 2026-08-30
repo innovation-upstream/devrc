@@ -359,6 +359,32 @@ def test_dash_C_remains_the_ONE_acquittal_and_still_works():
     assert len(scans3) == 1, scans3
 
 
+def test_a_dash_C_inside_SCRIPT_TEXT_does_not_acquit_an_opaque_child():
+    """🔴 AUDIT R4-F1 — the defect class, FIFTH occurrence.
+
+    `_effective_cwd` scanned the whole token list before the head was known, so
+    any argv merely CONTAINING `-C` was acquitted — including one where `-C`
+    sits inside the shell script being interpreted. That is this module's own
+    original sin (reading an option-shaped token out of a string as evidence
+    about scope), surviving inside the one acquittal kept for being
+    unambiguous. It is only unambiguous for a command whose grammar defines it.
+    """
+    scans, opaque = _verdict(
+        "bash -c SHA=$(git -C /tmp/fx rev-parse HEAD); echo $SHA\t@.")
+    assert scans == [], scans
+    assert len(opaque) == 1, opaque
+
+
+def test_a_dash_C_that_is_ANOTHER_programs_flag_does_not_acquit():
+    """🔴 AUDIT R4-F1, second shape: `-C` as an unrelated flag of a repo script."""
+    for argv in ("bash scripts/run-tests.sh -C /tmp/outdir",
+                 "python3 -m pytest scripts/tests -C /tmp/out",
+                 "node scripts/x.mjs -C /tmp/out"):
+        scans, opaque = _verdict(f"{argv}\t@.")
+        assert scans == [], (argv, scans)
+        assert len(opaque) == 1, (argv, opaque)
+
+
 def test_a_relative_read_escaping_via_dotdot_is_not_recorded_in_repo(monkeypatch):
     """🟢 AUDIT R3-F4. `../../devrc-sibling/x` yielded prefix `scripts/..`."""
     monkeypatch.chdir(rp.REPO_ROOT / "scripts")

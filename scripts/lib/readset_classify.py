@@ -90,7 +90,7 @@ def _is_repo_cwd(cwd: str) -> bool:
     return not cwd.startswith("/")
 
 
-def _effective_cwd(toks: list[str], cwd: str) -> str:
+def _effective_cwd(toks: list[str], head: str, cwd: str) -> str:
     """The tree the command operates on: `-C <path>` wins over the real cwd.
 
     🔴 THE ONLY SURVIVING ACQUITTAL, and it is here because it is the only one
@@ -101,7 +101,20 @@ def _effective_cwd(toks: list[str], cwd: str) -> str:
 
     A relative `-C` is resolved against the current cwd, so `-C subdir` from a
     repo cwd stays inside — that case genuinely IS a scan of this tree.
+
+    🔴 ONLY FOR COMMANDS THAT HAVE A `-C`. The first version scanned the whole
+    token list before the head was known, so ANY argv containing the two
+    characters `-C` was acquitted — including
+    `bash -c '… git -C /tmp/fx rev-parse …'`, where `-C` is inside the SCRIPT
+    TEXT, and `bash run-tests.sh -C /tmp/outdir`, where it is some other
+    program's unrelated flag. Both scored CLEAN. That is this module's own
+    original sin — reading an option-shaped token out of a string as evidence
+    about scope — for the fifth time, surviving inside the one acquittal that
+    was kept because it was supposed to be unambiguous. It is only unambiguous
+    for a command whose grammar defines it.
     """
+    if head != "git" and head not in _DIRECT_SCANNERS:
+        return cwd
     if "-C" not in toks:
         return cwd
     i = toks.index("-C")
@@ -192,7 +205,7 @@ def _exec_verdict(execs: set[str]) -> tuple[list[str], list[str]]:
         # — it names the tree the command operates on. Measured cost of
         # dropping the rest: 13 files move OPAQUE -> ALWAYS-RUN, ZERO `scoped`
         # files change, so the published ceiling is unaffected.
-        eff_cwd = _effective_cwd(toks, cwd)
+        eff_cwd = _effective_cwd(toks, head, cwd)
         if not _is_repo_cwd(eff_cwd):
             continue                    # -C names another tree
 
