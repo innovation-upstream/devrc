@@ -1417,6 +1417,34 @@ in
   home.file.".claude/hooks/clawgate-writeback-guard.py" = {
     source = ../scripts/claude-hooks/clawgate-writeback-guard.py;
   };
+  # 🔴 THE HANDOFF WRITE GUARD — the write-back guard's counterpart on the OTHER
+  # record. That one makes a clawgate pickup report back to the board; this one makes
+  # a session that RESUMED a handoff doc write one before it stops.
+  #
+  # PostToolUse (NO matcher, same reason as its neighbour) watches for a READ of a
+  # specific handoff doc — a `Read` of `claudedocs/handoff-*.md`, or the `git show
+  # <ref>:claudedocs/…` form these repos use for a doc on an unmerged branch — and for
+  # REAL WORK after it. Stop then measures whether ANY handoff was written since that
+  # read: a `handoff_doc.py` run, a Write/Edit of a handoff doc, or the resumed doc's
+  # own mtime. Three routes unioned, so it self-suppresses however the doc got written
+  # — including under a different topic, which the measurement counts as recorded.
+  #
+  # 🔴 ARMED ON THE READ, NOT ON SessionStart, and that is the design: arming at
+  # session start would fire on every session that never touched a handoff. Measured
+  # over 253 `/resume` sessions (2026-08-15..08-29): 22 (8.7%) never recorded their
+  # work, ZERO of them because the write gate correctly declined, and the dominant
+  # loss bucket is a session that ENDED CLEANLY — 8 of 16 — with a Stop hook already
+  # firing in 8 of 8 of them. `claudedocs/handoff-skill-chain-usage-audit.md`.
+  #
+  # Escalates block, block, notice, silence per doc per session, never blocks when it
+  # could not measure (it says so instead), and every error path exits 0. Unlike its
+  # neighbour it spawns NO subprocess on any path.
+  #
+  # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and the
+  # switch still succeeds with the hook absent — this repo's standing trap.
+  home.file.".claude/hooks/handoff-write-guard.py" = {
+    source = ../scripts/claude-hooks/handoff-write-guard.py;
+  };
   # 🔴 THE CLAWGATE TASK INTERVIEW GATE — the write-back guard's counterpart at the
   # OTHER end of a task's life. That one makes a pickup report back; this one makes
   # a CREATE say what "done" means.

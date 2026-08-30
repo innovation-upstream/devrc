@@ -90,6 +90,7 @@ NEXT_STEP = HOOK_PY + " ~/.claude/hooks/next-step-nudge.py"
 NOTIFY = HOOK_PY + " ~/.claude/hooks/claude-notify.py"
 LEDGER = HOOK_PY + " ~/.claude/hooks/agent-ledger-hook.py"
 WRITEBACK = HOOK_PY + " ~/.claude/hooks/clawgate-writeback-guard.py"
+HANDOFF_GUARD = HOOK_PY + " ~/.claude/hooks/handoff-write-guard.py"
 INTERVIEW = HOOK_PY + " ~/.claude/hooks/clawgate-task-interview-guard.py"
 BASH_GUARD = HOOK_PY + " ~/.claude/hooks/bash-guard.py"
 BG_CAPTURE = HOOK_PY + " ~/.claude/hooks/bg-command-capture.py"
@@ -203,7 +204,7 @@ def test_it_says_what_it_did_on_stdout(tmp_path):
     assert NEXT_STEP in p.stdout, p.stdout
 
 
-def test_three_foreign_stop_hooks_come_back_as_six_originals_intact_and_in_order(tmp_path):
+def test_three_foreign_stop_hooks_come_back_as_seven_originals_intact_and_in_order(tmp_path):
     """🔴 Losing the clawgate Stop hook would silently break remote approval."""
     home = make_home(tmp_path, settings_with(THREE_FOREIGN_STOP_HOOKS))
 
@@ -214,19 +215,22 @@ def test_three_foreign_stop_hooks_come_back_as_six_originals_intact_and_in_order
     # SET equality, not membership: it fails when the set SHRINKS (one clobbered) and
     # when it GROWS (something registered by accident), which membership cannot see.
     assert set(after) == set(THREE_FOREIGN_STOP_HOOKS) | {NEXT_STEP, LEDGER,
-                                                        WRITEBACK}, after
-    assert len(after) == 6, after
+                                                        WRITEBACK,
+                                                        HANDOFF_GUARD}, after
+    assert len(after) == 7, after
     # The three originals keep their identity AND their relative order, and stay ahead
     # of the appended ones — append-only, never a rewrite.
     assert after[:3] == THREE_FOREIGN_STOP_HOOKS, after
-    # 🔴 The three appended hooks in the order the registrant adds them. Order is
+    # 🔴 The four appended hooks in the order the registrant adds them. Order is
     # load-bearing for next-step-nudge (it returns additionalContext and should
     # run after the notifiers have observed the turn) and irrelevant to the
     # ledger, which neither blocks nor prints — but it is pinned so a reordering
     # is a decision someone makes rather than a diff nobody reads. The write-back
-    # guard is the only one here that can BLOCK, and it likewise lands after every
-    # foreign owner has already seen the turn.
-    assert after[3:] == [LEDGER, WRITEBACK, NEXT_STEP], after
+    # guard and the handoff write guard are the two here that can BLOCK, and both
+    # likewise land after every foreign owner has already seen the turn — the
+    # handoff one last, so the two blocking hooks have a stable order rather than
+    # an incidental one.
+    assert after[3:] == [LEDGER, WRITEBACK, HANDOFF_GUARD, NEXT_STEP], after
 
 
 def test_unrelated_settings_content_is_untouched(tmp_path):
