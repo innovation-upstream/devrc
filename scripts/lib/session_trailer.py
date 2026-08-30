@@ -21,6 +21,21 @@ resolve the session -> wake it". Two things break it, and only one was known:
      emitted by PROSE — an instruction the agent must remember — which is exactly
      what `claude/RULES.md` says to replace with something structural.
 
+     🔴 THE MEASUREMENT ITSELF HAS A TRAP, AND IT HAS BITTEN THREE TIMES.
+     Counting with `git show … | grep -q` under `set -o pipefail` UNDERCOUNTS,
+     silently: `grep -q` exits at the first match, `git show` dies of SIGPIPE,
+     and `pipefail` turns that into a failed pipeline — so a commit is dropped
+     from the count EXACTLY WHEN IT MATCHES. Reproduced side by side on the same
+     200 commits:
+
+         with `set -o pipefail` + `grep -q`  ->  55
+         same loop without pipefail          ->  67
+
+     Every wrong figure in this feature's history — 41%/27%, 55, and one auditor
+     round each — traces to that shape. Count without a pipe (read each message
+     into a variable, or one subprocess per commit) and the number is stable.
+     `claude/RULES.md`: validate the instrument before reading its verdict.
+
      🔴 COUNT COMMITS, NOT LINES — AND RE-MEASURE RATHER THAN QUOTING THIS. Two
      wrong figures preceded this one, and the second is the instructive one:
        * "9 of the last 200" came from `grep -c`, which counts LINES; each such

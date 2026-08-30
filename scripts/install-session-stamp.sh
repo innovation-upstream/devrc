@@ -51,6 +51,7 @@ REPO=""
 SOURCE_ROOT=""
 MODE="dry"
 FORCE=0
+_repairing=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -185,12 +186,34 @@ if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
       echo "  already installed (generated wrapper -> this checkout) ✓"
       exit 0
     fi
-    if ! is_intact "$TARGET"; then
-      # Ours, but cut short. Repairing our own broken hook is the safe act and
-      # must not require --force: while it sits there, every commit is refused.
-      echo "  ⚠ an existing devrc hook is INCOMPLETE (no end sentinel) — repairing"
+    # 🔴 SELF-REPAIR IS SCOPED TO *THIS CHECKOUT'S OWN* HOOK, and the unscoped
+    # version was a real regression — measured side by side against the previous
+    # revision, on a third-party hook derived from devrc's generated wrapper
+    # (the very case `is_ours`'s own comment above records as seen in the wild):
+    #
+    #   before: --apply (no --force) -> rc 4, file UNCHANGED
+    #   after:  --apply (no --force) -> rc 0, file OVERWRITTEN, their body gone
+    #
+    # `is_ours` is a STRUCTURAL claim — a marker line plus an `impl=` line — not
+    # a claim that devrc wrote the file. Gating self-repair on it alone therefore
+    # re-opened, one axis over, the same "destroys something that is not ours"
+    # class this script removed `is_legacy_ours` to close. Requiring the `impl=`
+    # line to name THIS checkout keeps the repair (our own hook, cut short, from
+    # our own install) while leaving every other shape behind the --force gate.
+    if [ "$_existing" = "impl=$(printf '%q' "$IMPL")" ] && ! is_intact "$TARGET"; then
+      echo "  ⚠ this checkout's own hook is INCOMPLETE (no end sentinel) — repairing"
+      echo "    (a truncated hook refuses every commit, so repairing it does not"
+      echo "     wait for --force)"
       FORCE=1
+      _repairing=1
     fi
+    # 🔴 `elif`, not a fall-through. The repair branch above used to fall
+    # straight into this one, so a single run printed three mutually
+    # contradictory lines: "repairing", then "points at another checkout"
+    # naming THIS checkout's own path, then "Re-point it with --force" —
+    # followed by doing it without --force. It also made the dangerous case
+    # log-indistinguishable from the benign one.
+    #
     # OUR hook, pointing at a DIFFERENT checkout — typically installed from an
     # agent worktree that has since been removed, leaving the impl path dangling.
     # Say so, rather than calling devrc's own hook foreign and demanding --force
@@ -201,9 +224,11 @@ if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
     # just fixed for. `is_ours` currently guarantees `_existing` is non-empty,
     # so the branch is unreachable today; it is written safely anyway because
     # "unreachable" is a property of another function that may be relaxed.
-    echo "  ⚠ an EXISTING devrc hook points at another checkout:"
-    if [ -n "$_existing" ]; then echo "      $_existing"; fi
-    echo "    Re-point it with --force; this is devrc's own hook, not a foreign one."
+    if [ "${_repairing:-0}" -ne 1 ]; then
+      echo "  ⚠ an EXISTING devrc hook points at another checkout:"
+      if [ -n "$_existing" ]; then echo "      $_existing"; fi
+      echo "    Re-point it with --force; this is devrc's own hook, not a foreign one."
+    fi
   fi
   if [ "$FORCE" -ne 1 ]; then
     echo "  ✘ a prepare-commit-msg already exists and is not ours. Look at it first:" >&2
