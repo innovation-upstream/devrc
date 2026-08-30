@@ -983,3 +983,42 @@ def test_check_floors_declares_the_subset_on_its_GLOBAL_line():
     assert "SELECTED" in line[0] and "SUBSET" in line[0], (
         "the GLOBAL floor line does not say it summed a SUBSET — it is the "
         f"number a reader uses to judge the run's coverage.\n{line[0]}")
+
+
+def test_the_SUMMARY_BANNER_names_the_real_selection_source():
+    """🔴 round-4 M12 — the one surface the class scan structurally could not see.
+
+    `test_no_message_hardcodes_the_flag_when_the_ENVIRONMENT_selected` runs only
+    under `--check-floors` and `--check-targets`, and BOTH exit before
+    `SUBSET_NOTE` is rendered into the SUMMARY banner. So the banner — the line
+    `gate.sh` starts reading, and the whole reason F1 was deploy-blocking — was
+    outside a guard whose docstring says "every operator-facing string".
+
+    Measured: mutating the banner's `${ONLY_TARGETS_SOURCE}` to a hardcoded
+    `--targets` printed
+
+        ==== SUMMARY (hermetic set) — SUBSET: 1 of 28 hermetic target(s) via --targets ====
+
+    for an env-selected run with NO flag on the command line, and SURVIVED all 30
+    tests in this file AND the gating sandbox tier with byte-identical counts.
+    An operator reading that checks their command line, finds no `--targets`, and
+    has no way to attribute the narrowing — the exact question these lines exist
+    to answer.
+
+    This needs a REAL run (no `--check-*`), because the banner only exists on one.
+    """
+    _require_targets_flag(RUN_TESTS)
+    proc = _run_env([str(RUN_TESTS), str(REPO_ROOT)], ENV_ONLY)
+    assert proc.returncode == 0, f"{proc.stdout[-1500:]}\n{proc.stderr[-1500:]}"
+    assert "SUMMARY" in proc.stdout, f"no banner:\n{proc.stdout[-1500:]}"
+    # The SUMMARY region is exactly what gate.sh prints; assert inside it only.
+    tail = proc.stdout[proc.stdout.index("SUMMARY"):]
+    head = tail.splitlines()[0]
+    assert "DEVRC_TARGETS" in head, (
+        "the SUMMARY banner does not name the environment variable that "
+        f"selected — it is the line gate.sh starts reading.\n{head}")
+    assert "--targets" not in head, (
+        f"the banner blames a flag that was never passed.\n{head}")
+    # And the PARTIAL RUN block immediately below it, same reasoning.
+    block = "\n".join(tail.splitlines()[1:6])
+    assert "PARTIAL RUN" in block, f"no PARTIAL RUN block:\n{block}"
