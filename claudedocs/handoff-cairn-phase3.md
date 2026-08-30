@@ -18,79 +18,73 @@ Make the hosted subsystem store the single datastore every host reads **and writ
 
 ## State now
 
-🔴 **CRITERION 10, STEP 1 OF 2, IS DONE AND PROVEN ON THE POD** (2026-08-29, homelab-infra
-`1e0c9250`). The token file holds **two rows**, and the coexistence *is* the migration — no
-credential moved, no read broke, and the rollback is deleting line 2 with **no image change**:
+🔴 **RANK 2 IS CLOSED — the SERVED copy now has a verified, alerted, off-node backup.**
+homelab-infra **#551**, squash **`c4e0f82b`**, merged 2026-08-30T17:30Z, Flux-reconciled and
+**adopted** (all four objects carry `kustomize.toolkit.fluxcd.io/name`; both Kustomizations
+`READY=True`). Daily **03:45 UTC** → `subsystem-store-backups` on the archive tenant, 90-day
+server-side ILM on `daily/`, credential scoped with **no `s3:DeleteObject`**.
+
+Post-merge run of the reconciled artifact: `1607 files, 15 scopes, 132 entries` — uploaded,
+round-trip byte-compared, extracted and re-hashed. `lastSuccessfulTime` 2026-08-30T17:33:14Z.
+All three alerts `state=inactive health=ok`. `daily/` holds 51 objects; `quarantine/` cleared
+of test debris.
+
+🔴 **THE FINDING THAT SHAPED IT — a `git bundle` backup of the served copy would have been
+GREEN AND EMPTY.** Re-pointing devrc's `analyze-service-index/backup.py` at `/data` is the
+obvious move and is wrong. Measured on the served copy 2026-08-30: `devrc/cairn.md` was
+**untracked** (in no commit of any scope repo) and the API-appended `[cairn: zach/…]` bullet
+was in the working tree with **0** occurrences at `HEAD`. A bundle carries committed objects
+only, so it is structurally blind to exactly the bytes that exist nowhere else. Hence a
+whole-tree tar (working tree **and** `.git`), its own bucket, its own credential. **Do not
+"consolidate" the two backups later without re-reading this.**
+
+⚠ **What it does NOT fix.** RPO is up to 24 h. **The seed clobber is unchanged** — an
+API-appended bullet is still overwritten by the next `seed.sh` until criterion 9. The backup
+makes a destructive `PUT` *recoverable*, not impossible.
+
+### Carried forward — criterion 10 step 1, unchanged by this session
+
+🔴 **STEP 1 OF 2 IS DONE AND PROVEN ON THE POD** (2026-08-29, homelab-infra `1e0c9250`). The
+token file holds **two rows**, and the coexistence *is* the migration — no credential moved, no
+read broke, and the rollback is deleting line 2 with **no image change**:
 
 | line | shape | identity | fingerprint | authority |
 |---|---|---|---|---|
 | 1 | `<token>` | `legacy` | `2481e4553f6c` | UNRESTRICTED read · **MAY NOT WRITE** |
 | 2 | `<token> zach <15 scopes>` | `zach` | `a8f329c534d7` | 15 scopes · **may write** |
 
-Live banner, re-read 2026-08-30T03:0xZ — **this line named the pre-rotation fingerprint until
-now, and was wrong**:
-`token-ids=2481e4553f6c:legacy,a8f329c534d7:zach`, still shouting
+Live banner: `token-ids=2481e4553f6c:legacy,a8f329c534d7:zach`, still shouting
 `UNRESTRICTED-SCOPE LEGACY MODE — 1 of 2`.
 
 🔴 **The mapped row was ROTATED once, same day** (homelab-infra `a8d77945`). Its first token
-(`8e1e79bb4664`) was printed in plaintext into a session transcript by a shell mistake — a
-pipe and a heredoc BOTH feeding one `ssh … bash -s`, which under **zsh MULTIOS are
-CONCATENATED on stdin** rather than one winning, so the token became the remote shell's line 1
-and came back in a `command not found`. **Never feed a secret to a remote shell that is also
-receiving a heredoc**: use two invocations — `printf '%s' "$TOK" | ssh host 'umask 077; cat >
-~/.tok'`, then `ssh host 'bash -s' < script.sh`, the script shredding `~/.tok`. A rotation
-needs no `zach-prev` identity: guard 12 covers an OVERLAP, and this was a REPLACE.
+(`8e1e79bb4664`) was printed in plaintext into a session transcript by a shell mistake — a pipe
+and a heredoc BOTH feeding one `ssh … bash -s`, which under **zsh MULTIOS are CONCATENATED on
+stdin** rather than one winning. **Never feed a secret to a remote shell that is also receiving
+a heredoc**: two invocations, `printf '%s' "$TOK" | ssh host 'umask 077; cat > ~/.tok'` then
+`ssh host 'bash -s' < script.sh`, the script shredding `~/.tok`. A rotation needs no
+`zach-prev` identity: guard 12 covers an OVERLAP, and this was a REPLACE.
 
-✅ **BOTH HOSTS ARE ON THE MAPPED TOKEN.** Workbench and laptop each verified through the real
-client (`cairn sync` → 132 entries) *and* by the audit log (`token=a8f329c534d7
-identity=zach`). **Criterion 10's 24 h clock is running from 2026-08-30T02:12:28Z** — the
-pod's own `startTime`, because the log cannot evidence anything earlier than the process that
-writes it. (An earlier revision said `02:11Z`, ~90 s optimistic: it dated the clock from the
-commit rather than from the observer.) Re-read at 03:0xZ: pod `…-g6qct`, **0 restarts**,
-`token=2481e4553f6c` count **0**, `token=a8f329c534d7` count 2. ⚠ The evidence lives in the
-POD LOG, which resets on restart — a restart inside the window destroys the proof even though
-the property still holds, so confirm `restartCount` and `startTime` before quoting the count,
-and read it from Loki if the window must survive one.
+✅ **BOTH HOSTS ARE ON THE MAPPED TOKEN** — workbench and laptop each verified through the real
+client (`cairn sync` → 132 entries) *and* by the audit log (`token=a8f329c534d7 identity=zach`).
 
-**The write probes below ran PRE-ROTATION**, on `8e1e79bb4664`. They are kept verbatim because
-they are the criterion-4 evidence; the fingerprint they name is simply retired:
+**The pod runs `0.6.0`** (a concurrent session bumped it in homelab-infra `5a153492`); live
+`imageID` is `sha256:80a7c735…`. Any doc still saying 0.5.0 is stale.
 
-```
-POST /api/v1/entry/devrc/subsystem-store-api/bullets  token=2481e4553f6c identity=legacy  403 legacy-cannot-write
-POST /api/v1/entry/no-such-scope-xyzzy/e/bullets      token=8e1e79bb4664 identity=zach    404 scope-unknown
-POST /api/v1/entry/devrc/subsystem-store-api/bullets  token=8e1e79bb4664 identity=zach    200 appended
-GET  /api/v1/recall/devrc                             both fingerprints                   200 (no read lost)
-```
+**Criterion 8 is STILL WORKBENCH-ONLY** — what moved on the laptop was its *client token*, not
+its *seed*. Served **132 entries / 15 scopes** against the card's target **139 / 19**.
 
-…and the bullet was **read back off disk** (`kubectl exec cat`): a single-line insert at the
-top of `## Nuance / work-history`, `13350 → 14603 B`, tagged
-`[cairn: zach/9cfaabff-a4ab-4571-8364-b1a44f83cf9b]`. The request carried a forged
-`"actor":"someone-else"` and it was **discarded** — so criterion 4's forgery case is verified
-**against the pod**, not only against the image.
+🔴 **STEP 2 — deleting the bare line — IS NOT DONE, and is untouched by this session.** Purely
+time-gated: the window opens **2026-08-31T02:12:28Z** (the pod's own `startTime`, because the
+log cannot evidence anything earlier than the process that writes it). Clock intact, re-read
+this session: pod `…-g6qct`, **0 restarts**, `startTime` 02:12:28Z. Nothing was done to the
+legacy row or to `env.bak-legacy-2026-08-29` on either host. ⚠ The evidence lives in the POD
+LOG, which resets on restart — confirm `restartCount` and `startTime` before quoting the count,
+and read it from Loki if a restart lands inside the window.
 
-**The pod runs `0.6.0`, not `0.5.0`.** A concurrent session bumped it in homelab-infra
-`5a153492` (2026-08-29 15:01, "#996 merged and the pod never moved"); live `imageID` is
-`sha256:80a7c735…`. Any doc still saying 0.5.0 is stale.
-
-🔴 **STEP 2 — deleting the bare line — IS NOT DONE.** It is now purely time-gated: the window
-opens **2026-08-31T02:12:28Z**, after which the ordered checklist in rank 1 applies (count
-still 0 → rollback rehearsed → delete the row → **shred the backups on both hosts**). (A
-previous revision of this paragraph said the clock had not started because both hosts still
-held the legacy token. That was true when written and is **now false** — both moved
-2026-08-30.)
-
-**Criterion 8 — STILL THIS HOST ONLY, and do not confuse it with tonight's cutover.** What
-moved on the laptop was its **client token**, not its **seed**. `seed.sh` has still only been
-run from workbench; served **132 entries / 15 scopes** against the card's target **139 / 19**,
-and the gap is laptop-only.
-
-**PR #1048 (this doc) — CI is RUNNING again.** Both Tekton checks went `PENDING` at
-2026-08-30T03:05:22Z off `b3495647`; the head before that sat on 4-hour-old `ERROR`s. A
-close/reopen retrigger earlier produced **no pipelinerun at all** despite the EventListener's
-CEL filter accepting `reopened` — a push does retrigger, a reopen apparently did not.
-devrc-ci's own recent record: **3 Succeeded / 23 Failed / 5 Cancelled** of 31 completed. Until
-this merges the `main` copy is stale — **but it still carries `clawgate-task: 371`**, so a
-`/resume` off the stale copy is routed to the card, where the full evidence lives.
+**Seven `/audit-pr` rounds ran on #551** (delta-chained, claims ledgers posted as PR comments).
+🔴 **The ladder stopped on the PAYLOAD-ATTRIBUTION GATE, NOT on a clean round** — round 7 still
+returned a real 🟡 (fixed), but by then fixes were touching **3 executable lines against ~24 of
+prose**. Do not read "merged" as "audited clean".
 
 ## Open investigations — live diagnosis state
 
@@ -149,64 +143,63 @@ this merges the `main` copy is stale — **but it still carries `clawgate-task: 
 
 ## Next steps (ranked)
 
-🔴 **RANKS RENUMBERED this session** (the old list had a struck-through 0 and no 3). No
-`cairn-phase3-*` claims were live at the time, so nothing was re-pointed — but derive slugs
-fresh: `claim-work --slug-for <this doc> <rank>`.
-
-🔴 **RANK 1 (criterion 10 step 1) IS DONE** — see "State now". What follows is the remainder.
+🔴 **Numbering is UNCHANGED from the previous revision on purpose** — the rank is half a
+claim's identity (`claim-work --slug-for <this doc> <rank>`), so rank 2 is marked closed **in
+place** rather than removed. `cairn-phase3-2` was released.
 
 1. 🔴 **Criterion 10 step 2, once the clock expires (≥ 2026-08-31T02:12:28Z — the pod's
-   `startTime`, not the commit time).** Both hosts are already moved. The checklist, in order:
-   1. `kubectl -n subsystem-store logs <pod> | grep -c token=2481e4553f6c` is still **0**
-      across the full 24 h. ⚠ **A pod restart inside the window resets the log and destroys
-      the evidence** even though the property still holds — read it from Loki if that happens.
-      Confirm `restartCount` and `startTime` before quoting the count.
-   2. **Exercise the rollback once, deliberately** — delete line 2, restart the pod, confirm
-      reads still work on legacy, put it back. The card requires this *before* removal, and it
-      is the only thing that proves the migration is reversible rather than asserted.
-   3. Delete the bare line. 🔴 That removes the **last unrestricted credential**: afterwards a
-      scope missing from `zach`'s 15-entry allowlist is unreadable by anything, and by
-      criterion 3 that is indistinguishable from a scope that does not exist. Re-read the
-      allowlist against `ls /data` first — it is a snapshot, and the store has gained scopes
-      before.
-   4. 🔴 **Shred the legacy token's leftovers, or the retired credential outlives its
-      retirement.** `~/.config/subsystem-store/env.bak-legacy-2026-08-29` exists on **BOTH**
-      hosts and holds the bare token in plaintext; they are the rollback for step 2 and must
-      survive until it lands, then be destroyed:
-      ```bash
-      shred -u ~/.config/subsystem-store/env.bak-legacy-2026-08-29
-      ssh zach@192.168.50.155 'shred -u ~/.config/subsystem-store/env.bak-legacy-2026-08-29'
-      ```
-      Nothing else in this doc or on the card carries this step. "The row is deleted" is not
-      "the credential is gone" while a copy sits on two disks.
-   ⚠ Reading the mapped token: `kubectl -n subsystem-store get secret subsystem-store-token -o
-   jsonpath='{.data.token}' | base64 -d` and take field 1 of line 2. 🔴 **Never pipe it into an
-   `ssh … bash -s` that is also receiving a heredoc** — see the MULTIOS trap above; that is
-   what forced the first rotation.
-2. 🔴 **The backup CronJob, and it is now more urgent than it was.** The served copy can hold
-   bytes that exist nowhere else the moment anything writes through the API (see the seed
-   clobber below), and `zach` is a whole-file `PUT` credential over all 15 scopes. The LOCAL
-   store is covered (`commit.sh` per-scope git + `backup.py` encrypted bundles), so "the store
-   has no backup" is wrong — **"the SERVED copy has none" is right**, and that is the gap.
-3. **Criterion 8's laptop half** — the card requires BOTH hosts. This is what `#998` was
-   fixed *for*, and it is still unexercised for that purpose. Run `seed.sh` from the laptop
-   (`laptop` skill for the host), then `comm -23` per host must print zero lines. Expect the
-   NOTE about foreign entries — that is the fixed behaviour, not an error.
-4. **Criterion 9 — the cutover.** `subsystem-index` writes through `cairn`; local store
-   becomes a read-only cache (`stat -c %a` = 444, EACCES *watched*). 🔴 This is also what makes
-   an API write DURABLE — see the seed clobber below.
-5. **Verify criteria 1, 2, 5, 6, 7 against the POD**, not just in tests. Criterion 4 is now
-   done there (including the forged-`actor` case); 2's denied-scope arm is done for WRITES
-   (404 `scope-unknown`) but not for the three read routes.
+   `startTime`, not the commit time).** Both hosts are already on the mapped token. Checklist,
+   in order: (a) `kubectl -n subsystem-store logs <pod> | grep -c token=2481e4553f6c` still
+   **0** across the full 24 h — confirm `restartCount` and `startTime` first, because a restart
+   inside the window resets the log and destroys the evidence even though the property holds;
+   (b) **exercise the rollback once, deliberately** — delete line 2, restart the pod, confirm
+   reads still work on legacy, put it back; (c) delete the bare line — 🔴 that removes the
+   **last unrestricted credential**, so re-read `zach`'s 15-scope allowlist against `ls /data`
+   first; (d) 🔴 **`shred -u ~/.config/subsystem-store/env.bak-legacy-2026-08-29` on BOTH
+   hosts** (`ssh zach@192.168.50.155` for the laptop) — "the row is deleted" is not "the
+   credential is gone" while a copy sits on two disks.
+   forcing: none
+2. ~~**The backup CronJob.**~~ ✅ **CLOSED 2026-08-30** — homelab-infra #551, squash
+   `c4e0f82b`. See "State now". Rank retained so live claim slugs keep resolving.
+   forcing: none
+3. **Criterion 8's laptop half** — the card requires BOTH hosts; `seed.sh` has still only been
+   run from workbench (served 132 entries / 15 scopes against the card's 139 / 19, and the gap
+   is laptop-only). Run `seed.sh` from the laptop (`laptop` skill), then `comm -23` per host
+   must print zero lines. Expect the NOTE about foreign entries — that is `#998`'s fixed
+   behaviour, not an error.
+   forcing: none
+4. **Criterion 9 — the cutover.** `subsystem-index` writes through `cairn`; the local store
+   becomes a read-only cache (`stat -c %a` = 444, EACCES *watched*, not assumed). 🔴 This is
+   what makes an API write DURABLE — until it lands, every appended bullet is one `seed.sh`
+   from gone. The backup precondition is now satisfied, so this is no longer blocked on it;
+   the read/write **allowlist split** is still this criterion's own job.
+   forcing: none
+5. **Verify criteria 1, 2, 5, 6, 7 against the POD**, not just in tests. Criterion 4 is done
+   there (including the forged-`actor` case); 2's denied-scope arm is done for WRITES (404
+   `scope-unknown`) but not for the three read routes.
+   forcing: none
 6. **Add the `internal-error` alert** in the monitoring config. Without it the dispatch
    backstop turns a dropped connection into a quiet 500 only the audit log sees.
+   forcing: none
 7. **`scripts/cairn` has no write verb** — the CLI still only reads, so nothing can drive the
    write path from the command line.
+   forcing: none
 8. **§5's off-mesh control, still unrun** — from a phone on cellular:
    `curl -si https://store.zacx.dev/api/v1/recall/devrc` (expect 401) and
    `curl -si https://store.zacx.dev/` (expect 404). Cannot be done from any host on the mesh.
+   forcing: none
 9. **devrc #1045** — three pre-existing `seed.sh` gaps. The third (local-side `-type f`
    uncovered) is the mirror of what #998 fixed and the one worth doing.
+   forcing: none
+10. 🔴 **`scripts/provision-vaultwarden-backup-bucket.sh` has an orphaned-credential window,
+    found while auditing #551 and deliberately NOT fixed there** (reordering another app's
+    provisioning does not belong in a subsystem-store PR). It runs `mc ilm rule add` **LAST**,
+    after `mc admin user add` + `policy attach`, and has no pre-flight refusals — so an abort
+    at that last step leaves a live write-capable MinIO key whose secret was never printed.
+    #551's copy fixes this by ordering; the sibling did not get it, and the "read the two
+    scripts against each other" claim has been withdrawn in both places. **Closing condition:**
+    a merged homelab-infra PR moving `ilm rule add` above `user add` in that script.
+    forcing: security
 
 ## Gotchas / decisions / dead-ends
 
@@ -377,50 +370,71 @@ child and a child directory named `*.md` all exit **0**; only the start point yi
   shipped**. Both commits are kept. The live Task's `requests.cpu: 2` matches `origin/trunk` by
   content — so "the fix is not applied yet" is a misreading.
 
+**From #551's seven audit rounds — two that generalise well past this PR:**
+
+- 🔴 **A COMMENT INSIDE AN UNQUOTED HEREDOC EXECUTES ON THE HOST.** `cat > f <<EOF` is
+  unquoted so `${VAR}` interpolates — and so do `` `backticks` `` and `$(…)`. A comment
+  containing `` `mc admin user add` `` RAN it and spliced ~2 KB of usage text into a script
+  that then runs as root inside the MinIO tenant pod. Nothing was damaged (usage text is not
+  valid shell and `set -e` aborts loudly) — that is luck, not design. **No prose in an
+  unquoted heredoc body**; guarded by `scripts/tests/test-provision-heredoc.sh` in
+  homelab-infra, which extracts the body by its delimiters, asserts zero backticks and zero
+  `$( )`, and carries a POSITIVE CONTROL because a grep that finds nothing is
+  indistinguishable from a grep wired to nothing.
+- 🔴 **REMOVING A BAD MECHANISM CAN REMOVE A GOOD SIDE EFFECT WITH IT.** A destructive
+  pre-flight probe (`: > "$OUT"` then `rm -f "$OUT"`) had to go — it was measured deleting a
+  real credential on the refusal path. But `rm` never follows a symlink, so it had also been
+  *accidentally* defusing a dangling-symlink attack; the clean replacement (`[ -e ]`) follows
+  the link and wrote the credential through it. **Ask what the old code was accidentally doing
+  for you.**
+
+**A third, about this kind of work rather than this code:** across rounds 5–7, eleven findings
+and nine were **prose contradicting code** — a claim fixed at one site and left standing at its
+sibling, an enumeration silently scoped to half the flow, a message reworded for one of two
+callers. The code converged after round 3; the narrative did not. When a comment states a
+safety property, it is a claim to test, and the cheapest test is "which sites say this?".
+
+**Verification notes worth keeping:**
+- `shutil.copytree` does **not** raise `FileNotFoundError` for a per-file failure — `_copytree`
+  batches errors into `shutil.Error`, which subclasses `OSError` but **not** `FileNotFoundError`.
+  Only the top-level `scandir` raises FNF. A vanished **subdirectory** bypasses `copy_function`
+  entirely, so an errno-based classifier must also check `os.path.lexists` on the reported
+  source. Measured on python 3.12.14 (the image's version).
+- `kubectl create job --from=cronjob/X` **does** set an ownerReference, so it updates the
+  CronJob's `lastSuccessfulTime`. A hand-rolled standalone Job does not — which is how a
+  CronJob can show a stale success while newer runs of the fixed code have all passed.
+- An `error: superseded by a newer run` commit status from `gitops-validate` is the supersede
+  mechanism, **not** a test failure. Read the description, not the state.
+
 ## How to verify
 
 ```bash
-# the deployed pod is the built artifact, not just the pinned spec
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod -l app=subsystem-store-api \
-  -o jsonpath='{.items[0].status.containerStatuses[0].imageID}{"\n"}'   # sha256:80a7c735… (0.6.0)
+# the backup is Flux-owned, not merely co-existing
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get cronjob subsystem-store-backup \
+  -o jsonpath='{.metadata.labels.kustomize\.toolkit\.fluxcd\.io/name}{"\n"}'   # subsystem-store
 
-# BOTH token rows are loaded — this is criterion 10 step 1's own check
+# it succeeded recently, and the alerts that would notice otherwise are healthy
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get cronjob subsystem-store-backup \
+  -o jsonpath='{.status.lastSuccessfulTime}{"\n"}'
+curl -s "http://192.168.50.94:30909/api/v1/rules?type=alert" | \
+  python3 -c "import json,sys; [print(r['name'], r['state'], r['health']) for g in json.load(sys.stdin)['data']['groups'] if g['name']=='subsystem-store.backup' for r in g['rules']]"
+
+# 🔴 a 200 is not proof — read the artifact back by a route that is NOT the job's own
+KUBECONFIG=$KC_HOMELAB kubectl -n minio-archive exec minio-archive-pool-0-0 -c minio -- sh -c \
+  '. /tmp/minio/config.env; mc alias set arc http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null; \
+   mc cat arc/subsystem-store-backups/latest/LAST_SUCCESS'
+#   then: mc cat the named tar.gz + its .manifest.txt, extract, `sha256sum -c` the manifest,
+#   and `diff -r` against a fresh `kubectl exec ... tar cf -` of /data. Was 1607/1607 + identical.
+
+# the guards
+bash scripts/tests/test-provision-heredoc.sh                      # 7/7, incl. its positive control
+nix-shell -p 'python3.withPackages(ps: [ps.pyyaml])' --run \
+  "bash scripts/tests/test-check-subsystem-store-phase1.sh"       # 25/25
+
+# criterion 10 step 2's gate (do NOT act before 2026-08-31T02:12:28Z)
 POD=$(KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod -l app=subsystem-store-api \
   -o jsonpath='{.items[0].metadata.name}')
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs $POD | head -2
-#   token-ids=2481e4553f6c:legacy,8e1e79bb4664:zach
-#   UNRESTRICTED-SCOPE LEGACY MODE — 1 of 2 …
-
-# the write path is live and legacy still cannot write (env still holds the LEGACY token)
-set -a; . ~/.config/subsystem-store/env; set +a
-curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $SUBSYSTEM_STORE_TOKEN" \
-  -H 'User-Agent: subsystem-store-client/1' "$SUBSYSTEM_STORE_URL/api/v1/recall/devrc"   # 200
-curl -s -o /dev/null -w '%{http_code}\n' -X POST -H "Authorization: Bearer $SUBSYSTEM_STORE_TOKEN" \
-  -H 'User-Agent: subsystem-store-client/1' -H 'Content-Type: application/json' \
-  -d '{"text":"x","session":"v"}' \
-  "$SUBSYSTEM_STORE_URL/api/v1/entry/devrc/agent-ledger/bullets"                          # 403
-
-# 🔴 A 200 IS NOT PROOF — read the bullet back OFF DISK, and diff, do not byte-offset compare
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec $POD -- \
-  cat /data/devrc/subsystem-store-api.md | grep -c '\[cairn: zach/'                       # >= 1
-
-# has the legacy fingerprint gone quiet? (criterion 10 step 2's 24h gate)
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs $POD --since=24h \
-  | grep -c 'token=2481e4553f6c'                                        # must be 0 to proceed
-
-# criterion 8, per host — MUST print zero lines
-POD=$(KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod -l app=subsystem-store-api \
-  -o jsonpath='{.items[0].metadata.name}')
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec $POD -- \
-  sh -c 'cd /data && find . -mindepth 2 -maxdepth 2 ! -path "./.*" -name "*.md" -type f' \
-  | sed 's|^\./||' | LC_ALL=C sort > /tmp/served.txt
-( cd ~/.claude/analyze-service-index && find . -mindepth 2 -maxdepth 2 ! -path './.*' \
-  -name '*.md' -type f ) | sed 's|^\./||' | LC_ALL=C sort > /tmp/local.txt
-LC_ALL=C comm -23 /tmp/local.txt /tmp/served.txt | wc -l     # 0 on workbench; laptop UNRUN
-
-# the seed guard, both tiers (the dev host alone is structurally blind — see #998)
-nix develop <devrc> --command env PYTHONDONTWRITEBYTECODE=1 python -m pytest \
-  <devrc>/scripts/tests/test_subsystem_store_api.py <devrc>/scripts/tests/test_runtime_shebangs.py \
-  -q -p no:randomly                                          # 631 passed, 0 skipped
-nix build <devrc>#checks.x86_64-linux.pytests --no-link      # collected=9809 passed=9809 skipped=0
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod $POD \
+  -o jsonpath='restarts={.status.containerStatuses[0].restartCount} start={.status.startTime}{"\n"}'
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs $POD --since=24h | grep -c 'token=2481e4553f6c'  # must be 0
 ```
