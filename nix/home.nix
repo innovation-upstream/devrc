@@ -1038,6 +1038,15 @@ in
   home.file.".config/activity-collector/changed_paths.py".source =
     ../scripts/collector/changed_paths.py;
 
+  # The mention scanner (source=mentions), imported by claude/session-tailer.py
+  # from the collector ROOT for the same reason changed_paths.py is — and with
+  # the same failure mode if this entry is missing: a green switch, then an
+  # ImportError on the next timer tick that stops the claude summariser dead.
+  # It is ALSO read from the repo by scripts/mention-open.py (the Alacritty hint
+  # handler), which resolves it relative to the checkout, not to this copy.
+  home.file.".config/activity-collector/mention_scan.py".source =
+    ../scripts/collector/mention_scan.py;
+
   # Claude Code activity source (5th source): a periodic tailer that scans the
   # ~/.claude transcripts and emits NEW user-typed messages / slash-commands as
   # source=claude events via the shared emit helper. Symlinked recursively so the

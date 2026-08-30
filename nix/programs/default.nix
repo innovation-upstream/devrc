@@ -10,7 +10,8 @@ let
   tmux = import ./tmux {pkgs=pkgs;};
   git = import ./git {};
   direnv = import ./direnv {};
-  alacritty = import ./alacritty {};
+  # `config` for home.homeDirectory, `pkgs` for the mention-hint wrapper.
+  alacritty = import ./alacritty { inherit pkgs config; };
   k9s = import ./k9s {};
   ranger = import ./ranger {};
 in
