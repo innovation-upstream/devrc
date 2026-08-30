@@ -253,15 +253,29 @@ const DISCORD_ORIGIN_HOST = "cdn.discordapp.com";
  *
  * The READ side must fold identically -- see `haveUrl` in service_worker.js.
  */
+export function discordSourceKey(url) {
+  if (!discordChannelId(url)) return "";
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "";
+  }
+  return `https://${DISCORD_ORIGIN_HOST}${parsed.pathname || "/"}`;
+}
+
 /**
  * THE LEDGER'S KEY FOR ONE URL. One rule, one place.
  *
  * Every site that turns a single URL into a `source_urls` key goes through
- * here: the write in `playerDownload` and the read in `haveUrl`. It was spelled
- * three different ways across two files for exactly one round, and that is
- * precisely how the write and the read came to disagree -- the fold landed on
- * the reader and on one of the two writers, so a lookup asked for a string the
- * other writer never stored.
+ * here: the write in `playerDownload` and the read in `haveUrl`. Those TWO were
+ * spelled differently for exactly one round -- one folded a Discord attachment,
+ * the other did not -- and that is precisely how they came to disagree: a
+ * lookup asked for a string the writer never stored.
+ *
+ * (Two, not three. `buildMatchPayload` also mentions `discordSourceKey`, but it
+ * is a different rule and is excluded below on purpose; counting it here would
+ * contradict the next paragraph.)
  *
  * NOT the same rule as `buildMatchPayload`'s `sourceKey`, and it must not be
  * folded into this. That one arbitrates between TWO candidate keys -- the
@@ -272,17 +286,6 @@ const DISCORD_ORIGIN_HOST = "cdn.discordapp.com";
  */
 export function ledgerSourceKey(url) {
   return discordSourceKey(url) || playerSourceKey(url);
-}
-
-export function discordSourceKey(url) {
-  if (!discordChannelId(url)) return "";
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return "";
-  }
-  return `https://${DISCORD_ORIGIN_HOST}${parsed.pathname || "/"}`;
 }
 
 /**
