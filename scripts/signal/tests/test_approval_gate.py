@@ -867,11 +867,53 @@ def test_reconcile_sent_without_a_note_also_preserves_it(db):
 
 
 def test_a_note_ADDS_to_the_record_rather_than_replacing_it(db):
-    """POSITIVE CONTROL: the preservation above is not "the note is ignored"."""
+    """🔴 RED at 9fb6de75 — it asserted the REPLACEMENT its own name denied.
+
+    Round-2 audit F3, the `reconcile_send` half. `_stranded()` approves with
+    `approval_ref="cg-strand"`, so a passing assertion of
+    `== "checked the thread, nothing there"` was a measurement that the approval
+    reference had been ERASED — `COALESCE(note, approval_ref)` returns the note.
+    The test name claimed the property; the assertion pinned its opposite, and
+    read as coverage while providing none.
+
+    Doubles as the POSITIVE CONTROL for the two preservation tests above: the
+    note is not merely ignored, and both halves of the trail are named here.
+    """
     draft = _stranded(db)
     row = db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_NOT_SENT,
                             note="checked the thread, nothing there")
-    assert row["approval_ref"] == "checked the thread, nothing there"
+    assert row["approval_ref"] == (
+        "cg-strand" + _signal_db.APPROVAL_REF_SEPARATOR
+        + "checked the thread, nothing there")
+
+
+def test_reconcile_SENT_with_a_note_also_appends_rather_than_replacing(db):
+    """🔴 RED at 9fb6de75 (it returned the bare note). Both branches, F3.
+
+    The `--sent` branch carried the identical `COALESCE(%s, approval_ref)`, so
+    recording "it did go out" WITH a note destroyed the approval reference the
+    transmitted message went out under — the worst of the three, because that
+    row is the audit record of a message a third party actually received.
+    """
+    draft = _stranded(db)
+    row = db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_SENT,
+                            server_timestamp="1723900000333",
+                            note="saw it in the thread")
+    assert row["approval_ref"] == (
+        "cg-strand" + _signal_db.APPROVAL_REF_SEPARATOR + "saw it in the thread")
+
+
+def test_an_EMPTY_note_leaves_the_trail_untouched_rather_than_appending_a_separator(db):
+    """A blank `--note` is no note — not a bare separator, and not an erasure.
+
+    `_appended_note()` normalises it to NULL so the `CASE` leaves the column
+    alone. At 9fb6de75 `COALESCE('', approval_ref)` returned `''`, wiping the
+    trail entirely — so this is RED there too, on a different symptom.
+    """
+    draft = _stranded(db)
+    row = db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_NOT_SENT,
+                            note="   ")
+    assert row["approval_ref"] == "cg-strand"
 
 
 def test_reconcile_rejects_an_unknown_outcome(db):

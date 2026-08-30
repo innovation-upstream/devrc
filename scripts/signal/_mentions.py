@@ -129,14 +129,24 @@ def _needle_pattern(needle: str) -> "re.Pattern":
 
     🔴 TWO THINGS THE PLAIN `str.find()` GOT WRONG, both silent:
 
-    * **NO BOUNDARY.** `find("@Ann")` matches INSIDE `"@Anna"`. With members
+    * **NO WORD BOUNDARY.** `find("@Ann")` matches INSIDE `"@Anna"`. With members
       `Ann` and `Anna` and a body `"hi @Anna and @Ann ok"`, `--mention Ann`
       produced span `(3, 4)` — Ann is pinged, Anna's name is the text on screen,
       and the render is corrupted. `(?!\\w)` requires a non-word character (or
-      end of string) immediately after the needle, so a name that is a PREFIX of
-      another member's name can no longer land on them. The scan CONTINUES past
-      a boundary-failing hit rather than refusing, so the real `@Ann` later in
-      that body is still found.
+      end of string) immediately after the needle.
+
+      🔴 `(?!\\w)` IS NOT THE WHOLE PREFIX RULE, AND MUST NOT BE DESCRIBED AS
+      ONE. It blocks only WORD characters, so every member name whose second
+      component is introduced by punctuation — `Ann-Marie`, `Ann.Smith`,
+      `Ann'Marie` — satisfies it and `--mention Ann` landed on the first four
+      characters of somebody ELSE's name anyway (measured, round-2 audit F2).
+      The rest of the rule is member-aware and lives in `find_span`'s `avoid`
+      argument, built by `_colliding_needles()`: a hit is skipped when ANOTHER
+      group member's longer `@name` also matches at that same offset, whatever
+      character separates the parts. Together the two cover "a name that is a
+      prefix of another GROUP MEMBER's name cannot land on them"; neither covers
+      a prefix of an arbitrary non-member string in the body, and no docstring
+      here claims it does.
     * **CASE.** `_resolve_one()` matches names case-INSENSITIVELY (`.lower()`),
       so `--mention ANN` resolved to Ann and then died on `MentionSpanMissing`
       against a body reading `@Ann` — resolution and span search disagreed about
@@ -148,7 +158,8 @@ def _needle_pattern(needle: str) -> "re.Pattern":
     return re.compile(re.escape(needle) + r"(?!\w)", re.IGNORECASE | re.UNICODE)
 
 
-def find_span(body: str, needle: str, *, from_index: int = 0) -> tuple[int, int, int]:
+def find_span(body: str, needle: str, *, from_index: int = 0,
+              avoid=()) -> tuple[int, int, int]:
     """`(code_point_index, start, length)` of `needle` in `body`.
 
     `start`/`length` are UTF-16 code units — the wire units. The code-point index
@@ -156,21 +167,39 @@ def find_span(body: str, needle: str, *, from_index: int = 0) -> tuple[int, int,
     match this span describes; the previous code re-ran `body.find()` to move the
     cursor, a second copy of the predicate that would now disagree with the
     boundary-aware search above.
+
+    `avoid` is a list of OTHER members' `@name` needles that are LONGER than this
+    one. A hit at which any of them also matches is a PREFIX COLLISION — the
+    visible text belongs to the other member — and is SKIPPED, exactly as a
+    `(?!\\w)` failure is skipped, so a genuine later `@who` in the same body is
+    still found. Scanning on rather than refusing is what keeps
+    `"hi @Ann-Marie and @Ann ok"` working.
     """
     body = body or ""
-    match = _needle_pattern(needle).search(body, from_index)
-    if match is None:
-        raise MentionSpanMissing(
-            f"the draft body does not contain {needle!r}"
-            + (f" at or after character {from_index}" if from_index else "")
-            + " as a whole word. A Signal mention REPLACES an existing span of "
-              "the message text, so the text has to be there — and a match that "
-              "runs straight into more letters (`@Ann` inside `@Anna`) is a "
-              "DIFFERENT person's name, not this one. Add it to --body, or drop "
-              "the --mention."
-        )
-    idx = match.start()
-    return idx, utf16_len(body[:idx]), utf16_len(needle)
+    pattern = _needle_pattern(needle)
+    longer = [_needle_pattern(a) for a in (avoid or ())]
+    pos = from_index
+    while True:
+        match = pattern.search(body, pos)
+        if match is None:
+            raise MentionSpanMissing(
+                f"the draft body does not contain {needle!r}"
+                + (f" at or after character {from_index}" if from_index else "")
+                + " as a whole word that is not part of another member's name. A "
+                  "Signal mention REPLACES an existing span of the message text, "
+                  "so the text has to be there — and a match that runs straight "
+                  "into more letters (`@Ann` inside `@Anna`) or into the rest of "
+                  "another member's name (`@Ann` inside `@Ann-Marie`) is a "
+                  "DIFFERENT person's name, not this one. Add it to --body, or "
+                  "drop the --mention."
+            )
+        idx = match.start()
+        if not any(p.match(body, idx) for p in longer):
+            return idx, utf16_len(body[:idx]), utf16_len(needle)
+        # A longer member name occupies this offset. Step ONE character, not one
+        # needle: the skipped text belongs to somebody else and may itself
+        # contain the needle again.
+        pos = idx + 1
 
 
 def utf16_span(body: str, needle: str, *, from_index: int = 0) -> tuple[int, int]:
@@ -210,10 +239,20 @@ def _contact_author(contact: dict) -> str:
     return (contact.get("signal_uuid") or contact.get("phone_number") or "")
 
 
-def _contact_names(contact: dict) -> set[str]:
-    return {str(n).strip().lower()
+def _contact_names_raw(contact: dict) -> set[str]:
+    """The stored names AS WRITTEN. Used to build `@name` needles.
+
+    Kept un-folded on purpose: `str.lower()` can CHANGE LENGTH (`İ` → two code
+    points), and a needle built from a folded name would no longer be the text
+    that is actually in the body.
+    """
+    return {str(n).strip()
             for n in (contact.get("display_name"), contact.get("profile_name"))
             if str(n or "").strip()}
+
+
+def _contact_names(contact: dict) -> set[str]:
+    return {n.lower() for n in _contact_names_raw(contact)}
 
 
 # --------------------------------------------------------------------------- #
@@ -259,16 +298,55 @@ def resolve_mentions(identifiers, *, body: str, members, contacts,
     for ident in idents:
         author = _resolve_one(ident, member_set=member_set, candidates=candidates)
         needle = "@" + ident
-        idx, start, length = find_span(body or "", needle,
-                                       from_index=cursor_for.get(needle, 0))
+        # 🔴 THE CURSOR KEY IS CASEFOLDED, BECAUSE THE MATCHER IS CASE-INSENSITIVE.
+        # `_needle_pattern` compiles with `re.IGNORECASE`, so `@Ann` and `@ANN`
+        # are the SAME needle to the search — but keying the cursor on the raw
+        # string made them two dict entries, both starting from 0, both landing
+        # on the same first occurrence. `--mention Ann --mention ANN` against
+        # `"hi @Ann and @ANN ok"` then produced two identical spans and was
+        # refused by `_refuse_overlapping_spans` with a message telling the
+        # operator to give each mention its own `@who` text — which the body
+        # already had. Round-2 audit F1; the key must fold exactly as the
+        # matcher does. `casefold()` may change LENGTH, which is why it is used
+        # only as a dict key and never to compute an offset.
+        key = needle.casefold()
+        idx, start, length = find_span(
+            body or "", needle, from_index=cursor_for.get(key, 0),
+            avoid=_colliding_needles(ident, author=author, candidates=candidates))
         # Advance THIS needle's cursor past the occurrence just claimed, so
         # `--mention Ann --mention Ann` takes the first and second "@Ann" rather
         # than pointing both mentions at the same span. Derived from the match
         # `find_span` returned, NOT from a second search.
-        cursor_for[needle] = idx + len(needle)
+        cursor_for[key] = idx + len(needle)
         out.append({"author": author, "start": start, "length": length})
     _refuse_overlapping_spans(out)
     return out
+
+
+def _colliding_needles(ident: str, *, author: str, candidates: list) -> list[str]:
+    """`@name` needles of OTHER group members that are LONGER than `@ident`.
+
+    🔴 THE HALF OF THE PREFIX RULE `(?!\\w)` CANNOT DO. The right-hand word
+    boundary blocks `@Ann` inside `@Anna` but NOT inside `@Ann-Marie` or
+    `@Ann.Smith` — a hyphen and a dot are both non-word characters, so the
+    boundary is satisfied and the mention landed on the first four characters of
+    a different member's name while the text on screen stayed theirs. Handing
+    the other members' full names to `find_span` closes that for ANY separator,
+    because the test is "does a longer member name occupy this exact offset",
+    not "which characters are allowed to follow".
+
+    Restricted to OTHER authors: a contact with `display_name="Ann"` and
+    `profile_name="Ann Marie"` is one person, and their own longer name must not
+    veto their own ping. Restricted to LONGER names because an equal-length
+    match IS this identifier (the matcher is case-insensitive), which is the
+    `MentionNameAmbiguous` case and belongs to `_resolve_one`.
+    """
+    width = len(ident.strip())
+    return ["@" + name
+            for contact in (candidates or [])
+            if _contact_author(contact) != author
+            for name in _contact_names_raw(contact)
+            if len(name) > width]
 
 
 def _refuse_overlapping_spans(mentions: list) -> None:

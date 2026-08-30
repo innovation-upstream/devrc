@@ -98,10 +98,29 @@ The body must already contain the literal `@<who>`. Signal REPLACES that span wi
 `@DisplayName` on the receiving client, so if the text is not there, there is nothing
 to replace. The match is **case-insensitive** (so `--mention ANN` finds `@Ann` — name
 resolution has always been case-insensitive, and the span search now agrees with it)
-and is **bounded on the right**: `@Ann` will not match inside `@Anna`, so a member
-whose name is a PREFIX of another member's cannot steal their ping. Two mentions whose
-spans **overlap** are refused (`MentionSpansOverlap`) — overlapping spans are two
-rewrites of the same characters and what the recipient renders is undefined.
+and is **bounded on the right** by two rules working together, because one is not
+enough:
+
+- a **word boundary** — `@Ann` will not match inside `@Anna`;
+- a **member-aware prefix check** — a hit where another GROUP MEMBER's longer
+  `@name` starts at the same offset is skipped, whatever separates the parts. The
+  word boundary alone let `@Ann` land inside `@Ann-Marie`, `@Ann.Smith`,
+  `@Ann'Marie` and `@Ann Smith`, because a hyphen, a dot, an apostrophe and a
+  space are all non-word characters: Ann was pinged while the visible text
+  stayed the other member's name.
+
+Together: a name that is a prefix of **another group member's** name cannot steal
+their ping. Note the scope — this is about *member* names. `@Ann` in a body reading
+`@Ann-the-dog`, where no member is called `Ann-the-dog`, still matches, and ordinary
+punctuation after a mention (`thanks @Ann.`) still matches, which is the point of
+making the rule member-aware rather than banning punctuation. If no non-colliding
+occurrence exists the draft is **refused** (`MentionSpanMissing`), never sent with the
+wrong span.
+
+Two mentions whose spans **overlap** are refused (`MentionSpansOverlap`) — overlapping
+spans are two rewrites of the same characters and what the recipient renders is
+undefined. (Reachable when one person carries two stored names, e.g. `display_name`
+`Ann` and `profile_name` `Ann Smith`, and both are mentioned.)
 
 🔴 **Every failure is a REFUSAL (exit 3), never a silent drop** — a mention pushes a
 notification through the recipient's mute settings and names a third party, so
@@ -312,17 +331,32 @@ composes and transmits**.
    hashing it made "DM someone new, then their first message arrives" refuse the
    send with no adversary involved.
 
-   ⚠️ **Before rolling this out, drain the pre-existing approvals.** Drafts
-   approved *before* `approved_digest` existed carry NULL and fail closed on the
-   first `send`. Find them first:
+   ⚠️ **Drain the pre-existing approvals — as the FIRST step AFTER this ships,
+   before anyone runs `send`.** Drafts approved *before* `approved_digest`
+   existed carry NULL and fail closed on the first `send`.
 
-   ```sql
-   SELECT id, send_state, approval_ref FROM signal.messages
-    WHERE send_state = 'approved' AND approved_digest IS NULL;
-   ```
+   🔴 The order matters and the old wording had it backwards ("before rolling
+   this out"). Every tool the recovery needs — the `approved_digest` column, the
+   `unapprove` command — ships **in this change**: the column is created by
+   `ensure_schema()` on consumer start, and `unapprove` does not exist on the
+   previous revision. So the procedure is only executable once the new consumer
+   is running, and it is not urgent before then, because the old revision does
+   not enforce the digest and those drafts send normally there. The window to
+   worry about is deploy → first `send`, not before deploy.
 
-   Each one is recovered the same way: read it (`drafts --state approved`), then
-   `unapprove <id> --note "pre-digest approval"` and `approve <id> --ref <ref>`.
+   1. Deploy, and let the consumer start (that is what runs `ensure_schema()`
+      and adds the column).
+   2. Find them:
+
+      ```sql
+      SELECT id, send_state, approval_ref FROM signal.messages
+       WHERE send_state = 'approved' AND approved_digest IS NULL;
+      ```
+
+   3. Recover each one the same way: read it (`drafts --state approved`), then
+      `unapprove <id> --note "pre-digest approval"` and `approve <id> --ref <ref>`.
+      The note is **appended** to `approval_ref`, so the original reference stays
+      in the row alongside it — the trail reads `"<old-ref> | pre-digest approval"`.
 
 Every refusal raises **`SendGateError`**. `scripts/signal/tests/test_approval_gate.py`
 attempts six documented bypasses and requires each to fail with that error.

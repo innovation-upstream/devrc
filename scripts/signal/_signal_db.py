@@ -88,6 +88,46 @@ APPROVAL_TOKEN_ENV = "SIGNAL_APPROVAL_TOKEN"
 RECONCILE_SENT = "sent"
 RECONCILE_NOT_SENT = "not-sent"
 
+# 🔴 `approval_ref` IS AN APPEND-ONLY AUDIT TRAIL, AND ONE SQL FRAGMENT SAYS SO.
+#
+# `approve_draft()` writes the clawgate reference the operator's decision is
+# recorded under; `unapprove_draft()` and BOTH branches of `reconcile_send()`
+# then record an operator NOTE on the same single TEXT column. Those three used
+# `approval_ref = COALESCE(%s, approval_ref)`, whose docstrings all claimed the
+# trail was "added to, never erased" — and COALESCE returns its FIRST non-null
+# argument, so passing a note returned THE NOTE and destroyed the reference to
+# the approval the refused attempt actually rode on. Exactly the documented
+# usage (`SKILL.md`: `unapprove 42 --note "..."`) was the case that erased it.
+# Round-2 audit F3; the reconcile half carried the identical defect under a
+# comment asserting the opposite ("A note ADDS to the record; it never replaces
+# it") and a test whose NAME said so while its assertion pinned the replacement.
+#
+# ONE fragment, three call sites, so the three cannot drift apart again — the
+# shape that produced this bug twice. The parameter appears TWICE, so every call
+# site binds the note twice; `_appended_note()` normalises a blank note to NULL
+# first, or an empty `--note` would append a bare separator.
+_APPEND_APPROVAL_REF = (
+    "approval_ref = CASE WHEN %s IS NULL THEN approval_ref "
+    "ELSE COALESCE(approval_ref || %s, %s) END"
+)
+# What separates one entry from the next in the trail. Read by the tests.
+APPROVAL_REF_SEPARATOR = " | "
+
+
+def _appended_note(note):
+    """`(note_or_none, suffix, first)` — the three binds `_APPEND_APPROVAL_REF` wants.
+
+    A blank or missing note is NULL, so the fragment's `CASE` leaves the column
+    untouched. A real note is appended after `APPROVAL_REF_SEPARATOR` when the
+    column already holds something, and stands alone when it does not — which is
+    what the `COALESCE(approval_ref || %s, %s)` expresses: `||` with a NULL left
+    operand is NULL in both Postgres and sqlite, so the fallback is the bare note.
+    """
+    text = (note or "").strip() if isinstance(note, str) else note
+    if not text:
+        return (None, None, None)
+    return (text, APPROVAL_REF_SEPARATOR + str(text), str(text))
+
 
 # --------------------------------------------------------------------------- #
 # Schema — the single source of truth. Tests DERIVE from these statements rather
@@ -518,6 +558,15 @@ def _mint_send_authorization(draft: dict) -> SendAuthorization:
     # notification through a mute setting and names a third party, so a payload
     # that gained, lost or re-pointed one after approval is a DIFFERENT act from
     # the one on the card. Bound here; verified in `spend_authorization()`.
+    #
+    # WHICH WINDOW THIS SLOT COVERS, precisely (round-2 audit F4): it is the
+    # values read by `send_approved()`'s FIRST `_draft_or_raise()`, and
+    # `spend_authorization()` compares them against the SECOND read taken after
+    # the row is claimed. So these slots cover the mint-read → POST-read gap and
+    # nothing before it. The approve → mint half is covered by a DIFFERENT
+    # mechanism a few lines up: `approved_digest` vs `draft_payload_digest()`.
+    # Between them the whole approve → POST window is covered, but by two
+    # guards, not by this one.
     object.__setattr__(auth, "mentions",
                        _mentions.canonical_mentions(draft.get("mentions")))
     nonce = uuid.uuid4().hex
@@ -538,12 +587,29 @@ def spend_authorization(auth: object, *, recipient, body, mentions) -> None:
     🔴 (c) IS THE NEW HALF, AND WHY THE ARGUMENTS ARE REQUIRED KEYWORDS. Until
     it existed the capability authorised "a transmit for draft N" and NOTHING
     about the message: `auth.recipient` and `auth.body` were populated at mint
-    and then read by nobody, so anything that changed the row between approval
-    and the POST — a concurrent writer, a second agent, a bug — sent text a human
-    never saw, under an approval a human really did give. Mentions make that
-    window materially worse: they notify third parties through mute settings, so
-    a mutated mention array is an act against someone who is not in the
-    conversation you approved.
+    and then read by nobody, so a writer that changed the row before the POST
+    sent text a human never saw, under an approval a human really did give.
+    Mentions make that window materially worse: they notify third parties
+    through mute settings, so a mutated mention array is an act against someone
+    who is not in the conversation you approved.
+
+    🔴 WHAT THIS COMPARISON COVERS, AND WHAT IT DOES NOT (round-2 audit F4 — the
+    docstring used to say "between approval and the POST", which is wider than
+    the code). `auth` was minted from `send_approved()`'s FIRST read of the row;
+    the values passed here come from its SECOND read, taken after the claim. So
+    this closes the **mint-read → POST-read** gap only. The **approve → mint**
+    half is closed separately and by a different instrument: `approve_draft()`
+    stores `approved_digest` and `_mint_send_authorization()` refuses to mint
+    unless the row still hashes to it. Two guards, one window between them —
+    stated as two claims because they fail independently, and a reader who
+    believes this one covers both would not notice the digest going missing.
+
+    One more difference worth naming: the digest hashes a CANONICAL recipient
+    identity (`recipient_identity()` — the contact/group ROW ID), while the
+    comparison here is against the recipient STRING `get_draft()` renders. That
+    string legitimately flips from a number to a uuid when `_promote_
+    placeholder()` learns a real uuid, which is why the digest does not hash it;
+    within the narrow window this guard covers, a flip is a real second writer.
 
     The three parameters have NO DEFAULTS on purpose. A default would let a call
     site silently opt out of the binding by omitting them, which is exactly the
@@ -912,7 +978,13 @@ class SignalDB:
 
         Including the `ALTER TABLE … ADD COLUMN IF NOT EXISTS` migration, which
         is idempotent for the same reason and is pinned by
-        `test_mentions.py::test_ensure_schema_twice_is_a_no_op`.
+        `test_pg_type_compat.py::test_ensure_schema_is_idempotent_on_real_postgres`
+        — the PG-TIER test, which is where the claim can actually be measured.
+        `test_mentions.py::test_ensure_schema_twice_is_a_no_op_ON_THE_SQLITE_
+        SUBSTRATE` also runs it twice, but the substrate EMULATES
+        `ADD COLUMN IF NOT EXISTS` (see `tests/fakepg.py`), so what it observes
+        is the emulation, not Postgres. The old pointer here named that test by
+        its pre-rename name and so read as a Postgres claim it never made.
         """
         with self._c.cursor() as cur:
             for stmt in SCHEMA_STATEMENTS:
@@ -1730,8 +1802,14 @@ class SignalDB:
         row must never carry a stale one, or the next `approve` would be checked
         against a digest it did not write.
 
-        `note` is recorded on `approval_ref` when given, and COALESCEd like
-        `reconcile_send`'s so the audit trail is added to, never erased.
+        `note` is APPENDED to `approval_ref` when given — see
+        `_APPEND_APPROVAL_REF`, the one fragment this and both `reconcile_send`
+        branches share. 🔴 It used to be `COALESCE(%s, approval_ref)`, which
+        returns the NOTE when a note is given: the documented usage
+        (`unapprove 42 --note "body was edited after approval"`) therefore
+        DESTROYED the reference to the approval the refused send rode on, in the
+        one scenario this command exists for. Round-2 audit F3. The trail now
+        reads `"<approval-ref> | <note>"`, and passing no note leaves it alone.
         """
         if not os.environ.get(APPROVAL_TOKEN_ENV):
             raise SendGateError(
@@ -1755,9 +1833,9 @@ class SignalDB:
         self._transition(
             draft_id,
             "UPDATE signal.messages SET send_state = %s, approved_digest = NULL, "
-            "approval_ref = COALESCE(%s, approval_ref) "
-            "WHERE id = %s AND send_state = %s",
-            (STATE_PENDING, note, draft_id, STATE_APPROVED),
+            + _APPEND_APPROVAL_REF
+            + " WHERE id = %s AND send_state = %s",
+            (STATE_PENDING, *_appended_note(note), draft_id, STATE_APPROVED),
             expected=STATE_APPROVED,
             what="withdraw the approval",
         )
@@ -2066,24 +2144,28 @@ class SignalDB:
                 draft_id,
                 "UPDATE signal.messages SET message_timestamp = %s, "
                 "send_state = %s, message_type = 'message', "
-                "approval_ref = COALESCE(%s, approval_ref) "
-                "WHERE id = %s AND send_state = %s",
-                (server_ts, STATE_SENT, note, draft_id, STATE_SENDING),
+                + _APPEND_APPROVAL_REF
+                + " WHERE id = %s AND send_state = %s",
+                (server_ts, STATE_SENT, *_appended_note(note), draft_id,
+                 STATE_SENDING),
                 expected=STATE_SENDING,
                 what="reconcile as sent",
             )
         else:
-            # COALESCE in BOTH branches. A bare `approval_ref = %s` here erased
-            # the recorded approval whenever the operator passed no `--note` —
-            # deleting the audit record of the very approval the attempt rode on,
-            # which is the thing `approve_draft`'s docstring stakes D3 on. A note
-            # ADDS to the record; it never replaces it.
+            # 🔴 THE SAME FRAGMENT IN BOTH BRANCHES — and it is an APPEND now,
+            # not a COALESCE. A bare `approval_ref = %s` here erased the recorded
+            # approval whenever the operator passed no `--note`; COALESCE fixed
+            # that half and left the other one broken, erasing it whenever the
+            # operator DID pass a note, under a comment claiming "a note ADDS to
+            # the record; it never replaces it". Round-2 audit F3: the comment is
+            # now true, and both branches share `_APPEND_APPROVAL_REF` with
+            # `unapprove_draft` so no third variant can appear.
             self._transition(
                 draft_id,
                 "UPDATE signal.messages SET send_state = %s, "
-                "approval_ref = COALESCE(%s, approval_ref) "
-                "WHERE id = %s AND send_state = %s",
-                (STATE_PENDING, note, draft_id, STATE_SENDING),
+                + _APPEND_APPROVAL_REF
+                + " WHERE id = %s AND send_state = %s",
+                (STATE_PENDING, *_appended_note(note), draft_id, STATE_SENDING),
                 expected=STATE_SENDING,
                 what="reconcile as not-sent",
             )

@@ -1010,11 +1010,69 @@ def test_unapprove_refuses_anything_that_is_not_approved(db):
 
 def test_unapprove_does_not_erase_the_approval_ref_when_given_no_note(db):
     """The audit record of the approval the attempt rode on is ADDED to, never
-    replaced — the same COALESCE `reconcile_send` needed."""
+    replaced. GREEN at 9fb6de75 — this half always worked."""
     draft = _group_draft(db)
     db.approve_draft(draft["id"], approval_ref="clawgate-task-777")
     db.unapprove_draft(draft["id"])
     assert db.get_draft(draft["id"])["approval_ref"] == "clawgate-task-777"
+
+
+def test_unapprove_WITH_A_NOTE_appends_rather_than_erasing_the_approval_ref(db):
+    """🔴 RED at 9fb6de75 — it returned the bare note. Round-2 audit F3.
+
+    THE DOCUMENTED USAGE. `SKILL.md` tells the operator to run
+    `unapprove 42 --note "body was edited after approval"` after a refused send,
+    and `COALESCE(%s, approval_ref)` returns its FIRST non-null argument — so
+    the note REPLACED `clawgate-task-778`, destroying the audit record of the
+    approval that the refused attempt rode on, in the exact scenario the command
+    exists for. The docstring above the SQL said the trail was "added to, never
+    erased".
+
+    The test that shipped with the command only exercised the no-note path while
+    its docstring claimed the property for both. This is the note path.
+    """
+    draft = _group_draft(db)
+    db.approve_draft(draft["id"], approval_ref="clawgate-task-778")
+    db.unapprove_draft(draft["id"], note="body was edited after approval")
+    ref = db.get_draft(draft["id"])["approval_ref"]
+    assert ref == ("clawgate-task-778" + _signal_db.APPROVAL_REF_SEPARATOR
+                   + "body was edited after approval")
+    # BOTH halves named, so an implementation that keeps only one cannot pass.
+    assert "clawgate-task-778" in ref
+    assert "body was edited after approval" in ref
+    # 🔴 The separator is pinned as a LITERAL here, once. Every other assertion
+    # in this file builds its expectation FROM `APPROVAL_REF_SEPARATOR`, so a
+    # mutant that empties it would weld two entries into `"cg-778body was …"`
+    # and survive them all — the constant cannot check itself.
+    assert _signal_db.APPROVAL_REF_SEPARATOR == " | "
+
+
+def test_the_trail_appends_WITHIN_a_cycle_and_a_fresh_approve_RESETS_it(db):
+    """🔴 THE EXACT SCOPE OF "APPEND ONLY", stated so nothing wider is claimed.
+
+    `unapprove` and `reconcile` APPEND — that is F3, and it is what makes the
+    approval a refused attempt rode on survivable. `approve_draft` still writes
+    `approval_ref = %s`, i.e. it RESETS: a new approval is a new decision under a
+    new clawgate reference, and `SKILL.md` documents it that way. So the column
+    accumulates within one approve→withdraw cycle and starts over at the next
+    `approve`. NOT changed here — the audit asked for the append, not for an
+    unbounded log in a single TEXT column.
+
+    RED at 9fb6de75 on the second assertion (it read `"note-2"` alone, the
+    reference erased). The first is an INVARIANT GUARD on the reset, green there.
+    """
+    draft = _group_draft(db)
+    db.approve_draft(draft["id"], approval_ref="cg-1")
+    db.unapprove_draft(draft["id"], note="note-1")
+    assert db.get_draft(draft["id"])["approval_ref"] == (
+        "cg-1" + _signal_db.APPROVAL_REF_SEPARATOR + "note-1")
+
+    db.approve_draft(draft["id"], approval_ref="cg-2")
+    assert db.get_draft(draft["id"])["approval_ref"] == "cg-2", \
+        "a fresh approve opens a new decision and REPLACES the reference"
+    db.unapprove_draft(draft["id"], note="note-2")
+    assert db.get_draft(draft["id"])["approval_ref"] == (
+        "cg-2" + _signal_db.APPROVAL_REF_SEPARATOR + "note-2")
 
 
 # --- finding 2: the digest bound a RENDERED PROJECTION ---------------------- #
@@ -1181,16 +1239,27 @@ def test_a_mention_at_the_very_END_of_the_body_still_matches():
 def test_OVERLAPPING_spans_are_refused_with_their_own_error():
     """🔴 Boundary-legal and still overlapping. Red at 182c3280 (it sent both).
 
-    Members `Ann` and `Ann Smith`, body `"@Ann Smith please"`. `@Ann` is followed
-    by a SPACE, so the word boundary is satisfied — and the two spans are (0,4)
-    and (0,10). Two rewrites of the same characters; what the recipient renders
-    is undefined.
+    ONE person carrying TWO stored names — `display_name="Ann"` and
+    `profile_name="Ann Smith"` — and a body `"@Ann Smith please"`. `@Ann` is
+    followed by a SPACE, so the word boundary is satisfied, and the two spans
+    are (0,4) and (0,10). Two rewrites of the same characters; what the
+    recipient renders is undefined.
+
+    🔴 THE FIXTURE MOVED, AND THE REASON MATTERS. It used to give the two names
+    to two DIFFERENT members. Round-2 audit F2 made a name that is a prefix of
+    another MEMBER's name refuse earlier and more precisely, as
+    `MentionSpanMissing` — see
+    `test_a_member_whose_name_is_a_SPACE_separated_prefix_of_another_members_is_refused`,
+    which pins that. `_colliding_needles()` deliberately does NOT veto a
+    person's own longer name against their own ping, so the same-author shape
+    still reaches this guard — and it is a real one: a promoted contact really
+    can carry both a display name and a longer profile name.
     """
     contacts = [
         {"signal_uuid": ANN_UUID, "phone_number": None, "display_name": "Ann",
-         "profile_name": None, "is_placeholder": False},
+         "profile_name": "Ann Smith", "is_placeholder": False},
         {"signal_uuid": BOB_UUID, "phone_number": None,
-         "display_name": "Ann Smith", "profile_name": None,
+         "display_name": "Bob", "profile_name": None,
          "is_placeholder": False},
     ]
     with pytest.raises(_mentions.MentionSpansOverlap) as exc:
@@ -1246,6 +1315,143 @@ def test_case_insensitive_matching_did_not_break_the_utf16_offsets():
     assert body.casefold().find("@ann") == 11, "and .casefold() shifts it further"
     assert _resolve(["ann"], body) == [
         {"author": ANN_UUID, "start": 9, "length": 4}]
+
+
+# --- round-2 F1: the cursor was case-SENSITIVE, the matcher case-INSENSITIVE - #
+def test_two_DIFFERENTLY_CASED_mentions_of_one_person_take_SUCCESSIVE_spans():
+    """🔴 RED at 9fb6de75 with `MentionSpansOverlap`. Round-2 audit F1.
+
+    `_needle_pattern` compiles with `re.IGNORECASE`, but `resolve_mentions`
+    keyed its per-needle search cursor on the RAW `"@" + ident`. `--mention Ann
+    --mention ANN` therefore created TWO dict entries, both starting from
+    cursor 0, and both matched the SAME first occurrence — two identical spans,
+    which the overlap guard then refused with "Give each mention its own `@who`
+    text in --body" while the body already had two distinct ones.
+
+    A draft that WORKED at 182c3280 (`[(3,4), (12,4)]`) was refused at
+    9fb6de75, so this is a regression test, not an invariant guard. The two
+    spans are pinned as literals: an implementation that folds the key but not
+    the cursor arithmetic cannot make these numbers agree.
+    """
+    out = _resolve(["Ann", "ANN"], "hi @Ann and @ANN ok")
+    assert out == [{"author": ANN_UUID, "start": 3, "length": 4},
+                   {"author": ANN_UUID, "start": 12, "length": 4}]
+
+
+def test_the_case_folded_cursor_still_REFUSES_when_there_is_only_one_occurrence():
+    """The fold must move the cursor, not disable it.
+
+    A key-folding change that also stopped ADVANCING the cursor would make the
+    test above pass and silently point two mentions at one `@Ann` again. With
+    only one occurrence in the body the second `--mention` must still run out of
+    text.
+
+    RED at 9fb6de75 — MEASURED, not assumed: it raised `MentionSpansOverlap`
+    there, because both mentions claimed span (3,4). The refusal was right by
+    accident and for the wrong reason; the class asserted here is the one that
+    says what is actually wrong with the draft.
+    """
+    with pytest.raises(MentionSpanMissing):
+        _resolve(["Ann", "ANN"], "hi @Ann ok")
+
+
+# --- round-2 F2: `(?!\w)` is narrower than "a prefix of another member" ----- #
+@pytest.mark.parametrize("other_name, body", [
+    ("Ann-Marie", "hi @Ann-Marie ok"),
+    ("Ann.Smith", "hi @Ann.Smith ok"),
+    ("Ann'Marie", "hi @Ann'Marie ok"),
+])
+def test_a_PUNCTUATED_member_name_no_longer_steals_a_shorter_members_ping(
+        other_name, body):
+    """🔴 RED at 9fb6de75 — it returned `{author: Ann, start: 3, length: 4}`.
+
+    Round-2 audit F2. `(?!\\w)` blocks only WORD characters, so a hyphen, a dot
+    or an apostrophe in another member's name satisfied the boundary and
+    `--mention Ann` landed on the first four characters of THEIR name: Ann is
+    pinged, the text on screen is corrupted mid-word, and nothing refused. That
+    is the exact failure the boundary docstring claimed to have removed.
+
+    Parametrised over three separators on purpose — a fix that special-cases the
+    hyphen passes one case and fails the other two.
+    """
+    contacts = [
+        {"signal_uuid": ANN_UUID, "phone_number": None, "display_name": "Ann",
+         "profile_name": None, "is_placeholder": False},
+        {"signal_uuid": BOB_UUID, "phone_number": None,
+         "display_name": other_name, "profile_name": None,
+         "is_placeholder": False},
+    ]
+    with pytest.raises(MentionSpanMissing) as exc:
+        _resolve(["Ann"], body, members=[ANN_UUID, BOB_UUID], contacts=contacts)
+    assert "another member's name" in str(exc.value)
+
+    # POSITIVE CONTROL, same fixture: the LONGER name is still mentionable, and
+    # a real `@Ann` later in the same body is still found. Without these two a
+    # `raise MentionSpanMissing` at the top of `find_span` would pass the above.
+    assert _resolve([other_name], body, members=[ANN_UUID, BOB_UUID],
+                    contacts=contacts) == [
+        {"author": BOB_UUID, "start": 3, "length": len(other_name) + 1}]
+    assert _resolve(["Ann"], body.replace(" ok", " and @Ann ok"),
+                    members=[ANN_UUID, BOB_UUID], contacts=contacts) == [
+        {"author": ANN_UUID, "start": len(other_name) + 9, "length": 4}]
+
+
+def test_a_member_whose_name_is_a_SPACE_separated_prefix_of_another_members_is_refused():
+    """🔴 RED at 9fb6de75 — it SENT `{author: Ann, start: 0, length: 4}`.
+
+    The space-separated case of the same defect, and the one the old
+    `test_OVERLAPPING_spans_are_refused_with_their_own_error` fixture only ever
+    caught when BOTH names were mentioned. With `--mention Ann` alone against
+    members `Ann` and `Ann Smith` and a body `"@Ann Smith please"`, 9fb6de75
+    returned a span over `Ann Smith`'s first four characters with no refusal at
+    all — the overlap guard never ran, because there was only one mention.
+    """
+    contacts = [
+        {"signal_uuid": ANN_UUID, "phone_number": None, "display_name": "Ann",
+         "profile_name": None, "is_placeholder": False},
+        {"signal_uuid": BOB_UUID, "phone_number": None,
+         "display_name": "Ann Smith", "profile_name": None,
+         "is_placeholder": False},
+    ]
+    with pytest.raises(MentionSpanMissing):
+        _resolve(["Ann"], "@Ann Smith please", members=[ANN_UUID, BOB_UUID],
+                 contacts=contacts)
+
+
+def test_a_members_OWN_longer_name_does_not_veto_their_own_ping():
+    """🔴 The collision rule must be scoped to OTHER authors.
+
+    One contact carrying `display_name="Ann"` and `profile_name="Ann Smith"` is
+    ONE person — a routine shape after `_promote_placeholder()` learns a profile
+    name. A collision rule that ignored authorship would refuse `--mention Ann`
+    against `"@Ann Smith please"` on the strength of that person's own other
+    name, i.e. refuse a ping at the very person who was asked for.
+
+    GREEN at 9fb6de75 (no collision rule existed) — an INVARIANT GUARD on the
+    new rule's scope, not regression coverage.
+    """
+    contacts = [
+        {"signal_uuid": ANN_UUID, "phone_number": None, "display_name": "Ann",
+         "profile_name": "Ann Smith", "is_placeholder": False},
+    ]
+    assert _resolve(["Ann"], "@Ann Smith please", members=[ANN_UUID],
+                    contacts=contacts) == [
+        {"author": ANN_UUID, "start": 0, "length": 4}]
+
+
+def test_ordinary_punctuation_after_a_mention_still_matches():
+    """🔴 The collision rule is MEMBER-AWARE, not a wider punctuation ban.
+
+    Refusing every non-word character after the needle would have been the cheap
+    fix, and it breaks ordinary English: `"thanks @Ann."` and `"@Ann-please"`
+    have no colliding member behind them and must still resolve. This is the
+    negative control that separates "member-aware" from "punctuation-phobic".
+
+    GREEN at 9fb6de75 — an INVARIANT GUARD, not regression coverage.
+    """
+    for body, start in [("thanks @Ann.", 7), ("@Ann-please", 0), ("@Ann's dog", 0)]:
+        assert _resolve(["Ann"], body) == [
+            {"author": ANN_UUID, "start": start, "length": 4}], body
 
 
 # --- finding 5: refusal messages leaked the whole group roster -------------- #

@@ -1156,9 +1156,18 @@ def mention_author_names(db, mentions) -> dict:
     """`{author: display name}` for a resolved mentions array. For the CARD.
 
     The card's job is to tell a HUMAN who a draft will ping, and `author` is
-    usually a bare uuid. Looked up through the same `contacts_by_identifiers`
-    the resolver used, so the name on the card and the name the resolver matched
-    come from one query.
+    usually a bare uuid.
+
+    🔴 A SECOND QUERY, NOT THE RESOLVER'S. It goes through the same
+    `contacts_by_identifiers` METHOD, but with a different identifier list — the
+    resolved `author` ids, not the group's full membership — so it is a separate
+    round trip against a table that ordinary ingest is writing to concurrently.
+    The docstring used to claim the two "come from one query"; they do not, and
+    a promotion landing in between can legitimately make the card print a name
+    the resolver did not see. That is a display-time difference only: the
+    `author` on the wire is the one the resolver returned, and it is what the
+    approval digest binds. Named rather than papered over, because a reader who
+    believed "one query" would treat a disagreement as impossible.
     """
     if not mentions:
         return {}
