@@ -412,3 +412,66 @@ def test_resolve_targets_flags_a_nonexistent_root(tmp_path):
     docs, per_root = HA.resolve_targets([str(tmp_path / "nope")])
     assert docs == []
     assert per_root == [(str(tmp_path / "nope"), None)]
+
+
+# --- round 2: the corpus SHOUTS a terminal status, so case is the discriminator ---
+
+FAIL_CLOSED = """# Handoff: t — 2026-08-29
+
+## Open investigations — live diagnosis state
+### The fail-closed backstop is unexercised
+- still open.
+
+### The Redis-key drift class is bounded, not closed
+- also still open.
+
+### Everything else is **CLOSED** — verified
+- done.
+"""
+
+
+def test_resolved_head_is_case_sensitive_on_purpose(tmp_path):
+    """🔴 RED if `re.I` is ever re-added to RESOLVED_HEAD.
+
+    Round 1 added it, reasoning that the sibling RETRACTED carries re.I so the
+    inconsistency must be the defect. Backwards: this corpus SHOUTS a terminal
+    status, so the capitals are the discriminator. Measured on the real corpus,
+    re.I added 12,902 B over 10 blocks and 10 of 10 were inversions — including
+    two headings that literally read `not closed` and `unresolved, and
+    deliberately not resolved`, and three where `fail-closed` is a term of art.
+
+    Both directions in one fixture: the two lower-case headings must NOT match,
+    the shouted one MUST — so the guard cannot pass by matching nothing.
+    """
+    a = _doc(tmp_path, FAIL_CLOSED)
+    titles = [t for t, *_ in a["resolved"]]
+    assert titles == ["Everything else is **CLOSED** — verified"], titles
+
+
+def test_open_sections_are_not_scanned_for_evictable_content(tmp_path):
+    """Widening GOTCHAS to a word-boundary search pulled in the LIVE half of the
+    doc — `Open decisions`, `PENDING — HUMAN decisions/actions`, `Parked on YOU`.
+    Nothing was mis-booked at the time (0 B), so this guard is preventive: a
+    dead-end bullet under an OPEN heading must not be booked as history."""
+    a = _doc(tmp_path, """# Handoff: t — 2026-08-29
+
+## Open decisions (yours, not the platform's)
+- **Dead end (do not re-derive):** we are NOT doing the cache thing.
+
+## Gotchas / decisions / dead-ends
+- **Dead end (do not re-derive):** the cache theory was REFUTED.
+""")
+    assert len(a["retracted"]) == 1, "only the closed Gotchas section is scanned"
+
+
+def test_overlapping_roots_do_not_double_count(tmp_path):
+    """The population column must SUM to the header. Round 1 tallied before dedup,
+    so `<repo>` and `<repo>/claudedocs` each reported the full count."""
+    cd = tmp_path / "r" / "claudedocs"
+    cd.mkdir(parents=True)
+    (cd / "handoff-a.md").write_text("# H\n")
+    (cd / "handoff-b.md").write_text("# H\n")
+    docs, per_root = HA.resolve_targets([str(tmp_path / "r"), str(cd)])
+    assert len(docs) == 2
+    assert sum(n for _r, n in per_root if n is not None) == len(docs)
+    assert per_root == [(str(tmp_path / "r"), 2), (str(cd), 0)]

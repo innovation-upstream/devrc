@@ -87,14 +87,28 @@ RESUME_COST = 200
 # Measured over all 413 docs: `Next steps (ranked)` 246, `Gotchas / decisions /
 # dead-ends` 237, `State now` 231, `Open investigations …` 198. The families below
 # are deliberately loose on the tail of the heading and anchored on its head.
-# 🔴 ANCHORED ON `^` THESE MISSED REAL SECTIONS, ALWAYS UNDERSTATING. Measured over
-# the corpus: `^gotchas` missed 70 H2 headings / 102,153 B (`Durable gotchas (this
-# session)`, `🔴🔴 CRITICAL GOTCHAS (…)`, `Key gotchas (…)`) — and in those
-# sections NEITHER the retracted scan NOR the RELOCATE_DURABLE scan ever ran.
-# `^open investigations` missed 16 headings / 63,894 B, two of them fully terminal
-# (`Closed investigations — measured 2026-08-13, do not re-derive`, 4,009 B).
-# Consistent with the FLOOR framing, but a looser floor than the number reads, so
-# the anchors are relaxed to a word-boundary search.
+# 🔴 ANCHORED ON `^` THESE MISSED REAL SECTIONS, ALWAYS UNDERSTATING. Re-measured
+# over the 414-doc corpus AT H2, which is the only level the tool reads
+# (`SA.sections(lines, heads, 2)`): the widened GOTCHAS covers **52 H2 headings /
+# 77,937 B** the anchored form missed (`Durable gotchas (this session)`,
+# `🔴🔴 CRITICAL GOTCHAS (…)`, `Key gotchas (…)`) — and in those sections NEITHER
+# the retracted scan NOR the RELOCATE_DURABLE scan ever ran. Widened INVESTIGATIONS
+# covers **10 H2 / 51,182 B** more, two of them fully terminal.
+# ⚠ Round 1 wrote these as 70/102,153 and 16/63,894. Those counted H1–H6; the tool
+# consults H2 only, so they were ~1.4x high. Round 2 caught it — and the pair was
+# the JUSTIFICATION for the highest-risk change in that round, which is exactly the
+# kind of number that gets re-quoted instead of re-derived.
+# 🔴 An OPEN section is the LIVE half of the doc, and widening GOTCHAS to a
+# word-boundary search pulled 13 of them in — `Open decisions (yours, not the
+# platform's)`, `🔴 PENDING — HUMAN decisions/actions`, `🔴 Parked on YOU —
+# product/ops decisions`. Nothing is mis-booked today (measured: 0 B of retracted
+# bytes, 2 advisory bullets), but any future `- … dead-end …` bullet under
+# `## Open decisions` would be booked as evictable history. The file already owned
+# this guard shape for WORK_STATUS and simply did not apply it to the families.
+# Applied to GOTCHAS ONLY: `Open investigations` is the INVESTIGATIONS family's
+# canonical heading and legitimately contains resolved sub-blocks.
+OPEN_SECTION = re.compile(r"\bopen\b|\bpending\b|\bparked\b|\bwaiting\b|\bunresolved\b", re.I)
+
 NEXT_STEPS = re.compile(r"\bnext steps\b|\bdo next\b|\bwhat'?s next\b", re.I)
 INVESTIGATIONS = re.compile(r"\binvestigations?\b|\blive diagnosis\b", re.I)
 GOTCHAS = re.compile(r"\bgotchas?\b|\bdead-ends?\b|\bdecisions\b", re.I)
@@ -123,11 +137,26 @@ DONE_MARK = re.compile(r"✅|~~|\bDONE\b|\bSHIPPED\b|\bMERGED\b|\bCLOSED\b|\bLAN
 DONE_FIRST_LINE_ONLY = True
 
 # A resolved investigation block, judged on its HEADING only, same reason.
-# 🔴 `re.I` — this was the ONE matcher here without it while its sibling RETRACTED
-# carried it, so a heading spelling the word in lower case was missed. Costs ~4 KB
-# on the corpus; the inconsistency is the real defect, since nothing made the two
-# behave alike.
-RESOLVED_HEAD = re.compile(r"✅|\bCLOSED\b|\bRESOLVED\b|\bANSWERED\b|~~", re.I)
+#
+# 🔴 CASE-SENSITIVE ON PURPOSE — DO NOT ADD `re.I`. Round 1 added it, reasoning
+# that RETRACTED carries `re.I` so the inconsistency must be the defect. That was
+# backwards, and round 2 caught it: THIS CORPUS SHOUTS A TERMINAL STATUS
+# (✅ / CLOSED / RESOLVED / ANSWERED), so the capitals ARE the discriminator, not
+# an accident. Lower case is how the words appear in ordinary prose.
+#
+# Measured: `re.I` added 12,902 B over 10 blocks, and 10 of 10 are inversions —
+# `bounded, not closed` · `unresolved, and deliberately not resolved` · `two open
+# items (arc is closed, these are new)` · `Why #4174 was closed — the reusable
+# lesson`, plus three where `fail-closed` is a TERM OF ART, not a status. A reader
+# quoting the resolved bucket would have evicted a block whose own title says it is
+# not resolved. Three mechanisms — term of art, negation, and "something else was
+# closed" — none of which a case-insensitive word match can separate.
+#
+# The control that settles it: handoff-object-leak-guard.md has BOTH shapes — a
+# `fail-closed backstop is unexercised` heading (open; the false positive `re.I`
+# added) and `Everything else … is **CLOSED** — verified` (terminal; the
+# case-sensitive matcher already caught it).
+RESOLVED_HEAD = re.compile(r"✅|\bCLOSED\b|\bRESOLVED\b|\bANSWERED\b|~~")
 
 # A bullet recording something that was retracted or refuted. This is history by
 # construction: the value is the correction, and the correction is one line.
@@ -312,7 +341,7 @@ def audit_one(doc):
             for t3, s3, e3, b3 in SA.sections(lines, heads, 3, s, e):
                 if RESOLVED_HEAD.search(t3):
                     resolved.append((t3, s3, e3, b3))
-        if GOTCHAS.search(title):
+        if GOTCHAS.search(title) and not OPEN_SECTION.search(title):
             retracted += _blocks_by_bullet(lines, heads, inside, s, e,
                                            lambda t: RETRACTED.search(t))
             generic += len(_blocks_by_bullet(lines, heads, inside, s, e,
@@ -366,26 +395,33 @@ def resolve_targets(args):
     stderr where a redirect loses it. A quoted headline has to be traceable to the
     population it came from.
     """
-    out, per_root = [], []
+    # 🔴 TALLIED AFTER DEDUP, one root at a time. Round 1 counted what each root
+    # MATCHED and deduped afterwards, so two overlapping roots (`<repo>` and
+    # `<repo>/claudedocs`, which the usage line explicitly invites) each reported
+    # the full 87 under a header reading 87 — a traceability feature contradicting
+    # its own total. Counting only the NEWLY-UNIQUE docs makes the column sum to
+    # the header by construction, and gives the second root an honest 0.
+    seen, uniq, per_root = set(), [], []
     for a in args:
         p = Path(os.path.expanduser(a))
-        before = len(out)
         if p.is_file():
-            out.append(p.resolve())
+            found = [p.resolve()]
         elif not p.is_dir():
             print(f"handoff-audit: no such path: {p}", file=sys.stderr)
             per_root.append((str(p), None))
             continue
         else:
+            found = []
             for base in (p, p / "claudedocs"):
                 if base.is_dir():
-                    out += [f.resolve() for f in sorted(base.glob("handoff-*.md"))]
-        per_root.append((str(p), len(out) - before))
-    seen, uniq = set(), []
-    for p in out:
-        if p not in seen:
-            seen.add(p)
-            uniq.append(p)
+                    found += [f.resolve() for f in sorted(base.glob("handoff-*.md"))]
+        added = 0
+        for f in found:
+            if f not in seen:
+                seen.add(f)
+                uniq.append(f)
+                added += 1
+        per_root.append((str(p), added))
     return uniq, per_root
 
 
@@ -403,7 +439,8 @@ def render(audits, show_all, n_detail, n_sections, out=sys.stdout, per_root=()):
         p("\n## population (each root as given, and what it contributed)")
         for root, n in per_root:
             p(f"  {'NO SUCH PATH' if n is None else format(n, '>5')}  {root}")
-        p("  A root contributing 0 is shown so a quoted total is traceable to it.")
+        p("  Counted after dedup, so the column SUMS to the header even when two")
+        p("  roots overlap. A root contributing 0 is shown, not hidden.")
     p(f"\ntarget {TARGET:,} B   ·   hard cap {HARD:,} B")
     p("  🔴 NOT ENFORCED. No gate in this repo measures a handoff doc, so every")
     p("     verdict below is a REFERENCE you may argue with, not a rejection. The")
