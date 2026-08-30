@@ -113,7 +113,9 @@ def select_verdict(text: str) -> Verdict | None:
 #       PLAIN `<<EOF` (where tabs are NOT stripped, so it emits at column 1 and
 #       is harmless) is still reported as a COLLISION — which has no ledger, so
 #       the only remedy would be editing the file. Accepted because it is
-#       latent: no file under `scripts/` currently has a tab-indented line.
+#       latent: no tab-indented `RESULT:` line exists under `scripts/`.
+#       (Tab-indented lines DO exist there — the operative claim is the
+#       narrower one, and the wider phrasing was measurably false.)
 #       Prefer spaces in heredoc bodies. If this ever fires for real, the fix is
 #       to make the tab-indented case pinnable, not to drop the `\t*`.
 #
@@ -142,11 +144,23 @@ _COMMENT = re.compile(r"^\s*#")
 # harmless" while emitting a real forged verdict. Enumerating what is DANGEROUS
 # regenerates that bug on the next spelling nobody thought of.
 #
-# So the rule is inverted: a payload is BENIGN only when this module can PROVE
-# the whole emitted string is a CLOSED LITERAL — the quote closes on this line,
-# the text inside carries no interpolation marker, and nothing after the closing
-# quote can append to what gets printed. Everything else is DYNAMIC, which is
-# pinnable but only by a human enumeration. Unknown spellings now fail SAFE.
+# So for the QUOTED arm the rule is inverted: a payload is BENIGN only when this
+# module can PROVE the whole emitted string is a CLOSED LITERAL — the quote
+# closes on this line, the text inside carries no interpolation marker, and
+# nothing after the closing quote can append to what gets printed. Everything
+# else is DYNAMIC, pinnable only by a human enumeration.
+#
+# 🔴 THAT WHITELIST IS QUOTED-ONLY, AND SAYING OTHERWISE IS THE DEFECT THIS
+# MODULE EXISTS TO CATCH. An earlier revision's docstring and commit message
+# both claimed "unknown spellings now fail SAFE" without qualification; the
+# unquoted-command and heredoc arms below were, and still are, a NAMED
+# BLACKLIST — they return BENIGN by default and escape only on an enumerated
+# set. That is a real width difference, it was found by mutating an arm that NO
+# fixture reached (both `return BENIGN` and `return DYNAMIC` survived a green
+# suite), and it is now stated here rather than implied away. The blacklist has
+# since been widened to the measured hazard — shell control operators, which let
+# `echo RESULT: ok && echo RESULT: PASS` emit a forged verdict — and both arms
+# now have fixtures that actually reach them.
 _LITERAL_VERDICT = re.compile(r"""\s*\\?["']?\s*(PASS|FAIL)\b""")
 
 # Anything that can splice a runtime value into a literal: shell/Make expansion
@@ -158,7 +172,23 @@ _INTERPOLATION = re.compile(r"""[$`{%]""")
 # literal: nothing, a bracket/paren/terminator, or a trailing comment. A `+`, a
 # `,` introducing another argument, or a `.join(`/`.format(` call all append to
 # what is printed, so any of them means the payload is NOT decidable here.
+#
+# ⚠ ACCEPTED OVER-CONSERVATISM: this also rejects closed literals with ordinary
+# trailing content — `echo "RESULT: 3 problems" >&2`, `print("RESULT: done",
+# file=sys.stderr)`, `print(…, flush=True)` — and `_INTERPOLATION` likewise
+# rejects a literal `%` or `{` in the payload (`RESULT: 50% coverage`). Those
+# are closed literals with nothing to enumerate, so a DYNAMIC_PAYLOADS pin would
+# be vacuous and would dilute a ledger that is supposed to carry real human
+# enumerations. Measured impact today: ZERO inside the two registries (11
+# repo-wide, all in prose or assignments outside the scanned population). The
+# error is in the FAIL-SAFE direction, which is why it is accepted rather than
+# tuned — but if it starts firing on ordinary summary lines, widen this class
+# rather than teaching people to pin reflexively.
 _TERMINAL_AFTER_QUOTE = re.compile(r"""^[)\];\s]*(?:\#.*)?$""")
+
+# Shell control operators. Only meaningful for the UNQUOTED command arm, where
+# they can start a second command on the same line.
+_SHELL_CONTROL = re.compile(r"""&&|\|\||[;|&<>]""")
 
 COLLISION = "collision"
 DYNAMIC = "dynamic"
@@ -191,6 +221,15 @@ def classify_payload(line: str) -> str | None:
     if _LITERAL_VERDICT.match(after):
         return COLLISION
 
+    # 🔴 A line can emit the prefix MORE THAN ONCE, and the SECOND one is where
+    # a forgery hides: `echo RESULT: ok && echo RESULT: PASS` emits BOTH, and
+    # bash really puts `RESULT: PASS` at column 0 (measured with `cat -A`).
+    # Judging the line by its FIRST emission alone called that benign. Judge it
+    # by its WORST.
+    if any(_LITERAL_VERDICT.match(seg)
+           for seg in line.split(RESERVED_PREFIX)[2:]):
+        return COLLISION
+
     quoted = _QUOTED.search(line)
     if quoted:
         quote = quoted.group(1)
@@ -204,8 +243,21 @@ def classify_payload(line: str) -> str | None:
             return DYNAMIC              # `+ v`, `, v`, `.join(…)` — appends
         return BENIGN
 
-    # Unquoted `echo RESULT: …` or a heredoc body line: the rest of the line IS
-    # the payload, so it is literal unless something interpolates into it.
+    # No quote opened the prefix, so the payload is the rest of the LINE. Two
+    # sub-cases, and they must NOT share one predicate — what can splice a
+    # value in differs between them.
+    if _UNQUOTED.search(line):
+        # A shell/Python COMMAND. A control operator starts a new command, so
+        # it is every bit as dangerous as interpolation:
+        # `echo RESULT: ok && echo RESULT: PASS` really does put `RESULT: PASS`
+        # at column 0 (measured with `cat -A`). An earlier revision returned
+        # BENIGN for exactly that line and told the operator it was provable.
+        if _INTERPOLATION.search(after) or _SHELL_CONTROL.search(after):
+            return DYNAMIC
+        return BENIGN
+
+    # A heredoc body line is literal TEXT — `&&` there is printed, not executed
+    # — so only interpolation can change what is emitted.
     return DYNAMIC if _INTERPOLATION.search(after) else BENIGN
 
 
@@ -316,6 +368,32 @@ APPEND_FIXTURES = {
     "concat":       'print("' + RESERVED_PREFIX + ' " + v)',
     "join":         'print("' + RESERVED_PREFIX + ' ".join(p))',
     "another-arg":  'print("' + RESERVED_PREFIX + '", v)',
+}
+
+
+# The UNQUOTED-command and HEREDOC arms. 🔴 No fixture reached them for a whole
+# round, so both `return BENIGN` and `return DYNAMIC` mutants survived a fully
+# green suite — a branch nothing executes cannot be verified by anything.
+FALLBACK_FIXTURES = {
+    # A SECOND emission on the same line carrying a literal verdict. bash really
+    # puts `RESULT: PASS` at column 0 here (measured with `cat -A`), so this is
+    # a COLLISION, not merely undecidable — and judging the line by its FIRST
+    # emission called it provably harmless.
+    "second-emission-and":  ("echo " + RESERVED_PREFIX + " ok && echo "
+                             + RESERVED_PREFIX + " PASS", COLLISION),
+    "second-emission-semi": ("echo " + RESERVED_PREFIX + " ok; echo "
+                             + RESERVED_PREFIX + " PASS", COLLISION),
+    # 🔴 Each of the next two isolates ONE clause. `unquoted-pipe` carries a
+    # shell operator and NO interpolation and no second prefix; `unquoted-var`
+    # carries interpolation and no operator. Fixtures that carried two signals
+    # let a mutant die to the wrong clause — measured, twice.
+    "unquoted-pipe":     ("echo " + RESERVED_PREFIX + " ok | tee f", DYNAMIC),
+    "unquoted-var":      ("echo " + RESERVED_PREFIX + " $v", DYNAMIC),
+    # unquoted command, provably fine: one command, literal payload.
+    "unquoted-literal":  ("echo " + RESERVED_PREFIX + " ok", BENIGN),
+    # heredoc body: literal TEXT, so `&&` is printed rather than executed.
+    "heredoc-literal":   (RESERVED_PREFIX + " 3 problems and counting", BENIGN),
+    "heredoc-var":       (RESERVED_PREFIX + " $verdict", DYNAMIC),
 }
 
 

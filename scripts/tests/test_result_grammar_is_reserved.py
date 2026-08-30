@@ -189,10 +189,21 @@ DYNAMIC_PAYLOADS = [
 
 
 def _array_body(name: str) -> str:
-    """The raw text between `NAME=(` and its closing `)` in run-tests.sh."""
+    """The text between `NAME=(` and its closing `)` in run-tests.sh, with
+    comment lines removed.
+
+    🔴 ROUND-3 FINDING NEW-3: the comment strip is load-bearing, not tidiness.
+    `_bash_array` skips `#` lines and the cross-check's regex did not, so a
+    comment merely MENTIONING a quoted script path made the two extractions
+    disagree — firing "One of them is reading the wrong thing" and sending a
+    debugger after a parser bug that does not exist. That is the exact hazard
+    the assertion it guards was written to replace. Today's `SHELL_TESTS`
+    comment escapes only because it happens to use backticks.
+    """
     m = re.search(rf"^{name}=\((.*?)^\)", RUNNER_SRC, re.S | re.M)
     assert m, f"{name} not found in run-tests.sh — the scan is reading nothing"
-    return m.group(1)
+    return "\n".join(ln for ln in m.group(1).splitlines()
+                     if not ln.strip().startswith("#"))
 
 
 def _bash_array(name: str) -> list[str]:
@@ -439,6 +450,33 @@ def test_each_interpolation_marker_has_its_OWN_control(marker):
         f"{marker!r} no longer forces DYNAMIC: {line}")
 
 
+@pytest.mark.parametrize("shape", sorted(G.FALLBACK_FIXTURES))
+def test_the_unquoted_and_heredoc_arms_are_REACHED_and_correct(shape):
+    """🔴 ROUND-3 FINDING NEW-1. The fallback arm returns BENIGN by default, and
+    for a whole round NO fixture reached it — so mutating it to `return BENIGN`
+    AND to `return DYNAMIC` both survived a fully green suite. A branch nothing
+    executes cannot be verified by anything.
+
+    `echo RESULT: ok && echo RESULT: PASS` is the reachable consequence: bash
+    really emits `RESULT: PASS` at column 0, and it was reported to the operator
+    as provably harmless.
+    """
+    line, expected = G.FALLBACK_FIXTURES[shape]
+    assert G.line_emits_reserved_prefix(line), f"not seen at all: {line}"
+    assert G.classify_payload(line) == expected, (
+        f"{shape!r} classified {G.classify_payload(line)!r}, expected "
+        f"{expected!r}: {line}")
+
+
+def test_the_fallback_fixtures_actually_reach_the_fallback_arm():
+    """Guard the guard above: if every fixture were quoted, the parametrized
+    test would pass while still never executing the arm it names."""
+    for shape, (line, _expected) in G.FALLBACK_FIXTURES.items():
+        assert not G._QUOTED.search(line), (
+            f"{shape!r} opens the prefix with a QUOTE, so it takes the quoted "
+            f"arm and proves nothing about the fallback: {line}")
+
+
 @pytest.mark.parametrize("shape", sorted(G.APPEND_FIXTURES))
 def test_each_APPEND_shape_has_its_own_control(shape):
     """The arm with NO marker at all — caught only by `_TERMINAL_AFTER_QUOTE`.
@@ -521,9 +559,16 @@ def test_the_ledger_FILTER_works_regardless_of_what_the_live_tree_holds():
         "anywhere in the repo")
     assert not any(_matches(e, hit_other_line) for e in ledger), (
         "_matches ignores the NEEDLE — a pin would cover any hit in that file")
-    assert not any(_matches(e, hit_same) for e in []), (
-        "an EMPTY ledger matched something, so the empty state is not "
-        "distinguishable from a ledger that is never read")
+    # 🔴 An earlier revision asserted `not any(_matches(e, hit) for e in [])`
+    # here. `any()` over an empty iterable is False BY LANGUAGE DEFINITION, so
+    # that assertion could not fail — it tested Python, not this ledger. The
+    # meaningful claim is that a NON-empty ledger of unrelated pins does not
+    # match, which is what actually distinguishes "nothing pinned it" from
+    # "the filter is broken open".
+    unrelated = [("scripts/tests/test_other.sh", "something else", "why")]
+    assert not any(_matches(e, hit_same) for e in unrelated), (
+        "a ledger of unrelated pins matched — the filter is broken open, and "
+        "an empty ledger would be indistinguishable from a working one")
 
 
 def test_negative_control_an_indented_emission_is_not_flagged():
