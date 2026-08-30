@@ -403,3 +403,83 @@ class TestQuotedTrailerInProse:
         """Positive control, so the fix is not simply 'never matches'."""
         msg = "feat: x\n\nClaude-Session-Id: real\n"
         assert st.has_trailer(msg) is True
+
+
+# ---------------------------------------------------------------------------
+# 🔴 ROUND-4 GUARDS. The round-3 audit found that reverting the WHOLE of
+# session_trailer.py to its round-2 version left all 137 tests across five files
+# GREEN — three shipped behaviour changes and one correctness fix with nothing
+# that could see them. Positive control at the time: mutating TRAILER_KEY turned
+# 16 red, so the harness reached the module; the SURVIVED was real, not wiring.
+# These are the discriminators.
+# ---------------------------------------------------------------------------
+class TestExoticLineSeparatorsAreNotRewritten:
+    """🔴 `splitlines()` also breaks on \\r, \\x0b, \\x0c, \\x85, \\u2028 and
+    \\u2029, so rejoining with "\\n" EDITS prose it was only meant to read.
+    Measured on the round-2 code: a CRLF message lost every \\r, and a body
+    containing \\x0b gained a line break the author never wrote."""
+
+    @pytest.mark.parametrize("sep,name", [
+        ("\r", "CR"), ("\x0b", "VT"), ("\x0c", "FF"),
+        ("\x85", "NEL"), (" ", "LS"), (" ", "PS"),
+    ])
+    def test_a_body_separator_survives_a_rewrite(self, sep, name):
+        msg = f"feat: x\n\nbo{sep}dy\n\nClaude-Session-Id: OLD\n"
+        out = st.append_trailer(msg, "NEW")
+        assert "Claude-Session-Id: NEW" in out
+        assert f"bo{sep}dy" in out, (
+            f"a {name} in the body was rewritten as a line break")
+
+    def test_a_crlf_message_keeps_its_carriage_returns(self):
+        msg = "feat: x\r\n\r\nClaude-Session-Id: OLD\r\nCo-Authored-By: Z <z@e>\r\n"
+        out = st.append_trailer(msg, "NEW")
+        assert "Claude-Session-Id: NEW" in out
+        assert "Co-Authored-By: Z <z@e>\r" in out, "the CRLF body lost its \\r"
+
+
+class TestSameIdDuplicatesCollapse:
+    """🔴 The early return used to test only "are they all already correct",
+    which is TRUE for a message carrying the same id twice — measured count 2."""
+
+    def test_two_identical_trailers_collapse_to_one(self):
+        msg = "feat: x\n\nClaude-Session-Id: A\nClaude-Session-Id: A\n"
+        assert st.append_trailer(msg, "A").count("Claude-Session-Id:") == 1
+
+    def test_a_single_correct_trailer_is_still_a_byte_identical_no_op(self):
+        """Positive control: the fix did not simply stop returning early."""
+        msg = "feat: x\n\nClaude-Session-Id: A\n"
+        assert st.append_trailer(msg, "A") == msg
+
+    @pytest.mark.parametrize("first,second", [("A", "B"), ("B", "A")])
+    def test_collapse_keeps_the_first_position(self, first, second):
+        msg = (f"feat: x\n\nClaude-Session-Id: {first}\n"
+               f"Claude-Session-Id: {second}\nCo-Authored-By: Z <z@e>\n")
+        out = st.append_trailer(msg, "A")
+        lines = out.split("\n")
+        assert out.count("Claude-Session-Id:") == 1
+        assert lines.index("Claude-Session-Id: A") < lines.index("Co-Authored-By: Z <z@e>")
+
+
+class TestTheStateFileModeSurvivesALeftoverTemp:
+    """🔴 `os.open(..., 0o600)` applies the mode ONLY on creation, so a leftover
+    `.tmp` is reused with its OLD mode and `os.replace` carries that onto the
+    target. The reachable leftover is this feature's own: an earlier revision
+    created it at 0644 with `open(tmp,"w")`, and it survives a kill between the
+    write and the replace."""
+
+    def test_a_stale_0644_temp_does_not_downgrade_the_state_file(self, tmp_path):
+        common = str(tmp_path)
+        os.makedirs(common, exist_ok=True)
+        stale = st.state_file(4242, common) + ".tmp"
+        Path(stale).write_text("{}")
+        os.chmod(stale, 0o644)
+        assert st.record("s", 4242, root=common, reader=LIVE) is True
+        mode = oct(os.stat(st.state_file(4242, common)).st_mode)[-3:]
+        assert mode == "600", f"state file shipped {mode}, not 600"
+
+    def test_the_clean_path_is_also_0600(self, tmp_path):
+        """Positive control — so the test above is about the LEFTOVER, not about
+        record() being broken in general."""
+        common = str(tmp_path)
+        assert st.record("s", 4243, root=common, reader=LIVE) is True
+        assert oct(os.stat(st.state_file(4243, common)).st_mode)[-3:] == "600"

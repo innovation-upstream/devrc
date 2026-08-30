@@ -133,21 +133,38 @@ is_ours() {
   grep -q '^impl=' "$1" 2>/dev/null
 }
 
-# 🔴 An install from BEFORE the generated-wrapper change is a SYMLINK, which
-# `[ -f ]` reports false for once it dangles — so the old shape was neither
-# recognised as ours (`--apply` refused it as foreign, rc 4) nor removable
-# (`--uninstall` said "nothing to uninstall") and the operator was left to `rm`
-# it by hand. This recognises that legacy shape so the installer can migrate it.
-is_legacy_ours() {
-  [ -L "$1" ] || return 1
-  case "$(readlink "$1" 2>/dev/null)" in
-    */scripts/git-hooks/prepare-commit-msg) return 0 ;;
-    *) return 1 ;;
-  esac
-}
+# 🔴 OURS AND INTACT ARE DIFFERENT QUESTIONS, and conflating them stranded the
+# repo. A hook TRUNCATED mid-write still carries the marker and the `impl=` line,
+# so the already-installed check matched it, printed "already installed ✓" and
+# exited 0 — leaving an executable, syntactically invalid hook that refuses every
+# commit, and no path back short of `rm`. The generated wrapper ends with a
+# sentinel; its absence means the file was cut short.
+END_MARKER="# devrc-session-stamp: end"
+is_intact() { [ -f "$1" ] && grep -q "^$END_MARKER\$" "$1" 2>/dev/null; }
+
+# ⚠ THERE IS DELIBERATELY NO LEGACY-SYMLINK MIGRATION, and a previous revision's
+# attempt at one was REMOVED as a net negative.
+#
+# It matched a symlink whose target ended `/scripts/git-hooks/prepare-commit-msg`
+# — a path devrc has never installed. Verified three ways: the only revision that
+# ever created a symlink here (`9164486e`) pointed at `githooks/prepare-commit-msg`;
+# `git log --all --diff-filter=A` shows `scripts/git-hooks/prepare-commit-msg` was
+# never added in ANY ref; and that revision is not an ancestor of `main`, so it
+# reached no host. The branch was therefore inert for its stated purpose while
+# being a live false-positive surface — measured, it happily `UNINSTALLED` a
+# symlink belonging to an unrelated tool that merely shared the suffix. That is
+# the same "deletes something that is not ours" class this installer had just
+# fixed on the regular-file side, re-opened one axis narrower.
+#
+# Its test was a SPELLED guard too: it symlinked to the matcher's own string, so
+# it could only ever agree with the matcher and could not notice the shape being
+# wrong.
+#
+# If a real legacy state is ever found in the wild, add the migration THEN, keyed
+# to the path that was actually installed.
 
 if [ "$MODE" = "uninstall" ]; then
-  if is_ours "$TARGET" || is_legacy_ours "$TARGET"; then
+  if is_ours "$TARGET"; then
     rm -f "$TARGET"; echo "  UNINSTALLED"
   else
     echo "  nothing to uninstall (no devrc-managed hook at that path)"
@@ -164,22 +181,29 @@ if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
     # aborted. rc 1 is not in this script's exit-code table, and it made the
     # installer unable to replace the one hook state it most needed to repair.
     _existing="$(grep -m1 '^impl=' "$TARGET" 2>/dev/null || true)"
-    if [ "$_existing" = "impl=$(printf '%q' "$IMPL")" ]; then
+    if [ "$_existing" = "impl=$(printf '%q' "$IMPL")" ] && is_intact "$TARGET"; then
       echo "  already installed (generated wrapper -> this checkout) ✓"
       exit 0
+    fi
+    if ! is_intact "$TARGET"; then
+      # Ours, but cut short. Repairing our own broken hook is the safe act and
+      # must not require --force: while it sits there, every commit is refused.
+      echo "  ⚠ an existing devrc hook is INCOMPLETE (no end sentinel) — repairing"
+      FORCE=1
     fi
     # OUR hook, pointing at a DIFFERENT checkout — typically installed from an
     # agent worktree that has since been removed, leaving the impl path dangling.
     # Say so, rather than calling devrc's own hook foreign and demanding --force
     # for what is really a re-point.
+    # 🔴 `if`, not `[ … ] && echo`. Under `set -euo pipefail` a trailing
+    # `&&` whose left side is false makes the whole statement the script's
+    # last status and EXITS — re-creating the rc-1 abort this installer was
+    # just fixed for. `is_ours` currently guarantees `_existing` is non-empty,
+    # so the branch is unreachable today; it is written safely anyway because
+    # "unreachable" is a property of another function that may be relaxed.
     echo "  ⚠ an EXISTING devrc hook points at another checkout:"
-    [ -n "$_existing" ] && echo "      $_existing"
+    if [ -n "$_existing" ]; then echo "      $_existing"; fi
     echo "    Re-point it with --force; this is devrc's own hook, not a foreign one."
-  elif is_legacy_ours "$TARGET"; then
-    echo "  ⚠ a LEGACY devrc install is present (a symlink, from before the"
-    echo "    generated-wrapper change). Re-point it with --force; it is devrc's"
-    echo "    own, not a foreign hook:"
-    echo "      -> $(readlink "$TARGET" 2>/dev/null || true)"
   fi
   if [ "$FORCE" -ne 1 ]; then
     echo "  ✘ a prepare-commit-msg already exists and is not ours. Look at it first:" >&2
@@ -269,6 +293,7 @@ else
 fi
 "$py" "$impl" "$@" 2>/dev/null
 exit 0
+# devrc-session-stamp: end
 WRAPPER
 } > "$_tmp"
 chmod +x "$_tmp"

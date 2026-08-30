@@ -213,12 +213,22 @@ def record(session_id: str, pid: int, root=None, transcript_path=None,
             payload["transcript_path"] = transcript_path
         target = state_file(pid, d)
         tmp = target + ".tmp"
-        # 🔴 CREATE IT 0600, don't chmod AFTER. `open()` then `os.chmod()` leaves
-        # the file world-readable between the two calls, and it names a session
-        # and may carry a transcript path. Not exploitable on this host (the home
-        # directory is 0700, so nobody can traverse to it) but the window is free
-        # to close and a shared host would not have that protection.
-        fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        # 🔴 CREATE IT 0600 — and UNLINK FIRST, because the mode argument to
+        # os.open() applies ONLY when the file is created. An earlier revision
+        # dropped the trailing `os.chmod` in favour of the mode argument, which
+        # regressed exactly the case the chmod had been covering: a LEFTOVER
+        # `.tmp` from a previous run is reused, keeps its old mode, and
+        # `os.replace` carries that mode onto the target. Measured under umask
+        # 022 — clean path 0600 both ways, but with a 0644 leftover the new
+        # version shipped 0644 where the old one still produced 0600. And the
+        # reachable leftover is this feature's own: the previous revision created
+        # that tmp with `open(tmp, "w")` at 0644, and it survives a kill between
+        # write and replace. Unlink + O_EXCL means the mode always applies.
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(fd, "w") as fh:
             json.dump(payload, fh)
         os.replace(tmp, target)          # atomic: no half-written read
@@ -299,10 +309,12 @@ def _trailer_lines(message: str, key: str):
     commit silently got no stamp. That is the exact shape of this feature's own
     documentation commits, so it was not a hypothetical.
 
-    🔴 Deliberately NOT `git interpret-trailers` / `%(trailers:)`. MEASURED:
-    git's parser reports 9 trailers on `origin/main` where a content search finds
-    55, because it only recognises a contiguous block at the very END and this
-    repo's messages carry a "Generated with" line after it.
+    🔴 Deliberately NOT `git interpret-trailers` / `%(trailers:)`. MEASURED at
+    `3b1a0477`: git's parser reports **9** trailers in the last 200 commits of
+    `origin/main` where a per-commit content search finds **67**, because it only
+    recognises a contiguous block at the very END and this repo's messages carry
+    a "Generated with" line after it. (This line said 55 for one revision — one
+    of the three wrong counts the module header enumerates. See it for why.)
     """
     prefix = key.lower() + ":"
     return [i for i, line in enumerate(_lines(message))
