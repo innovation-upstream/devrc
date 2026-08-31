@@ -271,11 +271,19 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
    still stands — the push is `rsync -a --delete` SOURCE→STAGE then tar STAGE→pod, so every
    entry the laptop also holds is overwritten with the laptop's copy, destroying API-appended
    bullets that exist only in the served copy. Recoverable via #551's backup, not harmless.
+   🔴 **So do rank 4 FIRST.** Criterion 9 makes API writes durable, which *removes* this
+   hazard rather than managing it — after it, the overwrite has nothing unique to destroy.
+   Running 3 first means relying on the backup to recover; running 4 first turns a
+   destructive operation into a safe one.
    forcing: none
 4. **Criterion 9 — the cutover.** `subsystem-index` writes through `cairn`; the local store
    becomes a read-only cache (`stat -c %a` = 444, EACCES *watched*, not assumed). 🔴 This is
    what makes an API write DURABLE — until it lands, every appended bullet is one `seed.sh`
    from gone. The read/write **allowlist split** is this criterion's own job.
+   🔴 **Do this BEFORE rank 3**, despite the lower rank. Rank 3 runs `seed.sh` from the
+   laptop, whose `rsync -a --delete` push overwrites every shared entry with the laptop's
+   copy. This criterion is what makes the API-appended bullets durable, so landing it first
+   is what makes rank 3 non-destructive instead of backup-dependent.
    forcing: none
 5. **Verify criteria 1, 2, 5, 6, 7 against the POD**, not just in tests. Criterion 4 is done
    there; 2's denied-scope arm is done for WRITES (404 `scope-unknown`) but not for the three
