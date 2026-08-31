@@ -425,9 +425,10 @@ def gate_points_at_the_shared_checkout(t):
 def nix_build_points_at_the_shared_checkout(t):
     return _swap(
         t,
-        '        *[f"nix build <your worktree>#checks.{NIX_SYSTEM}.{n}"\n'
+        '        *[f"nix build <your worktree>#checks.{NIX_SYSTEM}.{n}'
+        ' --no-link -L"\n'
         "          for n in tc.check_names],\n",
-        '        *[f"nix build {tc.root}#checks.{NIX_SYSTEM}.{n}"\n'
+        '        *[f"nix build {tc.root}#checks.{NIX_SYSTEM}.{n} --no-link -L"\n'
         "          for n in tc.check_names],\n",
     )
 

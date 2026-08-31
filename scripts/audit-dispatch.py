@@ -2879,7 +2879,20 @@ def _toolchain_checks_lines(tc):
         "lists rather than reporting a broken gate:",
         "",
         "```",
-        *[f"nix build <your worktree>#checks.{NIX_SYSTEM}.{n}"
+        # 🔴 `--no-link -L` IS NOT DECORATION, AND THIS LINE IS A MERGED-TREE
+        # RESOLUTION. `nix build` prints NO build log for a build that SUCCEEDS
+        # unless you pass `-L`/`--print-build-logs`, so the sentence above
+        # telling the auditor to read a runner's own `RESULT:` line is, for the
+        # sandbox tier, an instruction to read something never printed;
+        # `--no-link` keeps a `result` symlink out of the cwd of an auditor
+        # briefed READ-ONLY. `5324bf47` (#1133) fixed exactly that on the two
+        # HARDCODED lines this branch replaced with a probed list — the two
+        # changes are textually disjoint and semantically collide, and the
+        # merged tree was RED on `_assert_every_nix_build_prints_its_log` until
+        # this carried the flags. Emitting them per NAME rather than twice is
+        # what that guard's own docstring asks for: "a THIRD tier added later is
+        # covered automatically".
+        *[f"nix build <your worktree>#checks.{NIX_SYSTEM}.{n} --no-link -L"
           for n in tc.check_names],
         "```",
         "",
