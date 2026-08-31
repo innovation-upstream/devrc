@@ -98,6 +98,156 @@ with **zero steps executed** after a 60-minute `TaskRunTimeout`, starved by a si
   carries `39eec8a5 docs(handoff): … analyzed Tekton CI pipeline throughput, identified
   bottlenecks`, and a `ci-speedup-1` claim is live. Read that before starting fresh.
 
+### The CI failure was a **TIMEOUT**, not an RST — and that breaks the backlog elimination's premise while a *different* measurement still rules the backlog out
+
+**New datum (2026-08-31).** `devrc-ci-ddrxx`, revision `857fc3f5`, node `talos-xr6-r7p`:
+`TestTheActorComesFromTheTOKEN::test_a_FORGED_actor_in_the_body_is_DISCARDED[record1-…-dana]`
+failed on **gw1** with a bare `TimeoutError` and no assertion executed. Chain:
+`post_bullet` → `fetch` → `urlopen(req, timeout=timeout)` → `http.client` →
+`socket.py:720`. **Line 720 of this Python (3.12.14) is `return self._sock.recv_into(b)`
+inside `SocketIO.readinto`** — read, verbatim, from the interpreter the gate uses. So this
+is a **READ** timeout on a connection the client had already established and written to,
+not a connect timeout. `HANG_TIMEOUT` was already `60.0` at that revision, so a localhost
+round-trip went unanswered for **more than 60 s**.
+
+🔴 **The premise of the entries above does not transfer.** Both ruled accept-queue overflow
+out with *"`tcp_abort_on_overflow = 0`, so overflow drops SYNs and yields a **timeout**,
+never an RST"*. That argument was made to explain an **RST**. Applied to a **TIMEOUT** it
+runs backwards: a timeout is precisely what that sysctl predicts. **The elimination as
+written is void for this observation** — do not carry it forward as if it covered both.
+
+**The backlog is nonetheless ruled out here, on a measurement instead of an inference.**
+
+- **The failing test opens exactly ONE connection.** Counted at `verify_request`, which
+  socketserver calls once per accepted connection: `{port: 1}`. `urllib` sends
+  `Connection: close` (measured off the wire), so `post_bullet` is one request on one
+  connection.
+- **The accept queue it would have to overflow is 128 deep**, read off the live socket
+  (`ss -lntH` Send-Q on the real `build_server` socket), not off the constant.
+  Overflow needs >128 *simultaneous* pending connections. **1 vs 128 is arithmetic, not
+  judgement.**
+- Instrument validated before either number was quoted: requested backlog 5 → reported 5,
+  128 → 128, 100000 → **4096** (the somaxconn truncation, observed). The reader moves with
+  the request; a 128 is not a constant it always prints.
+
+**`somaxconn` does NOT truncate the 128 in the sandbox — the suspicion is measured false.**
+Read inside a real nix build sandbox netns on the dev host, and inside both a pod netns and
+a fresh `unshare -n` on the CI node:
+
+| | dev host | dev-host nix sandbox | CI node `talos-xr6-r7p` (pod netns **and** fresh netns) |
+|---|---|---|---|
+| `net.core.somaxconn` | 4096 | **4096** | **4096** |
+| `tcp_abort_on_overflow` | 0 | 0 | 0 |
+| `tcp_max_syn_backlog` | 4096 | 4096 | 2048 |
+| `tcp_synack_retries` | 5 | 5 | 5 |
+
+`430fe3e1`'s fix is fully in force in CI. Nothing about the sandbox weakens it.
+
+### CPU starvation is quantitatively too small — which retires the premise `HANG_TIMEOUT = 60` rests on
+
+`HANG_TIMEOUT` was raised 15 → 60 on the stated cause *"a 10-minute parallel suite competing
+with a saturated cluster"*. **Measured against that story and it does not hold.**
+
+Load–latency curve using the suite's **own** `running()` / `post_bullet()` (so the server,
+token record, store layout, framing and teardown are identical to the failing test), pinned
+to a 2-CPU cpuset with spinners on the same cores. Clock brackets the POST only —
+`running()`'s teardown costs up to `serve_forever`'s 0.5 s poll interval and would otherwise
+floor every sample. All 1250 round-trips answered **200**:
+
+| spinners on 2 CPUs | oversubscription | p50 | p99 | **max** | >60 s |
+|---|---|---|---|---|---|
+| 0 | 1× | 0.014 s | 0.435 s | 0.558 s | 0 |
+| 8 | 5× | 0.032 s | 0.061 s | 0.105 s | 0 |
+| 32 | 17× | 0.144 s | 0.340 s | 0.394 s | 0 |
+| 96 | 49× | 0.446 s | 0.924 s | 1.033 s | 0 |
+| 192 | **97×** | 1.001 s | 2.573 s | **2.984 s** | **0** |
+
+Negative control: a POST to a socket nothing ever accepts raised `TimeoutError` at 3.01 s
+against a 3.00 s bound — the timer can fire and be seen.
+
+**97× CPU oversubscription buys 2.98 s. The CI node was at 2.1×** (`node_load1` max 34.00 on
+16 CPUs; PSI cpu-some max 0.266). CPU contention is off by roughly three orders of magnitude
+from a 60 s stall. 🔴 **So `HANG_TIMEOUT = 60` is not wrong, but its stated justification is
+— and raising it further would buy nothing against whatever this actually is.**
+
+### The leading candidate: two unbounded `fsync`s inside the request
+
+`server.py:_replace_bytes` issues **two** `fsync`s per append — the file (`os.fsync`, 2012)
+then the parent directory (`_fsync_dir`, 1976) — **inside the handler, before the response is
+written**. `fsync` blocks in uninterruptible D-state, is bounded by nothing, and **burns no
+CPU**, which is exactly why it is invisible in the CPU metrics above. 🔴 **The handler's
+`timeout = 15` does NOT bound it**: that is a SOCKET timeout and does not reach a syscall.
+
+**Sufficiency demonstrated, frame for frame.** Stalling one `fsync` past the client's bound
+reproduces the CI traceback exactly — `fetch` → `urlopen` → `http.client` →
+`socket.py:720, in readinto / return self._sock.recv_into(b)` → `TimeoutError: timed out`.
+Control: with the stall removed the same request answers **200 in 0.056 s**, so the harness
+can pass and the failure is caused by the stall.
+
+**The node's I/O was in fact saturated during that step** (Prometheus, 06:25–06:55Z, n=31,
+node-exporter `192.168.50.191:9100`):
+
+- PSI io **full** `rate(node_pressure_io_stalled[2m])` mean **0.128**, **max 0.586** — at the
+  peak, 58.6 % of wall time *no* task on the node could progress on I/O. That is **2.2×**
+  larger than the CPU some-stall, and full is the more severe class.
+- `node_procs_blocked` (D-state) **max 37**; `sda` utilisation **max 0.996**, weighted queue
+  time max **64.1**, write await **max 1.264 s**.
+- Three discrete saturation episodes fall inside the step: **06:32–06:34** (the worst),
+  06:36:30–06:38:30, 06:45–06:47. Five concurrent `devrc-ci-*-gate-pod`s were on the node;
+  `ddrxx` wrote ~1/5 of the load — mostly a victim.
+- **Memory is affirmatively ruled out**: PSI memory max 0.004 (0.4 %), ≥10.87 GB available
+  throughout.
+- Clean negative control for the instrument: the 04:25Z window with **zero** CI pods reads
+  sda util 1.3 %, io-full 0.14 %. The saturation is caused by CI concurrency.
+
+### 🔴 What is NOT established — read this before quoting the section above
+
+- **No 60-second I/O operation was observed.** The worst per-op latency in the window is
+  **1.264 s**, and the 0.586 io-full figure is a duty cycle over a minute, not a contiguous
+  stall. Sufficiency (a stalled `fsync` produces this exact traceback) is **not** attribution.
+- **The same I/O picture appears in every comparison window** — −6 h, −12 h and −24 h are
+  statistically indistinguishable from the incident window, and those runs did not fail. So
+  saturation is a *necessary-condition candidate*, not a discriminating cause. It cannot
+  separate "the filesystem stalled this request" from a rival that merely coincided with
+  routine CI load.
+- **The discriminating signal is client-side and CI does not currently emit it**: whether the
+  60 s expiry landed inside 06:32–06:34 / 06:36–06:38 / 06:45–06:47, and *which* frame the
+  server thread was in. Prometheus cannot answer either.
+- Whether the historical `ConnectionResetError` (the entries above) and this `TimeoutError`
+  are one mechanism or two **remains open**. They have different shapes and only the RST one
+  has a located hypothesis (`_consume_body`'s five undrained arms).
+
+### What shipped instead of a fix — and why it is not one
+
+🔴 **No drain, no retry, no bound was moved.** The failure carries no information about
+*which side* blocked, and that — not the flake's rarity — is why this has stayed open:
+**a client-side read timeout is the observable that the most mechanisms share, so on its own
+it identifies none of them.**
+
+`fetch` now catches `TimeoutError`, prints `_why_the_server_did_not_answer()` to stderr and
+**re-raises unchanged**. The report dumps every live thread's stack and emits a greppable
+`MECHANISM = …` verdict — `SERVER_BLOCKED_IN_FSYNC`, `SERVER_BLOCKED_ON_ENTRY_LOCK`,
+`SERVER_BLOCKED_IN_AUDIT_SINK`, `SERVER_BLOCKED_ELSEWHERE`, `NEVER_ACCEPTED`,
+`NO_SERVER_THREAD_ALIVE`, or `AMBIGUOUS(…)` when two stuck handlers disagree. A hung test
+still fails, exactly as loudly. **The next occurrence in CI names its own mechanism.**
+
+⚠ **Labelled honestly: `TestAHungRoundTripSAYSWhichSideBlocked` is an INVARIANT GUARD on the
+reporter, not regression coverage for the flake.** The flake has never been made to
+reproduce and no test claims otherwise. Its evidence is the mutation matrix (baseline 4
+passed; drop the fsync rule → the fsync arm alone fails; drop the entry-lock rules → that arm
+alone fails; make the verdict a true constant → the discrimination control **and**
+`NEVER_ACCEPTED` fail; make `fetch` swallow the timeout → three arms fail on
+`DID NOT RAISE`; make the handler drain inert → two arms fail; positive control with no rules
+at all → caught).
+
+🔴 **Two traps paid for while writing it, both worth not re-paying.** `post_bullet` forwards
+`**payload` into the JSON **body**, so a `timeout=` passed to it is sent to the server as a
+field and the request silently waits the full `HANG_TIMEOUT` — the test then passes while
+measuring nothing. And a test that wedges a handler **must drain it**: handler threads are
+daemons that `shutdown()`/`server_close()` never join, so one left parked leaks into later
+tests and the reporter attributes *its* mechanism to somebody else's hang. That happened
+here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
+
 ## Next steps (ranked)
 
 🔴 **Numbering is UNCHANGED on purpose** — the rank is half a claim's identity

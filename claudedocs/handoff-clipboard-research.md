@@ -18,32 +18,32 @@ Research modern best practices for clipboard and terminal clipboard interaction 
 
 ## State now
 
-- **Rank 8 is BUILT, committed and pushed — NOT merged.** Branch
-  `fix/kickoff-path-resolves`, commit **`28e54067`**, based on `origin/main`.
-  No PR yet; the gate was still running when this was written. Files:
-  `scripts/resume-state.sh`, `scripts/tests/test_resume_state_handoff_resolution.py`.
-- 🔴 **The fix landed in the CONSUMER, not in the template I filed it against.**
-  Two things ruled the template out: `claude/skills/handoff/SKILL.md` has **34
-  bytes** of headroom under its enforced ceiling (so any addition needs an
-  eviction in the same commit), and **#1144 and #1146 are both open against that
-  exact file**. Re-reading the mechanism showed the token was a valid path all
-  along — just anchored one level above where a kickoff is pasted — so
-  `embedded_md_path` now re-anchors a RELATIVE miss on the repo root. That
-  repairs **all 91 existing docs' kickoffs**, not only future ones, and touches
-  neither the ceiling nor the contended file.
-- **Symptom reproduced and gone**, real repo, real input, from the repo root:
+- **Rank 8 is MERGED and CLOSED OUT.** `#1159` → **`dae5ac23`**, verified by
+  CONTENT on `origin/main` (a squash makes ancestry read FALSE): re-anchor
+  clause present, the `RELATIVE ONLY` restriction present, the surviving-mutant
+  annotation present, all 3 named tests present.
+- ✅ **VERIFIED LIVE, not merely merged.** The ORIGINAL failing input, run
+  against the copy on `main` from the repo root:
   ```
-  base    -> handoff: handoff-mention-detection.md   + NO SUCH FILE gap
-  patched -> handoff: handoff-clipboard-research.md  + no gap
+  before: handoff: handoff-mention-detection.md   + NO SUCH FILE gap
+  after:  handoff: handoff-clipboard-research.md  + no gap
   ```
-- **Rank 2 (#1128 → `c06a56a1`) and its close-out (#1151 → `16cfa342`) are
-  MERGED** and verified by content. Ranks 1/3/4/5 untouched.
-- **Claim `clipboard-research-8` is HELD** until the PR lands.
-- ⚠ **The ship blocker recorded in the last update has EXPIRED — re-measure,
-  do not trust either line.** `scripts/memory-detail` is no longer staged and
-  `nix/graphical.nix` is clean; that session landed its work. `nix/pkgs/
-  default.nix` is STILL dirty (adds `inxi`, `cpu-x`), so a `home-manager switch`
-  would still build another session's unreviewed change.
+  `readlink -f scripts/resume-state.sh` terminates in `~/workspace/devrc`, so it
+  is the working-tree copy — **live with no `home-manager switch`**, and the base
+  clone is fast-forwarded, so this host already has it.
+- **Gated on the MERGED tree, not the branch.** `origin/main` had moved 4
+  commits with no file overlap — and one was
+  `8e8ee3bc fix(nogit_plugin): serialise the config control`, the GUARD 9 plugin
+  whose output corruption had broken the dev-host gate an hour earlier, plus 354
+  new lines of its tests. Merged `main` in and let Tekton gate the result: both
+  required checks green.
+- **Rank 2 (#1128 → `c06a56a1`), its close-out (#1151 → `16cfa342`) and rank 8
+  (#1159 → `dae5ac23`) are all MERGED.** Ranks 1/3/4/5/6 untouched.
+- **Claim `clipboard-research-8` RELEASED**; both worktrees removed; branch
+  deleted. Nothing of this session's remains.
+- ⚠ **NOT SHIPPED.** `nix/pkgs/default.nix` carries another session's
+  uncommitted `inxi`/`cpu-x` additions, so a `home-manager switch` would build
+  unreviewed WIP. The laptop is behind. **Re-measure before shipping.**
 
 ## Research findings — clipboard/terminal clipboard best practices (2025-2026)
 
@@ -152,19 +152,17 @@ is retired, NOT reused.
 **Closed by this effort — kept so a resume does not re-open them:**
 - ~~adopt `set clipboard=unnamedplus`~~ — **DECLINED 2026-08-29**: it routes every
   `d`/`c`/`x`/`s` through the `+` register, so `dd` clobbers the system clipboard.
-- ~~install a clipboard manager for history~~ — **investigated 2026-08-29, nothing
-  installed.** Evidence and the **RETRACTED** greenclip security argument are
-  under Gotchas; the retraction stands.
+- ~~install a clipboard manager for history~~ — **investigated, nothing installed.**
+  Evidence and the **RETRACTED** greenclip security argument are under Gotchas.
 - ~~migrate to Wayland~~ — not applicable: measured `XDG_SESSION_TYPE=x11`.
 - ~~**unprotected-`main` arm for `drift-check.sh`**~~ — **SHIPPED** as rc 24,
   #1065 → `ebbe5eaa`, verified live under the real unit.
-- ~~**Rank 2 — correct `CLAUDE.md`'s break-glass note**~~ — **MERGED**, #1128 →
-  `c06a56a1`. Guard: `scripts/tests/test_break_glass_note.py`.
-- ~~**Rank 8 — the kickoff path that does not resolve**~~ — **BUILT 2026-08-31,
-  IN FLIGHT: `fix/kickoff-path-resolves` @ `28e54067`, no PR yet.** Close it
-  out: confirm the gate + both sandbox tiers, open the PR, merge, then
-  `claim-work --release clipboard-research-8` and remove the two worktrees
-  (`devrc-kickoff-beb749f5`, `devrc-kickoff-base-beb749f5`).
+- ~~**Rank 2 — `CLAUDE.md`'s break-glass note**~~ — **MERGED**, #1128 → `c06a56a1`.
+  Guard: `scripts/tests/test_break_glass_note.py`.
+- ~~**Rank 8 — the kickoff path that did not resolve**~~ — **MERGED 2026-08-31**,
+  #1159 → `dae5ac23`, verified live on the real input. Fixed in the CONSUMER
+  (`embedded_md_path`), which repaired all existing docs' kickoffs rather than
+  only future ones.
 
 1. **Give the rc-24 arm an UNMEASURED ladder** (devrc). THREE could-not-measure
    states, and a lapsed/expired `gh` token leaves it blind **forever** while the
@@ -195,11 +193,22 @@ is retired, NOT reused.
    on what would make it trustworthy.** Files: `scripts/break-glass-merge.sh`.
    forcing: none
 7. **Tekton CAPACITY — `devrc-pytests` fails a localhost round-trip under load**
-   (homelab, NOT devrc). Unchanged this session and still open. See the Gotchas
-   entry for why the owner is capacity and not the test file.
+   (homelab, NOT devrc). 🔴 **STILL OPEN, and now THREE occurrences by TWO
+   sessions.** Mine: #1128 and #1151, both `[record0-…-zach]`. **Another
+   session's, landed as #1172 → `ef71733b` while this session worked rank 8:**
+   `[record1-…-dana]` on `devrc-ci-ddrxx`, rev `857fc3f5`, node `talos-xr6-r7p`.
+   That commit REFINES the mechanism and corroborates the capacity reading
+   independently: `socket.py:720` is `self._sock.recv_into(b)` in
+   `SocketIO.readinto`, so it is a **READ timeout on an ESTABLISHED connection**
+   — not an RST, not a backlog/accept-queue problem — and `HANG_TIMEOUT` was
+   already `60.0` at that revision. Files it touched:
+   `scripts/tests/test_subsystem_store_api.py` (+324),
+   `claudedocs/handoff-cairn-phase3.md`. **Read #1172 before re-deriving
+   anything here.**
    **CLOSING CONDITION:** `devrc-pytests` completes 5 consecutive runs with no
-   `socket.py` `TimeoutError`, read from the PipelineRun logs.
-   forcing: gate — cost a merge cycle on both #1128 and #1151.
+   `socket.py` `TimeoutError`, read from the PipelineRun logs, not inferred from
+   PRs happening to merge.
+   forcing: gate — it has now cost merge cycles on #1128, #1151 and #1172.
 
 ## Gotchas / decisions / dead-ends
 - OSC 52 supersedes tmux-yank for this setup — no reason to install the plugin
@@ -572,6 +581,68 @@ the status line that carried them. The ranked item is now a pointer to this.
   the protocol that means the doc likely belongs to none of them, and #440 is
   unrelated to this work — so no field, rather than a guess that would be
   reconciled against for the life of the doc.
+
+### The handoff doc went STALE TWICE in one thread — this is a PROCESS bug
+
+- 🔴 **Both times the doc landed BEFORE the merge it described, so both times it
+  sat on `origin/main` asserting four things that were false**: *not merged*,
+  *no PR yet*, *claim HELD*, *worktrees on disk*. Caught only because the
+  operator asked "is anything outstanding?" — twice. A `/resume` reading it in
+  between would have re-entered finished work.
+- **Why it recurs rather than being a slip:** the write-back guard fires at the
+  END of a turn, and the merge completes AFTER that turn. So the natural order
+  is write-then-merge, and the doc is structurally one step behind every time.
+- **The remedy is an ORDERING, not more care:** after a merge lands, update
+  `State now` in the SAME session — treat "merged" as part of the close-out, not
+  as something the next session will notice. A doc whose status section is one
+  step behind reads exactly like a doc that is current.
+
+### Rank 8 — the kickoff path fix (2026-08-31)
+
+- 🔴 **FIX THE CONSUMER, NOT THE EMITTER, WHEN THE EMITTED VALUE IS VALID.** The
+  kickoff's `<repo>/claudedocs/handoff-<topic>.md` is a real path — it just
+  resolves from the repo's PARENT, and a kickoff is pasted INSIDE the repo.
+  Patching the template would have fixed future kickoffs only, needed an
+  eviction against `SKILL.md`'s ceiling (**34 bytes** of headroom), and collided
+  with #1144 and #1146, both open against that exact file. Re-anchoring in
+  `embedded_md_path` fixed every existing doc and touched neither.
+- 🔴 **The RESTRICTION is the load-bearing half, not the re-anchoring.** It
+  applies to RELATIVE tokens only. An ABSOLUTE token that is absent stays a
+  miss: the caller named a specific tree, so serving a same-named doc from THIS
+  repo would be the identical wrong-initiative bug one level down. Pinned by
+  `test_an_ABSOLUTE_token_that_is_absent_STAYS_a_gap` against a repo that DOES
+  contain a same-named doc.
+- 🔴 **EVERY fixture carries a NEWER DECOY**, or the newest-of-N fallback selects
+  the same file the token names and the tests pass whether or not the clause
+  exists. The base failure reads `handoff-zz-newer-decoy.md != handoff-wanted.md`.
+- 🔴 **MY MUTATION SWEEP REPORTED 6/6 SURVIVED AND EVERY ONE WAS A LIE — TWICE.**
+  (1) It scraped `::(test_\w+)`; pytest writes `::\x1b[1mtest_name\x1b[0m`, ANSI
+  bold between the `::` and the name. Nothing matched, so nothing looked failed
+  — **including a mutant the base run had already proven kills two tests**; that
+  contradiction is what exposed it. (2) After that, its `-k` filter did not match
+  a newly added test, so `break-removed` reported SURVIVED a second time. A
+  third, smaller one: a bare `::(test_\w+)` over the whole output also scrapes
+  the WARNINGS summary — 3 names for a run with 0 failures. Scrape `^FAILED`
+  only. **The sweep now SELF-CHECKS** (control GREEN and a known-fatal mutant
+  KILLED) and prints `SWEEP-INVALID` otherwise.
+- ⚠ **One mutant SURVIVES and is annotated as such in the source** rather than
+  left reading as covered: `root-guard-dropped`. Killing `[ -n "$root" ]` needs a
+  literal `/claudedocs/handoff-*.md` at the filesystem ROOT, which no fixture can
+  create.
+- 🔴 **THE DEV-HOST GATE TIER IS UNRELIABLE IN THIS SHARED CHECKOUT.** It
+  reported `RESULT=FAIL`, `TOTAL collected=0` and **29 targets "unparseable
+  summary"** — on a clean tree, twice, including targets the diff cannot reach.
+  Cause: `GUARD 9` writes multi-line `gitenv(observed)` blocks into pytest's
+  stdout whenever the shared `.git` moves, and other sessions fetch into it
+  constantly. **A linked worktree does not isolate this** — it isolates the
+  working DIRECTORY, not the git dir. The sandbox tier builds from a store copy
+  with no `.git` and is structurally immune, which is a second reason to treat
+  it as authoritative. ⚠ I first blamed my own mid-run commit; the clean re-run
+  failed identically and REFUTED that. A plausible cause is not a diagnosis.
+- 🔴 **"No file overlap" is not merge safety, and here it nearly cost the check
+  that mattered.** #1159 was 4 commits behind with zero overlap — and one of
+  those commits was the GUARD 9 plugin itself. Overlap answers *will git
+  conflict*, never *will the merged tree behave*. Read what the commits DID.
 
 ## How to verify
 

@@ -315,19 +315,39 @@ The rank is half a `claim-work` slug's identity. Ranks 1, 2 and 3 are closed.
 6. **BLOCKED — do not start:** cg#362 and cg#363 wait on the teammate's private-repo
    migration ticket.
    forcing: none — blocked on a third party.
-7. 🔴 **cg#348 — make the CI reporter distinguish capacity from a broken gate.** Repo
-   `zacxdev/homelab-infra`, files `devrc-ci-pipeline.yaml` (the `clone` step and `post_leg`
-   in the `report` finally task). Diagnosis and ranked fixes are in **comment 593**.
-   🔴 The fix **recovers no lost check — it makes the loss legible**; the commit message must
-   say so or a reviewer reads it as a reliability fix.
-   forcing: gate — measured 2026-08-31, **2 of 28 terminal PR-gate runs (7.1%) lost a
-   REQUIRED check to pure queueing**, and with `enforce_admins: true` those PRs are BLOCKED
-   until someone pushes again. Three capacity outcomes and one real defect currently post the
-   same string.
+7. ✅ **DONE — cg#348's REPORTING half.** homelab-infra#600 → squash **`4e1a7970`**,
+   verified by CONTENT and **deployed**: Flux `tekton-triggers` reports
+   `lastApplied=trunk@sha1:4e1a7970…` and the LIVE `devrc-ci-report` Task carries the new
+   arm (0 occurrences immediately after merge; ~80s to reconcile). Four mechanisms now post
+   four strings, all still GitHub `error` — **it recovers no lost check, it makes the loss
+   legible.** Audit ladder ran 3 rounds and stopped on a clean one. **Do not re-work.**
+   🔴 **cg#348 ITSELF IS STILL OPEN — only the reporting half shipped.** Comment 593's top
+   finding (the PR leg preempts the main leg because priority is split by trigger) and the
+   queueing cost are untouched. Criteria 1 and 3 are NOT met: they want a REAL gate run
+   observed under contention, and the probes were a scratch pipeline. Criterion 4 is
+   **deliberately not implemented** — comment 256 retracted it.
+   🔴 **TWO MEASURED CORRECTIONS TO THE CARD'S OWN PLAN — do not re-derive:**
+   (a) **`kubectl delete pod` is NOT a preemption stand-in.** Tried twice; Tekton RECREATED
+   the pod and the TaskRun `Succeeded`. Card #348's proposed probe 3 measures a different
+   mechanism. Kill the step process instead.
+   (b) **A SKIPPED gate's `$(tasks.gate.reason)` is the EMPTY STRING**, not `PipelineRun was
+   stopping`. The `:-` fallback is the arm that actually fires.
+   forcing: none for the reporting half — shipped and live.
 8. **Cairn integration, phase 0** — reconcile the two conflicting writers of the subsystem
    store before automatic capture multiplies the inconsistency. Plan and all 11 decisions:
    `claudedocs/plan-cairn-integration.md` (merged `093a63db`). Do not re-derive them here.
    forcing: none — nothing external is waiting.
+9. **cg#469 — a 4xx on the FIRST leg's status POST costs the SECOND leg its check.** Filed
+   2026-08-31 out of #600's audit, deliberately out of that PR's scope. Under `set -eu`,
+   `curl -sf` on the pytests POST aborts before nodetests posts at all — checks stuck
+   `pending` forever, the same end-state as `devrc-ci-nnt6f`/`9p6mf`. 🔴 The fix is NOT
+   `|| true`: that trades a loud failure for a silent one. Carries a second, trivial item
+   (a stale "six pipelines / devrc-ci 3m" comment; the live scan says >= 11 and 5.0m).
+   Repo `homelab-talos`, same file as rank 7.
+   forcing: none — read off the code, NOT observed in the wild.
+   🔴 APPENDED as 9, not inserted as 8: this list's numbering is STABLE because the rank is
+   half a `claim-work` slug's identity, so renumbering silently re-points every live claim.
+   A new item goes on the END even when it is topically adjacent to rank 7.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **cg#428 COLLIDES WITH OPEN PR #1011 (`feat/mention-detection-click-to-open`), and
