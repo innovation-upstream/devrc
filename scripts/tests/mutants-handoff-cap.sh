@@ -2,9 +2,15 @@
 # Mutation battery for rules (i) and (j) of `scripts/lib/handoff_doc.py` —
 # one-doc-per-effort, and a forcing function per ranked next-step — plus the
 # EXIT-CODE CONTRACT those rules return through, and the mainline-copy predicate
-# rule (i) consults. The last two sections were added closing #1093/#1115: the
-# codes and the predicate were the ladder's own scaffolding, and every mutant
-# there SURVIVED all 295 tests at filing.
+# rule (i) consults. THREE sections were added closing #1093/#1115 — the codes,
+# the predicate, and the round-4 message row with its negative control.
+#
+# 🔴 THEY ARE NOT ALL THE SAME KIND OF ROW, and reading them as one gets two of
+# them wrong. The exit-code and predicate mutants each SURVIVED all 295 tests at
+# filing, so those rows are regression coverage. The round-4 mutant was already
+# KILLED at filing — by the WRONG MESSAGE, which is the entire defect #1093.1
+# names — so that row is a DIAGNOSTIC-QUALITY guard, and its `ok` means the
+# failure names the real defect, not that a test newly fails.
 #
 # Not run by CI. An author/reviewer instrument, kept IN THE TREE so
 # "mutation-verified" can be RE-DERIVED instead of believed.

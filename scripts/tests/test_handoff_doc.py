@@ -1407,10 +1407,15 @@ class TestRuleFDidNotMoveTheExitCodes:
         """
         codes = {n: v for n, v in vars(hd).items()
                  if n.startswith("EXIT_") and isinstance(v, int)}
-        # 🔴 EXACT, not `>=`. Against exactly 9 constants a `>= 8` floor tolerates
-        # ONE silently vanishing — a rename, a deletion, or a value that stops
-        # being an int — which is the same class of drift this test exists for.
-        assert len(codes) == 9, f"the EXIT_* constant set changed: {codes}"
+        # 🔴 THE INJECTIVITY LOOP RUNS FIRST, AND THE ORDER IS THE POINT. This
+        # test is named and documented for COLLISIONS, so a collision must be
+        # what it reports. A count assertion placed above it pre-empts that:
+        # adding a second constant equal to 9 — the #962/#1046 shape, one digit
+        # from what a PR in flight actually does — dies to `assert 10 == 9`, the
+        # remedial text below never renders, and the message that does render
+        # invites bumping the literal to 10, after which the real defect
+        # surfaces only on a SECOND run. That is #1093.1's defect ("the
+        # assertion that runs first misdirects") recreated in a sibling test.
         seen: dict[int, str] = {}
         for name, value in sorted(codes.items()):
             assert value not in seen, (
@@ -1420,6 +1425,12 @@ class TestRuleFDidNotMoveTheExitCodes:
                 f"next free code and update the skill's exit-code list with it."
             )
             seen[value] = name
+        # 🔴 EXACT, not `>=`. Against exactly 9 constants a `>= 8` floor tolerates
+        # ONE silently vanishing — a rename, a deletion, or a value that stops
+        # being an int — which is the same class of drift this test exists for.
+        # A legitimate addition is expected to update this number; the failure
+        # prints the whole dict, so what changed is on screen.
+        assert len(codes) == 9, f"the EXIT_* constant set changed: {codes}"
 
     def test_the_exit_code_constants_did_not_move(self) -> None:
         """Their VALUES, not just their names — a caller reads the number."""
@@ -1445,14 +1456,23 @@ class TestRuleFDidNotMoveTheExitCodes:
             f"WRONG_BASE_REMEDY names an exit code that is not "
             f"EXIT_STALE_BASE={hd.EXIT_STALE_BASE}: {remedy!r}")
         doc = HANDOFF_SKILL.read_text(encoding="utf-8")
-        for const, label in ((hd.EXIT_STALE_BASE, "stale-base"),):
-            assert f"(exit {const})" in doc, (
-                f"claude/skills/handoff/SKILL.md does not name exit {const} for "
-                f"{label}; renumbering the constant left the skill stale.")
-        for const in (hd.EXIT_DOC_PER_EFFORT, hd.EXIT_UNFORCED):
-            assert f"({const})" in doc, (
-                f"SKILL.md does not name exit {const}; rule (i)/(j)'s documented "
-                f"codes drifted from the module.")
+        # 🔴 BIND THE STATUS TOKEN TO ITS CODE — a bare `f"({const})"` asks only
+        # whether the DIGIT appears anywhere in a 25 KB file, which any OTHER
+        # status spelling the same number satisfies. MEASURED: rewriting
+        # `status=new-doc` (7) to (9) — the exact drift this test exists to
+        # prevent — left all 297 tests GREEN, because `status=dated-topic` still
+        # spelled (7). The pair is the claim; the digit alone is not.
+        for status, const, form in (
+            ("stale-base", hd.EXIT_STALE_BASE, "exit {}"),
+            ("dated-topic", hd.EXIT_DOC_PER_EFFORT, "{}"),
+            ("new-doc", hd.EXIT_DOC_PER_EFFORT, "{}"),
+            ("unforced", hd.EXIT_UNFORCED, "{}"),
+        ):
+            want = f"`status={status}` ({form.format(const)})"
+            assert want in doc, (
+                f"claude/skills/handoff/SKILL.md does not carry {want!r}; the "
+                f"skill's documented code for status={status} drifted from the "
+                f"module, where it is {const}.")
 
     def test_merge_still_returns_a_plain_string(self) -> None:
         """`merge()` is public and called directly by other tests in this file;
@@ -5327,19 +5347,11 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         _sh("git", "add", "--", "claudedocs", cwd=work)
         _sh("git", "commit", "-q", "-m", "repo has other handoff docs", cwd=work)
 
-        # A mainline copy that is STALE but holds nothing to lose.
-        other = tmp_path / "ws-mainline"
-        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
-        for k, v in (("user.name", "W"), ("user.email", "w@example.invalid"),
-                     ("commit.gpgsign", "false")):
-            _sh("git", "config", k, v, cwd=other)
-        (other / "claudedocs").mkdir(exist_ok=True)
-        (other / "claudedocs" / "handoff-sample-topic.md").write_text(
-            "   \n\n", encoding="utf-8")
-        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
-        _sh("git", "commit", "-q", "-m", "whitespace mainline copy", cwd=other)
-        _sh("git", "push", "-q", "origin", "main", cwd=other)
-        _sh("git", "fetch", "-q", "origin", cwd=work)
+        # A mainline copy that is STALE but holds nothing to lose. Uses the
+        # class's own `_mainline_doc` rather than a fourth inlined clone —
+        # #1093.3, which this change closes, WAS a sibling inlining this helper,
+        # and the `--allow-empty` suppression it removed lives in here.
+        self._mainline_doc(tmp_path, work, "   \n\n", "whitespace mainline copy")
 
         res = run_tool(work, "--confirm", update=update_file)
         assert res.returncode == hd.EXIT_DOC_PER_EFFORT, (
