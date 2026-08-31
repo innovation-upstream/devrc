@@ -593,7 +593,68 @@ def test_the_unresolved_escape_ledger_covers_BOTH_answers():
         "reason this class is DYNAMIC rather than COLLISION")
 
 
-FORGE_TOOLS = ("bash", "sed", "tr", "awk", "tee")
+@pytest.mark.parametrize("shape", sorted(G.BEFORE_PREFIX_ESCAPE_FIXTURES))
+def test_a_BEFORE_prefix_escape_is_seen_and_never_reported_benign(shape):
+    """🔴 ROUND-10 FINDING NEW-19 — the FOURTH fail-open, and the worst of them.
+
+    `_ESC` named `\\n`/`\\r` AND required them to be quote-adjacent, so
+    `print("checks done\\nRESULT: PASS (exit=0)")` reported that the line emits
+    NOTHING at column 0 — `classify_payload` returned None, so the line never
+    entered the population and was invisible to all four guard assertions at
+    once. That is strictly worse than a wrong class: a BENIGN verdict would at
+    least have demanded a pin.
+
+    🔴 This test exists because adding the fixtures was NOT enough: with the
+    ledger present but nothing asserting the VERDICT, removing the detection AND
+    removing the classification both survived a green suite. Fixtures nothing
+    consumes are the same defect as a branch nothing reaches.
+    """
+    line, expected, _forges = G.BEFORE_PREFIX_ESCAPE_FIXTURES[shape][:3]
+    assert G.line_emits_reserved_prefix(line), (
+        f"the scan does not SEE {shape!r} at all, so it is invisible to every "
+        f"assertion in this file: {line}")
+    verdict = G.classify_payload(line)
+    assert verdict is not None, f"{shape!r} classified as emitting nothing: {line}"
+    assert verdict != G.BENIGN, (
+        f"{shape!r} was reported PROVABLY HARMLESS while the escape can put the "
+        f"prefix at column 0: {line}")
+    assert verdict == expected, (
+        f"expected {expected!r} for {shape!r}, got {verdict!r}: {line}")
+
+
+def test_the_before_prefix_fixtures_really_place_their_escape_BEFORE_the_prefix():
+    """Guard the guard: if a fixture put its escape after the prefix it would be
+    covered by UNRESOLVED_ESCAPE_FIXTURES instead, and this ledger would prove
+    nothing about the half it was written for."""
+    for shape, entry in G.BEFORE_PREFIX_ESCAPE_FIXTURES.items():
+        line = entry[0]
+        head = line.split(G.RESERVED_PREFIX, 1)[0]
+        assert G.ESC in head, (
+            f"{shape!r} has no escape before the prefix, so it does not exercise "
+            f"the before-prefix arm: {line}")
+
+
+def _ground_truth_ledgers() -> dict:
+    """Every ground-truth ledger in the module, found by SHAPE.
+
+    🔴 ROUND-10 FINDING NEW-20. The first version keyed on a `_FIXTURES` name
+    suffix AND on tuples of length exactly 3, while its docstring claimed to
+    find "every dict carrying a 3-tuple ground-truth ledger". Measured, a ledger
+    named `..._LEDGER`, and one carrying a fourth element documenting WHY the
+    flag holds, both SURVIVED — each with an unmeasured `really_forges` flag,
+    which is NEW-14 again. Both are plausible next edits.
+
+    Keyed on the only thing that actually matters: a dict of tuples whose third
+    element is a bool. That is the ground-truth flag, wherever it lives and
+    whatever the dict is called.
+    """
+    return {name: obj for name, obj in vars(G).items()
+            if isinstance(obj, dict) and obj
+            and all(isinstance(v, tuple) and len(v) >= 3
+                    and isinstance(v[2], bool) for v in obj.values())}
+
+
+FORGE_TOOLS = ("bash", "python3", "sed", "tr", "awk", "tee")
 
 
 def test_the_really_forges_flags_are_MEASURED_against_real_bash(tmp_path):
@@ -625,29 +686,35 @@ def test_the_really_forges_flags_are_MEASURED_against_real_bash(tmp_path):
     bash = shutil.which("bash")
     # 🔴 BOTH ground-truth ledgers. A second ledger carrying unmeasured flags is
     # NEW-14 again — the whole finding was a field that READ as verified.
-    ledger = {**{f"chain/{k}": v for k, v in G.CHAIN_TRANSFORM_FIXTURES.items()},
-              **{f"escape/{k}": v for k, v in G.UNRESOLVED_ESCAPE_FIXTURES.items()}}
+    # 🔴 DISCOVERED, not listed — see the pin below. Listing them is what let a
+    # ledger go unmeasured twice.
+    ledger = {f"{name}/{k}": v
+              for name, d in sorted(_ground_truth_ledgers().items())
+              for k, v in d.items()}
     # 🔴 ROUND-9 FINDING NEW-18. Deleting a ledger from this merge SURVIVED a
     # green suite — the comment saying "a second ledger with unmeasured flags is
     # NEW-14 again" was prose, not a check, which is NEW-14's own shape one
     # level up. Pinned: every dict in the module carrying a 3-tuple ground-truth
     # ledger must be measured here, discovered rather than listed, so a THIRD
     # ledger is covered without anyone remembering.
-    declared = {name: obj for name, obj in vars(G).items()
-                if name.endswith("_FIXTURES") and isinstance(obj, dict)
-                and obj and all(isinstance(v, tuple) and len(v) == 3
-                                for v in obj.values())}
-    measured = sum(len(d) for d in (G.CHAIN_TRANSFORM_FIXTURES,
-                                    G.UNRESOLVED_ESCAPE_FIXTURES))
-    assert sum(len(d) for d in declared.values()) == measured == len(ledger), (
-        f"a ground-truth ledger is not being measured here: the module declares "
-        f"{sorted(declared)} totalling {sum(len(d) for d in declared.values())} "
-        f"entries, this test measures {len(ledger)}. An unmeasured really_forges "
-        "flag reads as verified and is not — that was NEW-14.")
-    for shape, (line, _verdict, really_forges) in sorted(ledger.items()):
+    assert len(ledger) == sum(len(d) for d in _ground_truth_ledgers().values())
+    assert len(_ground_truth_ledgers()) >= 3, (
+        f"only {len(_ground_truth_ledgers())} ground-truth ledgers discovered; "
+        "the module declares at least three. The discovery predicate is too "
+        "narrow and a ledger is going unmeasured.")
+    for shape, entry in sorted(ledger.items()):
+        line, _verdict, really_forges = entry[0], entry[1], entry[2]
+        # 🔴 A fixture declares its INTERPRETER when it is not a shell line.
+        # The first version ran everything under bash, so `print("…")` produced
+        # an EMPTY stdout and read as "does not forge" — a measurement that
+        # silently measured nothing, which is the shape this test exists to
+        # kill. Caught by this very assertion on a Python fixture.
+        interp = entry[3] if len(entry) > 3 else "bash"
         # `wait` so a process substitution's output is flushed before bash exits;
         # cwd=tmp_path so `tee f` writes into the sandbox, not the repo.
-        proc = subprocess.run([bash, "-c", line + "\nwait\n"], cwd=str(tmp_path),
+        argv = ([shutil.which("python3"), "-c", line] if interp == "python"
+                else [bash, "-c", line + "\nwait\n"])
+        proc = subprocess.run(argv, cwd=str(tmp_path),
                               capture_output=True, text=True, timeout=60)
         observed = bool(G.RESERVED_RE.search(proc.stdout))
         assert observed == really_forges, (

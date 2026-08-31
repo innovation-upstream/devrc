@@ -122,8 +122,29 @@ def select_verdict(text: str) -> Verdict | None:
 #       Prefer spaces in heredoc bodies. If this ever fires for real, the fix is
 #       to make the tab-indented case pinnable, not to drop the `\t*`.
 #
+# Escapes between the opening quote and the prefix. `_ESC` is the KNOWN case —
+# only `\\n`/`\\r`, which certainly start a new line, so a literal verdict after
+# them is a certain COLLISION.
 _ESC = r"(?:\\[nr])*"
 _QUOTED = re.compile(rf"""(['"]){_ESC}{re.escape(RESERVED_PREFIX)}""")
+
+# 🔴 …and the UNKNOWN case, which was a fail-open for four rounds. `_ESC` names
+# two spellings AND requires them to be quote-adjacent, so every one of these
+# reported that the line emits NOTHING at column 0 while really writing a
+# verdict there (executed, read back through gate.sh's own grep):
+#
+#     print("checks done\nRESULT: PASS (exit=0)")
+#     printf "checks: 12\x0aRESULT: PASS (exit=0)\n"
+#     print("\u000aRESULT: FAIL (exit=1)")
+#
+# That is strictly worse than a wrong CLASS: `None` keeps the line out of the
+# population entirely, so all four guard assertions are blind to it at once.
+# Any run of non-quote text carrying a backslash can break the line, so the
+# prefix after it may land at column 0 — detected here, and classified DYNAMIC
+# because this module cannot know whether the escape expands.
+_QUOTED_AFTER_ESCAPE = re.compile(
+    rf"""(['"])[^'"]*\\[^'"]*{re.escape(RESERVED_PREFIX)}"""
+)
 _UNQUOTED = re.compile(
     rf"""\b(?:echo|printf|print)\b\s+(?:-\S+\s+)*{re.escape(RESERVED_PREFIX)}"""
 )
@@ -253,8 +274,8 @@ def line_emits_reserved_prefix(line: str) -> bool:
     """True when this source line would put `RESULT:` at column 0 of stdout."""
     if _COMMENT.match(line):
         return False
-    return bool(_QUOTED.search(line) or _UNQUOTED.search(line)
-                or _HEREDOC.match(line))
+    return bool(_QUOTED.search(line) or _QUOTED_AFTER_ESCAPE.search(line)
+                or _UNQUOTED.search(line) or _HEREDOC.match(line))
 
 
 def _spells_a_verdict(fragment: str) -> bool:
@@ -329,6 +350,20 @@ def _classify_chain(command: str) -> str:
 def _classify_one_command(command: str) -> str:
     """Classify ONE command — no separators inside it by construction."""
     after = command.split(RESERVED_PREFIX, 1)[1]
+
+    # 🔴 BEFORE the literal-verdict check, and the ORDER is the whole point.
+    # Text carrying an unresolved escape sits between the quote and the prefix,
+    # so the emitted text MAY break there and put the prefix at column 0 — or
+    # may not: `print("done\nRESULT: PASS")` really forges, while
+    # `echo "done\nRESULT: PASS"` (no `-e`) prints one literal line and forges
+    # nothing. This module cannot tell them apart. Running the literal check
+    # first would call BOTH a COLLISION, and COLLISION has no ledger — so the
+    # bash spelling would be an unpinnable false positive whose only remedy is
+    # editing someone's file. DYNAMIC still fails the guard until a human
+    # enumerates it; it just does not do so unanswerably.
+    if not _QUOTED.search(command) and _QUOTED_AFTER_ESCAPE.search(command):
+        return DYNAMIC
+
     if _spells_a_verdict(command):
         return COLLISION
 
@@ -584,6 +619,37 @@ UNRESOLVED_ESCAPE_FIXTURES = {
     # one — which is exactly why this class is DYNAMIC and not COLLISION.
     "bare-echo-literal": ('echo "' + RESERVED_PREFIX + ' ok' + ESC + 'n'
                           + RESERVED_PREFIX + ' PASS"', DYNAMIC, False),
+}
+
+# 🔴 BEFORE-PREFIX ESCAPES — the fourth fail-open, and the half the
+# after-prefix fix did not touch. Text carrying an unresolved escape between the
+# opening quote and the prefix. `_ESC` named `\n`/`\r` AND required them to be
+# quote-adjacent, so every one of these reported that the line emits NOTHING at
+# column 0 — invisible to all four guard assertions at once, which is strictly
+# worse than a wrong class.
+#
+# Each fixture places its escape BEFORE the prefix; UNRESOLVED_ESCAPE_FIXTURES
+# are structurally blind to this half, because every one of those places its
+# escape after.
+#
+#   name -> (line, verdict, does the emitter REALLY forge?)
+BEFORE_PREFIX_ESCAPE_FIXTURES = {
+    "python-text-then-nl": ('print("checks done' + ESC + 'n'
+                            + RESERVED_PREFIX + ' PASS (exit=0)")', DYNAMIC, True,
+                            "python"),
+    "printf-text-then-hex": ('printf "checks: 12' + ESC + 'x0a'
+                             + RESERVED_PREFIX + ' PASS (exit=0)' + ESC + 'n"',
+                             DYNAMIC, True),
+    "echo-e-text-then-nl": ('echo -e "done' + ESC + 'n'
+                            + RESERVED_PREFIX + ' PASS (exit=0)"', DYNAMIC, True),
+    "python-unicode-nl":   ('print("' + ESC + 'u000a'
+                            + RESERVED_PREFIX + ' FAIL (exit=1)")', DYNAMIC, True,
+                            "python"),
+    # A bare `echo` does not expand the escape — one literal line, forges
+    # nothing. This is why the class is DYNAMIC and not COLLISION: running the
+    # literal-verdict check first would make this an unpinnable false positive.
+    "bare-echo-literal":   ('echo "done' + ESC + 'n'
+                            + RESERVED_PREFIX + ' PASS (exit=0)"', DYNAMIC, False),
 }
 
 # Lines that MENTION the grammar a second time without running a second
