@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Top-RAM-consumers view for the i3status-rust `memory` block (left-click).
+
+The bar pill shows used-as-size; a left-click opens THIS float terminal — a
+summary header (total/used/free + swap) and the top 15 processes sorted by RSS.
+Reads /proc/meminfo and `ps aux`; no external deps, no network.
+
+Everything is best-effort — a launcher must never crash loudly.
+
+The pure/mockable logic (parse /proc/meminfo, parse ps, format) is factored
+out and unit-tested in scripts/tests/test_memory_detail.py; `--dump` prints
+the output without opening a terminal.
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+
+TOP_N = 15
+
+
+# --------------------------------------------------------------------------- #
+# Pure / mockable logic (unit-tested against fixtures — NO subprocess)
+# --------------------------------------------------------------------------- #
+def human(n) -> str:
+    """Compact human size from a byte count: '957M', '1.8T', '641G'."""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "?"
+    for unit in ("B", "K", "M", "G", "T", "P"):
+        if n < 1024 or unit == "P":
+            if unit == "B":
+                return "%dB" % int(n)
+            return ("%.1f%s" % (n, unit)).replace(".0%s" % unit, unit)
+        n /= 1024.0
+    return "?"
+
+
+def parse_meminfo(text: str) -> dict:
+    """Parse /proc/meminfo into {key: bytes}.  Keys with 'kB' are converted."""
+    info = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        key = parts[0].rstrip(":")
+        try:
+            val = int(parts[1])
+        except ValueError:
+            continue
+        if len(parts) >= 3 and parts[2] == "kB":
+            val *= 1024
+        info[key] = val
+    return info
+
+
+def parse_ps(text: str) -> list:
+    """Parse `ps aux` into [{pid, user, rss, pct_mem, command}].
+
+    rss is in KB (ps default).  Sorted by rss descending; malformed rows
+    are dropped.
+    """
+    procs = []
+    for line in text.splitlines():
+        parts = line.split(None, 10)
+        if len(parts) < 11 or parts[0] == "USER":
+            continue
+        try:
+            pid = int(parts[1])
+            rss = int(parts[5])
+            pct_mem = float(parts[3])
+        except (ValueError, IndexError):
+            continue
+        procs.append({
+            "pid": pid,
+            "user": parts[0],
+            "rss": rss * 1024,  # convert to bytes
+            "pct_mem": pct_mem,
+            "command": parts[10],
+        })
+    procs.sort(key=lambda p: p["rss"], reverse=True)
+    return procs
+
+
+def format_summary(info: dict) -> str:
+    """One-line summary: 'RAM: 12.3G / 31.2G (39%)  Swap: 1.2G / 8.0G (15%)'."""
+    total = info.get("MemTotal", 0)
+    avail = info.get("MemAvailable", info.get("MemFree", 0))
+    used = total - avail if total else 0
+    pct = round(100 * used / total) if total else 0
+
+    swap_total = info.get("SwapTotal", 0)
+    swap_free = info.get("SwapFree", 0)
+    swap_used = swap_total - swap_free if swap_total else 0
+    swap_pct = round(100 * swap_used / swap_total) if swap_total else 0
+
+    ram = "RAM: %s / %s (%d%%)" % (human(used), human(total), pct)
+    swap = "Swap: %s / %s (%d%%)" % (human(swap_used), human(swap_total), swap_pct)
+    return "%s  %s" % (ram, swap)
+
+
+def format_table(procs: list, n: int = TOP_N) -> str:
+    """Formatted table of top-N processes by RSS.
+
+    Columns: PID  USER  RSS  %MEM  COMMAND (truncated to fit).
+    """
+    if not procs:
+        return "  (no processes)"
+    rows = procs[:n]
+    # column widths
+    pid_w = max(len(str(p["pid"])) for p in rows)
+    user_w = max(len(p["user"]) for p in rows)
+    rss_w = max(len(human(p["rss"])) for p in rows)
+
+    lines = []
+    hdr = "  %-*s  %-*s  %*s  %%MEM  COMMAND" % (pid_w, "PID", user_w, "USER", rss_w, "RSS")
+    lines.append(hdr)
+    lines.append("  " + "-" * len(hdr))
+    for p in rows:
+        rss = human(p["rss"]).rjust(rss_w)
+        cmd = p["command"]
+        if len(cmd) > 40:
+            cmd = cmd[:37] + "..."
+        lines.append("  %-*d  %-*s  %s  %5.1f  %s"
+                      % (pid_w, p["pid"], user_w, p["user"], rss, p["pct_mem"], cmd))
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# Side-effecting (subprocess / terminal — not unit-tested)
+# --------------------------------------------------------------------------- #
+def read_meminfo() -> dict:
+    try:
+        with open("/proc/meminfo") as f:
+            return parse_meminfo(f.read())
+    except Exception:
+        return {}
+
+
+def read_ps() -> list:
+    try:
+        out = subprocess.run(
+            ["ps", "aux"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=10).stdout
+    except Exception:
+        return []
+    return parse_ps(out)
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    info = read_meminfo()
+    procs = read_ps()
+    header = format_summary(info)
+    table = format_table(procs)
+    output = "%s\n\n%s" % (header, table)
+
+    if "--dump" in argv:
+        print(output)
+        return 0
+
+    # Float terminal: write to a temp file, then exec less so the user can
+    # scroll/search.  The script process becomes less — it stays alive until
+    # the user presses 'q', keeping the alacritty window open.
+    try:
+        import os, tempfile
+        fd, path = tempfile.mkstemp(prefix="memdetail_", suffix=".txt")
+        with os.fdopen(fd, "w") as f:
+            f.write(output + "\n")
+        os.execvp("less", ["less", "-N", path])
+    except Exception:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:   # a launcher must never crash loudly
+        sys.exit(0)
