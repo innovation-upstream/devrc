@@ -577,6 +577,30 @@ own `t.Fatalf`, zero panics, zero compile failures.** Site 3 was the only one ca
 because its guard is the only one that also protects a pointer deref. Commit amended to
 `d687fcaa`, force-pushed with `--force-with-lease`; local HEAD == `origin`'s.
 
+### ✅ RESOLVED — ranks 8c and 8d are MERGED and verified on the MERGED TREE
+- **8c** — `ZacxDev/homelab-infra#591`, squash **`d6dc52cf`**. All four checks were green.
+- **8d** — `ZacxDev/homelab-infra#592`, squash **`d2d2346e`**.
+- **Verified on `origin/trunk` at `d2d2346e`, i.e. the tree the merges created, not either branch:**
+  Go `20 ^ok / 0 ^FAIL` (rc read from `go test` itself), bats `67 ok / 0 not ok` (rc read from
+  `bats` itself) with the new guard passing as `ok 35` and `ok 67` in the two suites.
+- **Content-verified, never by ancestry** (a squash merge makes `--is-ancestor` false forever):
+  0 `time.Sleep` left in the two Go test files on trunk; `scan_inert_negated_greps` present 5x in
+  each bats suite.
+
+🔴 **#592's `clawgate-ci` was RED at merge time and it was NOT a verdict on the change.** The run
+(`clawgate-ci-czshq`, rev `751aabaa`) hit **`TaskRunTimeout`** at the task's 25m budget, consumed
+in the **`go`** step, which killed `go`/`extension`/`hook`/`verdict` together — so the check text
+read `COULD NOT RUN: clawgate-ci stopped before any leg reported`. Attribution, stated with its
+evidence: #592's diff contains **zero Go files**, so it cannot have slowed the `go` step, and
+**#591 — which does touch Go — passed the same pipeline nine minutes later** (`clawgate-ci-hsdlk`,
+rev `d687fcaa`, Succeeded). `ZacxDev/homelab-infra#572` is already open to raise that budget.
+⚠ **The leg that never ran was `hook` — the one #592 exists to exercise** — so merging on the
+"COULD NOT RUN means broken gate" convention alone would have shipped it with zero CI coverage of
+the thing it changed. It was merged on a **local reproduction of that exact leg instead**: the same
+`docker.io/bats/bats:1.11.1` image the pipeline uses, run on the LAPTOP (the workbench cannot pull
+docker.io), `BATS_RC=0`, 67/0. That closed the agent's one self-declared unverified gap
+(it had run bats 1.14.0).
+
 ## Gotchas
 - 🔴 **A FAILED `git worktree add` DOES NOT STOP THE NEXT `git -C <path>` — AND I LANDED A
   MERGE ON ANOTHER SESSION'S BRANCH THIS WAY.** `worktree add /home/zach/workspace/devrc-integ`
@@ -1186,6 +1210,34 @@ because its guard is the only one that also protects a pointer deref. Commit ame
   perfectly good run. Pair every filtered rc 0 with a positive control on the same filter
   (`-v`, count `--- PASS`) and check for `no tests to run`. This is the go-test face of the
   documented reassuring-zero class.
+
+- 🔴 **AN EMPTY COMMIT CANNOT RE-TRIGGER A PATH-FILTERED PIPELINE — and the non-result is
+  INDISTINGUISHABLE FROM A BROKEN TRIGGER.** `clawgate-ci-pipeline.yaml:13-14` filters pushes on
+  `containers/clawgate/**`. An empty commit (the `--allow-empty` flag) touches no paths, so the
+  webhook is filtered out, **no PipelineRun is ever created**, and `gh pr checks` says
+  `no checks reported on the '<branch>' branch` — byte-identical to a trigger that is genuinely
+  broken or absent. Measured here: push `4052bc61` (empty) produced nothing; re-doing it as an
+  AMEND of the real commit (`c3040726`, tree byte-identical, `git diff` against the original
+  **empty**) re-listed the two `.bats` paths and the run appeared. **To re-trigger a path-filtered
+  pipeline the commit must touch a filtered path** — amending the real commit does it without
+  changing a byte of content.
+- 🔴 **A TEKTON CHECK'S TEXT AND ITS PIPELINERUN CAN DISAGREE — read the TaskRun's STEPS.** The
+  check said "stopped before any leg reported"; the PipelineRun said `Tasks Completed: 2
+  (Failed: 1)`. Both were true: the task hit `TaskRunTimeout`, and Tekton marks every unfinished
+  step `exit=1 TaskRunTimeout` at once, so `go`/`extension`/`hook`/`verdict` all appear failed
+  while none of them produced a verdict. `kubectl -n tekton-ci get taskruns -l
+  tekton.dev/pipelineRun=<run> -o json` and read the per-step `terminated.reason` — **which step
+  consumed the budget is the whole diagnosis**, and it is what tells you whether your diff could
+  possibly be responsible.
+- ⚠ **`ssh … | tail` HANDS YOU TAIL'S EXIT STATUS, and a bats run ending in `ok 67` looks like a
+  pass either way.** A remote suite run this session reported "exit code 0" that was `tail`'s. Take
+  the count and the rc **on the far side** — redirect to a file there, read `$?` from the runner
+  itself, and count `^ok ` / `^not ok ` lines — then read those numbers back. Same family as the
+  documented `| tail; echo rc=$?` failure.
+- ⚠ **The `bash-guard.py` PreToolUse hook parses HEREDOC BODIES as real commands.** A gotchas
+  block quoting `git commit --amend` / `--allow-empty` was refused as "commit on branch main".
+  The hook's own message names the case: write prose with the Write tool and pass it by file
+  (`git commit -F <file>`, `gh pr create --body-file <file>`), which the RULES prefer anyway.
 
 ## How to verify
 
