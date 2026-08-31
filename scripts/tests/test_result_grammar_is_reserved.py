@@ -649,6 +649,59 @@ def test_the_before_prefix_fixtures_really_place_their_escape_BEFORE_the_prefix(
             f"not exercise the before-prefix arm: {line}")
 
 
+@pytest.mark.parametrize("marker", sorted(G.BEFORE_PREFIX_MARKER_FIXTURES))
+def test_each_BEFORE_PREFIX_marker_has_its_OWN_control(marker):
+    """🔴 ROUND-13 FINDING NEW-22 — the THIRD time this gap has appeared here.
+
+    Dropping `$` or a backtick from the arm's class each SURVIVED a 70/70 green
+    suite: the only `$` fixture was `echo "${nl}RESULT: …"`, whose head carries
+    `{` too, so the `{` alternative always did the killing. Both mutants re-open
+    a forgery that was executed under bash — so the gap had removed the
+    regression detector for the fail-open the same commit had just closed.
+    """
+    line, expected, _forges = G.BEFORE_PREFIX_MARKER_FIXTURES[marker][:3]
+    head = line.split(G.RESERVED_PREFIX, 1)[0]
+    others = [m for m in G.UNRESOLVED_MARKERS if m != marker]
+    assert not any(m in head for m in others), (
+        f"the {marker!r} fixture also carries {[m for m in others if m in head]} "
+        "before the prefix — a mutant dropping this marker would die to a "
+        f"different alternative and prove nothing about it: {line}")
+    assert G.line_emits_reserved_prefix(line), (
+        f"{marker!r} no longer makes the line visible to the scan: {line}")
+    assert G.classify_payload(line) == expected, (
+        f"{marker!r}: expected {expected!r}, got "
+        f"{G.classify_payload(line)!r}: {line}")
+
+
+def test_every_marker_in_the_class_HAS_a_fixture():
+    """The set is read from the module, never hand-listed here — a marker added
+    to `UNRESOLVED_MARKERS` without a fixture would otherwise be unpinned, which
+    is exactly how this gap recurred."""
+    missing = [m for m in G.UNRESOLVED_MARKERS
+               if m not in G.BEFORE_PREFIX_MARKER_FIXTURES]
+    assert not missing, (
+        f"markers {missing} are in UNRESOLVED_MARKERS with no fixture, so "
+        "dropping them from the class would survive a green suite")
+
+
+def test_the_two_marker_sets_are_derived_from_ONE_definition():
+    """🔴 ROUND-13 FINDING NEW-23. A comment claimed the arm reuses the payload
+    arm's class — "one definition, not two that drift" — while four hand-spelled
+    copies existed and nothing cross-checked them. Read the compiled patterns,
+    so a divergence cannot be silent."""
+    assert set(G.INTERPOLATION_MARKERS) < set(G.UNRESOLVED_MARKERS), (
+        "UNRESOLVED_MARKERS must be a strict superset of INTERPOLATION_MARKERS")
+    assert set(G.UNRESOLVED_MARKERS) - set(G.INTERPOLATION_MARKERS) == {G.ESC}, (
+        "the only difference must be the backslash, which matters before the "
+        "prefix and is handled by its own arm inside the payload")
+    for m in G.INTERPOLATION_MARKERS:
+        assert G._INTERPOLATION.search(m), f"{m!r} missing from _INTERPOLATION"
+    for m in G.UNRESOLVED_MARKERS:
+        assert G._QUOTED_AFTER_UNRESOLVED.search(f'"a{m}b{G.RESERVED_PREFIX}'), (
+            f"{m!r} is in UNRESOLVED_MARKERS but the arm's compiled pattern does "
+            "not match it — the sets have drifted")
+
+
 def _ground_truth_ledgers() -> dict:
     """Every ground-truth ledger in the module, found by SHAPE.
 

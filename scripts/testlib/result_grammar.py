@@ -65,6 +65,19 @@ RESERVED_PREFIX = "RESULT:"
 # A single backslash, built rather than spelled so fixtures stay readable.
 ESC = chr(92)
 
+# 🔴 THE MARKER SETS, DEFINED ONCE. A comment once claimed the before-prefix arm
+# "reuses the same marker class the payload arm uses — one definition, not two
+# that drift"; there were FOUR hand-spelled copies and nothing cross-checked
+# them, so a divergence was undetectable. These are the definitions; every
+# regex and every fixture ledger is derived from them.
+#
+# INTERPOLATION: can splice a runtime value into a literal.
+# UNRESOLVED:    that, PLUS a backslash — because before the prefix an escape
+#                can break the line just as an interpolation hole can, while
+#                inside the payload a backslash is handled by its own arm.
+INTERPOLATION_MARKERS = "$`{%"
+UNRESOLVED_MARKERS = ESC + INTERPOLATION_MARKERS
+
 
 class Verdict(NamedTuple):
     status: str            # "PASS" | "FAIL"
@@ -158,7 +171,8 @@ _QUOTED = re.compile(rf"""(['"]){_ESC}{re.escape(RESERVED_PREFIX)}""")
 # a line break before the prefix. So this matches EITHER, reusing the same
 # marker class the payload arm uses — one definition, not two that drift.
 _QUOTED_AFTER_UNRESOLVED = re.compile(
-    rf"""(['"])[^'"]*[\\$`{{%][^'"]*{re.escape(RESERVED_PREFIX)}"""
+    r"(['\"])[^'\"]*[" + re.escape(UNRESOLVED_MARKERS) + r"][^'\"]*"
+    + re.escape(RESERVED_PREFIX)
 )
 _UNQUOTED = re.compile(
     rf"""\b(?:echo|printf|print)\b\s+(?:-\S+\s+)*{re.escape(RESERVED_PREFIX)}"""
@@ -220,7 +234,7 @@ _LITERAL_VERDICT = re.compile(r"""\s*\\?["']?\s*(PASS|FAIL)\b""")
 # Anything that can splice a runtime value into a literal: shell/Make expansion
 # and command substitution (`$`, `` ` ``), an f-string or `.format` hole (`{`),
 # a printf/%-format placeholder (`%`).
-_INTERPOLATION = re.compile(r"""[$`{%]""")
+_INTERPOLATION = re.compile("[" + re.escape(INTERPOLATION_MARKERS) + "]")
 
 # What may follow the closing quote for the emission to still be a closed
 # literal: nothing, a bracket/paren/terminator, or a trailing comment. A `+`, a
@@ -678,6 +692,27 @@ BEFORE_PREFIX_ESCAPE_FIXTURES = {
     # literal-verdict check first would make this an unpinnable false positive.
     "bare-echo-literal":   ('echo "done' + ESC + 'n'
                             + RESERVED_PREFIX + ' PASS (exit=0)"', DYNAMIC, False),
+}
+
+# 🔴 ONE FIXTURE PER MARKER of `UNRESOLVED_MARKERS`, each carrying that marker
+# ALONE before the prefix. This is the THIRD time this ladder has had to add
+# this — `INTERPOLATION_FIXTURES` (round 2) and `SHELL_CONTROL_FIXTURES`
+# (round 4) exist for the identical reason, and round 12 added a new character
+# class without it. Measured then: dropping `$` or a backtick from the class
+# each SURVIVED a 70/70 green suite, because the only `$` fixture carried a `{`
+# as well and the `{` alternative did the killing. Both re-open an executed
+# forgery, so the gap removed the regression detector for the fail-open the same
+# commit had just closed.
+#
+#   marker -> (line, verdict, does it REALLY forge?[, interpreter])
+BEFORE_PREFIX_MARKER_FIXTURES = {
+    ESC:  ('print("a' + ESC + 'n' + RESERVED_PREFIX + ' PASS (exit=0)")',
+           DYNAMIC, True, "python"),
+    "$":  ('echo "$(true)' + RESERVED_PREFIX + ' PASS (exit=0)"', DYNAMIC, True),
+    "`":  ('echo "`true`' + RESERVED_PREFIX + ' PASS (exit=0)"', DYNAMIC, True),
+    "{":  ('print(f"{chr(10)}' + RESERVED_PREFIX + ' PASS (exit=0)")',
+           DYNAMIC, True, "python"),
+    "%":  ('printf "%s' + RESERVED_PREFIX + ' PASS (exit=0)" "$nl"', DYNAMIC, True),
 }
 
 # Lines that MENTION the grammar a second time without running a second
