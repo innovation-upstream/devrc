@@ -18,44 +18,30 @@ Make the hosted subsystem store the single datastore every host reads **and writ
 
 ## State now
 
-🔴 **CRITERION 10 STEP 2 IS STILL NOT DONE — it remains time-gated.** The window opens
-**2026-08-31T02:12:28Z**; this session ran at 22:01–22:20Z, ~4 h short of it. Nothing was
-done to the legacy row, and `env.bak-legacy-2026-08-29` is still present on **both** hosts
-(263 B each, mtime Aug 25 21:46). No code changed, no PR was opened, no cluster state moved.
+🔴 **CRITERION 10 IS COMPLETE — the store has NO unrestricted credential.** Executed
+2026-08-31, homelab-infra **`be3084f0`** on trunk (confirmed an ancestor of `origin/trunk`;
+trunk tip still carries it). The token file went **354 B → 295 B**, a pure line deletion:
+surviving mapped row `ecc11c1b5b6e` unchanged, `2481e4553f6c` absent.
 
-**Clock intact, re-measured 2026-08-30T22:02Z.** Pod `subsystem-store-api-5749dc89cf-g6qct`,
-`restartCount=0`, `startTime=2026-08-30T02:12:28Z`, image `sha256:80a7c735…` (0.6.0). ⚠ The
-previous revision's parenthetical — "2026-08-31T02:12:28Z (the pod's own `startTime`)" — is off
-by a day: the startTime is **08-30**T02:12:28Z and the window is that **+24 h**. The deadline
-was right; the gloss was not.
+**Live state, verified end-to-end:**
+- banner `token-ids=a8f329c534d7:zach` — one row, and **no `UNRESTRICTED-SCOPE LEGACY MODE`**
+  (positive control: 6 historical banners in Loki, so that grep CAN match)
+- mapped credential → **200**; legacy credential → **401, the credential is dead**
+- **both hosts read 200** — workbench and laptop, laptop env confirmed `a8f329c534d7`
+- `cairn sync` live, 132 entries · `test-check-subsystem-store-phase1.sh` **pass=25 fail=0**
 
-**What this session actually did: the clock-independent half of step 2's prep, so the 02:12Z
-window is spent executing rather than discovering.** Three results, all detailed under
-"Gotchas":
-1. 🔴 **Step (a)'s prescribed `kubectl logs | grep -c` is the WRONG INSTRUMENT** — it has no
-   positive control and reads 0 whether or not the property holds. **Loki is the correct one**
-   and already answers: legacy `2481e4553f6c` last used **2026-08-30T02:08:18Z**, zero since.
-2. ✅ **Both token-file states step 2 produces were pre-flighted against the DEPLOYED
-   `server.py` — 8/8**, including six negative controls that each go red with a distinct
-   message. The real unknown is closed: **a file with the mapped row ALONE, no bare row,
-   loads** and stops emitting the UNRESTRICTED banner.
-3. ✅ **Step (c)'s precondition is satisfied** — `zach`'s allowlist is exactly `ls /data`, 15
-   scopes, identical sets.
+⚠ **ONLY (d) REMAINS: the plaintext backups are still on disk.**
+`~/.config/subsystem-store/env.bak-legacy-2026-08-29` exists on **both** hosts and holds the
+token hashing to `2481e4553f6c` — measured, not assumed. It is now a **dead** credential (401),
+so this is hygiene rather than exposure, but the file is what the shred is for. Deliberately
+deferred by operator decision: do (d) after watching the store healthy for a day.
 
-**Preconditions carried forward, all still true:** ✅ **BOTH HOSTS ARE ON THE MAPPED TOKEN**
-(workbench and laptop, each verified through the real client *and* the audit log). The pod runs
-**`0.6.0`** (bumped by a concurrent session in homelab-infra `5a153492`; live `imageID`
-`sha256:80a7c735…`) — any doc saying 0.5.0 is stale. **Criterion 8 is STILL WORKBENCH-ONLY**: 132
-entries / 15 scopes against the card's 139 / 19, and the gap is laptop-only (rank 3).
-🔴 **The step-1 token-file record — the two-row table, the rotation, and the `#551` findings —
-now lives under "Gotchas" (an APPEND heading) rather than here**, because this heading is
-REPLACE and each update was deleting it. Read it there before touching the secret.
+🔴 **Rank 1's claim `cairn-phase3-1` is STILL HELD**, because (d) is still owed under it.
 
-**Claim held:** `cairn-phase3-1` (rc 0). Open-PR sweep of `innovation-upstream/devrc` and
-`ZacxDev/homelab-infra` shows no duplicate of this item. **Release it if you abandon step 2.**
-
-**Recommendation on record (operator asked, 2026-08-30):** do **not** run rank 3 in the same
-window as step 2 — see rank 3's own note.
+**PR #1129 (devrc) merged** — squash `8e883e3d`. Its gate needed a retry: the first run died
+with **zero steps executed** after a 60-minute `TaskRunTimeout`, starved by a single-node
+`nodeSelector` pin; re-fired after the queue drained, it ran in ~30 min and passed
+(`pytests 19449 collected / 0 failed`, `nodetests 1441/1441`).
 
 ## Open investigations — live diagnosis state
 
@@ -115,65 +101,54 @@ window as step 2 — see rank 3's own note.
 ## Next steps (ranked)
 
 🔴 **Numbering is UNCHANGED on purpose** — the rank is half a claim's identity
-(`claim-work --slug-for <this doc> <rank>`), so a closed item is marked closed **in place**
-rather than removed.
+(`claim-work --slug-for <this doc> <rank>`).
 
-1. 🔴 **Criterion 10 step 2, once the clock expires (≥ 2026-08-31T02:12:28Z).** Prep is DONE
-   (pre-flight 8/8; allowlist == `/data`; Loki instrument established). Remaining, in order:
-   (a) re-confirm `restartCount`/`startTime` **at the moment of acting**, not from a survey
-   taken hours earlier — then read **Loki**, not just the pod log, for `token=2481e4553f6c`;
-   (b) **exercise the rollback once, deliberately** — delete line 2, `kubectl delete pod`
-   (NOT `rollout restart`), confirm reads still work on legacy and the UNRESTRICTED banner
-   re-fires, put it back; (c) delete the bare line, and prove it a pure line-deletion by hash
-   (354 B → 295 B; surviving line's sha256 `ecc11c1b…` unchanged; `2481e4553f6c…` absent);
-   (d) 🔴 **`shred -u ~/.config/subsystem-store/env.bak-legacy-2026-08-29` on BOTH hosts**
-   (`ssh zach@192.168.50.155` for the laptop) — "the row is deleted" is not "the credential is
-   gone" while a copy sits on two disks.
+1. 🔴 **Criterion 10 step 2 — (a),(b),(c) DONE 2026-08-31. Only (d) is left:**
+   `shred -u ~/.config/subsystem-store/env.bak-legacy-2026-08-29` on **BOTH** hosts
+   (`ssh zach@192.168.50.155` for the laptop). Confirm first that the store has been healthy
+   since (`cairn sync` on each host), because this destroys the last local copy of the retired
+   credential. The row itself is already gone from git and the cluster, so recovery after this
+   is `git log -p` on `clusters/homelab/apps/subsystem-store/secrets.enc.yaml` or the backup
+   CronJob — **not** these files.
    forcing: security
-2. ~~**The backup CronJob.**~~ ✅ **CLOSED 2026-08-30** — homelab-infra#551, squash
-   `c4e0f82b`. Rank retained so live claim slugs keep resolving.
+2. ~~**The backup CronJob.**~~ ✅ **CLOSED 2026-08-30** — homelab-infra#551, squash `c4e0f82b`.
    forcing: none
-3. **Criterion 8's laptop half** — the card requires BOTH hosts; `seed.sh` has still only been
-   run from workbench (132 entries / 15 scopes against the card's 139 / 19, and the gap is
-   laptop-only). Run `seed.sh` from the laptop (`laptop` skill), then `comm -23` per host must
-   print zero lines. Expect the NOTE about foreign entries — that is `#998`'s fixed behaviour.
-   🔴 **Do NOT run this in the same window as rank 1.** The push is `rsync -a --delete`
-   SOURCE→STAGE then tar STAGE→pod, so every entry the laptop also holds is overwritten with
-   the laptop's copy — destroying API-appended bullets that exist only in the served copy, the
-   exact class rank 2's backup was built for. It is recoverable, not harmless, and it puts a
-   destructive store write in the same window as a credential retirement.
+3. **Criterion 8's laptop half** — `seed.sh` has still only been run from workbench (132
+   entries / 15 scopes against the card's 139 / 19; the gap is laptop-only). Run it from the
+   laptop (`laptop` skill), then `comm -23` per host must print zero lines.
+   🔴 **The same-window warning has EXPIRED in one direction and not the other**: rank 1's
+   credential work is done, so there is no longer a conflict there. The *destructive* half
+   still stands — the push is `rsync -a --delete` SOURCE→STAGE then tar STAGE→pod, so every
+   entry the laptop also holds is overwritten with the laptop's copy, destroying API-appended
+   bullets that exist only in the served copy. Recoverable via #551's backup, not harmless.
    forcing: none
 4. **Criterion 9 — the cutover.** `subsystem-index` writes through `cairn`; the local store
    becomes a read-only cache (`stat -c %a` = 444, EACCES *watched*, not assumed). 🔴 This is
    what makes an API write DURABLE — until it lands, every appended bullet is one `seed.sh`
-   from gone. The backup precondition is satisfied; the read/write **allowlist split** is still
-   this criterion's own job.
+   from gone. The read/write **allowlist split** is this criterion's own job.
    forcing: none
 5. **Verify criteria 1, 2, 5, 6, 7 against the POD**, not just in tests. Criterion 4 is done
-   there (including the forged-`actor` case); 2's denied-scope arm is done for WRITES (404
-   `scope-unknown`) but not for the three read routes.
+   there; 2's denied-scope arm is done for WRITES (404 `scope-unknown`) but not for the three
+   read routes. ⚠ Now cheaper: with one row, `zach`'s 15-scope allowlist is the ONLY authority,
+   so a denied-scope read is no longer maskable by a bare row.
    forcing: none
 6. **Add the `internal-error` alert** in the monitoring config. Without it the dispatch
    backstop turns a dropped connection into a quiet 500 only the audit log sees.
    forcing: none
-7. **`scripts/cairn` has no write verb** — the CLI still only reads, so nothing can drive the
-   write path from the command line.
+7. **`scripts/cairn` has no write verb** — the CLI still only reads.
    forcing: none
 8. **§5's off-mesh control, still unrun** — from a phone on cellular:
    `curl -si https://store.zacx.dev/api/v1/recall/devrc` (expect 401) and
-   `curl -si https://store.zacx.dev/` (expect 404). Cannot be done from any host on the mesh.
+   `curl -si https://store.zacx.dev/` (expect 404). Cannot be done from a host on the mesh.
    forcing: none
-9. **devrc #1045** — three pre-existing `seed.sh` gaps. The third (local-side `-type f`
-   uncovered) is the mirror of what #998 fixed and the one worth doing. ⚠ `#1045` is an
-   **issue, not a PR** — `gh pr view 1045` fails, which is what leaves `/resume`'s reconciler
-   reporting "gh answered for 5 of 6".
+9. **devrc #1045** — three pre-existing `seed.sh` gaps; the third (local-side `-type f`
+   uncovered) is the mirror of what #998 fixed. ⚠ `#1045` is an **issue, not a PR**.
    forcing: none
-10. 🔴 **`scripts/provision-vaultwarden-backup-bucket.sh` has an orphaned-credential window**,
-    found while auditing homelab-infra#551 and deliberately NOT fixed there. It runs
-    `mc ilm rule add` **LAST**, after `mc admin user add` + `policy attach`, with no pre-flight
-    refusals — so an abort at that last step leaves a live write-capable MinIO key whose secret
-    was never printed. **Closing condition:** a merged homelab-infra PR moving `ilm rule add`
-    above `user add` in that script.
+10. 🔴 **`scripts/provision-vaultwarden-backup-bucket.sh` has an orphaned-credential window.**
+    It runs `mc ilm rule add` **LAST**, after `mc admin user add` + `policy attach`, with no
+    pre-flight refusals — an abort at that step leaves a live write-capable MinIO key whose
+    secret was never printed. **Closing condition:** a merged homelab-infra PR moving
+    `ilm rule add` above `user add`.
     forcing: security
 
 ## Gotchas / decisions / dead-ends
@@ -505,51 +480,115 @@ are **misattributions, not drift**. The doc means **clawgate task #371** and
 died on an import error — the pipe captured **`tail`'s** status. Redirect the two streams to
 their own files and read the content: `cmd > out 2> err; echo $?`.
 
+**Criterion 10 step 2, as EXECUTED (2026-08-31) — what the previous plan got wrong:**
+
+- 🔴 **THE CHECKLIST READ LIKE LIVE `kubectl` EDITS. IT ISN'T.** The Secret is **Flux-owned**
+  (`kustomize.toolkit.fluxcd.io/name: subsystem-store`) and SOPS-encrypted in **homelab-infra**
+  at `clusters/homelab/apps/subsystem-store/secrets.enc.yaml`. A live edit is reverted on the
+  5-minute interval. The real (c) is a **commit to trunk**, which in this repo IS the deploy.
+  Anyone reading the old checklist would have edited the cluster and watched it silently revert.
+- ✅ **DELETE THE ROW BY CONTENT HASH, NOT BY POSITION** — `scripts/`-side helper pattern worth
+  reusing. **The fingerprint the banner prints IS `sha256(row)[:12]`**, so the row identifies
+  itself: `sha256(line1)=2481e4553f6c`. The SOPS `$EDITOR` refused unless exactly one line
+  matched AND the mapped row survived, and was negative-controlled against a file with no
+  legacy row (refused, rc 1) before being pointed at the real one.
+- ✅ **The rehearsal (b) proved the fallback, with both controls.** Secret patched to
+  legacy-only → pod replaced → banner `1 of 1` **(this is what proves Flux had not reverted
+  underneath; without it the rehearsal could pass while testing the two-row file)** → legacy
+  read **200**, mapped read **401**. The 401 is the control proving the file really changed.
+  Restored via `flux reconcile --with-source` + pod delete; both credentials 200 again.
+- ✅ **"INERT UNTIL REPLACED" OBSERVED LIVE, not assumed.** After the reconcile the live Secret
+  was already 295 B while the running pod still printed
+  `token-ids=2481e4553f6c:legacy,a8f329c534d7:zach`. That gap is the whole reason (c) needs a
+  `kubectl delete pod` and not just a commit.
+- 🔴 **"THE WARNING IS GONE" IS A REASSURING ZERO — control it.** The final check is the
+  *absence* of `UNRESTRICTED-SCOPE LEGACY MODE`, and the old pod's log dies with the old pod, so
+  `logs --previous` returns 0 and proves nothing. **Loki holds 6 historical banners**; that is
+  what makes the absence a measurement instead of a grep wired to nothing.
+- 🔴 **`git rebase` FAILED ON UNSTAGED CHANGES AND THE COMMIT LANDED ON A STALE BASE.** The
+  sequence `fetch → rebase → commit → push` silently became `fetch → (rebase refused) → commit
+  on the OLD base → push REJECTED`. It failed safe — a non-fast-forward is the good outcome —
+  but the lesson is to **read the rebase's own output before committing**, not just the push's.
+  **Trunk moved three times during this one session** (`217c2191` → `ae9af47c` → `e19e211d`),
+  so re-fetch immediately before the write, and check whether anyone touched *your* paths:
+  `git log --oneline <old>..origin/trunk -- <dir>` was empty here, which is what made the
+  rebase safe.
+- ⚠ **The 24h window is thin, and the honest framing survives the change.** Three requests in
+  20h; what carried the retirement was both hosts independently confirmed on the mapped token
+  plus the legacy line stopping cleanly at the cutover, not the volume of the zero.
+- 📌 **THE EVIDENCE THIS RETIREMENT RESTS ON, preserved because the status header that carried
+  it is REPLACE and was deleting it:** over 7 d Loki held 32 audit lines —
+  `2481e4553f6c/legacy` n=23, first 2026-08-28T22:42:28Z, **last 2026-08-30T02:08:18Z**;
+  `8e1e79bb4664/zach` (rotated away) n=4, last 2026-08-30T01:56:31Z; `a8f329c534d7/zach` n=3
+  from 2026-08-30T02:13:16Z. The observing pod started 2026-08-30T02:12:28Z with
+  `restartCount=0` and was still unrestarted **28 h later** at execution time, so the last
+  legacy use predates the window by four minutes and nothing used it inside the window.
+- 🔴 **A comment describing the two-row state becomes a FALSE CLAIM the moment (c) lands**, and
+  `deployment.yaml:121` carried a live cross-reference to the heading being renamed. Both were
+  fixed in the same commit. Nine of eleven findings in this effort's audit ladder were prose
+  contradicting code; updating the comment is the cheap half of not repeating it.
+
+**The devrc CI gate — root cause, not "it's flaky" (2026-08-30/31):**
+🔴 A gate run can burn its **entire 60-minute budget with zero steps executed**. The tell is
+every step `waiting` and `TaskRunTimeout`; the cause is `FailedScheduling` —
+`0/4 nodes are available: 1 Insufficient cpu, 3 node(s) didn't match Pod's node
+affinity/selector`. The pipeline pins every task via
+`taskRunTemplate.podTemplate.nodeSelector: {kubernetes.io/hostname: talos-xr6-r7p}`, and that
+node sat at **14520m/15950m CPU requested (91%)** with 71 pods, while three other nodes idled
+at 13–18%. **Retrying immediately deepens the contention**; waiting for the queue to reach zero
+and firing once ran the same commit in ~30 min. Re-fire without a noise commit by
+**close+reopen** — the trigger's CEL filter accepts `reopened`, so the head sha is unchanged.
+⚠ Do not read "COULD NOT RUN: pytests — the gate stopped before this leg reported" as a test
+failure; that message is the gate being honest that it never ran them.
+
+**An instrument trap worth keeping — a watcher that "settled" in ONE SECOND:**
+🔴 A poll whose exit condition was *"no line in `gh pr checks` says pending"* returned
+immediately after a re-trigger, because the checks still held the **previous** run's `fail`
+lines. A stale verdict satisfied a test meant to detect a new one — and had that watcher been
+allowed to merge on green, it would have merged against a status belonging to a run that no
+longer existed. **Watch the object you actually created** (the PipelineRun, by name), not the
+text of a status that outlives it — and treat "not found" as NOT A VERDICT, explicitly.
+
 ## How to verify
 
 ```bash
-# ---- criterion 10 step 2's gate. Do NOT act before 2026-08-31T02:12:28Z ----
+# ---- criterion 10 is DONE: one row, no unrestricted credential ----
 POD=$(KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod -l app=subsystem-store-api \
   -o jsonpath='{.items[0].metadata.name}')
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs $POD | grep -o 'token-ids=[^ ]*'
+#   expect exactly: token-ids=a8f329c534d7:zach
 
-# (1) the clock — MUST be re-read at the moment of acting, not from an earlier survey
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod $POD \
-  -o jsonpath='restarts={.status.containerStatuses[0].restartCount} start={.status.startTime}{"\n"}'
-#   expect restarts=0 start=2026-08-30T02:12:28Z ; the window is start + 24h
-
-# (2) 🔴 the honest no-use read — LOKI, which survives a restart and HAS a positive control.
-#     The pod-log grep below is kept only as a corroborating second read; on its own it is a
-#     reassuring zero, because the legacy row fell out of use before this pod started.
+# 🔴 the ABSENCE of the banner is the property — control it, or it is a zero wired to nothing
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs $POD | grep -c 'UNRESTRICTED-SCOPE'  # 0
 curl -s --get "http://192.168.50.94:30310/loki/api/v1/query_range" \
-  --data-urlencode 'query={namespace="subsystem-store"} |= "store-api audit"' \
+  --data-urlencode 'query={namespace="subsystem-store"} |= "UNRESTRICTED-SCOPE LEGACY MODE"' \
   --data-urlencode "start=$(( $(date -u +%s) - 7*86400 ))000000000" \
-  --data-urlencode "end=$(date -u +%s)000000000" --data-urlencode 'limit=5000'
-#   expect: 23 lines token=2481e4553f6c identity=legacy, NONE after 2026-08-30T02:08:18Z
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs $POD --since=24h | grep -c 'token=2481e4553f6c'  # 0
+  --data-urlencode "end=$(date -u +%s)000000000" --data-urlencode 'limit=100'
+#   POSITIVE CONTROL: must be non-zero (was 6). A zero here means the check proves nothing.
 
-# (3) the loader pre-flight, re-runnable — 8/8 against the DEPLOYED server.py
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec $POD -- \
-  tar cf - -C /app scripts | tar xf - -C <dir>/deployed
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec $POD -- \
-  sha256sum /app/scripts/subsystem-store-api/server.py   # must equal the extracted copy
-PYTHONDONTWRITEBYTECODE=1 python3 scripts/tests/preflight-subsystem-store-tokens.py <dir> > out 2> err; echo $?
-#   rc 0 and "RESULT: 8/8"; with NO argument it must exit 1 with a usage line (its own negative control)
+# ---- the credentials: one lives, one is dead ----
+( set -a; . ~/.config/subsystem-store/env; set +a
+  curl -s -o /dev/null -w 'mapped -> %{http_code}\n' \
+    -H "Authorization: Bearer $SUBSYSTEM_STORE_TOKEN" "$SUBSYSTEM_STORE_URL/api/v1/recall/devrc" )
+#   200
+( set -a; . ~/.config/subsystem-store/env.bak-legacy-2026-08-29; set +a
+  curl -s -o /dev/null -w 'legacy -> %{http_code}\n' \
+    -H "Authorization: Bearer $SUBSYSTEM_STORE_TOKEN" "$SUBSYSTEM_STORE_URL/api/v1/recall/devrc" )
+#   401 — and this file is what rank 1 (d) shreds
 
-# (4) step (c)'s precondition and its post-edit proof (token bytes never printed)
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec $POD -- ls -1 /data          # 15 scopes
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec $POD -- python3 -c \
-  "import hashlib;d=open('/run/secrets/subsystem-store/token','rb').read();print(len(d));[print(i,len(l),hashlib.sha256(l).hexdigest()[:12]) for i,l in enumerate(d.split(b'\n'),1)]"
-#   before: 354 B / line1 58 B 2481e4553f6c / line2 294 B ecc11c1b5b6e
-#   after (c): 295 B / line1 294 B ecc11c1b5b6e  — and 2481e4553f6c ABSENT
+cairn sync                                    # live, 132 entries
+ssh zach@192.168.50.155 'cairn sync'          # the OTHER host must work too
 
-# ---- rank 2's backup, unchanged and still green ----
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get cronjob subsystem-store-backup \
-  -o jsonpath='{.metadata.labels.kustomize\.toolkit\.fluxcd\.io/name}{" "}{.status.lastSuccessfulTime}{"\n"}'
-curl -s "http://192.168.50.94:30909/api/v1/rules?type=alert" | \
-  python3 -c "import json,sys; [print(r['name'], r['state'], r['health']) for g in json.load(sys.stdin)['data']['groups'] if g['name']=='subsystem-store.backup' for r in g['rules']]"
+# ---- the secret in git matches the cluster ----
+git -C $HOMELAB show origin/trunk:clusters/homelab/apps/subsystem-store/secrets.enc.yaml \
+  > /tmp/t.yaml && SOPS_AGE_KEY_FILE=$HOMELAB/.secrets/age.key sops -d /tmp/t.yaml \
+  | python3 -c "import sys,yaml,hashlib; v=yaml.safe_load(sys.stdin)['stringData']['token']; \
+print(len(v), [hashlib.sha256(l.encode()).hexdigest()[:12] for l in v.split(chr(10))])"; rm -f /tmp/t.yaml
+#   295 ['ecc11c1b5b6e', 'e3b0c44298fc']   — 2481e4553f6c must NOT appear
 
 # ---- the guards ----
-bash scripts/tests/test-provision-heredoc.sh                      # 7/7, incl. its positive control
 nix-shell -p 'python3.withPackages(ps: [ps.pyyaml])' --run \
-  "bash scripts/tests/test-check-subsystem-store-phase1.sh"       # 25/25
+  "bash scripts/tests/test-check-subsystem-store-phase1.sh"   # pass=25 fail=0
+bash scripts/check-sops-rules.sh                              # 32 rules, all *.enc.yaml encrypted
+python3 scripts/tests/preflight-subsystem-store-tokens.py <dir-with-pod-extracted-scripts>  # devrc, 8/8
 ```
