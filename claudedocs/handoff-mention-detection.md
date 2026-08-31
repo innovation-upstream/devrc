@@ -18,8 +18,8 @@ Detect clawgate/GitHub/ClickUp references in agent output, emit telemetry, and m
 them clickable in the terminal the way a URL already is. **SHIPPED AND VERIFIED LIVE.**
 
 ## State now
-🔴 **RANKS 1, 3 AND 4 ARE CLOSED. RANK 2 IS OWNED BY ANOTHER EFFORT — hand over, do not
-work it here.** The genuinely open items are ranks 5–7 below.
+🔴 **RANKS 1, 3, 4 AND 5 ARE CLOSED. RANK 2 IS OWNED BY ANOTHER EFFORT — hand over, do not
+work it here.** The genuinely open items are ranks 6–7 below.
 
 - Branch: `main`. `origin/main` was `e0e29e7b` when this doc was created; it is `e0f35ce2`
   as of 2026-08-30 and moved **six times during this session's own gate runs**, which is
@@ -35,16 +35,14 @@ work it here.** The genuinely open items are ranks 5–7 below.
 - `8503620a` in **homelab-infra** — the 0.8.19 pin bump (the deploy itself)
 - `innovation-upstream/devrc#1131` → squash `e0f35ce2` — ranks 1/3/4 closed, rank 2's
   diagnosis and hand-over
+- `innovation-upstream/devrc#1099` → squash `6bf866fe` — rank 5, the "UNGATED by CI"
+  correction. **Merged, content-verified, shipped to both hosts and consumer-verified.**
 
 **Still open, with owners:**
-- 🔴 **`innovation-upstream/devrc#1099` — OPEN and BLOCKED.** Corrects a false 🔴 claim
-  ("the browser layer is UNGATED by CI") in three places. Correct and locally verified
-  (526 tests). `tekton/devrc-nodetests=success`, `tekton/devrc-pytests=failure` — the
-  flaky `test_subsystem_store_api.py` family, **not** its content. Its worktree
-  `/home/zach/workspace/devrc-clawgate-ci` is deliberately still on disk holding the
-  branch. ⚠ It also edits `claudedocs/handoff-tmux-webapp.md`, which `main` has since
-  touched — **check for a semantic conflict before merging**, a clean git merge is not a
-  clean merge.
+- **Leftover worktree `/home/zach/workspace/devrc-clawgate-ci`** — held #1099's branch
+  deliberately; that branch is now merged, so `gh pr merge --delete-branch` could not
+  delete the local ref and the worktree is now pure clutter. Left in place rather than
+  removed: it is not this effort's to reap. `git worktree remove` it when convenient.
 - **clawgate #463** (open) — the board-scroll layout bug; blocks #440's criterion 1.
 - **clawgate #440** — `ready_for_review`, not `complete`, for exactly that reason.
 - **`homelab-infra` base clone cannot fast-forward** — `merge --ff-only` refuses on a
@@ -119,13 +117,16 @@ The original diagnosis is kept below because #463 inherits its layout context.
    detects the hazard and is live, and the edit as specified would make a one-way operation
    more usable. Under "Rank 4" in Gotchas.
    forcing: none — closed as obsolete, deliberately not done.
-5. **Merge `devrc#1099`** — `innovation-upstream/devrc`, touches
-   `claude/skills/clawgate/SKILL.md`, `claude/skills/clawgate/reference/extension.md`,
-   `claudedocs/handoff-tmux-webapp.md`. Blocked only by the flaky gate. Re-check the
-   merged tree first: `main` has touched `handoff-tmux-webapp.md` since the branch point.
-   Closing condition: merged, verified by content (a squash is never an ancestor).
-   forcing: gate — a required check is red on a test the diff cannot reach, and the PR
-   corrects a 🔴 claim that is actively misleading agents in three files.
+5. ~~**Merge `devrc#1099`**~~ — **DONE 2026-08-31**, squash `6bf866fe`. Closing condition
+   met by content, not ancestry: all three files are blob-identical on `origin/main`.
+   **The two blockers this doc recorded had both evaporated before I touched it** — the
+   flaky gate was green (both required checks `SUCCESS` at 03:12:49Z, after someone pushed
+   `246d0522` paying the skill byte ceiling), and the `handoff-tmux-webapp.md` semantic
+   conflict was moot because main's commits since the branch point touched **zero** files
+   the branch touches. Merged-tree gate run anyway: tier 1 (devShell) 19,910 passed / 3
+   skipped / 0 failed against floor 18,383; tier 2 `nix` pytests + nodetests both
+   `RESULT: PASS`, built one at a time. Then **shipped** — see the deploy gotcha below.
+   forcing: none — closed.
 6. **Fix clawgate #463, then close #440** — `ZacxDev/homelab-infra`,
    `containers/clawgate`. 60 of 248 cards are unreachable by any scroll; #440's criterion 1
    is unsatisfiable for 24% of the board until it lands. #463 carries 6 criteria and a
@@ -141,6 +142,34 @@ The original diagnosis is kept below because #463 inherits its layout context.
    receiving changes while looking healthy.
 
 ## Gotchas / decisions / dead-ends
+- 🔴 **Merging #1099 changed NOTHING for the agents it was written for until the switch —
+  and the stale copy still asserted the very claim the PR deleted.** `claude/skills/**`
+  deploys as a `home.file` **copy**, so `readlink -f ~/.claude/skills/clawgate/reference/
+  extension.md` terminated in `/nix/store` and the live text was the OLD one: the false
+  assertion present, **0** occurrences of `clawgate-e2e`. A doc-only merge feels finished
+  at the squash; here it was half done. After `ship.sh`: store path moved on **both**
+  hosts (`zrapkwjp…` → `yclky1ds…`, identical), false assertion **0**, `clawgate-e2e` **4**.
+  Report the deploy and the consumer read as two claims.
+- 🔴 **The blocker a handoff records is a HYPOTHESIS about the past, and both of #1099's
+  had expired.** The doc said "blocked by the flaky gate" and "check for a semantic
+  conflict"; by the time I read it the gate was green and the overlap was gone. Re-measure
+  a recorded blocker before planning around it — the cost of not doing so is a session
+  spent defeating an obstacle that is not there.
+- ⚠ **`origin/main` moved mid-gate (`57b010fb` → `9a7c4338`), invalidating a merged-tree
+  run that had just finished.** With `strict: false` and main moving every ~20 min, a full
+  re-gate per move is unwinnable. What worked: diff the new base against the old, and
+  re-run only the surface that could interact — here the repo-wide doc/skill/rules
+  scanners (561 passed), since the new commit was docs-only and file-disjoint. Say which
+  subset you re-ran and why, rather than implying a full re-gate.
+- ⚠ **A red gate can be a MISSING ENVIRONMENT, not a code failure.** My first tier-1 run
+  reported `RESULT: FAIL (exit=3)` — `run-tests.sh` refusing because `logrotate` was off
+  PATH, because I ran `gate.sh` outside the flake devShell. It says so explicitly and
+  prints the `nix develop … run-tests.sh` line to use. Read the reason before treating a
+  red as a verdict on the diff.
+- ⚠ **GitHub code search is BLIND on `ZacxDev/homelab-infra`** — a positive control for
+  `filename:flake.nix` returned `total_count: 0`. An empty code-search result there proves
+  nothing about the repo. Use `git/trees/<ref>?recursive=1` instead; that is how
+  `clawgate-e2e-pipeline.yaml` was confirmed to exist.
 - 🔴 **A terminal-UI interaction can be verified WITHOUT taking the operator's screen —
   `Xvfb` + the deployed config + an `xdg-open` capture handler.** This is the pattern
   that closed rank 1, and it generalises to any alacritty/hint/`xdg-open` behaviour.
