@@ -27,8 +27,9 @@ runs against them. Consequences:
 - 🔴 **`git stash` is repo-GLOBAL.** `refs/stash` lives in the common git dir, so
   a concurrent session can pop or drop yours. Never stash here for any reason —
   set work aside with `cp <file> /tmp/…` and copy it back.
-- 🔴 **Never bare `git reset --hard`, `git clean`, or `git checkout --`** in a
-  scope. Each destroys **uncommitted** curated content, which no hourly commit
+- 🔴 **Never `git reset --hard` (bare), `git clean`, or `git checkout --`** in a
+  scope. ("bare" qualifies `git reset --hard` alone — `git checkout --` always
+  takes a pathspec and `git clean` is almost always `-fd`.) Each destroys **uncommitted** curated content, which no hourly commit
   and no daily bundle holds — and the autocommit means "it's in git" is a claim
   about *some* commit, not about the bytes you want. 🔴 **`git reset --hard
   <ref>` is worse: it ORPHANS committed content**, and `backup.py` bundles with

@@ -454,7 +454,10 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 #           which is the AUTHORITATIVE copy of client-confidential content —
 #           the daily bundle and the served pod are both lagging derivatives,
 #           so a corrupted source replicates outward rather than being
-#           repairable from either.
+#           repairable from either — though a bundle already in the bucket
+#           still holds what was reachable when it was written, so "lagging"
+#           is not "useless": check the retention window before concluding
+#           anything is unrecoverable.
 # logrotate: scripts/tests/test_claude_log_rotate.py drives the REAL binary
 # against a temp directory (rotation, truncation, generation cap, and the .bak
 # scope fence). Those tests FAIL rather than skip when it is absent — a skipped

@@ -343,8 +343,13 @@
             # copy step is `rsync -a --delete "$STORE"/ "$STAGE"/`. Without the
             # binary those tests fail with `rsync: command not found` (rc 127),
             # which is a FAILURE and not a skip, deliberately: the property they
-            # pin is that seeding never writes to the local store, and that store
-            # is the only copy of client-confidential content. The same
+            # pin is that seeding never writes to the local store, which is the
+            # AUTHORITATIVE copy of client-confidential content — the daily MinIO
+            # bundle and the served pod are both lagging derivatives, so a
+            # corrupted source replicates outward rather than being repairable
+            # from either. (This comment said "the only copy" until 2026-08-31;
+            # its twin in scripts/run-tests.sh was corrected and this one was
+            # not, leaving the two files disagreeing about one fact.) The same
             # nix-shell-stripped-PATH method as the `nix` entry above reproduced
             # it. Present on the workbench (`~/.nix-profile/bin/rsync`), so the
             # pre-push tier is unaffected.

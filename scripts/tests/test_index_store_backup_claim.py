@@ -72,6 +72,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from testlib.nix_units import (  # noqa: E402
     declares,
+    directive,
     is_conditional,
     unit_source,
 )
@@ -96,16 +97,46 @@ CLAIM_PRESENT = (
     "escrow-verify.py checks the key material."
 )
 
+# 🔴 THE DECOMMISSION PARAGRAPH IS ITSELF A CLAIM, AND THE FIRST DRAFT OF IT WAS
+# FALSE IN THE TWO WAYS THIS WHOLE PR EXISTS TO STOP. It read "…so nothing leaves
+# this machine and a destroyed scope is recoverable only from its own hourly
+# commits — and not at all if the disk is gone." Both halves are refuted by this
+# repo's own already-corrected prose: `seed.sh` records that the served pod holds
+# a copy, and `backup.py`'s `DEFAULT_KEEP = 14` means retiring the unit leaves a
+# fortnight of age-encrypted bundles sitting in MinIO. An operator who pasted it
+# on day 1 of that window would have published a confidentiality falsehood AND an
+# impossibility claim in a recovery path — the exact failure mode this file's
+# docstring calls the worst one. A canonical paragraph a guard tells you to paste
+# is payload, not scaffolding; it gets the same scrutiny as the doc it lands in.
 CLAIM_ABSENT = (
-    "There is NO off-machine backup. The analyze-service-index-backup unit has been "
-    "retired, so nothing leaves this machine and a destroyed scope is recoverable only "
-    "from its own hourly commits — and not at all if the disk is gone."
+    "The analyze-service-index-backup unit has been RETIRED, so no NEW off-machine "
+    "bundle is being written. That is not the same as no copy existing: bundles "
+    "already in the MinIO bucket survive until their retention window expires (see "
+    "ASIB_KEEP in backup.py), and the served pod holds a copy as stale as its last "
+    "seed. Check both before calling anything unrecoverable. Once the window has "
+    "passed, a destroyed scope is recoverable only from its own hourly commits, and "
+    "not at all if the disk is gone."
 )
+
+# Lines that QUOTE a claim in order to retract it. `_section_states` drops them
+# before matching — see `test_a_quoted_retraction_cannot_satisfy_the_pin`.
+_RETRACTION_MARKERS = ("used to say", "used to read", "no longer true", "⚠")
 
 
 def _normalise(text: str) -> str:
-    """Collapse whitespace and markdown emphasis; keep the words."""
-    return re.sub(r"\s+", " ", re.sub(r"[`*_]", "", text)).strip().lower()
+    """Collapse whitespace and markdown emphasis; keep the words.
+
+    ⚠ `_` is stripped ONLY at a word boundary. It is markdown emphasis
+    (`__bold__`) *and* an identifier character, and this subsystem's identifiers
+    include `ASIB_KEEP` and `SOPS_AGE_KEY_FILE`. Stripping it unconditionally —
+    which the first version did — would let a doc that wrote `ASIBKEEP` satisfy
+    a pin that names `ASIB_KEEP`; not stripping it at all breaks emphasis
+    insensitivity. The boundary-anchored form does both, and the `__daily,
+    off-machine__` fixture below is what holds that property.
+    """
+    text = re.sub(r"[`*]", "", text)
+    text = re.sub(r"(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])", "", text)
+    return re.sub(r"\s+", " ", text).strip().lower()
 
 
 def _store_safety_section() -> str:
@@ -149,15 +180,35 @@ def _nix_wires_a_backup(src: str | None = None, *, script_exists: bool = True) -
         return False
     if is_conditional(BACKUP_SERVICE, src) or is_conditional(BACKUP_TIMER, src):
         return False
-    if "timers.target" not in unit_source(BACKUP_TIMER, src):
+    # 🔴 BY DIRECTIVE NAME, NOT BY SUBSTRING — both of these were substring
+    # checks and both were measured green against a broken unit: `After =
+    # [ "timers.target" ]` satisfied the first (declared, never enabled), and
+    # deleting the whole ExecStart line satisfied the second, because
+    # `X-Restart-Triggers` on the NEXT line carries the same path.
+    wanted_by = directive("WantedBy", unit_source(BACKUP_TIMER, src))
+    if wanted_by is None or "timers.target" not in wanted_by:
         return False
-    if "analyze-service-index/backup.py" not in unit_source(BACKUP_SERVICE, src):
+    exec_start = directive("ExecStart", unit_source(BACKUP_SERVICE, src))
+    if exec_start is None or "analyze-service-index/backup.py" not in exec_start:
         return False
     return script_exists
 
 
 def _section_states(claim: str, section: str) -> bool:
-    return _normalise(claim) in _normalise(section)
+    """Does the section ASSERT `claim` — not merely quote it while retracting it?
+
+    🔴 A substring test over the whole section is walkable by a QUOTED
+    RETRACTION: "⚠ This section used to say: '<claim>'. That is NO LONGER TRUE —
+    the unit was retired and a destroyed scope is UNRECOVERABLE" contains the
+    claim and would satisfy a naive pin. That is not hypothetical here — the
+    doc already uses exactly that retraction shape, so it is the natural thing a
+    future editor writes. Retraction lines are dropped before matching.
+    """
+    kept = [
+        ln for ln in section.splitlines()
+        if not any(m in ln.lower() for m in _RETRACTION_MARKERS)
+    ]
+    return _normalise(claim) in _normalise("\n".join(kept))
 
 
 def test_the_backup_claim_matches_the_nix_wiring() -> None:
@@ -240,6 +291,37 @@ def test_the_claim_detector_sees_polarity_not_just_tokens() -> None:
         "report the live doc as missing one no matter what it said"
     )
 
+    # 🔴 `_` IS EMPHASIS AT A WORD BOUNDARY AND AN IDENTIFIER CHARACTER INSIDE
+    # ONE. `__daily__` above proves the first half; this proves the second, so a
+    # future `_normalise` that goes back to stripping `_` unconditionally is
+    # caught rather than silently widening every pin that names an identifier.
+    assert _normalise("__x__ ASIB_KEEP") == "x asib_keep"
+
+
+def test_a_quoted_retraction_cannot_satisfy_the_pin() -> None:
+    """🔴 The walk that survived the whole-string pin.
+
+    A substring test over the section is satisfied by text that QUOTES the claim
+    in order to deny it — and this doc already uses that retraction shape, so it
+    is the natural thing a future editor writes, not a contrived attack.
+    """
+    quoted_denial = (
+        "**Store safety.** ⚠ This section used to say: "
+        f"\"{CLAIM_PRESENT}\" That is NO LONGER TRUE — the unit was retired and a "
+        "destroyed scope is UNRECOVERABLE."
+    )
+    assert not _section_states(CLAIM_PRESENT, quoted_denial), (
+        "a quoted retraction satisfied the pin — the guard would certify a doc "
+        "that tells the reader the exact opposite of the claim it is pinning"
+    )
+
+    # CONTROL: dropping retraction lines must not blind the detector to a real
+    # claim sitting beside one. The live doc has both.
+    assert _section_states(CLAIM_PRESENT, _store_safety_section()), (
+        "dropping retraction lines also dropped the live claim — the filter is "
+        "eating the thing it is supposed to protect"
+    )
+
 
 def test_the_wiring_check_is_not_fooled_by_comments_or_a_disabled_timer() -> None:
     """🔴 The other regression that killed the first version.
@@ -298,6 +380,53 @@ def test_the_wiring_check_is_not_fooled_by_comments_or_a_disabled_timer() -> Non
     assert not _nix_wires_a_backup(gated), (
         "a `lib.mkIf` gate went unnoticed — an unconditional doc promise about "
         "a conditional unit is false on every excluded host"
+    )
+
+    # 3b. 🔴 THE SAME GATE ON THE *SERVICE*, whose declaration has a DIFFERENT
+    #     SHAPE. Clause 3 above only ever exercised the timer (`= {` on one
+    #     line); the service is `=` then `let … in {`, so its `=` line is EMPTY
+    #     and a gate written where nix style puts it for that shape was
+    #     invisible. Breakable on one unit and inert on the other is the
+    #     "prove it REACHABLE, not just breakable" trap.
+    at_svc = live.index(f"  {BACKUP_SERVICE} =")
+    eol = live.index("\n", at_svc)
+    gated_svc = live[:eol] + " lib.mkIf serverMode" + live[eol:]
+    assert gated_svc != live, "the mutant did not apply — it proves nothing"
+    assert is_conditional(BACKUP_SERVICE, gated_svc), (
+        "a `lib.mkIf` on the SERVICE went unnoticed — its `=` line is empty, so "
+        "a reader that only looks at that line is inert on this unit"
+    )
+    assert not _nix_wires_a_backup(gated_svc)
+
+    # 4. `WantedBy` swapped for `After`: the timer is DECLARED, ordered against
+    #    timers.target, and enabled by nothing. A substring check for
+    #    "timers.target" passes; the directive check does not.
+    after_not_wanted = live[:cut] + 'After = [ "timers.target" ];' + live[cut + len(wanted_by):]
+    assert after_not_wanted != live, "the mutant did not apply — it proves nothing"
+    assert "timers.target" in unit_source(BACKUP_TIMER, after_not_wanted), (
+        "control: the substring a naive check would find must still be present, "
+        "or this mutant proves nothing about reading the DIRECTIVE"
+    )
+    assert not _nix_wires_a_backup(after_not_wanted), (
+        "`After = [ \"timers.target\" ]` read as an enabled timer — the check is "
+        "matching a substring, not the WantedBy directive"
+    )
+
+    # 5. ExecStart deleted while `X-Restart-Triggers` on the NEXT line still
+    #    carries the same path. A `Type=oneshot` unit with no ExecStart cannot
+    #    run at all; a substring check stays green.
+    svc = unit_source(BACKUP_SERVICE, live)
+    exec_line = next(ln for ln in svc.splitlines() if "ExecStart" in ln)
+    at_exec = live.index(exec_line.strip())
+    no_exec = live[:at_exec] + live[live.index("\n", at_exec) + 1:]
+    assert no_exec != live, "the mutant did not apply — it proves nothing"
+    assert "analyze-service-index/backup.py" in unit_source(BACKUP_SERVICE, no_exec), (
+        "control: X-Restart-Triggers must still carry the path, or this mutant "
+        "proves nothing about reading the DIRECTIVE"
+    )
+    assert not _nix_wires_a_backup(no_exec), (
+        "a service with no ExecStart read as wired — the check is matching the "
+        "path anywhere in the block, and X-Restart-Triggers supplies it"
     )
 
     # 4. ExecStart names a script that is not on disk.
