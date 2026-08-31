@@ -129,7 +129,24 @@ def directive(name: str, block: str) -> str | None:
                 f"block, so its value cannot be read. Line: {ln.strip()!r}"
             )
         value = value[:-1].strip()
-        if (value.count("''") % 2
+        if len(parts) == 1:
+            # 🔴 A SINGLE-LINE VALUE IS NEVER A TRUNCATION — the `;` that ended
+            # it is the one that ends the declaration. Applying the balance
+            # check here regressed values the reader this replaced got right:
+            # `"${pkgs.grep}/bin/grep '^[' f"` and `-c 'printf %s }'` both have
+            # unbalanced brackets INSIDE a string and were correctly returned.
+            return value
+        # 🔴 STRIP NIX'S OWN `''` ESCAPES BEFORE COUNTING. Inside an indented
+        # string, `''${`, `''$`, `'''` and `''\` are ESCAPES, not a second
+        # delimiter — so a naive `count("''") % 2` reads
+        # `writeShellScript "x" '' export PATH=''${PATH}:/bin '';` as balanced
+        # and hands back the truncation this function exists to refuse.
+        # Measured: `_nix_wires_a_backup` then answered False on a LIVE unit and
+        # the guard instructed a maintainer to publish "the unit has been
+        # RETIRED". That is the outcome the paragraph above calls the worst of
+        # the three, produced by the check written to prevent it.
+        probe = re.sub(r"'''|''\$\{|''\$|''\\.", "", value)
+        if (probe.count("''") % 2
                 or value.count("{") != value.count("}")
                 or value.count("[") != value.count("]")):
             raise NotImplementedError(

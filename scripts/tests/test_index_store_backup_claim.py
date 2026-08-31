@@ -136,6 +136,10 @@ CLAIM_ABSENT = (
 # before matching — see `test_a_quoted_retraction_cannot_satisfy_the_pin`.
 _RETRACTION_MARKERS = ("used to say", "used to read", "no longer true", "⚠")
 
+# `-`, `*` and `1.` all start a markdown list item. Matching only `-` reddened
+# the required check on an ordinary reformat and is why this is a pattern.
+_LIST_ITEM = re.compile(r"\s*(?:[-*+]|\d+\.)\s")
+
 
 def _normalise(text: str) -> str:
     """Collapse whitespace and markdown emphasis; keep the words.
@@ -218,50 +222,87 @@ def _section_states(claim: str, section: str) -> bool:
     doc already uses exactly that retraction shape, so it is the natural thing a
     future editor writes.
 
-    🔴 THE MATCH RUNS OVER LIST-ITEM BLOCKS, AND A RETRACTION LINE ENDS A BLOCK.
-    Two walks were measured against weaker versions of this, and the shape of
-    each is why the rule is what it is:
+    🔴 THE MATCH RUNS OVER BLOCKS, AND A BLOCK IS DISQUALIFIED BY CONTACT WITH A
+    RETRACTION — not by the claim's formatting. Four walks were measured against
+    weaker versions of this, and the rule is the smallest thing that covers all
+    four:
 
     1. DELETING retraction lines and re-joining makes previously NON-ADJACENT
        text contiguous. Wedge `⚠ NO LONGER TRUE — the unit was RETIRED` into the
-       MIDDLE of the claim bullet and a delete-then-rejoin filter stitches the
-       halves back together and answers True — green where the plain substring
-       test it replaced was correctly red. Ending the block at a retraction line
-       keeps the break, so neither half contains the whole claim.
-    2. Neutralising the marker's LINE is defeated by ADJACENCY, not by
-       vocabulary — an earlier docstring said the limit was the marker's
-       spelling, and that was measurably wrong. Put `⚠ This section used to
-       say:` on its OWN line with the quotation below it and only the marker
-       line is touched, leaving the quoted claim standing and the pin GREEN
-       while the doc says recovery is impossible. Requiring the claim to sit in
-       a LIST ITEM closes it: the canonical claim IS a bullet, and a retraction
-       paragraph quoting it is not.
+       MIDDLE of the claim and a delete-then-rejoin filter stitches the halves
+       back together — green where the plain substring test was correctly red.
+    2. Neutralising only the marker's LINE is defeated by ADJACENCY. Put
+       `⚠ This section used to say:` on its OWN line with the quotation below and
+       the quoted claim stands untouched.
+    3. The MIRROR of 2 — a marker on the line BELOW the claim — is the more
+       natural editorial shape and was uncaught for three rounds.
+    4. Requiring the claim to be a `-` LIST ITEM closed 2 but broke the file's
+       own purpose: `CLAIM_ABSENT` is handed over with "replace the claim with
+       this PARAGRAPH", and a pasted paragraph then matched nothing, so the gate
+       stayed red with the same message — the unfollowable-instruction defect
+       this file exists to prevent, re-created by the fix for a sibling walk. It
+       also reddened the required check on any reformat from `-` to `*`, and it
+       silently defanged three sibling assertions whose fixtures are paragraphs.
 
-    A block is a line starting `-` plus its continuation lines, cut at the next
-    bullet, a blank line, or a retraction line.
+    So: blocks are split on blank lines AND at list-item starts (`-`, `*`, `1.`),
+    a block containing a retraction marker is disqualified, and so is a block
+    immediately ADJACENT to (not blank-separated from) a disqualified one. The
+    claim's own formatting is irrelevant — paragraph, bullet or wrapped all
+    match.
 
-    ⚠ STATED LIMIT, because a guard's description must not be wider than its
-    body: a retraction marker on its own line ABOVE a claim that is still
-    formatted as a bullet is not caught. The two mechanisms together cover the
-    shapes this doc actually uses and the two walks that were measured against
-    it — they are not a proof that no retraction can pass.
+    ⚠ STATED LIMIT: the marker set is a vocabulary, so a retraction that uses
+    none of those words and is separated from the claim by a BLANK LINE is not
+    caught. This is not a proof that no retraction can pass.
     """
-    blocks, cur = [], []
-    for ln in section.splitlines():
-        retraction = any(m in ln.lower() for m in _RETRACTION_MARKERS)
-        starts_item = ln.lstrip().startswith("-")
-        if retraction or not ln.strip() or starts_item:
+    raw = section.splitlines()
+    marked = [any(m in ln.lower() for m in _RETRACTION_MARKERS) for ln in raw]
+
+    blocks: list[tuple[list[str], bool]] = []   # (lines, contains-marker)
+    cur: list[str] = []
+    cur_marked = False
+    prev_blank = True
+    for ln, is_marked in zip(raw, marked):
+        blank = not ln.strip()
+        starts_item = bool(_LIST_ITEM.match(ln))
+        if blank or starts_item:
             if cur:
-                blocks.append("\n".join(cur))
-                cur = []
-            if retraction:
+                blocks.append((cur, cur_marked))
+            cur, cur_marked = [], False
+            if blank:
+                # A blank line breaks ADJACENCY as well as the block.
+                blocks.append(([], False))
+                prev_blank = True
                 continue
-        if starts_item or cur:
-            cur.append(ln)
+        cur.append(ln)
+        cur_marked = cur_marked or is_marked
+        prev_blank = False
     if cur:
-        blocks.append("\n".join(cur))
+        blocks.append((cur, cur_marked))
+    _ = prev_blank
+
+    # Contact rule: a block touching a MARKED block, with no blank line between,
+    # inherits the taint. Walk both directions — walk 3 above is the mirror of 2.
+    #
+    # 🔴 NEIGHBOURS ARE READ FROM `marked`, NEVER FROM `tainted`. Reading the
+    # array being written cascades the taint down the whole section: the live
+    # doc opens with a ⚠ retraction, so the bullet after it was tainted, then
+    # the bullet after THAT inherited from the tainted one, and the real claim
+    # was disqualified — the guard rejecting the very doc it is meant to
+    # certify. Contact is one hop, deliberately.
+    marked_block = [m for _, m in blocks]
+    tainted = list(marked_block)
+    for i, (lines, _m) in enumerate(blocks):
+        if not lines:                       # a blank-line separator
+            continue
+        for j in (i - 1, i + 1):
+            if 0 <= j < len(blocks) and blocks[j][0] and marked_block[j]:
+                tainted[i] = True
+
     target = _normalise(claim)
-    return any(target in _normalise(b) for b in blocks)
+    return any(
+        lines and not tainted[i] and target in _normalise("\n".join(lines))
+        for i, (lines, _m) in enumerate(blocks)
+    )
 
 
 def test_the_backup_claim_matches_the_nix_wiring() -> None:
@@ -406,6 +447,35 @@ def test_a_quoted_retraction_cannot_satisfy_the_pin() -> None:
         "a retraction marker on its own line left the quoted claim standing — "
         "the pin is certifying a doc that says the backup was retired"
     )
+
+    # 🔴 THE MIRROR OF THE ABOVE — a marker on the line BELOW the claim. It is
+    # the more natural editorial shape (state it, then retract it) and it was
+    # uncaught for three rounds while the docstring named only the ABOVE case.
+    marker_below = f"- {CLAIM_PRESENT}\n  ⚠ NO LONGER TRUE — the unit was RETIRED."
+    assert not _section_states(CLAIM_PRESENT, marker_below), (
+        "a retraction on the line BELOW the claim left it standing — the "
+        "contact rule is one-directional"
+    )
+    blank_separated = f"- {CLAIM_PRESENT}\n\n⚠ NO LONGER TRUE — the unit was RETIRED."
+    assert _section_states(CLAIM_PRESENT, blank_separated), (
+        "a blank line must break adjacency, or the live doc's unrelated ⚠ "
+        "paragraphs would disqualify every claim near them"
+    )
+
+    # 🔴 THE FILE'S OWN INSTRUCTION MUST BE FOLLOWABLE. The failure message says
+    # "replace the claim with this paragraph" and hands over CLAIM_ABSENT. A
+    # bullet-only matcher answered False for a pasted PARAGRAPH, so the gate
+    # stayed red with the same message — the unfollowable-instruction defect
+    # this file exists to prevent, re-created by a fix for a sibling walk.
+    assert _section_states(CLAIM_ABSENT, f"**Store safety.** {CLAIM_ABSENT}"), (
+        "the decommission paragraph cannot satisfy its own guard — the "
+        "instruction the failure message gives cannot be followed"
+    )
+    for bullet in ("-", "*", "1."):
+        assert _section_states(CLAIM_PRESENT, f"{bullet} {CLAIM_PRESENT}"), (
+            f"a {bullet!r} list item did not match — an ordinary markdown "
+            "reformat would red the required check on both tiers"
+        )
 
     # CONTROL for the list-item scoping: a claim that IS a bullet must still be
     # seen when it wraps across continuation lines, or the rule above would
