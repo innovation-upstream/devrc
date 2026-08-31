@@ -69,7 +69,8 @@ survives adversarial re-derivation, and fix whatever it exposes.
   (rank 4) is committed on #1055 and NOT live; `handoff-audit.py` is committed on #1064 and
   wired into no gate, skill or script. Only the write guard has shipped.
 - **2026-08-30 session: ranks 3 and 6 both CLOSED, and both by REFUTING their own premise.**
-  Rank 6 → devrc**#1108, OPEN** (the tekton skill was already correct; what shipped is the
+  Rank 6 → devrc**#1108 MERGED** 2026-08-31T05:15:15Z as **`57b010fb`** (squash — verified by
+  CONTENT on `origin/main`, never by ancestry). The tekton skill was already correct; what shipped is the
   hostPath revert and its independent second blocker). Rank 3 → the drift question does not
   discriminate (95.5% vs a **90.3% control**); the real finding is **13 / 26** abandoned docs
   uncommitted-since-and-still-open, **5** of them with no link from X to Y. Instrument
@@ -85,8 +86,9 @@ survives adversarial re-derivation, and fix whatever it exposes.
   hypothesis is superseded and was the wrong population. The symptom fix (`8e33bf1d`, #1023,
   `HANG_TIMEOUT` 15→60 s) is live on `main` and **insufficient — 4 of 11 runs still failed
   today**. 🔴 **It blocks the arc mechanically:** `main` is `enforce_admins: true` with both legs
-  required, so **#1055, #1064 and #1108 are all held by a failure none of them caused.** The
-  remaining work is Tekton capacity and belongs to the `tekton` skill's owners, not here.
+  required, so **#1055 and #1064 are still held by a failure neither caused** (#1108 got through
+  on its third attempt, 2026-08-31 — see the walk-back below). The remaining work is Tekton
+  capacity and belongs to the `tekton` skill's owners, not here.
 
 ## Open investigations — live diagnosis state
 
@@ -172,6 +174,41 @@ X when the topic moves, or a `/resume` warning when the doc it is opening has ha
 since the last session that read it. Both are cheap; which one is right depends on whether
 drift is usually a RENAME (X and Y are the same work) or a genuine SCOPE MOVE — that split
 has not been measured, and the 5 unlinked cases above are the set to read.
+
+### 🔴 WALK-BACK — "queue depth is what moved" was UNDER-CONTROLLED, and the store already knew
+**Corrected 2026-08-31, by reading the subsystem store instead of re-deriving.** This doc briefly
+claimed that #1108's three gate attempts showed *"the variable that moved was queue depth, not the
+diff"*. The three attempts are real and are recorded above:
+
+| attempt | queue at fire | outcome |
+|---|---|---|
+| 1 `9cb3e56f` | 8 running / 3 pending | `FAILED: pytests` naming a test |
+| 2 `a3f15123` | 7 running / 2 pending | `COULD NOT RUN` both legs, gate task's 60m budget expired |
+| 3 `eb03676c` | **5 running / 0 pending** | **both legs green, 22m** |
+
+🔴 **But `devrc/tests.md` in the subsystem store has carried the controlled version since
+2026-08-27, and nobody in this arc consulted it** — *"Three runs of `tekton/devrc-*` on ONE
+UNCHANGED commit (`4ea2ee71`, PR #937, retriggered by close/reopen): (1) both legs ERROR 'COULD NOT
+RUN'; (2) nodetests pass, pytests FAILED with `failed=0`; (3) both pass, summary byte-identical to
+(2)."* That is **the exact probe this doc kept listing as its open next step** — one unchanged
+commit, three different verdicts — already run, days earlier, and it moves queue depth from
+"demonstrated cause" to "uncontrolled covariate". Three attempts at three depths with three
+outcomes is equally consistent with a gate that is simply nondeterministic.
+
+**What survives and what does not.** The capacity MECHANISM stands — it is measured and written
+down in-tree at `scripts/tests/test_subsystem_store_api.py:99-108`, and attempt 2's failure is
+unambiguous (60m13s against a 60m task budget). What does NOT survive is the causal claim about
+attempt 3 specifically: a single green at one depth is not an experiment. **Do not cite the
+8→7→5 / 3→2→0 table as evidence that draining the queue fixes the gate.**
+
+🔴 **The reusable lesson is about where to look, not about CI.** This arc spent days naming
+"re-run on an unchanged sha" as its next probe while the answer sat in a store that
+`subsystem_recall.py` prints in one read-only command — and this session DID run that command at
+kickoff, but the recall featured `skills` in full and only listed `tests`, so the relevant bullet
+was one `--ref` away and never opened. **When a doc names a probe as open, grep the store for it
+before running it.** Related: `devrc#943` is open on the sibling defect (a failing status that
+does not name which of ~28 targets failed), which is why attempt 1's named test and PR #937's
+`failed=0` are different shapes and must not be merged into one story.
 
 ### ✅ CLOSED — the audit ladder on #1108, and what SIX rounds on a 21-line docs PR actually taught
 **Every round found something real, and five of the six found the PREVIOUS round's correction
@@ -467,7 +504,7 @@ rather than removed and renumbered. New work is appended at the end.
    `persistentVolumeClaim: nix-store-cache` (30Gi Bound). What WAS missing is why the hostPath
    cannot simply come back — a second, independent blocker that gotcha 6(a)'s closing "the
    narrow fix is a baseline-compatible cache" invited someone to walk straight into.
-   Shipped as **devrc#1108, OPEN** — 7 commits, **audit ladder CLOSED after 6 rounds**, gate
+   Shipped as **devrc#1108, MERGED `57b010fb`** — 9 commits, **audit ladder CLOSED after 6 rounds**, gate
    re-triggered by empty commit `a3f15123`. 🔴 **Every round found something real, and FIVE of
    the six found the PREVIOUS round's correction wrong** — that ratio is the finding, not the
    PR. See "The audit ladder on #1108" below.
