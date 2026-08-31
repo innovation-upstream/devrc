@@ -112,10 +112,16 @@ ROWS=0
 # 🔴 Read the CONTENT, never an exit code. A suite that never ran yields zero
 # FAILED lines — i.e. "clean" — so a harness wired to nothing would score every
 # mutant SURVIVED and every control ok. The floor catches COLLAPSE, not growth.
-# `run-tests.sh`'s own floor formula is `m - min(50, max(1, m/20))`; at m=11
-# that is 10. It catches COLLAPSE, not growth — losing one test still clears it,
+# `run-tests.sh`'s own floor formula is `m - min(50, max(1, m/20))`; at m=13
+# that is 12. It catches COLLAPSE, not growth — losing one test still clears it,
 # losing two reports HARNESS BROKE.
-MIN_TESTS=10
+#
+# 🔴 THIS FLOOR DOES NOT TRACK THE MODULE — RE-DERIVE IT WHEN YOU ADD A TEST.
+# Measured 2026-08-31: the module grew 11 → 13 while this stayed at 10, so the
+# gap it tolerated silently widened from one test to three. Nothing failed; a
+# floor that is too LOW never complains, which is exactly why it goes unnoticed.
+# Re-derive with the formula above against `--collect-only`, never by memory.
+MIN_TESTS=12
 failing() {
   local out n f total
   # stderr is CAPTURED, not discarded: the commonest way to get "0 tests ran" on

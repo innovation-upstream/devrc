@@ -203,11 +203,15 @@ people's claims is the worst place for it to happen.
 Mutation controls, each run on a copy of the HEAD tree, under
 `PYTHONDONTWRITEBYTECODE=1` with the pytest cache disabled. The unmutated copy
 is the positive control, so a red below is the mutant and not the harness.
-**Re-measured 2026-08-26 against the current 11-test module** -- the counts
+**Re-measured 2026-08-26 against the then-current 11-test module** -- the counts
 first recorded here were taken against a 5-test module that never existed, and
-M2/M5 have since gained assertions that also fire:
+M2/M5 have since gained assertions that also fire. 🔴 The module is **13 tests**
+as of 2026-08-31 (the escape-hatch pins), so the POS control below reads 13, not
+11; the per-mutant FAILED counts are unchanged because no mutant here touches
+the escape hatch. A count quoted in prose that no assertion reads is unpinned by
+construction -- this one had already gone stale once before this note:
 
-  POS  unmutated copy ......................... 11 passed
+  POS  unmutated copy ......................... 13 passed
   M1   cosmetic reword of the RULES clause
        ("FINDINGS, never by a number" -> "findings,
        not by a number") ....................... 2 failed -- the string pin AND
@@ -242,7 +246,9 @@ not ceremony -- two mutants below silently failed to apply on a first pass
 because their target had been re-wrapped, and without it both would have been
 recorded as SURVIVED off an 11-passed run.
 
-  POS  unmutated copy ......................... 11 passed  <- harness control
+  POS  unmutated copy ......................... 13 passed  <- harness control
+                                                 (11 when this table was taken;
+                                                 the escape-hatch pins added 2)
   BASE origin/main's SKILL.md, reference file
        absent (i.e. pre-change) ............... 6 failed, 5 passed
   PREV the round-1 tip `ed38490b` ............. 5 failed, 6 passed  <- the tree
@@ -424,10 +430,17 @@ SKILL_NOT_WASTE = (
 )
 
 # 🔴 The PROSE-payload escape hatch is the ONE criterion that can END a ladder
-# without a clean round, and until this pin it was the only stop-related clause
-# in the file that nothing asserted on. That asymmetry is how it drifted: the
-# findings-keyed rule around it carries five pins, so a reword there fails
-# loudly, while a reword HERE was silent.
+# without a clean round, and until these pins NOTHING in this module asserted on
+# any part of it. That asymmetry is how it drifted: the findings-keyed rule
+# around it carries five pins, so a reword there fails loudly, while a reword
+# HERE was silent.
+#
+# ⚠ An earlier draft of this comment said the hatch was "the only stop-related
+# clause in the file that nothing asserted on". THAT WAS FALSE, and a later
+# round refuted it by measurement: deleting the whole ⚠ caveat below scored 393
+# passed / 0 failed. It was unpinned too -- which is why it is pinned here now.
+# The false version is worth recording because it read as a survey and was
+# actually a guess: reading as coverage while providing none is worse than none.
 #
 # What is load-bearing is the DELIVERABLE, not the auditor's confidence. "Can
 # NAME" is a private mental state and no reader can check it; the rationale has
@@ -438,11 +451,37 @@ SKILL_NOT_WASTE = (
 # Measured: #1133's round-2 fix added the NAME precondition and deleted the
 # summary obligation in the SAME edit (wider on one axis, narrower on another --
 # the shape this very skill tells auditors to hunt). It reached `main` and was
-# caught only by a later blind round, four commits downstream.
+# caught only by a later blind round -- 22 commits later on `main`, of which
+# exactly ONE (#1117) touched any audit-pr surface. (An earlier draft said "four
+# commits downstream"; no denominator produces four.)
+#
+# 🔴 THE PIN COVERS THE WHOLE PARAGRAPH, NOT JUST ITS FIRST SENTENCE. The
+# precondition is the first half; the CRITERIA are the tail, and a pin that
+# stopped at "acting on it.**" left them free to be inverted. Measured: swapping
+# the tail for "One unresolved 🔴 is acceptable · any blast radius · ..." scored
+# 393 passed / 0 failed against the shorter pin. This skill states the rule 40
+# lines below -- "a pin that stops mid-sentence leaves the tail free to argue the
+# opposite" -- and the first draft of this pin broke it.
 SKILL_PROSE_ESCAPE_STOP = (
     "**Stop on this — but ONLY once you can NAME, IN THE ROUND'S SUMMARY AND NOT "
     "LEFT IMPLICIT, why the rounds will not stop on their own; read the next "
-    "paragraph before acting on it.**"
+    "paragraph before acting on it.** No 🔴 · no blast radius beyond \"the "
+    "document contains a false sentence\" · and the recurring SHAPE swept at "
+    "every site rather than at the one that was reported. Record what you are "
+    "NOT fixing, on the PR, so the next reader knows it is open rather than "
+    "absent."
+)
+
+# 🔴 The ⚠ caveat is what stops the hatch ending a CONVERGING ladder, and it is
+# the paragraph the sentence above means by "read the next paragraph". Deleting
+# it was measured to be silent (393 passed / 0 failed), so it is pinned too --
+# and its position matters as much as its text: an earlier draft of this fix
+# inserted a history paragraph BETWEEN the pointer and this caveat, silently
+# re-pointing the instruction at itself.
+SKILL_HATCH_NOT_A_LICENCE = (
+    "⚠ **THIS DOES NOT OVERRIDE THE FINDINGS-KEYED STOP RULE, AND IT IS NOT A "
+    "LICENCE TO STOP ON A ROUND THAT FOUND THINGS.** That rule still governs: a "
+    "round returning findings that needed fixing is followed by another round."
 )
 
 # `claude/RULES-ARCHIVE.md`, anchor `audit-fix-resets-gate` -- the evidence the
@@ -958,7 +997,40 @@ def test_the_prose_escape_hatch_demands_its_rationale_IN_THE_SUMMARY():
     _assert_pinned_once(
         SKILL_MD,
         SKILL_PROSE_ESCAPE_STOP,
-        "the prose-payload escape hatch's summary requirement",
+        "the prose-payload escape hatch's summary requirement AND its criteria",
+    )
+    _assert_pinned_once(
+        SKILL_MD,
+        SKILL_HATCH_NOT_A_LICENCE,
+        "the escape hatch's not-a-licence caveat",
+    )
+
+
+def test_the_escape_hatch_pointer_resolves_to_the_NOT_A_LICENCE_caveat():
+    """🔴 The hatch says "read the next paragraph". Pin WHICH paragraph that is.
+
+    Both texts existing somewhere in the file is not enough: the instruction is
+    POSITIONAL, so anything inserted between them silently re-points it. That is
+    not hypothetical -- the first draft of this very fix put a history paragraph
+    in the gap, and an auditor obeying the instruction literally would have read
+    prose about #1133 instead of "NOT A LICENCE TO STOP ON A ROUND THAT FOUND
+    THINGS", and could have ended a CONVERGING ladder over unfixed findings.
+
+    Asserted as ADJACENCY under the same normalisation the pins use, so the two
+    paragraphs must remain consecutive rather than merely both present.
+    """
+    body = _norm(_read(SKILL_MD))
+    adjacent = _norm(SKILL_PROSE_ESCAPE_STOP) + " " + _norm(SKILL_HATCH_NOT_A_LICENCE)
+    assert adjacent in body, (
+        "\n\nclaude/skills/audit-pr/SKILL.md: the escape-hatch criteria paragraph "
+        "is no longer IMMEDIATELY followed by the not-a-licence caveat.\n"
+        "  The criteria sentence ends '...read the next paragraph before acting "
+        "on it.', so whatever sits next IS that instruction's referent.\n"
+        "  Something has been inserted between them, or one of them moved. Put "
+        "the caveat back directly after the criteria paragraph; anything else "
+        "belongs BELOW the caveat.\n"
+        "  This is positional on purpose -- both strings are pinned separately, "
+        "and both pins pass while the pointer points at the wrong text."
     )
 
 

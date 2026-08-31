@@ -217,16 +217,6 @@ blast radius beyond "the document contains a false sentence" · and the recurrin
 every site rather than at the one that was reported. Record what you are NOT fixing, on the PR,
 so the next reader knows it is open rather than absent.
 
-🔴 **WRITING IT DOWN IS THE WHOLE POINT, AND AN EARLIER REWORD DELETED IT.** "Can NAME" is a
-private mental state; a reader cannot check it. Without the rationale in the summary a report
-that ENDED the ladder on this escape hatch is **indistinguishable from one that converged** — the
-findings, verdict and ledger line all look the same — so an operator cannot tell "no findings
-remain" from "real 🟡s are deliberately unfixed". Those are opposite meanings. Measured: this
-requirement was dropped by `#1133`'s round-2 fix, which added the NAME precondition and removed
-the summary obligation in the same edit — **wider on one axis, narrower on another**, the exact
-shape this skill tells you to hunt for. It is pinned by
-`scripts/tests/test_audit_ladder_stop_rule.py` now because nothing pinned it then.
-
 ⚠ **THIS DOES NOT OVERRIDE THE FINDINGS-KEYED STOP RULE, AND IT IS NOT A LICENCE TO STOP ON A
 ROUND THAT FOUND THINGS.** That rule still governs: a round returning findings that needed fixing
 is followed by another round. This criterion answers a different question — *what ends a ladder
@@ -236,6 +226,19 @@ converging one. **"Does not terminate" above means the GATE cannot fire, not tha
 run out** — a prose ladder that returns a clean round ends there, exactly like any other. If in
 doubt, run the next round: this criterion is for the case where you can already name why the
 rounds will not stop on their own.
+
+🔴 **WRITING IT DOWN IS THE WHOLE POINT, AND AN EARLIER REWORD DELETED IT.** "Can NAME" is a
+private mental state; a reader cannot check it. Without the rationale in the summary a report
+that ENDED the ladder on this escape hatch is **indistinguishable from one that converged** — the
+findings, verdict and ledger line all look the same — so an operator cannot tell "no findings
+remain" from "real 🟡s are deliberately unfixed". Those are opposite meanings. Measured: this
+requirement was dropped by `#1133`'s round-2 fix, which added the NAME precondition and removed
+the summary obligation in the same edit — **wider on one axis, narrower on another**, the exact
+shape this skill tells you to hunt for. 🔴 **This paragraph sits BELOW the ⚠ one on purpose:
+the sentence above says "read the next paragraph", and that pointer means the ⚠ caveat.** An
+earlier draft of this very fix inserted this history here and silently re-pointed it at itself —
+found by the next round. The criteria sentence and the ⚠ caveat are both pinned by
+`scripts/tests/test_audit_ladder_stop_rule.py`; this paragraph is not.
 
 ## Mutation testing: deletion-mutants are the EASY half
 
