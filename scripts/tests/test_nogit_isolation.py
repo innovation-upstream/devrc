@@ -371,7 +371,17 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 # Start together. Without the barrier the children stagger by their own import
 # time and the collision this measures never happens.
+# 🔴 BOUNDED. An unbounded `while not exists(go)` busy-polls FOREVER if the
+# parent dies between spawning us and writing the file — a KeyboardInterrupt, an
+# xdist worker restart, a failed write — leaving N children at 200 polls/s with
+# nothing that will ever release them. The parent also kills us in a finally,
+# but a child must not depend on its parent's cleanup to terminate.
+_deadline = time.monotonic() + 120
 while not os.path.exists(go):
+    if time.monotonic() >= _deadline:
+        sys.stdout.write(json.dumps(
+            {"status": "BARRIER-TIMEOUT", "detail": "parent never released the barrier"}))
+        raise SystemExit(0)
     time.sleep(0.005)
 mod.install(guard_dir)
 status, detail = mod.config_control(guard_dir)
@@ -393,6 +403,14 @@ sys.stdout.write(json.dumps({"status": status, "detail": detail}))
 # write slow, which is precisely the condition under which a retry-with-backoff
 # loop stops working — it is not a proxy for the bug, it IS the bug's
 # precondition.
+# 🔴 THESE TWO ARE A RATIO, NOT A PAIR OF MEASUREMENTS — re-MEASURE them on new
+# hardware, do not merely re-run. The RED half of the matrix needs the serialised
+# writes to outlast the retry loop's maximum jitter budget (~0.75s). Measured
+# here: 0.17s per write against the seeded config, so 16 writers take ~2.7s to
+# drain — comfortably past it. On hardware ~10x faster the drain fits INSIDE the
+# backoff, the base implementation passes, and the reproduction goes vacuous
+# while still looking green. If the base stops going red, that is the first
+# thing to check; raising _CONTENDED_CONFIG_KEYS restores the ratio.
 _CONTENDERS = 16
 _CONTENDED_CONFIG_KEYS = 200_000
 
@@ -430,15 +448,30 @@ def _fire_controls_concurrently(tmp_path, n=_CONTENDERS,
         [sys.executable, str(child), mod_path, str(guard), str(go)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         for _ in range(n)]
-    go.write_text("go", encoding="utf-8")
+    # 🔴 The finally is what makes the barrier safe from THIS side: a
+    # `communicate` timeout used to propagate and leave the remaining children
+    # running, and an exception between Popen and `go.write_text` left all of
+    # them polling a file that would never appear.
     out = []
-    for p in procs:
-        stdout, stderr = p.communicate(timeout=300)
-        try:
-            out.append(json.loads(stdout))
-        except ValueError:
-            out.append({"status": "CHILD-CRASHED",
-                        "detail": (stdout + stderr)[-400:]})
+    try:
+        go.write_text("go", encoding="utf-8")
+        for p in procs:
+            try:
+                stdout, stderr = p.communicate(timeout=300)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                stdout, stderr = p.communicate()
+                out.append({"status": "CHILD-TIMEOUT", "detail": "exceeded 300s"})
+                continue
+            try:
+                out.append(json.loads(stdout))
+            except ValueError:
+                out.append({"status": "CHILD-CRASHED",
+                            "detail": (stdout + stderr)[-400:]})
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
     return out, guard
 
 
