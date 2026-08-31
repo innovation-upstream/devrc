@@ -707,13 +707,29 @@ def test_the_two_marker_sets_are_derived_from_ONE_definition():
     # fail-CLOSED (a wider class can only raise a verdict, never lower one), so
     # this was an overclaim rather than a hazard — but the sentence is the thing
     # this file exists to police.
-    for ch in "&;|<>#@!~^*()-_=+abcXYZ019 ":
-        assert not G._INTERPOLATION.search(ch), (
-            f"{ch!r} is matched by _INTERPOLATION but is not in "
-            f"INTERPOLATION_MARKERS — the pattern is wider than its definition")
-        assert not G._QUOTED_AFTER_UNRESOLVED.search(f'"a{ch}b{G.RESERVED_PREFIX}'), (
-            f"{ch!r} is matched by the arm but is not in UNRESOLVED_MARKERS — "
-            "the pattern is wider than its definition")
+    # 🔴 ROUND-15 FINDING NEW-26. The first attempt at this loop spelled a
+    # 27-character alphabet — a SPELLED guard where a STRUCTURAL one belongs,
+    # which is this file's own rule turned on itself. 63 of the 95 printable
+    # ASCII characters were outside both the marker sets and that alphabet, and
+    # 13 widening mutants survived while the failure message described them
+    # verbatim ("the pattern is wider than its definition"). Sweep the range
+    # instead of naming members of it.
+    #
+    # ⚠ `'` and `"` are the two characters this cannot probe: the arm's own
+    # pattern is delimited by them, so a quote inside the probe string ends the
+    # run rather than testing it. Stated rather than left implied — the hole is
+    # two characters, not zero.
+    for cp in range(0x20, 0x400):
+        ch = chr(cp)
+        if ch not in G.INTERPOLATION_MARKERS:
+            assert not G._INTERPOLATION.search(ch), (
+                f"{ch!r} (U+{cp:04X}) is matched by _INTERPOLATION but is not in "
+                "INTERPOLATION_MARKERS — the pattern is wider than its definition")
+        if ch not in G.UNRESOLVED_MARKERS and ch not in "'\"":
+            assert not G._QUOTED_AFTER_UNRESOLVED.search(
+                f'"a{ch}b{G.RESERVED_PREFIX}'), (
+                f"{ch!r} (U+{cp:04X}) is matched by the arm but is not in "
+                "UNRESOLVED_MARKERS — the pattern is wider than its definition")
 
 
 # The ground-truth ledgers this file measures, pinned BY NAME and both ways.
