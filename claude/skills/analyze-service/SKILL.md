@@ -77,7 +77,7 @@ better done deterministically. The script does it now; Grep is for reading code.
 ## Reference (load only when you need it)
 
 - `~/.claude/skills/analyze-service/reference/index-store.md` — where the index lives, how a ref resolves, the entry schema, 🔴 **store safety** (curated, client-confidential, no backup: never stash/reset/push there), and what each `index:` status means.
-- `~/.claude/skills/analyze-service/reference/write-back.md` — the **opt-in, confirm-gated, diff-first** index update: what counts as notable, auto-discovered pointers, bloat discipline. Read it before writing anything to the store.
+- `~/.claude/skills/analyze-service/reference/write-back.md` — **what is worth recording**: what counts as notable, auto-discovered pointers, bloat discipline, and the `created_by: analyze-service` stamp. Read it before writing anything to the store. 🔴 **It does NOT carry the write protocol.** Since 2026-08-31 there is exactly ONE, shared with `/handoff`, in `~/.claude/skills/subsystem-index/SKILL.md` — read the mechanism THERE and nowhere else; it is deliberately not summarised here, because a summary is a copy and copies drift.
 
 ## Measurement + pairs
 
