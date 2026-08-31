@@ -41,6 +41,21 @@ WHAT THIS MODULE DOES **NOT** COVER, stated so nobody reads coverage into it
   its wording. It cannot see a hostile rewrite that keeps the substrings — which
   is what layer 2 (the whole-region hash) is for, and why the region is pinned
   whole rather than by keyword.
+* 🔴 Layers 1-4 all key on what an AGREEING copy contains — the exact `MANDATE`
+  fragment, or ten exact phrasings of the retired text. A fork is by definition a
+  document that says something DIFFERENT, so those layers detect AGREEMENT and
+  are blind to DISAGREEMENT. That gap was MEASURED (clawgate cg#473): a complete,
+  materially conflicting second protocol appended to `write-back.md` left the
+  module at 61 passed. Layer 5 is the disagreement half, and it is keyed on the
+  MECHANISM TOKENS a second protocol cannot avoid naming rather than on any
+  particular wording.
+* `scripts/subsystem-store-api/server.py` carries a THIRD append protocol
+  (flock + temp-file-rename, `PUT` behind `If-Match`). It writes the POD's
+  `/data`, not `~/.claude/analyze-service-index/`, so "one protocol" holds for
+  the local store today — but this module scans `claude/skills/**/*.md` only and
+  would never see it. Phase 1 of `claudedocs/plan-cairn-integration.md` makes the
+  pod canonical; that is when this has to be reconciled. Recorded so nobody reads
+  coverage of it into a green run here.
 
 🔴 NO TEST HERE READS THE REAL STORE. Nothing in this file opens
 `~/.claude/analyze-service-index/`; it reads tracked documents in this repo only.
@@ -102,6 +117,23 @@ BANNED_IMPERATIVES: tuple[str, ...] = (
 # --- the region extractor ------------------------------------------------------
 
 
+def _region_span(doc: str, name: str) -> tuple[int, int]:
+    """Half-open `[start, end)` CHARACTER offsets of the region's body.
+
+    Split out from `_region()` so the confinement guard in layer 5 can ask
+    "is this occurrence inside the region?" against the same extraction the hash
+    uses. One rule, one place: two extractors would drift, and the whole point of
+    this module is that a duplicated predicate disagrees with itself eventually.
+    """
+    begin, end = f"<!-- {name}:begin", f"<!-- {name}:end"
+    i = doc.find(begin)
+    assert i != -1, f"marker {begin!r} is missing from {POINTER.name}"
+    i = doc.index("-->", i) + len("-->")
+    j = doc.find(end, i)
+    assert j != -1, f"marker {end!r} is missing from {POINTER.name}"
+    return i, j
+
+
 def _region(doc: str, name: str) -> str:
     """Bytes between `<!-- <name>:begin -->` and `<!-- <name>:end -->`.
 
@@ -111,12 +143,7 @@ def _region(doc: str, name: str) -> str:
     inside each marker stays editable without changing which bytes are hashed.
     Same contract as `test_subsystem_resolver.py`'s extractor, deliberately.
     """
-    begin, end = f"<!-- {name}:begin", f"<!-- {name}:end"
-    i = doc.find(begin)
-    assert i != -1, f"marker {begin!r} is missing from {POINTER.name}"
-    i = doc.index("-->", i) + len("-->")
-    j = doc.find(end, i)
-    assert j != -1, f"marker {end!r} is missing from {POINTER.name}"
+    i, j = _region_span(doc, name)
     body = doc[i:j].strip()
     assert body, f"region {name!r} is EMPTY — the hash would guard nothing"
     return body
@@ -550,6 +577,388 @@ class TestThePointerRegionIsPinnedWHOLE:
                 self.REGION,
             )
         assert "the hash would guard nothing" in str(exc.value)
+
+
+# =============================================================================
+# Layer 5 — DISAGREEMENT: a second protocol that agrees with nothing.
+# =============================================================================
+#
+# 🔴 WHY THIS LAYER EXISTS, and what it is keyed on instead.
+#
+# Layers 1-4 ask "does this document still contain the words an agreeing copy
+# would contain?". A fork does not contain them — that is what makes it a fork —
+# so a REWORDED second protocol walks straight past all four. Measured, cg#473:
+# the block below, appended verbatim to `write-back.md` in a `cp -a` copy of
+# 50bfd91f, left this module at 61 passed / 0 failed.
+#
+#     ## Performing the write (analyze-service)
+#     Show the proposed bullet as a unified diff … then ask the user
+#     `append this to the index? (y/N)`. Proceed only on a yes. Then re-read the
+#     entry file and use the `Write` tool to emit the whole file …
+#
+# The one thing that block CANNOT do is describe a write mechanism without naming
+# a write mechanism. So layer 5 keys on two token classes and their CO-OCCURRENCE
+# in one paragraph — a MECHANISM (which tool, or a confirm gate) and a STORE
+# CONTEXT (this store, its anchor heading, its owner, its entry files) — and then
+# asks three questions about WHICH documents may carry such a paragraph, WHERE in
+# the pointer they may sit, and WHETHER the owner's have changed.
+#
+# 🔴 It makes NO attempt to tell an INSTRUCTION from a DESCRIPTION, and nothing
+# below assumes it can. Both doors quote the retired prompt verbatim while
+# recording its retirement, and a guard that banned the spelling would make the
+# resolution record unwritable — which is how the next session re-derives the
+# fork from scratch. So instead of judging the prose: every document allowed to
+# carry such a paragraph is ENUMERATED with its reason, the pointer's occurrences
+# are CONFINED to the already-hashed region, and the owner's are PINNED WHOLE.
+
+# Front matter is a DECLARATION, not prose: `allowed-tools: …, Write, Edit, …`
+# is already covered by `TestTheMandatedToolIsThePreApprovedOne`, and leaving it
+# in the scan would file every skill that pre-approves `Write` as a protocol
+# carrier. Stripped before any layer-5 predicate runs.
+_FRONT_MATTER = re.compile(r"\A---\n.*?\n---\n", re.S)
+
+# A write MECHANISM: the tool an executor is told to reach for, or the confirm
+# gate it is told to open. Backticked tool names are this repo's spelling; the
+# `use/then/plain/via <tool>` alternation catches the unbackticked form without
+# matching the ordinary English verb ("Write a durable lesson", "Editing it
+# means…"), which a bare `\bWrite\b` does match and which appears in the owner.
+MECHANISM = re.compile(
+    r"`Write`|`Edit`"
+    r"|\b(?:Write|Edit) tool\b"
+    r"|\b(?:use|using|uses|with|then|via|plain)\s+(?:a\s+|the\s+)?\*{0,2}`?(?:Write|Edit)`?\*{0,2}\b"
+    r"|\(y/N\)|\by/N\b|\byes/no\b|\byes-no\b"
+)
+
+# …applied to THIS store. Without this half the predicate would fire on every
+# skill in the repo that mentions a tool. These are the store's own nouns: its
+# directory, the heading the mandated `Edit` anchors on, the owning document, and
+# the words for the things it holds.
+STORE_CONTEXT = re.compile(
+    r"analyze-service-index"
+    r"|Nuance / work-history"
+    r"|nuance heading"
+    r"|subsystem-index/SKILL\.md"
+    r"|index entry|entry file|index store|subsystem index"
+)
+
+
+def _paragraphs(text: str) -> list[str]:
+    return [p for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+
+def _mechanism_outside_region(doc: str, region: str) -> list[tuple[int, str]]:
+    """`(line, token)` for every MECHANISM occurrence OUTSIDE the named region.
+
+    🔴 ONE expression, used by the guard below AND by its positive control.
+    MEASURED (cg#473 mutation sweep, mutant M6): while the control carried its
+    own copy of this filter, replacing the GUARD's copy with `if False` left all
+    71 tests green — the control was proving a DUPLICATE reachable while the real
+    guard was dead. `claude/RULES.md`: one rule, one place.
+    """
+    lo, hi = _region_span(doc, region)
+    return [
+        (doc[: m.start()].count("\n") + 1, m.group(0))
+        for m in MECHANISM.finditer(doc)
+        if not (lo <= m.start() and m.end() <= hi)
+    ]
+
+
+def _store_write_paragraphs(text: str) -> list[str]:
+    """Paragraphs that name a write MECHANISM *and* THIS store in the same block.
+
+    Paragraph-scoped rather than file-scoped on purpose: a file-scoped
+    co-occurrence would fire on any long document that happens to mention both
+    somewhere, and a line-scoped one would miss a mechanism sentence wrapped
+    across two lines. It reports paragraphs; it does NOT classify them as
+    instruction or description, and nothing below assumes it can.
+    """
+    body = _FRONT_MATTER.sub("", text)
+    return [
+        p for p in _paragraphs(body) if MECHANISM.search(p) and STORE_CONTEXT.search(p)
+    ]
+
+
+class TestTheStoreWriteCarrierLedgerIsEXACT:
+    """🔴 A NEW DOOR IS CAUGHT WHETHER OR NOT IT AGREES WITH THE OWNER.
+
+    `TestTheMechanismLedger` above enumerates the documents containing the exact
+    `MANDATE` fragment — so it sees a new door that COPIES the owner and is blind
+    to one that CONTRADICTS it. This is the same ledger shape over the
+    disagreement predicate: the exhaustive set of `claude/skills/**/*.md` that
+    state a write mechanism for this store AT ALL, in any wording.
+
+    Fails when the set GROWS (a third door, however phrased) and when it SHRINKS
+    (a door stopped describing the mechanism — for the two that must, that is a
+    deletion, and layers 1/3 say which sentence).
+    """
+
+    # Path (repo-relative) -> why this document is allowed to state a mechanism.
+    ALLOWED: dict[str, str] = {
+        "claude/skills/subsystem-index/SKILL.md": (
+            "THE owner — the single append protocol, for every caller"
+        ),
+        "claude/skills/subsystem-index/reference/index-write.md": (
+            "the owner's own rationale file: the measured evidence for the `Edit` "
+            "anchor, including the case where a concurrent `Edit` succeeds silently"
+        ),
+        "claude/skills/analyze-service/reference/write-back.md": (
+            "the pointer — quotes the retired prompt to record what the fork was; "
+            "confined to the hashed region by the test below"
+        ),
+        "claude/skills/analyze-service/reference/index-store.md": (
+            "the store's SCHEMA doc, recording that a stale word in its own prose "
+            "('a confirmed write-back') survived the 2026-08-31 retirement"
+        ),
+        "claude/skills/prune-index/SKILL.md": (
+            "the DELETION protocol for the same store. It KEEPS a y/N and KEEPS "
+            "`Write`, deliberately: a cut rewrites the whole file and removes "
+            "bytes that are often their content's only copy, so blast radius "
+            "earns the gate. Explicitly outside the append retirement, and it "
+            "says so in its own text"
+        ),
+    }
+
+    @staticmethod
+    def _carriers() -> set[str]:
+        return {
+            p.relative_to(ROOT).as_posix()
+            for p in SKILLS.rglob("*.md")
+            if _store_write_paragraphs(p.read_text(encoding="utf-8", errors="replace"))
+        }
+
+    def test_the_carrier_set_is_EXACTLY_the_ledger(self) -> None:
+        found = self._carriers()
+        expected = set(self.ALLOWED)
+        grew = sorted(found - expected)
+        shrank = sorted(expected - found)
+        assert found == expected, (
+            "the set of skill documents stating a WRITE MECHANISM for the "
+            "analyze-service index store has changed.\n"
+            f"  NEW carriers (a second protocol is growing): {grew or 'none'}\n"
+            f"  LOST carriers (a door stopped describing it): {shrank or 'none'}\n"
+            "Ledger, with the reason each entry is allowed:\n  "
+            + "\n  ".join(f"{k} — {v}" for k, v in self.ALLOWED.items())
+            + "\n🔴 Unlike the `MANDATE` ledger above, this one does NOT require "
+            "the new door to agree with the owner — a door that CONTRADICTS it "
+            "lands here too, which is the whole reason this test exists. There is "
+            "ONE append protocol and it lives in "
+            f"{OWNER.relative_to(ROOT)}. Route to it. If a new document genuinely "
+            "must state a mechanism, add it HERE with its reason, in the same "
+            "commit, and say in the commit message what keeps it from drifting."
+        )
+
+    def test_the_predicate_can_OBSERVE_a_new_carrier(self, tmp_path: Path) -> None:
+        """🔴 POSITIVE CONTROL. A scan returning a reassuring set is
+        indistinguishable from one wired to nothing. Feed it a paragraph that
+        MUST match — worded so it shares no literal with either door, uses none
+        of `BANNED_IMPERATIVES` and never quotes `MANDATE` — and watch it match.
+        """
+        planted = (
+            "## Recording the outcome\n"
+            "Re-read the entry file, then emit the whole document with the "
+            "`Write` tool once the operator has agreed.\n"
+        )
+        assert MANDATE not in planted
+        assert not [b for b in BANNED_IMPERATIVES if b in planted]
+        assert _store_write_paragraphs(planted), (
+            "the disagreement predicate did not fire on a paragraph naming both a "
+            "write tool and this store's entry files — it is wired to nothing."
+        )
+
+    def test_the_predicate_needs_BOTH_halves(self) -> None:
+        """NEGATIVE CONTROL, both directions. A predicate that fired on either
+        half alone would flag most of `claude/skills/` and the ledger would be
+        maintained by deletion."""
+        mechanism_only = "Present the diff, then use `Edit` on the runbook.\n"
+        store_only = "The index entry lives outside every repo.\n"
+        assert not _store_write_paragraphs(mechanism_only)
+        assert not _store_write_paragraphs(store_only)
+
+    def test_front_matter_is_NOT_a_mechanism_statement(self) -> None:
+        """Front matter is a DECLARATION about the skill, not an instruction to
+        an executor, so it is stripped before the predicate runs — `allowed-tools`
+        has its own test one layer up (`TestTheMandatedToolIsThePreApprovedOne`).
+
+        🔴 The fixture's `description:` deliberately spells BOTH halves of the
+        predicate, so this test is killed by removing the strip. An earlier
+        version used a plain `allowed-tools: …, Write, Edit` line, which the
+        MECHANISM pattern does not match anyway — it passed with the strip
+        deleted, i.e. it asserted nothing."""
+        doc = (
+            "---\n"
+            "name: some-skill\n"
+            'description: "keeps the index entry fresh; use `Edit` for that"\n'
+            "allowed-tools: Bash, Read, Write, Edit\n"
+            "---\n\n"
+            "This document routes to the owner and states no mechanism.\n"
+        )
+        body_without_front_matter = _FRONT_MATTER.sub("", doc)
+        assert MECHANISM.search(doc) and STORE_CONTEXT.search(doc), (
+            "premise gone: the fixture's front matter no longer spells both "
+            "halves, so stripping it could not be what makes this pass."
+        )
+        assert not (
+            MECHANISM.search(body_without_front_matter)
+            and STORE_CONTEXT.search(body_without_front_matter)
+        )
+        assert not _store_write_paragraphs(doc)
+
+
+class TestThePointerStatesNoMechanismOUTSIDEThePinnedRegion:
+    """🔴 THE CONFINEMENT RULE — positional, so no wording can walk it.
+
+    `TestTheMechanismLedger.test_the_pointers_only_occurrence_is_INSIDE_the_pinned_region`
+    makes exactly this argument about the `MANDATE` fragment, and is therefore
+    blind to a second protocol that never quotes it. This widens the same
+    argument from one agreeing string to EVERY mechanism token: inside the
+    region every word is hashed, so a quote there cannot drift; outside it, a
+    paragraph is free to say anything, and that is where the fork regrew.
+
+    A second protocol appended to this file is caught by WHERE it sits, not by
+    what it says — the property the measured cg#473 mutant defeated.
+    """
+
+    REGION = "one-append-protocol"
+
+    def test_every_mechanism_token_is_inside_the_region(self, pointer: str) -> None:
+        outside = _mechanism_outside_region(pointer, self.REGION)
+        assert not outside, (
+            f"{POINTER.relative_to(ROOT)} states a write mechanism OUTSIDE its "
+            f"pinned `one-append-protocol` region:\n"
+            + "\n".join(f"  line {ln}: {tok!r}" for ln, tok in outside)
+            + "\n\nThis file carries NO protocol of its own — it routes to "
+            f"{OWNER.relative_to(ROOT)} at step 4 and quotes the retired prompt "
+            "ONCE, inside the hashed region, to record what the fork was. A "
+            "mechanism sentence anywhere else is a SECOND protocol regrowing, "
+            "and it does not have to repeat a single word of the old one to be "
+            "the same failure: until 2026-08-31 this file gated the append "
+            "behind a y/N the owner had already retired, and told you to retype "
+            "the whole entry with `Write`, which is MEASURED to lose a "
+            "concurrent append silently.\n"
+            "If the protocol is genuinely changing, change it in the OWNER and "
+            "leave this file pointing."
+        )
+
+    def test_the_confinement_check_can_SEE_an_outside_occurrence(
+        self, pointer: str
+    ) -> None:
+        """🔴 POSITIVE CONTROL. The assertion above is a claim about an EMPTY
+        list, which is the shape a check wired to nothing also produces. So plant
+        a mechanism sentence after the region's end marker and watch the same
+        expression report it — with a sentence that shares no literal with the
+        old text (`BANNED_IMPERATIVES`) and never quotes `MANDATE`, so what is
+        being proven is the POSITION rule and not one of the substring pins.
+
+        🔴 It calls `_mechanism_outside_region` — the SAME function the guard
+        calls, not a second copy of the filter. With a copy, this control stayed
+        green while the guard's own filter was mutated dead (cg#473 sweep, M6).
+        """
+        planted = "\n\nThen use the `Write` tool on the entry file.\n"
+        assert MANDATE not in planted
+        assert not [b for b in BANNED_IMPERATIVES if b in planted]
+        assert _mechanism_outside_region(pointer + planted, self.REGION), (
+            "the confinement expression reported nothing for a file with a "
+            "mechanism sentence appended after the region — it is not reading "
+            "what it claims to read."
+        )
+
+
+class TestTheOwnersMechanismProseIsPinnedWHOLE:
+    """🔴 THE OWNER CAN FORK AGAINST ITSELF, and the ledgers cannot see it.
+
+    Every ledger above ALLOWS the owner to state the mechanism — it is the
+    protocol — so a contradicting carve-out appended to the owner changes no
+    ledger, quotes no banned imperative, and leaves all seven `OWNER_SENTENCES`
+    present. Measured (cg#473): green.
+
+    So the owner's mechanism prose is pinned WHOLE, the way the pointer's region
+    is: every paragraph of `subsystem-index/SKILL.md` that names a write
+    mechanism for this store, normalised and concatenated, under one hash.
+    CONTENT-selected rather than position-delimited, deliberately — a hash over
+    the write half alone would miss a carve-out inserted into the read half, and
+    the read half is where the historical record lives, which is precisely the
+    text a re-opener would edit.
+
+    The price, stated rather than discovered: rewording ANY of those paragraphs
+    fails this test on purpose. The rest of the document — the probe, the
+    windows, the caveats, most of its length — is untouched by it.
+    """
+
+    EXPECTED_SHA = "2ed3ce831ebf20058a8d25a3a01cd02b76b1a2541cbbe5133395440e730850b8"
+
+    @staticmethod
+    def _digest(owner: str) -> tuple[str, list[str]]:
+        paras = [_normalise(p) for p in _store_write_paragraphs(owner)]
+        return hashlib.sha256("\n\n".join(paras).encode("utf-8")).hexdigest(), paras
+
+    def test_the_owners_mechanism_paragraphs_are_UNCHANGED(self, owner: str) -> None:
+        actual, paras = self._digest(owner)
+        assert actual == self.EXPECTED_SHA, (
+            f"\nThe MECHANISM PROSE of {OWNER.relative_to(ROOT)} CHANGED.\n"
+            f"  expected sha256 {self.EXPECTED_SHA}\n"
+            f"  actual   sha256 {actual}\n"
+            f"  {len(paras)} paragraph(s) currently selected:\n"
+            + "\n".join(f"    - {p[:160]}…" for p in paras)
+            + "\n\nThis is the ONE append protocol for this store, so a paragraph "
+            "added here is not a local edit: it is what every caller executes. A "
+            "CARVE-OUT is the dangerous shape — 'for caller X, confirm first and "
+            "retype the file instead' reinstates, for one caller, exactly the "
+            "fork closed on 2026-08-31, and no substring pin above can see it "
+            "because it deletes nothing.\n"
+            "So: re-read these paragraphs against "
+            f"{POINTER.relative_to(ROOT)}, confirm the two doors still describe "
+            "ONE protocol with no per-caller exception, then paste the actual "
+            "sha above into EXPECTED_SHA in the SAME commit. Updating the hash "
+            "without reading the other door is the one way to make this guard "
+            "worthless."
+        )
+
+    def test_the_selection_is_NOT_EMPTY(self, owner: str) -> None:
+        """🔴 A hash over zero paragraphs is a constant, and would pass forever
+        against a document that had been gutted — the silent-zero shape. The
+        count is pinned as a FLOOR rather than an equality so that adding a
+        paragraph is reported by the hash above, with its actionable message,
+        rather than by an off-by-one here."""
+        _, paras = self._digest(owner)
+        assert len(paras) >= 3, (
+            f"only {len(paras)} mechanism paragraph(s) found in "
+            f"{OWNER.relative_to(ROOT)}; the pin would be guarding almost "
+            f"nothing. The owner must state: what the fork was, the `already "
+            f"there` comparison the retired prompt did NOT do, and the mandated "
+            f"`Edit`."
+        )
+
+    def test_the_hash_MOVES_for_an_appended_carve_out(self, owner: str) -> None:
+        """🔴 POSITIVE CONTROL, built from the exact shape this class exists to
+        catch: a per-caller exception appended to the owner. It quotes no
+        `BANNED_IMPERATIVES` and never reproduces `MANDATE`, so a moved hash is
+        attributable to THIS guard and to nothing else in the module."""
+        carve_out = (
+            "\n\n## Exception for one caller\n"
+            "When the request came in through the other door, confirm with the "
+            "operator first and then emit the whole entry file with the `Write` "
+            "tool; the anchored-edit rule above does not apply to that caller.\n"
+        )
+        assert MANDATE not in carve_out
+        assert not [b for b in BANNED_IMPERATIVES if b in carve_out]
+        before, before_paras = self._digest(owner)
+        after, after_paras = self._digest(owner + carve_out)
+        assert len(after_paras) == len(before_paras) + 1, (
+            "the carve-out was not selected by the predicate at all, so this "
+            "control proves nothing about the hash."
+        )
+        assert after != before, "the hash did not move for an appended carve-out"
+
+    def test_a_REWRAP_does_not_move_the_hash(self, owner: str) -> None:
+        """The affordance, asserted rather than described: the same paragraphs
+        re-wrapped hash the same, because `_normalise` collapses whitespace. A
+        changed WORD still moves it — `test_normalisation_ignores_REWRAP_and_not_REWORD`
+        pins that half."""
+        original = "Still print the unified diff before writing"
+        assert original in owner, "premise gone: the rewrap target is not in the owner"
+        rewrapped = owner.replace(original, "Still print the\nunified diff\nbefore writing", 1)
+        assert rewrapped != owner
+        assert self._digest(rewrapped)[0] == self._digest(owner)[0]
 
 
 # =============================================================================
