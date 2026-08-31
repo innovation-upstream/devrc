@@ -124,8 +124,21 @@ collapsing by date:  remix-session x8 (homelab-talos)
 ```
 
 Every one is the same effort wearing a new filename. So a dated topic is refused
-with **no bypass** — under a one-doc-per-effort rule a date in the slug has no
-legitimate use, and a bypass would be taken every time.
+with **no flag bypass** — under a one-doc-per-effort rule a date in the slug has
+no legitimate use, and a flag would be taken every time.
+
+🔴 **"No bypass" was too strong, and the sentence is now scoped to what the code
+does** (devrc#964 item 2). No FLAG bypasses rule (i-a); a **SPELLING** still
+does. What `_TOPIC_DATE` catches is the ISO date hyphenated (`2026-08-01`) or
+compact (`20260801`, the `date +%Y%m%d` form an agent reaches for). What it
+knowingly does **not** catch, each pinned by a named test so the gap is a
+recorded decision rather than an accident:
+
+| spelling | why it is left | backstop |
+|---|---|---|
+| `q3-2026-cleanup`, `remix-2026-07-session` — a bare YEAR | the bare-year arm was **deleted 2026-08-31** on an operator decision: across 147 real handoff docs it had **zero hits in both directions**, while refusing `rfc-1918-addressing`, `rsa-2048-keys`, `cve-2024-3094-xz` and seven more, handing back unreadable slugs (`rfc--addressing`) with no flag to say "that is a number" | rule (i-b) |
+| `remix-1756339200` — an epoch | a 10-digit arm buys one spelling and re-opens the false-positive surface just closed | rule (i-b) |
+| `26-08-01-remix` — a 2-digit year | same trade: `\d{2}-\d{2}-\d{2}` eats ordinary numbers | rule (i-b) |
 
 The second arm cannot be made crisp and is not pretended to be. Whether
 `remix-session` and `remix-hardening-session` are one effort is a judgement, and
@@ -150,11 +163,27 @@ to type `incident` falsely, moving the population underground where nothing can
 measure it. Measured baseline for that population: of **384 ranked items across
 83 docs**, only **89 (23%)** cite a PR, issue or `IN FLIGHT` marker of any kind.
 
-🔴 **Two things this does NOT do.** It cannot check that a cited forcing function
-is real or genuinely external — the enumeration is structural, the evidence
-beside it is prose. And the *"does not get worked"* half is **not enforced**:
-this module writes the doc, it does not consume the queue. The skip belongs in
-`/resume` step 6 and `claim-work`, and is not implemented.
+🔴 **Three things this does NOT do.** It cannot check that a cited forcing
+function is real or genuinely external — the enumeration is structural, the
+evidence beside it is prose. The *"does not get worked"* half is **not
+enforced**: this module writes the doc, it does not consume the queue. The skip
+belongs in `/resume` step 6 and `claim-work`, and is not implemented.
+
+And 🔴 **rule (j) only gates a section headed `Next steps`** — the spelling the
+template mandates. Cosmetic variants of that heading ARE covered (case,
+repeated whitespace, and leading ornament, so `▶ Next steps (ranked)` counts);
+a **REWORDING** is not. MEASURED across the 147-doc corpus: 20 sections
+carrying **96 items** read to a human as the ranked queue and are exempt —
+`Ranked next steps`, `Open items, ranked`, `Backlog — the highest-ROI UNBUILT
+items (ranked)`, `Resume next session`, `Next session — priority order`, and 15
+more. Chasing those by synonym is refused for the same reason the forcing
+vocabulary is an allowlist: a guard on WORDS is walkable by rewording, and a
+synonym list makes rule (j)'s coverage unpredictable at the moment a session is
+trying to obey it. **Head the section `## Next steps` and it is gated; head it
+anything else and it is not.** Pinned by
+`TestTheNextStepsSelectorHasOneOwner`, whose non-goal rows are green in both
+directions so a later widening has to argue with a test rather than slip past
+one.
 
 ### An item is a BLOCK, and the refusal diagnoses instead of assuming absence
 
