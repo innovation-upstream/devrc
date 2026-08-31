@@ -2022,9 +2022,14 @@ RepoToolchain = namedtuple(
 # reached and a `nix build …#checks…` would be prescribed anyway.
 #
 # 🔴 ROUND 15 — THE REGEX WAS NEVER THE DEFENCE, AND MEASURING IT SAID SO. Both
-# patterns below now run over `_nix_strip`ped text, so a `checks = {` inside a
-# devShell heredoc or inside a `/* … */` comment is not text either of them can
-# see. Measured at `5bad0a0c` against the un-stripped scanner: a heredoc holding
+# patterns below now run over the text `_nix_scan` has BLANKED, so a
+# `checks = {` inside a devShell heredoc or inside a `/* … */` comment is not
+# text either of them can see. (Round 15 wrote `_nix_strip`ped here; round 16
+# split the scanner into `_nix_scan` — which returns the blanked text AND the
+# `clean` flag the hedge is keyed on — and left `_nix_strip` behind as a
+# test-only wrapper. The production path is `_flake_check_names` -> `_nix_scan`;
+# nothing in production calls `_nix_strip`.) Measured at `5bad0a0c` against the
+# un-stripped scanner: a heredoc holding
 #
 #     checks = {
 #     unit = 1;
@@ -2099,6 +2104,56 @@ def _nix_scan(text):
     So the scan is a STACK now: `${…}` inside a string pushes a CODE frame,
     `}` at that frame's depth 0 pops back into the string, and an identifier is
     consumed by MAXIMAL MUNCH so its trailing apostrophes cannot open anything.
+
+    🔴 THAT REVERSED A DOCUMENTED SAFETY DIRECTION, AND ROUND 16 REPLACED THE
+    SENTENCE THAT SAID SO INSTEAD OF UPDATING IT. `ba321c06` carried an explicit
+    STATED LIMIT: `${…}` interpolations inside a string "are real nix code and
+    this blanks them with the rest of the string … That is the SAFE direction —
+    the probe under-reads and the brief hedges — and it is the direction chosen
+    deliberately." The stack necessarily does the OPPOSITE: `${` inside a string
+    pushes a CODE frame, so an interpolation body is now SCANNED AS CODE.
+
+    That is the fix, not a regression — `shellHook = '' ${lib.optionalString c
+    '' … ''} '';` cannot be lexed at all without descending into the
+    interpolation, and NOT descending is what produced both round-16 failures,
+    in both directions. But the deliberate under-read is gone in one narrow
+    shape, and a docstring that documents the new mechanism while quietly
+    dropping the old limit reads as if nothing about the direction changed.
+
+    🔴 SO: THE RESIDUAL EXPOSURE, MEASURED. A `checks` binding that exists ONLY
+    inside an interpolation is now READ where it used to be blanked:
+
+        shellHook = '' echo ${lib.foo {
+        checks = {
+        phantom = 1;
+        };
+        }} '';
+
+    Through `_flake_check_names`, in BOTH string flavours (`''…''` and `"…"`):
+    `ba321c06` -> `None`, HEAD -> `['phantom']`, with `clean` True — so the
+    brief would fence `nix build <wt>#checks.x86_64-linux.phantom` against a
+    repository that declares no such attribute, and `clean` cannot catch it
+    because nothing about that scan is unclean. CONTROL, same run: an ordinary
+    top-level `checks.x86_64-linux = {` reads `['real']` on BOTH sides, so this
+    is the lexer changing its mind and not a fixture that broke one of them.
+
+    It needs a LINE-ANCHORED `checks… = {` inside an interpolation, which is not
+    an idiom anything writes — re-measured for this note over EVERY `flake.nix`
+    on this host, 1154 files: 0 changed answer between the `ba321c06` flat
+    scanner and this stack, and 0 lex unclean. The fixture above is the positive
+    control for that zero: it is the shape a real repository would have to
+    contain, and it DOES move the answer, so the 0 is a fact about the corpus
+    and not about a probe wired to nothing.
+
+    🔴 IT IS RECORDED AS A KNOWN LIMIT AND DELIBERATELY NOT GUARDED. Any guard
+    for it has to tell a `checks` match found inside an interpolation from one
+    found outside — which means the CODE frames must record their nesting and
+    the match offsets must be filtered against it. That is a change to what the
+    lexer records, and destabilising a lexer whose two previous rounds each
+    shipped a confident wrong answer, in order to close a shape with no measured
+    instance, is the wrong trade. If it ever bites, `clean` is not the valve to
+    reach for: an interpolation body is not uncertain, it is code, and the brief
+    would hedge for a reason that is not true.
 
     🔴 AND IT REPORTS ITS OWN UNCERTAINTY, because "the lexer got lost" and "the
     file has no checks" are different sentences and the second is the confident
@@ -2226,7 +2281,20 @@ def _nix_scan(text):
 
 
 def _nix_strip(text):
-    """The blanked text alone — for callers that do not read `clean`."""
+    """The blanked text alone. 🔴 A TEST SEAM — there are NO production callers.
+
+    Every production read goes through `_nix_scan` directly (`_flake_check_names`
+    below is the only one), because the second half of that tuple — `clean` — is
+    what the hedge is keyed on: where the lexer got lost the probe must answer
+    the hedged `[]`, never a name list and never a bolded "no `checks` output".
+
+    So do NOT read this wrapper as evidence that a route exists which reads the
+    blanked text WITHOUT consulting `clean`. There is no such caller, and adding
+    one would reopen exactly the hazard `clean` was introduced to close. It
+    survives only so the stripper's own invariants — length, newline count, what
+    is blanked and what is left standing — can be pinned in the suite without
+    each assertion unpacking a two-tuple.
+    """
     return _nix_scan(text)[0]
 
 

@@ -6242,6 +6242,28 @@ def test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there(tmp_pa
     Driven over all THREE `py_tests` states, because "the bar is absent" is
     satisfied by a note that vanished and "the bar is present" by one that never
     varies. Both are the failure this pins.
+
+    🔴 …AND OVER EXACTLY ONE SHELL STATE, WHICH IS THE REACH THIS TEST HAS. Said
+    out loud, because the equality below is FALSE in the other shell state and
+    NOT for a defect. All three fixtures use `DEVRC_FLAKE`, which names pytest,
+    so all three take `_toolchain_shell_note`'s `shell` branch. Measured on the
+    fourth combination — `py_tests` FOUND with a flake that names no pytest, so
+    no dev shell is detected — a BARE `python3 -m pytest <paths>` IS fenced
+    (`_toolchain_pytest_lines` prefixes it with `shell`, which is then "") while
+    the python-specific bar is NOT emitted: `fenced_pytest=True,
+    diagnosed=False`, and `diagnosed == fenced_pytest` goes red.
+
+    That is scaffolding, not payload. The bare branch carries its own
+    `No module named pytest` diagnosis in its own wording, and
+    `test_the_wrong_shell_diagnosis_covers_every_command_not_only_pytest` is
+    what pins it. The two sibling assertions below are likewise spelled to the
+    shell branch's sentences ("…and not a broken gate", "in EVERY language"),
+    neither of which the bare branch's single sentence contains.
+
+    So the shell axis is now ASSERTED as a precondition rather than left
+    implied: a future no-shell fixture added to `trees` trips that assertion,
+    which names the reason, instead of tripping the equality and reading as a
+    real defect in the payload.
     """
     trees = {}
     for name, py_test in (("none", False), ("found", True)):
@@ -6282,6 +6304,23 @@ def test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there(tmp_pa
     )
     # The python-specific diagnosis: present exactly where a python command is.
     for name, section in sections.items():
+        # 🔴 THE SHELL AXIS, PINNED RATHER THAN ASSUMED — see the docstring.
+        # Every assertion in this loop is spelled to `_toolchain_shell_note`'s
+        # SHELL branch. The BARE branch says all three things differently and
+        # the equality below is genuinely false there, so a no-shell fixture
+        # must fail HERE, naming the reason, and not there wearing the costume
+        # of a payload regression.
+        assert "Every command above is BARE on purpose" not in section, (
+            f"\n\npy_tests={name!r}: this fixture landed in the BARE (no dev "
+            f"shell detected) branch of `_toolchain_shell_note`. The three "
+            f"assertions below are spelled to the SHELL branch's wording and "
+            f"are FALSE in the bare branch WITHOUT any defect — measured: a "
+            f"no-shell repo with `py_tests=FOUND` fences a bare `python3 -m "
+            f"pytest` and emits no python-specific bar, so `diagnosed == "
+            f"fenced_pytest` goes red. The bare branch is pinned by "
+            f"`test_the_wrong_shell_diagnosis_covers_every_command_not_only_"
+            f"pytest`; pin it there, not by widening this loop:\n{section}"
+        )
         fenced_pytest = any("python3 -m pytest" in c
                             for c in toolchain_commands(section))
         diagnosed = "A bare `python3 -m pytest` failing" in section
