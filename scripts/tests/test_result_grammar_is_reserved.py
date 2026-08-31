@@ -700,6 +700,31 @@ def test_the_two_marker_sets_are_derived_from_ONE_definition():
         assert G._QUOTED_AFTER_UNRESOLVED.search(f'"a{m}b{G.RESERVED_PREFIX}'), (
             f"{m!r} is in UNRESOLVED_MARKERS but the arm's compiled pattern does "
             "not match it — the sets have drifted")
+    # 🔴 ROUND-14 FINDING NEW-25. The loops above only prove every declared
+    # marker IS matched; the docstring claimed "a divergence cannot be silent",
+    # which also needs the reverse. Measured: adding `&` to either compiled
+    # pattern alone left the suite 77/77 green. The undetected direction is
+    # fail-CLOSED (a wider class can only raise a verdict, never lower one), so
+    # this was an overclaim rather than a hazard — but the sentence is the thing
+    # this file exists to police.
+    for ch in "&;|<>#@!~^*()-_=+abcXYZ019 ":
+        assert not G._INTERPOLATION.search(ch), (
+            f"{ch!r} is matched by _INTERPOLATION but is not in "
+            f"INTERPOLATION_MARKERS — the pattern is wider than its definition")
+        assert not G._QUOTED_AFTER_UNRESOLVED.search(f'"a{ch}b{G.RESERVED_PREFIX}'), (
+            f"{ch!r} is matched by the arm but is not in UNRESOLVED_MARKERS — "
+            "the pattern is wider than its definition")
+
+
+# The ground-truth ledgers this file measures, pinned BY NAME and both ways.
+# See NEW-24 in the measurement test: a numeric floor goes slack the moment a
+# ledger is added, which is exactly when the newest one is least covered.
+GROUND_TRUTH_LEDGERS = {
+    "CHAIN_TRANSFORM_FIXTURES",
+    "UNRESOLVED_ESCAPE_FIXTURES",
+    "BEFORE_PREFIX_ESCAPE_FIXTURES",
+    "BEFORE_PREFIX_MARKER_FIXTURES",
+}
 
 
 def _ground_truth_ledgers() -> dict:
@@ -766,10 +791,22 @@ def test_the_really_forges_flags_are_MEASURED_against_real_bash(tmp_path):
     # ledger must be measured here, discovered rather than listed, so a THIRD
     # ledger is covered without anyone remembering.
     assert len(ledger) == sum(len(d) for d in _ground_truth_ledgers().values())
-    assert len(_ground_truth_ledgers()) >= 3, (
-        f"only {len(_ground_truth_ledgers())} ground-truth ledgers discovered; "
-        "the module declares at least three. The discovery predicate is too "
-        "narrow and a ledger is going unmeasured.")
+    # 🔴 ROUND-14 FINDING NEW-24. This was a `>= 3` literal floor. It had zero
+    # slack when three ledgers existed — and the very commit that added a FOURTH
+    # made it slack by one, so a predicate narrowing that excluded exactly the
+    # new ledger SURVIVED a 77/77 green suite, with a corrupted `really_forges`
+    # riding along. That is NEW-14's shape (a flag reading as measured while
+    # measuring nothing) reopened for the newest ledger, and the message
+    # "declares at least three" had silently become false.
+    #
+    # Pinned BOTH WAYS on the NAME SET, the same discipline as the other ledgers
+    # in this file: a ledger that stops being discovered fails, and one added
+    # without being named here fails too. A count cannot do that; a name set can.
+    assert set(_ground_truth_ledgers()) == GROUND_TRUTH_LEDGERS, (
+        f"discovered ledgers {sorted(_ground_truth_ledgers())} != pinned "
+        f"{sorted(GROUND_TRUTH_LEDGERS)}. Either the discovery predicate stopped "
+        "finding one — in which case its really_forges flags are unmeasured and "
+        "read as verified — or a new ledger needs adding to the pin.")
     for shape, entry in sorted(ledger.items()):
         line, _verdict, really_forges = entry[0], entry[1], entry[2]
         # 🔴 A fixture declares its INTERPRETER when it is not a shell line.
