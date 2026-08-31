@@ -553,6 +553,15 @@ check are byte-identical in `gh pr checks`, and I diagnosed the first without na
 - 🔴 **`clawgate-ci` does NOT run Playwright — this feature is almost entirely browser-layer, so
   it is UNGATED.** Run `make e2e` locally and **count**: without Docker, `test.skip` on
   `!dockerAvailable()` leaves **11 of 18 spec files / 77 of 113 tests** and goes green.
+  - ⚠ **CORRECTED 2026-08-30, by a different effort — the "so it is UNGATED" half is FALSE.**
+    `clawgate-ci` genuinely does not run Playwright, but a SEPARATE Tekton check does:
+    measured on homelab-infra#564, `tekton/clawgate-e2e` → `clawgate e2e passed — 122 tests,
+    2 skipped`, running `make e2e` on the PR's own specs against a REAL Postgres (Tekton pods
+    have no Docker daemon). Whether it BLOCKS is unmeasured — branch protection 403s on this
+    private repo without GitHub Pro. The local Docker skip trap above is still real; the spec
+    counts are stale (21 files / 124 collected as of this date). Canonical text now lives in
+    the `clawgate` skill + its `reference/extension.md`; this bullet is left in place because
+    the rest of the doc reasons from it.
 - 🔴 **`clawgatectl` is built from a LOCAL working tree of homelab-talos**, so it can be present
   but STALE — a behind checkout ships a binary **missing verbs that prints help and exits 0**
   under a plausible version label. This already happened (0.7.95, no `task status`). New verbs
