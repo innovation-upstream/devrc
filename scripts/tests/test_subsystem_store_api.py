@@ -66,6 +66,7 @@ import sys
 import textwrap
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
@@ -296,6 +297,139 @@ def running(
         thread.join(timeout=10)
 
 
+# 🔴 WHICH SIDE WAS BLOCKED, AND ON WHAT. Ordered innermost-first: the first
+# token found scanning a stuck handler's frames from the innermost outward wins,
+# so `fsync` reached from inside `_replace_bytes` reports as FSYNC and not as the
+# entry lock it is holding on the way in.
+_HUNG_SERVER_RULES: tuple[tuple[str, str], ...] = (
+    ("fsync", "SERVER_BLOCKED_IN_FSYNC"),
+    ("flock", "SERVER_BLOCKED_ON_ENTRY_LOCK"),
+    ("_EntryLock", "SERVER_BLOCKED_ON_ENTRY_LOCK"),
+    ("_audit_lock", "SERVER_BLOCKED_IN_AUDIT_SINK"),
+    ("self.audit(", "SERVER_BLOCKED_IN_AUDIT_SINK"),
+)
+
+
+def _why_the_server_did_not_answer() -> str:
+    """Every live thread's stack, plus a one-line `MECHANISM =` verdict.
+
+    🔴 DIAGNOSTICS, NOT A MITIGATION. Nothing here retries, drains, or moves a
+    bound, and the `TimeoutError` is re-raised unchanged — a test that hung
+    still fails, exactly as loudly. What this adds is the one fact the bare
+    exception cannot carry, and whose absence is why the store-api hang stayed
+    open for weeks: **a client-side read timeout is the observable that the
+    most mechanisms share, so on its own it identifies none of them.**
+
+    The rivals, every one of which surfaces identically as `TimeoutError` at
+    `socket.py:720` (`SocketIO.readinto` -> `recv_into`):
+
+      * **the handler parked in `fsync`.** `server.py:_replace_bytes` issues
+        TWO — the file, then the parent directory — INSIDE the request and
+        BEFORE the response is written. `fsync` blocks in uninterruptible
+        D-state, is bounded by nothing, and burns no CPU, so it is invisible in
+        CPU/PSI-cpu metrics. The handler's `timeout = 15` does NOT bound it:
+        that is a SOCKET timeout and does not reach a syscall.
+      * **the handler parked on the entry `flock`** (also unbounded).
+      * **the handler parked in the audit sink** — `_audit_lock` is a CLASS
+        attribute and therefore process-global across every server in the
+        worker.
+      * **the connection was never ACCEPTED** — accept-queue overflow, or the
+        `serve_forever` thread simply not scheduled. Distinguished from all of
+        the above by there being no handler thread at all.
+
+    The verdict is emitted as a `MECHANISM = ...` line so a CI log can be
+    grepped for it without a human reading the stacks, the same shape the
+    transport investigation in `claudedocs/handoff-cairn-phase3.md` used.
+    """
+    frames = sys._current_frames()
+    main_ident = threading.main_thread().ident
+    handlers: list[tuple[str, list[str]]] = []
+    accept_loop_parked = False
+    report: list[str] = []
+
+    for thread in threading.enumerate():
+        frame = frames.get(thread.ident)
+        if frame is None or thread.ident == main_ident:
+            continue
+        stack = traceback.format_stack(frame)
+        report.append(
+            f"--- thread {thread.name!r} daemon={thread.daemon} ---\n" + "".join(stack)
+        )
+        blob = "".join(stack)
+        # `process_request_thread` is socketserver's per-connection worker, so
+        # its presence is what makes a thread a HANDLER rather than the accept
+        # loop. A thread can be both only if `serve_forever` ran inline, which
+        # `running()` never does.
+        if "process_request_thread" in blob:
+            handlers.append((thread.name, stack))
+        elif "serve_forever" in blob:
+            accept_loop_parked = True
+
+    # 🔴 EVERY handler is classified, not the first one found — and if they
+    # DISAGREE the headline says so instead of picking one. `ThreadingHTTPServer`
+    # runs daemon handler threads that `shutdown()`/`server_close()` do NOT join,
+    # so a thread stuck in an EARLIER test is still alive here and would
+    # otherwise be reported as this request's mechanism. That is not
+    # hypothetical: it happened while writing the tests for this function, and a
+    # confident wrong verdict is worse than none.
+    per_handler: list[str] = []
+    for name, stack in handlers:
+        found = "BLOCKED_ELSEWHERE"
+        for line in reversed(stack):          # innermost frame first
+            hit = next(
+                (m for token, m in _HUNG_SERVER_RULES if token in line), None
+            )
+            if hit:
+                found = hit
+                break
+        per_handler.append(f"{name}={found}")
+
+    distinct = {entry.split("=", 1)[1] for entry in per_handler}
+    if len(distinct) == 1:
+        verdict = distinct.pop()
+    elif len(distinct) > 1:
+        verdict = "AMBIGUOUS(" + ",".join(sorted(distinct)) + ")"
+    elif accept_loop_parked:
+        # No handler exists at all, so the connection was never accepted. That
+        # names the FAMILY — accept-queue overflow or an unscheduled accept loop
+        # — and deliberately does not choose between them; the listening
+        # socket's own queue depth is what separates those two.
+        verdict = "NEVER_ACCEPTED"
+    else:
+        verdict = "NO_SERVER_THREAD_ALIVE"
+
+    return (
+        f"\nMECHANISM = {verdict}   "
+        f"(handler threads={len(handlers)} [{' '.join(per_handler) or '-'}], "
+        f"accept loop parked={accept_loop_parked})\n"
+        + "".join(report)
+    )
+
+
+def _await_no_handler_threads(bound: float = HANG_TIMEOUT) -> int:
+    """Block until no `process_request_thread` is alive. Returns what is left.
+
+    🔴 A TEST THAT DELIBERATELY WEDGES A HANDLER MUST DRAIN IT. Handler threads
+    are daemons and `running()`'s teardown does not join them, so one left
+    parked leaks into every later test in this worker — where
+    `_why_the_server_did_not_answer` will see it and report ITS mechanism for
+    somebody else's hang. Bounded, and the count is returned rather than
+    asserted so the caller decides what a leftover means.
+    """
+    deadline = time.monotonic() + bound
+    while time.monotonic() < deadline:
+        alive = [
+            t for t in threading.enumerate()
+            if "process_request_thread" in t.name
+        ]
+        if not alive:
+            return 0
+        time.sleep(0.02)
+    return len(
+        [t for t in threading.enumerate() if "process_request_thread" in t.name]
+    )
+
+
 def fetch(
     url: str,
     *,
@@ -333,6 +467,30 @@ def fetch(
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, dict(exc.headers), exc.read()
+    except TimeoutError:
+        # 🔴 RE-RAISED UNCHANGED — this is a report, not a recovery. The dump is
+        # taken HERE, while the server is still blocked, because by the time the
+        # exception reaches the test the `with running(...)` teardown has torn
+        # down the very threads whose stacks answer the question.
+        #
+        # ⚠ `TimeoutError` IS THE READ PHASE, and that is why this clause is
+        # narrow rather than an `except OSError`. `urllib` wraps only
+        # `h.request()`, so a CONNECT-phase timeout arrives as `URLError` and
+        # already names its own phase; letting it past unhandled keeps the two
+        # distinguishable in the log instead of collapsing them into one report.
+        #
+        # 🔴 THE REPORTER MAY NEVER REPLACE THE FAILURE IT DESCRIBES. ~200 call
+        # sites share this helper; if `_why_the_server_did_not_answer` ever
+        # raised, that exception would propagate INSTEAD of the `TimeoutError`
+        # and every hang in the module would report as a defect in the
+        # diagnostic. A best-effort report is worth having; a diagnostic that
+        # can rewrite the diagnosis is not.
+        try:
+            report = _why_the_server_did_not_answer()
+        except Exception as diag_exc:  # noqa: BLE001 — see above
+            report = f"\nMECHANISM = REPORTER_FAILED ({diag_exc!r})\n"
+        print(report, file=sys.stderr, flush=True)
+        raise
 
 
 def _raw_request(host: str, path: str, headers: list[tuple[str, str]]) -> int:
@@ -15129,3 +15287,169 @@ class TestTheListenBacklogIsDeepEnoughForThisServersOwnConcurrency:
             )
         finally:
             httpd.server_close()
+
+
+class TestAHungRoundTripSAYSWhichSideBlocked:
+    """🔴 THE INSTRUMENT, NOT A FIX — and the distinction is the whole point.
+
+    `test_a_FORGED_actor_in_the_body_is_DISCARDED` failed in CI (`devrc-ci-ddrxx`,
+    revision `857fc3f5`) with a bare `TimeoutError` out of `socket.py:720` and
+    nothing else. Nothing in that traceback says whether the server was blocked,
+    and if so on what — which is why the investigation in
+    `claudedocs/handoff-cairn-phase3.md` ran for weeks against an observable that
+    every candidate mechanism produces identically.
+
+    These tests do NOT make the flake reproduce, do NOT retry and do NOT move a
+    bound. They pin that `_why_the_server_did_not_answer` can TELL THE RIVALS
+    APART, because a classifier that answered `SERVER_BLOCKED_IN_FSYNC` to every
+    hang would be worse than no classifier: it would end the investigation with
+    a confident wrong answer.
+
+    ⚠ LABELLED HONESTLY: these are INVARIANT GUARDS on the reporter, not
+    regression coverage for the flake. The flake has never been made to
+    reproduce, and no test here claims otherwise. Each arm's own evidence is the
+    mutation matrix in the PR body — the arm's rule deleted from
+    `_HUNG_SERVER_RULES` and the test watched to fail with its own message.
+    """
+
+    # Deliberately far apart: the client must give up while the server is still
+    # stuck, or the report is taken after the block has cleared and says nothing.
+    # Kept SMALL because each test pays `SERVER_STALL` twice over — once waiting
+    # for the client to give up, once draining the wedged handler.
+    CLIENT_BOUND = 0.25
+    SERVER_STALL = 1.2
+
+    def _hang_and_report(self, store, monkeypatch, where: str) -> str:
+        """Drive one POST into a server deliberately stuck at `where`.
+
+        Returns the reporter's own text, captured by calling it at the moment
+        the client gives up — the same instant `fetch` calls it in anger.
+        """
+        # 🔴 Every arm starts from a clean thread table. Without this, a handler
+        # wedged by the PREVIOUS arm is still alive and the verdict below is
+        # about that one — the exact mis-attribution these tests exist to
+        # prevent, and the reason the headline reports AMBIGUOUS on disagreement.
+        assert _await_no_handler_threads(HANG_TIMEOUT) == 0, (
+            "a handler thread from an earlier test is still parked, so this "
+            "arm's verdict would not be about this arm's request"
+        )
+        stalled = threading.Event()
+
+        def _stall(*_a, **_k):
+            stalled.set()
+            time.sleep(self.SERVER_STALL)
+
+        if where == "fsync":
+            # 🔴 `_fsync_dir`, not `os.fsync`: patching the stdlib's `os.fsync`
+            # is process-global and would stall any OTHER thread that happened
+            # to fsync during this test. This module-level function is reached
+            # only from `_replace_bytes`, so the blast radius is exactly the
+            # request under test.
+            monkeypatch.setattr(api, "_fsync_dir", _stall)
+        elif where == "entry-lock":
+            class _StallingLock:
+                def __init__(self, _path):
+                    pass
+
+                def __enter__(self):
+                    _stall()
+                    return self
+
+                def __exit__(self, *_exc):
+                    return None
+
+            monkeypatch.setattr(api, "_EntryLock", _StallingLock)
+        else:                                    # pragma: no cover - typo guard
+            raise AssertionError(f"unknown stall site {where!r}")
+
+        with running(store, tokens=(ZACH,)) as (base, _audit):
+            # 🔴 `fetch` DIRECTLY, not `post_bullet`. `post_bullet` forwards
+            # `**payload` into the JSON BODY, so a `timeout=` passed to it is
+            # silently sent to the server as a field instead of bounding the
+            # client — the request then waits the full HANG_TIMEOUT, the stall
+            # elapses, and the test passes while measuring nothing. Cost one
+            # debugging round; do not "simplify" this back.
+            with pytest.raises(TimeoutError):
+                fetch(
+                    bullets_url(base, ALLOW_SCOPE),
+                    token=ZACH_TOKEN,
+                    method="POST",
+                    timeout=self.CLIENT_BOUND,
+                    data=json.dumps(
+                        {"text": BULLET_A, "session": SESSION_A}
+                    ).encode("utf-8"),
+                )
+            assert stalled.is_set(), (
+                "the server never reached the stall site, so the hang under "
+                "test was NOT the one this test set up — the report below "
+                "would be about some other mechanism"
+            )
+            try:
+                return _why_the_server_did_not_answer()
+            finally:
+                # Drain OUR wedged handler before handing back, so the leak
+                # this arm created cannot be inherited by the next one.
+                _await_no_handler_threads(HANG_TIMEOUT)
+
+    def test_a_stall_in_the_FSYNC_region_is_NAMED(self, scoped_store, monkeypatch):
+        """`_replace_bytes` fsyncs the file AND the parent directory inside the
+        request, before the response is written. Both are unbounded: the
+        handler's `timeout = 15` is a SOCKET timeout and does not reach a
+        syscall."""
+        report = self._hang_and_report(scoped_store, monkeypatch, "fsync")
+        assert "MECHANISM = SERVER_BLOCKED_IN_FSYNC" in report, report
+        assert "_fsync_dir" in report, (
+            "the verdict was right but the stacks do not name the blocking "
+            "frame, so a reader still cannot check the verdict"
+        )
+
+    def test_a_stall_on_the_ENTRY_LOCK_reads_DIFFERENTLY(
+        self, scoped_store, monkeypatch
+    ):
+        """🔴 THE DISCRIMINATION CONTROL. A reporter that said FSYNC to every
+        hang would pass the test above and be worthless. This one hangs the
+        server somewhere ELSE and requires the verdict to MOVE."""
+        report = self._hang_and_report(scoped_store, monkeypatch, "entry-lock")
+        assert "MECHANISM = SERVER_BLOCKED_ON_ENTRY_LOCK" in report, report
+        assert "SERVER_BLOCKED_IN_FSYNC" not in report, (
+            "a hang that is not in fsync was reported as fsync — the verdict "
+            "is a constant, not a measurement"
+        )
+
+    def test_a_request_that_is_NEVER_ACCEPTED_reads_as_NEVER_ACCEPTED(
+        self, scoped_store
+    ):
+        """The rival family the backlog work was about: no handler thread exists
+        at all, because the connection was never accepted.
+
+        Modelled with a real parked `serve_forever` (from `running`) plus a
+        second socket that is listening and never accepted — which is exactly
+        the state an accept-queue overflow leaves the client in.
+        """
+        assert _await_no_handler_threads(HANG_TIMEOUT) == 0, (
+            "a handler thread from an earlier test is still parked — this arm "
+            "asserts there is NO handler, so a leftover would fail it for the "
+            "wrong reason"
+        )
+        with running(scoped_store, tokens=(ZACH,)) as (_base, _audit):
+            with socket.socket() as never:
+                never.bind(("127.0.0.1", 0))
+                never.listen(1)
+                url = f"http://127.0.0.1:{never.getsockname()[1]}/api/v1/status"
+                with pytest.raises(TimeoutError):
+                    fetch(url, token=ZACH_TOKEN, timeout=self.CLIENT_BOUND)
+                report = _why_the_server_did_not_answer()
+        assert "MECHANISM = NEVER_ACCEPTED" in report, report
+        assert "handler threads=0" in report, report
+
+    def test_the_reporter_is_a_REPORT_and_changes_no_OUTCOME(self, scoped_store):
+        """🔴 The property that makes this safe to add to a helper 200+ call
+        sites share: a healthy round-trip is untouched, and a hung one still
+        RAISES. `fetch` swallowing the timeout to print a nice message would be
+        the suppression this investigation is explicitly forbidden to ship."""
+        with running(scoped_store, tokens=(ZACH,)) as (base, _audit):
+            code, headers, _b = post_bullet(
+                base, ZACH_TOKEN, ALLOW_SCOPE, text=BULLET_B, session=SESSION_B,
+            )
+        assert code == 200, (code, headers)
+        assert headers["X-Store-Status"] == "appended"
