@@ -5252,3 +5252,255 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         assert "status=stale-base" in res.stderr
         assert "status=new-doc" not in res.stderr
         assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+
+# --- rule (k): an elimination names HOW it was eliminated ---------------------
+
+ELIM = "## Open investigations\n### The candidate\n- **Ruled out:** {}\n"
+
+
+class TestAnEliminationNamesHowItWasEliminated:
+    """Rule (k). A `Ruled out:` bullet must declare an evidence kind.
+
+    🔴 RED AT `origin/main`: before this change every case below exited 0 and
+    wrote the doc, because no rule read elimination bullets at all. That is the
+    regression this class covers.
+    """
+
+    def test_the_MEASURED_bullet_that_this_rule_exists_for_is_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE VERBATIM BULLET, 2026-08-30. A weaker model had run `inxi
+        -CmG` and `inxi -dm`; NEITHER prints a part number, so this sentence was
+        an elimination its own data could not support — and it was false. The
+        doc then ranked the surviving theory FIRST, and the instruction was to
+        reboot a 26-day-uptime workstation into its BIOS."""
+        upd = write_delta(
+            tmp_path, "mimo.md",
+            ELIM.format("Not a per-DIMM issue (all 4 identical)"),
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 10, (res.returncode, res.stdout, res.stderr)
+        assert "status=unevidenced" in res.stderr
+        assert "[no via: field]" in res.stderr
+        assert "Not a per-DIMM issue" in res.stderr
+        assert not (repo / "claudedocs" / "handoff-sample-topic.md").read_text(
+            encoding="utf-8"
+        ).count("per-DIMM"), "a refusal must write NOTHING"
+
+    @pytest.mark.parametrize(
+        "kind", sorted({"command", "measurement", "code", "change", "doc"})
+    )
+    def test_every_observed_kind_is_accepted(
+        self, repo: Path, tmp_path: Path, kind: str
+    ) -> None:
+        upd = write_delta(
+            tmp_path, f"k-{kind}.md",
+            ELIM.format(f"the writer is not `install.sh` — via: {kind}"),
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+
+    def test_via_assumed_is_ACCEPTED_and_reported(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 Refusing `assumed` would not stop anyone reasoning their way to an
+        elimination — it would teach them to type `command` falsely, moving the
+        population underground. Same argument as `forcing: none`. So it lands,
+        and it is COUNTED where a reader sees it."""
+        upd = write_delta(
+            tmp_path, "assumed.md",
+            ELIM.format("a clock skew — via: assumed, nothing was measured"),
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "via: assumed" in res.stdout
+        assert "REASONED, NOT MEASURED" in res.stdout
+        assert "a clock skew" in res.stdout
+
+    def test_the_assumed_block_is_SILENT_when_every_elimination_was_observed(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """No reassuring "0 assumed" line on the ordinary run — it gets skimmed
+        and then read as a guarantee."""
+        upd = write_delta(
+            tmp_path, "obs.md", ELIM.format("the cache — via: command, `ls -la`"),
+        )
+        res = run_tool(repo, update=upd)
+        assert "REASONED, NOT MEASURED" not in res.stdout
+
+    def test_an_unknown_kind_is_refused_and_NAMED(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """There is deliberately no `obvious`/`checked`/`verified`, so a bullet
+        reaching for one is refused rather than silently counted."""
+        upd = write_delta(
+            tmp_path, "unk.md", ELIM.format("the parser — via: obvious"),
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 10, (res.returncode, res.stderr)
+        assert "[unknown kind" in res.stderr and "obvious" in res.stderr
+
+    def test_a_near_miss_is_NAMED_not_reported_as_absent(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The failure `_VIA_ATTEMPT` exists to prevent: a bullet that DOES
+        carry a tag told `[no via: field]` and handed a remedy it already
+        satisfied is a refusal no re-run can clear."""
+        upd = write_delta(
+            tmp_path, "near.md", ELIM.format("the parser — via = command"),
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 10, (res.returncode, res.stderr)
+        assert "[unparsed" in res.stderr
+        assert "[no via: field]" not in res.stderr
+
+    def test_a_field_inside_a_fence_is_NAMED_as_fenced(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """Same reason as rule (j)'s: the author can SEE the field in their
+        file, so `[no via: field]` reads as a lie."""
+        upd = write_delta(
+            tmp_path, "fenced.md",
+            "## Open investigations\n- **Ruled out:** the writer\n\n  ```\n"
+            "  via: command\n  ```\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 10, (res.returncode, res.stderr)
+        assert "[fenced]" in res.stderr
+
+    def test_a_bullet_INSIDE_a_fence_is_a_sample_not_a_claim(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """A handoff routinely pastes a sample bullet in a code block. Gating on
+        it would refuse a doc for text that documents the gate."""
+        upd = write_delta(
+            tmp_path, "sample.md",
+            "## Gotchas\nWrite eliminations like this:\n\n```\n"
+            "- **Ruled out:** the cache\n```\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+
+    def test_a_NESTED_bullet_is_part_of_its_parent_not_a_claim_of_its_own(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        upd = write_delta(
+            tmp_path, "nested.md",
+            "## Open investigations\n- **Symptom:** it hangs\n"
+            "    - **Ruled out:** the sub-case\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, res.stdout + res.stderr
+
+    def test_legacy_base_bullets_are_not_retroactively_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE PERMANENTLY-RED-GATE GUARD, and the reason rule (k) reads the
+        UPDATE. `open investigations` is an APPEND heading, so the merged doc
+        carries every elimination any session ever wrote — 122 of them across
+        this repo's docs, none of which can now be edited to add a field.
+        Checking the merge would refuse on run one, forever, which
+        `claude/RULES.md` names as worse than no gate."""
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        doc.write_text(
+            doc.read_text(encoding="utf-8")
+            + "\n## Open investigations\n- **Ruled out:** the ancient theory\n",
+            encoding="utf-8",
+        )
+        _sh("git", "add", "-f", str(doc), cwd=repo)
+        _sh("git", "commit", "-qm", "legacy elimination", cwd=repo)
+        upd = write_delta(
+            tmp_path, "clean.md", "## State now\nNothing eliminated here.\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+
+    # 🔴 THE WALKABILITY GUARD. MEASURED: the first version of `_ELIMINATION`
+    # demanded a separator immediately after the marker and MISSED all nine of
+    # these — every one a real shape in this repo's docs. A gate blind to them
+    # is escaped by typing `Ruled out (obviously):`.
+    @pytest.mark.parametrize(
+        "opener",
+        [
+            "- **Ruled out:** the cache",
+            "- **Ruled out as writers:** the cache",
+            "- **Ruled out (structurally):** the cache",
+            "- **Ruled out, and still true:** the cache",
+            "- **Ruled out (carried forward):** the cache",
+            "- **Ruled out** (do NOT re-run these): the cache",
+            "- **Ruled out — it never reached git.** the cache",
+            "- **Ruled out, by reading the code:** the cache",
+            "- **Ruled out (with the evidence that killed each):** the cache",
+            "- Ruled out: the cache",
+            "- **Ruled out (obviously):** the cache",
+        ],
+    )
+    def test_a_qualifier_between_the_marker_and_the_claim_cannot_escape(
+        self, repo: Path, tmp_path: Path, opener: str
+    ) -> None:
+        upd = write_delta(
+            tmp_path, "q.md", f"## Open investigations\n{opener}\n",
+        )
+        res = run_tool(repo, update=upd)
+        assert res.returncode == 10, (opener, res.returncode, res.stderr)
+
+
+class TestTheExitCodeLegendIsComplete:
+    """🔴 THE OTHER HALF of `test_no_two_exit_constants_share_a_value` above,
+    which already pins the codes as INJECTIVE. Injective is not documented: a
+    code can be unique and still be one no reader can look up.
+
+    MEASURED on this branch — the legend HAD drifted exactly that way. It ended
+    at `8 unforced` while `EXIT_STALE_BASE = 9` was live, reachable, and printed
+    `status=stale-base` at callers. The suite was green throughout, because the
+    only guard on the legend was the SKILL.md one, which scrapes `status=`
+    tokens out of the module source and never reads the module's own docstring.
+    """
+
+    def _codes(self) -> dict[str, int]:
+        return {
+            name: getattr(hd, name)
+            for name in dir(hd)
+            if name.startswith("EXIT_")
+            and isinstance(getattr(hd, name), int)
+        }
+
+    def test_the_module_legend_documents_every_nonzero_code(self) -> None:
+        """🔴 A code the legend omits is one no reader can look up — and the
+        legend HAD drifted: it stopped at 8 while `EXIT_STALE_BASE = 9` was
+        live and reachable."""
+        legend = hd.__doc__ or ""
+        _head, _sep, tail = legend.partition("EXIT CODES")
+        assert _sep, "the module docstring no longer carries an EXIT CODES block"
+        for name, value in sorted(self._codes().items()):
+            if value == 0:
+                continue
+            assert re.search(rf"^\s*{value}\s+\S", tail, re.M), (
+                f"{name} = {value} is not listed in the EXIT CODES legend"
+            )
+
+
+class TestRuleKIsWiredToRealContent:
+    """🔴 THE POSITIVE CONTROL. A pattern that matches nothing is
+    indistinguishable from a gate that passes — `claude/RULES.md` calls a
+    reassuring zero the failure, not the all-clear. So assert the parser finds
+    elimination bullets in the COMMITTED corpus, not just in fixtures."""
+
+    def test_the_committed_corpus_yields_elimination_bullets(self) -> None:
+        docs = sorted((REPO_ROOT / "claudedocs").glob("handoff-*.md"))
+        if not docs:
+            pytest.skip("no handoff corpus in this checkout")
+        total = sum(
+            len(hd.elimination_bullets(
+                d.read_text(encoding="utf-8", errors="replace")))
+            for d in docs
+        )
+        # A FLOOR, not the measurement — the corpus grows. Measured 2026-08-30:
+        # 122 bullets across 44 of 90 docs.
+        assert total >= 90, (
+            f"only {total} elimination bullets parsed across {len(docs)} docs — "
+            f"the pattern has stopped matching the house style, and a gate that "
+            f"matches nothing reads exactly like a gate that passes."
+        )

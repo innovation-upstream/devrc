@@ -327,3 +327,91 @@ question to be answered before any diff is computed, and an answer that means
 prompt. Because that answer comes from the caller, there is a second guard that
 does not depend on it: a merge whose result equals what is already on disk exits
 `no-change` rather than making an empty commit.
+
+## §D — rule (k): an elimination names HOW it was eliminated (2026-08-30)
+
+`status=unevidenced`, exit **10**. A `Ruled out:` bullet in the update must
+carry `via: <kind>` — `command`, `measurement`, `code`, `change`, `doc`, or the
+honest opt-out `assumed`.
+
+### The incident
+
+An opencode session running a weaker model wrote this into a handoff's
+open-investigations block:
+
+```
+- **Ruled out:** Not a per-DIMM issue (all 4 identical)
+```
+
+It had run `inxi -CmG` and `inxi -dm`. **Neither prints a part number.** The
+sentence was an elimination its own data could not support, and it was false —
+one flag away (`inxi -max`) sat two different part numbers from two different
+kits, which killed the theory the doc then ranked **first**, with a ⚠ and "free
+performance sitting on the table". That rank-1 instruction was to reboot a
+26-day-uptime workstation into its BIOS.
+
+Nothing in the session was incompetent. It navigated the repo cleanly, checked
+package availability properly, tested under `nix-shell` before installing, and
+correctly diagnosed a dispatch failure from a log tail. What it could not do was
+separate *what it measured* from *what was merely consistent with what it
+measured* — and an elimination is where that gap does the most damage, because
+it is the claim a later session trusts most and re-checks least. `/resume`
+already warns that a mid-diagnosis block "reads as current forever"; this is the
+same hazard one level down, at the individual bullet.
+
+### Why a closed vocabulary and not a content check
+
+The obvious gate is to require the bullet to *look* evidenced — cite a backtick,
+a number, a `file:line`. Measured against the bullet above, **every cheap
+heuristic accepts it**: it contains a digit, it is fluent, it is the same length
+as bullets that do cite evidence. Nothing in its text separates it from a real
+elimination, because what it lacks is not a word but a measurement.
+`claude/RULES.md` names this directly — "a guard on WORDS is walkable by
+REWORDING". So the author declares the KIND instead, from an allowlist. A
+blocklist of weasel phrases would be defeated by any synonym; an allowlist you
+must pick from cannot be, because a kind outside the set is refused by default.
+
+There is deliberately no `obvious`, `known`, `checked`, `verified` or `tested`.
+Those are what an unmeasured elimination reaches for, and their absence is what
+forces such a bullet onto `assumed`.
+
+### Why `assumed` is accepted
+
+Same argument as `forcing: none`, and it is not a softening. Refusing it would
+not stop anyone reasoning their way to an elimination — it would teach them to
+type `command` falsely, which moves the population underground and destroys the
+signal. The failure was never that the session reasoned rather than measured; it
+was that the doc did not **say so**, so a later reader could not tell the two
+apart. `via: assumed` lands, and it is counted in an advisory above the diff.
+
+The gate cannot tell a true elimination from a false one and does not try. It
+makes the provenance mandatory and greppable — nothing more.
+
+### Two things that make it not a permanently-red gate
+
+1. **It reads the UPDATE, never the merged doc.** `open investigations` is an
+   APPEND heading, so the merged doc accumulates every elimination any session
+   ever wrote — **122 of them across 44 of this repo's 90 docs**, none of which
+   can now be edited to add a field. Checking the merge would refuse on run one,
+   forever, which `claude/RULES.md` calls worse than no gate. Rule (j) reads the
+   update for a related but weaker reason; here it is the whole design.
+2. **The marker needs no punctuation.** The first version demanded a separator
+   straight after `Ruled out` and MISSED nine real bullets, every one the same
+   shape: a qualifier before the colon — `**Ruled out as writers:**`,
+   `**Ruled out (structurally):**`, `**Ruled out, and still true:**`,
+   `**Ruled out** (do NOT re-run these):`. Nine is a house style, not noise, and
+   a gate blind to it is escaped by typing `Ruled out (obviously):`. So the
+   marker alone opens the bullet and the rest of the line is the claim.
+
+### Controls
+
+A pattern that matches nothing is indistinguishable from a gate that passes, so
+both directions are pinned. **Positive:** the committed corpus yields ≥90
+elimination bullets (measured: 122) — if the house style drifts, the floor
+fails rather than the gate silently going quiet. **False-positive:** `via:`
+followed by a member of the vocabulary occurs **0 times** across the corpus
+outside a deliberate tag. That is also why the key is `via` and not the more
+self-documenting `evidence`: `evidence: the ACCESS_DENIED is positive evidence
+it is NOT` is a real shape here, and against it the kind group captures `the`,
+refusing a bullet whose author *did* cite a measurement. `via` needs a colon
+immediately after it, and prose writes `via the`, never `via:`.

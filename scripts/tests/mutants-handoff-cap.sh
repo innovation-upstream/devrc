@@ -196,10 +196,18 @@ printf '\n== rule (i-b): a second doc for an existing effort (must be KILLED) ==
 # 🔴 THE TWO HALVES OF THE CONDITION GET SEPARATE ROWS. Mutating both together
 # would delete the guard with its enclosing condition and prove nothing about
 # either half.
+# 🔴 BOTH SEDS RE-ANCHORED 2026-08-30. They targeted the guard's ONE-LINE form
+# (`if not doc.exists() and not args.new_effort:`), which no longer exists —
+# the condition was wrapped across two lines at some point and neither row was
+# updated. Both had been reporting `MUTATION DID NOT APPLY — result meaningless`
+# since, so rule (i-b)'s two headline guards were UNVERIFIED while the sweep
+# looked complete. That the harness says "meaningless" rather than "ok" is the
+# only reason this was recoverable: a sed that silently fails to match reports
+# the UNMUTATED file's behaviour, i.e. the most flattering possible wrong answer.
 run 'new-doc-guard-never-fires' test_a_new_topic_is_refused_and_lists_what_exists \
-  's|if not doc.exists() and not args.new_effort:|if False and not args.new_effort:|'
+  's|if (not doc.exists() and not args.new_effort|if (False and not args.new_effort|'
 run 'new-effort-assertion-ignored' test_new_effort_lands_it \
-  's|if not doc.exists() and not args.new_effort:|if not doc.exists() and True:|'
+  's|if (not doc.exists() and not args.new_effort|if (not doc.exists() and True|'
 # The LIST is the half that makes the refusal compliable. A refusal naming no
 # existing doc is a block with no way past it but the flag.
 run 'existing-docs-list-suppressed' test_a_new_topic_is_refused_and_lists_what_exists \
@@ -439,6 +447,41 @@ run_skill 'skill-near-miss-clause-rebound-to-the-fence' \
 run 'refusal-marker-renamed' \
   test_every_refusal_MARKER_the_module_prints_reaches_the_skill \
   's@^MARK_FENCED = "\[fenced\]"@MARK_FENCED = "[in-a-fence]"@'
+
+printf '\n== rule (k): an elimination names HOW it was eliminated (must be KILLED) ==\n'
+# The refusal deleted outright: no bullet is ever unevidenced.
+run 'elimination-refusal-never-fires' test_the_MEASURED_bullet_that_this_rule_exists_for_is_refused \
+  's|bad = \[b for b in bullets if not b.is_declared\]|bad = []|'
+# The CLOSED VOCABULARY opened up. Anything typed after `via:` would count,
+# which is the whole difference between an allowlist and a keyword sniff.
+run 'elimination-kind-allowlist-opened' test_an_unknown_kind_is_refused_and_NAMED \
+  's|return self.kind in ELIMINATION_KINDS|return self.kind is not None|'
+# 🔴 THE WALKABILITY ROW. Reverts the marker to the narrow form that demanded a
+# separator straight after `Ruled out` — the shape that MISSED nine real corpus
+# bullets and is escaped by typing `Ruled out (obviously):`. The anchor carries
+# the `\b` because `ruled[ -]out` alone also matches the comment above it, and a
+# sed that hits the comment mutates nothing while reporting the guard held.
+run 'elimination-marker-requires-a-separator' test_a_qualifier_between_the_marker_and_the_claim_cannot_escape \
+  's|ruled\[ -\]out\\b|ruled[ -]out\\s*:|'
+# The near-miss net removed: a bullet that DOES carry a tag gets told to add one.
+run 'elimination-near-miss-net-removed' test_a_near_miss_is_NAMED_not_reported_as_absent \
+  's|if _VIA_ATTEMPT.search(ln)|if False|'
+# The fenced diagnosis removed: a field the author can SEE reads as absent.
+run 'elimination-fenced-diagnosis-removed' test_a_field_inside_a_fence_is_NAMED_as_fenced \
+  's|fenced = near is None and any(_VIA.search(ln) for ln in hidden)|fenced = False|'
+# 🔴 THE COLLISION THIS REPO ALREADY SHIPPED ONCE — two constants both taking 7.
+# The killing guard is PRE-EXISTING; this row proves rule (k)'s new code is
+# inside its reach rather than beside it.
+run 'exit-code-collides-with-unforced' test_no_two_exit_constants_share_a_value \
+  's|^EXIT_UNEVIDENCED = 10|EXIT_UNEVIDENCED = 8|'
+# The legend half: a code can be unique and still undocumented. MEASURED — the
+# legend ended at 8 while EXIT_STALE_BASE = 9 was live and printed at callers.
+run 'exit-legend-omits-the-new-code' test_the_module_legend_documents_every_nonzero_code \
+  's|^ 10  unevidenced|# 10 unevidenced|'
+# BEHAVIOUR-FREE CONTROL for this block specifically — the rows above must key on
+# behaviour, not on the presence of rule (k)'s own comment text.
+run 'rule-k-comment-reword-control' SURVIVES \
+  's|# --- rule (k): an elimination names HOW it was eliminated|# --- rule k: elimination evidence (reworded comment)|'
 
 printf '\n== controls ==\n'
 # 🔴 POSITIVE CONTROL — a mutant to a PRE-EXISTING guard (rule d) that the suite
