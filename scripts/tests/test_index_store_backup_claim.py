@@ -248,7 +248,7 @@ def _section_states(claim: str, section: str) -> bool:
        also reddened the required check on any reformat from `-` to `*`, and it
        silently defanged three sibling assertions whose fixtures are paragraphs.
 
-    So: blocks are split on blank lines AND at list-item starts (`-`, `*`, `1.`),
+    So: blocks are split on blank lines AND at list-item starts (`-`, `*`, `+`, `1.`),
     and a block containing a retraction marker is disqualified. The claim's own
     formatting is irrelevant — paragraph, bullet or wrapped all match.
 
@@ -643,11 +643,111 @@ def test_list_item_splitting_is_what_the_pattern_is_for() -> None:
         )
 
 
+def test_every_retraction_marker_is_individually_load_bearing() -> None:
+    """🔴 Each marker alone, on a claim carrying NO other marker.
+
+    Every other fixture in this file uses at least two markers at once ("⚠ …
+    used to say", "NO LONGER TRUE" beside a "⚠"), so dropping any single one
+    from `_RETRACTION_MARKERS` survived the whole suite. `⚠` is the worst of
+    them to lose: it is the glyph this doc's own house style uses, so
+    `- <claim> ⚠ RETIRED 2026-09-01.` is the terse edit a maintainer actually
+    writes — and with `⚠` unpinned the guard certified it.
+
+    `.lower()` is pinned by the upper-cased spellings below for the same
+    reason: nothing else forced it.
+
+    🔴 THE MARKERS ARE SPELLED OUT HERE, NOT READ FROM `_RETRACTION_MARKERS`.
+    The first version of this test iterated the tuple — so a mutant that DROPPED
+    an element also dropped its own test case, and `⚠` was scored KILLED by an
+    unrelated test while this one passed vacuously. Never derive a test's
+    expectation from the thing it is testing.
+    """
+    expected = ("used to say", "used to read", "no longer true", "⚠")
+    assert set(_RETRACTION_MARKERS) == set(expected), (
+        "the marker set changed; add the new one to this literal list — it is "
+        "deliberately a second copy so a dropped element cannot hide here"
+    )
+    for marker in expected:
+        one = f"- {CLAIM_PRESENT} {marker} 2026-09-01."
+        assert not _section_states(CLAIM_PRESENT, one), (
+            f"a claim retracted with {marker!r} ALONE still matched — that "
+            "marker is not load-bearing and could be dropped unnoticed"
+        )
+    for spelling in ("USED TO SAY", "No Longer True", "Used To Read"):
+        assert not _section_states(CLAIM_PRESENT, f"- {CLAIM_PRESENT} {spelling}."), (
+            f"{spelling!r} was not recognised — the marker match is "
+            "case-sensitive, so an ordinary capitalisation walks it"
+        )
+
+
+def test_a_marker_ABOVE_the_claim_in_the_same_block_disqualifies_it() -> None:
+    """🔴 Walk #2 of `_section_states`'s docstring, isolated.
+
+    `cur_marked = cur_marked or any(...)` accumulates across the whole block.
+    Reducing it to `cur_marked = any(...)` — the last line only — survived the
+    suite, because `own_line_marker` happens to carry a closing "That is NO
+    LONGER TRUE" line that lands a marker on the block's LAST line. Remove that
+    line and the fixture stops covering the branch it appears to cover.
+
+    This fixture has the marker ONLY above, so the accumulation is the only
+    thing that can catch it.
+    """
+    marker_above_only = f"⚠ This section used to say:\n{CLAIM_PRESENT}"
+    assert not _section_states(CLAIM_PRESENT, marker_above_only), (
+        "a marker on an EARLIER line of the claim's own block did not "
+        "disqualify it — the marked flag is not accumulating across the block"
+    )
+
+
+def test_the_list_item_pattern_must_not_split_on_bold_or_prose() -> None:
+    """🔴 `_LIST_ITEM` also decides what is NOT a bullet, and that half is what
+    the trailing `\\s` buys.
+
+    Dropping the `\\s` makes `**bold**` read as a `*` list item. Both directions
+    then break: a wrapped claim whose continuation begins `**` splits into a
+    block no longer containing the whole claim (a FALSE RED on the required
+    check from an ordinary rewrap), and a retraction whose continuation begins
+    `**` escapes its marked block (a FALSE GREEN). `.match` vs `.search` is
+    pinned here too — a mid-line `- ` must not start a block.
+    """
+    halves = CLAIM_PRESENT.split(", bucket ")
+    assert len(halves) == 2, "fixture assumption broken"
+    wrapped_bold = f"- {halves[0]}, bucket\n  **{halves[1]}**"
+    assert _section_states(CLAIM_PRESENT, wrapped_bold), (
+        "a continuation line beginning `**` was read as a new list item — an "
+        "ordinary markdown rewrap now reds the required check"
+    )
+
+    retracted_bold = (
+        f"- {CLAIM_PRESENT}\n  **⚠ NO LONGER TRUE — the unit was RETIRED.**"
+    )
+    assert not _section_states(CLAIM_PRESENT, retracted_bold), (
+        "a bolded retraction escaped the claim's block — it was read as a new "
+        "list item instead of a continuation"
+    )
+
+    # 🔴 `.match`, not `.search` — anchored at the START of the line.
+    #
+    # The first fixture for this put the dash on a line that ALREADY began with
+    # a bullet, so `.match` and `.search` split identically and the mutant
+    # survived. It has to be a CONTINUATION line that contains a dash but does
+    # not start with one: under `.search` that line starts a new block, which
+    # cuts the retraction away from the claim it retracts.
+    continuation_with_dash = (
+        f"- {CLAIM_PRESENT}\n"
+        "  superseded 2026-09-01 - ⚠ NO LONGER TRUE, the unit was RETIRED."
+    )
+    assert not _section_states(CLAIM_PRESENT, continuation_with_dash), (
+        "a dash INSIDE a continuation line started a new block, splitting the "
+        "retraction away from the claim — the pattern is not anchored"
+    )
+
+
 def test_the_shapes_this_pin_does_NOT_catch() -> None:
     """🔴 THE STATED LIMIT, PINNED — so it stays a decision, not a surprise.
 
     `_section_states` catches a retraction only when it shares a BLOCK with the
-    claim. These three shapes therefore walk it, and a contact rule that would
+    claim. The shapes below therefore walk it, and a contact rule that would
     have caught them was removed on purpose (see `_section_states`'s docstring:
     nothing reached it, and it put the live doc one ordinary edit from an
     unfollowable red).
