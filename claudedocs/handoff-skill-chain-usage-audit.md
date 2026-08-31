@@ -53,17 +53,29 @@ survives adversarial re-derivation, and fix whatever it exposes.
   `devrc/analyze-service-index.md` (recall *lists* vs *features*). Also **closed an `OPEN:` bullet
   that was not mine** — the clawgate "browser layer is UNGATED" item, whose fix merged as
   `6bf866fe`; verified by content before rewriting it `RESOLVED`. Scope open-actions 1 → 0.
-- **Branch / PRs:** `zach/skill-chain-usage-audit` → **devrc#1055, OPEN** (carries ranks 3's
-  instrument, rank 4's clawgate fix, and this doc). **devrc#1064, OPEN** (`feat/handoff-audit`).
-  🔴 **Both are still RED on the capacity flake — neither caused it**, and `main` is
-  `enforce_admins: true` with both legs required, so both are blocked on a re-run against a quiet
-  queue. #1108 got through on its **third** attempt.
+- 🔴 **RANK 9 MEASURED, NOT CUT (2026-08-31 ~17:00Z). Nothing was re-triggered, no empty commit
+  was pushed.** The "quiet queue" precondition is **not a queue-depth wait — it is a single-node
+  arithmetic ceiling**, and the item's own premise number is wrong by ~2×. See the new
+  investigation block below for the values. Claim `skill-chain-usage-audit-9` is **still held**.
+- 🔴 **#1055 does NOT need a re-trigger and MUST NOT be pushed to while a run is live.** It has
+  had a gate run in flight since **2026-08-31T16:32:20Z** (`devrc-ci-szfm7`, head `f85b7444`),
+  fired by the previous session's own docs commit. The pipeline carries a
+  `ci.zacx.dev/supersede-key: pr-1055` label, so **any push to the branch cancels the run that is
+  currently grading it** — including a `/handoff` update. Read `szfm7`'s state before pushing:
+  `KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pipelinerun devrc-ci-szfm7 -o jsonpath='{.status.conditions[0].reason}'`
+- **Branch / PRs:** `zach/skill-chain-usage-audit` → **devrc#1055, OPEN** (gate RUNNING as above).
+  **devrc#1064, OPEN** (`feat/handoff-audit`) — pytests RED, nodetests green; it is the only one of
+  the two that actually needs the rank-9 push.
 - 🔴 **The LOCAL branch `zach/skill-chain-usage-audit` in the primary clone is DIVERGED and is the
   STALE side** — do not check it out, do not move it. **Work detached off
   `origin/zach/skill-chain-usage-audit` and push `HEAD:zach/skill-chain-usage-audit`.** The primary
-  clone sits on `main` (behind 2) and holds other sessions' uncommitted files.
+  clone sits on `main` and holds other sessions' uncommitted files.
 - **Not deployed:** rank 4's clawgate `SKILL.md` fix is committed on #1055 and NOT live;
   `handoff-audit.py` is on #1064 and wired into no gate, skill or script.
+- **This session's clawgate link: NONE.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
+  this session, with its positive control confirming the board was reachable. Per its contract that
+  0 cannot distinguish "touched no task" from "wrong id", so **no `clawgate-task:` field was
+  written** and this is not a clean bill of health.
 
 ## Open investigations — live diagnosis state
 
@@ -443,6 +455,74 @@ belongs to the `tekton` owners, not to another retry.
 - **Next probe (unchanged):** re-run #1055's gate on an unchanged SHA. A *different* test ⇒
   environment/timing; the *same* test ⇒ a real runner-vs-local divergence worth fixing.
 
+### Rank 9's "quiet queue" is a ONE-NODE CPU-REQUEST CEILING of five gate pods, not a queue that drains
+- **Symptom + exact repro:** devrc-ci gate pods sit `Pending` for minutes while other work runs, so
+  rank 9's stated signal (`0 Pending pods`) is rarely observable. Reproduce:
+  `KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pods --field-selector=status.phase=Pending`
+- **Observed (with values), all 2026-08-31 ~16:50–17:05Z on the homelab cluster:**
+  - 🔴 **The cluster is `$KC_HOMELAB`, NOT dp-prod.** This session's default `KUBECONFIG` is
+    `prod-kubeconfig`; `kubectl -n tekton-ci get pipelineruns` there returns
+    `No resources found in tekton-ci namespace.` — a confident empty that is a fact about the
+    wrong cluster. Only `KC_HOMELAB` has the namespace (`tekton-ci Active 45d`).
+  - Scheduler event on both pending gate pods, verbatim: `0/4 nodes are available: 1 Insufficient
+    cpu, 3 node(s) didn't match Pod's node affinity/selector.`
+  - The pin is a **hard `nodeSelector`, not a soft affinity**:
+    `kubectl -n tekton-ci get pod <gate-pod> -o jsonpath='{.spec.nodeSelector}'` →
+    `{"kubernetes.io/hostname":"talos-xr6-r7p"}`; `.spec.affinity.nodeAffinity` is **empty**.
+  - `talos-xr6-r7p`: allocatable **15950m**, requested **14320m (89%)**. Of the 14220m resolved
+    across its 67 running pods, **11700m (82%) is the gate itself** — 5 × `devrc-ci-*-gate-pod`
+    at **2250m** each. Non-CI baseline on the node is only ~2520m (largest single non-CI pod:
+    `tekton-triggers-core-interceptors` at 350m).
+  - Per-pod request is **2250m**, from two steps: `step-pytests=2` and `step-nodetests=250m`
+    (`-o jsonpath='{range .spec.containers[*]}{.name}={.resources.requests.cpu}{"\n"}{end}'`).
+  - Arithmetic ceiling: 5 × 2250 + 2520 ≈ 13770 fits; a 6th needs 2250m against ~1630m free.
+    **Measured state matched exactly: 5 gate pods `NotReady` (3/6 steps, i.e. running), everything
+    beyond them `Pending`.**
+- **Ruled out:**
+  - *"The node is squeezed by unrelated workloads"* — **killed by the breakdown above**: 82% of the
+    node's requests are the gate's own pods. Saturation is self-inflicted, so it **does** drain and
+    `0 Pending` **is** reachable; it just needs fewer than 5 devrc PRs in flight, and ~21 PRs are
+    open with ~10 sessions pushing.
+  - *"rank 10's 4250m premise"* — **REFUTED by measurement: the gate pod requests 2250m.** Whatever
+    rank 10 proposes must be re-derived from 2250m, and from the fact that the binding constraint is
+    the `nodeSelector`, not the request size alone.
+- **Leading hypothesis:** the real unblock for rank 9 is un-pinning or right-sizing that pod — which
+  is **already claimed by another session** as `ci-speedup-7` ("retry the devrc-ci node unpin behind
+  a nix-store-ownership probe on a SCRATCH pipeline"). Rank 9 is therefore *waiting on* that work,
+  not merely on a window. **Do not start it — it is locked.**
+- **Next probe:** poll for the window rather than reasoning about it. This session armed
+  `scratchpad/watch-queue.sh` (a 45 s poll emitting on 0-pending and on `szfm7` terminal); re-create
+  it or run inline:
+  `KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pods --field-selector=status.phase=Pending --no-headers | wc -l`
+
+### #1064's named failure is WALL-CLOCK-BOUNDED — a mechanism for the capacity story, not just a covariate
+- **Symptom + exact repro:** `gh pr checks 1064 --repo innovation-upstream/devrc` →
+  `tekton/devrc-pytests fail — FAILED: pytests — FAILING:
+  test_a_hanging_fetch_is_BOUNDED_and_the_memo_spares_a_second_wait | TOTAL collected=18718
+  passed=18713 skippe…` (truncated by GitHub's 140-char status limit). nodetests: **1366/1366 pass**.
+- **Observed (with values):**
+  - The test is `scripts/tests/test_resume_state_skill_freshness.py:1003`. It asserts
+    **`assert 20 <= elapsed < 60`** around a production `timeout 25`, and **`memo_secs=0`** computed
+    from bash integer `$SECONDS`. **Two of its four assertions are wall-clock upper bounds**; the
+    other two (`first=1`, `second=1`) are logical.
+  - **#1064's diff cannot reach it.** `gh pr diff 1064 --name-only` → exactly three files:
+    `scripts/README.md`, `scripts/handoff-audit.py`, `scripts/tests/test_handoff_audit.py`.
+  - Estate-wide sweep of all 39 open PRs' `tekton/devrc-pytests` head status: **9 `failure`
+    naming 7 DIFFERENT tests**, **6 `COULD NOT RUN`**, 9 `success`, 8 pending, 7 no-status. The only
+    repeated signature is `TestTheActorComesFromTheTOKEN.test_a_FORGED_actor_in_the_body_is_DISCARDED`
+    (#1126, #1087, #985). `test_a_hanging_fetch_is_BOUNDED…` appears on **#1064 alone**.
+- **Ruled out:** *"#1064 broke something"* — the diff does not touch the failing test's module or the
+  `resume-state` script it exercises.
+- 🔴 **NOT established — say so rather than closing it.** I could **not** determine WHICH assertion
+  fired. #1064's run is **pruned from the cluster** (only 240 pipelineruns retained; no
+  `pr-1064` row survives) and the GitHub status carries **no `target_url`**, so there are no logs —
+  this is devrc**#943**'s sibling defect biting again. A scatter of one-off failures across
+  unrelated PRs is consistent with contention, but it remains a **sample, not a controlled
+  demonstration**; the WALK-BACK block's caution stands unchanged.
+- **Next probe:** on the next #1064 run, capture the pytest output **while the PipelineRun still
+  exists** — `kubectl -n tekton-ci logs <gate-pod> -c step-pytests | grep -A20 'hanging_fetch'` —
+  so the failing assertion is named before the run is pruned.
+
 ## Next steps (ranked)
 
 🔴 **The numbering below is STABLE and load-bearing** — `claim-work --slug-for <this doc> <rank>`
@@ -457,8 +537,6 @@ rather than removed and renumbered. New work is appended at the end.
    docs declare open work against **90.3% of maintained ones**. Real finding: **13 / 26**
    abandoned-and-uncommitted-since, of which **5** have a successor that names neither the doc
    nor its topic. Instrument `claudedocs/skill-chain-drift-audit.py` (committed, 4 controls).
-   The successor question (rename vs scope-move) is the one live thread it leaves — the 5
-   unlinked cases are the set to read.
    forcing: none
 4. **Deploy the clawgate `SKILL.md` fix** — `home-manager switch`, then confirm
    `~/.claude/skills/clawgate/SKILL.md` no longer contains "preserve both".
@@ -498,17 +576,27 @@ rather than removed and renumbered. New work is appended at the end.
    session that writes a handoff BECAUSE it was blocked is a success, not a contaminated sample —
    count blocks (`~/.cache/claude-handoff-write/s/*/fires-*`) and report them beside the rate.
    forcing: none
-9. **Re-trigger #1055 and #1064 against a QUIET queue** — the only mechanical thing left, and it
-   needs a window rather than a decision. Measure first
-   (`kubectl -n tekton-ci get pipelineruns` running count + Pending pod count); **0 pending** is
-   the signal that matters. Then one empty commit per branch, recording the depth in the message.
-   🔴 Read the WALK-BACK block first: two attempts on #1108 failed and the third passed, but that
-   is **not** a controlled demonstration that draining the queue fixes it.
-   forcing: gate — both PRs are blocked by a required check that neither one caused
-10. **Right-size the devrc-ci gate pod, or establish it cannot be** — it requests **4250m** while
-   three sampled running pods used **1m / 4m / 544m**, and `talos-xr6-r7p` sits at ~89% CPU
-   requests. 🔴 A lead, not a licence: measure PEAK over a full run before proposing anything, and
-   read the `tekton` skill first — it records four *other* fixes as already-rejected-with-measurements.
+9. **Re-trigger #1064 against a QUIET queue — and #1064 ONLY.** 🔴 **RE-SCOPED 2026-08-31 by
+   measurement; read the two new investigation blocks before acting.** Three corrections to this
+   item as originally written: (a) **#1055 is out of scope** — it has had a run in flight since
+   16:32:20Z and its `supersede-key` means any push cancels it; (b) the signal `0 Pending` is a
+   **five-gate-pod arithmetic ceiling on the single pinned node `talos-xr6-r7p`**, not a queue that
+   drains on its own schedule; (c) the correct kubeconfig is **`$KC_HOMELAB`** — the session default
+   `prod-kubeconfig` returns a confident empty. Poll
+   `KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pods --field-selector=status.phase=Pending`,
+   and on **0 pending** push one empty commit to `feat/handoff-audit`, recording the depth in the
+   message. 🔴 The WALK-BACK block still stands: a green at low depth is **not** a controlled
+   demonstration that draining the queue fixes the gate.
+   forcing: gate — devrc#1064 is blocked by `tekton/devrc-pytests`, a required check its own
+   three-file diff cannot reach
+10. **Right-size the devrc-ci gate pod, or establish it cannot be.** 🔴 **Its premise is REFUTED:
+   the pod requests 2250m, not 4250m** (`step-pytests=2` + `step-nodetests=250m`, measured
+   2026-08-31). The binding constraint is the **hard `nodeSelector` pinning it to one of four
+   nodes**, not the request size alone. 🔴 **DO NOT START — the unpin is already locked** by another
+   session's claim `ci-speedup-7` ("retry the devrc-ci node unpin behind a nix-store-ownership probe
+   on a SCRATCH pipeline"). Coordinate with that claim rather than opening a second front; if it is
+   released, measure PEAK CPU over a full run before proposing anything, and read the `tekton` skill
+   first — it records four *other* fixes as already-rejected-with-measurements.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
