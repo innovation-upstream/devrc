@@ -227,7 +227,7 @@ claims all four and collides with a whole-doc claim.
    was REMOVED (button, route, handler, ledger entry), leaving `clawgatectl panel rm` as the only
    delete path.
    forcing: none
-8. **Housekeeping — 8a (RECURRING), 8b and 8e done; 8c and 8d IN FLIGHT.**
+8. **Housekeeping — 8a (RECURRING), 8b and 8e done; 8c and 8d IN FLIGHT and both now verified.**
    forcing: gate — `clawgate-e2e` was green through all four of #538's audit rounds while running
    ZERO specs touching layout, and its floor tolerated losing 15 of 125 tests. 8b and 8e closed
    both halves of that.
@@ -238,12 +238,14 @@ claims all four and collides with a whole-doc claim.
      `clawgate-e2e` 125/2 on the final sha. SIX audit rounds; the first FIVE each found the previous
      round's fix had created the next defect.
    - c. **IN FLIGHT: `ZacxDev/homelab-infra#591`** (`fix/clawgate-8c-settle-barrier`, commit
-     `07e0bd14`). All eight `time.Sleep` bets in
+     `d687fcaa` after an amend + `--force-with-lease`). All eight `time.Sleep` bets in
      `containers/clawgate/internal/api/{push_task,task_comment}_test.go` replaced with
-     `awaitPushesSettled`. 🔴 **DO NOT MERGE ON THE AGENT'S EVIDENCE — see the open investigation
-     below.** The change is very likely correct and the suite is green (verified independently:
-     20 `^ok` / 0 `^FAIL`, `go test`'s own exit 0), but the per-site mutation evidence is defective
-     and is being re-derived.
+     `awaitPushesSettled`. ✅ **Evidence now VERIFIED — the earlier "do not merge on this table"
+     warning is RESOLVED** (see the resolved investigation below): all eight mutants die at their
+     own `t.Fatalf`, zero panics, and the barrier is independently confirmed load-bearing
+     (mutant + barrier RED at `:282`; mutant − barrier `ok` over 50 runs, with a 50-`--- PASS`
+     positive control proving the filter selects a real test). Independent full package run:
+     20 `^ok` / 0 `^FAIL`, `go test`'s own exit 0.
    - d. **IN FLIGHT: `ZacxDev/homelab-infra#592`** (`test/clawgate-8d-negated-grep-scanner`, commit
      `751aabaa`). `scan_inert_negated_greps` + one `@test` per bats suite. **Verified
      independently, both directions:** as committed, 67 `ok` / 0 `not ok` with both scanner tests
@@ -282,7 +284,7 @@ used here, so nothing could ever have closed it.
     Full detail is in the `clawgate` subsystem-index entry.
     forcing: incident — a shipped, measured defect on the version now live on both hosts, filed as
     task #463 by the session that found it.
-13. **NEW — `claim-work --slug-for` collapses every LETTERED sub-rank to the bare doc slug, so the
+13. **`claim-work --slug-for` collapses every LETTERED sub-rank to the bare doc slug, so the
     queue lock is inert for exactly the items that are open.** Repo: `devrc`, `scripts/claim-work.sh`
     (plus its tests under `scripts/tests/`). Measured 2026-08-31 against
     `claudedocs/handoff-tmux-webapp.md`:
@@ -536,6 +538,44 @@ check are byte-identical in `gh pr checks`, and I diagnosed the first without na
   endpoint on the same server DOES push), but note it also has an earlier `if d.armed()` guard at
   test line ~532 that would fire BEFORE the barrier for some mutant shapes — the classic
   "an earlier check always wins so the guard never executes" trap.
+
+### ✅ RESOLVED — `ZacxDev/homelab-infra#591`'s evidence was UNDER-REPORTED, not wrong
+🔴 **This CORRECTS the block above, which is left in place because the failure mode is the lesson.**
+The site-3 mutant was **two hunks**, and the report described only the first. The omitted hunk was:
+```go
+-	noteID := *a.NoteID
++	var noteID int64 // MUTANT: nil-safe deref so M3 fails on the ASSERTION, not a panic
++	if a.NoteID != nil {
++		noteID = *a.NoteID
++	}
+```
+The mutant's own comment names the panic trap, so the author had designed around it and then
+under-described the patch. My single-hunk re-run was therefore a **different mutant** — a real
+INVALID one — and the panic I measured was correct about the patch I applied and not about theirs.
+
+**Re-verified independently, on the corrected single-hunk form** (which keeps the deref reachable
+by assigning the by-value local copy: `agents.Store.GetByName` returns `Agent`, not `*Agent`):
+```go
+-	if a.Status != agents.StatusRunning || a.NoteID == nil {
++	if a.Status != agents.StatusRunning {
+ 		return
+ 	}
++	if a.NoteID == nil {
++		a.NoteID = new(int64) // local copy; keeps the deref below reachable
++	}
+```
+- mutant **+** barrier → `push_task_test.go:282: task-less agent fired 1 provisioning push(es),
+  want 0` — the test's own `t.Fatalf`, **0 panics** (`grep -c '^panic:'` = 0).
+- mutant **−** barrier (the `awaitPushesSettled` line deleted from that test only) → `ok`, `-count=50`.
+- 🔴 **Positive control for that rc 0**, because a `-run` filter matching nothing also exits 0:
+  the same filter on the unmutated tree with `-v` gives **50 `--- PASS`**, and no
+  `no tests to run` warning appears in either log. So the assertion is genuinely BLIND without the
+  barrier, and the barrier is what catches the mutant.
+
+All eight sites were re-classified as assertion-vs-panic-vs-compile-error: **eight died at their
+own `t.Fatalf`, zero panics, zero compile failures.** Site 3 was the only one carrying this hazard,
+because its guard is the only one that also protects a pointer deref. Commit amended to
+`d687fcaa`, force-pushed with `--force-with-lease`; local HEAD == `origin`'s.
 
 ## Gotchas
 - 🔴 **A FAILED `git worktree add` DOES NOT STOP THE NEXT `git -C <path>` — AND I LANDED A
@@ -1127,6 +1167,25 @@ check are byte-identical in `gh pr checks`, and I diagnosed the first without na
   `origin/main` at this handoff**, with another session's uncommitted `nix/pkgs/default.nix` in the
   tree. Authoring the handoff there would have hit `handoff_doc.py`'s `stale-base` refusal at best
   and committed onto their branch at worst. Author from a worktree off `origin/main`.
+
+- 🔴 **A MUTATION RUNNER THAT PRINTS "THE FIRST `file.go:NNN:` MATCH" CANNOT TELL A KILL FROM A
+  DEATH UPSTREAM — and its output looks identical either way.** #591's original runner grepped
+  `\.go:[0-9]+:` and printed the first hit. For a real kill that is the `t.Fatalf` line; for a
+  panicking mutant it is a **stack frame**, equally plausible-looking. The sweep therefore could
+  not have been evidence for the claim it was used to make, whatever the result. **A sweep must
+  CLASSIFY each red — assertion / panic / compile error — and say which**; a bare "died" is not a
+  kill. Same family as the kill-attribution parser that printed `by: FAIL:` for all 15 mutants.
+- 🔴 **UNDER-REPORTING A MULTI-HUNK MUTANT IS INDISTINGUISHABLE FROM FABRICATING THE RESULT, and
+  the re-runner will measure a DIFFERENT mutant.** #591's site-3 patch was two hunks; the report
+  named one. Re-running the named hunk alone produced a panic — a true measurement of a mutant
+  nobody had run, which read as "the reported evidence is false". Both parties were right about
+  their own patch. **State every hunk of a mutant verbatim**, and when re-verifying someone else's,
+  ask for the literal patch before concluding their number was wrong.
+- 🔴 **`rc=0` FROM A `-run`-FILTERED GO TEST IS NOT "IT PASSED" — a filter matching NOTHING also
+  exits 0**, and `--- PASS` lines do not print without `-v`, so a count of them reads 0 for a
+  perfectly good run. Pair every filtered rc 0 with a positive control on the same filter
+  (`-v`, count `--- PASS`) and check for `no tests to run`. This is the go-test face of the
+  documented reassuring-zero class.
 
 ## How to verify
 
