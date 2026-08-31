@@ -21,42 +21,58 @@ durable output is the linkage: which ClickUp ticket, which clawgate card, and wh
 genuinely built versus assumed.
 
 ## State now
-- **Branch / PR:** nothing in flight for this effort. All of it merged; base `origin/main`
-  at `093a63db` or later.
-- 🔴 **RANK 1 IS DONE AND MERGED — cg#365's remaining defect is fixed.** devrc#1130 →
-  squash **`ec102d00`**, verified BY CONTENT (the guard is present in
-  `origin/main:scripts/lib/session_trailer.py`), never by ancestry.
-  - Root cause was **not** what the earlier diagnosis in this doc said. The code DID test
-    for a trailer block — but from the **last line**, and `^[A-Za-z][A-Za-z0-9-]*:\s`
-    matches a conventional-commit SUBJECT, so `fix: one line only` looked like a trailer
-    block and the stamp was joined to it with no blank line. Now decided by the **last
-    paragraph**, per git's real rule (probed against `git interpret-trailers` 2.55.0).
-  - **A second regression closed with it**, unpredicted: on an indented continuation
-    (`Co-Authored-By: A\n    <a@b.c>`) the old last-line test split the block and **lost
-    the sibling trailer**.
-  - **Audit ladder ran 2 rounds.** Round 1 found a `IndexError` on a whitespace-only tail
-    line that the hook's broad `except` swallowed into a commit succeeding with no
-    trailer, nothing logged — fixed in `10a5dc0a`. Round 2 found no payload defect and
-    verified the guard across 10,974 messages with zero divergence from base. Stopping at
-    2 was a judgement call, not a clean round: round 2's fixes changed **0 payload lines**,
-    so a round 3 would have audited the ladder's own scaffolding.
-  - **Gated on the merged tree**, not just the branch — both `checks.x86_64-linux` tiers
-    built green in a real clone at `c06a56a1 + 96d5c315`. `strict: false`, so a branch
-    check says nothing about the tree a merge creates.
-- ✅ **VERIFIED LIVE ON BOTH HOSTS, against the deployed artifact — not merged-and-assumed.**
-  The original failing shape (`fix: one line only`) now gains its blank line through the
-  installed `.git/hooks/prepare-commit-msg`, and `git interpret-trailers --parse` returns
-  the id. Laptop carries the same store copy and has the git hook installed.
-- **The trailer remains ARMED on both hosts** (PreToolUse recorder + git hook), unchanged
-  from the previous session.
-- 🔴 **Cairn's integration is now planned in its OWN doc — do not re-derive it here.**
-  `claudedocs/plan-cairn-integration.md` (merged `093a63db`) records 11 decisions from an
-  alignment session: Cairn is a **per-person agent re-entry cache, multi-tenant, one store
-  per person**, hosted pod canonical, local disk a read-through cache, automatic capture,
-  age-out on read recency, opt-in sharing gated by `sensitivity:`. Phases 0–4 live there.
-  **Store state re-measured 2026-08-31: workbench 146 entries / 15 scopes, laptop 47 / 12,
-  22 distinct scopes of which 5 overlap and 7 are laptop-only.** The figures in the
+- **Branch / PR:** nothing in flight for this effort. Everything merged.
+- 🔴 **RANK 2 IS DONE — cg#445 is fixed and merged.** devrc#1148 → squash **`8e8ee3bc`**,
+  verified BY CONTENT on `origin/main` (`held_count` and `_config_write_lock` both present),
+  never by ancestry.
+  - **The card's stated mechanism was WRONG, and that is why it was rediscovered three
+    times.** It blamed the git **common dir's** config shared by ~117 worktrees — an
+    environmental fact, therefore unfixable, which is where 2026-08-22, 08-28 and 08-30 all
+    stopped. The contended file was the guard's **own** `GIT_CONFIG_GLOBAL` target with a
+    fixed filename (`guard_dir / "gitconfig"`), and `nogit_plugin.py`'s own comment said so.
+  - 🔴 **The obvious fix (per-pid filename) would have broken GUARD 10 on EVERY target.**
+    `scripts/run-tests.sh` builds that path independently in shell as `$NOGIT_CONFIG` and
+    tests it for **equality** (`:4562`), and counts control keys in that **one** file
+    (`:3023`). Neither greps for `guard_config_path`. Shipped instead: an advisory `flock`
+    on a separate `<guard-dir>/gitconfig.pylock` — never `.lock`, which is git's own lock
+    name for the same file.
+  - **Four audit rounds, ending clean.** Payload lines per fix round: **113 → 69 → 35 → 0 →
+    0**. Rounds 1–3 each found a defect created by the previous round's fix; round 4 found
+    nothing and both stop conditions fired together (clean round + two consecutive
+    zero-payload rounds).
+  - **The three prior rediscoveries were 2026-08-22, 08-28 and 08-30**, each costing
+    ~20-minute control runs, all recorded in the `devrc/tests` index entry.
+- 🔴 **Cairn's integration is planned in its OWN doc — do not re-derive it here.**
+  `claudedocs/plan-cairn-integration.md` (merged `093a63db`): 11 decisions from an alignment
+  session — Cairn is a **per-person agent re-entry cache, multi-tenant, one store per
+  person**, hosted pod canonical, local disk a read-through cache, automatic capture, age-out
+  on read recency, opt-in sharing gated by `sensitivity:`. Phases 0–4 live there.
+  **Store state measured 2026-08-31: workbench 146 entries / 15 scopes, laptop 47 / 12; 22
+  distinct scopes of which 5 overlap and 7 are laptop-only.** The figures in the
   `subsystem-index` skill are from 2026-08-27 and are stale.
+- ✅ **GATED ON THE MERGED TREE, three tiers** — `origin/main 74b427d5` + `21176d1d`, built
+  in a real clone (never a worktree — `nix build path:<worktree>` breaks every git call in
+  the sandbox), one at a time:
+  - sandbox `pytests` → `/nix/store/gzx25hxsyzz8…` GREEN
+  - sandbox `nodetests` → `/nix/store/s112ljw56ww0…` GREEN
+  - dev-host `gate.sh --tier pytest` → `GATE: RESULT=PASS exit=0`, 19914 passed / 0 failed
+  - 🔴 **The two sandbox tiers prove MERGE SAFETY ONLY.** `NOGIT_REPO_LOCAL` is empty in the
+    nix sandbox, so GUARD 10 is not the same guard there. Only the dev-host tier is evidence
+    about cg#445 — keep those two claims separate.
+  - **The GUARD 10 evidence, on the merged tree:** **zero** occurrences of `unmeasured` or
+    `lock-contended` in the whole run (grepped explicitly — that value is *pass-shaped* if
+    you only read an exit code); `config-control` equals `plugin` on **all 38 targets**; and
+    `scripts/validation/tests`, the exact target cg#445 named, reports `config-control=4
+    plugin=4`.
+- **cg#365 and cg#445 are both at `ready_for_review`, awaiting the operator's `complete`
+  call** — neither body carries a `## Acceptance criteria` heading, so per the status gate
+  an agent may not mark them complete.
+- **The CI diagnosis went to cg#348 as comment 593**, not a new card — cg#348 already covered
+  the priority mechanism, and cg#337/#303 are adjacent.
+- ⚠ **The base clone `~/workspace/devrc` is on `main`, behind `origin/main`, with another
+  session's uncommitted work** (`M nix/pkgs/default.nix`, plus untracked
+  `output.txt`, `scripts/diagnose-nix-disk.sh`, `scripts/tests/test_opencode_rig_control.py`).
+  Theirs to sync, not this effort's.
 
 ## The cluster — ClickUp ↔ clawgate ↔ Cairn
 All six ClickUp tickets came from the **2026-08-26 harness / knowledge-sharing meeting**
@@ -247,46 +263,71 @@ clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg
   shape, which works today. Condition is "add a separator only when there is no trailer
   block to join". Recorded in full as comment 570 on cg#365.
 
-## Next steps (ranked)
-🔴 **NUMBERING IS STABLE — items are marked done IN PLACE, never removed or renumbered.**
-The rank is half a `claim-work` slug's identity, so re-ranking silently re-points every
-live claim. Ranks 1 and 3 are closed and kept as tombstones.
+### 🔴 OPEN — a stale `<cfg>.lock` is self-inflicted and nothing cleans it up
+- **Symptom + exact repro:** `_git`'s own `timeout=LOCK_TIMEOUT` SIGKILLs git; git does not
+  remove its lockfile on SIGKILL. **One** timed-out `git config --global` write therefore
+  poisons the guard dir for every remaining session and every remaining target.
+- **Observed (with values):** measured at HEAD with the mutex working perfectly — after one
+  timed-out write the guard dir holds `['gitconfig', 'gitconfig.lock']`, and the very next
+  session gets `git config --global exited 255 — still lock-contended after 6 attempts`.
+  `command grep` over `run-tests.sh` + the plugin found **no** stale-lock handling anywhere.
+- **Ruled out:** that this is a regression from the mutex — it is not. Serialised writes are
+  *faster*, so a timeout is strictly **less** likely at HEAD than at base. Pre-existing.
+- **Leading hypothesis:** it is a real, unclosed hole. The mutex made it *legible*, not gone.
+- **Next probe:** decide whether to close it (unlink a `<cfg>.lock` older than N seconds
+  before the first attempt, with the risk that a live git write is mid-flight) or leave it
+  documented. Worth its own card if it recurs.
 
-1. ✅ **DONE — cg#365's single-paragraph trailer separator.** Merged `ec102d00`
-   (devrc#1130), verified live on both hosts against the deployed hook. cg#365 is at
-   `ready_for_review`; whether it goes to `complete` is the operator's call, because its
-   body carries a prose "Closing condition" rather than a `## Acceptance criteria` heading.
-   **Do not re-work this item.**
+### 🔴 CLOSED AS UNRECOVERABLE — which mechanism caused the 2026-08-30 red
+- **Observed:** three distinct mechanisms produce a **byte-identical** `still lock-contended
+  after 6 attempts` verdict: (a) genuine contention, (b) the mutex not held (fail-open), (c)
+  a stale `<cfg>.lock`. The original incident was diagnosed from exactly that string.
+- **Ruled out:** recovering it. No discriminator was recorded at the time and the run's
+  artefacts are long gone (Tekton retention is `keep: 20`, hourly).
+- **Resolution:** not knowable. The fix is verified against the mechanism it addresses; it is
+  **not** proof about that specific incident, and the doc should not imply otherwise. This is
+  the repo's own "an EMPTY RESULT cannot distinguish two mechanisms" rule landing on a
+  diagnosis. **Closed forward:** the verdict now prints `mutex=held N/6,
+  stale-git-lock=PRESENT|absent`, so a fourth rediscovery names its own mechanism.
+
+## Next steps (ranked)
+🔴 **NUMBERING IS STABLE — done items stay as tombstones, never removed or renumbered.**
+The rank is half a `claim-work` slug's identity. Ranks 1, 2 and 3 are closed.
+
+1. ✅ **DONE — cg#365's trailer separator.** Merged `ec102d00`. **Do not re-work.**
    forcing: none — closed.
-2. 🔴 **cg#445 — GUARD 10 is unmeasurable on the workbench.** `gate.sh`'s pytest tier is
-   red for attribution-only reasons on any run from a worktree of the shared clone
-   (`git config --global` exit 255, lock-contended, ~123 worktrees sharing the common
-   config). **This is now the ONLY open item in this queue with an external forcing
-   function, i.e. the one to work next.** 🔴 THIRD rediscovery — the index shows the same
-   class found on 2026-08-22 and 2026-08-28, each time costing ~20-minute control runs.
-   Hold the environment fixed and vary only the code; a `main`-in-an-isolated-clone control
-   against a branch failing in a *worktree* varies both and proves nothing.
-   forcing: gate — a required local gate is permanently red for reasons unrelated to any
-   change, which `claude/RULES.md` names as worse than no gate.
-3. ✅ **DONE — trailer confirmed on a real devrc commit.** Closed by `fa64c986`. Kept in
-   place so the numbering does not shift. **Do not re-work this item.**
+2. ✅ **DONE — cg#445, GUARD 10 unmeasurable.** Merged `8e8ee3bc`, four audit rounds, gated
+   on the merged tree across three tiers. `ready_for_review`; the `complete` call is the
+   operator's. **Do not re-work.**
    forcing: none — closed.
-4. ⚠ **cg#428 — STATUS CHANGED UNDER THIS DOC; RE-CHECK BEFORE TOUCHING IT.** This entry
-   used to read "BLOCKED on devrc#1011". Measured 2026-08-31: cg#428 is
-   **`ready_for_review`** with 5 comments — another session worked it while this effort was
-   in flight. Read the card before doing anything; the work described here may be done.
-   The standing constraint if any remains: it must IMPORT
-   `scripts/collector/mention_scan.py`'s `CLICKUP_TASK_URL` / `_github_url` /
-   `clawgate_url`, never write a second resolver.
+3. ✅ **DONE — trailer confirmed on a real devrc commit** (`fa64c986`). **Do not re-work.**
+   forcing: none — closed.
+4. ⚠ **cg#428 — RE-CHECK BEFORE TOUCHING.** Was "BLOCKED on devrc#1011"; measured 2026-08-31
+   it is **`ready_for_review`** with 5 comments — another session worked it. Read the card
+   first. If anything remains it must IMPORT `scripts/collector/mention_scan.py`'s
+   `CLICKUP_TASK_URL` / `_github_url` / `clawgate_url`, never write a second resolver.
    forcing: none — likely already delivered; verify rather than assume.
 5. **cg#429 — clickup-mirror per-task repo override.** Repo `homelab-talos`, files
    `scripts/clickup-mirror/mirror.py`,
    `clusters/workbench/apps/clickup-mirror/config-configmap.yaml`.
    forcing: none — re-probed 2026-08-30: cg#363/364/365 still read
-   `innovation-upstream/devrc`, cg#362 still unset. The mechanism is real and has not fired.
+   `innovation-upstream/devrc`, cg#362 still unset. Real mechanism, has not fired.
 6. **BLOCKED — do not start:** cg#362 and cg#363 wait on the teammate's private-repo
    migration ticket.
    forcing: none — blocked on a third party.
+7. 🔴 **cg#348 — make the CI reporter distinguish capacity from a broken gate.** Repo
+   `zacxdev/homelab-infra`, files `devrc-ci-pipeline.yaml` (the `clone` step and `post_leg`
+   in the `report` finally task). Diagnosis and ranked fixes are in **comment 593**.
+   🔴 The fix **recovers no lost check — it makes the loss legible**; the commit message must
+   say so or a reviewer reads it as a reliability fix.
+   forcing: gate — measured 2026-08-31, **2 of 28 terminal PR-gate runs (7.1%) lost a
+   REQUIRED check to pure queueing**, and with `enforce_admins: true` those PRs are BLOCKED
+   until someone pushes again. Three capacity outcomes and one real defect currently post the
+   same string.
+8. **Cairn integration, phase 0** — reconcile the two conflicting writers of the subsystem
+   store before automatic capture multiplies the inconsistency. Plan and all 11 decisions:
+   `claudedocs/plan-cairn-integration.md` (merged `093a63db`). Do not re-derive them here.
+   forcing: none — nothing external is waiting.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **cg#428 COLLIDES WITH OPEN PR #1011 (`feat/mention-detection-click-to-open`), and
@@ -623,25 +664,65 @@ live claim. Ranks 1 and 3 are closed and kept as tombstones.
   says an agent may not mark it `complete` — it derives criteria it would then be grading
   itself against. Left at `ready_for_review` deliberately.
 
+- 🔴 **`git checkout -- <path>` DESTROYED UNCOMMITTED WORK TWICE IN ONE SESSION, both times
+  while restoring after a mutation test.** It reverts to the COMMITTED state, so fixes that
+  were not yet committed simply vanished. The second time was caught **only** because a
+  brand-new test failed *unmutated* and its message showed the OLD verdict format — without
+  that test I would have committed a fix that was not there. **Commit before mutating, and
+  mutate a `cp -a` copy** (`rm -f <copy>/.git` first — a worktree's `.git` is a FILE pointing
+  at the real git dir). I had put this exact warning in a subagent's brief and then walked
+  into it myself.
+- 🔴 **A PREDICATE OPEN-CODED IN TWO LANGUAGES IS INVISIBLE TO A ONE-LANGUAGE GREP.** I
+  grepped `guard_config_path`/`CONFIG_NAME` (Python), found three consumers, and briefed
+  "nothing requires sharing". Two more existed in `run-tests.sh`, which builds the same path
+  in **shell** as `$NOGIT_CONFIG`. The proposed fix would have broken GUARD 10 on every
+  target. **Ask what OTHER language constructs this value before declaring a consumer list
+  complete.**
+- 🔴 **THE AUDIT LADDER FOUND DEFECTS IN MY OWN FIXES, TWICE, AND BOTH WERE THE SHAPE THE FIX
+  WAS MEANT TO PREVENT.** Round 2: the `mutex=` field I added to make failures legible
+  sampled ONE retry attempt while reading as the whole run. Round 3: my fix for that had a
+  **surviving mutant** (`held_count += 0`) because the fixture could only ever produce `0`
+  and I asserted that literal — `claude/RULES.md`'s "a fixture derived from the constant
+  under test", walked into *while fixing a mutation-coverage defect*. **Budget for the ladder
+  to audit the repair, not just the original.**
+- 🔴 **`install()`-style helpers that set process-wide state must not be called from a test.**
+  My round-2 tests called `nogit_plugin.install()` in-process; it rewrites five env vars and
+  its own header says it is NEVER UNDONE, so the redirect leaked into **42 later tests**,
+  which then verified containment against a redirect an unrelated test installed. The file
+  already had the right pattern (`monkeypatch.setenv`). Round 4 reproduced the leak from
+  scratch as a positive control before confirming the fix.
+- 🔴 **I DELETED ANOTHER SESSION'S AUDIT REFS.** Sweeping `refs/audit/*` to clean up my own
+  two, I removed **eight** belonging to a live PR #1119 ladder. Recoverable (that branch was
+  intact on origin) but not mine to touch. **Filter to your own refs by name.**
+- 🔴 **`git branch -r --contains` IS NOT AUTHORITATIVE** — it reads a local tracking ref and
+  named a branch `git ls-remote` says does not exist. Ask the remote, then compare CONTENT.
+- 🔴 **RE-CHECK THE BRANCH AT THE MOMENT YOU ACT.** `git status -sb` said `main` at session
+  start; hours later the shared base clone stood on a feature branch. A `merge --ff-only` on
+  that assumption was misread as "main has diverged" — it had not. The remedy that reading
+  suggested (`reset --keep origin/main`) would have moved the FEATURE BRANCH's pointer.
+  Caught only because the operator asked "is that safe?".
+- ⚠ **Backticks in a `git commit -m` body are COMMAND SUBSTITUTION** — a bullet silently lost
+  its content. Use `-F <file>`.
+- ⚠ **zsh does not word-split unquoted parameters** — `set -- $r` in a loop read the whole
+  string as one field and printed four zeros. Use explicit values or a real array.
+- **Filing on an already-covered card beats minting a new one.** The CI diagnosis went to
+  cg#348 as a comment because the duplicate sweep found cg#348/#337/#303 already open on it;
+  a fourth card would have been the exact collision class this whole effort investigated.
+
 ## How to verify
 ```bash
-# rank 1 landed, BY CONTENT (squash — never ancestry)
-git -C ~/workspace/devrc show origin/main:scripts/lib/session_trailer.py | grep -c "if not para:"
+# rank 2 landed, BY CONTENT (squash — never ancestry)
+git -C ~/workspace/devrc show origin/main:scripts/testlib/nogit_plugin.py | grep -c held_count
 
-# 🔴 the fix works through the DEPLOYED hook — reproduce the original symptom
+# 🔴 GUARD 10 is actually measuring — the dev-host tier ONLY; the nix sandbox is NOT this guard
+nix develop ~/workspace/devrc -c bash ~/workspace/devrc/scripts/gate.sh --tier pytest > /tmp/g.log 2>&1
+grep -cE "unmeasured|lock-contended" /tmp/g.log        # MUST be 0 — this is the failure mode
+grep -E "config-control=" /tmp/g.log | awk '{c="";p="";for(i=1;i<=NF;i++){if($i~/^config-control=/){split($i,a,"=");c=a[2]}if($i~/^plugin=/){split($i,b,"=");p=b[2]}}; print $1, (c==p?"OK":"*** MISMATCH ***")}'
+
+# the trailer works through the DEPLOYED hook — reproduce the original symptom
 printf 'fix: one line only\n' > /tmp/t1 && ~/workspace/devrc/.git/hooks/prepare-commit-msg /tmp/t1 message
 git interpret-trailers --parse < /tmp/t1     # must print Claude-Session-Id; EMPTY was the bug
 
-# the trailer is ARMED, not merely deployed — both must hold, on BOTH hosts
-python3 -c "import json,os;s=json.load(open(os.path.expanduser('~/.claude/settings.json')));\
-print('ARMED' if [h for h in s['hooks']['PreToolUse'] if 'session-stamp' in json.dumps(h)] else 'NOT ARMED')"
-ls -l ~/workspace/devrc/.git/hooks/prepare-commit-msg
-
 # 🔴 every ranked item's LIVE state — this doc goes stale under you
-clawgatectl task ls --summary | jq -r '.[] | select([362,363,364,365,428,429,439,445]|index(.id)) | "cg#\(.id) \(.status)"'
-
-# 🔴 the LOCAL gate must be run from an isolated CLONE, never a worktree (cg#445)
-C=$(mktemp -d); git clone --quiet --no-hardlinks ~/workspace/devrc "$C"
-cd "$C" && nix develop ~/workspace/devrc -c bash scripts/gate.sh
-nix build "path:$C#checks.x86_64-linux.pytests" --no-link   # ONE AT A TIME
+clawgatectl task ls --summary | jq -r '.[] | select([348,362,363,364,365,428,429,439,445]|index(.id)) | "cg#\(.id) \(.status)"'
 ```
