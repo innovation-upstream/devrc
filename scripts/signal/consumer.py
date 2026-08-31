@@ -43,11 +43,15 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+# Aliased: `_base_message()` binds a LOCAL named `quote` (the envelope's reply
+# quote), and an unaliased import would read as that in every other function.
+from urllib.parse import quote as _urlquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import psycopg2  # noqa: E402  (real class objects for the retry classifier)
 
+import _mentions  # noqa: E402
 import _signal_db  # noqa: E402
 from _signal_db import (  # noqa: E402
     RECONCILE_NOT_SENT,
@@ -91,6 +95,12 @@ ACCOUNT = os.environ.get("SIGNAL_ACCOUNT", "")
 RECEIVE_PATH = "/v1/receive"
 ATTACHMENT_PATH = "/v1/attachments"
 SEND_PATH = "/v2/send"
+# 🔴 A READ. `GET /v1/groups/<account>/<group-id>` returns the group's detail,
+# including `members[]` — which arrives MIXED: some entries are E.164, some are
+# bare UUIDs (measured against the deployed signal-cli-rest-api for the 7-member
+# 'Vetr app group': 5 of 7 were uuid-only). Anything joining that list against
+# `signal.contacts` must therefore try BOTH columns; see `_mentions._contact_ids`.
+GROUPS_PATH = "/v1/groups"
 
 # --------------------------------------------------------------------------- #
 # The event kinds this consumer emits. tests/test_skill_doc.py DERIVES this list
@@ -987,14 +997,20 @@ def conversation_key(msg: dict) -> str:
 # The send path — the ONLY route to the Signal send endpoint (D3)
 # --------------------------------------------------------------------------- #
 def transmit_approved(auth, *, recipient: str, body: str, number: str,
+                      mentions: list | None = None,
                       poster=None, api_url: str | None = None,
                       timeout: float = 20.0) -> dict | list:
     """POST an approved draft to the Signal API. Requires a `SendAuthorization`.
 
     🔴 `spend_authorization()` runs BEFORE anything touches the network, and it
-    raises `SendGateError` for a non-capability, a forged look-alike, or a
-    capability that has already been spent. There is no keyword that skips it and
-    no other send-endpoint call site in `scripts/signal/`.
+    raises `SendGateError` for a non-capability, a forged look-alike, a
+    capability that has already been spent, OR a payload that is not the one the
+    capability was minted for. There is no keyword that skips it and no other
+    send-endpoint call site in `scripts/signal/`.
+
+    `mentions` is the wire array (`[{"author","start","length"}, …]`) and is part
+    of what the capability binds, so it cannot be added, removed or re-pointed
+    between approval and this call.
 
     `number` is the SENDING account and is REQUIRED by the server: upstream
     `SendV2` rejects an empty one with 400 `"Couldn't process request - please
@@ -1007,19 +1023,156 @@ def transmit_approved(auth, *, recipient: str, body: str, number: str,
     locally generated one would not dedupe). Upstream types that field as a
     STRING (`ds.SendMessageResponse.Timestamp string`), so the caller coerces.
     """
-    spend_authorization(auth)
+    spend_authorization(auth, recipient=recipient, body=body, mentions=mentions)
     if not number:
         raise SendGateError(
             "transmit refused: no sending `number` — the server would reject this "
             "with 400 'please provide a valid number' (D3 approval gate)")
     url = (api_url or API_URL).rstrip("/") + SEND_PATH
     payload = {"message": body, "number": number, "recipients": [recipient]}
+    # 🔴 OMITTED, not sent empty, when there are no mentions. Upstream's
+    # `SendMessageV2` unmarshals `mentions` into `[]data.MessageMention`; a
+    # mention-free send has never carried the key and does not start now, so the
+    # request byte-for-byte matches the one this path has been making all along.
+    # Each entry is rebuilt with EXACTLY the three keys the server's struct has
+    # — a fourth would be dropped silently, and a stray key from a stored row is
+    # not something to discover on the wire.
+    if mentions:
+        payload["mentions"] = [
+            {"author": str(m["author"]), "start": int(m["start"]),
+             "length": int(m["length"])}
+            for m in mentions
+        ]
     if poster is None:  # pragma: no cover - the live path; tests inject a poster
         import requests
         poster = requests.post
     resp = poster(url, json=payload, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
+
+
+def fetch_group_members(number: str, group_address: str, *, getter=None,
+                        api_url: str | None = None,
+                        timeout: float = 20.0) -> list:
+    """`GET /v1/groups/<number>/<group-id>` → the group's `members[]`.
+
+    Read-only, and the ONLY reason this function exists is mention resolution: a
+    display name is meaningless without the membership to resolve it against,
+    and resolving against the whole `signal.contacts` table would let a name that
+    matches somebody in a DIFFERENT conversation become an `author` here.
+
+    Returns the raw list — a MIX of E.164 strings and bare UUID strings. It is
+    deliberately not normalised: `_mentions` owns that, so there is one place
+    that decides what a member identifier means.
+
+    A member entry may also be an OBJECT (`{"number": …, "uuid": …}`) depending
+    on the upstream version; both shapes are flattened rather than assumed, for
+    the same reason `_normalize_send_response` accepts two reply shapes — a
+    surprise here would otherwise read as "this group has no members", which is
+    a REFUSAL in `_mentions.resolve_mentions` and not a silent empty array.
+    """
+    if getter is None:  # pragma: no cover - the live path; tests inject a getter
+        import requests
+        getter = requests.get
+    url = "{}{}/{}/{}".format((api_url or API_URL).rstrip("/"), GROUPS_PATH,
+                              _urlquote(number, safe=""),
+                              _urlquote(group_address, safe=""))
+    resp = getter(url, timeout=timeout)
+    resp.raise_for_status()
+    detail = resp.json()
+    if isinstance(detail, list):  # some versions return a single-element list
+        detail = detail[0] if detail else {}
+    out = []
+    for member in (detail or {}).get("members") or []:
+        if isinstance(member, dict):
+            ident = member.get("uuid") or member.get("number")
+        else:
+            ident = member
+        if ident:
+            out.append(str(ident))
+    return out
+
+
+def resolve_draft_mentions(db, *, recipient: str, body: str, identifiers,
+                           number: str, member_fetcher=None) -> list:
+    """`--mention` values → the wire mentions array for one draft, or raise.
+
+    The seam between the three pieces, and the reason it is a named function
+    rather than four lines inside `main()`: a test can drive it with an injected
+    `member_fetcher` and the hermetic DB, which is the only way the refusal
+    matrix is reachable without a network.
+
+    Returns `[]` immediately when nothing was asked for — so the no-mention path
+    makes NO group API call at all, and `draft --to +15550100` keeps working with
+    no membership lookup and no behaviour change.
+    """
+    if not identifiers:
+        return []
+    is_group = _signal_db._looks_like_group_address(recipient)
+    if not is_group:
+        # Refuse WITHOUT a membership fetch: there is no group to fetch, and the
+        # error must name the real problem rather than an HTTP 404 from a URL
+        # built out of a phone number.
+        return _mentions.resolve_mentions(identifiers, body=body, members=[],
+                                          contacts=[], is_group=False)
+    # 🔴 REFUSED HERE, NOT AS A 404. An empty `--from-number` builds
+    # `/v1/groups//<gid>`, which the server answers 404 — and the 404 escaped
+    # `resp.raise_for_status()` as an `HTTPError`, which is NOT a `ValueError`,
+    # so `main()`'s draft handler did not catch it and the operator got a
+    # traceback and exit 1 for a missing argument.
+    if not str(number or "").strip():
+        raise _mentions.MentionGroupLookupFailed(
+            "mentions need the SENDING account number to look the group's "
+            "membership up (`GET /v1/groups/<number>/<id>`), and --from-number "
+            "is empty. Pass --from-number, or set $SIGNAL_ACCOUNT.")
+    fetch = member_fetcher or fetch_group_members
+    try:
+        members = fetch(number, recipient)
+    except (_mentions.MentionError, AssertionError):
+        # `MentionError` is already the right shape. `AssertionError` is
+        # re-raised because the suite's "this must never be called" fetchers
+        # raise it: swallowing one would turn a guard that FIRED into a
+        # `MentionGroupLookupFailed` the surrounding test happily accepts —
+        # green for exactly the wrong reason.
+        raise
+    except Exception as exc:  # noqa: BLE001 - deliberately wide; see below
+        # 🔴 ANY failure of the membership lookup is a REFUSAL, in the type the
+        # `draft` handler catches. The transport raises `requests` exceptions,
+        # the JSON decode raises its own, and neither is a `ValueError` — so
+        # every one of them reached the operator as a traceback. Re-raised with
+        # the original type NAMED and chained, so nothing is hidden.
+        raise _mentions.MentionGroupLookupFailed(
+            f"could not read the target group's membership from "
+            f"`GET /v1/groups/<number>/<id>` ({type(exc).__name__}: {exc}), so no "
+            f"--mention can be resolved. Nothing was drafted. Check "
+            f"--from-number and that --to is the group `id`, not its "
+            f"`internal_id`.") from exc
+    contacts = db.contacts_by_identifiers(members)
+    return _mentions.resolve_mentions(identifiers, body=body, members=members,
+                                      contacts=contacts, is_group=True)
+
+
+def mention_author_names(db, mentions) -> dict:
+    """`{author: display name}` for a resolved mentions array. For the CARD.
+
+    The card's job is to tell a HUMAN who a draft will ping, and `author` is
+    usually a bare uuid.
+
+    🔴 A SECOND QUERY, NOT THE RESOLVER'S. It goes through the same
+    `contacts_by_identifiers` METHOD, but with a different identifier list — the
+    resolved `author` ids, not the group's full membership — so it is a separate
+    round trip against a table that ordinary ingest is writing to concurrently.
+    The docstring used to claim the two "come from one query"; they do not, and
+    a promotion landing in between can legitimately make the card print a name
+    the resolver did not see. That is a display-time difference only: the
+    `author` on the wire is the one the resolver returned, and it is what the
+    approval digest binds. Named rather than papered over, because a reader who
+    believed "one query" would treat a disagreement as impossible.
+    """
+    if not mentions:
+        return {}
+    authors = [str(m.get("author")) for m in mentions if m.get("author")]
+    return _mentions.author_names(mentions, db.contacts_by_identifiers(authors))
 
 
 def http_attachment_fetcher(api_url: str | None = None, timeout: float = 30.0):
@@ -1176,6 +1329,17 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--body", required=True)
     d.add_argument("--from-number", default=ACCOUNT,
                    help="the sending account (default $SIGNAL_ACCOUNT)")
+    d.add_argument("--mention", action="append", default=[], metavar="WHO",
+                   help="ping a GROUP member. Repeatable. WHO is the member's "
+                        "display name, or their bare uuid / +E.164. --body MUST "
+                        "already contain the literal text `@WHO` — a Signal "
+                        "mention REPLACES an existing span of the message, so "
+                        "the span has to exist. Anything that cannot be resolved "
+                        "to exactly one real member of THIS group is REFUSED "
+                        "(exit 3), never dropped: a mention pushes a "
+                        "notification through the recipient's mute settings, so "
+                        "silently sending fewer than you asked for is a "
+                        "different act from the one you approved")
 
     ls = sub.add_parser("drafts", help="list drafts and their send_state")
     ls.add_argument("--state", choices=[STATE_PENDING, STATE_APPROVED,
@@ -1184,6 +1348,13 @@ def build_parser() -> argparse.ArgumentParser:
     a = sub.add_parser("approve", help="record Zach's clawgate approval for a draft")
     a.add_argument("draft_id", type=int)
     a.add_argument("--ref", required=True, help="the clawgate approval reference")
+
+    ua = sub.add_parser(
+        "unapprove",
+        help="withdraw an approval: approved -> pending, so it can be approved "
+             "again (the ONLY route out of a digest refusal)")
+    ua.add_argument("draft_id", type=int)
+    ua.add_argument("--note", help="why, recorded on the row's approval_ref")
 
     sd = sub.add_parser("send", help="transmit an APPROVED draft (gated)")
     sd.add_argument("draft_id", type=int)
@@ -1334,9 +1505,17 @@ def main(argv=None) -> int:  # pragma: no cover - thin CLI shell over tested uni
         elif args.cmd == "draft":
             import clawgate
             try:
+                # 🔴 RESOLVED BEFORE THE ROW IS WRITTEN. Every mention refusal is
+                # a `ValueError` subclass and lands in the handler below, so a
+                # bad --mention leaves NO draft behind — an operator who fixes
+                # the name and re-runs gets one draft, not two, and the clawgate
+                # queue never shows a card for a message that cannot be sent.
+                mentions = resolve_draft_mentions(
+                    db, recipient=args.to, body=args.body,
+                    identifiers=args.mention, number=args.from_number)
                 draft = db.draft_message(
                     recipient=args.to, body=args.body,
-                    self_number=args.from_number)
+                    self_number=args.from_number, mentions=mentions)
             except ValueError as exc:
                 # 🔴 EXIT 3, like every sibling. `mute` catches ValueError and
                 # `send`/`reconcile` catch SendGateError, both exiting 3; this
@@ -1346,13 +1525,30 @@ def main(argv=None) -> int:  # pragma: no cover - thin CLI shell over tested uni
                 print(f"refused: {exc}", file=sys.stderr)
                 return 3
             clawgate.emit_draft_task(
-                draft_id=draft["id"], recipient=args.to, body=args.body)
+                draft_id=draft["id"], recipient=args.to, body=args.body,
+                mentions=mentions,
+                author_names=mention_author_names(db, mentions))
             print(json.dumps(draft))
         elif args.cmd == "drafts":
             print(json.dumps(db.list_drafts(state=args.state), default=str))
         elif args.cmd == "approve":
-            print(json.dumps(db.approve_draft(args.draft_id, approval_ref=args.ref),
-                             default=str))
+            try:
+                print(json.dumps(db.approve_draft(args.draft_id,
+                                                  approval_ref=args.ref),
+                                 default=str))
+            except SendGateError as exc:
+                # Exit 3 like every sibling refusal. `approve` alone let a
+                # missing token / wrong-state refusal escape as a traceback.
+                print(f"refused: {exc}", file=sys.stderr)
+                return 3
+        elif args.cmd == "unapprove":
+            try:
+                print(json.dumps(db.unapprove_draft(args.draft_id,
+                                                    note=args.note),
+                                 default=str))
+            except SendGateError as exc:
+                print(f"refused: {exc}", file=sys.stderr)
+                return 3
         elif args.cmd == "send":
             try:
                 print(json.dumps(db.send_approved(args.draft_id), default=str))

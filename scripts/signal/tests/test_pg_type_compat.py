@@ -220,3 +220,40 @@ def test_the_backstop_catches_the_refactors_that_walked_it(walk):
     assert _uncast_coalesces(walk), (
         f"the backstop does not flag {walk!r}, which raises DatatypeMismatch on "
         f"a real server — it is guarding a spelling, not the hazard")
+
+
+# --------------------------------------------------------------------------- #
+# The MIGRATION, on a real server
+# --------------------------------------------------------------------------- #
+@pytest.mark.skipif(not os.environ.get("SIGNAL_PG_DSN"),
+                    reason="needs a real Postgres (SIGNAL_PG_DSN); the hermetic "
+                           "substrate EMULATES `ADD COLUMN IF NOT EXISTS`, so it "
+                           "cannot answer this question")
+def test_ensure_schema_is_idempotent_on_real_postgres():
+    """🔴 `ensure_schema()` runs on EVERY consumer start, so it must be re-runnable.
+
+    Its hermetic sibling — `test_mentions.py::
+    test_ensure_schema_twice_is_a_no_op_ON_THE_SQLITE_SUBSTRATE` — asserts
+    `fakepg`'s own emulation of `ADD COLUMN IF NOT EXISTS`, which SQLite does not
+    have. That test was named `test_ensure_schema_twice_is_a_no_op`, which read
+    as a claim about the deployed engine; it was not one. This is.
+
+    Runs the SHIPPED `SCHEMA_STATEMENTS` (imported, never transcribed) twice
+    against a live server in a transaction that is rolled back, so a second start
+    that would crash the pod fails HERE instead.
+    """
+    import sys
+    sys.path.insert(0, str(MODULE.parent))
+    import psycopg2  # imported lazily: absent in the default hermetic env
+    import _signal_db
+
+    assert len(_signal_db.SCHEMA_STATEMENTS) > 5, "imported an empty DDL ledger"
+    conn = psycopg2.connect(os.environ["SIGNAL_PG_DSN"])
+    try:
+        with conn.cursor() as cur:
+            for _pass in (1, 2):
+                for statement in _signal_db.SCHEMA_STATEMENTS:
+                    cur.execute(statement)
+        conn.rollback()
+    finally:
+        conn.close()
