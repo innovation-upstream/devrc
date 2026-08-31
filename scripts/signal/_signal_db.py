@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
+import json
 import os
 import re
 import socket
@@ -40,6 +42,9 @@ import sys
 import time
 import uuid
 from urllib.parse import urlparse
+
+# Pure, dependency-free, and imports nothing from this module — no cycle.
+import _mentions
 
 try:
     import psycopg2
@@ -82,6 +87,46 @@ APPROVAL_TOKEN_ENV = "SIGNAL_APPROVAL_TOKEN"
 # The two outcomes an operator can record for a draft stranded in `sending`.
 RECONCILE_SENT = "sent"
 RECONCILE_NOT_SENT = "not-sent"
+
+# 🔴 `approval_ref` IS AN APPEND-ONLY AUDIT TRAIL, AND ONE SQL FRAGMENT SAYS SO.
+#
+# `approve_draft()` writes the clawgate reference the operator's decision is
+# recorded under; `unapprove_draft()` and BOTH branches of `reconcile_send()`
+# then record an operator NOTE on the same single TEXT column. Those three used
+# `approval_ref = COALESCE(%s, approval_ref)`, whose docstrings all claimed the
+# trail was "added to, never erased" — and COALESCE returns its FIRST non-null
+# argument, so passing a note returned THE NOTE and destroyed the reference to
+# the approval the refused attempt actually rode on. Exactly the documented
+# usage (`SKILL.md`: `unapprove 42 --note "..."`) was the case that erased it.
+# Round-2 audit F3; the reconcile half carried the identical defect under a
+# comment asserting the opposite ("A note ADDS to the record; it never replaces
+# it") and a test whose NAME said so while its assertion pinned the replacement.
+#
+# ONE fragment, three call sites, so the three cannot drift apart again — the
+# shape that produced this bug twice. The parameter appears TWICE, so every call
+# site binds the note twice; `_appended_note()` normalises a blank note to NULL
+# first, or an empty `--note` would append a bare separator.
+_APPEND_APPROVAL_REF = (
+    "approval_ref = CASE WHEN %s IS NULL THEN approval_ref "
+    "ELSE COALESCE(approval_ref || %s, %s) END"
+)
+# What separates one entry from the next in the trail. Read by the tests.
+APPROVAL_REF_SEPARATOR = " | "
+
+
+def _appended_note(note):
+    """`(note_or_none, suffix, first)` — the three binds `_APPEND_APPROVAL_REF` wants.
+
+    A blank or missing note is NULL, so the fragment's `CASE` leaves the column
+    untouched. A real note is appended after `APPROVAL_REF_SEPARATOR` when the
+    column already holds something, and stands alone when it does not — which is
+    what the `COALESCE(approval_ref || %s, %s)` expresses: `||` with a NULL left
+    operand is NULL in both Postgres and sqlite, so the fallback is the bare note.
+    """
+    text = (note or "").strip() if isinstance(note, str) else note
+    if not text:
+        return (None, None, None)
+    return (text, APPROVAL_REF_SEPARATOR + str(text), str(text))
 
 
 # --------------------------------------------------------------------------- #
@@ -265,6 +310,35 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
 
+    # 🔴 A MIGRATION, NOT A COLUMN IN THE `CREATE TABLE` ABOVE. Every other
+    # statement here is `CREATE … IF NOT EXISTS`, which is a no-op against an
+    # EXISTING table — so adding `mentions` to `signal.messages`'s CREATE body
+    # would take effect on a fresh database (the hermetic substrate, which is
+    # built from scratch every test) and do NOTHING to prod, where the table
+    # already exists. The suite would be green and the deployed schema unchanged.
+    # `ADD COLUMN IF NOT EXISTS` is idempotent in Postgres (>= 9.6), so
+    # `ensure_schema()` stays safe to run on every start.
+    #
+    # JSONB, holding the wire array verbatim: `[{"author","start","length"}, …]`.
+    # It is what was APPROVED and what is SENT, so it has to be durable for the
+    # same reason the body is — and the send-authorization binding compares
+    # against it (see `_mint_send_authorization`).
+    "ALTER TABLE signal.messages ADD COLUMN IF NOT EXISTS mentions JSONB",
+
+    # 🔴 WHAT THE HUMAN ACTUALLY APPROVED, as a digest. `approve_draft()` writes
+    # it; `_mint_send_authorization()` refuses to mint when the row no longer
+    # hashes to it.
+    #
+    # It has to be DURABLE and it has to be written at APPROVAL, because that is
+    # where the window is. `approve` and `send` are separate CLI invocations
+    # minutes or hours apart, and everything in between sees an ordinary row: a
+    # capability minted at SEND time out of whatever the row says then agrees
+    # with itself no matter what changed, which is precisely the tautology that
+    # made the old `auth.recipient`/`auth.body` fields dead code. Comparing
+    # against a value recorded BEFORE the wait is the only thing that can
+    # disagree.
+    "ALTER TABLE signal.messages ADD COLUMN IF NOT EXISTS approved_digest TEXT",
+
     "CREATE INDEX IF NOT EXISTS idx_msg_ts ON signal.messages(message_timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_msg_dm ON signal.messages(source_contact_id, message_timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_msg_group ON signal.messages(group_id, message_timestamp) WHERE group_id IS NOT NULL",
@@ -334,7 +408,7 @@ class SendAuthorization:
     look-alike object cannot stand in for it.
     """
 
-    __slots__ = ("draft_id", "recipient", "body", "_nonce")
+    __slots__ = ("draft_id", "recipient", "body", "mentions", "_nonce")
 
     def __init__(self, *_a, **_kw):  # pragma: no cover - exercised via the gate tests
         raise SendGateError(
@@ -353,6 +427,78 @@ class SendAuthorization:
 _ISSUED_NONCES: set[str] = set()
 
 
+def payload_digest(*, recipient, body, mentions) -> str:
+    """A stable fingerprint of the three things that make up a sent message.
+
+    Canonical JSON with sorted keys so the digest depends on the VALUES and not
+    on dict ordering or on whether `mentions` came back as `None`, `[]` or a JSON
+    string — `canonical_mentions()` flattens all three to the same tuple.
+
+    Not a security primitive: nothing here is defending against an attacker who
+    can already write to the row AND recompute the digest. It defends against
+    the realistic case — a second writer, a buggy job, an agent editing a draft
+    it did not approve — where the row changes and the digest does not.
+    """
+    payload = json.dumps(
+        {"recipient": recipient, "body": body,
+         "mentions": [list(m) for m in _mentions.canonical_mentions(mentions)]},
+        sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+# 🔴 THE ROUTE OUT, NAMED IN THE ERROR THAT SENDS YOU DOWN IT. Both digest
+# refusals used to end "Re-approve it" — an instruction the CLI could not carry
+# out: `approve` is `pending`-only, `reconcile` is `sending`-only, and there was
+# no third subcommand, so a refused draft was stuck in `approved` FOREVER. The
+# text and `unapprove_draft()` ship together; `test_skill_doc` pins the command
+# into SKILL.md and `test_mentions` walks this exact sequence with no raw SQL.
+_REAPPROVE_HINT = (
+    "run `unapprove {draft_id}` to return it to `pending`, then "
+    "`approve {draft_id} --ref <new-clawgate-ref>` — both are operator commands "
+    "and need SIGNAL_APPROVAL_TOKEN"
+)
+
+
+def recipient_identity(draft) -> str:
+    """The STABLE identity of a draft's recipient, for the approval digest.
+
+    🔴 WHY NOT `draft["recipient"]`. That field is a RENDERED PROJECTION, not an
+    identity: `get_draft()`'s `CASE` prints a contact's `phone_number` while the
+    row is a placeholder and its `signal_uuid` once it is not. `_promote_
+    placeholder()` performs exactly that swap as UNATTENDED BACKGROUND INGEST —
+    the moment an envelope arrives from a number we had only a placeholder for.
+
+    So hashing the rendered string made the ordinary "message someone new" path
+    fire the tamper guard: draft a DM to an unknown number → approve → that
+    person's first envelope arrives → the projection changes → `send` refuses,
+    with no adversary, no second writer, and NO CHANGE TO WHO THE MESSAGE GOES
+    TO. The promotion PRESERVES the contact row id (that is the documented point
+    of its `NOT EXISTS` guard), so the row id is stable across exactly the event
+    the rendered form is not.
+
+    Falls back to the address string only for a dict that carries no row ids —
+    the hand-built rows in the unit tests, which have no substrate behind them.
+    """
+    d = draft or {}
+    if d.get("group_id") is not None:
+        return f"group:{d['group_id']}"
+    if d.get("dest_contact_id") is not None:
+        return f"contact:{d['dest_contact_id']}"
+    return f"address:{d.get('recipient')}"
+
+
+def draft_payload_digest(draft) -> str:
+    """The approval digest OF A DRAFT ROW — the one definition, used by both sides.
+
+    `approve_draft()` writes it and `_mint_send_authorization()` re-checks it. A
+    single function so the two can never compute it over different fields, which
+    is the shape that would make the guard either vacuous or permanently red.
+    """
+    d = draft or {}
+    return payload_digest(recipient=recipient_identity(d), body=d.get("body"),
+                          mentions=d.get("mentions"))
+
+
 def _mint_send_authorization(draft: dict) -> SendAuthorization:
     """Mint a one-shot send capability for an APPROVED draft row.
 
@@ -366,23 +512,111 @@ def _mint_send_authorization(draft: dict) -> SendAuthorization:
             f"draft {(draft or {}).get('id')!r} has send_state={state!r}; only "
             f"{STATE_APPROVED!r} drafts may be transmitted (D3 approval gate)"
         )
+    # 🔴 THE APPROVE -> MUTATE -> SEND WINDOW, CLOSED HERE. `approve` and `send`
+    # are separate invocations; in between, the draft is an ordinary row that
+    # anything with the connection can rewrite. `approve_draft()` recorded a
+    # digest of exactly what it showed the human, and this refuses to mint a
+    # capability for a row that no longer hashes to it — so a body, a recipient
+    # or a MENTION added, removed or re-pointed after approval cannot be
+    # transmitted under that approval. FAILS CLOSED: a missing digest is a
+    # refusal, not a pass, because "no digest" and "digest cleared by the writer
+    # we are guarding against" are the same observation.
+    recorded = (draft or {}).get("approved_digest")
+    try:
+        current = draft_payload_digest(draft)
+    except _mentions.MentionError as exc:
+        # A stored `mentions` column that cannot be read is a REFUSAL on the send
+        # path, in the error type this path's CLI handler catches — not a bare
+        # TypeError escaping as a traceback.
+        raise SendGateError(
+            f"draft {draft.get('id')!r} carries an unreadable `mentions` column, "
+            f"so what was approved cannot be recomputed: {exc} (D3 approval gate)"
+        ) from exc
+    if not recorded:
+        raise SendGateError(
+            f"draft {draft.get('id')!r} is approved but carries NO approval "
+            f"digest, so there is nothing to check the payload against. Either "
+            f"it was approved before this binding existed, or the digest was "
+            f"cleared — the two are indistinguishable from here. "
+            + _REAPPROVE_HINT.format(draft_id=draft.get("id"))
+            + " (D3 approval gate — approve/mutate/send binding)"
+        )
+    if recorded != current:
+        raise SendGateError(
+            f"draft {draft.get('id')!r} CHANGED after it was approved: the row "
+            f"now hashes to {current} but the approval recorded {recorded}. "
+            f"Nothing was sent. Read the draft, then, if the new text is what "
+            f"you want, "
+            + _REAPPROVE_HINT.format(draft_id=draft.get("id"))
+            + " (D3 approval gate — approve/mutate/send binding)"
+        )
     auth = object.__new__(SendAuthorization)
     object.__setattr__(auth, "draft_id", draft["id"])
     object.__setattr__(auth, "recipient", draft.get("recipient"))
     object.__setattr__(auth, "body", draft.get("body"))
+    # 🔴 The MENTIONS are part of what was approved. A mention pushes a
+    # notification through a mute setting and names a third party, so a payload
+    # that gained, lost or re-pointed one after approval is a DIFFERENT act from
+    # the one on the card. Bound here; verified in `spend_authorization()`.
+    #
+    # WHICH WINDOW THIS SLOT COVERS, precisely (round-2 audit F4): it is the
+    # values read by `send_approved()`'s FIRST `_draft_or_raise()`, and
+    # `spend_authorization()` compares them against the SECOND read taken after
+    # the row is claimed. So these slots cover the mint-read → POST-read gap and
+    # nothing before it. The approve → mint half is covered by a DIFFERENT
+    # mechanism a few lines up: `approved_digest` vs `draft_payload_digest()`.
+    # Between them the whole approve → POST window is covered, but by two
+    # guards, not by this one.
+    object.__setattr__(auth, "mentions",
+                       _mentions.canonical_mentions(draft.get("mentions")))
     nonce = uuid.uuid4().hex
     object.__setattr__(auth, "_nonce", nonce)
     _ISSUED_NONCES.add(nonce)
     return auth
 
 
-def spend_authorization(auth: object) -> None:
-    """Consume a capability, or raise `SendGateError`.
+def spend_authorization(auth: object, *, recipient, body, mentions) -> None:
+    """Consume a capability FOR A SPECIFIC PAYLOAD, or raise `SendGateError`.
 
     Called by `consumer.transmit_approved()` immediately before it touches the
-    network. Rejects (a) anything that is not a real `SendAuthorization` and
+    network. Rejects (a) anything that is not a real `SendAuthorization`,
     (b) a capability that has already been spent — which is what makes an
-    approved draft transmit EXACTLY once.
+    approved draft transmit EXACTLY once — and (c) a payload that is not the one
+    the capability was minted for.
+
+    🔴 (c) IS THE NEW HALF, AND WHY THE ARGUMENTS ARE REQUIRED KEYWORDS. Until
+    it existed the capability authorised "a transmit for draft N" and NOTHING
+    about the message: `auth.recipient` and `auth.body` were populated at mint
+    and then read by nobody, so a writer that changed the row before the POST
+    sent text a human never saw, under an approval a human really did give.
+    Mentions make that window materially worse: they notify third parties
+    through mute settings, so a mutated mention array is an act against someone
+    who is not in the conversation you approved.
+
+    🔴 WHAT THIS COMPARISON COVERS, AND WHAT IT DOES NOT (round-2 audit F4 — the
+    docstring used to say "between approval and the POST", which is wider than
+    the code). `auth` was minted from `send_approved()`'s FIRST read of the row;
+    the values passed here come from its SECOND read, taken after the claim. So
+    this closes the **mint-read → POST-read** gap only. The **approve → mint**
+    half is closed separately and by a different instrument: `approve_draft()`
+    stores `approved_digest` and `_mint_send_authorization()` refuses to mint
+    unless the row still hashes to it. Two guards, one window between them —
+    stated as two claims because they fail independently, and a reader who
+    believes this one covers both would not notice the digest going missing.
+
+    One more difference worth naming: the digest hashes a CANONICAL recipient
+    identity (`recipient_identity()` — the contact/group ROW ID), while the
+    comparison here is against the recipient STRING `get_draft()` renders. That
+    string legitimately flips from a number to a uuid when `_promote_
+    placeholder()` learns a real uuid, which is why the digest does not hash it;
+    within the narrow window this guard covers, a flip is a real second writer.
+
+    The three parameters have NO DEFAULTS on purpose. A default would let a call
+    site silently opt out of the binding by omitting them, which is exactly the
+    seam this closes; a `TypeError` at import-time-adjacent call sites is the
+    point. This function is also the ONLY place the comparison lives — see
+    `test_the_only_send_call_site_is_inside_transmit_approved`, which pins that
+    `transmit_approved()` passes all three.
     """
     if not isinstance(auth, SendAuthorization):
         raise SendGateError(
@@ -390,13 +624,64 @@ def spend_authorization(auth: object) -> None:
             "is required (D3 approval gate); got "
             f"{type(auth).__name__}"
         )
+    # 🔴 THE THREE CHECKS RUN TYPE -> NONCE -> PAYLOAD, and the order is load
+    # bearing in BOTH directions. Nonce before payload, so a forgery that only
+    # half-populates the slots is refused as the forgery it is rather than as a
+    # payload mismatch (and so the pre-existing "already been spent" wording
+    # still wins for a replayed capability). Payload before the DISCARD, so a
+    # mismatch is a REFUSAL and not a consumed attempt: burning the capability
+    # here would strand a draft that nothing is wrong with, and the operator's
+    # remedy — look at the row, re-approve, re-send — needs it still sendable.
     nonce = getattr(auth, "_nonce", None)
     if nonce not in _ISSUED_NONCES:
         raise SendGateError(
             "transmit refused: this SendAuthorization has already been spent "
             "(D3 approval gate — capabilities are single-use)"
         )
+    mismatches = []
+    if auth.recipient != recipient:
+        mismatches.append(f"recipient {auth.recipient!r} -> {recipient!r}")
+    if auth.body != body:
+        mismatches.append(f"body {auth.body!r} -> {body!r}")
+    try:
+        want_mentions = _mentions.canonical_mentions(mentions)
+    except _mentions.MentionError as exc:
+        # Same translation as the mint side: an unreadable mentions array is a
+        # refusal in the type `send`'s CLI handler catches, not a raw TypeError.
+        raise SendGateError(
+            f"transmit refused: the mentions array offered for draft "
+            f"{auth.draft_id!r} is unreadable — {exc} (D3 approval gate)") from exc
+    have_mentions = getattr(auth, "mentions", ())
+    if have_mentions != want_mentions:
+        mismatches.append(f"mentions {list(have_mentions)!r} -> "
+                          f"{list(want_mentions)!r}")
+    if mismatches:
+        raise SendGateError(
+            f"transmit refused: the payload does not match what was approved for "
+            f"draft {auth.draft_id!r} — {'; '.join(mismatches)}. The draft row "
+            f"changed between approval and transmission; nothing was sent and the "
+            f"capability was NOT spent (D3 approval gate — approve/mutate/send "
+            f"binding)"
+        )
     _ISSUED_NONCES.discard(nonce)
+
+
+def _decode_mentions(value) -> list:
+    """A stored `mentions` column → a list. NULL/''/'null' all mean none.
+
+    psycopg2 already decodes JSONB; the sqlite substrate hands back the raw TEXT.
+    Both reach this, so both engines produce the same Python shape.
+    """
+    if value is None or value == "":
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        value = bytes(value).decode("utf-8")
+    if isinstance(value, str):
+        decoded = json.loads(value)
+        return list(decoded) if decoded else []
+    raise ValueError(f"unreadable mentions column: {value!r}")
 
 
 # `message_type` of a row whose sender retracted it. The row is KEPT (its
@@ -689,7 +974,18 @@ class SignalDB:
 
     # -- schema ------------------------------------------------------------
     def ensure_schema(self) -> None:
-        """Create the `signal` schema. Idempotent — every statement is IF NOT EXISTS."""
+        """Create the `signal` schema. Idempotent — every statement is IF NOT EXISTS.
+
+        Including the `ALTER TABLE … ADD COLUMN IF NOT EXISTS` migration, which
+        is idempotent for the same reason and is pinned by
+        `test_pg_type_compat.py::test_ensure_schema_is_idempotent_on_real_postgres`
+        — the PG-TIER test, which is where the claim can actually be measured.
+        `test_mentions.py::test_ensure_schema_twice_is_a_no_op_ON_THE_SQLITE_
+        SUBSTRATE` also runs it twice, but the substrate EMULATES
+        `ADD COLUMN IF NOT EXISTS` (see `tests/fakepg.py`), so what it observes
+        is the emulation, not Postgres. The old pointer here named that test by
+        its pre-rename name and so read as a Postgres claim it never made.
+        """
         with self._c.cursor() as cur:
             for stmt in SCHEMA_STATEMENTS:
                 cur.execute(stmt)
@@ -757,6 +1053,36 @@ class SignalDB:
                 (signal_uuid, phone_number, display_name, profile_name, is_placeholder),
             )
             return _returned_id(cur, "upsert_contact")
+
+    def contacts_by_identifiers(self, identifiers) -> list:
+        """Contact rows for a MIXED list of uuids and phone numbers.
+
+        `GET /v1/groups/.../members` returns both forms in one array, so a lookup
+        that queried only `signal_uuid` would find nothing for the E.164 members
+        and a lookup that queried only `phone_number` would find nothing for the
+        uuid-only ones — and in the measured 7-member group, 5 members are
+        uuid-only. Both columns are matched, in ONE query, and
+        `is_placeholder` comes back with the row because a placeholder is a
+        REFUSAL upstream, not something to filter out silently here.
+        """
+        idents = [str(i).strip() for i in (identifiers or []) if str(i or "").strip()]
+        if not idents:
+            return []
+        # Two separate `IN` lists rather than one: `signal_uuid` is `uuid` in
+        # Postgres and comparing it to a phone number like '+15550100' raises
+        # `invalid input syntax for type uuid`. CASTING the column to text keeps
+        # both engines happy and keeps the whole thing one round trip.
+        placeholders = ", ".join(["%s"] * len(idents))
+        with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, CAST(signal_uuid AS text) AS signal_uuid, "
+                "phone_number, display_name, profile_name, is_placeholder "
+                "FROM signal.contacts "
+                f"WHERE CAST(signal_uuid AS text) IN ({placeholders}) "
+                f"   OR phone_number IN ({placeholders})",
+                tuple(idents) * 2,
+            )
+            return [dict(r) for r in cur.fetchall()]
 
     def contact_id_by_phone(self, phone_number: str) -> int | None:
         """The contact row for a phone number, preferring a REAL one over a placeholder.
@@ -1251,6 +1577,7 @@ class SignalDB:
                       self_uuid: str | None = None,
                       self_number: str | None = None,
                       approval_ref: str | None = None,
+                      mentions: list | None = None,
                       provisional_timestamp: int | None = None) -> dict:
         """Compose and STORE an outbound draft. **Transmits nothing.**
 
@@ -1363,18 +1690,26 @@ class SignalDB:
                 "a draft's provisional timestamp must be NEGATIVE so it cannot "
                 "collide with a server-assigned timestamp (🔧 #4)"
             )
+        # 🔴 Stored as TEXT-encoded JSON, never as a Python list handed to the
+        # driver. psycopg2 adapts a `list` to a Postgres ARRAY, not to JSONB, so
+        # passing it raw would raise `column "mentions" is of type jsonb but
+        # expression is of type text[]` at runtime — and the sqlite substrate,
+        # which stores JSONB as TEXT, could not see it. `None` stays NULL: a
+        # mention-free draft must be indistinguishable from every draft written
+        # before this column existed.
+        mentions_json = json.dumps(list(mentions)) if mentions else None
         with self._c.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO signal.messages
                     (message_timestamp, source_contact_id, dest_contact_id,
                      group_id, message_type, body, is_outbound, send_state,
-                     approval_ref)
-                VALUES (%s, %s, %s, %s, 'draft', %s, true, %s, %s)
+                     approval_ref, mentions)
+                VALUES (%s, %s, %s, %s, 'draft', %s, true, %s, %s, %s)
                 RETURNING id
                 """,
                 (ts, source_id, dest_id, group_row_id, body, STATE_PENDING,
-                 approval_ref),
+                 approval_ref, mentions_json),
             )
             draft_id = _returned_id(cur, "draft_message")
         self._c.commit()
@@ -1384,6 +1719,7 @@ class SignalDB:
             "source_contact_id": source_id, "dest_contact_id": dest_id,
             "group_id": group_row_id, "group_created": group_created,
             "approval_ref": approval_ref,
+            "mentions": list(mentions) if mentions else [],
         }
 
     def approve_draft(self, draft_id: int, *, approval_ref: str) -> dict:
@@ -1421,13 +1757,88 @@ class SignalDB:
                 f"draft {draft_id!r} has send_state={row['send_state']!r}; only "
                 f"{STATE_PENDING!r} drafts may be approved (D3 approval gate)"
             )
+        # 🔴 RECORD WHAT IS BEING APPROVED, not merely THAT it was approved. The
+        # digest is computed from the row we just read — the exact recipient,
+        # body and mentions the clawgate card described — and
+        # `_mint_send_authorization()` refuses to send a row that no longer
+        # hashes to it. Written in the SAME statement as the state flip so an
+        # approved draft can never exist without one.
+        # 🔴 Over `recipient_identity(row)`, NOT `row["recipient"]` — see that
+        # function: the printed recipient is a projection that background ingest
+        # rewrites, and hashing it made an ordinary placeholder promotion look
+        # like tampering.
+        try:
+            digest = draft_payload_digest(row)
+        except _mentions.MentionError as exc:
+            raise SendGateError(
+                f"approval refused: draft {draft_id!r} carries an unreadable "
+                f"`mentions` column ({exc}), so there is nothing coherent to "
+                f"approve (D3 approval gate)") from exc
         with self._c.cursor() as cur:
             cur.execute(
-                "UPDATE signal.messages SET send_state = %s, approval_ref = %s "
-                "WHERE id = %s",
-                (STATE_APPROVED, approval_ref, draft_id),
+                "UPDATE signal.messages SET send_state = %s, approval_ref = %s, "
+                "approved_digest = %s WHERE id = %s",
+                (STATE_APPROVED, approval_ref, digest, draft_id),
             )
         self._c.commit()
+        return self._draft_or_raise(draft_id)
+
+    def unapprove_draft(self, draft_id: int, *, note: str | None = None) -> dict:
+        """Return an APPROVED draft to `pending` so it can be approved again.
+
+        🔴 WHY THIS EXISTS — IT CLOSES A TERMINAL DEAD END. The approval digest
+        makes `_mint_send_authorization()` refuse a draft whose payload changed
+        after approval, and that refusal happens BEFORE `_claim_for_sending()`,
+        so the row stays `approved`. But `approve_draft()` is `pending`-only and
+        `reconcile_send()` is `sending`-only, and there was no third command:
+        the refused draft was unsendable forever, and both the refusal text and
+        SKILL.md told the operator to "re-approve it" — something the CLI had no
+        way to do. The only route back was hand-editing the row, which is
+        precisely the second writer the digest exists to catch.
+
+        Gated on `SIGNAL_APPROVAL_TOKEN` **exactly as `approve_draft` is**: this
+        un-does an operator decision, so it is an operator decision. It does NOT
+        send, does not re-approve, and CLEARS `approved_digest` — a `pending`
+        row must never carry a stale one, or the next `approve` would be checked
+        against a digest it did not write.
+
+        `note` is APPENDED to `approval_ref` when given — see
+        `_APPEND_APPROVAL_REF`, the one fragment this and both `reconcile_send`
+        branches share. 🔴 It used to be `COALESCE(%s, approval_ref)`, which
+        returns the NOTE when a note is given: the documented usage
+        (`unapprove 42 --note "body was edited after approval"`) therefore
+        DESTROYED the reference to the approval the refused send rode on, in the
+        one scenario this command exists for. Round-2 audit F3. The trail now
+        reads `"<approval-ref> | <note>"`, and passing no note leaves it alone.
+        """
+        if not os.environ.get(APPROVAL_TOKEN_ENV):
+            raise SendGateError(
+                f"unapprove refused: {APPROVAL_TOKEN_ENV} is not set. Withdrawing "
+                f"an approval is the OPERATOR's step, on the same token as "
+                f"`approve` — it is deliberately unavailable to the consumer "
+                f"Deployment and to drafting agents (D3 approval gate)"
+            )
+        row = self._draft_or_raise(draft_id)
+        if row["send_state"] != STATE_APPROVED:
+            raise SendGateError(
+                f"draft {draft_id!r} has send_state={row['send_state']!r}; only "
+                f"{STATE_APPROVED!r} drafts may be unapproved. A draft in "
+                f"{STATE_SENDING!r} is reconciled with `reconcile`, not here — "
+                f"the POST was attempted and its outcome is unknown (D3 approval "
+                f"gate)"
+            )
+        # The SAME guarded transition every other state move uses: names the
+        # state it expects and reads the rowcount, so a concurrent `send` that
+        # claimed the row first is told it lost rather than silently overwritten.
+        self._transition(
+            draft_id,
+            "UPDATE signal.messages SET send_state = %s, approved_digest = NULL, "
+            + _APPEND_APPROVAL_REF
+            + " WHERE id = %s AND send_state = %s",
+            (STATE_PENDING, *_appended_note(note), draft_id, STATE_APPROVED),
+            expected=STATE_APPROVED,
+            what="withdraw the approval",
+        )
         return self._draft_or_raise(draft_id)
 
     def _draft_or_raise(self, draft_id: int) -> dict:
@@ -1477,6 +1888,7 @@ class SignalDB:
                 """
                 SELECT m.id, m.message_timestamp, m.body, m.send_state,
                        m.approval_ref, m.source_contact_id, m.dest_contact_id,
+                       m.mentions AS mentions, m.approved_digest,
                        -- `signal_uuid` is uuid, `phone_number` is text, and
                        -- Postgres type-checks the WHOLE CASE regardless of which
                        -- branch would run — so an uncast COALESCE here raises
@@ -1518,6 +1930,12 @@ class SignalDB:
             group_signal_id = out.pop("group_signal_id", None)
             if group_signal_id is not None:
                 out["recipient"] = _group_id_to_address(group_signal_id)
+            # 🔴 ALWAYS A LIST, never NULL and never a JSON string. psycopg2
+            # decodes a real JSONB column to a Python list already; the sqlite
+            # substrate (JSONB -> TEXT) hands back the raw string. Normalising
+            # here means every caller — the send payload, the binding check, the
+            # CLI's `json.dumps` — sees one shape, on both engines.
+            out["mentions"] = _decode_mentions(out.get("mentions"))
             return out
 
     def list_drafts(self, state: str | None = None) -> list:
@@ -1566,8 +1984,16 @@ class SignalDB:
         # duplicate message. `send_attempts` records that it was tried.
         self._claim_for_sending(draft_id)
 
-        result = transmit(auth, recipient=draft["recipient"], body=draft["body"],
-                          number=number)
+        # 🔴 RE-READ, deliberately, and send THIS row — not the `draft` dict the
+        # capability was minted from. Sending the minted dict would make the
+        # binding in `spend_authorization()` a tautology: it would be comparing
+        # the capability against the very values it was built from, and could
+        # never disagree. Reading the row again is what turns the binding into a
+        # real check on the approve→mutate→send window, because anything that
+        # wrote to the row in between shows up HERE and nowhere else.
+        live = self._draft_or_raise(draft_id)
+        result = transmit(auth, recipient=live["recipient"], body=live["body"],
+                          mentions=live.get("mentions") or [], number=number)
         # 🔴 The live server returns a LIST, one entry per recipient — measured
         # 2026-08-21 against signal-cli-rest-api in json-rpc mode:
         #     201  [{"timestamp":"1787331796630"}]
@@ -1718,24 +2144,28 @@ class SignalDB:
                 draft_id,
                 "UPDATE signal.messages SET message_timestamp = %s, "
                 "send_state = %s, message_type = 'message', "
-                "approval_ref = COALESCE(%s, approval_ref) "
-                "WHERE id = %s AND send_state = %s",
-                (server_ts, STATE_SENT, note, draft_id, STATE_SENDING),
+                + _APPEND_APPROVAL_REF
+                + " WHERE id = %s AND send_state = %s",
+                (server_ts, STATE_SENT, *_appended_note(note), draft_id,
+                 STATE_SENDING),
                 expected=STATE_SENDING,
                 what="reconcile as sent",
             )
         else:
-            # COALESCE in BOTH branches. A bare `approval_ref = %s` here erased
-            # the recorded approval whenever the operator passed no `--note` —
-            # deleting the audit record of the very approval the attempt rode on,
-            # which is the thing `approve_draft`'s docstring stakes D3 on. A note
-            # ADDS to the record; it never replaces it.
+            # 🔴 THE SAME FRAGMENT IN BOTH BRANCHES — and it is an APPEND now,
+            # not a COALESCE. A bare `approval_ref = %s` here erased the recorded
+            # approval whenever the operator passed no `--note`; COALESCE fixed
+            # that half and left the other one broken, erasing it whenever the
+            # operator DID pass a note, under a comment claiming "a note ADDS to
+            # the record; it never replaces it". Round-2 audit F3: the comment is
+            # now true, and both branches share `_APPEND_APPROVAL_REF` with
+            # `unapprove_draft` so no third variant can appear.
             self._transition(
                 draft_id,
                 "UPDATE signal.messages SET send_state = %s, "
-                "approval_ref = COALESCE(%s, approval_ref) "
-                "WHERE id = %s AND send_state = %s",
-                (STATE_PENDING, note, draft_id, STATE_SENDING),
+                + _APPEND_APPROVAL_REF
+                + " WHERE id = %s AND send_state = %s",
+                (STATE_PENDING, *_appended_note(note), draft_id, STATE_SENDING),
                 expected=STATE_SENDING,
                 what="reconcile as not-sent",
             )

@@ -5,10 +5,11 @@
     python3 scripts/signal/tests/mutation_battery.py --list      # show the ledger
     python3 scripts/signal/tests/mutation_battery.py --only A1 M4
 
-Exit codes: 0 every mutant killed by its named test · 1 at least one SURVIVED,
-ANCHOR-MISSed or was KILLED-WRONG-REASON · 2 refused to start (dirty tree, an
-unreadable `git status`, a red baseline, a named killer that did not run) ·
-3 a mutant was left in the tree, or that could not be determined.
+Exit codes: 0 every mutant reached its EXPECTED verdict · 1 at least one did not
+(SURVIVED, ANCHOR-MISS, KILLED-WRONG-REASON — or, for an `equivalent=True` row,
+KILLED) · 2 refused to start (dirty tree, an unreadable `git status`, a red
+baseline, a named killer that did not run) · 3 a mutant was left in the tree, or
+that could not be determined.
 
 🔴 WHY THIS FILE EXISTS AT ALL. Eight mutation batteries have been run against
 this module across #514, #537, #540, #546 and #573. Every one of them lived in a
@@ -60,17 +61,45 @@ DB = "scripts/signal/_signal_db.py"
 CON = "scripts/signal/consumer.py"
 BP = "scripts/signal/build-push.sh"
 
+MEN = "scripts/signal/_mentions.py"
+SKILL = "claude/skills/signal/SKILL.md"
+
 SUITE_EXCL = "scripts/signal/tests/test_group_exclusions.py"
+SUITE_MENT = "scripts/signal/tests/test_mentions.py"
+SUITE_SKILL = "scripts/signal/tests/test_skill_doc.py"
 SUITE_IMAGE = "scripts/signal/tests/test_image_deps.py"
 SUITE_LIVE = "scripts/signal/tests/test_liveness.py"
 
 
 class Mutant:
-    """One way to break the code, and the ONE test that must notice."""
+    """One way to break the code, and the ONE test that must notice.
 
-    def __init__(self, mid, why, path, old, new, killer, suite):
+    `equivalent=True` INVERTS the expected verdict: the mutation is argued to be
+    incapable of changing any observable behaviour, so SURVIVED is the pass and
+    KILLED is the finding — it would mean the argument is wrong and the two
+    forms are not interchangeable after all.
+
+    🔴 WHY THESE ARE RECORDED RATHER THAN DELETED. An equivalent mutant is the
+    one row a reader is most likely to re-derive from scratch next round, and
+    the argument for equivalence is usually a premise about the code around it
+    ("`re` folds one code point to one"). Keeping the row keeps the premise
+    checkable: if that premise ever stops holding, this stops SURVIVING and the
+    runner says so. Deleting the row loses both the finding and the reason.
+    🔴 AND IT MUST NOT MAKE THE RUNNER PERMANENTLY RED — a gate that is always
+    failing is one everybody learns to click through, so `equivalent` is what
+    keeps a legitimate survivor out of the failure set instead of parking a
+    known-red row in it.
+    """
+
+    def __init__(self, mid, why, path, old, new, killer, suite, *,
+                 equivalent: bool = False):
         self.id, self.why, self.path = mid, why, path
         self.old, self.new, self.killer, self.suite = old, new, killer, suite
+        self.equivalent = equivalent
+
+    @property
+    def expected(self) -> str:
+        return "SURVIVED" if self.equivalent else "KILLED"
 
 
 MUTANTS: list[Mutant] = [
@@ -261,7 +290,7 @@ MUTANTS: list[Mutant] = [
     # ------------------------------------------------------------------ #
     Mutant("B1", "`build-push.sh`'s subcommand pin left stale — the control that refuses "
                  "to push an image whose CLI grew a subcommand nobody decided on", BP,
-           'want_choices="approve conversations draft drafts health mute muted reconcile run search send unmute "',
+           'want_choices="approve conversations draft drafts health mute muted reconcile run search send unapprove unmute "',
            'want_choices="approve conversations draft drafts health reconcile run search send "',
            "test_the_build_control_lists_EXACTLY_the_CLI_subcommands", SUITE_IMAGE),
 
@@ -451,6 +480,281 @@ MUTANTS: list[Mutant] = [
            "            return recording",
            "            return attr",
            "test_each_MUTE_PROBE_actually_calls_the_method_it_is_keyed_under", SUITE_EXCL),
+
+    # ------------------------------------------------------------------ #
+    # MENTIONS (#1121, round-3 and round-4 delta audits). Every mutant here is a
+    # way the fixes revert or over-correct. Two shapes recur and both are
+    # represented deliberately: a SECOND matching rule that agrees with the
+    # first only on ASCII (MEN1/MEN2), and an identity check that is either
+    # too narrow (MEN5/MEN7/MEN11) or too wide (MEN6/MEN10). The fixture pairs
+    # are chosen so ASCII CANNOT SEE the bug — `ß`/`ss` and `İstanbul`/
+    # `istanbul` — which is exactly why the round-2 fix passed its own battery.
+    #
+    # 🔴 MEN10 IS THE ROW TO READ FIRST. Every other mutant here breaks a
+    # REFUSAL; MEN10 is the round-3 fix as shipped, and it SENDS. An identity
+    # rule has two failure directions and only one of them is loud — which is
+    # why the too-narrow and too-wide mutants come in pairs whose killers cannot
+    # see each other's defect.
+    # ------------------------------------------------------------------ #
+    Mutant("MEN1", "the cursor's equivalence goes back to `casefold()` — a SECOND "
+                   "matching rule. Agrees with `re.IGNORECASE` on ASCII and disagrees "
+                   "in BOTH directions on unicode, which is how round-2's fix shipped "
+                   "with both arms live.",
+           MEN,
+           "    return _whole(a, b) and _whole(b, a)",
+           "    return a.casefold() == b.casefold()",
+           "test_the_cursor_does_NOT_merge_two_needles_the_MATCHER_keeps_APART",
+           SUITE_MENT),
+
+    Mutant("MEN2", "the equivalence goes RAW — exact string identity. The OPPOSITE "
+                   "over-correction to MEN1: nothing is ever merged, so `@İstanbul` "
+                   "and `@istanbul` both start at 0 and claim the same span. Needed "
+                   "separately because MEN1's killer stays GREEN under this.",
+           MEN,
+           "    return _whole(a, b) and _whole(b, a)",
+           "    return a == b",
+           "test_the_cursor_DOES_merge_two_needles_the_MATCHER_treats_as_ONE",
+           SUITE_MENT),
+
+    Mutant("MEN3", "🔴 EQUIVALENT MUTANT, recorded rather than counted as a kill. "
+                   "`_whole()` drops its end-of-string check. It cannot change any "
+                   "answer: `re.escape` folds one code point to one, so a match "
+                   "consumes exactly `len(pattern)`, and BOTH directions matching "
+                   "already forces the two needles to be the same length. Kept in the "
+                   "ledger so the next round does not re-derive it — and so that if "
+                   "the matcher ever grows a variable-width element, this row turns "
+                   "into a real mutant and its SURVIVED verdict becomes a finding.",
+           MEN,
+           "        return match is not None and match.end() == len(text)",
+           "        return match is not None",
+           "test_the_cursor_DOES_merge_two_needles_the_MATCHER_treats_as_ONE",
+           SUITE_MENT, equivalent=True),
+
+    Mutant("MEN4", "the cursor stops ADVANCING past the match it just claimed. Every "
+                   "repeat of one needle then re-claims the first occurrence, which "
+                   "the overlap guard refuses — the round-2 defect by another route.",
+           MEN,
+           "        slot[1] = idx + len(needle)",
+           "        slot[1] = idx",
+           "test_the_ASCII_case_the_round_2_fix_was_written_for_still_works",
+           SUITE_MENT),
+
+    Mutant("MEN5", "the collision rule reverts to comparing RAW author strings, so one "
+                   "person holding a real row AND a durable phone-only placeholder "
+                   "reads as two people and their own longer name vetoes their own "
+                   "ping. The shipped round-2 defect, in its narrowest form.",
+           MEN,
+           "            if _norm_member(_contact_author(contact)) not in mine",
+           "            if _contact_author(contact) != author",
+           "test_a_person_in_TWO_contact_rows_does_not_veto_their_OWN_ping",
+           SUITE_MENT),
+
+    Mutant("MEN6", "the identity check goes VETO-BLIND — every other member's longer "
+                   "name is dropped from `avoid`. The over-correction MEN5's killer "
+                   "cannot see: it passes under this, while round-2's F2 silently "
+                   "reopens and `@Ann` lands on `@Ann Smith` again.",
+           MEN,
+           "            if _norm_member(_contact_author(contact)) not in mine",
+           "            if False",
+           "test_a_DIFFERENT_persons_longer_name_still_vetoes", SUITE_MENT),
+
+    Mutant("MEN7", "`_identity_groups()` unions NOTHING, so every row is its own "
+                   "person. Same observable as MEN5 from a different SITE — the "
+                   "builder rather than the lookup — because a union that silently "
+                   "stops merging is not visible at the call site at all.",
+           MEN,
+           "            if not (row_a.get(\"is_placeholder\") or row_b.get(\"is_placeholder\")):\n"
+           "                continue",
+           "            if True:\n"
+           "                continue",
+           "test_a_person_in_TWO_contact_rows_does_not_veto_their_OWN_ping",
+           SUITE_MENT),
+
+    Mutant("MEN10", "🔴 [round-4 audit F-A] the identity union DROPS its "
+                    "`is_placeholder` gate, so any two rows sharing an identifier "
+                    "merge — which is what round-3's own fix shipped. `phone_number` "
+                    "is TEXT with no UNIQUE constraint and `_promote_placeholder()` "
+                    "only touches placeholder rows, so two REAL rows can durably hold "
+                    "one number (number recycling / a number change). Merging them "
+                    "dropped person B's veto and PINGED person A on a body reading "
+                    "@Ann Smith — the first WRONG SEND in four audit rounds, where "
+                    "every other defect here was a refusal. The OPPOSITE "
+                    "over-correction to MEN7, which MEN7's killer cannot see: it "
+                    "passes under this.",
+           MEN,
+           "            if not (row_a.get(\"is_placeholder\") or row_b.get(\"is_placeholder\")):\n"
+           "                continue",
+           "            if False:\n"
+           "                continue",
+           "test_two_REAL_rows_sharing_a_number_are_TWO_people_not_one",
+           SUITE_MENT),
+
+    Mutant("MEN11", "🔴 [round-4 audit F-B] `_resolve_one()` de-duplicates by the "
+                    "ROW's author string again instead of by identity — the second "
+                    "site of the predicate `_identity_groups()` owns. One person "
+                    "holding a real row and a durable placeholder row is then refused "
+                    "as an AMBIGUITY, and the remedy the message prints is half wrong: "
+                    "one of the two ids is the synthetic placeholder uuid, which is "
+                    "not in `member_set`, so following the advice hits "
+                    "MentionNotAMember.",
+           MEN,
+           "        group = identity.get(key) or frozenset({key})",
+           "        group = frozenset({key})",
+           "test_one_person_with_a_real_AND_a_placeholder_row_is_NOT_ambiguous",
+           SUITE_MENT),
+
+    Mutant("MEN12", "`NAME_HINT_MAX` shrinks 5 -> 4. Found SURVIVING all 908 tests by "
+                    "the round-4 audit (F-C): the only assertion on the truncation "
+                    "derived its expectation from `_mentions.NAME_HINT_MAX` itself, so "
+                    "it agreed with any value. A cap on how much of a group roster a "
+                    "token-free `draft` refusal will enumerate is a privacy constant; "
+                    "an uncovered one drifts in the other direction just as quietly.",
+           MEN,
+           "NAME_HINT_MAX = 5",
+           "NAME_HINT_MAX = 4",
+           "test_the_name_hint_cap_is_a_LITERAL_five_not_whatever_the_module_says",
+           SUITE_MENT),
+
+    Mutant("MEN13", "🔴 [round-5 audit F-A] the GROUP-LEVEL invariant is deleted, "
+                    "leaving only round-4's per-pair `is_placeholder` gate. That gate "
+                    "cannot survive transitivity: the union-find joins PATHS, so with "
+                    "three rows on one number — real A, placeholder P, real C — the "
+                    "direct edge A—C is blocked and A—P—C unions anyway. Two real "
+                    "people are one identity again and `--mention Ann` pings A under "
+                    "a body reading @Ann Smith. This is the shipped 707412e6 "
+                    "behaviour, and the reason the fix is a check on the FORMED "
+                    "GROUP rather than a third revision of the pair condition. MEN10's "
+                    "killer cannot see it — that fixture has only two rows.",
+           MEN,
+           "        if len(members_) > 1:",
+           "        if False:",
+           "test_a_PLACEHOLDER_bridging_TWO_REAL_rows_is_REFUSED_not_guessed",
+           SUITE_MENT),
+
+    Mutant("MEN14", "the group invariant's BOUNDARY moves 1 -> 2, so a group holding "
+                    "exactly two real rows — the whole failure mode — passes while a "
+                    "three-real-row group still refuses. The narrowest expression that "
+                    "can be wrong here, and worth keeping because it pins WHERE the "
+                    "threshold sits rather than merely that a threshold exists. "
+                    "🔴 [round-6 audit] THE LEDGER CLAIM THAT EACH OF MEN13/MEN14 IS "
+                    "'killed by a test the other is not' WAS FALSE, and is retracted: "
+                    "both are killed by the same two tests "
+                    "(`..._bridging_TWO_REAL_rows_is_REFUSED_not_guessed` and "
+                    "`..._survives_a_mention_typed_as_a_BARE_UUID`), and no test can "
+                    "ever separate them in that direction. MEN14 refuses on a strict "
+                    "SUBSET of the states MEN13 refuses on, so its killer set is a "
+                    "strict subset of MEN13's: any test that sees MEN14 sees a missing "
+                    "refusal at exactly two real rows, which MEN13 also misses. The "
+                    "mutants are ORDERED, not independent. Only the other direction is "
+                    "reachable — a THREE-real-row fixture would kill MEN13 and be "
+                    "survived by MEN14 — and this suite has none, so as of this round "
+                    "MEN14 is strictly redundant with MEN13 and is retained for the "
+                    "boundary it documents, not for coverage it adds.",
+           MEN,
+           "        if len(members_) > 1:",
+           "        if len(members_) > 2:",
+           "test_a_PLACEHOLDER_bridging_TWO_REAL_rows_is_REFUSED_not_guessed",
+           SUITE_MENT),
+
+    Mutant("MEN15", "🔴 [round-6 audit F-1] the refusal goes back to covering the "
+                    "WHOLE CALL: `_refuse_if_polluted()` ignores the mention's own "
+                    "match set and raises whenever ANY group is polluted. That is the "
+                    "shipped 69e910ac behaviour, and it is wrong in the direction "
+                    "nobody was watching — a refusal, not a send, so every wrong-send "
+                    "test stays green. `_colliding_needles()` reads identity for "
+                    "exactly one thing, `mine = identity.get(key)`, the mention "
+                    "TARGET'S OWN group; an uninvolved member's group is untouched by "
+                    "somebody else's merge and both polluted names are in their veto "
+                    "list either way. One stale placeholder row then bricked every "
+                    "mention in the group for every member, with no CLI route to find "
+                    "or delete the row. MEN13/MEN14's killers cannot see this: they "
+                    "assert a refusal, and this mutant refuses MORE.",
+           MEN,
+           "        hit = polluted.get(_norm_member(_contact_author(row)))\n"
+           "        if hit:",
+           "        hit = next(iter(polluted.values()))\n"
+           "        if hit:",
+           "test_an_UNRELATED_member_still_resolves_while_ANOTHER_group_is_polluted",
+           SUITE_MENT),
+
+    Mutant("MEN16", "the narrowed check goes BLIND instead of wide — "
+                    "`_refuse_if_polluted()` never raises, so the group-level "
+                    "invariant is detected and then discarded. The opposite "
+                    "over-correction to MEN15, which MEN15's killer cannot see (it "
+                    "passes under this), and the one that reopens round 5's wrong "
+                    "send. Detection and refusal are now two sites, so this proves "
+                    "the second one is load-bearing on its own.",
+           MEN,
+           "        hit = polluted.get(_norm_member(_contact_author(row)))\n"
+           "        if hit:",
+           "        hit = polluted.get(_norm_member(_contact_author(row)))\n"
+           "        if False:",
+           "test_a_PLACEHOLDER_bridging_TWO_REAL_rows_is_REFUSED_not_guessed",
+           SUITE_MENT),
+
+    Mutant("MEN17", "the refusal message counts the ROWS while listing the "
+                    "DE-DUPLICATED authors again — round-6 F-1's second defect, which "
+                    "printed `2 DIFFERENT real identities (['Ann'])` for two real rows "
+                    "carrying one author string: a count and a list that contradict "
+                    "each other in the one message the operator has to act on. Every "
+                    "refusal test still passes under it, because they assert the CLASS "
+                    "and not the text.",
+           MEN,
+           "        f\"{len(shown)} distinct real identities ({shown!r}\"",
+           "        f\"{len(real_rows)} distinct real identities ({shown!r}\"",
+           "test_the_unresolvable_refusal_COUNTS_and_LISTS_the_same_identities",
+           SUITE_MENT),
+
+    Mutant("MEN18", "the refusal stops naming the SHARED IDENTIFIER the bridging "
+                    "placeholder was minted for. It still says 'remove the stale "
+                    "placeholder contact row' — and `consumer.py` exposes no contacts "
+                    "subcommand, so the operator's only route is Postgres and this is "
+                    "the only value they could have selected on. An unactionable "
+                    "refusal is a permanent one.",
+           MEN,
+           "    bridges = sorted({i for row in group_rows if row.get(\"is_placeholder\")\n"
+           "                      for i in (_contact_ids(row) & real_ids)})",
+           "    bridges = []",
+           "test_the_unresolvable_refusal_COUNTS_and_LISTS_the_same_identities",
+           SUITE_MENT),
+
+    Mutant("MEN8", "`utf16_span()` stops forwarding `avoid` — the exported wrapper "
+                   "silently implements only the `(?!\\w)` half while its docstring "
+                   "promises one matching rule. It has NO production caller, so only "
+                   "a direct test can see it; the next caller inherits the gap.",
+           MEN,
+           "    _, start, length = find_span(body, needle, from_index=from_index, avoid=avoid)",
+           "    _, start, length = find_span(body, needle, from_index=from_index)",
+           "test_utf16_span_FORWARDS_avoid_so_it_really_is_one_matching_rule",
+           SUITE_MENT),
+
+    Mutant("MEN9", "🔴 the drain runbook's steps SWAPPED — the SELECT before the "
+                   "deploy, i.e. exactly the unexecutable order the test is named "
+                   "for. Measured: this SURVIVED the pre-round-3 assertion, which "
+                   "indexed `deploy` over the whole section and found it in the "
+                   "explanatory paragraph above the list. The mutant is what proves "
+                   "the surviving ordering guard is REACHABLE now that the walkable "
+                   "phrase assertion beside it is gone.",
+           SKILL,
+           "   1. Deploy, and let the consumer start (that is what runs `ensure_schema()`\n"
+           "      and adds the column).\n"
+           "   2. Find them:\n"
+           "\n"
+           "      ```sql\n"
+           "      SELECT id, send_state, approval_ref FROM signal.messages\n"
+           "       WHERE send_state = 'approved' AND approved_digest IS NULL;\n"
+           "      ```\n",
+           "   1. Find them:\n"
+           "\n"
+           "      ```sql\n"
+           "      SELECT id, send_state, approval_ref FROM signal.messages\n"
+           "       WHERE send_state = 'approved' AND approved_digest IS NULL;\n"
+           "      ```\n"
+           "\n"
+           "   2. Deploy, and let the consumer start (that is what runs `ensure_schema()`\n"
+           "      and adds the column).\n",
+           "test_the_pre_digest_drain_procedure_is_ORDERED_so_it_can_be_RUN",
+           SUITE_SKILL),
 ]
 
 
@@ -504,6 +808,30 @@ def _verdict(rc: int, failures: set[str], killer: str) -> tuple[str, str]:
     return "KILLED-WRONG-REASON", f"expected {killer}, got {sorted(failures)}"
 
 
+def headline(results) -> str:
+    """The `N/M killed` line. PURE — extracted so it is table-testable.
+
+    🔴 IT USED TO DOUBLE-SUBTRACT (round-4 audit F-D). The count was
+    `len(results) - len(bad) - len(equiv)`, and a row that is BOTH `equivalent`
+    AND bad — an "equivalent" mutant that got KILLED, i.e. precisely the finding
+    the flag exists to surface — was charged to both subtrahends. Observed live
+    as `-1/0 killed`. The exit code and the `!!` lines were correct throughout;
+    only the number a reader scans FIRST was wrong, which is the worst place for
+    one, because a negative headline reads as a glitch in the tool rather than
+    as a finding about the ledger.
+
+    Counted, not subtracted: the numerator is the real mutants that met their
+    expectation, the denominator the real mutants. Equivalent rows are reported
+    separately and never enter either.
+    """
+    real = [r for r in results if not r[0].equivalent]
+    equiv = [r for r in results if r[0].equivalent]
+    killed = [r for r in real if r[1] == r[0].expected]
+    return (f"{len(killed)}/{len(real)} killed by their NAMED test"
+            + (f"  ({len(equiv)} EQUIVALENT, expected to survive)"
+               if equiv else ""))
+
+
 def _git_status(repo: Path) -> tuple[int, str]:
     """`git status --porcelain`, returning the STATUS as well as the output.
 
@@ -531,7 +859,8 @@ def main(argv=None) -> int:
     if args.list:
         for m, n in anchor_report():
             flag = "" if n == 1 else f"  🔴 ANCHOR MATCHES {n}x"
-            print(f"{m.id:4} {m.path:30} -> {m.killer}{flag}\n     {m.why}\n")
+            tag = "  [EQUIVALENT — expected to SURVIVE]" if m.equivalent else ""
+            print(f"{m.id:4} {m.path:30} -> {m.killer}{flag}{tag}\n     {m.why}\n")
         return 0
 
     # 🔴 A SIGTERM used to leave a mutant in the tree. `finally` covers exceptions
@@ -617,10 +946,17 @@ def main(argv=None) -> int:
     print("\n================ SUMMARY ================")
     for m, verdict, detail in results:
         print(f"  {verdict:20} {m.id}  {m.killer}")
-    bad = [r for r in results if r[1] != "KILLED"]
-    print(f"\n{len(results) - len(bad)}/{len(results)} killed by their NAMED test")
+    # 🔴 COMPARED AGAINST EACH MUTANT'S OWN EXPECTED VERDICT, not against the
+    # constant "KILLED": an `equivalent=True` row PASSES by surviving, and FAILS
+    # loudly if something kills it, because that would disprove the equivalence
+    # argument recorded in its `why`.
+    bad = [r for r in results if r[1] != r[0].expected]
+    equiv = [r for r in results if r[0].equivalent]
+    print("\n" + headline(results))
     for m, verdict, detail in bad:
-        print(f"  !! {verdict}: {m.id} — {detail}", file=sys.stderr)
+        expected = f"expected {m.expected}" if m.equivalent else ""
+        print(f"  !! {verdict}: {m.id} — {detail} {expected}".rstrip(),
+              file=sys.stderr)
 
     rc_git, after = _git_status(REPO)
     if rc_git != 0:

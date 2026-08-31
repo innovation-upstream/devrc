@@ -201,3 +201,121 @@ def test_skill_records_all_four_schema_corrections():
     assert "echo back via device sync" in gotchas
     assert "Reactions can precede their target" in gotchas
     assert "signal_attachment_id" in gotchas
+
+
+# --------------------------------------------------------------------------- #
+# Round-2 audit F2 + F7 — two places SKILL.md made a claim the code did not keep
+# --------------------------------------------------------------------------- #
+_PREFIX_SEPARATORS = ["-", ".", " ", "'"]
+
+
+@pytest.mark.parametrize("sep", _PREFIX_SEPARATORS)
+def test_the_prefix_claim_is_true_of_the_CODE_and_stated_in_the_DOC(sep):
+    """🔴 THE SEAM: a doc sentence and the code that has to be as wide as it.
+
+    SKILL.md claimed "a member whose name is a PREFIX of another member's cannot
+    steal their ping". The code implemented `(?!\\w)`, which blocks only WORD
+    characters — so at 9fb6de75 every separator below satisfied the boundary and
+    `--mention Ann` landed on the first four characters of `Ann<sep>Marie`. The
+    doc was RIGHT and the code was narrow; the audit's instruction was to widen
+    the code, and this test is what stops them drifting apart again.
+
+    BOTH halves are asserted from ONE parameter list. Widen the doc without the
+    code and the behavioural half fails; narrow the code without the doc and the
+    same half fails; drop a separator from the doc and the text half fails.
+    Neither half is a guard on its own — separately they are exactly the
+    "verified in isolation" shape that let this ship.
+
+    RED at 9fb6de75 on the behavioural half for `-`, `.`, `'` and ` `.
+    """
+    import _mentions
+
+    ann = "11111111-1111-4111-8111-111111111111"
+    other_id = "22222222-2222-4222-8222-222222222222"
+    other = f"Ann{sep}Marie"
+    contacts = [
+        {"signal_uuid": ann, "phone_number": None, "display_name": "Ann",
+         "profile_name": None, "is_placeholder": False},
+        {"signal_uuid": other_id, "phone_number": None, "display_name": other,
+         "profile_name": None, "is_placeholder": False},
+    ]
+    # (a) the CODE refuses rather than stealing the ping.
+    with pytest.raises(_mentions.MentionSpanMissing):
+        _mentions.resolve_mentions(["Ann"], body=f"hi @{other} ok",
+                                   members=[ann, other_id], contacts=contacts,
+                                   is_group=True)
+    # (b) the DOC names this separator, so a reader can tell what is covered.
+    mentions_section = SKILL_TEXT.split("## Mentions")[1].split("\n## ")[0]
+    assert f"@Ann{sep}" in mentions_section, (
+        f"the code refuses a {sep!r}-separated prefix collision but SKILL.md's "
+        f"Mentions section never mentions that separator — the doc is narrower "
+        f"than the code, which is how the reverse drift went unnoticed")
+
+
+def test_the_prefix_claim_does_NOT_overreach_to_NON_member_text():
+    """The other direction: the doc must not claim more than the code does.
+
+    The rule is MEMBER-aware. `@Ann` in `"@Ann-the-dog"`, where nothing is named
+    `Ann-the-dog`, still matches — deliberately, because banning punctuation
+    outright would break `"thanks @Ann."`. SKILL.md has to say so, or the next
+    reader files the behaviour below as a bug.
+    """
+    import _mentions
+
+    ann = "11111111-1111-4111-8111-111111111111"
+    contacts = [{"signal_uuid": ann, "phone_number": None, "display_name": "Ann",
+                 "profile_name": None, "is_placeholder": False}]
+    assert _mentions.resolve_mentions(
+        ["Ann"], body="@Ann-the-dog", members=[ann], contacts=contacts,
+        is_group=True) == [{"author": ann, "start": 0, "length": 4}]
+    mentions_section = SKILL_TEXT.split("## Mentions")[1].split("\n## ")[0]
+    assert "member" in mentions_section.lower()
+    assert "thanks @Ann." in mentions_section, (
+        "SKILL.md must show the case the member-aware rule deliberately allows")
+
+
+def test_the_pre_digest_drain_procedure_is_ORDERED_so_it_can_be_RUN():
+    """🔴 RED at 9fb6de75. Round-2 audit F7.
+
+    The doc said to drain pre-existing approvals "**before** rolling this out",
+    and then prescribed `unapprove` and a `WHERE approved_digest IS NULL` query —
+    a command and a column that BOTH ship in this change. Followed literally the
+    procedure cannot run: there is no `unapprove` on the previous revision and no
+    column to select on. An unexecutable runbook step is worse than none, because
+    the operator discovers it mid-incident.
+
+    Pinned by ORDER, not by a phrase.
+
+    🔴 THE PHRASE ASSERTION IS GONE — round-3 audit F2. It read
+    `assert "before rolling this out" not in SKILL_TEXT.lower()` and it passed
+    only because a markdown line-wrap splits the phrase across a newline at
+    SKILL.md's "the old wording had it backwards" paragraph, which quotes those
+    exact words on purpose. So it was green for a typographic reason, and a
+    purely COSMETIC rewrap — identical words, one line instead of two — turned
+    it RED with the message "the reversed ordering is back", which would have
+    been false. A guard on WORDS is walkable by rewording and trippable by
+    reflowing; the state that actually matters is the ORDER, and the assertion
+    below is the one that pins it.
+    """
+    anchor = "rain the pre-existing approvals"
+    assert SKILL_TEXT.count(anchor) == 1, \
+        "HARNESS: the drain section anchor is not unique in SKILL.md"
+    section = SKILL_TEXT.split(anchor)[1]
+    # 🔴 THE COMPARISON IS SCOPED TO THE NUMBERED PROCEDURE, NOT THE WHOLE
+    # SECTION. Measured while removing the phrase assertion: `section` opens
+    # with a paragraph EXPLAINING the ordering, and that paragraph contains the
+    # word "deploy" (offset 741) before the SELECT (offset 1025) — so the index
+    # over the whole section was satisfied by the explanation, whatever order
+    # the steps below it were in. Swapping steps 1 and 2 in SKILL.md left this
+    # test GREEN. It is now anchored on the list itself.
+    parts = section.split("\n   1. ", 1)
+    assert len(parts) == 2, \
+        "HARNESS: the drain procedure is no longer a `1.`-numbered list"
+    procedure = parts[1]
+    deploy_at = procedure.lower().index("deploy")
+    query_at = procedure.index("approved_digest IS NULL")
+    assert deploy_at < query_at, (
+        "the drain procedure must tell the operator to deploy FIRST — the "
+        "column it selects on is created by the new consumer's ensure_schema()")
+    # And the recovery command it prescribes must actually exist in the CLI.
+    assert "unapprove" in _commands(), "the runbook prescribes a command the CLI lacks"

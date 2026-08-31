@@ -236,7 +236,14 @@ choices=$(docker run --rm --entrypoint python3 "$IMAGE" \
 # transmit nothing, and — the property that made this the chosen design — DELETE
 # nothing: `unmute` restores the conversation in full, because the messages were
 # never removed. `muted` is read-only.
-want_choices="approve conversations draft drafts health mute muted reconcile run search send unmute "
+#
+# `unapprove` added 2026-08-30, closing a terminal dead end. Acknowledged
+# deliberately, as this control demands. It moves a draft approved -> pending and
+# NULLs `approved_digest`; it transmits nothing and can only make a draft LESS
+# sendable — a pending draft has no route to the wire until an operator approves
+# it again. It is gated on `SIGNAL_APPROVAL_TOKEN`, which is deliberately absent
+# from this pod's environment, so in the deployed image it can only refuse.
+want_choices="approve conversations draft drafts health mute muted reconcile run search send unapprove unmute "
 if [[ "$choices" != "$want_choices" ]]; then
   echo "build-push: REFUSING TO PUSH — subcommand set is '$choices'," >&2
   echo "            expected '$want_choices'. Empty means the parse found no {…}" >&2
