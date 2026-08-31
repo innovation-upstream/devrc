@@ -715,17 +715,28 @@ def test_the_two_marker_sets_are_derived_from_ONE_definition():
     # verbatim ("the pattern is wider than its definition"). Sweep the range
     # instead of naming members of it.
     #
-    # ⚠ `'` and `"` are the two characters this cannot probe: the arm's own
+    # ⚠ WHAT THIS SWEEP STILL CANNOT SEE, stated accurately at the third attempt:
+    #   * a widening by a character OUTSIDE U+0020–U+03FF. Measured survivors:
+    #     TAB, LF, CR, backspace, U+0400, U+20AC — and an explicit `\x00-\x1f`
+    #     range. Shorthand classes mostly DO die here (`\s \w \d \S \W \D`,
+    #     `a-z`), because they match something inside the range;
+    #   * a MULTI-character widening (`|<<>>`), which a per-character sweep
+    #     cannot see by construction.
+    #
+    # 🔴 An earlier revision also skipped `'` and `"`, claiming "the arm's own
     # pattern is delimited by them, so a quote inside the probe string ends the
-    # run rather than testing it. Stated rather than left implied — the hole is
-    # two characters, not zero.
+    # run rather than testing it". That was measurably FALSE — the probe never
+    # needs its `[^'"]*` run to span a quote: `"` opens, `a` fills, the widened
+    # class matches the quote itself, `b` fills, `RESULT:` closes. The skip was a
+    # self-inflicted hole that let two real widenings survive, described to the
+    # reader as structural. Removed; the shipped module stays clean.
     for cp in range(0x20, 0x400):
         ch = chr(cp)
         if ch not in G.INTERPOLATION_MARKERS:
             assert not G._INTERPOLATION.search(ch), (
                 f"{ch!r} (U+{cp:04X}) is matched by _INTERPOLATION but is not in "
                 "INTERPOLATION_MARKERS — the pattern is wider than its definition")
-        if ch not in G.UNRESOLVED_MARKERS and ch not in "'\"":
+        if ch not in G.UNRESOLVED_MARKERS:
             assert not G._QUOTED_AFTER_UNRESOLVED.search(
                 f'"a{ch}b{G.RESERVED_PREFIX}'), (
                 f"{ch!r} (U+{cp:04X}) is matched by the arm but is not in "
