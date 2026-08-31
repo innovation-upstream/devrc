@@ -1977,6 +1977,10 @@ in
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/SKILL.md";
   home.file.".config/opencode/skills/dl-router/dl-route".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/dl-route";
+  # rig-control: hand-written command (with !` shell injection) overrides the
+  # auto-generated one (which would just copy the skill body verbatim).
+  home.file.".config/opencode/commands/rig-control.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/opencode/commands/rig-control.md";
   # 🔴 clickup used to need a mkOutOfStoreSymlink here, pointing opencode's copy at
   # ~/.claude/skills/clickup — the standalone, uncommitted checkout that lived only
   # on this host. Now that the skill is IN `claude/skills/`, the recursive mapping
