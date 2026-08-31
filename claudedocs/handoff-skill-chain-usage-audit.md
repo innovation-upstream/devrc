@@ -269,6 +269,29 @@ the same cross-check shape that found the write guard's unarmed `Read` path.
   carries a distinct `refs/pull/N/merge` preview sha (`7cdb05a8da15`/`6f302194e897`/`182c32809f88`;
   `e3df913307a2`/`911af220fb62`/`f5b6bddf24ad`). **An equal test COUNT is not an equal TREE.**
   The attribution above does the work instead, and needs no such control.
+🔴 **THE RE-RUN DID NOT CLEAR IT, AND IT FAILED A DIFFERENT WAY — 2026-08-30/31.** #1108 was
+re-triggered with empty commit `a3f15123` on the strength of the non-attribution above. The
+gate came back **`COULD NOT RUN` on BOTH legs**, which is a different observable from the first
+attempt's `FAILED: pytests — FAILING: <test>`. Diagnosed rather than re-run again:
+
+| attempt | sha | observable | mechanism |
+|---|---|---|---|
+| 1 | `9cb3e56f` | `FAILED: pytests — FAILING: TestTheActorComesFromTheTOKEN…` | a `TimeoutError` out of `socket.py` INSIDE the suite |
+| 2 | `a3f15123` | `COULD NOT RUN` on **both** legs | the **gate task's own 60m budget** expired before any verdict |
+
+Attempt 2's status went `pending 23:12:50Z` → `error 00:13:03Z` = **60m13s**, against
+`devrc-ci-pipeline.yaml:1554` `timeout: "60m"` (the pipeline budget is 1h25m and tasks 70m, so
+neither of those is what fired). Queue at diagnosis: **8 concurrent PipelineRuns, 3 Pending
+pods.** `29ccfd69`'s own commit message predicted exactly this shape — *"halving the pods a node
+admits moved the cost into PENDING, and the timeout clock runs there."*
+
+🔴 **So "re-run until green" is REFUTED here, not merely unattractive.** Two attempts produced
+two distinct symptoms of one saturated node, and a third would be the antipattern rather than a
+measurement. The `tekton` skill's own instruction is the applicable one — *"Push, wait for the
+queue to drain, push."* **The next attempt should be made against a quiet queue, once, and the
+queue depth recorded beside the result**; if it fails a third time the blocker is capacity and
+belongs to the `tekton` owners, not to another retry.
+
 - **Consequence, stated because it blocks the arc:** `main` protection is `enforce_admins: true`
   with **both** `tekton/devrc-pytests` and `tekton/devrc-nodetests` required (`strict: false`),
   so a red pytests leg blocks the merge outright — **#1055, #1064 and #1108 are all held by a
