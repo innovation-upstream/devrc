@@ -719,6 +719,45 @@ directions. Read both halves — either one alone is wrong.**
   unchanged: the pin (needs sudo, one host) or clearing the record on `192.168.50.1` (fixes every
   machine on the LAN, and is still untouched).
 
+### 🔴 `test_subsystem_store_api.py` HAS RECURRED — the "Fixed by devrc#996" claim above is now FALSE
+🔴 **This corrects the Gotchas bullet that ends "Fixed by devrc#996 (`1b1f71ad`…)" and the
+open-investigation heading that says "nothing is fixing it".** #996 did not close it.
+
+- **Symptom + exact repro:** `devrc#1162` — a **one-markdown-file** PR — was blocked by
+  `tekton/devrc-pytests` on
+  `TestTheActorComesFromTheTOKEN::test_a_FORGED_actor_in_the_body_is_DISCARDED[record0-…]`.
+  That is the **same case name** this doc already records from `devrc#1056`, in the block above.
+- **Observed (with values):** the failure is attached to head `74e39bea`
+  (`FAILED: pytests — FAILING: TestTheActorComesFromTheTOKEN…`). The **immediately preceding**
+  head of the same branch, `e1d1318f`, failed a DIFFERENT test
+  (`test_no_unallowlisted_public_ip_literal_is_committed` — a real defect of mine, since fixed), so
+  the two reds are unrelated. After a rebase with no content change beyond that fix, head
+  `2fd84888` passed: `TOTAL collected=19942 passed=19939 skipped=3 failed=0`.
+- **Ruled out — the diff.** #1162 touches exactly ONE file, `claudedocs/handoff-tmux-webapp.md`.
+  A markdown file cannot reach a store-api test. This is the doc's own stated discriminator
+  ("the discriminator that settled it was a DOCS-ONLY PR failing"), reproduced.
+- **Control, and its LIMIT:** `scripts/tests/test_subsystem_store_api.py` on a clean
+  `origin/main` worktree ran **3/3 green — 641 passed each — at 301.6s / 293.8s / 296.8s.** The
+  tight spread rules out load inflation *in that run*. 🔴 **But it is a weaker control than it
+  looks:** it ran on the DEV HOST while the failure is in the nix **sandbox tier** under CI
+  concurrency, so it is a second sample of a DIFFERENT environment, not of the failing one. The
+  structural argument (one markdown file) is what actually discriminates here; the 3/3 only shows
+  the file is not deterministically broken.
+- **Leading hypothesis:** unchanged from the original block — non-determinism that surfaces under
+  concurrency, with the failing case MOVING between runs (now three distinct cases observed across
+  four runs: `TestEnumerationChannelsAreClosed…`, `TestTrustedProxyOverTheRealProcess…`,
+  `TestTheActorComesFromTheTOKEN…`). #996 narrowed it; it did not eliminate it.
+- **Next probe:** do NOT re-derive this from the dev host again — it passes there. Reproduce in the
+  tier that fails: `nix build .#checks.x86_64-linux.pytests` (ONE derivation at a time — a combined
+  invocation produces false failures), repeatedly, and record which case fails each time. If the
+  case keeps moving, the seed/ordering hypothesis is confirmed and
+  `fix/xdist-parametrize-values-deterministic` (branch exists locally, still no PR) is the thread to
+  pull.
+- 🔴 **Consequence while it stays open:** devrc is the one repo here with `enforce_admins: true` and
+  two required checks, so this blocks arbitrary PRs — including docs-only ones — and the only
+  remedy is a fresh push. **A red on this file is not evidence about your diff.** Check the case
+  name against the three above before spending any time on it.
+
 ## Gotchas
 - 🔴 **A FAILED `git worktree add` DOES NOT STOP THE NEXT `git -C <path>` — AND I LANDED A
   MERGE ON ANOTHER SESSION'S BRANCH THIS WAY.** `worktree add /home/zach/workspace/devrc-integ`
@@ -1388,6 +1427,15 @@ directions. Read both halves — either one alone is wrong.**
   around it** — and when the check passes, ask whether the underlying cause is fixed or merely
   masked before rewriting the note. Here it was masked: the pull worked while the router was still
   serving a 485-day poisoned record.
+
+- 🔴 **"FIXED BY #N" IS A CLAIM WITH A SHELF LIFE, AND A FLAKE IS THE WORST PLACE TO WRITE ONE.**
+  This doc recorded `test_subsystem_store_api.py` as fixed by devrc#996 and it recurred — on a
+  one-markdown-file PR, on a case name the doc had already written down. The failure mode is
+  specific: a flake marked fixed reads as "your diff broke it", which is the most expensive
+  possible wrong reading, because the person who hits it is the one with least reason to doubt it.
+  **When closing a flake, record what was MEASURED (the fix, and the runs that passed) rather than
+  the verdict** — and prefer "N consecutive green runs in the failing tier" to "fixed", because the
+  first is falsifiable by the next red and the second silently absorbs it.
 
 ## How to verify
 
