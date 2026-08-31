@@ -601,6 +601,52 @@ the thing it changed. It was merged on a **local reproduction of that exact leg 
 docker.io), `BATS_RC=0`, 67/0. That closed the agent's one self-declared unverified gap
 (it had run bats 1.14.0).
 
+### ✅ RESOLVED — the MERGED-TREE CI verdict is in, and BOTH tiers are green
+The earlier note that only the dev-host tier had confirmed 8c/8d is now **superseded**.
+`clawgate-ci-rerun-z5wj5` on revision **`d2d2346e`** (trunk with both merges):
+```
+== clawgate-ci summary ==
+  go         pass
+  extension  pass
+  hook       pass
+ALL LEGS PASS
+```
+All ten steps `exit=0`, and the `hook` leg — the one #592 exists to exercise and which had never
+run — reaches `ok 67 no test body asserts an absence with a negated grep (use refute_grep)` with
+`hook leg rc=0`. So the sandbox tier (a `cp -r` store copy with no `.git`) and the dev-host tier
+now agree on the merged tree.
+
+⚠ **It was obtained by RE-RUNNING the pipeline from the failed run's own spec**
+(`kubectl -n tekton-ci get pipelinerun <failed> -o json` → strip `metadata.name`/`status`, set
+`generateName`, `kubectl create`), NOT by pushing to trunk. Worth knowing: a trunk PipelineRun is
+re-runnable without a commit, so a capacity-starved verdict is recoverable later.
+
+### 🔴 `TaskRunTimeout` IN clawgate-ci HAS TWO DISTINCT CAUSES, AND `#572` ONLY FIXES ONE
+- **Symptom:** both present as `tekton/clawgate-ci` red with
+  `COULD NOT RUN: clawgate-ci stopped before any leg reported`.
+- **Observed (with values), and they are NOT the same failure:**
+  - `clawgate-ci-czshq` (rev `751aabaa`): `mint-token`, `clone`, `status-pending`, `wait-postgres`,
+    `build-css` all **`exit=0 Completed`**; `go`/`extension`/`hook`/`verdict` `exit=1
+    TaskRunTimeout`. The pod ran and **the budget was consumed inside the `go` step**.
+  - `clawgate-ci-z5pdm` (rev `d2d2346e`): **ALL TEN steps `exit=None running`** — not one
+    executed. TaskRun reason `ExceededNodeResources`, pod `0/10 Pending` for 14 min. The pod
+    **never scheduled**; the 25m budget elapsed while unschedulable.
+  - Cluster at the time: 9 pods Pending in `tekton-ci`, node CPU requests 16/61/55/**89**%, CPU
+    limits oversubscribed to 228/493/268%. After it drained (0 pending, requests 16/61/24/16%,
+    tekton-ci running 16 → 1) the identical spec passed in ~10 min.
+- **Ruled out:** the diff, in both cases. #592 contains zero Go files so it cannot slow `go`, and
+  #591 — which does touch Go — passed the same pipeline nine minutes after czshq failed.
+- 🔴 **Consequence for `ZacxDev/homelab-infra#572` (raise the task budget 25m → 40m):** it fixes
+  the czshq shape and does **nothing** for the z5pdm shape — a longer budget just waits longer for
+  a pod that never lands. **Do not let the bump be recorded as the fix for both.** The z5pdm shape
+  needs scheduling headroom (requests/limits, priority class, or concurrency caps), which is a
+  different change.
+- **Next probe when it recurs:** read the per-step `terminated.reason` FIRST —
+  `kubectl -n tekton-ci get taskruns -l tekton.dev/pipelineRun=<run> -o json`. If early steps show
+  `exit=0 Completed` it is a budget problem; if every step is `exit=None running` it is a
+  scheduling problem, and `kubectl get pods -A --field-selector=status.phase=Pending` plus node
+  `Allocated resources` is the confirming read.
+
 ## Gotchas
 - 🔴 **A FAILED `git worktree add` DOES NOT STOP THE NEXT `git -C <path>` — AND I LANDED A
   MERGE ON ANOTHER SESSION'S BRANCH THIS WAY.** `worktree add /home/zach/workspace/devrc-integ`
@@ -1238,6 +1284,19 @@ docker.io), `BATS_RC=0`, 67/0. That closed the agent's one self-declared unverif
   block quoting `git commit --amend` / `--allow-empty` was refused as "commit on branch main".
   The hook's own message names the case: write prose with the Write tool and pass it by file
   (`git commit -F <file>`, `gh pr create --body-file <file>`), which the RULES prefer anyway.
+
+- 🔴 **TEKTON MARKS EVERY UNFINISHED STEP `TaskRunTimeout` AT ONCE, SO THE STEP LIST ALONE DOES NOT
+  NAME THE CULPRIT — read `exitCode`, not just `reason`.** A timed-out task shows `go`,
+  `extension`, `hook` and `verdict` all "failed" whether the pod ran for 25 minutes or never
+  started. The discriminator is whether the EARLIER steps carry `exit=0 Completed`
+  (ran, then blew the budget) or `exit=None` (never executed at all). Reading only the reason makes
+  a scheduling failure look like a slow test suite, and sends you to optimise or re-budget the
+  wrong thing.
+- ⚠ **A capacity-starved PipelineRun verdict is RECOVERABLE — re-run the spec, do not push.**
+  `kubectl -n tekton-ci get pipelinerun <run> -o json`, strip `metadata.name`/`uid`/
+  `resourceVersion`/`creationTimestamp`/`status`, set `generateName`, `kubectl create`. This
+  re-reports the GitHub status for the same revision without a commit, which matters on trunk where
+  a push means a deploy.
 
 ## How to verify
 
