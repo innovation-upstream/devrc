@@ -251,6 +251,28 @@ source (`c919cd32c230` vs `11fde963e9e9`) under the same version string. This is
 - **Fix (on the laptop):** `git -C ~/workspace/homelab-talos pull --ff-only` then a
   `home-manager switch`.
 
+### 🟡 FILED, NOT DONE — the consolidation audit round 1 found and this PR deliberately did not take
+Round 1's finding F7, recorded here because the PR said it would be filed and the first
+version of this doc did not carry it. Verified on `origin/main` today, not recalled:
+
+- **Three open-coded `_bash_array` copies**, measured with
+  `find scripts -name '*.py' | xargs grep -l 'def _bash_array'`:
+  `scripts/tests/test_hook_tests_dir_collects.py`,
+  `scripts/tests/test_no_real_launchers_all_targets.py`, and
+  `scripts/tests/test_result_grammar_is_reserved.py` (added by #1119). Two are
+  byte-identical; the `test_hook_tests_dir_collects.py` one already DIVERGES — it strips
+  quotes *before* the comment check.
+- **Seven surviving `"RESULT: …" in stdout` substring readers**, including
+  `test_gate_exit_truthfulness.py:362` — 35 lines below a site #1119 converted for exactly
+  that reason — plus `test_run_tests_floors.py:241,314`,
+  `test_run_tests_preconditions.py:652,683`, `test_run_tests_timing.py:262`,
+  `test_nogit_isolation.py:1626`.
+
+🔴 **NONE of these is presently vacuous** — every substring reader is paired with a
+`returncode` assertion, so this is consistency work, not a live hole. It was deliberately
+NOT folded into #1119: widening a diff to chase a repo-wide pattern is how an audit ladder
+leaves the PR it is auditing.
+
 ## 🔴 The one thing to read before doing items 3 and 4
 🟢 **UPDATE 2026-08-30 — the blocker below has LARGELY CLEARED. Read this first; the
 original text is kept underneath because its ARGUMENT is still the right one.**
@@ -295,27 +317,42 @@ a fleet-wide claim cannot be made from this data yet. Re-check both hosts appear
 ## Next steps (ranked)
 1. **Rotate the leaked `activity_reader` credential.**
    forcing: security — a LIVE exposure, an `activity_reader` password in cleartext in the
-   opencode session store. Zach's to do; the only item here with an EXTERNAL forcing
-   function.
-2. **Bring the laptop's clawgate built source current** — two commands on that host, above.
-   forcing: regression — MEASURED by drift-check: the two hosts build different source
-   under one version string.
-3. **The `adoption-scan` `via: "skill"` registry arm.** Files:
+   opencode session store. Zach's to do; the only item in this doc with an EXTERNAL
+   forcing function.
+2. **Bring the laptop's `homelab-talos/containers/clawgate` built source current** —
+   `git -C ~/workspace/homelab-talos pull --ff-only` then a `home-manager switch`, ON THE
+   LAPTOP. Measured by `drift-check.sh`: laptop rc 17, 1 behind; workbench CURRENT, so the
+   two hosts build DIFFERENT source (`c919cd32c230` vs `11fde963e9e9`) under one version
+   string.
+   forcing: regression — MEASURED, and it is the 2026-08-14 failure mode's exact shape (a
+   `clawgatectl` whose binary is older than its label).
+3. **Commit or claim the workbench's dirty `nix/pkgs/default.nix`** (+4 lines, tracked).
+   `ship.sh` reports it as DIRTY AND IN THE ARTIFACT, so the workbench's built generation
+   is `origin/main` PLUS that change while the laptop's is not — the hosts are at one sha
+   but not one artifact. It is NOT from the #1119 work (that touched no `nix/pkgs` path).
+   forcing: regression — an un-committed path inside the built artifact is the
+   dirty-tree-probe hazard in `RULES.md`: the deployed copy and the commit are different
+   claims, and right now only one host has it.
+4. **Consolidate `_bash_array` and the substring readers** — the F7 block above.
+   forcing: none — nothing is vacuous today; this is "one rule, one place" hygiene, and
+   the divergence already present in `test_hook_tests_dir_collects.py` is the argument for
+   doing it before a fourth copy appears.
+5. **The `adoption-scan` `via: "skill"` registry arm.** Files:
    `scripts/session-analysis/adoption-scan.py`, `claude/skills/adoption-scan/SKILL.md`.
-   forcing: none — unchanged. The incident that forced this effort is closed by #1000 +
-   #1059. Do not work it on the strength of being written down.
-4. **The `attributionSkill` deadman.** File: `scripts/validation/invariants.py`.
+   forcing: none — the incident that forced this effort is closed by #1000 + #1059. Do not
+   work it on the strength of being written down.
+6. **The `attributionSkill` deadman.** File: `scripts/validation/invariants.py`.
    forcing: none — guards a hypothetical silent zero; nothing has regressed.
-5. **`claudedocs/followups-skill-usage-telemetry.md`** — G5, the ClickHouse creds/query
-   helper. (`audit-dispatch.py`'s wrong-toolchain brief was closed by #1104.)
+7. **`claudedocs/followups-skill-usage-telemetry.md` — G5 only**, the ClickHouse
+   creds/query helper. ✅ The `audit-dispatch.py` wrong-toolchain brief in that file is
+   CLOSED: #1104 merged 2026-08-30T19:09Z, verified via `gh pr view`, not assumed.
    forcing: none.
-6. **Escape-obfuscation hardening of the RESULT: scan** — deliberately NOT done. An
-   auditor found 11 fail-open cases reachable only by DELIBERATE obfuscation
-   (`echo RESULT: PA''SS`, `$'RESULT: \x50ASS'`). Identical at rounds 4, 5 and 6, so
-   pre-existing rather than a regression, zero occurrences in the registry population.
+8. **Escape-obfuscation hardening of the `RESULT:` scan** — deliberately NOT done. 11
+   fail-open cases reachable only by DELIBERATE obfuscation (`echo RESULT: PA''SS`,
+   `$'RESULT: \x50ASS'`); identical at rounds 4, 5 and 6, so pre-existing rather than a
+   regression, and zero occurrences in the 9-entry registry population.
    forcing: none — the guard exists to stop a copy-pasted literal, and its docstring now
-   states plainly that its blind-spot list is not exhaustive. Widening it to defeat
-   deliberate obfuscation is different work; do not start it without a reason.
+   states plainly that its blind-spot list is not exhaustive. Do not start without a reason.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`find-session`'s "both hosts" claim was HALF FALSE for weeks** and is the root cause of
