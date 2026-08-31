@@ -365,7 +365,10 @@ def _validate_site_rules(rules: dict) -> None:
         if not isinstance(media, (dict, list)):
             raise ConfigError(
                 f"{where}.player.media must be a table, or a list of them "
-                '(e.g. media = {{ element = "video#main", attr = "src" }})')
+                # SINGLE braces. This half is a plain adjacent string, not an
+                # f-string, so `{{` is never consumed and the operator was
+                # shown a literal `{{ ... }}` they cannot paste into TOML.
+                '(e.g. media = { element = "video#main", attr = "src" })')
         if not accessors:
             raise ConfigError(
                 f"{where}.player.media must not be an empty list -- a rule "

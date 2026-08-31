@@ -642,3 +642,31 @@ test("an empty list and an over-long list are both refused", () => {
   assert.ok(P.normalisePlayerRule(
     { player: { container: "#wrap", media: eight } }));
 });
+
+test("each accessor sees only ITS OWN nodes", () => {
+  // MEASURED: accumulating the node lists across accessors
+  // (`nodes = nodes.concat(...)`) survived the whole 536-test suite and
+  // returned a URL belonging to NEITHER pair. The shape that catches it needs
+  // an element matched by the FIRST accessor that does not answer the first
+  // attribute but DOES carry the second one -- otherwise the leak is invisible
+  // because the earlier nodes simply have nothing to contribute.
+  const r = P.normalisePlayerRule({
+    player: {
+      container: "#wrap",
+      media: [
+        { element: ".decoy", attr: "data-orig" },
+        { element: ".real", attr: "href" },
+      ],
+    },
+  });
+  const dom = playerDomFromHTML(
+    '<div id="wrap">'
+    + '<a class="decoy" href="https://wrong.test/x.png"></a>'
+    + '<a class="real" href="https://right.test/x.png"></a>'
+    + "</div>");
+  const container = dom.queryAll("#wrap")[0];
+  // `.decoy` has no data-orig, so accessor 1 yields nothing. Accessor 2 must
+  // query `.real` afresh -- if `.decoy` were still in scope its `href` would
+  // win, because it comes first in document order.
+  assert.equal(P.readMediaUrl(dom, r, container), "https://right.test/x.png");
+});

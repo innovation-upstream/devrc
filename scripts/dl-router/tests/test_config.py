@@ -6,6 +6,7 @@ constraint, asserted here so a future edit cannot quietly leak one.
 from __future__ import annotations
 
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -250,6 +251,30 @@ def _load(tmp_path, rules):
     return config_mod.load(p)
 
 
+def _toml_str(text) -> str:
+    """A TOML basic string with `"` and `\\` escaped."""
+    return '"' + str(text).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _toml_value(value) -> str:
+    """One TOML value, emitted with its OWN type preserved.
+
+    A bool, an int, a float and a nested array must NOT come out as strings --
+    the validator's type checks are exactly what several tests below assert,
+    and a stringifying emitter would satisfy every one of them vacuously.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, dict):
+        return "{" + ", ".join(
+            f"{k} = {_toml_value(v)}" for k, v in value.items()) + "}"
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(v) for v in value) + "]"
+    return _toml_str(value)
+
+
 def _toml(entry, prefix):
     """Just enough TOML emitter for these cases."""
     lines, tables = [], []
@@ -265,13 +290,14 @@ def _toml(entry, prefix):
             # `a[href^="https://x/"]` is the whole reason a list exists, and an
             # emitter that produced unclosed inline tables for it would make
             # every list test fail on the FIXTURE rather than on the validator.
-            def _s(x):
-                return '"' + str(x).replace("\\", "\\\\").replace('"', '\\"') \
-                    + '"'
-            inner = ", ".join(
-                "{" + ", ".join(f"{ik} = {_s(iv)}" for ik, iv in s.items())
-                + "}" if isinstance(s, dict) else _s(s) for s in v)
-            lines.append(f"{k} = [{inner}]")
+            #
+            # 🔴 AND NON-STRINGS ARE EMITTED AS THEMSELVES. An earlier version
+            # wrapped every scalar in quotes, so `element = 1` reached the
+            # validator as the STRING "1" and was accepted -- any test asserting
+            # a type rejection would have passed vacuously, testing the emitter
+            # rather than the validator, which is the exact inversion this
+            # helper's docstring promises not to do.
+            lines.append(f"{k} = [{', '.join(_toml_value(s) for s in v)}]")
         elif isinstance(v, list):
             lines.append(f"{k} = [" + ", ".join(f'"{s}"' for s in v) + "]")
         else:
@@ -392,16 +418,97 @@ def test_a_bad_entry_in_a_list_names_ITS_INDEX(tmp_path):
     assert "media[1].attr" in str(e.value)
 
 
-def test_the_SINGLE_table_message_carries_no_index(tmp_path):
-    """The old message must not grow a `[0]` -- it would read as a list error
-    to someone who never wrote a list."""
+def test_the_SINGLE_table_message_is_pinned_WHOLE(tmp_path):
+    """🔴 THE WHOLE NORMALISED STRING, not a substring.
+
+    This is a back-compat contract: an operator with a single-table rule must
+    see exactly what they saw before the list form existed. A substring check
+    (`"media.attr" in msg and "[0]" not in msg`) is walkable by rewording
+    everything around it -- and a reworded message is precisely the drift this
+    guards. A cosmetic reword now fails this test, which is the price of a
+    machine-readable claim.
+    """
     with pytest.raises(config_mod.ConfigError) as e:
         _load(tmp_path, _player({"element": "video", "attr": ""}))
+    assert str(e.value) == (
+        'site_rules.\'h.test\'.player.media.attr must be a non-empty string')
+
+
+def test_a_LIST_entry_message_names_its_index_and_is_pinned_whole(tmp_path):
+    """The mirror of the test above: the list form differs from the single
+    form ONLY by the `[idx]`, so both are pinned whole and the pair is what
+    makes 'byte-identical except for the index' checkable."""
+    with pytest.raises(config_mod.ConfigError) as e:
+        _load(tmp_path, _player([{"element": "video", "attr": "src"},
+                                 {"element": "video", "attr": ""}]))
+    assert str(e.value) == (
+        'site_rules.\'h.test\'.player.media[1].attr must be a non-empty string')
+
+
+def test_the_wrong_SHAPE_message_is_pastable_TOML(tmp_path):
+    """It carries an example, and an example an operator cannot paste is
+    worse than none: the f-string/plain-string split rendered `{{ ... }}`."""
+    with pytest.raises(config_mod.ConfigError) as e:
+        _load(tmp_path, _player("video"))
     msg = str(e.value)
-    assert "media.attr" in msg and "[0]" not in msg
+    assert "{{" not in msg and "}}" not in msg, msg
+    assert 'media = { element = "video#main", attr = "src" }' in msg
 
 
 def test_a_scalar_media_is_still_refused(tmp_path):
     with pytest.raises(config_mod.ConfigError) as e:
         _load(tmp_path, _player("video"))
     assert "must be a table" in str(e.value)
+
+
+def test_a_list_entry_that_is_not_a_table_is_a_ConfigError_not_a_CRASH(
+        tmp_path):
+    """🔴 THE GUARD THIS PINS IS WHAT STOPS A RESTART LOOP.
+
+    `load_degraded` catches `ConfigError` and nothing else, and the unit is
+    `Restart=always` + `RestartSec=10`. Without the isinstance check, a
+    `media = ["video"]` typo raises AttributeError ('str' has no attribute
+    'get'), which `load_degraded` does NOT catch, so the sidecar crash-loops
+    six times a minute with nothing listening -- the exact failure
+    `load_degraded`'s own docstring exists to prevent.
+    """
+    with pytest.raises(config_mod.ConfigError) as e:
+        _load(tmp_path, _player(["video"]))
+    assert "must be a table" in str(e.value)
+    # ...and the degraded path must produce a config, not propagate.
+    path = tmp_path / "config.toml"
+    cfg, err = config_mod.load_degraded(path, env={})
+    assert err and cfg.library_root is None
+
+
+def test_a_non_string_accessor_field_is_refused(tmp_path):
+    """The emitter preserves types on purpose; if it stringified them this
+    would pass vacuously against `element = "1"`."""
+    for bad in ({"element": 1, "attr": "src"},
+                {"element": "video", "attr": True}):
+        with pytest.raises(config_mod.ConfigError) as e:
+            _load(tmp_path, _player([bad]))
+        assert "must be a non-empty string" in str(e.value)
+
+
+def test_THE_TWO_LANGUAGES_AGREE_ON_THE_ACCESSOR_CAP():
+    """🔴 A HAND-COPIED CONSTANT IN TWO LANGUAGES, PINNED.
+
+    MEASURED: bumping only `config.py`'s cap to 9 leaves BOTH suites fully
+    green (48/48 python, 536/536 node). The sidecar would then accept a 9-entry
+    rule that `normalisePlayerRule` rejects, so the host gets NO BUTTON and no
+    error anywhere -- the silent failure both files' comments name.
+
+    This repo has already paid for this shape once: `fixtures/name_cases.json`
+    exists because two hand-copied cross-language tables agreed with each other
+    while the implementations disagreed on 991 inputs.
+    """
+    js = (Path(__file__).resolve().parent.parent
+          / "extension" / "player_buttons.js").read_text(encoding="utf-8")
+    found = re.findall(r"var MAX_MEDIA_ACCESSORS = (\d+);", js)
+    assert len(found) == 1, \
+        f"expected exactly one JS declaration, found {found!r}"
+    assert int(found[0]) == config_mod.MAX_MEDIA_ACCESSORS, (
+        f"player_buttons.js caps at {found[0]} but config.py caps at "
+        f"{config_mod.MAX_MEDIA_ACCESSORS} -- a rule between the two sizes is "
+        "accepted by the sidecar and silently renders no button")

@@ -167,10 +167,14 @@
     // rather than the thumbnail, and it does so BY CONSTRUCTION: the anchor's
     // URL is already signed for its own host, so nothing has to be rewritten.
     var pairs = rule.media;
-    var nodes = [];
     for (var p = 0; p < pairs.length; p += 1) {
       var attr = pairs[p].attr;
-      nodes = safeQuery(dom, pairs[p].element, container);
+      // EACH ACCESSOR SEES ONLY ITS OWN NODES. Declared inside the loop and
+      // never accumulated: carrying the previous accessor's matches forward
+      // would let an EARLIER element answer a LATER accessor's attribute, so
+      // the URL returned would belong to neither pair. Pinned by
+      // "each accessor sees only ITS OWN nodes" in player_buttons.test.mjs.
+      var nodes = safeQuery(dom, pairs[p].element, container);
       for (var i = 0; i < nodes.length; i += 1) {
         var node = nodes[i];
         var value = "";
