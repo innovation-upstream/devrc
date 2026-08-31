@@ -693,14 +693,18 @@ directions. Read both halves — either one alone is wrong.**
 - 🔴 **But it is NOT fixed, and "docker.io works now" is the more dangerous wrong conclusion.**
   The router is still serving the poisoned record, unchanged:
   ```
-  dig @192.168.50.1 registry-1.docker.io   ->  TTL 41879636 (~485 days)
-      98.84.245.6 / 54.225.97.128 / 52.4.106.100 / 100.63.109.26
-  dig @1.1.1.1     registry-1.docker.io   ->  TTL 49
-      52.72.129.195 / 3.221.100.247 / 44.205.219.111 / 98.85.115.1
+  dig @<the LAN router> registry-1.docker.io  ->  TTL 41879636 (~485 days), 4 addresses
+  dig @<a public resolver> registry-1.docker.io  ->  TTL 49, a DISJOINT set of 4
   ```
+  ⚠ The addresses are deliberately NOT written down: they are ephemeral third-party allocations of
+  no lasting value, this repo is PUBLIC, and `scripts/tests/test_no_public_ips.py` rejects a public
+  IP literal (it caught this paragraph's first draft — an allowlist entry would have been the wrong
+  fix, since every exemption there is path-scoped and must keep matching something). **Re-derive
+  them with the two `dig`s above; the DISJOINTNESS and the TTL are the finding, not the values.**
   TLS against the addresses the ROUTER hands out still presents certificates for unrelated sites —
-  measured `subject=CN=kube-apiserver` and `subject=CN=*.dsiderenp.app`, plus one address that
-  completes no handshake. That is the documented symptom, intact.
+  measured one generic infrastructure CN and one wildcard CN belonging to an unrelated third-party
+  domain (not named here, same reason), plus one address that completes no handshake. That is the
+  documented symptom, intact.
 - **The host-side pin is still NOT applied.** `server=/docker.io/` appears **0** times in the
   RUNNING dnsmasq config. `nix/system/apply-dnsmasq-docker-io-pin.sh` remains staged-not-applied
   and still needs `sudo nixos-rebuild switch`, which an agent cannot run.
