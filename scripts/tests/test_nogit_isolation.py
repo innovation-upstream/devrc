@@ -57,6 +57,20 @@ WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the label):
     203a5582, green at HEAD — the matrix is in the test's own docstring.
     `test_the_control_mutex_is_never_gits_own_lock_file` is the INVARIANT GUARD
     beside it, on the one rename that would silence the control entirely.
+  * `test_the_exhaustion_verdict_counts_acquisitions_it_does_not_sample_one` is
+    REGRESSION coverage for the verdict describing ONE retry attempt while
+    reading as the whole run — `held` is rebound each iteration, so a bare
+    boolean said `mutex=held` on a run where most writes went unserialised, and
+    the reader then hunts a rogue writer that does not exist. It pins BOTH sides
+    of the ratio (`0/6` with the mutex taken from the test process, `6/6` with it
+    free) because pinning only the zero leaves a mutant that hardcodes the
+    numerator alive — measured, it SURVIVED before the second half existed.
+  * `test_CONFIG_LOCK_WAIT_is_read_at_call_time_not_captured_at_import` is
+    REGRESSION coverage for a silent trap rather than a wrong answer: `wait` was
+    a default argument, captured at import, so monkeypatching the module
+    attribute did nothing while its three neighbours honoured it. Asserted by
+    ELAPSED TIME, which is the observable the trap moves — 60.28s with the bug
+    against its 5s bound, 0.30s without.
   * the plugin-flag set pin, the lever pins, the two-way token pin and the
     accounting-site count are INVARIANT GUARDS. The bug never violated them; they
     exist so the enforcement point cannot be narrowed to nothing by an edit that
@@ -458,10 +472,15 @@ def _fire_controls_concurrently(tmp_path, n=_CONTENDERS,
     # with a `continue` bounds the fixture at n*300 = 4800s — past `gate.sh`'s
     # 3600s tier cap, turning a systemic child hang into `reason=timeout` with NO
     # verdict instead of one clean failure. The budget must also EXCEED the
-    # documented 391s single-control ceiling (LOCK_RETRIES * (CONFIG_LOCK_WAIT +
-    # LOCK_TIMEOUT) + jitter), or a legitimately slow control is killed and
-    # reported as a hang. 600s satisfies both; re-derive it if either constant
-    # moves — and note this, not _CONTENDED_CONFIG_KEYS, is the real cap.
+    # ceiling of a whole `config_control` call, or a legitimately slow control is
+    # killed and reported as a hang. 🔴 THAT IS NOT THE DOCUMENTED 391s: 391 is
+    # the RETRY LOOP's bound (LOCK_RETRIES * (CONFIG_LOCK_WAIT + LOCK_TIMEOUT) +
+    # jitter), and the function then does a post-loop `--get` read-back with
+    # `_git`'s DEFAULT timeout of 30 rather than LOCK_TIMEOUT — so the call's
+    # real ceiling is ≈421s. An earlier revision of this comment said 391 and
+    # told you to re-derive from it, which would come out 30s short. 600s clears
+    # 421; re-derive from 421 if any of those constants moves — and note this,
+    # not _CONTENDED_CONFIG_KEYS, is the real cap.
     budget = 600.0
     deadline = time.monotonic() + budget
     out = []
@@ -476,6 +495,11 @@ def _fire_controls_concurrently(tmp_path, n=_CONTENDERS,
                 # Capture what it DID say. Discarding this for a fixed string
                 # would be the exact failure the payload half of this commit
                 # exists to fix: a verdict that does not name its mechanism.
+                # ⚠ MEASURED: the tail is EMPTY for a child killed before its
+                # single JSON write, because _CONTENDER writes nothing until the
+                # very end. So an empty tail means "killed before it produced
+                # anything", NOT "it had nothing useful to say" — a child that
+                # does emit (verified with a stderr marker) has it captured here.
                 stdout, stderr = p.communicate()
                 out.append({"status": "CHILD-TIMEOUT",
                             "detail": f"killed after the {budget:.0f}s fixture "
@@ -535,7 +559,7 @@ def test_concurrent_sessions_all_emit_their_control_key(tmp_path):
         f"to the session count, so a scattered write reads as a dead redirect.")
 
 
-def test_the_exhaustion_verdict_counts_acquisitions_it_does_not_sample_one(tmp_path):
+def test_the_exhaustion_verdict_counts_acquisitions_it_does_not_sample_one(tmp_path, monkeypatch):
     """🔴 REGRESSION. The verdict must report how MANY attempts held the mutex.
 
     `held` is rebound every retry, so printing it alone describes ONE attempt
@@ -550,10 +574,18 @@ def test_the_exhaustion_verdict_counts_acquisitions_it_does_not_sample_one(tmp_p
     itself really does exit 255 — mechanism (c), which is what makes the
     exhaustion path reachable without racing anything.
     """
+    # 🔴 monkeypatch, NOT `install()`. `install()` rewrites five process-wide
+    # env vars and its own header says it is NEVER UNDONE — so calling it here
+    # leaks this test's redirect into every test that runs after it in the file
+    # (measured: 42 of them), and those tests then verify containment against a
+    # redirect an unrelated test installed rather than the session fixture's.
+    # `_guard_config`'s vacuity assertion cannot detect that. The file already
+    # had the right pattern; this test is what introduced the wrong one.
     guard = tmp_path / "g"
     guard.mkdir()
-    nogit_plugin.install(guard)
     cfg = nogit_plugin.guard_config_path(guard)
+    cfg.write_text("", encoding="utf-8")
+    monkeypatch.setenv(nogit_plugin.CONFIG_ENV, str(cfg))
     Path(str(cfg) + ".lock").write_text("", encoding="utf-8")
 
     holder = nogit_plugin.guard_config_lock_path(guard).open("a+")
@@ -573,8 +605,28 @@ def test_the_exhaustion_verdict_counts_acquisitions_it_does_not_sample_one(tmp_p
     # And the other discriminator still names mechanism (c) beside it.
     assert "stale-git-lock=PRESENT" in detail, detail
 
+    # 🔴 THE NON-ZERO SIDE, and it is not optional. Asserting only `0/6` pins a
+    # value this fixture can ONLY ever produce, so a mutant that hardcodes the
+    # numerator to 0 SURVIVES a green suite — RULES.md's "a fixture derived from
+    # the constant under test cannot see that constant change", walked into
+    # while fixing a mutation-coverage defect. Same stale lock so git still
+    # fails, but WITHOUT holding the mutex, so every acquire succeeds: the
+    # counter must move. This is also mechanism (a) — serialised throughout and
+    # still failing — pinned beside the (b)+(c) case above.
+    guard_a = tmp_path / "a"
+    guard_a.mkdir()
+    cfg_a = nogit_plugin.guard_config_path(guard_a)
+    cfg_a.write_text("", encoding="utf-8")
+    monkeypatch.setenv(nogit_plugin.CONFIG_ENV, str(cfg_a))
+    Path(str(cfg_a) + ".lock").write_text("", encoding="utf-8")
 
-def test_CONFIG_LOCK_WAIT_is_read_at_call_time_not_captured_at_import(tmp_path):
+    status_a, detail_a = nogit_plugin.config_control(guard_a)
+    assert status_a == "unmeasured", (status_a, detail_a)
+    assert (f"mutex=held {nogit_plugin.LOCK_RETRIES}/{nogit_plugin.LOCK_RETRIES}"
+            in detail_a), detail_a
+
+
+def test_CONFIG_LOCK_WAIT_is_read_at_call_time_not_captured_at_import(tmp_path, monkeypatch):
     """🔴 REGRESSION, and it guards a SILENT trap rather than a wrong answer.
 
     `wait` was bound as `wait: float = CONFIG_LOCK_WAIT`, so the value was
@@ -588,9 +640,14 @@ def test_CONFIG_LOCK_WAIT_is_read_at_call_time_not_captured_at_import(tmp_path):
     Measured: ~60.00s with the bug, ~0.30s without — so a 5s bound is nowhere
     near either, and this is not a timing-sensitive test in the flaky sense.
     """
+    # monkeypatch, not `install()` — same reason as the test above: `install()`
+    # is documented as never undone and would leak this redirect into every
+    # later test in the file.
     guard = tmp_path / "g"
     guard.mkdir()
-    nogit_plugin.install(guard)
+    cfg = nogit_plugin.guard_config_path(guard)
+    cfg.write_text("", encoding="utf-8")
+    monkeypatch.setenv(nogit_plugin.CONFIG_ENV, str(cfg))
     lock_path = nogit_plugin.guard_config_lock_path(guard)
     # Hold the mutex from this process so every acquire below must wait it out.
     holder = lock_path.open("a+")
