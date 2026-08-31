@@ -195,8 +195,7 @@ OPEN one. *History:* a 2026-08-26 renumbering superseded an earlier 1–7 list, 
 before that date may name a different item — do not renumber again without releasing live claims.
 
 🔴 **AND THE LOCK CANNOT TELL 8a/8b/8c/8d APART — see rank 13.** `--slug-for … 8c` returns the
-BARE slug `tmux-webapp`, not `tmux-webapp-8c`. Until 13 lands, claiming any lettered sub-item
-claims all four and collides with a whole-doc claim.
+BARE slug `tmux-webapp`. Prefer plain integer ranks until 13 lands.
 
 1. ✅ **DONE 2026-08-27** — the idle reaper had never fired because it COULD NOT (`time.NewTicker`
    delivers its first tick one whole interval in). `ZacxDev/homelab-infra#457`, 0.8.7.
@@ -211,96 +210,90 @@ claims all four and collides with a whole-doc claim.
    forcing: none
 5. ✅ **DONE 2026-08-29 — `ZacxDev/homelab-infra#516`, squash `c8635976`.** `requireTerminalToken`:
    the ONLY fail-closed tier. 🔴 **The secret is still UNPROVISIONED and the surface boots DISABLED
-   — correct, not a regression.** The SOPS age identity is on NEITHER host. Wired `optional: true`,
-   because without it a missing key is a `CreateContainerConfigError` that stops the WHOLE pod.
+   — correct, not a regression.** The SOPS age identity is on NEITHER host. Wired `optional: true`.
    **To arm it:** `clawgate gentoken` → `sops clusters/workbench/apps/clawgate/secrets.enc.yaml`.
    forcing: none
 6. ✅ **FULLY DONE 2026-08-31 — `ZacxDev/homelab-infra#527` + `devrc#1056` (squash `ac64ccb4`).**
-   `devrc#1056` merged and the sentinel is observed non-null end to end on both hosts (values in
-   Status). 🔴 **A PANEL STORES A DESCRIPTION, NOT A REFERENCE** — measured across 79 live windows,
-   no field is both unique and stable, so panels resolve against the live snapshot on every read.
-   The laptop's `start_time` is Jan 2021, which is why this is an OPAQUE EQUALITY TOKEN and never
-   a timestamp.
+   Sentinel observed non-null end to end on both hosts. 🔴 **A PANEL STORES A DESCRIPTION, NOT A
+   REFERENCE** — no field is both unique and stable across 79 live windows, so panels resolve
+   against the live snapshot on every read. The laptop's `start_time` is Jan 2021: an OPAQUE
+   EQUALITY TOKEN, never a timestamp.
    forcing: none
 7. ✅ **DONE 2026-08-30 — `ZacxDev/homelab-infra#538`, squash `fb9b75e5`.** The htmx layout tab.
    🔴 **THE UI TIER CARRIES ONLY REVERSIBLE CONTROLS, BY CONSTRUCTION** — the destructive control
-   was REMOVED (button, route, handler, ledger entry), leaving `clawgatectl panel rm` as the only
-   delete path.
+   was REMOVED, leaving `clawgatectl panel rm` as the only delete path.
    forcing: none
-8. **Housekeeping — 8a (RECURRING), 8b and 8e done; 8c and 8d IN FLIGHT and both now verified.**
+8. ✅ **DONE — all five sub-items closed.** 8a RECURRING (measured green 2026-08-31), 8b/8e done,
+   8c `ZacxDev/homelab-infra#591` squash `d6dc52cf`, 8d `#592` squash `d2d2346e`. Both verified on
+   the merged tree in BOTH tiers (go 20 ok/0 FAIL; bats 67 ok/0 not ok; `ALL LEGS PASS` on
+   `clawgate-ci-rerun-z5wj5`). Audited post-merge — findings became ranks 14–16, not a revert.
    forcing: gate — `clawgate-e2e` was green through all four of #538's audit rounds while running
-   ZERO specs touching layout, and its floor tolerated losing 15 of 125 tests. 8b and 8e closed
-   both halves of that.
-   - a. ⚠ **RE-APPLIED, MEASURED GREEN 2026-08-31, NOT PERMANENTLY CLOSED.** See Status — it
-     regressed within hours of first closing and will do so again on the next clawgate release,
-     because nothing converges `homelab-talos` on either host.
-   - b. ✅ **DONE — `ZacxDev/homelab-infra#566`, squash `4964d223`.** `layout.spec.ts`, three tests,
-     `clawgate-e2e` 125/2 on the final sha. SIX audit rounds; the first FIVE each found the previous
-     round's fix had created the next defect.
-   - c. **IN FLIGHT: `ZacxDev/homelab-infra#591`** (`fix/clawgate-8c-settle-barrier`, commit
-     `d687fcaa` after an amend + `--force-with-lease`). All eight `time.Sleep` bets in
-     `containers/clawgate/internal/api/{push_task,task_comment}_test.go` replaced with
-     `awaitPushesSettled`. ✅ **Evidence now VERIFIED — the earlier "do not merge on this table"
-     warning is RESOLVED** (see the resolved investigation below): all eight mutants die at their
-     own `t.Fatalf`, zero panics, and the barrier is independently confirmed load-bearing
-     (mutant + barrier RED at `:282`; mutant − barrier `ok` over 50 runs, with a 50-`--- PASS`
-     positive control proving the filter selects a real test). Independent full package run:
-     20 `^ok` / 0 `^FAIL`, `go test`'s own exit 0.
-   - d. **IN FLIGHT: `ZacxDev/homelab-infra#592`** (`test/clawgate-8d-negated-grep-scanner`, commit
-     `751aabaa`). `scan_inert_negated_greps` + one `@test` per bats suite. **Verified
-     independently, both directions:** as committed, 67 `ok` / 0 `not ok` with both scanner tests
-     present and passing while every existing `! grep` prose line stays in place; with a
-     `! grep -q "ZZ_PLANTED_CONTROL_ZZ" /dev/null` planted mid-body in
-     `hook/tests/clawgate-hook.bats`, `not ok 35` with the scanner's OWN message naming
-     `VIOLATION 313:` and the exact planted line. Tree restored, sha256 confirmed.
-     ⚠ Known gap, stated in the failure message itself: a negation that is not the first token
-     (`foo && ! grep …`) is NOT flagged.
-   - e. ✅ **DONE — `ZacxDev/homelab-infra#584`, squash `30125ea1`, LIVE on the deployed Task.**
-     `MIN_PASSED` 110 → 116, `HEALTHY_PASSED` 118 → 125.
-
-🔴 **There is no rank 9.** A previous revision listed one — "get three portable lessons into
-MEMORY.md" — and it was NOT a work item: the operator confirmed 2026-08-27 that MEMORY.md is not
-used here, so nothing could ever have closed it.
-
+   ZERO specs touching layout. 8b and 8e closed both halves of that.
+9. **There is no rank 9** — a previous revision listed one and it was never a work item (the
+   operator confirmed 2026-08-27 that MEMORY.md is not used here).
+   forcing: none
 10. **Two guard gaps #457's ladder left open deliberately, both scaffolding-scope.**
     `RunSweeper`'s ticker survives `NewTicker`→`NewTimer` against the whole api package;
     `RunRetention` and `RunReconciler` deserve the same check (pattern:
-    `TestRunAttentionReapTicksOnTheIntervalItWasGiven`). And the `main()` wiring ledger pins syntax,
+    `TestRunAttentionReapTicksOnTheIntervalItWasGiven`). The `main()` wiring ledger pins syntax,
     not reachability — NOT closable statically.
     forcing: none
 11. **The archive drawer loses its `open` after every write-triggered swap.** KNOWN, UNFIXED, noted
-    in-code at `layoutArchivedDrawer`. The correct fix is the `taskCardScript` treatment (a
-    once-bound listener re-applying `open` after settle).
-    🔴 **8b makes this verifiable AND has already measured the trap on BOTH sides:**
-    `layout.spec.ts` deliberately does NOT pin the drawer's `open` — mutant H (`<details open>`,
-    i.e. the defect FIXED) is asserted to PASS, so the spec will not red the day someone fixes it.
-    But a once-bound listener that SWALLOWS the summary's click is mutant PD, which the spec DOES
-    red at the toggle assertion. Read both before writing the fix.
+    in-code at `layoutArchivedDrawer`. The fix is the `taskCardScript` treatment (a once-bound
+    listener re-applying `open` after settle). 🔴 `layout.spec.ts` deliberately does NOT pin the
+    drawer's `open` — mutant H is asserted to PASS, so the spec will not red when someone fixes it;
+    but a listener that SWALLOWS the summary's click is mutant PD, which it DOES red. Read both.
     forcing: none
 12. **NOT MINE, RECORDED SO IT IS NOT LOST: 24% of the tasks board cannot be scrolled to — clawgate
-    task #463.** Another session measured it live on 0.8.19 at 1280x720: `scrollHeight` 21,997 vs
-    `innerHeight` 720, and at maxScroll the last card sits at `rect.top +6,510`,
-    `inViewport:false` — **60 of 248 cards unreachable** by wheel, `scrollTo` or `scrollIntoView`.
-    Full detail is in the `clawgate` subsystem-index entry.
-    forcing: incident — a shipped, measured defect on the version now live on both hosts, filed as
+    task #463.** Measured live on 0.8.19 at 1280x720: `scrollHeight` 21,997 vs `innerHeight` 720;
+    at maxScroll the last card sits at `rect.top +6,510`, `inViewport:false` — **60 of 248 cards
+    unreachable**. Full detail in the `clawgate` subsystem-index entry.
+    forcing: incident — a shipped, measured defect on the version live on both hosts, filed as
     task #463 by the session that found it.
-13. **`claim-work --slug-for` collapses every LETTERED sub-rank to the bare doc slug, so the
-    queue lock is inert for exactly the items that are open.** Repo: `devrc`, `scripts/claim-work.sh`
-    (plus its tests under `scripts/tests/`). Measured 2026-08-31 against
-    `claudedocs/handoff-tmux-webapp.md`:
-    ```
-    8   -> tmux-webapp-8      11  -> tmux-webapp-11     12  -> tmux-webapp-12
-    8a  -> tmux-webapp        8b  -> tmux-webapp
-    8c  -> tmux-webapp        8d  -> tmux-webapp
-    ```
-    So 8a/8b/8c/8d are indistinguishable from each other AND from a whole-doc claim: taking 8c
-    silently locks 8d, and a session claiming "the tmux-webapp work" collides with both. The rank
-    is half a claim's identity, so this is the lock failing open in the one place this doc's
-    housekeeping tier lives. Closing condition: `--slug-for <doc> 8c` returns a slug distinct from
-    `--slug-for <doc> 8d` and from `--slug-for <doc> 8`, with a test pinning all three.
-    forcing: regression — the lock is documented as the protection `/resume` step 6 runs before
-    touching a ranked item, and it does not discriminate the four items currently at the front of
-    this queue.
+13. **`claim-work --slug-for` collapses every LETTERED sub-rank to the bare doc slug.** Repo:
+    `devrc`, `scripts/claim-work.sh:357` — `^[0-9]+$` accepts bare digits only, so `8c` fails it,
+    `SLUG_RANK` stays empty and the argument is left unshifted and ignored: **discarded, not
+    rejected** (no warning, exit 0, well-formed slug). Written up in
+    `claude/skills/handoff/reference/shared-queue.md` (devrc#1163). Closing condition:
+    `--slug-for <doc> 8c` returns a slug distinct from `8d` and from `8`, pinned by a test, while
+    still refusing anything beginning with `-`.
+    forcing: regression — the lock is the protection `/resume` step 6 runs before touching a ranked
+    item, and it does not discriminate a doc's housekeeping tier, where contention is highest.
+14. **Pin the settle barrier's PRECONDITION, which nothing currently asserts.** Repo:
+    `homelab-talos`, `containers/clawgate/internal/api/push_fanout_ledger_test.go`. Extend the
+    ledger to AST-assert that no `notify*`/`pushTask` call appears inside a `go` statement or a
+    `safeGo` closure anywhere in `internal/api` — i.e. pin the RELATIONSHIP `awaitPushesSettled`
+    depends on, not a call-site count. Evidence and the 20/20-vs-0/20 measurement are in the
+    resolved investigation above. Closing condition: the ledger reds when
+    `s.notifyAgentRunning(agentName)` at `server.go:2160` is wrapped in `safeGo`.
+    forcing: regression — measured, the conversion took one bug class from a 20/20 detector to a
+    0/20 non-detector, and the guard that would have caught the enabling refactor does not exist.
+15. **The bats scanner's heredoc premise is FALSE, and two of its sub-expressions survive mutation.**
+    Repo: `homelab-talos`, `containers/clawgate/hook/tests/{clawgate-hook,clawgate-stop-hook}.bats`.
+    Three parts, all from the #592 audit and re-verified here:
+    (a) 🔴 KNOWN LIMIT 4 says no test body uses a heredoc; `clawgate-stop-hook.bats:860` and `:907`
+    both do, and the false sentence sits at `:1306` of that same file and in the PR body. Latent
+    today (no column-0 `}` inside either heredoc) — one ordinary edit makes `/^}/ { inbody = 0 }`
+    truncate the body silently, taking the pre-existing sibling `scan_detached_absences` (`:1080`)
+    with it, while `EXAMINED > 0` and the `BODIES` equality both stay green.
+    (b) 🟡 KNOWN LIMIT 5's `function name { … }` exclusion is unenforced, and the `BODIES`
+    cross-check CANNOT see it because both sides use the identical `^@test ` pattern — they agree
+    at the same wrong number. bats 1.11.1 does run such tests (measured).
+    (c) 🟡 Two mutants SURVIVED: dropping the `(e|f|z)?` alternation, and dropping the TRAILING
+    word-boundary class (the sweep exercised only the leading one). The `egrep/fgrep/zgrep`
+    capability is asserted in three places and pinned by nothing.
+    forcing: regression — this is the guard's own blind spot in the file it guards, and (a) is the
+    shape the guard exists to catch.
+16. **The `clawgate-ci` bats leg has NO collected-test floor** (pre-existing, not introduced by
+    #592). Repo: `homelab-talos`,
+    `clusters/homelab/apps/tekton-pipelines/triggers/clawgate-ci-pipeline.yaml:440`. Measured in
+    the CI image: `bats` on a file with zero tests prints `1..0` and **exits 0**, so a suite that
+    stops collecting reads as a pass — the same hole the pytest and node tiers already close with
+    floors. The leg's own comments at `:409-410` still say "11 tests" and "18 + 11"; the real
+    numbers are 35 + 32 = 67. Closing condition: the leg fails when either suite collects fewer
+    tests than its floor, and the floor is derived from a real run.
+    forcing: gate — a green that cannot distinguish "passed" from "collected nothing" is the
+    documented reassuring-zero class, on the tier that gates this repo's hook changes.
 
 ## Open investigations — live diagnosis state
 
@@ -646,6 +639,46 @@ re-runnable without a commit, so a capacity-starved verdict is recoverable later
   `exit=0 Completed` it is a budget problem; if every step is `exit=None running` it is a
   scheduling problem, and `kubectl get pods -A --field-selector=status.phase=Pending` plus node
   `Allocated resources` is the confirming read.
+
+### ✅ RESOLVED — both #591 and #592 were audited post-merge; both are sound, and both leaked follow-ups
+Audits run 2026-08-31, one read-only subagent each, against the merged squashes. **Neither found a
+reason to revert.** Every finding below was independently re-verified here before filing — two of
+the auditors' own numbers were reproduced and one was beaten.
+
+**#591 — the barrier is correct at all eight sites, and its PRECONDITION is unpinned.**
+`awaitPushesSettled` is valid only while every push DECISION is reached synchronously before the
+awaited call returns (`pushInFlight.Add(1)` runs on the caller's goroutine, `server.go:2010`).
+Nothing asserts that. The existing seam ledger (`push_fanout_ledger_test.go:39-43`) pins a
+DIFFERENT thing — that `push.Broadcast` has one call site — which a notify helper moved into a
+`safeGo` satisfies unchanged. **Measured independently, same test, 20 runs each, mutant = invert
+the running-status skip AND wrap `notifyAgentRunning` in `safeGo` (the repo's own idiom, 7 existing
+sites):**
+```
+pre-PR  time.Sleep(20ms)      -> 20/20 CAUGHT
+post-PR awaitPushesSettled    ->  0/20 CAUGHT
+```
+The auditor measured 3/20; I measured 0/20 — same direction, stronger. ⚠ **A LOST TRIPWIRE, NOT A
+LIVE BUG:** production decides these synchronously today. But it is not hypothetical — production's
+coalescer flush runs on `time.AfterFunc` (`push_task.go:60`) and the tests are synchronous only
+because the injected fake fires inline, so the precondition is a property of the TEST SEAM, not of
+production. 🔴 My first attempt at this mutant did not compile; it was scored **INVALID**, never a
+survivor. → rank 14.
+
+**#592 — the guard reds on the real historical violation, and one of its documented premises is
+false in the very file it guards.** Confirmed here: `clawgate-stop-hook.bats:860` and `:907` are
+`@test` bodies opening `cat > "$TMP/bin/jq" <<'SHIM'`, while line **1306 of that same file** states
+*"No test body in either suite uses one."* ⚠ **LATENT, NOT LIVE — I checked:** neither heredoc
+contains a column-0 `}` today, so the scanner is not currently blind. One ordinary edit — wrapping
+the shim's logic in a shell function, which puts `}` at column 0 — makes `/^}/ { inbody = 0 }` end
+the body at the heredoc's brace and silently switch the scanner off for the rest of it. Both
+`inbody = 0` sites (`:1080` the pre-existing sibling, `:1332` the new one) share the rule, so the
+older `scan_detached_absences` goes dark on the same body. **Both instruments stay green while
+blind**: `EXAMINED > 0` still holds and the `BODIES == grep -c '^@test '` equality still holds.
+→ rank 15.
+
+⚠ **Neither PR's `clawgate-ci` ever ran the leg that covers it** — #592's timed out before the
+`hook` leg (see the TaskRunTimeout investigation above). The bats coverage claim for #592 rests on
+a local reproduction of that leg in the same `docker.io/bats/bats:1.11.1` image, not on CI.
 
 ## Gotchas
 - 🔴 **A FAILED `git worktree add` DOES NOT STOP THE NEXT `git -C <path>` — AND I LANDED A
