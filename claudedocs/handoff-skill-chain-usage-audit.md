@@ -51,12 +51,16 @@ survives adversarial re-derivation, and fix whatever it exposes.
   `devrc/skills.md` (the derivation-command lesson) and `devrc/analyze-service-index.md` (recall
   *lists* vs *features*). Also closed an `OPEN:` bullet that was not mine — the clawgate "browser
   layer is UNGATED" item, fix merged as `6bf866fe`. Scope open-actions 1 → 0.
-- 🔴 **RANK 9 CLOSED 2026-08-31 WITH ITS PREMISE REFUTED — and the fix was a MERGE, not a
-  re-trigger.** #1055 was 94 commits stale and failing deterministically in 0.18 s on a defect
-  `31cd214d` had already fixed on `main`; the control at `origin/main` passed. `git merge
-  origin/main` took the exact test red→green. Full evidence in the correction block below.
-  🔴 **Residual, NOT closed:** the gate reported **`failed=2`** and named only one test
-  (devrc#943), so a second #1055 failure is still unidentified.
+- 🔴 **RANK 9 CLOSED 2026-08-31, PREMISE REFUTED TWICE — and #1055 needed TWO unrelated fixes,
+  neither of them a re-trigger.** (i) 94 commits stale ⇒ `git merge origin/main` (`31cd214d`),
+  red→green on `test_live_existing_resolutions_not_made_ambiguous`. (ii) the unnamed half of
+  `failed=2` turned out to be `test_the_skill_did_not_grow` — rank 4's own unpaid **405 B** growth
+  of `claude/skills/clawgate/SKILL.md` past a 15088 B ceiling, **already red at the pre-merge head
+  `f85b7444` (15491 B)** — fixed by EVICTION in `eb1eb185` (15086 B, 310 passed). Both verified
+  locally in well under a second, each against an `origin/main` control.
+  🔴 **OPEN TAIL: the run at `eb1eb185` was still in flight when this was written — read its
+  verdict before asserting #1055 is green.** Three runs have now failed for three different
+  reasons.
 - **Branch / PRs:** `zach/skill-chain-usage-audit` → **devrc#1055, OPEN** — now carries
   `origin/main` merged in plus this doc. **devrc#1064, OPEN** (`feat/handoff-audit`) — pytests RED
   on a **timing** test that passes locally on its own branch; 93 commits behind (rank 11).
@@ -560,6 +564,42 @@ deliberately: the wrong reading is the point.
   here, and they separate "stale base" from "environment" without a cluster. The arc spent days on
   the queue-depth story with `git rev-list --count <branch>..origin/main` never run.
 
+### ✅ CLOSED — #1055's `failed=2` residual IS `test_the_skill_did_not_grow`, and fixing the first failure is what named it
+**This closes the residual the correction block above left explicitly open. It was not a merge
+regression and not the environment — it was the branch's own rank-4 commit, reported second.**
+
+- **How it surfaced:** the post-merge run `devrc-ci-8vnc6` (at `e7809891`) came back
+  `pytests fail — FAILING: test_the_skill_did_not_grow | collected=19942 passed=19938 skipped=3
+  failed=1`. The espanso failure is gone and the count went **2 → 1**, so the ratchet was the
+  other member of the original `failed=2`.
+- 🔴 **It was ALREADY red before the merge — proven, not inferred.** At the pre-merge head
+  `f85b7444` the ratchet test was present (`git show f85b7444:scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py`
+  contains it) and `git cat-file -s f85b7444:claude/skills/clawgate/SKILL.md` = **15491 B**
+  against a **15088 B** ceiling. So the merge did not introduce it; devrc**#943** merely reported
+  one of two names and this was the one left out.
+- **Reproduced locally in 0.15 s** — `python3 -m pytest
+  scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py -k did_not_grow`:
+  `AssertionError: claude/skills/clawgate/SKILL.md is 15479 bytes … assert 15479 <= 15088`.
+- **Attribution, with the control:** `origin/main` is **15074 B against the same 15088 ceiling**
+  (14 B of headroom, passes); the branch was 15479. Same ceiling both sides ⇒ **the branch added
+  the bytes**, in rank 4's `bd9a4b34` *"fix(clawgate skill): drop the hardcoded Stop-hook count"*,
+  which swapped a short line for ~405 B of rationale and paid no eviction.
+- **REMEDY APPLIED (`eb1eb185`, pushed): trimmed the prose, did NOT re-pin the ceiling.** The
+  guard's own docstring names re-pinning as the anti-pattern — *"a ceiling left at an old, larger
+  size silently licenses the regrowth it was installed to catch"*. What survives in the skill body
+  is the imperative (**preserve EVERY non-clawgate** entry) and the derivation
+  (`jq -r '.hooks.Stop[].hooks[].command'`); what went is the dated incident narrative, which does
+  not belong in an always-loaded body. **15086 ≤ 15088, and the whole guard file is green: 310
+  passed, 0 failed.**
+- 🔴 **The reusable lesson, and it is not about clawgate: a `failed=N` that names ONE test is
+  `N−1` UNKNOWN defects, not one.** Under devrc#943 the report is a sample of the failure set, so
+  the honest reading of `failed=2` + one name is *"one identified, one unidentified"* — and the
+  count dropping by exactly one per fix is the confirmation that nothing else moved. This arc
+  treated a single named test as the whole failure twice.
+- 🔴 **NOT claimed: that #1055 is now green.** A run at `eb1eb185` was in flight when this was
+  written and its verdict had not been read. Three of #1055's runs have now failed for three
+  different reasons; read the run before asserting anything.
+
 ## Next steps (ranked)
 
 🔴 **The numbering below is STABLE and load-bearing** — `claim-work --slug-for <this doc> <rank>`
@@ -577,14 +617,18 @@ rather than removed and renumbered. New work is appended at the end.
    forcing: none
 4. **Deploy the clawgate `SKILL.md` fix** — `home-manager switch`, then confirm
    `~/.claude/skills/clawgate/SKILL.md` no longer contains "preserve both".
-   🔴 IN FLIGHT / blocked: needs devrc#1055 merged.
+   🔴 IN FLIGHT / blocked: needs devrc#1055 merged. 🔴 **The fix's TEXT CHANGED on 2026-08-31
+   (`eb1eb185`)** — it was over the skill-size ratchet and had to be trimmed, so verify against
+   the CURRENT branch copy, not the wording `bd9a4b34` introduced.
    forcing: none
 5. **Act on the handoff-doc bloat proposal** — `claudedocs/proposal-handoff-doc-bloat.md`.
    The auditor shipped (IN FLIGHT: devrc#1064); the `/handoff` SKILL.md change is deliberately
    NOT written — operator chose propose-only. Next move is the eviction contract
    (budget + step 4.5 + EVICT_HISTORY/RELOCATE_DURABLE/KEEP_HOT), not a gate: the caps file for
    gate 11 records that the general ratchet rule was replayed over 365 days / 901 commits and
-   **REFUTED**, so re-run that replay for handoff docs before proposing one.
+   **REFUTED**, so re-run that replay for handoff docs before proposing one. 🔴 Datapoint from
+   2026-08-31: the clawgate skill ratchet DID catch a real unpaid 405 B addition (rank 9's
+   close-out) — one case, on a SKILL body not a handoff doc, so it does not settle the replay.
    forcing: none
 6. ✅ **DONE (2026-08-31) — the item's own PREMISE was REFUTED by the re-measure it demanded, and
    then six audit rounds refuted five of their own predecessors.** The skill's lines
@@ -613,19 +657,19 @@ rather than removed and renumbered. New work is appended at the end.
    session that writes a handoff BECAUSE it was blocked is a success, not a contaminated sample —
    count blocks (`~/.cache/claude-handoff-write/s/*/fires-*`) and report them beside the rate.
    forcing: none
-9. ✅ **DONE (2026-08-31) — and the item's PREMISE was REFUTED: "re-trigger both against a quiet
-   queue" was the wrong action for BOTH PRs.** #1055 was **94 commits stale**, failing
-   deterministically (0.18 s, no cluster) on a defect fixed by `31cd214d` on `main`; the control at
-   `origin/main` passed. **Remedy: `git merge origin/main`, verified red→green on the exact test,
-   pushed to `zach/skill-chain-usage-audit`.** #1064's named test passes on its own branch (25.18 s)
-   and IS the contention shape, but it is 93 commits behind too. 🔴 **What did NOT survive: the
-   "0 pending" signal.** It is a **five-gate-pod arithmetic ceiling** on the single hard-pinned node
-   `talos-xr6-r7p` (allocatable 15950m, 82% of its requests are the gate's own 5 × **2250m** pods),
-   not a queue that drains on its own schedule. See the two investigation blocks.
-   🔴 Residual, and it is NOT closed: **`failed=2`, one test named** (devrc#943) — the second #1055
-   failure is still unidentified, and the full suite was not run locally.
-   forcing: gate — devrc#1055 and #1064 are blocked by `tekton/devrc-pytests`, a required check on
-   a repo with `enforce_admins: true`
+9. ✅ **DONE (2026-08-31) — premise REFUTED twice over. "Re-trigger both against a quiet queue"
+   was the wrong action for BOTH PRs, and #1055 needed TWO unrelated fixes, neither a re-trigger.**
+   (i) 94 commits stale ⇒ `git merge origin/main` (`31cd214d`), red→green on
+   `test_live_existing_resolutions_not_made_ambiguous`. (ii) the unnamed half of `failed=2` was
+   `test_the_skill_did_not_grow` — rank 4's own unpaid 405 B skill growth — fixed by eviction in
+   `eb1eb185`. Both verified locally, sub-second, with an `origin/main` control. #1064's named test
+   passes on its own branch (25.18 s) and IS the contention shape; it is 93 behind (rank 11).
+   🔴 What did NOT survive: the "0 pending" signal — it is a **five-gate-pod arithmetic ceiling**
+   on the hard-pinned node `talos-xr6-r7p` (82% of its requests are the gate's own 5 × **2250m**
+   pods), not a queue that drains on its own schedule.
+   🔴 **OPEN TAIL: #1055's run at `eb1eb185` was unread at write time. Read it first.**
+   forcing: gate — devrc#1055 and #1064 are blocked by `tekton/devrc-pytests`, required on a repo
+   with `enforce_admins: true`
 10. **Right-size the devrc-ci gate pod, or establish it cannot be.** 🔴 **Its premise is REFUTED:
    the pod requests 2250m, not 4250m** (`step-pytests=2` + `step-nodetests=250m`, measured
    2026-08-31). The binding constraint is the **hard `nodeSelector` pinning it to one of four
@@ -637,9 +681,12 @@ rather than removed and renumbered. New work is appended at the end.
    forcing: none
 11. **Merge `origin/main` forward into `feat/handoff-audit` (#1064) and re-run its gate.** 93 commits
    behind; its own named failure is timing, not staleness, so this is hygiene plus a fresh run —
-   but do it from a worktree off `origin/feat/handoff-audit`, and capture the gate pod's
-   `step-pytests` log **before the PipelineRun is pruned** if it goes red again (240-run retention;
-   the GitHub status carries no `target_url`, so a pruned run leaves no evidence at all).
+   but do it from a worktree off `origin/feat/handoff-audit`. 🔴 **Apply rank 9's two lessons before
+   concluding anything about the result:** run the named failing test at the branch AND at
+   `origin/main` (that pair separates stale-base from environment in under a second), and treat a
+   `failed=N` naming one test as **N−1 still unidentified** — capture the gate pod's `step-pytests`
+   log before the PipelineRun prunes (240-run retention; the GitHub status carries no `target_url`,
+   so a pruned run leaves no evidence at all).
    forcing: gate — devrc#1064 is blocked by `tekton/devrc-pytests`
 
 ## Gotchas / decisions / dead-ends
