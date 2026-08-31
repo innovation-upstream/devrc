@@ -50,6 +50,7 @@ COPY scripts/signal/consumer.py    /app/scripts/signal/
 COPY scripts/signal/_signal_db.py  /app/scripts/signal/
 COPY scripts/signal/_minio.py      /app/scripts/signal/
 COPY scripts/signal/clawgate.py    /app/scripts/signal/
+COPY scripts/signal/_mentions.py   /app/scripts/signal/
 
 # --------------------------------------------------------------------------- #
 # 🔴 SIGNAL_PG_DIRECT=1 IS A PROPERTY OF THE IMAGE, NOT A DEPLOYMENT CHOICE.

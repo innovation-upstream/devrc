@@ -16,47 +16,56 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
-- **`#1109`** (`fix/sequence-absent-vs-empty-origin-pair`, head **`e4777c58`**) — the rank-1 fix,
-  plus a round-1 audit-fix commit. **`#1111`** (`docs/handoff-audit-pr-ladder-1109`) — this doc.
-  Both OPEN, neither merged.
-- **Both PRs' required Tekton checks (`devrc-pytests`, `devrc-nodetests`) reported SUCCESS** on the
-  pre-audit tips. 🔴 `#1109` has been pushed to since, so its checks are running again — a green
-  read before `e4777c58` is a claim about `2579e2f3`, not about the tip.
-- **Sandbox tiers, run locally ONE AT A TIME against `2579e2f3`**, verdict read from each
-  derivation's own log: `pytests` (`gwzds1c6…-devrc-pytests.drv`) → `RESULT: PASS (exit=0)`,
-  `PASS 48  FAIL 0`, 0 `panic: test timed out`. `nodetests` (`gmaidwmi…-devrc-nodetests.drv`) →
-  `RESULT: PASS (exit=0)`, **FIVE** `# fail 0` blocks: **569 (browser-bridge)**, 508 (dl-router),
-  21 (browser-ext), 188 (clickup skill), 134 (discord-embed-ext). ⚠ **An earlier revision of this
-  doc said FOUR and omitted the 569** — the browser-bridge one, i.e. the subsystem `#1109`
-  changes. Not re-run since `e4777c58`.
-- **Dev-host tier at `e4777c58`:** 477 passed across `test_server.py` + the ratchet.
-- ⚠ **CORRECTION to this doc's own concurrency claim.** It said a sibling session was building
-  "the same derivation". It was building `devrc-mergegate-1073`'s tree, which is a **different
-  source and therefore a different `.drv`** — the same check ATTRIBUTE, not the same derivation.
-  nix takes a per-derivation lock, so the original wording described something that cannot
-  happen. Store-level contention is real; same-derivation contention was not what occurred, and
-  no surviving artefact measures the overlap. The greens stand on their own logs.
-- 🔴 **DO NOT ASSUME THE BASE CLONE IS ON `main`.** `~/workspace/devrc` was on `main` at session
-  start and on **`docs/handoff-bb-resume-0830`** (created from `origin/docs/handoff-browser-bridge-tab-ref`)
-  when this doc was first written — another session's live branch in the shared checkout. Caught
-  by `git branch --show-current` immediately before the handoff write; without it `handoff_doc.py`
-  would have committed onto that branch, silently. ⚠ The sha that branch sat on is NOT recorded
-  here on purpose: an earlier revision named `28ff9d2a`, which was its head for ~2 minutes and
-  already wrong by the time that revision committed. **The branch name is the durable fact; a
-  moving head is not.** Re-check before every write here.
-- **PROVENANCE** (merged, verified by content, all seven re-checked by an independent audit):
-  `#1035`→`ccb31628`, `#1060`→`31cd214d`, `#1074`→`e9f8ce14`, `#1023`→`8e33bf1d`,
-  `#1033`→`70eff59c`, `#1009`→`442bde83`, `#1005`→`aaa5514c`.
-- **Base:** `#1109` branched off `2cec1d45`; `origin/main` moved repeatedly during the session.
-  ⚠ "No open PR of the 30 touches either file" was true when measured and is **not a durable
-  claim** — there are 37+ open PRs now, and `#1109` itself touches both. Re-derive, don't quote.
-- ✅ **RANK 2 (drift-check rc 17) IS CLOSED, NOT "unchanged".** Measured:
-  `git -C ~/workspace/homelab-talos rev-list --count HEAD..@{upstream} -- containers/clawgate`
-  → **0**, and both hosts now run **`clawgatectl 0.8.18`** (`p85k4nyi…`), not 0.8.17. Its own
-  closing condition — "it clears itself when that repo is next pulled for a real reason" — was
-  met, and an earlier revision of this doc restated it as live **~50 minutes after it had already
-  cleared**. That restatement was carried forward from memory without re-measuring, which is the
-  exact failure this thread is about.
+- ✅ **RANK 1 IS CLOSED — the fleet is converged and drift-check is rc 0.** Both hosts at
+  `9a7c433865ef`, switched, consumer-checked (`managed artifacts resolve 0 dangling` /
+  `CURRENT 0 stale` on each). `drift-check.sh` exits **0** with `PARITY-RC=0` on both — which is
+  affirmative, not an absence: rc 10 (behind) is a parity-arm code, so a zero there is the check
+  PASSING, not the check being skipped.
+- ✅ **RANK 2 IS CLOSED — and NOT by this session.** `devrc-seq-absent-empty`, `devrc-auditfix`
+  and `devrc-ho2` are all gone from `git worktree list`. Verified mechanically with a positive
+  control (pattern matched a known-present worktree = 1, the three = 0) rather than by eye.
+  🔴 **But the underlying condition is far worse than the item said: 137 worktrees are still
+  registered**, most on merged branches, ~90 of them under `.claude/worktrees/agent-*`. The
+  ranked item named three; retiring those three changed almost nothing.
+- 🔴 **PREVIOUS DOC'S STATE LINES WERE STALE IN TWO WAYS — both found by measuring, not reading.**
+  (a) The workbench was recorded as sitting on `feat/memory-detail-click`; it was back on `main`
+  and **also 1 commit behind**, so rank 1 was a TWO-host ship, not one. (b) rc 17 was recorded as
+  closed at the output on both hosts; it **had re-opened on the laptop**.
+- ⚠ **`ship.sh` returned rc 19 on the first pass — the documented mid-run race, not a fault.**
+  `origin/main` merged between the two hosts' fetches: workbench landed `57b010fb`, laptop
+  `9a7c4338`. Every per-host check passed on both because each host really was at origin/main
+  *as it saw it*. The second pass converged both, which is the remedy the tool prints itself.
+- ✅ **rc 17 (laptop) CLOSED.** The laptop was building `clawgatectl` from a
+  `homelab-talos/containers/clawgate` subtree 2 commits stale. Fixed with drift-check's own
+  printed remedy: `git -C ~/workspace/homelab-talos pull --ff-only` on a **re-verified-clean**
+  tree (`f7b07be3` → `22b250be`, 0 ahead, so ff-only could not conflict; `f7b07be3` is the
+  rollback point), then a `home-manager switch` — a pull alone changes nothing nix manages.
+  Laptop now serves `clawgatectl 0.8.19` from a real store path.
+  🔴 **Scoped honestly: the drift was real at the CHECKOUT and its BINARY impact was nil.** The
+  whole 17-commit pull touched exactly four files under `containers/clawgate` — two `.bats` and
+  two `_test.go` — none of which reach a compiled binary. The laptop was never running wrong
+  code. Derived from the pull's own diffstat, not from the commit titles.
+  Source parity is now `compared=2 same=2 differing=0`; the workbench's `homelab-talos` reached
+  the same `22b250be` during this window **by another session, not by this one**.
+- 🔴 **HOST DIVERGENCE PERSISTS, UNCHANGED AND NOT MINE TO CLOSE.** `ship.sh` states it outright:
+  `DIRTY AND IN THE ARTIFACT — nix reads 1 path(s)`, namely `nix/pkgs/default.nix`, so the
+  workbench generation is `origin/main` **plus** an uncommitted `inxi` + `cpu-x` hunk that is
+  another session's work. The laptop has neither package. **Two hosts, same sha, different code**
+  — invisible to git parity. Re-shipping PRESERVED this state rather than creating it.
+- **Three untracked files on the workbench**, none in a nix-read path (`hits=0` of 160 paths), so
+  none is deployed: `output.txt`, `scripts/diagnose-nix-disk.sh`,
+  `scripts/tests/test_opencode_rig_control.py`. 🔴 The last is an unsaved TEST with **no owner
+  identified** — `claude/RULES.md` classes that as unsaved work one routine `checkout` from
+  silent deletion.
+- **Both preserved WIP dirs still exist and were not touched:**
+  `~/workspace/.wip-preserve-discord-embed-2026-08-28/` and
+  `~/workspace/.wip-preserve-memory-detail-2026-08-30/`.
+- **Prior merges, carried forward (verified by CONTENT in an earlier session, never ancestry):**
+  `#1109` → `8c61f2e6`, `#1111` → `f081167d`, `#1133` → `5324bf47`.
+- **This doc's own update:** branch `docs/handoff-aplr-rank1-shipped`, worktree
+  `~/workspace/devrc-ho-aplr2`. No `clawgate-task:` field is recorded — `clawgate_handoff.sh
+  resolve` returned **rc 5 (nothing resolved) with its positive control passing**. That is not
+  "no task": an unknown session id also answers 200 with an empty array.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -132,13 +141,28 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   other "surfaces a worktree does not hand you" in `claude/RULES.md`.
 
 ## Next steps (ranked)
-1. **Merge `#1109`, then `#1111`.** (repo: `devrc`.) IN FLIGHT: `devrc#1109`, `devrc#1111`.
-   🔴 **Wait for `#1109`'s checks to re-report on `e4777c58`** — the SUCCESS recorded above was
-   against `2579e2f3`, before the audit-fix commit. **Closing condition:** both merged and their
-   content present in `origin/main`, verified by diffing the files — never by ancestry, since a
-   squash merge makes the branch head a permanent non-ancestor. Checked by whoever merges.
-   forcing: gate — the two required Tekton contexts on `main` (`enforce_admins: true`), which
-   neither PR can merge without.
+🔴 **Numbering is deliberately STABLE — rank 3 keeps its number.** The rank is half a
+`claim-work` slug's identity, so renumbering would silently re-point any live claim. Items 1
+and 2 are retained as DONE markers rather than deleted.
+
+1. **DONE (2026-08-31) — ship the laptop.** Both hosts converged at `9a7c4338`; `drift-check.sh`
+   rc 0, `PARITY-RC=0` on both. Nothing to do; do not re-claim.
+   forcing: none
+2. **DONE (found already closed 2026-08-31) — the three leftover worktrees.** Gone from
+   `git worktree list`, closed by another session. ⚠ **The successor condition is real and
+   unowned: 137 registered worktrees**, most on merged branches. Not filed as an item — no named
+   owner and no closing condition anyone can check, so a ticket would read as covered while
+   nothing could close it (the object-leak rule).
+   forcing: none
+3. **`#1133`'s audit ladder never converged — round 3 was never run.** (repo: `devrc`; files
+   `scripts/audit-dispatch.py`, `claude/skills/audit-pr/`.) Round 2 returned findings; they were
+   fixed in `9ff5c9a9` and merged on operator instruction, so **that commit is the only one in
+   that PR no auditor has seen**. Range for a delta round: `ea36a489..9ff5c9a9`. Blast radius is
+   bounded — four shell-guard lines and prose inside a generated brief, so the failure mode is
+   "a future auditor reads a wrong instruction", not broken code. Claims blocks for rounds 1 and
+   2 are on the PR. **Closing condition:** a round returns no findings, or a named reader
+   dismisses it in writing.
+   forcing: none
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The ladder never returned a clean round in twelve.** The stop rule assumes
@@ -409,63 +433,127 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   number was correct when measured and the *fix itself* then changed the tree. The measurement
   and the commit are different moments, and only the second one is what a reader will check.
 
+- 🔴 **FIVE AUDIT ROUNDS ACROSS THREE PRs, AND EVERY SINGLE FIX INTRODUCED A NEW DEFECT.** Not one
+  round of mine was clean. The code changes were right first time; the SENTENCES about them were
+  not. The defects narrowed each round (a false citation → a widened census verb → a missing shell
+  guard → a false ledger entry), which is convergence, but the rate did not reach zero.
+  **The generalisable claim: dense normative prose written at speed is where the defects are, and
+  a blind adversarial audit is the only thing that caught any of them.**
+- 🔴 **A DELTA LADDER CANNOT SEE A CLAIM ITS OWN EARLIER COMMIT STALED.** `(+ 11 op-selected)` was
+  true at `#1109`'s first commit and falsified by its second; **three delta rounds walked past it,
+  four lines from the paragraph all three were editing**, because every round's range excluded it.
+  Found only from OUTSIDE, by the audit of a different PR quoting the same number. Nothing pinned
+  it — no assertion reads `op-selected` — so a green suite was silent. Remedy now in the skill:
+  once per ladder, range-free, re-derive every count the PR's files assert.
+- 🔴 **THE ATTRIBUTION GATE IS INERT WHEN THE PAYLOAD IS PROSE.** For a docs/skill PR the `.md`
+  IS the payload, so no round is ever zero-payload and the two-zero-rounds gate cannot fire —
+  while the ladder does exactly what the gate exists to catch. `#1111` was closed on the STATED
+  criterion instead. Both findings landed in `claude/skills/audit-pr/` (`#1133`).
+- 🔴 **THE AUDIT BRIEF INSTRUCTED AN IMPOSSIBLE READ, AND HAD FOR ITS WHOLE LIFE.**
+  `audit-dispatch.py` emitted `nix build …#checks…` with **no `-L`** under "read each runner's own
+  `RESULT:` line". `nix build` prints no build log for a build that SUCCEEDS without `-L`.
+  Measured: without `-L` → 3 console lines, 0 builder lines; with `-L` → the log streams.
+  ⚠ A FAILING build DOES print its tail inline (bounded by `log-lines`, 25), which is why the
+  omission survived — only the green case was silent. Three of four auditors this session declined
+  to run the sandbox tier; that is CONSISTENT with the defect and does not prove it caused them.
+- 🔴 **`-L` WRITES TO STDERR — MY OWN FIX'S EXAMPLE CAPTURED NOTHING.** I wrote that
+  `-L … | tail -40` keeps the `RESULT:` line. Measured: **0 lines, 0 hits** without `2>&1`. My
+  ORIGINAL measurement had used `2>&1`; I measured it correctly and then wrote the claim without
+  the redirect.
+- 🔴 **A FALLBACK THAT REPORTED A CLEAN RUN FOR A TIER THAT NEVER RAN, TWICE, GETTING WORSE.**
+  v1: `nix log` on an unbuilt derivation exits 1 but `>` has already truncated the file, so
+  `grep -c 'panic: test timed out'` prints a reassuring **0**. v2 (my fix): guarded that, but left
+  `DRV=$(nix path-info …)` unguarded — an empty `$DRV` makes **`nix log ""` resolve as `.` and
+  print the cwd flake's DEFAULT PACKAGE log**, so the auditor greps a FOREIGN log reading
+  `RESULT: PASS (exit=0)`. **Silence became an affirmative false green.** Both now guarded, with a
+  measured control.
+- 🔴 **A GUARD THAT ASSERTS THE COMMAND CANNOT SEE A MISSING FLAG.** `test_audit_dispatch.py`
+  pinned the `nix build …pytests` substring and stayed green for the whole life of the missing
+  `-L`. Replaced with a scan over EVERY emitted `nix build` line. Mutation-controlled: stripping
+  the flags fails with **that guard's own message**, and a `.pytests`→`.PYTESTS` rename was the
+  positive control proving the harness reached those lines at all.
+- 🔴 **A CLAIM IN A LEDGER PROPAGATES AS AN ASSERTION.** Round 1's claims block on `#1133` said
+  `--no-link` "is stated with its justification". No such prose existed — I described the fix in a
+  commit message and never wrote it into the file. `audit-dispatch.py` REPRINTS the claims block
+  into the next round's brief, so a false entry is served to the next auditor as established fact.
+  Caught only because round 2 grepped instead of believing the ledger.
+- ⚠ **I ran `bash -n` on a Python file and reported a syntax error** while checking someone else's
+  script. The shebang is `#!/usr/bin/env python3`. Wrong instrument, confidently reported — the
+  exact class I spent the session cataloguing, committed while auditing.
+- ⚠ **CARRIED FORWARD from a REPLACE section so it is not lost: the "same derivation" correction.**
+  An earlier revision of this doc said a sibling session was building "the same derivation"
+  concurrently with mine. It was building `devrc-mergegate-1073`'s tree — a **different source and
+  therefore a different `.drv`**, i.e. the same check ATTRIBUTE, not the same derivation. nix takes
+  a per-derivation lock, so the original wording described something that cannot happen. Store-level
+  contention is real; **no surviving artefact measures the overlap**, so the attribution is from
+  memory and stays unproven. The greens stand on their own logs regardless.
+- **`ship.sh`'s verdict is a claim about GIT parity, and it is not wrong to say so** — it reported
+  `2 hosts compared, both at ec102d00` while the two hosts ran different code, because the
+  divergence lived entirely in one host's uncommitted tree. Git parity is not host parity, and
+  nothing in the toolchain sees that gap.
+
+- 🔴 **A HANDOFF'S `State now` GOES STALE IN THE DIRECTION OF "ALREADY DONE", NOT ONLY
+  "STILL BROKEN" — and this session hit BOTH in one sitting.** Rank 2 was already closed by
+  another session, and the workbench had moved OFF the branch the doc pinned it to. A resume
+  that trusts the status section re-does closed work and mis-scopes open work simultaneously.
+  **Measure every ranked item's closing condition before working it, not just its description.**
+- 🔴 **A RANKED ITEM CAN NAME INSTANCES WHEN THE CONDITION IS A POPULATION.** Rank 2 named three
+  worktrees; closing all three left **137** registered. The item was satisfiable without moving
+  the thing it existed to protect against. When an item enumerates, ask what the enumeration is
+  a sample OF, and whether the closing condition measures the sample or the population.
+- 🔴 **rc 17 RE-OPENED AFTER BEING CLOSED "AT THE OUTPUT" — a converged state is not a latched
+  one.** ⚠ **Carried forward from the `State now` line this update replaced, because the lesson
+  outlives the status:** an earlier revision closed rc 17 on the INPUT condition (subtree count
+  0, `clawgatectl 0.8.18`) and called the OUTPUT closed; a later one corrected that by actually
+  RUNNING `drift-check.sh`. **Checking the input and declaring the output closed is the shape
+  this thread keeps finding.** That correction was right — and it is still only a reading at an
+  instant: nothing converges `nix/pkgs`' foreign source repos, so the condition regrows silently
+  the moment that upstream moves. **Treat every "closed" drift condition as a reading with a
+  timestamp, not a latch.**
+- **`ship.sh` rc 19 is a RACE, not a failure, and the per-host lines say so.** Both hosts pass
+  every internal check while landing on different shas, because `origin/main` moved between the
+  two fetches. The fix is literally to re-run it. Reading the final verdict alone would suggest
+  something was wrong with a host.
+- 🔴 **A DRIFT CONDITION AND ITS BLAST RADIUS ARE INDEPENDENT CLAIMS, AND REPORTING ONLY THE
+  FIRST OVERSTATES.** rc 17 fired correctly — the laptop's checkout genuinely was stale — but
+  the four stale files under `containers/clawgate` were all tests (`.bats`, `_test.go`), which
+  cannot reach a compiled binary. So "the laptop was building from stale source" is true and
+  "the laptop was running wrong code" is false. Derive the second from the DIFF, never from the
+  commit subjects, and state both.
+- **`--ff-only` is what makes a cross-host convergence pull safe to do unattended**: it cannot
+  conflict and cannot destroy — it fast-forwards or refuses. Paired with re-verifying the tree
+  is clean *immediately before* the pull (not in the survey that motivated it) and recording the
+  pre-pull sha, the step is fully reversible.
+
 ## How to verify
-🔴 **`<TREE>` below means A TREE YOU CHOSE — a worktree at the commit you mean to measure.**
-Never `~/workspace/devrc`: that is the SHARED base clone, its branch is whatever another
-session left it on, and `git fetch` does not move its working tree. An earlier revision of
-this block warned about exactly that and then hardcoded it three lines later, so the bucket
-re-derivation printed `62 / where=3` while annotating `64 / where=5`. A command that reads a
-tree you did not pin is not a verification.
-
 ```bash
-# --- the sandbox tier. FOUR things an earlier version of this block got wrong ---
-# (a) `nix build` prints no build log for a build that SUCCEEDS without -L;
-# (b) an already-built derivation prints NOTHING at all, -L or not, so silence is not a verdict;
-# (c) a FAILING build DOES print the tail of the builder log inline (bounded by `log-lines`);
-# (d) `~/workspace/devrc` is the SHARED base clone — see above.
-nix build "<TREE>#checks.x86_64-linux.pytests" --no-link -L
-DRV=$(nix path-info --derivation "<TREE>#checks.x86_64-linux.pytests")
-nix log "$DRV" > /tmp/pytests.log            # works even when the build was cached
-grep -n 'RESULT:' /tmp/pytests.log           # TWO hits: `RESULT: all good`, then
-                                             # `RESULT: PASS (exit=0)` — the LAST is the verdict
-grep -c 'panic: test timed out' /tmp/pytests.log   # 0
-# repeat for .nodetests — ONE AT A TIME; a combined invocation produces FALSE failures.
-# nodetests prints FIVE `# fail 0` blocks: 569 browser-bridge, 508 dl-router, 21 browser-ext,
-# 188 clickup skill, 134 discord-embed-ext.
+# --- the fleet: the ONE command that carries ranks 1 and 2's closing conditions ---
+bash ~/workspace/devrc/scripts/drift-check.sh
+# expect rc 0. Read the PER-HOST lines, never the final verdict alone:
+#   [workbench] PARITY-RC=0        <- affirmative: rc10 (behind) is a parity-arm code
+#   [laptop]    PARITY-RC=0
+#   [*] BUILT SOURCE homelab-talos/containers/clawgate is CURRENT ... 22b250be5ae4
+#   [*] SRC-RC=0                   <- rc 17 closed on BOTH hosts
+#   [srcrepo] compared=2 same=2 differing=0
+# ⚠ a non-zero rc here is EXPECTED to recur: nothing converges nix/pkgs' foreign
+#   source repos, so rc 17 regrows whenever homelab-talos/tmux-fuzzyclaw upstream moves.
 
-# --- #1109 landed by CONTENT, never ancestry (a squash merge is never an ancestor) ---
+# --- rank 2's closing condition, WITH the positive control (a bare 0 proves nothing) ---
+git -C ~/workspace/devrc worktree list --porcelain | grep -E '^worktree ' \
+  | grep -cE 'devrc-seq-absent-empty|devrc-auditfix|devrc-ho2$'    # 0  <- the three are gone
+git -C ~/workspace/devrc worktree list --porcelain | grep -cE '^worktree '  # 137 <- the real population
+
+# --- the divergence that is STILL OPEN (expect a non-empty diff = still uncommitted) ---
+git -C ~/workspace/devrc diff --stat nix/pkgs/default.nix   # inxi/cpu-x, another session's
+
+# --- the three prior merges, by CONTENT (never ancestry — a squash is never an ancestor) ---
 git -C ~/workspace/devrc fetch origin main
-# BOTH pair sites sequence: each waits for row one before issuing command two
 git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/test_server.py \
-  | grep -cE '_wait_ops\(spool_dir, "tabs", 1, where=_routed_to\(inst\)\)'   # 2
-# POSITIVE CONTROL for that grep, because a zero from a dead pattern is indistinguishable
-# from a real zero: the same pattern returns 1 at 2579e2f3 and 0 at 2cec1d45.
-git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/test_server.py \
-  | grep -cE '^\s+(absent, empty|first, second) = _wait_ops'                 # 0
-git -C ~/workspace/devrc show origin/main:scripts/tests/test_positional_spool_reader_ratchet.py \
-  | grep -m1 'PINNED_POSITIONAL_TOTAL ='                                     # 47
-
-# --- re-derive the bucket counts. NOTE `<TREE>` — this is the command that got it wrong. ---
-nix develop ~/workspace/devrc -c python3 - "<TREE>" <<'PY'
-import sys, collections
-tree = sys.argv[1]
-sys.path.insert(0, tree + "/scripts/tests")
-import test_positional_spool_reader_ratchet as R
-recs = R.classify_wait_calls(R.TARGET_DIR)
-assert str(R.TARGET_DIR).startswith(tree), ("measuring the WRONG tree", R.TARGET_DIR)
-print(R.TARGET_DIR)
-print(len(recs), "call sites")
-for b, c in sorted(collections.Counter(r["bucket"] for r in recs).items()):
-    print("  %3d  %s" % (c, b))
-PY
-# at #1109's head: 64 sites, _wait_ops where= 5, _wait_events positional 47 (the PIN, unmoved).
-# The assert is the point: TARGET_DIR resolves from the ratchet module's OWN __file__, so
-# importing it from the wrong path silently measures the wrong corpus.
-
-# --- the CONTROL that makes the fix non-vacuous, for EITHER pair site ---
-# swap the two _cmd_sess calls, keeping the sequencing, in a .git-free `cp -a` copy.
-# Expect RED at the first row's ["session"] with KeyError: 'session', and the
-# `pair[0] == <first row>` line still GREEN. Measured on both sites, twice, independently.
+  | grep -cE '_wait_ops\(spool_dir, "tabs", 1, where=_routed_to\(inst\)\)'    # 2  (#1109)
+git -C ~/workspace/devrc show origin/main:scripts/audit-dispatch.py \
+  | grep -cE 'NO DERIVATION|NO LOG — never built HERE|EMPTY LOG'             # 3  (#1133)
+git -C ~/workspace/devrc show origin/main:claude/skills/audit-pr/SKILL.md \
+  | grep -cE 'A DELTA ROUND CANNOT SEE A CLAIM|WHEN THE PAYLOAD IS PROSE'    # 2  (#1133)
 ```
 ## Open investigations — live diagnosis state
 
@@ -597,3 +685,25 @@ PY
   nothing there can detect the sequencing's removal.
 - **Independently re-derived before fixing** — the `git show`, the AST walk, and the mutation
   were all re-run here rather than accepted from the agent.
+
+### CLOSED, and the recommendation went stale mid-investigation — the memory-detail WIP
+- **What it was:** `ship.sh` was authorised against a workbench tree holding another session's
+  uncommitted `nix/graphical.nix`, `nix/pkgs/default.nix`, staged `scripts/memory-detail` and two
+  untracked test files, deploying them to the workbench only.
+- 🔴 **OWNER FOUND ONLY BY SEARCHING BOTH RUNTIMES** — opencode session
+  `ses_fab8bd9e7ffe6En2UiziYXH9Md`, `run=d6cc95d5`, `directory=/home/zach/workspace/devrc` (the
+  base clone, **no worktree**). **No Claude Code transcript contains an `Edit`/`Write` to those
+  paths** — only mentions. Searching one runtime would have concluded nobody owned it, which is
+  the identical finding this doc already recorded for `discord-embed-ext`.
+- **Its agent-ledger record carries `pane_id: None`, `window_id: None`, `tmux_pid: None`** — a
+  headless dispatch, never attached to a tmux pane, so `session-manager` could not find a window
+  and there was no human to notify. The three live opencode windows all carry different session
+  ids.
+- 🔴 **RECOMMENDATION RETRACTED BEFORE IT WAS ACTED ON.** I recommended opening a PR for their
+  work. Between recommending and re-checking, **the owner landed it themselves** —
+  `0c0b8794 feat(bar): memory block left-click opens top RAM consumers view` on
+  `feat/memory-detail-click`, pushed. Acting on the recommendation would have DUPLICATED their
+  work, which is the shared-queue hazard `claim-work` exists for. The state moved under a
+  recommendation that was correct when made.
+- **Residue:** `nix/pkgs/default.nix` (`inxi`/`cpu-x`) is still uncommitted, so the workbench has
+  two packages the laptop lacks.

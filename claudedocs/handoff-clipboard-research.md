@@ -18,27 +18,38 @@ Research modern best practices for clipboard and terminal clipboard interaction 
 
 ## State now
 
-- **Rank 2 is BUILT, committed and pushed — NOT merged.** Branch
-  `fix/break-glass-restore-recipe`, commit **`b22c1d78`**, based on `53f523ed`.
-  No PR opened yet; the full gate was still running when this doc was written.
-  Files: `CLAUDE.md` (the escape-hatch note), `scripts/tests/test_break_glass_note.py` (new).
-- **What it changes.** The break-glass note handed over
+- **Rank 2 is MERGED and CLOSED OUT.** `#1128` → **`c06a56a1`**, verified by
+  CONTENT on `origin/main` (a squash makes ancestry read FALSE — it does here
+  too, and that is expected, not a problem): guard file present, one full `PUT`
+  restore, one read-back step, `<!-- merge-gate: other -->` marker still exactly
+  1, and exactly 1 `## State now` in this doc.
+- **What it changed.** The break-glass note handed over
   `gh api -X DELETE …/branches/main/protection/required_status_checks` and said
-  nothing about closing the window. It now carries the four-step round trip:
-  **capture → open → full `PUT` → read back**, with the capture command run live
-  against the real endpoint and verified to emit all **11** keys the `PUT`
-  requires, in the shape of the restore that actually worked on 2026-08-30.
+  nothing about closing the window. It now carries **capture → open → full `PUT`
+  → read back**. The capture command was run live against the real endpoint and
+  emits all **11** keys the `PUT` requires.
 - **Rank 1 (rc 24) remains DONE** — #1065 → `ebbe5eaa`, verified live under the
   real systemd unit. Unchanged by this session.
-- **Verification of the new guard:** red at `53f523ed` with the real finding
-  (`carries no -X PUT`), green at `b22c1d78`; mutation sweep **7/7 killed**,
-  control green, under `PYTHONDONTWRITEBYTECODE=1`.
-- ⚠ **Not merged, not deployed, not shipped.** `CLAUDE.md` is repo-root prose so
-  no `home-manager switch` is needed for it to take effect, but the branch is
-  not on `main` yet — nothing reading `main` sees the corrected note.
-- Claim `clipboard-research-2` is **HELD, not released** (this session still
-  owns rank 2 until the PR lands). Worktrees `devrc-breakglass` and
-  `devrc-baseglass` are still on disk and must be removed at close-out.
+- **Guard verification:** red at `53f523ed` with the real finding (`carries no
+  -X PUT`), green at HEAD; mutation sweep **7/7 killed**, control green, under
+  `PYTHONDONTWRITEBYTECODE=1`. Gated on the **MERGED tree** (`83a24dcf` =
+  `origin/main` + the PR), not just the branch: `19486 collected, 0 failed` vs
+  `19459` on the branch alone — the count moving is what proves the merged tree
+  was actually the thing gated.
+- **Claim `clipboard-research-2` RELEASED.** All three worktrees this session
+  created (`devrc-breakglass`, `devrc-baseglass`,
+  `devrc-integ-breakglass-2d8f77d9`) removed; `integ/breakglass-merged-2d8f77d9`
+  deleted. Base clone fast-forwarded to the merge.
+- 🔴 **NOT SHIPPED, deliberately, and this is the one thing to re-check before
+  anyone runs `ship.sh`.** Another session has `scripts/memory-detail` **staged**
+  (`A `) in the shared workbench checkout with `nix/graphical.nix` modified to
+  reference it from a bar click handler. A `home-manager switch` today would
+  build and deploy **that session's half-finished feature** to both hosts.
+  Nothing in rank 2 needs a deploy — the project `CLAUDE.md` is read straight
+  from the working tree and is already live on the workbench via the
+  fast-forward; a test file deploys nothing. But #1056/#1084/#1101 merged in the
+  same window DO touch deployable paths, so a ship IS wanted — once that WIP
+  lands or is unstaged. **Re-measure before shipping; do not trust this line.**
 
 ## Research findings — clipboard/terminal clipboard best practices (2025-2026)
 
@@ -141,9 +152,8 @@ of by a human happening to look.
 
 ## Next steps (ranked)
 
-🔴 **Numbering is deliberately STABLE across this update** — rank is half a
-`claim-work` slug's identity, so item 2 is marked done in place rather than
-removed and the rest are not renumbered.
+🔴 **Numbering stays STABLE** — rank is half a `claim-work` slug's identity.
+Rank 2 has moved into the closed block below; its number is retired, NOT reused.
 
 **Closed by this effort — kept so a resume does not re-open them:**
 - ~~adopt `set clipboard=unnamedplus`~~ — **DECLINED 2026-08-29**: it routes every
@@ -155,6 +165,9 @@ removed and the rest are not renumbered.
 - ~~migrate to Wayland~~ — not applicable: measured `XDG_SESSION_TYPE=x11`.
 - ~~**Add an unprotected-`main` arm to `scripts/drift-check.sh`**~~ — **SHIPPED
   2026-08-30** as rc 24, #1065 → `ebbe5eaa`, verified live under the real unit.
+- ~~**Rank 2 — correct `CLAUDE.md`'s break-glass note**~~ — **MERGED 2026-08-30**,
+  #1128 → `c06a56a1`, verified by content. Guard:
+  `scripts/tests/test_break_glass_note.py`.
 
 1. **Give the rc-24 arm an UNMEASURED ladder** (devrc). It has THREE
    could-not-measure states, and a lapsed/expired `gh` token leaves it blind
@@ -164,13 +177,6 @@ removed and the rest are not renumbered.
    most likely to lapse. Files: `scripts/drift-check.sh` (reuse the
    `u_streak_bump`/`_streak_file_bump` machinery), `scripts/tests/test_drift_check.py`.
    forcing: none
-2. ~~**Correct `devrc/CLAUDE.md`'s break-glass note**~~ — **BUILT 2026-08-30,
-   IN FLIGHT: branch `fix/break-glass-restore-recipe` @ `b22c1d78`, no PR yet.**
-   Close it out: confirm the gate, open the PR, merge, then
-   `claim-work --release clipboard-research-2` and remove both worktrees.
-   forcing: incident — the 2026-08-29/30 unprotections; occurrence 1's restore
-   trap executed and still left main open, occurrence 2 left a direct push
-   (`837d3fde`) on main that required checks would have rejected.
 3. **Run `/audit-pr 1043`** (devrc) — the one review the clipboard effort never
    got, and it touches `nix/programs/`, which every `home-manager switch`
    depends on. Merged, shipped and verified on the real path, so this is
@@ -187,14 +193,58 @@ removed and the rest are not renumbered.
    `scripts/tests/test_drift_check.py`.
    forcing: none
 6. **OFFERED, NOT BUILT — `scripts/break-glass-merge.sh`** (devrc). The
-   deterministic version of the recipe rank 2 just wrote into prose: capture,
-   open, merge, full `PUT`, read back, and **refuse to exit 0 unless the
-   read-back diff matches the capture key-by-key**. Deliberately not built this
-   session: shipping an *untested* command into a break-glass path is precisely
-   the failure rank 2 corrects, and it cannot be tested end-to-end without
-   opening the window on `main`. Needs an operator decision on how to prove it
-   before it is trusted. Files: `scripts/break-glass-merge.sh` (new).
+   deterministic version of the recipe rank 2 wrote into prose: capture, open,
+   merge, full `PUT`, read back, and **refuse to exit 0 unless the read-back
+   diff matches the capture key-by-key**. Deliberately not built: shipping an
+   *untested* command into a break-glass path is precisely the failure rank 2
+   corrects, and it cannot be tested end-to-end without opening the window on
+   `main`. **Needs an operator decision on what would make it trustworthy**
+   before it is worth writing. Files: `scripts/break-glass-merge.sh` (new).
    forcing: none
+7. **Tekton CAPACITY — `devrc-pytests` fails a localhost round-trip under load**
+   (homelab, NOT devrc). `TestTheActorComesFromTheTOKEN::test_a_FORGED_actor_in_
+   the_body_is_DISCARDED[record0-…]` failed the REQUIRED `tekton/devrc-pytests`
+   **twice**: on #1128 and again on #1151 — the second a **docs-only** PR
+   touching one file, which cannot have caused it. Identical mechanism both
+   times: `TimeoutError` out of `socket.py:720` on the client's `recv_into`, so
+   the test never reached the property it asserts.
+   🔴 **AN EARLIER DRAFT OF THIS ITEM NAMED THE WRONG OWNER, and the correction
+   is the point.** It said "remove the timing dependency in the test". But
+   `HANG_TIMEOUT` is **already 60 s**, raised from 15 s on 2026-08-29 for this
+   exact failure, and that constant's own comment says: *"This is the SYMPTOM
+   fix. The cause is a 10-minute parallel suite competing with a saturated
+   cluster, which belongs to Tekton capacity, not to this file."* A localhost
+   round-trip that blows a 60 s budget is not a badly-written test — the node
+   lost the scheduler. Raising it a third time is more symptom.
+   **Measured:** the same constant's comment records ~60% of runs failing
+   REPO-WIDE (6 of 10, unrelated branches) with 12 concurrent pipelineruns; at
+   the 2026-08-31 03:30Z failure the cluster held 6 in-flight runs, 23 pods in
+   `Error`, and a node at 73% CPU. Locally the class passes 3/3 in ~6 s and the
+   same derivation passes whole.
+   ⚠ So **re-triggering is the correct available remedy here**, not laziness —
+   the durable fix is cluster capacity and belongs to the `tekton` skill's
+   domain. What is NOT acceptable is reading a red `devrc-pytests` as a verdict
+   on the diff: it has now twice been a verdict on the node.
+   Files: homelab Tekton capacity (concurrency caps / resource requests for
+   `devrc-ci`); `scripts/tests/test_subsystem_store_api.py` only if a
+   capacity fix proves impossible.
+   **CLOSING CONDITION:** `devrc-pytests` completes 5 consecutive runs with no
+   `socket.py` `TimeoutError`, measured from the PipelineRun logs, not inferred
+   from PRs happening to merge.
+   forcing: gate — it failed a REQUIRED check and cost a merge cycle on BOTH
+   #1128 and #1151.
+8. **`/handoff`'s kickoff template emits a path that does NOT resolve** (devrc).
+   The template is `<repo>/claudedocs/handoff-<topic>.md`, which yields
+   `devrc/claudedocs/…`; `resume-state.sh` matched no such file, **fell back to
+   the newest of 90 handoff docs** and reconciled a DIFFERENT initiative — PR
+   states, DRIFT lines and all — with only the `!! GAPS` banner as the tell.
+   Measured this session. This is a defect in the emitted template, not in one
+   session's typing, so it recurs for every kickoff. Files:
+   `claude/skills/handoff/SKILL.md` (step 3 template).
+   **CLOSING CONDITION:** a kickoff emitted by the skill, pasted verbatim,
+   produces a `resume-state.sh` run whose `handoff:` line names the intended doc
+   and whose DRIFT block carries no `requested handoff … NO SUCH FILE` gap.
+   forcing: incident — it silently reconciled the wrong initiative on this run.
 
 ## Gotchas / decisions / dead-ends
 - OSC 52 supersedes tmux-yank for this setup — no reason to install the plugin
@@ -458,6 +508,39 @@ It now sits under `## Gotchas`, which appends.
   block**; a clean-looking digest under a fallback is a digest about other work.
   `/handoff` emits the prefixed form, so this will recur — pass the path as it
   exists on disk.
+
+### Close-out of rank 2 (2026-08-30)
+
+- 🔴 **A FAILED SETUP STEP DOES NOT STOP THE STEPS THAT ASSUME IT WORKED.**
+  Building the merged-tree integration branch, `git worktree add
+  /home/zach/workspace/devrc-integ` **failed loudly** — that path already existed
+  as ANOTHER session's worktree on `integ/963-965` — and every chained `git -C`
+  command after it ran anyway, **merging this branch into their integration
+  branch**. Caught one command later; restored from the reflog with
+  `reset --keep ea9811ed` (never `--hard`), working tree clean, no branch
+  contains the stray merge. **Two lessons, and the second is the reusable one:**
+  name worktrees per-session (`devrc-<topic>-<session-prefix>`), and **guard the
+  path first** (`test -e "$W" && exit 1`) rather than relying on `worktree add`
+  to stop the sequence — its failure is loud and its successors are silent.
+- 🔴 **The merged-tree gate is not ceremony — `strict: false` means a green
+  check is a claim about the PR's BRANCH.** #1128 was 3 commits behind `main`
+  with **zero file overlap**, which reads as obviously safe and is exactly the
+  case the repo's own rule refuses ("disjoint files are not merge safety"). Both
+  sides added test files; the merged tree collected **19486** against the
+  branch's **19459**. The moving count is the evidence the right tree was
+  gated — a merged-tree run that reports the branch's own number gated nothing.
+- ⚠ **A red REQUIRED check is not automatically your diff, and not automatically
+  a flake either.** The discriminator that settled it here was the FAILURE KIND:
+  a socket `TimeoutError` means the test never reached its assertions, so it
+  asserts nothing about the code. Read the step log for the exception, not the
+  summary line. See ranked item 7 — re-running cleared it and is the weaker
+  remedy.
+- 🔴 **`ship.sh` was NOT run, and "merged" does not imply "deployed".** Another
+  session's `scripts/memory-detail` is staged in the shared checkout with
+  `nix/graphical.nix` referencing it, so a switch would deploy their unfinished
+  feature to both hosts. Rank 2 needs no deploy (repo-root prose + a test), but
+  the laptop is now behind on #1056/#1084/#1101, which do not. **Re-measure the
+  staged state before shipping.**
 
 ## How to verify
 

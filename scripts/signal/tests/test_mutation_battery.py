@@ -70,6 +70,48 @@ def test_every_mutant_actually_CHANGES_the_source(mutant):
 
 
 @pytest.mark.parametrize("mutant", battery.MUTANTS, ids=lambda m: m.id)
+def test_an_EQUIVALENT_mutant_ARGUES_for_itself(mutant):
+    """🔴 `equivalent=True` flips a SURVIVED from a finding into a pass.
+
+    That is exactly the switch somebody reaches for when a mutant will not die
+    and the deadline is close — "call it equivalent and move on" — and it is
+    indistinguishable, in the summary line, from a genuinely unkillable
+    mutation. So the flag has to cost something: the row must say the word in
+    its own `why`, where a reader and a reviewer will see the ARGUMENT next to
+    the claim rather than a bare boolean buried in the call.
+
+    Not a proof of equivalence — nothing static can be — but it makes an
+    unargued one impossible to add quietly.
+    """
+    if not mutant.equivalent:
+        assert mutant.expected == "KILLED"
+        return
+    assert "EQUIVALENT" in mutant.why.upper(), (
+        f"mutant {mutant.id} is flagged equivalent but its description does not "
+        f"say so, let alone argue it: {mutant.why!r}")
+    assert mutant.expected == "SURVIVED"
+
+
+def test_an_equivalent_mutant_that_gets_KILLED_is_a_FAILURE_not_a_pass():
+    """Behavioural, on the pure comparison the runner uses.
+
+    A killed "equivalent" mutant means the equivalence argument was WRONG — the
+    two forms are distinguishable after all — which is a finding about the
+    ledger, not a success. Pinned here because the runner's own summary line
+    would otherwise read `0/0 killed` and look like a clean run.
+    """
+    equiv = battery.Mutant("X", "EQUIVALENT: argued", "p", "a", "b", "k", "s",
+                           equivalent=True)
+    plain = battery.Mutant("Y", "a real mutant", "p", "a", "b", "k", "s")
+    assert equiv.expected == "SURVIVED" and plain.expected == "KILLED"
+    # The runner's failure set is `verdict != m.expected`, so the four cells:
+    assert ("SURVIVED" != equiv.expected) is False   # equivalent survives -> pass
+    assert ("KILLED" != equiv.expected) is True      # equivalent killed   -> FAIL
+    assert ("KILLED" != plain.expected) is False     # real killed         -> pass
+    assert ("SURVIVED" != plain.expected) is True    # real survived       -> FAIL
+
+
+@pytest.mark.parametrize("mutant", battery.MUTANTS, ids=lambda m: m.id)
 def test_every_named_killer_test_EXISTS(mutant):
     """A killer that does not exist can never fire — so the mutant can never die.
 
@@ -224,3 +266,114 @@ def test_the_audit_found_mutants_are_still_present():
     for m in battery.MUTANTS:
         if m.id.startswith("A"):
             assert "[audit]" in m.why, f"{m.id} lost its provenance note"
+
+
+# --------------------------------------------------------------------------- #
+# ROUND-4 delta audit
+# --------------------------------------------------------------------------- #
+# 🔴 The BUDGET, not just the word. `test_an_EQUIVALENT_mutant_ARGUES_for_itself`
+# above covers only the KILLED direction; the LAUNDERING direction was measured
+# end to end by the round-4 audit. `NAME_HINT_MAX = 5 -> 4` was a GENUINE
+# survivor of all 908 tests, and adding it to the ledger with `equivalent=True`
+# and the word "EQUIVALENT" in its `why` produced BATTERY_RC=0, a green suite and
+# 213 passing battery-meta tests. Cost of laundering a real coverage gap into a
+# green gate: one word in a string — the same spelled-guard class this branch
+# removed from `test_skill_doc.py`.
+#
+# A cap cannot prove an equivalence argument (nothing static can). What it does
+# is take the move out of the quiet path: a new `equivalent=True` row now
+# REQUIRES editing the number below, in a diff a reviewer reads, next to the
+# argument they must accept. That mutant is itself now KILLED rather than
+# reclassified — see MEN12 and its killer.
+EQUIVALENT_BUDGET = 1
+
+
+def test_the_number_of_EQUIVALENT_rows_is_CAPPED():
+    """The ledger may hold at most `EQUIVALENT_BUDGET` argued-equivalent rows."""
+    equiv = [m for m in battery.MUTANTS if m.equivalent]
+    assert sum(m.equivalent for m in battery.MUTANTS) <= EQUIVALENT_BUDGET, (
+        f"{len(equiv)} rows are flagged equivalent ({[m.id for m in equiv]}) but "
+        f"the budget is {EQUIVALENT_BUDGET}. `equivalent=True` turns a SURVIVED "
+        f"from a finding into a pass, so raising the cap is a deliberate, "
+        f"reviewable edit — make it here, in the same diff as the argument.")
+
+
+def test_the_budget_is_TIGHT_so_a_new_equivalent_row_cannot_slip_in():
+    """🔴 The cap must BIND. A slack budget is a cap that permits the move.
+
+    Measured: at fbeca469 the ledger held exactly one equivalent row (MEN3) and
+    no cap at all, so a second could be added with `equivalent=True` and one word
+    in a string. This asserts the budget equals what is actually spent — so the
+    next row is refused by the test above rather than absorbed by headroom.
+    """
+    assert sum(m.equivalent for m in battery.MUTANTS) == EQUIVALENT_BUDGET, (
+        "the budget has slack: it must equal the number of equivalent rows, or "
+        "a new one lands green without anyone editing this file")
+
+
+def test_the_ONE_equivalent_row_is_MEN3_and_it_still_argues_the_same_premise():
+    """The budgeted row is named, so spending it elsewhere is loud.
+
+    MEN3's equivalence rests on a PREMISE about the code around it — `re` folds
+    one code point to one, so a match consumes exactly `len(pattern)`. Keeping
+    the row keyed by id means a future round cannot re-spend the budget on a
+    different mutation while the count stays at one.
+    """
+    equiv = [m for m in battery.MUTANTS if m.equivalent]
+    assert [m.id for m in equiv] == ["MEN3"], [m.id for m in equiv]
+    assert "folds one code point to one" in equiv[0].why
+
+
+@pytest.mark.parametrize("rows, expected", [
+    # (equivalent?, verdict) pairs -> the headline text
+    ([(False, "KILLED")], "1/1 killed by their NAMED test"),
+    ([(False, "SURVIVED")], "0/1 killed by their NAMED test"),
+    ([(False, "KILLED-WRONG-REASON")], "0/1 killed by their NAMED test"),
+    ([(True, "SURVIVED")],
+     "0/0 killed by their NAMED test  (1 EQUIVALENT, expected to survive)"),
+    # 🔴 THE F-D CELL: a row that is BOTH equivalent AND wrong. The old
+    # `len(results) - len(bad) - len(equiv)` charged it twice and printed -1/0.
+    ([(True, "KILLED")],
+     "0/0 killed by their NAMED test  (1 EQUIVALENT, expected to survive)"),
+    ([(True, "KILLED"), (False, "KILLED")],
+     "1/1 killed by their NAMED test  (1 EQUIVALENT, expected to survive)"),
+])
+def test_the_headline_count_never_double_subtracts(rows, expected):
+    """Round-4 F-D, table-tested against the pure `headline()`.
+
+    The exit code and the `!!` detail lines were correct all along; this is the
+    number a reader scans first, and `-1/0` reads as a glitch in the tool rather
+    than as the finding it actually was.
+
+    🔴 SCOPE OF THE RED. At fbeca469 this logic was INLINE in `main()`, so these
+    cases fail there with an `AttributeError` — the extraction is what makes the
+    defect reachable at all, exactly as `_verdict` was extracted for the same
+    reason. The BEHAVIOURAL proof that the old expression was wrong is the test
+    below, which runs the old arithmetic and watches it go negative.
+    """
+    results = [(battery.Mutant(f"X{i}", "EQUIVALENT: argued" if eq else "real",
+                               "p", "a", "b", "k", "s", equivalent=eq),
+                verdict, "detail")
+               for i, (eq, verdict) in enumerate(rows)]
+    assert battery.headline(results) == expected
+
+
+def test_the_OLD_headline_arithmetic_really_did_go_NEGATIVE():
+    """The control that makes the test above regression coverage, not a rewrite.
+
+    The shipped expression was `len(results) - len(bad) - len(equiv)` over
+    `bad = [verdict != expected]` and `equiv = [m.equivalent]`. On the one cell
+    where those two sets INTERSECT — an equivalent mutant that got KILLED, the
+    single finding the flag exists to surface — the row is subtracted twice.
+    Run here rather than described, so the claim is checked by the machine: the
+    old form yields -1 where `headline()` yields 0, and `-1/0 killed` is what a
+    live run printed.
+    """
+    equiv_row = (battery.Mutant("X", "EQUIVALENT: argued", "p", "a", "b", "k",
+                                "s", equivalent=True), "KILLED", "detail")
+    results = [equiv_row]
+    bad = [r for r in results if r[1] != r[0].expected]
+    equiv = [r for r in results if r[0].equivalent]
+    old = len(results) - len(bad) - len(equiv)
+    assert old == -1, "the old arithmetic is not being reproduced faithfully"
+    assert battery.headline(results).startswith("0/0 "), battery.headline(results)

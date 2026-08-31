@@ -192,10 +192,10 @@ toolchain and the dispatch `curl`. Durable facts only:
   provisions — has **no Cilium**, so `agent-hardening.md` is a **homelab** playbook.
 - **Alloy has no auto-reloader** — if clawgate metrics vanish from homelab Prometheus, restart Alloy
   first (`telemetry.md`).
-- **Red GitHub Actions checks on `homelab-infra` are NOISE** (billing-blocked); the real gate is
-  Tekton `clawgate-ci` (`tekton` skill). 🔴 **But `clawgate-ci` does NOT run Playwright —
-  browser-layer changes are UNGATED.** Run `make e2e` locally and **count**: without Docker,
-  `test.skip` on `!dockerAvailable()` leaves **11 of 18 spec files / 77 of 113 tests**, green.
+- **Red GitHub Actions checks on `homelab-infra` are NOISE**; real checks: Tekton (`tekton` skill).
+  🔴 **`clawgate-ci` runs no Playwright — but `clawgate-e2e`, a SEPARATE check, DOES; "the browser
+  layer is UNGATED" was FALSE.** ⚠ RUNS is not BLOCKS; `make e2e` without Docker self-skips most
+  full-mode files and reads green — **COUNT**. `extension.md`.
 - 🔴 **The browser extension does NOT ship via Flux — merging to `trunk` deploys NOTHING.** Brave
   loads it unpacked from `~/workspace/clawgate-extension/containers/clawgate/extension` (branch
   `clawgate-ext-local`, same path on **BOTH hosts**); deploy = `merge --ff-only origin/trunk` on both

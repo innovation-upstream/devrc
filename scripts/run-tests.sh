@@ -1773,7 +1773,16 @@ TARGET_FLOORS=(
   # that is what is below, copied not computed. Found by a run on an unrelated
   # branch: this was already RED on origin/main, so it was blocking every push
   # rather than only the change that noticed it.
-  "scripts/signal/tests|682"
+  # 2026-08-30: 968 tripped the ceiling at 852 with every test PASSING — the
+  # floor had fallen 286 behind, far more than the 170 of slack the gate allows,
+  # so several whole suites could have vanished under it while the run stayed
+  # green. The gate printed "scripts/signal/tests|920" and that is what is
+  # below, copied not computed. The growth is PR #1121's MENTIONS work: the
+  # suite went from a 682 floor to 968 collected in one change. It also added
+  # the run's THIRD skip — `test_pg_type_compat.py:228`, the real-Postgres
+  # idempotence check for `ensure_schema()` — so unlike every entry above this
+  # one, EXPECTED_SKIPS is NOT untouched; see its new sibling pin there.
+  "scripts/signal/tests|920"
   "scripts/initiatives/tests|745"
   "scripts/repo-cos/tests|315"
   "scripts/task-spec-drafter/tests|135"
@@ -3193,6 +3202,20 @@ EXPECTED_SKIPS=(
   # SIGNAL_PG_DSN — the test then RUNS, the skip total drops to 1, and the flat
   # entry count still said 2.
   "scripts/signal/tests|needs a real Postgres|unset:SIGNAL_PG_DSN"
+  # The SECOND real-Postgres test in the same file (test_pg_type_compat.py:228),
+  # added by PR #1121: `ensure_schema()` runs on every consumer start, so it must
+  # be re-runnable, and only a real server can answer that. Its hermetic sibling
+  # in test_mentions.py asserts `fakepg`'s own EMULATION of `ADD COLUMN IF NOT
+  # EXISTS` — a claim about the substrate, not about the deployed engine.
+  # A SEPARATE entry rather than a widened regex, because the accounting compares
+  # the skip TOTAL against the number of applicable ENTRIES (one test per entry):
+  # letting the pin above absorb both would leave 3 skips against 2 entries and
+  # keep the gate red. Same reason, same conditional, same consequence as its
+  # sibling: opt-in only, never runs in the gate, so pinning unbreaks main but
+  # does not restore the coverage.
+  # CONDITIONAL for the same reason: with SIGNAL_PG_DSN exported this test RUNS,
+  # and a flat entry count would then say 3 where 1 skip is observed.
+  "scripts/signal/tests|the hermetic substrate EMULATES|unset:SIGNAL_PG_DSN"
   # GUARD 9's positive control for `_own_xdist_run_id()`
   # (test_gitenv_sibling_exclusion.py::test_a_real_worker_reports_a_run_id).
   # 🔴 IT CANNOT BE FAKED INTO RUNNING IN-PROCESS, and the alternative was

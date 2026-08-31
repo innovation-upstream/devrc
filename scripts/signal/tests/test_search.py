@@ -90,7 +90,7 @@ def test_search_finds_outbound_messages_too(db):
                              self_number="+15559090")
     db.approve_draft(draft["id"], approval_ref="cg-search")
     db.send_approved(draft["id"],
-                     transmit=lambda auth, recipient, body, number: {"timestamp": "1723300009999"})
+                     transmit=lambda auth, recipient, body, number, mentions=None: {"timestamp": "1723300009999"})
     bodies = [h["body"] for h in db.search("permit")]
     assert "I filed the harbour permit" in bodies
     assert any(h["is_outbound"] for h in db.search("permit"))
