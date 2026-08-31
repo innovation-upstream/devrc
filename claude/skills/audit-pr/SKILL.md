@@ -211,11 +211,21 @@ what the gate exists to catch, because "fixed a defect" and "reworded a warning"
 edit. Left alone it does not terminate. Measured on devrc #1111: round 2's findings were mostly
 about text round 1 had written, and the gate could not see it.
 
-**Stop on this — but ONLY once you can NAME why the rounds will not stop on their own; read the
-next paragraph before acting on it.** No 🔴 · no blast radius beyond "the document contains a
-false sentence" · and the recurring SHAPE swept at every site rather than at the one that was
-reported. Record what you are NOT fixing, on the PR, so the next reader knows it is open rather
-than absent.
+**Stop on this — but ONLY once you can NAME, IN THE ROUND'S SUMMARY AND NOT LEFT IMPLICIT, why
+the rounds will not stop on their own; read the next paragraph before acting on it.** No 🔴 · no
+blast radius beyond "the document contains a false sentence" · and the recurring SHAPE swept at
+every site rather than at the one that was reported. Record what you are NOT fixing, on the PR,
+so the next reader knows it is open rather than absent.
+
+🔴 **WRITING IT DOWN IS THE WHOLE POINT, AND AN EARLIER REWORD DELETED IT.** "Can NAME" is a
+private mental state; a reader cannot check it. Without the rationale in the summary a report
+that ENDED the ladder on this escape hatch is **indistinguishable from one that converged** — the
+findings, verdict and ledger line all look the same — so an operator cannot tell "no findings
+remain" from "real 🟡s are deliberately unfixed". Those are opposite meanings. Measured: this
+requirement was dropped by `#1133`'s round-2 fix, which added the NAME precondition and removed
+the summary obligation in the same edit — **wider on one axis, narrower on another**, the exact
+shape this skill tells you to hunt for. It is pinned by
+`scripts/tests/test_audit_ladder_stop_rule.py` now because nothing pinned it then.
 
 ⚠ **THIS DOES NOT OVERRIDE THE FINDINGS-KEYED STOP RULE, AND IT IS NOT A LICENCE TO STOP ON A
 ROUND THAT FOUND THINGS.** That rule still governs: a round returning findings that needed fixing

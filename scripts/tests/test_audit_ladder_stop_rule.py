@@ -423,6 +423,28 @@ SKILL_NOT_WASTE = (
     "cited here.**"
 )
 
+# 🔴 The PROSE-payload escape hatch is the ONE criterion that can END a ladder
+# without a clean round, and until this pin it was the only stop-related clause
+# in the file that nothing asserted on. That asymmetry is how it drifted: the
+# findings-keyed rule around it carries five pins, so a reword there fails
+# loudly, while a reword HERE was silent.
+#
+# What is load-bearing is the DELIVERABLE, not the auditor's confidence. "Can
+# NAME" is a private mental state and no reader can check it; the rationale has
+# to land in the round's summary, because a report that ended the ladder on this
+# hatch is otherwise INDISTINGUISHABLE from one that converged -- same findings
+# section, same verdict, same ledger line -- and those mean opposite things.
+#
+# Measured: #1133's round-2 fix added the NAME precondition and deleted the
+# summary obligation in the SAME edit (wider on one axis, narrower on another --
+# the shape this very skill tells auditors to hunt). It reached `main` and was
+# caught only by a later blind round, four commits downstream.
+SKILL_PROSE_ESCAPE_STOP = (
+    "**Stop on this — but ONLY once you can NAME, IN THE ROUND'S SUMMARY AND NOT "
+    "LEFT IMPLICIT, why the rounds will not stop on their own; read the next "
+    "paragraph before acting on it.**"
+)
+
 # `claude/RULES-ARCHIVE.md`, anchor `audit-fix-resets-gate` -- the evidence the
 # core bullet's `→ archive:` tag routes to. Pinned so the rejected-cap reasoning
 # cannot be evicted into nothing: RULES.md is byte-capped, so this anchor is
@@ -917,6 +939,27 @@ def test_rules_md_states_the_stop_condition():
 def test_audit_pr_skill_states_the_stop_condition():
     _assert_pinned_once(SKILL_MD, SKILL_HEADING, "the stop-rule heading")
     _assert_pinned_once(SKILL_MD, SKILL_STOP_BODY, "the stop-rule body")
+
+
+def test_the_prose_escape_hatch_demands_its_rationale_IN_THE_SUMMARY():
+    """🔴 The escape hatch must produce an ARTIFACT, not a state of mind.
+
+    This is the only clause that ends a ladder WITHOUT a clean round, so a
+    reader has to be able to tell that it was used. "Can NAME" alone is
+    unobservable: the report looks identical whether the ladder converged or
+    the hatch was invoked over unfixed 🟡s.
+
+    Pinned as a WHOLE normalised string, per `claude/RULES.md` (spelled-guards):
+    the artifact is prose, so a keyword guard is walkable by rewording -- which
+    is precisely what happened. #1133 reworded this sentence, adding the NAME
+    precondition while deleting "stated in the round's summary and not left
+    implicit", and no test noticed.
+    """
+    _assert_pinned_once(
+        SKILL_MD,
+        SKILL_PROSE_ESCAPE_STOP,
+        "the prose-payload escape hatch's summary requirement",
+    )
 
 
 def test_the_rejected_cap_is_recorded_where_the_rule_lives():
