@@ -234,11 +234,13 @@ findings, verdict and ledger line all look the same — so an operator cannot te
 remain" from "real 🟡s are deliberately unfixed". Those are opposite meanings. Measured: this
 requirement was dropped by `#1133`'s round-2 fix, which added the NAME precondition and removed
 the summary obligation in the same edit — **wider on one axis, narrower on another**, the exact
-shape this skill tells you to hunt for. 🔴 **This paragraph sits BELOW the ⚠ one on purpose:
-the sentence above says "read the next paragraph", and that pointer means the ⚠ caveat.** An
-earlier draft of this very fix inserted this history here and silently re-pointed it at itself —
-found by the next round. The criteria sentence and the ⚠ caveat are both pinned by
-`scripts/tests/test_audit_ladder_stop_rule.py`; this paragraph is not.
+shape this skill tells you to hunt for. 🔴 **This paragraph sits BELOW the ⚠ one on purpose: the
+"read the next paragraph" pointer is in the CRITERIA paragraph two above, and it means the ⚠
+caveat.** An earlier draft of this very fix inserted this history between the two and silently
+re-pointed it at itself — found by the next round. Both of those paragraphs are pinned WHOLE by
+`scripts/tests/test_audit_ladder_stop_rule.py`, and their ADJACENCY is asserted separately,
+because both pins pass while a paragraph sits between them. This paragraph is pinned by nothing —
+edit it freely.
 
 ## Mutation testing: deletion-mutants are the EASY half
 
