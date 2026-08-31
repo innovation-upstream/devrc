@@ -48,6 +48,29 @@ WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the label):
     measured against a scratch HOME, never the operator's.
   * `test_the_control_of_those_mutants_is_green` is the positive control for all
     of them, and pins the accounting line the others read.
+  * `test_concurrent_sessions_all_emit_their_control_key` is REGRESSION coverage
+    for the guard going DARK under its own parallelism: every xdist worker fires
+    the config control at ONE file, git's `<cfg>.lock` is exclusive, and the
+    plugin's retry-with-jitter only wins while a write is faster than the
+    backoff. On a loaded box it is not, GUARD 10 reported `control=unmeasured`,
+    and an unmeasured control is a guard that has proved nothing. Red at
+    203a5582, green at HEAD — the matrix is in the test's own docstring.
+    `test_the_control_mutex_is_never_gits_own_lock_file` is the INVARIANT GUARD
+    beside it, on the one rename that would silence the control entirely.
+  * `test_the_exhaustion_verdict_counts_acquisitions_it_does_not_sample_one` is
+    REGRESSION coverage for the verdict describing ONE retry attempt while
+    reading as the whole run — `held` is rebound each iteration, so a bare
+    boolean said `mutex=held` on a run where most writes went unserialised, and
+    the reader then hunts a rogue writer that does not exist. It pins BOTH sides
+    of the ratio (`0/6` with the mutex taken from the test process, `6/6` with it
+    free) because pinning only the zero leaves a mutant that hardcodes the
+    numerator alive — measured, it SURVIVED before the second half existed.
+  * `test_CONFIG_LOCK_WAIT_is_read_at_call_time_not_captured_at_import` is
+    REGRESSION coverage for a silent trap rather than a wrong answer: `wait` was
+    a default argument, captured at import, so monkeypatching the module
+    attribute did nothing while its three neighbours honoured it. Asserted by
+    ELAPSED TIME, which is the observable the trap moves — 60.28s with the bug
+    against its 5s bound, 0.30s without.
   * the plugin-flag set pin, the lever pins, the two-way token pin and the
     accounting-site count are INVARIANT GUARDS. The bug never violated them; they
     exist so the enforcement point cannot be narrowed to nothing by an edit that
@@ -55,7 +78,9 @@ WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the label):
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -345,6 +370,335 @@ def test_the_config_control_is_fail_closed_when_the_write_is_not_contained(
     # satisfied by a function that can only ever fail.
     status, detail = nogit_plugin.config_control(tmp_path)
     assert status == nogit_plugin.CONTROL_OK, (status, detail)
+
+
+# --------------------------------------------------------------------------- #
+# The control write under CONCURRENCY
+# --------------------------------------------------------------------------- #
+# The child. A separate PROCESS per session, not a thread: the thing being
+# contended is git's `<cfg>.lock`, a real file lock, and threads in one
+# interpreter would serialise on nothing a thread can see.
+_CONTENDER = '''\
+import importlib.util, json, os, sys, time
+mod_path, guard_dir, go = sys.argv[1], sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location("nogit_under_test", mod_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+# Start together. Without the barrier the children stagger by their own import
+# time and the collision this measures never happens.
+# 🔴 BOUNDED. An unbounded `while not exists(go)` busy-polls FOREVER if the
+# parent dies between spawning us and writing the file — a KeyboardInterrupt, an
+# xdist worker restart, a failed write — leaving N children at 200 polls/s with
+# nothing that will ever release them. The parent also kills us in a finally,
+# but a child must not depend on its parent's cleanup to terminate.
+_deadline = time.monotonic() + 120
+while not os.path.exists(go):
+    if time.monotonic() >= _deadline:
+        sys.stdout.write(json.dumps(
+            {"status": "BARRIER-TIMEOUT", "detail": "parent never released the barrier"}))
+        raise SystemExit(0)
+    time.sleep(0.005)
+mod.install(guard_dir)
+status, detail = mod.config_control(guard_dir)
+sys.stdout.write(json.dumps({"status": status, "detail": detail}))
+'''
+
+# 🔴 THE TWO NUMBERS, AND WHY THESE. Both are LOCK-HOLD-WINDOW amplifiers, and
+# together they stand in for the operator's loaded box, where a `git config`
+# write outlasts the plugin's ~0.75s of total backoff. Measured on this host
+# against the PRE-FIX plugin (203a5582):
+#
+#   16 writers, empty guard file .................  0 / 16 failed  (green, useless)
+#   96 writers, empty guard file .................  3 / 96 failed  (red, marginal)
+#  160 writers, empty guard file ................. 74 /160 failed  (red, expensive)
+#   16 writers, 200k-key guard file .............. 10-11 / 16 failed  (red, cheap)
+#
+# The seeded shape is the one committed: it is the only one that is both
+# reliably red at base and cheap enough to run every gate. The seed makes ONE
+# write slow, which is precisely the condition under which a retry-with-backoff
+# loop stops working — it is not a proxy for the bug, it IS the bug's
+# precondition.
+# 🔴 THESE TWO ARE A RATIO, NOT A PAIR OF MEASUREMENTS — re-MEASURE them on new
+# hardware, do not merely re-run. The RED half of the matrix needs the serialised
+# writes to outlast the retry loop's maximum jitter budget (~0.75s). Measured
+# here: 0.17s per write against the seeded config, so 16 writers take ~2.7s to
+# drain — comfortably past it. On hardware ~10x faster the drain fits INSIDE the
+# backoff, the base implementation passes, and the reproduction goes vacuous
+# while still looking green. If the base stops going red, that is the first
+# thing to check; raising _CONTENDED_CONFIG_KEYS restores the ratio.
+_CONTENDERS = 16
+_CONTENDED_CONFIG_KEYS = 200_000
+
+
+def _fire_controls_concurrently(tmp_path, n=_CONTENDERS,
+                                seed=_CONTENDED_CONFIG_KEYS):
+    """N processes, one shared guard dir, one `config_control` each -> statuses.
+
+    The module under test is the real plugin. `DEVRC_NOGIT_PLUGIN_UNDER_TEST`
+    re-points THE CHILDREN — and only the children — at another copy of the
+    file; this process keeps the real import either way. That is how the RED
+    half of this test's matrix is reproduced against the pre-fix implementation:
+
+        git -C <repo> show 203a5582:scripts/testlib/nogit_plugin.py > /tmp/base.py
+        DEVRC_NOGIT_PLUGIN_UNDER_TEST=/tmp/base.py pytest -k concurrent_sessions
+
+    Nothing here can pollute the runner's ledger: each child calls `install()`
+    on ITS OWN guard dir, so its `GIT_CONFIG_GLOBAL` — and therefore its control
+    key — lands in this tmp_path, never in the run's isolated config where
+    `_nogit_controls()` counts one key per session.
+    """
+    mod_path = os.environ.get("DEVRC_NOGIT_PLUGIN_UNDER_TEST",
+                              nogit_plugin.__file__)
+    child = tmp_path / "contender.py"
+    child.write_text(_CONTENDER, encoding="utf-8")
+    guard = tmp_path / "guard"
+    guard.mkdir()
+    if seed:
+        (guard / nogit_plugin.CONFIG_NAME).write_text(
+            "[devrc-nogit-seed]\n"
+            + "".join(f"\tk{i} = v{i}\n" for i in range(seed)),
+            encoding="utf-8")
+    go = tmp_path / "go"
+    procs = [subprocess.Popen(
+        [sys.executable, str(child), mod_path, str(guard), str(go)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(n)]
+    # 🔴 The finally is what makes the barrier safe from THIS side: a
+    # `communicate` timeout used to propagate and leave the remaining children
+    # running, and an exception between Popen and `go.write_text` left all of
+    # them polling a file that would never appear.
+    # 🔴 ONE WHOLE-FIXTURE DEADLINE, not a per-child timeout. The children run
+    # CONCURRENTLY but are waited on in sequence, so a per-child `timeout=300`
+    # with a `continue` bounds the fixture at n*300 = 4800s — past `gate.sh`'s
+    # 3600s tier cap, turning a systemic child hang into `reason=timeout` with NO
+    # verdict instead of one clean failure. The budget must also EXCEED the
+    # ceiling of a whole `config_control` call, or a legitimately slow control is
+    # killed and reported as a hang. 🔴 THAT IS NOT THE DOCUMENTED 391s: 391 is
+    # the RETRY LOOP's bound (LOCK_RETRIES * (CONFIG_LOCK_WAIT + LOCK_TIMEOUT) +
+    # jitter), and the function then does a post-loop `--get` read-back with
+    # `_git`'s DEFAULT timeout of 30 rather than LOCK_TIMEOUT — so the call's
+    # real ceiling is ≈421s. An earlier revision of this comment said 391 and
+    # told you to re-derive from it, which would come out 30s short. 600s clears
+    # 421; re-derive from 421 if any of those constants moves — and note this,
+    # not _CONTENDED_CONFIG_KEYS, is the real cap.
+    budget = 600.0
+    deadline = time.monotonic() + budget
+    out = []
+    try:
+        go.write_text("go", encoding="utf-8")
+        for p in procs:
+            remaining = max(1.0, deadline - time.monotonic())
+            try:
+                stdout, stderr = p.communicate(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                # Capture what it DID say. Discarding this for a fixed string
+                # would be the exact failure the payload half of this commit
+                # exists to fix: a verdict that does not name its mechanism.
+                # ⚠ MEASURED: the tail is EMPTY for a child killed before its
+                # single JSON write, because _CONTENDER writes nothing until the
+                # very end. So an empty tail means "killed before it produced
+                # anything", NOT "it had nothing useful to say" — a child that
+                # does emit (verified with a stderr marker) has it captured here.
+                stdout, stderr = p.communicate()
+                out.append({"status": "CHILD-TIMEOUT",
+                            "detail": f"killed after the {budget:.0f}s fixture "
+                                      f"budget: {((stdout or '') + (stderr or ''))[-400:]}"})
+                continue
+            try:
+                out.append(json.loads(stdout))
+            except ValueError:
+                out.append({"status": "CHILD-CRASHED",
+                            "detail": (stdout + stderr)[-400:]})
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+    return out, guard
+
+
+def test_concurrent_sessions_all_emit_their_control_key(tmp_path):
+    """🔴 REGRESSION. Every session sharing a guard dir must MEASURE its control.
+
+    MEASURED on the operator's box: `scripts/gate.sh --tier pytest` failed GUARD
+    10 with `control=emitted,unmeasured … still lock-contended after 6 attempts`
+    for `scripts/validation/tests`. Under xdist each worker fires this control at
+    the SAME file; git's `<cfg>.lock` is exclusive and non-blocking, so the
+    losers exit 255 and the plugin's retry-with-jitter is a herd racing to
+    re-collide. It holds only while a write is faster than the backoff.
+
+    A session that cannot run its own positive control has proved nothing, and
+    the runner correctly refuses to score that as a pass — so this is a guard
+    going dark, not a cosmetic flake.
+
+    THE MATRIX (RULES.md: a test not watched to fail proves nothing):
+      RED   at 203a5582 — 10 of 16 children `unmeasured`, "still lock-contended
+                          after 6 attempts"
+      GREEN at HEAD     — 16 of 16 `emitted`
+    Reproduce the red half with `DEVRC_NOGIT_PLUGIN_UNDER_TEST`; see
+    `_fire_controls_concurrently`.
+    """
+    results, guard = _fire_controls_concurrently(tmp_path)
+    bad = [r for r in results if r["status"] != nogit_plugin.CONTROL_OK]
+    assert not bad, (
+        f"{len(bad)} of {len(results)} concurrent sessions could not measure "
+        f"their own `git config --global` control:\n"
+        + "\n".join(f"  {r['status']}: {r['detail']}" for r in bad[:5]))
+
+    # The POSITIVE CONTROL for the assertion above: `emitted` is only meaningful
+    # if the keys actually arrived. A control that reported success while the
+    # writes vanished is the reassuring zero this whole guard exists to refuse —
+    # and it is also what a "fix" that silently redirected each session to its
+    # own file would produce here.
+    written = (guard / nogit_plugin.CONFIG_NAME).read_text(encoding="utf-8")
+    landed = written.count(nogit_plugin.CONTROL_PREFIX)
+    assert landed == len(results), (
+        f"{len(results)} sessions reported `{nogit_plugin.CONTROL_OK}` but the "
+        f"ONE shared guard file holds {landed} control key(s). `run-tests.sh`'s "
+        f"`_nogit_controls()` counts them in that single file and pins the count "
+        f"to the session count, so a scattered write reads as a dead redirect.")
+
+
+def test_the_exhaustion_verdict_counts_acquisitions_it_does_not_sample_one(tmp_path, monkeypatch):
+    """🔴 REGRESSION. The verdict must report how MANY attempts held the mutex.
+
+    `held` is rebound every retry, so printing it alone describes ONE attempt
+    while reading as a property of the whole run — with the mutex free only at
+    the end, a run where four of six writes went UNSERIALISED would report
+    `mutex=held`, sending the reader hunting a rogue writer that does not exist.
+    That is the misdiagnosis the field was added to prevent, in the costlier
+    direction, so the ratio is the guard and a bare boolean is the bug.
+
+    Driven to exhaustion the honest way: hold the mutex from this process (so
+    every acquire fails open, giving 0/N) AND plant a stale `<cfg>.lock` so git
+    itself really does exit 255 — mechanism (c), which is what makes the
+    exhaustion path reachable without racing anything.
+    """
+    # 🔴 monkeypatch, NOT `install()`. `install()` rewrites five process-wide
+    # env vars and its own header says it is NEVER UNDONE — so calling it here
+    # leaks this test's redirect into every test that runs after it in the file
+    # (measured: 42 of them), and those tests then verify containment against a
+    # redirect an unrelated test installed rather than the session fixture's.
+    # `_guard_config`'s vacuity assertion cannot detect that. The file already
+    # had the right pattern; this test is what introduced the wrong one.
+    guard = tmp_path / "g"
+    guard.mkdir()
+    cfg = nogit_plugin.guard_config_path(guard)
+    cfg.write_text("", encoding="utf-8")
+    monkeypatch.setenv(nogit_plugin.CONFIG_ENV, str(cfg))
+    Path(str(cfg) + ".lock").write_text("", encoding="utf-8")
+
+    holder = nogit_plugin.guard_config_lock_path(guard).open("a+")
+    original = nogit_plugin.CONFIG_LOCK_WAIT
+    nogit_plugin.CONFIG_LOCK_WAIT = 0.05   # do not wait out our own mutex 6x
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        status, detail = nogit_plugin.config_control(guard)
+    finally:
+        nogit_plugin.CONFIG_LOCK_WAIT = original
+        holder.close()
+
+    assert status == "unmeasured", (status, detail)
+    # The RATIO, not a boolean. Literal expected value: every acquire failed
+    # open because we held the mutex, across all LOCK_RETRIES attempts.
+    assert f"mutex=held 0/{nogit_plugin.LOCK_RETRIES}" in detail, detail
+    # And the other discriminator still names mechanism (c) beside it.
+    assert "stale-git-lock=PRESENT" in detail, detail
+
+    # 🔴 THE NON-ZERO SIDE, and it is not optional. Asserting only `0/6` pins a
+    # value this fixture can ONLY ever produce, so a mutant that hardcodes the
+    # numerator to 0 SURVIVES a green suite — RULES.md's "a fixture derived from
+    # the constant under test cannot see that constant change", walked into
+    # while fixing a mutation-coverage defect. Same stale lock so git still
+    # fails, but WITHOUT holding the mutex, so every acquire succeeds: the
+    # counter must move. This is also mechanism (a) — serialised throughout and
+    # still failing — pinned beside the (b)+(c) case above.
+    guard_a = tmp_path / "a"
+    guard_a.mkdir()
+    cfg_a = nogit_plugin.guard_config_path(guard_a)
+    cfg_a.write_text("", encoding="utf-8")
+    monkeypatch.setenv(nogit_plugin.CONFIG_ENV, str(cfg_a))
+    Path(str(cfg_a) + ".lock").write_text("", encoding="utf-8")
+
+    status_a, detail_a = nogit_plugin.config_control(guard_a)
+    assert status_a == "unmeasured", (status_a, detail_a)
+    assert (f"mutex=held {nogit_plugin.LOCK_RETRIES}/{nogit_plugin.LOCK_RETRIES}"
+            in detail_a), detail_a
+
+
+def test_CONFIG_LOCK_WAIT_is_read_at_call_time_not_captured_at_import(tmp_path, monkeypatch):
+    """🔴 REGRESSION, and it guards a SILENT trap rather than a wrong answer.
+
+    `wait` was bound as `wait: float = CONFIG_LOCK_WAIT`, so the value was
+    captured at IMPORT and `monkeypatch.setattr(mod, "CONFIG_LOCK_WAIT", …)` did
+    nothing — while its three neighbours (LOCK_RETRIES, LOCK_TIMEOUT,
+    CONFIG_LOCK_SUFFIX) all honoured it. Reverting to the default-argument form
+    leaves every other test in this file GREEN, which is exactly why this one
+    exists: it already cost a measurement (a probe set to 0.2s took 60.4s).
+
+    Asserted by ELAPSED TIME, because that is the observable the trap changes.
+    Measured: ~60.00s with the bug, ~0.30s without — so a 5s bound is nowhere
+    near either, and this is not a timing-sensitive test in the flaky sense.
+    """
+    # monkeypatch, not `install()` — same reason as the test above: `install()`
+    # is documented as never undone and would leak this redirect into every
+    # later test in the file.
+    guard = tmp_path / "g"
+    guard.mkdir()
+    cfg = nogit_plugin.guard_config_path(guard)
+    cfg.write_text("", encoding="utf-8")
+    monkeypatch.setenv(nogit_plugin.CONFIG_ENV, str(cfg))
+    lock_path = nogit_plugin.guard_config_lock_path(guard)
+    # Hold the mutex from this process so every acquire below must wait it out.
+    holder = lock_path.open("a+")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        original = nogit_plugin.CONFIG_LOCK_WAIT
+        nogit_plugin.CONFIG_LOCK_WAIT = 0.2
+        try:
+            started = time.monotonic()
+            with nogit_plugin._config_write_lock(guard) as held:
+                pass
+            elapsed = time.monotonic() - started
+        finally:
+            nogit_plugin.CONFIG_LOCK_WAIT = original
+    finally:
+        holder.close()
+
+    assert held is False, "the mutex was held elsewhere; this acquire must fail open"
+    assert elapsed < 5.0, (
+        f"honoured the import-time default instead of the module attribute: "
+        f"waited {elapsed:.2f}s against CONFIG_LOCK_WAIT=0.2")
+
+    # Positive control for the assertion above: an EXPLICIT wait= must still
+    # win, so the test cannot pass by the parameter having been ignored.
+    holder = lock_path.open("a+")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        started = time.monotonic()
+        with nogit_plugin._config_write_lock(guard, wait=0.0) as held_explicit:
+            pass
+        explicit_elapsed = time.monotonic() - started
+    finally:
+        holder.close()
+    assert held_explicit is False
+    assert explicit_elapsed < 5.0
+
+
+def test_the_control_mutex_is_never_gits_own_lock_file(tmp_path):
+    """INVARIANT GUARD on the one rename that would silence the whole control.
+
+    `<cfg>.lock` is the file GIT creates to take its own exclusive lock. If this
+    plugin's advisory mutex were ever spelled that way, holding it would make
+    every `git config --global` in the run fail outright — the positive control
+    killed by the mechanism added to protect it. Also pinned: the mutex is a
+    sibling INSIDE the guard dir, never the config file itself.
+    """
+    lock = nogit_plugin.guard_config_lock_path(tmp_path)
+    cfg = nogit_plugin.guard_config_path(tmp_path)
+    assert lock.name != nogit_plugin.CONFIG_NAME + ".lock", (
+        "the control mutex is spelled the same as git's own lock file")
+    assert lock != cfg and lock.parent == tmp_path, (lock, cfg)
 
 
 def test_the_runner_and_the_plugin_agree_on_the_shared_tokens():
