@@ -177,6 +177,32 @@ blind spots and the ten-entry defect ledger: `claudedocs/measurement-scripts-tes
 - **Leading hypothesis:** the existing `triggers` field already discriminates bucket C better than any operand rule can, because it is *measured* rather than inferred from argv. The remaining true unknown is narrower than 83.4% of suite time — it is only those bucket-C files whose in-process trigger set is SMALL **and** whose child is a repo script.
 - **Next probe:** intersect the two — list bucket-C files with fewer than ~30 in-process paths **and** at least one `bash <repo script>` child. That is the only population a child tracer could move, and it is far smaller than 69. Size it before building anything.
 
+### Rank 7 step 0 DONE: the unpin's perf baseline, RE-TAKEN at `requests.cpu: 2`
+- **Why it had to be re-taken:** `claude/skills/tekton/reference/pipelines.md` → "Retrying the devrc-ci unpin" states the quoted wins (queue 17–22m → 0.1m, wall clock 39.1m → 17.4m) are **not re-derivable** — the runs are pruned, and they were measured while `requests.cpu` was **4** (`23887675`). `bb62668f` put it back to **2**, which is live. So the entire justification for rank 7 rested on a baseline taken under a different configuration.
+- **Observed (with values), 2026-08-31, `requests.cpu: 2` live, n=31 gate TaskRuns / 35 retained PipelineRuns:**
+  - **Gate pod-start latency (TaskRun `startTime` → first step `startedAt`): p50 101s, p90 748s, max 1043s.** Slowest three: `devrc-ci-grz6m-gate` 1043s, `-qjxwl-gate` 936s, `-v6p74-gate` 864s.
+  - Wall clock (start → completion): **median 23.4m, p90 34.2m, max 42.6m**, against a **45m** gate budget.
+  - **Every gate pod landed on `talos-xr6-r7p` — 24 of 24.** The pin is intact and is the whole scheduling surface.
+  - PipelineRun creation → `startTime` is **median 0.0s, max 1.0s** — 🔴 **that number is NOT the queue wait and must not be quoted as one**; Tekton starts the run immediately and the wait is entirely in pod scheduling, above.
+- **Verdict: the upside is REAL and survives the cpu-2 re-take.** ~12.5 minutes at p90 is pure scheduling wait on a 45m budget, caused by pinning four nodes' worth of demand onto one.
+- **Next probe:** the ownership question (below) — nothing about the unpin should be attempted until it is answered on a scratch pipeline.
+
+### Rank 7 blocker: WHO takes the nix store lock? — root cannot EACCES a file it owns
+- **Symptom:** the reverted hostPath produced `error: opening lock file "/nix/var/nix/db/big-lock": Permission denied`, 75 occurrences across 42 tests, on every devrc PR (`7839ef54`).
+- **Observed (with values) — live gate pod `devrc-ci-gjljc-gate-pod`, `step-pytests`, 2026-08-31:**
+  - `id` → **`uid=0(root) gid=0(root)`**
+  - `build-users-group = nixbld`, `sandbox = true`, `sandbox-fallback = true`
+  - **`ls -d /build` → No such file or directory** — so nix is running builds UNSANDBOXED via fallback, live today. This reproduces SKILL.md gotcha 6(b) exactly, on the PVC arm, on a *working* gate.
+  - `stat` → `755 root:root /nix` · `755 root:root /nix/var/nix/db` · **`600 root:root /nix/var/nix/db/big-lock`** — i.e. the volume that WORKS carries the same 0600 root:root lock the failure names.
+- 🔴 **The sharpened question, which the reference does not yet state:** a **root** client holds `CAP_DAC_OVERRIDE` and cannot receive `EACCES` on a mode-0600 file it owns — demonstrated by the working gate above, which is root against exactly that file. **Therefore whoever hit "Permission denied" during the hostPath window was NOT root.** That makes `7839ef54`'s "ownership the nix build user can use" theory *directionally* right while its mechanism stays unproven, and it converts the probe from "fix the permissions" into a single measurable question: **which uid takes the store lock, and when does it stop being root?**
+- **Ruled out:** "the storage kind is the variable" — already refuted in the reference (`nix-store-cache`'s PV is itself a `hostPath` `DirectoryOrCreate` on the same disk). Also **candidate 1 (root-directory mode)**, refuted 2026-08-30; a `chmod 0777` before the seed measures nothing.
+- **Next probe:** on a SCRATCH pipeline only — instrument the identity of the lock-taker rather than patching permissions. Run a build that shells out to `nix-instantiate` and have it print `id -u` from **inside** the builder, against (a) the live PVC and (b) a fresh hostPath. If (a) prints 0 and (b) prints a `nixbld` uid, the mechanism is named and the fix follows. 🔴 Never on `devrc-ci`: `enforce_admins: true` with both legs required means a wrong guess blocks every contributor.
+
+### The `privileged` namespace label grants nothing — and that is independent of the volume
+- **Observed:** `kubectl get ns tekton-ci -o jsonpath='{.metadata.labels}'` → `pod-security.kubernetes.io/enforce: privileged` (still `686d6ff0`). But the gate pod requests **no privilege at all**: pod-level `securityContext` is `{}` and all six step containers are empty.
+- **Consequence:** PodSecurity *permits*, it does not *grant*. So the label buys nothing **regardless of whether the hostPath ever comes back** — the sharper form of the reference's "buys nothing while the PVC is back". It also explains gotcha 6(b): nix's sandbox cannot engage because the pod never asks for the capability, so it falls back and the `sandbox = true` in `nix config show` is cosmetic.
+- **Consequence for ranked item 5:** reverting that label is **not blocked on the unpin**, and re-granting it later would not by itself make a hostPath work.
+
 ## Next steps (ranked)
 🔴 **RANKS 1–7 ARE THE PRE-EXISTING NUMBERING AND MUST NOT MOVE** — the rank is half a
 claim's identity (`claim-work --slug-for <this doc> <rank>`), so inserting an item
@@ -250,6 +276,10 @@ made the node unpin `ci-speedup-8` here while `main`'s copy still called it
 - **`strace` is NOT in the flake devShell** — measured 2026-08-31. No dependency-free tracer covers `bash` children. A `sitecustomize` tracer would cover `python3` children (and python grandchildren under bash, env being inherited) but not a bash script's own reads.
 - ⚠ **A `sitecustomize` child tracer has a named blind spot before it is written:** a test building `env=` from scratch rather than `{**os.environ, …}` drops the propagated variables and its child goes untraced. Under-credits (safe), and detectable — compare python execs recorded against child shards written.
 - **GUARD 9 (`gitenv`) fired in observed mode throughout both traces** because other sessions were writing `/home/zach/workspace/devrc/.git` concurrently. Attribution being impossible in a shared checkout, not a failure; the prevention half stayed in force.
+
+- 🔴 **I pushed three times in quick succession to a docs-only PR and put three runs into a shared queue.** Measured while working: **8 `devrc-ci` runs Running/Pending at once**, one gate pod Pending, all on `talos-xr6-r7p`. The `tekton` skill states this plainly — *"PUSHING N BRANCHES IS NOT N INDEPENDENT ACTIONS — IT IS ONE BLAST-RADIUS ACTION … Push, wait for the queue to drain, push"* — and it is not only my own checks that suffer. **Batch handoff updates into one push.**
+- 🔴 **`PipelineRun` creation→`startTime` is a decoy metric: median 0.0s.** It reads like "there is no queue" and is the opposite of the truth. The wait lives in TaskRun→pod scheduling (p90 748s). Anyone re-measuring this must use the TaskRun's first-step `startedAt`, not the PipelineRun's `startTime`.
+- **The gate's `sandbox = true` is cosmetic today** — `/build` does not exist, so builds run unsandboxed. Read `/build`'s existence, never `nix config show`, exactly as gotcha 6(b) says; this session confirmed it live on a healthy run rather than a broken one.
 
 ## How to verify
 1. **The full measurement (this run's numbers):**
