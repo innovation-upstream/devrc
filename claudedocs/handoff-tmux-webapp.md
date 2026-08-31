@@ -679,6 +679,41 @@ blind**: `EXAMINED > 0` still holds and the `BODIES == grep -c '^@test '` equali
 ⚠ **Neither PR's `clawgate-ci` ever ran the leg that covers it** — #592's timed out before the
 `hook` leg (see the TaskRunTimeout investigation above). The bats coverage claim for #592 rests on
 a local reproduction of that leg in the same `docker.io/bats/bats:1.11.1` image, not on CI.
+||||||| parent of e1d1318f (docs(handoff): correcting the docker.io block in BOTH directions: the workbench CAN pull today (meas)
+### ⚠ CORRECTION 2026-08-31 — the workbench CAN pull `docker.io` today, and the root cause is STILL UNFIXED
+🔴 **This corrects the "THE WORKBENCH STILL CANNOT PULL FROM `docker.io`" block above in BOTH
+directions. Read both halves — either one alone is wrong.**
+
+- **The instruction "build clawgate images on the laptop" is no longer true as a hard constraint.**
+  Measured on the workbench: `docker pull docker.io/bats/bats:1.11.1` **succeeded** (`Downloaded
+  newer image`), and so did `docker.io/library/alpine:3.20`. I followed the old block this session
+  and routed a bats run to the laptop **without testing the workbench first** — which is the
+  "an open-investigation block reads as current forever" trap this doc warns about, walked into by
+  the session that was reading the warning.
+- 🔴 **But it is NOT fixed, and "docker.io works now" is the more dangerous wrong conclusion.**
+  The router is still serving the poisoned record, unchanged:
+  ```
+  dig @192.168.50.1 registry-1.docker.io   ->  TTL 41879636 (~485 days)
+      98.84.245.6 / 54.225.97.128 / 52.4.106.100 / 100.63.109.26
+  dig @1.1.1.1     registry-1.docker.io   ->  TTL 49
+      52.72.129.195 / 3.221.100.247 / 44.205.219.111 / 98.85.115.1
+  ```
+  TLS against the addresses the ROUTER hands out still presents certificates for unrelated sites —
+  measured `subject=CN=kube-apiserver` and `subject=CN=*.dsiderenp.app`, plus one address that
+  completes no handshake. That is the documented symptom, intact.
+- **The host-side pin is still NOT applied.** `server=/docker.io/` appears **0** times in the
+  RUNNING dnsmasq config. `nix/system/apply-dnsmasq-docker-io-pin.sh` remains staged-not-applied
+  and still needs `sudo nixos-rebuild switch`, which an agent cannot run.
+- **So why do pulls work?** The system resolver is currently answering from the good upstream
+  (`dig registry-1.docker.io` with no `@` returns a TTL-25 correct answer), i.e. dnsmasq is
+  preferring `1.1.1.1` over the router for this name **by luck of upstream selection, not by
+  configuration**. Nothing pins that. It can flip back with no change by anyone.
+- 🔴 **Practical guidance, replacing the old block's:** do NOT hard-route image builds to the
+  laptop as a standing rule, and do NOT delete `apply-dnsmasq-docker-io-pin.sh` as obsolete.
+  **Test the pull at the moment you need it** — one `docker pull` is the whole check — and treat a
+  failure as this same unfixed router bug rather than re-diagnosing it. The durable fixes are
+  unchanged: the pin (needs sudo, one host) or clearing the record on `192.168.50.1` (fixes every
+  machine on the LAN, and is still untouched).
 
 ## Gotchas
 - 🔴 **A FAILED `git worktree add` DOES NOT STOP THE NEXT `git -C <path>` — AND I LANDED A
@@ -1339,6 +1374,16 @@ a local reproduction of that leg in the same `docker.io/bats/bats:1.11.1` image,
   `resourceVersion`/`creationTimestamp`/`status`, set `generateName`, `kubectl create`. This
   re-reports the GitHub status for the same revision without a commit, which matters on trunk where
   a push means a deploy.
+
+- 🔴 **A "CANNOT DO X" NOTE IN A HANDOFF IS A CLAIM WITH A SHELF LIFE, AND OBEYING IT COSTS NOTHING
+  VISIBLE — WHICH IS WHY IT NEVER GETS RE-TESTED.** This session read "the workbench cannot pull
+  docker.io", routed a container run to the laptop, and the detour WORKED — so nothing anywhere
+  signalled that the premise was stale. A false "cannot" is self-preserving in a way a false "can"
+  is not: the latter fails loudly on first use, the former just quietly buys a workaround forever.
+  **When a doc tells you a capability is missing, spend the one command to check before building
+  around it** — and when the check passes, ask whether the underlying cause is fixed or merely
+  masked before rewriting the note. Here it was masked: the pull worked while the router was still
+  serving a 485-day poisoned record.
 
 ## How to verify
 
