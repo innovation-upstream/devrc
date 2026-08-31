@@ -1407,7 +1407,10 @@ class TestRuleFDidNotMoveTheExitCodes:
         """
         codes = {n: v for n, v in vars(hd).items()
                  if n.startswith("EXIT_") and isinstance(v, int)}
-        assert len(codes) >= 8, f"the scraper found too few constants: {codes}"
+        # 🔴 EXACT, not `>=`. Against exactly 9 constants a `>= 8` floor tolerates
+        # ONE silently vanishing — a rename, a deletion, or a value that stops
+        # being an int — which is the same class of drift this test exists for.
+        assert len(codes) == 9, f"the EXIT_* constant set changed: {codes}"
         seen: dict[int, str] = {}
         for name, value in sorted(codes.items()):
             assert value not in seen, (
@@ -1422,6 +1425,34 @@ class TestRuleFDidNotMoveTheExitCodes:
         """Their VALUES, not just their names — a caller reads the number."""
         assert (hd.EXIT_OK, hd.EXIT_USAGE, hd.EXIT_FAIL) == (0, 2, 3)
         assert (hd.EXIT_NO_ADVANCE, hd.EXIT_NO_CHANGE, hd.EXIT_BEHIND) == (4, 5, 6)
+        # 🔴 THE LADDER'S OWN CODES, which stopped at 6 and were unpinned. #1046
+        # renumbered EXIT_STALE_BASE 7 -> 9 after #962 claimed 7; nothing asserted
+        # the new value, so setting it to 10 SURVIVED all 295 tests while three
+        # prose sites still said 9.
+        assert (hd.EXIT_DOC_PER_EFFORT, hd.EXIT_UNFORCED, hd.EXIT_STALE_BASE) == (7, 8, 9)
+
+    def test_the_prose_quotes_the_CONSTANT_not_a_stale_literal(self) -> None:
+        """🔴 PROSE AGAINST THE CONSTANT, not prose against prose.
+
+        `test_the_remedy_is_pinned_as_a_WHOLE_normalised_string` compares one
+        string to another string, so it fires when the WORDING moves and never
+        when the NUMBER does. Measured: `EXIT_STALE_BASE = 10` survives the whole
+        file while `SKILL.md`, `WRONG_BASE_REMEDY` and that pin all still say
+        "exit 9". A caller reads the number, so the number is what must agree.
+        """
+        remedy = hd.WRONG_BASE_REMEDY
+        assert f"(exit {hd.EXIT_STALE_BASE})" in remedy, (
+            f"WRONG_BASE_REMEDY names an exit code that is not "
+            f"EXIT_STALE_BASE={hd.EXIT_STALE_BASE}: {remedy!r}")
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        for const, label in ((hd.EXIT_STALE_BASE, "stale-base"),):
+            assert f"(exit {const})" in doc, (
+                f"claude/skills/handoff/SKILL.md does not name exit {const} for "
+                f"{label}; renumbering the constant left the skill stale.")
+        for const in (hd.EXIT_DOC_PER_EFFORT, hd.EXIT_UNFORCED):
+            assert f"({const})" in doc, (
+                f"SKILL.md does not name exit {const}; rule (i)/(j)'s documented "
+                f"codes drifted from the module.")
 
     def test_merge_still_returns_a_plain_string(self) -> None:
         """`merge()` is public and called directly by other tests in this file;
@@ -5110,7 +5141,9 @@ class TestAbsentBasePresentOnMainlineIsRefused:
             _sh("git", "config", k, v, cwd=other)
         (other / "claudedocs" / "handoff-sample-topic.md").write_text("", encoding="utf-8")
         _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
-        _sh("git", "commit", "-q", "--allow-empty", "-m", "empty the handoff", cwd=other)
+        # No `--allow-empty`: git refusing "nothing to commit" is the guard
+        # against a fixture body identical to what the mainline already holds.
+        _sh("git", "commit", "-q", "-m", "empty the handoff", cwd=other)
         _sh("git", "push", "-q", "origin", "main", cwd=other)
         _sh("git", "fetch", "-q", "origin", cwd=work)
 
@@ -5164,10 +5197,25 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         # non-zero. Only the mainline SHAPE line proves the copy was read and
         # measured, which is the claim this test's name makes.
         prop = run_tool(work, update=update_file)
-        assert "origin/main: 0 sections /" in prop.stdout, (
-            "the mainline copy was never read, so the negatives below prove "
-            "nothing", prop.stdout[-400:])
-        assert "will be replaced by this delta" not in prop.stdout
+        # 🔴 ORDER MATTERS. Assert the loud-line ABSENCE first: if
+        # `replaces_mainline_doc` regresses to `bool(mainline.lines)`, the loud
+        # branch is taken and the shape line never prints — so the shape
+        # assertion would fire with "the mainline copy was never read", which is
+        # FALSE and points a maintainer two functions away from the defect.
+        assert "will be replaced by this delta" not in prop.stdout, (
+            "the guard MIS-FIRED on a whitespace mainline copy — the copy WAS "
+            "read; `replaces_mainline_doc` said it was something to lose",
+            prop.stdout[-400:])
+        # 🔴 And the NON-degenerate half of the shape. `0 sections` alone is what
+        # `doc_shape("")` and a hardcoded DocShape(0,0) also produce, so pinning
+        # it cannot see a mutant that reads the blob then measures the wrong
+        # text — MEASURED: `doc_shape(shown.out)` -> `doc_shape("")` survived
+        # this test scoped to itself. The line count differs per fixture, so it
+        # is the half that proves the real bytes were measured.
+        want_lines = 1 if blank == "\n" else 2
+        assert f"origin/main: 0 sections / {want_lines} lines" in prop.stdout, (
+            "the mainline copy was never read or was measured from the wrong "
+            "text, so the negatives below prove nothing", prop.stdout[-400:])
 
         res = run_tool(work, "--confirm", update=update_file)
         assert res.returncode == 0, (
@@ -5251,4 +5299,52 @@ class TestAbsentBasePresentOnMainlineIsRefused:
             res.returncode, res.stdout, res.stderr)
         assert "status=stale-base" in res.stderr
         assert "status=new-doc" not in res.stderr
+        assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def test_rule_i_asks_WHICH_predicate_not_merely_whether_stale(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 PINS THE PREDICATE, not the outcome — and in the fail-OPEN direction.
+
+        #1046 narrowed rule (i) with `not currency.replaces_mainline_doc("")`.
+        Broadening it to `not currency.stale` SURVIVED all 295 tests while
+        changing behaviour: a whitespace-only mainline copy is `stale` but is NOT
+        something to lose, so under the mutant rule (i) stops firing and the doc
+        is WRITTEN — silently bypassing #962's one-doc-per-effort cap.
+
+        MEASURED: repo with other handoff docs, topic's doc absent locally,
+        mainline copy whitespace-only -> HEAD rc 7 (cap fires, nothing written);
+        mutant rc 0 (written).
+
+        `test_an_EMPTY_mainline_doc_is_NOT_something_to_lose` cannot see this —
+        its fixture has no other handoff docs, so rule (i) never applies there.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        others = work / "claudedocs"
+        others.mkdir(exist_ok=True)
+        (others / "handoff-other-effort.md").write_text(
+            "# Handoff: other\n\n## State now\n\nx.\n", encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs", cwd=work)
+        _sh("git", "commit", "-q", "-m", "repo has other handoff docs", cwd=work)
+
+        # A mainline copy that is STALE but holds nothing to lose.
+        other = tmp_path / "ws-mainline"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "W"), ("user.email", "w@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        (other / "claudedocs").mkdir(exist_ok=True)
+        (other / "claudedocs" / "handoff-sample-topic.md").write_text(
+            "   \n\n", encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "whitespace mainline copy", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        _sh("git", "fetch", "-q", "origin", cwd=work)
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, (
+            "the one-doc-per-effort cap did not fire — rule (i) was broadened to "
+            "`stale`, which is true of a mainline copy that holds nothing",
+            res.returncode, res.stdout, res.stderr)
+        assert "status=new-doc" in res.stderr
         assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()

@@ -196,10 +196,20 @@ printf '\n== rule (i-b): a second doc for an existing effort (must be KILLED) ==
 # 🔴 THE TWO HALVES OF THE CONDITION GET SEPARATE ROWS. Mutating both together
 # would delete the guard with its enclosing condition and prove nothing about
 # either half.
+# 🔴 RE-ANCHORED. devrc#1046 rewrote this line into a parenthesised THREE-term
+# condition, so the old single-line anchor matched 0 times and both rows reported
+# `MUTATION DID NOT APPLY — result meaningless`. The harness's own `cmp -s` guard
+# is what made that loud instead of a false SURVIVED; without it these two rows
+# would have read as coverage while testing nothing.
 run 'new-doc-guard-never-fires' test_a_new_topic_is_refused_and_lists_what_exists \
-  's|if not doc.exists() and not args.new_effort:|if False and not args.new_effort:|'
+  's|if (not doc.exists() and not args.new_effort|if (False and not args.new_effort|'
 run 'new-effort-assertion-ignored' test_new_effort_lands_it \
-  's|if not doc.exists() and not args.new_effort:|if not doc.exists() and True:|'
+  's|if (not doc.exists() and not args.new_effort|if (not doc.exists() and True|'
+# The THIRD term, added by #1046: a doc on the MAINLINE means this is a stale
+# clone, not a new effort. Dropping it re-shadows the stale-base refusal — the
+# defect that reopened #1046's audit ladder after it had closed.
+run 'stale-clone-treated-as-new-effort' test_a_STALE_BASE_in_a_REALISTIC_repo_is_not_reported_as_a_NEW_effort \
+  's|and not currency.replaces_mainline_doc("")):|and True):|'
 # The LIST is the half that makes the refusal compliable. A refusal naming no
 # existing doc is a block with no way past it but the flag.
 run 'existing-docs-list-suppressed' test_a_new_topic_is_refused_and_lists_what_exists \
