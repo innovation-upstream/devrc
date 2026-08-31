@@ -142,8 +142,23 @@ _QUOTED = re.compile(rf"""(['"]){_ESC}{re.escape(RESERVED_PREFIX)}""")
 # Any run of non-quote text carrying a backslash can break the line, so the
 # prefix after it may land at column 0 — detected here, and classified DYNAMIC
 # because this module cannot know whether the escape expands.
-_QUOTED_AFTER_ESCAPE = re.compile(
-    rf"""(['"])[^'"]*\\[^'"]*{re.escape(RESERVED_PREFIX)}"""
+# 🔴 …and this arm shipped ESCAPE-ONLY for one round, which left the identical
+# hazard spelled with an INTERPOLATION HOLE completely invisible. These are not
+# obfuscation — `echo "${nl}RESULT: …"` and `print(f"{header}RESULT: …")` are
+# ordinary spellings — and every one returned `None`, "emits nothing at column
+# 0", so the line never entered the population and all four guard assertions
+# were blind to it at once:
+#
+#     echo "${nl}RESULT: PASS (exit=0)"
+#     print(f"{header}RESULT: PASS (exit=0)")
+#     print("%sRESULT: PASS (exit=0)" % nl)
+#     printf "%sRESULT: PASS (exit=0)%s" "$nl" "$nl"
+#
+# A backslash and an interpolation hole are the same hazard here: either can put
+# a line break before the prefix. So this matches EITHER, reusing the same
+# marker class the payload arm uses — one definition, not two that drift.
+_QUOTED_AFTER_UNRESOLVED = re.compile(
+    rf"""(['"])[^'"]*[\\$`{{%][^'"]*{re.escape(RESERVED_PREFIX)}"""
 )
 _UNQUOTED = re.compile(
     rf"""\b(?:echo|printf|print)\b\s+(?:-\S+\s+)*{re.escape(RESERVED_PREFIX)}"""
@@ -274,7 +289,7 @@ def line_emits_reserved_prefix(line: str) -> bool:
     """True when this source line would put `RESULT:` at column 0 of stdout."""
     if _COMMENT.match(line):
         return False
-    return bool(_QUOTED.search(line) or _QUOTED_AFTER_ESCAPE.search(line)
+    return bool(_QUOTED.search(line) or _QUOTED_AFTER_UNRESOLVED.search(line)
                 or _UNQUOTED.search(line) or _HEREDOC.match(line))
 
 
@@ -361,7 +376,7 @@ def _classify_one_command(command: str) -> str:
     # bash spelling would be an unpinnable false positive whose only remedy is
     # editing someone's file. DYNAMIC still fails the guard until a human
     # enumerates it; it just does not do so unanswerably.
-    if not _QUOTED.search(command) and _QUOTED_AFTER_ESCAPE.search(command):
+    if not _QUOTED.search(command) and _QUOTED_AFTER_UNRESOLVED.search(command):
         return DYNAMIC
 
     if _spells_a_verdict(command):
@@ -634,6 +649,19 @@ UNRESOLVED_ESCAPE_FIXTURES = {
 #
 #   name -> (line, verdict, does the emitter REALLY forge?)
 BEFORE_PREFIX_ESCAPE_FIXTURES = {
+    # 🔴 INTERPOLATION HOLES, not escapes — the fifth fail-open. `echo
+    # "${nl}RESULT: …"` and `print(f"{header}RESULT: …")` are ORDINARY
+    # spellings, not obfuscation, and every one returned None before this arm
+    # matched an interpolation marker as well as a backslash.
+    "shell-var-hole":  ('echo "${nl}' + RESERVED_PREFIX + ' PASS (exit=0)"',
+                        DYNAMIC, True),
+    "fstring-hole":    ('print(f"{chr(10)}' + RESERVED_PREFIX + ' PASS (exit=0)")',
+                        DYNAMIC, True, "python"),
+    "percent-format":  ('print("%s' + RESERVED_PREFIX + ' PASS (exit=0)" % chr(10))',
+                        DYNAMIC, True, "python"),
+    "printf-percent-s": ('printf "%s' + RESERVED_PREFIX + ' PASS (exit=0)%s" '
+                         '"$nl" "$nl"', DYNAMIC, True),
+
     "python-text-then-nl": ('print("checks done' + ESC + 'n'
                             + RESERVED_PREFIX + ' PASS (exit=0)")', DYNAMIC, True,
                             "python"),

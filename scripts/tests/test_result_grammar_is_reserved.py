@@ -94,7 +94,19 @@ entry to get green: `NEAR_MISSES` is for payloads the scanner PROVED benign, and
 🔴 WHAT A GREEN RUN HERE CANNOT SEE
 -----------------------------------
 This is a SOURCE scan, so it sees a literal in the file it scans and nothing
-else. It is structurally blind to:
+else.
+
+🔴 **THIS LIST IS NOT EXHAUSTIVE, AND READING IT AS EXHAUSTIVE HAS ALREADY COST
+FIVE FAIL-OPENS.** Every one of them was a way of putting the prefix at column 0
+that no bullet here named — an escape after the prefix, an escape before it, a
+non-`\n` escape spelling, a pipe stage rewriting the stream, an interpolation
+hole before the prefix. Each was found by EXECUTING a candidate and reading the
+bytes back through gate.sh's own reader, never by reading this list. So: when
+you need to know whether a shape is covered, run it and look — do not consult
+these bullets and conclude. What is written here is what is KNOWN to be missing,
+not the boundary of what is missing.
+
+Known blind spots:
 
   * an emission whose PREFIX is built up across lines — `v="RESULT:"` on one
     line and `echo "$v PASS"` on another. Measured: `echo "$v PASS"` alone is
@@ -629,9 +641,12 @@ def test_the_before_prefix_fixtures_really_place_their_escape_BEFORE_the_prefix(
     for shape, entry in G.BEFORE_PREFIX_ESCAPE_FIXTURES.items():
         line = entry[0]
         head = line.split(G.RESERVED_PREFIX, 1)[0]
-        assert G.ESC in head, (
-            f"{shape!r} has no escape before the prefix, so it does not exercise "
-            f"the before-prefix arm: {line}")
+        # An ESCAPE or an INTERPOLATION HOLE — both can put a line break before
+        # the prefix, and the arm matches either. Checking only for a backslash
+        # would exclude the interpolation fixtures from their own guard.
+        assert any(c in head for c in (G.ESC, "$", "`", "{", "%")), (
+            f"{shape!r} has no unresolved marker before the prefix, so it does "
+            f"not exercise the before-prefix arm: {line}")
 
 
 def _ground_truth_ledgers() -> dict:
