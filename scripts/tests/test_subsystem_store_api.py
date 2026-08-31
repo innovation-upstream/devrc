@@ -113,21 +113,39 @@ ROOT = Path(__file__).resolve().parents[2]
 # reproduced ON THE DEV HOST in ~70 s; see `scripts/ci-repro/`. Two corrections
 # to the framing above, both measured:
 #
-#   * IT IS DISK, NOT CPU. All 3 failures on run `devrc-ci-86zxj` (sha 5de43017)
-#     printed this suite's own classifier — `MECHANISM = SERVER_BLOCKED_IN_FSYNC
-#     … accept loop parked=True`. `server.py:_replace_bytes` fsyncs BEFORE the
-#     response is written, and fsync blocks in uninterruptible sleep. The gate
-#     workspace is `emptyDir medium=disk` and the nix caches are `local-path`
-#     PVCs on ONE pinned node (talos-xr6-r7p), so every concurrent pipelinerun
-#     contends on ONE physical disk — 12 overlapped that window.
-#     🔴 So "give the gate CPU/memory requests" is the wrong fix, however
-#     plausible: k8s requests govern CPU and memory, NOT disk I/O. (And
-#     `computeResources: null` is not a devrc oversight — all 449 taskruns in
-#     that namespace declare none.)
-#   * SEED/ORDERING IS REFUTED as the mechanism. No reordering is needed:
-#     delaying a SINGLE fsync past this bound reproduces the exact failure, on
-#     the identical test and parametrisation the gate reported. Control 8 passed
-#     / 4.63 s; with one stalled fsync, 1 failed. Recipe: `scripts/ci-repro/`.
+#   * IT IS DISK LATENCY, NOT CPU. On run `devrc-ci-86zxj` (sha 5de43017) this
+#     suite's own classifier printed `MECHANISM = SERVER_BLOCKED_IN_FSYNC …
+#     accept loop parked=True`. `server.py:_replace_bytes` fsyncs the file
+#     (:2012) and the parent dir (_fsync_dir, :1961) INSIDE the request, before
+#     the response is written, and fsync blocks in uninterruptible sleep.
+#     devrc-ci is pinned to ONE node (talos-xr6-r7p); the volume every
+#     concurrent run SHARES is the static `nix-store-cache` PVC (30Gi,
+#     local-path), not the per-run `source` workspace, which is a
+#     volumeClaimTemplate holding a ~13 MB clone. 12 pipelineruns overlapped
+#     that window (7 devrc-ci, 4 gitops-validate, 1 auditloop).
+#     ⚠ "give the gate CPU/memory requests" does NOT fix the latency — requests
+#     govern CPU and memory, not IOPS — but it is not useless either: every run
+#     is pinned to one node, so non-zero requests are the standard way to make
+#     excess runs Pending instead of co-scheduled, i.e. a concurrency cap. Do
+#     not read this as "requests are the wrong lever"; read it as "they cap
+#     concurrency, they do not speed up fsync". `computeResources: null` is a
+#     platform-wide default (479/479 taskruns), not a devrc oversight.
+#   * SEED/ORDERING IS NOT THE MECHANISM — but mind what proves that. The
+#     REPRODUCER (`scripts/ci-repro/`) shows fsync latency SUFFICES: delaying a
+#     single fsync past this bound reproduces the exact failure, on the
+#     identical test and parametrisation the gate reported (control 8 passed /
+#     4.63 s; with one stalled fsync, 1 failed). Sufficiency is not necessity —
+#     what actually refutes seed/ordering is the CI classifier above, not the
+#     reproducer.
+#   * ⚠ THE 3 FAILURES ON THAT RUN WERE NOT ONE FLAKE. The third was
+#     TestAHungRoundTripSAYSWhichSideBlocked::test_a_stall_in_the_FSYNC_region_
+#     is_NAMED, which failed at :15382 ("the server never reached the stall
+#     site") against CLIENT_BOUND = 0.25 (:15319) — NOT against this constant.
+#     So it evidences an fsync exceeding 0.25 s, and the advice below about not
+#     raising HANG_TIMEOUT does not address the bound that actually failed
+#     there. That 0.25/1.2 pair is the same "bound tighter than the thing it
+#     discriminates" shape as commit f4a3d69b; it is UNFIXED and unflagged
+#     elsewhere.
 #
 # 🔴 Do NOT raise this constant again in response to a recurrence. Read the
 # per-hung-call arithmetic directly below — the bound is not the lever, and the
