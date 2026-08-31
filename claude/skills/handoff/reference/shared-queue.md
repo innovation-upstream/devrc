@@ -182,11 +182,58 @@ neither substitutes for the other:
 - **Push the branch the moment you create it**, before doing the work (an empty
   commit is enough) — it is visible to `git ls-remote` the instant it lands.
 
+## 🔴 A LETTERED SUB-RANK SILENTLY LOSES ITS RANK, so the lock cannot tell `8a`…`8d` apart
+
+**Measured 2026-08-31** against `claudedocs/handoff-tmux-webapp.md`, whose rank 8
+carried sub-items `8a`–`8e`:
+
+```
+8   -> tmux-webapp-8      12  -> tmux-webapp-12     13  -> tmux-webapp-13
+8a  -> tmux-webapp        8c  -> tmux-webapp
+```
+
+Every lettered rank collapses to the **bare doc slug** — which is also what a
+whole-doc claim derives — so `8a`, `8b`, `8c`, `8d` and "the tmux-webapp work"
+are **one lock between them**. Claiming `8c` silently takes `8d` as well, and a
+session claiming the doc as a whole collides with all four.
+
+**Mechanism**, `scripts/claim-work.sh:357`:
+
+```sh
+if [ "$#" -gt 0 ] && [[ ${1} =~ ^[0-9]+$ ]]; then SLUG_RANK="$1"; shift; fi
+```
+
+`^[0-9]+$` accepts bare digits only. `8c` fails it, `SLUG_RANK` stays empty,
+`derive_slug` takes its no-rank branch, and the argument is left unshifted to be
+ignored. 🔴 **It is DISCARDED, not rejected** — no warning, exit 0, and a
+well-formed slug on stdout. The comment there shows the intent was to avoid
+swallowing a following *flag*; a lettered rank is neither a digit string nor a
+flag, and falls into the gap between those two cases.
+
+**Why this is the worst possible place for it:** the rank is half a claim's
+identity, and sub-lettering is what a doc does to its *housekeeping* tier — the
+small, parallelisable items most likely to be picked up by two sessions at once.
+The lock is inert exactly where contention is highest.
+
+⚠ **Do not "fix" this by hand-writing a slug** (`claim-work tmux-webapp-8c …`).
+The slug's whole job is that both sessions derive the *same* string from the same
+doc and rank; a hand-typed one is a lock only against someone who typed it
+identically. Until the derivation is fixed, bundle the lettered items under one
+claim and say so in the subject.
+
+**Closing condition:** `--slug-for <doc> 8c` returns a slug distinct from
+`--slug-for <doc> 8d` **and** from `--slug-for <doc> 8`, pinned by a test. The
+rank still must not swallow a following flag, so the widened pattern has to keep
+refusing anything beginning with `-`.
+
 ## Producing side
 
 When writing an item into `## Next steps (ranked)`, make "is this already taken?"
 cheap to answer: name the repo and the files it will touch, and mark anything
 already in progress as `IN FLIGHT: <repo>#<pr>` or `BRANCH: <name>`.
+
+🔴 **And prefer plain integers for ranks while the defect above is open** — a
+sub-lettered item is unclaimable in its own right.
 
 🔴 **NEVER write a status marker from an INFERRED human action.** A marker asserts
 somebody DID something, and a queue item is the one place where being wrong about
