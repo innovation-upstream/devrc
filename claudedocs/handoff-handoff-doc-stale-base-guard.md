@@ -185,7 +185,6 @@ commit. Turn it into a refusal.
   asks only whether a digit appears somewhere in a 25 KB file, and any other status spelling
   the same number satisfies it. MEASURED: the exact drift the test existed to prevent left
   all 297 tests green. Bind the token to the value — `` `status=new-doc` (7) `` — not the value alone.
-- 🔴 **`nix build` writes its log to STDERR.** A 0-byte `.out` during a healthy run is not a stall.
 - 🔴 **zsh ate `$H:scripts/...` as a history modifier** (`:s`), so `git show "$H:path"` failed
   with `bad substitution` and one probe silently reported 0 constants. **Brace it: `${H}:path`.**
 - 🔴 **A `cmp -s`/COULD-NOT-STAGE guard is what makes a broken control visible.** The round-4

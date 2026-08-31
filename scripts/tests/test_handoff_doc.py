@@ -1462,8 +1462,15 @@ class TestRuleFDidNotMoveTheExitCodes:
         # `status=new-doc` (7) to (9) — the exact drift this test exists to
         # prevent — left all 297 tests GREEN, because `status=dated-topic` still
         # spelled (7). The pair is the claim; the digit alone is not.
+        # 🔴 ALL SEVEN PAIRS THE SKILL DOCUMENTS, not the four this started with.
+        # MEASURED: with only four, `status=behind` (exit 6) → (exit 4) left all
+        # 297 tests green — the same walkability the four were added to close,
+        # surviving three statuses over. The set is the claim; a subset of it
+        # reads as coverage of the skill's numbers and is not.
         for status, const, form in (
             ("stale-base", hd.EXIT_STALE_BASE, "exit {}"),
+            ("behind", hd.EXIT_BEHIND, "exit {}"),
+            ("no-change", hd.EXIT_NO_CHANGE, "exit {}"),
             ("dated-topic", hd.EXIT_DOC_PER_EFFORT, "{}"),
             ("new-doc", hd.EXIT_DOC_PER_EFFORT, "{}"),
             ("unforced", hd.EXIT_UNFORCED, "{}"),
@@ -1473,6 +1480,16 @@ class TestRuleFDidNotMoveTheExitCodes:
                 f"claude/skills/handoff/SKILL.md does not carry {want!r}; the "
                 f"skill's documented code for status={status} drifted from the "
                 f"module, where it is {const}.")
+        # Step 3's line names these two WITHOUT the `status=` prefix, so they
+        # need their own spelling — dropping them because the prefix differs is
+        # how a "covers the documented codes" claim quietly means "covers most".
+        for label, const in (("no-advance", hd.EXIT_NO_ADVANCE),
+                             ("no-change", hd.EXIT_NO_CHANGE)):
+            want = f"`{label}` ({const})"
+            assert want in doc, (
+                f"claude/skills/handoff/SKILL.md does not carry {want!r}; step "
+                f"3's bare-name spelling of {label} drifted from the module, "
+                f"where it is {const}.")
 
     def test_merge_still_returns_a_plain_string(self) -> None:
         """`merge()` is public and called directly by other tests in this file;
@@ -1487,6 +1504,19 @@ class TestRuleFDidNotMoveTheExitCodes:
 # --------------------------------------------------------------------------
 
 SKILL_PINS: list[tuple[str, str]] = [
+    # 🔴 THE WORD "only" IS THE CLAIM, and it was evicted once already. Two other
+    # files describe this clause as load-bearing — `handoff_doc.py`'s rule-(j)
+    # legend comment and `TestSkillAndModuleAgree`'s docstring both say "only ONE
+    # of the four means 'add a field'" — so both stop being true the moment a
+    # byte-pressure edit takes the word, and NOTHING saw it: MEASURED, deleting
+    # `only` leaves all 297 tests green. SKILL.md sits at 7 B of headroom, i.e.
+    # under exactly the pressure that removed it the first time.
+    (
+        "Read each row's marker — only one means \"add a field\"",
+        "🔴 only ONE of the four markers means add-a-field; a legend that drops "
+        "`only` tells the executor to add a `forcing:` field to a QUOTED item, "
+        "which FENCED_FIELD_REMEDY exists to forbid",
+    ),
     (
         "scripts/lib/handoff_doc.py",
         "the step actually invokes the tool that owns the gate",

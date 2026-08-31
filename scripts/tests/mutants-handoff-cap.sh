@@ -5,12 +5,28 @@
 # rule (i) consults. THREE sections were added closing #1093/#1115 — the codes,
 # the predicate, and the round-4 message row with its negative control.
 #
-# 🔴 THEY ARE NOT ALL THE SAME KIND OF ROW, and reading them as one gets two of
-# them wrong. The exit-code and predicate mutants each SURVIVED all 295 tests at
-# filing, so those rows are regression coverage. The round-4 mutant was already
-# KILLED at filing — by the WRONG MESSAGE, which is the entire defect #1093.1
-# names — so that row is a DIAGNOSTIC-QUALITY guard, and its `ok` means the
-# failure names the real defect, not that a test newly fails.
+# 🔴 THEY ARE NOT ALL THE SAME KIND OF ROW, and reading them as one gets three
+# of the six wrong. MEASURED at the merge-base `093a63db`, the 295-test tree
+# current when #1115 was filed:
+#
+#   REGRESSION COVERAGE — survived at filing, killed only by a NEW assertion:
+#     stale-base-code-renumbered · doc-per-effort-code-renumbered ·
+#     unforced-code-renumbered · rule-i-broadened-to-bare-stale   (295 passed)
+#
+#   INVARIANT GUARDS — already killed at filing by PRE-EXISTING tests, so an
+#   `ok` here does NOT show the new assertion is what catches them:
+#     one-exit-constant-silently-vanishes      (8 failed at `093a63db`)
+#     mainline-measured-from-the-wrong-text    (2 failed at `093a63db`)
+#
+#   DIAGNOSTIC-QUALITY — killed at filing by the WRONG MESSAGE, which is the
+#   whole of #1093.1, so `ok` means the failure NAMES the real defect:
+#     round-4-regression-message  (+ its negative control)
+#
+# 🔴 The distinction is not pedantry: `claude/RULES.md` calls a guard pinning an
+# invariant the bug never violated an INVARIANT GUARD and says to label it as
+# one rather than count it as regression coverage — and reading the second group
+# as the first is what makes a maintainer believe deleting the new assertion
+# would be caught here. It would not be.
 #
 # Not run by CI. An author/reviewer instrument, kept IN THE TREE so
 # "mutation-verified" can be RE-DERIVED instead of believed.
@@ -466,10 +482,20 @@ run 'refusal-marker-renamed' \
   's@^MARK_FENCED = "\[fenced\]"@MARK_FENCED = "[in-a-fence]"@'
 
 printf '\n== the EXIT-CODE CONTRACT the ladder left unpinned (must be KILLED) ==\n'
-# 🔴 THESE FOUR EACH SURVIVED ALL 295 TESTS WHEN #1115 FILED THEM. The
-# enumeration in `test_the_exit_code_constants_did_not_move` stopped at 6, so
-# the ladder's OWN codes — the ones rules (i)/(j) and the stale-base refusal
-# return — had no pin on their VALUES at all. A caller branches on the number.
+# 🔴 THE FIRST THREE — the renumbers — SURVIVED ALL 295 TESTS WHEN #1115 FILED
+# THEM, so those three rows are regression coverage. The enumeration in
+# `test_the_exit_code_constants_did_not_move` stopped at 6, so the ladder's OWN
+# codes — the ones rules (i)/(j) and the stale-base refusal return — had no pin
+# on their VALUES at all. A caller branches on the number.
+#
+# 🔴 THE FOURTH IS NOT ONE OF THEM, and an earlier wording said it was.
+# MEASURED at the merge-base `093a63db`: `one-exit-constant-silently-vanishes`
+# already killed **8** tests there, so it is an INVARIANT GUARD on the new
+# `== 9`, NOT evidence that `== 9` is what catches it. Delete that assertion and
+# this row still reports `ok`, because `test_the_exit_code_constants_did_not_move`
+# and seven behind-path siblings kill it anyway — which is exactly what this
+# harness's own `(also: …)` list prints. Counting it as regression coverage is
+# the `claude/RULES.md` vacuous-guard shape.
 run 'stale-base-code-renumbered' test_the_exit_code_constants_did_not_move \
   's|^EXIT_STALE_BASE = 9$|EXIT_STALE_BASE = 10|'
 run 'doc-per-effort-code-renumbered' test_the_exit_code_constants_did_not_move \
