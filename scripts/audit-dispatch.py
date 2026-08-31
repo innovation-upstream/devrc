@@ -2081,9 +2081,75 @@ def render_toolchain(facts):
         "they exist sent one audit chasing a tier its repo does not have:",
         "",
         "```",
-        "nix build <your worktree>#checks.x86_64-linux.pytests",
-        "nix build <your worktree>#checks.x86_64-linux.nodetests",
+        "nix build <your worktree>#checks.x86_64-linux.pytests --no-link -L",
+        "nix build <your worktree>#checks.x86_64-linux.nodetests --no-link -L",
         "```",
+        "",
+        "🔴 **`-L` IS NOT OPTIONAL AND THIS BRIEF USED TO OMIT IT.** `nix build` "
+        "prints NO build log for a build that SUCCEEDS unless you pass "
+        "`-L`/`--print-build-logs` — so the instruction above to read a "
+        "`RESULT:` line was, for the sandbox tier, an instruction to read "
+        "something that is never printed. MEASURED 2026-08-30 on a builder "
+        "emitting 201 lines plus a `RESULT:` line: without `-L`, **3 console "
+        "lines, 0 builder lines**. ⚠ A FAILING build is the exception — nix "
+        "prints the tail of its log inline, bounded by `log-lines` (25 by "
+        "default), which is why the omission survived: the red case looked fine.",
+        "",
+        "⚠ **`--no-link` is deliberate**: you are briefed READ-ONLY, and the "
+        "un-flagged form drops a `result` symlink into your cwd. It changes "
+        "nothing about what is built or logged.",
+        "",
+        "🔴 **AND `-L` WRITES TO STDERR, SO A BARE PIPE OR `>` CAPTURES NOTHING "
+        "— REDIRECT IT.** An earlier draft of this very block said \"even a "
+        "`| tail -40` keeps the `RESULT:` line as its last\", which is FALSE as "
+        "written and was caught by an audit of the commit that added it. "
+        "Measured on the same builder: `-L … | tail -40` with stderr left alone "
+        "keeps **0 lines and 0 `RESULT:` hits**; `-L … 2>&1 | tail -40` keeps 40 "
+        "lines with `RESULT:` last. The `nix log` form below is the opposite — "
+        "it writes to STDOUT, so `>` works there and not here. **Do not carry a "
+        "redirect across from one to the other.**",
+        "",
+        "🔴 **AND AN ALREADY-BUILT DERIVATION PRINTS NOTHING AT ALL, `-L` OR "
+        "NOT — so silence is never a pass.** Read the derivation's own log "
+        "instead, which survives caching and a swallowed console:",
+        "",
+        "```",
+        "DRV=$(nix path-info --derivation <your worktree>#checks.x86_64-linux.pytests)",
+        "[ -n \"$DRV\" ] || { echo 'NO DERIVATION — this repo has no such tier'; exit 1; }",
+        "nix log \"$DRV\" > /tmp/tier.log || { echo 'NO LOG — never built HERE'; exit 1; }",
+        "test -s /tmp/tier.log || { echo 'EMPTY LOG — do not grep it'; exit 1; }",
+        "grep -n 'RESULT:' /tmp/tier.log          # the LAST hit is the verdict",
+        "grep -c 'panic: test timed out' /tmp/tier.log",
+        "```",
+        "",
+        "🔴 **ALL THREE GUARD LINES ARE LOAD-BEARING, AND THEY CLOSE THREE "
+        "DIFFERENT FALSE GREENS — DO NOT DROP ANY OF THEM.**",
+        "",
+        "- **`[ -n \"$DRV\" ]` — the worst one, because it fails LOUD-LOOKING.** "
+        "If the tier does not exist, `nix path-info --derivation` errors to "
+        "STDERR (which the `>` two lines down discards) and `$DRV` is EMPTY. "
+        "`nix log \"\"` does not fail — it resolves the empty installable as `.` "
+        "and prints **the cwd flake's default package log**. MEASURED in a "
+        "throwaway flake: neither of the other two guards fires, `test -s` "
+        "passes because the file is genuinely non-empty, and the auditor greps a "
+        "FOREIGN log reading `RESULT: PASS (exit=0)`. That is an affirmative "
+        "false green off another derivation entirely — strictly worse than the "
+        "silence this block was written to fix. ⚠ A repo with no "
+        "`packages.default` is immune by luck of flake shape, not by design.",
+        "- **`|| { … }` on `nix log`** — a derivation never built HERE exits **1** "
+        "with `build log … is not available`, but `>` has already truncated the "
+        "file, so `grep -c 'panic: test timed out'` prints a reassuring **0**, "
+        "identical to a green run. MEASURED on this repo's own "
+        "`checks.x86_64-linux.nodetests`.",
+        "- **`test -s`** — guards EMPTY only, and claims nothing about a "
+        "truncated log.",
+        "",
+        "An earlier draft of this block said \"do NOT read an exit code\" here, "
+        "which suppressed the one signal separating those states. Read the "
+        "CONTENT — and check there IS content, and that it is YOURS, first. "
+        "⚠ `exit 1` is right for a dispatched agent's fresh shell; pasted into "
+        "an INTERACTIVE shell it closes it, so the diagnosis is echoed before "
+        "each exit.",
         "",
         "Name the tier and the base sha in any claim you make about the gate — "
         "\"the gate passed\" is true of one run, one tier, one base, and reads "

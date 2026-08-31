@@ -35,12 +35,18 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 MODULE = REPO / "scripts" / "lib" / "session_trailer.py"
+
+sys.path.insert(0, str(REPO / "scripts"))
+
+from testlib import hermetic_git  # noqa: E402
 
 
 def _load():
@@ -483,3 +489,191 @@ class TestTheStateFileModeSurvivesALeftoverTemp:
         common = str(tmp_path)
         assert st.record("s", 4243, root=common, reader=LIVE) is True
         assert oct(os.stat(st.state_file(4243, common)).st_mode)[-3:] == "600"
+
+
+# ---------------------------------------------------------------------------
+# 🔴 GIT ITSELF IS THE ORACLE. Every guard above asserts that the trailer TEXT
+# is somewhere in the message — which was TRUE of all three message shapes while
+# git recognised the trailer in only two of them, so this whole file passed
+# straight through the defect. The guards below assert the property that
+# actually matters: `git interpret-trailers --parse` returns the stamp. None of
+# them derives its expectation from `append_trailer`'s own formatting.
+# ---------------------------------------------------------------------------
+GIT_ENV = hermetic_git.hermetic_git_env()
+
+
+def _git_parsed_trailers(message: str) -> str:
+    """What GIT reads as this message's trailer block — never our own parser."""
+    return subprocess.run(
+        ["git", "interpret-trailers", "--parse"],
+        input=message, capture_output=True, text=True, env=GIT_ENV).stdout
+
+
+class TestGitParsesTheStampedTrailer:
+    """🔴 REGRESSION for the single-paragraph shape; INVARIANT GUARDS for the rest.
+
+    MEASURED at `a5bc5df6` (2026-08-30): `append_trailer("fix: one line only\\n",
+    …)` returned `'fix: one line only\\nClaude-Session-Id: …\\n'` — no blank line
+    — and `git interpret-trailers --parse` returned `''`. Confirmed on a real
+    commit object, whose `%(trailers:key=Claude-Session-Id,valueonly)` was EMPTY.
+    The cause was a separator test that looked at the LAST LINE alone, which a
+    conventional-commit SUBJECT satisfies: `fix: one line only` matches
+    `^[A-Za-z][A-Za-z0-9-]*:\\s`.
+
+    ⚠ THE SPLIT BELOW IS MEASURED, NOT ASSERTED. Each shape was run through
+    `append_trailer` at `a5bc5df6` AND at HEAD, and its verdict read off `git
+    interpret-trailers --parse`; `REGRESSION` is exactly the set that came back
+    RED at base. Everything in `INVARIANT` was GREEN there, so it is NOT
+    regression coverage — it is here because the obvious WRONG fix (always
+    appending "\\n\\n") greens every RED shape while splitting an existing
+    trailer block, which is the shape every agent commit in this repo has.
+    """
+
+    # RED at a5bc5df6, GREEN at HEAD. All four share one cause: the old test
+    # looked at the LAST LINE, and `fix: …` / `Note: …` satisfy it wherever they
+    # sit — so the stamp was glued onto a paragraph git reads as prose.
+    REGRESSION = [
+        ("single-line", "fix: one line only\n"),
+        ("prose-then-trailerish", "fix: x\n\nSome prose here.\nNote: something\n"),
+        ("trailerish-second-line", "fix: x\nNote: right after the subject\n"),
+        ("subject-and-blank-only", "fix: x\n\n"),
+    ]
+    # GREEN at a5bc5df6 too — invariant guards, pinning what must not break.
+    INVARIANT = [
+        ("with-body", "fix: x\n\nbody here.\n"),
+        ("existing-trailer", "fix: x\n\nbody.\n\nCo-Authored-By: A <a@b.c>\n"),
+        ("agent-shape", "fix: x\n\nbody.\n\nCo-Authored-By: A <a@b.c>\n"
+                        "Claude-Session: https://example.invalid/s/1\n"),
+        ("subject-no-colon", "subject with no colon at all\n"),
+        # 🔴 THE MUTATION-SWEEP FIXTURE. Every other shape here is decided by
+        # the paragraph's FIRST line, so dropping the check that the WHOLE
+        # paragraph is trailers SURVIVED a fully green run. git does not read
+        # this last paragraph as a block (measured), so the stamp must be
+        # separated from it or git parses nothing.
+        ("trailerish-then-prose",
+         "fix: x\n\nbody\n\nCo-Authored-By: A <a@b.c>\nplain prose line\n"),
+        ("continuation-line", "fix: x\n\nbody\n\nCo-Authored-By: A\n    <a@b.c>\n"),
+    ]
+
+    @pytest.mark.parametrize("name,message", REGRESSION + INVARIANT)
+    def test_git_reads_the_stamp_as_a_trailer(self, name, message):
+        out = st.append_trailer(message, "SID-42")
+        assert "Claude-Session-Id: SID-42" in _git_parsed_trailers(out), (
+            f"git does not read the stamp as a trailer for the {name} shape; "
+            f"the stamped message was {out!r}")
+
+    @pytest.mark.parametrize("name,message", [
+        ("existing-trailer", "fix: x\n\nbody.\n\nCo-Authored-By: A <a@b.c>\n"),
+        ("continuation-line", "fix: x\n\nbody\n\nCo-Authored-By: A\n    <a@b.c>\n"),
+    ])
+    def test_a_sibling_trailer_keeps_its_block(self, name, message):
+        """🔴 The always-"\\n\\n" fix passes the test above and fails this one: a
+        blank line inserted INSIDE a trailer block leaves git parsing only the
+        half after it, so `Co-Authored-By` stops being a trailer at all.
+
+        MEASURED per shape at `a5bc5df6`: `existing-trailer` KEPT its sibling
+        (invariant guard), `continuation-line` LOST it (regression) — the old
+        tail test saw the indented `    <a@b.c>` as prose and split the block.
+        """
+        parsed = _git_parsed_trailers(st.append_trailer(message, "SID-42"))
+        assert "Co-Authored-By: A <a@b.c>" in parsed, (
+            f"the {name} shape lost its sibling trailer; git parsed {parsed!r}")
+        assert "Claude-Session-Id: SID-42" in parsed
+
+    def test_the_oracle_can_report_absence(self):
+        """🔴 NEGATIVE CONTROL. Without it, a `--parse` wired to nothing would
+        make every assertion above vacuous. The input is the exact broken output
+        `a5bc5df6` produced, handed to git directly."""
+        assert _git_parsed_trailers(
+            "fix: one line only\nClaude-Session-Id: SID-42\n") == ""
+
+    def test_the_oracle_can_report_a_trailer(self):
+        """POSITIVE CONTROL: a hand-written, literally-correct message, so the
+        expectation is not derived from `append_trailer`."""
+        assert "Claude-Session-Id: SID-42" in _git_parsed_trailers(
+            "fix: x\n\nbody.\n\nClaude-Session-Id: SID-42\n")
+
+
+class TestTheSeparatorIsChosenFromTheLastParagraph:
+    """The unit behind the property above, pinned as LITERAL expected strings so
+    the shapes are legible without running git."""
+
+    def test_a_single_paragraph_message_gains_a_blank_line(self):
+        assert st.append_trailer("fix: one line only\n", "SID-42") == (
+            "fix: one line only\n\nClaude-Session-Id: SID-42\n")
+
+    def test_a_trailer_block_is_joined_with_no_blank_line(self):
+        assert st.append_trailer(
+            "fix: x\n\nCo-Authored-By: A <a@b.c>\n", "SID-42") == (
+            "fix: x\n\nCo-Authored-By: A <a@b.c>\nClaude-Session-Id: SID-42\n")
+
+    def test_a_trailerish_line_in_the_subject_paragraph_is_not_a_block(self):
+        """git never reads the FIRST paragraph as trailers, however it looks."""
+        assert st._ends_in_trailer_block("fix: x\nNote: right after") is False
+
+    def test_a_mixed_last_paragraph_is_not_a_block(self):
+        assert st._ends_in_trailer_block(
+            "fix: x\n\nSome prose here.\nNote: something") is False
+
+    def test_a_paragraph_that_only_STARTS_as_trailers_is_not_a_block(self):
+        """🔴 The discriminating case: judging the paragraph by its first line
+        alone SURVIVED a fully green suite until this fixture existed."""
+        assert st._ends_in_trailer_block(
+            "fix: x\n\nbody\n\nCo-Authored-By: A <a@b.c>\nplain prose line"
+        ) is False
+
+    def test_an_indented_continuation_stays_inside_the_block(self):
+        assert st._ends_in_trailer_block(
+            "fix: x\n\nbody\n\nCo-Authored-By: A\n    <a@b.c>") is True
+
+
+class TestAWhitespaceOnlyTailDoesNotRaise:
+    """🔴 REGRESSION. `body` is `rstrip("\\n")`, so a final line of SPACES
+    survives; it is falsy under `.strip()`, so the paragraph scan never moves and
+    the slice is EMPTY. Indexing it raised IndexError — and the message was
+    stamped fine BEFORE the paragraph predicate existed, so this is a strict
+    regression, not a pre-existing gap.
+
+    It matters because the failure is SILENT end to end: `prepare_commit_msg.py`
+    calls `append_trailer` outside any try, and the module's broad
+    `except Exception: sys.exit(0)` plus the wrapper's `2>/dev/null` turn the
+    crash into a commit that succeeds carrying no trailer. Nothing is logged.
+    That contradicts the module header's "FAILS OPEN, ALWAYS ... degrades to
+    'no trailer'" — it degraded by crashing, which is a different thing.
+    """
+
+    # Four CONTENT shapes on ONE route, not four routes — measured, because the
+    # first wording of this comment claimed route diversity that is structurally
+    # impossible. An empty slice requires `start == len(lines)`, i.e. the scan
+    # loop ran ZERO iterations; any route where it moves leaves `para` non-empty.
+    # Instrumented: all four give loop-iterations=0. They vary what PRECEDES the
+    # blank tail (body, trailer block, nothing), which is what could plausibly
+    # change the separator decision — not the path into the guard.
+    @pytest.mark.parametrize("name,message", [
+        ("spaces-after-body", "fix: v\n\nbody\n   \n"),
+        ("spaces-after-trailer", "subject\n\nCo-Authored-By: A\n  \n"),
+        ("tab-after-body", "fix: v\n\nbody\n\t\n"),
+        ("whitespace-only", "   \n"),
+    ])
+    def test_it_stamps_instead_of_raising(self, name, message):
+        out = st.append_trailer(message, "SID-42")
+        assert "Claude-Session-Id: SID-42" in out
+        # The original body must survive verbatim — a crash-avoidance fix that
+        # silently ate the message would satisfy the assertion above alone.
+        assert out.startswith(message.rstrip("\n"))
+
+    def test_the_predicate_itself_reports_no_block(self):
+        """INVARIANT GUARD, not a regression guard — and the distinction is
+        measured, because the first wording of this docstring overclaimed it.
+
+        It does NOT pin a git-visible correctness property: against git 2.55.0,
+        joining and separating parse IDENTICALLY for every whitespace-tail shape,
+        because git treats a whitespace-only line as a paragraph separator. No
+        separator choice here can save a preceding `Co-Authored-By`, and our own
+        stamp parses either way.
+
+        What it does pin is BYTE-IDENTITY with base `a5bc5df6`, which is the
+        strong result: `False` is what makes the output of this whole class match
+        pre-regression behaviour exactly.
+        """
+        assert st._ends_in_trailer_block("fix: v\n\nbody\n   ") is False

@@ -21,30 +21,50 @@ durable output is the linkage: which ClickUp ticket, which clawgate card, and wh
 genuinely built versus assumed.
 
 ## State now
-- **Branch / PR:** nothing in flight. All work merged to `main`; base clone at `55fca8ff`.
-- **Ranks 1, 2, 5, 6 are DONE.** Every merge verified BY CONTENT (squash makes
-  `merge-base --is-ancestor` false forever):
-  - **rank 1** — devrc#1049 confirmed merged, all 6 blobs at `485202f8` byte-identical
-    to `origin/main`; `cairn-task-linkage-1` was already released; worktree removed.
-  - **rank 2** — devrc#1039 → **`bd63b7bd`**. ClickUp ids redacted first (see Gotchas).
-  - **rank 6** — devrc#1079 → **`7ed7d41a`**. `cairn` on PATH via `mkOutOfStoreSymlink`,
-    shipped to BOTH hosts, verified at the CONSUMER not just the deploy.
-  - **rank 5** — devrc#1083 → **`3568530d`**. The session-id trailer, after **ten**
-    audit rounds. Also devrc#1082 → `3b1a0477` (handoff corrections).
-- **Filed:** **cg#445** — GUARD 10 cannot be measured on this box.
-- 🔴 **DEPLOY STATUS: NOT DEPLOYED.** The hosts are still on `7ed7d41a` from the rank-6
-  work. `scripts/lib/session_trailer.py`, `scripts/claude-hooks/session-stamp.py` and the
-  `~/.claude/hooks/` entries exist in git and are deployed by NOTHING until a
-  `home-manager switch` / `scripts/ship.sh`. Merged ≠ deployed.
-- 🔴 **AND #1083 ACTIVATES NOTHING EVEN AFTER A SWITCH.** Both halves are opt-in operator
-  acts: the `PreToolUse` registration lives in per-host `settings.json` (unmanaged by
-  design), and the git half needs `scripts/install-session-stamp.sh --apply`. Merging
-  changed how zero commits are made.
-- ⚠ **The MERGED TREE was never gated.** Everything was verified on the PR branch at
-  `7e3b751b`; `main` moved twice underneath (`ad891a5c`, `52fdd983`) and `ad891a5c` also
-  touches `nix/home.nix`. `strict: false`, so neither Tekton nor I ran the suite on
-  `main + #1083`. The merge was textually clean and every entry is present — that is a
-  weaker claim than a gated one, and it is the one I can make.
+- **Branch / PR:** nothing in flight. No PR opened this session; the work was a deploy +
+  two operator arming acts + one clawgate comment. Base clone on `main` at `7a2003d2`.
+- 🔴 **RANK 1 IS DONE — both hosts DEPLOYED and the trailer is ARMED.** This supersedes the
+  previous "DEPLOY STATUS: NOT DEPLOYED" block, which was stale in both directions: the
+  workbench was already at `origin/main` and switched, and the laptop was on `911af220`,
+  not the `7ed7d41a` the doc recorded.
+  - `scripts/ship.sh` — laptop fast-forwarded `911af220 -> 7a2003d2`; workbench already
+    there. **Cross-host agreement asserted by the tool**: both at `7a2003d2`. Managed
+    artifacts resolve and are current on both (workbench 570 checked / 399 repo-sourced,
+    laptop 516 / 384; 0 dangling, 0 stale).
+  - **Hook half ARMED on BOTH hosts** — a `PreToolUse` entry added to each per-host
+    `~/.claude/settings.json` (workbench 5→6, laptop 4→5; backups at
+    `~/.claude/settings.json.bak-session-stamp`). 🔴 Registered with the absolute
+    `/nix/store/9ka5…-python3-3.12.14/bin/python3.12` the sibling hooks use, **not** the
+    bare `python3` the installer's printed snippet suggests — a bare command name dies
+    during a `home-manager switch` while the profile is momentarily blank.
+  - **Git half ARMED on BOTH hosts** — `scripts/install-session-stamp.sh --repo
+    ~/workspace/devrc --apply`, writing `.git/hooks/prepare-commit-msg`.
+    `core.hooksPath` was unset on both, so `.git/hooks` is what git reads.
+- **Deploy/verify status — VERIFIED AT THE CONSUMER, with both controls.** Not inferred
+  from the deploy:
+  - the recorder fired in an **already-running** session — the `settings.json` edit took
+    effect with **no restart** (state file `~/.cache/claude-session-trailer/2131466.json`
+    appeared after one commit-shaped Bash call);
+  - a **real `git commit`** in a throwaway repo with the hook installed produced a commit
+    object carrying `Claude-Session-Id: 8cdbb099-7deb-4b2a-a34c-320fb8539a73`, readable
+    back via `git log -1 --format='%(trailers:key=Claude-Session-Id,valueonly)'`;
+  - the transcript exists at that uuid (460K), so `claude --resume 8cdbb099-…` is the wake
+    handle. **blame → id → live session closes.**
+  - **negative control:** with no recorded session the message is left **byte-identical**
+    (the human-commit case). **positive control:** exactly one trailer line with one.
+  - ⚠ **Scope:** verified on a throwaway repo's commit object and by exercising the **real
+    installed hook** in the devrc clone against a message file. **No trailer has yet been
+    observed on a commit that landed on devrc `main`** — that is rank 3.
+- **Filed:** comment **570 on cg#365** (not a new card — cg#365 is open and this is its
+  closing condition; filing one would have duplicated it).
+- ⚠ **This checkout is shared and another session is editing it right now** — `M
+  nix/graphical.nix` plus two untracked files appeared mid-session. `nix/graphical.nix`
+  **is** a nix-read path, so the next `ship.sh` will classify it dirty-and-deployed.
+- **Carried forward — ranks 1, 2, 5, 6 of the ORIGINAL list remain done** (devrc#1049
+  `485202f8`; devrc#1039 → `bd63b7bd`; devrc#1083 → `3568530d`; devrc#1079 → `7ed7d41a`;
+  devrc#1082 → `3b1a0477`), and **cg#445 is still filed and open**.
+- ⚠ **The merged tree for #1083 was still never gated** — unchanged from the previous
+  session, and arming does not change it.
 
 ## The cluster — ClickUp ↔ clawgate ↔ Cairn
 All six ClickUp tickets came from the **2026-08-26 harness / knowledge-sharing meeting**
@@ -191,31 +211,90 @@ clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg
   worktree-copy rule), so each step silently varied `.git` presence alongside the file
   under test. **Build the sandbox tier from a real CLONE, never from a worktree.**
 
+### CLOSED — "which session id is canonical" was answered IN CODE, not left open
+- **Resolution:** the doc carried this as an open decision ("stamp the uuid, stamp both, or
+  have cg#362 own the mapping"). The merged implementation already decided, and chose the
+  resolvable id. `scripts/lib/session_trailer.py` → `TRAILER_KEY = "Claude-Session-Id"` —
+  a **distinct key** from the convention-driven `Claude-Session: https://claude.ai/…` —
+  stamping the hook payload's `session_id`, i.e. the **transcript uuid**, which is what
+  `claude --resume` takes.
+- **Observed:** `scripts/git-hooks/prepare_commit_msg.py`'s docstring states it
+  deliberately does NOT emit the claude.ai URL and warns against synthesising one from the
+  uuid ("the resulting link would not resolve").
+- **Consequence:** the two id spaces are no longer conflated — different keys, only the
+  resolvable one stamped. The 2026-08-29 finding that the join broke was correct **then**
+  and is now superseded. Do not re-derive it.
+
+### 🔴 OPEN — a single-paragraph commit message is stamped with NO blank line, so git does not parse it as a trailer
+- **Symptom + exact repro:** `git commit -m "test: does a real commit carry the trailer"`
+  in a repo with the hook installed. The stamp lands on line 2 with no separating blank
+  line; `git log -1 --format='%(trailers:key=Claude-Session-Id,valueonly)'` returns
+  **empty**. The id is present as text and **invisible to every standard trailer
+  consumer** — which is cg#365's entire closing condition.
+- **Observed (with values):** `append_trailer` over three shapes, parsed back with `git
+  interpret-trailers --parse` as an independent oracle:
+  ```
+  single-line      'fix: one line only\n'                   -> ''                    <-- FAILS
+  with body        'fix: x\n\nbody here.\n'                  -> 'Claude-Session-Id: …'
+  existing trailer 'fix: x\n\nbody.\n\nCo-Authored-By: …\n'  -> both trailers
+  ```
+  git's own implementation disagrees on the same input — it inserts the blank line:
+  ```
+  $ printf 'fix: one line only\n' | git interpret-trailers --trailer "Claude-Session-Id: X"
+  fix: one line only
+                            <-- blank line git adds
+  Claude-Session-Id: X
+  ```
+- **Ruled out:** "the existing tests would have caught it" — they assert the trailer
+  *text* is present, which is true in all three shapes. A test name wider than its
+  assertion.
+- **Leading hypothesis:** `append_trailer` appends directly instead of inserting a
+  separator when the message has no trailer block to join.
+- **Next probe:** none needed — it is diagnosed. Write the fix. 🔴 **Do NOT always append
+  `\n\n`**: that inserts a blank line inside an existing trailer block and breaks the third
+  shape, which works today. Condition is "add a separator only when there is no trailer
+  block to join". Recorded in full as comment 570 on cg#365.
+
 ## Next steps (ranked)
-1. **Deploy and verify the session-id trailer end to end.** `scripts/ship.sh` (both hosts),
-   then decide whether to arm it. Files: `scripts/install-session-stamp.sh`,
-   `~/.claude/settings.json` (per-host). The installer is dry-run unless `--apply` and
-   prints the `settings.json` snippet on success.
-   forcing: none — nothing external is waiting on this; it is the natural close of rank 5.
+🔴 **RANKS RENUMBERED once this session** — the previous rank 1 (deploy + arm) is DONE, so
+everything shifted. No live `claim-work` claims existed on this doc at renumber time
+(`cairn-task-linkage-1` was taken and released within this session), so nothing was
+silently re-pointed. **Numbering is stable from here — do not renumber again**; rank 3 is
+kept in place, marked done, rather than removed.
+
+1. **cg#365 — fix the single-paragraph trailer separator.** Diagnosed in the open-
+   investigation block above and in comment 570 on cg#365; the acceptance criteria are
+   mechanical. Repo `innovation-upstream/devrc`, files `scripts/lib/session_trailer.py`
+   (`append_trailer`) and its tests. Done means `git interpret-trailers --parse` returns
+   the id for all three shapes, pinned by a test watched to fail on pre-change code
+   (single-line RED at the base ref, green at HEAD).
+   forcing: user — cg#365 is a mirrored ClickUp ticket (`868kx9ev6`) raised by Zach and
+   two teammates at the 2026-08-26 harness meeting; the trailer is now ARMED on both
+   hosts, so the defect is live rather than hypothetical.
 2. **cg#445 — GUARD 10 is unmeasurable on the workbench**, so `gate.sh`'s pytest tier is
-   red for attribution-only reasons on any run from a worktree of the shared clone. Two
-   ~20-minute control runs were burned this session establishing that, and the index shows
-   the class rediscovered on 2026-08-22 and 2026-08-28 before that.
+   red for attribution-only reasons on any run from a worktree of the shared clone.
+   Unchanged this session. 🔴 **This is the THIRD rediscovery** — the index shows the same
+   class found on 2026-08-22 and 2026-08-28 before that, each time costing control runs.
    forcing: gate — a required local gate is permanently red for reasons unrelated to any
-   change, which `claude/RULES.md` names as worse than no gate ("it trains everyone to
-   click through").
-3. **cg#428 Layer B — criterion 4 (URL resolution).** BLOCKED on devrc#1011. It must IMPORT
+   change, which `claude/RULES.md` names as worse than no gate.
+3. ✅ **DONE — trailer confirmed on a real devrc commit.** Kept in place so the numbering
+   does not shift. Closed by **`fa64c986`** (the commit that landed this very doc, made
+   from the worktree `devrc-handoff-cairn-arm`): its message carries
+   `Claude-Session-Id: 8cdbb099-…` and `git log -1
+   --format='%(trailers:key=Claude-Session-Id,valueonly)'` returns it. **Do not re-work
+   this item.**
+   forcing: none — closed.
+4. **cg#428 Layer B — criterion 4 (URL resolution).** BLOCKED on devrc#1011. Must IMPORT
    `scripts/collector/mention_scan.py`'s `CLICKUP_TASK_URL` / `_github_url` /
-   `clawgate_url`; do not write a second resolver. Files:
+   `clawgate_url`; do not write a second resolver. Files
    `scripts/lib/subsystem_resolver.py`, `scripts/tests/test_subsystem_task_refs.py`.
    forcing: none — blocked, and nothing external is waiting.
-4. **cg#429 — clickup-mirror per-task repo override.** repo `homelab-talos`, files
+5. **cg#429 — clickup-mirror per-task repo override.** Repo `homelab-talos`, files
    `scripts/clickup-mirror/mirror.py`,
-   `clusters/workbench/apps/clickup-mirror/config-configmap.yaml`. Run the repo-revert
-   probe below first; a revert is its regression case.
-   forcing: none — the mechanism is real but has not fired (re-probed this session, still
-   not reverted).
-5. **BLOCKED — do not start:** cg#362 and cg#363 wait on the teammate's private-repo
+   `clusters/workbench/apps/clickup-mirror/config-configmap.yaml`.
+   forcing: none — re-probed again this session (2026-08-30): cg#363/364/365 still read
+   `innovation-upstream/devrc`, cg#362 still unset. The mechanism is real and has not fired.
+6. **BLOCKED — do not start:** cg#362 and cg#363 wait on the teammate's private-repo
    migration ticket.
    forcing: none — blocked on a third party.
 
@@ -450,25 +529,98 @@ clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg
   is recorded and read by nothing; the same-pid `record()` race was analysed but never
   reproduced.
 
+- 🔴 **OPERATOR DECISION 2026-08-30 — ARM BOTH HALVES, BOTH HOSTS, devrc only.** Asked as
+  one question with the blast radius stated: `.git/hooks/` is the **common** git dir,
+  shared by **123 worktrees** on this clone plus ~30 concurrently-claimed sessions. Chosen
+  over host-at-a-time and over leaving it inert.
+- 🔴 **THE TWO HALVES ONLY PRODUCE VALUE TOGETHER — staging them is not a risk ladder.**
+  The recorder alone writes state files nobody reads; the git hook alone gets
+  `lookup() → None` and leaves messages byte-identical. So "arm the safe half first" buys
+  nothing: the safe half IS the inert half. It is arm-both or arm-neither.
+- **What made arming defensible, checked before doing it, not after:** every path in both
+  scripts is fail-open (`sys.exit(0)`, no permission decision emitted), the installed hook
+  is a `/bin/sh` wrapper guarding on interpreter existence (a fix for a measured rc-1
+  commit REFUSAL), the message write is `rename(2)`-atomic (a fix for a measured
+  message TRUNCATION), and it is a no-op for human commits.
+- 🔴 **The installer's own printed snippet uses a bare `python3` — do not paste it.** Every
+  sibling hook in `settings.json` uses an absolute `/nix/store` path, because a bare name
+  resolves through `~/.nix-profile`, which a `home-manager switch` blanks for ~1s. Verified
+  the store path exists on BOTH hosts before using it.
+- 🔴 **A `settings.json` hook edit takes effect in an ALREADY-RUNNING session** — measured,
+  not assumed. Worth knowing both ways: it means arming is immediate, and it means an
+  edit to that file reaches every live session on the host at once.
+- 🔴 **`bash-guard.py` parses the command text BEFORE the command runs, so it cannot see a
+  shell variable's value or a directory the same command is about to create.** Two
+  refusals this session, both correct-by-design and both confusing at first read: `git -C
+  "$T" commit` was judged against the caller's cwd (devrc/main) because `$T`'s value is
+  not in the text, and `mkdir … && git -C /abs/path commit` was judged the same way
+  because the path did not exist yet at parse time. Fix: create the directory in an
+  EARLIER tool call and pass `-C` a literal absolute path.
+- **A throwaway test repo defaults to branch `main`, which the guard blocks.** `git init -b
+  probe-branch` — the ban is on the branch NAME, and a scratch repo is not exempt.
+- 🔴 **`git interpret-trailers` is the right oracle for trailer questions, and it is free.**
+  The single-line defect above was invisible to "is the string present?" and obvious to
+  "does git parse it?". `claude/RULES.md`: the oracle for what a format means is the
+  format's own implementation, not the author.
+- **Filed as a COMMENT on the open card, not a new card.** cg#365's scope is exactly this
+  defect. The previous session recorded the same reasoning for the `claim-work`↔clawgate
+  bridge (comment on cg#383, no new card); this follows that precedent.
+- ⚠ **`clawgatectl task create` is gated by a PreToolUse hook requiring a literal `##
+  Acceptance criteria` heading** (level-2 ATX, not `###`, not bold, not inside a fence),
+  and it routes you to `claude/skills/clawgate/flows/task-authoring.md` for the interview.
+  `--body-file` with a literal path works fine for both `create` and `task comment`.
+- ⚠ **`resume-state.sh` takes a PATH, and `~` inside quotes is NOT expanded.** This doc's
+  own "Run this first" invocation quoted `"~/workspace/devrc/claudedocs/handoff-…"`, which
+  resolved nothing: the run fell back to the newest of 89 handoffs and reconciled a
+  DIFFERENT initiative, printing an explicit `!` gap saying so. Pass an unquoted or
+  expanded absolute path.
+- ⚠ **The doc's `#N` refs are still mostly bare, and the reconciler refuses to guess.**
+  `resume-state.sh` reported `17 bare #N ref(s) could not be attributed` because the doc
+  names three repos. Writing `owner/repo#N` is what makes them reconcilable.
+- **This doc's `clawgate-task:` stays 364.** This session's WORKED task was **365**
+  (`clawgate_handoff.sh resolve` → rc 0, `#365 role=worked`), but `field <doc>` → rc 0
+  means a readable field is already present ⇒ leave it alone. Same call the previous
+  session made for 428.
+
+- 🔴 **A WORKTREE SHARES `.git/hooks` WITH THE CLONE — which is how rank 3 closed itself.**
+  `install-session-stamp.sh` writes into the **common** git dir, so the hook applies to
+  every worktree of that clone, including one created after the install. The commit that
+  landed this doc (`fa64c986`, made by `handoff_doc.py` from a fresh worktree) was stamped
+  and parses. That is the same 123-worktree reach that made arming a blast-radius decision
+  — read it both ways: it is why the feature works everywhere, and why a defect in it
+  would too.
+- ⚠ **`handoff_doc.py` runs git from inside Python, so no PreToolUse hook sees its commit**
+  — including the never-commit-to-`main` guard. This session's doc was landed from a
+  worktree on a topic branch **by hand**, because devrc forbids committing to `main` and
+  the tool would have pushed to whatever branch the checkout sat on. Check
+  `git branch --show-current` yourself before `--confirm --push`.
+
 ## How to verify
 ```bash
-# rank 5 landed, BY CONTENT (squash — never ancestry)
-git -C ~/workspace/devrc rev-parse origin/main:scripts/lib/session_trailer.py
+# both hosts converged (re-run any time; it is idempotent and READ-ONLY when clean)
+bash ~/workspace/devrc/scripts/drift-check.sh
 
-# the hooks are deployed but NOT armed — both should be true after a switch
-readlink -f ~/.claude/hooks/session-stamp.py            # -> /nix/store/... (a store copy)
-python3 -c "import json;print([h for h in json.load(open('$HOME/.claude/settings.json')).get('hooks',{}).get('PreToolUse',[])])" | grep -c session-stamp || echo "NOT armed (expected)"
+# the trailer is ARMED, not merely deployed — BOTH must be true, on BOTH hosts
+readlink -f ~/.claude/hooks/session-stamp.py                     # -> /nix/store/... (deployed)
+python3 -c "import json,os;s=json.load(open(os.path.expanduser('~/.claude/settings.json')));\
+print('ARMED' if [h for h in s['hooks']['PreToolUse'] if 'session-stamp' in json.dumps(h)] else 'NOT ARMED')"
+ls -l ~/workspace/devrc/.git/hooks/prepare-commit-msg           # the git half
 
-# the git half, dry-run — changes nothing
-bash ~/workspace/devrc/scripts/install-session-stamp.sh --repo ~/workspace/devrc
+# the round trip, end to end (what cg#365 actually asks for)
+SID=$(git -C ~/workspace/devrc log -1 --format='%(trailers:key=Claude-Session-Id,valueonly)')
+test -n "$SID" && ls -l ~/.claude/projects/-home-zach-workspace-devrc/"$SID".jsonl \
+  && echo "wake it: claude --resume $SID"
 
-# rank 6 at the CONSUMER, on both hosts
-command -v cairn && readlink -f ~/.local/bin/cairn && (cd /tmp && cairn who --help >/dev/null && echo "lazy import OK")
+# 🔴 the single-line gap — this is the OPEN defect; empty output on the first is the bug
+printf 'fix: one line only\n' > /tmp/m1 && ~/workspace/devrc/.git/hooks/prepare-commit-msg /tmp/m1 message
+git interpret-trailers --parse < /tmp/m1        # EMPTY today == the defect
+printf 'fix: x\n\nbody.\n' > /tmp/m2 && ~/workspace/devrc/.git/hooks/prepare-commit-msg /tmp/m2 message
+git interpret-trailers --parse < /tmp/m2        # prints the id == the working shape
 
-# cg#362-365 repo values have not reverted (rank 4's regression case)
+# cg#362-365 repo values have not reverted (rank 5's regression case)
 clawgatectl task ls --summary 2>/dev/null | jq -r '.[] | select(.id>=362 and .id<=365) | "cg#\(.id) repo=\(.repo)"'
 
-# 🔴 the LOCAL gate must be run from an isolated CLONE, never a worktree
+# 🔴 the LOCAL gate must be run from an isolated CLONE, never a worktree (cg#445)
 C=$(mktemp -d); git clone --quiet --no-hardlinks ~/workspace/devrc "$C"
 cd "$C" && nix develop ~/workspace/devrc -c bash scripts/gate.sh
 nix build "path:$C#checks.x86_64-linux.pytests" --no-link   # ONE AT A TIME

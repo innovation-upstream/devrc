@@ -180,6 +180,21 @@ debugging, changing or copying a specific pipeline.
    live object — `kubectl -n tekton-ci get task gitops-validate -o jsonpath='{range
    .spec.steps[*]}{.name}{"\n"}{end}'` — and then watch the **first run after** the reconcile.
    A green check on the PR that adds a leg is not evidence about the leg.
+   🔴 **THE VALUE YOU EDITED IS TWO HOPS FROM WHERE YOU EDITED IT, and grepping the wrong hop
+   returns a CLEAN ZERO.** A step's `env` lives in the **Task**, not the TriggerTemplate: the
+   chain is TriggerTemplate → `pipelineRef` → **Task**. Measured 2026-08-30 changing
+   `clawgate-e2e`'s `MIN_PASSED` — `kubectl -n tekton-ci get triggertemplate -o yaml | grep -c
+   MIN_PASSED` returns **0 across all 13 templates**, and so does the Pipeline. That zero is a
+   FAILING POSITIVE CONTROL, not "the value is not deployed yet". Read the Task:
+   `kubectl -n tekton-ci get task <name> -o json` → `.spec.steps[].env[]`.
+   🔴 **AND A MID-CASCADE FLUX CHAIN LOOKS EXACTLY LIKE A WEDGED ONE.** The same session read
+   `tekton-operator` = *"Reconciliation in progress"* with `tekton-config` AND `tekton-triggers`
+   both `False — dependency … is not ready`, which reads as a broken GitOps delivery path with
+   everyone's merges stranded. One minute later the operator was `Ready` on that session's own
+   revision: it was an ordinary dependency cascade caught in flight. **Re-read the chain before
+   reporting it blocked**, and confirm arrival on the LIVE object rather than on
+   `lastAppliedRevision` alone — the kustomizations reconcile in dependency order, so the leaf
+   (`tekton-triggers`) lags the root by design, not by fault.
 8. 🔴 **A pipeline-level timeout SKIPS `finally` — so a timed-out run posts NOTHING and the PR
    sits on `pending` forever.** Put the limit on the **PipelineTask** (`spec.tasks[].timeout`),
    never on `timeouts.tasks`/`timeouts.pipeline`. Measured three ways on v1.12.0 (a `sleep 300`
