@@ -48,6 +48,15 @@ WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the label):
     measured against a scratch HOME, never the operator's.
   * `test_the_control_of_those_mutants_is_green` is the positive control for all
     of them, and pins the accounting line the others read.
+  * `test_concurrent_sessions_all_emit_their_control_key` is REGRESSION coverage
+    for the guard going DARK under its own parallelism: every xdist worker fires
+    the config control at ONE file, git's `<cfg>.lock` is exclusive, and the
+    plugin's retry-with-jitter only wins while a write is faster than the
+    backoff. On a loaded box it is not, GUARD 10 reported `control=unmeasured`,
+    and an unmeasured control is a guard that has proved nothing. Red at
+    203a5582, green at HEAD — the matrix is in the test's own docstring.
+    `test_the_control_mutex_is_never_gits_own_lock_file` is the INVARIANT GUARD
+    beside it, on the one rename that would silence the control entirely.
   * the plugin-flag set pin, the lever pins, the two-way token pin and the
     accounting-site count are INVARIANT GUARDS. The bug never violated them; they
     exist so the enforcement point cannot be narrowed to nothing by an edit that
@@ -56,6 +65,7 @@ WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the label):
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -345,6 +355,149 @@ def test_the_config_control_is_fail_closed_when_the_write_is_not_contained(
     # satisfied by a function that can only ever fail.
     status, detail = nogit_plugin.config_control(tmp_path)
     assert status == nogit_plugin.CONTROL_OK, (status, detail)
+
+
+# --------------------------------------------------------------------------- #
+# The control write under CONCURRENCY
+# --------------------------------------------------------------------------- #
+# The child. A separate PROCESS per session, not a thread: the thing being
+# contended is git's `<cfg>.lock`, a real file lock, and threads in one
+# interpreter would serialise on nothing a thread can see.
+_CONTENDER = '''\
+import importlib.util, json, os, sys, time
+mod_path, guard_dir, go = sys.argv[1], sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location("nogit_under_test", mod_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+# Start together. Without the barrier the children stagger by their own import
+# time and the collision this measures never happens.
+while not os.path.exists(go):
+    time.sleep(0.005)
+mod.install(guard_dir)
+status, detail = mod.config_control(guard_dir)
+sys.stdout.write(json.dumps({"status": status, "detail": detail}))
+'''
+
+# 🔴 THE TWO NUMBERS, AND WHY THESE. Both are LOCK-HOLD-WINDOW amplifiers, and
+# together they stand in for the operator's loaded box, where a `git config`
+# write outlasts the plugin's ~0.75s of total backoff. Measured on this host
+# against the PRE-FIX plugin (203a5582):
+#
+#   16 writers, empty guard file .................  0 / 16 failed  (green, useless)
+#   96 writers, empty guard file .................  3 / 96 failed  (red, marginal)
+#  160 writers, empty guard file ................. 74 /160 failed  (red, expensive)
+#   16 writers, 200k-key guard file .............. 10-11 / 16 failed  (red, cheap)
+#
+# The seeded shape is the one committed: it is the only one that is both
+# reliably red at base and cheap enough to run every gate. The seed makes ONE
+# write slow, which is precisely the condition under which a retry-with-backoff
+# loop stops working — it is not a proxy for the bug, it IS the bug's
+# precondition.
+_CONTENDERS = 16
+_CONTENDED_CONFIG_KEYS = 200_000
+
+
+def _fire_controls_concurrently(tmp_path, n=_CONTENDERS,
+                                seed=_CONTENDED_CONFIG_KEYS):
+    """N processes, one shared guard dir, one `config_control` each -> statuses.
+
+    The module under test is the real plugin. `DEVRC_NOGIT_PLUGIN_UNDER_TEST`
+    re-points THE CHILDREN — and only the children — at another copy of the
+    file; this process keeps the real import either way. That is how the RED
+    half of this test's matrix is reproduced against the pre-fix implementation:
+
+        git -C <repo> show 203a5582:scripts/testlib/nogit_plugin.py > /tmp/base.py
+        DEVRC_NOGIT_PLUGIN_UNDER_TEST=/tmp/base.py pytest -k concurrent_sessions
+
+    Nothing here can pollute the runner's ledger: each child calls `install()`
+    on ITS OWN guard dir, so its `GIT_CONFIG_GLOBAL` — and therefore its control
+    key — lands in this tmp_path, never in the run's isolated config where
+    `_nogit_controls()` counts one key per session.
+    """
+    mod_path = os.environ.get("DEVRC_NOGIT_PLUGIN_UNDER_TEST",
+                              nogit_plugin.__file__)
+    child = tmp_path / "contender.py"
+    child.write_text(_CONTENDER, encoding="utf-8")
+    guard = tmp_path / "guard"
+    guard.mkdir()
+    if seed:
+        (guard / nogit_plugin.CONFIG_NAME).write_text(
+            "[devrc-nogit-seed]\n"
+            + "".join(f"\tk{i} = v{i}\n" for i in range(seed)),
+            encoding="utf-8")
+    go = tmp_path / "go"
+    procs = [subprocess.Popen(
+        [sys.executable, str(child), mod_path, str(guard), str(go)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(n)]
+    go.write_text("go", encoding="utf-8")
+    out = []
+    for p in procs:
+        stdout, stderr = p.communicate(timeout=300)
+        try:
+            out.append(json.loads(stdout))
+        except ValueError:
+            out.append({"status": "CHILD-CRASHED",
+                        "detail": (stdout + stderr)[-400:]})
+    return out, guard
+
+
+def test_concurrent_sessions_all_emit_their_control_key(tmp_path):
+    """🔴 REGRESSION. Every session sharing a guard dir must MEASURE its control.
+
+    MEASURED on the operator's box: `scripts/gate.sh --tier pytest` failed GUARD
+    10 with `control=emitted,unmeasured … still lock-contended after 6 attempts`
+    for `scripts/validation/tests`. Under xdist each worker fires this control at
+    the SAME file; git's `<cfg>.lock` is exclusive and non-blocking, so the
+    losers exit 255 and the plugin's retry-with-jitter is a herd racing to
+    re-collide. It holds only while a write is faster than the backoff.
+
+    A session that cannot run its own positive control has proved nothing, and
+    the runner correctly refuses to score that as a pass — so this is a guard
+    going dark, not a cosmetic flake.
+
+    THE MATRIX (RULES.md: a test not watched to fail proves nothing):
+      RED   at 203a5582 — 10 of 16 children `unmeasured`, "still lock-contended
+                          after 6 attempts"
+      GREEN at HEAD     — 16 of 16 `emitted`
+    Reproduce the red half with `DEVRC_NOGIT_PLUGIN_UNDER_TEST`; see
+    `_fire_controls_concurrently`.
+    """
+    results, guard = _fire_controls_concurrently(tmp_path)
+    bad = [r for r in results if r["status"] != nogit_plugin.CONTROL_OK]
+    assert not bad, (
+        f"{len(bad)} of {len(results)} concurrent sessions could not measure "
+        f"their own `git config --global` control:\n"
+        + "\n".join(f"  {r['status']}: {r['detail']}" for r in bad[:5]))
+
+    # The POSITIVE CONTROL for the assertion above: `emitted` is only meaningful
+    # if the keys actually arrived. A control that reported success while the
+    # writes vanished is the reassuring zero this whole guard exists to refuse —
+    # and it is also what a "fix" that silently redirected each session to its
+    # own file would produce here.
+    written = (guard / nogit_plugin.CONFIG_NAME).read_text(encoding="utf-8")
+    landed = written.count(nogit_plugin.CONTROL_PREFIX)
+    assert landed == len(results), (
+        f"{len(results)} sessions reported `{nogit_plugin.CONTROL_OK}` but the "
+        f"ONE shared guard file holds {landed} control key(s). `run-tests.sh`'s "
+        f"`_nogit_controls()` counts them in that single file and pins the count "
+        f"to the session count, so a scattered write reads as a dead redirect.")
+
+
+def test_the_control_mutex_is_never_gits_own_lock_file(tmp_path):
+    """INVARIANT GUARD on the one rename that would silence the whole control.
+
+    `<cfg>.lock` is the file GIT creates to take its own exclusive lock. If this
+    plugin's advisory mutex were ever spelled that way, holding it would make
+    every `git config --global` in the run fail outright — the positive control
+    killed by the mechanism added to protect it. Also pinned: the mutex is a
+    sibling INSIDE the guard dir, never the config file itself.
+    """
+    lock = nogit_plugin.guard_config_lock_path(tmp_path)
+    cfg = nogit_plugin.guard_config_path(tmp_path)
+    assert lock.name != nogit_plugin.CONFIG_NAME + ".lock", (
+        "the control mutex is spelled the same as git's own lock file")
+    assert lock != cfg and lock.parent == tmp_path, (lock, cfg)
 
 
 def test_the_runner_and_the_plugin_agree_on_the_shared_tokens():

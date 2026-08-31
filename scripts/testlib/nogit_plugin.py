@@ -99,6 +99,8 @@ see (an atexit hook, a lingering thread, a fixture finalizer).
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import random
 import shutil
@@ -164,6 +166,38 @@ LOCK_TIMEOUT = 5
 CONTROL_OK = "emitted"
 CONTROL_UNCONTAINED = "WITHHELD-UNCONTAINED"
 
+# 🔴 THE CROSS-PROCESS MUTEX THAT MAKES THE RETRY LOOP A FALLBACK RATHER THAN THE
+# PLAN. Every session sharing one guard dir fires the control write above; git's
+# own `<cfg>.lock` is exclusive and NON-blocking, so the losers exit 255
+# immediately and the retry loop is a thundering herd racing to re-collide. It
+# only wins while the write is faster than the backoff: MEASURED on this box,
+# 96 concurrent writers to an empty guard file produced 3 exhaustions, 160
+# produced 74, and 16 writers against a config large enough to make one write
+# outlast the jitter produced 11. The operator's box is the loaded case, and
+# GUARD 10 read the exhaustion as `control=unmeasured` — the guard unable to run
+# its own positive control, which the runner correctly refuses to score as a
+# pass.
+#
+# So the writers are SERIALISED here instead, on an advisory `flock` every
+# participant takes before invoking git. There is no collision left to back off
+# from, and nothing about the guard's accounting moves: the redirect still names
+# the ONE file `run-tests.sh` exported (checked for equality at its GUARD 10
+# evaluation), and the control keys still accumulate in that ONE file where
+# `_nogit_controls()` counts them one-per-session.
+#
+# 🔴 `.pylock`, NEVER `.lock`: `<cfg>.lock` is git's OWN lock file name, and
+# creating it ourselves would make every `git config --global` write in the run
+# fail outright — the guard's positive control silenced by the thing meant to
+# protect it.
+#
+# The lock is advisory and released by the kernel when the holder's fd closes,
+# so a killed worker cannot wedge the run. Acquisition is bounded: on timeout the
+# write proceeds UNLOCKED, which is exactly the pre-serialisation behaviour, and
+# the retry loop below is still there to catch it.
+CONFIG_LOCK_SUFFIX = ".pylock"
+CONFIG_LOCK_WAIT = 60.0
+CONFIG_LOCK_POLL = 0.005
+
 # The protocol probe. `.invalid` is reserved by RFC 2606 and can never resolve,
 # so if the allowlist is NOT in effect this fails at DNS — a DIFFERENT error,
 # which is exactly what makes the two states distinguishable. Nothing leaves the
@@ -181,6 +215,59 @@ REFUSAL_TOKEN = "not allowed"
 def guard_config_path(guard_dir: Path) -> Path:
     """The throwaway file `git config --global` writes to under this guard."""
     return Path(guard_dir) / CONFIG_NAME
+
+
+def guard_config_lock_path(guard_dir: Path) -> Path:
+    """The advisory lock serialising this guard's `git config --global` writes.
+
+    A SIBLING of the config file, never the config file itself and never git's
+    own `<cfg>.lock` — see CONFIG_LOCK_SUFFIX. Nothing reads it; it exists only
+    to be flock'd.
+    """
+    return Path(guard_dir) / (CONFIG_NAME + CONFIG_LOCK_SUFFIX)
+
+
+@contextlib.contextmanager
+def _config_write_lock(guard_dir: Path, wait: float = CONFIG_LOCK_WAIT):
+    """Hold the guard dir's config mutex for one `git config --global` write.
+
+    Yields True if the lock is held, False if it could not be taken — and False
+    is not a failure path: the caller writes anyway, because an unserialised
+    write is the behaviour that shipped before this lock existed and the retry
+    loop still covers it. FAILING here must never turn into `unmeasured`, which
+    is the verdict this whole change exists to stop producing.
+
+    Polled `LOCK_NB` rather than a blocking `LOCK_EX` so the wait is BOUNDED. A
+    blocking acquire against a holder that wedged would hang the session inside
+    a session-scoped autouse fixture, i.e. hang the target with no output.
+    """
+    fh = None
+    held = False
+    try:
+        try:
+            Path(guard_dir).mkdir(parents=True, exist_ok=True)
+            fh = guard_config_lock_path(guard_dir).open("a+")
+        except OSError:
+            fh = None
+        if fh is not None:
+            deadline = time.monotonic() + wait
+            while True:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    held = True
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(CONFIG_LOCK_POLL)
+        yield held
+    finally:
+        if fh is not None:
+            if held:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                fh.close()
 
 
 def install(guard_dir: Path) -> Path:
@@ -251,14 +338,24 @@ def config_control(guard_dir: Path) -> tuple[str, str]:
     key = f"{CONTROL_SECTION}.{CONTROL_PREFIX}{os.getpid()}"
     token = f"nogit-{os.getpid()}"
 
-    # 🔴 RETRY ONLY ON LOCK CONTENTION. Under pytest-xdist every worker runs its
-    # own session and fires this control, and they all write the SAME guard file
-    # — git takes an exclusive `<cfg>.lock` per write, so the losers exit 255
-    # with "could not lock config file". MEASURED: 8 concurrent
-    # `git config --global` writes to one file -> 4 exit 0, 4 exit 255 with that
-    # message. Before the retry, GUARD 10 reported `control=unmeasured` for 16 of
-    # 27 targets — the guard could not run its own positive control, which it
-    # correctly refuses to score as a pass.
+    # 🔴 RETRY ONLY ON LOCK CONTENTION — DEFENCE IN DEPTH, NOT THE MECHANISM.
+    # Under pytest-xdist every worker runs its own session and fires this
+    # control, and they all write the SAME guard file — git takes an exclusive
+    # `<cfg>.lock` per write, so the losers exit 255 with "could not lock config
+    # file". MEASURED: 8 concurrent `git config --global` writes to one file ->
+    # 4 exit 0, 4 exit 255 with that message. Before the retry, GUARD 10 reported
+    # `control=unmeasured` for 16 of 27 targets — the guard could not run its own
+    # positive control, which it correctly refuses to score as a pass.
+    #
+    # The retry ALONE was not enough, and was never going to be: it randomises a
+    # collision instead of removing one, so it holds only while a write finishes
+    # inside the backoff window. On a loaded box it does not, and GUARD 10 went
+    # back to `unmeasured` (measured on `scripts/validation/tests`). The
+    # `_config_write_lock` below is what removes the collision; this loop is KEPT
+    # because it covers the contention the lock cannot see — a writer that never
+    # took it (a test in the target firing its own `git config --global`, a
+    # concurrent process reaching the same file, a session that failed to open
+    # the lock at all).
     #
     # The retry is deliberately NARROW: any other non-zero exit still returns
     # "unmeasured" on the first try. Widening it to all failures would convert a
@@ -268,7 +365,14 @@ def config_control(guard_dir: Path) -> tuple[str, str]:
         # A SHORT timeout, not _git's 30s default: this is one tiny local write,
         # and it is now retried, so the worst case is LOCK_RETRIES * timeout. At
         # 30s that is 3 minutes per session spent discovering a stuck lock.
-        wrote = _git(["config", "--global", key, token], timeout=LOCK_TIMEOUT)
+        #
+        # The mutex is held around the git invocation ONLY — never across the
+        # backoff sleep below. Sleeping under it would make every OTHER
+        # participant wait out a delay incurred for a writer that is not
+        # participating, which is the shape that turns a mutex into the stall it
+        # was added to prevent.
+        with _config_write_lock(guard_dir):
+            wrote = _git(["config", "--global", key, token], timeout=LOCK_TIMEOUT)
         if wrote is None:
             return "unmeasured", "git is not runnable from this session"
         if wrote.returncode == 0:
