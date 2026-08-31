@@ -108,6 +108,31 @@ ROOT = Path(__file__).resolve().parents[2]
 # 🔴 This is the SYMPTOM fix. The cause is a 10-minute parallel suite competing
 # with a saturated cluster, which belongs to Tekton capacity, not to this file.
 #
+# 🔴 AND 60 DID NOT HOLD — it recurred 2026-08-31, so do not read the paragraph
+# above as closed. What is new is that the contention is now NAMED and can be
+# reproduced ON THE DEV HOST in ~70 s; see `scripts/ci-repro/`. Two corrections
+# to the framing above, both measured:
+#
+#   * IT IS DISK, NOT CPU. All 3 failures on run `devrc-ci-86zxj` (sha 5de43017)
+#     printed this suite's own classifier — `MECHANISM = SERVER_BLOCKED_IN_FSYNC
+#     … accept loop parked=True`. `server.py:_replace_bytes` fsyncs BEFORE the
+#     response is written, and fsync blocks in uninterruptible sleep. The gate
+#     workspace is `emptyDir medium=disk` and the nix caches are `local-path`
+#     PVCs on ONE pinned node (talos-xr6-r7p), so every concurrent pipelinerun
+#     contends on ONE physical disk — 12 overlapped that window.
+#     🔴 So "give the gate CPU/memory requests" is the wrong fix, however
+#     plausible: k8s requests govern CPU and memory, NOT disk I/O. (And
+#     `computeResources: null` is not a devrc oversight — all 449 taskruns in
+#     that namespace declare none.)
+#   * SEED/ORDERING IS REFUTED as the mechanism. No reordering is needed:
+#     delaying a SINGLE fsync past this bound reproduces the exact failure, on
+#     the identical test and parametrisation the gate reported. Control 8 passed
+#     / 4.63 s; with one stalled fsync, 1 failed. Recipe: `scripts/ci-repro/`.
+#
+# 🔴 Do NOT raise this constant again in response to a recurrence. Read the
+# per-hung-call arithmetic directly below — the bound is not the lever, and the
+# next raise buys a longer outage, not a greener gate.
+#
 # 🔴 THE COST IS PER HUNG CALL, NOT PER SUITE — corrected after audit. The
 # commit that introduced this said "4x longer to fail … still fits" the 45m gate
 # task budget. That is true of ONE hung call. This module has ~208 `fetch(` and
