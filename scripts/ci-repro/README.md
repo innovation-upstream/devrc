@@ -37,8 +37,11 @@ node. Measured 2026-08-31: gitops-validate is pinned to a **different** node
 (42/42 pods on `talos-uvh-gtj`) and the one auditloop run was on `talos-deu-s2q`.
 Neither mounts anything devrc-ci mounts. Sizing a concurrency cap against 12 would
 size it against runs that were never there.
-⚠ `claude/skills/tekton/SKILL.md:48` says "every run lands on `talos-xr6-r7p`" — true
-of *devrc-ci* runs, misleading as written, and the likely source of the 12.
+⚠ `claude/skills/tekton/SKILL.md` says "every run lands on `talos-xr6-r7p`" in its
+node-pinning paragraph — true of *devrc-ci* runs, misleading as written, and the likely
+source of the 12. **That same file already resolves it** further down, recording the
+`devrc-ci` / `gitops-validate` node split from homelab-infra #396 — so read both before
+editing either. (`grep -n 'talos-uvh-gtj' claude/skills/tekton/SKILL.md`.)
 
 🔴 **AND THE FAILING WRITE IS ON NEITHER NAMED VOLUME.** The gate pod mounts
 `nix-store-cache` at `/nix` and the per-run `source` PVC (a `volumeClaimTemplate`,
@@ -107,10 +110,17 @@ mechanism testable on demand rather than to eliminate rivals.
 ### Why LD_PRELOAD and not the narrower tool already in the repo
 
 `test_subsystem_store_api.py` monkeypatches `api._fsync_dir` inside
-`TestAHungRoundTripSAYSWhichSideBlocked` — `grep -n '_fsync_dir", _stall' ` finds it —
-and carries a 🔴 comment noting that patching the stdlib's `os.fsync` is process-global
-and would stall any other thread. (Cited by name, not by line: that file's comment
-block shifts on every edit, and a line citation into it shipped wrong twice.) This shim is **strictly wider** than what that comment warns
+`TestAHungRoundTripSAYSWhichSideBlocked`, and carries a 🔴 comment noting that patching
+the stdlib's `os.fsync` is process-global and would stall any other thread. Find it:
+
+```bash
+grep -n '_fsync_dir", _stall' scripts/tests/test_subsystem_store_api.py
+```
+
+(By name, never by line. A line citation into that file shipped wrong **three times** in
+this PR alone — twice from counting against the pre-PR tree, and once because the very
+commit that "fixed" it inserted lines above its own citation.) This shim is **strictly
+wider** than what that comment warns
 against. It is used anyway because it needs no repo edit and therefore tests the
 shipped code path exactly as CI runs it — but the narrower monkeypatch is the right
 tool if you only need `_fsync_dir`, and the warning above applies to this shim too.
@@ -118,10 +128,18 @@ tool if you only need `_fsync_dir`, and the warning above applies to this shim t
 ## Two fixes that look right and are not
 
 🔴 **Raising `HANG_TIMEOUT` again is worse than doing nothing.** 60.0 is already the
-symptom fix (raised from 15 on 2026-08-29) and it did not hold. The test file's own
-arithmetic (`:155-158`) is ~320 hung-call sites × 60 s ≈ 5.3 h; re-counted live in
-this PR's tree it is 211 `fetch(` + 113 `await_audit(` = **324**, so ≈ 5.4 h. Either
-way it dwarfs the budget.
+symptom fix (raised from 15 on 2026-08-29) and it did not hold. The test file carries
+this arithmetic itself, next to the constant — search for `per-hung-call` in
+`test_subsystem_store_api.py`. Re-derive the multiplier rather than trusting either
+copy:
+
+```bash
+F=scripts/tests/test_subsystem_store_api.py
+echo $(( $(grep -c 'fetch(' $F) + $(grep -c 'await_audit(' $F) ))   # hung-call sites
+```
+
+At the time of writing that is ~324 (× 60 s ≈ 5.4 h); the file's own text says ~320
+(≈ 5.3 h). Either way it dwarfs the budget.
 ⚠ **That budget is NOT 45 m** — the test file says 45 m and the live values are the
 gate task's `timeout: 1h0m0s` inside pipeline `timeouts: {tasks: 1h10m0s, pipeline:
 1h25m0s}`. The conclusion survives (5.4 h ≫ 1 h, and even 15 s × 324 ≈ 81 m exceeds
@@ -133,17 +151,31 @@ CPU and memory, **not** disk IOPS, so requests would not make fsync faster. But 
 devrc-ci run is `nodeSelector`-pinned to one node, so non-zero requests are exactly the
 standard mechanism for making excess runs **Pending instead of co-scheduled** — i.e.
 they are one way to implement the concurrency cap listed below. (`computeResources:
-null` is not a devrc oversight: **479/479** taskruns in that namespace declare none, so
+null` is not a devrc oversight: **every** taskrun in that namespace declares none — the
+ratio is what matters and has held at every reading; the absolute count drifts — so
 this is a platform-wide default, and changing devrc alone would not stop under-declared
 neighbours oversubscribing the node.)
 
 The real levers are infra and are **not** this repo's to apply, ranked by whether they
 can move the write that actually stalls:
 
-1. **Cap concurrent devrc-ci runs on the pinned node, or unpin it.** Sizes against
-   **7**, not 12. Distinct from `tekton-supersede`, which only collapses redundant
-   runs of the *same* PR. Non-zero `computeResources` is one way to implement this —
-   it does not touch IOPS, but it makes excess runs Pending instead of co-scheduled.
+1. **Bound the disk-heavy work on that NODE, or unpin devrc-ci.** 🔴 **Capping
+   devrc-ci alone does not bound the node** — the mechanism is node-local *device*
+   contention, so any pod there competes regardless of which volumes it names.
+   `talos-xr6-r7p` is not devrc-ci's: measured 2026-08-31 it also hosted `auditloop`
+   38, `clawgate` 13, `vetr` 7, `naida` 6, `remix` 2 pods, and `auditloop-ci` is **not**
+   hostname-pinned (its template only excludes one other node), so it lands there
+   routinely. A cap set at "7 devrc-ci runs" bounds one pipeline out of five that
+   schedule there. Re-derive the co-residents before sizing anything:
+
+   ```bash
+   kubectl -n tekton-ci get pods --field-selector spec.nodeName=talos-xr6-r7p \
+     -o json | jq -r '.items[].metadata.name | split("-")[0]' | sort | uniq -c | sort -rn
+   ```
+
+   Distinct from `tekton-supersede`, which only collapses redundant runs of the *same*
+   PR. Non-zero `computeResources` is one way to implement a cap — it does not touch
+   IOPS, but it makes excess runs Pending instead of co-scheduled.
 2. **Give the gate's ephemeral layer (`/tmp`) faster or isolated storage** — that is
    where the stalling fsync lands. Requires first measuring whether it shares a device
    with the local-path PVs; see the ⚠ above.
@@ -152,7 +184,35 @@ can move the write that actually stalls:
 
 ## Counts in this file
 
-`7`/`12` runs, `499` taskruns, `324` call sites, the per-node PV split and the live
-timeouts were measured on 2026-08-31 and **nothing asserts on any of them** — they
-drift, and did so within one session (449→479→499 taskruns while this PR was open).
-Re-derive before quoting; the `kubectl`/`grep` commands are in this PR's comments.
+Every number here was measured on 2026-08-31 and **nothing asserts on any of them**.
+They drift in both directions — the taskrun count was read as 449, 479, 499 and 468 at
+four points while this PR was open. **Re-derive before quoting.** The commands are
+here, not in a comment thread:
+
+```bash
+KC=~/workspace/homelab-talos/homelab-kubeconfig
+
+# overlapping pipelineruns in a window, and which node each ran on
+kubectl --kubeconfig $KC get pipelineruns -A -o json | jq -r '.items[]
+  | select(.status.startTime != null)
+  | select(.status.startTime <= "<END>" and (.status.completionTime // "9999") >= "<START>")
+  | .metadata.name'
+kubectl --kubeconfig $KC -n tekton-ci get pods -o json \
+  | jq -r '.items[] | "\(.spec.nodeName)\t\(.metadata.name)"' | sort
+
+# taskruns declaring no compute resources
+kubectl --kubeconfig $KC -n tekton-ci get taskruns -o json \
+  | jq '[.items[] | select(.spec.computeResources == null)] | length'
+
+# PVs per node
+kubectl --kubeconfig $KC get pv -o json | jq -r '.items[]
+  | .spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]' \
+  | sort | uniq -c
+
+# live budgets
+kubectl --kubeconfig $KC -n tekton-ci get pipelinerun <run> -o jsonpath='{.spec.timeouts}'
+```
+
+⚠ Pipelineruns are pruned (`keep: 100`), so a window more than a few hours old is **not
+fully re-derivable** — 5 of the 12 runs cited above are already gone. Treat the
+breakdown as a record, not something a later reader can reproduce.

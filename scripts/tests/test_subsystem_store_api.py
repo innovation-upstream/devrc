@@ -131,7 +131,8 @@ ROOT = Path(__file__).resolve().parents[2]
 #     excess runs Pending instead of co-scheduled, i.e. a concurrency cap. Do
 #     not read this as "requests are the wrong lever"; read it as "they cap
 #     concurrency, they do not speed up fsync". `computeResources: null` is a
-#     platform-wide default (479/479 taskruns), not a devrc oversight.
+#     platform-wide default — EVERY taskrun in that namespace declares none,
+#     at every reading; the absolute count drifts — not a devrc oversight.
 #   * SEED/ORDERING IS NOT THE MECHANISM — but mind what proves that. The
 #     REPRODUCER (`scripts/ci-repro/`) shows fsync latency SUFFICES: delaying a
 #     single fsync past this bound reproduces the exact failure, on the
