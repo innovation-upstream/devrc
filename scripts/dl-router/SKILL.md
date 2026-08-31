@@ -226,12 +226,20 @@ to the other host. The anchor's href is already signed for where it points.
 2. Verify the embed host matches the rule key exactly (`browser frames` confirms
    the iframe origin).
 3. A **full Brave restart** is required after changing player rule config.
-4. 🔴 **ONE malformed accessor kills the WHOLE rule**, silently — no button, no
-   error. Deliberate: a partial button covers only some media on the page and
-   looks like the feature working. Check every entry, not just the one you
-   edited.
-5. 🔴 **More than 8 accessors** is refused by the sidecar, which then degrades
-   to unconfigured — see the ordering warning below.
+4. 🔴 **ONE malformed accessor kills the WHOLE rule** — check every entry, not
+   just the one you edited. Deliberate: a partial button covers only some media
+   on the page and looks like the feature working. **Where you see the failure
+   depends on WHICH kind of malformed**, and the quiet one is the one to know
+   about:
+   - a **type/shape** error (empty or missing `element`/`attr`, a non-string, a
+     non-table entry, more than 8) is caught by the **sidecar**, loudly — it
+     names the offending index, e.g. `player.media[1].attr must be a non-empty
+     string`, and surfaces in `dl-route status` and `/healthz`. Look there
+     first.
+   - a **grammar** error the sidecar deliberately does not check (an
+     unsupported selector — `>`, `+`, `~`, `:`, over 300 chars — or an `attr`
+     that is not a bare name) is caught only in the extension, which returns no
+     rule: **no button and no error anywhere.** That one is silent.
 
 🔴 **DEPLOY ORDER, and it is not symmetric.** The two halves ship by different
 mechanisms: the extension loads **unpacked from the working tree** (a `git pull`

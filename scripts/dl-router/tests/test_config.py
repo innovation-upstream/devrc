@@ -277,31 +277,28 @@ def _toml_value(value) -> str:
 
 def _toml(entry, prefix):
     """Just enough TOML emitter for these cases."""
+    # 🔴 EVERY VALUE GOES THROUGH `_toml_value`. ONE RULE, ONE PLACE.
+    #
+    # An earlier version wrapped scalars in quotes, so `element = 1` reached the
+    # validator as the STRING "1" and was accepted -- a type-rejection test
+    # written through it would have passed vacuously, testing the emitter rather
+    # than the validator, which is the exact inversion this helper's docstring
+    # promises not to do. The first fix routed only the array-of-inline-tables
+    # branch through `_toml_value` and left the other two stringifying, so the
+    # inversion survived on the SINGLE-TABLE form -- which is the back-compat
+    # shape every deployed config uses. Measured: `element = "1"` there while
+    # the list branch emitted `element = 1`.
+    #
+    # `"` is escaped rather than assumed absent: an attribute selector like
+    # `a[href^="https://x/"]` is the whole reason the list form exists, and an
+    # emitter producing unclosed inline tables for it would make every list test
+    # fail on the FIXTURE rather than on the validator.
     lines, tables = [], []
     for k, v in entry.items():
         if isinstance(v, dict):
             tables.append((k, v))
-        elif isinstance(v, list) and any(isinstance(s, dict) for s in v):
-            # An ARRAY OF INLINE TABLES, which is what a multi-accessor
-            # `media` is. Emitted here rather than worked around in the tests:
-            # a helper that silently stringified these would have made every
-            # list assertion below test the emitter instead of the validator.
-            # `"` is ESCAPED, not assumed absent: an attribute selector like
-            # `a[href^="https://x/"]` is the whole reason a list exists, and an
-            # emitter that produced unclosed inline tables for it would make
-            # every list test fail on the FIXTURE rather than on the validator.
-            #
-            # 🔴 AND NON-STRINGS ARE EMITTED AS THEMSELVES. An earlier version
-            # wrapped every scalar in quotes, so `element = 1` reached the
-            # validator as the STRING "1" and was accepted -- any test asserting
-            # a type rejection would have passed vacuously, testing the emitter
-            # rather than the validator, which is the exact inversion this
-            # helper's docstring promises not to do.
-            lines.append(f"{k} = [{', '.join(_toml_value(s) for s in v)}]")
-        elif isinstance(v, list):
-            lines.append(f"{k} = [" + ", ".join(f'"{s}"' for s in v) + "]")
         else:
-            lines.append(f'{k} = "{v}"')
+            lines.append(f"{k} = {_toml_value(v)}")
     for k, v in tables:
         lines.append(f"[{prefix}.{k}]")
         lines.append(_toml(v, f"{prefix}.{k}"))
@@ -512,3 +509,32 @@ def test_THE_TWO_LANGUAGES_AGREE_ON_THE_ACCESSOR_CAP():
         f"player_buttons.js caps at {found[0]} but config.py caps at "
         f"{config_mod.MAX_MEDIA_ACCESSORS} -- a rule between the two sizes is "
         "accepted by the sidecar and silently renders no button")
+
+
+def test_the_SINGLE_table_form_refuses_non_strings_TOO(tmp_path):
+    """🔴 THE BACK-COMPAT SHAPE, not just the new one.
+
+    The list form got a type test first; the single table -- which is what
+    every deployed config actually uses -- did not, and the emitter was
+    stringifying that branch, so `element = 1` arrived as "1" and was accepted.
+    A test written here BEFORE the emitter was fixed would have passed while
+    asserting nothing.
+    """
+    for bad in ({"element": 1, "attr": "src"},
+                {"element": "video", "attr": True},
+                {"element": 2.5, "attr": "src"}):
+        with pytest.raises(config_mod.ConfigError) as e:
+            _load(tmp_path, _player(bad))
+        assert "must be a non-empty string" in str(e.value), bad
+
+
+def test_the_emitter_preserves_types_on_EVERY_branch(tmp_path):
+    """The guard on the guard. `_toml` has three value branches and the fix
+    initially covered one; this asserts the helper itself, so a future edit
+    that re-stringifies any branch fails here rather than silently making some
+    other test vacuous."""
+    emitted = _toml({"a": 1, "b": True, "c": [1, True], "d": "x"}, "p")
+    assert "a = 1" in emitted and 'a = "1"' not in emitted
+    assert "b = true" in emitted and 'b = "True"' not in emitted
+    assert "c = [1, true]" in emitted
+    assert 'd = "x"' in emitted, "strings must still be quoted"
