@@ -124,8 +124,10 @@ CLAIM_ABSENT = (
     "The analyze-service-index-backup unit has been RETIRED, so no NEW off-machine "
     "bundle is being written. That is not the same as no copy existing, and nothing "
     "expires on its own: pruning runs only as part of an upload, so retiring the unit "
-    "retires the pruner too and the last ASIB_KEEP bundles per scope stay in the MinIO "
-    "bucket until deleted BY HAND. The served pod also holds a copy, as stale as its "
+    "retires the pruner too and the last ASIB_KEEP bundles stay in the MinIO bucket "
+    "until deleted BY HAND — per HOST-and-scope prefix, so a scope written by two "
+    "hosts leaves two sets and clearing one is not clearing the scope. The served pod "
+    "also holds a copy, as stale as its "
     "last seed. Check both — with restore-verify.py — before calling anything "
     "unrecoverable, and delete them deliberately when the data should be gone."
 )
@@ -133,11 +135,6 @@ CLAIM_ABSENT = (
 # Lines that QUOTE a claim in order to retract it. `_section_states` drops them
 # before matching — see `test_a_quoted_retraction_cannot_satisfy_the_pin`.
 _RETRACTION_MARKERS = ("used to say", "used to read", "no longer true", "⚠")
-
-# What a retraction line becomes. Must survive `_normalise` (no backticks, no
-# asterisks, no boundary underscores) and must not appear in any real claim, so
-# that a wedged retraction still breaks the claim in two.
-_RETRACTED_SENTINEL = "zzretractedlinezz"
 
 
 def _normalise(text: str) -> str:
@@ -221,25 +218,50 @@ def _section_states(claim: str, section: str) -> bool:
     doc already uses exactly that retraction shape, so it is the natural thing a
     future editor writes.
 
-    🔴 RETRACTION LINES ARE REPLACED BY A SENTINEL, NOT DELETED. Deleting them
-    makes previously NON-ADJACENT text contiguous, which opens a second walk in
-    the act of closing the first: wedge `⚠ NO LONGER TRUE — the unit was RETIRED`
-    into the MIDDLE of the claim bullet and a delete-then-rejoin filter stitches
-    the two halves back together and answers True — measured GREEN where the
-    plain substring test it replaced was correctly RED. A sentinel keeps the
-    break, so a wedge still fails.
+    🔴 THE MATCH RUNS OVER LIST-ITEM BLOCKS, AND A RETRACTION LINE ENDS A BLOCK.
+    Two walks were measured against weaker versions of this, and the shape of
+    each is why the rule is what it is:
 
-    ⚠ The marker set is a SPELLING, and that is a stated limit rather than a
-    closed hazard: `previously stated`, `RETRACTED` and `OBSOLETE` all walk it.
-    It buys back the ⚠-shaped retraction this doc actually uses; it is not a
-    proof that no retraction can pass.
+    1. DELETING retraction lines and re-joining makes previously NON-ADJACENT
+       text contiguous. Wedge `⚠ NO LONGER TRUE — the unit was RETIRED` into the
+       MIDDLE of the claim bullet and a delete-then-rejoin filter stitches the
+       halves back together and answers True — green where the plain substring
+       test it replaced was correctly red. Ending the block at a retraction line
+       keeps the break, so neither half contains the whole claim.
+    2. Neutralising the marker's LINE is defeated by ADJACENCY, not by
+       vocabulary — an earlier docstring said the limit was the marker's
+       spelling, and that was measurably wrong. Put `⚠ This section used to
+       say:` on its OWN line with the quotation below it and only the marker
+       line is touched, leaving the quoted claim standing and the pin GREEN
+       while the doc says recovery is impossible. Requiring the claim to sit in
+       a LIST ITEM closes it: the canonical claim IS a bullet, and a retraction
+       paragraph quoting it is not.
+
+    A block is a line starting `-` plus its continuation lines, cut at the next
+    bullet, a blank line, or a retraction line.
+
+    ⚠ STATED LIMIT, because a guard's description must not be wider than its
+    body: a retraction marker on its own line ABOVE a claim that is still
+    formatted as a bullet is not caught. The two mechanisms together cover the
+    shapes this doc actually uses and the two walks that were measured against
+    it — they are not a proof that no retraction can pass.
     """
-    kept = [
-        _RETRACTED_SENTINEL
-        if any(m in ln.lower() for m in _RETRACTION_MARKERS) else ln
-        for ln in section.splitlines()
-    ]
-    return _normalise(claim) in _normalise("\n".join(kept))
+    blocks, cur = [], []
+    for ln in section.splitlines():
+        retraction = any(m in ln.lower() for m in _RETRACTION_MARKERS)
+        starts_item = ln.lstrip().startswith("-")
+        if retraction or not ln.strip() or starts_item:
+            if cur:
+                blocks.append("\n".join(cur))
+                cur = []
+            if retraction:
+                continue
+        if starts_item or cur:
+            cur.append(ln)
+    if cur:
+        blocks.append("\n".join(cur))
+    target = _normalise(claim)
+    return any(target in _normalise(b) for b in blocks)
 
 
 def test_the_backup_claim_matches_the_nix_wiring() -> None:
@@ -367,6 +389,33 @@ def test_a_quoted_retraction_cannot_satisfy_the_pin() -> None:
     assert not _section_states(CLAIM_PRESENT, wedged), (
         "a retraction wedged INTO the claim was stitched back together — the "
         "filter closed the quoted-retraction walk by opening a wedged one"
+    )
+
+    # 🔴 THE WALK THE SENTINEL ALONE DID NOT CLOSE. Put the marker on its OWN
+    # line and the sentinel replaces only that line, leaving the quotation
+    # intact below it. Measured green before the list-item scoping; the limit is
+    # ADJACENCY, not the marker's spelling, and the docstring used to say the
+    # opposite.
+    own_line_marker = (
+        "**Store safety.**\n"
+        "⚠ This section used to say:\n"
+        f"{CLAIM_PRESENT}\n"
+        "That is NO LONGER TRUE — the unit was retired; recovery is impossible."
+    )
+    assert not _section_states(CLAIM_PRESENT, own_line_marker), (
+        "a retraction marker on its own line left the quoted claim standing — "
+        "the pin is certifying a doc that says the backup was retired"
+    )
+
+    # CONTROL for the list-item scoping: a claim that IS a bullet must still be
+    # seen when it wraps across continuation lines, or the rule above would
+    # reject the live doc for the wrong reason.
+    halves2 = CLAIM_PRESENT.split(", bucket ")
+    assert len(halves2) == 2, "fixture assumption broken"
+    wrapped_bullet = f"- {halves2[0]}, bucket\n  {halves2[1]}"
+    assert _section_states(CLAIM_PRESENT, wrapped_bullet), (
+        "the list-item scoping rejected a claim that IS a wrapped bullet — it "
+        "would reject the live doc for the wrong reason"
     )
 
 

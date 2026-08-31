@@ -34,8 +34,11 @@ runs against them. Consequences:
   about *some* commit, not about the bytes you want. 🔴 **`git reset --hard
   <ref>` is worse: it ORPHANS committed content**, and `backup.py` bundles with
   `git bundle create --all` (reachable refs only), so the orphans reach no
-  FUTURE bundle. They are still inside the bundles already in the bucket —
-  read them back with `restore-verify.py` before calling anything lost.
+  FUTURE bundle. A bundle already in the bucket holds them only if they were
+  reachable when THAT bundle was written — the daily run can be up to a day
+  behind the hourly commit that created them, so a fresh commit orphaned the
+  same day is in NO bundle. Check with `restore-verify.py`; past that, the
+  reflog is the only holder.
 - 🔴 **Never add a remote and never push.** ⚠ This bullet used to justify itself
   with "Nothing in this store leaves the machine", which has been false since
   2026-08-21: `analyze-service-index-backup.service` sends age-encrypted bundles

@@ -352,11 +352,14 @@
             # "useless": check what is in the bucket, with restore-verify.py,
             # before concluding anything is unrecoverable.
             #
-            # ⚠ This comment said "the only copy" until 2026-08-31. Its twin in
-            # scripts/run-tests.sh is the SAME argument in different words, and
-            # the two have now drifted apart twice — first on "the only copy",
-            # then on the qualifier above, which the twin got and this one did
-            # not. If you change one, change the other in the same commit. The same
+            # 🔴 This block is the TWIN of the one in scripts/run-tests.sh — the
+            # same argument in different words, and NOTHING ENFORCES THAT THEY
+            # AGREE. They have drifted apart three times: on "the only copy", on
+            # the bucket qualifier above, and on "check the retention window"
+            # (which is false — see backup.py). Each time one was corrected and
+            # the other was not, and each time the correcting commit believed it
+            # had reconciled them. Change both in the same commit, or delete one
+            # and point at the other. The same
             # nix-shell-stripped-PATH method as the `nix` entry above reproduced
             # it. Present on the workbench (`~/.nix-profile/bin/rsync`), so the
             # pre-push tier is unaffected.

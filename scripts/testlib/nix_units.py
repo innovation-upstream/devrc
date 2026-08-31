@@ -92,30 +92,54 @@ def directive(name: str, block: str) -> str | None:
 
     So callers ask for the directive by NAME and read its value.
 
-    🔴 SINGLE-LINE VALUES ONLY, AND A MULTI-LINE ONE RAISES RATHER THAN
-    TRUNCATING. Every directive this reads in `nix/home.nix` today is on one
-    line, but a value wrapped in `pkgs.writeShellScript '' … ''` or a
-    `Environment = { … }` block is one ordinary refactor away. A non-greedy
-    `.*?;$` under `re.S` would stop at the FIRST line-terminal `;` anywhere
-    inside such a value and hand back a plausible truncated string — not None.
-    That is the worst of the three outcomes: `_nix_wires_a_backup` would answer
-    False, and the guard would instruct a maintainer to paste "the unit has been
-    RETIRED" into a shipped skill reference while the unit is live. A loud
-    NotImplementedError is a smaller bill than a published falsehood.
+    🔴 AN AMBIGUOUS MULTI-LINE VALUE RAISES RATHER THAN TRUNCATING. A value
+    wrapped in `pkgs.writeShellScript '' … ''` or an `Environment = { … }` block
+    is one ordinary refactor away. A non-greedy `.*?;$` under `re.S` would stop
+    at the FIRST line-terminal `;` anywhere inside such a value and hand back a
+    plausible truncated string — not None. That is the worst of the three
+    outcomes: `_nix_wires_a_backup` would answer False, and the guard would
+    instruct a maintainer to paste "the unit has been RETIRED" into a shipped
+    skill reference while the unit is live. A loud NotImplementedError is a
+    smaller bill than a published falsehood.
+
+    🔴 A WRAPPED DECLARATION IS NOT A MULTI-LINE VALUE, AND THE FIRST VERSION
+    OF THIS REFUSED BOTH. `ExecStart =` on one line with a long path on the next
+    is an ordinary nix line-wrap; the VALUE is single-line, only the declaration
+    is split. Refusing it turned a benign reformat of `nix/home.nix` into a red
+    REQUIRED merge check on both tiers. So continuation lines are joined up to
+    the terminating `;`, and the result is refused only when it is genuinely
+    ambiguous — an unbalanced `''`, brace or bracket, i.e. the
+    `writeShellScript '' … ''` and `Environment = { … }` shapes where the first
+    line-terminal `;` is INSIDE the value rather than ending it.
     """
-    for ln in block.splitlines():
+    lines = block.splitlines()
+    for i, ln in enumerate(lines):
         m = re.match(rf"\s*{re.escape(name)}\s*=\s*(.*)$", ln)
         if not m:
             continue
-        value = m.group(1).strip()
-        if value.endswith(";"):
-            return value[:-1].strip()
-        raise NotImplementedError(
-            f"`{name}` has a multi-line value in this block, which this reader "
-            "cannot parse. It refuses rather than returning the truncated first "
-            "line, because a caller would read that as a WRONG value and act on "
-            f"it. Extend `directive()` to handle it. Line: {ln.strip()!r}"
-        )
+        parts = [m.group(1).strip()]
+        j = i
+        while not parts[-1].endswith(";") and j + 1 < len(lines):
+            j += 1
+            parts.append(lines[j].strip())
+        value = " ".join(p for p in parts if p).strip()
+        if not value.endswith(";"):
+            raise NotImplementedError(
+                f"`{name}`'s declaration is never terminated by `;` in this "
+                f"block, so its value cannot be read. Line: {ln.strip()!r}"
+            )
+        value = value[:-1].strip()
+        if (value.count("''") % 2
+                or value.count("{") != value.count("}")
+                or value.count("[") != value.count("]")):
+            raise NotImplementedError(
+                f"`{name}` has a multi-line value with unbalanced "
+                f"''/{{}}/[] — the first line-terminal `;` is INSIDE it, so any "
+                "answer here would be a truncation. This reader refuses rather "
+                "than returning a WRONG value a caller would act on. Extend "
+                f"`directive()` to handle it. Got: {value!r}"
+            )
+        return value
     return None
 
 
