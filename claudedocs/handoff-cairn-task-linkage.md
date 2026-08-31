@@ -333,10 +333,28 @@ The rank is half a `claim-work` slug's identity. Ranks 1, 2 and 3 are closed.
    (b) **A SKIPPED gate's `$(tasks.gate.reason)` is the EMPTY STRING**, not `PipelineRun was
    stopping`. The `:-` fallback is the arm that actually fires.
    forcing: none for the reporting half — shipped and live.
-8. **Cairn integration, phase 0** — reconcile the two conflicting writers of the subsystem
-   store before automatic capture multiplies the inconsistency. Plan and all 11 decisions:
-   `claudedocs/plan-cairn-integration.md` (merged `093a63db`). Do not re-derive them here.
-   forcing: none — nothing external is waiting.
+8. ⚠ **PARTIALLY DONE — Cairn phase 0's CONSOLIDATION shipped; its ACCEPTANCE CRITERION did
+   not.** devrc#1170 → squash **`50bfd91f`**, verified by content. One owner
+   (`subsystem-index/SKILL.md`), `analyze-service/reference/write-back.md` reduced to a
+   pointer, the y/N retired at the last door, `created_by` supplied by the caller.
+   🔴 **DO NOT MARK PHASE 0 COMPLETE.** Its criterion is *"a test that fails if a second
+   protocol reappears"*, and the shipped 644-line guard does **not**: MEASURED, a full
+   conflicting protocol planted in `write-back.md` — carrying both the retired y/N and the
+   banned whole-file `Write` — gives **56 passed**. Every layer keys on the exact string an
+   *agreeing* copy would contain, so it detects agreement and misses disagreement. Filed as
+   **cg#473**, which is rank 10. Phase 0 closes when that lands, not before.
+   🔴 **The PR's own mutation evidence for that guard was NOT ISOLATED** — its "reworded fork"
+   mutant was killed by a count that can only move if the mutant reproduced the pinned literal
+   verbatim. Do not re-derive the conclusion it supported.
+   ⚠ **I did not start this item — it was already built by another session and OPEN as
+   #1170 with no claim on it.** Only `gh pr list` saw it; `claim-work` cannot. Starting fresh
+   would have written a second append protocol into the change that exists to remove one.
+   **A 🔴 found on the way, fixed in `97d898e5`:** `analyze-service`'s `allowed-tools` lacked
+   `Edit` while the PR routed it to an `Edit`-mandated protocol — so at that door the
+   measured-unsafe whole-file `Write` was pre-approved and the safe path prompted. Nothing in
+   the repo read `allowed-tools`; there is now a guard with a negative control.
+   forcing: none — but phase 1 (pod canonical) should not start on the assumption phase 0 is
+   closed.
 9. **cg#469 — a 4xx on the FIRST leg's status POST costs the SECOND leg its check.** Filed
    2026-08-31 out of #600's audit, deliberately out of that PR's scope. Under `set -eu`,
    `curl -sf` on the pytests POST aborts before nodetests posts at all — checks stuck
@@ -345,6 +363,18 @@ The rank is half a `claim-work` slug's identity. Ranks 1, 2 and 3 are closed.
    (a stale "six pipelines / devrc-ci 3m" comment; the live scan says >= 11 and 5.0m).
    Repo `homelab-talos`, same file as rank 7.
    forcing: none — read off the code, NOT observed in the wild.
+10. **cg#473 — the index-append guard does not fail on a REWORDED second protocol.** This is
+   what rank 8 is waiting on: phase 0's stated criterion. MEASURED — a full conflicting
+   protocol planted in `write-back.md` gives 56 passed, while a verbatim re-add gives 3
+   failed, so the ledger detects AGREEMENT and misses DISAGREEMENT. Needs a predicate keyed on
+   disagreement, not on the exact string an agreeing copy would contain. 🔴 The card requires
+   each of its three mutants to be demonstrated ISOLATED — a non-isolated mutant is exactly
+   what made the original evidence false.
+   ⚠ Related, NOT covered by that ledger: `scripts/subsystem-store-api/server.py` carries a
+   THIRD append protocol (flock + temp-file-rename, `PUT` behind `If-Match`). Harmless today —
+   it writes the pod's `/data`, not the local store — but phase 1 makes the pod canonical.
+   forcing: none — but it BLOCKS calling phase 0 done.
+   🔴 APPENDED as 10, never inserted: the rank is half a `claim-work` slug's identity.
    🔴 APPENDED as 9, not inserted as 8: this list's numbering is STABLE because the rank is
    half a `claim-work` slug's identity, so renumbering silently re-points every live claim.
    A new item goes on the END even when it is topically adjacent to rank 7.
