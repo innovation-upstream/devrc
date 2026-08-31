@@ -9,44 +9,41 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Phases 1–4 SHIPPED. Ranks 5, 6, 7, 8a and 8b are ✅ DONE. clawgate is at 0.8.18 and
-`clawgatectl` MATCHES it on both hosts. The lowest-numbered OPEN item is 8c.**
+**Ranks 1–8b and 8e are ✅ DONE. The lowest-numbered OPEN item is 8c.**
+🔴 **BUT RANK 8a IS NOT A CLOSED STATE — it REGRESSED within hours and was re-applied.** Read its
+entry before trusting any version claim in this doc.
 
-🔴 **DO NOT READ A VERSION FROM THIS DOC — `clawgatectl health` is the only authority.** It said
-**0.8.18** on 2026-08-30, after nine values in four days. ⚠ **0.8.12 and 0.8.14 EXIST IN HARBOR AND
-WERE NEVER DEPLOYED** — each was built, then discarded before merge because trunk gained a
-`containers/clawgate` fix while the PR was in review, so the image would have carried a HIGHER
-version number with LESS code. A tag existing is not a tag having shipped.
+🔴 **DO NOT READ A VERSION FROM THIS DOC — `clawgatectl health` is the only authority.** It was
+0.8.18 at the last handoff and is **0.8.19** now; another session shipped it. That is the tenth
+value in five days. ⚠ **0.8.12 and 0.8.14 EXIST IN HARBOR AND WERE NEVER DEPLOYED** — each was
+built, then discarded before merge because trunk gained a `containers/clawgate` fix mid-review, so
+the image would have carried a HIGHER version number with LESS code.
 
-✅ **RANK 8a — `clawgatectl` is 0.8.18 on BOTH hosts.** No devrc change was needed:
-`nix/pkgs/tools/clawgatectl.nix` builds from each host's LOCAL `~/workspace/homelab-talos` tree and
-DERIVES its version from the Go source, so the fix was `merge --ff-only origin/trunk` on the laptop
-(5 behind, its source still said 0.8.17) then `ship.sh`. Verified past the label with a cross-host
-round trip — a matching label is exactly what the 2026-08-14 incident also showed.
+✅ **RANK 8e DONE — `ZacxDev/homelab-infra#584`, squash `30125ea1`, and it is LIVE.**
+`MIN_PASSED` 110 → **116**, `HEALTHY_PASSED` 118 → **125**. Verified on the DEPLOYED object, not
+just on trunk: `kubectl -n tekton-ci get task clawgate-e2e` reports `MIN_PASSED=116`, and
+`tekton-triggers` has applied `30125ea1`.
+🔴 **It was NOT the one-line bump the previous handoff promised — the floor has a SECOND CALL
+SITE.** `scripts/tests/test_clawgate_e2e_verdict.py` holds `HEALTHY_PASSED`, an independently
+derived constant that **bounds what `MIN_PASSED` may legally be**. Editing the manifest alone would
+have left a guard asserting a stale reality and made any future floor above 118 fail with "the gate
+could never go green" about a reachable one. Found only because a sibling PR's TITLE (#582,
+"GUARD that both call sites agree") warned that floors here have more than one site.
 
-✅ **RANK 8b — `ZacxDev/homelab-infra#566`, squash `4964d223`.** The layout tab's first browser
-coverage, `containers/clawgate/e2e/tests/layout.spec.ts`. `clawgate-e2e` **125 tests, 2 skipped**
-on the FINAL sha (not a stale green five commits back). Verified on `origin/trunk` by content.
-🔴 **SIX audit rounds, and the first FIVE each found that the previous round's fix had created the
-next defect** — five for five of one class: *a claim wider than the code*. Two were coverage
-REGRESSIONS introduced while claiming an improvement. See Gotchas; the full measured record is in
-the PR's six `audit-claims` comments.
+🔴 **RANK 8a REGRESSED AND WAS RE-APPLIED — treat it as RECURRING, not done.** At the last handoff
+both hosts were 0.8.18 == server. Another session shipped 0.8.19 the same day and both clients were
+instantly stale. **TWO INDEPENDENT CAUSES, one per host, each needing a different action:** the
+**workbench**'s `homelab-talos` was AT trunk with `buildVersion = "0.8.19"` in the tree but the
+INSTALLED binary was 0.8.18 (no `home-manager switch` since); the **laptop** was **16 commits
+behind** and did not have 0.8.19 to build at all. Re-applied — both hosts now 0.8.19 == 0.8.19.
 
-**Landed this session:**
-- `ZacxDev/homelab-infra#566` — rank 8b, squash **`4964d223`**.
-- `innovation-upstream/devrc#1090` — squash `52fdd983`, the previous handoff, rescued from a
-  local-only commit on `main` that branch protection had stranded.
-- `innovation-upstream/devrc#1101` — squash **`a5bc5df6`**, this doc's previous update **plus a
-  correction**: I had filed "clawgate-e2e never registered on #566" as an open investigation. It
-  had registered; it simply had not been SCHEDULED yet when I read `gh pr checks` minutes after
-  opening the PR. The retraction is in the doc, superseded-but-verbatim.
-- `innovation-upstream/devrc#1056` — 🔄 **STILL OPEN**, rebased onto current `main` (`352f4ade`)
-  and re-triggered. Claim `tmux-webapp-6` still held.
+**Live at handoff (measured):** both hosts converged, `ship.sh` rc 0 (first pass rc **19** — the
+documented mid-run race where `origin/main` moves between the two fetches; the tool names the
+remedy and the second pass landed both on one sha). Terminal write surface still boots
+**`DISABLED (fail-closed)`**, its intended resting state — re-checked in the pod log, not recalled.
 
-**Live at handoff:** both hosts at devrc `main`, `ship.sh` rc 0 with cross-host agreement COMPARED.
-Terminal write surface still boots `DISABLED (fail-closed)`, its intended resting state.
-**No `clawgate-task:` field written** — `clawgate_handoff.sh resolve` exited **5**; its positive
-control shows the board answered 11 links for another session, so the board is reachable, but an
+**No `clawgate-task:` field written** — `clawgate_handoff.sh resolve` exited **5**. Its positive
+control shows the board answered 8 links for another session, so the board is reachable; but an
 unknown session id ALSO answers 200 with an empty array. That zero is not a clean bill of health.
 
 ## Platform: this is a clawgate feature
@@ -212,64 +209,67 @@ before that date may name a different item — do not renumber again without rel
 4. ✅ **DONE 2026-08-28** — tmux snapshot ingest + host-side pusher (`ZacxDev/homelab-infra#468` +
    `devrc#974`), 0.8.8. Proof was an UNATTENDED tick.
    forcing: none
-5. ✅ **DONE 2026-08-29 — `ZacxDev/homelab-infra#516`, squash `c8635976`, deployed 0.8.13.**
-   `requireTerminalToken`: the ONLY fail-closed tier. 🔴 **The secret is still UNPROVISIONED and
-   the surface boots DISABLED — correct, not a regression.** The SOPS age identity is on NEITHER
-   host. Wired `optional: true`, because without it a missing key is a `CreateContainerConfigError`
-   that stops the WHOLE pod. **To arm it:** `clawgate gentoken` → `sops
-   clusters/workbench/apps/clawgate/secrets.enc.yaml`. No code or manifest change needed.
+5. ✅ **DONE 2026-08-29 — `ZacxDev/homelab-infra#516`, squash `c8635976`.** `requireTerminalToken`:
+   the ONLY fail-closed tier. 🔴 **The secret is still UNPROVISIONED and the surface boots DISABLED
+   — correct, not a regression** (re-verified in the pod log at this handoff). The SOPS age identity
+   is on NEITHER host. Wired `optional: true`, because without it a missing key is a
+   `CreateContainerConfigError` that stops the WHOLE pod. **To arm it:** `clawgate gentoken` →
+   `sops clusters/workbench/apps/clawgate/secrets.enc.yaml`. No code or manifest change needed.
    forcing: none
-6. ✅ **DONE 2026-08-29 — `ZacxDev/homelab-infra#527`, squash `7bb78908`, deployed 0.8.16.**
-   🔴 **A PANEL STORES A DESCRIPTION, NOT A REFERENCE.** Measured across all 79 live windows: no
-   field is both unique and stable. So panels resolve against the live snapshot on every read and
-   report `resolved`/`ambiguous`/`missing`/`unreported`/`host_unreachable`.
-   ⚠ **Claim `tmux-webapp-6` is STILL HELD** pending `devrc#1056`.
+6. ✅ **DONE 2026-08-29/30 — `ZacxDev/homelab-infra#527` + `devrc#1056` (squash `ac64ccb4`).**
+   Both halves now on main. 🔴 **A PANEL STORES A DESCRIPTION, NOT A REFERENCE** — measured across
+   79 live windows, no field is both unique and stable, so panels resolve against the live snapshot
+   on every read. The producer half's sentinel is confirmed LIVE in production on an unattended
+   tick (`laptop 2509:1609459239`, `workbench 4025325:1785949442` — the laptop's `start_time` is
+   Jan 2021, which is why this is an OPAQUE EQUALITY TOKEN and never a timestamp).
    forcing: none
-7. ✅ **DONE 2026-08-30 — `ZacxDev/homelab-infra#538`, squash `fb9b75e5`, deployed 0.8.18.**
-   The htmx layout tab. 🔴 **THE UI TIER CARRIES ONLY REVERSIBLE CONTROLS, BY CONSTRUCTION.**
-   The destructive control was REMOVED — button, route, handler and ledger entry — leaving
-   `clawgatectl panel rm` (requireHookToken) as the only delete path.
+7. ✅ **DONE 2026-08-30 — `ZacxDev/homelab-infra#538`, squash `fb9b75e5`.** The htmx layout tab.
+   🔴 **THE UI TIER CARRIES ONLY REVERSIBLE CONTROLS, BY CONSTRUCTION** — the destructive control
+   was REMOVED (button, route, handler, ledger entry), leaving `clawgatectl panel rm` as the only
+   delete path.
    forcing: none
-8. **Housekeeping — 8a and 8b DONE; 8c, 8d, 8e open.**
+8. **Housekeeping — 8a (RECURRING), 8b and 8e done; 8c and 8d open.**
    forcing: gate — `clawgate-e2e` was green through all four of #538's audit rounds while running
-   ZERO specs touching layout. 8b closed that; 8e is the floor that same gate reads.
-   - a. ✅ **DONE 2026-08-30** — `clawgatectl` 0.8.18 on both hosts. See Status.
-   - b. ✅ **DONE 2026-08-30 — `ZacxDev/homelab-infra#566`, squash `4964d223`.** Two → three
-     Playwright tests; `clawgate-e2e` 125/2 on the final sha; six audit rounds.
+   ZERO specs touching layout, and its floor tolerated losing 15 of 125 tests. 8b and 8e closed
+   both halves of that.
+   - a. ⚠ **RE-APPLIED 2026-08-30, NOT PERMANENTLY CLOSED.** See Status and Gotchas — it regressed
+     within hours of first closing and will do so again on the next clawgate release.
+   - b. ✅ **DONE — `ZacxDev/homelab-infra#566`, squash `4964d223`.** `layout.spec.ts`, three tests,
+     `clawgate-e2e` 125/2 on the final sha. SIX audit rounds; the first FIVE each found the previous
+     round's fix had created the next defect.
    - c. Eight sleep-based timing bets in
      `containers/clawgate/internal/api/{push_task,task_comment}_test.go` (pre-existing; mechanical
      now `awaitPushesSettled` exists).
    - d. A scanner test for in-body `! grep` — closing condition: a test in both bats suites that
      reds on a planted `! grep` assertion.
-   - e. **Re-derive `MIN_PASSED` in `clawgate-e2e-pipeline.yaml`. 🔴 THE NUMBER IS NOW MEASURED
-     FROM CI: `125 tests, 2 skipped` on `c617bdd5`** (it was 124 before 8b's third test landed; do
-     not use that). At the file's own 110/118 ≈ 93.2% ratio that is **`MIN_PASSED: 116`**, against
-     a current 110 — i.e. it tolerates losing 15 tests. ⚠ `MAX_SKIPPED` is 6 against a measured 2;
-     leave it. Closing condition: 116 committed. ⚠ Also stale in the same file: the prose at
-     ~:522-527 still says "120 tests in 21 files … 118 passed / 2 skipped".
-     forcing: regression — the floor silently tolerates losing 15 of 125 tests.
+   - e. ✅ **DONE — `ZacxDev/homelab-infra#584`, squash `30125ea1`, LIVE on the deployed Task.**
 
 🔴 **There is no rank 9.** A previous revision listed one — "get three portable lessons into
 MEMORY.md" — and it was NOT a work item: the operator confirmed 2026-08-27 that MEMORY.md is not
 used here, so nothing could ever have closed it.
 
 10. **Two guard gaps #457's ladder left open deliberately, both scaffolding-scope.**
-    - **`RunSweeper`'s ticker survives `NewTicker`→`NewTimer`** against the whole api package.
-      `RunRetention` and `RunReconciler` deserve the same check. Pattern to copy:
-      `TestRunAttentionReapTicksOnTheIntervalItWasGiven`.
-    - **The `main()` wiring ledger pins syntax, not reachability.** NOT closable statically; the
-      compensating control is the runtime entry log line, which is itself guarded.
+    `RunSweeper`'s ticker survives `NewTicker`→`NewTimer` against the whole api package;
+    `RunRetention` and `RunReconciler` deserve the same check (pattern:
+    `TestRunAttentionReapTicksOnTheIntervalItWasGiven`). And the `main()` wiring ledger pins syntax,
+    not reachability — NOT closable statically.
     forcing: none
 11. **The archive drawer loses its `open` after every write-triggered swap.** KNOWN, UNFIXED, noted
-    in-code at `layoutArchivedDrawer` with both rejected fixes. The correct fix is the
-    `taskCardScript` treatment (a once-bound listener re-applying `open` after settle).
-    🔴 **8b now makes this verifiable AND has already measured the trap:** `layout.spec.ts`
-    deliberately does NOT pin the drawer's `open`, and mutant H (`<details open>`, i.e. the defect
-    FIXED) is asserted to PASS — so the spec will not red the day someone fixes it. But a
-    once-bound listener that swallows the summary's click IS mutant PD, which the spec DOES red.
-    Read both before writing the fix. Closing condition: restoring three archived panels in a
-    browser without reopening the drawer between each.
+    in-code at `layoutArchivedDrawer`. The correct fix is the `taskCardScript` treatment (a
+    once-bound listener re-applying `open` after settle).
+    🔴 **8b makes this verifiable AND has already measured the trap on BOTH sides:**
+    `layout.spec.ts` deliberately does NOT pin the drawer's `open` — mutant H (`<details open>`,
+    i.e. the defect FIXED) is asserted to PASS, so the spec will not red the day someone fixes it.
+    But a once-bound listener that SWALLOWS the summary's click is mutant PD, which the spec DOES
+    red at the toggle assertion. Read both before writing the fix.
     forcing: none
+12. **NOT MINE, RECORDED SO IT IS NOT LOST: 24% of the tasks board cannot be scrolled to — clawgate
+    task #463.** Another session measured it live on 0.8.19 at 1280x720: `scrollHeight` 21,997 vs
+    `innerHeight` 720, and at maxScroll the last card sits at `rect.top +6,510`, `inViewport:false`
+    — **60 of 248 cards unreachable** by wheel, `scrollTo` or `scrollIntoView`. It is on the version
+    this session deployed to both hosts. Full detail is in the `clawgate` subsystem-index entry.
+    forcing: incident — a shipped, measured defect on the version now live on both hosts, filed as
+    task #463 by the session that found it.
 
 ## Open investigations — live diagnosis state
 
@@ -980,6 +980,54 @@ check are byte-identical in `gh pr checks`, and I diagnosed the first without na
   from this that the suite CANNOT run on this host; it can — `playwright.config.ts` sets
   `executablePath` explicitly from the bundle. The skew is real and worth its own fix, but it is not
   a property of the repo.
+
+- 🔴 **RANK 8a's CLOSING CONDITION IS NOT STABLE, AND NOTHING CONVERGES EITHER HALF.**
+  `clawgatectl` needs a CURRENT `~/workspace/homelab-talos` tree **and** a `home-manager switch`,
+  per host — those are separate claims and they fail independently (measured: workbench had the
+  tree but not the switch; laptop had neither). `ship.sh` is scoped to `~/workspace/devrc` and
+  never touches `homelab-talos`; `drift-check.sh` rc 17 REPORTS source currency but does not fix
+  it. **So any "clawgatectl is current" note — including this doc's — is true only of the moment it
+  was written.** Re-run the round trip instead of reading it. Fix, both hosts:
+  `git -C ~/workspace/homelab-talos merge --ff-only origin/trunk` then `ship.sh`.
+- 🔴 **THE SHARED devrc CHECKOUT MOVES UNDER YOU — CHECK THE BRANCH IMMEDIATELY BEFORE ANY WRITE.**
+  Caught at this handoff: `~/workspace/devrc` was on **`feat/memory-detail-click`** (another
+  session's branch) with their uncommitted `nix/pkgs/default.nix` in the tree, 5 behind
+  `origin/main`. A `handoff_doc.py --confirm` there would have committed onto THEIR branch — no
+  conflict, no error, and `git log` afterwards shows exactly what you expect because you are
+  reading the branch you landed on. **Author the handoff from a worktree off `origin/main`**, which
+  also sidesteps the `stale-base` refusal a behind-checkout would have triggered.
+- 🔴 **A FLOOR OR A PINNED CONSTANT MAY HAVE A SECOND CALL SITE THAT BOUNDS IT — grep the NAME
+  across the repo before changing the value.** For 8e that was four files: two false hits (an
+  unrelated `MAX_SKIPPED_IDS` JS constant; comments only in `eventlistener.yaml`) and one real
+  second site. Changing one site alone leaves a guard asserting a stale reality.
+- 🔴 **RE-DERIVE A PINNED COUNT FROM THE SOURCE, AND DO NOT TRUST A PER-FILE TALLY.**
+  `routing.spec.ts` **collects 5 tests but only 4 are the no-DB ones** — it splits
+  `SPA tab routing (no-DB shell)` (4, unguarded) from `SPA tab routing (full mode)` (1, behind
+  `guardFullMode()`). A count of collected-tests-per-file reads `SHELL_ONLY = 37` and silently
+  raises the floor's lower bound. ⚠ My first attempt at that tally also hit the documented **zsh
+  no-word-splitting** trap — `for b in $MULTILINE` looped ONCE on the whole string and returned a
+  plausible 32 that happened to be correct. Re-derived in Python rather than keep a number watched
+  arriving by luck.
+- 🔴 **PROVE A BOUND FIRES BEFORE TRUSTING IT — this one was MEASURED INERT once.**
+  `test_clawgate_e2e_verdict.py` records an audit that set `MIN_PASSED=2` / `MAX_SKIPPED=1000` and
+  watched **every case pass**. So the 8e change was verified by mutating the MANIFEST (what a
+  person reaches for when the gate reds), never the test: `MIN_PASSED=2` → reds
+  `test_the_floor_sits_ABOVE_a_database_less_run`; `=126` → `test_the_floor_sits_AT_OR_BELOW_a_healthy_run`;
+  `MAX_SKIPPED=1` → the ceiling rejects the permanent skips; `=1000` → `test_the_skip_ceiling_admits_
+  the_permanent_skips_and_little_else`. Each fires its OWN named bound.
+- 🔴 **MERGED ≠ LIVE for anything Flux reconciles — and a mid-cascade snapshot looks exactly like a
+  wedged one.** After #584 merged, the LIVE Task still carried `MIN_PASSED=110`; a PipelineRun
+  executes the DEPLOYED object. Worse, the first read of the Flux chain showed `tekton-operator`
+  "Reconciliation in progress" with `tekton-config` and `tekton-triggers` both blocked on their
+  dependency — which reads as a broken GitOps delivery path. One minute later the operator was
+  Ready on my own revision: it was a normal cascade caught in flight. **Re-read a dependency chain
+  before reporting it blocked.** ⚠ Also: the floor is NOT in the TriggerTemplate. The chain is
+  TriggerTemplate → `pipelineRef` → **Task `clawgate-e2e`**; a grep for `MIN_PASSED` across all 13
+  TriggerTemplates returns **0**, which is a FAILING POSITIVE CONTROL, not a clean zero.
+- ⚠ **A `finally:`-only restore is not SIGKILL-safe, and the Bash tool caps at 10 minutes** however
+  long a timeout you request. A mutation battery was killed mid-run and left `internal/ui/layout.go`
+  MODIFIED in the worktree. Run long batteries with `run_in_background`, and `git status` the tree
+  after any killed run before trusting anything downstream of it.
 
 ## How to verify
 
