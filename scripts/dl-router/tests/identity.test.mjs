@@ -8,9 +8,11 @@ import assert from "node:assert/strict";
 
 import {
   KIND_CATEGORY, KIND_PERFORMER, SCORE_ALIAS_SITE, buildMatchPayload,
-  carryReferrer, discordAliasKey, discordChannelId, hostOf, identitySignals,
+  carryReferrer, discordAliasKey, discordChannelId, discordSourceKey, hostOf,
+  identitySignals,
   kindOf,
-  localContext, localDecide, subjectPhrases, threadAliasKey, threadSlug,
+  localContext, localDecide, preferOriginalUrl, subjectPhrases, threadAliasKey,
+  threadSlug,
   titleSubject,
 } from "../extension/route_core.js";
 import { loadUrlCases } from "./fixtures.mjs";
@@ -57,7 +59,144 @@ test("hostnames match the shared table byte for byte", () => {
   }
 });
 
+test("every table row's ledger key is signature-free and host-folded", () => {
+  // Driven off the SAME table as the channel ids, so a URL shape added there
+  // is covered here too rather than needing a second hand-copied list -- the
+  // exact failure the table's own `_why` block describes.
+  //
+  // 🔴 IT ASSERTS PROPERTIES, NOT A RE-DERIVED STRING. This used to assert
+  // `=== c.url.split("?")[0]`, which is not the contract: the key also drops
+  // the fragment, lower-cases the host and folds the proxy host to the origin.
+  // A legitimate new fixture row carrying a `#fragment` therefore RED-ed this
+  // guard while the implementation was correct -- a guard that punishes the
+  // fixture growth it advertises. Exact values are pinned by the hand-written
+  // literal tests below, which is where an exact expectation belongs.
+  for (const c of URL_CASES.discord) {
+    const key = discordSourceKey(c.url);
+    if (!c.channel) {
+      assert.equal(key, "", c.url);
+      continue;
+    }
+    assert.equal(key.includes("?"), false, `query survived: ${c.url}`);
+    assert.equal(key.includes("#"), false, `fragment survived: ${c.url}`);
+    assert.ok(key.startsWith("https://cdn.discordapp.com/"),
+      `host not folded to the origin: ${c.url} -> ${key}`);
+    assert.equal(key.endsWith(new URL(c.url).pathname), true,
+      `path not preserved: ${c.url} -> ${key}`);
+  }
+});
+
+test("the proxy copy and the original are ONE ledger row", () => {
+  // The failure this fold exists to remove: save an image once from Chrome's
+  // own "Save image as…" (which yields the proxy src) and once from this
+  // extension's menu (which yields the origin), and a host-scoped key files
+  // them as two assets that never accumulate a hit.
+  const path = `/attachments/${CHANNEL}/998877665544332211/a.png`;
+  const proxy = `https://media.discordapp.net${path}?format=webp&width=550`;
+  const origin = `https://cdn.discordapp.com${path}?ex=1&is=2&hm=3`;
+  assert.equal(discordSourceKey(proxy), discordSourceKey(origin));
+  assert.equal(discordSourceKey(proxy), `https://cdn.discordapp.com${path}`);
+});
+
+test("a fragment never reaches the ledger key", () => {
+  // The shape that RED-ed the old table guard. Pinned so it cannot come back.
+  assert.equal(discordSourceKey(`${CDN}#t=5`), CDN);
+});
+
 // --- Discord ---------------------------------------------------------------- //
+test("the signature does not reach the ledger key", () => {
+  // Discord re-signs on every page load, so these two name ONE asset. Keyed on
+  // the raw URL they are two ledger rows and `have` can only ever miss.
+  const a = `${CDN}?ex=68b1&is=68b0&hm=aaaaaaaa`;
+  const b = `${CDN}?ex=68c2&is=68c1&hm=bbbbbbbb`;
+  assert.notEqual(a, b);
+  assert.equal(discordSourceKey(a), discordSourceKey(b));
+  assert.equal(discordSourceKey(a), CDN);
+});
+
+test("two different attachments in one channel keep different ledger keys", () => {
+  // The failure mode of over-normalising: a channel-wide key would collapse
+  // every attachment ever posted into one row.
+  const other
+    = `https://cdn.discordapp.com/attachments/${CHANNEL}/111111111111111111/b.mp4`;
+  assert.notEqual(discordSourceKey(CDN), discordSourceKey(other));
+});
+
+test("a non-attachment Discord URL gets no ledger key", () => {
+  assert.equal(
+    discordSourceKey(`https://cdn.discordapp.com/avatars/${CHANNEL}/a.png`), "");
+  assert.equal(discordSourceKey("https://example-site.test/a.mp4"), "");
+  assert.equal(discordSourceKey(""), "");
+});
+
+test("a Discord attachment's key BEATS the capture's own embed-page key", () => {
+  // A Discord channel URL names thousands of assets. If the capture's key won,
+  // every attachment in the channel would share one ledger row.
+  const payload = buildMatchPayload(
+    { id: 1, url: CDN },
+    { sourceKey: "https://discord.com/channels/1/2" },
+    null);
+  assert.equal(payload.sourceKey, CDN);
+});
+
+test("a non-Discord download still uses the capture's key", () => {
+  const payload = buildMatchPayload(
+    { id: 1, url: "https://cdn.example-site.test/signed.mp4?token=x" },
+    { sourceKey: "https://example-embed.test/e/abc" },
+    null);
+  assert.equal(payload.sourceKey, "https://example-embed.test/e/abc");
+});
+
+test("an ordinary download still carries no key at all", () => {
+  const payload = buildMatchPayload(
+    { id: 1, url: "https://example-site.test/a.mp4" }, {}, null);
+  assert.equal(payload.sourceKey, "");
+});
+
+// --- preferring the original over the resizing proxy ------------------------ //
+const PREVIEW
+  = `https://media.discordapp.net/attachments/${CHANNEL}/998877665544332211/a.png`;
+const ORIGINAL
+  = `https://cdn.discordapp.com/attachments/${CHANNEL}/998877665544332211/a.png`;
+
+test("a proxy thumbnail is swapped for the original behind it", () => {
+  assert.equal(
+    preferOriginalUrl(`${PREVIEW}?format=webp&width=550&height=733`,
+      `${ORIGINAL}?ex=1&is=2&hm=3`),
+    `${ORIGINAL}?ex=1&is=2&hm=3`);
+});
+
+test("a link to a DIFFERENT asset is never substituted", () => {
+  // The whole point of comparing paths: a link that merely wraps an image is
+  // not evidence that it is the same thing.
+  const elsewhere
+    = `https://cdn.discordapp.com/attachments/${CHANNEL}/222222222222222222/z.png`;
+  assert.equal(preferOriginalUrl(PREVIEW, elsewhere), PREVIEW);
+});
+
+test("a non-Discord pair is left exactly alone", () => {
+  assert.equal(
+    preferOriginalUrl("https://example-site.test/thumb.jpg",
+      "https://example-site.test/full.jpg"),
+    "https://example-site.test/thumb.jpg");
+});
+
+test("an avatar sharing the hosts is never swapped", () => {
+  const av = `https://media.discordapp.net/avatars/${CHANNEL}/a.png`;
+  const av2 = `https://cdn.discordapp.com/avatars/${CHANNEL}/a.png`;
+  assert.equal(preferOriginalUrl(av, av2), av);
+});
+
+test("a video's own src survives -- there is nothing better to swap to", () => {
+  assert.equal(preferOriginalUrl(CDN, "https://discord.com/channels/1/2"), CDN);
+});
+
+test("either URL missing degrades to the other, never to empty", () => {
+  assert.equal(preferOriginalUrl("", ORIGINAL), ORIGINAL);
+  assert.equal(preferOriginalUrl(PREVIEW, ""), PREVIEW);
+  assert.equal(preferOriginalUrl("", ""), "");
+});
+
 test("a Discord attachment yields a site-scoped channel identity", () => {
   // Six of nine real downloads looked like this: `tags: []`, `title: ''`,
   // `pageUrl: ''`. The channel id in the URL is the only signal there is.

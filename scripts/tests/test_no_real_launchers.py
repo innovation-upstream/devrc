@@ -1459,6 +1459,18 @@ def test_the_module_loader_scan_can_actually_find_something(tmp_path):
 # assembles its patterns — which keeps THIS file inside the scan's scope instead
 # of excluding it, so a real clobber added here would still be caught.
 PINNED_PATH_CLOBBERS = {
+    "test_session_stamp_seam.py": (
+        '"PATH"' + ': str(empty_bin)',
+        "an EMPTY directory in tmp_path, justified by emptiness like "
+        "test_claude_log_rotate.py above. The absence is the whole point of the "
+        "test: the installer-GENERATED prepare-commit-msg must exit 0 when no "
+        "python3 can be found, because as a `#!/usr/bin/env python3` hook an "
+        "unresolvable interpreter made `git commit` exit 1 with the commit "
+        "REFUSED (measured, paired control). No amount of PREPENDING can make "
+        "an interpreter unfindable, so the clobber is required to reach the "
+        "condition at all. 🔴 It removes python3 and everything else — the test "
+        "asserts only the hook's exit status and that the message file is "
+        "byte-identical, both of which are independent of what else is on PATH"),
     "test_rig_control.py": (
         '"PATH"' + ': "/usr/bin/false"',
         "deliberately makes yad unfindable; /usr/bin/false holds no binaries, so "

@@ -9,7 +9,6 @@ description: Drive the user's LIVE, logged-in Brave browser — read the active 
 BB=~/workspace/devrc/scripts/browser-bridge/browser   # ← run it by this exact path
 $BB whoami                          # ORIENT FIRST: HOST + connected profiles + extension_stale
 $BB --instance <key> open <url>     # open a NEW tab THIS session owns → returns tabId
-$BB --instance <key> --tab <id> text   # cheap read of a specific tab
 ```
 
 🔴 **Run `whoami` first on every fresh browser task.** Both hosts are hostname
@@ -47,6 +46,11 @@ Global flags, usable before any op: `--instance <key>` (which profile),
 Env defaults `$BB_INSTANCE`/`$BB_TAB`/`$BB_FRAME` (flag wins; zsh does NOT
 split an unquoted `$F`). ⚠ an export outlives the call — env-routed ops say so
 once, on stderr.
+A toolbar-icon click copies `bw://<host>/<instance>/<tabId>` — one token that IS
+`--instance`+`--tab`, either side of the op; host verified. `<ref> context`
+resolves one. 🔴 For
+`type`/`js`/`eval`/`agent` it is a reference only BEFORE the op — after it, it is
+the text/goal you send. `agent` refuses a LEADING one, `--tab` and `--frame`.
 Result payloads land under `.result.data`.
 
 | command | does |
@@ -54,7 +58,7 @@ Result payloads land under `.result.data`.
 | `whoami` | **read-only identity** (global; no `--instance`) — host label (`laptop`/`workbench`), connected instances (active-tab **domain** only), bridge diagnostics, `extension_version_current` |
 | `health` / `instances` | connected instances + count (JSON: key, label, instanceId, tab url/title). `extension_stale` on `health`+`whoami`, NOT `instances` — ⚠ `null` = "undecidable", NOT "fine" → `reference/errors.md` |
 | `ping` | **which extension CODE is loaded?** → `{pong,extensionVersion,buildMarker,id,ops}`; read `buildMarker` — version+id describe the DIRECTORY. Staleness is PER PROFILE |
-| `context` | **page metadata, no DOM read** — url/domain/path/query/title/tabId, tab-scoped. Cheapest read; ⚠ NOT a render check → `reference/read-envelopes.md` |
+| `context` | **page metadata, no DOM read** — url/domain/path/query/title/tabId, tab-scoped. Cheapest read; also RESOLVES a `bw://` ref; ⚠ NOT a render check → `reference/read-envelopes.md` |
 | `open [url] [--wake[=MS]]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. 🔴 A re-`open` does NOT navigate — it DISCARDS your url → `reference/tabs-instances.md` |
 | `close` / `release` | close this session's owned tab / drop ownership without closing it |
 | `tabs` | list open tabs (`.data.ownedTabId` flags yours) |
@@ -104,12 +108,11 @@ users?" needs server-side evidence (RUM, metrics, pod health, anonymous `curl`).
 
 ## This is the user's LIVE session
 
-It's their real browser, not a scratch VM. Don't `nav` a tab that may hold unsaved
-work (a half-typed comment, a form) — `open` your own tab, or an obviously
-disposable one. 🔴 If ANYTHING takes their screen — `activate`, the X-fallback
-capture — RECORD focus AND workspace first and restore BOTH at the end, on
-failure too; restoring focus does not reliably carry the workspace. Why, and the
-commands → `reference/spa-wake.md`.
+Their real browser, not a scratch VM: don't `nav` a tab that may hold unsaved work
+(a half-typed comment, a form) — `open` your own, or an obviously disposable one.
+Anything that takes their screen (`activate`, X-fallback) is governed by RULES.md
+→ "The Operator's Screen Is Not Yours To Take", which loads every session; the
+record/restore commands → `reference/spa-wake.md`.
 
 ## Reference files — load ONE only when its trigger fires
 

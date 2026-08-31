@@ -28,6 +28,22 @@ that calls `collector/invocation.py:emit_invocation`** — `verify-agent-work`, 
 rows and the drafter cwd heuristic). **Anything that does not emit is invisible, and no registry
 row can change that.**
 
+🔴 **SKILLS ARE NOT IN THIS REPORT — and "is skill X used?" has a DIFFERENT owner.**
+This scan sees the 9 `invocation.py` emitters above; a **skill** (`signal`, `browser`,
+`handoff`, …) is not one of them, so asking this report about a skill gets silence, not a
+zero. **The answer lives in `find-session --skill NAME`** (`scripts/find-session.py`), which
+reads the `skills_used` / `skills_invoked` rollup the Claude session-tailer writes onto
+`source='claude', kind='session-summary'`.
+
+🔴 **Do not answer a skill-usage question by grepping transcripts for the skill's name.** That
+is the exact mistake this routing line exists to prevent: measured 2026-08-29, `signal` returned
+**678** keyword-matching sessions and **6** real uses — and 5 of the 6 were on the *laptop*, so a
+workbench-only keyword search answered "never used", the reverse of the truth. Mention ≠ use, and
+one host ≠ the fleet.
+
+⚠ `skills_used` is **forward-only** (first rows 2026-08-29): a skill genuinely used before that
+date reads as unused. Say "no recorded use since <date>", never "never used".
+
 **Known uncovered: the `make ux-audit` harnesses** (naida / vetr / auditloop-self / remix /
 civitai-manager — see `ux-audit-loops`). They run from a Makefile inside those repos, not through
 a devrc wrapper, and emit **nothing**. So this scan **cannot** answer "is `make ux-audit` actually

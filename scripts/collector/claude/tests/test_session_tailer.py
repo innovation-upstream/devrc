@@ -1018,7 +1018,223 @@ def test_v1_state_file_migrates_without_a_reemit_storm(env):
     env["state"].write_text(json.dumps(
         {"version": 1, "sigs": {str(p): S.signature(str(p))}}), encoding="utf-8")
     loaded = S.load_state(env["state"])
-    assert loaded[str(p)] == {"sig": S.signature(str(p)), "emitted_at": None}
+    # `mentions` is the v3 field (the source=mentions ledger). A v1 entry has
+    # never emitted one, so it migrates to the empty ledger — which re-emits any
+    # mention once and re-converges, exactly like the unknown `emitted_at`.
+    assert loaded[str(p)] == {"sig": S.signature(str(p)), "emitted_at": None,
+                              "mentions": []}
     assert S.run(now=time.time()) == 0
     assert _spool_events(env["spool"]) == []        # unchanged → nothing emitted
     assert json.loads(env["state"].read_text())["version"] == S.STATE_VERSION
+
+
+# --------------------------------------------------------------------------- #
+# MENTIONS (source=mentions) — the second event stream this tailer emits
+# --------------------------------------------------------------------------- #
+# Every fixture below is SYNTHETIC. This repo is public and captured agent text
+# is not committable, so the "assistant output" here is written for the shapes it
+# exercises and nothing else.
+def assistant_text(*texts, ts="2026-07-11T10:01:00.000Z",
+                   cwd="/home/zach/workspace/devrc", isSidechain=False):
+    """An assistant turn whose content is TEXT blocks (the ones the mention scan
+    reads), as opposed to `assistant()` above which builds tool_use blocks."""
+    return {"type": "assistant", "timestamp": ts, "cwd": cwd,
+            "isSidechain": isSidechain,
+            "message": {"role": "assistant", "model": "claude-opus-4-8",
+                        "content": [{"type": "text", "text": t} for t in texts],
+                        "usage": {}}}
+
+
+def _mentions(spool):
+    return [e for e in _spool_events(spool) if e["source"] == "mentions"]
+
+
+def _summaries(spool):
+    return [e for e in _spool_events(spool) if e["source"] == "claude"]
+
+
+def test_collect_mentions_reads_assistant_text_only():
+    """Tool inputs, tool RESULTS and user messages are deliberately out of
+    scope: a tool result is usually a file the agent read, so scanning it would
+    record the repo's own contents as 'mentions'."""
+    objs = [
+        user_typed("please look at #111"),
+        user_tool_result(is_error=False, text="a file containing #222"),
+        assistant([("Bash", {"command": "gh pr view 333"})]),
+        assistant_text("done, see civitai/talos-infra#444"),
+    ]
+    got = S.collect_mentions(objs)
+    assert [(m["platform"], m["id"]) for m in got] == [("github", "444")]
+
+
+def test_collect_mentions_skips_sidechain_turns():
+    objs = [assistant_text("#111", isSidechain=True), assistant_text("#222")]
+    assert [m["id"] for m in S.collect_mentions(objs)] == ["222"]
+
+
+def test_collect_mentions_dedupes_on_the_RAW_text_not_the_bare_id():
+    """🔴 `devrc#7` and `talos-infra#7` are different references that share an
+    id. Keying the ledger on the id alone would emit the first and silently drop
+    the second for the life of the session."""
+    objs = [assistant_text("devrc#7 and talos-infra#7 and devrc#7 again")]
+    got = S.collect_mentions(objs)
+    assert [m["raw"] for m in got] == ["devrc#7", "talos-infra#7"]
+
+
+def test_collect_mentions_is_capped(monkeypatch):
+    monkeypatch.setattr(S, "MENTIONS_PER_SESSION_CAP", 3)
+    objs = [assistant_text(" ".join(f"#{n}" for n in range(100, 200)))]
+    assert len(S.collect_mentions(objs)) == 3
+
+
+def test_collect_mentions_takes_the_turns_own_timestamp():
+    objs = [assistant_text("#370", ts="2026-07-11T12:34:56.000Z")]
+    (m,) = S.collect_mentions(objs)
+    assert m["ts"] == "2026-07-11 12:34:56.000"
+
+
+def test_a_mention_emits_its_own_event_and_roundtrips(env):
+    _write(env["projects"], "-home-zach-workspace-devrc", "sess-M", [
+        user_typed("do a thing"),
+        assistant_text("landed as civitai/talos-infra#1065", ts="2026-07-11T10:02:00.000Z"),
+    ])
+    assert S.run() == 0
+    assert len(_summaries(env["spool"])) == 1, "the session summary must still ship"
+    (ev,) = _mentions(env["spool"])
+    assert ev["kind"] == "mention-detected"
+    assert ev["text"] == "civitai/talos-infra#1065"
+    assert ev["session"] == "sess-M"
+    assert ev["project"] == "devrc"
+    assert ev["app"] == "claude-code"
+    # The mention's OWN instant, not the session start (10:00).
+    assert ev["ts"] == "2026-07-11 10:02:00.000"
+    payload = json.loads(ev["payload"])
+    assert payload["platform"] == "github"
+    assert payload["reference_id"] == "1065"
+    assert payload["url"] == "https://github.com/civitai/talos-infra/issues/1065"
+    assert payload["candidates"] == "github"
+    assert "civitai/talos-infra#1065" in payload["context"]
+
+
+def test_a_bare_reference_is_emitted_as_ambiguous_with_no_url(env):
+    """🔴 An ambiguous span must NOT be recorded as a resolved one. Emitting a
+    clawgate row AND a github row for one `#370` would put a reference in the
+    dataset that was never made."""
+    _write(env["projects"], "-home-zach-workspace-devrc", "sess-A", [
+        user_typed("go"), assistant_text("fixed in #370"),
+    ])
+    assert S.run() == 0
+    (ev,) = _mentions(env["spool"])
+    payload = json.loads(ev["payload"])
+    assert payload["platform"] == "ambiguous"
+    assert payload["url"] == ""
+    assert payload["candidates"] == "clawgate,github"
+
+
+def test_a_clickup_id_is_emitted(env):
+    _write(env["projects"], "-home-zach-workspace-devrc", "sess-C", [
+        user_typed("go"), assistant_text("ticket 868abc123 is done"),
+    ])
+    assert S.run() == 0
+    (ev,) = _mentions(env["spool"])
+    payload = json.loads(ev["payload"])
+    assert payload["platform"] == "clickup"
+    assert payload["url"] == "https://app.clickup.com/t/868abc123"
+
+
+def test_a_session_with_no_mentions_emits_only_its_summary(env):
+    _write(env["projects"], "-home-zach-workspace-devrc", "sess-N", [
+        user_typed("go"), assistant_text("all done, nothing to reference"),
+    ])
+    assert S.run() == 0
+    assert len(_summaries(env["spool"])) == 1
+    assert _mentions(env["spool"]) == []
+
+
+def test_a_mention_is_NOT_reemitted_when_the_session_resummarises(env):
+    """🔴 THE AMPLIFICATION GUARD. A session re-emits its rollup up to ~7 times
+    a day (first-seen / interim / settled). Without the per-session ledger every
+    mention would ride along on each of those — the exact row-storm this file's
+    header documents for session-summary itself."""
+    p = _write(env["projects"], "-home-zach-workspace-devrc", "s1", [
+        user_typed("go"), assistant_text("see #370"),
+    ])
+    t0 = time.time()
+    assert S.run(now=t0) == 0
+    assert len(_mentions(env["spool"])) == 1
+
+    # Grow it, let it settle, and let the interim window elapse so the summary
+    # genuinely re-emits.
+    _append(p, user_typed("more", ts="2026-07-11T11:00:00.000Z"),
+            mtime=t0 + SETTLE + 1)
+    later = t0 + SETTLE + INTERIM + 10
+    assert S.run(now=later) == 0
+    assert len(_summaries(env["spool"])) == 2, "the summary must have re-emitted"
+    assert len(_mentions(env["spool"])) == 1, "the mention must NOT have re-emitted"
+
+
+def test_a_NEW_mention_in_a_resumed_session_IS_emitted(env):
+    """The ledger must suppress repeats without suppressing new material."""
+    p = _write(env["projects"], "-home-zach-workspace-devrc", "s1", [
+        user_typed("go"), assistant_text("see #370"),
+    ])
+    t0 = time.time()
+    assert S.run(now=t0) == 0
+    _append(p, assistant_text("and also 868abc123", ts="2026-07-11T11:00:00.000Z"),
+            mtime=t0 + SETTLE + 1)
+    later = t0 + SETTLE + INTERIM + 10
+    assert S.run(now=later) == 0
+    ids = sorted(json.loads(e["payload"])["reference_id"]
+                 for e in _mentions(env["spool"]))
+    assert ids == ["370", "868abc123"]
+
+
+def test_the_ledger_survives_a_restart_through_the_state_file(env):
+    p = _write(env["projects"], "-home-zach-workspace-devrc", "s1", [
+        user_typed("go"), assistant_text("see #370"),
+    ])
+    assert S.run() == 0
+    assert S.load_state(env["state"])[str(p)]["mentions"] == ["ambiguous:#370"]
+
+
+def test_a_corrupt_mention_ledger_degrades_instead_of_crashing():
+    """A ledger we cannot read must never make a mention permanently
+    unemittable, and must never crash the timer."""
+    for junk in (None, "not a list", 5, {"a": 1}):
+        assert S._mention_keys(junk) == []
+    assert S._mention_keys(["a", 2, "b"]) == ["a", "b"]
+
+
+def test_the_run_summary_reports_the_mention_count(env, capsys):
+    _write(env["projects"], "-home-zach-workspace-devrc", "s1", [
+        user_typed("go"), assistant_text("see #370 and devrc#5"),
+    ])
+    assert S.run() == 0
+    assert "mentions=2" in _summary_line(capsys)
+
+
+def test_the_mention_count_is_printed_even_when_zero(env, capsys):
+    """A counter that only appears when non-zero is indistinguishable from a
+    build that never had it — the same reason `failed` is unconditional."""
+    _write(env["projects"], "-home-zach-workspace-devrc", "s1", [user_typed("go")])
+    assert S.run() == 0
+    assert "mentions=0" in _summary_line(capsys)
+
+
+def test_an_unreadable_transcript_emits_no_mentions_and_does_not_crash(env):
+    d = env["projects"] / "-home-zach-workspace-devrc"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "garbage.jsonl").write_text("not json at all\n", encoding="utf-8")
+    assert S.run() == 0
+    assert _mentions(env["spool"]) == []
+    assert len(_summaries(env["spool"])) == 1
+
+
+def test_summarize_transcript_still_answers_from_the_shared_reader(tmp_path):
+    """`load_transcript` was split out so ONE read serves both the rollup and the
+    mention scan. The old entry point must be unchanged for its own callers."""
+    p = tmp_path / "s.jsonl"
+    p.write_text(json.dumps(assistant_text("#370")) + "\n", encoding="utf-8")
+    assert S.load_transcript(str(p)) is not None
+    assert S.summarize_transcript(str(p))["unreadable"] is False
+    assert S.load_transcript(str(tmp_path / "missing.jsonl")) is None

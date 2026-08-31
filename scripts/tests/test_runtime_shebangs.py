@@ -76,6 +76,20 @@ PATTERNS = ("test_*.py", "conftest.py", "test_*.sh")
 #       (`/bin/sh`, `sys.executable`);
 #   (b) the string is not a shebang at all.
 ALLOWLIST = [
+    # Shape (b): not a shebang being WRITTEN, a shebang being ASSERTED. The line
+    # pins that the wrapper the installer GENERATES starts with `#!/bin/sh`,
+    # which is a deploy-blocking correctness property rather than a style choice:
+    # as `#!/usr/bin/env python3` an unresolvable interpreter made `git commit`
+    # exit 1 with the commit REFUSED (measured, with a paired control). /bin/sh
+    # is absolute and sandbox-present, so this allowlisting cannot readmit the
+    # hazard the guard exists to catch — and the assertion is what keeps anyone
+    # from putting `env` back.
+    # 🔴 The pattern deliberately does NOT spell the shebang: this file's own
+    # `test_this_guards_source_does_not_match_itself` would then flag the
+    # allowlist entry, which is the guard correctly refusing to carry the very
+    # literal it exists to find. Match the assertion's shape instead.
+    ("scripts/tests/test_session_stamp_seam.py", "assert first ==",
+     "ASSERTS the hook's shebang (a fail-open requirement), never writes one"),
     ("scripts/tests/test_playwright_nixos.py", "/bin/sh",
      "writes /bin/sh directly — absolute, present in the sandbox"),
     ("scripts/tests/test_notify_failure.py", "_bash",
@@ -98,6 +112,24 @@ ALLOWLIST = [
     ("scripts/claude-hooks/tests/test_guard_core.py", "/usr/bin/doas",
      "not an argv the test EXECS: a parametrize list of wrapper-binary strings "
      "fed to gc.evaluate() as text, so the path is never resolved"),
+    # 🔴 The needle is /bin/sh WITHOUT the leading hash-bang, and that is not a
+    # style choice: a quote immediately followed by those two characters is
+    # itself one of the scan's needles, so writing the fuller string here makes
+    # THIS file its own offender. `test_this_guards_source_does_not_match_itself`
+    # catches it — observed while adding this very entry.
+    ("scripts/tests/test_mention_scan.py", "/bin/sh",
+     "shape (b) — not a shebang the test writes or execs: a parametrize entry in "
+     "the mention scanner's NEGATIVE-case list, passed to scan_mentions() as a "
+     "plain string to prove that a hash followed by a non-digit is not a "
+     "mention. No file is created and nothing is run. It names /bin/sh rather "
+     "than the env-based interpreter path so the pin stays inside shape (a) too"),
+    ("scripts/tests/test_cleanup_disk_gate.sh", "/bin/sh",
+     "writes /bin/sh directly — absolute, present in the sandbox. It is a bash "
+     "test stubbing nine binaries onto PATH, so testlib.mockbin.write_exec "
+     "(Python) is not reachable from it; shape (a) above is the sanctioned "
+     "alternative and the stub bodies are POSIX sh. It arrived carrying the "
+     "/usr/bin/env defect and this guard caught it on its first gate run — "
+     "which is the guard working, not a reason to widen it"),
 ]
 
 

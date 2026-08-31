@@ -210,6 +210,126 @@ export function discordAliasKey(channelId) {
   return KEY_PREFIX_DISCORD + String(channelId);
 }
 
+// Discord serves one attachment from two hosts: the resizing proxy goes in the
+// <img src>, downscaled to whatever the client asked for and usually
+// re-encoded to webp, while the original sits on the wrapping <a href>. So
+// `info.srcUrl` on an image names A THUMBNAIL, not the file that was posted.
+// (A <video> is unaffected -- its src is already the origin.)
+const DISCORD_PREVIEW_HOST = "media.discordapp.net";
+const DISCORD_ORIGIN_HOST = "cdn.discordapp.com";
+
+/**
+ * The stable ledger identity of a Discord attachment, else "".
+ *
+ * Discord signs every CDN URL (`ex`/`is`/`hm`) and re-signs it on each page
+ * load, so the query names THE REQUEST rather than the asset -- precisely the
+ * case `sourceKey` was introduced for. The path
+ * `/attachments/<channel>/<message>/<name>` is globally unique and never
+ * rotates, so dropping the query is what makes "have I got this already"
+ * answerable at all.
+ *
+ * Without it every re-download of one attachment writes a NEW ledger row and a
+ * lookup can only ever miss -- the failure `haveUrl` already names in its own
+ * words: "a badge that never lights actively asserts you do not have this".
+ * `store.source_url_key` keeps the query on purpose, and is right to: on the
+ * sites it was written for the query IS the asset identity. Discord is the
+ * exception, so the exception is expressed here, once, rather than by
+ * weakening that rule for everyone.
+ *
+ * THE AUTHORITY IS FOLDED -- host, SCHEME and PORT, not just the host.
+ * `playerSourceKey` keys on `scheme://host + path` (and `host` carries a
+ * non-default port), so the proxy copy and the original -- the SAME attachment
+ * path served from two hosts -- would key differently and file as two assets.
+ * Save an image once from Chrome's own "Save image as..." and once from this
+ * extension's menu and the ledger holds two rows that never accumulate a hit:
+ * exactly the miss this key exists to remove. The docstring above says the
+ * PATH is the identity; folding the authority is what makes the implementation
+ * as wide as that sentence.
+ *
+ * Scheme and port fold out as a consequence of rebuilding the key from a fixed
+ * origin rather than from the input. Stated because it is real, not because it
+ * matters here: Discord is https-only and portless, so no live URL exercises
+ * either axis, and tests/identity.test.mjs pins the host axis only.
+ *
+ * The READ side must fold identically -- see `haveUrl` in service_worker.js.
+ */
+export function discordSourceKey(url) {
+  if (!discordChannelId(url)) return "";
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "";
+  }
+  return `https://${DISCORD_ORIGIN_HOST}${parsed.pathname || "/"}`;
+}
+
+/**
+ * THE LEDGER'S KEY FOR ONE URL. One rule, one place.
+ *
+ * Every site that turns a single URL into a `source_urls` key goes through
+ * here: the write in `playerDownload` and the read in `haveUrl`. Those TWO were
+ * spelled differently for exactly one round -- one folded a Discord attachment,
+ * the other did not -- and that is precisely how they came to disagree: a
+ * lookup asked for a string the writer never stored.
+ *
+ * (Two, not three. `buildMatchPayload` also mentions `discordSourceKey`, but it
+ * is a different rule and is excluded below on purpose; counting it here would
+ * contradict the next paragraph.)
+ *
+ * NOT the same rule as `buildMatchPayload`'s `sourceKey`, and it must not be
+ * folded into this. That one arbitrates between TWO candidate keys -- the
+ * download's own URL versus the capture's -- and deliberately yields "" for an
+ * ordinary download so the sidecar falls back to the full URL. Routing this
+ * through here instead would mint a key for EVERY download on every site,
+ * silently changing what the ledger records everywhere.
+ */
+export function ledgerSourceKey(url) {
+  return discordSourceKey(url) || playerSourceKey(url);
+}
+
+/**
+ * Given the two URLs the browser offers for one right-clicked element, the one
+ * a "save this" action should actually fetch.
+ *
+ * NARROW ON PURPOSE. It swaps only when both URLs are Discord attachment URLs
+ * with the SAME path -- i.e. provably the same asset at two resolutions.
+ * A link that merely happens to wrap an image is not evidence of anything, and
+ * preferring `linkUrl` in general would turn every linked thumbnail on every
+ * site into a download of wherever the link pointed.
+ *
+ * KNOWN UNHANDLED VARIANT, stated rather than guessed at: if Discord ever
+ * puts a FULL-SIZE PROXY url on the anchor (`media.discordapp.net?width=4096`)
+ * instead of the origin, this returns `srcUrl` and the downscaled copy is still
+ * what gets saved. Widening to "prefer the anchor whenever the paths match"
+ * would cover it, but nothing in the live corpus shows that shape, and a
+ * URL cannot be read for pixel size -- so the narrow rule stands until a real
+ * instance turns up.
+ *
+ * NOT OBSERVABLE: nothing records whether this ever fires. The extension has
+ * no logging facility and inventing one is out of scope here, so the next
+ * reader cannot answer "is this a no-op in production?" from data. Say so
+ * rather than implying it has been seen to work.
+ */
+export function preferOriginalUrl(srcUrl, linkUrl) {
+  if (!srcUrl) return linkUrl || "";
+  if (!linkUrl) return srcUrl;
+  if (hostOf(srcUrl) !== DISCORD_PREVIEW_HOST) return srcUrl;
+  if (hostOf(linkUrl) !== DISCORD_ORIGIN_HOST) return srcUrl;
+  // Both must be attachments, not just Discord-hosted: an avatar or an emoji
+  // shares the hosts and must never be swapped for something else.
+  if (!discordChannelId(srcUrl) || !discordChannelId(linkUrl)) return srcUrl;
+  let src;
+  let link;
+  try {
+    src = new URL(srcUrl);
+    link = new URL(linkUrl);
+  } catch {
+    return srcUrl;
+  }
+  return src.pathname === link.pathname ? linkUrl : srcUrl;
+}
+
 /**
  * The stored key for a thread slug. NEAR-VERBATIM: `allTokens`, not
  * `contentTokens`. Stopword stripping belongs to fuzzy matching, never to an
@@ -597,7 +717,16 @@ export function buildMatchPayload(item, capture, carried) {
     // THE LEDGER'S KEY, when the download has a stable name that its own URL
     // is not (see playerSourceKey). Empty for every ordinary download, and the
     // sidecar then falls back to `url` exactly as it did before.
-    sourceKey: typeof c.sourceKey === "string" ? c.sourceKey : "",
+    //
+    // A Discord attachment BEATS the capture's own key, and the order matters.
+    // The capture's key is `playerSourceKey(embedUrl)` -- the page the media
+    // was embedded in. On the sites that feature was built for one embed page
+    // carries one video, so the page identifies the asset; on Discord one
+    // channel URL carries thousands, so using it would collapse an entire
+    // channel into a single ledger row. The attachment path identifies the
+    // asset exactly, so it wins wherever it exists.
+    sourceKey: discordSourceKey(item?.url)
+      || (typeof c.sourceKey === "string" ? c.sourceKey : ""),
     page: {
       title: c.pageTitle || "",
       url: c.pageUrl || "",

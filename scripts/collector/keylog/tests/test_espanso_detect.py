@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import espanso_triggers as ET       # noqa: E402
+import espanso_detect as ED         # noqa: E402
 from espanso_detect import EspansoDetector  # noqa: E402
 
 # A representative slice of the live config. :date is a prefix of :datetime
@@ -507,11 +508,16 @@ def test_multiword_term_with_extra_whitespace_is_tokenized():
 #                  mutation-checked instead — see the PR body.
 #
 # These fixtures carry the REAL triggers/labels/search_terms from nix/home.nix.
+# 🔴 2026-08-29: `:dacq` regained "ask" + "clarifying" there (deliberately — see
+# `_AMBIGUOUS_TERM_OWNER`), so this fixture was updated to match. Keeping the
+# older, narrower list would have left every test below green while the live
+# config had gone ambiguous: a fixture that has drifted from the file it claims
+# to mirror asserts the past, and reads as coverage of the present.
 ACQ_BASE = {"matches": [
     {"trigger": ":dacq", "replace": "...",
      "label": "Process feedback: dispatch subagent + elicit scope",
-     "search_terms": ["feedback", "dispatch", "process", "elicit", "scope",
-                      "include"]},
+     "search_terms": ["ask", "clarifying", "feedback", "dispatch", "process",
+                      "elicit", "scope", "include"]},
     {"trigger": ":acq", "replace": "...", "label": "ask clarifying questions",
      "search_terms": ["ask", "clarify", "clarifying", "questions"]},
 ]}
@@ -593,6 +599,126 @@ def test_naming_tiebreak_does_not_reach_the_picker():
     d = _det_for(ACQ_BASE)
     assert {t for t in d.ts.triggers if d._term_matches("acq", t)} == {
         ":acq", ":dacq"}
+
+
+# -- FIX 5: a term two snippets spell ON PURPOSE ------------------------------
+# 2026-08-29. `:dacq` regained "ask" and "clarifying" in nix/home.nix, because
+# that is how the dispatch snippet is actually searched for. `_names_trigger`
+# cannot rescue either term (neither snippet is NAMED "ask"), so both went to
+# None and the live guard went red. The two previous responses both deleted the
+# terms from `:dacq` — buying a telemetry row with a real picker route, and
+# reverted by hand each time.
+#
+# The fix is a DECLARED owner (`_AMBIGUOUS_TERM_OWNER`), consulted only on the
+# already-ambiguous branch and only over the snippets the term genuinely
+# reaches. The tests below pin both halves: that it resolves the declared case,
+# and — the part that keeps it from becoming "guess something" — that an
+# ambiguous term with NO declaration still returns None.
+def test_declared_owner_resolves_a_term_both_snippets_spell():
+    # RED without _AMBIGUOUS_TERM_OWNER: both are None, because ':dacq' spells
+    # "ask" outright and "clarify" ⊂ its "clarifying".
+    d = _det_for(ACQ_BASE)
+    assert d._term_matches("ask", ":dacq") is True     # the deliberate overlap
+    assert d._term_matches("ask", ":acq") is True
+    assert d._attribute("ask") == ":acq"
+    assert d._term_matches("clarify", ":dacq") is True  # via "clarifying"
+    assert d._attribute("clarify") == ":acq"
+
+
+def test_declared_owner_does_not_reach_the_picker():
+    # The whole reason the table exists: BOTH rows must still list. If this ever
+    # shrinks to one, the fix has re-made the mistake it was written to undo.
+    d = _det_for(ACQ_BASE)
+    assert {t for t in d.ts.triggers if d._term_matches("ask", t)} == {
+        ":acq", ":dacq"}
+    assert {t for t in d.ts.triggers if d._term_matches("clarify", t)} == {
+        ":acq", ":dacq"}
+
+
+def test_undeclared_ambiguous_term_still_resolves_to_none():
+    # 🔴 The honesty guard. Mutating the owner lookup to a positional pick
+    # (`matched[0]`, "shortest trigger", "first declared") passes every test
+    # above and fails here. Silence in the table is NOT a licence to guess.
+    d = _det_for(ACQ_BASE)
+    assert sorted(t for t in d.ts.triggers if d._term_matches("ac", t)) == [
+        ":acq", ":dacq"]
+    assert "ac" not in ED._AMBIGUOUS_TERM_OWNER
+    assert d._attribute("ac") is None
+
+
+def test_declared_owner_cannot_invent_a_resolution(monkeypatch):
+    # `owner in matched` is load-bearing: a stale entry — a snippet renamed, or
+    # a term that no longer reaches it — must go INERT, never point at a snippet
+    # the term does not match. Deleting that clause turns this red.
+    monkeypatch.setitem(ED._AMBIGUOUS_TERM_OWNER, "ac", ":zzz-not-a-trigger")
+    d = _det_for(ACQ_BASE)
+    assert ":zzz-not-a-trigger" not in d.ts.triggers
+    assert d._attribute("ac") is None
+
+
+def test_declared_owner_never_repoints_a_unique_match(monkeypatch):
+    # 🔴 AN INVARIANT GUARD, NOT REGRESSION COVERAGE — labelled as one because a
+    # mutation sweep proved it cannot fail on its own. `owner in matched` makes
+    # this property STRUCTURAL: if the owner is among the matches and there is
+    # only one match, the owner IS that match, so consulting the table earlier
+    # is a no-op. Measured — moving the lookup above the uniqueness check (M4)
+    # and above `_names_trigger` (M5) both left this GREEN; the guard that
+    # actually killed them is
+    # `test_naming_a_trigger_still_beats_the_declared_owner`, and the one that
+    # kills a dropped `owner in matched` is
+    # `test_declared_owner_cannot_invent_a_resolution`.
+    # It stays because it documents the invariant those two rest on. Do not
+    # count it as evidence the ordering is tested.
+    d = _det_for(ACQ_BASE)
+    assert d._attribute("questions") == ":acq"
+    monkeypatch.setitem(ED._AMBIGUOUS_TERM_OWNER, "questions", ":dacq")
+    assert d._attribute("questions") == ":acq"
+
+
+def test_naming_a_trigger_still_beats_the_declared_owner(monkeypatch):
+    # Precedence: a term that IS a trigger name is a stronger signal than a
+    # hand-declared owner, so `_names_trigger` must be consulted first. Swapping
+    # the two blocks in `_attribute` turns this red.
+    monkeypatch.setitem(ED._AMBIGUOUS_TERM_OWNER, "acq", ":dacq")
+    d = _det_for(ACQ_BASE)
+    assert d._attribute("acq") == ":acq"
+
+
+def test_every_declared_owner_names_a_real_live_trigger():
+    """A typo or a renamed snippet leaves an entry that can never fire.
+
+    ANTI-VACUITY: this reads the LIVE config, so an empty trigger set would make
+    it pass with nothing checked — `_live_det` is pinned non-trivial by
+    `test_live_scraper_observes_the_real_config`, and asserted again here.
+    """
+    d = _live_det()
+    assert len(d.ts.triggers) > 20, "the live scraper found almost nothing"
+    unknown = {term: trig for term, trig in ED._AMBIGUOUS_TERM_OWNER.items()
+               if trig not in d.ts.triggers}
+    assert not unknown, (
+        "these _AMBIGUOUS_TERM_OWNER entries name a trigger that no longer "
+        "exists in nix/home.nix, so they are dead: " + repr(unknown))
+
+
+def test_the_declared_owner_table_is_actually_load_bearing():
+    """At least one entry must be DOING something on the live config.
+
+    Without this the whole mechanism can go inert — every term resolving
+    uniquely again — and the tests above would keep passing while nothing
+    consults the table. That is the state in which someone deletes it as unused,
+    and the picker terms go with it. If this fails, the honest fix is to delete
+    the now-inert entry, not to keep it as decoration.
+    """
+    d = _live_det()
+    working = []
+    for term, trig in ED._AMBIGUOUS_TERM_OWNER.items():
+        matched = [t for t in d.ts.triggers if d._term_matches(term, t)]
+        if len(matched) > 1 and trig in matched and d._attribute(term) == trig:
+            working.append(term)
+    assert working, (
+        "no _AMBIGUOUS_TERM_OWNER entry resolves an actually-ambiguous live "
+        "term — the table is inert and asserts nothing: "
+        + repr(dict(ED._AMBIGUOUS_TERM_OWNER)))
 
 
 # --------------------------------------------------------------------------- #

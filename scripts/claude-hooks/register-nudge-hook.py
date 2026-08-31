@@ -103,6 +103,10 @@ Registers (APPEND surface):
     task write-back non-optional — PostToolUse watches for a read of a specific task
     id and for real work after it, Stop re-reads the board live and blocks a turn
     that is about to end with the card still uncommented).
+  * PostToolUse / Stop: handoff-write-guard.py (the same shape on the OTHER record —
+    PostToolUse watches for a READ of a specific handoff doc and for real work after
+    it, Stop measures whether any handoff was written since that read and blocks a
+    turn about to end without one. Armed on the read, never on session start).
   * PreToolUse(Bash) / PostToolUse(Bash): bg-command-capture.py — INSTRUMENTATION,
     not a guard and not a nudge. It has no verdict, writes nothing to stdout and
     returns 0 on every input; it appends the VERBATIM command string of every
@@ -113,9 +117,10 @@ Registers (APPEND surface):
     command and `run_in_background`, PostToolUse has the `backgroundTaskId` that
     names the run's output file.
 
-🔴 TWO of these carry NO `matcher` on PostToolUse — agent-ledger-hook.py and
-clawgate-writeback-guard.py — unlike the three nudges above. Those three are about
-the shape of a Bash COMMAND, so `Bash` is the right scope. The other two are not:
+🔴 THREE of these carry NO `matcher` on PostToolUse — agent-ledger-hook.py,
+clawgate-writeback-guard.py and handoff-write-guard.py — unlike the three nudges
+above. The NUDGES are about the shape of a Bash COMMAND, so `Bash` is the right
+scope for them. These three are not:
 
   * the ledger records that a tool call HAPPENED, and scoping it to Bash would
     silently stop the heartbeat for a session doing a long stretch of Read/Edit work
@@ -127,6 +132,12 @@ the shape of a Bash COMMAND, so `Bash` is the right scope. The other two are not
     for an hour — the commonest shape of the failure it exists to catch — and would
     stay silent for it. The Bash half (`git commit` / `git push` / `gh pr create`) is
     the part a matcher WOULD cover, and it is the smaller half.
+  * the handoff write guard has the same second job, on the other record: it is
+    watching for REAL WORK after a handoff READ, and — additionally — for the
+    handoff WRITE itself, which is a `Write`/`Edit` of a `claudedocs/handoff-*.md`
+    whenever the doc was not produced by `handoff_doc.py`. Under a `Bash` matcher
+    it would be blind to both, i.e. it would nag sessions that HAD recorded their
+    work and miss the ones that had not.
 
 The cost, MEASURED rather than asserted: ~21 ms per call against ~9 ms for a bare
 interpreter start, and the hook throttles at 30s, so the overwhelming majority of
@@ -219,8 +230,10 @@ MANAGED_HOOK_SCRIPTS = frozenset({
     "clawgate-task-interview-guard.py",
     "clawgate-writeback-guard.py",
     "gh-issue-closing-condition-guard.py",
+    "handoff-write-guard.py",
     "next-step-nudge.py",
     "search-tool-nudge.py",
+    "session-stamp.py",
     "shell-env-nudge.py",
 })
 
@@ -260,7 +273,7 @@ MANAGED_SHELL_HOOK_SCRIPTS = frozenset({
 })
 
 HOOK_LIBRARY_MODULES = frozenset({"agent_ledger.py", "bg_command_capture.py",
-                                  "guard_core.py"})
+                                  "guard_core.py", "session_trailer.py"})
 
 REGISTRAR_SCRIPT = "register-nudge-hook.py"
 
@@ -591,6 +604,19 @@ LEDGER_EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"]
 WRITEBACK_CMD = with_python("~/.claude/hooks/clawgate-writeback-guard.py")
 WRITEBACK_EVENTS = ["PostToolUse", "Stop"]
 
+# The handoff write-back guard — the write-back guard's counterpart on the OTHER
+# record. That one makes a clawgate pickup report back to the board; this one makes
+# a session that RESUMED a handoff doc write one before it stops. Same two events and
+# the same NO-matcher PostToolUse entry, for the same reason: half of what it watches
+# for (the work, and the handoff write itself) is an Edit/Write tool call.
+#
+# 🔴 NOT registered on SessionStart, deliberately, and that is the design rather than
+# an omission: arming there would fire on every session that never touched a handoff.
+# It arms on the READ — see the hook's module docstring for the 253-session
+# measurement that selects the read as the trigger.
+HANDOFF_GUARD_CMD = with_python("~/.claude/hooks/handoff-write-guard.py")
+HANDOFF_GUARD_EVENTS = ["PostToolUse", "Stop"]
+
 # 🔴 THE FIRST PreToolUse HOOK THIS SCRIPT REGISTERS, and that is a widening of
 # the append surface, not a rewording of it. Until now PreToolUse was
 # rewrite-only: bash-guard's INTERPRETER was this script's, its REGISTRATION was
@@ -652,7 +678,8 @@ SINGLE_EVENT_CMDS = {
 # remove. It is reported instead — see the end of the de-dup pass.
 REGISTERED_SCRIPTS = frozenset(
     hook_script_of(c)
-    for c in POST_BASH_CMDS + PRE_BASH_CMDS + [NOTIFY_CMD, LEDGER_CMD, WRITEBACK_CMD]
+    for c in POST_BASH_CMDS + PRE_BASH_CMDS + [NOTIFY_CMD, LEDGER_CMD, WRITEBACK_CMD,
+                                               HANDOFF_GUARD_CMD]
     + [c for cmds in SINGLE_EVENT_CMDS.values() for c in cmds]
 )
 
@@ -1092,6 +1119,23 @@ for event in WRITEBACK_EVENTS:
         continue
     arr.append({"hooks": [{"type": "command", "command": WRITEBACK_CMD}]})
     added.append("%s: %s" % (event, WRITEBACK_CMD))
+
+# --- the handoff write guard (append-only, same discipline) ------------------
+# 🔴 THE SECOND **Stop** ENTRY HERE THAT CAN BLOCK — the fourth blocking hook this
+# script registers overall, the other two being PreToolUse gates — and it is
+# appended AFTER the clawgate one so the order of the two Stop blockers is a
+# decision rather than an accident of table position. Each
+# caps itself independently — two consecutive blocks per task and per doc — so a
+# session holding both a clawgate card and a resumed handoff can in principle stack
+# toward the CLI's cap of 8, at which point the CLI ends the turn with a warning. A
+# graceful ceiling, named rather than hidden; the same interaction the write-back
+# guard's own docstring records for MAX_TASKS.
+for event in HANDOFF_GUARD_EVENTS:
+    arr = hooks.setdefault(event, [])
+    if hook_script_of(HANDOFF_GUARD_CMD) in registered_scripts(arr):
+        continue
+    arr.append({"hooks": [{"type": "command", "command": HANDOFF_GUARD_CMD}]})
+    added.append("%s: %s" % (event, HANDOFF_GUARD_CMD))
 
 # --- single-event hooks (append-only, same discipline) -----------------------
 for event, cmds in SINGLE_EVENT_CMDS.items():

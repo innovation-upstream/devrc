@@ -53,6 +53,11 @@
 #   * a command word produced by EXPANSION (`$g checkout main`, `eval "$cmd"`).
 #     The scanner flags the alias where it can see one being made (`g=git`), but
 #     an alias built from parts, or read from a file, resolves to nothing static.
+#   * 🔴 A NON-GIT MUTATION SURFACE. The allowlist governs `git` verbs; the
+#     branch-protection arm runs `gh`, which can DELETE the very protection it
+#     reads — `devrc/CLAUDE.md` publishes that one-liner verbatim as an escape
+#     hatch, so it is a plausible thing for a maintainer to paste here. Covered
+#     by its own guard (`test_the_gh_calls_are_read_only`), NOT by the scanner.
 #   * anything inside a string that only becomes code on the FAR SIDE of the ssh
 #     hop. The $CHECK payload is scanned because it is literal text in this file;
 #     a payload assembled at runtime would not be. `require_int` plus `%q` on the
@@ -91,8 +96,8 @@
 # one. So:
 #   * 19, 20 and 21 are RESERVED to ship.sh here and must not be taken as DRIFT
 #     codes. 22 is now TAKEN by this script (skillOverrides disagree with the
-#     tier ledger) and 23 by the nix-read untracked ladder, so the next free
-#     code for this script is 24.
+#     tier ledger), 23 by the nix-read untracked ladder and 24 by the
+#     branch-protection arm, so the next free code for this script is 25.
 #   * anything this script adds above 21 is reserved back the other way; ship.sh
 #     documents this in its own header for the same reason.
 #
@@ -161,6 +166,14 @@
 #       artifact by the next switch. Measured 2026-08-25: one such file had sat
 #       on the workbench for ~3 weeks with every check green. See "UNTRACKED IN A
 #       NIX-READ PATH" below. It ranks between rc 15 and rc 12 — see severity().
+#   24  DRIFT — `main` ON THE CANONICAL REMOTE HAS NO REQUIRED STATUS CHECKS, so
+#       the gate every change to this fleet passes through is OFF. 🔴 The FOURTH
+#       kind of parity, and the first three are all blind to it: they ask whether
+#       the two hosts match `origin/main`, and this asks whether `origin/main` is
+#       still a thing worth matching. Both hosts can be byte-identical, every
+#       symlink resolve, every built source be current — and `main` be a branch
+#       anyone can push anything to. See "BRANCH PROTECTION" below. It ranks
+#       between rc 8 and rc 17 — see severity().
 #   16  ACTIONABLE, not drift — the fuzzyclaw PHASE-2 GATE has OPENED: zero rows
 #       still take their `age_secs` from fuzzyclaw alone, so the readers can be
 #       removed. See "THE FUZZYCLAW PHASE-2 GATE" below. It is the LEAST severe
@@ -423,6 +436,69 @@
 # DND-defeating failure toast 4× a day forever — the same permanently-red-gate
 # refusal this file already makes for an unreachable remote, below.
 #
+# ── BRANCH PROTECTION ON THE CANONICAL REMOTE (rc 24) ─────────────────────────
+# 🔴 A FOURTH KIND OF PARITY, AND THE OTHER THREE CANNOT SEE IT. Git parity asks
+# "is this checkout still tracking origin/main?"; host parity asks "is what it
+# describes actually deployed?"; source parity asks "is the code we COMPILE
+# current?". All three take `origin/main` as the reference and ask who has
+# diverged from it. This one asks the question underneath them: is `origin/main`
+# still a branch that anything has to get past a gate to reach?
+#
+# MEASURED 2026-08-29, TWICE IN ONE DAY on innovation-upstream/devrc:
+#   ~19:58Z  `required_status_checks` DELETED as a deliberate, operator-authorised
+#            break-glass to merge two PRs. The restore was written as an EXIT
+#            trap, it RAN, and it left main unprotected anyway — `PATCH` cannot
+#            restore the sub-resource after a DELETE (see the gotcha below).
+#   ~21:56Z  `contexts: null` again, and NOT from the same actor. Independent
+#            evidence that a window was open in between: commit 837d3fde is a
+#            `Merge branch 'main' of github.com:…` — a DIRECT PUSH to main, which
+#            required checks with enforce_admins would have rejected.
+# Both were found by a human happening to look. Nothing on either host could have
+# said so, and this deadman was FULLY GREEN throughout — correctly, because every
+# question it asked was about the two checkouts.
+#
+# 🔴 THE VERDICT IS THE CONTEXT COUNT, NEVER THE `protected` FLAG. The measured
+# incident is `protected: true` with `required_status_checks` GONE: deleting that
+# sub-resource leaves the protection object standing, so a checker keying on
+# `protected` reports healthy on the exact state that bit us. Both shapes are
+# real and both are drift here — measured against the live API 2026-08-29:
+#   protected true,  contexts ["tekton/devrc-pytests","tekton/devrc-nodetests"]
+#   protected false, contexts []          (a repo with no protection at all)
+# so the arm reads `<protected> <context-count>` and branches on the SECOND
+# field, printing the first beside it because the two states need different
+# repairs (restore the sub-resource vs create protection from nothing).
+#
+# 🔴 EVERY NON-ANSWER IS A REASON, NEVER A ZERO — the same rule the phase-2 gate
+# and the tier arm already apply, and it matters more here because the failure
+# mode of a credentials-less `gh` is an empty string, and an empty string parsed
+# as a count is 0, and 0 is the value that means DRIFT. That would make this arm
+# fire on every timer run the moment `gh` lost its token: a permanently-red gate,
+# which `claude/RULES.md` is explicit is worse than no gate. So the arm demands a
+# well-formed `<bool> <int>` line and prints COULD NOT MEASURE for anything else
+# — no `gh`, no network, no auth, a repo it cannot see, an origin that is not a
+# GitHub remote at all. None of those set an rc, and none of them read as a pass.
+#
+# 🔴 THE SLUG IS DERIVED FROM THE CHECKOUT, never hardcoded. `git ls-remote
+# --get-url origin` (local, no network — allowlisted, and the only read-only verb
+# that yields a remote URL without admitting `git config`/`git remote`, whose
+# write forms would breach passivity). A non-GitHub or unparseable origin is a
+# COULD NOT MEASURE, which is also what makes this arm inert against the
+# throwaway file:// origins the suite builds.
+#
+# 🔴 PASSIVITY EXTENDS TO THE API. `gh` can mutate — deleting this very
+# protection is a one-liner `devrc/CLAUDE.md` publishes verbatim — and the git
+# allowlist that guards the rest of this file is structurally blind to it. So the
+# only `gh` this script may run is a plain read: no `-X`/`--method` other than
+# GET, no `-f`/`--field` body. Pinned by
+# `test_drift_check.py::test_the_gh_calls_are_read_only`.
+#
+# 🔴 THE REPAIR IS NOT THE OBVIOUS ONE, so the finding carries it. `gh api -X
+# PATCH …/protection/required_status_checks` CANNOT restore the sub-resource
+# after a DELETE — it returns non-zero and changes nothing. Restoring needs a
+# full `PUT …/branches/main/protection`. That is why the measured break-glass
+# left main unprotected despite a restore trap that ran: the rollback path had
+# never been executed once.
+#
 # ── UNREACHABLE IS NOT DRIFT (the alerting policy) ────────────────────────────
 # 🔴 The timer runs on the WORKBENCH ONLY (gated on the ~/.server-mode marker in
 # nix/home.nix), so its remote leg always ssh's to the LAPTOP — a machine that is
@@ -448,16 +524,18 @@
 # is reading a timer's output, so the single number it hands to systemd must be
 # the worst thing found, or an un-pushed workbench could hide behind a merely
 # behind laptop. Severity order (worst first):
-#     8 > 17 > 14 > 13 > 18 > 6 > 2 > 4 > 3 > 12 > 23 > 15 > 10 > 22 > 16
+#     8 > 24 > 17 > 14 > 13 > 18 > 6 > 2 > 4 > 3 > 12 > 23 > 15 > 10 > 22 > 16
 # 🔴 THAT ORDER IS THE severity() TABLE, NOT THE DIGITS — it never was monotonic
 # (14 outranks 13 outranks 18 outranks 6 outranks 4), 17 is not "less severe
 # than 16" because it is larger, 23 outranks 15 while 22 ranks second-LAST, and
-# 22 is the largest digit here. Every code below 16 that is still free (5, 7, 9,
+# 24 — the LARGEST digit here — ranks SECOND, directly under rc 8. Reading this
+# ladder off the numbers gets that one exactly backwards. Every code below 16
+# that is still free (5, 7, 9,
 # 11) is reserved to a ship.sh meaning this script does not take, so a new DRIFT
 # code has nowhere to go but upward; its rank is stated in severity() and here.
 # 🔴 UPWARD IS NOT EMPTY EITHER: ship.sh owns 19 (hosts-disagree), 20
-# (superseded) and 21 (usage), and this script has now taken 22 and 23, so the
-# next free DRIFT code is 24, not 19. See the reciprocal
+# (superseded) and 21 (usage), and this script has now taken 22, 23 and 24, so
+# the next free DRIFT code is 25, not 19. See the reciprocal
 # reservation under EXIT CODES above — that collision was one increment away.
 # (6 and 2 are both unreachable through this path today — the script exits each
 # directly, before any per-host leg runs — but the order is documented for every
@@ -538,6 +616,24 @@
 #                    gate is local-only, and every value sent over ssh is one
 #                    that has to be proved safe.
 #   DRIFT_PHASE2_TIMEOUT  seconds the phase-2 scan may take (default 60, integer)
+#   DRIFT_GH          the `gh` binary the branch-protection arm (rc 24) runs
+#                    (default `gh`, resolved from PATH). Exists so the suite can
+#                    drive that arm against a stub, and — pointed at a path that
+#                    does not exist — keep every OTHER test from reaching the
+#                    operator's real credentials and the network. Same role as
+#                    DRIFT_SESSION_MANAGER, and for the same measured reason.
+#   DRIFT_GH_TIMEOUT  seconds that probe may take (default 20, integer)
+#   DRIFT_GH_RULESET_MAX  how many rulesets the rc-24 arm will examine before it
+#                    stops and reports COULD NOT MEASURE (default 5, >=1). The
+#                    rules endpoint returns one entry per APPLYING ruleset, repo-
+#                    and org-level mixed, so the loop is over a set this script
+#                    does not control.
+#   DRIFT_PROTECT_SLUG  owner/repo the rc-24 arm asks about, INSTEAD of deriving
+#                    it from the checkout's origin. Exists for the suite: the
+#                    derivation reads the same `origin` the git leg fetches
+#                    from, so giving the arm a GitHub slug by editing origin
+#                    would send `git fetch` to the real github.com. The derived
+#                    value is the only correct one on a real host.
 #   DRIFT_TIER_LEDGER  path to the skill-listing tier ledger (default: the
 #                    claude/skill-tiers.json beside this script's repo). Exists
 #                    so the suite can drive the rc-22 arm against a fixture
@@ -629,6 +725,22 @@ DRIFT_STATE_DIR="${DRIFT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/drift-
 DRIFT_SESSION_MANAGER="${DRIFT_SESSION_MANAGER:-$_drift_dir/session-manager}"
 DRIFT_PHASE2_TIMEOUT="${DRIFT_PHASE2_TIMEOUT:-60}"
 DRIFT_SRC_FETCH_TIMEOUT="${DRIFT_SRC_FETCH_TIMEOUT:-30}"
+# The branch-protection arm (rc 24). Spelled as an explicit unset-test rather
+# than `${DRIFT_GH:-gh}` so the word `gh` survives word-bounded as a COMMAND
+# NAME: this binary is resolved from the unit's PATH, and
+# `test_every_command_the_checker_runs_is_on_the_unit_path` looks for exactly
+# that spelling. Overridable for the same reason DRIFT_SESSION_MANAGER is — the
+# suite must be able to point the arm at a stub, and at a path that does not
+# exist, without the operator's real credentials or the network ever being
+# reachable from a test.
+if [ -z "${DRIFT_GH+set}" ]; then DRIFT_GH=gh; fi
+DRIFT_GH_TIMEOUT="${DRIFT_GH_TIMEOUT:-20}"
+# 🔴 A BOUND on the ruleset loop, like every sibling listing here. The rules
+# endpoint returns one entry per applying ruleset, repo- and org-level mixed,
+# so the loop is over a set this script does not control. Hitting the cap is
+# COULD NOT MEASURE, never DRIFT: stopping early means we did not look, and
+# "did not look" must never read as "nothing gates main".
+DRIFT_GH_RULESET_MAX="${DRIFT_GH_RULESET_MAX:-5}"
 
 # 🔴 Both tunables are INTERPOLATED INTO A SCRIPT THAT RUNS ON THE OTHER HOST
 # (piped to `bash -s` over ssh), so a non-integer value is remote code execution
@@ -745,6 +857,20 @@ require_int DRIFT_PHASE2_TIMEOUT "$DRIFT_PHASE2_TIMEOUT"
 # Same reasoning as DRIFT_PHASE2_TIMEOUT: not interpolated into a remote payload,
 # but handed to `timeout`, where a non-integer reads as "the tool is broken".
 require_int DRIFT_SRC_FETCH_TIMEOUT "$DRIFT_SRC_FETCH_TIMEOUT"
+# Same again for the branch-protection probe's cap.
+require_int DRIFT_GH_TIMEOUT "$DRIFT_GH_TIMEOUT"
+require_int DRIFT_GH_RULESET_MAX "$DRIFT_GH_RULESET_MAX"
+# Floored at 1 HERE rather than via require_positive_int: that helper's zero-arm
+# prints an rc-23 story about nix-read paths and `hits=` counts, none of which
+# applies to this cap — an operator debugging this exit would be sent to a
+# different arm entirely. A cap of 0 examines no ruleset and reports COULD NOT
+# MEASURE forever, which is the silent blindness rc 18 exists for.
+if [ "$DRIFT_GH_RULESET_MAX" -lt 1 ] 2>/dev/null; then
+  echo "drift-check: DRIFT_GH_RULESET_MAX must be >= 1, got: $DRIFT_GH_RULESET_MAX" >&2
+  echo "  0 examines no ruleset, so the branch-protection arm (rc 24) reports COULD" >&2
+  echo "  NOT MEASURE on every run forever while looking correct." >&2
+  exit 2
+fi
 
 DO_LOCAL=1
 DO_REMOTE=1
@@ -787,6 +913,20 @@ severity() {
   case "${1:-0}" in
     0)  echo 0 ;;
     8)  echo 70 ;;
+    # 24 (main on the canonical remote has no required status checks) sits
+    # between 8 and 17, and it is the LARGEST digit in this table — reading the
+    # ladder off the numbers puts it dead last, which is the wrong end.
+    #   BELOW 8, because rc 8 is work that exists on exactly ONE machine, in no
+    #   commit anyone else has, where a careless rescue destroys the only copy.
+    #   Nothing is lost here and the repair is one reversible API call. A hazard
+    #   that has already cost something outranks one that is merely open.
+    #   ABOVE 17, because 17 is bounded — one package's source is stale on one
+    #   host, and what it can corrupt is what that package does. This is the gate
+    #   on the branch BOTH hosts converge to, so it admits every other failure
+    #   class in this table onto both machines at once, including the un-pushed
+    #   and stale-source ones. It was also measured admitting a direct push to
+    #   main within hours of being opened, so "merely open" is a short state.
+    24) echo 68 ;;
     # 17 (a source repo devrc BUILDS FROM is not current here) sits between 8
     # and 14, and the digit says nothing about that — see the header.
     #   BELOW 8, because a diverged devrc stops every future change to this host,
@@ -2627,6 +2767,295 @@ else
 fi
 echo
 
+# ── BRANCH PROTECTION ON THE CANONICAL REMOTE (rc 24) ─────────────────────────
+# See "BRANCH PROTECTION" in the header for what this measures and why it is a
+# fourth kind of parity. Here: how it refuses to produce a silent zero.
+#
+# 🔴 THE HAZARD THIS SHAPE EXISTS TO AVOID IS SPECIFIC TO THIS ARM. Every other
+# could-not-measure in this file degrades toward "no finding". Here the natural
+# failure — `gh` with no token prints nothing — parses as a count of ZERO, and
+# zero is the DRIFT value. So the arm never derives its verdict from a count it
+# did not positively read: the line must be exactly `<true|false> <digits>`, and
+# anything else is a reason, printed as such, setting no rc.
+bp_slug_of() { # bp_slug_of <remote-url> -> owner/repo, or "" if not GitHub
+  # 🔴 THE HOST MUST BE ANCHORED, NOT MERELY CONTAINED. `*github.com/*` is an
+  # unanchored substring test, and a self-hosted mirror puts that string in the
+  # PATH: `https://mirror.internal.example/github.com/other-owner/other-repo.git`
+  # matched it and yielded `other-owner/other-repo` — a slug this fleet's remote
+  # never named. The arm would then query a REAL, UNRELATED repo and, if that
+  # one is protected, print a confident green about a remote it is not watching.
+  # Not a 404 into could-not-measure: an affirmative answer about the wrong
+  # subject, which is worse than no answer. Measured on three mirror shapes.
+  #
+  # So: strip the scheme, strip any userinfo, and require what REMAINS to BEGIN
+  # with `github.com` followed by the scp `:` or the path `/`.
+  local U="$1" S=""
+  case "$U" in *://*) U="${U#*://}" ;; esac
+  # 🔴 THE USERINFO STRIP MUST BE ANCHORED TOO, or it re-opens the very class the
+  # host anchor below closes: `https://mirror.example/u@github.com/o/r.git` has an
+  # `@` in its PATH, and stripping to it leaves a string that BEGINS `github.com/`.
+  # Userinfo can only precede the host, so it may not contain a `/`.
+  case "$U" in
+    *@*) case "${U%%@*}" in */*) ;; *) U="${U#*@}" ;; esac ;;
+  esac
+  case "$U" in
+    github.com:*) S="${U#github.com:}" ;;
+    github.com/*) S="${U#github.com/}" ;;
+    *) return 0 ;;
+  esac
+  # Trailing slash BEFORE `.git`, then again after: stripping `.git` first left
+  # `owner/repo.git` for `…/repo.git/`, a slug that 404s while looking right.
+  S="${S%/}"
+  S="${S%.git}"
+  S="${S%/}"
+  # Exactly two non-empty, slash-free components. A URL that yields anything
+  # else is NOT turned into a best guess: an owner/repo we invented would be
+  # queried, 404, and land in could-not-measure wearing a fabricated subject.
+  case "$S" in
+    /*|*/) return 0 ;;
+    */*/*) return 0 ;;
+    */*) printf '%s' "$S" ;;
+    *) return 0 ;;
+  esac
+}
+
+echo "=== branch protection on the canonical remote (main) ==="
+# 🔴 THE OVERRIDE EXISTS FOR THE SUITE, and it is not a convenience. The
+# derivation reads the SAME `origin` the git leg fetches from, so a test that
+# gave this arm a GitHub slug by editing origin would point `git fetch` at the
+# real github.com — every rc-24 test would then depend on the live state of a
+# remote no test controls, over a network the suite is built not to touch. Same
+# role and same reasoning as DRIFT_TIER_LEDGER; the derived value is the only
+# correct one on a real host, and the derivation keeps its own coverage
+# (`test_the_slug_is_derived_from_the_origin_remote`).
+BP_URL=""
+BP_SLUG="${DRIFT_PROTECT_SLUG:-}"
+if [ -z "$BP_SLUG" ]; then
+  # `ls-remote --get-url` is LOCAL — it expands the configured URL and exits
+  # without contacting anything (measured 0.003s). It is also the only read-only
+  # verb on the passivity allowlist that yields a remote URL; `git config` and
+  # `git remote` both have write forms and are deliberately not allowlisted.
+  BP_URL="$(git -C "$DRIFT_REPO" ls-remote --get-url origin 2>/dev/null)"
+  BP_SLUG="$(bp_slug_of "$BP_URL")"
+fi
+if [ -z "$BP_SLUG" ] && [ -z "$BP_URL" ]; then
+  echo "[protect] COULD NOT MEASURE — no origin remote readable in $DRIFT_REPO."
+  echo "[protect]   This is NOT 'main is protected'. No rc is set."
+elif [ -z "$BP_SLUG" ]; then
+  # The URL itself is deliberately not echoed: this repo is public and an origin
+  # can name a private host. The finding is that it is not a GitHub owner/repo,
+  # which is all the operator needs to know why the arm stayed quiet.
+  echo "[protect] COULD NOT MEASURE — origin is not a github.com owner/repo remote,"
+  echo "[protect]   so there is no branch-protection API to ask. No rc is set."
+elif ! command -v "$DRIFT_GH" >/dev/null 2>&1; then
+  echo "[protect] COULD NOT MEASURE — no usable gh binary at $DRIFT_GH."
+  echo "[protect]   This is NOT 'main is protected'. No rc is set."
+else
+  # A plain GET. 🔴 No -X/--method, no -f/--field: `gh` can DELETE this very
+  # protection, and the git allowlist that guards the rest of this file cannot
+  # see a `gh` argv at all. Pinned by test_the_gh_calls_are_read_only.
+  BP_RAW="$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/branches/main" --jq '"\(.protected) \(.protection.required_status_checks.contexts // [] | length) \(.protection.required_status_checks.contexts // [] | join(","))"' 2>/dev/null)"
+  # 🔴 POSITIONAL READ, not `${x%% *}`/`${x##* }`. Those BOTH fall back to the
+  # whole string when there is no space, so a one-field answer set `protected`
+  # and the count from the SAME token — one value read twice, wearing the shape
+  # of a measurement. `read` simply leaves the later fields EMPTY, and empty is
+  # rejected below. The names field is display-only and may legitimately be
+  # empty (a branch with no required checks has no context names).
+  BP_PROT=""; BP_N=""; BP_NAMES=""
+  read -r BP_PROT BP_N BP_NAMES <<EOF
+$BP_RAW
+EOF
+  case "$BP_PROT" in true|false) ;; *) BP_N=-1 ;; esac
+  case "$BP_N" in ''|*[!0-9]*) BP_N=-1 ;; esac
+  if [ "$BP_N" = -1 ]; then
+    echo "[protect] COULD NOT MEASURE — gh gave no usable answer for $BP_SLUG."
+    echo "[protect]   No network, no credentials, no access to that repo, or an API shape"
+    echo "[protect]   this arm does not recognise. 🔴 An empty answer parses as a count of"
+    echo "[protect]   ZERO, and zero is the DRIFT value — so it is refused here rather than"
+    echo "[protect]   fired as a finding. This is NOT 'main is protected'. No rc is set."
+  elif [ "$BP_N" -gt 0 ]; then
+    echo "[protect] $BP_SLUG main: $BP_N required status check(s) — ${BP_NAMES:-<names unavailable>}"
+    # 🔴 A COUNT IS NOT THE GATE — `enforce_admins` IS HALF OF IT. Required checks
+    # with admin enforcement OFF do not stop an admin pushing straight to main,
+    # which is the exact mechanism behind incident 2 (`837d3fde`, a direct push).
+    # So a non-zero count alone is not an all-clear.
+    #
+    # 🔴 AND IT MUST BE READ FROM THE PROTECTION ENDPOINT, NOT THIS ONE. Measured
+    # 2026-08-29: `/branches/main` reports `.protection.enforce_admins` ABSENT for
+    # innovation-upstream/devrc — so `// false` yields **false** — while
+    # `/branches/main/protection` reports `true` for the same branch at the same
+    # moment. Keying on the branch endpoint's value would have fired rc 24 on our
+    # own healthy repo, every run: a permanently-red gate created by the fix for a
+    # blind spot. A second call is the price of reading the field that exists.
+    BP_ENF="$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/branches/main/protection" --jq '.enforce_admins.enabled' 2>/dev/null)"
+    case "$BP_ENF" in
+      true)
+        echo "[protect]   enforce_admins=true — the checks bind admins too."
+        ;;
+      false)
+        echo "[protect] 🔴 DRIFT — $BP_SLUG main requires $BP_N check(s) but enforce_admins is FALSE."
+        echo "[protect]   Half a gate. An admin — the actor in both 2026-08-29 occurrences — can"
+        echo "[protect]   push straight to main past every required check. This is the mechanism"
+        echo "[protect]   that would have let 837d3fde through even with the checks present."
+        echo "[protect]   fix: PUT /repos/$BP_SLUG/branches/main/protection with enforce_admins true."
+        note_rc 24
+        ;;
+      *)
+        echo "[protect]   enforce_admins=UNKNOWN — the protection endpoint did not answer."
+        echo "[protect]   NOT read as 'admins are bound'. No rc is set for this half."
+        ;;
+    esac
+  else
+    # 🔴 ZERO CLASSIC CHECKS IS NOT YET DRIFT — RULESETS ARE A SECOND, NEWER
+    # MECHANISM AND THIS ENDPOINT CANNOT SEE THEM. Measured 2026-08-29:
+    # `astral-sh/uv` reads `protected=true, contexts=[]` here while carrying a
+    # ruleset whose types include `required_status_checks` — a fully gated branch
+    # that the classic read calls wide open. GitHub's UI now steers restores
+    # toward rulesets, so the most likely next repair of THIS repo produces
+    # exactly that state, and rc 24 would then fire on every 6-hourly run
+    # forever: the DND-bypassing toast 4x/day, i.e. the permanently-red gate this
+    # file refuses everywhere else. So ask the ruleset endpoint before deciding.
+    # 🔴 COUNTING RULE DECLARATIONS IS NOT READING THE GATE — the same mistake as
+    # counting classic contexts without `enforce_admins`, reintroduced on the path
+    # added to fix it. A `required_status_checks` rule can list ZERO checks, can
+    # sit in a ruleset whose `enforcement` is not `active`, and can carry
+    # `bypass_actors` letting an admin push straight past it — which is the exact
+    # mechanism of incident 2. So the rule must list at least one check, and the
+    # ruleset it belongs to must be active with nobody bypassing it.
+    #
+    # `/rules/branches/main` exposes `parameters` but NOT `bypass_actors`; the
+    # ruleset DETAIL endpoint carries both and is readable without repo-admin
+    # (measured on astral-sh/uv: `enforcement=active, bypass_actors=0`).
+    BP_RULES_RAW="$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/rules/branches/main" --jq '[.[]|select(.type=="required_status_checks" and ((.parameters.required_status_checks//[])|length)>0)] | "\(length) \([.[].ruleset_id]|unique|join(","))"' 2>/dev/null)"
+    # 🔴 ONE RULESET IS NOT ALL RULESETS. This endpoint returns the rules from
+    # EVERY ruleset that applies, repo- and ORG-level mixed — measured live on
+    # astral-sh/uv, whose list interleaves `ruleset_source_type` Organization and
+    # Repository. ⚠ BUT uv does NOT exhibit this bug and is not evidence of it:
+    # its Organization entries are `deletion`/`pull_request`/etc, so exactly ONE
+    # id survives the `required_status_checks` filter and the old `.[0]` read it
+    # correctly. The mixing is real; a repo that DEMONSTRATES the failure was not
+    # found, and the case below is constructed. Taking `.[0].ruleset_id` let a
+    # single ruleset decide the
+    # verdict for all of them: an org-level ruleset in `evaluate` mode sorting
+    # first — the standard org rollout pattern — made a genuinely gated branch
+    # read `enforcement=evaluate, not active` and fire rc 24 every 6h forever.
+    # That is a FALSE DRIFT, and a false drift on this arm is the permanently-red
+    # gate its own header refuses. So collect every id and let ANY gating ruleset
+    # settle it.
+    BP_RULES=""; BP_RULE_IDS=""
+    read -r BP_RULES BP_RULE_IDS <<EOF
+$BP_RULES_RAW
+EOF
+    case "$BP_RULES" in ''|*[!0-9]*) BP_RULES=-1 ;; esac
+    case "$BP_RULE_IDS" in *[!0-9,]*) BP_RULE_IDS="" ;; esac
+    # 🔴 AND AN EMPTY FIELD IS A LOST ID, NOT A HARMLESS SEPARATOR. jq emits
+    # `,111` when one selected rule carries a NULL ruleset_id (measured), which
+    # passes the character class above; `tr ',' ' '` then drops the empty and the
+    # loop examines ONE id while $BP_RULES says two. The arm never compares
+    # ids-examined against ids-emitted, so the missing one is invisible and the
+    # run can fire DRIFT having looked at a subset. Reject the whole list instead
+    # — the same all-or-nothing rule the character class already applies, which
+    # routes it to the zero-examined COULD NOT MEASURE arm below.
+    case ",$BP_RULE_IDS," in *,,*) BP_RULE_IDS="" ;; esac
+    if [ "$BP_RULES" = -1 ]; then
+      # 🔴 The one case that must NOT become a finding: classic says zero and the
+      # ruleset half could not be read, so "unprotected" and "protected by a
+      # ruleset I cannot see" are indistinguishable. Firing here would be the
+      # empty-answer-is-zero trap one level up.
+      echo "[protect] COULD NOT MEASURE — $BP_SLUG main has 0 CLASSIC required checks, and the"
+      echo "[protect]   ruleset endpoint did not answer, so a ruleset gate cannot be ruled out."
+      echo "[protect]   This is NOT 'main is unprotected' and NOT 'main is protected'. No rc."
+    elif [ "$BP_RULES" -gt 0 ]; then
+      # The rules list checks. Now ask whether ANY ruleset holding one actually
+      # BINDS — active, with no bypass actors. Every id is examined, because one
+      # non-binding ruleset among several says nothing about the others.
+      BP_GATED=0; BP_GATE_ID=""; BP_UNREADABLE=0; BP_SEEN=0; BP_CAPPED=0; BP_WHY=""
+      for BP_ID in $(printf '%s' "$BP_RULE_IDS" | tr ',' ' '); do
+        BP_SEEN=$((BP_SEEN + 1))
+        if [ "$BP_SEEN" -gt "$DRIFT_GH_RULESET_MAX" ]; then BP_CAPPED=1; break; fi
+        BP_RS_RAW="$(timeout "$DRIFT_GH_TIMEOUT" "$DRIFT_GH" api "repos/$BP_SLUG/rulesets/$BP_ID" --jq '"\(.enforcement) \((.bypass_actors//[])|length)"' 2>/dev/null)"
+        BP_RS_ENF=""; BP_RS_BYPASS=""
+        read -r BP_RS_ENF BP_RS_BYPASS <<EOF
+$BP_RS_RAW
+EOF
+        case "$BP_RS_BYPASS" in ''|*[!0-9]*) BP_RS_BYPASS=-1 ;; esac
+        if [ -z "$BP_RS_ENF" ] || [ "$BP_RS_BYPASS" = -1 ]; then
+          BP_UNREADABLE=$((BP_UNREADABLE + 1))
+        elif [ "$BP_RS_ENF" != active ]; then
+          BP_WHY="$BP_WHY $BP_ID=enforcement:$BP_RS_ENF"
+        elif [ "$BP_RS_BYPASS" -gt 0 ]; then
+          BP_WHY="$BP_WHY $BP_ID=bypass-actors:$BP_RS_BYPASS"
+        else
+          BP_GATED=1; BP_GATE_ID="$BP_ID"; break
+        fi
+      done
+      if [ "$BP_GATED" = 1 ]; then
+        echo "[protect] $BP_SLUG main: 0 classic required checks, but ruleset $BP_GATE_ID gates it"
+        echo "[protect]   (enforcement=active, 0 bypass actors, and its required_status_checks rule"
+        echo "[protect]   lists at least one check). The gate is ON, by the newer mechanism."
+      elif [ "$BP_SEEN" = 0 ] || [ "$BP_UNREADABLE" -gt 0 ] || [ "$BP_CAPPED" = 1 ]; then
+        # 🔴 NOT DRIFT. No ruleset was PROVEN to gate, but one we could not read
+        # may. "Unprotected" and "protected by a ruleset I could not examine" are
+        # the same observation, which is the empty-answer-is-zero trap again.
+        echo "[protect] COULD NOT MEASURE — $BP_SLUG main has 0 CLASSIC required checks and"
+        echo "[protect]   $BP_RULES required-checks rule(s), but none was PROVEN to bind:"
+        # 🔴 ZERO ITERATIONS IS THE WORST CASE TO GET WRONG. The id list can be
+        # blanked by the sanitiser above (a non-numeric id) or arrive empty from
+        # jq (every selected rule had a null ruleset_id), and the loop then runs
+        # NOT ONCE. Without this arm control fell through to the DRIFT branch and
+        # the arm announced "NONE of its N ruleset(s) binds" with an EMPTY reason
+        # list — "we examined nothing" printed as "nothing gates main", which is
+        # the exact inversion this block's own header forbids, and strictly worse
+        # than the revision it replaced (which 404'd into could-not-measure).
+        [ "$BP_SEEN" = 0 ] && echo "[protect]     the ruleset id list was empty or unusable — 0 examined"
+        [ "$BP_UNREADABLE" -gt 0 ] && echo "[protect]     $BP_UNREADABLE ruleset(s) could not be read"
+        [ "$BP_CAPPED" = 1 ] && echo "[protect]     stopped after $DRIFT_GH_RULESET_MAX ruleset(s) (DRIFT_GH_RULESET_MAX)"
+        [ -n "$BP_WHY" ] && echo "[protect]     examined and not binding:$BP_WHY"
+        echo "[protect]   NOT read as protected, and NOT as drift. No rc is set."
+      else
+        echo "[protect] 🔴 DRIFT — $BP_SLUG main has 0 classic required checks, and NONE of its"
+        echo "[protect]   $BP_RULES required-checks rule(s) binds:$BP_WHY"
+        echo "[protect]   A ruleset in evaluate/disabled mode REPORTS and does not block; one with"
+        echo "[protect]   bypass actors is the ruleset spelling of enforce_admins=false, letting"
+        echo "[protect]   whoever is listed push straight past every check — the mechanism behind"
+        echo "[protect]   837d3fde. Either way nothing gates main."
+        echo "[protect]   fix: set enforcement=active and remove the bypass actors on one of them."
+        note_rc 24
+      fi
+    else
+    echo "[protect] 🔴 DRIFT — $BP_SLUG main has ZERO required status checks (protected=$BP_PROT),"
+    echo "[protect]   by CLASSIC protection and by RULESETS alike — both were checked."
+    echo "[protect]   The gate every change to this fleet passes through is OFF: anything can"
+    echo "[protect]   land on main, and both hosts converge to main. Measured TWICE on"
+    echo "[protect]   2026-08-29, once leaving a DIRECT PUSH on main that required checks"
+    echo "[protect]   would have rejected. Neither was detected by anything but a human."
+    if [ "$BP_PROT" = true ]; then
+      echo "[protect]   protected=true: the protection object stands and required_status_checks"
+      echo "[protect]   was deleted out of it — the exact break-glass shape. 🔴 PATCH CANNOT"
+      echo "[protect]   restore it; it returns non-zero and changes nothing. Use a full PUT of"
+      echo "[protect]   /repos/$BP_SLUG/branches/main/protection, then READ IT BACK — a restore"
+      echo "[protect]   that has never been run is a hypothesis, and that is how this was missed."
+    else
+      echo "[protect]   protected=false: there is no protection object at all, so this is a"
+      echo "[protect]   create rather than a restore. Same endpoint, full PUT, read it back."
+    fi
+    # 🔴 The DIAGNOSTIC must be runnable in the state it is printed in. The
+    # protection endpoint 404s with `Branch not protected` exactly when
+    # protected=false, so pointing an operator at it there hands them an error
+    # under pressure. Name the endpoint that answers in each case.
+    if [ "$BP_PROT" = true ]; then
+      echo "[protect]   read the live state: gh api /repos/$BP_SLUG/branches/main/protection"
+    else
+      echo "[protect]   read the live state: gh api /repos/$BP_SLUG/branches/main --jq .protection"
+      echo "[protect]   (…/branches/main/protection 404s 'Branch not protected' in this state)"
+    fi
+    echo "[protect]   rulesets, the other mechanism: gh api /repos/$BP_SLUG/rules/branches/main"
+    note_rc 24
+    fi
+  fi
+fi
+echo
+
 # ── FUZZYCLAW PHASE-2 GATE ────────────────────────────────────────────────────
 # See "THE FUZZYCLAW PHASE-2 GATE" in the header for what this measures and why
 # it is local-only. Here: how it refuses to produce a silent zero.
@@ -2792,6 +3221,12 @@ if [ "$rc" != 0 ]; then
   echo "       (nix reads the path, but the flake filtered the untracked file OUT of the"
   echo "       artifact — unsaved work, not a deployed one). A host whose nix-read set came EMPTY"
   echo "       is COULD NOT MEASURE, never rc23. (ranks between rc15 and rc12; see severity() )"
+  echo "  rc24=main on the canonical remote has ZERO required status checks — the merge gate"
+  echo "       is OFF for the branch both hosts converge to. protected=true means the checks"
+  echo "       were deleted out of a standing protection object (PATCH cannot restore it; PUT"
+  echo "       the whole thing and read it back). A gh that cannot answer is COULD NOT"
+  echo "       MEASURE, never rc24. (ranks between rc8 and rc17 — the LARGEST digit here"
+  echo "       ranks SECOND; see severity() )"
 fi
 [ -n "$UNCHECKED" ] && echo "drift-check: NOT checked: $UNCHECKED"
 exit "$rc"
