@@ -49,6 +49,7 @@ WHAT THIS MODULE DOES **NOT** COVER, stated so nobody reads coverage into it
 from __future__ import annotations
 
 import hashlib
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -177,6 +178,68 @@ class TestTheDoorsAreTheDeployedOnes:
         assert out.returncode == 0, (
             f"{rel} is not tracked by git, so the flake omits it from the deploy "
             f"and every pin against it is vacuous.\n{out.stderr}"
+        )
+
+
+# =============================================================================
+# Layer 0b — the mandated mechanism is the PRE-APPROVED one at every door.
+# =============================================================================
+
+# Skills whose SKILL.md routes an executor to the owner's write half. Each MUST
+# pre-approve `Edit`, because that is what the owner mandates.
+WRITING_DOORS = ("analyze-service", "subsystem-index", "handoff", "prune-index")
+# The read-only door, carried as the NEGATIVE CONTROL below. Without it, a guard
+# asserting "these skills declare Edit" would also pass on a tree where every
+# skill declared every tool — i.e. it would be testing nothing.
+READ_ONLY_DOOR = "resume"
+
+_ALLOWED = re.compile(r"^allowed-tools:\s*(.+)$", re.M)
+
+
+def _allowed_tools(skill: str) -> set[str]:
+    m = _ALLOWED.search((SKILLS / skill / "SKILL.md").read_text(encoding="utf-8"))
+    assert m, f"{skill}/SKILL.md has no allowed-tools line"
+    return {t.strip() for t in m.group(1).split(",") if t.strip()}
+
+
+class TestTheMandatedToolIsThePreApprovedOne:
+    """🔴 A PROTOCOL AND A FRONTMATTER CAN CONSOLIDATE APART.
+
+    `allowed-tools` is a PRE-APPROVAL, not a restriction — every tool stays
+    callable — so this is about incentive, not reachability. The owner mandates
+    `Edit` (`MANDATE`, above) precisely because a whole-file `Write` retype is
+    MEASURED to lose a concurrent append silently
+    (`subsystem-index/reference/index-write.md`). If a door pre-approves `Write`
+    and not `Edit`, then at that door the UNSAFE mechanism runs without a prompt
+    and the mandated SAFE one raises one — and in a headless or subagent run
+    there is nobody to answer it.
+
+    Found by audit on the PR that created this module: `analyze-service` was
+    routed to the `Edit` mandate while its own frontmatter listed
+    `Bash, Read, Write, Grep, Agent`. The pairing had been coherent BEFORE the
+    consolidation (that door said "plain `Write`", and `Write` was pre-approved);
+    the protocol moved and the frontmatter did not. Nothing in this repo read
+    `allowed-tools` at all, so no gate could see it.
+    """
+
+    @pytest.mark.parametrize("skill", WRITING_DOORS)
+    def test_a_writing_door_pre_approves_the_mandated_Edit(self, skill: str) -> None:
+        tools = _allowed_tools(skill)
+        assert "Edit" in tools, (
+            f"{skill}/SKILL.md pre-approves {sorted(tools)} — no `Edit`, which "
+            f"is what the owner MANDATES ({MANDATE!r}). The measured-unsafe "
+            f"whole-file `Write` would run unprompted while the safe path stops "
+            f"for approval."
+        )
+
+    def test_the_read_only_door_pre_approves_NEITHER(self) -> None:
+        """NEGATIVE CONTROL. Proves the guard above discriminates instead of
+        passing on any tree — a skill that only READS the store must not
+        pre-approve either write tool, and `resume` is that skill."""
+        tools = _allowed_tools(READ_ONLY_DOOR)
+        assert not ({"Edit", "Write"} & tools), (
+            f"{READ_ONLY_DOOR}/SKILL.md pre-approves {sorted(tools)} — it reads "
+            f"the store and must pre-approve no write tool."
         )
 
 

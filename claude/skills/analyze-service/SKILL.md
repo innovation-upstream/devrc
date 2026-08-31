@@ -2,7 +2,7 @@
 name: analyze-service
 description: "Recon a service/subsystem fast: locate where it lives, load its config, check its live state and recent changes — then optionally do the follow-on task. Replaces hand-typed 'analyze the {redis,minio,flux,bastion,monitoring,…} setup, then …' recon."
 argument-hint: "<service> [then <follow-on task>] — e.g. 'redis', 'externaldns then bump the chart', 'monitoring'"
-allowed-tools: Bash, Read, Write, Grep, Agent
+allowed-tools: Bash, Read, Write, Edit, Grep, Agent
 ---
 
 # /analyze-service — one deterministic recon call
