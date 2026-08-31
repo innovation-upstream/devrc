@@ -32,8 +32,7 @@ survives adversarial re-derivation, and fix whatever it exposes.
   devrc**#1092** merged as **`ad891a5c`**; `ship.sh` converged both hosts to `bd1572f3` (verified
   by ANCESTRY of the shipped sha, plus a byte check: deployed blob **`6d25558e`**). Registered on
   both hosts — 1 `PostToolUse`, 1 `Stop`, **0** `SessionStart` — and probed live against the
-  DEPLOYED copy: block · self-suppress · read-with-no-work silent · no state dir for an untouched
-  session. **Merged and registered are two claims; both were made separately.**
+  DEPLOYED copy. **Merged and registered are two claims; both were made separately.**
 - ✅ **MERGED — rank 6: devrc#1108 as `57b010fb`** (squash, 2026-08-31T05:15:15Z; **verified by
   CONTENT on `origin/main`, never by ancestry** — ancestry is false forever after a squash).
   9 commits: the correction, six audit rounds, two gate re-triggers. **Every round found something
@@ -46,26 +45,21 @@ survives adversarial re-derivation, and fix whatever it exposes.
 - ✅ **CLOSED — the CI investigation, and it LEAVES this arc.** Capacity, already measured in-tree
   at `scripts/tests/test_subsystem_store_api.py:99-108`. The symptom fix (`8e33bf1d`, #1023,
   `HANG_TIMEOUT` 15→60 s) is live and **insufficient**. 🔴 See the WALK-BACK block: the
-  queue-depth attribution is an **uncontrolled covariate**, not a demonstrated cause.
-- ✅ **Subsystem store recorded** (2026-08-31, `--pr 1108,1055` window — the `--session` window
-  REFUSED with `transcript cwd does not match`, correctly, because this session ran in
-  `datapacket-talos`). Two bullets: `devrc/skills.md` (the derivation-command lesson) and
-  `devrc/analyze-service-index.md` (recall *lists* vs *features*). Also **closed an `OPEN:` bullet
-  that was not mine** — the clawgate "browser layer is UNGATED" item, whose fix merged as
-  `6bf866fe`; verified by content before rewriting it `RESOLVED`. Scope open-actions 1 → 0.
-- 🔴 **RANK 9 MEASURED, NOT CUT (2026-08-31 ~17:00Z). Nothing was re-triggered, no empty commit
-  was pushed.** The "quiet queue" precondition is **not a queue-depth wait — it is a single-node
-  arithmetic ceiling**, and the item's own premise number is wrong by ~2×. See the new
-  investigation block below for the values. Claim `skill-chain-usage-audit-9` is **still held**.
-- 🔴 **#1055 does NOT need a re-trigger and MUST NOT be pushed to while a run is live.** It has
-  had a gate run in flight since **2026-08-31T16:32:20Z** (`devrc-ci-szfm7`, head `f85b7444`),
-  fired by the previous session's own docs commit. The pipeline carries a
-  `ci.zacx.dev/supersede-key: pr-1055` label, so **any push to the branch cancels the run that is
-  currently grading it** — including a `/handoff` update. Read `szfm7`'s state before pushing:
-  `KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pipelinerun devrc-ci-szfm7 -o jsonpath='{.status.conditions[0].reason}'`
-- **Branch / PRs:** `zach/skill-chain-usage-audit` → **devrc#1055, OPEN** (gate RUNNING as above).
-  **devrc#1064, OPEN** (`feat/handoff-audit`) — pytests RED, nodetests green; it is the only one of
-  the two that actually needs the rank-9 push.
+  queue-depth attribution is an **uncontrolled covariate**, not a demonstrated cause — and the
+  2026-08-31 correction block below shows it was not even the right *class* for #1055.
+- ✅ **Subsystem store recorded** (2026-08-31, `--pr 1108,1055` window). Two bullets:
+  `devrc/skills.md` (the derivation-command lesson) and `devrc/analyze-service-index.md` (recall
+  *lists* vs *features*). Also closed an `OPEN:` bullet that was not mine — the clawgate "browser
+  layer is UNGATED" item, fix merged as `6bf866fe`. Scope open-actions 1 → 0.
+- 🔴 **RANK 9 CLOSED 2026-08-31 WITH ITS PREMISE REFUTED — and the fix was a MERGE, not a
+  re-trigger.** #1055 was 94 commits stale and failing deterministically in 0.18 s on a defect
+  `31cd214d` had already fixed on `main`; the control at `origin/main` passed. `git merge
+  origin/main` took the exact test red→green. Full evidence in the correction block below.
+  🔴 **Residual, NOT closed:** the gate reported **`failed=2`** and named only one test
+  (devrc#943), so a second #1055 failure is still unidentified.
+- **Branch / PRs:** `zach/skill-chain-usage-audit` → **devrc#1055, OPEN** — now carries
+  `origin/main` merged in plus this doc. **devrc#1064, OPEN** (`feat/handoff-audit`) — pytests RED
+  on a **timing** test that passes locally on its own branch; 93 commits behind (rank 11).
 - 🔴 **The LOCAL branch `zach/skill-chain-usage-audit` in the primary clone is DIVERGED and is the
   STALE side** — do not check it out, do not move it. **Work detached off
   `origin/zach/skill-chain-usage-audit` and push `HEAD:zach/skill-chain-usage-audit`.** The primary
@@ -523,6 +517,49 @@ belongs to the `tekton` owners, not to another retry.
   exists** — `kubectl -n tekton-ci logs <gate-pod> -c step-pytests | grep -A20 'hanging_fetch'` —
   so the failing assertion is named before the run is pruned.
 
+### 🔴 CORRECTION, same session — #1055 was NOT red on the capacity flake. It was 94 commits STALE, and a re-trigger could never have fixed it
+**This supersedes both the doc's "Both are still RED on the capacity flake — neither caused it" and
+this session's own earlier framing above, which treated #1055 and #1064 as one story. They are two
+different failures and only one of them is environmental.** The earlier blocks are left in place
+deliberately: the wrong reading is the point.
+
+- **What broke the assumption:** `devrc-ci-szfm7` (the run in flight at kickoff) FAILED at 20m, and
+  its logs were captured **before the PipelineRun was pruned** — the probe the block above lists as
+  its next step, run for real. Verdict step, verbatim:
+  `pytests fail FAILING: test_live_existing_resolutions_not_made_ambiguous | TOTAL collected=18695
+  passed=18691 skipped=2 failed=2`
+- **It reproduces DETERMINISTICALLY and locally, in 0.18 s — no cluster, no contention:**
+  `cd <worktree-of-origin/zach/skill-chain-usage-audit> && python3 -m pytest
+  scripts/collector/keylog/tests/test_espanso_detect.py -k live_existing_resolutions -q`
+  →
+  `AssertionError: search terms regressed: {'ask': (':acq', None, [':dacq', ':acq']),
+  'clarify': (':acq', None, [':dacq', ':acq'])}` — the terms now match **two** snippets, so
+  `_attribute` returns `None` (ambiguous) instead of `:acq`.
+- 🔴 **THE CONTROL, and it is what settles it. Same test, same command, at `origin/main`
+  (`c2daa65d`): `1 passed in 0.17s`.** Red on the branch, green on main ⇒ the defect is the
+  branch's **staleness**, not the gate, not the node, not the queue.
+- **The missing commit is named:** `31cd214d` *"fix(espanso): both snippets may spell \"ask\" —
+  attribution gets a declared owner instead of the picker losing a route (#1060)"*, on `main`, not on
+  the branch. `git rev-list --count origin/zach/skill-chain-usage-audit..origin/main` = **94**.
+- **REMEDY APPLIED: `git merge origin/main` into the branch, then re-ran the same test → `1 passed
+  in 0.12s`.** Red before, green after, on the exact failing path. A rebase/merge, never a
+  re-trigger; a re-trigger would have failed identically forever.
+- 🔴 **NOT claimed: that the gate will now go green.** The summary said **`failed=2`** and named
+  **one** test — devrc**#943**'s defect, the status that will not say which of ~28 targets failed.
+  The second failure was never named and I did not run the full 18,695-test suite. **Merging main
+  fixes the failure I reproduced; it is not evidence about the other one.**
+- **#1064 is the OPPOSITE case and the earlier block's reading survives for it.** Its named test
+  `test_a_hanging_fetch_is_BOUNDED_and_the_memo_spares_a_second_wait` **PASSES on its own branch**,
+  run locally at `origin/feat/handoff-audit` (`466a0938`): `1 passed, 41 deselected in 25.18s` —
+  i.e. it costs ~25 s by construction and its assertion is `20 <= elapsed < 60`, so it passes with
+  ~35 s of headroom on an idle machine and is exactly the shape contention eats. **One measurement
+  on one machine, not a general claim.** #1064 is also **93 commits behind** main, so it should be
+  merged forward too — but for it, that is hygiene, not the diagnosis.
+- **Reusable tell, and it is the cheap one this arc kept skipping:** before attributing a red gate to
+  capacity, **run the named failing test locally at the branch AND at `main`.** Two commands, sub-second
+  here, and they separate "stale base" from "environment" without a cluster. The arc spent days on
+  the queue-depth story with `git rev-list --count <branch>..origin/main` never run.
+
 ## Next steps (ranked)
 
 🔴 **The numbering below is STABLE and load-bearing** — `claim-work --slug-for <this doc> <rank>`
@@ -540,7 +577,7 @@ rather than removed and renumbered. New work is appended at the end.
    forcing: none
 4. **Deploy the clawgate `SKILL.md` fix** — `home-manager switch`, then confirm
    `~/.claude/skills/clawgate/SKILL.md` no longer contains "preserve both".
-   🔴 IN FLIGHT / blocked: needs devrc#1055 merged, which is blocked on the capacity flake.
+   🔴 IN FLIGHT / blocked: needs devrc#1055 merged.
    forcing: none
 5. **Act on the handoff-doc bloat proposal** — `claudedocs/proposal-handoff-doc-bloat.md`.
    The auditor shipped (IN FLIGHT: devrc#1064); the `/handoff` SKILL.md change is deliberately
@@ -576,19 +613,19 @@ rather than removed and renumbered. New work is appended at the end.
    session that writes a handoff BECAUSE it was blocked is a success, not a contaminated sample —
    count blocks (`~/.cache/claude-handoff-write/s/*/fires-*`) and report them beside the rate.
    forcing: none
-9. **Re-trigger #1064 against a QUIET queue — and #1064 ONLY.** 🔴 **RE-SCOPED 2026-08-31 by
-   measurement; read the two new investigation blocks before acting.** Three corrections to this
-   item as originally written: (a) **#1055 is out of scope** — it has had a run in flight since
-   16:32:20Z and its `supersede-key` means any push cancels it; (b) the signal `0 Pending` is a
-   **five-gate-pod arithmetic ceiling on the single pinned node `talos-xr6-r7p`**, not a queue that
-   drains on its own schedule; (c) the correct kubeconfig is **`$KC_HOMELAB`** — the session default
-   `prod-kubeconfig` returns a confident empty. Poll
-   `KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pods --field-selector=status.phase=Pending`,
-   and on **0 pending** push one empty commit to `feat/handoff-audit`, recording the depth in the
-   message. 🔴 The WALK-BACK block still stands: a green at low depth is **not** a controlled
-   demonstration that draining the queue fixes the gate.
-   forcing: gate — devrc#1064 is blocked by `tekton/devrc-pytests`, a required check its own
-   three-file diff cannot reach
+9. ✅ **DONE (2026-08-31) — and the item's PREMISE was REFUTED: "re-trigger both against a quiet
+   queue" was the wrong action for BOTH PRs.** #1055 was **94 commits stale**, failing
+   deterministically (0.18 s, no cluster) on a defect fixed by `31cd214d` on `main`; the control at
+   `origin/main` passed. **Remedy: `git merge origin/main`, verified red→green on the exact test,
+   pushed to `zach/skill-chain-usage-audit`.** #1064's named test passes on its own branch (25.18 s)
+   and IS the contention shape, but it is 93 commits behind too. 🔴 **What did NOT survive: the
+   "0 pending" signal.** It is a **five-gate-pod arithmetic ceiling** on the single hard-pinned node
+   `talos-xr6-r7p` (allocatable 15950m, 82% of its requests are the gate's own 5 × **2250m** pods),
+   not a queue that drains on its own schedule. See the two investigation blocks.
+   🔴 Residual, and it is NOT closed: **`failed=2`, one test named** (devrc#943) — the second #1055
+   failure is still unidentified, and the full suite was not run locally.
+   forcing: gate — devrc#1055 and #1064 are blocked by `tekton/devrc-pytests`, a required check on
+   a repo with `enforce_admins: true`
 10. **Right-size the devrc-ci gate pod, or establish it cannot be.** 🔴 **Its premise is REFUTED:
    the pod requests 2250m, not 4250m** (`step-pytests=2` + `step-nodetests=250m`, measured
    2026-08-31). The binding constraint is the **hard `nodeSelector` pinning it to one of four
@@ -598,6 +635,12 @@ rather than removed and renumbered. New work is appended at the end.
    released, measure PEAK CPU over a full run before proposing anything, and read the `tekton` skill
    first — it records four *other* fixes as already-rejected-with-measurements.
    forcing: none
+11. **Merge `origin/main` forward into `feat/handoff-audit` (#1064) and re-run its gate.** 93 commits
+   behind; its own named failure is timing, not staleness, so this is hygiene plus a fresh run —
+   but do it from a worktree off `origin/feat/handoff-audit`, and capture the gate pod's
+   `step-pytests` log **before the PipelineRun is pruned** if it goes red again (240-run retention;
+   the GitHub status carries no `target_url`, so a pruned run leaves no evidence at all).
+   forcing: gate — devrc#1064 is blocked by `tekton/devrc-pytests`
 
 ## Gotchas / decisions / dead-ends
 
@@ -829,56 +872,22 @@ of this doc — re-read them before trusting any similar analysis.**
   shipped errors.
 
 ## How to verify
-```bash
-# 1. rank 1's split, end to end (the classifier IS committed on #1055)
-W=/tmp/chain-work; mkdir -p "$W"
-python3 ~/workspace/devrc/scripts/find-session.py "Canonical handoff (read first)" \
-  --since 2026-08-15 --limit 500 > "$W/chain2.out" 2>"$W/chain2.err"
-test ! -s "$W/chain2.err" || echo "PARTIAL COVERAGE — read chain2.err first"
-CHAIN_WORKDIR="$W" bash ~/workspace/devrc/claudedocs/skill-chain-loss-index.sh
-CHAIN_WORKDIR="$W" python3 ~/workspace/devrc/claudedocs/skill-chain-loss-classifier.py
-#   expect 8 cleanly-ended / 4 interrupted-at-end / 2 context-exhausted / 2 never-started,
-#   and a non-empty INSTRUMENT CONTROLS block. A run whose controls are absent is void.
-
-# 2. rank 2's hook — its own suite, and the mutation sweep that certifies its guards.
-#    🔴 The sweep EDITS the hook in place and restores it in a `finally`, so give it a CLEAN
-#    worktree, never the primary clone.
-WT=/tmp/hwg
-git -C ~/workspace/devrc worktree add --detach "$WT" origin/zach/handoff-write-guard
-(cd "$WT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest scripts/claude-hooks/tests/ -q)  # expect 2922 passed
-HWG_TREE="$WT" python3 "$WT/claudedocs/handoff-write-guard-mutation-sweep.py"             # expect 29/29 killed
-git -C ~/workspace/devrc worktree remove --force "$WT"
-
-# 3. rank 2's hook, END TO END as a real process, in the shape the 8.7% loss actually takes.
-#    🔴 This is the verification that matters: the suite proves the parts, this proves the whole.
-H=/tmp/hwg-e2e; rm -rf $H; mkdir -p $H/repo/claudedocs $H/home/.claude
-G=~/.claude/hooks/handoff-write-guard.py   # the DEPLOYED copy — see rank 7
-run(){ printf '%s' "$1" | HOME=$H/home python3 $G; }
-run '{"hook_event_name":"PostToolUse","session_id":"e2e","cwd":"/elsewhere","tool_name":"Bash","tool_input":{"command":"git -C '$H'/repo show origin/x:claudedocs/handoff-t.md"}}'
-run '{"hook_event_name":"PostToolUse","session_id":"e2e","tool_name":"Edit","tool_input":{"file_path":"/x/y.py"}}'
-run '{"hook_event_name":"Stop","session_id":"e2e"}'          # expect {"decision":"block", …}
-run '{"hook_event_name":"PostToolUse","session_id":"e2e","tool_name":"Bash","tool_input":{"command":"python3 /r/scripts/lib/handoff_doc.py --repo /r --topic t"}}'
-run '{"hook_event_name":"Stop","session_id":"e2e"}'          # expect EMPTY — it self-suppressed
-
-# 3b. rank 3's drift audit. Shares chain2.out/docs.idx/allnames.txt with the classifier
-#     above, so run it in the SAME $W. The controls run is NOT optional — a run without
-#     them is void, and one of them was silently UNREADABLE until gotcha 8.
-CHAIN_WORKDIR="$W" DRIFT_CONTROLS=1 python3 ~/workspace/devrc/claudedocs/skill-chain-drift-audit.py
-#   expect 4 lines, ALL beginning OK (positive / negative / sensitivity / write-detector)
-CHAIN_WORKDIR="$W" python3 ~/workspace/devrc/claudedocs/skill-chain-drift-audit.py
-#   expect 29 DRIFT over 26 distinct docs, 13 abandoned-and-still-open, 5 with no link back,
-#   and a CONTROL line near 90% on the maintained arm. If the control arm is far BELOW the
-#   drift arm the predicate has changed meaning — re-read it before quoting either number.
-#   First run takes ~12m (transcript scan); it caches to $W/written.cache.json, then ~20s.
-
-# 4. the bloat corpus (#1064). Absolute totals DRIFT — re-derive, never quote a comment.
-python3 ~/workspace/devrc/scripts/handoff-audit.py \
-  ~/workspace/devrc ~/workspace/homelab-talos ~/workspace/civit/datapacket-talos
-
-# 5. the auditor's own suite
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/tests/test_handoff_audit.py -q -p no:cacheprovider   # expect 23
-
-# 6. rank 4 is DEPLOYED (not merely committed) — expect 0 only AFTER a home-manager switch
-grep -c 'preserve both' ~/.claude/skills/clawgate/SKILL.md
-```
+- **The #1055 diagnosis, in two commands and under a second** — this is the reusable control:
+  ```bash
+  DEVRC=~/workspace/devrc
+  git -C "$DEVRC" worktree add --detach /tmp/ctl-main origin/main
+  (cd /tmp/ctl-main && python3 -m pytest scripts/collector/keylog/tests/test_espanso_detect.py -k live_existing_resolutions -q)   # expect: 1 passed
+  git -C "$DEVRC" worktree remove --force /tmp/ctl-main
+  ```
+  Against a pre-merge checkout of `zach/skill-chain-usage-audit` the same command fails with
+  `{'ask': (':acq', None, [':dacq', ':acq']), ...}`.
+- **The staleness itself:** `git -C "$DEVRC" rev-list --count origin/<branch>..origin/main` — 94 for
+  #1055 before the merge, 93 for #1064.
+- **The gate's node ceiling:**
+  ```bash
+  export KUBECONFIG=$KC_HOMELAB
+  kubectl -n tekton-ci get pods --field-selector=status.phase=Pending
+  kubectl get node talos-xr6-r7p -o jsonpath='{.status.allocatable.cpu}'
+  ```
+  🔴 The session default `prod-kubeconfig` answers `No resources found in tekton-ci namespace.` —
+  a confident empty about the wrong cluster.
