@@ -178,24 +178,31 @@ blind spots and the ten-entry defect ledger: `claudedocs/measurement-scripts-tes
 - **Next probe:** intersect the two — list bucket-C files with fewer than ~30 in-process paths **and** at least one `bash <repo script>` child. That is the only population a child tracer could move, and it is far smaller than 69. Size it before building anything.
 
 ## Next steps (ranked)
-1. **Land the convicting operand rule in `scripts/lib/readset_classify.py`** — and land it in the NARROW form: *a data operand equal to REPO_ROOT convicts; the executable and an interpreter's script argument do NOT*. Measured effect: **9 files OPAQUE → ALWAYS-RUN, 0 files into `scoped`**. Also fix PR #1154's body, which states the broad form. Test coverage must include the over-conviction case (`bash <repo script> --store /tmp/x` must NOT convict).
+🔴 **RANKS 1–7 ARE THE PRE-EXISTING NUMBERING AND MUST NOT MOVE** — the rank is half a
+claim's identity (`claim-work --slug-for <this doc> <rank>`), so inserting an item
+mid-list silently re-points every live claim and lets two sessions claim the SAME work
+under different slugs. An earlier revision of this doc inserted a new item at rank 2 and
+made the node unpin `ci-speedup-8` here while `main`'s copy still called it
+`ci-speedup-7` — measured, both slugs derivable at once. **New items go at the END.**
+
+1. **Land the convicting operand rule in `scripts/lib/readset_classify.py`** — in the NARROW form: *a data operand equal to REPO_ROOT convicts; the executable and an interpreter's script argument do NOT*. Measured effect: **9 files OPAQUE → ALWAYS-RUN, 0 files into `scoped`**. Test coverage must include the over-conviction case (`bash <repo script> --store /tmp/x` must NOT convict). Small cleanup — it makes the classifier honest, it does not make CI faster.
    forcing: none
-2. **Size the population a child tracer could actually move** (the Next probe above) before building one. If it is small, rank 3 closes permanently and this effort ends.
-   forcing: none
-3. **Measure the browser-bridge flake rate (#1124).** ≥50 sandbox-tier runs of `test_server.py`, counting cross-test spool rows. It can redden a REQUIRED check at random, and `main` has `enforce_admins: true` with no admin override.
+2. **Measure the browser-bridge flake rate (#1124).** ≥50 sandbox-tier runs of `test_server.py`, counting cross-test spool rows. It can redden a REQUIRED check at random, and `main` has `enforce_admins: true` with no admin override.
    forcing: gate
-4. **Fix the zombie-git co-tenant probe (#1123).** Ignore `/proc/<pid>/stat` state `Z` and descendants of the test's own process; regression test driven by a deliberately-unreaped child, watched red first.
+3. **Fix the zombie-git co-tenant probe (#1123).** Ignore `/proc/<pid>/stat` state `Z` and descendants of the test's own process; regression test driven by a deliberately-unreaped child, watched red first.
    forcing: gate
-5. **Close #1094** — two guard-thinness findings in `scripts/tests/test_run_tests_targets.py` from #1073's round-4 audit.
+4. **Close #1094** — two guard-thinness findings in `scripts/tests/test_run_tests_targets.py` from #1073's round-4 audit.
    forcing: none
-6. **Decide the `tekton-ci` PodSecurity label** (homelab-infra). `686d6ff0` set `enforce: privileged` solely to admit a hostPath now reverted. Another session's commit — **ask before unwinding.**
+5. **Decide the `tekton-ci` PodSecurity label** (homelab-infra). `686d6ff0` set `enforce: privileged` solely to admit a hostPath now reverted. Another session's commit — **ask before unwinding.**
    forcing: none
-7. **Decide whether to revert the gate budget 45m→60m** (`29ccfd69`, homelab-infra).
+6. **Decide whether to revert the gate budget 45m→60m** (`29ccfd69`, homelab-infra).
    forcing: none
-8. **Retry the node unpin** — ONLY behind the nix-store-ownership probe on a SCRATCH pipeline (never devrc-ci).
+7. **Retry the node unpin — THE ONLY ITEM HERE WITH REAL UPSIDE.** Measured when previously unpinned: queue wait 17.2m/22.5m → 0.1m, wall clock **39.1m median → 17.4m**, `scripts/tests` 728s → 417s. Reverted because a `DirectoryOrCreate` hostPath is created root-owned and every test shelling out to nix died `opening lock file "/nix/var/nix/db/big-lock": Permission denied` (75 occurrences, 42 tests, every PR). 🔴 **ONLY behind the nix-store-ownership probe, on a SCRATCH pipeline, NEVER devrc-ci** — three times this effort used CI as the test environment for a change to CI. Probe: hostPath + a `chown`/`chmod` in `seed-nix`, then assert `nix-instantiate --eval -E '1+1'` succeeds **as the sandbox build user** before touching the real gate.
+   forcing: none
+8. **Size the population a child tracer could actually move** — bucket-C files with a small in-process trigger set AND a `bash <repo script>` child. That is the only population a tracer could move, and it is far smaller than 69. Size it before building anything.
    forcing: none
 
-🔴 **DO NOT BUILD the path→target mapping (the old rank 3).** Unchanged, and rank 1 did not rescue it: the 9 newly-convicted files move time INTO always-run, and bucket C is not the skippable pool it superficially looks like.
+🔴 **DO NOT BUILD the path→target mapping (the old rank 3).** Unchanged, and rank 1 did not rescue it: the 9 newly-convicted files move time INTO always-run, and bucket C is not the skippable pool it superficially looks like. **The gate's remaining upside is item 7 — pipeline/node parallelism — not test selection.**
 
 ## Gotchas / decisions / dead-ends
 - **xdist is already at 4 workers** — the code caps at `min(nproc, 4)`. Going to 8+ helps but has diminishing returns. The real win is splitting the monolith.
