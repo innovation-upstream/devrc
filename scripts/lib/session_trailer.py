@@ -362,6 +362,66 @@ def has_trailer(message: str, key: str = TRAILER_KEY) -> bool:
     return bool(_trailer_lines(message, key))
 
 
+# `Key: value` at column 0 — the shape of a trailer LINE. Not the shape of a
+# trailer BLOCK, which is what `_ends_in_trailer_block` decides.
+_TRAILER_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*:\s")
+# git folds an indented line into the PREVIOUS trailer's value, so it belongs to
+# the block rather than ending it. Measured: `Co-Authored-By: A\n    <a@b.c>` is
+# one trailer to `git interpret-trailers --parse`, not a trailer plus prose.
+_TRAILER_CONTINUATION_RE = re.compile(r"^[ \t]")
+
+
+def _ends_in_trailer_block(body: str) -> bool:
+    """Would git let a new trailer JOIN `body`'s last paragraph?
+
+    🔴 THE TAIL LINE ALONE CANNOT ANSWER THIS, and asking it that way is the bug
+    this replaces. The old test was `re.match(r"^[A-Za-z][A-Za-z0-9-]*:\\s", tail)`
+    on the LAST LINE only — which is TRUE of a conventional-commit SUBJECT
+    (`fix: one line only`). A single-paragraph message therefore got its trailer
+    glued straight onto line 2 with no blank line, and git then read the whole
+    thing as one subject paragraph: `git interpret-trailers --parse` returned
+    NOTHING, and a real commit's `%(trailers:key=Claude-Session-Id)` was EMPTY.
+    Whole commits were silently unresolvable — the failure the trailer exists to
+    prevent.
+
+    git's actual rule, measured against `git interpret-trailers` 2.55.0 rather
+    than inferred, is a property of the LAST PARAGRAPH:
+
+      * it must not BE the first paragraph — git never reads the subject
+        paragraph as trailers, so `fix: x\\nNote: y\\n` gets a blank line;
+      * every line in it must be a trailer line (or an indented continuation),
+        so `Some prose here.\\nNote: something` gets a blank line too.
+
+    Conservative where it differs: git also accepts `Key:value` with no space,
+    and we do not. Being stricter only ever ADDS the blank line, which still
+    yields a paragraph git parses as trailers — it can cost a sibling trailer
+    its block, never cost us our own.
+    """
+    lines = _lines(body)
+    start = len(lines)
+    while start > 0 and lines[start - 1].strip():
+        start -= 1
+    if start == 0:
+        return False                 # the last paragraph IS the subject's
+    para = lines[start:]
+    if not para:
+        # 🔴 `body` is `rstrip("\n")`, which strips NEWLINES and not a final line
+        # of spaces or tabs. Such a line is falsy under `.strip()`, so the scan
+        # above never moves, `start == len(lines)`, and this slice is EMPTY —
+        # `para[0]` then raised IndexError. Measured: `"fix: v\n\nbody\n   \n"`
+        # stamped fine BEFORE this predicate existed and raised after, so it is
+        # a STRICT regression, and the hook's broad `except` swallowed it into a
+        # commit that succeeded carrying no trailer, with nothing logged.
+        # Reachable via `--cleanup=verbatim` and from any direct library caller;
+        # git's own cleanup strips such lines before the hook on the `-m` path.
+        # A trailing blank paragraph is not a trailer block, so: do not join.
+        return False
+    if not _TRAILER_LINE_RE.match(para[0]):
+        return False                 # a block cannot open on a continuation
+    return all(_TRAILER_LINE_RE.match(text)
+               or _TRAILER_CONTINUATION_RE.match(text) for text in para[1:])
+
+
 def append_trailer(message: str, session_id: str, key: str = TRAILER_KEY) -> str:
     """Return `message` carrying exactly one `key: session_id` trailer.
 
@@ -404,8 +464,6 @@ def append_trailer(message: str, session_id: str, key: str = TRAILER_KEY) -> str
     if not body:
         return line + "\n"
     # A trailer is separated from prose by a blank line, but must not gain one
-    # when the message already ends in a trailer block.
-    tail = _lines(body)[-1]
-    is_trailer_tail = bool(re.match(r"^[A-Za-z][A-Za-z0-9-]*:\s", tail))
-    sep = "\n" if is_trailer_tail else "\n\n"
+    # when the message already ends in a trailer block git would let it join.
+    sep = "\n" if _ends_in_trailer_block(body) else "\n\n"
     return body + sep + line + "\n"

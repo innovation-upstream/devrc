@@ -63,7 +63,7 @@ let
     critical_mem = 92;
     interval = 10;
     click = [
-      { button = "left"; cmd = btopCmd; }
+      { button = "left"; cmd = "alacritty --class float,float -o window.dimensions.columns=100 -o window.dimensions.lines=25 -e ${scriptsDir}/memory-detail"; }
     ];
   };
   # Bar shows "/" only; left-click opens a rofi gauge list of all real filesystems
@@ -445,6 +445,11 @@ lib.mkIf isNixOS {
   # disk-explore: the disk block's right-click — ncdu on the fullest real mount.
   home.file.".config/i3status-rust/scripts/disk-explore" = {
     source = ../scripts/disk-explore;
+    executable = true;
+  };
+  # memory-detail: the memory block's left-click — top RAM consumers float.
+  home.file.".config/i3status-rust/scripts/memory-detail" = {
+    source = ../scripts/memory-detail;
     executable = true;
   };
   home.file.".config/i3status-rust/scripts/i3blocks-rigcontrol" = {
