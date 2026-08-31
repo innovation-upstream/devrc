@@ -2834,6 +2834,16 @@ CHECKS_DISCRIMINATOR = (
 )
 
 
+# 🔴 The cached-build fallback's guard lines, each a SINGLE named constant so a
+# mutation can remove exactly one and the harness can name which. Each closes a
+# DIFFERENT measured false green; the number of them is deliberately not
+# asserted in the emitted prose (`test -s` speaks to emptiness only and claims
+# nothing about truncation).
+NIX_LOG_TMPFILE = 'LOG=$(mktemp -t audit-tier-XXXXXXXX.log)   # per-agent: a FIXED path is truncated by every sibling agent'
+NIX_LOG_DRV_GUARD = '[ -n "$DRV" ] || { echo "NO DERIVATION — wrong attr, or this repo has no such tier"; exit 1; }'
+NIX_LOG_RUN_GUARD = 'nix log "$DRV" > "$LOG" 2>/dev/null || { echo "NO LOG — never built HERE (nix log is per-machine)"; exit 1; }'
+NIX_LOG_EMPTY_GUARD = '[ -s "$LOG" ] || { echo "EMPTY LOG — cannot vouch"; exit 1; }'
+
 def _toolchain_checks_lines(tc):
     """The sandbox tier — only when the flake really declares one."""
     if not tc.flake:
@@ -2896,6 +2906,57 @@ def _toolchain_checks_lines(tc):
           for n in tc.check_names],
         "```",
         "",
+        # 🔴 EMITTED ONLY WHERE CHECK LINES WERE ACTUALLY FENCED. With no
+        # check names there is no build whose log could be recovered, and
+        # the block would be advice about a command this brief never gave.
+        # It also keeps the guard ISOLATING: this text itself contains
+        # `#checks.`, so a presence check over the whole brief is satisfied
+        # by the very thing it is meant to gate (measured: it stole a kill
+        # from V41, whose mutant empties the check-name list).
+        *(([
+            # 🔴 THE CACHED CASE. `-L` streams the log only while the build RUNS.
+            # An already-realised output is not rebuilt, so nix prints NOTHING and
+            # exits 0 — and the instruction above ("read each runner's own `RESULT:`
+            # line") then has nothing to read while looking like a pass. MEASURED
+            # 2026-08-31 on one derivation, three runs: uncached `-L` → rc 0, 5
+            # lines, 1 `RESULT:`; the SAME command again, now cached → rc 0, **0
+            # lines, 0 `RESULT:`**; `nix log <drv>` → rc 0, 2 lines, 1 `RESULT:`.
+            # Common here, not exotic: sibling sessions and CI build the same tree.
+            "🔴 **A `nix build` that prints NOTHING is the CACHED case, not a pass.** "
+            "`-L` streams a log only while a build RUNS; an already-realised output "
+            "is not rebuilt, so nix prints nothing and exits **0**. The `RESULT:` "
+            "line you were just told to read is then absent, and the silence is "
+            "indistinguishable from success. Recover it from the derivation's own "
+            "retained log — do NOT re-run the build to get its output back:",
+            "",
+            "```bash",
+            # (a) mktemp, never a fixed path: two audit agents run concurrently here
+            #     by design, and a shared `/tmp/<name>.log` means each truncates the
+            #     other's file and greps the other's tier — with every guard passing.
+            # (b) each guard below closes a DIFFERENT measured false green, and the
+            #     count is deliberately not asserted in the prose: `test -s` speaks
+            #     to emptiness only and claims nothing about truncation.
+            NIX_LOG_TMPFILE,
+            f'DRV=$(nix path-info --derivation <your worktree>#checks.{NIX_SYSTEM}'
+            '.<name> 2>/dev/null)',
+            "# 🔴 An EMPTY $DRV makes `nix log \"\"` resolve as `.` — it then prints "
+            "the CWD FLAKE'S DEFAULT PACKAGE log, i.e. a FOREIGN log that may read "
+            "`RESULT: PASS`. Silence would be survivable; this is an affirmative "
+            "false green.",
+            NIX_LOG_DRV_GUARD,
+            "# 🔴 `>` truncates BEFORE nix runs, so an unbuilt derivation leaves an "
+            "EMPTY file and `grep -c` prints a reassuring 0.",
+            NIX_LOG_RUN_GUARD,
+            NIX_LOG_EMPTY_GUARD,
+            "# Read the CONTENT — and check there IS content, and that it is YOURS.",
+            'grep -n "RESULT:" "$LOG"; grep -c "panic: test timed out" "$LOG"',
+            "```",
+            "",
+            "⚠ Each guard above is echoed before its `exit 1`, so the diagnosis "
+            "survives; but `exit 1` pasted into an INTERACTIVE shell closes it — run "
+            "the block as a script, or replace the exits with `return`.",
+            "",
+        ]) if tc.check_names else []),
     ]
 
 

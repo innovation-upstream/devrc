@@ -2762,6 +2762,86 @@ def _assert_every_nix_build_prints_its_log(out: str) -> None:
         "`RESULT:` line cannot be followed:\n  " + "\n  ".join(offenders))
 
 
+def _assert_the_cached_build_fallback_carries_its_guards(out: str) -> None:
+    """The `nix log` recovery block must keep every guard that makes it safe.
+
+    🔴 WHY IT EXISTS AT ALL, measured 2026-08-31 on one derivation, three runs
+    of the SAME command: uncached `nix build --no-link -L` -> rc 0, 5 lines, 1
+    `RESULT:`; run again, now cached -> rc 0, **0 lines, 0 `RESULT:`**;
+    `nix log <drv>` -> rc 0, 2 lines, 1 `RESULT:`. `-L` streams a log only while
+    a build RUNS, so an already-realised output prints NOTHING and exits 0 --
+    and the brief's "read each runner's own `RESULT:` line" then has nothing to
+    read while looking exactly like a pass. Sibling sessions and CI build the
+    same tree constantly here, so the cached case is the common one.
+
+    🔴 WHY STRUCTURAL, NOT A SPELLING PIN -- the same argument
+    `_assert_every_nix_build_prints_its_log` makes one screen up, and the same
+    way it was learned: a substring assert on the COMMAND stayed green for the
+    whole life of a missing `-L`. Each guard below closes a DIFFERENT measured
+    false green, and dropping any ONE of them restores it:
+
+      * empty `$DRV`  -> `nix log ""` resolves as `.` and prints the CWD FLAKE'S
+        DEFAULT PACKAGE log. The auditor then greps a FOREIGN log that may read
+        `RESULT: PASS (exit=0)`. Not silence -- an AFFIRMATIVE false green.
+      * unguarded `nix log` -> `>` truncates BEFORE nix runs, so an unbuilt
+        derivation leaves an empty file and `grep -c` prints a reassuring 0.
+      * no `-s` test -> an empty log reads as "no timeouts found".
+
+    🔴 And a FIXED log path is its own hazard, which is why `mktemp` is
+    required: audit agents run concurrently here by design, so a shared
+    `/tmp/<name>.log` means each truncates the other's file and greps the
+    other's tier -- with all three guards above passing.
+
+    The count of hazards is deliberately NOT asserted in the emitted prose: an
+    earlier version of this block claimed it closed "THREE DIFFERENT FALSE
+    GREENS" while its bullets delivered two, and `test -s` speaks to emptiness
+    only -- it claims nothing about truncation.
+    """
+    if "nix log" not in out:
+        return  # no fallback emitted (e.g. a repo with no sandbox tier)
+    required = {
+        '[ -n "$DRV" ]': "an empty $DRV makes `nix log \"\"` print a FOREIGN log",
+        "NO DERIVATION": "the empty-$DRV guard must say why it refused",
+        "NO LOG": "an unbuilt derivation must be named, not left as an empty file",
+        '[ -s "$LOG" ]': "an empty log must not read as 'no timeouts found'",
+        "EMPTY LOG": "the empty-log guard must say why it refused",
+        "mktemp": "a FIXED log path is truncated by every sibling agent",
+    }
+    missing = [f"{tok}  ({why})" for tok, why in required.items() if tok not in out]
+    assert not missing, (
+        "the `nix log` cached-build fallback is missing guards that each close a "
+        "MEASURED false green; without them the block can report a clean tier "
+        "that never ran:\n  " + "\n  ".join(missing))
+    # A fixed path defeats mktemp even when mktemp is present.
+    assert "/tmp/tier.log" not in out, (
+        "the fallback names the FIXED path /tmp/tier.log. Two audit agents run "
+        "concurrently here by design: each truncates the other's file and greps "
+        "the other's tier, with every guard above still passing. Use mktemp.")
+
+
+def test_the_cached_build_fallback_is_emitted_with_its_guards():
+    """🔴 A `nix build` printing nothing is the CACHED case, not a pass.
+
+    Regression guard for the gap #1117 left when it carried forward `--no-link
+    -L` and dropped the recovery block. `-L` fixes the SUCCEEDING-build case and
+    does nothing for the ALREADY-BUILT one.
+    """
+    rc, out, err = run_main(["900"])
+    assert rc == 0, err
+    # 🔴 SCOPED TO ITS PRECONDITION. The fallback is owed only where a sandbox
+    # tier is actually fenced; a repo without one needs no recovery block. Left
+    # unconditional, this test also killed C3 and V41 -- mutants that remove the
+    # whole toolchain section, which those rows already own. A guard that fires
+    # on every upstream breakage stops isolating the thing it names.
+    if "nix build <your worktree>#checks." not in out:
+        return
+    assert "nix log" in out, (
+        "the toolchain section fences `nix build ...#checks... -L` and tells the "
+        "auditor to read a `RESULT:` line, but offers no recovery when that build "
+        "is CACHED and prints nothing at rc 0. Emit the `nix log <drv>` fallback.")
+    _assert_the_cached_build_fallback_carries_its_guards(out)
+
+
 def test_the_toolchain_gates_the_auditors_copy_not_the_shared_checkout():
     """🔴 REGRESSION. Red at `abc41024`, where every command named the shared
     checkout.
@@ -7913,6 +7993,14 @@ RED_AT_BASE_R16: frozenset[str] = frozenset({
     "test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there",
 })
 
+# 🔴 The cached-build gap #1117 left. `-L` fixes the SUCCEEDING build; it does
+# nothing for the ALREADY-BUILT one, which prints zero lines at rc 0 while the
+# brief tells the auditor to read a `RESULT:` line. Watched RED at 7de5b0bd by
+# grafting the test onto that tree: 1 failed.
+RED_AT_BASE_R17: frozenset[str] = frozenset({
+    "test_the_cached_build_fallback_is_emitted_with_its_guards",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
@@ -7925,6 +8013,7 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "9e23c379": RED_AT_BASE_R14,
     "5bad0a0c": RED_AT_BASE_R15,
     "ba321c06": RED_AT_BASE_R16,
+    "7de5b0bd": RED_AT_BASE_R17,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
@@ -8633,6 +8722,19 @@ FIX_MATRIX = (
      "where a python command is fenced",
      "test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there",
      "RED@ba321c06", "V60 V61"),
+    ("r17/N1 #1117 carried forward `--no-link -L` and dropped the `nix log` "
+     "recovery block, leaving the CACHED case uncovered: `-L` streams a log only "
+     "while a build RUNS, so an already-realised output prints ZERO lines and "
+     "exits 0 while the brief says to read each runner's own `RESULT:` line — "
+     "silence indistinguishable from a pass, and common here because sibling "
+     "sessions and CI build the same tree. MEASURED on one derivation, three "
+     "runs of the same command: uncached -L -> rc 0, 5 lines, 1 RESULT:; cached "
+     "-> rc 0, 0 lines, 0 RESULT:; `nix log <drv>` -> rc 0, 2 lines, 1 RESULT:. "
+     "Ported back with the guards its own audit rounds had found necessary, and "
+     "with mktemp rather than a fixed /tmp path, which two concurrent agents "
+     "truncate under each other",
+     "test_the_cached_build_fallback_is_emitted_with_its_guards",
+     "RED@7de5b0bd", "V62"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor

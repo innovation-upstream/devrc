@@ -1885,6 +1885,22 @@ def the_pytest_diagnosis_is_emitted_without_a_pytest_command(t):
                  "        if True:\n")
 
 
+def the_cached_build_fallback_loses_its_empty_drv_guard(t):
+    """V62 — round 17. The guard whose absence is an AFFIRMATIVE false green.
+
+    The fallback resolves `DRV=$(nix path-info --derivation ...)` then runs
+    `nix log "$DRV"`. Drop the `[ -n "$DRV" ]` guard and an unresolvable
+    attribute leaves `$DRV` EMPTY -- `nix log ""` then resolves as `.` and
+    prints the CWD FLAKE'S DEFAULT PACKAGE log. The auditor greps a FOREIGN log
+    that may read `RESULT: PASS (exit=0)`.
+
+    Silence would be survivable; this makes the block affirmatively vouch for a
+    tier that never ran, which is why the guard is pinned BY NAME and not by a
+    count of guards.
+    """
+    return _swap(t, "        NIX_LOG_DRV_GUARD,\n", "")
+
+
 def the_absence_bar_points_at_a_bar_that_is_never_above_it(t):
     """V61 — round 16. The dangling cross-reference, restored.
 
@@ -2998,6 +3014,9 @@ ROWS = [
     ("V61 the absence bar points at a bar that is never above it",
      {"test_the_python_absence_bar_does_not_point_at_a_bar_that_is_not_there"},
      the_absence_bar_points_at_a_bar_that_is_never_above_it),
+    ("V62 the cached-build fallback loses its empty-$DRV guard",
+     {"test_the_cached_build_fallback_is_emitted_with_its_guards"},
+     the_cached_build_fallback_loses_its_empty_drv_guard),
 ]
 
 
