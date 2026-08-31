@@ -201,22 +201,38 @@ Rank 2 has moved into the closed block below; its number is retired, NOT reused.
    `main`. **Needs an operator decision on what would make it trustworthy**
    before it is worth writing. Files: `scripts/break-glass-merge.sh` (new).
    forcing: none
-7. **Remove the socket-timeout dependency in `test_subsystem_store_api.py`**
-   (devrc). `TestTheActorComesFromTheTOKEN::test_a_FORGED_actor_in_the_body_is_
-   DISCARDED[record0-…]` failed `tekton/devrc-pytests` on #1128 with a socket
-   read `TimeoutError` — not an assertion; the test never reached the property
-   it asserts. It stands up a real HTTP server and the client timed out under
-   `popen-gw2` with ~14 concurrent PipelineRuns on the cluster. **Attribution
-   was measured, not assumed:** same tree + same derivation passed locally
-   (`19459, 0 failed`), merged tree passed (`19486, 0 failed`), and the class
-   passes 3/3 locally in ~6s. It was cleared by a re-trigger, which is the
-   WEAKER remedy and is recorded as such — the durable fix is to remove the
-   timing dependency (bound the wait explicitly, or assert against an in-process
-   client rather than a socket). Files:
-   `scripts/tests/test_subsystem_store_api.py`.
-   **CLOSING CONDITION:** that test no longer reads from a socket with an
-   implicit timeout, and `tekton/devrc-pytests` passes on the PR that changes it.
-   forcing: gate — it failed a REQUIRED check and cost a merge cycle on #1128.
+7. **Tekton CAPACITY — `devrc-pytests` fails a localhost round-trip under load**
+   (homelab, NOT devrc). `TestTheActorComesFromTheTOKEN::test_a_FORGED_actor_in_
+   the_body_is_DISCARDED[record0-…]` failed the REQUIRED `tekton/devrc-pytests`
+   **twice**: on #1128 and again on #1151 — the second a **docs-only** PR
+   touching one file, which cannot have caused it. Identical mechanism both
+   times: `TimeoutError` out of `socket.py:720` on the client's `recv_into`, so
+   the test never reached the property it asserts.
+   🔴 **AN EARLIER DRAFT OF THIS ITEM NAMED THE WRONG OWNER, and the correction
+   is the point.** It said "remove the timing dependency in the test". But
+   `HANG_TIMEOUT` is **already 60 s**, raised from 15 s on 2026-08-29 for this
+   exact failure, and that constant's own comment says: *"This is the SYMPTOM
+   fix. The cause is a 10-minute parallel suite competing with a saturated
+   cluster, which belongs to Tekton capacity, not to this file."* A localhost
+   round-trip that blows a 60 s budget is not a badly-written test — the node
+   lost the scheduler. Raising it a third time is more symptom.
+   **Measured:** the same constant's comment records ~60% of runs failing
+   REPO-WIDE (6 of 10, unrelated branches) with 12 concurrent pipelineruns; at
+   the 2026-08-31 03:30Z failure the cluster held 6 in-flight runs, 23 pods in
+   `Error`, and a node at 73% CPU. Locally the class passes 3/3 in ~6 s and the
+   same derivation passes whole.
+   ⚠ So **re-triggering is the correct available remedy here**, not laziness —
+   the durable fix is cluster capacity and belongs to the `tekton` skill's
+   domain. What is NOT acceptable is reading a red `devrc-pytests` as a verdict
+   on the diff: it has now twice been a verdict on the node.
+   Files: homelab Tekton capacity (concurrency caps / resource requests for
+   `devrc-ci`); `scripts/tests/test_subsystem_store_api.py` only if a
+   capacity fix proves impossible.
+   **CLOSING CONDITION:** `devrc-pytests` completes 5 consecutive runs with no
+   `socket.py` `TimeoutError`, measured from the PipelineRun logs, not inferred
+   from PRs happening to merge.
+   forcing: gate — it failed a REQUIRED check and cost a merge cycle on BOTH
+   #1128 and #1151.
 8. **`/handoff`'s kickoff template emits a path that does NOT resolve** (devrc).
    The template is `<repo>/claudedocs/handoff-<topic>.md`, which yields
    `devrc/claudedocs/…`; `resume-state.sh` matched no such file, **fell back to
