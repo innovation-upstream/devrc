@@ -58,9 +58,10 @@ survives adversarial re-derivation, and fix whatever it exposes.
   of `claude/skills/clawgate/SKILL.md` past a 15088 B ceiling, **already red at the pre-merge head
   `f85b7444` (15491 B)** — fixed by EVICTION in `eb1eb185` (15086 B, 310 passed). Both verified
   locally in well under a second, each against an `origin/main` control.
-  🔴 **OPEN TAIL: the run at `eb1eb185` was still in flight when this was written — read its
-  verdict before asserting #1055 is green.** Three runs have now failed for three different
-  reasons.
+  ✅ **VERDICT READ: #1055 is GREEN at `eb1eb185`** — run `devrc-ci-xqb5m`, `failed=0`,
+  `collected=19942 passed=19939`, nodetests 1449/1449, BOTH TIERS PASS, both statuses posted.
+  `failed=2 → 1 → 0`, one per fix. ⚠ `mergeable` still read `UNKNOWN` (GitHub computes it
+  lazily) — re-read it, that is not a conflict signal.
 - **Branch / PRs:** `zach/skill-chain-usage-audit` → **devrc#1055, OPEN** — now carries
   `origin/main` merged in plus this doc. **devrc#1064, OPEN** (`feat/handoff-audit`) — pytests RED
   on a **timing** test that passes locally on its own branch; 93 commits behind (rank 11).
@@ -599,6 +600,29 @@ regression and not the environment — it was the branch's own rank-4 commit, re
 - 🔴 **NOT claimed: that #1055 is now green.** A run at `eb1eb185` was in flight when this was
   written and its verdict had not been read. Three of #1055's runs have now failed for three
   different reasons; read the run before asserting anything.
+
+### ✅ VERDICT READ — #1055 is GREEN at `eb1eb185`, and `failed=2` is fully accounted for
+Closes the "OPEN TAIL" the block above left. Run `devrc-ci-xqb5m`:
+`pytests pass TOTAL collected=19942 passed=19939 skipped=3 failed=0 (floor: 18383)` ·
+`nodetests pass tests=1449 pass=1449 fail=0` · **BOTH TIERS PASS**, and both statuses are posted
+on the PR (`gh pr checks 1055`).
+
+🔴 **The arithmetic is the point, and it is the confirmation the lesson above asked for:
+`failed=2 → 1 → 0`, one per fix, nothing else moved.** Two defects, two causes, neither of them
+the capacity flake this arc spent days on:
+1. `test_live_existing_resolutions_not_made_ambiguous` — **stale base**, 94 commits behind
+   `31cd214d`; fixed by `git merge origin/main`.
+2. `test_the_skill_did_not_grow` — **the branch's own unpaid 405 B** skill growth from rank 4's
+   `bd9a4b34`; fixed by eviction in `eb1eb185`.
+
+🔴 **What this retires: "both PRs are RED on the capacity flake — neither caused it."** For #1055
+that sentence was wrong on every clause — both failures were caused by the branch, both were
+deterministic, and both were diagnosable in under a second locally with an `origin/main` control.
+It survives only for **#1064**, whose named test still passes on its own branch (rank 11).
+
+⚠ `gh pr view` reports `mergeable=UNKNOWN / mergeStateStatus=UNKNOWN` — GitHub's mergeability is
+computed lazily and had not settled at write time. That is **not** a conflict signal; re-read it
+before concluding anything about merging.
 
 ## Next steps (ranked)
 
