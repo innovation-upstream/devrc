@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Mutation battery for rules (i) and (j) of `scripts/lib/handoff_doc.py` —
-# one-doc-per-effort, and a forcing function per ranked next-step.
+# one-doc-per-effort, and a forcing function per ranked next-step — plus the
+# EXIT-CODE CONTRACT those rules return through, and the mainline-copy predicate
+# rule (i) consults. The last two sections were added closing #1093/#1115: the
+# codes and the predicate were the ladder's own scaffolding, and every mutant
+# there SURVIVED all 295 tests at filing.
 #
 # Not run by CI. An author/reviewer instrument, kept IN THE TREE so
 # "mutation-verified" can be RE-DERIVED instead of believed.
@@ -76,6 +80,11 @@ find "$ROOT" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
 MOD="$ROOT/scripts/lib/handoff_doc.py"
 SUITE="$ROOT/scripts/tests/test_handoff_doc.py"
 cp -a "$MOD" "$T/mod.orig"
+# 🔴 A THIRD PRISTINE COPY. Every row before #1093.1 mutated the module or the
+# skill only, so the SUITE never needed one. The round-4 negative control
+# restores the PRE-FIX ASSERTION ORDER by editing the suite, and a row that
+# edits a file it cannot put back would silently poison every row after it.
+cp -a "$SUITE" "$T/suite.orig"
 # 🔴 THE SKILL BODY IS A SECOND MUTABLE ARTEFACT, AND IT HAS TO BE. Rule (j)'s
 # refusal is only actionable through SKILL.md's step-5 legend — the module's own
 # comment calls that legend "the executor's only map from a marker to what to do
@@ -449,6 +458,127 @@ run_skill 'skill-near-miss-clause-rebound-to-the-fence' \
 run 'refusal-marker-renamed' \
   test_every_refusal_MARKER_the_module_prints_reaches_the_skill \
   's@^MARK_FENCED = "\[fenced\]"@MARK_FENCED = "[in-a-fence]"@'
+
+printf '\n== the EXIT-CODE CONTRACT the ladder left unpinned (must be KILLED) ==\n'
+# 🔴 THESE FOUR EACH SURVIVED ALL 295 TESTS WHEN #1115 FILED THEM. The
+# enumeration in `test_the_exit_code_constants_did_not_move` stopped at 6, so
+# the ladder's OWN codes — the ones rules (i)/(j) and the stale-base refusal
+# return — had no pin on their VALUES at all. A caller branches on the number.
+run 'stale-base-code-renumbered' test_the_exit_code_constants_did_not_move \
+  's|^EXIT_STALE_BASE = 9$|EXIT_STALE_BASE = 10|'
+run 'doc-per-effort-code-renumbered' test_the_exit_code_constants_did_not_move \
+  's|^EXIT_DOC_PER_EFFORT = 7$|EXIT_DOC_PER_EFFORT = 11|'
+run 'unforced-code-renumbered' test_the_exit_code_constants_did_not_move \
+  's|^EXIT_UNFORCED = 8$|EXIT_UNFORCED = 12|'
+# 🔴 THE FLOOR-VS-EXACT ROW. `len(codes) >= 8` against exactly 9 constants
+# tolerates ONE silently vanishing — a rename, a deletion, or a value that stops
+# being an `int`. This mutant makes one stop being an int, which is the arm a
+# deletion-shaped mutant would miss.
+run 'one-exit-constant-silently-vanishes' test_no_two_exit_constants_share_a_value \
+  's|^EXIT_BEHIND = 6$|EXIT_BEHIND = "6"|'
+
+printf '\n== rule (i) consults WHICH predicate, and the mainline is really MEASURED ==\n'
+# 🔴 THE FAIL-OPEN ROW. Broadening the third term to `not currency.stale` reads
+# as a simplification and changes behaviour: a whitespace-only mainline copy is
+# `stale` but is NOT something to lose, so rule (i) stops firing and #962's
+# one-doc-per-effort cap is silently bypassed. It survived all 295 tests.
+run 'rule-i-broadened-to-bare-stale' \
+  test_rule_i_asks_WHICH_predicate_not_merely_whether_stale \
+  's|and not currency.replaces_mainline_doc("")):|and not currency.stale):|'
+# 🔴 THE DEGENERATE-VALUE ROW. `0 sections` is what `doc_shape("")` and a
+# hardcoded `DocShape(0,0)` also produce, so pinning it alone cannot see a
+# mutant that reads the mainline blob and then measures the WRONG TEXT. The
+# per-fixture LINE COUNT is the half that proves real bytes were measured.
+run 'mainline-measured-from-the-wrong-text' \
+  test_a_WHITESPACE_mainline_doc_is_ALSO_not_something_to_lose \
+  's|            mainline = doc_shape(shown.out)|            mainline = doc_shape("")|'
+
+printf '\n== the round-4 regression must fail with the RIGHT message (#1093.1) ==\n'
+# 🔴 A DIAGNOSTIC-QUALITY ROW, so `_run` cannot score it: every other row asks
+# WHICH TEST died, this one asks WHICH MESSAGE it died with. Reverting
+# `replaces_mainline_doc` to the round-4 bug takes the LOUD branch, so the shape
+# line never prints — and if the shape assertion runs FIRST it fires with "the
+# mainline copy was never read", which is false and points a maintainer two
+# functions from the defect.
+#
+# 🔴 READ ONLY THE `^E ` LINES. pytest prints the failing test's SOURCE as
+# traceback context and this test's COMMENTS quote the old message verbatim, so
+# a grep over the whole output matches the comment and reports a misdirect that
+# did not happen. Measured — that is exactly what the first run of this row did.
+R4_MUT='s|            and self.mainline_blank is False|            and bool(self.mainline.lines)|'
+R4_TEST=test_a_WHITESPACE_mainline_doc_is_ALSO_not_something_to_lose
+r4_err() { # r4_err  ⇒ the AssertionError lines from the mutated run
+  PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$SUITE" -k "$R4_TEST" \
+    -q --no-header -p no:cacheprovider 2>&1 | grep '^E '
+}
+ROWS=$((ROWS+1))
+sed "$R4_MUT" "$MOD" > "$T/m" 2>/dev/null
+if cmp -s "$MOD" "$T/m"; then
+  printf '  🔴 %-44s MUTATION DID NOT APPLY — result meaningless\n' 'round-4-regression-message'
+  FAILURES=$((FAILURES+1))
+else
+  cat "$T/m" > "$MOD"
+  r4="$(r4_err)"
+  cp -a "$T/mod.orig" "$MOD"
+  if [ -z "$r4" ]; then
+    printf '  🔴 %-44s SURVIVED — no assertion fired\n' 'round-4-regression-message'
+    FAILURES=$((FAILURES+1))
+  elif grep -q 'the guard MIS-FIRED on a whitespace mainline copy' <<<"$r4"; then
+    printf '  ok %-44s KILLED naming the real defect (guard MIS-FIRED)\n' 'round-4-regression-message'
+  else
+    printf '  🔴 %-44s MISDIRECTS — died to: %s\n' 'round-4-regression-message' \
+      "$(head -1 <<<"$r4")"
+    FAILURES=$((FAILURES+1))
+  fi
+fi
+# 🔴 NEGATIVE CONTROL FOR THE ROW ABOVE — without it, its `ok` is unfalsifiable.
+# Restores the PRE-FIX ORDER by deleting the loud-line assertion, so the shape
+# assertion runs first exactly as it did before #1093.1, then re-runs the SAME
+# mutant. This MUST misdirect; if it reports the correct message too, the row
+# above is keying on something other than the fix and its verdict is void.
+# Deliberately NOT `git show <sha>` — a squash merge makes the pre-fix sha
+# unreachable from the mainline, which would rot this control the day it lands.
+ROWS=$((ROWS+1))
+python3 - "$SUITE" <<'PYEOF'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+# 🔴 The message is an implicit-concat string tuple, so the LAST line before
+# `prop.stdout[-400:]` carries a trailing comma — `"[^"]*"\n` without the
+# optional `,` matched ZERO times and the control reported COULD NOT STAGE.
+pat = re.compile(
+    r'\n *assert "will be replaced by this delta" not in prop\.stdout, \(\n'
+    r'(?: *"[^"]*",?\n)+ *prop\.stdout\[-400:\]\)\n')
+hits = pat.findall(s)
+# 🔴 EXACTLY ONE. A count=1 replace on a pattern that occurs twice deletes
+# whichever comes first, which is not the one anybody pictured; and zero means
+# the assertion was reworded and this control is measuring nothing.
+if len(hits) != 1:
+    sys.stderr.write(f"expected exactly 1 loud-line assertion, found {len(hits)}\n")
+    sys.exit(1)
+m = pat.search(s)
+open(p, "w", encoding="utf-8").write(s[:m.start()] + "\n" + s[m.end():])
+PYEOF
+if [ $? -ne 0 ]; then
+  printf '  🔴 %-44s COULD NOT STAGE — the row above is UNVALIDATED\n' 'round-4-negative-control'
+  FAILURES=$((FAILURES+1))
+else
+  sed -i "$R4_MUT" "$MOD"
+  nc="$(r4_err)"
+  cp -a "$T/mod.orig" "$MOD"; cp -a "$T/suite.orig" "$SUITE"
+  if grep -q 'the guard MIS-FIRED' <<<"$nc"; then
+    printf '  🔴 %-44s PRE-FIX ORDER gave the CORRECT message — row above is void\n' \
+      'round-4-negative-control'
+    FAILURES=$((FAILURES+1))
+  elif grep -q 'the mainline copy was never read' <<<"$nc"; then
+    printf '  ok %-44s PRE-FIX ORDER misdirects — the row above can go red\n' \
+      'round-4-negative-control'
+  else
+    printf '  🔴 %-44s INCONCLUSIVE — died to: %s\n' 'round-4-negative-control' \
+      "$(head -1 <<<"$nc")"
+    FAILURES=$((FAILURES+1))
+  fi
+fi
 
 printf '\n== controls ==\n'
 # 🔴 POSITIVE CONTROL — a mutant to a PRE-EXISTING guard (rule d) that the suite
