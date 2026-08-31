@@ -15,9 +15,32 @@ Detect clawgate/GitHub/ClickUp references in agent output, emit telemetry, and m
 them clickable in the terminal the way a URL already is. **SHIPPED AND VERIFIED LIVE.**
 
 ## State now
+🔴 **ALL FOUR RANKS ARE NOW CLOSED EXCEPT RANK 2 (CI capacity).** Ranks 1 and 3 shipped;
+rank 4 is closed **as obsolete** — read its entry before re-opening it, the reasoning is
+the deliverable. What is genuinely still open is listed under "Still open" below.
+
 - Branch: `main`, clean. `origin/main` was `e0e29e7b` when this doc was written and is
-  `3b1a0477` as of 2026-08-30 — the moves since are other threads' handoff docs, none
-  touching the mention feature
+  `ac64ccb4` as of 2026-08-30 — the moves since are other threads' work, none touching
+  the mention feature. It moved **four times during this session's own gate runs**, which
+  is why every merge here re-checked the merged tree rather than trusting a branch-green.
+- **clawgate is 0.8.19 live** (`clawgatectl health`), pin commit `8503620a` on
+  `homelab-infra` trunk, carrying the `#task-N` deeplink fix.
+
+**Still open, with owners:**
+- **Rank 2, CI capacity** — untouched, and it BIT this session repeatedly. Diagnosis
+  added to that rank.
+- **`innovation-upstream/devrc#1099`** — corrects a false 🔴 claim ("the browser layer is
+  UNGATED by CI") in three places. Correct and locally verified (526 tests); **BLOCKED by
+  the flaky gate**, not by its content. Worktree `devrc-clawgate-ci` is deliberately left
+  on disk holding its branch.
+- **clawgate #463** — the board-scroll layout bug found by verifying #440 live.
+- **clawgate #440** — `ready_for_review`, blocked on #463 for its criterion 1.
+- **`homelab-infra` base clone cannot fast-forward** — `merge --ff-only` refuses on a
+  dirty `flake.nix` (+ `.claude/skills/deploy/SKILL.md`, untracked files); stuck at
+  `93876471` vs trunk `4964d223`. Pre-existing, NOT this session's, and it did not affect
+  the deploy (that went through a clean worktree). Left alone: it is someone's uncommitted
+  work, and this is the silent-drift shape — a base clone that cannot ff stops receiving
+  changes while looking healthy.
 - **Both hosts deployed and converged** (`ship.sh` → `ad5274b6`, cross-host agreement,
   0 dangling artifacts on either)
 
@@ -81,8 +104,32 @@ test + 3 registrations). Not mine to merge.
 
 ## Open investigations — live diagnosis state
 
-### clawgate deeplink `#task-N` is inert — filed as clawgate task #440 (open)
-- **Symptom + exact repro:** open `https://clawgate.zacx.dev/tasks#task-370`. The board
+### ~~clawgate deeplink `#task-N` is inert~~ — FIXED, deployed 0.8.19, verified live
+**CLOSED 2026-08-30.** `taskHashScript()` shipped in `homelab-infra#564` (squash
+`9ff37992`) and reached the running pod as **clawgate 0.8.19** (pin commit `8503620a`).
+The leading hypothesis below was **CORRECT** and is now confirmed by the fix working.
+
+Verified against the deployed pod, not a fixture — headless Chromium at 1280×720 driven
+straight at the LAN NodePort:
+```
+ARRIVE  #task-253  inViewport=true  data-task-hash-focus=true  scrollY 0 -> 20736
+HASHCHG #task-440  inViewport=true  data-task-hash-focus=true  scrollY -> 1204
+PREVIOUS #task-253 data-task-hash-focus=null   NO-RELOAD sentinel="kept"   CONSOLE ERRORS: []
+```
+
+🔴 **The live check found a SECOND, PRE-EXISTING bug that the e2e structurally could not
+— now clawgate task #463 (open).** The bottom of the board cannot be scrolled to:
+`scrollHeight` 21,997 vs maxScroll 21,277, and at maxScroll the last card sits at
+`rect.top +6,510` — **60 of 248 cards unreachable by ANY scroll** (wheel, `scrollTo`,
+`scrollIntoView`). Control proving it is not the new handler: measured on `/tasks` with
+**no fragment**, so the handler never armed, and it reproduces with that code inert.
+So **#440 is `ready_for_review`, NOT `complete`** — its criterion 1 is satisfied for the
+reachable 76% of the board and is unsatisfiable for the rest until #463 lands.
+
+The original diagnosis is kept below because #463 inherits its layout context.
+
+- **Symptom + exact repro (as measured BEFORE the fix):** open
+  `https://clawgate.zacx.dev/tasks#task-370`. The board
   loads; the page does NOT scroll to or focus task 370. Reachable from the shipped
   feature: click a bare `#N` mention → rofi picker → choose the clawgate candidate.
 - **Observed (with values):**
@@ -106,18 +153,169 @@ test + 3 registrations). Not mine to merge.
    REMAINING INTERACTIONS NOW VERIFIED" above. Closed by machine observation on an
    isolated Xvfb rather than by an operator report, because the operator was mid-game
    when the check came due (see Gotchas). No repo change; nothing left open here.
-2. **CI capacity — the durable fix.** `ZacxDev/homelab-infra`,
-   `clusters/homelab/apps/tekton-pipelines/`. Gate pods request far more than they use
-   (nodes at 28–36% CPU while 6 gate pods sat `Pending` on `ExceededNodeResources`).
-   Either cap concurrent `devrc-ci` PipelineRuns or right-size the requests. Closing
-   condition: a `devrc-ci` run scheduling promptly with ≥6 others active.
-3. **Fix `clawgate` deeplink** — clawgate task **#440**, `ZacxDev/homelab-infra`,
-   `containers/clawgate`. Client-side hash handler + `hashchange`, reusing `.card-enter`.
-   Closing condition: #440's 6 criteria, verified by a new spec in
-   `e2e/tests/tasks.spec.ts` shown RED before / GREEN after.
-4. **Document the branch-protection escape hatch's asymmetry** in `devrc/CLAUDE.md` —
-   it currently names the `DELETE` but not that restoring needs a full `PUT` (see
-   Gotchas). Closing condition: merged PR touching that paragraph.
+2. **CI capacity — the durable fix. STILL OPEN, and it is now failing PRs, not just
+   queueing them.** `ZacxDev/homelab-infra`, `clusters/homelab/apps/tekton-pipelines/`.
+   Gate pods request far more than they use (nodes at 28–36% CPU while 6 gate pods sat
+   `Pending` on `ExceededNodeResources`). Either cap concurrent `devrc-ci` PipelineRuns or
+   right-size the requests. Closing condition: a `devrc-ci` run scheduling promptly with
+   ≥6 others active.
+   **Measured 2026-08-30 on one docs-only PR (#1099), three consecutive runs, three
+   different outcomes, none about the diff:**
+   - run 1 `e1183352` → **`ERROR`**, not failure: `TaskRunTimeout`, *"failed to finish
+     within 1h0m0s"*. ~43 minutes elapsed between run start and the test steps starting
+     (17:58Z→18:41Z), leaving them ~17 min before the TaskRun was killed. Surfaced on the
+     PR as `COULD NOT RUN: pytests — the gate stopped before this leg reported`.
+     🔴 **RETRACTED: an earlier revision of this bullet blamed `seed-nix` for those 43
+     minutes. That was INFERENCE FROM A GAP, never a measurement of the step, and it is
+     WRONG.** Measured across 114 retained TaskRuns, `seed-nix` is `min 0.0s / p50 0.0s /
+     max 129.0s` — a no-op on a warm cache, exactly as its sentinel design intends. The
+     gap is **pod SCHEDULING**: Tekton's TaskRun timeout starts at TaskRun creation and
+     includes `Pending`, and gate pods were separately measured sitting `Pending` 11–12
+     minutes with 5 running + 5 queued. Same root cause, wrong mechanism — and naming the
+     step I happened to be able to see would have sent the next person to optimise a step
+     that costs nothing.
+   - runs 2 and 3 → real verdicts, but red on **`test_subsystem_store_api.py`**, a
+     different test each time. Run 3's failure named its own mechanism (that file's tests
+     are instrumented for exactly this): `MECHANISM = TRANSPORT`, writer #4's POST raised
+     `TimeoutError` at 60.06s. Per-writer elapsed in ONE 8-way race: `0.36s 0.9s 2.03s
+     3.34s 4.93s 6.25s` … then **42.94s** and **60.06s**. The `…was lost` arm — the
+     real-defect arm — did NOT fire, so the entry lock is not implicated.
+   - **ONE dimension, and the premise at the top of this rank is also wrong.** "Gate pods
+     request far more than they use" does not hold: the gate requests 2250m/2752Mi (2 CPU
+     for the xdist pytest step), and `talos-xr6-r7p` measured **90% CPU requested / 91%
+     actual**. It is not over-requesting — it is CONFINED. "Nodes at 28–36%" was true of
+     the three nodes the pods **cannot reach**.
+   - 🔴 **THE ACTUAL CAUSE — a node pin inherited from a node-local PVC.** The shared
+     `nix-store-cache` PVC (`tekton-ci`) is `local-path` / RWO with its PV hard-pinned by
+     nodeAffinity to `talos-xr6-r7p`, so every gate pod inherits
+     `nodeSelector: kubernetes.io/hostname=talos-xr6-r7p`. The scheduler says it plainly:
+     `0/4 nodes are available: 1 Insufficient cpu, 3 node(s) didn't match Pod's node
+     affinity/selector`. Twelve-odd idle cores on the other three nodes are structurally
+     unreachable.
+   - **Control, so this is not a guess:** five open PRs were red simultaneously on
+     different tests concentrated in the store-API suite (the tests that stand up a real
+     HTTP server), while six others passed at 19,292–19,431 collected. Unrelated diffs,
+     different tests, one file family = load, not five regressions.
+   - 🔴 **Do NOT "fix" this by widening `test_subsystem_store_api.py`'s timeouts.** That
+     file's docstring forbids it in terms, and correctly: widening converts the load case
+     into a pass and leaves the defect case looking identical.
+   - Cost driver, for whoever takes it: each append holds `_EntryLock` — a blocking
+     `fcntl.flock(LOCK_EX)`, no timeout — across a read-modify-write with **two `fsync`s**
+     (file, then directory). Eight racers serialise through that on a box running ~19.4k
+     tests under xdist.
+   - 🔴 **"MOVE THE CACHE TO RWX" IS REJECTED — DO NOT RE-DERIVE IT.** Scoped 2026-08-30
+     and it is not a PVC edit, it is "install distributed storage on Talos" first:
+     **0 RWX PVCs of 289, 0 RWX PVs of 298, `kubectl get csidrivers` → none.** Every class
+     (`local-path`, `local-storage`, six `openebs-*`) is node-local by construction, and
+     `ci-priority-classes.yaml:139` already says so. **It was tried and reverted once** —
+     `d149c87f` (#111, 2026-07-16) dropped the cache as unschedulable and recorded RWX as
+     a follow-up *"needing RWX storage or hard node-pinning"*; pinning is the branch that
+     was taken. Costs if anyone revives it: `accessModes`/`storageClassName` are immutable
+     on a bound PVC, so migrating means delete-and-recreate, and with
+     `reclaimPolicy: Delete` + Flux `prune=true` the cache is **destroyed irreversibly** —
+     a revert returns the manifest, not the data. A cold cache is a **correctness**
+     failure, not a slowdown: a recorded ablation produced **43 test failures** on a
+     revision that passes with it. And 5+ concurrent pods write a shared **SQLite** fetcher
+     cache, a git tarball cache, a Go build cache and the nix store's own lock files, with
+     **no locking today** beyond a one-time seed sentinel — cross-node SQLite over NFS is a
+     corruption hazard the current single-node layout simply does not have.
+     Two further measured facts that close it off. The volume actually holds **69 GB across
+     25,664 store paths** — the PVC *requests* 30Gi, but `local-path` sets no quota so it
+     was never enforced — making this a ≥80 GB provision plus a physical 69 GB copy. And
+     🔴 **RWO was never the blocker**: six pods share that PVC concurrently right now,
+     because RWO is per-**NODE**, not per-pod. Flipping the access mode against
+     `local-path` would change nothing — the provisioner still writes a hostPath and still
+     stamps the same `nodeAffinity`. A per-node `hostPath` cache is separately
+     **FORBIDDEN**: Talos enforces PodSecurity `baseline` cluster-wide and a server
+     dry-run returns `violates PodSecurity "baseline:latest": hostPath volumes`.
+   - **The pin is not hurting at NORMAL load** — pod-start p90: `naida 14s`, `remix 15s`,
+     `auditloop 24s`, `devrc 31s`, vs unpinned `clawgate-ci 13s`. It falls over in a
+     BURST (5 running + 5 queued). So the lever is concurrency, not storage.
+   - 🔴 **TWO MORE PLAUSIBLE FIXES ARE ALSO DEAD — both were nearly proposed here, and
+     the arithmetic is what killed them. Do not re-derive either.**
+     - **"Cap concurrent runs / lean on supersede" — NO.** `tekton-supersede` (CronJob,
+       `* * * * *`) ALREADY covers this pipeline: **43** retained `devrc-ci-pipeline` runs
+       carry `ci.zacx.dev/supersede-key`. It cancels older runs sharing a key — same PR,
+       same branch. The 10 pods measured were **10 DISTINCT PRs**, correctly not
+       superseded. Capping would queue genuinely different work; it removes no work.
+       ⚠ A first query for this returned `0` because it used label value `devrc-ci`
+       instead of `devrc-ci-pipeline`. The positive control (a histogram over all
+       pipelines) is what caught it — do not read a bare zero here without one.
+     - **"Do a #396-style static split for `devrc-ci`" — NO, it would make devrc WORSE.**
+       The only viable target node `talos-jkj-deb` has ~4,380m free ⇒ **1–2** concurrent
+       gate pods at 2250m each; devrc currently gets ~**5** on `talos-xr6-r7p`. The split
+       helps the OTHER three pipelines by vacating xr6 and demotes the pipeline it was
+       meant to rescue. (`talos-deu-s2q` is not headroom either: 4 CPU and **99% actual**.)
+   - 🔴 **THE ACTUAL COST DRIVER IS THE WORKLOAD, NOT THE PLACEMENT.** The gate runs
+     **~19,440 collected tests for a three-markdown-file PR**. Storage, scheduling and
+     concurrency are all symptoms of paying that per run, ten runs at a time.
+     **`--targets` subsetting is already MERGED and on `main`** — PR #1073.
+   - 🔴 **THIS RANK IS ALREADY OWNED BY ANOTHER EFFORT. DO NOT BUILD HERE — HAND OVER.**
+     `claudedocs/handoff-ci-speedup.md` is the canonical doc, with live claims
+     **`ci-speedup-1`** (taken 1d ago, "cut devrc-ci pytests step from ~21min") and
+     **`ci-speedup-2`** (taken 3h ago, "empirically measure which test files are repo-wide
+     scanners"). It is well ahead of this rank and its ordering CONTRADICTS the obvious
+     one: a path→target mapper is worth **~1.7x alone but ~3.6x after** `scripts/tests` is
+     decomposed, so decomposition comes FIRST and must be **measured, not classified** (its
+     regex classifier over-classifies and is explicitly untrusted). Its estimate history is
+     **3x → 1.7x → uncertain** — three revisions, which is why it refuses to build the
+     mapper on an estimate.
+     🔴 **It also already TRIED the unpin, and that is the big lever, not the mapper:**
+     unpinned, queue wait **17.2m/22.5m → 0.1m** and wall clock **39.1m median → 17.4m**.
+     Reverted because a `DirectoryOrCreate` hostPath is created **root-owned**, so every
+     test shelling out to nix died — `opening lock file "/nix/var/nix/db/big-lock":
+     Permission denied`, **75 occurrences / 42 tests on every PR**, with PVC-era runs at
+     **0** as the control. Retry is gated on a `chown`/`chmod` probe **on a scratch
+     pipeline**, never on `devrc-ci`.
+   - **What THIS session adds for that owner, not found in their doc** (all measured here,
+     2026-08-30): `tekton-supersede` already covers `devrc-ci` (43 keyed runs) so a
+     concurrency cap removes no work; a #396-style split would DEMOTE devrc (~5 concurrent
+     → 1–2); the cache is **69 GB / 25,664 store paths**, not the 30Gi requested; RWX is
+     absent cluster-wide with positive controls (**0 CSI drivers, 0 RWX of 294 PVs**); and
+     **RWO is per-NODE, not per-pod**, so the access mode was never the lever.
+   - ⚠ **Process note, recorded because it is the reusable part:** this rank was
+     investigated for a full session BEFORE anyone ran `claim-work --list`. Two live claims
+     and a more advanced handoff already existed. Nothing was written to the cluster and
+     the findings above are a genuine contribution, but the sweep costs one command and
+     would have reordered the whole effort. Sweep FIRST — the rule names exactly this.
+   - Affected surface if anyone does touch the cache: **4 pipelines** (`naida-ux-audit`,
+     `remix-ux-audit`, `auditloop-ci`, `devrc-ci`) **+ 4 TriggerTemplate node pins**.
+     `gitops-validate` is already on a separate `nix-store-cache-2`; `clawgate-ci`,
+     `clawgate-e2e`, `clawgate-ux-audit` and `vetr-infra-guards` deliberately use no nix
+     cache and must not be enlisted into one.
+3. ~~**Fix `clawgate` deeplink**~~ — **DONE 2026-08-30.** Closing condition was "#440's 6
+   criteria, verified by a new spec in `e2e/tests/tasks.spec.ts` shown RED before / GREEN
+   after"; measured with the SAME spec file on both sides — **3 failed / 1 passed at
+   `3b90b6ee`, 4 passed after**. Merged `homelab-infra#564`, deployed 0.8.19, verified
+   live (see the closed investigation above). ⚠ The **handoff's** closing condition is
+   met; **#440's own** is not — it sits `ready_for_review` behind the newly-filed #463.
+   Successor item is #463, not this rank.
+4. ~~**Document the branch-protection escape hatch's asymmetry**~~ — **CLOSED AS OBSOLETE
+   2026-08-30. Do not re-open it; the paragraph would be redundant AND slightly harmful.**
+   This rank was written before `#1065` merged. Measured today:
+   - **The exact text it asks for already exists**, at the site an operator actually
+     reads — `scripts/drift-check.sh` (on `main`): *"`gh api -X PATCH
+     …/protection/required_status_checks` CANNOT restore the sub-resource after a DELETE
+     — it returns non-zero and changes nothing. Restoring needs a full `PUT
+     …/branches/main/protection`. That is why the measured break-glass left main
+     unprotected despite a restore trap that ran: the rollback path had never been
+     executed once."*
+   - **A deterministic detector now covers the hazard and is LIVE** — rc 24, merged as
+     `#1065`. `drift-check.timer` is `active`+`enabled`; last run 2026-08-30 12:24 CDT.
+     Its verdict is the **context count**, never the `protected` flag. Prose hoped
+     someone would read it; rc 24 fires 4×/day.
+   - Live protection reads healthy: `enforce_admins: true`, `strict: false`, both
+     contexts present with `app_id` 4320115 pinning.
+   🔴 **And the edit as SPECIFIED is the wrong shape.** `CLAUDE.md` still hands over the
+   `DELETE` with no mention of the asymmetry — but "also document the `PUT`" makes a
+   one-way, hard-to-reverse operation MORE usable, exactly when someone reaches for it
+   under pressure (measured 2026-08-30: the devrc gate failed three consecutive runs of
+   an innocent docs PR). It would also have prevented **neither** measured incident: the
+   first one *had* a restore trap, it *ran*, and main was left unprotected anyway. If
+   anything belongs in `CLAUDE.md` it is one clause saying the DELETE is one-way and that
+   rc 24 watches for it — a pointer to the detector, not a copy of the recipe. That is a
+   materially different edit and needs its own decision, so it was NOT made under this
+   item's authority.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A terminal-UI interaction can be verified WITHOUT taking the operator's screen —
