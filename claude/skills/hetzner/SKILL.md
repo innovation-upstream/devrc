@@ -79,8 +79,10 @@ never present its total as "the fleet" without saying which accounts were read. 
 the account list and an unreachable list for exactly this reason; **relay both.**
 
 Known as of 2026-08-31: the `default` token reaches 3 servers in `ash` (`k0s-01`,
-`vetr-k8s-app-1/2`). It does **not** reach the production k0s cluster at `5.161.118.55`
-(`diffsona`, `tryonhaulcentral-k8s`) — that is a separate account whose token is not on this box.
+`vetr-k8s-app-1/2`). It does **not** reach the production k0s cluster (`diffsona`,
+`tryonhaulcentral-k8s`) — that is a separate account whose token is not on this box. Resolve that
+cluster's address from `$HOMELAB/production-kubeconfig` rather than writing a literal here: devrc is
+PUBLIC and `scripts/tests/test_no_public_ips.py` fails the suite on a committed routable IP.
 
 ## Verify
 
