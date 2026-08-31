@@ -5,28 +5,36 @@
 # rule (i) consults. THREE sections were added closing #1093/#1115 — the codes,
 # the predicate, and the round-4 message row with its negative control.
 #
-# 🔴 THEY ARE NOT ALL THE SAME KIND OF ROW, and reading them as one gets three
-# of the six wrong. MEASURED at the merge-base `093a63db`, the 295-test tree
-# current when #1115 was filed:
+# 🔴 THEY ARE NOT ALL THE SAME KIND OF ROW. This change adds NINE rows, and
+# reading them as one kind gets FIVE of them wrong. MEASURED by running each
+# mutant against the merge-base `093a63db`, a 295-test tree:
 #
-#   REGRESSION COVERAGE — survived at filing, killed only by a NEW assertion:
+#   REGRESSION COVERAGE (4) — the mutant SURVIVED the whole suite at the base,
+#   so a NEW assertion is what catches it:
 #     stale-base-code-renumbered · doc-per-effort-code-renumbered ·
 #     unforced-code-renumbered · rule-i-broadened-to-bare-stale   (295 passed)
 #
-#   INVARIANT GUARDS — already killed at filing by PRE-EXISTING tests, so an
-#   `ok` here does NOT show the new assertion is what catches them:
+#   INVARIANT GUARDS (3) — the mutant was ALREADY killed at the base by
+#   pre-existing tests, so the row does not show the suite would otherwise
+#   miss it:
 #     one-exit-constant-silently-vanishes      (8 failed at `093a63db`)
 #     mainline-measured-from-the-wrong-text    (2 failed at `093a63db`)
+#     stale-clone-treated-as-new-effort        (1 failed at `093a63db`)
 #
-#   DIAGNOSTIC-QUALITY — killed at filing by the WRONG MESSAGE, which is the
-#   whole of #1093.1, so `ok` means the failure NAMES the real defect:
-#     round-4-regression-message  (+ its negative control)
+#   DIAGNOSTIC-QUALITY (2) — killed at the base by the WRONG MESSAGE, which is
+#   the whole of #1093.1, so `ok` means the failure NAMES the real defect:
+#     round-4-regression-message  +  round-4-negative-control
 #
-# 🔴 The distinction is not pedantry: `claude/RULES.md` calls a guard pinning an
-# invariant the bug never violated an INVARIANT GUARD and says to label it as
-# one rather than count it as regression coverage — and reading the second group
-# as the first is what makes a maintainer believe deleting the new assertion
-# would be caught here. It would not be.
+# 🔴 "INVARIANT GUARD" IS A CLAIM ABOUT THE SUITE, NOT ABOUT THIS HARNESS — and
+# an earlier wording conflated the two, which is the error this note exists to
+# stop repeating. `_run` demands the row's OWN NAMED killer, so deleting the new
+# assertion does NOT leave the row reporting `ok`: it reports 🔴 WRONG-KILLER.
+# MEASURED on the head tree with `assert len(codes) == 9` deleted and the
+# vanishing-constant mutant applied — 8 tests fail and
+# `test_no_two_exit_constants_share_a_value` is NOT among them, so `grep -qx`
+# misses and the row goes red. So these three rows DO bind their new assertions;
+# what they do not do is prove the suite would have missed the mutant without
+# them. `claude/RULES.md` asks for that label, not for the row to be deleted.
 #
 # Not run by CI. An author/reviewer instrument, kept IN THE TREE so
 # "mutation-verified" can be RE-DERIVED instead of believed.
@@ -491,11 +499,13 @@ printf '\n== the EXIT-CODE CONTRACT the ladder left unpinned (must be KILLED) ==
 # 🔴 THE FOURTH IS NOT ONE OF THEM, and an earlier wording said it was.
 # MEASURED at the merge-base `093a63db`: `one-exit-constant-silently-vanishes`
 # already killed **8** tests there, so it is an INVARIANT GUARD on the new
-# `== 9`, NOT evidence that `== 9` is what catches it. Delete that assertion and
-# this row still reports `ok`, because `test_the_exit_code_constants_did_not_move`
-# and seven behind-path siblings kill it anyway — which is exactly what this
-# harness's own `(also: …)` list prints. Counting it as regression coverage is
-# the `claude/RULES.md` vacuous-guard shape.
+# `== 9` — it does not show the suite would have missed the mutant without it.
+# 🔴 THAT IS NOT A REASON TO DELETE `== 9`, and an earlier version of this
+# comment said deleting it would leave this row reporting `ok`. FALSE, and
+# measured: with the assertion deleted, the 8 killers do NOT include this row's
+# named `test_no_two_exit_constants_share_a_value`, so `_run`'s `grep -qx` misses
+# and the row reports 🔴 WRONG-KILLER. The pin is load-bearing HERE even though
+# the mutant was already covered THERE.
 run 'stale-base-code-renumbered' test_the_exit_code_constants_did_not_move \
   's|^EXIT_STALE_BASE = 9$|EXIT_STALE_BASE = 10|'
 run 'doc-per-effort-code-renumbered' test_the_exit_code_constants_did_not_move \

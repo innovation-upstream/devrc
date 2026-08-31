@@ -1513,9 +1513,10 @@ SKILL_PINS: list[tuple[str, str]] = [
     # under exactly the pressure that removed it the first time.
     (
         "Read each row's marker — only one means \"add a field\"",
-        "🔴 only ONE of the four markers means add-a-field; a legend that drops "
-        "`only` tells the executor to add a `forcing:` field to a QUOTED item, "
-        "which FENCED_FIELD_REMEDY exists to forbid",
+        "🔴 only ONE of the four markers means add-a-field; without `only` the "
+        "executor applies that remedy to all four, when [unknown kind] needs a "
+        "LISTED kind, [unparsed] needs RE-SPELLING and [fenced] needs unfencing "
+        "or tagging the item",
     ),
     (
         "scripts/lib/handoff_doc.py",
