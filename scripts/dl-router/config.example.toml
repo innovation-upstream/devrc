@@ -141,3 +141,26 @@ max_jobs = 4
 # # `attr` is an attribute (or same-named property) NAME, never an expression:
 # # config is data, and there is no path here that evaluates a string.
 # media     = { element = "video#main-video", attr = "src" }
+#
+# # `media` may also be an ORDERED LIST of accessors, tried in order, first
+# # http(s) hit wins. That exists because `attr` is ONE name, so a single pair
+# # cannot cover a site that posts both an image and a video: the image's own
+# # `src` is often a downscaled copy from a resizing proxy, with the original on
+# # the wrapping <a>, while a video's `src` IS the original. Put the accessor
+# # that resolves the BEST copy first.
+# #
+# # [site_rules."chat.example.test".player]
+# # container = "[class^=mediaWrapper]"
+# # media = [
+# #   { element = 'a[href^="https://cdn.example-cdn.test/attachments"]', attr = "href" },
+# #   { element = "video", attr = "src" },
+# # ]
+# #
+# # Do NOT try to reach the original by rewriting a proxy URL's host: the two
+# # hosts commonly carry DIFFERENT signature parameters, so a rewritten URL
+# # drops a signature that belonged to the other host. Taking the anchor's own
+# # href works because it is already signed for the host it points at.
+# #
+# # One malformed accessor rejects the WHOLE rule and renders no button --
+# # keeping the good ones would silently cover only some media on the page,
+# # which looks like the feature working. At most 8 accessors per rule.

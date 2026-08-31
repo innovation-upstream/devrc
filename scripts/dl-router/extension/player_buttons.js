@@ -58,6 +58,11 @@
   // An attribute or property NAME, never an expression. See readMediaUrl.
   var ACCESSOR_NAME = /^[A-Za-z][A-Za-z0-9_-]*$/;
   var HTTP_URL = /^https?:\/\/[^\s]+$/i;
+  // Mirrors config.MAX_MEDIA_ACCESSORS. A cap, not a design target: every
+  // accessor is a selector query run inside the CLICK handler. Both sides must
+  // agree -- a list the sidecar accepts and this rejects renders NO button,
+  // which is silent.
+  var MAX_MEDIA_ACCESSORS = 8;
 
   function isSupportedSelector(selector) {
     if (typeof selector !== "string") return false;
@@ -90,15 +95,31 @@
       ? player.media : null;
     if (!media) return null;
     if (!isSupportedSelector(player.container)) return null;
-    if (!isSupportedSelector(media.element)) return null;
-    if (typeof media.attr !== "string" || !ACCESSOR_NAME.test(media.attr)) {
-      return null;
+    // ONE accessor or an ORDERED LIST. `attr` is a single NAME, so one pair
+    // cannot say "the image's ANCHOR href, but the video's own src" -- which is
+    // exactly what a site serving both kinds needs. Normalised to a list here
+    // so readMediaUrl has one shape to walk.
+    var raws = Array.isArray(media) ? media : [media];
+    if (!raws.length || raws.length > MAX_MEDIA_ACCESSORS) return null;
+    var accessors = [];
+    for (var a = 0; a < raws.length; a += 1) {
+      var acc = raws[a];
+      if (!acc || typeof acc !== "object") return null;
+      if (!isSupportedSelector(acc.element)) return null;
+      if (typeof acc.attr !== "string" || !ACCESSOR_NAME.test(acc.attr)) {
+        // STRICT, and it must stay strict. Dropping the bad accessor and
+        // keeping the good ones would render a button that silently covers
+        // only some media on the page -- the failure this function's docstring
+        // calls worse than no button, because it looks like it is working.
+        return null;
+      }
+      accessors.push({ element: acc.element.trim(), attr: acc.attr });
     }
     var mount = isSupportedSelector(player.mount) ? player.mount.trim() : "";
     return {
       container: player.container.trim(),
       mount: mount,
-      media: { element: media.element.trim(), attr: media.attr },
+      media: accessors,
       label: (typeof player.label === "string" && player.label
         && player.label.length <= 40) ? player.label : LABEL,
     };
@@ -138,26 +159,38 @@
    */
   function readMediaUrl(dom, rule, container) {
     if (!rule) return "";
-    var nodes = safeQuery(dom, rule.media.element, container);
-    for (var i = 0; i < nodes.length; i += 1) {
-      var node = nodes[i];
-      var value = "";
-      try {
-        if (node && typeof node.getAttribute === "function") {
-          value = node.getAttribute(rule.media.attr) || "";
+    // ORDER IS THE CONTRACT, not an implementation detail: the first accessor
+    // that yields an http(s) URL wins, so a rule puts the accessor that
+    // resolves the BEST copy first. On a site that serves one asset at two
+    // resolutions -- a downscaled <img src> under an <a> pointing at the
+    // original -- reading the anchor first is what saves the posted file
+    // rather than the thumbnail, and it does so BY CONSTRUCTION: the anchor's
+    // URL is already signed for its own host, so nothing has to be rewritten.
+    var pairs = rule.media;
+    var nodes = [];
+    for (var p = 0; p < pairs.length; p += 1) {
+      var attr = pairs[p].attr;
+      nodes = safeQuery(dom, pairs[p].element, container);
+      for (var i = 0; i < nodes.length; i += 1) {
+        var node = nodes[i];
+        var value = "";
+        try {
+          if (node && typeof node.getAttribute === "function") {
+            value = node.getAttribute(attr) || "";
+          }
+          if (!value && node && typeof node[attr] === "string") {
+            value = node[attr];
+          }
+        } catch (e) {
+          value = "";
         }
-        if (!value && node && typeof node[rule.media.attr] === "string") {
-          value = node[rule.media.attr];
+        // The frame-side shape check is a nicety so the button can say "not
+        // ready" instead of firing a doomed download. The AUTHORITATIVE gate is
+        // sanitize.isHttpUrl in the service worker, which is the only side that
+        // can refuse.
+        if (typeof value === "string" && HTTP_URL.test(value.trim())) {
+          return value.trim();
         }
-      } catch (e) {
-        value = "";
-      }
-      // The frame-side shape check is a nicety so the button can say "not
-      // ready" instead of firing a doomed download. The AUTHORITATIVE gate is
-      // sanitize.isHttpUrl in the service worker, which is the only side that
-      // can refuse.
-      if (typeof value === "string" && HTTP_URL.test(value.trim())) {
-        return value.trim();
       }
     }
     return "";

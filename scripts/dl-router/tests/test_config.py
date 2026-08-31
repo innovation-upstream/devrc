@@ -256,6 +256,22 @@ def _toml(entry, prefix):
     for k, v in entry.items():
         if isinstance(v, dict):
             tables.append((k, v))
+        elif isinstance(v, list) and any(isinstance(s, dict) for s in v):
+            # An ARRAY OF INLINE TABLES, which is what a multi-accessor
+            # `media` is. Emitted here rather than worked around in the tests:
+            # a helper that silently stringified these would have made every
+            # list assertion below test the emitter instead of the validator.
+            # `"` is ESCAPED, not assumed absent: an attribute selector like
+            # `a[href^="https://x/"]` is the whole reason a list exists, and an
+            # emitter that produced unclosed inline tables for it would make
+            # every list test fail on the FIXTURE rather than on the validator.
+            def _s(x):
+                return '"' + str(x).replace("\\", "\\\\").replace('"', '\\"') \
+                    + '"'
+            inner = ", ".join(
+                "{" + ", ".join(f"{ik} = {_s(iv)}" for ik, iv in s.items())
+                + "}" if isinstance(s, dict) else _s(s) for s in v)
+            lines.append(f"{k} = [{inner}]")
         elif isinstance(v, list):
             lines.append(f"{k} = [" + ", ".join(f'"{s}"' for s in v) + "]")
         else:
@@ -315,3 +331,77 @@ def test_a_malformed_rule_degrades_the_sidecar_instead_of_crash_looping(
     cfg, err = config_mod.load_degraded(p)
     assert err and "player.media must be a table" in err
     assert cfg.library_root is None, "and nothing is routed by accident"
+
+
+# --- an ORDERED LIST of media accessors ------------------------------------ #
+# The sidecar is the FIRST gate: it validates site_rules before the snapshot
+# ever reaches the extension, so a list it rejects can never render a button no
+# matter what player_buttons.js accepts. These pin that the two agree.
+
+def _player(media):
+    return {"h.test": {"player": {"container": "#c", "media": media}}}
+
+
+def test_a_single_media_table_is_still_accepted(tmp_path):
+    """Back-compat. Every deployed config today uses this shape."""
+    cfg = _load(tmp_path, _player({"element": "video", "attr": "src"}))
+    assert cfg.section("site_rules")["h.test"]["player"]
+
+
+def test_a_list_of_media_accessors_is_accepted(tmp_path):
+    cfg = _load(tmp_path, _player([
+        {"element": 'a[href^="https://cdn.test/"]', "attr": "href"},
+        {"element": "video", "attr": "src"},
+    ]))
+    media = cfg.section("site_rules")["h.test"]["player"]["media"]
+    assert [m["attr"] for m in media] == ["href", "src"], \
+        "order must survive the round trip -- it is the contract"
+
+
+def test_an_empty_media_list_is_refused(tmp_path):
+    with pytest.raises(config_mod.ConfigError) as e:
+        _load(tmp_path, _player([]))
+    assert "empty list" in str(e.value)
+
+
+def test_a_list_longer_than_the_cap_is_refused(tmp_path):
+    over = [{"element": "video", "attr": "src"}] * (
+        config_mod.MAX_MEDIA_ACCESSORS + 1)
+    with pytest.raises(config_mod.ConfigError) as e:
+        _load(tmp_path, _player(over))
+    assert str(config_mod.MAX_MEDIA_ACCESSORS) in str(e.value)
+
+
+def test_the_cap_itself_is_accepted(tmp_path):
+    """The boundary, so the cap cannot drift off by one."""
+    at_cap = [{"element": "video", "attr": "src"}] * \
+        config_mod.MAX_MEDIA_ACCESSORS
+    cfg = _load(tmp_path, _player(at_cap))
+    assert len(cfg.section("site_rules")["h.test"]["player"]["media"]) == \
+        config_mod.MAX_MEDIA_ACCESSORS
+
+
+def test_a_bad_entry_in_a_list_names_ITS_INDEX(tmp_path):
+    """A long list with one typo must say WHICH entry, or the operator has to
+    bisect their own config by hand."""
+    with pytest.raises(config_mod.ConfigError) as e:
+        _load(tmp_path, _player([
+            {"element": "video", "attr": "src"},
+            {"element": "a", "attr": ""},
+        ]))
+    assert "media[1].attr" in str(e.value)
+
+
+def test_the_SINGLE_table_message_carries_no_index(tmp_path):
+    """The old message must not grow a `[0]` -- it would read as a list error
+    to someone who never wrote a list."""
+    with pytest.raises(config_mod.ConfigError) as e:
+        _load(tmp_path, _player({"element": "video", "attr": ""}))
+    msg = str(e.value)
+    assert "media.attr" in msg and "[0]" not in msg
+
+
+def test_a_scalar_media_is_still_refused(tmp_path):
+    with pytest.raises(config_mod.ConfigError) as e:
+        _load(tmp_path, _player("video"))
+    assert "must be a table" in str(e.value)
