@@ -64,6 +64,7 @@ WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the label):
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -452,16 +453,33 @@ def _fire_controls_concurrently(tmp_path, n=_CONTENDERS,
     # `communicate` timeout used to propagate and leave the remaining children
     # running, and an exception between Popen and `go.write_text` left all of
     # them polling a file that would never appear.
+    # 🔴 ONE WHOLE-FIXTURE DEADLINE, not a per-child timeout. The children run
+    # CONCURRENTLY but are waited on in sequence, so a per-child `timeout=300`
+    # with a `continue` bounds the fixture at n*300 = 4800s — past `gate.sh`'s
+    # 3600s tier cap, turning a systemic child hang into `reason=timeout` with NO
+    # verdict instead of one clean failure. The budget must also EXCEED the
+    # documented 391s single-control ceiling (LOCK_RETRIES * (CONFIG_LOCK_WAIT +
+    # LOCK_TIMEOUT) + jitter), or a legitimately slow control is killed and
+    # reported as a hang. 600s satisfies both; re-derive it if either constant
+    # moves — and note this, not _CONTENDED_CONFIG_KEYS, is the real cap.
+    budget = 600.0
+    deadline = time.monotonic() + budget
     out = []
     try:
         go.write_text("go", encoding="utf-8")
         for p in procs:
+            remaining = max(1.0, deadline - time.monotonic())
             try:
-                stdout, stderr = p.communicate(timeout=300)
+                stdout, stderr = p.communicate(timeout=remaining)
             except subprocess.TimeoutExpired:
                 p.kill()
+                # Capture what it DID say. Discarding this for a fixed string
+                # would be the exact failure the payload half of this commit
+                # exists to fix: a verdict that does not name its mechanism.
                 stdout, stderr = p.communicate()
-                out.append({"status": "CHILD-TIMEOUT", "detail": "exceeded 300s"})
+                out.append({"status": "CHILD-TIMEOUT",
+                            "detail": f"killed after the {budget:.0f}s fixture "
+                                      f"budget: {((stdout or '') + (stderr or ''))[-400:]}"})
                 continue
             try:
                 out.append(json.loads(stdout))
@@ -515,6 +533,99 @@ def test_concurrent_sessions_all_emit_their_control_key(tmp_path):
         f"ONE shared guard file holds {landed} control key(s). `run-tests.sh`'s "
         f"`_nogit_controls()` counts them in that single file and pins the count "
         f"to the session count, so a scattered write reads as a dead redirect.")
+
+
+def test_the_exhaustion_verdict_counts_acquisitions_it_does_not_sample_one(tmp_path):
+    """🔴 REGRESSION. The verdict must report how MANY attempts held the mutex.
+
+    `held` is rebound every retry, so printing it alone describes ONE attempt
+    while reading as a property of the whole run — with the mutex free only at
+    the end, a run where four of six writes went UNSERIALISED would report
+    `mutex=held`, sending the reader hunting a rogue writer that does not exist.
+    That is the misdiagnosis the field was added to prevent, in the costlier
+    direction, so the ratio is the guard and a bare boolean is the bug.
+
+    Driven to exhaustion the honest way: hold the mutex from this process (so
+    every acquire fails open, giving 0/N) AND plant a stale `<cfg>.lock` so git
+    itself really does exit 255 — mechanism (c), which is what makes the
+    exhaustion path reachable without racing anything.
+    """
+    guard = tmp_path / "g"
+    guard.mkdir()
+    nogit_plugin.install(guard)
+    cfg = nogit_plugin.guard_config_path(guard)
+    Path(str(cfg) + ".lock").write_text("", encoding="utf-8")
+
+    holder = nogit_plugin.guard_config_lock_path(guard).open("a+")
+    original = nogit_plugin.CONFIG_LOCK_WAIT
+    nogit_plugin.CONFIG_LOCK_WAIT = 0.05   # do not wait out our own mutex 6x
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        status, detail = nogit_plugin.config_control(guard)
+    finally:
+        nogit_plugin.CONFIG_LOCK_WAIT = original
+        holder.close()
+
+    assert status == "unmeasured", (status, detail)
+    # The RATIO, not a boolean. Literal expected value: every acquire failed
+    # open because we held the mutex, across all LOCK_RETRIES attempts.
+    assert f"mutex=held 0/{nogit_plugin.LOCK_RETRIES}" in detail, detail
+    # And the other discriminator still names mechanism (c) beside it.
+    assert "stale-git-lock=PRESENT" in detail, detail
+
+
+def test_CONFIG_LOCK_WAIT_is_read_at_call_time_not_captured_at_import(tmp_path):
+    """🔴 REGRESSION, and it guards a SILENT trap rather than a wrong answer.
+
+    `wait` was bound as `wait: float = CONFIG_LOCK_WAIT`, so the value was
+    captured at IMPORT and `monkeypatch.setattr(mod, "CONFIG_LOCK_WAIT", …)` did
+    nothing — while its three neighbours (LOCK_RETRIES, LOCK_TIMEOUT,
+    CONFIG_LOCK_SUFFIX) all honoured it. Reverting to the default-argument form
+    leaves every other test in this file GREEN, which is exactly why this one
+    exists: it already cost a measurement (a probe set to 0.2s took 60.4s).
+
+    Asserted by ELAPSED TIME, because that is the observable the trap changes.
+    Measured: ~60.00s with the bug, ~0.30s without — so a 5s bound is nowhere
+    near either, and this is not a timing-sensitive test in the flaky sense.
+    """
+    guard = tmp_path / "g"
+    guard.mkdir()
+    nogit_plugin.install(guard)
+    lock_path = nogit_plugin.guard_config_lock_path(guard)
+    # Hold the mutex from this process so every acquire below must wait it out.
+    holder = lock_path.open("a+")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        original = nogit_plugin.CONFIG_LOCK_WAIT
+        nogit_plugin.CONFIG_LOCK_WAIT = 0.2
+        try:
+            started = time.monotonic()
+            with nogit_plugin._config_write_lock(guard) as held:
+                pass
+            elapsed = time.monotonic() - started
+        finally:
+            nogit_plugin.CONFIG_LOCK_WAIT = original
+    finally:
+        holder.close()
+
+    assert held is False, "the mutex was held elsewhere; this acquire must fail open"
+    assert elapsed < 5.0, (
+        f"honoured the import-time default instead of the module attribute: "
+        f"waited {elapsed:.2f}s against CONFIG_LOCK_WAIT=0.2")
+
+    # Positive control for the assertion above: an EXPLICIT wait= must still
+    # win, so the test cannot pass by the parameter having been ignored.
+    holder = lock_path.open("a+")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        started = time.monotonic()
+        with nogit_plugin._config_write_lock(guard, wait=0.0) as held_explicit:
+            pass
+        explicit_elapsed = time.monotonic() - started
+    finally:
+        holder.close()
+    assert held_explicit is False
+    assert explicit_elapsed < 5.0
 
 
 def test_the_control_mutex_is_never_gits_own_lock_file(tmp_path):

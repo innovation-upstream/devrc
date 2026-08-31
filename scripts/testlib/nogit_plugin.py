@@ -277,16 +277,29 @@ def _config_write_lock(guard_dir: Path, wait: float | None = None):
                     held = True
                     break
                 except OSError as exc:
-                    # 🔴 ONLY contention is worth waiting out. `flock` reports a
-                    # held lock as EWOULDBLOCK/EAGAIN; anything else — ENOLCK on
-                    # a filesystem without lock support, EPERM under a
-                    # restrictive seccomp — will NEVER succeed, so polling it
-                    # burns the whole CONFIG_LOCK_WAIT per acquire, silently,
-                    # every session. MEASURED with flock forced to ENOLCK:
-                    # held=False after the full wait rather than immediately.
-                    # Not reachable on today's hosts (the guard dir is a local
-                    # `mktemp -d` in every tier), which is why this fails fast
-                    # rather than escalating.
+                    # 🔴 Only CONTENTION is worth polling out: `flock` reports a
+                    # held lock as EWOULDBLOCK/EAGAIN, and waiting is exactly
+                    # right for that. Anything else fails open immediately
+                    # rather than burning the whole CONFIG_LOCK_WAIT per
+                    # acquire, silently, every session.
+                    #
+                    # ⚠ AN EARLIER VERSION OF THIS COMMENT JUSTIFIED THAT WITH
+                    # "ENOLCK means a filesystem without lock support and will
+                    # NEVER succeed". That is WRONG — flock(2) documents ENOLCK
+                    # as "the kernel ran out of memory for allocating lock
+                    # records", i.e. rare and TRANSIENT; and EPERM is not a
+                    # documented flock error at all, reachable only via a seccomp
+                    # filter synthesising it. The behaviour is still the one we
+                    # want, but the trade is a DELIBERATE choice, not a fact
+                    # about the errno: a transient ENOLCK now fails open
+                    # instantly instead of being polled out, and the outer retry
+                    # can then exhaust in under a second. Accepted because it is
+                    # rare, and because a silent 60s stall per session on an
+                    # errno that cannot be waited out is the worse failure.
+                    #
+                    # Neither path is reachable on today's hosts — the guard dir
+                    # is a local `mktemp -d` in every tier — so this rests on the
+                    # man page and code reading, not a live reproduction.
                     if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
                         break
                     if time.monotonic() >= deadline:
@@ -393,6 +406,16 @@ def config_control(guard_dir: Path) -> tuple[str, str]:
     # "unmeasured" on the first try. Widening it to all failures would convert a
     # genuinely broken control into a slow green, which is the exact failure this
     # guard exists to prevent.
+    #
+    # 🔴 COUNT the acquisitions, do not sample the last one. `held` is rebound
+    # every iteration, so reporting it alone describes ONE attempt while reading
+    # as a property of the whole run: with the mutex free only at the end
+    # ([F,F,F,F,T,T]) the verdict would say "held" while FOUR of six writes ran
+    # unserialised. That is the misdiagnosis this field exists to prevent, in the
+    # costlier direction — it sends the reader hunting a rogue writer that does
+    # not exist. The ratio distinguishes "serialised throughout and still
+    # collided" from "mostly unserialised".
+    held_count = 0
     for attempt in range(LOCK_RETRIES):
         # A SHORT timeout, not _git's 30s default: this is one tiny local write.
         # 🔴 THE WORST CASE IS NO LONGER `LOCK_RETRIES * timeout`. That sentence
@@ -409,6 +432,7 @@ def config_control(guard_dir: Path) -> tuple[str, str]:
         # participating, which is the shape that turns a mutex into the stall it
         # was added to prevent.
         with _config_write_lock(guard_dir) as held:
+            held_count += bool(held)
             wrote = _git(["config", "--global", key, token], timeout=LOCK_TIMEOUT)
         if wrote is None:
             return "unmeasured", "git is not runnable from this session"
@@ -442,7 +466,7 @@ def config_control(guard_dir: Path) -> tuple[str, str]:
             return ("unmeasured",
                     f"git config --global exited {wrote.returncode} — still "
                     f"lock-contended after {LOCK_RETRIES} attempts "
-                    f"(mutex={'held' if held else 'NOT-held'}, "
+                    f"(mutex=held {held_count}/{attempt + 1}, "
                     f"stale-git-lock={'PRESENT' if stale else 'absent'})")
         # FULL JITTER, not a pid-derived offset. The first version used
         # `(os.getpid() % 17) / 1000` — at most 16ms against a 50ms step, and
