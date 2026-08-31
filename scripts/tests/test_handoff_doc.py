@@ -4186,8 +4186,32 @@ class TestTheNextStepsSelectorHasOneOwner:
         neither predicate's own tests could see. Both surfaces were tested; what
         nobody owned was that they answer the SAME question. Measured
         disagreement at `edbc596f`: `Next  steps` was `canonical_prefix` ->
-        `next steps` and `ranked_items` -> not a queue."""
-        assert (hd.canonical_prefix(heading) == hd.NEXT_STEPS_PREFIX) is is_queue
+        `next steps` and `ranked_items` -> not a queue.
+
+        🔴 IT COMPARES `canonical_prefix` AGAINST `ranked_items`' OWN VERDICT,
+        and an earlier version of this test did NOT — it compared
+        `canonical_prefix` against `is_next_steps_heading`, which literally calls
+        it, so the two could not disagree by construction. That version was this
+        PR's own headline defect committed against itself: a guard whose
+        DOCSTRING claims a relationship while its BODY inspects one side.
+        CAUGHT BY MUTATION, not by reading — `heading-test-open-coded-again`
+        (revert the call site to the raw `.startswith`) reported 🔴 `WRONG-KILLER`,
+        dying to the table test and the structural one while THIS test, the row's
+        named killer, stayed green. Comparing against the real call site is what
+        makes it a seam guard rather than a tautology.
+
+        `is_queue` is still asserted rather than only the equality: two sides
+        that agree on the WRONG answer would satisfy a bare `a is b`.
+        """
+        via_canonical = hd.canonical_prefix(heading) == hd.NEXT_STEPS_PREFIX
+        via_selector = bool(hd.ranked_items(
+            f"## {heading}\n\n1. do the thing. forcing: gate — CI red\n"
+        ))
+        assert via_selector is via_canonical, (
+            "the section selector and the canonical classifier disagree about "
+            f"{heading!r} — one rule, two places, wrong at one"
+        )
+        assert via_canonical is is_queue
         assert hd.is_next_steps_heading(heading) is is_queue
 
     def test_ranked_items_does_not_OPEN_CODE_the_predicate(self) -> None:
