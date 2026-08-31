@@ -108,6 +108,55 @@ ROOT = Path(__file__).resolve().parents[2]
 # 🔴 This is the SYMPTOM fix. The cause is a 10-minute parallel suite competing
 # with a saturated cluster, which belongs to Tekton capacity, not to this file.
 #
+# 🔴 AND 60 DID NOT HOLD — it recurred 2026-08-31, so do not read the paragraph
+# above as closed. What is new is that the contention is now NAMED and can be
+# reproduced ON THE DEV HOST in ~70 s; see `scripts/ci-repro/`. Two corrections
+# to the framing above, both measured:
+#
+#   * IT IS DISK LATENCY, NOT CPU. On run `devrc-ci-86zxj` (sha 5de43017) this
+#     suite's own classifier printed `MECHANISM = SERVER_BLOCKED_IN_FSYNC …
+#     accept loop parked=True`. `server.py:_replace_bytes` fsyncs the file
+#     (:2012) and the parent dir (_fsync_dir, :1961) INSIDE the request, before
+#     the response is written, and fsync blocks in uninterruptible sleep.
+#     devrc-ci is pinned to ONE node (talos-xr6-r7p). 🔴 The contention set is
+#     the 7 devrc-ci runs, NOT the 12 overlapping pipelineruns: gitops-validate
+#     is pinned to talos-uvh-gtj and the one auditloop run was on
+#     talos-deu-s2q. 🔴 And the stalling fsync lands on NEITHER named volume —
+#     not `nix-store-cache` (/nix) nor the per-run `source` PVC
+#     (/workspace/source), but the step container's EPHEMERAL layer under /tmp,
+#     where the gate sets no TMPDIR and mounts nothing.
+#     ⚠ "give the gate CPU/memory requests" does NOT fix the latency — requests
+#     govern CPU and memory, not IOPS — but it is not useless either: every run
+#     is pinned to one node, so non-zero requests are the standard way to make
+#     excess runs Pending instead of co-scheduled, i.e. a concurrency cap. Do
+#     not read this as "requests are the wrong lever"; read it as "they cap
+#     concurrency, they do not speed up fsync". `computeResources: null` is a
+#     platform-wide default — EVERY taskrun in that namespace declares none,
+#     at every reading; the absolute count drifts — not a devrc oversight.
+#   * SEED/ORDERING IS NOT THE MECHANISM — but mind what proves that. The
+#     REPRODUCER (`scripts/ci-repro/`) shows fsync latency SUFFICES: delaying a
+#     single fsync past this bound reproduces the exact failure, on the
+#     identical test and parametrisation the gate reported (control 8 passed /
+#     4.63 s; with one stalled fsync, 1 failed). Sufficiency is not necessity —
+#     what actually refutes seed/ordering is the CI classifier above, not the
+#     reproducer.
+#   * ⚠ THE 3 FAILURES ON THAT RUN WERE NOT ONE FLAKE. The third was
+#     TestAHungRoundTripSAYSWhichSideBlocked::test_a_stall_in_the_FSYNC_region_
+#     is_NAMED, which failed on its assertion ("the server never reached the stall
+#     site") against `CLIENT_BOUND` (0.25) — NOT against this constant. Both
+#     live in TestAHungRoundTripSAYSWhichSideBlocked; find them by NAME, never
+#     by line — this comment block shifts them every time it is edited, which
+#     already shipped one wrong citation.
+#     So it evidences an fsync exceeding 0.25 s, and the advice below about not
+#     raising HANG_TIMEOUT does not address the bound that actually failed
+#     there. That 0.25/1.2 pair is the same "bound tighter than the thing it
+#     discriminates" shape as commit f4a3d69b; it is UNFIXED and unflagged
+#     elsewhere.
+#
+# 🔴 Do NOT raise this constant again in response to a recurrence. Read the
+# per-hung-call arithmetic directly below — the bound is not the lever, and the
+# next raise buys a longer outage, not a greener gate.
+#
 # 🔴 THE COST IS PER HUNG CALL, NOT PER SUITE — corrected after audit. The
 # commit that introduced this said "4x longer to fail … still fits" the 45m gate
 # task budget. That is true of ONE hung call. This module has ~208 `fetch(` and
