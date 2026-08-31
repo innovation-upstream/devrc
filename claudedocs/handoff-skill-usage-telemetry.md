@@ -273,6 +273,37 @@ version of this doc did not carry it. Verified on `origin/main` today, not recal
 NOT folded into #1119: widening a diff to chase a repo-wide pattern is how an audit ladder
 leaves the PR it is auditing.
 
+### 🔴 UNRESOLVED — `test_subsystem_store_api.py` is a fleet-wide flaky gate, and it blocks unrelated PRs
+- **Symptom + exact repro:** `tekton/devrc-pytests` reports FAILURE on PRs whose diffs cannot
+  reach the failing test. Observed on a **docs-only** PR (#1150, one markdown file in
+  `claudedocs/`).
+- **Observed (verbatim), 2026-08-31, across 12 open PRs:**
+  ```
+  #1151 RED: TestTheActorComesFromTheTOKEN.test_a_FORGED_actor_in_the_body_is_DISCARDED
+  #1150 RED: TestTextRejectsControlAndFormattingCharacters.test_ORDINARY_non_ASCII_prose…
+  #1145 RED: TestTextRejectsControlAndFormattingCharacters.test_ORDINARY_non_ASCII_prose…
+  #1136 RED: TestAppendIsCommutativeAndIdempotent.test_the_interleave_harness_CAN_LOSE…
+  ```
+  4 of 12 red, **every failure inside `scripts/tests/test_subsystem_store_api.py`**, each
+  naming a DIFFERENT test; the other 7 green. #1145 fails on the identical test as #1150.
+- **🔴 THE DISCRIMINATING CONTROL, and it settles attribution:** the **same sandbox tier CI
+  runs** passes locally on the same branch —
+  `nix build .#checks.x86_64-linux.pytests` → `RESULT: PASS (exit=0)`,
+  `collected=19913 passed=19910 failed=0` — **including the very test CI failed on**. Same
+  code, same tier, different environment.
+- **Ruled out:** the diff (docs-only, cannot reach that file); a pre-existing red main (the
+  test passes on clean `origin/main` at the PR's base); a tier difference (the sandbox tier
+  passes locally).
+- **Leading hypothesis:** contention in the CI pod. Those tests drive a `running(...)` fixture
+  that starts a live server and POSTs — the readiness-race shape this repo already documents
+  as a flake class (see the `dl-router` live-fixture block in this doc's history).
+- **Next probe:** harden the fixture's readiness wait in `test_subsystem_store_api.py` —
+  `RULES.md` says fix a flake rather than re-run it. A fresh push cleared it for #1150, which
+  is the expedient call for a docs PR, NOT a fix.
+- **Why this matters beyond one PR:** a required gate red on a third of open PRs for reasons
+  unrelated to their diffs is the "permanently-red gate trains everyone to click through"
+  failure named in `claude/RULES.md`.
+
 ## 🔴 The one thing to read before doing items 3 and 4
 🟢 **UPDATE 2026-08-30 — the blocker below has LARGELY CLEARED. Read this first; the
 original text is kept underneath because its ARGUMENT is still the right one.**
@@ -317,42 +348,41 @@ a fleet-wide claim cannot be made from this data yet. Re-check both hosts appear
 ## Next steps (ranked)
 1. **Rotate the leaked `activity_reader` credential.**
    forcing: security — a LIVE exposure, an `activity_reader` password in cleartext in the
-   opencode session store. Zach's to do; the only item in this doc with an EXTERNAL
-   forcing function.
-2. **Bring the laptop's `homelab-talos/containers/clawgate` built source current** —
+   opencode session store. Zach's to do; still the only item here with an EXTERNAL forcing
+   function.
+2. **Harden `test_subsystem_store_api.py`'s live-server readiness wait.** Repo `devrc`, file
+   `scripts/tests/test_subsystem_store_api.py`. Evidence in the block above.
+   forcing: gate — MEASURED: a REQUIRED check red on 4 of 12 open PRs on diffs that cannot
+   reach it, blocking merges and training click-through.
+3. **Bring the laptop's `homelab-talos/containers/clawgate` built source current** —
    `git -C ~/workspace/homelab-talos pull --ff-only` then a `home-manager switch`, ON THE
-   LAPTOP. Measured by `drift-check.sh`: laptop rc 17, 1 behind; workbench CURRENT, so the
-   two hosts build DIFFERENT source (`c919cd32c230` vs `11fde963e9e9`) under one version
-   string.
-   forcing: regression — MEASURED, and it is the 2026-08-14 failure mode's exact shape (a
-   `clawgatectl` whose binary is older than its label).
-3. **Commit or claim the workbench's dirty `nix/pkgs/default.nix`** (+4 lines, tracked).
-   `ship.sh` reports it as DIRTY AND IN THE ARTIFACT, so the workbench's built generation
-   is `origin/main` PLUS that change while the laptop's is not — the hosts are at one sha
-   but not one artifact. It is NOT from the #1119 work (that touched no `nix/pkgs` path).
-   forcing: regression — an un-committed path inside the built artifact is the
-   dirty-tree-probe hazard in `RULES.md`: the deployed copy and the commit are different
-   claims, and right now only one host has it.
-4. **Consolidate `_bash_array` and the substring readers** — the F7 block above.
-   forcing: none — nothing is vacuous today; this is "one rule, one place" hygiene, and
-   the divergence already present in `test_hook_tests_dir_collects.py` is the argument for
-   doing it before a fourth copy appears.
-5. **The `adoption-scan` `via: "skill"` registry arm.** Files:
-   `scripts/session-analysis/adoption-scan.py`, `claude/skills/adoption-scan/SKILL.md`.
-   forcing: none — the incident that forced this effort is closed by #1000 + #1059. Do not
-   work it on the strength of being written down.
-6. **The `attributionSkill` deadman.** File: `scripts/validation/invariants.py`.
-   forcing: none — guards a hypothetical silent zero; nothing has regressed.
-7. **`claudedocs/followups-skill-usage-telemetry.md` — G5 only**, the ClickHouse
-   creds/query helper. ✅ The `audit-dispatch.py` wrong-toolchain brief in that file is
-   CLOSED: #1104 merged 2026-08-30T19:09Z, verified via `gh pr view`, not assumed.
+   LAPTOP. drift-check: laptop rc 17, 1 behind; workbench CURRENT — the two hosts build
+   DIFFERENT source under one version string.
+   forcing: regression — MEASURED, and the 2026-08-14 failure mode's exact shape.
+4. **Commit or discard the workbench's dirty `nix/pkgs/default.nix`** (+4 lines, tracked).
+   `ship.sh` reports it DIRTY AND IN THE ARTIFACT on every run, so the workbench's generation
+   is `origin/main` PLUS it while the laptop's is not — one sha, two artifacts. NOT from this
+   effort's work.
+   forcing: regression — an uncommitted path inside a built artifact is the dirty-tree-probe
+   hazard: "it works here" and "it is in the commit" are independent claims.
+5. **Consolidate `_bash_array` and the `"RESULT: …" in stdout` substring readers** — audit
+   finding F7, filed in #1150. 3 copies (one, `test_hook_tests_dir_collects.py`, already
+   DIVERGES) and 7 readers, none vacuous today.
+   forcing: none — hygiene; the existing divergence is the argument for doing it before a
+   fourth copy appears.
+6. **The `adoption-scan` `via: "skill"` registry arm** and **the `attributionSkill` deadman**.
+   Files: `scripts/session-analysis/adoption-scan.py`, `scripts/validation/invariants.py`.
+   ⚠ The pre-existing `skill-usage-telemetry` claim covers this territory — check it before
+   starting.
+   forcing: none — the incident that forced this effort is closed by #1000 + #1059.
+7. **`claudedocs/followups-skill-usage-telemetry.md` — G5 only**, the ClickHouse creds/query
+   helper. The `audit-dispatch.py` item there is CLOSED (#1104, verified via `gh pr view`).
    forcing: none.
 8. **Escape-obfuscation hardening of the `RESULT:` scan** — deliberately NOT done. 11
-   fail-open cases reachable only by DELIBERATE obfuscation (`echo RESULT: PA''SS`,
-   `$'RESULT: \x50ASS'`); identical at rounds 4, 5 and 6, so pre-existing rather than a
-   regression, and zero occurrences in the 9-entry registry population.
-   forcing: none — the guard exists to stop a copy-pasted literal, and its docstring now
-   states plainly that its blind-spot list is not exhaustive. Do not start without a reason.
+   fail-opens reachable only by DELIBERATE obfuscation; pre-existing, zero occurrences in the
+   9-entry registry population, and the guard's docstring now states its blind-spot list is
+   not exhaustive.
+   forcing: none — do not start without a reason.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`find-session`'s "both hosts" claim was HALF FALSE for weeks** and is the root cause of
@@ -486,20 +516,37 @@ a fleet-wide claim cannot be made from this data yet. Re-check both hosts appear
 - **A duplicate-sweep zero was validated before being believed:** the title filter returned
   0 under test and 18 on a positive control of the same shape.
 
+- 🔴 **`git worktree add -b <topic> origin/main` sets the new branch's upstream to
+  `origin/main`, so a bare `git push` from that worktree targets MAIN, not the topic branch.**
+  Mine silently did nothing (branch protection ate it) and `git status -sb` read
+  `## <topic>...origin/main [ahead 2]` — which looks like an ordinary ahead-count, not a
+  misconfiguration. Caught only by comparing `rev-parse HEAD` against `rev-parse @{u}` after
+  the push output looked truncated. **Push explicitly by branch name from a fresh worktree**,
+  or fix the upstream at creation.
+- 🔴 **A CI red on a diff that cannot reach the failing test is an ATTRIBUTION question, and
+  the cheap control answers it in one run:** run the SAME tier locally. Same code + same tier
+  + different result ⇒ environment, not diff. Reasoning about plausibility instead is how a
+  flake gets recorded as a regression.
+- **Asked "is anything outstanding?" twice, this found something BOTH times** — three unkept
+  commitments the first time (F7 unfiled, index entry unwritten, worktrees left), and an
+  unshipped merge the second. Close-out reporting ran reliably ahead of close-out doing;
+  re-checking commitments against the tree is cheap and was never wasted.
+
 ## How to verify
 ```bash
-# 1. the guard
+# 1. the guard, on main
 nix develop ~/workspace/devrc -c python3 -m pytest \
   scripts/tests/test_result_grammar_is_reserved.py -q
 
-# 2. the live near-miss, in PRODUCTION gate output — grep the sandbox log, not the source
-nix build .#checks.x86_64-linux.pytests --no-link -L 2>&1 | grep -B1 -A2 'RESULT: all good'
+# 2. hosts converged AND cross-host compared (read every per-host line, not the verdict)
+bash ~/workspace/devrc/scripts/drift-check.sh
 
-# 3. the two readers still agree — gate.sh must still say `tail -1`
-grep -n 'verdict=' ~/workspace/devrc/scripts/gate.sh
-
-# 4. after merge: NOT live on a host until a switch
-scripts/ship.sh && bash ~/workspace/devrc/scripts/drift-check.sh
+# 3. the flake — is the store-API suite still red on unrelated PRs?
+for N in $(gh pr list --repo innovation-upstream/devrc --state open --json number --jq '.[].number' | head -12); do
+  gh api repos/innovation-upstream/devrc/commits/$(gh pr view $N --repo innovation-upstream/devrc \
+    --json headRefOid --jq .headRefOid)/status \
+    --jq '.statuses[]? | select(.context=="tekton/devrc-pytests") | "'"$N"' \(.state) \(.description)"'
+done
 ```
 ## State now — rank 7 BUILT and mutation-verified on a branch; gate IN FLIGHT (2026-08-30)
 
@@ -559,3 +606,22 @@ scripts/ship.sh && bash ~/workspace/devrc/scripts/drift-check.sh
   head measured 19608/18145, so re-measure rather than quoting these.
 - **Claim `skill-usage-telemetry-7`** — release when #1119 merges.
 - 🔴 **Merged ≠ deployed.** This guard only runs on a host after `scripts/ship.sh`.
+## State now — rank 7 SHIPPED and DEPLOYED; close-out merged; both hosts converged (2026-08-31)
+
+- **#1119 `2a357c01`** — the `RESULT:` verdict-grammar guard. 17 audit rounds, closed clean on
+  round 17 with zero findings. Verified on `origin/main` **by content** (a squash is never an
+  ancestor).
+- **#1150 `a5974f52`** — the close-out: audit finding F7 filed, the dirty-artifact item ranked,
+  #1104 confirmed merged. Also verified by content.
+- **Deployed.** `scripts/ship.sh` run TWICE — once after #1119, and again after #1150 closed a
+  gap I had left: I merged #1150 and did not ship, leaving the laptop 6 commits behind. Both
+  hosts now converged and **cross-host COMPARED** at `d9144e21`.
+- **Consumer-verified**, not `git log`-verified: 77 tests pass running from the workbench
+  checkout at the merged sha; the laptop carries both files at the same sha.
+- **Claim `skill-usage-telemetry-7` RELEASED** — `claim-work --check` reads FREE.
+  ⚠ A DIFFERENT claim, `skill-usage-telemetry` (no rank suffix, 2 days old, predates this
+  session), is still held and covers rank 5's territory ("adoption-scan via:skill registry
+  mode"). Not this session's to release.
+- **No clawgate task recorded.** `clawgate_handoff.sh resolve` exited 5 with its positive
+  control confirming the board is reachable — so a real zero, but per the skill an empty
+  result cannot distinguish "touched no task" from "wrong id". Not a clean bill of health.
