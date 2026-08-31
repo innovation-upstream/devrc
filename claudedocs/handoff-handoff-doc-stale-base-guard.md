@@ -23,41 +23,35 @@ was retired 2026-08-23, leaving the warning as the only thing between that diff 
 commit. Turn it into a refusal.
 
 ## State now
-- **devrc#1046 MERGED** — squash `e9437342`. Verified by CONTENT on `origin/main` (a squash
-  never makes the head an ancestor): `EXIT_STALE_BASE = 9`, `test_no_two_exit_constants_share_a_value`,
-  `test_a_STALE_BASE_in_a_REALISTIC_repo_is_not_reported_as_a_NEW_effort`, and rule (i)
-  consulting `not currency.replaces_mainline_doc("")` are all present.
-- **Rank 1 is DONE up to review: devrc#1146 is OPEN**, `fix/audit-ladder-scaffolding-gaps`,
-  closing **#1093** and **#1115** (both linked — `closingIssuesReferences` confirms).
-  Commits: `b1263772` the seven fixes · `afe8e190` the mutants moved into the tree ·
-  `d42a353b` audit round 1. The branch was 23 behind `main`, not the 9 this doc used to say;
-  rebased onto `093a63db` first, so **the tree that was gated IS the merged tree**.
-- **Gate at `d42a353b`, both tiers ONE AT A TIME (#1088), read from each runner's own
-  `RESULT:` line:** `pytests` PASS — collected=19533 passed=19531 skipped=2 failed=0
-  (floor 18145); `nodetests` PASS — suites=5 files=41 tests=1441 pass=1441 fail=0
-  (floor 1367). `mutants-handoff-cap.sh`: **47 rows, 0 failures**, baseline clean,
-  0 DID-NOT-APPLY, 0 WRONG-KILLER.
-- **The mutants now live IN THE TREE**, as three new sections of
-  `scripts/tests/mutants-handoff-cap.sh` — not a second harness, because that file already
-  owns the named-killer WRONG-KILLER check, the collected-test floor, the DID-NOT-APPLY diff
-  and the restore. It needed a third pristine copy (`$T/suite.orig`): the round-4 negative
-  control is the first row that mutates the SUITE.
-- **Audit round 1 (`/audit-pr 1146`) returned 6 findings; all 6 are fixed in `d42a353b`.**
-  The two that mattered were guards reading as coverage while providing less than their
-  docstrings claimed: the prose test was SPELLED, not structural (rewriting
-  `status=new-doc` (7) → (9) left all 297 tests GREEN, because `status=dated-topic` still
-  spelled `(7)`), and `assert len(codes) == 9` sat ABOVE the injectivity loop, so a colliding
-  constant died to `assert 10 == 9` and the collision remedy never rendered — **#1093.1's own
-  defect recreated in a sibling test**. Both fixes were watched red by mutation.
-- **A DELTA RE-AUDIT of `afe8e190..d42a353b` is still owed** — an audit fix resets the
-  verification gate, and every delta round so far in this effort found something the previous
-  round's fix introduced.
-- Also merged in an earlier session: **ZacxDev/homelab-infra#460** (`26d98f1b`) and **#519**
-  (subsystem-store-api `0.5.0` → `0.6.0`).
-- **subsystem-store-api is DEPLOYED and VERIFIED**: pod `…-97gnp`, image `0.6.0`,
-  `_audit_lock` count **3** (was 0), `server.py` 226,998 B (was 222,147), `/healthz` 200,
-  0 restarts. devrc#996's fix is live.
-- **Claim:** held as `devrc-1093-1115-scaffolding`. **Release it when #1146 merges.**
+- **devrc#1046 MERGED** — squash `e9437342`, verified by CONTENT on `origin/main` (a squash
+  never makes the head an ancestor).
+- 🔴 **RANK 1 IS DONE AND #1146 IS MERGE-READY — it is NOT merged, and must be sequenced
+  with #1144 first (see rank 2).** `fix/audit-ladder-scaffolding-gaps`, head `b8850d77`,
+  8 commits, `mergeable=MERGEABLE mergeStateStatus=CLEAN`, `closes 1093,1115`.
+- **Gate at `b8850d77`** — both sandbox tiers ONE AT A TIME (#1088), read from each runner's
+  own `RESULT:` line: `pytests` PASS (collected=19534 passed=19532 skipped=2 failed=0,
+  floor 18145) · `nodetests` PASS (suites=5 files=41 tests=1441 pass=1441 fail=0, floor 1367).
+  **Both required Tekton checks are `success` against `b8850d77` ITSELF**, confirmed via
+  `/commits/<sha>/status` rather than the PR-level rollup.
+  `mutants-handoff-cap.sh`: **47 rows, 0 failures**, baseline clean (measured at `53991450`;
+  the change since is comment-only, mechanically verified 0 non-comment lines).
+- **The mutants live IN THE TREE** as new sections of `scripts/tests/mutants-handoff-cap.sh`,
+  not a second harness — that file already owns the named-killer check, the collected-test
+  floor, the DID-NOT-APPLY diff and the restore. Needed a third pristine copy
+  (`$T/suite.orig`) because the round-4 negative control is the first row to mutate the SUITE.
+- 🔴 **THE AUDIT LADDER IS CLOSED BY THE ATTRIBUTION GATE, not by a clean round.**
+  round 1: 6 findings, fixes changed **2** payload lines · round 2: 6 findings, **0** ·
+  round 3: 5 findings, **0**. Two consecutive zero-payload rounds ⇒ the ladder had left the
+  PR and was auditing its own scaffolding. **No round 4 was run.** The remainder is filed as
+  **devrc#1160** with a closing condition — which is exactly how #1093/#1115 were created.
+- **Two of round 3's five findings were FIXED rather than filed**, deliberately:
+  `claude/RULES.md` names *a comment whose falsity would lead a maintainer to delete the
+  guard it described*. Round 2's comment claimed deleting `assert len(codes) == 9` would
+  still score `ok`; MEASURED, the row scores **WRONG-KILLER**.
+- **Claim:** still held as `devrc-1093-1115-scaffolding`. **Release it when #1146 merges.**
+- Earlier sessions: **ZacxDev/homelab-infra#460** (`26d98f1b`) and **#519** merged;
+  **subsystem-store-api 0.6.0 DEPLOYED and VERIFIED** (pod `…-97gnp`, `_audit_lock` = 3,
+  `/healthz` 200, 0 restarts).
 
 ## Open investigations — live diagnosis state
 
@@ -93,32 +87,39 @@ commit. Turn it into a refusal.
   truncated at 140 chars and carries no `target_url`.
 
 ## Next steps (ranked)
-1. **Land devrc#1146** — run the delta re-audit of `afe8e190..d42a353b` first; continue rounds
-   only while a round produces a finding that needs fixing, and stop on the first clean one.
-   Then merge and `claim-work --release devrc-1093-1115-scaffolding`.
-   forcing: gate — `tekton/devrc-pytests` and `tekton/devrc-nodetests` are both REQUIRED with
-   `enforce_admins: true`, and a Tekton status is not re-runnable: the `FORGED_actor` flake
-   red-lit `afe8e190` and only a fresh push cleared it.
-2. **Coordinate #1146 with #1144 before either merges** — #1144 (`a960d43a`) adds
-   `EXIT_UNEVIDENCED = 10`, so the merged tree has 10 constants against #1146's
-   `len(codes) == 9` and goes red by design. The byte-ceiling half of that warning is
-   **RETRACTED**: 27,510 B was the CONFLICTED file. Union resolution is 25,861 B against a
-   merged budget of 26,100 (#1144 raises `MAX_BYTES` to 27,000) — **+239 B, no eviction**.
-   forcing: gate — whichever merges second fails a required check until the count is updated.
+1. **Merge devrc#1146, then `claim-work --release devrc-1093-1115-scaffolding`.** Everything
+   is green; the only open question is ordering against #1144 (rank 2). Nothing else is owed.
+   forcing: gate — both required checks are green on the head sha now, and `strict: false`
+   means that claim ages the moment `main` moves.
+2. 🔴 **Sequence #1146 against devrc#1144 before merging EITHER.** #1144
+   (`feat/handoff-elimination-evidence`, head `a960d43a`) adds `EXIT_UNEVIDENCED = 10`;
+   #1146 asserts `len(codes) == 9`. Whichever merges second fails a required check until the
+   count is updated — **by design**, and it now reports a proper collision message rather
+   than a bare `assert 10 == 9`. The byte-ceiling half of this warning is **RETRACTED**:
+   27,510 B was the CONFLICTED file. Union resolution is 25,861 B against a merged budget of
+   26,100 (#1144 raises `MAX_BYTES` to 27,000) — **+239 B, no eviction needed**.
+   ⚠ #1144 is another session's live claim (`linux-cpu-profiling`) — coordinate, do not edit it.
+   forcing: gate — a required check fails for whoever merges second.
 3. **Apply the staged dnsmasq fix** — `sudo ~/workspace/devrc/nix/system/apply-dnsmasq-docker-io-pin.sh`.
    Only the operator can run it.
    forcing: incident — measured 2026-08-29: the LAN router pins `registry-1.docker.io` with a
    487-day TTL and two of those IPs were reassigned to other AWS customers, so every
    `docker build` fails TLS. Worked around once with `--add-host`; unfixed.
-4. **Fix `subsystem-audit.py`'s `EVICTABLE` classifier** — it verifies the target EXISTS and
+4. **File the `resume-state.sh` sibling-worktree gap.** Given an explicit path to a handoff
+   living in a LINKED WORKTREE, the run reports NO SUCH FILE and falls back to newest-of-N,
+   producing a digest for a different initiative. **MEASURED against devrc#1159's fix
+   (`dae5ac23`), which does NOT close it** — that fix re-anchors on the repo ROOT, and a
+   sibling worktree is a different root. Closing condition: `resume-state.sh <path-in-a-
+   linked-worktree>` resolves that doc instead of falling back, checked by a merged PR.
+   forcing: none
+5. **Fix `subsystem-audit.py`'s `EVICTABLE` classifier** — it verifies the target EXISTS and
    labels that "its content has a home". Measured on both of `devrc/tests.md`'s evictable
    bullets: one's commit carried none of the 3 later additions; the other's named sha carried
    **0 of 9** markers. 8 more so-labelled bullets store-wide.
    forcing: none
-5. **Resume `claudedocs/handoff-subsystem-index-per-host.md` ranks 3, 5, 6, 7** — index-write
-   protocol reconciliation; decide the store-api pod; decide replication; file the
-   `FORGED_actor` flake — which is no longer hypothetical: it red-lit `afe8e190` and three
-   other PRs in one window.
+6. **Resume `claudedocs/handoff-subsystem-index-per-host.md` ranks 3, 5, 6, 7** — including
+   filing the `FORGED_actor` flake, which is no longer hypothetical: it red-lit `afe8e190`
+   and three other PRs in one window, one of them a single-markdown-file PR.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -202,31 +203,57 @@ commit. Turn it into a refusal.
   `feat/memory-detail-click` at session start and on `main` hours later, switched by another
   session. It was 0 ahead of `origin/main` throughout, so `ship.sh` was never blocked.
 
+- 🔴 **"INVARIANT GUARD" IS A CLAIM ABOUT THE SUITE, NOT ABOUT THE HARNESS — and collapsing
+  the two produced a FALSE comment in both directions across two rounds.** A mutant already
+  killed at the merge-base means the row does not show the suite would otherwise miss it.
+  It does NOT mean the new assertion is redundant: a harness that demands each row's own
+  NAMED killer still binds it. MEASURED — delete `assert len(codes) == 9` and the row scores
+  **WRONG-KILLER**, not `ok`. State both halves or state neither.
+- 🔴 **The same defect class recurred FOUR times in one PR: a claim of coverage wider than
+  the code provides.** As the original #1093/#1115 findings, then in the harness header, then
+  in round 1's fix for that header, then in round 2's fix for THAT. Every round caught the
+  previous round's version — which is the argument for keying the ladder to FINDINGS, never
+  to a round count. The tell each time was a comment or docstring naming a RELATIONSHIP while
+  the code inspected one side.
+- 🔴 **The attribution gate is what ends a ladder that keeps finding real things.** Rounds 2
+  and 3 both produced genuine findings AND changed zero payload lines. Findings-keyed stopping
+  alone would have run forever; the gate is what says "these are findings about scaffolding
+  the ladder itself wrote".
+- 🔴 **A `git worktree`'s `FETCH_HEAD` is per-worktree.** `git -C <repo> fetch` then
+  `git -C <worktree> merge FETCH_HEAD` fails `could not open … FETCH_HEAD`. Fetch into a
+  namespaced remote-tracking ref and merge THAT. The failure is loud, but the numbers printed
+  by the steps AFTER it describe an unmerged tree and read as a successful measurement.
+- 🔴 **A PreToolUse hook blocks the WHOLE Bash call**, so a heredoc that writes a file in the
+  same call as the blocked command never runs. `gh issue create --body-file $VAR` is refused
+  twice over: the gate cannot expand `$VAR`, and the file it names was never created. Write
+  the body with the Write tool, then pass a LITERAL path.
+- 🔴 **`git merge-file` output is not a resolution.** Sizing a merged file from the conflicted
+  artefact counts the markers and the duplicated region — it read 27,510 B where a union
+  resolution is 25,861 B, a 1.6 KB overstatement that would have sent the next merger on an
+  unnecessary prose eviction. Model it additively from the two diffs and say it is an estimate.
+- ⚠ **Pyright noise in this repo is expected outside the devShell** — `Import "pytest" could
+  not be resolved` and a handful of unused-arg nits are pre-existing, not your edit.
+
 ## How to verify
 ```bash
-# 1. #1046 landed by CONTENT (a squash is never an ancestor)
-git -C ~/workspace/devrc show origin/main:scripts/lib/handoff_doc.py | grep -E "^EXIT_STALE_BASE = "
+# 1. the PR is green ON ITS HEAD SHA, not on a stale one (the rollup can lag)
+PH=$(gh pr view 1146 --repo innovation-upstream/devrc --json headRefOid --jq .headRefOid)
+gh api "/repos/innovation-upstream/devrc/commits/${PH}/status" --jq '.state'   # success
 
-# 2. the branch under test IS the merged tree (must print `0<TAB>N`)
-git -C ~/workspace/devrc-scaffold fetch origin main
-git -C ~/workspace/devrc-scaffold rev-list --left-right --count origin/main...HEAD
-
-# 3. BOTH sandbox tiers, ONE AT A TIME (#1088) — read each runner's own RESULT: line
+# 2. BOTH sandbox tiers, ONE AT A TIME (#1088) — read each runner's own RESULT: line
 nix build ~/workspace/devrc-scaffold#checks.x86_64-linux.pytests   --no-link --print-build-logs
 nix build ~/workspace/devrc-scaffold#checks.x86_64-linux.nodetests --no-link --print-build-logs
 
-# 4. every mutant #1093/#1115 recorded as surviving — now IN THE TREE, no scratch file.
-#    Must run under the devShell: the harness calls bare `python3 -m pytest`, and
+# 3. every mutant #1093/#1115 recorded as surviving — IN THE TREE, no scratch file.
+#    MUST run under the devShell: the harness calls bare `python3 -m pytest`, and
 #    `.envrc` is `use opencode`, which does not provide it.
 nix develop ~/workspace/devrc -c bash \
   ~/workspace/devrc-scaffold/scripts/tests/mutants-handoff-cap.sh   # 47 rows, 0 failures
 
+# 4. the comment that was false is now true: deleting the pin scores WRONG-KILLER, not ok
+#    (delete `assert len(codes) == 9`, apply s|^EXIT_BEHIND = 6$|EXIT_BEHIND = "6"|,
+#     run test_handoff_doc.py — test_no_two_exit_constants_share_a_value must NOT be a killer)
+
 # 5. SKILL.md is under its enforced ceiling (26,400 - 900 = 25,500)
 wc -c ~/workspace/devrc-scaffold/claude/skills/handoff/SKILL.md     # 25,493
-
-# 6. the store-api fix is RUNNING, not merely merged
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec \
-  $(KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod -l app=subsystem-store-api \
-    -o jsonpath='{.items[0].metadata.name}') -- \
-  grep -c _audit_lock /app/scripts/subsystem-store-api/server.py   # must be 3
 ```
