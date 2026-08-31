@@ -111,6 +111,38 @@ The original diagnosis is kept below because #463 inherits its layout context.
   client-side), and the verifier. Criterion 4 is the sharp one: a fragment naming a task
   NOT in the rendered set (tag filter active) must not fail silently.
 
+### The dirty `homelab-talos` working tree — MEASURED, awaiting an operator decision
+Not a bug; an unresolved **disposition**. Full evidence is under rank 7. The one thing that
+must not be lost:
+
+- **Symptom + exact repro:** `git -C ~/workspace/homelab-talos merge --ff-only origin/trunk`
+  refuses. `git status --porcelain` shows ` M .claude/skills/deploy/SKILL.md`, ` M flake.nix`
+  plus untracked scratch.
+- **Observed (with values):**
+  - `git rev-list --left-right --count HEAD...origin/trunk` → **`0	1`** (0 ahead, 1 behind).
+    The refusal is the dirty tree, NOT divergence.
+  - `git hash-object flake.nix` → `f58b97ce…`; `HEAD:flake.nix` and `origin/trunk:flake.nix`
+    are both `4058416e…`. Scanned **every** commit on **every** branch touching the path
+    (11 commits): **no match**. Same for `.claude/skills/deploy/SKILL.md`
+    (working `402cd671…` vs committed `64977409…`).
+  - `git log --all -S'__dp_status_cache' -- flake.nix` in this repo → **empty**; the same
+    search in `datapacket-talos` → **`527b9ec32` / `4e3201fbb` "feat(dev): cache GitHub
+    status in shell hook (#956)"**. The blob is in **neither** repo's object store, so it
+    is a hand/agent port, not a copy of any revision.
+  - `gh repo view ZacxDev/homelab-talos` → **does not resolve**. `kubectl get gitrepository
+    -A` → `flux-system` reads `ssh://git@github.com/ZacxDev/homelab-infra.git` branch
+    `trunk`.
+- **Ruled out:**
+  - *"stale cruft, safe to restore"* — killed by the all-branches blob scan above.
+  - *"diverged, needs the preserve→`reset --keep` rescue"* — killed by `0 ahead`.
+  - *"a separate homelab-talos repo exists"* — killed by the `gh repo view` miss plus the
+    Flux `GitRepository` URL.
+- **Leading hypothesis:** someone (or an agent) ported datapacket's dev-shell PR-status hook
+  into this flake and lost #465's dependency block in the merge, then left it uncommitted.
+- **Next probe:** none needed for diagnosis — this is a decision. If it proceeds, the
+  question to answer first is whether the #465 block can be restored *on top of* the port
+  (`git show origin/trunk:flake.nix` holds the good copy of that block).
+
 ## Next steps (ranked)
 1. ~~**Verify the two unverified interactions**~~ — **DONE**, merged as `#1086`. Closed by
    machine observation on an isolated Xvfb, not an operator report.
@@ -172,20 +204,42 @@ The original diagnosis is kept below because #463 inherits its layout context.
      pins that, so a browser change would silently regress deeplinks to every completed
      task — the exact failure #440 existed to remove.
    forcing: none — closed as refuted, with #468 carrying the residue.
-7. **Decide the `homelab-infra` base clone** — it cannot fast-forward. Someone must say
-   whether the dirty `flake.nix` + `.claude/skills/deploy/SKILL.md` are WIP worth a branch
-   or stale cruft to discard. 🔴 Hash the working copy against that file's recent commits
-   first: byte-identical to an OLDER commit proves a stale orphan, and "restoring" it
-   silently reverts everything since.
-   🔴 **WHICH CLONE — resolved 2026-08-31, because the name misleads.** It is
-   **`~/workspace/homelab-talos`**; its `origin` is `git@github.com:ZacxDev/homelab-infra.git`.
-   One repo, two names — the directory is `homelab-talos`, the GitHub repo is
-   `homelab-infra`, and there is no separate `homelab-infra` checkout to go looking for.
-   Confirmed dirty there on 2026-08-31: ` M .claude/skills/deploy/SKILL.md`, ` M flake.nix`,
-   plus untracked `go.mod`, `opencode.json`, `claudedocs/handoff-limewire-torrent-comps.md`
-   and three `__pycache__/` dirs. **The hashing step above is still NOT done.**
-   forcing: none — not blocking today, which is precisely the failure mode: it stops
-   receiving changes while looking healthy.
+7. **Decide the dirty `homelab-talos` clone** — 🔴 **MEASURED 2026-08-31; the decision is
+   all that is left, and BOTH halves of this item's original premise were WRONG.**
+   - 🔴 **It is NOT diverged.** `HEAD...origin/trunk` = **0 ahead, 1 behind**. There are no
+     un-pushed commits to rescue, and the `merge --ff-only` refusal is caused **solely by
+     the dirty working tree**. The preserve→push→`reset --keep` recipe this item used to
+     prescribe has nothing to operate on. It has also moved since the doc was written
+     (`93876471` → `5c0a6cab`), so "stuck" was stale too.
+   - 🔴 **The dirty files are NOT stale orphans — they are NOVEL.** Both blobs were hashed
+     against **every commit on every branch** (`git rev-list --all`): no match, in this
+     repo or in `datapacket-talos`. So the "byte-identical to an older commit ⇒ safe to
+     restore" escape does not apply, and `git restore` would **destroy real work**.
+   - 🔴 **`flake.nix` (+122/−140) is the dangerous one.** It ports datapacket's PR-status
+     shell hook (`__dp_status_cache`, from datapacket **#956** "feat(dev): cache GitHub
+     status in shell hook") into this dev shell, and in doing so **DELETES #465's
+     dependency-closure block** — the 🔴-commented `pyyaml/pytest/click/requests/numpy/
+     pillow` list whose own comment records that without it the repo's gate emits *"a
+     confident WRONG RED"*. **Committing it as-is silently re-opens #465.**
+   - **`.claude/skills/deploy/SKILL.md` (+25, pure addition)** is worth saving on its own:
+     a 🔴 lesson measured 2026-08-27 deploying `subsystem-store-api:0.4.0` — for a
+     Flux-managed app, bump the manifest in the repo **Flux actually reads**, because the
+     `clusters/homelab/apps/**` trees are byte-identical and bumping the wrong checkout
+     commits and reconciles cleanly while changing nothing that runs.
+   - **Both files share an mtime to ~1ms** (`2026-08-30 19:02:29`) ⇒ ONE bulk write, not
+     two hand edits. ⚠ An mtime still cannot name the writer.
+   - **Untracked:** `go.mod` (21 bytes, `module t`), `opencode.json`, `tests/` (1 file) —
+     all stamped `2026-08-28 19:13:03`, a throwaway scratch Go module. Plus
+     `claudedocs/handoff-limewire-torrent-comps.md` (6.4 KB), which is real unsaved writing.
+   - **Repo naming, now nailed down:** `ZacxDev/homelab-talos` **does not exist**; Flux's
+     `GitRepository` reads `ZacxDev/homelab-infra @ trunk`. The **laptop carries BOTH
+     directory names** (`~/workspace/homelab-talos` *and* `~/workspace/homelab-infra`),
+     both cloning that one repo; the workbench has only `homelab-talos`. One repo, up to
+     three checkouts — which is the actual mechanism behind the SKILL.md warning above.
+   - **Nothing was written.** Operator instruction 2026-08-31 for dirty trees is
+     measure-and-report only: no commit, restore, checkout or delete.
+   forcing: user — the operator asked for this measurement on 2026-08-31 and the
+   disposition of `flake.nix` is now a decision only they can make.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A task's own MEASUREMENT can be the artifact — check what your selector can SEE
@@ -397,6 +451,35 @@ The original diagnosis is kept below because #463 inherits its layout context.
   corrects it. ⚠ **RUNS is not BLOCKS** — whether `clawgate-e2e` is *required* is
   unmeasured: `GET /branches/trunk/protection` 403s on that private repo without GitHub
   Pro.
+
+- 🔴 **A handoff's recorded BLOCKER is a hypothesis about the past, and three of this
+  effort's were dead on arrival.** #1099's "blocked by the flaky gate" (green by the time
+  it was read), its "check for a semantic conflict in `handoff-tmux-webapp.md`" (main's
+  commits since the branch point touched zero files the branch touched), and rank 7's
+  "cannot fast-forward / may be stale cruft" (0 ahead, and both files novel). **Re-measure a
+  recorded blocker before planning around it** — the cost of not doing so is a session spent
+  defeating an obstacle that is not there.
+- 🔴 **`claim-work --subject` is a NO-OP on a claim you already hold.** It prints
+  `✅ THIS IS YOURS — carry on. Nothing to do.` and **silently keeps the old subject**, so a
+  claim whose premise you have just refuted goes on advertising that premise to every other
+  session. Measured 2026-08-31. The fix is `--release` then re-claim with the new `--subject`;
+  there is no in-place edit.
+- 🔴 **A red required check is not automatically about your diff — READ WHICH TEST.**
+  `tekton/devrc-pytests` failed #1168 on `test_mkdir_refuses_unsafe_names[..]`, a
+  real-process test driving a LIVE HTTP server in `dl-router`, against a diff of **one
+  markdown file**. The discriminating control, not a re-run: the `nix` pytests derivation on
+  the MERGED tree locally reported `collected=19942 passed=19939 skipped=3 failed=0`, and
+  Tekton's red run collected the **identical 19942** — same tree, same test set, one
+  real-process test differing. The re-run then reported those exact numbers. **Compare the
+  collected counts**; they are what tells you it is the same suite.
+- ⚠ **A gate failing on a MISSING ENVIRONMENT looks like a code failure.** `scripts/gate.sh`
+  returned `RESULT: FAIL (exit=3)` purely because `logrotate` was off PATH — it was run
+  outside the flake devShell. It says so explicitly and prints the
+  `nix develop … run-tests.sh` line to use. Read the reason before treating a red as a
+  verdict on the diff.
+- 🔴 **GitHub code search is BLIND on `ZacxDev/homelab-infra`** — a positive control for
+  `filename:flake.nix` returned `total_count: 0`. An empty code-search result there proves
+  nothing. Use `gh api repos/…/git/trees/<ref>?recursive=1`.
 
 ## How to verify
 ```bash

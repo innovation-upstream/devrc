@@ -15,6 +15,18 @@ claim-work "$SLUG" --subject "<the item, in generic words>"   # 0 = yours · 10 
 claim-work --release "$SLUG"                                  # when you finish or abandon it
 ```
 
+🔴 **`--subject` is a NO-OP on a claim you ALREADY HOLD — there is no in-place
+edit.** Re-running `claim-work "$SLUG" --subject "<new text>"` on your own live
+claim prints `✅ THIS IS YOURS — carry on with it. Nothing to do.` at **rc 0** and
+**silently keeps the OLD subject**. Measured 2026-08-31: an item whose premise had
+just been *refuted* went on advertising that refuted premise to every other
+session for the rest of the run, because rc 0 read as "updated". The subject is
+the SOFT signal other sessions scan for a near-duplicate of their item (see the
+EXACT-slug limitation below), so a stale one is worse than a terse one. **To
+correct it: `--release "$SLUG"` then re-claim with the new `--subject`.** That
+briefly opens the slug to a racing claimant — acceptable for a correction, and
+the only route there is.
+
 🔴 **The namespace is GLOBAL — ONE canonical remote, resolved from the script's
 own location, never from the cwd's `origin`.** That is not a detail: the queue is
 global (handoff docs live in devrc while the work happens in other repos), and it
