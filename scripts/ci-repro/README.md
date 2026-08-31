@@ -31,12 +31,13 @@ MECHANISM = SERVER_BLOCKED_IN_FSYNC   (handler threads=1 [... =SERVER_BLOCKED_IN
 (`nodeSelector: kubernetes.io/hostname: talos-xr6-r7p`), so a burst of pushes stacks
 concurrent runs onto one machine's disk.
 
-🔴 **The contention set is 7, NOT 12 — do not quote the 12.** Twelve pipelineruns
-overlapped the failing window, but only the **7 devrc-ci** ones were on the pinned
-node. Measured 2026-08-31: gitops-validate is pinned to a **different** node
-(42/42 pods on `talos-uvh-gtj`) and the one auditloop run was on `talos-deu-s2q`.
-Neither mounts anything devrc-ci mounts. Sizing a concurrency cap against 12 would
-size it against runs that were never there.
+🔴 **Of the twelve overlapping pipelineruns, only 7 were devrc-ci — and 7 is NOT the
+node's contention set either.** Measured 2026-08-31: gitops-validate is pinned to a
+**different** node (`talos-uvh-gtj`) and the one auditloop run in that window was on
+`talos-deu-s2q`, so neither was contending with this suite. But **do not stop here and
+size a cap at 7** — the mechanism is node-local *device* contention (see the lever
+section), so every other pipeline resident on `talos-xr6-r7p` counts too, whatever
+volumes it names. 12 is wrong in one direction and 7 in the other.
 ⚠ `claude/skills/tekton/SKILL.md` says "every run lands on `talos-xr6-r7p`" in its
 node-pinning paragraph — true of *devrc-ci* runs, misleading as written, and the likely
 source of the 12. **That same file already resolves it** further down, recording the
@@ -162,16 +163,26 @@ can move the write that actually stalls:
 1. **Bound the disk-heavy work on that NODE, or unpin devrc-ci.** 🔴 **Capping
    devrc-ci alone does not bound the node** — the mechanism is node-local *device*
    contention, so any pod there competes regardless of which volumes it names.
-   `talos-xr6-r7p` is not devrc-ci's: measured 2026-08-31 it also hosted `auditloop`
-   38, `clawgate` 13, `vetr` 7, `naida` 6, `remix` 2 pods, and `auditloop-ci` is **not**
-   hostname-pinned (its template only excludes one other node), so it lands there
-   routinely. A cap set at "7 devrc-ci runs" bounds one pipeline out of five that
-   schedule there. Re-derive the co-residents before sizing anything:
+   `talos-xr6-r7p` is not devrc-ci's — **8 distinct pipelines** were resident when this
+   was written, devrc-ci being one. A cap set at "7 devrc-ci runs" bounds one of eight.
+   ⚠ Two of those became free to land there only on **2026-08-31**: `auditloop-ci` and
+   `remix-ux-audit` lost their hostname pins that day (homelab-infra #597), so their
+   large pod counts are mostly *pre-un-pin fossils* — the numbers understate what they
+   will do next, not overstate it. `naida-ux-audit` is **still** hostname-pinned to this
+   node, which makes it a concrete lever this section's own logic calls for.
+   Re-derive by PIPELINE (not by name prefix — that splits one pipeline across rows):
 
    ```bash
-   kubectl -n tekton-ci get pods --field-selector spec.nodeName=talos-xr6-r7p \
-     -o json | jq -r '.items[].metadata.name | split("-")[0]' | sort | uniq -c | sort -rn
+   KC=~/workspace/homelab-talos/homelab-kubeconfig   # no default KUBECONFIG here, by design
+   kubectl --kubeconfig $KC -n tekton-ci get pods \
+     --field-selector spec.nodeName=talos-xr6-r7p -o json \
+     | jq -r '.items[].metadata.labels["tekton.dev/pipeline"] // "none"' | sort | uniq -c | sort -rn
    ```
+
+   🔴 **Pass `--kubeconfig` explicitly.** This box has *no* default `KUBECONFIG` by
+   design; a bare `kubectl` errors loudly, but with some *other* cluster exported the
+   `--field-selector` matches nothing and returns a **silent zero** — which reads as
+   "devrc-ci is alone on the node", the exact inverse of this section's point.
 
    Distinct from `tekton-supersede`, which only collapses redundant runs of the *same*
    PR. Non-zero `computeResources` is one way to implement a cap — it does not touch
@@ -213,6 +224,15 @@ kubectl --kubeconfig $KC get pv -o json | jq -r '.items[]
 kubectl --kubeconfig $KC -n tekton-ci get pipelinerun <run> -o jsonpath='{.spec.timeouts}'
 ```
 
-⚠ Pipelineruns are pruned (`keep: 100`), so a window more than a few hours old is **not
-fully re-derivable** — 5 of the 12 runs cited above are already gone. Treat the
-breakdown as a record, not something a later reader can reproduce.
+⚠ **Pipelineruns are pruned aggressively, so an old window is not re-derivable at all.**
+Retention is `keep: 20` per resource, hourly — not the `keep: 100`/daily that two stale
+comments in `homelab-talos` still claim. Derive it, do not trust either:
+
+```bash
+kubectl --kubeconfig $KC get tektonconfig config -o jsonpath='{.spec.pruner}'
+```
+
+Several of the runs in the window above were already pruned while this PR was open.
+Treat that breakdown as a **record**, not as something a later reader can reproduce —
+and note this cuts the other way too: the window is 5× less recoverable than the
+superseded figure implied.
