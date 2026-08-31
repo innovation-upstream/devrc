@@ -18,8 +18,12 @@ Detect clawgate/GitHub/ClickUp references in agent output, emit telemetry, and m
 them clickable in the terminal the way a URL already is. **SHIPPED AND VERIFIED LIVE.**
 
 ## State now
-🔴 **RANKS 1, 3, 4 AND 5 ARE CLOSED. RANK 2 IS OWNED BY ANOTHER EFFORT — hand over, do not
-work it here.** The genuinely open items are ranks 6–7 below.
+🔴 **RANKS 1, 3, 4, 5 AND 6 ARE CLOSED. RANK 2 IS OWNED BY ANOTHER EFFORT — hand over, do
+not work it here.** The only genuinely open item is rank 7 below.
+
+🔴 **RANK 6 WAS NOT A DEFECT — clawgate #463 is REFUTED, and this doc asserted its premise
+as fact for a day.** "60 of 248 cards unreachable by any scroll" was a measurement
+artifact. Do not re-derive it; the evidence is under rank 6.
 
 - Branch: `main`. `origin/main` was `e0e29e7b` when this doc was created; it is `e0f35ce2`
   as of 2026-08-30 and moved **six times during this session's own gate runs**, which is
@@ -43,8 +47,17 @@ work it here.** The genuinely open items are ranks 6–7 below.
   deliberately; that branch is now merged, so `gh pr merge --delete-branch` could not
   delete the local ref and the worktree is now pure clutter. Left in place rather than
   removed: it is not this effort's to reap. `git worktree remove` it when convenient.
-- **clawgate #463** (open) — the board-scroll layout bug; blocks #440's criterion 1.
-- **clawgate #440** — `ready_for_review`, not `complete`, for exactly that reason.
+- **clawgate #463** — `ready_for_review`, **REFUTED, not fixed.** There is no layout bug;
+  see rank 6. Left at `ready_for_review` rather than `complete` because the status gate
+  permits `complete` only when every AUTHOR-SPECIFIED criterion was validated, and I
+  refuted the premise instead of meeting them. ⚠ The vocabulary has no `closed`/`wontfix`
+  and **dismissing DELETES the task**, so `ready_for_review` is the closed-ish state.
+- **clawgate #468** (open, NEW) — the one real finding split out of #463: `taskHashScript`
+  reaches a card inside the collapsed `Done` section only because **Chromium** auto-expands
+  the `<details>`; the handler never asks. Nothing pins that browser behaviour.
+- **clawgate #440** — still `ready_for_review`. 🔴 **Its recorded blocker is GONE**: #463
+  does not block criterion 1, verified live. Deliberately NOT flipped — a previous session
+  derived and validated its criteria, and grading that is Zach's call, not an agent's.
 - **`homelab-infra` base clone cannot fast-forward** — `merge --ff-only` refuses on a
   dirty `flake.nix` (+ `.claude/skills/deploy/SKILL.md`, untracked files); stuck at
   `93876471` vs trunk. **Pre-existing and NOT this session's**; it did not affect the
@@ -127,21 +140,79 @@ The original diagnosis is kept below because #463 inherits its layout context.
    skipped / 0 failed against floor 18,383; tier 2 `nix` pytests + nodetests both
    `RESULT: PASS`, built one at a time. Then **shipped** — see the deploy gotcha below.
    forcing: none — closed.
-6. **Fix clawgate #463, then close #440** — `ZacxDev/homelab-infra`,
-   `containers/clawgate`. 60 of 248 cards are unreachable by any scroll; #440's criterion 1
-   is unsatisfiable for 24% of the board until it lands. #463 carries 6 criteria and a
-   measurement script shape as its verifier.
-   forcing: none — a real user-facing defect, but nothing external is forcing it and
-   nobody has asked. Do not let its severity read as urgency.
+6. ~~**Fix clawgate #463, then close #440**~~ — **CLOSED 2026-08-31 AS REFUTED. There is no
+   defect.** Measured live on 0.8.19, headless Chromium, both viewports (1280×720 and
+   390×844). The arithmetic closes with no residue: the 62 "unreachable" cards are **59**
+   inside the deliberately collapsed `Done` `<details>` plus **3** final-screenful cards
+   that are fully visible at the bottom of the viewport. `trulyOffscreenAtMaxScroll` = **0**
+   at both viewports, and the last RENDERED card sits at bottom 532 ≤ 720 (desktop) and
+   656 ≤ 844 (phone) — criterion 1 already passes.
+   - **The under-reporting box, named:** an ancestor-chain walk from the last card found
+     `spill: 0` everywhere except `<details class="group/sec">`, which reports
+     `offsetHeight: 48` (its `<summary>`) while its child grid extends **6,769px** past it.
+     Control: `d.open = true` → `offsetHeight` 48 → 6,817 and document `scrollHeight`
+     22,261 → 29,030.
+   - **Why the original measurement saw phantom geometry:** Chromium implements
+     `::details-content` with **`content-visibility: hidden`**, not `display: none` —
+     measured via `getComputedStyle(d, '::details-content')`, not assumed. Collapsed
+     descendants keep a queryable layout, so any script that enumerates
+     `article[id^="task-"]` and compares rects counts them as laid out.
+     🔴 **`document.scrollHeight` was always CORRECT.**
+   - 🔴 **#463's criterion 2 is unsatisfiable as written** — "cards with document-y beyond
+     maxScroll == 0" is impossible for *any* scrollable page, since the final screenful
+     always has `top > maxScroll` while being fully visible. A criterion that cannot be
+     met by a correct page is a trap for whoever picks it up.
+   - **#440 is NOT blocked.** `/tasks#task-208` (status `complete`, inside the collapsed
+     section) lands today: `scrollY 28310`, `rectTop 390`, `inViewport true`,
+     `data-task-hash-focus="true"`.
+   - **The real finding, now clawgate #468:** `taskHashScript` never touches `<details>` —
+     verified by reading the whole handler (no `.open`, no `details` reference; its only
+     scroll call is `el.scrollIntoView(...)`). The deeplink works because **Chromium**
+     auto-expands a closed `<details>` when a fragment targets content inside it. Nothing
+     pins that, so a browser change would silently regress deeplinks to every completed
+     task — the exact failure #440 existed to remove.
+   forcing: none — closed as refuted, with #468 carrying the residue.
 7. **Decide the `homelab-infra` base clone** — it cannot fast-forward. Someone must say
    whether the dirty `flake.nix` + `.claude/skills/deploy/SKILL.md` are WIP worth a branch
    or stale cruft to discard. 🔴 Hash the working copy against that file's recent commits
    first: byte-identical to an OLDER commit proves a stale orphan, and "restoring" it
    silently reverts everything since.
+   🔴 **WHICH CLONE — resolved 2026-08-31, because the name misleads.** It is
+   **`~/workspace/homelab-talos`**; its `origin` is `git@github.com:ZacxDev/homelab-infra.git`.
+   One repo, two names — the directory is `homelab-talos`, the GitHub repo is
+   `homelab-infra`, and there is no separate `homelab-infra` checkout to go looking for.
+   Confirmed dirty there on 2026-08-31: ` M .claude/skills/deploy/SKILL.md`, ` M flake.nix`,
+   plus untracked `go.mod`, `opencode.json`, `claudedocs/handoff-limewire-torrent-comps.md`
+   and three `__pycache__/` dirs. **The hashing step above is still NOT done.**
    forcing: none — not blocking today, which is precisely the failure mode: it stops
    receiving changes while looking healthy.
 
 ## Gotchas / decisions / dead-ends
+- 🔴 **A task's own MEASUREMENT can be the artifact — check what your selector can SEE
+  before trusting a count.** #463 was filed off a real, careful, numerically specific
+  measurement that was nonetheless wrong, because `querySelectorAll` returns elements
+  inside a closed `<details>` and their rects are non-zero under `content-visibility:
+  hidden`. The count was honest; the *set* was wrong. **Ask which of the elements your
+  query returns are not actually rendered** — `el.closest('details:not([open]))` was the
+  whole diagnosis, and partitioning by it made 62 resolve into 59 + 3 with no residue.
+  Generalises past `<details>`: any visibility mechanism that preserves layout
+  (`content-visibility`, `visibility: hidden`, an offscreen transform) feeds phantom
+  geometry to a rect-comparing script.
+- 🔴 **A criterion that a CORRECT system cannot satisfy is a trap, not a bar.** #463's
+  criterion 2 ("cards with document-y beyond maxScroll == 0") is unsatisfiable for any
+  scrollable page — the last screenful always has `top > maxScroll`. An agent picking it
+  up would have "fixed" it by expanding or deleting content. When writing criteria, ask
+  what a healthy system scores.
+- ⚠ **The clawgate e2e nix shell is version-skewed and `run.sh` cannot launch a browser
+  as configured** — `e2e/shell.nix` says `@playwright/test` and nixpkgs
+  `playwright-driver` must match, but the client is pinned **1.59.1** (wants chromium
+  revision **1217**) while `playwright-driver.browsers` now ships **1228**. Workaround
+  that worked: launch with an explicit `executablePath` at
+  `…-playwright-browsers/chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell`
+  plus `PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true`. **Pre-existing, unfiled, and NOT
+  investigated** — recorded here so the next person does not spend the same 20 minutes
+  concluding the suite is unrunnable. It does not affect `tekton/clawgate-e2e`, which
+  builds its own environment.
 - 🔴 **Merging #1099 changed NOTHING for the agents it was written for until the switch —
   and the stale copy still asserted the very claim the PR deleted.** `claude/skills/**`
   deploys as a `home.file` **copy**, so `readlink -f ~/.claude/skills/clawgate/reference/
