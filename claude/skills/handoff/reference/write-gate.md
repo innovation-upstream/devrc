@@ -391,7 +391,7 @@ makes the provenance mandatory and greppable — nothing more.
 
 1. **It reads the UPDATE, never the merged doc.** `open investigations` is an
    APPEND heading, so the merged doc accumulates every elimination any session
-   ever wrote — **122 of them across 44 of this repo's 90 docs**, none of which
+   ever wrote — **126 of them across 45 of this repo's 90 docs**, none of which
    can now be edited to add a field. Checking the merge would refuse on run one,
    forever, which `claude/RULES.md` calls worse than no gate. Rule (j) reads the
    update for a related but weaker reason; here it is the whole design.

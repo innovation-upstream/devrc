@@ -5262,9 +5262,13 @@ ELIM = "## Open investigations\n### The candidate\n- **Ruled out:** {}\n"
 class TestAnEliminationNamesHowItWasEliminated:
     """Rule (k). A `Ruled out:` bullet must declare an evidence kind.
 
-    🔴 RED AT `origin/main`: before this change every case below exited 0 and
-    wrote the doc, because no rule read elimination bullets at all. That is the
-    regression this class covers.
+    ⚠ MEASURED at `8bbec6ba`, the base this branch forked from: **18 of the 27
+    cases below fail there and 9 PASS.** The 9 are the accept-direction ones —
+    an already-tagged bullet, a fenced sample, a modified tracked file — which
+    exited 0 before this change too, because no rule read elimination bullets at
+    all. They are INVARIANT GUARDS, not regression coverage, and are labelled
+    here rather than counted, following the convention this file already uses
+    (`⚠ NOT RED AT <sha>`). The 18 are the regression this class covers.
     """
 
     def test_the_MEASURED_bullet_that_this_rule_exists_for_is_refused(
@@ -5482,6 +5486,179 @@ class TestTheExitCodeLegendIsComplete:
             )
 
 
+# --------------------------------------------------------------------------
+# the refusals stay CLEARABLE: one remedy PER CAUSE
+#
+# 🔴 Every case here is a defect an adversarial audit found in rule (k)'s first
+# revision, which printed ONE unconditional trailer for all four causes and so
+# reproduced all three of the unrecoverable-refusal shapes rule (j) had already
+# been fixed for — twice.
+# --------------------------------------------------------------------------
+
+def test_an_absent_field_is_told_to_INDENT_it(repo: Path, tmp_path: Path):
+    """The flush-left case: once a BLANK line has intervened, `_item_blocks`
+    ends the bullet at the next column-0 line, so a `via:` written there is
+    outside the bullet and reads as absent — the author then sees a refusal for
+    a field they can see in their own file.
+
+    ⚠ The blank line is load-bearing in this fixture, and leaving it out is how
+    the first draft of this test failed: with NO blank, a col-0 line is markdown
+    lazy continuation and DOES count, so the run exits 0. Both halves are real
+    behaviour; only the one with the blank is the hazard."""
+    upd = write_delta(
+        tmp_path, "flush.md",
+        "## Open investigations\n- **Ruled out:** the cache\n\nvia: command\n",
+    )
+    res = run_tool(repo, update=upd)
+    assert res.returncode == 10
+    assert "INDENT" in res.stderr
+
+
+def test_a_near_miss_is_NOT_told_to_add_a_field_it_already_has(
+    repo: Path, tmp_path: Path
+):
+    """🔴 `NEAR_MISS_REMEDY`'s stated rule, applied to rule (k): a bullet on
+    this arm HAS a field, so repeating the add-one text is the unrecoverable
+    refusal the whole branch exists to end."""
+    upd = write_delta(
+        tmp_path, "nm.md", ELIM.format("the parser — via = command"),
+    )
+    res = run_tool(repo, update=upd)
+    assert res.returncode == 10
+    assert "could not parse it" in res.stderr
+    assert "Tag each bullet marked" not in res.stderr
+
+
+def test_a_fenced_field_is_NOT_told_only_to_move_it_out(repo: Path, tmp_path: Path):
+    """The commonest fenced `via:` is this tool's OWN refusal pasted back in.
+    Obeying a bare 'unfence it' promotes a quote into a false declaration."""
+    upd = write_delta(
+        tmp_path, "fx.md",
+        "## Open investigations\n- **Ruled out:** the writer\n\n  ```\n"
+        "  via: command\n  ```\n",
+    )
+    res = run_tool(repo, update=upd)
+    assert res.returncode == 10
+    assert "do NOT promote the quote" in res.stderr
+
+
+def test_only_the_causes_PRESENT_get_a_remedy(repo: Path, tmp_path: Path):
+    """A refusal printing all four remedies makes the reader hunt for theirs,
+    which is the same failure as printing none."""
+    upd = write_delta(tmp_path, "one.md", ELIM.format("the cache"))
+    res = run_tool(repo, update=upd)
+    assert "Tag each bullet marked" in res.stderr
+    assert "could not parse it" not in res.stderr
+    assert "INSIDE a code fence" not in res.stderr
+
+
+def test_the_refusal_says_NOTHING_WAS_WRITTEN(repo: Path, tmp_path: Path):
+    """SKILL.md asserts "Four refusals. All write NOTHING"; the other six say so
+    in their own output and rule (k) did not."""
+    upd = write_delta(tmp_path, "nw.md", ELIM.format("the cache"))
+    assert "NOTHING WRITTEN" in run_tool(repo, update=upd).stderr
+
+
+def test_more_bullets_than_are_shown_says_so(repo: Path, tmp_path: Path):
+    """Without this, an author fixes the visible rows, re-runs, and is refused
+    again with no warning that more were waiting."""
+    body = "## Open investigations\n" + "".join(
+        f"- **Ruled out:** candidate {i}\n" for i in range(hd.EXISTING_SHOWN_MAX + 4)
+    )
+    upd = write_delta(tmp_path, "many.md", body)
+    res = run_tool(repo, update=upd)
+    assert res.returncode == 10
+    assert "and 4 more not shown" in res.stderr
+
+
+def test_every_marker_rule_k_prints_reaches_the_skill():
+    """🔴 THE LEDGER THAT DID NOT EXIST. `MARK_NO_VIA` was printed by the module
+    and appeared nowhere in SKILL.md, and `REFUSAL_MARKERS`' own two-way guard
+    could not see it — that guard asserts a LENGTH of 4 against rule (j)'s
+    tuple, so a fifth marker in a different tuple is invisible to it."""
+    doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+    for marker in hd.ELIMINATION_MARKERS:
+        assert marker in doc, (
+            f"the module prints {marker!r} for rule (k) and "
+            f"claude/skills/handoff/SKILL.md never mentions it — an executor "
+            f"hits an undocumented marker at the moment it is about to push."
+        )
+
+
+def test_the_skill_template_teaches_the_field_authors_must_write():
+    """🔴 MEASURED BY AUDIT: replaying every past handoff update, 80 of 242
+    deltas (33%) add an elimination bullet and NONE would have passed. A field
+    reachable only through the refusal makes one run in three fail-then-fix on
+    the ordinary path — red by construction, which RULES.md calls worse than no
+    gate. So the step-2 template must name it, not just the step-5 legend."""
+    doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+    template = doc[:doc.index("5. **Land the handoff doc")]
+    assert "via:" in template, (
+        "the `Ruled out:` template line does not mention `via: <kind>`, so an "
+        "author writes the scratch file from a template that teaches the shape "
+        "step 5 refuses."
+    )
+
+
+def test_the_reference_section_for_this_rule_is_ROUTED():
+    """A `reference/` file does not auto-fire — something must NAME it. Both
+    existing pointers said §C; §D was unreachable from the skill body."""
+    assert "write-gate §D" in HANDOFF_SKILL.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        "- 🔴 **Ruled out — my own first diagnosis, which was WRONG.** the cache",
+        "- ⚠ **Ruled out:** the cache",
+        "- [x] **Ruled out:** the cache",
+        "- 🔴 ⚠ **Ruled out:** the cache",
+    ],
+)
+def test_leading_decoration_before_the_marker_cannot_escape(
+    repo: Path, tmp_path: Path, opener: str
+):
+    """🔴 The mirror of the qualifier fix, to the LEFT. `_MARKUP` admits only
+    `[*_`~]`, so a 🔴 between the bullet and the marker made the bullet
+    invisible — four real corpus bullets, all this shape."""
+    upd = write_delta(tmp_path, "dec.md", f"## Open investigations\n{opener}\n")
+    assert run_tool(repo, update=upd).returncode == 10, opener
+
+
+def test_NOT_ruled_out_is_still_excluded(repo: Path, tmp_path: Path):
+    """🔴 THE COST SIDE of the widening, and why the admitted run is NON-LETTER.
+    `- **NOT ruled out:**` is a real corpus line asserting the OPPOSITE; a
+    general prefix would start refusing bullets that say a candidate is live."""
+    upd = write_delta(
+        tmp_path, "not.md",
+        "## Open investigations\n- **NOT ruled out:** the cache\n",
+    )
+    assert run_tool(repo, update=upd).returncode == 0
+
+
+def test_an_unrelated_column_0_fence_does_not_forge_a_fenced_verdict(
+    repo: Path, tmp_path: Path
+):
+    """🔴 `_item_blocks` appends fenced lines to `hidden` BEFORE its boundary
+    check, so a col-0 fence anywhere later in the update was absorbed into this
+    bullet — its own docstring calls that "a KNOWN, UNTESTED gap". Rule (j)
+    never felt it (one section); rule (k) walks the whole body. The likeliest
+    such paste is THIS TOOL'S OWN REFUSAL, i.e. exactly what a session re-running
+    after rc 10 has in its scratch file."""
+    upd = write_delta(
+        tmp_path, "colfence.md",
+        # 🔴 NO INTERVENING HEADING. A col-0 heading would END the bullet block
+        # before the fence is reached, so the first draft of this fixture could
+        # not reproduce the hazard at all and its mutant SURVIVED.
+        "## Open investigations\n- **Ruled out:** the cache\n\n"
+        "```\nvia: command\n```\n",
+    )
+    res = run_tool(repo, update=upd)
+    assert res.returncode == 10
+    assert "[no via: field]" in res.stderr
+    assert "[fenced]" not in res.stderr
+
+
 class TestRuleKIsWiredToRealContent:
     """🔴 THE POSITIVE CONTROL. A pattern that matches nothing is
     indistinguishable from a gate that passes — `claude/RULES.md` calls a
@@ -5498,7 +5675,8 @@ class TestRuleKIsWiredToRealContent:
             for d in docs
         )
         # A FLOOR, not the measurement — the corpus grows. Measured 2026-08-30:
-        # 122 bullets across 44 of 90 docs.
+        # 126 bullets across 45 of 90 docs, re-measured after the
+        # leading-decoration widening.
         assert total >= 90, (
             f"only {total} elimination bullets parsed across {len(docs)} docs — "
             f"the pattern has stopped matching the house style, and a gate that "

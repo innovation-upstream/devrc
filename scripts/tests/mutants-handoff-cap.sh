@@ -114,7 +114,14 @@ failing() {
   fi
   # Parametrised ids are `name[param]`; the class stops at `[`, which collapses
   # every case of one test onto its base name — what `want` is spelled as.
-  sed -n 's/^FAILED [^:]*::\([A-Za-z0-9_]*\)::\([A-Za-z0-9_]*\).*/\2/p;s/^FAILED [^:]*::\([A-Za-z0-9_]*\)$/\1/p' <<<"$out" | sort -u
+  # 🔴 THREE PATTERNS, AND THE THIRD IS A FIX. The first two are class::method
+  # and a BARE module-level test — the second END-ANCHORED, so a module-level
+  # PARAMETRISED test (`name[param]`) matched NEITHER: no second `::` for the
+  # first, and `[param]` after the name for the second. Such a failure was
+  # therefore invisible, and its mutant scored SURVIVED. MEASURED 2026-08-31 on
+  # `leading-decoration-rejected`: the harness said SURVIVED while running the
+  # killing test by hand failed 3 of its 4 cases.
+  sed -n 's/^FAILED [^:]*::\([A-Za-z0-9_]*\)::\([A-Za-z0-9_]*\).*/\2/p;s/^FAILED [^:]*::\([A-Za-z0-9_]*\)$/\1/p;s/^FAILED [^:]*::\([A-Za-z0-9_]*\)\[.*/\1/p' <<<"$out" | sort -u
 }
 
 # 🔴 ONE IMPLEMENTATION, TWO TARGETS. `run` mutates the module, `run_skill` the
@@ -468,7 +475,7 @@ run 'elimination-near-miss-net-removed' test_a_near_miss_is_NAMED_not_reported_a
   's|if _VIA_ATTEMPT.search(ln)|if False|'
 # The fenced diagnosis removed: a field the author can SEE reads as absent.
 run 'elimination-fenced-diagnosis-removed' test_a_field_inside_a_fence_is_NAMED_as_fenced \
-  's|fenced = near is None and any(_VIA.search(ln) for ln in hidden)|fenced = False|'
+  's|        fenced = near is None and any(|        fenced = False and any(|'
 # 🔴 THE COLLISION THIS REPO ALREADY SHIPPED ONCE — two constants both taking 7.
 # The killing guard is PRE-EXISTING; this row proves rule (k)'s new code is
 # inside its reach rather than beside it.
@@ -478,6 +485,26 @@ run 'exit-code-collides-with-unforced' test_no_two_exit_constants_share_a_value 
 # legend ended at 8 while EXIT_STALE_BASE = 9 was live and printed at callers.
 run 'exit-legend-omits-the-new-code' test_the_module_legend_documents_every_nonzero_code \
   's|^ 10  unevidenced|# 10 unevidenced|'
+# The ADVISORY half — `via: assumed` must land AND be counted where a reader
+# sees it. Rule (j) has the same row for `forcing: none`.
+run 'assumed-advisory-suppressed' test_via_assumed_is_ACCEPTED_and_reported \
+  's|    assumed = \[b for b in bullets if b.kind == "assumed"\]|    assumed = []|'
+# 🔴 THE CLEARABILITY ROWS. An audit found rule (k) shipped with ONE trailer for
+# all four causes, reproducing all three unrecoverable-refusal shapes rule (j)
+# had already been fixed for twice. Collapsing the per-cause selection back is
+# what these rows forbid.
+run 'remedies-collapse-to-all-causes' test_only_the_causes_PRESENT_get_a_remedy \
+  's|) if c in causes|) if True|'
+run 'nothing-written-line-dropped' test_the_refusal_says_NOTHING_WAS_WRITTEN \
+  's|f"NOTHING WRITTEN — not the doc|f"nothing written — not the doc|'
+run 'elided-count-suppressed' test_more_bullets_than_are_shown_says_so \
+  's|    if elided:|    if False:|'
+# The leading-decoration widening, reverted — the mirror of the qualifier row.
+run 'leading-decoration-rejected' test_leading_decoration_before_the_marker_cannot_escape \
+  's|rf"(?:\[\^A-Za-z\\s\]+\\s\*)\*"|rf""|'
+# The col-0-fence false verdict, reintroduced by dropping the indent filter.
+run 'fenced-filter-ignores-indent' test_an_unrelated_column_0_fence_does_not_forge_a_fenced_verdict \
+  's|_VIA.search(ln) for ln in hidden if ln\[:1\] in (" ", "\\t")|_VIA.search(ln) for ln in hidden|'
 # BEHAVIOUR-FREE CONTROL for this block specifically — the rows above must key on
 # behaviour, not on the presence of rule (k)'s own comment text.
 run 'rule-k-comment-reword-control' SURVIVES \
