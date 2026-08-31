@@ -559,8 +559,8 @@ def test_a_transforming_chain_is_NEVER_reported_benign(shape):
         "element is that this claim is data a test checks, not prose")
 
 
-@pytest.mark.parametrize("shape", sorted(G.EMBEDDED_NEWLINE_FIXTURES))
-def test_an_embedded_newline_payload_is_never_reported_benign(shape):
+@pytest.mark.parametrize("shape", sorted(G.UNRESOLVED_ESCAPE_FIXTURES))
+def test_an_unresolved_escape_payload_is_never_reported_benign(shape):
     """🔴 ROUND-8 FINDING NEW-15 — the SECOND fail-open in this module.
 
     The closed-literal proof is PER LINE. An escaped newline inside the payload
@@ -575,7 +575,7 @@ def test_an_embedded_newline_payload_is_never_reported_benign(shape):
     — and the `bare-echo-literal` fixture is the one that forges nothing, which
     is why guessing COLLISION would be an unpinnable false positive.
     """
-    line, expected, _really_forges = G.EMBEDDED_NEWLINE_FIXTURES[shape]
+    line, expected, _really_forges = G.UNRESOLVED_ESCAPE_FIXTURES[shape]
     verdict = G.classify_payload(line)
     assert verdict != G.BENIGN, (
         f"an embedded-newline payload was reported PROVABLY HARMLESS; the proof "
@@ -584,10 +584,10 @@ def test_an_embedded_newline_payload_is_never_reported_benign(shape):
         f"expected {expected!r} for {shape!r}, got {verdict!r}: {line}")
 
 
-def test_the_embedded_newline_ledger_covers_BOTH_answers():
+def test_the_unresolved_escape_ledger_covers_BOTH_answers():
     """The class exists because the module CANNOT tell an expanding emitter from
     a literal one. A ledger where every entry forges would not show that."""
-    flags = {f for _line, _v, f in G.EMBEDDED_NEWLINE_FIXTURES.values()}
+    flags = {f for _line, _v, f in G.UNRESOLVED_ESCAPE_FIXTURES.values()}
     assert flags == {True, False}, (
         f"really_forges takes only {flags}; the `bare-echo` case is the whole "
         "reason this class is DYNAMIC rather than COLLISION")
@@ -626,7 +626,24 @@ def test_the_really_forges_flags_are_MEASURED_against_real_bash(tmp_path):
     # 🔴 BOTH ground-truth ledgers. A second ledger carrying unmeasured flags is
     # NEW-14 again — the whole finding was a field that READ as verified.
     ledger = {**{f"chain/{k}": v for k, v in G.CHAIN_TRANSFORM_FIXTURES.items()},
-              **{f"newline/{k}": v for k, v in G.EMBEDDED_NEWLINE_FIXTURES.items()}}
+              **{f"escape/{k}": v for k, v in G.UNRESOLVED_ESCAPE_FIXTURES.items()}}
+    # 🔴 ROUND-9 FINDING NEW-18. Deleting a ledger from this merge SURVIVED a
+    # green suite — the comment saying "a second ledger with unmeasured flags is
+    # NEW-14 again" was prose, not a check, which is NEW-14's own shape one
+    # level up. Pinned: every dict in the module carrying a 3-tuple ground-truth
+    # ledger must be measured here, discovered rather than listed, so a THIRD
+    # ledger is covered without anyone remembering.
+    declared = {name: obj for name, obj in vars(G).items()
+                if name.endswith("_FIXTURES") and isinstance(obj, dict)
+                and obj and all(isinstance(v, tuple) and len(v) == 3
+                                for v in obj.values())}
+    measured = sum(len(d) for d in (G.CHAIN_TRANSFORM_FIXTURES,
+                                    G.UNRESOLVED_ESCAPE_FIXTURES))
+    assert sum(len(d) for d in declared.values()) == measured == len(ledger), (
+        f"a ground-truth ledger is not being measured here: the module declares "
+        f"{sorted(declared)} totalling {sum(len(d) for d in declared.values())} "
+        f"entries, this test measures {len(ledger)}. An unmeasured really_forges "
+        "flag reads as verified and is not — that was NEW-14.")
     for shape, (line, _verdict, really_forges) in sorted(ledger.items()):
         # `wait` so a process substitution's output is flushed before bash exits;
         # cwd=tmp_path so `tee f` writes into the sandbox, not the repo.

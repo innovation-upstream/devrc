@@ -62,6 +62,9 @@ EXIT_CARRYING_RE = re.compile(r"^RESULT: (PASS|FAIL) \(exit=(\d+)\)$", re.M)
 # is a near-miss, not a collision — see the guard's NEAR_MISSES pin.
 RESERVED_PREFIX = "RESULT:"
 
+# A single backslash, built rather than spelled so fixtures stay readable.
+ESC = chr(92)
+
 
 class Verdict(NamedTuple):
     status: str            # "PASS" | "FAIL"
@@ -134,9 +137,20 @@ _HEREDOC = re.compile(rf"""^\t*{re.escape(RESERVED_PREFIX)}""")
 # permanently red with no remedy but rewording someone's prose.
 _COMMENT = re.compile(r"^\s*#")
 
-# An escaped newline INSIDE a payload — the emitted text becomes several lines,
-# each starting at column 0. `_ESC` only covers escapes BEFORE the prefix.
-_EMBEDDED_NEWLINE = re.compile(r"\\[nr]")
+# 🔴 ANY UNRESOLVED BACKSLASH inside a payload. This module does not interpret
+# escapes, so it cannot know what one expands to — and several expand to a LINE
+# TERMINATOR, which starts a new line at column 0 that the per-line proof never
+# examined. `_ESC` only covers escapes BEFORE the prefix.
+#
+# 🔴 This was `\\[nr]` for exactly one round, and that was a BLACKLIST INSIDE THE
+# WHITELIST — the very shape this module's own header argues against. It named
+# two spellings, and `\x0a`, `\012`, `\u000a`, `\U0000000a` all sailed past it
+# and returned BENIGN for lines that really wrote a verdict at column 0
+# (established by executing them and reading the bytes through gate.sh's own
+# `grep … | tail -1`). Enumerating the dangerous spellings regenerates the bug on
+# the next one nobody thought of; refusing to certify ANY unresolved escape
+# closes the whole class in one predicate.
+_UNRESOLVED_ESCAPE = re.compile(r"\\")
 
 # --- PAYLOAD CLASSIFICATION ---------------------------------------------------
 # Three outcomes, not two, and BENIGN is a WHITELIST.
@@ -268,7 +282,7 @@ def classify_payload(line: str) -> str | None:
                       INSIDE the payload returned BENIGN for a line that really
                       forged on its second output line, because the proof is per
                       LINE and only the first was proved. Closed; the shape is
-                      pinned by EMBEDDED_NEWLINE_FIXTURES.
+                      pinned by UNRESOLVED_ESCAPE_FIXTURES.
     `BENIGN`        — PROVED a closed literal that is not `PASS`/`FAIL`.
 
     🔴 A line can run SEVERAL commands, and the forgery hides in the second:
@@ -329,7 +343,7 @@ def _classify_one_command(command: str) -> str:
             return DYNAMIC              # a runtime value is spliced in
         if not _TERMINAL_AFTER_QUOTE.match(rest):
             return DYNAMIC              # `+ v`, `, v`, `.join(…)` — appends
-        if _EMBEDDED_NEWLINE.search(inside):
+        if _UNRESOLVED_ESCAPE.search(inside):
             # 🔴 The closed-literal proof is PER LINE, and an escaped newline
             # inside the payload starts ANOTHER line at column 0 that the proof
             # never looked at. `printf "RESULT: ok\nRESULT: FAIL\n"` really
@@ -347,7 +361,14 @@ def _classify_one_command(command: str) -> str:
     # Unquoted command, or a heredoc body line: the rest IS the payload, so it
     # is literal text unless something interpolates into it. 🔴 A NAMED
     # BLACKLIST, not the whitelist above — see the module docstring.
-    return DYNAMIC if _INTERPOLATION.search(after) else BENIGN
+    #
+    # 🔴 The unresolved-escape check applies HERE TOO. It was added to the quoted
+    # arm alone, leaving `echo -e RESULT: ok\\nRESULT: PASS` returning BENIGN
+    # while really writing a verdict at column 0 — half a fix reads exactly like
+    # a whole one.
+    if _UNRESOLVED_ESCAPE.search(after) or _INTERPOLATION.search(after):
+        return DYNAMIC
+    return BENIGN
 
 
 def line_is_collision(line: str) -> bool:
@@ -539,21 +560,29 @@ SEVERITY_RUNG_FIXTURES = {
                             + RESERVED_PREFIX + " $v", DYNAMIC),
 }
 
-# 🔴 EMBEDDED-NEWLINE PAYLOADS. An escaped newline inside the payload starts
-# another line at column 0, and the closed-literal proof is PER LINE — it proved
-# only the first and returned BENIGN while bash really wrote a verdict on the
-# second. Each is DYNAMIC (not provable), never BENIGN.
+# 🔴 UNRESOLVED-ESCAPE PAYLOADS. This module does not interpret escapes, and
+# several of them expand to a LINE TERMINATOR that starts a new line at column 0
+# — which the per-line closed-literal proof never examined. One fixture per
+# SPELLING, because the first fix here named `\\n`/`\\r` only and every other
+# spelling sailed past it returning BENIGN for a line that really forged.
 #
-#   name -> (line, verdict, does bash REALLY forge?)
-EMBEDDED_NEWLINE_FIXTURES = {
-    "printf-two-lines": ('printf "' + RESERVED_PREFIX + ' ok\\n'
-                         + RESERVED_PREFIX + ' FAIL\\n"', DYNAMIC, True),
-    "echo-e-two-lines": ('echo -e "' + RESERVED_PREFIX + ' ok\\n'
-                         + RESERVED_PREFIX + ' PASS"', DYNAMIC, True),
-    # A bare `echo` does NOT expand the escape, so this one forges nothing — it
-    # is DYNAMIC because the module cannot tell the two apart, which is exactly
-    # why this class is DYNAMIC rather than COLLISION.
-    "bare-echo-literal": ('echo "' + RESERVED_PREFIX + ' ok\\n'
+#   name -> (line, verdict, does bash/python REALLY forge?)
+UNRESOLVED_ESCAPE_FIXTURES = {
+    "backslash-n":  ('printf "' + RESERVED_PREFIX + ' ok' + ESC + 'n'
+                     + RESERVED_PREFIX + ' FAIL' + ESC + 'n"', DYNAMIC, True),
+    "hex-0a":       ('printf "' + RESERVED_PREFIX + ' ok' + ESC + 'x0a'
+                     + RESERVED_PREFIX + ' FAIL"', DYNAMIC, True),
+    "octal-012":    ('printf "' + RESERVED_PREFIX + ' ok' + ESC + '012'
+                     + RESERVED_PREFIX + ' FAIL"', DYNAMIC, True),
+    "echo-e-hex":   ('echo -e "' + RESERVED_PREFIX + ' ok' + ESC + 'x0a'
+                     + RESERVED_PREFIX + ' PASS"', DYNAMIC, True),
+    # 🔴 The UNQUOTED arm, which had no escape check at all for a whole round.
+    "unquoted-echo-e": ('echo -e ' + RESERVED_PREFIX + ' ok' + ESC + ESC + 'n'
+                        + RESERVED_PREFIX + ' PASS', DYNAMIC, True),
+    # A bare `echo` does NOT expand the escape, so this forges nothing. It is
+    # DYNAMIC because the module cannot tell an expanding emitter from a literal
+    # one — which is exactly why this class is DYNAMIC and not COLLISION.
+    "bare-echo-literal": ('echo "' + RESERVED_PREFIX + ' ok' + ESC + 'n'
                           + RESERVED_PREFIX + ' PASS"', DYNAMIC, False),
 }
 
