@@ -56,6 +56,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from testlib.mockbin import write_exec  # noqa: E402
 from testlib.runner_patch import runner_with_targets, write_pytest_suite  # noqa: E402
+from testlib.result_grammar import select_verdict  # noqa: E402
 
 GATE = REPO_ROOT / "scripts" / "gate.sh"
 RUN_TESTS = REPO_ROOT / "scripts" / "run-tests.sh"
@@ -287,14 +288,27 @@ def test_the_verdict_line_carries_the_exit_code(tmp_path):
         ["bash", str(runner), str(REPO_ROOT)],
         cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=300,
     )
-    m = re.search(r"^RESULT: (PASS|FAIL) \(exit=(\d+)\)$", proc.stdout, re.M)
-    assert m, (
-        "the runner printed no exit-carrying verdict line, so its status still "
+    # 🔴 `select_verdict`, not a local `re.search`. This test drives the REAL
+    # HOOK_TESTS/SHELL_TESTS registries (`runner_patch` leaves them alone unless
+    # a caller names them), and their stdout is inlined into the stream. A
+    # first-match reader therefore reads whichever verdict-shaped line a
+    # registry entry printed FIRST -- so this very assertion could be satisfied
+    # by a line the runner never wrote, which is the wrong-witness shape.
+    # `scripts/tests/test_result_grammar_is_reserved.py` keeps the registries
+    # clean; this reads the LAST line, as gate.sh always has.
+    v = select_verdict(proc.stdout)
+    assert v is not None, (
+        "the runner printed no verdict line at all, so its status still "
         f"only exists outside its output.\n{proc.stdout}"
     )
-    assert m.group(1) == "FAIL", proc.stdout
-    assert int(m.group(2)) == proc.returncode, (
-        f"the verdict claims exit={m.group(2)} but the process exited "
+    assert v.exit_code is not None, (
+        "the runner's verdict is the regressed bare form carrying no exit code "
+        f"({v.line!r}), so a reader who only has the content learns nothing "
+        f"about the status.\n{proc.stdout}"
+    )
+    assert v.status == "FAIL", proc.stdout
+    assert v.exit_code == proc.returncode, (
+        f"the verdict claims exit={v.exit_code} but the process exited "
         f"{proc.returncode} -- content and status disagree at the source."
     )
     assert proc.returncode != 0
@@ -313,7 +327,12 @@ def test_a_green_real_run_says_pass_with_exit_zero(tmp_path):
         env={**os.environ, "MIN_TESTS": "1"},
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "RESULT: PASS (exit=0)" in proc.stdout, proc.stdout
+    # Also `select_verdict`: a bare `in proc.stdout` substring check is
+    # satisfied by ANY line in the stream, including one a registry entry
+    # printed, so it would pass while the runner's own verdict was absent.
+    v = select_verdict(proc.stdout)
+    assert v is not None and v.status == "PASS" and v.exit_code == 0, (
+        f"the runner's own final verdict was not PASS (exit=0): {v!r}\n{proc.stdout}")
 
 
 @pytest.mark.parametrize("runner", [RUN_TESTS, RUN_NODE], ids=["pytest", "node"])
