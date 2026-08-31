@@ -18,8 +18,10 @@ lever is COLLAPSING ROUND TRIPS, which is what this module is: the four static
 recon steps in one process, emitting one bounded brief.
 
 🔴 IT NEVER WRITES, AND IT NEVER MUTATES THE STORE. The `/analyze-service`
-write-back half is confirm-gated, diff-first and lives in the skill; this module
-has no write path at all. `TestReconNeverWrites` hashes a store tree either side
+write-back half is diff-first and lives in the skills — `write-back.md` decides
+whether a run has anything worth recording, and `subsystem-index/SKILL.md`
+carries the one append protocol both callers follow (the y/N there was retired
+2026-08-31). This module has no write path at all. `TestReconNeverWrites` hashes a store tree either side
 of every mode and every failure.
 
 🔴 IT DOES NOT REIMPLEMENT THE INDEX READ. Scope derivation is

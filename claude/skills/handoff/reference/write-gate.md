@@ -33,8 +33,15 @@ Both skills were correct on their own terms:
   ends with "Then wait for direction", and says that creating index entries is
   "`/handoff`'s confirm-gated job at the end of a session, not this step's."
   It followed all of that.
-* **`/handoff`** gates its **index** write: "Write only on explicit confirm,
-  diff first… on decline, discard", and the step blocks on a y/N.
+* **`/handoff`** gated its **index** write: "Write only on explicit confirm,
+  diff first… on decline, discard", and the step blocked on a y/N.
+  ⚠ **Past tense on purpose — that prompt no longer exists.** It was retired at
+  the index write 2026-08-15, at step 5 on 2026-08-23, and at the last remaining
+  door (`/analyze-service`'s) on 2026-08-31, all by operator decision on the same
+  evidence: the answer was always `y`. **The argument in this document is
+  unaffected** — what it turns on is that the write was SPECIFIED somewhere, not
+  that a human typed a letter, and both writes still show a diff first and are
+  still declinable on content.
 
 What nothing covered: the handoff **doc's own** write+push, and the behaviour of
 the session that runs *after* a resume — which inherits no constraint at all. It
