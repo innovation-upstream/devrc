@@ -136,8 +136,12 @@ CLAIM_ABSENT = (
 # before matching — see `test_a_quoted_retraction_cannot_satisfy_the_pin`.
 _RETRACTION_MARKERS = ("used to say", "used to read", "no longer true", "⚠")
 
-# `-`, `*` and `1.` all start a markdown list item. Matching only `-` reddened
-# the required check on an ordinary reformat and is why this is a pattern.
+# `-`, `*`, `+` and `1.` all start a markdown list item. Matching only `-`
+# reddened the required check on an ordinary reformat, which is why this is a
+# pattern. 🔴 Its job is BLOCK SPLITTING, not claim recognition — the claim's
+# own formatting is irrelevant — so `test_list_item_splitting_is_what_the`
+# `_pattern_is_for` exercises the split, which is the only thing widening it
+# actually buys.
 _LIST_ITEM = re.compile(r"\s*(?:[-*+]|\d+\.)\s")
 
 
@@ -245,63 +249,64 @@ def _section_states(claim: str, section: str) -> bool:
        silently defanged three sibling assertions whose fixtures are paragraphs.
 
     So: blocks are split on blank lines AND at list-item starts (`-`, `*`, `1.`),
-    a block containing a retraction marker is disqualified, and so is a block
-    immediately ADJACENT to (not blank-separated from) a disqualified one. The
-    claim's own formatting is irrelevant — paragraph, bullet or wrapped all
-    match.
+    and a block containing a retraction marker is disqualified. The claim's own
+    formatting is irrelevant — paragraph, bullet or wrapped all match.
 
-    ⚠ STATED LIMIT: the marker set is a vocabulary, so a retraction that uses
-    none of those words and is separated from the claim by a BLANK LINE is not
-    caught. This is not a proof that no retraction can pass.
+    🔴 A CONTACT RULE — tainting the block ADJACENT to a marked one — WAS TRIED
+    AND REMOVED, deliberately, and this is the reasoning so it is not re-added
+    by someone reading walks 2 and 3 above. It was measured to buy nothing and
+    to cost a live fragility:
+
+      * NOTHING REACHED IT. Both shipped retraction fixtures collapse into a
+        SINGLE marked block, so they are caught by the marked-block rule; the
+        entire taint loop could be deleted with the suite green. An assertion
+        message named the contact rule while its fixture never exercised it —
+        the same defect this ladder had just found in `nix_units`.
+      * IT PUT THE LIVE DOC ONE ORDINARY EDIT FROM AN UNFOLLOWABLE RED. The
+        Store-safety section opens with a ⚠ retraction paragraph, and the claim
+        bullet was untainted only because an unrelated `- hourly, local` bullet
+        sat between them. Delete that bullet, reorder the two, or add a ⚠ to it
+        — all three flipped the gate to FAIL with "does not carry the canonical
+        claim … Expected this text: <the claim>" while the claim was present
+        verbatim. That is the permanently-red, instruction-cannot-be-followed
+        gate this file exists to prevent.
+
+    A retraction ABOUT a section legitimately precedes the claims it corrects;
+    a retraction QUOTING a claim contains it. Only the second is mechanically
+    separable, so only the second is caught.
+
+    ⚠ STATED LIMIT — the exact residual, pinned by
+    `test_the_shapes_this_pin_does_NOT_catch`: a retraction that does not share
+    a BLOCK with the claim is not caught. Concretely, three shapes walk it, all
+    measured: `- <claim>` followed by `- ⚠ NO LONGER TRUE`; `- ⚠ used to say:`
+    followed by `- <claim>`; and a marker paragraph followed by the claim as a
+    bullet — with or without a blank line between, since a list start ends a
+    block regardless. A marker-free retraction walks it in any shape. This is
+    not a proof that no retraction can pass, and the pin above is what makes a
+    future improvement visible rather than accidental.
     """
     raw = section.splitlines()
-    marked = [any(m in ln.lower() for m in _RETRACTION_MARKERS) for ln in raw]
-
     blocks: list[tuple[list[str], bool]] = []   # (lines, contains-marker)
     cur: list[str] = []
     cur_marked = False
-    prev_blank = True
-    for ln, is_marked in zip(raw, marked):
+    for ln in raw:
         blank = not ln.strip()
-        starts_item = bool(_LIST_ITEM.match(ln))
-        if blank or starts_item:
+        if blank or _LIST_ITEM.match(ln):
             if cur:
                 blocks.append((cur, cur_marked))
             cur, cur_marked = [], False
             if blank:
-                # A blank line breaks ADJACENCY as well as the block.
-                blocks.append(([], False))
-                prev_blank = True
                 continue
         cur.append(ln)
-        cur_marked = cur_marked or is_marked
-        prev_blank = False
+        cur_marked = cur_marked or any(
+            m in ln.lower() for m in _RETRACTION_MARKERS)
     if cur:
         blocks.append((cur, cur_marked))
-    _ = prev_blank
-
-    # Contact rule: a block touching a MARKED block, with no blank line between,
-    # inherits the taint. Walk both directions — walk 3 above is the mirror of 2.
-    #
-    # 🔴 NEIGHBOURS ARE READ FROM `marked`, NEVER FROM `tainted`. Reading the
-    # array being written cascades the taint down the whole section: the live
-    # doc opens with a ⚠ retraction, so the bullet after it was tainted, then
-    # the bullet after THAT inherited from the tainted one, and the real claim
-    # was disqualified — the guard rejecting the very doc it is meant to
-    # certify. Contact is one hop, deliberately.
-    marked_block = [m for _, m in blocks]
-    tainted = list(marked_block)
-    for i, (lines, _m) in enumerate(blocks):
-        if not lines:                       # a blank-line separator
-            continue
-        for j in (i - 1, i + 1):
-            if 0 <= j < len(blocks) and blocks[j][0] and marked_block[j]:
-                tainted[i] = True
 
     target = _normalise(claim)
     return any(
-        lines and not tainted[i] and target in _normalise("\n".join(lines))
-        for i, (lines, _m) in enumerate(blocks)
+        not marked and target in _normalise("\n".join(lines))
+        for lines, marked in blocks
     )
 
 
@@ -448,18 +453,22 @@ def test_a_quoted_retraction_cannot_satisfy_the_pin() -> None:
         "the pin is certifying a doc that says the backup was retired"
     )
 
-    # 🔴 THE MIRROR OF THE ABOVE — a marker on the line BELOW the claim. It is
-    # the more natural editorial shape (state it, then retract it) and it was
-    # uncaught for three rounds while the docstring named only the ABOVE case.
+    # 🔴 THE MIRROR OF THE ABOVE — a marker BELOW the claim, as a continuation
+    # of the same block. Caught because it shares the claim's block, which is
+    # the only mechanism here: see the docstring on why the contact rule that
+    # would also have caught the SEPARATE-block shapes was removed.
     marker_below = f"- {CLAIM_PRESENT}\n  ⚠ NO LONGER TRUE — the unit was RETIRED."
     assert not _section_states(CLAIM_PRESENT, marker_below), (
-        "a retraction on the line BELOW the claim left it standing — the "
-        "contact rule is one-directional"
+        "a retraction on the continuation line BELOW the claim left it "
+        "standing — the marker is inside the claim's own block"
     )
+    # A ⚠ paragraph that is NOT part of the claim's block must not disqualify
+    # it: the live doc's Store-safety section opens with exactly that, and
+    # tainting across the boundary is what made this gate fragile.
     blank_separated = f"- {CLAIM_PRESENT}\n\n⚠ NO LONGER TRUE — the unit was RETIRED."
     assert _section_states(CLAIM_PRESENT, blank_separated), (
-        "a blank line must break adjacency, or the live doc's unrelated ⚠ "
-        "paragraphs would disqualify every claim near them"
+        "an unrelated ⚠ paragraph disqualified a claim in another block — the "
+        "live doc would red the required check on an ordinary edit"
     )
 
     # 🔴 THE FILE'S OWN INSTRUCTION MUST BE FOLLOWABLE. The failure message says
@@ -610,6 +619,97 @@ def test_the_wiring_check_is_not_fooled_by_comments_or_a_disabled_timer() -> Non
     assert not _nix_wires_a_backup(live, script_exists=False), (
         "a missing backup.py reads as wired — the unit would fail on every run"
     )
+
+
+def test_list_item_splitting_is_what_the_pattern_is_for() -> None:
+    """🔴 `_LIST_ITEM`'s real job, which the bullet-form loop does NOT exercise.
+
+    Since the redesign the claim's formatting is irrelevant — a `*` bullet
+    matches as a plain line whether or not the pattern recognises it — so
+    narrowing the pattern back to `-` survived a fully green suite. What the
+    widening actually buys is BLOCK SPLITTING: a retracted `*` item must not
+    contaminate the next one, and must not shield itself either.
+    """
+    c = CLAIM_PRESENT
+    for bullet in ("-", "*", "+", "1."):
+        # The marker sits in a SEPARATE item; the claim's item must survive.
+        assert _section_states(c, f"{bullet} ⚠ used to say something else\n{bullet} {c}"), (
+            f"a {bullet!r} item did not split the block — a retraction in the "
+            "PREVIOUS item disqualified an unrelated claim"
+        )
+        # …and a marker in the claim's OWN item must still disqualify it.
+        assert not _section_states(c, f"{bullet} {c} ⚠ NO LONGER TRUE"), (
+            f"a {bullet!r} item carrying its own retraction still matched"
+        )
+
+
+def test_the_shapes_this_pin_does_NOT_catch() -> None:
+    """🔴 THE STATED LIMIT, PINNED — so it stays a decision, not a surprise.
+
+    `_section_states` catches a retraction only when it shares a BLOCK with the
+    claim. These three shapes therefore walk it, and a contact rule that would
+    have caught them was removed on purpose (see `_section_states`'s docstring:
+    nothing reached it, and it put the live doc one ordinary edit from an
+    unfollowable red).
+
+    This test asserts the CURRENT behaviour rather than the desired one. If you
+    close any of these, it goes red and tells you to update the stated limit —
+    which is the point: a residual nobody can see is how a guard's description
+    drifts wider than its body.
+    """
+    c = CLAIM_PRESENT
+    uncaught = {
+        "marker as a sibling bullet BELOW":
+            f"- {c}\n- ⚠ NO LONGER TRUE — the unit was RETIRED.",
+        "marker as a sibling bullet ABOVE":
+            f"- ⚠ This section used to say:\n- {c}",
+        "marker paragraph, claim as a bullet":
+            f"⚠ This section used to say:\n- {c}",
+        "marker paragraph, blank line, claim as a bullet":
+            f"⚠ This section used to say:\n\n- {c}",
+        "retraction using none of the marker words":
+            f"- {c}\n  (RETRACTED 2026-09-01; the unit is gone.)",
+    }
+    still_walks = [k for k, v in uncaught.items() if _section_states(c, v)]
+    assert still_walks == list(uncaught), (
+        "a shape the stated limit lists as UNCAUGHT is now caught: "
+        f"{sorted(set(uncaught) - set(still_walks))}. That is an improvement — "
+        "update `_section_states`'s STATED LIMIT and this fixture together, so "
+        "the description never claims more or less than the body delivers."
+    )
+
+
+def test_the_live_doc_is_not_one_edit_from_an_unfollowable_red() -> None:
+    """🔴 The fragility that killed the contact rule, pinned against its return.
+
+    Under that rule the live claim survived only because an unrelated bullet sat
+    between it and the section's ⚠ preamble. Each edit below flipped the gate to
+    FAIL with "does not carry the canonical claim" while the claim was present
+    verbatim — a red whose instruction cannot be followed. All must stay green.
+    """
+    section = _store_safety_section()
+    lines = section.splitlines()
+    claim_i = next(i for i, ln in enumerate(lines) if "daily, off-machine" in ln)
+    hourly_i = next(i for i, ln in enumerate(lines) if "hourly, local" in ln)
+    assert hourly_i == claim_i - 1, (
+        "fixture assumption broken: the two bullets are no longer adjacent, so "
+        "these edits no longer reproduce the fragility"
+    )
+
+    without_sibling = "\n".join(lines[:hourly_i] + lines[hourly_i + 1:])
+    swapped = "\n".join(
+        lines[:hourly_i] + [lines[claim_i], lines[hourly_i]] + lines[claim_i + 1:])
+    sibling_marked = "\n".join(
+        lines[:hourly_i] + [lines[hourly_i] + " ⚠ see below"] + lines[hourly_i + 1:])
+
+    for name, variant in (("sibling deleted", without_sibling),
+                          ("bullets swapped", swapped),
+                          ("sibling carries a ⚠", sibling_marked)):
+        assert _section_states(CLAIM_PRESENT, variant), (
+            f"an ordinary docs edit ({name}) reds the required check while the "
+            "claim is present verbatim — the contact rule, or something like "
+            "it, is back"
+        )
 
 
 def test_the_section_slice_is_bounded_by_the_next_heading() -> None:

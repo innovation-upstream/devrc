@@ -70,10 +70,16 @@ class TestStripNixComments:
         assert "gruvbox" not in out
 
     def test_an_escaped_quote_does_not_flip_string_state(self):
-        src = 'a = "he said \\"hi\\" # not a comment";  # this one is\n'
-        out = strip_nix_comments(src)
-        assert "not a comment" in out
-        assert "this one is" not in out
+        """🔴 ODD number of escaped quotes, deliberately.
+
+        The first version of this fixture had TWO, so a mutant that stopped
+        honouring `\\` produced byte-identical output — the parity error
+        cancelled and the branch survived a green suite. One escape does not
+        cancel: with the escape ignored, the string is read as closing at
+        `\\"`, the trailing `#` lands outside a string, and the comment is cut.
+        """
+        src = 'a = "3\\" wide";  # gone\n'
+        assert strip_nix_comments(src) == 'a = "3\\" wide";'
 
 
 # --- declares ------------------------------------------------------------------
@@ -181,6 +187,17 @@ class TestDirectiveRefusesRatherThanTruncating:
     def test_an_attrset_value_raises(self):
         with pytest.raises(NotImplementedError):
             directive("Environment", "Environment = {\n  A = 1;\n  B = 2;\n};\n")
+
+    def test_a_LIST_value_raises(self):
+        """🔴 The `[`/`]` clause, which nothing exercised.
+
+        Without it this returns the truncation `'[ "A=1"'` — a plausible WRONG
+        value, which is the outcome `directive()`'s docstring calls the worst of
+        the three. The attrset case above cannot reach this branch: it is caught
+        by the `{`/`}` clause first.
+        """
+        with pytest.raises(NotImplementedError):
+            directive("Environment", 'Environment = [\n  "A=1";\n  "B=2"\n];\n')
 
     def test_an_unterminated_declaration_raises(self):
         with pytest.raises(NotImplementedError):
