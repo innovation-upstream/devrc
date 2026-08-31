@@ -766,9 +766,12 @@ class TestTheStoreWriteCarrierLedgerIsEXACT:
         )
 
     def test_the_predicate_needs_BOTH_halves(self) -> None:
-        """NEGATIVE CONTROL, both directions. A predicate that fired on either
-        half alone would flag most of `claude/skills/` and the ledger would be
-        maintained by deletion."""
+        """NEGATIVE CONTROL, both directions: neither half alone may fire.
+
+        A predicate that accepted either half would flag documents that merely
+        mention a tool, and documents that merely mention the store. MEASURED
+        (cg#473 sweep, mutant M3): switching this `and` to `or` fails the carrier
+        ledger and the owner's pin as well as this test."""
         mechanism_only = "Present the diff, then use `Edit` on the runbook.\n"
         store_only = "The index entry lives outside every repo.\n"
         assert not _store_write_paragraphs(mechanism_only)
@@ -816,6 +819,12 @@ class TestThePointerStatesNoMechanismOUTSIDEThePinnedRegion:
 
     A second protocol appended to this file is caught by WHERE it sits, not by
     what it says — the property the measured cg#473 mutant defeated.
+
+    ⚠ The SCOPE of "no wording can walk it", stated exactly: once a paragraph
+    names a `MECHANISM` token, no rewording of the surrounding prose helps. A
+    fork that names NO mechanism token — no tool, no confirm gate — is outside
+    this test, and outside every layer-5 test. That is the residual gap, and it
+    is a property of the token list, not of the position rule.
     """
 
     REGION = "one-append-protocol"
