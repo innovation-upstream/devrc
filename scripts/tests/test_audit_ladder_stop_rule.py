@@ -213,7 +213,12 @@ because no mutant here touches the escape hatch". THAT WAS FALSE FOR M5** — an
 it was false in the direction that blesses a stale row. M5 does not *touch* the
 hatch, it TRUNCATES THE WHOLE FILE, so it necessarily takes both new hatch
 assertions with it. Re-measured 2026-08-31: **M5 = 11 failed** (the row below
-said 9, already stale by 1 before this round and by 2 after). M2 was re-measured
+said 9). 🔴 The sentence that first corrected this row got its OWN history wrong
+-- it said "stale by 1 before this round and by 2 after"; M5 measured across the
+ladder is 9 at `74b427d5`, 10 at `a8e9e50a`, 11 at `18131a61` and 11 at
+`21a98263`, so it was already stale by TWO before that round and that round did
+not move it. "By 1" was true only at `a8e9e50a`, two commits earlier and not
+where the false sentence was written. A correction is a claim too.) M2 was re-measured
 as a control and genuinely is unchanged at 2. A count quoted in prose that no
 assertion reads is unpinned by construction -- this pair has now drifted twice,
 and the second time a sentence written to explain the update endorsed the drift:
@@ -257,10 +262,25 @@ recorded as SURVIVED off an 11-passed run.
                                                  (11 when this table was taken;
                                                  the escape-hatch pins added 2)
   BASE origin/main's SKILL.md, reference file
-       absent (i.e. pre-change) ............... 6 failed, 5 passed
-  PREV the round-1 tip `ed38490b` ............. 5 failed, 6 passed  <- the tree
+       absent (i.e. pre-change) ............... NOT REPRODUCIBLE AS WRITTEN
+                                                (recorded as 6 failed, 5 passed;
+                                                "origin/main" has moved far past
+                                                what it meant on 2026-08-26, so
+                                                the row names no fixed tree. Its
+                                                6+5=11 cannot hold for a 13-test
+                                                module either. Left as history,
+                                                NOT re-derived -- pin a SHA if
+                                                this row is ever wanted back.)
+  PREV the round-1 tip `ed38490b` ............. 7 failed, 6 passed  <- the tree
                                                 the second audit read; these are
                                                 the pins added after it
+                                                (was 5 failed; re-measured
+                                                2026-08-31 with the 13-test
+                                                module against ed38490b's four
+                                                documents. Same drift, same
+                                                direction, as M5 one screen up --
+                                                the sibling site the round that
+                                                fixed M5 did not sweep.)
 
   the five that SURVIVED a green 11-test suite until the classifier was pinned:
   Z1   classifier METHOD sentence deleted ..... 1 failed
@@ -490,8 +510,12 @@ SKILL_PROSE_ESCAPE_STOP = (
 # inserted a history paragraph BETWEEN the pointer and this caveat, silently
 # re-pointing the instruction at itself.
 # 🔴 WHOLE PARAGRAPH, and the first draft of THIS constant got it wrong — four
-# lines below a banner saying not to. It stopped after two of the five sentences,
-# and the three it left free are the caveat's entire operational content.
+# lines below a banner saying not to. It stopped after two of the caveat's SIX
+# sentences, leaving FOUR free -- two of which are its entire operational
+# content. (An earlier draft of this comment said "five ... three"; a regex
+# sentence-splitter then said four, because `THINGS.**` puts the bold marker
+# between the period and the space. Six, enumerated by hand. Third wrong
+# number for one paragraph -- count by reading, not by pattern.)
 # MEASURED at that draft, both with a fully green 13-test suite:
 #   "not a shortcut out of a converging one"  -> "...and equally a shortcut
 #      out of one"                                    13 passed, SURVIVED
@@ -1063,8 +1087,12 @@ def test_the_escape_hatch_pointer_resolves_to_the_NOT_A_LICENCE_caveat():
         "\n\nclaude/skills/audit-pr/SKILL.md: the escape-hatch criteria are no "
         "longer a PARAGRAPH of their own.\n"
         "  The pinned text is present somewhere (that pin is a separate test), "
-        "but not as a standalone block -- most likely a blank line was removed "
-        "and it merged with a neighbour.\n"
+        "but not as a standalone block. Two routes get you here: a blank line "
+        "was removed so it merged with a neighbour, OR the paragraph was "
+        "EDITED (a sentence added/removed) -- the sibling pin is a substring "
+        "check and stays green for that, so this is the only test that goes "
+        "red. If you changed the prose deliberately, update the constant in "
+        "this file in the SAME commit.\n"
         "  Markdown block structure is what makes 'the next paragraph' mean "
         "anything, so this is a real change, not formatting."
     )

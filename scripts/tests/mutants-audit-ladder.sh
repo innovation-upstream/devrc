@@ -345,6 +345,47 @@ run "churn row reverted to the stale 1,002" \
     '**1,051**' '**1,002**'
 
 echo
+echo "== the PROSE-payload escape hatch =="
+# 🔴 These three rows meet this battery's stated inclusion rule exactly: each
+# was MEASURED SURVIVING against a fully green module, and each is green only
+# because a pin was too short. Recording them in a comment is what this file
+# exists to stop -- the sweeps it replaces "happened in a session scratchpad
+# that no longer exists", including the rows that justified adding a pin.
+#
+# The first two invert the caveat's operational content while every other pin
+# stays byte-identical: the first is the ONLY sentence forbidding the hatch on a
+# CONVERGING ladder, the second is the default-to-continue instruction. Both
+# SURVIVED at 18131a61 with 13 passed.
+run "hatch: 'not a shortcut' inverted" \
+    test_the_prose_escape_hatch_demands_its_rationale_IN_THE_SUMMARY "$SKILL" \
+    'not a shortcut out of a
+converging one.' \
+    'not a shortcut out of a
+converging one, and equally a shortcut out of one.'
+# 🔴 The target is LINE-WRAPPED. A naive one-line pattern here is a no-op, and
+# `run` would print MUTATION DID NOT APPLY rather than a false SURVIVED — which
+# is precisely how a hand-run version of this control reported a false green
+# before it was moved in here.
+run "hatch: 'if in doubt' flipped to STOP" \
+    test_the_prose_escape_hatch_demands_its_rationale_IN_THE_SUMMARY "$SKILL" \
+    'If in
+doubt, run the next round:' \
+    'If in
+doubt, STOP:'
+# The blank line is what MAKES two paragraphs, so deleting it merges the caveat
+# into the criteria and "read the next paragraph" resolves to the history again.
+# Invisible to both whole-string pins (`_norm` collapses newlines) -- this row is
+# the only mechanical evidence the adjacency assertion is keyed to block
+# structure rather than to text.
+run "hatch: blank line before the caveat deleted" \
+    test_the_escape_hatch_pointer_resolves_to_the_NOT_A_LICENCE_caveat "$SKILL" \
+    'open rather than absent.
+
+⚠ **THIS DOES NOT OVERRIDE' \
+    'open rather than absent.
+⚠ **THIS DOES NOT OVERRIDE'
+
+echo
 echo "== REACHABILITY: relocations that leave every string pin byte-identical =="
 # 🔴 These two are the rows the module's docstring marks as the reachability
 # controls, and they were the gap this harness shipped with: without them the
