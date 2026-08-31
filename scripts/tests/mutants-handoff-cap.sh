@@ -286,8 +286,11 @@ run 'mainline-only-rows-not-labelled' test_a_doc_only_the_MAINLINE_has_is_listed
   's|f"    {name}" + (f"    (on {ref} only)" if name in upstream_set else "")|f"    {name}"|'
 # 🔴 THE SENTENCE, which is the half that made the list read as complete. A count
 # of one CHECKOUT'S glob described as "this repo" is a claim wider than the code.
+# ⚠ THE ANCHOR CARRIES THE MESSAGE'S OWN LEADING SPACES. A first version dropped
+# the two spaces after `f"` and reported `MUTATION DID NOT APPLY` — caught by the
+# harness's `cmp -s` control, which is the only reason it was not scored `ok`.
 run 'count-claims-the-whole-repo' test_the_count_says_WORKING_TREE_not_repo \
-  's|f"{relpath} does not exist, and this WORKING TREE already has "|f"{relpath} does not exist, and this repo already has "|'
+  's|f"  {relpath} does not exist, and this WORKING TREE already has "|f"  {relpath} does not exist, and this repo already has "|'
 # The elision's escape hatch, ONE ROW PER SOURCE — the two lists come from
 # different places and no single command enumerates the union, so a message that
 # names only one of them is wrong for half the callers. Showing 12 of 92 with no
