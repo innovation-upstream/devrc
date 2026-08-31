@@ -28,21 +28,37 @@ MECHANISM = SERVER_BLOCKED_IN_FSYNC   (handler threads=1 [... =SERVER_BLOCKED_IN
 ```
 
 **Why CI and not here.** `devrc-ci` is pinned to one node
-(`nodeSelector: kubernetes.io/hostname: talos-xr6-r7p`). Measured 2026-08-31 on run
-`devrc-ci-86zxj`: **12 pipelineruns overlapped** the failing window — **7** devrc-ci,
-**4** gitops-validate, **1** auditloop.
+(`nodeSelector: kubernetes.io/hostname: talos-xr6-r7p`), so a burst of pushes stacks
+concurrent runs onto one machine's disk.
 
-🔴 **The shared surface is `nix-store-cache`, not the workspace.** Each run's `source`
-workspace is a **`volumeClaimTemplate`** — a per-run `local-path` PVC, ~4 Gi, holding
-(per the triggertemplate's own comment) "only a 12.8 MB clone plus two build logs".
-The volume every concurrent run *shares* is the single static `nix-store-cache` PVC
-(30 Gi, `local-path`, bound to that same node) — consistent with
-`claude/skills/tekton/SKILL.md:41`. All 239 PVCs in `tekton-ci` are `local-path`, so
-they are all the node's local disk either way; the point is which one is contended.
+🔴 **The contention set is 7, NOT 12 — do not quote the 12.** Twelve pipelineruns
+overlapped the failing window, but only the **7 devrc-ci** ones were on the pinned
+node. Measured 2026-08-31: gitops-validate is pinned to a **different** node
+(42/42 pods on `talos-uvh-gtj`) and the one auditloop run was on `talos-deu-s2q`.
+Neither mounts anything devrc-ci mounts. Sizing a concurrency cap against 12 would
+size it against runs that were never there.
+⚠ `claude/skills/tekton/SKILL.md:48` says "every run lands on `talos-xr6-r7p`" — true
+of *devrc-ci* runs, misleading as written, and the likely source of the 12.
 
-⚠ An earlier revision of this file said the workspace was `emptyDir medium=disk`.
-That was **wrong** and is corrected here: the pod's `tekton-internal-workspace`
-emptyDir is Tekton's own plumbing, not the pipeline's `source` workspace.
+🔴 **AND THE FAILING WRITE IS ON NEITHER NAMED VOLUME.** The gate pod mounts
+`nix-store-cache` at `/nix` and the per-run `source` PVC (a `volumeClaimTemplate`,
+~4 Gi) at `/workspace/source` — but the stalling `os.fsync` in the CI traceback
+targets
+`/tmp/nix-build-devrc-pytests.drv-0/pytest-of-nixbld13/pytest-0/popen-gw3/…/store`,
+i.e. the **step container's ephemeral layer**. `devrc-ci-gate` sets no `TMPDIR`/`TMP`
+and mounts nothing at `/tmp` (verified on the pod spec). So relocating
+`nix-store-cache` would remove *neighbouring* nix traffic from the shared device but
+**cannot move the failing writer**. Whether the ephemeral layer and the local-path PVs
+share one physical device is *inferred* from the standard Talos `/var` layout, **not
+measured** — measure it before acting on it.
+
+⚠ Two earlier revisions of this file got the storage wrong in different ways: first
+`emptyDir medium=disk` (that was the pod's `tekton-internal-workspace`, Tekton's own
+plumbing), then "the volume every concurrent run shares is `nix-store-cache`" (false
+for 5 of the 12, and not where the failing write lands). Both are corrected above.
+tekton-ci's PVs are spread over four nodes — `talos-xr6-r7p` 100, `talos-deu-s2q` 52,
+`talos-uvh-gtj` 51, `talos-jkj-deb` 43 — so "all `local-path`" does **not** mean "all
+one disk".
 
 ## Use it
 
@@ -90,9 +106,11 @@ mechanism testable on demand rather than to eliminate rivals.
 
 ### Why LD_PRELOAD and not the narrower tool already in the repo
 
-`test_subsystem_store_api.py:15342-15348` monkeypatches `api._fsync_dir`, and carries
-a 🔴 comment noting that patching the stdlib's `os.fsync` is process-global and would
-stall any other thread. This shim is **strictly wider** than what that comment warns
+`test_subsystem_store_api.py` monkeypatches `api._fsync_dir` inside
+`TestAHungRoundTripSAYSWhichSideBlocked` — `grep -n '_fsync_dir", _stall' ` finds it —
+and carries a 🔴 comment noting that patching the stdlib's `os.fsync` is process-global
+and would stall any other thread. (Cited by name, not by line: that file's comment
+block shifts on every edit, and a line citation into it shipped wrong twice.) This shim is **strictly wider** than what that comment warns
 against. It is used anyway because it needs no repo edit and therefore tests the
 shipped code path exactly as CI runs it — but the narrower monkeypatch is the right
 tool if you only need `_fsync_dir`, and the warning above applies to this shim too.
@@ -100,10 +118,15 @@ tool if you only need `_fsync_dir`, and the warning above applies to this shim t
 ## Two fixes that look right and are not
 
 🔴 **Raising `HANG_TIMEOUT` again is worse than doing nothing.** 60.0 is already the
-symptom fix (raised from 15 on 2026-08-29) and it did not hold. The test file computes
-~324 hung-call sites × 60 s ≈ 5.4 h against a 45 m task budget — and blowing that
-budget is the documented state where nothing is posted and the required checks stay
-`pending` forever, clearable only by a fresh push.
+symptom fix (raised from 15 on 2026-08-29) and it did not hold. The test file's own
+arithmetic (`:155-158`) is ~320 hung-call sites × 60 s ≈ 5.3 h; re-counted live in
+this PR's tree it is 211 `fetch(` + 113 `await_audit(` = **324**, so ≈ 5.4 h. Either
+way it dwarfs the budget.
+⚠ **That budget is NOT 45 m** — the test file says 45 m and the live values are the
+gate task's `timeout: 1h0m0s` inside pipeline `timeouts: {tasks: 1h10m0s, pipeline:
+1h25m0s}`. The conclusion survives (5.4 h ≫ 1 h, and even 15 s × 324 ≈ 81 m exceeds
+it), but do not quote 45 m; the test file's copy of that number is stale and is left
+untouched here rather than silently corrected in a comment-only change.
 
 ⚠ **"CPU/memory requests cannot fix it" — too strong; corrected.** k8s requests govern
 CPU and memory, **not** disk IOPS, so requests would not make fsync faster. But every
@@ -114,13 +137,22 @@ null` is not a devrc oversight: **479/479** taskruns in that namespace declare n
 this is a platform-wide default, and changing devrc alone would not stop under-declared
 neighbours oversubscribing the node.)
 
-The real levers are infra and are **not** this repo's to apply: unpin the node or spread
-disk-heavy pipelines; cap concurrent runs per node (distinct from `tekton-supersede`,
-which only collapses redundant runs of the *same* PR); or give **`nix-store-cache`**
-isolated or faster storage.
+The real levers are infra and are **not** this repo's to apply, ranked by whether they
+can move the write that actually stalls:
+
+1. **Cap concurrent devrc-ci runs on the pinned node, or unpin it.** Sizes against
+   **7**, not 12. Distinct from `tekton-supersede`, which only collapses redundant
+   runs of the *same* PR. Non-zero `computeResources` is one way to implement this —
+   it does not touch IOPS, but it makes excess runs Pending instead of co-scheduled.
+2. **Give the gate's ephemeral layer (`/tmp`) faster or isolated storage** — that is
+   where the stalling fsync lands. Requires first measuring whether it shares a device
+   with the local-path PVs; see the ⚠ above.
+3. **Relocating `nix-store-cache`** only removes neighbouring nix traffic from the
+   shared device. Worth doing if 1 and 2 are blocked; it cannot move the failing write.
 
 ## Counts in this file
 
-`12` overlapping runs, `479` taskruns, `~324` call sites and the two `local-path`
-figures were measured on 2026-08-31 and **nothing asserts on them** — they will drift.
-Re-derive before quoting them; the commands are in the git history of this file's PR.
+`7`/`12` runs, `499` taskruns, `324` call sites, the per-node PV split and the live
+timeouts were measured on 2026-08-31 and **nothing asserts on any of them** — they
+drift, and did so within one session (449→479→499 taskruns while this PR was open).
+Re-derive before quoting; the `kubectl`/`grep` commands are in this PR's comments.

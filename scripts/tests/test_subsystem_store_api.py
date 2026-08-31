@@ -118,11 +118,13 @@ ROOT = Path(__file__).resolve().parents[2]
 #     accept loop parked=True`. `server.py:_replace_bytes` fsyncs the file
 #     (:2012) and the parent dir (_fsync_dir, :1961) INSIDE the request, before
 #     the response is written, and fsync blocks in uninterruptible sleep.
-#     devrc-ci is pinned to ONE node (talos-xr6-r7p); the volume every
-#     concurrent run SHARES is the static `nix-store-cache` PVC (30Gi,
-#     local-path), not the per-run `source` workspace, which is a
-#     volumeClaimTemplate holding a ~13 MB clone. 12 pipelineruns overlapped
-#     that window (7 devrc-ci, 4 gitops-validate, 1 auditloop).
+#     devrc-ci is pinned to ONE node (talos-xr6-r7p). 🔴 The contention set is
+#     the 7 devrc-ci runs, NOT the 12 overlapping pipelineruns: gitops-validate
+#     is pinned to talos-uvh-gtj and the one auditloop run was on
+#     talos-deu-s2q. 🔴 And the stalling fsync lands on NEITHER named volume —
+#     not `nix-store-cache` (/nix) nor the per-run `source` PVC
+#     (/workspace/source), but the step container's EPHEMERAL layer under /tmp,
+#     where the gate sets no TMPDIR and mounts nothing.
 #     ⚠ "give the gate CPU/memory requests" does NOT fix the latency — requests
 #     govern CPU and memory, not IOPS — but it is not useless either: every run
 #     is pinned to one node, so non-zero requests are the standard way to make
@@ -139,8 +141,11 @@ ROOT = Path(__file__).resolve().parents[2]
 #     reproducer.
 #   * ⚠ THE 3 FAILURES ON THAT RUN WERE NOT ONE FLAKE. The third was
 #     TestAHungRoundTripSAYSWhichSideBlocked::test_a_stall_in_the_FSYNC_region_
-#     is_NAMED, which failed at :15382 ("the server never reached the stall
-#     site") against CLIENT_BOUND = 0.25 (:15319) — NOT against this constant.
+#     is_NAMED, which failed on its assertion ("the server never reached the stall
+#     site") against `CLIENT_BOUND` (0.25) — NOT against this constant. Both
+#     live in TestAHungRoundTripSAYSWhichSideBlocked; find them by NAME, never
+#     by line — this comment block shifts them every time it is edited, which
+#     already shipped one wrong citation.
 #     So it evidences an fsync exceeding 0.25 s, and the advice below about not
 #     raising HANG_TIMEOUT does not address the bound that actually failed
 #     there. That 0.25/1.2 pair is the same "bound tighter than the thing it

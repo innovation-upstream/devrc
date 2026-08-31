@@ -39,9 +39,13 @@ int fsync(int fd) {
         *(void **)(&real) = dlsym(RTLD_NEXT, "fsync");
         if (!real) {
             /* Unreachable under LD_PRELOAD (RTLD_NEXT always finds libc's
-             * fsync), but a dlopen'd misuse should fail loudly, not SIGSEGV. */
+             * fsync), but a dlopen'd misuse should fail loudly, not SIGSEGV.
+             * 🔴 dlerror() CLEARS the error on read, so it must be called ONCE
+             * and stashed: `dlerror() ? dlerror() : ...` prints "(null)" and is
+             * formally UB — it loses the very reason this branch exists. */
+            const char *why = dlerror();
             fprintf(stderr, "[slowfsync] FATAL: dlsym(RTLD_NEXT, \"fsync\") failed: %s\n",
-                    dlerror() ? dlerror() : "(no error)");
+                    why ? why : "(no error reported)");
             errno = ENOSYS;
             return -1;
         }
