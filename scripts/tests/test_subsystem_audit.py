@@ -3,7 +3,7 @@
 🔴 OFFLINE, HERMETIC, AND SYNTHETIC. Every fixture in this file is written into a
 `tmp_path`; nothing under `~/.claude/analyze-service-index/` is opened, and no
 line of it is reproduced here. That store is curated, CLIENT-CONFIDENTIAL and
-unbacked-up, and devrc is PUBLIC — so a fixture derived from it would be a leak
+not re-derivable, and devrc is PUBLIC — so a fixture derived from it would be a leak
 even if it looked innocuous. The corpus is only ever described in this repo as
 aggregate integers.
 

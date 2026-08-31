@@ -49,7 +49,7 @@ Prints, each **with its denominator**: per-entry bytes vs budget; bullet shape v
 
 If the verdict says **"no prune needed (stop; do not churn the files)"** — stop. It is a claim about the classes above and nothing else.
 
-## 2. Back up first (the cut rewrites curated, unbacked-up files)
+## 2. Back up first (the cut rewrites curated files the timers have not captured yet)
 🔴 **Chain with `&&` and count the files** — `cp …; echo ok` prints success even when the copy failed.
 ```bash
 BK=/tmp/index-prune-$(date +%s); mkdir -p "$BK"

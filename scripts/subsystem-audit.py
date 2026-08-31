@@ -394,7 +394,7 @@ def _git(repo: Path, *args: str, store_root: Path) -> subprocess.CompletedProces
 
     🔴 THE GUARD IS THE POINT, not a nicety. The store's scope dirs are each
     their own git repo (`index-store.md`), so a scope-to-repo derivation that
-    ever pointed back at the store would run git inside curated, unbacked-up,
+    ever pointed back at the store would run git inside curated,
     client-confidential content — which "Store safety" forbids outright. The
     check is on the RESOLVED path so a symlink cannot walk around it.
     """
@@ -403,7 +403,8 @@ def _git(repo: Path, *args: str, store_root: Path) -> subprocess.CompletedProces
     if rp == sr or sr in rp.parents or rp.is_relative_to(sr):
         raise RuntimeError(
             f"refusing to run git inside the index store: {rp} is under {sr}. "
-            "The store is curated and unbacked-up; this audit is read-only."
+            "The store is curated and client-confidential; this audit is "
+            "read-only."
         )
     return subprocess.run(
         ["git", "-C", str(rp), *args], capture_output=True, text=True, timeout=20

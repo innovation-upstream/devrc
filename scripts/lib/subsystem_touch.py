@@ -136,7 +136,7 @@ in one line:
     covering both sources would be wrong about both" — already forbids that
     shape for two sources; a union makes it unavoidable rather than optional.
   * The consumer's decision is per-path. `/handoff` proposes a dated journal
-    bullet against a curated, client-confidential, unbacked-up store. "This
+    bullet against a curated, client-confidential, not-re-derivable store. "This
     session worked on X" and "some session moved X on this branch" are different
     claims and only one of them belongs in a work-history bullet. A merged set
     destroys exactly the fact needed to choose.
@@ -2862,8 +2862,8 @@ def _reserve_slot_for_top_noncoherent(
 # already carries 6 bullets sharing a single date, and 12 of 26 carry at least 2.
 #
 # 🔴 READ-AND-DISPLAY ONLY. This module has NO write call site and that property
-# is what lets it be pointed at a curated, client-confidential, unbacked-up
-# store; `TestNeverWrites` hashes a whole store tree either side of every mode.
+# is what lets it be pointed at a curated, client-confidential store whose
+# backups both LAG the current bytes; `TestNeverWrites` hashes a whole store tree either side of every mode.
 # Everything below reads.
 
 
@@ -3231,7 +3231,7 @@ def build_report(
     # (`subsystem_recall`) degrades — it serves what it can and reports the rest —
     # because spending every good entry to report one bad one is a bad trade for
     # somebody who only wants to look. This is the other side: it gates a WRITE
-    # into a curated, unbacked-up store, and acting on a partially-read index is
+    # into a curated, not-re-derivable store, and acting on a partially-read index is
     # the one case where aborting is cheaper than degrading. The exit code is
     # unchanged (3).
     #

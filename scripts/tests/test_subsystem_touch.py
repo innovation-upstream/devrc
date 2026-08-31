@@ -7657,8 +7657,8 @@ class TestJournalNegativeControls:
 class TestJournalIsReadOnly:
     def test_reading_the_journals_writes_NOTHING(self, tmp_path) -> None:
         """🔴 The property that lets this be pointed at a curated,
-        client-confidential, unbacked-up store. Hashed either side, over every
-        journal state at once."""
+        client-confidential store whose backups both LAG it. Hashed either side,
+        over every journal state at once."""
         store = _journal_store(tmp_path)
         before = _tree_hash(store)
         _journal_render(store, "batcher", "quiet-thing", "headless-thing", "prosy-thing")
@@ -10309,8 +10309,8 @@ class TestScanEntryShape:
         assert sorted(s.kind for s in rows) == [st.SHAPE_ABSENT, st.SHAPE_RENAMED]
 
     def test_scan_entry_shape_WRITES_NOTHING(self, tmp_path) -> None:
-        """The store is curated, client-confidential and unbacked. Hashed, not
-        grepped — a grep for `open(..., "w")` passes while a different spelling
+        """The store is curated, client-confidential and not re-derivable.
+        Hashed, not grepped — a grep for `open(..., "w")` passes while a different spelling
         writes."""
         store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
         before = _tree_hash(store)

@@ -2,51 +2,79 @@
 
 WHY THIS EXISTS
 ---------------
-`~/.claude/analyze-service-index/` genuinely had no backup until 2026-08-21, and
-fifteen places across docs, module docstrings and test docstrings said so. The
-backup landed; **not one of those sentences was updated**, so for nine days the
-repo asserted, in a 🔴 block, that the store was irreplaceable with no
-off-machine copy.
+`~/.claude/analyze-service-index/` genuinely had no backup until 2026-08-21.
+The backup landed; the sentences saying it had none were not updated, so for
+nine days the repo asserted, in 🔴 blocks, that the store was irreplaceable with
+no off-machine copy.
 
-🔴 THAT IS NOT A COSMETIC STALENESS. It is a "this is impossible" claim sitting
-in a RECOVERY path. The failure it produces is silent and total: an agent facing
-a destroyed store reads "irreplaceable, no off-machine backup", concludes
-recovery is not available, and never looks for `restore-verify.py` or the age-
-encrypted bundles in MinIO that would have restored it. A stale comment that
-makes a *capability* invisible costs more than one that makes a hazard invisible,
-because nobody goes looking for a second opinion about an impossibility.
+🔴 THAT IS NOT COSMETIC STALENESS. It is a "this is impossible" claim in a
+RECOVERY path. The failure is silent and total: an agent facing a destroyed
+store reads "irreplaceable, no off-machine backup", concludes recovery is
+unavailable, and never looks for `restore-verify.py` or the age-encrypted
+bundles that would have restored it. A stale comment that hides a CAPABILITY
+costs more than one that hides a hazard, because nobody seeks a second opinion
+about an impossibility.
 
-WHAT THIS PINS, AND WHY IT IS A RELATIONSHIP RATHER THAN A SPELLING
-------------------------------------------------------------------
-A test that banned the phrase "no off-machine backup" would be the "spelled
-rather than structural" guard `claude/RULES.md` warns about — walkable by any
-reword, and it would fire on the ⚠ retraction sentences that legitimately QUOTE
-the old wording. So this pins the two facts against each other:
+WHAT THIS PINS
+--------------
+Two facts against each other:
 
-    A. does `nix/home.nix` actually wire a backup?   (unit + timer + ExecStart
-       naming a `backup.py` that exists on disk)
-    B. does the canonical Store-safety section CLAIM one, concretely enough to
-       act on? (names the unit, the object store, the bucket, and the tool that
-       reads a bundle BACK)
+    A. does `nix/home.nix` actually wire a backup? — a LIVE declaration of the
+       service and the timer (comments stripped), the timer enabled via
+       `WantedBy = [ "timers.target" ]`, an ExecStart naming a `backup.py` that
+       exists on disk, and neither unit gated behind `lib.mkIf`.
+    B. does the canonical Store-safety section state the matching claim?
 
-and asserts `A == B`. Delete the unit and the doc claim goes red — pointing at
-the sentence to restore. Rename the unit or the bucket and it goes red, because
-the doc names them. Write a doc claim with no wiring behind it and it goes red.
+and asserts `A == B`, with a canonical paragraph for EACH state.
+
+🔴 WHY THE CLAIM IS PINNED AS A WHOLE NORMALISED STRING, NOT AS TOKENS. The
+first version of this guard required four substrings to be present. An audit
+walked it in one pass: a section reading "IRREPLACEABLE — there is NO
+off-machine backup and no way to recover it. The `analyze-service-index-backup`
+unit was REMOVED, the bucket `analyze-service-index-backups` was deleted, and
+`restore-verify.py` no longer works" contains every required token and PASSED —
+the guard certified agreement while the doc said the exact opposite of the
+truth. Token presence cannot see POLARITY. `claude/RULES.md` gives the rule for
+this case directly: when the artifact under test IS prose, a guard on WORDS is
+walkable by REWORDING, so pin the WHOLE normalised string and pay the cosmetic
+reword cost for a machine-readable claim.
+
+🔴 AND WHY THERE IS AN `ABSENT` PARAGRAPH TOO. The same audit found the reverse
+state unsatisfiable: with the wiring removed, the old guard failed and told the
+maintainer to "rewrite that section to say the store has NO off-machine backup"
+— which was exactly what they had just done, because any such rewrite that
+NAMED the retired unit and bucket still tripped the token check. A gate whose
+instruction cannot be followed is a permanently-red gate, and `claude/RULES.md`
+says a permanently-red gate is worse than no gate. So decommissioning has a
+canonical paragraph the failure message prints in full, ready to paste.
 
 🔴 WHAT THIS DOES **NOT** DO, STATED SO NOBODY READS COVERAGE INTO IT. It never
 opens the live store, reaches MinIO, or runs systemd — devrc is PUBLIC and the
-store is client-confidential. So it cannot tell you the backup *ran*, that a
-bundle is *restorable*, or that the unit is enabled on any host. It pins that
-the REPO's claim and the REPO's wiring agree. Whether the timer fires is
+store is client-confidential. So it cannot tell you the backup RAN, that a
+bundle is RESTORABLE, or that the timer is enabled on any particular host. It
+pins that the REPO's claim and the REPO's wiring agree. Per-host liveness is
 `systemctl --user list-timers 'analyze-service-index*'`, by hand, on each host.
+
+⚠ NOR IS IT A COMPLETENESS CHECK ON THE PROSE. It reads ONE section of ONE
+file. Other files carry their own statements about this store, and this guard
+is structurally blind to every one of them — it cannot tell you the corpus
+agrees, only that the canonical section does.
 """
 
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO / "scripts"))
+
+from testlib.nix_units import (  # noqa: E402
+    declares,
+    is_conditional,
+    unit_source,
+)
 
 HOME_NIX = REPO / "nix" / "home.nix"
 BACKUP_PY = REPO / "scripts" / "analyze-service-index" / "backup.py"
@@ -54,20 +82,30 @@ STORE_SAFETY_DOC = (
     REPO / "claude" / "skills" / "analyze-service" / "reference" / "index-store.md"
 )
 
-# The four things the doc must NAME for a reader to act on the claim. A vague
-# "it is backed up" is not enough: the point of the sentence is to send someone
-# who has just lost the store to the thing that reads a bundle back.
-REQUIRED_IN_CLAIM = (
-    "analyze-service-index-backup",          # the unit to check / trigger
-    "minio",                                 # where the bundles live
-    "analyze-service-index-backups",         # the bucket
-    "restore-verify.py",                     # the tool that reads one BACK
+BACKUP_SERVICE = "systemd.user.services.analyze-service-index-backup"
+BACKUP_TIMER = "systemd.user.timers.analyze-service-index-backup"
+
+# 🔴 THE CANONICAL CLAIM FOR EACH STATE, pinned whole. Normalisation collapses
+# whitespace and drops markdown emphasis, so a rewrap or a bold change is free;
+# changing a WORD is not, and that is the point.
+CLAIM_PRESENT = (
+    "daily, off-machine — analyze-service-index-backup.service bundles every scope, "
+    "age-encrypted, to the homelab MinIO minio-archive tenant, bucket "
+    "analyze-service-index-backups, key <host>-<machine-id>/<scope>/<ts>.bundle.age. "
+    "Read them back with scripts/analyze-service-index/restore-verify.py; "
+    "escrow-verify.py checks the key material."
+)
+
+CLAIM_ABSENT = (
+    "There is NO off-machine backup. The analyze-service-index-backup unit has been "
+    "retired, so nothing leaves this machine and a destroyed scope is recoverable only "
+    "from its own hourly commits — and not at all if the disk is gone."
 )
 
 
 def _normalise(text: str) -> str:
-    """Collapse whitespace and markdown noise so a rewrap cannot walk this."""
-    return re.sub(r"[\s`*_]+", " ", text).lower()
+    """Collapse whitespace and markdown emphasis; keep the words."""
+    return re.sub(r"\s+", " ", re.sub(r"[`*_]", "", text)).strip().lower()
 
 
 def _store_safety_section() -> str:
@@ -78,99 +116,198 @@ def _store_safety_section() -> str:
     lands when they are told to read Store safety.
     """
     body = STORE_SAFETY_DOC.read_text(encoding="utf-8")
-    start = body.find("**Store safety.**")
-    assert start != -1, (
-        f"{STORE_SAFETY_DOC} no longer contains a '**Store safety.**' heading. "
-        "That section is the canonical statement every other site points at; "
-        "if it was renamed, update this test to the new anchor."
+    anchor = "**Store safety.**"
+    count = body.count(anchor)
+    assert count == 1, (
+        f"{STORE_SAFETY_DOC} contains {count} '{anchor}' anchors; this reader "
+        "assumes exactly one. If the section was renamed or duplicated, fix the "
+        "doc or update this anchor — do not let it slice an arbitrary one."
     )
+    start = body.find(anchor)
     end = body.find("\n## ", start)
     return body[start:] if end == -1 else body[start:end]
 
 
-def _nix_wires_a_backup() -> bool:
-    nix = HOME_NIX.read_text(encoding="utf-8")
-    return (
-        "systemd.user.services.analyze-service-index-backup" in nix
-        and "systemd.user.timers.analyze-service-index-backup" in nix
-        and "analyze-service-index/backup.py" in nix
-        and BACKUP_PY.is_file()
-    )
+def _nix_wires_a_backup(src: str | None = None, *, script_exists: bool = True) -> bool:
+    """A LIVE, ENABLED, UNCONDITIONAL backup — not a mention of one.
+
+    Every clause here is a way the backup can stop running while a naive
+    substring search still matches:
+      * comments that quote the attribute path of a unit being retired,
+      * a timer declared but never `WantedBy` anything, so it is never enabled,
+      * an ExecStart naming a script that has been deleted,
+      * a `lib.mkIf` gate, which makes an unconditional doc promise false on
+        every host the condition excludes.
+
+    `src`/`script_exists` are injectable so the mutation test below can drive
+    each clause. Production callers pass neither.
+    """
+    if src is None:
+        src = HOME_NIX.read_text(encoding="utf-8")
+        script_exists = BACKUP_PY.is_file()
+    if not (declares(BACKUP_SERVICE, src) and declares(BACKUP_TIMER, src)):
+        return False
+    if is_conditional(BACKUP_SERVICE, src) or is_conditional(BACKUP_TIMER, src):
+        return False
+    if "timers.target" not in unit_source(BACKUP_TIMER, src):
+        return False
+    if "analyze-service-index/backup.py" not in unit_source(BACKUP_SERVICE, src):
+        return False
+    return script_exists
 
 
-def _doc_claims_a_backup(section: str) -> bool:
-    norm = _normalise(section)
-    return all(token.lower() in norm for token in REQUIRED_IN_CLAIM)
+def _section_states(claim: str, section: str) -> bool:
+    return _normalise(claim) in _normalise(section)
 
 
 def test_the_backup_claim_matches_the_nix_wiring() -> None:
+    section = _store_safety_section()
     wired = _nix_wires_a_backup()
-    claimed = _doc_claims_a_backup(_store_safety_section())
 
-    if wired and not claimed:
+    if wired and not _section_states(CLAIM_PRESENT, section):
         raise AssertionError(
-            "nix/home.nix wires analyze-service-index-backup (unit + timer + "
-            f"{BACKUP_PY.relative_to(REPO)}), but the 'Store safety' section of "
-            f"{STORE_SAFETY_DOC.relative_to(REPO)} does not say so in actionable "
-            f"terms. It must name all of: {', '.join(REQUIRED_IN_CLAIM)}.\n"
-            "This is the exact drift the file docstring describes: an agent that "
-            "has just lost the store reads that section and needs to be told a "
-            "restore path EXISTS and what reads a bundle back."
+            "nix/home.nix wires a live, enabled, unconditional backup (service + "
+            f"timer + {BACKUP_PY.relative_to(REPO)}), but the 'Store safety' section "
+            f"of {STORE_SAFETY_DOC.relative_to(REPO)} does not carry the canonical "
+            "claim. An agent that has just lost the store reads that section and "
+            "must be told a restore path EXISTS and what reads a bundle back.\n\n"
+            "Expected this text (whitespace and emphasis are free, WORDS are not):\n\n"
+            f"{CLAIM_PRESENT}\n"
         )
-    if claimed and not wired:
+    if not wired and not _section_states(CLAIM_ABSENT, section):
         raise AssertionError(
-            f"{STORE_SAFETY_DOC.relative_to(REPO)} claims the store is backed up "
-            "off-machine, but nix/home.nix no longer wires it (or backup.py is "
-            "gone). Either restore the wiring, or rewrite that section to say the "
-            "store has NO off-machine backup — a promised backup that does not "
-            "run is worse than an admitted absence."
+            "nix/home.nix no longer wires a live, enabled, unconditional backup, but "
+            f"{STORE_SAFETY_DOC.relative_to(REPO)} still claims one. A promised "
+            "backup that does not run is worse than an admitted absence.\n\n"
+            "Either restore the wiring, or replace the claim with this paragraph:\n\n"
+            f"{CLAIM_ABSENT}\n"
         )
 
 
-def test_the_claim_detector_can_fail_and_can_fire() -> None:
-    """Negative + positive control on `_doc_claims_a_backup` itself.
+def test_the_two_canonical_claims_are_mutually_exclusive() -> None:
+    """Neither paragraph may satisfy the other's check.
 
-    A checker that answers True unconditionally would make the test above green
-    forever, which is how a claim-vs-reality gate becomes decoration. So: feed it
-    prose that must NOT satisfy the claim, and prose that must.
+    Without this, a future edit that made the two texts overlap would let one
+    section satisfy BOTH states, and the `A == B` assertion above would stop
+    discriminating while still passing.
     """
-    # NEGATIVE CONTROL — the pre-2026-08-21 wording, which must not pass.
+    assert not _section_states(CLAIM_PRESENT, CLAIM_ABSENT)
+    assert not _section_states(CLAIM_ABSENT, CLAIM_PRESENT)
+
+
+def test_the_claim_detector_sees_polarity_not_just_tokens() -> None:
+    """🔴 The regression that killed the first version of this guard.
+
+    A token-presence detector passed this text. It names the unit, the bucket
+    and the restore tool — every token the old `REQUIRED_IN_CLAIM` demanded —
+    while telling the reader the exact opposite of the truth.
+    """
+    reversed_claim = (
+        "**Store safety.** IRREPLACEABLE — there is **NO** off-machine backup and no "
+        "way to recover it. The `analyze-service-index-backup` unit was **REMOVED**, "
+        "the MinIO bucket `analyze-service-index-backups` was **deleted**, and "
+        "`restore-verify.py` no longer works. A destructive write here is PERMANENT."
+    )
+    assert not _section_states(CLAIM_PRESENT, reversed_claim), (
+        "the detector accepted a meaning-REVERSED section that happens to contain "
+        "the right nouns — it is pinning vocabulary, not the claim"
+    )
+
+    # The stale pre-2026-08-21 wording must not pass either.
     stale = (
-        "**Store safety.** The content is **curated, irreplaceable, not "
-        "re-derivable by re-running recon**, with no off-machine backup."
+        "**Store safety.** The content is **curated, irreplaceable, not re-derivable "
+        "by re-running recon**, with no off-machine backup."
     )
-    assert not _doc_claims_a_backup(stale), (
-        "the detector accepted the stale 'no off-machine backup' paragraph as a "
-        "backup claim — it is testing nothing"
+    assert not _section_states(CLAIM_PRESENT, stale)
+
+    # A vague claim naming no restore path must not pass.
+    assert not _section_states(
+        CLAIM_PRESENT, "**Store safety.** The store is backed up off-machine every day."
     )
 
-    # A vague claim must not pass either: naming the fact without naming the
-    # restore path is what leaves a reader unable to act on it.
-    vague = "**Store safety.** The store is backed up off-machine every day."
-    assert not _doc_claims_a_backup(vague), (
-        "the detector accepted a claim that names no unit, bucket or restore "
-        "tool — a reader who lost the store still cannot act on it"
+    # POSITIVE CONTROL — the canonical claim, rewrapped and re-emphasised, must
+    # still be seen. Without this the detector could be answering False always.
+    rewrapped = (
+        "- __daily, off-machine__ —\n  `analyze-service-index-backup.service`\n  bundles "
+        "every    scope, **age-encrypted**, to the homelab MinIO `minio-archive`\n"
+        "  tenant, bucket `analyze-service-index-backups`, key\n"
+        "  `<host>-<machine-id>/<scope>/<ts>.bundle.age`. Read them back with\n"
+        "  `scripts/analyze-service-index/restore-verify.py`; `escrow-verify.py`\n"
+        "  checks the key material."
+    )
+    assert _section_states(CLAIM_PRESENT, rewrapped), (
+        "the detector could not see the canonical claim after a rewrap — it would "
+        "report the live doc as missing one no matter what it said"
     )
 
-    # POSITIVE CONTROL — a minimal claim carrying all four tokens, rewrapped and
-    # re-cased, so the detector is shown to survive reformatting.
-    good = (
-        "**Store safety.**\nDaily bundles from\n`ANALYZE-SERVICE-INDEX-BACKUP"
-        ".service`\ngo age-encrypted to the homelab MinIO tenant, bucket\n"
-        "`analyze-service-index-backups`; read one back with\n`RESTORE-VERIFY.PY`."
+
+def test_the_wiring_check_is_not_fooled_by_comments_or_a_disabled_timer() -> None:
+    """🔴 The other regression that killed the first version.
+
+    An audit renamed both attribute paths and left only `#` comment lines naming
+    the originals. Live declarations: 0 and 0. The substring-based check stayed
+    GREEN while the docs promised daily bundles.
+
+    Each mutant below breaks the backup in a way a naive `substring in src`
+    cannot see, and each is asserted to flip `_nix_wires_a_backup` to False —
+    the whole predicate, not one clause of it, so a mutant that an earlier
+    clause happens to reject cannot be mistaken for this clause working.
+    """
+    live = HOME_NIX.read_text(encoding="utf-8")
+
+    # POSITIVE CONTROL. Without this every assertion below is satisfied by a
+    # predicate that returns False unconditionally.
+    assert _nix_wires_a_backup(live), (
+        "the live home.nix must read as wired, or every mutant below passes "
+        "for the wrong reason"
     )
-    assert _doc_claims_a_backup(good), (
-        "the detector could not see a well-formed claim — it would report the "
-        "live doc as missing one no matter what it said"
+
+    # 1. Declared only inside a comment — the measured walk.
+    commented = live.replace(
+        f"  {BACKUP_SERVICE} =", f"  # DISABLED 2026-09-01: {BACKUP_SERVICE} =", 1
+    )
+    assert not _nix_wires_a_backup(commented), (
+        "a commented-out declaration still reads as wired — the reader is "
+        "answering about the prose, not the configuration"
+    )
+
+    # 2. Timer declared but never enabled: it exists and never fires.
+    #    🔴 Built by index arithmetic on the RAW source, not by replacing the
+    #    comment-stripped block: the first attempt did the latter, the
+    #    `str.replace` matched nothing, and the "mutant" was byte-identical to
+    #    `live` — a mutant that never applied, scored as SURVIVED. The
+    #    `mutated != live` assertion below is what makes that impossible.
+    wanted_by = 'WantedBy = [ "timers.target" ];'
+    assert wanted_by in unit_source(BACKUP_TIMER, live)
+    at = live.index(f"  {BACKUP_TIMER} =")
+    cut = live.index(wanted_by, at)
+    unenabled = live[:cut] + live[cut + len(wanted_by):]
+    assert unenabled != live, "the mutant did not apply — it proves nothing"
+    assert not _nix_wires_a_backup(unenabled), (
+        "a timer with no `WantedBy` reads as wired — it is declared, never "
+        "enabled, and never fires"
+    )
+
+    # 3. Gated behind `lib.mkIf`: false on every host the condition excludes,
+    #    while the doc promises it unconditionally.
+    gated = live.replace(
+        f"  {BACKUP_TIMER} = {{", f"  {BACKUP_TIMER} = lib.mkIf serverMode {{", 1
+    )
+    assert is_conditional(BACKUP_TIMER, gated)
+    assert not is_conditional(BACKUP_TIMER, live)
+    assert not _nix_wires_a_backup(gated), (
+        "a `lib.mkIf` gate went unnoticed — an unconditional doc promise about "
+        "a conditional unit is false on every excluded host"
+    )
+
+    # 4. ExecStart names a script that is not on disk.
+    assert not _nix_wires_a_backup(live, script_exists=False), (
+        "a missing backup.py reads as wired — the unit would fail on every run"
     )
 
 
 def test_the_section_slice_is_bounded_by_the_next_heading() -> None:
-    """The claim must live IN Store safety, not merely somewhere in the file.
-
-    Without this, a passing mention in the schema section below would satisfy
-    the gate while the section a reader is sent to still said "no backup".
-    """
+    """The claim must live IN Store safety, not merely somewhere in the file."""
     section = _store_safety_section()
     assert section.startswith("**Store safety.**"), section[:80]
     assert "\n## " not in section, (

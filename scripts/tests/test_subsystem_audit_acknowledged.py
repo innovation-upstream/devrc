@@ -42,7 +42,8 @@ real list that can be made without opening the store.
 
 🔴 OFFLINE, HERMETIC AND SYNTHETIC, like its two siblings. Nothing under
 `~/.claude/analyze-service-index/` is opened and no line of it is reproduced.
-That store is curated, CLIENT-CONFIDENTIAL and unbacked-up, and devrc is PUBLIC.
+That store is curated, CLIENT-CONFIDENTIAL and not re-derivable, and devrc is
+PUBLIC.
 Entry NAMES appear in `ACKNOWLEDGED_OVER_CAP` itself — they are already in the
 audit's own printed output — but no entry CONTENT may enter this repo, so every
 fixture below is padding generated here. `$WORKSPACE` is repointed at an empty

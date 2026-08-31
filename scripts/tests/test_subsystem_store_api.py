@@ -2446,7 +2446,7 @@ class TestAuditLog:
 
 
 # =============================================================================
-# 10. The seed — 🔴 the local store is the ONLY copy.
+# 10. The seed — 🔴 the local store is AUTHORITATIVE; every other copy lags it.
 # =============================================================================
 
 
