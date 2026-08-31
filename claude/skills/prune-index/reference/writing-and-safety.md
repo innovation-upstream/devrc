@@ -34,7 +34,8 @@ runs against them. Consequences:
   about *some* commit, not about the bytes you want. 🔴 **`git reset --hard
   <ref>` is worse: it ORPHANS committed content**, and `backup.py` bundles with
   `git bundle create --all` (reachable refs only), so the orphans reach no
-  future bundle either.
+  FUTURE bundle. They are still inside the bundles already in the bucket —
+  read them back with `restore-verify.py` before calling anything lost.
 - 🔴 **Never add a remote and never push.** ⚠ This bullet used to justify itself
   with "Nothing in this store leaves the machine", which has been false since
   2026-08-21: `analyze-service-index-backup.service` sends age-encrypted bundles

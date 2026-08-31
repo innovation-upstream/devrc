@@ -91,9 +91,32 @@ def directive(name: str, block: str) -> str | None:
     [ "timers.target" ]`: declared, never enabled, never fires, guard green.
 
     So callers ask for the directive by NAME and read its value.
+
+    🔴 SINGLE-LINE VALUES ONLY, AND A MULTI-LINE ONE RAISES RATHER THAN
+    TRUNCATING. Every directive this reads in `nix/home.nix` today is on one
+    line, but a value wrapped in `pkgs.writeShellScript '' … ''` or a
+    `Environment = { … }` block is one ordinary refactor away. A non-greedy
+    `.*?;$` under `re.S` would stop at the FIRST line-terminal `;` anywhere
+    inside such a value and hand back a plausible truncated string — not None.
+    That is the worst of the three outcomes: `_nix_wires_a_backup` would answer
+    False, and the guard would instruct a maintainer to paste "the unit has been
+    RETIRED" into a shipped skill reference while the unit is live. A loud
+    NotImplementedError is a smaller bill than a published falsehood.
     """
-    m = re.search(rf"^\s*{re.escape(name)}\s*=\s*(.*?);\s*$", block, re.M | re.S)
-    return m.group(1).strip() if m else None
+    for ln in block.splitlines():
+        m = re.match(rf"\s*{re.escape(name)}\s*=\s*(.*)$", ln)
+        if not m:
+            continue
+        value = m.group(1).strip()
+        if value.endswith(";"):
+            return value[:-1].strip()
+        raise NotImplementedError(
+            f"`{name}` has a multi-line value in this block, which this reader "
+            "cannot parse. It refuses rather than returning the truncated first "
+            "line, because a caller would read that as a WRONG value and act on "
+            f"it. Extend `directive()` to handle it. Line: {ln.strip()!r}"
+        )
+    return None
 
 
 def declares(attr_path: str, src: str) -> bool:
