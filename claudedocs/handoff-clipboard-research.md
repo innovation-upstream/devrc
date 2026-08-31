@@ -18,38 +18,32 @@ Research modern best practices for clipboard and terminal clipboard interaction 
 
 ## State now
 
-- **Rank 2 is MERGED and CLOSED OUT.** `#1128` → **`c06a56a1`**, verified by
-  CONTENT on `origin/main` (a squash makes ancestry read FALSE — it does here
-  too, and that is expected, not a problem): guard file present, one full `PUT`
-  restore, one read-back step, `<!-- merge-gate: other -->` marker still exactly
-  1, and exactly 1 `## State now` in this doc.
-- **What it changed.** The break-glass note handed over
-  `gh api -X DELETE …/branches/main/protection/required_status_checks` and said
-  nothing about closing the window. It now carries **capture → open → full `PUT`
-  → read back**. The capture command was run live against the real endpoint and
-  emits all **11** keys the `PUT` requires.
-- **Rank 1 (rc 24) remains DONE** — #1065 → `ebbe5eaa`, verified live under the
-  real systemd unit. Unchanged by this session.
-- **Guard verification:** red at `53f523ed` with the real finding (`carries no
-  -X PUT`), green at HEAD; mutation sweep **7/7 killed**, control green, under
-  `PYTHONDONTWRITEBYTECODE=1`. Gated on the **MERGED tree** (`83a24dcf` =
-  `origin/main` + the PR), not just the branch: `19486 collected, 0 failed` vs
-  `19459` on the branch alone — the count moving is what proves the merged tree
-  was actually the thing gated.
-- **Claim `clipboard-research-2` RELEASED.** All three worktrees this session
-  created (`devrc-breakglass`, `devrc-baseglass`,
-  `devrc-integ-breakglass-2d8f77d9`) removed; `integ/breakglass-merged-2d8f77d9`
-  deleted. Base clone fast-forwarded to the merge.
-- 🔴 **NOT SHIPPED, deliberately, and this is the one thing to re-check before
-  anyone runs `ship.sh`.** Another session has `scripts/memory-detail` **staged**
-  (`A `) in the shared workbench checkout with `nix/graphical.nix` modified to
-  reference it from a bar click handler. A `home-manager switch` today would
-  build and deploy **that session's half-finished feature** to both hosts.
-  Nothing in rank 2 needs a deploy — the project `CLAUDE.md` is read straight
-  from the working tree and is already live on the workbench via the
-  fast-forward; a test file deploys nothing. But #1056/#1084/#1101 merged in the
-  same window DO touch deployable paths, so a ship IS wanted — once that WIP
-  lands or is unstaged. **Re-measure before shipping; do not trust this line.**
+- **Rank 8 is BUILT, committed and pushed — NOT merged.** Branch
+  `fix/kickoff-path-resolves`, commit **`28e54067`**, based on `origin/main`.
+  No PR yet; the gate was still running when this was written. Files:
+  `scripts/resume-state.sh`, `scripts/tests/test_resume_state_handoff_resolution.py`.
+- 🔴 **The fix landed in the CONSUMER, not in the template I filed it against.**
+  Two things ruled the template out: `claude/skills/handoff/SKILL.md` has **34
+  bytes** of headroom under its enforced ceiling (so any addition needs an
+  eviction in the same commit), and **#1144 and #1146 are both open against that
+  exact file**. Re-reading the mechanism showed the token was a valid path all
+  along — just anchored one level above where a kickoff is pasted — so
+  `embedded_md_path` now re-anchors a RELATIVE miss on the repo root. That
+  repairs **all 91 existing docs' kickoffs**, not only future ones, and touches
+  neither the ceiling nor the contended file.
+- **Symptom reproduced and gone**, real repo, real input, from the repo root:
+  ```
+  base    -> handoff: handoff-mention-detection.md   + NO SUCH FILE gap
+  patched -> handoff: handoff-clipboard-research.md  + no gap
+  ```
+- **Rank 2 (#1128 → `c06a56a1`) and its close-out (#1151 → `16cfa342`) are
+  MERGED** and verified by content. Ranks 1/3/4/5 untouched.
+- **Claim `clipboard-research-8` is HELD** until the PR lands.
+- ⚠ **The ship blocker recorded in the last update has EXPIRED — re-measure,
+  do not trust either line.** `scripts/memory-detail` is no longer staged and
+  `nix/graphical.nix` is clean; that session landed its work. `nix/pkgs/
+  default.nix` is STILL dirty (adds `inxi`, `cpu-x`), so a `home-manager switch`
+  would still build another session's unreviewed change.
 
 ## Research findings — clipboard/terminal clipboard best practices (2025-2026)
 
@@ -152,99 +146,60 @@ of by a human happening to look.
 
 ## Next steps (ranked)
 
-🔴 **Numbering stays STABLE** — rank is half a `claim-work` slug's identity.
-Rank 2 has moved into the closed block below; its number is retired, NOT reused.
+🔴 **Numbering stays STABLE.** Rank 8 has moved to the closed block; its number
+is retired, NOT reused.
 
 **Closed by this effort — kept so a resume does not re-open them:**
 - ~~adopt `set clipboard=unnamedplus`~~ — **DECLINED 2026-08-29**: it routes every
   `d`/`c`/`x`/`s` through the `+` register, so `dd` clobbers the system clipboard.
 - ~~install a clipboard manager for history~~ — **investigated 2026-08-29, nothing
-  installed.** The evidence and the **RETRACTED** greenclip security argument are
-  under Gotchas; the retraction stands — anyone who can read
-  `~/.cache/greenclip.history` can already read `~/.ssh/id_*`.
+  installed.** Evidence and the **RETRACTED** greenclip security argument are
+  under Gotchas; the retraction stands.
 - ~~migrate to Wayland~~ — not applicable: measured `XDG_SESSION_TYPE=x11`.
-- ~~**Add an unprotected-`main` arm to `scripts/drift-check.sh`**~~ — **SHIPPED
-  2026-08-30** as rc 24, #1065 → `ebbe5eaa`, verified live under the real unit.
-- ~~**Rank 2 — correct `CLAUDE.md`'s break-glass note**~~ — **MERGED 2026-08-30**,
-  #1128 → `c06a56a1`, verified by content. Guard:
-  `scripts/tests/test_break_glass_note.py`.
+- ~~**unprotected-`main` arm for `drift-check.sh`**~~ — **SHIPPED** as rc 24,
+  #1065 → `ebbe5eaa`, verified live under the real unit.
+- ~~**Rank 2 — correct `CLAUDE.md`'s break-glass note**~~ — **MERGED**, #1128 →
+  `c06a56a1`. Guard: `scripts/tests/test_break_glass_note.py`.
+- ~~**Rank 8 — the kickoff path that does not resolve**~~ — **BUILT 2026-08-31,
+  IN FLIGHT: `fix/kickoff-path-resolves` @ `28e54067`, no PR yet.** Close it
+  out: confirm the gate + both sandbox tiers, open the PR, merge, then
+  `claim-work --release clipboard-research-8` and remove the two worktrees
+  (`devrc-kickoff-beb749f5`, `devrc-kickoff-base-beb749f5`).
 
-1. **Give the rc-24 arm an UNMEASURED ladder** (devrc). It has THREE
-   could-not-measure states, and a lapsed/expired `gh` token leaves it blind
-   **forever** while the deadman reads clean — verbatim the rc-18 lesson this
-   repo already records ("a scope that can never be evaluated escalated NEVER").
-   The `enforce_admins` half additionally needs repo-**admin**, the credential
-   most likely to lapse. Files: `scripts/drift-check.sh` (reuse the
-   `u_streak_bump`/`_streak_file_bump` machinery), `scripts/tests/test_drift_check.py`.
+1. **Give the rc-24 arm an UNMEASURED ladder** (devrc). THREE could-not-measure
+   states, and a lapsed/expired `gh` token leaves it blind **forever** while the
+   deadman reads clean — verbatim the rc-18 lesson this repo already records.
+   The `enforce_admins` half needs repo-**admin**, the credential most likely to
+   lapse. Files: `scripts/drift-check.sh` (reuse `u_streak_bump`/
+   `_streak_file_bump`), `scripts/tests/test_drift_check.py`.
    forcing: none
 3. **Run `/audit-pr 1043`** (devrc) — the one review the clipboard effort never
-   got, and it touches `nix/programs/`, which every `home-manager switch`
-   depends on. Merged, shipped and verified on the real path, so this is
-   confirmation rather than a gate. Files: `nix/programs/`, `.config/nvim/`.
+   got; it touches `nix/programs/`, which every `home-manager switch` depends on.
+   Files: `nix/programs/`, `.config/nvim/`.
    forcing: none
 4. **Consider recording the transferable lesson in `claude/RULES.md`**: *a fixture
    that supplies an environment cannot observe that environment being absent.*
-   Gated — `RULES.md` has an enforced ceiling (`scripts/tests/test_rules_size.py`)
-   needing an eviction in the SAME commit, so this is an operator call.
+   Gated — `RULES.md` has an enforced ceiling needing an eviction in the SAME
+   commit, so this is an operator call.
    forcing: none
-5. **The gh read-only guard rejects `--paginate`/`-H`** (devrc). It fails
-   **CLOSED**, so the cost is a test edit, not safety — but `--paginate` is a
-   plausible near-term need on `/rules/branches/main`. Files:
+5. **The gh read-only guard rejects `--paginate`/`-H`** (devrc). Fails **CLOSED**,
+   so the cost is a test edit, not safety. Files:
    `scripts/tests/test_drift_check.py`.
    forcing: none
 6. **OFFERED, NOT BUILT — `scripts/break-glass-merge.sh`** (devrc). The
-   deterministic version of the recipe rank 2 wrote into prose: capture, open,
-   merge, full `PUT`, read back, and **refuse to exit 0 unless the read-back
-   diff matches the capture key-by-key**. Deliberately not built: shipping an
-   *untested* command into a break-glass path is precisely the failure rank 2
-   corrects, and it cannot be tested end-to-end without opening the window on
-   `main`. **Needs an operator decision on what would make it trustworthy**
-   before it is worth writing. Files: `scripts/break-glass-merge.sh` (new).
+   deterministic version of rank 2's prose recipe: capture, open, merge, full
+   `PUT`, read back, and **refuse to exit 0 unless the read-back diff matches
+   key-by-key**. Not built deliberately: shipping an *untested* command into a
+   break-glass path is the failure rank 2 corrects, and it cannot be tested
+   end-to-end without opening the window on `main`. **Needs an operator decision
+   on what would make it trustworthy.** Files: `scripts/break-glass-merge.sh`.
    forcing: none
 7. **Tekton CAPACITY — `devrc-pytests` fails a localhost round-trip under load**
-   (homelab, NOT devrc). `TestTheActorComesFromTheTOKEN::test_a_FORGED_actor_in_
-   the_body_is_DISCARDED[record0-…]` failed the REQUIRED `tekton/devrc-pytests`
-   **twice**: on #1128 and again on #1151 — the second a **docs-only** PR
-   touching one file, which cannot have caused it. Identical mechanism both
-   times: `TimeoutError` out of `socket.py:720` on the client's `recv_into`, so
-   the test never reached the property it asserts.
-   🔴 **AN EARLIER DRAFT OF THIS ITEM NAMED THE WRONG OWNER, and the correction
-   is the point.** It said "remove the timing dependency in the test". But
-   `HANG_TIMEOUT` is **already 60 s**, raised from 15 s on 2026-08-29 for this
-   exact failure, and that constant's own comment says: *"This is the SYMPTOM
-   fix. The cause is a 10-minute parallel suite competing with a saturated
-   cluster, which belongs to Tekton capacity, not to this file."* A localhost
-   round-trip that blows a 60 s budget is not a badly-written test — the node
-   lost the scheduler. Raising it a third time is more symptom.
-   **Measured:** the same constant's comment records ~60% of runs failing
-   REPO-WIDE (6 of 10, unrelated branches) with 12 concurrent pipelineruns; at
-   the 2026-08-31 03:30Z failure the cluster held 6 in-flight runs, 23 pods in
-   `Error`, and a node at 73% CPU. Locally the class passes 3/3 in ~6 s and the
-   same derivation passes whole.
-   ⚠ So **re-triggering is the correct available remedy here**, not laziness —
-   the durable fix is cluster capacity and belongs to the `tekton` skill's
-   domain. What is NOT acceptable is reading a red `devrc-pytests` as a verdict
-   on the diff: it has now twice been a verdict on the node.
-   Files: homelab Tekton capacity (concurrency caps / resource requests for
-   `devrc-ci`); `scripts/tests/test_subsystem_store_api.py` only if a
-   capacity fix proves impossible.
+   (homelab, NOT devrc). Unchanged this session and still open. See the Gotchas
+   entry for why the owner is capacity and not the test file.
    **CLOSING CONDITION:** `devrc-pytests` completes 5 consecutive runs with no
-   `socket.py` `TimeoutError`, measured from the PipelineRun logs, not inferred
-   from PRs happening to merge.
-   forcing: gate — it failed a REQUIRED check and cost a merge cycle on BOTH
-   #1128 and #1151.
-8. **`/handoff`'s kickoff template emits a path that does NOT resolve** (devrc).
-   The template is `<repo>/claudedocs/handoff-<topic>.md`, which yields
-   `devrc/claudedocs/…`; `resume-state.sh` matched no such file, **fell back to
-   the newest of 90 handoff docs** and reconciled a DIFFERENT initiative — PR
-   states, DRIFT lines and all — with only the `!! GAPS` banner as the tell.
-   Measured this session. This is a defect in the emitted template, not in one
-   session's typing, so it recurs for every kickoff. Files:
-   `claude/skills/handoff/SKILL.md` (step 3 template).
-   **CLOSING CONDITION:** a kickoff emitted by the skill, pasted verbatim,
-   produces a `resume-state.sh` run whose `handoff:` line names the intended doc
-   and whose DRIFT block carries no `requested handoff … NO SUCH FILE` gap.
-   forcing: incident — it silently reconciled the wrong initiative on this run.
+   `socket.py` `TimeoutError`, read from the PipelineRun logs.
+   forcing: gate — cost a merge cycle on both #1128 and #1151.
 
 ## Gotchas / decisions / dead-ends
 - OSC 52 supersedes tmux-yank for this setup — no reason to install the plugin
@@ -541,6 +496,82 @@ It now sits under `## Gotchas`, which appends.
   feature to both hosts. Rank 2 needs no deploy (repo-root prose + a test), but
   the laptop is now behind on #1056/#1084/#1101, which do not. **Re-measure the
   staged state before shipping.**
+
+### Rank 7 — why the red `devrc-pytests` is CAPACITY, not the test (evidence)
+
+Moved here from `Next steps` (a REPLACE heading) so the measurements outlive
+the status line that carried them. The ranked item is now a pointer to this.
+
+- 🔴 **AN EARLIER DRAFT OF ITEM 7 NAMED THE WRONG OWNER.** It said "remove the
+  timing dependency in the test". `HANG_TIMEOUT` is **already 60 s**, raised
+  from 15 s on 2026-08-29 for this exact failure, and that constant's own
+  comment says: *"This is the SYMPTOM fix. The cause is a 10-minute parallel
+  suite competing with a saturated cluster, which belongs to Tekton capacity,
+  not to this file."* A localhost round-trip that blows a 60 s budget is the
+  node losing the scheduler, not a test-design problem. Raising it a third time
+  is more symptom.
+- **What failed, twice:** `TestTheActorComesFromTheTOKEN::test_a_FORGED_actor_
+  in_the_body_is_DISCARDED[record0-…]`, on #1128 and again on #1151 — the second
+  a **docs-only** PR touching one file, which cannot have caused it. Identical
+  mechanism: `TimeoutError` out of `socket.py:720` on the client's `recv_into`,
+  so the test never reached the property it asserts.
+- **Measured:** that comment records ~60% of runs failing REPO-WIDE (6 of 10,
+  unrelated branches) at 12 concurrent pipelineruns. At the 2026-08-31 03:30Z
+  failure: 6 runs in flight, 23 pods in `Error`, a node at 73% CPU. Locally the
+  class passes 3/3 in ~6 s and the whole derivation passes.
+- ⚠ **So re-triggering IS the correct available remedy here, not laziness** —
+  the durable fix is cluster capacity. What is NOT acceptable is reading a red
+  `devrc-pytests` as a verdict on the diff: it has now twice been a verdict on
+  the node. Both #1128 and #1151 went green on a re-trigger with nothing about
+  the test changed, which is itself evidence for the capacity reading.
+
+### Rank 8 — the kickoff path fix (2026-08-31)
+
+- 🔴 **FIX THE CONSUMER, NOT THE EMITTER, WHEN THE EMITTED VALUE IS VALID.** The
+  kickoff's `<repo>/claudedocs/handoff-<topic>.md` is a real path — it just
+  resolves from the repo's PARENT, and a kickoff is pasted INSIDE the repo.
+  Patching the template would have fixed future kickoffs only, needed a
+  byte-ceiling eviction, and collided with two open PRs. Re-anchoring in
+  `embedded_md_path` fixed all 91 existing docs and touched neither.
+- 🔴 **The RESTRICTION is the load-bearing half, not the re-anchoring.**
+  Re-anchoring is applied to RELATIVE tokens only. An ABSOLUTE token that is
+  absent stays a miss: the caller named a specific tree, so serving a same-named
+  doc from THIS repo would be the identical wrong-initiative bug one level down
+  and harder to see. Pinned by
+  `test_an_ABSOLUTE_token_that_is_absent_STAYS_a_gap` against a repo that DOES
+  contain a same-named doc, so a clause re-anchoring absolutes fails it.
+- 🔴 **EVERY fixture carries a NEWER DECOY, and that is what makes the tests
+  non-vacuous.** With one doc in the repo the newest-of-N fallback selects the
+  same file the token names, and the regression tests pass whether or not the
+  clause exists. The base failure reads
+  `handoff-zz-newer-decoy.md != handoff-wanted.md` — the fallback picking the
+  wrong doc, which is the incident in miniature.
+- 🔴 **MY MUTATION SWEEP REPORTED 6/6 SURVIVED AND EVERY ONE WAS A LIE — TWICE,
+  BOTH THIS REPO'S OWN DOCUMENTED TRAPS.**
+  1. It scraped `::(test_\w+)`; pytest writes `::\x1b[1mtest_name\x1b[0m`, ANSI
+     bold between the `::` and the name. Nothing matched, so nothing looked
+     failed — **including a mutant the base run had already proven kills two
+     tests.** That contradiction is what exposed it. Fixed with `--color=no`,
+     ANSI stripping, and a verdict from the `N failed` COUNT, not from names.
+  2. After that, its `-k` filter did not match the newly added
+     `test_the_FIRST_resolvable_token_wins_not_the_last`, so `break-removed`
+     reported SURVIVED **a second time**. The filter is gone; it runs the file.
+  A third, smaller one: a bare `::(test_\w+)` over the whole output also scrapes
+  the WARNINGS summary — it listed 3 names for a run with 0 failures, which
+  reads as attribution and is not. Scrape `^FAILED` lines only.
+  **The sweep now SELF-CHECKS** — control GREEN and `whole-clause-removed`
+  KILLED — and prints `SWEEP-INVALID` otherwise, because a sweep that cannot
+  observe a failure issues a clean bill of health to a guard that does nothing.
+- ⚠ **One mutant SURVIVES and is annotated as such in the source rather than
+  left reading as covered:** `root-guard-dropped`. Killing `[ -n "$root" ]`
+  needs a literal `/claudedocs/handoff-*.md` at the filesystem ROOT, which no
+  fixture can create. Kept because it is correct, not because anything proves
+  it fires.
+- **No `clawgate-task:` recorded, deliberately.** `resolve` exited **6**: one
+  task linked (#440, the inert deeplink) with `role=read` and none WORKED. Per
+  the protocol that means the doc likely belongs to none of them, and #440 is
+  unrelated to this work — so no field, rather than a guess that would be
+  reconciled against for the life of the doc.
 
 ## How to verify
 
