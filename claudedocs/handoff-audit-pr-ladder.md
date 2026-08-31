@@ -141,27 +141,43 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   other "surfaces a worktree does not hand you" in `claude/RULES.md`.
 
 ## Next steps (ranked)
-🔴 **Numbering is deliberately STABLE — rank 3 keeps its number.** The rank is half a
-`claim-work` slug's identity, so renumbering would silently re-point any live claim. Items 1
-and 2 are retained as DONE markers rather than deleted.
+🔴 **Numbering is deliberately STABLE.** The rank is half a `claim-work` slug's identity, so
+renumbering silently re-points every live claim. Closed items are retained as DONE markers.
 
-1. **DONE (2026-08-31) — ship the laptop.** Both hosts converged at `9a7c4338`; `drift-check.sh`
-   rc 0, `PARITY-RC=0` on both. Nothing to do; do not re-claim.
+1. **DONE (2026-08-31) — ship the laptop.** Both hosts converged; `drift-check.sh` rc 0,
+   `PARITY-RC=0` on both. Do not re-claim.
    forcing: none
-2. **DONE (found already closed 2026-08-31) — the three leftover worktrees.** Gone from
-   `git worktree list`, closed by another session. ⚠ **The successor condition is real and
-   unowned: 137 registered worktrees**, most on merged branches. Not filed as an item — no named
-   owner and no closing condition anyone can check, so a ticket would read as covered while
-   nothing could close it (the object-leak rule).
+2. **DONE (found already closed 2026-08-31) — the three leftover worktrees.** ⚠ The successor
+   condition is real and unowned: **137 registered worktrees**, most on merged branches. Not
+   filed — no named owner and no checkable closing condition, so a ticket would read as covered
+   while nothing could close it.
    forcing: none
-3. **`#1133`'s audit ladder never converged — round 3 was never run.** (repo: `devrc`; files
-   `scripts/audit-dispatch.py`, `claude/skills/audit-pr/`.) Round 2 returned findings; they were
-   fixed in `9ff5c9a9` and merged on operator instruction, so **that commit is the only one in
-   that PR no auditor has seen**. Range for a delta round: `ea36a489..9ff5c9a9`. Blast radius is
-   bounded — four shell-guard lines and prose inside a generated brief, so the failure mode is
-   "a future auditor reads a wrong instruction", not broken code. Claims blocks for rounds 1 and
-   2 are on the PR. **Closing condition:** a round returns no findings, or a named reader
-   dismisses it in writing.
+3. **DONE (2026-08-31) — `#1133`'s never-run round 3.** Run blind over `ea36a489..9ff5c9a9`. It
+   returned 4 🟡 + 1 🟢. Exactly one was live in `main` — the escape hatch's summary obligation,
+   deleted by a reword — fixed and pinned in **`#1157`**, which then ran its own three-round
+   ladder and was **stopped on the stated criterion, not on a clean round** (rationale recorded
+   on the PR, per the clause `#1157` restores). The other four findings were not actionable
+   against `main`: `#1117` had already removed the code they describe. See rank 4.
+   forcing: none
+4. **The `nix log` fallback port-back that `#1117` deferred — with acceptance criteria already
+   measured.** (repo: `devrc`; file `scripts/audit-dispatch.py`.) `1f0fe4c1` (#1117) rewrote
+   `render_toolchain` 2h36m after `#1133` merged, carrying forward only `--no-link -L` and
+   deferring the rest to "its own PR and its own round". Verified: `git show
+   origin/main:scripts/audit-dispatch.py | grep -c path-info` → **0**. 🔴 **These four are
+   measured, not speculative — a port-back that reintroduces the old block ships all of them:**
+   - **Do not carry the stderr parenthetical** claiming `nix path-info`'s stderr is discarded by
+     the `>` two lines down. Measured: that `>` belongs to a different command and redirects
+     stdout; the flake error lands on the terminal. It also contradicts the same block's correct
+     "`-L` WRITES TO STDERR" rule 28 lines above.
+   - **Do not carry the fixed `/tmp/tier.log`.** Two parallel audit agents truncate each other's
+     file and each greps the other's tier — with all three guards passing. Use `mktemp`.
+   - **Add a structural guard for the guard set.** Measured: deleting the `[ -n "$DRV" ]` emitter
+     left the suite byte-identical (301 passed); a `.pytests`→`.PYTESTS` positive control on the
+     same emitter went red, so the harness reaches those lines and simply cannot see these.
+   - **"THEY CLOSE THREE DIFFERENT FALSE GREENS" is wider than the bullets deliver** — the list
+     supplies two.
+   **Closing condition:** a PR restoring that block lands with all four addressed, or a named
+   reader records in writing that the fallback is not coming back.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -524,6 +540,53 @@ and 2 are retained as DONE markers rather than deleted.
   conflict and cannot destroy — it fast-forwards or refuses. Paired with re-verifying the tree
   is clean *immediately before* the pull (not in the survey that motivated it) and recording the
   pre-pull sha, the step is fully reversible.
+
+- 🔴 **A `git checkout -- <file>` USED TO RESTORE A MUTATION ALSO REVERTS YOUR UNCOMMITTED FIX,
+  AND NOTHING REPORTS IT.** Measured this session: an edit to `SKILL.md` was made, then three
+  mutation controls each restored with `git checkout -- <that same file>`. Restore goes to the
+  last COMMIT, so the fix left with the mutation. The commit then contained ONE file while its
+  message described TWO, and a claims block served the false version to the next auditor.
+  🔴 **Every status signal said success**: the suite was green (that prose was unpinned), the
+  commit succeeded, `git log` showed what was expected — because you read the branch you landed
+  on. It surfaced only by grepping the MERGED TREE for the sentence I believed I had written.
+  `claude/RULES.md` already says to restore from a `cp -a` copy for exactly this; the rule was in
+  front of me and "it was only mutated" read as an exemption. **Commit before mutating, or
+  restore from a copy — and verify a fix landed by CONTENT, never by the commit succeeding.**
+- 🔴 **A HAND-RUN MUTATION THAT DOES NOT APPLY REPORTS A FALSE GREEN; THE BATTERY CATCHES IT IN
+  ONE RUN.** Two mutation targets in `SKILL.md` were LINE-WRAPPED, so a one-line pattern was a
+  no-op and the run printed a clean pass for a mutant that never executed. `mutants-audit-ladder.sh`'s
+  `run` asserts the edit applied and prints `MUTATION DID NOT APPLY — result meaningless`. It
+  fired on the very first row added. **Mutants belong in the committed battery, not in a comment**
+  — the battery's own preamble says the sweeps it replaces "happened in a session scratchpad that
+  no longer exists, including the rows that justified adding a pin". 18 → 21 rows.
+- 🔴 **A PIN THAT STOPS MID-PARAGRAPH LEAVES THE TAIL FREE TO ARGUE THE OPPOSITE — committed
+  twice, the second time four lines under the banner forbidding it.** Measured: with the caveat
+  pinned for 2 of its 6 sentences, inverting "not a shortcut out of a converging one" and
+  flipping "If in doubt, run the next round" → "STOP" each scored a **fully green 13-test
+  suite**. Those are the only clause forbidding the hatch on a converging ladder and the
+  default-to-continue instruction. **When the artifact is prose, pin the WHOLE normalised
+  paragraph**, and when you fix one constant, check its SIBLING in the same commit.
+- 🔴 **AN ADJACENCY CLAIM NEEDS A POSITIONAL GUARD; TWO STRING PINS CANNOT SEE IT.** A "read the
+  next paragraph" pointer was silently re-pointed by inserting a paragraph in the gap — both
+  pinned texts still present, both pins green. And the first fix compared WHITESPACE-NORMALISED
+  text, which collapses newlines, so deleting the blank line that MAKES two paragraphs also
+  scored green while rendered markdown merged them. Compare parsed paragraph BLOCKS and assert
+  `index + 1`.
+- 🔴 **A COUNT QUOTED WITHOUT ITS SCOPE IS UNREPRODUCIBLE EVEN WHEN IT IS TRUE.** "394 passed
+  across six modules" was correct and an auditor reproducing a *different* six got 240 and
+  reported it unverifiable. Same round: three "393 passed" figures matched no command at all.
+  **Name the command or the module set beside any test count.** Related, measured three times in
+  one paragraph: a sentence count went "five" (wrong), then a regex splitter said "four" (wrong —
+  `THINGS.**` puts the bold marker between the period and the space), then six by hand. **Count
+  by reading, not by pattern.**
+- ⚠ **A row naming `origin/main` identifies no fixed tree.** A mutation-matrix `BASE` row read
+  "origin/main's SKILL.md ... 6 failed, 5 passed"; `origin/main` has moved far past what it meant,
+  so the row is unreproducible. Marked NOT REPRODUCIBLE rather than given a fresh number —
+  inventing one would be the defect being fixed. **Pin a sha in any row you want re-derivable.**
+- **The attribution gate did not fire on this ladder and was not made to.** Payload per round:
+  23 → 0 → 12 lines against ~90 scaffolding each. Never two consecutive zeroes, so the gate stayed
+  silent while the ladder was plainly auditing its own scaffolding. That is the documented
+  structural blind spot for a prose payload, and the reason the stated-criterion stop exists.
 
 ## How to verify
 ```bash

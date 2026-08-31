@@ -18,8 +18,12 @@ Detect clawgate/GitHub/ClickUp references in agent output, emit telemetry, and m
 them clickable in the terminal the way a URL already is. **SHIPPED AND VERIFIED LIVE.**
 
 ## State now
-🔴 **RANKS 1, 3, 4 AND 5 ARE CLOSED. RANK 2 IS OWNED BY ANOTHER EFFORT — hand over, do not
-work it here.** The genuinely open items are ranks 6–7 below.
+🔴 **RANKS 1, 3, 4, 5 AND 6 ARE CLOSED. RANK 2 IS OWNED BY ANOTHER EFFORT — hand over, do
+not work it here.** The only genuinely open item is rank 7 below.
+
+🔴 **RANK 6 WAS NOT A DEFECT — clawgate #463 is REFUTED, and this doc asserted its premise
+as fact for a day.** "60 of 248 cards unreachable by any scroll" was a measurement
+artifact. Do not re-derive it; the evidence is under rank 6.
 
 - Branch: `main`. `origin/main` was `e0e29e7b` when this doc was created; it is `e0f35ce2`
   as of 2026-08-30 and moved **six times during this session's own gate runs**, which is
@@ -43,8 +47,17 @@ work it here.** The genuinely open items are ranks 6–7 below.
   deliberately; that branch is now merged, so `gh pr merge --delete-branch` could not
   delete the local ref and the worktree is now pure clutter. Left in place rather than
   removed: it is not this effort's to reap. `git worktree remove` it when convenient.
-- **clawgate #463** (open) — the board-scroll layout bug; blocks #440's criterion 1.
-- **clawgate #440** — `ready_for_review`, not `complete`, for exactly that reason.
+- **clawgate #463** — `ready_for_review`, **REFUTED, not fixed.** There is no layout bug;
+  see rank 6. Left at `ready_for_review` rather than `complete` because the status gate
+  permits `complete` only when every AUTHOR-SPECIFIED criterion was validated, and I
+  refuted the premise instead of meeting them. ⚠ The vocabulary has no `closed`/`wontfix`
+  and **dismissing DELETES the task**, so `ready_for_review` is the closed-ish state.
+- **clawgate #468** (open, NEW) — the one real finding split out of #463: `taskHashScript`
+  reaches a card inside the collapsed `Done` section only because **Chromium** auto-expands
+  the `<details>`; the handler never asks. Nothing pins that browser behaviour.
+- **clawgate #440** — still `ready_for_review`. 🔴 **Its recorded blocker is GONE**: #463
+  does not block criterion 1, verified live. Deliberately NOT flipped — a previous session
+  derived and validated its criteria, and grading that is Zach's call, not an agent's.
 - **`homelab-infra` base clone cannot fast-forward** — `merge --ff-only` refuses on a
   dirty `flake.nix` (+ `.claude/skills/deploy/SKILL.md`, untracked files); stuck at
   `93876471` vs trunk. **Pre-existing and NOT this session's**; it did not affect the
@@ -98,6 +111,38 @@ The original diagnosis is kept below because #463 inherits its layout context.
   client-side), and the verifier. Criterion 4 is the sharp one: a fragment naming a task
   NOT in the rendered set (tag filter active) must not fail silently.
 
+### The dirty `homelab-talos` working tree — MEASURED, awaiting an operator decision
+Not a bug; an unresolved **disposition**. Full evidence is under rank 7. The one thing that
+must not be lost:
+
+- **Symptom + exact repro:** `git -C ~/workspace/homelab-talos merge --ff-only origin/trunk`
+  refuses. `git status --porcelain` shows ` M .claude/skills/deploy/SKILL.md`, ` M flake.nix`
+  plus untracked scratch.
+- **Observed (with values):**
+  - `git rev-list --left-right --count HEAD...origin/trunk` → **`0	1`** (0 ahead, 1 behind).
+    The refusal is the dirty tree, NOT divergence.
+  - `git hash-object flake.nix` → `f58b97ce…`; `HEAD:flake.nix` and `origin/trunk:flake.nix`
+    are both `4058416e…`. Scanned **every** commit on **every** branch touching the path
+    (11 commits): **no match**. Same for `.claude/skills/deploy/SKILL.md`
+    (working `402cd671…` vs committed `64977409…`).
+  - `git log --all -S'__dp_status_cache' -- flake.nix` in this repo → **empty**; the same
+    search in `datapacket-talos` → **`527b9ec32` / `4e3201fbb` "feat(dev): cache GitHub
+    status in shell hook (#956)"**. The blob is in **neither** repo's object store, so it
+    is a hand/agent port, not a copy of any revision.
+  - `gh repo view ZacxDev/homelab-talos` → **does not resolve**. `kubectl get gitrepository
+    -A` → `flux-system` reads `ssh://git@github.com/ZacxDev/homelab-infra.git` branch
+    `trunk`.
+- **Ruled out:**
+  - *"stale cruft, safe to restore"* — killed by the all-branches blob scan above.
+  - *"diverged, needs the preserve→`reset --keep` rescue"* — killed by `0 ahead`.
+  - *"a separate homelab-talos repo exists"* — killed by the `gh repo view` miss plus the
+    Flux `GitRepository` URL.
+- **Leading hypothesis:** someone (or an agent) ported datapacket's dev-shell PR-status hook
+  into this flake and lost #465's dependency block in the merge, then left it uncommitted.
+- **Next probe:** none needed for diagnosis — this is a decision. If it proceeds, the
+  question to answer first is whether the #465 block can be restored *on top of* the port
+  (`git show origin/trunk:flake.nix` holds the good copy of that block).
+
 ## Next steps (ranked)
 1. ~~**Verify the two unverified interactions**~~ — **DONE**, merged as `#1086`. Closed by
    machine observation on an isolated Xvfb, not an operator report.
@@ -127,21 +172,101 @@ The original diagnosis is kept below because #463 inherits its layout context.
    skipped / 0 failed against floor 18,383; tier 2 `nix` pytests + nodetests both
    `RESULT: PASS`, built one at a time. Then **shipped** — see the deploy gotcha below.
    forcing: none — closed.
-6. **Fix clawgate #463, then close #440** — `ZacxDev/homelab-infra`,
-   `containers/clawgate`. 60 of 248 cards are unreachable by any scroll; #440's criterion 1
-   is unsatisfiable for 24% of the board until it lands. #463 carries 6 criteria and a
-   measurement script shape as its verifier.
-   forcing: none — a real user-facing defect, but nothing external is forcing it and
-   nobody has asked. Do not let its severity read as urgency.
-7. **Decide the `homelab-infra` base clone** — it cannot fast-forward. Someone must say
-   whether the dirty `flake.nix` + `.claude/skills/deploy/SKILL.md` are WIP worth a branch
-   or stale cruft to discard. 🔴 Hash the working copy against that file's recent commits
-   first: byte-identical to an OLDER commit proves a stale orphan, and "restoring" it
-   silently reverts everything since.
-   forcing: none — not blocking today, which is precisely the failure mode: it stops
-   receiving changes while looking healthy.
+6. ~~**Fix clawgate #463, then close #440**~~ — **CLOSED 2026-08-31 AS REFUTED. There is no
+   defect.** Measured live on 0.8.19, headless Chromium, both viewports (1280×720 and
+   390×844). The arithmetic closes with no residue: the 62 "unreachable" cards are **59**
+   inside the deliberately collapsed `Done` `<details>` plus **3** final-screenful cards
+   that are fully visible at the bottom of the viewport. `trulyOffscreenAtMaxScroll` = **0**
+   at both viewports, and the last RENDERED card sits at bottom 532 ≤ 720 (desktop) and
+   656 ≤ 844 (phone) — criterion 1 already passes.
+   - **The under-reporting box, named:** an ancestor-chain walk from the last card found
+     `spill: 0` everywhere except `<details class="group/sec">`, which reports
+     `offsetHeight: 48` (its `<summary>`) while its child grid extends **6,769px** past it.
+     Control: `d.open = true` → `offsetHeight` 48 → 6,817 and document `scrollHeight`
+     22,261 → 29,030.
+   - **Why the original measurement saw phantom geometry:** Chromium implements
+     `::details-content` with **`content-visibility: hidden`**, not `display: none` —
+     measured via `getComputedStyle(d, '::details-content')`, not assumed. Collapsed
+     descendants keep a queryable layout, so any script that enumerates
+     `article[id^="task-"]` and compares rects counts them as laid out.
+     🔴 **`document.scrollHeight` was always CORRECT.**
+   - 🔴 **#463's criterion 2 is unsatisfiable as written** — "cards with document-y beyond
+     maxScroll == 0" is impossible for *any* scrollable page, since the final screenful
+     always has `top > maxScroll` while being fully visible. A criterion that cannot be
+     met by a correct page is a trap for whoever picks it up.
+   - **#440 is NOT blocked.** `/tasks#task-208` (status `complete`, inside the collapsed
+     section) lands today: `scrollY 28310`, `rectTop 390`, `inViewport true`,
+     `data-task-hash-focus="true"`.
+   - **The real finding, now clawgate #468:** `taskHashScript` never touches `<details>` —
+     verified by reading the whole handler (no `.open`, no `details` reference; its only
+     scroll call is `el.scrollIntoView(...)`). The deeplink works because **Chromium**
+     auto-expands a closed `<details>` when a fragment targets content inside it. Nothing
+     pins that, so a browser change would silently regress deeplinks to every completed
+     task — the exact failure #440 existed to remove.
+   forcing: none — closed as refuted, with #468 carrying the residue.
+7. **Decide the dirty `homelab-talos` clone** — 🔴 **MEASURED 2026-08-31; the decision is
+   all that is left, and BOTH halves of this item's original premise were WRONG.**
+   - 🔴 **It is NOT diverged.** `HEAD...origin/trunk` = **0 ahead, 1 behind**. There are no
+     un-pushed commits to rescue, and the `merge --ff-only` refusal is caused **solely by
+     the dirty working tree**. The preserve→push→`reset --keep` recipe this item used to
+     prescribe has nothing to operate on. It has also moved since the doc was written
+     (`93876471` → `5c0a6cab`), so "stuck" was stale too.
+   - 🔴 **The dirty files are NOT stale orphans — they are NOVEL.** Both blobs were hashed
+     against **every commit on every branch** (`git rev-list --all`): no match, in this
+     repo or in `datapacket-talos`. So the "byte-identical to an older commit ⇒ safe to
+     restore" escape does not apply, and `git restore` would **destroy real work**.
+   - 🔴 **`flake.nix` (+122/−140) is the dangerous one.** It ports datapacket's PR-status
+     shell hook (`__dp_status_cache`, from datapacket **#956** "feat(dev): cache GitHub
+     status in shell hook") into this dev shell, and in doing so **DELETES #465's
+     dependency-closure block** — the 🔴-commented `pyyaml/pytest/click/requests/numpy/
+     pillow` list whose own comment records that without it the repo's gate emits *"a
+     confident WRONG RED"*. **Committing it as-is silently re-opens #465.**
+   - **`.claude/skills/deploy/SKILL.md` (+25, pure addition)** is worth saving on its own:
+     a 🔴 lesson measured 2026-08-27 deploying `subsystem-store-api:0.4.0` — for a
+     Flux-managed app, bump the manifest in the repo **Flux actually reads**, because the
+     `clusters/homelab/apps/**` trees are byte-identical and bumping the wrong checkout
+     commits and reconciles cleanly while changing nothing that runs.
+   - **Both files share an mtime to ~1ms** (`2026-08-30 19:02:29`) ⇒ ONE bulk write, not
+     two hand edits. ⚠ An mtime still cannot name the writer.
+   - **Untracked:** `go.mod` (21 bytes, `module t`), `opencode.json`, `tests/` (1 file) —
+     all stamped `2026-08-28 19:13:03`, a throwaway scratch Go module. Plus
+     `claudedocs/handoff-limewire-torrent-comps.md` (6.4 KB), which is real unsaved writing.
+   - **Repo naming, now nailed down:** `ZacxDev/homelab-talos` **does not exist**; Flux's
+     `GitRepository` reads `ZacxDev/homelab-infra @ trunk`. The **laptop carries BOTH
+     directory names** (`~/workspace/homelab-talos` *and* `~/workspace/homelab-infra`),
+     both cloning that one repo; the workbench has only `homelab-talos`. One repo, up to
+     three checkouts — which is the actual mechanism behind the SKILL.md warning above.
+   - **Nothing was written.** Operator instruction 2026-08-31 for dirty trees is
+     measure-and-report only: no commit, restore, checkout or delete.
+   forcing: user — the operator asked for this measurement on 2026-08-31 and the
+   disposition of `flake.nix` is now a decision only they can make.
 
 ## Gotchas / decisions / dead-ends
+- 🔴 **A task's own MEASUREMENT can be the artifact — check what your selector can SEE
+  before trusting a count.** #463 was filed off a real, careful, numerically specific
+  measurement that was nonetheless wrong, because `querySelectorAll` returns elements
+  inside a closed `<details>` and their rects are non-zero under `content-visibility:
+  hidden`. The count was honest; the *set* was wrong. **Ask which of the elements your
+  query returns are not actually rendered** — `el.closest('details:not([open]))` was the
+  whole diagnosis, and partitioning by it made 62 resolve into 59 + 3 with no residue.
+  Generalises past `<details>`: any visibility mechanism that preserves layout
+  (`content-visibility`, `visibility: hidden`, an offscreen transform) feeds phantom
+  geometry to a rect-comparing script.
+- 🔴 **A criterion that a CORRECT system cannot satisfy is a trap, not a bar.** #463's
+  criterion 2 ("cards with document-y beyond maxScroll == 0") is unsatisfiable for any
+  scrollable page — the last screenful always has `top > maxScroll`. An agent picking it
+  up would have "fixed" it by expanding or deleting content. When writing criteria, ask
+  what a healthy system scores.
+- ⚠ **The clawgate e2e nix shell is version-skewed and `run.sh` cannot launch a browser
+  as configured** — `e2e/shell.nix` says `@playwright/test` and nixpkgs
+  `playwright-driver` must match, but the client is pinned **1.59.1** (wants chromium
+  revision **1217**) while `playwright-driver.browsers` now ships **1228**. Workaround
+  that worked: launch with an explicit `executablePath` at
+  `…-playwright-browsers/chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell`
+  plus `PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true`. **Pre-existing, unfiled, and NOT
+  investigated** — recorded here so the next person does not spend the same 20 minutes
+  concluding the suite is unrunnable. It does not affect `tekton/clawgate-e2e`, which
+  builds its own environment.
 - 🔴 **Merging #1099 changed NOTHING for the agents it was written for until the switch —
   and the stale copy still asserted the very claim the PR deleted.** `claude/skills/**`
   deploys as a `home.file` **copy**, so `readlink -f ~/.claude/skills/clawgate/reference/
@@ -326,6 +451,35 @@ The original diagnosis is kept below because #463 inherits its layout context.
   corrects it. ⚠ **RUNS is not BLOCKS** — whether `clawgate-e2e` is *required* is
   unmeasured: `GET /branches/trunk/protection` 403s on that private repo without GitHub
   Pro.
+
+- 🔴 **A handoff's recorded BLOCKER is a hypothesis about the past, and three of this
+  effort's were dead on arrival.** #1099's "blocked by the flaky gate" (green by the time
+  it was read), its "check for a semantic conflict in `handoff-tmux-webapp.md`" (main's
+  commits since the branch point touched zero files the branch touched), and rank 7's
+  "cannot fast-forward / may be stale cruft" (0 ahead, and both files novel). **Re-measure a
+  recorded blocker before planning around it** — the cost of not doing so is a session spent
+  defeating an obstacle that is not there.
+- 🔴 **`claim-work --subject` is a NO-OP on a claim you already hold.** It prints
+  `✅ THIS IS YOURS — carry on. Nothing to do.` and **silently keeps the old subject**, so a
+  claim whose premise you have just refuted goes on advertising that premise to every other
+  session. Measured 2026-08-31. The fix is `--release` then re-claim with the new `--subject`;
+  there is no in-place edit.
+- 🔴 **A red required check is not automatically about your diff — READ WHICH TEST.**
+  `tekton/devrc-pytests` failed #1168 on `test_mkdir_refuses_unsafe_names[..]`, a
+  real-process test driving a LIVE HTTP server in `dl-router`, against a diff of **one
+  markdown file**. The discriminating control, not a re-run: the `nix` pytests derivation on
+  the MERGED tree locally reported `collected=19942 passed=19939 skipped=3 failed=0`, and
+  Tekton's red run collected the **identical 19942** — same tree, same test set, one
+  real-process test differing. The re-run then reported those exact numbers. **Compare the
+  collected counts**; they are what tells you it is the same suite.
+- ⚠ **A gate failing on a MISSING ENVIRONMENT looks like a code failure.** `scripts/gate.sh`
+  returned `RESULT: FAIL (exit=3)` purely because `logrotate` was off PATH — it was run
+  outside the flake devShell. It says so explicitly and prints the
+  `nix develop … run-tests.sh` line to use. Read the reason before treating a red as a
+  verdict on the diff.
+- 🔴 **GitHub code search is BLIND on `ZacxDev/homelab-infra`** — a positive control for
+  `filename:flake.nix` returned `total_count: 0`. An empty code-search result there proves
+  nothing. Use `gh api repos/…/git/trees/<ref>?recursive=1`.
 
 ## How to verify
 ```bash
