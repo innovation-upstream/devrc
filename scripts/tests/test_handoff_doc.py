@@ -1407,7 +1407,15 @@ class TestRuleFDidNotMoveTheExitCodes:
         """
         codes = {n: v for n, v in vars(hd).items()
                  if n.startswith("EXIT_") and isinstance(v, int)}
-        assert len(codes) >= 8, f"the scraper found too few constants: {codes}"
+        # 🔴 THE INJECTIVITY LOOP RUNS FIRST, AND THE ORDER IS THE POINT. This
+        # test is named and documented for COLLISIONS, so a collision must be
+        # what it reports. A count assertion placed above it pre-empts that:
+        # adding a second constant equal to 9 — the #962/#1046 shape, one digit
+        # from what a PR in flight actually does — dies to `assert 10 == 9`, the
+        # remedial text below never renders, and the message that does render
+        # invites bumping the literal to 10, after which the real defect
+        # surfaces only on a SECOND run. That is #1093.1's defect ("the
+        # assertion that runs first misdirects") recreated in a sibling test.
         seen: dict[int, str] = {}
         for name, value in sorted(codes.items()):
             assert value not in seen, (
@@ -1417,11 +1425,71 @@ class TestRuleFDidNotMoveTheExitCodes:
                 f"next free code and update the skill's exit-code list with it."
             )
             seen[value] = name
+        # 🔴 EXACT, not `>=`. Against exactly 9 constants a `>= 8` floor tolerates
+        # ONE silently vanishing — a rename, a deletion, or a value that stops
+        # being an int — which is the same class of drift this test exists for.
+        # A legitimate addition is expected to update this number; the failure
+        # prints the whole dict, so what changed is on screen.
+        assert len(codes) == 9, f"the EXIT_* constant set changed: {codes}"
 
     def test_the_exit_code_constants_did_not_move(self) -> None:
         """Their VALUES, not just their names — a caller reads the number."""
         assert (hd.EXIT_OK, hd.EXIT_USAGE, hd.EXIT_FAIL) == (0, 2, 3)
         assert (hd.EXIT_NO_ADVANCE, hd.EXIT_NO_CHANGE, hd.EXIT_BEHIND) == (4, 5, 6)
+        # 🔴 THE LADDER'S OWN CODES, which stopped at 6 and were unpinned. #1046
+        # renumbered EXIT_STALE_BASE 7 -> 9 after #962 claimed 7; nothing asserted
+        # the new value, so setting it to 10 SURVIVED all 295 tests while three
+        # prose sites still said 9.
+        assert (hd.EXIT_DOC_PER_EFFORT, hd.EXIT_UNFORCED, hd.EXIT_STALE_BASE) == (7, 8, 9)
+
+    def test_the_prose_quotes_the_CONSTANT_not_a_stale_literal(self) -> None:
+        """🔴 PROSE AGAINST THE CONSTANT, not prose against prose.
+
+        `test_the_remedy_is_pinned_as_a_WHOLE_normalised_string` compares one
+        string to another string, so it fires when the WORDING moves and never
+        when the NUMBER does. Measured: `EXIT_STALE_BASE = 10` survives the whole
+        file while `SKILL.md`, `WRONG_BASE_REMEDY` and that pin all still say
+        "exit 9". A caller reads the number, so the number is what must agree.
+        """
+        remedy = hd.WRONG_BASE_REMEDY
+        assert f"(exit {hd.EXIT_STALE_BASE})" in remedy, (
+            f"WRONG_BASE_REMEDY names an exit code that is not "
+            f"EXIT_STALE_BASE={hd.EXIT_STALE_BASE}: {remedy!r}")
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        # 🔴 BIND THE STATUS TOKEN TO ITS CODE — a bare `f"({const})"` asks only
+        # whether the DIGIT appears anywhere in a 25 KB file, which any OTHER
+        # status spelling the same number satisfies. MEASURED: rewriting
+        # `status=new-doc` (7) to (9) — the exact drift this test exists to
+        # prevent — left all 297 tests GREEN, because `status=dated-topic` still
+        # spelled (7). The pair is the claim; the digit alone is not.
+        # 🔴 ALL SEVEN PAIRS THE SKILL DOCUMENTS, not the four this started with.
+        # MEASURED: with only four, `status=behind` (exit 6) → (exit 4) left all
+        # 297 tests green — the same walkability the four were added to close,
+        # surviving three statuses over. The set is the claim; a subset of it
+        # reads as coverage of the skill's numbers and is not.
+        for status, const, form in (
+            ("stale-base", hd.EXIT_STALE_BASE, "exit {}"),
+            ("behind", hd.EXIT_BEHIND, "exit {}"),
+            ("no-change", hd.EXIT_NO_CHANGE, "exit {}"),
+            ("dated-topic", hd.EXIT_DOC_PER_EFFORT, "{}"),
+            ("new-doc", hd.EXIT_DOC_PER_EFFORT, "{}"),
+            ("unforced", hd.EXIT_UNFORCED, "{}"),
+        ):
+            want = f"`status={status}` ({form.format(const)})"
+            assert want in doc, (
+                f"claude/skills/handoff/SKILL.md does not carry {want!r}; the "
+                f"skill's documented code for status={status} drifted from the "
+                f"module, where it is {const}.")
+        # Step 3's line names these two WITHOUT the `status=` prefix, so they
+        # need their own spelling — dropping them because the prefix differs is
+        # how a "covers the documented codes" claim quietly means "covers most".
+        for label, const in (("no-advance", hd.EXIT_NO_ADVANCE),
+                             ("no-change", hd.EXIT_NO_CHANGE)):
+            want = f"`{label}` ({const})"
+            assert want in doc, (
+                f"claude/skills/handoff/SKILL.md does not carry {want!r}; step "
+                f"3's bare-name spelling of {label} drifted from the module, "
+                f"where it is {const}.")
 
     def test_merge_still_returns_a_plain_string(self) -> None:
         """`merge()` is public and called directly by other tests in this file;
@@ -1436,6 +1504,20 @@ class TestRuleFDidNotMoveTheExitCodes:
 # --------------------------------------------------------------------------
 
 SKILL_PINS: list[tuple[str, str]] = [
+    # 🔴 THE WORD "only" IS THE CLAIM, and it was evicted once already. Two other
+    # files describe this clause as load-bearing — `handoff_doc.py`'s rule-(j)
+    # legend comment and `TestSkillAndModuleAgree`'s docstring both say "only ONE
+    # of the four means 'add a field'" — so both stop being true the moment a
+    # byte-pressure edit takes the word, and NOTHING saw it: MEASURED, deleting
+    # `only` leaves all 297 tests green. SKILL.md sits at 7 B of headroom, i.e.
+    # under exactly the pressure that removed it the first time.
+    (
+        "Read each row's marker — only one means \"add a field\"",
+        "🔴 only ONE of the four markers means add-a-field; without `only` the "
+        "executor applies that remedy to all four, when [unknown kind] needs a "
+        "LISTED kind, [unparsed] needs RE-SPELLING and [fenced] needs unfencing "
+        "or tagging the item",
+    ),
     (
         "scripts/lib/handoff_doc.py",
         "the step actually invokes the tool that owns the gate",
@@ -5110,7 +5192,9 @@ class TestAbsentBasePresentOnMainlineIsRefused:
             _sh("git", "config", k, v, cwd=other)
         (other / "claudedocs" / "handoff-sample-topic.md").write_text("", encoding="utf-8")
         _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
-        _sh("git", "commit", "-q", "--allow-empty", "-m", "empty the handoff", cwd=other)
+        # No `--allow-empty`: git refusing "nothing to commit" is the guard
+        # against a fixture body identical to what the mainline already holds.
+        _sh("git", "commit", "-q", "-m", "empty the handoff", cwd=other)
         _sh("git", "push", "-q", "origin", "main", cwd=other)
         _sh("git", "fetch", "-q", "origin", cwd=work)
 
@@ -5164,10 +5248,25 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         # non-zero. Only the mainline SHAPE line proves the copy was read and
         # measured, which is the claim this test's name makes.
         prop = run_tool(work, update=update_file)
-        assert "origin/main: 0 sections /" in prop.stdout, (
-            "the mainline copy was never read, so the negatives below prove "
-            "nothing", prop.stdout[-400:])
-        assert "will be replaced by this delta" not in prop.stdout
+        # 🔴 ORDER MATTERS. Assert the loud-line ABSENCE first: if
+        # `replaces_mainline_doc` regresses to `bool(mainline.lines)`, the loud
+        # branch is taken and the shape line never prints — so the shape
+        # assertion would fire with "the mainline copy was never read", which is
+        # FALSE and points a maintainer two functions away from the defect.
+        assert "will be replaced by this delta" not in prop.stdout, (
+            "the guard MIS-FIRED on a whitespace mainline copy — the copy WAS "
+            "read; `replaces_mainline_doc` said it was something to lose",
+            prop.stdout[-400:])
+        # 🔴 And the NON-degenerate half of the shape. `0 sections` alone is what
+        # `doc_shape("")` and a hardcoded DocShape(0,0) also produce, so pinning
+        # it cannot see a mutant that reads the blob then measures the wrong
+        # text — MEASURED: `doc_shape(shown.out)` -> `doc_shape("")` survived
+        # this test scoped to itself. The line count differs per fixture, so it
+        # is the half that proves the real bytes were measured.
+        want_lines = 1 if blank == "\n" else 2
+        assert f"origin/main: 0 sections / {want_lines} lines" in prop.stdout, (
+            "the mainline copy was never read or was measured from the wrong "
+            "text, so the negatives below prove nothing", prop.stdout[-400:])
 
         res = run_tool(work, "--confirm", update=update_file)
         assert res.returncode == 0, (
@@ -5251,4 +5350,44 @@ class TestAbsentBasePresentOnMainlineIsRefused:
             res.returncode, res.stdout, res.stderr)
         assert "status=stale-base" in res.stderr
         assert "status=new-doc" not in res.stderr
+        assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def test_rule_i_asks_WHICH_predicate_not_merely_whether_stale(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 PINS THE PREDICATE, not the outcome — and in the fail-OPEN direction.
+
+        #1046 narrowed rule (i) with `not currency.replaces_mainline_doc("")`.
+        Broadening it to `not currency.stale` SURVIVED all 295 tests while
+        changing behaviour: a whitespace-only mainline copy is `stale` but is NOT
+        something to lose, so under the mutant rule (i) stops firing and the doc
+        is WRITTEN — silently bypassing #962's one-doc-per-effort cap.
+
+        MEASURED: repo with other handoff docs, topic's doc absent locally,
+        mainline copy whitespace-only -> HEAD rc 7 (cap fires, nothing written);
+        mutant rc 0 (written).
+
+        `test_an_EMPTY_mainline_doc_is_NOT_something_to_lose` cannot see this —
+        its fixture has no other handoff docs, so rule (i) never applies there.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        others = work / "claudedocs"
+        others.mkdir(exist_ok=True)
+        (others / "handoff-other-effort.md").write_text(
+            "# Handoff: other\n\n## State now\n\nx.\n", encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs", cwd=work)
+        _sh("git", "commit", "-q", "-m", "repo has other handoff docs", cwd=work)
+
+        # A mainline copy that is STALE but holds nothing to lose. Uses the
+        # class's own `_mainline_doc` rather than a fourth inlined clone —
+        # #1093.3, which this change closes, WAS a sibling inlining this helper,
+        # and the `--allow-empty` suppression it removed lives in here.
+        self._mainline_doc(tmp_path, work, "   \n\n", "whitespace mainline copy")
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, (
+            "the one-doc-per-effort cap did not fire — rule (i) was broadened to "
+            "`stale`, which is true of a mainline copy that holds nothing",
+            res.returncode, res.stdout, res.stderr)
+        assert "status=new-doc" in res.stderr
         assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()
