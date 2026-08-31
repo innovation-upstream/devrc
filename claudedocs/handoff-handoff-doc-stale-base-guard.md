@@ -27,16 +27,37 @@ commit. Turn it into a refusal.
   never makes the head an ancestor): `EXIT_STALE_BASE = 9`, `test_no_two_exit_constants_share_a_value`,
   `test_a_STALE_BASE_in_a_REALISTIC_repo_is_not_reported_as_a_NEW_effort`, and rule (i)
   consulting `not currency.replaces_mainline_doc("")` are all present.
-- **IN FLIGHT — uncommitted, in `~/workspace/devrc-scaffold` on `fix/audit-ladder-scaffolding-gaps`**
-  (branched off `main`, now 9 behind). Three files modified, **not committed, not pushed, no PR**:
-  `claude/skills/handoff/SKILL.md`, `scripts/tests/mutants-handoff-cap.sh`,
-  `scripts/tests/test_handoff_doc.py`. This closes issues **#1093** and **#1115**. 1,181 tests
-  pass locally; both sandbox tiers NOT yet run on it.
-- Also merged this session: **ZacxDev/homelab-infra#460** (squash `26d98f1b`) and
-  **#519** (squash — subsystem-store-api `0.5.0` → `0.6.0`).
+- **Rank 1 COMMITTED AND PUSHED — no PR yet.** In `~/workspace/devrc-scaffold` on
+  `fix/audit-ladder-scaffolding-gaps`: `b1263772` *test(handoff_doc): close the audit ladder's
+  filed scaffolding gaps (#1093, #1115)* — the three files the last session left uncommitted
+  (`claude/skills/handoff/SKILL.md`, `scripts/tests/mutants-handoff-cap.sh`,
+  `scripts/tests/test_handoff_doc.py`; +115/−9). The branch was **23 behind** `origin/main`,
+  not the 9 this doc previously recorded; it is **rebased onto `093a63db` and force-pushed**,
+  so the tree under test IS the merged tree. `SKILL.md` = **25,498 B** against the enforced
+  25,500 (2 B headroom, as predicted).
+- 🔴 **Nothing on those 23 commits touches `handoff_doc.py`, the handoff `SKILL.md`, or either
+  test file** — measured with `git log HEAD..origin/main -- <the four paths>`, empty. So the
+  #1046/#962 shape (two PRs appending to one `main()`, no conflict marker) does NOT recur here.
+- **IN FLIGHT — the gate.** `nix build …#checks.x86_64-linux.pytests` was running at handoff
+  time; `nodetests` NOT started (they must run **one at a time**, #1088). Logs:
+  `<scratchpad>/pytests.{out,err}`.
+- **IN FLIGHT — the mutation battery, written but NOT run.**
+  `<scratchpad>/battery.sh` re-runs every mutant #1093 and #1115 record as surviving, because
+  #1115's closing condition requires the PR body to record each result. Rows: the three
+  exit-code renumbers, one EXIT_ constant silently vanishing, rule (i) broadened to
+  `not currency.stale`, `doc_shape(shown.out)` → `doc_shape("")`, and the round-4
+  `replaces_mainline_doc` regression asserted to fail with the CORRECT message (#1093.1).
+  Carries a green baseline, a positive control, a must-SURVIVE reword control,
+  `PYTHONDONTWRITEBYTECODE=1` and a `cmp -s` did-it-apply guard on every row.
+- **No duplicate in flight** — swept 32 open devrc PRs; none touches any of the three files.
+- Also merged in the prior session: **ZacxDev/homelab-infra#460** (squash `26d98f1b`) and
+  **#519** (subsystem-store-api `0.5.0` → `0.6.0`).
 - **subsystem-store-api is DEPLOYED and VERIFIED**: pod `…-97gnp`, image `0.6.0`,
   `_audit_lock` count **3** (was 0), `server.py` 226,998 B (was 222,147), `/healthz` 200,
   0 restarts. devrc#996's fix is live.
+- **Claim:** this item is held as `devrc-1093-1115-scaffolding` (a reworded slug — the
+  canonical `handoff-doc-stale-base-guard-1` is still free and was deliberately NOT minted, to
+  avoid two refs for one item). Release it when the PR merges.
 
 ## Open investigations — live diagnosis state
 
@@ -72,10 +93,13 @@ commit. Turn it into a refusal.
   truncated at 140 chars and carries no `target_url`.
 
 ## Next steps (ranked)
-1. **Commit + PR the uncommitted work in `~/workspace/devrc-scaffold`**, closing #1093 and
-   #1115. Run BOTH sandbox tiers first (`nix build <wt>#checks.x86_64-linux.{pytests,nodetests}`,
-   **one at a time** per #1088). Files: the three above.
-   forcing: none
+1. **Finish the gate and open the PR** for `fix/audit-ladder-scaffolding-gaps` (devrc).
+   Remaining: read the `pytests` tier's own `RESULT:` line (never a piped exit code), then run
+   `nodetests` **separately**, then `bash <scratchpad>/battery.sh`, then re-sweep
+   `gh pr list` and `gh pr create`. The PR body must record **each** battery row — that is
+   #1115's stated closing condition, not a nicety.
+   forcing: gate — both required checks (`tekton/devrc-pytests`, `tekton/devrc-nodetests`)
+   block the merge, and `strict: false` means a green branch check is a claim about the branch.
 2. **Apply the staged dnsmasq fix** — `sudo ~/workspace/devrc/nix/system/apply-dnsmasq-docker-io-pin.sh`.
    Only the operator can run it.
    forcing: incident — measured 2026-08-29: the LAN router pins `registry-1.docker.io` with a
@@ -125,17 +149,45 @@ commit. Turn it into a refusal.
 - `SKILL.md` now has **2 bytes** of headroom against the enforced 25,500. The next addition
   needs an eviction and there is essentially nothing left to give.
 
+- 🔴 **A handoff doc committed only to a feature branch in a WORKTREE is unfindable from the
+  base clone, and `/resume` does not fail loudly on that.** This doc lives at
+  `~/workspace/devrc-scaffold/claudedocs/…`, not `~/workspace/devrc/claudedocs/…`. Given the
+  base-clone path, `resume-state.sh` reported NO SUCH FILE and **fell back to the newest of 90
+  docs** (`handoff-mention-detection.md`) — it prints that as a `!` gap and withdraws the DRIFT
+  all-clear, but the digest it produced was about a different initiative entirely. **Kickoff
+  blocks for worktree-resident docs must name the WORKTREE path.**
+- 🔴 **`claim-work` ownership is per GIT-DIR, so the same session gets rc 10 from its own
+  worktree and rc 12 from its base clone.** This item was claimed 5h earlier from
+  `/home/zach/workspace/devrc/.git`; checking from `devrc-scaffold` (whose git-dir is
+  `…/devrc/.git/worktrees/devrc-scaffold`) returns **rc 10 DO NOT START**, which reads as a
+  peer holding it. That is the strict sibling-worktree predicate working as designed. Resolve
+  it by matching the ref's `owner-id:` trailer against `owner_id_for()` over
+  `<common-dir>` + `<common-dir>/worktrees/*` rather than by guessing — the ref's `clone-id:`
+  confirms same-clone-same-host first.
+- ⚠ **The same item was claimed under a REWORDED slug**, so the canonical
+  `claim-work --slug-for <doc> 1` came back FREE. The exact-slug match is the hard lock; the
+  `--list` subject column is the only thing that catches this, and only if you read it.
+- 🔴 **`nix build` writes the build log to STDERR, not stdout.** `pytests.out` was 0 bytes
+  throughout a healthy run — that is not a stalled build.
+
 ## How to verify
 ```bash
 # 1. #1046 landed by CONTENT (a squash is never an ancestor)
 git -C ~/workspace/devrc show origin/main:scripts/lib/handoff_doc.py | grep -E "^EXIT_STALE_BASE = "
 
-# 2. the guard refuses in a REALISTIC repo (the shape that was shadowed)
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/tests/test_handoff_doc.py -q -p no:cacheprovider \
-  -k "REALISTIC_repo or WHICH_predicate or share_a_value"
+# 2. the branch under test IS the merged tree (must print `0<TAB>2`)
+git -C ~/workspace/devrc-scaffold fetch origin main
+git -C ~/workspace/devrc-scaffold rev-list --left-right --count origin/main...HEAD
 
-# 3. the store-api fix is RUNNING, not merely merged
+# 3. BOTH sandbox tiers, ONE AT A TIME (#1088) — read each runner's own RESULT: line
+nix build ~/workspace/devrc-scaffold#checks.x86_64-linux.pytests   --no-link --print-build-logs
+nix build ~/workspace/devrc-scaffold#checks.x86_64-linux.nodetests --no-link --print-build-logs
+
+# 4. the four #1115 mutants + the two #1093 ones stop surviving
+bash <scratchpad>/battery.sh          # ends with BATTERY_RESULT: PASS
+bash ~/workspace/devrc-scaffold/scripts/tests/mutants-handoff-cap.sh   # rule-(i) rows: killed, not DID NOT APPLY
+
+# 5. the store-api fix is RUNNING, not merely merged
 KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store exec \
   $(KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod -l app=subsystem-store-api \
     -o jsonpath='{.items[0].metadata.name}') -- \
