@@ -35,6 +35,14 @@ let
   # module's DEFAULT, so a validation run of bare `--rebuild` would derive,
   # report, write NOTHING and exit 0 — and be read as the supervised live run
   # this switch is waiting for.
+  # 🔴 AND THE `--dry-run` HALF IS ONLY A PRE-FLIGHT SINCE IT LEARNED TO FAIL.
+  # It used to skip the refusal guard entirely: MEASURED, `--repo /nope
+  # --rebuild` exited 0 with no "REFUS" text while the identical argv plus
+  # `--write` exited 4 — the documented pre-flight passed for a config the real
+  # run refuses, which is the shape `claude/RULES.md` calls a harness that cannot
+  # go red. It now evaluates the collision and refusal gates in BOTH modes and
+  # returns the same exit code, so a green dry-run is evidence about the run that
+  # follows it. Read the exit code, not just the report.
   enableHandoffIndexSync = false;
   # Drift-deadman master switch (scripts/drift-check.sh) — gates ONLY whether the
   # timer is wired into timers.target. The SERVICE definition is always emitted, so
@@ -2865,9 +2873,23 @@ in
         # .zshenv, so `handoff_index.default_repos()` would find none of the
         # $DEVRC/$HOMELAB/… handles and index NOTHING — a silent zero that renders
         # as an empty index, which the search CLI reports as `🔴 BROKEN INDEX`.
-        # Only the two repos this host is guaranteed to hold are set here; a
-        # handle pointing at an absent checkout is reported as UNMEASURED rather
-        # than folded into a clean count, so adding one is safe.
+        # Only the two repos this host is guaranteed to hold are set here.
+        # 🔴 A HANDLE POINTING AT AN ABSENT CHECKOUT IS NOT FREE, AND THIS
+        # COMMENT USED TO SAY IT WAS. It is reported as UNMEASURED rather than
+        # folded into a clean count — that part is true — but the run then
+        # proceeds as a PARTIAL index: the absent repo contributes nothing, keeps
+        # whatever rows it already had (the rebuild's delete is scoped to what
+        # MEASURED), and every run prints a `🔴 PARTIAL INDEX` warning. So adding
+        # a handle for a repo this host may not have is SUPPORTED, not free:
+        # expect a standing warning on every run, and do not read an unscoped
+        # query's silence as evidence that repo is silent.
+        # ⚠ The refusal it does NOT trip is worth naming, because the first
+        # version of that guard tripped on exactly this: refusing whenever ANY
+        # repo was unmeasured made a host with one absent checkout fire
+        # `OnFailure=notify-failure@%n.service` 4×/day forever with the index
+        # frozen — a permanently-red gate, which trains everyone to click
+        # through. It now refuses only when ALL repos are unmeasured, or when the
+        # measured subset yields zero rows.
         "DEVRC=%h/workspace/devrc"
         "HOMELAB=%h/workspace/homelab-talos"
       ];

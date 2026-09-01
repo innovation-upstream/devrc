@@ -13,22 +13,27 @@ doc BODIES today, and that is the gap this closes:
 So the corpus is queryable only by a human who already knows which doc to open,
 and `/resume` and subagents re-derive findings that are written down.
 
-⚠ CORPUS SIZE, AT THE SCOPE EACH FIGURE WAS ACTUALLY MEASURED. Re-measured HERE,
-2026-09-01, by running `--dry-run` after the audit fixes: **devrc 94 docs / 968
-sections** off `origin/main`, **homelab-talos 54 docs / 512 sections** off
-`origin/trunk`. (Both section counts moved by single digits from the figures this
-module first carried — 959 and 506 — because `main`/`trunk` moved, not because the
-derivation changed. That drift is exactly why the WORKTREE count below is stated
-in one place only.) A
-wider figure of ~424 docs / 8.6 MB over four repos (adding two client checkouts)
-comes from the brief that commissioned this work and was NOT re-derived here —
-quote it as second-hand or re-run `--dry-run` against those repos.
+⚠ CORPUS SIZE, AT THE SCOPE EACH FIGURE WAS ACTUALLY MEASURED, AND IT MOVES.
+Re-measured HERE by running `--dry-run` with all four `$DEVRC`/`$HOMELAB`/
+`$DATAPACKET`/`$CIVITAI` handles set:
+
+    2026-09-01  devrc 96 / 992 · homelab-talos 54 / 522 ·
+                datapacket-talos 288 / 2450 · civitai 1 / 14
+                TOTAL 439 docs / 3978 sections
+
+🔴 EVERY ONE OF THESE NUMBERS IS STALE THE DAY AFTER IT IS WRITTEN, and this
+docstring has now carried three generations of them: devrc read 94/968 earlier the
+SAME day and 959 sections before that, moving because `main` moved and for no
+other reason. Quote them as a SCALE, never as a value to check against, and re-run
+`--dry-run` if you need the number. (The brief that commissioned this work carried
+a second-hand `~424 docs / 8.6 MB` over the same four repos. That is now
+first-hand and slightly low — but the same caveat applies to the replacement.)
 
 WHAT THIS MODULE IS NOT
 -----------------------
 🔴 NOT A SYSTEM OF RECORD. The index is DERIVED and DISPOSABLE; git is the record.
-`--rebuild` truncates and re-derives from scratch, and that must always remain a
-safe operation. Nothing may ever be stored here that cannot be re-derived from a
+`--rebuild` deletes its in-scope rows and re-derives them from scratch, and that
+must always remain a safe operation. Nothing may ever be stored here that cannot be re-derived from a
 git ref, and no consumer may treat a row as authoritative over the doc it came
 from.
 
@@ -112,11 +117,17 @@ CONTRACT SUMMARY
     resolve_mainline(repo)                    -> (ref | None, ladder)
     identity_collisions(rows)                 -> tuple[str, ...]        PURE
     rebuild_refusal(derivations, rows)        -> str | None             PURE
+    partial_scope_warnings(derivations)       -> tuple[str, ...]        PURE
+    rebuild_delete_labels(derivs, stored, ..) -> tuple[str, ...]        PURE
     handoff_paths_in_ref(repo, ref)           -> tuple[str, ...]
     doc_text_at_ref(repo, ref, path)          -> str | None
-    handoff_paths_on_disk(repo)               -> tuple[str, ...]
+    handoff_paths_on_disk(repo)               -> DiskScan
     untracked_docs(on_disk, tracked)          -> tuple[str, ...]        PURE
     untracked_warnings(repo_label, paths)     -> tuple[str, ...]        PURE
+    unscannable_warnings(repo_label, scan)    -> tuple[str, ...]        PURE
+    derivation_warnings(derivations)          -> tuple[str, ...]        PURE
+    all_clear_blockers(derivations)           -> tuple[str, ...]        PURE
+    derivation_json(derivations)              -> dict                   PURE
     slug_for(doc_path)                        -> str                    PURE
     doc_date_for(doc_path, text)              -> str | None             PURE
     fold_forcing_kind(raw)                    -> str | None             PURE
@@ -165,6 +176,7 @@ __all__ = [
     "IndexStats",
     "Hit",
     "RepoDerivation",
+    "DiskScan",
     "SectionStore",
     "MemorySectionStore",
     "PostgresSectionStore",
@@ -174,8 +186,14 @@ __all__ = [
     "handoff_paths_on_disk",
     "untracked_docs",
     "untracked_warnings",
+    "unscannable_warnings",
     "identity_collisions",
     "rebuild_refusal",
+    "partial_scope_warnings",
+    "rebuild_delete_labels",
+    "derivation_warnings",
+    "all_clear_blockers",
+    "derivation_json",
     "render_derivation",
     "RC_OK",
     "RC_USAGE",
@@ -380,17 +398,62 @@ class Hit:
     rank: float
 
 
+@dataclass(frozen=True)
+class DiskScan:
+    """What the WORKING-TREE half of the durability comparison actually saw.
+
+    🔴 IT EXISTS BECAUSE `()` MEANT THREE DIFFERENT THINGS. `handoff_paths_on_disk`
+    used to return a bare tuple, so "the directory is absent", "the directory is
+    unreadable" and "the directory is readable and holds no handoff docs" were one
+    value — and `render_derivation` printed the literal all-clear "every handoff
+    doc on disk is also in it" for all three. MEASURED: with a real untracked doc
+    present, `chmod 0o000 claudedocs/` turned a `🔴 DURABILITY HOLE` into that
+    all-clear, with the doc still sitting there uncommitted.
+
+    🔴 AND THE MECHANISM WAS NOT THE ONE THE OLD CODE GUARDED. The old body wrapped
+    `Path.rglob` in `except OSError: return ()` — an UNREACHABLE clause for this
+    case, because `rglob` walks via `os.scandir` and SWALLOWS a per-directory
+    `PermissionError` internally. MEASURED on CPython 3.12.14: `rglob` over a
+    `chmod 0o000` directory returns `[]` and raises nothing. So the walk is now
+    `os.walk(..., onerror=…)`, which is the only form that HANDS the error back,
+    and the errors are recorded rather than swallowed.
+
+    `scanned` is "the walk was attempted and reached its end"; `errors` is every
+    directory it could not read. The all-clear requires BOTH, plus at least one
+    path actually seen — a comparison whose disk side is empty compared nothing.
+    The default is `scanned=False`: an unset field must never be able to license
+    an all-clear."""
+
+    paths: tuple[str, ...] = ()
+    scanned: bool = False
+    #: `HANDOFF_DIR` does not exist. A MEASURED absence (`git_mainline`'s
+    #: distinction), not a failure — an ordinary state for a worktree sitting on a
+    #: branch that predates the directory.
+    absent: bool = False
+    errors: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        """The walk ran AND hid nothing. The one predicate the all-clear reads."""
+        return self.scanned and not self.errors
+
+
 @dataclass
 class RepoDerivation:
     """What one repo contributed, and what could NOT be measured about it.
 
     🔴 `unmeasured` IS A STRUCTURAL FLAG, NOT A GREP OVER `warnings`. The refusal
     guard (`rebuild_refusal`) has to answer "did any repo fail to measure" before
-    it lets a TRUNCATE run, and answering that by searching the warning strings
-    for the word `UNMEASURED` would be exactly the spelled-not-structural guard
-    `claude/RULES.md` forbids: a reworded warning walks past it while the hazard
-    is unchanged. It carries the REASON token rather than a bool so the refusal
-    message can name what went wrong without re-deriving it."""
+    it lets a destructive rebuild run, and answering that by searching the warning
+    strings for the word `UNMEASURED` would be exactly the spelled-not-structural
+    guard `claude/RULES.md` forbids: a reworded warning walks past it while the
+    hazard is unchanged. It carries the REASON token rather than a bool so the
+    refusal message can name what went wrong without re-deriving it.
+
+    🔴 `disk` IS THE SAME KIND OF FIELD, FOR THE OTHER HALF OF THE REPORT. The
+    all-clear asserts something about the DISK side and used to be gated on the
+    REF-side document count (`elif total_docs:`) — two different measurements, one
+    of which cannot see the other's failure. See `DiskScan`."""
 
     repo: str
     label: str
@@ -401,6 +464,7 @@ class RepoDerivation:
     untracked: tuple[str, ...] = ()
     warnings: list[str] = field(default_factory=list)
     unmeasured: str | None = None
+    disk: DiskScan = field(default_factory=DiskScan)
 
 
 # --------------------------------------------------------------------------- #
@@ -497,33 +561,89 @@ def doc_text_at_ref(repo: str | Path, ref: str, path: str) -> str | None:
     return _git(repo, ["show", f"{ref}:{path}"])
 
 
-def handoff_paths_on_disk(repo: str | Path) -> tuple[str, ...]:
-    """`claudedocs/**/handoff-*.md` paths in the WORKING TREE, repo-relative, sorted.
+def handoff_paths_on_disk(repo: str | Path) -> DiskScan:
+    """The WORKING-TREE half of the durability comparison, AND whether it ran.
 
     Read ONLY to compute the untracked-doc report. Nothing derived from this
     function is ever indexed — see `untracked_docs`.
 
-    🔴 `rglob`, NOT `glob`, AND THE RECURSION IS THE WHOLE POINT. This function is
-    one HALF of a set difference whose other half is `handoff_paths_in_ref`, which
-    runs `git ls-tree -r` — RECURSIVE. A non-recursive disk scan therefore made the
-    two halves scan different shapes: a doc at `claudedocs/sub/handoff-x.md` on
-    disk and absent from the ref produced `untracked=()`, and `render_derivation`
-    printed the literal all-clear "every handoff doc on disk is also in it".
-    That is the failure mode `claude/RULES.md` calls worse than no check —
-    reporting COVERAGE it does not provide, so nobody looks again. The two sides of
-    a difference must walk the same tree or the difference is meaningless."""
-    base = Path(repo) / HANDOFF_DIR
-    try:
-        found = [p for p in base.rglob(HANDOFF_GLOB) if p.is_file()]
-    except OSError:
+    🔴 RECURSIVE, AND THE RECURSION IS THE WHOLE POINT. This function is one HALF
+    of a set difference whose other half is `handoff_paths_in_ref`, which runs
+    `git ls-tree -r` — RECURSIVE. A non-recursive disk scan made the two halves
+    walk different shapes: a doc at `claudedocs/sub/handoff-x.md` on disk and
+    absent from the ref produced `untracked=()`, and `render_derivation` printed
+    the literal all-clear "every handoff doc on disk is also in it". That is the
+    failure mode `claude/RULES.md` calls worse than no check — reporting COVERAGE
+    it does not provide, so nobody looks again. The two sides of a difference must
+    walk the same tree or the difference is meaningless.
+
+    🔴 AND THE MATCHER IS `_HANDOFF_NAME`, THE SAME ONE THE REF SIDE USES, not the
+    `HANDOFF_GLOB` shell pattern. Same argument, one level down: two spellings of
+    "is this a handoff doc" over the two halves of one difference is the duplicated
+    predicate that is wrong at N−1 sites.
+
+    🔴 `os.walk(onerror=…)`, NOT `Path.rglob`, AND THAT IS THE FIX FOR THE MEASURED
+    DEFECT — see `DiskScan`. `rglob` swallows a per-directory `PermissionError`
+    inside `os.scandir` and returns `[]`, so an UNREADABLE `claudedocs/` was
+    indistinguishable from a clean one and the old `except OSError: return ()`
+    around it could never fire. `os.walk` is the form that hands the error to a
+    callback, which is what lets an unreadable directory be REPORTED instead of
+    read as a finding of nothing."""
+    root = Path(repo)
+    base = root / HANDOFF_DIR
+    if not base.exists():
+        # A measured absence. `os.walk` would report it through `onerror` as an
+        # ENOENT, which reads as a failure — it is not one, and folding it in
+        # would make every repo without the directory look unscannable.
+        return DiskScan(paths=(), scanned=True, absent=True, errors=())
+
+    errors: list[str] = []
+
+    def _onerror(exc: OSError) -> None:
+        errors.append(f"{getattr(exc, 'filename', None) or base}: {exc.strerror or exc}")
+
+    out: list[str] = []
+    for dirpath, _dirnames, filenames in os.walk(base, onerror=_onerror):
+        for name in filenames:
+            if not _HANDOFF_NAME.match(name):
+                continue
+            p = Path(dirpath) / name
+            if not p.is_file():
+                continue
+            try:
+                out.append(p.relative_to(root).as_posix())
+            except ValueError:  # pragma: no cover - the walk is rooted at repo
+                continue
+    return DiskScan(
+        paths=tuple(sorted(out)),
+        scanned=True,
+        absent=False,
+        errors=tuple(errors),
+    )
+
+
+def unscannable_warnings(repo_label: str, scan: DiskScan) -> tuple[str, ...]:
+    """The warning lines for a disk scan that could not read everything. PURE.
+
+    Empty when the walk was clean — a per-repo "0 unreadable directories" would
+    bury the real ones, exactly as `untracked_warnings` argues for its own zero."""
+    if scan.complete:
         return ()
-    out = []
-    for p in found:
-        try:
-            out.append(p.relative_to(Path(repo)).as_posix())
-        except ValueError:  # pragma: no cover - glob is rooted at repo
-            continue
-    return tuple(sorted(out))
+    if not scan.scanned:  # pragma: no cover - no caller can produce this today
+        return (
+            f"⚠ UNSCANNED DISK — {repo_label}: the working-tree walk never ran, so "
+            f"the on-disk-vs-ref comparison has NO disk side. Untracked handoff "
+            f"docs, if any, are NOT reported.",
+        )
+    n = len(scan.errors)
+    return (
+        f"⚠ UNSCANNABLE DISK — {repo_label}: {n} director{'y' if n == 1 else 'ies'} "
+        f"under {HANDOFF_DIR}/ could not be read, so any handoff doc inside "
+        f"{'it' if n == 1 else 'them'} is INVISIBLE to the durability check — an "
+        f"uncommitted doc there is NOT reported and this run cannot say the repo "
+        f"is clean. Fix the permissions and re-run.",
+        *(f"    {e}" for e in scan.errors),
+    )
 
 
 def untracked_docs(on_disk: Iterable[str], tracked: Iterable[str]) -> tuple[str, ...]:
@@ -661,7 +781,7 @@ def doc_date_for(doc_path: str, text: str) -> str | None:
     `1234-56-78`; the previous docstring argued Postgres would reject those "at
     write time rather than this function guessing". It would — and that is the
     problem, not the safety net. The rejection lands INSIDE the write
-    transaction, after `--rebuild` has truncated, so one typo in one preamble
+    transaction, after `--rebuild` has deleted, so one typo in one preamble
     emptied the whole index. It is also DETERMINISTIC: the same doc fails the same
     way every 6h, so the index stays empty until a human reads the unit's journal.
     A malformed date is a display field being wrong; it must never be able to take
@@ -907,8 +1027,14 @@ def derive_repo(repo: str | Path, *, label: str | None = None) -> RepoDerivation
     out.ref = ref
     sha = ref_commit_sha(root, ref)
     tracked = handoff_paths_in_ref(root, ref)
-    out.untracked = untracked_docs(handoff_paths_on_disk(root), tracked)
+    out.disk = handoff_paths_on_disk(root)
+    out.untracked = untracked_docs(out.disk.paths, tracked)
     out.warnings.extend(untracked_warnings(name, out.untracked))
+    # 🔴 SURFACED, NOT SWALLOWED. An unreadable directory under `claudedocs/` used
+    # to produce an empty disk side with no warning and no flag, which rendered as
+    # the all-clear. It is a gap in the durability check, so it is a warning about
+    # the CHECK — and `render_derivation` also refuses the all-clear on it.
+    out.warnings.extend(unscannable_warnings(name, out.disk))
     for path in tracked:
         text = doc_text_at_ref(root, ref, path)
         if text is None:
@@ -1106,12 +1232,12 @@ class PostgresSectionStore:
     (pinned), the boost table it shares with the memory backend, the row shape it
     inserts, every caller path above it, and — through a fake connection that
     records `(statement, commit)` in order — that a `--rebuild` write issues its
-    TRUNCATE and every INSERT inside ONE transaction with exactly ONE commit at
-    the end. That last one is a real behavioural guard against a real incident,
+    SCOPED DELETE and every INSERT inside ONE transaction with exactly ONE commit
+    at the end. That last one is a real behavioural guard against a real incident,
     but a recorder is not a server. What is still NOT covered: that Postgres
     accepts the DDL, that the generated column is legal, that `ts_rank` orders as
-    expected, that TRUNCATE is transactional on the real server, or that a real
-    query returns anything at all."""
+    expected, that the delete and the inserts really are one transaction on the real
+    server, or that a real query returns anything at all."""
 
     def __init__(self, conn):
         self._conn = conn
@@ -1151,8 +1277,32 @@ class PostgresSectionStore:
             f"ON CONFLICT (repo, slug, section, ordinal) DO UPDATE SET {updates}"
         )
 
-    def write(self, rows: Sequence[Section], *, rebuild: bool = False) -> int:
-        """Write `rows`. With `rebuild`, TRUNCATE first — IN THE SAME TRANSACTION.
+    #: 🔴 A PREDICATE, NOT A `TRUNCATE`. The statement this replaced was
+    #: `TRUNCATE initiatives.handoff_section` with no WHERE at all, so a run
+    #: scoped to ONE repo emptied EVERY repo and reported success. The scope is
+    #: computed by `rebuild_delete_labels` and passed in; there is no code path
+    #: that deletes without one.
+    DELETE_SQL = f"DELETE FROM {TABLE} WHERE repo = ANY(%s)"
+
+    def write(
+        self,
+        rows: Sequence[Section],
+        *,
+        rebuild: bool = False,
+        rebuild_labels: Sequence[str] = (),
+    ) -> int:
+        """Write `rows`. With `rebuild`, DELETE the in-scope labels first — IN THE
+        SAME TRANSACTION.
+
+        🔴 THE DELETE IS SCOPED, AND AN UNSCOPED REBUILD IS A `ValueError`, NOT A
+        WHOLE-TABLE WIPE. Measured against this class over a recording connection:
+        `--repo ~/workspace/devrc --rebuild --write` issued `TRUNCATE
+        initiatives.handoff_section`, re-inserted only devrc, printed `wrote 968
+        section row(s)` and exited 0 — homelab-talos's ~515 sections silently
+        gone. `rebuild_labels` is therefore REQUIRED whenever `rebuild` is set;
+        an empty scope means the caller has not decided what it is authoritative
+        for, and guessing "everything" is exactly the bug. `rebuild_delete_labels`
+        is the one place that decision is made.
 
         🔴 ONE TRANSACTION, ONE COMMIT, ALL-OR-NOTHING PER RUN. This replaces a
         `truncate()` that committed on its own followed by an `upsert()` that
@@ -1171,7 +1321,15 @@ class PostgresSectionStore:
         run, which is every run the timer makes. A comment is a claim too, and
         this one would have talked a reader out of looking.
 
-        ON CONFLICT DO UPDATE is still the insert form: with the truncate now
+        ⚠ A SCOPED DELETE IS NOT AS CHEAP AS `TRUNCATE`, and that is a knowing
+        trade: `TRUNCATE` reclaims the whole relation in one step while `DELETE`
+        writes a tuple version per row and leaves the space to autovacuum. On a
+        corpus measured in the low thousands of rows that is not a cost worth
+        buying a whole-table wipe with. It is stated because a future reader
+        looking at row counts an order of magnitude larger should re-derive it,
+        not because it bites today.
+
+        ON CONFLICT DO UPDATE is still the insert form: with the delete now
         inside the transaction it is what keeps a manual non-rebuild run
         idempotent, and it is the reason `identity_collisions` has to exist —
         the clause cannot raise on a duplicate identity, so nothing but that
@@ -1180,12 +1338,19 @@ class PostgresSectionStore:
         🔴 A doc that SHRINKS (a section removed) leaves its old high ordinals
         behind on a NON-rebuild run — that is what `--rebuild` is for, and it is
         why the timer's unit runs it."""
+        if rebuild and not rebuild_labels:
+            raise ValueError(
+                "refusing a --rebuild with an EMPTY delete scope: the caller has "
+                "not said which repo labels this run is authoritative for, and "
+                "'all of them' is the whole-table wipe this parameter exists to "
+                "prevent. See rebuild_delete_labels()."
+            )
         sql = self.insert_sql()
         cols = self.WRITE_COLUMNS
         n = 0
         with self._conn.cursor() as cur:
             if rebuild:
-                cur.execute(f"TRUNCATE {TABLE}")
+                cur.execute(self.DELETE_SQL, [list(rebuild_labels)])
             for row in rows:
                 data = row.as_row()
                 cur.execute(sql, [data[c] for c in cols])
@@ -1310,14 +1475,14 @@ def import_maildb():
 def rebuild_refusal(
     derivations: Sequence[RepoDerivation], rows: Sequence[Section]
 ) -> str | None:
-    """`None` when a `--rebuild` TRUNCATE is safe; otherwise WHY it is refused.
+    """`None` when a `--rebuild` is safe to run; otherwise WHY it is refused.
 
     🔴 THE GUARD BETWEEN A BAD RUN AND AN EMPTY PRODUCTION INDEX. `--rebuild`
-    truncates BEFORE it knows it has anything to put back, and the timer runs
-    exactly `--rebuild` every 6h. Two failures reached that TRUNCATE and were
+    deletes BEFORE it knows it has anything to put back, and the timer runs
+    exactly `--rebuild` every 6h. Two failures reached that delete and were
     reported as success:
 
-      * every repo UNMEASURED — a renamed checkout, an unset env handle, a
+      * EVERY repo UNMEASURED — a renamed checkout, an unset env handle, a
         `git` that could not resolve a mainline. Measured: driving
         `main(["--repo","/bogus/a","--repo","/bogus/b","--rebuild"])` emptied the
         table and returned 0, so `OnFailure=notify-failure@%n.service` never fired
@@ -1326,32 +1491,248 @@ def rebuild_refusal(
         unreadable, or `HANDOFF_DIR` gone.
 
     Both are "I could not measure the corpus", and neither is "the corpus is
-    empty". Truncating on either replaces a good index with a confident nothing.
+    empty". Rebuilding on either replaces a good index with a confident nothing.
     The refusal is checked against `RepoDerivation.unmeasured` — a STRUCTURAL
     field, never a grep over the warning prose, which a reword would walk past.
 
-    🔴 A PARTIAL derivation still truncates, and that is deliberate: one repo
-    UNMEASURED out of three is a refusal (it is the `unmeasured` branch), but a
-    repo that legitimately holds zero handoff docs is not, because it MEASURED
-    zero. The distinction is exactly `git_mainline`'s: an absence that was
-    checked is a fact; an absence that could not be checked is not."""
+    🔴 A PARTIAL DERIVATION IS NOT A REFUSAL, AND THAT IS A DELIBERATE REVERSAL.
+    This guard first shipped refusing when ANY repo came back UNMEASURED. Measured
+    on one present repo (2 real rows) plus one absent repo: `REFUSING --rebuild: 1
+    of 2 repo(s) came back UNMEASURED`, rc 4, nothing written — on a unit carrying
+    `OnFailure=notify-failure@%n.service` and a 6h timer, i.e. a failure toast
+    4×/day forever with the index frozen at whatever it last held. A host that
+    legitimately does not have `$CIVITAI` or `$HOMELAB` checked out is a SUPPORTED
+    state (`nix/home.nix` says so where it sets the handles), and
+    `claude/RULES.md` is explicit that a permanently-red gate is worse than no
+    gate: it trains everyone to click through. So the rule is:
+
+        refuse when ALL repos are unmeasured, or when the measured subset
+        yields ZERO rows — index what resolved, and warn loudly about the rest.
+
+    What makes the partial case safe is NOT this function: it is
+    `rebuild_delete_labels`, which scopes the delete to the labels this run
+    actually MEASURED, so an unmeasured repo's rows are left exactly where they
+    are rather than truncated away. Refusing here as well would buy nothing and
+    cost the toast. The loud half is `partial_scope_warnings`, which every output
+    path prints and which the write's own success line repeats — a partial run
+    must not be able to read as a complete one."""
     bad = [d for d in derivations if d.unmeasured]
-    if bad:
+    if derivations and len(bad) == len(derivations):
         detail = ", ".join(f"{d.label} ({d.unmeasured})" for d in bad)
         return (
-            f"REFUSING --rebuild: {len(bad)} of {len(derivations)} repo(s) came back "
-            f"UNMEASURED — {detail}. A TRUNCATE here would replace a good index with "
+            f"REFUSING --rebuild: ALL {len(derivations)} repo(s) came back "
+            f"UNMEASURED — {detail}. A rebuild here would replace a good index with "
             f"a confident nothing, and the run would report success. Fix the repo "
             f"handles, or re-run without --rebuild to refresh what CAN be measured."
         )
     if not rows:
+        measured = len(derivations) - len(bad)
         return (
-            "REFUSING --rebuild: the derivation produced ZERO rows from "
-            f"{len(derivations)} repo(s) that all resolved a mainline ref. That is "
-            "not 'the corpus is empty' — it is a corpus that could not be read. "
-            "TRUNCATE is not run and nothing is written."
+            "REFUSING --rebuild: the derivation produced ZERO rows from the "
+            f"{measured} repo(s) that resolved a mainline ref. That is not 'the "
+            "corpus is empty' — it is a corpus that could not be read. Nothing is "
+            "deleted and nothing is written."
         )
     return None
+
+
+def partial_scope_warnings(derivations: Sequence[RepoDerivation]) -> tuple[str, ...]:
+    """The loud half of the partial-rebuild decision. PURE.
+
+    🔴 A PARTIAL RUN MUST NOT BE ABLE TO READ AS A COMPLETE ONE. `rebuild_refusal`
+    now PROCEEDS when some repos measured and some did not, so the only thing left
+    standing between "indexed what resolved" and a reader believing the index
+    covers every configured repo is this sentence. Empty when every repo measured,
+    for `untracked_warnings`' reason: a per-run "0 repos missing" buries the real
+    ones.
+
+    Printed by `render_derivation` (so `--dry-run` and `--json` carry it) AND
+    repeated on the write's own success line, because the success line is the one
+    output a scripted caller is most likely to be reading alone."""
+    bad = [d for d in derivations if d.unmeasured]
+    if not bad or len(bad) == len(derivations):
+        # All-unmeasured is `rebuild_refusal`'s case, not this one; saying it twice
+        # in two voices is how one of them stops being read.
+        return ()
+    detail = ", ".join(f"{d.label} ({d.unmeasured})" for d in bad)
+    ok = ", ".join(d.label for d in derivations if d.unmeasured is None)
+    return (
+        f"🔴 PARTIAL INDEX — {len(bad)} of {len(derivations)} configured repo(s) "
+        f"came back UNMEASURED and contributed NOTHING: {detail}. What was indexed "
+        f"covers only: {ok}. A query scoped to a missing repo will return an EMPTY "
+        f"SCOPE, and an unscoped query's silence is NOT evidence those repos are "
+        f"silent. Their existing rows are left untouched (the rebuild delete is "
+        f"scoped to what MEASURED), so this run neither refreshed nor destroyed "
+        f"them.",
+    )
+
+
+def rebuild_delete_labels(
+    derivations: Sequence[RepoDerivation],
+    stored: Sequence[str],
+    *,
+    scoped: bool,
+) -> tuple[str, ...]:
+    """The repo labels a `--rebuild` run is AUTHORITATIVE for — what it may delete.
+
+    🔴 THIS REPLACES AN UNQUALIFIED `TRUNCATE`, AND THE OLD ONE WAS A MEASURED
+    DATA-LOSS BUG. `handoff_index.py --repo ~/workspace/devrc --rebuild --write`
+    issued `TRUNCATE initiatives.handoff_section` — EVERY repo — re-inserted only
+    devrc, printed `wrote 968 section row(s) … (after TRUNCATE, one transaction)`
+    and exited 0. homelab-talos's ~515 sections were gone, silently, from the
+    exact command a human types to refresh one repo. Scoping the delete is chosen
+    over refusing a scoped rebuild because it makes the NATURAL command correct
+    rather than erroring at it.
+
+    Two inputs decide the scope, and both are structural:
+
+      * `scoped` — did the caller name repos with `--repo`? A scoped run speaks
+        only for what it was pointed at.
+      * `d.unmeasured` — a repo that could not be READ is not a repo whose rows
+        this run may destroy. This is what makes `rebuild_refusal`'s new
+        partial-tolerance safe: the absent `$CIVITAI` keeps its rows.
+
+    🔴 AND A FULL RUN STILL COLLECTS THE REPOS THAT DISAPPEARED FROM THE CONFIG.
+    Deleting only what MEASURED would leave a repo that was dropped from the env
+    handles indexed forever, un-refreshed and un-removable — a stale corpus that
+    every query keeps answering from. So an unscoped run (the timer's shape) also
+    claims authority over any stored label that is not in the CONFIGURED set at
+    all. Note the asymmetry, which is the whole point: configured-but-unmeasured
+    is preserved, not-configured-at-all is removed. A scoped run claims neither —
+    it was never told what the full config is.
+
+    PURE, so the whole decision is testable without a database."""
+    measured = {d.label for d in derivations if d.unmeasured is None}
+    if scoped:
+        return tuple(sorted(measured))
+    configured = {d.label for d in derivations}
+    disappeared = {r for r in stored if r not in configured}
+    return tuple(sorted(measured | disappeared))
+
+
+def derivation_warnings(derivations: Sequence[RepoDerivation]) -> tuple[str, ...]:
+    """Every warning a run has to report, from ONE function.
+
+    🔴 IT IS A FUNCTION BECAUSE THERE IS MORE THAN ONE OUTPUT PATH. The warning
+    block lived only inside `render_derivation`, which `--json` REPLACES — so an
+    agent using the machine surface (the surface most likely to be consumed
+    without a human reading it) got rows and no durability-hole report, no
+    identity collisions and no partial-index notice. A caveat spelled in one
+    renderer is a caveat the other renderer does not have."""
+    return (
+        *(w for d in derivations for w in d.warnings),
+        *identity_collisions([s for d in derivations for s in d.sections]),
+        *partial_scope_warnings(derivations),
+    )
+
+
+def all_clear_blockers(derivations: Sequence[RepoDerivation]) -> tuple[str, ...]:
+    """Why this run may NOT print the all-clear, beyond having no warnings. PURE.
+
+    🔴 THE ALL-CLEAR ASSERTS SOMETHING ABOUT THE DISK SIDE AND WAS GATED ON THE
+    REF SIDE. `render_derivation` read `elif total_docs:` — a count of documents
+    found in the git REF — and then printed "every handoff doc on disk is also in
+    it". Those are two different measurements, and the ref-side count cannot see a
+    disk-side failure. MEASURED on one repo with a real durability hole present:
+    readable → `🔴 DURABILITY HOLE — 1 handoff doc …`; `chmod 0o000 claudedocs/` →
+    `## warnings: none — … every handoff doc on disk is also in it.` The
+    uncommitted doc had not moved.
+
+    So the sentence is now gated on the measurement it actually describes:
+
+      * every repo's disk walk RAN and hid nothing (`DiskScan.complete`), and
+      * the walk saw at least one path — a set difference whose disk side is
+        empty compared nothing, and "every handoff doc on disk is also in it" over
+        zero docs is vacuously true, which is the shape `claude/RULES.md` calls
+        worse than no check.
+
+    The ref-side count stays as a third condition (it is `render_derivation`'s
+    original one, and it is right — it just was not sufficient). Returning the
+    REASONS rather than a bool is what lets the report say which measurement was
+    missing instead of a bare NOT AN ALL-CLEAR.
+
+    ⚠ THE `incomplete` ARM CANNOT CHANGE `render_derivation`'S OUTPUT, AND THAT IS
+    STATED BECAUSE A MUTATION SWEEP FOUND IT. Deleting the arm left the whole
+    suite green: an incomplete walk always also produces an `⚠ UNSCANNABLE DISK`
+    warning (both read the same `DiskScan.complete`), and any warning at all sends
+    the renderer down the `if warnings:` branch, which never consults the
+    blockers. So in the TEXT report it is a second copy of one predicate.
+
+    It is kept, and it is not decoration, because `derivation_json` exposes
+    `all_clear_blockers` as its own machine-readable field: a consumer asking
+    "what stopped the all-clear" must get the complete answer from THAT list, not
+    have to also parse prose out of `warnings`. Its coverage is therefore a
+    contract of this pure function and is tested AS one — reached directly rather
+    than through the renderer, which structurally cannot reach it."""
+    out: list[str] = []
+    if not sum(d.docs for d in derivations):
+        out.append(
+            "ZERO documents were scanned in any mainline ref, so the "
+            "on-disk-vs-ref comparison had nothing to compare"
+        )
+    incomplete = [d.label for d in derivations if not d.disk.complete]
+    if incomplete:
+        out.append(
+            "the working-tree walk did not complete for: "
+            + ", ".join(incomplete)
+            + " — so an uncommitted doc there would be INVISIBLE to this check"
+        )
+    if not sum(len(d.disk.paths) for d in derivations):
+        # ⚠ DO NOT QUOTE THE ALL-CLEAR SENTENCE HERE. `TestTheAllClearIsEarned`
+        # pins the WHOLE normalised sentence as absent from a non-all-clear
+        # report — the guard against a reword walking past it — so echoing the
+        # words inside the reason for withholding it makes that pin unsatisfiable.
+        out.append(
+            "the DISK side of the comparison saw ZERO handoff docs, so an "
+            "all-clear about it would be vacuously true and measure nothing"
+        )
+    return tuple(out)
+
+
+def derivation_json(derivations: Sequence[RepoDerivation]) -> dict:
+    """The machine surface, carrying everything `render_derivation` prints.
+
+    🔴 `--json` USED TO EMIT A BARE LIST OF ROWS AND NOTHING ELSE. The warning
+    block lived inside `render_derivation`, which `--json` replaces — so the
+    surface built FOR AN AGENT was the one surface with no durability-hole
+    report, no identity collisions and no partial-index notice, on a CLI whose
+    default mode is now dry-run. That is the same defect as a caveat spelled in
+    one renderer: the consumer least able to notice the omission got it.
+
+    Shape: an OBJECT, not a list. The rows moved under `rows` so the warnings can
+    sit beside them; there are no consumers of the old list shape (P1, and the
+    timer that would use it ships gated off), so this is a rename, not a
+    migration. `all_clear` is a BOOLEAN a caller can branch on, with
+    `all_clear_blockers` naming what was not measured when it is false — the
+    same distinction the text renderer draws between "no findings" and "nothing
+    examined"."""
+    warnings = derivation_warnings(derivations)
+    blockers = all_clear_blockers(derivations)
+    return {
+        "rows": [s.as_row() for d in derivations for s in d.sections],
+        "warnings": list(warnings),
+        "all_clear": not warnings and not blockers,
+        "all_clear_blockers": list(blockers),
+        "totals": {
+            "docs": sum(d.docs for d in derivations),
+            "sections": sum(len(d.sections) for d in derivations),
+        },
+        "repos": [
+            {
+                "label": d.label,
+                "repo": d.repo,
+                "ref": d.ref,
+                "docs": d.docs,
+                "sections": len(d.sections),
+                "unmeasured": d.unmeasured,
+                "untracked": list(d.untracked),
+                "disk_scan_complete": d.disk.complete,
+                "disk_paths_seen": len(d.disk.paths),
+                "disk_scan_errors": list(d.disk.errors),
+            }
+            for d in derivations
+        ],
+    }
 
 
 def render_derivation(derivations: Sequence[RepoDerivation]) -> str:
@@ -1363,29 +1744,29 @@ def render_derivation(derivations: Sequence[RepoDerivation]) -> str:
         ref = d.ref or "NO MAINLINE REF"
         lines.append(f"  {d.label:<24} {ref:<20} docs={d.docs:<5} sections={len(d.sections)}")
     lines.append(f"  TOTAL  docs={total_docs}  sections={total_rows}")
-    warnings = [
-        *(w for d in derivations for w in d.warnings),
-        *identity_collisions([s for d in derivations for s in d.sections]),
-    ]
+    warnings = derivation_warnings(derivations)
+    blockers = all_clear_blockers(derivations)
     if warnings:
         lines.append("")
         lines.append("## warnings")
         lines.extend(f"  {w}" for w in warnings)
-    elif total_docs:
+    elif not blockers:
         lines.append("")
         lines.append("## warnings: none — every repo resolved a mainline ref and every")
         lines.append("   handoff doc on disk is also in it.")
     else:
-        # 🔴 THE ALL-CLEAR IS CONDITIONAL ON HAVING SCANNED SOMETHING. Zero docs
-        # with zero warnings means the comparison found nothing to compare, and
-        # printing "every handoff doc on disk is also in it" for it is a vacuous
-        # green — a guard whose description claims coverage its body did not
-        # provide (claude/RULES.md). A reader must not be able to mistake "no
-        # documents were examined" for "no problems were found".
+        # 🔴 THE ALL-CLEAR IS CONDITIONAL ON HAVING MEASURED THE THING IT CLAIMS.
+        # Zero warnings is not the same fact as zero findings: a comparison that
+        # never ran, or ran over nothing, produces no warnings either. Printing
+        # "every handoff doc on disk is also in it" for that is a vacuous green —
+        # a guard whose description claims coverage its body did not provide
+        # (claude/RULES.md). A reader must not be able to mistake "nothing was
+        # examined" for "no problems were found", so the reasons are NAMED.
         lines.append("")
-        lines.append("## warnings: NOT AN ALL-CLEAR — ZERO documents were scanned, so the")
-        lines.append("   on-disk-vs-ref comparison had nothing to compare. This is an")
-        lines.append("   absence of MEASUREMENT, not an absence of findings.")
+        lines.append("## warnings: NOT AN ALL-CLEAR — this run did not measure what the")
+        lines.append("   all-clear would claim. This is an absence of MEASUREMENT, not")
+        lines.append("   an absence of findings:")
+        lines.extend(f"     - {b}" for b in blockers)
     return "\n".join(lines)
 
 
@@ -1427,8 +1808,11 @@ def main(argv: Sequence[str] | None = None, *, open_store=_maildb_store) -> int:
                          "NOT the repo LABEL that handoff_search.py's --repo takes; "
                          "default: the $DEVRC/$HOMELAB/… handles that are set")
     ap.add_argument("--rebuild", action="store_true",
-                    help="TRUNCATE the table and re-derive from scratch, in ONE "
-                         "transaction; refused if any repo came back UNMEASURED")
+                    help="DELETE this run's in-scope repo rows and re-derive them from "
+                         "scratch, in ONE transaction; the delete is scoped to the "
+                         "repos this run MEASURED (never the whole table), and is "
+                         "refused if ALL repos came back UNMEASURED or the "
+                         "derivation is empty")
     ap.add_argument("--write", action="store_true",
                     help="actually write to the database (without it, this only "
                          "derives and reports — see --dry-run)")
@@ -1458,52 +1842,93 @@ def main(argv: Sequence[str] | None = None, *, open_store=_maildb_store) -> int:
         )
         return RC_USAGE
 
+    # 🔴 EXPLICIT `--repo` IS WHAT MAKES A RUN SCOPED, and the distinction decides
+    # what a `--rebuild` may delete. A run told which repos to look at speaks only
+    # for those; a run that read the CONFIGURED set (`default_repos`) is
+    # authoritative over the whole table, including labels that have since
+    # disappeared from the config. See `rebuild_delete_labels`.
+    scoped = bool(args.repo)
     derivations = [derive_repo(path, label=label) for path, label in repos]
     rows = [s for d in derivations for s in d.sections]
 
     if args.json:
-        print(json.dumps([s.as_row() for s in rows], indent=2, sort_keys=True))
+        print(json.dumps(derivation_json(derivations), indent=2, sort_keys=True))
     else:
         print(render_derivation(derivations))
+
+    # 🔴 EVERY GATE IS EVALUATED BEFORE THE `--write` BRANCH, and that is the fix
+    # for a pre-flight that passed for a config the real run refused.
+    # `nix/home.nix` tells the operator to watch a `--dry-run` before arming the
+    # timer; MEASURED, `--repo /nope --rebuild` (dry-run) exited 0 with no
+    # "REFUS" text anywhere while the identical argv plus `--write` exited 4. A
+    # documented pre-flight that cannot fail is not a pre-flight. So the gates run
+    # in both modes, report identically, and return the SAME code — the only
+    # difference between the two runs is whether a store is opened.
+    #
+    # 🔴 EVERY REFUSAL EXITS NON-ZERO. The unit carries
+    # `OnFailure=notify-failure@%n.service`, so a run that refuses must not return
+    # 0 — a silent success is how an empty index went unnoticed. The checks run
+    # BEFORE the store is opened: there is no reason to take a port-forward for a
+    # write that is not going to happen.
+    gate: tuple[int, list[str]] | None = None
+    collisions = identity_collisions(rows)
+    if collisions:
+        gate = (RC_COLLISION, [
+            *collisions,
+            "handoff-index: refusing to write a derivation that would silently "
+            "lose documents.",
+        ])
+    elif args.rebuild:
+        # 🔴 THE REFUSAL IS REBUILD-SCOPED, DELIBERATELY, AND THE BOUNDARY IS
+        # STATED BECAUSE IT LOOKS LIKE AN OVERSIGHT. A non-rebuild run over an
+        # UNMEASURED repo still exits 0: it DESTROYS nothing (the upsert simply
+        # refreshes fewer rows) and the warning is printed either way. What is
+        # unrecoverable is DELETING on a derivation that could not be measured at
+        # all, and that is what refuses. The timer passes `--rebuild`, so the
+        # scheduled path is the covered one.
+        refusal = rebuild_refusal(derivations, rows)
+        if refusal:
+            gate = (RC_REFUSED, [f"🔴 {refusal}"])
+
+    if gate is not None:
+        rc, lines = gate
+        for line in lines:
+            print(line, file=sys.stderr)
+        if not args.write:
+            print("handoff-index: this was a DRY RUN — nothing was written, and the "
+                  "SAME check would stop the --write run with this same exit code. "
+                  "Fix it before arming the timer.", file=sys.stderr)
+        return rc
 
     if not args.write:
         print("\n(no --write: nothing was written. Dry-run is the DEFAULT; pass "
               "--write to touch the database.)")
         return RC_OK
 
-    # 🔴 EVERY REFUSAL BELOW EXITS NON-ZERO, and that is half the fix. The unit
-    # carries `OnFailure=notify-failure@%n.service`, so a run that refuses to
-    # write must not return 0 — a silent success is how an empty index went
-    # unnoticed. The checks run BEFORE the store is opened: there is no reason to
-    # take a port-forward for a write that is not going to happen.
-    collisions = identity_collisions(rows)
-    if collisions:
-        for line in collisions:
-            print(line, file=sys.stderr)
-        print("handoff-index: refusing to write a derivation that would silently "
-              "lose documents.", file=sys.stderr)
-        return RC_COLLISION
-
-    # 🔴 THE REFUSAL IS REBUILD-SCOPED, DELIBERATELY, AND THE BOUNDARY IS STATED
-    # BECAUSE IT LOOKS LIKE AN OVERSIGHT. A non-rebuild run over an UNMEASURED
-    # repo still exits 0: it DESTROYS nothing (the upsert simply refreshes fewer
-    # rows), the warning is printed either way, and making it fatal would fire
-    # the failure toast forever on any host whose `$HOMELAB`/`$CIVITAI` checkout
-    # is legitimately absent — the exact case `nix/home.nix` says is safe to
-    # configure. What is unrecoverable is TRUNCATING on an unmeasured
-    # derivation, and that is what refuses. The timer passes `--rebuild`, so the
-    # scheduled path is the covered one.
-    if args.rebuild:
-        refusal = rebuild_refusal(derivations, rows)
-        if refusal:
-            print(f"🔴 {refusal}", file=sys.stderr)
-            return RC_REFUSED
-
     with open_store() as store:
         store.ensure_schema()
-        n = store.write(rows, rebuild=args.rebuild)
-    print(f"\nwrote {n} section row(s) to {TABLE}"
-          f"{' (after TRUNCATE, one transaction)' if args.rebuild else ''}")
+        # 🔴 READ THE STORED LABELS BEFORE DECIDING WHAT TO DELETE. The delete
+        # scope needs to know which repos the table holds that the CONFIG no
+        # longer names, and that fact exists only in the database.
+        labels = (
+            rebuild_delete_labels(derivations, store.repos(), scoped=scoped)
+            if args.rebuild else ()
+        )
+        n = store.write(rows, rebuild=args.rebuild, rebuild_labels=labels)
+    scope_note = (
+        f" (after DELETE of {len(labels)} repo label(s): {', '.join(labels)} — "
+        f"one transaction)" if args.rebuild else ""
+    )
+    partial = partial_scope_warnings(derivations)
+    # 🔴 THE SUCCESS LINE ITSELF SAYS PARTIAL. It is the one line a scripted
+    # caller is most likely to read alone, and `wrote 968 section row(s)` reads as
+    # a complete index whether or not it is one.
+    print(f"\nwrote {n} section row(s) to {TABLE}{scope_note}"
+          + ("\n🔴 THIS INDEX IS PARTIAL — see the PARTIAL INDEX warning above; "
+             "some configured repos contributed nothing and kept their old rows."
+             if partial else ""))
+    for line in partial:
+        print(line, file=sys.stderr)
     return RC_OK
 
 

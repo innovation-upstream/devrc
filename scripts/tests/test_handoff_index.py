@@ -691,23 +691,56 @@ class TestRecallBanner:
             hs.run_search(_store(), "zarfwidget", backend="memory",
                           repo="norepo-by-that-name").status,
             hs.run_search(hi.MemorySectionStore([]), "x", backend="memory").status,
+            hs.run_search(hi.MemorySectionStore([]), "x", backend="memory",
+                          unmeasured=(("gone", "no-such-directory"),)).status,
         }
         assert emitted == set(hs.STATUSES)
 
     def test_every_status_has_an_exit_code_and_vice_versa(self):
-        """🔴 PINNED TWO-WAY. A status missing from `EXIT_CODES` falls through
-        `.get(status, 0)` and exits 0 — the fluent-zero failure one level up, in
-        the one channel a scripted caller reads. A code for a status nothing
-        emits is a contract that can never fire. `hit`/`no-match` are the two
-        ANSWERS and are absent ON PURPOSE, so the ledger is stated as a partition
-        rather than as a subset."""
-        answers = {"hit", "no-match"}
-        assert set(hs.EXIT_CODES) | answers == set(hs.STATUSES)
-        assert set(hs.EXIT_CODES) & answers == set()
-        # …and no two non-answers share a code, or the caller cannot tell a
-        # broken environment from their own bad filter.
+        """🔴 PINNED AS A PARTITION. A status in none of the three ledgers falls
+        through `.get(status, 0)` and exits 0 — the fluent-zero failure one level
+        up, in the one channel a scripted caller reads. A ledger entry for a
+        status nothing emits is a contract that can never fire.
+
+        Three ledgers, not one, because `empty-scope`'s code is decided by its
+        REASON and the other statuses' by the status alone. They must PARTITION
+        `STATUSES`: overlap would mean two rules claim one status and the winner
+        is whichever branch `exit_code_for` happens to test first."""
+        ledgers = [set(hs.EXIT_CODES), set(hs.ANSWER_STATUSES),
+                   set(hs.REASON_KEYED_STATUSES)]
+        assert set().union(*ledgers) == set(hs.STATUSES)
+        for i, a in enumerate(ledgers):
+            for b in ledgers[i + 1:]:
+                assert a & b == set(), (a, b)
+        # …and no two status-keyed non-answers share a code, or the caller cannot
+        # tell a broken environment from a missing checkout.
         assert len(set(hs.EXIT_CODES.values())) == len(hs.EXIT_CODES)
         assert all(v != 0 for v in hs.EXIT_CODES.values())
+
+    def test_every_scope_reason_has_an_exit_code_and_vice_versa(self):
+        """🔴 THE SECOND HALF OF THE PARTITION, PINNED TWO-WAY. `empty-scope` is
+        REASON-keyed, so a new `SCOPE_REASONS` member with no entry here would
+        take `exit_code_for`'s fallback silently, and an entry naming no reason is
+        a code nothing can produce."""
+        assert set(hs.SCOPE_REASON_EXIT_CODES) == set(hs.SCOPE_REASONS)
+
+    def test_the_documented_no_rows_decision_is_the_one_that_ships(self):
+        """🔴 THE ARGUABLE CHOICE, PINNED SO IT CANNOT DRIFT SILENTLY. The module
+        docstring argues at length that a VALID filter over an empty scope
+        (`no-rows`) exits non-zero rather than 0, because the exit code is the one
+        channel read without the prose and `no-rows` (searched ZERO sections) and
+        `no-match` (searched N>0, found nothing) are the two zeros this module
+        exists to keep apart. Asserted as a differential against `no-match`, which
+        IS an answer and IS 0 — a test on `no-rows` alone could not tell the
+        decision from a blanket 'everything is non-zero'."""
+        store = _store()
+        no_rows = hs.run_search(store, "zarfwidget", backend="memory",
+                                repo="cablerepo", sections=["gotcha"])
+        no_match = hs.run_search(store, "hexapoddery", backend="memory")
+        assert no_rows.scope_reason == "no-rows"
+        assert hs.exit_code_for(no_rows) == 4
+        assert no_match.status == "no-match"
+        assert hs.exit_code_for(no_match) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -830,7 +863,11 @@ class RecordingCursor:
         return False
 
     def execute(self, sql, params=None):
-        self._log.append(("EXEC", " ".join(str(sql).split())))
+        # 🔴 THE PARAMS ARE RECORDED TOO, and that is not decoration: the F2
+        # defect is a DELETE whose WHERE clause is right and whose BOUND SCOPE is
+        # wrong. A recorder that keeps only the SQL text cannot see the difference
+        # between deleting one repo's rows and deleting every repo's.
+        self._log.append(("EXEC", " ".join(str(sql).split()), params))
 
     def fetchone(self):
         return (0, 0)
@@ -868,14 +905,26 @@ class RecordingConn:
     def statements(self):
         return [e[1] for e in self.log if e[0] == "EXEC"]
 
+    def params_for(self, prefix):
+        """The bound parameters of every statement starting with `prefix`."""
+        return [e[2] for e in self.log if e[0] == "EXEC" and e[1].startswith(prefix)]
+
     def kinds(self):
-        """The log as a coarse sequence: TRUNCATE / INSERT / DDL / COMMIT."""
+        """The log as a coarse sequence: TRUNCATE / DELETE / INSERT / DDL / COMMIT.
+
+        🔴 `TRUNCATE` IS STILL IN THE VOCABULARY THOUGH NOTHING EMITS IT ANY MORE.
+        That is deliberate: the assertions below say `"TRUNCATE" not in kinds`,
+        and a classifier that cannot spell the word would satisfy that assertion
+        for a run that issued one. A negative assertion is only worth what the
+        instrument's positive vocabulary is."""
         out = []
         for e in self.log:
             if e[0] == "COMMIT":
                 out.append("COMMIT")
             elif e[1].startswith("TRUNCATE"):
                 out.append("TRUNCATE")
+            elif e[1].startswith("DELETE"):
+                out.append("DELETE")
             elif e[1].startswith("INSERT"):
                 out.append("INSERT")
             elif e[1].startswith("SELECT pg_advisory"):
@@ -969,35 +1018,113 @@ class TestRebuildRefusal:
         assert d.unmeasured is None
         assert hi.rebuild_refusal([d], d.sections) is None
 
-    def test_one_unmeasured_repo_among_several_still_refuses(self, tmp_path):
-        """A PARTIAL derivation is the dangerous shape, not the obvious one: it
-        produces rows, so a guard keyed only on emptiness would let it truncate
-        and replace the corpus with a subset of itself."""
+    def test_one_unmeasured_repo_among_several_is_NOT_refused(self, tmp_path):
+        """🔴 A DELIBERATE REVERSAL, AND THE REASON IT REVERSED IS A MEASUREMENT.
+        This guard first shipped refusing when ANY repo came back UNMEASURED.
+        Measured on exactly this shape — one present repo with real rows plus one
+        absent repo — it returned `REFUSING --rebuild: 1 of 2 repo(s) came back
+        UNMEASURED`, rc 4, nothing written. On a unit carrying
+        `OnFailure=notify-failure@%n.service` behind a 6h timer that is a failure
+        toast 4×/day forever with the index frozen, on a host whose only sin is
+        not having `$CIVITAI` checked out — `claude/RULES.md`'s permanently-red
+        gate, which trains everyone to click through.
+
+        A partial run is now SAFE rather than refused, and the thing that makes it
+        safe is `rebuild_delete_labels` scoping the delete away from the repo that
+        could not be read. That is asserted here too: refusing would be pointless
+        if the proceed-path still destroyed the unmeasured repo's rows."""
         good = tmp_path / "good"
         _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
         ds = [hi.derive_repo(good, label="good"),
               hi.derive_repo(tmp_path / "gone", label="gone")]
         rows = [s for d in ds for s in d.sections]
-        assert rows  # the run DID produce rows
-        refusal = hi.rebuild_refusal(ds, rows)
+        assert rows and ds[1].unmeasured == "no-such-directory"
+        assert hi.rebuild_refusal(ds, rows) is None
+        # …and the unmeasured repo's rows are NOT in the delete scope, so they
+        # survive the rebuild rather than being silently replaced by nothing.
+        labels = hi.rebuild_delete_labels(ds, ("good", "gone"), scoped=False)
+        assert labels == ("good",)
+
+    def test_a_partial_derivation_says_PARTIAL_INDEX_loudly(self, tmp_path):
+        """🔴 PROCEEDING WITHOUT SAYING SO IS THE WORSE BUG. With the refusal
+        relaxed, this warning is the only thing standing between "indexed what
+        resolved" and a reader believing the index covers every configured repo.
+        Pinned as a differential over the SAME renderer, so only the partiality
+        can explain the two outputs."""
+        good = tmp_path / "partialgood"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        ds = [hi.derive_repo(good, label="partialgood"),
+              hi.derive_repo(tmp_path / "vanished", label="vanished")]
+
+        partial = hi.render_derivation(ds)
+        assert "🔴 PARTIAL INDEX" in partial
+        assert "vanished (no-such-directory)" in partial
+        assert "covers only: partialgood" in partial
+
+        # The negative control: an all-measured run must NOT carry it, or the
+        # assertion above proves only that the sentence is always printed.
+        whole = hi.render_derivation([ds[0]])
+        assert "PARTIAL INDEX" not in whole
+
+    def test_an_ALL_unmeasured_derivation_is_still_refused(self, tmp_path):
+        """The boundary the reversal did NOT move. Refusing on ANY unmeasured repo
+        and refusing on ALL of them differ only when the set is mixed, so this
+        pins the end of the range the relaxation must not have swallowed."""
+        ds = [hi.derive_repo(tmp_path / "gone-a", label="gone-a"),
+              hi.derive_repo(tmp_path / "gone-b", label="gone-b")]
+        refusal = hi.rebuild_refusal(ds, [])
         assert refusal is not None
-        assert "gone (no-such-directory)" in refusal
+        assert "ALL 2 repo(s) came back UNMEASURED" in refusal
+        assert "gone-a (no-such-directory)" in refusal
+
+    def test_a_partial_derivation_with_no_rows_is_refused(self, tmp_path):
+        """The other end: SOME repos measured, and what they measured is nothing.
+        The relaxation keys on the unmeasured COUNT, so a partial run whose
+        measured half is empty must still be caught by the zero-rows arm — with a
+        message that no longer claims every repo resolved a ref."""
+        empty = tmp_path / "partialempty"
+        _write_repo(empty, {}, commit=False)
+        subprocess.run(["git", "-C", str(empty), "commit", "-qm", "e", "--allow-empty"],
+                       check=True)
+        ds = [hi.derive_repo(empty, label="partialempty"),
+              hi.derive_repo(tmp_path / "absent", label="absent")]
+        refusal = hi.rebuild_refusal(ds, [])
+        assert refusal is not None
+        assert "ZERO rows from the 1 repo(s) that resolved" in refusal
+
+    def test_a_partial_rebuild_WRITES_and_says_partial_through_main(self, tmp_path, capsys):
+        """🔴 THE WHOLE REVERSAL, END TO END, THROUGH `main`. Before this change
+        the identical argv exited 4 and opened no store at all; the recording
+        connection is what proves the write now HAPPENS rather than merely that
+        the exit code moved."""
+        good = tmp_path / "e2egood"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        conn = RecordingConn()
+        rc = hi.main(["--repo", str(good), "--repo", str(tmp_path / "e2egone"),
+                      "--rebuild", "--write"], open_store=_recording_store(conn))
+        assert rc == hi.RC_OK
+        assert conn.kinds().count("INSERT") == 9
+        out = capsys.readouterr()
+        assert "🔴 THIS INDEX IS PARTIAL" in out.out
+        assert "🔴 PARTIAL INDEX" in out.err
+        # …and the delete named only the repo that measured.
+        assert conn.params_for("DELETE") == [[["e2egood"]]]
 
 
 class TestWriteTransaction:
-    def test_the_truncate_and_every_insert_share_ONE_transaction(self, tmp_path):
+    def test_the_delete_and_every_insert_share_ONE_transaction(self, tmp_path):
         """🔴 THE MUTANT-KILLER, AND THE ORDERING IS THE CLAIM.
 
         Three things are asserted, and each fails for its own mutation:
-          * a TRUNCATE is issued at all           (mutant: `TRUNCATE` -> `pass`)
+          * a DELETE is issued at all             (mutant: the delete -> `pass`)
           * it comes BEFORE every INSERT          (mutant: reordered)
-          * there is NO commit between the TRUNCATE and the last INSERT, and
+          * there is NO commit between the DELETE and the last INSERT, and
             exactly ONE after it                  (mutant: the old two-commit
                                                    `truncate(); upsert()` shape)
 
         The schema DDL commits separately and BEFORE any of this — that is
         `ensure_schema`'s advisory-lock transaction and is not part of the data
-        write — so the sequence is sliced from the TRUNCATE onward."""
+        write — so the sequence is sliced from the DELETE onward."""
         repo = tmp_path / "txrepo"
         _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
         conn = RecordingConn()
@@ -1006,16 +1133,16 @@ class TestWriteTransaction:
         assert rc == hi.RC_OK
 
         kinds = conn.kinds()
-        assert "TRUNCATE" in kinds, kinds
-        tail = kinds[kinds.index("TRUNCATE"):]
+        assert "DELETE" in kinds, kinds
+        tail = kinds[kinds.index("DELETE"):]
         n_inserts = tail.count("INSERT")
         assert n_inserts == 9, tail  # DOC_FULL's nine retrieval units
-        # TRUNCATE, then every INSERT, then exactly ONE commit — and nothing else.
-        assert tail == ["TRUNCATE", *(["INSERT"] * n_inserts), "COMMIT"], tail
+        # DELETE, then every INSERT, then exactly ONE commit — and nothing else.
+        assert tail == ["DELETE", *(["INSERT"] * n_inserts), "COMMIT"], tail
 
-    def test_a_write_without_rebuild_issues_no_truncate(self, tmp_path):
+    def test_a_write_without_rebuild_issues_no_delete(self, tmp_path):
         """The negative control for the same recorder: it must be capable of
-        NOT seeing a TRUNCATE, or the assertion above proves only that the word
+        NOT seeing a delete, or the assertion above proves only that the word
         is always present."""
         repo = tmp_path / "notruncate"
         _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
@@ -1023,10 +1150,94 @@ class TestWriteTransaction:
         rc = hi.main(["--repo", str(repo), "--write"], open_store=_recording_store(conn))
         assert rc == hi.RC_OK
         kinds = conn.kinds()
+        assert "DELETE" not in kinds
         assert "TRUNCATE" not in kinds
         assert kinds.count("INSERT") == 9
         # Still one commit for the data write (plus ensure_schema's own).
         assert kinds[-1] == "COMMIT"
+
+
+class TestScopedRebuildDelete:
+    """F2 — a `--repo`-scoped `--rebuild --write` used to empty the WHOLE table."""
+
+    def test_a_scoped_rebuild_deletes_ONLY_the_repo_it_was_pointed_at(self, tmp_path):
+        """🔴 THE REPRODUCED DEFECT, AND IT REPORTED SUCCESS. Measured against
+        this exact class over a recording connection:
+        `handoff_index.py --repo ~/workspace/devrc --rebuild --write` issued
+        `TRUNCATE initiatives.handoff_section` — no predicate, every repo —
+        re-inserted only devrc, printed `wrote 968 section row(s) … (after
+        TRUNCATE, one transaction)` and exited 0. homelab-talos's ~515 sections
+        were gone.
+
+        The assertion is on the BOUND SCOPE, not on the verb. A DELETE with a
+        WHERE clause bound to every stored label is the same data loss spelled
+        differently, and a test that only checked for the word `DELETE` would pass
+        for it."""
+        repo = tmp_path / "onlyme"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+
+        conn = RecordingConn()
+        rc = hi.main(["--repo", str(repo), "--rebuild", "--write"],
+                     open_store=_recording_store(conn))
+        assert rc == hi.RC_OK
+        stmts = [s for s in conn.statements() if s.startswith(("DELETE", "TRUNCATE"))]
+        assert len(stmts) == 1, stmts
+        assert stmts[0] == "DELETE FROM initiatives.handoff_section WHERE repo = ANY(%s)"
+        # 🔴 THE SCOPE ITSELF. `onlyme` and nothing else.
+        assert conn.params_for("DELETE") == [[["onlyme"]]]
+        # …and the success line no longer advertises a TRUNCATE that is not run.
+        assert "TRUNCATE" not in "\n".join(conn.statements())
+
+    def test_the_scope_is_the_MEASURED_labels_not_every_derived_one(self, tmp_path):
+        """A repo that could not be READ is not a repo whose rows this run may
+        destroy — that is what makes the relaxed refusal safe. Differential over
+        one derivation list, so only the `unmeasured` flag can explain it."""
+        good = tmp_path / "measured"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        ds = [hi.derive_repo(good, label="measured"),
+              hi.derive_repo(tmp_path / "unmeasured", label="unmeasured")]
+        assert hi.rebuild_delete_labels(ds, (), scoped=True) == ("measured",)
+        assert hi.rebuild_delete_labels(ds, (), scoped=False) == ("measured",)
+
+    def test_a_FULL_run_still_collects_a_repo_that_left_the_config(self, tmp_path):
+        """🔴 THE ASYMMETRY IS THE WHOLE DESIGN, and scoping the delete without it
+        would trade a data-loss bug for a stale-corpus bug: a repo dropped from
+        the env handles would stay indexed forever, un-refreshed and unremovable,
+        with every query still answering from it.
+
+        configured-but-UNMEASURED  -> preserved (it may come back)
+        NOT CONFIGURED at all      -> deleted   (nothing will ever refresh it)
+
+        A scoped run claims neither, because it was never told what the full
+        config is. Three-way differential over ONE stored set."""
+        good = tmp_path / "stillhere"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        ds = [hi.derive_repo(good, label="stillhere"),
+              hi.derive_repo(tmp_path / "cantread", label="cantread")]
+        stored = ("stillhere", "cantread", "dropped-from-config")
+
+        full = hi.rebuild_delete_labels(ds, stored, scoped=False)
+        assert full == ("dropped-from-config", "stillhere")
+        assert "cantread" not in full
+
+        scoped = hi.rebuild_delete_labels(ds, stored, scoped=True)
+        assert scoped == ("stillhere",)
+        assert "dropped-from-config" not in scoped
+
+    def test_a_rebuild_with_an_EMPTY_scope_raises_rather_than_wiping(self):
+        """🔴 THE LIBRARY-LEVEL BELT. `main` cannot reach this — the refusal guard
+        guarantees at least one measured repo before a write — but `write()` is
+        public and a future caller that forgets the scope must not get the
+        whole-table wipe as the default. Reachable by construction, and it is the
+        DELETE that must not have run: the assertion is on the recorder, not only
+        on the raise."""
+        conn = RecordingConn()
+        store = hi.PostgresSectionStore(conn)
+        row = hi.Section("r", "s", "p", None, None, "goal", 0, "h", "b")
+        with pytest.raises(ValueError, match="EMPTY delete scope"):
+            store.write([row], rebuild=True)
+        assert conn.statements() == []
+        assert conn.log == []
 
     def test_the_insert_is_an_upsert_on_the_tables_unique_identity(self, tmp_path):
         repo = tmp_path / "upsertrepo"
@@ -1100,8 +1311,106 @@ class TestDryRunIsTheDefault:
         assert hi.main(["--repo", str(repo), "--json"],
                        open_store=_refusing_store()) == hi.RC_OK
         payload = json.loads(capsys.readouterr().out.split("\n(no --write")[0])
-        assert len(payload) == 9
-        assert {r["section"] for r in payload} == set(hi.SECTIONS)
+        assert len(payload["rows"]) == 9
+        assert {r["section"] for r in payload["rows"]} == set(hi.SECTIONS)
+
+    def test_the_json_surface_carries_the_WARNINGS_the_text_one_prints(
+            self, tmp_path, capsys):
+        """🔴 THE WARNING BLOCK LIVED ONLY IN `render_derivation`, WHICH `--json`
+        REPLACES. So the surface built FOR AN AGENT — the consumer least able to
+        notice the omission — got rows and no durability-hole report at all.
+        Measured as a differential over ONE repo carrying a real hole, through
+        both renderers, so only the surface can explain the difference."""
+        repo = tmp_path / "jsonwarn"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        (repo / hi.HANDOFF_DIR / "handoff-cable-audit.md").write_text(DOC_SPARSE)
+
+        text = hi.render_derivation([hi.derive_repo(repo, label="jsonwarn")])
+        assert "DURABILITY HOLE" in text
+
+        assert hi.main(["--repo", str(repo), "--json"],
+                       open_store=_refusing_store()) == hi.RC_OK
+        payload = json.loads(capsys.readouterr().out.split("\n(no --write")[0])
+        assert any("DURABILITY HOLE" in w for w in payload["warnings"])
+        assert payload["all_clear"] is False
+        assert payload["repos"][0]["untracked"] == ["claudedocs/handoff-cable-audit.md"]
+
+    def test_the_json_all_clear_is_a_BOOLEAN_a_caller_can_branch_on(
+            self, tmp_path, capsys):
+        """The positive control for the field: it must be reachable as True, or
+        the assertion above pins a constant. And when it is False without any
+        warning — nothing examined — the blockers say WHICH measurement is
+        missing, which is the distinction the text renderer draws in prose."""
+        clean = tmp_path / "jsonclean"
+        _write_repo(clean, {"handoff-widget-relay.md": DOC_FULL})
+        assert hi.main(["--repo", str(clean), "--json"],
+                       open_store=_refusing_store()) == hi.RC_OK
+        payload = json.loads(capsys.readouterr().out.split("\n(no --write")[0])
+        assert payload["warnings"] == []
+        assert payload["all_clear"] is True
+        assert payload["all_clear_blockers"] == []
+        assert payload["repos"][0]["disk_scan_complete"] is True
+        assert payload["repos"][0]["disk_paths_seen"] == 1
+
+        empty = tmp_path / "jsonempty"
+        _write_repo(empty, {}, commit=False)
+        subprocess.run(["git", "-C", str(empty), "commit", "-qm", "e", "--allow-empty"],
+                       check=True)
+        assert hi.main(["--repo", str(empty), "--json"],
+                       open_store=_refusing_store()) == hi.RC_OK
+        payload = json.loads(capsys.readouterr().out.split("\n(no --write")[0])
+        assert payload["warnings"] == []
+        assert payload["all_clear"] is False
+        assert payload["all_clear_blockers"]
+
+    def test_a_dry_run_evaluates_the_SAME_refusal_the_write_run_does(
+            self, tmp_path, capsys):
+        """🔴 THE DOCUMENTED PRE-FLIGHT PASSED FOR A CONFIG THE REAL RUN REFUSES.
+        `nix/home.nix` tells the operator to watch a `--dry-run` before arming the
+        timer. MEASURED: `--repo /nope --rebuild` (dry-run) exited **0** with no
+        "REFUS" text anywhere, while the identical argv plus `--write` exited 4. A
+        pre-flight that cannot go red is not an instrument.
+
+        Asserted as the PAIR — same argv, one flag apart — because a test on the
+        dry-run alone could not tell "the gate now fires in dry-run" from "the gate
+        fires for everything"."""
+        argv = ["--repo", str(tmp_path / "nope-a"), "--repo", str(tmp_path / "nope-b"),
+                "--rebuild"]
+        dry = hi.main(argv, open_store=_refusing_store())
+        dry_err = capsys.readouterr().err
+        wet = hi.main([*argv, "--write"], open_store=_refusing_store())
+        wet_err = capsys.readouterr().err
+
+        assert dry == wet == hi.RC_REFUSED
+        assert "REFUSING --rebuild" in dry_err and "REFUSING --rebuild" in wet_err
+        # …and the dry run says which run it is speaking for.
+        assert "this was a DRY RUN" in dry_err
+        assert "this was a DRY RUN" not in wet_err
+
+    def test_a_dry_run_over_a_HEALTHY_config_still_exits_zero(self, tmp_path, capsys):
+        """The negative control for the pre-flight: making dry-run evaluate the
+        gates must not have made it refuse everything, or a green dry-run stops
+        being obtainable and the instruction in `nix/home.nix` becomes unusable."""
+        repo = tmp_path / "preflightok"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        rc = hi.main(["--repo", str(repo), "--rebuild"], open_store=_refusing_store())
+        assert rc == hi.RC_OK
+        out = capsys.readouterr()
+        assert "no --write: nothing was written" in out.out
+        assert "REFUS" not in out.err and "REFUS" not in out.out
+
+    def test_a_dry_run_evaluates_the_collision_gate_too(self, tmp_path, capsys):
+        """The same class as the refusal, and the same fix: a pre-flight that skips
+        a gate the write run applies reports a config as safe that is not."""
+        for parent in ("dryone", "drytwo"):
+            (tmp_path / parent).mkdir()
+            _write_repo(tmp_path / parent / "samename",
+                        {"handoff-widget-relay.md": DOC_FULL})
+        argv = ["--repo", str(tmp_path / "dryone" / "samename"),
+                "--repo", str(tmp_path / "drytwo" / "samename")]
+        assert hi.main(argv, open_store=_refusing_store()) == hi.RC_COLLISION
+        assert "IDENTITY COLLISION" in capsys.readouterr().err
+        assert hi.main([*argv, "--write"], open_store=_refusing_store()) == hi.RC_COLLISION
 
 
 class TestIdentityCollisionGuard:
@@ -1188,7 +1497,7 @@ class TestNestedDurabilityHole:
         sub.mkdir()
         (sub / "handoff-orphan.md").write_text(DOC_SPARSE)
 
-        assert "claudedocs/sub/handoff-orphan.md" in hi.handoff_paths_on_disk(repo)
+        assert "claudedocs/sub/handoff-orphan.md" in hi.handoff_paths_on_disk(repo).paths
         d = hi.derive_repo(repo, label="nestedrepo")
         assert d.untracked == ("claudedocs/sub/handoff-orphan.md",)
         assert any("DURABILITY HOLE" in w for w in d.warnings)
@@ -1230,6 +1539,14 @@ class TestNestedDurabilityHole:
 
 
 class TestTheAllClearIsEarned:
+    """🔴 WIDENED FROM THE REF SIDE TO THE SIDE THE SENTENCE ACTUALLY DESCRIBES.
+
+    The original version of this class exercised only the ref-side count, and the
+    implementation was gated only on the ref-side count (`elif total_docs:`) — so
+    the suite was green over a disk-side blind spot that the all-clear sentence is
+    entirely about. That is the shape `claude/RULES.md` calls a guard whose
+    DESCRIPTION claims coverage its body does not provide."""
+
     def test_zero_documents_scanned_is_NOT_an_all_clear(self, tmp_path):
         """🔴 A GUARD WHOSE DESCRIPTION CLAIMS COVERAGE ITS BODY DOES NOT PROVIDE
         IS WORSE THAN NONE. With no documents examined the on-disk-vs-ref
@@ -1246,14 +1563,141 @@ class TestTheAllClearIsEarned:
         assert "ZERO documents were scanned" in text
         assert "handoff doc on disk is also in it" not in text
 
+    def test_an_UNREADABLE_claudedocs_is_NOT_an_all_clear(self, tmp_path):
+        """🔴 THE MEASURED DEFECT THIS CLASS COULD NOT SEE, AND IT IS A DIFFERENT
+        SIDE OF THE COMPARISON. `handoff_paths_on_disk` returned `()` with no
+        warning and no flag when `claudedocs/` was unreadable, `untracked_docs`
+        found nothing to report, and the all-clear was gated on the REF-side
+        document count — which is high and healthy, because git can read the ref
+        perfectly well.
+
+        MEASURED on one repo with a REAL durability hole present:
+          readable      -> `🔴 DURABILITY HOLE — 1 handoff doc …`
+          chmod 0o000   -> `## warnings: none — … every handoff doc on disk is
+                            also in it.`
+        The uncommitted doc had not moved. This is that pair, run as a
+        differential over ONE repo, so only the permission bit can explain it.
+
+        ⚠ AND THE OLD `except OSError: return ()` WAS NOT THE MECHANISM. `rglob`
+        walks via `os.scandir` and swallows the `PermissionError` internally —
+        measured on CPython 3.12.14, it returns `[]` and raises nothing — so that
+        clause could never fire. The fix is `os.walk(onerror=…)`, which is why the
+        error text reaches the report at all."""
+        repo = tmp_path / "unreadable"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        docs = repo / hi.HANDOFF_DIR
+        (docs / "handoff-cable-audit.md").write_text(DOC_SPARSE)
+
+        readable = hi.render_derivation([hi.derive_repo(repo, label="unreadable")])
+        assert "DURABILITY HOLE" in readable
+
+        os.chmod(docs, 0o000)
+        try:
+            scan = hi.handoff_paths_on_disk(repo)
+            assert scan.paths == ()          # the disk side still comes back empty…
+            assert scan.errors               # …but it now SAYS it could not look
+            assert scan.complete is False
+            d = hi.derive_repo(repo, label="unreadable")
+            assert d.untracked == ()         # the hole is genuinely invisible…
+            text = hi.render_derivation([d])
+        finally:
+            os.chmod(docs, 0o755)
+
+        # …and the report must not read as a finding of nothing.
+        assert "handoff doc on disk is also in it" not in text
+        assert "UNSCANNABLE DISK" in text
+        assert "NOT reported" in text
+        # The ref side is healthy throughout — which is exactly why gating the
+        # all-clear on it could not see this.
+        assert "docs=1" in text
+
     def test_a_real_scan_with_no_findings_IS_an_all_clear(self, tmp_path):
         """The positive control: the all-clear must still be reachable, or the
-        assertion above proves only that it was deleted."""
+        assertions above prove only that it was deleted."""
         repo = tmp_path / "realclean"
         _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
-        text = hi.render_derivation([hi.derive_repo(repo, label="realclean")])
+        d = hi.derive_repo(repo, label="realclean")
+        assert d.disk.complete is True and len(d.disk.paths) == 1
+        text = hi.render_derivation([d])
         assert "handoff doc on disk is also in it" in text
         assert "NOT AN ALL-CLEAR" not in text
+
+    def test_a_disk_side_that_saw_ZERO_paths_is_NOT_an_all_clear(self, tmp_path):
+        """🔴 THE THIRD BLOCKER, AND IT IS NOT THE SAME AS THE FIRST TWO. The walk
+        RAN and hid nothing — it simply had nothing to walk, because `claudedocs/`
+        is absent from the working tree while the ref carries documents (an
+        ordinary worktree-on-another-branch state). 'Every handoff doc on disk is
+        also in it' over zero disk docs is vacuously true and measures nothing."""
+        repo = tmp_path / "nodiskdir"
+        _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
+        import shutil
+        shutil.rmtree(repo / hi.HANDOFF_DIR)
+
+        scan = hi.handoff_paths_on_disk(repo)
+        assert scan.absent is True and scan.complete is True and scan.paths == ()
+        d = hi.derive_repo(repo, label="nodiskdir")
+        assert d.docs == 1                   # the REF side is populated…
+        assert d.warnings == []              # …and there is nothing to warn about
+        text = hi.render_derivation([d])
+        assert "handoff doc on disk is also in it" not in text
+        assert "NOT AN ALL-CLEAR" in text
+        assert "DISK side of the comparison saw ZERO" in text
+
+    def test_the_blockers_NAME_which_measurement_is_missing(self, tmp_path):
+        """A bare NOT-AN-ALL-CLEAR tells a reader nothing about what to fix, and
+        the three blockers have three different fixes. Pinned as a differential:
+        the empty-repo case must name the REF-side blocker and NOT the
+        unreadable-disk one, or the reasons are decoration."""
+        empty = tmp_path / "blockempty"
+        _write_repo(empty, {}, commit=False)
+        subprocess.run(["git", "-C", str(empty), "commit", "-qm", "e", "--allow-empty"],
+                       check=True)
+        blockers = hi.all_clear_blockers([hi.derive_repo(empty, label="blockempty")])
+        assert any("ZERO documents were scanned" in b for b in blockers)
+        assert not any("did not complete" in b for b in blockers)
+
+        clean = tmp_path / "blockclean"
+        _write_repo(clean, {"handoff-widget-relay.md": DOC_FULL})
+        assert hi.all_clear_blockers([hi.derive_repo(clean, label="blockclean")]) == ()
+
+    def test_an_incomplete_walk_is_named_in_the_blockers_LIST_itself(self):
+        """🔴 REACHED DIRECTLY, BECAUSE THE RENDERER STRUCTURALLY CANNOT REACH IT.
+        A mutation sweep deleted `all_clear_blockers`' incomplete-walk arm and the
+        whole suite stayed green: an incomplete walk always also emits an
+        `⚠ UNSCANNABLE DISK` warning (both read `DiskScan.complete`), and ANY
+        warning sends `render_derivation` down its `if warnings:` branch, which
+        never consults the blockers. Through the text report the arm is a second
+        copy of one predicate and cannot be killed.
+
+        It is not decoration, though, because `derivation_json` publishes
+        `all_clear_blockers` as its own field — a consumer asking "what stopped
+        the all-clear" has to get the complete answer from that list rather than
+        parse prose out of `warnings`. So the coverage is a contract of this PURE
+        function and is pinned as one, with the derivation built by hand to
+        isolate the arm from the other two blockers.
+
+        ⚠ Labelled honestly: this is a CONTRACT pin on a pure function, not a
+        regression test for a defect anyone observed in the rendered report."""
+        d = hi.RepoDerivation(
+            repo="/x", label="halfread", ref="main", docs=3,
+            disk=hi.DiskScan(paths=("claudedocs/handoff-a.md",), scanned=True,
+                             errors=("claudedocs/locked: Permission denied",)),
+        )
+        blockers = hi.all_clear_blockers([d])
+        assert any("did not complete" in b and "halfread" in b for b in blockers)
+        # …and neither of the other two arms fires here, so the assertion above
+        # cannot be satisfied by one of them.
+        assert not any("ZERO documents were scanned" in b for b in blockers)
+        assert not any("saw ZERO handoff docs" in b for b in blockers)
+        assert len(blockers) == 1
+
+        # The negative control on the SAME shape: a complete walk, everything else
+        # identical, yields no blocker at all.
+        ok = hi.RepoDerivation(
+            repo="/x", label="halfread", ref="main", docs=3,
+            disk=hi.DiskScan(paths=("claudedocs/handoff-a.md",), scanned=True),
+        )
+        assert hi.all_clear_blockers([ok]) == ()
 
 
 # --------------------------------------------------------------------------- #
@@ -1447,11 +1891,17 @@ class TestScopedSilentZeroGuard:
         text = hs.render(hs.run_search(_store(), "quixotry", backend="memory"))
         assert "in_scope_sections=" not in text
 
-    def test_the_four_statuses_render_with_no_shared_opening_phrase(self):
-        """🔴 WIDENED FROM TWO TO FOUR. Each zero must be machine-distinguishable
-        from the others, or a caller reading prose conflates them."""
+    def test_the_five_statuses_render_with_no_shared_opening_phrase(self):
+        """🔴 WIDENED FROM TWO TO FOUR TO FIVE. Each zero must be
+        machine-distinguishable from the others, or a caller reading prose
+        conflates them. `unmeasured-corpus` joins the ledger because it used to
+        render as `broken-index` — same words, wrong diagnosis, confident next
+        step."""
         broken = hs.render(hs.run_search(hi.MemorySectionStore([]), "zarfwidget",
                                         backend="memory"))
+        unmeasured = hs.render(hs.run_search(
+            hi.MemorySectionStore([]), "zarfwidget", backend="memory",
+            unmeasured=(("gone", "no-such-directory"),)))
         scope = hs.render(hs.run_search(_store(), "zarfwidget", backend="memory",
                                         repo="norepo"))
         genuine = hs.render(hs.run_search(_store(), "hexapoddery", backend="memory"))
@@ -1459,12 +1909,13 @@ class TestScopedSilentZeroGuard:
 
         marks = {
             "ran against NOTHING": broken,
+            "failed to resolve, so no corpus was ever built": unmeasured,
             "the filter, not the corpus, is what is empty": scope,
             "the index WAS searched": genuine,
             "section(s), best first": hit,
         }
         for phrase, owner in marks.items():
-            for other in (broken, scope, genuine, hit):
+            for other in (broken, unmeasured, scope, genuine, hit):
                 if other is owner:
                     assert phrase in other, phrase
                 else:
@@ -1493,7 +1944,7 @@ class TestScopedSilentZeroGuard:
         _write_repo(repo, {"handoff-widget-relay.md": DOC_FULL})
         rc = hs.main(["--query", "zarfwidget", "--offline", "--offline-repo", str(repo),
                       "--repo", str(repo)])   # a PATH, not the label
-        assert rc == hs.EXIT_CODES["empty-scope"] == 4
+        assert rc == hs.SCOPE_REASON_EXIT_CODES["unknown-repo"] == 4
         assert "🔴 EMPTY SCOPE" in capsys.readouterr().out
         # …and the correct label, through the same main, exits 0 with a hit.
         assert hs.main(["--query", "zarfwidget", "--offline",
@@ -1511,6 +1962,103 @@ class TestScopedSilentZeroGuard:
                       "--limit", str(limit)])
         assert rc == 2
         assert f"--limit must be >= {hs.MIN_LIMIT}" in capsys.readouterr().err
+
+    def test_an_UNRESOLVABLE_offline_repo_is_not_a_broken_index(self, tmp_path, capsys):
+        """🔴 THE REPRODUCED MISDIAGNOSIS, AND IT CAME WITH A CONFIDENT WRONG FIX.
+        MEASURED: `--offline --offline-repo /does/not/exist` printed `🔴 BROKEN
+        INDEX — this table holds ZERO documents … Rebuild it (--rebuild --write)
+        or check the handoff-index-sync unit`, rc 3 — on a code path that opens no
+        database, has no table to rebuild and no unit to check. `_offline_store`
+        called `derive_repo`, which records a STRUCTURAL `unmeasured` reason per
+        repo, and threw the flag away; `run_search` then saw an empty store and
+        had nothing to distinguish the two mechanisms with. `claude/RULES.md` →
+        'an EMPTY RESULT cannot distinguish two mechanisms'.
+
+        Pinned as a differential against a genuinely EMPTY-but-measurable corpus,
+        which must still say BROKEN INDEX — otherwise this asserts only that the
+        broken-index branch was deleted."""
+        rc = hs.main(["--query", "zarfwidget", "--offline",
+                      "--offline-repo", str(tmp_path / "does-not-exist")])
+        out = capsys.readouterr().out
+        assert rc == hs.EXIT_CODES["unmeasured-corpus"] == 6
+        assert "🔴 UNMEASURABLE CORPUS" in out
+        assert "no-such-directory" in out
+        # 🔴 THE WRONG REMEDIES MUST BE GONE, not merely joined by a right one.
+        assert "BROKEN INDEX" not in out
+        assert "--rebuild --write" not in out
+        assert "handoff-index-sync" not in out
+
+        # The differential: a real repo that resolves and holds no handoff docs is
+        # a measured empty corpus, and IS a broken index.
+        empty = tmp_path / "measurably-empty"
+        _write_repo(empty, {}, commit=False)
+        subprocess.run(["git", "-C", str(empty), "commit", "-qm", "e", "--allow-empty"],
+                       check=True)
+        rc2 = hs.main(["--query", "zarfwidget", "--offline", "--offline-repo", str(empty)])
+        out2 = capsys.readouterr().out
+        assert rc2 == hs.EXIT_CODES["broken-index"] == 3
+        assert "🔴 BROKEN INDEX" in out2
+        assert "UNMEASURABLE CORPUS" not in out2
+
+    def test_no_repos_at_all_is_a_usage_error_in_the_siblings_wording(
+            self, monkeypatch, capsys):
+        """🔴 THE SECOND VARIANT, AND IT PRINTED **ZERO** WARNINGS. With every
+        handle unset and no `--offline-repo`, `default_repos()` returns `[]`, the
+        corpus is empty for the most ordinary reason there is, and this rendered
+        the same false `🔴 BROKEN INDEX`, rc 3.
+
+        The sibling CLI over the SAME corpus already got it right — `no repos to
+        index. Pass --repo, or set one of: $DEVRC, …`, rc 2 — so two front ends
+        disagreed about one fact. Asserted as that cross-CLI differential, not
+        against a hand-copied string: pinning the literal would let the two drift
+        apart again the next time either is reworded."""
+        for handle in hi.REPO_ENV_HANDLES:
+            monkeypatch.delenv(handle, raising=False)
+
+        rc_index = hi.main(["--rebuild"], open_store=_refusing_store())
+        index_err = capsys.readouterr().err
+        rc_search = hs.main(["--query", "zarfwidget", "--offline"])
+        search_err = capsys.readouterr().err
+
+        assert rc_index == rc_search == 2
+        assert "no repos to index" in search_err
+        assert "BROKEN INDEX" not in search_err
+        # Same sentence, same handle list, only the flag name differs.
+        assert index_err.replace("--repo,", "--offline-repo,") == search_err.replace(
+            "handoff-search:", "handoff-index:")
+
+    def test_a_PARTIALLY_unmeasured_offline_corpus_still_answers(self, tmp_path, capsys):
+        """The boundary the fix must NOT have moved. `unmeasured-corpus` fires only
+        when the corpus came back EMPTY; a run over one good repo and one absent
+        one has rows and must answer normally, with the per-repo warning beside
+        it. Widening it to 'any unmeasured repo' would make a host missing one
+        checkout permanently unable to get an answer — the same permanently-red
+        mistake `rebuild_refusal` had to unwind."""
+        good = tmp_path / "partialsearch"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        rc = hs.main(["--query", "zarfwidget", "--offline",
+                      "--offline-repo", str(good),
+                      "--offline-repo", str(tmp_path / "absent-one")])
+        cap = capsys.readouterr()
+        assert rc == 0
+        assert "Why the zarfwidget latch never fires" in cap.out
+        assert "UNMEASURABLE CORPUS" not in cap.out
+        assert "UNMEASURED — absent-one" in cap.err
+
+    def test_the_json_surface_carries_the_unmeasured_repos(self, tmp_path, capsys):
+        """A consumer reading `--json` must be able to see which repos contributed
+        nothing to the hits it is about to act on, without parsing stderr."""
+        good = tmp_path / "jsonpartial"
+        _write_repo(good, {"handoff-widget-relay.md": DOC_FULL})
+        rc = hs.main(["--query", "zarfwidget", "--offline", "--json",
+                      "--offline-repo", str(good),
+                      "--offline-repo", str(tmp_path / "jsongone")])
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 0 and payload["status"] == "hit"
+        assert payload["unmeasured"] == [
+            {"repo": "jsongone", "reason": "no-such-directory"}
+        ]
+        assert payload["exit_code"] == 0
 
     def test_the_smallest_legal_limit_still_answers(self, tmp_path, capsys):
         """The positive control for the bound: it must not have moved the cliff."""

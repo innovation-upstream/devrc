@@ -27,7 +27,7 @@ from is always the one nobody expected to reach.
 
 🔴 THE SILENT-ZERO GUARD
 ------------------------
-A zero-result query has THREE causes that mean different things:
+A zero-result query has FOUR causes that mean different things:
 
     the corpus does not say that      an ANSWER. Carry on.
     your FILTER emptied the corpus    a CALLER ERROR. The query ran against zero
@@ -36,15 +36,37 @@ A zero-result query has THREE causes that mean different things:
     nothing was ever indexed          a BROKEN INDEX. The query never ran against
                                       anything, and reading it as an answer is a
                                       confident zero with an empty table behind it.
+    the REPOS could not be read       an UNMEASURABLE CORPUS — `--offline` only.
+                                      There is no table and no unit to blame; the
+                                      checkouts this run was pointed at do not
+                                      resolve. See below.
 
 `claude/RULES.md` → "An EMPTY RESULT cannot distinguish two mechanisms". So every
-response — hit, no-match, empty-scope and broken alike — carries the literal
-`indexed_docs=N indexed_sections=M`, and the zero cases are rendered with
+response — hit, no-match, empty-scope, unmeasured and broken alike — carries the
+literal `indexed_docs=N indexed_sections=M`, and the zero cases are rendered with
 sentences that SHARE NO OPENING PHRASE:
 
     NO MATCH — …            the SCOPE holds rows and none of them matched
     🔴 EMPTY SCOPE — …      the index holds rows; your filter selects none of them
     🔴 BROKEN INDEX — …     the index holds NOTHING; nothing was searched
+    🔴 UNMEASURABLE CORPUS  the repos themselves did not resolve; there is no
+                            index to be broken
+
+🔴 THE FOURTH ONE IS A DIAGNOSIS BUG THIS MODULE SHIPPED WITH, and it is exactly
+the empty-result trap it lectures about elsewhere. `--offline` builds its corpus
+by calling `handoff_index.derive_repo`, which records a STRUCTURAL `unmeasured`
+reason per repo — and the offline seam read the derived rows and threw that flag
+away. MEASURED, two variants: `--offline --offline-repo /does/not/exist` printed
+`🔴 BROKEN INDEX — this table holds ZERO documents … Rebuild it (--rebuild
+--write) or check the handoff-index-sync unit`, rc 3, when there is neither a
+table nor a unit anywhere in that code path; and with all four handles unset and
+no `--offline-repo`, `default_repos()` returned `[]` and produced the SAME false
+BROKEN INDEX with not one warning printed. The sibling CLI
+(`handoff_index.py`) got the second case right — `no repos to index. Pass
+--repo, or set one of: $DEVRC, …`, rc 2 — so the two front ends disagreed about
+one fact. Both are fixed: the no-repos case is a usage error with the sibling's
+wording, and an unmeasurable repo set gets its own status and exit code.
+
 
 🔴 THE MIDDLE ONE IS WHY `stats()` TAKES THE SAME FILTERS `search()` DOES. It
 originally did not, so the counts printed beside a scoped query described the
@@ -58,9 +80,34 @@ answered. Both a scoped count of zero and an unknown label produce `empty-scope`
 because they are one fact — the filter, not the corpus, is what is empty.
 
 `SearchOutcome.status` names which, in values that share no spelling
-(`hit` / `no-match` / `empty-scope` / `broken-index`), so a caller can switch on
-one field rather than parse prose. The exit code follows the status, and both
-non-answers exit non-zero: neither an empty index nor an empty scope is a reading.
+(`hit` / `no-match` / `empty-scope` / `broken-index` / `unmeasured-corpus`), so a
+caller can switch on one field rather than parse prose. The exit code follows the
+status, and NO non-answer exits zero: an empty index, an empty scope and a corpus
+that could not be measured are none of them readings.
+
+🔴 THE EXIT-CODE CONTRACT, AND THE ONE DECISION IN IT THAT IS ARGUABLE
+----------------------------------------------------------------------
+    0   hit, no-match                     ANSWERS about a scope that was searched
+    2   usage (bad --limit, no repos)     argv is wrong; nothing ran
+    3   broken-index                      the table is empty
+    4   empty-scope                       the FILTER selected nothing
+    6   unmeasured-corpus                 the repos did not resolve (--offline)
+
+🔴 `empty-scope` EXITS 4 FOR **BOTH** OF ITS REASONS, INCLUDING `no-rows` — a
+filter that is entirely valid (a real repo label, a declared section kind) over a
+corpus that simply has nothing under it. That was a deliberate choice against the
+alternative of returning 0 for it, and the argument is worth having in front of
+you because the flag side is real: a `set -e` script running
+`--repo devrc --section gotcha` over a corpus with no gotcha sections now dies,
+where reading it as "no results" would not. It is 4 anyway because THE EXIT CODE
+IS THE ONE CHANNEL A SCRIPTED CALLER READS WITHOUT THE PROSE, and `no-rows` and
+`no-match` are precisely the two zeros this whole module exists to keep apart:
+one searched N>0 sections and found nothing, the other searched ZERO. Collapsing
+them in that channel re-creates the defect at the only layer where the loud
+rendering cannot help. The contract is therefore stated as "no non-answer exits
+0", with no exceptions — a rule with one carve-out is a rule people forget. There
+are no production callers today; a future one that WANTS the zero should branch on
+`scope_reason` (carried in the text and in `--json`), not on the exit code.
 
 
 THE BACKEND IS INJECTED
@@ -107,10 +154,15 @@ __all__ = [
     "STATUSES",
     "MIN_LIMIT",
     "EXIT_CODES",
+    "ANSWER_STATUSES",
+    "REASON_KEYED_STATUSES",
     "SCOPE_REASONS",
+    "SCOPE_REASON_EXIT_CODES",
+    "exit_code_for",
     "SearchOutcome",
     "recall_banner",
     "stats_line",
+    "offline_targets",
     "run_search",
     "render",
     "outcome_json",
@@ -127,13 +179,17 @@ DEFAULT_LIMIT = 10
 #: this output is paid by a resuming session's context. Truncation is MARKED.
 BODY_CLIP = 700
 
-#: The four outcomes, in values that share no spelling — see the module docstring.
+#: The five outcomes, in values that share no spelling — see the module docstring.
 #: `broken-index` is NOT spelled `*-empty` and `empty-scope` is NOT spelled
 #: `*-no-match`: an index with nothing in it, a FILTER that selects nothing, and a
 #: query that matched nothing within a populated scope are three different facts
 #: with three different next actions, and two statuses that share a word get read
-#: as one.
-STATUSES: tuple[str, ...] = ("hit", "no-match", "empty-scope", "broken-index")
+#: as one. `unmeasured-corpus` is the fourth zero and shares a spelling with none
+#: of them either — "the repos did not resolve" is not "the table is empty", and
+#: the fix (a checkout / an env handle) is nothing like `--rebuild --write`.
+STATUSES: tuple[str, ...] = (
+    "hit", "no-match", "empty-scope", "broken-index", "unmeasured-corpus",
+)
 
 #: 🔴 A `--limit` BELOW THIS IS A CALLER ERROR, NOT A NARROW SEARCH. `--limit 0`
 #: returns zero hits from a perfectly good index and used to render the
@@ -144,12 +200,23 @@ STATUSES: tuple[str, ...] = ("hit", "no-match", "empty-scope", "broken-index")
 #: even means. Bounded at parse time, where the message can name the flag.
 MIN_LIMIT = 1
 
-#: status -> process exit code. 🔴 PINNED TWO-WAY against `STATUSES` by
-#: `test_every_status_has_an_exit_code_and_vice_versa`: a status with no code
-#: would silently exit 0 (the fluent-zero failure, one level up), and a code for
-#: a status nothing emits is a contract nobody can trigger. `hit` and `no-match`
-#: are the two ANSWERS and are absent on purpose — `.get(status, 0)`.
-EXIT_CODES: dict[str, int] = {"broken-index": 3, "empty-scope": 4}
+#: status -> process exit code, for the statuses whose code depends on the status
+#: ALONE. 🔴 PINNED against `STATUSES` by
+#: `test_every_status_has_an_exit_code_and_vice_versa`, which asserts the three
+#: ledgers below PARTITION `STATUSES`: a status in none of them falls through to
+#: `.get(status, 0)` and exits 0 — the fluent-zero failure, one level up, in the
+#: one channel a scripted caller reads.
+EXIT_CODES: dict[str, int] = {"broken-index": 3, "unmeasured-corpus": 6}
+
+#: The statuses that ARE answers, and therefore exit 0 by definition. Stated as a
+#: named ledger rather than left implicit so the partition test can assert
+#: coverage instead of a subset.
+ANSWER_STATUSES: tuple[str, ...] = ("hit", "no-match")
+
+#: The statuses whose exit code is decided by the REASON, not by the status.
+#: One member today; named so `exit_code_for` reads as a rule rather than as a
+#: special case for one literal.
+REASON_KEYED_STATUSES: tuple[str, ...] = ("empty-scope",)
 
 #: WHY a scope came back empty. One status, because a caller's action is the same
 #: (fix the filter); two reasons, because the fix is not. `unknown-repo` is a
@@ -158,6 +225,26 @@ EXIT_CODES: dict[str, int] = {"broken-index": 3, "empty-scope": 4}
 #: perfectly valid filter over a corpus that has nothing under it. Pinned two-way
 #: against what `run_search` emits.
 SCOPE_REASONS: tuple[str, ...] = ("unknown-repo", "no-rows")
+
+#: 🔴 BOTH ARE 4, AND THE `no-rows` HALF IS THE ARGUABLE DECISION — the module
+#: docstring's exit-code section makes the case in full. Short version: the exit
+#: code is the one channel read without the prose, and `no-rows` (searched ZERO
+#: sections) versus `no-match` (searched N>0 and found nothing) are the two zeros
+#: this module exists to keep apart. Pinned two-way against `SCOPE_REASONS`, so a
+#: new reason cannot be added without deciding its code.
+SCOPE_REASON_EXIT_CODES: dict[str, int] = {"unknown-repo": 4, "no-rows": 4}
+
+
+def exit_code_for(outcome: "SearchOutcome") -> int:
+    """The process exit code for one outcome. THE ONE PLACE THE MAPPING IS READ.
+
+    🔴 THE UNKNOWN-KEY FALLBACK IS NON-ZERO, NOT ZERO. A reason the ledger does
+    not carry is a bug in this module, and the safe direction for a bug is the one
+    a caller notices. The partition test makes it unreachable; the direction it
+    points is what matters if it ever is not."""
+    if outcome.status in REASON_KEYED_STATUSES:
+        return SCOPE_REASON_EXIT_CODES.get(outcome.scope_reason, 4)
+    return EXIT_CODES.get(outcome.status, 0)
 
 
 @dataclass(frozen=True)
@@ -182,6 +269,13 @@ class SearchOutcome:
     known_repos: tuple[str, ...] = ()
     #: Only meaningful on `empty-scope`. See `SCOPE_REASONS`.
     scope_reason: str | None = None
+    #: `((label, reason), …)` for every repo the corpus-builder could NOT measure.
+    #: 🔴 STRUCTURAL, CARRIED ACROSS THE SEAM. `handoff_index.derive_repo` records
+    #: this per repo and `_offline_store` used to drop it on the floor, which is
+    #: how an unresolvable checkout got diagnosed as a broken Postgres table. It
+    #: is the field, not a grep over the warning prose, for `RepoDerivation`'s
+    #: reason: a reworded warning must not be able to disarm a guard.
+    unmeasured: tuple[tuple[str, str], ...] = ()
 
     @property
     def in_scope(self) -> IndexStats:
@@ -263,6 +357,7 @@ def run_search(
     repo: str | None = None,
     sections: Sequence[str] = (),
     limit: int = DEFAULT_LIMIT,
+    unmeasured: Sequence[tuple[str, str]] = (),
 ) -> SearchOutcome:
     """Query the store and CLASSIFY the result. The one place `status` is decided.
 
@@ -283,16 +378,34 @@ def run_search(
     label (checked against `store.repos()`, so the message can name the real ones)
     AND on a scoped count of zero from a known filter — one status, because they
     are one fact: the filter, not the corpus, is empty. Getting to rung 3 is the
-    only thing that licenses the sentence "the docs do not discuss this"."""
+    only thing that licenses the sentence "the docs do not discuss this".
+
+    🔴 AND RUNG 1 IS ITSELF TWO MECHANISMS, WHICH IS WHY `unmeasured` REACHES HERE.
+    An empty store means "the table holds nothing" OR "the repos this corpus was
+    built from could not be read", and those have nothing in common but the
+    observable — the exact `claude/RULES.md` empty-result trap. The caller is the
+    only thing that knows which: `--offline` builds its own corpus and holds the
+    per-repo `unmeasured` reasons; the Postgres path builds none and passes `()`.
+    So the classification is `unmeasured-corpus` when the builder reported a
+    failure and `broken-index` only when it did not — never a guess.
+
+    ⚠ SCOPED TO THE ZERO CASE ON PURPOSE. A corpus that is PARTIALLY unmeasured
+    but still holds rows answers normally; its warnings are printed by the CLI
+    beside the result. Widening this to "any unmeasured repo" would turn a host
+    that legitimately lacks one checkout into a permanent non-answer, which is the
+    same permanently-red-gate mistake `handoff_index.rebuild_refusal` had to
+    unwind."""
     stats = store.stats()
     if stats.indexed_docs == 0:
         # Do not even run the query: with zero rows there is nothing to ask, and
         # a store that fails on a query against an empty table would turn a
         # diagnosable broken index into a traceback.
         return SearchOutcome(
-            query=query, stats=stats, hits=(), status="broken-index", backend=backend,
+            query=query, stats=stats, hits=(),
+            status="unmeasured-corpus" if unmeasured else "broken-index",
+            backend=backend,
             repo=repo, sections=tuple(sections), limit=limit, scoped=stats,
-            known_repos=tuple(store.repos()),
+            known_repos=tuple(store.repos()), unmeasured=tuple(unmeasured),
         )
 
     known = tuple(store.repos())
@@ -315,7 +428,7 @@ def run_search(
         return SearchOutcome(
             query=query, stats=stats, hits=(), status="empty-scope", backend=backend,
             repo=repo, sections=tuple(sections), limit=limit, scoped=scoped,
-            known_repos=known, scope_reason=reason,
+            known_repos=known, scope_reason=reason, unmeasured=tuple(unmeasured),
         )
 
     hits = tuple(store.search(query, repo=repo, sections=sections, limit=limit))
@@ -330,6 +443,7 @@ def run_search(
         limit=limit,
         scoped=scoped,
         known_repos=known,
+        unmeasured=tuple(unmeasured),
     )
 
 
@@ -354,6 +468,27 @@ def render(outcome: SearchOutcome) -> str:
                    outcome.scoped if outcome.filtered else None),
         "  ".join(scope),
     ]
+
+    if outcome.status == "unmeasured-corpus":
+        # 🔴 NAMES NEITHER A TABLE NOR A UNIT, AND THAT IS THE POINT. This branch
+        # exists because the `broken-index` block below was rendered for it, and
+        # every remedy that block offers — `--rebuild --write`, the
+        # handoff-index-sync unit — is about a Postgres index that this code path
+        # never touches. Sending a reader to rebuild an index when their checkout
+        # is missing is a wrong diagnosis delivered with a confident next step,
+        # which is worse than no next step at all.
+        detail = ", ".join(f"{label} ({reason})" for label, reason in outcome.unmeasured)
+        lines += [
+            "",
+            f"🔴 UNMEASURABLE CORPUS — all {len(outcome.unmeasured)} repo(s) this run "
+            f"was pointed at failed to resolve, so no corpus was ever built: {detail}.",
+            "   This is NOT a broken index and NOT an answer about the corpus. There is "
+            "no table to rebuild and no unit to check on this path — the repos "
+            "themselves are what did not resolve.",
+            "   Fix the checkout path(s) or the `$DEVRC`/`$HOMELAB`/… handles, or pass "
+            "`--offline-repo <path>` explicitly, then re-run.",
+        ]
+        return "\n".join(lines)
 
     if outcome.status == "broken-index":
         lines += [
@@ -456,6 +591,13 @@ def outcome_json(outcome: SearchOutcome) -> dict:
         "in_scope_sections": outcome.in_scope.indexed_sections,
         "known_repos": list(outcome.known_repos),
         "scope_reason": outcome.scope_reason,
+        # Carried on EVERY status, not only `unmeasured-corpus`: a partially
+        # unmeasured corpus answers normally, and a consumer reading those hits
+        # needs to know which repos contributed nothing to them.
+        "unmeasured": [
+            {"repo": label, "reason": reason} for label, reason in outcome.unmeasured
+        ],
+        "exit_code": exit_code_for(outcome),
         "hits": [
             {
                 "repo": h.repo, "slug": h.slug, "doc_path": h.doc_path,
@@ -467,12 +609,34 @@ def outcome_json(outcome: SearchOutcome) -> dict:
     }
 
 
-def _offline_store(repos: Sequence[str]) -> tuple[MemorySectionStore, list[str]]:
-    targets = [(r, Path(r).name) for r in repos] or handoff_index.default_repos()
+def offline_targets(repos: Sequence[str]) -> list[tuple[str, str]]:
+    """The `(path, label)` pairs `--offline` will derive from.
+
+    Split out of `_offline_store` so `main` can tell "no repos were named at all"
+    from "the repos named did not resolve" BEFORE building a corpus — they are
+    different errors with different fixes, and the empty list used to reach the
+    store as a silent zero and render as `🔴 BROKEN INDEX`."""
+    return [(r, Path(r).name) for r in repos] or handoff_index.default_repos()
+
+
+def _offline_store(
+    targets: Sequence[tuple[str, str]],
+) -> tuple[MemorySectionStore, list[str], tuple[tuple[str, str], ...]]:
+    """The in-process corpus, its warnings, AND what it could not measure.
+
+    🔴 THE THIRD ELEMENT IS THE FIX FOR A MISDIAGNOSIS. This function called
+    `derive_repo` — which sets a STRUCTURAL `unmeasured` reason per repo — and
+    returned only the rows and the warning strings, so `run_search` saw an empty
+    store and could not tell an unresolvable checkout from an empty table. The
+    flag is carried across the seam rather than re-derived or grepped out of the
+    warnings, for `RepoDerivation.unmeasured`'s reason."""
     derivations = [handoff_index.derive_repo(p, label=lab) for p, lab in targets]
     rows = [s for d in derivations for s in d.sections]
     warnings = [w for d in derivations for w in d.warnings]
-    return MemorySectionStore(rows), warnings
+    unmeasured = tuple(
+        (d.label, d.unmeasured) for d in derivations if d.unmeasured is not None
+    )
+    return MemorySectionStore(rows), warnings, unmeasured
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -511,12 +675,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     if args.offline:
-        store, warnings = _offline_store(args.offline_repo)
+        # 🔴 "NOBODY NAMED A REPO" IS A USAGE ERROR, NOT A BROKEN INDEX. With all
+        # four handles unset and no `--offline-repo`, `default_repos()` returns
+        # `[]`, the corpus is empty for the most ordinary reason there is, and
+        # this used to render `🔴 BROKEN INDEX` with ZERO warnings — a confident
+        # wrong diagnosis about a database this path never opens. The wording and
+        # the rc match `handoff_index.py`'s for the same condition: two front ends
+        # over one corpus must not disagree about one fact.
+        targets = offline_targets(args.offline_repo)
+        if not targets:
+            print(
+                "handoff-search: no repos to index. Pass --offline-repo, or set one "
+                "of: "
+                + ", ".join(f"${h}" for h in handoff_index.REPO_ENV_HANDLES),
+                file=sys.stderr,
+            )
+            return 2
+        store, warnings, unmeasured = _offline_store(targets)
         for w in warnings:
             print(w, file=sys.stderr)
         backend = "memory"
         outcome = run_search(store, args.query, backend=backend, repo=args.repo,
-                             sections=args.section, limit=args.limit)
+                             sections=args.section, limit=args.limit,
+                             unmeasured=unmeasured)
     else:
         MailDB = handoff_index.import_maildb()
         with MailDB() as db:
@@ -525,11 +706,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                                  sections=args.section, limit=args.limit)
 
     print(json.dumps(outcome_json(outcome), indent=2) if args.json else render(outcome))
-    # 🔴 NEITHER NON-ANSWER EXITS ZERO, and they get DIFFERENT codes. A broken
-    # index is a broken environment and an empty scope is a caller error; a
-    # caller that only checks the exit code must read neither as "no results",
-    # and one that wants to tell them apart must not have to parse prose.
-    return EXIT_CODES.get(outcome.status, 0)
+    # 🔴 NO NON-ANSWER EXITS ZERO, and each gets a DIFFERENT code. A broken index
+    # is a broken environment, an unmeasurable corpus is a missing checkout and an
+    # empty scope is a caller error; a caller that only checks the exit code must
+    # read none of them as "no results", and one that wants to tell them apart
+    # must not have to parse prose. The mapping lives in `exit_code_for` — see the
+    # module docstring for why `empty-scope`/`no-rows` is 4 and not 0.
+    return exit_code_for(outcome)
 
 
 if __name__ == "__main__":  # pragma: no cover
