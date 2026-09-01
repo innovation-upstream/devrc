@@ -168,11 +168,30 @@ printf 'files in .links : %d\n' "$(find /nix/store/.links -xdev -printf . 2>/dev
 printf 'store paths     : %d\n' "$(ls /nix/store/ 2>/dev/null | wc -l)"
 
 echo
-echo "=== 6c. /home breakdown (top 15 by allocated size) ==="
-# The old glob was `/home/*/.* /home/*/*`, which expands `.` and `..` per user and
-# made du walk /home twice and print nothing usable. Enumerate depth-2 instead.
-find /home -xdev -mindepth 2 -maxdepth 2 -print0 2>/dev/null \
-  | xargs -0 -r du -sh -x 2>/dev/null | sort -rh | head -15
+echo "=== 6c. /home breakdown — ROOT FILESYSTEM ONLY (top 15 by allocated size) ==="
+# 🔴 `du -x` only stops du CROSSING AWAY from its starting point. When the starting
+# point IS a foreign mount, du walks the whole thing: the 2026-09-01 run reported
+# 12T for /home/zach/hdd-20tb (/dev/sda1, xfs, 18.2T) and 1.2T for old-nix-hdd
+# (/dev/sdc1) under a root filesystem that is 1.8T in total — figures a reader can
+# take for root-fs usage, contradicting section 2's correct 686.8 GiB for /home.
+# Walking them is also what made that run take ~3 hours. Compare each candidate's
+# device against / and skip the foreign ones, then list them separately.
+ROOT_DEV=$(stat -c '%D' / 2>/dev/null)
+FOREIGN=""
+for p in /home/*/* /home/*/.*; do
+  case "${p##*/}" in .|..) continue ;; esac
+  [ -d "$p" ] || continue
+  d=$(stat -c '%D' "$p" 2>/dev/null) || continue
+  if [ "$d" = "$ROOT_DEV" ]; then echo "$p"; else FOREIGN="$FOREIGN $p"; fi
+done | tr '\n' '\0' | xargs -0 -r du -sh -x 2>/dev/null | sort -rh | head -15
+echo "--- NOT on the root filesystem, so NOT part of this accounting ---"
+if [ -n "$FOREIGN" ]; then
+  for p in $FOREIGN; do
+    printf '  %-40s %s\n' "$p" "$(findmnt -n -o SOURCE,FSTYPE,SIZE,USED --target "$p" 2>/dev/null | head -1)"
+  done
+else
+  echo "  none"
+fi
 
 echo
 echo "=== 6d. /tmp breakdown — MEASURED 2026-09-01 as the largest inode consumer ==="
@@ -191,7 +210,20 @@ ls -A /tmp 2>/dev/null | sed -E 's/[0-9]{3,}.*$//; s/[A-Za-z0-9]{8,}$//' \
 
 echo
 echo "=== 7. Deleted-but-open files ==="
-lsof +L1 2>/dev/null | awk 'NR>1{s+=$8} END {printf "count=%d bytes=%.1f GiB\n", NR-1, s/1073741824}'
+# The 2026-09-01 run printed `count=-1`: the awk did NR-1 to drop lsof's header,
+# but with no output at all NR is 0. A negative count also hid the distinction
+# between "lsof found nothing" and "lsof did not run" — the two readings that
+# matter most here, since a zero is the reassuring one.
+if ! command -v lsof >/dev/null 2>&1; then
+  echo "COULD NOT MEASURE: lsof not on PATH — this is NOT a zero"
+else
+  LSOF_OUT=$(lsof +L1 2>/dev/null); LSOF_RC=$?
+  if [ -z "$LSOF_OUT" ]; then
+    echo "count=0 bytes=0.0 GiB  (lsof exited $LSOF_RC with no rows — no deleted-but-open files)"
+  else
+    printf '%s\n' "$LSOF_OUT" | awk 'NR>1{n++; s+=$8} END {printf "count=%d bytes=%.1f GiB\n", n+0, s/1073741824}'
+  fi
+fi
 
 echo
 echo "=== 8. Leftover diagnostic mounts ==="
