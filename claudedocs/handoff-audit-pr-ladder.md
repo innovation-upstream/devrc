@@ -144,40 +144,30 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
 🔴 **Numbering is deliberately STABLE.** The rank is half a `claim-work` slug's identity, so
 renumbering silently re-points every live claim. Closed items are retained as DONE markers.
 
+**ALL FOUR RANKED ITEMS ARE CLOSED.** Nothing here is workable; a `/resume` picking from this
+list should read the Gotchas and stop, not claim a rank.
+
 1. **DONE (2026-08-31) — ship the laptop.** Both hosts converged; `drift-check.sh` rc 0,
    `PARITY-RC=0` on both. Do not re-claim.
    forcing: none
 2. **DONE (found already closed 2026-08-31) — the three leftover worktrees.** ⚠ The successor
    condition is real and unowned: **137 registered worktrees**, most on merged branches. Not
-   filed — no named owner and no checkable closing condition, so a ticket would read as covered
-   while nothing could close it.
+   filed — no named owner and no checkable closing condition.
    forcing: none
-3. **DONE (2026-08-31) — `#1133`'s never-run round 3.** Run blind over `ea36a489..9ff5c9a9`. It
-   returned 4 🟡 + 1 🟢. Exactly one was live in `main` — the escape hatch's summary obligation,
-   deleted by a reword — fixed and pinned in **`#1157`**, which then ran its own three-round
-   ladder and was **stopped on the stated criterion, not on a clean round** (rationale recorded
-   on the PR, per the clause `#1157` restores). The other four findings were not actionable
-   against `main`: `#1117` had already removed the code they describe. See rank 4.
+3. **DONE (2026-08-31) — `#1133`'s never-run round 3.** Ran blind over `ea36a489..9ff5c9a9`:
+   4 🟡 + 1 🟢. One was live in `main` (the escape hatch's summary obligation, deleted by a
+   reword) and is fixed in **`#1157`**, merged `3e4c447f` after a ladder stopped on the stated
+   criterion. The other four described code `#1117` had already removed — they became rank 4.
    forcing: none
-4. **The `nix log` fallback port-back that `#1117` deferred — with acceptance criteria already
-   measured.** (repo: `devrc`; file `scripts/audit-dispatch.py`.) `1f0fe4c1` (#1117) rewrote
-   `render_toolchain` 2h36m after `#1133` merged, carrying forward only `--no-link -L` and
-   deferring the rest to "its own PR and its own round". Verified: `git show
-   origin/main:scripts/audit-dispatch.py | grep -c path-info` → **0**. 🔴 **These four are
-   measured, not speculative — a port-back that reintroduces the old block ships all of them:**
-   - **Do not carry the stderr parenthetical** claiming `nix path-info`'s stderr is discarded by
-     the `>` two lines down. Measured: that `>` belongs to a different command and redirects
-     stdout; the flake error lands on the terminal. It also contradicts the same block's correct
-     "`-L` WRITES TO STDERR" rule 28 lines above.
-   - **Do not carry the fixed `/tmp/tier.log`.** Two parallel audit agents truncate each other's
-     file and each greps the other's tier — with all three guards passing. Use `mktemp`.
-   - **Add a structural guard for the guard set.** Measured: deleting the `[ -n "$DRV" ]` emitter
-     left the suite byte-identical (301 passed); a `.pytests`→`.PYTESTS` positive control on the
-     same emitter went red, so the harness reaches those lines and simply cannot see these.
-   - **"THEY CLOSE THREE DIFFERENT FALSE GREENS" is wider than the bullets deliver** — the list
-     supplies two.
-   **Closing condition:** a PR restoring that block lands with all four addressed, or a named
-   reader records in writing that the fallback is not coming back.
+4. **DONE (2026-09-01) — the `nix log` port-back.** Merged as **`#1185` → `76d20386`**, shipped
+   to both hosts. 🔴 **It was checked for NECESSITY first, as this item's own closing condition
+   allowed** — and it was necessary. MEASURED on one derivation, three runs of the same command:
+   uncached `-L` → rc 0, 5 lines, 1 `RESULT:`; **cached → rc 0, 0 lines, 0 `RESULT:`**;
+   `nix log <drv>` → rc 0, 2 lines, 1 `RESULT:`. `#1117` kept `-L`, which fixes a SUCCEEDING
+   build and does nothing for an ALREADY-BUILT one, so the brief told auditors to read a
+   `RESULT:` line that a cached build never prints, at rc 0. All four acceptance criteria
+   addressed. ⚠ **`90202ce5..2eaa3c62` — the fix round — is UNAUDITED**, by operator decision on
+   cost, recorded on the PR as such and not as convergence.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -587,6 +577,51 @@ renumbering silently re-points every live claim. Closed items are retained as DO
   23 → 0 → 12 lines against ~90 scaffolding each. Never two consecutive zeroes, so the gate stayed
   silent while the ladder was plainly auditing its own scaffolding. That is the documented
   structural blind spot for a prose payload, and the reason the stated-criterion stop exists.
+
+- 🔴 **rc 17 RECURRED WITHIN HOURS, ON BOTH HOSTS, AND THE SECOND INSTANCE HAD REAL BLAST
+  RADIUS — the prediction in this doc was right and the first instance's harmlessness was
+  luck.** The earlier recurrence touched only `.bats`/`_test.go` files, so the binary was
+  unaffected; the later one touched **`cmd/clawgatectl/client.go`**, so both hosts were building
+  `clawgatectl` without the `#468` deeplink fix that `0.8.20` carries. **Read the DIFF every
+  time**: "rc 17 fired" and "the binary is wrong" are independent claims, and the second one is
+  the reason to act. Both hosts are now at `eed7db5a` running `clawgatectl-0.8.20`.
+- 🔴 **`pull.rebase = true` MAKES `git pull --ff-only` PRINT A FAILURE IT DID NOT SUFFER.**
+  Measured on the workbench: `error: cannot pull with rebase: You have unstaged changes.` — and
+  HEAD moved anyway. The reflog is the arbiter and said `merge origin/trunk: Fast-forward`. **A
+  loud error is not evidence the operation failed**; read `git reflog`, not the message. The
+  tracked modifications in that tree were byte-identical before and after (md5 of
+  `status --porcelain`, taken both sides).
+- 🔴 **AND THE `| tail` TRAP AGAIN, IN THE SAME COMMAND.** `git pull … | tail -3; echo
+  "PULL_RC=$?"` printed `PULL_RC=0` — that is **`tail`'s** status, and it happened to agree with
+  a success it could not have observed. This is documented in `claude/RULES.md` and in this very
+  doc, and was still reproduced by habit at the moment its answer mattered. **The defence that
+  works is never quoting a piped `$?`, not remembering the rule.**
+- ⚠ **SAME VERSION, SAME SUBTREE COMMIT, DIFFERENT STORE HASH — and that is not a fault.**
+  Both hosts run `clawgatectl-0.8.20` from identical subtree tree OIDs (`drift-check`:
+  `compared=2 same=2 differing=0`), yet the store paths differ, because the workbench holds an
+  UNTRACKED file inside the built source dir (`containers/clawgate/e2e/live-verify-0820.mjs`,
+  another session's). The build reads the TREE, not the commit. `drift-check` reports this as
+  `DIRTY` and never as drift, which is the right call — but a store-path comparison across hosts
+  will disagree with a commit comparison, and the commit is not the thing being built.
+- 🔴 **THE STORE-API FLAKE FAILED TWO DOCS-ONLY PRs IN ONE SESSION, ON TWO DIFFERENT TESTS.**
+  `#1178` died on `TestTheBackstopNeverSendsASecondResponse` and `#1191` on
+  `TestAHungRoundTripSAYSWhichSideBlocked.test_a_stall_in_the_FSYNC_region_is_NAMED` — both in
+  `scripts/tests/test_subsystem_store_api.py`, both on diffs consisting of ONE `claudedocs/`
+  file, which cannot reach that code. Targets took **464s** and **530s**. Each passed **3/3
+  locally in ~5s**, with `--collect-only` confirming the CI-failing test was actually selected.
+  🔴 **The second one is self-diagnosing and worth quoting**, because it tells the next reader
+  what to conclude: *"the server never reached the stall site, so the hang under test was NOT
+  the one this test set up — the report below would be about some other mechanism"*. The test
+  detected that its own SETUP had not taken effect under load. Contrast `#1178`, whose message
+  said the OPPOSITE of its values (`assert 0 == 1`, `raw == b''` under "a SECOND complete
+  response followed"). **A self-diagnosing assertion is worth writing: one of these two cost a
+  diagnosis and the other handed it over.** Recorded as evidence the Tekton-capacity condition
+  is routine, not occasional — still deliberately NOT filed, for want of a closing condition.
+- 🔴 **THE LAST ACT OF CLOSING A RANKED ITEM IS UPDATING THE LIST, AND IT IS THE ONE MOST
+  LIKELY TO BE SKIPPED.** `#1185` merged and shipped while rank 4 still read OPEN in this doc —
+  the exact duplicate-work hazard that rank 1's own update had fixed hours earlier in the same
+  session. A merged PR is invisible to `/resume`; the ranked list is what it reads. **The work
+  is not done when the PR merges; it is done when the queue says so.**
 
 ## How to verify
 ```bash
