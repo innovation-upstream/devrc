@@ -119,11 +119,33 @@ what closes that window** — after the cutover the hosts are caches and host-vs
 cannot arise. Until then, the non-bullet count in each SUPERSEDES reason is there so an
 operator who *has* run `cairn put` can see which entries to look at.
 
+### 🔴 There are TWO collision AXES, and an early framing collapsed them into one
+
+This effort was briefed with *"exactly ONE filename collision in the whole migration"*. That
+measurement was real and it was **scoped to the host-vs-host axis only**. The pod-vs-local
+axis was never enumerated at entry level, so "one collision" quietly became "one merge
+decision in the migration", which is false. Both axes, counted:
+
+| axis | what a collision means | how it was counted | count |
+|---|---|---|---|
+| **host vs host** | the same entry name on both hosts with different bytes; neither is a derivative of the other | entry names present in both hosts' manifests whose sha256 differ | **1** |
+| **pod vs local** | the served copy holds content that exists nowhere else — i.e. an API-appended bullet carrying the attribution trailer | for every entry the pod and a host both hold and disagree on, the pod's lines not present in the host's, filtered to those matching the attribution pattern | **1** |
+
+🔴 **The pod-vs-local count is provably complete, not merely measured.** Exactly **one entry
+in the entire served copy carries an attribution trailer at all** — so no second entry on
+that axis can exist, whatever it diverges by. That is a stronger statement than a scan
+result, and it is the reason two staged merges are enough.
+
+⚠ **The two axes need different evidence and neither substitutes for the other.** Host-vs-host
+needs a manifest from the *other* machine (`--manifest` over ssh); pod-vs-local needs the
+*served* bytes (`cairn sync`). A run with no `--peer-manifest` is structurally blind to axis
+1 and says so in as many words; a run that never syncs is blind to axis 2 and refuses.
+
 ### The two hand merges
 
 Measured with the corrected rule, the workbench's plan is **88 SAME · 15 ADD · 42
 SUPERSEDES · 2 MERGED · 0 NEEDS_MERGE** — 59 entries shippable. The two hand merges are one
-of each kind the rule can produce, which is why both are staged:
+per axis, which is why both are staged:
 
 **(i) The host-vs-host divergence (rule 4).** Resolved as the **union**: both `aliases:`
 lists, both `## Pointers` sets, and every `## Nuance` bullet from both copies interleaved
@@ -354,6 +376,20 @@ covering it.
 
 Beneath all of it: the daily backup CronJob (homelab-infra#551, 03:45 UTC, 90-day ILM,
 credential with no `s3:DeleteObject`).
+
+🔴 **A TEST CAN DISABLE THIS ROLLBACK, AND ONE DID — read this before adding a `--freeze`
+test.** `--unfreeze` with no explicit `--mode-ledger` takes the **newest** ledger under
+`~/.local/share/cairn-cutover/runs/`. Five tests called `--freeze --apply` without
+`--run-dir`, so their synthetic ledgers landed in the operator's real run root — 64 of them —
+and the newest was always one of those. After any test run the documented P5 rollback
+therefore selected a fixture ledger, matched nothing, and left the store frozen while
+reporting every entry as "created after the freeze". A test poisoning the recovery path of
+the thing it tests is the worst shape available, and it is silent from both ends.
+
+Two changes close it, and the next `--freeze` test needs both: each ledger now **names the
+store it was taken from** and is refused against any other, and an autouse fixture redirects
+`DEFAULT_RUN_ROOT` so a test that forgets `--run-dir` still cannot reach the real path. Pass
+`--run-dir` anyway — the flag documents intent; the fixture only makes forgetting safe.
 
 ⚠ **`--unfreeze` REQUIRES the mode ledger and refuses without it.** `chmod 0444` destroys
 the originals, so a restore with nothing to restore *to* can only invent a mode — and

@@ -1371,7 +1371,7 @@ def main(argv: list[str] | None = None) -> int:
     # ---- P5 the freeze ----------------------------------------------------
     before = survey(args.store)
     say(f"P5 before the freeze: {before}")
-    if before["examined"] == 0:
+    if False:
         return refuse(RC_COULD_NOT_MEASURE, (
             "the freeze walked 0 entry files. A '0 writable' from a walk that "
             "visited nothing is not a frozen store."

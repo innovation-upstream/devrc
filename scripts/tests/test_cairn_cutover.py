@@ -636,6 +636,63 @@ class TestRefCollisions:
         }
         assert cc.ref_collisions(union) == []
 
+    def test_the_QUALIFIED_ref_branch_is_REACHED__a_bare_lookup_would_invent_one(
+        self, cc
+    ):
+        """🔴 THE CASE THAT MAKES THE KIND-QUALIFIED LOOKUP OBSERVABLE.
+
+        A mutation sweep scored `if rkind is not None:` -> `if False:` as
+        SURVIVED: with only two entries, collapsing every ref to the bare
+        `slug == ref` lookup happened to return the same COUNTS, so no assertion
+        moved. A branch whose removal changes nothing is not covered, however
+        many tests mention it.
+
+        Three entries make the two lookups disagree. Under the correct rule
+        `a.process` is kind-qualified — slug `a`, kind `process` — and matches
+        exactly `a.process.md`. Under a bare lookup it matches every entry whose
+        SLUG is the string `a.process`, which is both of the doubly-qualified
+        files, and reports a LIVE collision the resolver does not have. LIVE
+        blocks the cutover, so the mutant is the permanently-red-gate direction.
+        """
+        union = {
+            "sc/a.process.md": cc.EntryFacts("sc/a.process.md", "1" * 64, (), ()),
+            "sc/a.process.doc.md": cc.EntryFacts(
+                "sc/a.process.doc.md", "2" * 64, (), ()),
+            "sc/a.process.org.md": cc.EntryFacts(
+                "sc/a.process.org.md", "3" * 64, (), ()),
+        }
+        assert cc.ref_collisions(union) == [], (
+            "the kind-qualified lookup was bypassed, inventing a collision on a "
+            "ref the resolver answers unambiguously"
+        )
+
+    def test_that_THREE_entry_shape_is_unambiguous_for_the_REAL_resolver_too(self):
+        """The measurement the test above rests on, taken from the resolver."""
+        sys.path.insert(0, str(REPO / "scripts" / "lib"))
+        import subsystem_recall as rc
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _tree(root, {
+                "sc/a.process.md": _entry("sc", "a", "- 2026-01-01: x."),
+                "sc/a.process.doc.md": _entry("sc", "a.process", "- 2026-01-01: y."),
+                "sc/a.process.org.md": _entry("sc", "a.process", "- 2026-01-01: z."),
+            })
+            _store, index = rc.load_store(str(root), verb="read")
+            assert len(index.entries("sc")) == 3, (
+                f"fixture did not load: {getattr(index, 'malformed', None)}"
+            )
+            for ref, want in (
+                ("a", "a.process.md"),
+                ("a.process", "a.process.md"),
+                ("a.process.doc", "a.process.doc.md"),
+                ("a.process.org", "a.process.org.md"),
+            ):
+                entry, tier = rc.resolve_ref_tiered(ref, index, "sc")
+                assert entry is not None and entry.filename == want, (ref, entry)
+
     def test_that_NON_collision_is_also_what_the_REAL_resolver_says(self):
         """Measured against the resolver, so the claim above is its behaviour and
         not my reading of it. All three refs resolve, none ambiguously.
