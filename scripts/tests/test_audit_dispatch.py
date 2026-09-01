@@ -2763,60 +2763,87 @@ def _assert_every_nix_build_prints_its_log(out: str) -> None:
 
 
 def _assert_the_cached_build_fallback_carries_its_guards(out: str) -> None:
-    """The `nix log` recovery block must keep every guard that makes it safe.
+    """The `nix log` recovery block must be SAFE AS EXECUTED, not as spelled.
 
-    🔴 WHY IT EXISTS AT ALL, measured 2026-08-31 on one derivation, three runs
-    of the SAME command: uncached `nix build --no-link -L` -> rc 0, 5 lines, 1
-    `RESULT:`; run again, now cached -> rc 0, **0 lines, 0 `RESULT:`**;
-    `nix log <drv>` -> rc 0, 2 lines, 1 `RESULT:`. `-L` streams a log only while
-    a build RUNS, so an already-realised output prints NOTHING and exits 0 --
-    and the brief's "read each runner's own `RESULT:` line" then has nothing to
-    read while looking exactly like a pass. Sibling sessions and CI build the
-    same tree constantly here, so the cached case is the common one.
+    🔴 WHY IT EXISTS, measured on one derivation, three runs of the SAME
+    command: uncached `nix build --no-link -L` -> rc 0, 5 lines, 1 `RESULT:`;
+    run again, now cached -> rc 0, **0 lines, 0 `RESULT:`**; `nix log <drv>` ->
+    rc 0, 2 lines, 1 `RESULT:`. `-L` streams a log only while a build RUNS, so
+    an already-realised output prints NOTHING at rc 0 -- and the brief's "read
+    each runner's own `RESULT:` line" then has nothing to read while looking
+    exactly like a pass.
 
-    🔴 WHY STRUCTURAL, NOT A SPELLING PIN -- the same argument
-    `_assert_every_nix_build_prints_its_log` makes one screen up, and the same
-    way it was learned: a substring assert on the COMMAND stayed green for the
-    whole life of a missing `-L`. Each guard below closes a DIFFERENT measured
-    false green, and dropping any ONE of them restores it:
-
-      * empty `$DRV`  -> `nix log ""` resolves as `.` and prints the CWD FLAKE'S
-        DEFAULT PACKAGE log. The auditor then greps a FOREIGN log that may read
-        `RESULT: PASS (exit=0)`. Not silence -- an AFFIRMATIVE false green.
-      * unguarded `nix log` -> `>` truncates BEFORE nix runs, so an unbuilt
-        derivation leaves an empty file and `grep -c` prints a reassuring 0.
-      * no `-s` test -> an empty log reads as "no timeouts found".
-
-    🔴 And a FIXED log path is its own hazard, which is why `mktemp` is
-    required: audit agents run concurrently here by design, so a shared
-    `/tmp/<name>.log` means each truncates the other's file and greps the
-    other's tier -- with all three guards above passing.
-
-    The count of hazards is deliberately NOT asserted in the emitted prose: an
-    earlier version of this block claimed it closed "THREE DIFFERENT FALSE
-    GREENS" while its bullets delivered two, and `test -s` speaks to emptiness
-    only -- it claims nothing about truncation.
+    🔴 THIS CHECK USED TO BE A SPELLING PIN AND THREE MUTANTS WALKED IT. It
+    tested six substrings against the WHOLE brief, under a docstring claiming
+    it was structural. Measured, each surviving a fully green 127-test suite:
+      * dropping `; exit 1` from the $DRV guard -- every token still present, and
+        the rendered block then printed `NO DERIVATION` and CONTINUED to a
+        foreign log's `RESULT: PASS (exit=0)`;
+      * `LOG=/tmp/audit-tier.log  # prefer mktemp here: ...` -- the WORD mktemp
+        survived in a comment, and the pinned literal `/tmp/tier.log` was absent;
+      * demoting every guard out of the ```bash fence into prose.
+    A guard that reads as coverage while providing none is worse than none, so
+    this now slices the FENCE and asserts each guard as a WHOLE LINE, in order,
+    each terminating in `exit 1; }`.
     """
-    if "nix log" not in out:
-        return  # no fallback emitted (e.g. a repo with no sandbox tier)
-    required = {
-        '[ -n "$DRV" ]': "an empty $DRV makes `nix log \"\"` print a FOREIGN log",
-        "NO DERIVATION": "the empty-$DRV guard must say why it refused",
-        "NO LOG": "an unbuilt derivation must be named, not left as an empty file",
-        '[ -s "$LOG" ]': "an empty log must not read as 'no timeouts found'",
-        "EMPTY LOG": "the empty-log guard must say why it refused",
-        "mktemp": "a FIXED log path is truncated by every sibling agent",
-    }
-    missing = [f"{tok}  ({why})" for tok, why in required.items() if tok not in out]
-    assert not missing, (
-        "the `nix log` cached-build fallback is missing guards that each close a "
-        "MEASURED false green; without them the block can report a clean tier "
-        "that never ran:\n  " + "\n  ".join(missing))
-    # A fixed path defeats mktemp even when mktemp is present.
-    assert "/tmp/tier.log" not in out, (
-        "the fallback names the FIXED path /tmp/tier.log. Two audit agents run "
-        "concurrently here by design: each truncates the other's file and greps "
-        "the other's tier, with every guard above still passing. Use mktemp.")
+    fences = re.findall(r"```bash\n(.*?)```", out, re.S)
+    blocks = [f for f in fences if "nix log" in f]
+    assert len(blocks) == 1, (
+        f"expected exactly ONE fenced bash block containing `nix log`, found "
+        f"{len(blocks)}. The guards below are asserted INSIDE that fence; prose "
+        "outside it is not executed by anyone.")
+    lines = [ln.strip() for ln in blocks[0].splitlines()
+             if ln.strip() and not ln.strip().startswith("#")]
+
+    # The log path must come from a command substitution, never a literal: audit
+    # agents run concurrently here by design, so a fixed path means each
+    # truncates the other's file and greps the other's tier, all guards passing.
+    assert any(re.match(r"LOG=\$\(mktemp\b", ln) for ln in lines), (
+        "the log path is not assigned from `$(mktemp ...)`. A FIXED path is "
+        "truncated by every sibling agent; a comment mentioning mktemp is not "
+        "the same as using it:\n  " + "\n  ".join(lines))
+
+    # Each guard must be a whole executable line that STOPS. `exit 1` is what
+    # makes a failed guard a stop rather than a note; without it the block
+    # continues into `nix log ""` and prints a FOREIGN log.
+    required = [
+        (r'^\[ -n "\$DRV" \]', "an empty $DRV makes `nix log \"\"` print the CWD "
+                                "flake's DEFAULT PACKAGE log — an affirmative "
+                                "false green, not silence"),
+        (r'^nix log "\$DRV" >', "`>` truncates BEFORE nix runs, so an unbuilt "
+                               "derivation must be named, not left as an empty file"),
+        (r'^\[ -s "\$LOG" \]', "an empty log must not read as 'no timeouts found'"),
+    ]
+    positions = []
+    for pattern, why in required:
+        hit = [i for i, ln in enumerate(lines) if re.match(pattern, ln)]
+        assert hit, (
+            f"the fenced block has no line matching {pattern!r} — {why}.\n  "
+            + "\n  ".join(lines))
+        i = hit[0]
+        assert "exit 1" in lines[i], (
+            f"this guard does not STOP, so a failure becomes a note and the "
+            f"block continues into the very false green it exists to close:\n"
+            f"  {lines[i]}")
+        positions.append(i)
+    assert positions == sorted(positions), (
+        "the guards are out of order: $DRV must be checked before `nix log` "
+        "runs, and the log's emptiness after it. Order:\n  "
+        + "\n  ".join(lines))
+
+    # 🔴 The verdict grep must NOT be last: `grep -c` exits 1 when the count is
+    # 0, so ending on it INVERTS the block's status — measured, a healthy tier
+    # exited 1 and a timing-out one exited 0.
+    # 🔴 The LAST COMMAND, not the last LINE. A line may chain several commands
+    # with `;`, and only the final one sets `$?`. An earlier draft of this very
+    # assertion matched the start of the line and failed on a block whose last
+    # COMMAND was already correct — narrower than its own description, the shape
+    # this module exists to catch.
+    last_cmd = lines[-1].split(";")[-1].strip()
+    assert not re.match(r'^grep -c\b', last_cmd), (
+        "the block's LAST COMMAND is `grep -c`, which exits 1 when the count is "
+        "0 — so a HEALTHY tier reports failure and a timing-out one reports "
+        f"success. Put the `RESULT:` grep last.\n  last command: {last_cmd}")
 
 
 def test_the_cached_build_fallback_is_emitted_with_its_guards():
