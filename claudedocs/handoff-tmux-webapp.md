@@ -9,38 +9,55 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Ranks 1–8b and 8e are ✅ DONE. Rank 6 is now FULLY closed. 8c and 8d are IN FLIGHT as
-`ZacxDev/homelab-infra#591` and `#592`.**
+**Ranks 1–8 are ✅ DONE, all sub-items included. Ranks 10–16 are OPEN.** The live-refresh work
+(`ZacxDev/homelab-infra#611`) is DONE, merged, and **deployed as 0.8.21** — see below.
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC — `clawgatectl health` is the only authority.**
-Measured 2026-08-31: server **0.8.19**, and both hosts' clients agree.
+Measured 2026-09-01: server **0.8.21**. It was 0.8.19 earlier the same session and 0.8.20 in
+between, shipped by another session mid-work — which is the whole reason the number is derived
+from the live pin and never from a doc.
 
-✅ **RANK 8a MEASURED GREEN 2026-08-31 — and it is still RECURRING, not closed.** Both halves
-checked, because a matching label is vacuous on its own:
-- Labels: `clawgatectl --version` = 0.8.19 on workbench AND laptop; `clawgatectl health` = 0.8.19.
-- **The round trip that moves a number:** `clawgatectl view create` from the **laptop**, then
-  `clawgatectl view ls` on the **workbench** — `[]` → 1 row → `[]` after `view rm`. Not a client
-  wired to nothing.
-- Source currency: workbench `homelab-talos` at `trunk`, 0 behind. Laptop **9 commits behind
-  `origin/trunk` but 0 of them touch `containers/clawgate`** — so the binary it would rebuild is
-  unaffected. That is the subtree-not-repo distinction `drift-check.sh` rc 17 makes; do not read
-  the repo-wide number as staleness.
+✅ **RANK 8a — still RECURRING, not closed.** At its last measurement both hosts' `clawgatectl`
+matched the server and a cross-host round trip moved a number (`view create` on the laptop →
+`view ls` on the workbench, `[]` → 1 → `[]`). 🔴 **0.8.21 has since shipped, so both clients are
+stale again by construction** — nothing converges `homelab-talos`, so re-run the round trip rather
+than reading this paragraph. Source currency at that measurement: workbench at `trunk`; laptop 9
+commits behind but **0 of them touching `containers/clawgate`**, which is the subtree-not-repo
+distinction `drift-check.sh` rc 17 makes.
 
-✅ **RANK 6 IS NOW FULLY CLOSED — the previous doc had it as merged-blocked, and that is stale.**
-`devrc#1056` has **MERGED** (both required checks SUCCESS; the doc's `ERROR`/`ERROR` reading is
-obsolete). The sentinel is live end to end: `GET /api/tmux/snapshot` returns `tmuxServerId`
-**non-null for both hosts** — `2509:1609459239` (laptop) and `4025325:1785949442` (workbench) —
-with `receivedAt` 40 s before the read. The doc's "`tmux_server_id` is NULL on both hosts, so the
-resolver's window-id tier disables itself" is **no longer true**. No `tmux-webapp-*` claim was
-held, so there was nothing to release.
+✅ **RANK 6 REMAINS FULLY CLOSED.** `devrc#1056` merged; the sentinel is live end to end —
+`GET /api/tmux/snapshot` returns `tmuxServerId` non-null for both hosts (`2509:1609459239` laptop,
+`4025325:1785949442` workbench). The old "`tmux_server_id` is NULL on both hosts, so the resolver's
+window-id tier disables itself" reading is obsolete.
 
-`devrc#1140` has also merged, which is why a working-tree copy of this doc may read ~48 lines
-shorter than `origin/main`'s.
+✅ **RANKS 8c AND 8d MERGED** — `ZacxDev/homelab-infra#591` (squash `d6dc52cf`) and `#592`
+(squash `d2d2346e`), both verified on the merged tree at `d2d2346e` in BOTH tiers: go 20 ok / 0
+FAIL, bats 67 ok / 0 not ok under the CI image, and `ALL LEGS PASS` on a re-run `clawgate-ci`.
+Audited post-merge; findings became ranks 14–16, not a revert.
 
-**No `clawgate-task:` field written** — `clawgate_handoff.sh resolve` exited **5**, 0 tasks for
-this session. Its positive control shows the board answered 2 links for another session, so the
-board is reachable; but a wrong session id ALSO answers 200 with an empty array. That zero is not
-a clean bill of health.
+🔴 **THE LIVE-REFRESH GAP IS CLOSED AND DEPLOYED — `#611`, squash `5d11d9a7`, live as 0.8.21.**
+The server had broadcast `tmux.changed` on every snapshot ingest since #468 with **nothing
+listening**, because #496 added a guard FORBIDDING the subscription on the premise that "clawgate
+emits no such event". Git settles it: the broadcast (`32f49804`) predates the guard (`844a7350`),
+so the premise was never true. Both panels now carry
+`load, every 60s, sse:tmux.changed from:body, clawgate:resync from:body` — the poll retained as a
+deadman, because SSE drops silently and a tab that stops updating with no signal is this
+codebase's recurring failure mode.
+**Verified live, not inferred:** the served `/tasks` page shows the trigger on both `#panel-tmux`
+and `#panel-layout`; the SSE stream carried **2 `tmux.changed` events in a 180 s window** (two
+feeder ticks at the 2-minute cadence) against 159 total events as a control.
+
+**What the UI does today, for whoever asks next:**
+- `/ui/tmux` — every window on both hosts, now refreshing within ~1 s of a snapshot push. "What I
+  have open is always there" is TRUE of this tab.
+- `/ui/layout` — only panels you declare. A newly-opened window does **not** appear. Panels
+  re-resolve against the live snapshot each read, so a closed window reports `missing` rather than
+  silently rebinding.
+- The remaining lag is the **2-minute host-side feeder** (`tmux-snapshot-push.timer` on the
+  workbench, which collects BOTH hosts in one pass — so if it stops, both go stale together).
+  Deliberately not reduced: `session-manager` makes up to 4 ssh invocations per remote host per
+  run with no `ControlMaster`.
+- Terminal WRITE is still `DISABLED (fail-closed)` — read-only until a token is provisioned.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -758,6 +775,32 @@ open-investigation heading that says "nothing is fixing it".** #996 did not clos
   remedy is a fresh push. **A red on this file is not evidence about your diff.** Check the case
   name against the three above before spending any time on it.
 
+### ✅ RESOLVED — the 0.8.21 deploy, and the image-vs-pin trap it walked into
+🔴 **A PIN THAT LANDS AFTER YOUR MERGE DOES NOT MEAN THE IMAGE CARRIES IT.** Measured:
+`#611`'s squash `5d11d9a7` merged at **19:57**; another session's `0.8.20` pin `eed7db5a` landed at
+**19:58**. Trunk therefore looked like it had shipped the change — and the running 0.8.20 page had
+**0** occurrences of `sse:tmux.changed`, against a positive control of 6 other `sse:*`
+subscriptions in the same page. 0.8.20's image was built BEFORE the merge. This is the documented
+"an image built during review silently omits a fix that landed mid-review" shape (the reason 0.8.12
+and 0.8.14 were discarded), reached from the timing side rather than the review side.
+**The control that settles it costs one command: run the candidate image locally and grep its
+rendered page BEFORE pushing.** Measured for 0.8.21 — 1 occurrence in the image, 0 in live 0.8.20.
+Do this instead of reasoning from commit timestamps, which cannot see when an image was built.
+
+### ✅ RESOLVED — four audit rounds on #611, and the attribution gate ended them
+Round 1 (full) found the guards were **spelled, not structural**: a decoy attribute carrying the
+same string let a non-subscribing panel pass the entire Go suite. Round 2 found the FIX introduced
+a regression — the AST rewrite traded a walkable-but-spelling-agnostic check for a
+precise-but-literal-only one, losing a shape `AutoApproveBanner` already uses deliberately
+(`trigger := "…"; hx("hx-trigger", trigger)`); the PRE-fix guard caught it and the post-fix one did
+not. Round 3 found the fix's own comment overclaimed. Each round found a real defect created by the
+previous round's fix — three times consecutively.
+🔴 **The ladder was ended by the ATTRIBUTION GATE, not by a clean round**: round 2's fixes changed
+0 executable payload lines (27 comment lines in payload files — ambiguous), round 3's changed 0
+payload files at all. Two consecutive zero-payload rounds ⇒ the ladder had left the PR and was
+auditing scaffolding it had itself written. The final comment corrections were made directly rather
+than as a round 4, because re-auditing a comment edit is the loop the gate exists to stop.
+
 ## Gotchas
 - 🔴 **A FAILED `git worktree add` DOES NOT STOP THE NEXT `git -C <path>` — AND I LANDED A
   MERGE ON ANOTHER SESSION'S BRANCH THIS WAY.** `worktree add /home/zach/workspace/devrc-integ`
@@ -1436,6 +1479,32 @@ open-investigation heading that says "nothing is fixing it".** #996 did not clos
   **When closing a flake, record what was MEASURED (the fix, and the runs that passed) rather than
   the verdict** — and prefer "N consecutive green runs in the failing tier" to "fixed", because the
   first is falsifiable by the next red and the second silently absorbs it.
+
+- 🔴 **A `hx-trigger` CURLED DIRECTLY FROM A FRAGMENT ENDPOINT CANNOT SHOW ITS REFRESH BEHAVIOUR —
+  the PARENT drives it.** `GET /ui/tmux` and `GET /ui/layout` are htmx FRAGMENTS; the SPA shell
+  (`GET /tasks`, `/tmux`, `/layout` — all `handleIndex`) mounts them as
+  `<div id="panel-tmux" hx-get="/ui/tmux" hx-trigger="load, every 60s, …">`. Curling the fragment
+  shows no `hx-trigger` and reads as "this tab has no auto-refresh", which is how this session
+  nearly dispatched work to add polling that had existed all along. **Fetch the page a human
+  loads, not the endpoint it calls.** The same read also makes `/ui/layout`'s 318-byte empty-state
+  a reassuring zero for any attribute you grep it for.
+- 🔴 **`tailwindcss_4` IS NOT THE `tailwindcss` THE DEPLOY RUNBOOK MEANS, AND THE RUNBOOK'S OWN
+  TRAP-DETECTOR MISREADS IT.** Measured in one worktree: `nix-shell -p tailwindcss_4` emits
+  **18,707 bytes with `.h-14` absent**; `nix-shell -p tailwindcss` emits **41,992 bytes with
+  `.h-14` present**. The runbook says `grep -c '\.h-14'` returning 0 means the CSS-cwd trap fired —
+  under `_4` that reads as the trap when the cwd was correct. Byte count discriminates them (the
+  real trap yields ~5 KB). ⚠ Low stakes for a DEPLOY — the Dockerfile builds its own CSS, so the
+  IMAGE is never affected — but it makes a local gate silently wrong, and `TestStaticAssetsServed`
+  cannot catch it because it asserts app.css is *served*, not that it contains anything.
+- ⚠ **The deploy runbook's "the workbench's `~/.docker/config.json` has no `harbor.homelab.lan`
+  entry" is STALE.** Measured 2026-09-01: `auths` = `127.0.0.1:30022`, `ghcr.io`,
+  **`harbor.homelab.lan`**, and `docker push` from the workbench succeeded rc 0. The laptop-push
+  workaround is no longer required for that reason. (The docker.io *pull* situation is a separate
+  entry above and is masked-not-fixed.)
+- 🔴 **A ROLLOUT CHECK THAT ASKS "IS ANY POD ON THE NEW VERSION" PASSES MID-ROLLOUT.** Measured:
+  the first check after `flux reconcile` returned Running pods on **both** 0.8.20 and 0.8.21. The
+  condition must be "every Running pod is the new image AND none is the old", not "the new image
+  appears" — the sibling of the documented `.items[0]` trap, from the other direction.
 
 ## How to verify
 
