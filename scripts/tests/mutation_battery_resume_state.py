@@ -61,9 +61,9 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
      '    if [ -n "$named_missing" ] || [ -n "$unresolved" ]; then',
      '    if [ -n "$named_missing" ]; then'),
     ("M6", "deletion", "drop the named-but-missing gap",
-     '    if [ -n "$named_missing" ]; then', '    if false; then'),
+     '      elif [ -n "$named_missing" ]; then', '      elif false; then'),
     ("M7", "deletion", "never record a named-but-missing token",
-     '    [ -n "$miss" ] || miss="$tok"\n', "    :\n"),
+     '    [ -n "$miss" ] || { miss="$tok"; ambig="$amb"; }\n', "    :\n"),
     # ---- comment-out -----------------------------------------------------
     ("M8", "comment-out", "comment out the unresolved flag",
      '      [ -z "$HANDOFF" ] && unresolved=1\n',
@@ -94,8 +94,14 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
     ("M15", "branch inversion", "invert the basename arms",
      '    case "$base" in handoff-*.md|*HANDOFF*.md) ;; *) continue ;; esac\n',
      '    case "$base" in handoff-*.md|*HANDOFF*.md) continue ;; *) ;; esac\n'),
+    # ⚠ Carries the FOLLOWING line as context. Since #1164 wrapped the fallback
+    # chain in `if [ -z "$named_missing" ]`, the bare `      if [ -z "$HANDOFF" ]`
+    # spelling occurs THREE times and the mutant would report NOT APPLIED — a
+    # silent survivor, which is the failure mode this file's docstring warns
+    # about. The `rest=` line is what makes it the GAP branch specifically.
     ("M16", "branch inversion", "invert the empty-HANDOFF gap branch",
-     '      if [ -z "$HANDOFF" ]; then', '      if [ -n "$HANDOFF" ]; then'),
+     '      if [ -z "$HANDOFF" ]; then\n        rest=" NOTHING was reconciled',
+     '      if [ -n "$HANDOFF" ]; then\n        rest=" NOTHING was reconciled'),
     ("M17", "branch inversion", "explicit-path branch inverted (-f -> ! -f)",
      '    if [ -f "$arg" ]; then path="$arg"',
      '    if [ ! -f "$arg" ]; then path="$arg"'),
@@ -113,7 +119,8 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
      '    [ -f "$tok" ] && { hit="$tok"; break; }\n',
      '    [ -f "$tok" ] && { hit="$tok"; continue; }\n'),
     ("M22", "off-by-one", "record the LAST named-missing token, not the first",
-     '    [ -n "$miss" ] || miss="$tok"\n', '    miss="$tok"\n'),
+     '    [ -n "$miss" ] || { miss="$tok"; ambig="$amb"; }\n',
+     '    miss="$tok"; ambig="$amb"\n'),
     # ---- widening (the shape two audits both reached for) -----------------
     ("M23", "widening", "case-fold the caps glob in the prose scan",
      'case "$base" in handoff-*.md|*HANDOFF*.md)',
@@ -179,14 +186,77 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
      " Re-run naming the doc's path, or with no argument to take newest deliberately.\"",
      '"'),
     ("M31", "early exit", "a miss short-circuits the scan before a later hit",
-     '    [ -f "$tok" ] && { hit="$tok"; break; }\n'
      '    # Shaped like a handoff reference, but not on disk. Remember the FIRST such\n'
      '    # token: it is the caller\'s stated intent, and the run is about to ignore it.\n'
-     '    [ -n "$miss" ] || miss="$tok"\n',
-     '    [ -f "$tok" ] && { hit="$tok"; break; }\n'
-     '    miss="$tok"; break\n'),
+     '    # Its candidate set (empty unless the search above found SEVERAL) travels\n'
+     '    # with it, so the gap can say what it saw rather than only that it failed.\n'
+     '    [ -n "$miss" ] || { miss="$tok"; ambig="$amb"; }\n',
+     '    miss="$tok"; ambig="$amb"; break\n'),
     ("M30", "stale rebind", "the strip loop drops its trailing-punctuation strip",
      '    tok=${tok%[\\`\\\'\\"\\)\\]\\>,\\;]}\n', "    :\n"),
+    # ---- #1164: linked-worktree resolution, scoped to the NAMED clone ------
+    #
+    # The two halves are mutated independently because they fail differently:
+    # W1/W4/W6 put the wrong-initiative digest back by finding nothing (or
+    # everything); W2 widens the search out of the clone that was NAMED; W3 and
+    # W7/W8/W11/W12 break the refusal on an ambiguous set or lie about it;
+    # W9/W10 are part 2's no-fallback guard, one side each.
+    ("W1", "deletion", "never search the NAMED clone's worktrees",
+     '        wt=$(worktrees_holding "${dir%/claudedocs}" "$base"); wrc=$?\n',
+     '        wrc=1\n'),
+    ("W2", "widening", "search $PWD's clone instead of the one the token NAMED "
+                       "(the wrong-initiative bug, one level down)",
+     'wt=$(worktrees_holding "${dir%/claudedocs}" "$base"); wrc=$?',
+     'wt=$(worktrees_holding "$root" "$base"); wrc=$?'),
+    ("W3", "branch inversion", "an AMBIGUOUS set is resolved to its first member",
+     '  [ "$n" -eq 1 ] && return 0\n  return 2\n', '  return 0\n'),
+    ("W4", "deletion", "drop the regular-file test inside the worktree scan",
+     '        [ -f "$w/claudedocs/$base" ] && printf \'%s\\n\' "$w/claudedocs/$base"\n',
+     '        printf \'%s\\n\' "$w/claudedocs/$base"\n'),
+    # ⚠ NO MUTANT FOR THE `rev-parse --git-dir` GUARD IN `worktrees_holding`,
+    # and saying so beats shipping a permanent survivor. It is EQUIVALENT: a
+    # directory that exists but is not in a checkout makes `git worktree list`
+    # fail, whose (suppressed) output is empty, which returns 1 either way; a
+    # directory that IS inside a checkout resolves identically with or without
+    # it. The guard is kept because it states the precondition, not because
+    # anything can observe it. `[ -d "$dir" ]` above it is what handles absence,
+    # and W2 covers the scoping claim people actually care about.
+    ("W6", "deletion", "never search the RELATIVE anchor's worktrees",
+     '           wt=$(worktrees_holding "$root" "$base"); wrc=$?\n',
+     '           wrc=1\n'),
+    ("W7", "operand swap", "the ambiguity count is the token, not the candidates",
+     '        lead="requested handoff \\"$named_missing\\" — NO SUCH FILE, and '
+     '$(basename "$named_missing") exists in $n_amb worktrees',
+     '        lead="requested handoff \\"$named_missing\\" — NO SUCH FILE, and '
+     '$(basename "$named_missing") exists in 1 worktrees'),
+    ("W8", "reword", "the ambiguity lead is reworded",
+     'exists in $n_amb worktrees of that clone ($list_amb), so NONE was chosen."',
+     'is ambiguous."'),
+    # ---- #1164 part 2: a named-missing handoff must not fall back ----------
+    ("W9", "guard hoist", "the fallback chain runs for a NAMED path again "
+                          "(the #1164 wrong-initiative digest)",
+     '    if [ -z "$named_missing" ]; then\n', '    if true; then\n'),
+    ("W10", "widening", "the no-fallback guard also blocks any SUPPLIED "
+                        "argument (the `unresolved` class), killing the "
+                        "MEASURED bare-basename and civitai-slug cases",
+     '    if [ -z "$named_missing" ]; then\n',
+     '    if [ -z "$named_missing" ] && [ -z "$arg" ]; then\n'),
+    ("W13", "off-by-one", "the enumeration cap slides by one (5 shown, not 4)",
+     '          if [ "$n_shown" -lt 4 ]; then\n',
+     '          if [ "$n_shown" -lt 5 ]; then\n'),
+    ("W14", "deletion", "the capped list drops its `and N more` clause, so the "
+                        "sentence silently understates what was found",
+     '        [ "$n_amb" -gt "$n_shown" ] \\\n'
+     '          && list_amb="$list_amb, and $((n_amb - n_shown)) more"\n',
+     "        :\n"),
+    ("W15", "stale rebind", "the COUNT shrinks with the capped list",
+     'exists in $n_amb worktrees', 'exists in $n_shown worktrees'),
+    ("W11", "operand swap", "rc 3 is read as rc 2, so the candidate set is lost",
+     '      [ "$rc" -eq 3 ] && {\n', '      [ "$rc" -eq 9 ] && {\n'),
+    ("W12", "operand swap", "the ambiguous token and its candidate list are "
+                            "swapped",
+     '        named_missing=${path%%$\'\\n\'*}; named_ambig=${path#*$\'\\n\'}; path=""; }',
+     '        named_missing=${path#*$\'\\n\'}; named_ambig=${path%%$\'\\n\'*}; path=""; }'),
 ]
 
 
