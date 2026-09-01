@@ -16,12 +16,17 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Diagnose and resolve disk pressure on the workbench NixOS host (root partition `/dev/nvme0n1p2`, 1.8TB). The host was at 87% usage with ~228G free. The session freed ~200G through cleanup, then investigated why the filesystem reports 1.5TB used while only ~600GB of data is measurable.
 
 ## State now
-- Branch `handoff-nix-disk-v3`, pushed, **no PR**, gate NOT run. Commits: `34f3c9e9` doc · `6d21f5f3` script · `9ef89fa7` fixes · `c79202f1` doc · `bd0f0c20` fixes.
+- **PR OPEN: devrc#1227** on branch `handoff-nix-disk-v3` (head `df6f0346`, current main merged in). Not merged.
 - Claim held: `nix-disk-cleanup-1`. No clawgate task.
-- **The root run completed cleanly.** Investigation RESOLVED: the mass is `/tmp`. Nothing running; filesystem untouched by these sessions.
+- The investigation is RESOLVED (`/tmp`, 78.5M entries / 469 GiB). The remaining work is landing the fix and taking the reclaim.
+- 🔴 **`nix/system/apply-tmp-churn-retention.sh` is MODIFIED in the base clone `~/workspace/devrc` and must stay that way until #1227 merges.** The working copy is the FIXED version (byte-identical to the branch); `main` still carries the broken `m:7d`. A `git checkout` of that file silently restores a rule set that ages no directory AND removes `--emit-rules`, which is the command the operator was given.
 
-### What's IN FLIGHT
-- Nothing. Three items await an operator decision (`/tmp` triage, the PR, the three `sudo` one-liners).
+### What's DONE this session
+1. Refuted the "ext4 metadata" diagnosis; measured the real answer.
+2. Wrote `scripts/diagnose-disk-accounting.sh`, ran it (operator, as root), then fixed three defects its first run exposed.
+3. Audited `apply-tmp-churn-retention.sh` against `tmpfiles.d(5)` — found the `m:` vs `mM:` defect that made the never-applied fix inert.
+4. Fixed `scripts/tests/test_tmp_churn_retention.py` after the gate caught 10 failures I introduced.
+5. Gated the MERGED tree on both tiers, all green.
 
 ## Open investigations — live diagnosis state
 
@@ -206,22 +211,33 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - Fixed in `bd0f0c20`: a not-on-PATH branch printing COULD NOT MEASURE, an empty-output branch reporting 0 alongside lsof's exit code, and a count that cannot go negative. Controls: old code reproduces `-1` on empty input, new code gives 0, and two rows give `count=2 bytes=2.0 GiB`.
 - **So session 2's `lsof +L1 = 0` elimination has NOT been re-confirmed as root.** It stands on session 2's evidence alone.
 
+### Gate status — both tiers green on the MERGED tree, Tekton pending
+- **Sandbox tier** (`nix build .#checks.x86_64-linux.<d>`, the tier Tekton runs, built ONE AT A TIME — a combined invocation produces false failures):
+  - `pytests` → `RESULT: PASS (exit=0)`, `TOTAL collected=20364 passed=20361 skipped=3 failed=0` (floor 18404)
+  - `nodetests` → `RESULT: PASS (exit=0)`, `TOTAL suites=5 files=41 tests=1449 pass=1449 fail=0` (floor 1367)
+- **Dev-host tier** (`scripts/gate.sh`): same counts, PASS.
+- Merged-tree base at gate time: `14b00c3f`. Main has since moved to `80625392`+; every mover touched only `claudedocs/*`, **disjoint** from this PR's four files, so the result still applies. Verified by file-set intersection, not by the merge exiting 0 — a clean `git merge` is not a clean merge.
+- 🔴 **`nix build` reporting BUILD OK is a claim about the BUILD, not about tests running.** Read the counts. And nix prefixes every line `devrc-pytests> `, so a `grep '^RESULT:'` finds NOTHING on a passing run — that empty grep nearly got reported as "no verdict".
+- **`gate.sh` first attempt reported `pytest RESULT: FAIL (exit=3)` — a MISSING ENVIRONMENT, not a code failure** (`logrotate` off PATH; the runner refuses rather than silently skipping). Fix is to run inside `nix develop <repo>`; `.envrc` is `use opencode`, so direnv alone never provides the gate toolchain. That same run printed `GATE_RC=0` beside `GATE: RESULT=FAIL exit=1` — the pipe ate the status.
+    via: measurement
+
+### The Tekton `devrc-pytests` failure on this PR is a KNOWN FLAKE — do not attribute it to this branch
+- **Observed:** run `devrc-ci-sjxn5` on `0d606bac`, exactly one failure: `scripts/tests/test_subsystem_store_api.py::TestTheBackstopNeverSendsASecondResponse::test_an_exception_AFTER_the_response_sends_NO_second_response`. `TOTAL collected=20364 passed=20360 skipped=3 failed=1`.
+- **Already documented in this repo:** `claudedocs/handoff-hook-interpreter-pinning.md:78` — *"Known flakes, do not attribute to a branch"* — and `claudedocs/handoff-find-session-live-first.md:338`, which records occurrence 5 (`devrc-ci-29tv4`) as **the same test class**, signature `AssertionError: the PUT sent a second response too: b''`. Third signature across five test classes, all the same in-process round-trip. Owned by `#863`.
+- **Controls run before concluding:** this PR touches 4 files, none in that subsystem · the test passed **12/12** locally in isolation, with a `--collect-only` positive control showing 1 collected rather than 0 · the full sandbox derivation passed locally · a different recent run (`devrc-ci-x9rff`, sha `bf433490`) failed a DIFFERENT test in the SAME file.
+    via: measurement
+- **Next probe if it recurs:** read the gate pod log directly rather than the check state — `KUBECONFIG=$KC_HOMELAB kubectl logs -n tekton-ci <pipelinerun>-gate-pod --all-containers`, and match the PipelineRun to a sha via `.spec.params[?(@.name=="revision")]`.
+
 ## Next steps (ranked)
-1. **Triage `/tmp` before deleting anything** — 469 GiB / 78.5M entries. Re-run the patched script (section 6d breaks `/tmp` down by size, inode count and entry-name family) or scope a read-only pass to `/tmp` alone. Known families: ~17K `nix-develop-*`, ~16K `nix-shell.*`, agent worktrees, playwright/chromium profiles. **Do not mass-delete on a live box** — k3s, agent worktrees and running sessions hold paths there.
+1. **Take the `/tmp` reclaim — no rebuild needed, and the rebuild is BLOCKED anyway.** `sudo bash nix/system/apply-tmp-churn-retention.sh --emit-rules > /tmp/churn.conf`, inspect with `sudo systemd-tmpfiles --dry-run --clean /tmp/churn.conf 2>&1 | tail` (read BOTH streams — "Would remove" is on stderr), then `sudo systemd-tmpfiles --clean /tmp/churn.conf`. Measure `df -i /` before and after; that difference is the only real answer to how much `/tmp` was holding.
    forcing: none
-2. **Re-run the patched script** for deduped bytes, a correct `/home` breakdown and a real deleted-but-open reading. Much faster now that 13T of external disk is excluded.
+2. **Merge #1227** once Tekton settles. Both tiers are green locally on the merged tree. `/audit-pr 1227` has NOT been run and is recommended — this PR produced two retracted claims and one caught regression.
    forcing: none
-3. **Decide whether `/var/lib/docker` (57 GB, 1.64M inodes) is live.** k3s uses containerd; `docker ps -a` and `docker system df` answer it.
+3. **`sudo nixos-rebuild boot` + reboot** to make the rules durable. `switch` is blocked by a `switchInhibitors` pre-switch check on an unrelated `dbus -> broker` channel migration; `boot` skips it. Do NOT use `NIXOS_NO_CHECK=1` on a box running k3s.
    forcing: none
-4. **`/home` candidates if more is needed:** `.ollama` 63G, `.cache` 36G, `.npm` 13G, `go` 13G — all rebuildable caches.
+4. **Decide whether `/var/lib/docker` (57 GB, 1.64M inodes) is live** — k3s uses containerd. `docker ps -a`, `docker system df`.
    forcing: none
-5. **`sudo tune2fs -m 1 /dev/nvme0n1p2`** → +74.5 GiB Avail, `Used` unchanged, reversible with `-m 5`.
-   forcing: none
-6. **Open a PR for `handoff-nix-disk-v3`** (5 commits, unmerged; gate not run, both Tekton tiers required).
-   forcing: none
-7. **Housekeeping:** `sudo umount /mnt/rootcheck && sudo rmdir /mnt/rootcheck` · `sudo rmdir '/&&'` · delete untracked `scripts/diagnose-nix-disk.sh` and `output.txt` · release the claim.
-   forcing: none
-8. **Only then, capacity work.** With `/tmp` at 469 GiB and `/nix` at 147 GB unique, moving `/nix` to its own partition addresses the smaller problem.
+5. **Housekeeping:** `sudo umount /mnt/rootcheck && sudo rmdir /mnt/rootcheck` · `sudo rmdir '/&&'` · delete untracked `scripts/diagnose-nix-disk.sh` and `output.txt` · `claim-work.sh --release nix-disk-cleanup-1`.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -261,10 +277,13 @@ Diagnose and resolve disk pressure on the workbench NixOS host (root partition `
 - **`NR-1` to strip a header yields −1 on empty input.** Any "count" that can go negative is hiding the difference between "nothing found" and "did not run", and the zero is usually the reassuring reading.
 - **This host has 6 non-root filesystems mounted under `/home`** (`sda1`, `sdb2`, `sdc1`, `nvme1n1p1`, `nvme3n1p1` plus root) — any `/home` figure must say which filesystem it is about.
 
+- 🔴 **I restructured a script without checking whether it had tests.** `scripts/tests/test_tmp_churn_retention.py` was already in the branch, one `grep -rl` away, and the gate caught 10 failures I caused. **RETRACTION:** commit `94d8a1e5` claimed "nothing tied [the two rule lists] together" — false; `test_the_shell_verification_ledger_equals_the_python_rule_ledger` compared them as sets. The consolidation is still worth having (structural beats test-enforced) but it closed no unguarded gap.
+- 🔴 **Knowing a failure mode does not prevent it — FOUR instances in one session, every one with a written rule.** (a) diagnosed a "section printed nothing" defect from output pasted mid-stream, while writing that exact lesson into this doc; (b) `2>/dev/null | grep -c` returned a clean 0 for a rule removing 1,066 entries, because the output is on stderr; (c) a wait loop `while pgrep -f "run-tests.sh"` matched its OWN command line and hung forever — the rule names almost this exact example; (d) a check-watcher matched `*pending*` against `PENDING` and declared the gate settled while both checks ran. **All four failed TOWARD a reassuring answer, which is why none announced itself.** The defence is structural, not attentional.
+- **`pgrep -f 'nix build'` matched ANOTHER SESSION's build** on `devrc-merged`. Killing by pattern would have killed a sibling agent's work. Resolve PIDs and confirm each `/proc/<pid>/cmdline` carries your own session id first.
+- **A concurrent `nix build` of the same derivation is a contention risk**: a green under contention is trustworthy, a red is not until re-checked alone.
+
 ## How to verify
-1. **The answer:** `sudo find /tmp -xdev -printf . | wc -c` — tens of millions; compare to `df -i /` used inodes (~81%).
-2. **The metadata refutation:** `dumpe2fs -h /dev/nvme0n1p2 | grep -iE 'Inode size|Inode count|journal size'` → ≈30 GiB, not 902.
-3. **The 6c fix:** section 6c must NOT list `hdd-20tb` or `old-nix-hdd` in the top-15 table, and must name them under "NOT on the root filesystem". Its total must be reconcilable with section 2's `/home`.
-4. **The dedup fix:** one file hardlinked 4× → deduped bytes equal `du -sx`, `dup-links` column reads 3.
-5. **Section 7:** must print `count=0` or a positive count, never a negative one, and COULD NOT MEASURE if lsof is absent.
-6. **`tune2fs`:** Avail rises ~74.5 GiB, `Used` does not move.
+1. **The reclaim:** `df -i /` before and after the `--clean`. Used inodes should drop by millions.
+2. **The rules are live** (after a reboot): `systemd-tmpfiles --cat-config | grep 'mM:7d'` returns 8 rules, and `grep -c ' m:7d'` returns 0.
+3. **The gate:** re-run both `nix build .#checks.x86_64-linux.{pytests,nodetests}` ONE AT A TIME on a merged tree and read the `TOTAL`/`RESULT:` lines, never the exit code.
+4. **The flake attribution:** if `devrc-pytests` is red, read the gate pod log and check the failing test against `test_subsystem_store_api.py` before attributing it to any branch.
