@@ -461,8 +461,12 @@ rather than removed and renumbered. New work is appended at the end.
    WHOLE ARC. STILL NOT CUT, and deliberately so.** (This is the arc's CLOSING CONDITION, not the only
    remaining item. 🔴 **Do not read this as an enumeration of the open set — DERIVE it:**
    from the devrc repo root, `python3 scripts/handoff-audit.py --sections 1 <this doc>` prints
-   `N/12 ranked items done` — that is the COUNT only; for MEMBERSHIP scan for items carrying no
-   `✅ **DONE**` marker, and check the two agree.
+   `N/12 ranked items done` — that is the COUNT only. For MEMBERSHIP, **anchor on the LINE START**:
+   an item is done iff its own opening line matches `^<rank>. ✅`; every other numbered item is
+   open. 🔴 **Anchoring matters — do not grep for a done-marker anywhere in the item.** The marker
+   also appears in prose (this very sentence sits inside rank 8), so an unanchored search marks
+   rank 8 — the arc's CLOSING CONDITION — as done and silently drops it. Then check the membership
+   count agrees with the tool's `N`; if it does not, the method is wrong, not the tool.
    At 2026-09-01 the open set was **{5, 8, 10, 12}**; an earlier version of this line named only
    5 and 12 and so hid **rank 10, which carries a live `claim-work` lock (`ci-speedup-7`)** —
    missing it is how a session opens a second front on work someone else holds.)
