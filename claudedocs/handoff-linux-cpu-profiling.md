@@ -79,7 +79,7 @@ What was actually in the tree, now separated and pushed so nothing can be lost:
 | effort | branch | state |
 |---|---|---|
 | CPU profiling tools | `feat/cpu-profiling-tools` | **PR #1135** |
-| memory-detail bar feature | `feat/bar-memory-detail` | pushed, **no PR yet** |
+| memory-detail bar feature | *(none — see below)* | **LANDED as #1138** by its own owner |
 | stranded rig-control test | `test/opencode-rig-control` | pushed, **must not merge as-is** |
 
 - **`scripts/memory-detail`** had been `git add`ed by the previous session purely to
@@ -105,10 +105,12 @@ What was actually in the tree, now separated and pushed so nothing can be lost:
 1. **Merge PR #1135** — run both tiers on the merged tree first
    (`nix build .#checks.x86_64-linux.pytests`, then `.nodetests`, **one at a
    time** — a combined invocation produces false failures). Forcing: none.
-2. **Decide the fate of `feat/bar-memory-detail`** — complete and green, but
-   nobody has watched the bar block actually open the float since the three parts
-   were brought together. Verify the click path, then PR it. Forcing: user
-   (it is not this effort's work).
+2. ~~Decide the fate of `feat/bar-memory-detail`~~ — **CLOSED, no action.** The
+   effort had an owner after all: it landed on `main` as **#1138** while this
+   work was in flight. The preservation branch was byte-identical to what landed
+   (verified per file, not by ancestry) and has been deleted. The judgement that
+   held: it was pushed as a BRANCH and never opened as a PR, so rescuing another
+   session's work created no duplicate review.
 3. **Fix `test/opencode-rig-control` before it goes near the suite** — point it at
    `claude/skills/` instead of the deployed path, or skip cleanly when that path is
    absent. Then it can join #1134. Forcing: none.
