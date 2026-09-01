@@ -511,7 +511,15 @@ embedded_md_path(){
     # killed, each by a named test.
     case "$tok" in
       /*) ;;
-      *) if [ -n "$mine" ] && [ -n "$root" ] && [ -f "$root/claudedocs/$base" ]; then
+      *) # 🔴 `$mine` GATES THE RE-ANCHOR TOO, NOT ONLY THE WORKTREE SEARCH
+         # BELOW. Gating one and not the other is mutant X1, and it is not
+         # hypothetical: it SURVIVED all 178 tests and shipped in the first fix
+         # commit, because every foreign-token fixture kept its doc in a
+         # WORKTREE, so the plain re-anchor had nothing to find and no test
+         # could tell the two clauses apart. Without this, a foreign
+         # `other-repo/claudedocs/<base>` still resolves THIS repo's own copy —
+         # the pre-existing #1159 half of the hole, silently.
+         if [ -n "$mine" ] && [ -n "$root" ] && [ -f "$root/claudedocs/$base" ]; then
            hit="$root/claudedocs/$base"; break
          fi
          # …and the same worktree treatment on the same anchor, under the same
