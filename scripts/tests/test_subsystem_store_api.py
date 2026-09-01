@@ -149,9 +149,15 @@ ROOT = Path(__file__).resolve().parents[2]
 #     already shipped one wrong citation.
 #     So it evidences an fsync exceeding 0.25 s, and the advice below about not
 #     raising HANG_TIMEOUT does not address the bound that actually failed
-#     there. That 0.25/1.2 pair is the same "bound tighter than the thing it
-#     discriminates" shape as commit f4a3d69b; it is UNFIXED and unflagged
-#     elsewhere.
+#     there. That 0.25/1.2 pair was the same "bound tighter than the thing it
+#     discriminates" shape as commit f4a3d69b.
+#     ✅ FIXED — and the pair is GONE rather than retuned. `SERVER_STALL` no
+#     longer exists and nothing samples `stalled.is_set()`: the caller WAITS for
+#     the stall site to be reached, and the handler is then held by an Event
+#     until the report has been taken. Retuning the two numbers was the obvious
+#     fix and would have been wrong — ANY fixed pair is a bet on the scheduler,
+#     and this one was lost in CI while winning on every dev host. Do not
+#     reintroduce a fixed stall duration here; the guard below pins that.
 #
 # 🔴 Do NOT raise this constant again in response to a recurrence. Read the
 # per-hung-call arithmetic directly below — the bound is not the lever, and the
@@ -7332,6 +7338,97 @@ def test_the_drain_guard_catches_the_sweep_it_exists_to_catch():
     blocking = [(ln, a) for ln, a in _drain_bounds(blocking_mutant) if a == "None"]
     assert len(blocking) == 1, (
         f"a `settimeout(None)` drain — block forever — was not detected: {blocking!r}"
+    )
+
+
+def _sampled_event_preconditions(source: "str | None" = None) -> "list[tuple[int, str]]":
+    """Every `assert <event>.is_set()` — a PRECONDITION that samples a race.
+
+    🔴 THE SHAPE, NOT THE SPELLING. `is_set()` is not banned: `await_audit`
+    calls it twice, inside a deadline-bounded polling loop, which is correct and
+    must stay legal. What cannot be legal is using it as the TEST OF AN ASSERT,
+    because that reads a background thread's progress at one instant and fails
+    the build if the thread has not got there yet — a claim about the scheduler
+    wearing the words of a claim about the code.
+
+    That is exactly how `TestAHungRoundTripSAYSWhichSideBlocked` failed in CI on
+    PRs whose diff could not reach it: within `CLIENT_BOUND` (0.25 s) the server
+    had to accept, spawn, parse, authenticate, meter, resolve and read before
+    reaching the stall site. Idle dev host: a few ms, so it passed 5/5 even
+    pinned to one core under 27 CPU hogs. Contended CI node: not always.
+
+    The fix is `.wait(HANG_TIMEOUT)`, which is strictly stronger — it still
+    fails when the site is genuinely never reached (proved by mutation), and it
+    stops failing when the site is merely reached late.
+    """
+    src = source if source is not None else Path(__file__).read_text()
+    bad = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Assert):
+            continue
+        test = node.test
+        if (
+            isinstance(test, ast.Call)
+            and getattr(test.func, "attr", None) == "is_set"
+        ):
+            bad.append((node.lineno, ast.unparse(test)))
+    return bad
+
+
+def test_no_precondition_SAMPLES_an_event_instead_of_WAITING_for_it():
+    """🔴 A precondition that samples a race is a flake with a good error message.
+
+    It blocks every PR exactly as a real defect would, while saying the code is
+    wrong — the most expensive possible failure, because the accusation is
+    specific and false.
+    """
+    sampled = _sampled_event_preconditions()
+    assert not sampled, (
+        f"these assertions SAMPLE an Event instead of waiting on it: {sampled}. "
+        "Use `assert ev.wait(HANG_TIMEOUT)` — it still fails when the event is "
+        "never set, and stops failing when it is merely set late. See "
+        "`_hang_and_report`."
+    )
+
+
+def test_the_sampled_event_DETECTOR_can_actually_see_one():
+    """🔴 The positive control. Without it a clean zero above is
+    indistinguishable from a walk that matches nothing — and this detector is
+    narrow by design (asserts only), so "it found none" is very easy to get for
+    the wrong reason.
+    """
+    src = Path(__file__).read_text()
+    assert _sampled_event_preconditions(src) == [], "fixture drift: one is already present"
+
+    # Re-introduce exactly the form that was removed.
+    #
+    # 🔴 THE ANCHOR IS BUILT BY CONCATENATION, NOT WRITTEN AS ONE LITERAL, and
+    # that is load-bearing rather than style. Spelled whole, this string would
+    # appear TWICE in the file — once here and once in the code it targets — and
+    # `replace(..., 1)` would hit THIS line first. It did: the mutation applied
+    # (so `mutant != src` passed), the guard reported zero, and the test failed
+    # with an empty list while the real code was untouched. Split like this, the
+    # file contains exactly one copy, which the assertion below pins.
+    target = "            armed = stalled" + ".wait(HANG_TIMEOUT)"
+    assert src.count(target) == 1, (
+        f"the anchor is no longer unique ({src.count(target)} copies) — a "
+        "count=1 replace would mutate the wrong one and this control would pass "
+        "while testing nothing"
+    )
+    mutant = src.replace(target, "            assert stalled" + ".is_set()", 1)
+    assert mutant != src, "the mutation did not apply — this test is vacuous"
+    found = _sampled_event_preconditions(mutant)
+    assert len(found) == 1 and found[0][1] == "stalled.is_set()", (
+        f"re-introducing the sampled precondition did not surface it: {found!r}"
+    )
+
+    # 🔴 AND THE NEGATIVE HALF: the legal uses must NOT be flagged, or the guard
+    # is unleaveable and someone will delete it. `await_audit` calls `is_set()`
+    # in a loop and in an assignment; neither is an assert test.
+    assert "closed.is_set()" in src, "fixture drift: await_audit no longer calls is_set"
+    assert not [f for f in _sampled_event_preconditions(src) if "closed" in f[1]], (
+        "the legal polling-loop use of is_set() was flagged — this guard would "
+        "be permanently red and would train people to delete it"
     )
 
 
@@ -15696,12 +15793,12 @@ class TestAHungRoundTripSAYSWhichSideBlocked:
     `_HUNG_SERVER_RULES` and the test watched to fail with its own message.
     """
 
-    # Deliberately far apart: the client must give up while the server is still
-    # stuck, or the report is taken after the block has cleared and says nothing.
-    # Kept SMALL because each test pays `SERVER_STALL` twice over — once waiting
-    # for the client to give up, once draining the wedged handler.
+    # 🔴 THE CLIENT BOUND, AND NOTHING ELSE. There is deliberately no
+    # `SERVER_STALL` any more — see `_hang_and_report`. The stall is now held
+    # open by an Event until the report has been taken, so its duration is
+    # DECIDED by this test rather than guessed in advance, and the pair of
+    # bounds that had to be "far apart" no longer has to be anything.
     CLIENT_BOUND = 0.25
-    SERVER_STALL = 1.2
 
     def _hang_and_report(self, store, monkeypatch, where: str) -> str:
         """Drive one POST into a server deliberately stuck at `where`.
@@ -15718,10 +15815,28 @@ class TestAHungRoundTripSAYSWhichSideBlocked:
             "arm's verdict would not be about this arm's request"
         )
         stalled = threading.Event()
+        released = threading.Event()
 
         def _stall(*_a, **_k):
             stalled.set()
-            time.sleep(self.SERVER_STALL)
+            # 🔴 HELD UNTIL THE REPORT HAS BEEN TAKEN, not for a fixed span.
+            # The old form slept `SERVER_STALL` (1.2 s) and the caller sampled
+            # `stalled.is_set()` the instant the client gave up at
+            # `CLIENT_BOUND` (0.25 s) — two independent races against one
+            # unsynchronised handler:
+            #   (a) ARMING: within 250 ms the server had to accept, spawn a
+            #       thread, parse, authenticate, meter, resolve and read before
+            #       reaching this line. Idle dev host: a few ms. Contended CI
+            #       node: not always — and the guard then blamed the CODE for a
+            #       SCHEDULING outcome.
+            #   (b) REPORTING: if the stack walk took longer than the remaining
+            #       sleep, the handler unblocked mid-report and the verdict was
+            #       about a server that was no longer stuck.
+            # Both disappear once the two sides synchronise instead of racing:
+            # the caller WAITS for this line to be reached, and this line waits
+            # for the caller to be done. Bounded so a defect cannot park a
+            # handler forever and wedge the drain below.
+            released.wait(HANG_TIMEOUT)
 
         if where == "fsync":
             # 🔴 `_fsync_dir`, not `os.fsync`: patching the stdlib's `os.fsync`
@@ -15763,14 +15878,32 @@ class TestAHungRoundTripSAYSWhichSideBlocked:
                         {"text": BULLET_A, "session": SESSION_A}
                     ).encode("utf-8"),
                 )
-            assert stalled.is_set(), (
-                "the server never reached the stall site, so the hang under "
-                "test was NOT the one this test set up — the report below "
-                "would be about some other mechanism"
-            )
+            # 🔴 WAIT FOR THE ARMING — DO NOT SAMPLE IT. `stalled.is_set()` here
+            # was an instantaneous read of a race the server had no obligation
+            # to have won yet, so a slow-to-schedule handler failed the guard
+            # with "the server never reached the stall site" while the code was
+            # fine. Waiting cannot mask a real regression: if the stall site is
+            # genuinely never reached — the fix stops calling `_fsync_dir`, or
+            # the request is rejected before the write path — this returns False
+            # and the assertion below still fires, just on evidence instead of
+            # on timing. It costs a PASSING run nothing: the event is normally
+            # already set by the time the client has given up.
+            armed = stalled.wait(HANG_TIMEOUT)
             try:
+                assert armed, (
+                    f"the server never reached the {where!r} stall site within "
+                    f"{HANG_TIMEOUT:g}s, so the hang under test was NOT the one "
+                    "this test set up — the report would be about some other "
+                    "mechanism. This is now a WAITED verdict, not a sampled "
+                    "one, so it is a claim about the SERVER rather than about "
+                    "scheduling: the handler never got to the stall site at all."
+                )
                 return _why_the_server_did_not_answer()
             finally:
+                # 🔴 RELEASE FIRST, THEN DRAIN — and in `finally`, so a failed
+                # assertion above cannot leave the handler parked for the full
+                # bound and strand the next arm's precondition.
+                released.set()
                 # Drain OUR wedged handler before handing back, so the leak
                 # this arm created cannot be inherited by the next one.
                 _await_no_handler_threads(HANG_TIMEOUT)
