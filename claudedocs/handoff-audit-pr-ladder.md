@@ -16,56 +16,32 @@ sessions, then fix what the measurement exposed. It exposed that the ladder's
 findings-keyed stop rule does not terminate in the guard-hardening regime.
 
 ## State now
-- ✅ **RANK 1 IS CLOSED — the fleet is converged and drift-check is rc 0.** Both hosts at
-  `9a7c433865ef`, switched, consumer-checked (`managed artifacts resolve 0 dangling` /
-  `CURRENT 0 stale` on each). `drift-check.sh` exits **0** with `PARITY-RC=0` on both — which is
-  affirmative, not an absence: rc 10 (behind) is a parity-arm code, so a zero there is the check
-  PASSING, not the check being skipped.
-- ✅ **RANK 2 IS CLOSED — and NOT by this session.** `devrc-seq-absent-empty`, `devrc-auditfix`
-  and `devrc-ho2` are all gone from `git worktree list`. Verified mechanically with a positive
-  control (pattern matched a known-present worktree = 1, the three = 0) rather than by eye.
-  🔴 **But the underlying condition is far worse than the item said: 137 worktrees are still
-  registered**, most on merged branches, ~90 of them under `.claude/worktrees/agent-*`. The
-  ranked item named three; retiring those three changed almost nothing.
-- 🔴 **PREVIOUS DOC'S STATE LINES WERE STALE IN TWO WAYS — both found by measuring, not reading.**
-  (a) The workbench was recorded as sitting on `feat/memory-detail-click`; it was back on `main`
-  and **also 1 commit behind**, so rank 1 was a TWO-host ship, not one. (b) rc 17 was recorded as
-  closed at the output on both hosts; it **had re-opened on the laptop**.
-- ⚠ **`ship.sh` returned rc 19 on the first pass — the documented mid-run race, not a fault.**
-  `origin/main` merged between the two hosts' fetches: workbench landed `57b010fb`, laptop
-  `9a7c4338`. Every per-host check passed on both because each host really was at origin/main
-  *as it saw it*. The second pass converged both, which is the remedy the tool prints itself.
-- ✅ **rc 17 (laptop) CLOSED.** The laptop was building `clawgatectl` from a
-  `homelab-talos/containers/clawgate` subtree 2 commits stale. Fixed with drift-check's own
-  printed remedy: `git -C ~/workspace/homelab-talos pull --ff-only` on a **re-verified-clean**
-  tree (`f7b07be3` → `22b250be`, 0 ahead, so ff-only could not conflict; `f7b07be3` is the
-  rollback point), then a `home-manager switch` — a pull alone changes nothing nix manages.
-  Laptop now serves `clawgatectl 0.8.19` from a real store path.
-  🔴 **Scoped honestly: the drift was real at the CHECKOUT and its BINARY impact was nil.** The
-  whole 17-commit pull touched exactly four files under `containers/clawgate` — two `.bats` and
-  two `_test.go` — none of which reach a compiled binary. The laptop was never running wrong
-  code. Derived from the pull's own diffstat, not from the commit titles.
-  Source parity is now `compared=2 same=2 differing=0`; the workbench's `homelab-talos` reached
-  the same `22b250be` during this window **by another session, not by this one**.
-- 🔴 **HOST DIVERGENCE PERSISTS, UNCHANGED AND NOT MINE TO CLOSE.** `ship.sh` states it outright:
-  `DIRTY AND IN THE ARTIFACT — nix reads 1 path(s)`, namely `nix/pkgs/default.nix`, so the
-  workbench generation is `origin/main` **plus** an uncommitted `inxi` + `cpu-x` hunk that is
-  another session's work. The laptop has neither package. **Two hosts, same sha, different code**
-  — invisible to git parity. Re-shipping PRESERVED this state rather than creating it.
-- **Three untracked files on the workbench**, none in a nix-read path (`hits=0` of 160 paths), so
-  none is deployed: `output.txt`, `scripts/diagnose-nix-disk.sh`,
-  `scripts/tests/test_opencode_rig_control.py`. 🔴 The last is an unsaved TEST with **no owner
-  identified** — `claude/RULES.md` classes that as unsaved work one routine `checkout` from
-  silent deletion.
-- **Both preserved WIP dirs still exist and were not touched:**
+🔴 **THIS EFFORT IS COMPLETE. All four ranked items are DONE and every PR is merged, content-
+verified and shipped.** Only rank 5 (below) is workable, and it is `forcing: none`.
+
+- **Five PRs, all MERGED and verified by CONTENT with a negative control** (never ancestry — a
+  squash makes the branch head a permanent non-ancestor):
+  `#1153` → `018e5761` · `#1157` → `3e4c447f` · `#1178` → `0aa90f20` · `#1185` → `76d20386` ·
+  `#1191` → `a4529101`.
+- **Fleet: both hosts at `a4529101`, `drift-check` rc 0** — `PARITY-RC=0` and `SRC-RC=0` on each,
+  source parity `compared=2 same=2 differing=0`, `clawgatectl 0.8.21` on both.
+- ✅ **The `inxi`/`cpu-x` HOST DIVERGENCE IS RESOLVED** — committed to `main` by another session,
+  verified present in `origin/main:nix/pkgs/default.nix` (1 each, negative control 0). The
+  workbench's dirty-tracked path is gone; `ship.sh` reports `0 tracked` dirty paths.
+- 🔴 **BREAK-GLASS WAS AUTHORISED AND NOT USED.** `#1191` was red three times on the store-api
+  fsync condition; the operator authorised the branch-protection break-glass, and a re-check
+  before acting made it unnecessary — a rebase onto current `main` in a genuinely quiet window
+  passed. **`main` was never unprotected** (verified after: both checks required,
+  `enforce_admins=true`).
+- **Still open BY DESIGN, each deliberately unfiled for want of a closing condition:** 137
+  registered worktrees; the Tekton/fsync capacity condition (diagnosed in `scripts/ci-repro/`,
+  three fixes already rejected on measurements).
+- **Preserved WIP from earlier sessions, untouched:**
   `~/workspace/.wip-preserve-discord-embed-2026-08-28/` and
   `~/workspace/.wip-preserve-memory-detail-2026-08-30/`.
-- **Prior merges, carried forward (verified by CONTENT in an earlier session, never ancestry):**
-  `#1109` → `8c61f2e6`, `#1111` → `f081167d`, `#1133` → `5324bf47`.
-- **This doc's own update:** branch `docs/handoff-aplr-rank1-shipped`, worktree
-  `~/workspace/devrc-ho-aplr2`. No `clawgate-task:` field is recorded — `clawgate_handoff.sh
-  resolve` returned **rc 5 (nothing resolved) with its positive control passing**. That is not
-  "no task": an unknown session id also answers 200 with an empty array.
+- **No claims held; no worktrees of this effort remain.** No `clawgate-task:` field is recorded —
+  `clawgate_handoff.sh resolve` returned **rc 5 (nothing resolved) with its positive control
+  passing**, which is not "no task": an unknown session id also answers 200 with an empty array.
 
 ## Closed investigations — both were diagnosed on 2026-08-28
 
@@ -141,33 +117,27 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   other "surfaces a worktree does not hand you" in `claude/RULES.md`.
 
 ## Next steps (ranked)
-🔴 **Numbering is deliberately STABLE.** The rank is half a `claim-work` slug's identity, so
-renumbering silently re-points every live claim. Closed items are retained as DONE markers.
+🔴 **Numbering is STABLE — the rank is half a `claim-work` slug's identity.** Items 1–4 are
+retained as DONE markers; do not re-claim them.
 
-**ALL FOUR RANKED ITEMS ARE CLOSED.** Nothing here is workable; a `/resume` picking from this
-list should read the Gotchas and stop, not claim a rank.
-
-1. **DONE (2026-08-31) — ship the laptop.** Both hosts converged; `drift-check.sh` rc 0,
-   `PARITY-RC=0` on both. Do not re-claim.
+1. **DONE (2026-08-31) — ship the laptop.** `drift-check.sh` rc 0, `PARITY-RC=0` on both.
    forcing: none
-2. **DONE (found already closed 2026-08-31) — the three leftover worktrees.** ⚠ The successor
-   condition is real and unowned: **137 registered worktrees**, most on merged branches. Not
-   filed — no named owner and no checkable closing condition.
+2. **DONE (found already closed 2026-08-31) — the three leftover worktrees.** ⚠ Successor
+   condition real and unowned: **137 registered worktrees**. Not filed — no checkable closing
+   condition.
    forcing: none
-3. **DONE (2026-08-31) — `#1133`'s never-run round 3.** Ran blind over `ea36a489..9ff5c9a9`:
-   4 🟡 + 1 🟢. One was live in `main` (the escape hatch's summary obligation, deleted by a
-   reword) and is fixed in **`#1157`**, merged `3e4c447f` after a ladder stopped on the stated
-   criterion. The other four described code `#1117` had already removed — they became rank 4.
+3. **DONE (2026-08-31) — `#1133`'s never-run round 3.** `#1157` → `3e4c447f`.
    forcing: none
-4. **DONE (2026-09-01) — the `nix log` port-back.** Merged as **`#1185` → `76d20386`**, shipped
-   to both hosts. 🔴 **It was checked for NECESSITY first, as this item's own closing condition
-   allowed** — and it was necessary. MEASURED on one derivation, three runs of the same command:
-   uncached `-L` → rc 0, 5 lines, 1 `RESULT:`; **cached → rc 0, 0 lines, 0 `RESULT:`**;
-   `nix log <drv>` → rc 0, 2 lines, 1 `RESULT:`. `#1117` kept `-L`, which fixes a SUCCEEDING
-   build and does nothing for an ALREADY-BUILT one, so the brief told auditors to read a
-   `RESULT:` line that a cached build never prints, at rc 0. All four acceptance criteria
-   addressed. ⚠ **`90202ce5..2eaa3c62` — the fix round — is UNAUDITED**, by operator decision on
-   cost, recorded on the PR as such and not as convergence.
+4. **DONE (2026-09-01) — the `nix log` port-back.** `#1185` → `76d20386`.
+   forcing: none
+5. **`90202ce5..2eaa3c62` — `#1185`'s fix round — is UNAUDITED.** (repo: `devrc`; files
+   `scripts/audit-dispatch.py`, `scripts/tests/test_audit_dispatch.py`.) Round 1 found 4 🟡 + 2 🟢
+   including a real correctness bug (the emitted block's exit status inverted) and a guard three
+   mutants walked; the fix round was merged on operator decision on cost, recorded on the PR as a
+   decision and **not** as convergence. 🔴 The relevant base rate: across this effort a fix
+   introduced a new defect in **five of six rounds**, twice by committing the exact error the same
+   commit was fixing. **Closing condition:** a round returns no findings, or a named reader
+   dismisses it in writing.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -623,35 +593,84 @@ list should read the Gotchas and stop, not claim a rank.
   session. A merged PR is invisible to `/resume`; the ranked list is what it reads. **The work
   is not done when the PR merges; it is done when the queue says so.**
 
+- 🔴 **rc 17 RECURRED THREE TIMES IN ONE SESSION, AND THE FIRST INSTANCE'S HARMLESSNESS WAS
+  LUCK.** (1) laptop, 2 commits, all `.bats`/`_test.go` — binary unaffected. (2) BOTH hosts, 1
+  commit touching `cmd/clawgatectl/client.go` — both were building without the `#468` deeplink
+  fix. (3) laptop again, 2 commits touching `client.go` + `internal/ui/components.go` — missing
+  `0.8.21`. **Two of three had real blast radius.** The rule that worked every time: read the
+  DIFF, excluding `_test.go`/`.bats`/`tests/`, and never the commit subjects. A clean
+  `drift-check` here has a shelf life of HOURS — nothing converges `nix/pkgs`' foreign source
+  repos, so it regrows on the next `homelab-talos` commit.
+- 🔴 **"QUIET WINDOW" FAILED AS A PREDICTOR ONCE AND WORKED ONCE — AND THE DIFFERENCE WAS WHEN I
+  SAMPLED.** Attempt 3 was launched at contention 1 and FAILED; the run executed 01:48–02:08Z, by
+  which time contention was back to 4. Attempt 4 launched at contention 1 and PASSED — with
+  contention **also back to 4 by completion**. So the completion-time reading is the wrong
+  instrument in both directions: what matters is contention DURING the fsync-heavy window, which
+  neither sample sees. A measurement taken minutes before the act is a hypothesis about now.
+- 🔴 **AN ARMED AUTO-MERGE IS A LANDMINE FOR WHOEVER OPENS BREAK-GLASS — INCLUDING SOMEONE
+  ELSE'S PR.** Pre-flight for the break-glass found `#1169` (another session's, docs-only) with
+  auto-merge **ARMED and its required check RED**, failing on the SAME test as mine. Opening the
+  protection window would have merged it past its gate, silently, inside my operation. That is
+  not an authorisation I had. 🔴 **Re-measure `gh pr list --json autoMergeRequest` immediately
+  before the DELETE, never in the survey that motivated it** — on re-check hours later it had
+  gone `CONFLICTING`, which neutralises it (auto-merge cannot land a conflicted PR) but could
+  reverse the moment its author resolves the conflict.
+- 🔴 **I ARMED THAT LANDMINE MYSELF AND HAD TO DISARM IT.** Auto-merge on a permanently-red head
+  does NOTHING useful — nothing re-triggers the gate by itself — so it buys no progress and
+  leaves exactly the hazard above. If the head is red, disarm rather than "leave it ready".
+- 🔴 **`pull.rebase = true` MAKES `git pull --ff-only` PRINT A FAILURE IT DID NOT SUFFER.**
+  `error: cannot pull with rebase: You have unstaged changes.` — and HEAD fast-forwarded anyway.
+  **`git reflog` is the arbiter** (`merge origin/trunk: Fast-forward`); the message is not. The
+  other session's tracked modifications were byte-identical either side (md5 of
+  `status --porcelain`, taken both times).
+- 🔴 **THE `| tail` TRAP, HIT AGAIN IN THAT SAME COMMAND — and it AGREED with the truth, which is
+  worse.** `git pull … | tail -3; echo "PULL_RC=$?"` printed `PULL_RC=0`: `tail`'s status, for an
+  operation whose real outcome it could not observe. It happened to be right. **A piped `$?` that
+  agrees is not evidence; never quote one.**
+- 🔴 **THE STORE-API FLAKE IS DIAGNOSED, NOT MYSTERIOUS — READ `scripts/ci-repro/README.md`
+  BEFORE RE-PUSHING.** It states the mechanism (`_replace_bytes` fsyncs inside the request before
+  the response is written; `devrc-ci` is pinned to one node so stacked runs contend on one disk)
+  and states outright that it hits **docs-only PRs**. Four failures this effort across two PRs and
+  three different tests, targets 464–530s, every one passing 3/3 locally in ~5s with a
+  `--collect-only` positive control. Do not re-derive this; do not debug your diff against it.
+- ⚠ **SAME VERSION, SAME SUBTREE COMMIT, DIFFERENT STORE HASH — not a fault.** The workbench held
+  an UNTRACKED file inside the built source dir (`containers/clawgate/e2e/live-verify-0820.mjs`).
+  The build reads the TREE, not the commit; `drift-check` reports it `DIRTY` and never as drift.
+- 🔴 **THE LAST ACT OF CLOSING A RANKED ITEM IS UPDATING THE LIST, AND IT IS THE ONE MOST LIKELY
+  TO BE SKIPPED.** `#1185` merged and shipped while rank 4 still read OPEN — the exact
+  duplicate-work hazard rank 1's own update had fixed hours earlier in the same session. A merged
+  PR is invisible to `/resume`; the ranked list is what it reads.
+
 ## How to verify
 ```bash
-# --- the fleet: the ONE command that carries ranks 1 and 2's closing conditions ---
+# --- the whole effort, in one command. Expect rc 0. ---
 bash ~/workspace/devrc/scripts/drift-check.sh
-# expect rc 0. Read the PER-HOST lines, never the final verdict alone:
-#   [workbench] PARITY-RC=0        <- affirmative: rc10 (behind) is a parity-arm code
-#   [laptop]    PARITY-RC=0
-#   [*] BUILT SOURCE homelab-talos/containers/clawgate is CURRENT ... 22b250be5ae4
-#   [*] SRC-RC=0                   <- rc 17 closed on BOTH hosts
+#   [workbench] PARITY-RC=0 / SRC-RC=0     [laptop] PARITY-RC=0 / SRC-RC=0
 #   [srcrepo] compared=2 same=2 differing=0
-# ⚠ a non-zero rc here is EXPECTED to recur: nothing converges nix/pkgs' foreign
-#   source repos, so rc 17 regrows whenever homelab-talos/tmux-fuzzyclaw upstream moves.
+# ⚠ rc 17 is EXPECTED to recur here within hours — nothing converges nix/pkgs' foreign
+#   source repos. Read the DIFF before acting: exclude _test.go/.bats/tests/ and see
+#   whether anything reaches a compiled binary.
 
-# --- rank 2's closing condition, WITH the positive control (a bare 0 proves nothing) ---
-git -C ~/workspace/devrc worktree list --porcelain | grep -E '^worktree ' \
-  | grep -cE 'devrc-seq-absent-empty|devrc-auditfix|devrc-ho2$'    # 0  <- the three are gone
-git -C ~/workspace/devrc worktree list --porcelain | grep -cE '^worktree '  # 137 <- the real population
-
-# --- the divergence that is STILL OPEN (expect a non-empty diff = still uncommitted) ---
-git -C ~/workspace/devrc diff --stat nix/pkgs/default.nix   # inxi/cpu-x, another session's
-
-# --- the three prior merges, by CONTENT (never ancestry — a squash is never an ancestor) ---
+# --- the five merges, by CONTENT (a squash is never an ancestor), with a negative control ---
 git -C ~/workspace/devrc fetch origin main
-git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/test_server.py \
-  | grep -cE '_wait_ops\(spool_dir, "tabs", 1, where=_routed_to\(inst\)\)'    # 2  (#1109)
-git -C ~/workspace/devrc show origin/main:scripts/audit-dispatch.py \
-  | grep -cE 'NO DERIVATION|NO LOG — never built HERE|EMPTY LOG'             # 3  (#1133)
 git -C ~/workspace/devrc show origin/main:claude/skills/audit-pr/SKILL.md \
-  | grep -cE 'A DELTA ROUND CANNOT SEE A CLAIM|WHEN THE PAYLOAD IS PROSE'    # 2  (#1133)
+  | grep -c 'IN THE ROUND.S SUMMARY AND NOT LEFT IMPLICIT'          # 1  (#1157)
+git -C ~/workspace/devrc show origin/main:scripts/audit-dispatch.py \
+  | grep -c 'NIX_LOG_DRV_GUARD'                                     # 2  (#1185: def + use)
+git -C ~/workspace/devrc show origin/main:claudedocs/handoff-audit-pr-ladder.md \
+  | grep -c 'ALL FOUR RANKED ITEMS ARE CLOSED'                      # 1  (#1191)
+git -C ~/workspace/devrc show origin/main:scripts/audit-dispatch.py \
+  | grep -c 'ZZZ-NOT-PRESENT'                                       # 0  <- negative control
+
+# --- the guards actually guard (not just exist) ---
+env -u CDPATH nix develop ~/workspace/devrc -c bash \
+  ~/workspace/devrc/scripts/tests/mutants-audit-ladder.sh     # ✅ 21 row(s), all as expected
+env -u CDPATH nix develop ~/workspace/devrc -c python3 \
+  ~/workspace/devrc/scripts/tests/mutants-audit-dispatch.py   # ✅ 138 row(s), all as expected
+
+# --- both hosts serve the same clawgatectl ---
+clawgatectl --version                                         # 0.8.21
+ssh zach@192.168.50.155 'clawgatectl --version'               # 0.8.21
 ```
 ## Open investigations — live diagnosis state
 
