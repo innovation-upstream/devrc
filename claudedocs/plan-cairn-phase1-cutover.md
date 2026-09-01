@@ -547,6 +547,40 @@ the served copy. An entry only the *other* host holds is not checked for strande
 run on this one — which is why step 6 runs the whole script on the laptop too, and why the
 peer manifest is worth producing even though the plan could proceed without it.
 
+### 🔴 An incident from building this, because the mechanism generalises
+
+While this branch was being written, a **background mutation sweep** was rewriting
+`scripts/cairn-cutover.py` in place — mutate, run the suite, restore, repeat. A `git add`
+landed inside one of those windows and **committed a mutant**: the P5 empty-walk refusal
+shipped as `if False:`, disabled, in the very commit whose message explains why it exists.
+
+There was no error. `git log` showed exactly what was expected, and the working tree looked
+correct seconds later once the sweep restored it. **The suite could not catch it** — the
+sweep restores, so every later run is green over a red commit. What caught it was comparing
+the *committed blob* against the sweep's own pre-mutation backup (`git show HEAD:<path>` vs
+the `cp` aside); that artifact was the only thing that could have seen it.
+
+**The generalisation:** a tool that rewrites your tree is a **concurrent writer**, and
+`git add` is a read of whatever is there at that instant. `claude/RULES.md` already says to
+re-check *which branch* before committing because another session may have moved it — this
+is the same hazard one level down, in the CONTENT, moved by a process you started yourself.
+A mutation sweep is the worst instance, because its whole job is to produce plausible edits
+that survive a diff review.
+
+⚠ **Bounding it honestly, in both directions.** Every commit on the branch was scanned for
+the strings the sweep can write: exactly one was contaminated, and it is reverted; HEAD's
+blob is byte-identical to the verified backup. And the contaminated commit was never going
+to become `main`'s state under any merge method — devrc's recent practice is **squash**
+(all twelve most recent first-parent commits on `main` carry a `(#N)` squash suffix), which
+discards intermediates entirely; merge commits are *permitted* and five exist in history,
+but even under one the merge's TREE is the branch head's content. So the blast radius is
+this branch's history, not the mainline. That bound does not make the incident less worth
+recording — the same race would have shipped the disabled guard had it landed on the final
+commit instead of an intermediate one.
+
+**The operational rule:** never run a mutation sweep concurrently with anything that stages,
+builds or tests. It contends with all three and only one of them fails loudly.
+
 ## 9. The instruments, and how each was validated
 
 Every verdict below comes from something that was shown to be capable of the opposite
