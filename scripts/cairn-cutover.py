@@ -194,6 +194,20 @@ def run(cmd: list[str], *, timeout: int = 120, cwd: Path | None = None) -> Ran:
     recently printing `NIXBUILD_RC=0` for a build that had just failed 45 tests.
     `subprocess.run` with `capture_output` gives the child's own status and the
     two streams separately, so a caller can read the CONTENT and the code.
+
+    🔴 A TIMEOUT KEEPS WHAT THE CHILD ALREADY PRINTED. This used to return
+    `Ran(124, "", …)`, discarding it — so `_acceptance`'s refusal said "Read its
+    per-scope FAIL lines above" over a run that had printed nothing above, and
+    the operator was sent looking for output that had been thrown away one frame
+    earlier. The partial stdout is the most useful thing a timed-out sweep
+    leaves: it names the scopes that DID complete, which is where the next run
+    starts.
+
+    ⚠ MEASURED, NOT ASSUMED: on CPython 3.12.14 `TimeoutExpired.stdout` is
+    **bytes even under `text=True`**, and `.stderr` came back **None**. So both
+    are normalised here rather than passed through — a bytes value handed to a
+    caller that writes it to a text stream raises `TypeError`, which would turn
+    a timeout into a traceback.
     """
     try:
         proc = subprocess.run(
@@ -202,9 +216,22 @@ def run(cmd: list[str], *, timeout: int = 120, cwd: Path | None = None) -> Ran:
         )
     except FileNotFoundError as exc:
         return Ran(127, "", f"{cmd[0]}: not found ({exc})")
-    except subprocess.TimeoutExpired:
-        return Ran(124, "", f"{cmd[0]}: timed out after {timeout}s")
+    except subprocess.TimeoutExpired as exc:
+        partial = _as_text(exc.stdout)
+        note = f"{cmd[0]}: timed out after {timeout}s"
+        if not partial:
+            note += " — and it had printed NOTHING to stdout by then"
+        return Ran(124, partial, "\n".join(filter(None, (_as_text(exc.stderr), note))))
     return Ran(proc.returncode, proc.stdout, proc.stderr)
+
+
+def _as_text(stream: object) -> str:
+    """Whatever `TimeoutExpired` hands back, as a `str`. `None` becomes empty."""
+    if stream is None:
+        return ""
+    if isinstance(stream, (bytes, bytearray)):
+        return stream.decode("utf-8", "replace")
+    return str(stream)
 
 
 def say(msg: str) -> None:
@@ -1565,11 +1592,28 @@ def _acceptance(args: argparse.Namespace, cache_dir: Path) -> int:
     digest's one featured body is chosen the same way, while the transport
     (`seed.sh`: `rsync` to a stage, `tar` into the pod) carries no mtime — so
     the old whole-scope `cmp` failed on stores that were byte-identical
-    (measured 2026-09-01 against the live pod: `scopes=5 pass=1 fail=4`, the
-    lone PASS being the only two-entry scope). It now compares, per scope, the
-    `mode=list` render with its index ROWS sorted, the entry SET via `comm`,
-    and then EACH entry's own single-ref render. A `FAIL … entry SET differs`
-    names the refs.
+    (measured 2026-09-01 against the live pod: `scopes=5 pass=1 fail=4`). It
+    now compares, per scope, the `mode=list` render with its index ROWS sorted,
+    the entry SET via `comm`, and then EACH entry's own single-ref render. A
+    `FAIL … entry SET differs` names the refs.
+
+    ⚠ THAT RUN USED TO CARRY "the lone PASS being the only two-entry scope",
+    AND IT IS WRONG. Re-measured 2026-09-01 on the workbench, entries as
+    `subsystem_recall` INDEXES them: cli=5, devrc=26, datapacket-talos=49,
+    homelab-infra=0, storage-resolver=1 (`backblaze.md` plus a `README.md`,
+    correctly not indexed). No two-entry scope appears in that run at all. The
+    boundary that holds is arithmetic: a ONE-entry index has exactly one
+    possible order; TWO OR MORE is where order can differ. And `homelab-infra`
+    was a SET difference, not an ordering one — 0 indexed entries locally means
+    `status=scope-empty` with no INDEX block, so ordering cannot produce its
+    102 unaccounted lines. Three of the four FAILs were ordering.
+
+    🔴 A PER-ENTRY RENDER THAT IS NOT `recalled` IS REFUSED. A `--ref` that
+    resolves to no single entry still renders a well-formed report and still
+    exits 0, so the comparator would otherwise count a body it never saw. That
+    makes an ambiguous ref anywhere in a scope an ACCEPTANCE FAILURE here, with
+    the store left unfrozen — the remedy is a store fix (`prune-index`), and no
+    live scope carries that shape today.
 
     ⚠ THE SET ARM IS AN ACCEPTANCE CHECK, AND IT IS ONLY ONE HERE. After this
     cutover the pod is canonical and each host's store is a read-through cache
@@ -1581,8 +1625,13 @@ def _acceptance(args: argparse.Namespace, cache_dir: Path) -> int:
     could not detect a half-copied seed, which is the one thing P4 exists for.
 
     ⚠ AND IT IS NOW N+1 REQUESTS PER SCOPE, not 1. A 50-entry scope issues 51.
-    The `timeout=600` below is what bounds that; the whole real store measured
-    at ~400 entries, and one local `--ref` render costs ~73 ms.
+    The `timeout=600` below is what bounds that. 🔴 THE SIZE IT IS BOUNDING,
+    MEASURED RATHER THAN GUESSED: this walks the LOCAL store, which on the
+    workbench holds 141 INDEXED entries across 16 scopes (154 `.md` files) as
+    of 2026-09-01 — so 141 + 16 = 157 renders, not the "~400 entries" this
+    docstring used to claim, which was reproducible from neither side. One
+    local `--ref` render costs ~73 ms. The pod's copy is larger and is not
+    measured from here; it is the side that will grow past this first.
     """
     refreshed = run(
         [sys.executable, str(CAIRN), "--cache", str(cache_dir), "sync"], timeout=120
@@ -1619,9 +1668,21 @@ def _acceptance(args: argparse.Namespace, cache_dir: Path) -> int:
     sys.stdout.write(verified.out)
     sys.stderr.write(verified.err)
     if not verified.ok:
+        # 🔴 THE INSTRUCTION IS CONDITIONAL ON THERE BEING SOMETHING TO READ.
+        # `run` now preserves a timed-out child's partial stdout, but a sweep
+        # killed before its first scope completed still leaves nothing — and
+        # "read the FAIL lines above" over an empty capture sends the operator
+        # looking for output that does not exist.
+        where = (
+            "Read its per-scope FAIL lines above."
+            if verified.out.strip()
+            else "It printed NO per-scope lines at all — so this says nothing "
+                 "about any individual scope, and the sweep may have been cut "
+                 "short rather than found a difference."
+        )
         return refuse(RC_ACCEPTANCE, (
-            f"verify-byte-identity.sh exited {verified.rc}. Read its per-scope FAIL "
-            f"lines above. The store was NOT frozen."
+            f"verify-byte-identity.sh exited {verified.rc}. {where} "
+            f"The store was NOT frozen."
         ))
     return RC_OK
 

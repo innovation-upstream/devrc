@@ -24,6 +24,7 @@ from __future__ import annotations
 import http.server
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -1438,3 +1439,65 @@ class TestTheDeltaTree:
         saved = sorted(str(p.relative_to(dest)) for p in dest.rglob("*.md"))
         assert saved == ["sc/changed.md"]
         assert "the served copy" in (dest / "sc" / "changed.md").read_text()
+
+
+class TestRunPreservesPartialOutputOnTimeout:
+    """🔴 A TIMED-OUT CHILD'S STDOUT IS EVIDENCE, NOT DEBRIS.
+
+    `run` used to return `Ran(124, "", …)`, so `_acceptance`'s refusal — "Read
+    its per-scope FAIL lines above" — pointed at output the same function had
+    just discarded. The acceptance sweep is now N+1 requests per scope, which
+    makes the 600s timeout genuinely reachable and makes the partial capture
+    the only record of which scopes DID complete.
+    """
+
+    def test_a_TIMEOUT_keeps_what_the_child_had_already_printed(self, cc):
+        r = cc.run(
+            ["bash", "-c", "echo PASS scope=one; echo PASS scope=two; sleep 30"],
+            timeout=2,
+        )
+        assert r.rc == 124, f"expected the timeout code, got {r.rc}"
+        # 🔴 THE LOAD-BEARING ASSERTION. Pre-change this was `""`.
+        assert "PASS scope=one" in r.out and "PASS scope=two" in r.out, (
+            f"the timed-out child's stdout was discarded: {r.out!r}"
+        )
+        assert "timed out after 2s" in r.err
+
+    def test_the_partial_capture_is_a_STR_not_the_BYTES_python_hands_back(self, cc):
+        """⚠ MEASURED ON CPython 3.12.14: `TimeoutExpired.stdout` is BYTES even
+        under `text=True`, and `.stderr` came back None.
+
+        Passing either through unchanged is not a cosmetic wart — `_acceptance`
+        does `sys.stdout.write(verified.out)`, and a `bytes` there raises
+        `TypeError`, turning a timeout into a traceback. So this asserts the
+        TYPE, which is the thing the caller depends on, and then exercises the
+        caller's actual operation.
+        """
+        r = cc.run(["bash", "-c", "echo something; sleep 30"], timeout=2)
+        # 🔴 THE CONTENT CHECK COMES FIRST, AND IT IS WHAT KEEPS THE TYPE CHECK
+        # FROM BEING VACUOUS. `""` is a `str`, so the assertions below are
+        # satisfied by the pre-change code that discarded the capture entirely
+        # — they say something only about a capture that actually happened.
+        assert r.out.strip(), (
+            f"nothing was captured, so the type assertions below would pass "
+            f"against a `run` that threw the output away: {r.out!r}"
+        )
+        assert isinstance(r.out, str), f"partial stdout is {type(r.out).__name__}"
+        assert isinstance(r.err, str), f"partial stderr is {type(r.err).__name__}"
+        # The operation `_acceptance` performs on it, run for real.
+        io.StringIO().write(r.out)
+
+    def test_a_child_that_printed_NOTHING_before_timing_out_SAYS_SO(self, cc):
+        """🔴 THE EMPTY CASE IS REPORTED, NOT LEFT AS AN EMPTY STRING.
+
+        `claude/RULES.md`: an empty result cannot distinguish two mechanisms.
+        "No FAIL lines" reads identically whether the sweep found nothing or
+        never got started, so the timeout note says which one this was.
+        """
+        r = cc.run(["bash", "-c", "sleep 30"], timeout=2)
+        assert r.rc == 124
+        assert r.out == ""
+        assert "printed NOTHING to stdout" in r.err, (
+            f"an empty partial capture was not distinguished from a clean one: "
+            f"{r.err!r}"
+        )

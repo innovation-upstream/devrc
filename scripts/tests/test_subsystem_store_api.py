@@ -51,7 +51,7 @@ status strings are all spelled again here by hand. Importing them would assert
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 import ast
 import errno
@@ -3929,8 +3929,17 @@ def token_file(tmp_path: Path) -> Path:
 # transport (`seed.sh`: `rsync -a --delete` into a stage, then `tar` into the
 # pod) does not carry mtime. So two stores holding IDENTICAL BYTES render their
 # index in a different order — measured against the live pod on 2026-09-01,
-# where every scope with more than two entries failed and the `cli` scope's only
-# unaccounted difference was one row's POSITION.
+# `scopes=5 pass=1 fail=4`, the `cli` scope's only unaccounted difference being
+# one row's POSITION.
+#
+# ⚠ THAT RUN USED TO BE SUMMARISED AS "every scope with more than two entries
+# failed", WHICH IS WRONG. Re-measured 2026-09-01, entries as `subsystem_recall`
+# INDEXES them: cli=5, devrc=26, datapacket-talos=49, homelab-infra=0,
+# storage-resolver=1. No two-entry scope appears in that run at all, so the data
+# could not support a two-entry boundary; and `homelab-infra` FAILED on a SET
+# difference, not on order (0 indexed entries means `status=scope-empty` with no
+# INDEX block, which ordering cannot make differ by 102 lines). The boundary
+# that holds is the arithmetic one this fixture argues for itself, below.
 #
 # FOUR entries, not two: two entries can only be in one of two orders and the
 # fixture would be one coin-flip away from asserting nothing. Names are pairwise
@@ -4013,6 +4022,235 @@ def shuffled_pair(tmp_path: Path) -> tuple[Path, Path]:
     return local, served
 
 
+# =============================================================================
+# 🔴 THE AMBIGUOUS-REF FIXTURE — the shape the per-entry arm cannot compare and
+# used to report as compared anyway.
+#
+# `resolve_ref_tiered` matches a BARE ref on `e.slug` alone, so `alpha.md` and
+# `alpha.process.md` (a documented `<slug>.<kind>.md`, `KINDS =
+# service|process|org|doc`) both carry slug `alpha` and both index — as the
+# refs `alpha` and `alpha.process`. `--ref alpha` then raises
+# `AmbiguousRefError`, and `subsystem_recall._exit_for` maps `ref-ambiguous` to
+# exit **0**, so nothing in the verifier's rc check can see it.
+#
+# ⚠ `alpha.process.md` MUST DECLARE `service: alpha`, not `service:
+# alpha.process`. The loader requires the filename's SLUG PART and `service:`
+# to agree, and rejects the file as MALFORMED otherwise — which would make this
+# fixture a store-defect case rather than the supported-convention case it is
+# about. `_ambiguous_refs` asserts the resulting index, so a fixture that
+# silently degraded that way fails loudly instead of going vacuous.
+# =============================================================================
+
+AMBIG_SCOPE = "gadget-rack"
+
+
+def _write_ambiguous_scope(root: Path) -> None:
+    (root / AMBIG_SCOPE).mkdir(parents=True)
+    # Same slug, two kinds -> the refs `alpha` and `alpha.process`, and a bare
+    # `--ref alpha` that resolves to neither.
+    (root / AMBIG_SCOPE / "alpha.md").write_text(
+        _entry("alpha", AMBIG_SCOPE, nuance="- 2026-02-11: alpha seats on a shim.")
+    )
+    (root / AMBIG_SCOPE / "alpha.process.md").write_text(
+        _entry(
+            "alpha",
+            AMBIG_SCOPE,
+            nuance="- 2026-02-11: the alpha process runs on a rota.",
+        )
+    )
+    # A third, unambiguous entry: the per-entry arm must still be seen to work
+    # on the refs it CAN resolve, or a FAIL here would not distinguish "refused
+    # the ambiguous one" from "refused the scope for some other reason".
+    (root / AMBIG_SCOPE / "beta.md").write_text(
+        _entry("beta", AMBIG_SCOPE, nuance="- 2026-02-11: beta seats on a shim.")
+    )
+
+
+def _ambiguous_refs(root: Path) -> None:
+    """The fixture's own positive control, asserted before any comparator runs.
+
+    🔴 EVERY ASSERTION BELOW IS ABOUT REACHABILITY, NOT ABOUT THE FIX. If the
+    loader rejected `alpha.process.md`, or the two files landed under one ref,
+    the scope would hold two ordinary entries and every test using this fixture
+    would pass against the OLD verifier while asserting nothing.
+    """
+    refs = _index_refs(root, AMBIG_SCOPE)
+    assert sorted(refs) == ["alpha", "alpha.process", "beta"], (
+        f"the fixture did not index three entries as `alpha`, `alpha.process` "
+        f"and `beta` — the ambiguity it is about is not reachable: {refs}"
+    )
+    out = subprocess.run(
+        [
+            sys.executable, str(RECALL_PATH), "--store", str(root),
+            "--scope", AMBIG_SCOPE, "--ref", "alpha",
+        ],
+        capture_output=True, text=True, timeout=HANG_TIMEOUT,
+    )
+    # 🔴 THE EXIT CODE IS THE DEFECT, SPELLED OUT. A non-zero here would mean
+    # the verifier's own `rc_entry > 3` check already covered this case and the
+    # guard under test is unreachable.
+    assert out.returncode == 0, (
+        f"`--ref alpha` exited {out.returncode}; the false-green this fixture "
+        f"is about depends on it exiting 0:\n{out.stdout}\n{out.stderr}"
+    )
+    assert out.stdout.startswith("subsystem-recall: status=ref-ambiguous "), (
+        f"`--ref alpha` did not report `ref-ambiguous`:\n{out.stdout[:400]}"
+    )
+
+
+# =============================================================================
+# 🔴 THE MEASURED-EVIDENCE BLOCK, PINNED AS A WHOLE NORMALISED STRING.
+#
+# This block is the verifier's own account of the run that motivated it, and it
+# has already been WRONG ONCE, in two places at once: it called a one-entry
+# scope a two-entry one, and it read a set-difference FAIL as an ordering FAIL.
+# Both errors then propagated to four other sites and into a merged commit
+# SUBJECT, which cannot be corrected.
+#
+# 🔴 A KEYWORD OR SUBSTRING ASSERTION WOULD NOT HAVE CAUGHT EITHER. Both wrong
+# claims were fluent English containing every word a plausible partial
+# assertion would have looked for — "storage-resolver", "PASS", "entries" —
+# which is the "a guard on WORDS is walkable by REWORDING" shape in
+# `claude/RULES.md`. When the artefact under test IS PROSE, the whole
+# normalised string is the only pin that holds.
+#
+# ⚠ THE PRICE IS DELIBERATE: a cosmetic reword of that comment fails this test.
+# Pay it by updating `_EXPECTED_EVIDENCE_BLOCK` in the same commit — and, when
+# a NUMBER in it moves, by re-running the measurement rather than editing the
+# literal to match. The anchors are asserted separately from the content, so a
+# block that was moved or deleted fails with "anchor not found" rather than
+# with a diff nobody can read.
+# =============================================================================
+
+_EVIDENCE_BLOCK_START = "# 🔴 AND IT CANNOT COMPARE THE WHOLE-SCOPE DIGEST AT ALL"
+_EVIDENCE_BLOCK_END = "# 🔴 SO THE CLAIM IS RESTATED AT THE LEVEL IT CAN HOLD."
+
+_EXPECTED_EVIDENCE_BLOCK = """
+    🔴 AND IT CANNOT COMPARE THE WHOLE-SCOPE DIGEST AT ALL — THAT IS THE SECOND
+    THING THAT MADE THIS SCRIPT PERMANENTLY RED, AFTER `host:`.
+    `subsystem_recall` orders its INDEX **newest-first by entry-file mtime**, and
+    picks the digest's one featured BODY the same way (`select_featured`'s
+    most-recent fallback). The transport does not preserve mtime — `seed.sh`
+    `rsync`s into a stage and `tar`s that into the pod — so two stores holding
+    byte-identical entries render their index in a DIFFERENT ORDER and feature a
+    DIFFERENT entry. MEASURED 2026-09-01 against the live pod, store
+    `~/.claude/analyze-service-index`, over a `kubectl port-forward`:
+
+    FAIL scope=devrc            raw-diff-lines=45   accounted-for=6
+    FAIL scope=cli              raw-diff-lines=8    accounted-for=6
+    PASS scope=storage-resolver (1 entry)
+    FAIL scope=homelab-infra    raw-diff-lines=108  accounted-for=6
+    FAIL scope=datapacket-talos raw-diff-lines=336  accounted-for=6
+
+    The `cli` scope is the clean isolation — its index ROWS were identical and the
+    only unaccounted difference was one row's POSITION. `claude/RULES.md`: a
+    permanently-red gate is worse than no gate.
+
+    🔴 TWO READINGS OF THAT RUN WERE WRONG, AND THIS IS THE CORRECTION.
+    The `storage-resolver` line above said `(2 entries)` and the paragraph
+    concluded "every passing scope had 2 entries; every failing one had more".
+    RE-MEASURED 2026-09-01 on this host, same store, counting entries as
+    `subsystem_recall` INDEXES them rather than as files on disk:
+
+    cli=5  devrc=26  datapacket-talos=49  homelab-infra=0  storage-resolver=1
+
+    `storage-resolver/` holds `backblaze.md` plus a `README.md`, and a README in a
+    scope is correctly NOT indexed — so it is a ONE-entry scope. NO TWO-ENTRY
+    SCOPE APPEARS IN THAT RUN AT ALL, so the data could never support a two-entry
+    boundary, in either direction.
+
+    The boundary that does hold is ARITHMETIC, not measured: a ONE-entry index has
+    exactly one possible order and cannot diverge; TWO OR MORE is where the order
+    can differ. That is the same argument the ordering fixture in
+    `scripts/tests/test_subsystem_store_api.py` makes for itself when it chooses
+    FOUR refs — two entries admit only two orders, so a two-entry fixture is one
+    coin-flip away from asserting nothing.
+
+    And `homelab-infra` was NOT an ordering failure. It holds ZERO indexed entries
+    on this host (one `README.md`), so its local render is `status=scope-empty`
+    with no INDEX block at all — 102 unaccounted lines that ordering structurally
+    cannot produce. That FAIL was a SET difference, the lagging read-through cache
+    case described below. THREE of the four FAILs were ordering, not four.
+"""
+
+
+def _normalise_prose(text: str) -> str:
+    """Collapse every whitespace run to one space. Reflowing is free; words are not."""
+    return " ".join(text.split())
+
+
+# The retracted sentences, in every spelling they were written in, plus the
+# entry count that produced them. Matched case-INSENSITIVELY: the same claim
+# appears here shouted and in sentence case.
+_RETRACTED_BOUNDARY = (
+    "the only two-entry scope",
+    "the lone pass being the only two-entry scope",
+    "every scope with more than two entries",
+    "could not pass for any scope with more than two entries",
+    "every passing scope had 2 entries",
+    "pass scope=storage-resolver (2 entries)",
+)
+
+# A line carrying one of these is QUOTING the claim in order to retract it.
+# Kept deliberately short and explicit: a longer list is a wider exemption, and
+# the exemption is the part that can make this check vacuous.
+_RETRACTION_MARKERS = ("used to", "concluded", "said", "was not", "is wrong")
+
+
+def _unmarked_retractions(
+    sites: Sequence[str], root: Path | None = None
+) -> list[str]:
+    """Every line at `sites` that ASSERTS a retracted claim without marking it."""
+    base = ROOT if root is None else root
+    found: list[str] = []
+    for rel in sites:
+        path = base / rel
+        assert path.is_file(), f"the ledger names a path that does not exist: {rel}"
+        for line in path.read_text().splitlines():
+            low = line.lower()
+            if any(m in low for m in _RETRACTION_MARKERS):
+                continue
+            if any(phrase in low for phrase in _RETRACTED_BOUNDARY):
+                found.append(f"{rel}: {line.strip()}")
+    return found
+
+
+# 🔴 THE SITES THAT CARRIED THE RETRACTED BOUNDARY, AND THE TWO THIS CANNOT
+# SCAN — enumerated so the gap is a stated fact rather than an omission.
+#
+# SCANNED (below): the three non-test sources it was copied to.
+#
+# NOT SCANNED, and why:
+#   * `scripts/tests/test_subsystem_store_api.py` — THIS FILE. A scanner whose
+#     needles live in its own source matches itself: every phrase below would
+#     be reported at the line that spells it. Excluding it is not a shrug —
+#     including it would make the check report a permanent, meaningless red,
+#     which is the permanently-red-gate shape. This file's own copy of the
+#     claim was corrected in the same commit, by hand.
+#   * the SQUASH COMMIT SUBJECT of #1222 on `main` — "it could not pass for any
+#     scope with more than two entries". Immutable; nothing can fix it, and
+#     this ledger exists because that is where the wrong sentence still lives.
+_BOUNDARY_SITES = (
+    "scripts/subsystem-store-api/verify-byte-identity.sh",
+    "scripts/subsystem-store-api/README.md",
+    "scripts/cairn-cutover.py",
+)
+
+
+@pytest.fixture
+def ambiguous_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """A local store and a served copy holding an ambiguous ref, same bytes."""
+    local = tmp_path / "ambig-local"
+    served = tmp_path / "ambig-served"
+    _write_ambiguous_scope(local)
+    subprocess.run(
+        ["cp", "-a", str(local), str(served)], check=True, capture_output=True
+    )
+    _ambiguous_refs(local)
+    _ambiguous_refs(served)
+    return local, served
+
+
 class TestByteIdentityVerifier:
     def test_POSITIVE_identical_stores_PASS_for_every_scope(
         self, store: Path, token_file: Path
@@ -4090,9 +4328,14 @@ class TestByteIdentityVerifier:
         differ. The reader orders its INDEX newest-first by mtime and picks the
         digest's one featured BODY the same way, and the transport does not
         carry mtime — so the old whole-scope `cmp` reported a difference for a
-        store that was identical, on every scope with more than two entries.
-        MEASURED against the live pod on 2026-09-01: `scopes=5 pass=1 fail=4`,
-        the single PASS being the only two-entry scope.
+        store that was identical. MEASURED against the live pod on 2026-09-01:
+        `scopes=5 pass=1 fail=4`.
+
+        ⚠ THAT PASS WAS NOT "the only two-entry scope" — see the fixture header
+        above. `storage-resolver` indexes ONE entry, no two-entry scope appears
+        in the run, and one of the four FAILs was a set difference rather than
+        an ordering one. The boundary is arithmetic: one entry admits one order,
+        two or more can diverge.
 
         `claude/RULES.md`: a permanently-red gate is worse than no gate.
         """
@@ -4278,6 +4521,71 @@ class TestByteIdentityVerifier:
             f"folded into the index-order excuse:\n{r.stdout}"
         )
 
+    def test_a_FRAME_ONLY_divergence_is_caught_with_the_ROWS_and_SET_identical(
+        self, shuffled_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE FRAME ARM, ISOLATED — the one arm with no control of its own.
+
+        Every other test in this class moves the rows, the set or an entry
+        body, so each of them would still fail with the frame comparison wired
+        to a constant zero. The only test that could see a frame-only
+        difference was `test_LEADING_BLANKS_WITHOUT_the_banner_are_NOT_stripped`
+        — which is about the snapshot-block narrowing, and would go on passing
+        for its own reason if this arm died.
+
+        The served copy gains an UNINDEXABLE file: no front matter, so the
+        loader collects it as MALFORMED. Nothing addressable changes —
+
+          * the entry SET is identical (a rejected file is not indexed and not
+            `--ref`-addressable, which is the same rule that keeps a `README`
+            out of the comparison);
+          * every index ROW is identical, byte for byte;
+
+        — while the FRAME moves twice: a `🔴 MALFORMED` block appears, and the
+        INDEX head switches from "ALL N entries, none omitted" to "the N
+        READABLE entries … NOT complete". A comparator blind to the frame would
+        report this pod as byte-identical to this host while it holds a corrupt
+        file the operator has never been told about.
+
+        The assertion is on `sorted-row-lines=0`, not merely on the FAIL: a
+        difference that leaked into the rows would fail here too and would be
+        proving the row arm, not this one.
+        """
+        local, served = shuffled_pair
+        (served / ORDER_SCOPE / "duct-broken.md").write_text("no front matter here\n")
+        _stamp(served, SHUFFLED_ORDER)
+
+        # 🔴 REACHABILITY, ASSERTED BEFORE THE COMPARATOR RUNS. If the loader
+        # ever INDEXED that file, this would become a set-difference test
+        # wearing a frame-difference name.
+        assert sorted(_index_refs(local)) == sorted(_index_refs(served)), (
+            "the unindexable file changed the entry SET, so this is a set "
+            "test, not the frame-only case it claims to be"
+        )
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, (
+            f"a pod holding an unreadable entry file compared as identical:\n"
+            f"{r.stdout}"
+        )
+        assert f"FAIL scope={ORDER_SCOPE} scope-level render differs" in r.stdout
+        frame = re.search(r"frame-lines=(\d+)", r.stdout)
+        rows = re.search(r"sorted-row-lines=(\d+)", r.stdout)
+        assert frame and rows, f"the FAIL line printed no arm counts:\n{r.stdout}"
+        assert int(frame.group(1)) > 0, (
+            f"frame-lines=0 while the MALFORMED block and the index head "
+            f"genuinely differ — the frame comparison is wired to nothing:\n"
+            f"{r.stdout}"
+        )
+        assert int(rows.group(1)) == 0, (
+            f"sorted-row-lines={rows.group(1)} — the divergence reached the "
+            f"ROWS, so this test is not the frame-only isolation it claims and "
+            f"proves nothing about the frame arm:\n{r.stdout}"
+        )
+
     def test_a_PAGINATED_index_is_REFUSED_rather_than_partially_compared(
         self, tmp_path: Path, token_file: Path
     ):
@@ -4291,10 +4599,13 @@ class TestByteIdentityVerifier:
         page 1 would be a partial check reported as a clean one, which is the
         silent-zero shape this whole file refuses.
 
-        It refuses instead, and the refusal names the scope. No scope in the
-        real store is near the cap today (largest measured: 50 entries), so this
-        is the unobserved case made reachable rather than a reproduction of one
-        that happened.
+        It refuses instead, and the refusal names the scope. This is the
+        unobserved case made reachable rather than a reproduction of one that
+        happened — but the headroom is finite and shrinking: measured
+        2026-09-01 on the workbench, `LISTING_PAGE_SIZE` is 100 and the largest
+        scope (`datapacket-talos`) indexes 49, i.e. 51 entries of headroom in
+        an append-mostly store that is pruned by hand. When it crosses, this
+        refusal fails the cutover's acceptance gate with the store unfrozen.
         """
         root = tmp_path / "big"
         (root / ORDER_SCOPE).mkdir(parents=True)
@@ -4315,6 +4626,285 @@ class TestByteIdentityVerifier:
         assert f"FAIL scope={ORDER_SCOPE} index is PAGINATED" in r.stdout
         assert "Nothing about this scope was verified." in r.stdout
         assert "verify: scopes=1 pass=0 fail=1 entries-compared=0" in r.stdout
+
+    def test_a_scope_of_EXACTLY_LISTING_PAGE_SIZE_is_COMPARED_not_refused(
+        self, tmp_path: Path, token_file: Path
+    ):
+        """🔴 THE OTHER SIDE OF THE SAME BOUNDARY.
+
+        The refusal above is measured at `LISTING_PAGE_SIZE + 1` only, and one
+        point does not locate a boundary: an off-by-one that refused at exactly
+        the cap would pass that test and quietly stop verifying the largest
+        scope that is still fully comparable. `claude/RULES.md` — measure at
+        two points, and name them.
+
+        So this is the cap EXACTLY. The index fits one page, nothing is
+        mtime-derived about its membership, and every body must be compared:
+        `entries-compared` equal to the cap is the load-bearing assertion, not
+        the exit code — a run that refused and a run that compared nothing both
+        differ from this.
+        """
+        n = api.rc.LISTING_PAGE_SIZE
+        root = tmp_path / "at-the-cap"
+        (root / ORDER_SCOPE).mkdir(parents=True)
+        for i in range(n):
+            ref = f"run-{i:04d}"
+            (root / ORDER_SCOPE / f"{ref}.md").write_text(
+                _entry(ref, ORDER_SCOPE, nuance=f"- 2026-02-11: {ref}.")
+            )
+        with running(root) as (base, _):
+            r = run_verify(
+                "--store", str(root), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "index is PAGINATED" not in r.stdout, (
+            f"a scope of exactly {n} entries — one page, nothing past it — was "
+            f"refused as paginated:\n{r.stdout}"
+        )
+        assert f"verify: scopes=1 pass=1 fail=0 entries-compared={n}" in r.stdout, (
+            f"the per-entry arm did not compare all {n} bodies:\n{r.stdout}"
+        )
+
+    # ------------------------------------------------------------------
+    # 🔴 THE AMBIGUOUS-REF FALSE GREEN, AND ITS REACHABILITY CONTROL.
+    # ------------------------------------------------------------------
+
+    def test_a_ONE_CHARACTER_divergence_BEHIND_an_AMBIGUOUS_REF_is_NOT_reported_as_PASS(
+        self, ambiguous_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE REGRESSION. This is the run that printed a FALSE GREEN.
+
+        The two stores are identical except for ONE CHARACTER inside
+        `alpha.md`'s nuance bullet — the same divergence
+        `test_a_CONTENT_difference_UNDER_a_SHUFFLED_order_is_STILL_caught`
+        catches — and EVERY arm of the comparator is structurally blind to it:
+
+          * the SET arm sees the same three refs on both sides;
+          * the index ROW for `alpha` carries the bullet COUNT, not its text,
+            so it is unchanged;
+          * the FRAME is unchanged;
+          * and the per-entry arm's `--ref alpha` resolves to NEITHER
+            `alpha.md` nor `alpha.process.md`, so both sides render a
+            byte-identical `AMBIGUOUS REF` notice — with exit 0, because
+            `_exit_for` maps `ref-ambiguous` outside `UNREADABLE_STATUSES`.
+
+        Before this guard the run printed `PASS scope=gadget-rack entries=3 …
+        entries-compared=3` and exited 0. `entries=3` ACTIVELY ASSERTED that
+        three bodies were compared when only two had been, so the count was not
+        merely silent about the gap — it denied it.
+
+        ⚠ WHAT THIS TEST PROVES IS THE REFUSAL, NOT DETECTION. The comparator
+        still cannot see the changed character; there is no route serving raw
+        entry bytes and no way to address that entry. It now declines to
+        certify the scope instead of certifying it wrongly, which is the same
+        answer the pagination arm gives.
+        """
+        local, served = ambiguous_pair
+        path = served / AMBIG_SCOPE / "alpha.md"
+        mutated = path.read_text().replace("seats on a shim", "seats on a shin")
+        assert mutated != path.read_text(), "the mutation did not apply"
+        path.write_text(mutated)
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, (
+            f"a one-character divergence hidden behind an ambiguous ref was "
+            f"reported as a PASS:\n{r.stdout}\n{r.stderr}"
+        )
+        assert f"FAIL scope={AMBIG_SCOPE} ref=alpha rendered NO ENTRY BODY" in r.stdout, (
+            f"the refusal did not name the scope, the ref and the shape:\n{r.stdout}"
+        )
+        # 🔴 THE STATUS IS NAMED, ON BOTH SIDES. A refusal that said only "not
+        # recalled" would leave the reader unable to tell an ambiguous ref from
+        # a lagging pod, which are different remedies.
+        assert "status local=ref-ambiguous pod=ref-ambiguous" in r.stdout, (
+            f"the refusal did not name the status of both sides:\n{r.stdout}"
+        )
+        assert "verify: scopes=1 pass=0 fail=1 entries-compared=0" in r.stdout, (
+            f"a refused scope still contributed to entries-compared:\n{r.stdout}"
+        )
+        # 🔴 AND NO PASS LINE SURVIVED. The refusal breaks out of the per-entry
+        # loop, so a mutant that reported the failure and then printed the PASS
+        # anyway is red here rather than green on the returncode alone.
+        assert not _evidence_rows(r.stdout), (
+            f"a refused scope printed an accounting row:\n{r.stdout}"
+        )
+
+    def test_an_AMBIGUOUS_REF_alone_is_REFUSED_even_when_the_stores_are_IDENTICAL(
+        self, ambiguous_pair: tuple[Path, Path], token_file: Path
+    ):
+        """🔴 THE SAME SCOPE WITH NOTHING WRONG — AND STILL REFUSED.
+
+        This is the deliberate behaviour change, stated as a test rather than
+        as a comment. The two stores here are byte-identical, so the old
+        comparator's PASS was *correct about identity* and false about
+        COVERAGE: it counted `entries=3` for a scope in which one entry had not
+        been compared by anything, and no reader could tell.
+
+        A ref that resolves to no single entry is not addressable, so its bytes
+        cannot be compared by any arm — the honest verdict is that the scope
+        was not verified, exactly as for a paginated index. It is not a
+        permanently-red gate: no scope in the live store carries a
+        `<slug>.<kind>.md` pair today, and the remedy when one does is a store
+        fix (`prune-index` exists for `ref-ambiguous`), not a weaker check.
+
+        `beta` is in the fixture so this FAIL is attributable: a comparator
+        that refused the scope for some unrelated reason would fail here too,
+        which is why the assertion names the ref.
+        """
+        local, served = ambiguous_pair
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(local), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, (
+            f"an unverifiable entry was certified as compared:\n{r.stdout}"
+        )
+        assert f"FAIL scope={AMBIG_SCOPE} ref=alpha rendered NO ENTRY BODY" in r.stdout
+        assert "verify: scopes=1 pass=0 fail=1 entries-compared=0" in r.stdout
+
+    def test_an_UNAMBIGUOUS_scope_of_the_SAME_SHAPE_still_PASSES(
+        self, tmp_path: Path, token_file: Path
+    ):
+        """🔴 THE POSITIVE CONTROL FOR THE TWO ABOVE.
+
+        A guard that refused every scope would satisfy both tests above and
+        make the whole comparator useless. This is the same fixture with the
+        kind-qualified twin removed, so all three refs resolve: it must PASS,
+        and it must compare all THREE bodies.
+
+        The `alpha.process` entry is what makes `alpha` ambiguous; dropping it
+        leaves `alpha`, `gamma` and `beta` — three ordinary entries whose
+        `--ref` renders all report `status=recalled`.
+        """
+        root = tmp_path / "unambiguous"
+        _write_ambiguous_scope(root)
+        (root / AMBIG_SCOPE / "alpha.process.md").unlink()
+        (root / AMBIG_SCOPE / "gamma.md").write_text(
+            _entry("gamma", AMBIG_SCOPE, nuance="- 2026-02-11: gamma runs on a rota.")
+        )
+        assert sorted(_index_refs(root, AMBIG_SCOPE)) == ["alpha", "beta", "gamma"], (
+            "the control fixture is not the three-unambiguous-entry scope it claims"
+        )
+
+        with running(root) as (base, _):
+            r = run_verify(
+                "--store", str(root), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "verify: scopes=1 pass=1 fail=0 entries-compared=3" in r.stdout
+        rows = _evidence_rows(r.stdout)
+        assert len(rows) == 1 and rows[0]["entries"] == 3, (
+            f"the per-entry arm did not compare all three bodies: {rows}"
+        )
+
+    # ------------------------------------------------------------------
+    # 🔴 THE PROSE CLAIM ITSELF, PINNED.
+    # ------------------------------------------------------------------
+
+    def test_the_MEASURED_EVIDENCE_block_is_pinned_as_a_WHOLE_NORMALISED_STRING(self):
+        """The verifier's account of its own motivating run, word for word.
+
+        See `_EXPECTED_EVIDENCE_BLOCK` for why this is a whole-string pin and
+        not a set of keyword assertions: both of the errors it replaced were
+        fluent sentences that any plausible substring check would have passed.
+        """
+        lines = VERIFY_PATH.read_text().splitlines()
+        starts = [n for n, l in enumerate(lines) if l.startswith(_EVIDENCE_BLOCK_START)]
+        ends = [n for n, l in enumerate(lines) if l.startswith(_EVIDENCE_BLOCK_END)]
+        # 🔴 EXACTLY ONE OF EACH. A missing anchor makes this test vacuous by
+        # construction; a duplicated one makes the slice below arbitrary.
+        assert len(starts) == 1, (
+            f"expected exactly one measured-evidence block opener in "
+            f"{VERIFY_PATH.name}, found {len(starts)}"
+        )
+        assert len(ends) == 1, (
+            f"expected exactly one closing anchor in {VERIFY_PATH.name}, "
+            f"found {len(ends)}"
+        )
+        assert starts[0] < ends[0], "the closing anchor precedes the opener"
+
+        body = [
+            line[1:].strip() if line.startswith("#") else line
+            for line in lines[starts[0]:ends[0]]
+        ]
+        assert _normalise_prose("\n".join(body)) == _normalise_prose(
+            _EXPECTED_EVIDENCE_BLOCK
+        ), (
+            "the measured-evidence block in verify-byte-identity.sh no longer "
+            "matches the pinned text. If you REWORDED it, update "
+            "`_EXPECTED_EVIDENCE_BLOCK` in the same commit. If a NUMBER moved, "
+            "RE-RUN THE MEASUREMENT — that block was wrong once already, and "
+            "editing the literal to match a changed comment is how it stays "
+            "wrong.\n\n"
+            f"in the script:\n{_normalise_prose(chr(10).join(body))}\n\n"
+            f"pinned here:\n{_normalise_prose(_EXPECTED_EVIDENCE_BLOCK)}"
+        )
+
+    def test_NO_scanned_site_ASSERTS_the_RETRACTED_two_entry_boundary(self):
+        """🔴 THE CLAIM WAS COPIED TO FIVE PLACES. This is the ledger for three.
+
+        The pin above holds ONE site, word for word. This is deliberately a
+        different KIND of check, and neither subsumes the other: the pin fails
+        on any reword of that one block, this fails only when a specific
+        retracted sentence is ASSERTED at any of the three other sources. A
+        correct rewrite of the block passes this and fails the pin; a wrong
+        claim newly added to `README.md` passes the pin and fails this.
+
+        ⚠ TWO STATED LIMITS, because a guard that reads wider than it is
+        would be worse than none:
+
+          * IT IS A SPELLED GUARD. A reworded version of the same false claim
+            walks straight past it. What it actually prevents is the literal
+            sentence being copied back — and the place it would be copied back
+            FROM is #1222's merged commit subject, which still carries it and
+            cannot be corrected.
+          * IT SCANS THREE OF THE FIVE SITES. See `_BOUNDARY_SITES` for which
+            two it cannot reach and why.
+
+        A retraction has to be able to QUOTE the wrong sentence, so a bare
+        occurrence is not the finding — an occurrence on a line that does not
+        mark it as retracted is. `test_the_RETRACTION_MARKERS_do_not_exempt_a_
+        bare_assertion` is the negative control for that exemption.
+        """
+        found = _unmarked_retractions(_BOUNDARY_SITES)
+        assert not found, (
+            "the retracted two-entry boundary is ASSERTED again, unmarked, at:\n  "
+            + "\n  ".join(found)
+        )
+
+    def test_the_RETRACTION_MARKERS_do_not_exempt_a_bare_assertion(
+        self, tmp_path: Path
+    ):
+        """🔴 THE NEGATIVE CONTROL FOR THE SCANNER ABOVE.
+
+        That scanner exempts any line carrying a retraction marker, and an
+        exemption that swallowed the assertion it is meant to catch would make
+        the whole check a reassuring zero. So: feed it a file that ASSERTS the
+        boundary with no marker (must be reported) and one that RETRACTS it
+        (must not be), and read both answers — the non-zero is what proves the
+        scanner can observe anything at all.
+        """
+        asserted = tmp_path / "asserted.md"
+        asserted.write_text(
+            "the run failed for every scope with more than two entries\n"
+        )
+        retracted = tmp_path / "retracted.md"
+        retracted.write_text(
+            "this used to say it failed for every scope with more than two "
+            "entries, which was wrong\n"
+        )
+        hits = _unmarked_retractions(("asserted.md",), root=tmp_path)
+        assert len(hits) == 1, (
+            f"the scanner did not report a bare assertion — a zero from it "
+            f"would mean nothing: {hits}"
+        )
+        assert _unmarked_retractions(("retracted.md",), root=tmp_path) == [], (
+            "the scanner reported a line that explicitly retracts the claim, "
+            "which would make every correction permanently red"
+        )
 
     def test_every_permitted_difference_is_ACCOUNTED_FOR_not_merely_small(
         self, store: Path, tmp_path: Path, token_file: Path

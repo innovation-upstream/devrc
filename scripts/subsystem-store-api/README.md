@@ -350,9 +350,9 @@ two that each made this script permanently red in turn:
 The digest also picks its one featured BODY by mtime (`select_featured`'s
 most-recent fallback), so on a multi-entry scope two byte-identical stores
 render a different index order *and* a different featured entry. Measured
-2026-09-01 against the live pod: `scopes=5 pass=1 fail=4`, the lone PASS being
-the only two-entry scope, and the `cli` scope's entire unaccounted difference
-being one row's POSITION. Instead, per scope:
+2026-09-01 against the live pod: `scopes=5 pass=1 fail=4`, and the `cli`
+scope's entire unaccounted difference being one row's POSITION. Instead, per
+scope:
 
 1. the **`mode=list` render** — no body, so no mtime-selected featured entry —
    with the index rows sorted and the rest compared verbatim;
@@ -360,13 +360,56 @@ being one row's POSITION. Instead, per scope:
    on one side only FAILS and names it;
 3. **each entry's own bytes**, as its `--ref` / `?ref=` render — a narrowing
    that prints no index, so it carries no order. There is no route serving raw
-   entry bytes; the API only ever returns renders.
+   entry bytes; the API only ever returns renders. 🔴 That render must report
+   `status=recalled` **on both sides**, or the scope is REFUSED — see below.
+
+🔴 **That run was read wrong twice, and the corrected reading is this.** This
+paragraph used to add "the lone PASS being the only two-entry scope", and
+`verify-byte-identity.sh` concluded from it that the comparator "could not pass
+for any scope with more than two entries". Re-measured 2026-09-01 on the
+workbench, same store, counting entries as `subsystem_recall` **indexes** them:
+`cli`=5, `devrc`=26, `datapacket-talos`=49, `homelab-infra`=0,
+`storage-resolver`=1. `storage-resolver/` holds `backblaze.md` plus a
+`README.md`, and a README in a scope is correctly not indexed — so it is a
+**one**-entry scope, and **no two-entry scope appears in that run at all**. The
+boundary that holds is arithmetic rather than measured: a one-entry index has
+exactly one possible order and cannot diverge; **two or more** is where order
+can differ. `homelab-infra` was also not an ordering failure — 0 indexed
+entries means its local render is `status=scope-empty` with no INDEX block, so
+its 102 unaccounted lines cannot be ordering; that FAIL was a **set**
+difference. Three of the four FAILs were ordering.
 
 ⚠ **A scope whose index PAGINATES is refused, not partly compared.** Past
 `LISTING_PAGE_SIZE` both the page membership and the ref column's width are
 mtime-derived, and the refs past page 1 are never read — so page 1 is not
 comparable and a PASS over it would be a partial check reported as a clean one.
-No scope in the store is near the cap today (largest measured: 50 entries).
+
+🔴 **The headroom, because that is the number that says when to act.**
+`LISTING_PAGE_SIZE` is **100**. Measured 2026-09-01 on the workbench, the
+largest scope is `datapacket-talos` at 50 files / **49 indexed** — 49% of the
+cap, **51 entries of headroom**. The verifier greps *both* renders, so the
+binding side is whichever store is larger, and the pod's copy of that scope is
+the larger one. When it crosses, this refusal exits 1,
+`cairn-cutover.py::_acceptance` returns `RC_ACCEPTANCE`, and the cutover
+refuses with the store left **unfrozen** — the permanently-red-gate shape this
+comparator was rewritten to remove, relocated rather than eliminated. The store
+is append-mostly and pruning is manual, so the number only grows. The two ways
+out are unchanged: raise the reader's page cap, or teach this script to walk
+every page and normalise the padding.
+
+🔴 **A per-entry render that is not `recalled` is REFUSED, not compared.** A
+`--ref` run that resolves to no single entry still prints a well-formed report
+— a notice where the body should be — and `subsystem_recall._exit_for` returns
+**0** for it (only `*-unreadable` is non-zero), so an exit-code check cannot
+see it. The two notices are then byte-identical whenever the stores index the
+same refs, so `cmp` accepts them and `entries=` counts a body that was never
+rendered. Reachable by a supported convention, not only by a defect: a bare ref
+resolves on `e.slug` alone, so a scope holding `alpha.md` **and**
+`alpha.process.md` indexes the refs `alpha` and `alpha.process` while `--ref
+alpha` is ambiguous. The FAIL names the scope, the ref and both sides' status.
+Refusing rather than merely not counting: a silently uncounted entry inside a
+PASS is the same coverage-in-name-only shape one level down. No live scope uses
+that shape today; the remedy when one does is a store fix (`prune-index`).
 
 ⚠ **The set arm is an acceptance check for the moment right after a push.**
 Post-cutover the pod is canonical and each host's store is a read-through cache

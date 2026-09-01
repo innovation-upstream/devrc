@@ -29,10 +29,20 @@ default digest) feature a different entry.
 `verify-byte-identity.sh` asserts identity modulo exactly those FOUR
 differences, mechanically: it canonicalises the two lines on both sides, strips
 the measured snapshot block from the remote, compares the index rows as a
-SORTED set, and decomposes the raw diff into the four named causes so a fifth
-divergence cannot hide inside the excuse. ⚠ THIS PARAGRAPH USED TO SAY "one
-line … the raw diff is exactly one line", which was already false when `host:`
-shipped and stayed false through two more causes.
+SORTED set, and compares each entry's own single-ref render byte for byte.
+⚠ THIS PARAGRAPH USED TO SAY "one line … the raw diff is exactly one line",
+which was already false when `host:` shipped and stayed false through two more
+causes.
+
+⚠ AND IT USED TO ADD "decomposes the raw diff into the four named causes SO A
+FIFTH DIVERGENCE CANNOT HIDE INSIDE THE EXCUSE", which is a reworded version of
+the same overclaim. NOTHING GATES ON THE DECOMPOSITION — the script says so
+itself ("those numbers are EVIDENCE, not a second gate; gating on them would be
+an unreachable guard counted as coverage"), and so does its README. What
+actually catches a fifth divergence is the `residual != 0` branch (a frame or
+sorted-row difference that survived every canonicalisation) and the per-entry
+`cmp`. The counts are there so a READER can see the excuse was spent on the
+lines it claims, which is a different and weaker job.
 
 PHASE 1 SCOPE — read-only, cluster-internal, no ingress
 -------------------------------------------------------
