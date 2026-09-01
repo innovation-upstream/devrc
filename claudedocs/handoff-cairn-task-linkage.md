@@ -325,6 +325,85 @@ clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg
   attempts ended `gate: reason=Succeeded`: Tekton RECREATED the pod. Card #348's proposed probe
   3 measures a different mechanism. Kill the step process instead.
 
+### SUPERSEDED 2026-09-01 — rank 11 / cg#348's SCHEDULING half: the free-disk prerequisite was measured, and the lever it gates is no longer the lever
+🔴 **This block supersedes "OPEN — cg#348's SCHEDULING half is untouched" above. Rank 11's
+"Next probe: measure that free disk before designing anything" is DONE. Do not re-measure it,
+and do not design the third-cache change it was gating.**
+
+- **What was asked:** rank 11's leading hypothesis was *"the only real lever left is moving the
+  main leg to a different node, which has an unverified prerequisite — free disk for a third
+  30Gi local-path nix cache was never measured."*
+
+- 🔴 **The premise was wrong before the measurement mattered.** `/var/lib/mnt/disk-1/<pvc>` is a
+  **directory on the Talos `/var` partition, not a separate mount** — node-exporter reports 42
+  distinct mountpoints and that path is not among them. So "free disk for a local-path PV" is
+  free space on `/var`, and any figure taken against another filesystem is answering a
+  different question.
+
+- **Observed (with values), two instruments and two readings ~12 min apart.** Instruments:
+  kubelet `stats/summary` (`.node.fs.availableBytes`) and node-exporter
+  `node_filesystem_avail_bytes{mountpoint="/var"}` via `scripts/obs-read`. Positive control on
+  the metric: `count(node_filesystem_avail_bytes)` = **99 series**.
+
+  | node | `/var` size | reading 1 | reading 2 | nix cache today |
+  |---|---|---|---|---|
+  | `talos-xr6-r7p` | 3722 GiB | 3378 | **3379** | `nix-store-cache` 30Gi — gate pinned here |
+  | `talos-uvh-gtj` | 221 GiB | 119 | **116** | `nix-store-cache-2` 30Gi (gitops-validate) |
+  | `talos-jkj-deb` | 230 GiB | 102 | **102** | none |
+  | `talos-deu-s2q` | 109 GiB | 16 → 80 | **92** | none |
+
+  At reading 2 the two instruments agreed **exactly** on all four nodes. The 16→92 swing on
+  `deu-s2q` was TIME, not instrument bias — three nodes agreed across both readings while that
+  one moved 76 GiB in ten minutes, on a 109 GiB disk carrying 58 tekton-ci PVs.
+
+- **Verdict on the prerequisite: satisfiable in the narrow sense, and a bad bet.** The only
+  candidate with stable room is `talos-jkj-deb` — and it is the one node CI must not use: sole
+  untainted control-plane node, shares its `sda` with etcd; unpinned CI landed there **82%** of
+  the time and drove etcd p99 to **60s**, silently dropping **253** Tekton trigger evaluations
+  and costing PR 355 its verdict (recorded at length in
+  `clawgate-ci-triggertemplate.yaml`). `deu-s2q`, the other candidate, is the volatile one above.
+
+- 🔴 **And the lever is superseded, which makes the disk question moot.** homelab-infra shipped
+  `clusters/homelab/apps/tekton-pipelines/triggers/nix-binary-cache.yaml` on **2026-08-31** — a
+  MinIO bucket serving the Nix binary-cache file layout over HTTP, deliberately **not** a cache
+  server (`attic` and `harmonia`/`nix-serve` were evaluated and rejected in writing, because
+  both re-introduce the node-bound PVC the change exists to remove). Its own header: *"the
+  mechanism that lets a pipeline stop being pinned to one node."* A pod fetching store paths
+  over HTTP needs **no PVC for `/nix`, and therefore no `nodeSelector`.**
+
+- **Proof the pattern works, not just that it exists:** `auditloop-ci` took it the same day —
+  per-run `emptyDir` for `/nix` + HTTP substitution ⇒ one PVC ⇒ `nodeSelector` **deleted**,
+  replaced by a `NotIn: [talos-jkj-deb]` exclusion (3 candidate nodes, not 4, for the etcd
+  reason above). Live: its pods now land on **2 different nodes**.
+
+- **Still true, re-verified live 2026-09-01** — the parts of rank 11's diagnosis that hold:
+  `devrc-ci` is still hard-pinned (`nodeSelector: kubernetes.io/hostname: talos-xr6-r7p`;
+  **12 of 12** recent gate pods there), and the priority split is intact — main-leg pods
+  `ci-bulk` / **−10000**, PR-leg pods unset / **0**, same node, so PR legs remain valid
+  preemptors of the main leg.
+
+- **Ruled out:** building a third 30Gi local-path nix cache. It costs a node choice that is
+  either unsafe (`jkj-deb`) or unstable (`deu-s2q`), and it re-commits to the node-bound-PVC
+  design that `nix-binary-cache.yaml` exists to retire.
+
+- ⚠ **One measured caveat before anyone assumes the unpin is free:** the `nix-cache-warm`
+  CronJob is **weekly** (`0 3 * * 0`) and has **never run** (`LAST SCHEDULE <none>`, age 21h at
+  measurement). Bucket contents are whatever the initial fill left. **Measure the cache hit rate
+  before quoting a wall-clock win.**
+
+- 🔴 **A CLAIMED near-duplicate the lock cannot merge with this one:** `ci-speedup-7` is HELD
+  (*"retry the devrc-ci node unpin behind a nix-store-ownership probe on a SCRATCH pipeline"*),
+  and `claudedocs/handoff-ci-speedup.md` is its doc. Same constraint, different remedy, and it
+  has already re-taken the perf baseline at `requests.cpu: 2` — gate pod-start latency **p50
+  101s, p90 748s, max 1043s** against a 45m budget, **24 of 24** gate pods on `talos-xr6-r7p`.
+  **Rank 11 and `ci-speedup-7` must not be worked independently.** Its own open blocker is
+  *which uid takes the nix store lock* — a root client cannot receive `EACCES` on a mode-0600
+  file it owns, so whoever hit "Permission denied" during the hostPath window was not root.
+
+- **Next probe:** none for the disk question — it is answered and closed. The live question is
+  whether `devrc-ci` should follow `auditloop-ci` onto the binary cache, and that belongs to
+  `ci-speedup-7`'s holder, not to a fresh draw of rank 11.
+
 ## Next steps (ranked)
 🔴 **NUMBERING IS STABLE — items are marked done IN PLACE, never removed or renumbered.**
 The rank is half a `claim-work` slug's identity. New items APPEND to the end even when they
@@ -828,6 +907,24 @@ belong topically beside an earlier one.
   run caught** — a `NO CAPACITY` arm asserting a mechanism the code cannot observe, a bare
   `${BUILD_REASON}` under `set -eu`, and the `allowed-tools` mismatch. **None was visible from a
   green suite.**
+
+- 🔴 **RANK 11'S ANSWER CAME FROM READING THE REPO, NOT THE CLUSTER — and the ranked item could
+  not have told you that.** The disk measurement was the assigned probe and it was worth
+  running, but the finding that ended the item was a manifest committed **two days after this
+  doc's rank 11 was written**. A ranked item records the world as it was; the mechanism that
+  retires it can land in a sibling repo with no signal here. **Before working an infra item,
+  `git log --since=<doc-date>` the subsystem it names.**
+- 🔴 **A "prerequisite never measured" can be the wrong question rather than an open one.**
+  Rank 11 framed the blocker as an unmeasured quantity. Measuring it was cheap and correct, and
+  the answer that mattered was that the *filesystem the question named did not exist* — the
+  local-path PVs live on `/var`, not on a `disk-1` mount. **Confirm the object of a measurement
+  exists before trusting the number you take against it.**
+- ⚠ **Cairn phase-1 work was scoped and dispatched this session and is recorded in
+  `claudedocs/handoff-cairn-phase3.md`, not here** — that doc owns criteria 8 and 9. Claim
+  `cairn-phase1-migration` is held. Headline for anyone reading this doc first: the plan's
+  "5 overlapping scopes need a merge rule" is a **scope-level** count; at entry level there is
+  exactly **one** collision (`devrc/signal.md`, genuinely diverged), plus two alias collisions
+  one of which the merge itself introduces.
 
 ## How to verify
 ```bash
