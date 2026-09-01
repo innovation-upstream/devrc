@@ -112,6 +112,7 @@ PY = fake_python("0000000000000000000000000000000-python3-3.12.14")
 NOTIFY = PY + " ~/.claude/hooks/claude-notify.py"
 CLAWGATE_STOP = "/home/zach/.claude/clawgate-stop-hook.sh"
 SEARCH_NUDGE = PY + " ~/.claude/hooks/search-tool-nudge.py"
+PROVENANCE_NUDGE = PY + " ~/.claude/hooks/git-add-provenance-nudge.py"
 NEXT_STEP = PY + " ~/.claude/hooks/next-step-nudge.py"
 TMUX_STOP = "~/.config/tmux/task-hook.sh"
 # 🔴 THE ONE MANAGED COMMAND WITH NO PYTHON IN IT — see scenario 18. It is spelled
@@ -348,11 +349,11 @@ with tempfile.TemporaryDirectory() as tmp:
     post = cmds(d, "PostToolUse")
     WB_EXPANDED = PY + " " + home + "/.claude/hooks/clawgate-writeback-guard.py"
     SHELL_HOMEVAR = PY + " $HOME/.claude/hooks/shell-env-nudge.py"
-    check("8: PostToolUse holds exactly the three migrated hooks plus the three appended ones",
+    check("8: PostToolUse holds exactly the three migrated hooks plus the appended ones",
           set(post) == {PY + " ~/.claude/hooks/audit-pr-nudge.py",
                         SHELL_HOMEVAR, WB_EXPANDED, SEARCH_NUDGE, LEDGER,
-                        BG_CAPTURE, HANDOFF_GUARD})
-    check("8: no hook was double-registered", len(post) == 7)
+                        BG_CAPTURE, HANDOFF_GUARD, PROVENANCE_NUDGE})
+    check("8: no hook was double-registered", len(post) == 8)
     check("8: the $HOME/ spelling was rewritten in place, not re-added",
           post.count(SHELL_HOMEVAR) == 1
           and PY + " ~/.claude/hooks/shell-env-nudge.py" not in post)
@@ -748,6 +749,12 @@ with tempfile.TemporaryDirectory() as tmp:
           entries(d12, "PostToolUse") == [
               ("Bash", AUDIT), ("Bash", SHELL), ("Bash", SEARCH_NUDGE),
               (None, LEDGER), ("Bash", LEDGER), (None, WRITEBACK),
+              # git-add-provenance-nudge was absent from this fixture, so the
+              # healing run APPENDS it. It lands HERE, not at the end: appends
+              # follow the registrar's own POST_BASH_CMDS order, and this entry
+              # sits after search-tool-nudge in that list. The position is the
+              # evidence it was appended in spec order rather than tacked on.
+              ("Bash", PROVENANCE_NUDGE),
               ("Bash", BG_CAPTURE), (None, HANDOFF_GUARD)])
     check("12: Stop healed, keeping the first copy of each and the three survivors",
           entries(d12, "Stop") == [
@@ -924,8 +931,9 @@ for hostile, why, hostile_cwd, expected_reason in HOSTILE_OVERRIDES:
         # 19 -> 20: gh-issue-closing-condition-guard.py joined PRE_BASH_CMDS.
         # 20 -> 22: handoff-write-guard.py joined BOTH PostToolUse and Stop, so
         #           one converged run holds two more commands than it did.
-        check(tag + ": three consecutive runs hold exactly 22 hook commands",
-              counts == [22, 22, 22])
+        # 22 -> 23: git-add-provenance-nudge.py joined POST_BASH_CMDS.
+        check(tag + ": three consecutive runs hold exactly 23 hook commands",
+              counts == [23, 23, 23])
         with open(settings) as f:
             d13 = json.load(f)
         written = [c for ev in d13.get("hooks", {}) for c in cmds(d13, ev)

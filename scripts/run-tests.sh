@@ -825,6 +825,13 @@ HERMETIC_TARGETS=(
   # no marker), because a scanner that marks everything would satisfy a one-way
   # test while turning the 16 MiB bound into hours of history instead of months.
   scripts/claude-hooks/tests/test_bg_command_capture.py
+  # Same reason again — a FILE, not the directory. git-add-provenance-nudge warns
+  # when a `git add` staged an untracked file whose mtime predates the session.
+  # Its whole value is in the SILENT direction: staging a new file is mandatory in
+  # this repo, so a false positive would nag on the correct, required action. The
+  # false-positive control is gated here rather than left to the ungated
+  # hand-rolled scripts beside it.
+  scripts/claude-hooks/tests/test_git_add_provenance_nudge.py
   # Writer 2 of the agent activity ledger — the OPENCODE half. A Python suite
   # driving real `node`, mirroring scripts/collector/opencode/tests/test_plugin.py
   # (this repo's established way to test an opencode plugin; there is no node
@@ -2106,6 +2113,11 @@ TARGET_FLOORS=(
   # count, not arithmetic — if this line conflicts, re-run the gate on the MERGED
   # tree and copy what it prints rather than reconciling the two sides.
   "scripts/claude-hooks/tests/test_bg_command_capture.py|76"
+  # 2026-08-30, git-add-provenance-nudge lands: 22 collected, floor 21 —
+  # `_suggested_floor 22` = 22 - max(1, 22/20) = 21. Re-measured from the
+  # collected count after the on-disk-name pins were added, not carried over
+  # from the 19 the first draft measured.
+  "scripts/claude-hooks/tests/test_git_add_provenance_nudge.py|21"
   # 2026-08-14, writer 2 (opencode) arrives as a NEW target: 15 collected.
   #   _suggested_floor 15 = 15 - min(50, max(1, 15/20 = 0 -> 1)) = 14.
   #
