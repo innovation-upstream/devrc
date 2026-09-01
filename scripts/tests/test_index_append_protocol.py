@@ -893,7 +893,20 @@ class TestTheOwnersMechanismProseIsPinnedWHOLE:
     windows, the caveats, most of its length — is untouched by it.
     """
 
-    EXPECTED_SHA = "2ed3ce831ebf20058a8d25a3a01cd02b76b1a2541cbbe5133395440e730850b8"
+    # Updated 2026-08-31 when #1132 merged into this branch. What moved: the
+    # mechanism paragraph's parenthetical, from "a whole-file retype of a
+    # curated, unbacked-up entry" to "a whole-file retype of a curated entry …
+    # and the hourly commit behind it can be up to seventy minutes stale" — the
+    # store HAS had an off-machine backup since 2026-08-21, and #1170's own
+    # conflict analysis says to take #1132's wording here.
+    #
+    # 🔴 Both doors re-read before this hash was pasted, which is what the
+    # failure message demands: `subsystem-index/SKILL.md` mandates `Edit`
+    # anchored on `## Nuance / work-history` with `Write` only for a first-ever
+    # file, and `write-back.md` routes there and restates no mechanism. ONE
+    # protocol, and NO per-caller carve-out — the change was a factual
+    # correction inside the paragraph, not an exception added to it.
+    EXPECTED_SHA = "499af271b29f30baf574c19fca8edbfd4f443dce8aafb899f0bc2e83af595961"
 
     @staticmethod
     def _digest(owner: str) -> tuple[str, list[str]]:
