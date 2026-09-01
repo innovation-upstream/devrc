@@ -3592,7 +3592,8 @@ class TestSkillDocsArePinned:
         ),
         (
             "do not go create an entry",
-            "writing is /handoff's confirm-gated job, not this step's",
+            "writing is /handoff's job at the END of a session, not this step's "
+            "(it shows a diff; the y/N was retired 2026-08-15)",
         ),
         ("sensitivity=", "the store is client-confidential and this repo is PUBLIC"),
         # --- the digest, and the claim it replaced -------------------------
