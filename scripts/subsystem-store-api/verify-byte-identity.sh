@@ -531,10 +531,14 @@ for scope in "${SCOPES[@]}"; do
     # `alpha.process` while `--ref alpha` raises `AmbiguousRefError` —
     # `<slug>.<kind>.md` is documented (`KINDS = service|process|org|doc`,
     # worked example `repo-cos.process` in the resolver's own docstring).
-    # No scope in the live store uses that shape today; the store is
-    # append-mostly, and this was reproduced end-to-end against a pod-shaped
-    # stub whose only real difference was ONE CHARACTER inside `alpha.md`:
-    # `PASS scope=gadget entries=3 … entries-compared=3`, exit 0.
+    # No scope in the live store uses that shape today (0 of 154 files, measured
+    # 2026-09-01); the store is append-mostly. REPRODUCED end-to-end against a
+    # real in-process server, two stores identical but for ONE CHARACTER inside
+    # `alpha.md`'s nuance bullet — this script, at 7d9da8f5, printed:
+    #   PASS scope=gadget-rack entries=3 bytes=6801 raw-diff-lines=18 … accounted-for=18
+    #   verify: scopes=1 pass=1 fail=0 entries-compared=3
+    # and exited 0. The fixture is `ambiguous_pair` in
+    # `scripts/tests/test_subsystem_store_api.py`.
     #
     # REFUSED, not merely left out of `entries=`. A stream silently dropped
     # from the count is the same coverage-in-name-only shape one level down:
