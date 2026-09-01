@@ -254,7 +254,17 @@ class TestTheSeamIsOwned:
         other."""
         lib = REPO_ROOT / "scripts" / "lib"
         importers = {p.name for p in sorted(lib.glob("*.py")) if _imports_mainline(p)}
-        assert importers == {"subsystem_touch.py", "handoff_doc.py"}, importers
+        # `handoff_index.py` joined 2026-09-01: it sources the handoff corpus from
+        # each repo's MAINLINE REF rather than the working tree, so "which ref is
+        # this repo's mainline" is a question it must answer identically to the
+        # other two — homelab-talos is `origin/trunk`, and a hardcoded `main` here
+        # would have indexed nothing for it (verified: it derives `origin/trunk`
+        # and reads 54 docs).
+        assert importers == {
+            "subsystem_touch.py",
+            "handoff_doc.py",
+            "handoff_index.py",
+        }, importers
 
     def test_the_ledger_of_modules_that_merely_MENTION_it_is_pinned_too(self) -> None:
         """The other half of the split above. A module that discusses this seam

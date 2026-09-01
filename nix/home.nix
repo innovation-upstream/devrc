@@ -18,6 +18,20 @@ let
   # DDL/insert path (snapshot #1 wrote 23 rows to prod, telemetry-on, and the DSN role
   # is confirmed to have CREATE SCHEMA). The timer runs hourly (see the timer below).
   enableInitiativesSync = true;
+  # handoff-index-sync (P1) master switch — gates ONLY whether the TIMER is wired
+  # into timers.target; the service definition is always emitted, so
+  # `systemctl --user start handoff-index-sync` works by hand.
+  #
+  # 🔴 OFF, and it must stay off until a supervised live run has validated the
+  # write path. This is exactly `enableInitiativesSync`'s original posture and for
+  # the same reason: `handoff_index.py` creates a NEW schema object
+  # (`initiatives.handoff_section`, with a GENERATED tsvector column and a GIN
+  # index) in a PROD database, and NOTHING in the test suite can exercise that —
+  # the gate runs in a nix sandbox with no cluster and no Postgres, so the DDL has
+  # been read and never executed. A routine `ship.sh` must not be able to silently
+  # arm an unvalidated prod-write timer. Flip it after a hand-run of
+  # `--dry-run` and then a real `--rebuild` has been watched to work.
+  enableHandoffIndexSync = false;
   # Drift-deadman master switch (scripts/drift-check.sh) — gates ONLY whether the
   # timer is wired into timers.target. The SERVICE definition is always emitted, so
   # `systemctl --user start drift-check` works by hand on either host regardless.
@@ -2788,6 +2802,84 @@ in
     Timer = {
       OnStartupSec = "2min";
       OnUnitActiveSec = "15min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # ── HANDOFF-DOC SECTION INDEX (scripts/lib/handoff_index.py) ─────────────────
+  # Derives a SECTION-grained full-text index of the handoff corpus into
+  # `initiatives.handoff_section` (measured 2026-09-01: devrc 94 docs / 959
+  # sections off origin/main, homelab-talos 54 / 506 off origin/trunk), so `/resume` and
+  # subagents can query what past sessions ALREADY wrote down instead of
+  # re-deriving it. Sibling of initiatives-sync: same database, same schema, same
+  # MailDB connection path (kubectl port-forward + psycopg2 + DSN-from-secret).
+  #
+  # 🔴 THE CORPUS IS READ FROM GIT REFS, NOT THE WORKING TREE. This box carries
+  # 143 worktrees in devrc alone (measured); a working-tree scan would index mid-edit branches, the same doc
+  # N times, and stale orphan copies, and two runs an hour apart would disagree
+  # for reasons unrelated to what anyone wrote. Each repo's mainline is DERIVED
+  # via scripts/lib/git_mainline.py — never hardcoded to main/trunk.
+  #
+  # 🔴 `--rebuild` TRUNCATES, AND THAT IS SAFE BY DESIGN. The index is DERIVED and
+  # DISPOSABLE; git is the system of record. Nothing is stored here that a re-run
+  # cannot rebuild, and no consumer may treat a row as authoritative over the doc
+  # it came from. A full rebuild each pass is also what keeps a SHRUNK doc from
+  # leaving orphaned high ordinals behind (see PostgresSectionStore.upsert).
+  #
+  # WHY 6h AND NOT 15min: unlike initiative-scan there is no live-state component
+  # here — a handoff doc changes when a session ends, a handful of times a day.
+  # The run is git-only plus one write transaction (no gh, no ClickHouse, no LLM),
+  # so it is cheap; the interval is set by how fast the SOURCE moves, not by cost.
+  systemd.user.services.handoff-index-sync = lib.mkIf serverMode {
+    Unit = {
+      Description = "Handoff index sync — handoff docs (git refs) → homelab Postgres (initiatives.handoff_section)";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Hard ceiling so a half-hung kubectl can't wedge the timer; the cgroup is
+      # killed and the timer re-arms on the next OnUnitActiveSec. 300s is ample —
+      # the measured corpus is 424 `git show` calls plus one write transaction.
+      TimeoutStartSec = 300;
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.kubectl pkgs.bash pkgs.coreutils ]}"
+        "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
+        "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+        "HOME=%h"
+        # 🔴 The repo set, as EXPLICIT env handles. A user unit does NOT source
+        # .zshenv, so `handoff_index.default_repos()` would find none of the
+        # $DEVRC/$HOMELAB/… handles and index NOTHING — a silent zero that renders
+        # as an empty index, which the search CLI reports as `🔴 BROKEN INDEX`.
+        # Only the two repos this host is guaranteed to hold are set here; a
+        # handle pointing at an absent checkout is reported as UNMEASURED rather
+        # than folded into a clean count, so adding one is safe.
+        "DEVRC=%h/workspace/devrc"
+        "HOMELAB=%h/workspace/homelab-talos"
+      ];
+      # nix-shell pulls psycopg2 (the _db.py write path). git/kubectl come from
+      # PATH above and are inherited into the nix-shell (it is not --pure).
+      ExecStart = ''${pkgs.bash}/bin/bash -c "exec nix-shell -p 'python3.withPackages(p:[p.psycopg2])' --run 'python %h/workspace/devrc/scripts/lib/handoff_index.py --rebuild'"'';
+      # Re-run the unit when the deriver changes (cf. X-Restart-Triggers above).
+      X-Restart-Triggers = [ "${../scripts/lib/handoff_index.py}" ];
+    };
+  };
+
+  # DOUBLE-GATED: serverMode (workbench-only) AND enableHandoffIndexSync (the
+  # OFF-by-default master switch in the let-block above). With the switch false
+  # the timer unit is not emitted at all, so no deploy can wire an unvalidated
+  # prod-write timer into timers.target — the DDL in this path has been read and
+  # never executed (the gate's nix sandbox has no Postgres).
+  systemd.user.timers.handoff-index-sync = lib.mkIf (serverMode && enableHandoffIndexSync) {
+    Unit = {
+      Description = "Periodic timer for the handoff-doc section index";
+    };
+    Timer = {
+      OnStartupSec = "10min";
+      OnUnitActiveSec = "6h";
     };
     Install = {
       WantedBy = [ "timers.target" ];
