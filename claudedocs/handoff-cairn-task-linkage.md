@@ -21,50 +21,44 @@ durable output is the linkage: which ClickUp ticket, which clawgate card, and wh
 genuinely built versus assumed.
 
 ## State now
-- **Branch / PR:** nothing in flight. No PR opened this session; the work was a deploy +
-  two operator arming acts + one clawgate comment. Base clone on `main` at `7a2003d2`.
-- 🔴 **RANK 1 IS DONE — both hosts DEPLOYED and the trailer is ARMED.** This supersedes the
-  previous "DEPLOY STATUS: NOT DEPLOYED" block, which was stale in both directions: the
-  workbench was already at `origin/main` and switched, and the laptop was on `911af220`,
-  not the `7ed7d41a` the doc recorded.
-  - `scripts/ship.sh` — laptop fast-forwarded `911af220 -> 7a2003d2`; workbench already
-    there. **Cross-host agreement asserted by the tool**: both at `7a2003d2`. Managed
-    artifacts resolve and are current on both (workbench 570 checked / 399 repo-sourced,
-    laptop 516 / 384; 0 dangling, 0 stale).
-  - **Hook half ARMED on BOTH hosts** — a `PreToolUse` entry added to each per-host
-    `~/.claude/settings.json` (workbench 5→6, laptop 4→5; backups at
-    `~/.claude/settings.json.bak-session-stamp`). 🔴 Registered with the absolute
-    `/nix/store/9ka5…-python3-3.12.14/bin/python3.12` the sibling hooks use, **not** the
-    bare `python3` the installer's printed snippet suggests — a bare command name dies
-    during a `home-manager switch` while the profile is momentarily blank.
-  - **Git half ARMED on BOTH hosts** — `scripts/install-session-stamp.sh --repo
-    ~/workspace/devrc --apply`, writing `.git/hooks/prepare-commit-msg`.
-    `core.hooksPath` was unset on both, so `.git/hooks` is what git reads.
-- **Deploy/verify status — VERIFIED AT THE CONSUMER, with both controls.** Not inferred
-  from the deploy:
-  - the recorder fired in an **already-running** session — the `settings.json` edit took
-    effect with **no restart** (state file `~/.cache/claude-session-trailer/2131466.json`
-    appeared after one commit-shaped Bash call);
-  - a **real `git commit`** in a throwaway repo with the hook installed produced a commit
-    object carrying `Claude-Session-Id: 8cdbb099-7deb-4b2a-a34c-320fb8539a73`, readable
-    back via `git log -1 --format='%(trailers:key=Claude-Session-Id,valueonly)'`;
-  - the transcript exists at that uuid (460K), so `claude --resume 8cdbb099-…` is the wake
-    handle. **blame → id → live session closes.**
-  - **negative control:** with no recorded session the message is left **byte-identical**
-    (the human-commit case). **positive control:** exactly one trailer line with one.
-  - ⚠ **Scope:** verified on a throwaway repo's commit object and by exercising the **real
-    installed hook** in the devrc clone against a message file. **No trailer has yet been
-    observed on a commit that landed on devrc `main`** — that is rank 3.
-- **Filed:** comment **570 on cg#365** (not a new card — cg#365 is open and this is its
-  closing condition; filing one would have duplicated it).
-- ⚠ **This checkout is shared and another session is editing it right now** — `M
-  nix/graphical.nix` plus two untracked files appeared mid-session. `nix/graphical.nix`
-  **is** a nix-read path, so the next `ship.sh` will classify it dirty-and-deployed.
-- **Carried forward — ranks 1, 2, 5, 6 of the ORIGINAL list remain done** (devrc#1049
-  `485202f8`; devrc#1039 → `bd63b7bd`; devrc#1083 → `3568530d`; devrc#1079 → `7ed7d41a`;
-  devrc#1082 → `3b1a0477`), and **cg#445 is still filed and open**.
-- ⚠ **The merged tree for #1083 was still never gated** — unchanged from the previous
-  session, and arming does not change it.
+- **Branch / PR:** NOTHING IN FLIGHT. All five PRs merged.
+- ✅ **CAIRN PHASE 0 IS CLOSED — both halves, and they were separate claims.** The
+  CONSOLIDATION is devrc#1170 → `50bfd91f`; the ACCEPTANCE CRITERION (*"a test that fails if a
+  second protocol reappears"*) is devrc#1186 → **`27a0e998`**. Phase 1 (pod canonical) is now
+  unblocked.
+  - ⚠ **#1186's `devrc-pytests` was RED on an earlier head and PASSED on the final one**
+    (`20067 passed / 0 failed`). The red was the store-api fsync contention, diagnosed
+    independently in devrc#1181 — see the closed investigation below. It was never this diff.
+- ✅ **RANK 7 DONE AND DEPLOYED — cg#348's REPORTING half.** homelab-infra#600 → squash
+  **`4e1a7970`**, verified BY CONTENT. 🔴 **Merged ≠ deployed, checked separately:** Flux
+  `tekton-triggers` reports `lastApplied=trunk@sha1:4e1a7970…` and the LIVE `devrc-ci-report`
+  Task carries the new arm. Immediately after the merge the live Task had **0** occurrences;
+  reconcile took ~80s.
+  - Four mechanisms now post four strings — `NO CAPACITY` / `NO GATE POD` / `KILLED` /
+    `BROKEN GATE` — all still GitHub `error`. **It recovers no lost check; it makes the loss
+    legible.**
+  - **Audit ladder ran 3 rounds and stopped on a clean one.** Round 1: 1🟡 2🟢. Round 2:
+    3🟡 2🟢, **every one introduced by round 1's own fix**. Round 3: 0🔴 0🟡, 2🟢.
+    Payload lines 63 → 36 → 24, executable shell 5 → 1 → **0**.
+- ✅ **devrc#1170 → `50bfd91f`** — one owner for the index-append protocol, y/N retired at the
+  last door, `created_by` supplied by the caller. A 🔴 found on the way and fixed in `97d898e5`:
+  `analyze-service`'s `allowed-tools` lacked `Edit` while the PR routed it to an `Edit`-mandated
+  protocol, so the measured-unsafe `Write` was the PRE-APPROVED path at that door.
+- ✅ **devrc#1179 merged** — three wall-clock bounds in
+  `scripts/browser-bridge/tests/test_server.py` were `< 1.0` against a **5.0s** mechanism, i.e.
+  load detectors rather than timeout detectors. Each is now `TIMEOUT / 2`, derived from a named
+  local. Mutation-verified: a **3.0s** delay (a partial regression, under the full timeout)
+  still fails all three on their own assertion.
+- ✅ **devrc#1174 → `314ea94f`** and **devrc#1184 → `329f0d40`** — the rank 7 and rank 8
+  ledger entries.
+- **Filed this session:** **cg#469** (rank 9) and **cg#473** (rank 10).
+- ⚠ **The devrc base clone is on `main` and CLEAN of tracked changes** (untracked `output.txt`,
+  `scripts/diagnose-nix-disk.sh` only) — it moved off `feat/opencode-rig-control-skill` during
+  the session, by another session, not by us. The **homelab-talos** base clone is still behind
+  and dirty with another session's work; left exactly as found.
+- **All worktrees removed and ALL claims released** — nothing of this session's is held.
+  ⚠ `/home/zach/workspace/devrc-close8-beb749f5` (`docs/rank8-closeout`) is ANOTHER session's
+  worktree; left alone.
 
 ## The cluster — ClickUp ↔ clawgate ↔ Cairn
 All six ClickUp tickets came from the **2026-08-26 harness / knowledge-sharing meeting**
@@ -255,48 +249,141 @@ clawgatectl task ls --summary | jq -r '.[] | select(.id>=362 and .id<=365) | "cg
   shape, which works today. Condition is "add a separator only when there is no trailer
   block to join". Recorded in full as comment 570 on cg#365.
 
-## Next steps (ranked)
-🔴 **RANKS RENUMBERED once this session** — the previous rank 1 (deploy + arm) is DONE, so
-everything shifted. No live `claim-work` claims existed on this doc at renumber time
-(`cairn-task-linkage-1` was taken and released within this session), so nothing was
-silently re-pointed. **Numbering is stable from here — do not renumber again**; rank 3 is
-kept in place, marked done, rather than removed.
+### 🔴 OPEN — a stale `<cfg>.lock` is self-inflicted and nothing cleans it up
+- **Symptom + exact repro:** `_git`'s own `timeout=LOCK_TIMEOUT` SIGKILLs git; git does not
+  remove its lockfile on SIGKILL. **One** timed-out `git config --global` write therefore
+  poisons the guard dir for every remaining session and every remaining target.
+- **Observed (with values):** measured at HEAD with the mutex working perfectly — after one
+  timed-out write the guard dir holds `['gitconfig', 'gitconfig.lock']`, and the very next
+  session gets `git config --global exited 255 — still lock-contended after 6 attempts`.
+  `command grep` over `run-tests.sh` + the plugin found **no** stale-lock handling anywhere.
+- **Ruled out:** that this is a regression from the mutex — it is not. Serialised writes are
+  *faster*, so a timeout is strictly **less** likely at HEAD than at base. Pre-existing.
+- **Leading hypothesis:** it is a real, unclosed hole. The mutex made it *legible*, not gone.
+- **Next probe:** decide whether to close it (unlink a `<cfg>.lock` older than N seconds
+  before the first attempt, with the risk that a live git write is mid-flight) or leave it
+  documented. Worth its own card if it recurs.
 
-1. **cg#365 — fix the single-paragraph trailer separator.** Diagnosed in the open-
-   investigation block above and in comment 570 on cg#365; the acceptance criteria are
-   mechanical. Repo `innovation-upstream/devrc`, files `scripts/lib/session_trailer.py`
-   (`append_trailer`) and its tests. Done means `git interpret-trailers --parse` returns
-   the id for all three shapes, pinned by a test watched to fail on pre-change code
-   (single-line RED at the base ref, green at HEAD).
-   forcing: user — cg#365 is a mirrored ClickUp ticket (`868kx9ev6`) raised by Zach and
-   two teammates at the 2026-08-26 harness meeting; the trailer is now ARMED on both
-   hosts, so the defect is live rather than hypothetical.
-2. **cg#445 — GUARD 10 is unmeasurable on the workbench**, so `gate.sh`'s pytest tier is
-   red for attribution-only reasons on any run from a worktree of the shared clone.
-   Unchanged this session. 🔴 **This is the THIRD rediscovery** — the index shows the same
-   class found on 2026-08-22 and 2026-08-28 before that, each time costing control runs.
-   forcing: gate — a required local gate is permanently red for reasons unrelated to any
-   change, which `claude/RULES.md` names as worse than no gate.
-3. ✅ **DONE — trailer confirmed on a real devrc commit.** Kept in place so the numbering
-   does not shift. Closed by **`fa64c986`** (the commit that landed this very doc, made
-   from the worktree `devrc-handoff-cairn-arm`): its message carries
-   `Claude-Session-Id: 8cdbb099-…` and `git log -1
-   --format='%(trailers:key=Claude-Session-Id,valueonly)'` returns it. **Do not re-work
-   this item.**
+### 🔴 CLOSED AS UNRECOVERABLE — which mechanism caused the 2026-08-30 red
+- **Observed:** three distinct mechanisms produce a **byte-identical** `still lock-contended
+  after 6 attempts` verdict: (a) genuine contention, (b) the mutex not held (fail-open), (c)
+  a stale `<cfg>.lock`. The original incident was diagnosed from exactly that string.
+- **Ruled out:** recovering it. No discriminator was recorded at the time and the run's
+  artefacts are long gone (Tekton retention is `keep: 20`, hourly).
+- **Resolution:** not knowable. The fix is verified against the mechanism it addresses; it is
+  **not** proof about that specific incident, and the doc should not imply otherwise. This is
+  the repo's own "an EMPTY RESULT cannot distinguish two mechanisms" rule landing on a
+  diagnosis. **Closed forward:** the verdict now prints `mutex=held N/6,
+  stale-git-lock=PRESENT|absent`, so a fourth rediscovery names its own mechanism.
+
+### CLOSED BY ANOTHER SESSION — the store-api "flake" is fsync CONTENTION, not a flaky test
+- **Why it is here:** it went red on **devrc#1186** on
+  `TestAHungRoundTripSAYSWhichSideBlocked.test_a_stall_in_the_FSYNC_region_is_NAMED`, in a file
+  that PR does not touch. I could attribute it AWAY from the diff but could not diagnose it.
+- **Observed (mine, with values):** the PR touches ONE file
+  (`scripts/tests/test_index_append_protocol.py`) which nothing imports; the failing test passes
+  on `origin/main` **and** on the PR head, same environment, in isolation; the whole class is
+  **5/5 pass locally**, ~5s each, no variance; the identical `nix build` sandbox derivation is
+  green on that head. `target_url` is **null** on the status, so there was no step log and no way
+  to tell WHICH assertion failed — and that class has two very different ones
+  (`assert stalled.is_set()` vs the mechanism assertions).
+- **Ruled out by me:** that it is this PR's defect. **NOT** ruled out: anything about the CI
+  mechanism — I declined to call it a flake on an absence.
+- **RESOLUTION, from devrc#1181 (`0c333846`), landed by another session while this ran:**
+  `server.py:_replace_bytes` fsyncs BEFORE the response is written, and fsync blocks in
+  **uninterruptible sleep**. When one fsync exceeds `HANG_TIMEOUT` (60.0) the client raises
+  `TimeoutError` at `socket.py:720` and **the gate reports a code failure for an I/O stall**.
+  devrc-ci is pinned to one node, the gate workspace is `emptyDir medium=disk` and the nix
+  caches are `local-path` PVCs, so every concurrent pipelinerun contends on ONE physical disk —
+  **12 pipelineruns overlapped the failing window.** It ships an LD_PRELOAD reproducer
+  (`scripts/ci-repro/slowfsync.c`) that fails the identical test on the dev host.
+- 🔴 **Two fixes it records as looking right and NOT being — do not re-attempt:** CPU/memory
+  requests cannot fix it (k8s requests govern CPU and memory, **not disk I/O**), and raising
+  `HANG_TIMEOUT` again is worse than nothing (60 is already the symptom fix from 15 on
+  2026-08-29 and it did not hold; ~320 hung-call sites × 60s ≈ 5.3h against a 45m budget).
+- ⚠ **Read it beside cg#348: it is the SAME SHAPE.** An I/O stall reported as a code failure,
+  and a capacity loss reported as a code failure, are one class — a red check that is not about
+  the diff. Rank 7 made one of them legible; this one the suite already classified correctly
+  and said so unprompted (`MECHANISM = SERVER_BLOCKED_IN_FSYNC … accept loop parked=True`).
+
+### OPEN — cg#348's SCHEDULING half is untouched
+- **Observed (comment 593, re-read this session):** priority is split by trigger — 34
+  `devrc-ci-pr` TaskRuns with `priorityClassName` **unset** (effective 0) vs 7
+  `devrc-ci-push-main` at `ci-bulk` (**−10000**), both `nodeSelector`-pinned to the same node.
+  So every PR-leg gate pod is a valid preemptor of the main-leg pod. Separately, **2 of 28
+  terminal PR-gate runs (7.1%) lost a REQUIRED check to pure queueing** — a TaskRun's timeout
+  clock starts at CREATION, so a pod that never schedules burns its whole budget queued.
+- **Ruled out WITH MEASUREMENTS — do not re-propose:** raising `ci-bulk` (would let CI preempt
+  cert-manager and Flux); `retries` on the gate (retries genuine verdicts; `timeouts.tasks` is
+  cumulative across attempts); a concurrency cap (simulated against the real arrival trace and
+  WORSE at every cap that helps); ResourceQuota (cannot be scoped safely).
+- **Leading hypothesis:** the only real lever left is moving the main leg to a different node,
+  which has an **unverified prerequisite** — free disk for a third 30Gi local-path nix cache was
+  never measured.
+- **Next probe:** measure that free disk before designing anything.
+- 🔴 **`kubectl delete pod` is NOT a preemption stand-in — MEASURED TWICE this session.** Both
+  attempts ended `gate: reason=Succeeded`: Tekton RECREATED the pod. Card #348's proposed probe
+  3 measures a different mechanism. Kill the step process instead.
+
+## Next steps (ranked)
+🔴 **NUMBERING IS STABLE — items are marked done IN PLACE, never removed or renumbered.**
+The rank is half a `claim-work` slug's identity. New items APPEND to the end even when they
+belong topically beside an earlier one.
+
+1. ✅ **DONE — cg#365's trailer separator.** Merged `ec102d00`. **Do not re-work.**
    forcing: none — closed.
-4. **cg#428 Layer B — criterion 4 (URL resolution).** BLOCKED on devrc#1011. Must IMPORT
-   `scripts/collector/mention_scan.py`'s `CLICKUP_TASK_URL` / `_github_url` /
-   `clawgate_url`; do not write a second resolver. Files
-   `scripts/lib/subsystem_resolver.py`, `scripts/tests/test_subsystem_task_refs.py`.
-   forcing: none — blocked, and nothing external is waiting.
+2. ✅ **DONE — cg#445, GUARD 10 unmeasurable.** Merged `8e8ee3bc`. **Do not re-work.**
+   forcing: none — closed.
+3. ✅ **DONE — trailer confirmed on a real devrc commit** (`fa64c986`). **Do not re-work.**
+   forcing: none — closed.
+4. ⚠ **cg#428 — RE-CHECK BEFORE TOUCHING; CHEAPEST OPEN ITEM.** Live read 2026-08-31:
+   **`ready_for_review`**, 5 comments — another session worked it. Read the card first; the work
+   may be done and need only confirming. If anything remains it must IMPORT
+   `scripts/collector/mention_scan.py`'s `CLICKUP_TASK_URL` / `_github_url` / `clawgate_url`,
+   never write a second resolver.
+   forcing: none — likely already delivered; verify rather than assume.
 5. **cg#429 — clickup-mirror per-task repo override.** Repo `homelab-talos`, files
    `scripts/clickup-mirror/mirror.py`,
    `clusters/workbench/apps/clickup-mirror/config-configmap.yaml`.
-   forcing: none — re-probed again this session (2026-08-30): cg#363/364/365 still read
-   `innovation-upstream/devrc`, cg#362 still unset. The mechanism is real and has not fired.
-6. **BLOCKED — do not start:** cg#362 and cg#363 wait on the teammate's private-repo
-   migration ticket.
+   forcing: none — the mechanism is real and has not fired; cg#363/364/365 still read
+   `innovation-upstream/devrc`, cg#362 still unset.
+6. **BLOCKED — do not start:** cg#362 and cg#363 wait on the teammate's private-repo migration.
    forcing: none — blocked on a third party.
+7. ✅ **DONE AND DEPLOYED — cg#348's REPORTING half.** homelab-infra#600 → `4e1a7970`; Flux
+   `lastApplied` confirms the live Task. **Do not re-work.** 🔴 **cg#348 ITSELF STAYS OPEN** —
+   only the reporting half shipped; criteria 1 and 3 want a REAL gate run under contention and
+   the probes were a scratch pipeline, and criterion 4 is deliberately not implemented
+   (comment 256 retracted it). The scheduling half is rank 11.
+   forcing: none — the reporting half is shipped and live.
+8. ✅ **DONE — Cairn phase 0 is CLOSED.** Consolidation devrc#1170 → `50bfd91f`; the
+   acceptance criterion devrc#1186 → `27a0e998`. **They were separate claims and only the first
+   had shipped for most of this session** — the entry is kept as a tombstone saying so, because
+   "one protocol" reads as done while "a test that catches a second one" is what phase 0 asked
+   for. Phase 1 (make the pod canonical) is now unblocked. **Do not re-work.**
+   forcing: none — closed.
+9. **cg#469 — a 4xx on the FIRST leg's status POST costs the SECOND leg its check.** Repo
+   `homelab-talos`, file
+   `clusters/homelab/apps/tekton-pipelines/triggers/devrc-ci-pipeline.yaml`. Under `set -eu`,
+   `curl -sf` on the pytests POST aborts before nodetests posts at all — both required contexts
+   stuck `pending` forever, the same end-state as `devrc-ci-nnt6f`/`9p6mf`. 🔴 The fix is NOT
+   `|| true`: that trades a loud failure for a silent one. Also carries a stale
+   "six pipelines / devrc-ci 3m" comment (live scan says ≥11 and 5.0m).
+   forcing: none — read off the code, NOT observed in the wild.
+10. ✅ **DONE — cg#473's disagreement predicate.** devrc#1186 → `27a0e998`. Independently
+   re-verified before merge: the reworded-fork mutant reproduces **no** pinned literal
+   (`MANDATE: False`, banned imperatives: none — checked mechanically against literals parsed
+   from the module source) and dies naming the file and the lines. 71 passed on the merged tree.
+   🔴 **Residual, stated in the class docstring:** a fork that describes a whole-file retype
+   WITHOUT naming a tool or a confirm gate is outside every layer — the mechanism half is a
+   token list, the narrowest thing a real fork cannot avoid, not a completeness proof.
+   **Do not re-work.**
+   forcing: none — closed.
+11. **cg#348's SCHEDULING half — the only item here with a live external forcing function.**
+   Repo `homelab-talos`. See the open-investigation block above for what is already
+   rejected-with-measurement; the surviving lever is moving the main leg to another node, whose
+   free-disk prerequisite was never measured. Measure that first.
+   forcing: gate — 2 of 28 terminal PR-gate runs (7.1%) lost a REQUIRED check to pure queueing,
+   and with `enforce_admins: true` those PRs are BLOCKED until someone pushes again.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **cg#428 COLLIDES WITH OPEN PR #1011 (`feat/mention-detection-click-to-open`), and
@@ -595,33 +682,169 @@ kept in place, marked done, rather than removed.
   the tool would have pushed to whatever branch the checkout sat on. Check
   `git branch --show-current` yourself before `--confirm --push`.
 
+- 🔴 **A RANKED LIST GOES STALE UNDER YOU, AND THE STALENESS IS INVISIBLE.** Two entries in
+  this doc were wrong within a day of being written: rank 1 was shipped, and rank 4's
+  "BLOCKED on devrc#1011" became `ready_for_review` because **another session worked the
+  card while this effort was in flight**. Neither is detectable by reading the doc — both
+  read as current forever. `claim-work` cannot see it either: it locks an item, it does
+  not notice the item finishing elsewhere. **Re-read the live card state for every ranked
+  item before drawing from this queue**, not just the one you intend to take.
+- 🔴 **`git branch -r --contains` IS NOT AUTHORITATIVE — it reads a LOCAL tracking ref
+  that can be stale, and it said a commit was safe on a branch that no longer exists on
+  the remote.** Used to check whether a diverging commit was preserved, it named
+  `origin/feat/memory-detail-click`; `git ls-remote origin` returned **nothing** for that
+  branch. The commit was in fact preserved — under a *differently named* branch whose PR
+  had already squash-merged, which only `git ls-remote` + a **content** comparison against
+  `origin/main` could establish. Ancestry says "not merged" after every squash, forever.
+  **Ask the remote, then compare content.**
+- 🔴 **RE-CHECK THE BRANCH AT THE MOMENT YOU ACT, NOT AT SESSION START — a shared checkout
+  MOVES.** `git status -sb` at session start said `main`; hours later the base clone was
+  standing on `feat/memory-detail-click`, switched by another session. A
+  `git merge --ff-only origin/main` run on that assumption failed with
+  `Not possible to fast-forward` and was misread as "`main` has diverged" — it had not;
+  local `main` was simply behind. **The proposed remedy, `git reset --keep origin/main`,
+  would have moved the FEATURE BRANCH's pointer, not `main`** — `--keep` protects
+  uncommitted changes, it does not protect you from being on the wrong branch. Caught only
+  because the operator asked "is that safe?".
+- ⚠ **The devrc CI gate is degraded in a way that reads as a code defect**, and it will
+  interfere with landing anything here. PR-leg pipeline pods **preempt** main-leg pods
+  (priority 0 vs `ci-bulk` −10000, same pinned node), and single-node queueing cost **2 of
+  28 PR-gate runs (7.1%) a required check** on 2026-08-31 — versus 1 lost to preemption.
+  🔴 **Three capacity outcomes and one real defect all post the SAME string**
+  (`COULD NOT RUN: <leg>`), which is exactly why a red check there gets debugged as a diff
+  problem. A run on `main`'s own tip failed this way with **no test ever executing**.
+  Diagnosis and ranked fixes are on the clawgate card filed for it; the cheapest fix makes
+  the loss **legible**, it does not recover a lost check.
+- **`ready_for_review` vs `complete` on a mirrored ClickUp card:** cg#365's body carries a
+  prose "Closing condition", not a `## Acceptance criteria` heading, so the status gate
+  says an agent may not mark it `complete` — it derives criteria it would then be grading
+  itself against. Left at `ready_for_review` deliberately.
+
+- 🔴 **`git checkout -- <path>` DESTROYED UNCOMMITTED WORK TWICE IN ONE SESSION, both times
+  while restoring after a mutation test.** It reverts to the COMMITTED state, so fixes that
+  were not yet committed simply vanished. The second time was caught **only** because a
+  brand-new test failed *unmutated* and its message showed the OLD verdict format — without
+  that test I would have committed a fix that was not there. **Commit before mutating, and
+  mutate a `cp -a` copy** (`rm -f <copy>/.git` first — a worktree's `.git` is a FILE pointing
+  at the real git dir). I had put this exact warning in a subagent's brief and then walked
+  into it myself.
+- 🔴 **A PREDICATE OPEN-CODED IN TWO LANGUAGES IS INVISIBLE TO A ONE-LANGUAGE GREP.** I
+  grepped `guard_config_path`/`CONFIG_NAME` (Python), found three consumers, and briefed
+  "nothing requires sharing". Two more existed in `run-tests.sh`, which builds the same path
+  in **shell** as `$NOGIT_CONFIG`. The proposed fix would have broken GUARD 10 on every
+  target. **Ask what OTHER language constructs this value before declaring a consumer list
+  complete.**
+- 🔴 **THE AUDIT LADDER FOUND DEFECTS IN MY OWN FIXES, TWICE, AND BOTH WERE THE SHAPE THE FIX
+  WAS MEANT TO PREVENT.** Round 2: the `mutex=` field I added to make failures legible
+  sampled ONE retry attempt while reading as the whole run. Round 3: my fix for that had a
+  **surviving mutant** (`held_count += 0`) because the fixture could only ever produce `0`
+  and I asserted that literal — `claude/RULES.md`'s "a fixture derived from the constant
+  under test", walked into *while fixing a mutation-coverage defect*. **Budget for the ladder
+  to audit the repair, not just the original.**
+- 🔴 **`install()`-style helpers that set process-wide state must not be called from a test.**
+  My round-2 tests called `nogit_plugin.install()` in-process; it rewrites five env vars and
+  its own header says it is NEVER UNDONE, so the redirect leaked into **42 later tests**,
+  which then verified containment against a redirect an unrelated test installed. The file
+  already had the right pattern (`monkeypatch.setenv`). Round 4 reproduced the leak from
+  scratch as a positive control before confirming the fix.
+- 🔴 **I DELETED ANOTHER SESSION'S AUDIT REFS.** Sweeping `refs/audit/*` to clean up my own
+  two, I removed **eight** belonging to a live PR #1119 ladder. Recoverable (that branch was
+  intact on origin) but not mine to touch. **Filter to your own refs by name.**
+- 🔴 **`git branch -r --contains` IS NOT AUTHORITATIVE** — it reads a local tracking ref and
+  named a branch `git ls-remote` says does not exist. Ask the remote, then compare CONTENT.
+- 🔴 **RE-CHECK THE BRANCH AT THE MOMENT YOU ACT.** `git status -sb` said `main` at session
+  start; hours later the shared base clone stood on a feature branch. A `merge --ff-only` on
+  that assumption was misread as "main has diverged" — it had not. The remedy that reading
+  suggested (`reset --keep origin/main`) would have moved the FEATURE BRANCH's pointer.
+  Caught only because the operator asked "is that safe?".
+- ⚠ **Backticks in a `git commit -m` body are COMMAND SUBSTITUTION** — a bullet silently lost
+  its content. Use `-F <file>`.
+- ⚠ **zsh does not word-split unquoted parameters** — `set -- $r` in a loop read the whole
+  string as one field and printed four zeros. Use explicit values or a real array.
+- **Filing on an already-covered card beats minting a new one.** The CI diagnosis went to
+  cg#348 as a comment because the duplicate sweep found cg#348/#337/#303 already open on it;
+  a fourth card would have been the exact collision class this whole effort investigated.
+
+- 🔴 **CARRIED FORWARD from `State now`, which a REPLACE would otherwise have dropped —
+  cg#445's REAL mechanism, and why it was rediscovered three times.** The card blamed the git
+  **common dir's** config shared by ~117 worktrees — an environmental fact, therefore
+  unfixable, which is where **2026-08-22, 08-28 and 08-30 all stopped**, each costing ~20-minute
+  control runs. The contended file was actually the guard's **own** `GIT_CONFIG_GLOBAL` target
+  with a fixed filename (`guard_dir / "gitconfig"`), and `nogit_plugin.py`'s own comment said
+  so. 🔴 **A card's stated mechanism is a hypothesis, and a wrong one that sounds environmental
+  is the most expensive kind — it reads as "not ours to fix" and stops the search.**
+- 🔴 **CARRIED FORWARD — the Cairn store's measured state, 2026-08-31.** Workbench **146
+  entries / 15 scopes**, laptop **47 / 12**; **22 distinct scopes of which 5 overlap and 7 are
+  laptop-only**. The figures in the `subsystem-index` skill are from 2026-08-27 and are stale.
+  🔴 The store is **PER-HOST and unreplicated**, so a `scope-absent` on one machine is never a
+  claim about the fleet — phase 1 makes the pod canonical and has to reconcile the 5 overlaps.
+- 🔴 **RANK 8 WAS ALREADY BUILT, BY ANOTHER SESSION, AND NOTHING IN THE LOCK COULD SEE IT.**
+  devrc#1170 was open and unclaimed and was *exactly* phase 0. Only `gh pr list` surfaced it —
+  `claim-work` locks an item, it does not notice the item being done elsewhere. Starting rank 8
+  fresh would have written a second append protocol into the change that exists to remove one.
+  **Sweep `gh pr list` before drawing ANY ranked item, not just the one you intend to take.**
+- 🔴 **`allowed-tools` IS A PRE-APPROVAL, NOT A RESTRICTION** — *"every tool remains callable,
+  and your permission settings still govern tools that are not listed."* So a skill routed to an
+  `Edit`-mandated protocol while declaring only `Write` is not blocked; it is **incentivised
+  toward the unsafe path**, because `Write` runs unprompted and `Edit` falls to normal
+  permissions (this host: `defaultMode: default`, 210 allow entries, **zero** Edit/Write). In a
+  headless or subagent run nobody answers the prompt. **Nothing in devrc read `allowed-tools` at
+  all** until #1170; there is now a guard with a negative control.
+- 🔴 **A GUARD'S FIXTURE CAN MAKE ITS OWN BRANCH UNREACHABLE.**
+  `test_an_UNSET_BUILD_REASON_does_not_abort_the_reporter` existed for exactly the defect a fix
+  round then introduced — a bare `${BUILD_REASON}` under `set -eu` — and could not see it,
+  because its fixture set a phase, so `[ -z "$phase" ] && …` short-circuited before the bare
+  expansion was evaluated. **Ask what the fixture makes UNREACHABLE, not just what it asserts.**
+- 🔴 **A NON-ISOLATED MUTANT PRODUCES FALSE EVIDENCE, AND IT READS AS PROOF.** #1170's claim
+  that its ledger caught a *reworded* fork rested on a mutant whose count could only move if it
+  reproduced the pinned literal **verbatim**. Measured: a genuinely reworded fork passed all 56.
+  **Check mechanically that a mutant reproduces none of the pinned literals** before believing
+  what it kills — a one-command check against literals parsed from the module source.
+- 🔴 **`kubectl delete pod` is NOT a preemption stand-in** — twice, Tekton RECREATED the pod and
+  the TaskRun `Succeeded`. Kill the step process instead; that reproduces the recorded
+  preemption signature (`StepFailed`, step killed).
+- 🔴 **A SKIPPED gate's `$(tasks.gate.reason)` is the EMPTY STRING**, not `PipelineRun was
+  stopping`. Measured on a scratch pipeline whose first task blew its own timeout: the reporter
+  received `status=None reason=<empty>`. Two revisions of a test docstring asserted otherwise —
+  one of them while its own fixture passed `""`.
+- 🔴 **POINT `nix develop` AT YOUR WORKTREE, NEVER A SHARED BASE CLONE.** A base clone carrying
+  another session's modified `nix/pkgs/default.nix` / `flake.nix` yields a DIFFERENT dev shell:
+  20 test files lost PyYAML and the suite reported `tests_ran=655` instead of 1349. It looks
+  like a broken suite, not a wrong shell.
+- ⚠ **A BLOCKED PreToolUse hook EATS THE WHOLE COMMAND, including work that ran BEFORE the
+  blocked part.** A `cat > file <<EOF … EOF` preceding a refused `clawgatectl task create` never
+  wrote the file, so the retry failed with *"the --body-file path could not be read"* and looked
+  like a permissions problem. Write the file with the `Write` tool in its own call.
+- ⚠ **`git … | tail; echo "rc=$?"` REPORTS TAIL'S STATUS.** A `merge --ff-only` that printed
+  `fatal: Not possible to fast-forward` was followed by a cheerful `ff rc=0`. Read the output
+  TEXT, never the piped code. (The refusal itself was correct: the base clone was on another
+  session's branch.)
+- **`gh pr merge --auto` is the honest answer to "merge now" under `enforce_admins: true`** —
+  there is no admin override, and the documented protection-deletion escape hatch does NOT
+  round-trip (`PATCH` 404s; closing the window needs a full `PUT` of the whole object). Not
+  worth it for a docs PR. Arm auto-merge and verify `autoMergeRequest != null` rather than
+  trusting the exit code.
+- **Three of five substantive changes this session had defects only a blind audit or a control
+  run caught** — a `NO CAPACITY` arm asserting a mechanism the code cannot observe, a bare
+  `${BUILD_REASON}` under `set -eu`, and the `allowed-tools` mismatch. **None was visible from a
+  green suite.**
+
 ## How to verify
 ```bash
-# both hosts converged (re-run any time; it is idempotent and READ-ONLY when clean)
-bash ~/workspace/devrc/scripts/drift-check.sh
+# rank 7 landed AND is deployed — merged != deployed, both must hold
+git -C ~/workspace/homelab-talos show origin/trunk:clusters/homelab/apps/tekton-pipelines/triggers/devrc-ci-pipeline.yaml | grep -c "NO GATE POD"
+KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get task devrc-ci-report -o yaml | grep -c "NO GATE POD"
+KUBECONFIG=$KC_HOMELAB kubectl get kustomization -n flux-system tekton-triggers -o jsonpath='{.status.lastAppliedRevision}'
 
-# the trailer is ARMED, not merely deployed — BOTH must be true, on BOTH hosts
-readlink -f ~/.claude/hooks/session-stamp.py                     # -> /nix/store/... (deployed)
-python3 -c "import json,os;s=json.load(open(os.path.expanduser('~/.claude/settings.json')));\
-print('ARMED' if [h for h in s['hooks']['PreToolUse'] if 'session-stamp' in json.dumps(h)] else 'NOT ARMED')"
-ls -l ~/workspace/devrc/.git/hooks/prepare-commit-msg           # the git half
+# rank 8/10 — did #1186 land, and does the guard actually catch a REWORDED fork?
+gh pr view 1186 --repo innovation-upstream/devrc --json state,mergeCommit
+# then, in a cp -a copy with .git REMOVED first, append a conflicting protocol to
+# claude/skills/analyze-service/reference/write-back.md and confirm it goes RED:
+nix develop <worktree> --command python3 -m pytest <copy>/scripts/tests/test_index_append_protocol.py -q -p no:cacheprovider
 
-# the round trip, end to end (what cg#365 actually asks for)
-SID=$(git -C ~/workspace/devrc log -1 --format='%(trailers:key=Claude-Session-Id,valueonly)')
-test -n "$SID" && ls -l ~/.claude/projects/-home-zach-workspace-devrc/"$SID".jsonl \
-  && echo "wake it: claude --resume $SID"
+# every ranked item's LIVE state — this doc goes stale under you
+clawgatectl task ls --summary | jq -r '.[] | select([348,362,363,428,429,469,473]|index(.id)) | "cg#\(.id) \(.status)"'
 
-# 🔴 the single-line gap — this is the OPEN defect; empty output on the first is the bug
-printf 'fix: one line only\n' > /tmp/m1 && ~/workspace/devrc/.git/hooks/prepare-commit-msg /tmp/m1 message
-git interpret-trailers --parse < /tmp/m1        # EMPTY today == the defect
-printf 'fix: x\n\nbody.\n' > /tmp/m2 && ~/workspace/devrc/.git/hooks/prepare-commit-msg /tmp/m2 message
-git interpret-trailers --parse < /tmp/m2        # prints the id == the working shape
-
-# cg#362-365 repo values have not reverted (rank 5's regression case)
-clawgatectl task ls --summary 2>/dev/null | jq -r '.[] | select(.id>=362 and .id<=365) | "cg#\(.id) repo=\(.repo)"'
-
-# 🔴 the LOCAL gate must be run from an isolated CLONE, never a worktree (cg#445)
-C=$(mktemp -d); git clone --quiet --no-hardlinks ~/workspace/devrc "$C"
-cd "$C" && nix develop ~/workspace/devrc -c bash scripts/gate.sh
-nix build "path:$C#checks.x86_64-linux.pytests" --no-link   # ONE AT A TIME
+# the shared queue's lock, before drawing ANY item
+claim-work --list
 ```

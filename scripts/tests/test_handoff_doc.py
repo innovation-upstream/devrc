@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import os
 import re
 import shutil
@@ -1407,7 +1408,15 @@ class TestRuleFDidNotMoveTheExitCodes:
         """
         codes = {n: v for n, v in vars(hd).items()
                  if n.startswith("EXIT_") and isinstance(v, int)}
-        assert len(codes) >= 8, f"the scraper found too few constants: {codes}"
+        # 🔴 THE INJECTIVITY LOOP RUNS FIRST, AND THE ORDER IS THE POINT. This
+        # test is named and documented for COLLISIONS, so a collision must be
+        # what it reports. A count assertion placed above it pre-empts that:
+        # adding a second constant equal to 9 — the #962/#1046 shape, one digit
+        # from what a PR in flight actually does — dies to `assert 10 == 9`, the
+        # remedial text below never renders, and the message that does render
+        # invites bumping the literal to 10, after which the real defect
+        # surfaces only on a SECOND run. That is #1093.1's defect ("the
+        # assertion that runs first misdirects") recreated in a sibling test.
         seen: dict[int, str] = {}
         for name, value in sorted(codes.items()):
             assert value not in seen, (
@@ -1417,11 +1426,71 @@ class TestRuleFDidNotMoveTheExitCodes:
                 f"next free code and update the skill's exit-code list with it."
             )
             seen[value] = name
+        # 🔴 EXACT, not `>=`. Against exactly 9 constants a `>= 8` floor tolerates
+        # ONE silently vanishing — a rename, a deletion, or a value that stops
+        # being an int — which is the same class of drift this test exists for.
+        # A legitimate addition is expected to update this number; the failure
+        # prints the whole dict, so what changed is on screen.
+        assert len(codes) == 9, f"the EXIT_* constant set changed: {codes}"
 
     def test_the_exit_code_constants_did_not_move(self) -> None:
         """Their VALUES, not just their names — a caller reads the number."""
         assert (hd.EXIT_OK, hd.EXIT_USAGE, hd.EXIT_FAIL) == (0, 2, 3)
         assert (hd.EXIT_NO_ADVANCE, hd.EXIT_NO_CHANGE, hd.EXIT_BEHIND) == (4, 5, 6)
+        # 🔴 THE LADDER'S OWN CODES, which stopped at 6 and were unpinned. #1046
+        # renumbered EXIT_STALE_BASE 7 -> 9 after #962 claimed 7; nothing asserted
+        # the new value, so setting it to 10 SURVIVED all 295 tests while three
+        # prose sites still said 9.
+        assert (hd.EXIT_DOC_PER_EFFORT, hd.EXIT_UNFORCED, hd.EXIT_STALE_BASE) == (7, 8, 9)
+
+    def test_the_prose_quotes_the_CONSTANT_not_a_stale_literal(self) -> None:
+        """🔴 PROSE AGAINST THE CONSTANT, not prose against prose.
+
+        `test_the_remedy_is_pinned_as_a_WHOLE_normalised_string` compares one
+        string to another string, so it fires when the WORDING moves and never
+        when the NUMBER does. Measured: `EXIT_STALE_BASE = 10` survives the whole
+        file while `SKILL.md`, `WRONG_BASE_REMEDY` and that pin all still say
+        "exit 9". A caller reads the number, so the number is what must agree.
+        """
+        remedy = hd.WRONG_BASE_REMEDY
+        assert f"(exit {hd.EXIT_STALE_BASE})" in remedy, (
+            f"WRONG_BASE_REMEDY names an exit code that is not "
+            f"EXIT_STALE_BASE={hd.EXIT_STALE_BASE}: {remedy!r}")
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        # 🔴 BIND THE STATUS TOKEN TO ITS CODE — a bare `f"({const})"` asks only
+        # whether the DIGIT appears anywhere in a 25 KB file, which any OTHER
+        # status spelling the same number satisfies. MEASURED: rewriting
+        # `status=new-doc` (7) to (9) — the exact drift this test exists to
+        # prevent — left all 297 tests GREEN, because `status=dated-topic` still
+        # spelled (7). The pair is the claim; the digit alone is not.
+        # 🔴 ALL SEVEN PAIRS THE SKILL DOCUMENTS, not the four this started with.
+        # MEASURED: with only four, `status=behind` (exit 6) → (exit 4) left all
+        # 297 tests green — the same walkability the four were added to close,
+        # surviving three statuses over. The set is the claim; a subset of it
+        # reads as coverage of the skill's numbers and is not.
+        for status, const, form in (
+            ("stale-base", hd.EXIT_STALE_BASE, "exit {}"),
+            ("behind", hd.EXIT_BEHIND, "exit {}"),
+            ("no-change", hd.EXIT_NO_CHANGE, "exit {}"),
+            ("dated-topic", hd.EXIT_DOC_PER_EFFORT, "{}"),
+            ("new-doc", hd.EXIT_DOC_PER_EFFORT, "{}"),
+            ("unforced", hd.EXIT_UNFORCED, "{}"),
+        ):
+            want = f"`status={status}` ({form.format(const)})"
+            assert want in doc, (
+                f"claude/skills/handoff/SKILL.md does not carry {want!r}; the "
+                f"skill's documented code for status={status} drifted from the "
+                f"module, where it is {const}.")
+        # Step 3's line names these two WITHOUT the `status=` prefix, so they
+        # need their own spelling — dropping them because the prefix differs is
+        # how a "covers the documented codes" claim quietly means "covers most".
+        for label, const in (("no-advance", hd.EXIT_NO_ADVANCE),
+                             ("no-change", hd.EXIT_NO_CHANGE)):
+            want = f"`{label}` ({const})"
+            assert want in doc, (
+                f"claude/skills/handoff/SKILL.md does not carry {want!r}; step "
+                f"3's bare-name spelling of {label} drifted from the module, "
+                f"where it is {const}.")
 
     def test_merge_still_returns_a_plain_string(self) -> None:
         """`merge()` is public and called directly by other tests in this file;
@@ -1436,6 +1505,20 @@ class TestRuleFDidNotMoveTheExitCodes:
 # --------------------------------------------------------------------------
 
 SKILL_PINS: list[tuple[str, str]] = [
+    # 🔴 THE WORD "only" IS THE CLAIM, and it was evicted once already. Two other
+    # files describe this clause as load-bearing — `handoff_doc.py`'s rule-(j)
+    # legend comment and `TestSkillAndModuleAgree`'s docstring both say "only ONE
+    # of the four means 'add a field'" — so both stop being true the moment a
+    # byte-pressure edit takes the word, and NOTHING saw it: MEASURED, deleting
+    # `only` leaves all 297 tests green. SKILL.md sits at 7 B of headroom, i.e.
+    # under exactly the pressure that removed it the first time.
+    (
+        "Read each row's marker — only one means \"add a field\"",
+        "🔴 only ONE of the four markers means add-a-field; without `only` the "
+        "executor applies that remedy to all four, when [unknown kind] needs a "
+        "LISTED kind, [unparsed] needs RE-SPELLING and [fenced] needs unfencing "
+        "or tagging the item",
+    ),
     (
         "scripts/lib/handoff_doc.py",
         "the step actually invokes the tool that owns the gate",
@@ -3658,15 +3741,16 @@ class TestADatedTopicIsRefused:
         [
             ("browser-bridge-2026-08-01", "2026-08-01"),   # devrc spelling: trailing
             ("2026-07-18-remix-session", "2026-07-18"),    # homelab spelling: leading
-            # 🔴 the token is `2026`, not `2026-07`: the year-month arm was
-            # DELETED as a dead predicate (see `_TOPIC_DATE`), and the bare-year
-            # arm catches this spelling. Asserting `2026-07` here would have
-            # passed either way — the refusal echoes the topic, which contains
-            # it — which is how the redundant arm stayed invisible.
-            ("remix-2026-07-session", "2026"),             # year-month spelling
-            ("q3-2026-cleanup", "2026"),                   # bare year
+            # 🔴 RED AT `edbc596f` — the arm that catches this is NEW (#964 item
+            # 2). `\d{4}-\d{2}-\d{2}` needs the hyphens, so `date +%Y%m%d` — the
+            # likeliest AGENT-generated spelling, and the one a cron or a script
+            # produces without thinking — sailed straight through while
+            # `rfc-1918-addressing` was refused. Both spellings, so the arm is
+            # pinned at a leading and a trailing position rather than at one.
+            ("remix-20260801", "20260801"),                # compact, trailing
+            ("20260801-remix-session", "20260801"),        # compact, leading
         ],
-        ids=["trailing-iso", "leading-iso", "year-month", "bare-year"],
+        ids=["trailing-iso", "leading-iso", "trailing-compact", "leading-compact"],
     )
     def test_every_dated_spelling_in_the_corpus_is_refused(
         self, repo: Path, update_file: Path, topic: str, token: str
@@ -3711,12 +3795,75 @@ class TestADatedTopicIsRefused:
         assert "status=proposed" in res.stdout
 
     @pytest.mark.parametrize(
-        "topic", ["h2-planning", "ipv6-rollout", "s3-403-triage", "phase-2-store"]
+        "topic",
+        [
+            # The original four. 🔴 EVERY ONE OF THEM AVOIDS THE 19xx/20xx
+            # WINDOW, which is exactly why this test could not see #964 item 1:
+            # it was four points sampled entirely outside the hazard.
+            "h2-planning", "ipv6-rollout", "s3-403-triage", "phase-2-store",
+            # 🔴 RED AT `edbc596f`, all ten. Each is a plausible slug in this
+            # estate whose 4-digit run a human reads as a NUMBER, and each was
+            # refused with NO FLAG TO SAY SO — the refusal handing back an
+            # unreadable substitute (`rfc-1918-addressing` -> `rfc--addressing`).
+            # `security` is a first-class forcing kind, which makes
+            # `cve-YYYY-NNNN` a predictable slug rather than a contrived one.
+            "rfc-1918-addressing",      # the RFC, not the year
+            "rsa-2048-keys",            # a key size
+            "nfs-2049-mount",           # a port
+            "port-2000-collision",      # a port
+            "rtx-2080-passthrough",     # a GPU
+            "rtmp-1935-relay",          # a port
+            "y2038-timestamps",         # a bug's name
+            "viewport-1920x1080",       # a resolution
+            "iso-2022-jp-encoding",     # a character encoding
+            "cve-2024-3094-xz",         # a CVE id
+        ],
     )
     def test_ordinary_numbers_in_a_slug_are_not_dates(self, topic: str) -> None:
-        """The over-broad direction, at four points. A slug is allowed to carry
-        digits — `h2`, `ipv6`, `403`, `phase-2` — and a pattern that ate them
-        would make the rule unpredictable at the moment a session obeys it."""
+        """The over-broad direction. A slug is allowed to carry digits — `h2`,
+        `ipv6`, `403`, `phase-2`, a port, a key size, a CVE — and a pattern that
+        ate them would make the rule unpredictable at the moment a session is
+        trying to obey it, with no bypass to reach for."""
+        assert hd.topic_carries_a_date(topic) is None
+
+    @pytest.mark.parametrize(
+        "topic", ["q3-2026-cleanup", "remix-2026-07-session"]
+    )
+    def test_a_year_only_slug_is_a_KNOWN_gap(self, topic: str) -> None:
+        """🔴 THE COST SIDE OF THE 2026-08-31 DELETION, PINNED SO IT IS A
+        DECISION RATHER THAN AN ACCIDENT — and RED AT `edbc596f`, where both of
+        these were refused.
+
+        Deleting `_TOPIC_DATE`'s bare-year arm (#964 item 1) buys the ten
+        false positives above and costs exactly this: a YEAR-ONLY per-session
+        slug is no longer refused. The trade was made on a measurement, not a
+        preference — across the 147 real handoff docs in devrc + homelab-talos
+        that arm had ZERO hits in BOTH directions, all 55 dated slugs carrying a
+        full ISO date. Rule (i-b)'s new-doc refusal still catches the SECOND doc
+        for an effort that already has one, which is what makes the gap
+        survivable.
+
+        If a year-only doc ever appears in the corpus, this test is the thing to
+        delete — and re-adding the arm then has a measurement behind it.
+        """
+        assert hd.topic_carries_a_date(topic) is None
+
+    @pytest.mark.parametrize("topic", ["remix-1756339200", "26-08-01-remix"])
+    def test_the_two_remaining_date_spellings_are_KNOWN_gaps(self, topic: str) -> None:
+        """🔴 GREEN ON BOTH SIDES — an INVARIANT GUARD, not regression coverage,
+        and labelled as one because `claude/RULES.md` asks for the distinction.
+
+        #964 item 2 listed four spellings that pass. Two are now refused (see
+        the compact params above); these two are NOT, and catching them would
+        cost more than it buys: a 10-digit epoch and a 2-digit-year `\\d{2}-
+        \\d{2}-\\d{2}` arm would both re-open exactly the false-positive surface
+        item 1 was just closed to remove.
+
+        The value of pinning them is the SENTENCE, not the behaviour: rule
+        (i-a)'s refusal says "there is no FLAG to bypass this", and that is now
+        the whole of the claim. A SPELLING still walks it — which is why the
+        skill body says `no flag bypasses it` rather than `no bypass exists`.
+        """
         assert hd.topic_carries_a_date(topic) is None
 
 
@@ -3909,19 +4056,300 @@ class TestARankedItemMustNameAForcingFunction:
         assert res.returncode == 0, res.stdout + res.stderr
         assert len(hd.ranked_items(upd.read_text(encoding="utf-8"))) == 1
 
-    def test_a_nested_numbered_line_is_not_a_rank(self) -> None:
+    @pytest.mark.parametrize("indent", [1, 2, 3, 4, 5, 8])
+    def test_a_nested_numbered_line_is_not_a_rank(self, indent: int) -> None:
         """The ranks are half a claim's identity (`claim-work --slug-for <doc>
-        <rank>`), so counting a sub-item as a rank would re-point live claims."""
+        <rank>`), so counting a sub-item as a rank would re-point live claims.
+
+        🔴 RED AT `edbc596f` FOR indent 1, 2 AND 3 — #964 item 5. This test
+        pinned FOUR SPACES only, and four is excluded by `_RANKED_ITEM`'s
+        `^ {0,3}` bound under both the real pattern and a wider one, so it could
+        never see the boundary it claimed to guard. **3 spaces is the CommonMark
+        content indent for `1. `** — the canonical column a sub-list under a
+        top-level rank starts at — and at three the old code returned TWO items
+        both numbered `1`: the exact miscount the comment above `_RANKED_ITEM`
+        said the bound prevented.
+
+        Parametrised ACROSS the boundary rather than at one point, so a fix that
+        merely moves the bound cannot pass: the old `^ {0,3}` reading and the
+        contextual one disagree only at 1-3, and the shared cases at 4+ are what
+        prove the widening did not cost the exclusion it already had.
+        """
         text = (
             "## Next steps (ranked)\n"
             "1. Fix it. forcing: gate — CI red\n"
-            "    1. sub-step, not a rank\n"
+            + " " * indent + "1. sub-step, not a rank\n"
         )
         assert [i.rank for i in hd.ranked_items(text)] == ["1"]
+
+    def test_a_SIBLING_at_the_same_column_IS_a_rank(self) -> None:
+        """🔴 THE POSITIVE CONTROL for the test above, and the direction that
+        matters: an exclusion which also swallowed real siblings would make rule
+        (j) silently ACCEPT every item after the first. Same fixture shape, one
+        variable changed — the child's column."""
+        text = (
+            "## Next steps (ranked)\n"
+            "1. Fix it. forcing: gate — CI red\n"
+            "1. Then ship it. forcing: user — Zach asked\n"
+        )
+        assert [i.rank for i in hd.ranked_items(text)] == ["1", "1"]
+
+    def test_a_queue_INDENTED_AS_A_WHOLE_still_has_every_item_counted(self) -> None:
+        """🔴 THE COLUMN IS RELATIVE, NEVER A LITERAL 0 — and this is the
+        fail-OPEN direction, so it is the expensive one to get wrong.
+
+        A section that indents its whole queue (CommonMark allows up to 3 spaces
+        on a top-level block) must still have all of its items gated. Pinning
+        the column at 0 instead of at the FIRST item's own column would exempt
+        every one of them from rule (j) — untagged items silently accepted,
+        which `_item_blocks` already records as strictly worse than a false
+        refusal. Green at `edbc596f` too: an INVARIANT GUARD on the new walk,
+        labelled as one.
+        """
+        text = (
+            "## Next steps (ranked)\n"
+            "  1. Fix it. forcing: gate — CI red\n"
+            "  2. Ship it. forcing: user — Zach asked\n"
+        )
+        assert [i.rank for i in hd.ranked_items(text)] == ["1", "2"]
+
+    def test_a_numbered_line_indented_PAST_the_commonmark_bound_is_never_a_rank(
+        self,
+    ) -> None:
+        """`_RANKED_ITEM`'s `^ {0,3}` bound, given its OWN killer.
+
+        Once the nesting exclusion moved into `_item_blocks` the regex bound
+        stopped being what excludes a CHILD, so nothing else reaches it: every
+        nesting case above is decided by the contextual check. This is the shape
+        only the pattern can refuse — the FIRST numbered line in a section,
+        deeply indented under a bullet, i.e. quoted output rather than a rank.
+        Widening the pattern to `^ *` makes it a rank, and rule (j) then refuses
+        a document over a line nobody wrote as a work item.
+        """
+        text = (
+            "## Next steps (ranked)\n"
+            "- context, not a queue:\n"
+            "      1. sample output, not a rank\n"
+        )
+        assert hd.ranked_items(text) == []
 
     def test_items_outside_a_next_steps_heading_are_not_asked(self) -> None:
         """Scoped to the queue. A numbered list under `## Goal` is prose."""
         assert hd.ranked_items("## Goal\n1. ship the thing\n") == []
+
+
+class TestTheNextStepsSelectorHasOneOwner:
+    """#964 item 3. `ranked_items` re-derived "is this the ranked queue?" with a
+    raw `heading_text(h).lower().startswith(NEXT_STEPS_PREFIX)` while
+    `canonical_prefix` already owned the question WITH whitespace normalisation.
+    One rule, two places — and `claude/RULES.md` says such a predicate is
+    typically wrong at N-1 of N sites, which is what consolidating made audible.
+    """
+
+    #: 🔴 THE WHOLE MATRIX, not a sample — the seam is the relationship between
+    #: two predicates, and a table with only agreeing rows cannot see a
+    #: disagreement. Rows are `(heading text, is it the ranked queue?)`.
+    HEADINGS: tuple[tuple[str, bool], ...] = (
+        ("Next steps (ranked)", True),          # what the template mandates
+        ("NEXT STEPS", True),                   # case
+        ("Next  steps (ranked)", True),         # 🔴 the MEASURED disagreement
+        ("▶ Next steps (ranked)", True),        # 🔴 decoration, 1 real doc
+        ("🔴 Next steps", True),                # decoration, emoji
+        # The NON-GOAL half. These are REWORDINGS, and refusing to chase them is
+        # a decision — see `is_next_steps_heading`. 20 corpus sections carrying
+        # 96 items look like this and are deliberately not gated.
+        ("Ranked next steps", False),
+        ("Open items, ranked", False),
+        ("Backlog — the highest-ROI UNBUILT items (ranked)", False),
+        ("Resume next session", False),
+        ("Goal", False),
+        ("State now", False),
+    )
+
+    @pytest.mark.parametrize("heading,is_queue", HEADINGS)
+    def test_the_selector_answers_the_whole_matrix(
+        self, heading: str, is_queue: bool
+    ) -> None:
+        """🔴 RED AT `edbc596f` for `Next  steps` and both decorated rows — each
+        returned 0 items, silently exempting every item under it from rule (j).
+        The non-goal rows are GREEN on both sides: INVARIANT GUARDS that pin the
+        decision not to chase synonyms, so a later widening has to argue with a
+        test rather than slip past one."""
+        text = f"## {heading}\n\n1. do the thing. forcing: gate — CI red\n"
+        assert bool(hd.ranked_items(text)) is is_queue
+
+    @pytest.mark.parametrize("heading,is_queue", HEADINGS)
+    def test_the_TWO_call_sites_cannot_disagree(
+        self, heading: str, is_queue: bool
+    ) -> None:
+        """🔴 THE SEAM GUARD — it pins the RELATIONSHIP, which is the thing
+        neither predicate's own tests could see. Both surfaces were tested; what
+        nobody owned was that they answer the SAME question. Measured
+        disagreement at `edbc596f`: `Next  steps` was `canonical_prefix` ->
+        `next steps` and `ranked_items` -> not a queue.
+
+        🔴 IT COMPARES `canonical_prefix` AGAINST `ranked_items`' OWN VERDICT,
+        and an earlier version of this test did NOT — it compared
+        `canonical_prefix` against `is_next_steps_heading`, which literally calls
+        it, so the two could not disagree by construction. That version was this
+        PR's own headline defect committed against itself: a guard whose
+        DOCSTRING claims a relationship while its BODY inspects one side.
+        CAUGHT BY MUTATION, not by reading — `heading-test-open-coded-again`
+        (revert the call site to the raw `.startswith`) reported 🔴 `WRONG-KILLER`,
+        dying to the table test and the structural one while THIS test, the row's
+        named killer, stayed green. Comparing against the real call site is what
+        makes it a seam guard rather than a tautology.
+
+        `is_queue` is still asserted rather than only the equality: two sides
+        that agree on the WRONG answer would satisfy a bare `a is b`.
+        """
+        via_canonical = hd.canonical_prefix(heading) == hd.NEXT_STEPS_PREFIX
+        via_selector = bool(hd.ranked_items(
+            f"## {heading}\n\n1. do the thing. forcing: gate — CI red\n"
+        ))
+        assert via_selector is via_canonical, (
+            "the section selector and the canonical classifier disagree about "
+            f"{heading!r} — one rule, two places, wrong at one"
+        )
+        assert via_canonical is is_queue
+        assert hd.is_next_steps_heading(heading) is is_queue
+
+    def test_ranked_items_does_not_OPEN_CODE_the_predicate(self) -> None:
+        """The structural half. A behavioural table pins today's answers; only
+        this stops a future edit re-introducing a second copy that agrees on
+        these eleven rows and diverges on the twelfth. 🔴 It is NOT sufficient
+        alone — a structural check type-checks past a wrong argument — which is
+        why both halves exist."""
+        # 🔴 COMMENTS STRIPPED FIRST. The first version of this assertion read
+        # the raw source and went red on the COMMENT directly above the call
+        # site — a comment that says to use the one owner. `claude/RULES.md`:
+        # a search's answer is a claim about the searcher's VIEW.
+        src = inspect.getsource(hd.ranked_items)
+        code = "\n".join(line.split("#")[0] for line in src.splitlines())
+        assert "startswith" not in code, (
+            "`ranked_items` is open-coding the heading test again — ask "
+            "`is_next_steps_heading`, which asks `canonical_prefix`"
+        )
+        assert "is_next_steps_heading(" in code
+
+    def test_decoration_stripping_cannot_promote_a_SYNONYM(self) -> None:
+        """🔴 THE BOUND ON THE WIDENING, and the reason it is safe. Only LEADING
+        non-alphanumerics are stripped, so the normaliser can never turn a
+        different heading into this one — it only undoes ornament on the same
+        one. Without this, `_HEADING_DECORATION` could be widened to eat word
+        characters and the synonym rows above would start passing while every
+        other test stayed green."""
+        assert hd.canonical_prefix("Ranked next steps") is None
+        assert hd.canonical_prefix("The next steps") is None
+        assert hd.canonical_prefix("▶ ⚠ 🔴 Next steps") == hd.NEXT_STEPS_PREFIX
+
+
+class TestTheNewDocRefusalSeesTheMAINLINE:
+    """#964 item 4. Rule (i-b)'s list was a `glob` of the WORKING TREE, so in a
+    clone that is behind — the incident this module exists for — the doc it tells
+    you to name may exist only upstream and the list STRUCTURALLY CANNOT contain
+    the answer, while reading as though it were complete.
+
+    Distinct from `#1046`, which fixed the OTHER half: that one stopped rule (i)
+    pre-empting the stale-base refusal for THIS topic's doc. This is about the
+    OTHER efforts' docs, which is what makes the list usable.
+    """
+
+    @staticmethod
+    def _drop_locally(repo: Path, name: str) -> None:
+        """Delete a committed doc from the WORKING TREE and HEAD, leaving it on
+        `origin/main` — a stale clone, built rather than described."""
+        _sh("git", "rm", "-q", "--", f"claudedocs/{name}", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "local branch dropped it", cwd=repo)
+
+    def test_a_doc_only_the_MAINLINE_has_is_listed_and_labelled(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 RED AT `edbc596f` — the upstream-only doc was simply absent from
+        the list, and the count said `1 handoff doc(s)` while two efforts
+        existed."""
+        (repo / "claudedocs" / "handoff-other-effort.md").write_text(
+            BASE_DOC, encoding="utf-8"
+        )
+        _sh("git", "add", "--", "claudedocs/handoff-other-effort.md", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "a second effort", cwd=repo)
+        _sh("git", "push", "-q", "origin", "main", cwd=repo)
+        self._drop_locally(repo, "handoff-other-effort.md")
+
+        res = run_tool(repo, update=update_file, topic="remix-hardening-session")
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, res.stdout + res.stderr
+        assert "status=new-doc" in res.stderr
+        assert "handoff-other-effort.md" in res.stderr, (
+            "the upstream-only doc must be OFFERED — it is the answer to the "
+            "question the refusal asks"
+        )
+        assert "only)" in res.stderr, (
+            "and LABELLED, or the reader cannot tell 'you have this' from "
+            "'you would have to fetch this'"
+        )
+
+    def test_the_count_says_WORKING_TREE_not_repo(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 A CLAIM ABOUT A CLONE IS NOT A CLAIM ABOUT A REPO. The sentence
+        said "this repo already has N handoff doc(s)" while counting a glob of
+        one checkout — the wording is what made the list read as complete. RED
+        at `edbc596f`."""
+        res = run_tool(repo, update=update_file, topic="remix-hardening-session")
+        assert "this WORKING TREE already has" in res.stderr, res.stderr
+        assert "this repo already has" not in res.stderr
+
+    def test_an_ELIDING_list_says_how_to_see_the_rest(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 RED AT `edbc596f`. `EXISTING_SHOWN_MAX` is 12 against 92 docs in
+        devrc, so the refusal shows 12 and elides 80 — and an effort last touched
+        three weeks ago is not in the newest-12 window. "Re-run with its topic"
+        then points at a list that cannot contain the answer, with no way to ask
+        for more.
+
+        🔴 BOTH SOURCES, because the two lists have different ones and NO SINGLE
+        COMMAND enumerates the union — an `ls-tree`-only line is wrong whenever
+        the elided tail is local, and an `ls`-only line wrong whenever it is
+        upstream. The fixture builds a repo that has both, one doc over the cap,
+        so a message naming only one of them fails here.
+        """
+        docs = repo / "claudedocs"
+        # an UPSTREAM-ONLY doc: committed and pushed, then dropped locally
+        (docs / "handoff-upstream-only.md").write_text(BASE_DOC, encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-upstream-only.md", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "upstream effort", cwd=repo)
+        _sh("git", "push", "-q", "origin", "main", cwd=repo)
+        self._drop_locally(repo, "handoff-upstream-only.md")
+        for n in range(hd.EXISTING_SHOWN_MAX):
+            (docs / f"handoff-effort-{n:02d}.md").write_text(BASE_DOC, encoding="utf-8")
+
+        res = run_tool(repo, update=update_file, topic="remix-hardening-session")
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, res.stdout + res.stderr
+        assert "… and 2 more" in res.stderr, res.stderr
+        assert f"ls {repo}/claudedocs/handoff-*.md" in res.stderr, (
+            "an elision with no way to see what was elided is the amplifier, "
+            "not the cap — and the LOCAL half is where the tail usually is"
+        )
+        assert "ls-tree" in res.stderr, (
+            "…and the MAINLINE half, or a stale clone is told to `ls` a tree "
+            "that does not have the doc it is being sent to find"
+        )
+
+    def test_an_UNRESOLVABLE_mainline_yields_no_rows_and_does_not_crash(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 AN UNANSWERED QUESTION MUST NOT BECOME A LIST. A repo with no
+        mainline ref, an unfetched ref, or no `claudedocs/` upstream all yield
+        `[]` — and `[]` is NOT "the mainline has no docs". The positive control
+        is the test above, which shows the same function CAN return rows; without
+        it this assertion is indistinguishable from a function wired to nothing.
+        """
+        work = tmp_path / "norem"
+        work.mkdir()
+        _sh("git", "init", "-q", "-b", "main", cwd=work)
+        assert hd.mainline_handoff_docs(work, None) == []
+        assert hd.mainline_handoff_docs(work, "origin/main") == []
 
 
 class TestTheFieldIsFoundOnTheWholeItemNotTheNumberedLine:
@@ -5110,7 +5538,9 @@ class TestAbsentBasePresentOnMainlineIsRefused:
             _sh("git", "config", k, v, cwd=other)
         (other / "claudedocs" / "handoff-sample-topic.md").write_text("", encoding="utf-8")
         _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=other)
-        _sh("git", "commit", "-q", "--allow-empty", "-m", "empty the handoff", cwd=other)
+        # No `--allow-empty`: git refusing "nothing to commit" is the guard
+        # against a fixture body identical to what the mainline already holds.
+        _sh("git", "commit", "-q", "-m", "empty the handoff", cwd=other)
         _sh("git", "push", "-q", "origin", "main", cwd=other)
         _sh("git", "fetch", "-q", "origin", cwd=work)
 
@@ -5164,10 +5594,25 @@ class TestAbsentBasePresentOnMainlineIsRefused:
         # non-zero. Only the mainline SHAPE line proves the copy was read and
         # measured, which is the claim this test's name makes.
         prop = run_tool(work, update=update_file)
-        assert "origin/main: 0 sections /" in prop.stdout, (
-            "the mainline copy was never read, so the negatives below prove "
-            "nothing", prop.stdout[-400:])
-        assert "will be replaced by this delta" not in prop.stdout
+        # 🔴 ORDER MATTERS. Assert the loud-line ABSENCE first: if
+        # `replaces_mainline_doc` regresses to `bool(mainline.lines)`, the loud
+        # branch is taken and the shape line never prints — so the shape
+        # assertion would fire with "the mainline copy was never read", which is
+        # FALSE and points a maintainer two functions away from the defect.
+        assert "will be replaced by this delta" not in prop.stdout, (
+            "the guard MIS-FIRED on a whitespace mainline copy — the copy WAS "
+            "read; `replaces_mainline_doc` said it was something to lose",
+            prop.stdout[-400:])
+        # 🔴 And the NON-degenerate half of the shape. `0 sections` alone is what
+        # `doc_shape("")` and a hardcoded DocShape(0,0) also produce, so pinning
+        # it cannot see a mutant that reads the blob then measures the wrong
+        # text — MEASURED: `doc_shape(shown.out)` -> `doc_shape("")` survived
+        # this test scoped to itself. The line count differs per fixture, so it
+        # is the half that proves the real bytes were measured.
+        want_lines = 1 if blank == "\n" else 2
+        assert f"origin/main: 0 sections / {want_lines} lines" in prop.stdout, (
+            "the mainline copy was never read or was measured from the wrong "
+            "text, so the negatives below prove nothing", prop.stdout[-400:])
 
         res = run_tool(work, "--confirm", update=update_file)
         assert res.returncode == 0, (
@@ -5251,6 +5696,46 @@ class TestAbsentBasePresentOnMainlineIsRefused:
             res.returncode, res.stdout, res.stderr)
         assert "status=stale-base" in res.stderr
         assert "status=new-doc" not in res.stderr
+        assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()
+
+    def test_rule_i_asks_WHICH_predicate_not_merely_whether_stale(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 PINS THE PREDICATE, not the outcome — and in the fail-OPEN direction.
+
+        #1046 narrowed rule (i) with `not currency.replaces_mainline_doc("")`.
+        Broadening it to `not currency.stale` SURVIVED all 295 tests while
+        changing behaviour: a whitespace-only mainline copy is `stale` but is NOT
+        something to lose, so under the mutant rule (i) stops firing and the doc
+        is WRITTEN — silently bypassing #962's one-doc-per-effort cap.
+
+        MEASURED: repo with other handoff docs, topic's doc absent locally,
+        mainline copy whitespace-only -> HEAD rc 7 (cap fires, nothing written);
+        mutant rc 0 (written).
+
+        `test_an_EMPTY_mainline_doc_is_NOT_something_to_lose` cannot see this —
+        its fixture has no other handoff docs, so rule (i) never applies there.
+        """
+        work = repo_lacking_the_doc(tmp_path)
+        others = work / "claudedocs"
+        others.mkdir(exist_ok=True)
+        (others / "handoff-other-effort.md").write_text(
+            "# Handoff: other\n\n## State now\n\nx.\n", encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs", cwd=work)
+        _sh("git", "commit", "-q", "-m", "repo has other handoff docs", cwd=work)
+
+        # A mainline copy that is STALE but holds nothing to lose. Uses the
+        # class's own `_mainline_doc` rather than a fourth inlined clone —
+        # #1093.3, which this change closes, WAS a sibling inlining this helper,
+        # and the `--allow-empty` suppression it removed lives in here.
+        self._mainline_doc(tmp_path, work, "   \n\n", "whitespace mainline copy")
+
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_DOC_PER_EFFORT, (
+            "the one-doc-per-effort cap did not fire — rule (i) was broadened to "
+            "`stale`, which is true of a mainline copy that holds nothing",
+            res.returncode, res.stdout, res.stderr)
+        assert "status=new-doc" in res.stderr
         assert not (work / "claudedocs" / "handoff-sample-topic.md").exists()
 
 
@@ -5675,8 +6160,10 @@ class TestRuleKIsWiredToRealContent:
             for d in docs
         )
         # A FLOOR, not the measurement — the corpus grows. Measured 2026-08-30:
-        # 126 bullets across 45 of 90 docs, re-measured after the
-        # leading-decoration widening.
+        # 151 bullets across 47 of 93 docs (2026-09-01, on the
+        # merged tree). A GROWING corpus, so that is a dated measurement
+        # used to set the floor, never an invariant — the floor is what is
+        # asserted, and it only has to stay comfortably beneath.
         assert total >= 90, (
             f"only {total} elimination bullets parsed across {len(docs)} docs — "
             f"the pattern has stopped matching the house style, and a gate that "

@@ -1329,6 +1329,16 @@ in
   home.file.".claude/hooks/search-tool-nudge.py" = {
     source = ../scripts/claude-hooks/search-tool-nudge.py;
   };
+  # git-add-provenance-nudge fires PostToolUse on Bash and warns when a `git add`
+  # staged an untracked file whose mtime PREDATES the session — i.e. another
+  # effort's uncommitted work swept into your index, which is how half a feature
+  # gets committed. Deliberately NOT a guard_core check: that layer has no warn
+  # tier, and in this repo staging a NEW file is mandatory (the flake omits
+  # untracked paths), so a blocking version would fire on the deploy path for
+  # every new skill, hook and test — the permanently-red shape RULES.md rejects.
+  home.file.".claude/hooks/git-add-provenance-nudge.py" = {
+    source = ../scripts/claude-hooks/git-add-provenance-nudge.py;
+  };
   # claude-notify is the turn-finished notifier: on UserPromptSubmit/Stop/SubagentStop
   # it fires a desktop toast (or, headless, a clawgate phone push as FALLBACK) when a
   # turn ran >= threshold (default 60s). Telemetry shows Claude runs mostly on the

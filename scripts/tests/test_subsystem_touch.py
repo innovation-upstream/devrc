@@ -18,9 +18,11 @@ declared status is actually EMITTED — not merely declared — and that no two 
 them are spelled the same.
 
 🔴 THE STORE IS NEVER WRITTEN, AND THAT IS TESTED BEHAVIOURALLY, NOT BY GREP.
-`~/.claude/analyze-service-index/` is curated, client-confidential and has no
-off-machine backup. `TestNeverWrites` hashes a whole synthetic store tree either
-side of every mode. A `grep` for `open(..., "w")` would be the "spelled rather
+`~/.claude/analyze-service-index/` is curated, client-confidential and not
+re-derivable by re-running recon. (Was "has no off-machine backup" — false; it is
+backed up hourly locally and daily to MinIO. The rule is unaffected: a backup does
+not un-write a bad append.) `TestNeverWrites` hashes a whole synthetic store tree
+either side of every mode. A `grep` for `open(..., "w")` would be the "spelled rather
 than structural" guard `claude/RULES.md` warns about — it passes while a
 different spelling writes.
 
@@ -938,7 +940,7 @@ class TestNeverWrites:
 
     def test_the_template_creates_no_file(self, store: Path) -> None:
         before = _tree_hash(store)
-        st.new_entry_template("roster", SCOPE, today=TODAY)
+        st.new_entry_template("roster", SCOPE, today=TODAY, created_by="handoff")
         assert _tree_hash(store) == before
 
 
@@ -961,7 +963,12 @@ class TestProposalShapes:
         assert f"{SCOPE}/collector.md" in text
 
     def test_the_new_entry_template_is_MINIMAL_and_fail_safe(self) -> None:
-        t = st.new_entry_template("roster", SCOPE, today=TODAY)
+        # 🔴 `created_by` is deliberately NOT "handoff" here. It was the module's
+        # hardcoded value until 2026-08-31, so a fixture spelling it again would
+        # be satisfied by a re-hardcoded default and this assertion would survive
+        # exactly the regression it is here to catch. Feed a value the old
+        # constant CANNOT equal and watch the output move.
+        t = st.new_entry_template("roster", SCOPE, today=TODAY, created_by="analyze-service")
         assert t.startswith("---\n")
         assert "service: roster\n" in t
         assert f"scope: {SCOPE}\n" in t
@@ -969,7 +976,8 @@ class TestProposalShapes:
         # operator claim a writer may never infer.
         assert "sensitivity: client-confidential\n" in t
         assert "sensitivity: public" not in t
-        assert "created_by: handoff\n" in t
+        assert "created_by: analyze-service\n" in t
+        assert "created_by: handoff" not in t
         assert "## What it is" in t
         assert "## Pointers" in t
         # NOT the full schema — the strain test found the rich sections came out
@@ -990,7 +998,7 @@ class TestProposalShapes:
         `path_refs` was the other option and stays rejected — it is the shared
         predicate inside the doc's hashed region and `/analyze-service` consumes
         it too."""
-        t = st.new_entry_template("roster-sync", SCOPE, today=TODAY)
+        t = st.new_entry_template("roster-sync", SCOPE, today=TODAY, created_by="handoff")
         assert "# aliases: [roster_sync, test_roster_sync]" in t
         # COMMENTED, so it is an affordance and not a wrong claim: an alias
         # asserted before anyone checked it is a live mis-address.
@@ -999,7 +1007,7 @@ class TestProposalShapes:
     def test_the_commented_alias_line_does_not_become_a_real_field(self) -> None:
         """The parser must skip it — a `#` line read as data would give every
         entry two aliases nobody wrote."""
-        fm = sr.parse_front_matter(st.new_entry_template("roster-sync", SCOPE, today=TODAY))
+        fm = sr.parse_front_matter(st.new_entry_template("roster-sync", SCOPE, today=TODAY, created_by="handoff"))
         assert "aliases" not in fm
         assert fm["service"] == "roster-sync"
         # positive control: the parser IS reading this front matter at all
@@ -1007,7 +1015,7 @@ class TestProposalShapes:
 
     def test_the_template_slug_is_normalized_by_the_shared_predicate(self) -> None:
         assert "service: my-new-thing\n" in st.new_entry_template(
-            sr.normalize_ref("My New_Thing"), SCOPE, today=TODAY
+            sr.normalize_ref("My New_Thing"), SCOPE, today=TODAY, created_by="handoff"
         )
 
     def test_the_template_parses_back_as_a_valid_entry(self) -> None:
@@ -1015,7 +1023,7 @@ class TestProposalShapes:
         entry no later run can ever address — and each half tested alone would
         be green. `claude/RULES.md` → "the defect lives in the SEAM nobody
         owns"."""
-        text = st.new_entry_template("roster", SCOPE, today=TODAY)
+        text = st.new_entry_template("roster", SCOPE, today=TODAY, created_by="handoff")
         fm = dict(sr.parse_front_matter(text))
         fm["filename"] = "roster.md"
         entry = sr.SubsystemEntry.from_mapping(fm)
@@ -1031,7 +1039,7 @@ class TestProposalShapes:
         paths = ["apps/roster/a.yaml", "apps/roster/b.yaml"]
         assert _report(paths, store).known == ()  # before
         (store / SCOPE / "roster.md").write_text(
-            st.new_entry_template("roster", SCOPE, today=TODAY), encoding="utf-8"
+            st.new_entry_template("roster", SCOPE, today=TODAY, created_by="handoff"), encoding="utf-8"
         )
         after = _report(paths, store)
         assert [m.entry.ref for m in after.known] == ["roster"]
@@ -1080,7 +1088,7 @@ class TestCensus:
         report the same numbers forever and the experiment would never resolve."""
         before = st.census(store)
         (store / SCOPE / "roster.md").write_text(
-            st.new_entry_template("roster", SCOPE, today=TODAY), encoding="utf-8"
+            st.new_entry_template("roster", SCOPE, today=TODAY, created_by="handoff"), encoding="utf-8"
         )
         after = st.census(store)
         assert after.total == before.total + 1
@@ -1351,7 +1359,12 @@ class TestCli:
         assert payload["status"] == "resolved"
         assert payload["known"][0]["ref"] == "collector"
         assert payload["known"][0]["file"] == "collector.md"
-        assert payload["writer_id"] == "handoff"
+        # 🔴 WAS `payload["writer_id"] == "handoff"`. A probe run stamps nothing,
+        # so naming one writer here asserted something the report has no standing
+        # to say — and it was false for half the callers as of 2026-08-31. The
+        # report now publishes the CHOICES; the value is the caller's to supply.
+        assert payload["known_writers"] == ["analyze-service", "handoff"]
+        assert "writer_id" not in payload
         assert payload["source"]["kind"] == "caller"
 
     def test_a_bad_paths_from_value_is_REJECTED_not_defaulted(
@@ -1397,12 +1410,26 @@ class TestCli:
     def test_template_mode(self, store: Path, capsys) -> None:
         rc, cap = self._run(
             ["--store", str(store), "--scope", SCOPE, "--template", "Roster_Sync",
-             "--today", TODAY],
+             "--today", TODAY, "--writer", "handoff"],
             capsys,
         )
         assert rc == 0
         assert "service: roster-sync" in cap.out
         assert "created_by: handoff" in cap.out
+
+    def test_template_mode_stamps_the_OTHER_caller(self, store: Path, capsys) -> None:
+        """The half `test_template_mode` structurally cannot see. `handoff` was
+        the hardcoded value, so a run passing it is green whether or not
+        `--writer` is wired to anything. Feed the value the old constant CANNOT
+        equal and watch the stamp move."""
+        rc, cap = self._run(
+            ["--store", str(store), "--scope", SCOPE, "--template", "Roster_Sync",
+             "--today", TODAY, "--writer", "analyze-service"],
+            capsys,
+        )
+        assert rc == 0
+        assert "created_by: analyze-service" in cap.out
+        assert "created_by: handoff" not in cap.out
 
     def test_end_to_end_against_a_REAL_repo(self, tmp_path: Path, capsys) -> None:
         """The whole path: real git → derived scope → real store → report. Every
@@ -1933,8 +1960,17 @@ class TestEntrySchemaAgreement:
     def test_the_resolver_IGNORES_it_rather_than_rejecting_it(self) -> None:
         """It is PROVENANCE, not identity: an entry must stay addressable
         without it, and an entry carrying it must not be malformed."""
-        fm = dict(sr.parse_front_matter(st.new_entry_template("roster", SCOPE, today=TODAY)))
-        assert fm["created_by"] == "handoff", "parse_front_matter dropped the field"
+        fm = dict(
+            sr.parse_front_matter(
+                # Not "handoff": that was the hardcoded value until 2026-08-31,
+                # so it cannot distinguish "the argument was written" from "the
+                # old default was".
+                st.new_entry_template(
+                    "roster", SCOPE, today=TODAY, created_by="analyze-service"
+                )
+            )
+        )
+        assert fm["created_by"] == "analyze-service", "parse_front_matter dropped the field"
         entry = sr.SubsystemEntry.from_mapping({**fm, "filename": "roster.md"})
         assert entry.ref == "roster"
         # and without it, unchanged — so nothing depends on its presence
@@ -1955,8 +1991,9 @@ class TestEntrySchemaAgreement:
 
 class TestNoRealStoreIsRead:
     """🔴 No test here may touch `~/.claude/analyze-service-index/`: it is
-    client-confidential, has no backup, and is rewritten hourly by an autocommit
-    timer. Every fixture in this file is built under `tmp_path`, and every call
+    client-confidential, not re-derivable by re-running recon, and rewritten
+    hourly by an autocommit timer. (Was "has no backup" — false; that autocommit
+    IS the local layer, and daily age-encrypted bundles go to MinIO.) Every fixture in this file is built under `tmp_path`, and every call
     is passed an explicit store root — the module's own default is never
     exercised, which is what these two assert."""
 
@@ -7654,8 +7691,8 @@ class TestJournalNegativeControls:
 class TestJournalIsReadOnly:
     def test_reading_the_journals_writes_NOTHING(self, tmp_path) -> None:
         """🔴 The property that lets this be pointed at a curated,
-        client-confidential, unbacked-up store. Hashed either side, over every
-        journal state at once."""
+        client-confidential store whose backups both LAG it. Hashed either side,
+        over every journal state at once."""
         store = _journal_store(tmp_path)
         before = _tree_hash(store)
         _journal_render(store, "batcher", "quiet-thing", "headless-thing", "prosy-thing")
@@ -8901,7 +8938,7 @@ class TestNoPathFootprint:
         that `--template <slug>` really does emit a complete entry for an
         arbitrary slug — the whole premise of this block.
         """
-        out = st.new_entry_template("prod-postgres", "devrc", today=TODAY)
+        out = st.new_entry_template("prod-postgres", "devrc", today=TODAY, created_by="handoff")
         assert "service: prod-postgres" in out
         assert "scope: devrc" in out
         assert "created_by: handoff" in out
@@ -10306,8 +10343,8 @@ class TestScanEntryShape:
         assert sorted(s.kind for s in rows) == [st.SHAPE_ABSENT, st.SHAPE_RENAMED]
 
     def test_scan_entry_shape_WRITES_NOTHING(self, tmp_path) -> None:
-        """The store is curated, client-confidential and unbacked. Hashed, not
-        grepped — a grep for `open(..., "w")` passes while a different spelling
+        """The store is curated, client-confidential and not re-derivable.
+        Hashed, not grepped — a grep for `open(..., "w")` passes while a different spelling
         writes."""
         store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
         before = _tree_hash(store)

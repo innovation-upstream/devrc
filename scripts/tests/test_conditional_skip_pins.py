@@ -26,6 +26,7 @@ repo before. This file only reads `run-tests.sh`.
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import textwrap
@@ -179,24 +180,128 @@ def test_conditional_entry_counts_only_when_the_var_is_UNSET():
         "VAR set means the test RUNS, so the pin must NOT be counted"
 
 
+PG_DSN_VAR = "SIGNAL_PG_DSN"
+
+
+def _real_postgres_skip_reasons() -> list[tuple[str, str]]:
+    """`(owning-dir, literal reason)` for EVERY test in the repo whose skip is
+    gated on `SIGNAL_PG_DSN`, read out of the test SOURCES by `ast`.
+
+    🔴 WHY DERIVED, AND WHY NOT A REASON PATTERN. The obvious predicate for "is
+    this a real-Postgres pin" is a substring of the reason — but the two shipped
+    reasons share only the prefix pytest never had to keep, and the SECOND
+    entry's regex (`the hermetic substrate EMULATES`) does not contain the word
+    "Postgres" at all. A pattern tuned to match today's two rows would match
+    them by accident and silently stop matching the third. The only
+    non-accidental definition of "real-Postgres skip" is the one the test files
+    themselves state: a `skipif` whose CONDITION names `SIGNAL_PG_DSN`.
+
+    No `git` — a plain glob, so the hermetic tier is unaffected (see the module
+    docstring). The cheap substring pre-filter keeps this to the handful of
+    files that can possibly qualify.
+    """
+    out: list[tuple[str, str]] = []
+    for path in sorted((REPO / "scripts").rglob("test_*.py")):
+        src = path.read_text(encoding="utf8", errors="replace")
+        if PG_DSN_VAR not in src:
+            continue
+        rel = path.relative_to(REPO).as_posix()
+        for node in ast.walk(ast.parse(src)):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if not (isinstance(fn, ast.Attribute) and fn.attr == "skipif"):
+                continue
+            cond = node.args[0] if node.args else next(
+                (k.value for k in node.keywords if k.arg == "condition"), None)
+            # The CONDITION only — the reason text also spells the variable, and
+            # matching on that would sweep in skips gated on something else.
+            if cond is None or PG_DSN_VAR not in ast.unparse(cond):
+                continue
+            reason = next((k.value.value for k in node.keywords
+                           if k.arg == "reason"
+                           and isinstance(k.value, ast.Constant)
+                           and isinstance(k.value.value, str)), None)
+            assert reason, (
+                f"{rel}: a skipif gated on {PG_DSN_VAR} has no literal "
+                f"`reason=` — the ledger pins skips BY REASON, so this skip "
+                f"cannot be pinned and GUARD 2 will report it unpinned")
+            out.append((rel.rsplit("/", 1)[0], reason))
+    assert out, (
+        f"found NO test gated on {PG_DSN_VAR} anywhere under scripts/ — this "
+        f"fixture no longer knows which skips it is pinning")
+    return out
+
+
+def _real_postgres_pins() -> list[str]:
+    """Every LEDGER ENTRY that can forgive a real-Postgres skip.
+
+    The predicate is the runner's own matcher, not a word: an entry qualifies
+    when its owning directory and its regex accept at least one of the reasons
+    read above. That is deliberately not one-to-one — the shipped regex
+    `needs a real Postgres` matches BOTH reasons, because both skipif reasons
+    open with that prefix, and the matching loop in `run-tests.sh` breaks on the
+    first applicable entry that matches. So "which entry forgives which skip" is
+    not well-defined; "which entries can forgive a real-Postgres skip" is, and
+    it is the set that must all be conditional.
+
+    The COUNTS must still agree one-for-one, because the accounting compares the
+    skip TOTAL against the number of applicable ENTRIES. One entry short (a pin
+    deleted, or one widened to absorb both) leaves more skips than entries and
+    the gate is red; one entry long leaves fewer, and the gate is red the other
+    way with advice that is wrong for a conditional pin.
+    """
+    reasons = _real_postgres_skip_reasons()
+    pins = [e for e in _ledger_entries()
+            if any(e.split("|")[0] == owning_dir and re.search(e.split("|")[1], reason)
+                   for owning_dir, reason in reasons)]
+    assert len(pins) == len(reasons), (
+        f"{len(reasons)} test(s) skip on {PG_DSN_VAR} "
+        f"({[r for _, r in reasons]!r}) but {len(pins)} EXPECTED_SKIPS "
+        f"entr(y/ies) can forgive them ({pins!r}). The ledger accounts one entry "
+        f"per skipped test, so any mismatch reds GUARD 2 — too few entries "
+        f"leaves an UNPINNED skip, too many pins a skip that never happens.")
+    return pins
+
+
 def test_the_real_ledger_behaves_the_same_way():
     """The shipped entries, not a synthetic pair — so a future edit that drops the
-    condition from the Postgres pin is caught here and not only in production."""
-    block = _extract("EXPECTED_SKIPS=(", "\n)")
-    entries = re.findall(r'^\s*"([^"]+)"', block, re.M)
-    assert len(entries) >= 2, f"parsed {len(entries)} ledger entries — extraction is broken"
-    assert any(e.startswith("scripts/signal/tests|") and e.endswith("|unset:SIGNAL_PG_DSN")
-               for e in entries), "the Postgres pin lost its condition"
+    condition from a Postgres pin is caught here and not only in production.
+
+    🔴 TWO HALVES, AND WHY THE ARITHMETIC ALONE IS NOT ENOUGH. The count below
+    is derived from the number of real-Postgres pins rather than a literal `1`,
+    so adding a second such test does not falsify it. But a derived count can be
+    SATISFIED BY THE BUG: drop the condition from ONE of two Postgres pins and
+    the applicable total falls by one instead of two — while the number of
+    entries still carrying a condition also falls to one, so the two sides move
+    together and the subtraction still balances. The predecessor of this case
+    guarded that with `any(... endswith("|unset:SIGNAL_PG_DSN"))`, which the
+    surviving pin satisfies. So the structural half is `all`, over the pins
+    derived from the test sources — it is the only half that can see a single
+    silently-unconditional pin.
+    """
+    entries = _ledger_entries()
+    pins = _real_postgres_pins()
+
+    unconditional = [p for p in pins if not p.endswith(f"|unset:{PG_DSN_VAR}")]
+    assert not unconditional, (
+        f"these real-Postgres pins lost their `|unset:{PG_DSN_VAR}` condition: "
+        f"{unconditional!r}. With {PG_DSN_VAR} exported those tests RUN, so an "
+        f"unconditional entry counts a skip that never happened and the gate is "
+        f"permanently RED for that developer — the exact bug this file exists "
+        f"to stop. The arithmetic below cannot see this alone: the applicable "
+        f"total and the conditional-entry count fall together and still balance.")
 
     harness = _count_harness(entries)
-    with_dsn = _bash(harness, {"SIGNAL_PG_DSN": "postgres://x"})
+    with_dsn = _bash(harness, {PG_DSN_VAR: "postgres://x"})
     without = _bash(harness)
     assert without.returncode == 0 and with_dsn.returncode == 0
     n_without = int(without.stdout.split()[0])
     n_with = int(with_dsn.stdout.split()[0])
-    assert n_with == n_without - 1, (
-        f"exporting SIGNAL_PG_DSN must drop exactly one expected pin "
-        f"(got {n_without} -> {n_with}); this is the permanently-red-gate bug")
+    assert n_with == n_without - len(pins), (
+        f"exporting {PG_DSN_VAR} must drop exactly {len(pins)} expected pin(s) "
+        f"— one per real-Postgres test, {pins!r} — (got {n_without} -> "
+        f"{n_with}); this is the permanently-red-gate bug")
 
 
 def test_an_unknown_condition_is_a_HARD_ERROR_not_a_silent_pass():

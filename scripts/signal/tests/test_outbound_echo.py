@@ -56,7 +56,7 @@ def _echo_envelope(*, timestamp, body="sent from my laptop"):
 
 
 def _transmit_returning(ts, *, as_string=True):
-    def _t(auth, *, recipient, body, number):
+    def _t(auth, *, recipient, body, number, mentions=None):
         assert number, "the server requires the sending `number` and 400s without it"
         return {"timestamp": str(ts) if as_string else ts}
     return _t

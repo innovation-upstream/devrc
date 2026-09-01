@@ -187,6 +187,21 @@ Verifying the picker's privacy guard by hand has a trap that makes the obvious t
 
 ## CI scope
 `clawgate-ci` (Tekton — see the `tekton` skill) runs `go build`/`vet`/`test -race` + extension
-coverage + hook bats. It does **NOT** run Playwright, so the browser layer is UNGATED by CI. Run
-`make e2e` locally and **count** the results: `tasks.spec.ts` `test.skip`s the whole file without
-Docker, so a "green" run can mean 17 tests never executed.
+coverage + hook bats, and does **NOT** run Playwright.
+
+🔴 **That is not the same as "the browser layer is UNGATED by CI", which this file used to say and
+which is false.** A SEPARATE Tekton check, `clawgate-e2e`, runs `make e2e` on the PR's own specs.
+Measured on homelab-infra#564: `tekton/clawgate-e2e` → `clawgate e2e passed — 122 tests, 2 skipped`.
+Its Postgres is REAL rather than Docker, because Tekton pods have no daemon — see
+`clawgate-e2e-pipeline.yaml`, which documents that a Docker-based gate would have self-skipped every
+full-mode spec and gone green having tested almost nothing.
+
+⚠ **RUNS is not BLOCKS.** Whether `clawgate-e2e` is a required check is **unmeasured**:
+`GET /repos/ZacxDev/homelab-infra/branches/trunk/protection` 403s on this private repo without
+GitHub Pro, so the required-check list is unreadable from here. Never read its green as "the merge
+was protected".
+
+The local skip trap is still real and still yours to defeat: without Docker, `test.skip` on
+`!dockerAvailable()` drops the full-mode spec files silently. So run `make e2e` locally and **count**
+— then compare that total against the check's own `N tests, M skipped` string, rather than trusting
+either number alone.

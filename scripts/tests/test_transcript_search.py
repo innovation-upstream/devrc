@@ -814,6 +814,11 @@ JSONL_GLOB_SITES = {
         (1, "test: lists its own tmp state dir to assert what the hook wrote"),
     ("scripts/claude-hooks/tests/test_search_tool_nudge.py", "OS-WALK"):
         (1, "test: walks its own tmp fixture tree"),
+    ("scripts/claude-hooks/tests/test_git_add_provenance_nudge.py", "DIR-LISTING"):
+        (1, "test: lists its own tmp cache dir to assert the session id was "
+            "sanitised into the filename. The `.jsonl` in the same function is "
+            "the FIXTURE TRANSCRIPT it writes, not a corpus walk — the hook "
+            "reads the single path the payload names and never enumerates."),
 }
 
 _GLOB_ATTRS = {"glob", "rglob", "iglob"}

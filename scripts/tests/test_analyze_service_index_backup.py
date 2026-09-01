@@ -1723,16 +1723,21 @@ _COMMIT_SERVICE = "systemd.user.services.analyze-service-index-commit"
 _COMMIT_TIMER = "systemd.user.timers.analyze-service-index-commit"
 
 
-def _strip_nix_comments(block: str) -> str:
-    """Drop whole-line `#` comments.
-
-    These blocks are heavily commented and several comments QUOTE directives
-    (`#   ProtectHome=read-only …`, `# BindPaths = [ … "-%h" ];`). A reader that
-    did not strip them would answer questions about the prose instead of the
-    configuration — and would do it silently.
-    """
-    return "\n".join(ln for ln in block.splitlines()
-                     if not ln.lstrip().startswith("#"))
+# 🔴 ONE READER, NOT TWO. This was a local copy of the same predicate that
+# `scripts/tests/test_index_store_backup_claim.py` open-coded a second time —
+# and an audit measured the copies disagreeing: the local one stripped
+# whole-line comments only, so a TRAILING `# retired: <attr path> = {` still
+# read as a live declaration. `claude/RULES.md`: a predicate open-coded at N
+# sites is typically wrong at N−1 of them in the same direction, and unifying
+# them is what makes the disagreement audible. The shared reader also handles
+# trailing comments, with double-quote parity so a `#` inside a nix string is
+# not a comment.
+#
+# These blocks are heavily commented and several comments QUOTE directives
+# (`#   ProtectHome=read-only …`, `# BindPaths = [ … "-%h" ];`). A reader that
+# did not strip them would answer questions about the prose instead of the
+# configuration — and would do it silently.
+from testlib.nix_units import strip_nix_comments as _strip_nix_comments  # noqa: E402
 
 
 def _unit_block(start: str, end: str) -> str:

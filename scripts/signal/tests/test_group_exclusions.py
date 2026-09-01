@@ -1061,7 +1061,7 @@ def test_send_and_reconcile_work_END_TO_END_on_a_group_draft(db, monkeypatch):
 
     seen = {}
 
-    def fake_transmit(auth, *, recipient, body, number):
+    def fake_transmit(auth, *, recipient, body, number, mentions=None):
         seen.update(recipient=recipient, body=body, number=number,
                     draft_id=auth.draft_id)
         return [{"timestamp": "1787331796630"}]
@@ -1080,7 +1080,7 @@ def test_send_and_reconcile_work_END_TO_END_on_a_group_draft(db, monkeypatch):
                              self_number=SELF_NUMBER)
     db.approve_draft(other["id"], approval_ref="clawgate/2")
 
-    def explode(auth, *, recipient, body, number):
+    def explode(auth, *, recipient, body, number, mentions=None):
         raise RuntimeError("pod killed after the POST")
 
     with pytest.raises(RuntimeError):

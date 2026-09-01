@@ -17,7 +17,7 @@ Two sessions appending to one store entry were simulated against a fixture (2026
 | `Write` | retypes the whole file from bytes it read **before** the first session wrote | **silently gone** — no error, and nothing about it appears in the diff that was shown |
 | `Edit` | rewrites only the matched region | **survives regardless** |
 
-🔴 **The corrected mechanism, stated as MEASURED and not as reasoned: the protection is that `Edit` is BOUNDED, not that a stale anchor fails.** A whole-file retype of a curated, unbacked-up entry can lose content the confirm-diff never displayed; a bounded region rewrite cannot.
+🔴 **The corrected mechanism, stated as MEASURED and not as reasoned: the protection is that `Edit` is BOUNDED, not that a stale anchor fails.** A whole-file retype of a curated entry can lose content the confirm-diff never displayed — and the hourly commit behind it lags, so "it is in git" does not cover the bytes you just read; a bounded region rewrite cannot.
 
 🔴 **It does NOT reliably fail loudly, and an earlier version of this rationale said it did.** Measured on the anchor the protocol actually names — the bare `## Nuance / work-history` line — the second `Edit` **succeeds silently** and both bullets land. Benign in outcome, but you are *not* told a collision happened. It errors only in two cases: when the anchor spans the insertion point (the header *plus* the first existing bullet), or when the first session's insert has made the anchor non-unique.
 
