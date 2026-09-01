@@ -18,43 +18,56 @@ Detect clawgate/GitHub/ClickUp references in agent output, emit telemetry, and m
 them clickable in the terminal the way a URL already is. **SHIPPED AND VERIFIED LIVE.**
 
 ## State now
-🔴 **RANKS 1–6 ARE CLOSED. RANK 2 IS OWNED ELSEWHERE. Open: 7 (a decision), 8, 9.**
-Nothing in this effort is blocked on work; everything left is blocked on a human.
+🔴 **RANK 8 IS ANSWERED AND CLOSED — and answering it REFUTED #468's premise.**
+Ranks 1–6 closed (2 owned elsewhere). Rank 7 landed as a PR. Open: 7 and 8 need a
+MERGE; 9 is unchanged and human-only.
 
-- Branch `main`, clean apart from two untracked scratch files (`output.txt`,
-  `scripts/diagnose-nix-disk.sh`). 🔴 `nix/pkgs/default.nix` is **no longer dirty** — devrc
-  **#1135** merged 2026-08-31T23:16Z, so the "dirty AND in the artifact" warning `ship.sh`
-  printed on five consecutive runs is resolved. It was never unsaved work; it was that PR
-  applied in the tree.
-- **clawgate 0.8.20 is LIVE** — `clawgatectl health` → `{"status":"ok","version":"0.8.20"}`,
-  pod `clawgate-58b4c8fd57-8cm49`, trunk `eed7db5a`. It carries the #468 fix.
+- devrc `main`, **behind 4**; ⚠ `nix/programs/alacritty/default.nix` is dirty and is
+  **NOT this session's work** — another session is live in this shared checkout. Left
+  untouched. Untracked scratch `output.txt`, `scripts/diagnose-nix-disk.sh` as before.
+- **clawgate is 0.8.21 live**, not the 0.8.20 this doc previously recorded — pin bump
+  `b461f270` ("carry the tmux.changed SSE subscription"), unrelated to this effort.
+  #468's fix survived it: `7087eb37` is an ancestor of `origin/trunk` and the
+  explicit-open code is present in `openAncestorDetails`.
+- ⚠ `clawgatectl` now prints a skew note (built for 0.8.20, server 0.8.21). Harmless.
 
-**Merged this session (later half):**
-- `innovation-upstream/devrc#1099` → `6bf866fe` — rank 5, the "UNGATED by CI" correction
-- `innovation-upstream/devrc#1155` → `74b427d5` — rank 5 close-out
-- `innovation-upstream/devrc#1168` → `d07c0c06` — rank 6 refutation
-- `innovation-upstream/devrc#1175` → `7f1c81c9` — rank 7 measurement + the `claim-work` lesson
-- `innovation-upstream/devrc#1181` → `0c333846` — the store-api flake: named cause + reproducer
-- `ZacxDev/homelab-infra#613` → `7087eb37` — clawgate #468, the deeplink handler
-- `eed7db5a` in homelab-infra — the 0.8.20 pin bump (the deploy itself)
+**Opened this session (both awaiting a human merge):**
+- `ZacxDev/homelab-infra#616` — rank 7's rescued `deploy/SKILL.md` lesson, framing
+  corrected. **`mergeStateStatus: CLEAN`**, `gitops-validate` SUCCESS.
+- `ZacxDev/homelab-infra#617` — corrects the false comment on `openAncestorDetails`.
+  Comment-only. `tekton/clawgate-e2e` **SUCCESS — 127 tests, 2 skipped**;
+  `gitops-validate` SUCCESS. 🔴 Its two reds are **`COULD NOT RUN: … stopped before
+  any leg reported`** — a broken gate, not a verdict on the diff. Control:
+  `clawgate-ci` is red the same way on unrelated `#450`.
+- clawgate **#468** carries a new measurement comment. **Status deliberately NOT
+  changed** — grading it is rank 9 and not an agent's call.
 
-**Deploy/verify status, stated separately:**
-- devrc: all five PRs shipped to **both hosts** via `ship.sh`, each run verified per-host.
-- clawgate: 0.8.20 built, smoke-tested, pushed, reconciled, and **verified at the consumer** —
-  `data-task-hash-opened` now EXISTS on the live board (it was absent on 0.8.19), which is
-  what proves the new code is running rather than the version string alone.
-- 🔴 **But the #468 handler is a NO-OP on the live board today** — it reports `"0"`, i.e. it
-  found nothing closed to open. See rank 8; the fix is insurance there, not a repair.
-
-**Still open, with owners:**
+**Still open, with owners** (carried forward — re-verified 2026-09-01 unless noted):
 - **clawgate #463** — `ready_for_review`, REFUTED not fixed. No layout bug exists.
-- **clawgate #468** — `ready_for_review`, implemented + merged + deployed. Rank 9.
+- **clawgate #468** — `ready_for_review`, implemented + merged + deployed. Rank 9. 🔴 Its
+  PREMISE is now refuted too — see Open investigations; that makes the fix *more*
+  load-bearing, not less.
 - **clawgate #440** — `ready_for_review`; its blocker is refuted. Rank 9.
-- **`rescue/workbench-dirty-tree-2026-08-31`** in homelab-infra — someone's uncommitted work,
-  now safe. Rank 7.
-- ⚠ **A leaked `clawgate-e2e-pg-35881` container, up 42 h** (created 2026-08-30 01:39, so NOT
-  this session's). `deploy.md` records that these starve the box. Left alone deliberately —
-  another session's resource. `docker rm -f clawgate-e2e-pg-35881`.
+- **`rescue/workbench-dirty-tree-2026-08-31`** in homelab-infra (`c40261bc`) — still on
+  origin, re-verified. It is now the ONLY copy of the dropped `flake.nix` port.
+- ⚠ **The leaked `clawgate-e2e-pg-35881` container is STILL UP** — `docker ps` reports
+  `Up 2 days`, created 2026-08-30 01:39, so still not this effort's. `deploy.md` records
+  that these starve the box. Left alone deliberately — another session's resource.
+  `docker rm -f clawgate-e2e-pg-35881`.
+
+**Earlier session's merges, retained** (`#1099` → `6bf866fe`, `#1155` → `74b427d5`,
+`#1168` → `d07c0c06`, `#1175` → `7f1c81c9`, `#1181` → `0c333846` in devrc; `#613` →
+`7087eb37` and the pin bump `eed7db5a` in homelab-infra). All shipped to both hosts via
+`ship.sh`. ⚠ The line that used to sit here — "the #468 handler is a NO-OP on the live
+board, the fix is insurance not a repair" — is **REFUTED**; see Open investigations.
+
+**Rank 7's disposition, executed on operator instruction:**
+- `.claude/skills/deploy/SKILL.md` → landed as #616. Still dirty in
+  `~/workspace/homelab-talos` until that merges; restore it then.
+- `flake.nix` → **dropped**, `git restore`d back to `HEAD` (`4058416e`). The port's
+  bytes remain at `c40261bc:flake.nix` on origin, re-verified byte-identical
+  (`f58b97ce…`) immediately before the restore. That clone reads `0 ahead, 1 behind`
+  again and can now fast-forward once the SKILL half lands.
 
 ## Open investigations — live diagnosis state
 
@@ -168,7 +181,62 @@ environment rather than about the code. Both readings are measured; neither is i
   bash e2e/run.sh tasks.spec.ts -g "opens the collapsed Done section itself"
   ```
 
+### RESOLVED 2026-09-01 — the live-vs-hermetic deeplink divergence does not exist
+The block above ("The `#task-<id>` deeplink reaches a collapsed-Done card LIVE but not
+HERMETICALLY") is **closed**, and its leading hypothesis — a timing/size difference,
+the live board being taller and settling more slowly — is **REFUTED**. So is #468's
+own premise. The prescribed next probe (seed the harness to ~250 cards) was NOT run:
+it tests document size, which is not the variable, and it would have "confirmed size"
+without naming a mechanism.
+
+- **What is actually true.** Chromium expands a closed `<details>` for fragment
+  **NAVIGATION** only, and **never** for a script-driven `scrollIntoView`. Measured
+  over both binaries in the pinned `playwright-driver` bundle — `chromium-1228` **and**
+  `chromium_headless_shell-1228`, checked separately because they are different
+  binaries and the e2e skew workaround uses the latter — on a page whose target card is
+  injected AFTER load, exactly as htmx does here:
+
+  | action | closed `<details>` opens? |
+  |---|---|
+  | nothing (control) | no |
+  | `scrollIntoView()` | **no** |
+  | `scrollIntoView({block:'center',behavior:'smooth'})` | **no** |
+  | `p.open = true` (what #468 shipped) | **yes** |
+  | `location.hash=` / `<a href="#…">` click / `assign` / `replace` | yes |
+  | fragment present at **parse** time | yes |
+  | fragment present, target injected after **DOMContentLoaded** | **no** |
+
+  Cards here arrive in a later htmx fetch — after `DOMContentLoaded` — so the browser's
+  fragment anchor is already abandoned by the time the card exists.
+
+- **Live confirmation, deployed 0.8.21, FRESH browser profile:** `/tasks#task-208` and
+  `/tasks#task-407` both read `data-task-hash-opened="1"` — *the handler* opened it.
+  Negative control, `/tasks` with no fragment: Done closed, card at `top 23048`,
+  `inViewport: false`, no focus attribute. The server itself serves
+  `<details data-task-section="Done" class="group/sec">` with **no** `open` attribute
+  (61 tasks inside), so the closed starting state is read off the response, not assumed.
+
+- **Why the two readings ever differed:** the recorded live `data-task-hash-opened="0"`
+  came from a browser profile whose Done section was **already open**. A fresh profile
+  reads `1` and behaves **identically** to the hermetic harness. Board size, document
+  height and settle timing are all eliminated.
+
+- **Consequence, and it upgrades #468:** the fix is not insurance against a
+  hypothetical future browser change. On 0.8.19 a deeplink to any completed task was
+  **broken for every visitor with a clean profile**. That is a real shipped failure it
+  fixed. The e2e spec's `data-task-hash-opened >= 1` assertion is confirmed correct and
+  was deliberately left unchanged.
+
+- **Reusable probe:** `cdp2.py` (arms driven from OUTSIDE the page) and `live.py` in
+  this session's scratchpad. Rebuild rather than hunt for them — the shape is a closed
+  `<details>`, a card injected after load, one action per run, and a
+  `Page.addScriptToEvaluateOnNewDocument` load counter.
+
 ## Next steps (ranked)
+🔴 Numbering is STABLE on purpose — `claim-work --slug-for <this doc> <rank>` derives
+from it, so re-ranking silently re-points every live claim. Ranks 1–6 are CLOSED and are
+carried forward verbatim rather than deleted, for exactly that reason.
+
 1. ~~**Verify the two unverified interactions**~~ — **DONE**, merged as `#1086`. Closed by
    machine observation on an isolated Xvfb, not an operator report.
    forcing: none — closed, retained only so the rank numbering stays stable.
@@ -229,51 +297,40 @@ environment rather than about the code. Both readings are measured; neither is i
      pins that, so a browser change would silently regress deeplinks to every completed
      task — the exact failure #440 existed to remove.
    forcing: none — closed as refuted, with #468 carrying the residue.
-7. **Decide the dirty `homelab-talos` clone** — 🔴 **MEASURED, and the WORK IS SAFE; only the
-   decision remains.** The bytes are preserved on `rescue/workbench-dirty-tree-2026-08-31`
-   (commit `c40261bc`, pushed to `ZacxDev/homelab-infra`), built via a temporary
-   `GIT_INDEX_FILE` and pushed straight to a remote ref — **no working tree, index or local
-   ref was touched**, verified by before/after checksums. So nothing is at risk from a
-   routine `checkout` any more, and this can wait.
-   - 🔴 **It is NOT diverged** — `0 ahead, 1 behind`; only the dirty tree blocks `--ff-only`.
-     The preserve→push→`reset --keep` recipe has nothing to operate on.
-   - 🔴 **The dirty files are NOVEL, not stale orphans** — both blobs hashed against every
-     commit on every branch (323 origin refs), no match here or in `datapacket-talos`. A
-     `git restore` would destroy real work.
-   - 🔴 **`flake.nix` (+122/−140) is the decision.** It ports datapacket's PR-status shell
-     hook (`__dp_status_cache`, datapacket #956) in and **DELETES #465's dependency-closure
-     block**, whose own comment records that without it the gate emits *"a confident WRONG
-     RED"*. **Do not land it as-is** — restore that block on top first
-     (`git show origin/trunk:flake.nix` has the good copy).
-   - **`.claude/skills/deploy/SKILL.md` (+25, pure addition)** is worth landing on its own
-     merits — a 🔴 lesson **measured 2026-08-27 deploying `subsystem-store-api:0.4.0`**: for a
-     Flux-managed app bump the manifest in the repo Flux ACTUALLY reads, because the
-     `clusters/homelab/apps/**` trees are byte-identical and bumping the wrong checkout commits
-     and reconciles cleanly while changing nothing that runs.
-   - 🔴 **NOTHING WAS WRITTEN to that tree.** The operator's 2026-08-31 instruction for dirty
-     trees is measure-and-report only: no commit, restore, checkout or delete. The rescue used a
-     temporary index and a direct remote-ref push precisely to honour that.
-   - **Untracked scratch deliberately excluded** from the rescue: `go.mod` (21 bytes,
-     `module t`), `opencode.json`, `tests/`, three `__pycache__/`.
-   forcing: user — the operator asked for the measurement; the disposition of `flake.nix` is
-   a decision only they can make, and it is the one thing blocking this.
 
-8. **Explain why the deeplink behaves DIFFERENTLY live vs hermetically** —
-   `ZacxDev/homelab-infra`, `containers/clawgate`. The single unresolved question left by
-   #468. Live (0.8.20) the browser opens the collapsed `Done` section before the handler
-   runs, so `data-task-hash-opened` reads **"0"**; hermetically (e2e, 24 seeded cards) the
-   card is **unreachable** without the handler (`toBeInViewport` → "viewport ratio 0").
-   Both measured. Until this is understood, "the deeplink works" is a claim about an
-   environment, not about the code. Full evidence under Open investigations below.
-   forcing: none — the shipped fix is correct under both readings, so nothing is broken
-   while this stays open. Do not let its interest read as urgency.
+7. **Merge `ZacxDev/homelab-infra#616`** — rank 7's landing half. `mergeStateStatus:
+   CLEAN`, `gitops-validate` SUCCESS, docs-only (`+34/−0`, one `.claude/skills/**`
+   file). ⚠ `/audit-pr 616` was **offered and not run**. After it merges, `git -C
+   ~/workspace/homelab-talos restore .claude/skills/deploy/SKILL.md` to clear that
+   clone's last dirty file. **Claim `mention-detection-7` is HELD by this session** —
+   release it on merge.
+   - 🔴 **The STANDING policy for a dirty tree you did not dirty is measure-and-report
+     only** — no commit, restore, checkout or delete (operator, 2026-08-31). This session
+     departed from it ONLY because the operator was asked and chose the disposition
+     explicitly. **Do not read the restore below as precedent**: absent a fresh decision,
+     measure and hand it over. The rescue that made the bytes safe used a temporary
+     `GIT_INDEX_FILE` and a direct remote-ref push precisely to honour that policy —
+     no working tree, index or local ref was touched.
+   forcing: user — the operator chose "land SKILL.md only, drop the flake port"; this
+   is the second half of executing that decision.
 
-9. **Grade clawgate #440 and #468** — both sit at `ready_for_review` and both are blocked on
-   a HUMAN, not on work. #440's recorded blocker (#463) is refuted; #468 is implemented,
-   merged (`7087eb37`) and deployed (0.8.20). 🔴 An agent must not close either: #440's
-   criteria were derived by a previous session, and **#468's were written by this one**, so
-   grading them is self-grading whichever way the `## Acceptance criteria` detector reads.
-   forcing: none — nothing external is waiting on the status flip.
+8. **Merge `ZacxDev/homelab-infra#617`** — the comment correction. Comment-only, no
+   behaviour change; `clawgate-e2e` SUCCESS (127 tests, 2 skipped), `gitops-validate`
+   SUCCESS. 🔴 Do **not** debug its two reds against the diff: both say `COULD NOT RUN:
+   … stopped before any leg reported`, and `clawgate-ci` is red the same way on
+   unrelated `#450`. ⚠ `/audit-pr 617` offered, not run. **Claim `mention-detection-8`
+   is HELD** — release on merge.
+   forcing: user — same instruction; and the comment it deletes actively argues for
+   removing load-bearing code, so leaving it costs more the longer it sits.
+
+9. **Grade clawgate #440 and #468** — both `ready_for_review`, both blocked on a HUMAN.
+   🔴 An agent must not close either: #440's criteria were written by a previous
+   session and #468's by another, so grading is self-grading whichever way the
+   `## Acceptance criteria` detector reads. **New evidence for the grader:** #468's
+   stated premise is refuted (see Open investigations), which makes its fix *more*
+   load-bearing, not less — it repaired a live failure rather than pinning a browser
+   detail. #440's own blocker (#463) remains refuted.
+   forcing: none — nothing external waits on the status flip.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A task's own MEASUREMENT can be the artifact — check what your selector can SEE
@@ -565,22 +622,82 @@ environment rather than about the code. Both readings are measured; neither is i
   the tree. Checking a dirty file against open PRs before "rescuing" it cost one command and
   avoided inventing a problem. #1135 has since merged.
 
+- 🔴 **A CODE COMMENT CAN ARGUE FOR DELETING THE CODE IT DESCRIBES — and that is the
+  expensive direction to be wrong in.** `openAncestorDetails` shipped with
+  "🔴 THIS LOOKS UNNECESSARY, AND THAT IS THE POINT … Chromium auto-expands a closed
+  `<details>` when scrollIntoView targets content inside it". Measured false on both
+  pinned binaries. A maintainer trimming "redundant insurance" would have broken the
+  deeplink for every completed task, with a green suite — the spec asserts
+  `data-task-hash-opened >= 1`, which the deletion also removes the means to satisfy.
+  **Read a comment that tells you its own code is unnecessary as a claim to test.**
+- 🔴 **The cheap discriminating control beat the recorded next probe, and the recorded
+  probe would have produced a CONFIDENT WRONG ANSWER.** The doc prescribed seeding the
+  harness to ~250 cards to test size. Size is not the variable; a bigger seed would
+  plausibly have flipped the result and been recorded as "size confirmed". What
+  actually discriminated was a 20-line static page with one action per run. **When a
+  handoff hands you a probe, ask what it VARIES before running it.**
+- 🔴 **`--dump-dom --virtual-time-budget` STALLS across a same-document navigation and
+  reports a page that never ran as `pending`** — indistinguishable from a page whose
+  script threw. Two arms (`location.hash=`, synthetic anchor click) read `pending` at
+  budgets of 15s, 30s and 60s and looked like failures; under a real-time CDP driver
+  both were **`true`**. The instrument, not the browser. Drive CDP directly when a
+  measurement involves navigation.
+- 🔴 **`location.assign` can silently RELOAD, which measures a different arm while
+  looking like the one you meant.** A parse-time fragment expands the `<details>`; a
+  post-load one does not — so a reload would have "confirmed" the navigation arm using
+  the parse-time mechanism. The control is a
+  `Page.addScriptToEvaluateOnNewDocument` counter: every arm here held
+  `documentLoads: 1`. **Any nav-based browser measurement needs a reload counter.**
+- 🔴 **A FRESH BROWSER PROFILE IS PART OF THE EXPERIMENT.** The whole retracted
+  divergence traces to one live reading taken in a profile whose Done section was
+  already open. Per-tab/profile UI state is invisible in the reading and survives a
+  same-tab hash navigation. **Use a throwaway `--user-data-dir` per run, and say you
+  did** — "measured live" without it is a claim about that profile.
+- 🔴 **`echo "rc=$?"` after a PIPE reports the LAST command's status — I hit the
+  documented trap anyway.** `go build … | head -20; echo BUILD_RC=$?` printed
+  `BUILD_RC=0` for a build I had not read. Re-run captured `out=$(…); rc=$?` → the real
+  rc. **Never put a pipe between a build and its status.**
+- 🔴 **Validate a build the same way as any other instrument — both directions.** For
+  #617 the negative control was injecting a backtick into JS living inside a Go
+  backtick raw string: `rc 1`, `syntax error: unexpected name backtick`; restored,
+  `rc 0`. A comment-only change that "still builds" proves nothing until the build has
+  been watched to fail.
+- 🔴 **A rescued doc's FRAMING can be false while its lesson is true — verify the
+  claims before landing someone else's prose.** The rescued `deploy/SKILL.md` addition
+  blamed two repos holding byte-identical trees. `ZacxDev/homelab-talos` **does not
+  resolve**; there is ONE repo, `homelab-infra`, with many local checkouts — the
+  derivation shipped in #616 lists **17**, exactly one on `trunk` and one detached, and
+  the long-lived clone *named* `homelab-talos` has `homelab-infra` as its origin. The
+  hazard is the **CHECKOUT**, not the repo. Landing it as written would have sent a
+  reader hunting a repo that does not exist.
+- ⚠ **`clawgatectl task list --status complete` produced NO OUTPUT and exit 0** — a
+  silent zero. Getting a completed task id came from parsing `/ui/tasks` for the
+  `data-task-section="Done"` block instead. Unfiled; do not read that command's silence
+  as "no completed tasks".
+- ⚠ **A `COULD NOT RUN: … stopped before any leg reported` check is posted as
+  `failure`, not `error`** — so a rollup that only reads conclusions calls it a failing
+  diff. Read `.statuses[].description`, and get a control from an unrelated open PR
+  before spending anything on it.
+
 ## How to verify
 ```bash
-# the deeplink, live against the deployed pod (LAN UI is open, no auth)
-curl -sf http://192.168.50.250:30302/ui/tasks | grep -c 'id="task-[0-9]*"'
-clawgatectl health          # must report 0.8.19
+# the rank-8 finding, live against the deployed pod (LAN UI is open, no auth).
+# Expect data-task-hash-opened="1" on a FRESH browser profile — a "0" means the
+# profile already had Done open, which is exactly the trap that produced the
+# retracted divergence. Use a throwaway --user-data-dir every run.
+curl -s http://192.168.50.250:30302/ui/tasks | grep -c 'data-task-section="Done"'   # 1, and NO open= attr
+clawgatectl health          # 0.8.21
 
-# the alacritty hints, off-screen and without taking the operator's screen:
-#   Xvfb :99 -> real alacritty -> probe XDG_CONFIG_HOME symlinking ~/.config/alacritty
-#   -> probe XDG_DATA_HOME whose .desktop appends %u to a log. Recipe in Gotchas.
+# the two PRs
+gh pr view 616 --repo ZacxDev/homelab-infra --json mergeable,mergeStateStatus
+gh api repos/ZacxDev/homelab-infra/commits/$(gh pr view 617 --repo ZacxDev/homelab-infra \
+  --json headRefOid --jq .headRefOid)/status --jq '.statuses[]|"\(.context) \(.state) \(.description)"'
+# ^ read the DESCRIPTIONS: "COULD NOT RUN" is a broken gate, not a failing diff.
 
-# devrc doc subset (the flake devShell carries the gate toolchain; direnv does NOT)
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc/scripts/tests/test_handoff_doc.py \
-  ~/workspace/devrc/scripts/tests/test_closing_condition_single_source.py -q
+# the comment correction still builds (JS inside a Go backtick raw string)
+nix-shell -p go --run "go -C <worktree>/containers/clawgate build ./internal/ui/"
 ```
 🔴 Run **both** tiers before claiming a merge is safe, and name the tier and base sha:
 `scripts/gate.sh` is the dev host; `nix build .#checks.x86_64-linux.{pytests,nodetests}`
-is what Tekton gates on. **Build them ONE AT A TIME** — a combined invocation contends on
-the nix store and produces false failures.
+is what Tekton gates on. **Build them ONE AT A TIME** — a combined invocation contends
+on the nix store and produces false failures.
