@@ -16412,7 +16412,15 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         # fix is inert while this file stays green.
         available = store_siting.tmpfs_dir()
         if available is None:
-            pytest.skip("no tmpfs available here; the fallback path is exercised")
+            pytest.skip(
+                # 🔴 `tmpfs_dir()` returning None gained a SECOND cause when the
+                # free-space floor landed, and this message named only the first.
+                # In the environment that matters this skip is the only signal,
+                # so the whole fix going inert must not read as "no tmpfs here".
+                "no USABLE tmpfs: absent, not tmpfs, under _MIN_FREE_BYTES "
+                "free, or unwritable. The fallback path is exercised. Check "
+                "WHICH cause applies before reading this as a bare absence."
+            )
         assert store_siting.mount_fstype(store) == "tmpfs", (
             f"store landed on {store_siting.mount_fstype(store)!r} while a tmpfs at "
             f"{available} was available — the fix is inert"
@@ -16428,4 +16436,154 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         assert (store / EMPTY_SCOPE).is_dir()
         assert (store / BROKEN_SCOPE / "thing-gamma.md").read_text().startswith(
             "no front matter"
+        )
+
+
+class TestTheSitingRULESThemselvesArePinned:
+    """🔴 EVERY FIX IN THIS MODULE HAS A TEST, BECAUSE THE ROUND THAT SHIPPED THEM
+    HAD NONE AND ALL THREE SURVIVED MUTATION.
+
+    Audit round 2 ran a battery over the 105 tests that touch `store_siting` and
+    found `>=`→`>`, dropping the free-space floor, and dropping the `mkdtemp`
+    try/except ALL survived — 105 passed each time — while a positive control
+    (fstype check always true) was correctly KILLED. So the selected set could go
+    red on a defect in this module; these three simply were not pinned by anything.
+
+    They are the fixes most likely to be "simplified" back: `>=` reads like a typo
+    against a docstring that says "LONGEST matching mount point", and the floor
+    reads redundant beside the write probe. Each mutation lands the store back on
+    the contended disk with a fully green suite — the exact defect this module
+    exists to remove, arriving through the check meant to prevent it, and showing up
+    in CI as an unattributable flake on somebody else's PR.
+    """
+
+    def _mounts(self, tmp_path: Path, body: str) -> str:
+        table = tmp_path / "mounts"
+        table.write_text(body)
+        return str(table)
+
+    def test_a_SHADOWED_mount_point_reports_the_LAST_entry_not_the_first(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # /proc/mounts is LAST-WINS: when two mounts share a path the later line is
+        # the live filesystem. `depth > best[0]` kept the FIRST at equal depth, so a
+        # disk bind over a tmpfs reported `tmpfs` and the store landed on disk.
+        # This is the mutation that survived round 2; it dies here.
+        monkeypatch.setattr(
+            store_siting,
+            "_MOUNTS_PATH",
+            self._mounts(
+                tmp_path,
+                "tmpfs /dev/shm tmpfs rw 0 0\n"
+                "/dev/sda1 /dev/shm ext4 rw 0 0\n",
+            ),
+        )
+        assert store_siting.mount_fstype(Path("/dev/shm")) == "ext4", (
+            "the shadowing (last) entry must win — with `>` this returns 'tmpfs' "
+            "and a disk-backed bind is silently accepted as tmpfs"
+        )
+
+    def test_the_MIRROR_shadow_also_resolves_to_the_last_entry(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # The opposite order must also follow last-wins, or the rule is just a
+        # coincidence that happens to favour one spelling.
+        monkeypatch.setattr(
+            store_siting,
+            "_MOUNTS_PATH",
+            self._mounts(
+                tmp_path,
+                "/dev/sda1 /dev/shm ext4 rw 0 0\ntmpfs /dev/shm tmpfs rw 0 0\n",
+            ),
+        )
+        assert store_siting.mount_fstype(Path("/dev/shm")) == "tmpfs"
+
+    def test_a_genuinely_NESTED_mount_still_resolves_to_the_deepest(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # The `>=` change must not break real nesting: distinct paths at different
+        # depths still resolve to the longest match, not to whatever came last.
+        monkeypatch.setattr(
+            store_siting,
+            "_MOUNTS_PATH",
+            self._mounts(
+                tmp_path,
+                "/dev/sda1 / ext4 rw 0 0\n"
+                "devtmpfs /dev devtmpfs rw 0 0\n"
+                "tmpfs /dev/shm tmpfs rw 0 0\n"
+                "/dev/sda1 /home ext4 rw 0 0\n",
+            ),
+        )
+        assert store_siting.mount_fstype(Path("/dev/shm/inner/deeper")) == "tmpfs"
+        assert store_siting.mount_fstype(Path("/dev/null")) == "devtmpfs"
+        assert store_siting.mount_fstype(Path("/etc/passwd")) == "ext4"
+
+    def test_a_tmpfs_UNDER_the_free_space_floor_is_REFUSED(self, monkeypatch):
+        # A five-byte probe passes on a tmpfs with five bytes free; the caller's
+        # real writes then raise ENOSPC, turning a test that would have PASSED on
+        # disk into an error. Driving the floor above any real filesystem is the
+        # hermetic equivalent of filling one.
+        if store_siting.tmpfs_dir() is None:
+            pytest.skip("no usable tmpfs here, so the floor cannot be exercised")
+        monkeypatch.setattr(store_siting, "_MIN_FREE_BYTES", 1 << 60)
+        assert store_siting.tmpfs_dir() is None, (
+            "a tmpfs with less than _MIN_FREE_BYTES free must be refused; without "
+            "the floor this returns the path and the caller dies on ENOSPC"
+        )
+
+    def test_the_floor_is_not_so_high_that_it_refuses_EVERY_tmpfs(self, monkeypatch):
+        # The mirror. A floor that rejects everything is indistinguishable from
+        # having no tmpfs at all — the fix would go inert with the suite green.
+        if store_siting.mount_fstype(Path("/dev/shm")) != "tmpfs":
+            pytest.skip("no tmpfs at /dev/shm on this host")
+        monkeypatch.setattr(store_siting, "_MIN_FREE_BYTES", 0)
+        assert store_siting.tmpfs_dir() is not None
+
+    def test_mkdtemp_REFUSING_falls_back_instead_of_raising(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # mkdtemp sat outside the try, so its OSError propagated rather than
+        # falling back — the candidate can fill or go read-only between the probe
+        # and the call. Dropping the try/except survived round 2's battery.
+        if store_siting.tmpfs_dir() is None:
+            pytest.skip("no usable tmpfs here, so the mkdtemp path is not taken")
+
+        def raiser(*a, **k):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(store_siting.tempfile, "mkdtemp", raiser)
+        with store_siting.store_root(tmp_path) as root:
+            assert tmp_path in root.parents, (
+                f"expected the tmp_path fallback, got {root} — without the "
+                "try/except this raises OSError instead"
+            )
+
+    def test_the_fallback_honours_a_custom_store_NAME(self, tmp_path: Path, monkeypatch):
+        # test_cairn_cli.py passes name="src"; a fallback that hardcoded "store"
+        # would hand it the wrong directory only on hosts without a tmpfs.
+        def raiser(*a, **k):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(store_siting.tempfile, "mkdtemp", raiser)
+        with store_siting.store_root(tmp_path, "src") as root:
+            assert root.name == "src"
+
+    def test_scoped_store_is_ALSO_sited_off_the_disk(self, scoped_store: Path):
+        # The fixture round 2 fixed had no positive control of its own — only the
+        # ratchet, and only for one spelling. It feeds ~110 `running(...)` sites,
+        # i.e. most of the in-request-fsync population in this file.
+        available = store_siting.tmpfs_dir()
+        if available is None:
+            pytest.skip(
+                # 🔴 `tmpfs_dir()` returning None gained a SECOND cause when the
+                # free-space floor landed, and this message named only the first.
+                # In the environment that matters this skip is the only signal,
+                # so the whole fix going inert must not read as "no tmpfs here".
+                "no USABLE tmpfs: absent, not tmpfs, under _MIN_FREE_BYTES "
+                "free, or unwritable. The fallback path is exercised. Check "
+                "WHICH cause applies before reading this as a bare absence."
+            )
+        assert store_siting.mount_fstype(scoped_store) == "tmpfs", (
+            f"scoped_store landed on {store_siting.mount_fstype(scoped_store)!r} "
+            f"while a tmpfs at {available} was available"
         )

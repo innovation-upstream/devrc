@@ -62,10 +62,22 @@ from pathlib import Path
 _CANDIDATE_ENV = "DEVRC_TEST_TMPFS"
 _DEFAULT_CANDIDATE = "/dev/shm"
 
+# The mounts table, as a SEAM. It is a module attribute rather than a literal
+# inside `mount_fstype` because the shadowed-mount case that `>=` fixes cannot be
+# reached hermetically otherwise — the only alternative is `unshare -Urm`, which a
+# test suite cannot rely on. Audit round 2 found all three of this round's fixes
+# SURVIVING mutation precisely because none of them had a test; this is what lets
+# one exist.
+_MOUNTS_PATH = "/proc/mounts"
+
 # Free space a candidate must have before we will site a store on it. The stores
-# these tests build are kilobytes, so this is not a capacity estimate — it is a
-# margin that keeps a nearly-full tmpfs from turning a passing test into ENOSPC.
-_MIN_FREE_BYTES = 8 * 1024 * 1024
+# these tests build are kilobytes, so this is a MARGIN, not a capacity estimate: it
+# exists to keep a nearly-full tmpfs from turning a passing test into ENOSPC.
+# 🔴 1 MiB, not 8: a measured 4 MiB tmpfs comfortably held a 200 KB write and was
+# rejected by the 8 MiB floor, so the fix went inert (falling back to disk) on a
+# perfectly usable mount. The floor only has to exceed what these stores write,
+# which is three orders of magnitude below this.
+_MIN_FREE_BYTES = 1024 * 1024
 
 
 def mount_fstype(path: Path) -> str | None:
@@ -77,7 +89,7 @@ def mount_fstype(path: Path) -> str | None:
     """
     try:
         target = path.resolve()
-        entries = Path("/proc/mounts").read_text().splitlines()
+        entries = Path(_MOUNTS_PATH).read_text().splitlines()
     except OSError:
         return None
     best: tuple[int, str] | None = None
@@ -164,7 +176,9 @@ def store_root(tmp_path: Path, name: str = "store") -> Generator[Path]:
     except OSError:
         # The candidate passed every check above and still would not give us a
         # directory (it filled between the probe and here, hit a quota, or went
-        # read-only). Falling back is the whole contract: never worse than disk.
+        # read-only). Falling back reproduces the pre-tmpfs behaviour for THIS
+        # call — which is the contract for this branch, and not the absolute
+        # "never worse than disk" the module docstring above retracts.
         yield tmp_path / name
         return
     try:

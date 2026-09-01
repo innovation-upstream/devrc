@@ -153,10 +153,31 @@ def _test_files() -> list[Path]:
 
 
 def _calls_build_server(path: Path) -> bool:
+    """AST call OR a `build_server(` inside a STRING LITERAL.
+
+    🔴 THE STRING HALF IS NOT BELT-AND-BRACES — without it this is NARROWER than the
+    regex it replaced, and in the worse direction. Seven test files here drive
+    `sys.executable -c <script>`; a store server stood up inside such a script is a
+    call the AST cannot see, and dropping a file from the ledger silently is worse
+    than the comment-only false positive the AST fixed. Measured: a mutant running
+    `build_server(...)` from a `textwrap.dedent` block was caught by the old regex
+    and SURVIVED the AST-only version.
+
+    Scanning only `ast.Constant` strings — not the raw text — keeps the false
+    positive fixed: a COMMENT is not a Constant, so prose still does not match.
+    """
     try:
-        return _calls_build_server_ast(ast.parse(path.read_text(encoding="utf-8")))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError):
         return False
+    if _calls_build_server_ast(tree):
+        return True
+    return any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and "build_server(" in node.value
+        for node in ast.walk(tree)
+    )
 
 
 def test_the_ledger_names_exactly_the_files_that_stand_up_the_store_server():
@@ -223,28 +244,72 @@ def test_the_scan_can_actually_SEE_a_build_server_call():
     )
 
 
-# 🔴 A RATCHET, NOT A TARGET. `test_subsystem_store_api.py` still builds store roots
-# inline from `tmp_path / "store"` inside individual tests. Those DO reach the server
-# and so are in the fsync population — they are just a long tail (one or two tests
-# each) rather than the shared fixtures, which are all sited now.
+# 🔴 A RATCHET, NOT A TARGET — and an AST one, because the first version was SPELLED.
+# `test_subsystem_store_api.py` still builds store roots inline from `tmp_path` inside
+# individual tests. Those reach `api.append_bullet` -> `_replace_bytes` in-process and
+# so fsync inside the request; they are a long tail (one or two tests each) rather than
+# the shared fixtures, which are all sited now.
 #
-# Converting them needs a signature change on each enclosing test, and a scripted
-# attempt at that silently skipped 9 of 19 while its own assertion still passed — the
-# reason this is a recorded ratchet instead of a rushed refactor. It exists so the
-# number cannot quietly GROW while the file reads as fixed.
-_DISK_ROOTED_SITES = 18
+# 🔴 The first ratchet was `.count('tmp_path / "store"')` and an audit walked FOUR of
+# five spellings through it: `tmp_path/"store"` (no spaces), `tmp_path / 'store'`
+# (single quotes), `tmp_path / VAR`, and `tmp_path.joinpath("store")`. There is no
+# formatter gate in this repo, so the first two are not normalised away. Counting the
+# AST collapses all four — quoting and spacing do not survive parsing at all.
+#
+# A scripted mass conversion of these sites was attempted and REVERTED: it silently
+# skipped 9 of 19 signature edits while its own assertion still passed. Hence a ratchet
+# rather than a rushed refactor.
+_DISK_ROOTED_SITES = 20
+
+_ROOT_NAMES = {"store", "src"}
+
+
+def _is_disk_rooted_store_expr(node: ast.AST) -> bool:
+    """`tmp_path / "store"` and its spellings — a store root that skips the siting.
+
+    A bare `tmp_path / <Name>` counts because the variable could be anything; that is
+    deliberately conservative, since the failure this bounds is silent.
+    """
+    if (
+        isinstance(node, ast.BinOp)
+        and isinstance(node.op, ast.Div)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == "tmp_path"
+    ):
+        right = node.right
+        if isinstance(right, ast.Constant) and right.value in _ROOT_NAMES:
+            return True
+        return isinstance(right, ast.Name)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "joinpath"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "tmp_path"
+        and node.args
+    ):
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and first.value in _ROOT_NAMES:
+            return True
+        return isinstance(first, ast.Name)
+    return False
 
 
 def test_the_inline_disk_rooted_store_sites_do_not_GROW():
     path = TESTS / "test_subsystem_store_api.py"
-    actual = path.read_text(encoding="utf-8").count('tmp_path / "store"')
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    actual = sum(1 for n in ast.walk(tree) if _is_disk_rooted_store_expr(n))
     assert actual <= _DISK_ROOTED_SITES, (
         f"{actual} inline disk-backed store roots, up from {_DISK_ROOTED_SITES}. "
-        "Each one writes through server.py:_replace_bytes and fsyncs inside the "
-        "request, so a new one rejoins the contention-flake population. Use "
+        "Each writes through server.py:_replace_bytes and fsyncs inside the request, "
+        "so a new one rejoins the contention-flake population. Use "
         "testlib.store_siting.store_root() instead."
     )
-    assert actual >= _DISK_ROOTED_SITES - 3 or actual == 0, (
-        f"only {actual} left, was {_DISK_ROOTED_SITES} — good, but lower "
-        "_DISK_ROOTED_SITES in the same commit so the ratchet keeps biting."
+    # 🔴 NO SLACK, and no `or actual == 0` escape. The previous version tolerated a
+    # drop of up to three and passed unconditionally at zero — so the count could
+    # regrow 0 -> 18 with the constant still reading 18 and the ratchet never biting.
+    assert actual == _DISK_ROOTED_SITES, (
+        f"only {actual} inline sites left, was {_DISK_ROOTED_SITES} — good. Lower "
+        "_DISK_ROOTED_SITES to that number in the SAME commit, or the ratchet goes "
+        "slack by exactly the amount you just fixed."
     )
