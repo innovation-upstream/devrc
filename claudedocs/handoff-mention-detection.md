@@ -18,56 +18,54 @@ Detect clawgate/GitHub/ClickUp references in agent output, emit telemetry, and m
 them clickable in the terminal the way a URL already is. **SHIPPED AND VERIFIED LIVE.**
 
 ## State now
-🔴 **RANK 8 IS ANSWERED AND CLOSED — and answering it REFUTED #468's premise.**
-Ranks 1–6 closed (2 owned elsewhere). Rank 7 landed as a PR. Open: 7 and 8 need a
-MERGE; 9 is unchanged and human-only.
+🔴 **RANKS 1–8 ARE CLOSED. ONLY RANK 9 REMAINS, AND IT IS HUMAN-ONLY.** Everything this
+effort was carrying is merged and verified by CONTENT; nothing is deployed-pending.
 
-- devrc `main`, **behind 4**; ⚠ `nix/programs/alacritty/default.nix` is dirty and is
-  **NOT this session's work** — another session is live in this shared checkout. Left
-  untouched. Untracked scratch `output.txt`, `scripts/diagnose-nix-disk.sh` as before.
-- **clawgate is 0.8.21 live**, not the 0.8.20 this doc previously recorded — pin bump
-  `b461f270` ("carry the tmux.changed SSE subscription"), unrelated to this effort.
-  #468's fix survived it: `7087eb37` is an ancestor of `origin/trunk` and the
-  explicit-open code is present in `openAncestorDetails`.
-- ⚠ `clawgatectl` now prints a skew note (built for 0.8.20, server 0.8.21). Harmless.
+**Merged and content-verified 2026-09-01:**
+- `innovation-upstream/devrc#1201` → squash `3a8ef2f0` — the rank-8 handoff. Doc blob
+  `d3ef5d45` is byte-identical on `origin/main`. Both required checks were SUCCESS.
+- `ZacxDev/homelab-infra#616` → squash `437cd091` — rank 7's rescued `deploy/SKILL.md`
+  lesson. Blob `83a4112f` on `trunk`; corrected framing present, the false "two repos"
+  claim **0 occurrences**.
+- `ZacxDev/homelab-infra#617` → squash `884aae25` — the comment correction. On `trunk`:
+  `THIS IS LOAD-BEARING` present, `THIS LOOKS UNNECESSARY` **0 occurrences**. Merged
+  `UNSTABLE` — its two reds were the `COULD NOT RUN` pair; `clawgate-e2e` was SUCCESS.
+- Claims `mention-detection-7` and `-8` RELEASED.
 
-**Opened this session (both awaiting a human merge):**
-- `ZacxDev/homelab-infra#616` — rank 7's rescued `deploy/SKILL.md` lesson, framing
-  corrected. **`mergeStateStatus: CLEAN`**, `gitops-validate` SUCCESS.
-- `ZacxDev/homelab-infra#617` — corrects the false comment on `openAncestorDetails`.
-  Comment-only. `tekton/clawgate-e2e` **SUCCESS — 127 tests, 2 skipped**;
-  `gitops-validate` SUCCESS. 🔴 Its two reds are **`COULD NOT RUN: … stopped before
-  any leg reported`** — a broken gate, not a verdict on the diff. Control:
-  `clawgate-ci` is red the same way on unrelated `#450`.
-- clawgate **#468** carries a new measurement comment. **Status deliberately NOT
-  changed** — grading it is rank 9 and not an agent's call.
+**Nothing needed deploying, and that was CHECKED not assumed.** `nix/home.nix` deploys
+only `claudedocs/close-the-loop/{STATE,ARCHIVE}.md` out of `claudedocs/` — handoff docs
+are NOT managed paths — and #617 is clawgate Go source, which reaches nothing running
+without a pin bump. So "merged" and "deployed" coincide here only because there is
+nothing to deploy. clawgate remains **0.8.21**.
 
-**Still open, with owners** (carried forward — re-verified 2026-09-01 unless noted):
-- **clawgate #463** — `ready_for_review`, REFUTED not fixed. No layout bug exists.
-- **clawgate #468** — `ready_for_review`, implemented + merged + deployed. Rank 9. 🔴 Its
-  PREMISE is now refuted too — see Open investigations; that makes the fix *more*
-  load-bearing, not less.
-- **clawgate #440** — `ready_for_review`; its blocker is refuted. Rank 9.
-- **`rescue/workbench-dirty-tree-2026-08-31`** in homelab-infra (`c40261bc`) — still on
-  origin, re-verified. It is now the ONLY copy of the dropped `flake.nix` port.
-- ⚠ **The leaked `clawgate-e2e-pg-35881` container is STILL UP** — `docker ps` reports
-  `Up 2 days`, created 2026-08-30 01:39, so still not this effort's. `deploy.md` records
-  that these starve the box. Left alone deliberately — another session's resource.
-  `docker rm -f clawgate-e2e-pg-35881`.
+**`~/workspace/homelab-talos` is now CLEAN** — `0 ahead, 0 behind`, no tracked
+modifications, carrying #616's corrected `deploy/SKILL.md` (`83a4112f`). It had been
+unable to `merge --ff-only` since 2026-08-31. The recovery path was re-verified
+IMMEDIATELY before the restore, not in the survey that motivated it: working copy
+`402cd671` matched `c40261bc:.claude/skills/deploy/SKILL.md` on origin.
 
-**Earlier session's merges, retained** (`#1099` → `6bf866fe`, `#1155` → `74b427d5`,
-`#1168` → `d07c0c06`, `#1175` → `7f1c81c9`, `#1181` → `0c333846` in devrc; `#613` →
-`7087eb37` and the pin bump `eed7db5a` in homelab-infra). All shipped to both hosts via
-`ship.sh`. ⚠ The line that used to sit here — "the #468 handler is a NO-OP on the live
-board, the fix is insurance not a repair" — is **REFUTED**; see Open investigations.
+**Both loose ends closed:**
+- ⚠ **The stranded `claudedocs/handoff-limewire-torrent-comps.md` needed NO rescue — it
+  was already safe.** Its blob `df6219f2` is byte-identical inside `c40261bc`
+  (`rescue/workbench-dirty-tree-2026-08-31`), already on origin. 🔴 **This doc's own
+  earlier text was misleading about that**: it enumerated the rescue's exclusions
+  (`go.mod`, `opencode.json`, `tests/`, three `__pycache__/`) in a way that read as
+  "untracked files were left out" — the rescue DID capture this `claudedocs/` file. The
+  uniqueness check cost one command and stopped a pointless second copy.
+- ✅ **`clawgate-e2e-pg-35881` REMOVED.** Not on an assumption of idleness: positive
+  control **6** rows from `pg_stat_activity` (proving the query can see backends)
+  against **0** other client backends, plus no established host connections on 35881.
+  Port freed; no other `clawgate-e2e-pg-*` remain.
 
-**Rank 7's disposition, executed on operator instruction:**
-- `.claude/skills/deploy/SKILL.md` → landed as #616. Still dirty in
-  `~/workspace/homelab-talos` until that merges; restore it then.
-- `flake.nix` → **dropped**, `git restore`d back to `HEAD` (`4058416e`). The port's
-  bytes remain at `c40261bc:flake.nix` on origin, re-verified byte-identical
-  (`f58b97ce…`) immediately before the restore. That clone reads `0 ahead, 1 behind`
-  again and can now fast-forward once the SKILL half lands.
+⚠ **Observed, deliberately NOT acted on — someone else's live resources:**
+- container `wizardly_agnesi` (`clawgate-audit:1`) **Up 4 days** — same leaked shape as
+  the one removed, but an audit image that may be a running job. Find its owner first.
+- `docker system df`: **772 local volumes, 37.39 GB, 100% reclaimable** — dwarfs
+  anything the container cost. `scripts/diagnose-nix-disk.sh` sits untracked in devrc,
+  so disk pressure may already be someone's thread.
+- devrc `main` still carries another session's dirty `nix/programs/alacritty/
+  default.nix`, untouched throughout, including across two fast-forwards and a
+  `reset --keep`. Each fast-forward was checked for collision with it first.
 
 ## Open investigations — live diagnosis state
 
@@ -232,9 +230,16 @@ without naming a mechanism.
   `<details>`, a card injected after load, one action per run, and a
   `Page.addScriptToEvaluateOnNewDocument` load counter.
 
+### CLOSED — nothing is mid-diagnosis in this effort
+Every investigation this doc opened is resolved: the deeplink deeplink-inert bug (rank 3,
+shipped), #463 (refuted), the dirty-clone disposition (rank 7, executed), and the
+live-vs-hermetic divergence (rank 8, refuted — see the RESOLVED block above, which
+stands unchanged). Rank 9 is a grading decision, not a diagnosis. **A future session
+should not read this section as work in progress.**
+
 ## Next steps (ranked)
 🔴 Numbering is STABLE on purpose — `claim-work --slug-for <this doc> <rank>` derives
-from it, so re-ranking silently re-points every live claim. Ranks 1–6 are CLOSED and are
+from it, so re-ranking silently re-points every live claim. Ranks 1–8 are CLOSED and are
 carried forward verbatim rather than deleted, for exactly that reason.
 
 1. ~~**Verify the two unverified interactions**~~ — **DONE**, merged as `#1086`. Closed by
@@ -298,38 +303,27 @@ carried forward verbatim rather than deleted, for exactly that reason.
      task — the exact failure #440 existed to remove.
    forcing: none — closed as refuted, with #468 carrying the residue.
 
-7. **Merge `ZacxDev/homelab-infra#616`** — rank 7's landing half. `mergeStateStatus:
-   CLEAN`, `gitops-validate` SUCCESS, docs-only (`+34/−0`, one `.claude/skills/**`
-   file). ⚠ `/audit-pr 616` was **offered and not run**. After it merges, `git -C
-   ~/workspace/homelab-talos restore .claude/skills/deploy/SKILL.md` to clear that
-   clone's last dirty file. **Claim `mention-detection-7` is HELD by this session** —
-   release it on merge.
-   - 🔴 **The STANDING policy for a dirty tree you did not dirty is measure-and-report
-     only** — no commit, restore, checkout or delete (operator, 2026-08-31). This session
-     departed from it ONLY because the operator was asked and chose the disposition
-     explicitly. **Do not read the restore below as precedent**: absent a fresh decision,
-     measure and hand it over. The rescue that made the bytes safe used a temporary
-     `GIT_INDEX_FILE` and a direct remote-ref push precisely to honour that policy —
-     no working tree, index or local ref was touched.
-   forcing: user — the operator chose "land SKILL.md only, drop the flake port"; this
-   is the second half of executing that decision.
-
-8. **Merge `ZacxDev/homelab-infra#617`** — the comment correction. Comment-only, no
-   behaviour change; `clawgate-e2e` SUCCESS (127 tests, 2 skipped), `gitops-validate`
-   SUCCESS. 🔴 Do **not** debug its two reds against the diff: both say `COULD NOT RUN:
-   … stopped before any leg reported`, and `clawgate-ci` is red the same way on
-   unrelated `#450`. ⚠ `/audit-pr 617` offered, not run. **Claim `mention-detection-8`
-   is HELD** — release on merge.
-   forcing: user — same instruction; and the comment it deletes actively argues for
-   removing load-bearing code, so leaving it costs more the longer it sits.
-
+7. ~~**Merge `ZacxDev/homelab-infra#616`**~~ — **DONE 2026-09-01**, squash `437cd091`.
+   Closed by CONTENT: blob `83a4112f` on `trunk`, corrected framing present, false
+   "two repos" claim 0 occurrences. The follow-up it named is also done — that clone's
+   `deploy/SKILL.md` was restored and the clone fast-forwarded, so it is clean again.
+   forcing: none — closed.
+8. ~~**Merge `ZacxDev/homelab-infra#617`**~~ — **DONE 2026-09-01**, squash `884aae25`.
+   Merged `UNSTABLE` deliberately: both reds said `COULD NOT RUN: … stopped before any
+   leg reported`, and `clawgate-e2e` — the check that actually exercises that file —
+   was SUCCESS at 127 tests / 2 skipped. ⚠ Whether `clawgate-ci` is *required* on
+   `trunk` is STILL UNMEASURED: `GET /branches/trunk/protection` 403s on that private
+   repo without GitHub Pro, so "not required" remains inferred from #613 having merged
+   red, never read from protection.
+   forcing: none — closed.
 9. **Grade clawgate #440 and #468** — both `ready_for_review`, both blocked on a HUMAN.
-   🔴 An agent must not close either: #440's criteria were written by a previous
-   session and #468's by another, so grading is self-grading whichever way the
-   `## Acceptance criteria` detector reads. **New evidence for the grader:** #468's
-   stated premise is refuted (see Open investigations), which makes its fix *more*
-   load-bearing, not less — it repaired a live failure rather than pinning a browser
-   detail. #440's own blocker (#463) remains refuted.
+   🔴 An agent must not close either: #440's criteria were written by a previous session
+   and #468's by another, so grading is self-grading whichever way the
+   `## Acceptance criteria` detector reads. **Evidence for the grader, now on the task
+   as a comment:** #468's stated premise is refuted, which makes its fix MORE
+   load-bearing — it repaired a live failure (0.8.19 was broken for every clean-profile
+   visitor) rather than pinning a browser detail. #440's own blocker (#463) remains
+   refuted. **This is the only open item in the effort.**
    forcing: none — nothing external waits on the status flip.
 
 ## Gotchas / decisions / dead-ends
@@ -679,23 +673,69 @@ carried forward verbatim rather than deleted, for exactly that reason.
   diff. Read `.statuses[].description`, and get a control from an unrelated open PR
   before spending anything on it.
 
+- 🔴 **`handoff_doc.py --push` CAN NO LONGER LAND ON devrc `main` — branch protection
+  rejects it, and the commit is left on LOCAL main.** Measured 2026-09-01:
+  `GH006: Protected branch update failed … 2 of 2 required status checks are expected`,
+  `status=push-failed`, commit `d5778150` local-only — precisely the state `ship.sh`
+  skips silently. The tool says so and hands over preserve → verify → `reset --keep`,
+  which worked: branch pushed, sha confirmed on origin by an INDEPENDENT `ls-remote`
+  (not the push's own word), `main` reset back. **Expect this every time now** — plan on
+  a topic branch + PR, or run `/handoff` from a WORKTREE so `main` is never touched.
+- 🔴 **`Next steps` is a REPLACE section, so a delta that lists only the OPEN ranks
+  DELETES the closed ones — and rank number is half a `claim-work` slug's identity.**
+  Nearly shipped: a delta carrying only 7–9 would have removed ranks 1–6 and silently
+  re-pointed every live claim on this doc. Caught by the tool's own
+  `DROPS N line(s) that look DURABLE` warning. **Always carry the closed ranks forward
+  verbatim.**
+- 🔴 **CHECK WHETHER A "STRANDED" FILE IS ALREADY SAFE BEFORE RESCUING IT — one command,
+  and the answer here was yes.** `handoff-limewire-torrent-comps.md` looked like classic
+  unsaved work (untracked, 3 days old, in a shared clone). `git log --all
+  --diff-filter=A -- <path>` found it already inside `c40261bc` on origin, blob-identical.
+  A second rescue would have created a competing copy of another session's work and read
+  as a new finding. **`--diff-filter=A` plus a blob compare is the whole check.**
+- 🔴 **DO NOT read "idle" from a query that FAILED — that is an empty result standing in
+  for two different mechanisms.** The first `pg_stat_activity` probe on the leaked
+  container errored `role "postgres" does not exist`; treating that as "no connections"
+  would have been a coin flip. The real role came from `POSTGRES_USER` in the container
+  env, and the answer was reported as a PAIR: positive control **6** rows (proving the
+  query sees backends) against **0** other client backends. Never quote the zero alone.
+- ⚠ **zsh does not word-split, and it silently produced a wrong `gh` invocation.**
+  `for spec in "repo 1201" …; set -- $spec` left `$1` holding the WHOLE string and `$2`
+  empty, so every call died `argument required when using the --repo flag`. Loud here;
+  the same construct returns a confident wrong VALUE elsewhere. Use a literal list or
+  `${=var}`.
+- ⚠ **A `COULD NOT RUN: … stopped before any leg reported` check posts as `failure`, not
+  `error`** — so any rollup reading conclusions calls it a failing diff. Read
+  `.statuses[].description`, and get a control from an unrelated open PR before spending
+  anything on it: `clawgate-ci` was red the same way on `#450`, which cannot have caused it.
+- 🔴 **STANDING POLICY, not a one-off: a dirty tree you did not dirty is MEASURE-AND-
+  REPORT ONLY** — no commit, restore, checkout or delete (operator, 2026-08-31). Moved
+  here from a ranked item because ranks get replaced and this must not vanish with one.
+  This effort departed from it exactly once, for `flake.nix`/`SKILL.md`, and ONLY because
+  the operator was asked and chose the disposition explicitly. **That is not precedent.**
+  Absent a fresh decision: measure, preserve without touching the tree, hand it over. The
+  preserve technique that honours the policy — temporary `GIT_INDEX_FILE` + a push
+  straight to a remote ref — touches no working tree, index or local ref.
+- 🔴 **`rescue/workbench-dirty-tree-2026-08-31` (`c40261bc`, on origin) is now the ONLY
+  copy of two things** — do not delete it: the DROPPED `flake.nix` port
+  (`c40261bc:flake.nix` = `f58b97ce`, which deletes #465's dependency-closure block and
+  must not be landed as-is), and `claudedocs/handoff-limewire-torrent-comps.md`
+  (`df6219f2`), which is otherwise only an untracked file in one clone.
+
 ## How to verify
 ```bash
-# the rank-8 finding, live against the deployed pod (LAN UI is open, no auth).
-# Expect data-task-hash-opened="1" on a FRESH browser profile — a "0" means the
-# profile already had Done open, which is exactly the trap that produced the
-# retracted divergence. Use a throwaway --user-data-dir every run.
-curl -s http://192.168.50.250:30302/ui/tasks | grep -c 'data-task-section="Done"'   # 1, and NO open= attr
+# all three merges, by CONTENT — a squash never makes the head an ancestor, so
+# `merge-base --is-ancestor` returns false forever and is the wrong instrument here.
+git -C $DEVRC rev-parse origin/main:claudedocs/handoff-mention-detection.md   # d3ef5d45…
+R=~/workspace/homelab-talos
+git -C $R rev-parse origin/trunk:.claude/skills/deploy/SKILL.md               # 83a4112f…
+git -C $R show origin/trunk:containers/clawgate/internal/ui/components.go \
+  | grep -c 'THIS LOOKS UNNECESSARY'                                          # must be 0
+
+# the rank-8 finding, live. Expect data-task-hash-opened="1" on a FRESH profile —
+# a "0" means the profile already had Done open, the exact trap that produced the
+# retracted divergence. Throwaway --user-data-dir every run.
 clawgatectl health          # 0.8.21
-
-# the two PRs
-gh pr view 616 --repo ZacxDev/homelab-infra --json mergeable,mergeStateStatus
-gh api repos/ZacxDev/homelab-infra/commits/$(gh pr view 617 --repo ZacxDev/homelab-infra \
-  --json headRefOid --jq .headRefOid)/status --jq '.statuses[]|"\(.context) \(.state) \(.description)"'
-# ^ read the DESCRIPTIONS: "COULD NOT RUN" is a broken gate, not a failing diff.
-
-# the comment correction still builds (JS inside a Go backtick raw string)
-nix-shell -p go --run "go -C <worktree>/containers/clawgate build ./internal/ui/"
 ```
 🔴 Run **both** tiers before claiming a merge is safe, and name the tier and base sha:
 `scripts/gate.sh` is the dev host; `nix build .#checks.x86_64-linux.{pytests,nodetests}`
