@@ -291,8 +291,19 @@ def backup_precondition(
 
 def write_route_deployed(
     *, url: str, token: str, scope: str, timeout: int = 20
-) -> tuple[bool, str | None, str]:
-    """Does the RUNNING image carry the write path? `(ok, sentence)`.
+) -> tuple[bool, int | None, str]:
+    """Does the RUNNING image carry the write path? `(ok, rc_on_failure, sentence)`.
+
+    ⚠ THE ANNOTATION AND THIS FIRST LINE WERE BOTH WRONG FOR ONE COMMIT, IN THE
+    SAME DIRECTION, AND THAT IS THE POINT WORTH KEEPING. The return went from a
+    2-tuple to a 3-tuple to stop an unreachable pod being reported as "the image
+    is read-only"; the middle slot carries an EXIT CODE, and both the signature
+    (`str | None`) and this line (`(ok, sentence)`) were left describing the old
+    shape. The code was correct throughout — the caller reads the slot as an rc
+    — so nothing failed, and nothing could: `claude/RULES.md` is explicit that a
+    type declaration is not a code path, so no test and no green suite can see a
+    lie told only in an annotation. It was caught by a type checker reading the
+    file, which is the only instrument that looks at this.
 
     🔴 THE PROBE IS A DELIBERATELY MALFORMED BODY, AND THAT IS WHAT MAKES IT
     SAFE. `server._append_bullet` validates the payload BEFORE it resolves the
