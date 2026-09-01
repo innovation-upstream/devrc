@@ -46,10 +46,16 @@ survives adversarial re-derivation, and fix whatever it exposes.
   `home-manager switch` was deliberately skipped rather than run as a no-op riding another
   session's uncommitted `nix/programs/alacritty/default.nix`. Rank 11 forward-merged `main` into
   #1064 and its gate went green.
-- **OPEN: ranks 5, 8, 10, 12** (rank 13 DONE 2026-09-01). Derive, don't trust this line —
-  `python3 scripts/handoff-audit.py --sections 1 <this doc>` from the devrc repo root prints
-  `N/13 ranked items done` (**10/13** at 2026-09-01; the `8/12` this line carried was already stale
-  by two items and one denominator when read — the count and the DENOMINATOR both move).
+- **OPEN: ranks 5, 8, 10, 12 — FOUR of 13; DONE are 1,2,3,4,6,7,9,11,13 — NINE. Count the list, do
+  not quote the tool.** `python3 scripts/handoff-audit.py --sections 1 <this doc>` prints
+  **`10/13`**, and 10 + 4 = 14 ≠ 13, which is the tell. 🔴 **The extra one is rank 5, and the
+  mis-read is structural, not a typo:** `DONE_MARK` matches `\bDONE\b` on an item's **first line
+  only** (`scripts/handoff-audit.py:145`, `:339`), and rank 5 opens *"The WORKED EXAMPLE is DONE
+  (#1207"* — whose very next clause is *"the CONTRACT is not"*. So the tool silently closes **the
+  largest open item, the one whose own text documents that this tool's bucketing is broken.**
+  Until that is fixed, this doc's `N/13` is a lower bound on open work, not a reading.
+  (The `8/12` this line used to carry was one item and one denominator stale; the denominator was
+  already 13 in the same commit that wrote `12`.)
 - 🔴 **CARRIED FORWARD — durable specifics the condensed status above would otherwise drop.**
   *Ranks 2+7, the hook:* devrc**#1092** `ad891a5c`; `ship.sh` converged BOTH hosts to **`bd1572f3`**
   (verified by ancestry of the shipped sha PLUS a byte check of the deployed blob **`6d25558e`**);
@@ -155,23 +161,35 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
   cited `devrc/tests.md` as carrying it; that store file contains **no loopback bullet at all**
   (measured, with a positive control). The socket timeout is the SURFACE; the fsync-in-request is
   the CAUSE. The blocks after this one are kept only for the reasoning they rule out.
-- 🔴 **PARTIALLY MITIGATED 2026-09-01 by #1211 `1a4350f3` (merged 19:30:17Z) — and "partially" is
-  the load-bearing word.** It sites the store on tmpfs so fsync cannot stall, which removes the
-  mechanism *where it was applied*, and it was applied to **one of the three files that stand up
-  this server**. Measured on `origin/main` at `b59b0475`: `api.build_server` has exactly three
-  callers — `scripts/tests/test_subsystem_store_api.py` (44 hits for `tmpfs|/dev/shm|store_siting`),
-  `scripts/tests/test_cairn_write.py` (**0**) and `scripts/tests/test_cairn_cli.py` (**0**) — and
-  `scripts/testlib/store_siting.py` does not exist there. So the mechanism above **still fires for
-  the two cairn suites**, and that is demonstrated rather than predicted: the first PR gated after
-  #1211 merged went red on `TestAppendLands` in `test_cairn_write.py` against a docs-only diff.
-  The consolidation is devrc**#1219** (`fix/consolidate-store-siting`), **OPEN as of 2026-09-01** —
-  re-derive its state before quoting this line. 🔴 **Do not read #1211 as closing the family**, and
-  do not read a red on `test_subsystem_store_api.py` as this mechanism any more either: that file
-  is now sited, so a red there needs a fresh diagnosis rather than this block.
+- 🔴 **PARTIALLY MITIGATED 2026-09-01 by #1211 `1a4350f3` (merged 19:30:17Z) — and the unit of
+  "partially" is the FIXTURE, not the file.** #1211 sites the store on tmpfs so fsync cannot stall.
+  Measured on `origin/main`, `api.build_server` is stood up from three files, and inside the one
+  file #1211 touched there are **two** store fixtures:
+
+  | site | sited on tmpfs? | `running(...)` sites |
+  |---|---|---|
+  | `test_subsystem_store_api.py` `store` (`:393`, calls `_tmpfs_dir()`) | **yes** | 133 |
+  | `test_subsystem_store_api.py` `scoped_store` (`:9097`, `_build_store(tmp_path / "store", …)`) | **NO** | 110 |
+  | `test_cairn_write.py` | **NO** | — |
+  | `test_cairn_cli.py` | **NO** | — |
+
+  🔴 **So a red on `test_subsystem_store_api.py` IS still very possibly this mechanism** — do not
+  send yourself off for a fresh diagnosis on the strength of the file's name. The live instance:
+  **#1216 `1e5942a8`, a diff of ONE markdown file, went `devrc-pytests FAILURE` on
+  `TestTheActorComesFromTheTOKEN`** — a class that runs on `scoped_store`, i.e. on the contended
+  disk, and the same class `scripts/ci-repro/README.md:79,83` uses as its reproducer. #1219's own
+  code says this in as many words (`22dd33df:scripts/tests/test_subsystem_store_api.py:9033-9037`:
+  *"It was missed when #1211 sited `store` alone"*).
+  🔴 **And "sited" is not "proven sited on the CI node":** `_tmpfs_dir()` falls back to `tmp_path`
+  (disk) on four conditions, and #1211's own message notes CI's `/dev/shm` is the container's mount,
+  64Mi by default and **possibly absent**. Nobody has verified the probe engages on
+  `talos-xr6-r7p`, so read #1211 as removing the mechanism *wherever the probe succeeds*, which is
+  unmeasured where it matters. The consolidation is devrc**#1219** (`fix/consolidate-store-siting`),
+  **OPEN as of 2026-09-01** — re-derive its state before quoting any of this.
   ⚠ `scripts/ci-repro/README.md` — which this block sends you to, and which remains correct about
   the mechanism, the code sites and the reproducer — carries **no mitigation note at all**
   (grepped `tmpfs|1211|mitigat|shm` at `origin/main`: **zero hits**), so read on arrival there as
-  describing a failure mode that is live in two of three suites, not three of three.
+  describing a failure mode that is still live nearly everywhere it was live before.
 
 ### Was the devrc-ci outage fully closed?
 - **Symptom:** 2026-08-29 ~22:23–22:48Z every devrc-ci gate leg reported
@@ -432,22 +450,27 @@ EVICTED 2026-09-01 (terminal). Verdict: #1064 green, MERGED `f71ff648`; the two-
 - ✅ **CLOSED 2026-09-01 — caveat written; values in the CI block and rank 13, not repeated here.**
   🔴 **The one thing that belongs only here:** this item was filed because a sibling change (#1211)
   falsified the doc's claim — and the *item written to repair that* was itself falsified by a second
-  sibling change (#1219's evidence) in the ~3 h before anyone worked it. The mechanism still fires;
-  only "should no longer fire" was wrong. **A staleness-repair item decays exactly like the claim it
-  repairs** — re-measure the REMEDY's premise, not just the original claim. That is rank 6's lesson
+  sibling change before anyone worked it. 🔴 **The window is the finding, and it is far shorter than
+  it feels: rank 13 was filed at 21:00:22Z (`66eee1d7`) and worked at 21:41:58Z (`afe68628`) — 41 m
+  36 s — and #1219, which refutes its premise, was opened at 21:11:38Z, ELEVEN MINUTES after
+  filing.** The mechanism still fires; only "should no longer fire" was wrong. **A staleness-repair
+  item decays exactly like the claim it repairs**, and on this repo the half-life is minutes, not
+  days — re-measure the REMEDY's premise, not just the original claim. That is rank 6's lesson
   ("re-measure before editing") arriving one level up, and rank 6 is where it was already written
   down. via: measurement
 - **Symptom:** the doc's superseded-hypothesis block (the one round 4 corrected) tells a reader the
   `devrc-ci` red-gate mechanism is `server.py:_replace_bytes` fsyncing inside the request against a
   one-node pin, and to read `scripts/ci-repro/README.md`. That was correct when written.
 - **Observed (with values):** **#1211 `1a4350f3` merged 2026-09-01T19:30:17Z** — *"site the store on
-  tmpfs so the gate stops failing on disk contention"* — i.e. the mechanism is **mitigated**. #1207
+  tmpfs so the gate stops failing on disk contention"* — ~~i.e. the mechanism is **mitigated**~~
+  (**superseded: PARTIALLY, at fixture granularity — see the CLOSED verdict above**). #1207
   merged at **20:03:27Z**, 33 minutes LATER, carrying the un-caveated warning. Also landed since:
   **#1213 `793a2b8e`** (the store-api gate flake: tmpfs fix shipped, 8-red triage, a classifier that
   reads the checkout PATH) and **#1214 `07a22f14`**.
 - **Ruled out:** *"the doc is simply wrong"* — it is not; the mechanism and the reproducer are real
   and `scripts/ci-repro/README.md` still documents them. What is missing is the **mitigation**, so a
-  reader will expect a failure mode that should no longer fire. via: change
+  reader will expect a failure mode that ~~should no longer fire~~ **mostly still fires** (see the
+  CLOSED verdict above — this line's premise is the one that was refuted). via: change
 - **Leading hypothesis:** this is the arc's own recurring shape operating ACROSS PRs rather than
   within one — a claim true at write time, falsified by a sibling change, inside no audit round's
   range. Six rounds could not have caught it: #1211 was not in any range.
@@ -552,14 +575,23 @@ rather than removed and renumbered. New work is appended at the end.
    and one remedy shape is chosen in writing.
    forcing: none
 13. ✅ **DONE (2026-09-01) — caveat shipped as PARTIALLY mitigated; the item's own premise ("should
-   no longer fire") was REFUTED in the doing.** Evidence in the CI block above. Mechanism text kept
-   verbatim, as the item required.
+   no longer fire") was REFUTED in the doing, and so was the FIRST version of the caveat.** Evidence
+   in the CI block above. Mechanism text kept verbatim, as the item required. 🔴 The audit round
+   caught that the first draft said "`test_subsystem_store_api.py` is now sited" — **false at
+   fixture granularity** (`scoped_store`, 110 sites, still disk-backed), i.e. the fix for a
+   one-of-three error repeated it one level down. That is the shape to expect, not a one-off.
    🔴 **Left undone deliberately — the next reader's, and it is a devrc-repo edit, not a doc edit:**
    `scripts/ci-repro/README.md` carries **no mitigation note** (zero hits for
    `tmpfs|1211|mitigat|shm` at `origin/main`), so the reproducer reads as fully live at the one place
-   this doc sends people. CLOSES WHEN: that README names `1a4350f3` and which suites remain unsited,
-   or #1219 merges and makes the caveat historical — whichever a reader checks first with
-   `git -C ~/workspace/devrc grep -c tmpfs origin/main -- scripts/ci-repro/README.md`.
+   this doc sends people. CLOSES WHEN **either**: (a) that README names `1a4350f3` AND which
+   fixtures remain unsited, or (b) #1219 merges, making the caveat historical. Check with — and
+   `fetch` first, or a stale clone answers for a ref you do not have:
+   ```bash
+   DEVRC=~/workspace/devrc
+   git -C "$DEVRC" fetch origin main -q
+   git -C "$DEVRC" grep -cE '1a4350f3|scoped_store' origin/main -- scripts/ci-repro/README.md   # (a): non-zero
+   gh pr view 1219 --repo innovation-upstream/devrc --json state -q .state                      # (b): MERGED
+   ```
    forcing: regression — the doc asserts a live failure mode that a merged change has mitigated,
    and it is read as authoritative at session start
 
@@ -812,7 +844,9 @@ of this doc — re-read them before trusting any similar analysis.**
   twice this arc.
 - **Doc size / open ranks, both DERIVED:**
   `(cd "$DEVRC" && python3 scripts/handoff-audit.py --sections 1 claudedocs/handoff-skill-chain-usage-audit.md)`
-  → `N/12 ranked items done` and the size line. Never quote a size from prose.
+  → `N/<total> ranked items done` and the size line. Never quote a size from prose — and 🔴 **never
+  quote the ranked-item count from the tool either: it over-counts** (see `## State now`, which
+  carries the one copy of that caveat and the reason). The SIZE line is the trustworthy half.
 - **The gate's node ceiling:**
   ```bash
   export KUBECONFIG=$KC_HOMELAB
