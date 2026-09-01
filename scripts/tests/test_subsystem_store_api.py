@@ -4001,6 +4001,118 @@ class TestByteIdentityVerifier:
         assert f"PASS scope={OTHER_SCOPE}" in r.stdout
         assert "pass=3 fail=1" in r.stdout
 
+    def test_LEADING_BLANKS_WITHOUT_the_banner_are_NOT_stripped(
+        self, store: Path, token_file: Path, monkeypatch
+    ):
+        """🔴 THE NARROWING, EXERCISED — not merely asserted in a comment.
+
+        The snapshot block is measured as a run of banner-or-blank lines at the
+        head of the remote stream, and a run that does NOT contain the banner
+        must be left alone: blank lines the server put there for some other
+        reason are a real difference, and a rule that swallowed them would be
+        the "erase a difference it does not claim" failure this whole commit is
+        about.
+
+        Same store on both sides, so `store:` and `host:` are identical and the
+        ONLY difference is two leading blanks. The verifier must FAIL, and its
+        accounting must say `snapshot-block-lines=0` — it stripped nothing, and
+        it says so.
+        """
+        # An image that emits the separator but no banner. `_serve_report` builds
+        # `prose + "\n\n" + text`, so an empty prose is exactly two blank lines.
+        monkeypatch.setattr(api, "snapshot_freshness", lambda root: ("x", ""))
+
+        with running(store) as (base, _):
+            r = run_verify(
+                "--store", str(store), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, (
+            f"two unexplained leading blank lines were swallowed:\n{r.stdout}"
+        )
+        assert "verify: scopes=4 pass=0 fail=4" in r.stdout
+        for line in r.stdout.splitlines():
+            if line.startswith("FAIL scope="):
+                assert "snapshot-block-lines=0" in line, (
+                    f"the block claimed lines it did not earn: {line}"
+                )
+                assert "raw-diff-lines=2 " in line, (
+                    f"expected exactly the two leading blanks to differ: {line}"
+                )
+
+    def test_a_server_that_serves_NO_SNAPSHOT_BLOCK_at_all_still_PASSES(
+        self, store: Path, token_file: Path
+    ):
+        """🔴 THE 0.2.0 PATH. The stamp shipped in 0.3.0; this script has to keep
+        working against an image that predates it.
+
+        The old rule got that for free — a `sed` address that matches nothing
+        deletes nothing. The measured rule does not: it computes a block LENGTH,
+        and `sed '1,0d'` is an ERROR, not a no-op, so an empty block has to be
+        branched on rather than passed through. That branch is the whole reason
+        this test exists; without it the script would exit non-zero on every
+        scope against a pre-0.3.0 pod and the failure would read as a content
+        difference.
+
+        The stub replays the local CLI's own bytes per scope — a server that
+        renders identically and stamps nothing.
+        """
+        import http.server
+
+        bodies = {}
+        for scope in (SCOPE, OTHER_SCOPE, EMPTY_SCOPE, BROKEN_SCOPE):
+            out = subprocess.run(
+                [sys.executable, str(RECALL_PATH), "--store", str(store),
+                 "--scope", scope],
+                capture_output=True, timeout=HANG_TIMEOUT,
+            )
+            # exit 3 is "nothing readable" — a legitimate render, which the
+            # verifier itself tolerates. Anything harder is a broken fixture.
+            assert out.returncode <= 3, out.stderr.decode()
+            bodies[scope] = out.stdout
+
+        class Unstamped(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                body = bodies.get(self.path.rsplit("/", 1)[-1])
+                if body is None:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):  # noqa: D102
+                pass
+
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Unstamped)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            r = run_verify(
+                "--store", str(store),
+                "--url", f"http://127.0.0.1:{httpd.server_address[1]}",
+                "--token-file", str(token_file),
+            )
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=10)
+
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "verify: scopes=4 pass=4 fail=0" in r.stdout
+        # 🔴 And the accounting says WHY it is green: nothing differed and
+        # nothing was canonicalised away. A green with a non-zero block here
+        # would mean the strip invented a block to delete.
+        rows = _evidence_rows(r.stdout)
+        assert len(rows) == 4, f"expected one evidence row per scope:\n{r.stdout}"
+        for row in rows:
+            assert row == {
+                "raw": 0, "store_root": 0, "host": 0,
+                "snapshot": 0, "block": 0, "accounted": 0,
+            }, f"an unstamped identical render was not a clean zero: {row}"
+
     def test_an_UNREACHABLE_pod_FAILS_rather_than_comparing_nothing(
         self, store: Path, token_file: Path
     ):
