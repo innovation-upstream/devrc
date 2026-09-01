@@ -2919,8 +2919,10 @@ def test_a_SIBLING_WORKTREE_named_relatively_now_MISSES_and_the_absolute_form_do
 # `set -f` keeps `claudedocs/handoff-*.md` from expanding, which is right, but
 # it then reaches `[ -f ]` as a LITERAL that can never exist and was recorded as
 # "the caller named a specific document". Since #1164 part 2 that suppresses the
-# whole fallback chain, so the run reconciles NOTHING. That literal appears
-# twice in /resume's own SKILL.md prose, which is passed through VERBATIM.
+# whole fallback chain, so the run reconciles NOTHING. That literal appears in
+# /resume's own SKILL.md prose, which is passed through VERBATIM. (No count:
+# this said "twice" against a MEASURED 4 occurrences on 3 lines, and nothing
+# enforces the number — the two SPELLINGS below are what matters.)
 #
 # MEASURED 2026-09-01, same repo, same command:
 #   3e42bb04  handoff: (none found — git-only)  + "NO SUCH FILE" + NOTHING reconciled
@@ -3083,4 +3085,187 @@ def test_a_HUMAN_named_worktree_is_shown_ahead_of_EPHEMERAL_agent_checkouts(
     assert gaps[0] == GAP_LEAD_AMBIGUOUS.format(
         tok=tok, base=IN_WORKTREE, n=5,
         paths=", ".join([h_path] + a_paths[:3]) + ", and 1 more",
+    ) + GAP_REST_NONE, gaps[0]
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 #1197 AUDIT ROUND 2 — THE RESIDUAL OF A NAME-BASED DISCRIMINATOR
+#
+# F1's gate compares `<Y>`'s LAST COMPONENT to this checkout's directory name.
+# `claude/skills/resume/SKILL.md` said "anything else relative is neither
+# searched nor re-anchored", which is STRONGER than what that compares: a
+# relative token pointing at a genuinely foreign tree whose path ENDS in this
+# repo's own name re-anchors here and resolves this repo's copy, silently.
+#
+# MEASURED at cf1b6f81 from a checkout named `devrc`:
+#   backup/devrc/claudedocs/<base>          -> resolves, gaps EMPTY
+#   ../elsewhere/devrc/claudedocs/<base>    -> resolves, gaps EMPTY
+#   /absolute/elsewhere/devrc/…  (control)  -> miss + NO SUCH FILE
+#   DEVRC/claudedocs/<base>      (control)  -> miss + NO SUCH FILE
+#
+# It is a RESIDUAL, not a regression — at 3e42bb04 EVERY relative `<Y>`
+# re-anchored — and widening the discriminator needs one a foreign SIBLING
+# fails, which `-d` does not (`test_a_FOREIGN_relative_token_is_not_re_anchored_
+# on_THIS_repos_own_copy` is the shape that rules `-d` out). So it is DOCUMENTED
+# and PINNED instead: these two tests are the machine-readable half of the
+# SKILL.md sentence, and they fail if the behaviour drifts in either direction.
+#
+# ⚠ THESE ARE NOT REGRESSION TESTS — nothing here was ever broken and then
+# fixed. They are invariant guards over a deliberate limitation. What makes them
+# non-vacuous is the mutation battery: X6 (compare the FULL path instead of the
+# last component) and X5 (the repo-name arm never fires) turn the first red, and
+# X3 (any `<Y>` counts as naming this tree) turns the second red.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "ydir,make_it",
+    [
+        # a foreign tree NESTED under the cwd whose last component is `devrc`
+        pytest.param("backup/devrc", False, id="nested-name-ends-in-repo-name"),
+        # …and a real sibling checkout that EXISTS and does NOT hold the doc,
+        # which is what makes the residual a wrong-clone resolution rather than
+        # a harmless miss: the caller named a tree, that tree lacks the file,
+        # and the run answers out of a different one with no gap.
+        pytest.param("../elsewhere/devrc", True, id="sibling-repo-exists-lacks-doc"),
+    ],
+)
+def test_a_FOREIGN_tree_whose_LAST_COMPONENT_matches_this_repo_STILL_re_anchors(
+    tmp_path, stub_bin, ydir, make_it
+):
+    """⚠ THE RESIDUAL, pinned so it is a recorded decision and not a surprise."""
+    repo = make_repo(tmp_path, docs=(WANTED, DECOY), name="devrc")
+    assert (repo / "claudedocs" / WANTED).is_file()
+    if make_it:
+        other = make_repo(tmp_path, docs=(), name="elsewhere/devrc")
+        assert not (other / "claudedocs" / WANTED).exists(), (
+            "the fixture must NOT put the doc in the tree the caller named, or "
+            "this passes for the wrong reason"
+        )
+
+    out = run_resume(repo, stub_bin, f"{ydir}/claudedocs/{WANTED}", cwd=repo)
+    assert handoff_line(out) == f"handoff: {WANTED}", out
+    assert gap_lines(out) == [], out
+
+
+@pytest.mark.parametrize(
+    "tok_fmt",
+    [
+        # an ABSOLUTE path ending in this repo's name never re-anchors …
+        pytest.param("/no-such-checkout/elsewhere/devrc/claudedocs/{doc}",
+                     id="absolute-still-misses"),
+        # … and the compare is case-SENSITIVE, so a differently-cased spelling
+        # of this very repo's name is a foreign name like any other.
+        pytest.param("DEVRC/claudedocs/{doc}", id="case-differs-still-misses"),
+    ],
+)
+def test_the_residual_is_BOUNDED_by_the_absolute_and_case_rules(
+    tmp_path, stub_bin, tok_fmt
+):
+    """THE OTHER SIDE, on the SAME fixture — so the re-anchor above is
+    attributable to the NAME matching and not to the gate having stopped
+    working. Without this pair, `mine=1` unconditionally would pass the test
+    above (it is mutant X3)."""
+    repo = make_repo(tmp_path, docs=(WANTED, DECOY), name="devrc")
+    tok = tok_fmt.format(doc=WANTED)
+    out = run_resume(repo, stub_bin, tok, cwd=repo)
+    assert handoff_line(out) == "handoff: (none found — git-only)", out
+    scrubbed = out.replace(tok, "")
+    for doc in (WANTED, DECOY):
+        assert doc not in scrubbed, f"{doc} was reconciled anyway\n{out}"
+    gaps = gap_lines(out)
+    assert len(gaps) == 1, gaps
+    assert gaps[0] == GAP_LEAD_MISSING.format(tok=tok) + GAP_REST_NONE, gaps[0]
+
+
+# --------------------------------------------------------------------------- #
+# 🟢 #1197 AUDIT ROUND 2 — `<repo>//claudedocs/<base>`, THE DOUBLE-SLASH SPELLING
+#
+# `${ydir##*/}` of `devrc/` is the EMPTY STRING and can never equal a repo's
+# directory name, so before the strip this spelling of the kickoff shape missed
+# — the safe direction (a loud gap), but a `"${d}/claudedocs/…"` splice emits it
+# whenever `$d` already ends in `/`, and it unambiguously names THIS tree.
+# --------------------------------------------------------------------------- #
+def test_a_DOUBLE_SLASH_in_the_repo_prefixed_shape_still_names_THIS_tree(
+    tmp_path, stub_bin
+):
+    """🔴 RED before the trailing-slash strip: `handoff: (none found —
+    git-only)` plus a NO SUCH FILE gap."""
+    repo = make_repo(tmp_path, docs=(WANTED, DECOY), name="devrc")
+    out = run_resume(repo, stub_bin, f"devrc//claudedocs/{WANTED}", cwd=repo)
+    assert handoff_line(out) == f"handoff: {WANTED}", out
+    assert gap_lines(out) == [], out
+
+
+def test_the_double_slash_strip_does_NOT_widen_the_discriminator(
+    tmp_path, stub_bin
+):
+    """CONTROL for the test above: the same spelling with a FOREIGN name must
+    still miss. Stripping trailing `/` can only expose a component that was
+    already there, and this is what proves it did not do more."""
+    repo = make_repo(tmp_path, docs=(WANTED, DECOY), name="devrc")
+    tok = f"other-repo//claudedocs/{WANTED}"
+    out = run_resume(repo, stub_bin, tok, cwd=repo)
+    assert handoff_line(out) == "handoff: (none found — git-only)", out
+    assert WANTED not in out.replace(tok, ""), out
+    assert gap_lines(out) == [
+        GAP_LEAD_MISSING.format(tok=tok) + GAP_REST_NONE
+    ], gap_lines(out)
+
+
+# --------------------------------------------------------------------------- #
+# 🟢 #1197 AUDIT ROUND 2 — THE EPHEMERAL CLASSIFICATION KEYS ON THE WHOLE PATH
+#
+# The display preference classifies a candidate with the glob
+# `*/.claude/worktrees/agent-*`. Nothing in the suite varied that pattern: every
+# fixture's ephemeral candidates were under `.claude/worktrees/agent-*` and
+# every human one matched NEITHER `.claude/` NOR `agent-`, so a widened
+# `*/.claude/*` and a widened `*/agent-*` both SURVIVED — each would demote a
+# real worktree into the "disposable, do not suggest" class against a sentence
+# whose advice is "pass the worktree's own path".
+#
+# This fixture holds one candidate of each shape the two variants disagree on.
+# --------------------------------------------------------------------------- #
+def test_the_EPHEMERAL_classification_needs_the_WHOLE_agent_worktree_PATH(
+    tmp_path, stub_bin
+):
+    """🔴 Kills the two glob variants nothing else could see.
+
+    Two human-owned worktrees that a looser pattern would call disposable:
+      `devrc/.claude/zz-review`            — under `.claude/`, NOT a
+                                             `worktrees/agent-*` checkout, so
+                                             `*/.claude/*` demotes it.
+      `devrc/zz-humanspace/agent-review`   — a component literally named
+                                             `agent-…` outside `.claude/`, so
+                                             `*/agent-*` demotes it.
+    Both sort AFTER the four real agent checkouts in `LC_ALL=C` order, so the
+    preference — not the sort — is the only thing that can put them first.
+    """
+    repo = make_repo(tmp_path, docs=(BASE_DECOY,), name="devrc")
+    agents = [
+        add_worktree(repo, f"devrc/.claude/worktrees/agent-{i}", f"feat/a{i}",
+                     docs=(IN_WORKTREE,))
+        for i in range(4)
+    ]
+    humans = [
+        add_worktree(repo, "devrc/.claude/zz-review", "feat/review",
+                     docs=(IN_WORKTREE,)),
+        add_worktree(repo, "devrc/zz-humanspace/agent-review", "feat/agentname",
+                     docs=(IN_WORKTREE,)),
+    ]
+    a_paths = sorted(f"{w}/claudedocs/{IN_WORKTREE}" for w in agents)
+    h_paths = sorted(f"{w}/claudedocs/{IN_WORKTREE}" for w in humans)
+
+    # THE FIXTURE IS DISCRIMINATING: in plain sorted order NEITHER human falls
+    # inside the four shown, so a run that shows them can only be doing so
+    # because of the preference.
+    first_four = sorted(a_paths + h_paths)[:4]
+    assert not [p for p in h_paths if p in first_four], (a_paths, h_paths)
+
+    tok = repo / "claudedocs" / IN_WORKTREE
+    gaps = gap_lines(run_resume(repo, stub_bin, str(tok), cwd=repo))
+    assert len(gaps) == 1, gaps
+    # both humans first in C order, then the agent checkouts, the UNCAPPED
+    # count of 6, and `and 2 more`.
+    assert gaps[0] == GAP_LEAD_AMBIGUOUS.format(
+        tok=tok, base=IN_WORKTREE, n=6,
+        paths=", ".join(h_paths + a_paths[:2]) + ", and 2 more",
     ) + GAP_REST_NONE, gaps[0]

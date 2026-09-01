@@ -46,7 +46,21 @@ SCRIPT = ROOT / "scripts/resume-state.sh"
 SUITE = "scripts/tests/test_resume_state_handoff_resolution.py"
 
 # (id, shape, description, old, new) — `old` must occur EXACTLY once.
-MUTANTS: list[tuple[str, str, str, str, str]] = [
+#
+# 🔴 THAT "EXACTLY ONCE" IS NOW A GATE, NOT A CONVENTION.
+# `scripts/tests/test_mutation_battery_anchors.py` is COLLECTED and fails on any
+# anchor here that stops occurring exactly once, so the `!! PATTERN OCCURS 0x`
+# class — a row that silently tests nothing after somebody reformats the line it
+# anchors on, twice committed in this repo — is caught by the push that causes
+# it rather than by whoever next runs this file by hand.
+#
+# 🔴 `old`/`new` MAY BE TUPLES OF EQUAL LENGTH, applied in order, each required
+# to occur exactly once — the same mechanism the sibling
+# `mutation_battery_resume_state_skill.py` already carries, for the same reason:
+# some defects are not one edit. A HEADER THAT LIES ABOUT ITS BODY needs the
+# body to change and the header not to, and expressing only half of it would put
+# a false label on the one instrument whose purpose is quotable evidence.
+MUTANTS: list[tuple[str, str, str, str | tuple, str | tuple]] = [
     # ---- deletion --------------------------------------------------------
     ("M1", "deletion", "drop the parent-directory (claudedocs) test",
      '    case "$dir" in */claudedocs|claudedocs) ;; *) continue ;; esac\n', ""),
@@ -321,6 +335,51 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
                         "the sentence reports 0 worktrees while listing four",
      '          n_amb=$((n_amb + 1))\n          case "$cand" in\n',
      '          case "$cand" in\n'),
+    # ---- #1197 audit round 2: the classification PATTERN itself --------------
+    #
+    # X11/X12 remove and invert the PREFERENCE; nothing varied the glob that
+    # decides which class a candidate lands in. Both variants below demote a
+    # real, human-owned worktree into the "disposable, do not suggest" class,
+    # and both SURVIVED until
+    # `test_the_EPHEMERAL_classification_needs_the_WHOLE_agent_worktree_PATH`
+    # supplied a candidate of each shape — every earlier fixture's humans
+    # matched neither `.claude/` nor `agent-`.
+    ("X14", "widening", "the ephemeral test drops down to `.claude/`, so a "
+                        "human worktree that merely LIVES under .claude/ is "
+                        "demoted out of the four shown",
+     '            */.claude/worktrees/agent-*) eph_amb="$eph_amb$cand"$\'\\n\' ;;\n',
+     '            */.claude/*) eph_amb="$eph_amb$cand"$\'\\n\' ;;\n'),
+    ("X15", "widening", "the ephemeral test keeps only `agent-`, so a worktree "
+                        "with an `agent-…` component anywhere is demoted",
+     '            */.claude/worktrees/agent-*) eph_amb="$eph_amb$cand"$\'\\n\' ;;\n',
+     '            */agent-*) eph_amb="$eph_amb$cand"$\'\\n\' ;;\n'),
+    # ---- #1197 audit round 2: the trailing-slash strip -----------------------
+    ("X16", "deletion", "`<repo>//claudedocs/<base>` stops naming this tree, "
+                        "because `${ydir##*/}` of `devrc/` is the empty string",
+     '        while [ "$ydir" != "${ydir%/}" ]; do ydir=${ydir%/}; done\n',
+     "        :\n"),
+    # ---- #1197 audit round 2: F7's assertion, proven to be the KILLER --------
+    #
+    # 🔴 THIS ROW EXISTS TO MAKE ONE ASSERTION REACHABLE, and the handoff doc
+    # cites it. F7 replaced `assert doc not in handoff_line(out)` — which could
+    # not fail, the line above having already pinned that string — with
+    # `assert doc not in out`. Every OTHER mutant that reddens
+    # `test_a_prose_path_that_does_NOT_exist_is_not_taken` trips the
+    # `handoff_line(out)` equality FIRST (W9, for one: the fallback runs, so the
+    # `handoff:` line names the doc), which proves nothing about the whole-`out`
+    # form. TWO SITES, because that is what the defect is: the fallback runs
+    # (body) while the `handoff:` line still reports nothing found (header) —
+    # the count/body skew of M32, one layer up. Under it the digest reconciles a
+    # document and only the whole-`out` assertion can see it.
+    ("X17", "header/body skew",
+     "the fallback runs for a NAMED path AND the `handoff:` line still reports "
+     "(none found), so the digest reconciles a document the header denies",
+     ('    if [ -z "$named_missing" ]; then\n',
+      '  if [ -n "$HANDOFF" ]; then\n'
+      '    # The `handoff:` line names the FILE and nothing else'),
+     ('    if true; then\n',
+      '  if false; then\n'
+      '    # The `handoff:` line names the FILE and nothing else')),
 ]
 
 
@@ -354,12 +413,22 @@ def main() -> int:
 
         survived: list[str] = []
         for mid, shape, desc, old, new in MUTANTS:
-            n = orig.count(old)
-            if n != 1:
-                print(f"{mid:4} {shape:16} !! PATTERN OCCURS {n}x — NOT APPLIED — {desc}")
+            # One edit or several: a tuple means every pair is applied in order,
+            # and EACH is still required to occur exactly once. A multi-site
+            # mutant whose second half silently did not apply would be scored on
+            # the first half alone — which is a DIFFERENT mutation than the row
+            # describes, reported under the row's name.
+            pairs = list(zip(old, new)) if isinstance(old, tuple) else [(old, new)]
+            counts = [orig.count(o) for o, _ in pairs]
+            if any(n != 1 for n in counts):
+                shown_n = counts[0] if len(counts) == 1 else counts
+                print(f"{mid:4} {shape:16} !! PATTERN OCCURS {shown_n}x — NOT APPLIED — {desc}")
                 survived.append(mid)
                 continue
-            SCRIPT.write_text(orig.replace(old, new), encoding="utf-8")
+            mutated = orig
+            for o, nw in pairs:
+                mutated = mutated.replace(o, nw)
+            SCRIPT.write_text(mutated, encoding="utf-8")
             nf, _np, killers = run_suite()
             if not nf:
                 survived.append(mid)

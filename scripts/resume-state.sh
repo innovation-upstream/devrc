@@ -465,6 +465,24 @@ embedded_md_path(){
     # itself a checkout" does NOT catch it; the discriminator has to be the
     # NAME, not the resolvability.
     #
+    # 🔴 AND THE NAME IS ALL IT IS — A RESIDUAL, SAID OUT LOUD. This does NOT
+    # mean "a foreign tree is never re-anchored": the test is `<Y>`'s LAST
+    # COMPONENT, so ANY relative token whose directory part ends in a component
+    # spelled like this checkout re-anchors here, wherever it actually points.
+    # MEASURED 2026-09-01 from a checkout named `devrc`, both with NO gap:
+    #
+    #   backup/devrc/claudedocs/<base>        -> resolves THIS repo's copy
+    #   ../elsewhere/devrc/claudedocs/<base>  -> resolves THIS repo's copy
+    #
+    # It is the unavoidable cost of a name-based discriminator, not an
+    # oversight, and it is bounded: a foreign tree with a DIFFERENT last
+    # component misses, the compare is case-SENSITIVE so `DEVRC/claudedocs/…`
+    # misses, and an ABSOLUTE token never re-anchors at all. Widening the
+    # discriminator needs one that a foreign SIBLING fails, which `-d` does not
+    # (above). Pinned by `test_a_FOREIGN_tree_whose_LAST_COMPONENT_matches_this
+    # _repo_STILL_re_anchors` and stated in SKILL.md, so nobody reads the gate
+    # as stronger than it is.
+    #
     # ⚠ THIS NARROWS A LEGITIMATE-BUT-AMBIGUOUS CASE, DELIBERATELY. A relative
     # token naming a SIBLING WORKTREE OF THE SAME CLONE — `devrc-topic/
     # claudedocs/x.md` typed from `devrc` — now misses. It is the safe
@@ -483,6 +501,14 @@ embedded_md_path(){
       claudedocs) mine=1 ;;
       */claudedocs)
         ydir=${dir%/claudedocs}
+        # `<repo>//claudedocs/<base>` — what a `"${d}/claudedocs/…"` splice
+        # emits when `$d` already ends in `/`, and a spelling of the SAME
+        # kickoff shape. Without this strip `${ydir##*/}` is the empty string,
+        # which can never equal a repo's directory name, so a token that
+        # unambiguously names this tree missed. It cannot widen the
+        # discriminator: dropping trailing `/` can only ever expose a component
+        # that was already there, never turn a foreign name into this one.
+        while [ "$ydir" != "${ydir%/}" ]; do ydir=${ydir%/}; done
         if [ -n "$root" ] && [ "${ydir##*/}" = "${root##*/}" ]; then mine=1; fi
         ;;
     esac
@@ -520,13 +546,11 @@ embedded_md_path(){
       # separates them puts the doc in the BASE CLONE with no worktree
       # (`test_a_FOREIGN_relative_token_is_not_re_anchored_on_THIS_repos_own_copy`).
       #
-      # 🔴 DO NOT REFORMAT THE NEXT LINE. X1's mutation anchor is that whole
-      # line verbatim, `*)` and `if` together. Splitting it across two lines —
-      # to insert a comment exactly like this one — makes the pattern match 0x,
-      # and the row then reports NOT APPLIED instead of testing anything.
-      # MEASURED: that is what commit 60c893b7 did here, and it is the same
-      # defect #1115.1 fixed in `mutants-handoff-cap.sh`. Put prose above the
-      # `case`, never between `*)` and its command.
+      # 🔴 DO NOT REFORMAT THE NEXT LINE — X1's mutation anchor is that whole
+      # line verbatim, `*)` and `if` together (`60c893b7` split it to insert a
+      # comment and the row silently went to 0x). This comment is no longer the
+      # guard: `scripts/tests/test_mutation_battery_anchors.py` fails the gate
+      # on ANY battery anchor that stops occurring exactly once.
       *) if [ -n "$mine" ] && [ -n "$root" ] && [ -f "$root/claudedocs/$base" ]; then
            hit="$root/claudedocs/$base"; break
          fi
@@ -549,11 +573,13 @@ embedded_md_path(){
     # "the caller named a specific document" about a pattern that names a
     # class. Since #1164 part 2 that costs the whole digest: `named_missing`
     # suppresses the fallback chain, so the run reconciles NOTHING. The literal
-    # `claudedocs/handoff-*.md` appears twice in /resume's own SKILL.md prose,
-    # which this script's argument carries through VERBATIM. A token carrying a
-    # shell metacharacter is dropped from the miss bookkeeping instead — the
-    # run degrades to the ordinary no-match path it took before the scan
-    # existed.
+    # `claudedocs/handoff-*.md` appears in /resume's own SKILL.md prose, which
+    # this script's argument carries through VERBATIM — no count here on
+    # purpose: it read "twice" against a MEASURED 4 occurrences on 3 lines, and
+    # a number nothing enforces is one edit from being wrong again. A token
+    # carrying a shell metacharacter is dropped from the miss bookkeeping
+    # instead — the run degrades to the ordinary no-match path it took before
+    # the scan existed.
     case "$tok" in
       *'*'*|*'?'*|*'['*) continue ;;
     esac

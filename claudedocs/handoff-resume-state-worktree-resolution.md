@@ -23,8 +23,12 @@ linked worktrees by construction — `claude/RULES.md` makes worktree isolation 
 default for any file-modifying agent — so this fires on the repo's own mandated workflow.
 
 ## State now
-- 🔴 **PR #1197 is OPEN** — `fix/resume-state-worktree-resolution`, head `6f4d748b`,
-  closing **#1164**. Branched off `d86e5f81`. Not merged.
+- 🔴 **PR #1197 is OPEN** — `fix/resume-state-worktree-resolution`, head `cf1b6f81`,
+  closing **#1164**. Branched off `d86e5f81`. Not merged. *(This line said `6f4d748b`,
+  which is two commits back — `6f4d748b` was the head when the sentence was written and
+  `f8309584`/`cf1b6f81` landed after it. A recorded sha ages; re-read
+  `git rev-parse HEAD` rather than this line.)* **Audit round 2's fixes are in the working
+  tree, uncommitted, on top of `cf1b6f81`.**
 - 🔴 **I MISDIAGNOSED A MUTANT AS SHIPPED CODE, committed the false claim as
   `60c893b7`, and retracted it in `6f4d748b`.** I ran the mutation battery — which
   rewrites `scripts/resume-state.sh` IN PLACE, once per mutant — in this worktree while a
@@ -70,7 +74,18 @@ default for any file-modifying agent — so this fires on the repo's own mandate
   no clone at all); F3 `SKILL.md:20`'s "never the one you are standing in" corrected per
   input class; F4 `LC_ALL=C sort -u` plus a human-named-before-`agent-*` display preference;
   F5 tokens containing `* ? [` are dropped from `named_missing`; F7 a vacuous assertion
-  replaced with the whole-`out` form and proven reachable under a mutant.
+  replaced with the whole-`out` form.
+- 🔴 **F7's "proven reachable under a mutant" WAS AN UNBACKED CLAIM WHEN IT WAS WRITTEN,
+  and is backed now.** Round 2's auditor traced every battery row that reddens
+  `test_a_prose_path_that_does_NOT_exist_is_not_taken` and found the `handoff_line(out)`
+  equality on the line ABOVE fires first in each — W9, for one: the fallback runs, so the
+  `handoff:` line names the doc — so no row demonstrated the whole-`out` line was ever the
+  killer. Closed by new mutant **X17**, the first TWO-SITE row in this battery: the
+  fallback runs for a NAMED path (body) AND the `handoff:` printer still emits
+  `(none found — git-only)` (header). MEASURED under it: the equality PASSES and the
+  failure is `assert 'SESSION-HANDOFF.md' not in '## resume-s…'`, i.e. line 649 itself.
+  **A claim that an assertion is reachable is a mutation result; write it after you have
+  the killer, not after you have the intent.**
 - 🔴 **THE MUTATION SWEEP FOUND A REAL SURVIVOR — X1** — dropping the gate from the
   *re-anchor* while keeping it on the *worktree search*. Every foreign-token fixture put the
   doc in a WORKTREE, so the plain re-anchor had nothing to find and no test could see it.
@@ -86,6 +101,42 @@ default for any file-modifying agent — so this fires on the repo's own mandate
   the fix round's original 69/69, which I had wrongly disputed.
 - **Suite: 180 passed.** `bash -n` clean. Behaviour at `6f4d748b` is identical to
   `d756a1f8` — the diff between them is comment-only, checked mechanically.
+
+### Audit round 2 (uncommitted, on top of `cf1b6f81`) — 6 findings, all closed
+- 🔴 **🟡-1 the deploy claim was WRONG in the direction that inverts the fix** — see Next
+  steps 2. `scripts/resume-state.sh` is a plain working-tree file, `SKILL.md` is nix-managed.
+- 🔴 **🟡-2 the DO-NOT-REFORMAT comment is no longer the guard.** New COLLECTED test
+  `scripts/tests/test_mutation_battery_anchors.py` asserts every `MUTANTS` row's `old`
+  pattern occurs EXACTLY ONCE in the script it targets, for BOTH Python batteries, reading
+  their tables by import so a new row is covered automatically. It carries its own two-way
+  ledger of batteries, a 0x/2x negative control and a non-empty positive control.
+  **NEGATIVE CONTROL AGAINST THE REAL DEFECT:** run against
+  `git show 60c893b7:scripts/resume-state.sh` it reports exactly one offender —
+  `X1: occurs 0x` — and 0 offenders at `cf1b6f81`/HEAD. The source comment is kept but
+  shortened; it now points at the test rather than being the mechanism.
+- 🔴 **🟡-3 SKILL.md over-claimed and now states the residual.** "Anything else relative is
+  neither searched nor re-anchored" is stronger than a LAST-COMPONENT comparison:
+  `backup/devrc/claudedocs/<base>` and `../elsewhere/devrc/claudedocs/<base>` re-anchor and
+  resolve THIS repo's copy with no gap. **The discriminator was NOT widened** — no cheap
+  correct one exists that keeps #1159's kickoff shape working (`-d` is ruled out by the
+  foreign-SIBLING shape). Instead: corrected in SKILL.md, stated in the source comment, and
+  PINNED by `test_a_FOREIGN_tree_whose_LAST_COMPONENT_matches_this_repo_STILL_re_anchors`
+  (killed by X6 and X5) plus `test_the_residual_is_BOUNDED_by_the_absolute_and_case_rules`
+  (killed by X3). Invariant guards, not regression tests — said so in the module.
+- **🟢-4 `<repo>//claudedocs/<base>` now resolves.** `$ydir`'s trailing slashes are stripped
+  before the name compare; it cannot widen the discriminator (stripping `/` can only expose
+  a component that was already there). New mutant **X16**; RED before the strip with the
+  measured symptom (`NO SUCH FILE`), plus a control that `other-repo//claudedocs/…` still
+  misses.
+- **🟢-7 the classification PATTERN is now varied.** New mutants **X14** (`*/.claude/*`) and
+  **X15** (`*/agent-*`) — MEASURED SURVIVING all 186 pre-existing tests, exactly as the
+  auditor predicted. Killed by the one new fixture
+  `test_the_EPHEMERAL_classification_needs_the_WHOLE_agent_worktree_PATH`, which holds a
+  human worktree under `.claude/` and one with an `agent-…` component outside it.
+- **Round-2 numbers: battery 73/73 killed, 0 NOT APPLIED, survived: none**, control
+  187 passed / 0 failed (it ABORTS on a red baseline; it did not). Resolution suite 187
+  passed. `bash -n` clean. Run on a QUIESCENT worktree; `scripts/resume-state.sh` verified
+  byte-identical to its pre-battery snapshot afterwards (`cmp`).
 - **Tiers at `60c893b7`** (comment-only different from HEAD): `pytests` PASS
   collected=20105 passed=20102 skipped=3 failed=0 (floor 18383) · `nodetests` PASS
   suites=5 files=41 tests=1449 pass=1449 fail=0.
@@ -119,19 +170,44 @@ default for any file-modifying agent — so this fires on the repo's own mandate
 - **Next probe:** `nix develop ~/workspace/devrc -c python3 scripts/tests/mutation_battery_resume_state.py`
   under `PYTHONDONTWRITEBYTECODE=1`, and grep the output for `NOT APPLIED` before reading any
   `killed` count.
+- ✅ **CLOSED at audit round 2 — do not re-run it as an open question.** Probe executed as
+  written: `NOT APPLIED` count **0**, control **187 passed / 0 failed** (the abort guard
+  did not fire), **73/73 killed, survived: none** — the table has since grown by four rows
+  (X14–X17). The ANCHOR risk this bullet named is no longer carried by a hand-run: it is a
+  collected test (`test_mutation_battery_anchors.py`), so a 0x/2x anchor now fails the gate.
 
 ## Next steps (ranked)
-1. **Read the merged-tree tier results, then delta re-audit `3e42bb04..6f4d748b`, then
-   merge.** Continue the ladder while rounds produce findings; stop on the first clean one,
-   or when two consecutive fix rounds change zero payload lines.
+1. **Commit round 2's working-tree fixes, re-run BOTH tiers on the branch AND on a fresh
+   merged tree, then delta re-audit ROUND 2's diff (`cf1b6f81..HEAD`), then merge.**
+   Round 2 produced 6 findings and all 6 were fixed, so the ladder CONTINUES — an audit fix
+   resets the verification gate, and the delta to audit is round 2's own, not
+   `3e42bb04..cf1b6f81`. Stop on the first round that returns no finding.
+   ⚠ The merged-tree result recorded below was measured at `9bd136a2` and is now stale:
+   round 2 touched 5 files and `origin/main` has moved to `07a22f14`.
    forcing: gate — both required checks block the merge with `enforce_admins: true`.
-2. **After merge, `home-manager switch` (or `scripts/ship.sh`) — merging changes NOTHING.**
-   `scripts/resume-state.sh` and `claude/skills/resume/SKILL.md` are nix-managed, so both
-   hosts keep the OLD behaviour until a switch. `readlink -f` is the arbiter of live-vs-store.
-   forcing: gate — the fix is inert on both hosts until this runs.
+2. 🔴 **After merge run `scripts/ship.sh` — the two halves of this change deploy
+   DIFFERENTLY, and doing only one INVERTS the fix.** This doc previously said both are
+   nix-managed. **`scripts/resume-state.sh` is not.** MEASURED 2026-09-01 with the arbiter
+   `claude/RULES.md` names:
+   ```
+   readlink -f scripts/resume-state.sh          -> itself      (working tree = LIVE)
+   readlink -f ~/.claude/skills/resume/SKILL.md -> /nix/store/…-devrc-claude-skills/…
+   command grep -rn resume-state nix/           -> 0 matches
+   ```
+   `/resume` invokes `bash ~/workspace/devrc/scripts/resume-state.sh` — the working-tree
+   file — so a plain `git pull` makes the NARROWED resolver live immediately, while the
+   deployed `SKILL.md` still says "searches the worktrees of the clone the path NAMED".
+   New behaviour under old instructions is worse than either. `git pull` + `home-manager
+   switch` on BOTH hosts, i.e. `scripts/ship.sh`.
+   forcing: gate — a pull alone ships the new behaviour under the old instructions.
 3. **Close devrc#1160** — four `status`→code associations `claude/skills/handoff/SKILL.md`
-   documents in prose that nothing pins, plus a stale `MIN_TESTS` ledger comment. `SKILL.md`
-   has **7 B** of headroom against its enforced 25,500, so this is a byte-budget decision.
+   documents in prose that nothing pins, plus a stale `MIN_TESTS` ledger comment. The
+   byte budget MOVED and this doc had the old numbers: **#1144 merged (squash `3d0b77e5`)
+   and raised `MAX_BYTES` to 27,000**, so on `origin/main` the enforced budget is
+   `27,000 − 900 = 26,100` against a 25,864 B file — **236 B**, not 7 B against 25,500
+   (those are this BRANCH's stale values: `MAX_BYTES = 26,400`, file 25,496). Re-derive
+   from `scripts/tests/test_handoff_skill_size.py` on the tree you are editing, never from
+   this line; it is still a byte-budget decision, with more room than it looked.
    forcing: none
 4. **Apply the staged dnsmasq fix** — `sudo ~/workspace/devrc/nix/system/apply-dnsmasq-docker-io-pin.sh`.
    Only the operator can run it.
@@ -207,8 +283,10 @@ default for any file-modifying agent — so this fires on the repo's own mandate
   records a MEASURED case where the fallback correctly served exactly that doc — widening the
   suppression to `unresolved` would break it. Guarded by
   `test_a_bare_BASENAME_slug_STILL_falls_back_and_resolves` and
-  `test_the_civitai_slug_STILL_falls_back_and_resolves`; mutant X10 (widen the gate to any
-  supplied argument) is killed by 42 tests including both.
+  `test_the_civitai_slug_STILL_falls_back_and_resolves`; mutant **W10** (widen the gate to
+  any supplied argument) is killed by 42 tests including both. *(This read `X10`, which is
+  a different row — the `LC_ALL=C` locale pin. The battery's ids are not sequential across
+  families; quote the id from the table, not from memory.)*
   *(Carried forward by hand: the merge tool warned this line was being dropped from a REPLACE
   section, and it was right — the reason had vanished from the doc while the code kept the
   behaviour.)*
