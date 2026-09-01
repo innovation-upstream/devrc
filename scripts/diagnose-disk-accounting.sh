@@ -58,22 +58,45 @@ echo
 echo "=== 2. Inodes and allocated bytes per top-level directory ==="
 echo "  -xdev: stays on the root fs. /mnt/rootcheck is EXCLUDED — it is a bind mount"
 echo "  of / and would double-count the entire filesystem."
+echo "  HARDLINKS ARE DEDUPED. find visits every LINK, so a naive '%b' sum counts a"
+echo "  hardlinked file once per link — /nix/store is ~1.46M files hardlinked into"
+echo "  .links, and the 2026-09-01 run over-counted by 32.3M entries / ~664 GiB that"
+echo "  way, producing a NEGATIVE residual. Each inode is now counted once."
 TOTAL_INODES=0
-printf '%14s %12s  %s\n' "INODES" "GiB(alloc)" "PATH"
+TOTAL_DEDUPED=0
+printf '%14s %12s %10s  %s\n' "INODES" "GiB(alloc)" "dup-links" "PATH"
 for d in /*; do
   case "$d" in
     /proc|/sys|/dev|/run|/mnt) continue ;;
   esac
   [ -d "$d" ] || continue
   [ -L "$d" ] && continue
-  read -r n blocks < <(
-    find "$d" -xdev -printf '%b\n' 2>>"$DENIED_LOG" \
-      | awk '{n++; b+=$1} END {print n+0, b+0}'
+  # %y=type %n=link count %i=inode %b=512B blocks. Only non-directories with more
+  # than one link go in the seen[] hash, so it holds multiply-linked FILES only —
+  # directories always have nlink>1 and appear exactly once in find's output.
+  read -r n blocks dups < <(
+    find "$d" -xdev -printf '%y %n %i %b\n' 2>>"$DENIED_LOG" \
+      | awk '{
+          if ($1 != "d" && $2 > 1) { if (seen[$3]++) { dup++; next } }
+          n++; b += $4
+        }
+        END {print n+0, b+0, dup+0}'
   )
   gib=$(echo "$blocks" | awk '{printf "%.1f", $1*512/1073741824}')
-  printf '%14d %12s  %s\n' "$n" "$gib" "$d"
+  printf '%14d %12s %10d  %s\n' "$n" "$gib" "$dups" "$d"
   TOTAL_INODES=$((TOTAL_INODES + n))
+  TOTAL_DEDUPED=$((TOTAL_DEDUPED + dups))
 done
+printf '%14d %12s %10d  TOTAL\n' "$TOTAL_INODES" "" "$TOTAL_DEDUPED"
+echo "  dup-links = extra directory entries pointing at an already-counted inode."
+echo "  A zero in that column for a tree you KNOW is hardlinked (/nix) means the"
+echo "  dedup is not running — treat it as instrument failure, not a clean result."
+echo
+echo "  🔴 STILL DOUBLE-COUNTED, and dedup cannot fix it: BIND MOUNTS of the same"
+echo "  device. /var/lib/kubelet bind-mounts the k3s local-path PVC directories, so"
+echo "  that data is counted under BOTH /var/lib/kubelet and"
+echo "  /var/lib/rancher/k3s/storage. -xdev does not help — same device. Section 5"
+echo "  and section 6 print the two figures separately so you can subtract."
 
 echo
 echo "=== 3. Residual — the number the whole question turns on ==="
@@ -83,18 +106,32 @@ printf 'RESIDUAL        : %d\n' "$((INODES_USED - TOTAL_INODES))"
 echo "A residual near zero means the tree is fully accounted for and the byte column"
 echo "above is the real answer. A large residual means something is STILL unmeasured —"
 echo "read the denial report below before drawing any conclusion from it."
+echo "A NEGATIVE residual means over-counting, never hidden data: hardlinks not"
+echo "deduped (see the dup-links column) or bind-mounted data counted under two paths."
+echo "A small positive residual is expected — the tree moves while this runs."
 
 echo
 echo "=== 4. Blind-spot report (positive control) ==="
-DENIED=$(grep -c 'Permission denied' "$DENIED_LOG" 2>/dev/null || echo 0)
-OTHER=$(grep -vc 'Permission denied' "$DENIED_LOG" 2>/dev/null || echo 0)
-echo "directories find could not read : $DENIED"
-echo "other find errors               : $OTHER"
+# `grep -c` prints 0 AND exits 1 when there are no matches, so `|| echo 0` used to
+# emit a two-line "0\n0" and every later [ -gt ] on it died with "integer expected"
+# — i.e. the denial guard failed exactly when it had something to report. Count
+# with a form that cannot fail, and verify it is a single integer.
+DENIED=$(grep -c 'Permission denied' "$DENIED_LOG" 2>/dev/null; true)
+OTHER=$(grep -c 'No such file or directory' "$DENIED_LOG" 2>/dev/null; true)
+TOTAL_ERR=$(wc -l < "$DENIED_LOG" 2>/dev/null || echo 0)
+case "$DENIED$OTHER" in *[!0-9]*|'') echo "!! denial counter is broken — treat every count above as UNVERIFIED"; DENIED=0; OTHER=0 ;; esac
+UNCLASSIFIED=$((TOTAL_ERR - DENIED - OTHER))
+echo "directories find could not read      : $DENIED"
+echo "vanished mid-scan (benign, transient): $OTHER"
+echo "OTHER, unclassified                  : $UNCLASSIFIED"
 if [ "$DENIED" -gt 0 ]; then
-  echo "!! Running as root and STILL denied — the counts above are floors, not totals."
+  echo "!! Running as root and STILL denied — the counts above are FLOORS, not totals."
   grep 'Permission denied' "$DENIED_LOG" | head -20
 fi
-[ "$OTHER" -gt 0 ] && grep -v 'Permission denied' "$DENIED_LOG" | head -20
+if [ "$UNCLASSIFIED" -gt 0 ]; then
+  echo "-- unclassified errors (read these; they are not known-benign) --"
+  grep -v 'Permission denied' "$DENIED_LOG" | grep -v 'No such file or directory' | head -20
+fi
 
 echo
 echo "=== 5. k3s local-path PVCs (unreadable without root; the prior '1.7GB' claim) ==="
@@ -132,7 +169,25 @@ printf 'store paths     : %d\n' "$(ls /nix/store/ 2>/dev/null | wc -l)"
 
 echo
 echo "=== 6c. /home breakdown (top 15 by allocated size) ==="
-du -sh -x /home/*/.* /home/*/* 2>/dev/null | sort -rh | head -15
+# The old glob was `/home/*/.* /home/*/*`, which expands `.` and `..` per user and
+# made du walk /home twice and print nothing usable. Enumerate depth-2 instead.
+find /home -xdev -mindepth 2 -maxdepth 2 -print0 2>/dev/null \
+  | xargs -0 -r du -sh -x 2>/dev/null | sort -rh | head -15
+
+echo
+echo "=== 6d. /tmp breakdown — MEASURED 2026-09-01 as the largest inode consumer ==="
+echo "  78,501,285 entries / 469 GiB, 81% of this filesystem's inodes. /tmp is on"
+echo "  the ROOT partition here, not tmpfs, so nothing clears it at boot."
+printf 'top-level entries : %d\n' "$(ls -A /tmp 2>/dev/null | wc -l)"
+echo "--- top 15 by allocated size ---"
+du -sh -x /tmp/* 2>/dev/null | sort -rh | head -15
+echo "--- top 15 by inode count ---"
+find /tmp -xdev -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null \
+  | xargs -0 -r -I{} sh -c 'printf "%12d  %s\n" "$(find "{}" -xdev -printf . 2>/dev/null | wc -c)" "{}"' \
+  | sort -rn | head -15
+echo "--- entry-name families (what is generating them) ---"
+ls -A /tmp 2>/dev/null | sed -E 's/[0-9]{3,}.*$//; s/[A-Za-z0-9]{8,}$//' \
+  | sort | uniq -c | sort -rn | head -20
 
 echo
 echo "=== 7. Deleted-but-open files ==="
