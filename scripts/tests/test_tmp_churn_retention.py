@@ -49,7 +49,7 @@ FRESH_CONFIG = f"""{{ config, pkgs, ... }}:
 # The glob added after the script had already shipped. Case 1 above is the reason
 # this constant is spelled out separately rather than read from the ledger: the
 # test must know which rule is the LATE one.
-LATE_RULE = '"e /tmp/nix-shell.* - - - m:7d"'
+LATE_RULE = '"e /tmp/nix-shell.* - - - mM:7d"'
 
 
 def _script_text() -> str:
@@ -57,29 +57,51 @@ def _script_text() -> str:
 
 
 def _extract_inserter() -> str:
-    """The body of the `python3 - "$CFG" <<'PY' … PY` heredoc, verbatim."""
+    """The body of the `python3 - "$CFG" "${TMPFILES_RULES[@]}" <<'PY' … PY` heredoc.
+
+    The ledger moved OUT of this heredoc on 2026-09-01 and is now a bash array
+    passed on argv, so the inserter and the post-write verifier read one
+    definition. This regex therefore tolerates arguments after "$CFG" — but see
+    `test_the_inserter_and_the_verifier_read_ONE_ledger`, which pins that they
+    both actually reference it.
+    """
     text = _script_text()
-    m = re.search(r"^python3 - \"\$CFG\" <<'PY'\n(.*?)^PY$", text, re.M | re.S)
+    m = re.search(r"^python3 - \"\$CFG\"[^\n]*<<'PY'\n(.*?)^PY$", text, re.M | re.S)
     assert m, "could not find the python heredoc — has the script's shape changed?"
     body = m.group(1)
     assert "systemd.tmpfiles.rules" in body, "extracted the wrong block"
     return body
 
 
-def _python_rules() -> list[str]:
-    """The RULES ledger as the inserter itself defines it."""
-    body = _extract_inserter()
-    m = re.search(r"^RULES = \[\n(.*?)^\]$", body, re.M | re.S)
-    assert m, "could not find the RULES ledger in the inserter"
-    return re.findall(r"'\s*(\"e /tmp/.*?\")\s*'", m.group(1))
-
-
-def _shell_verified_rules() -> list[str]:
-    """The rules the script re-reads off disk after writing, in its `for` loop."""
+def _bash_ledger() -> list[str]:
+    """The single TMPFILES_RULES ledger, as the shipped script defines it."""
     text = _script_text()
-    m = re.search(r"^for _rule in \\\n(.*?)^do$", text, re.M | re.S)
-    assert m, "could not find the post-write verification loop"
-    return re.findall(r"'(e /tmp/.*?)'", m.group(1))
+    m = re.search(r"^TMPFILES_RULES=\(\n(.*?)^\)$", text, re.M | re.S)
+    assert m, "could not find the TMPFILES_RULES ledger — has the script's shape changed?"
+    return re.findall(r"^\s*'(e /tmp/[^']*)'", m.group(1), re.M)
+
+
+def _python_rules() -> list[str]:
+    """The ledger in the quoted form the inserter writes into configuration.nix.
+
+    Reads the SAME array the script passes on argv, so there is still no second
+    copy of the rules here to drift out of sync.
+    """
+    return [f'"{r}"' for r in _bash_ledger()]
+
+
+def _verifier_iterates_the_ledger() -> bool:
+    """Does the post-write verification loop iterate the ONE ledger?
+
+    It used to carry its own hardcoded copy of the rules, which this module
+    compared against the inserter's. That comparison is obsolete now that there is
+    a single array — but the property it protected is not, so it is pinned
+    structurally instead: a verifier that stopped reading TMPFILES_RULES would
+    once again be able to "verify" a rule set it never looked at.
+    """
+    return re.search(
+        r'^for _rule in "\$\{TMPFILES_RULES\[@\]\}"; do$', _script_text(), re.M
+    ) is not None
 
 
 def _run_inserter(tmp_path: Path, config_text: str) -> tuple[int, str, str, str]:
@@ -89,7 +111,7 @@ def _run_inserter(tmp_path: Path, config_text: str) -> tuple[int, str, str, str]
     src = tmp_path / "inserter.py"
     src.write_text(_extract_inserter())
     proc = subprocess.run(
-        [sys.executable, str(src), str(cfg)],
+        [sys.executable, str(src), str(cfg), *_bash_ledger()],
         capture_output=True,
         text=True,
     )
@@ -99,19 +121,28 @@ def _run_inserter(tmp_path: Path, config_text: str) -> tuple[int, str, str, str]
 # ---------------------------------------------------------------- the ledger --
 
 
-def test_the_shell_verification_ledger_equals_the_python_rule_ledger():
+def test_the_inserter_and_the_verifier_read_ONE_ledger():
     """A rule written but never re-read off disk is unverified; a rule verified but
-    never written is a permanently-failing check. The two lists must be the SAME
-    set — this fails when either grows or shrinks, not merely when one is empty."""
-    written = {r.strip('"') for r in _python_rules()}
-    verified = set(_shell_verified_rules())
+    never written is a permanently-failing check.
 
-    assert written, "the python RULES ledger parsed empty — the extractor is broken"
-    assert verified, "the shell verification loop parsed empty — the extractor is broken"
-    assert written == verified, (
-        "the rules the script WRITES and the rules it VERIFIES have diverged.\n"
-        f"  written but not verified: {sorted(written - verified)}\n"
-        f"  verified but not written: {sorted(verified - written)}"
+    Until 2026-09-01 those were two hardcoded lists and this test compared them as
+    SETS. They are now one bash array, so the property is pinned at its source
+    instead: the ledger exists and is non-empty, the inserter is handed it on
+    argv, and the verifier iterates that same array. Any of the three breaking
+    re-opens the divergence this test has always been about.
+    """
+    ledger = _bash_ledger()
+    assert ledger, "the TMPFILES_RULES ledger parsed empty — the extractor is broken"
+
+    assert re.search(
+        r'^python3 - "\$CFG" "\$\{TMPFILES_RULES\[@\]\}" <<\'PY\'$',
+        _script_text(),
+        re.M,
+    ), "the inserter is no longer handed TMPFILES_RULES on argv"
+
+    assert _verifier_iterates_the_ledger(), (
+        "the post-write verification loop no longer iterates TMPFILES_RULES — it "
+        "can now 'verify' a rule set it never looked at"
     )
 
 
