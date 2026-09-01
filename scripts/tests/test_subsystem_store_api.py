@@ -5507,6 +5507,27 @@ class TestAuditLogCannotBeForged:
         assert f"token={api.token_id(GOOD_TOKEN)}" in line
 
 
+def _smuggling_verdict(responses: "list[bytes]", what: str) -> str:
+    """Say WHICH WAY a smuggling count was wrong — 0 and 2 are opposite bugs.
+
+    🔴 The same mis-description devrc#1165 was about, in the sibling family.
+    "a GET body was re-parsed as a request" is a sentence about `2`, asserted by
+    a predicate that also fails at `0` — and `0` is what an empty read produces.
+    A reader that returned nothing would have accused the server of smuggling.
+    """
+    if not responses:
+        return (
+            f"NO complete response came back for {what}. The read was EMPTY or "
+            "PARTIAL — the server did not answer, or had not answered yet. "
+            "NOTHING was re-parsed as a request; this is not a smuggling result "
+            "at all, and re-reading it as one is how this flake was misdiagnosed."
+        )
+    return (
+        f"{len(responses)} responses came back for {what} — the body WAS "
+        f"re-parsed as a request on the same connection: {responses!r}"
+    )
+
+
 class TestNoRequestSmuggling:
     """🔴 CRITICAL. The server keeps connections alive and never read request
     bodies, so a body was parsed as the NEXT request on the same socket.
@@ -5518,24 +5539,23 @@ class TestNoRequestSmuggling:
     attacker chose.
     """
 
-    def _raw(self, host: str, payload: bytes, expect: int = 2) -> list[bytes]:
-        """Write raw bytes on ONE socket and read every response that comes back."""
-        import socket
+    def _raw(self, host: str, payload: bytes, expect: int = 1) -> list[bytes]:
+        """Write raw bytes on ONE socket and read every response that comes back.
 
-        host_name, port = host.split(":")
-        with socket.create_connection((host_name, int(port)), timeout=10) as sock:
-            sock.sendall(payload)
-            sock.settimeout(5)
-            chunks = []
-            try:
-                while True:
-                    chunk = sock.recv(65536)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-            except (TimeoutError, OSError):
-                pass
-        return b"".join(chunks).split(b"HTTP/1.1 ")[1:]
+        🔴 `expect` USED TO BE DECLARED AND NEVER READ, which is worse than not
+        having it: the signature advertised "I wait for this many" while the
+        body read until a 5 s timeout and returned whatever had arrived, and
+        every caller took the default without passing anything. A parameter is
+        not a code path. It is now the bound the reader actually waits on.
+
+        Reads through `_raw_exchange` (defined further down, at the desync
+        tests) rather than open-coding a second socket loop — that duplicate is
+        how this family kept the empty-read race after the other one was fixed.
+        Only the SPLIT pieces are returned here, which is the difference that
+        justified two helpers in the first place.
+        """
+        raw, _eof = _raw_exchange(host, payload, expect=expect)
+        return _responses(raw)
 
     def test_a_POST_BODY_is_not_served_as_the_next_request(self, store: Path):
         """The end-to-end property. ⚠ It is defended by BOTH layers, so a sweep
@@ -5560,8 +5580,8 @@ class TestNoRequestSmuggling:
                 f"Content-Length: {len(smuggled)}\r\n\r\n"
             ).encode() + smuggled
             responses = self._raw(host, payload)
-        assert len(responses) == 1, (
-            f"the body was re-parsed as a request: {len(responses)} responses"
+        assert len(responses) == 1, _smuggling_verdict(
+            responses, "a POST whose BODY held a complete second request line"
         )
         assert POINTER_LINE.encode() not in b"".join(responses)
 
@@ -5586,7 +5606,9 @@ class TestNoRequestSmuggling:
                 f"Content-Length: {len(smuggled)}\r\n\r\n"
             ).encode() + smuggled
             responses = self._raw(host, payload)
-        assert len(responses) == 1, "a GET body was re-parsed as a request"
+        assert len(responses) == 1, _smuggling_verdict(
+            responses, "a GET with a BODY on a deliberately kept-alive connection"
+        )
         assert POINTER_LINE.encode() not in b"".join(responses)
 
     def test_POSITIVE_CONTROL_the_raw_harness_CAN_see_two_responses(
@@ -5600,8 +5622,12 @@ class TestNoRequestSmuggling:
             one = (
                 f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n\r\n"
             ).encode()
-            responses = self._raw(host, one + one)
-        assert len(responses) == 2, f"the harness cannot see two: {len(responses)}"
+            responses = self._raw(host, one + one, expect=2)
+        assert len(responses) == 2, (
+            f"the harness cannot see two responses on one connection: "
+            f"{len(responses)} came back ({responses!r}). Every 'exactly 1' "
+            "assertion in this class is vacuous until this passes."
+        )
 
     def test_a_rejected_request_does_not_keep_its_connection(self, store: Path):
         with running(store) as (base, _):
@@ -5611,7 +5637,9 @@ class TestNoRequestSmuggling:
                 f"CF-Connecting-IP: {CLIENT_IP}\r\n\r\n"
             ).encode()
             responses = self._raw(host, bad + bad)
-        assert len(responses) == 1, "a 401 left the connection open for reuse"
+        assert len(responses) == 1, _smuggling_verdict(
+            responses, "two pipelined requests the FIRST of which is a 401"
+        )
         assert b"Connection: close" in responses[0]
 
 
@@ -13551,7 +13579,60 @@ BULLET_BACKSTOP = "the anchor windlass trips its breaker on a cold morning"
 BULLET_AFTER_PUT = "the chart plotter loses its fix under the bridge"
 
 
-def _raw_exchange(host: str, payload: bytes, *, settle: float = 3.0):
+# 🔴 HOW LONG THE RAW READER LINGERS *AFTER* THE RESPONSES IT WAS TOLD TO EXPECT
+# HAVE ARRIVED, watching for an extra one. This is a DRAIN bound in the sense
+# `test_the_drain_bounds_were_NOT_swept_into_the_hang_bound` means it: it is paid
+# in full by every PASSING run, so it stays small and must never be swept onto
+# `HANG_TIMEOUT`. It is NOT the bound that decides whether the answer arrived —
+# that is the completion wait below, and conflating the two is the defect this
+# constant was extracted to make impossible to re-introduce.
+RAW_SETTLE_S = 3.0
+
+# Poll granularity for the completion wait. Deliberately small: every `settimeout`
+# in this file stays a drain-sized number, and the OVERALL deadline is enforced by
+# the loop re-checking the clock instead of by one long `settimeout`. Written this
+# way on purpose — a single `sock.settimeout(HANG_TIMEOUT)` would be the exact
+# sweep the drain guard forbids, and would also make a passing run pay 60 s.
+RAW_POLL_S = 0.5
+
+
+def _complete_responses(raw: bytes) -> int:
+    """How many FULLY-FRAMED responses `raw` holds.
+
+    🔴 THE POINT IS TO TELL "NOT YET" FROM "NEVER". A byte count cannot: a
+    response that is half-written and a response that will never come look
+    identical from the reader's side, and the whole flake below is what happens
+    when a reader treats the first as the second.
+
+    Framing is exact rather than heuristic because `server.py:_respond` is the
+    ONLY thing that writes a response and it ALWAYS sends `Content-Length`
+    (`/healthz` and the uniform 401 included — `send_error` is overridden to go
+    through `_respond` too). A response whose headers are incomplete, or whose
+    body has not all arrived, counts as NOT complete; so does one with no
+    `Content-Length`, since an unframeable response cannot be known to have
+    ended. ⚠ Assumes no HEAD on a raw socket, which no caller in this file does:
+    a HEAD reply advertises a length it never sends, and would read as forever
+    incomplete.
+    """
+    n, pos = 0, 0
+    while True:
+        head_end = raw.find(b"\r\n\r\n", pos)
+        if head_end < 0:
+            return n
+        head = raw[pos:head_end]
+        match = re.search(rb"\r\ncontent-length:[ \t]*(\d+)", head, re.I)
+        if match is None:
+            return n
+        end = head_end + 4 + int(match.group(1))
+        if len(raw) < end:
+            return n
+        n += 1
+        pos = end
+
+
+def _raw_exchange(
+    host: str, payload: bytes, *, expect: int = 1, settle: float = RAW_SETTLE_S
+):
     """Send `payload` on ONE socket; return `(every byte that came back, saw_eof)`.
 
     🔴 THE RAW SOCKET IS THE ONLY INSTRUMENT THAT CAN SEE THIS DEFECT. `urllib`
@@ -13564,31 +13645,121 @@ def _raw_exchange(host: str, payload: bytes, *, settle: float = 3.0):
 
     Deliberately NOT `TestNoRequestSmuggling._raw`: that one returns only the
     split pieces, and the assertion below needs the UNSPLIT bytes to say
-    "nothing trailed the first response".
+    "nothing trailed the first response". (That helper now delegates HERE for
+    its reading, so there is one reader rather than two that drift.)
+
+    🔴 TWO BOUNDS, AND COLLAPSING THEM INTO ONE IS THE FLAKE (devrc#1165).
+    This helper used to `settimeout(3.0)` and read until that expired, treating
+    the timeout as "the server has finished talking". Under the disk contention
+    PR #1181 measured, a response that takes longer than 3 s to start is
+    ordinary — so the reader returned an EMPTY buffer, no exception was raised
+    anywhere, and the failure surfaced further down as `len(answers) == 0`
+    against a message about a SECOND response. Four CI runs were read as a
+    response-desync defect when the server had simply not answered yet.
+
+      * PHASE 1 — WAIT FOR AN ANSWER. Read until `expect` responses are fully
+        framed, or EOF, bounded by `HANG_TIMEOUT`. Costs nothing on a healthy
+        run (it stops the instant the last byte of the response lands) and
+        raises a message that says HANG when it does give up.
+      * PHASE 2 — THEN LINGER `settle`, which is what actually detects the extra
+        response these tests exist to catch. Unchanged in value and meaning.
+
+    So a slow server is now slow rather than silent, and only a server that
+    never answers fails — with a sentence naming that.
     """
     import socket
 
     name, port = host.split(":")
-    chunks: "list[bytes]" = []
+    buf = b""
     saw_eof = False
     with socket.create_connection((name, int(port)), timeout=10) as sock:
+        # 🔴 SEND UNDER THE CONNECT TIMEOUT, not under the poll slice. Setting
+        # the poll bound first would put a 0.5 s deadline on `sendall`, which is
+        # a send bound nobody asked for and a new flake on a slow write.
         sock.sendall(payload)
-        sock.settimeout(settle)
-        try:
-            while True:
+        sock.settimeout(RAW_POLL_S)
+
+        deadline = time.monotonic() + HANG_TIMEOUT
+        while not saw_eof and _complete_responses(buf) < expect:
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"NO complete response within {HANG_TIMEOUT:g}s: expected "
+                    f"{expect}, framed {_complete_responses(buf)} from "
+                    f"{len(buf)} bytes: {buf!r}. THE SERVER DID NOT ANSWER IN "
+                    "TIME — this is a hang or an I/O stall on the server side, "
+                    "NOT a wrong number of responses. Do not read it as a "
+                    "desync, and do not raise this bound: see HANG_TIMEOUT."
+                )
+            try:
                 chunk = sock.recv(65536)
-                if not chunk:
-                    saw_eof = True
-                    break
-                chunks.append(chunk)
-        except (TimeoutError, OSError):
-            pass
-    return b"".join(chunks), saw_eof
+            except TimeoutError:
+                continue  # poll slice expired; the deadline above is the bound
+            except OSError:
+                break
+            if not chunk:
+                saw_eof = True
+                break
+            buf += chunk
+
+        # 🔴 The extra-response watch. It runs even once `expect` are in hand —
+        # that is the entire point, and shortening it blunts every desync
+        # assertion below without failing any of them.
+        linger_until = time.monotonic() + settle
+        while not saw_eof and time.monotonic() < linger_until:
+            try:
+                chunk = sock.recv(65536)
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            if not chunk:
+                saw_eof = True
+                break
+            buf += chunk
+    return buf, saw_eof
 
 
 def _responses(raw: bytes) -> "list[bytes]":
     """The status lines + everything after them, one per response on the wire."""
     return raw.split(b"HTTP/1.1 ")[1:]
+
+
+def _one_response(raw: bytes, what: str, *, saw_eof: "bool | None" = None) -> "list[bytes]":
+    """Assert `raw` holds EXACTLY ONE response, saying WHICH WAY it was wrong.
+
+    🔴 THE MESSAGE MUST DISCRIMINATE 0 FROM 2, BECAUSE THOSE ARE OPPOSITE BUGS
+    WITH OPPOSITE FIXES (devrc#1165). Every site here used to be spelled
+
+        assert len(answers) == 1, "a SECOND complete response followed ..."
+
+    which is a sentence about `> 1` attached to a predicate that also fails at
+    `0`. In CI it failed at `0` — `raw` was `b''` — and reported a response
+    desync that had not happened. Four runs, three sessions and two wrong
+    diagnoses came out of that one mis-description, so the count is now reported
+    by the branch that actually fired rather than by whichever case the author
+    had in mind.
+
+    `what` names the request under test, so the sentence identifies the site
+    without the reader having to resolve a line number that shifts whenever a
+    comment above it is edited.
+    """
+    answers = _responses(raw)
+    if len(answers) == 1:
+        return answers
+    eof = "" if saw_eof is None else f" (saw_eof={saw_eof})"
+    if not answers:
+        raise AssertionError(
+            f"NO complete response came back for {what}{eof}: {raw!r}. The read "
+            "was EMPTY or PARTIAL — either the request vanished without an "
+            "answer, or the server had not answered yet and the reader stopped "
+            "waiting. THIS IS NOT A SECOND RESPONSE and is not a desync; a "
+            "trailing-response bug reports as 2 below, never as 0."
+        )
+    raise AssertionError(
+        f"{len(answers)} responses came back for {what}{eof} — a SECOND "
+        f"complete response followed the first on ONE connection, which a "
+        f"pooling proxy hands to the next client: {raw!r}"
+    )
 
 
 def _request(host: str, method: str, target: str, body: bytes | None = None) -> bytes:
@@ -13601,6 +13772,162 @@ def _request(host: str, method: str, target: str, body: bytes | None = None) -> 
     if body is None:
         return (head + "\r\n").encode()
     return (head + f"Content-Length: {len(body)}\r\n\r\n").encode() + body
+
+
+class TestTheRawReaderWaitsForTheAnswerItWasPromised:
+    """🔴 THE REGRESSION GUARD FOR devrc#1165 — RED AT THE PARENT COMMIT.
+
+    Unlike almost everything else in this file, these are NOT invariant guards.
+    There was a real defect: `_raw_exchange` read with a single 3 s
+    `settimeout` and treated its expiry as "the server has finished talking",
+    so a server slower than 3 s returned an EMPTY buffer with no exception
+    anywhere. `tekton/devrc-pytests` failed four times on it, on three
+    different test names, and every report named a SECOND response that did not
+    exist.
+
+    Each test below fails at the parent commit, and the matrix is in the PR
+    body. They use a stub TCP server rather than the real one: the property is
+    "the reader waits for a slow answer", which does not depend on what is
+    slow, and pinning it to `server.py`'s fsync would re-pin it to the one
+    cause that happened to be observed.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _slow_server(delay: float, reply: bytes, *, repeat: int = 1):
+        """A socket that accepts, waits `delay`, then writes `reply` `repeat` times."""
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+
+        def serve():
+            try:
+                conn, _addr = srv.accept()
+            except OSError:
+                return
+            with conn:
+                conn.recv(65536)
+                time.sleep(delay)
+                try:
+                    conn.sendall(reply * repeat)
+                except OSError:
+                    # The client gave up and closed — exactly the BrokenPipeError
+                    # the CI failures printed alongside the empty read.
+                    return
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            yield f"127.0.0.1:{srv.getsockname()[1]}"
+        finally:
+            srv.close()
+            thread.join(timeout=10)
+
+    # A complete, correctly framed response — the thing the reader must wait for.
+    _REPLY = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nCache-Control: no-store\r\n\r\nok"
+
+    def test_a_response_SLOWER_than_the_settle_bound_is_still_READ(self):
+        """🔴 THE DEFECT ITSELF. `RAW_SETTLE_S` is 3.0; this server takes longer,
+        which under CI disk contention is ordinary rather than exotic. Before the
+        fix this returned `b''` and the caller reported a phantom second response.
+        """
+        slow = RAW_SETTLE_S + 1.5
+        assert slow > RAW_SETTLE_S, "fixture drift: the delay must exceed the drain"
+        with self._slow_server(slow, self._REPLY) as host:
+            raw, _eof = _raw_exchange(host, b"GET / HTTP/1.1\r\n\r\n", settle=0.2)
+        assert _complete_responses(raw) == 1, (
+            f"the reader gave up before a {slow:g}s answer arrived: {raw!r}"
+        )
+        assert _one_response(raw, "a deliberately slow stub server")[0].startswith(b"200 ")
+
+    def test_the_reader_still_sees_a_SECOND_response_after_waiting(self):
+        """🔴 THE OTHER DIRECTION, and the reason the fix is not just a longer
+        timeout. Waiting for `expect` responses must not stop the reader
+        noticing an EXTRA one — that detection is the entire point of these
+        tests, and a fix that traded it away would pass every assertion above
+        while silently disarming the class.
+        """
+        with self._slow_server(RAW_SETTLE_S + 1.5, self._REPLY, repeat=2) as host:
+            raw, _eof = _raw_exchange(host, b"GET / HTTP/1.1\r\n\r\n")
+        assert _complete_responses(raw) == 2, (
+            f"the trailing response was not observed after the wait: {raw!r}"
+        )
+
+    def test_a_server_that_NEVER_answers_says_HANG_not_response_count(self):
+        """🔴 The bound still exists; only its MESSAGE changed. A reader that
+        waited forever would swap a wrong diagnosis for a hung gate.
+        """
+        # 🔴 HOLDS THE CONNECTION OPEN AND SENDS NOTHING. An earlier draft passed
+        # `delay=0` with an empty reply, which CLOSED the socket immediately —
+        # the reader saw EOF, returned cleanly and the test failed DID-NOT-RAISE.
+        # A stub that hangs up is not a stub that hangs, and only the second one
+        # reaches the deadline arm.
+        with self._slow_server(2.0, b"") as host:
+            with pytest.raises(AssertionError) as excinfo:
+                _raw_exchange_with_bound(host, bound=0.5)
+        message = str(excinfo.value)
+        assert "NO complete response within" in message, message
+        assert "DID NOT ANSWER IN TIME" in message, message
+        # 🔴 The mis-description that started all this must not come back by
+        # another route: a hang is never reported as a response-count defect.
+        assert "SECOND complete response" not in message, message
+
+    def test_an_EMPTY_read_is_reported_as_EMPTY_and_never_as_a_SECOND_response(self):
+        """🔴 THE ASSERTION-SHAPE FIX, pinned as a normalised STRING rather than
+        by keyword. The old sentence was reachable at `len == 0`, and a guard
+        that only greps for a word is walkable by rewording — so this asserts
+        what the reader is actually told.
+        """
+        with pytest.raises(AssertionError) as empty:
+            _one_response(b"", "the CI case", saw_eof=False)
+        said = str(empty.value)
+        assert "NO complete response came back for the CI case" in said, said
+        assert "THIS IS NOT A SECOND RESPONSE" in said, said
+        assert "saw_eof=False" in said, said
+
+        # And the >=2 case still says the thing it was always meant to say.
+        two = self._REPLY * 2
+        with pytest.raises(AssertionError) as extra:
+            _one_response(two, "the desync case")
+        also = str(extra.value)
+        assert "2 responses came back for the desync case" in also, also
+        assert "SECOND complete response followed the first" in also, also
+
+    def test_the_FRAMING_parser_tells_partial_from_complete(self):
+        """🔴 The positive/negative control for `_complete_responses`. Without
+        it, "the reader waited for a complete response" is a claim about a
+        function nobody has watched distinguish anything.
+        """
+        assert _complete_responses(b"") == 0
+        assert _complete_responses(self._REPLY) == 1
+        assert _complete_responses(self._REPLY * 3) == 3
+        # Headers complete, body one byte short — the case a byte-count check
+        # cannot see and the whole reason framing is parsed rather than sniffed.
+        assert _complete_responses(self._REPLY[:-1]) == 0
+        # Headers themselves truncated.
+        assert _complete_responses(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n") == 0
+        # A first complete response followed by a partial second counts as ONE,
+        # so a desync assertion cannot be tripped by a half-arrived trailer.
+        assert _complete_responses(self._REPLY + self._REPLY[:-1]) == 1
+
+
+def _raw_exchange_with_bound(host: str, *, bound: float):
+    """`_raw_exchange` with its completion deadline shortened, for the hang test.
+
+    🔴 A SEPARATE ENTRY POINT rather than a parameter on `_raw_exchange` itself:
+    a `deadline=` argument would be one refactor away from a call site pinning
+    its own bound, which is exactly the drift
+    `test_no_hang_detector_is_still_bound_by_a_LITERAL` exists to stop. Nothing
+    in the suite proper reaches this; it exists so the hang MESSAGE can be
+    asserted without spending `HANG_TIMEOUT` seconds to see it.
+    """
+    global HANG_TIMEOUT
+    previous = HANG_TIMEOUT
+    HANG_TIMEOUT = bound
+    try:
+        return _raw_exchange(host, b"GET / HTTP/1.1\r\n\r\n", settle=0.2)
+    finally:
+        HANG_TIMEOUT = previous
 
 
 class TestTheBackstopNeverSendsASecondResponse:
@@ -13656,10 +13983,8 @@ class TestTheBackstopNeverSendsASecondResponse:
         # round has produced three times: a file nothing wrote to trivially has
         # no second response either. The 200 is a real 200 about a real append.
         assert BULLET_BACKSTOP in nuance_of(path), path.read_text()
-        answers = _responses(raw)
-        assert len(answers) == 1, (
-            "a SECOND complete response followed the 200 on one connection — a "
-            f"pooling proxy hands it to the next client: {raw!r}"
+        answers = _one_response(
+            raw, "a POST whose handler raised AFTER its 200", saw_eof=saw_eof
         )
         assert answers[0].startswith(b"200 "), raw
         assert b"internal error" not in raw, raw
@@ -13684,8 +14009,20 @@ class TestTheBackstopNeverSendsASecondResponse:
         with running(scoped_store, tokens=(ZACH,)) as (base, _):
             host = base.split("//", 1)[1]
             one = f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()
-            raw, _eof = _raw_exchange(host, one + one)
-        assert len(_responses(raw)) == 2, f"the reader cannot see two: {raw!r}"
+            raw, _eof = _raw_exchange(host, one + one, expect=2)
+        # 🔴 Spelled as an exact count, NOT `>= 2`: this control is the reason
+        # "exactly one" above is a claim about the SERVER rather than about the
+        # reader, and a floor would keep saying so if the reader started
+        # duplicating. It is also the site that would go red first if the
+        # completion wait ever stopped waiting — `expect=2` makes the reader
+        # hold out for BOTH pipelined answers instead of whatever the drain
+        # happened to catch.
+        assert len(_responses(raw)) == 2, (
+            f"the reader cannot see two responses on one connection: {raw!r}. "
+            "Every 'exactly one response' assertion in this class is worthless "
+            "until this passes — a reader that can only ever see one satisfies "
+            "them all."
+        )
 
     def test_an_exception_BEFORE_the_response_still_yields_ONE_500(
         self, scoped_store: Path, monkeypatch
@@ -13713,8 +14050,7 @@ class TestTheBackstopNeverSendsASecondResponse:
             lines = await_audit(audit, 1)
         monkeypatch.undo()
 
-        answers = _responses(raw)
-        assert len(answers) == 1, raw
+        answers = _one_response(raw, "a POST whose handler raised BEFORE any response")
         assert answers[0].startswith(b"500 "), raw
         assert b"internal error\n" in raw, raw
         assert any("result=500" in ln and "status=internal-error" in ln for ln in lines), lines
@@ -13755,8 +14091,7 @@ class TestTheBackstopNeverSendsASecondResponse:
 
         # The replace LANDED — the assertion that stops this being vacuous.
         assert path.read_bytes() == replacement
-        answers = _responses(raw)
-        assert len(answers) == 1, f"the PUT sent a second response too: {raw!r}"
+        answers = _one_response(raw, "a PUT whose handler raised AFTER its 200")
         assert answers[0].startswith(b"200 "), raw
         assert any(
             "result=500" in ln and "status=internal-error-after-response" in ln
@@ -13790,10 +14125,7 @@ class TestTheREADDispatchIsBackstoppedToo:
             raw, _eof = _raw_exchange(
                 host, _request(host, "GET", f"/api/v1/recall/{ALLOW_SCOPE}")
             )
-            answers = _responses(raw)
-            assert len(answers) == 1, (
-                f"the READ dispatch vanished instead of answering: {raw!r}"
-            )
+            answers = _one_response(raw, "a GET whose read handler raised")
             assert answers[0].startswith(b"500 "), raw
             lines = await_audit(audit, 1)
         monkeypatch.undo()
@@ -13819,8 +14151,7 @@ class TestTheREADDispatchIsBackstoppedToo:
         with running(scoped_store, tokens=(ZACH,)) as (base, audit):
             host = base.split("//", 1)[1]
             raw, _eof = _raw_exchange(host, _request(host, "GET", "/api/v1/snapshot"))
-            answers = _responses(raw)
-            assert len(answers) == 1, raw
+            answers = _one_response(raw, "a GET whose snapshot handler raised")
             assert answers[0].startswith(b"500 "), raw
             lines = await_audit(audit, 1)
         monkeypatch.undo()
@@ -13846,8 +14177,9 @@ class TestTheREADDispatchIsBackstoppedToo:
             lines = await_audit(audit, 2)
         monkeypatch.undo()
 
-        answers = _responses(raw)
-        assert len(answers) == 1, f"the read path sent a second response: {raw!r}"
+        answers = _one_response(
+            raw, "a GET whose recall handler raised AFTER its 200", saw_eof=saw_eof
+        )
         assert answers[0].startswith(b"200 "), raw
         # The recall really was SERVED — the anti-vacuity half. An answer that
         # never rendered the digest would satisfy "exactly one response" too.
@@ -13930,10 +14262,10 @@ class TestTheBackstopSurvivesITSOWNLogSink:
                     body,
                 ),
             )
-            answers = _responses(raw)
-            assert len(answers) == 1, (
-                "the request VANISHED — the backstop's own log write took the "
-                f"answer with it: {raw!r}"
+            answers = _one_response(
+                raw,
+                "a POST whose backstop had to log through a RAISING print_exc "
+                "(the request must not vanish with the log write)",
             )
             assert answers[0].startswith(b"500 "), raw
             lines = await_audit(audit, 1)
@@ -14007,8 +14339,11 @@ class TestTheBackstopSurvivesITSOWNLogSink:
         # and it is also the half that makes the `500` below a TRADE rather than
         # a clean refusal. See the docstring.
         assert BULLET_SINKLESS in nuance_of(path), path.read_text()
-        answers = _responses(raw)
-        assert len(answers) == 1, f"a second response followed the answer: {raw!r}"
+        answers = _one_response(
+            raw,
+            "a POST whose audit sink was gone (EPIPE) and whose print_exc raised",
+            saw_eof=saw_eof,
+        )
         assert answers[0].startswith(b"500 "), (
             "a request whose audit record could not be written was SERVED. With "
             "`_audit` before `_respond` the sink raises before any byte is on "
@@ -14159,10 +14494,10 @@ class TestAnUndecodableEntryNameIsNotTheCallersFault:
             raw, _eof = _raw_exchange(
                 host, _request(host, "GET", f"/api/v1/recall/{ALLOW_SCOPE}")
             )
-            answers = _responses(raw)
-            assert len(answers) == 1, (
-                "the request VANISHED — this arm's own log write took the answer "
-                f"with it, past a SIBLING backstop that never sees it: {raw!r}"
+            answers = _one_response(
+                raw,
+                "a GET on an unreadable store whose own log write raised, past a "
+                "SIBLING backstop that never sees it",
             )
             assert answers[0].startswith(b"503 "), raw
             lines = await_audit(audit, 1)
