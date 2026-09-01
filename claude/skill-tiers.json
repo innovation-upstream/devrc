@@ -68,6 +68,7 @@
     },
     "find-session": { "tier": "A" },
     "handoff": { "tier": "A" },
+    "hetzner": { "tier": "B", "why": "asked for by name ('my Hetzner fleet', 'what am I paying Hetzner', 'price a node'); no symptom routes here, and cloud-cost questions are deliberate rather than incidental, so it does not need to auto-fire" },
     "i3": { "tier": "A" },
     "initiative-scan": {
       "tier": "B",

@@ -27,26 +27,46 @@ runs against them. Consequences:
 - 🔴 **`git stash` is repo-GLOBAL.** `refs/stash` lives in the common git dir, so
   a concurrent session can pop or drop yours. Never stash here for any reason —
   set work aside with `cp <file> /tmp/…` and copy it back.
-- 🔴 **Never `git reset --hard`, `git clean`, or `git checkout --`** in a scope.
-  Each destroys curated content that has no other copy, and the autocommit means
-  "it's in git" is a claim about *some* commit, not about the bytes you want.
-- 🔴 **Never add a remote and never push.** Nothing in this store leaves the
-  machine.
+- 🔴 **Never `git reset --hard` (bare), `git clean`, or `git checkout --`** in a
+  scope. ("bare" qualifies `git reset --hard` alone — `git checkout --` always
+  takes a pathspec and `git clean` is almost always `-fd`.) Each destroys **uncommitted** curated content, which no hourly commit
+  and no daily bundle holds — and the autocommit means "it's in git" is a claim
+  about *some* commit, not about the bytes you want. 🔴 **`git reset --hard
+  <ref>` is worse: it ORPHANS committed content**, and `backup.py` bundles with
+  `git bundle create --all` (reachable refs only), so the orphans reach no
+  FUTURE bundle. A bundle already in the bucket holds them only if they were
+  reachable when THAT bundle was written — the daily run can be up to a day
+  behind the hourly commit that created them, so a fresh commit orphaned the
+  same day is in NO bundle. Check with `restore-verify.py`; past that, the
+  reflog is the only holder.
+- 🔴 **Never add a remote and never push.** ⚠ This bullet used to justify itself
+  with "Nothing in this store leaves the machine", which has been false since
+  2026-08-21: `analyze-service-index-backup.service` sends age-encrypted bundles
+  to homelab MinIO daily. The rule is unchanged — that path is encrypted, on the
+  operator's own hardware and audited; a git remote is none of those — but do not
+  repeat the old sentence when pricing exposure.
 - **Write the file and run no git command.** Committing a scope is the store's
   own concern.
 
 ## The confirm-gated write, step by step
 
 1. Audit first. Never propose a cut the audit did not classify.
-2. Back up (`cp -a`, `&&`-chained, count the files). This is the only safety net.
-3. For ONE entry, build the proposed new bytes.
+2. `cairn sync`, then back up the **cache** (`cp -a`, `&&`-chained, count the
+   files). This is the only safety net for the CURRENT bytes: the hourly commit
+   and the daily bundle both lag, so neither holds what you are about to
+   overwrite — and the frozen local mirror is an OLDER set of bytes than the
+   ones the put will replace.
+3. For ONE entry, build the proposed new bytes, in a scratch file.
 4. Present a **unified diff** against the current file — one compact block — and
    ask a single yes/no. Never batch a scope behind one prompt: a bad cut must be
    rejectable on its own.
-5. On confirm: **re-read the file** (a concurrent session may have appended since
-   step 3), re-apply the change to *current* bytes, then plain `Write`. On
-   decline, discard and move on.
-6. Never touch a file the user did not confirm.
+5. On confirm: land the scratch file with `cairn put`. The store's entry files
+   are `0444`, so a `Write` against one fails with `EACCES`; and the `If-Match`
+   the put derives from a live sync is what REPLACES the old "re-read the file
+   first, a concurrent session may have appended" rule — a concurrent append now
+   fails the put with exit 8 instead of being silently overwritten. On decline,
+   discard the scratch file and move on.
+6. Never touch an entry the user did not confirm.
 
 🔴 **Build the new entry by VERBATIM SLICING of the original**, not by retyping
 it. Content survival then becomes structural instead of something you have to
@@ -98,8 +118,13 @@ that is an invalid control, not a clean result.
 
 ## Landing
 
-Nothing about this store lands in a PR: the writes are local and final, and the
-store never leaves the machine. What DOES land in devrc is any change to the
+Nothing about this store lands in a PR. ⚠ This paragraph used to add "the writes
+are local and final", which the Cairn cutover made false: a prune now lands on
+the **pod**, over an authenticated API, and the local tree is a read-only mirror.
+The rule is unchanged — the other paths off this machine are that API and the
+encrypted daily backup (see 🔴 **Store safety** in
+`~/.claude/skills/analyze-service/reference/index-store.md`) — never a PR,
+never a git remote. What DOES land in devrc is any change to the
 audit script, this skill, or the `analyze-service` reference docs — those go
 through the ordinary feature-branch + PR flow, gated by
 `scripts/gate.sh --tier both --set all` on the tree rebased onto current

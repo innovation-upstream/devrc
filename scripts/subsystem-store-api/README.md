@@ -39,7 +39,7 @@ Replication happens over this API; those tests are untouched.
 | `Dockerfile` | image, built from the **repo root** as context (the modules live in `scripts/lib`) |
 | `build-push.sh` | build + push to Harbor. Refuses to push if `/data` in the image is non-empty |
 | `seed.sh` | `rsync` the local store into a stage, optionally `tar`-push it into the pod. Never writes to the source |
-| `verify-byte-identity.sh` | the phase-1 acceptance comparator: pod digest vs local CLI digest, per scope |
+| `verify-byte-identity.sh` | the phase-1 acceptance comparator, per scope: the `mode=list` render (index rows as a **sorted set**), the entry **set** by `comm`, then **each entry's** own single-ref render |
 
 Manifests: `homelab-talos` → `clusters/homelab/apps/subsystem-store/`.
 
@@ -330,14 +330,100 @@ client identity. See "Rate limit, lockout and the client address" below.
 ⚠ `verify-byte-identity.sh` prints a `diff` on failure, and that diff is store
 content. Redirect it to a file on a shared terminal.
 
-## Why byte-identity is asserted "modulo one line"
+## Why byte-identity is asserted "modulo FOUR named differences"
 
 `render_text` prints `  store: <root>`, and the pod's root is `/data` while the
 workbench's is `~/.claude/analyze-service-index`. The streams therefore cannot be
-byte-identical, and a verifier that said they were would be lying. The script
-canonicalises exactly that line and `cmp`s the result, and prints beside the
-verdict how many lines differ **with no canonicalisation** and how many of those
-are the store-root line — `2` and `2` for pod-vs-workbench.
+byte-identical, and a verifier that said they were would be lying.
+
+There are **four** such differences, not one, and the second and fourth are the
+two that each made this script permanently red in turn:
+
+| difference | why it is legitimate | how it is canonicalised |
+|---|---|---|
+| `  store: <root>` | the pod serves a copy at a different path | rewritten to a fixed token **on both sides** |
+| `  host: <id>` | `store_host_line()` names the machine whose disk was read — the store is PER-HOST, and saying so is the entire point of the line | rewritten to a fixed token **on both sides** |
+| the `🔴 SNAPSHOT` block | a transport annotation the server prepends and the local CLI correctly does not emit | removed from the **remote** only |
+| the INDEX row **order** | the index is newest-first by entry-file **mtime**, and the transport (`rsync` to a stage, `tar` into the pod) does not carry mtime | index rows compared as a **sorted set** on both sides; everything else in the stream compared verbatim, in order |
+
+🔴 **The fourth is why it no longer compares the whole-scope digest at all.**
+The digest also picks its one featured BODY by mtime (`select_featured`'s
+most-recent fallback), so on a multi-entry scope two byte-identical stores
+render a different index order *and* a different featured entry. Measured
+2026-09-01 against the live pod: `scopes=5 pass=1 fail=4`, the lone PASS being
+the only two-entry scope, and the `cli` scope's entire unaccounted difference
+being one row's POSITION. Instead, per scope:
+
+1. the **`mode=list` render** — no body, so no mtime-selected featured entry —
+   with the index rows sorted and the rest compared verbatim;
+2. the **entry SET**, by `comm` over the refs the two index blocks list. A ref
+   on one side only FAILS and names it;
+3. **each entry's own bytes**, as its `--ref` / `?ref=` render — a narrowing
+   that prints no index, so it carries no order. There is no route serving raw
+   entry bytes; the API only ever returns renders.
+
+⚠ **A scope whose index PAGINATES is refused, not partly compared.** Past
+`LISTING_PAGE_SIZE` both the page membership and the ref column's width are
+mtime-derived, and the refs past page 1 are never read — so page 1 is not
+comparable and a PASS over it would be a partial check reported as a clean one.
+No scope in the store is near the cap today (largest measured: 50 entries).
+
+⚠ **The set arm is an acceptance check for the moment right after a push.**
+Post-cutover the pod is canonical and each host's store is a read-through cache
+that may legitimately lag — measured 2026-09-01, scope `devrc` at 26 entries
+locally against 29 on the pod, with nothing wrong. `cairn-cutover.py` runs this
+at P4, immediately after the push, which is where a set difference means the
+push was lossy. It is deliberately not weakened for the lagging-cache case: a
+check that shrugged at a missing entry could not detect a half-copied seed.
+
+⚠ **It is now N+1 requests per scope**, not 1 — a 50-entry scope issues 51.
+
+🔴 **`host:` was added late and nothing stripped it**, so every comparison
+between a workbench and a pod failed by construction — `verify: scopes=16 pass=0
+fail=16` on a store whose content was identical. `claude/RULES.md`: a
+permanently-red gate is worse than no gate. **That rule alone closes it**:
+measured on scope `kubeclaw`, workbench versus the live pod, using the script's
+own expressions — `store:` + banner canonicalised gives **2** differing lines,
+adding `host:` gives **0**.
+
+⚠ **The snapshot block's LENGTH is measured rather than assumed — hardening for
+a version skew that has NOT been observed.** The previous anchored two-line rule
+was *not* broken: it deletes the banner and its blank separator, which is exactly
+what this tree's `server.py` emits. Two structural reasons to measure anyway,
+neither needing a failure to have happened: the deployed image's arrangement is
+not this checkout's to assume, and a fixed-size delete removes lines that never
+enter the accounting below, so **deleted** could not be reconciled against
+**counted**. The block is now the run of lines at the head of the remote stream
+that are the banner or are blank; it is stripped only if that run **contains**
+the banner, and a server that emits no banner (pre-0.3.0) has nothing removed.
+
+Beside the verdict the script prints how many lines differ **with no
+canonicalisation at all**, decomposed into the four causes and summed as
+`accounted-for`:
+
+```
+raw-diff-lines == store-root-lines + host-lines + snapshot-block-lines + index-order-lines
+```
+
+🔴 **The counts are SUMS over every stream compared for the scope** — one
+scope-level `mode=list` render plus one single-ref render per entry — so
+against a pod-shaped remote `store-root-lines` reads `2 * (1 + entries)`, not a
+flat 2. `entries=` is printed for exactly that reason and one more: a scope
+that compared no bodies must be readable as one, the same rule `drift-check.sh`
+follows by printing links EXAMINED beside links dangling.
+
+`index-order-lines` is **measured, not assumed** — it is the diff reduction the
+row sort actually bought (differing lines after the `store:`/`host:`/snapshot
+canonicalisation, minus what still differs once the rows are sorted). A rule
+that erased a difference without a matching count would widen the blind spot
+rather than the gate, which is why it joined the sum in the same commit as the
+sort. The three-line block in
+`test_a_POD_SHAPED_remote_PASSES_when_only_the_THREE_permitted_lines_differ` is
+a SYNTHESISED skew, not a shape any deployed image has been seen to emit.
+
+Those numbers are EVIDENCE, not a second gate: gating on them would be an
+unreachable guard counted as coverage. But every canonicalisation rule **must**
+appear in that sum.
 
 ## The token is a SET, and rotation is by overlap
 

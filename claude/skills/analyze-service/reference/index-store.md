@@ -34,9 +34,23 @@ never live state, never re-derived config values.
 hashed region**, so correcting the wording would change a sha that is pinned to
 the resolver's code; the redirect is stated here instead, deliberately.
 
-🔴 **Store safety.** The content is **curated, irreplaceable, not re-derivable by re-running recon**, with no off-machine backup. Inside any scope dir:
+⚠ **Same bullet, second stale word: "a *confirmed* write-back".** The confirm
+prompt was retired everywhere on 2026-08-31 — a scope dir or entry file still
+appears only on a WRITE, and the write still shows a diff first, but nothing asks
+a y/N. The protocol is `~/.claude/skills/subsystem-index/SKILL.md`, one document
+for every caller of this store; `write-back.md` decides *whether* an
+`/analyze-service` run has anything worth recording and points there for *how*.
+Stated out here for the same reason as the redirect above: the wording is inside
+the hash.
+
+🔴 **Store safety.** The content is **curated, client-confidential, and not re-derivable by re-running recon.** ⚠ **This paragraph used to say "with no off-machine backup". That has been false since 2026-08-21 and it was false in a RECOVERY path** — an agent reading it concludes a loss is unrecoverable and never looks for the restore tooling below. Two layers exist, and neither makes the store disposable:
+- **hourly, local** — each `<scope>/` is its own git repo, committed by `analyze-service-index-commit.service` (`OnCalendar=hourly`, `RandomizedDelaySec=600`, so it fires within ten minutes AFTER the hour, not on it).
+- **daily, off-machine** — `analyze-service-index-backup.service` bundles every scope, **age-encrypted**, to the homelab MinIO `minio-archive` tenant, bucket `analyze-service-index-backups`, key `<host>-<machine-id>/<scope>/<ts>.bundle.age`. Read them back with `scripts/analyze-service-index/restore-verify.py`; `escrow-verify.py` checks the key material.
+
+🔴 **So price a destructive write honestly — and note the two prices are DIFFERENT.** An accidental overwrite or deletion costs back to the last hourly commit locally and the last daily bundle off-machine; **uncommitted working-tree state is in NEITHER**. A history rewrite costs strictly more, and the bullets below say which is which. Neither price makes the store disposable, and the rules stand unchanged either way: they rest on **confidentiality and curation**, never on the absence of a backup. Inside any scope dir:
 - **Never `git stash`** — `refs/stash` is repo-**global** and concurrent sessions share this store, so your stash can be popped or dropped by another session. Set work aside with `cp <file> /tmp/…` instead.
-- **Never `git reset --hard`, `git clean`, or `git checkout --`** — each destroys curated content that has no other copy.
+- **Never `git reset --hard` (bare), `git clean`, or `git checkout --`** — each destroys **uncommitted** curated content, which is exactly the part no commit and no bundle holds. ⚠ "bare" qualifies `git reset --hard` ONLY, contrasted with the `<ref>` form below: `git checkout --` always takes a pathspec and `git clean` is almost always `-fd`, so reading "bare" across all three would license exactly the commands this bullet forbids.
+- 🔴 **`git reset --hard <ref>` is WORSE than the bare form, not milder — it orphans COMMITTED content.** `backup.py` bundles with `git bundle create --all`, which walks **reachable refs only**, so once the branch has moved back, the orphaned commits are in no FUTURE bundle. They are still inside the bundles ALREADY in the bucket, which hold whatever was reachable when each was made — `ASIB_KEEP` daily runs, default 14 (`backup.py`) — so run `restore-verify.py` before calling anything lost. Past that window the reflog is the only holder. Do not read "it is committed, so a bundle has it" as safety against a history rewrite.
 - **Never add a remote, never push**, and never copy a line into `devrc` (PUBLIC) or any public repo, issue, PR, gist or commit message. devrc `60e6d9d` exists because this data class had to be scrubbed out of a public repo retroactively.
 - Each scope's own `README.md` states the policy governing it — **read it before writing there**.
 

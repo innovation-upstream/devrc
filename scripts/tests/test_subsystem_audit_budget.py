@@ -31,10 +31,13 @@ change that adds this gate; the gate is what stops the prose from being the only
 defence, exactly as `test_rules_size.py` does for `claude/RULES.md`.
 
 🔴 WHAT THIS MODULE DOES **NOT** DO, STATED SO NOBODY READS COVERAGE INTO IT.
-It never opens the live store. The store is curated, CLIENT-CONFIDENTIAL and has
-no off-machine backup, and devrc is PUBLIC — so no fixture here is derived from
-it, every fixture is synthetic, and the corpus statistics above are AGGREGATE
-INTEGERS, which is the most that may be recorded in this repo. That means this
+It never opens the live store. The store is curated, CLIENT-CONFIDENTIAL and not
+re-derivable by re-running recon, and devrc is PUBLIC — so no fixture here is
+derived from it, every fixture is synthetic, and the corpus statistics above are
+AGGREGATE INTEGERS, which is the most that may be recorded in this repo.
+⚠ That sentence used to read "and has no off-machine backup" — false; daily
+age-encrypted bundles go to MinIO. PUBLIC is the operative half here, and it has
+not changed. That means this
 module cannot gate the live store's size the way `test_rules_size.py` gates a
 tracked file. What it gates instead:
 
@@ -108,7 +111,9 @@ ENTRY_HARD_BYTES = 12_288
 #
 # ⚠ NOT A GATE ON THE LIVE STORE. Nothing fails a build when an entry exceeds
 # this; `subsystem-audit.py` REPORTS and a human confirms every cut
-# (`write-back.md`'s confirm-gated, diff-first contract). Raising either number
+# (the `prune-index` skill's confirm-gated, diff-first contract — NOT
+# `write-back.md`, whose own protocol copy was retired 2026-08-31 along with the
+# append y/N; a prune is a deletion and keeps its prompt). Raising either number
 # requires saying in the commit message which entry could not be expressed in
 # the budget — the same discipline `test_rules_size.py` imposes.
 ENTRY_TARGET_BYTES = 6_144

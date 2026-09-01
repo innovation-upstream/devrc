@@ -1940,8 +1940,8 @@ def _bullet_date(first_line: str) -> str | None:
 #
 # Deliberately separate from everything above: the pure functions never touch the
 # filesystem, so the tests exercise them with in-memory fixtures and NEVER read
-# the real store (which is client-confidential, unbacked-up, and rewritten hourly
-# by the autocommit timer).
+# the real store (which is client-confidential, curated, and rewritten hourly by
+# the autocommit timer while other sessions write to it).
 
 
 def parse_front_matter(text: str) -> dict[str, object]:

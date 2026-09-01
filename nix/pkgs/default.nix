@@ -54,6 +54,10 @@ with pkgs; [
   # Invoked by scripts/dl-router/fetcher.py as an argv list, never a shell
   # string. See the `dl-router` skill.
   yt-dlp
+
+  # Hardware/system profiling (CPU-Z equivalents on Linux)
+  inxi            # comprehensive system info (CPU/GPU/RAM/disks/network in one shot)
+  cpu-x           # CPU-Z GUI clone — cache speeds, clocks, motherboard, BIOS
 ]
 ++ (import ./lang { inherit pkgs; })
 ++ (import ./tools { inherit pkgs workspace; })

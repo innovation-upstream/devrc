@@ -23,12 +23,15 @@ Make the hosted subsystem store the single datastore every host reads **and writ
 trunk tip still carries it). The token file went **354 B → 295 B**, a pure line deletion:
 surviving mapped row `ecc11c1b5b6e` unchanged, `2481e4553f6c` absent.
 
-**Live state, verified end-to-end:**
+**Live state, verified end-to-end (carried forward — this is the criterion-10 verification
+record, and its positive control is the part that makes it evidence):**
 - banner `token-ids=a8f329c534d7:zach` — one row, and **no `UNRESTRICTED-SCOPE LEGACY MODE`**
   (positive control: 6 historical banners in Loki, so that grep CAN match)
 - mapped credential → **200**; legacy credential → **401, the credential is dead**
 - **both hosts read 200** — workbench and laptop, laptop env confirmed `a8f329c534d7`
 - `cairn sync` live, 132 entries · `test-check-subsystem-store-phase1.sh` **pass=25 fail=0**
+  ⚠ **That 132 was 2026-08-31 and is STILL 132 on 2026-09-01** — see the phase-1 table below.
+  The count agreeing across two days is not health; it is the pod being frozen.
 
 ⚠ **ONLY (d) REMAINS: the plaintext backups are still on disk.**
 `~/.config/subsystem-store/env.bak-legacy-2026-08-29` exists on **both** hosts and holds the
@@ -36,12 +39,46 @@ token hashing to `2481e4553f6c` — measured, not assumed. It is now a **dead** 
 so this is hygiene rather than exposure, but the file is what the shred is for. Deliberately
 deferred by operator decision: do (d) after watching the store healthy for a day.
 
-🔴 **Rank 1's claim `cairn-phase3-1` is STILL HELD**, because (d) is still owed under it.
+🔴 **CORRECTION 2026-09-01 — the claim `cairn-phase3-1` is NOT held.** This doc said it was
+"STILL HELD" because (d) is owed. Live `claim-work --list` shows **no cairn-phase3 claim of any
+rank**. (d) is still owed; the *lock* on it is gone, so nothing stops a second session picking
+it up. Re-claim before working it.
 
 **PR #1129 (devrc) merged** — squash `8e883e3d`. Its gate needed a retry: the first run died
 with **zero steps executed** after a 60-minute `TaskRunTimeout`, starved by a single-node
 `nodeSelector` pin; re-fired after the queue drained, it ran in ~30 min and passed
 (`pytests 19449 collected / 0 failed`, `nodetests 1441/1441`).
+
+**PR #1187 MERGED** 2026-09-01T03:17:40Z — the 9-before-8 sequencing is now in the ranked list
+on `main`, so a session drawing rank 3 sees it without reading the PR.
+
+### Phase 1 measured end-to-end 2026-09-01 — criteria 8 and 9 are the whole gap
+
+Every number below was measured this session, not recalled.
+
+| | entries | scopes | newest content |
+|---|---|---|---|
+| pod (`store.zacx.dev`) | **132** | 15 | `2026-08-29T21:03:20Z`, `seeded=2026-08-29T20:34:38Z` |
+| workbench local disk | **146** | 15 | mtime `2026-08-31 18:29` |
+| laptop local disk | **49** | 12 | — |
+
+- The pod is a snapshot of the **workbench alone** and is frozen. Its 15 scopes are *exactly*
+  the workbench's 15; **all 7 host-exclusive laptop scopes are absent from it entirely.**
+- Pod-vs-workbench per scope: **−14 total**.
+- 🔴 **`scripts/lib/subsystem_touch.py` — the writer — contains ZERO HTTP code.** Every write
+  lands on local disk. The pod's authenticated write path exists in
+  `scripts/subsystem-store-api/server.py` and **nothing calls it.** That is criterion 9 stated
+  as a measurement.
+- Auth is live and enforced — `/api/v1/recall/devrc`: no-token **401**, bad-token **401**, real
+  host credential **200**. Do not "add auth"; it is done.
+
+**IN FLIGHT:** claim **`cairn-phase1-migration`** is HELD (release with
+`claim-work --release cairn-phase1-migration`). A subagent is running in worktree
+`.claude/worktrees/agent-a03ac0e6c1aebf3db` (branch `worktree-agent-a03ac0e6c1aebf3db`)
+producing a design doc, a hand-merged entry, a dry-run-default cutover script and tests. It hit
+an API session limit once and was resumed. 🔴 **UNVERIFIED — the dispatching session has not
+read its output and cannot vouch for any of it.** Its brief forbids executing the cutover or
+the re-seed; the operator runs those.
 
 ## Open investigations — live diagnosis state
 
@@ -248,6 +285,61 @@ daemons that `shutdown()`/`server_close()` never join, so one left parked leaks 
 tests and the reporter attributes *its* mechanism to somebody else's hang. That happened
 here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
 
+### RESOLVED BY MEASUREMENT — the phase-1 merge rule is ONE FILE, not five scopes
+- **Why it looked bigger:** `plan-cairn-integration.md` records "5 scopes exist on both hosts …
+  5 need a merge rule" and calls the merge rule "the risk here, not the transport". That is a
+  **scope-level** count and it was read as an entry-level one.
+- **Observed (with values), both hosts enumerated 2026-09-01:** across the 5 scopes present on
+  both hosts — 122 workbench entries vs 17 laptop entries — there is **exactly ONE filename
+  collision: `devrc/signal.md`.** The other 16 laptop entries have unique names and are a pure
+  additive union with no merge decision at all.
+- **The one collision HAS genuinely diverged**, and neither side is a stale copy of the other:
+
+  | | workbench | laptop |
+  |---|---|---|
+  | size / mtime | 5260 B / `2026-08-21 00:10:56` | 4507 B / `2026-08-30 21:29:53` |
+  | aliases | `signal, signal-consumer, signal-api, test_signal` | `signal, test_signal, _signal_db, consumer, signal-cli-rest-api` |
+  | unique content | homelab-infra manifest pointers; "parent Flux kustomization is `homelab`, not `signal`"; the `proposal-signal-chat-skill.md` §Corrections reference | the newer prose; the **D3 draft→approve→send** outbound design |
+
+  116 changed lines. **The pod holds the workbench copy, so the laptop's newer entry is ALREADY
+  INVISIBLE to `cairn recall`.**
+- **Ruled out:** "newest-wins is safe." It is not — it would discard the workbench's pointer set
+  and 2 aliases, and the loss would be invisible afterwards. Seeding from the workbench (what
+  the pod does today) discards the laptop's newer copy symmetrically.
+- **Operator decision 2026-09-01: HAND-MERGE**, union of aliases and both pointer sets, neither
+  copy discarded. It is one file; the cost is trivial and it is the only merge decision in the
+  entire migration.
+
+### 🔴 OPEN — aliases are a SECOND collision channel, and the merge INTRODUCES one
+- **Symptom:** a filename comparison cannot see it. Two entries with different filenames whose
+  `aliases:` overlap make `--ref <alias>` ambiguous after the merge.
+- **Observed (with values), computed over the merged union:**
+  - `homelab-talos`: alias **`triggers`** claimed by `tekton-pipelines.md` (**laptop-only**) and
+    `tekton-ci.md` (**workbench**). 🔴 **This ambiguity exists on NEITHER host today — the
+    merge creates it.**
+  - `devrc`: alias **`cairn`** claimed by `cairn.md` and `present.md`, **both on the
+    workbench** — pre-existing and latent. `--ref cairn` currently returns `cairn.md`, which
+    suggests a filename match outranks an alias, but that precedence was **inferred from one
+    observation, not measured**. Measure it before relying on it.
+  - Two laptop entries carry **no `aliases:` field at all** (one in a client scope, one in
+    `devrc`).
+- **Ruled out:** that the entry-level count settles the merge risk. It does not — the one
+  filename collision and the two alias collisions are disjoint sets.
+- **Next probe:** confirm the reader's name-vs-alias precedence mechanically
+  (`subsystem_recall.py --ref`), then decide the `triggers` rename before any re-seed.
+
+### 🔴 OPEN — two live phase numberings, and a plan doc that contradicts live state
+- **Observed:** `plan-cairn-integration.md` (2026-08-31) asserts *"No tenancy, no auth, no
+  age-out, no sharing exist in any form."* The auth half is **FALSE** — measured above with both
+  controls (401 / 401 / 200). That doc is what defines phase sequencing, so anyone planning off
+  it mis-orders work.
+- **Observed:** there are **two numbering schemes in simultaneous use.** cg#371's "phase 3"
+  (per-token identity, scope authorisation, write path) is `plan-cairn-integration.md`'s
+  **phase 2**; commit subjects read `cairn phase 3, criteria 1-7`. The plan's phase 1 (pod
+  canonical) is cg#371's criteria **8 and 9**.
+- **Next probe:** none — it is diagnosed. Reconcile the two documents so the numbering is
+  single-valued, and correct the false sentence.
+
 ## Next steps (ranked)
 
 🔴 **Numbering is UNCHANGED on purpose** — the rank is half a claim's identity
@@ -271,11 +363,19 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
    still stands — the push is `rsync -a --delete` SOURCE→STAGE then tar STAGE→pod, so every
    entry the laptop also holds is overwritten with the laptop's copy, destroying API-appended
    bullets that exist only in the served copy. Recoverable via #551's backup, not harmless.
+   🔴 **So do rank 4 FIRST.** Criterion 9 makes API writes durable, which *removes* this
+   hazard rather than managing it — after it, the overwrite has nothing unique to destroy.
+   Running 3 first means relying on the backup to recover; running 4 first turns a
+   destructive operation into a safe one.
    forcing: none
 4. **Criterion 9 — the cutover.** `subsystem-index` writes through `cairn`; the local store
    becomes a read-only cache (`stat -c %a` = 444, EACCES *watched*, not assumed). 🔴 This is
    what makes an API write DURABLE — until it lands, every appended bullet is one `seed.sh`
    from gone. The read/write **allowlist split** is this criterion's own job.
+   🔴 **Do this BEFORE rank 3**, despite the lower rank. Rank 3 runs `seed.sh` from the
+   laptop, whose `rsync -a --delete` push overwrites every shared entry with the laptop's
+   copy. This criterion is what makes the API-appended bullets durable, so landing it first
+   is what makes rank 3 non-destructive instead of backup-dependent.
    forcing: none
 5. **Verify criteria 1, 2, 5, 6, 7 against the POD**, not just in tests. Criterion 4 is done
    there; 2's denied-scope arm is done for WRITES (404 `scope-unknown`) but not for the three
@@ -698,6 +798,78 @@ lines. A stale verdict satisfied a test meant to detect a new one — and had th
 allowed to merge on green, it would have merged against a status belonging to a run that no
 longer existed. **Watch the object you actually created** (the PipelineRun, by name), not the
 text of a status that outlives it — and treat "not found" as NOT A VERDICT, explicitly.
+
+- 🔴 **OPERATOR DECISIONS 2026-09-01, asked as one question with the blast radius stated, all
+  three answered as recommended.** (a) `devrc/signal.md` → **hand-merge**, union of aliases and
+  both pointer sets, neither copy discarded. (b) Write path → **write-through, the pod is the
+  authority**: writes go to the pod and **fail loudly** when it is unreachable, local disk
+  becomes a read-through cache, and a write during an outage is **REFUSED, not queued** — that
+  cost is accepted. `/resume` must keep working offline for **reads** off the local cache.
+  (c) Dispatch scope → **design + reversible script; the operator executes the cutover.**
+- 🔴 **A PREREQUISITE NOBODY HAD: `scripts/cairn` HAS NO WRITE VERB.** Rank 7 of this doc
+  records it and it is easy to read as cosmetic. Criterion 9 routes `subsystem-index` writes
+  *through* `cairn`, so the write verb is **in scope for criterion 9**, not a follow-on.
+- 🔴 **THE SWEEP CAUGHT THE SEQUENCING; THE LOCK STRUCTURALLY COULD NOT.** `gh pr list` surfaced
+  open PR #1187 arguing criterion 9 must precede criterion 8. `claim-work` cannot see this class
+  — it locks an item, it does not notice an item's *ordering* being revised elsewhere. This is
+  the third recorded instance of `gh pr list` finding what the lock cannot; run it before
+  drawing ANY ranked item, not just the one you intend to take.
+- ⚠ **`clawgate_handoff.sh resolve` returned rc 6 for this session** — one linked task (#364),
+  `role=read`, **no worked task**. Per the protocol that is "record nothing", not "pick one".
+  Both cairn docs already carry readable `clawgate-task:` fields (371 here, 364 on
+  `handoff-cairn-task-linkage.md`), so `field <doc>` → rc 0 ⇒ left alone.
+- **STALE RECALL CORRECTED, two entries.** The `devrc/cairn` index entry carries
+  `OPEN: cairn is NOT on PATH` — **false**, it is at `~/.local/bin/cairn`. And this doc's
+  "claim `cairn-phase3-1` is STILL HELD" is false (see State now). Both read as current forever;
+  neither is detectable by reading the doc.
+- ⚠ **`seed.sh`'s `--delete` is about the STAGE, and that is what makes rank 3 destructive.**
+  The push is `rsync -a --delete` SOURCE→STAGE, then a tar built **from the stage**. So every
+  entry the pushing host also holds overwrites the served copy — destroying API-appended bullets
+  that exist only on the pod. Recoverable via homelab-infra#551's backup, not harmless. This is
+  the whole argument for landing criterion 9 first.
+- ⚠ **The re-seed's backup precondition must be CHECKED, not assumed.** #551's CronJob exists
+  (closed 2026-08-30), but devrc#1132 (`f9c86a8b`) exists precisely because **15 places
+  asserted the backup's state wrongly**. Require a recent *successful* run as a refusal-gated
+  precondition.
+- ⚠ **A read-only local cache must be proven by a WATCHED EACCES, not by `stat -c %a`.** A mode
+  bit is a claim; a refused write is evidence. Rank 4 already says this — it is repeated here
+  because it is the kind of check that gets downgraded to a `stat` under time pressure.
+- **RANK 11 OF `handoff-cairn-task-linkage.md` IS ANSWERED AND SUPERSEDED — recorded there, not
+  here.** Summary only, so this doc does not carry another effort's diagnosis: its stated lever
+  (a third 30 GiB local-path nix cache on another node) is both a bad bet on measured free disk
+  and **unnecessary**, because homelab-infra shipped a binary-cache mechanism on 2026-08-31 that
+  removes the cache PVC entirely. It matters here because that same single-node pin is what
+  starved PR #1129's first gate run to zero steps executed.
+
+- **These doc updates are carried by devrc PR #1199** (branch `docs/handoff-cairn-phase1-scope`,
+  commits `8c23c255` this doc, `deb42d77` `handoff-cairn-task-linkage.md`). Written from a
+  worktree on a topic branch — `handoff_doc.py` runs git inside Python, so no PreToolUse hook
+  sees its commit, including the never-commit-to-`main` guard; `git branch --show-current` was
+  checked before each. The PR is docs-only and was **not** audited: the substantive risk in it
+  is whether the recorded measurements are right, which an audit of the diff does not test.
+- ⚠ **A CONFIRMING INSTANCE of a floor the `/handoff` skill already states — not a new lesson,
+  recorded because it is the first time it was measured here.** `handoff_doc.py` printed **no**
+  `DROPS N line(s) that look DURABLE` warning while the REPLACE of `## State now` would have
+  deleted the criterion-10 end-to-end verification record — including the Loki **positive
+  control** (6 historical banners, proving the grep CAN match), which is the part that makes
+  that block evidence rather than an assertion. Caught only by reading the diff. The skill's
+  rule — *"a silent run is NOT evidence that nothing durable was dropped"* — is load-bearing,
+  and `State now` is where verification records go to die because the section reads as status.
+- ⚠ **Both subsystem-index windows returned empty for the session that wrote this, and that was
+  HONEST rather than a failure.** `--session` saw 0 paths (100% of what it named was outside the
+  session cwd — scratchpad and worktree); `--pr 1199` saw 2 files, both the excluded handoff
+  docs. The session's whole *file* footprint was the handoffs; its actual work was measuring a
+  pod, a cluster and two hosts' stores, none of which has a path in this repo. **A dead end in
+  both windows is a fact about the windows, not a licence to skip the store** — the write went
+  to `devrc/cairn` on operator knowledge of the right home, not on a resolver's nomination.
+- **Recorded to the store this session** (`~/.claude/analyze-service-index/devrc/cairn.md`,
+  validated in the same turn — `OK 1 of 1 parse`, entry shape clean, 0 out-of-reach markers):
+  the pod-freezes-and-is-workbench-only finding with the writer's zero-HTTP-code half; the
+  scope-count-vs-entry-count trap plus aliases as a second collision channel (marked `OPEN:`);
+  and auth-is-live-while-the-plan-doc-denies-it. Also **closed an OPEN in the same edit** —
+  *"`cairn` is NOT on PATH"* → `RESOLVED 7ed7d41a` (#1079), verified an ancestor of
+  `origin/main` and present at `~/.local/bin/cairn`. That bullet had been served as outstanding
+  since 2026-08-29 while the remedy was already merged.
 
 ## How to verify
 

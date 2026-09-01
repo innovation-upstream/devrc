@@ -1,19 +1,51 @@
-# `/analyze-service` write-back — the opt-in, confirm-gated index update
+# `/analyze-service` write-back — what is worth recording
 
 Loaded on demand. The recon itself (`scripts/lib/service_recon.py`) is
-**read-only and has no write path at all**; this document is the whole of the
-mutation half, and it is executed by you, not by the script. Schema, location,
-resolution and store safety are in `index-store.md`.
+**read-only and has no write path at all**; this document decides *whether* a run
+has anything worth recording, and it is executed by you, not by the script.
+Schema, location, resolution and store safety are in `index-store.md`.
+**How the write itself is performed is NOT in this file** — see step 4.
 
 Recon stays **read-only by default** — the index is mutated only when a run
-surfaces something notable AND the user confirms, shown as a **diff first**.
-Never silent-mutate.
+surfaces something notable. Never silent-mutate.
 
 1. Run the recon brief (read-only) as usual.
 2. **After** the brief, evaluate whether it surfaced anything **notable** (below).
-3. Nothing notable → **do nothing**, say `index unchanged`.
-4. A proposed change → present it as a **unified diff** against the current index file (or "new file" for first-ever), one compact block, and ask a single yes/no: *"append this to the index? (y/N)"*.
-5. **Write only on explicit confirm.** On confirm, re-read the file (so a concurrent append isn't clobbered), re-apply the change to current bytes, then plain Write to `~/.claude/analyze-service-index/<scope>/<slug>.md` (creating the dir/file if first-ever; use `<slug>.<kind>.md` **only** when a same-slug entry of another kind already exists, and say why in the diff). On a **first-ever** file, stamp `created_by: analyze-service` in the front matter (schema in `index-store.md`) — on an append, leave whatever is there. On decline, discard. The write is local and final — **nothing leaves the machine**: no remote, no push. But it is **not** outside git; committing the scope repo is the store's own concern (an out-of-band autocommit), never this command's, so **write the file and run no git command** (🔴 **Store safety** in `index-store.md`).
+3. Nothing notable → **do nothing**, say `index unchanged`. Declining on content is a normal, frequent outcome.
+4. Something notable → **follow the write half of `claude/skills/subsystem-index/SKILL.md`** (deployed `~/.claude/skills/subsystem-index/SKILL.md`), then come back here for the two caller facts below. That file is the ONE append protocol for this store, and it is the same one `/handoff` follows.
+
+<!-- one-append-protocol:begin — pinned VERBATIM (normalised) by scripts/tests/test_index_append_protocol.py. This block is exactly where a second, forked protocol would grow back, so it is pinned whole rather than by keyword: any reword fails on purpose. Editing it means re-reading BOTH doors and updating the pin in the same commit. -->
+🔴 **THE APPEND PROTOCOL IS NOT RESTATED HERE, DELIBERATELY.** Two documents
+describing one write is how they come to disagree. Until 2026-08-31 this file
+gated the append behind *"append this to the index? (y/N)"* and told you to use a
+plain `Write`, while `subsystem-index/SKILL.md` declared that prompt retired and
+mandated `Edit` anchored on `## Nuance / work-history`. Both read as *the*
+protocol, neither named a winner, and what they disagreed about was the one
+operation that can destroy another session's bullet.
+
+🔴 **Operator decision, 2026-08-31 — the fork is closed: the y/N is retired
+EVERYWHERE, and `subsystem-index/SKILL.md` is the single protocol.** A whole-file
+retype is MEASURED to lose a concurrent append silently, so `Edit` anchored on
+`## Nuance / work-history` is the mandated mechanism, and `Write` stays correct
+**only** for a first-ever file, which has no prior content to lose. **Do not
+re-add a protocol paragraph to this file.** What belongs here is what is specific
+to `/analyze-service` — what counts as notable, the auto-discovered pointers, the
+bloat discipline — plus the two caller facts the shared protocol deliberately
+leaves to its caller:
+
+🔴 **You are the `analyze-service` caller, and the shared protocol hardcodes no
+writer.** On a **first-ever** file,
+stamp `created_by: analyze-service` in the front matter (schema in `index-store.md`);
+on an append, leave whatever is there.
+`scripts/lib/subsystem_touch.py --template` refuses to print a template without
+`--writer`, so pass `--writer analyze-service` — the value is the CALLER's id,
+never the tool's. `--census` reads that split back, which is the only reason the
+stamp exists.
+
+**Where the file goes:** `~/.claude/analyze-service-index/<scope>/<slug>.md`,
+creating the dir/file if first-ever. Use `<slug>.<kind>.md` **only** when a
+same-slug entry of another kind already exists, and say why in the diff.
+<!-- one-append-protocol:end -->
 
 ## Notable — append-worthy
 
@@ -29,9 +61,10 @@ Matches the "Gotchas" spirit + the `MEMORY.md` "durable lesson, not status" bar:
 
 ## Auto-discovered pointers
 
-Propose in the diff, still confirm-gated — a bad match must be rejectable.
-Curate the starting set: **propose at most ~5-7 candidates, never a raw match
-list** — a dump is unusable even though the human confirms each.
+Propose in the diff — the diff is where a bad match has to be visible, because
+nothing downstream asks about it. Curate the starting set: **propose at most ~5-7
+candidates, never a raw match list** — a dump is unusable, and now that the diff
+is shown rather than answered, an unreviewable dump is simply an unreviewed one.
 
 - `manage-* skill`: match the service name against skill names/descriptions in `.claude/skills/*/SKILL.md` (e.g. `redis`→`manage-redis`).
 - `MEMORY.md slug`: **filename-match first** — propose slugs whose *filename* contains the normalized service token (or an `aliases` entry), e.g. `*redis*.md`; those are the slugs actually ABOUT the service. **Only if that yields <3**, fall back to content-grep of the memory dir, but **rank by mention density and propose only the top few**, never the raw `grep -il` list (it is far too broad: `redis` returns ~90 slugs vs ~15 actually redis-centric).
@@ -54,4 +87,4 @@ Mirrors the `MEMORY.md` memory-hygiene rules.
   2. 🔴 **An `OPEN:` bullet ALWAYS STAYS.** Never an eviction candidate, at any age or size, and it never counts toward reclaiming bytes. It is the one thing in the store that cannot be re-derived by re-running recon.
   3. **A `RESOLVED` bullet becomes an eviction CANDIDATE only once its content has a HOME** — i.e. it names a target (a `claudedocs/` path, a commit sha, a PR/issue ref) that is verified to EXIST. Then the durable form genuinely does live elsewhere, and the index goes back to being a pointer sheet rather than an append-only log.
   4. 🔴 **A `RESOLVED` bullet with NO reachable home is `NO HOME — write the record first`, and is NEVER evictable.** Its bullet is the only copy of the finding, so cutting it deletes the finding. Write the record, re-run the audit, *then* evict.
-  5. **Nothing is ever auto-evicted.** `scripts/subsystem-audit.py` is READ-ONLY: it reports the three classes with their denominators and names the target it verified. The cut itself goes through steps 4–5 of the confirm-gated, diff-first contract at the top of this file. The **`prune-index` skill** drives the whole pass.
+  5. **Nothing is ever auto-evicted.** `scripts/subsystem-audit.py` is READ-ONLY: it reports the three classes with their denominators and names the target it verified. The cut itself is a DELETION, not an append, so it does **not** run the append protocol in step 4 above: it goes through the **`prune-index` skill**, whose own confirm-gated, diff-first contract is in `~/.claude/skills/prune-index/reference/writing-and-safety.md`. That gate survives on blast radius — a cut removes bytes that may be their content's only copy — and is a separate decision from the append prompt retired 2026-08-31.
