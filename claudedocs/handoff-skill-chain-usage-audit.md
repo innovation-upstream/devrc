@@ -164,12 +164,19 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
   *"the shared hostPath nix cache causes concurrent-eval interference"* — killed: if it did,
   #1046/#1057/#1059 would fail the nix-eval test, and they fail a filesystem one instead.
 - ~~**Leading hypothesis:** the affected population is exactly "tests that read host state".~~
-  🔴 **SUPERSEDED AND PARTLY WRONG — the block this pointed at is now the 5-line tombstone below,
-which carries neither the loopback-population correction nor the 11-runs sweep; the mechanism is
-stated inline here and the durable form is in store `devrc/tests.md`.** The mechanism is a **loopback
-  socket starved by the scheduler**, which is not a host-state read at all; it is any test that
-  makes a localhost call while the node is oversubscribed. The two blocks after this one are
-  also superseded and are kept only for the reasoning they rule out.
+  🔴 **SUPERSEDED — AND SO IS THE "loopback socket starved by the scheduler" FRAMING THAT REPLACED
+  IT. THE MECHANISM IS DIAGNOSED AND IT IS DISK, NOT CPU: READ `scripts/ci-repro/README.md`
+  FIRST.** `server.py:_replace_bytes` fsyncs the file and then the parent dir **INSIDE the request,
+  before the response is written**, and `devrc-ci` is pinned to one node — so stacked runs contend
+  on **one disk**. The README ships a compiled reproducer and names the code sites; the durable
+  pointer is the 2026-09-01 bullet in store `devrc/tests.md`.
+  🔴 **It hits PRs whose diff CANNOT REACH IT, docs-only included** — measured at 4 reds across 3
+  DIFFERENT tests, every one passing 3/3 locally in ~5 s. So a red gate here is NOT evidence about
+  your diff, and "the node is oversubscribed" sends you at CPU/capacity — i.e. at rank 10, which is
+  LOCKED (`ci-speedup-7`). ⚠ An earlier version of this line asserted the loopback framing and
+  cited `devrc/tests.md` as carrying it; that store file contains **no loopback bullet at all**
+  (measured, with a positive control). The socket timeout is the SURFACE; the fsync-in-request is
+  the CAUSE. The blocks after this one are kept only for the reasoning they rule out.
 
 ### Was the devrc-ci outage fully closed?
 - **Symptom:** 2026-08-29 ~22:23–22:48Z every devrc-ci gate leg reported
@@ -304,8 +311,9 @@ stated inline here and the durable form is in store `devrc/tests.md`.** The mech
     **Measured state matched exactly: 5 gate pods `NotReady` (3/6 steps, i.e. running), everything
     beyond them `Pending`.**
 - **Ruled out:**
-  - *"The node is squeezed by unrelated workloads"* — **killed by the breakdown above**: 82% of the
-    node's requests are the gate's own pods. Saturation is self-inflicted, so it **does** drain and
+  - *"The node is squeezed by unrelated workloads"* — **killed by the breakdown above**: **79%**
+    (11,250m of 14,220m) of the node's requests are the gate's own five pods — not the 82% an
+    earlier version of this line quoted, which is the whole `tekton-ci` namespace share. Saturation is self-inflicted, so it **does** drain and
     `0 Pending` **is** reachable; it just needs fewer than 5 devrc PRs in flight, and ~21 PRs are
     open with ~10 sessions pushing.
   - *"rank 10's 4250m premise"* — **REFUTED by measurement: the gate pod requests 2250m.** Whatever
@@ -384,7 +392,7 @@ deliberately: the wrong reading is the point.
   run locally at `origin/feat/handoff-audit` (`466a0938`): `1 passed, 41 deselected in 25.18s` —
   i.e. it costs ~25 s by construction and its assertion is `20 <= elapsed < 60`, so it passes with
   ~35 s of headroom on an idle machine and is exactly the shape contention eats. **One measurement
-  on one machine, not a general claim.** #1064 is also **93 commits behind** main, so it should be
+  on one machine, not a general claim.** #1064 is also **93 commits behind** main (as read that day; it was 124 when rank 11 ran — re-derive), so it should be
   merged forward too — but for it, that is hygiene, not the diagnosis.
 - **Reusable tell, and it is the cheap one this arc kept skipping:** before attributing a red gate to
   capacity, **run the named failing test locally at the branch AND at `main`.** Two commands, sub-second
@@ -452,7 +460,9 @@ rather than removed and renumbered. New work is appended at the end.
 8. 🔴 **Grade the hook against the number it was built to move — THE CLOSING CONDITION OF THIS
    WHOLE ARC. STILL NOT CUT, and deliberately so.** (This is the arc's CLOSING CONDITION, not the only
    remaining item. 🔴 **Do not read this as an enumeration of the open set — DERIVE it:**
-   `python3 scripts/handoff-audit.py --sections 1 <this doc>` prints `N/12 ranked items done`.
+   from the devrc repo root, `python3 scripts/handoff-audit.py --sections 1 <this doc>` prints
+   `N/12 ranked items done` — that is the COUNT only; for MEMBERSHIP scan for items carrying no
+   `✅ **DONE**` marker, and check the two agree.
    At 2026-09-01 the open set was **{5, 8, 10, 12}**; an earlier version of this line named only
    5 and 12 and so hid **rank 10, which carries a live `claim-work` lock (`ci-speedup-7`)** —
    missing it is how a session opens a second front on work someone else holds.)
