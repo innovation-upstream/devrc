@@ -164,7 +164,9 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
   *"the shared hostPath nix cache causes concurrent-eval interference"* — killed: if it did,
   #1046/#1057/#1059 would fail the nix-eval test, and they fail a filesystem one instead.
 - ~~**Leading hypothesis:** the affected population is exactly "tests that read host state".~~
-  🔴 **SUPERSEDED AND PARTLY WRONG — see the CLOSED block below.** The mechanism is a **loopback
+  🔴 **SUPERSEDED AND PARTLY WRONG — the block this pointed at is now the 5-line tombstone below,
+which carries neither the loopback-population correction nor the 11-runs sweep; the mechanism is
+stated inline here and the durable form is in store `devrc/tests.md`.** The mechanism is a **loopback
   socket starved by the scheduler**, which is not a host-state read at all; it is any test that
   makes a localhost call while the node is oversubscribed. The two blocks after this one are
   also superseded and are kept only for the reasoning they rule out.
@@ -292,8 +294,9 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
     `kubectl -n tekton-ci get pod <gate-pod> -o jsonpath='{.spec.nodeSelector}'` →
     `{"kubernetes.io/hostname":"talos-xr6-r7p"}`; `.spec.affinity.nodeAffinity` is **empty**.
   - `talos-xr6-r7p`: allocatable **15950m**, requested **14320m (89%)**. Of the 14220m resolved
-    across its 67 running pods, **11700m (82%) is the gate itself** — 5 × `devrc-ci-*-gate-pod`
-    at **2250m** each. Non-CI baseline on the node is only ~2520m (largest single non-CI pod:
+    across its 67 running pods, **11,250m (79%) is the five gate pods** (5 × `devrc-ci-*-gate-pod`
+    at **2250m** each); 11,700m is the whole `tekton-ci` namespace share, which is the wider figure
+    and was once mis-stated here as the gate's own. Non-CI baseline on the node is only ~2520m (largest single non-CI pod:
     `tekton-triggers-core-interceptors` at 350m).
   - Per-pod request is **2250m**, from two steps: `step-pytests=2` and `step-nodetests=250m`
     (`-o jsonpath='{range .spec.containers[*]}{.name}={.resources.requests.cpu}{"\n"}{end}'`).
@@ -447,8 +450,12 @@ rather than removed and renumbered. New work is appended at the end.
    forcing: none
 
 8. 🔴 **Grade the hook against the number it was built to move — THE CLOSING CONDITION OF THIS
-   WHOLE ARC. STILL NOT CUT, and deliberately so.** (Ranks **5** and **12** are also open; this is
-   the arc's CLOSING CONDITION, not the only remaining item.)
+   WHOLE ARC. STILL NOT CUT, and deliberately so.** (This is the arc's CLOSING CONDITION, not the only
+   remaining item. 🔴 **Do not read this as an enumeration of the open set — DERIVE it:**
+   `python3 scripts/handoff-audit.py --sections 1 <this doc>` prints `N/12 ranked items done`.
+   At 2026-09-01 the open set was **{5, 8, 10, 12}**; an earlier version of this line named only
+   5 and 12 and so hid **rank 10, which carries a live `claim-work` lock (`ci-speedup-7`)** —
+   missing it is how a session opens a second front on work someone else holds.)
    Re-run rank 1's measurement on a post-2026-08-30T17:35Z window and compare the **8.7%** loss
    rate and the **8/16 cleanly-ended** bucket. As of 2026-09-01 the post-window holds roughly
    **one day**; the pre-period needed **14 days for 253** `/resume`-genesis sessions. Cutting it
@@ -476,8 +483,10 @@ rather than removed and renumbered. New work is appended at the end.
    count blocks (`~/.cache/claude-handoff-write/s/*/fires-*`) and report them beside the rate.
    forcing: none
 9. ✅ **DONE (2026-08-31), premise REFUTED twice; #1055 MERGED as `8c108d8b`.** The durable output
-   is the two-arm local discriminator (branch vs `main`), not the PR — see the block
-   `### The local suite's 76 failures are NOT this arc's, and the control says so`.
+   is the two-arm local discriminator (branch vs `main`), not the PR — see
+   `### 🔴 CORRECTION, same session — #1055 was NOT red on the capacity flake…`, where
+   "red on the branch, green on `main`" is actually derived. **NOT the "76 failures" block** —
+   that is a different control, about ranks 2/7; an earlier version of this line pointed there.
    forcing: none
 
 10. **Right-size the devrc-ci gate pod, or establish it cannot be.** 🔴 **Its premise is REFUTED:
@@ -751,7 +760,8 @@ of this doc — re-read them before trusting any similar analysis.**
 - **The skill-ratchet half:** `git -C "$DEVRC" cat-file -s f85b7444:claude/skills/clawgate/SKILL.md`
   = **15491** (red, ceiling 15088) vs `origin/main` = **15086** (green).
 - **The staleness itself:** `git -C "$DEVRC" rev-list --count <sha-or-branch>..origin/main` — 94 for
-  #1055 before the merge, 93 for #1064.
+  #1055 before the merge. 🔴 **Expect NO fixed number for #1064** — it read 93, then 124, then
+  130 at merge time and 138 after: `main` moves hourly, so RE-DERIVE rather than compare.
 - **The gate's node ceiling:**
   ```bash
   export KUBECONFIG=$KC_HOMELAB
