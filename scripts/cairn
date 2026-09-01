@@ -42,6 +42,15 @@ never absorbed into "served from cache"; an outage is benign and that is not.
 Beyond those, a report exits with the READER's own code, so a scope whose
 entries are all malformed still exits non-zero as it always did.
 
+🔴 AND THE WRITE VERBS ARE THE MIRROR IMAGE — `append` and `put` DO NOT DEGRADE.
+The table above exists because a read must never report an outage as an empty
+store. A write has the opposite obligation: there is no cache to answer from and
+no such thing as a stale write, so an unreachable store is a REFUSED write at
+exit 7, never a queued one and never a local one. Codes 6/7/8 (refused /
+unreachable / precondition-failed) are disjoint from every read code precisely so
+a caller cannot read "nothing was displayed" as "the bullet landed". The pod is
+the authority; this cache has none. See the WRITE PATH block below the readers.
+
 CONFIG: `~/.config/subsystem-store/env` (mode 0600) — `SUBSYSTEM_STORE_URL`,
 `SUBSYSTEM_STORE_TOKEN`. Environment variables of the same name win, so a test
 can point this at a throwaway server without touching the file. See SECRETS.md.
@@ -51,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -64,6 +74,7 @@ import urllib.request
 import zlib
 from pathlib import Path
 from typing import Sequence
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import subsystem_recall as rc  # noqa: E402
@@ -94,6 +105,33 @@ EXIT_REFRESH_FAILED = 4
 # The server answered with something we refuse to install. Distinct from every
 # other code so it can never be read as an outage or as a clean run.
 EXIT_CORRUPT = 5
+
+# --- WRITE codes. Deliberately distinct from every READ code above. ----------
+#
+# 🔴 A WRITE HAS NO CACHE TO FALL BACK ON, AND THAT ASYMMETRY IS THE CONTRACT.
+# `recall`'s job is to answer, so an outage degrades to a stale answer that says
+# it is stale, at exit 0. A write's job is to make a durable record; there is no
+# such thing as a stale write, and a queued one is a write the caller believes
+# landed. So `append`/`put` FAIL LOUDLY when the store cannot be reached — the
+# accepted cost of decision 8 in `claudedocs/plan-cairn-integration.md`, stated
+# there and stated again here so a future reader cannot mistake it for an
+# oversight and "fix" it by adding a spool.
+#
+# 6 = the STORE refused the request and the caller must change it (4xx that is
+#     not a precondition failure): a malformed bullet, an unknown ref, a scope
+#     this credential may not see. Retrying byte-for-byte cannot help.
+EXIT_WRITE_REFUSED = 6
+# 7 = the write did NOT happen and the reason is not the caller's request — the
+#     host was unreachable, or the server could not read its own store (503).
+#     Distinct from 6 because a retry is exactly the right response to this one
+#     and exactly the wrong response to that one.
+EXIT_WRITE_UNREACHABLE = 7
+# 8 = the precondition failed (412): the entry moved under the revision this
+#     write was based on. Its own code because the remedy is unique — re-sync,
+#     re-derive the revision, re-apply the edit — and because collapsing it into
+#     6 would invite a blind retry that either 412s forever or, with `If-Match`
+#     dropped, silently overwrites somebody else's change.
+EXIT_WRITE_PRECONDITION = 8
 
 STATE_LIVE = "live"
 STATE_CACHED = "cached"
@@ -159,6 +197,38 @@ def load_config(path: Path | None = None) -> tuple[str, str]:
     return url.rstrip("/"), token  # type: ignore[union-attr,return-value]
 
 
+def _apply_standard_headers(req: "urllib.request.Request", token: str) -> None:
+    """The two headers EVERY request to this host must carry, in ONE place.
+
+    🔴 A User-Agent IS REQUIRED, and urllib's default is actively refused.
+    MEASURED 2026-08-25 against the live host, same token, same path, three
+    requests differing ONLY in this header:
+        curl's default UA    -> 200
+        `Python-urllib/3.12` -> 403      <-- urllib's default
+        empty UA             -> 200
+    The 403 comes from the edge, not the app, so it is NOT a token rejection and
+    NOT the store being down — but it arrives looking like both.
+
+    🔴 THIS EXISTS AS A FUNCTION BECAUSE THE WRITE PATH WOULD OTHERWISE HAVE TO
+    RE-LEARN IT. When `fetch_snapshot` was the only caller the header was a line
+    inside it; adding `append`/`put` made that line a rule with two more sites,
+    and a rule at three sites is the shape `claude/RULES.md` says regenerates
+    the same bug at N-1 of them.
+
+    🔴 THE GUARD IS `test_cairn_write.py::TestTheRequestItself::
+    test_no_request_builder_ANYWHERE_bypasses_this_helper` — an AST scan over
+    this file AND `cairn-cutover.py`, asserting every function that constructs a
+    `urllib.request.Request` also calls this helper. An earlier version of this
+    sentence named a test that **did not exist**, which is worse than naming
+    none: it reads as coverage and stops anyone looking. It was written while
+    the only real check was a behavioural one on the append path, so a new read
+    verb building its own request was unguarded by the very line claiming to
+    guard it.
+    """
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("User-Agent", "subsystem-store-client/1")
+
+
 def fetch_snapshot(
     url: str, token: str, *, scope: str | None, timeout: int
 ) -> tuple[bytes, dict[str, str]]:
@@ -175,18 +245,11 @@ def fetch_snapshot(
         raise StoreUnreachable(f"refusing to fetch {url}: {bad}")
     target = f"{url}/api/v1/snapshot" + (f"?scope={scope}" if scope else "")
     req = urllib.request.Request(target, method="GET")
-    req.add_header("Authorization", f"Bearer {token}")
-    # 🔴 A User-Agent IS REQUIRED, and the default one is actively refused.
-    # MEASURED 2026-08-25 against the live host, same token, same path, three
-    # requests differing ONLY in this header:
-    #     curl's default UA    -> 200
-    #     `Python-urllib/3.12` -> 403      <-- urllib's default
-    #     empty UA             -> 200
-    # The 403 comes from the edge, not the app, so it is NOT a token rejection
-    # and NOT the store being down — but it arrives looking like both. Without
-    # this line every Python client of `store.zacx.dev` is blocked, which is
-    # exactly the shape of bug that gets diagnosed as "the store is broken".
-    req.add_header("User-Agent", "subsystem-store-client/1")
+    # Auth + the mandatory User-Agent. See `_apply_standard_headers` for the
+    # measurement that makes the UA load-bearing; without it every Python client
+    # of this host is blocked, which is exactly the shape of bug that gets
+    # diagnosed as "the store is broken".
+    _apply_standard_headers(req, token)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             # 🔴 RETURN THE MESSAGE, NEVER A DICT BUILT FROM IT.
@@ -731,6 +794,284 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return worst
 
 
+# =============================================================================
+# THE WRITE PATH (criterion 9). Everything above this line reads.
+# =============================================================================
+#
+# 🔴 WRITE-THROUGH, NO SPOOL, NO CACHE FALLBACK. The pod is the authority; the
+# local cache is a read-through copy with no authority of its own. A write that
+# cannot reach the pod is REFUSED, loudly, at a non-zero exit — it is never
+# queued, never written to the cache, and never reported as done. `/resume` and
+# every other READ keeps working offline off the cache; only writes stop. That
+# asymmetry is decision 8 in `claudedocs/plan-cairn-integration.md` and the
+# reason it is acceptable is that a refused write costs one retry while a
+# silently-local write costs the bullet the next `seed.sh` overwrites.
+#
+# 🔴 THE ACTOR IS NOT SENT AND CANNOT BE. `server._append_bullet` derives it
+# from the token that authenticated and DISCARDS any `actor` key in the body.
+# This client therefore does not have an `--actor` flag: offering one would
+# imply a control the caller does not have.
+
+
+class WriteRefused(Exception):
+    """The store answered, and the answer is a refusal. Carries its own code.
+
+    🔴 SEPARATE FROM `StoreUnreachable` FOR THE SAME REASON `StoreCorrupt` IS.
+    "I could not ask" and "I asked and was told no" have different remedies —
+    retry vs change the request — and a client that collapses them turns a
+    permanently-malformed bullet into an infinite retry, or a transient outage
+    into "the store rejected this, give up".
+    """
+
+    def __init__(self, exit_code: int, status: str, detail: str) -> None:
+        super().__init__(detail)
+        self.exit_code = exit_code
+        self.status = status
+        self.detail = detail
+
+
+# HTTP status -> (our exit code, whether the caller should retry unchanged).
+# 🔴 A TABLE, NOT AN `if` LADDER, so `test_every_documented_server_status_maps`
+# can walk it against the statuses `server.py` actually emits on a write route.
+# An unmapped code is NOT silently treated as success: `_classify` falls through
+# to EXIT_WRITE_REFUSED and says the code was unrecognised, which is loud and
+# wrong-in-the-safe-direction (the caller is told the write did not land).
+_WRITE_STATUS_EXITS: dict[int, int] = {
+    400: EXIT_WRITE_REFUSED,        # malformed body / ambiguous ref
+    401: EXIT_WRITE_REFUSED,        # no or bad credential
+    403: EXIT_WRITE_REFUSED,        # edge refusal (see the User-Agent note)
+    404: EXIT_WRITE_REFUSED,        # scope-unknown or ref-unknown
+    405: EXIT_WRITE_REFUSED,        # read-only image: the write path is NOT deployed
+    412: EXIT_WRITE_PRECONDITION,   # If-Match named a revision the entry no longer has
+    422: EXIT_WRITE_REFUSED,        # entry-shape: no `## Nuance / work-history`
+    428: EXIT_WRITE_REFUSED,        # precondition required (a PUT with no If-Match)
+    429: EXIT_WRITE_UNREACHABLE,    # rate limited — a retry IS the right response
+    # 🔴 500 IS A RETRY, NOT A "FIX YOUR REQUEST". `server._backstop` turns any
+    # unhandled handler exception into a 500, so it IS reachable on a write
+    # route. It was absent here and fell through to `_classify`'s "unrecognised"
+    # arm, which is EXIT_WRITE_REFUSED — telling the caller to change a
+    # byte-identical request that would very likely succeed on a retry. The
+    # fallthrough was labelled "wrong-in-the-safe-direction", and that is true
+    # for landed/not-landed and FALSE for retry/don't-retry, which is the exact
+    # distinction 6 and 7 exist to carry.
+    500: EXIT_WRITE_UNREACHABLE,
+    502: EXIT_WRITE_UNREACHABLE,    # a bad gateway is the edge, not the request
+    503: EXIT_WRITE_UNREACHABLE,    # the server could not read its own store
+    504: EXIT_WRITE_UNREACHABLE,
+}
+
+
+def _classify(code: int, status: str, detail: str) -> WriteRefused:
+    exit_code = _WRITE_STATUS_EXITS.get(code)
+    if exit_code is None:
+        return WriteRefused(
+            EXIT_WRITE_REFUSED,
+            status or f"http-{code}",
+            f"unrecognised HTTP {code} on a write route — treating the write as "
+            f"NOT LANDED: {detail}",
+        )
+    return WriteRefused(exit_code, status or f"http-{code}", detail)
+
+
+def send_write(
+    url: str,
+    token: str,
+    *,
+    method: str,
+    path: str,
+    body: bytes,
+    timeout: int,
+    extra_headers: dict[str, str] | None = None,
+) -> tuple[dict[str, str], bytes]:
+    """One request against a write route. Returns `(headers, body)` on 200.
+
+    Raises `WriteRefused` on any non-200 the server produced, and
+    `StoreUnreachable` when there was no answer at all. Nothing else escapes.
+    """
+    bad = _cairn_who().unbounded_timeout_reason(timeout)
+    if bad:
+        # 🔴 THE SAME REFUSAL THE READ PATH MAKES, FOR THE SAME REASON. A
+        # `timeout=None` reaches `urlopen` as NO timeout, and an unbounded WRITE
+        # is strictly worse than an unbounded read: the request may already have
+        # been applied, so a caller that eventually gives up cannot tell whether
+        # it landed.
+        raise StoreUnreachable(f"refusing to write to {url}: {bad}")
+    target = f"{url}{path}"
+    req = urllib.request.Request(target, data=body, method=method)
+    _apply_standard_headers(req, token)
+    req.add_header("Content-Type", "application/json")
+    for name, value in (extra_headers or {}).items():
+        req.add_header(name, value)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            # `resp.headers` returned as the Message, never `dict(...)` — see
+            # `fetch_snapshot` for the measured case-folding incident.
+            return resp.headers, resp.read()
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", "replace").strip().replace("\n", "; ")
+        except Exception:
+            detail = ""
+        status = exc.headers.get("X-Store-Status", "") if exc.headers else ""
+        raise _classify(exc.code, status, detail[:400] or f"HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise StoreUnreachable(f"{url} unreachable: {exc.reason}") from exc
+    except OSError as exc:
+        raise StoreUnreachable(f"{url} unreachable: {exc}") from exc
+
+
+def _write_scope(args: argparse.Namespace) -> str | None:
+    """The scope a write targets, or None having already printed why."""
+    try:
+        scope = args.scope or scope_for_repo(args.repo)
+    except Exception as exc:
+        print(
+            f"cairn: could not derive a scope from {args.repo!r}: {exc}\n"
+            f"       pass --scope explicitly.",
+            file=sys.stderr,
+        )
+        return None
+    if not scope:
+        print("cairn: --scope is required (no scope could be derived)", file=sys.stderr)
+        return None
+    return scope
+
+
+def cmd_append(args: argparse.Namespace) -> int:
+    """`POST /api/v1/entry/<scope>/<ref>/bullets` — append ONE dated bullet.
+
+    🔴 THIS IS THE VERB CRITERION 9 ROUTES `subsystem-index` THROUGH. Before it
+    existed the skill's append was an `Edit` against `~/.claude/analyze-service-
+    index/<scope>/<entry>.md`, which is local-only: the bullet lived on one host
+    and the next `seed.sh` from any host replaced the served copy with a file
+    that never had it. This makes the append land where the authority is.
+
+    🔴 DO NOT DATE-PREFIX `--text`. The server prepends `- <date>: ` itself; the
+    first production append through this route reads `- 2026-08-29: 2026-08-29:
+    …` because a caller did.
+    """
+    scope = _write_scope(args)
+    if scope is None:
+        return EXIT_USAGE
+    url, token = load_config()
+    payload = json.dumps({"text": args.text, "session": args.session}).encode("utf-8")
+    quoted = f"/api/v1/entry/{quote(scope, safe='')}/{quote(args.ref, safe='')}/bullets"
+    headers, body = send_write(
+        url, token, method="POST", path=quoted, body=payload,
+        timeout=_store_timeout(args),
+    )
+    status = headers.get("X-Store-Status", "unknown")
+    revision = (headers.get("ETag") or "").strip('"')
+    # 🔴 `duplicate` IS PRINTED, NOT SWALLOWED, and it exits 0. The server
+    # recognises a bullet by CONTENT HASH, so a re-POST after a timeout is
+    # idempotent — which is the property that makes a retry safe. But a caller
+    # told nothing would read "appended" into a run that wrote nothing, and the
+    # store's own idempotency note says a genuinely new bullet whose text is
+    # byte-identical to an existing one is silently NOT appended. Saying which
+    # of the two happened is the whole difference.
+    print(
+        f"cairn: {status} scope={scope} ref={args.ref} revision={revision or 'unknown'}"
+    )
+    sys.stdout.write(body.decode("utf-8", "replace"))
+    return EXIT_OK
+
+
+def cmd_put(args: argparse.Namespace) -> int:
+    """`PUT /api/v1/entry/<scope>/<ref>` — whole-file replace behind `If-Match`.
+
+    🔴 WHY A WHOLE-FILE VERB EXISTS AT ALL, given that `append` is the safe one:
+    the `subsystem-index` protocol also mandates rewriting an existing bullet's
+    `OPEN:` marker to `RESOLVED <sha>:` **in the same edit**, and updating
+    `## Pointers`. Neither is an append. Without this verb, freezing the local
+    store read-only would make those two operations impossible rather than
+    merely relocated — the cutover would REGRESS a documented protocol step.
+
+    🔴 THE REVISION IS DERIVED FROM A **LIVE** SYNC, NEVER FROM `--no-sync`.
+    `server.entry_revision` is `sha256(file bytes)[:16]`, so the cache can
+    compute it offline — which is exactly what makes a stale cache dangerous
+    here in a way it is not for a read: an edit based on bytes that moved is a
+    lost update, and the `If-Match` is what turns that into a 412 instead of a
+    silent overwrite. Deriving it from a cache we did not just refresh would
+    still be *correct* (the server compares against its own copy) but it wastes
+    the operator's edit on a guaranteed 412. `--if-match` is accepted for the
+    case where the caller already holds the value.
+    """
+    scope = _write_scope(args)
+    if scope is None:
+        return EXIT_USAGE
+    # 🔴 READ THE FILE BEFORE THE NETWORK — AND "BEFORE THE NETWORK" MEANS ABOVE
+    # `resolve_state`, NOT ABOVE `load_config`. The first attempt at this fix
+    # moved the read up only as far as the config load, which is a local file
+    # read, so the full snapshot download still ran first: a missing `--file`
+    # went on reporting the STORE AS UNREACHABLE (rc 7) instead of "cannot read
+    # --file" (rc 2). The comment claimed the ordering, and the test that
+    # asserted it did so in its NAME while its body checked only the exit code
+    # and the sentence — both of which held with the read left where it was. A
+    # guard's description claiming coverage its body does not provide is the
+    # shape that stops anyone looking.
+    try:
+        payload = args.file.read_bytes()
+    except OSError as exc:
+        print(f"cairn: cannot read --file {args.file}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    revision = args.if_match
+    if not revision:
+        state, detail, hint = resolve_state(
+            args.cache, no_sync=False, scope=None, timeout=_store_timeout(args)
+        )
+        if state != STATE_LIVE:
+            # 🔴 NOT "served from cache". A read may degrade; deriving a
+            # precondition from bytes we could not confirm is the one case where
+            # the cache is worse than nothing.
+            #
+            # 🔴 AND NOT `hint`. This returned `hint if hint is not None else
+            # EXIT_WRITE_UNREACHABLE`, and `resolve_state` sets `hint` to
+            # EXIT_UNREACHABLE_NO_CACHE (3) exactly when there is NO cache —
+            # which is the FIRST run on a fresh host, i.e. the commonest way to
+            # get here. So the one code this whole file insists a write must
+            # never return was returned by a write, on its likeliest path, while
+            # four separate comments and the design doc said it could not
+            # happen. `hint` is a READ verdict — "this is what a reader should
+            # exit with" — and it has no meaning for a write. Measured before
+            # the fix: put with no cache -> 3, put with a cache -> 7, append
+            # with no cache -> 7.
+            print(
+                f"🔴 cairn: refusing to PUT — could not refresh the cache, so the "
+                f"revision would be derived from bytes that may have moved "
+                f"({detail}). Nothing was queued and nothing was written locally. "
+                f"Pass --if-match explicitly if you already hold it.",
+                file=sys.stderr,
+            )
+            return EXIT_WRITE_UNREACHABLE
+        matches = sorted(args.cache.glob(f"{scope}/{args.ref}.md")) or sorted(
+            args.cache.glob(f"{scope}/{args.ref}.*.md")
+        )
+        if len(matches) != 1:
+            print(
+                f"cairn: cannot derive a revision — {len(matches)} cached file(s) "
+                f"match {scope}/{args.ref}. Pass --if-match, or use the entry's "
+                f"exact filename stem as --ref.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        revision = hashlib.sha256(matches[0].read_bytes()).hexdigest()[:16]
+        print(f"cairn: derived If-Match {revision} from the live snapshot", file=sys.stderr)
+    url, token = load_config()
+    quoted = f"/api/v1/entry/{quote(scope, safe='')}/{quote(args.ref, safe='')}"
+    headers, body = send_write(
+        url, token, method="PUT", path=quoted, body=payload,
+        timeout=_store_timeout(args),
+        extra_headers={"If-Match": f'"{revision}"'},
+    )
+    new_rev = (headers.get("ETag") or "").strip('"')
+    print(
+        f"cairn: {headers.get('X-Store-Status', 'unknown')} scope={scope} "
+        f"ref={args.ref} revision={new_rev or 'unknown'}"
+    )
+    sys.stdout.write(body.decode("utf-8", "replace"))
+    return EXIT_OK
+
+
 def _cairn_who():
     """The `who` module, imported lazily — it owns the timeout predicate.
 
@@ -876,6 +1217,49 @@ def build_parser() -> argparse.ArgumentParser:
     e = common(sub.add_parser("ls-entries", help="one `<scope>/<entry>.md` per line"))
     e.set_defaults(func=cmd_ls_entries)
 
+    # --- the write verbs -----------------------------------------------------
+    # 🔴 `writes=True` IS NOT DECORATION. `main` maps a `StoreUnreachable` to
+    # exit 3 ("store-unreachable, no cache"), which is a READ verdict and reads
+    # as "nothing was shown". For a write the honest code is 7 — the record was
+    # NOT made — and the two must not share a number, because the whole point of
+    # write-through is that a caller can tell a failed write from a stale read.
+    # 🔴 NEITHER TAKES `--no-sync`. It would be meaningless on `append` and
+    # actively harmful on `put` (see that function on deriving a precondition
+    # from bytes we did not confirm), so it is absent rather than refused.
+    ap = sub.add_parser(
+        "append",
+        help="append ONE dated, attributed bullet to an entry (writes to the pod)",
+    )
+    ap.add_argument("--scope", default=None)
+    ap.add_argument("--repo", default=".")
+    ap.add_argument("--ref", required=True, help="the entry: a filename stem or an alias")
+    ap.add_argument(
+        "--text", required=True,
+        help="the bullet, ONE line, with NO leading `- ` and NO leading date — "
+             "the server adds both",
+    )
+    # 🔴 REQUIRED, WITH NO DEFAULT AND NO ENV FALLBACK. The server refuses a
+    # request without it (400), and criterion 4 is that every appended bullet
+    # records the actor AND the session. A default would be a value nobody
+    # chose, attached to a durable record; an env fallback would silently
+    # attribute one agent's bullet to whatever the shell last exported.
+    ap.add_argument("--session", required=True, help="the writing session's id")
+    ap.set_defaults(func=cmd_append, writes=True)
+
+    pu = sub.add_parser(
+        "put", help="replace a whole entry behind an If-Match precondition"
+    )
+    pu.add_argument("--scope", default=None)
+    pu.add_argument("--repo", default=".")
+    pu.add_argument("--ref", required=True)
+    pu.add_argument("--file", type=Path, required=True, help="the new entry bytes")
+    pu.add_argument(
+        "--if-match", default=None, dest="if_match",
+        help="the entry revision this edit is based on; derived from a LIVE "
+             "sync when omitted",
+    )
+    pu.set_defaults(func=cmd_put, writes=True)
+
     # 🔴 `who` TOUCHES NO STORE AND NO CACHE. It is the first cairn subcommand
     # about a different noun — a TASK, not a subsystem entry — so it takes none
     # of the `common()` flags and never syncs. It is here rather than in its own
@@ -911,6 +1295,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.no_sync = False
     try:
         return args.func(args)
+    except WriteRefused as exc:
+        # 🔴 THE STORE ANSWERED, AND THE ANSWER IS NO. Printed with the server's
+        # own `X-Store-Status`, because that token is what distinguishes the four
+        # 404s from each other (`scope-unknown` vs `ref-unknown`) and a 405
+        # (`read-only`) — which is the one that means "the write path is not
+        # deployed on the running image", i.e. an operator problem and not a
+        # caller problem, and which reads exactly like a wrong URL.
+        print(
+            f"🔴 cairn: the store REFUSED the write [{exc.status}] — {exc.detail}",
+            file=sys.stderr,
+        )
+        return exc.exit_code
     except StoreCorrupt as exc:
         # 🔴 LOUD, and never absorbed into "served from cache". A server that
         # ships a link, a traversal member, a duplicate, or a count disagreeing
@@ -919,6 +1315,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"🔴 cairn: REFUSED the archive — {exc}", file=sys.stderr)
         return EXIT_CORRUPT
     except StoreUnreachable as exc:
+        # 🔴 A WRITE AND A READ DO NOT SHARE A CODE HERE. Exit 3 is
+        # "store-unreachable, no cache" — a statement about what was DISPLAYED.
+        # On a write nothing was displayed and, more importantly, nothing was
+        # RECORDED; a caller that reads 3 as "the read came back empty" would
+        # carry on believing the bullet landed. `writes` is set by the write
+        # subparsers only, so this cannot drift with a new read verb.
+        if getattr(args, "writes", False):
+            print(
+                f"🔴 cairn: the write did NOT happen — {exc}\n"
+                f"          Nothing was queued and nothing was written locally. "
+                f"Re-run when the store is reachable.",
+                file=sys.stderr,
+            )
+            return EXIT_WRITE_UNREACHABLE
         # Reached only by a config failure outside `resolve_state`; still named.
         print(f"🔴 cairn: {STATE_NO_CACHE} — {exc}", file=sys.stderr)
         return EXIT_UNREACHABLE_NO_CACHE
