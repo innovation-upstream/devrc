@@ -57,6 +57,7 @@ import importlib.util
 import json
 from testlib import hermetic_git  # noqa: E402
 from testlib import mockbin  # noqa: E402
+from testlib import store_siting  # noqa: E402
 import io
 import os
 import re
@@ -332,92 +333,21 @@ def _entry(
 # 🔴 It does NOT weaken `TestAHungRoundTripSAYSWhichSideBlocked`. That class does not
 # depend on the real filesystem being slow: it monkeypatches `_fsync_dir` to stall
 # deliberately, so it exercises the same code path wherever the store lives.
-def _mount_fstype(path: Path) -> str | None:
-    """The filesystem type backing `path`, from /proc/mounts — or None.
-
-    Resolved by LONGEST matching mount point, not by string prefix: `/dev/shm`
-    and `/dev` are both prefixes of a path under the former, and taking the first
-    hit would report `devtmpfs` for a `tmpfs` mount.
-    """
-    try:
-        target = path.resolve()
-        entries = Path("/proc/mounts").read_text().splitlines()
-    except OSError:
-        return None
-    best: tuple[int, str] | None = None
-    for line in entries:
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        mount_point, fstype = parts[1], parts[2]
-        try:
-            mp = Path(mount_point).resolve()
-        except OSError:
-            continue
-        if target == mp or mp in target.parents:
-            depth = len(mp.parts)
-            if best is None or depth > best[0]:
-                best = (depth, fstype)
-    return None if best is None else best[1]
-
-
-def _tmpfs_dir() -> Path | None:
-    """A writable tmpfs directory for the store, or None to use the disk.
-
-    Three conditions, all required, because each fails independently in a real
-    container: the candidate is a directory, /proc/mounts says the filesystem
-    backing it is `tmpfs`, and an actual write succeeds. 🔴 The PATH is never the
-    test — `/dev/shm` is tmpfs only by convention and a container may mount
-    anything there, so trusting the name would be a guard that passes while the
-    hazard (a disk-backed store) is present in a different spelling.
-    """
-    for candidate in (os.environ.get("DEVRC_TEST_TMPFS"), "/dev/shm"):
-        if not candidate:
-            continue
-        path = Path(candidate)
-        try:
-            if not path.is_dir():
-                continue
-            if _mount_fstype(path) != "tmpfs":
-                continue
-            probe = path / f".devrc-tmpfs-probe-{os.getpid()}"
-            probe.write_bytes(b"probe")
-            probe.unlink()
-        except OSError:
-            continue
-        return path
-    return None
-
-
 @pytest.fixture
 def store(tmp_path: Path) -> Iterator[Path]:
     """A synthetic store: two populated scopes, one empty, one all-malformed."""
-    base = _tmpfs_dir()
-    holder: Path | None = None
-    if base is None:
-        root = tmp_path / "store"
-    else:
-        # tmp_path is auto-cleaned by pytest; a tmpfs directory is not, and tmpfs
-        # is RAM — leaking one per test would hold memory for the whole run.
-        holder = Path(tempfile.mkdtemp(prefix="devrc-store-", dir=str(base)))
-        root = holder / "store"
-    (root / SCOPE).mkdir(parents=True)
-    (root / OTHER_SCOPE).mkdir(parents=True)
-    (root / EMPTY_SCOPE).mkdir(parents=True)
-    (root / BROKEN_SCOPE).mkdir(parents=True)
-    (root / SCOPE / "thing-alpha.md").write_text(_entry("thing-alpha", SCOPE))
-    (root / OTHER_SCOPE / "thing-beta.md").write_text(
-        _entry("thing-beta", OTHER_SCOPE, nuance=OTHER_NUANCE)
-    )
-    # No front matter at all: the loader collects it as MALFORMED.
-    (root / BROKEN_SCOPE / "thing-gamma.md").write_text("no front matter here\n")
-    try:
+    with store_siting.store_root(tmp_path) as root:
+        (root / SCOPE).mkdir(parents=True)
+        (root / OTHER_SCOPE).mkdir(parents=True)
+        (root / EMPTY_SCOPE).mkdir(parents=True)
+        (root / BROKEN_SCOPE).mkdir(parents=True)
+        (root / SCOPE / "thing-alpha.md").write_text(_entry("thing-alpha", SCOPE))
+        (root / OTHER_SCOPE / "thing-beta.md").write_text(
+            _entry("thing-beta", OTHER_SCOPE, nuance=OTHER_NUANCE)
+        )
+        # No front matter at all: the loader collects it as MALFORMED.
+        (root / BROKEN_SCOPE / "thing-gamma.md").write_text("no front matter here\n")
         yield root
-    finally:
-        if holder is not None:
-            # Best-effort: a tmpfs leak costs RAM for the run, but failing the
-            # teardown would turn a passing test red for a cleanup problem.
-            shutil.rmtree(holder, ignore_errors=True)
 
 
 # RFC 5737 TEST-NET-3, and three DISTINCT addresses: a test that used one
@@ -16428,16 +16358,16 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         # /dev/shm is tmpfs while /dev is devtmpfs, and both are prefixes of a
         # path under the former. A first-match-wins scan reports devtmpfs and the
         # store then silently lands on the wrong filesystem.
-        if _mount_fstype(Path("/dev")) is None:
+        if store_siting.mount_fstype(Path("/dev")) is None:
             pytest.skip("no /proc/mounts on this platform")
-        assert _mount_fstype(Path("/dev/shm")) == "tmpfs", (
+        assert store_siting.mount_fstype(Path("/dev/shm")) == "tmpfs", (
             "/dev/shm must resolve to its OWN mount, not to /dev's"
         )
 
     def test_a_disk_path_is_NOT_reported_as_tmpfs(self):
         # The negative control. Without it, a helper hardcoded to return "tmpfs"
         # would satisfy every other assertion here.
-        fstype = _mount_fstype(Path("/"))
+        fstype = store_siting.mount_fstype(Path("/"))
         assert fstype is not None and fstype != "tmpfs", (
             f"root filesystem reported as {fstype!r} — if this box really does run "
             "root on tmpfs the siting logic is untestable here, not wrong"
@@ -16451,7 +16381,7 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         # This is the case that makes `/dev/shm` being conventionally-tmpfs safe
         # to rely on — we do not rely on it.
         monkeypatch.setenv("DEVRC_TEST_TMPFS", str(tmp_path))
-        got = _tmpfs_dir()
+        got = store_siting.tmpfs_dir()
         assert got != tmp_path, (
             "a disk-backed directory was accepted as tmpfs — the type check is "
             "not doing the work its docstring claims"
@@ -16464,20 +16394,20 @@ class TestTheStoreIsSitedOffTheContendedDisk:
         # current behaviour, never fail the suite.
         missing = tmp_path / "definitely-not-here"
         monkeypatch.setenv("DEVRC_TEST_TMPFS", str(missing))
-        got = _tmpfs_dir()
-        assert got is None or _mount_fstype(got) == "tmpfs"
+        got = store_siting.tmpfs_dir()
+        assert got is None or store_siting.mount_fstype(got) == "tmpfs"
 
     def test_the_store_fixture_ACTUALLY_lands_on_tmpfs_when_one_exists(
         self, store: Path
     ):
-        # 🔴 The positive control for the whole change. If `_tmpfs_dir()` finds a
+        # 🔴 The positive control for the whole change. If `store_siting.tmpfs_dir()` finds a
         # tmpfs, the store MUST be on it — otherwise the fixture fell back and the
         # fix is inert while this file stays green.
-        available = _tmpfs_dir()
+        available = store_siting.tmpfs_dir()
         if available is None:
             pytest.skip("no tmpfs available here; the fallback path is exercised")
-        assert _mount_fstype(store) == "tmpfs", (
-            f"store landed on {_mount_fstype(store)!r} while a tmpfs at "
+        assert store_siting.mount_fstype(store) == "tmpfs", (
+            f"store landed on {store_siting.mount_fstype(store)!r} while a tmpfs at "
             f"{available} was available — the fix is inert"
         )
 

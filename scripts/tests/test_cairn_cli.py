@@ -37,6 +37,8 @@ from types import SimpleNamespace
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts"))
+from testlib import store_siting  # noqa: E402
 CAIRN_CLI = REPO / "scripts" / "cairn"
 SERVER_PY = REPO / "scripts" / "subsystem-store-api" / "server.py"
 GOOD_TOKEN = "a" * 20 + "B" * 20 + "c" * 8
@@ -93,8 +95,16 @@ def _entry(service: str, scope: str, nuance: str) -> str:
 
 
 @pytest.fixture
-def source_store(tmp_path: Path) -> Path:
-    root = tmp_path / "src"
+def source_store(tmp_path: Path):
+    # 🔴 Sited via `testlib.store_siting`, not `tmp_path` directly: this file
+    # stands up the real store server, so its writes fsync INSIDE the request
+    # and a contended disk fails the gate on unrelated PRs. Falls back to
+    # `tmp_path` where no tmpfs is usable, so it is never worse than before.
+    with store_siting.store_root(tmp_path, "src") as root:
+        yield _populate_source_store(root)
+
+
+def _populate_source_store(root: Path) -> Path:
     (root / "widget-cfg").mkdir(parents=True)
     (root / "hollow-area").mkdir(parents=True)
     # 🔴 A SECOND *POPULATED* SCOPE, and it is load-bearing. The scope-filter
