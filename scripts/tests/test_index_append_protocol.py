@@ -522,6 +522,17 @@ class TestTheOwnerCarriesTheProtocol:
             "goes through `cairn put`",
             "🔴 the OTHER write: an `OPEN:`->`RESOLVED` rewrite is not an append",
         ),
+        # 🔴 The two writes used to be ONE `Edit`, so ordering could not arise.
+        # It can now, and the wrong order fails against the caller's OWN earlier
+        # write — a 412 that reads like someone else's concurrent edit. Nothing
+        # else in the toolchain states this; the layer-5 predicate cannot see the
+        # paragraph either, because it names no STORE noun.
+        (
+            "the rewrite is a `cairn put` and goes FIRST, then the new bullet's "
+            "`cairn append`",
+            "🔴 the ORDER of the two writes — reversed, the caller's own append "
+            "moves the entry out from under its own `If-Match`",
+        ),
         (
             "`Write` only for a first-ever file",
             "🔴 the carve-out — a first-ever file has no prior content to lose, "
