@@ -47,6 +47,8 @@ status strings are all spelled again here by hand. Importing them would assert
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import ast
 import errno
 import hashlib
@@ -66,6 +68,7 @@ import tarfile
 import secrets
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
@@ -268,10 +271,113 @@ def _entry(
     return "\n".join(lines)
 
 
+# 🔴 THE STORE FIXTURE IS SITED ON tmpfs WHEN ONE IS USABLE, AND THAT IS A FIX FOR
+# THE GATE FLAKE, NOT A PERFORMANCE TWEAK.
+#
+# `server.py:_replace_bytes` fsyncs the FILE and then the parent DIRECTORY *inside
+# the request, before the response is written*, and fsync blocks in uninterruptible
+# sleep. Under disk contention on the single node `devrc-ci` is pinned to, one such
+# fsync can exceed `HANG_TIMEOUT` and the gate reports a code failure for an I/O
+# stall — on PRs whose diff cannot reach this file at all. Full mechanism, and the
+# on-demand reproducer, in `scripts/ci-repro/README.md`.
+#
+# Raising `HANG_TIMEOUT` is explicitly banned above and does not address the bound.
+# The lever that remains is to remove the DEPENDENCE on disk latency, because these
+# tests are about HTTP and store semantics and assert nothing whatsoever about how
+# long an fsync takes. On tmpfs there is no backing device to contend for, so the
+# stall cannot occur by construction.
+#
+# Measured 2026-09-01 on this host, `_replace_bytes`'s exact sequence (mkstemp →
+# write → fsync file → replace → fsync dir), reporting MAX because HANG_TIMEOUT is
+# breached by a single worst-case call and a mean would hide it:
+#
+#              idle                          under 3 concurrent fsync writers
+#   disk    median 6.562ms  MAX 12.431ms     median 11.725ms  MAX 17.843ms
+#   tmpfs   median 0.017ms  MAX  0.140ms     median  0.011ms  MAX  0.090ms
+#
+# Disk latency doubled under a deliberately modest load; tmpfs did not move. That
+# load was nowhere near CI's, and no 60s stall was reproduced here — the claim is
+# that tmpfs is FLAT under contention, not that this measured the CI event.
+#
+# 🔴 IT FALLS BACK TO `tmp_path`, so it can never make the gate worse than it is
+# today. In the nix build sandbox `TMPDIR` is `/build` on ext2/ext3 while `/dev/shm`
+# is tmpfs and writable (probed). But CI builds UNSANDBOXED — its traceback shows
+# `/tmp/nix-build-…`, not `/build` — so there `/dev/shm` is the container's own
+# mount, which is 64Mi by default and may be absent or read-only. Every one of those
+# cases lands on the fallback and simply restores current behaviour.
+#
+# 🔴 It does NOT weaken `TestAHungRoundTripSAYSWhichSideBlocked`. That class does not
+# depend on the real filesystem being slow: it monkeypatches `_fsync_dir` to stall
+# deliberately, so it exercises the same code path wherever the store lives.
+def _mount_fstype(path: Path) -> str | None:
+    """The filesystem type backing `path`, from /proc/mounts — or None.
+
+    Resolved by LONGEST matching mount point, not by string prefix: `/dev/shm`
+    and `/dev` are both prefixes of a path under the former, and taking the first
+    hit would report `devtmpfs` for a `tmpfs` mount.
+    """
+    try:
+        target = path.resolve()
+        entries = Path("/proc/mounts").read_text().splitlines()
+    except OSError:
+        return None
+    best: tuple[int, str] | None = None
+    for line in entries:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mount_point, fstype = parts[1], parts[2]
+        try:
+            mp = Path(mount_point).resolve()
+        except OSError:
+            continue
+        if target == mp or mp in target.parents:
+            depth = len(mp.parts)
+            if best is None or depth > best[0]:
+                best = (depth, fstype)
+    return None if best is None else best[1]
+
+
+def _tmpfs_dir() -> Path | None:
+    """A writable tmpfs directory for the store, or None to use the disk.
+
+    Three conditions, all required, because each fails independently in a real
+    container: the candidate is a directory, /proc/mounts says the filesystem
+    backing it is `tmpfs`, and an actual write succeeds. 🔴 The PATH is never the
+    test — `/dev/shm` is tmpfs only by convention and a container may mount
+    anything there, so trusting the name would be a guard that passes while the
+    hazard (a disk-backed store) is present in a different spelling.
+    """
+    for candidate in (os.environ.get("DEVRC_TEST_TMPFS"), "/dev/shm"):
+        if not candidate:
+            continue
+        path = Path(candidate)
+        try:
+            if not path.is_dir():
+                continue
+            if _mount_fstype(path) != "tmpfs":
+                continue
+            probe = path / f".devrc-tmpfs-probe-{os.getpid()}"
+            probe.write_bytes(b"probe")
+            probe.unlink()
+        except OSError:
+            continue
+        return path
+    return None
+
+
 @pytest.fixture
-def store(tmp_path: Path) -> Path:
+def store(tmp_path: Path) -> Iterator[Path]:
     """A synthetic store: two populated scopes, one empty, one all-malformed."""
-    root = tmp_path / "store"
+    base = _tmpfs_dir()
+    holder: Path | None = None
+    if base is None:
+        root = tmp_path / "store"
+    else:
+        # tmp_path is auto-cleaned by pytest; a tmpfs directory is not, and tmpfs
+        # is RAM — leaking one per test would hold memory for the whole run.
+        holder = Path(tempfile.mkdtemp(prefix="devrc-store-", dir=str(base)))
+        root = holder / "store"
     (root / SCOPE).mkdir(parents=True)
     (root / OTHER_SCOPE).mkdir(parents=True)
     (root / EMPTY_SCOPE).mkdir(parents=True)
@@ -282,7 +388,13 @@ def store(tmp_path: Path) -> Path:
     )
     # No front matter at all: the loader collects it as MALFORMED.
     (root / BROKEN_SCOPE / "thing-gamma.md").write_text("no front matter here\n")
-    return root
+    try:
+        yield root
+    finally:
+        if holder is not None:
+            # Best-effort: a tmpfs leak costs RAM for the run, but failing the
+            # teardown would turn a passing test red for a cleanup problem.
+            shutil.rmtree(holder, ignore_errors=True)
 
 
 # RFC 5737 TEST-NET-3, and three DISTINCT addresses: a test that used one
@@ -359,6 +471,26 @@ def running(
 # token found scanning a stuck handler's frames from the innermost outward wins,
 # so `fsync` reached from inside `_replace_bytes` reports as FSYNC and not as the
 # entry lock it is holding on the way in.
+#
+# 🔴 KNOWN DEFECT, MEASURED 2026-09-01, NOT FIXED HERE — THE SCAN MATCHES THE
+# CHECKOUT PATH, BECAUSE `traceback.format_stack` RENDERS EACH FRAME'S FILENAME.
+# These are substring tokens matched against the whole rendered stack, so a clone
+# or worktree whose PATH contains one of them misclassifies EVERY hang, confidently
+# and wrongly — which is worse than no verdict. Reproduced by accident: a worktree
+# named `devrc-fsync` (named after the flake being fixed, which is the likely case)
+# turned `test_a_stall_on_the_ENTRY_LOCK_reads_DIFFERENTLY` red with
+# `MECHANISM = SERVER_BLOCKED_IN_FSYNC`, while the identical tree at
+# `devrc-storetmp` passed. `flock`, `_EntryLock` and `_audit_lock` are exposed the
+# same way.
+# ⚠ The first attempt to CONFIRM that was itself wrong and read as a refutation:
+# after `git worktree move`, a stale `__pycache__` kept the old `co_filename`
+# baked into the code objects, so the renamed tree still rendered the OLD path and
+# still failed. Clearing `__pycache__` (or `PYTHONDONTWRITEBYTECODE=1`) is what
+# made the control honest — the documented mtime+size revalidation trap, hit here
+# in the wild.
+# The fix is to scan the frames' SOURCE LINES rather than their filenames; it is
+# deliberately left out of the change that found it, because this classifier has
+# its own tests and that is its own edit.
 _HUNG_SERVER_RULES: tuple[tuple[str, str], ...] = (
     ("fsync", "SERVER_BLOCKED_IN_FSYNC"),
     ("flock", "SERVER_BLOCKED_ON_ENTRY_LOCK"),
@@ -15973,3 +16105,83 @@ class TestAHungRoundTripSAYSWhichSideBlocked:
             )
         assert code == 200, (code, headers)
         assert headers["X-Store-Status"] == "appended"
+
+
+class TestTheStoreIsSitedOffTheContendedDisk:
+    """The gate flake is fsync latency under disk contention; tmpfs removes it.
+
+    🔴 These pin the SITING, which is the only thing that makes the fix real. A
+    fixture that silently fell back to disk everywhere would leave the suite exactly
+    as flaky while every test still passed — the change would be inert and
+    indistinguishable from a working one, which is the failure mode this class
+    exists to make impossible.
+    """
+
+    def test_the_fstype_is_resolved_by_LONGEST_mount_point_not_by_prefix(self):
+        # /dev/shm is tmpfs while /dev is devtmpfs, and both are prefixes of a
+        # path under the former. A first-match-wins scan reports devtmpfs and the
+        # store then silently lands on the wrong filesystem.
+        if _mount_fstype(Path("/dev")) is None:
+            pytest.skip("no /proc/mounts on this platform")
+        assert _mount_fstype(Path("/dev/shm")) == "tmpfs", (
+            "/dev/shm must resolve to its OWN mount, not to /dev's"
+        )
+
+    def test_a_disk_path_is_NOT_reported_as_tmpfs(self):
+        # The negative control. Without it, a helper hardcoded to return "tmpfs"
+        # would satisfy every other assertion here.
+        fstype = _mount_fstype(Path("/"))
+        assert fstype is not None and fstype != "tmpfs", (
+            f"root filesystem reported as {fstype!r} — if this box really does run "
+            "root on tmpfs the siting logic is untestable here, not wrong"
+        )
+
+    def test_the_candidate_is_rejected_when_it_is_NOT_tmpfs(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # A directory that exists and is writable but is disk-backed must be
+        # refused: the guard is the FILESYSTEM TYPE, never the path's spelling.
+        # This is the case that makes `/dev/shm` being conventionally-tmpfs safe
+        # to rely on — we do not rely on it.
+        monkeypatch.setenv("DEVRC_TEST_TMPFS", str(tmp_path))
+        got = _tmpfs_dir()
+        assert got != tmp_path, (
+            "a disk-backed directory was accepted as tmpfs — the type check is "
+            "not doing the work its docstring claims"
+        )
+
+    def test_an_ABSENT_candidate_falls_back_rather_than_raising(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # The CI sandbox may have no usable tmpfs at all. That must degrade to
+        # current behaviour, never fail the suite.
+        missing = tmp_path / "definitely-not-here"
+        monkeypatch.setenv("DEVRC_TEST_TMPFS", str(missing))
+        got = _tmpfs_dir()
+        assert got is None or _mount_fstype(got) == "tmpfs"
+
+    def test_the_store_fixture_ACTUALLY_lands_on_tmpfs_when_one_exists(
+        self, store: Path
+    ):
+        # 🔴 The positive control for the whole change. If `_tmpfs_dir()` finds a
+        # tmpfs, the store MUST be on it — otherwise the fixture fell back and the
+        # fix is inert while this file stays green.
+        available = _tmpfs_dir()
+        if available is None:
+            pytest.skip("no tmpfs available here; the fallback path is exercised")
+        assert _mount_fstype(store) == "tmpfs", (
+            f"store landed on {_mount_fstype(store)!r} while a tmpfs at "
+            f"{available} was available — the fix is inert"
+        )
+
+    def test_the_store_fixture_is_still_a_correct_store_wherever_it_lands(
+        self, store: Path
+    ):
+        # Siting must not change CONTENT. Cheap, and it is what stops the tmpfs
+        # branch quietly producing a different fixture from the disk branch.
+        assert (store / SCOPE / "thing-alpha.md").is_file()
+        assert (store / OTHER_SCOPE / "thing-beta.md").is_file()
+        assert (store / EMPTY_SCOPE).is_dir()
+        assert (store / BROKEN_SCOPE / "thing-gamma.md").read_text().startswith(
+            "no front matter"
+        )
