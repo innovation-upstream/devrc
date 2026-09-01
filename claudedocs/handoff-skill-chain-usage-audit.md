@@ -45,7 +45,8 @@ survives adversarial re-derivation, and fix whatever it exposes.
 - ✅ **MERGED — rank 6: devrc#1108 as `57b010fb`** (squash, 2026-08-31T05:15:15Z; **verified by
   CONTENT on `origin/main`, never by ancestry** — ancestry is false forever after a squash).
   9 commits: the correction, six audit rounds, two gate re-triggers. **Every round found something
-  real and FIVE of six found the PREVIOUS round's correction wrong** — see the ladder block below;
+  real and FIVE of six found the PREVIOUS round's correction wrong** — detail in store `devrc/skills.md`
+  (the ladder block itself is now a tombstone);
   that ratio is the durable finding, not the PR.
 - ✅ **CLOSED — rank 3**, committed on #1055: the drift question does not discriminate (95.5% of
   abandoned docs declare open work vs a **90.3% control**). Real finding: **13 / 26** abandoned and
@@ -95,7 +96,7 @@ survives adversarial re-derivation, and fix whatever it exposes.
 EVICTED 2026-09-01 (terminal). Verdict: **8 cleanly-ended · 4 interrupted-at-end · 2 context-exhausted · 2 never-started** of 16 — carried in `## State now`'s headline, which survives every update.
 
 ### ✅ CLOSED — the topic-drift sessions, and why the question as posed does not discriminate
-EVICTED 2026-09-01 (terminal). Verdict: the question does NOT discriminate — **95.5%** of abandoned docs declare open work vs a **90.3%** control. Instrument `claudedocs/skill-chain-drift-audit.py`; see rank 3.
+EVICTED 2026-09-01 — **terminal EXCEPT its open probe, which is now rank 12** (it was wrongly labelled wholly terminal; caught by audit). Verdict: the question does NOT discriminate — **95.5%** of abandoned docs declare open work vs a **90.3%** control. Instrument `claudedocs/skill-chain-drift-audit.py`; see rank 3.
 
 ### 🔴 WALK-BACK — "queue depth is what moved" was UNDER-CONTROLLED, and the store already knew
 **Corrected 2026-08-31, by reading the subsystem store instead of re-deriving.** This doc briefly
@@ -133,10 +134,14 @@ does not name which of ~28 targets failed), which is why attempt 1's named test 
 `failed=0` are different shapes and must not be merged into one story.
 
 ### ✅ CLOSED — the audit ladder on #1108, and what SIX rounds on a 21-line docs PR actually taught
-EVICTED 2026-09-01 (terminal). Verdict: **five of six rounds found the PREVIOUS round's correction wrong**; an ATTRIBUTION GATE, not a clean round, is what ends such a ladder. Durable in store `devrc/tests.md` + `devrc/skills.md`.
+EVICTED 2026-09-01 (terminal). Verdict: **five of six rounds found the PREVIOUS round's correction wrong** — and 🔴 **the zero-payload ATTRIBUTION GATE CANNOT FIRE on a docs-only PR**: the payload IS the `.md`, so every fix round is 100% payload by construction and **stopping was a JUDGEMENT CALL, not a gate**. (A clean round still ends a ladder — `claude/RULES.md`. This tombstone previously asserted the inverse on both counts; corrected after audit.) Durable in store `devrc/skills.md` and `claude/skills/audit-pr/reference/round-ladder-evidence.md`.
 
 ### ✅ CLOSED — the red `devrc-ci` checks are a CAPACITY problem, and the repo had already diagnosed it
 EVICTED 2026-09-01 (terminal, and PARTLY REFUTED — that is why this line stays). Capacity is real and measured in `devrc/tests.md`, but it was **not the right class for #1055**: see the CORRECTION block below, which is KEPT.
+🔴 Also carried out of that block, because it is a RETRACTION and this pass's own contract says a
+correction must be tombstoned rather than deleted: **"An equal test COUNT is not an equal TREE."**
+The "same `collected` count, different verdict" control was RETRACTED before write-up — two count
+groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/merge` preview sha.
 
 ### Both PRs are red on tests neither one touches — environment-sensitive, not code
 - **Symptom + exact repro:** `gh pr checks 1055` → `tekton/devrc-pytests FAILURE`; same for #1064.
@@ -405,10 +410,12 @@ rather than removed and renumbered. New work is appended at the end.
 2. ✅ **DONE (2026-08-30)** — the handoff-write `Stop` hook. **MERGED as `ad891a5c`.**
    forcing: none
 
-3. ✅ **DONE (2026-08-30)** — the question as posed does NOT discriminate: 95.5% of abandoned
+3. ✅ **DONE (2026-08-30)** — the question as posed does NOT discriminate: 95.5% of abandoned docs
+   declare open work vs a 90.3% control. Its one open thread is now rank 12.
    forcing: none
 
-4. ✅ **DONE (2026-09-01) — NO deploy was needed and none was run.** The store copy at
+4. ✅ **DONE (2026-09-01) — NO deploy was needed and none was run.** The store copy was already
+   byte-identical to `origin/main`; traps are durable in store `devrc/skills.md`.
    forcing: none
 
 5. **Act on the handoff-doc bloat proposal** — `claudedocs/proposal-handoff-doc-bloat.md`.
@@ -420,10 +427,12 @@ rather than removed and renumbered. New work is appended at the end.
    2026-08-31: the clawgate skill ratchet DID catch a real unpaid 405 B addition — one case, on a
    SKILL body not a handoff doc, so it does not settle the replay.
    forcing: none
-6. ✅ **DONE (2026-08-31) — the item's own PREMISE was REFUTED by the re-measure it demanded, and
+6. ✅ **DONE (2026-08-31) — the item's own PREMISE was REFUTED by the re-measure it demanded.**
+   **MERGED as `57b010fb`.**
    forcing: none
 
 7. ✅ **DONE (2026-08-30)** — merged, shipped to both hosts, registered on both, and probed live
+   against the deployed copy.
    forcing: none
 
 8. 🔴 **Grade the hook against the number it was built to move — THE CLOSING CONDITION OF THIS
@@ -439,11 +448,23 @@ rather than removed and renumbered. New work is appended at the end.
    rank 4 was skipped partly to keep it that way. (b) *The grading population must exist across
    the whole pre-window*: the pre-period is the 2026-08-15 → 08-29 corpus, already measured and on
    disk, so this half is satisfied — say so rather than re-deriving it.
+   🔴 **RANK 1's CONTROLS AND BAND — restored here after audit, because rank 1's block is
+   evicted, its classifier was throwaway and is GONE, and this item requires re-deriving that
+   measurement. Grading `8/16` as a point estimate is a defect.** The probe positive control:
+   `handoff_doc.py` fired on **32 of 48** readable loser transcripts, so the 16 zeros are
+   absences, not a dead probe. The compaction-marker detector is real but **weak — 20 of 5,961**
+   corpus transcripts. The two context-exhausted peaks were **944,856 (0.94)** and **965,819
+   (0.97)** against 1M; every other session peaked 0.29–0.60. **Three sessions have an
+   unresolvable ceiling, so at most one D could flip: the floor is `cleanly-ended ≥ 7`, not
+   exactly 8.** Denominator caveat: 3 loser transcripts live on the laptop and are unreadable
+   from the workbench, and 29 sessions were dropped because their resumed doc would not resolve —
+   **treat the bucket SHARES as the finding, never the denominator.**
    🔴 **And name the confound before cutting:** the guard changes the behaviour it measures, so a
    session that writes a handoff BECAUSE it was blocked is a success, not a contaminated sample —
    count blocks (`~/.cache/claude-handoff-write/s/*/fires-*`) and report them beside the rate.
    forcing: none
 9. ✅ **DONE (2026-08-31), premise REFUTED twice; #1055 MERGED as `8c108d8b`.** The durable output
+   is the two-arm local discriminator (branch vs `main`), not the PR — see rank 11.
    forcing: none
 
 10. **Right-size the devrc-ci gate pod, or establish it cannot be.** 🔴 **Its premise is REFUTED:
@@ -455,7 +476,24 @@ rather than removed and renumbered. New work is appended at the end.
    four *other* fixes as already-rejected-with-measurements.
    forcing: none
 11. ✅ **DONE (2026-09-01) — `origin/main` merged forward into `feat/handoff-audit`
+   (`466a0938..4beb41e1`); gate green, `failed=0`, both tiers. MERGED as `f71ff648`.**
    forcing: none
+12. **Measure the RENAME-vs-SCOPE-MOVE split, then pick the drift remedy.** 🔴 **RE-OPENED
+   2026-09-01 by audit: this was a declared-open probe inside a block the eviction pass labelled
+   `(terminal)` and deleted — the exact stranding this arc exists to prevent.** The remedy must not
+   be guessed. Two candidate shapes: a `/handoff` step that writes a `superseded-by:` pointer into
+   X when the topic moves, or a `/resume` warning when the doc it opens has had no commit since the
+   last session that read it. Which is right depends on whether drift is usually a **RENAME** (X and
+   Y are the same work) or a genuine **SCOPE MOVE** — **that split has NOT been measured.** The read
+   set is the 5 unlinked pairs: `claudedocs-audit-arc-2026-08-22` → `opencode-rm-glob-narrowing`;
+   `gate-hardening-and-review-hide-2026-08-23` → `devrc-ci-failing-test-names`;
+   `skill-prune-campaign` → `bulkhead-metric-registry`; `submit-guards-and-app-drift` →
+   `pkgzip-exclusion-rules`; `subsystem-index-per-host` → `b2-orphan-sweep-arming`. Instrument:
+   `claudedocs/skill-chain-drift-audit.py` (4 controls, `DRIFT_CONTROLS=1`; a run whose control
+   block is absent is void). CLOSES WHEN: the split is measured over those 5 and one remedy shape
+   is chosen in writing.
+   forcing: none
+
 ## Gotchas / decisions / dead-ends
 
 🔴 **This measurement took FOUR instrument corrections, and every uncorrected version
