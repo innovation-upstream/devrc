@@ -10685,12 +10685,14 @@ class TestShapeMutationKills:
               "            + _render_validation_shape(report)\n"
               "            + _render_validation_open_actions(report)\n"
               "            + _render_validation_unreachable(report)\n"
+              "            + _render_validation_dropped(report)\n"
               "        )\n"
               "    n = len(report.malformed)",
               "        return \"\\n\".join(\n"
               "            out\n"
               "            + _render_validation_open_actions(report)\n"
               "            + _render_validation_unreachable(report)\n"
+              "            + _render_validation_dropped(report)\n"
               "        )\n"
               "    n = len(report.malformed)")],
         )
@@ -10838,6 +10840,7 @@ def _validated(store: Path) -> st.ValidationReport:
         open_actions=st.scan_open_actions(scanned),
         shape=st.scan_entry_shape(scanned),
         unreachable=st.scan_unreachable_markers(scanned),
+        dropped=st.scan_dropped_lines(scanned),
     )
 
 
@@ -11081,9 +11084,11 @@ class TestUnreachableMarkerMutationKills:
                 (
                     "            + _render_validation_open_actions(report)\n"
                     "            + _render_validation_unreachable(report)\n"
+                    "            + _render_validation_dropped(report)\n"
                     "        )\n"
                     "    n = len(report.malformed)",
                     "            + _render_validation_open_actions(report)\n"
+                    "            + _render_validation_dropped(report)\n"
                     "        )\n"
                     "    n = len(report.malformed)",
                 )
@@ -11112,11 +11117,13 @@ class TestUnreachableMarkerMutationKills:
                     "        + _render_validation_shape(report)\n"
                     "        + _render_validation_open_actions(report)\n"
                     "        + _render_validation_unreachable(report)\n"
+                    "        + _render_validation_dropped(report)\n"
                     "    )",
                     "    return \"\\n\".join(\n"
                     "        out\n"
                     "        + _render_validation_shape(report)\n"
                     "        + _render_validation_open_actions(report)\n"
+                    "        + _render_validation_dropped(report)\n"
                     "    )",
                 )
             ],
@@ -12257,3 +12264,241 @@ class TestTheProposalHeadersDoNotClaimAConfirmGate:
                 assert "SHOW the diff" in line, (
                     f"header states no write contract at all: {line!r}"
                 )
+
+
+# =============================================================================
+# 🔴 DROPPED NUANCE LINES, at the `--validate` surface.
+#
+# THE MEASURED DEFECT (2026-09-01). `parse_journal_bullets` drops text that
+# precedes the first bullet — documented in its own docstring — so a bullet that
+# loses or indents its OPENING line leaves its body on disk, inside no bullet,
+# where `--ref`, `--search`, the digest and every openness count skip it.
+# `--validate` returned `OK` at exit 0 for exactly that file.
+#
+# NOT HYPOTHETICAL. Scanning the live store's own git history (789 blob versions
+# across 16 scope repos) found SEVEN carrying dropped lines:
+# `datapacket-talos/image-cacher.md` and `.../orchestration.md`, written
+# 2026-08-19 with the bullet block indented six spaces, repaired 2026-08-27. For
+# those eight days one of them held a `OPEN:` that raised no badge anywhere.
+# The current tree is clean — 0 across 154 entry files — which is why this can
+# land without turning a gate permanently red.
+#
+# 🔴 THE COVERAGE IS PARTIAL ON PURPOSE and the tests say so below: a bullet
+# that loses its head while another bullet sits ABOVE it is absorbed into that
+# one and is byte-identical to a legitimate wrap. `test_the_absorbed_tail_case_
+# is_NOT_claimed` pins that limit so nobody reads the zero as wider than it is.
+# =============================================================================
+
+
+DROPPED_NUANCE = "\n".join(
+    [
+        "  the surviving tail of a bullet whose opening line was lost,",
+        "  OPEN: and the declaration that went with it.",
+        "- 2026-02-11: an ordinary bullet, fully intact, with no marker.",
+    ]
+)
+"""The FIELD SHAPE: the NEWEST bullet decapitated, so its body precedes the
+first surviving bullet. Values pairwise distinct from every literal asserted."""
+
+INTACT_NUANCE = "\n".join(
+    [
+        "- 2026-03-04: a bullet whose opening line is present,",
+        "  with a continuation line beneath it that wraps normally.",
+        "- 2026-02-11: an ordinary bullet, fully intact, with no marker.",
+    ]
+)
+
+ABSORBED_TAIL_NUANCE = "\n".join(
+    [
+        "- 2026-03-04: a bullet whose opening line is present,",
+        "  the surviving tail of a LATER bullet whose head was lost.",
+        "- 2026-02-11: an ordinary bullet, fully intact, with no marker.",
+    ]
+)
+"""Byte-identical in structure to `INTACT_NUANCE`. That is the point."""
+
+
+class TestValidateReportsDroppedNuanceLines:
+    """🔴 CONTENT IN THE FILE THAT REACHES NO BULLET, reported.
+
+    Every arm is a PAIR — asserted PRESENT on the decapitated shape and ABSENT
+    on an intact one. A block that printed on both would be boilerplate, and
+    boilerplate is indistinguishable from a scanner wired to nothing.
+    """
+
+    def test_the_dropped_lines_are_FOUND_and_the_intact_store_is_QUIET(
+        self, tmp_path: Path
+    ) -> None:
+        rep = _validated(_nuance_store(tmp_path, DROPPED_NUANCE))
+        assert [d.offset for d in rep.dropped] == [1, 2], (
+            "both pre-bullet lines must be reported, by their 1-based offset "
+            "within the nuance section"
+        )
+        assert "opening line was lost" in rep.dropped[0].line
+
+        quiet = _validated(_nuance_store(tmp_path / "b", INTACT_NUANCE))
+        assert quiet.dropped == (), (
+            "positive control: a normally-wrapped bullet must NOT be reported, "
+            "or the finding above is boilerplate"
+        )
+
+    def test_a_dropped_DECLARATION_is_flagged_but_never_counted_as_an_open_action(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The two populations must not merge. The bullet that would carry
+        the declaration no longer exists, so counting it as a declared `OPEN:`
+        would invent a bullet — and hide that the text is unreachable."""
+        rep = _validated(_nuance_store(tmp_path, DROPPED_NUANCE))
+        marked = [d for d in rep.dropped if d.carries_marker]
+        assert len(marked) == 1 and marked[0].offset == 2
+        assert sum(1 for a in rep.open_actions if a.declared) == 0, (
+            "a dropped marker must not appear in the declared-open population"
+        )
+        assert rep.unreachable == (), (
+            "nor in the unreachable-marker population: that one is about a "
+            "marker INSIDE a bullet, this one is about a line inside none"
+        )
+
+    def test_the_absorbed_tail_case_is_NOT_claimed(self, tmp_path: Path) -> None:
+        """🔴 PINS THE KNOWN LIMIT so the zero is never read as wider.
+
+        A bullet that loses its head BELOW another bullet is absorbed into that
+        one. The file is byte-identical to a legitimate wrap, so this check
+        cannot see it — asserted here rather than left as a comment, because a
+        later 'improvement' that made this fixture report would be reporting on
+        every wrapped bullet in the corpus.
+        """
+        rep = _validated(_nuance_store(tmp_path, ABSORBED_TAIL_NUANCE))
+        assert rep.dropped == ()
+
+    def test_the_block_prints_its_denominator_when_it_finds_NOTHING(
+        self, tmp_path: Path
+    ) -> None:
+        """A bare absence is indistinguishable from a scanner wired to nothing,
+        and this zero must also carry its own blind spot in words."""
+        out = st.render_validation(_validated(_nuance_store(tmp_path, INTACT_NUANCE)))
+        assert "dropped lines: 0 across 1 entry file(s)" in out
+        assert st.DROPPED_LINE in out
+        assert "PARTIAL BY CONSTRUCTION" in out, (
+            "the zero must say which half of the defect it did not check"
+        )
+
+    def test_the_block_names_the_file_the_line_and_the_remedy(
+        self, tmp_path: Path
+    ) -> None:
+        out = st.render_validation(_validated(_nuance_store(tmp_path, DROPPED_NUANCE)))
+        assert f"🔴 2 DROPPED LINE(S) across 1 entry file(s) [{st.DROPPED_LINE}]" in out
+        assert "collector.md: nuance line 1" in out
+        assert "looks like a DECLARATION" in out
+        assert "RESTORE FROM HISTORY, NOT FROM MEMORY" in out, (
+            "the remedy must point at the scope's git history — reconstructing "
+            "the opening line by hand invents a date the store never had"
+        )
+
+    def test_the_JSON_keys_are_separate_and_never_summed(
+        self, tmp_path: Path
+    ) -> None:
+        blob = _validated(_nuance_store(tmp_path, DROPPED_NUANCE)).to_json()
+        assert blob["dropped_line_count"] == 2
+        assert blob["dropped_marker_count"] == 1, "a SUBSET, not an addition"
+        assert blob["dropped_line_reason"] == st.DROPPED_LINE
+        assert blob["unreachable_marker_count"] == 0
+        assert blob["declared_open_count"] == 0
+        assert [d["offset"] for d in blob["dropped_lines"]] == [1, 2]
+
+    def test_a_renamed_nuance_heading_contributes_ZERO_here_not_a_finding(
+        self, tmp_path: Path
+    ) -> None:
+        """The second way this block can be vacuous. It reads one heading, so an
+        entry whose heading is renamed is invisible to it — the SHAPE block is
+        the one that must speak, and this must not double-report it."""
+        store = tmp_path / "renamed"
+        d = store / SCOPE
+        d.mkdir(parents=True)
+        body = _entry_with_nuance("collector", SCOPE, DROPPED_NUANCE)
+        (d / "collector.md").write_text(
+            body.replace("## Nuance / work-history", "## Nuance/work history"),
+            encoding="utf-8",
+        )
+        rep = _validated(store)
+        assert rep.dropped == ()
+        assert rep.shape != (), "the SHAPE block is the one that reports this"
+
+
+class TestTheDroppedBlockNeverTouchesTheVerdict:
+    """🔴 Advisory, on the same reasoning as its three siblings — and this is the
+    tempting exception, because a dropped line IS damage rather than unfinished
+    business. `handoff/SKILL.md` step 4 branches on the exit code to mean "write
+    NOTHING", so failing here would stop a session recording anything into an
+    entry whose only defect is that an OLDER write lost a line."""
+
+    def test_the_verdict_stays_zero_with_dropped_lines_present(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        store = _nuance_store(tmp_path, DROPPED_NUANCE)
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        assert st.main(argv) == 0
+        out = capsys.readouterr().out
+        assert "DROPPED LINE(S)" in out, "and it must still have been reported"
+        assert "OK — 1 of 1" in out
+
+    def test_kills_the_ADVISORY_ONLY_invariant_itself(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """The positive control for the arm above: build the regression it
+        claims to catch — `clean` taking a `dropped` term — and confirm the
+        fixture goes to 3. Without this, "the verdict is unchanged" is an
+        untested claim about an untested claim."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_dropped_verdict",
+            [("    @property\n    def clean(self) -> bool:\n        return not self.malformed",
+              "    @property\n    def clean(self) -> bool:\n"
+              "        return not self.malformed and not self.dropped")],
+        )
+        store = _nuance_store(tmp_path, DROPPED_NUANCE)
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        assert mod.main(argv) == 3, "the mutant must break the invariant"
+        capsys.readouterr()
+        assert st.main(argv) == 0, "and the real module must not"
+
+    def test_kills_the_SCAN_seam(self, tmp_path: Path, capsys) -> None:
+        """The scan can be wired out of the report and every unit test above
+        still passes — they build the report themselves. This pins the CLI
+        seam, which is the surface an operator actually reads."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_dropped_seam",
+            [("                dropped=scan_dropped_lines(scanned),",
+              "                dropped=(),")],
+        )
+        store = _nuance_store(tmp_path, DROPPED_NUANCE)
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        assert mod.main(argv) == 0
+        assert "DROPPED LINE(S)" not in capsys.readouterr().out
+        assert st.main(argv) == 0
+        assert "DROPPED LINE(S)" in capsys.readouterr().out
+
+    def test_kills_the_RENDERER_call_on_the_clean_path(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """The other half of the seam: the scan can run and the block still not
+        print. Anchored on the `OK` branch, whose call is textually distinct
+        from the malformed branch's."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_dropped_render",
+            [("            + _render_validation_unreachable(report)\n"
+              "            + _render_validation_dropped(report)\n"
+              "        )\n"
+              "    n = len(report.malformed)",
+              "            + _render_validation_unreachable(report)\n"
+              "        )\n"
+              "    n = len(report.malformed)")],
+        )
+        store = _nuance_store(tmp_path, DROPPED_NUANCE)
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        assert mod.main(argv) == 0
+        out = capsys.readouterr().out
+        assert "DROPPED LINE(S)" not in out
+        assert "marker reachability" in out, "the neighbouring block must survive"
