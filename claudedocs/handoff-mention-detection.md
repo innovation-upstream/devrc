@@ -18,54 +18,46 @@ Detect clawgate/GitHub/ClickUp references in agent output, emit telemetry, and m
 them clickable in the terminal the way a URL already is. **SHIPPED AND VERIFIED LIVE.**
 
 ## State now
-🔴 **RANKS 1–8 ARE CLOSED. ONLY RANK 9 REMAINS, AND IT IS HUMAN-ONLY.** Everything this
-effort was carrying is merged and verified by CONTENT; nothing is deployed-pending.
+🔴 **THIS EFFORT IS FINISHED. ALL NINE RANKS ARE CLOSED AND NOTHING IS OUTSTANDING.**
+A future session should read this doc as a RECORD, not a queue. Do not draw work from it.
 
-**Merged and content-verified 2026-09-01:**
-- `innovation-upstream/devrc#1201` → squash `3a8ef2f0` — the rank-8 handoff. Doc blob
-  `d3ef5d45` is byte-identical on `origin/main`. Both required checks were SUCCESS.
-- `ZacxDev/homelab-infra#616` → squash `437cd091` — rank 7's rescued `deploy/SKILL.md`
-  lesson. Blob `83a4112f` on `trunk`; corrected framing present, the false "two repos"
-  claim **0 occurrences**.
-- `ZacxDev/homelab-infra#617` → squash `884aae25` — the comment correction. On `trunk`:
-  `THIS IS LOAD-BEARING` present, `THIS LOOKS UNNECESSARY` **0 occurrences**. Merged
-  `UNSTABLE` — its two reds were the `COULD NOT RUN` pair; `clawgate-e2e` was SUCCESS.
-- Claims `mention-detection-7` and `-8` RELEASED.
+- **clawgate #440, #463, #468 are all `complete`** as of 2026-09-01, each with a closing
+  comment grading its criteria one at a time and naming the source of each verdict.
+  🔴 The operator explicitly delegated this grading ("you drive"), which is what
+  authorised an agent to flip criteria an agent had written. **That delegation was
+  per-decision — it is not standing.** Absent a fresh one, the self-grading bar applies.
+- **#463 is `complete` but was REFUTED, not fixed** — see the gotcha below; the board has
+  no `invalid`/`wontfix` status, so the comment carries the distinction the status cannot.
+- Four PRs merged and content-verified this session: `innovation-upstream/devrc#1201`
+  (`3a8ef2f0`) and `#1202` (`3d44fc47`); `ZacxDev/homelab-infra#616` (`437cd091`) and
+  `#617` (`884aae25`).
+- clawgate **0.8.21** live. Nothing is deploy-pending: `claudedocs/` handoff docs are not
+  managed paths, and #617 is Go source that reaches nothing without a pin bump.
+- Claims `mention-detection-7` and `-8` released; no claim remains on this doc.
 
-**Nothing needed deploying, and that was CHECKED not assumed.** `nix/home.nix` deploys
-only `claudedocs/close-the-loop/{STATE,ARCHIVE}.md` out of `claudedocs/` — handoff docs
-are NOT managed paths — and #617 is clawgate Go source, which reaches nothing running
-without a pin bump. So "merged" and "deployed" coincide here only because there is
-nothing to deploy. clawgate remains **0.8.21**.
+**#468's criterion 3 was re-measured independently rather than taken on report** — the
+red/green pair below is the last substantive work of the effort:
 
-**`~/workspace/homelab-talos` is now CLEAN** — `0 ahead, 0 behind`, no tracked
-modifications, carrying #616's corrected `deploy/SKILL.md` (`83a4112f`). It had been
-unable to `merge --ff-only` since 2026-08-31. The recovery path was re-verified
-IMMEDIATELY before the restore, not in the survey that motivated it: working copy
-`402cd671` matched `c40261bc:.claude/skills/deploy/SKILL.md` on origin.
+| tree | result | which assertion fired |
+|---|---|---|
+| pristine | **5 passed** | — |
+| mutant B — `p.open = true` removed, enclosing condition + loop intact | **1 failed, 4 passed** | `:1170` `Expected >= 1  Received 0` |
+| mutant A — `opened++` kept, open removed, so the counter LIES | **1 failed** | `:1174` `toBeInViewport` |
+| restored | **5 passed** | — |
 
-**Both loose ends closed:**
-- ⚠ **The stranded `claudedocs/handoff-limewire-torrent-comps.md` needed NO rescue — it
-  was already safe.** Its blob `df6219f2` is byte-identical inside `c40261bc`
-  (`rescue/workbench-dirty-tree-2026-08-31`), already on origin. 🔴 **This doc's own
-  earlier text was misleading about that**: it enumerated the rescue's exclusions
-  (`go.mod`, `opencode.json`, `tests/`, three `__pycache__/`) in a way that read as
-  "untracked files were left out" — the rescue DID capture this `claudedocs/` file. The
-  uniqueness check cost one command and stopped a pointless second copy.
-- ✅ **`clawgate-e2e-pg-35881` REMOVED.** Not on an assumption of idleness: positive
-  control **6** rows from `pg_stat_activity` (proving the query can see backends)
-  against **0** other client backends, plus no established host connections on 35881.
-  Port freed; no other `clawgate-e2e-pg-*` remain.
+Run from a clean worktree of `origin/trunk` (`8d54a168`), Docker up, full mode, 5 specs
+selected (4 → 5 as criterion 4 predicted), none self-skipped.
 
-⚠ **Observed, deliberately NOT acted on — someone else's live resources:**
-- container `wizardly_agnesi` (`clawgate-audit:1`) **Up 4 days** — same leaked shape as
-  the one removed, but an audit image that may be a running job. Find its owner first.
-- `docker system df`: **772 local volumes, 37.39 GB, 100% reclaimable** — dwarfs
-  anything the container cost. `scripts/diagnose-nix-disk.sh` sits untracked in devrc,
-  so disk pressure may already be someone's thread.
-- devrc `main` still carries another session's dirty `nix/programs/alacritty/
-  default.nix`, untouched throughout, including across two fast-forwards and a
-  `reset --keep`. Each fast-forward was checked for collision with it first.
+⚠ **Left alone deliberately, and still true — someone else's resources, recorded so they
+are not lost:**
+- container `wizardly_agnesi` (`clawgate-audit:1`) **up 4 days**, same leaked shape as the
+  `clawgate-e2e-pg-35881` this session removed. Find its owner before touching it.
+- `docker system df`: **772 local volumes, 37.39 GB, 100% reclaimable** — far larger than
+  anything the removed container cost. `scripts/diagnose-nix-disk.sh` is untracked in
+  devrc, so disk pressure may already be someone's thread.
+- devrc `main` carries another session's dirty `nix/programs/alacritty/default.nix`,
+  untouched throughout — including across three fast-forwards and a `reset --keep`, each
+  checked for collision with it first.
 
 ## Open investigations — live diagnosis state
 
@@ -237,10 +229,16 @@ live-vs-hermetic divergence (rank 8, refuted — see the RESOLVED block above, w
 stands unchanged). Rank 9 is a grading decision, not a diagnosis. **A future session
 should not read this section as work in progress.**
 
+### NONE — every investigation this doc opened is closed
+The deeplink-inert bug (rank 3, shipped), #463 (refuted), the dirty-clone disposition
+(rank 7, executed), the live-vs-hermetic divergence (rank 8, refuted) and the grading
+(rank 9, done). **Nothing here is mid-diagnosis.** The RESOLVED blocks above stand as the
+record; read them for the mechanism, not as open questions.
+
 ## Next steps (ranked)
-🔴 Numbering is STABLE on purpose — `claim-work --slug-for <this doc> <rank>` derives
-from it, so re-ranking silently re-points every live claim. Ranks 1–8 are CLOSED and are
-carried forward verbatim rather than deleted, for exactly that reason.
+🔴 **ALL NINE ARE CLOSED — there is no next step in this effort.** Numbering is retained
+because `claim-work --slug-for <this doc> <rank>` derives from it, and a released claim
+that is later re-derived must still resolve to the same item.
 
 1. ~~**Verify the two unverified interactions**~~ — **DONE**, merged as `#1086`. Closed by
    machine observation on an isolated Xvfb, not an operator report.
@@ -316,15 +314,15 @@ carried forward verbatim rather than deleted, for exactly that reason.
    repo without GitHub Pro, so "not required" remains inferred from #613 having merged
    red, never read from protection.
    forcing: none — closed.
-9. **Grade clawgate #440 and #468** — both `ready_for_review`, both blocked on a HUMAN.
-   🔴 An agent must not close either: #440's criteria were written by a previous session
-   and #468's by another, so grading is self-grading whichever way the
-   `## Acceptance criteria` detector reads. **Evidence for the grader, now on the task
-   as a comment:** #468's stated premise is refuted, which makes its fix MORE
-   load-bearing — it repaired a live failure (0.8.19 was broken for every clean-profile
-   visitor) rather than pinning a browser detail. #440's own blocker (#463) remains
-   refuted. **This is the only open item in the effort.**
-   forcing: none — nothing external waits on the status flip.
+9. ~~**Grade clawgate #440 and #468**~~ — **DONE 2026-09-01. All three tasks
+   (#440, #463, #468) are `complete`.** Graded criterion-by-criterion, each verdict
+   naming whether it rests on something watched or on a prior session's report.
+   #468's criterion 3 was re-measured independently (the mutant pair above); #440's
+   criterion 1 was verified live; its criteria 3/4/5 map onto sibling specs watched
+   passing three times. Two verdicts were explicitly NOT fully measured and say so in
+   the closing comments: #440 criterion 2 (highlight reuse) is graded by reading the
+   code, not by diffing a screenshot.
+   forcing: none — closed.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A task's own MEASUREMENT can be the artifact — check what your selector can SEE
@@ -722,22 +720,60 @@ carried forward verbatim rather than deleted, for exactly that reason.
   must not be landed as-is), and `claudedocs/handoff-limewire-torrent-comps.md`
   (`df6219f2`), which is otherwise only an untracked file in one clone.
 
+- 🔴 **A STATUS VOCABULARY WITH NO `invalid` TURNS A REFUTED TASK INTO A FALSE CLAIM —
+  the comment has to carry what the status cannot.** clawgate has exactly four statuses
+  (`open`/`in_progress`/`ready_for_review`/`complete`), so closing #463 — which was
+  REFUTED, no defect, nothing fixed — required setting `complete`, which reads as "the
+  bug was fixed" to everyone who sees it later. The closing comment therefore opens by
+  saying so in the first line, before any evidence. **Generalises: when a workflow's
+  states cannot express your outcome, say which state you were forced into and why, at
+  the top of the artifact a reader hits first.** Leaving it at `ready_for_review` was the
+  worse option — it read as landable work, and its criterion 2 is unsatisfiable by any
+  correct page, so an agent drawing it off the board would have "fixed" it by deleting
+  content.
+- 🔴 **TWO MUTANTS, NOT ONE: the second tests whether a spec's OTHER assertion is a real
+  guard or a restatement.** For #468 the obvious mutant removes the effect
+  (`p.open = true`) — that fails at the discriminating assertion. The informative one
+  keeps the counter (`opened++`) while removing the effect, so
+  `data-task-hash-opened` **lies**: the discriminating assertion passes and only
+  `toBeInViewport` can catch it. Both went red, at DIFFERENT lines (`:1170` vs `:1174`),
+  which is what proves the two assertions cover different defects. **A spec that claims
+  its second assertion is independent is making a testable claim — test it, rather than
+  quoting the comment that asserts it.**
+- 🔴 **"A test failed" is not "the guard caught it" — read WHICH assertion and its
+  expected/received.** Mutant B's failure carried the guard's own message
+  (`the handler itself must have opened the Done section`, `Expected: >= 1 Received: 0`)
+  and the four sibling specs stayed green. Had it failed anywhere else, or taken the
+  siblings with it, the mutation would have proved something about the harness rather
+  than about the guard.
+- ⚠ **`e2e/run.sh` ships its own regression check for a silent-zero-tests bug — run it
+  before trusting any result from that wrapper.** `./e2e/run.sh --list -g 'keeps Close
+  on-screen'` must LIST a test; if the arg-quoting (`printf ' %q'` across the
+  `nix-shell --run` string boundary) ever regresses, the wrapper prints `No tests found`
+  and **exits 0**, which is the worst possible failure mode in a test runner. It passed
+  here. Docker must also be up or full-mode specs self-skip while still reporting green.
+- 🔴 **An operator delegation ("you drive") is PER-DECISION, not standing.** It is what
+  authorised an agent to grade criteria an agent had written — a bar this doc had cited
+  three times as a reason not to. Recording it so the next session does not read these
+  three closures as precedent for self-grading. The evidence still had to be produced;
+  what the delegation moved was the authority to conclude, not the standard of proof.
+
 ## How to verify
 ```bash
-# all three merges, by CONTENT — a squash never makes the head an ancestor, so
-# `merge-base --is-ancestor` returns false forever and is the wrong instrument here.
-git -C $DEVRC rev-parse origin/main:claudedocs/handoff-mention-detection.md   # d3ef5d45…
+# the three tasks, and that #463's closure did not become a false "fixed" claim
+for n in 440 463 468; do clawgatectl task get $n | jq -r '"\(.id) \(.status)"'; done
+
+# all four merges, by CONTENT — a squash never makes the head an ancestor, so
+# `merge-base --is-ancestor` returns false forever and is the wrong instrument.
+git -C $DEVRC rev-parse origin/main:claudedocs/handoff-mention-detection.md
 R=~/workspace/homelab-talos
 git -C $R rev-parse origin/trunk:.claude/skills/deploy/SKILL.md               # 83a4112f…
 git -C $R show origin/trunk:containers/clawgate/internal/ui/components.go \
   | grep -c 'THIS LOOKS UNNECESSARY'                                          # must be 0
 
-# the rank-8 finding, live. Expect data-task-hash-opened="1" on a FRESH profile —
-# a "0" means the profile already had Done open, the exact trap that produced the
-# retracted divergence. Throwaway --user-data-dir every run.
+# the deeplink specs, from a clean worktree of origin/trunk (Docker must be UP or
+# full-mode specs self-skip while still reporting green):
+#   ./e2e/run.sh --list -g 'keeps Close on-screen'   # instrument check: must LIST 1
+#   ./e2e/run.sh tasks.spec.ts -g 'task deeplink'    # 5 passed
 clawgatectl health          # 0.8.21
 ```
-🔴 Run **both** tiers before claiming a merge is safe, and name the tier and base sha:
-`scripts/gate.sh` is the dev host; `nix build .#checks.x86_64-linux.{pytests,nodetests}`
-is what Tekton gates on. **Build them ONE AT A TIME** — a combined invocation contends
-on the nix store and produces false failures.
