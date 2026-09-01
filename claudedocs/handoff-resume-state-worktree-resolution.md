@@ -184,9 +184,13 @@ default for any file-modifying agent — so this fires on the repo's own mandate
    merged tree, then delta re-audit ROUND 3's diff (`7285291b..HEAD`), then merge.**
    *(This step used to name round 2 and `cf1b6f81..HEAD`. Round 2 was committed as
    `7285291b` and audited: round 3 returned 7 findings — 4 of them prose over-claims, which
-   is this branch's recurring defect — and all 7 were fixed. Those fixes are in the working
-   tree, UNCOMMITTED, on top of `7285291b`; nothing below has been re-measured against a
-   commit yet. ⚠ **One round-3 finding was itself partly wrong, and the fix says so rather
+   is this branch's recurring defect — and all 7 were fixed. 🔴 **This sentence used to
+   assert where those fixes lived ("in the working tree, UNCOMMITTED"), which was false the
+   moment the commit containing the sentence landed — the same defect it was written to
+   correct, one paragraph down. A status sentence about the current round is a FIXED POINT:
+   every round's commit falsifies the one the previous round wrote, so the way out is to
+   stop asserting commit status in prose at all.** Run `git log 7285291b.. --oneline` and
+   `git status` — they cannot be stale. ⚠ **One round-3 finding was itself partly wrong, and the fix says so rather
    than encoding it:** F3 asserted `mutants-dead-guard-exclude.sh` and `mutants-install-sh.sh`
    carry no did-not-apply control "in any spelling". Both do — `mutation did not apply
    uniquely` and `🔴 NOT-APPLIED` respectively, verified file by file — so what was actually

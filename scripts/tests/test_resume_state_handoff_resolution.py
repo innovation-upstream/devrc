@@ -648,8 +648,9 @@ def test_a_prose_path_that_does_NOT_exist_is_not_taken(tmp_path, stub_bin, docs)
     #
     # 🔴 THE MESSAGE CARRIES A TOKEN NOTHING ELSE IN THIS FILE SPELLS, and that
     # is load-bearing rather than decorative: `mutation_battery_resume_state.py`
-    # row X17 exists ONLY to prove this assertion reachable, and it fails 107
-    # tests, so "a test failed" cannot tell whether THIS one was among them.
+    # row X17 exists ONLY to prove this assertion reachable, and it reddens
+    # MOST of this file, so "a test failed" cannot tell whether THIS one was
+    # among them. (No count: the previous one was stale on arrival.)
     # X17 names this token as its `expected` phrase, which is what makes
     # deleting this line flip X17 to KILLED-WRONG-REASON instead of leaving it
     # printing KILLED. (audit of #1197, round 3, F2.)

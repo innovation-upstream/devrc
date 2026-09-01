@@ -58,8 +58,8 @@ SUITE = "scripts/tests/test_resume_state_handoff_resolution.py"
 # Without it a row is scored on this battery's original criterion — "the suite
 # went red" — which is all most rows need, because most of them redden a handful
 # of tests that plainly own the behaviour. It is NOT enough for a row whose
-# claim is "only assertion A can see this": a mutant reddening 107 of 187 tests
-# stays KILLED with A deleted, so the row's comment would be the only thing
+# claim is "only assertion A can see this": a mutant reddening MOST of the
+# suite stays KILLED with A deleted, so the row's comment would be the only thing
 # asserting the thing the row exists to assert. A row carrying `expected` is
 # killed only when that phrase appears in pytest's rendered `E ` lines — the
 # mechanism the sibling `mutation_battery_resume_state_skill.py` already
@@ -404,8 +404,12 @@ MUTANTS: list[tuple[str, str, str, str | tuple, str | tuple]] = [
       '  if false; then\n'
       '    # The `handoff:` line names the FILE and nothing else'),
      # 🔴 ATTRIBUTED, because the bare kill criterion cannot carry this row's
-     # claim. X17 reddens 107 of 187 tests, so `if not nf` stays true with the
+     # claim. X17 reddens most of the suite, so `if not nf` stays true with the
      # assertion X17 exists for DELETED — measured (audit of #1197, round 3,
+     # F2; re-measured round 4). 🔴 NO COUNT HERE ON PURPOSE: the figure was
+     # written as `107 of 187` by the commit that ADDED 3 tests, so it was stale
+     # on arrival. The argument needs `most`, not a number, and a number nothing
+     # enforces is one edit from being wrong again.
      # F2). This phrase is the token that assertion and nothing else in the
      # suite spells.
      "WHOLE-DIGEST CHECK"),
@@ -427,6 +431,14 @@ def run_suite(messages: bool = False) -> tuple[int, int, list[str], str]:
     that message's literal text; matching against the whole output therefore
     reports a right-reason kill for a test that never ran the assertion. pytest
     prefixes rendered assertion lines with `E ` and source echo with nothing.
+
+    ⚠ BUT `E ` IS NOT ONLY THE MESSAGE — it also carries the rewritten
+    EXPRESSION REPR, e.g. `E   assert 'TOKEN' in 'irrelevant'`. So the rule for
+    choosing an `expected` phrase is wider than "nothing else in the suite
+    spells it": it must also be absent from anything `resume-state.sh` can PRINT
+    AT RUNTIME. A phrase the digest emits would be echoed into an `E ` line by
+    any failing test that compares against the digest, and attributed to the
+    wrong row. Pick a token that exists only in the assertion itself.
     """
     env = {**os.environ, "PYTHONPATH": str(ROOT / "scripts"),
            "PYTHONDONTWRITEBYTECODE": "1"}
