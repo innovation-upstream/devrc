@@ -1028,11 +1028,17 @@ def main(argv: list[str] | None = None) -> int:
         ))
     say(f"P5 WATCHED EACCES: all {after['examined']} entry file(s) refused an "
         f"append. The local store is now a read-through cache.")
+    # ⚠ THE DEPLOY STEP NAMES `scripts/ship.sh`, NOT THE UNDERLYING BINARY, and
+    # that is deliberate on two counts. It is the more actionable instruction —
+    # ship.sh converges BOTH hosts and this store is per-host — and it keeps the
+    # launcher vocabulary out of a top-level script that must never launch one.
+    # `test_no_real_launchers.py` treats a bare mention as reaching the binary,
+    # correctly: it was reopened once by a name that was "only in a string".
     say("REMAINING, and NOT done by this script: land the protocol change that "
-        "routes `subsystem-index` appends through `cairn append`, and deploy it "
-        "(merge -> pull -> home-manager switch). Until that lands, the skill still "
-        "tells a writer to Edit a file that now refuses the write — which is a "
-        "loud failure, not a silent one, but it is a failure.")
+        "routes `subsystem-index` appends through `cairn append`, then merge, "
+        "pull and run `scripts/ship.sh` so BOTH hosts get it. Until that lands, "
+        "the skill still tells a writer to Edit a file that now refuses the "
+        "write — a loud failure, not a silent one, but a failure.")
     return RC_OK
 
 

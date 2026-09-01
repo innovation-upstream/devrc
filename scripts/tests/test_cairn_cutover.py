@@ -37,6 +37,9 @@ REPO = Path(__file__).resolve().parents[2]
 CUTOVER = REPO / "scripts" / "cairn-cutover.py"
 SERVER_PY = REPO / "scripts" / "subsystem-store-api" / "server.py"
 
+sys.path.insert(0, str(REPO / "scripts"))
+from testlib import mockbin  # noqa: E402
+
 
 def _load(name: str, path: Path):
     spec = importlib.util.spec_from_loader(
@@ -234,6 +237,66 @@ class TestTheMergeRule:
         (root / "linked").symlink_to(root / "sc")
         assert sorted(cc.read_store(root)) == ["sc/a.md"]
 
+    def test_the_PLANNER_and_the_PUSHER_walk_the_SAME_population(self, cc, tmp_path):
+        """🔴 A SEAM GUARD. Two components each tested alone can still be broken
+        TOGETHER, and this is the seam nobody owns: `read_store` decides what the
+        plan covers, `seed.sh::_shippable_entries` decides what the push ships.
+        A file in one set and not the other is silent in both directions — an
+        entry planned and not shipped is reported as landed, an entry shipped and
+        not planned bypasses the whole merge rule.
+
+        `seed.sh` was itself bitten by exactly this: two walks with different
+        rules printed `remote_entries=1 staged_entries=2` one line above
+        `seed: OK`, rc 0.
+
+        So this runs the SHELL predicate — copied out of `seed.sh` by nothing, it
+        is executed from the file itself — beside the Python one over a tree
+        holding every edge case each is documented to handle, and asserts the two
+        sets are equal. It pins a RELATIONSHIP, not a component.
+        """
+        import re as _re
+        import subprocess
+
+        root = _tree(tmp_path / "store", {
+            "sc/a.md": _entry("sc", "a", "- 2026-01-01: x."),
+            "sc/b.md": _entry("sc", "b", "- 2026-01-01: y."),
+            "sc/notes.txt": "not an entry",
+            "other/c.md": _entry("other", "c", "- 2026-01-01: z."),
+            ".dot-scope/d.md": _entry("dot", "d", "- 2026-01-01: w."),
+            "sc/nested/deep.md": _entry("deep", "deep", "- 2026-01-01: v."),
+            "top-level.md": "a stray entry at depth 1",
+        })
+        (root / "linked-scope").symlink_to(root / "sc")
+        (root / "sc" / "adir.md").mkdir()      # a DIRECTORY named *.md
+
+        # The shell half, taken from `seed.sh`'s own source so a change there
+        # fails HERE rather than diverging quietly.
+        seed_src = (REPO / "scripts" / "subsystem-store-api" / "seed.sh").read_text()
+        m = _re.search(r"\(\s*cd \"\$1\" && (find \. .*?)\s*\)", seed_src)
+        assert m, "could not find _shippable_entries' find expression in seed.sh"
+        find_expr = m.group(1)
+        # 🔴 `mockbin.SH` (/bin/sh), not `bash`. The expression is plain `find`
+        # with no bashisms, and /bin/sh is the one interpreter path guaranteed to
+        # exist inside the nix build sandbox — the tier this suite is gated on
+        # and the tier that is structurally blind to nothing else here.
+        got = subprocess.run(
+            [mockbin.SH, "-c", f'cd "$1" && {find_expr}', "_", str(root)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert got.returncode == 0, got.stderr
+        shell_set = {line[2:] for line in got.stdout.splitlines() if line.startswith("./")}
+
+        python_set = set(cc.read_store(root))
+        # POSITIVE CONTROL: both must be NON-EMPTY. Two empty sets are equal, and
+        # a comparison over nothing is the reassuring zero this repo refuses.
+        assert shell_set, "the shell predicate matched nothing — it proves nothing"
+        assert python_set, "the python walk matched nothing — it proves nothing"
+        assert python_set == shell_set, (
+            f"the planner and the pusher disagree.\n"
+            f"  only the planner sees: {sorted(python_set - shell_set)}\n"
+            f"  only the pusher sees:  {sorted(shell_set - python_set)}"
+        )
+
 
 # =============================================================================
 # Ref collisions
@@ -345,17 +408,21 @@ class TestBackupPrecondition:
         🔴 A FAKE BINARY, NOT A MONKEYPATCH OF `run`. The thing under test is
         how this code reads a REAL subprocess's stdout and status; patching the
         runner would test the test's own idea of subprocess semantics.
+
+        🔴 WRITTEN THROUGH `testlib.mockbin.write_exec`, WHICH OWNS THE SHEBANG.
+        The first version wrote `#!/usr/bin/env bash` itself and was green on the
+        dev host and RED in the nix sandbox — `/usr/bin/env` does not exist
+        there, so every one of these execs failed ENOENT and the code under test
+        correctly reported COULD NOT MEASURE for the wrong reason. That is the
+        two-tier hazard exactly as `mockbin`'s own header documents it; this is
+        the seventh site to pay it and the first not to re-derive the fix.
         """
         bindir = tmp_path / "bin"
         bindir.mkdir(exist_ok=True)
-        script = bindir / "kubectl"
-        script.write_text(
-            "#!/usr/bin/env bash\n"
-            f"cat <<'EOF'\n{body}\nEOF\n"
-            f"exit {rc}\n"
-        )
-        script.chmod(0o755)
-        return bindir
+        # POSIX `sh`: a quoted heredoc plus `exit` and nothing bash-specific.
+        return mockbin.write_exec(
+            bindir / "kubectl", f"cat <<'MOCKEOF'\n{body}\nMOCKEOF\nexit {rc}\n"
+        ).parent
 
     def _with_path(self, monkeypatch, bindir: Path):
         monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
