@@ -138,7 +138,7 @@ h. A BASE THAT IS THE WRONG DOCUMENT SAYS SO, LOUDLY. Rule (g)'s bucket line was
 
    🔴 IT WARNS in the ordinary stale case and REFUSES in exactly ONE: no usable
    doc HERE while the mainline has one, where every section arrives NEW and the
-   committed document is REPLACED wholesale. That case alone exits 7
+   committed document is REPLACED wholesale. That case alone exits 9
    (`stale-base`) and carries an explicit `--allow-replacing-mainline-doc`;
    everything else still warns at exit 0, and 4 `no-advance` / 5 `no-change` keep
    their exact meanings. Working on a deliberately-behind clone is legitimate —
@@ -234,6 +234,8 @@ EXIT CODES
   6  behind          — --push and the remote moved; nothing written
   7  doc-per-effort  — rule (i): a dated topic, or an unasserted new doc
   8  unforced        — rule (j): a ranked item names no forcing function
+  9  stale-base      — no usable doc here and the mainline has one
+ 10  unevidenced     — rule (k): an elimination names no way it was eliminated
 """
 
 from __future__ import annotations
@@ -311,6 +313,30 @@ whether `<remote>/<push-branch>` has moved, and only under `--push`; this asks
 whether the BASE DOCUMENT is the real one, against the DERIVED mainline ref. A
 feature branch current with its own upstream sails past the other check while the
 mainline copy of the doc is still the one being destroyed.
+"""
+
+EXIT_UNEVIDENCED = 10
+"""Rule (k). An elimination bullet names no way it was eliminated. Nothing written.
+
+MEASURED 2026-08-30, and this rule exists for one bullet. An opencode session
+running a weaker model wrote `**Ruled out:** Not a per-DIMM issue (all 4
+identical)` into a handoff's open-investigations block. It had run `inxi -CmG`
+and `inxi -dm`; NEITHER prints a part number, so the sentence was an elimination
+its own data could not support — and it was false. One flag away (`inxi -max`)
+sat two different part numbers, which killed the theory the doc went on to rank
+FIRST, with a ⚠ and "free performance sitting on the table". The next session's
+instruction was to reboot a 26-day-uptime workstation into its BIOS.
+
+🔴 THE GATE IS ON PROVENANCE, NOT ON PLAUSIBILITY. Nothing here can tell a true
+elimination from a false one, and it does not try. It makes the AUTHOR say which
+kind of evidence closed the question, from a closed vocabulary — the same shape
+as rule (j), and for the same reason: a blocklist of weasel phrases is walkable
+by rewording, an allowlist the author must pick from is not.
+
+🔴 AND `assumed` IS A MEMBER, ACCEPTED AND COUNTED. The failure was never that
+the session reasoned rather than measured; it was that the doc did not SAY so,
+so a later reader could not tell the two apart. `via: assumed` is the honest
+label, it passes, and it is reported above the diff.
 """
 
 
@@ -612,8 +638,19 @@ class RankedItem(typing.NamedTuple):
         return self.kind in FORCING_KINDS
 
 
-def _item_blocks(section_body: str) -> list[tuple[re.Match[str], list[str], list[str]]]:
+def _item_blocks(
+    section_body: str,
+    pattern: re.Pattern[str] = _RANKED_ITEM,
+) -> list[tuple[re.Match[str], list[str], list[str]]]:
     """`(match, the item's own visible lines, the fenced lines inside it)`.
+
+    🔴 `pattern` IS PARAMETERISED SO RULE (k) REUSES THIS WALK RATHER THAN
+    COPYING IT. Everything below about where a block ENDS was learned from
+    measured accept-and-refuse bugs; a second walker for elimination bullets
+    would have regenerated every one of them, which `claude/RULES.md` names
+    exactly ("a predicate open-coded at N sites is typically wrong at N−1 of
+    them in the same direction"). The pattern must capture at least one group;
+    callers read the groups they defined.
 
     🔴 AN ITEM IS A BLOCK, NOT A LINE, and that is this function's whole reason
     to exist. MEASURED over the committed corpus: 179 of 257 ranked items in
@@ -692,6 +729,7 @@ def _item_blocks(section_body: str) -> list[tuple[re.Match[str], list[str], list
     # 🔴 A NUMBERED LINE INDENTED PAST THE OPEN ITEM IS ITS CHILD, NOT A RANK —
     # #964 item 5, and the only place the answer exists. `_RANKED_ITEM` matches
     # indents 0-3 because CommonMark lets a top-level block carry up to 3 spaces;
+    # (`_ELIMINATION` shares that bound, so rule (k) inherits this too);
     # 3 is ALSO the content indent of a sub-list under `1. `, so the LINE is
     # ambiguous and only the enclosing item settles it. The first rank line in a
     # section fixes the queue's own column; anything deeper belongs to it.
@@ -706,7 +744,7 @@ def _item_blocks(section_body: str) -> list[tuple[re.Match[str], list[str], list
     starts: list[int] = []
     top_indent: int | None = None
     for i in range(len(all_lines)):
-        if i not in visible or not _RANKED_ITEM.match(all_lines[i]):
+        if i not in visible or not pattern.match(all_lines[i]):
             continue
         indent = len(all_lines[i]) - len(all_lines[i].lstrip(" "))
         if top_indent is not None and indent > top_indent:
@@ -731,7 +769,7 @@ def _item_blocks(section_body: str) -> list[tuple[re.Match[str], list[str], list
                 break
             blanked = False
             own.append(line)
-        m = _RANKED_ITEM.match(all_lines[start])
+        m = pattern.match(all_lines[start])
         assert m is not None  # `starts` is exactly the lines that matched
         out.append((m, own, hidden))
     return out
@@ -972,6 +1010,343 @@ def self_generated_report(items: typing.Sequence[RankedItem]) -> str:
             SELF_GENERATED_NOTE,
         ]
     )
+
+# --- rule (k): an elimination names HOW it was eliminated ---------------------
+#
+# 🔴 THE SAME SHAPE AS RULE (j), DELIBERATELY: a NAMED FIELD whose value comes
+# from a CLOSED VOCABULARY. `claude/RULES.md` warns that "a guard on WORDS is
+# walkable by REWORDING", and a content sniff is precisely that guard. MEASURED
+# against the bullet this rule exists for — `Not a per-DIMM issue (all 4
+# identical)` — every cheap heuristic ACCEPTS it: it carries a digit, it is
+# fluent, it is the same length as bullets that do cite evidence. Nothing in its
+# TEXT separates it from a real elimination, because what it lacks is not a word
+# but a MEASUREMENT. So the author declares the kind instead.
+#
+# What each member asserts, and each names something outside the author's head:
+#   command      a command was run and its output read
+#   measurement  a number was measured — the ≥2-point kind RULES.md asks for
+#   code         the source was read, at a place the bullet names
+#   change       a diff, a commit or a PR was read
+#   doc          an authoritative external spec or vendor document
+#   assumed      🔴 NOT EVIDENCE. A declaration that this was reasoned, not
+#                observed — ACCEPTED and counted, exactly like `forcing: none`.
+#
+# 🔴 THERE IS DELIBERATELY NO `obvious`, `known`, `checked`, `verified` OR
+# `tested`. Those are the labels an unmeasured elimination reaches for, and
+# their absence is what forces such a bullet onto `assumed`, where it is counted
+# and printed rather than passing as though something had been observed.
+ELIMINATION_KINDS: frozenset[str] = frozenset(
+    {"command", "measurement", "code", "change", "doc", "assumed"}
+)
+
+#: The kinds asserting an OBSERVATION — `ELIMINATION_KINDS` minus the honest
+#: opt-out. Derived, never a second literal list, for the reason
+#: `EXTERNAL_FORCING_KINDS` states: adding a kind above and forgetting it here
+#: is the drift that would silently stop counting `assumed`.
+OBSERVED_ELIMINATION_KINDS: frozenset[str] = ELIMINATION_KINDS - {"assumed"}
+
+# 🔴 `via`, NOT `evidence`, AND THE CHOICE IS A FALSE-REFUSAL ARGUMENT RATHER
+# THAN TASTE. `evidence:` is the more self-documenting key and it is the WRONG
+# one: `**Ruled out:** … evidence: the ACCESS_DENIED is positive evidence it is
+# NOT` is a real shape in this corpus, and against that line the kind group
+# captures `the`, so a bullet whose author DID cite a measurement is refused
+# `[unknown kind: the]`. `via` cannot collide the same way — the pattern
+# requires a COLON immediately after the key, and prose reaches for `via the`,
+# `via a`, `via its`, never `via:`. MEASURED over both corpora (devrc 90 docs,
+# 121 elimination bullets): `via:` followed by any member of the vocabulary
+# occurs 0 times outside a deliberate tag.
+ELIMINATION_KEY = "via"
+
+#: Same grammar as `_FORCING`, and it must STAY the same: an author who has
+#: learned one field's spelling should not have to learn a second. Bounded by
+#: the closed vocabulary in exactly the same way.
+_VIA = re.compile(
+    rf"(?<![A-Za-z0-9]){ELIMINATION_KEY}{_MARKUP}\s*:\s*{_MARKUP}\s*([A-Za-z-]+)",
+    re.IGNORECASE,
+)
+
+#: The FAIL-LOUD half, mirroring `_FORCING_ATTEMPT` for its measured reason: a
+#: bullet that DID carry a tag being told `[no via: field]` is a refusal no
+#: re-run can clear. Only ever consulted for a bullet already being refused, so
+#: the worst case is a refusal naming a line the author is looking at.
+_VIA_ATTEMPT = re.compile(
+    rf"(?<![A-Za-z0-9]){ELIMINATION_KEY}(?![A-Za-z0-9])"
+    rf"[^\n]{{0,40}}?"
+    rf"(?<![A-Za-z0-9])(?:{'|'.join(sorted(ELIMINATION_KINDS))})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+# An elimination bullet: a top-level list item whose text opens with a ruled-out
+# marker.
+#
+# ⚠ THE INDENT BOUND IS `{0,3}`, MATCHING `_RANKED_ITEM`, AND ITS LIMIT IS
+# STATED HERE BECAUSE THE COMMENT USED TO OVERSTATE IT. It said a "nested bullet
+# inside an item's sub-list is part of that item, not a claim of its own", which
+# is FALSE at the 2- and 3-space nesting CommonMark actually produces: those
+# match, and are treated as claims. Only 4-space-or-deeper nesting is excluded.
+# The bound is kept rather than tightened, because it is measured: over all 303
+# tracked `.md` the matched bullets sit at 0 spaces ×128 and at 3 spaces ×1 — so
+# `{0,1}` would silently drop a real elimination to buy a nesting case the
+# corpus does not contain.
+#
+# 🔴 NOTHING IS REQUIRED BETWEEN THE MARKER AND THE CLAIM, AND THAT WIDTH IS A
+# FIX, NOT LAZINESS. The first version demanded a separator right after the
+# marker (`ruled[ -]out` + markup + `[:—–-]`), which is what `Ruled out:`
+# looks like — and MEASURED over this repo's 90 docs it MISSED 9 real bullets,
+# every one of them the same shape: a QUALIFIER between the marker and the
+# colon. `**Ruled out as writers:**`, `**Ruled out (structurally):**`,
+# `**Ruled out, and still true:**`, `**Ruled out (carried forward):**`,
+# `**Ruled out** (do NOT re-run these):` … Nine is not noise, it is a house
+# style — and a gate blind to it is WALKABLE BY TYPING `Ruled out (obviously):`,
+# which is exactly the "guard on WORDS defeated by REWORDING" that
+# `claude/RULES.md` warns about. So the marker alone starts the bullet and the
+# rest of the line is the claim; there is no punctuation to omit.
+#
+# 🔴 AND THE SAME CLASS EXISTS TO THE **LEFT** OF THE MARKER — measured after
+# the qualifier fix, which only widened to its right. `_MARKUP` admits
+# `[*_`~]` and nothing else, so any other decoration between the bullet and
+# `Ruled out` defeated the pattern. Four real corpus bullets were invisible,
+# all one shape:
+#     - 🔴 **Ruled out — my own first diagnosis, which was WRONG.**
+# plus `- ⚠ **Ruled out:**` and `- [x] **Ruled out:**`. So a leading run of
+# NON-LETTER decoration (and an optional task-list checkbox) is skipped.
+#
+# 🔴 THE RUN IS NON-LETTER ON PURPOSE, NOT A GENERAL PREFIX: `- **NOT ruled
+# out:**` is a real corpus line and asserts the OPPOSITE. Letters are what
+# separate the two, so admitting a general prefix would silently start
+# refusing bullets that say a candidate is still live.
+_ELIMINATION = re.compile(
+    rf"^ {{0,3}}[-*+]\s+"
+    rf"(?:\[[ xX]\]\s*)?"
+    rf"(?:[^A-Za-z\s]+\s*)*"
+    rf"{_MARKUP}\s*ruled[ -]out\b(.*)$",
+    re.IGNORECASE,
+)
+
+#: Leading emphasis and separator punctuation left over on a claim once the
+#: marker is stripped — cosmetic only, so refusal rows read as the sentence the
+#: author wrote rather than `:** the thing`.
+_CLAIM_LEADER = re.compile(r"^[\s*_`~:—–-]+")
+
+
+class EliminationBullet(typing.NamedTuple):
+    """One `Ruled out:` bullet, and the evidence kind it declared (if any)."""
+
+    text: str
+    kind: str | None
+    """Lowercased declared kind, or None when the bullet carries no field. A
+    kind OUTSIDE `ELIMINATION_KINDS` is reported as declared — the author needs
+    to see what they typed in order to fix it."""
+    near_miss: str | None = None
+    """The line that LOOKS like a tag `_VIA` could not parse, or None."""
+    fenced: bool = False
+    """True when the only `via:` field sits inside a fence, where it does not
+    count."""
+
+    @property
+    def is_declared(self) -> bool:
+        return self.kind in ELIMINATION_KINDS
+
+
+def elimination_bullets(text: str) -> list[EliminationBullet]:
+    """Every top-level `Ruled out:` bullet in `text`, with its declared kind.
+
+    🔴 READS THE UPDATE, NEVER THE MERGED DOC — the single most load-bearing
+    line in this rule. `open investigations` is an APPEND heading (see
+    `APPEND_PREFIXES`), so the merged doc accumulates every elimination any
+    session ever wrote. Checking the merge would refuse on all 151 legacy
+    bullets across this repo's 45 docs that carry one, turning rule (k) into a
+    permanently-red gate on the first run — which `claude/RULES.md` names as
+    worse than no gate, because it trains everyone to click through. Checking
+    the UPDATE gates what THIS session is adding and nothing else.
+
+    🔴 SCOPED TO THE WHOLE BODY, NOT TO `## Open investigations`. A ruled-out
+    bullet makes the identical claim wherever it is written, and the corpus puts
+    them under `Gotchas` and `Findings` too. Narrowing to one heading would let
+    the same unevidenced elimination through by moving it one section down —
+    the "widest reading" the rules ask for.
+
+    Fence-aware via `_item_blocks`, for that function's stated reason: a handoff
+    routinely pastes a sample bullet inside a code block, and a sample is not a
+    claim.
+    """
+    _fm, body = split_front_matter(text)
+    out: list[EliminationBullet] = []
+    for m, own, hidden in _item_blocks(body, _ELIMINATION):
+        claim = _CLAIM_LEADER.sub("", m.group(1)).strip()
+        block = "\n".join(own)
+        found = _VIA.search(block)
+        if found:
+            out.append(EliminationBullet(claim, found.group(1).lower()))
+            continue
+        # Nothing parsed. Diagnose WHY, so the refusal says something the author
+        # has not already done — `_VIA_ATTEMPT` cannot span a newline, so a
+        # per-line walk sees what a block-wide search would and yields the LINE.
+        near = next(
+            (ln.strip() for ln in own if _VIA_ATTEMPT.search(ln)),
+            None,
+        )
+        # 🔴 INDENTED hidden lines ONLY, and this is a FIX. `_item_blocks`
+        # appends a fenced line to `hidden` BEFORE its boundary check, so a
+        # COLUMN-0 fence appearing anywhere later in the update is absorbed into
+        # this bullet's hidden set — its own docstring calls that "a KNOWN,
+        # UNTESTED gap". Rule (j) never felt it because it walks one section;
+        # rule (k) walks the whole body deliberately, so it does.
+        #
+        # MEASURED: an unrelated col-0 fence containing `via: command` turned an
+        # untagged bullet's honest `[no via: field]` into a false `[fenced]`,
+        # and the legend then told the author to unfence a block with no
+        # relationship to the bullet. The likeliest such paste is THIS TOOL'S
+        # OWN REFUSAL — exactly what sits in the scratch file of a session
+        # re-running after rc 10. A fence that really belongs to the bullet is
+        # indented under it, so indentation is the discriminator.
+        fenced = near is None and any(
+            _VIA.search(ln) for ln in hidden if ln[:1] in (" ", "\t")
+        )
+        out.append(EliminationBullet(claim, None, near, fenced))
+    return out
+
+
+ELIMINATION_VOCAB_LINE = (
+    "  The field is `via: <kind>`, anywhere on the bullet's own lines — "
+    "`<kind>` one of: " + ", ".join(sorted(OBSERVED_ELIMINATION_KINDS)) + ".\n"
+    "  `via: assumed` is the honest opt-out for a candidate you reasoned away "
+    "rather than measured. It is ACCEPTED and counted, not refused — but a "
+    "reader is then told the elimination rests on reasoning, not on evidence."
+)
+
+MARK_NO_VIA = "[no via: field]"
+
+#: 🔴 RULE (k)'s MARKER LEDGER, and it exists because the ONE it adds escaped
+#: `REFUSAL_MARKERS` — which is guarded from both sides and still could not see
+#: it, because that guard asserts a LENGTH of 4 against rule (j)'s tuple. So the
+#: new marker is enumerated here and the skill legend is asserted against THIS
+#: tuple, not against a number somebody has to remember to bump.
+ELIMINATION_MARKERS: tuple[str, ...] = (
+    MARK_NO_VIA,
+    MARK_UNKNOWN_KIND,
+    MARK_UNPARSED,
+    MARK_FENCED,
+)
+
+#: 🔴 THREE REMEDIES, ONE PER CAUSE — NOT one trailer for all of them. Rule (j)
+#: learned this twice, and `unforced_report`'s own standard is that "a refusal
+#: which instructs a caller to do a thing the caller has already done is
+#: unrecoverable": every re-run prints the identical text and the author has no
+#: way forward. Rule (k) shipped with a single unconditional trailer and
+#: reproduced all three shapes, so each arm now gets the remedy its cause needs.
+MISSING_VIA_REMEDY = (
+    f"  Tag each bullet marked {MARK_NO_VIA} above. A continuation line counts — "
+    "the field does not have to sit on the bullet's first line, but it MUST be "
+    "INDENTED: a flush-left line ENDS the bullet once a blank has intervened, so "
+    "a `via:` at column 0 below one is outside the bullet and reads as absent."
+)
+
+NEAR_MISS_VIA_REMEDY = (
+    f"  🔴 The bullet(s) marked {MARK_UNPARSED}] DO carry something — the quoted "
+    "line is there and the check could not parse it. Spell the field as the "
+    "literal key, a colon, then the kind: `via: command`. Emphasis around it is "
+    "fine (`**via: command**`, `**via:** command`, `_via: command_`); a word "
+    "between the key and the colon is not, and neither is any other separator "
+    "(`via = command`, `via — command`)."
+)
+
+FENCED_VIA_REMEDY = (
+    f"  🔴 The bullet(s) marked {MARK_FENCED} carry a `via:` INSIDE a code "
+    "fence, where it does not count — a pasted sample is not a declaration. If "
+    "it is YOUR declaration, move it onto one of the bullet's own lines, "
+    "INDENTED — at column 0 it reads as absent. If it is quoted output, an "
+    "example, or THIS TOOL'S OWN REFUSAL pasted back in, the bullet is genuinely "
+    "untagged and needs a field of its own — do NOT promote the quote."
+)
+
+UNKNOWN_VIA_REMEDY = (
+    f"  The bullet(s) marked {MARK_UNKNOWN_KIND} …] name a kind outside the "
+    "vocabulary. Pick one of the listed kinds, or `via: assumed` if nothing was "
+    "actually observed — there is deliberately no `obvious`/`checked`/`verified`."
+)
+
+ASSUMED_NOTE = (
+    "  These are ACCEPTED and the write proceeds — declaring one honestly is "
+    "the point. A later session must re-derive them before relying on them: an "
+    "elimination nobody measured is a hypothesis wearing a conclusion's clothes."
+)
+
+
+def unevidenced_report(bullets: typing.Sequence[EliminationBullet]) -> str:
+    """Rule (k)'s refusal block, or "" when every elimination declared a kind."""
+    bad = [b for b in bullets if not b.is_declared]
+    if not bad:
+        return ""
+    shown = bad[:EXISTING_SHOWN_MAX]
+    rows: list[str] = []
+    causes: set[str] = set()
+    for b in shown:
+        if b.fenced:
+            mark, cause = MARK_FENCED, "fenced"
+        elif b.near_miss is not None:
+            mark, cause = f"{MARK_UNPARSED}: {_clip(b.near_miss, 48)}]", "near"
+        elif b.kind is not None:
+            mark, cause = f"{MARK_UNKNOWN_KIND}: {_clip(b.kind, 24)}]", "unknown"
+        else:
+            mark, cause = MARK_NO_VIA, "absent"
+        causes.add(cause)
+        rows.append(f"  {mark} {_clip(b.text, 88)}")
+    elided = len(bad) - len(shown)
+    if elided:
+        # `unforced_report`'s line, for its reason: without it an author fixes
+        # the visible rows, re-runs, and is refused again with no warning that
+        # more were waiting.
+        rows.append(f"  … and {elided} more not shown.")
+    # 🔴 PER CAUSE, and only the causes actually present — a refusal that prints
+    # all four remedies makes the reader find their own, which is the same
+    # failure as printing none.
+    remedies = [
+        r for c, r in (
+            ("absent", MISSING_VIA_REMEDY),
+            ("near", NEAR_MISS_VIA_REMEDY),
+            ("unknown", UNKNOWN_VIA_REMEDY),
+            ("fenced", FENCED_VIA_REMEDY),
+        ) if c in causes
+    ]
+    return "\n".join(
+        [
+            f"status=unevidenced\n"
+            f"🔴 {len(bad)} of {len(bullets)} elimination bullet(s) name no way "
+            f"the candidate was eliminated. An elimination is the claim a later "
+            f"session trusts MOST and re-checks LEAST — it is what stops the "
+            f"next reader looking.\n"
+            f"NOTHING WRITTEN — not the doc, not a commit, not a ref. Fix your "
+            f"scratch file and re-run; re-running after a fix is safe.",
+            *rows,
+            ELIMINATION_VOCAB_LINE,
+            *remedies,
+            "  🔴 This gate cannot tell a TRUE elimination from a false one and "
+            "does not try. It makes you say which KIND of evidence closed the "
+            "question, so a later reader can tell a measurement from a guess.",
+        ]
+    )
+
+
+def assumed_report(bullets: typing.Sequence[EliminationBullet]) -> str:
+    """Rule (k)'s advisory for `via: assumed` bullets, or "".
+
+    Silent when there are none, for `self_generated_report`'s stated reason: a
+    reassuring "0 assumed eliminations" on every run gets skimmed and then read
+    as a guarantee.
+    """
+    assumed = [b for b in bullets if b.kind == "assumed"]
+    if not assumed:
+        return ""
+    return "\n".join(
+        [
+            f"🔴 {len(assumed)} of {len(bullets)} elimination(s) declare "
+            f"`{ELIMINATION_KEY}: assumed` — REASONED, NOT MEASURED:",
+            *[f"  {_clip(b.text, 96)}" for b in assumed[:EXISTING_SHOWN_MAX]],
+            ASSUMED_NOTE,
+        ]
+    )
+
 
 # Rule (c). A section whose heading starts with one of these is DIAGNOSIS STATE
 # and appends; everything else is CURRENT STATE and is replaced. Matching is on
@@ -1662,7 +2037,7 @@ def _clip(text: str, limit: int) -> str:
 # 🔴 But when there is no usable doc HERE and the mainline has one, warning was
 # the wrong call: every section arrives NEW, the committed document is REPLACED,
 # and the y/N that used to stand between that and a push was retired 2026-08-23.
-# That shape exits 7 (`stale-base`) with an explicit override. Scoping the
+# That shape exits 9 (`stale-base`) with an explicit override. Scoping the
 # refusal to it is what keeps this from being the clicked-through gate above.
 #
 # 🔴 IT MUST BE SILENT ON THE ORDINARY RUN, and that is measured rather than
@@ -2678,6 +3053,19 @@ def main(argv: list[str] | None = None) -> int:
         print(unforced, file=sys.stderr)
         return EXIT_UNFORCED
 
+    # ---- rule (k): every elimination names how it was eliminated ------------
+    # Read from the UPDATE for a reason rule (j) does NOT share and which is
+    # sharper here: `open investigations` is an APPEND heading, so the merged
+    # doc carries every elimination ever written. Checking the merge would
+    # refuse on 151 legacy bullets in this repo alone — permanently red on run
+    # one. See `elimination_bullets`. An update with no elimination bullet is
+    # not asked the question.
+    bullets = elimination_bullets(update_text)
+    unevidenced = unevidenced_report(bullets)
+    if unevidenced:
+        print(unevidenced, file=sys.stderr)
+        return EXIT_UNEVIDENCED
+
     base_text = doc.read_text(encoding="utf-8") if doc.exists() else ""
     if base_text:
         report = merge_report(base_text, update_text)
@@ -2777,6 +3165,12 @@ def main(argv: list[str] | None = None) -> int:
     self_generated = self_generated_report(items)
     if self_generated:
         print(self_generated)
+    # Rule (k)'s advisory half, for the identical reason: an elimination the
+    # author reasoned rather than measured is a statement about what the diff
+    # is adding, so it belongs above the diff and not after it.
+    assumed = assumed_report(bullets)
+    if assumed:
+        print(assumed)
     print(diff, end="" if diff.endswith("\n") else "\n")
 
     if not args.confirm:

@@ -227,7 +227,31 @@ REFERENCE_DIR = SKILL_MD.parent / "reference"
 # Sized at ~4 mean 🔴 rules (572 B each) against a +1,761 B need, which leaves
 # roughly ONE rule free above the floor. Deliberately tight, for the reason the
 # +600 entry above gives: the pressure is the point.
-MAX_BYTES = 26_400
+#
+# 🔴 2026-08-30: 26,400 -> 27,000 (+600). Lever 3 again, and it is case (a) of
+# the entry above repeating itself EXACTLY — for rule (k) this time, the
+# elimination-evidence gate (`via: <kind>` on a `Ruled out:` bullet).
+#
+#   lever 1, taken: the four remedies are printed BY THE TOOL, one per cause, at
+#     the moment each fires. The body carries no remedy text — only the marker
+#     names, which `test_every_refusal_MARKER_the_module_prints_reaches_the_skill`
+#     requires in the body by construction.
+#   lever 2, taken: the whole argument — the incident, why a closed vocabulary
+#     rather than a content check, why `assumed` is accepted, the read-the-UPDATE
+#     reasoning and both controls — went WHOLE to reference/write-gate.md §D.
+#
+# 🔴 WHAT COULD NOT BE EVICTED: the `via:` field in the step-2 TEMPLATE, which is
+# case (a) verbatim. An adversarial audit MEASURED the cost of leaving it out by
+# replaying every past handoff update: 80 of 242 deltas (33%) add at least one
+# elimination bullet, and NONE would have passed. So a field reachable only
+# through the refusal makes one run in three fail-then-fix on the ordinary path,
+# having just been shown a template that does not mention it — "red by
+# construction on the ordinary path", which `RULES.md` calls worse than no gate.
+#
+# The body needed +355 B for the template clause plus the four marker names.
+# Sized at +600 to leave ~266 B — about half a mean 🔴 rule — above the floor,
+# rather than the 16 B an exact fit would have left. Still deliberately tight.
+MAX_BYTES = 27_000
 
 # Required working margin below the ceiling.
 #

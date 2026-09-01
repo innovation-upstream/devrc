@@ -1479,7 +1479,19 @@ class TestSkillDocsArePinned:
         ("declining **by prompt** is what is gone", "the prompt went; declining did not"),
         ("Both steps still SHOW the diff before writing",
          "🔴 the half the prompt was never doing, kept at BOTH writes"),
-        ("re-read the file and re-apply to current bytes", "no concurrent append is clobbered"),
+        # 🔴 SUPERSEDES `("re-read the file and re-apply to current bytes", …)`.
+        # The 2026-09-01 Cairn cutover froze every local entry file to 0444 and
+        # moved the write to the store API, so the re-read — a guess at
+        # concurrency with no arbiter — is replaced by an `If-Match` derived from
+        # a live sync. Same claim (a concurrent append must not be clobbered),
+        # new mechanism, so the pin follows the sentence rather than the wording.
+        ("exit 8 IS the other writer, not a transient error",
+         "no concurrent append is clobbered"),
+        # …and the RETIREMENT has to be legible in the same paragraph, or the
+        # next reader restores the re-read as a rule that went missing.
+        ("THAT IS WHAT REPLACES the two rules this step used to carry — it is "
+         "a replacement, not an omission",
+         "the two dropped rules are named where they were dropped"),
         ("Never silent-mutate.", "the invariant carried over from analyze-service"),
         ("pointers, not copies", "the bloat rule"),
         (
@@ -1586,9 +1598,22 @@ class TestSkillDocsArePinned:
         # would require prose describing a prompt nothing asks.
         ("show one compact diff, then edit; no question",
          "the SKILL HOMES append follows the index write's CURRENT rule"),
+        # 🔴 SUPERSEDES `("use `Edit` anchored on `## Nuance / work-history`, not
+        # `Write`", "no whole-file retype of a curated unbacked-up entry")`. That
+        # instruction was the LOCAL mechanism; after the 2026-09-01 cutover the
+        # entry files are 0444 and the same `Edit` returns EACCES. The safety
+        # claim it carried — a whole-file retype must not silently lose a
+        # concurrent append — is now carried by the API's per-entry flock and
+        # `--if-match`, so the pin moves to the command that does the work.
+        # Deleting it instead would have removed the only assertion that this
+        # step names a write mechanism at all.
         (
-            "use `Edit` anchored on `## Nuance / work-history`, not `Write`",
-            "no whole-file retype of a curated unbacked-up entry",
+            "cairn append --scope <scope> --ref <entry> --session <session-uuid>",
+            "the mandated mechanism: the append lands on the POD, not locally",
+        ),
+        (
+            "The server adds the `- ` and the date — do not type either",
+            "🔴 the caller error this route has already produced in production",
         ),
 
         ("--exclude claudedocs/handoff-", "the ritual does not nominate its own artifact"),
@@ -1612,9 +1637,17 @@ class TestSkillDocsArePinned:
             "A bullet that adds nothing to what is on screen ⇒ propose nothing",
             "declining is the named, normal outcome",
         ),
+        # 🔴 SUPERSEDES `("the heading has to be created as part of the append",
+        # "an entry with no work-history section has no `Edit` anchor yet")`.
+        # Post-cutover it is not part of the append and cannot be: the server
+        # REFUSES a bullet for an entry with no `## Nuance / work-history` (422 ⇒
+        # exit 6), so the heading is a separate `cairn put` that must happen
+        # first. Same gap, opposite ordering — which is exactly why the pin had
+        # to be re-expressed rather than left to pass on a stale sentence.
         (
-            "the heading has to be created as part of the append",
-            "an entry with no work-history section has no `Edit` anchor yet",
+            "create the heading first with `cairn put`, then append",
+            "an entry with no work-history section is REFUSED by the server, so "
+            "the heading is its own write and comes before the bullet",
         ),
         # 🔴 Measured twice on two new scopes (2026-08-12): the store's hourly
         # timer `git init`s, seeds an identity and commits a brand-new scope dir,

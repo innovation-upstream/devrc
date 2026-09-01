@@ -70,6 +70,7 @@ Click actions for those blocks:
 | `find-session.py` | find past Claude Code sessions by keyword |
 | `memory-audit.py` | audit a project's auto-memory index (`MEMORY.md`) |
 | `skill-audit.py` | audit `SKILL.md` byte budgets + reference routing (`/prune-skill`) |
+| `handoff-audit.py` | audit `claudedocs/handoff-*.md` size + structurally-terminal content (the `/handoff` analogue; borrows skill-audit's parser and budget) |
 | `resume-state.sh` | initiative-scoped live-state reconciler for `/resume` |
 | `obs-read` | one-command, cluster-aware observability query tool |
 | `playwright-nixos` | drive Playwright with the nixpkgs Chromium matching *this project's* pin (`--list` / `--select`) |

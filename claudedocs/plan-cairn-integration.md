@@ -80,9 +80,44 @@ Also true today:
   reads local disk. Neither is wrong today, which is precisely the problem.
 - **35 of 146 entries carry no `sensitivity:` marker** and fail-safe to
   `client-confidential`. Under decision 11 that makes them unshareable until marked.
-- **No tenancy, no auth, no age-out, no sharing** exist in any form.
+- 🔴 **CORRECTED 2026-09-01. This line used to read "No tenancy, no auth, no age-out, no
+  sharing exist in any form." The AUTH HALF WAS FALSE, and was false when written.**
+  Authentication is live and enforced on the hosted store — measured against a read route
+  with both controls: **no token → 401, a wrong token → 401, the real host credential →
+  200.** Per-token identity, server-side scope authorization and criterion 3's enumeration
+  property (a refused scope is indistinguishable from an absent one) all shipped as
+  "phase 3" criteria 1–7, and the last unrestricted credential was retired 2026-08-31.
+  What genuinely does not exist yet: **no tenancy** (one tenant, addressed by nothing —
+  authorisation is by token, addressing by `user.email` is decision 6 and is unbuilt), **no
+  age-out**, and **no sharing**. The distinction matters because "add auth" reads as
+  available work and is not: the next authorisation work is the read/write allowlist split,
+  which is a change to an existing mechanism.
+- 🔴 **The store is now BACKED UP.** homelab-infra#551 shipped a daily CronJob (03:45 UTC,
+  whole-tree tar including `.git`, its own bucket, 90-day ILM, a credential with no
+  `s3:DeleteObject`). Several places in this repo still say it is not — see devrc#1132.
 - **Zero entries carry task, PR or session front matter** — so nothing in the store can
   currently be joined to the work that produced it.
+
+## 🔴 Two numberings are live, and they cross — read this before sequencing anything
+
+The phases below number **the plan**. clawgate task #371, the `handoff-cairn-*.md` docs and
+every devrc commit message number **delivery milestones**. They are different axes with the
+same word, and neither can be renamed: one is written into commit history, the other is the
+planning vocabulary. The crossing is real and has caused work to read as further along than
+it is.
+
+| delivery label (commits, cg#371, handoff docs) | what shipped | phase BELOW |
+|---|---|---|
+| "phase 1" | seed + the read-only hosted API | precursor to phase 1 |
+| "phase 2" | `cairn`, the read-through client | precursor to phase 1 |
+| "phase 3", criteria 1–7 | per-token identity, scope authorization, the write path | **phase 2** |
+| "phase 3", criterion 10 | retiring the unrestricted credential | **phase 2** |
+| "phase 3", criteria 8 + 9 | the laptop re-seed and the write-through cutover | **phase 1** |
+
+🔴 **So "phase 3, criteria 8 and 9" is PHASE 1 work below, carrying a phase-3 label.** The
+rule going forward: **the phases below are canonical for planning; the delivery labels are
+historical and are not renamed; any new work item names both.** Criterion 9's design is
+`claudedocs/plan-cairn-phase1-cutover.md`.
 
 ## The plan
 
@@ -109,6 +144,13 @@ hosts after a sync.
 Same-named entries on both hosts may have diverged. Decide the rule before migrating and
 write it down; a silent last-write-wins would discard whichever host was not migrated
 last, and the loss would be invisible.
+
+✅ **The rule is now written down and implemented**, with the migration measured:
+`claudedocs/plan-cairn-phase1-cutover.md` §3, `scripts/cairn-cutover.py::plan_delta`. It is
+generalised past the one file that motivated it — additive where a name exists on one side;
+a lineage argument where the pod's copy is a lagging derivative of a host's; and an
+unconditional refusal where two HOSTS disagree, cleared only by a human-authored merge. The
+script is dry-run by default and refuses rather than guessing.
 
 ### Phase 2 — tenancy and authorisation
 Tenant addressed by `user.email`, authorised by a pod-issued per-host token. Still one
