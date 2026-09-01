@@ -638,8 +638,15 @@ def test_a_prose_path_that_does_NOT_exist_is_not_taken(tmp_path, stub_bin, docs)
     arg = f"resume it; handoff: {repo / 'claudedocs' / 'handoff-gone-2026-01-01.md'}"
     out = run_resume(repo, stub_bin, arg)
     assert handoff_line(out) == "handoff: (none found — git-only)", out
+    # 🔴 ASSERTED OVER THE WHOLE DIGEST, like the sibling in the part-2 block.
+    # This read `doc not in handoff_line(out)` and COULD NOT FAIL: the line
+    # above already pins `handoff_line(out)` to an exact literal that contains
+    # none of `docs`, so the loop restated a settled fact while its comment
+    # claimed something about the digest. Coverage that reads as coverage and
+    # provides none is worse than none — it stops anyone looking. (audit of
+    # #1197, F7.)
     for doc in docs:                       # nothing else was substituted either
-        assert doc not in handoff_line(out), out
+        assert doc not in out, f"{doc} was reconciled anyway\n{out}"
     assert any("handoff-gone" in g for g in gap_lines(out)), out
     # …and the all-clear is withdrawn, which is the harm, not the filename.
     assert "matches the handoff's claims" not in " ".join(drift_lines(out)), out
@@ -1274,7 +1281,12 @@ GAP_LEAD_MISSING = 'requested handoff "{tok}" — NO SUCH FILE (renamed, moved, 
 # The #1164 lead: the named path is not on disk AND several worktrees of its own
 # clone hold that basename, so none was chosen. It REPLACES the lead above
 # rather than adding a second line — one cause, one line.
-GAP_LEAD_AMBIGUOUS = 'requested handoff "{tok}" — NO SUCH FILE, and {base} exists in {n} worktrees of that clone ({paths}), so NONE was chosen.'
+#
+# 🔴 "of that clone" was RETIRED (audit of #1197, F2): the candidates come from
+# whichever clone the search used, and for a bare `claudedocs/<base>` token the
+# caller named no clone at all, so "that" had no antecedent. Every clause here
+# must be true of every run that reaches it.
+GAP_LEAD_AMBIGUOUS = 'requested handoff "{tok}" — NO SUCH FILE, and {base} exists in {n} worktrees of the clone that path resolves against ({paths}), so NONE was chosen.'
 GAP_LEAD_SLUG = 'requested "{arg}" — nothing in it resolved to a handoff doc under {repo}/claudedocs.'
 GAP_REST_NONE = " NOTHING was reconciled; the DRIFT section below is about no document at all."
 GAP_REST_FELL = " The digest FELL BACK to {name}.{moves} Re-run naming the doc's path, or with no argument to take newest deliberately."
@@ -2751,3 +2763,324 @@ def test_the_civitai_slug_STILL_falls_back_and_resolves(tmp_path, stub_bin):
     repo = make_repo(tmp_path, docs=("SESSION-HANDOFF.md",))
     out = run_resume(repo, stub_bin, "session", cwd=repo)
     assert handoff_line(out) == "handoff: SESSION-HANDOFF.md", out
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 #1197 AUDIT ROUND 1, F1 — A RELATIVE TOKEN NAMING A *FOREIGN* TREE WAS
+# SERVED OUT OF THE STANDING CLONE'S WORKTREES, SILENTLY.
+#
+# The absolute/`<X>/claudedocs/` branch is scoped to `${dir%/claudedocs}` — the
+# tree the caller named. The RELATIVE branch was not: it re-anchored on `$root`
+# (the cwd's repo) and, since #1164, searched `$root`'s WORKTREES too, for ANY
+# `<Y>`. So `other-repo/claudedocs/<base>` typed inside `devrc` resolved a copy
+# out of `devrc`'s linked worktree, with NO gap.
+#
+# MEASURED 2026-09-01 in /tmp/f1v (devrc + linked worktree devrc-topic holding
+# the doc, sibling other-repo that does not):
+#
+#   d86e5f81  handoff: (none found — git-only) + the NO SUCH FILE gap  (honest)
+#   3e42bb04  handoff: handoff-only-in-worktree.md, # repo: …/devrc-topic,
+#             gaps EMPTY                                              (silent, wrong clone)
+#
+# The discriminator is the NAME, not resolvability: `other-repo` is a SIBLING of
+# the repo, so it does not resolve from the cwd at all and a `[ -d ]` test falls
+# straight through to `$root`. `$root` may be used only when <Y> is empty, or
+# <Y>'s LAST component is the cwd repo's own directory name.
+#
+# 🔴 EVERY FIXTURE BELOW CARRIES THE DOC IN A LINKED WORKTREE AND A NEWER DECOY
+# IN THE BASE CLONE, so "it missed" cannot be satisfied by a repo that had
+# nothing to serve — the shapes that MUST still resolve are asserted on the very
+# same fixture, in the same test.
+# --------------------------------------------------------------------------- #
+FOREIGN_SHAPES = [
+    # the reproduction: a sibling repo that EXISTS and does not hold the doc
+    pytest.param("other-repo", True, id="foreign-sibling-repo-exists"),
+    # …and one that is not on disk at all, which the same rule must cover
+    pytest.param("no-such-tree", False, id="foreign-name-does-not-exist"),
+]
+
+
+@pytest.mark.parametrize("ydir,make_it", FOREIGN_SHAPES)
+def test_a_FOREIGN_relative_token_is_not_served_from_THIS_clones_worktrees(
+    tmp_path, stub_bin, ydir, make_it
+):
+    """🔴 THE REGRESSION for F1. RED at 3e42bb04: resolves, no gap.
+
+    The doc exists in `devrc`'s own linked worktree, so a run that searches
+    `$root`'s clone WILL find it — that is what makes this test able to fail.
+    """
+    repo = make_repo(tmp_path, docs=(BASE_DECOY,), name="devrc")
+    wt = add_worktree(repo, "devrc-topic", "feat/topic", docs=(IN_WORKTREE,))
+    assert (wt / "claudedocs" / IN_WORKTREE).is_file()
+    if make_it:
+        make_repo(tmp_path, docs=(), name=ydir)
+
+    out = run_resume(repo, stub_bin, f"{ydir}/claudedocs/{IN_WORKTREE}", cwd=repo)
+    assert handoff_line(out) == "handoff: (none found — git-only)", out
+    assert IN_WORKTREE not in out.replace(f"{ydir}/claudedocs/{IN_WORKTREE}", ""), out
+    gaps = gap_lines(out)
+    assert len(gaps) == 1, gaps
+    assert f"{ydir}/claudedocs/{IN_WORKTREE}" in gaps[0], gaps
+    assert gaps[0].endswith(GAP_REST_NONE), gaps
+
+
+@pytest.mark.parametrize("ydir,make_it", FOREIGN_SHAPES)
+def test_a_FOREIGN_relative_token_is_not_re_anchored_on_THIS_repos_own_copy(
+    tmp_path, stub_bin, ydir, make_it
+):
+    """🔴 THE SINGLE-TREE HALF OF THE SAME HOLE — no worktrees involved at all.
+
+    #1159's re-anchor (`$root/claudedocs/$base`) fired for ANY `<Y>`, so this
+    predates the worktree search entirely: `other-repo/claudedocs/<base>` typed
+    inside `devrc` resolved DEVRC's own copy, silently. F1's `$mine` gate closes
+    it as a side effect, and NOTHING SAW IT until the mutation battery: X1 (drop
+    the gate from the re-anchor, keep it on the worktree search) SURVIVED all
+    178 tests, because every foreign-token fixture kept the doc in a WORKTREE
+    and the base clone therefore had nothing for the re-anchor to find. This
+    fixture puts the doc in the base clone instead — the only shape that can
+    tell the two clauses apart.
+
+    The positive control is `test_a_repo_prefixed_token_resolves_from_INSIDE_the
+    _repo` above: same fixture, same doc, `<Y>` swapped for this repo's own
+    name, and it resolves.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, DECOY), name="devrc")
+    assert (repo / "claudedocs" / WANTED).is_file()
+    if make_it:
+        make_repo(tmp_path, docs=(), name=ydir)
+
+    out = run_resume(repo, stub_bin, f"{ydir}/claudedocs/{WANTED}", cwd=repo)
+    assert handoff_line(out) == "handoff: (none found — git-only)", out
+    # The gap ECHOES the caller's own token, which contains WANTED — scrub that
+    # one occurrence before asserting over the digest, or the test fails on the
+    # very sentence that proves it behaved.
+    scrubbed = out.replace(f"{ydir}/claudedocs/{WANTED}", "")
+    for doc in (WANTED, DECOY):        # neither the named copy nor the newest
+        assert doc not in scrubbed, f"{doc} was reconciled anyway\n{out}"
+    gaps = gap_lines(out)
+    assert len(gaps) == 1, gaps
+    assert f"{ydir}/claudedocs/{WANTED}" in gaps[0], gaps
+    assert gaps[0].endswith(GAP_REST_NONE), gaps
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        # <Y> is this checkout's own directory name — the kickoff-template shape
+        pytest.param("devrc/claudedocs/{doc}", id="repo-prefixed"),
+        # <Y> is empty — the token names no tree, so the cwd's is the only one
+        pytest.param("claudedocs/{doc}", id="bare-claudedocs"),
+    ],
+)
+def test_the_TWO_relative_shapes_that_DO_name_this_tree_still_resolve(
+    tmp_path, stub_bin, shape
+):
+    """THE OTHER SIDE OF F1's DISCRIMINATOR, on the SAME fixture as the test
+    above — so the miss there is attributable to the foreign `<Y>` and not to a
+    worktree search that stopped working. Without this pair, gating the relative
+    branch on `$mine` could be spelled `if false` and the miss test would still
+    pass."""
+    repo = make_repo(tmp_path, docs=(BASE_DECOY,), name="devrc")
+    add_worktree(repo, "devrc-topic", "feat/topic", docs=(IN_WORKTREE,))
+    out = run_resume(repo, stub_bin, shape.format(doc=IN_WORKTREE), cwd=repo)
+    assert handoff_line(out) == f"handoff: {IN_WORKTREE}", out
+    assert gap_lines(out) == [], out
+
+
+def test_a_SIBLING_WORKTREE_named_relatively_now_MISSES_and_the_absolute_form_does_not(
+    tmp_path, stub_bin
+):
+    """⚠ THE NARROWING F1 TAKES ON PURPOSE, pinned so it is a decision and not
+    a surprise.
+
+    `devrc-topic/claudedocs/<base>` typed inside `devrc` names a sibling
+    worktree of the SAME clone — legitimate, and indistinguishable BY NAME from
+    the foreign `other-repo/...` above. It now misses. That is the safe
+    direction: the run prints the gap naming exactly what it could not find
+    rather than a confident digest, and the ABSOLUTE spelling of the very same
+    path still resolves — which the second half here proves, so the narrowing
+    costs a spelling and not a capability.
+    """
+    repo = make_repo(tmp_path, docs=(BASE_DECOY,), name="devrc")
+    wt = add_worktree(repo, "devrc-topic", "feat/topic", docs=(IN_WORKTREE,))
+
+    rel = run_resume(repo, stub_bin, f"devrc-topic/claudedocs/{IN_WORKTREE}", cwd=repo)
+    assert handoff_line(rel) == "handoff: (none found — git-only)", rel
+    assert len(gap_lines(rel)) == 1, gap_lines(rel)
+
+    absolute = run_resume(repo, stub_bin, str(wt / "claudedocs" / IN_WORKTREE), cwd=repo)
+    assert handoff_line(absolute) == f"handoff: {IN_WORKTREE}", absolute
+    assert gap_lines(absolute) == [], absolute
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 #1197 AUDIT ROUND 1, F5 — A GLOB TOKEN IS NOT A DOCUMENT
+#
+# `set -f` keeps `claudedocs/handoff-*.md` from expanding, which is right, but
+# it then reaches `[ -f ]` as a LITERAL that can never exist and was recorded as
+# "the caller named a specific document". Since #1164 part 2 that suppresses the
+# whole fallback chain, so the run reconciles NOTHING. That literal appears
+# twice in /resume's own SKILL.md prose, which is passed through VERBATIM.
+#
+# MEASURED 2026-09-01, same repo, same command:
+#   3e42bb04  handoff: (none found — git-only)  + "NO SUCH FILE" + NOTHING reconciled
+#   HEAD      handoff: <the newest doc>         + the ordinary slug-miss gap
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "arg",
+    [
+        # the two spellings /resume's own SKILL.md carries
+        pytest.param("claudedocs/handoff-*.md", id="star-lowercase-family"),
+        pytest.param("claudedocs/*HANDOFF*.md", id="star-caps-family"),
+        # the other two metacharacters `set -f` also literalises
+        pytest.param("claudedocs/handoff-?.md", id="question-mark"),
+        pytest.param("claudedocs/handoff-[ab].md", id="bracket"),
+        # …and in prose, which is the form the skill actually passes through
+        pytest.param("resume the claudedocs/handoff-*.md work", id="in-prose"),
+    ],
+)
+def test_a_GLOB_shaped_token_is_not_recorded_as_a_named_document(
+    tmp_path, stub_bin, arg
+):
+    """🔴 RED at 3e42bb04 for every row: `handoff: (none found — git-only)`.
+
+    The repo holds real handoffs the fallback can serve, so "it reconciled
+    something" is a fact about the guard rather than about an empty repo — and
+    `test_a_star_in_the_argument_is_split_not_GLOBBED` above still pins that the
+    token is not EXPANDED, which is the opposite hazard and must not regress.
+    """
+    docs = ("handoff-alpha-2026-01-01.md", WANTED, NEWEST)
+    repo = make_repo(tmp_path, docs=docs)
+    out = run_resume(repo, stub_bin, arg, cwd=repo)
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+    # the miss is still REPORTED — an argument that resolved nothing always
+    # warns — but as the slug-miss lead, which does not claim a file was named.
+    gaps = gap_lines(out)
+    assert len(gaps) == 1, gaps
+    assert "NO SUCH FILE" not in gaps[0], gaps
+    assert "FELL BACK" in gaps[0], gaps
+
+
+def test_the_glob_rows_above_are_not_vacuous_because_a_LITERAL_miss_still_gaps(
+    tmp_path, stub_bin
+):
+    """POSITIVE CONTROL for the block above: the SAME repo, the SAME shape, one
+    character different — no metacharacter — must still reconcile NOTHING.
+    Without this the glob rows would pass against a `named_missing` that had
+    stopped working altogether."""
+    docs = ("handoff-alpha-2026-01-01.md", WANTED, NEWEST)
+    repo = make_repo(tmp_path, docs=docs)
+    out = run_resume(repo, stub_bin, "claudedocs/handoff-nope.md", cwd=repo)
+    assert handoff_line(out) == "handoff: (none found — git-only)", out
+    assert "NO SUCH FILE" in gap_lines(out)[0], gap_lines(out)
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 #1197 AUDIT ROUND 1, F4 — THE CANDIDATE LIST'S ORDER
+#
+# Two independent defects in one line, both measured:
+#   (a) `sort` was UNPINNED by locale while the expectations here are built with
+#       Python `sorted()` (codepoint order = C order). Every fixture in this
+#       module collates identically under C and under en_US.UTF-8, so none of
+#       them could see it.
+#   (b) the four shown were whichever four sorted first, and on the real clone
+#       that is four disposable `.claude/worktrees/agent-*` checkouts — against
+#       a sentence whose own advice is "pass the worktree's own path".
+# --------------------------------------------------------------------------- #
+def test_the_candidate_list_is_collated_LC_ALL_C_not_in_the_callers_locale(
+    tmp_path, stub_bin
+):
+    """🔴 THIS TEST NEITHER SKIPS NOR DEGRADES — it FAILS if it cannot run.
+
+    Same reasoning as `test_a_README_beside_a_lowercase_sibling_survives_a_UTF8_
+    LOCALE` in test_subsystem_store_api.py, and the same mechanism supplies the
+    locale to both tiers: `LOCALE_ARCHIVE`, exported in flake.nix's devShell AND
+    in checks.pytests. A degradation to C would make this pass while observing
+    nothing, which is the vacuity the pin exists to prevent.
+
+    AVAILABILITY IS DETECTED BY EXERCISING THE CAPABILITY: sort the two fixture
+    paths under C and under en_US.UTF-8 and require the orders to DIFFER. That
+    one assertion answers "is a non-C collation available?" and "does this
+    fixture still invert?" at once.
+
+    The inversion: `devrc-Bravo` vs `devrc-alpha`. C compares 'B' (0x42) before
+    'a' (0x61); en_US.UTF-8 folds case and puts 'a' before 'b'. Python
+    `sorted()` is codepoint order, i.e. C order — so an unpinned `sort` under
+    the caller's own locale emits the list in the OTHER order and this fails.
+    """
+    forced = "en_US.UTF-8"
+    repo = make_repo(tmp_path, docs=(BASE_DECOY,), name="devrc")
+    wts = [
+        add_worktree(repo, "devrc-Bravo", "feat/bravo", docs=(IN_WORKTREE,)),
+        add_worktree(repo, "devrc-alpha", "feat/alpha", docs=(IN_WORKTREE,)),
+    ]
+    paths = [f"{w}/claudedocs/{IN_WORKTREE}" for w in wts]
+
+    def _sorted_under(lc):
+        return subprocess.run(
+            ["sort"], input="".join(p + "\n" for p in paths),
+            capture_output=True, text=True, env={**os.environ, "LC_ALL": lc},
+        ).stdout
+
+    assert _sorted_under("C") != _sorted_under(forced), (
+        f"`sort` orders {paths} the same under C and under {forced}, so this "
+        "test would pass whether or not the collation is pinned. Either the "
+        "fixture stopped inverting, or — far more likely — this is a GATE "
+        "ENVIRONMENT regression: flake.nix must export LOCALE_ARCHIVE in BOTH "
+        "the devShell and checks.pytests, or the tier has only the C locale."
+    )
+
+    tok = repo / "claudedocs" / IN_WORKTREE
+    gaps = gap_lines(run_resume(
+        repo, stub_bin, str(tok), cwd=repo,
+        extra_env={"LC_ALL": forced, "LANG": forced},
+    ))
+    assert len(gaps) == 1, gaps
+    assert gaps[0] == GAP_LEAD_AMBIGUOUS.format(
+        tok=tok, base=IN_WORKTREE, n=2, paths=", ".join(sorted(paths)),
+    ) + GAP_REST_NONE, gaps[0]
+
+
+def test_a_HUMAN_named_worktree_is_shown_ahead_of_EPHEMERAL_agent_checkouts(
+    tmp_path, stub_bin
+):
+    """🔴 The gap's advice is "pass the worktree's own path", so the four it
+    shows must be four a human could act on.
+
+    MEASURED 2026-09-01 on this host's real devrc clone:
+    `handoff-discord-embed-ext-rescue.md` exists in 28 worktrees, 27 of them
+    `.claude/worktrees/agent-*` and ONE human-named (`devrc-handoff-cairn`).
+
+    ⚠ WHAT THAT MEASUREMENT ACTUALLY SHOWED, since the two halves of F4
+    interact: under the AMBIENT en_US.UTF-8 the human worktree came back at
+    position 28 of 28 and was hidden inside `and 24 more`; under the `LC_ALL=C`
+    now pinned it sorts FIRST. So the real instance is already fixed by the
+    other half. This fixture therefore builds the case C order does NOT fix —
+    a human worktree whose path sorts AFTER `<repo>/.claude/…` ('z' > '/') —
+    because a sort order is not a reason to recommend a disposable checkout.
+    """
+    repo = make_repo(tmp_path, docs=(BASE_DECOY,), name="devrc")
+    agents = [
+        add_worktree(repo, f"devrc/.claude/worktrees/agent-{i}", f"feat/a{i}",
+                     docs=(IN_WORKTREE,))
+        for i in range(4)
+    ]
+    human = add_worktree(repo, "zz-human-worktree", "feat/human",
+                         docs=(IN_WORKTREE,))
+    a_paths = sorted(f"{w}/claudedocs/{IN_WORKTREE}" for w in agents)
+    h_path = f"{human}/claudedocs/{IN_WORKTREE}"
+
+    # THE FIXTURE IS DISCRIMINATING: in plain sorted order the human worktree
+    # falls outside the four shown, so a run that still shows it can only be
+    # doing so because of the preference.
+    assert h_path not in sorted(a_paths + [h_path])[:4], (a_paths, h_path)
+
+    tok = repo / "claudedocs" / IN_WORKTREE
+    gaps = gap_lines(run_resume(repo, stub_bin, str(tok), cwd=repo))
+    assert len(gaps) == 1, gaps
+    # human first, then the agent checkouts in LC_ALL=C order, then the
+    # UNCAPPED count of 5 and the `and 1 more` clause.
+    assert gaps[0] == GAP_LEAD_AMBIGUOUS.format(
+        tok=tok, base=IN_WORKTREE, n=5,
+        paths=", ".join([h_path] + a_paths[:3]) + ", and 1 more",
+    ) + GAP_REST_NONE, gaps[0]

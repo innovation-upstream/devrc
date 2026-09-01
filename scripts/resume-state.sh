@@ -258,6 +258,14 @@ REPO="" HANDOFF="" SLUG=""
 # caller passes the directory the TOKEN named, and every path returned is a
 # worktree of that same clone — the guarantee survives.
 #
+# 🔴 THAT IS A CONSTRAINT ON THE CALLER, AND THIS FUNCTION CANNOT ENFORCE IT.
+# It was violated at the SECOND call site the day it shipped: the relative
+# re-anchor passed `$root` — the cwd's repo — for ANY token, so
+# `other-repo/claudedocs/<base>` typed inside `devrc` was answered out of
+# `devrc`'s worktrees with no gap (audit of #1197, F1; measured). The
+# `$mine` gate in `embedded_md_path` is what holds it now: `$root` may be
+# passed here only for a token that names THIS tree or names no tree at all.
+#
 #   exit 0 + one path    exactly one worktree holds it
 #   exit 2 + N paths     several do; the caller must NOT pick
 #   exit 1 + nothing     none does, or $1 is not inside a git repo
@@ -280,7 +288,14 @@ worktrees_holding(){
     | sed -n 's#^worktree ##p' \
     | while IFS= read -r w; do
         [ -f "$w/claudedocs/$base" ] && printf '%s\n' "$w/claudedocs/$base"
-      done | sort -u)
+      # 🔴 `LC_ALL=C` IS THE PIN, NOT A TIDY-UP. Bare `sort` collates under the
+      # caller's locale: under `en_US.UTF-8` punctuation and case fold away, so
+      # `devrc-A/…` vs `devrc-a/…` vs `devrc.b/…` order DIFFERENTLY from
+      # codepoint order. The tests build their expected list with Python
+      # `sorted()`, which is codepoint order — i.e. C order — so an unpinned
+      # `sort` is a live impl/test divergence that the ASCII-lowercase fixtures
+      # cannot see, because they collate identically either way.
+      done | LC_ALL=C sort -u)
   n=$(printf '%s\n' "$cands" | grep -c .)
   [ "$n" -eq 0 ] && return 1
   printf '%s\n' "$cands"
@@ -373,7 +388,7 @@ worktrees_holding(){
 #                       basename, so nothing was chosen. See `worktrees_holding`.
 embedded_md_path(){
   local tok hit="" miss="" base dir noglob="" root=""
-  local amb="" ambig="" wt="" wrc=0
+  local amb="" ambig="" wt="" wrc=0 mine="" ydir=""
   # The repo of $PWD, resolved ONCE. Used only to re-anchor a RELATIVE token
   # that named a real doc from one directory up — see the clause below.
   root=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null) || root=""
@@ -420,6 +435,57 @@ embedded_md_path(){
         [ "$wrc" -eq 2 ] && amb="$wt"
         ;;
     esac
+    # 🔴 DOES THE TOKEN NAME *THIS* TREE? Everything below the `case` on `$tok`
+    # re-anchors on `$root` — the repo of `$PWD` — and `$root` is only a
+    # defensible anchor for a token that was never a claim about some OTHER
+    # tree. Two shapes qualify and nothing else does:
+    #
+    #   `claudedocs/<base>`          <Y> is empty: the token names no tree at
+    #                                all, so the cwd's is the only one it can
+    #                                mean (typed from a subdirectory).
+    #   `<…>/<root's name>/claudedocs/<base>`
+    #                                <Y>'s LAST component is this checkout's own
+    #                                directory name — #1159's kickoff-template
+    #                                shape, `<repo>/claudedocs/handoff-<x>.md`
+    #                                pasted inside `<repo>`.
+    #
+    # 🔴 MEASURED 2026-09-01 (audit of #1197, round 1) — WITHOUT THIS TEST THE
+    # WORKTREE SEARCH ABOVE IS SCOPED AND THE ONE BELOW IS NOT. In a fixture
+    # holding `devrc` (with linked worktree `devrc-topic` carrying the doc) and
+    # a sibling `other-repo` that does NOT carry it,
+    #
+    #   cd devrc && resume-state.sh "other-repo/claudedocs/handoff-only-in-worktree.md"
+    #
+    # printed `handoff: handoff-only-in-worktree.md`, `# repo: …/devrc-topic`
+    # and NO gap: a doc served out of a clone the caller did not name, silently.
+    # That is exactly the wrong-initiative harm #1164 exists to remove, and the
+    # 🔴 comments above and in `worktrees_holding` both promise it cannot
+    # happen. `other-repo` does not resolve from the cwd at all — it is a
+    # SIBLING of the repo, not a subdirectory — so "re-anchor only if <Y> is
+    # itself a checkout" does NOT catch it; the discriminator has to be the
+    # NAME, not the resolvability.
+    #
+    # ⚠ THIS NARROWS A LEGITIMATE-BUT-AMBIGUOUS CASE, DELIBERATELY. A relative
+    # token naming a SIBLING WORKTREE OF THE SAME CLONE — `devrc-topic/
+    # claudedocs/x.md` typed from `devrc` — now misses. It is the safe
+    # direction: the run prints the `!` gap naming what it could not find
+    # instead of a confident digest, and the absolute form
+    # (`/…/devrc-topic/claudedocs/x.md`) still resolves through the scoped
+    # search above. Widening it back means finding a discriminator that a
+    # FOREIGN sibling fails, which `-d` does not.
+    #
+    # ⚠ It also closes the pre-existing single-tree half of the same hole:
+    # #1159's plain `$root/claudedocs/$base` re-anchor fired for ANY <Y>, so
+    # `other-repo/claudedocs/<base>` already resolved this repo's own copy
+    # before any worktree search existed. Strictly stronger, same reason.
+    mine=""
+    case "$dir" in
+      claudedocs) mine=1 ;;
+      */claudedocs)
+        ydir=${dir%/claudedocs}
+        if [ -n "$root" ] && [ "${ydir##*/}" = "${root##*/}" ]; then mine=1; fi
+        ;;
+    esac
     # 🔴 A RELATIVE token anchored one level ABOVE the repo still names a real
     # doc — and this is not a hypothetical shape: `/handoff`'s own kickoff
     # template emits `<repo>/claudedocs/handoff-<topic>.md`, which resolves from
@@ -445,20 +511,35 @@ embedded_md_path(){
     # killed, each by a named test.
     case "$tok" in
       /*) ;;
-      *) if [ -n "$root" ] && [ -f "$root/claudedocs/$base" ]; then
+      *) if [ -n "$mine" ] && [ -n "$root" ] && [ -f "$root/claudedocs/$base" ]; then
            hit="$root/claudedocs/$base"; break
          fi
-         # …and the same worktree treatment on the same anchor. A relative token
-         # was never a claim about a specific tree — that is exactly why it may
-         # be re-anchored at all — so widening it from `$root` to `$root`'s
-         # clone changes the reach by no repos, only by worktrees. Skipped when
-         # the clause above already found the token ambiguous, so a single cause
-         # cannot report two different candidate sets.
-         if [ -z "$amb" ]; then
+         # …and the same worktree treatment on the same anchor, under the same
+         # `$mine` gate. A relative token that names THIS tree (or names no tree
+         # at all) was never a claim about a specific OTHER tree — that is
+         # exactly why it may be re-anchored — so widening it from `$root` to
+         # `$root`'s clone changes the reach by no repos, only by worktrees.
+         # Skipped when the clause above already found the token ambiguous, so a
+         # single cause cannot report two different candidate sets.
+         if [ -n "$mine" ] && [ -z "$amb" ]; then
            wt=$(worktrees_holding "$root" "$base"); wrc=$?
            [ "$wrc" -eq 0 ] && { hit="$wt"; break; }
            [ "$wrc" -eq 2 ] && amb="$wt"
          fi ;;
+    esac
+    # 🔴 A GLOB IS NOT A DOCUMENT. `set -f` above stops `claudedocs/handoff-*.md`
+    # from expanding, which is correct — but it then reaches `[ -f ]` as a
+    # LITERAL filename that can never exist, and recording it as `miss` states
+    # "the caller named a specific document" about a pattern that names a
+    # class. Since #1164 part 2 that costs the whole digest: `named_missing`
+    # suppresses the fallback chain, so the run reconciles NOTHING. The literal
+    # `claudedocs/handoff-*.md` appears twice in /resume's own SKILL.md prose,
+    # which this script's argument carries through VERBATIM. A token carrying a
+    # shell metacharacter is dropped from the miss bookkeeping instead — the
+    # run degrades to the ordinary no-match path it took before the scan
+    # existed.
+    case "$tok" in
+      *'*'*|*'?'*|*'['*) continue ;;
     esac
     # Shaped like a handoff reference, but not on disk. Remember the FIRST such
     # token: it is the caller's stated intent, and the run is about to ignore it.
@@ -621,16 +702,56 @@ resolve(){
         # from. The "and N more" clause is appended ONLY when there are more, so
         # every clause stays true of every run that reaches it; `$n_amb` is
         # always the real total, so the count never shrinks with the list.
+        #
+        # 🔴 WHICH FOUR IT SHOWS IS NOT ARBITRARY. This sentence's own advice is
+        # "pass the worktree's own path", so four paths nobody would ever pass
+        # is the least actionable list it could print. MEASURED 2026-09-01 on
+        # this host's real devrc clone: `handoff-discord-embed-ext-rescue.md`
+        # exists in 28 worktrees, 27 of them EPHEMERAL agent checkouts under
+        # `.claude/worktrees/agent-*`, and exactly ONE human-named
+        # (`devrc-handoff-cairn`) — the only candidate anyone would ever pass.
+        #
+        # ⚠ SAY WHAT THE MEASUREMENT ACTUALLY SHOWED, because the two halves of
+        # this fix interact and the obvious story is wrong. Under the AMBIENT
+        # `en_US.UTF-8` — which is what the unpinned `sort` above used to
+        # collate with — `devrc-handoff-cairn` came back at position **28 of
+        # 28** and was hidden inside `and 24 more`. Under the `LC_ALL=C` now
+        # pinned above it sorts FIRST, so that particular instance is already
+        # shown without this pass. This pass is still the structural fix: C
+        # order puts `<repo>/.claude/…` above any sibling whose name sorts after
+        # `<repo>/`, so a human worktree that happens to be named that way is
+        # hidden again, and nothing about a sort order makes a disposable
+        # checkout a better suggestion than a real one.
+        #
+        # Human-named worktrees are enumerated FIRST; within each class the
+        # `LC_ALL=C sort` order from `worktrees_holding` is preserved, so a
+        # candidate set with no agent checkouts in it produces exactly the list
+        # it did before. `$n_amb` is counted over EVERY candidate in the first
+        # pass, so the count is untouched by the reordering.
+        local pref_amb="" eph_amb=""
         while IFS= read -r cand; do
           [ -n "$cand" ] || continue
           n_amb=$((n_amb + 1))
-          if [ "$n_shown" -lt 4 ]; then
-            list_amb="${list_amb:+$list_amb, }$cand"; n_shown=$((n_shown + 1))
-          fi
+          case "$cand" in
+            */.claude/worktrees/agent-*) eph_amb="$eph_amb$cand"$'\n' ;;
+            *)                           pref_amb="$pref_amb$cand"$'\n' ;;
+          esac
         done <<<"$named_ambig"
+        while IFS= read -r cand; do
+          [ -n "$cand" ] || continue
+          [ "$n_shown" -lt 4 ] || break
+          list_amb="${list_amb:+$list_amb, }$cand"; n_shown=$((n_shown + 1))
+        done <<<"$pref_amb$eph_amb"
         [ "$n_amb" -gt "$n_shown" ] \
           && list_amb="$list_amb, and $((n_amb - n_shown)) more"
-        lead="requested handoff \"$named_missing\" — NO SUCH FILE, and $(basename "$named_missing") exists in $n_amb worktrees of that clone ($list_amb), so NONE was chosen."
+        # 🔴 "of that clone" WAS NOT TRUE OF EVERY RUN THAT REACHED HERE, which
+        # is what the rule above this block forbids. The candidates come from
+        # whichever clone the search used — `<X>`'s for an `<X>/claudedocs/…`
+        # token, the cwd's for a re-anchored relative one — and "that clone"
+        # reads as "the clone you named", which a bare `claudedocs/<base>` token
+        # never named at all. "the clone that path resolves against" is true of
+        # all three shapes and names the same thing in each.
+        lead="requested handoff \"$named_missing\" — NO SUCH FILE, and $(basename "$named_missing") exists in $n_amb worktrees of the clone that path resolves against ($list_amb), so NONE was chosen."
       elif [ -n "$named_missing" ]; then
         lead="requested handoff \"$named_missing\" — NO SUCH FILE (renamed, moved, or in another checkout?)."
       else

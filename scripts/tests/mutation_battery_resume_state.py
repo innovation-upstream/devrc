@@ -229,8 +229,13 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
      '$(basename "$named_missing") exists in $n_amb worktrees',
      '        lead="requested handoff \\"$named_missing\\" — NO SUCH FILE, and '
      '$(basename "$named_missing") exists in 1 worktrees'),
+    # ⚠ The tail moved with F2 (audit of #1197): "of that clone" had no
+    # antecedent for a bare `claudedocs/<base>` token, which names no clone at
+    # all, and the block's own rule is that every clause must be true of every
+    # run that reaches it.
     ("W8", "reword", "the ambiguity lead is reworded",
-     'exists in $n_amb worktrees of that clone ($list_amb), so NONE was chosen."',
+     'exists in $n_amb worktrees of the clone that path resolves against '
+     '($list_amb), so NONE was chosen."',
      'is ambiguous."'),
     # ---- #1164 part 2: a named-missing handoff must not fall back ----------
     ("W9", "guard hoist", "the fallback chain runs for a NAMED path again "
@@ -241,9 +246,11 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
                         "MEASURED bare-basename and civitai-slug cases",
      '    if [ -z "$named_missing" ]; then\n',
      '    if [ -z "$named_missing" ] && [ -z "$arg" ]; then\n'),
+    # ⚠ The cap moved into the SECOND pass when F4 (audit of #1197) split the
+    # enumeration into count-everything / show-the-actionable-ones.
     ("W13", "off-by-one", "the enumeration cap slides by one (5 shown, not 4)",
-     '          if [ "$n_shown" -lt 4 ]; then\n',
-     '          if [ "$n_shown" -lt 5 ]; then\n'),
+     '          [ "$n_shown" -lt 4 ] || break\n',
+     '          [ "$n_shown" -lt 5 ] || break\n'),
     ("W14", "deletion", "the capped list drops its `and N more` clause, so the "
                         "sentence silently understates what was found",
      '        [ "$n_amb" -gt "$n_shown" ] \\\n'
@@ -257,6 +264,63 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
                             "swapped",
      '        named_missing=${path%%$\'\\n\'*}; named_ambig=${path#*$\'\\n\'}; path=""; }',
      '        named_missing=${path#*$\'\\n\'}; named_ambig=${path%%$\'\\n\'*}; path=""; }'),
+    # ---- #1197 audit round 1, F1: the RELATIVE branch is scoped too ---------
+    #
+    # The absolute/`<X>/claudedocs/` branch was scoped to the named tree; the
+    # relative one re-anchored on `$root` for ANY `<Y>`, so a token naming a
+    # FOREIGN tree was served out of the standing clone's worktrees with no gap.
+    # X1/X2 are the two halves of that hole, one each; X3 widens the gate back
+    # open wholesale; X4/X5/X6 narrow it, each killing one of the two shapes
+    # that legitimately mean "this tree".
+    ("X1", "deletion", "the `$mine` gate is dropped from the relative re-anchor "
+                       "(a FOREIGN <Y> resolves THIS repo's own copy — the "
+                       "pre-#1159-era half of the hole)",
+     '      *) if [ -n "$mine" ] && [ -n "$root" ] && [ -f "$root/claudedocs/$base" ]; then',
+     '      *) if [ -n "$root" ] && [ -f "$root/claudedocs/$base" ]; then'),
+    ("X2", "deletion", "the `$mine` gate is dropped from the relative WORKTREE "
+                       "search (the measured F1 bug: a foreign relative token "
+                       "served out of the standing clone's worktrees, no gap)",
+     '         if [ -n "$mine" ] && [ -z "$amb" ]; then\n',
+     '         if [ -z "$amb" ]; then\n'),
+    ("X3", "widening", "any <Y> counts as naming this tree",
+     '        if [ -n "$root" ] && [ "${ydir##*/}" = "${root##*/}" ]; then mine=1; fi\n',
+     '        mine=1\n'),
+    ("X4", "deletion", "a bare `claudedocs/<base>` no longer names this tree",
+     '      claudedocs) mine=1 ;;\n', '      claudedocs) ;;\n'),
+    ("X5", "deletion", "the repo-name arm never fires, so the kickoff-template "
+                       "shape `<repo>/claudedocs/<base>` misses",
+     '        if [ -n "$root" ] && [ "${ydir##*/}" = "${root##*/}" ]; then mine=1; fi\n',
+     '        if false; then mine=1; fi\n'),
+    ("X6", "operand swap", "<Y> is compared to the repo's full PATH instead of "
+                           "its last component",
+     '[ "${ydir##*/}" = "${root##*/}" ]', '[ "${ydir}" = "${root}" ]'),
+    # ---- #1197 audit round 1, F5: a glob token is not a document ------------
+    ("X7", "deletion", "a glob-shaped token is recorded as a named document "
+                       "again, so `claudedocs/handoff-*.md` — a literal /resume "
+                       "passes through verbatim — reconciles NOTHING",
+     "    case \"$tok\" in\n      *'*'*|*'?'*|*'['*) continue ;;\n    esac\n",
+     "    :\n"),
+    ("X8", "widening", "the metacharacter test drops `?` and `[`, keeping only "
+                       "`*`",
+     "      *'*'*|*'?'*|*'['*) continue ;;\n",
+     "      *'*'*) continue ;;\n"),
+    ("X9", "widening", "the metacharacter test swallows EVERY token, so no "
+                       "named-missing path is ever recorded",
+     "      *'*'*|*'?'*|*'['*) continue ;;\n", "      *) continue ;;\n"),
+    # ---- #1197 audit round 1, F4: the candidate list's order ----------------
+    ("X10", "deletion", "the candidate sort is unpinned by locale again, so the "
+                        "list order follows the caller's LC_COLLATE",
+     '      done | LC_ALL=C sort -u)\n', '      done | sort -u)\n'),
+    ("X11", "deletion", "the enumeration stops preferring human-named worktrees, "
+                        "so the four shown can all be disposable agent checkouts",
+     '        done <<<"$pref_amb$eph_amb"\n', '        done <<<"$named_ambig"\n'),
+    ("X12", "branch inversion", "the classification is inverted: ephemeral agent "
+                                "checkouts are shown FIRST",
+     '        done <<<"$pref_amb$eph_amb"\n', '        done <<<"$eph_amb$pref_amb"\n'),
+    ("X13", "deletion", "the total is never counted in the classifying pass, so "
+                        "the sentence reports 0 worktrees while listing four",
+     '          n_amb=$((n_amb + 1))\n          case "$cand" in\n',
+     '          case "$cand" in\n'),
 ]
 
 
