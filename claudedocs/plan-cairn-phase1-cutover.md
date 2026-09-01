@@ -140,12 +140,23 @@ So there are two classes, and conflating them would make the check a permanently
 
 ### What is actually there
 
-Measured over the union (195 entries), using the resolver's own `normalize_ref`:
+Measured over the union (195 entries), using the resolver's own `normalize_ref` **and its
+own `split_kind`**:
 
 | | count | where they come from |
 |---|---|---|
 | LIVE | **3** | 1 **introduced by the merge**; 2 pre-existing on one host and newly *served* |
 | LATENT | **4** | 2 pre-existing; **2 introduced by the merge** |
+
+⚠ **An earlier count of these same numbers was a FLOOR, not a count**, and the correction is
+worth keeping. The checker first split `<slug>.<kind>.md` with a hand-rolled
+`stem.split(".")` instead of importing `split_kind`, which registered only kind-less files
+under their slug. But `resolve_ref_tiered` matches a bare ref against `e.slug` with **no
+kind constraint**, so `svc` reaches `svc.md` *and* `svc.process.md` and raises — a live
+ambiguity making both entries unwritable, and the checker returned nothing for it.
+Re-measured after importing the resolver's own splitter: the union happens to hold no such
+pair, so the table above is unchanged — but it is now a count rather than a lower bound, and
+the difference was invisible until the splitter was shared.
 
 - **The introduced LIVE one** is an alias claimed by an infra-scope entry on one host and by
   a differently-named infra-scope entry on the other. It exists on neither host today and
@@ -279,17 +290,41 @@ the cutover, criterion 8 reduces to a verification rather than a second push.
 
 | phase | what it changes | rollback |
 |---|---|---|
-| P0 preconditions | nothing | — |
+| P0 preconditions | **a run directory (0700) holding a full copy of the store, and one non-mutating POST** — see below | delete the run directory |
 | P1 plan | writes only into the run directory | delete the run directory |
 | P2 collisions | nothing | — |
 | P3 push | adds and overwrites entries on the pod | `cairn-cutover.py --rollback-push <run-dir> --apply` re-PUTs the pre-push bytes saved for every entry the push was about to overwrite. **Partial by construction**: an ADD has no pre-image and the API has no delete verb. |
 | P4 verify | nothing | — |
-| P5 freeze | `chmod 0444` on entry files | `cairn-cutover.py --unfreeze --apply` |
+| P5 freeze | records every entry's mode, then `chmod 0444` | `cairn-cutover.py --unfreeze --apply` restores **the recorded modes**, not a normalised 0644 |
 | protocol change (§8 step 7) | a skill body | revert the commit, `ship.sh` |
 
+⚠ **"A dry run changes nothing" is not literally true, and the two exceptions are worth
+knowing.** P0 runs on every non-`--freeze` invocation, including a dry run, and it (a)
+creates `~/.local/share/cairn-cutover/runs/<ts>/cache/` — **mode 0700, and holding a full
+plaintext copy of the client-confidential store** — which accumulates one per run with no
+cleanup, and (b) sends one `POST` to the live pod. That POST cannot write anything (§9), but
+it is metered and it lands in the audit log. Nothing on either host's store, and nothing
+already on the pod, is modified.
+
+🔴 **The backup precondition gates the CUTOVER, not every mode of this script.** It lives in
+the P0 block, which `--freeze`, `--unfreeze`, `--rollback-push` and `--manifest` all skip.
+That is right for three of them — `--manifest` reads, and the two rollbacks are what you
+reach for *after* something went wrong. It is a real gap for **`--freeze --apply`**, which
+chmods every entry file in the store with no backup check, no store comparison and no
+acceptance run. It is reversible (`--unfreeze --apply`, from the mode ledger the freeze
+writes) and it is a documented single-phase escape hatch — but do not read §9's table as
+covering it.
+
 Beneath all of it: the daily backup CronJob (homelab-infra#551, 03:45 UTC, 90-day ILM,
-credential with no `s3:DeleteObject`). The script **refuses to run** without a recent
-successful one — see §9.
+credential with no `s3:DeleteObject`).
+
+⚠ **`--unfreeze` REQUIRES the mode ledger and refuses without it.** `chmod 0444` destroys
+the originals, so a restore with nothing to restore *to* can only invent a mode — and
+inventing 0644 for an entry that was 0600 is a permission **widening** on
+client-confidential content, performed by the recovery path and called a rollback. The
+freeze therefore writes `<run-dir>/.cairn-cutover-modes.json` (0600) before it changes
+anything, and an entry created *after* the freeze — possible, since scope directories stay
+writable — is reported and **left alone**, never guessed at.
 
 ⚠ **The rollback for a failed FREEZE is automatic and is not optional.** If the freeze is
 applied and any entry file still accepts a write, the script restores every mode bit to
@@ -371,17 +406,43 @@ ssh zach@10.42.0.100 "python3 ~/workspace/devrc/scripts/cairn-cutover.py \
 
 # 8. VERIFY THE WHOLE THING from a fresh session, on BOTH hosts:
 cairn sync && cairn recall --scope <a scope> | head -5
-python3 $D/scripts/cairn-cutover.py            # must print P1 … NEEDS_MERGE 0 and
-                                               # P5 "already applied", rc 0
+python3 $D/scripts/cairn-cutover.py \
+  --peer-manifest ~/.local/share/cairn-cutover/laptop-manifest.json
+#    expect rc 0 and, in the P1 line, NEEDS_MERGE 0 with an EMPTY delta:
+#      "P1 plan over <n> local entries: {'ADD': 0, 'SAME': <n>, 'SUPERSEDES': 0,
+#       'MERGED': 0, 'NEEDS_MERGE': 0}"
+#      "DRY RUN — 0 entr(ies) would be pushed …"
+#    🔴 A DRY RUN DOES NOT REACH P5 — it returns at the end of P3, by design, so
+#    it prints no P5 line at all. An earlier version of this step said to expect
+#    `P5 "already applied"`, which no dry run can emit; the obvious "fix" is to
+#    add --apply, which re-enters the push path. Check the freeze separately,
+#    read-only:
+python3 $D/scripts/cairn-cutover.py --freeze   # dry run of phase 5 ALONE
+#    expect: "P5 every entry file already refuses a write — the freeze is
+#             already applied. This is the idempotent re-run.", rc 0
 ```
 
 **Rollback, if step 5 or 6 goes wrong:**
 
 ```bash
-python3 $D/scripts/cairn-cutover.py --unfreeze --apply          # local disk writable again
+# restore each entry to the mode the freeze RECORDED (not a normalised 0644):
+python3 $D/scripts/cairn-cutover.py --unfreeze --apply
+#   it uses the newest ~/.local/share/cairn-cutover/runs/*/.cairn-cutover-modes.json;
+#   pass --mode-ledger <path> to pick one. With NO ledger it REFUSES rather than
+#   inventing a mode — that refusal is correct, not an obstacle.
+
+# re-PUT the served bytes of every entry the push overwrote:
 python3 $D/scripts/cairn-cutover.py --rollback-push \
-    ~/.local/share/cairn-cutover/runs/<timestamp> --apply       # re-PUT the overwritten bytes
+    ~/.local/share/cairn-cutover/runs/<timestamp> --apply
+#   PARTIAL BY CONSTRUCTION: an ADD has no pre-image and the API has no delete
+#   verb, so this undoes overwrites only. It derives a fresh If-Match, so it
+#   REFUSES rather than clobbering a third party's later write.
 ```
+
+⚠ **What the acceptance check does NOT cover.** `comm -23` compares **this host** against
+the served copy. An entry only the *other* host holds is not checked for strandedness by a
+run on this one — which is why step 6 runs the whole script on the laptop too, and why the
+peer manifest is worth producing even though the plan could proceed without it.
 
 ## 9. The instruments, and how each was validated
 
@@ -394,7 +455,17 @@ answer. A green from an unvalidated instrument is a claim about the instrument.
 | the backup precondition | absent CronJob, absent `kubectl`, unparseable JSON, unparseable timestamp, and a `lastSuccessfulTime` that is **absent** → all refuse with their own sentence | a fresh timestamp passes and prints the measured age beside the ceiling; the boundary is measured from **both** sides (35.5 h passes, 36.5 h refuses) |
 | the write-route probe | a `405 read-only` server → reported as an **operator** problem | a `400 bad-request` server → reported as deployed. The probe body is `{}`, refused by the server's validator *before* any ref is resolved, so it cannot write |
 | the freeze | `probe_writable` returns `writable` at 0644 and `refused` at 0444, on the same file, twice | a partially-applied freeze (one file left writable) exits 16 **and** restores every mode bit |
-| the mutation sweep | baseline green (67) before any mutant is scored; a known-fatal mutant is killed | 16/16 mutants killed, each by the **named** test; originals restored and re-verified green |
+| the mutation sweep | baseline green before any mutant is scored; a known-fatal mutant is killed | **28/28** killed, each by the **named** test; originals restored and re-verified green |
+
+⚠ **The sweep took five rounds, and three of them found a defect in the sweep or in the
+guards rather than in the code.** Recorded because the pattern is the norm here, not bad
+luck: round 1 found two guards that could not be reached (one unreachable behind an earlier
+return — labelled, not counted; one predicate inseparable from its neighbour — **deleted**);
+round 3 found the sweep's own parser matching `0 failed for another reason` out of the
+script's stderr instead of pytest's summary line, scoring a killed mutant as SURVIVED; round
+4 found two guards whose tests pinned membership rather than behaviour (a status table row
+could point at the wrong exit code, and `main` could discard the probe's own code, both
+invisibly). Only round 5 returned clean, which is what ended it.
 
 🔴 **The backup precondition refuses on every way of NOT getting an answer**, not only on a
 stale answer. devrc PR #1132 exists because fifteen places in this repo asserted this

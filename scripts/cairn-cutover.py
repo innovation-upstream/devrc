@@ -43,14 +43,25 @@ destructive operation into an idempotent one instead of relying on a restore.
 
 PHASES AND THEIR ROLLBACKS
 --------------------------
-  P0  preconditions            — read-only; nothing to roll back
+  P0  preconditions            — creates a 0700 run dir holding a full copy of the
+                                 store, and sends ONE non-mutating POST (see
+                                 `write_route_deployed`). Nothing on either store
+                                 is modified. Roll back by deleting the run dir.
   P1  plan the delta           — read-only; writes only into the run directory
   P2  ref-collision check      — read-only
   P3  push the delta           — rollback: `--rollback-push <run-dir>` re-PUTs the
                                  pre-push bytes this script saved for every entry
                                  it was about to overwrite
   P4  acceptance + byte check  — read-only
-  P5  freeze local disk        — rollback: `--unfreeze`
+  P5  freeze local disk        — records every mode, then chmods. Rollback:
+                                 `--unfreeze`, which RESTORES the recorded modes
+                                 and refuses without the ledger.
+
+⚠ THE BACKUP PRECONDITION GATES THE CUTOVER, NOT EVERY MODE. It lives in the P0
+block, which `--freeze`, `--unfreeze`, `--rollback-push` and `--manifest` skip.
+Right for the last three; a real gap for `--freeze --apply`, which chmods the
+whole store on its own. It is reversible and single-purpose, but do not read the
+precondition as covering it.
 The skill/protocol half of the cutover (routing `subsystem-index` writes through
 `cairn append`) is a DOCUMENT change and is rolled back by reverting its commit;
 this script neither applies nor reverts it, and says so rather than implying it
@@ -108,12 +119,24 @@ RC_USAGE = 2
 RC_ROOT = 9                 # running as root makes the EACCES evidence vacuous
 RC_BACKUP = 10              # no recent SUCCESSFUL backup, or it could not be measured
 RC_UNREACHABLE = 11         # the store could not be read
+# 12 — THE 405 ARM AND NOTHING ELSE. Every other falsy result of the probe is
+# RC_COULD_NOT_MEASURE. This used to answer all of them, so an unreachable pod
+# during P0 was reported as "the running image is read-only" and sent the
+# operator to redeploy the store over a network blip.
 RC_NO_WRITE_ROUTE = 12      # the RUNNING image has no write path (405 read-only)
 RC_NO_STORE = 13            # the local store is missing or holds no scopes
 RC_UNRESOLVED_DIVERGENCE = 14   # two copies disagree and no merged file resolves it
 RC_REF_COLLISION = 15       # a ref would resolve to two entries in the union
 RC_FREEZE_INEFFECTIVE = 16  # the freeze was applied and a write STILL succeeded
-RC_ACCEPTANCE = 17          # `comm -23` did not print zero lines
+# 17 — THE PUSH/VERIFY FAMILY. Deliberately one code with a stated scope rather
+# than a code per site: it means "the entries this host holds are not, or cannot
+# be shown to be, on the pod, and NOTHING WAS FROZEN". Three sites reach it —
+# `seed.sh` exiting non-zero, `comm -23` printing lines, and a failed
+# `--rollback-push` restore — and all three leave the operator in the same place
+# with the same next step (read the verdict lines above, re-run). The ledger used
+# to describe only the `comm -23` site, which is the defect: a code's comment
+# must cover every site that returns it or the comment is the narrower claim.
+RC_ACCEPTANCE = 17
 RC_COULD_NOT_MEASURE = 18   # an instrument did not answer; never folded into a pass
 
 # 🔴 THE DISCRIMINATOR THIS WHOLE MERGE RULE TURNS ON. `server.render_bullet`
@@ -140,7 +163,7 @@ ATTRIBUTION = re.compile(
 # reader that does not exist — it would miss a collision the write route hits,
 # and invent one it does not. There is no version of this worth having twice.
 sys.path.insert(0, str(HERE / "lib"))
-from subsystem_resolver import normalize_ref  # noqa: E402
+from subsystem_resolver import normalize_ref, split_kind  # noqa: E402
 
 
 # =============================================================================
@@ -268,7 +291,7 @@ def backup_precondition(
 
 def write_route_deployed(
     *, url: str, token: str, scope: str, timeout: int = 20
-) -> tuple[bool, str]:
+) -> tuple[bool, str | None, str]:
     """Does the RUNNING image carry the write path? `(ok, sentence)`.
 
     🔴 THE PROBE IS A DELIBERATELY MALFORMED BODY, AND THAT IS WHAT MAKES IT
@@ -287,43 +310,56 @@ def write_route_deployed(
     ⚠ 400 IS THE PASS HERE. That inversion is stated because it reads wrong at a
     glance and a future reader "fixing" it to `== 200` would make the check
     unsatisfiable — the same shape as a guard that can never fire.
+
+    🔴 RETURNS `(ok, rc_on_failure, sentence)` — THREE STATES, NOT TWO. Every
+    falsy result used to be answered by the caller with `RC_NO_WRITE_ROUTE`,
+    which is documented as "the RUNNING image has no write path (405
+    read-only)". So an UNREACHABLE pod during P0 was reported as "the image is
+    read-only", sending the operator to redeploy the store over a network blip.
+    Only the 405 arm means that; everything else is `RC_COULD_NOT_MEASURE`,
+    which exists and was going unused.
     """
     target = f"{url.rstrip('/')}/api/v1/entry/{scope}/__cutover_probe__/bullets"
     req = urllib.request.Request(target, data=b"{}", method="POST")
-    req.add_header("Authorization", f"Bearer {token}")
-    # See `cairn._apply_standard_headers`: urllib's default UA is 403'd by the edge.
-    req.add_header("User-Agent", "subsystem-store-client/1")
+    # 🔴 THE CLI'S OWN HELPER, NOT A FOURTH COPY. This hand-rolled the two
+    # headers, in the same change whose `_apply_standard_headers` docstring
+    # argues that a rule at three sites regenerates the same bug at N-1 of them.
+    # A drifted copy here would be 403'd by the edge and reported as
+    # "the image is read-only" — an operator sent to redeploy over a header.
+    _cairn()._apply_standard_headers(req, token)
     req.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return False, (
-                f"the probe was ANSWERED {resp.status}, and the only expected answers "
-                f"are 400 (route present) or 405 (route absent). Treating this as "
-                f"UNMEASURED rather than guessing."
+            return False, RC_COULD_NOT_MEASURE, (
+                f"COULD NOT MEASURE the write route: the probe was ANSWERED "
+                f"{resp.status}, and the only expected answers are 400 (route "
+                f"present) or 405 (route absent). Not guessing."
             )
     except urllib.error.HTTPError as exc:
         status = exc.headers.get("X-Store-Status", "") if exc.headers else ""
         if exc.code == 400:
-            return True, (
+            return True, None, (
                 f"the write route IS deployed — the malformed-body probe was refused "
                 f"400 [{status or 'bad-request'}], which only a server that DISPATCHED "
                 f"the POST can answer"
             )
         if exc.code == 405:
-            return False, (
+            return False, RC_NO_WRITE_ROUTE, (
                 f"the RUNNING image is READ-ONLY — POST answered 405 [{status}]. This "
                 f"is an operator problem, not a caller problem: deploy an image "
                 f"carrying the write path before cutting over, or every append after "
                 f"the freeze fails with nowhere to land."
             )
-        return False, (
+        return False, RC_COULD_NOT_MEASURE, (
             f"COULD NOT MEASURE the write route: the probe answered {exc.code} "
             f"[{status}]. 401 means the credential; 403 means the edge."
         )
     except urllib.error.URLError as exc:
-        return False, f"COULD NOT MEASURE the write route: {url} unreachable: {exc.reason}"
+        return False, RC_COULD_NOT_MEASURE, (
+            f"COULD NOT MEASURE the write route: {url} unreachable: {exc.reason}")
     except OSError as exc:
-        return False, f"COULD NOT MEASURE the write route: {url} unreachable: {exc}"
+        return False, RC_COULD_NOT_MEASURE, (
+            f"COULD NOT MEASURE the write route: {url} unreachable: {exc}")
 
 
 # =============================================================================
@@ -464,17 +500,28 @@ def plan_delta(
     for rel, facts in sorted(local.items()):
         src = store_root / rel
         override = (merged_dir / rel) if merged_dir else None
-        if rel not in pod:
-            plan.items.append(Item(rel, ADD, "not present in the served copy", src))
-            continue
-        if pod[rel].sha256 == facts.sha256:
-            plan.items.append(Item(rel, SAME, "byte-identical to the served copy", src))
-            continue
+
+        # 🔴 THE HAND-AUTHORED RESOLUTION IS CONSULTED FIRST, BEFORE EVERY OTHER
+        # CLAUSE. It used to sit third, below the ADD and SAME returns, which
+        # made it UNREACHABLE for any entry the pod does not hold — so an
+        # operator who had written a merge for a host-only entry watched it be
+        # silently ignored in favour of the local copy. A human decision must
+        # not be overridden by a classifier; if it exists, it wins.
         if override is not None and override.is_file():
             plan.items.append(
                 Item(rel, MERGED, f"resolved by hand at {override}", override)
             )
             continue
+
+        # 🔴 THE PEER CHECK IS SECOND, AND IT USED TO BE FIFTH — BELOW `ADD`.
+        # That ordering made merge rule 4 ("host vs host divergent -> ALWAYS a
+        # hand merge, never last-write-wins") FALSE for every entry the pod does
+        # not yet hold, which is precisely the population this migration is
+        # about: the host-exclusive scopes reach the pod for the first time here,
+        # so `rel not in pod` is true for all of them and the ADD return fired
+        # first. The result was first-host-to-run-wins, silently, with no
+        # operator decision — the exact failure the rule is written to forbid,
+        # committed by the code that states it.
         if peer is not None and rel in peer and peer[rel].sha256 != facts.sha256:
             plan.items.append(Item(
                 rel, NEEDS_MERGE,
@@ -484,6 +531,13 @@ def plan_delta(
                 src,
             ))
             continue
+
+        if rel not in pod:
+            plan.items.append(Item(rel, ADD, "not present in the served copy", src))
+            continue
+        if pod[rel].sha256 == facts.sha256:
+            plan.items.append(Item(rel, SAME, "byte-identical to the served copy", src))
+            continue
         pod_only = [b for b in pod[rel].bullets if b not in facts.bullets]
         attributed = [b for b in pod_only if ATTRIBUTION.search(b)]
         if attributed:
@@ -492,6 +546,35 @@ def plan_delta(
                 f"the served copy holds {len(attributed)} API-appended bullet(s) this "
                 f"host does not — that content exists nowhere else and a push would "
                 f"overwrite it. Author a resolution at <merged>/{rel}.",
+                src,
+            ))
+            continue
+        # 🔴 A DIVERGENCE WITH **NO** POD-ONLY BULLETS IS UNRECOGNISED, NOT
+        # SUPERSEDED. The bytes differ and the bullet lists do not, so whatever
+        # moved is OUTSIDE the region this rule can see — front matter, `## What
+        # it is`, `## Pointers`, or a bullet's continuation lines. The attribution
+        # scan says nothing about any of them, so classifying it SUPERSEDES
+        # printed "the served copy holds 0 bullet line(s) this host lacks and
+        # NONE is API-attributed" as the JUSTIFICATION FOR OVERWRITING IT — a
+        # vacuous truth offered as evidence from a scan that examined nothing.
+        #
+        # 🔴 AND THE WRITER THAT PRODUCES EXACTLY THIS SHAPE IS `cairn put`,
+        # WHICH THIS SAME CHANGE ADDS. Its stated reasons to exist are updating
+        # `## Pointers` and rewriting an `OPEN:` marker — both outside the bullet
+        # set, both invisible here. So rule 3's premise ("seed.sh and the API are
+        # the only writers, and the API's changes are attributed") is not broken
+        # by some hypothetical third route; it is broken by this file's sibling.
+        # NEEDS_MERGE is the fail-safe direction this module already declares.
+        if not pod_only:
+            plan.items.append(Item(
+                rel, NEEDS_MERGE,
+                "divergent, but the served copy holds NO bullet line this host "
+                "lacks — so whatever differs is outside the region the "
+                "attribution rule can see (front matter, `## What it is`, "
+                "`## Pointers`, or a bullet's continuation lines). A whole-file "
+                "`cairn put` produces exactly this shape. Unrecognised, therefore "
+                f"refused rather than overwritten. Diff them and resolve at "
+                f"<merged>/{rel}.",
                 src,
             ))
             continue
@@ -544,30 +627,51 @@ def ref_collisions(union: dict[str, EntryFacts]) -> list[Collision]:
     per_scope: dict[str, list[tuple[str, str | None, set[str], str]]] = {}
     for rel, facts in union.items():
         scope, filename = rel.split("/", 1)
-        stem = filename[:-3]
-        parts = stem.split(".")
-        slug, kind = (parts[0], parts[1]) if len(parts) > 1 else (stem, None)
+        stem = filename[:-3] if filename.endswith(".md") else filename
+        # 🔴 THE RESOLVER'S OWN `split_kind`, IMPORTED. The first version was
+        # `parts = stem.split("."); slug, kind = (parts[0], parts[1]) if …` — a
+        # SECOND SPELLING, inside a function whose comment insists a collision
+        # check must never model a different reader than the resolver. It was
+        # wrong in both directions: `split_kind` treats a trailing dot-segment as
+        # a kind ONLY if it is in `KINDS`, so `foo.notes.md` has slug
+        # `foo.notes` here and slug `foo` there (a FALSE collision, the
+        # permanently-red-gate direction), while `a.b.c.md` silently discarded
+        # `c`. See `test_a_KIND_QUALIFIED_file_collides_with_its_bare_sibling`
+        # for the case it MISSED, which is the one that matters.
+        slug, kind = split_kind(normalize_ref(stem))
         per_scope.setdefault(scope, []).append(
-            (normalize_ref(slug), kind, {normalize_ref(a) for a in facts.aliases}, filename)
+            (slug, kind, {normalize_ref(a) for a in facts.aliases}, filename)
         )
     found: list[Collision] = []
     for scope, entries in sorted(per_scope.items()):
-        slugs: dict[str, set[str]] = {}
+        # 🔴 WHAT A FILENAME-TIER REF ACTUALLY REACHES — and the bare-slug row is
+        # the whole fix. `resolve_ref_tiered` matches a ref with NO kind against
+        # `e.slug` alone, **with no kind constraint**, so `svc` hits `svc.md` AND
+        # `svc.process.md` and raises `AmbiguousRefError`. Registering only
+        # kind-less files (the first version) made that pair invisible: measured,
+        # the resolver raised on 2 candidates while this returned `[]` — the
+        # exact condition P2 exists to detect, missed. `repo-cos.process` is the
+        # resolver docstring's own worked example, so the shape is in live use.
+        filename_refs: dict[str, set[str]] = {}
         aliases: dict[str, set[str]] = {}
         for slug, kind, alias_set, filename in entries:
-            if kind is None:
-                slugs.setdefault(slug, set()).add(filename)
+            filename_refs.setdefault(slug, set()).add(filename)
+            if kind is not None:
+                # A kind-QUALIFIED ref matches only that (slug, kind) pair.
+                filename_refs.setdefault(f"{slug}.{kind}", set()).add(filename)
             for alias in alias_set:
                 aliases.setdefault(alias, set()).add(filename)
-        for slug, files in sorted(slugs.items()):
+        for ref, files in sorted(filename_refs.items()):
             if len(files) > 1:
-                found.append(Collision("FILENAME", scope, slug, tuple(sorted(files))))
+                found.append(Collision("FILENAME", scope, ref, tuple(sorted(files))))
         for alias, files in sorted(aliases.items()):
-            if alias in slugs:
-                if files != slugs[alias]:
+            # Shadowed by ANY filename-tier ref, bare or qualified — the alias
+            # tier is reached only when tier 1 returns ZERO hits.
+            if alias in filename_refs:
+                if files != filename_refs[alias]:
                     found.append(Collision(
                         "ALIAS-shadowed", scope, alias, tuple(sorted(files)),
-                        tuple(sorted(slugs[alias])),
+                        tuple(sorted(filename_refs[alias])),
                     ))
             elif len(files) > 1:
                 found.append(Collision("ALIAS", scope, alias, tuple(sorted(files))))
@@ -641,6 +745,48 @@ def survey(store: Path) -> dict[str, int]:
     return tally
 
 
+MODE_LEDGER = ".cairn-cutover-modes.json"
+
+
+def save_modes(store: Path, dest: Path) -> int:
+    """Record every entry file's CURRENT mode, so a freeze can be undone exactly.
+
+    🔴 A RESTORE NEEDS THE ORIGINALS, AND `chmod 0444` DESTROYS THEM.
+    `--unfreeze` used to set every entry to 0644 unconditionally and call itself
+    a rollback. For a file that was 0600 — a plausible mode on a
+    client-confidential entry, and the mode this script's own staging directory
+    uses — that is a permission WIDENING presented as a restore, on exactly the
+    content the widening matters for. So the modes are written down before they
+    are changed, into the run directory beside the pre-push bytes.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    modes = {rel: (store / rel).stat().st_mode & 0o777 for rel in read_store(store)}
+    dest.write_text(json.dumps(modes, sort_keys=True, indent=1), encoding="utf-8")
+    dest.chmod(0o600)
+    return len(modes)
+
+
+def restore_modes(store: Path, ledger: Path) -> tuple[int, int]:
+    """Put every entry file back to the mode `save_modes` recorded.
+
+    Returns `(restored, unknown)`. An entry with no ledger row is NOT guessed at:
+    it is counted and reported, because inventing 0644 for it is the exact defect
+    this function replaces.
+    """
+    recorded: dict[str, int] = json.loads(ledger.read_text(encoding="utf-8"))
+    restored = unknown = 0
+    for rel in read_store(store):
+        want = recorded.get(rel)
+        if want is None:
+            unknown += 1
+            continue
+        path = store / rel
+        if (path.stat().st_mode & 0o777) != want:
+            path.chmod(want)
+        restored += 1
+    return restored, unknown
+
+
 def set_entry_mode(store: Path, mode: int) -> int:
     """chmod every ENTRY FILE. Scope directories are deliberately untouched.
 
@@ -695,7 +841,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--freeze", action="store_true",
                    help="run phase 5 alone (still needs --apply to take effect)")
     p.add_argument("--unfreeze", action="store_true",
-                   help="ROLLBACK of phase 5: restore the entry files to 0644")
+                   help="ROLLBACK of phase 5: restore each entry file to the mode "
+                        "the freeze recorded for it")
+    p.add_argument("--mode-ledger", type=Path, default=None, dest="mode_ledger",
+                   help=f"the freeze's <run-dir>/{MODE_LEDGER}; the newest one "
+                        f"under the default run root is used when omitted")
     p.add_argument("--manifest", action="store_true",
                    help="print this host's store manifest as JSON and exit — the "
                         "input --peer-manifest wants, produced on the other host")
@@ -787,6 +937,15 @@ def load_peer(path: Path | None) -> dict[str, EntryFacts] | None:
     }
 
 
+def _newest_mode_ledger(root: Path | None = None) -> Path | None:
+    """The most recent run's mode ledger, or None. Never a guess at the modes."""
+    root = root or DEFAULT_RUN_ROOT
+    if not root.is_dir():
+        return None
+    found = sorted(root.glob(f"*/{MODE_LEDGER}"))
+    return found[-1] if found else None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -811,16 +970,37 @@ def main(argv: list[str] | None = None) -> int:
     if args.unfreeze:
         before = survey(args.store)
         say(f"unfreeze: before  {before}")
-        if not args.apply:
-            say("DRY RUN — pass --apply to restore 0644. Nothing was changed.")
-            return RC_OK
-        changed = set_entry_mode(args.store, 0o644)
-        after = survey(args.store)
-        say(f"unfreeze: chmod 0644 on {changed} entry file(s); after {after}")
-        if after["examined"] and after["writable"] != after["examined"]:
+        ledger = args.mode_ledger or _newest_mode_ledger()
+        # 🔴 `is_file()`, NOT JUST `is not None`. An explicit `--mode-ledger`
+        # naming a path that does not exist reached `restore_modes` and died on
+        # an unguarded `FileNotFoundError` at exit 1 — a code outside this
+        # script's whole vocabulary, on the recovery path, where the operator is
+        # least able to interpret it.
+        if ledger is None or not ledger.is_file():
             return refuse(RC_COULD_NOT_MEASURE, (
-                f"unfreeze did not fully take: {after['writable']} of "
-                f"{after['examined']} entry file(s) are writable again."
+                f"no readable mode ledger ({ledger or 'none found'}), so there is "
+                "nothing to restore TO. The freeze "
+                "records every entry file's original mode before changing it; "
+                "without that file an 'unfreeze' can only invent one, and inventing "
+                "0644 for an entry that was 0600 WIDENS permissions on "
+                "client-confidential content while calling itself a rollback. Pass "
+                f"--mode-ledger <run-dir>/{MODE_LEDGER} explicitly, or chmod by hand "
+                "having decided what the modes should be."
+            ))
+        say(f"unfreeze: restoring from {ledger}")
+        if not args.apply:
+            say("DRY RUN — pass --apply to restore the recorded modes. "
+                "Nothing was changed.")
+            return RC_OK
+        restored, unknown = restore_modes(args.store, ledger)
+        after = survey(args.store)
+        say(f"unfreeze: restored {restored} entry file(s), {unknown} not in the "
+            f"ledger and therefore LEFT ALONE; after {after}")
+        if unknown:
+            return refuse(RC_COULD_NOT_MEASURE, (
+                f"{unknown} entry file(s) have no recorded mode — they were created "
+                f"after the freeze. They are untouched, not guessed at. Decide their "
+                f"modes yourself."
             ))
         return RC_OK
 
@@ -830,6 +1010,7 @@ def main(argv: list[str] | None = None) -> int:
     stage_dir = run_dir / "stage"
     cache_dir = run_dir / "cache"
     prepush_dir = run_dir / "pre-push"
+    ledger_path = run_dir / MODE_LEDGER
 
     # ---- P0 preconditions -------------------------------------------------
     if not args.freeze:
@@ -851,8 +1032,19 @@ def main(argv: list[str] | None = None) -> int:
         if not ok:
             return refuse(RC_BACKUP, sentence)
 
+        # 🔴 0700, ON EVERY LEVEL. What lands under here is a FULL PLAINTEXT COPY
+        # of a client-confidential store — the sync below writes it, and the
+        # runbook prescribes several dry runs before an apply, so these
+        # accumulate. `mkdir` at the default umask leaves them 0755, i.e.
+        # world-readable, in the same change that is careful to 0600 the merged
+        # entry for exactly this reason. `mode=` on `mkdir` is masked by the
+        # umask, so the chmod is explicit rather than trusted to the flag.
+        DEFAULT_RUN_ROOT.mkdir(parents=True, exist_ok=True)
+        DEFAULT_RUN_ROOT.chmod(0o700)
         run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir.chmod(0o700)
         cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir.chmod(0o700)
         synced = run(
             [sys.executable, str(CAIRN), "--cache", str(cache_dir), "sync"], timeout=120
         )
@@ -874,10 +1066,14 @@ def main(argv: list[str] | None = None) -> int:
                 "the served copy holds no scope, so the write-route probe has no "
                 "scope to address. A zero here is not a pass."
             ))
-        ok, sentence = write_route_deployed(url=url, token=token, scope=probe_scope)
+        ok, probe_rc, sentence = write_route_deployed(
+            url=url, token=token, scope=probe_scope)
         say(f"P0 {sentence}")
         if not ok:
-            return refuse(RC_NO_WRITE_ROUTE, sentence)
+            # 🔴 THE PROBE'S OWN CODE, not a blanket RC_NO_WRITE_ROUTE. Only the
+            # 405 arm means "the image has no write path"; an unreachable pod
+            # answered under that code sent the operator to redeploy the store.
+            return refuse(probe_rc or RC_COULD_NOT_MEASURE, sentence)
 
         # ---- P1 the plan --------------------------------------------------
         peer = load_peer(args.peer_manifest)
@@ -999,6 +1195,15 @@ def main(argv: list[str] | None = None) -> int:
             f"file(s) and then require all {before['examined']} to refuse a write.")
         return RC_OK
 
+    # 🔴 RECORD THE MODES BEFORE DESTROYING THEM. `chmod 0444` is not reversible
+    # from the result — every entry ends up looking the same, so an "unfreeze"
+    # with no ledger can only invent a mode, and inventing 0644 for a file that
+    # was 0600 is a permission WIDENING on client-confidential content dressed as
+    # a rollback. `--unfreeze` refuses outright without this file.
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    n_recorded = save_modes(args.store, ledger_path)
+    say(f"P5 recorded {n_recorded} original mode(s) to {ledger_path} — "
+        f"`--unfreeze` REQUIRES this file and refuses without it.")
     changed = set_entry_mode(args.store, 0o444)
     after = survey(args.store)
     say(f"P5 chmod 0444 on {changed} entry file(s); after {after}")
@@ -1018,13 +1223,13 @@ def main(argv: list[str] | None = None) -> int:
     # `before` one, and `test_a_FREEZE_over_an_empty_store_is_COULD_NOT_MEASURE_
     # not_success` is the test that kills its removal.
     if after["refused"] != after["examined"] or after["examined"] == 0:
-        set_entry_mode(args.store, 0o644)
+        restore_modes(args.store, ledger_path)
         return refuse(RC_FREEZE_INEFFECTIVE, (
             f"the freeze did not take: {after['refused']} of {after['examined']} "
             f"entry file(s) refused a write ({after['writable']} still writable, "
             f"{after['other']} failed for another reason). The mode bits were "
-            f"RESTORED to 0644 rather than left half-applied. A store that looks "
-            f"frozen and is not is worse than one that is plainly not."
+            f"RESTORED from {ledger_path} rather than left half-applied. A store "
+            f"that looks frozen and is not is worse than one that is plainly not."
         ))
     say(f"P5 WATCHED EACCES: all {after['examined']} entry file(s) refused an "
         f"append. The local store is now a read-through cache.")
@@ -1042,18 +1247,36 @@ def main(argv: list[str] | None = None) -> int:
     return RC_OK
 
 
+_CAIRN_MODULE = None
+
+
+def _cairn():
+    """The `cairn` CLI as a module, loaded once. It owns config and headers.
+
+    🔴 IMPORTED, NEVER REIMPLEMENTED. Both things this script needs from it —
+    the config parser and the request headers — are rules with a measured
+    incident behind them (a missing value that reads as "the store is down"; a
+    User-Agent the edge 403s). A second copy of either would be a fourth site
+    for a rule that already argues, in its own docstring, that three is too many.
+    """
+    global _CAIRN_MODULE
+    if _CAIRN_MODULE is None:
+        sys.path.insert(0, str(HERE))
+        spec = importlib.util.spec_from_loader(
+            "cairn_cli", importlib.machinery.SourceFileLoader("cairn_cli", str(CAIRN))
+        )
+        module = importlib.util.module_from_spec(spec)
+        # `sys.modules[name] = mod` BEFORE `exec_module`, or the first @dataclass
+        # raises `AttributeError: 'NoneType' has no attribute '__dict__'`.
+        sys.modules["cairn_cli"] = module
+        spec.loader.exec_module(module)
+        _CAIRN_MODULE = module
+    return _CAIRN_MODULE
+
+
 def _config() -> tuple[str, str]:
     """URL + token, read through `cairn`'s own loader — never a second parser."""
-    sys.path.insert(0, str(HERE))
-    spec = importlib.util.spec_from_loader(
-        "cairn_cli", importlib.machinery.SourceFileLoader("cairn_cli", str(CAIRN))
-    )
-    module = importlib.util.module_from_spec(spec)
-    # `sys.modules[name] = mod` BEFORE `exec_module`, or the first @dataclass
-    # raises `AttributeError: 'NoneType' has no attribute '__dict__'`.
-    sys.modules["cairn_cli"] = module
-    spec.loader.exec_module(module)
-    return module.load_config()
+    return _cairn().load_config()
 
 
 def _materialise(plan: Plan, dest: Path) -> None:

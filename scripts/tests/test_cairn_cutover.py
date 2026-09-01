@@ -186,6 +186,95 @@ class TestTheMergeRule:
                              store_root=local, merged_dir=None, peer=peer)
         assert [i.verdict for i in plan.items] == [cc.SUPERSEDES]
 
+    def test_a_HOST_vs_HOST_divergence_is_a_HAND_MERGE_even_when_the_POD_LACKS_IT(
+        self, cc, tmp_path
+    ):
+        """🔴 THE ORDERING BUG RULE 4 WAS WRITTEN TO FORBID, COMMITTED BY THE CODE
+        THAT STATES IT.
+
+        The `ADD` clause used to run BEFORE the peer check, so for any entry the
+        pod does not yet hold — which is EVERY entry in a host-exclusive scope,
+        i.e. the whole population this migration is about — a host-vs-host
+        disagreement was classified `ADD` and pushed. First-host-to-run-wins,
+        silently, with no operator decision: exactly the last-write-wins the rule
+        forbids "whatever the mtimes say".
+
+        This fixture differs from the earlier host-vs-host case in ONE respect —
+        the pod does not hold the entry — which is the axis the bug lived on.
+        """
+        local = _tree(tmp_path / "l", {"sc/only-on-hosts.md": _entry(
+            "sc", "only-on-hosts", "- 2026-03-04: this host's account.")})
+        peer = {"sc/only-on-hosts.md": cc.EntryFacts(
+            "sc/only-on-hosts.md", "d" * 64, (), ())}
+        plan = cc.plan_delta(cc.read_store(local), {},   # pod holds NOTHING
+                             store_root=local, merged_dir=None, peer=peer)
+        assert [i.verdict for i in plan.items] == [cc.NEEDS_MERGE], (
+            "a host-vs-host divergence was pushed as an ADD because the pod "
+            "happened not to hold it"
+        )
+        assert plan.shippable == []
+
+    def test_a_hand_authored_MERGE_wins_even_when_the_POD_LACKS_THE_ENTRY(
+        self, cc, tmp_path
+    ):
+        """The same ordering defect, one clause over: `--merged` was consulted
+        BELOW the `ADD` return, so an operator's hand-written resolution for a
+        host-only entry was silently discarded in favour of the local copy. A
+        human decision must not be overridden by a classifier."""
+        local = _tree(tmp_path / "l", {"sc/only-on-hosts.md": _entry(
+            "sc", "only-on-hosts", "- 2026-03-04: the local copy.")})
+        merged = _tree(tmp_path / "m", {"sc/only-on-hosts.md": _entry(
+            "sc", "only-on-hosts", "- 2026-03-04: the RESOLVED copy.")})
+        plan = cc.plan_delta(cc.read_store(local), {},
+                             store_root=local, merged_dir=merged)
+        assert [i.verdict for i in plan.items] == [cc.MERGED]
+        assert plan.items[0].source == merged / "sc/only-on-hosts.md"
+        assert "RESOLVED copy" in plan.items[0].source.read_text()
+
+    def test_a_divergence_with_NO_pod_only_bullets_is_UNRECOGNISED_not_superseded(
+        self, cc, tmp_path
+    ):
+        """🔴 THE VACUOUS JUSTIFICATION. The bytes differ and the bullet lists do
+        not, so whatever moved is outside the region the attribution rule can
+        see. Classifying it SUPERSEDES printed "the served copy holds 0 bullet
+        line(s) this host lacks and NONE is API-attributed" as the reason to
+        OVERWRITE it — a vacuous truth offered as evidence from a scan that
+        examined nothing.
+
+        🔴 AND `cairn put` — added by the same change — produces exactly this
+        shape: its stated reasons to exist are updating `## Pointers` and
+        rewriting an `OPEN:` marker, both outside the bullet set. So rule 3's
+        premise is broken by this file's own sibling, not by a hypothetical.
+
+        The fixture differs ONLY in the `## What it is` PROSE — a line that does
+        not begin `- `, so it is not in the bullet set either side, which is what
+        makes `pod_only` empty.
+
+        ⚠ MEASURED WHILE WRITING THIS: `read_store` extracts EVERY line beginning
+        `- `, so a `## Pointers` entry counts as a bullet too. That makes the
+        attribution scan a deliberate SUPERSET (fail-safe), but it also means a
+        pointers-only divergence is NOT the empty-`pod_only` case — this fixture
+        was written that way first and classified SUPERSEDES, correctly.
+        """
+        local = _tree(tmp_path / "l", {"sc/a.md": "\n".join([
+            "---", "service: a", "scope: sc", "sensitivity: internal", "---", "",
+            "## What it is", "the a, as this host describes it.", "",
+            "## Pointers", "- `sc: src/a.py`", "",
+            "## Nuance / work-history", "- 2026-01-01: one shared bullet.", "",
+        ])})
+        pod = _tree(tmp_path / "p", {"sc/a.md": "\n".join([
+            "---", "service: a", "scope: sc", "sensitivity: internal", "---", "",
+            "## What it is", "the a, rewritten through a whole-file PUT.", "",
+            "## Pointers", "- `sc: src/a.py`", "",
+            "## Nuance / work-history", "- 2026-01-01: one shared bullet.", "",
+        ])})
+        plan = cc.plan_delta(cc.read_store(local), cc.read_store(pod),
+                             store_root=local, merged_dir=None)
+        assert [i.verdict for i in plan.items] == [cc.NEEDS_MERGE], (
+            f"classified {plan.items[0].verdict} with reason: {plan.items[0].reason}"
+        )
+        assert "outside the region" in plan.items[0].reason
+
     def test_ONLY_a_hand_authored_file_clears_a_NEEDS_MERGE(self, cc, tmp_path):
         local = _tree(tmp_path / "l", {"sc/a.md": _entry("sc", "a", "- 2026-02-09: host.")})
         pod = _tree(tmp_path / "p", {"sc/a.md": _entry(
@@ -356,12 +445,85 @@ class TestRefCollisions:
             "the alias tier answered first; the LATENT classification is unsafe"
         )
 
-    def test_two_files_with_one_SLUG_is_a_FILENAME_collision(self, cc):
+    def test_one_slug_in_two_SCOPES_is_not_a_collision(self, cc):
+        """Refs resolve WITHIN a scope, so the same stem in two scopes is fine.
+
+        ⚠ RENAMED. This was called `test_two_files_with_one_SLUG_is_a_FILENAME_
+        collision` while asserting the empty list — a name that said the opposite
+        of its assertion, over the arm that had no positive coverage at all. The
+        real FILENAME collision now has its own test below.
+        """
         union = {
             "sc/dup.md": cc.EntryFacts("sc/dup.md", "1" * 64, (), ()),
             "other/dup.md": cc.EntryFacts("other/dup.md", "2" * 64, (), ()),
         }
-        # Different SCOPES — refs resolve within a scope, so this is NOT one.
+        assert cc.ref_collisions(union) == []
+
+    def test_a_KIND_QUALIFIED_file_collides_with_its_BARE_sibling(self, cc):
+        """🔴 THE COLLISION THE FIRST VERSION COULD NOT SEE — and the FILENAME
+        arm's only positive coverage.
+
+        `resolve_ref_tiered` matches a kind-less ref against `e.slug` **with no
+        kind constraint**, so `svc` hits BOTH `svc.md` and `svc.process.md` and
+        raises `AmbiguousRefError` — both entries become unwritable, which is the
+        exact condition P2 exists to detect. The first implementation registered
+        only kind-less files under their slug, so it returned `[]` for this pair
+        while the real resolver raised. `repo-cos.process` is the resolver
+        docstring's own worked example, so the shape is in live use.
+
+        The qualified ref is NOT ambiguous and must not be reported — that is the
+        second assertion, and without it a fix could pass by flagging everything.
+        """
+        union = {
+            "sc/svc.md": cc.EntryFacts("sc/svc.md", "1" * 64, (), ()),
+            "sc/svc.process.md": cc.EntryFacts("sc/svc.process.md", "2" * 64, (), ()),
+        }
+        found = cc.ref_collisions(union)
+        assert [(c.tier, c.ref, c.claimants) for c in found] == [
+            ("FILENAME", "svc", ("svc.md", "svc.process.md"))
+        ], found
+        assert found[0].live
+
+    def test_that_collision_is_the_one_the_REAL_resolver_raises_on(self, cc):
+        """The measurement behind the test above, against the resolver itself —
+        so the checker's claim is pinned to the reader's behaviour and not to my
+        reading of it."""
+        sys.path.insert(0, str(REPO / "scripts" / "lib"))
+        import subsystem_recall as rc
+        import subsystem_resolver as sr
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _tree(root, {
+                "sc/svc.md": _entry("sc", "svc", "- 2026-01-01: x."),
+                "sc/svc.process.md": _entry("sc", "svc", "- 2026-01-01: y."),
+            })
+            _store, index = rc.load_store(str(root), verb="read")
+            with pytest.raises(sr.AmbiguousRefError):
+                rc.resolve_ref_tiered("svc", index, "sc")
+            # The QUALIFIED ref is unambiguous — the control that keeps the
+            # assertion above from being "any ref in this scope raises".
+            entry, tier = rc.resolve_ref_tiered("svc.process", index, "sc")
+            assert entry is not None and tier == "filename"
+
+    def test_a_NON_KIND_dotted_stem_is_NOT_split__no_FALSE_collision(self, cc):
+        """The other direction, and the permanently-red-gate one.
+
+        `split_kind` treats a trailing dot-segment as a kind ONLY if it is in
+        `KINDS`. The hand-rolled `stem.split(".")` took `foo` out of
+        `foo.notes.md`, so `foo.md` beside `foo.notes.md` would have been
+        reported as a LIVE collision the resolver does not have — blocking a
+        cutover over a defect that does not exist.
+        """
+        import subsystem_resolver as sr
+
+        assert "notes" not in sr.KINDS, "fixture assumes `notes` is not a KIND"
+        union = {
+            "sc/foo.md": cc.EntryFacts("sc/foo.md", "1" * 64, (), ()),
+            "sc/foo.notes.md": cc.EntryFacts("sc/foo.notes.md", "2" * 64, (), ()),
+        }
         assert cc.ref_collisions(union) == []
 
     def test_alias_owner_parsing_refuses_a_malformed_spec(self, cc):
@@ -550,44 +712,85 @@ class TestWriteRouteProbe:
         input capable of being written is ever sent."""
         srv = self._serve(400, "bad-request")
         try:
-            ok, sentence = cc.write_route_deployed(
+            ok, rc, sentence = cc.write_route_deployed(
                 url=f"http://127.0.0.1:{srv.server_address[1]}", token="t", scope="sc")
         finally:
             srv.shutdown(); srv.server_close()
         assert ok, sentence
+        assert rc is None
         assert "IS deployed" in sentence
 
-    def test_a_405_is_reported_as_an_OPERATOR_problem(self, cc):
+    def test_a_405_is_the_ONLY_answer_that_means_NO_WRITE_ROUTE(self, cc):
+        """🔴 THE CODE, NOT JUST THE VERDICT. Every falsy result used to be
+        answered by the caller with RC_NO_WRITE_ROUTE, whose documented meaning
+        is "the running image has no write path" — so an unreachable pod during
+        P0 told the operator to redeploy the store. Only this arm may carry it.
+        """
         srv = self._serve(405, "read-only")
         try:
-            ok, sentence = cc.write_route_deployed(
+            ok, rc, sentence = cc.write_route_deployed(
                 url=f"http://127.0.0.1:{srv.server_address[1]}", token="t", scope="sc")
         finally:
             srv.shutdown(); srv.server_close()
         assert not ok
+        assert rc == cc.RC_NO_WRITE_ROUTE
         assert "READ-ONLY" in sentence and "operator problem" in sentence
 
     @pytest.mark.parametrize("code, status", [(401, "unauthorized"), (403, "")])
     def test_any_OTHER_answer_is_UNMEASURED_never_a_pass(self, cc, code, status):
         srv = self._serve(code, status)
         try:
-            ok, sentence = cc.write_route_deployed(
+            ok, rc, sentence = cc.write_route_deployed(
                 url=f"http://127.0.0.1:{srv.server_address[1]}", token="t", scope="sc")
         finally:
             srv.shutdown(); srv.server_close()
         assert not ok
+        assert rc == cc.RC_COULD_NOT_MEASURE, (
+            "a credential or edge refusal was reported as 'the image has no write "
+            "path', which sends the operator to redeploy the store"
+        )
         assert "COULD NOT MEASURE" in sentence
 
-    def test_an_UNREACHABLE_host_is_UNMEASURED(self, cc):
+    def test_an_UNREACHABLE_host_is_UNMEASURED_not_a_missing_write_route(self, cc):
         import socket as _socket
 
         with _socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             dead = sock.getsockname()[1]
-        ok, sentence = cc.write_route_deployed(
+        ok, rc, sentence = cc.write_route_deployed(
             url=f"http://127.0.0.1:{dead}", token="t", scope="sc")
         assert not ok
+        assert rc == cc.RC_COULD_NOT_MEASURE
         assert "COULD NOT MEASURE" in sentence
+
+    def test_the_probe_sends_the_User_Agent_the_edge_REQUIRES(self, cc):
+        """🔴 THE FOURTH SITE THAT HAND-ROLLED THIS HEADER IS NOW THE CLI'S OWN
+        HELPER, AND THIS IS WHAT PINS IT. A drifted copy would be 403'd by the
+        edge, which this probe classifies as COULD NOT MEASURE — so the symptom
+        of a wrong header is an operator being told the store is unreachable."""
+        seen = {}
+
+        class Capture(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                seen.update({k.lower(): v for k, v in self.headers.items()})
+                self.send_response(400)
+                self.send_header("x-store-status", "bad-request")
+                self.send_header("content-length", "0")
+                self.end_headers()
+
+            def log_message(self, *_a):
+                return
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Capture)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            cc.write_route_deployed(
+                url=f"http://127.0.0.1:{srv.server_address[1]}", token="tok", scope="sc")
+        finally:
+            srv.shutdown(); srv.server_close()
+        assert seen.get("user-agent") == "subsystem-store-client/1"
+        assert seen.get("authorization") == "Bearer tok"
 
     def test_the_probe_body_CANNOT_be_written_by_the_real_server(self, srv, tmp_path):
         """🔴 THE SAFETY CLAIM, EXERCISED AGAINST THE REAL VALIDATOR rather than
@@ -692,14 +895,116 @@ class TestTheScriptRefusesRatherThanProceeds:
         assert {p: p.stat().st_mode for p in root.rglob("*.md")} == before
         assert not (tmp_path / "run" / "delta").exists()
 
-    def test_UNFREEZE_is_a_real_rollback_and_is_DRY_RUN_by_default(self, cc, tmp_path):
-        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+    def test_MAIN_propagates_the_PROBES_OWN_code_not_a_blanket_no_write_route(
+        self, cc, tmp_path, monkeypatch
+    ):
+        """🔴 THE WIRING, NOT THE PROBE. `write_route_deployed` returns its own rc
+        and the unit tests above pin it — but `main` used to discard that and
+        answer every falsy result with `RC_NO_WRITE_ROUTE`, so an UNREACHABLE pod
+        during P0 told the operator "the running image is read-only" and sent
+        them to redeploy the store over a network blip. A sweep proved the unit
+        tests blind to it: replacing `probe_rc or …` with the constant SURVIVED.
+
+        So this drives `main` far enough to reach the probe, with a REAL dead
+        port behind it, and asserts the code that comes out.
+        """
+        store = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        run_dir = tmp_path / "run"
+        _tree(run_dir / "cache", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+
+        import socket as _socket
+
+        with _socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            dead = sock.getsockname()[1]
+
+        monkeypatch.setattr(cc, "backup_precondition",
+                            lambda **_kw: (True, "backup OK — stubbed"))
+        # The only `run` on the path to the probe is `cairn sync`; the cache is
+        # pre-populated above, so a no-op success is faithful.
+        monkeypatch.setattr(cc, "run", lambda *_a, **_kw: cc.Ran(0, "live", ""))
+        monkeypatch.setattr(cc, "_config", lambda: (f"http://127.0.0.1:{dead}", "tok"))
+
+        rc = cc.main(["--store", str(store), "--run-dir", str(run_dir)])
+        assert rc == cc.RC_COULD_NOT_MEASURE, (
+            f"an unreachable pod during P0 exited {rc}; RC_NO_WRITE_ROUTE (12) "
+            f"would send the operator to redeploy the store."
+        )
+
+    def test_UNFREEZE_RESTORES_the_recorded_modes_and_never_WIDENS_one(
+        self, cc, tmp_path
+    ):
+        """🔴 A ROLLBACK RESTORES; IT DOES NOT NORMALISE.
+
+        `--unfreeze` used to `chmod 0644` every entry unconditionally and call
+        itself the rollback of the freeze. For a file that was **0600** — a
+        plausible mode on a client-confidential entry, and the mode this effort's
+        own staging file uses — that is a permission WIDENING on exactly the
+        content the widening matters for, performed by the recovery path. So the
+        freeze now records the modes first and the restore reads them back.
+
+        The fixture makes the two behaviours distinguishable ON PURPOSE: one
+        entry at 0600 and one at 0644. A restore that normalises passes a
+        same-mode fixture and fails this one.
+        """
+        root = _tree(tmp_path / "s", {
+            "sc/private.md": _entry("sc", "private", "- 2026-01-01: x."),
+            "sc/ordinary.md": _entry("sc", "ordinary", "- 2026-01-01: y."),
+        })
+        (root / "sc" / "private.md").chmod(0o600)
+        (root / "sc" / "ordinary.md").chmod(0o644)
+        ledger = tmp_path / "run" / cc.MODE_LEDGER
+        assert cc.save_modes(root, ledger) == 2
+        assert ledger.stat().st_mode & 0o777 == 0o600, "the ledger itself is 0600"
+
         cc.set_entry_mode(root, 0o444)
-        assert cc.survey(root)["refused"] == 1
-        assert cc.main(["--store", str(root), "--unfreeze"]) == cc.RC_OK
-        assert cc.survey(root)["refused"] == 1, "a dry run changed the mode bits"
-        assert cc.main(["--store", str(root), "--unfreeze", "--apply"]) == cc.RC_OK
-        assert cc.survey(root)["writable"] == 1
+        assert cc.survey(root)["refused"] == 2
+
+        args = ["--store", str(root), "--unfreeze", "--mode-ledger", str(ledger)]
+        assert cc.main(args) == cc.RC_OK
+        assert cc.survey(root)["refused"] == 2, "a dry run changed the mode bits"
+
+        assert cc.main([*args, "--apply"]) == cc.RC_OK
+        assert cc.survey(root)["writable"] == 2
+        assert (root / "sc" / "private.md").stat().st_mode & 0o777 == 0o600, (
+            "the rollback WIDENED a 0600 entry — that is the defect it replaces"
+        )
+        assert (root / "sc" / "ordinary.md").stat().st_mode & 0o777 == 0o644
+
+    def test_UNFREEZE_with_NO_LEDGER_refuses_rather_than_inventing_a_mode(
+        self, cc, tmp_path
+    ):
+        """The other half: with nothing to restore TO, guessing 0644 is the very
+        widening above. Refusing is the only honest answer."""
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        (root / "sc" / "a.md").chmod(0o600)
+        cc.set_entry_mode(root, 0o444)
+        rc = cc.main([
+            "--store", str(root), "--unfreeze", "--apply",
+            "--mode-ledger", str(tmp_path / "nope" / cc.MODE_LEDGER),
+        ])
+        assert rc == cc.RC_COULD_NOT_MEASURE
+        assert cc.survey(root)["refused"] == 1, "it changed modes anyway"
+
+    def test_an_entry_created_AFTER_the_freeze_is_LEFT_ALONE_not_guessed_at(
+        self, cc, tmp_path
+    ):
+        """Scope directories stay writable, so a new entry CAN appear between the
+        freeze and the unfreeze. It has no recorded mode; inventing one is the
+        defect. It is counted, reported, and untouched."""
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        ledger = tmp_path / "run" / cc.MODE_LEDGER
+        cc.save_modes(root, ledger)
+        cc.set_entry_mode(root, 0o444)
+        newcomer = root / "sc" / "later.md"
+        newcomer.write_text(_entry("sc", "later", "- 2026-01-02: z."))
+        newcomer.chmod(0o640)
+        rc = cc.main([
+            "--store", str(root), "--unfreeze", "--apply", "--mode-ledger", str(ledger),
+        ])
+        assert rc == cc.RC_COULD_NOT_MEASURE
+        assert newcomer.stat().st_mode & 0o777 == 0o640
+        assert (root / "sc" / "a.md").stat().st_mode & 0o777 == 0o644
 
     def test_FREEZE_alone_is_dry_run_by_default_then_takes_and_is_idempotent(
         self, cc, tmp_path

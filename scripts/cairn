@@ -213,8 +213,17 @@ def _apply_standard_headers(req: "urllib.request.Request", token: str) -> None:
     RE-LEARN IT. When `fetch_snapshot` was the only caller the header was a line
     inside it; adding `append`/`put` made that line a rule with two more sites,
     and a rule at three sites is the shape `claude/RULES.md` says regenerates
-    the same bug at N-1 of them. `test_every_request_builder_sets_the_UA` pins
-    that no request leaves this file without going through here.
+    the same bug at N-1 of them.
+
+    🔴 THE GUARD IS `test_cairn_write.py::TestTheRequestItself::
+    test_no_request_builder_ANYWHERE_bypasses_this_helper` — an AST scan over
+    this file AND `cairn-cutover.py`, asserting every function that constructs a
+    `urllib.request.Request` also calls this helper. An earlier version of this
+    sentence named a test that **did not exist**, which is worse than naming
+    none: it reads as coverage and stops anyone looking. It was written while
+    the only real check was a behavioural one on the append path, so a new read
+    verb building its own request was unguarded by the very line claiming to
+    guard it.
     """
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("User-Agent", "subsystem-store-client/1")
@@ -837,7 +846,18 @@ _WRITE_STATUS_EXITS: dict[int, int] = {
     422: EXIT_WRITE_REFUSED,        # entry-shape: no `## Nuance / work-history`
     428: EXIT_WRITE_REFUSED,        # precondition required (a PUT with no If-Match)
     429: EXIT_WRITE_UNREACHABLE,    # rate limited — a retry IS the right response
+    # 🔴 500 IS A RETRY, NOT A "FIX YOUR REQUEST". `server._backstop` turns any
+    # unhandled handler exception into a 500, so it IS reachable on a write
+    # route. It was absent here and fell through to `_classify`'s "unrecognised"
+    # arm, which is EXIT_WRITE_REFUSED — telling the caller to change a
+    # byte-identical request that would very likely succeed on a retry. The
+    # fallthrough was labelled "wrong-in-the-safe-direction", and that is true
+    # for landed/not-landed and FALSE for retry/don't-retry, which is the exact
+    # distinction 6 and 7 exist to carry.
+    500: EXIT_WRITE_UNREACHABLE,
+    502: EXIT_WRITE_UNREACHABLE,    # a bad gateway is the edge, not the request
     503: EXIT_WRITE_UNREACHABLE,    # the server could not read its own store
+    504: EXIT_WRITE_UNREACHABLE,
 }
 
 
@@ -988,13 +1008,26 @@ def cmd_put(args: argparse.Namespace) -> int:
             # 🔴 NOT "served from cache". A read may degrade; deriving a
             # precondition from bytes we could not confirm is the one case where
             # the cache is worse than nothing.
+            #
+            # 🔴 AND NOT `hint`. This returned `hint if hint is not None else
+            # EXIT_WRITE_UNREACHABLE`, and `resolve_state` sets `hint` to
+            # EXIT_UNREACHABLE_NO_CACHE (3) exactly when there is NO cache —
+            # which is the FIRST run on a fresh host, i.e. the commonest way to
+            # get here. So the one code this whole file insists a write must
+            # never return was returned by a write, on its likeliest path, while
+            # four separate comments and the design doc said it could not
+            # happen. `hint` is a READ verdict — "this is what a reader should
+            # exit with" — and it has no meaning for a write. Measured before
+            # the fix: put with no cache -> 3, put with a cache -> 7, append
+            # with no cache -> 7.
             print(
                 f"🔴 cairn: refusing to PUT — could not refresh the cache, so the "
                 f"revision would be derived from bytes that may have moved "
-                f"({detail}). Pass --if-match explicitly if you already hold it.",
+                f"({detail}). Nothing was queued and nothing was written locally. "
+                f"Pass --if-match explicitly if you already hold it.",
                 file=sys.stderr,
             )
-            return hint if hint is not None else EXIT_WRITE_UNREACHABLE
+            return EXIT_WRITE_UNREACHABLE
         matches = sorted(args.cache.glob(f"{scope}/{args.ref}.md")) or sorted(
             args.cache.glob(f"{scope}/{args.ref}.*.md")
         )
@@ -1008,8 +1041,17 @@ def cmd_put(args: argparse.Namespace) -> int:
             return EXIT_USAGE
         revision = hashlib.sha256(matches[0].read_bytes()).hexdigest()[:16]
         print(f"cairn: derived If-Match {revision} from the live snapshot", file=sys.stderr)
+    # 🔴 READ THE FILE BEFORE THE NETWORK, NOT AFTER. This came after
+    # `resolve_state` — a full snapshot download — so `--file` naming a path that
+    # does not exist spent the whole sync and then died on an unguarded
+    # `FileNotFoundError` at exit 1: a code in neither the read table nor the
+    # write table, reached by the commonest typo this verb has.
+    try:
+        payload = args.file.read_bytes()
+    except OSError as exc:
+        print(f"cairn: cannot read --file {args.file}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
     url, token = load_config()
-    payload = args.file.read_bytes()
     quoted = f"/api/v1/entry/{quote(scope, safe='')}/{quote(args.ref, safe='')}"
     headers, body = send_write(
         url, token, method="PUT", path=quoted, body=payload,

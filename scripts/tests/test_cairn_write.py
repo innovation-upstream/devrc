@@ -88,6 +88,17 @@ def store(tmp_path: Path) -> Path:
     (root / "widget-cfg" / "thing-beta.md").write_text(
         _entry("thing-beta", "widget-cfg", "- 2026-01-03: the sidecar drops its lease.")
     )
+    # 🔴 A SECOND SCOPE THAT EXISTS ON DISK AND IS **NOT** IN THE TOKEN'S
+    # ALLOWLIST, AND IT IS LOAD-BEARING. The indistinguishability test below
+    # claims to exercise a REFUSED scope beside an ABSENT one; without this
+    # directory both of its "refused" cases were merely absent, so they took the
+    # same branch whether or not `visible_scopes` filtering existed at all —
+    # a sameness that held with the guard deleted. `hidden-scope` is refused by
+    # the ALLOWLIST here, which is the case that was never being reached.
+    (root / "hidden-scope").mkdir(parents=True)
+    (root / "hidden-scope" / "secret-thing.md").write_text(
+        _entry("secret-thing", "hidden-scope", "- 2026-01-04: not yours to see.")
+    )
     return root
 
 
@@ -404,12 +415,28 @@ class TestRefusalsAreDistinguishable:
         different causes, one identical observable. It fails if a future client
         (or server) starts leaking WHICH cause it was — which is what a naive
         "surface the audit status to the user" change would do.
+
+        🔴 THE THIRD CASE ONLY BECAME REAL WHEN THE FIXTURE GREW A `hidden-scope`
+        DIRECTORY. Before that it named a scope that simply did not exist, so all
+        three inputs took the same "absent" branch and the assertion held whether
+        or not `visible_scopes` filtering existed — a sameness that survives
+        deleting the guard it claims to pin. `hidden-scope` is now ON DISK and
+        excluded by the token's allowlist, which is the case the property is
+        about, and its ENTRY is named so the ref would resolve if the scope were
+        visible.
         """
+        # POSITIVE CONTROL ON THE FIXTURE ITSELF: the refused scope must actually
+        # be THERE. If this file is ever removed, the third case silently becomes
+        # a fourth copy of the second and the test goes back to proving nothing.
+        assert (live.store / "hidden-scope" / "secret-thing.md").is_file(), (
+            "the allowlist-refused case is not on disk, so it is merely ABSENT — "
+            "the sameness below would hold with `visible_scopes` deleted"
+        )
         outs = []
         for scope, ref in (
             ("widget-cfg", "no-such-entry-here"),   # ref that resolves to nothing
             ("scope-that-never-existed", "thing-alpha"),
-            ("hidden-scope", "thing-alpha"),        # outside the allowlist
+            ("hidden-scope", "secret-thing"),       # EXISTS on disk, allowlist-refused
         ):
             proc = run_cairn(
                 "append", "--scope", scope, "--ref", ref, "--text", "x",
@@ -462,6 +489,58 @@ class TestRefusalsAreDistinguishable:
         assert "read-only" in proc.stderr
         assert "REFUSED" in proc.stderr
 
+    @pytest.mark.parametrize(
+        "code, status, want",
+        [
+            # 🔴 THE MAPPING'S SEMANTICS, NOT ITS MEMBERSHIP. The table test
+            # asserts every status server.py can emit is PRESENT in
+            # `_WRITE_STATUS_EXITS`; it is blind to a row pointing at the wrong
+            # code. A sweep proved it: `500: EXIT_WRITE_REFUSED` SURVIVED a green
+            # suite. These drive the real client against a real socket.
+            (500, "internal-error", 7),   # `_backstop` — retry IS the remedy
+            (503, "store-unreachable", 7),
+            (429, "rate-limited", 7),
+            (422, "entry-shape", 6),      # the entry has no nuance heading
+            (400, "bad-request", 6),
+            (404, "not-found", 6),
+        ],
+    )
+    def test_each_status_maps_to_the_code_whose_REMEDY_is_right(
+        self, tmp_path, code, status, want
+    ):
+        """6 means "change your request"; 7 means "try again". A 500 answered as
+        6 tells the caller to change a byte-identical request that would very
+        likely have succeeded — and a 400 answered as 7 invites an infinite
+        retry of a bullet that can never be accepted."""
+        class Fixed(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                body = b"fixed\n"
+                self.send_response(code)
+                self.send_header("x-store-status", status)
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_a):
+                return
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixed)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            proc = run_cairn(
+                "append", "--scope", "widget-cfg", "--ref", "thing-alpha",
+                "--text", "x", "--session", SESSION,
+                url=f"http://127.0.0.1:{srv.server_address[1]}", cache=tmp_path / "c",
+            )
+        finally:
+            srv.shutdown(); srv.server_close()
+        assert proc.returncode == want, (
+            f"HTTP {code} [{status}] exited {proc.returncode}, wanted {want}. "
+            f"6 and 7 carry opposite remedies."
+        )
+        assert status in proc.stderr
+
     def test_a_412_gets_its_OWN_code_so_a_blind_retry_is_not_the_remedy(self, tmp_path):
         """A precondition failure is neither "fix your request" nor "retry"."""
         class Stale(http.server.BaseHTTPRequestHandler):
@@ -512,20 +591,56 @@ class TestPutReplacesBehindAPrecondition:
         on_disk = (live.store / "widget-cfg" / "thing-beta.md").read_text()
         assert "RESOLVED abc1234" in on_disk
 
-    def test_put_REFUSES_to_derive_a_revision_it_could_not_refresh(self, live, tmp_path):
-        """A precondition from bytes we could not confirm is the one case where
-        the cache is worse than nothing: it turns the operator's edit into a
-        guaranteed 412 while looking like a normal run."""
+    @pytest.mark.parametrize("prime_the_cache", [True, False])
+    def test_put_REFUSES_at_7_whether_or_not_a_CACHE_EXISTS(
+        self, live, tmp_path, prime_the_cache
+    ):
+        """🔴 BOTH SIDES OF THE CACHE, AND THE SECOND ONE IS WHERE THE BUG WAS.
+
+        This test used to prime the cache and assert `returncode != 0`. Both
+        halves were wrong, and together they hid a real defect for a whole audit
+        round: `!= 0` cannot see WHICH code, and priming the cache exercised only
+        the branch that already returned 7.
+
+        With NO cache — the FIRST run on a fresh host, the commonest way to reach
+        this path — `resolve_state` hands back `EXIT_UNREACHABLE_NO_CACHE` (3),
+        and the code returned that `hint` verbatim. So a WRITE returned the READ
+        verdict "store-unreachable, no cache", which this whole file exists to
+        make impossible, while four comments and the design doc said it could not
+        happen. Measured before the fix: no cache -> 3, cache -> 7.
+
+        The file's own rule is "pin a CODE and a SENTENCE, not merely non-zero" —
+        stated at the top and broken here. Both are pinned now, on both sides.
+        """
         cache = tmp_path / "c"
-        assert run_cairn("sync", url=live.base, cache=cache).returncode == 0
+        if prime_the_cache:
+            assert run_cairn("sync", url=live.base, cache=cache).returncode == 0
         replacement = tmp_path / "r.md"
         replacement.write_text(_entry("thing-beta", "widget-cfg", "- 2026-01-03: x."))
         proc = run_cairn(
             "put", "--scope", "widget-cfg", "--ref", "thing-beta",
             "--file", str(replacement), url=None, cache=cache,
         )
-        assert proc.returncode != 0
+        assert proc.returncode == 7, (
+            f"cache={prime_the_cache}: a write returned {proc.returncode}; 3 is the "
+            f"READ code for 'nothing was displayed' and must never answer a write"
+        )
         assert "refusing to PUT" in proc.stderr
+        assert "Nothing was queued" in proc.stderr
+
+    def test_put_with_a_MISSING_file_refuses_BEFORE_it_spends_a_sync(
+        self, live, tmp_path
+    ):
+        """Exit 1 with a traceback is in neither table, and it arrived after a
+        full snapshot download — for the commonest typo this verb has."""
+        proc = run_cairn(
+            "put", "--scope", "widget-cfg", "--ref", "thing-beta",
+            "--file", str(tmp_path / "does-not-exist.md"),
+            url=live.base, cache=tmp_path / "c",
+        )
+        assert proc.returncode == 2, (proc.returncode, proc.stderr)
+        assert "cannot read --file" in proc.stderr
+        assert "Traceback" not in proc.stderr
 
 
 class TestTheRequestItself:
@@ -548,6 +663,63 @@ class TestTheRequestItself:
         for req in writes:
             assert req["headers"].get("user-agent") == "subsystem-store-client/1"
             assert req["headers"].get("authorization", "").startswith("Bearer ")
+
+    def test_no_request_builder_ANYWHERE_bypasses_this_helper(self):
+        """🔴 THE STRUCTURAL GUARD `_apply_standard_headers`' DOCSTRING NAMES.
+
+        That docstring used to name a test called
+        `test_every_request_builder_sets_the_UA`. It did not exist — anywhere.
+        The only real check was the behavioural one below, which watches the
+        APPEND path, so a new read verb building its own `Request` was unguarded
+        by the very sentence claiming to guard it. That is the
+        "reading as coverage while providing none" shape, and it is worse than
+        no claim because it stops anyone looking.
+
+        So: an AST walk over both files, finding every function that constructs a
+        `urllib.request.Request`, and asserting each also calls
+        `_apply_standard_headers`. A missing User-Agent is 403'd by the edge, and
+        that 403 arrives looking like a bad token AND like the store being down.
+        """
+        import ast as _ast
+
+        offenders = []
+        checked = 0
+        for path in (CAIRN_CLI, REPO / "scripts" / "cairn-cutover.py"):
+            tree = _ast.parse(path.read_text())
+            for node in _ast.walk(tree):
+                if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    continue
+                calls = [
+                    n for n in _ast.walk(node)
+                    if isinstance(n, _ast.Call)
+                ]
+                builds = any(
+                    isinstance(c.func, _ast.Attribute) and c.func.attr == "Request"
+                    for c in calls
+                )
+                if not builds:
+                    continue
+                checked += 1
+                applies = any(
+                    (isinstance(c.func, _ast.Attribute)
+                     and c.func.attr == "_apply_standard_headers")
+                    or (isinstance(c.func, _ast.Name)
+                        and c.func.id == "_apply_standard_headers")
+                    for c in calls
+                )
+                if not applies:
+                    offenders.append(f"{path.name}::{node.name}")
+        # POSITIVE CONTROL: the scan must have FOUND request builders. A zero
+        # here is a scan wired to nothing, and it would pass forever.
+        assert checked >= 3, (
+            f"the AST scan found only {checked} request builder(s) — it is not "
+            f"looking at what it claims to look at"
+        )
+        assert not offenders, (
+            f"these build a urllib Request without going through "
+            f"`_apply_standard_headers`: {offenders}. urllib's default User-Agent "
+            f"is 403'd by the edge in front of this host."
+        )
 
     def test_the_body_carries_text_and_session_and_NO_actor(self, live, tmp_path):
         live.handler.seen.clear()
@@ -599,16 +771,32 @@ class TestExitCodesDoNotOverlap:
         production as a zero exit over a write that never landed."""
         table = _write_status_table()
         server_src = SERVER_PY.read_text()
-        # The statuses the two write handlers respond with, read off the source
-        # rather than restated: `self._respond(<code>,` inside the write half.
-        write_half = server_src.split("def _append_bullet", 1)[1]
         import re as _re
-        emitted = {int(m) for m in _re.findall(r"self\._respond\(\s*(\d{3})", write_half)}
-        emitted.discard(200)
+
+        # 🔴 THE WHOLE SERVER, NOT TWO METHOD BODIES. This used to split at
+        # `def _append_bullet` and regex the remainder, which yields ONLY
+        # `_append_bullet` and `_replace_entry` — emitting {400,412,422,428,503},
+        # all five already mapped. So it was green while the statuses that
+        # actually reach a write caller from OTHER layers were invisible to it:
+        # 404 (`_not_found`, defined ABOVE the split), 405 (`read-only`), 401/403
+        # (auth), and 500 (`_backstop`) — and 500 was genuinely unmapped, falling
+        # through to "change your request" for a condition whose remedy is a
+        # retry. A scan whose docstring says "on a write route" must not be
+        # bounded by where one method happens to sit in the file.
+        emitted = {int(m) for m in _re.findall(r"self\._respond\(\s*(\d{3})", server_src)}
+        emitted |= {int(m) for m in _re.findall(r"self\.send_response\(\s*(\d{3})", server_src)}
+        emitted -= {200, 204, 206, 304}   # successes and a conditional-GET code
+        # POSITIVE CONTROL: the scan must see the statuses this PR learned about
+        # the hard way. A regex that matched nothing would pass vacuously.
+        for known in (404, 405, 500):
+            assert known in emitted, (
+                f"the status scan did not see {known}, which server.py demonstrably "
+                f"emits — the pattern is wrong, not the table"
+            )
         missing = sorted(emitted - set(table))
         assert not missing, (
-            f"server.py's write handlers can answer {missing}, which "
-            f"`_WRITE_STATUS_EXITS` does not map. An unmapped code falls through "
-            f"to 'unrecognised', which is loud — but a deliberate status deserves "
-            f"a deliberate exit code."
+            f"server.py can answer {missing} on a route this client writes to, and "
+            f"`_WRITE_STATUS_EXITS` does not map them. An unmapped code falls "
+            f"through to 'unrecognised' => EXIT_WRITE_REFUSED, which tells the "
+            f"caller to change a request that may only need retrying."
         )
