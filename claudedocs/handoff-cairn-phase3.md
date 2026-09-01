@@ -18,67 +18,72 @@ Make the hosted subsystem store the single datastore every host reads **and writ
 
 ## State now
 
-🔴 **CRITERION 10 IS COMPLETE — the store has NO unrestricted credential.** Executed
-2026-08-31, homelab-infra **`be3084f0`** on trunk (confirmed an ancestor of `origin/trunk`;
-trunk tip still carries it). The token file went **354 B → 295 B**, a pure line deletion:
-surviving mapped row `ecc11c1b5b6e` unchanged, `2481e4553f6c` absent.
+🔴 **CARRIED FORWARD — the phase-1 closure record. `State now` is a REPLACE heading, so this
+block is deleted by every update that does not re-state it; it is the durable evidence, not
+status.**
 
-**Live state, verified end-to-end (carried forward — this is the criterion-10 verification
-record, and its positive control is the part that makes it evidence):**
-- banner `token-ids=a8f329c534d7:zach` — one row, and **no `UNRESTRICTED-SCOPE LEGACY MODE`**
-  (positive control: 6 historical banners in Loki, so that grep CAN match)
-- mapped credential → **200**; legacy credential → **401, the credential is dead**
-- **both hosts read 200** — workbench and laptop, laptop env confirmed `a8f329c534d7`
-- `cairn sync` live, 132 entries · `test-check-subsystem-store-phase1.sh` **pass=25 fail=0**
-  ⚠ **That 132 was 2026-08-31 and is STILL 132 on 2026-09-01** — see the phase-1 table below.
-  The count agreeing across two days is not health; it is the pod being frozen.
+🔴 **CRITERIA 8 AND 9 ARE COMPLETE. PHASE 1 IS CLOSED — the pod is canonical and both local
+stores are read-through caches.** Executed and verified 2026-09-01.
 
-⚠ **ONLY (d) REMAINS: the plaintext backups are still on disk.**
-`~/.config/subsystem-store/env.bak-legacy-2026-08-29` exists on **both** hosts and holds the
-token hashing to `2481e4553f6c` — measured, not assumed. It is now a **dead** credential (401),
-so this is hygiene rather than exposure, but the file is what the shred is for. Deliberately
-deferred by operator decision: do (d) after watching the store healthy for a day.
+| | result |
+|---|---|
+| pod | **201 entries / 23 scopes**, both hosts read the same snapshot `seeded=2026-09-01T20:38:36Z` |
+| workbench freeze | 153 files, **`P5 WATCHED EACCES: all 153 refused an append`** |
+| laptop freeze | 49 files, **`P5 WATCHED EACCES: all 49 refused an append`** |
+| idempotency | both hosts re-run → *"the freeze is already applied"* |
+| runbook §8 final check | `{'ADD': 0, 'SAME': 153, 'SUPERSEDES': 0, 'MERGED': 0, 'NEEDS_MERGE': 0}`, **0 entries would be pushed** |
+| rollback | mode ledgers on both hosts (`runs/20260901T203704Z/`, `runs/20260901T203951Z/`); `--unfreeze` refuses without one |
 
-🔴 **CORRECTION 2026-09-01 — the claim `cairn-phase3-1` is NOT held.** This doc said it was
-"STILL HELD" because (d) is owed. Live `claim-work --list` shows **no cairn-phase3 claim of any
-rank**. (d) is still owed; the *lock* on it is gone, so nothing stops a second session picking
-it up. Re-claim before working it.
+**The proof that the per-host store is gone:** the workbench can `cairn recall` a
+**laptop-exclusive scope** (`status=recalled`). That was structurally impossible before.
 
-**PR #1129 (devrc) merged** — squash `8e883e3d`. Its gate needed a retry: the first run died
-with **zero steps executed** after a 60-minute `TaskRunTimeout`, starved by a single-node
-`nodeSelector` pin; re-fired after the queue drained, it ran in ~30 min and passed
-(`pytests 19449 collected / 0 failed`, `nodetests 1441/1441`).
+**Criterion 10 remains COMPLETE (execution record):** executed 2026-08-31, homelab-infra
+**`be3084f0`** on trunk, confirmed an ancestor of `origin/trunk`. The token file went
+**354 B → 295 B**, a pure line deletion: surviving mapped row `ecc11c1b5b6e` unchanged,
+`2481e4553f6c` absent. Live banner `token-ids=a8f329c534d7:zach`, no
+`UNRESTRICTED-SCOPE LEGACY MODE` — positive control: 6 historical banners in Loki, so that grep
+CAN match. Mapped credential → **200**; legacy credential → **401, dead**; **both hosts read
+200**. PR #1187 (`9-before-8` sequencing) merged 2026-09-01T03:17:40Z; that ordering is now
+history, since both ranks are done.
 
-**PR #1187 MERGED** 2026-09-01T03:17:40Z — the 9-before-8 sequencing is now in the ranked list
-on `main`, so a session drawing rank 3 sees it without reading the PR.
+🔴 **The claim `cairn-phase3-1` is NOT held** (re-verified 2026-09-01). `cairn-phase1-migration`
+was held for the phase-1 work and has been **released**. `cairn-phase3-11` IS held by the
+session that shipped #1222 — release it when the ladder closes.
 
-### Phase 1 measured end-to-end 2026-09-01 — criteria 8 and 9 are the whole gap
+---
 
-Every number below was measured this session, not recalled.
+🔴 **RANK 11 IS FIXED AND LIVE-VERIFIED AGAINST THE POD — devrc PR #1222, `MERGEABLE/CLEAN`,
+both required Tekton checks SUCCESS. NOT MERGED; audit round 1 IN FLIGHT.** Branch
+`fix/verify-byte-identity-order-independent`, tip `d2fa8a88` on base `b59b0475`.
 
-| | entries | scopes | newest content |
-|---|---|---|---|
-| pod (`store.zacx.dev`) | **132** | 15 | `2026-08-29T21:03:20Z`, `seeded=2026-08-29T20:34:38Z` |
-| workbench local disk | **146** | 15 | mtime `2026-08-31 18:29` |
-| laptop local disk | **49** | 12 | — |
+**The defect was TWO mtime dependencies, not one.** `subsystem_recall` orders its INDEX
+newest-first by entry-file mtime **and picks the digest's one featured BODY the same way**;
+`seed.sh`'s transport (`rsync` → stage → `tar` → pod) carries no mtime. The second half was
+found during implementation and is not in this doc's earlier diagnosis.
 
-- The pod is a snapshot of the **workbench alone** and is frozen. Its 15 scopes are *exactly*
-  the workbench's 15; **all 7 host-exclusive laptop scopes are absent from it entirely.**
-- Pod-vs-workbench per scope: **−14 total**.
-- 🔴 **`scripts/lib/subsystem_touch.py` — the writer — contains ZERO HTTP code.** Every write
-  lands on local disk. The pod's authenticated write path exists in
-  `scripts/subsystem-store-api/server.py` and **nothing calls it.** That is criterion 9 stated
-  as a measurement.
-- Auth is live and enforced — `/api/v1/recall/devrc`: no-token **401**, bad-token **401**, real
-  host credential **200**. Do not "add auth"; it is done.
+**The comparator now does three things per scope**, replacing one whole-scope render: (1) the
+`mode=list` render with index **rows sorted**, rest verbatim; (2) the entry **SET** via `comm`,
+naming refs, **run FIRST** so it is not an unreachable guard; (3) **each entry's** own `?ref=`
+render. A **paginated** index is refused rather than partly compared — page membership *and*
+the per-page ref column width are both mtime-derived. `index-order-lines` joins the printed
+accounting sum, **measured** as the diff reduction the sort bought, so identity is
+`raw == store-root + host + block + order`, exact on a PASS.
 
-**IN FLIGHT:** claim **`cairn-phase1-migration`** is HELD (release with
-`claim-work --release cairn-phase1-migration`). A subagent is running in worktree
-`.claude/worktrees/agent-a03ac0e6c1aebf3db` (branch `worktree-agent-a03ac0e6c1aebf3db`)
-producing a design doc, a hand-merged entry, a dry-run-default cutover script and tests. It hit
-an API session limit once and was resumed. 🔴 **UNVERIFIED — the dispatching session has not
-read its output and cannot vouch for any of it.** Its brief forbids executing the cutover or
-the re-seed; the operator runs those.
+**Live run against the pod (this session, port-forward, store `~/.claude/analyze-service-index`)
+— the acceptance step the implementing agent could not do:**
+
+| scope | before #1222 | after #1222 |
+|---|---|---|
+| `cli` (5 entries, byte-identical) | **FAIL** `raw-diff-lines=8` | **PASS** `index-order-lines=2`, `accounted-for=38` = `raw=38` |
+| `storage-resolver` (1 entry, was passing) | PASS | **PASS** — the fix did not just paint everything green |
+| `devrc` | FAIL `canonicalised-cmp=differs raw=45` | **FAIL — `entry SET differs pod-only=3`** |
+| `datapacket-talos` | FAIL `raw=336` | **FAIL — `entry SET differs pod-only=2`** |
+
+The two remaining FAILs are the **correct** verdict and now name a real cause; before the fix
+they were indistinguishable from the ordering artifact.
+
+**Criterion 10 (d) still outstanding** (rank 1) and criteria 8/9/10 remain as recorded above —
+this session changed none of that.
 
 ## Open investigations — live diagnosis state
 
@@ -340,52 +345,171 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
 - **Next probe:** none — it is diagnosed. Reconcile the two documents so the numbering is
   single-valued, and correct the false sentence.
 
+### 🔴 OPEN — `verify-byte-identity.sh` STILL cannot pass for a multi-entry scope: it is mtime-ordered
+- **Symptom + exact repro:** `cairn-cutover.py --apply` reaches P4 and reports
+  `verify: scopes=16 pass=11 fail=5` (and `scopes=12 pass=0 fail=12` for the laptop store) on
+  stores that are byte-identical. Reproduce: run the cutover against any scope with >2 entries.
+- **Observed (with values):** the failing diff is the *index listing*, not entry content —
+  `local: … tekton-ci, clawgate` vs `pod: … alloy-talos, autoremix`, while the filename SETS
+  are identical. `subsystem_recall`'s index is **newest-first by mtime**, and the transport does
+  not preserve mtime: an entry pushed minutes earlier read pod `2026-09-01 15:32:44` vs local
+  `2026-09-01 00:19:56`; one never in a delta read pod `13:27:03` vs local `2026-08-30 13:49:04`.
+  Every PASSING scope had **2** entries; every failing one had **24–50**.
+- **Ruled out:** that #1214 fixed it — #1214 closed the `host:` gap only, and after it the same
+  runs still failed on ordering. via: measurement
+- **Ruled out:** a snapshot race — the failure persisted across repeated applies with a fresh
+  `seeded=` stamp each time. via: measurement
+- **Leading hypothesis:** the check compares a RENDER whose order is a function of filesystem
+  metadata the transport does not promise. Byte-identity of *entries* is the real claim; the
+  render is a proxy that cannot hold.
+- **Next probe:** none needed for diagnosis. The fix is to compare the entry SET plus each
+  entry's bytes (order-independent), not the mtime-ordered render — the substitute used this
+  session, which passed 153/153 and 49/49 with both controls.
+- 🔴 **Until then this is a PERMANENTLY-RED GATE inside the cutover**, which `claude/RULES.md`
+  calls worse than no gate. It was worked around, not fixed.
+
+### 🔴 OPEN — `cairn put` has never been exercised against the live pod
+- **Symptom:** `prune-index`'s whole-file rewrite now routes through `cairn put` (#1210), and
+  that path has not run once. `cairn append` was proved empirically; `put` was not.
+- **Observed:** the write route itself is deployed — the cutover's malformed-body probe is
+  refused `400 [bad-request]`, which only a server that DISPATCHED the POST can answer.
+- **Ruled out:** that the append proof covers it — they are different verbs and different
+  server handlers (`POST …/bullets` vs `PUT …/entry`). via: code
+- **Next probe:** run one real prune through `prune-index` and watch it land on the pod. That
+  is `prune-index`'s stated closing condition and it is unmet.
+
+### 🔴 OPEN — the token scope allowlist goes stale by construction
+- **Symptom + exact repro:** a scope is created by any session writing its first entry. It is
+  then absent from the token allowlist, and the cutover refuses to freeze because that entry is
+  "missing from the served copy".
+- **Observed (with values):** `civitai-block-generate-from-model` was created by another session
+  during this very session. `grep -c` inside the pod against `$SUBSYSTEM_STORE_TOKEN_FILE`
+  returned **0** for it and **1** for a known-good scope. The API reports an unpermitted scope
+  as `status=scope-absent` — **not** 403 — so "not allowlisted" and "not pushed" are the same
+  symptom from outside.
+- **Ruled out:** a snapshot lag — the pod reported `entry-files=150` while indexing `149`
+  across repeated syncs with fresh stamps. via: measurement
+- **Ruled out:** file permissions on the pod — the new scope dir was `65532:65532`, identical
+  to every working scope. via: command
+- **Leading hypothesis:** nothing warns, and the cutover's refusal is the only detector — and it
+  only inspects one host. homelab-infra#620 unblocked today's run (15 → 23 scopes) but fixed
+  nothing structural.
+- **Next probe:** decide where the durable fix belongs — whatever mints the token, or a
+  drift-check arm that compares each host's scope set against the allowlist.
+
+### RESOLVED BY FIX (pending audit) — `verify-byte-identity.sh` was mtime-ordered
+- **Supersedes the OPEN block above.** Reproduced this session at the live pod before touching
+  any code: `verify: scopes=5 pass=1 fail=4`, and the `cli` scope isolated it cleanly — index
+  rows byte-identical, the only unaccounted difference a single row's POSITION
+  (`pkgzip` at local line 10 vs pod line 13).
+- **Observed (with values):** every PASS had ≤2 entries; every FAIL had more. Fixed in #1222;
+  post-fix live run in `State now`.
+- **Ruled out:** that #1214 covered it — #1214 closed the `host:` canonicalisation gap only, and
+  the ordering failures persisted after it. via: measurement
+- **Ruled out:** that row order was the whole defect — the digest's single featured BODY is
+  picked by mtime too, so a byte-identical store also rendered a different entry body.
+  via: code
+- **Next probe:** read audit round 1's findings when it returns; run the ladder to a clean
+  round. Do not re-derive the diagnosis.
+
+### 🔴 OPEN — the local stores now LAG the canonical pod, and nothing reports it
+- **Symptom + exact repro:** post-cutover each host's store is a read-through cache. Run
+  `verify-byte-identity.sh` against any busy scope and the entry SET differs.
+- **Observed (with values), 2026-09-01:** `devrc` local **26** entries vs pod **29**
+  (`pod-only=3`; the pod carries an `obs` entry and 2 extra nuance bullets on
+  `subsystem-store-api` that the local copy has never seen). `datapacket-talos` `pod-only=2`.
+  Both hosts read the same pod snapshot, so this is cache staleness, not divergence.
+- **Ruled out:** that this is a defect in #1222's set arm — the set arm is reporting a true
+  fact, and weakening it would make a half-copied seed undetectable. via: code
+- **Leading hypothesis:** this is correct-by-design and only becomes a problem because
+  `verify-byte-identity.sh` is now meaningful **only immediately after a seed/push** — which is
+  where P4 runs it. #1222 states that in the script header, the P4 docstring, the README and
+  the set-arm test docstring.
+- **Next probe:** decide whether `cairn sync` should be scheduled, or whether a stale local
+  cache is simply fine now that reads go through the pod. Nothing currently reports the lag.
+
+### 🔴 OPEN — `verify-byte-identity.sh` cannot be run against the PUBLIC ingress
+- **Symptom + exact repro:**
+  `verify-byte-identity.sh --url https://store.zacx.dev …` → **`FAIL … remote HTTP 403
+  (body: error code: 1000)`** on every scope.
+- **Observed (with values):** all 4 scopes tried returned 403 with a **Cloudflare** error body,
+  not the store's. The script unconditionally sends `CF-Connecting-IP`, and Cloudflare rejects
+  a client-supplied one. Over a `kubectl port-forward` the identical invocation works.
+- **Ruled out:** an auth problem — the same credential returns 200 through the port-forward.
+  via: measurement
+- **Leading hypothesis:** the script's own comment says the header is "inert" on the
+  port-forward path and correct against the nebula gateway; it is neither inert nor correct
+  against the public URL, and nothing in the script or its usage text says so.
+- **Next probe:** decide whether to send the header only when `--url` is not the public
+  hostname, or simply document the constraint. Not covered by #1222.
+
+### 🔴 OPEN — the cutover left TWO stores and `/resume` reads the DEAD one
+- **Symptom + exact repro:** write a bullet through `cairn append`, then run the command
+  `/resume` step 4 and the top of this doc both prescribe:
+  `python3 scripts/lib/subsystem_recall.py --repo ~/workspace/devrc`. The bullet is not there,
+  and the output claims completeness anyway.
+- **Observed (with values), 2026-09-01, minutes after two writes to `devrc/subsystem-store-api`:**
+
+  | reader | store it reads | entries | mode | carries the new bullet |
+  |---|---|---|---|---|
+  | `subsystem_recall.py --repo` (what `/resume` runs) | `~/.claude/analyze-service-index` | **26** | **444** | **no (0 occurrences)** |
+  | `cairn recall` | `~/.cache/subsystem-store` | **29** | 644 | yes (1) |
+
+  These are **two different directories**. The first is the mirror the cutover FROZE; nothing
+  refreshes it, so it can only drift further. It nonetheless prints
+  `INDEX … ALL 26 entries in 'devrc/', none omitted` — a completeness claim about a disk that
+  is missing three entries, and it carries **no staleness stamp** of the kind the pod's own
+  `SNAPSHOT, NOT THE SOURCE` banner has.
+- **Ruled out:** that this is the ordinary read-through-cache lag recorded above — that entry is
+  about the mirror trailing the pod by a few entries. This is structural: the mirror is
+  **read-only and never synced**, so the gap is unbounded, and the reader that IS synced is a
+  different command against a different path. via: measurement
+- **Ruled out:** that `cairn sync` fixes it — `sync` updates `~/.cache/subsystem-store`, which is
+  not the path `--repo` resolves. Running `cairn sync` immediately before the probe changed
+  nothing. via: command
+- **Leading hypothesis:** criterion 9 repointed the WRITE path and `cairn`'s own read; the
+  **prescribed read surface was not repointed**, and nothing detects it. Every `/resume` since
+  the cutover has oriented on a store frozen at 2026-09-01 while believing it complete.
+- **Next probe:** none needed for diagnosis. Pick a fix: point `subsystem_recall --repo` at the
+  synced cache; or make it REFUSE a store with no snapshot stamp (so a frozen mirror cannot
+  masquerade as current); or rewrite the prescribed command to `cairn recall` in the `resume`
+  and `subsystem-index` skills **and** in both cairn handoff docs. The refusal arm is the one
+  that also protects the next store that gets frozen.
+
 ## Next steps (ranked)
 
 🔴 **Numbering is UNCHANGED on purpose** — the rank is half a claim's identity
-(`claim-work --slug-for <this doc> <rank>`).
+(`claim-work --slug-for <this doc> <rank>`). Items are marked done IN PLACE; new items APPEND.
 
 1. 🔴 **Criterion 10 step 2 — (a),(b),(c) DONE 2026-08-31. Only (d) is left:**
    `shred -u ~/.config/subsystem-store/env.bak-legacy-2026-08-29` on **BOTH** hosts
    (`ssh zach@192.168.50.155` for the laptop). Confirm first that the store has been healthy
    since (`cairn sync` on each host), because this destroys the last local copy of the retired
-   credential. The row itself is already gone from git and the cluster, so recovery after this
-   is `git log -p` on `clusters/homelab/apps/subsystem-store/secrets.enc.yaml` or the backup
-   CronJob — **not** these files.
+   credential. Recovery after this is `git log -p` on the secrets file or the backup CronJob —
+   **not** these files.
    forcing: security
 2. ~~**The backup CronJob.**~~ ✅ **CLOSED 2026-08-30** — homelab-infra#551, squash `c4e0f82b`.
    forcing: none
-3. **Criterion 8's laptop half** — `seed.sh` has still only been run from workbench (132
-   entries / 15 scopes against the card's 139 / 19; the gap is laptop-only). Run it from the
-   laptop (`laptop` skill), then `comm -23` per host must print zero lines.
-   🔴 **The same-window warning has EXPIRED in one direction and not the other**: rank 1's
-   credential work is done, so there is no longer a conflict there. The *destructive* half
-   still stands — the push is `rsync -a --delete` SOURCE→STAGE then tar STAGE→pod, so every
-   entry the laptop also holds is overwritten with the laptop's copy, destroying API-appended
-   bullets that exist only in the served copy. Recoverable via #551's backup, not harmless.
-   🔴 **So do rank 4 FIRST.** Criterion 9 makes API writes durable, which *removes* this
-   hazard rather than managing it — after it, the overwrite has nothing unique to destroy.
-   Running 3 first means relying on the backup to recover; running 4 first turns a
-   destructive operation into a safe one.
+3. ✅ **DONE 2026-09-01 — criterion 8, the laptop half.** Its 49 entries and 7 exclusive scopes
+   are on the pod (`remote_entries=201`, `seed: OK all 49 staged entries are present`), and its
+   store is frozen with a watched EACCES on all 49. Pushed FROM the workbench via `--store`
+   because the laptop has no kubeconfig — deliberately, rather than copying a cluster-admin
+   credential to a second host. **Do not re-work.**
    forcing: none
-4. **Criterion 9 — the cutover.** `subsystem-index` writes through `cairn`; the local store
-   becomes a read-only cache (`stat -c %a` = 444, EACCES *watched*, not assumed). 🔴 This is
-   what makes an API write DURABLE — until it lands, every appended bullet is one `seed.sh`
-   from gone. The read/write **allowlist split** is this criterion's own job.
-   🔴 **Do this BEFORE rank 3**, despite the lower rank. Rank 3 runs `seed.sh` from the
-   laptop, whose `rsync -a --delete` push overwrites every shared entry with the laptop's
-   copy. This criterion is what makes the API-appended bullets durable, so landing it first
-   is what makes rank 3 non-destructive instead of backup-dependent.
+4. ✅ **DONE 2026-09-01 — criterion 9, the cutover.** Write-through shipped (#1210), verifier
+   fixed (#1214), both stores frozen, runbook §8 final check clean. **Do not re-work.**
    forcing: none
 5. **Verify criteria 1, 2, 5, 6, 7 against the POD**, not just in tests. Criterion 4 is done
    there; 2's denied-scope arm is done for WRITES (404 `scope-unknown`) but not for the three
-   read routes. ⚠ Now cheaper: with one row, `zach`'s 15-scope allowlist is the ONLY authority,
-   so a denied-scope read is no longer maskable by a bare row.
+   read routes. ⚠ The allowlist is now **23 scopes**, not 15 — re-read it before reasoning
+   about what a denied-scope read proves.
    forcing: none
 6. **Add the `internal-error` alert** in the monitoring config. Without it the dispatch
    backstop turns a dropped connection into a quiet 500 only the audit log sees.
    forcing: none
-7. **`scripts/cairn` has no write verb** — the CLI still only reads.
+7. ✅ **DONE — `scripts/cairn` has a write verb.** `cairn append` and `cairn put` shipped in
+   #1196 and are deployed on both hosts. `append` is proved live; `put` is **not** — see the
+   open investigation. **Do not re-work the verb; do close the `put` proof (rank 12).**
    forcing: none
 8. **§5's off-mesh control, still unrun** — from a phone on cellular:
    `curl -si https://store.zacx.dev/api/v1/recall/devrc` (expect 401) and
@@ -400,6 +524,28 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
     secret was never printed. **Closing condition:** a merged homelab-infra PR moving
     `ilm rule add` above `user add`.
     forcing: security
+11. 🔴 **Make `verify-byte-identity.sh` order-independent.**
+    **IN FLIGHT: devrc#1222** — fix written, live-verified against the pod, both required
+    checks green, **audit round 1 dispatched and not yet returned.** Closing condition: the
+    ladder returns a clean round, then #1222 merges. Do not re-implement it.
+    forcing: gate — the cutover's own P4 fails on byte-identical stores, and a permanently-red
+    gate trains everyone to click through it.
+12. **Exercise `cairn put` once, live, through `prune-index`.** Repo `devrc`. That skill's
+    closing condition is one prune observed landing on the pod; nothing has run it.
+    forcing: none
+13. **Close the allowlist-staleness hole.** Repo `homelab-infra` (token minting) and/or `devrc`
+    (`scripts/drift-check.sh` arm comparing each host's scope set to the allowlist).
+    forcing: none
+14. **`claude/skills/subsystem-index/reference/index-write.md` documents the RETIRED
+    `Edit`-anchor protocol.** Repo `devrc`. The skill body says so in one line; the sidecar
+    still reads as current.
+    forcing: none
+15. **Merge devrc#1218 (this doc's own PR) and re-sync the base clone.** Until it lands, the
+    copy of this doc on `main` is the pre-phase-1-closure one: it has 10 ranks, no rank 11, and
+    a 132-entry pod. A `/resume` reconciles against `origin/main` and therefore reads the STALE
+    copy while reporting `handoff-read: working-tree copy (identical to origin/main)` — a green
+    freshness line that is true and misleading at once. **This session hit exactly that.**
+    forcing: none
 
 ## Gotchas / decisions / dead-ends
 
@@ -871,46 +1017,139 @@ text of a status that outlives it — and treat "not found" as NOT A VERDICT, ex
   `origin/main` and present at `~/.local/bin/cairn`. That bullet had been served as outstanding
   since 2026-08-29 while the remedy was already merged.
 
+- 🔴 **OPERATOR DECISION 2026-09-01 — protocol change BEFORE the cutover, not after.** The
+  runbook deferred it to "a separate PR after 5 and 6 verify", which would have left every
+  session writing the index via `Edit` hitting EACCES for the length of a PR+gate+ship cycle.
+  Evidence it was not hypothetical: the store grew 146 → 148 → 150 → 153 entries and 15 → 16
+  scopes **during** the session, with writes at 00:19, 00:48, 11:07, 11:21, 11:27, 11:35.
+  Cost accepted: appends to not-yet-pushed entries fail `ref-not-found` in the gap, which is
+  loud rather than silent.
+- 🔴 **`prune-index` was the writer most likely to be forgotten, and covering only
+  `subsystem-index` would NOT have delivered "the freeze breaks nothing".** The design doc's
+  own writer table named it; it needed its own `cairn put` routing in the same PR.
+- 🔴 **A defect I reported that did NOT exist, and how it nearly shipped.** I claimed the
+  snapshot banner left a residual blank line. The real script uses `sed '/…/,+1d'`, which
+  deletes the banner AND its separator — my control used a hand-rolled single-line `/…/d`, so
+  the residue was **my own reimplementation**, not the script. Re-measured with the script's own
+  seds: 2 differing lines before the `host:` rule, **0** after. The subagent refused to
+  implement to my spec and said the diagnosis did not reproduce; the false claim had already
+  been written into **five** sites as a measured past incident and was retracted before merge
+  (`60dbcce2`). **One rule, one place — I open-coded a predicate the script owned and trusted my
+  copy over the original.**
+- 🔴 **What caught it was an ACCOUNTING assertion, not a verdict.** The pre-existing
+  `…ACCOUNTED_FOR…` test asserts `raw == store_root + 2*snapshot` and stayed green, making the
+  claim and the repo disagree out loud. Same shape as the mutant where deleting the `host_lines`
+  COUNT still passes `cmp` and is caught only by the decomposition. A pass/fail verdict says
+  "these differ"; an accounting assertion says "and here is exactly which lines I claimed the
+  excuse for" — only the second can contradict a wrong human diagnosis.
+- 🔴 **A refresh from the pod is NOT safe by default.** `devrc/subsystem-store-api.md` had **43
+  lines another session appended locally AFTER its merge was staged** (local mtime 14:35:48 vs
+  merge staged 00:39:42). Copying the pod's copy down would have destroyed that work; the merge
+  was re-authored instead. Every refresh was gated on "zero local lines absent from the pod",
+  with two documented exceptions where a reflow changed line breaks and the substance was
+  confirmed present by marker.
+- 🔴 **I merged into ANOTHER SESSION'S integration worktree.** `~/workspace/devrc-integ` already
+  existed on `integ/963-965`; my `worktree add` failed but the following `git -C … merge` still
+  ran. Restored with `git reset --keep ea9811ed` (its reflog position immediately prior; tree
+  clean; branch local-only). **Check a path is free BEFORE assuming it, not after.**
+- ⚠ **`verify-byte-identity.sh` sends `CF-Connecting-IP`, which Cloudflare rejects as spoofing
+  (403, `error code: 1000`) through the public ingress.** Point `SUBSYSTEM_STORE_URL` at a
+  `kubectl port-forward` for the verify step; the script's own comment anticipates this, the
+  cutover does not do it.
+- ⚠ **`seed.sh`'s push needs `KUBECONFIG` in the ENVIRONMENT.** The cutover passes
+  `--kubeconfig` for its own backup check only; without the export, `kubectl` falls back to
+  `localhost:8080` and the run refuses at rc 17 having staged but pushed nothing.
+- ⚠ **A `kubectl port-forward` backgrounded with `&` inside one Bash call does not survive to
+  the next.** Use the harness's own background mode; verify with repeated probes before relying
+  on it.
+- ⚠ **The `FORGED_actor` flake cost a required check again** (`#1214`, plus #1026/#1025 and a
+  batch of four devrc-ci runs on record). Attributed away on three grounds before re-running:
+  the diff names neither the class nor the test; it passes 2/2 in 2.27s on the merged tree; the
+  full merged-tree gate is green. A fresh push is the only thing that re-runs a required check.
+- ⚠ **The workbench's deployed generation is `origin/main` PLUS an uncommitted 8-line
+  `nix/programs/alacritty/default.nix` change belonging to another session.** `ship.sh` reports
+  this itself as `🔴 DIRTY AND IN THE ARTIFACT`. Cosmetic and reversible with `git restore`, but
+  it is live.
+
+**This session (2026-09-01), operating on rank 11:**
+- 🔴 **THE AUTHORITATIVE COPY OF THIS DOC WAS ON AN UNMERGED PR AND EVERY FRESHNESS CHECK SAID
+  IT WAS CURRENT.** `resume-state.sh` printed `handoff-read: working-tree copy (identical to
+  origin/main)` — true, and useless: the phase-1 closure and rank 11 were on the open branch
+  `docs/handoff-cairn-phase1-closed` (#1218), which is neither the working tree nor `main`. The
+  tree copy had **10** ranks and a 132-entry pod; the real one had **14** and 201. It was caught
+  only because the kickoff message named facts the doc did not contain. **A freshness check
+  that compares against the mainline is structurally blind to a handoff update sitting in
+  review** — grep `gh pr list` for `claudedocs/` before trusting one.
+- 🔴 **`claim-work --slug-for` needs the DOC, and the doc it needs may not be the one you read.**
+  The slug minted here (`cairn-phase3-11`) was correct only because the rank numbering on the
+  PR branch matched what the kickoff named. Had the ranks been renumbered in review, the claim
+  would have locked a different item under a plausible-looking slug.
+- ⚠ **`clawgate_handoff.sh resolve` returned rc 6 for this session** — one linked task (#371),
+  `role=read`, **no worked task**. Per the protocol that is "record nothing", not "pick one".
+  The doc already carries a readable `clawgate-task: 371` (`field` → rc 0), so it was left
+  alone.
+- ⚠ **The branch `docs/handoff-cairn-phase1-closed` is CHECKED OUT in another session's
+  worktree** (`/home/zach/workspace/devrc-ho-p3`), so `git worktree add` on it fails
+  `fatal: … is already used by worktree at …`. This update was therefore authored on
+  `docs/handoff-cairn-p3-rank11`, branched off that PR's tip, rather than by writing into a
+  checkout this session did not make. Land it into #1218 or onto `main` after #1218 merges.
+- ⚠ **A stale worktree at `/home/zach/workspace/devrc-handoff-cairn` sits on
+  `docs/handoff-cairn-phase2`, whose remote branch is GONE.** Left untouched; it is a candidate
+  for `git worktree remove` by whoever owns it.
+
+**On the rank-11 implementation, worth not re-deriving:**
+- 🔴 **A MUTANT SURVIVED AND WAS REPORTED RATHER THAN PAPERED OVER.** Mutating `rows_diff=0`
+  survived the first sweep because every index-row field is body-derived, so the per-entry arm
+  catches the same thing one step later and `returncode == 1` proved nothing. The fix was to
+  assert the difference was seen **by the row comparison** (`sorted-row-lines > 0`) — the count
+  that stops a genuine row difference being folded into the reorder excuse — rather than claim
+  coverage the sweep did not have. Final sweep: 9 narrow mutants, 9 killed, each dying with its
+  own guard's assertion, under `PYTHONDONTWRITEBYTECODE=1` with a known-caught positive control.
+- **Red-at-base matrix:** all 5 new tests red at `66eee1d7`, green at HEAD. The regression
+  case's base failure is the defect itself — rows reordered **and** a different featured entry —
+  on stores whose bytes are identical.
+- **Gate tiers, both named with their base:** dev-host `scripts/gate.sh` → `RESULT=PASS`, and
+  the sandbox tiers `.#checks.x86_64-linux.{pytests,nodetests}` → PASS, built **one at a time**,
+  all at `b59b0475` + the branch commit. `origin/main` moved to `836bac03` mid-run, so those
+  claims are about `b59b0475`, not the current tip; `strict: false` means green ≠ merged-tree
+  green.
+- **The verifier is now N+1 HTTP requests per scope**, not 1. P4 bounds it at `timeout=600`. The
+  per-request cost **against the pod is unmeasured** — only the local `--ref` leg was timed
+  (~73 ms × 10 runs). At 201 entries across 23 scopes that bound is an assumption, not a
+  measurement.
+
+- ✅ **`cairn put` IS NOW PROVEN LIVE AGAINST THE POD** — the open investigation saying it never
+  had been is closed by measurement, incidentally rather than deliberately: this session used
+  `put` twice to rewrite bullets on `devrc/subsystem-store-api` (`If-Match 3aee155a848e1670` →
+  `c865d70976d961e0`, then `9eee662af4986546` → `4056a7d18b5c0f75`), each deriving `If-Match`
+  from a live sync and each answering `replaced`. ⚠ **Rank 12 is NOT thereby closed**: its
+  stated closing condition is one prune observed landing on the pod **through `prune-index`**,
+  and that skill's path is still unexercised. The VERB is proven; the CALLER is not.
+
 ## How to verify
 
 ```bash
+# ---- rank 11: the fix, against the LIVE pod (the acceptance step) ----
+# 1. port-forward; there is deliberately no ingress path that works (see the OPEN block).
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store port-forward svc/subsystem-store-api 8102:8102 &
+# 2. stage the credential in a file, umask 077, and SHRED it afterwards.
+umask 077; ( set -a; . ~/.config/subsystem-store/env; set +a; printf '%s' "$SUBSYSTEM_STORE_TOKEN" > /tmp/tok )
+# 3. `cli` is the discriminating pair: >2 entries, byte-identical, FAILED before #1222.
+bash scripts/subsystem-store-api/verify-byte-identity.sh \
+  --store ~/.claude/analyze-service-index --url http://127.0.0.1:8102 --token-file /tmp/tok \
+  --scope cli --scope storage-resolver
+#   expect: PASS cli … index-order-lines=2 accounted-for=38   (raw-diff-lines must EQUAL accounted-for)
+#           PASS storage-resolver …                            (the control: it passed BEFORE the fix too)
+shred -u /tmp/tok
+# 🔴 kill the port-forward by RESOLVED PID — never let a pattern reach pkill -f.
+
+# ---- the lag is real and expected; this is what it looks like ----
+#   FAIL scope=devrc entry SET differs local-only=0 pod-only=3
+#   That is the CORRECT verdict, not a regression. See the OPEN block.
+
 # ---- criterion 10 is DONE: one row, no unrestricted credential ----
 POD=$(KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod -l app=subsystem-store-api \
   -o jsonpath='{.items[0].metadata.name}')
 KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs $POD | grep -o 'token-ids=[^ ]*'
 #   expect exactly: token-ids=a8f329c534d7:zach
-
-# 🔴 the ABSENCE of the banner is the property — control it, or it is a zero wired to nothing
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs $POD | grep -c 'UNRESTRICTED-SCOPE'  # 0
-curl -s --get "http://192.168.50.94:30310/loki/api/v1/query_range" \
-  --data-urlencode 'query={namespace="subsystem-store"} |= "UNRESTRICTED-SCOPE LEGACY MODE"' \
-  --data-urlencode "start=$(( $(date -u +%s) - 7*86400 ))000000000" \
-  --data-urlencode "end=$(date -u +%s)000000000" --data-urlencode 'limit=100'
-#   POSITIVE CONTROL: must be non-zero (was 6). A zero here means the check proves nothing.
-
-# ---- the credentials: one lives, one is dead ----
-( set -a; . ~/.config/subsystem-store/env; set +a
-  curl -s -o /dev/null -w 'mapped -> %{http_code}\n' \
-    -H "Authorization: Bearer $SUBSYSTEM_STORE_TOKEN" "$SUBSYSTEM_STORE_URL/api/v1/recall/devrc" )
-#   200
-( set -a; . ~/.config/subsystem-store/env.bak-legacy-2026-08-29; set +a
-  curl -s -o /dev/null -w 'legacy -> %{http_code}\n' \
-    -H "Authorization: Bearer $SUBSYSTEM_STORE_TOKEN" "$SUBSYSTEM_STORE_URL/api/v1/recall/devrc" )
-#   401 — and this file is what rank 1 (d) shreds
-
-cairn sync                                    # live, 132 entries
-ssh zach@192.168.50.155 'cairn sync'          # the OTHER host must work too
-
-# ---- the secret in git matches the cluster ----
-git -C $HOMELAB show origin/trunk:clusters/homelab/apps/subsystem-store/secrets.enc.yaml \
-  > /tmp/t.yaml && SOPS_AGE_KEY_FILE=$HOMELAB/.secrets/age.key sops -d /tmp/t.yaml \
-  | python3 -c "import sys,yaml,hashlib; v=yaml.safe_load(sys.stdin)['stringData']['token']; \
-print(len(v), [hashlib.sha256(l.encode()).hexdigest()[:12] for l in v.split(chr(10))])"; rm -f /tmp/t.yaml
-#   295 ['ecc11c1b5b6e', 'e3b0c44298fc']   — 2481e4553f6c must NOT appear
-
-# ---- the guards ----
-nix-shell -p 'python3.withPackages(ps: [ps.pyyaml])' --run \
-  "bash scripts/tests/test-check-subsystem-store-phase1.sh"   # pass=25 fail=0
-bash scripts/check-sops-rules.sh                              # 32 rules, all *.enc.yaml encrypted
-python3 scripts/tests/preflight-subsystem-store-tokens.py <dir-with-pod-extracted-scripts>  # devrc, 8/8
 ```
