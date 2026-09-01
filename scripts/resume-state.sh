@@ -511,15 +511,23 @@ embedded_md_path(){
     # killed, each by a named test.
     case "$tok" in
       /*) ;;
-      *) # 🔴 `$mine` GATES THE RE-ANCHOR TOO, NOT ONLY THE WORKTREE SEARCH
-         # BELOW. Gating one and not the other is mutant X1, and it is not
-         # hypothetical: it SURVIVED all 178 tests and shipped in the first fix
-         # commit, because every foreign-token fixture kept its doc in a
-         # WORKTREE, so the plain re-anchor had nothing to find and no test
-         # could tell the two clauses apart. Without this, a foreign
-         # `other-repo/claudedocs/<base>` still resolves THIS repo's own copy —
-         # the pre-existing #1159 half of the hole, silently.
-         if [ -n "$mine" ] && [ -n "$root" ] && [ -f "$root/claudedocs/$base" ]; then
+      # 🔴 `$mine` GATES BOTH CLAUSES BELOW — the re-anchor AND the worktree
+      # search — and gating only one is a real, measured blind spot rather than
+      # a theoretical one. They are mutants X1 and X2, one per clause. X1
+      # SURVIVED the first battery run over 178 tests: every foreign-token
+      # fixture kept its doc in a WORKTREE, so the ungated re-anchor had nothing
+      # to find and no test could tell the two clauses apart. The fixture that
+      # separates them puts the doc in the BASE CLONE with no worktree
+      # (`test_a_FOREIGN_relative_token_is_not_re_anchored_on_THIS_repos_own_copy`).
+      #
+      # 🔴 DO NOT REFORMAT THE NEXT LINE. X1's mutation anchor is that whole
+      # line verbatim, `*)` and `if` together. Splitting it across two lines —
+      # to insert a comment exactly like this one — makes the pattern match 0x,
+      # and the row then reports NOT APPLIED instead of testing anything.
+      # MEASURED: that is what commit 60c893b7 did here, and it is the same
+      # defect #1115.1 fixed in `mutants-handoff-cap.sh`. Put prose above the
+      # `case`, never between `*)` and its command.
+      *) if [ -n "$mine" ] && [ -n "$root" ] && [ -f "$root/claudedocs/$base" ]; then
            hit="$root/claudedocs/$base"; break
          fi
          # …and the same worktree treatment on the same anchor, under the same
