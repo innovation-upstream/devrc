@@ -30,6 +30,13 @@ READ BEFORE TRUSTING A VERDICT:
   * SURVIVED does not mean "the code is wrong". It means "no test can see this
     change" — usually a missing test, occasionally genuinely-equivalent code.
     Every survivor is a question to answer, not a defect to fix.
+  * THERE ARE THREE KILL VERDICTS, because "a test failed" is not always the
+    claim a row is making. `KILLED` is the original criterion. A row that
+    carries an `expected` phrase (see the table header) reports
+    `KILLED(attributed)` when that phrase is in pytest's `E ` lines, and
+    `KILLED-WRONG-REASON` when it is not — the latter is a FAILURE of this
+    battery, counted with the survivors in the final line, because the row's
+    named assertion is not the one that went red.
   * The script is restored in a `finally`, so an abort mid-run does not leave a
     mutated `resume-state.sh` behind. Check `git diff` anyway if it dies hard.
 """
@@ -45,7 +52,23 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/resume-state.sh"
 SUITE = "scripts/tests/test_resume_state_handoff_resolution.py"
 
-# (id, shape, description, old, new) — `old` must occur EXACTLY once.
+# (id, shape, description, old, new[, expected]) — `old` must occur EXACTLY once.
+#
+# 🔴 `expected` IS OPTIONAL AND PER-ROW, AND THE VERDICT SAYS WHICH KIND YOU GOT.
+# Without it a row is scored on this battery's original criterion — "the suite
+# went red" — which is all most rows need, because most of them redden a handful
+# of tests that plainly own the behaviour. It is NOT enough for a row whose
+# claim is "only assertion A can see this": a mutant reddening 107 of 187 tests
+# stays KILLED with A deleted, so the row's comment would be the only thing
+# asserting the thing the row exists to assert. A row carrying `expected` is
+# killed only when that phrase appears in pytest's rendered `E ` lines — the
+# mechanism the sibling `mutation_battery_resume_state_skill.py` already
+# carries, ported here for X17 (audit of #1197, round 3, F2).
+#
+# Be precise about what that buys, in the sibling's exact words: it proves THE
+# TEST CARRYING THAT PHRASE IS THE ONE THAT WENT RED, not that the script
+# emitted anything. It does not rule out two tests sharing wording — so a phrase
+# used here must be one nothing else in the suite spells.
 #
 # 🔴 THAT "EXACTLY ONCE" IS NOW A GATE, NOT A CONVENTION.
 # `scripts/tests/test_mutation_battery_anchors.py` is COLLECTED and fails on any
@@ -379,16 +402,38 @@ MUTANTS: list[tuple[str, str, str, str | tuple, str | tuple]] = [
       '    # The `handoff:` line names the FILE and nothing else'),
      ('    if true; then\n',
       '  if false; then\n'
-      '    # The `handoff:` line names the FILE and nothing else')),
+      '    # The `handoff:` line names the FILE and nothing else'),
+     # 🔴 ATTRIBUTED, because the bare kill criterion cannot carry this row's
+     # claim. X17 reddens 107 of 187 tests, so `if not nf` stays true with the
+     # assertion X17 exists for DELETED — measured (audit of #1197, round 3,
+     # F2). This phrase is the token that assertion and nothing else in the
+     # suite spells.
+     "WHOLE-DIGEST CHECK"),
 ]
 
 
-def run_suite() -> tuple[int, int, list[str]]:
-    env = {**os.environ, "PYTHONPATH": str(ROOT / "scripts")}
+def run_suite(messages: bool = False) -> tuple[int, int, list[str], str]:
+    """Run the resolution suite once. Returns (failed, passed, killers, msgs).
+
+    🔴 `messages` COSTS A DIFFERENT TRACEBACK MODE, so it is opt-in per row.
+    `--tb=no` renders no assertion text at all, so `msgs` is empty under it and
+    an `expected` phrase could never match; `--tb=short` renders the failures of
+    a 107-test kill, which is a lot of output to format for the ~60 rows that do
+    not need it. Only rows carrying `expected` pay for it.
+
+    🔴 ONLY THE `E ` LINES COUNT AS "THE MESSAGE" — the sibling battery's
+    hard-won detail. Under `--tb=short` pytest also echoes the SOURCE of the
+    failing statement, which for an assert with an f-string message contains
+    that message's literal text; matching against the whole output therefore
+    reports a right-reason kill for a test that never ran the assertion. pytest
+    prefixes rendered assertion lines with `E ` and source echo with nothing.
+    """
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "scripts"),
+           "PYTHONDONTWRITEBYTECODE": "1"}
     r = subprocess.run(
         [sys.executable, "-m", "pytest", SUITE, "-p", "no:cacheprovider",
          "-p", "testlib.nolaunch_plugin", "-p", "testlib.spool_plugin",
-         "--tb=no", "-q"],
+         "--tb=short" if messages else "--tb=no", "-q"],
         cwd=ROOT, capture_output=True, text=True, env=env, timeout=1800,
     )
     out = r.stdout
@@ -396,13 +441,14 @@ def run_suite() -> tuple[int, int, list[str]]:
                       for ln in out.splitlines() if ln.startswith("FAILED")})
     nfail = int(m.group(1)) if (m := re.search(r"(\d+) failed", out)) else 0
     npass = int(m.group(1)) if (m := re.search(r"(\d+) passed", out)) else 0
-    return nfail, npass, killers
+    msgs = "\n".join(ln for ln in out.splitlines() if ln.startswith("E "))
+    return nfail, npass, killers, msgs
 
 
 def main() -> int:
     orig = SCRIPT.read_text(encoding="utf-8")
     try:
-        nf, np_, _ = run_suite()
+        nf, np_, _, _ = run_suite()
         print(f"CONTROL (pristine): {np_} passed, {nf} failed")
         # 🔴 BOTH halves — see this module's docstring. A green-looking zero is
         # what a battery wired to nothing reports.
@@ -412,7 +458,9 @@ def main() -> int:
             return 1
 
         survived: list[str] = []
-        for mid, shape, desc, old, new in MUTANTS:
+        for row in MUTANTS:
+            mid, shape, desc, old, new = row[:5]
+            expected = row[5] if len(row) > 5 else None
             # One edit or several: a tuple means every pair is applied in order,
             # and EACH is still required to occur exactly once. A multi-site
             # mutant whose second half silently did not apply would be scored on
@@ -429,17 +477,30 @@ def main() -> int:
             for o, nw in pairs:
                 mutated = mutated.replace(o, nw)
             SCRIPT.write_text(mutated, encoding="utf-8")
-            nf, _np, killers = run_suite()
+            nf, _np, killers, msgs = run_suite(messages=expected is not None)
             if not nf:
+                verdict = "SURVIVED"
+                survived.append(mid)
+            elif expected is None:
+                verdict = "KILLED "
+            elif expected in msgs:
+                verdict = "KILLED(attributed)"
+            else:
+                # 🔴 A FAILURE OF THIS BATTERY, not of the script: the row's
+                # named assertion is not the one that went red, so whatever the
+                # row's comment claims about reachability is unproven.
+                verdict = "KILLED-WRONG-REASON"
                 survived.append(mid)
             shown = ", ".join(k[:56] for k in killers[:3])
             extra = f" (+{len(killers) - 3} more)" if len(killers) > 3 else ""
-            print(f"{mid:4} {shape:16} {'KILLED ' if nf else 'SURVIVED'} "
-                  f"f={nf:<3} {desc}")
+            print(f"{mid:4} {shape:16} {verdict} f={nf:<3} {desc}")
+            if verdict == "KILLED-WRONG-REASON":
+                print(f"     expected {expected!r} in the `E ` lines; not found")
             if killers:
                 print(f"     killers: {shown}{extra}")
-        print(f"\n{len(MUTANTS) - len(survived)}/{len(MUTANTS)} killed; "
-              f"survived: {survived or 'none'}")
+        print(f"\n{len(MUTANTS) - len(survived)}/{len(MUTANTS)} killed (rows "
+              f"carrying `expected`: for the RIGHT reason); "
+              f"problems: {survived or 'none'}")
         return 1 if survived else 0
     finally:
         SCRIPT.write_text(orig, encoding="utf-8")

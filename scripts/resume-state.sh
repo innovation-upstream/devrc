@@ -469,19 +469,34 @@ embedded_md_path(){
     # mean "a foreign tree is never re-anchored": the test is `<Y>`'s LAST
     # COMPONENT, so ANY relative token whose directory part ends in a component
     # spelled like this checkout re-anchors here, wherever it actually points.
-    # MEASURED 2026-09-01 from a checkout named `devrc`, both with NO gap:
     #
-    #   backup/devrc/claudedocs/<base>        -> resolves THIS repo's copy
-    #   ../elsewhere/devrc/claudedocs/<base>  -> resolves THIS repo's copy
+    # 🔴 AND RE-ANCHORING IS NOT "RESOLVES THIS REPO'S COPY WITH NO GAP" — that
+    # is what this paragraph used to say, and it was narrower than the behaviour
+    # in the direction of the harm (audit of #1197, round 3). Re-anchoring hands
+    # the token to the SAME resolution a token naming this tree honestly gets,
+    # worktree search included, so there are THREE legs and only two are
+    # gapless. MEASURED 2026-09-01 from a checkout named `devrc`, with both
+    # `backup/devrc/claudedocs/<base>` and `../elsewhere/devrc/claudedocs/<base>`:
+    #
+    #   base clone holds <base>       -> resolves the base clone's copy, no gap
+    #   ONLY a linked worktree does   -> resolves OUT OF THAT WORKTREE, which is
+    #                                    another branch's checkout and is what
+    #                                    the `# repo:` line then names; no gap
+    #   SEVERAL worktrees do          -> nothing is chosen, and the AMBIGUITY
+    #                                    gap fires naming them
     #
     # It is the unavoidable cost of a name-based discriminator, not an
     # oversight, and it is bounded: a foreign tree with a DIFFERENT last
     # component misses, the compare is case-SENSITIVE so `DEVRC/claudedocs/…`
     # misses, and an ABSOLUTE token never re-anchors at all. Widening the
     # discriminator needs one that a foreign SIBLING fails, which `-d` does not
-    # (above). Pinned by `test_a_FOREIGN_tree_whose_LAST_COMPONENT_matches_this
-    # _repo_STILL_re_anchors` and stated in SKILL.md, so nobody reads the gate
-    # as stronger than it is.
+    # (above). All three legs are pinned — the first two by
+    # `test_a_FOREIGN_tree_whose_LAST_COMPONENT_matches_this_repo_STILL_re_anchors`
+    # (parametrised over WHICH tree holds the doc, and asserting the `# repo:`
+    # line, because the `handoff:` line is a basename and cannot tell them
+    # apart), the third by `test_the_residual_ALSO_hits_the_AMBIGUITY_gap_when_
+    # SEVERAL_worktrees_hold_it` — and stated in SKILL.md, so nobody reads the
+    # gate as stronger than it is.
     #
     # ⚠ THIS NARROWS A LEGITIMATE-BUT-AMBIGUOUS CASE, DELIBERATELY. A relative
     # token naming a SIBLING WORKTREE OF THE SAME CLONE — `devrc-topic/

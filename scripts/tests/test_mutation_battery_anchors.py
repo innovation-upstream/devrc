@@ -26,13 +26,36 @@ tomorrow without anyone remembering to.
 
 ⚠ SCOPE — the `.sh` batteries are NOT covered. `scripts/tests/mutants-*.sh`
 carry their anchors as shell heredocs/`sed` expressions rather than a Python
-table, so nothing here can read them; they keep their own in-script checks.
-`git grep -l 'PATTERN OCCURS' scripts/tests/` enumerates both families.
+table, so nothing here can read them. Each does carry its own in-script
+did-not-apply control — checked file by file rather than assumed, 2026-09-01 —
+but they do not agree on how to SPELL it: most print `MUTATION DID NOT APPLY`,
+`mutants-dead-guard-exclude.sh` prints `mutation did not apply uniquely`, and
+`mutants-install-sh.sh` prints `🔴 NOT-APPLIED`.
+
+🔴 SO ENUMERATE BY FILENAME, NOT BY MARKER — no single marker grep sees both
+families, and none is authoritative even within the `.sh` one:
+
+    ls scripts/tests/mutants-* scripts/tests/mutation_battery_*
+
+That is the whole population: `mutants-*` (mostly `.sh`, plus the
+function-style `mutants-audit-dispatch.py`) and `mutation_battery_*.py`. The
+PYTHON half of it is pinned two-way by
+`test_the_battery_ledger_names_every_python_instrument` below, so treat that
+test — not this paragraph — as the ledger; the `.sh` half is described here and
+enforced nowhere, so re-run the `ls`.
+
+This paragraph used to hand over `git grep -l 'PATTERN OCCURS' scripts/tests/`
+as the enumerator of "both families". It returns the two Python batteries and
+this file and **no `.sh` at all** — `PATTERN OCCURS` is the Python family's
+spelling alone — so a reader who ran it concluded there are no `.sh` batteries,
+contradicting the sentence three lines above it. (audit of #1197, round 3, F3.)
 """
 
 from __future__ import annotations
 
 import importlib.util
+import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -40,21 +63,38 @@ import pytest
 HERE = Path(__file__).resolve().parent
 
 # Every battery whose anchors this module pins. Kept in sync with the directory
-# by `test_the_battery_ledger_names_every_python_battery` below, so a third
+# by `test_the_battery_ledger_names_every_python_instrument` below, so a third
 # battery is covered by adding it here and cannot be added by forgetting to.
 BATTERIES = (
     "mutation_battery_resume_state.py",
     "mutation_battery_resume_state_skill.py",
 )
 
+# 🔴 PYTHON MUTATION INSTRUMENTS THIS MODULE CANNOT PIN, each with its reason.
+# The ledger below globs BOTH naming conventions — `mutation_battery_*.py` is
+# the MINORITY one (two files against ten `mutants-*`), so a future Python
+# battery named `mutants-<x>.py` would have sat outside a "two-way pin" that
+# read as directory-wide. It is a named exemption rather than a pattern, and
+# `test_the_EXEMPTION_list_is_not_a_hiding_place` re-checks the reason.
+# (audit of #1197, round 3, F5.)
+NOT_TABLE_DRIVEN = {
+    # Builds each mutant with a Python FUNCTION that rewrites the source; there
+    # is no `MUTANTS` table of `(id, …, old, new)` rows to read anchors out of.
+    # It does its own uniqueness checking in `_require_unique`/`_sub_unique`.
+    "mutants-audit-dispatch.py",
+}
 
-def _load(filename: str):
+
+def _load(filename: str | Path):
     """Import a battery for its `MUTANTS` table and its `SCRIPT` path.
 
     Both batteries keep every side effect under `if __name__ == "__main__"`, so
-    importing one runs no subprocess and rewrites nothing.
+    importing one runs no subprocess and rewrites nothing. A bare name resolves
+    against this directory; a Path is used as given, which is what lets the
+    negative controls load a deliberately-broken COPY from a tmpdir instead of
+    editing a real battery in the tree.
     """
-    path = HERE / filename
+    path = Path(filename) if Path(filename).is_absolute() else HERE / filename
     spec = importlib.util.spec_from_file_location(f"_anchors_{path.stem}", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -149,14 +189,122 @@ def test_the_anchor_check_is_not_vacuous_because_the_tables_are_NON_EMPTY():
         assert mod.SCRIPT.is_file(), f"{battery}: SCRIPT does not exist"
 
 
-def test_the_battery_ledger_names_every_python_battery():
-    """TWO-WAY PIN. A battery added to the directory but not to `BATTERIES`
-    would be uncovered while this module reads as covering them all."""
-    on_disk = sorted(p.name for p in HERE.glob("mutation_battery_*.py"))
-    assert on_disk == sorted(BATTERIES), (
-        "the battery ledger disagrees with scripts/tests/.\n"
-        f"  on disk: {on_disk}\n"
-        f"  ledger:  {sorted(BATTERIES)}\n"
-        "Add the new battery to BATTERIES (and check its table keeps `old` as "
-        "the 4th field), or remove the stale name."
+def _python_instruments() -> list[str]:
+    """Every Python mutation instrument in `scripts/tests/`, under EITHER
+    naming convention — `mutation_battery_*.py` and `mutants-*.py`."""
+    return sorted({p.name
+                   for pat in ("mutation_battery_*.py", "mutants-*.py")
+                   for p in HERE.glob(pat)})
+
+
+def test_the_battery_ledger_names_every_python_instrument():
+    """TWO-WAY PIN. A battery added to the directory but named in neither
+    `BATTERIES` nor `NOT_TABLE_DRIVEN` would be uncovered while this module
+    reads as covering them all — and, before F5, a battery named `mutants-*.py`
+    would have been uncovered *and* undetected, because the glob only saw the
+    minority convention."""
+    on_disk = _python_instruments()
+    accounted = {*BATTERIES, *NOT_TABLE_DRIVEN}
+    unaccounted = [n for n in on_disk if n not in accounted]
+    assert not unaccounted, (
+        "python mutation instrument(s) in scripts/tests/ that this module "
+        f"neither pins nor exempts: {unaccounted}\n"
+        "Add it to BATTERIES (and check its table keeps `old` as the 4th "
+        "field), or to NOT_TABLE_DRIVEN with the reason it has no readable "
+        "`MUTANTS` table."
+    )
+    stale = sorted(n for n in accounted if n not in on_disk)
+    assert not stale, (
+        f"the ledger names file(s) that are not on disk: {stale}\n"
+        f"  on disk: {on_disk}"
+    )
+
+
+def test_the_EXEMPTION_list_is_not_a_hiding_place():
+    """🔴 An exemption written when a file had no `MUTANTS` table must not
+    survive the file GROWING one — that is how a battery ends up unpinned
+    behind a reason that stopped being true. Re-checked from the source."""
+    for name in sorted(NOT_TABLE_DRIVEN):
+        src = (HERE / name).read_text(encoding="utf-8")
+        assert not re.search(r"(?m)^MUTANTS\b", src), (
+            f"{name} is exempted from the anchor check as having no `MUTANTS` "
+            "table, and it now has one. Move it from NOT_TABLE_DRIVEN to "
+            "BATTERIES."
+        )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A MULTI-SITE ROW MUST PAIR EVERY `old` WITH A `new` (audit of #1197, F4)
+# --------------------------------------------------------------------------- #
+def _pair_offenders(rows) -> list[str]:
+    """Rows whose `old`/`new` cannot be zipped into complete pairs.
+
+    Both batteries build their sites as `list(zip(old, new))` and then derive
+    the occurrence check FROM those pairs. `zip` truncates to the shorter
+    operand, so `old=(A, B), new=(N,)` drops site B out of the count *and* out
+    of the application, and the half-mutant is scored under the row's name —
+    verbatim the failure the comment above each `zip` says it prevents. A `new`
+    handed over as a 2-character STRING is worse: it zips character-wise and
+    applies two single-character substitutions the row does not describe.
+    """
+    bad = []
+    for row in rows:
+        old, new = row[3], row[4]
+        if isinstance(old, tuple) and not isinstance(new, tuple):
+            bad.append(f"{row[0]}: `old` is a {len(old)}-tuple but `new` is a "
+                       f"{type(new).__name__} — zip() would pair CHARACTERS")
+        elif not isinstance(old, tuple) and isinstance(new, tuple):
+            bad.append(f"{row[0]}: `new` is a tuple but `old` is not — "
+                       "str.replace() would be handed a tuple")
+        elif isinstance(old, tuple) and len(old) != len(new):
+            bad.append(f"{row[0]}: {len(old)} old pattern(s) against "
+                       f"{len(new)} new — zip() would silently drop "
+                       f"{abs(len(old) - len(new))} site(s)")
+    return bad
+
+
+@pytest.mark.parametrize("battery", BATTERIES)
+def test_a_MULTI_SITE_row_pairs_every_old_with_a_new(battery):
+    """🔴 THE GUARD. Latent, not live: no row is malformed today, which is
+    exactly when the pin is cheap to add and impossible to argue with."""
+    bad = _pair_offenders(_load(battery).MUTANTS)
+    assert not bad, (
+        f"{battery}: {len(bad)} row(s) cannot be zipped into complete pairs. "
+        "A truncated row applies FEWER edits than it names, passes the "
+        "occurrence check on the sites that survived the zip, and is scored "
+        "under the row's id.\n" + "\n".join(f"  {b}" for b in bad)
+    )
+
+
+@pytest.mark.parametrize("battery", BATTERIES)
+def test_the_PAIR_check_goes_RED_on_a_real_battery_COPY(battery, tmp_path):
+    """🔴 NEGATIVE CONTROL, end to end, on a COPY — never on a battery in the
+    tree, which the collected suite and any concurrent author both read.
+
+    A stub object would only prove `_pair_offenders` can count. This copies the
+    real file out, truncates its FIRST multi-site row's `new` tuple by textual
+    surgery, imports the copy through the same `_load`, and requires the guard
+    to name that row. If no row in the battery is multi-site there is nothing
+    to truncate and the control skips itself LOUDLY rather than passing.
+    """
+    mod = _load(battery)
+    multi = [r[0] for r in mod.MUTANTS if isinstance(r[3], tuple)]
+    if not multi:
+        pytest.skip(f"{battery} has no multi-site row to truncate")
+
+    copy = tmp_path / battery
+    shutil.copy(HERE / battery, copy)
+    src = copy.read_text(encoding="utf-8")
+    # Append a row that is malformed in the way F4 describes, built from the
+    # first real multi-site row so the shape is the battery's own.
+    row = next(r for r in mod.MUTANTS if isinstance(r[3], tuple))
+    injected = (row[0] + "-TRUNCATED",) + tuple(row[1:3]) + (row[3], row[4][:-1]) \
+        + tuple(row[5:])
+    src += f"\nMUTANTS.append({injected!r})\n"
+    copy.write_text(src, encoding="utf-8")
+
+    bad = _pair_offenders(_load(copy).MUTANTS)
+    assert any(b.startswith(row[0] + "-TRUNCATED:") for b in bad), (
+        "the pair check did not report the truncated row — it cannot see the "
+        f"failure it exists for. offenders={bad!r}"
     )

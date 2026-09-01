@@ -27,8 +27,11 @@ default for any file-modifying agent — so this fires on the repo's own mandate
   closing **#1164**. Branched off `d86e5f81`. Not merged. *(This line said `6f4d748b`,
   which is two commits back — `6f4d748b` was the head when the sentence was written and
   `f8309584`/`cf1b6f81` landed after it. A recorded sha ages; re-read
-  `git rev-parse HEAD` rather than this line.)* **Audit round 2's fixes are in the working
-  tree, uncommitted, on top of `cf1b6f81`.**
+  `git rev-parse HEAD` rather than this line.)* **Audit round 2's fixes ARE COMMITTED, as
+  `7285291b` on top of `cf1b6f81`.** *(This read "in the working tree, uncommitted" — a state
+  its own commit falsified, and the sha above already carries a self-disclaimer this sentence
+  did not. Round 3's fixes sit on top of `7285291b`; corrected by hand, because
+  `handoff_doc.py` cannot make a factual correction inside a REPLACE section.)*
 - 🔴 **I MISDIAGNOSED A MUTANT AS SHIPPED CODE, committed the false claim as
   `60c893b7`, and retracted it in `6f4d748b`.** I ran the mutation battery — which
   rewrites `scripts/resume-state.sh` IN PLACE, once per mutant — in this worktree while a
@@ -102,7 +105,7 @@ default for any file-modifying agent — so this fires on the repo's own mandate
 - **Suite: 180 passed.** `bash -n` clean. Behaviour at `6f4d748b` is identical to
   `d756a1f8` — the diff between them is comment-only, checked mechanically.
 
-### Audit round 2 (uncommitted, on top of `cf1b6f81`) — 6 findings, all closed
+### Audit round 2 (committed as `7285291b`, on top of `cf1b6f81`) — 6 findings, all closed
 - 🔴 **🟡-1 the deploy claim was WRONG in the direction that inverts the fix** — see Next
   steps 2. `scripts/resume-state.sh` is a plain working-tree file, `SKILL.md` is nix-managed.
 - 🔴 **🟡-2 the DO-NOT-REFORMAT comment is no longer the guard.** New COLLECTED test
@@ -177,13 +180,25 @@ default for any file-modifying agent — so this fires on the repo's own mandate
   collected test (`test_mutation_battery_anchors.py`), so a 0x/2x anchor now fails the gate.
 
 ## Next steps (ranked)
-1. **Commit round 2's working-tree fixes, re-run BOTH tiers on the branch AND on a fresh
-   merged tree, then delta re-audit ROUND 2's diff (`cf1b6f81..HEAD`), then merge.**
-   Round 2 produced 6 findings and all 6 were fixed, so the ladder CONTINUES — an audit fix
-   resets the verification gate, and the delta to audit is round 2's own, not
-   `3e42bb04..cf1b6f81`. Stop on the first round that returns no finding.
+1. **Commit ROUND 3's working-tree fixes, re-run BOTH tiers on the branch AND on a fresh
+   merged tree, then delta re-audit ROUND 3's diff (`7285291b..HEAD`), then merge.**
+   *(This step used to name round 2 and `cf1b6f81..HEAD`. Round 2 was committed as
+   `7285291b` and audited: round 3 returned 7 findings — 4 of them prose over-claims, which
+   is this branch's recurring defect — and all 7 were fixed. Those fixes are in the working
+   tree, UNCOMMITTED, on top of `7285291b`; nothing below has been re-measured against a
+   commit yet. ⚠ **One round-3 finding was itself partly wrong, and the fix says so rather
+   than encoding it:** F3 asserted `mutants-dead-guard-exclude.sh` and `mutants-install-sh.sh`
+   carry no did-not-apply control "in any spelling". Both do — `mutation did not apply
+   uniquely` and `🔴 NOT-APPLIED` respectively, verified file by file — so what was actually
+   broken was only the enumerator command, and writing the claimed exception into the
+   docstring would have shipped a new false sentence inside the fix for a false sentence.)*
+   The ladder CONTINUES — an audit fix resets the verification gate, and the
+   delta to audit is round 3's own, not `cf1b6f81..7285291b`. Stop on the first round that
+   returns no finding.
    ⚠ The merged-tree result recorded below was measured at `9bd136a2` and is now stale:
-   round 2 touched 5 files and `origin/main` has moved to `07a22f14`.
+   rounds 2 and 3 touched 6 files (measured, `cf1b6f81..HEAD` plus the working tree) and this
+   worktree's `origin/main` ref already reads `836bac03`, not `07a22f14` — **re-fetch rather
+   than trusting either sha; both age.**
    forcing: gate — both required checks block the merge with `enforce_admins: true`.
 2. 🔴 **After merge run `scripts/ship.sh` — the two halves of this change deploy
    DIFFERENTLY, and doing only one INVERTS the fix.** This doc previously said both are
@@ -284,9 +299,15 @@ default for any file-modifying agent — so this fires on the repo's own mandate
   suppression to `unresolved` would break it. Guarded by
   `test_a_bare_BASENAME_slug_STILL_falls_back_and_resolves` and
   `test_the_civitai_slug_STILL_falls_back_and_resolves`; mutant **W10** (widen the gate to
-  any supplied argument) is killed by 42 tests including both. *(This read `X10`, which is
-  a different row — the `LC_ALL=C` locale pin. The battery's ids are not sequential across
-  families; quote the id from the table, not from memory.)*
+  any supplied argument) is killed by **47** tests including both. *(This read `X10`, which
+  is a different row — the `LC_ALL=C` locale pin. The battery's ids are not sequential across
+  families; quote the id from the table, not from memory.)* *(And the count read **42**: the
+  commit that corrected `X10`→`W10` carried the old number through, in the same edit that
+  deleted an unenforced count on the grounds that a number nothing enforces is one edit from
+  being wrong. 47 is MEASURED here — `W10 … f=47` in a full battery run on the round-3 tree,
+  CONTROL 190 passed / 0 failed, 0 NOT APPLIED; audit round 3 separately reports the same 47
+  at `7285291b` and `cf1b6f81`, which is its measurement and not mine. It is still enforced
+  by nothing, so re-run the battery rather than quoting this line.)*
   *(Carried forward by hand: the merge tool warned this line was being dropped from a REPLACE
   section, and it was right — the reason had vanished from the doc while the code kept the
   behaviour.)*

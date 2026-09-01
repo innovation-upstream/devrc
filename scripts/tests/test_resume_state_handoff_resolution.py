@@ -645,8 +645,19 @@ def test_a_prose_path_that_does_NOT_exist_is_not_taken(tmp_path, stub_bin, docs)
     # claimed something about the digest. Coverage that reads as coverage and
     # provides none is worse than none — it stops anyone looking. (audit of
     # #1197, F7.)
+    #
+    # 🔴 THE MESSAGE CARRIES A TOKEN NOTHING ELSE IN THIS FILE SPELLS, and that
+    # is load-bearing rather than decorative: `mutation_battery_resume_state.py`
+    # row X17 exists ONLY to prove this assertion reachable, and it fails 107
+    # tests, so "a test failed" cannot tell whether THIS one was among them.
+    # X17 names this token as its `expected` phrase, which is what makes
+    # deleting this line flip X17 to KILLED-WRONG-REASON instead of leaving it
+    # printing KILLED. (audit of #1197, round 3, F2.)
     for doc in docs:                       # nothing else was substituted either
-        assert doc not in out, f"{doc} was reconciled anyway\n{out}"
+        assert doc not in out, (
+            f"{doc} was reconciled anyway — WHOLE-DIGEST CHECK (the `handoff:` "
+            f"line above can deny this and be wrong)\n{out}"
+        )
     assert any("handoff-gone" in g for g in gap_lines(out)), out
     # …and the all-clear is withdrawn, which is the harm, not the filename.
     assert "matches the handoff's claims" not in " ".join(drift_lines(out)), out
@@ -3128,12 +3139,44 @@ def test_a_HUMAN_named_worktree_is_shown_ahead_of_EPHEMERAL_agent_checkouts(
         pytest.param("../elsewhere/devrc", True, id="sibling-repo-exists-lacks-doc"),
     ],
 )
+@pytest.mark.parametrize(
+    "holder",
+    [
+        # the copy sits in the base clone the re-anchor lands on …
+        pytest.param("base-clone", id="doc-in-the-base-clone"),
+        # … or ONLY in one of its linked worktrees, on another branch, which the
+        # re-anchor then reaches out into. Same token, one notch further.
+        pytest.param("linked-worktree", id="doc-only-in-a-linked-worktree"),
+    ],
+)
 def test_a_FOREIGN_tree_whose_LAST_COMPONENT_matches_this_repo_STILL_re_anchors(
-    tmp_path, stub_bin, ydir, make_it
+    tmp_path, stub_bin, ydir, make_it, holder
 ):
-    """⚠ THE RESIDUAL, pinned so it is a recorded decision and not a surprise."""
-    repo = make_repo(tmp_path, docs=(WANTED, DECOY), name="devrc")
-    assert (repo / "claudedocs" / WANTED).is_file()
+    """⚠ THE RESIDUAL, pinned so it is a recorded decision and not a surprise.
+
+    🔴 `holder` IS THE LEG THIS TEST DID NOT HAVE (audit of #1197, round 3, F1).
+    It only ever put the doc in the BASE CLONE, while the sentences it is cited
+    by — in `SKILL.md` and in `resume-state.sh` — said the re-anchor resolves
+    "this repo's copy with no gap". Both halves of that were narrower than the
+    behaviour, in the direction of the harm: the re-anchor also runs the WORKTREE
+    search, so with the doc only in a linked worktree on another branch the run
+    answers out of THAT checkout (`# repo:` names it), and when several
+    worktrees hold it the ambiguity gap fires instead of "no gap" — pinned by
+    `test_the_residual_ALSO_hits_the_AMBIGUITY_gap_when_SEVERAL_worktrees_hold_it`.
+    """
+    if holder == "base-clone":
+        repo = make_repo(tmp_path, docs=(WANTED, DECOY), name="devrc")
+        answered_by = repo
+        assert (repo / "claudedocs" / WANTED).is_file()
+    else:
+        repo = make_repo(tmp_path, docs=(DECOY,), name="devrc")
+        answered_by = add_worktree(
+            repo, "devrc-topic", "feat/topic", docs=(WANTED,)
+        )
+        assert not (repo / "claudedocs" / WANTED).exists(), (
+            "the worktree leg must NOT put the doc in the base clone, or it is "
+            "the base-clone leg under a second name"
+        )
     if make_it:
         other = make_repo(tmp_path, docs=(), name="elsewhere/devrc")
         assert not (other / "claudedocs" / WANTED).exists(), (
@@ -3144,6 +3187,40 @@ def test_a_FOREIGN_tree_whose_LAST_COMPONENT_matches_this_repo_STILL_re_anchors(
     out = run_resume(repo, stub_bin, f"{ydir}/claudedocs/{WANTED}", cwd=repo)
     assert handoff_line(out) == f"handoff: {WANTED}", out
     assert gap_lines(out) == [], out
+    # 🔴 WHICH TREE ANSWERED. The `handoff:` line is a BASENAME and identical in
+    # both legs, so without this the worktree leg is the base-clone leg under a
+    # second id. Compared by directory NAME, not by path, because a symlinked
+    # tmpdir makes the two spellings differ.
+    assert Path(_repo_as_the_script_resolved_it(out)).name == answered_by.name, out
+
+
+def test_the_residual_ALSO_hits_the_AMBIGUITY_gap_when_SEVERAL_worktrees_hold_it(
+    tmp_path, stub_bin
+):
+    """⚠ THE THIRD LEG of the residual — and the one that makes "with no gap"
+    false as a universal claim (audit of #1197, round 3, F1).
+
+    The re-anchored token goes through the SAME worktree search as a token that
+    names this tree honestly, so it inherits the same refusal: two worktrees
+    holding the basename is a fork, nothing is chosen, and the gap says so. The
+    residual is therefore "re-anchors here and then resolves exactly as a token
+    naming this tree would" — not "resolves this repo's copy".
+    """
+    repo = make_repo(tmp_path, docs=(DECOY,), name="devrc")
+    a = add_worktree(repo, "devrc-a", "feat/a", docs=(WANTED,))
+    b = add_worktree(repo, "devrc-b", "feat/b", docs=(WANTED,))
+    tok = f"backup/devrc/claudedocs/{WANTED}"
+
+    out = run_resume(repo, stub_bin, tok, cwd=repo)
+    assert handoff_line(out) == "handoff: (none found — git-only)", out
+    gaps = gap_lines(out)
+    assert len(gaps) == 1, gaps
+    # The expected paths come from the FIXTURE, not from the digest; the shell
+    # sorts them under LC_ALL=C, so this does too.
+    paths = ", ".join(sorted(f"{w}/claudedocs/{WANTED}" for w in (a, b)))
+    assert gaps[0] == GAP_LEAD_AMBIGUOUS.format(
+        tok=tok, base=WANTED, n=2, paths=paths
+    ) + GAP_REST_NONE, gaps[0]
 
 
 @pytest.mark.parametrize(
