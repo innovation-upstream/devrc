@@ -9,9 +9,9 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Ranks 1–8, 13, 15 and 16 are ✅ DONE. Rank 14 is 🔵 IN FLIGHT as `ZacxDev/homelab-infra#632`
-(open, CI running). Ranks 10, 11, 12 remain OPEN** (12 is clawgate task #463 and explicitly NOT
-ours). The live-refresh work (`ZacxDev/homelab-infra#611`) is DONE, merged, and **deployed as
+**Ranks 1–8, 13, 14, 15 and 16 are ✅ DONE. Ranks 10, 11, 12 remain OPEN** (12 is clawgate task
+#463 and explicitly NOT ours). Rank 14 merged as `ZacxDev/homelab-infra#632`, squash `b2fecf49`,
+content-verified on `origin/trunk`. The live-refresh work (`ZacxDev/homelab-infra#611`) is DONE, merged, and **deployed as
 0.8.21**.
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC — `clawgatectl health` is the only authority.**
@@ -70,17 +70,22 @@ and `#panel-layout`; the SSE stream carried **2 `tmux.changed` events in a 180 s
   `origin/trunk` (`c9c6388d`).
 - **DONE this session:** rank 14 built, mutation-verified and shipped as
   `ZacxDev/homelab-infra#632` (head `94cf920e`). Rank 8a re-measured green (above).
-- 🔴 **NOT VERIFIED and it cannot be from here: #632's CI.** `tekton/clawgate-ci` and
-  `tekton/clawgate-e2e` both **registered and were `pending`** at handoff. Neither verdict was read.
-  The PR touches `containers/clawgate/**`, so the path filter DID fire — which is itself the thing
-  #618/#625 wanted proven, and rank 16's live proof (`step-hook` showing TWO plan lines and
-  `floor=34` / `floor=31`, never a single `1..67`) can be read off **this** run.
+- ✅ **#632's CI came back and it MERGED** — `clawgate-ci` pass (build/vet/test **-race** +
+  extension + hook bats), `clawgate-e2e` pass (127 tests, 2 skipped), `ux-audit-clawgate` pass;
+  `gitops-validate` RED on two Python tests that fail on two other revisions independently (see
+  rank 14). The PR touches `containers/clawgate/**` so the path filter DID fire — rank 16's live
+  proof (`step-hook`: TWO plan lines, `floor=34` / `floor=31`, never a single `1..67`) is readable
+  off this run.
+- ✅ **This doc's own PR, `devrc#1224`, merged as squash `f8ade1d7`** — required checks green:
+  pytests `collected=20359 passed=20356 skipped=3 failed=0` (floor 18404), nodetests
+  `tests=1449 pass=1449 fail=0` (floor 1367). Base clone fast-forwarded; the other session's five
+  WIP files were left untouched.
 - **Branch verified after push, not trusted from the push message:** local HEAD ==
   `git ls-remote` == `94cf920e`, 1 commit ahead of `origin/trunk`, tree clean, no `autocommit:`
   fixture commits. `core.hooksPath` measured at push time was repo-LOCAL and pointed at
   `<repo>/.git/hooks` (sample-only, so nothing ran) — the documented volatile value.
-- **Claim held:** `tmux-webapp-14` (`claim-work --release tmux-webapp-14` when #632 merges).
-  The worktree `~/workspace/ht-r14-800677` is still present and clean; remove it after merge.
+- **Claim `tmux-webapp-14` RELEASED**; worktree `~/workspace/ht-r14-800677` removed and pruned;
+  `~/workspace/homelab-talos` fast-forwarded to `b2fecf49`.
 - **No `clawgate-task:` field is recorded for this session.** `clawgate_handoff.sh resolve` exited
   **5** — 0 tasks — with its positive control confirming the board was reachable and the token
   accepted. 🔴 That is NOT a clean bill of health: a wrong `CLAUDE_CODE_SESSION_ID` also answers 200
@@ -323,10 +328,20 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     pre-change `origin/main`; the 8th is labelled in place as an invariant guard, not counted as
     regression coverage.
     forcing: none
-14. 🔵 **IN FLIGHT: `ZacxDev/homelab-infra#632`** (opened 2026-09-01, `fix/push-fanout-ledger-pins-sync-precondition`,
-    head `94cf920e`, test-only, +390 in one file). Do NOT re-do it; read the PR, then merge it once
-    `clawgate-ci` + `clawgate-e2e` report. Both registered and were RUNNING at handoff — no verdict
-    was read, so nothing here claims one.
+14. ✅ **DONE 2026-09-01 — `ZacxDev/homelab-infra#632`, squash `b2fecf49`.** Content-verified on
+    `origin/trunk` (never ancestry): the file went **168 → 558 lines**, all three new functions
+    present, with a nonexistent-marker grep returning 0 as the control that the check discriminates.
+    🔴 **It was merged over a RED `tekton/gitops-validate`, and that is NOT a claim the leg passed.**
+    The check text said `FAILED: scripts-tests` while `step-scripts-tests` **exited 0** — the
+    documented text-vs-PipelineRun disagreement; the real failures were
+    `test_s3_public_bucket_allowlist.py` and `test_loki_ruler_rules_wired.py`. **The discriminating
+    control, measured, not theorised:** `gitops-validate-wb42q` (rev `d2b775d9`, not mine) fails the
+    first and `gitops-validate-9gckk` (rev `2fe700b9`, not mine) fails the second, while mine
+    (`78rgf`, rev `94cf920e`) fails both — and this diff is ONE Go test file under
+    `containers/clawgate/`. The legs that DO cover it were green: `clawgate-ci` pass (build/vet/test
+    **-race** + extension + hook bats), `clawgate-e2e` pass (127 tests, 2 skipped),
+    `ux-audit-clawgate` pass. **Do not later infer from the merge that `gitops-validate` was green
+    for this change** — nobody can make that claim.
     **What landed:** `push_fanout_ledger_test.go` now pins the RELATIONSHIP, not a call-site count.
     Both sets are DERIVED, never spelled: push-deciders = transitive callers of `goPushBroadcast`
     (39 on trunk today), spawners = any function with a func-typed parameter and a `go` in its body
@@ -1738,6 +1753,25 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
   cheap outcome. Reuse them: the shared parser owns the "0 files scanned is the failure, not the
   all-clear" check, and a second copy is exactly how that check ends up true in one ledger and
   forgotten in another.
+
+- 🔴 **A `git show <ref>:<path>` WITHOUT `-C` READS THE CWD'S REPO, AND THE WRONG-REPO ANSWER IS A
+  CONFIDENT ZERO.** Content-verifying the #632 squash, four `git show origin/trunk:<file> | grep -c`
+  calls ran from `~/workspace/devrc`, which has no `origin/trunk`: each printed `fatal: invalid
+  object name` to stderr and **`0`** to stdout, and the zeros lined up under a heading that said
+  CONTENT VERIFICATION. The negative control was 0 too, so it agreed. **Re-run with `-C <repo>` and
+  pair every such count with a probe that MUST be non-zero** — the pattern that catches this is a
+  positive control, never a tidier-looking zero.
+- 🔴 **A CONTENT CHECK IS A CLAIM ABOUT YOUR PATTERN FIRST.** Verifying the #1224 squash,
+  `grep -c 'caught \*\*1/20\*\*'` returned 0 — the doc says `**1/20 caught**`, the index bullet says
+  `caught **1/20**`, and the pattern was copied from the wrong one. Cross-checked with a
+  regex-free `str.count` in python (fails differently) plus a negative control: 4 real occurrences.
+  **Never report an absence from a single pattern in a single tool.**
+- 🔴 **MERGING MAKES YOUR OWN FRESHLY-WRITTEN HANDOFF WRONG, AND THE WRONG PART IS AN INSTRUCTION.**
+  `#1224` landed saying rank 14 was `IN FLIGHT … read the PR, then merge it`; `#632` merged one
+  minute later, so the canonical doc carried a live instruction to do something already done. A
+  stale FACT is survivable — `resume-state.sh` prints `PR … MERGED` as a DRIFT line — but a stale
+  IMPERATIVE is read as a work item. **If you merge after writing the handoff, correct the ranked
+  item in the same session.**
 
 ## How to verify
 
