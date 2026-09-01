@@ -2309,3 +2309,102 @@ def test_no_network_tool_is_ever_invoked(tmp_path, stub_bin):
     assert not log.exists() or log.read_text() == "", (
         f"a network tool was invoked:\n{log.read_text()}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# A RELATIVE token anchored one level above the repo.
+#
+# `/handoff`'s kickoff template emits `<repo>/claudedocs/handoff-<topic>.md`.
+# That resolves from the repo's PARENT and NOT from the repo, which is where a
+# kickoff is actually pasted. MEASURED 2026-08-30: the miss sent the run down
+# the newest-of-N fallback and it reconciled a DIFFERENT INITIATIVE.
+#
+# 🔴 EVERY fixture below carries a NEWER DECOY. Without one the fallback would
+# select the same file the token names, and each test would pass whether or not
+# the re-anchoring clause exists — the vacuous-green shape this suite exists to
+# avoid. `docs[-1]` is the newest, so the decoy goes last.
+# --------------------------------------------------------------------------- #
+
+WANTED = "handoff-wanted.md"
+DECOY = "handoff-zz-newer-decoy.md"
+
+
+def test_a_repo_prefixed_token_resolves_from_INSIDE_the_repo(tmp_path, stub_bin):
+    """The exact shape the kickoff template emits, pasted where it is pasted."""
+    repo = make_repo(tmp_path, docs=(WANTED, DECOY), name="devrc")
+    out = run_resume(repo, stub_bin, f"devrc/claudedocs/{WANTED}", cwd=repo)
+    assert handoff_line(out) == f"handoff: {WANTED}", out
+    assert gap_lines(out) == [], out
+
+
+def test_the_decoy_PROVES_the_test_above_is_not_vacuous(tmp_path, stub_bin):
+    """POSITIVE CONTROL on the fixture, not on the subject.
+
+    If the fallback would have picked WANTED anyway, the test above proves
+    nothing about the re-anchoring. Run with NO argument: the fallback must
+    choose the DECOY. That is what makes `handoff: WANTED` above evidence.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, DECOY), name="devrc")
+    assert handoff_line(run_resume(repo, stub_bin)) == f"handoff: {DECOY}"
+
+
+def test_a_bare_claudedocs_token_resolves_from_a_SUBDIRECTORY(tmp_path, stub_bin):
+    """Same clause, second shape: `claudedocs/handoff-x.md` typed from a subdir."""
+    repo = make_repo(tmp_path, docs=(WANTED, DECOY), name="devrc")
+    sub = repo / "scripts"
+    sub.mkdir(exist_ok=True)
+    out = run_resume(repo, stub_bin, f"claudedocs/{WANTED}", cwd=sub)
+    assert handoff_line(out) == f"handoff: {WANTED}", out
+    assert gap_lines(out) == [], out
+
+
+def test_an_ABSOLUTE_token_that_is_absent_STAYS_a_gap(tmp_path, stub_bin):
+    """🔴 THE LOAD-BEARING RESTRICTION, and the reason the clause is safe.
+
+    An absolute path names a SPECIFIC tree. Re-anchoring it on this repo would
+    serve a same-named doc from the wrong checkout — the very wrong-initiative
+    failure the clause removes, reintroduced one level down and harder to see.
+    A same-named doc EXISTS here, so a clause that re-anchored absolutes would
+    resolve it and this test would fail.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, DECOY), name="devrc")
+    absent = f"/nonexistent-checkout/claudedocs/{WANTED}"
+    out = run_resume(repo, stub_bin, absent, cwd=repo)
+    assert any(absent in g for g in gap_lines(out)), out
+    assert handoff_line(out) != f"handoff: {WANTED}", out
+
+
+def test_a_repo_prefixed_token_naming_a_doc_THIS_repo_lacks_stays_a_gap(
+    tmp_path, stub_bin
+):
+    """Re-anchoring must not invent a resolution. Relative, but absent here."""
+    repo = make_repo(tmp_path, docs=(WANTED, DECOY), name="devrc")
+    tok = "devrc/claudedocs/handoff-never-existed.md"
+    out = run_resume(repo, stub_bin, tok, cwd=repo)
+    assert any(tok in g for g in gap_lines(out)), out
+
+
+def test_a_token_under_a_NON_claudedocs_dir_is_still_ignored(tmp_path, stub_bin):
+    """The dir-shape test still runs FIRST; re-anchoring did not widen it."""
+    repo = make_repo(tmp_path, docs=(WANTED, DECOY), name="devrc")
+    out = run_resume(repo, stub_bin, f"devrc/notdocs/{WANTED}", cwd=repo)
+    assert handoff_line(out) == f"handoff: {DECOY}", out
+
+
+def test_the_FIRST_resolvable_token_wins_not_the_last(tmp_path, stub_bin):
+    """🔴 Kills the `break`-removed mutant, which survived the first sweep.
+
+    Without the `break` the loop keeps going and a LATER token overwrites the
+    hit, silently making the function last-wins. Its own docstring and its
+    `miss` bookkeeping both promise FIRST. One token is not enough to tell the
+    two apart -- this needs two, BOTH resolvable, and they must be distinct
+    files or the assertion cannot see the difference.
+    """
+    first, second = "handoff-first-named.md", "handoff-second-named.md"
+    repo = make_repo(tmp_path, docs=(first, second, DECOY), name="devrc")
+    out = run_resume(
+        repo, stub_bin,
+        f"devrc/claudedocs/{first} and also devrc/claudedocs/{second}",
+        cwd=repo,
+    )
+    assert handoff_line(out) == f"handoff: {first}", out

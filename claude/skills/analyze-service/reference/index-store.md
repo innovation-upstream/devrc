@@ -34,6 +34,15 @@ never live state, never re-derived config values.
 hashed region**, so correcting the wording would change a sha that is pinned to
 the resolver's code; the redirect is stated here instead, deliberately.
 
+⚠ **Same bullet, second stale word: "a *confirmed* write-back".** The confirm
+prompt was retired everywhere on 2026-08-31 — a scope dir or entry file still
+appears only on a WRITE, and the write still shows a diff first, but nothing asks
+a y/N. The protocol is `~/.claude/skills/subsystem-index/SKILL.md`, one document
+for every caller of this store; `write-back.md` decides *whether* an
+`/analyze-service` run has anything worth recording and points there for *how*.
+Stated out here for the same reason as the redirect above: the wording is inside
+the hash.
+
 🔴 **Store safety.** The content is **curated, irreplaceable, not re-derivable by re-running recon**, with no off-machine backup. Inside any scope dir:
 - **Never `git stash`** — `refs/stash` is repo-**global** and concurrent sessions share this store, so your stash can be popped or dropped by another session. Set work aside with `cp <file> /tmp/…` instead.
 - **Never `git reset --hard`, `git clean`, or `git checkout --`** — each destroys curated content that has no other copy.
