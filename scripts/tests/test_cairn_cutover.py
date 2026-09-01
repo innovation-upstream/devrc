@@ -59,6 +59,26 @@ def cc():
     return _load("cairn_cutover_under_test", CUTOVER)
 
 
+@pytest.fixture(autouse=True)
+def _never_touch_the_operators_run_root(cc, tmp_path, monkeypatch):
+    """🔴 NO TEST MAY WRITE INTO THE REAL `~/.local/share/cairn-cutover/runs`.
+
+    Measured: five tests called `main(... --freeze --apply)` with no `--run-dir`,
+    so P5 wrote a mode ledger into the OPERATOR's run root — 66 directories
+    accumulated there from test runs alone. That is not merely untidy. The
+    default `--unfreeze` picks the NEWEST ledger under that root, so after any
+    test run the operator's documented P5 rollback selected a SYNTHETIC ledger,
+    matched nothing, and left the store frozen while reporting the entries as
+    "created after the freeze". A test poisoning the recovery path of the thing
+    it tests is the worst shape available.
+
+    Every test now passes `--run-dir`; this redirects the DEFAULT too, so a
+    future test that forgets cannot reach the real one. Belt and braces on
+    purpose — the explicit flag documents intent, this makes forgetting safe.
+    """
+    monkeypatch.setattr(cc, "DEFAULT_RUN_ROOT", tmp_path / "default-run-root")
+
+
 @pytest.fixture(scope="module")
 def srv():
     sys.path.insert(0, str(REPO / "scripts" / "lib"))
@@ -108,6 +128,46 @@ class TestTheMergeRule:
                              store_root=local, merged_dir=None)
         assert [i.verdict for i in plan.items] == [cc.SAME]
         assert plan.shippable == []
+
+    @pytest.mark.parametrize(
+        "pod_body, why",
+        [
+            # 🔴 THE CASE THE FIRST FIX INVERTED. A PURE APPEND: the host added a
+            # bullet, so the pod's lines are a strict SUBSET. `pod_only` (pod
+            # bullets minus local) is EMPTY here — which the first version read
+            # as "the difference is outside the bullet region" and refused. It is
+            # the safest divergence there is, and it is what the append-only
+            # protocol emits every single time, so refusing it made the gate
+            # permanently red on the commonest input.
+            ("- 2026-02-09: the first bullet.", "a pure append"),
+            # Cosmetic-only differences must not block either.
+            ("- 2026-02-09: the first bullet.\n", "a trailing newline"),
+            ("- 2026-02-09: the first bullet.\r", "a CRLF line ending"),
+        ],
+    )
+    def test_a_divergence_the_HOST_STRICTLY_CONTAINS_is_SUPERSEDED(
+        self, cc, tmp_path, pod_body, why
+    ):
+        """The strongest arm of rule 3, and the one that must never refuse.
+
+        When every line of the served copy is also in the host's copy, nothing on
+        the pod can be lost by pushing — a supersession that is PROVEN, not
+        argued. The reason text must say that, not the old sentence about the
+        difference lying outside the bullet region, which for an append is false.
+        """
+        local = _tree(tmp_path / "l", {"sc/a.md": _entry(
+            "sc", "a",
+            "- 2026-02-10: a bullet only this host has.",
+            "- 2026-02-09: the first bullet.")})
+        pod_dir = tmp_path / "p"
+        (pod_dir / "sc").mkdir(parents=True)
+        (pod_dir / "sc" / "a.md").write_text(_entry("sc", "a", pod_body))
+        plan = cc.plan_delta(cc.read_store(local), cc.read_store(pod_dir),
+                             store_root=local, merged_dir=None)
+        assert [i.verdict for i in plan.items] == [cc.SUPERSEDES], (
+            f"{why} was refused: {plan.items[0].reason}"
+        )
+        assert "contains EVERY line" in plan.items[0].reason
 
     def test_a_STALE_pod_copy_is_SUPERSEDED_by_the_host_not_hand_merged(
         self, cc, tmp_path
@@ -231,7 +291,7 @@ class TestTheMergeRule:
         assert plan.items[0].source == merged / "sc/only-on-hosts.md"
         assert "RESOLVED copy" in plan.items[0].source.read_text()
 
-    def test_a_divergence_with_NO_pod_only_bullets_is_UNRECOGNISED_not_superseded(
+    def test_a_PROSE_ONLY_divergence_is_SUPERSEDED_with_a_NON_VACUOUS_reason(
         self, cc, tmp_path
     ):
         """🔴 THE VACUOUS JUSTIFICATION. The bytes differ and the bullet lists do
@@ -270,10 +330,58 @@ class TestTheMergeRule:
         ])})
         plan = cc.plan_delta(cc.read_store(local), cc.read_store(pod),
                              store_root=local, merged_dir=None)
-        assert [i.verdict for i in plan.items] == [cc.NEEDS_MERGE], (
+        assert [i.verdict for i in plan.items] == [cc.SUPERSEDES], (
             f"classified {plan.items[0].verdict} with reason: {plan.items[0].reason}"
         )
-        assert "outside the region" in plan.items[0].reason
+        # 🔴 THE VERDICT IS SUPERSEDES AND THE REASON MUST NOT BE VACUOUS. That
+        # was the whole finding: the old sentence read "the served copy holds 0
+        # bullet line(s) this host lacks and NONE is API-attributed" — a scan
+        # that examined nothing, printed as the justification for overwriting.
+        # A version that REFUSED here was then tried and reverted: measured on
+        # the real trees it turned 1 hand-merge into 10, because a wrapped
+        # bullet's continuation lines are non-bullet lines.
+        assert "1 line(s) this host lacks" in plan.items[0].reason
+        assert "seed-time snapshot" in plan.items[0].reason
+
+    def test_a_STALE_hand_merge_over_an_IDENTICAL_entry_is_IGNORED_and_ANNOUNCED(
+        self, cc, tmp_path
+    ):
+        """🔴 THE DEFECT THE PREVIOUS FIX INTRODUCED, one clause over.
+
+        Hoisting `--merged` above `ADD` was right — an operator's resolution for
+        a host-only entry was being discarded. But `--merged` defaults to a
+        PERSISTENT directory, so a resolution left over from an earlier round
+        then preempted `SAME` as well, pushing stale bytes over a copy the pod
+        and this host already agreed on byte for byte. It was reported only as a
+        bare count in the verdict line, and `comm -23` compares names, so nothing
+        downstream could catch it.
+
+        An override now wins wherever a decision is needed, and is ANNOUNCED as
+        stale where nothing is in dispute.
+        """
+        text = _entry("sc", "a", "- 2026-01-01: agreed by both.")
+        local = _tree(tmp_path / "l", {"sc/a.md": text})
+        pod = _tree(tmp_path / "p", {"sc/a.md": text})
+        merged = _tree(tmp_path / "m", {"sc/a.md": _entry(
+            "sc", "a", "- 2025-12-01: a resolution from an earlier round.")})
+        plan = cc.plan_delta(cc.read_store(local), cc.read_store(pod),
+                             store_root=local, merged_dir=merged)
+        assert [i.verdict for i in plan.items] == [cc.SAME], (
+            f"a stale override pushed over an identical entry: {plan.items[0].reason}"
+        )
+        assert "STALE" in plan.items[0].reason
+        assert plan.shippable == []
+
+    def test_an_override_STILL_wins_where_a_decision_IS_needed(self, cc, tmp_path):
+        """The control for the rule above — without it, "ignore stale overrides"
+        could be implemented as "ignore overrides", which silently re-opens the
+        defect the hoist was made to fix."""
+        local = _tree(tmp_path / "l", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: host.")})
+        pod = _tree(tmp_path / "p", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: pod prose.")})
+        merged = _tree(tmp_path / "m", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: merged.")})
+        plan = cc.plan_delta(cc.read_store(local), cc.read_store(pod),
+                             store_root=local, merged_dir=merged)
+        assert [i.verdict for i in plan.items] == [cc.MERGED]
 
     def test_ONLY_a_hand_authored_file_clears_a_NEEDS_MERGE(self, cc, tmp_path):
         local = _tree(tmp_path / "l", {"sc/a.md": _entry("sc", "a", "- 2026-02-09: host.")})
@@ -507,6 +615,67 @@ class TestRefCollisions:
             # assertion above from being "any ref in this scope raises".
             entry, tier = rc.resolve_ref_tiered("svc.process", index, "sc")
             assert entry is not None and tier == "filename"
+
+    def test_TWO_kind_qualified_siblings_do_NOT_collide__no_FALSE_positive(self, cc):
+        """🔴 THE FALSE POSITIVE THE PREVIOUS FIX INTRODUCED.
+
+        Registering a bare slug for EVERY entry plus a `slug.kind` key flattened
+        two namespaces the resolver keys differently. Measured: `svc.process.md`
+        (slug `svc`, kind `process`) beside `svc.process.doc.md` (slug
+        `svc.process`, kind `doc`) both landed under the key `svc.process` and
+        were reported LIVE — while the resolver answers `svc.process`
+        unambiguously. A LIVE collision BLOCKS the cutover, so this is the
+        permanently-red-gate direction the fix's own comment names.
+
+        The checker now asks tier 1 directly instead of approximating it.
+        """
+        union = {
+            "sc/svc.process.md": cc.EntryFacts("sc/svc.process.md", "1" * 64, (), ()),
+            "sc/svc.process.doc.md": cc.EntryFacts(
+                "sc/svc.process.doc.md", "2" * 64, (), ()),
+        }
+        assert cc.ref_collisions(union) == []
+
+    def test_that_NON_collision_is_also_what_the_REAL_resolver_says(self):
+        """Measured against the resolver, so the claim above is its behaviour and
+        not my reading of it. All three refs resolve, none ambiguously.
+
+        ⚠ THE FIXTURE'S `service:` VALUES ARE LOAD-BEARING AND COST A ROUND TRIP.
+        Written with `service: svc` on both files, the second is MALFORMED —
+        *"filename 'svc.process.doc.md' has slug 'svc.process' but `service:`
+        normalizes to 'svc' — the two must agree or a ref reaches the wrong
+        file"* — so the loader drops it and the test proved nothing about two
+        loaded siblings. A malformed entry cannot be a claimant at all, which is
+        a *narrower* fixture than the one the collision check needs to be right
+        about. It is spelled correctly here so both files genuinely load.
+        """
+        sys.path.insert(0, str(REPO / "scripts" / "lib"))
+        import subsystem_recall as rc
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _tree(root, {
+                "sc/svc.process.md": _entry("sc", "svc", "- 2026-01-01: x."),
+                "sc/svc.process.doc.md": _entry(
+                    "sc", "svc.process", "- 2026-01-01: y."),
+            })
+            _store, index = rc.load_store(str(root), verb="read")
+            # POSITIVE CONTROL: both files must have LOADED. Without this the
+            # three lookups below can all pass over a one-entry index, which is
+            # exactly how the first version of this test passed nothing.
+            assert sorted(e.filename for e in index.entries("sc")) == [
+                "svc.process.doc.md", "svc.process.md"
+            ], f"malformed: {getattr(index, 'malformed', None)}"
+            for ref, want in (
+                ("svc", "svc.process.md"),
+                ("svc.process", "svc.process.md"),
+                ("svc.process.doc", "svc.process.doc.md"),
+            ):
+                entry, tier = rc.resolve_ref_tiered(ref, index, "sc")
+                assert entry is not None and entry.filename == want, (ref, entry)
+                assert tier == "filename"
 
     def test_a_NON_KIND_dotted_stem_is_NOT_split__no_FALSE_collision(self, cc):
         """The other direction, and the permanently-red-gate one.
@@ -986,6 +1155,69 @@ class TestTheScriptRefusesRatherThanProceeds:
         assert rc == cc.RC_COULD_NOT_MEASURE
         assert cc.survey(root)["refused"] == 1, "it changed modes anyway"
 
+    @pytest.mark.parametrize(
+        "payload, needle",
+        [
+            ("{ not json", "does not parse"),
+            ("", "does not parse"),
+            ("[]", "not an object"),
+            ('{"store": "/nowhere", "modes": {}}', "was taken against"),
+            ('{"modes": {"sc/a.md": 420}}', "no `modes` object"),   # no store field
+            ('{"store": "%STORE%", "modes": {"sc/a.md": "0600"}}', "is not a mode"),
+            ('{"store": "%STORE%", "modes": {"sc/a.md": true}}', "is not a mode"),
+            ('{"store": "%STORE%", "modes": []}', "no `modes` object"),
+        ],
+    )
+    def test_an_UNUSABLE_ledger_is_a_NAMED_REFUSAL_not_a_traceback(
+        self, cc, tmp_path, payload, needle
+    ):
+        """🔴 THE GUARD CHECKED `is_file()` AND PRINTED "no readable mode ledger".
+
+        Existence is not readability, and the gap was not theoretical: truncated
+        JSON, an empty file, a string mode and a top-level list each died on an
+        UNCAUGHT exception at exit 1 — on the RECOVERY path, where the operator
+        is least able to interpret a bare traceback. That is verbatim the
+        condition the guard's own comment claimed to have closed, one step over.
+
+        The `store` arm is the other half: a ledger records which store it came
+        from, because `--unfreeze` picks the newest one under a SHARED root and
+        rel paths collide readily between stores.
+        """
+        root = _tree(tmp_path / "s", {"sc/a.md": _entry("sc", "a", "- 2026-01-01: x.")})
+        (root / "sc" / "a.md").chmod(0o600)
+        cc.set_entry_mode(root, 0o444)
+        ledger = tmp_path / "run" / cc.MODE_LEDGER
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(payload.replace("%STORE%", str(root.resolve())))
+        rc = cc.main([
+            "--store", str(root), "--unfreeze", "--apply", "--mode-ledger", str(ledger),
+        ])
+        assert rc == cc.RC_COULD_NOT_MEASURE, rc
+        # The store must be untouched — a refusal that half-applied would be worse
+        # than the traceback it replaces.
+        assert (root / "sc" / "a.md").stat().st_mode & 0o777 == 0o444
+
+    def test_a_ledger_from_ANOTHER_STORE_is_refused_even_when_the_paths_line_up(
+        self, cc, tmp_path
+    ):
+        """The reason the ledger names its store. Two stores with the SAME rel
+        paths — the common case, since every store uses `<scope>/<entry>.md` —
+        and the modes recorded in one must not be applied to the other."""
+        a = _tree(tmp_path / "a", {"sc/x.md": _entry("sc", "x", "- 2026-01-01: a.")})
+        b = _tree(tmp_path / "b", {"sc/x.md": _entry("sc", "x", "- 2026-01-01: b.")})
+        (a / "sc" / "x.md").chmod(0o600)
+        (b / "sc" / "x.md").chmod(0o640)
+        ledger = tmp_path / "run" / cc.MODE_LEDGER
+        cc.save_modes(a, ledger)
+        cc.set_entry_mode(b, 0o444)
+        rc = cc.main([
+            "--store", str(b), "--unfreeze", "--apply", "--mode-ledger", str(ledger),
+        ])
+        assert rc == cc.RC_COULD_NOT_MEASURE
+        assert (b / "sc" / "x.md").stat().st_mode & 0o777 == 0o444, (
+            "store B was restored to store A's recorded modes"
+        )
+
     def test_an_entry_created_AFTER_the_freeze_is_LEFT_ALONE_not_guessed_at(
         self, cc, tmp_path
     ):
@@ -1013,12 +1245,12 @@ class TestTheScriptRefusesRatherThanProceeds:
             "sc/a.md": _entry("sc", "a", "- 2026-01-01: x."),
             "sc/b.md": _entry("sc", "b", "- 2026-01-01: y."),
         })
-        assert cc.main(["--store", str(root), "--freeze"]) == cc.RC_OK
+        assert cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"), "--freeze"]) == cc.RC_OK
         assert cc.survey(root)["writable"] == 2, "a dry run froze the store"
-        assert cc.main(["--store", str(root), "--freeze", "--apply"]) == cc.RC_OK
+        assert cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"), "--freeze", "--apply"]) == cc.RC_OK
         assert cc.survey(root) == {"examined": 2, "writable": 0, "refused": 2, "other": 0}
         # The idempotent re-run: already frozen, still exit 0, nothing changed.
-        assert cc.main(["--store", str(root), "--freeze", "--apply"]) == cc.RC_OK
+        assert cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"), "--freeze", "--apply"]) == cc.RC_OK
         assert cc.survey(root)["refused"] == 2
 
     def test_a_FREEZE_over_an_empty_store_is_COULD_NOT_MEASURE_not_success(
@@ -1026,7 +1258,7 @@ class TestTheScriptRefusesRatherThanProceeds:
     ):
         empty = tmp_path / "empty"
         empty.mkdir()
-        assert cc.main(["--store", str(empty), "--freeze", "--apply"]) == cc.RC_COULD_NOT_MEASURE
+        assert cc.main(["--store", str(empty), "--run-dir", str(tmp_path / "run"), "--freeze", "--apply"]) == cc.RC_COULD_NOT_MEASURE
 
     def test_a_PARTIAL_freeze_FAILS_and_the_mode_bits_are_ROLLED_BACK(
         self, cc, tmp_path, monkeypatch
@@ -1064,7 +1296,7 @@ class TestTheScriptRefusesRatherThanProceeds:
             return changed
 
         monkeypatch.setattr(cc, "set_entry_mode", leaky)
-        rc = cc.main(["--store", str(root), "--freeze", "--apply"])
+        rc = cc.main(["--store", str(root), "--run-dir", str(tmp_path / "run"), "--freeze", "--apply"])
         assert rc == cc.RC_FREEZE_INEFFECTIVE, rc
         after = cc.survey(root)
         assert after == {"examined": 3, "writable": 3, "refused": 0, "other": 0}, (

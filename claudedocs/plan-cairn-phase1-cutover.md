@@ -59,9 +59,18 @@ implemented in `plan_delta()` and each clause has a test named after it.
 > **2. Present on both, byte-identical → skip.** This clause is what makes a re-run a no-op
 > rather than a second push, i.e. what makes the whole operation idempotent.
 >
-> **3. Present on both and divergent, pod vs a host → the host copy supersedes**, *unless*
-> the pod holds a bullet the host lacks that carries the API attribution trailer
-> (`[cairn: actor/session]`).
+> **3. Present on both and divergent, pod vs a host** → decided by one question, asked over
+> **every line** and not only the bullets: *does the served copy hold any line this host does
+> not?*
+>
+> > **3a.** any such line carries the API attribution trailer (`[cairn: actor/session]`) →
+> > **hand merge**. It was written through the pod and exists in exactly one place.
+> > **3b.** there is no such line at all → **supersede**, and this is the strongest case in
+> > the rule: the host's copy is a superset, so nothing can be lost. A plain append lands
+> > here, as do a trailing newline and a CRLF difference.
+> > **3c.** such lines exist, none attributed → **supersede**. Lines the host has since
+> > edited away. The count that are not bullet openers rides along in the reason but does
+> > **not** change the verdict — see below.
 >
 > **4. Present on both HOSTS and divergent → always a hand merge.** Never last-write-wins,
 > whatever the mtimes say.
@@ -89,28 +98,56 @@ a claim the host has since retracted — with **no** attribution; **1** has an a
 bullet. Treating all 15 as hand merges would have made this a 15-file manual operation for
 14 files where the host copy is simply the newer one.
 
+### 🔴 A stricter version of 3c was tried and REVERTED, on measurement
+
+The obvious refinement is: *a pod-only line that is not a bullet opener must be front matter
+or `## Pointers`, i.e. outside what the attribution rule can see, i.e. a `cairn put` — so
+refuse it.* That argument sounds more careful and is wrong. **A store bullet WRAPS**, and a
+wrapped bullet's continuation lines do not begin `- `. Rewriting one bullet therefore
+produces "non-bullet lines only the pod has" as a matter of course.
+
+Measured on the real trees: the stricter rule turned **1 hand-merge into 10** — nine ordinary
+edits demanded operator attention. That is the permanently-red-gate direction, reached by the
+version of the rule that reads as most conservative. The count is reported and not gated.
+
 ⚠ **The rule's limit, stated rather than left to be met.** Rule 3 is a claim about *how the
-pod's copy got there*. It holds while `seed.sh` and the API are the only writers. A third
-route that edited the served copy would break the premise, not merely the implementation —
-which is why NEEDS_MERGE is the fail-safe direction and an unrecognised divergence ends in a
-refusal, not a push.
+pod's copy got there* — `seed.sh` produced it from a host, and the only thing that can have
+changed it since is the API, whose every change is attributed. `cairn put`, added by this
+same change, breaks that: it rewrites whole files with no attribution, so once it is in use a
+PUT-modified entry is genuinely indistinguishable from a seed-time snapshot. **The freeze is
+what closes that window** — after the cutover the hosts are caches and host-vs-pod divergence
+cannot arise. Until then, the non-bullet count in each SUPERSEDES reason is there so an
+operator who *has* run `cairn put` can see which entries to look at.
 
-### The one hand merge
+### The two hand merges
 
-The single host-vs-host divergence is resolved, by hand, as the **union**: the union of both
-`aliases:` lists, the union of both `## Pointers` sets, and every `## Nuance` bullet from
-both copies interleaved newest-first. **Neither copy was discarded and no bullet was
-reworded.** Each side carried something the other did not — one holds a set of deployment
-pointers and a Flux-parentage correction, the other holds newer prose and a whole outbound
-design — so "take the newer file" would have silently dropped a documented design.
+Measured with the corrected rule, the workbench's plan is **88 SAME · 15 ADD · 42
+SUPERSEDES · 2 MERGED · 0 NEEDS_MERGE** — 59 entries shippable. The two hand merges are one
+of each kind the rule can produce, which is why both are staged:
 
-The merged file is staged at
+**(i) The host-vs-host divergence (rule 4).** Resolved as the **union**: both `aliases:`
+lists, both `## Pointers` sets, and every `## Nuance` bullet from both copies interleaved
+newest-first. **Neither copy was discarded and no bullet was reworded.** Each side carried
+something the other did not — one holds a set of deployment pointers and a Flux-parentage
+correction, the other holds newer prose and a whole outbound design — so "take the newer
+file" would have silently dropped a documented design.
+
+**(ii) The pod-attributed bullet (rule 3a).** Exactly one entry in the whole store holds an
+API-appended bullet that exists nowhere else. Resolved mechanically: the host's copy, with
+that one bullet inserted **in date order** under `## Nuance / work-history` — its date is
+older than the host's newest, so putting it at the very top would have broken the store's
+newest-first convention. The bullet is carried **verbatim**, including its known
+double-date defect (`- <date>: <date>: …`, from a caller that date-prefixed text the server
+already stamps). A merge that silently repairs a writer's text is a merge that changed
+meaning; it is flagged here instead.
+
+Both merged files are staged at
 
     ~/.local/share/cairn-cutover/merged/<scope>/<entry>.md      (mode 0600)
 
 **outside the repo, deliberately** — it is client-confidential and this repo is public. It
-has been validated with the writer's own parser (`subsystem_touch --validate`): *OK — 1 of 1
-entry file(s) parse*.
+Both have been validated with the writer's own parser (`subsystem_touch --validate`):
+*OK — 2 of 2 entry file(s) parse, 0 malformed*.
 
 ⚠ **One advisory it carries forward unchanged.** One bullet inherited from one side writes
 its `RESOLVED <sha>:` marker with a parenthetical between the sha and the colon, which the
@@ -355,7 +392,9 @@ python3 $D/scripts/cairn-cutover.py \
 #      P0 cairn sync -> rc 0 … 132 entries
 #      P0 the write route IS deployed — … refused 400 …
 #      P1 plan over <n> local entries: {'ADD': …, 'SAME': …, 'SUPERSEDES': …,
-#         'MERGED': 1, 'NEEDS_MERGE': 0}
+#         'MERGED': 2, 'NEEDS_MERGE': 0}
+#      measured on the workbench today: SAME 88 · ADD 15 · SUPERSEDES 42 ·
+#      MERGED 2 · NEEDS_MERGE 0, i.e. 59 entries shippable
 #      P2 union … LIVE ref collisions=3 LATENT…=4    <- and it will REFUSE at rc 15
 #    🔴 rc 15 on the first run is EXPECTED. Step 3 is what clears it.
 
@@ -371,7 +410,11 @@ python3 $D/scripts/cairn-cutover.py \
   --alias-owner '<scope>:<ref>=<winner>.md' \
   --alias-owner '<scope>:<ref>=<winner>.md'
 #    expect: rc 0, "DRY RUN — <n> entr(ies) would be pushed", and the exact seed.sh
-#    command it would run. NEEDS_MERGE must be 0 and MERGED must be 1.
+#    command it would run. NEEDS_MERGE must be 0 and MERGED must be 2 (the
+#    two staged hand merges). A NEEDS_MERGE it names is a file you must author.
+#    ⚠ A stale entry under --merged is reported as `SAME … a STALE hand-merge
+#    … was IGNORED` rather than pushed — read those lines, they are how you
+#    learn a resolution from an earlier round is still lying around.
 
 # 5. APPLY, from the WORKBENCH. Pushes the delta, verifies, then freezes.
 export SUBSYSTEM_STORE_TOKEN_FILE=<path to a file holding just the token>

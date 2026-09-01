@@ -130,12 +130,16 @@ RC_REF_COLLISION = 15       # a ref would resolve to two entries in the union
 RC_FREEZE_INEFFECTIVE = 16  # the freeze was applied and a write STILL succeeded
 # 17 — THE PUSH/VERIFY FAMILY. Deliberately one code with a stated scope rather
 # than a code per site: it means "the entries this host holds are not, or cannot
-# be shown to be, on the pod, and NOTHING WAS FROZEN". Three sites reach it —
-# `seed.sh` exiting non-zero, `comm -23` printing lines, and a failed
-# `--rollback-push` restore — and all three leave the operator in the same place
-# with the same next step (read the verdict lines above, re-run). The ledger used
-# to describe only the `comm -23` site, which is the defect: a code's comment
-# must cover every site that returns it or the comment is the narrower claim.
+# be shown to be, on the pod, and NOTHING WAS FROZEN". FOUR sites reach it —
+# `seed.sh` exiting non-zero, `comm -23` printing lines, `verify-byte-identity.sh`
+# exiting non-zero, and a failed `--rollback-push` restore — and all four leave
+# the operator in the same place with the same next step (read the verdict lines
+# above, re-run). This ledger has now been wrong TWICE in the same direction: it
+# first described only the `comm -23` site, then claimed "three sites" while
+# there were four. Which is the rule it exists to state — a code's comment must
+# cover every site that returns it, or the comment is the narrower claim — and
+# evidently a hard one to keep true, so: `grep -n "RC_ACCEPTANCE" ` before
+# editing this sentence, and count.
 RC_ACCEPTANCE = 17
 RC_COULD_NOT_MEASURE = 18   # an instrument did not answer; never folded into a pass
 
@@ -384,6 +388,14 @@ class EntryFacts:
     sha256: str
     aliases: tuple[str, ...]
     bullets: tuple[str, ...]
+    # 🔴 EVERY NON-BLANK LINE, NOT ONLY THE BULLETS — and the difference is a
+    # whole class of divergence. A `cairn put` rewrites `## What it is` or
+    # `## Pointers`; none of that is a `- ` line, so a comparison scoped to
+    # bullets is BLIND to it and reports "0 bullet lines differ" as though it
+    # had looked. `lines` is what lets `plan_delta` say whether the host's copy
+    # is a superset of the served one, which is the only question that makes a
+    # supersession provable rather than argued.
+    lines: tuple[str, ...] = ()
 
 
 def read_store(root: Path) -> dict[str, EntryFacts]:
@@ -403,18 +415,30 @@ def read_store(root: Path) -> dict[str, EntryFacts]:
         for path in sorted(scope_dir.glob("*.md")):
             if path.is_symlink() or not path.is_file():
                 continue
-            data = path.read_bytes()
-            text = data.decode("utf-8", "surrogateescape")
-            out[f"{scope_dir.name}/{path.name}"] = EntryFacts(
-                rel=f"{scope_dir.name}/{path.name}",
-                sha256=hashlib.sha256(data).hexdigest(),
-                aliases=tuple(_aliases(text)),
-                bullets=tuple(
-                    line.strip() for line in text.splitlines()
-                    if line.strip().startswith("- ")
-                ),
-            )
+            rel = f"{scope_dir.name}/{path.name}"
+            out[rel] = _facts_for(rel, path)
     return out
+
+
+def _facts_for(rel: str, path: Path) -> EntryFacts:
+    """ONE parse of one entry file, for every caller that needs its facts.
+
+    `splitlines()` + `strip()` normalises CRLF, a trailing newline and trailing
+    whitespace away on BOTH sides, so a cosmetic difference cannot masquerade as
+    content. That is deliberate: the question these lists answer is "does the
+    served copy hold anything the host does not", and a line ending is not
+    content.
+    """
+    data = path.read_bytes()
+    text = data.decode("utf-8", "surrogateescape")
+    stripped = [line.strip() for line in text.splitlines() if line.strip()]
+    return EntryFacts(
+        rel=rel,
+        sha256=hashlib.sha256(data).hexdigest(),
+        aliases=tuple(_aliases(text)),
+        bullets=tuple(ln for ln in stripped if ln.startswith("- ")),
+        lines=tuple(stripped),
+    )
 
 
 def _aliases(text: str) -> list[str]:
@@ -482,10 +506,25 @@ def plan_delta(
          re-run a no-op rather than a second push.
       3. **Present on both and divergent, pod vs a host** -> the pod's copy is a
          LAGGING DERIVATIVE of that host's file (it got there by being seeded
-         from it), so the host copy SUPERSEDES it — *unless* the pod holds a
-         bullet the host lacks that carries the API attribution trailer. Such a
-         bullet was written through the pod and exists in exactly one place in
-         the world, so the entry becomes NEEDS_MERGE.
+         from it). Which way that cuts is decided by ONE question — *does the
+         served copy hold any line this host does not?* — asked over EVERY line,
+         not only the bullets, and answered in four arms ordered by how much
+         each can prove:
+
+           3a. a pod line carrying the API attribution trailer -> NEEDS_MERGE.
+               It was written through the pod and exists in exactly one place in
+               the world.
+           3b. NO pod-only line at all -> SUPERSEDES, and this is the strongest
+               case in the rule: the host's copy is a superset, so nothing can
+               be lost. A plain append lands here, as do a trailing newline and
+               a CRLF difference.
+           3c. pod-only lines, none attributed -> SUPERSEDES. Lines the host has
+               since edited away (an `OPEN:` closed, a claim retracted). The
+               count of non-bullet-opener lines rides along in the reason,
+               because those are usually the continuation lines of a rewritten
+               wrapped bullet — but they do NOT change the verdict. Splitting
+               3c on that distinction was tried and reverted: measured on the
+               real trees it turned 1 hand-merge into 10.
       4. **Present on both hosts and divergent** -> neither is a derivative of
          the other, so there is no supersession argument available. ALWAYS
          NEEDS_MERGE, never last-write-wins, whatever the mtimes say.
@@ -512,16 +551,39 @@ def plan_delta(
         src = store_root / rel
         override = (merged_dir / rel) if merged_dir else None
 
-        # 🔴 THE HAND-AUTHORED RESOLUTION IS CONSULTED FIRST, BEFORE EVERY OTHER
-        # CLAUSE. It used to sit third, below the ADD and SAME returns, which
-        # made it UNREACHABLE for any entry the pod does not hold — so an
-        # operator who had written a merge for a host-only entry watched it be
-        # silently ignored in favour of the local copy. A human decision must
-        # not be overridden by a classifier; if it exists, it wins.
-        if override is not None and override.is_file():
+        has_override = override is not None and override.is_file()
+        peer_disagrees = (
+            peer is not None and rel in peer and peer[rel].sha256 != facts.sha256
+        )
+        in_pod = rel in pod
+        identical = in_pod and pod[rel].sha256 == facts.sha256
+
+        # 🔴 THE HAND-AUTHORED RESOLUTION OUTRANKS EVERY CLASSIFIER — BUT ONLY
+        # WHERE THERE IS SOMETHING TO RESOLVE. It used to sit third, below the
+        # ADD and SAME returns, which made it UNREACHABLE for any entry the pod
+        # does not hold: an operator's written merge for a host-only entry was
+        # silently ignored in favour of the local copy. Hoisting it fixed that
+        # and introduced the opposite defect, because `--merged` defaults to a
+        # PERSISTENT directory: a resolution left over from an earlier round then
+        # preempted `SAME`, pushing stale bytes over a copy the pod and this host
+        # already agreed on, byte for byte — reported as a bare count in the
+        # verdict line and invisible to `comm -23`, which compares names only.
+        #
+        # So: an override wins wherever a decision is genuinely needed, and where
+        # nothing is in dispute it is announced as STALE rather than applied.
+        if has_override and not (identical and not peer_disagrees):
             plan.items.append(
                 Item(rel, MERGED, f"resolved by hand at {override}", override)
             )
+            continue
+        if has_override:
+            plan.items.append(Item(
+                rel, SAME,
+                f"byte-identical to the served copy — and a STALE hand-merge at "
+                f"{override} was IGNORED, because there is nothing here to "
+                f"resolve. Delete it once you have checked it is not wanted.",
+                src,
+            ))
             continue
 
         # 🔴 THE PEER CHECK IS SECOND, AND IT USED TO BE FIFTH — BELOW `ADD`.
@@ -533,7 +595,7 @@ def plan_delta(
         # first. The result was first-host-to-run-wins, silently, with no
         # operator decision — the exact failure the rule is written to forbid,
         # committed by the code that states it.
-        if peer is not None and rel in peer and peer[rel].sha256 != facts.sha256:
+        if peer_disagrees:
             plan.items.append(Item(
                 rel, NEEDS_MERGE,
                 "both hosts hold a different copy — neither is a derivative of the "
@@ -543,14 +605,18 @@ def plan_delta(
             ))
             continue
 
-        if rel not in pod:
+        if not in_pod:
             plan.items.append(Item(rel, ADD, "not present in the served copy", src))
             continue
-        if pod[rel].sha256 == facts.sha256:
+        if identical:
             plan.items.append(Item(rel, SAME, "byte-identical to the served copy", src))
             continue
+        # 🔴 THE COMPARISON IS OVER **EVERY LINE**, NOT ONLY THE BULLETS, and the
+        # arms below are ordered by how much they can PROVE.
+        local_lines = set(facts.lines)
+        pod_extra = [ln for ln in pod[rel].lines if ln not in local_lines]
         pod_only = [b for b in pod[rel].bullets if b not in facts.bullets]
-        attributed = [b for b in pod_only if ATTRIBUTION.search(b)]
+        attributed = [ln for ln in pod_extra if ATTRIBUTION.search(ln)]
         if attributed:
             plan.items.append(Item(
                 rel, NEEDS_MERGE,
@@ -560,40 +626,64 @@ def plan_delta(
                 src,
             ))
             continue
-        # 🔴 A DIVERGENCE WITH **NO** POD-ONLY BULLETS IS UNRECOGNISED, NOT
-        # SUPERSEDED. The bytes differ and the bullet lists do not, so whatever
-        # moved is OUTSIDE the region this rule can see — front matter, `## What
-        # it is`, `## Pointers`, or a bullet's continuation lines. The attribution
-        # scan says nothing about any of them, so classifying it SUPERSEDES
-        # printed "the served copy holds 0 bullet line(s) this host lacks and
-        # NONE is API-attributed" as the JUSTIFICATION FOR OVERWRITING IT — a
-        # vacuous truth offered as evidence from a scan that examined nothing.
+        # 🔴 THE STRONGEST CASE, AND IT WAS PREVIOUSLY CLASSIFIED BACKWARDS.
+        # `pod_extra` empty means the host's copy contains EVERY line the served
+        # copy has: a supersession that is PROVEN, not argued, and nothing can be
+        # lost by pushing it. This is what a plain append produces — the shape
+        # the append-only protocol emits every single time — and also what a
+        # trailing newline or a CRLF difference produces.
         #
-        # 🔴 AND THE WRITER THAT PRODUCES EXACTLY THIS SHAPE IS `cairn put`,
-        # WHICH THIS SAME CHANGE ADDS. Its stated reasons to exist are updating
-        # `## Pointers` and rewriting an `OPEN:` marker — both outside the bullet
-        # set, both invisible here. So rule 3's premise ("seed.sh and the API are
-        # the only writers, and the API's changes are attributed") is not broken
-        # by some hypothetical third route; it is broken by this file's sibling.
-        # NEEDS_MERGE is the fail-safe direction this module already declares.
-        if not pod_only:
+        # An earlier version of this arm tested `not pod_only` — pod bullets
+        # MINUS local — and answered NEEDS_MERGE. That set is empty exactly when
+        # the host has appended, so the safest case in the whole rule was being
+        # refused while the riskier rewrite case was auto-pushed: the two arms
+        # were inverted, and any NEEDS_MERGE aborts the run. The reason text was
+        # false for it too, claiming the difference lay outside the bullet region
+        # when for a pure append it lies squarely inside.
+        if not pod_extra:
             plan.items.append(Item(
-                rel, NEEDS_MERGE,
-                "divergent, but the served copy holds NO bullet line this host "
-                "lacks — so whatever differs is outside the region the "
-                "attribution rule can see (front matter, `## What it is`, "
-                "`## Pointers`, or a bullet's continuation lines). A whole-file "
-                "`cairn put` produces exactly this shape. Unrecognised, therefore "
-                f"refused rather than overwritten. Diff them and resolve at "
-                f"<merged>/{rel}.",
+                rel, SUPERSEDES,
+                f"divergent, and the host's copy contains EVERY line the served "
+                f"copy has ({len(facts.lines) - len(set(pod[rel].lines))} line(s) "
+                f"only this host has). Nothing on the pod can be lost by pushing "
+                f"it — the strongest form of the supersession rule.",
                 src,
             ))
             continue
+        # The served copy holds lines this host does not, and NONE is attributed.
+        #
+        # 🔴 THIS IS SUPERSEDES, AND A VERSION THAT REFUSED HERE WAS MEASURED AND
+        # REVERTED. The reasoning that produced the refusal was: a non-bullet
+        # line only the pod has must be front matter or `## Pointers`, i.e.
+        # outside what the attribution rule can see, i.e. a `cairn put`. Run
+        # against the real trees it turned 1 hand-merge into 10 — because a
+        # store bullet WRAPS, and a wrapped bullet's continuation lines do not
+        # begin `- `. Rewriting one bullet therefore produces "non-bullet lines
+        # only the pod has" as a matter of course. The rule would have demanded a
+        # hand merge for nine ordinary edits: the permanently-red-gate direction,
+        # reached by exactly the argument that sounds most careful.
+        #
+        # The lineage argument covers this case and does not need the line kinds:
+        # the pod's tree was PRODUCED FROM a host's by `seed.sh`, and the only
+        # thing that can change it since is the API, whose every change carries
+        # the attribution trailer checked above. A pod line the host lacks is a
+        # line the host has edited away.
+        #
+        # ⚠ ITS LIMIT, AND WHY THE COUNT IS PRINTED ANYWAY: `cairn put` — added
+        # by this same change — rewrites whole files without attribution, so once
+        # it is in use a PUT-modified entry is genuinely indistinguishable from a
+        # seed-time snapshot. That window is what the FREEZE closes: after the
+        # cutover the hosts are caches and host-vs-pod divergence cannot arise.
+        # Until then the non-bullet count rides along in the reason so an
+        # operator who HAS run `cairn put` can see which entries to look at.
+        outside = sum(1 for ln in pod_extra if not ln.startswith("- "))
         plan.items.append(Item(
             rel, SUPERSEDES,
-            f"divergent; the served copy holds {len(pod_only)} bullet line(s) this "
-            f"host lacks and NONE is API-attributed, so they are a stale snapshot "
-            f"of a file this host has since edited",
+            f"divergent; the served copy holds {len(pod_extra)} line(s) this host "
+            f"lacks ({outside} of them not bullet openers — usually the "
+            f"continuation lines of a rewritten bullet) and NONE is "
+            f"API-attributed. The served copy is a seed-time snapshot of this "
+            f"file and this host has edited it since.",
             src,
         ))
     return plan
@@ -647,7 +737,7 @@ def ref_collisions(union: dict[str, EntryFacts]) -> list[Collision]:
         # a kind ONLY if it is in `KINDS`, so `foo.notes.md` has slug
         # `foo.notes` here and slug `foo` there (a FALSE collision, the
         # permanently-red-gate direction), while `a.b.c.md` silently discarded
-        # `c`. See `test_a_KIND_QUALIFIED_file_collides_with_its_bare_sibling`
+        # `c`. See `test_a_KIND_QUALIFIED_file_collides_with_its_BARE_sibling`
         # for the case it MISSED, which is the one that matters.
         slug, kind = split_kind(normalize_ref(stem))
         per_scope.setdefault(scope, []).append(
@@ -663,13 +753,33 @@ def ref_collisions(union: dict[str, EntryFacts]) -> list[Collision]:
         # the resolver raised on 2 candidates while this returned `[]` — the
         # exact condition P2 exists to detect, missed. `repo-cos.process` is the
         # resolver docstring's own worked example, so the shape is in live use.
+        # 🔴 SIMULATE `resolve_ref_tiered`, DO NOT APPROXIMATE IT. Registering a
+        # bare slug for every entry and a `slug.kind` key beside it flattens two
+        # namespaces the resolver keys DIFFERENTLY, and the flattening invents
+        # collisions: measured, `svc.process.md` (slug `svc`, kind `process`)
+        # beside `svc.process.doc.md` (slug `svc.process`, kind `doc`) both
+        # registered under the key `svc.process`, reported LIVE — while the
+        # resolver answers `svc.process` unambiguously with `svc.process.md`.
+        # A LIVE collision BLOCKS, so that is the permanently-red-gate direction.
+        #
+        # The exact question is "for candidate ref R, how many entries does tier
+        # 1 return?", and tier 1 is four lines of `resolve_ref_tiered`. Asking it
+        # directly is both shorter and incapable of disagreeing with the reader.
+        candidates = {slug for slug, _k, _a, _f in entries}
+        candidates |= {
+            f"{slug}.{kind}" for slug, kind, _a, _f in entries if kind is not None
+        }
         filename_refs: dict[str, set[str]] = {}
+        for ref in candidates:
+            rslug, rkind = split_kind(ref)
+            if rkind is not None:
+                hits = {f for s, k, _a, f in entries if s == rslug and k == rkind}
+            else:
+                hits = {f for s, _k, _a, f in entries if s == ref}
+            if hits:
+                filename_refs[ref] = hits
         aliases: dict[str, set[str]] = {}
-        for slug, kind, alias_set, filename in entries:
-            filename_refs.setdefault(slug, set()).add(filename)
-            if kind is not None:
-                # A kind-QUALIFIED ref matches only that (slug, kind) pair.
-                filename_refs.setdefault(f"{slug}.{kind}", set()).add(filename)
+        for _slug, _kind, alias_set, filename in entries:
             for alias in alias_set:
                 aliases.setdefault(alias, set()).add(filename)
         for ref, files in sorted(filename_refs.items()):
@@ -772,19 +882,72 @@ def save_modes(store: Path, dest: Path) -> int:
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     modes = {rel: (store / rel).stat().st_mode & 0o777 for rel in read_store(store)}
-    dest.write_text(json.dumps(modes, sort_keys=True, indent=1), encoding="utf-8")
+    # 🔴 THE LEDGER NAMES ITS OWN STORE. Without this it is a bare `{rel: mode}`
+    # map with nothing binding it to the tree it came from — and `--unfreeze`
+    # picks the NEWEST ledger under a shared root, so ANY other run's ledger
+    # (a second store, a copy, a test that forgot `--run-dir`) is silently
+    # eligible. Rel paths collide readily across stores, so a mismatched ledger
+    # would restore modes recorded from a different tree with no way to notice.
+    dest.write_text(
+        json.dumps({"store": str(store.resolve()), "modes": modes},
+                   sort_keys=True, indent=1),
+        encoding="utf-8",
+    )
     dest.chmod(0o600)
     return len(modes)
+
+
+class LedgerUnusable(Exception):
+    """The mode ledger cannot be trusted. Carries the reason, never a bare fail."""
+
+
+def read_ledger(ledger: Path, store: Path) -> dict[str, int]:
+    """Parse and VALIDATE a mode ledger, or raise `LedgerUnusable` saying why.
+
+    🔴 EVERY WAY OF BEING UNREADABLE IS A NAMED REFUSAL. The previous guard
+    checked `is_file()` and nothing else, while printing "no readable mode
+    ledger" — a readability claim `is_file()` does not make. Measured against
+    that version: truncated JSON, an empty file, a string mode and a top-level
+    list each died on an UNCAUGHT exception at exit 1, on the recovery path,
+    which is verbatim the condition the guard's own comment said it had closed.
+    """
+    try:
+        raw = json.loads(ledger.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise LedgerUnusable(f"{ledger} does not parse as JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise LedgerUnusable(f"{ledger} holds {type(raw).__name__}, not an object")
+    recorded = raw.get("modes")
+    if not isinstance(recorded, dict):
+        raise LedgerUnusable(
+            f"{ledger} has no `modes` object — it predates the store-binding "
+            f"format, so it cannot be checked against this store. Chmod by hand "
+            f"having decided what the modes should be."
+        )
+    owner = raw.get("store")
+    if owner != str(store.resolve()):
+        raise LedgerUnusable(
+            f"{ledger} was taken against {owner!r}, not {str(store.resolve())!r}. "
+            f"Restoring one store's modes onto another is exactly the mistake the "
+            f"store field exists to catch."
+        )
+    for rel, mode in recorded.items():
+        if not isinstance(mode, int) or isinstance(mode, bool) or not 0 <= mode <= 0o7777:
+            raise LedgerUnusable(
+                f"{ledger} records {mode!r} for {rel}, which is not a mode"
+            )
+    return recorded
 
 
 def restore_modes(store: Path, ledger: Path) -> tuple[int, int]:
     """Put every entry file back to the mode `save_modes` recorded.
 
     Returns `(restored, unknown)`. An entry with no ledger row is NOT guessed at:
-    it is counted and reported, because inventing 0644 for it is the exact defect
-    this function replaces.
+    it is counted and returned, because inventing 0644 for it is the exact defect
+    this function replaces. Both numbers are the CALLER's to report — a caller
+    that discards them makes a restoration claim it did not check.
     """
-    recorded: dict[str, int] = json.loads(ledger.read_text(encoding="utf-8"))
+    recorded = read_ledger(ledger, store)
     restored = unknown = 0
     for rel in read_store(store):
         want = recorded.get(rel)
@@ -1000,10 +1163,23 @@ def main(argv: list[str] | None = None) -> int:
             ))
         say(f"unfreeze: restoring from {ledger}")
         if not args.apply:
-            say("DRY RUN — pass --apply to restore the recorded modes. "
-                "Nothing was changed.")
+            # 🔴 VALIDATE IN THE DRY RUN TOO. A ledger that will be refused at
+            # --apply must be refused here, or the dry run reassures the operator
+            # about a rollback that cannot happen.
+            try:
+                read_ledger(ledger, args.store)
+            except LedgerUnusable as exc:
+                return refuse(RC_COULD_NOT_MEASURE, str(exc))
+            say("DRY RUN — the ledger is readable and belongs to this store. "
+                "Pass --apply to restore the recorded modes. Nothing was changed.")
             return RC_OK
-        restored, unknown = restore_modes(args.store, ledger)
+        try:
+            restored, unknown = restore_modes(args.store, ledger)
+        except LedgerUnusable as exc:
+            return refuse(RC_COULD_NOT_MEASURE, (
+                f"{exc} NOTHING was changed — every entry is still at whatever "
+                f"mode the freeze left it."
+            ))
         after = survey(args.store)
         say(f"unfreeze: restored {restored} entry file(s), {unknown} not in the "
             f"ledger and therefore LEFT ALONE; after {after}")
@@ -1108,12 +1284,15 @@ def main(argv: list[str] | None = None) -> int:
         # ---- P2 collisions ------------------------------------------------
         union = dict(pod)
         for item in plan.shippable:
-            data = item.source.read_bytes()
-            text = data.decode("utf-8", "surrogateescape")
-            union[item.rel] = EntryFacts(
-                item.rel, hashlib.sha256(data).hexdigest(), tuple(_aliases(text)),
-                tuple(l.strip() for l in text.splitlines() if l.strip().startswith("- ")),
-            )
+            # 🔴 BUILT THROUGH `_facts_for`, not open-coded. This site used to
+            # spell the parse a second time and was already one field behind:
+            # `lines` was added to `EntryFacts` for the merge rule and this
+            # constructor kept passing four positional arguments, so every
+            # shippable entry entered the collision union with an EMPTY line set.
+            # Harmless for the collision check, which reads only aliases and
+            # filenames — but it is the same predicate at two sites, which is
+            # how the two come to disagree about something that matters.
+            union[item.rel] = _facts_for(item.rel, item.source)
         if peer:
             for rel, facts in peer.items():
                 union.setdefault(rel, facts)
@@ -1211,7 +1390,16 @@ def main(argv: list[str] | None = None) -> int:
     # with no ledger can only invent a mode, and inventing 0644 for a file that
     # was 0600 is a permission WIDENING on client-confidential content dressed as
     # a rollback. `--unfreeze` refuses outright without this file.
+    # 0700 HERE TOO. The chmod in P0 covers the cutover path; `--freeze --apply`
+    # skips P0 entirely, so on a host whose first invocation is a bare freeze the
+    # run root and run dir were created at the ambient umask (0755 measured).
+    # The ledger file is 0600 either way, so the exposure is a directory listing
+    # — but a 0755 dir here is also what `delta/`, `stage/` and `pre-push/` sit
+    # under on the cutover path, and those DO hold store bytes.
+    DEFAULT_RUN_ROOT.mkdir(parents=True, exist_ok=True)
+    DEFAULT_RUN_ROOT.chmod(0o700)
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.parent.chmod(0o700)
     n_recorded = save_modes(args.store, ledger_path)
     say(f"P5 recorded {n_recorded} original mode(s) to {ledger_path} — "
         f"`--unfreeze` REQUIRES this file and refuses without it.")
@@ -1234,7 +1422,27 @@ def main(argv: list[str] | None = None) -> int:
     # `before` one, and `test_a_FREEZE_over_an_empty_store_is_COULD_NOT_MEASURE_
     # not_success` is the test that kills its removal.
     if after["refused"] != after["examined"] or after["examined"] == 0:
-        restore_modes(args.store, ledger_path)
+        # 🔴 READ THE RESTORE'S OWN NUMBERS. This discarded them while the
+        # message below asserted "the mode bits were RESTORED" — a claim the code
+        # did not check. An entry created between `save_modes` and the failed
+        # freeze has no recorded mode, so it stays at 0444, uncounted, under a
+        # sentence saying everything was put back.
+        try:
+            restored, unknown = restore_modes(args.store, ledger_path)
+        except LedgerUnusable as exc:
+            return refuse(RC_FREEZE_INEFFECTIVE, (
+                f"the freeze did not take AND the mode ledger is unusable ({exc}). "
+                f"The store is LEFT AS THE FAILED FREEZE MADE IT — chmod it back "
+                f"by hand."
+            ))
+        if unknown:
+            return refuse(RC_FREEZE_INEFFECTIVE, (
+                f"the freeze did not take ({after['refused']} of "
+                f"{after['examined']} refused). {restored} entr(ies) were restored "
+                f"from {ledger_path}; {unknown} have NO recorded mode and are "
+                f"still at 0444 — they appeared after the ledger was written. "
+                f"Restore those by hand."
+            ))
         return refuse(RC_FREEZE_INEFFECTIVE, (
             f"the freeze did not take: {after['refused']} of {after['examined']} "
             f"entry file(s) refused a write ({after['writable']} still writable, "

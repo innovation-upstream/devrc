@@ -999,6 +999,21 @@ def cmd_put(args: argparse.Namespace) -> int:
     scope = _write_scope(args)
     if scope is None:
         return EXIT_USAGE
+    # 🔴 READ THE FILE BEFORE THE NETWORK — AND "BEFORE THE NETWORK" MEANS ABOVE
+    # `resolve_state`, NOT ABOVE `load_config`. The first attempt at this fix
+    # moved the read up only as far as the config load, which is a local file
+    # read, so the full snapshot download still ran first: a missing `--file`
+    # went on reporting the STORE AS UNREACHABLE (rc 7) instead of "cannot read
+    # --file" (rc 2). The comment claimed the ordering, and the test that
+    # asserted it did so in its NAME while its body checked only the exit code
+    # and the sentence — both of which held with the read left where it was. A
+    # guard's description claiming coverage its body does not provide is the
+    # shape that stops anyone looking.
+    try:
+        payload = args.file.read_bytes()
+    except OSError as exc:
+        print(f"cairn: cannot read --file {args.file}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
     revision = args.if_match
     if not revision:
         state, detail, hint = resolve_state(
@@ -1041,16 +1056,6 @@ def cmd_put(args: argparse.Namespace) -> int:
             return EXIT_USAGE
         revision = hashlib.sha256(matches[0].read_bytes()).hexdigest()[:16]
         print(f"cairn: derived If-Match {revision} from the live snapshot", file=sys.stderr)
-    # 🔴 READ THE FILE BEFORE THE NETWORK, NOT AFTER. This came after
-    # `resolve_state` — a full snapshot download — so `--file` naming a path that
-    # does not exist spent the whole sync and then died on an unguarded
-    # `FileNotFoundError` at exit 1: a code in neither the read table nor the
-    # write table, reached by the commonest typo this verb has.
-    try:
-        payload = args.file.read_bytes()
-    except OSError as exc:
-        print(f"cairn: cannot read --file {args.file}: {exc}", file=sys.stderr)
-        return EXIT_USAGE
     url, token = load_config()
     quoted = f"/api/v1/entry/{quote(scope, safe='')}/{quote(args.ref, safe='')}"
     headers, body = send_write(
