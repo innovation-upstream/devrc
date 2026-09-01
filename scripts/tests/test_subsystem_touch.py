@@ -10683,16 +10683,16 @@ class TestShapeMutationKills:
             [("        return \"\\n\".join(\n"
               "            out\n"
               "            + _render_validation_shape(report)\n"
+              "            + _render_validation_dropped(report)\n"
               "            + _render_validation_open_actions(report)\n"
               "            + _render_validation_unreachable(report)\n"
-              "            + _render_validation_dropped(report)\n"
               "        )\n"
               "    n = len(report.malformed)",
               "        return \"\\n\".join(\n"
               "            out\n"
+              "            + _render_validation_dropped(report)\n"
               "            + _render_validation_open_actions(report)\n"
               "            + _render_validation_unreachable(report)\n"
-              "            + _render_validation_dropped(report)\n"
               "        )\n"
               "    n = len(report.malformed)")],
         )
@@ -11082,13 +11082,13 @@ class TestUnreachableMarkerMutationKills:
             "m_um_render",
             [
                 (
+                    "            + _render_validation_dropped(report)\n"
                     "            + _render_validation_open_actions(report)\n"
                     "            + _render_validation_unreachable(report)\n"
-                    "            + _render_validation_dropped(report)\n"
                     "        )\n"
                     "    n = len(report.malformed)",
-                    "            + _render_validation_open_actions(report)\n"
                     "            + _render_validation_dropped(report)\n"
+                    "            + _render_validation_open_actions(report)\n"
                     "        )\n"
                     "    n = len(report.malformed)",
                 )
@@ -11115,15 +11115,15 @@ class TestUnreachableMarkerMutationKills:
                     "    return \"\\n\".join(\n"
                     "        out\n"
                     "        + _render_validation_shape(report)\n"
+                    "        + _render_validation_dropped(report)\n"
                     "        + _render_validation_open_actions(report)\n"
                     "        + _render_validation_unreachable(report)\n"
-                    "        + _render_validation_dropped(report)\n"
                     "    )",
                     "    return \"\\n\".join(\n"
                     "        out\n"
                     "        + _render_validation_shape(report)\n"
-                    "        + _render_validation_open_actions(report)\n"
                     "        + _render_validation_dropped(report)\n"
+                    "        + _render_validation_open_actions(report)\n"
                     "    )",
                 )
             ],
@@ -12488,13 +12488,11 @@ class TestTheDroppedBlockNeverTouchesTheVerdict:
         mod = _load_mutant(
             tmp_path,
             "m_dropped_render",
-            [("            + _render_validation_unreachable(report)\n"
+            [("            + _render_validation_shape(report)\n"
               "            + _render_validation_dropped(report)\n"
-              "        )\n"
-              "    n = len(report.malformed)",
-              "            + _render_validation_unreachable(report)\n"
-              "        )\n"
-              "    n = len(report.malformed)")],
+              "            + _render_validation_open_actions(report)\n",
+              "            + _render_validation_shape(report)\n"
+              "            + _render_validation_open_actions(report)\n")],
         )
         store = _nuance_store(tmp_path, DROPPED_NUANCE)
         argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
@@ -12502,3 +12500,308 @@ class TestTheDroppedBlockNeverTouchesTheVerdict:
         out = capsys.readouterr().out
         assert "DROPPED LINE(S)" not in out
         assert "marker reachability" in out, "the neighbouring block must survive"
+
+
+# =============================================================================
+# 🔴 ROUND-2 FIXES — everything below closes a finding from the blind audit of
+# PR #1223, and every one of them was a defect the round-1 tests passed over.
+#
+#   1. `carries_marker` was a hand-spelled copy of the marker vocabulary that
+#      was INERT on the shape the feature exists for and LOOSE on prose. It
+#      fired on `* OPEN:` (a bullet char the corpus does not use), missed
+#      `- OPEN:` and every dated `- 2026-08-19: OPEN: …`, and returned True for
+#      `resolved upstream in 1.2.3.`. Measured against all 7 historical
+#      dropped-line blobs in the live store: 0 of them flagged, including the
+#      `OPEN:` three docstrings cite as the motivating incident. Now routed
+#      through `subsystem_resolver.line_openness`, which `unreachable_markers`
+#      also calls — one rule, one place, pinned by the shape ledger.
+#   2. The block RENDERED AFTER `open actions:` and `marker reachability:`,
+#      whose zeros are false in exactly this state.
+#   3. Duplicate-line masking: reachability keyed on the line string alone.
+#   4. No fence tracking, unlike both sibling scanners.
+#   5. The MALFORMED-path render call had no behavioural test of its own.
+# =============================================================================
+
+
+class TestCarriesMarkerUsesTheSharedVocabulary:
+    """🔴 THE FIELD SHAPES, not the ones the old spelling happened to catch."""
+
+    @pytest.mark.parametrize(
+        "line, want",
+        [
+            ("- OPEN: the sibling repo still points at the old bucket.", True),
+            ("  - 2026-08-19: OPEN: nobody has re-checked the ramp.", True),
+            ("      - 2026-08-19: RESOLVED abc1234: it landed.", True),
+            ("  OPEN: a bare continuation that declares one.", True),
+            # prose the old spelling reported as declarations
+            ("  resolved upstream in 1.2.3.", False),
+            ("  RESOLVED_ADDR in the trace was the stale ClusterIP.", False),
+            # 🔴 THE FIELD SHAPE. The 2026-08-19 incident's marker sat
+            # MID-LINE; a signal anchored at position 0 is 0 on the only
+            # shape ever observed in the wild, which is what the audit
+            # called inert. Verbatim from blob 409fd27b.
+            ("  pod requests are cpu:1 / mem:2Gi. OPEN: nobody has checked", True),
+            # …but a mid-line mention still needs the COLON, or the rule
+            # fires on ordinary shouted prose:
+            ("  we should OPEN SOURCE this eventually.", False),
+            ("  the OPENAPI schema moved.", False),
+            ("  an ordinary wrapped continuation line.", False),
+        ],
+    )
+    def test_the_shapes(self, line: str, want: bool) -> None:
+        assert st._carries_marker(line) is want, line
+
+    def test_it_agrees_with_the_reader_that_owns_the_vocabulary(self) -> None:
+        """🔴 STRUCTURAL, not a second table. If `_carries_marker` ever stops
+        delegating, this fails even where the two happen to agree today."""
+        src = MODULE_PATH.read_text(encoding="utf-8")
+        fn = src[src.index("def _carries_marker("):src.index("def validate_command(")]
+        assert "line_openness(" in fn
+        assert "line_mentions_marker(" in fn
+        for reimplementation in ("startswith(", "lstrip(", '"OPEN', "'OPEN", "re.compile"):
+            assert reimplementation not in fn, (
+                f"_carries_marker spells {reimplementation!r} — that is a second "
+                f"copy of the marker vocabulary, which is the exact defect the "
+                f"audit found: inert on the field shape, loose on prose"
+            )
+
+    def test_a_dropped_DECLARATION_on_the_real_field_shape_is_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        """The end-to-end regression: the dated, `-`-bulleted, indented shape
+        that the whole 2026-08-19 incident is made of."""
+        nuance = "\n".join(
+            [
+                "      - 2026-08-19: OPEN: nobody has re-checked the ramp.",
+                "        its evidence continues here.",
+                "- 2026-02-11: an ordinary bullet, fully intact, with no marker.",
+            ]
+        )
+        rep = _validated(_nuance_store(tmp_path, nuance))
+        marked = [d for d in rep.dropped if d.carries_marker]
+        assert len(marked) == 1, (
+            "the dated `- …: OPEN:` shape is the one the store actually holds; "
+            "if this is 0 the urgency signal is inert on the field case"
+        )
+        out = st.render_validation(rep)
+        assert "looks like a DECLARATION" in out
+
+
+class TestTheDroppedBlockPrintsBeforeTheZerosItFalsifies:
+    """🔴 ORDER IS A FINDING, not cosmetics. `scan_open_actions` and
+    `scan_unreachable_markers` never see dropped text, so their zeros are facts
+    about content the parser did not reach. Printed after the 🔴 they read as
+    reassurance; printed before it they are false."""
+
+    def test_dropped_precedes_open_actions_and_marker_reachability(
+        self, tmp_path: Path
+    ) -> None:
+        out = st.render_validation(_validated(_nuance_store(tmp_path, DROPPED_NUANCE)))
+        i_dropped = out.index("DROPPED LINE(S)")
+        i_open = out.index("open actions")
+        i_reach = out.index("marker reachability")
+        assert i_dropped < i_open < i_reach, (
+            "the dropped block must print before the two blocks whose zeros it "
+            "invalidates"
+        )
+
+    def test_it_holds_on_the_MALFORMED_path_too(self, tmp_path: Path) -> None:
+        """Both returns of `render_validation`. The unreachable feature's own
+        history records this seam being wired on one path and not the other."""
+        store = _nuance_store(tmp_path, DROPPED_NUANCE)
+        (store / SCOPE / "broken.md").write_text(
+            "---\nservice: broken\naliases: [\n  wrapped\n]\n---\n", encoding="utf-8"
+        )
+        out = st.render_validation(_validated(store))
+        assert "MALFORMED" in out, "positive control: the malformed branch must run"
+        assert out.index("DROPPED LINE(S)") < out.index("open actions")
+
+
+class TestDroppedReachabilityIsKeyedOnOffsetNotJustText:
+    """🔴 A `set[str]` masks an orphan whose text matches any bullet line in the
+    same file — and a read-modify-write race, the shape that decapitates a
+    bullet, is exactly what duplicates a block."""
+
+    def test_a_duplicate_of_a_bullet_line_is_still_reported(
+        self, tmp_path: Path
+    ) -> None:
+        nuance = "\n".join(
+            [
+                "  a shared continuation sentence that appears twice.",
+                "- 2026-03-04: an intact bullet,",
+                "  a shared continuation sentence that appears twice.",
+            ]
+        )
+        rep = _validated(_nuance_store(tmp_path, nuance))
+        assert [d.offset for d in rep.dropped] == [1], (
+            "the orphan is textually identical to a line inside the bullet; "
+            "keyed on the string alone it vanishes from the report"
+        )
+
+    def test_the_intact_control_still_reports_nothing(self, tmp_path: Path) -> None:
+        """Positive control for the arm above: the same duplication WITHOUT an
+        orphan must stay silent, or the fix would report every wrapped bullet."""
+        nuance = "\n".join(
+            [
+                "- 2026-03-04: an intact bullet,",
+                "  a shared continuation sentence that appears twice.",
+                "- 2026-02-11: another intact bullet,",
+                "  a shared continuation sentence that appears twice.",
+            ]
+        )
+        assert _validated(_nuance_store(tmp_path, nuance)).dropped == ()
+
+
+class TestDroppedSkipsFencedRegions:
+    """🔴 Both sibling scanners track fences. A fenced snippet before the first
+    bullet is sample text, and the block's remedy — "restore the bullet opening
+    line" — is wrong for it."""
+
+    def test_a_fence_before_the_first_bullet_is_not_reported(
+        self, tmp_path: Path
+    ) -> None:
+        nuance = "\n".join(
+            [
+                "```yaml",
+                "key: value",
+                "- looks: like a bullet",
+                "```",
+                "- 2026-02-11: an ordinary bullet, fully intact, with no marker.",
+            ]
+        )
+        assert _validated(_nuance_store(tmp_path, nuance)).dropped == ()
+
+    def test_a_genuine_orphan_BESIDE_a_fence_is_still_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """Positive control: skipping fences must not skip everything before the
+        first bullet."""
+        nuance = "\n".join(
+            [
+                "```yaml",
+                "key: value",
+                "```",
+                "  a genuinely orphaned tail whose opening line was lost.",
+                "- 2026-02-11: an ordinary bullet, fully intact, with no marker.",
+            ]
+        )
+        rep = _validated(_nuance_store(tmp_path, nuance))
+        assert [d.line.strip() for d in rep.dropped] == [
+            "a genuinely orphaned tail whose opening line was lost."
+        ]
+
+
+class TestStep4NamesTheDroppedLineBlock:
+    """🔴 The writer's protocol branches on the EXIT CODE, and this block
+    deliberately leaves it at 0 — so a block the doc does not name is a block
+    nobody reads. Both siblings carry such a paragraph; this one shipped
+    without."""
+
+    def test_step_4_names_the_block_and_its_reason_token(self) -> None:
+        doc = INDEX_DOC.read_text(encoding="utf-8")
+        assert "`dropped lines:`" in doc
+        assert st.DROPPED_LINE in doc, (
+            f"reason token {st.DROPPED_LINE!r} is absent from step 4; a writer "
+            f"branching on the exit code alone will not see it"
+        )
+
+    def test_step_4_gives_the_REMEDY_and_the_LIMIT(self) -> None:
+        """Naming the block is not enough: the remedy is counter-intuitive (the
+        text must be RESTORED, and deleting it is the tempting wrong move), and
+        the zero is partial, which a reader must not over-read."""
+        doc = " ".join(INDEX_DOC.read_text(encoding="utf-8").split())
+        assert "never to delete the text" in doc
+        assert "partial by construction" in doc
+
+
+class TestTheDroppedRendererIsWiredOnBOTHReturns:
+    """🔴 `render_validation` returns from two places and the indentation differs
+    by four spaces, so an edit that wires one matches nothing on the other and
+    says so to nobody. That is not hypothetical: the marker-reachability feature
+    records it happening to exactly this seam. Round 1 mutated only the clean
+    path; deleting the MALFORMED call was caught, but by a SIBLING feature's
+    anchor-uniqueness assert, whose diagnosis names the wrong block."""
+
+    def _store(self, tmp_path: Path) -> Path:
+        store = _nuance_store(tmp_path, DROPPED_NUANCE)
+        (store / SCOPE / "broken.md").write_text(
+            "---\nservice: broken\naliases: [\n  wrapped\n]\n---\n", encoding="utf-8"
+        )
+        return store
+
+    def test_kills_the_RENDERER_call_on_the_MALFORMED_path(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        mod = _load_mutant(
+            tmp_path,
+            "m_dropped_render_malformed",
+            [("        + _render_validation_shape(report)\n"
+              "        + _render_validation_dropped(report)\n"
+              "        + _render_validation_open_actions(report)\n",
+              "        + _render_validation_shape(report)\n"
+              "        + _render_validation_open_actions(report)\n")],
+        )
+        store = self._store(tmp_path)
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        assert mod.main(argv) == 3, "the malformed fixture must take that branch"
+        out = capsys.readouterr().out
+        assert "MALFORMED" in out
+        assert "DROPPED LINE(S)" not in out, "the mutant must silence the block"
+        assert "marker reachability" in out, "the neighbouring block must survive"
+        assert st.main(argv) == 3
+        assert "DROPPED LINE(S)" in capsys.readouterr().out
+
+
+class TestTheUrgencyFlagFiresOnTheFieldIncident:
+    """🔴 THE REGRESSION THE AUDIT FOUND, pinned as a behaviour rather than as a
+    claim. The 2026-08-19 `datapacket-talos/orchestration.md` corruption held its
+    `OPEN:` MID-LINE. Two successive spellings of this flag read 0 on it — first
+    a hand-rolled `startswith` over the wrong bullet characters, then a correct
+    but position-0-anchored parse — while three docstrings, the commit message
+    and the PR body all cited that very `OPEN:` as the motivating incident.
+
+    The fixture line is VERBATIM from blob `409fd27b`, so this cannot drift into
+    testing a shape the store does not hold."""
+
+    FIELD_LINE = (
+        "        pod requests are cpu:1 / mem:2Gi. OPEN: nobody has checked "
+        "whether the ramp has degraded"
+    )
+
+    def test_the_dropped_declaration_is_flagged_and_RENDERED(
+        self, tmp_path: Path
+    ) -> None:
+        nuance = "\n".join(
+            [
+                "      - 2026-08-19: `genericworker-hpa` is the capacity ceiling,",
+                self.FIELD_LINE,
+                "- 2026-02-11: an ordinary bullet, fully intact, with no marker.",
+            ]
+        )
+        rep = _validated(_nuance_store(tmp_path, nuance))
+        assert [d.carries_marker for d in rep.dropped].count(True) == 1, (
+            "the field incident's mid-line OPEN: must rank as a lost DECLARATION"
+        )
+        blob = rep.to_json()
+        assert blob["dropped_marker_count"] == 1, (
+            "and it must reach the JSON, which is the only machine-readable "
+            "surface a dropped declaration has"
+        )
+        assert "looks like a DECLARATION" in st.render_validation(rep)
+
+    def test_shouted_prose_without_a_colon_is_NOT_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        """The control that makes the arm above a measurement. Unanchored, the
+        near-miss pattern's shouted branch would fire on ordinary prose; the
+        colon is what separates them."""
+        nuance = "\n".join(
+            [
+                "  we should OPEN SOURCE this, and the OPENAPI schema moved.",
+                "- 2026-02-11: an ordinary bullet, fully intact, with no marker.",
+            ]
+        )
+        rep = _validated(_nuance_store(tmp_path, nuance))
+        assert len(rep.dropped) == 1, "still reported as a dropped LINE"
+        assert rep.dropped[0].carries_marker is False, "but not as a declaration"
+        assert rep.to_json()["dropped_marker_count"] == 0
