@@ -603,7 +603,7 @@ answer. A green from an unvalidated instrument is a claim about the instrument.
 
 | instrument | negative control | positive control |
 |---|---|---|
-| `verify-byte-identity.sh` | one entry mutated by a single character → **FAIL, naming the scope** | identical stores → **PASS**, printing `raw-diff-lines`/`store-root-lines` beside the verdict |
+| `verify-byte-identity.sh` | one entry mutated by a single character → **FAIL, naming the scope**; the same mutation under a shuffled mtime order → still FAIL; an entry on one side only → FAIL **naming the ref** | identical stores → **PASS**; identical stores whose entry-file **mtimes are in a different order** → **PASS** (the mtime-ordering red), printing `raw-diff-lines`/`store-root-lines`/`index-order-lines`/`entries` beside the verdict |
 | the backup precondition | absent CronJob, absent `kubectl`, unparseable JSON, unparseable timestamp, and a `lastSuccessfulTime` that is **absent** → all refuse with their own sentence | a fresh timestamp passes and prints the measured age beside the ceiling; the boundary is measured from **both** sides (35.5 h passes, 36.5 h refuses) |
 | the write-route probe | a `405 read-only` server → reported as an **operator** problem | a `400 bad-request` server → reported as deployed. The probe body is `{}`, refused by the server's validator *before* any ref is resolved, so it cannot write |
 | the freeze | `probe_writable` returns `writable` at 0644 and `refused` at 0444, on the same file, twice | a partially-applied freeze (one file left writable) exits 16 **and** restores every mode bit |
