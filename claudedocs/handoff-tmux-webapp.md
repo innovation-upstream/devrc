@@ -21,7 +21,12 @@ from the live pin and never from a doc.
 matched the server and a cross-host round trip moved a number (`view create` on the laptop →
 `view ls` on the workbench, `[]` → 1 → `[]`). 🔴 **0.8.21 has since shipped, so both clients are
 stale again by construction** — nothing converges `homelab-talos`, so re-run the round trip rather
-than reading this paragraph. Source currency at that measurement: workbench at `trunk`; laptop 9
+than reading this paragraph. ⚠ **That "stale by construction" prediction was WRONG when tested.**
+Re-measured 2026-09-01 16:29Z: server 0.8.21, workbench client 0.8.21, laptop client 0.8.21, and the
+round trip moved a number cross-host (`view create` on the laptop → `view ls` on the workbench →
+`view rm`, `[] → 1 → []`). Something converged both checkouts after 0.8.21 shipped. The item stays
+RECURRING — the point is that "stale by construction" is a hypothesis to test, not a fact to carry.
+Source currency at that measurement: workbench at `trunk`; laptop 9
 commits behind but **0 of them touching `containers/clawgate`**, which is the subtree-not-repo
 distinction `drift-check.sh` rc 17 makes.
 
@@ -466,7 +471,13 @@ check are byte-identical in `gh pr checks`, and I diagnosed the first without na
   `layout.spec.ts`**, then set `MIN_PASSED` to ~93% of it, the way the existing comment derives 110
   from 118. It is a `-lt` floor, so nothing is broken meanwhile.
 
-### 🔴 `scripts/tests/test_subsystem_store_api.py` is FLAKY on `main`, and nothing is fixing it
+### ⚠ SUPERSEDED — `test_subsystem_store_api.py` is FLAKY on `main`, and nothing is fixing it
+🔴 **BOTH HALVES OF THIS HEADING ARE NOW FALSE, AND ITS "next probe" SENDS YOU DOWN A REFUTED
+THREAD. Read `### ✅ DIAGNOSED` below before spending a minute on anything here.** The mechanism is
+fsync latency, not seed/ordering, and `fix/xdist-parametrize-values-deterministic` is not the thread
+to pull. Kept verbatim because the eliminations below are still true and still useful — it is the
+FRAMING that was wrong, which is this doc's own documented failure mode for an open-investigation
+block.
 - **Symptom + exact repro:** `nix develop ~/workspace/devrc -c python3 -m pytest
   scripts/tests/test_subsystem_store_api.py -q` on a CLEAN `main` checkout.
 - **Observed (with values):** `1 failed, 640 passed in 321.94s` — failing
@@ -603,7 +614,9 @@ in the **`go`** step, which killed `go`/`extension`/`hook`/`verdict` together �
 read `COULD NOT RUN: clawgate-ci stopped before any leg reported`. Attribution, stated with its
 evidence: #592's diff contains **zero Go files**, so it cannot have slowed the `go` step, and
 **#591 — which does touch Go — passed the same pipeline nine minutes later** (`clawgate-ci-hsdlk`,
-rev `d687fcaa`, Succeeded). `ZacxDev/homelab-infra#572` is already open to raise that budget.
+rev `d687fcaa`, Succeeded). `ZacxDev/homelab-infra#572` (raise that budget) is **MERGED** — 2026-08-31 18:36Z. Read the
+`TaskRunTimeout` investigation below before recording it as the fix: it addresses one of the two
+causes.
 ⚠ **The leg that never ran was `hook` — the one #592 exists to exercise** — so merging on the
 "COULD NOT RUN means broken gate" convention alone would have shipped it with zero CI coverage of
 the thing it changed. It was merged on a **local reproduction of that exact leg instead**: the same
@@ -646,8 +659,8 @@ re-runnable without a commit, so a capacity-starved verdict is recoverable later
     tekton-ci running 16 → 1) the identical spec passed in ~10 min.
 - **Ruled out:** the diff, in both cases. #592 contains zero Go files so it cannot slow `go`, and
   #591 — which does touch Go — passed the same pipeline nine minutes after czshq failed.
-- 🔴 **Consequence for `ZacxDev/homelab-infra#572` (raise the task budget 25m → 40m):** it fixes
-  the czshq shape and does **nothing** for the z5pdm shape — a longer budget just waits longer for
+- 🔴 **Consequence for `ZacxDev/homelab-infra#572` (raise the task budget 25m → 40m), MERGED
+  2026-08-31 18:36Z:** it fixes the czshq shape and does **nothing** for the z5pdm shape — a longer budget just waits longer for
   a pod that never lands. **Do not let the bump be recorded as the fix for both.** The z5pdm shape
   needs scheduling headroom (requests/limits, priority class, or concurrency caps), which is a
   different change.
@@ -696,7 +709,7 @@ blind**: `EXAMINED > 0` still holds and the `BODIES == grep -c '^@test '` equali
 ⚠ **Neither PR's `clawgate-ci` ever ran the leg that covers it** — #592's timed out before the
 `hook` leg (see the TaskRunTimeout investigation above). The bats coverage claim for #592 rests on
 a local reproduction of that leg in the same `docker.io/bats/bats:1.11.1` image, not on CI.
-||||||| parent of e1d1318f (docs(handoff): correcting the docker.io block in BOTH directions: the workbench CAN pull today (meas)
+
 ### ⚠ CORRECTION 2026-08-31 — the workbench CAN pull `docker.io` today, and the root cause is STILL UNFIXED
 🔴 **This corrects the "THE WORKBENCH STILL CANNOT PULL FROM `docker.io`" block above in BOTH
 directions. Read both halves — either one alone is wrong.**
@@ -736,9 +749,12 @@ directions. Read both halves — either one alone is wrong.**
   unchanged: the pin (needs sudo, one host) or clearing the record on `192.168.50.1` (fixes every
   machine on the LAN, and is still untouched).
 
-### 🔴 `test_subsystem_store_api.py` HAS RECURRED — the "Fixed by devrc#996" claim above is now FALSE
+### ⚠ SUPERSEDED (its hypothesis only) — `test_subsystem_store_api.py` HAS RECURRED
 🔴 **This corrects the Gotchas bullet that ends "Fixed by devrc#996 (`1b1f71ad`…)" and the
 open-investigation heading that says "nothing is fixing it".** #996 did not close it.
+🔴 **AND ITS OWN "Leading hypothesis"/"Next probe" ARE NOW REFUTED — see `### ✅ DIAGNOSED` below.**
+The recurrence recorded here is real and its ruling-out is sound; only the seed/ordering explanation
+and the "pull `fix/xdist-parametrize-values-deterministic`" instruction are wrong.
 
 - **Symptom + exact repro:** `devrc#1162` — a **one-markdown-file** PR — was blocked by
   `tekton/devrc-pytests` on
@@ -774,6 +790,39 @@ open-investigation heading that says "nothing is fixing it".** #996 did not clos
   two required checks, so this blocks arbitrary PRs — including docs-only ones — and the only
   remedy is a fresh push. **A red on this file is not evidence about your diff.** Check the case
   name against the three above before spending any time on it.
+
+### ✅ DIAGNOSED — the store-api gate failure is FSYNC CONTENTION, and the seed/ordering hypothesis is REFUTED
+🔴 **This supersedes the two blocks above. Read `scripts/ci-repro/README.md` BEFORE re-pushing or
+debugging your diff** — it is the canonical write-up and it is maintained; this block is a pointer,
+not a copy.
+
+- **The mechanism, measured:** `server.py:_replace_bytes` fsyncs the file and then the parent
+  directory **inside the request, before the response is written**; fsync blocks in uninterruptible
+  sleep. When one fsync exceeds `HANG_TIMEOUT` the client raises `TimeoutError` and the gate reports
+  a **code failure for an I/O stall**. The suite's own classifier names it unprompted:
+  `MECHANISM = SERVER_BLOCKED_IN_FSYNC`. Why CI and not here: `devrc-ci` is pinned to one node, so a
+  burst of pushes stacks concurrent runs onto one machine's disk.
+- **There is now an on-demand reproducer on the dev host** — `scripts/ci-repro/slowfsync.c`, an
+  `LD_PRELOAD` shim, with its own instrument-validation step and a control/reproduction pair. It
+  reproduced the identical test with the identical parametrisation as a real CI failure, and was
+  independently re-run by an auditor.
+- **Three fixes have merged** (verified by content, never by ancestry): `devrc#1181` squash
+  `0c333846` (the diagnosis + reproducer), `#1190` squash `634c328a` (a raw reader racing the
+  server made 12 assertions report an empty read as a SECOND response), `#1193` squash `48a5540e`
+  (the hang guard SAMPLED its own arming instead of waiting for it).
+- 🔴 **NOT CLOSED — and deliberately not written as "fixed", per this doc's own shelf-life rule.**
+  Measured 2026-09-01 **after all three merged**: `devrc#1197` is red on
+  `TestAHungRoundTripSAYSWhichSideBlocked::test_a_stall_in_the_FSYNC_region_is_NAMED` — a **fourth**
+  distinct case in this file — while `#1199` passed the same tier. The honest status is: mechanism
+  identified and reproducible, three contributing defects removed, **no run of consecutive greens in
+  the failing tier yet**.
+- 🔴 **Unchanged and still the operative advice: a red on this file is not evidence about your
+  diff.** What changed is the remedy — do NOT re-derive an ordering theory, and do NOT open a PR for
+  `fix/xdist-parametrize-values-deterministic`.
+- ⚠ **Two fixes that look right and are not**, both written up in that README: raising
+  `HANG_TIMEOUT` again (60.0 is already the symptom fix, raised from 15, and it did not hold), and
+  relocating `nix-store-cache` (the stalling write lands on the step container's **ephemeral layer**,
+  which that volume does not cover).
 
 ### ✅ RESOLVED — the 0.8.21 deploy, and the image-vs-pin trap it walked into
 🔴 **A PIN THAT LANDS AFTER YOUR MERGE DOES NOT MEAN THE IMAGE CARRIES IT.** Measured:
@@ -1105,8 +1154,10 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
   (`TestTrustedProxyOverTheRealProcess`, `TestTheBackstopNeverSendsASecondResponse` ×2 variants,
   `TestTheActorComesFromTheTOKEN`). 🔴 **The discriminator that settled it was a DOCS-ONLY PR
   failing** — a one-markdown-file diff cannot break a store-api test. Each passed 5–6/6 in
-  isolation on clean `origin/main`, and the box was at load 18–51 from concurrent agents. Fixed
-  by devrc#996 (`1b1f71ad`, "audit BEFORE responding, and serialise the audit sink"). **If it
+  isolation on clean `origin/main`, and the box was at load 18–51 from concurrent agents. 🔴 **"Fixed
+  by devrc#996" IS FALSE — it recurred, and the mechanism is now DIAGNOSED as fsync contention; see
+  `### ✅ DIAGNOSED` above and `scripts/ci-repro/README.md`.** #996 (`1b1f71ad`, "audit BEFORE
+  responding, and serialise the audit sink") narrowed it. **If it
   recurs: run the full target on a clean `origin/main` worktree before touching your diff, and
   check whether UNRELATED targets' wall times also moved** — here a 273-test target swung
   9.56 s → 5.52 s between runs, which is load inflating everything, not one assertion.
