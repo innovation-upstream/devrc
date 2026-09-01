@@ -304,3 +304,81 @@ assertions (`assert data, "the request got no response at all"`) already say wha
 actually happened. They are also far less exposed, since both are answered by the
 pre-auth 401 path before any disk work. Converting them means restructuring two
 unrelated tests, so it was left out of the fix rather than done quietly.
+
+---
+
+## `slow_arm.py` — a GUARD that could not reach its own stall site in CI
+
+**What it answers.** `TestAHungRoundTripSAYSWhichSideBlocked` failed in CI
+(`devrc-ci-dpmck`, PR #1147, `collected=20075 passed=20071`) with
+
+```
+AssertionError: the server never reached the stall site, so the hang under test
+was NOT the one this test set up — the report below would be about a DIFFERENT hang
+assert False
+ +  where False = is_set()
+```
+
+The precondition did the right thing — it refused to report a verdict when its own
+setup had not landed. The problem was that the setup **did not reliably land**, so the
+guard failed where the code was fine: a flake with a better error message, blocking
+every PR exactly as the original one did.
+
+**The mechanism.** The precondition was `assert stalled.is_set()`, sampled at the
+instant the client's `timeout=CLIENT_BOUND` (**0.25 s**) expired. Within those 250 ms
+the server had to accept the connection, spawn a handler thread, parse the request,
+authenticate, meter, resolve the path, read the entry **and** reach `_fsync_dir`. On an
+idle dev host that takes a few ms. Under the CI node's concurrency it does not always.
+
+There was a second, quieter race in the same helper: the report had to be taken before
+the fixed `SERVER_STALL` (1.2 s) sleep elapsed, or the verdict described a server that
+had already unblocked.
+
+**The fix is synchronisation, not a bigger number.** `SERVER_STALL` is **gone**. The
+caller now `stalled.wait(HANG_TIMEOUT)`s for the stall site to be reached, and the
+handler is then held by a second Event until the report has been taken. Neither side
+guesses the other's timing, so there is no pair of bounds left to tune. It is also
+*faster*: the control run went 4.19 s → 3.06 s, because nothing sleeps 1.2 s any more.
+
+**Usage.**
+
+```bash
+# control — shim inert, same command line
+PYTHONPATH=scripts/ci-repro python3 -m pytest scripts/tests/test_subsystem_store_api.py \
+  -q -p slow_arm -k TestAHungRoundTripSAYSWhichSideBlocked
+
+# reproduction — 0.5 s on the request path, against a 0.25 s CLIENT_BOUND
+SLOW_ARM_S=0.5 PYTHONPATH=scripts/ci-repro python3 -m pytest \
+  scripts/tests/test_subsystem_store_api.py -q -p slow_arm --slow-arm-selftest \
+  -k TestAHungRoundTripSAYSWhichSideBlocked
+```
+
+| run | at parent commit | at HEAD |
+|---|---|---|
+| control | `4 passed` | `4 passed` |
+| armed `SLOW_ARM_S=0.5` | **`2 failed, 2 passed`** | **`4 passed`** |
+| armed `SLOW_ARM_S=3.0` (12x the bound) | — | `4 passed` |
+
+Both arms of the class fail at the parent commit, which confirms the defect is in the
+shared `_hang_and_report` helper rather than in one test.
+
+⚠ **The guard can still go RED — proved by mutation, not by assertion.** A `wait()`
+that masked a real regression would be worse than the flake:
+
+| mutant | result |
+|---|---|
+| `_replace_bytes` no longer calls `_fsync_dir` | RED — `Failed: DID NOT RAISE TimeoutError` (the server stops stalling entirely) |
+| handler parked *before* the stall site for longer than `HANG_TIMEOUT` (`SLOW_ARM_S=90`) | RED — `the server never reached the 'fsync' stall site within 60s`, after 91 s |
+| `("fsync", …)` removed from `_HUNG_SERVER_RULES` | RED — `MECHANISM = BLOCKED_ELSEWHERE`, so the classifier is still genuinely under test |
+
+The middle row is the important one: the client still times out, but the stall site is
+genuinely never reached — exactly the case a `wait()` could have swallowed. It does not.
+
+⚠ **NOT reproduced by natural scheduling on the dev host, and that is stated rather
+than glossed.** Pinned to ONE core with `-n 4`, then with 27 CPU hogs plus three
+fsync-looping `dd` writers on that core, the pre-fix guard still passed **5/5** on the
+class and **650/650** on the full file at 2.5x wall-clock inflation (81 s → 207 s). This
+is a 24-core host with fast NVMe; the arming path is a few ms of CPU, so a ~50x
+slowdown would be needed to miss 250 ms. The deterministic injection above reproduces
+the exact failure and the mutation matrix bounds the fix — but the *natural* CI
+scheduling failure was not reproduced here.
