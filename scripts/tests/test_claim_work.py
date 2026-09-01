@@ -784,6 +784,76 @@ def test_slug_for_normalises_case_and_punctuation():
     assert re.fullmatch(r"[a-z0-9][a-z0-9._-]*", slug), slug
 
 
+def test_slug_for_distinguishes_a_LETTERED_sub_rank():
+    """🔴 EVERY lettered sub-rank used to mint ONE slug, and the collision was
+    reported as rc 12 — the answer that means CARRY ON.
+
+    The parser matched `^[0-9]+$` only. `8c` failed it, so `SLUG_RANK` stayed
+    empty and the argument was left unshifted and ignored: DISCARDED, not
+    rejected — no warning, exit 0, a well-formed slug. Measured before the fix
+    on the real handoff doc: `8c` and `8d` BOTH printed `tmux-webapp`.
+
+    So two sessions working different sub-items derived one lock, and the second
+    was told `rc 12 = ALREADY YOURS, carry on`. Contention is highest exactly on
+    the housekeeping tier where lettered sub-ranks live.
+    """
+    doc = "claudedocs/handoff-x.md"
+    bare = _run("--slug-for", doc).stdout.strip()
+    eight = _run("--slug-for", doc, "8").stdout.strip()
+    c = _run("--slug-for", doc, "8c").stdout.strip()
+    d = _run("--slug-for", doc, "8d").stdout.strip()
+
+    # Pinned as LITERALS, not derived from each other: a test that only asserts
+    # "they differ" passes for a derivation that appends a counter.
+    assert (bare, eight, c, d) == ("x", "x-8", "x-8c", "x-8d"), (bare, eight, c, d)
+    assert len({bare, eight, c, d}) == 4, "two sub-ranks share one lock"
+    for slug in (eight, c, d):
+        assert re.fullmatch(r"[a-z0-9][a-z0-9._-]*", slug), slug
+
+
+def test_slug_for_FOLDS_the_rank_case_so_one_item_is_one_lock():
+    """`8C` and `8c` are the same item. The base is already case-folded for
+    exactly this reason ("two spellings, two slugs, no lock"); the rank was not.
+    Unfolded it would be worse than a split namespace — `validate_slug` is
+    lowercase-only, so `x-8C` is rc 2 at the moment you try to claim it."""
+    doc = "claudedocs/handoff-x.md"
+    assert _run("--slug-for", doc, "8C").stdout.strip() == "x-8c"
+    assert _run("--slug-for", doc, "8C").stdout.strip() == \
+        _run("--slug-for", doc, "8c").stdout.strip()
+
+
+@pytest.mark.parametrize("bad", ["8-c", "part2", "abc", "8.1", "8_c"])
+def test_slug_for_REFUSES_an_unparseable_rank_rather_than_DROPPING_it(bad):
+    """🔴 WIDENING THE PATTERN ALONE WOULD FIX THE INSTANCE AND LEAVE THE CLASS.
+
+    The hazard is a rank that is silently ignored, not the specific spelling
+    `8c`. With only a wider regex, `8-c` and `part2` still derive the bare doc
+    slug and still exit 0 — the same collision, one keystroke away. So anything
+    that is not a flag and not a well-formed rank is now a usage error.
+    """
+    r = _run("--slug-for", "claudedocs/handoff-x.md", bad)
+    assert r.returncode == RC_USAGE, (
+        f"rank {bad!r} was accepted or silently dropped: "
+        f"rc={r.returncode} out={r.stdout.strip()!r}"
+    )
+    # And it must not have printed a slug that a caller would then go and claim.
+    assert r.stdout.strip() != "x", f"printed the bare doc slug for {bad!r}"
+
+
+def test_slug_for_still_does_not_SWALLOW_a_trailing_flag():
+    """⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE — it passes on the pre-change
+    script too, and is labelled so nobody counts it as evidence for the fix.
+
+    Measured: of the cases added with this fix, seven go red at the pre-change
+    `origin/main` and this one does not. It is here because the fix rewrote the
+    branch that protects it — a following flag belongs to the parser, not to the
+    rank — and refusing a bad rank must not turn `--strict` into one.
+    """
+    r = _run("--slug-for", "claudedocs/handoff-x.md", "--strict")
+    assert r.returncode == RC_OK, r.stderr
+    assert r.stdout.strip() == "x", r.stdout
+
+
 # ── a typo must be LOUD, not failed open ─────────────────────────────────────
 
 @pytest.mark.parametrize("bad", [

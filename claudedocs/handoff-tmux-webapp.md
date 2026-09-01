@@ -9,7 +9,7 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Ranks 1–8 are ✅ DONE, all sub-items included. Ranks 10–16 are OPEN.** The live-refresh work
+**Ranks 1–8, 13 and 16 are ✅ DONE. Ranks 10, 11, 12, 14, 15 are OPEN.** The live-refresh work
 (`ZacxDev/homelab-infra#611`) is DONE, merged, and **deployed as 0.8.21** — see below.
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC — `clawgatectl health` is the only authority.**
@@ -216,8 +216,10 @@ re-points every live claim. A finished item stays in place marked ✅ DONE; take
 OPEN one. *History:* a 2026-08-26 renumbering superseded an earlier 1–7 list, so a slug minted
 before that date may name a different item — do not renumber again without releasing live claims.
 
-🔴 **AND THE LOCK CANNOT TELL 8a/8b/8c/8d APART — see rank 13.** `--slug-for … 8c` returns the
-BARE slug `tmux-webapp`. Prefer plain integer ranks until 13 lands.
+✅ **THE LOCK CAN NOW TELL 8a/8b/8c/8d APART — rank 13 landed 2026-09-01.**
+`--slug-for … 8c` returns `tmux-webapp-8c`, distinct from `8d` and from `8`. The old advice
+("prefer plain integer ranks") is retired. An unparseable rank is now rc 2 rather than a silent
+drop, so a typo’d rank can no longer collapse two items onto one lock in silence.
 
 1. ✅ **DONE 2026-08-27** — the idle reaper had never fired because it COULD NOT (`time.NewTicker`
    delivers its first tick one whole interval in). `ZacxDev/homelab-infra#457`, 0.8.7.
@@ -272,15 +274,17 @@ BARE slug `tmux-webapp`. Prefer plain integer ranks until 13 lands.
     unreachable**. Full detail in the `clawgate` subsystem-index entry.
     forcing: incident — a shipped, measured defect on the version live on both hosts, filed as
     task #463 by the session that found it.
-13. **`claim-work --slug-for` collapses every LETTERED sub-rank to the bare doc slug.** Repo:
-    `devrc`, `scripts/claim-work.sh:357` — `^[0-9]+$` accepts bare digits only, so `8c` fails it,
-    `SLUG_RANK` stays empty and the argument is left unshifted and ignored: **discarded, not
-    rejected** (no warning, exit 0, well-formed slug). Written up in
-    `claude/skills/handoff/reference/shared-queue.md` (devrc#1163). Closing condition:
-    `--slug-for <doc> 8c` returns a slug distinct from `8d` and from `8`, pinned by a test, while
-    still refusing anything beginning with `-`.
-    forcing: regression — the lock is the protection `/resume` step 6 runs before touching a ranked
-    item, and it does not discriminate a doc's housekeeping tier, where contention is highest.
+13. ✅ **DONE 2026-09-01.** `--slug-for` discarded a lettered sub-rank instead of rejecting it, so
+    `8c`, `8d` and every lettered sub-rank of every rank minted ONE slug — and the collision was
+    reported as **rc 12 “ALREADY YOURS, carry on”**, the one answer that means PROCEED. Measured
+    before the fix on this doc: `8c` and `8d` both printed `tmux-webapp`.
+    🔴 **The pattern was widened AND the class closed:** an unparseable rank (`8-c`, `8.1`,
+    `part2`) is now a usage error, not a silent drop, because the hazard was an ignored rank rather
+    than the spelling `8c`. The rank is also case-folded (`8C` == `8c`; `validate_slug` is
+    lowercase-only, so unfolded it was rc 2 at claim time). 7 of 8 new cases watched RED on the
+    pre-change `origin/main`; the 8th is labelled in place as an invariant guard, not counted as
+    regression coverage.
+    forcing: none
 14. **Pin the settle barrier's PRECONDITION, which nothing currently asserts.** Repo:
     `homelab-talos`, `containers/clawgate/internal/api/push_fanout_ledger_test.go`. Extend the
     ledger to AST-assert that no `notify*`/`pushTask` call appears inside a `go` statement or a
@@ -306,16 +310,19 @@ BARE slug `tmux-webapp`. Prefer plain integer ranks until 13 lands.
     capability is asserted in three places and pinned by nothing.
     forcing: regression — this is the guard's own blind spot in the file it guards, and (a) is the
     shape the guard exists to catch.
-16. **The `clawgate-ci` bats leg has NO collected-test floor** (pre-existing, not introduced by
-    #592). Repo: `homelab-talos`,
-    `clusters/homelab/apps/tekton-pipelines/triggers/clawgate-ci-pipeline.yaml:440`. Measured in
-    the CI image: `bats` on a file with zero tests prints `1..0` and **exits 0**, so a suite that
-    stops collecting reads as a pass — the same hole the pytest and node tiers already close with
-    floors. The leg's own comments at `:409-410` still say "11 tests" and "18 + 11"; the real
-    numbers are 35 + 32 = 67. Closing condition: the leg fails when either suite collects fewer
-    tests than its floor, and the floor is derived from a real run.
-    forcing: gate — a green that cannot distinguish "passed" from "collected nothing" is the
-    documented reassuring-zero class, on the tier that gates this repo's hook changes.
+16. ✅ **DONE 2026-09-01 — `ZacxDev/homelab-infra#618`, squash `b5992890`.** The `hook` leg read
+    only `bats`' exit code, and `bats` on a file with zero `@test` bodies prints `1..0` and exits
+    **0**. Each suite now runs separately against its own floor (34 / 31, from `bats --count`
+    measuring 35 / 32 in the leg's own image). Measured with the mutation verified applied:
+    pre-change `hook leg rc=0` verdict `pass`; post-change `rc=1` verdict `fail` — with `bats`
+    itself exiting 0 in BOTH, so the floor is the only thing that spoke. Floors pinned by
+    `scripts/tests/test_clawgate_ci_hook_floor.py` (extracts the script FROM the manifest;
+    6/6 mutants killed by name). The leg's stale “11 tests” / “18 + 11” comments are gone.
+    ⚠ **Deployed and verified against the DEPLOYED artifact, but no PipelineRun has run it yet** —
+    `clawgate-ci` is path-filtered on `containers/clawgate/**` and this change touched neither, so
+    nothing fired. The next PR touching that path is the end-to-end check: `step-hook` must show
+    TWO plan lines and `floor=34` / `floor=31`. A single `1..67` means the Task did not reconcile.
+    forcing: none
 
 ## Open investigations — live diagnosis state
 
@@ -851,6 +858,28 @@ auditing scaffolding it had itself written. The final comment corrections were m
 than as a round 4, because re-auditing a comment edit is the loop the gate exists to stop.
 
 ## Gotchas
+- 🔴 **A PR THAT CHANGES A TEKTON PIPELINE CANNOT BE VERIFIED BY THAT PIPELINE — its green check
+  is a statement about the OLD leg.** A PipelineRun executes the **deployed Task object in the
+  cluster**, never the manifest on the PR branch. Measured 2026-09-01 on `#618`, which rewrote
+  `clawgate-ci`'s `hook` leg: `tekton/clawgate-ci` went **green**, and reading `step-hook` of run
+  `clawgate-ci-vdcqw` (revision = that PR's own head) showed **one** plan line `1..67` and **zero**
+  `floor=` lines — i.e. the pre-change leg. The new leg would have printed two of each.
+  🔴 **This is the same MERGED ≠ LIVE shape already recorded above for #584's `MIN_PASSED`, and it
+  was walked into by a session holding that note** — because there the symptom was a stale VALUE
+  after merge, and here it is a green CHECK before merge, which reads as evidence rather than as
+  its absence. **Ask which object the run loaded, not whether the check is green.**
+  Three consequences worth knowing before the next one:
+  - **The leg that DOES run PR content is a different one.** `gitops-validate`'s `scripts-tests`
+    step executes the PR's own files, so a test shipped alongside the manifest change is really
+    gated; the manifest change itself is not.
+  - **Verify the DEPLOYED artifact directly instead of waiting.** `kubectl -n tekton-ci get task
+    <name> -o json`, pull the step's `script`, confirm it is byte-identical to what you tested,
+    and run THAT in the step's own image. No cluster write, no GitHub status, and it is evidence
+    about the thing that will actually execute.
+  - ⚠ **A merge may trigger nothing at all.** `clawgate-ci` is path-filtered on
+    `containers/clawgate/**`; #618 touched `clusters/…` and `scripts/tests/`, so no run fired and
+    none ever will for that commit. An empty commit cannot re-trigger a path-filtered pipeline
+    either (see the entry below). Re-running a prior PipelineRun from its own spec is the route.
 - 🔴 **A FAILED `git worktree add` DOES NOT STOP THE NEXT `git -C <path>` — AND I LANDED A
   MERGE ON ANOTHER SESSION'S BRANCH THIS WAY.** `worktree add /home/zach/workspace/devrc-integ`
   failed with `fatal: … already exists` (another session was using that path for

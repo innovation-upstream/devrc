@@ -352,10 +352,32 @@ while [ "$#" -gt 0 ]; do
       MODE=slug-for
       SLUG_DOC="${2:-}"
       shift 2 || die_usage "--slug-for needs a handoff-doc path"
-      # An optional trailing rank, only if it is a bare number — otherwise it is
-      # the next flag and must not be swallowed.
-      if [ "$#" -gt 0 ] && [[ ${1} =~ ^[0-9]+$ ]]; then
-        SLUG_RANK="$1"; shift
+      # An optional trailing rank: a bare number, or a number with a LETTERED
+      # SUB-RANK (`8`, `8c`) — the handoff convention `8a/8b/8c/8d`.
+      #
+      # 🔴 IT USED TO MATCH `^[0-9]+$` ONLY, AND EVERYTHING ELSE WAS DISCARDED
+      # RATHER THAN REJECTED — no warning, exit 0, well-formed slug. So
+      # `--slug-for <doc> 8c` printed the BARE doc slug, which means `8c`, `8d`
+      # and every other lettered sub-rank of every rank in that doc minted ONE
+      # slug. Two sessions on different sub-items then both matched it, and the
+      # second was told **rc 12 — ALREADY YOURS, carry on**: the one answer that
+      # means PROCEED, handed out for a collision. That is the exact outcome
+      # this lock exists to prevent.
+      #
+      # 🔴 SO THE FIX IS NOT ONLY TO WIDEN THE PATTERN. Anything that is not a
+      # flag and not a well-formed rank is now a USAGE ERROR, because a silently
+      # ignored rank is the hazard — `8c` was one instance of it, and `8-c` or
+      # `part2` would still have been dropped in silence.
+      # A flag must still not be swallowed (`--slug-for <doc> --strict`).
+      if [ "$#" -gt 0 ]; then
+        case "$1" in
+          -*) : ;;   # the next flag — leave it for the parser
+          *)
+            [[ ${1} =~ ^[0-9]+[A-Za-z]*$ ]] || die_usage \
+              "--slug-for rank must be a number with an optional lettered sub-rank (e.g. 8, 8c), got '$1'"
+            SLUG_RANK="$1"; shift
+            ;;
+        esac
       fi
       ;;
     --subject)
@@ -405,6 +427,11 @@ derive_slug() {
     | sed -e 's/[^a-z0-9]\{1,\}/-/g' -e 's/^-\{1,\}//' -e 's/-\{1,\}$//')"
   [ -n "$base" ] || return 1
   if [ -n "$rank" ]; then
+    # 🔴 CASE-FOLD THE RANK for the same reason the base is folded above: `8C`
+    # and `8c` are the same item, and two spellings deriving two slugs is no
+    # lock at all. `validate_slug` is lowercase-only anyway, so an unfolded
+    # `8C` would not merely split the namespace — it would be rc 2.
+    rank="$(printf '%s' "$rank" | tr '[:upper:]' '[:lower:]')"
     printf '%s-%s\n' "$base" "$rank"
   else
     printf '%s\n' "$base"
