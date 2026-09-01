@@ -51,17 +51,22 @@ runs against them. Consequences:
 ## The confirm-gated write, step by step
 
 1. Audit first. Never propose a cut the audit did not classify.
-2. Back up (`cp -a`, `&&`-chained, count the files). This is the only safety net
-   for the CURRENT bytes: the hourly commit and the daily bundle both lag, so
-   neither holds what you are about to overwrite.
-3. For ONE entry, build the proposed new bytes.
+2. `cairn sync`, then back up the **cache** (`cp -a`, `&&`-chained, count the
+   files). This is the only safety net for the CURRENT bytes: the hourly commit
+   and the daily bundle both lag, so neither holds what you are about to
+   overwrite — and the frozen local mirror is an OLDER set of bytes than the
+   ones the put will replace.
+3. For ONE entry, build the proposed new bytes, in a scratch file.
 4. Present a **unified diff** against the current file — one compact block — and
    ask a single yes/no. Never batch a scope behind one prompt: a bad cut must be
    rejectable on its own.
-5. On confirm: **re-read the file** (a concurrent session may have appended since
-   step 3), re-apply the change to *current* bytes, then plain `Write`. On
-   decline, discard and move on.
-6. Never touch a file the user did not confirm.
+5. On confirm: land the scratch file with `cairn put`. The store's entry files
+   are `0444`, so a `Write` against one fails with `EACCES`; and the `If-Match`
+   the put derives from a live sync is what REPLACES the old "re-read the file
+   first, a concurrent session may have appended" rule — a concurrent append now
+   fails the put with exit 8 instead of being silently overwritten. On decline,
+   discard the scratch file and move on.
+6. Never touch an entry the user did not confirm.
 
 🔴 **Build the new entry by VERBATIM SLICING of the original**, not by retyping
 it. Content survival then becomes structural instead of something you have to
@@ -113,9 +118,12 @@ that is an invalid control, not a clean result.
 
 ## Landing
 
-Nothing about this store lands in a PR: the writes are local and final, and the
-only path off this machine is the encrypted daily backup (see 🔴 **Store safety**
-in `~/.claude/skills/analyze-service/reference/index-store.md`) — never a PR,
+Nothing about this store lands in a PR. ⚠ This paragraph used to add "the writes
+are local and final", which the Cairn cutover made false: a prune now lands on
+the **pod**, over an authenticated API, and the local tree is a read-only mirror.
+The rule is unchanged — the other paths off this machine are that API and the
+encrypted daily backup (see 🔴 **Store safety** in
+`~/.claude/skills/analyze-service/reference/index-store.md`) — never a PR,
 never a git remote. What DOES land in devrc is any change to the
 audit script, this skill, or the `analyze-service` reference docs — those go
 through the ordinary feature-branch + PR flow, gated by

@@ -49,13 +49,32 @@ WHAT THIS MODULE DOES **NOT** COVER, stated so nobody reads coverage into it
   module at 61 passed. Layer 5 is the disagreement half, and it is keyed on the
   MECHANISM TOKENS a second protocol cannot avoid naming rather than on any
   particular wording.
-* `scripts/subsystem-store-api/server.py` carries a THIRD append protocol
-  (flock + temp-file-rename, `PUT` behind `If-Match`). It writes the POD's
-  `/data`, not `~/.claude/analyze-service-index/`, so "one protocol" holds for
-  the local store today — but this module scans `claude/skills/**/*.md` only and
-  would never see it. Phase 1 of `claudedocs/plan-cairn-integration.md` makes the
-  pod canonical; that is when this has to be reconciled. Recorded so nobody reads
+* `scripts/subsystem-store-api/server.py` carries the pod's own write protocol
+  (flock + temp-file-rename, `PUT` behind `If-Match`). This module scans
+  `claude/skills/**/*.md` only and would never see it. Recorded so nobody reads
   coverage of it into a green run here.
+
+🔴 THE 2026-09-01 CUTOVER, and what it moved in here
+----------------------------------------------------
+`claudedocs/plan-cairn-phase1-cutover.md` made the POD canonical and froze every
+local entry file to `0444`. The owner's write step is therefore no longer an
+`Edit` against `~/.claude/analyze-service-index/` — it is `cairn append` (one
+dated bullet, the server supplies the `- ` and the date) and `cairn put` (a
+whole-file replace behind `If-Match`). `prune-index` moved with it: its cut is a
+`cairn put`, and it KEEPS its y/N, which the plan's §5 table calls out as the
+writer most likely to be forgotten.
+
+What that means for THIS module, stated so a reader does not misread its shape:
+
+* `MANDATE` still holds the OLD `Edit`-anchor fragment. It is now the marker of a
+  document that talks about the RETIRED local mechanism, and the ledger over it
+  says which two documents may record that retirement — the same two, for the
+  same reason. Nothing may re-instruct it.
+* the disagreement predicate (`MECHANISM`, layer 5) was widened to name the
+  `cairn` verbs. Without that, a second protocol written in terms of the NEW
+  mechanism would have been invisible to every layer here — the module would have
+  gone on guarding the mechanism nobody uses. That is the "a guard's DESCRIPTION
+  claims COVERAGE" shape arriving through a cutover rather than an edit.
 
 🔴 NO TEST HERE READS THE REAL STORE. Nothing in this file opens
 `~/.claude/analyze-service-index/`; it reads tracked documents in this repo only.
@@ -88,11 +107,24 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 import subsystem_touch as st  # noqa: E402
 
 
-# The mechanism sentence: the fragment that MANDATES how an append is performed.
-# Chosen as the fragment rather than a whole sentence because the same mandate is
-# quoted (once) inside the pointer's pinned block, and the ledger below has to be
-# able to see both occurrences to say anything about the relationship.
+# The RETIRED mechanism fragment. Until the 2026-09-01 cutover this was the
+# sentence that MANDATED how an append is performed; it is now the fragment that
+# marks a document as talking about the retired LOCAL mechanism at all. Both
+# doors still contain it — the owner because it names what `cairn append` and
+# `--if-match` replaced, the pointer because its hashed region records what the
+# 2026-08-31 fork was — and the ledger below is what says those are the only two.
+#
+# 🔴 IT IS NOT RENAMED TO `RETIRED_*`, deliberately: every ledger, confinement
+# check and control below keys on it, and the RELATIONSHIP each asserts is
+# unchanged by the cutover. What changed is why a document may carry it, and that
+# is recorded in the ledgers' own reason strings rather than in a constant name.
 MANDATE = "anchored on `## Nuance / work-history`"
+
+# The verbs that REPLACED it. Named here so the disagreement predicate below can
+# see a second protocol written in the new mechanism — the old `MECHANISM` regex
+# knew only `Write`/`Edit`/`y/N`, so a fork phrased as `cairn put` would have
+# passed every layer in this module.
+WRITE_VERBS = ("cairn append", "cairn put")
 
 # 🔴 IMPERATIVES, not the string `(y/N)`. Both doors legitimately QUOTE the
 # retired prompt while describing its retirement, so banning the spelling would
@@ -233,13 +265,10 @@ class TestTheMandatedToolIsThePreApprovedOne:
     """🔴 A PROTOCOL AND A FRONTMATTER CAN CONSOLIDATE APART.
 
     `allowed-tools` is a PRE-APPROVAL, not a restriction — every tool stays
-    callable — so this is about incentive, not reachability. The owner mandates
-    `Edit` (`MANDATE`, above) precisely because a whole-file `Write` retype is
-    MEASURED to lose a concurrent append silently
-    (`subsystem-index/reference/index-write.md`). If a door pre-approves `Write`
-    and not `Edit`, then at that door the UNSAFE mechanism runs without a prompt
-    and the mandated SAFE one raises one — and in a headless or subagent run
-    there is nobody to answer it.
+    callable — so this is about incentive, not reachability. If a door
+    pre-approves the mechanism the protocol FORBIDS and not the one it mandates,
+    then at that door the wrong path runs unprompted while the right one stops
+    for approval — and in a headless or subagent run there is nobody to answer.
 
     Found by audit on the PR that created this module: `analyze-service` was
     routed to the `Edit` mandate while its own frontmatter listed
@@ -247,22 +276,43 @@ class TestTheMandatedToolIsThePreApprovedOne:
     consolidation (that door said "plain `Write`", and `Write` was pre-approved);
     the protocol moved and the frontmatter did not. Nothing in this repo read
     `allowed-tools` at all, so no gate could see it.
+
+    🔴 THE MANDATED TOOLS CHANGED AT THE 2026-09-01 CUTOVER, so this assertion
+    did too. The write is now `cairn append` / `cairn put` — a CLI, so `Bash` —
+    plus `Write` for the two local files that remain: a first-ever entry (the API
+    has no create route) and the scratch file `cairn put --file` reads. `Edit` is
+    NO LONGER REQUIRED here: entry files are `0444` and an `Edit` against one
+    fails with `EACCES`. Asserting it anyway would have been a pin that reads as
+    coverage of a rule nothing follows, which is worse than none.
     """
 
+    # What the owner mandates, post-cutover. `Edit` is deliberately absent — see
+    # the class docstring; it is not an oversight and not an eviction.
+    MANDATED_TOOLS = ("Bash", "Write")
+
     @pytest.mark.parametrize("skill", WRITING_DOORS)
-    def test_a_writing_door_pre_approves_the_mandated_Edit(self, skill: str) -> None:
+    @pytest.mark.parametrize("tool", MANDATED_TOOLS)
+    def test_a_writing_door_pre_approves_the_mandated_tool(
+        self, skill: str, tool: str
+    ) -> None:
         tools = _allowed_tools(skill)
-        assert "Edit" in tools, (
-            f"{skill}/SKILL.md pre-approves {sorted(tools)} — no `Edit`, which "
-            f"is what the owner MANDATES ({MANDATE!r}). The measured-unsafe "
-            f"whole-file `Write` would run unprompted while the safe path stops "
-            f"for approval."
+        assert tool in tools, (
+            f"{skill}/SKILL.md pre-approves {sorted(tools)} — no `{tool}`. The "
+            f"owner mandates {' and '.join(WRITE_VERBS)} (a CLI, so `Bash`) plus "
+            f"`Write` for the first-ever entry file and the `--file` scratch "
+            f"copy. A door missing one of those stops for approval on the "
+            f"mandated path while the forbidden local edit runs unprompted."
         )
 
     def test_the_read_only_door_pre_approves_NEITHER(self) -> None:
         """NEGATIVE CONTROL. Proves the guard above discriminates instead of
         passing on any tree — a skill that only READS the store must not
-        pre-approve either write tool, and `resume` is that skill."""
+        pre-approve either write tool, and `resume` is that skill.
+
+        ⚠ ITS WIDTH, stated exactly, because the mandated set changed: `resume`
+        DOES pre-approve `Bash` (it runs read-only scripts), so this control
+        discriminates the `Write` half of `MANDATED_TOOLS` and not the `Bash`
+        half. A tree where every skill declared every tool still fails here."""
         tools = _allowed_tools(READ_ONLY_DOOR)
         assert not ({"Edit", "Write"} & tools), (
             f"{READ_ONLY_DOOR}/SKILL.md pre-approves {sorted(tools)} — it reads "
@@ -344,12 +394,17 @@ class TestThePointerDefersToTheOwner:
             "the skill body names write-back.md but not the document that "
             "actually carries the protocol, so a reader stops one file short."
         )
-        assert MANDATE not in body, (
-            f"{ANALYZE_SKILL.name} restates the append mechanism "
-            f"({MANDATE!r}) instead of routing to it. That is a THIRD copy of a "
-            f"predicate that already had two and drifted. Point at "
-            f"{OWNER.relative_to(ROOT)}; do not summarise it."
-        )
+        # Both the retired fragment AND the verbs that replaced it: a summary of
+        # the CURRENT mechanism is the same third copy as a summary of the old
+        # one, and checking only the retired spelling would have gone quietly
+        # inert at the cutover.
+        for token in (MANDATE, *WRITE_VERBS):
+            assert token not in body, (
+                f"{ANALYZE_SKILL.name} restates the append mechanism "
+                f"({token!r}) instead of routing to it. That is a THIRD copy of a "
+                f"predicate that already had two and drifted. Point at "
+                f"{OWNER.relative_to(ROOT)}; do not summarise it."
+            )
 
 
 # =============================================================================
@@ -365,10 +420,12 @@ class TestTheMechanismLedger:
     `claude/skills/` that state the append mechanism at all.
     """
 
-    # Path (repo-relative) -> why it is allowed to carry the mandate.
+    # Path (repo-relative) -> why it is allowed to carry the RETIRED fragment.
     ALLOWED: dict[str, str] = {
         "claude/skills/subsystem-index/SKILL.md": (
-            "THE owner — the single append protocol, for every caller"
+            "THE owner — quotes the retired anchor rule ONCE, to say what the "
+            "API's per-entry flock and `--if-match` replaced. A rule dropped "
+            "without naming it reads as forgotten and gets re-derived"
         ),
         "claude/skills/analyze-service/reference/write-back.md": (
             "quotes it ONCE, inside the hashed `one-append-protocol` region, to "
@@ -446,17 +503,68 @@ class TestTheOwnerCarriesTheProtocol:
     exists in no document at all — strictly worse than the fork."""
 
     OWNER_SENTENCES: list[tuple[str, str]] = [
+        # 🔴 SUPERSEDES `("use `Edit` anchored on `## Nuance / work-history`, not
+        # `Write`", "the mandated mechanism…")`. The 2026-09-01 cutover froze
+        # every local entry file to 0444, so that instruction now describes a
+        # write that returns EACCES. The pin is REPLACED, not dropped: the
+        # mechanism it named still has to be pinned, at its new spelling.
         (
-            "use `Edit` anchored on `## Nuance / work-history`, not `Write`",
-            "🔴 the mandated mechanism: no whole-file retype of a curated entry",
+            "cairn append --scope <scope> --ref <entry> --session <session-uuid>",
+            "🔴 the mandated mechanism: the append lands on the POD, which is "
+            "the authority — a local write is invisible to it",
+        ),
+        (
+            "The server adds the `- ` and the date — do not type either",
+            "🔴 the one caller error the route has already produced in "
+            "production, stated where the command is",
+        ),
+        (
+            "goes through `cairn put`",
+            "🔴 the OTHER write: an `OPEN:`->`RESOLVED` rewrite is not an append",
+        ),
+        # 🔴 The two writes used to be ONE `Edit`, so ordering could not arise.
+        # It can now, and the wrong order fails against the caller's OWN earlier
+        # write — a 412 that reads like someone else's concurrent edit. Nothing
+        # else in the toolchain states this; the layer-5 predicate cannot see the
+        # paragraph either, because it names no STORE noun.
+        (
+            "the rewrite is a `cairn put` and goes FIRST, then the new bullet's "
+            "`cairn append`",
+            "🔴 the ORDER of the two writes — reversed, the caller's own append "
+            "moves the entry out from under its own `If-Match`",
         ),
         (
             "`Write` only for a first-ever file",
-            "🔴 the carve-out — a first-ever file has no prior content to lose",
+            "🔴 the carve-out — a first-ever file has no prior content to lose, "
+            "and the API has no create route, so it stays a LOCAL write",
+        ),
+        # 🔴 SUPERSEDES `("re-read the file and re-apply to current bytes",
+        # "the actual safeguard…")`. The re-read was a guess at concurrency with
+        # no arbiter; `--if-match` derived from a live sync is the arbiter, and
+        # exit 8 is what the re-read was trying to notice. Same claim, moved to
+        # the mechanism that now carries it — and the owner must still say the
+        # old rule was REPLACED rather than forgotten, which the next pin holds.
+        (
+            "exit 8 IS the other writer, not a transient error",
+            "🔴 the safeguard: a concurrent write is REFUSED, never clobbered",
         ),
         (
-            "re-read the file and re-apply to current bytes",
-            "the actual safeguard: a concurrent append must not be clobbered",
+            "THAT IS WHAT REPLACES the two rules this step used to carry — it is "
+            "a replacement, not an omission",
+            "🔴 the dropped rules are named where they were dropped, so the next "
+            "reader does not restore them as 'missing'",
+        ),
+        # 🔴 THE WHOLE CLAUSE, not the bare `entry files are \`0444\`` fragment.
+        # MEASURED while adding this pin: the owner states the freeze TWICE (once
+        # naming the path, once in the write half), so the short fragment
+        # SURVIVED a mutation that deleted the write half's sentence outright —
+        # the other occurrence satisfied it. `claude/RULES.md`: a guard on a word
+        # another sentence can spell is walkable.
+        (
+            "entry files are `0444` and an `Edit`/`Write` against one fails with "
+            "`EACCES`",
+            "🔴 WHY the local write is gone: an editor write now fails EACCES, "
+            "and that refusal is the design rather than a broken store",
         ),
         (
             "Still print the unified diff before writing",
@@ -598,7 +706,8 @@ class TestThePointerRegionIsPinnedWHOLE:
 #
 # The one thing that block CANNOT do is describe a write mechanism without naming
 # a write mechanism. So layer 5 keys on two token classes and their CO-OCCURRENCE
-# in one paragraph — a MECHANISM (which tool, or a confirm gate) and a STORE
+# in one paragraph — a MECHANISM (which tool, which store write verb, or a
+# confirm gate) and a STORE
 # CONTEXT (this store, its anchor heading, its owner, its entry files) — and then
 # asks three questions about WHICH documents may carry such a paragraph, WHERE in
 # the pointer they may sit, and WHETHER the owner's have changed.
@@ -622,11 +731,20 @@ _FRONT_MATTER = re.compile(r"\A---\n.*?\n---\n", re.S)
 # `use/then/plain/via <tool>` alternation catches the unbackticked form without
 # matching the ordinary English verb ("Write a durable lesson", "Editing it
 # means…"), which a bare `\bWrite\b` does match and which appears in the owner.
+#
+# 🔴 THE `cairn` ALTERNATIVE IS NOT DECORATION. Until the 2026-09-01 cutover the
+# only write mechanisms were the two tools and the confirm gate, so those three
+# classes were exhaustive. They stopped being exhaustive the moment the protocol
+# became a CLI: a second protocol phrased entirely as `cairn put …` names no tool
+# and opens no gate, and would have been invisible to every layer in this module
+# while the ledgers went on reporting a clean set. A predicate is only as wide as
+# the mechanisms that exist, and that set is not closed.
 MECHANISM = re.compile(
     r"`Write`|`Edit`"
     r"|\b(?:Write|Edit) tool\b"
     r"|\b(?:use|using|uses|with|then|via|plain)\s+(?:a\s+|the\s+)?\*{0,2}`?(?:Write|Edit)`?\*{0,2}\b"
     r"|\(y/N\)|\by/N\b|\byes/no\b|\byes-no\b"
+    r"|\bcairn\s+(?:append|put)\b"
 )
 
 # …applied to THIS store. Without this half the predicate would fire on every
@@ -710,11 +828,20 @@ class TestTheStoreWriteCarrierLedgerIsEXACT:
             "('a confirmed write-back') survived the 2026-08-31 retirement"
         ),
         "claude/skills/prune-index/SKILL.md": (
-            "the DELETION protocol for the same store. It KEEPS a y/N and KEEPS "
-            "`Write`, deliberately: a cut rewrites the whole file and removes "
-            "bytes that are often their content's only copy, so blast radius "
-            "earns the gate. Explicitly outside the append retirement, and it "
-            "says so in its own text"
+            "the DELETION protocol for the same store. It KEEPS its y/N, "
+            "deliberately: a cut rewrites the whole entry and removes bytes that "
+            "are often their content's only copy, so blast radius earns the "
+            "gate. Explicitly outside the append retirement, and it says so in "
+            "its own text. Since the 2026-09-01 cutover its write MECHANISM is "
+            "`cairn put` — only the mechanism moved, not the gate"
+        ),
+        "claude/skills/prune-index/reference/writing-and-safety.md": (
+            "the prune protocol's own step-by-step, loaded on demand by the "
+            "skill above. 🔴 It states the mechanism and always did — before the "
+            "cutover it escaped this ledger only because its numbered list named "
+            "no STORE noun, which is the residual gap layer 5 documents rather "
+            "than a document that was checked and cleared. Enumerated now that "
+            "it names one"
         ),
     }
 
@@ -906,7 +1033,22 @@ class TestTheOwnersMechanismProseIsPinnedWHOLE:
     # file, and `write-back.md` routes there and restates no mechanism. ONE
     # protocol, and NO per-caller carve-out — the change was a factual
     # correction inside the paragraph, not an exception added to it.
-    EXPECTED_SHA = "499af271b29f30baf574c19fca8edbfd4f443dce8aafb899f0bc2e83af595961"
+    #
+    # Updated 2026-09-01 for the Cairn write-through cutover (§8 step 7 of
+    # `claudedocs/plan-cairn-phase1-cutover.md`). What moved: the write step is
+    # now `cairn append` / `cairn put` against the pod, and the two rules it used
+    # to carry — the re-read-and-re-apply, and the `Edit` anchored on
+    # `## Nuance / work-history` — are named IN PLACE as replaced, not deleted
+    # silently. The selection grew 4 -> 5 paragraphs: the new header paragraph
+    # stating the freeze, and the two mechanism paragraphs replacing one.
+    #
+    # 🔴 Both doors re-read before this hash was pasted, which is what the
+    # failure message demands: `write-back.md` is UNCHANGED by that commit — it
+    # still routes to the owner at step 4 and states no mechanism of its own (its
+    # own region hash is untouched) — and the owner's five paragraphs describe
+    # ONE protocol for both callers with NO per-caller carve-out. The `Edit`
+    # anchor survives in the owner only as the sentence saying what replaced it.
+    EXPECTED_SHA = "0e359f317fefd7a2fc5b6e47b51c51b6562933f8592a06df8b7f5c97cda3c7f3"
 
     @staticmethod
     def _digest(owner: str) -> tuple[str, list[str]]:
@@ -1136,3 +1278,130 @@ class TestCreatedByIsSuppliedByTheCaller:
         assert rc == 0
         assert f"created_by: {self.OTHER}" in out
         assert "created_by: handoff" not in out
+
+
+# =============================================================================
+# The PRUNE door — same store, different verb, and its gate stays.
+# =============================================================================
+
+
+class TestThePruneDoorMovedItsMechanismAndKeptItsGate:
+    """🔴 `claudedocs/plan-cairn-phase1-cutover.md` §5 names `prune-index` "the
+    writer most likely to be forgotten": it runs rarely, so a break arrives weeks
+    later looking like a corrupt store rather than a missed migration. The 0444
+    freeze makes its whole-file `Write` return `EACCES`, so its mechanism had to
+    move to `cairn put`.
+
+    Two claims, pulling in OPPOSITE directions, which is why both are pinned:
+    the MECHANISM had to change (or the skill is simply dead on every host), and
+    the y/N had to SURVIVE (the retirement evidence — "the answer was always
+    `y`" — was measured on an APPEND; a cut removes bytes that are often their
+    content's only copy, and blast radius earns the gate). A migration that took
+    the gate with it would look like a success and be a regression.
+
+    ⚠ The ledgers above already fail if this door stops stating a mechanism at
+    all. They say nothing about WHICH mechanism, or about the gate — measured:
+    deleting the `cairn put` command line from this skill left every ledger and
+    every layer of this module green. That gap is what this class closes.
+    """
+
+    PRUNE = SKILLS / "prune-index" / "SKILL.md"
+    DETAIL = SKILLS / "prune-index" / "reference" / "writing-and-safety.md"
+
+    SENTENCES: list[tuple[str, str, str]] = [
+        (
+            "SKILL.md",
+            "cairn put --scope <scope> --ref <entry> --file /tmp/prune-<entry>.md",
+            "🔴 the migrated mechanism — a cut lands on the pod, not on a 0444 file",
+        ),
+        (
+            "SKILL.md",
+            "the local entry files are `0444` and any editor write against one "
+            "fails with `EACCES`",
+            "WHY it moved, stated where the command is, so an EACCES is read as "
+            "the design and not as a broken store",
+        ),
+        (
+            "SKILL.md",
+            "ask one yes/no",
+            "🔴 the gate that must SURVIVE the migration",
+        ),
+        (
+            "SKILL.md",
+            "**Keep the y/N here.**",
+            "the gate's reason, restated so a later reader does not 'finish' the "
+            "retirement by removing it",
+        ),
+        (
+            "SKILL.md",
+            "Only the write MECHANISM moved",
+            "🔴 the scope of the change, in one sentence",
+        ),
+        (
+            "SKILL.md",
+            "Exit 8 IS that writer",
+            "a concurrent append fails the put LOUDLY instead of being cut away",
+        ),
+        (
+            "SKILL.md",
+            "Sync first and audit the CACHE",
+            "🔴 the data-loss shape: a cut built from the frozen mirror's stale "
+            "bytes silently deletes every bullet appended since the freeze",
+        ),
+        (
+            "reference/writing-and-safety.md",
+            "land the scratch file with `cairn put`",
+            "the step-by-step agrees with the skill body — one mechanism, two "
+            "documents, which is the pairing this module exists to compare",
+        ),
+        (
+            "reference/writing-and-safety.md",
+            "ask a single yes/no",
+            "the gate survives in the detail file too",
+        ),
+    ]
+
+    def _doc(self, which: str) -> str:
+        path = self.PRUNE if which == "SKILL.md" else self.DETAIL
+        return path.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        "which,sentence,why", SENTENCES, ids=[f"{w}:{y[:40]}" for w, _, y in SENTENCES]
+    )
+    def test_sentence_still_present(self, which: str, sentence: str, why: str) -> None:
+        assert sentence in self._doc(which), (
+            f"claude/skills/prune-index/{which} no longer contains the sentence "
+            f"pinning {why}.\n  missing: {sentence!r}\n"
+            f"  This is the store's DELETION protocol. Its mechanism moved to "
+            f"`cairn put` at the 2026-09-01 freeze and its y/N deliberately did "
+            f"NOT move — restore the sentence, or change it and update this pin "
+            f"in the SAME commit saying which of the two claims changed."
+        )
+
+    def test_the_prune_pin_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL, both documents: a substring check against a doc that
+        happens to contain everything is indistinguishable from one pointed at
+        the wrong file."""
+        for which in ("SKILL.md", "reference/writing-and-safety.md"):
+            assert (
+                "a sentence deliberately absent from the prune skill"
+                not in self._doc(which)
+            )
+
+    @pytest.mark.parametrize("doc", [PRUNE, DETAIL], ids=lambda p: p.name)
+    def test_the_prune_door_is_TRACKED_by_git(self, doc: Path) -> None:
+        """Same argument as `TestTheDoorsAreTheDeployedOnes`: the flake source
+        contains only tracked files, so an untracked door deploys as an ABSENCE
+        while every pin above passes against the working copy. Returns rather
+        than skipping when there is no `.git` — the nix check tier builds from a
+        store copy with no repository, and `run-tests.sh` pins its skip set."""
+        assert doc.is_file(), f"pinned prune door is gone: {doc}"
+        if not (ROOT / ".git").exists():
+            return
+        rel = doc.relative_to(ROOT).as_posix()
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "--error-unmatch", "--", rel],
+            capture_output=True,
+            text=True,
+        )
+        assert out.returncode == 0, f"{rel} is not tracked by git.\n{out.stderr}"
