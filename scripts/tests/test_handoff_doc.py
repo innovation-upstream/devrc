@@ -1431,7 +1431,12 @@ class TestRuleFDidNotMoveTheExitCodes:
         # being an int — which is the same class of drift this test exists for.
         # A legitimate addition is expected to update this number; the failure
         # prints the whole dict, so what changed is on screen.
-        assert len(codes) == 9, f"the EXIT_* constant set changed: {codes}"
+        # 9 -> 10, 2026-09-01: rule (k) adds `EXIT_UNEVIDENCED = 10`. This is
+        # the "legitimate addition" the comment above anticipates, and the
+        # bump is deliberate rather than reflexive — the injectivity loop
+        # ran FIRST and passed, so this is a genuinely new code and not the
+        # #962/#1046 collision shape wearing a count failure.
+        assert len(codes) == 10, f"the EXIT_* constant set changed: {codes}"
 
     def test_the_exit_code_constants_did_not_move(self) -> None:
         """Their VALUES, not just their names — a caller reads the number."""
@@ -1442,6 +1447,10 @@ class TestRuleFDidNotMoveTheExitCodes:
         # the new value, so setting it to 10 SURVIVED all 295 tests while three
         # prose sites still said 9.
         assert (hd.EXIT_DOC_PER_EFFORT, hd.EXIT_UNFORCED, hd.EXIT_STALE_BASE) == (7, 8, 9)
+        # Rule (k)'s code, pinned the same way and for the same measured
+        # reason: an unpinned new value survives the whole suite while the
+        # prose that quotes it goes stale.
+        assert hd.EXIT_UNEVIDENCED == 10
 
     def test_the_prose_quotes_the_CONSTANT_not_a_stale_literal(self) -> None:
         """🔴 PROSE AGAINST THE CONSTANT, not prose against prose.
