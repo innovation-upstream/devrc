@@ -44,9 +44,38 @@
 #
 # ── THE FIX: mtime-only ageing, SCOPED to machine-generated churn ────────────
 #
-# systemd >= 253 accepts an age-by prefix (`m:7d` = consider mtime only). Verified
-# on this host's systemd 258 by control pair: `z:7d` -> "Invalid age-by 'z'",
-# `m:7d` -> parses and matches.
+# systemd >= 253 accepts an age-by prefix. Verified on this host's systemd 258 by
+# control pair: `z:7d` -> "Invalid age-by 'z'", `mM:7d` -> parses and matches.
+#
+# 🔴 THE PREFIX IS `mM:`, NOT `m:` — CASE IS THE FILE/DIRECTORY SWITCH, and this
+# file said `m:7d` ("consider mtime only") from 2026-08-15 until 2026-09-01.
+# tmpfiles.d(5), Age: "The lower-case letter signifies that the given timestamp
+# type should be considered for FILES, while the upper-case letter signifies that
+# the given timestamp type should be considered for DIRECTORIES." The default is
+# `abcmABM`; naming `m` alone therefore selects mtime for files and NO criterion
+# at all for directories. The docs' own example spells both: `bmA:1h`.
+#
+# Measured 2026-09-01 on a fixture (60-day-old dir + file, dir containing a subdir):
+#   m:7d   -> removes ./file.txt, ./sub/inner.txt          ... and LEAVES ./sub
+#   mM:7d  -> removes ./file.txt, ./sub/inner.txt, and     ... removes ./sub
+#   7d     -> removes NOTHING (default includes ctime, which the fixture just set)
+# So the old spelling emptied every directory and removed none of them. On a
+# filesystem whose problem is INODES — /tmp measured 2026-09-01 at ~78.5M entries,
+# 81% of the root fs — leaving the whole directory skeleton behind forfeits most
+# of the reclaim: nix-shell.* alone is 17,809 dirs of nested pytest trees.
+#
+# ✅ SAFETY, measured the same day with a REAL (not dry-run) --clean: an old
+# directory containing a RECENT file is NOT destroyed. tmpfiles uses rmdir
+# semantics, so a non-empty directory survives; the recent file was still there
+# with its contents intact afterwards. `mM` is strictly more thorough, not more
+# dangerous — the scoping to machine-generated globs is what carries the safety.
+#
+# 🔴 AND `--dry-run` OVER-REPORTS: it printed `Would remove directory "./olddir"`
+# for exactly that directory the real run then left alone. Dry-run counts are
+# UPPER bounds on directories. The "4,255,261 entries / ~47 GB" figure below came
+# from a dry-run and is therefore not a reclaim estimate in the direction its
+# "LOWER BOUND" note claims for the root-owned-paths reason; the two biases run
+# in opposite directions and neither has been quantified.
 #
 # 🔴 It is scoped by GLOB, not applied to /tmp as a whole, because /tmp holds
 # real work that a blanket rule would destroy. Measured: a blanket mtime-only
@@ -147,18 +176,18 @@ trap restore_on_err ERR
 # rule. `claude/RULES.md` -> "One rule, one place": a predicate duplicated across
 # call sites regenerates the same bug at every site.
 TMPFILES_RULES=(
-  'e /tmp/nix-shell-* - - - m:7d'
-  'e /tmp/nix-shell.* - - - m:7d'
-  'e /tmp/nix-develop-* - - - m:7d'
-  'e /tmp/nix-[0-9]* - - - m:7d'
-  'e /tmp/go-build* - - - m:7d'
-  'e /tmp/chromedp-runner* - - - m:7d'
-  'e /tmp/homelab-talos-prs-* - - - m:7d'
+  'e /tmp/nix-shell-* - - - mM:7d'
+  'e /tmp/nix-shell.* - - - mM:7d'
+  'e /tmp/nix-develop-* - - - mM:7d'
+  'e /tmp/nix-[0-9]* - - - mM:7d'
+  'e /tmp/go-build* - - - mM:7d'
+  'e /tmp/chromedp-runner* - - - mM:7d'
+  'e /tmp/homelab-talos-prs-* - - - mM:7d'
   # Added 2026-09-01. devrc's own scripts/run3 capture dirs: its header states they
   # are deliberately NOT removed ("reading the two files afterwards is the point"),
   # so they need retention, not a code fix. 1266 dirs, 438 with mtime >7d; none
   # carries a .git. Dry-run: 1066 entries would be removed.
-  'e /tmp/run3.* - - - m:7d'
+  'e /tmp/run3.* - - - mM:7d'
 )
 # 🔴 `e` ACTS ON A DIRECTORY'S CONTENTS AND SILENTLY IGNORES A PLAIN FILE. Every
 # glob in this ledger must therefore name DIRECTORIES. Measured 2026-09-01 on a
@@ -210,8 +239,31 @@ RULES = ['    "%s"' % r for r in sys.argv[2:]]
 if not RULES:
     raise SystemExit("ERROR: no rules passed on argv — TMPFILES_RULES is empty")
 
+# 🔴 EVICT STALE VARIANTS OF A LEDGER PATH FIRST. systemd-tmpfiles takes the FIRST
+# line for a path and logs `Duplicate line for path "...", ignoring.` for the rest.
+# Measured 2026-09-01: with the old `m:7d` line above the new `mM:7d` one, the
+# directory that only `mM` removes was NOT removed — the corrected rule was fully
+# inert, and the only signal was one low-severity log line. Appending alone is
+# therefore NOT an upgrade path, and the verifier below cannot see the problem: it
+# proves the TEXT is on disk, never that the rule is in EFFECT.
+import re as _re
+_evicted = []
+for _r in RULES:
+    _body = _r.strip().strip('"')
+    _type, _path = _body.split()[0], _body.split()[1]
+    # any existing rule line for the same type+path that is not byte-identical
+    _pat = _re.compile(r'^[ \t]*"%s %s .*"[ \t]*\n' % (_re.escape(_type), _re.escape(_path)), _re.M)
+    for _m in _pat.finditer(src):
+        if _m.group(0).strip() != _r.strip():
+            _evicted.append(_m.group(0).strip())
+            src = src.replace(_m.group(0), "")
+if _evicted:
+    print("      evicted %d stale rule line(s) for a path in this ledger:" % len(_evicted))
+    for _e in _evicted:
+        print("        - " + _e)
+
 missing = [r for r in RULES if r.strip() not in src]
-if not missing:
+if not missing and not _evicted:
     print("      all %d rules already present — nothing to insert" % len(RULES))
     raise SystemExit(0)
 
@@ -257,7 +309,16 @@ echo "    systemd-tmpfiles --clean --dry-run 2>&1 | head"
 echo "  (a bad age-by prefix reports 'Invalid age-by' and names the file:line)"
 echo
 
-if [[ -t 0 ]]; then
+# 🔴 TEST MODE MUST NEVER OFFER THE REBUILD. TMP_CHURN_CFG edits a FIXTURE; a
+# `nixos-rebuild switch` here would build the REAL system from an /etc/nixos this
+# run never touched, so the operator would see a rebuild scroll past and
+# reasonably conclude the rules had been applied. Nothing about the fixture edit
+# would be in it. Introduced with TMP_CHURN_CFG on 2026-09-01 and caught in the
+# same session's audit.
+if [[ -n "${TMP_CHURN_CFG:-}" ]]; then
+  echo "TEST MODE — not offering nixos-rebuild (the fixture is not the system config)."
+  ans=n
+elif [[ -t 0 ]]; then
   read -r -p "Run 'nixos-rebuild switch' now? [y/N] " ans || ans=n
 else
   echo "Non-interactive shell — skipping the rebuild prompt."
