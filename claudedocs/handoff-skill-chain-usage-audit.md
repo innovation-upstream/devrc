@@ -74,17 +74,17 @@ survives adversarial re-derivation, and fix whatever it exposes.
   lesson) and `devrc/analyze-service-index.md` (recall *lists* vs *features*) from the prior
   session, which also closed an `OPEN:` bullet that was not its own — the clawgate "browser layer
   is UNGATED" item, fix merged as `6bf866fe`, scope open-actions 1 → 0.
-- ✅ **RANK 11 DONE (2026-09-01): devrc#1064 is GREEN and awaiting a merge decision.**
-  `origin/main` merged forward into `feat/handoff-audit` (`466a0938..4beb41e1`); gate
-  `devrc-ci-qbgmb` `failed=0`, `collected=20146 passed=20143`, nodetests 1449/1449, both tiers.
-  It was **124** commits behind, not the 93 recorded here — re-derive that count when you act.
-  **Merging it was NOT part of rank 11 and was not done.**
+- ✅ **RANK 11 DONE, and devrc#1064 is MERGED as `f71ff648`** (2026-09-01T17:02:24Z; verified by
+  CONTENT on `origin/main`). `origin/main` was merged forward into `feat/handoff-audit`
+  (`466a0938..4beb41e1`), gate `devrc-ci-qbgmb` `failed=0`, `collected=20146 passed=20143`,
+  nodetests 1449/1449, both tiers; the merge was a SEPARATE, later decision, not part of rank 11.
+  It was **124** commits behind, not the 93 previously recorded — re-derive that count when you act.
 - ✅ **RANK 4 DONE (2026-09-01) — and it required NO deploy.** The store copy at
   `~/.claude/skills/clawgate/SKILL.md` is already byte-identical to `origin/main` (15086 B,
   `preserve both` = 0), so `home-manager switch` was deliberately SKIPPED rather than run as a
   no-op riding another session's uncommitted `nix/programs/alacritty/default.nix`. 🔴 Still true:
-  `handoff-audit.py` is on #1064 and wired into no gate, skill or script — shipping it is rank 5,
-  not rank 11.
+  `handoff-audit.py` is now on `main` but is wired into **no gate, skill or script** — it prints its
+  own `🔴 NOT ENFORCED` banner. Wiring it up is rank 5, not rank 11.
 - **Clawgate link for the sessions behind this doc: NONE.** `clawgate_handoff.sh resolve` exited
   **5** — 0 tasks — with its positive control confirming the board was reachable. Per its contract
   that 0 cannot distinguish "touched no task" from "wrong id", so **no `clawgate-task:` field was
@@ -93,9 +93,11 @@ survives adversarial re-derivation, and fix whatever it exposes.
 ## Open investigations — live diagnosis state
 
 ### ✅ CLOSED — why the never-run losses ended without invoking `/handoff`
-EVICTED 2026-09-01 (terminal). Verdict: **8 cleanly-ended · 4 interrupted-at-end · 2 context-exhausted · 2 never-started** of 16 — carried in `## State now`'s headline, which survives every update.
+EVICTED 2026-09-01 (terminal). Verdict: **8 cleanly-ended · 4 interrupted-at-end · 2 context-exhausted · 2 never-started** of 16 — carried in `## State now`'s headline. 🔴 **That headline is NOT automatically durable:
+`## State now` buckets as REPLACE, and a merge round-trip flags this very line among 9 durable
+lines a replace would drop. It survives only because each session carries it forward BY HAND.**
 
-### ✅ CLOSED — the topic-drift sessions, and why the question as posed does not discriminate
+### ⚠ MOSTLY CLOSED (open probe → rank 12) — the topic-drift sessions, and why the question as posed does not discriminate
 EVICTED 2026-09-01 — **terminal EXCEPT its open probe, which is now rank 12** (it was wrongly labelled wholly terminal; caught by audit). Verdict: the question does NOT discriminate — **95.5%** of abandoned docs declare open work vs a **90.3%** control. Instrument `claudedocs/skill-chain-drift-audit.py`; see rank 3.
 
 ### 🔴 WALK-BACK — "queue depth is what moved" was UNDER-CONTROLLED, and the store already knew
@@ -419,13 +421,22 @@ rather than removed and renumbered. New work is appended at the end.
    forcing: none
 
 5. **Act on the handoff-doc bloat proposal** — `claudedocs/proposal-handoff-doc-bloat.md`.
-   The auditor is on **devrc#1064, now GREEN and mergeable** (rank 11); the `/handoff` SKILL.md
+   The auditor **MERGED as `f71ff648`** and is on `main` (rank 11); the `/handoff` SKILL.md
    change is deliberately NOT written — operator chose propose-only. Next move is the eviction
    contract (budget + step 4.5 + EVICT_HISTORY/RELOCATE_DURABLE/KEEP_HOT), not a gate: the caps
    file for gate 11 records that the general ratchet rule was replayed over 365 days / 901 commits
    and **REFUTED**, so re-run that replay for handoff docs before proposing one. 🔴 Datapoint from
    2026-08-31: the clawgate skill ratchet DID catch a real unpaid 405 B addition — one case, on a
    SKILL body not a handoff doc, so it does not settle the replay.
+   🔴 **FOUR requirements the 2026-09-01 worked example produced — design against these, not from
+   scratch.** (1) A TOMBSTONE, not a deletion: append-only exists so a reader sees a prior reading
+   was CORRECTED. (2) The rank NUMBER must survive — it is half a `claim-work` slug identity.
+   (3) Any eviction tool must ASSERT STRUCTURE before writing (H2 set + rank numbers); a first
+   attempt reported "59.7% saved" having destroyed three whole sections. (4) 🔴 **The measurement
+   is NOT IDEMPOTENT**: `handoff-audit.py` buckets a resolved investigation on its **H3 heading
+   alone**, so it still reports "8 resolved investigations" over 8 one-line tombstones — an
+   automated `EVICT_HISTORY` driven off it would re-evict tombstoned blocks and DELETE THE
+   TOMBSTONES. Fix the signal before automating anything.
    forcing: none
 6. ✅ **DONE (2026-08-31) — the item's own PREMISE was REFUTED by the re-measure it demanded.**
    **MERGED as `57b010fb`.**
@@ -436,7 +447,8 @@ rather than removed and renumbered. New work is appended at the end.
    forcing: none
 
 8. 🔴 **Grade the hook against the number it was built to move — THE CLOSING CONDITION OF THIS
-   WHOLE ARC. STILL NOT CUT, and deliberately so. THIS IS NOW THE ONLY SUBSTANTIVE ITEM LEFT.**
+   WHOLE ARC. STILL NOT CUT, and deliberately so.** (Ranks **5** and **12** are also open; this is
+   the arc's CLOSING CONDITION, not the only remaining item.)
    Re-run rank 1's measurement on a post-2026-08-30T17:35Z window and compare the **8.7%** loss
    rate and the **8/16 cleanly-ended** bucket. As of 2026-09-01 the post-window holds roughly
    **one day**; the pre-period needed **14 days for 253** `/resume`-genesis sessions. Cutting it
@@ -464,7 +476,8 @@ rather than removed and renumbered. New work is appended at the end.
    count blocks (`~/.cache/claude-handoff-write/s/*/fires-*`) and report them beside the rate.
    forcing: none
 9. ✅ **DONE (2026-08-31), premise REFUTED twice; #1055 MERGED as `8c108d8b`.** The durable output
-   is the two-arm local discriminator (branch vs `main`), not the PR — see rank 11.
+   is the two-arm local discriminator (branch vs `main`), not the PR — see the block
+   `### The local suite's 76 failures are NOT this arc's, and the control says so`.
    forcing: none
 
 10. **Right-size the devrc-ci gate pod, or establish it cannot be.** 🔴 **Its premise is REFUTED:
