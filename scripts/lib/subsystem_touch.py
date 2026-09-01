@@ -15,17 +15,23 @@ the constraint on closing it:
     IS the ritual. Six slash-commands have never been invoked once.
 
 So this is one writer, one verb, riding `/handoff`. It reports; the SKILL does
-the writing, confirm-gated and diff-first.
+the writing, diff-first. (It was "confirm-gated and diff-first" until the y/N was
+retired — at the index write 2026-08-15, at `/handoff` step 5 on 2026-08-23, and
+at the last door, `/analyze-service`'s, on 2026-08-31. The diff is still printed
+before every write; only the prompt is gone, and declining on CONTENT is
+unaffected.)
 
 🔴 THIS MODULE NEVER WRITES TO THE STORE. Not "does not today" — there is no
 write path here at all, and `TestNeverWrites` hashes a store tree either side of
 every mode to keep it that way. The store is curated, client-confidential and not
-re-derivable by re-running recon; the confirm gate lives in the skill, where a
-human sees the diff, and a helper that could write would be a second, ungated
-writer. (This used to read "has no off-machine backup". It IS backed up — hourly
-local commits, daily age-encrypted bundles to MinIO; see
+re-derivable by re-running recon; the write protocol lives in the skill
+(`claude/skills/subsystem-index/SKILL.md`, the ONE protocol for both callers as
+of 2026-08-31), where the diff is printed for a human to read, and a helper that
+could write would be a second writer following no protocol at all. (This used to
+read "has no off-machine backup". It IS backed up — hourly local commits, daily
+age-encrypted bundles to MinIO; see
 `claude/skills/analyze-service/reference/index-store.md` -> "Store safety". The
-gate is unchanged: a backup does not un-write a bad append, and the working-tree
+rule is unchanged: a backup does not un-write a bad append, and the working-tree
 state a bad write lands on is in no commit and no bundle.)
 
 🔴 IT DOES NOT REIMPLEMENT MATCHING. Normalization, kind-splitting, tier
@@ -312,6 +318,8 @@ from host_identity import this_host  # noqa: E402
 
 __all__ = [
     "WRITER_ID",
+    "KNOWN_WRITERS",
+    "WRITER_PLACEHOLDER",
     "DEFAULT_STORE_ROOT",
     "DEFAULT_NOMINATION_LIMIT",
     "BASE_REF_CANDIDATES",
@@ -410,12 +418,24 @@ __all__ = [
     "main",
 ]
 
-# 🔴 THE FALSIFIABILITY STAMP. Every entry this writer proposes carries
-# `created_by: handoff` in its front matter, so the question the decision doc
-# left open — "do entries accrue OUTSIDE infra recon, or was the single-scope
-# corpus evidence of no demand?" — is answered by counting, not by recollection.
-# `census()` is the counter. The value is the SKILL name, not this file's name,
-# because the skill is the thing a later reader will be trying to attribute.
+# 🔴 THE FALSIFIABILITY STAMP. Every entry a writer proposes carries a
+# `created_by:` in its front matter, so the question the decision doc left open —
+# "do entries accrue OUTSIDE infra recon, or was the single-scope corpus evidence
+# of no demand?" — is answered by counting, not by recollection. `census()` is
+# the counter. The value is the SKILL name, not a file's name, because the skill
+# is the thing a later reader will be trying to attribute.
+#
+# 🔴 IT IS NO LONGER STAMPED FROM HERE, and that is the point of this comment.
+# Until 2026-08-31 `new_entry_template` hardcoded this constant, which was
+# correct only while the module had ONE caller. It has two: `/handoff` and
+# `/analyze-service` now follow one shared append protocol
+# (`claude/skills/subsystem-index/SKILL.md`), so a hardcoded default would file
+# every `/analyze-service` entry under `handoff` and quietly destroy the split
+# the field exists to measure. The template takes `created_by` as a REQUIRED
+# argument and the CLI takes it as a REQUIRED `--writer`; nothing defaults.
+#
+# This constant survives as the NAME `/handoff` passes, referenced by the CLI's
+# refusal message so the caller is told a real value rather than an abstraction.
 WRITER_ID = "handoff"
 
 # Writers that stamp themselves. An entry with NO `created_by:` is neither of
@@ -425,6 +445,13 @@ WRITER_ID = "handoff"
 # to stop inferring.
 KNOWN_WRITERS: tuple[str, ...] = ("analyze-service", "handoff")
 UNSTAMPED = "unstamped (pre-instrumentation)"
+
+# ONE spelling of the `--writer` placeholder, DERIVED from `KNOWN_WRITERS` rather
+# than typed. It appears in every command hint the renderers print and in the
+# CLI's own refusal message; three open-coded copies is the duplicated-predicate
+# shape `claude/RULES.md` names, and the copy that would go stale first is the
+# one an agent copy-pastes off a `NO PATH FOOTPRINT?` block.
+WRITER_PLACEHOLDER = "<" + "|".join(KNOWN_WRITERS) + ">"
 
 DEFAULT_STORE_ROOT = Path.home() / ".claude" / "analyze-service-index"
 
@@ -3508,8 +3535,19 @@ def _render_journal(j: EntryJournal, today: str, indent: str) -> list[str]:
     return out
 
 
-def new_entry_template(slug: str, scope: str, *, today: str) -> str:
+def new_entry_template(slug: str, scope: str, *, today: str, created_by: str) -> str:
     """A MINIMAL entry: identity front matter + the two sections that always fill.
+
+    🔴 `created_by` is REQUIRED and has NO DEFAULT — the caller supplies it. See
+    the note on `WRITER_ID`: this module has two callers (`/handoff` and
+    `/analyze-service`, sharing one append protocol since 2026-08-31), and a
+    default would stamp one of them wrongly on every entry the other creates,
+    silently, in the one field whose entire purpose is to tell them apart. A
+    missing argument is a `TypeError` at the call site; the CLI turns the same
+    omission into exit 2 naming the choices. Any string is accepted rather than
+    enumerated against `KNOWN_WRITERS` — `census()` buckets an unknown value
+    under its own name and never folds it into a known writer, so a third caller
+    is measurable the day it appears rather than the day someone widens a tuple.
 
     Deliberately not the full schema. The strain test in the decision doc found
     that a rich schema's extra sections came out EMPTY for want of evidence, and
@@ -3541,7 +3579,7 @@ def new_entry_template(slug: str, scope: str, *, today: str) -> str:
         f"service: {slug}\n"
         f"scope: {scope}\n"
         f"sensitivity: {_SENSITIVITY_FAIL_SAFE}\n"
-        f"created_by: {WRITER_ID}\n"
+        f"created_by: {created_by}\n"
         f"# aliases: [{slug.replace('-', '_')}, test_{slug.replace('-', '_')}]"
         "  # uncomment + trim: other spellings, and the test-file stem\n"
         "---\n"
@@ -3929,7 +3967,12 @@ def render_no_path_footprint(scope: str) -> list[str]:
         "session's work was on a subsystem that has none",
         "  (a production database, a cluster, a DNS record, an external service), "
         "the store can still hold it:",
-        f"    python3 {SELF_PATH} --template <slug> --scope {scope}",
+        f"    python3 {SELF_PATH} --template <slug> --scope {scope} "
+        f"--writer {WRITER_PLACEHOLDER}",
+        "  🔴 `--writer` is your OWN caller id and is REQUIRED — it becomes the "
+        "entry's `created_by:`, which is what",
+        "  `--census` counts. There is no default: this store has two writers and "
+        "guessing would corrupt that split.",
         "  🔴 Nothing matches it automatically TODAY — but it is not permanently "
         "unresolvable: it gains normal path",
         "  resolution the moment some path is named for the slug (verified). So "
@@ -4639,7 +4682,7 @@ def render_text(report: TouchReport) -> str:
         out.append(
             f"  template: {report.scope}/<slug>.md  (identity front matter + "
             f"`## What it is` + `## Pointers`; sensitivity={_SENSITIVITY_FAIL_SAFE}, "
-            f"created_by={WRITER_ID})"
+            f"created_by=your own caller id {WRITER_PLACEHOLDER} — REQUIRED, no default)"
         )
         # 🔴 Every nomination above is derived from PATHS, so it can only name
         # what left a file behind. A session whose real subject was a database or
@@ -4654,7 +4697,10 @@ def render_text(report: TouchReport) -> str:
             "  …or, if this session's real subject has NO file footprint (a "
             "database, a cluster, an external service), it needs no paths:"
         )
-        out.append(f"    python3 {SELF_PATH} --template <slug> --scope {report.scope}")
+        out.append(
+            f"    python3 {SELF_PATH} --template <slug> --scope {report.scope} "
+            f"--writer {WRITER_PLACEHOLDER}"
+        )
 
     if not report.writes_proposed:
         out.append("")
@@ -4736,7 +4782,14 @@ def report_json(report: TouchReport) -> dict:
         "store_host": store_host(),
         "today": report.today,
         "min_paths": report.min_paths,
-        "writer_id": WRITER_ID,
+        # 🔴 WAS `"writer_id": WRITER_ID`, and that was a claim this report has
+        # no standing to make. A probe run STAMPS NOTHING — the writer id belongs
+        # to whichever caller is about to write, and since 2026-08-31 there are
+        # two of them. Emitting one of the two here read as "this run's entries
+        # will be `handoff`", which is false half the time and unfalsifiable from
+        # the JSON. The honest field is the CHOICES, so a consumer can see that
+        # the value is the caller's to supply.
+        "known_writers": list(KNOWN_WRITERS),
         "policy_file": report.policy_path,
         "policy_basis": report.policy_basis,
         "source": {
@@ -6020,7 +6073,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--template",
         metavar="SLUG",
         default=None,
-        help="print the minimal new-entry template for SLUG and exit",
+        help="print the minimal new-entry template for SLUG and exit (needs --writer)",
+    )
+    p.add_argument(
+        "--writer",
+        choices=sorted(KNOWN_WRITERS),
+        default=None,
+        help=(
+            "the CALLING skill's id, written into the template's `created_by:`. "
+            "REQUIRED with --template and deliberately without a default: this "
+            "store has two writers sharing one append protocol, and a default "
+            "would file one caller's entries under the other in the exact field "
+            "`--census` exists to split. Not read by any other mode — nothing "
+            "else here stamps anything."
+        ),
     )
     p.add_argument(
         "--validate",
@@ -6134,8 +6200,31 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
             return _scope_memo[0]
 
         if args.template is not None:
+            # 🔴 REFUSE rather than default. `created_by:` is stamped once, at
+            # creation, and never edited afterwards — so a wrong value is
+            # permanent for that entry and invisible in every later reading. The
+            # module cannot infer its caller, so the only honest options are
+            # "ask the caller" and "be wrong silently"; this is the first.
+            if args.writer is None:
+                print(
+                    "subsystem-touch: --template needs --writer. The entry's "
+                    "`created_by:` is the CALLING SKILL's id, not this tool's, "
+                    "and this store has two writers: "
+                    + ", ".join(sorted(KNOWN_WRITERS))
+                    + f" (/handoff passes `--writer {WRITER_ID}`). It is stamped "
+                    "once at creation and never edited, so a guessed default "
+                    "would be permanently wrong for one caller and would corrupt "
+                    "the split `--census` reads. Pass one.",
+                    file=sys.stderr,
+                )
+                return 2
             print(
-                new_entry_template(normalize_ref(args.template), scope_of(), today=stamp)
+                new_entry_template(
+                    normalize_ref(args.template),
+                    scope_of(),
+                    today=stamp,
+                    created_by=args.writer,
+                )
             )
             return 0
 

@@ -16,25 +16,33 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Cut the devrc-ci gate from ~25 min. This session **refuted the previous handoff's diagnosis**, spent the cluster levers, reverted them, and shipped the first devrc-side mechanism.
 
 ## State now
-- **Ranks 1 and 2 are DONE and merged.** Nothing in flight; no branch of this effort is open.
-- **PR #1073** `feat/ci-impact-analysis` — `--targets` subset selection for `run-tests.sh`. **MERGED `809486fa`**, verified by content on `origin/main` (48 `ONLY_TARGETS`/`DEVRC_TARGETS` refs; `scripts/tests/test_run_tests_targets.py` present). Four audit rounds closed before merge.
-- **PR #1081** — this handoff doc's prior update. **MERGED `a6554bf2`**.
-- **PR #1120** `feat/measure-test-readsets` — rank 2, the read-set measurement. **MERGED `90deea1d`**, verified by content. Five audit rounds.
-- **Cluster: baseline**, except the devrc-ci gate budget 45m→60m (`29ccfd69`), which is still in place and was deliberately kept.
-- **Claims `ci-speedup-1` and `ci-speedup-2` are still HELD** — release them if you are not continuing this effort (`claim-work --release <slug>`).
-- **Open issues filed by this effort:** #1094 (two guard-thinness findings from #1073's round-4 audit), #1123, #1124 (both below).
+- **Ranks 1 and 2 are merged; rank 1's measurement is DONE this session** and its answer is below. No code change has landed for it yet.
+- **PR #1073** `feat/ci-impact-analysis` — `--targets` subset selection. **MERGED `809486fa`**, verified by content. Four audit rounds.
+- **PR #1081** — prior handoff update. **MERGED `a6554bf2`**.
+- **PR #1120** `feat/measure-test-readsets` — the read-set measurement. **MERGED `90deea1d`**, verified by content. Five audit rounds.
+- **PR #1152** — previous session's close-out doc. **MERGED `9a7c4338`**, verified by content.
+- **PR #1154** `docs/handoff-ci-speedup-rank1` — **OPEN**, commit `71b7e549`. Carries the two-file adjudication. 🔴 **Its body states the convicting rule as "a repo path in argv ⇒ ALWAYS-RUN", which is measurably TOO BROAD** — see the correction in Gotchas. Fix the body or the next reader builds the wrong rule.
+- **Cluster: baseline**, except the devrc-ci gate budget 45m→60m (`29ccfd69`), deliberately kept.
+- **Claim `ci-speedup-1` is HELD.**
+- **Open issues:** #1094, #1123, #1124.
+- **No `clawgate-task:` field**: `clawgate_handoff.sh resolve` returned **rc 5, nothing resolved**. Positive control confirms the board is reachable (11 links for another session), but an unknown id also answers 200 with an empty array — not a clean bill of health.
 
-### The rank-2 result, in one table
-All 144 test files in `scripts/tests` classified by read-set trace; timing from a separate untraced run.
+### Rank-1 re-measurement, 2026-08-31 — the tree has MOVED since rank 2
+Full trace, suite **green: 10987 passed in 638.53s**, `PYTEST_RC=0`.
 
-| bucket | files | timed | seconds | share |
-|---|---|---|---|---|
-| ALWAYS-RUN (proven to read the tree) | 28 | 28 | 193.6s | 15.0% |
-| **OPAQUE (read set UNKNOWN)** | 75 | 74 | 1078.3s | 83.4% |
-| scoped (provably bounded) | 41 | 31 | 21.4s | 1.7% |
+| | rank 2 (published) | rank 2 seconds (timed subset) | **this run** |
+|---|---|---|---|
+| measured test files | 144 | 133 timed / 1293.3s total | **149** |
+| ALWAYS-RUN | 28 | 28 timed · **193.6s · 15.0%** | **28** |
+| OPAQUE | 75 | 74 timed · **1078.3s · 83.4%** | **78** |
+| scoped | 41 | 31 timed · **21.4s · 1.7%** | **43** |
 
-**Ceiling for a perfect path→target mapping: 1.02x. 98.3% of the suite must run on any change.**
-Full write-up, blind spots and the ten-entry defect ledger: `claudedocs/measurement-scripts-tests-readsets.md`.
+**Rank 2's ceiling stands: 1.02x — 98.3% of the suite must run on any change.** Full write-up,
+blind spots and the ten-entry defect ledger: `claudedocs/measurement-scripts-tests-readsets.md`.
+
+🔴 **The two runs are NOT comparable file-for-file** — five test files were added to `scripts/tests` between them. Do not read `75 → 78` as three files becoming opaque.
+🔴 **THIS RUN HAS NO TIMINGS.** The seconds column is rank 2's, carried forward; this session ran no
+`--durations` pass, so **no new ceiling number exists** and none should be quoted from these counts.
 
 ## Open investigations — live diagnosis state
 
@@ -116,23 +124,111 @@ Full write-up, blind spots and the ten-entry defect ledger: `claudedocs/measurem
 - **Leading hypothesis:** nix store contention from *other* concurrent users on the box. `CLAUDE.md` documents this symptom for one operator building two derivations at once; these runs were sequential, so the contention is external.
 - **Next probe:** before believing any local sandbox RED, re-run it against unmodified `origin/main` in the same window. Tekton is the authority; the local tier is not.
 
+### Rank 1: are the two largest OPAQUE files legible, and does that RAISE the ceiling?
+- **Symptom + exact repro:** 75 files (1078.3s, 83.4% of suite time) classify OPAQUE because they spawn a child at a repo cwd whose reads the per-interpreter audit hook cannot see. The previous doc names `test_subsystem_store_api.py` and `test_run_tests_floors.py` as the two largest contributors and asks for them to be made legible. Reproduce the per-file exec set with:
+  ```bash
+  DEVRC_READSET_OUT=<scratch>/rs PYTHONPATH=$DEVRC/scripts \
+    nix develop $DEVRC -c python3 -m pytest \
+    scripts/tests/test_subsystem_store_api.py scripts/tests/test_run_tests_floors.py \
+    -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin \
+    -p testlib.gitenv_plugin -p testlib.nogit_plugin -p testlib.readset_plugin \
+    -n 4 --dist loadfile
+  ```
+- **Observed (with values) — BOTH are adjudicable from the recorded argv alone, no child tracer required:**
+  - `test_run_tests_floors.py` — 18 bash execs + 1 git. Ten of them are
+    `bash /tmp/.../popen-gw2/test_*/run-tests.sh /home/zach/workspace/devrc` —
+    **REPO_ROOT is the literal operand**, and `run-tests.sh`'s positional IS a repo
+    root. One more is `bash /home/zach/workspace/devrc/scripts/run-tests.sh
+    --check-floors`, the real runner at repo root. ⇒ **ALWAYS-RUN, proven.** Not opaque.
+  - `test_subsystem_store_api.py` — 45 bash, 23 python3, 3 cp, 1 each seed.sh/git/rm/sort.
+    **Every single operand is under `/tmp`**: `seed.sh --store /tmp/…`,
+    `seed.sh --stage /tmp/…`, `verify-byte-identity.sh --store|--url`,
+    `python3 …/server.py --store /tmp/…`, `cp -a /tmp/…`,
+    `python3 -c open('/tmp/…')`, `git ls-remote https://devrc-nogit-guard.invalid/…`.
+    The **only** repo paths anywhere in its exec set are the child *executables*:
+    `scripts/subsystem-store-api/{seed.sh,verify-byte-identity.sh,server.py}`.
+    ⇒ its inputs are outside the repo; its repo dependency is those scripts' own code.
+- **Ruled out:**
+  - *A universal (any-runtime) child tracer, as a dependency-free option* — **`strace` is not in the flake devShell** (`nix develop $DEVRC -c command -v strace` → not found). Using it would mean adding it to the devShell **and** the check derivation, plus ptrace working inside the nix sandbox, which is unmeasured.
+  - *That rank 1 necessarily raises the ceiling* — refuted by the first bullet above. `test_run_tests_floors.py` moving OPAQUE→ALWAYS-RUN **lowers** the best case. This is the one-directional drift the measurement doc already predicted ("every correction that fixed a defect moved files OUT of scoped").
+- **Leading hypothesis:** the ceiling will not move materially, for a reason that is structural rather than instrumental — even a *perfectly* scoped `test_subsystem_store_api.py` carries trigger prefixes `scripts/subsystem-store-api` and `scripts/lib`, and **this repo is essentially `scripts/`**, so nearly every commit touches them. Skippability requires triggers that ordinary changes MISS, and this corpus has few.
+- **Next probe:** finish the full 144-file trace, then compute a **best-case ceiling** — treat every OPAQUE file as perfectly scoped and see what number falls out. Published best case today is `1293.3 / 193.6 = 6.68x`; every file proven ALWAYS-RUN lowers it. **If the best case converges near 1.0x, rank 3 is dead permanently and this effort closes** — that verdict needs no instrument, only adjudication.
+
+### Rank 1 ANSWERED: what is the OPAQUE bucket actually made of?
+- **Symptom + exact repro:** 78 files classify OPAQUE — read set UNKNOWN — because they spawn a child at a repo cwd. The question is whether the argv already recorded can settle any of them without building a child tracer. Reproduce with the full-trace command in "How to verify", then split the bucket by what each opaque exec's **data operands** name (excluding `toks[0]` and the script an interpreter runs, both of which are CODE, not a tree read).
+- **Observed (with values) — the 78 split three ways:**
+  - **A. REPO_ROOT is a DATA operand ⇒ provably ALWAYS-RUN: 9 files.**
+    `test_run_tests_floors.py`, `test_run_tests_targets.py`, `test_run_tests_preconditions.py`,
+    `test_run_tests_timing.py`, `test_no_real_launchers_all_targets.py`,
+    `test_activity_spool_isolation.py`, `test_gate_exit_truthfulness.py`,
+    `test_devshell_satisfies_required_tools.py`, `test_opencode_config.py`.
+    Spelling, verbatim: `bash …/run-tests.sh /home/zach/workspace/devrc`,
+    `bash …/run-node-tests.sh /home/zach/workspace/devrc`, `git -C /home/zach/workspace/devrc`.
+  - **B. a DEEPER repo path as a data operand: 0 files.** The rule has exactly one shape here.
+  - **C. every data operand outside the repo: 69 files.**
+- 🔴 **Ruled out — "bucket C is 69 scoped candidates". IT IS NOT, and publishing it that way would be defect #11 in `measurement-scripts-tests-readsets.md`'s ledger** — the acquitting-operand fallacy reached by a new route. A child's data operands being outside the repo says nothing about what the child's **own code** reads. Disproof from inside bucket C itself, two files, same bucket, opposite reality:
+
+  | file | in-process paths the tracer ALREADY recorded | trigger prefixes |
+  |---|---|---|
+  | `test_drift_check.py` | **172** | ~all of `scripts/**`, plus `nix/pkgs`, `nix/home.nix`, `claude/skill-tiers.json` |
+  | `test_subsystem_store_api.py` | **16** | `scripts/lib`, `scripts/subsystem-store-api` only |
+
+  `test_drift_check.py` is effectively ALWAYS-RUN on its **in-process** reads alone — its child opacity adds nothing. `test_subsystem_store_api.py` is genuinely narrow. Same bucket, and the bucket does not distinguish them.
+- **Leading hypothesis:** the existing `triggers` field already discriminates bucket C better than any operand rule can, because it is *measured* rather than inferred from argv. The remaining true unknown is narrower than 83.4% of suite time — it is only those bucket-C files whose in-process trigger set is SMALL **and** whose child is a repo script.
+- **Next probe:** intersect the two — list bucket-C files with fewer than ~30 in-process paths **and** at least one `bash <repo script>` child. That is the only population a child tracer could move, and it is far smaller than 69. Size it before building anything.
+
+### Rank 7 step 0 DONE: the unpin's perf baseline, RE-TAKEN at `requests.cpu: 2`
+- **Why it had to be re-taken:** `claude/skills/tekton/reference/pipelines.md` → "Retrying the devrc-ci unpin" states the quoted wins (queue 17–22m → 0.1m, wall clock 39.1m → 17.4m) are **not re-derivable** — the runs are pruned, and they were measured while `requests.cpu` was **4** (`23887675`). `bb62668f` put it back to **2**, which is live. So the entire justification for rank 7 rested on a baseline taken under a different configuration.
+- **Observed (with values), 2026-08-31, `requests.cpu: 2` live, n=31 gate TaskRuns / 35 retained PipelineRuns:**
+  - **Gate pod-start latency (TaskRun `startTime` → first step `startedAt`): p50 101s, p90 748s, max 1043s.** Slowest three: `devrc-ci-grz6m-gate` 1043s, `-qjxwl-gate` 936s, `-v6p74-gate` 864s.
+  - Wall clock (start → completion): **median 23.4m, p90 34.2m, max 42.6m**, against a **45m** gate budget.
+  - **Every gate pod landed on `talos-xr6-r7p` — 24 of 24.** The pin is intact and is the whole scheduling surface.
+  - PipelineRun creation → `startTime` is **median 0.0s, max 1.0s** — 🔴 **that number is NOT the queue wait and must not be quoted as one**; Tekton starts the run immediately and the wait is entirely in pod scheduling, above.
+- **Verdict: the upside is REAL and survives the cpu-2 re-take.** ~12.5 minutes at p90 is pure scheduling wait on a 45m budget, caused by pinning four nodes' worth of demand onto one.
+- **Next probe:** the ownership question (below) — nothing about the unpin should be attempted until it is answered on a scratch pipeline.
+
+### Rank 7 blocker: WHO takes the nix store lock? — root cannot EACCES a file it owns
+- **Symptom:** the reverted hostPath produced `error: opening lock file "/nix/var/nix/db/big-lock": Permission denied`, 75 occurrences across 42 tests, on every devrc PR (`7839ef54`).
+- **Observed (with values) — live gate pod `devrc-ci-gjljc-gate-pod`, `step-pytests`, 2026-08-31:**
+  - `id` → **`uid=0(root) gid=0(root)`**
+  - `build-users-group = nixbld`, `sandbox = true`, `sandbox-fallback = true`
+  - **`ls -d /build` → No such file or directory** — so nix is running builds UNSANDBOXED via fallback, live today. This reproduces SKILL.md gotcha 6(b) exactly, on the PVC arm, on a *working* gate.
+  - `stat` → `755 root:root /nix` · `755 root:root /nix/var/nix/db` · **`600 root:root /nix/var/nix/db/big-lock`** — i.e. the volume that WORKS carries the same 0600 root:root lock the failure names.
+- 🔴 **The sharpened question, which the reference does not yet state:** a **root** client holds `CAP_DAC_OVERRIDE` and cannot receive `EACCES` on a mode-0600 file it owns — demonstrated by the working gate above, which is root against exactly that file. **Therefore whoever hit "Permission denied" during the hostPath window was NOT root.** That makes `7839ef54`'s "ownership the nix build user can use" theory *directionally* right while its mechanism stays unproven, and it converts the probe from "fix the permissions" into a single measurable question: **which uid takes the store lock, and when does it stop being root?**
+- **Ruled out:** "the storage kind is the variable" — already refuted in the reference (`nix-store-cache`'s PV is itself a `hostPath` `DirectoryOrCreate` on the same disk). Also **candidate 1 (root-directory mode)**, refuted 2026-08-30; a `chmod 0777` before the seed measures nothing.
+- **Next probe:** on a SCRATCH pipeline only — instrument the identity of the lock-taker rather than patching permissions. Run a build that shells out to `nix-instantiate` and have it print `id -u` from **inside** the builder, against (a) the live PVC and (b) a fresh hostPath. If (a) prints 0 and (b) prints a `nixbld` uid, the mechanism is named and the fix follows. 🔴 Never on `devrc-ci`: `enforce_admins: true` with both legs required means a wrong guess blocks every contributor.
+
+### The `privileged` namespace label grants nothing — and that is independent of the volume
+- **Observed:** `kubectl get ns tekton-ci -o jsonpath='{.metadata.labels}'` → `pod-security.kubernetes.io/enforce: privileged` (still `686d6ff0`). But the gate pod requests **no privilege at all**: pod-level `securityContext` is `{}` and all six step containers are empty.
+- **Consequence:** PodSecurity *permits*, it does not *grant*. So the label buys nothing **regardless of whether the hostPath ever comes back** — the sharper form of the reference's "buys nothing while the PVC is back". It also explains gotcha 6(b): nix's sandbox cannot engage because the pod never asks for the capability, so it falls back and the `sandbox = true` in `nix config show` is cosmetic.
+- **Consequence for ranked item 5:** reverting that label is **not blocked on the unpin**, and re-granting it later would not by itself make a hostPath work.
+
 ## Next steps (ranked)
-1. **Make the opaque subprocesses legible** (devrc, `scripts/tests/`). This is the ONLY thing that raises rank 3's ceiling above 1.02x. Start with `test_subsystem_store_api.py` and `test_run_tests_floors.py` — they are the two largest OPAQUE contributors. Approach: have them declare their repo reads, or run the child under a tracer, then re-run the measurement in `claudedocs/measurement-scripts-tests-readsets.md`.
+🔴 **RANKS 1–7 ARE THE PRE-EXISTING NUMBERING AND MUST NOT MOVE** — the rank is half a
+claim's identity (`claim-work --slug-for <this doc> <rank>`), so inserting an item
+mid-list silently re-points every live claim and lets two sessions claim the SAME work
+under different slugs. An earlier revision of this doc inserted a new item at rank 2 and
+made the node unpin `ci-speedup-8` here while `main`'s copy still called it
+`ci-speedup-7` — measured, both slugs derivable at once. **New items go at the END.**
+
+1. **Land the convicting operand rule in `scripts/lib/readset_classify.py`** — in the NARROW form: *a data operand equal to REPO_ROOT convicts; the executable and an interpreter's script argument do NOT*. Measured effect: **9 files OPAQUE → ALWAYS-RUN, 0 files into `scoped`**. Test coverage must include the over-conviction case (`bash <repo script> --store /tmp/x` must NOT convict). Small cleanup — it makes the classifier honest, it does not make CI faster.
    forcing: none
 2. **Measure the browser-bridge flake rate (#1124).** ≥50 sandbox-tier runs of `test_server.py`, counting cross-test spool rows. It can redden a REQUIRED check at random, and `main` has `enforce_admins: true` with no admin override.
    forcing: gate
-3. **Fix the zombie-git co-tenant probe (#1123).** Ignore `/proc/<pid>/stat` state `Z` and descendants of the test's own process; add a regression test driven by a deliberately-unreaped child, watched red first. Same gate exposure as item 2.
+3. **Fix the zombie-git co-tenant probe (#1123).** Ignore `/proc/<pid>/stat` state `Z` and descendants of the test's own process; regression test driven by a deliberately-unreaped child, watched red first.
    forcing: gate
-4. **Close #1094** — the two guard-thinness findings in `scripts/tests/test_run_tests_targets.py` from #1073's round-4 audit.
+4. **Close #1094** — two guard-thinness findings in `scripts/tests/test_run_tests_targets.py` from #1073's round-4 audit.
    forcing: none
-5. **Decide the `tekton-ci` PodSecurity label** (homelab-infra). `686d6ff0` set `pod-security.kubernetes.io/enforce: privileged` solely to admit a hostPath that is now reverted, so it buys nothing today. Another session's commit — **ask before unwinding.**
+5. **Decide the `tekton-ci` PodSecurity label** (homelab-infra). `686d6ff0` set `enforce: privileged` solely to admit a hostPath now reverted. Another session's commit — **ask before unwinding.**
    forcing: none
-6. **Decide whether to revert the gate budget 45m→60m** (`29ccfd69`, homelab-infra). It was raised to accommodate changes that were themselves reverted.
+6. **Decide whether to revert the gate budget 45m→60m** (`29ccfd69`, homelab-infra).
    forcing: none
-7. **Retry the node unpin** — ONLY behind the nix-store-ownership probe on a SCRATCH pipeline (never devrc-ci), per the dead-end recorded below.
+7. **Retry the node unpin — THE ONLY ITEM HERE WITH REAL UPSIDE.** Measured when previously unpinned: queue wait 17.2m/22.5m → 0.1m, wall clock **39.1m median → 17.4m**, `scripts/tests` 728s → 417s. Reverted because a `DirectoryOrCreate` hostPath is created root-owned and every test shelling out to nix died `opening lock file "/nix/var/nix/db/big-lock": Permission denied` (75 occurrences, 42 tests, every PR). 🔴 **ONLY behind the nix-store-ownership probe, on a SCRATCH pipeline, NEVER devrc-ci** — three times this effort used CI as the test environment for a change to CI. Probe: hostPath + a `chown`/`chmod` in `seed-nix`, then assert `nix-instantiate --eval -E '1+1'` succeeds **as the sandbox build user** before touching the real gate.
+   forcing: none
+8. **Size the population a child tracer could actually move** — bucket-C files with a small in-process trigger set AND a `bash <repo script>` child. That is the only population a tracer could move, and it is far smaller than 69. Size it before building anything.
    forcing: none
 
-🔴 **DO NOT BUILD the path→target mapping (the old rank 3).** Measured: it buys 1.02x — twenty-one seconds of a 1293-second suite — while inheriting 75 unmeasured files as chances to skip a test that should have run. It is a large, safety-critical mechanism guarding a rounding error. Item 1 is its prerequisite.
+🔴 **DO NOT BUILD the path→target mapping (the old rank 3).** Unchanged, and rank 1 did not rescue it: the 9 newly-convicted files move time INTO always-run, and bucket C is not the skippable pool it superficially looks like. **The gate's remaining upside is item 7 — pipeline/node parallelism — not test selection.**
 
 ## Gotchas / decisions / dead-ends
 - **xdist is already at 4 workers** — the code caps at `min(nproc, 4)`. Going to 8+ helps but has diminishing returns. The real win is splitting the monolith.
@@ -167,18 +263,43 @@ Full write-up, blind spots and the ten-entry defect ledger: `claudedocs/measurem
 - **A tilde in the `/resume` topic argument does not expand** — `~/workspace/...` resolved nothing and the digest silently fell back to the newest handoff doc (it does flag this as a `!` gap). Pass an absolute path.
 - **CARRIED FORWARD, still true:** 120 of 132 files in `scripts/tests/` have zero cross-file imports; only 12 share state (nolaunch / launch_log / spool). `test_subsystem_store_api.py` has no session- or module-scoped fixtures. Splitting is *safe*; it is just not *useful* (see the 1.02x above).
 
+- 🔴 **Rank 1 does not need a child tracer, and building one first would have been wasted work.** Both files the previous doc named were settled by reading the **already-recorded argv and cwd** — the tracer's existing output. The discriminating question is not "what did the child read" but "**does any operand name a path in this repo**". `test_run_tests_floors.py` answers yes (REPO_ROOT is the operand); `test_subsystem_store_api.py` answers no (every operand is `/tmp`). Adjudication before instrumentation.
+- 🔴 **A convicting operand rule and an acquitting one are not the same rule with the sign flipped.** The measurement doc's defects 6–10 all came from acquitting on operands — deciding from argv that a command reads *elsewhere*. Convicting (an operand inside the repo ⇒ reads this tree) fails toward ALWAYS-RUN, the safe direction, and is sound even where the acquittal is not: a repo path in argv is positive evidence, whereas its absence was being read as evidence of absence.
+- **`strace` is NOT in the flake devShell** — measured `2026-08-31`. So there is no dependency-free tracer that covers `bash` children. A Python-child tracer via `sitecustomize` on `PYTHONPATH` would cover `python3 …` children (and python grandchildren under bash, since env is inherited) but NOT a bash script's own reads. Scoped, not universal — price it accordingly.
+- ⚠ **A `sitecustomize` child tracer has a named blind spot before it is written**: a test that builds `env=` from scratch rather than `{**os.environ, …}` drops the propagated variables, so its child goes untraced. That under-credits (safe), and it is detectable — compare the count of python execs the parent recorded against the number of child shards written.
+- **The two-file trace ran green** — `PYTEST_RC=0`, shards `rs.gw0..gw3.json`. GUARD 9 (`gitenv`) emitted **observed**-mode reports during it because other sessions were writing `/home/zach/workspace/devrc/.git` concurrently (`refs/remotes/origin/feat/dlrouter-media-accessor-list` moved mid-run). That is attribution being impossible in a shared checkout, not a failure — the prevention half stayed in force.
+
+- 🔴 **I stated the convicting rule too broadly, and the measurement caught it.** "Any repo path in argv ⇒ ALWAYS-RUN" convicts `bash scripts/subsystem-store-api/seed.sh --store /tmp/x`, whose only repo token is **the script being executed**. That is code, not a tree read; the broad rule would convict nearly every file and measure nothing. The rule that survives contact with data is narrow: **a DATA operand equal to REPO_ROOT**, with `toks[0]` and an interpreter's script argument excluded. PR #1154's body carries the broad wording — correct it.
+- 🔴 **"Every data operand is outside the repo" is NOT evidence of a bounded read set** — it is the acquitting-operand fallacy (ledger defects 6–10) reached by a third route, and this session nearly published it as "69 scoped candidates". The disproof is inside the bucket: `test_drift_check.py` sits there with **172** in-process paths spanning ~all of `scripts/**`. **A child's operands describe its inputs, never its code's own reads.**
+- 🔴 **The plugin truncates argv to the first 6 tokens** (`" ".join(str(a) for a in argv[:6])` in `readset_plugin.py`). An operand in position 7+ is invisible, so the convicting rule **under-convicts**. That direction is safe (a file stays OPAQUE, which consumers already treat as must-run), but it means bucket A is a FLOOR of 9, never an exact count.
+- **Rank 1 did not need a child tracer to produce its answer** — both files the previous doc named, and 9 files in total, were settled from argv the tracer already records. Adjudicate before instrumenting.
+- **`strace` is NOT in the flake devShell** — measured 2026-08-31. No dependency-free tracer covers `bash` children. A `sitecustomize` tracer would cover `python3` children (and python grandchildren under bash, env being inherited) but not a bash script's own reads.
+- ⚠ **A `sitecustomize` child tracer has a named blind spot before it is written:** a test building `env=` from scratch rather than `{**os.environ, …}` drops the propagated variables and its child goes untraced. Under-credits (safe), and detectable — compare python execs recorded against child shards written.
+- **GUARD 9 (`gitenv`) fired in observed mode throughout both traces** because other sessions were writing `/home/zach/workspace/devrc/.git` concurrently. Attribution being impossible in a shared checkout, not a failure; the prevention half stayed in force.
+
+- 🔴 **I pushed three times in quick succession to a docs-only PR and put three runs into a shared queue.** Measured while working: **8 `devrc-ci` runs Running/Pending at once**, one gate pod Pending, all on `talos-xr6-r7p`. The `tekton` skill states this plainly — *"PUSHING N BRANCHES IS NOT N INDEPENDENT ACTIONS — IT IS ONE BLAST-RADIUS ACTION … Push, wait for the queue to drain, push"* — and it is not only my own checks that suffer. **Batch handoff updates into one push.**
+- 🔴 **`PipelineRun` creation→`startTime` is a decoy metric: median 0.0s.** It reads like "there is no queue" and is the opposite of the truth. The wait lives in TaskRun→pod scheduling (p90 748s). Anyone re-measuring this must use the TaskRun's first-step `startedAt`, not the PipelineRun's `startTime`.
+- **The gate's `sandbox = true` is cosmetic today** — `/build` does not exist, so builds run unsandboxed. Read `/build`'s existence, never `nix config show`, exactly as gotcha 6(b) says; this session confirmed it live on a healthy run rather than a broken one.
+
 ## How to verify
-1. **Rank 1 landed:** `git -C ~/workspace/devrc show origin/main:scripts/run-tests.sh | grep -c 'ONLY_TARGETS\|DEVRC_TARGETS'` → non-zero, and `git cat-file -e origin/main:scripts/tests/test_run_tests_targets.py`.
-2. **Rank 2 landed:** `git -C ~/workspace/devrc cat-file -e origin/main:scripts/lib/readset_classify.py` and `…:claudedocs/measurement-scripts-tests-readsets.md`.
-3. **The measurement is reproducible:**
+1. **The full measurement (this run's numbers):**
    ```bash
    DEVRC_READSET_OUT=/tmp/rs PYTHONPATH=$DEVRC/scripts \
      nix develop $DEVRC -c python3 -m pytest scripts/tests -q -p no:cacheprovider \
      -p testlib.nolaunch_plugin -p testlib.spool_plugin \
      -p testlib.gitenv_plugin -p testlib.nogit_plugin \
      -p testlib.readset_plugin -n 4 --dist loadfile
-   nix develop $DEVRC -c python3 scripts/lib/readset_classify.py /tmp/rs.*.json
+   nix develop $DEVRC -c python3 scripts/lib/readset_classify.py /tmp/rs.*.json --json /tmp/readsets.json
    ```
-   Expect `measured test files : 144 / ALWAYS-RUN 28 / OPAQUE 75 / scoped 41`.
+   Expect `measured test files : 149 / ALWAYS-RUN 28 / OPAQUE 78 / scoped 43` **on this tree**; the counts move as test files are added, so re-derive rather than asserting these.
+2. **The bucket-C disproof, in one command** — the claim that decides whether an operand rule can be trusted:
+   ```bash
+   nix develop $DEVRC -c python3 -c "
+   import json; d=json.load(open('/tmp/readsets.json'))
+   for f in ['scripts/tests/test_drift_check.py','scripts/tests/test_subsystem_store_api.py']:
+       print(f, d[f]['n_paths'], 'paths;', len(d[f]['triggers']), 'triggers')"
+   ```
+   Expect `test_drift_check.py` ≫ `test_subsystem_store_api.py` (172 vs 16 when measured). Both are OPAQUE and both have all data operands outside the repo — that is the point.
+3. **A convicting operand rule, once written, must move files OPAQUE→ALWAYS-RUN and move ZERO files into `scoped`.** That invariant is the rule's own safety test; assert it in the test file, not in prose.
 4. **The classifier's guards:** `nix develop $DEVRC -c python3 -m pytest scripts/tests/test_readset_classify.py -q -p no:cacheprovider` → 40 passed.
 5. **Cluster is at baseline:** `KUBECONFIG=$KC_HOMELAB kubectl get task devrc-ci-gate -n tekton-ci -o jsonpath='{.spec.volumes}'` must show `persistentVolumeClaim: nix-store-cache`, and `…steps[?(@.name=="pytests")].computeResources.requests.cpu` must be `2`.

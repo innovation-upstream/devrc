@@ -2366,7 +2366,14 @@ def test_a_healthy_ping_is_unaffected_and_answers_in_milliseconds(monkeypatch):
     measured healthy pings averaged 3–4 ms, so the 10 s deadline is ~2500×
     headroom — assert the fast path still returns 200, not a timeout."""
     monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
-    srv, _ = _serve(cmd_timeout=25.0, poll_timeout=5.0)
+    # Bound DERIVED from the deadline it discriminates, not a literal. `< 1.0`
+    # against a 5s poll_timeout was five times tighter than the thing under
+    # test, which makes it a load detector rather than a timeout detector; see
+    # the 🔴 block on test_unknown_instance_fails_fast_not_after_cmd_timeout.
+    # The measured healthy ping is 3-4 ms, so 2.5s is still ~600x headroom.
+    POLL_TIMEOUT = 5.0
+    FAST = POLL_TIMEOUT / 2
+    srv, _ = _serve(cmd_timeout=25.0, poll_timeout=POLL_TIMEOUT)
     ext = FakeExtension(srv, executor=lambda c: {"pong": True})
     ext.start()
     try:
@@ -2375,7 +2382,9 @@ def test_a_healthy_ping_is_unaffected_and_answers_in_milliseconds(monkeypatch):
         st, body = _req(srv, "POST", "/cmd", {"op": "ping"})
         elapsed = time.monotonic() - t0
         assert st == 200 and body["ok"] is True
-        assert elapsed < 1.0, f"a healthy ping took {elapsed:.2f}s"
+        assert elapsed < FAST, (
+            f"a healthy ping took {elapsed:.2f}s against a {POLL_TIMEOUT}s "
+            "poll_timeout — it went down a waiting path")
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -9296,9 +9305,20 @@ def test_last_unanswered_op_survives_a_swallowed_command():
 # --- fail FAST on an unresolvable target (never wait out cmd_timeout) -------- #
 def test_unknown_instance_fails_fast_not_after_cmd_timeout():
     """MEASURED, not asserted-by-construction: a mistyped/unknown --instance must
-    be rejected in well under the 20s cmd_timeout. `cmd_timeout` here is 5s, so a
-    resolution error that took the timeout path would be unmissable."""
-    srv, _ = _serve(cmd_timeout=5.0)
+    be rejected without waiting out `cmd_timeout`, so a resolution error that took
+    the timeout path is unmissable.
+
+    🔴 THE BOUND IS DERIVED FROM `cmd_timeout`, NOT A LITERAL. It used to be a
+    flat `< 1.0` against a 5s timeout — five times tighter than the thing it
+    discriminates, so CI load failed it while nothing was wrong (it went red on
+    devrc#1170, a PR touching no browser-bridge file, and passed in isolation on
+    the same tree). `366de091` records this exact shape at ten CLI sites: *a
+    test's safety net must not be tighter than the bound of the thing it
+    invokes.* Half the timeout still separates the two paths by 2.5s.
+    """
+    CMD_TIMEOUT = 5.0
+    FAST = CMD_TIMEOUT / 2
+    srv, _ = _serve(cmd_timeout=CMD_TIMEOUT)
     ext = FakeExtension(srv, instance_id="fake-1", label="work")
     ext.start()
     try:
@@ -9308,7 +9328,9 @@ def test_unknown_instance_fails_fast_not_after_cmd_timeout():
                         {"op": "tabs", "target": "nosuchlabel"})
         elapsed = time.monotonic() - t0
         assert st == 404 and body["error"] == "unknown_instance"
-        assert elapsed < 1.0, f"took {elapsed:.2f}s — it went down a waiting path"
+        assert elapsed < FAST, (
+            f"took {elapsed:.2f}s against a {CMD_TIMEOUT}s cmd_timeout — "
+            "it went down a waiting path")
         # And it names what IS known, so a typo and a silent drop are separable.
         assert [k["key"] for k in body["known_instances"]] == ["work"]
     finally:
@@ -9330,13 +9352,19 @@ def test_no_extension_fails_fast_and_names_the_instance_that_dropped():
     with reg._cond:  # noqa: SLF001
         reg._register_locked("fake-1", "work")  # noqa: SLF001
     clock[0] += S.CONNECT_STALE_S + 1          # it stopped polling; nothing in flight
-    srv, _ = _serve(cmd_timeout=5.0, registry=reg)
+    # Bound DERIVED from cmd_timeout, not a literal — same reason as the test
+    # above; see the 🔴 block there.
+    CMD_TIMEOUT = 5.0
+    FAST = CMD_TIMEOUT / 2
+    srv, _ = _serve(cmd_timeout=CMD_TIMEOUT, registry=reg)
     try:
         t0 = time.monotonic()
         st, body = _req(srv, "POST", "/cmd", {"op": "tabs", "target": "work"})
         elapsed = time.monotonic() - t0
         assert st == 503 and body["error"] == "extension_not_connected"
-        assert elapsed < 1.0, f"took {elapsed:.2f}s — it went down a waiting path"
+        assert elapsed < FAST, (
+            f"took {elapsed:.2f}s against a {CMD_TIMEOUT}s cmd_timeout — "
+            "it went down a waiting path")
         assert [k["key"] for k in body["known_instances"]] == ["work"]
         assert body["known_instances"][0]["connected"] is False
     finally:

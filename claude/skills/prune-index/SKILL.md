@@ -68,7 +68,9 @@ cp -a ~/.claude/analyze-service-index/. "$BK"/ && echo "backed up to $BK: $(find
 Bias toward EVICT/MERGE **only inside the RESOLVED population**. Everywhere else this store is a router *and* the sole archive of things nobody wrote down.
 
 ## 4. Propose — confirm-gated, diff first
-Same contract as `analyze-service`'s write-back (`~/.claude/skills/analyze-service/reference/write-back.md`): present a **unified diff** against the current file, one compact block, ask one yes/no. On confirm, **re-read the file first** (a concurrent session may have appended), re-apply to current bytes, then plain `Write`. On decline, discard.
+Present a **unified diff** against the current file, one compact block, ask one yes/no. On confirm, **re-read the file first** (a concurrent session may have appended), re-apply to current bytes, then plain `Write`. On decline, discard. Full contract: `~/.claude/skills/prune-index/reference/writing-and-safety.md`.
+
+⚠ **This used to read "same contract as `analyze-service`'s write-back", and that pointer is now false** — the append prompt was retired everywhere on 2026-08-31 and `write-back.md` no longer carries a protocol at all (the one append protocol is `~/.claude/skills/subsystem-index/SKILL.md`, which asks nothing and mandates `Edit`). 🔴 **A prune is NOT an append, so the retirement does not reach it**: the evidence that retired the prompt was "the answer was always `y`" on an APPEND, and a cut REMOVES bytes that are often their content's only copy. Blast radius earns the gate. Keep the y/N here, and keep `Write` here — a cut necessarily rewrites the whole file, so the append rule's `Edit` anchor does not apply; step 2's `cp -a` backup is what stands in for it.
 
 🔴 **Never silent-mutate, never batch a whole scope behind one prompt, and write the file and run NO git command** — the store has an out-of-band autocommit of its own.
 

@@ -39,8 +39,15 @@ the reconciled lifecycle checkable:
   * a `RESOLVED` bullet with no reachable home is reported `NO HOME - write the
     record first`, NEVER as evictable. That is the interesting finding, not an
     edge case: it names the bullets whose durable form was never written down.
-  * NOTHING IS EVER AUTO-EVICTED. This reports; a human confirms. Same
-    confirm-gated, diff-first contract `write-back.md` already carries.
+  * NOTHING IS EVER AUTO-EVICTED. This reports; a human confirms. The cut runs
+    the `prune-index` skill's confirm-gated, diff-first contract
+    (`claude/skills/prune-index/reference/writing-and-safety.md`). 🔴 NOT the
+    APPEND protocol: that pointer used to name `write-back.md`, whose copy was
+    retired on 2026-08-31 when the y/N went and the one append protocol moved to
+    `subsystem-index/SKILL.md`. A prune keeps its prompt on purpose — the
+    evidence that retired the append one ("the answer was always `y`") was
+    measured on an append, and a cut removes bytes that are often their
+    content's only copy.
 
 WHAT A ZERO HERE MEANS
 ----------------------

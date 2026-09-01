@@ -273,6 +273,55 @@ version of this doc did not carry it. Verified on `origin/main` today, not recal
 NOT folded into #1119: widening a diff to chase a repo-wide pattern is how an audit ladder
 leaves the PR it is auditing.
 
+### ✅ CLOSED BY ANOTHER SESSION — the store-api flake is fsync CONTENTION, and this doc named the wrong test AND the wrong mechanism
+The `dl-router live-fixture flake` block above says the mechanism is *"a readiness race that
+CI load can lose"* and prescribes *"harden the fixture's readiness wait"*. **Both halves are
+refuted**, and the correction landed as `innovation-upstream/devrc#1181` (merged
+`0c333846`) while this session was reading the doc.
+
+- **Wrong test named.** This doc's block names
+  `scripts/dl-router/tests/test_server.py::test_match_returns_the_contract_shape`. The
+  failing one is `scripts/tests/test_subsystem_store_api.py`
+  (`TestTheActorComesFromTheTOKEN::test_a_FORGED_actor_in_the_body_is_DISCARDED[record0-…-kelp-forest-zach]`).
+- **Mechanism (from #1181, measured not reasoned):** `server.py:_replace_bytes` fsyncs
+  **before** the response is written, and fsync blocks in uninterruptible sleep. One fsync
+  exceeding `HANG_TIMEOUT` (60.0) makes the client raise `TimeoutError` at `socket.py:720`
+  — the gate then reports a **code failure for an I/O stall**. The suite already
+  self-classifies it and says so unprompted:
+  `MECHANISM = SERVER_BLOCKED_IN_FSYNC (handler threads=1 […], accept loop parked=True)`.
+- **Reproducer, on the dev host:** `scripts/ci-repro/slowfsync.c`, an `LD_PRELOAD` shim
+  delaying exactly one fsync past the bound. Control `8 passed in 4.63s` rc 0; reproduction
+  `1 failed, 7 passed` rc 1, on the **identical test and parametrisation** as CI. **This
+  refutes the seed/ordering hypothesis** — no reordering is required.
+- **Why CI and not here:** `devrc-ci` is pinned to one node (`talos-xr6-r7p`); the gate
+  workspace is `emptyDir medium=disk` and the nix caches are `local-path` PVCs, so every
+  concurrent pipelinerun contends on **one physical disk**. 12 pipelineruns overlapped the
+  failing window.
+- **Two fixes that look right and are not:** CPU/memory requests cannot fix it (k8s requests
+  govern CPU and memory, **not disk I/O**; all 449 taskruns in that namespace declare none),
+  and **raising `HANG_TIMEOUT` again is worse than nothing** — 60 is already the symptom fix
+  from 15 and it did not hold; ~320 hung-call sites × 60 s ≈ 5.3 h against a 45 m budget,
+  i.e. the documented state where nothing posts and required checks stay `pending` forever.
+- **Real levers, NOT applied:** unpin the node or spread disk-heavy pipelines, cap concurrent
+  runs per node (distinct from `tekton-supersede`, which only collapses redundant runs of the
+  *same* PR), or isolate the workspace storage. Owned by claim `devrc-ci-flake-population`.
+
+### 🔴 OPEN (owned elsewhere) — the required pytest gate is red across most open PRs
+- **Observed 2026-08-31T21:2x Z:** **14 of 31** open devrc PRs carry
+  `tekton/devrc-pytests=FAILURE`, plus 2 `ERROR`. `tekton/devrc-nodetests` is **SUCCESS on
+  every one of them** — the failure is one-sided.
+- 🔴 **A prior kickoff put this at "4 of 12 open PRs".** That figure did not survive
+  re-measurement; quote the count you measured, with its timestamp, not this one.
+- **Attribution is NOT established from the PR surface.** `statusCheckRollup` returns these
+  as bare `StatusContext` rows with **empty `description` and empty `targetUrl`**, so the
+  failing test cannot be read from `gh pr view` at all — the Tekton step log is the only
+  source. Several of the reds are also days old (`#729`, `#769`, `#815`) and may be
+  unrelated to the fsync mechanism.
+- **Next probe:** for one recent red PR, read the `devrc-ci` step log and confirm whether it
+  prints `MECHANISM = SERVER_BLOCKED_IN_FSYNC`. That is what decides whether this is one
+  mechanism or several. Do NOT re-diagnose it standalone — coordinate with the
+  `devrc-ci-flake-population` claim holder.
+
 ## 🔴 The one thing to read before doing items 3 and 4
 🟢 **UPDATE 2026-08-30 — the blocker below has LARGELY CLEARED. Read this first; the
 original text is kept underneath because its ARGUMENT is still the right one.**
@@ -315,44 +364,51 @@ a fleet-wide claim cannot be made from this data yet. Re-check both hosts appear
 </details>
 
 ## Next steps (ranked)
-1. **Rotate the leaked `activity_reader` credential.**
-   forcing: security — a LIVE exposure, an `activity_reader` password in cleartext in the
-   opencode session store. Zach's to do; the only item in this doc with an EXTERNAL
-   forcing function.
-2. **Bring the laptop's `homelab-talos/containers/clawgate` built source current** —
-   `git -C ~/workspace/homelab-talos pull --ff-only` then a `home-manager switch`, ON THE
-   LAPTOP. Measured by `drift-check.sh`: laptop rc 17, 1 behind; workbench CURRENT, so the
-   two hosts build DIFFERENT source (`c919cd32c230` vs `11fde963e9e9`) under one version
-   string.
-   forcing: regression — MEASURED, and it is the 2026-08-14 failure mode's exact shape (a
-   `clawgatectl` whose binary is older than its label).
-3. **Commit or claim the workbench's dirty `nix/pkgs/default.nix`** (+4 lines, tracked).
-   `ship.sh` reports it as DIRTY AND IN THE ARTIFACT, so the workbench's built generation
-   is `origin/main` PLUS that change while the laptop's is not — the hosts are at one sha
-   but not one artifact. It is NOT from the #1119 work (that touched no `nix/pkgs` path).
-   forcing: regression — an un-committed path inside the built artifact is the
-   dirty-tree-probe hazard in `RULES.md`: the deployed copy and the commit are different
-   claims, and right now only one host has it.
-4. **Consolidate `_bash_array` and the substring readers** — the F7 block above.
-   forcing: none — nothing is vacuous today; this is "one rule, one place" hygiene, and
-   the divergence already present in `test_hook_tests_dir_collects.py` is the argument for
-   doing it before a fourth copy appears.
+
+🔴 **Numbering is STABLE and deliberately gappy — closed items keep their rank** so live
+`claim-work --slug-for <doc> <rank>` identities never re-point. Do not renumber.
+
+1. **Rotate the leaked `activity_reader` credential.** Zach's; an `activity_reader` password
+   in cleartext in the opencode session store.
+   forcing: security — a LIVE exposure, the only item here with an EXTERNAL forcing function.
+2. ✅ **DONE (closed without being worked).** Laptop `homelab-talos/containers/clawgate`
+   built source is CURRENT on both hosts; verified by `drift-check.sh` 2026-08-31.
+   **Carried forward from its old forcing line — the lesson outlives the item:** this was
+   the 2026-08-14 failure mode's exact shape, a `clawgatectl` whose binary is older than
+   its label. If the two hosts ever build different source under one version string again,
+   that is this hazard, not a new one.
+   forcing: none — closed, retained only to hold the rank.
+3. ✅ **DONE.** `nix/pkgs/default.nix` merged as `#1135` (`875ceb11`) and shipped to both
+   hosts; base clone clean.
+   forcing: none — closed, retained only to hold the rank.
+4. **Consolidate `_bash_array` and the substring `RESULT:` readers** — the F7 block above.
+   Files: `scripts/tests/test_hook_tests_dir_collects.py`,
+   `scripts/tests/test_no_real_launchers_all_targets.py`,
+   `scripts/tests/test_result_grammar_is_reserved.py`, plus the seven substring readers.
+   forcing: none — nothing is vacuous today; the divergence already present in
+   `test_hook_tests_dir_collects.py` is the argument for doing it before a fourth copy.
 5. **The `adoption-scan` `via: "skill"` registry arm.** Files:
    `scripts/session-analysis/adoption-scan.py`, `claude/skills/adoption-scan/SKILL.md`.
-   forcing: none — the incident that forced this effort is closed by #1000 + #1059. Do not
-   work it on the strength of being written down.
+   forcing: none — the incident that forced this effort is closed. Re-run the trailing-7d
+   identity query before building; the last reading was one day, not a plateau.
 6. **The `attributionSkill` deadman.** File: `scripts/validation/invariants.py`.
    forcing: none — guards a hypothetical silent zero; nothing has regressed.
 7. **`claudedocs/followups-skill-usage-telemetry.md` — G5 only**, the ClickHouse
    creds/query helper. ✅ The `audit-dispatch.py` wrong-toolchain brief in that file is
-   CLOSED: #1104 merged 2026-08-30T19:09Z, verified via `gh pr view`, not assumed.
+   CLOSED: `#1104` merged 2026-08-30T19:09Z, verified via `gh pr view`, not assumed.
+   🔴 **RANK COLLISION, resolved here:** older `State now` sections in this doc call the
+   result-grammar work (`#1119`) "rank 7", but **this list's 7 has always been G5** — and
+   `claim-work --slug-for <doc> <rank>` reads THIS list, so a past
+   `skill-usage-telemetry-7` claim was pointing at G5's slug while describing `#1119`.
+   `#1119` is DONE and deployed (see `State now`); it holds no rank. Treat item 7 as G5.
    forcing: none.
-8. **Escape-obfuscation hardening of the `RESULT:` scan** — deliberately NOT done. 11
-   fail-open cases reachable only by DELIBERATE obfuscation (`echo RESULT: PA''SS`,
-   `$'RESULT: \x50ASS'`); identical at rounds 4, 5 and 6, so pre-existing rather than a
-   regression, and zero occurrences in the 9-entry registry population.
-   forcing: none — the guard exists to stop a copy-pasted literal, and its docstring now
-   states plainly that its blind-spot list is not exhaustive. Do not start without a reason.
+8. **Escape-obfuscation hardening of the `RESULT:` scan** — deliberately NOT done.
+   forcing: none — reachable only by deliberate obfuscation; do not start without a reason.
+9. **The red `devrc-pytests` gate across open PRs** — the Open-investigations block above.
+   **IN FLIGHT: owned by claim `devrc-ci-flake-population`; `devrc#1181` merged.**
+   Closes when a newly-pushed PR shows `tekton/devrc-pytests=SUCCESS` — mechanically
+   checkable with `gh pr view <n> --json statusCheckRollup`.
+   forcing: gate — a REQUIRED check, measured red on 14 of 31 open PRs.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`find-session`'s "both hosts" claim was HALF FALSE for weeks** and is the root cause of
@@ -486,20 +542,53 @@ a fleet-wide claim cannot be made from this data yet. Re-check both hosts appear
 - **A duplicate-sweep zero was validated before being believed:** the title filter returned
   0 under test and 18 on a positive control of the same shape.
 
+- 🔴 **The exact-slug lock did NOT catch a live duplicate — the PR sweep did.** This
+  session's kickoff named rank 2 as the top item; `claim-work --check
+  skill-usage-telemetry-2` reported **FREE**, while another session had been on the same
+  work for 20 minutes under the *unrelated* slug `devrc-ci-flake-population` and opened
+  `#1181` **one minute** before the reconciler ran. The slug is the hard lock and it is
+  only as good as both sides deriving the same one; `gh pr list --state open` is what
+  actually saw it. **Run the sweep even when the lock says FREE** — this is the documented
+  uncovered class, observed live.
+- 🔴 **A kickoff's rank numbers can silently disagree with the doc's own ranked list.**
+  The kickoff said *"rank 2 = harden `test_subsystem_store_api.py`'s readiness wait"*; the
+  doc's rank 2 was the laptop clawgate source, and the readiness-wait item appeared only as
+  an unranked open-investigation block naming a **different test file**. Rank 1 matched, so
+  the mismatch was easy to miss. **Re-read the doc's own numbered list before drawing —
+  the kickoff is prose, the list is the queue.**
+- **A dirty tracked path in the base clone is not automatically WIP.** `nix/pkgs/default.nix`
+  looked like unsaved work and was byte-identical (`a2a6fe09`) to open PR `#1135`. Hashing
+  it against the PR's blob is what settled it in one command:
+  `git -C <repo> hash-object <path>` vs `git rev-parse <pr-base>:<path>`. Discarding it was
+  then provably lossless.
+- **Merge BEFORE ship when both are queued.** Shipping first would have converged both hosts
+  on `0c333846`, then `#1135` would land and leave them behind again. One merge → one ship
+  → one `drift-check` is the whole sequence.
+- 🔴 **This doc carried TWO conflicting "rank 7"s and nobody noticed.** The ranked list's
+  item 7 is the followups/G5 item; three separate `State now` sections call `#1119`
+  "rank 7". Because a claim slug is `<doc>-<rank>`, the `skill-usage-telemetry-7` claim
+  held for `#1119` was addressing G5's identity — a second session drawing G5 would have
+  been told it was taken, by a claim describing unrelated work. **The ranked list is the
+  only authority on a rank; prose that says "rank N" is not.** Resolved 2026-08-31.
+- 🔴 **`statusCheckRollup` cannot tell you WHICH test failed here.** These are bare
+  `StatusContext` rows with empty `description` and empty `targetUrl`; only the Tekton step
+  log carries the failing test. Do not infer a shared mechanism across red PRs from the PR
+  surface alone.
+
 ## How to verify
 ```bash
-# 1. the guard
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  scripts/tests/test_result_grammar_is_reserved.py -q
+# 1. #1135 landed by CONTENT (a squash is never an ancestor) + the squash commit exists
+git -C ~/workspace/devrc show origin/main:nix/pkgs/default.nix | grep -nE 'inxi|cpu-x'
+gh pr view 1135 --repo innovation-upstream/devrc --json mergedAt,mergeCommit
 
-# 2. the live near-miss, in PRODUCTION gate output — grep the sandbox log, not the source
-nix build .#checks.x86_64-linux.pytests --no-link -L 2>&1 | grep -B1 -A2 'RESULT: all good'
+# 2. both hosts converged AND agree on one sha — read the per-host lines, not the verdict
+bash ~/workspace/devrc/scripts/drift-check.sh          # expect rc 0, both hosts at 875ceb11
 
-# 3. the two readers still agree — gate.sh must still say `tail -1`
-grep -n 'verdict=' ~/workspace/devrc/scripts/gate.sh
+# 3. the flake correction is on main
+git -C ~/workspace/devrc log --oneline -1 0c333846
 
-# 4. after merge: NOT live on a host until a switch
-scripts/ship.sh && bash ~/workspace/devrc/scripts/drift-check.sh
+# 4. the ranked queue is unclaimed before you draw from it
+claim-work --list
 ```
 ## State now — rank 7 BUILT and mutation-verified on a branch; gate IN FLIGHT (2026-08-30)
 
@@ -559,3 +648,32 @@ scripts/ship.sh && bash ~/workspace/devrc/scripts/drift-check.sh
   head measured 19608/18145, so re-measure rather than quoting these.
 - **Claim `skill-usage-telemetry-7`** — release when #1119 merges.
 - 🔴 **Merged ≠ deployed.** This guard only runs on a host after `scripts/ship.sh`.
+## State now — ranks 2, 3 and 7 all CLOSED; both hosts converged at `875ceb11` (2026-08-31)
+
+- **Both hosts are LIVE at `875ceb11`.** `scripts/ship.sh` rc 0, **cross-host COMPARED**
+  (not the one-host `NOT COMPARED` case): workbench and laptop each fast-forwarded
+  `0c333846 → 875ceb11`, both `✅ VERIFIED — on branch main at origin/main + switched`,
+  `0 dangling / 0 absent / 0 stale` managed artifacts on both. Re-checked afterwards with
+  `drift-check.sh` → **rc 0, no drift**, both hosts clean on `main` at that sha.
+- **Rank 3 CLOSED — `nix/pkgs/default.nix` merged as `#1135`** (squash `875ceb11`, merged
+  `2026-08-31T23:16:09Z`). Verified **by content** on `origin/main` (`inxi` + `cpu-x` both
+  present at lines 59–60), not by ancestry — a squash never makes the head an ancestor.
+  The base clone's dirty copy was **byte-identical** to the merged blob
+  (`a2a6fe09` both sides, `git diff origin/main -- nix/pkgs/default.nix` empty), so it was
+  a redundant copy of the PR, never orphan WIP; `git restore`d to let `--ff-only` proceed.
+- **Rank 2 CLOSED without being worked** — the laptop's `homelab-talos/containers/clawgate`
+  built source is no longer behind. `drift-check.sh`: **both** hosts
+  `BUILT SOURCE homelab-talos/containers/clawgate is CURRENT`, same sha, `stale=0
+  unmeasured=0`, `[srcrepo] compared=2 same=2 differing=0`. The doc's
+  `c919cd32c230` vs `11fde963e9e9` two-host split is gone.
+- **Rank 7 (`#1119`) is merged AND now deployed** — it was merged-not-shipped at the last
+  handoff; this session's `ship.sh` is what made it live on both hosts.
+- **Claim `skill-usage-telemetry-3` was taken and RELEASED.** All eight ranked slugs
+  (`skill-usage-telemetry-1..8`) are currently FREE.
+- **Untracked in the shared base clone, left alone:** `output.txt`,
+  `scripts/diagnose-nix-disk.sh` — another session's working files, in no commit and no
+  backup. `[nixdirt] hits=0` against 320 nix-read paths, so neither is deployed.
+- **No `clawgate-task:` recorded, deliberately.** `clawgate_handoff.sh resolve` exited **5**
+  (0 tasks for this session) with its positive control confirming the board is reachable
+  (7 links for another session). Per the skill that is NOT a clean bill of health — a wrong
+  session id also answers 200 with an empty array — so no field was written.

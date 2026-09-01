@@ -9,17 +9,31 @@ allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 The store is the terse **pointer sheet** that OUTLIVES a handoff doc: handoff docs
 are per-topic and get overwritten, this does not.
 
-🔴 **THIS IS `/handoff`'s PROTOCOL. `/analyze-service` ALSO WRITES THE STORE AND
-DOES NOT FOLLOW IT** — it follows `claude/skills/analyze-service/reference/write-back.md`,
-and the two MATERIALLY CONFLICT: that one gates the append behind an explicit
-`append this to the index? (y/N)` which this file declares retired, and uses
-`Write` where this file mandates `Edit` anchored on `## Nuance / work-history`
-(measured: a whole-file retype silently loses a concurrent append). An earlier
-draft of this line claimed both skills follow this file. They do not, and saying
-so would send an `/analyze-service` run down the wrong protocol. **Reconciling
-them is open work, not something to assume has happened.** Concretely: the
-template below hardcodes `created_by: handoff`, which is correct only while this
-file has one caller.
+🔴 **THIS IS THE APPEND PROTOCOL FOR EVERY WRITER OF THIS STORE — `/handoff` AND
+`/analyze-service` BOTH.** There is one protocol and one document; there is no
+per-skill variant to look for.
+
+⚠ **It was genuinely forked until 2026-08-31, so a stale memory of that is not
+paranoia — read this before re-deriving it.** `/analyze-service`'s door,
+`claude/skills/analyze-service/reference/write-back.md`, carried a second copy of
+the protocol that MATERIALLY CONFLICTED with this one: it gated the append behind
+`append this to the index? (y/N)`, which this file had already declared retired,
+and it said `Write` where this file mandates `Edit` anchored on
+`## Nuance / work-history` (measured: a whole-file retype silently loses a
+concurrent append). Both read as *the* protocol and neither named a winner.
+**Operator decision, 2026-08-31: the y/N is retired EVERYWHERE and this file
+wins.** `write-back.md` was reduced to a POINTER at this one plus the
+`/analyze-service`-specific content that was never duplicated (what counts as
+notable, auto-discovered pointers, bloat discipline). The reconciliation is
+mechanically defended by `scripts/tests/test_index_append_protocol.py`, which
+goes red if either door grows a second protocol.
+
+🔴 **Consequence, and the reason the template below no longer hardcodes a
+writer:** this file has TWO callers, so `created_by:` is the CALLER's id, not
+this module's. Pass `--writer handoff` (you, `/handoff`) or `--writer
+analyze-service`; `--template` refuses to print without it rather than stamping a
+default that would be silently wrong for one of the two. `--census` reads the
+split back, which is the only reason the field exists.
 
 🔴 **This lived inside `/handoff` step 4 until 2026-08-24, and that was the wrong
 home in a way worth stating.** It is a separate subsystem: its own tool
@@ -105,7 +119,7 @@ Otherwise read `status=` and act on that case:
 
 🔴 **Decline on CONTENT, never on cost — an index entry does not cost a session anything.** Entries load on demand, read only by `/resume` step 4, never at session start; what loads every session is the skill *listing* (name + description), not entries and not skill bodies. An extra entry adds **one index row, ~14 tokens**, to a `/resume` that chooses to read it. Suppressing writes on a cost that does not exist is how the store stays empty and the emptiness then gets read as nobody wanting it. **"Already in the handoff doc" is also not a reason**: this store exists to OUTLIVE handoff docs, which are per-topic and get overwritten. A durable `.claude/skills/<name>/SKILL.md` *is* a legitimate alternative home; a handoff is not. 📖 §7.3.
 
-🔴 **A subsystem with NO FILE FOOTPRINT is invisible to every window — that is not the same as "nothing to record".** All four windows read file paths, `nominate()` clusters paths and needs two, and the `NO ENTRY` prompt only appears when something was nominated — so a session whose work was a production database, a cluster, a DNS record or an external service resolves and nominates nothing. On a dead end with no nominations the tool prints a **`NO PATH FOOTPRINT?`** block with the exact `--template <slug> --scope <scope>` command, which needs no paths at all. 🔴 State the trade when you use it — and state it accurately: nothing matches such an entry automatically **today**, but it is not permanently unresolvable. It **gains normal path resolution** the moment some path is named for the slug, so **prefer a slug a future path would carry**. Until then it is listed in the scope index and found by `--search`, which is enough to read at `/resume`. 🔴 The `NO ENTRY` block carries the same offer, because a nomination is path-derived and names the directory you touched rather than the database you worked on — and most dead ends DO nominate something, so that is where this case usually hides. The bias this closes is the one that matters: the subsystems living OUTSIDE the repo are exactly the ones whose knowledge is tribal. Still **at most one, or none**. 📖 §7.4.
+🔴 **A subsystem with NO FILE FOOTPRINT is invisible to every window — that is not the same as "nothing to record".** All four windows read file paths, `nominate()` clusters paths and needs two, and the `NO ENTRY` prompt only appears when something was nominated — so a session whose work was a production database, a cluster, a DNS record or an external service resolves and nominates nothing. On a dead end with no nominations the tool prints a **`NO PATH FOOTPRINT?`** block with the exact `--template <slug> --scope <scope> --writer <caller>` command, which needs no paths at all. 🔴 State the trade when you use it — and state it accurately: nothing matches such an entry automatically **today**, but it is not permanently unresolvable. It **gains normal path resolution** the moment some path is named for the slug, so **prefer a slug a future path would carry**. Until then it is listed in the scope index and found by `--search`, which is enough to read at `/resume`. 🔴 The `NO ENTRY` block carries the same offer, because a nomination is path-derived and names the directory you touched rather than the database you worked on — and most dead ends DO nominate something, so that is where this case usually hides. The bias this closes is the one that matters: the subsystems living OUTSIDE the repo are exactly the ones whose knowledge is tribal. Still **at most one, or none**. 📖 §7.4.
 
 🔴 **"It belongs in a skill" is a ROUTE, not a disposal — finish it in THIS turn or it is lost.** The sentence above authorises declining the index; on its own it also discharges the obligation, and the lesson then lives only in a transcript, which is the medium this store exists to outlive. 📖 §7.7. So: **take the owning skill from the tool's `SKILL HOMES` block, never from memory** — it ranks by term specificity, and a hit is a lead, not an answer. If nothing matched, run the `grep -ril` it prints with *your* domain term, because the tool derives terms from paths and **cannot see what the session was about**. Then append there under the same rule as the index write — show one compact diff, then edit; no question. 🔴 Edit the **repo source** (`~/workspace/devrc/claude/skills/…`), never `~/.claude/…` (a read-only store symlink), and a **new** file must be `git add`ed or the flake silently omits it from the deploy. If genuinely nothing owns it, say **UNFILED** and name the term you searched — an unfiled item that names its search is recoverable; "belongs in a skill" is not.
 - **`ambiguous` listed** — report the candidates and **write nothing** for that ref. The resolver refuses to pick; so do you.
@@ -120,7 +134,7 @@ Otherwise read `status=` and act on that case:
 
 🔴 **Expect the session window to be thin here, by construction.** The standing default is to DELEGATE non-trivial work to a subagent, and any file-modifying subagent gets its own WORKTREE — a subagent's turns are a *separate transcript* and a worktree is *outside the session cwd*, so the two defaults hit two of this window's three blind spots at once. **The better the session followed the rules, the less of it `--session` can see.** When most of the paths it named are outside the cwd the tool now prints a computed **`WRONG WINDOW?`** block with that run's own numbers and the exact flags to run instead — it fires on the measured condition, not on every run, so **when it appears, act on it**; treat it as the escalation being handed to you rather than as a caveat to note.
 
-**Separately, and independently of `status=`: if a `NO ENTRY` block is printed, consider a new entry.** It appears alongside `resolved` too — a session normally touches a known subsystem *and* an unrecorded one, and treating nominations as a `no-match`-only concern is what would stop entries ever accruing in a repo that already has one. Pick **at most one** nomination that is a real durable subsystem, or none — they are candidates, not answers, and rejecting all of them is a normal outcome. `--template <slug>` prints the entry to write — identity front matter (`scope`, `sensitivity: client-confidential`, `created_by: handoff`) plus `## What it is` and `## Pointers`. **Do not demand the full schema** — a thin entry that exists beats a rich one that doesn't. Uncomment the template's `aliases:` line if the subsystem is spelled more than one way, in particular the `test_<slug>` stem: matching is exact, so without it a module and its own test count as one path and stay under the threshold forever.
+**Separately, and independently of `status=`: if a `NO ENTRY` block is printed, consider a new entry.** It appears alongside `resolved` too — a session normally touches a known subsystem *and* an unrecorded one, and treating nominations as a `no-match`-only concern is what would stop entries ever accruing in a repo that already has one. Pick **at most one** nomination that is a real durable subsystem, or none — they are candidates, not answers, and rejecting all of them is a normal outcome. `--template <slug> --writer <caller>` prints the entry to write — identity front matter (`scope`, `sensitivity: client-confidential`, `created_by: <caller>`) plus `## What it is` and `## Pointers`. 🔴 **`--writer` is REQUIRED and has no default**, because this store has two writers and a default would stamp one of them wrongly and silently: as `/handoff` you pass `--writer handoff`, which puts `created_by: handoff` in the file; an `/analyze-service` run passes `--writer analyze-service`. Omitting it exits 2 and prints the choices rather than guessing. **Do not demand the full schema** — a thin entry that exists beats a rich one that doesn't. Uncomment the template's `aliases:` line if the subsystem is spelled more than one way, in particular the `test_<slug>` stem: matching is exact, so without it a module and its own test count as one path and stay under the threshold forever.
 
 **— the write half; everything above this line only reads —**
 

@@ -111,7 +111,9 @@ ENTRY_HARD_BYTES = 12_288
 #
 # ⚠ NOT A GATE ON THE LIVE STORE. Nothing fails a build when an entry exceeds
 # this; `subsystem-audit.py` REPORTS and a human confirms every cut
-# (`write-back.md`'s confirm-gated, diff-first contract). Raising either number
+# (the `prune-index` skill's confirm-gated, diff-first contract — NOT
+# `write-back.md`, whose own protocol copy was retired 2026-08-31 along with the
+# append y/N; a prune is a deletion and keeps its prompt). Raising either number
 # requires saying in the commit message which entry could not be expressed in
 # the budget — the same discipline `test_rules_size.py` imposes.
 ENTRY_TARGET_BYTES = 6_144

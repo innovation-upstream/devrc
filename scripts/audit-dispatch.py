@@ -2834,6 +2834,16 @@ CHECKS_DISCRIMINATOR = (
 )
 
 
+# 🔴 The cached-build fallback's guard lines, each a SINGLE named constant so a
+# mutation can remove exactly one and the harness can name which. Each closes a
+# DIFFERENT measured false green; the number of them is deliberately not
+# asserted in the emitted prose (`test -s` speaks to emptiness only and claims
+# nothing about truncation).
+NIX_LOG_TMPFILE = 'LOG=$(mktemp -t audit-tier-XXXXXXXX.log); ERR=$(mktemp -t audit-tier-XXXXXXXX.err)   # per-agent: a FIXED path is truncated by every sibling agent'
+NIX_LOG_DRV_GUARD = '[ -n "$DRV" ] || { echo "NO DERIVATION — nix said:"; cat "$ERR"; exit 1; }'
+NIX_LOG_RUN_GUARD = 'nix log "$DRV" > "$LOG" 2>/dev/null || { echo "NO LOG — never built HERE (nix log is per-machine)"; exit 1; }'
+NIX_LOG_EMPTY_GUARD = '[ -s "$LOG" ] || { echo "EMPTY LOG — cannot vouch"; exit 1; }'
+
 def _toolchain_checks_lines(tc):
     """The sandbox tier — only when the flake really declares one."""
     if not tc.flake:
@@ -2895,6 +2905,65 @@ def _toolchain_checks_lines(tc):
         *[f"nix build <your worktree>#checks.{NIX_SYSTEM}.{n} --no-link -L"
           for n in tc.check_names],
         "```",
+        "",
+        # 🔴 NO CONDITIONAL HERE. `if not tc.check_names: return` fires ~80
+        # lines above, so this point is only ever reached WITH check names —
+        # a `if tc.check_names else []` here is unreachable-false, and an
+        # earlier revision of this block carried one plus a comment claiming
+        # it "keeps the guard isolating (measured: it stole a kill from V41)".
+        # 🔴 BOTH HALVES WERE FALSE. Under V41 `check_names` is empty, so the
+        # EARLIER return fires and this line is never evaluated; and what
+        # actually stops the kill-stealing is the TEST's precondition in
+        # `test_the_cached_build_fallback_is_emitted_with_its_guards`. Proven:
+        # a probe raising on a falsy value never fired across the suite, while
+        # raising on a TRUTHY one failed 78 tests. Restoring the conditional
+        # would re-teach a maintainer that the payload gates this, and invite
+        # deleting the test precondition as redundant.
+        "🔴 **A `nix build` that prints NOTHING is the CACHED case, not a pass.** "
+        "`-L` streams a log only while a build RUNS; an already-realised output "
+        "is not rebuilt, so nix prints nothing and exits **0**. The `RESULT:` "
+        "line you were just told to read is then absent, and the silence is "
+        "indistinguishable from success. Recover it from the derivation's own "
+        "retained log — do NOT re-run the build to get its output back:",
+        "",
+        "```bash",
+        # (a) mktemp, never a fixed path: two audit agents run concurrently here
+        #     by design, and a shared `/tmp/<name>.log` means each truncates the
+        #     other's file and greps the other's tier — with every guard passing.
+        # (b) the guards do NOT each close an independent false green — dropping
+        #     the run guard alone still leaves `test -s` catching the empty file.
+        #     It buys a better DIAGNOSIS ("never built HERE"), not a separate
+        #     closure. Only the $DRV and -s guards are independently load-bearing.
+        NIX_LOG_TMPFILE,
+        # 🔴 stderr is KEPT and echoed by the guard below. Discarding it collapses
+        # two mechanisms into one diagnosis: a wrong attribute and a `flake.nix`
+        # SYNTAX ERROR both yield an empty $DRV, and blaming "no such tier" points
+        # the auditor at the repo instead of at their own broken edit.
+        f'DRV=$(nix path-info --derivation <your worktree>#checks.{NIX_SYSTEM}'
+        '.<name> 2>"$ERR")',
+        "# 🔴 An EMPTY $DRV makes `nix log \"\"` resolve as `.` — it then prints "
+        "the CWD FLAKE'S DEFAULT PACKAGE log, i.e. a FOREIGN log that may read "
+        "`RESULT: PASS`. Silence would be survivable; this is an affirmative "
+        "false green.",
+        NIX_LOG_DRV_GUARD,
+        "# 🔴 `>` truncates BEFORE nix runs, so an unbuilt derivation leaves an "
+        "EMPTY file and `grep -c` prints a reassuring 0.",
+        NIX_LOG_RUN_GUARD,
+        NIX_LOG_EMPTY_GUARD,
+        "# Read the CONTENT. 🔴 `grep -n \"RESULT:\"` goes LAST on purpose: "
+        "`grep -c` exits 1 when the count is 0, so ending on it inverts the "
+        "block's status — a HEALTHY tier would exit 1 and a timing-out one 0.",
+        'grep -c "panic: test timed out" "$LOG"; grep -n "RESULT:" "$LOG"',
+        "```",
+        "",
+        "⚠ Each guard echoes its diagnosis before `exit 1`, so the reason "
+        "survives; but a bare `exit 1` pasted into an INTERACTIVE shell closes "
+        "it. 🔴 **Wrap the block in a function and call it** — `run_tier() { … }; "
+        "run_tier`. Do NOT simply swap `exit` for `return`: at top level "
+        "`return` is not a stop, and MEASURED in interactive zsh, interactive "
+        "bash and `bash <script>` the block then CONTINUES past a failed guard "
+        "and prints a foreign log's `RESULT: PASS` — the exact false green this "
+        "block exists to prevent.",
         "",
     ]
 

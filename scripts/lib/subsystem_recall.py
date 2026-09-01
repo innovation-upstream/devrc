@@ -16,8 +16,11 @@ and pointed at a scope instead of at one service.
 🔴 IT NEVER WRITES. Not "does not today": there is no write path in this file,
 and `TestRecallNeverWrites` hashes a store tree either side of every mode and
 every failure. The store is curated, client-confidential and not re-derivable by
-re-running recon, so the only writers stay the two confirm-gated, diff-first ones
-in the skills. (This sentence used to justify that with "has no off-machine
+re-running recon, so the only writers stay the two diff-first ones in the skills —
+`/handoff` and `/analyze-service`, which since 2026-08-31 follow ONE append
+protocol (`claude/skills/subsystem-index/SKILL.md`) rather than a copy each. They
+were "confirm-gated" too until the y/N was retired; the diff is still shown.
+(This sentence used to justify the single-writer rule with "has no off-machine
 backup". It IS backed up — hourly local commits, daily age-encrypted bundles to
 MinIO; see `claude/skills/analyze-service/reference/index-store.md` -> "Store
 safety". The conclusion is unchanged because it never depended on that half.)

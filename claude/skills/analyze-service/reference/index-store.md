@@ -34,6 +34,15 @@ never live state, never re-derived config values.
 hashed region**, so correcting the wording would change a sha that is pinned to
 the resolver's code; the redirect is stated here instead, deliberately.
 
+⚠ **Same bullet, second stale word: "a *confirmed* write-back".** The confirm
+prompt was retired everywhere on 2026-08-31 — a scope dir or entry file still
+appears only on a WRITE, and the write still shows a diff first, but nothing asks
+a y/N. The protocol is `~/.claude/skills/subsystem-index/SKILL.md`, one document
+for every caller of this store; `write-back.md` decides *whether* an
+`/analyze-service` run has anything worth recording and points there for *how*.
+Stated out here for the same reason as the redirect above: the wording is inside
+the hash.
+
 🔴 **Store safety.** The content is **curated, client-confidential, and not re-derivable by re-running recon.** ⚠ **This paragraph used to say "with no off-machine backup". That has been false since 2026-08-21 and it was false in a RECOVERY path** — an agent reading it concludes a loss is unrecoverable and never looks for the restore tooling below. Two layers exist, and neither makes the store disposable:
 - **hourly, local** — each `<scope>/` is its own git repo, committed by `analyze-service-index-commit.service` (`OnCalendar=hourly`, `RandomizedDelaySec=600`, so it fires within ten minutes AFTER the hour, not on it).
 - **daily, off-machine** — `analyze-service-index-backup.service` bundles every scope, **age-encrypted**, to the homelab MinIO `minio-archive` tenant, bucket `analyze-service-index-backups`, key `<host>-<machine-id>/<scope>/<ts>.bundle.age`. Read them back with `scripts/analyze-service-index/restore-verify.py`; `escrow-verify.py` checks the key material.
