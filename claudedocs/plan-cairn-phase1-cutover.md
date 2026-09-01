@@ -237,6 +237,23 @@ disjointness as a set, and a mutant that collides them is killed.
    *Closing condition: a merged devrc PR changing `claude/skills/subsystem-index/SKILL.md`'s
    write step, shipped, and one `/handoff` observed appending through `cairn append`.*
 
+### What else touches the local store, and what the freeze does to each
+
+Checked, because a freeze is only safe if you know every writer. Three timers/tools reach
+that tree:
+
+| toucher | what it does | effect of a 0444 entry file |
+|---|---|---|
+| `analyze-service-index-commit.timer` (hourly) | `git init` / `git add` / `git commit` per scope | **unaffected.** It writes only into `<scope>/.git/`, which stays 0755, and it rewrites no working-tree byte (measured, and stated in the skill's own reference). Reading a 0444 file is what `git add` needs. |
+| `analyze-service-index-backup.timer` (6-hourly) | reads the tree, encrypts, uploads | **unaffected** — read-only over the tree. |
+| the `subsystem-index` / `analyze-service` append protocol | `Edit` on an entry | **EACCES.** Intended: that is the hazard being closed. It moves to `cairn append` in §8 step 7. |
+| the `prune-index` skill | evicts RESOLVED bullets — a whole-file rewrite | **EACCES.** Not covered by step 7's append change: pruning is a `cairn put`, and that skill needs its own follow-up. Named here so it is not discovered as a mystery permission error. |
+
+🔴 **`prune-index` is the writer most likely to be forgotten**, because it runs rarely and
+its failure will arrive weeks later looking like a broken store rather than a completed
+migration. Its closing condition is the same shape as step 7's: a merged devrc PR routing
+its rewrite through `cairn put`, shipped, and one prune observed landing on the pod.
+
 ## 6. The ordering argument: criterion 9 BEFORE criterion 8
 
 `claudedocs/handoff-cairn-phase3.md` ranks the laptop re-seed (criterion 8) at rank 3 and
@@ -426,5 +443,8 @@ In the order they should be done, each with the condition that closes it:
 3. **The read/write allowlist split** (§5 item 2) — a merged devrc PR plus a homelab-infra
    secret change, verified by a read-only credential getting a refusal on a write and 200 on
    a read.
-4. **Drop the dead aliases** — the 4 LATENT collisions. Each is a one-line edit; each
+4. **Route `prune-index` through `cairn put`** (§5's table) — a merged devrc PR, shipped, and
+   one prune observed landing on the pod. Lowest urgency and highest surprise value: it runs
+   rarely, so its EACCES will arrive weeks after the cutover looking like a broken store.
+5. **Drop the dead aliases** — the 4 LATENT collisions. Each is a one-line edit; each
    becomes live the day its shadowing filename is renamed.
