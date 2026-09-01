@@ -197,6 +197,19 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   gh api -X PUT /repos/$R/branches/main/protection --input $S/restore.json     # 3. CLOSE
   gh api /repos/$R/branches/main/protection > $S/after.json                    # 4. READ BACK
   ```
+  **`scripts/break-glass-merge.sh --yes [--pr N]` does all four and REFUSES to exit 0
+  unless the read-back matches the capture key-by-key.** Prefer it over typing the
+  four steps: it cannot forget step 4, it never issues a `PATCH`, and its restore is
+  ONE function called on both the normal path and the EXIT trap — so the trap can
+  never hold a command that has not just been exercised, which is precisely how a
+  restore failed before. Called with no `--pr` it opens the window, merges nothing
+  and closes it; that self-test is the SAME code path as a real run, only the payload
+  differs. 🔴 **VERIFIED END-TO-END AGAINST THIS REPO'S `main`, 2026-09-01T01:50Z** —
+  real DELETE, real PUT, all 11 keys read back identical to a capture taken
+  independently beforehand. rc: 0 ok · 3 bad capture · 4 open failed · 5 merge failed ·
+  **6 RESTORE FAILED (main may be unprotected)** · 7 read-back mismatch.
+  ⚠ It still merges through an OPEN window, so anything with auto-merge armed can land
+  ungated while it runs — check `gh pr list --json autoMergeRequest` first.
   🔴 **Step 4 is not optional, and step 1 is what makes it possible.** A PARTIAL `PUT`
   succeeds and silently drops every key you omitted — `enforce_admins`, force-push and
   deletion settings included — so `PUT` returning 200 is a claim about the REQUEST, never
