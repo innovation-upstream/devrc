@@ -37,10 +37,15 @@ survives adversarial re-derivation, and fix whatever it exposes.
   12,288 B target, and is **STILL OVER the 40,960 B hard cap**. 🔴 **The −28.7% the PR description
   claimed is WRONG and was corrected publicly** — every audit round correctly bought back bytes
   the eviction should not have taken.
-- 🔴 **RE-DERIVE THE SIZE, NEVER QUOTE ONE FROM THIS DOC.** Measured trail:
+- 🔴 **RE-DERIVE THE SIZE, NEVER QUOTE ONE FROM THIS DOC** — including the "5.3x" and "64,837"
+  in the bullet above, which describe the tree as it stood at #1207 and **not** the one you are
+  reading. Measured trail, each figure pinned to a **fixed sha** and none to a moving ref:
   `f71ff648` 80,397 · `21ee51d7` 57,356 · `1127e620` 60,964 · `ef49ac82` 62,298 · `34924645`
-  64,397 · `384e1c37`/`main` **64,837**. A figure quoted from a report that measured an EARLIER
-  commit of the same PR is the trap this arc hit in its own verification step.
+  64,397 · `384e1c37` 64,837 · `66eee1d7` **65,506** (this was `main` when rank 13 branched; #1217
+  added 669 B after #1207). 🔴 **`384e1c37` was labelled "/`main`" here and that label went stale
+  within the day** — a fixed number on a moving ref is the very trap this bullet exists to name.
+  A figure quoted from a report that measured an EARLIER commit of the same PR is the other half
+  of it, and is what this arc hit in its own verification step.
 - ✅ **Ranks 4 and 11 DONE.** Rank 4 needed **no deploy** — the store copy of
   `claude/skills/clawgate/SKILL.md` was already byte-identical to `origin/main` (15086 B), so
   `home-manager switch` was deliberately skipped rather than run as a no-op riding another
@@ -167,12 +172,27 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
   `api.build_server` has **exactly three caller files**, and inside the one file #1211 touched there
   are **two** store fixtures:
 
-  | site | sited on tmpfs? | `running(...)` sites | `tmpfs\|/dev/shm\|store_siting` hits |
+  | site | sited on tmpfs? | `with running(...)` sites | `tmpfs\|/dev/shm\|store_siting` hits |
   |---|---|---|---|
-  | `test_subsystem_store_api.py` `store` (`:393`, calls `_tmpfs_dir()`) | **yes** | 133 | 44 (file total) |
+  | `test_subsystem_store_api.py` `store` (`:393`, calls `_tmpfs_dir()`) | **yes** | 136 | 44 (file total) |
   | `test_subsystem_store_api.py` `scoped_store` (`:9097`, `_build_store(tmp_path / "store", …)`) | **NO** | 110 | — |
+  | same file, **UNFIXTURED** `running(served\|stage\|root\|tmp_path/"absent")` | **NO** | 13 | — |
   | `test_cairn_write.py` | **NO** | — | **0** |
   | `test_cairn_cli.py` | **NO** | — | **0** |
+
+  🔴 **The unit is the CALL SITE, and that third row is the one nobody has counted.** Of **259**
+  real `with running(...)` sites in that file, **123 are disk-backed** — 110 in `scoped_store` and
+  **13 that belong to no fixture at all**, built straight from `tmp_path` (`:1481, :1501, :3938,
+  :3959, :4011, :4087, :4134, :4360, :4377, :9968, :11755, :11852, :12584`). **Three of them —
+  `:11755, :11852, :12584` — drive `post_bullet`/`PUT`, i.e. `_replace_bytes` itself**, the exact
+  in-request fsync this block is about. 🔴 **#1219 does NOT reach them:** it re-sites the two
+  *fixtures*, and these are not fixtures — so "the file is done once #1219 merges" will be wrong in
+  the same way "the file is done because #1211 landed" was. This is the third granularity this arc
+  has been wrong at: file → fixture → call site. Assume there is a fourth.
+  ⚠ **Derive this partition, do not grep for it naively:** `grep -c 'running(store'` reads **133**
+  and misses **3 line-wrapped `running(\n store, …)` sites** (`:8764, :8792, :8832`), and 4 of the
+  272 lines containing `running(` are prose in comments. The 136/110/13 split above comes from a
+  walker that resolves the wrap and excludes comments.
 
   `scripts/testlib/store_siting.py` — the shared siting #1219 introduces — **does not exist at that
   ref**, which is the one-command check that #1219 has not landed yet.
@@ -196,8 +216,8 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
   ⚠ `scripts/ci-repro/README.md` — which this block sends you to, and which remains correct about
   the mechanism, the code sites and the reproducer — carries **no mitigation note at all**
   (grepped `tmpfs|1211|mitigat|shm` at `origin/main`: **zero hits**), so read on arrival there as
-  describing a failure mode still live on **110 of that file's 243 `running()` sites plus both
-  cairn suites** — not on all of it, and not on none.
+  describing a failure mode still live on **123 of that file's 259 `with running(...)` sites, plus
+  both cairn suites** — not on all of it, and not on none.
 
 ### Was the devrc-ci outage fully closed?
 - **Symptom:** 2026-08-29 ~22:23–22:48Z every devrc-ci gate leg reported
@@ -454,7 +474,8 @@ EVICTED 2026-09-01 (terminal). Verdict: #1064 green, MERGED `f71ff648`; the two-
   `~/.claude/analyze-service-index/devrc/skills.md` (2026-09-01 bullet) first; it carries this
   ratio and the four reusable rules.
 
-### ✅ CLOSED (rank 13) — CROSS-PR STALENESS, ALREADY BITING: the CI mechanism this doc documents was MITIGATED 33 minutes BEFORE #1207 merged
+### ✅ CLOSED (rank 13) — CROSS-PR STALENESS, ALREADY BITING: the CI mechanism this doc documents was PARTIALLY MITIGATED 33 minutes BEFORE #1207 merged
+🔴 **Heading corrected 2026-09-01 — it read "was MITIGATED", flat, and headings here are machine-read (`handoff-audit.py` buckets on the H3 alone). It still fires: see the fixture/call-site table in the CI block.**
 - ✅ **CLOSED 2026-09-01 — caveat written; values in the CI block and rank 13, not repeated here.**
   🔴 **The one thing that belongs only here:** this item was filed because a sibling change (#1211)
   falsified the doc's claim — and the *item written to repair that* was itself falsified by a second
@@ -482,10 +503,10 @@ EVICTED 2026-09-01 (terminal). Verdict: #1064 green, MERGED `f71ff648`; the two-
 - **Leading hypothesis:** this is the arc's own recurring shape operating ACROSS PRs rather than
   within one — a claim true at write time, falsified by a sibling change, inside no audit round's
   range. Six rounds could not have caught it: #1211 was not in any range.
-- **Next probe, verbatim:**
-  `gh pr view 1211 --repo innovation-upstream/devrc --json state,mergedAt` then
-  `git -C ~/workspace/devrc show origin/main:scripts/ci-repro/README.md | head -40` — confirm the
-  tmpfs siting, then add a one-line MITIGATED caveat to the doc's CI block naming `1a4350f3`.
+- **Next probe:** none — closed, and 🔴 **do not run the probe this bullet used to carry.** It said
+  *"confirm the tmpfs siting, then add a one-line MITIGATED caveat"*, in the flat singular framing
+  three audit rounds then refuted; following it now re-introduces the error. What was actually
+  done, and what a reader should copy instead, is the fixture/call-site table in the CI block.
   🔴 Do NOT delete the mechanism text: the reproducer and code sites remain the durable content.
 
 ### ⚠ STILL UNATTRIBUTED — the whole-class `TestPushabilityCasesTheFetchVersionGotWRONG` failure
@@ -601,19 +622,25 @@ rather than removed and renumbered. New work is appended at the end.
    is not one of them** (verified 2026-09-01), so its merge leaves this deliverable exactly as
    undone; it also leaves the *second* half of the caveat standing, because `store_siting.py`'s
    probe keeps a disk fallback and nobody has verified it engages on `talos-xr6-r7p`.
-   **(a) = that README names `1a4350f3` AND says which fixtures remain unsited — BOTH, which is why
-   this is two greps and not one alternation:**
+   **(a) = that README names `1a4350f3` AND says what is STILL unsited — and "still unsited" is
+   three separate populations, so it is three greps.** 🔴 An alternation would certify all three by
+   naming one, which is this arc's own recurring bug expressed as a regex:
    ```bash
    DEVRC=~/workspace/devrc
    git -C "$DEVRC" fetch origin main -q      # or a stale clone answers for a ref you do not have
    R=scripts/ci-repro/README.md
-   git -C "$DEVRC" grep -c '1a4350f3'   origin/main -- "$R"   # must be non-zero
-   git -C "$DEVRC" grep -cE 'scoped_store|unsited' origin/main -- "$R"   # AND this must be non-zero
+   git -C "$DEVRC" grep -c fsync        origin/main -- "$R"   # CONTROL first: must be 25
+   git -C "$DEVRC" grep -c '1a4350f3'   origin/main -- "$R"   # (a1) the sha
+   git -C "$DEVRC" grep -c scoped_store origin/main -- "$R"   # (a2) the unsited fixture
+   git -C "$DEVRC" grep -c cairn        origin/main -- "$R"   # (a3) the two cairn suites
    ```
-   Positive control for the pair, so a zero is a reading and not a broken probe:
-   `git -C "$DEVRC" grep -c fsync origin/main -- "$R"` returns 25.
-   forcing: regression — the doc asserts a live failure mode that a merged change has mitigated,
-   and it is read as authoritative at session start
+   The control runs INSIDE the block on purpose: `git grep -c` prints nothing and exits 1 on zero,
+   so a copy-paste that omits the control returns three blanks that are indistinguishable from a
+   broken probe. (a) is met only when a1, a2 and a3 are ALL non-zero **and** the control reads 25.
+   ⚠ The unfixtured call sites in the table above are a fourth population with no keyword of their
+   own — if you are the one writing that README, name them too.
+   forcing: regression — the doc asserted a live failure mode that a merged change PARTIALLY
+   mitigated, and it is read as authoritative at session start
 
 ## Gotchas / decisions / dead-ends
 
