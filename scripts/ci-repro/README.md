@@ -236,3 +236,71 @@ Several of the runs in the window above were already pruned while this PR was op
 Treat that breakdown as a **record**, not as something a later reader can reproduce —
 and note this cuts the other way too: the window is 5× less recoverable than the
 superseded figure implied.
+
+---
+
+## `slow_respond.py` — the RAW-SOCKET half of the same gate failure (devrc#1165)
+
+**What it answers.** `tekton/devrc-pytests` failed on a different test each run with
+
+```
+AssertionError: a SECOND complete response followed the 200 on one connection
+                — a pooling proxy hands it to the next client: b''
+assert 0 == 1
+```
+
+plus a `BrokenPipeError` in the same run. The message describes `> 1`; the failure was
+`== 0`. Nothing sent a second response — the client read an **empty socket**.
+
+**Why this is a second instrument and not a duplicate.** `slowfsync.c` above stalls one
+fsync past `HANG_TIMEOUT` (60.0) and lands on the `fetch(...)`/`http.client` sites,
+which raise `TimeoutError`. The **raw-socket** sites are a separate and far more
+sensitive population: they read with `sock.settimeout(settle)` where `settle` was
+**3.0**, and they *swallowed* the timeout. A stall of just over **3 s** — twenty times
+smaller than the one `slowfsync.c` has to manufacture, and correspondingly far more
+common under the disk contention this file already documents — made the reader return
+an empty buffer and sail on, with no exception raised anywhere.
+
+So this shim delays the **response** rather than the fsync, and by **seconds** rather
+than by a minute. It needs no compiler and no `LD_PRELOAD`.
+
+**Usage.**
+
+```bash
+# control — shim inert, same command line
+PYTHONPATH=scripts/ci-repro python3 -m pytest scripts/tests/test_subsystem_store_api.py \
+  -p slow_respond -k "TestTheBackstopNeverSendsASecondResponse or TestNoRequestSmuggling"
+
+# reproduction — 5 s stall against a 3.0 s drain
+SLOW_RESPOND_S=5 PYTHONPATH=scripts/ci-repro python3 -m pytest \
+  scripts/tests/test_subsystem_store_api.py -p slow_respond --slow-respond-selftest \
+  -k "TestTheBackstopNeverSendsASecondResponse or TestNoRequestSmuggling"
+```
+
+`--slow-respond-selftest` fails loudly unless the patch actually attached and the delay
+is non-zero — a shim that silently failed to attach reports a clean green that means
+nothing. Both of its arms have been watched to fire.
+
+**Measured, at the commit before the fix:**
+
+| run | result |
+|---|---|
+| control (`SLOW_RESPOND_S` unset) | `8 passed`, rc 0 |
+| reproduction (`SLOW_RESPOND_S=5`) | `3 failed, 5 passed`, rc 1 |
+
+The three failures reproduced the CI text verbatim, including
+`the PUT sent a second response too: b''` / `assert 0 == 1` and the `BrokenPipeError`
+— whose mechanism is now visible: the client's 3.0 s drain expired and closed the
+socket, so the server's own `wfile.write(body)` hit a broken pipe.
+
+**After the fix** (`_raw_exchange` waits for a framed response, then lingers to catch an
+extra one) the same armed command gives `13 passed`.
+
+⚠ **Two raw readers in that file were deliberately NOT converted** —
+`test_an_absolute_form_target_that_breaks_urlsplit_is_a_401_not_a_CRASH` and
+`test_an_UNKNOWN_method_is_the_same_uniform_401_not_a_501_page` still open-code a
+`settimeout(5)` drain. They share the race but not the mis-description: their
+assertions (`assert data, "the request got no response at all"`) already say what
+actually happened. They are also far less exposed, since both are answered by the
+pre-auth 401 path before any disk work. Converting them means restructuring two
+unrelated tests, so it was left out of the fix rather than done quietly.
