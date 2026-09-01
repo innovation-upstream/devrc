@@ -99,11 +99,19 @@
 
 set -euo pipefail
 
-CFG=/etc/nixos/configuration.nix
+# TMP_CHURN_CFG points the edit at a fixture instead of the real config. It exists
+# so the insert/idempotence logic can be exercised at all: without it the only way
+# to test this script is to run it against /etc/nixos as root, which is precisely
+# the thing you want tested BEFORE you do. Test mode needs no root because it
+# touches no system file — and it says so loudly, so a real run can never be
+# mistaken for one.
+CFG="${TMP_CHURN_CFG:-/etc/nixos/configuration.nix}"
 BAK="${CFG}.bak-tmp-churn-$(date +%Y%m%d-%H%M%S)"
 MARKER='/tmp churn retention'
 
-if [[ $EUID -ne 0 ]]; then
+if [[ -n "${TMP_CHURN_CFG:-}" ]]; then
+  echo "🔴 TEST MODE — editing fixture ${CFG}, NOT /etc/nixos. No system change."
+elif [[ $EUID -ne 0 ]]; then
   echo "This script edits ${CFG} and must run as root:" >&2
   echo "    sudo bash $0" >&2
   exit 1
@@ -131,8 +139,57 @@ trap restore_on_err ERR
 # /etc/nixos is not readable from here, so its state is UNMEASURED, not clean.
 # The ledger below is the single source of truth; the script inserts exactly the
 # rules that are absent and then re-reads the file to prove every one landed.
+# ── THE RULE LEDGER — ONE definition, read by BOTH the inserter and the verifier.
+# 🔴 These used to be two hardcoded lists (a Python one that inserted, a bash one
+# that verified). Nothing tied them together, so a rule added to the inserter and
+# not to the verifier would be written and then "verified present" by a loop that
+# never looked for it — the verification would report success over an unchecked
+# rule. `claude/RULES.md` -> "One rule, one place": a predicate duplicated across
+# call sites regenerates the same bug at every site.
+TMPFILES_RULES=(
+  'e /tmp/nix-shell-* - - - m:7d'
+  'e /tmp/nix-shell.* - - - m:7d'
+  'e /tmp/nix-develop-* - - - m:7d'
+  'e /tmp/nix-[0-9]* - - - m:7d'
+  'e /tmp/go-build* - - - m:7d'
+  'e /tmp/chromedp-runner* - - - m:7d'
+  'e /tmp/homelab-talos-prs-* - - - m:7d'
+  # Added 2026-09-01. devrc's own scripts/run3 capture dirs: its header states they
+  # are deliberately NOT removed ("reading the two files afterwards is the point"),
+  # so they need retention, not a code fix. 1266 dirs, 438 with mtime >7d; none
+  # carries a .git. Dry-run: 1066 entries would be removed.
+  'e /tmp/run3.* - - - m:7d'
+)
+# 🔴 `e` ACTS ON A DIRECTORY'S CONTENTS AND SILENTLY IGNORES A PLAIN FILE. Every
+# glob in this ledger must therefore name DIRECTORIES. Measured 2026-09-01 on a
+# clean fixture (a 60-day-old file and a 60-day-old dir, rule `e <glob> - - - m:7d`):
+# the file glob removed 0 with no error or warning; the directory removed its
+# content. So these three, added and then withdrawn the same day, are DEAD RULES —
+# they match thousands of real entries and reap none of them:
+#     gh-status-response.*  18925 entries / 10065 mtime>7d  (0-byte .json)   -> 0
+#     htoken.*               3202 /  2842  (13-byte "letsgethookie" marker)  -> 0
+#     health.*               2949 /  2613  (2-byte json, "[]")               -> 0
+# Do not re-add them in `e` form. Plain files at the top level of /tmp are reached
+# only by the /tmp rule ITSELF, which is the stock atime-based `q /tmp ... 10d`
+# this whole file exists to work around — and changing that one to mtime-only is
+# the blanket rule the 2026-08-15 revision refused, because it would delete live
+# git worktrees parked in /tmp. So this is a genuine gap, not an oversight.
+#
+# 🔴 The dry-run that catches a dead rule prints "Would remove" on STDERR, not
+# stdout. `… 2>/dev/null | grep -c 'Would remove'` returns 0 for a rule that works
+# perfectly — measured here as 0 on stdout against 1066 on stderr for the same
+# command. Always read both streams before believing a zero.
+# 🔴 DELIBERATELY NOT ADDED, and this is a measurement not a hunch. Sampled
+# 2026-09-01: cgparent-* 19044 dirs averaging 3 inodes (~57K), fx-excerpt-*
+# 15002 averaging 1 (~15K), cbf-* 7260 averaging 1, tmp.* 4088 averaging 1.
+# Together ~80K inodes against a filesystem holding 96-97M — reaping them buys
+# nothing measurable, and none of their producers has been identified. `tmp.*`
+# is bare mktemp's default and would need its own audit. The 2026-08-15 revision
+# declined these for lack of verification; the inode measurement now says the
+# trade was never worth making.
+
 echo "[1/1] reconciling tmpfiles rules in systemd.tmpfiles.rules"
-python3 - "$CFG" <<'PY'
+python3 - "$CFG" "${TMPFILES_RULES[@]}" <<'PY'
 import sys
 
 path = sys.argv[1]
@@ -147,15 +204,11 @@ HEADER = '''    # /tmp churn retention (2026-08-15). mtime-ONLY ageing (`m:`), b
 
 # 🔴 A hyphen is a LITERAL. `nix-shell-*` and `nix-shell.*` are two globs, and
 # nix-shell writes both spellings — see the header for the 3340-vs-1017 count.
-RULES = [
-    '    "e /tmp/nix-shell-* - - - m:7d"',
-    '    "e /tmp/nix-shell.* - - - m:7d"',
-    '    "e /tmp/nix-develop-* - - - m:7d"',
-    '    "e /tmp/nix-[0-9]* - - - m:7d"',
-    '    "e /tmp/go-build* - - - m:7d"',
-    '    "e /tmp/chromedp-runner* - - - m:7d"',
-    '    "e /tmp/homelab-talos-prs-* - - - m:7d"',
-]
+# The ledger arrives on argv from TMPFILES_RULES so the inserter and the verifier
+# below cannot disagree about what the rule set is.
+RULES = ['    "%s"' % r for r in sys.argv[2:]]
+if not RULES:
+    raise SystemExit("ERROR: no rules passed on argv — TMPFILES_RULES is empty")
 
 missing = [r for r in RULES if r.strip() not in src]
 if not missing:
@@ -181,17 +234,18 @@ PY
 
 # Verify by RE-READING the file, every rule individually — the insert reporting
 # success is a claim about the writer, not about what is now on disk.
-for _rule in \
-  'e /tmp/nix-shell-* - - - m:7d' \
-  'e /tmp/nix-shell.* - - - m:7d' \
-  'e /tmp/nix-develop-* - - - m:7d' \
-  'e /tmp/nix-[0-9]* - - - m:7d' \
-  'e /tmp/go-build* - - - m:7d' \
-  'e /tmp/chromedp-runner* - - - m:7d' \
-  'e /tmp/homelab-talos-prs-* - - - m:7d'
-do
+_verified=0
+for _rule in "${TMPFILES_RULES[@]}"; do
   grep -qF "$_rule" "$CFG" || { echo "ERROR: rule missing after edit: $_rule" >&2; false; }
+  _verified=$((_verified + 1))
 done
+# A loop over an empty array exits 0 having checked nothing — the "verified" that
+# means least. Assert it actually iterated, and that it saw the whole ledger.
+if [[ "$_verified" -ne "${#TMPFILES_RULES[@]}" || "$_verified" -eq 0 ]]; then
+  echo "ERROR: verified $_verified of ${#TMPFILES_RULES[@]} rules — not a pass" >&2
+  false
+fi
+echo "      verified $_verified of ${#TMPFILES_RULES[@]} rules individually"
 grep -qF "$MARKER" "$CFG" || { echo "ERROR: comment header missing after edit" >&2; false; }
 echo "      all rules verified present on disk"
 
