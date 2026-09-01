@@ -221,6 +221,21 @@ assert resolver.classify_path is api.classify_path, (
     "'what IS this path' is the defect the move was made to prevent"
 )
 
+# 🔴 THE SEAM THAT MAKES A POD-SHAPED `host:` LINE REACHABLE IN-PROCESS.
+# `subsystem_recall` does `from subsystem_touch import store_host_line`, and
+# `store_host_line` calls `store_host()` — a lookup in THIS module's globals, by
+# design (`subsystem_touch.store_host`'s docstring: "one injection point makes
+# the reader and the writer agree"). So patching it here moves what the
+# IN-PROCESS server renders while the local CLI, which `run_verify` starts as a
+# SUBPROCESS, keeps this machine's real identity. That asymmetry is precisely
+# the workbench-vs-pod shape, and nothing else in this harness produces it.
+touch = sys.modules["subsystem_touch"]
+assert hasattr(touch, "store_host"), (
+    "subsystem_touch no longer exposes `store_host` — the byte-identity "
+    "verifier's `host:` canonicalisation is tested through this seam, and a "
+    "rename here would silently turn those tests into same-host self-checks"
+)
+
 
 # =============================================================================
 # Synthetic fixtures — realistic SHAPES, invented names, pairwise-distinct text.
@@ -240,6 +255,14 @@ OTHER_NUANCE = "- 2026-01-03: the sidecar drops its lease during a rollout."
 
 # A token that clears the 43-character floor pinned literally below.
 GOOD_TOKEN = "a" * 20 + "B" * 20 + "c" * 8  # 48 chars
+
+# What `store_host()` returns INSIDE THE POD, in shape: the pod name as the
+# label, and `machine-id-unreadable` because a container image carries no
+# `/etc/machine-id` this reader will accept (`host_identity.MACHINE_ID_UNREADABLE`).
+# Synthetic — an invented replicaset/pod suffix, like every other fixture here.
+# 🔴 IT MUST SHARE NO PREFIX WITH THIS MACHINE'S OWN IDENTITY, or a
+# canonicalisation that matched only a prefix would pass by coincidence.
+POD_HOST = "subsystem-store-api-6f4d8c9b7a-qz2wl-machine-id-unreadable"
 
 
 def _entry(
@@ -3693,6 +3716,52 @@ def run_verify(*args: str) -> subprocess.CompletedProcess:
     )
 
 
+# 🔴 PINNED LITERALLY, PASS LINES ONLY. The field names are spelled here by hand
+# rather than imported or derived, per this file's header: a rename in the
+# script must break these tests, not be absorbed by them. It is anchored on
+# `PASS` because the accounting identity is a claim about a run the comparator
+# called byte-identical; a FAIL line prints a different field set on purpose.
+_EVIDENCE_RE = re.compile(
+    r"^PASS scope=\S+ bytes=\d+ "
+    r"raw-diff-lines=(?P<raw>\d+) "
+    r"store-root-lines=(?P<store_root>\d+) "
+    r"host-lines=(?P<host>\d+) "
+    r"snapshot-line=(?P<snapshot>\d+) "
+    r"snapshot-block-lines=(?P<block>\d+) "
+    r"accounted-for=(?P<accounted>\d+) ",
+    re.MULTILINE,
+)
+
+
+def _evidence_rows(stdout: str) -> list[dict[str, int]]:
+    """Every PASS line's accounting, as ints."""
+    return [
+        {k: int(v) for k, v in m.groupdict().items()}
+        for m in _EVIDENCE_RE.finditer(stdout)
+    ]
+
+
+def _wider_separator(module):
+    """A `snapshot_freshness` whose prose ends in a newline.
+
+    🔴 IT MODELS A DIFFERENT IMAGE, NOT A BROKEN ONE. `_serve_report` builds the
+    body as `prose + "\\n\\n" + text`, so a prose carrying its own trailing
+    newline yields banner + TWO blank separators — a three-line transport
+    annotation instead of this tree's two. The verifier is pointed at a POD, and
+    the pod's `server.py` is whatever was last deployed, not this checkout: a
+    canonicalisation that hardcodes the block's length is a bet on those two
+    being the same version. That bet was lost, and the residue was a single
+    unexplained blank line that `cmp` failed on for every scope.
+    """
+    real = module.snapshot_freshness
+
+    def _wrapped(store_root):
+        header, prose = real(store_root)
+        return header, prose + "\n"
+
+    return _wrapped
+
+
 @pytest.fixture
 def token_file(tmp_path: Path) -> Path:
     path = tmp_path / "token"
@@ -3780,15 +3849,25 @@ class TestByteIdentityVerifier:
         comment is a claim too"; a name is louder than a comment.
 
         The replacement is STRONGER than a bumped constant. It asserts the raw
-        difference is FULLY DECOMPOSED by its two named causes:
+        difference is FULLY DECOMPOSED by its named causes:
 
-            raw == store_root_lines + 2 * snapshot_lines
+            raw == store_root_lines + host_lines + snapshot_block_lines
 
-        (the block contributes its prose line AND its blank separator, and both
-        appear one-sided in the diff). An unexplained differing line therefore
-        still fails — which a hardcoded `raw-diff-lines=4` would not, since it
-        would go on passing if a store-root line vanished and some other
-        difference appeared in its place.
+        An unexplained differing line therefore still fails — which a hardcoded
+        `raw-diff-lines=4` would not, since it would go on passing if a
+        store-root line vanished and some other difference appeared in its
+        place.
+
+        🔴 `host_lines` JOINED THE SUM WITH THE `host:` CANONICALISATION, in the
+        same commit, and that ordering is the point: a rule that erases a
+        difference without a matching count widens the blind spot rather than
+        the gate. Here both sides run on this machine, so `host_lines` is 0 and
+        the identity is unchanged from the two-cause version — the case where it
+        is 2 is `test_a_POD_SHAPED_remote_PASSES_when_only_the_THREE_permitted_
+        lines_differ` below, which is where that term is actually exercised.
+        `snapshot_block_lines` replaces `2 * snapshot_lines`: the block's LENGTH
+        is now measured rather than assumed, so a served image whose separator
+        arrangement is not this tree's is still fully accounted for.
         """
         served = tmp_path / "served-elsewhere"
         subprocess.run(
@@ -3800,20 +3879,127 @@ class TestByteIdentityVerifier:
             )
         assert r.returncode == 0, r.stdout + r.stderr
 
-        rows = re.findall(
-            r"raw-diff-lines=(\d+) store-root-lines=(\d+) snapshot-line=(\d+)",
-            r.stdout,
-        )
-        assert rows, f"the verifier printed no evidence triples:\n{r.stdout}"
-        for raw, store_root, snapshot in rows:
-            assert int(raw) == int(store_root) + 2 * int(snapshot), (
-                f"unaccounted differing lines: raw={raw} "
-                f"store-root={store_root} snapshot={snapshot}"
+        rows = _evidence_rows(r.stdout)
+        assert rows, f"the verifier printed no evidence rows:\n{r.stdout}"
+        for row in rows:
+            assert row["raw"] == row["store_root"] + row["host"] + row["block"], (
+                f"unaccounted differing lines: {row}"
             )
-        # …and the two causes are each genuinely PRESENT, or the identity above
-        # is satisfiable by a run that compared nothing (0 == 0 + 2*0).
-        assert any(int(s) == 1 for _r, _sr, s in rows), "no snapshot line observed"
-        assert any(int(sr) == 2 for _r, sr, _s in rows), "no store-root line observed"
+            # The script's own arithmetic, read back rather than re-derived —
+            # a printed `accounted-for` that disagreed with its own parts would
+            # be a reader-facing lie even while the identity above held.
+            assert row["accounted"] == row["store_root"] + row["host"] + row["block"], (
+                f"the printed accounted-for does not equal its own parts: {row}"
+            )
+        # …and the causes exercised here are genuinely PRESENT, or the identity
+        # above is satisfiable by a run that compared nothing (0 == 0 + 0 + 0).
+        assert any(row["snapshot"] == 1 for row in rows), "no snapshot line observed"
+        assert any(row["block"] == 2 for row in rows), (
+            "no snapshot BLOCK observed — this tree's server emits the banner "
+            "plus exactly one blank separator, so a 2 is the expected length"
+        )
+        assert any(row["store_root"] == 2 for row in rows), "no store-root line observed"
+        # Both sides are this machine, so the host line must be IDENTICAL here.
+        # A non-zero would mean the harness accidentally diverged the two hosts,
+        # which would make the pod-shaped test below prove nothing new.
+        assert all(row["host"] == 0 for row in rows), (
+            f"the local self-check saw a host-line difference: {rows}"
+        )
+
+    def test_a_POD_SHAPED_remote_PASSES_when_only_the_THREE_permitted_lines_differ(
+        self, store: Path, tmp_path: Path, token_file: Path, monkeypatch
+    ):
+        """🔴 THE REGRESSION. This is the run that could not pass at all.
+
+        Every earlier test in this class compares two renders produced ON THE
+        SAME MACHINE, so their `host:` lines are byte-identical and the verifier
+        never had to canonicalise one. Against the actual pod they are different
+        BY CONSTRUCTION — `store_host_line()` names the machine whose disk was
+        read, and that is the entire reason it exists — so the comparator was
+        structurally unable to return anything but FAIL, on every scope, for a
+        store whose content was identical. `claude/RULES.md`: a permanently-red
+        gate is worse than no gate.
+
+        Three differences are set up here and NOTHING else:
+
+          * `store:`  — the served copy lives at a different root;
+          * `host:`   — the server renders a pod identity, the CLI subprocess
+                        this machine's;
+          * the SNAPSHOT block — and deliberately NOT in this tree's shape. The
+            served prose carries an extra separator, so the block is THREE lines
+            rather than two. The verifier does not compare against this tree's
+            `server.py`; it compares against whatever image the pod runs, and
+            the old anchored two-line delete left a residual blank line that no
+            rule claimed. Measuring the block is what makes any arrangement
+            work — and what makes it countable in the accounting.
+
+        The negative control is the next test, not a comment: the same three
+        permitted differences plus ONE mutated character must still FAIL.
+        """
+        served = tmp_path / "served-elsewhere"
+        subprocess.run(
+            ["cp", "-a", str(store), str(served)], check=True, capture_output=True
+        )
+        monkeypatch.setattr(touch, "store_host", lambda: POD_HOST)
+        monkeypatch.setattr(api, "snapshot_freshness", _wider_separator(api))
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(store), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "verify: scopes=4 pass=4 fail=0" in r.stdout
+
+        rows = _evidence_rows(r.stdout)
+        assert len(rows) == 4, f"expected one evidence row per scope:\n{r.stdout}"
+        for row in rows:
+            # 🔴 EACH PERMITTED DIFFERENCE PRESENT AND COUNTED. Asserting only
+            # the PASS would be satisfied by a canonicalisation that flattened
+            # the whole stream.
+            assert row["store_root"] == 2, f"no store-root difference: {row}"
+            assert row["host"] == 2, f"no host-line difference: {row}"
+            assert row["block"] == 3, (
+                f"the served banner + TWO blank separators were not measured "
+                f"as a 3-line block: {row}"
+            )
+            assert row["raw"] == row["store_root"] + row["host"] + row["block"], (
+                f"unaccounted differing lines: {row}"
+            )
+            assert row["accounted"] == row["raw"], (
+                f"the printed accounted-for does not cover the raw diff: {row}"
+            )
+
+    def test_a_POD_SHAPED_remote_STILL_FAILS_on_a_real_content_difference(
+        self, store: Path, tmp_path: Path, token_file: Path, monkeypatch
+    ):
+        """🔴 The control for the test above. Same three permitted differences,
+        plus a single changed character inside one entry.
+
+        Without this, "the pod-shaped run passes" is equally true of a verifier
+        that stopped comparing anything — which is exactly the failure mode a
+        wider canonicalisation introduces, and the reason the new rules are
+        counted rather than merely applied.
+        """
+        served = tmp_path / "served-elsewhere"
+        subprocess.run(
+            ["cp", "-a", str(store), str(served)], check=True, capture_output=True
+        )
+        path = served / SCOPE / "thing-alpha.md"
+        path.write_text(path.read_text().replace("40s", "41s"))
+
+        monkeypatch.setattr(touch, "store_host", lambda: POD_HOST)
+        monkeypatch.setattr(api, "snapshot_freshness", _wider_separator(api))
+
+        with running(served) as (base, _):
+            r = run_verify(
+                "--store", str(store), "--url", base, "--token-file", str(token_file)
+            )
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert f"FAIL scope={SCOPE}" in r.stdout
+        # Attributed, not a blanket red: the other scopes differ by the three
+        # permitted lines ONLY and still pass.
+        assert f"PASS scope={OTHER_SCOPE}" in r.stdout
+        assert "pass=3 fail=1" in r.stdout
 
     def test_an_UNREACHABLE_pod_FAILS_rather_than_comparing_nothing(
         self, store: Path, token_file: Path
