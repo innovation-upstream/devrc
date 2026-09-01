@@ -348,21 +348,29 @@ made this script permanently red:
 🔴 **`host:` was added late and nothing stripped it**, so every comparison
 between a workbench and a pod failed by construction — `verify: scopes=16 pass=0
 fail=16` on a store whose content was identical. `claude/RULES.md`: a
-permanently-red gate is worse than no gate.
+permanently-red gate is worse than no gate. **That rule alone closes it**:
+measured on scope `kubeclaw`, workbench versus the live pod, using the script's
+own expressions — `store:` + banner canonicalised gives **2** differing lines,
+adding `host:` gives **0**.
 
-🔴 **The snapshot block's LENGTH is measured, not assumed.** It used to be
-deleted by an anchored two-line rule, which is the shape *this tree's*
-`server.py` emits — but this script compares against whatever image the pod is
-running, and any other separator arrangement left a residual blank line that no
-rule claimed. The block is now the run of lines at the head of the remote stream
+⚠ **The snapshot block's LENGTH is measured rather than assumed — hardening for
+a version skew that has NOT been observed.** The previous anchored two-line rule
+was *not* broken: it deletes the banner and its blank separator, which is exactly
+what this tree's `server.py` emits. Two structural reasons to measure anyway,
+neither needing a failure to have happened: the deployed image's arrangement is
+not this checkout's to assume, and a fixed-size delete removes lines that never
+enter the accounting below, so **deleted** could not be reconciled against
+**counted**. The block is now the run of lines at the head of the remote stream
 that are the banner or are blank; it is stripped only if that run **contains**
 the banner, and a server that emits no banner (pre-0.3.0) has nothing removed.
 
 Beside the verdict the script prints how many lines differ **with no
 canonicalisation at all**, decomposed into the three causes and summed as
-`accounted-for` — `raw-diff-lines=7 store-root-lines=2 host-lines=2
-snapshot-block-lines=3 accounted-for=7` is a pod-vs-workbench run against an
-image whose block is three lines. Those numbers are EVIDENCE, not a second gate:
+`accounted-for`. A real pod-vs-workbench run reads `store-root-lines=2
+host-lines=2 snapshot-block-lines=2 accounted-for=6`; the three-line block in
+`test_a_POD_SHAPED_remote_PASSES_when_only_the_THREE_permitted_lines_differ` is
+a SYNTHESISED skew, not a shape any deployed image has been seen to emit.
+Those numbers are EVIDENCE, not a second gate:
 they can only disagree if a `sed` erased a line that was none of the three,
 which the renderer cannot produce (no entry body renders at two-space
 indentation — measured across all four modes). Gating on them would be an

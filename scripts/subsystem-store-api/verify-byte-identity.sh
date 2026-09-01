@@ -189,15 +189,29 @@ for scope in "${SCOPES[@]}"; do
   # make this script FAIL on every scope for a difference that is not about the
   # render at all — the same excuse the two lines above already earn.
   #
-  # 🔴 THE BLOCK IS MEASURED, NOT ASSUMED TO BE TWO LINES. The old rule was an
-  # anchored `,+1d` — the banner plus exactly one following line — which is the
-  # shape THIS TREE's `server.py` emits. This script does not compare against
-  # this tree's server; it compares against whatever image the pod is running,
-  # and a separator arrangement of any other size left a residual blank line
-  # that no rule claimed and `cmp` duly failed on. So the block is defined as
-  # the run of lines at the HEAD of the remote stream that are the banner or are
-  # blank, its LENGTH is measured, and exactly that many lines are dropped —
-  # which makes it countable in the accounting above, the thing `,+1d` was not.
+  # 🔴 THE BLOCK IS MEASURED, NOT ASSUMED TO BE TWO LINES — AND THIS IS
+  # HARDENING FOR A SKEW THAT HAS NOT BEEN OBSERVED, NOT A FIX FOR A DEFECT.
+  # ⚠ THE PREVIOUS RULE WAS NOT BROKEN. An anchored `,+1d` deletes the banner
+  # AND its blank separator, which is exactly the arrangement THIS TREE's
+  # `server.py` emits, and `test_every_permitted_difference_is_ACCOUNTED_FOR_
+  # not_merely_small` passes on it — before this change and after. Do not read
+  # this comment as evidence against it and do not go looking for the incident:
+  # there wasn't one. The retraction is recorded in this branch's history.
+  #
+  # Two structural reasons to measure the length anyway, neither of which needs
+  # a failure to have happened:
+  #   * THE LENGTH IS NOT THIS CHECKOUT'S TO ASSUME. This script does not
+  #     compare against this tree's `server.py`; it compares against whatever
+  #     image is DEPLOYED, and a fixed-size delete is a bet that those two are
+  #     the same version. Nothing here can check that bet.
+  #   * DELETED MUST EQUAL COUNTED. `,+1d` removes lines that never enter the
+  #     accounting above, so its removals could not be reconciled against `raw`;
+  #     a measured length can. That is the whole point of the sum, and a rule
+  #     exempt from it is the blind spot the sum exists to close.
+  #
+  # So the block is defined as the run of lines at the HEAD of the remote stream
+  # that are the banner or are blank, its LENGTH is measured, and exactly that
+  # many lines are dropped.
   #
   # Two narrowings keep this from reaching into a report body:
   #   * it is a HEAD run only — a banner appearing anywhere else is left alone

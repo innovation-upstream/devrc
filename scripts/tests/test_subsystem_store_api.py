@@ -3744,14 +3744,17 @@ def _evidence_rows(stdout: str) -> list[dict[str, int]]:
 def _wider_separator(module):
     """A `snapshot_freshness` whose prose ends in a newline.
 
-    🔴 IT MODELS A DIFFERENT IMAGE, NOT A BROKEN ONE. `_serve_report` builds the
-    body as `prose + "\\n\\n" + text`, so a prose carrying its own trailing
-    newline yields banner + TWO blank separators — a three-line transport
-    annotation instead of this tree's two. The verifier is pointed at a POD, and
-    the pod's `server.py` is whatever was last deployed, not this checkout: a
-    canonicalisation that hardcodes the block's length is a bet on those two
-    being the same version. That bet was lost, and the residue was a single
-    unexplained blank line that `cmp` failed on for every scope.
+    🔴 IT MODELS A DIFFERENT IMAGE, NOT A BROKEN ONE, AND THE SKEW IS
+    SYNTHETIC. `_serve_report` builds the body as `prose + "\\n\\n" + text`, so
+    a prose carrying its own trailing newline yields banner + TWO blank
+    separators — a three-line transport annotation instead of this tree's two.
+
+    ⚠ NO DEPLOYED IMAGE HAS BEEN SEEN TO EMIT THAT. This fixture exists because
+    the verifier is pointed at a POD, and the pod's `server.py` is whatever was
+    last deployed rather than this checkout: hardcoding the block's length is a
+    bet on those two being the same version, and nothing in the script can check
+    that bet. It is the unobserved case made reachable, not a reproduction of
+    one that happened.
     """
     real = module.snapshot_freshness
 
@@ -3927,11 +3930,17 @@ class TestByteIdentityVerifier:
                         this machine's;
           * the SNAPSHOT block — and deliberately NOT in this tree's shape. The
             served prose carries an extra separator, so the block is THREE lines
-            rather than two. The verifier does not compare against this tree's
-            `server.py`; it compares against whatever image the pod runs, and
-            the old anchored two-line delete left a residual blank line that no
-            rule claimed. Measuring the block is what makes any arrangement
-            work — and what makes it countable in the accounting.
+            rather than two.
+
+        ⚠ THAT THIRD DIFFERENCE IS A SYNTHESISED SKEW, AND ONLY THE FIRST TWO
+        ARE PART OF THE REGRESSION. No deployed image has been seen to emit a
+        three-line block, and the old anchored two-line delete was correct for
+        the arrangement this tree emits — `test_every_permitted_difference_is_
+        ACCOUNTED_FOR_not_merely_small` passes on it before and after. The skew
+        is here because the verifier compares against whatever image is
+        DEPLOYED, not this checkout, so a hardcoded length is an unverifiable
+        bet; measuring it also makes the deletion countable in the accounting,
+        which a fixed-size delete never was.
 
         The negative control is the next test, not a comment: the same three
         permitted differences plus ONE mutated character must still FAIL.
