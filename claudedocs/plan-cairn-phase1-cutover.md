@@ -570,13 +570,28 @@ that survive a diff review.
 ⚠ **Bounding it honestly, in both directions.** Every commit on the branch was scanned for
 the strings the sweep can write: exactly one was contaminated, and it is reverted; HEAD's
 blob is byte-identical to the verified backup. And the contaminated commit was never going
-to become `main`'s state under any merge method — devrc's recent practice is **squash**
-(all twelve most recent first-parent commits on `main` carry a `(#N)` squash suffix), which
-discards intermediates entirely; merge commits are *permitted* and five exist in history,
-but even under one the merge's TREE is the branch head's content. So the blast radius is
-this branch's history, not the mainline. That bound does not make the incident less worth
-recording — the same race would have shipped the disabled guard had it landed on the final
-commit instead of an intermediate one.
+to become `main`'s state under any merge method. devrc's recent practice is **squash** —
+the twelve most recent first-parent commits on `main` all carry a `(#N)` squash suffix — and
+a squash discards intermediates entirely. But merge commits are permitted and **common in
+this repo's history: 49 on first-parent at the time of writing**, of which 30 are GitHub PR
+merges and 19 are *local* merges (`Merge branch 'main' of …`, `Merge remote-tracking branch
+…`) — a different animal, and worth not lumping together. Under any of them the merge's
+TREE is still the branch head's content. So the blast radius is this branch's history, not
+the mainline.
+
+🔴 **AND THE COUNTER-BOUND, so the paragraph above cannot be read as "we were fine": the
+same race would have shipped the disabled guard had it landed on the FINAL commit instead of
+an intermediate one. Only the ordering prevented that, not the mechanism.** We were fine by
+luck.
+
+⚠ **That merge count was WRONG in this document's first draft, and the way it was wrong is
+the same class of defect as the incident it describes.** It read "five exist in history",
+taken from `git log --merges --oneline origin/main -5` — a command whose `-5` *is the
+number that came back*. The length of a list truncated by your own flag is not a population
+count, and it reads as measured precisely because it is specific. The same shape as
+`gh pr view --json files` silently capping at 100, and of a `grep | head` whose zero means
+"the pattern was not in the first N". **Ask what bounded the output before quoting its
+size.**
 
 **The operational rule:** never run a mutation sweep concurrently with anything that stages,
 builds or tests. It contends with all three and only one of them fails loudly.
