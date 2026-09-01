@@ -230,13 +230,28 @@ The lock is inert exactly where contention is highest.
 ⚠ **Do not "fix" this by hand-writing a slug** (`claim-work tmux-webapp-8c …`).
 The slug's whole job is that both sessions derive the *same* string from the same
 doc and rank; a hand-typed one is a lock only against someone who typed it
-identically. Until the derivation is fixed, bundle the lettered items under one
-claim and say so in the subject.
+identically.
 
-**Closing condition:** `--slug-for <doc> 8c` returns a slug distinct from
-`--slug-for <doc> 8d` **and** from `--slug-for <doc> 8`, pinned by a test. The
-rank still must not swallow a following flag, so the widened pattern has to keep
-refusing anything beginning with `-`.
+### ✅ FIXED 2026-09-01 — the closing condition is met and pinned
+
+`--slug-for <doc> 8c` now returns `<doc>-8c`, distinct from `8d` and from `8`,
+and a following flag is still not swallowed. Measured before the fix on the real
+handoff doc: `8c` and `8d` **both** printed the bare `tmux-webapp`.
+
+Two things beyond the literal condition, because widening the pattern alone
+would have fixed the instance and left the class:
+
+- **An unparseable rank is now a USAGE ERROR (rc 2), not a silent drop.** The
+  hazard was never the spelling `8c` — it was a rank the caller typed and the
+  script ignored at exit 0. `8-c`, `8.1` and `part2` would each still have
+  derived the bare doc slug under a merely-wider regex.
+- **The rank is case-folded**, for the reason the base already is: `8C` and `8c`
+  are one item, and `validate_slug` is lowercase-only, so an unfolded `8C` would
+  not merely split the namespace — it would be rc 2 at claim time.
+
+Pinned by `scripts/tests/test_claim_work.py`; seven of the eight cases were
+watched RED on the pre-change `origin/main`, and the eighth is labelled in place
+as an invariant guard rather than counted as regression coverage.
 
 ## Producing side
 
