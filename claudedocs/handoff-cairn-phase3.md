@@ -841,6 +841,36 @@ text of a status that outlives it — and treat "not found" as NOT A VERDICT, ex
   removes the cache PVC entirely. It matters here because that same single-node pin is what
   starved PR #1129's first gate run to zero steps executed.
 
+- **These doc updates are carried by devrc PR #1199** (branch `docs/handoff-cairn-phase1-scope`,
+  commits `8c23c255` this doc, `deb42d77` `handoff-cairn-task-linkage.md`). Written from a
+  worktree on a topic branch — `handoff_doc.py` runs git inside Python, so no PreToolUse hook
+  sees its commit, including the never-commit-to-`main` guard; `git branch --show-current` was
+  checked before each. The PR is docs-only and was **not** audited: the substantive risk in it
+  is whether the recorded measurements are right, which an audit of the diff does not test.
+- ⚠ **A CONFIRMING INSTANCE of a floor the `/handoff` skill already states — not a new lesson,
+  recorded because it is the first time it was measured here.** `handoff_doc.py` printed **no**
+  `DROPS N line(s) that look DURABLE` warning while the REPLACE of `## State now` would have
+  deleted the criterion-10 end-to-end verification record — including the Loki **positive
+  control** (6 historical banners, proving the grep CAN match), which is the part that makes
+  that block evidence rather than an assertion. Caught only by reading the diff. The skill's
+  rule — *"a silent run is NOT evidence that nothing durable was dropped"* — is load-bearing,
+  and `State now` is where verification records go to die because the section reads as status.
+- ⚠ **Both subsystem-index windows returned empty for the session that wrote this, and that was
+  HONEST rather than a failure.** `--session` saw 0 paths (100% of what it named was outside the
+  session cwd — scratchpad and worktree); `--pr 1199` saw 2 files, both the excluded handoff
+  docs. The session's whole *file* footprint was the handoffs; its actual work was measuring a
+  pod, a cluster and two hosts' stores, none of which has a path in this repo. **A dead end in
+  both windows is a fact about the windows, not a licence to skip the store** — the write went
+  to `devrc/cairn` on operator knowledge of the right home, not on a resolver's nomination.
+- **Recorded to the store this session** (`~/.claude/analyze-service-index/devrc/cairn.md`,
+  validated in the same turn — `OK 1 of 1 parse`, entry shape clean, 0 out-of-reach markers):
+  the pod-freezes-and-is-workbench-only finding with the writer's zero-HTTP-code half; the
+  scope-count-vs-entry-count trap plus aliases as a second collision channel (marked `OPEN:`);
+  and auth-is-live-while-the-plan-doc-denies-it. Also **closed an OPEN in the same edit** —
+  *"`cairn` is NOT on PATH"* → `RESOLVED 7ed7d41a` (#1079), verified an ancestor of
+  `origin/main` and present at `~/.local/bin/cairn`. That bullet had been served as outstanding
+  since 2026-08-29 while the remedy was already merged.
+
 ## How to verify
 
 ```bash
