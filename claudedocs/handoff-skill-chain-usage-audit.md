@@ -194,12 +194,12 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
   CANCELLATION.** `grep -c 'running(store'` reads **133**, which is the correct answer reached by
   two equal and opposite errors: it **misses 3 line-wrapped** `running(\n store, …)` sites
   (`:8764, :8792, :8832`) and **over-counts 3 lines inside a `textwrap.dedent("""…""")` string**
-  (`:8017, :8033, :8300`). Full partition of the 272 lines containing `running(`: **256** real
+  (`:8017` in `misplaced`, `:8033` in `correct`, `:8300` in a different test's helper). Full partition of the 272 lines containing `running(`: **256** real
   sites · 4 comments · **11 inside string literals** · 1 `def running(`.
   🔴 **This paragraph previously published 136/259 and claimed a walker produced them — both were
   wrong, and the mechanism is the joke of the arc:** a *text* walker that resolved the wrap but not
-  the string counted a `textwrap` block as production code, and that block is **another walker's
-  positive-control fixture**, sitting under the comment *"the detector must be able to SEE a
+  the string counted `textwrap` string bodies as production code — and `:8017` sits in **another walker's
+  positive-control fixture**, four lines under the comment *"the detector must be able to SEE a
   misplaced call, or the empty list above is a fact about the walker and nothing else."* The
   instrument was fooled by the fixture built to test exactly that. Use `ast.walk` over
   `With`/`AsyncWith` items — it cannot see comments **or** strings, and resolves wraps for free.
@@ -508,7 +508,7 @@ EVICTED 2026-09-01 (terminal). Verdict: #1064 green, MERGED `f71ff648`; the two-
   reads the checkout PATH) and **#1214 `07a22f14`**.
 - **Ruled out:** *"the doc is simply wrong"* — it is not; the mechanism and the reproducer are real
   and `scripts/ci-repro/README.md` still documents them. What is missing is the **mitigation**, so a
-  reader will expect a failure mode that ~~should no longer fire~~ **mostly still fires** (see the fixture
+  reader will expect a failure mode that ~~should no longer fire~~ **mostly still fires** (see the fixture/call-site
   table in the CI block — this line's premise is the one that was refuted). via: change
 - **Leading hypothesis:** this is the arc's own recurring shape operating ACROSS PRs rather than
   within one — a claim true at write time, falsified by a sibling change, inside no audit round's
@@ -600,7 +600,7 @@ rather than removed and renumbered. New work is appended at the end.
    `ci-speedup-7` (verified live 2026-09-01). 🔴 **And re-read the premise first: #1211 `1a4350f3`
    sited the store on tmpfs**, so the contention this item was motivated by may already be gone.
    ⚠ **CORRECTED 2026-09-01 — do NOT act on the sentence above without reading the CI block's
-   fixture table first.** #1211 sited **one fixture of two** in one file of three; **123 of that
+   fixture/call-site table first.** #1211 sited **one fixture of two** in one file of three; **123 of that
    file's 256** `running()` sites — the 110 in `scoped_store` PLUS 13 that belong to no fixture,
    three of them write-path — plus both cairn suites are still disk-backed, and the tmpfs probe is UNVERIFIED on
    `talos-xr6-r7p`. So the contention is **not** established as gone, and de-prioritising this item
@@ -635,8 +635,11 @@ rather than removed and renumbered. New work is appended at the end.
    undone; it also leaves the *second* half of the caveat standing, because `store_siting.py`'s
    probe keeps a disk fallback and nobody has verified it engages on `talos-xr6-r7p`.
    **(a) = that README names `1a4350f3` AND says what is STILL unsited — and "still unsited" is
-   three separate populations, so it is three greps.** 🔴 An alternation would certify all three by
-   naming one, which is this arc's own recurring bug expressed as a regex:
+   THREE populations (`scoped_store`, the two cairn suites, the 13 unfixtured sites), so with the
+   sha that is FOUR required greps.** 🔴 An alternation would certify all four by naming one, which
+   is this arc's own recurring bug expressed as a regex. ⚠ **This sentence said "three greps" until
+   round 5 — one round AFTER a4 was added below it, so the definition of (a) contradicted its own
+   check for a whole round. Count the `# (aN)` lines in the block; they are the authority.**
    ```bash
    DEVRC=~/workspace/devrc
    git -C "$DEVRC" fetch origin main -q      # or a stale clone answers for a ref you do not have
