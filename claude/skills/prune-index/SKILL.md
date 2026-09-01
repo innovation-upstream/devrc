@@ -19,6 +19,7 @@ The store is a **pointer/nuance sheet per service** under `~/.claude/analyze-ser
 ## 🔴 Store safety — read this before the audit, not after
 - The store is **curated, CLIENT-CONFIDENTIAL, and not re-derivable by re-running recon.** ⚠ This bullet used to read "and has no off-machine backup" — false since 2026-08-21: `analyze-service-index-commit.service` commits each scope hourly and `analyze-service-index-backup.service` sends age-encrypted bundles to MinIO daily (`restore-verify.py` reads them back). **The rules below are unchanged, because they never rested on that** — a prune loses back to the last hourly commit, and **uncommitted state is in no commit and no bundle.** Detail: `~/.claude/skills/analyze-service/reference/index-store.md` → Store safety.
 - **Each `<scope>/` is its own git repo** (the root is not). **Run NO git command inside it** — no `stash`, no `reset --hard`, no `clean`, no `checkout --`, no remote, no push. Set work aside with `cp <file> /tmp/…`.
+- 🔴 **Since the Cairn cutover the tree under `~/.claude/analyze-service-index/` is a FROZEN mirror — entry files are `0444` and the pod is the authority.** An `EACCES` from an editor there is the design, not a broken store: every write in this skill goes through `cairn put` (§4).
 - **Never copy an entry's content into devrc, any public repo, a PR body, an issue or a commit message.** Aggregate integers about the corpus are fine; a line of prose is not. devrc `60e6d9d` exists because this data class had to be scrubbed out of a public repo retroactively.
 - Each scope's own `README.md` states the policy governing it — read it before writing there. A scope with no README has no stated policy; the audit reports those.
 
@@ -38,10 +39,12 @@ The store is a **pointer/nuance sheet per service** under `~/.claude/analyze-ser
 Full rules incl. cross-repo targets and the stale-clone trap: `~/.claude/skills/prune-index/reference/classification.md`.
 
 ## 1. Audit (deterministic, READ-ONLY — no edits, no git in the store)
+🔴 **Sync first and audit the CACHE, not `~/.claude/analyze-service-index/`.** Since the Cairn cutover the pod is the authority and the local store is a frozen (`0444`) mirror that **no write updates** — every bullet appended through `cairn append` since the freeze is missing from it. Auditing the stale copy silently under-counts `OPEN:` bullets, which is the one number §6 compares before and after.
 ```bash
-python3 /home/zach/workspace/devrc/scripts/subsystem-audit.py                 # whole store
-python3 /home/zach/workspace/devrc/scripts/subsystem-audit.py --scope devrc   # one scope
-python3 /home/zach/workspace/devrc/scripts/subsystem-audit.py --all           # list every entry
+cairn sync && S=~/.cache/subsystem-store
+python3 /home/zach/workspace/devrc/scripts/subsystem-audit.py --store $S                 # whole store
+python3 /home/zach/workspace/devrc/scripts/subsystem-audit.py --store $S --scope devrc   # one scope
+python3 /home/zach/workspace/devrc/scripts/subsystem-audit.py --store $S --all           # list every entry
 ```
 Prints, each **with its denominator**: per-entry bytes vs budget; bullet shape vs the schema (advisory); the lifecycle split (OPEN kept / EVICTABLE / **NO HOME** / NOT CHECKED); pointer integrity; front-matter completeness; **ref collisions**; scopes with no README; and a verdict.
 
@@ -50,10 +53,10 @@ Prints, each **with its denominator**: per-entry bytes vs budget; bullet shape v
 If the verdict says **"no prune needed (stop; do not churn the files)"** — stop. It is a claim about the classes above and nothing else.
 
 ## 2. Back up first (the cut rewrites curated files the timers have not captured yet)
-🔴 **Chain with `&&` and count the files** — `cp …; echo ok` prints success even when the copy failed.
+🔴 **Chain with `&&` and count the files** — `cp …; echo ok` prints success even when the copy failed. Back up the **synced cache**: that is what you are about to overwrite, and the frozen local mirror is a different, older set of bytes.
 ```bash
-BK=/tmp/index-prune-$(date +%s); mkdir -p "$BK"
-cp -a ~/.claude/analyze-service-index/. "$BK"/ && echo "backed up to $BK: $(find "$BK" -type f | wc -l) file(s)"
+cairn sync && BK=/tmp/index-prune-$(date +%s) && mkdir -p "$BK"
+cp -a ~/.cache/subsystem-store/. "$BK"/ && echo "backed up to $BK: $(find "$BK" -type f | wc -l) file(s)"
 ```
 
 ## 3. Classify every bullet in an over-budget entry
@@ -68,23 +71,32 @@ cp -a ~/.claude/analyze-service-index/. "$BK"/ && echo "backed up to $BK: $(find
 Bias toward EVICT/MERGE **only inside the RESOLVED population**. Everywhere else this store is a router *and* the sole archive of things nobody wrote down.
 
 ## 4. Propose — confirm-gated, diff first
-Present a **unified diff** against the current file, one compact block, ask one yes/no. On confirm, **re-read the file first** (a concurrent session may have appended), re-apply to current bytes, then plain `Write`. On decline, discard. Full contract: `~/.claude/skills/prune-index/reference/writing-and-safety.md`.
+Present a **unified diff** against the current file, one compact block, ask one yes/no. On confirm, land the cut **through the store API** — the local entry files are `0444` and any editor write against one fails with `EACCES`:
+```bash
+cairn sync                                                    # the live bytes
+cp ~/.cache/subsystem-store/<scope>/<entry>.md /tmp/prune-<entry>.md
+#   apply the CONFIRMED cut to /tmp/prune-<entry>.md — the scratch copy, never the store
+cairn put --scope <scope> --ref <entry> --file /tmp/prune-<entry>.md
+```
+🔴 **`cairn put` derives its `If-Match` from a LIVE sync, and that is what REPLACES "re-read the file first, re-apply to current bytes" — a replacement, not an omission.** A session that appended between your sync and your put makes the put fail with **exit 8** instead of silently deleting their bullet, which is exactly the loss the old re-read rule was guessing at. **Exit 8 IS that writer**: `cairn sync`, re-apply the cut to the NEW bytes, show the diff again, ask again, put again. Never retry the same file and never pass `--if-match` by hand — that is the clobber the precondition exists to stop. Exit 6 = refused (bad ref or scope); exit 7 = the store was unreachable and **nothing was written or queued**. On decline, discard the scratch file. Full contract: `~/.claude/skills/prune-index/reference/writing-and-safety.md`.
 
-⚠ **This used to read "same contract as `analyze-service`'s write-back", and that pointer is now false** — the append prompt was retired everywhere on 2026-08-31 and `write-back.md` no longer carries a protocol at all (the one append protocol is `~/.claude/skills/subsystem-index/SKILL.md`, which asks nothing and mandates `Edit`). 🔴 **A prune is NOT an append, so the retirement does not reach it**: the evidence that retired the prompt was "the answer was always `y`" on an APPEND, and a cut REMOVES bytes that are often their content's only copy. Blast radius earns the gate. Keep the y/N here, and keep `Write` here — a cut necessarily rewrites the whole file, so the append rule's `Edit` anchor does not apply; step 2's `cp -a` backup is what stands in for it.
+⚠ **This used to read "same contract as `analyze-service`'s write-back", and that pointer is now false** — the append prompt was retired everywhere on 2026-08-31 and `write-back.md` no longer carries a protocol at all (the one append protocol is `~/.claude/skills/subsystem-index/SKILL.md`). 🔴 **A prune is NOT an append, so the retirement does not reach it**: the evidence that retired the prompt was "the answer was always `y`" on an APPEND, and a cut REMOVES bytes that are often their content's only copy. Blast radius earns the gate. **Keep the y/N here.** Only the write MECHANISM moved: a cut necessarily rewrites the whole entry, so it is a `cairn put` rather than the append verb — and step 2's `cp -a` backup, not the API, is still what lets you read back what left.
 
 🔴 **Never silent-mutate, never batch a whole scope behind one prompt, and write the file and run NO git command** — the store has an out-of-band autocommit of its own.
 
 ## 5. Fix a ref collision
-An ambiguous ref surfaces **nothing at all** — `--ref <it>` returns `ref-ambiguous` and no body, so the entry is unreachable by the name a human would type. Drop the alias from whichever entry it does not actually name (usually the one where it is an *initialism* rather than the word itself), then prove the fix:
+An ambiguous ref surfaces **nothing at all** — `--ref <it>` returns `ref-ambiguous` and no body, so the entry is unreachable by the name a human would type. Drop the alias from whichever entry it does not actually name (usually the one where it is an *initialism* rather than the word itself). 🔴 **The `aliases:` line is inside a frozen entry file, so this is a `cairn put` too** — same scratch-copy route as §4, same exit-8 rule; it is a one-line edit, not an exemption. Then prove the fix:
 ```bash
-python3 /home/zach/workspace/devrc/scripts/lib/subsystem_recall.py --ref <ref> --scope <scope>
+cairn sync && python3 /home/zach/workspace/devrc/scripts/lib/subsystem_recall.py --store ~/.cache/subsystem-store --ref <ref> --scope <scope>
 ```
 Must print `status=hit`, naming the entry you expect. 🔴 Clearing the collision by making the ref resolve to **nothing** is a regression, not a fix.
 
 ## 6. Verify (don't trust — measure)
 ```bash
-python3 /home/zach/workspace/devrc/scripts/subsystem-audit.py --scope <scope>
+cairn sync && python3 /home/zach/workspace/devrc/scripts/subsystem-audit.py --store ~/.cache/subsystem-store --scope <scope>
 ```
+🔴 **`cairn sync` again, or you re-measure the bytes you measured in §1** — the put landed on the pod, and a cache read without a refresh is a claim about your own pre-put copy, which is byte-identical whether or not the write succeeded.
+
 **Structural**: entries under budget, no collisions, `NO HOME` count unchanged or lower, and — the one that matters — **the OPEN count is IDENTICAL to before**. A prune that lost an OPEN bullet destroyed the store's only irreplaceable content while every other number improved.
 
 🔴 **A structural pass is not content survival.** Diff each rewritten entry against the §2 backup and read what left. Then drive the entry once for real: run `/analyze-service` against that service and check the brief still answers the question the cut bullets used to.

@@ -3802,10 +3802,26 @@ class TestSkillDocsArePinned:
     # wrong file, and a pin that quietly stops covering anything is worse than no
     # pin. `test_a_reworded_pin_is_still_caught_in_its_new_home` is the positive
     # control that these still bite where they now point.
+    # 🔴 SUPERSEDES `("do not treat \"no error\" as evidence you were alone", …)`.
+    # That instruction was the operational consequence of the retraction WHILE
+    # THERE WAS NO ARBITER: a concurrent `Edit` on the nuance anchor succeeds
+    # silently (measured by `TestAppendConcurrency` below), so silence proved
+    # nothing. The 2026-09-01 Cairn cutover supplied an arbiter — the API appends
+    # under a per-entry flock, and a `cairn put` whose base revision moved is
+    # REFUSED with exit 8 — which INVERTS the instruction: the loud failure is
+    # now the evidence, and the executor's job is to re-sync rather than retry.
+    # The measurement in the sidecar is unchanged and its pins below still hold;
+    # what changed is what the body must tell the executor to DO about it.
     HANDOFF_CORRECTIONS_SKILL: list[tuple[str, str]] = [
         (
-            "do not treat \"no error\" as evidence you were alone",
-            "the operational consequence of the retraction — an INSTRUCTION, so it stays in the body",
+            "exit 8 IS the other writer, not a transient error",
+            "the operational consequence of the retraction, re-expressed for the "
+            "store API — an INSTRUCTION, so it stays in the body",
+        ),
+        (
+            "never pass `--if-match` by hand to make it go away",
+            "🔴 the workaround that would restore the silent clobber the "
+            "retraction was about, named as forbidden",
         ),
     ]
 
