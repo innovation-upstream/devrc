@@ -23,11 +23,16 @@ unaffected.)
 
 🔴 THIS MODULE NEVER WRITES TO THE STORE. Not "does not today" — there is no
 write path here at all, and `TestNeverWrites` hashes a store tree either side of
-every mode to keep it that way. The store is curated, client-confidential and
-has no off-machine backup; the write protocol lives in the skill
+every mode to keep it that way. The store is curated, client-confidential and not
+re-derivable by re-running recon; the write protocol lives in the skill
 (`claude/skills/subsystem-index/SKILL.md`, the ONE protocol for both callers as
 of 2026-08-31), where the diff is printed for a human to read, and a helper that
-could write would be a second writer following no protocol at all.
+could write would be a second writer following no protocol at all. (This used to
+read "has no off-machine backup". It IS backed up — hourly local commits, daily
+age-encrypted bundles to MinIO; see
+`claude/skills/analyze-service/reference/index-store.md` -> "Store safety". The
+rule is unchanged: a backup does not un-write a bad append, and the working-tree
+state a bad write lands on is in no commit and no bundle.)
 
 🔴 IT DOES NOT REIMPLEMENT MATCHING. Normalization, kind-splitting, tier
 resolution and path→entry association all come from `subsystem_resolver`, which
@@ -137,7 +142,7 @@ in one line:
     covering both sources would be wrong about both" — already forbids that
     shape for two sources; a union makes it unavoidable rather than optional.
   * The consumer's decision is per-path. `/handoff` proposes a dated journal
-    bullet against a curated, client-confidential, unbacked-up store. "This
+    bullet against a curated, client-confidential, not-re-derivable store. "This
     session worked on X" and "some session moved X on this branch" are different
     claims and only one of them belongs in a work-history bullet. A merged set
     destroys exactly the fact needed to choose.
@@ -2884,8 +2889,8 @@ def _reserve_slot_for_top_noncoherent(
 # already carries 6 bullets sharing a single date, and 12 of 26 carry at least 2.
 #
 # 🔴 READ-AND-DISPLAY ONLY. This module has NO write call site and that property
-# is what lets it be pointed at a curated, client-confidential, unbacked-up
-# store; `TestNeverWrites` hashes a whole store tree either side of every mode.
+# is what lets it be pointed at a curated, client-confidential store whose
+# backups both LAG the current bytes; `TestNeverWrites` hashes a whole store tree either side of every mode.
 # Everything below reads.
 
 
@@ -3253,7 +3258,7 @@ def build_report(
     # (`subsystem_recall`) degrades — it serves what it can and reports the rest —
     # because spending every good entry to report one bad one is a bad trade for
     # somebody who only wants to look. This is the other side: it gates a WRITE
-    # into a curated, unbacked-up store, and acting on a partially-read index is
+    # into a curated, not-re-derivable store, and acting on a partially-read index is
     # the one case where aborting is cheaper than degrading. The exit code is
     # unchanged (3).
     #

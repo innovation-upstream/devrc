@@ -168,8 +168,10 @@ def _tree_hash(root: Path) -> str:
 
 
 class TestReconNeverWrites:
-    """The store is curated, client-confidential and has no off-machine backup.
-    The only writers are the two confirm-gated ones in the skills."""
+    """The store is curated, client-confidential and not re-derivable by re-running
+    recon. The only writers are the two confirm-gated ones in the skills.
+    (Was "has no off-machine backup" — false; it is backed up hourly/daily. See
+    `claude/skills/analyze-service/reference/index-store.md` -> "Store safety".)"""
 
     def test_the_module_has_no_write_call_at_all(self) -> None:
         """🔴 A STRUCTURAL claim, not a behavioural sample. A behavioural test

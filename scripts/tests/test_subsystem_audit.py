@@ -3,7 +3,7 @@
 🔴 OFFLINE, HERMETIC, AND SYNTHETIC. Every fixture in this file is written into a
 `tmp_path`; nothing under `~/.claude/analyze-service-index/` is opened, and no
 line of it is reproduced here. That store is curated, CLIENT-CONFIDENTIAL and
-unbacked-up, and devrc is PUBLIC — so a fixture derived from it would be a leak
+not re-derivable, and devrc is PUBLIC — so a fixture derived from it would be a leak
 even if it looked innocuous. The corpus is only ever described in this repo as
 aggregate integers.
 
@@ -525,9 +525,12 @@ def _digest(root: Path) -> dict[str, str]:
 def test_the_audit_writes_nothing_to_the_store(dirty_store):
     """🔴 THE SAFETY PROPERTY, measured rather than asserted in a docstring.
 
-    The real store is curated, client-confidential and has no backup. Byte-hash
-    every file before and after a full audit + render; any difference at all —
-    content, a new file, a deleted one — fails.
+    The real store is curated, client-confidential and not re-derivable by
+    re-running recon. (Was "has no backup" — false; hourly local commits, daily
+    age-encrypted MinIO bundles. Unchanged here: a backup restores to the last
+    commit, it does not undo an audit that scribbled on the working tree.)
+    Byte-hash every file before and after a full audit + render; any difference
+    at all — content, a new file, a deleted one — fails.
     """
     before = _digest(dirty_store)
     _render(dirty_store)
@@ -561,7 +564,9 @@ def test_the_audit_source_contains_no_write_call():
                    "os.remove", "os.rename", "os.replace"):
         assert banned not in code, (
             f"scripts/subsystem-audit.py contains {banned!r}. This auditor is "
-            "READ-ONLY by contract — the store has no backup."
+            "READ-ONLY by contract — the store is client-confidential and the "
+            "uncommitted window a stray write lands on is in no commit and no "
+            "off-machine bundle."
         )
 
 

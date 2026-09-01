@@ -451,7 +451,20 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 #           `rsync -a --delete "$STORE"/ "$STAGE"/`. Without the binary those
 #           tests fail with rc 127 rather than skipping, deliberately: the
 #           property they pin is that seeding never writes to the local store,
-#           and that store is the only copy of client-confidential content.
+#           which is the AUTHORITATIVE copy of client-confidential content —
+#           the daily bundle and the served pod are both lagging derivatives,
+#           so a corrupted source replicates outward rather than being
+#           repairable from either — though a bundle already in the bucket
+#           still holds what was reachable when it was written, so "lagging"
+#           is not "useless": check what is in the bucket, with
+#           restore-verify.py, before concluding anything is unrecoverable.
+#           (This said "check the retention window" until 2026-08-31. There
+#           is no window: ASIB_KEEP is an object COUNT enforced only inside
+#           backup.py's upload branch, so nothing expires on its own.
+#           🔴 This block is the TWIN of the one in flake.nix — the same
+#           argument in different words. They have drifted apart three
+#           times now, each time because one was corrected and the other
+#           was not. Change both in the same commit or delete one.)
 # logrotate: scripts/tests/test_claude_log_rotate.py drives the REAL binary
 # against a temp directory (rotation, truncation, generation cap, and the .bak
 # scope fence). Those tests FAIL rather than skip when it is absent — a skipped

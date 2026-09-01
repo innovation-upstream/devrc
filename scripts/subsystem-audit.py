@@ -3,10 +3,19 @@
 
 🔴 READ-ONLY. This module opens no file for writing, creates no directory, and
 runs no git command inside the store. The store is curated, client-confidential
-and has NO off-machine backup (`claude/skills/analyze-service/reference/index-store.md`
--> "Store safety"), so the audit is a MEASUREMENT and the /prune-index skill is
-what carries the confirm-gated write half. `_git()` below refuses any repo path
-that lies inside the store root, so even the pointer checks cannot reach it.
+and not re-derivable by re-running recon
+(`claude/skills/analyze-service/reference/index-store.md` -> "Store safety"), so
+the audit is a MEASUREMENT and the /prune-index skill is what carries the
+confirm-gated write half. `_git()` below refuses any repo path that lies inside
+the store root, so even the pointer checks cannot reach it.
+
+⚠ This paragraph used to say the store has NO off-machine backup. It does have
+one — hourly local commits plus daily age-encrypted MinIO bundles — and being
+read-only here is unaffected: an audit that wrote would still be an ungated
+second writer, and a prune's real exposure is the uncommitted window, which no
+commit and no bundle holds. Do NOT read the old sentence as "a loss is
+unrecoverable": `scripts/analyze-service-index/restore-verify.py` reads bundles
+back.
 
 WHY THIS EXISTS
 ---------------
@@ -392,7 +401,7 @@ def _git(repo: Path, *args: str, store_root: Path) -> subprocess.CompletedProces
 
     🔴 THE GUARD IS THE POINT, not a nicety. The store's scope dirs are each
     their own git repo (`index-store.md`), so a scope-to-repo derivation that
-    ever pointed back at the store would run git inside curated, unbacked-up,
+    ever pointed back at the store would run git inside curated,
     client-confidential content — which "Store safety" forbids outright. The
     check is on the RESOLVED path so a symlink cannot walk around it.
     """
@@ -401,7 +410,8 @@ def _git(repo: Path, *args: str, store_root: Path) -> subprocess.CompletedProces
     if rp == sr or sr in rp.parents or rp.is_relative_to(sr):
         raise RuntimeError(
             f"refusing to run git inside the index store: {rp} is under {sr}. "
-            "The store is curated and unbacked-up; this audit is read-only."
+            "The store is curated and client-confidential; this audit is "
+            "read-only."
         )
     return subprocess.run(
         ["git", "-C", str(rp), *args], capture_output=True, text=True, timeout=20

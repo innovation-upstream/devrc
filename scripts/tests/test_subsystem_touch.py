@@ -18,9 +18,11 @@ declared status is actually EMITTED — not merely declared — and that no two 
 them are spelled the same.
 
 🔴 THE STORE IS NEVER WRITTEN, AND THAT IS TESTED BEHAVIOURALLY, NOT BY GREP.
-`~/.claude/analyze-service-index/` is curated, client-confidential and has no
-off-machine backup. `TestNeverWrites` hashes a whole synthetic store tree either
-side of every mode. A `grep` for `open(..., "w")` would be the "spelled rather
+`~/.claude/analyze-service-index/` is curated, client-confidential and not
+re-derivable by re-running recon. (Was "has no off-machine backup" — false; it is
+backed up hourly locally and daily to MinIO. The rule is unaffected: a backup does
+not un-write a bad append.) `TestNeverWrites` hashes a whole synthetic store tree
+either side of every mode. A `grep` for `open(..., "w")` would be the "spelled rather
 than structural" guard `claude/RULES.md` warns about — it passes while a
 different spelling writes.
 
@@ -1989,8 +1991,9 @@ class TestEntrySchemaAgreement:
 
 class TestNoRealStoreIsRead:
     """🔴 No test here may touch `~/.claude/analyze-service-index/`: it is
-    client-confidential, has no backup, and is rewritten hourly by an autocommit
-    timer. Every fixture in this file is built under `tmp_path`, and every call
+    client-confidential, not re-derivable by re-running recon, and rewritten
+    hourly by an autocommit timer. (Was "has no backup" — false; that autocommit
+    IS the local layer, and daily age-encrypted bundles go to MinIO.) Every fixture in this file is built under `tmp_path`, and every call
     is passed an explicit store root — the module's own default is never
     exercised, which is what these two assert."""
 
@@ -7688,8 +7691,8 @@ class TestJournalNegativeControls:
 class TestJournalIsReadOnly:
     def test_reading_the_journals_writes_NOTHING(self, tmp_path) -> None:
         """🔴 The property that lets this be pointed at a curated,
-        client-confidential, unbacked-up store. Hashed either side, over every
-        journal state at once."""
+        client-confidential store whose backups both LAG it. Hashed either side,
+        over every journal state at once."""
         store = _journal_store(tmp_path)
         before = _tree_hash(store)
         _journal_render(store, "batcher", "quiet-thing", "headless-thing", "prosy-thing")
@@ -10340,8 +10343,8 @@ class TestScanEntryShape:
         assert sorted(s.kind for s in rows) == [st.SHAPE_ABSENT, st.SHAPE_RENAMED]
 
     def test_scan_entry_shape_WRITES_NOTHING(self, tmp_path) -> None:
-        """The store is curated, client-confidential and unbacked. Hashed, not
-        grepped — a grep for `open(..., "w")` passes while a different spelling
+        """The store is curated, client-confidential and not re-derivable.
+        Hashed, not grepped — a grep for `open(..., "w")` passes while a different spelling
         writes."""
         store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
         before = _tree_hash(store)

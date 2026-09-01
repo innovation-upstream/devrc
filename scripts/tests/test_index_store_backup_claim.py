@@ -1,0 +1,823 @@
+"""The index store's docs must agree with its nix wiring about whether a backup exists.
+
+WHY THIS EXISTS
+---------------
+`~/.claude/analyze-service-index/` genuinely had no backup until 2026-08-21.
+The backup landed; the sentences saying it had none were not updated, so for
+nine days the repo asserted, in 🔴 blocks, that the store was irreplaceable with
+no off-machine copy.
+
+🔴 THAT IS NOT COSMETIC STALENESS. It is a "this is impossible" claim in a
+RECOVERY path. The failure is silent and total: an agent facing a destroyed
+store reads "irreplaceable, no off-machine backup", concludes recovery is
+unavailable, and never looks for `restore-verify.py` or the age-encrypted
+bundles that would have restored it. A stale comment that hides a CAPABILITY
+costs more than one that hides a hazard, because nobody seeks a second opinion
+about an impossibility.
+
+WHAT THIS PINS
+--------------
+Two facts against each other:
+
+    A. does `nix/home.nix` actually wire a backup? — a LIVE declaration of the
+       service and the timer (comments stripped), the timer enabled via
+       `WantedBy = [ "timers.target" ]`, an ExecStart naming a `backup.py` that
+       exists on disk, and neither unit gated behind `lib.mkIf`.
+    B. does the canonical Store-safety section state the matching claim?
+
+and asserts `A == B`, with a canonical paragraph for EACH state.
+
+🔴 WHY THE CLAIM IS PINNED AS A WHOLE NORMALISED STRING, NOT AS TOKENS. The
+first version of this guard required four substrings to be present. An audit
+walked it in one pass: a section reading "IRREPLACEABLE — there is NO
+off-machine backup and no way to recover it. The `analyze-service-index-backup`
+unit was REMOVED, the bucket `analyze-service-index-backups` was deleted, and
+`restore-verify.py` no longer works" contains every required token and PASSED —
+the guard certified agreement while the doc said the exact opposite of the
+truth. Token presence cannot see POLARITY. `claude/RULES.md` gives the rule for
+this case directly: when the artifact under test IS prose, a guard on WORDS is
+walkable by REWORDING, so pin the WHOLE normalised string and pay the cosmetic
+reword cost for a machine-readable claim.
+
+🔴 AND WHY THERE IS AN `ABSENT` PARAGRAPH TOO. The same audit found the reverse
+state unsatisfiable: with the wiring removed, the old guard failed and told the
+maintainer to "rewrite that section to say the store has NO off-machine backup"
+— which was exactly what they had just done, because any such rewrite that
+NAMED the retired unit and bucket still tripped the token check. A gate whose
+instruction cannot be followed is a permanently-red gate, and `claude/RULES.md`
+says a permanently-red gate is worse than no gate. So decommissioning has a
+canonical paragraph the failure message prints in full, ready to paste.
+
+🔴 WHAT THIS DOES **NOT** DO, STATED SO NOBODY READS COVERAGE INTO IT. It never
+opens the live store, reaches MinIO, or runs systemd — devrc is PUBLIC and the
+store is client-confidential. So it cannot tell you the backup RAN, that a
+bundle is RESTORABLE, or that the timer is enabled on any particular host. It
+pins that the REPO's claim and the REPO's wiring agree. Per-host liveness is
+`systemctl --user list-timers 'analyze-service-index*'`, by hand, on each host.
+
+⚠ NOR IS IT A COMPLETENESS CHECK ON THE PROSE. It reads ONE section of ONE
+file. Other files carry their own statements about this store, and this guard
+is structurally blind to every one of them — it cannot tell you the corpus
+agrees, only that the canonical section does.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO / "scripts"))
+
+from testlib.nix_units import (  # noqa: E402
+    declares,
+    directive,
+    is_conditional,
+    unit_source,
+)
+
+HOME_NIX = REPO / "nix" / "home.nix"
+BACKUP_PY = REPO / "scripts" / "analyze-service-index" / "backup.py"
+STORE_SAFETY_DOC = (
+    REPO / "claude" / "skills" / "analyze-service" / "reference" / "index-store.md"
+)
+
+BACKUP_SERVICE = "systemd.user.services.analyze-service-index-backup"
+BACKUP_TIMER = "systemd.user.timers.analyze-service-index-backup"
+
+# 🔴 THE CANONICAL CLAIM FOR EACH STATE, pinned whole. Normalisation collapses
+# whitespace and drops markdown emphasis, so a rewrap or a bold change is free;
+# changing a WORD is not, and that is the point.
+CLAIM_PRESENT = (
+    "daily, off-machine — analyze-service-index-backup.service bundles every scope, "
+    "age-encrypted, to the homelab MinIO minio-archive tenant, bucket "
+    "analyze-service-index-backups, key <host>-<machine-id>/<scope>/<ts>.bundle.age. "
+    "Read them back with scripts/analyze-service-index/restore-verify.py; "
+    "escrow-verify.py checks the key material."
+)
+
+# 🔴 THE DECOMMISSION PARAGRAPH IS ITSELF A CLAIM, AND THE FIRST DRAFT OF IT WAS
+# FALSE IN THE TWO WAYS THIS WHOLE PR EXISTS TO STOP. It read "…so nothing leaves
+# this machine and a destroyed scope is recoverable only from its own hourly
+# commits — and not at all if the disk is gone." Both halves are refuted by this
+# repo's own already-corrected prose: `seed.sh` records that the served pod holds
+# a copy, and `backup.py`'s `DEFAULT_KEEP = 14` means retiring the unit leaves a
+# fortnight of age-encrypted bundles sitting in MinIO. An operator who pasted it
+# on day 1 of that window would have published a confidentiality falsehood AND an
+# impossibility claim in a recovery path — the exact failure mode this file's
+# docstring calls the worst one. A canonical paragraph a guard tells you to paste
+# is payload, not scaffolding; it gets the same scrutiny as the doc it lands in.
+#
+# 🔴 SECOND DRAFT, AND THE FIRST REWRITE WAS ALSO WRONG — in a way that reads as
+# reassuring. It said the bundles "survive until their retention window expires
+# (see ASIB_KEEP)". `ASIB_KEEP` is not a window: it is a COUNT of objects kept
+# per `<host>/<scope>/` prefix, and it is enforced by `prune()`, whose only call
+# site is inside the UPLOAD branch of `run()` (`backup.py:1162`). Retiring the
+# unit retires the pruner with it, so nothing expires at all — the last
+# `ASIB_KEEP` bundles per scope sit there until somebody deletes them by hand.
+# That cut both ways: an agent told the window had passed would skip
+# `restore-verify.py` on copies that still exist (the hides-a-CAPABILITY failure
+# again), and an operator told the copies self-expire would under-price a live
+# confidentiality obligation over client-confidential data.
+CLAIM_ABSENT = (
+    "The analyze-service-index-backup unit has been RETIRED, so no NEW off-machine "
+    "bundle is being written. That is not the same as no copy existing, and nothing "
+    "expires on its own: pruning runs only as part of an upload, so retiring the unit "
+    "retires the pruner too and the last ASIB_KEEP bundles stay in the MinIO bucket "
+    "until deleted BY HAND — per HOST-and-scope prefix, so a scope written by two "
+    "hosts leaves two sets and clearing one is not clearing the scope. The served pod "
+    "also holds a copy, as stale as its "
+    "last seed. Check both — with restore-verify.py — before calling anything "
+    "unrecoverable, and delete them deliberately when the data should be gone."
+)
+
+# Lines that QUOTE a claim in order to retract it. `_section_states` drops them
+# before matching — see `test_a_quoted_retraction_cannot_satisfy_the_pin`.
+_RETRACTION_MARKERS = ("used to say", "used to read", "no longer true", "⚠")
+
+# `-`, `*`, `+` and `1.` all start a markdown list item. Matching only `-`
+# reddened the required check on an ordinary reformat, which is why this is a
+# pattern. 🔴 Its job is BLOCK SPLITTING, not claim recognition — the claim's
+# own formatting is irrelevant — so `test_list_item_splitting_is_what_the`
+# `_pattern_is_for` exercises the split, which is the only thing widening it
+# actually buys.
+_LIST_ITEM = re.compile(r"\s*(?:[-*+]|\d+\.)\s")
+
+
+def _normalise(text: str) -> str:
+    """Collapse whitespace and markdown emphasis; keep the words.
+
+    ⚠ `_` is stripped ONLY at a word boundary. It is markdown emphasis
+    (`__bold__`) *and* an identifier character, and this subsystem's identifiers
+    include `ASIB_KEEP` and `SOPS_AGE_KEY_FILE`. Stripping it unconditionally —
+    which the first version did — would let a doc that wrote `ASIBKEEP` satisfy
+    a pin that names `ASIB_KEEP`; not stripping it at all breaks emphasis
+    insensitivity. The boundary-anchored form does both, and the `__daily,
+    off-machine__` fixture below is what holds that property.
+    """
+    text = re.sub(r"[`*]", "", text)
+    text = re.sub(r"(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])", "", text)
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _store_safety_section() -> str:
+    """The '🔴 **Store safety.**' block, up to the next markdown heading.
+
+    Sliced rather than whole-file so a mention of the backup ANYWHERE else in
+    the doc cannot satisfy the claim — the sentence has to be where a reader
+    lands when they are told to read Store safety.
+    """
+    body = STORE_SAFETY_DOC.read_text(encoding="utf-8")
+    anchor = "**Store safety.**"
+    count = body.count(anchor)
+    assert count == 1, (
+        f"{STORE_SAFETY_DOC} contains {count} '{anchor}' anchors; this reader "
+        "assumes exactly one. If the section was renamed or duplicated, fix the "
+        "doc or update this anchor — do not let it slice an arbitrary one."
+    )
+    start = body.find(anchor)
+    end = body.find("\n## ", start)
+    return body[start:] if end == -1 else body[start:end]
+
+
+def _nix_wires_a_backup(src: str | None = None, *, script_exists: bool = True) -> bool:
+    """A LIVE, ENABLED, UNCONDITIONAL backup — not a mention of one.
+
+    Every clause here is a way the backup can stop running while a naive
+    substring search still matches:
+      * comments that quote the attribute path of a unit being retired,
+      * a timer declared but never `WantedBy` anything, so it is never enabled,
+      * an ExecStart naming a script that has been deleted,
+      * a `lib.mkIf` gate, which makes an unconditional doc promise false on
+        every host the condition excludes.
+
+    `src`/`script_exists` are injectable so the mutation test below can drive
+    each clause. Production callers pass neither.
+    """
+    if src is None:
+        src = HOME_NIX.read_text(encoding="utf-8")
+        script_exists = BACKUP_PY.is_file()
+    if not (declares(BACKUP_SERVICE, src) and declares(BACKUP_TIMER, src)):
+        return False
+    if is_conditional(BACKUP_SERVICE, src) or is_conditional(BACKUP_TIMER, src):
+        return False
+    # 🔴 BY DIRECTIVE NAME, NOT BY SUBSTRING — both of these were substring
+    # checks and both were measured green against a broken unit: `After =
+    # [ "timers.target" ]` satisfied the first (declared, never enabled), and
+    # deleting the whole ExecStart line satisfied the second, because
+    # `X-Restart-Triggers` on the NEXT line carries the same path.
+    wanted_by = directive("WantedBy", unit_source(BACKUP_TIMER, src))
+    if wanted_by is None or "timers.target" not in wanted_by:
+        return False
+    exec_start = directive("ExecStart", unit_source(BACKUP_SERVICE, src))
+    if exec_start is None or "analyze-service-index/backup.py" not in exec_start:
+        return False
+    return script_exists
+
+
+def _section_states(claim: str, section: str) -> bool:
+    """Does the section ASSERT `claim` — not merely quote it while retracting it?
+
+    🔴 A substring test over the whole section is walkable by a QUOTED
+    RETRACTION: "⚠ This section used to say: '<claim>'. That is NO LONGER TRUE —
+    the unit was retired and a destroyed scope is UNRECOVERABLE" contains the
+    claim and would satisfy a naive pin. That is not hypothetical here — the
+    doc already uses exactly that retraction shape, so it is the natural thing a
+    future editor writes.
+
+    🔴 THE MATCH RUNS OVER BLOCKS, AND A BLOCK IS DISQUALIFIED BY CONTACT WITH A
+    RETRACTION — not by the claim's formatting. Four walks were measured against
+    weaker versions of this, and the rule is the smallest thing that covers all
+    four:
+
+    1. DELETING retraction lines and re-joining makes previously NON-ADJACENT
+       text contiguous. Wedge `⚠ NO LONGER TRUE — the unit was RETIRED` into the
+       MIDDLE of the claim and a delete-then-rejoin filter stitches the halves
+       back together — green where the plain substring test was correctly red.
+    2. Neutralising only the marker's LINE is defeated by ADJACENCY. Put
+       `⚠ This section used to say:` on its OWN line with the quotation below and
+       the quoted claim stands untouched.
+    3. The MIRROR of 2 — a marker on the line BELOW the claim — is the more
+       natural editorial shape and was uncaught for three rounds.
+    4. Requiring the claim to be a `-` LIST ITEM closed 2 but broke the file's
+       own purpose: `CLAIM_ABSENT` is handed over with "replace the claim with
+       this PARAGRAPH", and a pasted paragraph then matched nothing, so the gate
+       stayed red with the same message — the unfollowable-instruction defect
+       this file exists to prevent, re-created by the fix for a sibling walk. It
+       also reddened the required check on any reformat from `-` to `*`, and it
+       silently defanged three sibling assertions whose fixtures are paragraphs.
+
+    So: blocks are split on blank lines AND at list-item starts (`-`, `*`, `+`, `1.`),
+    and a block containing a retraction marker is disqualified. The claim's own
+    formatting is irrelevant — paragraph, bullet or wrapped all match.
+
+    🔴 A CONTACT RULE — tainting the block ADJACENT to a marked one — WAS TRIED
+    AND REMOVED, deliberately, and this is the reasoning so it is not re-added
+    by someone reading walks 2 and 3 above. It was measured to buy nothing and
+    to cost a live fragility:
+
+      * NOTHING REACHED IT. Both shipped retraction fixtures collapse into a
+        SINGLE marked block, so they are caught by the marked-block rule; the
+        entire taint loop could be deleted with the suite green. An assertion
+        message named the contact rule while its fixture never exercised it —
+        the same defect this ladder had just found in `nix_units`.
+      * IT PUT THE LIVE DOC ONE ORDINARY EDIT FROM AN UNFOLLOWABLE RED. The
+        Store-safety section opens with a ⚠ retraction paragraph, and the claim
+        bullet was untainted only because an unrelated `- hourly, local` bullet
+        sat between them. Delete that bullet, reorder the two, or add a ⚠ to it
+        — all three flipped the gate to FAIL with "does not carry the canonical
+        claim … Expected this text: <the claim>" while the claim was present
+        verbatim. That is the permanently-red, instruction-cannot-be-followed
+        gate this file exists to prevent.
+
+    A retraction ABOUT a section legitimately precedes the claims it corrects;
+    a retraction QUOTING a claim contains it. Only the second is mechanically
+    separable, so only the second is caught.
+
+    ⚠ STATED LIMIT — the exact residual, pinned by
+    `test_the_shapes_this_pin_does_NOT_catch`: a retraction that does not share
+    a BLOCK with the claim is not caught. Concretely, three shapes walk it, all
+    measured: `- <claim>` followed by `- ⚠ NO LONGER TRUE`; `- ⚠ used to say:`
+    followed by `- <claim>`; and a marker paragraph followed by the claim as a
+    bullet — with or without a blank line between, since a list start ends a
+    block regardless. A marker-free retraction walks it in any shape. This is
+    not a proof that no retraction can pass, and the pin above is what makes a
+    future improvement visible rather than accidental.
+    """
+    raw = section.splitlines()
+    blocks: list[tuple[list[str], bool]] = []   # (lines, contains-marker)
+    cur: list[str] = []
+    cur_marked = False
+    for ln in raw:
+        blank = not ln.strip()
+        if blank or _LIST_ITEM.match(ln):
+            if cur:
+                blocks.append((cur, cur_marked))
+            cur, cur_marked = [], False
+            if blank:
+                continue
+        cur.append(ln)
+        cur_marked = cur_marked or any(
+            m in ln.lower() for m in _RETRACTION_MARKERS)
+    if cur:
+        blocks.append((cur, cur_marked))
+
+    target = _normalise(claim)
+    return any(
+        not marked and target in _normalise("\n".join(lines))
+        for lines, marked in blocks
+    )
+
+
+def test_the_backup_claim_matches_the_nix_wiring() -> None:
+    section = _store_safety_section()
+    wired = _nix_wires_a_backup()
+
+    if wired and not _section_states(CLAIM_PRESENT, section):
+        raise AssertionError(
+            "nix/home.nix wires a live, enabled, unconditional backup (service + "
+            f"timer + {BACKUP_PY.relative_to(REPO)}), but the 'Store safety' section "
+            f"of {STORE_SAFETY_DOC.relative_to(REPO)} does not carry the canonical "
+            "claim. An agent that has just lost the store reads that section and "
+            "must be told a restore path EXISTS and what reads a bundle back.\n\n"
+            "Expected this text (whitespace and emphasis are free, WORDS are not):\n\n"
+            f"{CLAIM_PRESENT}\n"
+        )
+    if not wired and not _section_states(CLAIM_ABSENT, section):
+        raise AssertionError(
+            "nix/home.nix no longer wires a live, enabled, unconditional backup, but "
+            f"{STORE_SAFETY_DOC.relative_to(REPO)} still claims one. A promised "
+            "backup that does not run is worse than an admitted absence.\n\n"
+            "Either restore the wiring, or replace the claim with this paragraph:\n\n"
+            f"{CLAIM_ABSENT}\n"
+        )
+
+
+def test_the_two_canonical_claims_are_mutually_exclusive() -> None:
+    """Neither paragraph may satisfy the other's check.
+
+    Without this, a future edit that made the two texts overlap would let one
+    section satisfy BOTH states, and the `A == B` assertion above would stop
+    discriminating while still passing.
+    """
+    assert not _section_states(CLAIM_PRESENT, CLAIM_ABSENT)
+    assert not _section_states(CLAIM_ABSENT, CLAIM_PRESENT)
+
+
+def test_the_claim_detector_sees_polarity_not_just_tokens() -> None:
+    """🔴 The regression that killed the first version of this guard.
+
+    A token-presence detector passed this text. It names the unit, the bucket
+    and the restore tool — every token the old `REQUIRED_IN_CLAIM` demanded —
+    while telling the reader the exact opposite of the truth.
+    """
+    reversed_claim = (
+        "**Store safety.** IRREPLACEABLE — there is **NO** off-machine backup and no "
+        "way to recover it. The `analyze-service-index-backup` unit was **REMOVED**, "
+        "the MinIO bucket `analyze-service-index-backups` was **deleted**, and "
+        "`restore-verify.py` no longer works. A destructive write here is PERMANENT."
+    )
+    assert not _section_states(CLAIM_PRESENT, reversed_claim), (
+        "the detector accepted a meaning-REVERSED section that happens to contain "
+        "the right nouns — it is pinning vocabulary, not the claim"
+    )
+
+    # The stale pre-2026-08-21 wording must not pass either.
+    stale = (
+        "**Store safety.** The content is **curated, irreplaceable, not re-derivable "
+        "by re-running recon**, with no off-machine backup."
+    )
+    assert not _section_states(CLAIM_PRESENT, stale)
+
+    # A vague claim naming no restore path must not pass.
+    assert not _section_states(
+        CLAIM_PRESENT, "**Store safety.** The store is backed up off-machine every day."
+    )
+
+    # POSITIVE CONTROL — the canonical claim, rewrapped and re-emphasised, must
+    # still be seen. Without this the detector could be answering False always.
+    rewrapped = (
+        "- __daily, off-machine__ —\n  `analyze-service-index-backup.service`\n  bundles "
+        "every    scope, **age-encrypted**, to the homelab MinIO `minio-archive`\n"
+        "  tenant, bucket `analyze-service-index-backups`, key\n"
+        "  `<host>-<machine-id>/<scope>/<ts>.bundle.age`. Read them back with\n"
+        "  `scripts/analyze-service-index/restore-verify.py`; `escrow-verify.py`\n"
+        "  checks the key material."
+    )
+    assert _section_states(CLAIM_PRESENT, rewrapped), (
+        "the detector could not see the canonical claim after a rewrap — it would "
+        "report the live doc as missing one no matter what it said"
+    )
+
+    # 🔴 `_` IS EMPHASIS AT A WORD BOUNDARY AND AN IDENTIFIER CHARACTER INSIDE
+    # ONE. `__daily__` above proves the first half; this proves the second, so a
+    # future `_normalise` that goes back to stripping `_` unconditionally is
+    # caught rather than silently widening every pin that names an identifier.
+    assert _normalise("__x__ ASIB_KEEP") == "x asib_keep"
+
+
+def test_a_quoted_retraction_cannot_satisfy_the_pin() -> None:
+    """🔴 The walk that survived the whole-string pin.
+
+    A substring test over the section is satisfied by text that QUOTES the claim
+    in order to deny it — and this doc already uses that retraction shape, so it
+    is the natural thing a future editor writes, not a contrived attack.
+    """
+    quoted_denial = (
+        "**Store safety.** ⚠ This section used to say: "
+        f"\"{CLAIM_PRESENT}\" That is NO LONGER TRUE — the unit was retired and a "
+        "destroyed scope is UNRECOVERABLE."
+    )
+    assert not _section_states(CLAIM_PRESENT, quoted_denial), (
+        "a quoted retraction satisfied the pin — the guard would certify a doc "
+        "that tells the reader the exact opposite of the claim it is pinning"
+    )
+
+    # CONTROL: neutralising retraction lines must not blind the detector to a
+    # real claim sitting beside one. The live doc has both.
+    assert _section_states(CLAIM_PRESENT, _store_safety_section()), (
+        "neutralising retraction lines also dropped the live claim — the filter "
+        "is eating the thing it is supposed to protect"
+    )
+
+    # 🔴 THE WALK THE FIRST FILTER OPENED. Deleting a retraction line rejoins
+    # what sat on either side of it, so a retraction WEDGED INTO the claim was
+    # stitched back together and passed — green where the plain substring test
+    # it replaced was correctly red. The sentinel is what keeps the break.
+    lines = CLAIM_PRESENT.split(", key ")
+    assert len(lines) == 2, "fixture assumption broken — rebuild the wedge"
+    wedged = (
+        f"- {lines[0]}, key\n"
+        "⚠ NO LONGER TRUE as of 2026-09-01 — the unit was RETIRED.\n"
+        f"{lines[1]}"
+    )
+    assert not _section_states(CLAIM_PRESENT, wedged), (
+        "a retraction wedged INTO the claim was stitched back together — the "
+        "filter closed the quoted-retraction walk by opening a wedged one"
+    )
+
+    # 🔴 THE WALK THE SENTINEL ALONE DID NOT CLOSE. Put the marker on its OWN
+    # line and the sentinel replaces only that line, leaving the quotation
+    # intact below it. Measured green before the list-item scoping; the limit is
+    # ADJACENCY, not the marker's spelling, and the docstring used to say the
+    # opposite.
+    own_line_marker = (
+        "**Store safety.**\n"
+        "⚠ This section used to say:\n"
+        f"{CLAIM_PRESENT}\n"
+        "That is NO LONGER TRUE — the unit was retired; recovery is impossible."
+    )
+    assert not _section_states(CLAIM_PRESENT, own_line_marker), (
+        "a retraction marker on its own line left the quoted claim standing — "
+        "the pin is certifying a doc that says the backup was retired"
+    )
+
+    # 🔴 THE MIRROR OF THE ABOVE — a marker BELOW the claim, as a continuation
+    # of the same block. Caught because it shares the claim's block, which is
+    # the only mechanism here: see the docstring on why the contact rule that
+    # would also have caught the SEPARATE-block shapes was removed.
+    marker_below = f"- {CLAIM_PRESENT}\n  ⚠ NO LONGER TRUE — the unit was RETIRED."
+    assert not _section_states(CLAIM_PRESENT, marker_below), (
+        "a retraction on the continuation line BELOW the claim left it "
+        "standing — the marker is inside the claim's own block"
+    )
+    # A ⚠ paragraph that is NOT part of the claim's block must not disqualify
+    # it: the live doc's Store-safety section opens with exactly that, and
+    # tainting across the boundary is what made this gate fragile.
+    blank_separated = f"- {CLAIM_PRESENT}\n\n⚠ NO LONGER TRUE — the unit was RETIRED."
+    assert _section_states(CLAIM_PRESENT, blank_separated), (
+        "an unrelated ⚠ paragraph disqualified a claim in another block — the "
+        "live doc would red the required check on an ordinary edit"
+    )
+
+    # 🔴 THE FILE'S OWN INSTRUCTION MUST BE FOLLOWABLE. The failure message says
+    # "replace the claim with this paragraph" and hands over CLAIM_ABSENT. A
+    # bullet-only matcher answered False for a pasted PARAGRAPH, so the gate
+    # stayed red with the same message — the unfollowable-instruction defect
+    # this file exists to prevent, re-created by a fix for a sibling walk.
+    assert _section_states(CLAIM_ABSENT, f"**Store safety.** {CLAIM_ABSENT}"), (
+        "the decommission paragraph cannot satisfy its own guard — the "
+        "instruction the failure message gives cannot be followed"
+    )
+    for bullet in ("-", "*", "1."):
+        assert _section_states(CLAIM_PRESENT, f"{bullet} {CLAIM_PRESENT}"), (
+            f"a {bullet!r} list item did not match — an ordinary markdown "
+            "reformat would red the required check on both tiers"
+        )
+
+    # CONTROL for the list-item scoping: a claim that IS a bullet must still be
+    # seen when it wraps across continuation lines, or the rule above would
+    # reject the live doc for the wrong reason.
+    halves2 = CLAIM_PRESENT.split(", bucket ")
+    assert len(halves2) == 2, "fixture assumption broken"
+    wrapped_bullet = f"- {halves2[0]}, bucket\n  {halves2[1]}"
+    assert _section_states(CLAIM_PRESENT, wrapped_bullet), (
+        "the list-item scoping rejected a claim that IS a wrapped bullet — it "
+        "would reject the live doc for the wrong reason"
+    )
+
+
+def test_the_wiring_check_is_not_fooled_by_comments_or_a_disabled_timer() -> None:
+    """🔴 The other regression that killed the first version.
+
+    An audit renamed both attribute paths and left only `#` comment lines naming
+    the originals. Live declarations: 0 and 0. The substring-based check stayed
+    GREEN while the docs promised daily bundles.
+
+    Each mutant below breaks the backup in a way a naive `substring in src`
+    cannot see, and each is asserted to flip `_nix_wires_a_backup` to False —
+    the whole predicate, not one clause of it, so a mutant that an earlier
+    clause happens to reject cannot be mistaken for this clause working.
+    """
+    live = HOME_NIX.read_text(encoding="utf-8")
+
+    # POSITIVE CONTROL. Without this every assertion below is satisfied by a
+    # predicate that returns False unconditionally.
+    assert _nix_wires_a_backup(live), (
+        "the live home.nix must read as wired, or every mutant below passes "
+        "for the wrong reason"
+    )
+
+    # 1. Declared only inside a comment — the measured walk.
+    commented = live.replace(
+        f"  {BACKUP_SERVICE} =", f"  # DISABLED 2026-09-01: {BACKUP_SERVICE} =", 1
+    )
+    assert not _nix_wires_a_backup(commented), (
+        "a commented-out declaration still reads as wired — the reader is "
+        "answering about the prose, not the configuration"
+    )
+
+    # 2. Timer declared but never enabled: it exists and never fires.
+    #    🔴 Built by index arithmetic on the RAW source, not by replacing the
+    #    comment-stripped block: the first attempt did the latter, the
+    #    `str.replace` matched nothing, and the "mutant" was byte-identical to
+    #    `live` — a mutant that never applied, scored as SURVIVED. The
+    #    `mutated != live` assertion below is what makes that impossible.
+    wanted_by = 'WantedBy = [ "timers.target" ];'
+    assert wanted_by in unit_source(BACKUP_TIMER, live)
+    at = live.index(f"  {BACKUP_TIMER} =")
+    cut = live.index(wanted_by, at)
+    unenabled = live[:cut] + live[cut + len(wanted_by):]
+    assert unenabled != live, "the mutant did not apply — it proves nothing"
+    assert not _nix_wires_a_backup(unenabled), (
+        "a timer with no `WantedBy` reads as wired — it is declared, never "
+        "enabled, and never fires"
+    )
+
+    # 3. Gated behind `lib.mkIf`: false on every host the condition excludes,
+    #    while the doc promises it unconditionally.
+    gated = live.replace(
+        f"  {BACKUP_TIMER} = {{", f"  {BACKUP_TIMER} = lib.mkIf serverMode {{", 1
+    )
+    assert is_conditional(BACKUP_TIMER, gated)
+    assert not is_conditional(BACKUP_TIMER, live)
+    assert not _nix_wires_a_backup(gated), (
+        "a `lib.mkIf` gate went unnoticed — an unconditional doc promise about "
+        "a conditional unit is false on every excluded host"
+    )
+
+    # 3b. 🔴 THE SAME GATE ON THE *SERVICE*, whose declaration has a DIFFERENT
+    #     SHAPE. Clause 3 above only ever exercised the timer (`= {` on one
+    #     line); the service is `=` then `let … in {`, so its `=` line is EMPTY
+    #     and a gate written where nix style puts it for that shape was
+    #     invisible. Breakable on one unit and inert on the other is the
+    #     "prove it REACHABLE, not just breakable" trap.
+    #     🔴 THE GATE GOES ON THE LINE *AFTER* THE `=`, NOT AT THE END OF IT.
+    #     The first version of this mutant appended ` lib.mkIf serverMode` to
+    #     the `=` line — which the PRE-FIX one-line reader ALREADY caught, so
+    #     the whole clause was VACUOUS: an audit measured `is_conditional`
+    #     revertible to the one-liner with the suite fully green. The mutant
+    #     must land where nix style actually puts a gate for the `let … in {`
+    #     shape, which is the next line.
+    at_svc = live.index(f"  {BACKUP_SERVICE} =")
+    eol = live.index("\n", at_svc)
+    gated_svc = live[:eol + 1] + "    lib.mkIf serverMode (\n" + live[eol + 1:]
+    assert gated_svc != live, "the mutant did not apply — it proves nothing"
+    assert live[at_svc:eol].rstrip().endswith("="), (
+        "control: the service's `=` line must END at the `=` for this mutant to "
+        "test the NEXT-line case; if the declaration shape changed, rebuild it"
+    )
+    assert is_conditional(BACKUP_SERVICE, gated_svc), (
+        "a `lib.mkIf` on the SERVICE went unnoticed — its `=` line is empty, so "
+        "a reader that only looks at that line is inert on this unit"
+    )
+    assert not _nix_wires_a_backup(gated_svc)
+
+    # 4. `WantedBy` swapped for `After`: the timer is DECLARED, ordered against
+    #    timers.target, and enabled by nothing. A substring check for
+    #    "timers.target" passes; the directive check does not.
+    after_not_wanted = live[:cut] + 'After = [ "timers.target" ];' + live[cut + len(wanted_by):]
+    assert after_not_wanted != live, "the mutant did not apply — it proves nothing"
+    assert "timers.target" in unit_source(BACKUP_TIMER, after_not_wanted), (
+        "control: the substring a naive check would find must still be present, "
+        "or this mutant proves nothing about reading the DIRECTIVE"
+    )
+    assert not _nix_wires_a_backup(after_not_wanted), (
+        "`After = [ \"timers.target\" ]` read as an enabled timer — the check is "
+        "matching a substring, not the WantedBy directive"
+    )
+
+    # 5. ExecStart deleted while `X-Restart-Triggers` on the NEXT line still
+    #    carries the same path. A `Type=oneshot` unit with no ExecStart cannot
+    #    run at all; a substring check stays green.
+    svc = unit_source(BACKUP_SERVICE, live)
+    exec_line = next(ln for ln in svc.splitlines() if "ExecStart" in ln)
+    at_exec = live.index(exec_line.strip())
+    no_exec = live[:at_exec] + live[live.index("\n", at_exec) + 1:]
+    assert no_exec != live, "the mutant did not apply — it proves nothing"
+    assert "analyze-service-index/backup.py" in unit_source(BACKUP_SERVICE, no_exec), (
+        "control: X-Restart-Triggers must still carry the path, or this mutant "
+        "proves nothing about reading the DIRECTIVE"
+    )
+    assert not _nix_wires_a_backup(no_exec), (
+        "a service with no ExecStart read as wired — the check is matching the "
+        "path anywhere in the block, and X-Restart-Triggers supplies it"
+    )
+
+    # 4. ExecStart names a script that is not on disk.
+    assert not _nix_wires_a_backup(live, script_exists=False), (
+        "a missing backup.py reads as wired — the unit would fail on every run"
+    )
+
+
+def test_list_item_splitting_is_what_the_pattern_is_for() -> None:
+    """🔴 `_LIST_ITEM`'s real job, which the bullet-form loop does NOT exercise.
+
+    Since the redesign the claim's formatting is irrelevant — a `*` bullet
+    matches as a plain line whether or not the pattern recognises it — so
+    narrowing the pattern back to `-` survived a fully green suite. What the
+    widening actually buys is BLOCK SPLITTING: a retracted `*` item must not
+    contaminate the next one, and must not shield itself either.
+    """
+    c = CLAIM_PRESENT
+    for bullet in ("-", "*", "+", "1."):
+        # The marker sits in a SEPARATE item; the claim's item must survive.
+        assert _section_states(c, f"{bullet} ⚠ used to say something else\n{bullet} {c}"), (
+            f"a {bullet!r} item did not split the block — a retraction in the "
+            "PREVIOUS item disqualified an unrelated claim"
+        )
+        # …and a marker in the claim's OWN item must still disqualify it.
+        assert not _section_states(c, f"{bullet} {c} ⚠ NO LONGER TRUE"), (
+            f"a {bullet!r} item carrying its own retraction still matched"
+        )
+
+
+def test_every_retraction_marker_is_individually_load_bearing() -> None:
+    """🔴 Each marker alone, on a claim carrying NO other marker.
+
+    Every other fixture in this file uses at least two markers at once ("⚠ …
+    used to say", "NO LONGER TRUE" beside a "⚠"), so dropping any single one
+    from `_RETRACTION_MARKERS` survived the whole suite. `⚠` is the worst of
+    them to lose: it is the glyph this doc's own house style uses, so
+    `- <claim> ⚠ RETIRED 2026-09-01.` is the terse edit a maintainer actually
+    writes — and with `⚠` unpinned the guard certified it.
+
+    `.lower()` is pinned by the upper-cased spellings below for the same
+    reason: nothing else forced it.
+
+    🔴 THE MARKERS ARE SPELLED OUT HERE, NOT READ FROM `_RETRACTION_MARKERS`.
+    The first version of this test iterated the tuple — so a mutant that DROPPED
+    an element also dropped its own test case, and `⚠` was scored KILLED by an
+    unrelated test while this one passed vacuously. Never derive a test's
+    expectation from the thing it is testing.
+    """
+    expected = ("used to say", "used to read", "no longer true", "⚠")
+    assert set(_RETRACTION_MARKERS) == set(expected), (
+        "the marker set changed; add the new one to this literal list — it is "
+        "deliberately a second copy so a dropped element cannot hide here"
+    )
+    for marker in expected:
+        one = f"- {CLAIM_PRESENT} {marker} 2026-09-01."
+        assert not _section_states(CLAIM_PRESENT, one), (
+            f"a claim retracted with {marker!r} ALONE still matched — that "
+            "marker is not load-bearing and could be dropped unnoticed"
+        )
+    for spelling in ("USED TO SAY", "No Longer True", "Used To Read"):
+        assert not _section_states(CLAIM_PRESENT, f"- {CLAIM_PRESENT} {spelling}."), (
+            f"{spelling!r} was not recognised — the marker match is "
+            "case-sensitive, so an ordinary capitalisation walks it"
+        )
+
+
+def test_a_marker_ABOVE_the_claim_in_the_same_block_disqualifies_it() -> None:
+    """🔴 Walk #2 of `_section_states`'s docstring, isolated.
+
+    `cur_marked = cur_marked or any(...)` accumulates across the whole block.
+    Reducing it to `cur_marked = any(...)` — the last line only — survived the
+    suite, because `own_line_marker` happens to carry a closing "That is NO
+    LONGER TRUE" line that lands a marker on the block's LAST line. Remove that
+    line and the fixture stops covering the branch it appears to cover.
+
+    This fixture has the marker ONLY above, so the accumulation is the only
+    thing that can catch it.
+    """
+    marker_above_only = f"⚠ This section used to say:\n{CLAIM_PRESENT}"
+    assert not _section_states(CLAIM_PRESENT, marker_above_only), (
+        "a marker on an EARLIER line of the claim's own block did not "
+        "disqualify it — the marked flag is not accumulating across the block"
+    )
+
+
+def test_the_list_item_pattern_must_not_split_on_bold_or_prose() -> None:
+    """🔴 `_LIST_ITEM` also decides what is NOT a bullet, and that half is what
+    the trailing `\\s` buys.
+
+    Dropping the `\\s` makes `**bold**` read as a `*` list item. Both directions
+    then break: a wrapped claim whose continuation begins `**` splits into a
+    block no longer containing the whole claim (a FALSE RED on the required
+    check from an ordinary rewrap), and a retraction whose continuation begins
+    `**` escapes its marked block (a FALSE GREEN). `.match` vs `.search` is
+    pinned here too — a mid-line `- ` must not start a block.
+    """
+    halves = CLAIM_PRESENT.split(", bucket ")
+    assert len(halves) == 2, "fixture assumption broken"
+    wrapped_bold = f"- {halves[0]}, bucket\n  **{halves[1]}**"
+    assert _section_states(CLAIM_PRESENT, wrapped_bold), (
+        "a continuation line beginning `**` was read as a new list item — an "
+        "ordinary markdown rewrap now reds the required check"
+    )
+
+    retracted_bold = (
+        f"- {CLAIM_PRESENT}\n  **⚠ NO LONGER TRUE — the unit was RETIRED.**"
+    )
+    assert not _section_states(CLAIM_PRESENT, retracted_bold), (
+        "a bolded retraction escaped the claim's block — it was read as a new "
+        "list item instead of a continuation"
+    )
+
+    # 🔴 `.match`, not `.search` — anchored at the START of the line.
+    #
+    # The first fixture for this put the dash on a line that ALREADY began with
+    # a bullet, so `.match` and `.search` split identically and the mutant
+    # survived. It has to be a CONTINUATION line that contains a dash but does
+    # not start with one: under `.search` that line starts a new block, which
+    # cuts the retraction away from the claim it retracts.
+    continuation_with_dash = (
+        f"- {CLAIM_PRESENT}\n"
+        "  superseded 2026-09-01 - ⚠ NO LONGER TRUE, the unit was RETIRED."
+    )
+    assert not _section_states(CLAIM_PRESENT, continuation_with_dash), (
+        "a dash INSIDE a continuation line started a new block, splitting the "
+        "retraction away from the claim — the pattern is not anchored"
+    )
+
+
+def test_the_shapes_this_pin_does_NOT_catch() -> None:
+    """🔴 THE STATED LIMIT, PINNED — so it stays a decision, not a surprise.
+
+    `_section_states` catches a retraction only when it shares a BLOCK with the
+    claim. The shapes below therefore walk it, and a contact rule that would
+    have caught them was removed on purpose (see `_section_states`'s docstring:
+    nothing reached it, and it put the live doc one ordinary edit from an
+    unfollowable red).
+
+    This test asserts the CURRENT behaviour rather than the desired one. If you
+    close any of these, it goes red and tells you to update the stated limit —
+    which is the point: a residual nobody can see is how a guard's description
+    drifts wider than its body.
+    """
+    c = CLAIM_PRESENT
+    uncaught = {
+        "marker as a sibling bullet BELOW":
+            f"- {c}\n- ⚠ NO LONGER TRUE — the unit was RETIRED.",
+        "marker as a sibling bullet ABOVE":
+            f"- ⚠ This section used to say:\n- {c}",
+        "marker paragraph, claim as a bullet":
+            f"⚠ This section used to say:\n- {c}",
+        "marker paragraph, blank line, claim as a bullet":
+            f"⚠ This section used to say:\n\n- {c}",
+        "retraction using none of the marker words":
+            f"- {c}\n  (RETRACTED 2026-09-01; the unit is gone.)",
+    }
+    still_walks = [k for k, v in uncaught.items() if _section_states(c, v)]
+    assert still_walks == list(uncaught), (
+        "a shape the stated limit lists as UNCAUGHT is now caught: "
+        f"{sorted(set(uncaught) - set(still_walks))}. That is an improvement — "
+        "update `_section_states`'s STATED LIMIT and this fixture together, so "
+        "the description never claims more or less than the body delivers."
+    )
+
+
+def test_the_live_doc_is_not_one_edit_from_an_unfollowable_red() -> None:
+    """🔴 The fragility that killed the contact rule, pinned against its return.
+
+    Under that rule the live claim survived only because an unrelated bullet sat
+    between it and the section's ⚠ preamble. Each edit below flipped the gate to
+    FAIL with "does not carry the canonical claim" while the claim was present
+    verbatim — a red whose instruction cannot be followed. All must stay green.
+    """
+    section = _store_safety_section()
+    lines = section.splitlines()
+    claim_i = next(i for i, ln in enumerate(lines) if "daily, off-machine" in ln)
+    hourly_i = next(i for i, ln in enumerate(lines) if "hourly, local" in ln)
+    assert hourly_i == claim_i - 1, (
+        "fixture assumption broken: the two bullets are no longer adjacent, so "
+        "these edits no longer reproduce the fragility"
+    )
+
+    without_sibling = "\n".join(lines[:hourly_i] + lines[hourly_i + 1:])
+    swapped = "\n".join(
+        lines[:hourly_i] + [lines[claim_i], lines[hourly_i]] + lines[claim_i + 1:])
+    sibling_marked = "\n".join(
+        lines[:hourly_i] + [lines[hourly_i] + " ⚠ see below"] + lines[hourly_i + 1:])
+
+    for name, variant in (("sibling deleted", without_sibling),
+                          ("bullets swapped", swapped),
+                          ("sibling carries a ⚠", sibling_marked)):
+        assert _section_states(CLAIM_PRESENT, variant), (
+            f"an ordinary docs edit ({name}) reds the required check while the "
+            "claim is present verbatim — the contact rule, or something like "
+            "it, is back"
+        )
+
+
+def test_the_section_slice_is_bounded_by_the_next_heading() -> None:
+    """The claim must live IN Store safety, not merely somewhere in the file."""
+    section = _store_safety_section()
+    assert section.startswith("**Store safety.**"), section[:80]
+    assert "\n## " not in section, (
+        "the Store-safety slice ran past a markdown heading — it is no longer a "
+        "section slice, so a mention anywhere later in the file would satisfy it"
+    )
+    assert "## File schema" not in section
