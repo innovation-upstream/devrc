@@ -28,67 +28,44 @@ survives adversarial re-derivation, and fix whatever it exposes.
   context-exhausted · 2 never-started**, with a `Stop` hook already firing in **8 of 8** of the
   dominant bucket. Clawgate leg: of the 85 tasks that advanced past `open`, **73 (86%)** carry
   a write-back comment; **0** of 186 were agent-dispatched.
-- ✅ **devrc#1055 MERGED 2026-09-01T00:58:32Z as `8c108d8b`** (squash). 🔴 **Verified by CONTENT on
-  `origin/main`, never by ancestry** — `merge-base --is-ancestor` reads **false** forever after a
-  squash: the doc carries all four of that session's updates and
-  `git cat-file -s origin/main:claude/skills/clawgate/SKILL.md` = **15086**.
-- 🔴 **THE BRANCH `zach/skill-chain-usage-audit` IS GONE. Work off `origin/main`.** This doc's
-  canonical copy is now on `main`; every earlier instruction here to work detached off that branch
-  is obsolete and was removed with this update. Evidence blocks below still NAME the branch as
-  history — that is correct as history, and they cite **shas**, which survive a branch deletion
-  where a branch name does not.
-- ✅ **MERGED AND LIVE ON BOTH HOSTS — ranks 2 + 7: `scripts/claude-hooks/handoff-write-guard.py`.**
-  devrc**#1092** merged as **`ad891a5c`**; `ship.sh` converged both hosts to `bd1572f3` (verified
-  by ANCESTRY of the shipped sha, plus a byte check: deployed blob **`6d25558e`**). Registered on
-  both hosts — 1 `PostToolUse`, 1 `Stop`, **0** `SessionStart` — and probed live against the
-  DEPLOYED copy. **Merged and registered are two claims; both were made separately.**
-- ✅ **MERGED — rank 6: devrc#1108 as `57b010fb`** (squash, 2026-08-31T05:15:15Z; **verified by
-  CONTENT on `origin/main`, never by ancestry** — ancestry is false forever after a squash).
-  9 commits: the correction, six audit rounds, two gate re-triggers. **Every round found something
-  real and FIVE of six found the PREVIOUS round's correction wrong** — detail in store `devrc/skills.md`
-  (the ladder block itself is now a tombstone);
-  that ratio is the durable finding, not the PR.
-- ✅ **CLOSED — rank 3**, committed on #1055: the drift question does not discriminate (95.5% of
-  abandoned docs declare open work vs a **90.3% control**). Real finding: **13 / 26** abandoned and
-  uncommitted-since, **5** with no link from X to Y. Instrument
-  `claudedocs/skill-chain-drift-audit.py`, 4 controls, all green.
-- ✅ **CLOSED — the CI investigation, and it LEAVES this arc.** Capacity, already measured in-tree
-  at `scripts/tests/test_subsystem_store_api.py:99-108`. The symptom fix (`8e33bf1d`, #1023,
-  `HANG_TIMEOUT` 15→60 s) is live and **insufficient**. 🔴 See the WALK-BACK block: the queue-depth
-  attribution is an **uncontrolled covariate**, not a demonstrated cause — and the 2026-08-31
-  correction block below shows it was not even the right *class* for #1055.
-- ✅ **RANK 9 CLOSED, PREMISE REFUTED TWICE.** #1055 needed TWO unrelated fixes, neither a
-  re-trigger: (i) 94 commits stale ⇒ `git merge origin/main` (`31cd214d`), red→green on
-  `test_live_existing_resolutions_not_made_ambiguous`; (ii) the unnamed half of `failed=2` was
-  `test_the_skill_did_not_grow` — rank 4's own unpaid **405 B** growth of
-  `claude/skills/clawgate/SKILL.md` past a 15088 B ceiling, already red at `f85b7444` (15491 B) —
-  fixed by EVICTION in `eb1eb185` (15086 B, 310 passed). **Both verified locally in well under a
-  second, each against an `origin/main` control.** Final gate `devrc-ci-xqb5m`: `failed=0`,
-  `collected=19942 passed=19939`, nodetests 1449/1449, **both tiers pass**, both statuses posted.
-  `failed=2 → 1 → 0`, one per fix. ⚠ `mergeable` read `UNKNOWN` right after the push (GitHub
-  computes it lazily) and `MERGEABLE / CLEAN` minutes later — that is not a conflict signal.
-- ✅ **Subsystem store recorded** (`--pr 1108,1055` and `--pr 1055` windows; the `--session` window
-  REFUSED with `transcript cwd does not match`, correctly, because these sessions ran in
-  `datapacket-talos`). `devrc/tests.md` carries the stale-base-vs-environment discriminator and the
-  `failed=N` lesson (one bullet RESOLVED `eb1eb185`); `devrc/skills.md` (the derivation-command
-  lesson) and `devrc/analyze-service-index.md` (recall *lists* vs *features*) from the prior
-  session, which also closed an `OPEN:` bullet that was not its own — the clawgate "browser layer
-  is UNGATED" item, fix merged as `6bf866fe`, scope open-actions 1 → 0.
-- ✅ **RANK 11 DONE, and devrc#1064 is MERGED as `f71ff648`** (2026-09-01T17:02:24Z; verified by
-  CONTENT on `origin/main`). `origin/main` was merged forward into `feat/handoff-audit`
-  (`466a0938..4beb41e1`), gate `devrc-ci-qbgmb` `failed=0`, `collected=20146 passed=20143`,
-  nodetests 1449/1449, both tiers; the merge was a SEPARATE, later decision, not part of rank 11.
-  It was **124** commits behind, not the 93 previously recorded — re-derive that count when you act.
-- ✅ **RANK 4 DONE (2026-09-01) — and it required NO deploy.** The store copy at
-  `~/.claude/skills/clawgate/SKILL.md` is already byte-identical to `origin/main` (15086 B,
-  `preserve both` = 0), so `home-manager switch` was deliberately SKIPPED rather than run as a
-  no-op riding another session's uncommitted `nix/programs/alacritty/default.nix`. 🔴 Still true:
-  `handoff-audit.py` is now on `main` but is wired into **no gate, skill or script** — it prints its
-  own `🔴 NOT ENFORCED` banner. Wiring it up is rank 5, not rank 11.
-- **Clawgate link for the sessions behind this doc: NONE.** `clawgate_handoff.sh resolve` exited
-  **5** — 0 tasks — with its positive control confirming the board was reachable. Per its contract
-  that 0 cannot distinguish "touched no task" from "wrong id", so **no `clawgate-task:` field was
-  written** and this is not a clean bill of health.
+- 🔴 **EVERY PR OF THIS ARC IS MERGED. Work off `origin/main`; there is no branch.**
+  **#1055** `8c108d8b` · **#1064** `f71ff648` · **#1198** `40d7fef2` · **#1204** `ae8e68d3` ·
+  **#1207** `4162dab1` (2026-09-01T20:03:27Z). 🔴 **All verified by CONTENT on `origin/main`,
+  never by ancestry** — `merge-base --is-ancestor` reads **false** forever after a squash.
+- ✅ **RANK 5's WORKED EXAMPLE LANDED (#1207), and the ladder that graded it is CLOSED at 6
+  rounds with round 6 CLEAN.** The doc went **80,397 → 64,837 B (−19.4%)**, 6.5x → **5.3x** the
+  12,288 B target, and is **STILL OVER the 40,960 B hard cap**. 🔴 **The −28.7% the PR description
+  claimed is WRONG and was corrected publicly** — every audit round correctly bought back bytes
+  the eviction should not have taken.
+- 🔴 **RE-DERIVE THE SIZE, NEVER QUOTE ONE FROM THIS DOC.** Measured trail:
+  `f71ff648` 80,397 · `21ee51d7` 57,356 · `1127e620` 60,964 · `ef49ac82` 62,298 · `34924645`
+  64,397 · `384e1c37`/`main` **64,837**. A figure quoted from a report that measured an EARLIER
+  commit of the same PR is the trap this arc hit in its own verification step.
+- ✅ **Ranks 4 and 11 DONE.** Rank 4 needed **no deploy** — the store copy of
+  `claude/skills/clawgate/SKILL.md` was already byte-identical to `origin/main` (15086 B), so
+  `home-manager switch` was deliberately skipped rather than run as a no-op riding another
+  session's uncommitted `nix/programs/alacritty/default.nix`. Rank 11 forward-merged `main` into
+  #1064 and its gate went green.
+- **OPEN: ranks 5, 8, 10, 12.** Derive, don't trust this line —
+  `python3 scripts/handoff-audit.py --sections 1 <this doc>` from the devrc repo root prints
+  `N/12 ranked items done` (8/12 at 2026-09-01).
+- 🔴 **CARRIED FORWARD — durable specifics the condensed status above would otherwise drop.**
+  *Ranks 2+7, the hook:* devrc**#1092** `ad891a5c`; `ship.sh` converged BOTH hosts to **`bd1572f3`**
+  (verified by ancestry of the shipped sha PLUS a byte check of the deployed blob **`6d25558e`**);
+  registered on both hosts as **1 `PostToolUse`, 1 `Stop`, 0 `SessionStart`**. *Rank 3's real
+  finding:* **13 / 26** abandoned-and-uncommitted-since, **5** with no link from X to Y (that 5 is
+  rank 12's read set). *The pre-#1211 CI history:* the symptom fix `8e33bf1d` (#1023,
+  `HANG_TIMEOUT` 15→60 s) is live and was **insufficient** — which is why #1181/#1211 exist; the
+  queue-depth attribution remains an **uncontrolled covariate**, never a demonstrated cause.
+  *Store map:* `devrc/tests.md` = the stale-base-vs-environment discriminator + the `failed=N`
+  lesson; `devrc/skills.md` = the derivation-command lesson, the `stat`/`stat -L` trap, and the
+  6-round ladder ratio; `devrc/analyze-service-index.md` = recall *lists* vs *features*.
+  *Gotcha:* `mergeable` reading `UNKNOWN` right after a push is GitHub computing it lazily — it
+  settles to `MERGEABLE / CLEAN` minutes later and is **not** a conflict signal.
+- **This session's clawgate link: NONE.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks —
+  with its positive control confirming the board was reachable. That 0 cannot distinguish
+  "touched no task" from "wrong id", so **no `clawgate-task:` field was written**, and this is
+  not a clean bill of health.
 
 ## Open investigations — live diagnosis state
 
@@ -411,6 +388,69 @@ EVICTED 2026-09-01 (terminal). Verdict: no switch was needed or run. The two tra
 ### ✅ CLOSED — rank 11: #1064 is GREEN, and its diagnosis is now confirmed from BOTH arms
 EVICTED 2026-09-01 (terminal). Verdict: #1064 green, MERGED `f71ff648`; the two-arm discriminator returned the OPPOSITE verdict to #1055, which is what shows it discriminates. In `## State now` + rank 11.
 
+### ✅ CLOSED — the 6-round audit ladder on #1207, and the ratio that is the actual finding
+- **Outcome:** round 6 returned **zero findings at any severity**; the ladder ended there and no
+  round 7 was run (`claude/RULES.md`: a clean round ENDS a ladder, never confirm one).
+- 🔴 **5 of 6 rounds found a defect created by the PREVIOUS round's fix** — the same ratio #1108
+  measured. Totals: **3 🔴, 12 🟡, 10 🟢**. Ledger `round 6 · payload lines THIS round: 8 · since
+  round 1: 151`. Cost ≈ **850k subagent tokens** to shrink one document by ~16 KB.
+- 🔴 **All three 🔴 were CERTIFICATIONS, not omissions — that is the reusable shape.** (1) a
+  tombstone stating the INVERSE of `RULES.md` and of the store; (2) a line CERTIFYING a superseded
+  CI mechanism while citing a store file that contained no such bullet; (3) a shipped derivation
+  command that **matched its own prose**, marking rank 8 done and hiding the arc's closing
+  condition. The failure mode is *asserting* durability, not forgetting it.
+- **Ruled out:** *"the attribution gate will terminate this ladder"* — it cannot; the payload is
+  the `.md`, so every round is 100% payload by construction and the gate is structurally inert.
+  What ended it was the stated criterion (no 🔴 · no blast radius past "a false sentence" · the
+  recurring shape swept at EVERY site). via: measurement
+- **Ruled out:** *"a docs-only PR is low-stakes"* — two of the 🔴 had real blast radius: one would
+  have routed a reader at capacity work the same doc marks LOCKED (`ci-speedup-7`), the other
+  corrupted the doc's own mandated derivation. via: measurement
+- **Next probe:** none — closed. If a future ladder is opened on a prose PR, read
+  `~/.claude/analyze-service-index/devrc/skills.md` (2026-09-01 bullet) first; it carries this
+  ratio and the four reusable rules.
+
+### 🔴 CROSS-PR STALENESS, ALREADY BITING: the CI mechanism this doc now documents was MITIGATED 33 minutes BEFORE #1207 merged
+- **Symptom:** the doc's superseded-hypothesis block (the one round 4 corrected) tells a reader the
+  `devrc-ci` red-gate mechanism is `server.py:_replace_bytes` fsyncing inside the request against a
+  one-node pin, and to read `scripts/ci-repro/README.md`. That was correct when written.
+- **Observed (with values):** **#1211 `1a4350f3` merged 2026-09-01T19:30:17Z** — *"site the store on
+  tmpfs so the gate stops failing on disk contention"* — i.e. the mechanism is **mitigated**. #1207
+  merged at **20:03:27Z**, 33 minutes LATER, carrying the un-caveated warning. Also landed since:
+  **#1213 `793a2b8e`** (the store-api gate flake: tmpfs fix shipped, 8-red triage, a classifier that
+  reads the checkout PATH) and **#1214 `07a22f14`**.
+- **Ruled out:** *"the doc is simply wrong"* — it is not; the mechanism and the reproducer are real
+  and `scripts/ci-repro/README.md` still documents them. What is missing is the **mitigation**, so a
+  reader will expect a failure mode that should no longer fire. via: change
+- **Leading hypothesis:** this is the arc's own recurring shape operating ACROSS PRs rather than
+  within one — a claim true at write time, falsified by a sibling change, inside no audit round's
+  range. Six rounds could not have caught it: #1211 was not in any range.
+- **Next probe, verbatim:**
+  `gh pr view 1211 --repo innovation-upstream/devrc --json state,mergedAt` then
+  `git -C ~/workspace/devrc show origin/main:scripts/ci-repro/README.md | head -40` — confirm the
+  tmpfs siting, then add a one-line MITIGATED caveat to the doc's CI block naming `1a4350f3`.
+  🔴 Do NOT delete the mechanism text: the reproducer and code sites remain the durable content.
+
+### ⚠ STILL UNATTRIBUTED — the whole-class `TestPushabilityCasesTheFetchVersionGotWRONG` failure
+- **Symptom + exact repro:** one combined run of `scripts/tests/test_handoff_audit.py` +
+  `scripts/tests/test_handoff_doc.py` produced **6 failures**, all in that one class.
+- **Observed (with values):** the class contains **exactly 6 tests**, so this was the ENTIRE class,
+  not 6 scattered flakes — the signature of a shared precondition. **13 clean runs against 1
+  failure** (4 mine + 9 round 2's); base clean 5/5; failing run wall time **20.48 s** against a
+  18–22 s norm, so **not load**. All 6 drive the `--push` success/refusal path through
+  `git ls-remote` against a local bare remote; the fixture neutralises `GIT_CONFIG_GLOBAL`/
+  `GIT_CONFIG_SYSTEM` but still inherits `os.environ`.
+- **Ruled out:** *"my diff caused it"* — the diff is one markdown file and touches no fixture; the
+  same command passed 4× on the same tree immediately after. via: measurement
+- **Ruled out:** *"it is load"* — wall time was normal, and load inflates every test in a run, not
+  one class. via: measurement
+- **Leading hypothesis:** the same disk-contention family as the store-api flake (`#1181`/`#1211`)
+  — that one is recorded as hitting *"PRs whose diff cannot reach it, docs-only included"*, 4 reds
+  across 3 different tests, each passing 3/3 locally. 🔴 **NOT the same observation**: mine was a
+  LOCAL run and that one is `devrc-ci`. It is a lead, not an attribution.
+- **Next probe:** if it recurs, capture `/proc/loadavg` and `iostat -x 1 3` at failure time, and
+  re-run the class alone vs combined to test the shared-precondition reading.
+
 ## Next steps (ranked)
 
 🔴 **The numbering below is STABLE and load-bearing** — `claim-work --slug-for <this doc> <rank>`
@@ -419,116 +459,80 @@ rather than removed and renumbered. New work is appended at the end.
 
 1. ✅ **DONE (2026-08-29)** — the end-state split: 8 cleanly-ended vs 2 context-exhausted of 16.
    forcing: none
-
 2. ✅ **DONE (2026-08-30)** — the handoff-write `Stop` hook. **MERGED as `ad891a5c`.**
    forcing: none
-
-3. ✅ **DONE (2026-08-30)** — the question as posed does NOT discriminate: 95.5% of abandoned docs
-   declare open work vs a 90.3% control. Its one open thread is now rank 12.
+3. ✅ **DONE (2026-08-30)** — the question as posed does NOT discriminate: 95.5% of abandoned
+   docs declare open work against **90.3% of maintained ones**. Instrument
+   `claudedocs/skill-chain-drift-audit.py` (committed, 4 controls). Its one open thread is rank 12.
    forcing: none
-
 4. ✅ **DONE (2026-09-01) — NO deploy was needed and none was run.** The store copy was already
-   byte-identical to `origin/main`; traps are durable in store `devrc/skills.md`.
+   byte-identical to `origin/main` (15086 B, `preserve both` = 0).
    forcing: none
-
-5. **Act on the handoff-doc bloat proposal** — `claudedocs/proposal-handoff-doc-bloat.md`.
-   The auditor **MERGED as `f71ff648`** and is on `main` (rank 11); the `/handoff` SKILL.md
-   change is deliberately NOT written — operator chose propose-only. Next move is the eviction
-   contract (budget + step 4.5 + EVICT_HISTORY/RELOCATE_DURABLE/KEEP_HOT), not a gate: the caps
-   file for gate 11 records that the general ratchet rule was replayed over 365 days / 901 commits
-   and **REFUTED**, so re-run that replay for handoff docs before proposing one. 🔴 Datapoint from
-   2026-08-31: the clawgate skill ratchet DID catch a real unpaid 405 B addition — one case, on a
-   SKILL body not a handoff doc, so it does not settle the replay.
-   🔴 **FOUR requirements the 2026-09-01 worked example produced — design against these, not from
-   scratch.** (1) A TOMBSTONE, not a deletion: append-only exists so a reader sees a prior reading
-   was CORRECTED. (2) The rank NUMBER must survive — it is half a `claim-work` slug identity.
-   (3) Any eviction tool must ASSERT STRUCTURE before writing (H2 set + rank numbers); a first
-   attempt reported "59.7% saved" having destroyed three whole sections. (4) 🔴 **The measurement
-   is NOT IDEMPOTENT**: `handoff-audit.py` buckets a resolved investigation on its **H3 heading
-   alone**, so it still reports "8 resolved investigations" over 8 one-line tombstones — an
-   automated `EVICT_HISTORY` driven off it would re-evict tombstoned blocks and DELETE THE
-   TOMBSTONES. Fix the signal before automating anything.
+5. **Build the handoff-doc eviction contract.** 🔴 **The WORKED EXAMPLE is DONE (#1207
+   `4162dab1`); the CONTRACT is not.** Four requirements it produced are recorded in this item's
+   own text in the doc: tombstone-not-deletion · the rank NUMBER must survive · assert structure
+   before writing · 🔴 **the measurement is NOT IDEMPOTENT** (`handoff-audit.py` buckets a resolved
+   investigation on its **H3 heading alone**, so it still reports "8 resolved investigations" over
+   8 one-line tombstones — an automated `EVICT_HISTORY` would re-evict tombstones and DELETE them).
+   🔴 **Fix that signal before automating anything.** Before proposing a GATE, re-run the ratchet
+   replay for handoff docs: the caps file for gate 11 records the general rule REFUTED over 365
+   days / 901 commits. Files: `scripts/handoff-audit.py`, `claude/skills/handoff/SKILL.md`.
    forcing: none
-6. ✅ **DONE (2026-08-31) — the item's own PREMISE was REFUTED by the re-measure it demanded.**
-   **MERGED as `57b010fb`.**
+6. ✅ **DONE (2026-08-31)** — premise REFUTED by the re-measure it demanded; six audit rounds, five
+   of which refuted their predecessor. **MERGED as `57b010fb`.**
    forcing: none
-
-7. ✅ **DONE (2026-08-30)** — merged, shipped to both hosts, registered on both, and probed live
-   against the deployed copy.
+7. ✅ **DONE (2026-08-30)** — merged, shipped to both hosts, registered, probed live.
    forcing: none
-
-8. 🔴 **Grade the hook against the number it was built to move — THE CLOSING CONDITION OF THIS
-   WHOLE ARC. STILL NOT CUT, and deliberately so.** (This is the arc's CLOSING CONDITION, not the only
-   remaining item. 🔴 **Do not read this as an enumeration of the open set — DERIVE it:**
-   from the devrc repo root, `python3 scripts/handoff-audit.py --sections 1 <this doc>` prints
-   `N/12 ranked items done` — that is the COUNT only. For MEMBERSHIP, **anchor on the LINE START**:
-   an item is done iff its own opening line matches `^<rank>. ✅`; every other numbered item is
-   open. 🔴 **Anchoring matters — do not grep for a done-marker anywhere in the item.** The marker
-   also appears in prose (this very sentence sits inside rank 8), so an unanchored search marks
-   rank 8 — the arc's CLOSING CONDITION — as done and silently drops it. Then check the membership
-   count agrees with the tool's `N`; if it does not, the method is wrong, not the tool.
-   At 2026-09-01 the open set was **{5, 8, 10, 12}**; an earlier version of this line named only
-   5 and 12 and so hid **rank 10, which carries a live `claim-work` lock (`ci-speedup-7`)** —
-   missing it is how a session opens a second front on work someone else holds.)
-   Re-run rank 1's measurement on a post-2026-08-30T17:35Z window and compare the **8.7%** loss
-   rate and the **8/16 cleanly-ended** bucket. As of 2026-09-01 the post-window holds roughly
-   **one day**; the pre-period needed **14 days for 253** `/resume`-genesis sessions. Cutting it
-   now would grade on a handful of tail samples — the exact defect that killed talos-infra #901.
-   🔴 **Design it against the two ways this shape has ALREADY died here.** (a) *The treatment must
-   outlive the wait*: the treatment is a home-manager generation and ANY unrelated `ship.sh`
-   replaces it — check the deployed blob is still `6d25558e` **across the whole window**, not just
-   at the end. ✅ **Verified intact 2026-09-01** (deployed == `origin/main` == `6d25558e`), and
-   rank 4 was skipped partly to keep it that way. (b) *The grading population must exist across
-   the whole pre-window*: the pre-period is the 2026-08-15 → 08-29 corpus, already measured and on
-   disk, so this half is satisfied — say so rather than re-deriving it.
-   🔴 **RANK 1's CONTROLS AND BAND — restored here after audit, because rank 1's block is
-   evicted, its classifier was throwaway and is GONE, and this item requires re-deriving that
-   measurement. Grading `8/16` as a point estimate is a defect.** The probe positive control:
-   `handoff_doc.py` fired on **32 of 48** readable loser transcripts, so the 16 zeros are
-   absences, not a dead probe. The compaction-marker detector is real but **weak — 20 of 5,961**
-   corpus transcripts. The two context-exhausted peaks were **944,856 (0.94)** and **965,819
-   (0.97)** against 1M; every other session peaked 0.29–0.60. **Three sessions have an
-   unresolvable ceiling, so at most one D could flip: the floor is `cleanly-ended ≥ 7`, not
-   exactly 8.** Denominator caveat: 3 loser transcripts live on the laptop and are unreadable
-   from the workbench, and 29 sessions were dropped because their resumed doc would not resolve —
-   **treat the bucket SHARES as the finding, never the denominator.**
-   🔴 **And name the confound before cutting:** the guard changes the behaviour it measures, so a
-   session that writes a handoff BECAUSE it was blocked is a success, not a contaminated sample —
-   count blocks (`~/.cache/claude-handoff-write/s/*/fires-*`) and report them beside the rate.
+8. 🔴 **Grade the hook against the number it was built to move — THE ARC'S CLOSING CONDITION.
+   STILL NOT CUT, and deliberately so.** Re-run rank 1's measurement on a post-2026-08-30T17:35Z
+   window and compare the **8.7%** loss rate and the **8/16 cleanly-ended** bucket. As of
+   2026-09-01 the post-window holds ~1 day against a pre-period that needed **14 days for 253**
+   `/resume`-genesis sessions. Cutting now grades on tail samples — the defect that killed
+   talos-infra #901.
+   🔴 **RANK 1's CONTROLS AND BAND, restored here because rank 1's block is evicted and its
+   classifier is GONE:** probe positive control **32 of 48** readable loser transcripts (so the 16
+   zeros are absences, not a dead probe); compaction detector **weak, 20 of 5,961**; context peaks
+   **944,856 (0.94)** and **965,819 (0.97)** against 1M, every other session 0.29–0.60; **three
+   sessions have an unresolvable ceiling ⇒ the floor is `cleanly-ended ≥ 7`, NOT exactly 8**;
+   denominator caveat — 3 loser transcripts are laptop-only and 29 sessions were dropped, so
+   **treat the bucket SHARES as the finding, never the denominator**.
+   🔴 **Treatment integrity: the deployed blob must still be `6d25558e` ACROSS THE WHOLE WINDOW**,
+   not just at the end — any unrelated `ship.sh` replaces the generation. ✅ Verified intact
+   2026-09-01 (deployed == `origin/main` == `6d25558e`), and rank 4 was skipped partly to keep it so.
+   🔴 **Name the confound before cutting:** the guard changes the behaviour it measures, so a
+   session that writes a handoff BECAUSE it was blocked is a success, not contamination — count
+   blocks (`~/.cache/claude-handoff-write/s/*/fires-*`) and report them beside the rate.
    forcing: none
-9. ✅ **DONE (2026-08-31), premise REFUTED twice; #1055 MERGED as `8c108d8b`.** The durable output
-   is the two-arm local discriminator (branch vs `main`), not the PR — see
-   `### 🔴 CORRECTION, same session — #1055 was NOT red on the capacity flake…`, where
-   "red on the branch, green on `main`" is actually derived. **NOT the "76 failures" block** —
-   that is a different control, about ranks 2/7; an earlier version of this line pointed there.
+9. ✅ **DONE (2026-08-31)** — premise REFUTED twice; #1055 MERGED `8c108d8b`. The durable output is
+   the two-arm local discriminator (branch vs `main`), not the PR.
    forcing: none
-
-10. **Right-size the devrc-ci gate pod, or establish it cannot be.** 🔴 **Its premise is REFUTED:
-   the pod requests 2250m, not 4250m** (`step-pytests=2` + `step-nodetests=250m`, measured
-   2026-08-31). The binding constraint is the **hard `nodeSelector` pinning it to one of four
-   nodes**, not the request size alone. 🔴 **DO NOT START — the unpin is already locked** by another
-   session's claim `ci-speedup-7`. Coordinate with that claim rather than opening a second front;
-   if released, measure PEAK CPU over a full run first, and read the `tekton` skill — it records
-   four *other* fixes as already-rejected-with-measurements.
+10. **Right-size the devrc-ci gate pod, or establish it cannot be.** 🔴 **Premise REFUTED: the pod
+   requests 2250m, not 4250m**; the binding constraint is the hard `nodeSelector` pinning it to
+   `talos-xr6-r7p`, not the request size. 🔴 **DO NOT START — LOCKED** by another session's claim
+   `ci-speedup-7` (verified live 2026-09-01). 🔴 **And re-read the premise first: #1211 `1a4350f3`
+   sited the store on tmpfs**, so the contention this item was motivated by may already be gone.
    forcing: none
-11. ✅ **DONE (2026-09-01) — `origin/main` merged forward into `feat/handoff-audit`
-   (`466a0938..4beb41e1`); gate green, `failed=0`, both tiers. MERGED as `f71ff648`.**
+11. ✅ **DONE (2026-09-01)** — `origin/main` merged forward into `feat/handoff-audit`, gate green,
+   **#1064 MERGED as `f71ff648`**. It was 124 behind, not the 93 recorded — re-derive when you act.
    forcing: none
-12. **Measure the RENAME-vs-SCOPE-MOVE split, then pick the drift remedy.** 🔴 **RE-OPENED
-   2026-09-01 by audit: this was a declared-open probe inside a block the eviction pass labelled
-   `(terminal)` and deleted — the exact stranding this arc exists to prevent.** The remedy must not
-   be guessed. Two candidate shapes: a `/handoff` step that writes a `superseded-by:` pointer into
-   X when the topic moves, or a `/resume` warning when the doc it opens has had no commit since the
-   last session that read it. Which is right depends on whether drift is usually a **RENAME** (X and
-   Y are the same work) or a genuine **SCOPE MOVE** — **that split has NOT been measured.** The read
-   set is the 5 unlinked pairs: `claudedocs-audit-arc-2026-08-22` → `opencode-rm-glob-narrowing`;
-   `gate-hardening-and-review-hide-2026-08-23` → `devrc-ci-failing-test-names`;
-   `skill-prune-campaign` → `bulkhead-metric-registry`; `submit-guards-and-app-drift` →
-   `pkgzip-exclusion-rules`; `subsystem-index-per-host` → `b2-orphan-sweep-arming`. Instrument:
-   `claudedocs/skill-chain-drift-audit.py` (4 controls, `DRIFT_CONTROLS=1`; a run whose control
-   block is absent is void). CLOSES WHEN: the split is measured over those 5 and one remedy shape
-   is chosen in writing.
+12. **Measure the RENAME-vs-SCOPE-MOVE split, then pick the drift remedy.** 🔴 Re-opened
+   2026-09-01: this was a declared-open probe inside a block the eviction labelled `(terminal)`.
+   Two candidate remedies — a `/handoff` step writing a `superseded-by:` pointer into X when the
+   topic moves, or a `/resume` warning when the doc it opens has had no commit since the last
+   session that read it. Which is right depends on whether drift is usually a **RENAME** or a
+   **SCOPE MOVE**, and **that split has NOT been measured**. Read set = the 5 unlinked pairs named
+   in the doc. Instrument `claudedocs/skill-chain-drift-audit.py` (4 controls, `DRIFT_CONTROLS=1`;
+   a run whose control block is absent is void). CLOSES WHEN: the split is measured over those 5
+   and one remedy shape is chosen in writing.
    forcing: none
+13. **Add the MITIGATED caveat to the doc's CI block.** 🔴 #1211 `1a4350f3` sited the store-api test
+   store on tmpfs at 19:30Z, **33 min before #1207 merged**, so the doc ships an un-caveated
+   warning about a mechanism that should no longer fire. One line naming `1a4350f3`; do NOT delete
+   the mechanism text (`scripts/ci-repro/README.md`, the code sites) — that is the durable half.
+   Also read **#1213 `793a2b8e`** (8-red triage + a classifier reading the checkout PATH) before
+   writing, in case it supersedes this again.
+   forcing: regression — the doc asserts a live failure mode that a merged change has mitigated,
+   and it is read as authoritative at session start
 
 ## Gotchas / decisions / dead-ends
 
@@ -760,22 +764,26 @@ of this doc — re-read them before trusting any similar analysis.**
   shipped errors.
 
 ## How to verify
-- 🔴 **Every command below cites a SHA, not a branch name.** `zach/skill-chain-usage-audit` was
-  deleted after #1055 merged; shas survive that, branch names do not.
-- **The #1055 diagnosis, in two commands and under a second** — this is the reusable control:
+- 🔴 **Every command cites a SHA or derives its value; no branch names survive** —
+  `zach/skill-chain-usage-audit` was deleted after #1055 merged.
+- **The #1055 stale-base diagnosis, the reusable two-arm control, in two commands:**
   ```bash
   DEVRC=~/workspace/devrc
   git -C "$DEVRC" worktree add --detach /tmp/ctl-main origin/main
   (cd /tmp/ctl-main && python3 -m pytest scripts/collector/keylog/tests/test_espanso_detect.py -k live_existing_resolutions -q)   # expect: 1 passed
   git -C "$DEVRC" worktree remove --force /tmp/ctl-main
   ```
-  Against the pre-merge sha **`f85b7444`** the same command fails with
-  `{'ask': (':acq', None, [':dacq', ':acq']), ...}` — that is the red half of the matrix.
+  At the pre-merge sha **`f85b7444`** the same command FAILS with
+  `{'ask': (':acq', None, [':dacq', ':acq']), ...}`. Red on the branch, green on `main` ⇒ stale
+  base. Green on BOTH ⇒ environment. That pair is the arc's durable output.
 - **The skill-ratchet half:** `git -C "$DEVRC" cat-file -s f85b7444:claude/skills/clawgate/SKILL.md`
   = **15491** (red, ceiling 15088) vs `origin/main` = **15086** (green).
-- **The staleness itself:** `git -C "$DEVRC" rev-list --count <sha-or-branch>..origin/main` — 94 for
-  #1055 before the merge. 🔴 **Expect NO fixed number for #1064** — it read 93, then 124, then
-  130 at merge time and 138 after: `main` moves hourly, so RE-DERIVE rather than compare.
+  🔴 **Build `<rev>:<path>` with `printf '%s:%s'`** — zsh eats `$VAR:c…` as a history modifier and
+  yields `f85b7444laudedocs/…`, an error naming a path that appears nowhere in your command. Hit
+  twice this arc.
+- **Doc size / open ranks, both DERIVED:**
+  `(cd "$DEVRC" && python3 scripts/handoff-audit.py --sections 1 claudedocs/handoff-skill-chain-usage-audit.md)`
+  → `N/12 ranked items done` and the size line. Never quote a size from prose.
 - **The gate's node ceiling:**
   ```bash
   export KUBECONFIG=$KC_HOMELAB
@@ -783,4 +791,4 @@ of this doc — re-read them before trusting any similar analysis.**
   kubectl get node talos-xr6-r7p -o jsonpath='{.status.allocatable.cpu}'
   ```
   🔴 The session default `prod-kubeconfig` answers `No resources found in tekton-ci namespace.` —
-  a confident empty about the wrong cluster.
+  a confident empty about the WRONG cluster.
