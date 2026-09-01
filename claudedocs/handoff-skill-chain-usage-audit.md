@@ -110,7 +110,10 @@ commit, three different verdicts — already run, days earlier, and it moves que
 outcomes is equally consistent with a gate that is simply nondeterministic.
 
 **What survives and what does not.** The capacity MECHANISM stands — it is measured and written
-down in-tree at `scripts/tests/test_subsystem_store_api.py:99-108`, and attempt 2's failure is
+down in-tree at `8c108d8b:scripts/tests/test_subsystem_store_api.py:100-105` — 🔴 **sha-pinned,
+because a bare line range DRIFTS: at `b59b0475` that same `:99-108` holds an unrelated DRAIN-bounds
+comment and the capacity text has moved to `:106`. Grep the string `Why 60 and not 15`, which does
+not move** — and attempt 2's failure is
 unambiguous (60m13s against a 60m task budget). What does NOT survive is the causal claim about
 attempt 3 specifically: a single green at one depth is not an experiment. **Do not cite the
 8→7→5 / 3→2→0 table as evidence that draining the queue fixes the gate.**
@@ -185,8 +188,12 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
   real `with running(...)` sites in that file, **123 are disk-backed** — 110 in `scoped_store` and
   **13 that belong to no fixture at all**, built straight from `tmp_path` (`:1481, :1501, :3938,
   :3959, :4011, :4087, :4134, :4360, :4377, :9968, :11755, :11852, :12584`). **Three of them —
-  `:11755, :11852, :12584` — drive `post_bullet`/`PUT`, i.e. `_replace_bytes` itself**, the exact
-  in-request fsync this block is about. 🔴 **#1219 does NOT reach them:** it re-sites the two
+  `:11755, :11852, :12584` — drive the WRITE endpoints (`post_bullet`/`PUT`)**, which is where the
+  in-request fsync lives. ⚠ **Only `:11755` is asserted to REACH `_replace_bytes`** (it asserts
+  `200` / `x-store-status: appended`); `:11852` is refused at `412` and `:12584` at `422
+  entry-shape`, both **before** the `_replace_bytes` call at `server.py:2211` — `:12584` even
+  asserts `read_bytes() == before`. An earlier draft said all three were "`_replace_bytes` itself",
+  which over-certified by 3x; the SET is still the right one to name, the mechanism claim is not. 🔴 **#1219 does NOT reach them:** it re-sites the two
   *fixtures*, and these are not fixtures — so "the file is done once #1219 merges" will be wrong in
   the same way "the file is done because #1211 landed" was. This is the third granularity this arc
   has been wrong at: file → fixture → call site. Assume there is a fourth.
@@ -560,8 +567,12 @@ rather than removed and renumbered. New work is appended at the end.
    `4162dab1`); the CONTRACT is not.** Four requirements it produced are recorded in this item's
    own text in the doc: tombstone-not-deletion · the rank NUMBER must survive · assert structure
    before writing · 🔴 **the measurement is NOT IDEMPOTENT** (`handoff-audit.py` buckets a resolved
-   investigation on its **H3 heading alone**, so it still reports "8 resolved investigations" over
-   8 one-line tombstones — an automated `EVICT_HISTORY` would re-evict tombstones and DELETE them).
+   investigation on its **H3 heading alone**. 🔴 **Re-measured 2026-09-01: it reports 10, not the
+   "8" this item asserted — and the equality is what broke, not just the number.** Of the 10 blocks
+   it books, only **8** are one-line tombstones; the other two (the #1207 ladder block and the
+   rank-13 block) are full live content, and the rank-13 one was added by THIS PR's first commit.
+   So an automated `EVICT_HISTORY` would re-evict the 8 tombstones AND DELETE two blocks that were
+   never tombstones — the hazard is WIDER than this item stated, in the dangerous direction).
    🔴 **Fix that signal before automating anything.** Before proposing a GATE, re-run the ratchet
    replay for handoff docs: the caps file for gate 11 records the general rule REFUTED over 365
    days / 901 commits. Files: `scripts/handoff-audit.py`, `claude/skills/handoff/SKILL.md`.
@@ -644,7 +655,7 @@ rather than removed and renumbered. New work is appended at the end.
    DEVRC=~/workspace/devrc
    git -C "$DEVRC" fetch origin main -q      # or a stale clone answers for a ref you do not have
    R=scripts/ci-repro/README.md
-   git -C "$DEVRC" grep -c fsync        origin/main -- "$R"   # CONTROL first: must be 25
+   git -C "$DEVRC" grep -c fsync        origin/main -- "$R"   # CONTROL first: must be NON-ZERO (25 today)
    git -C "$DEVRC" grep -c '1a4350f3'   origin/main -- "$R"   # (a1) the sha
    git -C "$DEVRC" grep -c scoped_store origin/main -- "$R"   # (a2) the unsited fixture
    git -C "$DEVRC" grep -c cairn        origin/main -- "$R"   # (a3) the two cairn suites
@@ -652,7 +663,15 @@ rather than removed and renumbered. New work is appended at the end.
    ```
    The control runs INSIDE the block on purpose: `git grep -c` prints nothing and exits 1 on zero,
    so a copy-paste that omits the control returns four blanks that are indistinguishable from a
-   broken probe. **(a) is met only when a1, a2, a3 AND a4 are all non-zero and the control reads 25.**
+   broken probe. **(a) is met only when a1, a2, a3 AND a4 are all non-zero and the control is
+   non-zero.** ⚠ **The control is a POSITIVE control, not an equality — it was written `must be 25`
+   until round 6.** The edit that SATISFIES (a) is a mitigation note about an fsync bug, which
+   plausibly says "fsync" and moves the count to 26, making an equality-conjunction false at the
+   exact moment (a) is genuinely met.
+   🔴 **And re-read a2/a3 after #1219 merges:** it re-sites `scoped_store` AND both cairn suites, so
+   those two populations stop being "still unsited" — at which point demanding those words in the
+   README pushes you to write a false sentence or to score a met (a) as unmet. a4's population is
+   the one #1219 leaves alone, so a4 is the durable half of this check.
    🔴 **a4 was an advisory `⚠` until round 4 — i.e. the condition required three greps for FOUR
    populations, which is the same certify-by-naming-one bug as the alternation it replaced, one
    level further down and inside its own fix.** The population it omitted is the write-path one
