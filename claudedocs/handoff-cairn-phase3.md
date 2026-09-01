@@ -443,6 +443,39 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
 - **Next probe:** decide whether to send the header only when `--url` is not the public
   hostname, or simply document the constraint. Not covered by #1222.
 
+### 🔴 OPEN — the cutover left TWO stores and `/resume` reads the DEAD one
+- **Symptom + exact repro:** write a bullet through `cairn append`, then run the command
+  `/resume` step 4 and the top of this doc both prescribe:
+  `python3 scripts/lib/subsystem_recall.py --repo ~/workspace/devrc`. The bullet is not there,
+  and the output claims completeness anyway.
+- **Observed (with values), 2026-09-01, minutes after two writes to `devrc/subsystem-store-api`:**
+
+  | reader | store it reads | entries | mode | carries the new bullet |
+  |---|---|---|---|---|
+  | `subsystem_recall.py --repo` (what `/resume` runs) | `~/.claude/analyze-service-index` | **26** | **444** | **no (0 occurrences)** |
+  | `cairn recall` | `~/.cache/subsystem-store` | **29** | 644 | yes (1) |
+
+  These are **two different directories**. The first is the mirror the cutover FROZE; nothing
+  refreshes it, so it can only drift further. It nonetheless prints
+  `INDEX … ALL 26 entries in 'devrc/', none omitted` — a completeness claim about a disk that
+  is missing three entries, and it carries **no staleness stamp** of the kind the pod's own
+  `SNAPSHOT, NOT THE SOURCE` banner has.
+- **Ruled out:** that this is the ordinary read-through-cache lag recorded above — that entry is
+  about the mirror trailing the pod by a few entries. This is structural: the mirror is
+  **read-only and never synced**, so the gap is unbounded, and the reader that IS synced is a
+  different command against a different path. via: measurement
+- **Ruled out:** that `cairn sync` fixes it — `sync` updates `~/.cache/subsystem-store`, which is
+  not the path `--repo` resolves. Running `cairn sync` immediately before the probe changed
+  nothing. via: command
+- **Leading hypothesis:** criterion 9 repointed the WRITE path and `cairn`'s own read; the
+  **prescribed read surface was not repointed**, and nothing detects it. Every `/resume` since
+  the cutover has oriented on a store frozen at 2026-09-01 while believing it complete.
+- **Next probe:** none needed for diagnosis. Pick a fix: point `subsystem_recall --repo` at the
+  synced cache; or make it REFUSE a store with no snapshot stamp (so a frozen mirror cannot
+  masquerade as current); or rewrite the prescribed command to `cairn recall` in the `resume`
+  and `subsystem-index` skills **and** in both cairn handoff docs. The refusal arm is the one
+  that also protects the next store that gets frozen.
+
 ## Next steps (ranked)
 
 🔴 **Numbering is UNCHANGED on purpose** — the rank is half a claim's identity
@@ -1084,6 +1117,14 @@ text of a status that outlives it — and treat "not found" as NOT A VERDICT, ex
   per-request cost **against the pod is unmeasured** — only the local `--ref` leg was timed
   (~73 ms × 10 runs). At 201 entries across 23 scopes that bound is an assumption, not a
   measurement.
+
+- ✅ **`cairn put` IS NOW PROVEN LIVE AGAINST THE POD** — the open investigation saying it never
+  had been is closed by measurement, incidentally rather than deliberately: this session used
+  `put` twice to rewrite bullets on `devrc/subsystem-store-api` (`If-Match 3aee155a848e1670` →
+  `c865d70976d961e0`, then `9eee662af4986546` → `4056a7d18b5c0f75`), each deriving `If-Match`
+  from a live sync and each answering `replaced`. ⚠ **Rank 12 is NOT thereby closed**: its
+  stated closing condition is one prune observed landing on the pod **through `prune-index`**,
+  and that skill's path is still unexercised. The VERB is proven; the CALLER is not.
 
 ## How to verify
 
