@@ -167,20 +167,21 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
   (measured, with a positive control). The socket timeout is the SURFACE; the fsync-in-request is
   the CAUSE. The blocks after this one are kept only for the reasoning they rule out.
 - 🔴 **PARTIALLY MITIGATED 2026-09-01 by #1211 `1a4350f3` (merged 19:30:17Z) — and the unit of
-  "partially" is the FIXTURE, not the file.** #1211 sites the store on tmpfs so fsync cannot stall.
+  "partially" is the CALL SITE — not the file, and not the fixture either (this line said
+  "FIXTURE" until round 4; the table below is the authority).** #1211 sites the store on tmpfs so fsync cannot stall.
   Measured on `origin/main` **at `b59b0475`** (anchor it — bare "origin/main" moves), where
   `api.build_server` has **exactly three caller files**, and inside the one file #1211 touched there
   are **two** store fixtures:
 
   | site | sited on tmpfs? | `with running(...)` sites | `tmpfs\|/dev/shm\|store_siting` hits |
   |---|---|---|---|
-  | `test_subsystem_store_api.py` `store` (`:393`, calls `_tmpfs_dir()`) | **yes** | 136 | 44 (file total) |
+  | `test_subsystem_store_api.py` `store` (`:393`, calls `_tmpfs_dir()`) | **yes** | 133 | 44 (file total) |
   | `test_subsystem_store_api.py` `scoped_store` (`:9097`, `_build_store(tmp_path / "store", …)`) | **NO** | 110 | — |
   | same file, **UNFIXTURED** `running(served\|stage\|root\|tmp_path/"absent")` | **NO** | 13 | — |
   | `test_cairn_write.py` | **NO** | — | **0** |
   | `test_cairn_cli.py` | **NO** | — | **0** |
 
-  🔴 **The unit is the CALL SITE, and that third row is the one nobody has counted.** Of **259**
+  🔴 **The unit is the CALL SITE, and that third row is the one nobody has counted.** Of **256**
   real `with running(...)` sites in that file, **123 are disk-backed** — 110 in `scoped_store` and
   **13 that belong to no fixture at all**, built straight from `tmp_path` (`:1481, :1501, :3938,
   :3959, :4011, :4087, :4134, :4360, :4377, :9968, :11755, :11852, :12584`). **Three of them —
@@ -189,10 +190,19 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
   *fixtures*, and these are not fixtures — so "the file is done once #1219 merges" will be wrong in
   the same way "the file is done because #1211 landed" was. This is the third granularity this arc
   has been wrong at: file → fixture → call site. Assume there is a fourth.
-  ⚠ **Derive this partition, do not grep for it naively:** `grep -c 'running(store'` reads **133**
-  and misses **3 line-wrapped `running(\n store, …)` sites** (`:8764, :8792, :8832`), and 4 of the
-  272 lines containing `running(` are prose in comments. The 136/110/13 split above comes from a
-  walker that resolves the wrap and excludes comments.
+  ⚠ **Derive this partition with an AST walker, and beware that the naive grep is RIGHT BY
+  CANCELLATION.** `grep -c 'running(store'` reads **133**, which is the correct answer reached by
+  two equal and opposite errors: it **misses 3 line-wrapped** `running(\n store, …)` sites
+  (`:8764, :8792, :8832`) and **over-counts 3 lines inside a `textwrap.dedent("""…""")` string**
+  (`:8017, :8033, :8300`). Full partition of the 272 lines containing `running(`: **256** real
+  sites · 4 comments · **11 inside string literals** · 1 `def running(`.
+  🔴 **This paragraph previously published 136/259 and claimed a walker produced them — both were
+  wrong, and the mechanism is the joke of the arc:** a *text* walker that resolved the wrap but not
+  the string counted a `textwrap` block as production code, and that block is **another walker's
+  positive-control fixture**, sitting under the comment *"the detector must be able to SEE a
+  misplaced call, or the empty list above is a fact about the walker and nothing else."* The
+  instrument was fooled by the fixture built to test exactly that. Use `ast.walk` over
+  `With`/`AsyncWith` items — it cannot see comments **or** strings, and resolves wraps for free.
 
   `scripts/testlib/store_siting.py` — the shared siting #1219 introduces — **does not exist at that
   ref**, which is the one-command check that #1219 has not landed yet.
@@ -216,7 +226,7 @@ groups each held BOTH verdicts, and each run carried a distinct `refs/pull/N/mer
   ⚠ `scripts/ci-repro/README.md` — which this block sends you to, and which remains correct about
   the mechanism, the code sites and the reproducer — carries **no mitigation note at all**
   (grepped `tmpfs|1211|mitigat|shm` at `origin/main`: **zero hits**), so read on arrival there as
-  describing a failure mode still live on **123 of that file's 259 `with running(...)` sites, plus
+  describing a failure mode still live on **123 of that file's 256 `with running(...)` sites, plus
   both cairn suites** — not on all of it, and not on none.
 
 ### Was the devrc-ci outage fully closed?
@@ -492,7 +502,7 @@ EVICTED 2026-09-01 (terminal). Verdict: #1064 green, MERGED `f71ff648`; the two-
   one-node pin, and to read `scripts/ci-repro/README.md`. That was correct when written.
 - **Observed (with values):** **#1211 `1a4350f3` merged 2026-09-01T19:30:17Z** — *"site the store on
   tmpfs so the gate stops failing on disk contention"* — ~~i.e. the mechanism is **mitigated**~~
-  (**superseded: PARTIALLY, at FIXTURE granularity — see the fixture table in the CI block, `## Open investigations` → the PARTIALLY MITIGATED bullet**). #1207
+  (**superseded: PARTIALLY, at CALL-SITE granularity — see the fixture/call-site table in the CI block, `## Open investigations` → the PARTIALLY MITIGATED bullet**). #1207
   merged at **20:03:27Z**, 33 minutes LATER, carrying the un-caveated warning. Also landed since:
   **#1213 `793a2b8e`** (the store-api gate flake: tmpfs fix shipped, 8-red triage, a classifier that
   reads the checkout PATH) and **#1214 `07a22f14`**.
@@ -590,8 +600,9 @@ rather than removed and renumbered. New work is appended at the end.
    `ci-speedup-7` (verified live 2026-09-01). 🔴 **And re-read the premise first: #1211 `1a4350f3`
    sited the store on tmpfs**, so the contention this item was motivated by may already be gone.
    ⚠ **CORRECTED 2026-09-01 — do NOT act on the sentence above without reading the CI block's
-   fixture table first.** #1211 sited **one fixture of two** in one file of three; 110 `running()`
-   sites plus both cairn suites are still disk-backed, and the tmpfs probe is UNVERIFIED on
+   fixture table first.** #1211 sited **one fixture of two** in one file of three; **123 of that
+   file's 256** `running()` sites — the 110 in `scoped_store` PLUS 13 that belong to no fixture,
+   three of them write-path — plus both cairn suites are still disk-backed, and the tmpfs probe is UNVERIFIED on
    `talos-xr6-r7p`. So the contention is **not** established as gone, and de-prioritising this item
    on that reading is the misroute rank 13 exists to prevent.
    forcing: none
@@ -612,7 +623,8 @@ rather than removed and renumbered. New work is appended at the end.
    no longer fire") was REFUTED in the doing, and so was the FIRST version of the caveat.** Evidence
    in the CI block above. Mechanism text kept verbatim, as the item required. 🔴 The audit round
    caught that the first draft said "`test_subsystem_store_api.py` is now sited" — **false at
-   fixture granularity** (`scoped_store`, 110 sites, still disk-backed), i.e. the fix for a
+   fixture granularity** (`scoped_store`, 110 sites) **and then wrong again at fixture level —
+   the unit is the CALL SITE, 123 of 256 disk-backed** — i.e. the fix for a
    one-of-three error repeated it one level down. That is the shape to expect, not a one-off.
    🔴 **Left undone deliberately — the next reader's, and it is a devrc-repo edit, not a doc edit:**
    `scripts/ci-repro/README.md` carries **no mitigation note** (zero hits for
@@ -633,12 +645,16 @@ rather than removed and renumbered. New work is appended at the end.
    git -C "$DEVRC" grep -c '1a4350f3'   origin/main -- "$R"   # (a1) the sha
    git -C "$DEVRC" grep -c scoped_store origin/main -- "$R"   # (a2) the unsited fixture
    git -C "$DEVRC" grep -c cairn        origin/main -- "$R"   # (a3) the two cairn suites
+   git -C "$DEVRC" grep -cE 'unfixtured|11755' origin/main -- "$R"   # (a4) the 13 unfixtured sites
    ```
    The control runs INSIDE the block on purpose: `git grep -c` prints nothing and exits 1 on zero,
-   so a copy-paste that omits the control returns three blanks that are indistinguishable from a
-   broken probe. (a) is met only when a1, a2 and a3 are ALL non-zero **and** the control reads 25.
-   ⚠ The unfixtured call sites in the table above are a fourth population with no keyword of their
-   own — if you are the one writing that README, name them too.
+   so a copy-paste that omits the control returns four blanks that are indistinguishable from a
+   broken probe. **(a) is met only when a1, a2, a3 AND a4 are all non-zero and the control reads 25.**
+   🔴 **a4 was an advisory `⚠` until round 4 — i.e. the condition required three greps for FOUR
+   populations, which is the same certify-by-naming-one bug as the alternation it replaced, one
+   level further down and inside its own fix.** The population it omitted is the write-path one
+   (`:11755, :11852, :12584`), the most on-mechanism of the four and the only one #1219 will not
+   touch — so it was the worst possible one to leave optional.
    forcing: regression — the doc asserted a live failure mode that a merged change PARTIALLY
    mitigated, and it is read as authoritative at session start
 
