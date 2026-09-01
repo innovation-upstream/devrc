@@ -70,14 +70,32 @@ _DEFAULT_CANDIDATE = "/dev/shm"
 # one exist.
 _MOUNTS_PATH = "/proc/mounts"
 
-# Free space a candidate must have before we will site a store on it. The stores
-# these tests build are kilobytes, so this is a MARGIN, not a capacity estimate: it
-# exists to keep a nearly-full tmpfs from turning a passing test into ENOSPC.
-# 🔴 1 MiB, not 8: a measured 4 MiB tmpfs comfortably held a 200 KB write and was
-# rejected by the 8 MiB floor, so the fix went inert (falling back to disk) on a
-# perfectly usable mount. The floor only has to exceed what these stores write,
-# which is three orders of magnitude below this.
-_MIN_FREE_BYTES = 1024 * 1024
+# The largest store this suite builds, in tmpfs PAGE-ALLOCATED bytes. Measured
+# 2026-09-01 by reproducing the 305-entry fixture of
+# `test_cairn_cli.py::TestConcurrentSync::test_ten_concurrent_syncs_never_leave_a_SHORT_cache`:
+# apparent 53,985 B, page-allocated **1,257,472 B (1.199 MiB)**.
+#
+# 🔴 APPARENT BYTES UNDERSTATE THIS BY ~23x, and that is what makes the floor easy to
+# set wrong. tmpfs charges whole 4 KiB pages, so 305 small entries cost 1.2 MiB of
+# tmpfs however little text they contain. A floor reasoned from file sizes lands an
+# order of magnitude low.
+_LARGEST_STORE_BYTES = 1_257_472
+
+# Free space a candidate must have before we will site a store on it: the measured
+# peak above, with better than 3x margin.
+#
+# 🔴 THIS WAS 1 MiB FOR EXACTLY ONE COMMIT AND THAT WAS A REGRESSION — BELOW the peak.
+# It was lowered from 8 MiB on the strength of an observation that 8 MiB rejects a
+# usable 4 MiB tmpfs, WITHOUT measuring what the stores actually write. Reproduced
+# under `unshare -Urm` with /dev/shm at 1200k and the fallback candidate shadowed:
+# the 1 MiB floor accepted the mount and the run died `OSError: [Errno 28]`, while
+# the 8 MiB floor refused it and passed. The hazard window was 1 MiB <= free < ~1.3 MiB.
+# 🔴 Both directions are real and they are NOT symmetric: too LOW is an ENOSPC error
+# on a test that would have passed on disk; too HIGH only makes the fix inert (falls
+# back to disk, i.e. today's behaviour). Prefer too high, and pin the value —
+# `test_the_floor_CONSTANT_clears_the_largest_store_this_suite_builds` does that
+# directly rather than through a call whose own monkeypatch would mask it.
+_MIN_FREE_BYTES = 4 * 1024 * 1024
 
 
 def mount_fstype(path: Path) -> str | None:

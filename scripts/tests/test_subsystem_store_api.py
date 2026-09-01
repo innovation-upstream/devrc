@@ -16440,8 +16440,13 @@ class TestTheStoreIsSitedOffTheContendedDisk:
 
 
 class TestTheSitingRULESThemselvesArePinned:
-    """🔴 EVERY FIX IN THIS MODULE HAS A TEST, BECAUSE THE ROUND THAT SHIPPED THEM
-    HAD NONE AND ALL THREE SURVIVED MUTATION.
+    """🔴 THE THREE FIXES OF ROUND 2 ARE PINNED HERE — NOT every guard in the module.
+
+    An earlier header read "EVERY FIX IN THIS MODULE HAS A TEST" and that is
+    FALSE: dropping the write probe, the `is_dir()` check, or the tmpfs `rmtree`
+    cleanup each SURVIVES this suite (99 passed). The scoped sentence below was
+    accurate; the header was what a reader took away, which is the half that
+    stops anyone looking.
 
     Audit round 2 ran a battery over the 105 tests that touch `store_siting` and
     found `>=`→`>`, dropping the free-space floor, and dropping the `mkdtemp`
@@ -16508,10 +16513,19 @@ class TestTheSitingRULESThemselvesArePinned:
             "_MOUNTS_PATH",
             self._mounts(
                 tmp_path,
-                "/dev/sda1 / ext4 rw 0 0\n"
+                # 🔴 `/` LAST, deliberately. Ordered shallowest-first this
+                # fixture cannot tell "longest match" from "last match" —
+                # both rules give the same answer on every line, so a mutant
+                # that drops the depth comparison entirely SURVIVES here. It
+                # was killed only by the round-1 test that reads the real
+                # /proc/mounts, where `/` happens to come after /dev/shm on
+                # this host — and in the nix build sandbox the order is
+                # reversed, so the depth rule was unpinned in the tier the
+                # merge is gated on.
                 "devtmpfs /dev devtmpfs rw 0 0\n"
                 "tmpfs /dev/shm tmpfs rw 0 0\n"
-                "/dev/sda1 /home ext4 rw 0 0\n",
+                "/dev/sda1 /home ext4 rw 0 0\n"
+                "/dev/sda1 / ext4 rw 0 0\n",
             ),
         )
         assert store_siting.mount_fstype(Path("/dev/shm/inner/deeper")) == "tmpfs"
@@ -16587,3 +16601,76 @@ class TestTheSitingRULESThemselvesArePinned:
             f"scoped_store landed on {store_siting.mount_fstype(scoped_store)!r} "
             f"while a tmpfs at {available} was available"
         )
+
+    def test_the_floor_CONSTANT_clears_the_largest_store_this_suite_builds(self):
+        """🔴 ASSERTS THE CONSTANT, NOT A CALL — because the call-based guards CANNOT
+        see a bad value, and a bad value shipped.
+
+        `_MIN_FREE_BYTES` was lowered to 1 MiB for one commit while the largest store
+        this suite builds page-allocates 1.199 MiB, opening an ENOSPC window at
+        1 MiB <= free < ~1.3 MiB. The whole battery stayed green, because:
+
+          * `test_the_floor_is_not_so_high...` monkeypatches `_MIN_FREE_BYTES` to 0
+            before measuring — it overrides the exact variable it claims to bound, so
+            no value of that variable can ever fail it;
+          * `test_a_tmpfs_UNDER_the_free_space_floor_is_REFUSED` skips when
+            `tmpfs_dir()` is None, i.e. its assertion is unreachable precisely when
+            the fix has gone inert.
+
+        Measured: setting the floor to `1 << 60` (every store falls back to the
+        contended disk, the fix fully inert) gave 95 passed, 4 skipped, rc 0.
+
+        This test takes no fixture, monkeypatches nothing and cannot skip, so it holds
+        in the sandbox tier the merge is gated on.
+        """
+        assert store_siting._MIN_FREE_BYTES > store_siting._LARGEST_STORE_BYTES, (
+            f"_MIN_FREE_BYTES ({store_siting._MIN_FREE_BYTES:,}) must exceed the "
+            f"largest store this suite builds ({store_siting._LARGEST_STORE_BYTES:,} "
+            "page-allocated bytes) or a mount that passes the check can still run out "
+            "mid-test. Apparent file sizes understate tmpfs cost ~23x — measure "
+            "page allocation, not st_size."
+        )
+        # And an upper bound, because too HIGH silently disables the whole module.
+        # Generous: this only has to catch an order-of-magnitude mistake, not tune it.
+        assert store_siting._MIN_FREE_BYTES <= 64 * 1024 * 1024, (
+            f"_MIN_FREE_BYTES ({store_siting._MIN_FREE_BYTES:,}) exceeds a container's "
+            "default 64Mi /dev/shm, so every store would fall back to disk and this "
+            "module would be inert with the suite green"
+        )
+
+    def test_the_string_literal_half_of_the_membership_scan_is_LOAD_BEARING(
+        self, tmp_path: Path
+    ):
+        """A store server stood up inside a `sys.executable -c` script.
+
+        The AST scan cannot see a call inside a string, and seven test files here
+        already drive that shape. Disabling the Constant half left the ledger suite
+        at 99 passed — the widening reverted green, so nothing pinned it.
+        """
+        import test_store_siting_ledger as led
+
+        probe = tmp_path / "test_probe_subprocess_server.py"
+        probe.write_text(
+            "import textwrap\n"
+            'SCRIPT = textwrap.dedent("""\n'
+            "    build_server(store_root=arg)\n"
+            '""")\n'
+        )
+        assert led._calls_build_server(probe), (
+            "a build_server( call inside a string literal must count as standing up "
+            "the server — otherwise a subprocess-driven test is silently dropped from "
+            "the ledger, which is worse than the comment false positive this replaced"
+        )
+
+    def test_a_hash_COMMENT_mentioning_build_server_is_still_not_a_call(
+        self, tmp_path: Path
+    ):
+        """The mirror. Widening for strings must not undo the false-positive fix."""
+        import test_store_siting_ledger as led
+
+        probe = tmp_path / "test_probe_comment_only.py"
+        probe.write_text(
+            "# this file deliberately never calls build_server(...) itself\n"
+            "def test_x():\n    assert True\n"
+        )
+        assert not led._calls_build_server(probe)

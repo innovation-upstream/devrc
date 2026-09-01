@@ -163,8 +163,13 @@ def _calls_build_server(path: Path) -> bool:
     `build_server(...)` from a `textwrap.dedent` block was caught by the old regex
     and SURVIVED the AST-only version.
 
-    Scanning only `ast.Constant` strings — not the raw text — keeps the false
-    positive fixed: a COMMENT is not a Constant, so prose still does not match.
+    Scanning `ast.Constant` strings rather than raw text keeps the `#`-comment
+    false positive fixed — a comment is not a Constant.
+    ⚠ But a DOCSTRING is both prose AND a Constant, so a file whose docstring
+    discusses `build_server(` IS flagged. This file is the live example, handled
+    by the `discard` in the ledger test; any other such file needs adding to the
+    ledger or rewording. That is the price of not silently dropping a
+    subprocess-driven server test, which is the worse error.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -182,9 +187,11 @@ def _calls_build_server(path: Path) -> bool:
 
 def test_the_ledger_names_exactly_the_files_that_stand_up_the_store_server():
     found = {p.name for p in _test_files() if _calls_build_server(p)}
-    # Kept, though now provably unnecessary: the AST scanner cannot match this
-    # file's own prose, so the discard is dead. It stays as a cheap guard against
-    # a future edit here that really does call build_server in an example.
+    # 🔴 LOAD-BEARING, and it stopped being dead in the commit that called it dead.
+    # Widening the scan to `ast.Constant` strings made THIS file match its own
+    # docstrings, which mention `build_server(` while explaining the scanner.
+    # Measured: delete this line and the suite goes red accusing the ledger file
+    # of standing up a store server it does not have.
     found.discard(Path(__file__).name)
 
     missing = sorted(EXPECTED_SERVER_TESTS - found)
@@ -309,7 +316,11 @@ def test_the_inline_disk_rooted_store_sites_do_not_GROW():
     # drop of up to three and passed unconditionally at zero — so the count could
     # regrow 0 -> 18 with the constant still reading 18 and the ratchet never biting.
     assert actual == _DISK_ROOTED_SITES, (
-        f"only {actual} inline sites left, was {_DISK_ROOTED_SITES} — good. Lower "
-        "_DISK_ROOTED_SITES to that number in the SAME commit, or the ratchet goes "
-        "slack by exactly the amount you just fixed."
+        f"only {actual} inline sites left, was {_DISK_ROOTED_SITES}. 🔴 FIRST check "
+        "WHICH happened: sites genuinely converted to store_root(), or "
+        "_is_disk_rooted_store_expr narrowed so it counts fewer? The counter and "
+        "the constant live in this file and this assertion cannot tell them apart. "
+        "If sites were fixed, lower _DISK_ROOTED_SITES in the SAME commit. If the "
+        "predicate narrowed, widen it back — lowering the constant would bank a "
+        "coverage loss as if it were progress."
     )
