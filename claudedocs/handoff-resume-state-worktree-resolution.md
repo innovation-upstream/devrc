@@ -200,6 +200,19 @@ default for any file-modifying agent — so this fires on the repo's own mandate
   `flake.nix` exports it in the devShell and in `checks.pytests`, and the test hard-fails
   rather than skipping — but it has only been RUN on the dev host so far.
 
+- 🔴 **PART 2 IS SCOPED TO `named_missing`, NEVER TO `unresolved` — do not "simplify" that.**
+  Only a handoff-SHAPED path (dir ends `/claudedocs`, basename matches `handoff-*.md` or
+  `*HANDOFF*.md`) sets `named_missing` and therefore suppresses the fallback chain. A bare
+  basename such as `handoff-alpha-2026-01-01.md` is a SLUG, and `scripts/resume-state.sh`
+  records a MEASURED case where the fallback correctly served exactly that doc — widening the
+  suppression to `unresolved` would break it. Guarded by
+  `test_a_bare_BASENAME_slug_STILL_falls_back_and_resolves` and
+  `test_the_civitai_slug_STILL_falls_back_and_resolves`; mutant X10 (widen the gate to any
+  supplied argument) is killed by 42 tests including both.
+  *(Carried forward by hand: the merge tool warned this line was being dropped from a REPLACE
+  section, and it was right — the reason had vanished from the doc while the code kept the
+  behaviour.)*
+
 ## How to verify
 ```bash
 # 1. F1, on a fixture where the doc exists ONLY in a linked worktree and a sibling repo
