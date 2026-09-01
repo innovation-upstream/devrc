@@ -69,7 +69,6 @@ import tarfile
 import secrets
 import subprocess
 import sys
-import tempfile
 import textwrap
 import threading
 import time
@@ -9024,22 +9023,30 @@ def _build_store(root: Path, scopes: "dict[str, str]", *, malformed: str = "") -
 
 
 @pytest.fixture
-def scoped_store(tmp_path: Path) -> Path:
+def scoped_store(tmp_path: Path) -> Iterator[Path]:
     """Three populated scopes, and the malformed row lives in a DENIED one.
 
     The malformed placement is the point: `malformed_elsewhere` is rendered on
     EVERY status, so a reject sitting in a scope the caller cannot name is the
     channel that leaks without any miss ever happening.
+
+    🔴 SITED off the contended disk like `store` above, and it matters MORE than
+    that one: this fixture feeds ~110 `running(scoped_store, …)` sites, i.e. most
+    of the in-request-fsync population in this file, including the whole
+    concurrent-append and If-Match/revision blocks. It was missed when #1211 sited
+    `store` alone — the same "fixed one call site of N" error that PR was written
+    to correct, repeated one level down inside the file it had just fixed.
     """
-    return _build_store(
-        tmp_path / "store",
-        {
-            ALLOW_SCOPE: KELP_NUANCE,
-            DENY_SCOPE: QUARTZ_NUANCE,
-            THIRD_SCOPE: LANTERN_NUANCE,
-        },
-        malformed=DENY_SCOPE,
-    )
+    with store_siting.store_root(tmp_path) as root:
+        yield _build_store(
+            root,
+            {
+                ALLOW_SCOPE: KELP_NUANCE,
+                DENY_SCOPE: QUARTZ_NUANCE,
+                THIRD_SCOPE: LANTERN_NUANCE,
+            },
+            malformed=DENY_SCOPE,
+        )
 
 
 class TestScopedTokenRowGuards:

@@ -29,12 +29,23 @@ Disk doubled under a deliberately modest load; tmpfs did not move. That load was
 nowhere near CI's and no 60s stall was reproduced — the claim is that tmpfs is FLAT
 under contention, not that this measured the CI event.
 
-🔴 EVERY FAILURE MODE FALLS BACK TO THE CALLER'S `tmp_path`, so this can never make a
-suite worse than it was. That matters concretely: in the nix build sandbox `TMPDIR` is
+🔴 EVERY FAILURE MODE **THIS MODULE CAN DETECT** FALLS BACK TO THE CALLER'S
+`tmp_path`: not a directory, not tmpfs, under `_MIN_FREE_BYTES` free, unwritable, or
+`mkdtemp` refusing. That matters concretely: in the nix build sandbox `TMPDIR` is
 `/build` on ext2/ext3 while `/dev/shm` is tmpfs and writable, but CI builds
 UNSANDBOXED (its traceback shows `/tmp/nix-build-…`, not `/build`), so there
 `/dev/shm` is the container's own mount — 64Mi by default, possibly absent or
 read-only. All of those land on the fallback.
+
+⚠ **It is NOT unconditionally "never worse than disk", and an earlier draft of this
+docstring claimed that.** Two residual windows, both real and both narrower than the
+free-space floor above rather than closed by it:
+  * a tmpfs that passes the checks and then FILLS mid-run — a concurrent writer, or a
+    suite far larger than these stores — surfaces ENOSPC where disk would have passed.
+  * a run killed by SIGKILL (a gate timeout, `panic: test timed out`) skips the
+    `finally`, so `/dev/shm/devrc-store-*` survives; on a persistent container
+    `/dev/shm` repeated kills accumulate toward the first case. Nothing reaps them.
+Say which of these you have ruled out before restating the guarantee.
 """
 from __future__ import annotations
 
@@ -50,6 +61,11 @@ from pathlib import Path
 # the rejection path is exercised.
 _CANDIDATE_ENV = "DEVRC_TEST_TMPFS"
 _DEFAULT_CANDIDATE = "/dev/shm"
+
+# Free space a candidate must have before we will site a store on it. The stores
+# these tests build are kilobytes, so this is not a capacity estimate — it is a
+# margin that keeps a nearly-full tmpfs from turning a passing test into ENOSPC.
+_MIN_FREE_BYTES = 8 * 1024 * 1024
 
 
 def mount_fstype(path: Path) -> str | None:
@@ -76,7 +92,14 @@ def mount_fstype(path: Path) -> str | None:
             continue
         if target == mp or mp in target.parents:
             depth = len(mp.parts)
-            if best is None or depth > best[0]:
+            # 🔴 `>=`, NOT `>`. /proc/mounts is LAST-WINS for a shadowed mount point:
+            # when two mounts share one path the later line is the live one. With `>`
+            # the FIRST entry at a given depth won, so a disk-backed bind mounted over
+            # a tmpfs reported `tmpfs` and the store silently landed on disk — the
+            # exact hazard `tmpfs_dir`'s docstring claims to prevent, arriving through
+            # the check meant to prevent it. Measured under `unshare -Urm`: tmpfs at
+            # /dev/shm, then an ext4 bind over it, `st_dev(store) == st_dev(/tmp)`.
+            if best is None or depth >= best[0]:
                 best = (depth, fstype)
     return None if best is None else best[1]
 
@@ -99,6 +122,18 @@ def tmpfs_dir() -> Path | None:
             if not path.is_dir():
                 continue
             if mount_fstype(path) != "tmpfs":
+                continue
+            # 🔴 HEADROOM, NOT JUST WRITABILITY. A five-byte probe succeeds on a
+            # tmpfs with five bytes free, and the caller's real writes then raise
+            # ENOSPC — turning a test that would have PASSED on disk into an error,
+            # which is precisely the "can never make a suite worse" guarantee this
+            # module claims. Measured under `unshare -Urm` with /dev/shm sized 64k
+            # and 4096 bytes free: the probe passed and the store writes died
+            # `OSError: [Errno 28] No space left on device`.
+            # A container's default /dev/shm is 64Mi, so this floor keeps that case
+            # usable while rejecting a genuinely exhausted one.
+            stat = os.statvfs(path)
+            if stat.f_bavail * stat.f_frsize < _MIN_FREE_BYTES:
                 continue
             probe = path / f".devrc-tmpfs-probe-{os.getpid()}"
             probe.write_bytes(b"probe")
@@ -124,7 +159,14 @@ def store_root(tmp_path: Path, name: str = "store") -> Generator[Path]:
     if base is None:
         yield tmp_path / name
         return
-    holder = Path(tempfile.mkdtemp(prefix="devrc-store-", dir=str(base)))
+    try:
+        holder = Path(tempfile.mkdtemp(prefix="devrc-store-", dir=str(base)))
+    except OSError:
+        # The candidate passed every check above and still would not give us a
+        # directory (it filled between the probe and here, hit a quota, or went
+        # read-only). Falling back is the whole contract: never worse than disk.
+        yield tmp_path / name
+        return
     try:
         yield holder / name
     finally:
