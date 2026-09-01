@@ -325,28 +325,55 @@ mainline copy of the doc is still the one being destroyed.
 
 # i-a. A date ANYWHERE in the slug. Both spellings occur in the corpus and the
 # rule must catch both: devrc trails it (`browser-bridge-2026-08-01`) while
-# homelab-talos leads with it (`2026-07-18-remix-session`). The bare-year arm
-# catches `handoff-q3-2026-cleanup`, which the ISO arm alone would let through.
+# homelab-talos leads with it (`2026-07-18-remix-session`).
 #
-# 🔴 TWO ARMS, NOT THREE — and the third was DELETED after the mutation battery
-# scored it SURVIVED. A `\d{4}-\d{2}(?!\d)` year-month arm sat between these two
-# and no test could tell whether it was there: for `remix-2026-07-session` it
-# matched `2026-07` while the bare-year arm matches `2026`, so BOTH arms reach
-# the same verdict and differ only in the token the refusal quotes. That is the
-# dead-predicate shape `remote_has_commits_we_lack` already records in this file
-# ("two branches reaching one outcome cannot be told apart by any test"). The
-# only input it would have caught alone is a year outside 19xx/20xx — a slug like
-# `1888-07-notes` — which no handoff doc in either corpus carries. Deleting it
-# costs no coverage: `test_every_dated_spelling_in_the_corpus_is_refused` still
-# refuses that spelling, through the arm that remains.
-_TOPIC_DATE = re.compile(r"\d{4}-\d{2}-\d{2}|(?<!\d)(?:19|20)\d{2}(?!\d)")
+# 🔴 THE BARE-YEAR ARM `(?<!\d)(?:19|20)\d{2}(?!\d)` WAS DELETED 2026-08-31 —
+# operator decision on #964 item 1, and the deletion is the MEASUREMENT, not a
+# taste call. Over the 147 real handoff docs in devrc + homelab-talos that arm
+# had ZERO hits IN BOTH DIRECTIONS: all 55 dated slugs carry a full ISO date, so
+# it never fired on a real doc, and 0 of the 92 undated slugs tripped it. What it
+# DID have was a measured false-positive surface no test could see, because every
+# case is a plain 4-digit run a human reads as a NUMBER:
+#
+#   rfc-1918-addressing -> rfc--addressing      rtx-2080-passthrough -> rtx--passthrough
+#   rsa-2048-keys       -> rsa--keys            viewport-1920x1080   -> viewport-x1080
+#   nfs-2049-mount      -> nfs--mount           iso-2022-jp-encoding -> iso--jp-encoding
+#   y2038-timestamps    -> y-timestamps         cve-2024-3094-xz     -> cve--3094-xz
+#
+# The right column is what the refusal HANDS BACK, and it is unreadable — so a
+# false positive cost a real handoff its natural name with no flag to say "this
+# is a number". `cve-YYYY-NNNN` in particular is a predictable slug here, since
+# `security` is a first-class forcing kind.
+#
+# 🔴 WHAT THE DELETION COSTS, stated so nobody re-derives it as a regression: a
+# YEAR-ONLY per-session slug is no longer refused — `q3-2026-cleanup` and
+# `remix-2026-07-session` both pass now. Zero such docs exist in the 147-doc
+# corpus, and rule (i-b)'s new-doc refusal still catches the second doc for an
+# effort that already has one. `test_ordinary_numbers_in_a_slug_are_not_dates`
+# is the regression side; `test_a_year_only_slug_is_a_KNOWN_gap` is the cost side,
+# pinned so the gap is a recorded decision rather than an accident.
+#
+# 🔴 THE SECOND ARM IS NEW (#964 item 2) and it is the OTHER half of that trade.
+# `\d{4}-\d{2}-\d{2}` needs the hyphens, so the likeliest AGENT-GENERATED
+# spelling — `date +%Y%m%d`, i.e. `remix-20260801` — sailed straight through
+# while `rfc-1918` was refused. Measured over the same corpus: 0 of the 92
+# undated slugs carry a bare 8-digit `19xx`/`20xx` run, so this arm costs
+# nothing. `(?!\d)` keeps it off a 10-digit epoch, which stays a KNOWN gap.
+_TOPIC_DATE = re.compile(r"\d{4}-\d{2}-\d{2}|(?<!\d)(?:19|20)\d{6}(?!\d)")
 
 #: How many rows any of rules (i)/(j)'s listings show before eliding — the
 #: existing-docs list, the unforced items and the self-generated items alike.
 #: Each is an aid to recognising what to fix, not an inventory: devrc alone has
-#: 77 handoff docs, and 77 lines of filenames would bury the remedy under
-#: itself. Same reasoning as `DROPPED_SHOWN_MAX`, one number rather than three
-#: so the three blocks cannot drift into different shapes.
+#: 92 handoff docs (2026-08-31; 77 when this was written), and 92 lines of
+#: filenames would bury the remedy under itself. Same reasoning as
+#: `DROPPED_SHOWN_MAX`, one number rather than three so the three blocks cannot
+#: drift into different shapes.
+#:
+#: 🔴 AN ELIDING LIST MUST SAY HOW TO SEE THE REST — #964 item 4's amplifier.
+#: At 92 docs this shows 12 and elides 80, and an effort last touched three
+#: weeks ago is not in the newest-12 window, so "re-run with its topic" pointed
+#: at a list that structurally could not contain the answer. Rule (i-b)'s
+#: elision line now carries the command that enumerates all of them.
 EXISTING_SHOWN_MAX = 12
 
 
@@ -358,6 +385,37 @@ def topic_carries_a_date(topic: str) -> str | None:
     """
     m = _TOPIC_DATE.search(topic)
     return m.group(0) if m else None
+
+
+def mainline_handoff_docs(repo: Path, base_ref: str | None) -> list[str]:
+    """Every `claudedocs/handoff-*.md` on the MAINLINE ref, sorted by name.
+
+    🔴 THE LIST MUST NOT BE BLIND TO THE MAINLINE (#964 item 4). Rule (i-b)'s
+    refusal exists to say "one of these IS your effort — re-run with its topic",
+    and it built that list from a `glob` of the WORKING TREE. In a clone that is
+    behind — the 313-commits-behind incident this module exists for — the doc
+    you are being told to name may only exist upstream, so the list it offers
+    STRUCTURALLY CANNOT contain the answer while reading as if it were complete.
+
+    Distinct from `base_currency`'s question and it does not subsume it: that one
+    asks about THIS topic's doc and refuses (exit 9) when it would be replaced.
+    This one asks what OTHER efforts exist, which is what makes the list usable.
+
+    READ-ONLY and it does NOT fetch, for the same reason `base_currency` does
+    not: a human is waiting on the confirm gate. A `base_ref` of None, an
+    unfetched ref or a repo with no `claudedocs/` on the mainline all yield `[]`
+    — 🔴 which is NOT a claim that the mainline has no docs. The caller must not
+    render an empty list as "nothing upstream".
+    """
+    if base_ref is None:
+        return []
+    shown = git_allow(repo, "ls-tree", "--name-only", f"{base_ref}:claudedocs")
+    if shown.code != 0:
+        return []
+    return sorted(
+        name for name in shown.out.split("\n")
+        if name.startswith("handoff-") and name.endswith(".md")
+    )
 
 
 def existing_handoff_docs(repo: Path) -> list[str]:
@@ -506,10 +564,23 @@ _FORCING_ATTEMPT = re.compile(
     re.IGNORECASE,
 )
 
-# A TOP-LEVEL numbered item. The indent bound is what keeps a nested `1.` inside
-# an item's own sub-list from being counted as a rank of its own — the ranks are
-# half a claim's identity (`claim-work --slug-for <doc> <rank>`), so miscounting
-# them would re-point live claims.
+# A numbered item LINE. `^ {0,3}` is CommonMark's own bound on how far a
+# TOP-LEVEL block may be indented and still be top-level — it is NOT, on its own,
+# what excludes a nested item, and this comment used to claim that it was
+# (#964 item 5). MEASURED at every indent: 0,1,2,3 counted; 4,5,6 excluded. But
+# **3 spaces is exactly the CommonMark content indent for `1. `** — the canonical
+# column a sub-list under a top-level rank starts at — so at indent 3 the two
+# readings COLLIDE and no regex over a single line can tell them apart. At
+# `edbc596f` the collision resolved the wrong way: `1. parent` followed by
+# `   1. child` returned TWO items, both rank `1`. The ranks are half a claim's
+# identity (`claim-work --slug-for <doc> <rank>`), so that is the exact rank
+# miscount the comment said it prevented, and it re-points live claims.
+#
+# 🔴 THE EXCLUSION IS THEREFORE CONTEXTUAL AND LIVES IN `_item_blocks`, which is
+# the only place that knows which item is open. This pattern stays wide on
+# purpose: narrowing it to `^ {0,2}` would drop a legitimately 3-space-indented
+# top-level rank out of rule (j) entirely — silently ACCEPTING an untagged item,
+# the fail-open direction, which `_item_blocks` already records as the worse one.
 _RANKED_ITEM = re.compile(r"^ {0,3}(\d+)[.)]\s+(\S.*)$")
 
 NEXT_STEPS_PREFIX = "next steps"
@@ -618,10 +689,30 @@ def _item_blocks(section_body: str) -> list[tuple[re.Match[str], list[str], list
     """
     all_lines = section_body.splitlines()
     visible = {idx for idx, _ln in _unfenced(section_body)}
-    starts = [
-        i for i in range(len(all_lines))
-        if i in visible and _RANKED_ITEM.match(all_lines[i])
-    ]
+    # 🔴 A NUMBERED LINE INDENTED PAST THE OPEN ITEM IS ITS CHILD, NOT A RANK —
+    # #964 item 5, and the only place the answer exists. `_RANKED_ITEM` matches
+    # indents 0-3 because CommonMark lets a top-level block carry up to 3 spaces;
+    # 3 is ALSO the content indent of a sub-list under `1. `, so the LINE is
+    # ambiguous and only the enclosing item settles it. The first rank line in a
+    # section fixes the queue's own column; anything deeper belongs to it.
+    #
+    # 🔴 RELATIVE, NEVER A LITERAL 0. A section that indents its whole queue
+    # (all items at 2, say) must still have those items counted — pinning the
+    # column at 0 would exempt every one of them from rule (j), which is the
+    # fail-OPEN direction. MEASURED over the 147-doc corpus: all 547 real rank
+    # lines sit at indent 0 and 0 are the child shape, so this changes no
+    # committed document — it closes a latent miscount, and the corpus figure is
+    # the control that says so.
+    starts: list[int] = []
+    top_indent: int | None = None
+    for i in range(len(all_lines)):
+        if i not in visible or not _RANKED_ITEM.match(all_lines[i]):
+            continue
+        indent = len(all_lines[i]) - len(all_lines[i].lstrip(" "))
+        if top_indent is not None and indent > top_indent:
+            continue
+        top_indent = indent
+        starts.append(i)
     out: list[tuple[re.Match[str], list[str], list[str]]] = []
     for n, start in enumerate(starts):
         limit = starts[n + 1] if n + 1 < len(starts) else len(all_lines)
@@ -669,7 +760,9 @@ def ranked_items(text: str) -> list[RankedItem]:
     _pre, secs = split_sections(body)
     out: list[RankedItem] = []
     for heading, section_body in secs:
-        if not heading_text(heading).lower().startswith(NEXT_STEPS_PREFIX):
+        # 🔴 THE ONE OWNER, never a second `.startswith` — see `canonical_prefix`
+        # for the disagreement that spelling caused (#964 item 3).
+        if not is_next_steps_heading(heading_text(heading)):
             continue
         for m, own, hidden in _item_blocks(section_body):
             block = "\n".join(own)
@@ -1597,7 +1690,7 @@ def _clip(text: str, limit: int) -> str:
 CANONICAL_HEADING_PREFIXES: tuple[str, ...] = (
     "goal",
     "state now",
-    "next steps",
+    NEXT_STEPS_PREFIX,
     "how to verify",
     "what shipped",
     *APPEND_PREFIXES,
@@ -1609,13 +1702,56 @@ CANONICAL_HEADING_PREFIXES: tuple[str, ...] = (
 MIN_ESTABLISHED_SECTIONS = 4
 
 
+#: Leading punctuation, emoji or arrows a session hangs on a canonical heading.
+#: STRIPPED, because `▶ Next steps (ranked)` is the SAME section as
+#: `Next steps (ranked)` wearing decoration — not a reworded heading. 🔴 THE
+#: BOUND IS DELIBERATE: only LEADING non-alphanumerics, so this can never turn a
+#: SYNONYM into a match. `Ranked next steps` and `Backlog — …` still classify as
+#: None, and that is not an oversight — see `is_next_steps_heading`.
+#: MEASURED over all 1,051 headings in the 147-doc corpus: exactly 2 change
+#: classification, `▶ Next steps (ranked)` -> `next steps` and
+#: `⚠️ Gotchas / standing notes` -> `gotchas`, both of which plainly ARE those
+#: sections. Everything else is untouched.
+_HEADING_DECORATION = re.compile(r"^[^0-9A-Za-z]+")
+
+
 def canonical_prefix(heading: str) -> str | None:
-    """The skeleton section this heading TEXT belongs to, or None."""
-    low = " ".join(heading.lower().split())
+    """The skeleton section this heading TEXT belongs to, or None.
+
+    🔴 THE SOLE OWNER of "is this heading canonical?", and that is a fix rather
+    than a description (#964 item 3). `ranked_items` used to re-derive rule
+    (j)'s half with a raw `heading_text(h).lower().startswith("next steps")`,
+    which skips BOTH normalisations this does — so the two disagreed, measurably:
+    `## Next  steps` (two spaces) was canonical here and NOT a ranked section
+    there, silently exempting every item under it from rule (j). One rule, two
+    places, wrong at one.
+    """
+    low = _HEADING_DECORATION.sub("", " ".join(heading.lower().split()))
     for prefix in CANONICAL_HEADING_PREFIXES:
         if low.startswith(prefix):
             return prefix
     return None
+
+
+def is_next_steps_heading(heading: str) -> bool:
+    """Is this heading TEXT the ranked queue rule (j) gates? Via the one owner.
+
+    🔴 WHAT THIS DELIBERATELY DOES NOT DO, stated because the gap is MEASURED
+    and is a decision rather than a miss: it does not recognise a REWORDED
+    heading. Across the 147-doc corpus, 20 sections carrying 96 items are read
+    by a human as the ranked queue and are exempt here — `Ranked next steps`,
+    `Open items, ranked`, `Backlog — the highest-ROI UNBUILT items (ranked)`,
+    `Resume next session`, `Next session — priority order`, and 15 more.
+
+    Widening by SYNONYM is refused on purpose: `claude/RULES.md` says a guard on
+    WORDS is walkable by REWORDING, and a synonym list makes rule (j)'s coverage
+    unpredictable at the moment a session is trying to obey it — the same
+    argument `_TOPIC_DATE` and `FORCING_KINDS` are already built on. What IS
+    normalised is the two ways of spelling the SAME heading: whitespace, and
+    leading decoration. `## Next steps` is what the template mandates, so a
+    compliant session is covered and a deviating one is not gated.
+    """
+    return canonical_prefix(heading) == NEXT_STEPS_PREFIX
 
 
 class DocShape(typing.NamedTuple):
@@ -2422,10 +2558,12 @@ def main(argv: list[str] | None = None) -> int:
             f"in place. Drop the date — `--topic "
             f"{_TOPIC_DATE.sub('', args.topic).strip('-_') or '<effort>'}` — and "
             f"the existing doc for this effort will be found and updated.\n"
-            f"  🔴 There is no flag to bypass this. MEASURED over the 123 real "
-            f"handoff docs in devrc + homelab-talos: 55 (44%) carry a date, and "
-            f"collapsing them by date exposes `remix-session` x8 and "
-            f"`browser-bridge` x3 — the same effort, once per session.",
+            f"  🔴 There is no FLAG to bypass this — a SPELLING still can, and "
+            f"reference/write-gate.md §C names the three that do. RE-MEASURED "
+            f"2026-08-31 over the 147 real handoff docs in devrc + "
+            f"homelab-talos: 55 (37%) carry a date, and collapsing them by date "
+            f"exposes `remix-session` x8 and `browser-bridge` x3 — the same "
+            f"effort, once per session.",
             file=sys.stderr,
         )
         return EXIT_DOC_PER_EFFORT
@@ -2443,21 +2581,64 @@ def main(argv: list[str] | None = None) -> int:
 
     if (not doc.exists() and not args.new_effort
             and not currency.replaces_mainline_doc("")):
-        existing = existing_handoff_docs(repo)
-        if existing:
+        local = existing_handoff_docs(repo)
+        # 🔴 THE TRIGGER IS THE LOCAL LIST; THE MAINLINE ONLY COMPLETES IT.
+        # `if local`, deliberately NOT `if local or upstream`, and that is a
+        # MEASURED boundary rather than caution: gating on the union made rule
+        # (i-b) fire in a repo whose working tree has no handoff docs at all
+        # while the mainline has some, taking FOUR pre-existing tests red at
+        # once — `test_a_GENUINELY_NEW_doc_is_untouched_by_this` among them,
+        # i.e. the exact exit-0 contract #1046 landed to protect. #964 item 4's
+        # complaint was that the LIST is blind to the mainline, never that the
+        # rule should refuse more often. Computing `upstream` inside this branch
+        # also keeps the extra `git ls-tree` off the bootstrap path.
+        if local:
+            # 🔴 THE MAINLINE'S DOCS TOO. Appended rather than merged into the
+            # mtime order, because a blob on a ref HAS no mtime: inventing a
+            # position for it would make `existing_handoff_docs`' "NEWEST FIRST"
+            # contract a lie for half the rows. Only the ones ABSENT here are
+            # shown, and they are LABELLED, so the reader can tell "you have
+            # this" from "you would have to fetch this".
+            upstream = [
+                name for name in mainline_handoff_docs(repo, currency.base_ref)
+                if name not in set(local)
+            ]
+            existing = local + upstream
             shown = existing[:EXISTING_SHOWN_MAX]
             elided = len(existing) - len(shown)
+            upstream_set = set(upstream)
+            ref = currency.base_ref or "the mainline"
             print(
                 "status=new-doc\n"
                 "NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
-                f"  {relpath} does not exist, and this repo already has "
-                f"{len(existing)} handoff doc(s). Creating a second doc for an "
+                f"  {relpath} does not exist, and this WORKING TREE already has "
+                f"{len(local)} handoff doc(s)"
+                + (f" ({len(upstream)} more on {ref})" if upstream else "")
+                + ". Creating a second doc for an "
                 f"effort that already has one is the thing the one-doc-per-effort "
                 f"rule caps (operator decision 2026-08-28).\n"
                 "  If one of these IS this effort, re-run with its topic — the "
                 "update lands in place and nothing is lost:\n"
-                + "\n".join(f"    {name}" for name in shown)
-                + (f"\n    … and {elided} more." if elided else "")
+                + "\n".join(
+                    f"    {name}" + (f"    (on {ref} only)" if name in upstream_set else "")
+                    for name in shown
+                )
+                # 🔴 THE COMMAND MUST NAME THE SOURCE THAT WAS ELIDED. A single
+                # `ls-tree` line would be wrong whenever the tail is local, and
+                # a single `ls` wrong whenever it is upstream — the two lists
+                # have different sources and no one command enumerates the
+                # union. So the local half is always offered and the ref half
+                # only when there ARE upstream rows to see.
+                + (
+                    f"\n    … and {elided} more — `ls {repo}/claudedocs/"
+                    f"handoff-*.md` lists this tree's"
+                    + (
+                        f", `git -C {repo} ls-tree --name-only {ref}:claudedocs`"
+                        f" lists {ref}'s" if upstream else ""
+                    )
+                    + "."
+                    if elided else ""
+                )
                 + "\n  If this really is a NEW effort, say so: re-run with "
                 "`--new-effort`.\n"
                 "  🔴 No similarity matching is done here on purpose — whether "

@@ -149,8 +149,12 @@ debugging, changing or copying a specific pipeline.
    *delays* it — and whether that becomes a lost verdict is decided by the pipeline's own
    headroom, not by the burst. devrc (50m budget) drains and survives; gitops-validate, with
    the tightest budget and the worst latency, is the one that loses. **The lever is scheduling
-   pressure, not the timeout** (#378 family). Note `clawgate-ci` — the one pipeline with **no
-   `nodeSelector`** — has a pod-start max of **18s** rather than 19 minutes.
+   pressure, not the timeout** (#378 family). Note `clawgate-ci` — **no `nodeSelector`** — has a
+   pod-start max of **18s** rather than 19 minutes. ⚠ It was the ONLY unpinned pipeline when
+   this was measured 2026-08-23 and has not been since **2026-08-26**, when the `vetr-*` family
+   landed; **8** are unpinned today. **Derive the set** —
+   `~/workspace/devrc/claude/skills/tekton/reference/pipelines.md` → the clawgate-ci "PVC
+   unpinned" bullet ships the command; never read a pin list out of prose.
 4. **Placeholder imagePullSecret breaks ALL pulls.** A `harbor-cred` dockerconfigjson with a
    non-base64 `auth` placeholder makes every pod fail image pull ("illegal base64 data").
    **Do NOT attach a placeholder imagePullSecret** to the pipeline SA — public images
@@ -180,6 +184,21 @@ debugging, changing or copying a specific pipeline.
    live object — `kubectl -n tekton-ci get task gitops-validate -o jsonpath='{range
    .spec.steps[*]}{.name}{"\n"}{end}'` — and then watch the **first run after** the reconcile.
    A green check on the PR that adds a leg is not evidence about the leg.
+   🔴 **THE VALUE YOU EDITED IS TWO HOPS FROM WHERE YOU EDITED IT, and grepping the wrong hop
+   returns a CLEAN ZERO.** A step's `env` lives in the **Task**, not the TriggerTemplate: the
+   chain is TriggerTemplate → `pipelineRef` → **Task**. Measured 2026-08-30 changing
+   `clawgate-e2e`'s `MIN_PASSED` — `kubectl -n tekton-ci get triggertemplate -o yaml | grep -c
+   MIN_PASSED` returns **0 across all 13 templates**, and so does the Pipeline. That zero is a
+   FAILING POSITIVE CONTROL, not "the value is not deployed yet". Read the Task:
+   `kubectl -n tekton-ci get task <name> -o json` → `.spec.steps[].env[]`.
+   🔴 **AND A MID-CASCADE FLUX CHAIN LOOKS EXACTLY LIKE A WEDGED ONE.** The same session read
+   `tekton-operator` = *"Reconciliation in progress"* with `tekton-config` AND `tekton-triggers`
+   both `False — dependency … is not ready`, which reads as a broken GitOps delivery path with
+   everyone's merges stranded. One minute later the operator was `Ready` on that session's own
+   revision: it was an ordinary dependency cascade caught in flight. **Re-read the chain before
+   reporting it blocked**, and confirm arrival on the LIVE object rather than on
+   `lastAppliedRevision` alone — the kustomizations reconcile in dependency order, so the leaf
+   (`tekton-triggers`) lags the root by design, not by fault.
 8. 🔴 **A pipeline-level timeout SKIPS `finally` — so a timed-out run posts NOTHING and the PR
    sits on `pending` forever.** Put the limit on the **PipelineTask** (`spec.tasks[].timeout`),
    never on `timeouts.tasks`/`timeouts.pipeline`. Measured three ways on v1.12.0 (a `sleep 300`
@@ -260,13 +279,61 @@ debugging, changing or copying a specific pipeline.
    `pod-security.kubernetes.io/enforce: privileged` on the namespace (`686d6ff0`).
    ⚠ That is a **broader** grant than the 7 infra namespaces already carrying it — this one
    runs webhook-triggered CI. The narrow fix is a baseline-compatible cache.
+   🔴 **THAT hostPath IS GONE — `6bec075e` was REVERTED by `7839ef54` 2h19m later
+   (2026-08-29T22:09Z → 2026-08-30T00:29Z), so gotcha #3's node-pinning and
+   §"Adding a new pipeline / new repo" step 4 describe the LIVE gate, not history.**
+   Re-measured 2026-08-30 on `devrc-ci-vchxk-gate-pod`:
+   `nodeSelector kubernetes.io/hostname=talos-xr6-r7p`, volume `nix-cache` →
+   `persistentVolumeClaim: nix-store-cache` (30Gi, Bound, selected-node `talos-xr6-r7p`);
+   `gitops-validate` on `talos-uvh-gtj` with its own `nix-store-cache-2`. A read taken
+   *during* that window is a correct measurement of a state that no longer exists — check the
+   volume live before quoting either shape. ⚠ **And the window you could have OBSERVED it in
+   is shorter than the git interval: ~1h41m, not 2h19m** — for the first 39 minutes
+   (22:09Z→22:48Z) admission rejected every gate pod, so there was nothing to read.
+   🔴 **The revert was NOT the admission failure above — it is a SECOND, INDEPENDENT failure
+   of the same volume, and it is the one to solve first if the unpin is ever retried.** Nothing
+   in the sandbox could take the nix DB lock:
+   `error: opening lock file "/nix/var/nix/db/big-lock": Permission denied` — **75
+   occurrences across 42 tests, on EVERY devrc PR**, byte-identical on two different branches
+   (`devrc-ci-csfzb`/#1057, `devrc-ci-kdcmr`/#1059), against a pre-change run
+   (`devrc-ci-q4d5m`) of `failed=0` over 18,557 passed. *(Those figures are quoted from
+   `7839ef54`; the runs are pruned, so they are not re-derivable — the mechanism below is.)*
+   🔴 **`nix-store-cache` IS ITSELF A hostPath, so "PVC vs hostPath" is not the difference it
+   reads as** — its PV is `hostPath {path: /var/lib/mnt/disk-1/pvc-aef79024…_tekton-ci_nix-store-cache,
+   type: DirectoryOrCreate}`, same disk and same type as `6bec075e`'s. **Three differences are
+   measured, which one causes the lock failure is UNKNOWN, and `7839ef54`'s stated cause is
+   UNPROVEN rather than refuted** — the candidates, the invalid control to avoid, and the perf
+   baseline's `requests.cpu` caveat are in
+   `~/workspace/devrc/claude/skills/tekton/reference/pipelines.md` → "Retrying the devrc-ci
+   unpin" — which records one candidate as **REFUTED**, so read it before proposing an
+   experiment. 🔴 Retry only
+   with the ownership question answered FIRST and **proven on a scratch pipeline**: `7839ef54`
+   chose a full revert over a permission patch because *"the place to find the third failure mode
+   is not production"*, and with `enforce_admins: true` on devrc `main` a wrong guess blocks
+   **everyone's** merges. `686d6ff0`'s `privileged` exemption buys nothing while the PVC is back
+   — measured 2026-08-30 over **every live `tekton-ci` pod**: **zero** use hostPath,
+   hostNetwork/PID/IPC, privileged, added caps, hostPort or sysctls. ⚠ Re-run that sweep rather
+   than quoting a COUNT: the pod total is ~95% terminal and drifted 358 → 457 inside one
+   session, and even "distinct pipelines" is population-dependent (live pod labels **11**,
+   PipelineRuns 12, Pipeline CRs 13) — so say which you counted. 🔴 Its own
+   in-file comment is now STALE and says the opposite —
+   `<homelab-infra>/clusters/homelab/apps/tekton-pipelines/triggers/namespace.yaml` still reads
+   *"REQUIRED by the gate's hostPath nix cache"* over a precondition already satisfied.
    **(b) `sandbox = false` in the CI pod.** The `nix build .#checks…` tier is only hermetic
    where nix's sandbox is ON. With it off, the *same derivation hash* produced `failed=1` on
    the dev host and `failed=43` in CI — identical inputs, different output, i.e. impure.
    🔴 **Before debugging any diff against a red `devrc-ci` run, check both:**
    `kubectl get taskrun <run>-gate -n tekton-ci -o jsonpath='{.status.conditions[*].message}'`
-   and `kubectl exec -n tekton-ci <gate-pod> -c step-pytests -- sh -c 'nix config show | grep "^sandbox "'`.
+   and `kubectl exec -n tekton-ci <gate-pod> -c step-pytests -- sh -c 'ls -d /build; nix config show | grep -E "^(sandbox|sandbox-fallback) "'`.
    A red check whose cause is either of these is a **broken gate, not a bad change**.
+   🔴 **`nix config show` alone CANNOT ANSWER THIS — it reports the CONFIGURED value, and the
+   configured value is `true`.** Measured 2026-08-30 in a live gate pod: `sandbox = true`,
+   `sandbox-fallback = true`, **`/build` does not exist**, and the build sits in
+   `/tmp/nix-build-<drv>-0` — nix fell back to running UNSANDBOXED and said nothing. **`/build`'s
+   absence is the tell**, which is why the command leads with it; a grep for `^sandbox ` returns
+   a reassuring `true` over exactly the condition this gotcha exists to catch. Recorded as a 🔴
+   KNOWN LIMITATION at `devrc-ci-pipeline.yaml:147-154`, where all three fixes are blocked by
+   PodSecurity `baseline:latest`.
 
 ## What / where
 

@@ -58,7 +58,7 @@ Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 | Image / manifest | `harbor.homelab.lan/library/clawgate:<ver>`, pinned in `clusters/workbench/apps/clawgate/deployment.yaml` (Flux from `trunk`) |
 | LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) — **OPEN, no auth**; machine endpoints still need the token |
 | Public / nebula URL | `https://clawgate.zacx.dev` behind **Authelia passkey** (portal `login.zacx.dev`); laptop `http://10.42.0.10:8109` (homelab gateway) |
-| Hook events | `PermissionRequest` (`CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, `CLAWGATE_SUGGEST=off`), both in `~/.claude/settings.json`, ON by default. 🔴 The `Stop` array also carries **two** unrelated hooks (`tmux/task-hook.sh`, `claude-notify.py`) — **preserve both** |
+| Hook events | `PermissionRequest` (`CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, `CLAWGATE_SUGGEST=off`), both in `~/.claude/settings.json`, ON by default. 🔴 `Stop` also carries other hooks — **preserve EVERY non-clawgate**; DERIVE, never count: `jq -r '.hooks.Stop[].hooks[].command'` |
 | 🔴 Machine client | **`clawgatectl`** (devrc `nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch). 🔴 **Built from a LOCAL working tree of homelab-talos, so it can be present but STALE** — a behind checkout ships a binary MISSING verbs that prints help and **exits 0** under a plausible version label. JSON on stdout only; rc 0–8. **Every other route is still curl.** Commands, config, the staleness closure and the skew note: `task-api.md` |
 
 🔴 **clawgate has NO human auth of its own** (since 0.7.37): `requireSession` is a pass-through no-op,
@@ -192,10 +192,10 @@ toolchain and the dispatch `curl`. Durable facts only:
   provisions — has **no Cilium**, so `agent-hardening.md` is a **homelab** playbook.
 - **Alloy has no auto-reloader** — if clawgate metrics vanish from homelab Prometheus, restart Alloy
   first (`telemetry.md`).
-- **Red GitHub Actions checks on `homelab-infra` are NOISE** (billing-blocked); the real gate is
-  Tekton `clawgate-ci` (`tekton` skill). 🔴 **But `clawgate-ci` does NOT run Playwright —
-  browser-layer changes are UNGATED.** Run `make e2e` locally and **count**: without Docker,
-  `test.skip` on `!dockerAvailable()` leaves **11 of 18 spec files / 77 of 113 tests**, green.
+- **Red GitHub Actions checks on `homelab-infra` are NOISE**; real checks: Tekton (`tekton` skill).
+  🔴 **`clawgate-ci` runs no Playwright — but `clawgate-e2e`, a SEPARATE check, DOES; "the browser
+  layer is UNGATED" was FALSE.** ⚠ RUNS is not BLOCKS; `make e2e` without Docker self-skips most
+  full-mode files and reads green — **COUNT**. `extension.md`.
 - 🔴 **The browser extension does NOT ship via Flux — merging to `trunk` deploys NOTHING.** Brave
   loads it unpacked from `~/workspace/clawgate-extension/containers/clawgate/extension` (branch
   `clawgate-ext-local`, same path on **BOTH hosts**); deploy = `merge --ff-only origin/trunk` on both

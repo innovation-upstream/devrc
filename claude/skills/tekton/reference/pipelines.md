@@ -44,7 +44,7 @@ target → gate on the a11y-rule delta → post commit status **`tekton/ux-audit
   so the walk runs under an outer `nix-shell -p bash gnumake nix` with **`NIX_PATH` pinned**
   to the repo's `flake.lock` nixpkgs rev. (The base `nixos/nix` image has neither `make` nor
   a guaranteed `bash` on PATH.)
-- Reuses the **SHARED `nix-store-cache` PVC** (both pipelines node-pin to `talos-xr6-r7p`, so
+- Reuses the **SHARED `nix-store-cache` PVC** (remix and naida both node-pin to `talos-xr6-r7p` — as do `auditloop-ci` and `devrc-ci`; derive the set, see the clawgate-ci PVC bullet below — so
   both pods mount the one RWO local PVC; the seed-nix mkdir-lock tolerates concurrent
   same-node seeders). Separate **`remix-auditloop-creds`** SOPS secret (remix's Makefile
   reads `AUDITLOOP_PUSH_TOKEN`, a single string, vs naida's `AUDITLOOP_PUSH_TOKENS` map).
@@ -95,10 +95,26 @@ OR'd with a `head_commit` fallback for GitHub's truncation of large pushes.
   `auditloop-push-main` carries a `(!has(body.deleted) || body.deleted == false)` guard;
   clawgate-ci has no `created`/`deleted` guard.
 - **PVC unpinned.** Per-run **6Gi** RWO `volumeClaimTemplate` with **no**
-  `podTemplate.nodeSelector`, while *every* other pipeline pins
-  `kubernetes.io/hostname: talos-xr6-r7p` (naida 8Gi, remix 12Gi, gitops-validate 6Gi,
-  auditloop 10Gi). It works today (clawgate pods land on `talos-jkj-deb`) because it mounts
-  only the one PVC — but it forgoes the shared nix cache and is the odd one out.
+  `podTemplate.nodeSelector` (vs naida 8Gi, remix 12Gi, auditloop 10Gi).
+  🔴 **DO NOT READ A PIN LIST OUT OF THIS FILE — DERIVE IT.** This bullet has now been wrong
+  twice in two days, in opposite directions: it asserted *"every other pipeline pins
+  `talos-xr6-r7p`"* (false since homelab-infra #396 moved `gitops-validate` to
+  `talos-uvh-gtj`), and the correction that replaced it was censused over **live pods**, which
+  silently drops any pipeline that happens to have none right now — it lost `remix-ux-audit`
+  (which DOES pin `talos-xr6-r7p`; 20 retained PipelineRuns) and `vetr-app-e2e`. **Pods are not
+  the defining population; TriggerTemplates are:**
+  `kubectl -n tekton-ci get triggertemplates -o json | jq -r '.items[] | "\(.metadata.name)\t\(([..|objects|select(has("nodeSelector"))|.nodeSelector["kubernetes.io/hostname"]]|first // "<none>"))"'`
+  As of 2026-08-30 that returns 13 rows: **4** pin `talos-xr6-r7p`, **1** pins `talos-uvh-gtj`,
+  **8** pin nothing — so **floating is the majority and clawgate-ci is not the odd one out**,
+  which is the durable point. (A stale in-cluster comment at
+  `<homelab-infra>/clusters/homelab/apps/tekton-pipelines/triggers/ci-priority-classes.yaml` still calls
+  it "the ONE pipeline with no nodeSelector".)
+  ⚠ Being unpinned is a deliberate WIN, not only a cost — one RWO PVC means no pin is needed,
+  so it schedules anywhere and survives node loss (`clawgate-ci-pipeline.yaml:58,69`). The cost
+  is that it forgoes the shared nix cache. 🔴 **Do not "fix" that by pinning it to
+  `talos-xr6-r7p`** — it would become the FIFTH pipeline on the node the devrc-ci section below
+  is trying to take load off, and that node's contention is the documented mechanism behind
+  gitops-validate's lost verdicts.
 - **No concurrency control at all** — every matching push gets an independent PipelineRun and
   its own 6Gi PVC.
 - **`error` vs `fail` is implemented for the CSS path ONLY** (`clawgate-ci-pipeline.yaml:329`
@@ -106,3 +122,74 @@ OR'd with a `head_commit` fallback for GitHub's truncation of large pushes.
   `pass`/`fail`, so a crashed `npm install` or an unpullable bats image reports **"your
   change is bad"**. Partly compensated at aggregation: a *missing* verdict file is treated as
   the error class, and the summary separates `FAILED:` from `COULD NOT RUN:`.
+
+## Retrying the devrc-ci unpin — what is measured, and the control that is INVALID
+
+Context: `6bec075e` (2026-08-29T22:09Z) replaced the node-pinned `nix-store-cache` PVC with a
+per-node hostPath; `7839ef54` (2026-08-30T00:29Z) reverted it after 42 tests failed on every
+devrc PR with `error: opening lock file "/nix/var/nix/db/big-lock": Permission denied`. The
+SKILL.md gotcha 6(a) carries the summary; this is the diagnosis state.
+
+🔴 **`nix-store-cache` is itself a hostPath** — PV
+`hostPath {path: /var/lib/mnt/disk-1/pvc-aef79024…_tekton-ci_nix-store-cache, type: DirectoryOrCreate}`,
+the same disk and the same `DirectoryOrCreate` as the reverted
+`/var/lib/mnt/disk-1/devrc-ci-nix-cache`. So the storage KIND is not the variable.
+
+**Three candidates were listed; ONE IS NOW REFUTED and two stand. Which of the two causes the
+lock failure is UNKNOWN** — `7839ef54`'s
+*"the PVC works only because earlier runs populated its `/nix` with ownership the nix build user
+can use"* is **unproven, not refuted**:
+
+1. 🔴 **~~Root-directory mode.~~ REFUTED 2026-08-30 — do not spend a cycle on it.** The theory
+   was that `local-path-config`'s `mkdir -m 0777 -p "$VOL_DIR"` leaves the PVC root at 0777
+   where a bare hostPath is created 0755 root:root. **The live PVC root is 0755**, measured by
+   `kubectl exec <gate-pod> -c step-pytests -- stat -c '%a %U:%G %n' /nix …`:
+   `755 root:root /nix` · `755 root:root /nix/var/nix/db` · **`600 root:root
+   /nix/var/nix/db/big-lock`** · `755 root:root /nix/var/nix/profiles/per-user`.
+   **Mechanism: `cp -a src/. dst/` overwrites the DESTINATION root's own mode with the
+   source's**, so `seed-nix`'s `cp -a /nix/. /nix-cache/` erases whatever the volume root was
+   created with and both arms converge on the image's `/nix`. Controlled locally (GNU coreutils
+   9.11, 0700 source): `dst` at 0755 → 700 **and** `dst` at 0777 → 700.
+   ⚠ **So a `chmod 0777` before the seed measures NOTHING, and its null result reads as
+   evidence.** Note also that the file the error names is **0600 root:root on the volume that
+   WORKS** — see candidate 2 for why that is not a paradox.
+2. 🔴 **Build users — the one difference still standing. 🔴 AND IT IS NOT "the gate runs as
+   `nixbld`" — that phrasing was wrong here until 2026-08-30 and it sends a retry at the wrong
+   process.** Measured in a live gate pod:
+   `kubectl -n tekton-ci exec <gate-pod> -c step-pytests -- sh -c 'id; nix config show'` →
+   **`uid=0(root)`**, `build-users-group = nixbld`, `sandbox = true`. So the step's own nix
+   client is **root** — which is exactly why a 0600 root:root `big-lock` is no obstacle to it.
+   `nixbld` is who nix drops the **sandboxed builder** to, not who takes the store lock.
+   The population that can actually hit this is named by the gate's own step comment:
+   *"devrc has tests that shell out to `nix-instantiate` from INSIDE the build; running as an
+   unprivileged nixbld user…"* — a **nested** nix invocation, inside a sandboxed build,
+   reaching the real store. That is a narrower and far more testable proposition than "the
+   gate runs unprivileged", and it is what a retry should be designed against.
+   The control asymmetry is unchanged: `gitops-validate`'s `warm-tools` sets
+   `build-users-group =` (empty), disabling build users entirely, so a fresh `nix-store-cache-2`
+   (created `2026-08-25T05:33:47Z`) staying healthy says nothing about build-user ownership.
+   **Do not cite `gitops-validate` as a control for this.**
+   Measured negative worth keeping, because it closes off the obvious remedy: **the gate pod
+   sets no `securityContext` and no `fsGroup` at all** (pod-level `{}`, `null` on all six step
+   containers), so there is no kubelet-side ownership fixup to lean on.
+3. **A heal that already exists, on the gate only.** The `pytests`/`nodetests` steps run
+   `mkdir -p /nix/var/nix/profiles/per-user && chmod 755 /nix/var/nix/profiles …` against the
+   same root-owned-store problem one path over, with a MEASURED failure recorded beside it
+   (`could not set permissions on '/nix/var/nix/profiles/per-user' to 755: Operation not
+   permitted`, probes `devrc-ci-probe8-qbbg4` / `-probe10-b6jzh`) and the note that it
+   *"re-heals a fresh cache PVC"*. **Read that comment before designing anything** — it is the
+   closest thing to a worked diagnosis of this class that exists, and it shows a fresh volume
+   being made usable by an explicit heal rather than by accumulated history.
+
+🔴 **Prove any fix on a scratch pipeline, never on `devrc-ci`.** `7839ef54` deliberately chose a
+full revert over a permission patch: *"this volume has now broken CI twice in one evening … the
+place to find the third failure mode is not production."* devrc `main` is `enforce_admins: true`
+with both gate legs required, so a wrong guess blocks every contributor's merges.
+
+**The perf baseline is not re-usable as recorded.** The unpin's quoted wins — three nodes
+reachable instead of one, queue wait **17–22m → 0.1m**, wall clock **39.1m median → 17.4m** — are
+quoted from `7839ef54` and are not re-derivable (the runs are pruned). They were taken while
+`requests.cpu` was **4** (`23887675`, 2026-08-29 16:03 −05:00); `bb62668f` put it back to **2** at
+19:14, 15 min before the revert, and **2 is live today**. `bb62668f`'s own subject — *"the equality
+fixed starvation and bought a queue nothing drained"* — targets the same queue the unpin is
+credited with draining. **Re-take the baseline at cpu 2 before grading a retry.**

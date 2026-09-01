@@ -3227,8 +3227,8 @@ def test_latest_only_is_the_DEFAULT_and_picks_the_NEWEST_key(tmp_path, identity)
 # 8. 🔴 READ-ONLY PROOF — the store must come out byte-identical
 # --------------------------------------------------------------------------- #
 def test_a_full_verify_run_leaves_the_store_BYTE_IDENTICAL(tmp_path, identity):
-    """🔴 The store is the ONLY copy of client-confidential content that is not
-    re-derivable. A verifier is a reader; this is the measurement that says so."""
+    """🔴 The store is the AUTHORITATIVE copy of client-confidential content
+    that is not re-derivable — every backup of it lags. A verifier is a reader; this is the measurement that says so."""
     store = tmp_path / "store"
     objects = {}
     for name, n in (("scope-alpha", 3), ("scope-beta", 1), ("scope-gamma", 6)):

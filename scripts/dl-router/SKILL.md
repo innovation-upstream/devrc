@@ -191,6 +191,26 @@ label = "Save to library"                            # button text
 Find the embed host with `browser frames` (it is the host serving the iframe, not
 the page embedding it), then inspect inside it for the video element structure.
 
+**`media` may also be an ORDERED LIST — that is how ONE rule covers an image
+AND a video.** `attr` is a single NAME, so a lone pair cannot say "the image's
+anchor `href`, but the video's own `src`". The list is tried in order, first
+http(s) hit wins, so put the accessor resolving the **best** copy first:
+
+```toml
+[site_rules."chat.example.test".player]
+container = "[class^=mediaWrapper]"
+media = [
+  { element = 'a[href^="https://cdn.example-cdn.test/attachments"]', attr = "href" },
+  { element = "video", attr = "src" },
+]
+```
+
+An image's own `src` is often a **downscaled copy from a resizing proxy**, with
+the original on the wrapping `<a>`; a video's `src` already *is* the original.
+🔴 **Never reach the original by rewriting a proxy URL's host** — the two hosts
+carry different signature parameters, so the rewrite drops a signature belonging
+to the other host. The anchor's href is already signed for where it points.
+
 **Important details**
 - The media URL is **signed and rotates** — `player_buttons.js` reads it **at
   click time**, never caches. A stale URL will fail.
@@ -206,6 +226,31 @@ the page embedding it), then inspect inside it for the video element structure.
 2. Verify the embed host matches the rule key exactly (`browser frames` confirms
    the iframe origin).
 3. A **full Brave restart** is required after changing player rule config.
+4. 🔴 **ONE malformed accessor kills the WHOLE rule** — check every entry, not
+   just the one you edited. Deliberate: a partial button covers only some media
+   on the page and looks like the feature working. **Where you see the failure
+   depends on WHICH kind of malformed**, and the quiet one is the one to know
+   about:
+   - a **type/shape** error (empty or missing `element`/`attr`, a non-string, a
+     non-table entry, more than 8) is caught by the **sidecar**, loudly — it
+     names the offending index, e.g. `player.media[1].attr must be a non-empty
+     string`, and surfaces in `dl-route status` and `/healthz`. Look there
+     first.
+   - a **grammar** error the sidecar deliberately does not check (an
+     unsupported selector — `>`, `+`, `~`, `:`, over 300 chars — or an `attr`
+     that is not a bare name) is caught only in the extension, which returns no
+     rule: **no button and no error anywhere.** That one is silent.
+
+🔴 **DEPLOY ORDER, and it is not symmetric.** The two halves ship by different
+mechanisms: the extension loads **unpacked from the working tree** (a `git pull`
+plus a **full Brave restart**), while the sidecar runs **from the nix store**
+(`home-manager switch` only). Writing a list rule while the OLD sidecar is still
+live is a `ConfigError` → `load_degraded` → `library_root` unset → **every
+routing endpoint 503**, not just the button. So: **switch first, write the rule
+second.** Reverting is the mirror image — **remove the list rule from
+`config.toml` BEFORE rolling the sidecar back**, or the rollback takes the whole
+sidecar down. `dl-route status` reporting `library (unset …)` right after a
+config edit is this, not a new fault.
 
 ## Backfill — the one dangerous path
 

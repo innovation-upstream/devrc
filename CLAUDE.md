@@ -171,8 +171,50 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   `.github/workflows`, so the marker stays `other`.
   🔴 **`enforce_admins: true` is LIVE now** — it protected nothing while nothing was
   required. If Tekton is down or wedged, NOTHING merges and there is no admin override.
-  The escape hatch, deliberately written down because you will want it under pressure:
-  `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`
+  The escape hatch, deliberately written down because you will want it under pressure —
+  🔴 **and it does NOT round-trip. Read all four steps before you run step 2.** MEASURED
+  over three uses on 2026-08-29/30: `DELETE` opens the window and **`PATCH` cannot close
+  it**, so two restores failed — one of them inside an EXIT trap that fired exactly as
+  designed and still left `main` open, because the untested command was *inside* the
+  safety net. `PATCH …/required_status_checks` **404s `Required status checks not
+  enabled`**: it updates checks that exist, it cannot recreate a deleted sub-resource.
+  Closing the window needs a full `PUT` of the WHOLE protection object.
+  ```bash
+  R=innovation-upstream/devrc; S=<scratchpad>          # 1. CAPTURE FIRST — without this
+  gh api /repos/$R/branches/main/protection --jq '{    #    you cannot restore at all.
+    required_status_checks:{strict:.required_status_checks.strict,
+      checks:[.required_status_checks.checks[]|{context,app_id}]},
+    enforce_admins:.enforce_admins.enabled,
+    required_pull_request_reviews, restrictions,
+    required_linear_history:.required_linear_history.enabled,
+    allow_force_pushes:.allow_force_pushes.enabled,
+    allow_deletions:.allow_deletions.enabled,
+    block_creations:.block_creations.enabled,
+    required_conversation_resolution:.required_conversation_resolution.enabled,
+    lock_branch:.lock_branch.enabled,
+    allow_fork_syncing:.allow_fork_syncing.enabled}' > $S/restore.json
+  gh api -X DELETE /repos/$R/branches/main/protection/required_status_checks   # 2. OPEN
+  gh api -X PUT /repos/$R/branches/main/protection --input $S/restore.json     # 3. CLOSE
+  gh api /repos/$R/branches/main/protection > $S/after.json                    # 4. READ BACK
+  ```
+  🔴 **Step 4 is not optional, and step 1 is what makes it possible.** A PARTIAL `PUT`
+  succeeds and silently drops every key you omitted — `enforce_admins`, force-push and
+  deletion settings included — so `PUT` returning 200 is a claim about the REQUEST, never
+  about the protection. Diff `after` against the step-1 capture **key by key** and report
+  which keys matched; `restore: OK` printed by your own trap is not evidence. All 11 keys
+  are load-bearing: `required_status_checks`, `enforce_admins`,
+  `required_pull_request_reviews` and `restrictions` are *required* by the endpoint (the
+  last two are legitimately `null` here), and the `app_id` pinning inside `checks` is what
+  makes the restored context bind to Tekton rather than to any app that can post the name.
+  ⚠ **Not measured, so do not reach for it under pressure:** whether `PUT` with
+  `required_status_checks: null` opens the window symmetrically was never tried — the
+  `DELETE`/`PUT` asymmetry above is what has actually been run.
+  🔴 **The backstop is a DETECTOR, not a restore:** `drift-check.sh` rc 24 reports an
+  unprotected `main`, on a timer that repeats every `OnUnitActiveSec=6h` — so detection
+  lags by up to a full interval, and only where the deadman is actually wired in
+  (`serverMode && enableDriftDeadman`; the timer runs on the workbench). It catches a
+  botched restore after the fact; it does not undo one, and it is not a substitute for
+  step 4.
   ⚠ **`strict` is FALSE on purpose.** `strict: true` would force every PR to be up to date
   with `main` before merging — correct in principle, and unworkable here: `main` moved 11+
   times in one session and each move would re-queue a ~20-minute gate for every open PR.

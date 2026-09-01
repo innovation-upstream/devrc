@@ -35,6 +35,15 @@ from pathlib import Path
 DEFAULT_PORT = 8791
 DEFAULT_HOST = "127.0.0.1"
 
+# How many media accessors one player rule may list. A cap, not a design
+# target: every accessor is a selector query run inside the CLICK handler, and
+# a config typo that turned into a 500-entry list would stall the click on the
+# operator's own page. Two covers the case this exists for (an anchor-linked
+# image plus a direct video); the headroom is for a site that needs a poster or
+# a <source> fallback as well. Mirrored in player_buttons.js -- both sides must
+# agree, or a config the sidecar accepts renders no button.
+MAX_MEDIA_ACCESSORS = 8
+
 # The catch-all directory name. Created on demand under the library root; it is
 # also the terminal fallback of the extension's suggest() ladder.
 DEFAULT_OTHER_DIR = "other"
@@ -347,14 +356,39 @@ def _validate_site_rules(rules: dict) -> None:
         if not player.get("container"):
             raise ConfigError(f"{where}.player.container is required")
         media = player.get("media")
-        if not isinstance(media, dict):
+        # ONE accessor or an ORDERED LIST of them. The list exists because a
+        # single {element, attr} pair cannot express "read the image's ANCHOR
+        # href, but the video's own src" -- `attr` is one name, so a rule that
+        # covers both media kinds is impossible without it. Tried in order,
+        # first http(s) hit wins (player_buttons.readMediaUrl).
+        accessors = media if isinstance(media, list) else [media]
+        if not isinstance(media, (dict, list)):
             raise ConfigError(
-                f"{where}.player.media must be a table "
-                '(e.g. media = {{ element = "video#main", attr = "src" }})')
-        for key in ("element", "attr"):
-            if not isinstance(media.get(key), str) or not media[key]:
-                raise ConfigError(
-                    f"{where}.player.media.{key} must be a non-empty string")
+                f"{where}.player.media must be a table, or a list of them "
+                # SINGLE braces. This half is a plain adjacent string, not an
+                # f-string, so `{{` is never consumed and the operator was
+                # shown a literal `{{ ... }}` they cannot paste into TOML.
+                '(e.g. media = { element = "video#main", attr = "src" })')
+        if not accessors:
+            raise ConfigError(
+                f"{where}.player.media must not be an empty list -- a rule "
+                "with no accessor can never resolve a URL, and would render a "
+                "button that always fails")
+        if len(accessors) > MAX_MEDIA_ACCESSORS:
+            raise ConfigError(
+                f"{where}.player.media may list at most "
+                f"{MAX_MEDIA_ACCESSORS} accessors, got {len(accessors)}")
+        for idx, acc in enumerate(accessors):
+            # The index is only shown for a list, so the single-table message
+            # is byte-identical to what it has always been.
+            at = f"{where}.player.media" if not isinstance(media, list) \
+                else f"{where}.player.media[{idx}]"
+            if not isinstance(acc, dict):
+                raise ConfigError(f"{at} must be a table")
+            for key in ("element", "attr"):
+                if not isinstance(acc.get(key), str) or not acc[key]:
+                    raise ConfigError(
+                        f"{at}.{key} must be a non-empty string")
 
 
 def load_degraded(path: Path | None = None, *, env=None):

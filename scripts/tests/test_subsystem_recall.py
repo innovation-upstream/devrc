@@ -27,8 +27,11 @@ grep for `open(..., "w")` would be the "spelled rather than structural" guard
 `claude/RULES.md` warns about.
 
 🔴 NO TEST HERE READS THE REAL STORE. `~/.claude/analyze-service-index/` is
-curated, client-confidential, has no off-machine backup and is rewritten by an
-hourly autocommit while other sessions write to it. Every fixture is synthetic,
+curated, client-confidential, not re-derivable by re-running recon, and rewritten
+by an hourly autocommit while other sessions write to it. (Was "has no
+off-machine backup" — false; daily age-encrypted bundles go to MinIO. Irrelevant
+to the rule above either way: this is about not reading live client data into a
+PUBLIC repo's fixtures.) Every fixture is synthetic,
 under `tmp_path`, with names invented for this file. This repo is PUBLIC.
 
 🔴 `TestAppendConcurrency` IS A MEASUREMENT, NOT A BELIEF. The handoff protocol's

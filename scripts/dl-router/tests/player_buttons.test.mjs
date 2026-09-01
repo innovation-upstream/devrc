@@ -91,14 +91,16 @@ test("the player rule resolves against the embed host, from the fixture", () => 
   assert.ok(r, "the embed host must have a player rule");
   assert.equal(r.container, "#video-container");
   assert.equal(r.mount, "#video-wrapper");
-  assert.deepEqual(r.media, { element: "video#main-video", attr: "src" });
+  // A SINGLE-table config still normalises to a one-entry LIST -- that is the
+  // back-compat contract, and it is asserted here rather than assumed.
+  assert.deepEqual(r.media, [{ element: "video#main-video", attr: "src" }]);
   // Every selector must actually resolve in the real captured structure --
   // otherwise the rule is only asserting itself.
   const dom = embedDom();
   assert.equal(dom.queryAll(r.container).length, 1);
   const container = dom.queryAll(r.container)[0];
   assert.equal(dom.queryAll(r.mount, container).length, 1);
-  assert.equal(dom.queryAll(r.media.element, container).length, 1);
+  assert.equal(dom.queryAll(r.media[0].element, container).length, 1);
 });
 
 test("THE PLAYER RULE IS NOT KEYED ON THE FORUM: the forum host has none", () => {
@@ -434,7 +436,8 @@ test("a player rule carrying code-shaped fields keeps only the known ones", () =
   });
   assert.deepEqual(Object.keys(r).sort(),
     ["container", "label", "media", "mount"]);
-  assert.deepEqual(Object.keys(r.media).sort(), ["attr", "element"]);
+  assert.equal(Array.isArray(r.media), true, "media normalises to a list");
+  assert.deepEqual(Object.keys(r.media[0]).sort(), ["attr", "element"]);
 });
 
 test("the media accessor must be an attribute NAME, not an expression", () => {
@@ -523,3 +526,147 @@ test("the media URL is read in the click path and NOWHERE on the render path",
     assert.match(src.slice(src.indexOf("function handleClick(")),
       /var url = readMediaUrl\(/);
   });
+
+// --- an ORDERED LIST of media accessors ------------------------------------ //
+// WHY THIS EXISTS. `attr` is a single NAME, so one {element, attr} pair cannot
+// say "the image's ANCHOR href, but the video's own src". A site that posts
+// both kinds -- an <img> downscaled by a resizing proxy under an <a> pointing
+// at the original, alongside a <video> whose src IS the original -- is not
+// expressible with one pair: reading `src` saves the thumbnail, reading `href`
+// is dead for video. The list is tried in ORDER, first http(s) hit wins.
+
+const LIST_HOST = "twokinds.example.test";
+const ORIGIN = "https://cdn.example-cdn.test/attachments/900/1/a.png";
+const PROXY = "https://proxy.example-cdn.test/attachments/900/1/a.png?w=550";
+const VIDEO = "https://cdn.example-cdn.test/attachments/900/2/clip.mp4?sig=1";
+const LIST_RULES = {
+  [LIST_HOST]: {
+    player: {
+      container: "#wrap",
+      media: [
+        { element: 'a[href^="https://cdn.example-cdn.test/"]', attr: "href" },
+        { element: "video", attr: "src" },
+      ],
+    },
+  },
+};
+const listRule = () => P.playerRuleFor(LIST_RULES, LIST_HOST);
+
+test("a list of accessors normalises in order, and a single table still works",
+  () => {
+    const r = listRule();
+    assert.ok(r);
+    assert.deepEqual(r.media, [
+      { element: 'a[href^="https://cdn.example-cdn.test/"]', attr: "href" },
+      { element: "video", attr: "src" },
+    ]);
+    // back-compat, restated here so the two shapes are pinned side by side
+    assert.deepEqual(rule().media,
+      [{ element: "video#main-video", attr: "src" }]);
+  });
+
+test("AN IMAGE RESOLVES THROUGH ITS ANCHOR, not its downscaled src", () => {
+  // The whole point. `src` is present and is an http URL, so a first-match
+  // reader that ignored order would happily return the proxy copy.
+  const dom = playerDomFromHTML(
+    `<div id="wrap"><a href="${ORIGIN}"><img src="${PROXY}"></a></div>`);
+  const container = dom.queryAll("#wrap")[0];
+  assert.equal(P.readMediaUrl(dom, listRule(), container), ORIGIN);
+});
+
+test("A VIDEO RESOLVES THROUGH ITS OWN src -- the anchor accessor misses", () => {
+  const dom = playerDomFromHTML(
+    `<div id="wrap"><video src="${VIDEO}"></video></div>`);
+  const container = dom.queryAll("#wrap")[0];
+  assert.equal(P.readMediaUrl(dom, listRule(), container), VIDEO);
+});
+
+test("ORDER decides: swapping the accessors saves the thumbnail instead", () => {
+  // The control for the two tests above. If order did not matter they would
+  // both pass with the list reversed, and neither would be evidence.
+  const reversed = P.normalisePlayerRule({
+    player: {
+      container: "#wrap",
+      media: [
+        { element: "img", attr: "src" },
+        { element: 'a[href^="https://cdn.example-cdn.test/"]', attr: "href" },
+      ],
+    },
+  });
+  const dom = playerDomFromHTML(
+    `<div id="wrap"><a href="${ORIGIN}"><img src="${PROXY}"></a></div>`);
+  const container = dom.queryAll("#wrap")[0];
+  assert.equal(P.readMediaUrl(dom, reversed, container), PROXY);
+});
+
+test("a later accessor is reached only when the earlier ones find nothing",
+  () => {
+    // Both accessors are valid; only the second can match this DOM.
+    const dom = playerDomFromHTML(
+      `<div id="wrap"><video src="${VIDEO}"></video></div>`);
+    const container = dom.queryAll("#wrap")[0];
+    assert.equal(P.readMediaUrl(dom, listRule(), container), VIDEO);
+    // ...and with neither present, the reader reports nothing rather than
+    // guessing, so the button says "No media yet" instead of firing.
+    const bare = playerDomFromHTML(`<div id="wrap"></div>`);
+    assert.equal(
+      P.readMediaUrl(bare, listRule(), bare.queryAll("#wrap")[0]), "");
+  });
+
+test("ONE BAD ACCESSOR REJECTS THE WHOLE RULE -- no partial button", () => {
+  // Dropping the bad entry and keeping the good one would render a button that
+  // silently covers only some media on the page, which is the failure mode
+  // normalisePlayerRule's docstring calls worse than no button.
+  for (const bad of [{ element: "video", attr: "src()" },
+    { element: "a:hover", attr: "href" },
+    { element: "video", attr: "" },
+    "not-a-table",
+    null]) {
+    const r = P.normalisePlayerRule({
+      player: { container: "#wrap",
+        media: [{ element: "img", attr: "src" }, bad] },
+    });
+    assert.equal(r, null, JSON.stringify(bad));
+  }
+});
+
+test("an empty list and an over-long list are both refused", () => {
+  assert.equal(P.normalisePlayerRule(
+    { player: { container: "#wrap", media: [] } }), null);
+  const many = [];
+  for (let i = 0; i < 9; i += 1) many.push({ element: "video", attr: "src" });
+  assert.equal(P.normalisePlayerRule(
+    { player: { container: "#wrap", media: many } }), null);
+  // ...and the boundary itself is accepted, so the cap is off-by-one-proof.
+  const eight = many.slice(0, 8);
+  assert.ok(P.normalisePlayerRule(
+    { player: { container: "#wrap", media: eight } }));
+});
+
+test("each accessor sees only ITS OWN nodes", () => {
+  // MEASURED: accumulating the node lists across accessors
+  // (`nodes = nodes.concat(...)`) survived the whole 536-test suite and
+  // returned a URL belonging to NEITHER pair. The shape that catches it needs
+  // an element matched by the FIRST accessor that does not answer the first
+  // attribute but DOES carry the second one -- otherwise the leak is invisible
+  // because the earlier nodes simply have nothing to contribute.
+  const r = P.normalisePlayerRule({
+    player: {
+      container: "#wrap",
+      media: [
+        { element: ".decoy", attr: "data-orig" },
+        { element: ".real", attr: "href" },
+      ],
+    },
+  });
+  const dom = playerDomFromHTML(
+    '<div id="wrap">'
+    + '<a class="decoy" href="https://wrong.test/x.png"></a>'
+    + '<a class="real" href="https://right.test/x.png"></a>'
+    + "</div>");
+  const container = dom.queryAll("#wrap")[0];
+  // `.decoy` has no data-orig, so accessor 1 yields nothing. Accessor 2 must
+  // query `.real` afresh -- if `.decoy` were still in scope its `href` would
+  // win, because it comes first in document order.
+  assert.equal(P.readMediaUrl(dom, r, container), "https://right.test/x.png");
+});

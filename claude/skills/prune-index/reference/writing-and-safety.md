@@ -27,18 +27,33 @@ runs against them. Consequences:
 - 🔴 **`git stash` is repo-GLOBAL.** `refs/stash` lives in the common git dir, so
   a concurrent session can pop or drop yours. Never stash here for any reason —
   set work aside with `cp <file> /tmp/…` and copy it back.
-- 🔴 **Never `git reset --hard`, `git clean`, or `git checkout --`** in a scope.
-  Each destroys curated content that has no other copy, and the autocommit means
-  "it's in git" is a claim about *some* commit, not about the bytes you want.
-- 🔴 **Never add a remote and never push.** Nothing in this store leaves the
-  machine.
+- 🔴 **Never `git reset --hard` (bare), `git clean`, or `git checkout --`** in a
+  scope. ("bare" qualifies `git reset --hard` alone — `git checkout --` always
+  takes a pathspec and `git clean` is almost always `-fd`.) Each destroys **uncommitted** curated content, which no hourly commit
+  and no daily bundle holds — and the autocommit means "it's in git" is a claim
+  about *some* commit, not about the bytes you want. 🔴 **`git reset --hard
+  <ref>` is worse: it ORPHANS committed content**, and `backup.py` bundles with
+  `git bundle create --all` (reachable refs only), so the orphans reach no
+  FUTURE bundle. A bundle already in the bucket holds them only if they were
+  reachable when THAT bundle was written — the daily run can be up to a day
+  behind the hourly commit that created them, so a fresh commit orphaned the
+  same day is in NO bundle. Check with `restore-verify.py`; past that, the
+  reflog is the only holder.
+- 🔴 **Never add a remote and never push.** ⚠ This bullet used to justify itself
+  with "Nothing in this store leaves the machine", which has been false since
+  2026-08-21: `analyze-service-index-backup.service` sends age-encrypted bundles
+  to homelab MinIO daily. The rule is unchanged — that path is encrypted, on the
+  operator's own hardware and audited; a git remote is none of those — but do not
+  repeat the old sentence when pricing exposure.
 - **Write the file and run no git command.** Committing a scope is the store's
   own concern.
 
 ## The confirm-gated write, step by step
 
 1. Audit first. Never propose a cut the audit did not classify.
-2. Back up (`cp -a`, `&&`-chained, count the files). This is the only safety net.
+2. Back up (`cp -a`, `&&`-chained, count the files). This is the only safety net
+   for the CURRENT bytes: the hourly commit and the daily bundle both lag, so
+   neither holds what you are about to overwrite.
 3. For ONE entry, build the proposed new bytes.
 4. Present a **unified diff** against the current file — one compact block — and
    ask a single yes/no. Never batch a scope behind one prompt: a bad cut must be
@@ -99,7 +114,9 @@ that is an invalid control, not a clean result.
 ## Landing
 
 Nothing about this store lands in a PR: the writes are local and final, and the
-store never leaves the machine. What DOES land in devrc is any change to the
+only path off this machine is the encrypted daily backup (see 🔴 **Store safety**
+in `~/.claude/skills/analyze-service/reference/index-store.md`) — never a PR,
+never a git remote. What DOES land in devrc is any change to the
 audit script, this skill, or the `analyze-service` reference docs — those go
 through the ordinary feature-branch + PR flow, gated by
 `scripts/gate.sh --tier both --set all` on the tree rebased onto current
