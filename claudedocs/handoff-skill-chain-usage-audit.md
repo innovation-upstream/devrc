@@ -73,11 +73,17 @@ survives adversarial re-derivation, and fix whatever it exposes.
   lesson) and `devrc/analyze-service-index.md` (recall *lists* vs *features*) from the prior
   session, which also closed an `OPEN:` bullet that was not its own — the clawgate "browser layer
   is UNGATED" item, fix merged as `6bf866fe`, scope open-actions 1 → 0.
-- **Open PR:** **devrc#1064** (`feat/handoff-audit`) — pytests RED on a **timing** test that passes
-  locally on its own branch; **93 commits behind** `main`. That is rank 11, the only mechanical
-  item left.
-- **Not deployed:** rank 4's clawgate `SKILL.md` fix is now ON `main` but NOT yet switched onto
-  either host; `handoff-audit.py` is on #1064 and wired into no gate, skill or script.
+- ✅ **RANK 11 DONE (2026-09-01): devrc#1064 is GREEN and awaiting a merge decision.**
+  `origin/main` merged forward into `feat/handoff-audit` (`466a0938..4beb41e1`); gate
+  `devrc-ci-qbgmb` `failed=0`, `collected=20146 passed=20143`, nodetests 1449/1449, both tiers.
+  It was **124** commits behind, not the 93 recorded here — re-derive that count when you act.
+  **Merging it was NOT part of rank 11 and was not done.**
+- ✅ **RANK 4 DONE (2026-09-01) — and it required NO deploy.** The store copy at
+  `~/.claude/skills/clawgate/SKILL.md` is already byte-identical to `origin/main` (15086 B,
+  `preserve both` = 0), so `home-manager switch` was deliberately SKIPPED rather than run as a
+  no-op riding another session's uncommitted `nix/programs/alacritty/default.nix`. 🔴 Still true:
+  `handoff-audit.py` is on #1064 and wired into no gate, skill or script — shipping it is rank 5,
+  not rank 11.
 - **Clawgate link for the sessions behind this doc: NONE.** `clawgate_handoff.sh resolve` exited
   **5** — 0 tasks — with its positive control confirming the board was reachable. Per its contract
   that 0 cannot distinguish "touched no task" from "wrong id", so **no `clawgate-task:` field was
@@ -631,6 +637,52 @@ It survives only for **#1064**, whose named test still passes on its own branch 
 computed lazily and had not settled at write time. That is **not** a conflict signal; re-read it
 before concluding anything about merging.
 
+### ✅ CLOSED — rank 4 needed NO deploy: the fix was already live, and `stat` nearly said otherwise
+- **The arbiter (`readlink -f`) says STORE COPY, i.e. a `home.file`, i.e. "needs a switch":**
+  `~/.claude/skills/clawgate/SKILL.md` → `/nix/store/9szzbwsnmah34kj8bmplaxxrdkh62w6v-devrc-claude-skills/clawgate/SKILL.md`.
+- **But that store copy was ALREADY CURRENT.** `git -C ~/workspace/devrc show
+  origin/main:claude/skills/clawgate/SKILL.md | cmp -s - ~/.claude/skills/clawgate/SKILL.md` ⇒
+  **IDENTICAL**; `stat -L -c%s` = **15086**; `preserve both` = **0**, `preserve EVERY
+  non-clawgate` = **1**. The acceptance criterion was already met, so **no `home-manager switch`
+  was run**.
+- 🔴 **DELIBERATELY NOT SWITCHED, and the reason generalises: a switch is not free.** The primary
+  clone was dirty with another session's uncommitted `nix/programs/alacritty/default.nix`, so a
+  switch would have deployed that unrelated change as a rider for **zero** benefit on this item.
+  **A no-op deploy from a dirty tree is not a no-op.**
+- 🔴 **THE MEASUREMENT TRAP, and it produced an alarming false reading: `stat` does NOT follow a
+  symlink; `stat -L` does.** `stat -c%s` on this path returned **95** — the length of the store
+  path *string* — which reads exactly like a truncated/broken deploy of a 15 KB file. `grep`
+  meanwhile DOES follow, so the same file simultaneously "was 95 bytes" and "contained the new
+  wording". **Any time a size and a content check disagree, suspect you measured the link and the
+  target.** Use `stat -L`, or settle it with `cmp` against the ref, which is what actually closed
+  this.
+- 🔴 **The rank-8 interference check that had to come FIRST, and would have been invisible if
+  skipped:** rank 8's treatment is pinned to deployed blob `6d25558e`, and a `home-manager switch`
+  replaces the generation. `git hash-object ~/.claude/hooks/handoff-write-guard.py` and
+  `git rev-parse origin/main:scripts/claude-hooks/handoff-write-guard.py` **both** = `6d25558e`, so
+  a switch would not have disturbed the window. That is knowable only by checking — **before any
+  deploy on this box, ask what in-flight measurement the generation is carrying.**
+
+### ✅ CLOSED — rank 11: #1064 is GREEN, and its diagnosis is now confirmed from BOTH arms
+- **Forward-merged `origin/main` into `feat/handoff-audit`** — clean, no conflicts, #1064's three
+  files intact (`handoff-audit.py` 617 L, `test_handoff_audit.py` 520 L, `README.md` 1 L vs main).
+  Pushed `466a0938..4beb41e1`.
+- 🔴 **The doc's "93 commits behind" was STALE — it measured 124 at merge time.** `main` moves
+  several times an hour here. **Re-derive `rev-list --count <branch>..origin/main` at the moment you
+  act; never quote a staleness figure a previous session wrote down.**
+- **Gate `devrc-ci-qbgmb`: `pytests pass collected=20146 passed=20143 skipped=3 failed=0` ·
+  `nodetests pass 1449/1449` · BOTH TIERS PASS.**
+- **Pre-push local run, per rank 9's discipline — all three green:** the previously-named failure
+  `test_a_hanging_fetch_is_BOUNDED_and_the_memo_spares_a_second_wait` **passed in 25.11 s**;
+  #1064's own suite **23/23**; and `test_the_skill_did_not_grow` **passed** — that third one run
+  deliberately, because the merge pulls in `main`'s newer guards and a `failed=N` names only ONE.
+- 🔴 **The two-arm discriminator is now COMPLETE for #1064, and it is the OPPOSITE verdict to
+  #1055.** #1064's named test passes on its own branch AND on `main` ⇒ **environment**, never a
+  stale base. #1055's failed on its branch and passed on `main` ⇒ **stale base**, never the
+  environment. Same symptom at the gate (a red required check naming a test the PR does not
+  touch), opposite causes, and **one pair of sub-second local runs separates them**. That pair is
+  the durable output of ranks 9 + 11 — not either PR.
+
 ## Next steps (ranked)
 
 🔴 **The numbering below is STABLE and load-bearing** — `claim-work --slug-for <this doc> <rank>`
@@ -646,19 +698,19 @@ rather than removed and renumbered. New work is appended at the end.
    abandoned-and-uncommitted-since, of which **5** have a successor that names neither the doc
    nor its topic. Instrument `claudedocs/skill-chain-drift-audit.py` (committed, 4 controls).
    forcing: none
-4. **Deploy the clawgate `SKILL.md` fix** — 🔴 **UNBLOCKED 2026-09-01: #1055 is merged, so the fix
-   is on `main`.** Run `home-manager switch`, then confirm `~/.claude/skills/clawgate/SKILL.md` no
-   longer contains "preserve both". 🔴 **The fix's TEXT is NOT what `bd9a4b34` wrote** — it was over
-   the skill-size ratchet and was trimmed in `eb1eb185`, so the line now reads **preserve EVERY
-   non-clawgate** plus a `jq` derivation. Verify against the CURRENT `main` copy, not the wording in
-   any older description of this item.
+4. ✅ **DONE (2026-09-01) — NO deploy was needed and none was run.** The store copy at
+   `~/.claude/skills/clawgate/SKILL.md` was already byte-identical to `origin/main` (15086 B,
+   `preserve both` = 0). A `home-manager switch` was deliberately SKIPPED: it would have been a
+   no-op for this file while riding along another session's uncommitted
+   `nix/programs/alacritty/default.nix`. See the closed block above for the `stat` vs `stat -L`
+   trap and the rank-8 blob check that had to precede it.
    forcing: none
 5. **Act on the handoff-doc bloat proposal** — `claudedocs/proposal-handoff-doc-bloat.md`.
-   The auditor shipped (IN FLIGHT: devrc#1064); the `/handoff` SKILL.md change is deliberately
-   NOT written — operator chose propose-only. Next move is the eviction contract
-   (budget + step 4.5 + EVICT_HISTORY/RELOCATE_DURABLE/KEEP_HOT), not a gate: the caps file for
-   gate 11 records that the general ratchet rule was replayed over 365 days / 901 commits and
-   **REFUTED**, so re-run that replay for handoff docs before proposing one. 🔴 Datapoint from
+   The auditor is on **devrc#1064, now GREEN and mergeable** (rank 11); the `/handoff` SKILL.md
+   change is deliberately NOT written — operator chose propose-only. Next move is the eviction
+   contract (budget + step 4.5 + EVICT_HISTORY/RELOCATE_DURABLE/KEEP_HOT), not a gate: the caps
+   file for gate 11 records that the general ratchet rule was replayed over 365 days / 901 commits
+   and **REFUTED**, so re-run that replay for handoff docs before proposing one. 🔴 Datapoint from
    2026-08-31: the clawgate skill ratchet DID catch a real unpaid 405 B addition — one case, on a
    SKILL body not a handoff doc, so it does not settle the replay.
    forcing: none
@@ -674,23 +726,26 @@ rather than removed and renumbered. New work is appended at the end.
    untouched session). See `## State now`.
    forcing: none
 8. 🔴 **Grade the hook against the number it was built to move — THE CLOSING CONDITION OF THIS
-   WHOLE ARC. STILL NOT CUT, and deliberately so.** Re-run rank 1's measurement on a
-   post-2026-08-30T17:35Z window and compare the **8.7%** loss rate and the **8/16 cleanly-ended**
-   bucket. As of 2026-09-01 the post-window holds roughly **one day**; the pre-period needed
-   **14 days for 253** `/resume`-genesis sessions. Cutting it now would grade on a handful of
-   tail samples — the exact defect that killed talos-infra #901.
+   WHOLE ARC. STILL NOT CUT, and deliberately so. THIS IS NOW THE ONLY SUBSTANTIVE ITEM LEFT.**
+   Re-run rank 1's measurement on a post-2026-08-30T17:35Z window and compare the **8.7%** loss
+   rate and the **8/16 cleanly-ended** bucket. As of 2026-09-01 the post-window holds roughly
+   **one day**; the pre-period needed **14 days for 253** `/resume`-genesis sessions. Cutting it
+   now would grade on a handful of tail samples — the exact defect that killed talos-infra #901.
    🔴 **Design it against the two ways this shape has ALREADY died here.** (a) *The treatment must
    outlive the wait*: the treatment is a home-manager generation and ANY unrelated `ship.sh`
    replaces it — check the deployed blob is still `6d25558e` **across the whole window**, not just
-   at the end. (b) *The grading population must exist across the whole pre-window*: the pre-period
-   is the 2026-08-15 → 08-29 corpus, already measured and on disk, so this half is satisfied — say
-   so rather than re-deriving it.
+   at the end. ✅ **Verified intact 2026-09-01** (deployed == `origin/main` == `6d25558e`), and
+   rank 4 was skipped partly to keep it that way. (b) *The grading population must exist across
+   the whole pre-window*: the pre-period is the 2026-08-15 → 08-29 corpus, already measured and on
+   disk, so this half is satisfied — say so rather than re-deriving it.
    🔴 **And name the confound before cutting:** the guard changes the behaviour it measures, so a
    session that writes a handoff BECAUSE it was blocked is a success, not a contaminated sample —
    count blocks (`~/.cache/claude-handoff-write/s/*/fires-*`) and report them beside the rate.
    forcing: none
-9. ✅ **DONE (2026-08-31), premise REFUTED twice; #1055 MERGED as `8c108d8b`.** See `## State now`
-   and the two correction blocks. The durable output is two reusable controls, not the PR.
+9. ✅ **DONE (2026-08-31), premise REFUTED twice; #1055 MERGED as `8c108d8b`.** The durable output
+   is the two-arm local discriminator (branch vs `main`), not the PR. See `## State now` and the two
+   correction blocks for #1055 itself, and rank 11's block, where the same pair returned the
+   OPPOSITE verdict and thereby demonstrated it discriminates.
    forcing: none
 10. **Right-size the devrc-ci gate pod, or establish it cannot be.** 🔴 **Its premise is REFUTED:
    the pod requests 2250m, not 4250m** (`step-pytests=2` + `step-nodetests=250m`, measured
@@ -700,15 +755,11 @@ rather than removed and renumbered. New work is appended at the end.
    if released, measure PEAK CPU over a full run first, and read the `tekton` skill — it records
    four *other* fixes as already-rejected-with-measurements.
    forcing: none
-11. **Merge `origin/main` forward into `feat/handoff-audit` (#1064) and re-run its gate.** 93 commits
-   behind; its own named failure is timing, not staleness, so this is hygiene plus a fresh run —
-   do it from a worktree off `origin/feat/handoff-audit`. 🔴 **Apply rank 9's two lessons before
-   concluding anything:** run the named failing test at the branch AND at `origin/main` (that pair
-   separates stale-base from environment in under a second), and treat a `failed=N` naming one test
-   as **N−1 still unidentified** — capture the gate pod's `step-pytests` log before the PipelineRun
-   prunes (240-run retention; the GitHub status carries no `target_url`, so a pruned run leaves no
-   evidence at all).
-   forcing: gate — devrc#1064 is blocked by `tekton/devrc-pytests`
+11. ✅ **DONE (2026-09-01) — `origin/main` merged forward into `feat/handoff-audit`
+   (`466a0938..4beb41e1`), gate `devrc-ci-qbgmb` GREEN, `failed=0`, both tiers.** The branch was
+   **124** behind, not the 93 this doc recorded. **devrc#1064 is now green and awaiting a merge
+   decision — merging it is NOT part of this item and was not done.**
+   forcing: none
 
 ## Gotchas / decisions / dead-ends
 
