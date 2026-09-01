@@ -131,10 +131,34 @@ decision in the migration", which is false. Both axes, counted:
 | **host vs host** | the same entry name on both hosts with different bytes; neither is a derivative of the other | entry names present in both hosts' manifests whose sha256 differ | **1** |
 | **pod vs local** | the served copy holds content that exists nowhere else — i.e. an API-appended bullet carrying the attribution trailer | for every entry the pod and a host both hold and disagree on, the pod's lines not present in the host's, filtered to those matching the attribution pattern | **1** |
 
-🔴 **The pod-vs-local count is provably complete, not merely measured.** Exactly **one entry
-in the entire served copy carries an attribution trailer at all** — so no second entry on
-that axis can exist, whatever it diverges by. That is a stronger statement than a scan
-result, and it is the reason two staged merges are enough.
+🔴 **The pod-vs-local count rests on TWO claims, and only the first is a proof.** An earlier
+version of this paragraph said the count was *"provably complete, whatever it diverges by"*.
+That is wider than the instrument supports, and this document's own rule-3 commentary says
+so: the attribution trailer is written by the **append** route only, and a whole-file
+replace — `PUT /api/v1/entry/<scope>/<ref>`, or `cairn put` — writes no trailer at all. An
+entry rewritten that way would diverge pod-vs-local and carry nothing for the filter to
+find. So, stated as two claims with two different warrants:
+
+1. **For the ATTRIBUTED class the count is complete by construction.** Exactly **one of 132**
+   served entries carries an attribution trailer at all, so no second entry of that kind can
+   exist regardless of what else it diverges by. That is the regex over the whole served
+   copy, not a scan of the divergences.
+2. **For the UNATTRIBUTED class the count is empty because nothing has exercised a
+   whole-file write.** `cairn put` is added by *this* change and therefore cannot have run
+   before now.
+
+⚠ **Claim 2 has a gap I did not close.** The server's `PUT` route has existed since criteria
+1–7 shipped, so a hand-rolled `curl` PUT against the pod is *possible* even though no client
+existed. I did **not** check the audit log for one. If you want claim 2 airtight before the
+cutover, query Loki for a `method=PUT` audit line over the store's lifetime; a zero there
+closes it, and the pod-log grep does not (it holds only the current pod's history — the
+reassuring-zero shape this effort has already been bitten by).
+
+🔴 **AND THE GUARANTEE EXPIRES THE FIRST TIME ANYONE RUNS `cairn put` AGAINST THE POD.**
+After that, pod-vs-local completeness needs a different instrument than the trailer filter —
+the trailer will still be absent and will no longer mean "nothing unique here". A reader who
+inherits the word *provably* will not re-check this at exactly the moment it stops being
+true, which is why the warrant is written out rather than the conclusion alone.
 
 ⚠ **The two axes need different evidence and neither substitutes for the other.** Host-vs-host
 needs a manifest from the *other* machine (`--manifest` over ssh); pod-vs-local needs the
