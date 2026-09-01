@@ -4589,7 +4589,7 @@ def render_text(report: TouchReport) -> str:
 
     if report.known:
         out.append("")
-        out.append("KNOWN ENTRIES (propose a dated journal line, confirm-gated):")
+        out.append("KNOWN ENTRIES (propose a dated journal line; SHOW the diff, then write):")
         for m in report.known:
             fname = report.entry_files.get(m.entry.ref, m.entry.filename)
             out.append(f"  - {m.entry.ref}  ->  {report.scope}/{fname}  ({m.path_count} paths)")
@@ -4669,7 +4669,10 @@ def render_text(report: TouchReport) -> str:
 
     if report.nominations:
         out.append("")
-        out.append("NO ENTRY (propose a MINIMAL new entry, confirm-gated — pick at most one):")
+        out.append(
+            "NO ENTRY (propose a MINIMAL new entry; SHOW the diff, then write "
+            "— pick at most one):"
+        )
         for n in report.nominations:
             shape = "one place in the tree" if n.coherent else "spread across directories"
             if n.fans_out:

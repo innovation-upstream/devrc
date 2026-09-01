@@ -330,14 +330,53 @@ client identity. See "Rate limit, lockout and the client address" below.
 ⚠ `verify-byte-identity.sh` prints a `diff` on failure, and that diff is store
 content. Redirect it to a file on a shared terminal.
 
-## Why byte-identity is asserted "modulo one line"
+## Why byte-identity is asserted "modulo THREE named differences"
 
 `render_text` prints `  store: <root>`, and the pod's root is `/data` while the
 workbench's is `~/.claude/analyze-service-index`. The streams therefore cannot be
-byte-identical, and a verifier that said they were would be lying. The script
-canonicalises exactly that line and `cmp`s the result, and prints beside the
-verdict how many lines differ **with no canonicalisation** and how many of those
-are the store-root line — `2` and `2` for pod-vs-workbench.
+byte-identical, and a verifier that said they were would be lying.
+
+There are **three** such differences, not one, and the second is the one that
+made this script permanently red:
+
+| difference | why it is legitimate | how it is canonicalised |
+|---|---|---|
+| `  store: <root>` | the pod serves a copy at a different path | rewritten to a fixed token **on both sides** |
+| `  host: <id>` | `store_host_line()` names the machine whose disk was read — the store is PER-HOST, and saying so is the entire point of the line | rewritten to a fixed token **on both sides** |
+| the `🔴 SNAPSHOT` block | a transport annotation the server prepends and the local CLI correctly does not emit | removed from the **remote** only |
+
+🔴 **`host:` was added late and nothing stripped it**, so every comparison
+between a workbench and a pod failed by construction — `verify: scopes=16 pass=0
+fail=16` on a store whose content was identical. `claude/RULES.md`: a
+permanently-red gate is worse than no gate. **That rule alone closes it**:
+measured on scope `kubeclaw`, workbench versus the live pod, using the script's
+own expressions — `store:` + banner canonicalised gives **2** differing lines,
+adding `host:` gives **0**.
+
+⚠ **The snapshot block's LENGTH is measured rather than assumed — hardening for
+a version skew that has NOT been observed.** The previous anchored two-line rule
+was *not* broken: it deletes the banner and its blank separator, which is exactly
+what this tree's `server.py` emits. Two structural reasons to measure anyway,
+neither needing a failure to have happened: the deployed image's arrangement is
+not this checkout's to assume, and a fixed-size delete removes lines that never
+enter the accounting below, so **deleted** could not be reconciled against
+**counted**. The block is now the run of lines at the head of the remote stream
+that are the banner or are blank; it is stripped only if that run **contains**
+the banner, and a server that emits no banner (pre-0.3.0) has nothing removed.
+
+Beside the verdict the script prints how many lines differ **with no
+canonicalisation at all**, decomposed into the three causes and summed as
+`accounted-for`. A real pod-vs-workbench run reads `store-root-lines=2
+host-lines=2 snapshot-block-lines=2 accounted-for=6`; the three-line block in
+`test_a_POD_SHAPED_remote_PASSES_when_only_the_THREE_permitted_lines_differ` is
+a SYNTHESISED skew, not a shape any deployed image has been seen to emit.
+Those numbers are EVIDENCE, not a second gate:
+they can only disagree if a `sed` erased a line that was none of the three,
+which the renderer cannot produce (no entry body renders at two-space
+indentation — measured across all four modes). Gating on them would be an
+unreachable guard counted as coverage. But every canonicalisation rule **must**
+appear in that sum: a rule that erases a difference without a matching count
+widens the blind spot rather than the gate.
 
 ## The token is a SET, and rotation is by overlap
 

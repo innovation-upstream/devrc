@@ -3,25 +3,37 @@
 # EVERY scope (proposal §4 phase 1, §5 "byte-identity … `cmp`, not eyeballing").
 #
 # ⚠ IT CANNOT BE A BARE `cmp`, AND SAYING SO IS THE POINT.
-# `subsystem_recall.render_text` emits exactly one line naming the store root:
+# `subsystem_recall.render_text` emits exactly one line naming the store root
+# and exactly one line naming the machine whose disk was read:
 #
-#     store: /data                       (pod)
-#     store: /home/zach/.claude/…        (workbench)
+#     store: /data                       host: subsystem-store-api-…   (pod)
+#     store: /home/zach/.claude/…        host: nixos-<id-prefix>       (workbench)
 #
-# So the two byte streams are provably NOT identical, and a verifier that
-# reported them identical would be lying. What is claimed, precisely:
+# and the server prepends a transport annotation (the SNAPSHOT block) that the
+# local CLI correctly does not emit. So the two byte streams are provably NOT
+# identical, and a verifier that reported them identical would be lying. What is
+# claimed, precisely:
 #
-#   after replacing THAT ONE LINE with a fixed token on both sides, `cmp`
-#   reports the streams byte-identical.
+#   after replacing THOSE TWO LINES with a fixed token on both sides and
+#   removing the remote's SNAPSHOT block, `cmp` reports the streams
+#   byte-identical.
 #
-# Beside that verdict every PASS line prints `raw-diff-lines` and
-# `store-root-lines` — how many lines differ with NO canonicalisation, and how
-# many of those are the store-root line — so a reader can see the excuse was
-# spent on exactly the lines it claims (0/0 same-root, 2/2 pod-vs-workbench).
+# 🔴 THE `host:` RULE IS THE ONE THAT WAS MISSING, AND ITS ABSENCE MADE THIS
+# SCRIPT PERMANENTLY RED. `store_host_line()` shipped when the store became
+# PER-HOST; it names THIS machine, so it differs between the workbench and the
+# pod BY CONSTRUCTION and no run of this script could ever pass again
+# (`verify: scopes=16 pass=0 fail=16` on a store whose content was identical).
+# `claude/RULES.md`: a permanently-red gate is worse than no gate.
+#
+# Beside that verdict every PASS line prints its ACCOUNTING: `raw-diff-lines`
+# (how many lines differ with NO canonicalisation at all) decomposed into
+# `store-root-lines`, `host-lines` and `snapshot-block-lines`, plus the
+# `accounted-for` sum — so a reader can see the excuse was spent on exactly the
+# lines it claims (0/0/0 same-root same-host, 2/2/2 pod-vs-workbench).
 # ⚠ Those numbers are EVIDENCE, not a second gate, and the body of the script
-# says why: the two can only disagree if `sed` erased a non-store line, which
-# the renderer cannot produce. Gating on them would be an unreachable guard
-# counted as coverage.
+# says why: they can only disagree if `sed` erased a line that was none of the
+# three, which the renderer cannot produce. Gating on them would be an
+# unreachable guard counted as coverage.
 #
 # 🔴 CONTROLS. A comparator that always says PASS is indistinguishable from one
 # that works, so this script is exercised BOTH ways in
@@ -49,6 +61,7 @@ URL=""
 TOKEN_FILE=""
 SCOPES=()
 CANON='  store: <canonicalised>'
+CANON_HOST='  host: <canonicalised>'
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -56,7 +69,7 @@ while [[ $# -gt 0 ]]; do
     --url)        URL="${2:?}"; shift 2 ;;
     --token-file) TOKEN_FILE="${2:?}"; shift 2 ;;
     --scope)      SCOPES+=("${2:?}"); shift 2 ;;
-    -h|--help)    sed -n '2,35p' "$0"; exit 0 ;;
+    -h|--help)    sed -n '2,51p' "$0"; exit 0 ;;
     *) echo "verify: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -144,19 +157,29 @@ for scope in "${SCOPES[@]}"; do
 
   # Claim 2's EVIDENCE, computed before claim 1 so a green cmp is never printed
   # without it: how many lines differ with no canonicalisation at all, and how
-  # many of those are the store-root line.
+  # many of those each named cause accounts for.
   #
   # ⚠ THESE ARE REPORTED, NOT GATED, AND THAT IS DELIBERATE. `raw` can only
-  # differ from `store_lines` if the canonicalisation erased a difference that
-  # was NOT a store-root line — and `sed` only rewrites lines matching
-  # `^  store: `, which MEASURED against the renderer no entry body can produce
-  # (every body line is indented deeper than two spaces, checked in all three
-  # modes). So a gate on `raw -eq $store_lines` could never fire: it would be an
-  # unreachable guard counted as coverage, which `claude/RULES.md` calls out by
-  # name. The numbers are printed instead, so a reader can see that the
-  # canonicalisation excuse was spent on exactly the lines it claims.
+  # exceed the sum below if the canonicalisation erased a difference that was
+  # none of the three named causes — and `sed` only rewrites lines matching
+  # `^  store: ` or `^  host: `, which MEASURED against the renderer no entry
+  # body can produce (every body line is indented FOUR OR MORE spaces — the
+  # section headings at four, their content at six, and a body line that itself
+  # begins `  host: ` renders at eight; checked in all four modes: default,
+  # `--ref`, `--search`, `--list`). So a gate on `raw -eq $accounted` could
+  # never fire: it would be an unreachable guard counted as coverage, which
+  # `claude/RULES.md` calls out by name. The numbers are printed instead, so a
+  # reader can see that the canonicalisation excuse was spent on exactly the
+  # lines it claims.
+  #
+  # 🔴 EVERY CANONICALISATION RULE MUST APPEAR IN THIS SUM. A rule that erases a
+  # difference without a matching count widens the blind spot instead of the
+  # gate — which is why `host_lines` was added in the same commit as the `host:`
+  # sed, and why the snapshot block is counted by the number of lines actually
+  # deleted rather than assumed to be two.
   raw=$(diff "$local_out" "$remote_out" | grep -c '^[<>]' || true)
   store_lines=$(diff "$local_out" "$remote_out" | grep -c '^[<>]   store: ' || true)
+  host_lines=$(diff "$local_out" "$remote_out" | grep -c '^[<>]   host: ' || true)
 
   # 🔴 THE SNAPSHOT BLOCK IS A TRANSPORT ANNOTATION, NOT PART OF THE REPORT.
   # The server prepends one line dating the COPY it serves (plus a blank
@@ -164,31 +187,80 @@ for scope in "${SCOPES[@]}"; do
   # for the measured incident that put it there. The local CLI reads the
   # authoritative store and correctly emits no such line, so leaving it in would
   # make this script FAIL on every scope for a difference that is not about the
-  # render at all — the same excuse the `store:` line above already earns.
+  # render at all — the same excuse the two lines above already earn.
   #
-  # Stripped from the REMOTE only, and by an anchored two-line delete, so it
-  # cannot reach into a report body. An image WITHOUT the stamp is unaffected
-  # (the sed matches nothing), which is what keeps this runnable against 0.2.0.
+  # 🔴 THE BLOCK IS MEASURED, NOT ASSUMED TO BE TWO LINES — AND THIS IS
+  # HARDENING FOR A SKEW THAT HAS NOT BEEN OBSERVED, NOT A FIX FOR A DEFECT.
+  # ⚠ THE PREVIOUS RULE WAS NOT BROKEN. An anchored `,+1d` deletes the banner
+  # AND its blank separator, which is exactly the arrangement THIS TREE's
+  # `server.py` emits, and `test_every_permitted_difference_is_ACCOUNTED_FOR_
+  # not_merely_small` passes on it — before this change and after. Do not read
+  # this comment as evidence against it and do not go looking for the incident:
+  # there wasn't one. The retraction is recorded in this branch's history.
+  #
+  # Two structural reasons to measure the length anyway, neither of which needs
+  # a failure to have happened:
+  #   * THE LENGTH IS NOT THIS CHECKOUT'S TO ASSUME. This script does not
+  #     compare against this tree's `server.py`; it compares against whatever
+  #     image is DEPLOYED, and a fixed-size delete is a bet that those two are
+  #     the same version. Nothing here can check that bet.
+  #   * DELETED MUST EQUAL COUNTED. `,+1d` removes lines that never enter the
+  #     accounting above, so its removals could not be reconciled against `raw`;
+  #     a measured length can. That is the whole point of the sum, and a rule
+  #     exempt from it is the blind spot the sum exists to close.
+  #
+  # So the block is defined as the run of lines at the HEAD of the remote stream
+  # that are the banner or are blank, its LENGTH is measured, and exactly that
+  # many lines are dropped.
+  #
+  # Two narrowings keep this from reaching into a report body:
+  #   * it is a HEAD run only — a banner appearing anywhere else is left alone
+  #     and will fail the comparison, which is correct;
+  #   * the run must CONTAIN the banner, so a remote that merely starts with a
+  #     blank line has nothing stripped (that is a real difference).
+  # An image WITHOUT the stamp is therefore unaffected — the run is empty and
+  # nothing is deleted — which is what keeps this runnable against 0.2.0.
   snapshot_lines=$(grep -c '^🔴 SNAPSHOT, NOT THE SOURCE' "$remote_out" || true)
-  sed "s|^  store: .*|$CANON|" "$local_out"  > "$tmp/l.canon"
-  sed -e '/^🔴 SNAPSHOT, NOT THE SOURCE/,+1d' \
-      -e "s|^  store: .*|$CANON|" "$remote_out" > "$tmp/r.canon"
+  snapshot_block=$(awk '
+    /^🔴 SNAPSHOT, NOT THE SOURCE/ { n++; seen = 1; next }
+    $0 == ""                       { n++; next }
+                                   { exit }
+    END { print (seen ? n + 0 : 0) }
+  ' "$remote_out")
+
+  # 🔴 The SAME two seds on both sides. A canonicalisation applied to one stream
+  # only is not a canonicalisation, it is an edit — and the `store:`/`host:`
+  # rules are only honest because the local render is rewritten too.
+  canon_seds=(-e "s|^  store: .*|$CANON|" -e "s|^  host: .*|$CANON_HOST|")
+  sed "${canon_seds[@]}" "$local_out" > "$tmp/l.canon"
+  remote_seds=("${canon_seds[@]}")
+  # `1,0d` is a sed error, not a no-op, so the delete is only added when the
+  # block is non-empty.
+  if [[ "$snapshot_block" -gt 0 ]]; then
+    remote_seds=(-e "1,${snapshot_block}d" "${remote_seds[@]}")
+  fi
+  sed "${remote_seds[@]}" "$remote_out" > "$tmp/r.canon"
+
+  # Printed beside `raw` so the reader does the subtraction once, here, instead
+  # of in their head on every PASS line.
+  accounted=$((store_lines + host_lines + snapshot_block))
 
   rev=$(awk 'tolower($1)=="x-store-revision:"{print $2}' "$tmp/hdr" | tr -d '\r' | tail -1)
 
   # PASS is `cmp` on the canonicalised streams — the byte-identity claim itself.
-  # The two counts ride along as evidence: 0/0 is the case where both sides read
-  # the SAME root (a local self-check), 2/2 is pod-vs-workbench.
+  # The counts ride along as evidence: 0/0/0 is the case where both sides read
+  # the SAME root on the SAME host (a local self-check), 2/2/2 is
+  # pod-vs-workbench.
   if cmp -s "$tmp/l.canon" "$tmp/r.canon"; then
-    # `snapshot-line` rides along as EVIDENCE, exactly like the two counts above
+    # `snapshot-line` rides along as EVIDENCE, exactly like the counts above
     # and gated for the same reason they are not: a `0` here means the remote
     # served no stamp, which is true and expected against a pre-0.3.0 image, so
     # failing on it would make this script permanently red until a deploy lands
     # (RULES.md). Printed so a reader can see WHICH of the two the green means.
-    echo "PASS scope=$scope bytes=$(wc -c <"$tmp/l.canon") raw-diff-lines=$raw store-root-lines=$store_lines snapshot-line=$snapshot_lines revision=${rev:-unknown}"
+    echo "PASS scope=$scope bytes=$(wc -c <"$tmp/l.canon") raw-diff-lines=$raw store-root-lines=$store_lines host-lines=$host_lines snapshot-line=$snapshot_lines snapshot-block-lines=$snapshot_block accounted-for=$accounted revision=${rev:-unknown}"
     pass=$((pass + 1))
   else
-    echo "FAIL scope=$scope canonicalised-cmp=$(cmp -s "$tmp/l.canon" "$tmp/r.canon" && echo same || echo differs) raw-diff-lines=$raw store-lines=$store_lines"
+    echo "FAIL scope=$scope canonicalised-cmp=$(cmp -s "$tmp/l.canon" "$tmp/r.canon" && echo same || echo differs) raw-diff-lines=$raw store-lines=$store_lines host-lines=$host_lines snapshot-block-lines=$snapshot_block accounted-for=$accounted"
     # 🔴 `|| true` is load-bearing, not decoration. `diff` exits 1 when the files
     # differ — which is ALWAYS true on this branch — and under `set -o pipefail`
     # that status kills the whole script mid-loop, so the remaining scopes are

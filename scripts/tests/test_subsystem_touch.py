@@ -12183,3 +12183,77 @@ class TestTheStoreIsPerHost:
         bad.write_text("not-a-machine-id\n", encoding="utf-8")
         monkeypatch.setattr(hi, "MACHINE_ID_FILES", (str(bad),))
         assert hi.machine_id() is None
+
+
+# =============================================================================
+# THE PRINTED PROPOSAL MUST NOT ADVERTISE A GATE THAT NO LONGER EXISTS
+#
+# 🔴 THE MEASURED DEFECT. The append y/N was retired on 2026-08-15 and again,
+# everywhere, on 2026-08-31 — and both proposal HEADERS went on printing
+# "confirm-gated" for months afterwards. That is the one place it actually
+# misleads: an operator reading the tool's own output is told a prompt will
+# stand between the proposal and the store, and none will. Every other stale
+# mention lived in a docstring; these two were user-visible.
+#
+# 🔴 THIS IS NOT A PHRASE BAN. It reads the RENDERED OUTPUT of the real code
+# path, so it cannot be satisfied by rewording a comment, and it deliberately
+# does not police the word elsewhere: `prune-index` keeps its y/N on purpose
+# (a cut is a deletion, and the evidence that retired the prompt was measured on
+# an APPEND), and the dated retractions that quote the old wording must stay
+# findable as retractions. Scope is exactly the two headers this tool prints.
+# =============================================================================
+
+
+class TestTheProposalHeadersDoNotClaimAConfirmGate:
+    def _headers(self, store: Path) -> str:
+        """Both proposal headers through the real renderer, in one string.
+
+        KNOWN ENTRIES needs a path that resolves to an existing entry; NO ENTRY
+        needs one that resolves to none. Rendering both is the positive control:
+        if a future refactor stops emitting either header, the assertions below
+        would pass vacuously, so their presence is asserted first.
+        """
+        known = st.render_text(_report(self.KNOWN_PATHS, store))
+        # Two paths in ONE unseen directory: the shape `nominate()` requires
+        # (min_paths) and the same fixture the resolution tests use for a
+        # brand-new scope.
+        nominate = st.render_text(
+            _report(["apps/roster/a.yaml", "apps/roster/b.yaml"], store,
+                    scope="brand-new-repo")
+        )
+        return known + "\n" + nominate
+
+    KNOWN_PATHS = ["scripts/collector/a.py", "scripts/collector/b.py"]
+
+    def test_neither_header_advertises_a_confirm_gate(self, store: Path) -> None:
+        text = self._headers(store)
+        assert "KNOWN ENTRIES" in text, (
+            "positive control: the KNOWN ENTRIES header did not render, so the "
+            "assertion below would pass vacuously"
+        )
+        assert "NO ENTRY" in text, (
+            "positive control: the NO ENTRY header did not render, so the "
+            "assertion below would pass vacuously"
+        )
+        for line in text.splitlines():
+            if line.startswith(("KNOWN ENTRIES", "NO ENTRY")):
+                assert "confirm-gated" not in line.lower(), (
+                    "a proposal header still advertises a confirm gate. The "
+                    "append y/N was retired 2026-08-15 and again everywhere on "
+                    "2026-08-31; the write SHOWS a diff and then writes. "
+                    f"Header: {line!r}"
+                )
+
+    def test_the_headers_say_what_DOES_happen(self, store: Path) -> None:
+        """Removing a false claim is not the same as stating the true one.
+
+        Without this, deleting the words 'confirm-gated' and stopping would pass
+        the test above while leaving the operator with no idea whether a diff is
+        shown before the write.
+        """
+        text = self._headers(store)
+        for line in text.splitlines():
+            if line.startswith(("KNOWN ENTRIES", "NO ENTRY")):
+                assert "SHOW the diff" in line, (
+                    f"header states no write contract at all: {line!r}"
+                )

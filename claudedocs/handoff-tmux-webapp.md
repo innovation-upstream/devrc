@@ -9,7 +9,8 @@ and an **attention queue** that surfaces sessions needing a human so Zach can ju
 
 ## Status
 
-**Ranks 1–8, 13 and 16 are ✅ DONE. Ranks 10, 11, 12, 14, 15 are OPEN.** The live-refresh work
+**Ranks 1–8, 13, 15 and 16 are ✅ DONE. Ranks 10, 11, 12, 14 are OPEN** (12 is clawgate task
+#463 and explicitly NOT ours). The live-refresh work
 (`ZacxDev/homelab-infra#611`) is DONE, merged, and **deployed as 0.8.21** — see below.
 
 🔴 **DO NOT READ A VERSION FROM THIS DOC — `clawgatectl health` is the only authority.**
@@ -63,6 +64,49 @@ feeder ticks at the 2-minute cadence) against 159 total events as a control.
   Deliberately not reduced: `session-manager` makes up to 4 ssh invocations per remote host per
   run with no `ControlMaster`.
 - Terminal WRITE is still `DISABLED (fail-closed)` — read-only until a token is provisioned.
+
+- **Repo/branch:** `devrc` on `main`; `homelab-talos` on `trunk`. No branch of mine open — all four
+  PRs from this session are MERGED and content-verified on their remote refs.
+- **DONE this session, all four merged and verified by CONTENT (never ancestry — a squash makes
+  `--is-ancestor` false forever):**
+  | PR | what | squash |
+  |---|---|---|
+  | `devrc#1205` | handoff correction: superseded store-api flake blocks + a committed diff3 conflict marker | `ca044933` |
+  | `ZacxDev/homelab-infra#618` | rank 16 — the `clawgate-ci` bats collected-test floor | `b5992890` |
+  | `devrc#1212` | rank 13 — `--slug-for` discarded a lettered sub-rank | `76bb7507` |
+  | `ZacxDev/homelab-infra#625` | rank 15 — the bats scanners' heredoc blind spot | `0dd62cd9` |
+- **Deployed AND verified, stated separately:** `ship.sh` rc 0, both hosts at `26e16eca`, cross-host
+  agreement **COMPARED**, no skipped host (every per-host line read, not the verdict). Verified the
+  two things it was run for: `~/.claude/skills/handoff/reference/shared-queue.md` is current on this
+  host (it was a stale `/nix/store` copy), and the laptop's `clawgatectl`-adjacent `claim-work` now
+  returns `tmux-webapp-8c` / `-8d` instead of one collapsed slug.
+- 🔴 **Rank 16 is now PROVEN LIVE, which #618 alone could not do.** #618 changed a Tekton Task, and
+  a PipelineRun executes the DEPLOYED object — its own green `clawgate-ci` ran the OLD leg (measured:
+  one plan line `1..67`, zero `floor=` lines). #618 also triggered nothing on merge, being
+  path-filtered on `containers/clawgate/**` which it never touched. #625 DOES touch that path, so its
+  run `clawgate-ci-kdmd7` is the end-to-end proof:
+  ```
+  1..35
+    hook/tests/clawgate-hook.bats: rc=0 plan=1..35 ok=35 not_ok=0 ran=35 floor=34
+  1..32
+    hook/tests/clawgate-stop-hook.bats: rc=0 plan=1..32 ok=32 not_ok=0 ran=32 floor=31
+  hook leg rc=0
+  ```
+  Two plan lines, two floors. The deployed Task carries `run_suite` x2 (confirmed against the live
+  cluster object, byte-identical to what was tested).
+- **Rank 8a re-measured 2026-09-01 16:29Z and its standing prediction REFUTED.** Server 0.8.21, both
+  hosts' `clawgatectl` 0.8.21, and the cross-host round trip moved a number (`view create` on the
+  laptop → `view ls` on the workbench → `view rm`: `[] → 1 → []`). The doc's "stale again by
+  construction" is a hypothesis to test, not a fact to carry.
+- **IN FLIGHT: nothing.** No branch, no claim held (`tmux-webapp-13/15/16` and the doc-correction
+  slug all released), both worktrees removed and pruned, both base clones fast-forwarded.
+- ⚠ **Not verified, and it cannot be from here:** `trunk` has no post-merge `clawgate-ci` run over
+  the #625 bats files — the leg runs the deployed Task against a *PR's* checkout, so the next PR
+  touching `containers/clawgate/**` is the first thing that will exercise them on trunk.
+- ⚠ **The workbench's built generation is `origin/main` PLUS an uncommitted
+  `nix/programs/alacritty/default.nix`** (another session's WIP that nix reads at eval time).
+  `ship.sh` flags this itself as `DIRTY AND IN THE ARTIFACT`. The two hosts agree on the SHA; the
+  workbench's artifact is not purely that SHA.
 
 ## Platform: this is a clawgate feature
 | | |
@@ -294,22 +338,28 @@ drop, so a typo’d rank can no longer collapse two items onto one lock in silen
     `s.notifyAgentRunning(agentName)` at `server.go:2160` is wrapped in `safeGo`.
     forcing: regression — measured, the conversion took one bug class from a 20/20 detector to a
     0/20 non-detector, and the guard that would have caught the enabling refactor does not exist.
-15. **The bats scanner's heredoc premise is FALSE, and two of its sub-expressions survive mutation.**
-    Repo: `homelab-talos`, `containers/clawgate/hook/tests/{clawgate-hook,clawgate-stop-hook}.bats`.
-    Three parts, all from the #592 audit and re-verified here:
-    (a) 🔴 KNOWN LIMIT 4 says no test body uses a heredoc; `clawgate-stop-hook.bats:860` and `:907`
-    both do, and the false sentence sits at `:1306` of that same file and in the PR body. Latent
-    today (no column-0 `}` inside either heredoc) — one ordinary edit makes `/^}/ { inbody = 0 }`
-    truncate the body silently, taking the pre-existing sibling `scan_detached_absences` (`:1080`)
-    with it, while `EXAMINED > 0` and the `BODIES` equality both stay green.
-    (b) 🟡 KNOWN LIMIT 5's `function name { … }` exclusion is unenforced, and the `BODIES`
-    cross-check CANNOT see it because both sides use the identical `^@test ` pattern — they agree
-    at the same wrong number. bats 1.11.1 does run such tests (measured).
-    (c) 🟡 Two mutants SURVIVED: dropping the `(e|f|z)?` alternation, and dropping the TRAILING
-    word-boundary class (the sweep exercised only the leading one). The `egrep/fgrep/zgrep`
-    capability is asserted in three places and pinned by nothing.
-    forcing: regression — this is the guard's own blind spot in the file it guards, and (a) is the
-    shape the guard exists to catch.
+15. ✅ **DONE 2026-09-01 — `ZacxDev/homelab-infra#625`, squash `0dd62cd9`.** All three parts.
+    (a) KNOWN LIMIT 4 said no test body uses a heredoc; two do, and `/^}/ { inbody = 0 }` is shared
+    by BOTH scanners, so a column-0 `}` in one blinds them for the rest of the body while EXAMINED
+    stays positive and the BODIES cross-check still agrees. Measured on a probe of that shape:
+    pre-change `EXAMINED 3` and **ZERO violations**; post-change the real violation is caught and
+    the heredoc's own `! grep` correctly ignored as data. Heredoc tracking added at all FOUR sites
+    (2 scanners x 2 suites — no shared library) from one string, asserted byte-identical.
+    🔴 **Two traps it cost, both now in the code:** the scanner may not SPELL its own redirect
+    operator anywhere in its program (written literally in its own regex it opened a heredoc tagged
+    `A` on that line and ran blind to EOF — 33 bodies against 35 by grep; the pattern is assembled
+    in `BEGIN` now), and prose describing the operator needs an explicit comment clause — which
+    **SURVIVED** a green run until a fixture body pinned it, exactly the rule-no-mutant-can-kill this
+    file's own header warns against.
+    (b) KNOWN LIMIT 5 ENFORCED. Measured on bats 1.11.1: a function-style test with the trailing
+    marker IS collected and run (2), without it is not (1). Neither scanner sees one and the BODIES
+    cross-check is structurally blind (both sides count `^@test `), so they agree at the same wrong
+    number. Detector carries its own positive control.
+    (c) Both surviving mutants killed — one body each for egrep/fgrep/zgrep, and a `grepzilla` body
+    for the TRAILING word-boundary class (only the leading one was pinned, by `pgrep`).
+    Probe contract re-derived from a real run: **9 violations / BODIES 14 / EXAMINED 20**. Mutation
+    battery **6/6 killed**, M0 control green, file restored by hash.
+    forcing: none
 16. ✅ **DONE 2026-09-01 — `ZacxDev/homelab-infra#618`, squash `b5992890`.** The `hook` leg read
     only `bats`' exit code, and `bats` on a file with zero `@test` bodies prints `1..0` and exits
     **0**. Each suite now runs separately against its own floor (34 / 31, from `bats --count`
@@ -1586,6 +1636,34 @@ than as a round 4, because re-auditing a comment edit is the loop the gate exist
   condition must be "every Running pod is the new image AND none is the old", not "the new image
   appears" — the sibling of the documented `.items[0]` trap, from the other direction.
 
+- 🔴 **A SCANNER THAT READS THE FILE IT LIVES IN CANNOT SPELL ITS OWN PATTERN — and the failure is
+  a SILENT TRUNCATION, not an error.** Adding heredoc tracking to the bats scanners, the awk line
+  `sub(/^<<[^A-Za-z0-9_]*/, …)` matched ITSELF: the scanner opened a heredoc tagged `A` on its own
+  source line and skipped to EOF. Every downstream number stayed plausible — it simply reported
+  **33 test bodies where grep counted 35**. The `BODIES` equality cross-check is the only thing that
+  caught it; `EXAMINED > 0` was still true. Two separate manifestations, both measured: the REGEX
+  (fixed by assembling the pattern in `BEGIN`) and PROSE describing it (fixed by an explicit comment
+  clause). 🔴 **And the clause SURVIVED a green mutation run** until a fixture body was written for
+  it — the "rule no mutant can kill" this very file's header warns about, walked into while adding
+  a rule. Generalise: **any self-referential text scanner needs its own literals assembled, and a
+  cross-check that fails DIFFERENTLY is what makes the truncation visible.**
+- 🔴 **A POLL LOOP THAT CANNOT PARSE ITS STATUS EXITS IMMEDIATELY AND READS AS "CONCLUDED".** A
+  wait-for-CI loop embedded a python one-liner in zsh, hit a quoting `SyntaxError`, captured an
+  EMPTY string, and the `case "$s" in *pending*)` guard therefore did not match — so it broke out
+  after one iteration and the background task reported success having measured nothing. The
+  notification said "completed"; the run had not even started. **Never let an unreadable status
+  share a branch with a concluded one** — test emptiness and non-zero rc explicitly, and say
+  "still running" for both. ⚠ `gh pr checks` exits **8** while checks are pending, so `rc != 0` is
+  not an error either.
+- ⚠ **`ship.sh` reports `DIRTY AND IN THE ARTIFACT` and it is not cosmetic.** It classifies dirty
+  paths against the set nix actually READS at eval/build time, so a host can be byte-identical to
+  `origin/main` by SHA while the generation it just built is `origin/main` PLUS someone's
+  uncommitted WIP. Cross-host "both at <sha>" is then true and still not host parity.
+- ⚠ **An ABSENT Tekton check and a NOT-YET-SCHEDULED one remain byte-identical in `gh pr checks`,
+  and the wait is ~15 minutes.** `clawgate-ci` was missing from #625's list on first read; it
+  registered on the 5th poll iteration and passed. The doc already records this class from #566 —
+  it recurred, and waiting is the whole remedy.
+
 ## How to verify
 
 ```bash
@@ -1672,6 +1750,31 @@ Measured 2026-08-27 pre-fix: open=59, resolved=31, all=90 — the filter discrim
 readlink -f "$(jq -r '.hooks.PermissionRequest[].hooks[].command' ~/.claude/settings.json | sed 's/^CLAUDE_HOST=[a-z]* //')"
 ```
 must terminate inside `homelab-talos`, and that file must contain `raise_attention_question`.
+
+**Rank 13 — the lock discriminates lettered sub-ranks.** `claim-work` resolves into the WORKING
+TREE, so a base-clone `merge --ff-only` is what makes a fix effective; there is no switch:
+```bash
+for r in 8 8c 8d 8C; do printf '%s -> %s\n' "$r" \
+  "$(claim-work --slug-for claudedocs/handoff-tmux-webapp.md $r)"; done
+# expect tmux-webapp-8 / -8c / -8d / -8c   (8C folds; 8c != 8d != 8)
+claim-work --slug-for claudedocs/handoff-tmux-webapp.md 8-c   # rc 2 — a REFUSAL, not a silent drop
+```
+
+**Ranks 15 + 16 — the bats suites and their collected-test floors, in the leg's OWN image:**
+```bash
+cd ~/workspace/homelab-talos/containers/clawgate
+docker run --rm --entrypoint /bin/sh -v "$PWD:/c:ro" -e HOME=/tmp/bh \
+  docker.io/bats/bats:1.11.1 -c 'mkdir -p /tmp/bh; apk add --no-cache jq >/dev/null
+    cd /c && bats --count hook/tests/clawgate-hook.bats hook/tests/clawgate-stop-hook.bats'
+# 2026-09-01: 35 and 32; the floors are measured-minus-one. Re-derive, never tune until green.
+```
+🔴 **Rank 16's live proof is a REAL PipelineRun, not a local run — and ONLY a PR touching
+`containers/clawgate/**` produces one** (the leg is path-filtered, so a `clusters/**`-only change
+triggers nothing, and a PipelineRun runs the DEPLOYED Task rather than the PR's manifest):
+```bash
+kubectl -n tekton-ci logs pod/<clawgate-ci-run>-clawgate-ci-pod -c step-hook | grep -E 'floor=|^1\.\.'
+# expect TWO plan lines and floor=34 / floor=31. A single `1..67` means the Task did not reconcile.
+```
 ## Run this first — the index, one read-only command
 ```bash
 python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc

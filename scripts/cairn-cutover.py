@@ -1551,8 +1551,12 @@ def _acceptance(args: argparse.Namespace, cache_dir: Path) -> int:
 
     `verify-byte-identity.sh` is then run unmodified over every scope. Its own
     header documents the two controls that make its green meaningful, and its
-    PASS lines print `raw-diff-lines` and `store-root-lines` beside the verdict
-    so a reader can see the canonicalisation was spent where it claims.
+    PASS lines print `raw-diff-lines` beside the verdict, decomposed into
+    `store-root-lines` + `host-lines` + `snapshot-block-lines` and summed as
+    `accounted-for`, so a reader can see the canonicalisation was spent where it
+    claims. 🔴 THREE named differences, not one: this sentence used to name only
+    the store root, which was already false when `host:` shipped and is exactly
+    the difference that made that script permanently red.
     """
     refreshed = run(
         [sys.executable, str(CAIRN), "--cache", str(cache_dir), "sync"], timeout=120

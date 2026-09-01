@@ -169,7 +169,9 @@ def _tree_hash(root: Path) -> str:
 
 class TestReconNeverWrites:
     """The store is curated, client-confidential and not re-derivable by re-running
-    recon. The only writers are the two confirm-gated ones in the skills.
+    recon. The only writers are the two diff-first ones in the skills, which since
+    2026-08-31 follow ONE append protocol (`claude/skills/subsystem-index/SKILL.md`).
+    They were confirm-gated too until the y/N was retired; the diff is still shown.
     (Was "has no off-machine backup" — false; it is backed up hourly/daily. See
     `claude/skills/analyze-service/reference/index-store.md` -> "Store safety".)"""
 
