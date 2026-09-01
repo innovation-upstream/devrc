@@ -27,25 +27,40 @@ from is always the one nobody expected to reach.
 
 🔴 THE SILENT-ZERO GUARD
 ------------------------
-A zero-result query has TWO causes that mean opposite things:
+A zero-result query has THREE causes that mean different things:
 
     the corpus does not say that      an ANSWER. Carry on.
+    your FILTER emptied the corpus    a CALLER ERROR. The query ran against zero
+                                      rows because `--repo`/`--section` selected
+                                      none — the corpus was never asked.
     nothing was ever indexed          a BROKEN INDEX. The query never ran against
                                       anything, and reading it as an answer is a
                                       confident zero with an empty table behind it.
 
 `claude/RULES.md` → "An EMPTY RESULT cannot distinguish two mechanisms". So every
-response — hit, no-match and broken alike — carries the literal
-`indexed_docs=N indexed_sections=M`, and the two zero cases are rendered with
+response — hit, no-match, empty-scope and broken alike — carries the literal
+`indexed_docs=N indexed_sections=M`, and the zero cases are rendered with
 sentences that SHARE NO OPENING PHRASE:
 
-    NO MATCH — …            the index holds rows and none of them matched
+    NO MATCH — …            the SCOPE holds rows and none of them matched
+    🔴 EMPTY SCOPE — …      the index holds rows; your filter selects none of them
     🔴 BROKEN INDEX — …     the index holds NOTHING; nothing was searched
 
+🔴 THE MIDDLE ONE IS WHY `stats()` TAKES THE SAME FILTERS `search()` DOES. It
+originally did not, so the counts printed beside a scoped query described the
+WHOLE index: `--repo totally-bogus` rendered `NO MATCH — the index WAS searched`
+next to a reassuring `indexed_docs=352`, and both halves of that were false. The
+absolute path case is the one that bites, because `$DEVRC` is pre-exported on
+this box and `--repo $DEVRC` is the natural thing to type — this `--repo` takes a
+repo LABEL (`devrc`), while `handoff_index.py --repo` takes a PATH. A label the
+index does not hold is now REJECTED with the labels it does hold, rather than
+answered. Both a scoped count of zero and an unknown label produce `empty-scope`,
+because they are one fact — the filter, not the corpus, is what is empty.
+
 `SearchOutcome.status` names which, in values that share no spelling
-(`hit` / `no-match` / `broken-index`), so a caller can switch on one field rather
-than parse prose. The exit code follows the status, and `broken-index` exits
-non-zero: an empty index is a broken environment, not a reading.
+(`hit` / `no-match` / `empty-scope` / `broken-index`), so a caller can switch on
+one field rather than parse prose. The exit code follows the status, and both
+non-answers exit non-zero: neither an empty index nor an empty scope is a reading.
 
 
 THE BACKEND IS INJECTED
@@ -90,6 +105,9 @@ __all__ = [
     "DEFAULT_LIMIT",
     "BODY_CLIP",
     "STATUSES",
+    "MIN_LIMIT",
+    "EXIT_CODES",
+    "SCOPE_REASONS",
     "SearchOutcome",
     "recall_banner",
     "stats_line",
@@ -109,15 +127,49 @@ DEFAULT_LIMIT = 10
 #: this output is paid by a resuming session's context. Truncation is MARKED.
 BODY_CLIP = 700
 
-#: The three outcomes, in values that share no spelling — see the module docstring.
-#: `broken-index` is NOT spelled `*-empty`: an index with nothing in it and a query
-#: that matched nothing in a full index are different facts, and two statuses that
-#: share a word get read as one.
-STATUSES: tuple[str, ...] = ("hit", "no-match", "broken-index")
+#: The four outcomes, in values that share no spelling — see the module docstring.
+#: `broken-index` is NOT spelled `*-empty` and `empty-scope` is NOT spelled
+#: `*-no-match`: an index with nothing in it, a FILTER that selects nothing, and a
+#: query that matched nothing within a populated scope are three different facts
+#: with three different next actions, and two statuses that share a word get read
+#: as one.
+STATUSES: tuple[str, ...] = ("hit", "no-match", "empty-scope", "broken-index")
+
+#: 🔴 A `--limit` BELOW THIS IS A CALLER ERROR, NOT A NARROW SEARCH. `--limit 0`
+#: returns zero hits from a perfectly good index and used to render the
+#: corpus-is-silent prose — the same false claim `--repo <unknown>` made, by
+#: another door. `--limit -1` is worse: the memory backend's `hits[:-1]` quietly
+#: drops the LAST hit and returns a plausible list, while Postgres rejects
+#: `LIMIT -1` outright, so the two backends disagree about what a negative limit
+#: even means. Bounded at parse time, where the message can name the flag.
+MIN_LIMIT = 1
+
+#: status -> process exit code. 🔴 PINNED TWO-WAY against `STATUSES` by
+#: `test_every_status_has_an_exit_code_and_vice_versa`: a status with no code
+#: would silently exit 0 (the fluent-zero failure, one level up), and a code for
+#: a status nothing emits is a contract nobody can trigger. `hit` and `no-match`
+#: are the two ANSWERS and are absent on purpose — `.get(status, 0)`.
+EXIT_CODES: dict[str, int] = {"broken-index": 3, "empty-scope": 4}
+
+#: WHY a scope came back empty. One status, because a caller's action is the same
+#: (fix the filter); two reasons, because the fix is not. `unknown-repo` is a
+#: label the index does not hold — a typo, or a PATH where a label belongs, which
+#: is the natural mistake on a box that pre-exports `$DEVRC`. `no-rows` is a
+#: perfectly valid filter over a corpus that has nothing under it. Pinned two-way
+#: against what `run_search` emits.
+SCOPE_REASONS: tuple[str, ...] = ("unknown-repo", "no-rows")
 
 
 @dataclass(frozen=True)
 class SearchOutcome:
+    """One query's answer, and everything needed to read its zero correctly.
+
+    `stats` is the WHOLE index; `scoped` is what the `repo`/`sections` filters
+    left. They are separate fields rather than one number because the pair is the
+    guard: equal means no filter narrowed anything, and `scoped.indexed_sections
+    == 0` with `stats.indexed_docs > 0` is the empty-scope case that used to
+    render as an answer about the corpus."""
+
     query: str
     stats: IndexStats
     hits: tuple[Hit, ...]
@@ -126,6 +178,21 @@ class SearchOutcome:
     repo: str | None = None
     sections: tuple[str, ...] = ()
     limit: int = DEFAULT_LIMIT
+    scoped: IndexStats | None = None
+    known_repos: tuple[str, ...] = ()
+    #: Only meaningful on `empty-scope`. See `SCOPE_REASONS`.
+    scope_reason: str | None = None
+
+    @property
+    def in_scope(self) -> IndexStats:
+        """The counts the query actually ran against — the scoped ones when a
+        filter was applied, otherwise the whole index. Never None, so no renderer
+        has to branch and forget."""
+        return self.scoped if self.scoped is not None else self.stats
+
+    @property
+    def filtered(self) -> bool:
+        return self.repo is not None or bool(self.sections)
 
     @property
     def truncated(self) -> bool:
@@ -165,13 +232,27 @@ def recall_banner() -> str:
     )
 
 
-def stats_line(stats: IndexStats, backend: str) -> str:
+def stats_line(stats: IndexStats, backend: str, scoped: IndexStats | None = None) -> str:
     """🔴 THE LINE THAT MAKES A ZERO READABLE. Emitted on every status, in a fixed
-    `key=value` shape so a caller can grep it rather than parse prose."""
-    return (
+    `key=value` shape so a caller can grep it rather than parse prose.
+
+    🔴 WHEN A FILTER IS APPLIED, BOTH NUMBERS ARE PRINTED. `indexed_*` is the whole
+    index and `in_scope_*` is what the query could reach. Printing only the first
+    beside a scoped query is the exact defect this pair was added to close: it
+    reads as "352 documents were searched and none matched" when the true
+    statement is "0 documents were searched". Printing only the SECOND would be
+    the mirror error — a caller could not tell an empty scope from an empty index.
+    So: both, always, whenever they can differ."""
+    line = (
         f"indexed_docs={stats.indexed_docs} indexed_sections={stats.indexed_sections} "
         f"backend={backend}"
     )
+    if scoped is not None:
+        line += (
+            f" in_scope_docs={scoped.indexed_docs} "
+            f"in_scope_sections={scoped.indexed_sections}"
+        )
+    return line
 
 
 def run_search(
@@ -189,24 +270,66 @@ def run_search(
     guard. `stats()` is read FIRST and unconditionally: an empty index yields
     `broken-index` whether or not the query would have matched, because with zero
     rows the query did not run against anything and "no match" would be a claim
-    about a corpus that was never consulted."""
+    about a corpus that was never consulted.
+
+    🔴 AND THE SCOPE IS CHECKED BEFORE THE ZERO IS INTERPRETED TOO. Three ladder
+    rungs, widest first, because each one makes the next readable:
+
+        1. index empty            -> broken-index   nothing was ever indexed
+        2. filter selects nothing -> empty-scope    the caller emptied the corpus
+        3. otherwise              -> hit / no-match a real answer about the scope
+
+    Rung 2 is what the original guard was missing. It fires on an unknown `--repo`
+    label (checked against `store.repos()`, so the message can name the real ones)
+    AND on a scoped count of zero from a known filter — one status, because they
+    are one fact: the filter, not the corpus, is empty. Getting to rung 3 is the
+    only thing that licenses the sentence "the docs do not discuss this"."""
     stats = store.stats()
-    hits = tuple(store.search(query, repo=repo, sections=sections, limit=limit))
     if stats.indexed_docs == 0:
-        status = "broken-index"
-    elif hits:
-        status = "hit"
+        # Do not even run the query: with zero rows there is nothing to ask, and
+        # a store that fails on a query against an empty table would turn a
+        # diagnosable broken index into a traceback.
+        return SearchOutcome(
+            query=query, stats=stats, hits=(), status="broken-index", backend=backend,
+            repo=repo, sections=tuple(sections), limit=limit, scoped=stats,
+            known_repos=tuple(store.repos()),
+        )
+
+    known = tuple(store.repos())
+    scoped = store.stats(repo=repo, sections=sections)
+    # 🔴 ONE STATUS, TWO REASONS, AND THE REASONS ARE NOT REDUNDANT. Both are
+    # "the filter emptied the corpus", so a caller switching on `status` sees one
+    # case — but the two have DIFFERENT fixes and the message has to say which.
+    # `unknown-repo` is a typo or a path where a label belongs, answerable with
+    # the list of labels the index holds. `no-rows` is a filter that is entirely
+    # valid — a real repo, a declared section kind — that this corpus simply has
+    # nothing under, where listing the labels would be noise. Collapsing them
+    # into a bare count check makes the label list unreachable prose.
+    if repo is not None and repo not in known:
+        reason = "unknown-repo"
+    elif scoped.indexed_sections == 0:
+        reason = "no-rows"
     else:
-        status = "no-match"
+        reason = None
+    if reason is not None:
+        return SearchOutcome(
+            query=query, stats=stats, hits=(), status="empty-scope", backend=backend,
+            repo=repo, sections=tuple(sections), limit=limit, scoped=scoped,
+            known_repos=known, scope_reason=reason,
+        )
+
+    hits = tuple(store.search(query, repo=repo, sections=sections, limit=limit))
     return SearchOutcome(
         query=query,
         stats=stats,
         hits=hits,
-        status=status,
+        status="hit" if hits else "no-match",
         backend=backend,
         repo=repo,
         sections=tuple(sections),
         limit=limit,
+        scoped=scoped,
+        known_repos=known,
     )
 
 
@@ -227,7 +350,8 @@ def render(outcome: SearchOutcome) -> str:
     lines = [
         recall_banner(),
         "",
-        stats_line(outcome.stats, outcome.backend),
+        stats_line(outcome.stats, outcome.backend,
+                   outcome.scoped if outcome.filtered else None),
         "  ".join(scope),
     ]
 
@@ -238,16 +362,48 @@ def render(outcome: SearchOutcome) -> str:
             "against NOTHING.",
             "   This is NOT the answer 'the corpus does not mention that': the corpus was "
             "never consulted.",
-            "   Rebuild it (`scripts/lib/handoff_index.py --rebuild`) or check the "
-            "handoff-index-sync unit, then re-run.",
+            "   Rebuild it (`scripts/lib/handoff_index.py --rebuild --write`) or check "
+            "the handoff-index-sync unit, then re-run.",
         ]
         return "\n".join(lines)
 
-    if outcome.status == "no-match":
+    if outcome.status == "empty-scope":
+        # 🔴 SHARES NO OPENING PHRASE WITH EITHER OTHER ZERO, and specifically does
+        # NOT say "the index WAS searched" — because it was not.
         lines += [
             "",
-            f"NO MATCH — the index WAS searched and none of its "
-            f"{outcome.stats.indexed_sections} section(s) matched.",
+            f"🔴 EMPTY SCOPE — your filter selects 0 of the index's "
+            f"{outcome.stats.indexed_sections} section(s), so the query matched nothing "
+            f"it was never shown.",
+            "   This is NOT the answer 'the corpus does not mention that': the filter, "
+            "not the corpus, is what is empty.",
+        ]
+        if outcome.scope_reason == "unknown-repo":
+            known = ", ".join(outcome.known_repos) or "(none)"
+            lines += [
+                f"   NO REPO IS INDEXED UNDER THE LABEL {outcome.repo!r}. --repo takes a "
+                f"repo LABEL, not a path (`handoff_index.py --repo` is the one that "
+                f"takes a path).",
+                f"   Indexed labels: {known}.",
+            ]
+        else:
+            lines += [
+                "   The filter is VALID — every label and section kind in it is real — "
+                "but this corpus holds no row under it.",
+                "   Widen or drop --repo / --section and re-run.",
+            ]
+        return "\n".join(lines)
+
+    if outcome.status == "no-match":
+        scoped_note = (
+            f" (the whole index holds {outcome.stats.indexed_sections})"
+            if outcome.filtered else ""
+        )
+        lines += [
+            "",
+            f"NO MATCH — the index WAS searched and none of the "
+            f"{outcome.in_scope.indexed_sections} section(s) in scope matched"
+            f"{scoped_note}.",
             "   That is an answer about the corpus, not a broken tool: the docs do not "
             "discuss this in these words.",
             "   Try fewer/other terms, or widen --repo / --section before concluding "
@@ -293,6 +449,13 @@ def outcome_json(outcome: SearchOutcome) -> dict:
         "limit": outcome.limit,
         "indexed_docs": outcome.stats.indexed_docs,
         "indexed_sections": outcome.stats.indexed_sections,
+        # The scoped pair travels with the JSON for the reason it is printed in
+        # the text: a consumer switching on `status` still needs to be able to
+        # say WHY a zero is a zero without re-running the query.
+        "in_scope_docs": outcome.in_scope.indexed_docs,
+        "in_scope_sections": outcome.in_scope.indexed_sections,
+        "known_repos": list(outcome.known_repos),
+        "scope_reason": outcome.scope_reason,
         "hits": [
             {
                 "repo": h.repo, "slug": h.slug, "doc_path": h.doc_path,
@@ -318,10 +481,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         epilog="Results are POINTERS TO VERIFY, not current readings.",
     )
     ap.add_argument("--query", required=True)
-    ap.add_argument("--repo", default=None, help="restrict to one repo label")
+    ap.add_argument("--repo", default=None,
+                    help="restrict to one repo LABEL — the repo's directory name as "
+                         "the index stores it (e.g. `devrc`), NOT a filesystem path. "
+                         "`handoff_index.py --repo` is the one that takes a path. An "
+                         "unknown label is rejected, never answered with a zero")
     ap.add_argument("--section", action="append", default=[], choices=list(SECTIONS),
                     help="restrict to one or more section kinds (repeatable)")
-    ap.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
+    ap.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
+                    help=f"maximum hits to return (>= {MIN_LIMIT})")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--offline", action="store_true",
                     help="derive from git in-process and answer with no database "
@@ -329,6 +497,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--offline-repo", action="append", default=[],
                     help="repo root for --offline (repeatable)")
     args = ap.parse_args(argv)
+
+    # 🔴 BOUNDED BEFORE THE QUERY RUNS, not clamped silently. `--limit 0` produced
+    # zero hits from a healthy index and rendered the corpus-is-silent prose; a
+    # negative limit means two different things to the two backends (`hits[:-1]`
+    # drops the last hit; Postgres rejects `LIMIT -1`). Neither is a search the
+    # caller meant, so this is a usage error with its own exit code, not a value
+    # to guess at.
+    if args.limit < MIN_LIMIT:
+        print(f"handoff-search: --limit must be >= {MIN_LIMIT} (got {args.limit}); "
+              f"a limit below that returns an empty result from a healthy index.",
+              file=sys.stderr)
+        return 2
 
     if args.offline:
         store, warnings = _offline_store(args.offline_repo)
@@ -345,9 +525,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                                  sections=args.section, limit=args.limit)
 
     print(json.dumps(outcome_json(outcome), indent=2) if args.json else render(outcome))
-    # 🔴 A BROKEN INDEX EXITS NON-ZERO. It is a broken environment, not a reading,
-    # and a caller that only checks the exit code must not read it as "no results".
-    return 3 if outcome.status == "broken-index" else 0
+    # 🔴 NEITHER NON-ANSWER EXITS ZERO, and they get DIFFERENT codes. A broken
+    # index is a broken environment and an empty scope is a caller error; a
+    # caller that only checks the exit code must read neither as "no results",
+    # and one that wants to tell them apart must not have to parse prose.
+    return EXIT_CODES.get(outcome.status, 0)
 
 
 if __name__ == "__main__":  # pragma: no cover

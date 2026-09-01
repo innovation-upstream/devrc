@@ -30,7 +30,11 @@ let
   # the gate runs in a nix sandbox with no cluster and no Postgres, so the DDL has
   # been read and never executed. A routine `ship.sh` must not be able to silently
   # arm an unvalidated prod-write timer. Flip it after a hand-run of
-  # `--dry-run` and then a real `--rebuild` has been watched to work.
+  # `--dry-run` and then a real `--rebuild --write` has been watched to work.
+  # 🔴 `--write` IS PART OF THAT INSTRUCTION NOW, not a detail: dry-run is the
+  # module's DEFAULT, so a validation run of bare `--rebuild` would derive,
+  # report, write NOTHING and exit 0 — and be read as the supervised live run
+  # this switch is waiting for.
   enableHandoffIndexSync = false;
   # Drift-deadman master switch (scripts/drift-check.sh) — gates ONLY whether the
   # timer is wired into timers.target. The SERVICE definition is always emitted, so
@@ -2810,23 +2814,30 @@ in
 
   # ── HANDOFF-DOC SECTION INDEX (scripts/lib/handoff_index.py) ─────────────────
   # Derives a SECTION-grained full-text index of the handoff corpus into
-  # `initiatives.handoff_section` (measured 2026-09-01: devrc 94 docs / 959
-  # sections off origin/main, homelab-talos 54 / 506 off origin/trunk), so `/resume` and
+  # `initiatives.handoff_section` (re-measured 2026-09-01: devrc 94 docs / 968
+  # sections off origin/main, homelab-talos 54 / 512 off origin/trunk), so `/resume` and
   # subagents can query what past sessions ALREADY wrote down instead of
   # re-deriving it. Sibling of initiatives-sync: same database, same schema, same
   # MailDB connection path (kubectl port-forward + psycopg2 + DSN-from-secret).
   #
   # 🔴 THE CORPUS IS READ FROM GIT REFS, NOT THE WORKING TREE. This box carries
-  # 143 worktrees in devrc alone (measured); a working-tree scan would index mid-edit branches, the same doc
+  # many worktrees per repo; a working-tree scan would index mid-edit branches, the same doc
   # N times, and stale orphan copies, and two runs an hour apart would disagree
   # for reasons unrelated to what anyone wrote. Each repo's mainline is DERIVED
-  # via scripts/lib/git_mainline.py — never hardcoded to main/trunk.
+  # via scripts/lib/git_mainline.py — never hardcoded to main/trunk. (The measured
+  # worktree count lives in handoff_index.py's docstring and NOWHERE ELSE: it was
+  # carried in three places and two of them disagreed with the third inside one
+  # PR. Nothing pins it, so a copy is a claim that rots. Do not re-state it here.)
   #
-  # 🔴 `--rebuild` TRUNCATES, AND THAT IS SAFE BY DESIGN. The index is DERIVED and
-  # DISPOSABLE; git is the system of record. Nothing is stored here that a re-run
-  # cannot rebuild, and no consumer may treat a row as authoritative over the doc
-  # it came from. A full rebuild each pass is also what keeps a SHRUNK doc from
-  # leaving orphaned high ordinals behind (see PostgresSectionStore.upsert).
+  # 🔴 `--rebuild` TRUNCATES, AND THAT IS SAFE ONLY BECAUSE OF WHAT GUARDS IT. The
+  # index is DERIVED and DISPOSABLE and git is the system of record — but "a
+  # re-run can rebuild it" is a claim about a run that MEASURED something. The
+  # truncate is refused (non-zero, so the OnFailure toast below fires) when any
+  # repo comes back UNMEASURED or the derivation is empty, and it now runs in the
+  # SAME transaction as the inserts: it used to commit on its own, so any
+  # exception in the row loop left the table empty AND committed. A full rebuild
+  # each pass is also what keeps a SHRUNK doc from leaving orphaned high ordinals
+  # behind (see PostgresSectionStore.write).
   #
   # WHY 6h AND NOT 15min: unlike initiative-scan there is no live-state component
   # here — a handoff doc changes when a session ends, a handful of times a day.
@@ -2862,7 +2873,13 @@ in
       ];
       # nix-shell pulls psycopg2 (the _db.py write path). git/kubectl come from
       # PATH above and are inherited into the nix-shell (it is not --pure).
-      ExecStart = ''${pkgs.bash}/bin/bash -c "exec nix-shell -p 'python3.withPackages(p:[p.psycopg2])' --run 'python %h/workspace/devrc/scripts/lib/handoff_index.py --rebuild'"'';
+      # 🔴 `--write` IS REQUIRED AND IS NOT DECORATION. Dry-run is the module's
+      # DEFAULT: a bare invocation derives and reports and touches no database,
+      # because `main([])` used to open a port-forward to prod and upsert every
+      # row — the shape somebody types to see what it does was a prod write.
+      # Dropping `--write` here turns this unit into a very expensive no-op that
+      # still exits 0, so it is load-bearing in both directions.
+      ExecStart = ''${pkgs.bash}/bin/bash -c "exec nix-shell -p 'python3.withPackages(p:[p.psycopg2])' --run 'python %h/workspace/devrc/scripts/lib/handoff_index.py --rebuild --write'"'';
       # Re-run the unit when the deriver changes (cf. X-Restart-Triggers above).
       X-Restart-Triggers = [ "${../scripts/lib/handoff_index.py}" ];
     };
